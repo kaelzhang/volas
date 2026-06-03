@@ -42,6 +42,8 @@ dev = [
   "pytest-cov",
   "pytest-benchmark",
   "twine",
+  # PEP 639 / Metadata 2.4 license fields require packaging >= 24.2 to publish
+  "packaging>=24.2",
   "numpy>=2.0.0",
   "mypy",
   "maturin>=1.4"
