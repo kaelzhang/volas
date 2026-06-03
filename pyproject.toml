@@ -50,10 +50,10 @@ dev = [
 ]
 
 [tool.maturin]
-# The Rust crate builds the `volas_rs` extension module
+# Build the volas-python workspace crate (the `volas_rs` extension module)
+manifest-path = "crates/volas-python/Cargo.toml"
 module-name = "volas_rs"
 binding = "pyo3"
-features = ["pyo3/extension-module"]
 # Pure-Python package to include alongside the compiled module
 python-packages = ["volas"]
 

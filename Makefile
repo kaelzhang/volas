@@ -37,7 +37,7 @@ build-ext:
 # Clean build artifacts
 clean:
 	rm -rf dist build target/wheels
-	rm -rf volas/*.so volas_rs/*.so
+	rm -rf volas/*.so volas_rs*.so
 	rm -rf *.egg-info
 	rm -rf .eggs
 	rm -rf .coverage .coverage.* htmlcov

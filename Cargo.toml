@@ -1,24 +1,14 @@
-[package]
-name = "volas_rs"
+[workspace]
+resolver = "2"
+members = ["crates/volas-core", "crates/volas-python"]
+
+[workspace.package]
 version = "0.0.0"
 edition = "2021"
 authors = ["Kael Zhang <i+pypi@kael.me>"]
-description = "High-performance Rust core for the volas time-series kernel"
 license = "MIT"
 homepage = "https://github.com/kaelzhang/volas"
 repository = "https://github.com/kaelzhang/volas"
-
-[lib]
-name = "volas_rs"
-crate-type = ["cdylib"]
-
-[dependencies]
-pyo3 = { version = "0.25", features = ["extension-module"] }
-
-[features]
-default = []
-# Enable this feature to skip building the extension module
-extension-module = ["pyo3/extension-module"]
 
 [profile.release]
 lto = true

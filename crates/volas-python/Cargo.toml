@@ -1,0 +1,19 @@
+[package]
+name = "volas-python"
+description = "PyO3 bindings exposing volas DataFrame / Series to Python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lib]
+name = "volas_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+volas-core = { path = "../volas-core" }
+pyo3 = { version = "0.25", features = ["extension-module"] }
+numpy = "0.25"
+ndarray = "0.16"
