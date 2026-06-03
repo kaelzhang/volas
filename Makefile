@@ -77,7 +77,7 @@ cargo-test:
 
 # Upload to PyPI
 upload:
-	twine upload --config-file ~/.pypirc -r pypi dist/*
+	twine upload --config-file ~/.pypirc -r pypi dist/* --verbose
 
 # Publish (build package + upload)
 publish:
