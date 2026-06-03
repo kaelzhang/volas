@@ -4,11 +4,14 @@
 //! This crate is the only place pyo3 / numpy are used; all logic lives in
 //! `volas-core`.
 
+use std::sync::Arc;
+
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use volas_core::directive::{execute, parse};
 use volas_core::{Column, DataFrame, Series, VolasError};
 
 /// Map a core error to the closest Python exception.
@@ -41,6 +44,15 @@ fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     ))
 }
 
+/// Export a column to a 1-D NumPy array of the appropriate dtype.
+fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
+    match col {
+        Column::F64(v) => v.clone().into_pyarray(py).into_any(),
+        Column::Bool(v) => v.clone().into_pyarray(py).into_any(),
+        Column::I64(v) => v.clone().into_pyarray(py).into_any(),
+    }
+}
+
 /// `volas.Series` — a single named, indexed column.
 #[pyclass(name = "Series")]
 pub struct PySeries {
@@ -65,11 +77,7 @@ impl PySeries {
 
     /// Export the values to a 1-D NumPy array.
     fn to_numpy<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        match &self.inner.data {
-            Column::F64(v) => v.clone().into_pyarray(py).into_any(),
-            Column::Bool(v) => v.clone().into_pyarray(py).into_any(),
-            Column::I64(v) => v.clone().into_pyarray(py).into_any(),
-        }
+        column_to_numpy(py, &self.inner.data)
     }
 
     fn __repr__(&self) -> String {
@@ -82,10 +90,29 @@ impl PySeries {
     }
 }
 
-/// `volas.DataFrame` — an ordered, named, time-indexed table of columns.
+/// `volas.DataFrame` — an ordered, named, time-indexed table of columns with
+/// stock-pandas-style directive indexing.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
     inner: DataFrame,
+}
+
+impl PyDataFrame {
+    /// Resolve `key` to a column: an existing column, or a computed directive.
+    fn eval(&self, key: &str) -> Result<Column, VolasError> {
+        if self.inner.has_column(key) {
+            Ok(self.inner.column(key)?.clone())
+        } else {
+            let node = parse(key)?;
+            execute(&self.inner, &node)
+        }
+    }
+
+    fn wrap_series(&self, name: String, col: Column) -> PySeries {
+        PySeries {
+            inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
+        }
+    }
 }
 
 #[pymethods]
@@ -116,19 +143,56 @@ impl PyDataFrame {
         self.inner.height()
     }
 
-    /// `df[key]`: a column name -> Series, or a list of names -> DataFrame.
+    /// `df[key]`:
+    /// - a boolean Series / numpy bool array -> filtered DataFrame
+    /// - a column name or directive string -> Series
+    /// - a list of names / directives -> DataFrame
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(name) = key.extract::<String>() {
-            let s = self.inner.series(&name).map_err(pyerr)?;
-            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        if let Ok(s) = key.extract::<PyRef<PySeries>>() {
+            if let Column::Bool(mask) = &s.inner.data {
+                let sub = self.inner.filter_mask(mask).map_err(pyerr)?;
+                return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
+            }
         }
-        if let Ok(names) = key.extract::<Vec<String>>() {
-            let sub = self.inner.select(&names).map_err(pyerr)?;
+        if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
+            let sub = self.inner.filter_mask(arr.as_slice()?).map_err(pyerr)?;
             return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
         }
+        if let Ok(name) = key.extract::<String>() {
+            let col = self.eval(&name).map_err(pyerr)?;
+            return Ok(Py::new(py, self.wrap_series(name, col))?.into_any());
+        }
+        if let Ok(names) = key.extract::<Vec<String>>() {
+            let mut cols = Vec::with_capacity(names.len());
+            for n in &names {
+                cols.push(self.eval(n).map_err(pyerr)?);
+            }
+            let index = (*self.inner.index().as_ref()).clone();
+            let df = DataFrame::new(names, cols, Some(index)).map_err(pyerr)?;
+            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
+        }
         Err(PyKeyError::new_err(
-            "key must be a column name or a list of column names",
+            "key must be a column name, directive, list of those, or a boolean mask",
         ))
+    }
+
+    /// Execute a directive and return the result as a NumPy array.
+    #[pyo3(signature = (directive, create_column = false))]
+    fn exec<'py>(
+        &self,
+        py: Python<'py>,
+        directive: &str,
+        create_column: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = create_column; // column caching is not implemented in v1
+        let col = self.eval(directive).map_err(pyerr)?;
+        Ok(column_to_numpy(py, &col))
+    }
+
+    /// Get a column by name as a Series (raises KeyError if missing).
+    fn get_column(&self, key: &str) -> PyResult<PySeries> {
+        let col = self.inner.column(key).map_err(pyerr)?.clone();
+        Ok(self.wrap_series(key.to_string(), col))
     }
 
     /// Append the rows of another DataFrame (matched by column name), in place.

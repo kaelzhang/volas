@@ -8,6 +8,7 @@
 pub mod column;
 pub mod compute;
 pub mod dataframe;
+pub mod directive;
 pub mod dtype;
 pub mod error;
 pub mod indicators;
