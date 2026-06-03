@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+/dist
+/build
+
+# Compiled extensions
+*.so
+*.pyd
+*.dll
+
+# Rust
+/target
+Cargo.lock
+
+# Testing / coverage
+/.pytest_cache
+/.coverage
+.coverage.*
+htmlcov/
+/.benchmarks
+
+# Tooling caches
+/.ruff_cache
+/.mypy_cache
+
+# OS / editor
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
