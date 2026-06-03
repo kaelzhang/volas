@@ -1,7 +1,7 @@
 files = volas test *.py
 test_files = *
 
-.PHONY: install install-rust build build-pkg build-ext clean test lint fix fmt check cargo-test upload publish dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test benchmark lint fix fmt check cargo-test upload publish dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -46,7 +46,12 @@ clean:
 
 # Run tests
 test:
-	pytest -s -v test/test_$(test_files).py --doctest-modules --cov volas --cov-report term-missing
+	pytest -s -v test/test_$(test_files).py --ignore=test/test_benchmark.py --doctest-modules --cov volas --cov-report term-missing
+
+# Run the 3-way performance benchmark (pandas vs stock-pandas vs volas).
+# Depends on `build` so the volas extension is compiled in release mode.
+benchmark: build
+	pytest test/test_benchmark.py --benchmark-only --benchmark-group-by=param:spec --benchmark-columns=mean,median,ops,rounds --benchmark-sort=name
 
 # Run linters
 lint:
