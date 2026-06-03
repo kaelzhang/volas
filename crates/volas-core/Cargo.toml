@@ -10,3 +10,4 @@ repository.workspace = true
 
 [dependencies]
 thiserror = "1.0"
+ndarray = "0.16"

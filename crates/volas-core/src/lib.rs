@@ -6,9 +6,11 @@
 //! and directive engine.
 
 pub mod column;
+pub mod compute;
 pub mod dataframe;
 pub mod dtype;
 pub mod error;
+pub mod indicators;
 pub mod index;
 pub mod series;
 
