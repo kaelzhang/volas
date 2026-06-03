@@ -1,15 +1,15 @@
 [package]
-name = "candles_rs"
+name = "volas_rs"
 version = "0.0.0"
 edition = "2021"
 authors = ["Kael Zhang <i+pypi@kael.me>"]
-description = "High-performance Rust core for the candles time-series kernel"
+description = "High-performance Rust core for the volas time-series kernel"
 license = "MIT"
-homepage = "https://github.com/kaelzhang/candles"
-repository = "https://github.com/kaelzhang/candles"
+homepage = "https://github.com/kaelzhang/volas"
+repository = "https://github.com/kaelzhang/volas"
 
 [lib]
-name = "candles_rs"
+name = "volas_rs"
 crate-type = ["cdylib"]
 
 [dependencies]

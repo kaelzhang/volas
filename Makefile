@@ -1,4 +1,4 @@
-files = candles test *.py
+files = volas test *.py
 test_files = *
 
 .PHONY: install install-rust build build-pkg build-ext clean test lint fix fmt check cargo-test upload publish dev ci
@@ -37,7 +37,7 @@ build-ext:
 # Clean build artifacts
 clean:
 	rm -rf dist build target/wheels
-	rm -rf candles/*.so candles_rs/*.so
+	rm -rf volas/*.so volas_rs/*.so
 	rm -rf *.egg-info
 	rm -rf .eggs
 	rm -rf .coverage .coverage.* htmlcov
@@ -46,7 +46,7 @@ clean:
 
 # Run tests
 test:
-	pytest -s -v test/test_$(test_files).py --doctest-modules --cov candles --cov-report term-missing
+	pytest -s -v test/test_$(test_files).py --doctest-modules --cov volas --cov-report term-missing
 
 # Run linters
 lint:

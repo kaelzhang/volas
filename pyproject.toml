@@ -3,7 +3,7 @@ requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = 'candles'
+name = 'volas'
 dynamic = ["version"]
 description = 'High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.'
 readme = 'README.md'
@@ -32,7 +32,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kaelzhang/candles"
+Homepage = "https://github.com/kaelzhang/volas"
 
 [project.optional-dependencies]
 dev = [
@@ -50,12 +50,12 @@ dev = [
 ]
 
 [tool.maturin]
-# The Rust crate builds the `candles_rs` extension module
-module-name = "candles_rs"
+# The Rust crate builds the `volas_rs` extension module
+module-name = "volas_rs"
 binding = "pyo3"
 features = ["pyo3/extension-module"]
 # Pure-Python package to include alongside the compiled module
-python-packages = ["candles"]
+python-packages = ["volas"]
 
 [tool.mypy]
 warn_return_any = true

@@ -1,15 +1,15 @@
-# candles
+# volas
 
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
 **Status:** early development — version `0.0.0`. APIs are not yet stable and may change at any time.
 
-## What is candles?
+## What is volas?
 
-`candles` is a focused, DataFrame-like data structure purpose-built for financial
+`volas` is a focused, DataFrame-like data structure purpose-built for financial
 candlestick (OHLCV) time series and quantitative-trading workflows.
 
-Rather than being a general-purpose DataFrame, `candles` supports only what this
+Rather than being a general-purpose DataFrame, `volas` supports only what this
 domain needs — a time-indexed, two-dimensional table of numeric and boolean
 columns — and implements its storage and compute core in **Rust** for low,
 predictable latency on incremental ("append one bar") workloads.
@@ -30,7 +30,7 @@ predictable latency on incremental ("append one bar") workloads.
 > Not yet published to PyPI. For a local build, see [Development](#development).
 
 ```sh
-pip install candles
+pip install volas
 ```
 
 Requires Python >= 3.11.
@@ -40,9 +40,9 @@ Requires Python >= 3.11.
 > Preview of the intended API. Not yet implemented at `0.0.0`; subject to change.
 
 ```py
-from candles import Candles
+from volas import Volas
 
-c = Candles({
+v = Volas({
     'open':   [...],
     'high':   [...],
     'low':    [...],
@@ -51,8 +51,8 @@ c = Candles({
 })
 
 # Zero-copy export to NumPy (where possible)
-close = c['close'].to_numpy()
-matrix = c.to_numpy()
+close = v['close'].to_numpy()
+matrix = v.to_numpy()
 ```
 
 ## Development
