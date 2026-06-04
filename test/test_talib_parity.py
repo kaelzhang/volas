@@ -309,6 +309,9 @@ def test_candlestick_patterns_match_talib(ohlc):
         ('3linestrike', talib.CDL3LINESTRIKE, 8), ('breakaway', talib.CDLBREAKAWAY, 14),
         ('ladderbottom', talib.CDLLADDERBOTTOM, 14),
         ('concealbabyswall', talib.CDLCONCEALBABYSWALL, 13),
+        ('mathold', talib.CDLMATHOLD, 14),
+        ('risefall3methods', talib.CDLRISEFALL3METHODS, 14),
+        ('xsidegap3methods', talib.CDLXSIDEGAP3METHODS, 2),
     ]
     for name, fn, lb in patterns:
         want = fn(o, h, l, c)

@@ -2,7 +2,7 @@
 
 use super::{
     candle_average, color, each_bar, lowershadow, realbody, realbody_gap_down, realbody_gap_up,
-    uppershadow, BODY_LONG, NEAR, SHADOW_VERY_SHORT,
+    uppershadow, BODY_LONG, BODY_SHORT, NEAR, SHADOW_VERY_SHORT,
 };
 
 /// Three-Line Strike (TA-Lib CDL3LINESTRIKE): three same-colour candles in a row, each
@@ -122,6 +122,92 @@ pub fn cdl_concealbabyswall(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f
             && l[i] < l[i - 1]
         {
             100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Mat Hold (TA-Lib CDLMATHOLD): a long white, three small holding candles (penetrating
+/// the 1st body by less than `penetration`, default 0.5), then a white breakout closing
+/// above the reaction highs — bullish continuation `100`. Lookback 14.
+pub fn cdl_mathold(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: f64) -> Vec<f64> {
+    let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 4;
+    each_bar(c.len(), lb, |i| {
+        let floor = c[i - 4] - realbody(o, c, i - 4) * penetration;
+        if realbody(o, c, i - 4) > candle_average(BODY_LONG, o, h, l, c, i - 4)
+            && realbody(o, c, i - 3) < candle_average(BODY_SHORT, o, h, l, c, i - 3)
+            && realbody(o, c, i - 2) < candle_average(BODY_SHORT, o, h, l, c, i - 2)
+            && realbody(o, c, i - 1) < candle_average(BODY_SHORT, o, h, l, c, i - 1)
+            && color(o, c, i - 4) > 0.0
+            && color(o, c, i - 3) < 0.0
+            && color(o, c, i) > 0.0
+            && realbody_gap_up(o, c, i - 3, i - 4)
+            && o[i - 2].min(c[i - 2]) < c[i - 4]
+            && o[i - 1].min(c[i - 1]) < c[i - 4]
+            && o[i - 2].min(c[i - 2]) > floor
+            && o[i - 1].min(c[i - 1]) > floor
+            && o[i - 2].max(c[i - 2]) < o[i - 3]
+            && o[i - 1].max(c[i - 1]) < o[i - 2].max(c[i - 2])
+            && o[i] > c[i - 1]
+            && c[i] > h[i - 3].max(h[i - 2]).max(h[i - 1])
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Rising/Falling Three Methods (TA-Lib CDLRISEFALL3METHODS): a long body, three small
+/// counter-trend bodies holding within its range, then a long body resuming the trend.
+/// `color(1st)·100`. Lookback 14. (The `*color` multiplier handles both directions.)
+pub fn cdl_risefall3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 4;
+    each_bar(c.len(), lb, |i| {
+        let dir = color(o, c, i - 4);
+        let within = |k: usize| o[k].min(c[k]) < h[i - 4] && o[k].max(c[k]) > l[i - 4];
+        if realbody(o, c, i - 4) > candle_average(BODY_LONG, o, h, l, c, i - 4)
+            && realbody(o, c, i - 3) < candle_average(BODY_SHORT, o, h, l, c, i - 3)
+            && realbody(o, c, i - 2) < candle_average(BODY_SHORT, o, h, l, c, i - 2)
+            && realbody(o, c, i - 1) < candle_average(BODY_SHORT, o, h, l, c, i - 1)
+            && realbody(o, c, i) > candle_average(BODY_LONG, o, h, l, c, i)
+            && dir == -color(o, c, i - 3)
+            && color(o, c, i - 3) == color(o, c, i - 2)
+            && color(o, c, i - 2) == color(o, c, i - 1)
+            && color(o, c, i - 1) == -color(o, c, i)
+            && within(i - 3)
+            && within(i - 2)
+            && within(i - 1)
+            && c[i - 2] * dir < c[i - 3] * dir
+            && c[i - 1] * dir < c[i - 2] * dir
+            && o[i] * dir > c[i - 1] * dir
+            && c[i] * dir > c[i - 4] * dir
+        {
+            100.0 * dir
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Upside/Downside Gap Three Methods (TA-Lib CDLXSIDEGAP3METHODS): two same-colour bodies
+/// with a gap, then an opposite candle filling the gap (opening in the 2nd body, closing
+/// in the 1st). `color(1st)·100`. Lookback 2.
+pub fn cdl_xsidegap3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let _ = (h, l);
+    each_bar(c.len(), 2, |i| {
+        let up = color(o, c, i - 2) > 0.0 && realbody_gap_up(o, c, i - 1, i - 2);
+        let down = color(o, c, i - 2) < 0.0 && realbody_gap_down(o, c, i - 1, i - 2);
+        if color(o, c, i - 2) == color(o, c, i - 1)
+            && color(o, c, i - 1) == -color(o, c, i)
+            && o[i] < o[i - 1].max(c[i - 1])
+            && o[i] > o[i - 1].min(c[i - 1])
+            && c[i] < o[i - 2].max(c[i - 2])
+            && c[i] > o[i - 2].min(c[i - 2])
+            && (up || down)
+        {
+            color(o, c, i - 2) * 100.0
         } else {
             0.0
         }

@@ -103,6 +103,9 @@ pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
         "breakaway" => (Plain(cdl_breakaway as _), 14),
         "ladderbottom" => (Plain(cdl_ladderbottom as _), 14),
         "concealbabyswall" => (Plain(cdl_concealbabyswall as _), 13),
+        "mathold" => (pen(cdl_mathold, 0.5), 14),
+        "risefall3methods" => (Plain(cdl_risefall3methods as _), 14),
+        "xsidegap3methods" => (Plain(cdl_xsidegap3methods as _), 2),
         _ => return None,
     };
     Some(entry)
