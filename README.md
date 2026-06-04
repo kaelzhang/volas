@@ -228,25 +228,95 @@ df.exec('ma:5', create_column=True)   # also materialize it as a column
 
 ### Supported indicators
 
+volas implements every [TA-Lib](https://ta-lib.org) 0.6.4 function (all 10 groups,
+including all 61 candlestick patterns), each verified 1:1 against the `talib`
+package, plus a handful of stock-pandas-style extras. Directive names are lowercase
+and case-insensitive; multi-output indicators expose each line as a sub-command
+(`macd.signal`, `boll.upper`). Names mirror TA-Lib (e.g. `ht_dcperiod`); where a
+classic stock-pandas name differs, both spellings are accepted.
+
+**Overlap studies (trend / moving averages)**
+
 | Directive | Indicator | Example |
 | --- | --- | --- |
-| `ma` | Simple moving average | `ma:20`, `ma:10@open` |
-| `ema` | Exponential moving average | `ema:12` |
-| `smma` | Smoothed moving average | `smma:7` |
-| `macd` | MACD (`.signal`/`.dea`, `.histogram`, `.dif`) | `macd`, `macd.signal` |
-| `boll` | Bollinger Bands (`.upper`/`.u`, `.lower`/`.l`) | `boll`, `boll.upper:20,2` |
-| `bbw` | Bollinger Band width | `bbw` |
-| `rsv` | Raw stochastic value | `rsv:9` |
-| `kdj` | KDJ stochastic (`.k`/`.d`/`.j`) | `kdj.j`, `kdj.k:9,3` |
-| `rsi` | Relative Strength Index | `rsi:14` |
+| `ma` | Moving average — optional MA type `0..8` (SMA/EMA/WMA/DEMA/TEMA/TRIMA/KAMA/MAMA/T3) | `ma:20`, `ma:10,1` |
+| `ema` / `smma` | Exponential / smoothed (Wilder) MA | `ema:12`, `smma:7` |
+| `wma` `dema` `tema` `trima` `kama` `t3` | Weighted / (triple-)double-exp / triangular / adaptive / T3 MA | `dema:30`, `t3:5,0.7` |
+| `mama` | MESA adaptive MA (`.fama`) | `mama`, `mama.fama:0.5,0.05` |
+| `mavp` | MA with a variable per-row period | `mavp:2,30@,periods` |
+| `midpoint` / `midprice` | Midpoint of value / of high-low | `midpoint:14`, `midprice:14` |
 | `bbi` | Bull and Bear Index | `bbi` |
-| `tr` / `atr` | (Average) True Range | `tr`, `atr:14` |
+| `boll` / `bbw` | Bollinger Bands (`.upper`/`.lower`) / band width | `boll.upper:20,2`, `bbw` |
+| `accbands` | Acceleration Bands (`.upper`/`.lower`) | `accbands:20` |
+| `sar` / `sarext` | Parabolic SAR / extended SAR | `sar:0.02,0.2`, `sarext` |
+| `ht_trendline` | Hilbert Transform — instantaneous trendline | `ht_trendline` |
+
+**Momentum**
+
+| Directive | Indicator | Example |
+| --- | --- | --- |
+| `macd` / `macdext` | MACD (`.signal`/`.dea`, `.histogram`) / with per-line MA types | `macd.signal`, `macdext` |
+| `rsi` `cmo` `cci` `mfi` `bop` `willr` | RSI / Chande momentum / CCI / Money Flow / Balance of Power / Williams %R | `rsi:14`, `cci:14` |
+| `mom` `roc` `rocp` `rocr` `rocr100` | Momentum / rate-of-change family | `roc:10` |
+| `apo` / `ppo` | Absolute / percentage price oscillator | `ppo:12,26,0` |
+| `stoch` / `stochf` / `stochrsi` | Stochastic (slow/fast) / Stochastic RSI (`.k`/`.d`) | `stoch.k`, `stochrsi.d` |
+| `trix` `ultosc` `imi` | TRIX / Ultimate Oscillator / Intraday Momentum Index | `trix:30`, `ultosc` |
+| `aroon` / `aroonosc` | Aroon (`.up`/`.down`) / Aroon oscillator | `aroon.up:14` |
+| `plus_di` `minus_di` `plus_dm` `minus_dm` `dx` `adx` `adxr` | Directional movement system | `adx:14`, `plus_di:14` |
+
+**Volume · Volatility · Price transform**
+
+| Directive | Indicator | Example |
+| --- | --- | --- |
+| `obv` `ad` `adosc` | On-Balance Volume / Chaikin A/D line / A/D oscillator | `adosc:3,10` |
+| `tr` `atr` `natr` | (Normalized) (Average) True Range | `atr:14`, `natr:14` |
+| `avgprice` `medprice` `typprice` `wclprice` | Average / median / typical / weighted-close price | `typprice` |
+
+**Cycle (Hilbert Transform)**
+
+| Directive | Indicator | Example |
+| --- | --- | --- |
+| `ht_dcperiod` / `ht_dcphase` | Dominant cycle period / phase | `ht_dcperiod` |
+| `ht_phasor` / `ht_sine` | Phasor (`.quadrature`) / sine wave (`.leadsine`) | `ht_sine.leadsine` |
+| `ht_trendmode` | Trend (1) vs cycle (0) mode | `ht_trendmode` |
+
+**Statistic functions**
+
+| Directive | Indicator | Example |
+| --- | --- | --- |
+| `linearreg` (`_slope`/`_intercept`/`_angle`) / `tsf` | Linear regression / time-series forecast | `linearreg:14`, `tsf:14` |
+| `var` `stddev` `correl` `beta` | Variance / std-dev / Pearson correlation / beta | `correl:30@high,low` |
+| `sum` `maxindex` `minindex` `minmax` `minmaxindex` | Rolling sum / arg-extrema / extrema (`.min`/`.max`) | `sum:30`, `minmax.max:30` |
+
+`PySeries` also exposes the 15 Math Transform functions (`acos`…`tanh`) as methods.
+
+**Pattern recognition** — all 61 TA-Lib candlesticks via `style.<name>` (alias
+`cdl.<name>`), output `-100`/`0`/`+100` (some `±80`/`±200`). Patterns taking a
+penetration ratio accept it as an arg (e.g. `style.morningstar:0.3`):
+
+`2crows` `3blackcrows` `3inside` `3linestrike` `3outside` `3starsinsouth`
+`3whitesoldiers` `abandonedbaby` `advanceblock` `belthold` `breakaway`
+`closingmarubozu` `concealbabyswall` `counterattack` `darkcloudcover` `doji`
+`dojistar` `dragonflydoji` `engulfing` `eveningdojistar` `eveningstar`
+`gapsidesidewhite` `gravestonedoji` `hammer` `hangingman` `harami` `haramicross`
+`highwave` `hikkake` `hikkakemod` `homingpigeon` `identical3crows` `inneck`
+`invertedhammer` `kicking` `kickingbylength` `ladderbottom` `longleggeddoji`
+`longline` `marubozu` `matchinglow` `mathold` `morningdojistar` `morningstar`
+`onneck` `piercing` `rickshawman` `risefall3methods` `separatinglines`
+`shootingstar` `shortline` `spinningtop` `stalledpattern` `sticksandwich` `takuri`
+`tasukigap` `thrusting` `tristar` `unique3river` `upsidegap2crows` `xsidegap3methods`
+
+**stock-pandas extras**
+
+| Directive | Indicator | Example |
+| --- | --- | --- |
+| `rsv` / `kdj` | Raw stochastic value / KDJ (`.k`/`.d`/`.j`) | `rsv:9`, `kdj.j` |
 | `llv` / `hhv` | Lowest-low / highest-high value | `llv:10`, `hhv:10@high` |
 | `donchian` | Donchian channel (`.upper`/`.lower`) | `donchian:20` |
 | `hv` | Historical volatility | `hv:20,1d,252` |
 | `change` | Percentage change over N bars | `change:2` |
 | `increase` | Monotonic increase/decrease over N bars | `increase:3@close` |
-| `style` | Candle style (`bullish` / `bearish`) | `style:bullish` |
+| `style` | Candle color (`bullish` / `bearish`) | `style:bullish` |
 | `repeat` | A boolean condition holding N bars in a row | `repeat:2@(style:bullish)` |
 
 Operators: comparison `< <= == != >= >`, cross `// \\ ><`, arithmetic
