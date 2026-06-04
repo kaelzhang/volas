@@ -1,5 +1,10 @@
 # volas
 
+[![ci](https://github.com/kaelzhang/volas/actions/workflows/ci.yml/badge.svg)](https://github.com/kaelzhang/volas/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/kaelzhang/volas/branch/main/graph/badge.svg)](https://codecov.io/gh/kaelzhang/volas)
+[![PyPI version](https://img.shields.io/pypi/v/volas.svg)](https://pypi.org/project/volas/)
+[![Python versions](https://img.shields.io/pypi/pyversions/volas.svg)](https://pypi.org/project/volas/)
+
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
 **Status:** early development — version `0.0.0`. APIs are not yet stable and may change at any time.
