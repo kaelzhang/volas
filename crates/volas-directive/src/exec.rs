@@ -1,5 +1,7 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
+use std::borrow::Cow;
+
 use crate::spec::canon_sub;
 use crate::types::{Node, Op, UnaryOp};
 use volas_core::Column;
@@ -137,12 +139,31 @@ fn arg_i64(args: &[Option<String>], i: usize, default: i64) -> Result<i64> {
 
 // --- series resolution ------------------------------------------------------
 
-fn series_f64(df: &DataFrame, series: &[Node], i: usize, default_col: &str) -> Result<Vec<f64>> {
+/// Resolve a series operand to `&[f64]`. A plain `F64` column is **borrowed**
+/// (`Cow::Borrowed`, no copy — the common case, e.g. `close`/`high`/`low`); a
+/// computed sub-expression or a non-`F64` column is materialised (`Cow::Owned`).
+/// Callers pass `&resolved` to the kernels, which deref-coerces to `&[f64]`.
+fn series_f64<'a>(
+    df: &'a DataFrame,
+    series: &[Node],
+    i: usize,
+    default_col: &str,
+) -> Result<Cow<'a, [f64]>> {
     match series.get(i) {
-        Some(Node::Name(s)) if s.is_empty() => Ok(df.column(default_col)?.to_f64_vec()),
-        Some(node) => Ok(execute(df, node)?.to_f64_vec()),
-        None => Ok(df.column(default_col)?.to_f64_vec()),
+        Some(Node::Name(s)) if s.is_empty() => col_f64(df, default_col),
+        Some(node) => Ok(Cow::Owned(execute(df, node)?.to_f64_vec())),
+        None => col_f64(df, default_col),
     }
+}
+
+/// Borrow a frame column as `&[f64]` without copying when it is already `F64`;
+/// otherwise convert (e.g. an `I64` volume column).
+fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
+    let col = df.column(name)?;
+    Ok(match col.as_f64() {
+        Some(s) => Cow::Borrowed(s),
+        None => Cow::Owned(col.to_f64_vec()),
+    })
 }
 
 fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
@@ -347,6 +368,18 @@ fn exec_command(
             let close = series_f64(df, series, 2, "close")?;
             f64col(ind::willr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
         }
+
+        ("linearreg", _) => f64col(ind::linearreg(&close(0)?, arg_usize(args, 0, Some(14))?)),
+        ("linearreg_slope", _) => {
+            f64col(ind::linearreg_slope(&close(0)?, arg_usize(args, 0, Some(14))?))
+        }
+        ("linearreg_intercept", _) => {
+            f64col(ind::linearreg_intercept(&close(0)?, arg_usize(args, 0, Some(14))?))
+        }
+        ("linearreg_angle", _) => {
+            f64col(ind::linearreg_angle(&close(0)?, arg_usize(args, 0, Some(14))?))
+        }
+        ("tsf", _) => f64col(ind::tsf(&close(0)?, arg_usize(args, 0, Some(14))?)),
 
         ("avgprice", _) => {
             let open = series_f64(df, series, 0, "open")?;
