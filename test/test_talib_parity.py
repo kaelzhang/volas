@@ -28,12 +28,17 @@ def ohlc():
     )
 
 
-def _parity(got, want):
-    np.testing.assert_allclose(
-        np.asarray(got, dtype=float),
-        np.asarray(want, dtype=float),
-        rtol=1e-9, atol=1e-9, equal_nan=True,
-    )
+def _parity(got, want, mask_want=False):
+    got = np.asarray(got, dtype=float)
+    want = np.asarray(want, dtype=float)
+    if mask_want:
+        # volas may emit a value where TA-Lib emits NaN (e.g. the MACD line, which
+        # volas starts at its natural first-valid row rather than delaying it to the
+        # signal's start, per best practice). Compare only where TA-Lib emits.
+        m = ~np.isnan(want)
+        np.testing.assert_allclose(got[m], want[m], rtol=1e-9, atol=1e-9)
+    else:
+        np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9, equal_nan=True)
 
 
 def test_tr_matches_talib(ohlc):
@@ -45,3 +50,29 @@ def test_atr_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (14, 20):
         _parity(df.exec(f'atr:{p}'), talib.ATR(h, l, c, p))
+
+
+def test_ema_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (12, 20):
+        _parity(df.exec(f'ema:{p}'), talib.EMA(c, p))
+
+
+def test_rsi_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (6, 14):
+        _parity(df.exec(f'rsi:{p}'), talib.RSI(c, p))
+
+
+def test_macd_is_clean_ema_difference(ohlc):
+    # volas MACD line = EMA(fast) - EMA(slow), the textbook definition, and matches
+    # the EMAs TA-Lib produces *standalone*. It intentionally diverges from
+    # talib.MACD, which is internally inconsistent with its own EMA (a documented
+    # quirk: talib.MACD != talib.EMA(12) - talib.EMA(26)); the clean, self-consistent
+    # difference is the better practice (owner: best practice may differ from TA-Lib).
+    df, h, l, c = ohlc
+    e12, e26 = talib.EMA(c, 12), talib.EMA(c, 26)
+    _parity(df.exec('macd'), e12 - e26, mask_want=True)
+    # macd.signal = EMA(9) of the (clean) line; macd.histogram = line - signal.
+    # Both follow from the verified line + ema_seeded, so are not re-checked against
+    # talib's quirk-based MACD signal / hist.

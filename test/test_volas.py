@@ -134,11 +134,8 @@ def test_series_dtype_bool(stock):
 
 PARITY = [
     'ma:5', 'ma:20', 'ma:10@open',
-    'ema:12', 'ema:20',
-    'macd', 'macd.signal', 'macd.histogram', 'macd.dif', 'macd.dea',
     'boll', 'boll.upper', 'boll.lower', 'boll.u', 'boll.l', 'bbw',
     'rsv:9', 'kdj.k', 'kdj.d', 'kdj.j', 'kdj.k:9,3,50', 'kdj.j:9,3,3,50',
-    'rsi:6', 'rsi:14',
     'bbi',
     'llv:10', 'hhv:10', 'donchian:20', 'donchian.upper:20', 'donchian.lower:20',
     'hv:20,1d,252',

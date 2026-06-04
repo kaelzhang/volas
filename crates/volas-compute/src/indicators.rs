@@ -21,23 +21,23 @@ pub fn ma(close: &[f64], period: usize) -> Vec<f64> {
     kernels::sma(av(close), period).to_vec()
 }
 
-/// Exponential moving average (`com = (period - 1) / 2`).
+/// Exponential moving average (TA-Lib: SMA-seeded, `k = 2/(period+1)`).
 pub fn ema(close: &[f64], period: usize) -> Vec<f64> {
-    let com = (period as f64 - 1.0) / 2.0;
-    kernels::ewma_com(av(close), com, true, false, period).to_vec()
+    kernels::ema_seeded(av(close), period).to_vec()
 }
 
-/// Smoothed moving average.
+/// Smoothed moving average (Wilder's RMA: SMA-seeded, `alpha = 1/period`).
 pub fn smma(close: &[f64], period: usize) -> Vec<f64> {
-    kernels::smma(av(close), period).to_vec()
+    kernels::wilder(av(close), period).to_vec()
 }
 
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     let data = av(close);
-    let com_fast = (fast as f64 - 1.0) / 2.0;
-    let com_slow = (slow as f64 - 1.0) / 2.0;
-    // fast and slow EWMA in one fused pass (was two ewma_com traversals)
-    let (f, s) = kernels::dual_ewma(data, com_fast, fast, data, com_slow, slow, true, false);
+    // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the
+    // line is emitted from its natural start (the slow EMA's first valid row), not
+    // delayed to the signal line's start as TA-Lib's aligned 3-output form does.
+    let f = kernels::ema_seeded(data, fast);
+    let s = kernels::ema_seeded(data, slow);
     &f - &s
 }
 
@@ -46,19 +46,17 @@ pub fn macd(close: &[f64], fast: usize, slow: usize) -> Vec<f64> {
     macd_line(close, fast, slow).to_vec()
 }
 
-/// MACD signal line (DEA).
+/// MACD signal line (DEA) — SMA-seeded EMA of the MACD line.
 pub fn macd_signal(close: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
     let line = macd_line(close, fast, slow);
-    let com = (signal as f64 - 1.0) / 2.0;
-    kernels::ewma_com(line.view(), com, true, false, signal).to_vec()
+    kernels::ema_seeded(line.view(), signal).to_vec()
 }
 
-/// MACD histogram (`2 * (MACD - signal)`).
+/// MACD histogram — TA-Lib convention `MACD - signal` (not the stock-pandas `2x`).
 pub fn macd_histogram(close: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
     let line = macd_line(close, fast, slow);
-    let com = (signal as f64 - 1.0) / 2.0;
-    let sig = kernels::ewma_com(line.view(), com, true, false, signal);
-    (2.0 * (&line - &sig)).to_vec()
+    let sig = kernels::ema_seeded(line.view(), signal);
+    (&line - &sig).to_vec()
 }
 
 /// Bull and Bear Index (`mean of ma:a, ma:b, ma:c, ma:d`).
@@ -246,9 +244,9 @@ pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
         gains[i] = d.max(0.0);
         losses[i] = (-d).max(0.0);
     }
-    // both smoothed averages in one fused pass (smma = ewma_com, com = period-1)
-    let com = (period - 1) as f64;
-    let (sg, sl) = kernels::dual_ewma(gains.view(), com, period, losses.view(), com, period, true, false);
+    // TA-Lib RSI: SMA-seeded Wilder smoothing of the gains and the losses.
+    let sg = kernels::wilder(gains.view(), period);
+    let sl = kernels::wilder(losses.view(), period);
     let mut result = vec![f64::NAN; n];
     for i in 0..n {
         if sg[i].is_nan() || sl[i].is_nan() {
