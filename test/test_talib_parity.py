@@ -256,6 +256,23 @@ def test_directional_family_matches_talib(ohlc):
     _parity(df.exec('adx'), talib.ADX(h, l, c, 14))  # default resolves to 14
 
 
+def test_math_transform_series_methods_match_talib(ohlc):
+    # TA-Lib "Math Transform" group, implemented as element-wise Series methods (not
+    # directives). Parity holds on the raw close series — out-of-domain inputs (acos of
+    # a price, exp overflow) yield NaN/inf identically in both.
+    df, _, _, c = ohlc
+    close = df['close']
+    pairs = [
+        ('acos', talib.ACOS), ('asin', talib.ASIN), ('atan', talib.ATAN),
+        ('ceil', talib.CEIL), ('cos', talib.COS), ('cosh', talib.COSH),
+        ('exp', talib.EXP), ('floor', talib.FLOOR), ('ln', talib.LN),
+        ('log10', talib.LOG10), ('sin', talib.SIN), ('sinh', talib.SINH),
+        ('sqrt', talib.SQRT), ('tan', talib.TAN), ('tanh', talib.TANH),
+    ]
+    for name, fn in pairs:
+        _parity(getattr(close, name)(), fn(c))
+
+
 def test_macdext_matches_talib(ohlc):
     df, h, l, c = ohlc
     macd, signal, hist = talib.MACDEXT(c)  # all matypes default to SMA

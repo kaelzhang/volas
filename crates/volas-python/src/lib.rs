@@ -723,6 +723,81 @@ impl PySeries {
             self.inner.len()
         )
     }
+
+    // --- TA-Lib "Math Transform" group: element-wise, NaN-preserving (a NaN or an
+    // out-of-domain input — e.g. sqrt of a negative, asin outside [-1, 1] — yields
+    // NaN, matching TA-Lib). Implemented as Series methods, not directives.
+    /// Element-wise arc cosine (TA-Lib ACOS).
+    fn acos(&self) -> PySeries {
+        self.map_f64(f64::acos)
+    }
+    /// Element-wise arc sine (TA-Lib ASIN).
+    fn asin(&self) -> PySeries {
+        self.map_f64(f64::asin)
+    }
+    /// Element-wise arc tangent (TA-Lib ATAN).
+    fn atan(&self) -> PySeries {
+        self.map_f64(f64::atan)
+    }
+    /// Element-wise ceiling (TA-Lib CEIL).
+    fn ceil(&self) -> PySeries {
+        self.map_f64(f64::ceil)
+    }
+    /// Element-wise cosine (TA-Lib COS).
+    fn cos(&self) -> PySeries {
+        self.map_f64(f64::cos)
+    }
+    /// Element-wise hyperbolic cosine (TA-Lib COSH).
+    fn cosh(&self) -> PySeries {
+        self.map_f64(f64::cosh)
+    }
+    /// Element-wise base-e exponential (TA-Lib EXP).
+    fn exp(&self) -> PySeries {
+        self.map_f64(f64::exp)
+    }
+    /// Element-wise floor (TA-Lib FLOOR).
+    fn floor(&self) -> PySeries {
+        self.map_f64(f64::floor)
+    }
+    /// Element-wise natural logarithm (TA-Lib LN).
+    fn ln(&self) -> PySeries {
+        self.map_f64(f64::ln)
+    }
+    /// Element-wise base-10 logarithm (TA-Lib LOG10).
+    fn log10(&self) -> PySeries {
+        self.map_f64(f64::log10)
+    }
+    /// Element-wise sine (TA-Lib SIN).
+    fn sin(&self) -> PySeries {
+        self.map_f64(f64::sin)
+    }
+    /// Element-wise hyperbolic sine (TA-Lib SINH).
+    fn sinh(&self) -> PySeries {
+        self.map_f64(f64::sinh)
+    }
+    /// Element-wise square root (TA-Lib SQRT).
+    fn sqrt(&self) -> PySeries {
+        self.map_f64(f64::sqrt)
+    }
+    /// Element-wise tangent (TA-Lib TAN).
+    fn tan(&self) -> PySeries {
+        self.map_f64(f64::tan)
+    }
+    /// Element-wise hyperbolic tangent (TA-Lib TANH).
+    fn tanh(&self) -> PySeries {
+        self.map_f64(f64::tanh)
+    }
+}
+
+impl PySeries {
+    /// Apply an element-wise `f64 -> f64` map, preserving name and index. Non-F64
+    /// columns are coerced to f64 first. Shared by the Math Transform methods.
+    fn map_f64(&self, f: impl Fn(f64) -> f64) -> PySeries {
+        let data = Column::f64(self.inner.data.to_f64_vec().iter().map(|&x| f(x)).collect());
+        PySeries {
+            inner: Series::new(self.inner.name.clone(), data, Arc::clone(&self.inner.index)),
+        }
+    }
 }
 
 /// `series.iloc[...]` positional indexer.
