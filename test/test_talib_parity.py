@@ -95,8 +95,12 @@ def test_overlap_ma_variants_match_talib(ohlc):
         _parity(df.exec(f'tema:{p}'), talib.TEMA(c, p))
     for p in (9, 10, 30):  # exercise both odd and even periods (double-SMA split)
         _parity(df.exec(f'trima:{p}'), talib.TRIMA(c, p))
+    for p in (5, 10):
+        _parity(df.exec(f't3:{p}'), talib.T3(c, p))  # vfactor defaults to 0.7
+        _parity(df.exec(f't3:{p},0.5'), talib.T3(c, p, vfactor=0.5))
     _parity(df.exec('wma'), talib.WMA(c, 30))  # default resolves to 30
     _parity(df.exec('trima'), talib.TRIMA(c, 30))
+    _parity(df.exec('t3'), talib.T3(c, 5))
 
 
 def test_linear_regression_matches_talib(ohlc):

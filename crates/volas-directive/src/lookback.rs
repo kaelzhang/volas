@@ -18,6 +18,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "wma" | "trima" => arg(args, 0, 30).saturating_sub(1),
         "dema" => 2 * arg(args, 0, 30).saturating_sub(1),
         "tema" => 3 * arg(args, 0, 30).saturating_sub(1),
+        "t3" => 6 * arg(args, 0, 5).saturating_sub(1),
         "boll" | "bbw" => arg(args, 0, 20).saturating_sub(1),
         "macd" => match sub {
             None => arg(args, 0, 12).max(arg(args, 1, 26)).saturating_sub(1),

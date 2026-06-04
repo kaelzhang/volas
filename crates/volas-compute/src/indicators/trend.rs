@@ -84,6 +84,27 @@ pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
     kernels::sma(inner.view(), b).to_vec()
 }
 
+/// Tillson T3 (TA-Lib T3): `c1·e6 + c2·e5 + c3·e4 + c4·e3` over six cascaded
+/// SMA-seeded EMAs, with `vfactor`-derived coefficients `c1=-v³`, `c2=3(v²−c1)`,
+/// `c3=-6v²−3(v−c1)`, `c4=1+3v−c1+3v²` (computed in TA-Lib's exact float order).
+/// Default period 5, vfactor 0.7; lookback `6·(period-1)`.
+pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
+    let e1 = kernels::ema_seeded(av(data), period);
+    let e2 = kernels::ema_seeded(e1.view(), period);
+    let e3 = kernels::ema_seeded(e2.view(), period);
+    let e4 = kernels::ema_seeded(e3.view(), period);
+    let e5 = kernels::ema_seeded(e4.view(), period);
+    let e6 = kernels::ema_seeded(e5.view(), period);
+    let v2 = vfactor * vfactor;
+    let c1 = -(v2 * vfactor);
+    let c2 = 3.0 * (v2 - c1);
+    let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
+    let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
+    (0..data.len())
+        .map(|i| c1 * e6[i] + c2 * e5[i] + c3 * e4[i] + c4 * e3[i])
+        .collect()
+}
+
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     let data = av(close);
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the

@@ -223,6 +223,11 @@ fn exec_command(
         ("dema", _) => f64col(ind::dema(&close(0)?, arg_usize(args, 0, Some(30))?)),
         ("tema", _) => f64col(ind::tema(&close(0)?, arg_usize(args, 0, Some(30))?)),
         ("trima", _) => f64col(ind::trima(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("t3", _) => f64col(ind::t3(
+            &close(0)?,
+            arg_usize(args, 0, Some(5))?,
+            arg_f64(args, 1, 0.7)?,
+        )),
 
         ("macd", None) => {
             f64col(ind::macd(&close(0)?, arg_usize(args, 0, Some(12))?, arg_usize(args, 1, Some(26))?))
