@@ -8,6 +8,20 @@ use crate::error::{Result, VolasError};
 use crate::index::Index;
 use crate::series::Series;
 
+/// Metadata for a materialized (cached) directive column: the directive that
+/// produced it, its lookback, and how many leading rows currently hold valid
+/// values. After an `append`, the new rows are stale (NaN) and `valid_rows` lags
+/// `height` until `fulfill` recomputes the tail.
+#[derive(Clone, Debug)]
+pub struct ComputedMeta {
+    /// The (canonical) directive string.
+    pub directive: String,
+    /// The directive's lookback (warm-up rows).
+    pub lookback: usize,
+    /// Rows `[0, valid_rows)` currently hold valid values.
+    pub valid_rows: usize,
+}
+
 /// A 2-D, column-oriented, time-indexed table. All columns share one index and
 /// have equal length (`height`).
 #[derive(Clone, Debug)]
@@ -20,6 +34,22 @@ pub struct DataFrame {
     /// Column-name aliases (`alias -> source name`), resolved on lookup. Shared
     /// via `Arc` (cheap clone) and carried through derived frames.
     aliases: Arc<HashMap<String, String>>,
+    /// Materialized directive columns (name -> meta). Tracked so `fulfill` can
+    /// incrementally recompute their tail after an append. Carried through
+    /// `clone` / `append`; dropped by shape-changing ops (slice/select/…), where
+    /// the columns become plain data.
+    computed: HashMap<String, ComputedMeta>,
+}
+
+/// A column of `n` NaN values matching `col`'s dtype (only `F64` is paddable).
+fn pad_nan(col: &Column, n: usize) -> Result<Column> {
+    match col {
+        Column::F64(_) => Ok(Column::f64(vec![f64::NAN; n])),
+        other => Err(VolasError::DType(format!(
+            "cannot NaN-pad a {} column on append",
+            other.dtype()
+        ))),
+    }
 }
 
 impl DataFrame {
@@ -67,6 +97,7 @@ impl DataFrame {
             index: Arc::new(index),
             height,
             aliases: Arc::new(HashMap::new()),
+            computed: HashMap::new(),
         })
     }
 
@@ -216,6 +247,7 @@ impl DataFrame {
             index: Arc::clone(&self.index),
             height: self.height,
             aliases: Arc::clone(&self.aliases),
+            computed: HashMap::new(),
         })
     }
 
@@ -252,17 +284,77 @@ impl DataFrame {
         Ok(df)
     }
 
-    /// Append the rows of `other` (matched by column name) in place.
+    /// Append the rows of `other` (matched by column name) in place. Columns of
+    /// `self` absent from `other` are NaN-padded (so a frame with materialized
+    /// directive columns can take raw bars; `fulfill` then refreshes them).
+    /// Computed-column metadata is retained, leaving the new rows stale.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
         let names = self.names.clone();
+        let oh = other.height;
         for n in &names {
-            let oc = other.column(n)?;
-            let pos = self.column_pos(n).expect("name came from self");
-            self.columns[pos].append(oc)?;
+            let pos = *self.name_to_idx.get(n).expect("name came from self");
+            match other.column(n) {
+                Ok(oc) => self.columns[pos].append(oc)?,
+                Err(_) => {
+                    let pad = pad_nan(&self.columns[pos], oh)?;
+                    self.columns[pos].append(&pad)?;
+                }
+            }
         }
         let new_index = self.index.append(&other.index);
         self.index = Arc::new(new_index);
-        self.height += other.height;
+        self.height += oh;
+        Ok(())
+    }
+
+    /// Record that column `name` is a materialized directive result (valid for
+    /// all current rows).
+    pub fn set_computed(&mut self, name: &str, directive: String, lookback: usize) {
+        self.computed.insert(
+            name.to_string(),
+            ComputedMeta {
+                directive,
+                lookback,
+                valid_rows: self.height,
+            },
+        );
+    }
+
+    /// Snapshot of the materialized-directive columns (`name`, meta).
+    pub fn computed_columns(&self) -> Vec<(String, ComputedMeta)> {
+        self.computed
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Overwrite an `F64` column's rows `[from, from + values.len())` in place
+    /// (copy-on-write) and mark it valid up to the full height. O(values.len()).
+    pub fn update_computed_tail(&mut self, name: &str, from: usize, values: &[f64]) -> Result<()> {
+        let pos = self
+            .name_to_idx
+            .get(name)
+            .copied()
+            .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
+        match &mut self.columns[pos] {
+            Column::F64(arc) => {
+                let buf = Arc::make_mut(arc);
+                for (i, &v) in values.iter().enumerate() {
+                    if from + i < buf.len() {
+                        buf[from + i] = v;
+                    }
+                }
+            }
+            other => {
+                return Err(VolasError::DType(format!(
+                    "computed column \"{name}\" is {}, not f64",
+                    other.dtype()
+                )))
+            }
+        }
+        if let Some(meta) = self.computed.get_mut(name) {
+            meta.valid_rows = self.height;
+        }
         Ok(())
     }
 

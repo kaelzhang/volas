@@ -5,7 +5,7 @@
 //! This crate is the only place pyo3 / numpy are used; all logic lives in the
 //! `volas-core` / `volas-compute` / `volas-directive` crates.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
@@ -422,6 +422,49 @@ impl PyDataFrame {
             inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
         }
     }
+
+    /// Recompute the stale tail of cached directive columns in place — all of
+    /// them if `only` is `None`, else just the named one. O(lookback + new rows)
+    /// per column. Done against the real (non-computed) columns so a bare-name
+    /// directive recomputes and no cached buffer is pinned.
+    fn refresh_computed(&mut self, only: Option<&str>) -> PyResult<()> {
+        let height = self.inner.height();
+        let stale: Vec<_> = self
+            .inner
+            .computed_columns()
+            .into_iter()
+            .filter(|(n, m)| m.valid_rows < height && only.is_none_or(|o| o == n))
+            .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        let computed_names: HashSet<String> = self
+            .inner
+            .computed_columns()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        let real_names: Vec<String> = self
+            .inner
+            .names()
+            .iter()
+            .filter(|n| !computed_names.contains(*n))
+            .cloned()
+            .collect();
+        let base = self.inner.select(&real_names).map_err(pyerr)?;
+        for (name, meta) in stale {
+            let start = meta.valid_rows.saturating_sub(meta.lookback);
+            let slice = base.slice(start, height);
+            let node = parse(&meta.directive).map_err(pyerr)?;
+            let recomputed = execute(&slice, &node).map_err(pyerr)?;
+            let vals = recomputed.to_f64_vec();
+            let tail = &vals[meta.valid_rows - start..];
+            self.inner
+                .update_computed_tail(&name, meta.valid_rows, tail)
+                .map_err(pyerr)?;
+        }
+        Ok(())
+    }
 }
 
 #[pymethods]
@@ -501,7 +544,7 @@ impl PyDataFrame {
         self.inner.height()
     }
 
-    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // boolean mask (Series or numpy)
         if let Ok(s) = key.extract::<PyRef<PySeries>>() {
             if let Column::Bool(mask) = &s.inner.data {
@@ -520,8 +563,28 @@ impl PyDataFrame {
         }
         // column name or directive
         if let Ok(name) = key.extract::<String>() {
-            let col = self.eval(&name).map_err(pyerr)?;
-            return Ok(Py::new(py, self.wrap_series(name, col))?.into_any());
+            // Existing column — a real column, or a cached directive: refresh its
+            // stale tail if cached (no-op for a plain data column), then return.
+            if self.inner.has_column(&name) {
+                self.refresh_computed(Some(&name))?;
+                let col = self.inner.column(&name).map_err(pyerr)?.clone();
+                return Ok(Py::new(py, self.wrap_series(name, col))?.into_any());
+            }
+            // A directive: materialize (auto-cache) under its canonical name; on
+            // later access its stale tail is refreshed incrementally, so the
+            // result is always fresh AND cheap (O(lookback), not O(n)).
+            let node = parse(&name).map_err(pyerr)?;
+            let canonical = volas_directive::stringify(&node);
+            if self.inner.has_column(&canonical) {
+                self.refresh_computed(Some(&canonical))?;
+            } else {
+                let col = execute(&self.inner, &node).map_err(pyerr)?;
+                let lookback = volas_directive::lookback::lookback(&node);
+                self.inner.set_column(&canonical, col).map_err(pyerr)?;
+                self.inner.set_computed(&canonical, canonical.clone(), lookback);
+            }
+            let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
+            return Ok(Py::new(py, self.wrap_series(canonical, col))?.into_any());
         }
         // list of names / directives
         if let Ok(list) = key.extract::<Vec<String>>() {
@@ -678,6 +741,14 @@ impl PyDataFrame {
     fn alias(&mut self, as_name: &str, src_name: &str) -> PyResult<()> {
         self.inner = self.inner.with_alias(as_name, src_name).map_err(pyerr)?;
         Ok(())
+    }
+
+    /// Refresh the stale tail of every materialized (auto-cached) directive
+    /// column at once (e.g. before a bulk `to_numpy` / row read). Per-column
+    /// access already auto-refreshes; this is the batch form. In place,
+    /// incremental — O(lookback + new rows) per column, not O(n).
+    fn fulfill(&mut self) -> PyResult<()> {
+        self.refresh_computed(None)
     }
 
     fn __repr__(&self) -> String {
