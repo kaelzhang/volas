@@ -44,8 +44,8 @@ const EQUAL: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.05 };
 
 // Silence dead-code until every pattern that uses each setting lands.
 #[allow(dead_code)]
-const _UNUSED_SETTINGS: [Setting; 7] = [
-    BODY_VERY_LONG, BODY_SHORT, SHADOW_LONG, SHADOW_VERY_LONG, NEAR, FAR, EQUAL,
+const _UNUSED_SETTINGS: [Setting; 8] = [
+    BODY_VERY_LONG, BODY_SHORT, SHADOW_LONG, SHADOW_VERY_LONG, SHADOW_SHORT, NEAR, FAR, EQUAL,
 ];
 
 #[inline]
