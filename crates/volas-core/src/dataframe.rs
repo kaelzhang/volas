@@ -334,6 +334,12 @@ impl DataFrame {
         );
     }
 
+    /// Whether any materialized directive column is stale (its `valid_rows` lags
+    /// `height` after an `append`), i.e. a bulk read would see NaN until `fulfill`.
+    pub fn has_stale_computed(&self) -> bool {
+        self.computed.values().any(|m| m.valid_rows < self.height)
+    }
+
     /// Snapshot of the materialized-directive columns (`name`, meta).
     pub fn computed_columns(&self) -> Vec<(String, ComputedMeta)> {
         self.computed

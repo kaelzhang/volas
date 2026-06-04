@@ -7,6 +7,7 @@ the whole column (O(n)).
 """
 
 import time
+import pytest
 from pathlib import Path
 
 import numpy as np
@@ -39,14 +40,16 @@ def test_getitem_auto_refreshes_after_append():
 
 
 def test_fulfill_refreshes_bulk_read():
-    # to_numpy / iloc read the cached columns directly (no auto-refresh), so the
-    # appended rows are stale until fulfill() batch-refreshes them.
+    # to_numpy / iloc read the cached columns directly (no auto-refresh). After an
+    # append the cached columns are stale, so a bulk read RAISES (EX-1) instead of
+    # returning silent NaN; fulfill() makes it fresh.
     full = volas.read_csv(TENCENT)
     df = volas.read_csv(TENCENT).iloc[:40]
     df['ma:20']                                  # cache
     df = df.append(full.iloc[40:41])
     j = df.columns.index('ma:20')
-    assert np.isnan(df.to_numpy()[-1, j])        # stale before fulfill
+    with pytest.raises(ValueError):              # stale bulk read is loud, not silent
+        df.to_numpy()
     df.fulfill()                                 # batch tail recompute (in place)
     expected = volas.read_csv(TENCENT).iloc[:41]['ma:20'].to_numpy()[-1]
     # fresh after fulfill, to float tolerance (sliding sma is path-dependent)

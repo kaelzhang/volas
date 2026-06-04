@@ -29,3 +29,23 @@ def test_append_missing_plain_bool_or_str_errors():   # EX-11
     df2 = DataFrame({'f': [1., 2.], 's': ['a', 'b']})
     with pytest.raises(Exception):
         df2.append(DataFrame({'f': [3.]}))         # str missing -> error
+
+
+def test_stale_bulk_read_raises_until_fulfill():   # EX-1
+    df = DataFrame({'open': [float(i) for i in range(30)],
+                    'close': [float(i) + 1 for i in range(30)]})
+    df['ma:5']
+    df = df.append(DataFrame({'open': [99.0], 'close': [100.0]}))
+    # single-column df[directive] auto-refreshes (always fresh) ...
+    _ = df['ma:5']
+    # ... but a bulk to_numpy on another still-stale frame raises:
+    df2 = DataFrame({'open': [float(i) for i in range(30)],
+                     'close': [float(i) + 1 for i in range(30)]})
+    df2['ma:5']
+    df2 = df2.append(DataFrame({'open': [99.0], 'close': [100.0]}))
+    with pytest.raises(ValueError):
+        df2.to_numpy()
+    with pytest.raises(ValueError):
+        df2.iloc[-1]
+    df2.fulfill()
+    assert df2.to_numpy().shape[0] == 31           # fresh after fulfill

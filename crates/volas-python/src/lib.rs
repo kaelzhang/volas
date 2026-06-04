@@ -231,6 +231,21 @@ pub(crate) fn norm_idx(i: isize, len: usize) -> PyResult<usize> {
     }
 }
 
+/// Raise if the frame has stale computed columns after an `append`. The per-column
+/// `df[directive]` access auto-refreshes; bulk / positional reads (`to_numpy`,
+/// `.iloc` / `.loc` / `.at` / `.iat`) do not, so they must be fresh — call
+/// `fulfill()` first. Keeps the read path O(1) and never returns silent NaN.
+fn ensure_fresh(df: &DataFrame) -> PyResult<()> {
+    if df.has_stale_computed() {
+        Err(PyValueError::new_err(
+            "frame has stale computed (directive) columns after append; \
+             call fulfill() before a bulk or positional read",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 // --- Series ----------------------------------------------------------------
 
 /// `volas.Series` — a single named, indexed column.
@@ -1183,6 +1198,7 @@ impl PyDataFrame {
     /// `'float32'`); requesting a float over a string column raises.
     #[pyo3(signature = (dtype = None))]
     fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
+        ensure_fresh(&self.inner)?;
         let has_str = self.inner.columns().iter().any(|c| matches!(c, Column::Str(_)));
         let (h, w) = (self.inner.height(), self.inner.width());
 
@@ -1311,6 +1327,7 @@ pub struct DataFrameILoc {
 #[pymethods]
 impl DataFrameILoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        ensure_fresh(&self.inner)?;
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.height())?;
             return Ok(Py::new(py, row_at(&self.inner, i))?.into_any());
@@ -1393,6 +1410,7 @@ pub struct DataFrameLoc {
 #[pymethods]
 impl DataFrameLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        ensure_fresh(&self.inner)?;
         let index = self.inner.index();
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, index)?;
@@ -1416,6 +1434,7 @@ pub struct DataFrameIat {
 #[pymethods]
 impl DataFrameIat {
     fn __getitem__(&self, py: Python<'_>, key: (isize, isize)) -> PyResult<Py<PyAny>> {
+        ensure_fresh(&self.inner)?;
         let i = norm_idx(key.0, self.inner.height())?;
         let j = norm_idx(key.1, self.inner.width())?;
         Ok(scalar_to_py(py, &self.inner.columns()[j], i))
@@ -1431,6 +1450,7 @@ pub struct DataFrameAt {
 #[pymethods]
 impl DataFrameAt {
     fn __getitem__(&self, py: Python<'_>, key: (Py<PyAny>, String)) -> PyResult<Py<PyAny>> {
+        ensure_fresh(&self.inner)?;
         let index = self.inner.index();
         let label = parse_label(key.0.bind(py), index)?;
         let i = index
