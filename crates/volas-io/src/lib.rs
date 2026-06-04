@@ -98,17 +98,17 @@ fn build_na_set(opts: &ReadCsvOptions) -> HashSet<String> {
 /// (`i64` -> `f64` -> `bool` -> `str`), treating NA tokens as missing.
 fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
     if cells.is_empty() {
-        return Column::Str(cells);
+        return Column::str(cells);
     }
     let trimmed: Vec<&str> = cells.iter().map(|c| c.trim()).collect();
     let is_na = |t: &str| na.contains(t);
     // i64: every cell present and integral.
     if trimmed.iter().all(|t| !is_na(t) && t.parse::<i64>().is_ok()) {
-        return Column::I64(trimmed.iter().map(|t| t.parse().unwrap()).collect());
+        return Column::i64(trimmed.iter().map(|t| t.parse().unwrap()).collect());
     }
     // f64: every cell is either missing (-> NaN) or float-parseable.
     if trimmed.iter().all(|t| is_na(t) || t.parse::<f64>().is_ok()) {
-        return Column::F64(
+        return Column::f64(
             trimmed
                 .iter()
                 .map(|t| if is_na(t) { f64::NAN } else { t.parse().unwrap() })
@@ -120,9 +120,9 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
         .iter()
         .all(|t| matches!(t.to_ascii_lowercase().as_str(), "true" | "false"))
     {
-        return Column::Bool(trimmed.iter().map(|t| t.eq_ignore_ascii_case("true")).collect());
+        return Column::bool(trimmed.iter().map(|t| t.eq_ignore_ascii_case("true")).collect());
     }
-    Column::Str(cells)
+    Column::str(cells)
 }
 
 #[cfg(test)]
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn infers_i64() {
-        assert_eq!(infer(&["1", "2", "3"]), Column::I64(vec![1, 2, 3]));
+        assert_eq!(infer(&["1", "2", "3"]), Column::i64(vec![1, 2, 3]));
     }
 
     #[test]
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn scientific_and_negative_are_f64() {
         match infer(&["-1.5", "1e3"]) {
-            Column::F64(v) => assert_eq!(v, vec![-1.5, 1000.0]),
+            Column::F64(v) => assert_eq!(**v, vec![-1.5, 1000.0]),
             other => panic!("expected F64, got {other:?}"),
         }
     }
@@ -176,20 +176,20 @@ mod tests {
     fn infers_bool_any_case() {
         assert_eq!(
             infer(&["True", "false", "TRUE"]),
-            Column::Bool(vec![true, false, true])
+            Column::bool(vec![true, false, true])
         );
     }
 
     #[test]
     fn non_numeric_is_str() {
-        assert_eq!(infer(&["a", "b"]), Column::Str(vec!["a".into(), "b".into()]));
+        assert_eq!(infer(&["a", "b"]), Column::str(vec!["a".into(), "b".into()]));
     }
 
     #[test]
     fn empty_column_is_str() {
         assert_eq!(
             infer_column(Vec::new(), &default_na()),
-            Column::Str(Vec::new())
+            Column::str(Vec::new())
         );
     }
 
@@ -201,7 +201,7 @@ mod tests {
         });
         // "NA" is no longer missing -> the column is object/string, not float.
         match infer_column(vec!["1".into(), "NA".into()], &na) {
-            Column::Str(v) => assert_eq!(v, vec!["1".to_string(), "NA".to_string()]),
+            Column::Str(v) => assert_eq!(**v, vec!["1".to_string(), "NA".to_string()]),
             other => panic!("expected Str, got {other:?}"),
         }
     }

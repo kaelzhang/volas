@@ -22,8 +22,8 @@ impl Index {
     /// documented future refinement).
     pub fn from_column(col: &Column) -> Result<Index> {
         match col {
-            Column::Datetime(v) => Ok(Index::Datetime(v.clone())),
-            Column::I64(v) => Ok(Index::Int64(v.clone())),
+            Column::Datetime(v) => Ok(Index::Datetime(v.to_vec())),
+            Column::I64(v) => Ok(Index::Int64(v.to_vec())),
             other => Err(VolasError::DType(format!(
                 "cannot use a {} column as an index (only datetime / int64)",
                 other.dtype()
@@ -127,18 +127,18 @@ mod tests {
     #[test]
     fn from_datetime_and_int_columns() {
         assert_eq!(
-            Index::from_column(&Column::Datetime(vec![5, 6])).unwrap(),
+            Index::from_column(&Column::datetime(vec![5, 6])).unwrap(),
             Index::Datetime(vec![5, 6])
         );
         assert_eq!(
-            Index::from_column(&Column::I64(vec![1, 2])).unwrap(),
+            Index::from_column(&Column::i64(vec![1, 2])).unwrap(),
             Index::Int64(vec![1, 2])
         );
     }
 
     #[test]
     fn from_unsupported_column_errors() {
-        assert!(Index::from_column(&Column::F64(vec![1.0])).is_err());
-        assert!(Index::from_column(&Column::Str(vec!["x".into()])).is_err());
+        assert!(Index::from_column(&Column::f64(vec![1.0])).is_err());
+        assert!(Index::from_column(&Column::str(vec!["x".into()])).is_err());
     }
 }

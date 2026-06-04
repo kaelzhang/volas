@@ -1,28 +1,57 @@
 //! Column: a single typed, contiguous buffer.
 //!
-//! v1 stores values directly in a `Vec<T>`; `F64` columns use `NaN` for missing
-//! values (warm-up regions, gaps), matching stock-pandas / pandas semantics.
+//! Each variant holds its buffer behind an `Arc`, so a `Column` — and the
+//! `DataFrame` / `Series` that contain it — is cheap to clone: cloning shares the
+//! buffer (an O(1) refcount bump, not an O(n) copy). Mutation (`append`) is
+//! copy-on-write via `Arc::make_mut`: it grows the `Vec` in place when the buffer
+//! is uniquely owned, and copies only when a view (another `Series`, a zero-copy
+//! export) is still alive. `F64` columns use `NaN` for missing values (matching
+//! stock-pandas / pandas semantics).
+
+use std::sync::Arc;
 
 use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};
 
-/// A typed, contiguous column of values.
+/// A typed, contiguous column of values. The buffer is `Arc`-shared (cheap clone)
+/// and mutated copy-on-write.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Column {
     /// 64-bit floats; `NaN` denotes missing.
-    F64(Vec<f64>),
+    F64(Arc<Vec<f64>>),
     /// Booleans (comparison / signal results).
-    Bool(Vec<bool>),
+    Bool(Arc<Vec<bool>>),
     /// 64-bit signed integers.
-    I64(Vec<i64>),
+    I64(Arc<Vec<i64>>),
     /// UTF-8 strings.
-    Str(Vec<String>),
+    Str(Arc<Vec<String>>),
     /// Datetimes as i64 nanoseconds since the Unix epoch (UTC-naive).
-    Datetime(Vec<i64>),
+    Datetime(Arc<Vec<i64>>),
 }
 
 impl Column {
+    /// Build an `F64` column.
+    pub fn f64(v: Vec<f64>) -> Column {
+        Column::F64(Arc::new(v))
+    }
+    /// Build a `Bool` column.
+    pub fn bool(v: Vec<bool>) -> Column {
+        Column::Bool(Arc::new(v))
+    }
+    /// Build an `I64` column.
+    pub fn i64(v: Vec<i64>) -> Column {
+        Column::I64(Arc::new(v))
+    }
+    /// Build a `Str` column.
+    pub fn str(v: Vec<String>) -> Column {
+        Column::Str(Arc::new(v))
+    }
+    /// Build a `Datetime` column (epoch nanoseconds).
+    pub fn datetime(v: Vec<i64>) -> Column {
+        Column::Datetime(Arc::new(v))
+    }
+
     /// Number of elements.
     pub fn len(&self) -> usize {
         match self {
@@ -53,7 +82,7 @@ impl Column {
     /// Borrow the underlying `f64` slice, if this is an `F64` column.
     pub fn as_f64(&self) -> Option<&[f64]> {
         if let Column::F64(v) = self {
-            Some(v)
+            Some(v.as_slice())
         } else {
             None
         }
@@ -62,7 +91,7 @@ impl Column {
     /// Borrow the underlying `bool` slice, if this is a `Bool` column.
     pub fn as_bool(&self) -> Option<&[bool]> {
         if let Column::Bool(v) = self {
-            Some(v)
+            Some(v.as_slice())
         } else {
             None
         }
@@ -71,7 +100,7 @@ impl Column {
     /// Borrow the underlying `i64` slice, if this is an `I64` column.
     pub fn as_i64(&self) -> Option<&[i64]> {
         if let Column::I64(v) = self {
-            Some(v)
+            Some(v.as_slice())
         } else {
             None
         }
@@ -80,7 +109,7 @@ impl Column {
     /// Borrow the underlying `String` slice, if this is a `Str` column.
     pub fn as_str(&self) -> Option<&[String]> {
         if let Column::Str(v) = self {
-            Some(v)
+            Some(v.as_slice())
         } else {
             None
         }
@@ -89,7 +118,7 @@ impl Column {
     /// Borrow the underlying epoch-ns slice, if this is a `Datetime` column.
     pub fn as_datetime(&self) -> Option<&[i64]> {
         if let Column::Datetime(v) = self {
-            Some(v)
+            Some(v.as_slice())
         } else {
             None
         }
@@ -100,7 +129,7 @@ impl Column {
     /// `f64`.
     pub fn to_f64_vec(&self) -> Vec<f64> {
         match self {
-            Column::F64(v) => v.clone(),
+            Column::F64(v) => v.to_vec(),
             Column::Bool(v) => v.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect(),
             Column::I64(v) => v.iter().map(|&i| i as f64).collect(),
             Column::Str(v) => vec![f64::NAN; v.len()],
@@ -125,49 +154,50 @@ impl Column {
         }
     }
 
-    /// A contiguous `[start, end)` slice (copying).
+    /// A contiguous `[start, end)` slice (a fresh buffer).
     pub fn slice(&self, start: usize, end: usize) -> Column {
         match self {
-            Column::F64(v) => Column::F64(v[start..end].to_vec()),
-            Column::Bool(v) => Column::Bool(v[start..end].to_vec()),
-            Column::I64(v) => Column::I64(v[start..end].to_vec()),
-            Column::Str(v) => Column::Str(v[start..end].to_vec()),
-            Column::Datetime(v) => Column::Datetime(v[start..end].to_vec()),
+            Column::F64(v) => Column::f64(v[start..end].to_vec()),
+            Column::Bool(v) => Column::bool(v[start..end].to_vec()),
+            Column::I64(v) => Column::i64(v[start..end].to_vec()),
+            Column::Str(v) => Column::str(v[start..end].to_vec()),
+            Column::Datetime(v) => Column::datetime(v[start..end].to_vec()),
         }
     }
 
     /// Gather the given positions into a new column (fancy indexing).
     pub fn take(&self, idx: &[usize]) -> Column {
         match self {
-            Column::F64(v) => Column::F64(idx.iter().map(|&i| v[i]).collect()),
-            Column::Bool(v) => Column::Bool(idx.iter().map(|&i| v[i]).collect()),
-            Column::I64(v) => Column::I64(idx.iter().map(|&i| v[i]).collect()),
-            Column::Str(v) => Column::Str(idx.iter().map(|&i| v[i].clone()).collect()),
-            Column::Datetime(v) => Column::Datetime(idx.iter().map(|&i| v[i]).collect()),
+            Column::F64(v) => Column::f64(idx.iter().map(|&i| v[i]).collect()),
+            Column::Bool(v) => Column::bool(idx.iter().map(|&i| v[i]).collect()),
+            Column::I64(v) => Column::i64(idx.iter().map(|&i| v[i]).collect()),
+            Column::Str(v) => Column::str(idx.iter().map(|&i| v[i].clone()).collect()),
+            Column::Datetime(v) => Column::datetime(idx.iter().map(|&i| v[i]).collect()),
         }
     }
 
-    /// Append another column of the same dtype in place.
+    /// Append another column of the same dtype, copy-on-write (grows in place
+    /// when the buffer is uniquely owned).
     pub fn append(&mut self, other: &Column) -> Result<()> {
         match (self, other) {
             (Column::F64(a), Column::F64(b)) => {
-                a.extend_from_slice(b);
+                Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
             (Column::Bool(a), Column::Bool(b)) => {
-                a.extend_from_slice(b);
+                Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
             (Column::I64(a), Column::I64(b)) => {
-                a.extend_from_slice(b);
+                Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
             (Column::Str(a), Column::Str(b)) => {
-                a.extend_from_slice(b);
+                Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
             (Column::Datetime(a), Column::Datetime(b)) => {
-                a.extend_from_slice(b);
+                Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
             (s, o) => Err(VolasError::DType(format!(
@@ -179,20 +209,20 @@ impl Column {
     }
 
     /// Parse this column into a [`Column::Datetime`] (epoch ns). `Str` cells are
-    /// parsed via [`datetime::parse_ns`]; an already-`Datetime` column is
-    /// returned unchanged. Errors on an unparseable cell or an unsupported dtype.
+    /// parsed via [`datetime::parse_ns`]; an already-`Datetime` column is shared
+    /// back (cheap). Errors on an unparseable cell or an unsupported dtype.
     pub fn to_datetime(&self) -> Result<Column> {
         match self {
             Column::Datetime(_) => Ok(self.clone()),
             Column::Str(v) => {
                 let mut out = Vec::with_capacity(v.len());
-                for s in v {
+                for s in v.iter() {
                     let ns = datetime::parse_ns(s).ok_or_else(|| {
                         VolasError::Value(format!("could not parse datetime {s:?}"))
                     })?;
                     out.push(ns);
                 }
-                Ok(Column::Datetime(out))
+                Ok(Column::datetime(out))
             }
             other => Err(VolasError::DType(format!(
                 "cannot parse a {} column as datetime",
@@ -208,27 +238,38 @@ mod tests {
 
     #[test]
     fn datetime_column_basics() {
-        let c = Column::Datetime(vec![10, 20, 30]);
+        let c = Column::datetime(vec![10, 20, 30]);
         assert_eq!(c.len(), 3);
         assert_eq!(c.dtype(), DType::Datetime);
         assert_eq!(c.as_datetime().unwrap(), &[10, 20, 30]);
         assert_eq!(c.get_f64(1), 20.0);
         assert_eq!(c.to_f64_vec(), vec![10.0, 20.0, 30.0]);
-        assert_eq!(c.slice(1, 3), Column::Datetime(vec![20, 30]));
-        assert_eq!(c.take(&[2, 0]), Column::Datetime(vec![30, 10]));
+        assert_eq!(c.slice(1, 3), Column::datetime(vec![20, 30]));
+        assert_eq!(c.take(&[2, 0]), Column::datetime(vec![30, 10]));
+    }
+
+    #[test]
+    fn append_is_copy_on_write() {
+        // A shared view must not see a later append (CoW), but an unshared column
+        // grows in place.
+        let mut a = Column::f64(vec![1.0, 2.0]);
+        let view = a.clone(); // shares the Arc buffer
+        a.append(&Column::f64(vec![3.0])).unwrap();
+        assert_eq!(a.as_f64().unwrap(), &[1.0, 2.0, 3.0]);
+        assert_eq!(view.as_f64().unwrap(), &[1.0, 2.0]); // view unchanged
     }
 
     #[test]
     fn datetime_append_same_dtype_only() {
-        let mut a = Column::Datetime(vec![1]);
-        a.append(&Column::Datetime(vec![2, 3])).unwrap();
-        assert_eq!(a, Column::Datetime(vec![1, 2, 3]));
-        assert!(a.append(&Column::I64(vec![4])).is_err());
+        let mut a = Column::datetime(vec![1]);
+        a.append(&Column::datetime(vec![2, 3])).unwrap();
+        assert_eq!(a, Column::datetime(vec![1, 2, 3]));
+        assert!(a.append(&Column::i64(vec![4])).is_err());
     }
 
     #[test]
     fn to_datetime_parses_strings() {
-        let c = Column::Str(vec!["2020-01-01".into(), "2020-01-02 03:04:05".into()]);
+        let c = Column::str(vec!["2020-01-01".into(), "2020-01-02 03:04:05".into()]);
         let dt = c.to_datetime().unwrap();
         assert_eq!(dt.dtype(), DType::Datetime);
         assert_eq!(dt.len(), 2);
@@ -238,7 +279,7 @@ mod tests {
 
     #[test]
     fn to_datetime_errors() {
-        assert!(Column::Str(vec!["not-a-date".into()]).to_datetime().is_err());
-        assert!(Column::I64(vec![1, 2]).to_datetime().is_err());
+        assert!(Column::str(vec!["not-a-date".into()]).to_datetime().is_err());
+        assert!(Column::i64(vec![1, 2]).to_datetime().is_err());
     }
 }

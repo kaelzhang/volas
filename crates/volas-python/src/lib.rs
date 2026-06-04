@@ -29,19 +29,19 @@ fn pyerr(e: VolasError) -> PyErr {
 
 fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(a) = v.extract::<PyReadonlyArray1<f64>>() {
-        return Ok(Column::F64(a.as_slice()?.to_vec()));
+        return Ok(Column::f64(a.as_slice()?.to_vec()));
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<i64>>() {
-        return Ok(Column::I64(a.as_slice()?.to_vec()));
+        return Ok(Column::i64(a.as_slice()?.to_vec()));
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<bool>>() {
-        return Ok(Column::Bool(a.as_slice()?.to_vec()));
+        return Ok(Column::bool(a.as_slice()?.to_vec()));
     }
     if let Ok(vv) = v.extract::<Vec<f64>>() {
-        return Ok(Column::F64(vv));
+        return Ok(Column::f64(vv));
     }
     if let Ok(vv) = v.extract::<Vec<String>>() {
-        return Ok(Column::Str(vv));
+        return Ok(Column::str(vv));
     }
     Err(PyTypeError::new_err(
         "column values must be a 1-D numeric array, a list of numbers, or a list of strings",
@@ -50,12 +50,12 @@ fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
 
 fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
     match col {
-        Column::F64(v) => v.clone().into_pyarray(py).into_any(),
-        Column::Bool(v) => v.clone().into_pyarray(py).into_any(),
-        Column::I64(v) => v.clone().into_pyarray(py).into_any(),
+        Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
+        Column::Bool(v) => v.to_vec().into_pyarray(py).into_any(),
+        Column::I64(v) => v.to_vec().into_pyarray(py).into_any(),
         // String columns become NumPy object arrays (pandas `object` dtype).
         Column::Str(v) => {
-            let list = PyList::new(py, v).expect("build str list");
+            let list = PyList::new(py, v.as_slice()).expect("build str list");
             let kwargs = PyDict::new(py);
             kwargs.set_item("dtype", "object").expect("set dtype=object");
             py.import("numpy")
@@ -65,7 +65,7 @@ fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
         }
         // Datetime columns become NumPy datetime64[ns] arrays.
         Column::Datetime(v) => {
-            let arr = v.clone().into_pyarray(py);
+            let arr = v.to_vec().into_pyarray(py);
             arr.call_method1("astype", ("datetime64[ns]",))
                 .expect("astype datetime64[ns]")
         }
@@ -328,7 +328,7 @@ fn series_binop(
         out[i] = f(a[i], rhs[i]);
     }
     Ok(PySeries {
-        inner: Series::new(s.name.clone(), Column::F64(out), Arc::clone(&s.index)),
+        inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)),
     })
 }
 
@@ -586,7 +586,7 @@ impl PyDataFrame {
             let mut cols = Vec::new();
             for (n, v) in row.names.iter().zip(&row.values) {
                 names.push(n.clone());
-                cols.push(Column::F64(vec![*v]));
+                cols.push(Column::f64(vec![*v]));
             }
             let one_index = if row.is_datetime {
                 Index::Datetime(vec![row.index_value])

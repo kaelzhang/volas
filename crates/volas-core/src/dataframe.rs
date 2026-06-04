@@ -244,8 +244,8 @@ mod tests {
         DataFrame::new(
             vec!["a".into(), "b".into()],
             vec![
-                Column::F64(vec![1.0, 2.0, 3.0]),
-                Column::I64(vec![10, 20, 30]),
+                Column::f64(vec![1.0, 2.0, 3.0]),
+                Column::i64(vec![10, 20, 30]),
             ],
             None,
         )
@@ -299,7 +299,7 @@ mod tests {
     fn set_index_moves_column_out() {
         let df = DataFrame::new(
             vec!["t".into(), "v".into()],
-            vec![Column::I64(vec![100, 200]), Column::F64(vec![1.0, 2.0])],
+            vec![Column::i64(vec![100, 200]), Column::f64(vec![1.0, 2.0])],
             None,
         )
         .unwrap();

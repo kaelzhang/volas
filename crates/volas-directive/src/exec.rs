@@ -9,7 +9,7 @@ use volas_compute::indicators as ind;
 /// Execute a directive node against `df`.
 pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
     match node {
-        Node::Scalar(v) => Ok(Column::F64(vec![*v; df.height()])),
+        Node::Scalar(v) => Ok(Column::f64(vec![*v; df.height()])),
         Node::Name(name) => {
             if name.is_empty() {
                 return Err(VolasError::Value("empty column / command name".into()));
@@ -26,8 +26,8 @@ pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
         Node::Unary { op, operand } => {
             let c = execute(df, operand)?;
             Ok(match op {
-                UnaryOp::Not => Column::Bool(c.to_f64_vec().iter().map(|&x| x == 0.0).collect()),
-                UnaryOp::Neg => Column::F64(c.to_f64_vec().iter().map(|&x| -x).collect()),
+                UnaryOp::Not => Column::bool(c.to_f64_vec().iter().map(|&x| x == 0.0).collect()),
+                UnaryOp::Neg => Column::f64(c.to_f64_vec().iter().map(|&x| -x).collect()),
             })
         }
         Node::Binary { left, op, right } => {
@@ -40,7 +40,7 @@ pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
 
 fn as_bool(col: &Column) -> Vec<bool> {
     match col {
-        Column::Bool(v) => v.clone(),
+        Column::Bool(v) => v.to_vec(),
         other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
     }
 }
@@ -60,7 +60,7 @@ fn apply_binary(op: Op, l: &Column, r: &Column) -> Column {
                     _ => unreachable!(),
                 };
             }
-            Column::F64(out)
+            Column::f64(out)
         }
         Op::And | Op::Or | Op::Xor => {
             let (lb, rb) = (as_bool(l), as_bool(r));
@@ -74,9 +74,9 @@ fn apply_binary(op: Op, l: &Column, r: &Column) -> Column {
                     _ => unreachable!(),
                 };
             }
-            Column::Bool(out)
+            Column::bool(out)
         }
-        _ => Column::Bool(apply_cmp(op, &l.to_f64_vec(), &r.to_f64_vec())),
+        _ => Column::bool(apply_cmp(op, &l.to_f64_vec(), &r.to_f64_vec())),
     }
 }
 
@@ -149,7 +149,7 @@ fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
         .get(i)
         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
     match execute(df, node)? {
-        Column::Bool(v) => Ok(v),
+        Column::Bool(v) => Ok(v.to_vec()),
         other => Ok(other.to_f64_vec().iter().map(|&x| x != 0.0).collect()),
     }
 }
@@ -184,8 +184,8 @@ fn exec_command(
     let sub = canon_sub(name, sub);
     let sub = sub.as_deref();
     let close = |i| series_f64(df, series, i, "close");
-    let f64col = |v: Vec<f64>| Ok(Column::F64(v));
-    let boolcol = |v: Vec<bool>| Ok(Column::Bool(v));
+    let f64col = |v: Vec<f64>| Ok(Column::f64(v));
+    let boolcol = |v: Vec<bool>| Ok(Column::bool(v));
 
     match (name, sub) {
         ("ma", _) => f64col(ind::ma(&close(0)?, arg_usize(args, 0, None)?)),
@@ -343,10 +343,10 @@ mod tests {
         DataFrame::new(
             vec!["open".into(), "high".into(), "low".into(), "close".into()],
             vec![
-                Column::F64(vec![5.0, 6.0, 7.0, 8.0, 9.0]),
-                Column::F64(vec![6.0, 7.0, 8.0, 9.0, 10.0]),
-                Column::F64(vec![4.0, 5.0, 6.0, 7.0, 8.0]),
-                Column::F64(vec![5.0, 6.0, 7.0, 8.0, 9.0]),
+                Column::f64(vec![5.0, 6.0, 7.0, 8.0, 9.0]),
+                Column::f64(vec![6.0, 7.0, 8.0, 9.0, 10.0]),
+                Column::f64(vec![4.0, 5.0, 6.0, 7.0, 8.0]),
+                Column::f64(vec![5.0, 6.0, 7.0, 8.0, 9.0]),
             ],
             None,
         )

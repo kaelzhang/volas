@@ -28,7 +28,7 @@ impl Series {
         let n = values.len();
         Series {
             name,
-            data: Column::F64(values),
+            data: Column::f64(values),
             index: Arc::new(Index::Range(n)),
         }
     }
