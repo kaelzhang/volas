@@ -1,20 +1,10 @@
 //! Single-bar candlestick patterns.
 
 use super::{
-    candle_average, color, lowershadow, realbody, realbody_gap_down, realbody_gap_up, uppershadow,
-    BODY_DOJI, BODY_LONG, BODY_SHORT, NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_LONG,
-    SHADOW_VERY_SHORT,
+    candle_average, color, each_bar, lowershadow, realbody, realbody_gap_down, realbody_gap_up,
+    uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT, NEAR, SHADOW_LONG, SHADOW_SHORT,
+    SHADOW_VERY_LONG, SHADOW_VERY_SHORT,
 };
-
-/// Build a per-bar pattern: NaN before `lookback`, then `f(i)` (0 / ±100) per bar.
-#[inline]
-fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
-    let mut out = vec![f64::NAN; n];
-    for i in lookback..n {
-        out[i] = f(i);
-    }
-    out
-}
 
 /// Doji (TA-Lib CDLDOJI): real body no larger than the recent doji-body threshold —
 /// open ≈ close. Non-directional (uncertainty): `100` or `0`. Lookback 10.

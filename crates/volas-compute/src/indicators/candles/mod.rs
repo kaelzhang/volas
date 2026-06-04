@@ -14,34 +14,50 @@
 // Parity holds on the valid region.
 
 mod one_bar;
+mod two_bar;
 pub use one_bar::*;
+pub use two_bar::*;
 
-/// A candlestick-pattern recogniser over `(open, high, low, close)`.
-pub type CandleFn = fn(&[f64], &[f64], &[f64], &[f64]) -> Vec<f64>;
+/// A candlestick-pattern recogniser. Most take only `(open, high, low, close)`; a few
+/// also take TA-Lib's `penetration` ratio.
+pub enum CandlePattern {
+    /// `(open, high, low, close)`.
+    Plain(fn(&[f64], &[f64], &[f64], &[f64]) -> Vec<f64>),
+    /// `(open, high, low, close, penetration)`.
+    Penetration(fn(&[f64], &[f64], &[f64], &[f64], f64) -> Vec<f64>),
+}
 
 /// Resolve a pattern by its (post-`CDL`, lower-case) name to its recogniser and
 /// lookback. The single source of truth for which `style.<pattern>` / `cdl.<pattern>`
 /// names exist — the directive layer (spec/exec/lookback) queries this, so adding a
 /// pattern is one entry here plus its function.
-pub fn candle_pattern(name: &str) -> Option<(CandleFn, usize)> {
-    let entry: (CandleFn, usize) = match name {
-        "doji" => (cdl_doji, 10),
-        "marubozu" => (cdl_marubozu, 10),
-        "closingmarubozu" => (cdl_closingmarubozu, 10),
-        "longline" => (cdl_longline, 10),
-        "shortline" => (cdl_shortline, 10),
-        "highwave" => (cdl_highwave, 10),
-        "spinningtop" => (cdl_spinningtop, 10),
-        "dragonflydoji" => (cdl_dragonflydoji, 10),
-        "gravestonedoji" => (cdl_gravestonedoji, 10),
-        "longleggeddoji" => (cdl_longleggeddoji, 10),
-        "rickshawman" => (cdl_rickshawman, 10),
-        "belthold" => (cdl_belthold, 10),
-        "hammer" => (cdl_hammer, 11),
-        "hangingman" => (cdl_hangingman, 11),
-        "invertedhammer" => (cdl_invertedhammer, 11),
-        "shootingstar" => (cdl_shootingstar, 11),
-        "takuri" => (cdl_takuri, 10),
+pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
+    use CandlePattern::{Penetration, Plain};
+    let entry = match name {
+        // one-bar
+        "doji" => (Plain(cdl_doji as _), 10),
+        "marubozu" => (Plain(cdl_marubozu as _), 10),
+        "closingmarubozu" => (Plain(cdl_closingmarubozu as _), 10),
+        "longline" => (Plain(cdl_longline as _), 10),
+        "shortline" => (Plain(cdl_shortline as _), 10),
+        "highwave" => (Plain(cdl_highwave as _), 10),
+        "spinningtop" => (Plain(cdl_spinningtop as _), 10),
+        "dragonflydoji" => (Plain(cdl_dragonflydoji as _), 10),
+        "gravestonedoji" => (Plain(cdl_gravestonedoji as _), 10),
+        "longleggeddoji" => (Plain(cdl_longleggeddoji as _), 10),
+        "rickshawman" => (Plain(cdl_rickshawman as _), 10),
+        "belthold" => (Plain(cdl_belthold as _), 10),
+        "hammer" => (Plain(cdl_hammer as _), 11),
+        "hangingman" => (Plain(cdl_hangingman as _), 11),
+        "invertedhammer" => (Plain(cdl_invertedhammer as _), 11),
+        "shootingstar" => (Plain(cdl_shootingstar as _), 11),
+        "takuri" => (Plain(cdl_takuri as _), 10),
+        // two-bar
+        "engulfing" => (Plain(cdl_engulfing as _), 2),
+        "harami" => (Plain(cdl_harami as _), 11),
+        "haramicross" => (Plain(cdl_haramicross as _), 11),
+        "piercing" => (Plain(cdl_piercing as _), 11),
+        "darkcloudcover" => (Penetration(cdl_darkcloudcover as _), 11),
         _ => return None,
     };
     Some(entry)
@@ -148,4 +164,15 @@ fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usi
         1.0
     };
     s.factor * base / div
+}
+
+/// Build a per-bar pattern column: NaN before `lookback`, then `f(i)` (0 / ±100 / ±80)
+/// per bar. Shared by all pattern submodules.
+#[inline]
+fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
+    let mut out = vec![f64::NAN; n];
+    for i in lookback..n {
+        out[i] = f(i);
+    }
+    out
 }

@@ -441,14 +441,21 @@ fn exec_command(
             arg_usize(args, 0, Some(1))?,
             arg_i64(args, 1, 1)? as i32,
         )),
-        // Candlestick patterns: style.<pattern> / cdl.<pattern>. Output f64 -100/0/100.
+        // Candlestick patterns: style.<pattern> / cdl.<pattern>. Output f64 -100/0/100
+        // (engulfing may also emit ±80). A few take an optional `penetration` ratio.
         ("style", Some(pat)) if ind::candle_pattern(pat).is_some() => {
-            let (recogniser, _) = ind::candle_pattern(pat).unwrap();
+            let (pattern, _) = ind::candle_pattern(pat).unwrap();
             let open = series_f64(df, series, 0, "open")?;
             let high = series_f64(df, series, 1, "high")?;
             let low = series_f64(df, series, 2, "low")?;
             let close = series_f64(df, series, 3, "close")?;
-            f64col(recogniser(&open, &high, &low, &close))
+            let v = match pattern {
+                ind::CandlePattern::Plain(f) => f(&open, &high, &low, &close),
+                ind::CandlePattern::Penetration(f) => {
+                    f(&open, &high, &low, &close, arg_f64(args, 0, 0.5)?)
+                }
+            };
+            f64col(v)
         }
 
         ("style", sub) => {

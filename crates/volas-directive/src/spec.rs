@@ -220,9 +220,14 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("style", None) => (vec![Required], vec!["open", "close"]), // arg form: style:bullish
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]), // style.bullish
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
-        // compute layer's pattern registry, so new patterns need no change here.
+        // compute layer's pattern registry, so new patterns need no change here. Patterns
+        // taking a `penetration` ratio accept one optional Float arg (default 0.5).
         ("style", Some(p)) if volas_compute::indicators::candle_pattern(p).is_some() => {
-            (vec![], vec!["open", "high", "low", "close"])
+            let args = match volas_compute::indicators::candle_pattern(p).unwrap().0 {
+                volas_compute::indicators::CandlePattern::Penetration(_) => vec![Float(0.5)],
+                volas_compute::indicators::CandlePattern::Plain(_) => vec![],
+            };
+            (args, vec!["open", "high", "low", "close"])
         }
         ("repeat", None) => (vec![Int(1)], vec![]),
         ("change", None) => (vec![Int(2)], vec!["close"]),

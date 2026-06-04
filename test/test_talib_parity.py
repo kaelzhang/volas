@@ -278,11 +278,18 @@ def test_candlestick_patterns_match_talib(ohlc):
         ('hammer', talib.CDLHAMMER, 11), ('hangingman', talib.CDLHANGINGMAN, 11),
         ('invertedhammer', talib.CDLINVERTEDHAMMER, 11),
         ('shootingstar', talib.CDLSHOOTINGSTAR, 11), ('takuri', talib.CDLTAKURI, 10),
+        # two-bar
+        ('engulfing', talib.CDLENGULFING, 2), ('harami', talib.CDLHARAMI, 11),
+        ('haramicross', talib.CDLHARAMICROSS, 11), ('piercing', talib.CDLPIERCING, 11),
+        ('darkcloudcover', talib.CDLDARKCLOUDCOVER, 11),
     ]
     for name, fn, lb in patterns:
         want = fn(o, h, l, c)
         pat(df.exec(f'style.{name}'), want, lb)
         pat(df.exec(f'cdl.{name}'), want, lb)  # the cdl alias matches
+    # the penetration ratio is an optional arg (default 0.5)
+    pat(df.exec('cdl.darkcloudcover:0.6'),
+        talib.CDLDARKCLOUDCOVER(o, h, l, c, penetration=0.6), 11)
 
 
 def test_math_transform_series_methods_match_talib(ohlc):
