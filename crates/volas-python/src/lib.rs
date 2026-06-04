@@ -407,35 +407,37 @@ fn strided(start: isize, stop: isize, step: isize) -> Vec<usize> {
 
 // --- Row -------------------------------------------------------------------
 
-/// A single DataFrame row (the result of `df.iloc[i]`); carries its index label
-/// as `.name` and can be appended back.
+/// A single DataFrame row (the result of `df.iloc[i]` / `df.loc[label]`): a
+/// faithful 1-row frame carrying its index label and every column's *typed*
+/// value (no lossy f64 coercion, no flag pair to remember the index kind).
 #[pyclass(name = "Row")]
 pub struct PyRow {
-    names: Vec<String>,
-    values: Vec<f64>,
-    label: Py<PyAny>,
-    index_value: i64,
-    is_datetime: bool,
+    inner: DataFrame,
 }
 
 #[pymethods]
 impl PyRow {
+    /// The row's index label.
     #[getter]
     fn name(&self, py: Python<'_>) -> Py<PyAny> {
-        self.label.clone_ref(py)
+        label_to_py(py, self.inner.index(), 0)
     }
 
-    fn to_numpy<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
-        // not commonly used; expose the values as 1xN
-        let data = self.values.clone();
-        let w = data.len();
-        ndarray::Array2::from_shape_vec((1, w), data)
-            .unwrap()
-            .into_pyarray(py)
+    /// A scalar by column name (`row[col]`).
+    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let col = self.inner.column(key).map_err(pyerr)?;
+        Ok(scalar_to_py(py, col, 0))
+    }
+
+    fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let (data, h, w) = self.inner.to_row_major_f64();
+        Ok(ndarray::Array2::from_shape_vec((h, w), data)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .into_pyarray(py))
     }
 
     fn __repr__(&self) -> String {
-        format!("Row(name={:?}, columns={:?})", "...", self.names)
+        format!("Row(columns={:?})", self.inner.names())
     }
 }
 
@@ -706,25 +708,12 @@ impl PyDataFrame {
         let mut inner = self.inner.clone();
         if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
             inner.append(&df.inner).map_err(pyerr)?;
-            return Ok(PyDataFrame { inner });
+        } else if let Ok(row) = other.extract::<PyRef<PyRow>>() {
+            inner.append(&row.inner).map_err(pyerr)?;
+        } else {
+            return Err(PyTypeError::new_err("append expects a DataFrame or Row"));
         }
-        if let Ok(row) = other.extract::<PyRef<PyRow>>() {
-            let mut names = Vec::new();
-            let mut cols = Vec::new();
-            for (n, v) in row.names.iter().zip(&row.values) {
-                names.push(n.clone());
-                cols.push(Column::f64(vec![*v]));
-            }
-            let one_index = if row.is_datetime {
-                Index::Datetime(vec![row.index_value])
-            } else {
-                Index::Int64(vec![row.index_value])
-            };
-            let one = DataFrame::new(names, cols, Some(one_index)).map_err(pyerr)?;
-            inner.append(&one).map_err(pyerr)?;
-            return Ok(PyDataFrame { inner });
-        }
-        Err(PyTypeError::new_err("append expects a DataFrame or Row"))
+        Ok(PyDataFrame { inner })
     }
 
     fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
@@ -815,7 +804,7 @@ impl DataFrameILoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.height())?;
-            return Ok(Py::new(py, row_at(&self.inner, py, i))?.into_any());
+            return Ok(Py::new(py, row_at(&self.inner, i))?.into_any());
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             let info = slice.indices(self.inner.height() as isize)?;
@@ -827,21 +816,11 @@ impl DataFrameILoc {
     }
 }
 
-fn row_at(df: &DataFrame, py: Python<'_>, i: usize) -> PyRow {
-    let names = df.names().to_vec();
-    let values: Vec<f64> = df.columns().iter().map(|c| c.get_f64(i)).collect();
-    let label = label_to_py(py, df.index(), i);
-    let (index_value, is_datetime) = match df.index().as_ref() {
-        Index::Datetime(v) => (v[i], true),
-        Index::Int64(v) => (v[i], false),
-        Index::Range(_) => (i as i64, false),
-    };
+fn row_at(df: &DataFrame, i: usize) -> PyRow {
+    // `take` materializes the index label (Range -> Int64([i])) and preserves
+    // every column's dtype — a faithful 1-row frame.
     PyRow {
-        names,
-        values,
-        label,
-        index_value,
-        is_datetime,
+        inner: df.take(&[i]),
     }
 }
 
@@ -912,7 +891,7 @@ impl DataFrameLoc {
             .index()
             .position_of(label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-        Ok(Py::new(py, row_at(&self.inner, py, pos))?.into_any())
+        Ok(Py::new(py, row_at(&self.inner, pos))?.into_any())
     }
 }
 
