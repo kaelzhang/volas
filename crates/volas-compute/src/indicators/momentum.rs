@@ -53,8 +53,8 @@ pub fn rocr100(data: &[f64], period: usize) -> Vec<f64> {
 /// the highest high / lowest low (TA-Lib WILLR). A flat range (HH == LL) yields 0.
 /// Lookback `period-1`. The operation order mirrors TA-Lib bit-for-bit.
 pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let hh = kernels::rolling_max(av(high), period);
-    let ll = kernels::rolling_min(av(low), period);
+    // One fused pass for max(high) and min(low) instead of two separate van Herk sweeps.
+    let (hh, ll) = kernels::rolling_max_min(high, low, period);
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     for i in 0..n {

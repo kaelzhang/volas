@@ -318,6 +318,55 @@ fn van_herk(
     }
 }
 
+/// Fused rolling max of `high` and rolling min of `low` over `period` in a single van
+/// Herk traversal: the two extrema share the block-boundary sweep and one combine pass,
+/// and `high` / `low` stream together (one cache pass over the pair instead of two
+/// separate ones). NaN-free fast path — `stoch` / `stochf` / `willr` over OHLCV, and
+/// StochRSI over its finite RSI tail; otherwise defers to the separate [`rolling_max`] /
+/// [`rolling_min`] (which handle interior NaN via a deque). Bit-identical to the two
+/// separate calls — min/max are exact and order-independent.
+pub fn rolling_max_min(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
+    let n = high.len();
+    let mut hh = vec![f64::NAN; n];
+    let mut ll = vec![f64::NAN; n];
+    if period == 0 || period > n {
+        return (hh, ll);
+    }
+    if high.iter().any(|x| x.is_nan()) || low.iter().any(|x| x.is_nan()) {
+        let h = rolling_max(ArrayView1::from(high), period);
+        let l = rolling_min(ArrayView1::from(low), period);
+        return (h.into_raw_vec_and_offset().0, l.into_raw_vec_and_offset().0);
+    }
+    let mut pmax = vec![0.0f64; n];
+    let mut smax = vec![0.0f64; n];
+    let mut pmin = vec![0.0f64; n];
+    let mut smin = vec![0.0f64; n];
+    let mut s = 0;
+    while s < n {
+        let e = (s + period).min(n);
+        let (mut mx, mut mn) = (f64::NEG_INFINITY, f64::INFINITY);
+        for i in s..e {
+            mx = mx.max(high[i]);
+            pmax[i] = mx;
+            mn = mn.min(low[i]);
+            pmin[i] = mn;
+        }
+        let (mut mx, mut mn) = (f64::NEG_INFINITY, f64::INFINITY);
+        for i in (s..e).rev() {
+            mx = mx.max(high[i]);
+            smax[i] = mx;
+            mn = mn.min(low[i]);
+            smin[i] = mn;
+        }
+        s = e;
+    }
+    for i in (period - 1)..n {
+        hh[i] = smax[i + 1 - period].max(pmax[i]);
+        ll[i] = smin[i + 1 - period].min(pmin[i]);
+    }
+    (hh, ll)
+}
+
 /// Rolling minimum over the values present in each window.
 ///
 /// NaN-free data takes the O(n) van Herk fast path; otherwise an ascending

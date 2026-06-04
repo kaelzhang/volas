@@ -44,8 +44,8 @@ pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 /// warm-up is NaN, so the smoothing MAs in `stoch`/`stochf` begin at the right row.
 /// Lookback `period-1`.
 pub fn stoch_fastk(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let hh = kernels::rolling_max(av(high), period);
-    let ll = kernels::rolling_min(av(low), period);
+    // One fused pass for max(high) and min(low) instead of two separate van Herk sweeps.
+    let (hh, ll) = kernels::rolling_max_min(high, low, period);
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     for i in 0..n {
