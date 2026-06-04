@@ -38,6 +38,8 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "change" => arg(args, 0, 2).saturating_sub(1),
         "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0, 10),
         "willr" | "midpoint" | "midprice" => arg(args, 0, 14).saturating_sub(1),
+        "cmo" | "natr" => arg(args, 0, 14),
+        "bop" => 0,
         "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf" => {
             arg(args, 0, 14).saturating_sub(1)
         }

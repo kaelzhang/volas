@@ -129,6 +129,16 @@ def test_variance_stddev_matches_talib(ohlc):
     _parity(df.exec('var'), talib.VAR(c, 5))  # default resolves to 5
 
 
+def test_bop_cmo_natr_match_talib(ohlc):
+    df, h, l, c = ohlc
+    o = df['open'].to_numpy()
+    _parity(df.exec('bop'), talib.BOP(o, h, l, c))
+    for p in (9, 14):  # 14 is the shared TA-Lib default
+        _parity(df.exec(f'cmo:{p}'), talib.CMO(c, p))
+        _parity(df.exec(f'natr:{p}'), talib.NATR(h, l, c, p))
+    _parity(df.exec('cmo'), talib.CMO(c, 14))  # default resolves to 14
+
+
 def test_range_based_match_talib(ohlc):
     df, h, l, c = ohlc
     for p in (7, 14):  # 14 is the shared TA-Lib default

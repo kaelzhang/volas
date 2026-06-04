@@ -368,6 +368,20 @@ fn exec_command(
             let close = series_f64(df, series, 2, "close")?;
             f64col(ind::willr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
         }
+        ("cmo", _) => f64col(ind::cmo(&close(0)?, arg_usize(args, 0, Some(14))?)),
+        ("natr", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::natr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+        }
+        ("bop", _) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let high = series_f64(df, series, 1, "high")?;
+            let low = series_f64(df, series, 2, "low")?;
+            let close = series_f64(df, series, 3, "close")?;
+            f64col(ind::bop(&open, &high, &low, &close))
+        }
 
         ("linearreg", _) => f64col(ind::linearreg(&close(0)?, arg_usize(args, 0, Some(14))?)),
         ("linearreg_slope", _) => {

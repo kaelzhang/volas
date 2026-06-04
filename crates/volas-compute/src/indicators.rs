@@ -139,6 +139,15 @@ pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     kernels::wilder(av(&tr), period).to_vec()
 }
 
+/// Normalized Average True Range — `ATR/close · 100` (TA-Lib NATR), expressing ATR
+/// as a percentage of price. Lookback = period (same as ATR).
+pub fn natr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let atr = atr(high, low, close, period);
+    (0..close.len())
+        .map(|i| atr[i] / close[i] * 100.0)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Support / resistance
 // ---------------------------------------------------------------------------
@@ -270,10 +279,12 @@ pub fn kdj_j(
     (3.0 * &k - 2.0 * &d).to_vec()
 }
 
-/// Relative Strength Index.
-pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
-    let n = close.len();
-    let delta = kernels::diff(av(close));
+/// SMA-seeded Wilder average gain and average loss of `data`'s bar-to-bar changes
+/// — the shared core of RSI and CMO. Both outputs are NaN until the first smoothed
+/// value (at index `period`).
+fn wilder_gain_loss(data: &[f64], period: usize) -> (Array1<f64>, Array1<f64>) {
+    let n = data.len();
+    let delta = kernels::diff(av(data));
     let mut gains = Array1::from_elem(n, f64::NAN);
     let mut losses = Array1::from_elem(n, f64::NAN);
     for i in 1..n {
@@ -284,9 +295,16 @@ pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
         gains[i] = d.max(0.0);
         losses[i] = (-d).max(0.0);
     }
-    // TA-Lib RSI: SMA-seeded Wilder smoothing of the gains and the losses.
-    let sg = kernels::wilder(gains.view(), period);
-    let sl = kernels::wilder(losses.view(), period);
+    (
+        kernels::wilder(gains.view(), period),
+        kernels::wilder(losses.view(), period),
+    )
+}
+
+/// Relative Strength Index (TA-Lib RSI): `100·avgGain/(avgGain+avgLoss)`.
+pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
+    let (sg, sl) = wilder_gain_loss(close, period);
+    let n = close.len();
     let mut result = vec![f64::NAN; n];
     for i in 0..n {
         if sg[i].is_nan() || sl[i].is_nan() {
@@ -297,6 +315,28 @@ pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
         } else {
             result[i] = 100.0 - 100.0 / (1.0 + sg[i] / sl[i]);
         }
+    }
+    result
+}
+
+/// Chande Momentum Oscillator (TA-Lib CMO): `100·(avgGain−avgLoss)/(avgGain+avgLoss)`
+/// over the same Wilder-smoothed gains/losses as RSI; a flat window (gain+loss = 0)
+/// yields 0. Lookback `period`. (Algebraically `2·RSI − 100`; computed directly so
+/// the flat-window guard matches TA-Lib exactly rather than inheriting RSI's.)
+pub fn cmo(close: &[f64], period: usize) -> Vec<f64> {
+    let (sg, sl) = wilder_gain_loss(close, period);
+    let n = close.len();
+    let mut result = vec![f64::NAN; n];
+    for i in 0..n {
+        if sg[i].is_nan() || sl[i].is_nan() {
+            continue;
+        }
+        let denom = sg[i] + sl[i];
+        result[i] = if denom < 1e-14 {
+            0.0
+        } else {
+            100.0 * (sg[i] - sl[i]) / denom
+        };
     }
     result
 }
@@ -509,6 +549,21 @@ pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64
         }
     }
     out
+}
+
+/// Balance of Power: `(close − open)/(high − low)` (TA-Lib BOP). A bar with no
+/// range (`high − low < ε`) yields 0. Lookback 0.
+pub fn bop(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
+    (0..close.len())
+        .map(|i| {
+            let range = high[i] - low[i];
+            if range < 1e-14 {
+                0.0
+            } else {
+                (close[i] - open[i]) / range
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
