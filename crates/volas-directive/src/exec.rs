@@ -451,8 +451,8 @@ fn exec_command(
             let close = series_f64(df, series, 3, "close")?;
             let v = match pattern {
                 ind::CandlePattern::Plain(f) => f(&open, &high, &low, &close),
-                ind::CandlePattern::Penetration(f) => {
-                    f(&open, &high, &low, &close, arg_f64(args, 0, 0.5)?)
+                ind::CandlePattern::Penetration { f, default } => {
+                    f(&open, &high, &low, &close, arg_f64(args, 0, default)?)
                 }
             };
             f64col(v)

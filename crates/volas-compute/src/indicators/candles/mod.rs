@@ -14,17 +14,22 @@
 // Parity holds on the valid region.
 
 mod one_bar;
+mod three_bar;
 mod two_bar;
 pub use one_bar::*;
+pub use three_bar::*;
 pub use two_bar::*;
 
 /// A candlestick-pattern recogniser. Most take only `(open, high, low, close)`; a few
-/// also take TA-Lib's `penetration` ratio.
+/// also take TA-Lib's `penetration` ratio (with a pattern-specific default).
 pub enum CandlePattern {
     /// `(open, high, low, close)`.
     Plain(fn(&[f64], &[f64], &[f64], &[f64]) -> Vec<f64>),
-    /// `(open, high, low, close, penetration)`.
-    Penetration(fn(&[f64], &[f64], &[f64], &[f64], f64) -> Vec<f64>),
+    /// `(open, high, low, close, penetration)`, plus the TA-Lib default penetration.
+    Penetration {
+        f: fn(&[f64], &[f64], &[f64], &[f64], f64) -> Vec<f64>,
+        default: f64,
+    },
 }
 
 /// Resolve a pattern by its (post-`CDL`, lower-case) name to its recogniser and
@@ -33,6 +38,8 @@ pub enum CandlePattern {
 /// pattern is one entry here plus its function.
 pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
     use CandlePattern::{Penetration, Plain};
+    // Penetration patterns: darkcloudcover defaults 0.5, the star family 0.3.
+    let pen = |f, default| Penetration { f, default };
     let entry = match name {
         // one-bar
         "doji" => (Plain(cdl_doji as _), 10),
@@ -57,7 +64,7 @@ pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
         "harami" => (Plain(cdl_harami as _), 11),
         "haramicross" => (Plain(cdl_haramicross as _), 11),
         "piercing" => (Plain(cdl_piercing as _), 11),
-        "darkcloudcover" => (Penetration(cdl_darkcloudcover as _), 11),
+        "darkcloudcover" => (pen(cdl_darkcloudcover, 0.5), 11),
         "dojistar" => (Plain(cdl_dojistar as _), 11),
         "homingpigeon" => (Plain(cdl_homingpigeon as _), 11),
         "matchinglow" => (Plain(cdl_matchinglow as _), 6),
@@ -68,6 +75,13 @@ pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
         "kickingbylength" => (Plain(cdl_kickingbylength as _), 11),
         "separatinglines" => (Plain(cdl_separatinglines as _), 11),
         "counterattack" => (Plain(cdl_counterattack as _), 11),
+        // three-bar
+        "morningstar" => (pen(cdl_morningstar, 0.3), 12),
+        "eveningstar" => (pen(cdl_eveningstar, 0.3), 12),
+        "3inside" => (Plain(cdl_3inside as _), 12),
+        "3outside" => (Plain(cdl_3outside as _), 3),
+        "3whitesoldiers" => (Plain(cdl_3whitesoldiers as _), 12),
+        "3blackcrows" => (Plain(cdl_3blackcrows as _), 13),
         _ => return None,
     };
     Some(entry)
@@ -108,7 +122,7 @@ const EQUAL: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.05 };
 
 // Settings not yet consumed by a landed pattern (shrinks to nothing as patterns arrive).
 #[allow(dead_code)]
-const _UNUSED_SETTINGS: [Setting; 2] = [BODY_VERY_LONG, FAR];
+const _UNUSED_SETTINGS: [Setting; 1] = [BODY_VERY_LONG];
 
 #[inline]
 fn realbody(o: &[f64], c: &[f64], i: usize) -> f64 {

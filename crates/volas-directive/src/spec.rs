@@ -224,7 +224,9 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // taking a `penetration` ratio accept one optional Float arg (default 0.5).
         ("style", Some(p)) if volas_compute::indicators::candle_pattern(p).is_some() => {
             let args = match volas_compute::indicators::candle_pattern(p).unwrap().0 {
-                volas_compute::indicators::CandlePattern::Penetration(_) => vec![Float(0.5)],
+                volas_compute::indicators::CandlePattern::Penetration { default, .. } => {
+                    vec![Float(default)]
+                }
                 volas_compute::indicators::CandlePattern::Plain(_) => vec![],
             };
             (args, vec!["open", "high", "low", "close"])
