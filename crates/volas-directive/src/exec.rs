@@ -226,6 +226,8 @@ fn exec_command(
     // (e.g. `TR`). Columns are resolved before this function, so their case is preserved.
     let name_lc = name.to_ascii_lowercase();
     let name = name_lc.as_str();
+    // `cdl` is an alias for `style` (the candlestick namespace): cdl.<x> == style.<x>.
+    let name = if name == "cdl" { "style" } else { name };
     let sub = canon_sub(name, sub);
     let sub = sub.as_deref();
 
@@ -442,13 +444,16 @@ fn exec_command(
             arg_usize(args, 0, Some(1))?,
             arg_i64(args, 1, 1)? as i32,
         )),
-        ("style", _) => {
-            let style = match arg_str(args, 0)? {
-                "bullish" => ind::Style::Bullish,
-                "bearish" => ind::Style::Bearish,
+        ("style", sub) => {
+            // Direction from the sub-command (`style.bullish`, also `cdl.bullish`) or,
+            // for back-compat, the first argument (`style:bullish`).
+            let style = match sub.or_else(|| arg_at(args, 0)) {
+                Some("bullish") => ind::Style::Bullish,
+                Some("bearish") => ind::Style::Bearish,
                 other => {
                     return Err(VolasError::Value(format!(
-                        "style should be 'bullish' or 'bearish', got '{other}'"
+                        "style should be 'bullish' or 'bearish', got '{}'",
+                        other.unwrap_or("")
                     )))
                 }
             };
