@@ -10,6 +10,7 @@ pub mod dtype;
 pub mod error;
 pub mod index;
 pub mod series;
+pub mod tz;
 
 pub use column::Column;
 pub use dataframe::DataFrame;
@@ -17,3 +18,4 @@ pub use dtype::DType;
 pub use error::{Result, VolasError};
 pub use index::{Index, Label};
 pub use series::Series;
+pub use tz::Tz;
