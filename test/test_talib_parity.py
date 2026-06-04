@@ -85,3 +85,15 @@ def test_price_transform_matches_talib(ohlc):
     _parity(df.exec('medprice'), talib.MEDPRICE(h, l))
     _parity(df.exec('typprice'), talib.TYPPRICE(h, l, c))
     _parity(df.exec('wclprice'), talib.WCLPRICE(h, l, c))
+
+
+def test_momentum_roc_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (10, 14):  # 10 is the shared TA-Lib default
+        _parity(df.exec(f'mom:{p}'), talib.MOM(c, p))
+        _parity(df.exec(f'roc:{p}'), talib.ROC(c, p))
+        _parity(df.exec(f'rocp:{p}'), talib.ROCP(c, p))
+        _parity(df.exec(f'rocr:{p}'), talib.ROCR(c, p))
+        _parity(df.exec(f'rocr100:{p}'), talib.ROCR100(c, p))
+    # Defaults (period 10) resolve identically to the explicit form.
+    _parity(df.exec('roc'), talib.ROC(c, 10))

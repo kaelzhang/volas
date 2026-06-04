@@ -388,6 +388,54 @@ pub fn wclprice(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Momentum — change relative to the price `period` bars earlier
+// ---------------------------------------------------------------------------
+
+/// Momentum: `data[i] - data[i-period]` (TA-Lib MOM). NaN during warm-up.
+pub fn mom(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    for i in period..n {
+        out[i] = data[i] - data[i - period];
+    }
+    out
+}
+
+/// Shared shape for the rate-of-change ratios (ROC/ROCP/ROCR/ROCR100): relate
+/// each row to the price `period` bars earlier via `f(current, prior)`, NaN
+/// during warm-up. A prior price of exactly zero yields `0.0`, matching TA-Lib's
+/// divide-by-zero guard (purely theoretical for a positive price series).
+fn roc_ratio(data: &[f64], period: usize, f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    for i in period..n {
+        let prior = data[i - period];
+        out[i] = if prior == 0.0 { 0.0 } else { f(data[i], prior) };
+    }
+    out
+}
+
+/// Rate of change: `100 * (data/data[period ago] - 1)` (TA-Lib ROC).
+pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
+    roc_ratio(data, period, |cur, prior| (cur / prior - 1.0) * 100.0)
+}
+
+/// Rate of change percentage: `data/data[period ago] - 1` (TA-Lib ROCP).
+pub fn rocp(data: &[f64], period: usize) -> Vec<f64> {
+    roc_ratio(data, period, |cur, prior| cur / prior - 1.0)
+}
+
+/// Rate of change ratio: `data/data[period ago]` (TA-Lib ROCR).
+pub fn rocr(data: &[f64], period: usize) -> Vec<f64> {
+    roc_ratio(data, period, |cur, prior| cur / prior)
+}
+
+/// Rate of change ratio ×100: `100 * data/data[period ago]` (TA-Lib ROCR100).
+pub fn rocr100(data: &[f64], period: usize) -> Vec<f64> {
+    roc_ratio(data, period, |cur, prior| cur / prior * 100.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

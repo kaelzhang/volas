@@ -97,6 +97,11 @@ pub fn is_command(name: &str) -> bool {
             | "style"
             | "repeat"
             | "change"
+            | "mom"
+            | "roc"
+            | "rocp"
+            | "rocr"
+            | "rocr100"
             | "avgprice"
             | "medprice"
             | "typprice"
@@ -138,6 +143,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("style", None) => (vec![Required], vec!["open", "close"]),
         ("repeat", None) => (vec![Int(1)], vec![]),
         ("change", None) => (vec![Int(2)], vec!["close"]),
+        ("mom" | "roc" | "rocp" | "rocr" | "rocr100", None) => (vec![Int(10)], vec!["close"]),
         ("avgprice", None) => (vec![], vec!["open", "high", "low", "close"]),
         ("medprice", None) => (vec![], vec!["high", "low"]),
         ("typprice", None) => (vec![], vec!["high", "low", "close"]),

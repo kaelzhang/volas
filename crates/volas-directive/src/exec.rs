@@ -325,6 +325,12 @@ fn exec_command(
         ("repeat", _) => boolcol(ind::repeat(&series_bool(df, series, 0)?, arg_usize(args, 0, Some(1))?)),
         ("change", _) => f64col(ind::change(&close(0)?, arg_usize(args, 0, Some(2))?)),
 
+        ("mom", _) => f64col(ind::mom(&close(0)?, arg_usize(args, 0, Some(10))?)),
+        ("roc", _) => f64col(ind::roc(&close(0)?, arg_usize(args, 0, Some(10))?)),
+        ("rocp", _) => f64col(ind::rocp(&close(0)?, arg_usize(args, 0, Some(10))?)),
+        ("rocr", _) => f64col(ind::rocr(&close(0)?, arg_usize(args, 0, Some(10))?)),
+        ("rocr100", _) => f64col(ind::rocr100(&close(0)?, arg_usize(args, 0, Some(10))?)),
+
         ("avgprice", _) => {
             let open = series_f64(df, series, 0, "open")?;
             let high = series_f64(df, series, 1, "high")?;

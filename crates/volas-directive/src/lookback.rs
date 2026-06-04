@@ -33,6 +33,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "increase" | "repeat" => arg(args, 0, 1).saturating_sub(1),
         "style" => 0,
         "change" => arg(args, 0, 2).saturating_sub(1),
+        "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0, 10),
         "avgprice" | "medprice" | "typprice" | "wclprice" => 0,
         _ => return None,
     };
