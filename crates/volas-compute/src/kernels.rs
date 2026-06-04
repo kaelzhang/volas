@@ -282,6 +282,67 @@ pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
 /// `out[i] = out[i-1] + k*(x[i] - out[i-1])` with `k = 2/(period+1)`, SMA-seeded
 /// (TA-Lib's default EMA seeding).
 #[inline]
+/// Fused `ema(fast) - ema(slow)` (the MACD line) in a single pass. The two
+/// SMA-seeded EMAs are **independent** recurrences, so interleaving them in one
+/// loop lets the out-of-order core overlap the two FMA dependency chains (ILP) —
+/// roughly the cost of one EMA, not two — and emits the difference directly (no
+/// intermediate `fast` / `slow` arrays, no separate subtraction pass).
+/// Bit-identical to two [`ema_seeded`] calls minus each other. Requires
+/// `fast <= slow` (so the fast EMA seeds no later than the slow one).
+#[inline]
+pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array1<f64> {
+    let n = data.len();
+    let mut out = Array1::from_elem(n, f64::NAN);
+    if fast == 0 || slow == 0 || n == 0 {
+        return out;
+    }
+    let kf = 2.0 / (fast as f64 + 1.0);
+    let ks = 2.0 / (slow as f64 + 1.0);
+    // One scan finds both SMA seeds (the period-th finite value for each).
+    let (mut sf_sum, mut sf_cnt, mut sf_idx) = (0.0, 0usize, None);
+    let (mut ss_sum, mut ss_cnt, mut ss_idx) = (0.0, 0usize, None);
+    for i in 0..n {
+        let x = data[i];
+        if !x.is_nan() {
+            if sf_idx.is_none() {
+                sf_sum += x;
+                sf_cnt += 1;
+                if sf_cnt == fast {
+                    sf_idx = Some(i);
+                }
+            }
+            if ss_idx.is_none() {
+                ss_sum += x;
+                ss_cnt += 1;
+                if ss_cnt == slow {
+                    ss_idx = Some(i);
+                }
+            }
+        }
+    }
+    let (Some(sf), Some(ss)) = (sf_idx, ss_idx) else {
+        return out;
+    };
+    let src = data.as_slice().expect("MACD inputs are contiguous");
+    let dst = out.as_slice_mut().expect("from_elem is contiguous");
+    let mut pf = sf_sum / fast as f64; // fast EMA at its seed `sf`
+    // Warm the fast EMA up to the slow seed (the slow EMA is not valid yet, so the
+    // difference stays NaN until `ss`).
+    for &x in &src[sf + 1..=ss] {
+        pf = (x - pf).mul_add(kf, pf);
+    }
+    let mut ps = ss_sum / slow as f64; // slow EMA at its seed `ss`
+    dst[ss] = pf - ps;
+    // Interleaved from here: two independent FMA chains the OoO core overlaps.
+    for i in (ss + 1)..n {
+        let x = src[i];
+        pf = (x - pf).mul_add(kf, pf);
+        ps = (x - ps).mul_add(ks, ps);
+        dst[i] = pf - ps;
+    }
+    out
+}
+
 pub fn ema_seeded(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     let k = 2.0 / (period as f64 + 1.0);
     // `(x - prev) * k + prev` via a fused multiply-add: one rounding (slightly more

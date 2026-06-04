@@ -164,13 +164,12 @@ pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
 }
 
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
-    let data = av(close);
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the
     // line is emitted from its natural start (the slow EMA's first valid row), not
     // delayed to the signal line's start as TA-Lib's aligned 3-output form does.
-    let f = kernels::ema_seeded(data, fast);
-    let s = kernels::ema_seeded(data, slow);
-    &f - &s
+    // `ema_diff_seeded` fuses both EMAs into one interleaved pass (ILP over the two
+    // independent recurrences) and emits the difference directly.
+    kernels::ema_diff_seeded(av(close), fast, slow)
 }
 
 /// MACD line (DIF).
