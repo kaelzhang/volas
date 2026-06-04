@@ -212,8 +212,10 @@ def test_accbands_matches_talib(ohlc):
 
 def test_cci_trix_match_talib(ohlc):
     df, h, l, c = ohlc
+    v = np.asarray(df['volume'].to_numpy(), dtype=float)
     for p in (14, 20):
         _parity(df.exec(f'cci:{p}'), talib.CCI(h, l, c, p))
+        _parity(df.exec(f'mfi:{p}'), talib.MFI(h, l, c, v, p))
     for p in (15, 30):  # 30 is the TA-Lib default
         _parity(df.exec(f'trix:{p}'), talib.TRIX(c, p))
     _parity(df.exec('cci'), talib.CCI(h, l, c, 14))  # default resolves to 14

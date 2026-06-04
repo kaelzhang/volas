@@ -58,6 +58,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "willr" | "midpoint" | "midprice" => arg(args, 0, 14).saturating_sub(1),
         "cmo" | "natr" => arg(args, 0, 14),
         "cci" => arg(args, 0, 14).saturating_sub(1),
+        "mfi" => arg(args, 0, 14),
         "trix" => 3 * arg(args, 0, 30).saturating_sub(1) + 1,
         "aroon" | "aroonosc" => arg(args, 0, 14),
         "sum" | "maxindex" | "minindex" | "minmax" | "minmaxindex" => {

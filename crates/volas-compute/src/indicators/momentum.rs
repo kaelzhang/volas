@@ -166,3 +166,55 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     let (up, down) = aroon_up_down(high, low, period);
     up.iter().zip(&down).map(|(u, d)| u - d).collect()
 }
+
+/// Money Flow Index (TA-Lib MFI): `100·posMF/(posMF+negMF)` over `period`, where each
+/// bar's money flow `tp·volume` (tp = (h+l+c)/3) is signed by `tp`'s direction vs the
+/// prior bar. A total flow below 1.0 yields 0 (TA-Lib's guard). First value at index
+/// `period` (lookback = period). The sliding sums recompute the leaving bar's flow,
+/// which is bit-identical to TA-Lib's stored value.
+pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period + 1 > n {
+        return out;
+    }
+    let tp = |i: usize| (high[i] + low[i] + close[i]) / 3.0;
+    // Per-bar (positive, negative) money flow, signed by tp's change vs the prior bar.
+    let mf = |i: usize| -> (f64, f64) {
+        let diff = tp(i) - tp(i - 1);
+        let flow = tp(i) * volume[i];
+        if diff < 0.0 {
+            (0.0, flow)
+        } else if diff > 0.0 {
+            (flow, 0.0)
+        } else {
+            (0.0, 0.0)
+        }
+    };
+    let mfi_val = |pos: f64, neg: f64| {
+        let total = pos + neg;
+        if total < 1.0 {
+            0.0
+        } else {
+            100.0 * pos / total
+        }
+    };
+    let mut pos_sum = 0.0;
+    let mut neg_sum = 0.0;
+    for i in 1..=period {
+        let (p, ng) = mf(i);
+        pos_sum += p;
+        neg_sum += ng;
+    }
+    out[period] = mfi_val(pos_sum, neg_sum);
+    for i in (period + 1)..n {
+        let (dp, dn) = mf(i - period); // bar leaving the window
+        pos_sum -= dp;
+        neg_sum -= dn;
+        let (ap, an) = mf(i); // bar entering
+        pos_sum += ap;
+        neg_sum += an;
+        out[i] = mfi_val(pos_sum, neg_sum);
+    }
+    out
+}

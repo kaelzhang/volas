@@ -428,6 +428,13 @@ fn exec_command(
             f64col(ind::willr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
         }
         ("cmo", _) => f64col(ind::cmo(&close(0)?, arg_usize(args, 0, Some(14))?)),
+        ("mfi", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let volume = series_f64(df, series, 3, "volume")?;
+            f64col(ind::mfi(&high, &low, &close, &volume, arg_usize(args, 0, Some(14))?))
+        }
         ("cci", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
