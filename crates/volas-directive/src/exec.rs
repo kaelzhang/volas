@@ -490,6 +490,19 @@ fn exec_command(
                 f64col(ma_typed(&fastk, arg_usize(args, 1, Some(3))?, arg_usize(args, 2, Some(0))?)?)
             }
         }
+        ("stochrsi", Some(line @ ("k" | "d"))) => {
+            let close = close(0)?;
+            let fastk = ind::stochrsi_fastk(
+                &close,
+                arg_usize(args, 0, Some(14))?,
+                arg_usize(args, 1, Some(5))?,
+            );
+            if line == "k" {
+                f64col(fastk)
+            } else {
+                f64col(ma_typed(&fastk, arg_usize(args, 2, Some(3))?, arg_usize(args, 3, Some(0))?)?)
+            }
+        }
 
         // Directional movement family (+DM/-DM need only high/low; the rest add close).
         ("plus_dm", _) => {

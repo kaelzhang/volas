@@ -57,6 +57,22 @@ pub fn stoch_fastk(high: &[f64], low: &[f64], close: &[f64], period: usize) -> V
     out
 }
 
+/// TA-Lib StochRSI raw %K: the stochastic %K of the RSI line — `stoch_fastk` applied
+/// to `rsi(close, rsi_period)` over `fastk_period`. Because RSI itself warms up, the
+/// %K is masked to NaN until a full `fastk_period` window of finite RSI is available
+/// (index `rsi_period + fastk_period - 1`). The `fastd` line is then `ma_typed` of this.
+pub fn stochrsi_fastk(close: &[f64], rsi_period: usize, fastk_period: usize) -> Vec<f64> {
+    let rsi = rsi(close, rsi_period);
+    let mut fk = stoch_fastk(&rsi, &rsi, &rsi, fastk_period);
+    // rolling max/min skip NaN, so they would emit over a partial RSI window; suppress
+    // those rows — the %K is valid only once the whole window of RSI is finite.
+    let start = (rsi_period + fastk_period).saturating_sub(1).min(fk.len());
+    for v in fk.iter_mut().take(start) {
+        *v = f64::NAN;
+    }
+    fk
+}
+
 fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Array1<f64> {
     let llv = kernels::rolling_min(av(low), period_rsv);
     let hhv = kernels::rolling_max(av(high), period_rsv);

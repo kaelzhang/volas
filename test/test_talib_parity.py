@@ -217,6 +217,13 @@ def test_stochastic_family_matches_talib(ohlc):
     _parity(df.exec('stochf.d:9,4,1'), fd)
     with pytest.raises(Exception):
         df.exec('stoch')  # multi-output: requires a sub-command
+    # StochRSI = stochastic of RSI; same k-line natural-start divergence.
+    fk, fd = talib.STOCHRSI(c)  # defaults rsi 14, fastk 5, fastd 3, SMA
+    _parity(df.exec('stochrsi.k'), fk, mask_want=True)
+    _parity(df.exec('stochrsi.d'), fd)
+    fk, fd = talib.STOCHRSI(c, 10, 5, 4, 1)
+    _parity(df.exec('stochrsi.k:10,5,4,1'), fk, mask_want=True)
+    _parity(df.exec('stochrsi.d:10,5,4,1'), fd)
 
 
 def test_correl_beta_match_talib(ohlc):

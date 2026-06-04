@@ -76,6 +76,14 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
                 _ => base,
             }
         }
+        "stochrsi" => {
+            // RSI lookback (period) + the %K window (fastk_period-1), then the d-line MA.
+            let base = arg(args, 0, 14) + arg(args, 1, 5).saturating_sub(1);
+            match sub {
+                Some("d") => base + ma_lookback(arg(args, 2, 3), arg(args, 3, 0)),
+                _ => base,
+            }
+        }
         "plus_dm" | "minus_dm" => arg(args, 0, 14).saturating_sub(1),
         "plus_di" | "minus_di" | "dx" => arg(args, 0, 14),
         "adx" => 2 * arg(args, 0, 14) - 1,
