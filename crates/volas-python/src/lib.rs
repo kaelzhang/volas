@@ -557,6 +557,13 @@ impl PyDataFrame {
         Ok(volas_directive::lookback::lookback(&node))
     }
 
+    /// The canonical string form of a directive (default args / series dropped).
+    #[staticmethod]
+    fn directive_stringify(directive: &str) -> PyResult<String> {
+        let node = parse(directive).map_err(pyerr)?;
+        Ok(volas_directive::stringify(&node))
+    }
+
     fn get_column(&self, key: &str) -> PyResult<PySeries> {
         let col = self.inner.column(key).map_err(pyerr)?.clone();
         Ok(self.wrap_series(key.to_string(), col))

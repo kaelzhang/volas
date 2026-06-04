@@ -38,6 +38,18 @@ pub enum Op {
 }
 
 impl Op {
+    /// Binding priority (higher binds tighter), mirroring the parser's
+    /// precedence levels — used by `stringify` to decide parenthesization.
+    pub fn priority(&self) -> u8 {
+        match self {
+            Op::And | Op::Or | Op::Xor => 1,
+            Op::Lt | Op::Le | Op::Eq | Op::Ne | Op::Ge | Op::Gt | Op::CrossUp | Op::CrossDown
+            | Op::Cross => 2,
+            Op::Add | Op::Sub => 3,
+            Op::Mul | Op::Div => 4,
+        }
+    }
+
     /// The canonical source token.
     pub fn token(&self) -> &'static str {
         match self {

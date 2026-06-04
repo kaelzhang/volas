@@ -4,8 +4,11 @@
 pub mod exec;
 pub mod lookback;
 pub mod parser;
+pub mod spec;
+pub mod stringify;
 pub mod types;
 
 pub use exec::execute;
 pub use parser::parse;
+pub use stringify::stringify;
 pub use types::{Command, Node, Op};

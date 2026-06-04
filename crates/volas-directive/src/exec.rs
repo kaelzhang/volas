@@ -1,5 +1,6 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
+use crate::spec::canon_sub;
 use crate::types::{Node, Op, UnaryOp};
 use volas_core::Column;
 use volas_core::DataFrame;
@@ -159,20 +160,6 @@ fn arg_str<'a>(args: &'a [Option<String>], i: usize) -> Result<&'a str> {
 }
 
 // --- command dispatch -------------------------------------------------------
-
-/// Normalise a sub-command alias to its canonical form (or `None` for the main).
-fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
-    match (name, sub) {
-        ("macd", None | Some("dif")) => None,
-        ("macd", Some("s" | "signal" | "dea")) => Some("signal".into()),
-        ("macd", Some("h" | "histogram" | "macd")) => Some("histogram".into()),
-        ("boll" | "donchian", None | Some("middle")) => None,
-        ("boll" | "donchian", Some("u" | "upper")) => Some("upper".into()),
-        ("boll" | "donchian", Some("l" | "lower")) => Some("lower".into()),
-        (_, Some(s)) => Some(s.to_string()),
-        (_, None) => None,
-    }
-}
 
 fn exec_command(
     df: &DataFrame,
