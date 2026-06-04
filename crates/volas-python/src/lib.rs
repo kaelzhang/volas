@@ -326,6 +326,56 @@ impl PySeries {
         series_binop(&self.inner, other, |a, b| b / a)
     }
 
+    // Element-wise comparisons -> bool Series (pandas-style).
+    fn __lt__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_cmp(&self.inner, other, |a, b| a < b)
+    }
+    fn __le__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_cmp(&self.inner, other, |a, b| a <= b)
+    }
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_cmp(&self.inner, other, |a, b| a == b)
+    }
+    fn __ne__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_cmp(&self.inner, other, |a, b| a != b)
+    }
+    fn __ge__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_cmp(&self.inner, other, |a, b| a >= b)
+    }
+    fn __gt__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_cmp(&self.inner, other, |a, b| a > b)
+    }
+
+    // Element-wise boolean logic -> bool Series (operands coerced to bool).
+    fn __and__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_logical(&self.inner, other, |a, b| a && b)
+    }
+    fn __or__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_logical(&self.inner, other, |a, b| a || b)
+    }
+    fn __xor__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_logical(&self.inner, other, |a, b| a ^ b)
+    }
+    fn __rand__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_logical(&self.inner, other, |a, b| a && b)
+    }
+    fn __ror__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_logical(&self.inner, other, |a, b| a || b)
+    }
+    fn __rxor__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_logical(&self.inner, other, |a, b| a ^ b)
+    }
+    fn __invert__(&self) -> PySeries {
+        let out: Vec<bool> = to_bool_vec(&self.inner.data).iter().map(|&b| !b).collect();
+        PySeries {
+            inner: Series::new(
+                self.inner.name.clone(),
+                Column::bool(out),
+                Arc::clone(&self.inner.index),
+            ),
+        }
+    }
+
     /// `series[key]`: an integer position, a datetime label, or a slice.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
@@ -387,21 +437,25 @@ fn slice_series(s: &Series, slice: &Bound<'_, PySlice>) -> PyResult<PySeries> {
     })
 }
 
+/// The RHS of a Series binary op as an `f64` vector — another Series (positional,
+/// no index alignment) or a broadcast scalar.
+fn series_rhs_f64(other: &Bound<'_, PyAny>, len: usize) -> PyResult<Vec<f64>> {
+    if let Ok(o) = other.extract::<PyRef<PySeries>>() {
+        Ok(o.inner.data.to_f64_vec())
+    } else if let Ok(scalar) = other.extract::<f64>() {
+        Ok(vec![scalar; len])
+    } else {
+        Err(PyTypeError::new_err("unsupported operand for a Series operation"))
+    }
+}
+
 fn series_binop(
     s: &Series,
     other: &Bound<'_, PyAny>,
     f: impl Fn(f64, f64) -> f64,
 ) -> PyResult<PySeries> {
     let a = s.data.to_f64_vec();
-    let rhs = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
-        o.inner.data.to_f64_vec()
-    } else if let Ok(scalar) = other.extract::<f64>() {
-        vec![scalar; a.len()]
-    } else {
-        return Err(PyTypeError::new_err(
-            "unsupported operand for Series arithmetic",
-        ));
-    };
+    let rhs = series_rhs_f64(other, a.len())?;
     let n = a.len().min(rhs.len());
     let mut out = vec![f64::NAN; a.len()];
     for i in 0..n {
@@ -409,6 +463,59 @@ fn series_binop(
     }
     Ok(PySeries {
         inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)),
+    })
+}
+
+/// Element-wise comparison -> bool Series (positional; NaN compares `false` for
+/// ordering/equality and `true` for `!=`, matching IEEE / pandas element-wise).
+fn series_cmp(
+    s: &Series,
+    other: &Bound<'_, PyAny>,
+    f: impl Fn(f64, f64) -> bool,
+) -> PyResult<PySeries> {
+    let a = s.data.to_f64_vec();
+    let rhs = series_rhs_f64(other, a.len())?;
+    let n = a.len().min(rhs.len());
+    let mut out = vec![false; a.len()];
+    for i in 0..n {
+        out[i] = f(a[i], rhs[i]);
+    }
+    Ok(PySeries {
+        inner: Series::new(s.name.clone(), Column::bool(out), Arc::clone(&s.index)),
+    })
+}
+
+/// A column coerced to bool (a `Bool` column as-is, else `x != 0.0`).
+fn to_bool_vec(col: &Column) -> Vec<bool> {
+    match col {
+        Column::Bool(v) => v.to_vec(),
+        other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
+    }
+}
+
+/// Element-wise boolean logic -> bool Series (both operands coerced to bool).
+fn series_logical(
+    s: &Series,
+    other: &Bound<'_, PyAny>,
+    f: impl Fn(bool, bool) -> bool,
+) -> PyResult<PySeries> {
+    let a = to_bool_vec(&s.data);
+    let rhs = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
+        to_bool_vec(&o.inner.data)
+    } else if let Ok(b) = other.extract::<bool>() {
+        vec![b; a.len()]
+    } else if let Ok(x) = other.extract::<f64>() {
+        vec![x != 0.0; a.len()]
+    } else {
+        return Err(PyTypeError::new_err("unsupported operand for a Series logical op"));
+    };
+    let n = a.len().min(rhs.len());
+    let mut out = vec![false; a.len()];
+    for i in 0..n {
+        out[i] = f(a[i], rhs[i]);
+    }
+    Ok(PySeries {
+        inner: Series::new(s.name.clone(), Column::bool(out), Arc::clone(&s.index)),
     })
 }
 
