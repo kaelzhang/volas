@@ -364,11 +364,40 @@ pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize) -> Array1<
     if period == 0 || period > n || period <= ddof {
         return result;
     }
+    let p = period as f64;
+    let denom = (period - ddof) as f64;
+    // Fast path — contiguous data with no NaN: clean sliding sums of x and x²
+    // with no per-element NaN bookkeeping. Same accumulation order, so it is
+    // bit-identical to the slow path for NaN-free data while running faster — the
+    // common case for real OHLCV.
+    if let Some(src) = data.as_slice() {
+        if !src.iter().any(|x| x.is_nan()) {
+            {
+                let dst = result.as_slice_mut().expect("from_elem is contiguous");
+                let mut sum = 0.0;
+                let mut sum_sq = 0.0;
+                for i in 0..n {
+                    let x = src[i];
+                    sum += x;
+                    sum_sq += x * x;
+                    if i >= period {
+                        let leaving = src[i - period];
+                        sum -= leaving;
+                        sum_sq -= leaving * leaving;
+                    }
+                    if i + 1 >= period {
+                        let variance = (sum_sq - sum * sum / p) / denom;
+                        dst[i] = variance.max(0.0).sqrt();
+                    }
+                }
+            }
+            return result;
+        }
+    }
+    // Slow path — NaN-aware: a window containing any NaN yields NaN.
     let mut sum = 0.0;
     let mut sum_sq = 0.0;
     let mut nan_count = 0usize;
-    let p = period as f64;
-    let denom = (period - ddof) as f64;
     for i in 0..n {
         let x = data[i];
         if x.is_nan() {
