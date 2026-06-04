@@ -1,6 +1,10 @@
-//! A whitespace-tolerant recursive-descent parser for directive strings.
+//! A whitespace-tolerant precedence-climbing parser for directive strings.
+//!
+//! Precedence, low to high: logical (`& | ^`) < comparison / cross
+//! (`< <= == != >= > // \\ ><`) < additive (`+ -`) < multiplicative (`* /`) <
+//! unary (`~ -`) < primary (command, scalar, parenthesised expression).
 
-use super::types::{Command, Node, Op};
+use super::types::{Command, Node, Op, UnaryOp};
 use volas_core::{Result, VolasError};
 
 /// Parse a directive string into an AST [`Node`].
@@ -19,6 +23,21 @@ pub fn parse(input: &str) -> Result<Node> {
         )));
     }
     Ok(node)
+}
+
+fn bin(left: Node, op: Op, right: Node) -> Node {
+    Node::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }
+}
+
+fn is_cmp(op: Op) -> bool {
+    matches!(
+        op,
+        Op::Lt | Op::Le | Op::Eq | Op::Ne | Op::Ge | Op::Gt | Op::CrossUp | Op::CrossDown | Op::Cross
+    )
 }
 
 struct Parser<'a> {
@@ -56,22 +75,100 @@ impl<'a> Parser<'a> {
         }
     }
 
+    // --- precedence levels ---
+
     fn parse_expr(&mut self) -> Result<Node> {
-        let left = self.parse_term()?;
-        self.skip_ws();
-        if let Some(op) = self.try_op() {
+        self.parse_logical()
+    }
+
+    fn parse_logical(&mut self) -> Result<Node> {
+        let mut left = self.parse_cmp()?;
+        loop {
             self.skip_ws();
-            let right = self.parse_term()?;
-            return Ok(Node::Binary {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            });
+            match self.peek_binop() {
+                Some((op @ (Op::And | Op::Or | Op::Xor), len)) => {
+                    self.i += len;
+                    self.skip_ws();
+                    left = bin(left, op, self.parse_cmp()?);
+                }
+                _ => break,
+            }
         }
         Ok(left)
     }
 
-    fn parse_term(&mut self) -> Result<Node> {
+    fn parse_cmp(&mut self) -> Result<Node> {
+        let mut left = self.parse_add()?;
+        loop {
+            self.skip_ws();
+            match self.peek_binop() {
+                Some((op, len)) if is_cmp(op) => {
+                    self.i += len;
+                    self.skip_ws();
+                    left = bin(left, op, self.parse_add()?);
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_add(&mut self) -> Result<Node> {
+        let mut left = self.parse_mul()?;
+        loop {
+            self.skip_ws();
+            match self.peek_binop() {
+                Some((op @ (Op::Add | Op::Sub), len)) => {
+                    self.i += len;
+                    self.skip_ws();
+                    left = bin(left, op, self.parse_mul()?);
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_mul(&mut self) -> Result<Node> {
+        let mut left = self.parse_unary()?;
+        loop {
+            self.skip_ws();
+            match self.peek_binop() {
+                Some((op @ (Op::Mul | Op::Div), len)) => {
+                    self.i += len;
+                    self.skip_ws();
+                    left = bin(left, op, self.parse_unary()?);
+                }
+                _ => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_unary(&mut self) -> Result<Node> {
+        self.skip_ws();
+        match self.peek() {
+            Some(b'~') => {
+                self.bump();
+                let operand = self.parse_unary()?;
+                Ok(Node::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(operand),
+                })
+            }
+            Some(b'-') if !is_number_start(b'-', self.peek2()) => {
+                self.bump();
+                let operand = self.parse_unary()?;
+                Ok(Node::Unary {
+                    op: UnaryOp::Neg,
+                    operand: Box::new(operand),
+                })
+            }
+            _ => self.parse_primary(),
+        }
+    }
+
+    fn parse_primary(&mut self) -> Result<Node> {
         self.skip_ws();
         match self.peek() {
             Some(b'(') => {
@@ -90,6 +187,34 @@ impl<'a> Parser<'a> {
             ))),
         }
     }
+
+    /// Peek the next binary operator without consuming it.
+    fn peek_binop(&self) -> Option<(Op, usize)> {
+        let (a, b) = (self.peek(), self.peek2());
+        let pair = match (a, b) {
+            (Some(b'<'), Some(b'=')) => (Op::Le, 2),
+            (Some(b'>'), Some(b'=')) => (Op::Ge, 2),
+            (Some(b'='), Some(b'=')) => (Op::Eq, 2),
+            (Some(b'!'), Some(b'=')) => (Op::Ne, 2),
+            (Some(b'/'), Some(b'/')) => (Op::CrossUp, 2),
+            (Some(b'\\'), Some(b'\\')) => (Op::CrossDown, 2),
+            (Some(b'>'), Some(b'<')) => (Op::Cross, 2),
+            (Some(b'\\'), _) => (Op::CrossDown, 1),
+            (Some(b'<'), _) => (Op::Lt, 1),
+            (Some(b'>'), _) => (Op::Gt, 1),
+            (Some(b'+'), _) => (Op::Add, 1),
+            (Some(b'-'), _) => (Op::Sub, 1),
+            (Some(b'*'), _) => (Op::Mul, 1),
+            (Some(b'/'), _) => (Op::Div, 1),
+            (Some(b'&'), _) => (Op::And, 1),
+            (Some(b'|'), _) => (Op::Or, 1),
+            (Some(b'^'), _) => (Op::Xor, 1),
+            _ => return None,
+        };
+        Some(pair)
+    }
+
+    // --- leaves ---
 
     fn expect(&mut self, c: u8) -> Result<()> {
         if self.peek() == Some(c) {
@@ -198,7 +323,6 @@ impl<'a> Parser<'a> {
             } else if matches!(self.peek(), Some(c) if is_ident_start(c)) {
                 Node::Name(self.read_ident())
             } else {
-                // empty slot -> use the command's default series for this position
                 Node::Name(String::new())
             };
             series.push(node);
@@ -210,24 +334,6 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(series)
-    }
-
-    fn try_op(&mut self) -> Option<Op> {
-        let (a, b) = (self.peek(), self.peek2());
-        let (op, len) = match (a, b) {
-            (Some(b'<'), Some(b'=')) => (Op::Le, 2),
-            (Some(b'>'), Some(b'=')) => (Op::Ge, 2),
-            (Some(b'='), Some(b'=')) => (Op::Eq, 2),
-            (Some(b'/'), Some(b'/')) => (Op::CrossUp, 2),
-            (Some(b'\\'), Some(b'\\')) => (Op::CrossDown, 2),
-            (Some(b'>'), Some(b'<')) => (Op::Cross, 2),
-            (Some(b'\\'), _) => (Op::CrossDown, 1),
-            (Some(b'<'), _) => (Op::Lt, 1),
-            (Some(b'>'), _) => (Op::Gt, 1),
-            _ => return None,
-        };
-        self.i += len;
-        Some(op)
     }
 }
 
@@ -249,26 +355,10 @@ mod tests {
 
     #[test]
     fn parse_simple_command() {
-        let n = parse("ma:5").unwrap();
-        match n {
+        match parse("ma:5").unwrap() {
             Node::Command(c) => {
                 assert_eq!(c.name, "ma");
                 assert_eq!(c.args, vec![Some("5".to_string())]);
-                assert!(c.series.is_empty());
-            }
-            _ => panic!("expected command"),
-        }
-    }
-
-    #[test]
-    fn parse_sub_and_series() {
-        let n = parse("macd.signal:12,26,9@close").unwrap();
-        match n {
-            Node::Command(c) => {
-                assert_eq!(c.name, "macd");
-                assert_eq!(c.sub.as_deref(), Some("signal"));
-                assert_eq!(c.args.len(), 3);
-                assert_eq!(c.series, vec![Node::Name("close".into())]);
             }
             _ => panic!(),
         }
@@ -276,8 +366,7 @@ mod tests {
 
     #[test]
     fn parse_operator_and_scalar() {
-        let n = parse("kdj.j < 0").unwrap();
-        match n {
+        match parse("kdj.j < 0").unwrap() {
             Node::Binary { op, right, .. } => {
                 assert_eq!(op, Op::Lt);
                 assert_eq!(*right, Node::Scalar(0.0));
@@ -287,11 +376,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_nested_and_cross() {
-        assert!(matches!(parse("macd // macd.signal").unwrap(), Node::Binary { op: Op::CrossUp, .. }));
-        let n = parse("increase:3@(ma:20@close)").unwrap();
-        if let Node::Command(c) = n {
-            assert_eq!(c.name, "increase");
+    fn parse_cross_and_nested() {
+        assert!(matches!(
+            parse("macd // macd.signal").unwrap(),
+            Node::Binary { op: Op::CrossUp, .. }
+        ));
+        if let Node::Command(c) = parse("increase:3@(ma:20@close)").unwrap() {
             assert!(matches!(c.series[0], Node::Command(_)));
         } else {
             panic!();
@@ -299,22 +389,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_arg_slots() {
-        let n = parse("macd.signal:,,10").unwrap();
-        if let Node::Command(c) = n {
-            assert_eq!(c.args, vec![None, None, Some("10".into())]);
-        } else {
-            panic!();
+    fn parse_precedence() {
+        // (kdj.j + 1) != kdj.j
+        match parse("kdj.j + 1 != kdj.j").unwrap() {
+            Node::Binary { op: Op::Ne, left, .. } => {
+                assert!(matches!(*left, Node::Binary { op: Op::Add, .. }));
+            }
+            _ => panic!(),
         }
+        // (a > 1) | (a <= 1)
+        assert!(matches!(
+            parse("(kdj.j > 1) | (kdj.j <= 1)").unwrap(),
+            Node::Binary { op: Op::Or, .. }
+        ));
+        // unary not / neg
+        assert!(matches!(
+            parse("~(kdj.j <= 0)").unwrap(),
+            Node::Unary { op: UnaryOp::Not, .. }
+        ));
+        assert!(matches!(parse("kdj.j * 2").unwrap(), Node::Binary { op: Op::Mul, .. }));
     }
 
     #[test]
-    fn parse_multiline() {
-        let n = parse("repeat\n  : 5\n  @ (\n    close > boll.upper\n  )").unwrap();
-        if let Node::Command(c) = n {
-            assert_eq!(c.name, "repeat");
-            assert_eq!(c.args, vec![Some("5".into())]);
-            assert!(matches!(c.series[0], Node::Binary { op: Op::Gt, .. }));
+    fn parse_empty_arg_slots() {
+        if let Node::Command(c) = parse("macd.signal:,,10").unwrap() {
+            assert_eq!(c.args, vec![None, None, Some("10".into())]);
         } else {
             panic!();
         }

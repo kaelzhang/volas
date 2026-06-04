@@ -1,6 +1,6 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
-use crate::types::{Node, Op};
+use crate::types::{Node, Op, UnaryOp};
 use volas_core::Column;
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
@@ -23,21 +23,71 @@ pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
         Node::Command(cmd) => {
             exec_command(df, &cmd.name, cmd.sub.as_deref(), &cmd.args, &cmd.series)
         }
+        Node::Unary { op, operand } => {
+            let c = execute(df, operand)?;
+            Ok(match op {
+                UnaryOp::Not => Column::Bool(c.to_f64_vec().iter().map(|&x| x == 0.0).collect()),
+                UnaryOp::Neg => Column::F64(c.to_f64_vec().iter().map(|&x| -x).collect()),
+            })
+        }
         Node::Binary { left, op, right } => {
-            let l = execute(df, left)?.to_f64_vec();
-            let r = execute(df, right)?.to_f64_vec();
-            Ok(Column::Bool(apply_op(*op, &l, &r)))
+            let l = execute(df, left)?;
+            let r = execute(df, right)?;
+            Ok(apply_binary(*op, &l, &r))
         }
     }
 }
 
-fn apply_op(op: Op, l: &[f64], r: &[f64]) -> Vec<bool> {
+fn as_bool(col: &Column) -> Vec<bool> {
+    match col {
+        Column::Bool(v) => v.clone(),
+        other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
+    }
+}
+
+fn apply_binary(op: Op, l: &Column, r: &Column) -> Column {
+    match op {
+        Op::Add | Op::Sub | Op::Mul | Op::Div => {
+            let (lf, rf) = (l.to_f64_vec(), r.to_f64_vec());
+            let n = lf.len().min(rf.len());
+            let mut out = vec![f64::NAN; lf.len()];
+            for i in 0..n {
+                out[i] = match op {
+                    Op::Add => lf[i] + rf[i],
+                    Op::Sub => lf[i] - rf[i],
+                    Op::Mul => lf[i] * rf[i],
+                    Op::Div => lf[i] / rf[i],
+                    _ => unreachable!(),
+                };
+            }
+            Column::F64(out)
+        }
+        Op::And | Op::Or | Op::Xor => {
+            let (lb, rb) = (as_bool(l), as_bool(r));
+            let n = lb.len().min(rb.len());
+            let mut out = vec![false; lb.len()];
+            for i in 0..n {
+                out[i] = match op {
+                    Op::And => lb[i] && rb[i],
+                    Op::Or => lb[i] || rb[i],
+                    Op::Xor => lb[i] ^ rb[i],
+                    _ => unreachable!(),
+                };
+            }
+            Column::Bool(out)
+        }
+        _ => Column::Bool(apply_cmp(op, &l.to_f64_vec(), &r.to_f64_vec())),
+    }
+}
+
+fn apply_cmp(op: Op, l: &[f64], r: &[f64]) -> Vec<bool> {
     let n = l.len().min(r.len());
     let mut out = vec![false; l.len()];
     match op {
         Op::Lt => (0..n).for_each(|i| out[i] = l[i] < r[i]),
         Op::Le => (0..n).for_each(|i| out[i] = l[i] <= r[i]),
         Op::Eq => (0..n).for_each(|i| out[i] = l[i] == r[i]),
+        Op::Ne => (0..n).for_each(|i| out[i] = l[i] != r[i]),
         Op::Ge => (0..n).for_each(|i| out[i] = l[i] >= r[i]),
         Op::Gt => (0..n).for_each(|i| out[i] = l[i] > r[i]),
         Op::CrossUp => (1..n).for_each(|i| out[i] = l[i - 1] <= r[i - 1] && l[i] > r[i]),
@@ -46,6 +96,7 @@ fn apply_op(op: Op, l: &[f64], r: &[f64]) -> Vec<bool> {
             out[i] = (l[i - 1] <= r[i - 1] && l[i] > r[i])
                 || (l[i - 1] >= r[i - 1] && l[i] < r[i])
         }),
+        _ => unreachable!("non-comparison op in apply_cmp"),
     }
     out
 }

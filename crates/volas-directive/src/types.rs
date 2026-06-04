@@ -1,6 +1,6 @@
 //! Directive AST.
 
-/// A binary operator between two directive operands.
+/// A binary operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     /// `<`
@@ -9,6 +9,8 @@ pub enum Op {
     Le,
     /// `==`
     Eq,
+    /// `!=`
+    Ne,
     /// `>=`
     Ge,
     /// `>`
@@ -19,46 +21,84 @@ pub enum Op {
     CrossDown,
     /// `><` — left crosses right in either direction.
     Cross,
+    /// `+`
+    Add,
+    /// `-`
+    Sub,
+    /// `*`
+    Mul,
+    /// `/`
+    Div,
+    /// `&`
+    And,
+    /// `|`
+    Or,
+    /// `^`
+    Xor,
 }
 
 impl Op {
-    /// The canonical source token for the operator.
+    /// The canonical source token.
     pub fn token(&self) -> &'static str {
         match self {
             Op::Lt => "<",
             Op::Le => "<=",
             Op::Eq => "==",
+            Op::Ne => "!=",
             Op::Ge => ">=",
             Op::Gt => ">",
             Op::CrossUp => "//",
             Op::CrossDown => "\\\\",
             Op::Cross => "><",
+            Op::Add => "+",
+            Op::Sub => "-",
+            Op::Mul => "*",
+            Op::Div => "/",
+            Op::And => "&",
+            Op::Or => "|",
+            Op::Xor => "^",
         }
     }
+}
+
+/// A unary operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryOp {
+    /// `~` — logical NOT.
+    Not,
+    /// `-` — arithmetic negation.
+    Neg,
 }
 
 /// A parsed indicator command, e.g. `macd.signal:12,26,9@close`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Command {
-    /// Command name, e.g. `"ma"`, `"macd"`.
+    /// Command name.
     pub name: String,
-    /// Optional sub-command, e.g. `"signal"`, `"upper"`, `"j"`.
+    /// Optional sub-command.
     pub sub: Option<String>,
     /// Positional args as raw strings; `None` means "use the default".
     pub args: Vec<Option<String>>,
-    /// `@` series operands (column names or nested directives).
+    /// `@` series operands.
     pub series: Vec<Node>,
 }
 
 /// A node in the directive AST.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
-    /// A bare identifier: a column name, or a no-argument command (e.g. `tr`).
+    /// A bare identifier: a column name, or a no-argument command.
     Name(String),
-    /// A numeric literal operand (e.g. the `0` in `kdj.j < 0`).
+    /// A numeric literal.
     Scalar(f64),
     /// An indicator command.
     Command(Command),
+    /// A unary operation.
+    Unary {
+        /// Operator.
+        op: UnaryOp,
+        /// Operand.
+        operand: Box<Node>,
+    },
     /// A binary operation `left op right`.
     Binary {
         /// Left operand.
