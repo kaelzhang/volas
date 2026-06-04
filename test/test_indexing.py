@@ -1,11 +1,10 @@
 """volas pandas-compatible indexing tests.
 
-Ported from stock-pandas's ``test_indexing.py`` and pandas's indexing semantics,
-adapted to the index types volas supports. stock-pandas indexes the fixture by
-the string column ``name`` and slices ``.loc['b':]``; volas has no string index
-(only datetime / int — a documented gap), so the same indexing behaviour
-(``.iloc`` / ``.loc`` / ``.at`` / ``.iat`` / ``.index`` / row ``.name`` /
-column-list selection) is exercised over a DatetimeIndex and a RangeIndex.
+Ported from stock-pandas's ``test_indexing.py`` and pandas's indexing semantics.
+This module exercises ``.iloc`` / ``.loc`` / ``.at`` / ``.iat`` / ``.index`` /
+row ``.name`` / column-list selection over a DatetimeIndex and a RangeIndex;
+the string-index (``set_index`` on a string column, ``.loc['b':]``) counterpart
+lives in ``test_string_index.py``.
 """
 
 from pathlib import Path

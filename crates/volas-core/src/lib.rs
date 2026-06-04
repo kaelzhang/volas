@@ -15,5 +15,5 @@ pub use column::Column;
 pub use dataframe::DataFrame;
 pub use dtype::DType;
 pub use error::{Result, VolasError};
-pub use index::Index;
+pub use index::{Index, Label};
 pub use series::Series;

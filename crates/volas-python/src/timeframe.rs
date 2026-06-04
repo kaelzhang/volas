@@ -6,7 +6,7 @@ use pyo3::types::PyDict;
 
 use volas_time::{Agg, AggSpec, Cumulator, TimeFrame};
 
-use crate::{parse_label, pyerr, PyDataFrame};
+use crate::{parse_ts, pyerr, PyDataFrame};
 
 /// `volas.TimeFrame` — an OHLCV sampling period.
 #[pyclass(name = "TimeFrame")]
@@ -30,7 +30,7 @@ impl PyTimeFrame {
     }
     /// Unify a timestamp (datetime string or epoch-ns int) to its period key.
     fn unify(&self, ts: &Bound<'_, PyAny>) -> PyResult<i64> {
-        Ok(self.inner.unify(parse_label(ts)?))
+        Ok(self.inner.unify(parse_ts(ts)?))
     }
 
     #[classattr]

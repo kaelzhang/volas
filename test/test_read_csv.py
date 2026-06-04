@@ -260,7 +260,9 @@ def test_parse_dates_on_non_string_column_raises(tmp_path):
         volas.read_csv(path, parse_dates=['t'])
 
 
-def test_index_col_on_string_column_raises(tmp_path):
+def test_index_col_on_string_column_builds_string_index(tmp_path):
+    # a string column moved into the index yields a (pandas object) string index
     path = write_csv(tmp_path, "k,a\nx,1\ny,2\n")
-    with pytest.raises(Exception):
-        volas.read_csv(path, index_col='k')
+    df = volas.read_csv(path, index_col='k')
+    assert list(df.index) == ['x', 'y']
+    assert df.loc['y']['a'] == 2

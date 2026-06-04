@@ -14,7 +14,7 @@ use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice};
 
-use volas_core::{datetime, Column, DataFrame, DType, Index, Series, VolasError};
+use volas_core::{datetime, Column, DataFrame, DType, Index, Label, Series, VolasError};
 use volas_directive::{execute, parse};
 
 mod readers;
@@ -160,11 +160,12 @@ fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> {
             .unbind(),
         Index::Int64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         Index::Range(_) => (i as i64).into_pyobject(py).unwrap().into_any().unbind(),
+        Index::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
     }
 }
 
-/// Parse a Python label (datetime string or integer) to the i64 used by the index.
-pub(crate) fn parse_label(key: &Bound<'_, PyAny>) -> PyResult<i64> {
+/// Parse a Python timestamp (datetime string or epoch-ns integer) to i64 ns.
+pub(crate) fn parse_ts(key: &Bound<'_, PyAny>) -> PyResult<i64> {
     if let Ok(s) = key.extract::<String>() {
         return datetime::parse_ns(&s)
             .ok_or_else(|| PyKeyError::new_err(format!("invalid datetime label {s:?}")));
@@ -175,7 +176,20 @@ pub(crate) fn parse_label(key: &Bound<'_, PyAny>) -> PyResult<i64> {
     Err(PyKeyError::new_err("label must be a datetime string or integer"))
 }
 
-/// Build the `.index` as a NumPy array (datetime64[ns] for a DatetimeIndex).
+/// Parse a Python label to the [`Label`] kind expected by `index`: a string for
+/// a string index, a parsed datetime / integer for the numeric kinds.
+pub(crate) fn parse_label(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Label> {
+    match index {
+        Index::Str(_) => key
+            .extract::<String>()
+            .map(Label::Str)
+            .map_err(|_| PyKeyError::new_err("label must be a string for a string index")),
+        _ => parse_ts(key).map(Label::I64),
+    }
+}
+
+/// Build the `.index` as a NumPy array (datetime64[ns] for a DatetimeIndex,
+/// an object array for a string index).
 fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
     match index {
         Index::Datetime(v) => {
@@ -184,6 +198,12 @@ fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, Py
         }
         Index::Int64(v) => Ok(v.clone().into_pyarray(py).into_any()),
         Index::Range(n) => Ok((0..*n as i64).collect::<Vec<_>>().into_pyarray(py).into_any()),
+        Index::Str(v) => {
+            let list = PyList::new(py, v.as_slice())?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "object")?;
+            Ok(py.import("numpy")?.call_method("array", (list,), Some(&kwargs))?)
+        }
     }
 }
 
@@ -316,11 +336,11 @@ impl PySeries {
             return Ok(Py::new(py, slice_series(&self.inner, slice)?)?.into_any());
         }
         // label lookup
-        let label = parse_label(key)?;
+        let label = parse_label(key, &self.inner.index)?;
         let pos = self
             .inner
             .index
-            .position_of(label)
+            .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
         Ok(scalar_to_py(py, &self.inner.data, pos))
     }
@@ -681,18 +701,18 @@ impl PyDataFrame {
         }
     }
 
-    /// Drop rows by index label (`axis=0`) — returns a new DataFrame.
+    /// Drop rows by index label (`axis=0`) — returns a new DataFrame. Labels are
+    /// parsed against the index kind, so a string index drops by string label.
     #[pyo3(signature = (labels, axis = 0))]
-    fn drop(&self, labels: Vec<i64>, axis: i64) -> PyResult<PyDataFrame> {
+    fn drop(&self, py: Python<'_>, labels: Vec<Py<PyAny>>, axis: i64) -> PyResult<PyDataFrame> {
         let _ = axis;
+        let index = self.inner.index();
+        let targets: Vec<Label> = labels
+            .iter()
+            .map(|l| parse_label(l.bind(py), index))
+            .collect::<PyResult<_>>()?;
         let positions: Vec<usize> = (0..self.inner.height())
-            .filter(|&i| {
-                let lab = match self.inner.index().as_ref() {
-                    Index::Range(_) => i as i64,
-                    Index::Int64(v) | Index::Datetime(v) => v[i],
-                };
-                !labels.contains(&lab)
-            })
+            .filter(|&i| !targets.contains(&index.label_at(i)))
             .collect();
         Ok(PyDataFrame {
             inner: take_frame(&self.inner, &positions),
@@ -750,6 +770,15 @@ impl PyDataFrame {
         }
         Ok(PyDataFrame {
             inner: self.inner.rename(&mapping).map_err(pyerr)?,
+        })
+    }
+
+    /// Move a column into the row index (pandas `set_index(col)`), returning a
+    /// new frame. A datetime / int / string column becomes the matching index.
+    #[pyo3(signature = (keys))]
+    fn set_index(&self, keys: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame {
+            inner: self.inner.set_index(keys).map_err(pyerr)?,
         })
     }
 
@@ -833,17 +862,18 @@ fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResult<DataFrame
     let stop_obj = slice.getattr("stop")?;
     let is_label = start_obj.extract::<String>().is_ok() || stop_obj.extract::<String>().is_ok();
     if is_label {
+        let index = df.index();
         let lo = if start_obj.is_none() {
             None
         } else {
-            Some(parse_label(&start_obj)?)
+            Some(parse_label(&start_obj, index)?)
         };
         let hi = if stop_obj.is_none() {
             None
         } else {
-            Some(parse_label(&stop_obj)?)
+            Some(parse_label(&stop_obj, index)?)
         };
-        let (a, b) = df.index().label_slice(lo, hi);
+        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
         Ok(df.slice(a, b))
     } else {
         let info = slice.indices(df.height() as isize)?;
@@ -852,18 +882,21 @@ fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResult<DataFrame
     }
 }
 
-fn label_bounds(slice: &Bound<'_, PySlice>) -> PyResult<(Option<i64>, Option<i64>)> {
+fn label_bounds(
+    slice: &Bound<'_, PySlice>,
+    index: &Index,
+) -> PyResult<(Option<Label>, Option<Label>)> {
     let start_obj = slice.getattr("start")?;
     let stop_obj = slice.getattr("stop")?;
     let lo = if start_obj.is_none() {
         None
     } else {
-        Some(parse_label(&start_obj)?)
+        Some(parse_label(&start_obj, index)?)
     };
     let hi = if stop_obj.is_none() {
         None
     } else {
-        Some(parse_label(&stop_obj)?)
+        Some(parse_label(&stop_obj, index)?)
     };
     Ok((lo, hi))
 }
@@ -877,16 +910,15 @@ pub struct DataFrameLoc {
 #[pymethods]
 impl DataFrameLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let index = self.inner.index();
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let (lo, hi) = label_bounds(slice)?;
-            let (a, b) = self.inner.index().label_slice(lo, hi);
+            let (lo, hi) = label_bounds(slice, index)?;
+            let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
             return Ok(Py::new(py, PyDataFrame { inner: self.inner.slice(a, b) })?.into_any());
         }
-        let label = parse_label(key)?;
-        let pos = self
-            .inner
-            .index()
-            .position_of(label)
+        let label = parse_label(key, index)?;
+        let pos = index
+            .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
         Ok(Py::new(py, row_at(&self.inner, pos))?.into_any())
     }
@@ -916,11 +948,10 @@ pub struct DataFrameAt {
 #[pymethods]
 impl DataFrameAt {
     fn __getitem__(&self, py: Python<'_>, key: (Py<PyAny>, String)) -> PyResult<Py<PyAny>> {
-        let label = parse_label(key.0.bind(py))?;
-        let i = self
-            .inner
-            .index()
-            .position_of(label)
+        let index = self.inner.index();
+        let label = parse_label(key.0.bind(py), index)?;
+        let i = index
+            .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
         let col = self.inner.column(&key.1).map_err(pyerr)?;
         Ok(scalar_to_py(py, col, i))
@@ -937,8 +968,8 @@ pub struct SeriesLoc {
 impl SeriesLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let (lo, hi) = label_bounds(slice)?;
-            let (a, b) = self.inner.index.label_slice(lo, hi);
+            let (lo, hi) = label_bounds(slice, &self.inner.index)?;
+            let (a, b) = self.inner.index.label_slice(lo.as_ref(), hi.as_ref());
             let positions: Vec<usize> = (a..b).collect();
             let data = self.inner.data.take(&positions);
             let index = Arc::new(self.inner.index.take(&positions));
@@ -950,11 +981,11 @@ impl SeriesLoc {
             )?
             .into_any());
         }
-        let label = parse_label(key)?;
+        let label = parse_label(key, &self.inner.index)?;
         let pos = self
             .inner
             .index
-            .position_of(label)
+            .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
         Ok(scalar_to_py(py, &self.inner.data, pos))
     }
