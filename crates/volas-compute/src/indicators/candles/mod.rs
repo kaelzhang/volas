@@ -1,17 +1,23 @@
 // ---------------------------------------------------------------------------
-// Candlestick patterns (TA-Lib CDL*) — shared candle-settings framework
+// Candlestick patterns (TA-Lib CDL*)
 // ---------------------------------------------------------------------------
+//
+// A cohesive sub-domain of `indicators`: candlestick-pattern recognition. This module
+// owns the shared candle-settings framework (TA-Lib's `TA_CANDLE*`); the patterns
+// themselves live in bar-count submodules (`one_bar`, `two_bar`, …) and are re-exported.
 //
 // Each pattern tests a candle's geometry against adaptive thresholds derived from a
 // rolling average of a chosen "range" (real body / high-low / shadows) over the prior
-// `avg_period` bars, scaled by a `factor` — TA-Lib's candle-settings system. Output is
-// f64: `+100` bullish, `-100` bearish, `0` no pattern; the warm-up is NaN (volas's
-// uniform convention — TA-Lib fills its integer outputs with 0, which would be
-// indistinguishable from "no pattern"). Parity holds on the valid region.
+// `avg_period` bars, scaled by a `factor`. Output is f64: `+100` bullish, `-100`
+// bearish, `0` no pattern; the warm-up is NaN (volas's uniform convention — TA-Lib
+// fills its integer outputs with 0, which is indistinguishable from "no pattern").
+// Parity holds on the valid region.
 
-/// The range a candle-setting measures. The full set is kept (it mirrors TA-Lib's
-/// settings table); a variant is only *constructed* once a pattern that needs it lands,
-/// so allow the lint until then.
+mod one_bar;
+pub use one_bar::*;
+
+/// The range a candle-setting measures. The full set mirrors TA-Lib's settings table;
+/// a variant is only *constructed* once a pattern needing it lands, so allow the lint.
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 enum RangeType {
@@ -21,7 +27,8 @@ enum RangeType {
 }
 
 /// One candle-setting: which range, the averaging period (0 = the bar itself), and the
-/// scaling factor. Values are TA-Lib's defaults (ta_global.c).
+/// scaling factor. Values are TA-Lib's defaults (ta_global.c). Visible to the pattern
+/// submodules (descendants) without `pub`.
 #[derive(Clone, Copy)]
 struct Setting {
     range: RangeType,
@@ -42,7 +49,7 @@ const NEAR: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.2 };
 const FAR: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.6 };
 const EQUAL: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.05 };
 
-// Silence dead-code until every pattern that uses each setting lands.
+// Settings not yet consumed by a landed pattern (shrinks to nothing as patterns arrive).
 #[allow(dead_code)]
 const _UNUSED_SETTINGS: [Setting; 8] = [
     BODY_VERY_LONG, BODY_SHORT, SHADOW_LONG, SHADOW_VERY_LONG, SHADOW_SHORT, NEAR, FAR, EQUAL,
@@ -100,43 +107,4 @@ fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usi
         1.0
     };
     s.factor * base / div
-}
-
-/// Doji (TA-Lib CDLDOJI): a real body no larger than the recent doji-body threshold —
-/// open ≈ close. Always non-negative (uncertainty, not direction): `100` or `0`.
-/// Lookback `avg_period(BodyDoji)` = 10.
-pub fn cdl_doji(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
-    let n = close.len();
-    let mut out = vec![f64::NAN; n];
-    let lb = BODY_DOJI.avg_period;
-    for i in lb..n {
-        out[i] = if realbody(open, close, i) <= candle_average(BODY_DOJI, open, high, low, close, i)
-        {
-            100.0
-        } else {
-            0.0
-        };
-    }
-    out
-}
-
-/// Marubozu (TA-Lib CDLMARUBOZU): a long real body with negligible shadows on both
-/// ends. `color·100` (bullish white / bearish black) or `0`. Lookback
-/// `max(avg_period(BodyLong), avg_period(ShadowVeryShort))` = 10.
-pub fn cdl_marubozu(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
-    let n = close.len();
-    let mut out = vec![f64::NAN; n];
-    let lb = BODY_LONG.avg_period.max(SHADOW_VERY_SHORT.avg_period);
-    for i in lb..n {
-        let very_short = candle_average(SHADOW_VERY_SHORT, open, high, low, close, i);
-        out[i] = if realbody(open, close, i) > candle_average(BODY_LONG, open, high, low, close, i)
-            && uppershadow(open, high, close, i) < very_short
-            && lowershadow(open, low, close, i) < very_short
-        {
-            color(open, close, i) * 100.0
-        } else {
-            0.0
-        };
-    }
-    out
 }
