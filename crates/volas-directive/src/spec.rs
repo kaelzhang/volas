@@ -93,6 +93,7 @@ pub fn is_command(name: &str) -> bool {
             | "trima"
             | "t3"
             | "kama"
+            | "sar"
             | "accbands"
             | "macd"
             | "boll"
@@ -171,6 +172,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("wma" | "dema" | "tema" | "trima", None) => (vec![Int(30)], vec!["close"]),
         ("t3", None) => (vec![Int(5), Float(0.7)], vec!["close"]),
         ("kama", None) => (vec![Int(30)], vec!["close"]),
+        ("sar", None) => (vec![Float(0.02), Float(0.2)], vec!["high", "low"]),
         ("macd", None) => (vec![Int(12), Int(26)], vec!["close"]),
         ("macd", Some("signal" | "histogram")) => {
             (vec![Int(12), Int(26), Int(9)], vec!["close"])

@@ -265,6 +265,11 @@ fn exec_command(
             arg_f64(args, 1, 0.7)?,
         )),
         ("kama", _) => f64col(ind::kama(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("sar", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::sar(&high, &low, arg_f64(args, 0, 0.02)?, arg_f64(args, 1, 0.2)?))
+        }
         // Price oscillators: fast MA - slow MA, of a chosen MA type (default SMA).
         ("apo", _) => {
             let data = close(0)?;

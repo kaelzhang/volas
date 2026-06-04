@@ -100,6 +100,8 @@ def test_overlap_ma_variants_match_talib(ohlc):
         _parity(df.exec(f't3:{p},0.5'), talib.T3(c, p, vfactor=0.5))
     for p in (10, 30):  # 30 is the TA-Lib default
         _parity(df.exec(f'kama:{p}'), talib.KAMA(c, p))
+    _parity(df.exec('sar'), talib.SAR(h, l))  # defaults 0.02 / 0.2
+    _parity(df.exec('sar:0.01,0.1'), talib.SAR(h, l, acceleration=0.01, maximum=0.1))
     _parity(df.exec('wma'), talib.WMA(c, 30))  # default resolves to 30
     _parity(df.exec('trima'), talib.TRIMA(c, 30))
     _parity(df.exec('t3'), talib.T3(c, 5))

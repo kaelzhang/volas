@@ -163,6 +163,76 @@ pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
     out
 }
 
+/// Parabolic SAR (TA-Lib SAR). Faithful port of TA-Lib's recurrence: initial trend is
+/// chosen from the first bar's −DM1; each step trails the stop by `af·(ep − sar)`,
+/// `af` ramping by `acceleration` (capped at `maximum`) on every new extreme, resetting
+/// on a reversal; the SAR is clamped within the prior two bars' range. Default
+/// acceleration 0.02, maximum 0.2; lookback 1. (TA-Lib applies no rounding.)
+pub fn sar(high: &[f64], low: &[f64], acceleration: f64, maximum: f64) -> Vec<f64> {
+    let n = high.len();
+    let mut out = vec![f64::NAN; n];
+    if n < 2 {
+        return out;
+    }
+    let af_init = acceleration.min(maximum); // TA-Lib clamps the step to the cap
+    // Initial direction from the one-period −DM at bar 1: a positive −DM ⇒ short.
+    let diff_p = high[1] - high[0];
+    let diff_m = low[0] - low[1];
+    let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m { diff_m } else { 0.0 };
+    let mut is_long = !(minus_dm1 > 0.0);
+
+    let mut af = af_init;
+    let (mut ep, mut sar) = if is_long {
+        (high[1], low[0])
+    } else {
+        (low[1], high[0])
+    };
+    // "Cheat" the first iteration: prime new high/low with bar 1 (as TA-Lib does).
+    let mut new_low = low[1];
+    let mut new_high = high[1];
+
+    for today in 1..n {
+        let prev_low = new_low;
+        let prev_high = new_high;
+        new_low = low[today];
+        new_high = high[today];
+        if is_long {
+            if new_low <= sar {
+                // Reverse to short: stop becomes the extreme point, clamped up.
+                is_long = false;
+                sar = ep.max(prev_high).max(new_high);
+                out[today] = sar;
+                af = af_init;
+                ep = new_low;
+                sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
+            } else {
+                out[today] = sar;
+                if new_high > ep {
+                    ep = new_high;
+                    af = (af + af_init).min(maximum);
+                }
+                sar = (sar + af * (ep - sar)).min(prev_low).min(new_low);
+            }
+        } else if new_high >= sar {
+            // Reverse to long: stop becomes the extreme point, clamped down.
+            is_long = true;
+            sar = ep.min(prev_low).min(new_low);
+            out[today] = sar;
+            af = af_init;
+            ep = new_high;
+            sar = (sar + af * (ep - sar)).min(prev_low).min(new_low);
+        } else {
+            out[today] = sar;
+            if new_low < ep {
+                ep = new_low;
+                af = (af + af_init).min(maximum);
+            }
+            sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
+        }
+    }
+    out
+}
+
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the
     // line is emitted from its natural start (the slow EMA's first valid row), not
