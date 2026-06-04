@@ -19,6 +19,7 @@ pub(crate) fn av(s: &[f64]) -> ArrayView1<'_, f64> {
 mod bands;
 mod candles;
 mod directional;
+mod hilbert;
 mod math_ops;
 mod momentum;
 mod oscillators;
@@ -31,6 +32,7 @@ mod volume;
 pub use bands::*;
 pub use candles::*;
 pub use directional::*;
+pub use hilbert::*;
 pub use math_ops::*;
 pub use momentum::*;
 pub use oscillators::*;

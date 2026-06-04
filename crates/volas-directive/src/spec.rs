@@ -80,6 +80,13 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         ("accbands", None | Some("middle" | "m")) => None,
         ("accbands", Some("u" | "upper")) => Some("upper".into()),
         ("accbands", Some("l" | "lower")) => Some("lower".into()),
+        // Hilbert multi-output lines: primary line is the main command (P3).
+        ("ht_phasor", None | Some("i" | "inphase")) => None,
+        ("ht_phasor", Some("q" | "quad" | "quadrature")) => Some("quadrature".into()),
+        ("ht_sine", None | Some("sine")) => None,
+        ("ht_sine", Some("lead" | "leadsine")) => Some("leadsine".into()),
+        ("mama", None | Some("mama")) => None,
+        ("mama", Some("fama")) => Some("fama".into()),
         (_, Some(s)) => Some(s.to_string()),
         (_, None) => None,
     }
@@ -170,6 +177,13 @@ pub fn is_command(name: &str) -> bool {
             | "medprice"
             | "typprice"
             | "wclprice"
+            | "ht_dcperiod"
+            | "ht_dcphase"
+            | "ht_phasor"
+            | "ht_sine"
+            | "ht_trendline"
+            | "ht_trendmode"
+            | "mama"
     )
 }
 
@@ -293,6 +307,14 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("medprice", None) => (vec![], vec!["high", "low"]),
         ("typprice", None) => (vec![], vec!["high", "low", "close"]),
         ("wclprice", None) => (vec![], vec!["high", "low", "close"]),
+        // Hilbert-transform cycle suite: a single price series, no numeric args
+        // (MAMA takes fast/slow limits). Multi-output lines share the base spec.
+        ("ht_dcperiod" | "ht_dcphase" | "ht_trendline" | "ht_trendmode", None) => {
+            (vec![], vec!["close"])
+        }
+        ("ht_phasor", None | Some("quadrature")) => (vec![], vec!["close"]),
+        ("ht_sine", None | Some("leadsine")) => (vec![], vec!["close"]),
+        ("mama", None | Some("fama")) => (vec![Float(0.5), Float(0.05)], vec!["close"]),
         _ => return None,
     };
     Some(CommandSpec { args, series })

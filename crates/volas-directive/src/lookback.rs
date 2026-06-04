@@ -11,13 +11,14 @@ fn arg(args: &[Option<String>], i: usize, default: usize) -> usize {
 }
 
 /// Lookback of a TA-Lib MA-type over `period` (mirrors `exec::ma_typed`): DEMA is
-/// `2·(period-1)`, TEMA `3·(period-1)`, KAMA `period`, T3 `6·(period-1)`, and the
-/// rest (SMA/EMA/WMA/TRIMA) `period-1`.
+/// `2·(period-1)`, TEMA `3·(period-1)`, KAMA `period`, T3 `6·(period-1)`, MAMA a
+/// fixed `32` (period-independent), and the rest (SMA/EMA/WMA/TRIMA) `period-1`.
 pub(crate) fn ma_lookback(period: usize, matype: usize) -> usize {
     match matype {
         3 => 2 * period.saturating_sub(1),
         4 => 3 * period.saturating_sub(1),
         6 => period,
+        7 => 32,
         8 => 6 * period.saturating_sub(1),
         _ => period.saturating_sub(1),
     }
@@ -117,6 +118,10 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "obv" | "ad" => 0,
         "adosc" => arg(args, 0, 3).max(arg(args, 1, 10)).saturating_sub(1),
         "avgprice" | "medprice" | "typprice" | "wclprice" => 0,
+        // Hilbert-transform suite: fixed warm-up (DCPERIOD/PHASOR/MAMA = 32; the
+        // phase-dependent DCPHASE/SINE/TRENDLINE/TRENDMODE need 63).
+        "ht_dcperiod" | "ht_phasor" | "mama" => 32,
+        "ht_dcphase" | "ht_sine" | "ht_trendline" | "ht_trendmode" => 63,
         _ => return None,
     };
     Some(lb)

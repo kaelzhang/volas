@@ -192,8 +192,9 @@ fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
 
 /// Dispatch a TA-Lib MA-type code to the matching moving average over `data`.
 /// Codes follow TA-Lib's `TA_MAType`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
-/// 6 KAMA, 8 T3 (with vfactor 0.7, as TA-Lib's MA dispatch fixes it). 7 (MAMA) is not
-/// yet implemented. Shared by `ma`, `apo`, and `ppo`.
+/// 6 KAMA, 7 MAMA, 8 T3 (with vfactor 0.7, as TA-Lib's MA dispatch fixes it). MAMA
+/// ignores `period` and returns its primary (`mama`) line with the default
+/// 0.5/0.05 limits, exactly as `TA_MA`. Shared by `ma`, `apo`, `ppo`, and `mavp`.
 fn ma_typed(data: &[f64], period: usize, matype: usize) -> Result<Vec<f64>> {
     Ok(match matype {
         0 => ind::ma(data, period),
@@ -203,8 +204,8 @@ fn ma_typed(data: &[f64], period: usize, matype: usize) -> Result<Vec<f64>> {
         4 => ind::tema(data, period),
         5 => ind::trima(data, period),
         6 => ind::kama(data, period),
+        7 => ind::mama(data, 0.5, 0.05).0,
         8 => ind::t3(data, period, 0.7),
-        7 => return Err(VolasError::Value("ma type 7 (MAMA) is not yet implemented".into())),
         other => return Err(VolasError::Value(format!("unknown ma type {other}"))),
     })
 }
@@ -774,6 +775,23 @@ fn exec_command(
             f64col(ind::wclprice(&high, &low, &close))
         }
 
+        // Hilbert-transform cycle suite. Each takes a single price series (default
+        // close); multi-output ones expose the secondary line via a sub-command (P3).
+        ("ht_dcperiod", _) => f64col(ind::ht_dcperiod(&close(0)?)),
+        ("ht_dcphase", _) => f64col(ind::ht_dcphase(&close(0)?)),
+        ("ht_trendline", _) => f64col(ind::ht_trendline(&close(0)?)),
+        ("ht_trendmode", _) => f64col(ind::ht_trendmode(&close(0)?)),
+        ("ht_phasor", None) => f64col(ind::ht_phasor(&close(0)?).0),
+        ("ht_phasor", Some("quadrature")) => f64col(ind::ht_phasor(&close(0)?).1),
+        ("ht_sine", None) => f64col(ind::ht_sine(&close(0)?).0),
+        ("ht_sine", Some("leadsine")) => f64col(ind::ht_sine(&close(0)?).1),
+        ("mama", None) => f64col(
+            ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).0,
+        ),
+        ("mama", Some("fama")) => f64col(
+            ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).1,
+        ),
+
         (other, _) => Err(VolasError::Value(format!("unknown command '{other}'"))),
     }
 }
@@ -915,6 +933,20 @@ mod tests {
             "repeat:1@(close>10)",
             "repeat:2@close", // non-bool series -> coerced
             "change:2",
+            // Hilbert-transform suite (lookback exceeds this 30-row frame, so the
+            // results are all-NaN — this only exercises the dispatch + wiring).
+            "ht_dcperiod",
+            "ht_dcphase",
+            "ht_phasor",
+            "ht_phasor.quadrature",
+            "ht_sine",
+            "ht_sine.leadsine",
+            "ht_trendline",
+            "ht_trendmode",
+            "mama",
+            "mama:0.5,0.05",
+            "mama.fama",
+            "ma:10,7", // matype 7 = MAMA line
         ] {
             let col = execute(&df, &parse(d).unwrap())
                 .unwrap_or_else(|e| panic!("directive {d:?} failed: {e:?}"));
