@@ -274,20 +274,31 @@ impl PySeries {
         self.inner.len()
     }
 
-    fn to_numpy<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
-        column_to_numpy(py, &self.inner.data)
+    /// The values as a typed NumPy array; `dtype` casts (e.g. `'float32'`).
+    #[pyo3(signature = (dtype = None))]
+    fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
+        let arr = column_to_numpy(py, &self.inner.data);
+        match dtype {
+            Some(dt) => Ok(arr.call_method1("astype", (dt,))?),
+            None => Ok(arr),
+        }
     }
 
-    /// NumPy array protocol, so `np.isnan(series)` etc. work directly.
+    /// NumPy array protocol, so `np.isnan(series)` etc. work directly. Honors a
+    /// requested `dtype` (casts).
     #[pyo3(signature = (dtype = None, copy = None))]
     fn __array__<'py>(
         &self,
         py: Python<'py>,
         dtype: Option<PyObject>,
         copy: Option<PyObject>,
-    ) -> Bound<'py, PyAny> {
-        let _ = (dtype, copy);
-        column_to_numpy(py, &self.inner.data)
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        let arr = column_to_numpy(py, &self.inner.data);
+        match dtype {
+            Some(dt) => Ok(arr.call_method1("astype", (dt,))?),
+            None => Ok(arr),
+        }
     }
 
     /// NaN-skipping mean of the values.
@@ -1165,11 +1176,50 @@ impl PyDataFrame {
         Ok(slf)
     }
 
-    fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let (data, h, w) = self.inner.to_row_major_f64();
-        let arr = ndarray::Array2::from_shape_vec((h, w), data)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(arr.into_pyarray(py))
+    /// The frame as a 2-D NumPy array (pandas `to_numpy`). With no `dtype`: a fast
+    /// `float64` matrix when every column is numeric, else a lossless `object`
+    /// array (string columns kept, not NaN-poisoned). `dtype` casts (e.g.
+    /// `'float32'`); requesting a float over a string column raises.
+    #[pyo3(signature = (dtype = None))]
+    fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
+        let has_str = self.inner.columns().iter().any(|c| matches!(c, Column::Str(_)));
+        let (h, w) = (self.inner.height(), self.inner.width());
+
+        if let Some(dt) = dtype {
+            let floaty = dt.contains("float") || dt == "f32" || dt == "f64" || dt == "double";
+            if has_str && floaty {
+                return Err(PyValueError::new_err(format!(
+                    "cannot convert a string column to {dt}"
+                )));
+            }
+            let (data, h, w) = self.inner.to_row_major_f64();
+            let arr = ndarray::Array2::from_shape_vec((h, w), data)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+                .into_pyarray(py);
+            return Ok(arr.call_method1("astype", (dt,))?);
+        }
+
+        if !has_str {
+            // fast all-numeric path: a float64 matrix
+            let (data, h, w) = self.inner.to_row_major_f64();
+            let arr = ndarray::Array2::from_shape_vec((h, w), data)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            return Ok(arr.into_pyarray(py).into_any());
+        }
+
+        // mixed/string frame: a lossless 2-D object array (each cell typed)
+        let rows = PyList::empty(py);
+        for i in 0..h {
+            let row = PyList::empty(py);
+            for col in self.inner.columns() {
+                row.append(scalar_to_py(py, col, i))?;
+            }
+            rows.append(row)?;
+        }
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "object")?;
+        let _ = w;
+        Ok(py.import("numpy")?.call_method("array", (rows,), Some(&kwargs))?)
     }
 
     /// Value equality (same columns + index + values, `NaN == NaN`).
