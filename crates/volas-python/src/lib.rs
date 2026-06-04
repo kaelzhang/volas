@@ -143,6 +143,13 @@ impl PySeries {
         }
     }
 
+    #[getter]
+    fn loc(&self) -> SeriesLoc {
+        SeriesLoc {
+            inner: self.inner.clone(),
+        }
+    }
+
     fn __len__(&self) -> usize {
         self.inner.len()
     }
@@ -340,6 +347,27 @@ impl PyDataFrame {
         }
     }
 
+    #[getter]
+    fn loc(&self) -> DataFrameLoc {
+        DataFrameLoc {
+            inner: self.inner.clone(),
+        }
+    }
+
+    #[getter]
+    fn iat(&self) -> DataFrameIat {
+        DataFrameIat {
+            inner: self.inner.clone(),
+        }
+    }
+
+    #[getter]
+    fn at(&self) -> DataFrameAt {
+        DataFrameAt {
+            inner: self.inner.clone(),
+        }
+    }
+
     fn __len__(&self) -> usize {
         self.inner.height()
     }
@@ -501,6 +529,114 @@ fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResult<DataFrame
     }
 }
 
+fn label_bounds(slice: &Bound<'_, PySlice>) -> PyResult<(Option<i64>, Option<i64>)> {
+    let start_obj = slice.getattr("start")?;
+    let stop_obj = slice.getattr("stop")?;
+    let lo = if start_obj.is_none() {
+        None
+    } else {
+        Some(parse_label(&start_obj)?)
+    };
+    let hi = if stop_obj.is_none() {
+        None
+    } else {
+        Some(parse_label(&stop_obj)?)
+    };
+    Ok((lo, hi))
+}
+
+/// `df.loc[...]` label indexer.
+#[pyclass]
+pub struct DataFrameLoc {
+    inner: DataFrame,
+}
+
+#[pymethods]
+impl DataFrameLoc {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(slice) = key.downcast::<PySlice>() {
+            let (lo, hi) = label_bounds(slice)?;
+            let (a, b) = self.inner.index().label_slice(lo, hi);
+            return Ok(Py::new(py, PyDataFrame { inner: self.inner.slice(a, b) })?.into_any());
+        }
+        let label = parse_label(key)?;
+        let pos = self
+            .inner
+            .index()
+            .position_of(label)
+            .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+        Ok(Py::new(py, row_at(&self.inner, py, pos))?.into_any())
+    }
+}
+
+/// `df.iat[i, j]` scalar access by position.
+#[pyclass]
+pub struct DataFrameIat {
+    inner: DataFrame,
+}
+
+#[pymethods]
+impl DataFrameIat {
+    fn __getitem__(&self, py: Python<'_>, key: (isize, isize)) -> PyResult<Py<PyAny>> {
+        let i = norm_idx(key.0, self.inner.height())?;
+        let j = norm_idx(key.1, self.inner.width())?;
+        Ok(scalar_to_py(py, &self.inner.columns()[j], i))
+    }
+}
+
+/// `df.at[label, col]` scalar access by label + column name.
+#[pyclass]
+pub struct DataFrameAt {
+    inner: DataFrame,
+}
+
+#[pymethods]
+impl DataFrameAt {
+    fn __getitem__(&self, py: Python<'_>, key: (Py<PyAny>, String)) -> PyResult<Py<PyAny>> {
+        let label = parse_label(key.0.bind(py))?;
+        let i = self
+            .inner
+            .index()
+            .position_of(label)
+            .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+        let col = self.inner.column(&key.1).map_err(pyerr)?;
+        Ok(scalar_to_py(py, col, i))
+    }
+}
+
+/// `series.loc[...]` label indexer.
+#[pyclass]
+pub struct SeriesLoc {
+    inner: Series,
+}
+
+#[pymethods]
+impl SeriesLoc {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(slice) = key.downcast::<PySlice>() {
+            let (lo, hi) = label_bounds(slice)?;
+            let (a, b) = self.inner.index.label_slice(lo, hi);
+            let positions: Vec<usize> = (a..b).collect();
+            let data = self.inner.data.take(&positions);
+            let index = Arc::new(self.inner.index.take(&positions));
+            return Ok(Py::new(
+                py,
+                PySeries {
+                    inner: Series::new(self.inner.name.clone(), data, index),
+                },
+            )?
+            .into_any());
+        }
+        let label = parse_label(key)?;
+        let pos = self
+            .inner
+            .index
+            .position_of(label)
+            .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+        Ok(scalar_to_py(py, &self.inner.data, pos))
+    }
+}
+
 /// The compiled module backing the `volas` package.
 #[pymodule]
 fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -508,6 +644,10 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySeries>()?;
     m.add_class::<PyRow>()?;
     m.add_class::<DataFrameILoc>()?;
+    m.add_class::<DataFrameLoc>()?;
+    m.add_class::<DataFrameIat>()?;
+    m.add_class::<DataFrameAt>()?;
     m.add_class::<SeriesILoc>()?;
+    m.add_class::<SeriesLoc>()?;
     Ok(())
 }
