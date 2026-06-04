@@ -136,7 +136,14 @@ pub fn ewma_com(
 
     for i in 1..n {
         ewma_step(
-            data[i], &mut wavg, &mut old_wt, &mut nobs, old_wt_factor, new_wt, adjust, ignore_na,
+            data[i],
+            &mut wavg,
+            &mut old_wt,
+            &mut nobs,
+            old_wt_factor,
+            new_wt,
+            adjust,
+            ignore_na,
         );
         result[i] = if nobs >= min_periods { wavg } else { f64::NAN };
     }
@@ -184,8 +191,26 @@ pub fn dual_ewma(
     rb[0] = if nobs_b >= min_b { wavg_b } else { f64::NAN };
 
     for i in 1..n {
-        ewma_step(a[i], &mut wavg_a, &mut old_wt_a, &mut nobs_a, owf_a, nw_a, adjust, ignore_na);
-        ewma_step(b[i], &mut wavg_b, &mut old_wt_b, &mut nobs_b, owf_b, nw_b, adjust, ignore_na);
+        ewma_step(
+            a[i],
+            &mut wavg_a,
+            &mut old_wt_a,
+            &mut nobs_a,
+            owf_a,
+            nw_a,
+            adjust,
+            ignore_na,
+        );
+        ewma_step(
+            b[i],
+            &mut wavg_b,
+            &mut old_wt_b,
+            &mut nobs_b,
+            owf_b,
+            nw_b,
+            adjust,
+            ignore_na,
+        );
         ra[i] = if nobs_a >= min_a { wavg_a } else { f64::NAN };
         rb[i] = if nobs_b >= min_b { wavg_b } else { f64::NAN };
     }
@@ -277,7 +302,13 @@ pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1
 /// has none of the O(n·period) worst case of a track-and-rescan. `reduce` is
 /// monomorphised (inlined); `ident` is its identity (`+∞` for min, `−∞` for max).
 #[inline]
-fn van_herk(src: &[f64], period: usize, out: &mut [f64], reduce: impl Fn(f64, f64) -> f64, ident: f64) {
+fn van_herk(
+    src: &[f64],
+    period: usize,
+    out: &mut [f64],
+    reduce: impl Fn(f64, f64) -> f64,
+    ident: f64,
+) {
     let n = src.len();
     let mut prefix = vec![0.0f64; n];
     let mut suffix = vec![0.0f64; n];
@@ -626,7 +657,7 @@ mod tests {
         let d = array![1.0, f64::NAN, 3.0, 4.0];
         assert_eq!(ewma_com(d.view(), 1.0, true, true, 1).len(), 4); // adjust + ignore_na
         assert_eq!(ewma_com(d.view(), 1.0, false, false, 1).len(), 4); // neither
-        // a leading NaN keeps nobs below min_periods -> result[0] is NaN
+                                                                       // a leading NaN keeps nobs below min_periods -> result[0] is NaN
         let lead = array![f64::NAN, 2.0, 3.0];
         assert!(ewma_com(lead.view(), 1.0, true, false, 1)[0].is_nan());
     }
@@ -679,7 +710,11 @@ mod tests {
             return out;
         }
         for i in (p - 1)..n {
-            let mut acc = if max { f64::NEG_INFINITY } else { f64::INFINITY };
+            let mut acc = if max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
             let mut any = false;
             for &x in &d[i + 1 - p..=i] {
                 if !x.is_nan() {
@@ -732,7 +767,11 @@ mod tests {
         d[50] = f64::NAN;
         for p in [2usize, 5, 20] {
             for ddof in [0usize, 1] {
-                approx_eq_nan(&rolling_std(av(&d), p, ddof).to_vec(), &naive_std(&d, p, ddof), 1e-7);
+                approx_eq_nan(
+                    &rolling_std(av(&d), p, ddof).to_vec(),
+                    &naive_std(&d, p, ddof),
+                    1e-7,
+                );
             }
         }
     }
@@ -743,8 +782,16 @@ mod tests {
         d[10] = f64::NAN;
         d[11] = f64::NAN; // a fully-NaN sub-run
         for p in [1usize, 3, 10, 30] {
-            approx_eq_nan(&rolling_min(av(&d), p).to_vec(), &naive_minmax(&d, p, false), 0.0);
-            approx_eq_nan(&rolling_max(av(&d), p).to_vec(), &naive_minmax(&d, p, true), 0.0);
+            approx_eq_nan(
+                &rolling_min(av(&d), p).to_vec(),
+                &naive_minmax(&d, p, false),
+                0.0,
+            );
+            approx_eq_nan(
+                &rolling_max(av(&d), p).to_vec(),
+                &naive_minmax(&d, p, true),
+                0.0,
+            );
         }
     }
 
@@ -777,11 +824,27 @@ mod tests {
         let (a, b) = (av(&d), av(&g));
         // one input, two coms (the macd shape)
         let (f, s) = dual_ewma(a, 5.5, 12, a, 12.5, 26, true, false);
-        approx_eq_nan(&f.to_vec(), &ewma_com(a, 5.5, true, false, 12).to_vec(), 0.0);
-        approx_eq_nan(&s.to_vec(), &ewma_com(a, 12.5, true, false, 26).to_vec(), 0.0);
+        approx_eq_nan(
+            &f.to_vec(),
+            &ewma_com(a, 5.5, true, false, 12).to_vec(),
+            0.0,
+        );
+        approx_eq_nan(
+            &s.to_vec(),
+            &ewma_com(a, 12.5, true, false, 26).to_vec(),
+            0.0,
+        );
         // two inputs, one com (the rsi shape)
         let (ga, gb) = dual_ewma(a, 13.0, 14, b, 13.0, 14, true, false);
-        approx_eq_nan(&ga.to_vec(), &ewma_com(a, 13.0, true, false, 14).to_vec(), 0.0);
-        approx_eq_nan(&gb.to_vec(), &ewma_com(b, 13.0, true, false, 14).to_vec(), 0.0);
+        approx_eq_nan(
+            &ga.to_vec(),
+            &ewma_com(a, 13.0, true, false, 14).to_vec(),
+            0.0,
+        );
+        approx_eq_nan(
+            &gb.to_vec(),
+            &ewma_com(b, 13.0, true, false, 14).to_vec(),
+            0.0,
+        );
     }
 }
