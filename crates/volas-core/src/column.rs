@@ -230,6 +230,20 @@ impl Column {
             ))),
         }
     }
+
+    /// Value equality where `NaN == NaN` (pandas `equals` semantics), unlike the
+    /// derived `PartialEq` (which uses IEEE `NaN != NaN`).
+    pub fn equals(&self, other: &Column) -> bool {
+        match (self, other) {
+            (Column::F64(a), Column::F64(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| x == y || (x.is_nan() && y.is_nan()))
+            }
+            _ => self == other,
+        }
+    }
 }
 
 #[cfg(test)]

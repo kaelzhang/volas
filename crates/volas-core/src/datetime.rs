@@ -1,6 +1,6 @@
 //! Datetime parsing / formatting for the `DatetimeIndex` (UTC-naive, nanoseconds).
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Timelike};
 
 /// Parse a timestamp string to epoch nanoseconds (UTC, naive). Accepts the common
 /// `YYYY-MM-DD[ HH:MM:SS]` forms.
@@ -19,6 +19,24 @@ pub fn parse_ns(s: &str) -> Option<i64> {
         }
     }
     None
+}
+
+/// Decompose epoch nanoseconds into civil UTC parts
+/// `(year, month, day, hour, minute, second)` — used by time-frame unification.
+pub fn civil_parts(ns: i64) -> (i64, i64, i64, i64, i64, i64) {
+    let secs = ns.div_euclid(1_000_000_000);
+    let nsub = ns.rem_euclid(1_000_000_000) as u32;
+    let dt = DateTime::from_timestamp(secs, nsub)
+        .unwrap_or_default()
+        .naive_utc();
+    (
+        dt.year() as i64,
+        dt.month() as i64,
+        dt.day() as i64,
+        dt.hour() as i64,
+        dt.minute() as i64,
+        dt.second() as i64,
+    )
 }
 
 /// Format epoch nanoseconds as `YYYY-MM-DD HH:MM:SS` (UTC, naive).

@@ -221,6 +221,19 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Value equality (pandas `DataFrame.equals`): same column names + order,
+    /// same index, and value-equal columns (`NaN == NaN`).
+    pub fn equals(&self, other: &DataFrame) -> bool {
+        self.height == other.height
+            && self.names == other.names
+            && self.index.as_ref() == other.index.as_ref()
+            && self
+                .columns
+                .iter()
+                .zip(&other.columns)
+                .all(|(a, b)| a.equals(b))
+    }
+
     /// Flatten to a row-major (C-order) 2-D `f64` buffer for NumPy export,
     /// returning `(data, height, width)`.
     pub fn to_row_major_f64(&self) -> (Vec<f64>, usize, usize) {
