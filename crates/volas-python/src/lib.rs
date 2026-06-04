@@ -508,26 +508,18 @@ impl PyDataFrame {
     fn new(data: &Bound<'_, PyDict>, date_col: Option<String>) -> PyResult<Self> {
         let mut names = Vec::new();
         let mut columns = Vec::new();
-        let mut index: Option<Index> = None;
         for (k, v) in data.iter() {
-            let name: String = k.extract()?;
-            if Some(&name) == date_col.as_ref() {
-                let strings: Vec<String> = v.extract().map_err(|_| {
-                    PyTypeError::new_err(format!("date_col {name:?} must be datetime strings"))
-                })?;
-                let mut epochs = Vec::with_capacity(strings.len());
-                for s in &strings {
-                    epochs.push(datetime::parse_ns(s).ok_or_else(|| {
-                        PyValueError::new_err(format!("could not parse datetime {s:?}"))
-                    })?);
-                }
-                index = Some(Index::Datetime(epochs));
-                continue;
-            }
-            names.push(name);
+            names.push(k.extract::<String>()?);
             columns.push(pyany_to_column(&v)?);
         }
-        let df = DataFrame::new(names, columns, index).map_err(pyerr)?;
+        let mut df = DataFrame::new(names, columns, None).map_err(pyerr)?;
+        // Same string -> DatetimeIndex path as read_csv: parse the named column
+        // to datetime, then move it into the index.
+        if let Some(dc) = date_col {
+            let parsed = df.column(&dc).map_err(pyerr)?.to_datetime().map_err(pyerr)?;
+            df.set_column(&dc, parsed).map_err(pyerr)?;
+            df = df.set_index(&dc).map_err(pyerr)?;
+        }
         Ok(PyDataFrame { inner: df })
     }
 
