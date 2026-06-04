@@ -115,21 +115,49 @@ fn wilder_gain_loss(data: &[f64], period: usize) -> (Array1<f64>, Array1<f64>) {
 }
 
 /// Relative Strength Index (TA-Lib RSI): `100·avgGain/(avgGain+avgLoss)`.
+///
+/// Single-pass / single-allocation: seed the Wilder average gain & loss as the SMA
+/// of the first `period` bar-to-bar changes, emit from index `period`, then
+/// Wilder-smooth in place. Bit-identical to `wilder(gains)` / `wilder(losses)` +
+/// combine (same seed sum, same recursion, same flat-window guard) but ~one sixth
+/// the memory traffic — no `diff` / `gains` / `losses` / two smoothed arrays.
 pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
-    let (sg, sl) = wilder_gain_loss(close, period);
     let n = close.len();
-    let mut result = vec![f64::NAN; n];
-    for i in 0..n {
-        if sg[i].is_nan() || sl[i].is_nan() {
-            continue;
-        }
-        if sl[i].abs() < 1e-10 {
-            result[i] = 100.0;
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || n <= period {
+        return out;
+    }
+    let pf = period as f64;
+    let p1 = pf - 1.0;
+    let emit = |g: f64, l: f64| {
+        if l.abs() < 1e-10 {
+            100.0
         } else {
-            result[i] = 100.0 - 100.0 / (1.0 + sg[i] / sl[i]);
+            100.0 - 100.0 / (1.0 + g / l)
+        }
+    };
+    // Seed: SMA of the first `period` gains / losses (deltas at indices 1..=period).
+    let mut avg_gain = 0.0;
+    let mut avg_loss = 0.0;
+    for i in 1..=period {
+        let d = close[i] - close[i - 1];
+        if d > 0.0 {
+            avg_gain += d;
+        } else {
+            avg_loss -= d;
         }
     }
-    result
+    avg_gain /= pf;
+    avg_loss /= pf;
+    out[period] = emit(avg_gain, avg_loss);
+    for i in (period + 1)..n {
+        let d = close[i] - close[i - 1];
+        let (gain, loss) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
+        avg_gain = (avg_gain * p1 + gain) / pf;
+        avg_loss = (avg_loss * p1 + loss) / pf;
+        out[i] = emit(avg_gain, avg_loss);
+    }
+    out
 }
 
 /// Chande Momentum Oscillator (TA-Lib CMO): `100·(avgGain−avgLoss)/(avgGain+avgLoss)`
