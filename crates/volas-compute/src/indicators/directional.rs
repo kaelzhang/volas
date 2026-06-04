@@ -14,8 +14,16 @@
 fn dm1(high: &[f64], low: &[f64], i: usize) -> (f64, f64) {
     let diff_p = high[i] - high[i - 1];
     let diff_m = low[i - 1] - low[i];
-    let plus = if diff_p > 0.0 && diff_p > diff_m { diff_p } else { 0.0 };
-    let minus = if diff_m > 0.0 && diff_p < diff_m { diff_m } else { 0.0 };
+    let plus = if diff_p > 0.0 && diff_p > diff_m {
+        diff_p
+    } else {
+        0.0
+    };
+    let minus = if diff_m > 0.0 && diff_p < diff_m {
+        diff_m
+    } else {
+        0.0
+    };
     (plus, minus)
 }
 
@@ -93,12 +101,48 @@ pub fn minus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<
     di(&sm, &st, period)
 }
 
+/// Fused Wilder sums of +DM, −DM and TR in a single pass — `dm1` (which yields both
+/// directional moves) is evaluated once per bar instead of twice, and the three
+/// division-free recurrences share one traversal. Bit-identical to three
+/// [`wilder_sum`] calls.
+fn dm_tr_sums(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let n = high.len();
+    let (mut sp, mut sm, mut st) = (vec![f64::NAN; n], vec![f64::NAN; n], vec![f64::NAN; n]);
+    if period == 0 || period >= n {
+        return (sp, sm, st);
+    }
+    let (mut p, mut m, mut t) = (0.0, 0.0, 0.0);
+    for i in 1..period {
+        let (dp, dm) = dm1(high, low, i);
+        p += dp;
+        m += dm;
+        t += tr1(high, low, close, i);
+    }
+    sp[period - 1] = p;
+    sm[period - 1] = m;
+    st[period - 1] = t;
+    let a = 1.0 - 1.0 / period as f64;
+    for i in period..n {
+        let (dp, dm) = dm1(high, low, i);
+        p = p.mul_add(a, dp);
+        m = m.mul_add(a, dm);
+        t = t.mul_add(a, tr1(high, low, close, i));
+        sp[i] = p;
+        sm[i] = m;
+        st[i] = t;
+    }
+    (sp, sm, st)
+}
+
 /// Directional Movement Index `DX = 100·|+DI − −DI| / (+DI + −DI)` (TA-Lib DX); a ~0
 /// TR or ~0 DI-sum yields 0. Lookback `period`.
 pub fn dx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let sp = wilder_sum(high.len(), period, |i| dm1(high, low, i).0);
-    let sm = wilder_sum(high.len(), period, |i| dm1(high, low, i).1);
-    let st = wilder_sum(high.len(), period, |i| tr1(high, low, close, i));
+    let (sp, sm, st) = dm_tr_sums(high, low, close, period);
     let n = sp.len();
     let mut out = vec![f64::NAN; n];
     for i in period..n {
@@ -137,8 +181,13 @@ pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     }
     let mut prev = sum / pf;
     out[first] = prev;
+    // `(prev*(period-1) + dx)/period` as `prev*a + dx*b` (precomputed reciprocals,
+    // fused): no per-element division on the ADX recurrence. Contractive -> within
+    // the 1e-9 parity tolerance.
+    let a = (pf - 1.0) / pf;
+    let b = 1.0 / pf;
     for i in (2 * period)..n {
-        prev = (prev * (pf - 1.0) + dxv[i]) / pf;
+        prev = prev.mul_add(a, dxv[i] * b);
         out[i] = prev;
     }
     out
