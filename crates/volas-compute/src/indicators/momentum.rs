@@ -150,27 +150,23 @@ pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
 /// most-recent highest high / lowest low in `[i-period, i]` gives "days since the
 /// extreme", and up/down = `(100/period)·(period − daysSince)`. Both NaN until index
 /// `period`; ties resolve to the most recent bar, matching TA-Lib's tracker.
-fn aroon_up_down(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
+/// Track-and-rescan rolling argmax(high) / argmin(low) over the window `[i-period, i]`
+/// (the algorithm TA-Lib's Aroon family uses): keep each running extremum's index and
+/// rescan its window only when it expires. O(n) amortized with a very low constant on
+/// real data. Ties keep the *latest* index (`>=` / `<=`, matching TA-Lib), and the
+/// rescans scan the window as a slice (no per-element bounds checks). `emit(i, hi_idx,
+/// lo_idx)` fires for every output bar `i >= period`. Shared by the Aroon up/down lines
+/// and the oscillator so the dual extremum sweep is written once.
+fn aroon_track(high: &[f64], low: &[f64], period: usize, mut emit: impl FnMut(usize, usize, usize)) {
     let n = high.len();
-    let mut up = vec![f64::NAN; n];
-    let mut down = vec![f64::NAN; n];
     if period == 0 {
-        return (up, down);
+        return;
     }
-    let factor = 100.0 / period as f64;
-    let pf = period as f64;
-    // Track-and-rescan rolling argmax / argmin over the window `[i-period, i]` (the
-    // algorithm TA-Lib uses): keep the running extremum's index; rescan the window
-    // only when it expires. O(n) amortized with a very low constant on real data —
-    // and bounded by the small fixed window. Ties keep the *latest* index (`>=` /
-    // `<=`), so it is bit-identical to the original per-window rescan.
     let (mut hi_idx, mut hi) = (0usize, f64::NEG_INFINITY);
     let (mut lo_idx, mut lo_v) = (0usize, f64::INFINITY);
     for i in 0..n {
         let wstart = i.saturating_sub(period);
         if hi_idx < wstart {
-            // Rescan `[wstart, i)` as a slice — no per-element bounds checks on this
-            // O(period) hot path (`>=` keeps the latest index on ties).
             let win = &high[wstart..i];
             let mut h = f64::NEG_INFINITY;
             let mut hidx = wstart;
@@ -205,10 +201,24 @@ fn aroon_up_down(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64
             lo_idx = i;
         }
         if i >= period {
-            up[i] = factor * (pf - (i - hi_idx) as f64);
-            down[i] = factor * (pf - (i - lo_idx) as f64);
+            emit(i, hi_idx, lo_idx);
         }
     }
+}
+
+fn aroon_up_down(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
+    let n = high.len();
+    let mut up = vec![f64::NAN; n];
+    let mut down = vec![f64::NAN; n];
+    if period == 0 {
+        return (up, down);
+    }
+    let factor = 100.0 / period as f64;
+    let pf = period as f64;
+    aroon_track(high, low, period, |i, hi_idx, lo_idx| {
+        up[i] = factor * (pf - (i - hi_idx) as f64);
+        down[i] = factor * (pf - (i - lo_idx) as f64);
+    });
     (up, down)
 }
 
@@ -222,10 +232,20 @@ pub fn aroon_down(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     aroon_up_down(high, low, period).1
 }
 
-/// Aroon Oscillator: `aroonUp − aroonDown` (TA-Lib AROONOSC). Lookback `period`.
+/// Aroon Oscillator (TA-Lib AROONOSC): `factor·(hiIdx − loIdx)` — the algebraic identity
+/// of `aroonUp − aroonDown` that TA-Lib evaluates directly, so it materialises neither
+/// line nor a subtraction pass. Lookback `period`.
 pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    let (up, down) = aroon_up_down(high, low, period);
-    up.iter().zip(&down).map(|(u, d)| u - d).collect()
+    let n = high.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 {
+        return out;
+    }
+    let factor = 100.0 / period as f64;
+    aroon_track(high, low, period, |i, hi_idx, lo_idx| {
+        out[i] = factor * (hi_idx as i64 - lo_idx as i64) as f64;
+    });
+    out
 }
 
 /// Money Flow Index (TA-Lib MFI): `100·posMF/(posMF+negMF)` over `period`, where each
