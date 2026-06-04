@@ -219,8 +219,9 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("increase", None) => (vec![Int(1), I64(1)], vec!["close"]),
         ("style", None) => (vec![Required], vec!["open", "close"]), // arg form: style:bullish
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]), // style.bullish
-        // Candlestick patterns (style.<pattern> / cdl.<pattern>).
-        ("style", Some("doji" | "marubozu")) => {
+        // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
+        // compute layer's pattern registry, so new patterns need no change here.
+        ("style", Some(p)) if volas_compute::indicators::candle_pattern(p).is_some() => {
             (vec![], vec!["open", "high", "low", "close"])
         }
         ("repeat", None) => (vec![Int(1)], vec![]),

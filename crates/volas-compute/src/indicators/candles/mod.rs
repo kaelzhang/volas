@@ -16,6 +16,27 @@
 mod one_bar;
 pub use one_bar::*;
 
+/// A candlestick-pattern recogniser over `(open, high, low, close)`.
+pub type CandleFn = fn(&[f64], &[f64], &[f64], &[f64]) -> Vec<f64>;
+
+/// Resolve a pattern by its (post-`CDL`, lower-case) name to its recogniser and
+/// lookback. The single source of truth for which `style.<pattern>` / `cdl.<pattern>`
+/// names exist — the directive layer (spec/exec/lookback) queries this, so adding a
+/// pattern is one entry here plus its function.
+pub fn candle_pattern(name: &str) -> Option<(CandleFn, usize)> {
+    let entry: (CandleFn, usize) = match name {
+        "doji" => (cdl_doji, 10),
+        "marubozu" => (cdl_marubozu, 10),
+        "closingmarubozu" => (cdl_closingmarubozu, 10),
+        "longline" => (cdl_longline, 10),
+        "shortline" => (cdl_shortline, 10),
+        "highwave" => (cdl_highwave, 10),
+        "spinningtop" => (cdl_spinningtop, 10),
+        _ => return None,
+    };
+    Some(entry)
+}
+
 /// The range a candle-setting measures. The full set mirrors TA-Lib's settings table;
 /// a variant is only *constructed* once a pattern needing it lands, so allow the lint.
 #[derive(Clone, Copy)]
@@ -51,9 +72,7 @@ const EQUAL: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.05 };
 
 // Settings not yet consumed by a landed pattern (shrinks to nothing as patterns arrive).
 #[allow(dead_code)]
-const _UNUSED_SETTINGS: [Setting; 8] = [
-    BODY_VERY_LONG, BODY_SHORT, SHADOW_LONG, SHADOW_VERY_LONG, SHADOW_SHORT, NEAR, FAR, EQUAL,
-];
+const _UNUSED_SETTINGS: [Setting; 5] = [BODY_VERY_LONG, SHADOW_LONG, NEAR, FAR, EQUAL];
 
 #[inline]
 fn realbody(o: &[f64], c: &[f64], i: usize) -> f64 {

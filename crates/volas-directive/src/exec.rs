@@ -189,9 +189,6 @@ fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
     }
 }
 
-fn arg_str<'a>(args: &'a [Option<String>], i: usize) -> Result<&'a str> {
-    arg_at(args, i).ok_or_else(|| VolasError::Value(format!("missing required argument #{i}")))
-}
 
 /// Dispatch a TA-Lib MA-type code to the matching moving average over `data`.
 /// Codes follow TA-Lib's `TA_MAType`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
@@ -445,16 +442,13 @@ fn exec_command(
             arg_i64(args, 1, 1)? as i32,
         )),
         // Candlestick patterns: style.<pattern> / cdl.<pattern>. Output f64 -100/0/100.
-        ("style", Some(pat @ ("doji" | "marubozu"))) => {
+        ("style", Some(pat)) if ind::candle_pattern(pat).is_some() => {
+            let (recogniser, _) = ind::candle_pattern(pat).unwrap();
             let open = series_f64(df, series, 0, "open")?;
             let high = series_f64(df, series, 1, "high")?;
             let low = series_f64(df, series, 2, "low")?;
             let close = series_f64(df, series, 3, "close")?;
-            let v = match pat {
-                "doji" => ind::cdl_doji(&open, &high, &low, &close),
-                _ => ind::cdl_marubozu(&open, &high, &low, &close),
-            };
-            f64col(v)
+            f64col(recogniser(&open, &high, &low, &close))
         }
 
         ("style", sub) => {

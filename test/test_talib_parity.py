@@ -267,7 +267,13 @@ def test_candlestick_patterns_match_talib(ohlc):
         assert np.all(np.isnan(got[:lb])), 'pattern warm-up is NaN'
         np.testing.assert_array_equal(got[lb:], np.asarray(want, dtype=float)[lb:])
 
-    for name, fn in [('doji', talib.CDLDOJI), ('marubozu', talib.CDLMARUBOZU)]:
+    patterns = [
+        ('doji', talib.CDLDOJI), ('marubozu', talib.CDLMARUBOZU),
+        ('closingmarubozu', talib.CDLCLOSINGMARUBOZU), ('longline', talib.CDLLONGLINE),
+        ('shortline', talib.CDLSHORTLINE), ('highwave', talib.CDLHIGHWAVE),
+        ('spinningtop', talib.CDLSPINNINGTOP),
+    ]
+    for name, fn in patterns:
         want = fn(o, h, l, c)
         pat(df.exec(f'style.{name}'), want, 10)
         pat(df.exec(f'cdl.{name}'), want, 10)  # the cdl alias matches
