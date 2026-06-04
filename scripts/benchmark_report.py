@@ -27,24 +27,30 @@ from pathlib import Path
 
 # Fixed candidate order + colour, so the legend and bar colours are stable across
 # every chart in the report.
-CANDIDATE_ORDER = ['pandas', 'stock_pandas', 'polars', 'talib', 'duckdb', 'volas']
+CANDIDATE_ORDER = ['pandas', 'stock_pandas', 'polars', 'talib', 'volas']
 COLORS = {
     'pandas': '#5B8FF9',
     'stock_pandas': '#5AD8A6',
     'polars': '#5D7092',
     'talib': '#F6BD16',
-    'duckdb': '#E8684A',
     'volas': '#6F5EF9',
 }
+# Section order in the report: append first, then batch, then the full coverage.
+CATEGORY_ORDER = ['append', 'calc', 'coverage']
 CATEGORY_TITLES = {
     'calc': 'Batch indicator computation',
     'append': 'Append one new bar → updated indicator',
+    'coverage': 'Full coverage — volas vs TA-Lib',
 }
 CATEGORY_BLURB = {
-    'calc': 'Compute the indicator over the whole series.',
+    'calc': 'Compute the indicator over the whole series, across every library.',
     'append': ('A new bar arrives. <code>volas</code> / <code>stock_pandas</code> refresh their '
                'cached column incrementally (O(lookback)); the libraries with no indicator cache '
-               '(pandas / polars / talib / duckdb) must recompute the series (O(n)).'),
+               '(pandas / polars / talib) must recompute the series (O(n)). Every candidate is '
+               'measured with the same round count so the <code>rounds</code> column is comparable.'),
+    'coverage': ('Every indicator <strong>both volas and TA-Lib implement</strong> (the set the parity '
+                 'suite aligns), batch-computed and timed against TA-Lib only — an indicator only one '
+                 'of them has is omitted. <code>volas vs TA-Lib</code> &gt; 1.00× means volas is faster.'),
 }
 
 
@@ -67,7 +73,12 @@ def parse(data: dict) -> dict:
     groups: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     for b in data['benchmarks']:
         name = b['name']
-        category = 'calc' if name.startswith('test_calc') else 'append'
+        if name.startswith('test_calc'):
+            category = 'calc'
+        elif name.startswith('test_coverage'):
+            category = 'coverage'
+        else:
+            category = 'append'
         params = b.get('params') or {}
         indicator = params.get('indicator', name)
         candidate = params.get('candidate', name)
@@ -133,6 +144,33 @@ def _table(entries: list[tuple[str, dict]]) -> str:
     return ''.join(out)
 
 
+def _coverage_section(by_indicator: dict) -> str:
+    """A single volas-vs-TA-Lib table over the whole coverage set, slowest-volas
+    (the optimization targets) first; a win/loss summary on top."""
+    rows = []
+    for ind, entries in by_indicator.items():
+        d = dict(entries)
+        if 'volas' not in d or 'talib' not in d:
+            continue
+        v, t = d['volas']['median'], d['talib']['median']
+        rows.append((ind, v, t, (t / v) if v > 0 else 0.0))
+    rows.sort(key=lambda r: r[3])  # ascending speedup: where volas trails, first
+    wins = sum(1 for *_, s in rows if s >= 1.0)
+    body = []
+    for ind, v, t, s in rows:
+        cls = 'win' if s >= 1.0 else 'loss'
+        body.append(
+            f'<tr><td class="ind-name">{html.escape(ind)}</td>'
+            f'<td>{_fmt_time(v)}</td><td>{_fmt_time(t)}</td>'
+            f'<td class="perf {cls}">{s:.2f}×</td></tr>'
+        )
+    summary = (f'<p class="blurb">volas beats TA-Lib on <strong>{wins} / {len(rows)}</strong> '
+               f'covered indicators.</p>')
+    return (f'{summary}<table class="stats cov"><thead><tr>'
+            f'<th>Indicator</th><th>volas</th><th>TA-Lib</th><th>volas vs TA-Lib</th>'
+            f'</tr></thead><tbody>{"".join(body)}</tbody></table>')
+
+
 def _legend() -> str:
     items = ''.join(
         f'<span class="leg"><span class="dot" style="background:{COLORS[c]}"></span>{c}</span>'
@@ -149,19 +187,21 @@ def render(data: dict) -> str:
     pyver = machine.get('python_version', '')
 
     sections = []
-    for category in ['calc', 'append']:
+    for category in CATEGORY_ORDER:
         if category not in groups:
             continue
-        blocks = []
-        for indicator in sorted(groups[category]):
-            entries = groups[category][indicator]
-            blocks.append(
+        blurb = f'<p class="blurb">{CATEGORY_BLURB[category]}</p>'
+        if category == 'coverage':
+            inner = _coverage_section(groups[category])
+        else:
+            inner = ''.join(
                 f'<section class="ind"><h3>{html.escape(indicator)}</h3>'
-                f'<div class="grid">{_bar_chart(entries)}{_table(entries)}</div></section>'
+                f'<div class="grid">{_bar_chart(groups[category][indicator])}'
+                f'{_table(groups[category][indicator])}</div></section>'
+                for indicator in sorted(groups[category])
             )
         sections.append(
-            f'<section class="cat"><h2>{CATEGORY_TITLES[category]}</h2>'
-            f'<p class="blurb">{CATEGORY_BLURB[category]}</p>{"".join(blocks)}</section>'
+            f'<section class="cat"><h2>{CATEGORY_TITLES[category]}</h2>{blurb}{inner}</section>'
         )
 
     return f"""<!doctype html>
@@ -197,6 +237,9 @@ def render(data: dict) -> str:
   .stats th:first-child, .stats td:first-child {{ text-align: left; }}
   .stats th {{ color: #6a7280; font-weight: 600; font-size: 12px; }}
   .stats .perf {{ font-weight: 700; }}
+  .stats.cov td.ind-name {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }}
+  .stats .perf.win {{ color: #1f9d57; }}
+  .stats .perf.loss {{ color: #d4493f; }}
   footer {{ margin-top: 40px; color: #9aa0aa; font-size: 12px; }}
 </style></head>
 <body><div class="wrap">
@@ -208,13 +251,6 @@ def render(data: dict) -> str:
     <code>1.00×</code> and each faster candidate as <code>{{slowest ÷ this}}×</code>.
   </div>
   {_legend()}
-  <p class="note"><strong>On DuckDB:</strong> it is a general analytical-query engine
-  (joins / group-bys over large tables), measured here well outside its design
-  point — a single ~16&nbsp;KB column with microseconds of real work. Its fixed
-  per-query cost (plan + window operator + materialize) dominates, so it trails on
-  this microbenchmark even with prepared statements; the gap shrinks as data grows
-  (≈120× behind TA-Lib at 2&nbsp;K rows, ≈14× at 1&nbsp;M). It is included for
-  coverage, not because a SQL window is the right tool for streaming indicators.</p>
   {''.join(sections)}
   <footer>Generated by <code>scripts/benchmark_report.py</code> from pytest-benchmark output.</footer>
 </div></body></html>

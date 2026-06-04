@@ -64,7 +64,6 @@ dev = [
 # the group is effectively optional.
 benchmark = [
   "polars>=1.0",
-  "duckdb>=1.0",
 ]
 
 [tool.maturin]

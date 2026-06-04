@@ -1,29 +1,20 @@
-"""Multi-library performance comparison for OHLCV technical-indicator
-computation, plus the incremental "append one new bar" path.
+"""Multi-library performance comparison for OHLCV technical-indicator computation.
 
-Candidates (a library that is not importable, or an indicator a candidate cannot
-express, is simply skipped — the web report omits it):
+Three report sections:
 
-  * ``pandas``       — idiomatic per-indicator pandas.
-  * ``stock_pandas`` — ``StockDataFrame`` directive engine (Rust backend).
-  * ``polars``       — polars rolling / ewm expressions.
-  * ``talib``        — TA-Lib (the C library) via its Python wheel.
-  * ``duckdb``       — SQL window functions. DuckDB is a general analytical-query
-                        engine, not an indicator library, and ~100x slower on this
-                        kind of microbenchmark. It is included **only on the first
-                        indicator's ``calc`` test**, to document its positioning,
-                        and skipped everywhere else (all other ``calc`` tests and
-                        the entire ``append`` group).
-  * ``volas``        — ``volas.DataFrame`` directive kernel.
+  1. ``append`` — a new bar arrives → produce the updated indicator. ``volas`` and
+     ``stock_pandas`` refresh their cached column incrementally (``O(lookback)``);
+     pandas / polars / talib have no indicator cache, so a new bar means
+     recomputing the series (``O(n)`` — the honest cost for them). Every candidate
+     is measured through ``pedantic`` with the **same** round count, so the
+     ``rounds`` column is comparable (see ``APPEND_ROUNDS``).
+  2. ``calc`` — compute the indicator over the whole series (batch), all libraries.
+  3. ``coverage`` — every indicator **both volas and TA-Lib implement** (the set the
+     parity suite aligns), timed **volas vs TA-Lib only**. An indicator only one of
+     them has is omitted.
 
-Two benchmark groups per indicator:
-
-  * ``calc``   — compute the indicator over the whole series (batch).
-  * ``append`` — a new bar arrives → produce the updated indicator. ``volas`` and
-                 ``stock_pandas`` refresh their cached column incrementally
-                 (``O(lookback)``); the libraries with no indicator cache
-                 (pandas / polars / talib) must recompute the series (``O(n)``) —
-                 that *is* the honest cost of a new bar for them.
+Candidates: ``pandas`` (idiomatic), ``stock_pandas`` (StockDataFrame), ``polars``
+(rolling / ewm), ``talib`` (the C library), ``volas`` (the directive kernel).
 
 Run::
 
@@ -31,7 +22,7 @@ Run::
     make benchmark WEB_REPORT=1     # also (re)generate benchmark-report.html
 
 pandas / stock_pandas / talib live in the ``dev`` extra (the parity tests use them
-as oracles); polars / duckdb live in the ``benchmark`` extra.
+as oracles); polars lives in the ``benchmark`` extra.
 """
 
 from pathlib import Path
@@ -42,7 +33,6 @@ import pytest
 from stock_pandas import StockDataFrame
 from volas import DataFrame as VolasDataFrame
 
-# Optional comparison libraries — absent ones are skipped, not errors.
 try:
     import polars as pl
 except ImportError:  # pragma: no cover
@@ -51,10 +41,6 @@ try:
     import talib
 except ImportError:  # pragma: no cover
     talib = None
-try:
-    import duckdb
-except ImportError:  # pragma: no cover
-    duckdb = None
 
 DATA = Path(__file__).parent / 'data' / 'tencent_full.csv'
 COLUMNS = ['open', 'high', 'low', 'close', 'volume']
@@ -67,16 +53,22 @@ INDICATORS = [
     'ma:20', 'ema:12', 'macd', 'macd.signal', 'boll.upper',
     'bbw', 'rsi:14', 'atr:14', 'llv:10', 'hhv:10',
 ]
-CANDIDATES = ['pandas', 'stock_pandas', 'polars', 'talib', 'duckdb', 'volas']
+CANDIDATES = ['pandas', 'stock_pandas', 'polars', 'talib', 'volas']
 
 HAVE = {
     'pandas': True,
     'stock_pandas': True,
     'polars': pl is not None,
     'talib': talib is not None,
-    'duckdb': duckdb is not None,
     'volas': True,
 }
+
+# Every append candidate is measured through `pedantic` with this fixed round count
+# (volas / stock_pandas need fresh per-round state, so they cannot use the
+# auto-calibrated `benchmark()` the recompute candidates would otherwise get —
+# that asymmetry is exactly why the rounds used to be 50 vs ~30k). A uniform count
+# keeps the timings comparable and stable.
+APPEND_ROUNDS = 500
 
 
 # --- pandas (idiomatic, per indicator) -------------------------------------
@@ -172,7 +164,7 @@ def _pl_calc(indicator):
     return lambda pf: pf.select(expr)
 
 
-# --- TA-Lib (the C library) -------------------------------------------------
+# --- TA-Lib (the C library): the core 10 -----------------------------------
 
 def _talib_calc(indicator):
     if talib is None:
@@ -180,70 +172,20 @@ def _talib_calc(indicator):
 
     def run(a):
         c, h, lo = a['close'], a['high'], a['low']
-        if indicator == 'ma:20':
-            return talib.SMA(c, 20)
-        if indicator == 'ema:12':
-            return talib.EMA(c, 12)
-        if indicator == 'macd':
-            return talib.MACD(c, 12, 26, 9)[0]
-        if indicator == 'macd.signal':
-            return talib.MACD(c, 12, 26, 9)[1]
-        if indicator == 'boll.upper':
-            return talib.BBANDS(c, 20, 2.0, 2.0)[0]
-        if indicator == 'bbw':
-            u, m, low = talib.BBANDS(c, 20, 2.0, 2.0)
-            return (u - low) / m
-        if indicator == 'rsi:14':
-            return talib.RSI(c, 14)
-        if indicator == 'atr:14':
-            return talib.ATR(h, lo, c, 14)
-        if indicator == 'llv:10':
-            return talib.MIN(lo, 10)
-        if indicator == 'hhv:10':
-            return talib.MAX(h, 10)
-        raise KeyError(indicator)
+        return {
+            'ma:20': lambda: talib.SMA(c, 20),
+            'ema:12': lambda: talib.EMA(c, 12),
+            'macd': lambda: talib.MACD(c, 12, 26, 9)[0],
+            'macd.signal': lambda: talib.MACD(c, 12, 26, 9)[1],
+            'boll.upper': lambda: talib.BBANDS(c, 20, 2.0, 2.0)[0],
+            'bbw': lambda: (lambda u, m, low: (u - low) / m)(*talib.BBANDS(c, 20, 2.0, 2.0)),
+            'rsi:14': lambda: talib.RSI(c, 14),
+            'atr:14': lambda: talib.ATR(h, lo, c, 14),
+            'llv:10': lambda: talib.MIN(lo, 10),
+            'hhv:10': lambda: talib.MAX(h, 10),
+        }[indicator]()
 
     return run
-
-
-# --- DuckDB (SQL window functions; non-recursive indicators only) ----------
-
-# An ema / macd / rsi / atr is a recurrence that a plain SQL window cannot
-# express, so duckdb is offered only for the windowed (non-recursive) indicators.
-_DUCK_SQL = {
-    'ma:20': 'avg(close) OVER (ORDER BY rn ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)',
-    'boll.upper': ('avg(close) OVER w + 2.0 * stddev_pop(close) OVER w'),
-    'bbw': '4.0 * stddev_pop(close) OVER w / avg(close) OVER w',
-    'llv:10': 'min(low) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW)',
-    'hhv:10': 'max(high) OVER (ORDER BY rn ROWS BETWEEN 9 PRECEDING AND CURRENT ROW)',
-}
-
-
-def _duck_sql(indicator):
-    expr = _DUCK_SQL[indicator]
-    window = 'WINDOW w AS (ORDER BY rn ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)'
-    tail = f' {window}' if ' OVER w ' in f' {expr} ' else ''
-    return f'SELECT {expr} AS v FROM bars{tail} ORDER BY rn'
-
-
-def _duck_name(indicator):
-    """A safe PREPARE-statement name for an indicator key."""
-    return 'd_' + ''.join(ch if ch.isalnum() else '_' for ch in indicator)
-
-
-def _duck_calc(indicator):
-    # Run a PREPAREd statement (prepared once in the `states` fixture) so the
-    # per-call cost excludes SQL parsing — DuckDB's fairest idiom for a repeated
-    # query. Even so its fixed per-query overhead (plan + window operator +
-    # materialize back to NumPy) dwarfs a few microseconds of real work on a
-    # ~16 KB single column: DuckDB is a large-analytical-query engine being
-    # measured well outside its design point, not used "wrong" (verified: the gap
-    # vs talib shrinks from ~120x at 2 K rows to ~14x at 1 M as the fixed overhead
-    # amortizes; prepared + no redundant sort only trims ~30%).
-    if duckdb is None or indicator not in _DUCK_SQL:
-        return None
-    name = _duck_name(indicator)
-    return lambda con, n=name: con.execute(f'EXECUTE {n}').fetchnumpy()
 
 
 # --- the calc registry: CALC[candidate][indicator] = fn | None -------------
@@ -254,14 +196,109 @@ def _calc_registry():
         'stock_pandas': {k: (lambda spd, d=k: spd.exec(d, create_column=False)) for k in INDICATORS},
         'polars': {k: _pl_calc(k) for k in INDICATORS} if pl else {},
         'talib': {k: _talib_calc(k) for k in INDICATORS} if talib else {},
-        'duckdb': {k: _duck_calc(k) for k in INDICATORS} if duckdb else {},
         'volas': {k: (lambda v, d=k: v.exec(d)) for k in INDICATORS},
     }
-    # prune the indicators a candidate cannot express
     return {cand: {k: fn for k, fn in m.items() if fn is not None} for cand, m in reg.items()}
 
 
 CALC = _calc_registry()
+
+
+# --- coverage: every indicator BOTH volas and TA-Lib implement -------------
+#
+# (directive, TA-Lib call) pairs drawn from the TA-Lib parity suite — the
+# authoritative volas∩TA-Lib set, beyond the core 10 above. Timed volas-vs-TA-Lib
+# only. A multi-output TA-Lib function indexes the output the directive selects.
+
+def _coverage_pairs():
+    if talib is None:
+        return []
+    c, h, lo, o, v = (ARR['close'], ARR['high'], ARR['low'], ARR['open'], ARR['volume'])
+    return [
+        # price transforms
+        ('avgprice', lambda: talib.AVGPRICE(o, h, lo, c)),
+        ('medprice', lambda: talib.MEDPRICE(h, lo)),
+        ('typprice', lambda: talib.TYPPRICE(h, lo, c)),
+        ('wclprice', lambda: talib.WCLPRICE(h, lo, c)),
+        # overlap moving averages
+        ('wma:30', lambda: talib.WMA(c, 30)),
+        ('dema:30', lambda: talib.DEMA(c, 30)),
+        ('tema:30', lambda: talib.TEMA(c, 30)),
+        ('trima:30', lambda: talib.TRIMA(c, 30)),
+        ('t3:5', lambda: talib.T3(c, 5)),
+        ('kama:30', lambda: talib.KAMA(c, 30)),
+        ('sar', lambda: talib.SAR(h, lo)),
+        # linear regression family
+        ('linearreg:14', lambda: talib.LINEARREG(c, 14)),
+        ('linearreg_slope:14', lambda: talib.LINEARREG_SLOPE(c, 14)),
+        ('linearreg_intercept:14', lambda: talib.LINEARREG_INTERCEPT(c, 14)),
+        ('linearreg_angle:14', lambda: talib.LINEARREG_ANGLE(c, 14)),
+        ('tsf:14', lambda: talib.TSF(c, 14)),
+        # volume
+        ('obv', lambda: talib.OBV(c, v)),
+        ('ad', lambda: talib.AD(h, lo, c, v)),
+        ('adosc', lambda: talib.ADOSC(h, lo, c, v)),
+        # variance / stddev
+        ('var:5', lambda: talib.VAR(c, 5)),
+        ('stddev:5', lambda: talib.STDDEV(c, 5)),
+        # math operators
+        ('sum:30', lambda: talib.SUM(c, 30)),
+        ('maxindex:30', lambda: talib.MAXINDEX(c, 30)),
+        ('minindex:30', lambda: talib.MININDEX(c, 30)),
+        ('minmax.min:30', lambda: talib.MINMAX(c, 30)[0]),
+        ('minmax.max:30', lambda: talib.MINMAX(c, 30)[1]),
+        # aroon
+        ('aroon.up:14', lambda: talib.AROON(h, lo, 14)[1]),
+        ('aroon.down:14', lambda: talib.AROON(h, lo, 14)[0]),
+        ('aroonosc:14', lambda: talib.AROONOSC(h, lo, 14)),
+        # price oscillators
+        ('apo', lambda: talib.APO(c, 12, 26, 0)),
+        ('ppo', lambda: talib.PPO(c, 12, 26, 0)),
+        # stochastics
+        ('stoch.k', lambda: talib.STOCH(h, lo, c)[0]),
+        ('stoch.d', lambda: talib.STOCH(h, lo, c)[1]),
+        ('stochf.k', lambda: talib.STOCHF(h, lo, c)[0]),
+        ('stochf.d', lambda: talib.STOCHF(h, lo, c)[1]),
+        ('stochrsi.k', lambda: talib.STOCHRSI(c)[0]),
+        ('stochrsi.d', lambda: talib.STOCHRSI(c)[1]),
+        # correlation / beta
+        ('correl:30@high,low', lambda: talib.CORREL(h, lo, 30)),
+        ('beta:5@high,low', lambda: talib.BETA(h, lo, 5)),
+        # directional movement
+        ('plus_dm:14', lambda: talib.PLUS_DM(h, lo, 14)),
+        ('minus_dm:14', lambda: talib.MINUS_DM(h, lo, 14)),
+        ('plus_di:14', lambda: talib.PLUS_DI(h, lo, c, 14)),
+        ('minus_di:14', lambda: talib.MINUS_DI(h, lo, c, 14)),
+        ('dx:14', lambda: talib.DX(h, lo, c, 14)),
+        ('adx:14', lambda: talib.ADX(h, lo, c, 14)),
+        ('adxr:14', lambda: talib.ADXR(h, lo, c, 14)),
+        # acceleration bands
+        ('accbands.upper:20', lambda: talib.ACCBANDS(h, lo, c, 20)[0]),
+        ('accbands:20', lambda: talib.ACCBANDS(h, lo, c, 20)[1]),
+        ('accbands.lower:20', lambda: talib.ACCBANDS(h, lo, c, 20)[2]),
+        # other oscillators
+        ('cci:14', lambda: talib.CCI(h, lo, c, 14)),
+        ('mfi:14', lambda: talib.MFI(h, lo, c, v, 14)),
+        ('trix:30', lambda: talib.TRIX(c, 30)),
+        ('ultosc', lambda: talib.ULTOSC(h, lo, c)),
+        ('bop', lambda: talib.BOP(o, h, lo, c)),
+        ('cmo:14', lambda: talib.CMO(c, 14)),
+        ('natr:14', lambda: talib.NATR(h, lo, c, 14)),
+        # range based
+        ('midpoint:14', lambda: talib.MIDPOINT(c, 14)),
+        ('midprice:14', lambda: talib.MIDPRICE(h, lo, 14)),
+        ('willr:14', lambda: talib.WILLR(h, lo, c, 14)),
+        # momentum
+        ('mom:10', lambda: talib.MOM(c, 10)),
+        ('roc:10', lambda: talib.ROC(c, 10)),
+        ('rocp:10', lambda: talib.ROCP(c, 10)),
+        ('rocr:10', lambda: talib.ROCR(c, 10)),
+        ('rocr100:10', lambda: talib.ROCR100(c, 10)),
+    ]
+
+
+COVERAGE = dict(_coverage_pairs())
+COVERAGE_IDS = list(COVERAGE)
 
 
 # --- per-candidate state ----------------------------------------------------
@@ -277,39 +314,10 @@ def states():
         st['polars'] = pl.DataFrame({c: ARR[c] for c in COLUMNS})
     if talib is not None:
         st['talib'] = ARR
-    if duckdb is not None:
-        con = duckdb.connect()
-        con.register('csv_df', pd.DataFrame({c: ARR[c] for c in COLUMNS}))
-        con.execute('CREATE TABLE bars AS SELECT row_number() OVER () AS rn, * FROM csv_df')
-        con.unregister('csv_df')
-        # Prepare each supported query once so the timed call is a plain EXECUTE.
-        for ind in _DUCK_SQL:
-            con.execute(f'PREPARE {_duck_name(ind)} AS {_duck_sql(ind)}')
-        st['duckdb'] = con
     return st
 
 
-# --- group 1: batch indicator computation ----------------------------------
-
-@pytest.mark.parametrize('candidate', CANDIDATES)
-@pytest.mark.parametrize('indicator', INDICATORS)
-def test_calc(benchmark, states, indicator, candidate):
-    if not HAVE[candidate]:
-        pytest.skip(f'{candidate} not installed')
-    # DuckDB is a general analytical-query engine, not an indicator library, and
-    # is ~100x slower on these microbenchmarks (a different class of tool). Show
-    # it once — on the first indicator — to document its positioning, and skip it
-    # for every other test so the charts stay clean comparisons among the fast
-    # in-memory libraries.
-    if candidate == 'duckdb' and indicator != INDICATORS[0]:
-        pytest.skip('duckdb shown only on the first indicator (positioning demo)')
-    fn = CALC[candidate].get(indicator)
-    if fn is None:
-        pytest.skip(f'{candidate} cannot express {indicator}')
-    benchmark(fn, states[candidate])
-
-
-# --- group 2: append one new bar -> updated indicator ----------------------
+# --- section 1: append one new bar -> updated indicator --------------------
 
 def _volas_append(indicator):
     """volas: refresh the cached directive's tail incrementally (O(lookback))."""
@@ -346,22 +354,53 @@ def _stock_pandas_append(indicator):
 def test_append(benchmark, states, indicator, candidate):
     if not HAVE[candidate]:
         pytest.skip(f'{candidate} not installed')
-    # DuckDB is excluded from every append test (it appears once, in the first
-    # calc test, only to show its positioning — see test_calc).
-    if candidate == 'duckdb':
-        pytest.skip('duckdb excluded from the append benchmark (positioning / too slow)')
     if CALC[candidate].get(indicator) is None:
         pytest.skip(f'{candidate} cannot express {indicator}')
 
     if candidate == 'volas':
         run, setup = _volas_append(indicator)
-        benchmark.pedantic(run, setup=setup, rounds=50, iterations=1)
     elif candidate == 'stock_pandas':
         run, setup = _stock_pandas_append(indicator)
-        benchmark.pedantic(run, setup=setup, rounds=50, iterations=1)
     else:
-        # pandas / polars / talib / duckdb have no incremental indicator cache,
-        # so a new bar means recomputing the series — the honest O(n) cost.
-        fn = CALC[candidate][indicator]
-        state = states[candidate]
-        benchmark(fn, state)
+        # No incremental indicator cache: a new bar means recomputing the series
+        # (the honest O(n) cost). Wrapped in pedantic with the same rounds as the
+        # incremental candidates so the `rounds` column is comparable.
+        fn, state = CALC[candidate][indicator], states[candidate]
+
+        def run(_fn=fn, _state=state):
+            _fn(_state)
+
+        def setup():
+            return (), {}
+    benchmark.pedantic(run, setup=setup, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
+
+
+# --- section 2: batch indicator computation --------------------------------
+
+@pytest.mark.parametrize('candidate', CANDIDATES)
+@pytest.mark.parametrize('indicator', INDICATORS)
+def test_calc(benchmark, states, indicator, candidate):
+    if not HAVE[candidate]:
+        pytest.skip(f'{candidate} not installed')
+    fn = CALC[candidate].get(indicator)
+    if fn is None:
+        pytest.skip(f'{candidate} cannot express {indicator}')
+    benchmark(fn, states[candidate])
+
+
+# --- section 3: full coverage, volas vs TA-Lib only ------------------------
+
+@pytest.mark.parametrize('candidate', ['talib', 'volas'])
+@pytest.mark.parametrize('indicator', COVERAGE_IDS)
+def test_coverage(benchmark, states, indicator, candidate):
+    if talib is None:
+        pytest.skip('talib not installed')
+    if candidate == 'talib':
+        benchmark(COVERAGE[indicator])
+    else:
+        v = states['volas']
+        try:
+            v.exec(indicator)  # confirm volas implements it before timing
+        except Exception:
+            pytest.skip(f'volas cannot express {indicator}')
+        benchmark(lambda d=indicator: v.exec(d))
