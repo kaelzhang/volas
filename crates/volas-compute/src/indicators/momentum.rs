@@ -169,26 +169,36 @@ fn aroon_up_down(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64
     for i in 0..n {
         let wstart = i.saturating_sub(period);
         if hi_idx < wstart {
-            hi = f64::NEG_INFINITY;
-            for j in wstart..i {
-                if high[j] >= hi {
-                    hi = high[j];
-                    hi_idx = j;
+            // Rescan `[wstart, i)` as a slice — no per-element bounds checks on this
+            // O(period) hot path (`>=` keeps the latest index on ties).
+            let win = &high[wstart..i];
+            let mut h = f64::NEG_INFINITY;
+            let mut hidx = wstart;
+            for (off, &val) in win.iter().enumerate() {
+                if val >= h {
+                    h = val;
+                    hidx = wstart + off;
                 }
             }
+            hi = h;
+            hi_idx = hidx;
         }
         if high[i] >= hi {
             hi = high[i];
             hi_idx = i;
         }
         if lo_idx < wstart {
-            lo_v = f64::INFINITY;
-            for j in wstart..i {
-                if low[j] <= lo_v {
-                    lo_v = low[j];
-                    lo_idx = j;
+            let win = &low[wstart..i];
+            let mut l = f64::INFINITY;
+            let mut lidx = wstart;
+            for (off, &val) in win.iter().enumerate() {
+                if val <= l {
+                    l = val;
+                    lidx = wstart + off;
                 }
             }
+            lo_v = l;
+            lo_idx = lidx;
         }
         if low[i] <= lo_v {
             lo_v = low[i];
