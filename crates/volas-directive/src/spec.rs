@@ -147,6 +147,8 @@ pub fn is_command(name: &str) -> bool {
             | "tsf"
             | "var"
             | "stddev"
+            | "correl"
+            | "beta"
             | "obv"
             | "ad"
             | "adosc"
@@ -221,6 +223,9 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf",
             None,
         ) => (vec![Int(14)], vec!["close"]),
+        // First series defaults to close; the second is required (no spec default).
+        ("correl", None) => (vec![Int(30)], vec!["close"]),
+        ("beta", None) => (vec![Int(5)], vec!["close"]),
         ("var", None) => (vec![Int(5)], vec!["close"]),
         ("stddev", None) => (vec![Int(5), Float(1.0)], vec!["close"]),
         ("obv", None) => (vec![], vec!["close", "volume"]),

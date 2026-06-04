@@ -194,6 +194,23 @@ def test_ma_matype_apo_ppo_match_talib(ohlc):
     _parity(df.exec('ppo'), talib.PPO(c, 12, 26, 0))
 
 
+def test_correl_beta_match_talib(ohlc):
+    df, h, l, c = ohlc
+    v = np.asarray(df['volume'].to_numpy(), dtype=float)
+    for p in (14, 30):  # 30 is CORREL's default
+        _parity(df.exec(f'correl:{p}@high,low'), talib.CORREL(h, l, p))
+    for p in (5, 10):  # 5 is BETA's default
+        _parity(df.exec(f'beta:{p}@high,low'), talib.BETA(h, l, p))
+    # The first series defaults to close via an empty leading operand (@,<second>).
+    _parity(df.exec('correl:30@,volume'), talib.CORREL(c, v, 30))
+    _parity(df.exec('beta@,volume'), talib.BETA(c, v, 5))  # default period 5
+    # The second series is required.
+    with pytest.raises(Exception):
+        df.exec('correl:30')
+    with pytest.raises(Exception):
+        df.exec('beta')
+
+
 def test_directional_family_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (14, 20):  # 14 is the shared TA-Lib default

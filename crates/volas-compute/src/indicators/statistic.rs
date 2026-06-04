@@ -126,3 +126,106 @@ pub fn stddev(data: &[f64], period: usize, nbdev: f64) -> Vec<f64> {
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// Statistic — two-series relationships
+// ---------------------------------------------------------------------------
+
+/// Rolling Pearson correlation of `x` and `y` over `period` (TA-Lib CORREL):
+/// `(Σxy − ΣxΣy/n) / sqrt((Σx²−(Σx)²/n)(Σy²−(Σy)²/n))`. A non-positive denominator
+/// yields 0 (TA-Lib's guard). Lookback `period-1`.
+pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
+    let n = x.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period > n {
+        return out;
+    }
+    let pf = period as f64;
+    let (mut sx, mut sy, mut sx2, mut sy2, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for i in 0..period {
+        let (xi, yi) = (x[i], y[i]);
+        sx += xi;
+        sy += yi;
+        sx2 += xi * xi;
+        sy2 += yi * yi;
+        sxy += xi * yi;
+    }
+    let value = |sx: f64, sy: f64, sx2: f64, sy2: f64, sxy: f64| {
+        let denom = (sx2 - sx * sx / pf) * (sy2 - sy * sy / pf);
+        if denom < 1e-14 {
+            0.0
+        } else {
+            (sxy - sx * sy / pf) / denom.sqrt()
+        }
+    };
+    out[period - 1] = value(sx, sy, sx2, sy2, sxy);
+    let mut trailing = 0;
+    for i in period..n {
+        // Drop the trailing values, then add the new ones (TA-Lib's order).
+        let (tx, ty) = (x[trailing], y[trailing]);
+        trailing += 1;
+        sx -= tx;
+        sx2 -= tx * tx;
+        sxy -= tx * ty;
+        sy -= ty;
+        sy2 -= ty * ty;
+        let (xi, yi) = (x[i], y[i]);
+        sx += xi;
+        sx2 += xi * xi;
+        sxy += xi * yi;
+        sy += yi;
+        sy2 += yi * yi;
+        out[i] = value(sx, sy, sx2, sy2, sxy);
+    }
+    out
+}
+
+/// Rolling beta of `x` against `y` over `period` (TA-Lib BETA): the slope
+/// `(n·Σxy − Σx·Σy) / (n·Σx² − (Σx)²)` of the two series' one-bar **returns**
+/// `(p[i]−p[i-1])/p[i-1]` (a zero prior price gives a 0 return; a ~0 denominator
+/// gives 0). First value at index `period` (lookback = period).
+pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
+    let n = x.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period + 1 > n {
+        return out;
+    }
+    let ret = |arr: &[f64], i: usize| -> f64 {
+        let prev = arr[i - 1];
+        if prev.abs() < 1e-14 {
+            0.0
+        } else {
+            (arr[i] - prev) / prev
+        }
+    };
+    let pf = period as f64;
+    let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+    for i in 1..period {
+        let (rx, ry) = (ret(x, i), ret(y, i));
+        sx += rx;
+        sy += ry;
+        sxx += rx * rx;
+        sxy += rx * ry;
+    }
+    let mut trailing = 1;
+    for i in period..n {
+        let (rx, ry) = (ret(x, i), ret(y, i));
+        sx += rx;
+        sy += ry;
+        sxx += rx * rx;
+        sxy += rx * ry;
+        let denom = pf * sxx - sx * sx;
+        out[i] = if denom.abs() < 1e-14 {
+            0.0
+        } else {
+            (pf * sxy - sx * sy) / denom
+        };
+        let (tx, ty) = (ret(x, trailing), ret(y, trailing));
+        trailing += 1;
+        sx -= tx;
+        sy -= ty;
+        sxx -= tx * tx;
+        sxy -= tx * ty;
+    }
+    out
+}

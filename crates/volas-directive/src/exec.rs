@@ -166,6 +166,19 @@ fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
     })
 }
 
+/// Resolve a **required** numeric series operand at slot `i`: unlike [`series_f64`],
+/// an absent or empty operand is an error rather than a column default. Used where a
+/// command genuinely needs a second series the caller must name (e.g. `beta`/`correl`).
+fn series_f64_required<'a>(df: &'a DataFrame, series: &[Node], i: usize) -> Result<Cow<'a, [f64]>> {
+    match series.get(i) {
+        Some(Node::Name(s)) if s.is_empty() => Err(VolasError::Value(format!(
+            "series argument #{i} is required"
+        ))),
+        Some(node) => Ok(Cow::Owned(execute(df, node)?.to_f64_vec())),
+        None => Err(VolasError::Value(format!("series argument #{i} is required"))),
+    }
+}
+
 fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
     let node = series
         .get(i)
@@ -551,6 +564,18 @@ fn exec_command(
             f64col(ind::linearreg_angle(&close(0)?, arg_usize(args, 0, Some(14))?))
         }
         ("tsf", _) => f64col(ind::tsf(&close(0)?, arg_usize(args, 0, Some(14))?)),
+        // beta/correl relate two series: the first defaults to close, the second is required.
+        ("correl", _) => {
+            let x = close(0)?;
+            let y = series_f64_required(df, series, 1)?;
+            f64col(ind::correl(&x, &y, arg_usize(args, 0, Some(30))?))
+        }
+        ("beta", _) => {
+            let x = close(0)?;
+            let y = series_f64_required(df, series, 1)?;
+            f64col(ind::beta(&x, &y, arg_usize(args, 0, Some(5))?))
+        }
+
         ("var", _) => f64col(ind::var(&close(0)?, arg_usize(args, 0, Some(5))?)),
         ("stddev", _) => f64col(ind::stddev(
             &close(0)?,
