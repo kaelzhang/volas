@@ -42,14 +42,19 @@ pub fn maxindex(data: &[f64], period: usize) -> Vec<f64> {
         let tmp = data[today];
         if first || hi_idx < trailing {
             // The tracked max left the window — rebuild over [trailing, today].
-            hi_idx = trailing;
-            hi = data[trailing];
-            for i in (trailing + 1)..=today {
-                if data[i] > hi {
-                    hi_idx = i;
-                    hi = data[i];
+            // Scanning the window as a slice keeps this O(period) hot path free of
+            // per-element bounds checks (TA-Lib's C rescan has none).
+            let win = &data[trailing..=today];
+            let mut h = win[0];
+            let mut hidx = trailing;
+            for (off, &val) in win.iter().enumerate().skip(1) {
+                if val > h {
+                    h = val;
+                    hidx = trailing + off;
                 }
             }
+            hi = h;
+            hi_idx = hidx;
             first = false;
         } else if tmp >= hi {
             hi_idx = today;
@@ -77,14 +82,19 @@ pub fn minindex(data: &[f64], period: usize) -> Vec<f64> {
     for today in (period - 1)..n {
         let tmp = data[today];
         if first || lo_idx < trailing {
-            lo_idx = trailing;
-            lo = data[trailing];
-            for i in (trailing + 1)..=today {
-                if data[i] < lo {
-                    lo_idx = i;
-                    lo = data[i];
+            // Rebuild over [trailing, today] as a slice — the O(period) hot path then
+            // carries no per-element bounds checks (mirror of `maxindex`).
+            let win = &data[trailing..=today];
+            let mut l = win[0];
+            let mut lidx = trailing;
+            for (off, &val) in win.iter().enumerate().skip(1) {
+                if val < l {
+                    l = val;
+                    lidx = trailing + off;
                 }
             }
+            lo = l;
+            lo_idx = lidx;
             first = false;
         } else if tmp <= lo {
             lo_idx = today;
