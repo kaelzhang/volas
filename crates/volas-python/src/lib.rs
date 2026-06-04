@@ -5,6 +5,7 @@
 //! This crate is the only place pyo3 / numpy are used; all logic lives in the
 //! `volas-core` / `volas-compute` / `volas-directive` crates.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
@@ -12,7 +13,7 @@ use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice};
 
-use volas_core::{datetime, Column, DataFrame, Index, Series, VolasError};
+use volas_core::{datetime, Column, DataFrame, DType, Index, Series, VolasError};
 use volas_directive::{execute, parse};
 use volas_time::{Agg, AggSpec, Cumulator, TimeFrame};
 
@@ -26,6 +27,18 @@ fn pyerr(e: VolasError) -> PyErr {
             PyValueError::new_err(m)
         }
     }
+}
+
+/// Parse a pandas-style dtype string to a volas [`DType`].
+fn parse_dtype(s: &str) -> PyResult<DType> {
+    Ok(match s {
+        "float" | "float64" | "float_" | "double" | "f64" => DType::F64,
+        "int" | "int64" | "int_" | "long" | "i64" => DType::I64,
+        "bool" | "boolean" => DType::Bool,
+        "str" | "string" | "object" | "O" => DType::Utf8,
+        "datetime" | "datetime64" | "datetime64[ns]" => DType::Datetime,
+        _ => return Err(PyValueError::new_err(format!("unknown dtype {s:?}"))),
+    })
 }
 
 fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
@@ -626,6 +639,31 @@ impl PyDataFrame {
         let spec = build_agg_spec(cumulators)?;
         let out = volas_time::cumulate(&self.inner, tf, &spec).map_err(pyerr)?;
         Ok(PyDataFrame { inner: out })
+    }
+
+    /// Rename columns (pandas `rename(columns={old: new})`), returning a new
+    /// frame.
+    #[pyo3(signature = (columns))]
+    fn rename(&self, columns: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
+        let mut mapping = HashMap::new();
+        for (k, v) in columns.iter() {
+            mapping.insert(k.extract::<String>()?, v.extract::<String>()?);
+        }
+        Ok(PyDataFrame {
+            inner: self.inner.rename(&mapping).map_err(pyerr)?,
+        })
+    }
+
+    /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
+    /// new frame.
+    fn astype(&self, dtypes: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
+        let mut mapping = HashMap::new();
+        for (k, v) in dtypes.iter() {
+            mapping.insert(k.extract::<String>()?, parse_dtype(&v.extract::<String>()?)?);
+        }
+        Ok(PyDataFrame {
+            inner: self.inner.astype(&mapping).map_err(pyerr)?,
+        })
     }
 
     fn __repr__(&self) -> String {

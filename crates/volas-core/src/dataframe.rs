@@ -221,6 +221,30 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Rename columns (pandas `rename(columns=...)`), returning a new frame.
+    /// Names not in `mapping` are kept; columns and index are shared (cheap).
+    pub fn rename(&self, mapping: &HashMap<String, String>) -> Result<DataFrame> {
+        let names: Vec<String> = self
+            .names
+            .iter()
+            .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
+            .collect();
+        DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))
+    }
+
+    /// Cast the named columns to new dtypes (pandas `astype`), returning a new
+    /// frame. Untouched columns are shared (cheap).
+    pub fn astype(&self, mapping: &HashMap<String, crate::dtype::DType>) -> Result<DataFrame> {
+        let mut columns = self.columns.clone();
+        for (name, dtype) in mapping {
+            let pos = self
+                .column_pos(name)
+                .ok_or_else(|| VolasError::ColumnNotFound(name.clone()))?;
+            columns[pos] = self.columns[pos].cast(*dtype)?;
+        }
+        DataFrame::new(self.names.clone(), columns, Some((*self.index).clone()))
+    }
+
     /// Value equality (pandas `DataFrame.equals`): same column names + order,
     /// same index, and value-equal columns (`NaN == NaN`).
     pub fn equals(&self, other: &DataFrame) -> bool {

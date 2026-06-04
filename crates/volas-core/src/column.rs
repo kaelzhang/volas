@@ -231,6 +231,50 @@ impl Column {
         }
     }
 
+    /// Cast to another dtype (best-effort, pandas `astype`-like). A no-op when
+    /// already the target dtype.
+    pub fn cast(&self, to: DType) -> Result<Column> {
+        if self.dtype() == to {
+            return Ok(self.clone());
+        }
+        match to {
+            DType::F64 => Ok(Column::f64(self.to_f64_vec())),
+            DType::I64 => match self {
+                Column::F64(v) => Ok(Column::i64(v.iter().map(|&x| x as i64).collect())),
+                Column::Bool(v) => Ok(Column::i64(v.iter().map(|&b| b as i64).collect())),
+                Column::Datetime(v) => Ok(Column::i64(v.to_vec())),
+                other => Err(VolasError::DType(format!(
+                    "cannot cast a {} column to int64",
+                    other.dtype()
+                ))),
+            },
+            DType::Bool => match self {
+                Column::F64(v) => Ok(Column::bool(v.iter().map(|&x| x != 0.0).collect())),
+                Column::I64(v) => Ok(Column::bool(v.iter().map(|&x| x != 0).collect())),
+                other => Err(VolasError::DType(format!(
+                    "cannot cast a {} column to bool",
+                    other.dtype()
+                ))),
+            },
+            DType::Utf8 => Ok(Column::str(self.to_string_vec())),
+            DType::Datetime => self.to_datetime(),
+        }
+    }
+
+    /// Render each value as a `String` (for `astype(str)`).
+    fn to_string_vec(&self) -> Vec<String> {
+        match self {
+            Column::Str(v) => v.to_vec(),
+            Column::F64(v) => v.iter().map(|x| x.to_string()).collect(),
+            Column::I64(v) => v.iter().map(|x| x.to_string()).collect(),
+            Column::Bool(v) => v
+                .iter()
+                .map(|&b| if b { "True" } else { "False" }.to_string())
+                .collect(),
+            Column::Datetime(v) => v.iter().map(|&ns| datetime::format_ns(ns)).collect(),
+        }
+    }
+
     /// Value equality where `NaN == NaN` (pandas `equals` semantics), unlike the
     /// derived `PartialEq` (which uses IEEE `NaN != NaN`).
     pub fn equals(&self, other: &Column) -> bool {
