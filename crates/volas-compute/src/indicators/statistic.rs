@@ -20,17 +20,33 @@ fn linreg_fit(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
     // (period-1)·period·(2·period-1)/6 = Σ_{k=0}^{period-1} k², always integral.
     let sum_x_sqr = (period * (period - 1) * (2 * period - 1) / 6) as f64;
     let divisor = sum_x * sum_x - p * sum_x_sqr;
-    for today in (period - 1)..n {
-        let mut sum_xy = 0.0;
-        let mut sum_y = 0.0;
-        for i in (0..period).rev() {
-            let y = data[today - i];
-            sum_y += y;
-            sum_xy += i as f64 * y;
-        }
+    let mut emit = |today: usize, sum_y: f64, sum_xy: f64| {
         let m = (p * sum_xy - sum_x * sum_y) / divisor;
         slope[today] = m;
         intercept[today] = (sum_y - m * sum_x) / p;
+    };
+    // Seed the first window with TA-Lib's per-bar accumulation order (`i` = age, the
+    // newest bar weighted 0, the oldest `period-1`), then slide in O(1): when the
+    // window advances one bar every retained point's age rises by one, so `Σ i·y`
+    // gains `Σ y` and loses the departing point's full `period·y` term —
+    // `sum_xy += sum_y − period·leaving` (old `sum_y`), then `sum_y += entering −
+    // leaving`. This turns the rolling fit from O(n·period) to O(n); the running sums
+    // drift ~1e-13 relative (well within the 1e-9 TA-Lib parity tolerance), exactly as
+    // the WMA slide already relies on. Shared by linearreg / slope / intercept / angle
+    // / tsf.
+    let mut sum_y = 0.0;
+    let mut sum_xy = 0.0;
+    for i in (0..period).rev() {
+        let y = data[period - 1 - i];
+        sum_y += y;
+        sum_xy += i as f64 * y;
+    }
+    emit(period - 1, sum_y, sum_xy);
+    for today in period..n {
+        let leaving = data[today - period];
+        sum_xy += sum_y - p * leaving;
+        sum_y += data[today] - leaving;
+        emit(today, sum_y, sum_xy);
     }
     (slope, intercept)
 }
