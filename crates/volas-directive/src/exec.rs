@@ -435,6 +435,19 @@ fn exec_command(
             let volume = series_f64(df, series, 3, "volume")?;
             f64col(ind::mfi(&high, &low, &close, &volume, arg_usize(args, 0, Some(14))?))
         }
+        ("ultosc", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::ultosc(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(7))?,
+                arg_usize(args, 1, Some(14))?,
+                arg_usize(args, 2, Some(28))?,
+            ))
+        }
         ("cci", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;

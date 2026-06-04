@@ -218,6 +218,8 @@ def test_cci_trix_match_talib(ohlc):
         _parity(df.exec(f'mfi:{p}'), talib.MFI(h, l, c, v, p))
     for p in (15, 30):  # 30 is the TA-Lib default
         _parity(df.exec(f'trix:{p}'), talib.TRIX(c, p))
+    _parity(df.exec('ultosc'), talib.ULTOSC(h, l, c))  # defaults 7/14/28
+    _parity(df.exec('ultosc:5,10,20'), talib.ULTOSC(h, l, c, 5, 10, 20))
     _parity(df.exec('cci'), talib.CCI(h, l, c, 14))  # default resolves to 14
     _parity(df.exec('trix'), talib.TRIX(c, 30))
 

@@ -121,6 +121,7 @@ pub fn is_command(name: &str) -> bool {
             | "cci"
             | "trix"
             | "mfi"
+            | "ultosc"
             | "aroon"
             | "aroonosc"
             | "sum"
@@ -198,6 +199,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("cci", None) => (vec![Int(14)], vec!["high", "low", "close"]),
         ("trix", None) => (vec![Int(30)], vec!["close"]),
         ("mfi", None) => (vec![Int(14)], vec!["high", "low", "close", "volume"]),
+        ("ultosc", None) => (vec![Int(7), Int(14), Int(28)], vec!["high", "low", "close"]),
         ("aroon", Some("up" | "down")) => (vec![Int(14)], vec!["high", "low"]),
         ("aroonosc", None) => (vec![Int(14)], vec!["high", "low"]),
         ("sum" | "maxindex" | "minindex", None) => (vec![Int(30)], vec!["close"]),

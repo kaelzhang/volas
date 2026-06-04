@@ -59,6 +59,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "cmo" | "natr" => arg(args, 0, 14),
         "cci" => arg(args, 0, 14).saturating_sub(1),
         "mfi" => arg(args, 0, 14),
+        "ultosc" => arg(args, 0, 7).max(arg(args, 1, 14)).max(arg(args, 2, 28)),
         "trix" => 3 * arg(args, 0, 30).saturating_sub(1) + 1,
         "aroon" | "aroonosc" => arg(args, 0, 14),
         "sum" | "maxindex" | "minindex" | "minmax" | "minmaxindex" => {

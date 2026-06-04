@@ -218,3 +218,86 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     }
     out
 }
+
+/// Ultimate Oscillator (TA-Lib ULTOSC): a weighted blend of buying-pressure / true-
+/// range ratios over three periods. Per bar, BP = `close − min(low, prevClose)` and
+/// TR = the true range; with sliding sums `aₖ/bₖ` over `pₖ` bars, the value is
+/// `100·(4·a₁/b₁ + 2·a₂/b₂ + a₃/b₃)/7` (a term is dropped if its TR-sum is ~0). The
+/// 4/2/1 weights follow argument position, not magnitude. Default 7/14/28; lookback
+/// = max period.
+pub fn ultosc(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    p1: usize,
+    p2: usize,
+    p3: usize,
+) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    let max_p = p1.max(p2).max(p3);
+    if p1 == 0 || p2 == 0 || p3 == 0 || max_p >= n {
+        return out;
+    }
+    // (buying pressure, true range) for bar i (needs the prior close, so i >= 1).
+    let term = |i: usize| -> (f64, f64) {
+        let prev_close = close[i - 1];
+        let true_low = low[i].min(prev_close);
+        let bp = close[i] - true_low;
+        let mut tr = high[i] - low[i];
+        tr = tr.max((prev_close - high[i]).abs());
+        tr = tr.max((prev_close - low[i]).abs());
+        (bp, tr)
+    };
+    let start = max_p; // first output index
+    let (mut a1, mut b1, mut a2, mut b2, mut a3, mut b3) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for i in (start - p1 + 1)..start {
+        let (a, b) = term(i);
+        a1 += a;
+        b1 += b;
+    }
+    for i in (start - p2 + 1)..start {
+        let (a, b) = term(i);
+        a2 += a;
+        b2 += b;
+    }
+    for i in (start - p3 + 1)..start {
+        let (a, b) = term(i);
+        a3 += a;
+        b3 += b;
+    }
+    let (mut t1, mut t2, mut t3) = (start - p1 + 1, start - p2 + 1, start - p3 + 1);
+    for today in start..n {
+        let (a, b) = term(today);
+        a1 += a;
+        a2 += a;
+        a3 += a;
+        b1 += b;
+        b2 += b;
+        b3 += b;
+        let mut output = 0.0;
+        if b1.abs() >= 1e-14 {
+            output += 4.0 * (a1 / b1);
+        }
+        if b2.abs() >= 1e-14 {
+            output += 2.0 * (a2 / b2);
+        }
+        if b3.abs() >= 1e-14 {
+            output += a3 / b3;
+        }
+        let (at, bt) = term(t1);
+        a1 -= at;
+        b1 -= bt;
+        t1 += 1;
+        let (at, bt) = term(t2);
+        a2 -= at;
+        b2 -= bt;
+        t2 += 1;
+        let (at, bt) = term(t3);
+        a3 -= at;
+        b3 -= bt;
+        t3 += 1;
+        out[today] = 100.0 * (output / 7.0);
+    }
+    out
+}
