@@ -281,10 +281,15 @@ impl<'a> Parser<'a> {
             series = self.read_series()?;
         }
         if sub.is_none() && !has_args && !has_series {
+            // A bare identifier may be a column (case-sensitive) or a no-arg command;
+            // leave its case to the executor, which resolves columns first.
             Ok(Node::Name(name))
         } else {
+            // A sub-command / args / series makes this unambiguously a command, so the
+            // command name is case-insensitive (P6): lower-case it into the AST, which
+            // also flows through to stringify.
             Ok(Node::Command(Command {
-                name,
+                name: name.to_ascii_lowercase(),
                 sub,
                 args,
                 series,

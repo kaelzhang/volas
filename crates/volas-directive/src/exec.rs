@@ -221,6 +221,11 @@ fn exec_command(
     args: &[Option<String>],
     series: &[Node],
 ) -> Result<Column> {
+    // Command names are case-insensitive (P6). The parser already lower-cases names it
+    // knows are commands; this also covers a bare no-arg command reached as a Node::Name
+    // (e.g. `TR`). Columns are resolved before this function, so their case is preserved.
+    let name_lc = name.to_ascii_lowercase();
+    let name = name_lc.as_str();
     let sub = canon_sub(name, sub);
     let sub = sub.as_deref();
 
@@ -873,8 +878,9 @@ mod tests {
     fn command_and_argument_validation_errors() {
         let df = ohlcv();
         let is_err = |d: &str| execute(&df, &parse(d).unwrap()).is_err();
-        assert!(is_err("ma:5,6"), "too many args");
+        assert!(is_err("ema:5,6"), "too many args"); // ema takes one period (ma now takes matype too)
         assert!(is_err("frobnicate:5"), "unknown command");
+        assert!(is_err("MACD.bogus"), "case-insensitive name, still bad sub (P6)");
         assert!(is_err("kdj:9"), "missing required sub-command");
         assert!(is_err("macd.bogus"), "unknown sub-command");
         assert!(is_err("ma:abc"), "non-integer arg");

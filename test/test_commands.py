@@ -17,6 +17,15 @@ def stock():
     return get_tencent()
 
 
+def test_command_names_are_case_insensitive(stock):
+    """P6: command names are case-insensitive (with or without args/sub); column and
+    sub-command tokens are left as written."""
+    for directive in ('MACD:12,26', 'ATR:14', 'RSI:14', 'TR', 'BOLL.upper'):
+        got = np.asarray(stock[directive], dtype=float)
+        want = np.asarray(stock[directive.lower()], dtype=float)
+        np.testing.assert_array_equal(got, want)  # NaN positions included
+
+
 def test_append(stock):
     """tests:
     - stock.append() -> DataFrame
