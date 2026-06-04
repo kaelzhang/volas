@@ -1,9 +1,27 @@
 //! Two-bar candlestick patterns.
 
 use super::{
-    candle_average, color, each_bar, realbody, realbody_gap_down, realbody_gap_up, BODY_DOJI,
-    BODY_LONG, BODY_SHORT, EQUAL,
+    candle_average, candle_gap_down, candle_gap_up, color, each_bar, lowershadow, realbody,
+    realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT, EQUAL,
+    SHADOW_VERY_SHORT,
 };
+
+/// A marubozu: a long real body with negligible shadows both ends.
+#[inline]
+fn is_marubozu(o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> bool {
+    let vs = candle_average(SHADOW_VERY_SHORT, o, h, l, c, i);
+    realbody(o, c, i) > candle_average(BODY_LONG, o, h, l, c, i)
+        && uppershadow(o, h, c, i) < vs
+        && lowershadow(o, l, c, i) < vs
+}
+
+/// Whether bar `i` gaps away from bar `i-1` in the direction implied by the *prior*
+/// candle's colour (a black prior gaps up, a white prior gaps down) — the kicking gap.
+#[inline]
+fn kicking_gap(o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> bool {
+    (color(o, c, i - 1) < 0.0 && candle_gap_up(h, l, i, i - 1))
+        || (color(o, c, i - 1) > 0.0 && candle_gap_down(h, l, i, i - 1))
+}
 
 /// Engulfing (TA-Lib CDLENGULFING): the 2nd real body engulfs the 1st of the opposite
 /// colour. `color(i)·100` for a strict engulf, `color(i)·80` when a boundary just
@@ -224,6 +242,82 @@ pub fn cdl_thrusting(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             && c[i] <= c[i - 1] + realbody(o, c, i - 1) * 0.5
         {
             -100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Kicking (TA-Lib CDLKICKING): two opposite-colour marubozu separated by a gap in the
+/// 2nd's direction. `color(i)·100`. Lookback 11.
+pub fn cdl_kicking(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = SHADOW_VERY_SHORT.avg_period.max(BODY_LONG.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if color(o, c, i - 1) == -color(o, c, i)
+            && is_marubozu(o, h, l, c, i - 1)
+            && is_marubozu(o, h, l, c, i)
+            && kicking_gap(o, h, l, c, i)
+        {
+            color(o, c, i) * 100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Kicking-by-Length (TA-Lib CDLKICKINGBYLENGTH): a kicking whose signal takes the colour
+/// of the *longer* marubozu. `color(longer)·100`. Lookback 11.
+pub fn cdl_kickingbylength(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = SHADOW_VERY_SHORT.avg_period.max(BODY_LONG.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if color(o, c, i - 1) == -color(o, c, i)
+            && is_marubozu(o, h, l, c, i - 1)
+            && is_marubozu(o, h, l, c, i)
+            && kicking_gap(o, h, l, c, i)
+        {
+            let longer = if realbody(o, c, i) > realbody(o, c, i - 1) { i } else { i - 1 };
+            color(o, c, longer) * 100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Separating Lines (TA-Lib CDLSEPARATINGLINES): opposite-colour candles sharing an open,
+/// the 2nd a belt-hold long body — continuation `color(i)·100`. Lookback 11.
+pub fn cdl_separatinglines(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = SHADOW_VERY_SHORT.avg_period.max(BODY_LONG.avg_period).max(EQUAL.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        let eq = candle_average(EQUAL, o, h, l, c, i - 1);
+        let vs = candle_average(SHADOW_VERY_SHORT, o, h, l, c, i);
+        let belt_hold = (color(o, c, i) > 0.0 && lowershadow(o, l, c, i) < vs)
+            || (color(o, c, i) < 0.0 && uppershadow(o, h, c, i) < vs);
+        if color(o, c, i - 1) == -color(o, c, i)
+            && o[i] <= o[i - 1] + eq
+            && o[i] >= o[i - 1] - eq
+            && realbody(o, c, i) > candle_average(BODY_LONG, o, h, l, c, i)
+            && belt_hold
+        {
+            color(o, c, i) * 100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Counterattack (TA-Lib CDLCOUNTERATTACK): two long opposite-colour candles with equal
+/// closes. `color(i)·100`. Lookback 11.
+pub fn cdl_counterattack(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = EQUAL.avg_period.max(BODY_LONG.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        let eq = candle_average(EQUAL, o, h, l, c, i - 1);
+        if color(o, c, i - 1) == -color(o, c, i)
+            && realbody(o, c, i - 1) > candle_average(BODY_LONG, o, h, l, c, i - 1)
+            && realbody(o, c, i) > candle_average(BODY_LONG, o, h, l, c, i)
+            && c[i] <= c[i - 1] + eq
+            && c[i] >= c[i - 1] - eq
+        {
+            color(o, c, i) * 100.0
         } else {
             0.0
         }

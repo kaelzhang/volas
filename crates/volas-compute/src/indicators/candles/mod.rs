@@ -64,6 +64,10 @@ pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
         "inneck" => (Plain(cdl_inneck as _), 11),
         "onneck" => (Plain(cdl_onneck as _), 11),
         "thrusting" => (Plain(cdl_thrusting as _), 11),
+        "kicking" => (Plain(cdl_kicking as _), 11),
+        "kickingbylength" => (Plain(cdl_kickingbylength as _), 11),
+        "separatinglines" => (Plain(cdl_separatinglines as _), 11),
+        "counterattack" => (Plain(cdl_counterattack as _), 11),
         _ => return None,
     };
     Some(entry)
@@ -138,6 +142,17 @@ fn realbody_gap_up(o: &[f64], c: &[f64], i: usize, j: usize) -> bool {
 #[inline]
 fn realbody_gap_down(o: &[f64], c: &[f64], i: usize, j: usize) -> bool {
     o[i].max(c[i]) < o[j].min(c[j])
+}
+/// Candle (high-low) gap up between bar `i` and an earlier bar `j` (TA-Lib
+/// `TA_CANDLEGAPUP`): bar `i`'s low is above bar `j`'s high.
+#[inline]
+fn candle_gap_up(h: &[f64], l: &[f64], i: usize, j: usize) -> bool {
+    l[i] > h[j]
+}
+/// Candle gap down (TA-Lib `TA_CANDLEGAPDOWN`).
+#[inline]
+fn candle_gap_down(h: &[f64], l: &[f64], i: usize, j: usize) -> bool {
+    h[i] < l[j]
 }
 
 /// The setting's range at bar `i`.

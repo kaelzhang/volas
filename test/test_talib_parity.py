@@ -284,7 +284,10 @@ def test_candlestick_patterns_match_talib(ohlc):
         ('darkcloudcover', talib.CDLDARKCLOUDCOVER, 11), ('dojistar', talib.CDLDOJISTAR, 11),
         ('homingpigeon', talib.CDLHOMINGPIGEON, 11), ('matchinglow', talib.CDLMATCHINGLOW, 6),
         ('inneck', talib.CDLINNECK, 11), ('onneck', talib.CDLONNECK, 11),
-        ('thrusting', talib.CDLTHRUSTING, 11),
+        ('thrusting', talib.CDLTHRUSTING, 11), ('kicking', talib.CDLKICKING, 11),
+        ('kickingbylength', talib.CDLKICKINGBYLENGTH, 11),
+        ('separatinglines', talib.CDLSEPARATINGLINES, 11),
+        ('counterattack', talib.CDLCOUNTERATTACK, 11),
     ]
     for name, fn, lb in patterns:
         want = fn(o, h, l, c)
