@@ -96,9 +96,9 @@ def test_append():
     other = DataFrame({
         'open': [8.0], 'close': [9.0], 'high': [18.0], 'low': [7.0], 'volume': [800.0],
     })
-    df.append(other)
-    assert df.shape == (7, 5)
-    assert get_last(df['close']) == 9.0
+    out = df.append(other)
+    assert out.shape == (7, 5)
+    assert get_last(out['close']) == 9.0
 
 
 def test_bool_mask_filter_via_series(stock):

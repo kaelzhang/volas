@@ -158,6 +158,67 @@ impl PySeries {
         column_to_numpy(py, &self.inner.data)
     }
 
+    /// NumPy array protocol, so `np.isnan(series)` etc. work directly.
+    #[pyo3(signature = (dtype = None, copy = None))]
+    fn __array__<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<PyObject>,
+        copy: Option<PyObject>,
+    ) -> Bound<'py, PyAny> {
+        let _ = (dtype, copy);
+        column_to_numpy(py, &self.inner.data)
+    }
+
+    /// NaN-skipping mean of the values.
+    fn mean(&self) -> f64 {
+        let v = self.inner.data.to_f64_vec();
+        let (sum, cnt) = v
+            .iter()
+            .filter(|x| !x.is_nan())
+            .fold((0.0, 0usize), |(s, c), &x| (s + x, c + 1));
+        if cnt == 0 {
+            f64::NAN
+        } else {
+            sum / cnt as f64
+        }
+    }
+
+    /// pandas-style equality (NaN equals NaN, by value).
+    fn equals(&self, other: &PySeries) -> bool {
+        let a = self.inner.data.to_f64_vec();
+        let b = other.inner.data.to_f64_vec();
+        a.len() == b.len()
+            && a.iter()
+                .zip(&b)
+                .all(|(&x, &y)| x == y || (x.is_nan() && y.is_nan()))
+    }
+
+    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_binop(&self.inner, other, |a, b| a + b)
+    }
+    fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_binop(&self.inner, other, |a, b| a - b)
+    }
+    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_binop(&self.inner, other, |a, b| a * b)
+    }
+    fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_binop(&self.inner, other, |a, b| a / b)
+    }
+    fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_binop(&self.inner, other, |a, b| b + a)
+    }
+    fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_binop(&self.inner, other, |a, b| b - a)
+    }
+    fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_binop(&self.inner, other, |a, b| b * a)
+    }
+    fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_binop(&self.inner, other, |a, b| b / a)
+    }
+
     /// `series[key]`: an integer position, a datetime label, or a slice.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
@@ -219,6 +280,31 @@ fn slice_series(s: &Series, slice: &Bound<'_, PySlice>) -> PyResult<PySeries> {
     })
 }
 
+fn series_binop(
+    s: &Series,
+    other: &Bound<'_, PyAny>,
+    f: impl Fn(f64, f64) -> f64,
+) -> PyResult<PySeries> {
+    let a = s.data.to_f64_vec();
+    let rhs = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
+        o.inner.data.to_f64_vec()
+    } else if let Ok(scalar) = other.extract::<f64>() {
+        vec![scalar; a.len()]
+    } else {
+        return Err(PyTypeError::new_err(
+            "unsupported operand for Series arithmetic",
+        ));
+    };
+    let n = a.len().min(rhs.len());
+    let mut out = vec![f64::NAN; a.len()];
+    for i in 0..n {
+        out[i] = f(a[i], rhs[i]);
+    }
+    Ok(PySeries {
+        inner: Series::new(s.name.clone(), Column::F64(out), Arc::clone(&s.index)),
+    })
+}
+
 fn strided(start: isize, stop: isize, step: isize) -> Vec<usize> {
     let mut out = Vec::new();
     if step > 0 {
@@ -246,6 +332,8 @@ pub struct PyRow {
     names: Vec<String>,
     values: Vec<f64>,
     label: Py<PyAny>,
+    index_value: i64,
+    is_datetime: bool,
 }
 
 #[pymethods]
@@ -426,21 +514,29 @@ impl PyDataFrame {
         Ok(self.wrap_series(key.to_string(), col))
     }
 
-    /// Append rows of another DataFrame or a single Row, in place.
-    fn append(&mut self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<()> {
+    /// Append the rows of another DataFrame or a single Row, returning a new
+    /// DataFrame (pandas semantics; not in place).
+    fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let mut inner = self.inner.clone();
         if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
-            return self.inner.append(&df.inner).map_err(pyerr);
+            inner.append(&df.inner).map_err(pyerr)?;
+            return Ok(PyDataFrame { inner });
         }
         if let Ok(row) = other.extract::<PyRef<PyRow>>() {
-            let _ = py;
             let mut names = Vec::new();
             let mut cols = Vec::new();
             for (n, v) in row.names.iter().zip(&row.values) {
                 names.push(n.clone());
                 cols.push(Column::F64(vec![*v]));
             }
-            let one = DataFrame::new(names, cols, None).map_err(pyerr)?;
-            return self.inner.append(&one).map_err(pyerr);
+            let one_index = if row.is_datetime {
+                Index::Datetime(vec![row.index_value])
+            } else {
+                Index::Int64(vec![row.index_value])
+            };
+            let one = DataFrame::new(names, cols, Some(one_index)).map_err(pyerr)?;
+            inner.append(&one).map_err(pyerr)?;
+            return Ok(PyDataFrame { inner });
         }
         Err(PyTypeError::new_err("append expects a DataFrame or Row"))
     }
@@ -489,10 +585,17 @@ fn row_at(df: &DataFrame, py: Python<'_>, i: usize) -> PyRow {
     let names = df.names().to_vec();
     let values: Vec<f64> = df.columns().iter().map(|c| c.get_f64(i)).collect();
     let label = label_to_py(py, df.index(), i);
+    let (index_value, is_datetime) = match df.index().as_ref() {
+        Index::Datetime(v) => (v[i], true),
+        Index::Int64(v) => (v[i], false),
+        Index::Range(_) => (i as i64, false),
+    };
     PyRow {
         names,
         values,
         label,
+        index_value,
+        is_datetime,
     }
 }
 
