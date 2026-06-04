@@ -394,6 +394,126 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Assign `values` into column position `col` at the given row `positions`
+    /// (copy-on-write via [`Arc::make_mut`]). `values` is broadcast when it has
+    /// length 1, otherwise its length must equal `positions.len()`. This backs
+    /// `df.loc[...] = `, `df.iloc[...] = `, `df.at[...] = ` and `df.iat[...] = `.
+    ///
+    /// Dtype handling, matching pandas where reasonable:
+    /// - numeric kinds cross-cast (`I64` <-> `F64`);
+    /// - an `I64` column receiving a **fractional** (or NaN) `F64` value upgrades
+    ///   the whole column to `F64` (pandas widens an int column on a float write);
+    /// - `Bool` / `Str` / `Datetime` targets require a matching-kind value.
+    ///
+    /// A manual write into a cached directive column **drops its computed status**
+    /// (it becomes plain data) so a later `fulfill` can never silently clobber the
+    /// override.
+    pub fn assign_positions(
+        &mut self,
+        col: usize,
+        positions: &[usize],
+        values: &Column,
+    ) -> Result<()> {
+        if col >= self.columns.len() {
+            return Err(VolasError::Shape(format!(
+                "column position {col} is out of range (width {})",
+                self.columns.len()
+            )));
+        }
+        let n = positions.len();
+        if values.len() != 1 && values.len() != n {
+            return Err(VolasError::Shape(format!(
+                "cannot assign {} values to {n} selected rows",
+                values.len()
+            )));
+        }
+        for &p in positions {
+            if p >= self.height {
+                return Err(VolasError::Shape(format!(
+                    "row position {p} is out of range (height {})",
+                    self.height
+                )));
+            }
+        }
+        // Broadcast a length-1 value across every position.
+        let pick = |k: usize| if values.len() == 1 { 0 } else { k };
+
+        // I64 column + a fractional / NaN F64 write -> widen the column to F64.
+        if let (Column::I64(arc), Column::F64(src)) = (&self.columns[col], values) {
+            if src.iter().any(|x| x.is_nan() || x.fract() != 0.0) {
+                let mut f: Vec<f64> = arc.iter().map(|&x| x as f64).collect();
+                for (k, &p) in positions.iter().enumerate() {
+                    f[p] = src[pick(k)];
+                }
+                self.columns[col] = Column::f64(f);
+                self.drop_computed_at(col);
+                return Ok(());
+            }
+        }
+
+        match (&mut self.columns[col], values) {
+            (Column::F64(arc), Column::F64(src)) => {
+                let buf = Arc::make_mut(arc);
+                for (k, &p) in positions.iter().enumerate() {
+                    buf[p] = src[pick(k)];
+                }
+            }
+            (Column::F64(arc), Column::I64(src)) => {
+                let buf = Arc::make_mut(arc);
+                for (k, &p) in positions.iter().enumerate() {
+                    buf[p] = src[pick(k)] as f64;
+                }
+            }
+            (Column::I64(arc), Column::I64(src)) => {
+                let buf = Arc::make_mut(arc);
+                for (k, &p) in positions.iter().enumerate() {
+                    buf[p] = src[pick(k)];
+                }
+            }
+            // All-integral F64 (the widening branch above did not fire) -> store as i64.
+            (Column::I64(arc), Column::F64(src)) => {
+                let buf = Arc::make_mut(arc);
+                for (k, &p) in positions.iter().enumerate() {
+                    buf[p] = src[pick(k)] as i64;
+                }
+            }
+            (Column::Bool(arc), Column::Bool(src)) => {
+                let buf = Arc::make_mut(arc);
+                for (k, &p) in positions.iter().enumerate() {
+                    buf[p] = src[pick(k)];
+                }
+            }
+            (Column::Str(arc), Column::Str(src)) => {
+                let buf = Arc::make_mut(arc);
+                for (k, &p) in positions.iter().enumerate() {
+                    buf[p] = src[pick(k)].clone();
+                }
+            }
+            (Column::Datetime(arc), Column::Datetime(src)) => {
+                let buf = Arc::make_mut(arc);
+                for (k, &p) in positions.iter().enumerate() {
+                    buf[p] = src[pick(k)];
+                }
+            }
+            (target, src) => {
+                return Err(VolasError::DType(format!(
+                    "cannot assign {} values into a {} column",
+                    src.dtype(),
+                    target.dtype()
+                )));
+            }
+        }
+        self.drop_computed_at(col);
+        Ok(())
+    }
+
+    /// Drop the computed (cached-directive) status of the column at `col`, if any.
+    fn drop_computed_at(&mut self, col: usize) {
+        if let Some(name) = self.names.get(col) {
+            self.computed.remove(name);
+        }
+    }
+
     /// Rename columns (pandas `rename(columns=...)`), returning a new frame.
     /// Names not in `mapping` are kept; columns and index are shared (cheap).
     pub fn rename(&self, mapping: &HashMap<String, String>) -> Result<DataFrame> {
@@ -453,6 +573,7 @@ impl DataFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DType;
 
     fn sample() -> DataFrame {
         DataFrame::new(
@@ -637,5 +758,46 @@ mod tests {
         assert!(df.update_computed_tail("b", 0, &Column::f64(vec![1.0])).is_err());
         // an unknown column errors
         assert!(df.update_computed_tail("nope", 0, &Column::f64(vec![1.0])).is_err());
+    }
+
+    #[test]
+    fn assign_positions_scalar_and_array() {
+        let mut df = sample();
+        // broadcast a scalar into two rows of the F64 column "a"
+        df.assign_positions(0, &[0, 2], &Column::f64(vec![9.0])).unwrap();
+        assert_eq!(df.column("a").unwrap().as_f64().unwrap(), &[9.0, 2.0, 9.0]);
+        // element-wise array into the I64 column "b" (integral -> stays i64)
+        df.assign_positions(1, &[1, 2], &Column::f64(vec![40.0, 50.0])).unwrap();
+        assert_eq!(df.column("b").unwrap().as_i64().unwrap(), &[10, 40, 50]);
+    }
+
+    #[test]
+    fn assign_positions_widens_int_on_fractional() {
+        let mut df = sample();
+        // a fractional write into the I64 column widens the whole column to F64
+        df.assign_positions(1, &[0], &Column::f64(vec![1.5])).unwrap();
+        assert_eq!(df.column("b").unwrap().dtype(), DType::F64);
+        assert_eq!(df.column("b").unwrap().as_f64().unwrap(), &[1.5, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn assign_positions_drops_computed_status() {
+        let mut df = sample();
+        df.set_computed("a", "ma:2".into(), 1);
+        assert_eq!(df.computed_columns().len(), 1);
+        // a manual write into the cached column drops its computed status
+        df.assign_positions(0, &[0], &Column::f64(vec![7.0])).unwrap();
+        assert!(df.computed_columns().is_empty());
+    }
+
+    #[test]
+    fn assign_positions_length_and_dtype_guards() {
+        let mut df = sample();
+        // wrong-length array
+        assert!(df.assign_positions(0, &[0, 1], &Column::f64(vec![1.0, 2.0, 3.0])).is_err());
+        // out-of-range row
+        assert!(df.assign_positions(0, &[9], &Column::f64(vec![1.0])).is_err());
+        // bool into a numeric column
+        assert!(df.assign_positions(0, &[0], &Column::bool(vec![true])).is_err());
     }
 }

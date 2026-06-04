@@ -12,7 +12,7 @@ use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices};
+use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{datetime, Column, DataFrame, DType, Index, Label, Series, VolasError};
 use volas_directive::{execute, parse};
@@ -877,32 +877,27 @@ impl PyDataFrame {
         index_to_numpy(py, self.inner.index())
     }
 
+    // The indexers hold a live reference to this frame (`Py<PyDataFrame>`), not a
+    // snapshot, so `df.iloc[...] = ` / `df.loc[...] = ` mutate the frame in place
+    // (copy-on-write under the hood) and reads always see the current rows.
     #[getter]
-    fn iloc(&self) -> DataFrameILoc {
-        DataFrameILoc {
-            inner: self.inner.clone(),
-        }
+    fn iloc(slf: Bound<'_, Self>) -> DataFrameILoc {
+        DataFrameILoc { parent: slf.unbind() }
     }
 
     #[getter]
-    fn loc(&self) -> DataFrameLoc {
-        DataFrameLoc {
-            inner: self.inner.clone(),
-        }
+    fn loc(slf: Bound<'_, Self>) -> DataFrameLoc {
+        DataFrameLoc { parent: slf.unbind() }
     }
 
     #[getter]
-    fn iat(&self) -> DataFrameIat {
-        DataFrameIat {
-            inner: self.inner.clone(),
-        }
+    fn iat(slf: Bound<'_, Self>) -> DataFrameIat {
+        DataFrameIat { parent: slf.unbind() }
     }
 
     #[getter]
-    fn at(&self) -> DataFrameAt {
-        DataFrameAt {
-            inner: self.inner.clone(),
-        }
+    fn at(slf: Bound<'_, Self>) -> DataFrameAt {
+        DataFrameAt { parent: slf.unbind() }
     }
 
     fn __len__(&self) -> usize {
@@ -1390,25 +1385,211 @@ impl PyDataFrame {
 }
 
 /// `df.iloc[...]` positional indexer.
+// --- indexer assignment helpers (PD-12) ------------------------------------
+
+/// Build a length-1 [`Column`] from a Python scalar, coerced toward the target
+/// column's dtype (so a string can land in a datetime column, etc.). An `I64`
+/// target given a float yields an `F64` value — core then widens the column.
+fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
+    match target {
+        DType::F64 => {
+            let x = v
+                .extract::<f64>()
+                .map_err(|_| PyTypeError::new_err("expected a number"))?;
+            Ok(Column::f64(vec![x]))
+        }
+        DType::I64 => {
+            if let Ok(i) = v.extract::<i64>() {
+                Ok(Column::i64(vec![i]))
+            } else {
+                let x = v
+                    .extract::<f64>()
+                    .map_err(|_| PyTypeError::new_err("expected a number"))?;
+                Ok(Column::f64(vec![x]))
+            }
+        }
+        DType::Bool => {
+            let b = v
+                .extract::<bool>()
+                .map_err(|_| PyTypeError::new_err("expected a bool"))?;
+            Ok(Column::bool(vec![b]))
+        }
+        DType::Utf8 => {
+            let s = v
+                .extract::<String>()
+                .map_err(|_| PyTypeError::new_err("expected a string"))?;
+            Ok(Column::str(vec![s]))
+        }
+        DType::Datetime => Ok(Column::datetime(vec![parse_ts(v)?])),
+    }
+}
+
+/// Convert an array-like assignment value (list / NumPy array / `Series`) to a
+/// [`Column`]; core coerces it toward the target dtype.
+fn value_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
+    if let Ok(s) = v.extract::<PyRef<PySeries>>() {
+        return Ok(s.inner.data.clone());
+    }
+    pyany_to_column(v)
+}
+
+/// Resolve a `df[...] = value` right-hand side for `n` selected rows: a scalar is
+/// broadcast (length-1 column), an array-like must match `n`.
+fn resolve_assignment(v: &Bound<'_, PyAny>, target: DType, n: usize) -> PyResult<Column> {
+    // A Python str has `__len__` but is a scalar here; everything else with
+    // `__len__` (list / ndarray / Series) is array-like.
+    let is_str = v.extract::<String>().is_ok();
+    let arraylike = !is_str && v.hasattr("__len__").unwrap_or(false);
+    if arraylike {
+        let col = value_to_column(v)?;
+        if col.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "cannot assign {} values to {n} selected rows",
+                col.len()
+            )));
+        }
+        Ok(col)
+    } else {
+        scalar_to_column(v, target)
+    }
+}
+
+/// If `sel` is a boolean mask of length `height` (NumPy bool array, bool `Series`,
+/// or `list[bool]`), return the selected row positions; else `None`.
+fn as_bool_mask(sel: &Bound<'_, PyAny>, height: usize) -> Option<Vec<usize>> {
+    let collect = |bits: &[bool]| -> Option<Vec<usize>> {
+        (bits.len() == height).then(|| {
+            bits.iter()
+                .enumerate()
+                .filter_map(|(i, &b)| b.then_some(i))
+                .collect()
+        })
+    };
+    if let Ok(a) = sel.extract::<PyReadonlyArray1<bool>>() {
+        return a.as_slice().ok().and_then(collect);
+    }
+    if let Ok(ser) = sel.extract::<PyRef<PySeries>>() {
+        if let Column::Bool(v) = &ser.inner.data {
+            return collect(v);
+        }
+        return None;
+    }
+    if let Ok(v) = sel.extract::<Vec<bool>>() {
+        return collect(&v);
+    }
+    None
+}
+
+/// Resolve an `iloc` row selector (int / slice / int-list / bool-mask) to row
+/// positions.
+fn iloc_positions(sel: &Bound<'_, PyAny>, height: usize) -> PyResult<Vec<usize>> {
+    if let Some(pos) = as_bool_mask(sel, height) {
+        return Ok(pos);
+    }
+    if let Ok(i) = sel.extract::<isize>() {
+        return Ok(vec![norm_idx(i, height)?]);
+    }
+    if let Ok(slice) = sel.downcast::<PySlice>() {
+        let info = slice.indices(height as isize)?;
+        return Ok(strided(info.start, info.stop, info.step));
+    }
+    if let Ok(idxs) = sel.extract::<Vec<isize>>() {
+        return idxs.into_iter().map(|i| norm_idx(i, height)).collect();
+    }
+    Err(PyTypeError::new_err(
+        "iloc row selector must be an int, slice, int list, or boolean mask",
+    ))
+}
+
+/// Resolve a `loc` row selector (bool-mask / label-slice / label / label-list) to
+/// row positions.
+fn loc_positions(sel: &Bound<'_, PyAny>, index: &Index, height: usize) -> PyResult<Vec<usize>> {
+    if let Some(pos) = as_bool_mask(sel, height) {
+        return Ok(pos);
+    }
+    if let Ok(slice) = sel.downcast::<PySlice>() {
+        let (lo, hi) = label_bounds(slice, index)?;
+        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
+        return Ok((a..b).collect());
+    }
+    if let Ok(list) = sel.downcast::<PyList>() {
+        let mut out = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            let label = parse_label(&item, index)?;
+            out.push(
+                index
+                    .position_of(&label)
+                    .ok_or_else(|| PyKeyError::new_err("label not found"))?,
+            );
+        }
+        return Ok(out);
+    }
+    let label = parse_label(sel, index)?;
+    let pos = index
+        .position_of(&label)
+        .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+    Ok(vec![pos])
+}
+
+/// Split a `df.loc[rows, col]` / `df.iloc[rows, col]` assignment key into its two
+/// parts, with a clear error directing to the supported 2-tuple form.
+fn split_row_col<'py>(
+    key: &Bound<'py, PyAny>,
+    accessor: &str,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+    let tup = key.downcast::<PyTuple>().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "{accessor} assignment needs a (rows, column) key, e.g. df.{accessor}[mask, 'col'] = value"
+        ))
+    })?;
+    if tup.len() != 2 {
+        return Err(PyTypeError::new_err(format!(
+            "{accessor} assignment key must be (rows, column)"
+        )));
+    }
+    Ok((tup.get_item(0)?, tup.get_item(1)?))
+}
+
 #[pyclass]
 pub struct DataFrameILoc {
-    inner: DataFrame,
+    parent: Py<PyDataFrame>,
 }
 
 #[pymethods]
 impl DataFrameILoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        ensure_fresh(&self.inner)?;
+        let pf = self.parent.borrow(py);
+        ensure_fresh(&pf.inner)?;
         if let Ok(i) = key.extract::<isize>() {
-            let i = norm_idx(i, self.inner.height())?;
-            return Ok(Py::new(py, row_at(&self.inner, i))?.into_any());
+            let i = norm_idx(i, pf.inner.height())?;
+            return Ok(Py::new(py, row_at(&pf.inner, i))?.into_any());
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let info = slice.indices(self.inner.height() as isize)?;
-            let sub = positional_slice(&self.inner, &info);
+            let info = slice.indices(pf.inner.height() as isize)?;
+            let sub = positional_slice(&pf.inner, &info);
             return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
         }
         Err(PyIndexError::new_err("iloc key must be an integer or slice"))
+    }
+
+    /// `df.iloc[i, j] = scalar` or `df.iloc[rows, j] = scalar | array` (positional;
+    /// copy-on-write). `rows` is an int / slice / int-list / boolean mask; `j` is a
+    /// column position.
+    fn __setitem__(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let mut pf = self.parent.borrow_mut(py);
+        ensure_fresh(&pf.inner)?;
+        let (rows, col) = split_row_col(key, "iloc")?;
+        let height = pf.inner.height();
+        let j = norm_idx(col.extract::<isize>()?, pf.inner.width())?;
+        let positions = iloc_positions(&rows, height)?;
+        let target = pf.inner.columns()[j].dtype();
+        let val = resolve_assignment(value, target, positions.len())?;
+        pf.inner.assign_positions(j, &positions, &val).map_err(pyerr)
     }
 }
 
@@ -1510,60 +1691,134 @@ fn label_bounds(
 /// `df.loc[...]` label indexer.
 #[pyclass]
 pub struct DataFrameLoc {
-    inner: DataFrame,
+    parent: Py<PyDataFrame>,
 }
 
 #[pymethods]
 impl DataFrameLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        ensure_fresh(&self.inner)?;
-        let index = self.inner.index();
+        let pf = self.parent.borrow(py);
+        ensure_fresh(&pf.inner)?;
+        let index = pf.inner.index();
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, index)?;
             let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
-            return Ok(Py::new(py, PyDataFrame { inner: self.inner.slice(a, b) })?.into_any());
+            return Ok(Py::new(py, PyDataFrame { inner: pf.inner.slice(a, b) })?.into_any());
         }
         let label = parse_label(key, index)?;
         let pos = index
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-        Ok(Py::new(py, row_at(&self.inner, pos))?.into_any())
+        Ok(Py::new(py, row_at(&pf.inner, pos))?.into_any())
+    }
+
+    /// `df.loc[rows, col] = scalar | array` (label-based; copy-on-write). `rows` is
+    /// a boolean mask, a label slice, a single label, or a label list; `col` is a
+    /// single column name. The classic `df.loc[mask, 'signal'] = 1`.
+    fn __setitem__(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let mut pf = self.parent.borrow_mut(py);
+        ensure_fresh(&pf.inner)?;
+        let (rows, col) = split_row_col(key, "loc")?;
+        let colname: String = col.extract().map_err(|_| {
+            PyTypeError::new_err("loc assignment column must be a single column name")
+        })?;
+        let height = pf.inner.height();
+        let positions = {
+            let index = pf.inner.index();
+            loc_positions(&rows, index, height)?
+        };
+        let j = pf
+            .inner
+            .column_pos(&colname)
+            .ok_or_else(|| PyKeyError::new_err(format!("column {colname:?} not found")))?;
+        let target = pf.inner.columns()[j].dtype();
+        let val = resolve_assignment(value, target, positions.len())?;
+        pf.inner.assign_positions(j, &positions, &val).map_err(pyerr)
     }
 }
 
 /// `df.iat[i, j]` scalar access by position.
 #[pyclass]
 pub struct DataFrameIat {
-    inner: DataFrame,
+    parent: Py<PyDataFrame>,
 }
 
 #[pymethods]
 impl DataFrameIat {
     fn __getitem__(&self, py: Python<'_>, key: (isize, isize)) -> PyResult<Py<PyAny>> {
-        ensure_fresh(&self.inner)?;
-        let i = norm_idx(key.0, self.inner.height())?;
-        let j = norm_idx(key.1, self.inner.width())?;
-        Ok(scalar_to_py(py, &self.inner.columns()[j], i))
+        let pf = self.parent.borrow(py);
+        ensure_fresh(&pf.inner)?;
+        let i = norm_idx(key.0, pf.inner.height())?;
+        let j = norm_idx(key.1, pf.inner.width())?;
+        Ok(scalar_to_py(py, &pf.inner.columns()[j], i))
+    }
+
+    /// `df.iat[i, j] = scalar` — set a single cell by position (copy-on-write).
+    fn __setitem__(
+        &self,
+        py: Python<'_>,
+        key: (isize, isize),
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let mut pf = self.parent.borrow_mut(py);
+        ensure_fresh(&pf.inner)?;
+        let i = norm_idx(key.0, pf.inner.height())?;
+        let j = norm_idx(key.1, pf.inner.width())?;
+        let target = pf.inner.columns()[j].dtype();
+        let val = scalar_to_column(value, target)?;
+        pf.inner.assign_positions(j, &[i], &val).map_err(pyerr)
     }
 }
 
 /// `df.at[label, col]` scalar access by label + column name.
 #[pyclass]
 pub struct DataFrameAt {
-    inner: DataFrame,
+    parent: Py<PyDataFrame>,
 }
 
 #[pymethods]
 impl DataFrameAt {
     fn __getitem__(&self, py: Python<'_>, key: (Py<PyAny>, String)) -> PyResult<Py<PyAny>> {
-        ensure_fresh(&self.inner)?;
-        let index = self.inner.index();
+        let pf = self.parent.borrow(py);
+        ensure_fresh(&pf.inner)?;
+        let index = pf.inner.index();
         let label = parse_label(key.0.bind(py), index)?;
         let i = index
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-        let col = self.inner.column(&key.1).map_err(pyerr)?;
+        let col = pf.inner.column(&key.1).map_err(pyerr)?;
         Ok(scalar_to_py(py, col, i))
+    }
+
+    /// `df.at[label, col] = scalar` — set a single cell by label + column name
+    /// (copy-on-write).
+    fn __setitem__(
+        &self,
+        py: Python<'_>,
+        key: (Py<PyAny>, String),
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let mut pf = self.parent.borrow_mut(py);
+        ensure_fresh(&pf.inner)?;
+        let i = {
+            let index = pf.inner.index();
+            let label = parse_label(key.0.bind(py), index)?;
+            index
+                .position_of(&label)
+                .ok_or_else(|| PyKeyError::new_err("label not found"))?
+        };
+        let j = pf
+            .inner
+            .column_pos(&key.1)
+            .ok_or_else(|| PyKeyError::new_err(format!("column {:?} not found", key.1)))?;
+        let target = pf.inner.columns()[j].dtype();
+        let val = scalar_to_column(value, target)?;
+        pf.inner.assign_positions(j, &[i], &val).map_err(pyerr)
     }
 }
 
