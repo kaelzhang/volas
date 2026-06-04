@@ -161,15 +161,84 @@ def test_whitespace_around_numbers_trimmed(tmp_path):
     np.testing.assert_array_equal(np.asarray(df['B']), [2, 4])
 
 
-# --- date_col -> DatetimeIndex ---------------------------------------------
+# --- sep / delimiter / header / na_values ----------------------------------
 
-def test_date_col_becomes_datetime_index():
-    df = volas.read_csv(TENCENT, date_col='time_key')
+def test_custom_separator(tmp_path):
+    path = write_csv(tmp_path, "A\tB\n1\t2\n3\t4\n")
+    df = volas.read_csv(path, sep='\t')
+    np.testing.assert_array_equal(np.asarray(df['A']), [1, 3])
+    np.testing.assert_array_equal(np.asarray(df['B']), [2, 4])
+
+
+def test_semicolon_delimiter(tmp_path):
+    path = write_csv(tmp_path, "A;B\n1;2\n")
+    df = volas.read_csv(path, delimiter=';')
+    assert df.columns == ['A', 'B']
+    np.testing.assert_array_equal(np.asarray(df['A']), [1])
+
+
+def test_multichar_sep_raises(tmp_path):
+    path = write_csv(tmp_path, "A,B\n1,2\n")
+    with pytest.raises(Exception):
+        volas.read_csv(path, sep=', ')
+
+
+def test_header_none_generates_positional_names(tmp_path):
+    path = write_csv(tmp_path, "1,2,3\n4,5,6\n")
+    df = volas.read_csv(path, header=None)
+    assert df.columns == ['0', '1', '2']
+    assert df.shape == (2, 3)
+    np.testing.assert_array_equal(np.asarray(df['0']), [1, 4])
+
+
+def test_custom_na_values(tmp_path):
+    path = write_csv(tmp_path, "A\n1\nMISSING\n3\n")
+    df = volas.read_csv(path, na_values='MISSING')
+    pf = pd.read_csv(path, na_values='MISSING')
+    assert df['A'].dtype == 'float64'
+    np.testing.assert_allclose(
+        np.asarray(df['A']), pf['A'].to_numpy(float), equal_nan=True
+    )
+
+
+def test_keep_default_na_false_keeps_token_as_string(tmp_path):
+    path = write_csv(tmp_path, "A\nx\nNA\ny\n")
+    df = volas.read_csv(path, keep_default_na=False)
+    assert df['A'].dtype == 'object'
+    assert list(np.asarray(df['A'])) == ['x', 'NA', 'y']
+
+
+# --- parse_dates + index_col ------------------------------------------------
+
+def test_parse_dates_with_index_col_makes_datetime_index():
+    df = volas.read_csv(TENCENT, parse_dates=['time_key'], index_col='time_key')
     pf = pd.read_csv(TENCENT)
     assert 'time_key' not in df.columns
     assert str(df.index.dtype) == 'datetime64[ns]'
     expected = pd.to_datetime(pf['time_key']).to_numpy()
     assert (df.index == expected).all()
+
+
+def test_parse_dates_without_index_keeps_datetime_column():
+    df = volas.read_csv(TENCENT, parse_dates=['time_key'])
+    pf = pd.read_csv(TENCENT)
+    assert 'time_key' in df.columns
+    assert df['time_key'].dtype == 'datetime64[ns]'
+    expected = pd.to_datetime(pf['time_key']).to_numpy()
+    assert (np.asarray(df['time_key']) == expected).all()
+
+
+def test_index_col_by_integer_position():
+    df = volas.read_csv(TENCENT, parse_dates=['time_key'], index_col=0)
+    assert 'time_key' not in df.columns
+    assert str(df.index.dtype) == 'datetime64[ns]'
+
+
+def test_index_col_on_int_column():
+    df = volas.read_csv(TENCENT, index_col='volume')
+    pf = pd.read_csv(TENCENT)
+    assert 'volume' not in df.columns
+    np.testing.assert_array_equal(np.asarray(df.index), pf['volume'].to_numpy())
 
 
 # --- error paths ------------------------------------------------------------
@@ -179,13 +248,19 @@ def test_missing_file_raises():
         volas.read_csv('/no/such/file/volas_missing.csv')
 
 
-def test_unparsable_date_col_raises(tmp_path):
+def test_unparsable_parse_dates_raises(tmp_path):
     path = write_csv(tmp_path, "time_key,a\nnot-a-date,1\n")
     with pytest.raises(Exception):
-        volas.read_csv(path, date_col='time_key')
+        volas.read_csv(path, parse_dates=['time_key'])
 
 
-def test_non_string_date_col_raises(tmp_path):
+def test_parse_dates_on_non_string_column_raises(tmp_path):
     path = write_csv(tmp_path, "t,a\n1,2\n3,4\n")
     with pytest.raises(Exception):
-        volas.read_csv(path, date_col='t')
+        volas.read_csv(path, parse_dates=['t'])
+
+
+def test_index_col_on_string_column_raises(tmp_path):
+    path = write_csv(tmp_path, "k,a\nx,1\ny,2\n")
+    with pytest.raises(Exception):
+        volas.read_csv(path, index_col='k')

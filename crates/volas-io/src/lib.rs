@@ -1,67 +1,107 @@
 //! File readers for volas. Currently a high-performance CSV reader built on the
 //! `csv` crate, with per-column type inference.
 
+use std::collections::HashSet;
+
 use volas_core::{Column, DataFrame, Result, VolasError};
+
+/// pandas's default missing-value tokens (`STR_NA_VALUES`). A numeric column
+/// with any of these (trimmed) entries upcasts to `f64` with `NaN`, exactly as
+/// `pandas.read_csv` does.
+pub const DEFAULT_NA_VALUES: &[&str] = &[
+    "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND", "1.#QNAN",
+    "<NA>", "N/A", "NA", "NULL", "NaN", "None", "n/a", "nan", "null",
+];
+
+/// Options controlling [`read_csv`].
+pub struct ReadCsvOptions {
+    /// Field delimiter (default `b','`).
+    pub delimiter: u8,
+    /// Whether the first row is a header. When `false`, columns are named
+    /// `"0".."n-1"` by position.
+    pub has_header: bool,
+    /// Additional strings to treat as missing (beyond [`DEFAULT_NA_VALUES`]).
+    pub na_values: Vec<String>,
+    /// Whether [`DEFAULT_NA_VALUES`] are recognized at all.
+    pub keep_default_na: bool,
+}
+
+impl Default for ReadCsvOptions {
+    fn default() -> Self {
+        ReadCsvOptions {
+            delimiter: b',',
+            has_header: true,
+            na_values: Vec::new(),
+            keep_default_na: true,
+        }
+    }
+}
 
 /// Read a CSV file into a [`DataFrame`], inferring each column's dtype
 /// (`i64` -> `f64` -> `bool` -> `str`).
-pub fn read_csv(path: &str) -> Result<DataFrame> {
+pub fn read_csv(path: &str, opts: &ReadCsvOptions) -> Result<DataFrame> {
+    let na_set = build_na_set(opts);
     let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(opts.delimiter)
+        .has_headers(opts.has_header)
         .from_path(path)
         .map_err(|e| VolasError::Value(format!("cannot open CSV {path:?}: {e}")))?;
-    let headers: Vec<String> = rdr
-        .headers()
-        .map_err(|e| VolasError::Value(format!("bad CSV header: {e}")))?
-        .iter()
-        .map(String::from)
-        .collect();
-    let ncol = headers.len();
-    let mut raw: Vec<Vec<String>> = vec![Vec::new(); ncol];
+
+    // Resolve the header / column count up front so a data-less file still
+    // yields the right number of (empty) columns.
+    let mut headers: Vec<String> = if opts.has_header {
+        rdr.headers()
+            .map_err(|e| VolasError::Value(format!("bad CSV header: {e}")))?
+            .iter()
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut ncol = headers.len();
+    let mut raw: Vec<Vec<String>> = if ncol > 0 {
+        vec![Vec::new(); ncol]
+    } else {
+        Vec::new()
+    };
+
     for rec in rdr.records() {
         let rec = rec.map_err(|e| VolasError::Value(format!("bad CSV record: {e}")))?;
+        if raw.is_empty() {
+            ncol = rec.len();
+            raw = vec![Vec::new(); ncol];
+        }
         for (j, cell) in raw.iter_mut().enumerate() {
             cell.push(rec.get(j).unwrap_or("").to_string());
         }
     }
-    let columns: Vec<Column> = raw.into_iter().map(infer_column).collect();
+
+    if !opts.has_header {
+        headers = (0..ncol).map(|i| i.to_string()).collect();
+    }
+
+    let columns: Vec<Column> = raw.into_iter().map(|c| infer_column(c, &na_set)).collect();
     DataFrame::new(headers, columns, None)
 }
 
-/// Whether a (trimmed) cell is one of pandas's default missing-value tokens.
-///
-/// Mirrors pandas's `STR_NA_VALUES` so a numeric column with `NA` / `null` /
-/// `N/A` entries upcasts to `f64` with `NaN`, exactly as `pandas.read_csv` does.
-fn is_na(s: &str) -> bool {
-    matches!(
-        s,
-        "" | "#N/A"
-            | "#N/A N/A"
-            | "#NA"
-            | "-1.#IND"
-            | "-1.#QNAN"
-            | "-NaN"
-            | "-nan"
-            | "1.#IND"
-            | "1.#QNAN"
-            | "<NA>"
-            | "N/A"
-            | "NA"
-            | "NULL"
-            | "NaN"
-            | "None"
-            | "n/a"
-            | "nan"
-            | "null"
-    )
+/// The effective set of missing-value tokens for these options.
+fn build_na_set(opts: &ReadCsvOptions) -> HashSet<String> {
+    let mut set = HashSet::new();
+    if opts.keep_default_na {
+        set.extend(DEFAULT_NA_VALUES.iter().map(|s| s.to_string()));
+    }
+    set.extend(opts.na_values.iter().cloned());
+    set
 }
 
 /// Infer the most specific column type from string cells
 /// (`i64` -> `f64` -> `bool` -> `str`), treating NA tokens as missing.
-fn infer_column(cells: Vec<String>) -> Column {
+fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
     if cells.is_empty() {
         return Column::Str(cells);
     }
     let trimmed: Vec<&str> = cells.iter().map(|c| c.trim()).collect();
+    let is_na = |t: &str| na.contains(t);
     // i64: every cell present and integral.
     if trimmed.iter().all(|t| !is_na(t) && t.parse::<i64>().is_ok()) {
         return Column::I64(trimmed.iter().map(|t| t.parse().unwrap()).collect());
@@ -90,8 +130,12 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn default_na() -> HashSet<String> {
+        build_na_set(&ReadCsvOptions::default())
+    }
+
     fn infer(cells: &[&str]) -> Column {
-        infer_column(cells.iter().map(|s| s.to_string()).collect())
+        infer_column(cells.iter().map(|s| s.to_string()).collect(), &default_na())
     }
 
     #[test]
@@ -138,15 +182,43 @@ mod tests {
 
     #[test]
     fn non_numeric_is_str() {
-        assert_eq!(
-            infer(&["a", "b"]),
-            Column::Str(vec!["a".into(), "b".into()])
-        );
+        assert_eq!(infer(&["a", "b"]), Column::Str(vec!["a".into(), "b".into()]));
     }
 
     #[test]
     fn empty_column_is_str() {
-        assert_eq!(infer_column(Vec::new()), Column::Str(Vec::new()));
+        assert_eq!(
+            infer_column(Vec::new(), &default_na()),
+            Column::Str(Vec::new())
+        );
+    }
+
+    #[test]
+    fn na_disabled_keeps_tokens_as_str() {
+        let na = build_na_set(&ReadCsvOptions {
+            keep_default_na: false,
+            ..Default::default()
+        });
+        // "NA" is no longer missing -> the column is object/string, not float.
+        match infer_column(vec!["1".into(), "NA".into()], &na) {
+            Column::Str(v) => assert_eq!(v, vec!["1".to_string(), "NA".to_string()]),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_na_value_upcasts() {
+        let na = build_na_set(&ReadCsvOptions {
+            na_values: vec!["MISSING".into()],
+            ..Default::default()
+        });
+        match infer_column(vec!["1".into(), "MISSING".into()], &na) {
+            Column::F64(v) => {
+                assert_eq!(v[0], 1.0);
+                assert!(v[1].is_nan());
+            }
+            other => panic!("expected F64, got {other:?}"),
+        }
     }
 
     #[test]
@@ -158,7 +230,7 @@ mod tests {
             writeln!(f, "1,1.5,x").unwrap();
             writeln!(f, "2,,y").unwrap();
         }
-        let df = read_csv(path.to_str().unwrap()).unwrap();
+        let df = read_csv(path.to_str().unwrap(), &ReadCsvOptions::default()).unwrap();
         assert_eq!((df.height(), df.width()), (2, 3));
         assert_eq!(df.column("a").unwrap().as_i64().unwrap(), &[1, 2]);
         let b = df.column("b").unwrap().as_f64().unwrap();
@@ -172,7 +244,27 @@ mod tests {
     }
 
     #[test]
+    fn reads_headerless_and_tab_delimited() {
+        let path = std::env::temp_dir().join("volas_io_read_csv_headerless.tsv");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "1\t2\t3").unwrap();
+            writeln!(f, "4\t5\t6").unwrap();
+        }
+        let opts = ReadCsvOptions {
+            delimiter: b'\t',
+            has_header: false,
+            ..Default::default()
+        };
+        let df = read_csv(path.to_str().unwrap(), &opts).unwrap();
+        assert_eq!((df.height(), df.width()), (2, 3));
+        assert_eq!(df.names(), &["0".to_string(), "1".to_string(), "2".to_string()]);
+        assert_eq!(df.column("0").unwrap().as_i64().unwrap(), &[1, 4]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn missing_path_errors() {
-        assert!(read_csv("/no/such/dir/volas_io_missing.csv").is_err());
+        assert!(read_csv("/no/such/dir/volas_io_missing.csv", &ReadCsvOptions::default()).is_err());
     }
 }

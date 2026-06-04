@@ -63,6 +63,12 @@ fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
                 .call_method("array", (list,), Some(&kwargs))
                 .expect("np.array(object)")
         }
+        // Datetime columns become NumPy datetime64[ns] arrays.
+        Column::Datetime(v) => {
+            let arr = v.clone().into_pyarray(py);
+            arr.call_method1("astype", ("datetime64[ns]",))
+                .expect("astype datetime64[ns]")
+        }
     }
 }
 
@@ -73,6 +79,13 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
         Column::I64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         Column::Bool(v) => v[i].into_pyobject(py).unwrap().to_owned().into_any().unbind(),
         Column::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
+        Column::Datetime(v) => py
+            .import("numpy")
+            .expect("import numpy")
+            .call_method1("datetime64", (v[i], "ns"))
+            .expect("np.datetime64")
+            .into_any()
+            .unbind(),
     }
 }
 
@@ -788,38 +801,94 @@ impl SeriesLoc {
 
 /// Read a CSV file into a `DataFrame`, inferring per-column dtypes.
 ///
-/// `date_col`, when given, names a string column to parse into the
-/// `DatetimeIndex` (the column is consumed, mirroring the `DataFrame`
-/// constructor's `date_col`).
+/// A pandas-subset of `pandas.read_csv`:
+/// - `sep` / `delimiter` — field delimiter (single character; default `,`).
+/// - `header` — `True`/omitted = first row is the header; `None`/`False` = no
+///   header (columns named `"0".."n-1"`).
+/// - `na_values` / `keep_default_na` — extra / default missing-value tokens.
+/// - `parse_dates` — column names to parse into datetime columns.
+/// - `index_col` — a column name or integer position to move into the row index;
+///   applied after `parse_dates`, so naming a parsed date column yields a
+///   `DatetimeIndex`.
 #[pyfunction]
-#[pyo3(signature = (path, date_col = None))]
-fn read_csv(path: String, date_col: Option<String>) -> PyResult<PyDataFrame> {
-    let df = volas_io::read_csv(&path).map_err(pyerr)?;
-    let Some(dc) = date_col else {
-        return Ok(PyDataFrame { inner: df });
-    };
-    let col = df.column(&dc).map_err(pyerr)?;
-    let strings = col
-        .as_str()
-        .ok_or_else(|| PyTypeError::new_err(format!("date_col {dc:?} is not a string column")))?;
-    let mut epochs = Vec::with_capacity(strings.len());
-    for s in strings {
-        epochs.push(
-            datetime::parse_ns(s)
-                .ok_or_else(|| PyValueError::new_err(format!("could not parse datetime {s:?}")))?,
-        );
+#[pyo3(signature = (
+    path,
+    sep = None,
+    delimiter = None,
+    header = Some(true),
+    parse_dates = None,
+    index_col = None,
+    na_values = None,
+    keep_default_na = true,
+))]
+#[allow(clippy::too_many_arguments)]
+fn read_csv(
+    path: String,
+    sep: Option<String>,
+    delimiter: Option<String>,
+    header: Option<bool>,
+    parse_dates: Option<Vec<String>>,
+    index_col: Option<Bound<'_, PyAny>>,
+    na_values: Option<Bound<'_, PyAny>>,
+    keep_default_na: bool,
+) -> PyResult<PyDataFrame> {
+    // Resolve the delimiter (a single byte).
+    let delim_str = delimiter.or(sep).unwrap_or_else(|| ",".to_string());
+    let delim_bytes = delim_str.as_bytes();
+    if delim_bytes.len() != 1 {
+        return Err(PyValueError::new_err(
+            "sep / delimiter must be a single-byte character",
+        ));
     }
-    let mut names = Vec::with_capacity(df.width().saturating_sub(1));
-    let mut cols = Vec::with_capacity(names.capacity());
-    for (n, c) in df.names().iter().zip(df.columns()) {
-        if n == &dc {
-            continue;
+
+    // na_values: a string or a list of strings.
+    let na_list: Vec<String> = match na_values {
+        None => Vec::new(),
+        Some(obj) => {
+            if let Ok(s) = obj.extract::<String>() {
+                vec![s]
+            } else if let Ok(v) = obj.extract::<Vec<String>>() {
+                v
+            } else {
+                return Err(PyTypeError::new_err(
+                    "na_values must be a string or a list of strings",
+                ));
+            }
         }
-        names.push(n.clone());
-        cols.push(c.clone());
+    };
+
+    let opts = volas_io::ReadCsvOptions {
+        delimiter: delim_bytes[0],
+        has_header: matches!(header, Some(true)),
+        na_values: na_list,
+        keep_default_na,
+    };
+    let mut df = volas_io::read_csv(&path, &opts).map_err(pyerr)?;
+
+    // parse_dates: convert each named column to a datetime column in place.
+    if let Some(cols) = parse_dates {
+        for name in &cols {
+            let parsed = df.column(name).map_err(pyerr)?.to_datetime().map_err(pyerr)?;
+            df.set_column(name, parsed).map_err(pyerr)?;
+        }
     }
-    let out = DataFrame::new(names, cols, Some(Index::Datetime(epochs))).map_err(pyerr)?;
-    Ok(PyDataFrame { inner: out })
+
+    // index_col: move a column (by name or position) into the row index.
+    if let Some(ic) = index_col {
+        let name = if let Ok(s) = ic.extract::<String>() {
+            s
+        } else if let Ok(i) = ic.extract::<isize>() {
+            let pos = norm_idx(i, df.width())?;
+            df.names()[pos].clone()
+        } else {
+            return Err(PyTypeError::new_err(
+                "index_col must be a column name or an integer position",
+            ));
+        };
+        df = df.set_index(&name).map_err(pyerr)?;
+    }
+
+    Ok(PyDataFrame { inner: df })
 }
 
 /// The compiled module backing the `volas` package.

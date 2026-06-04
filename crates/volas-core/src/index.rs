@@ -1,5 +1,8 @@
 //! Index: the row labels shared by a frame and the series drawn from it.
 
+use crate::column::Column;
+use crate::error::{Result, VolasError};
+
 /// Row labels. Defaults to an implicit `0..n` range; a `Datetime` index is the
 /// common OHLCV case (i64 nanoseconds since the Unix epoch).
 #[derive(Clone, Debug, PartialEq)]
@@ -13,6 +16,21 @@ pub enum Index {
 }
 
 impl Index {
+    /// Build an index from a column (for `set_index`): a `Datetime` column
+    /// becomes a `DatetimeIndex`, an `I64` column an `Int64Index`. Other dtypes
+    /// are not supported as an index in v1 (string / float indexes are a
+    /// documented future refinement).
+    pub fn from_column(col: &Column) -> Result<Index> {
+        match col {
+            Column::Datetime(v) => Ok(Index::Datetime(v.clone())),
+            Column::I64(v) => Ok(Index::Int64(v.clone())),
+            other => Err(VolasError::DType(format!(
+                "cannot use a {} column as an index (only datetime / int64)",
+                other.dtype()
+            ))),
+        }
+    }
+
     /// Number of labels.
     pub fn len(&self) -> usize {
         match self {
@@ -99,5 +117,28 @@ impl Index {
             None => labels.len(),
         };
         (start, end.max(start))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_datetime_and_int_columns() {
+        assert_eq!(
+            Index::from_column(&Column::Datetime(vec![5, 6])).unwrap(),
+            Index::Datetime(vec![5, 6])
+        );
+        assert_eq!(
+            Index::from_column(&Column::I64(vec![1, 2])).unwrap(),
+            Index::Int64(vec![1, 2])
+        );
+    }
+
+    #[test]
+    fn from_unsupported_column_errors() {
+        assert!(Index::from_column(&Column::F64(vec![1.0])).is_err());
+        assert!(Index::from_column(&Column::Str(vec!["x".into()])).is_err());
     }
 }

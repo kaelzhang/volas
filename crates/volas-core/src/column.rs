@@ -3,6 +3,7 @@
 //! v1 stores values directly in a `Vec<T>`; `F64` columns use `NaN` for missing
 //! values (warm-up regions, gaps), matching stock-pandas / pandas semantics.
 
+use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};
 
@@ -17,6 +18,8 @@ pub enum Column {
     I64(Vec<i64>),
     /// UTF-8 strings.
     Str(Vec<String>),
+    /// Datetimes as i64 nanoseconds since the Unix epoch (UTC-naive).
+    Datetime(Vec<i64>),
 }
 
 impl Column {
@@ -27,6 +30,7 @@ impl Column {
             Column::Bool(v) => v.len(),
             Column::I64(v) => v.len(),
             Column::Str(v) => v.len(),
+            Column::Datetime(v) => v.len(),
         }
     }
 
@@ -42,6 +46,7 @@ impl Column {
             Column::Bool(_) => DType::Bool,
             Column::I64(_) => DType::I64,
             Column::Str(_) => DType::Utf8,
+            Column::Datetime(_) => DType::Datetime,
         }
     }
 
@@ -81,14 +86,25 @@ impl Column {
         }
     }
 
-    /// Materialize the values as `f64` (`bool` -> 0.0/1.0, `i64` -> as f64,
-    /// `str` -> NaN). Used to feed indicator kernels, which operate on `f64`.
+    /// Borrow the underlying epoch-ns slice, if this is a `Datetime` column.
+    pub fn as_datetime(&self) -> Option<&[i64]> {
+        if let Column::Datetime(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    /// Materialize the values as `f64` (`bool` -> 0.0/1.0, `i64` / `datetime` ->
+    /// as f64, `str` -> NaN). Used to feed indicator kernels, which operate on
+    /// `f64`.
     pub fn to_f64_vec(&self) -> Vec<f64> {
         match self {
             Column::F64(v) => v.clone(),
             Column::Bool(v) => v.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect(),
             Column::I64(v) => v.iter().map(|&i| i as f64).collect(),
             Column::Str(v) => vec![f64::NAN; v.len()],
+            Column::Datetime(v) => v.iter().map(|&i| i as f64).collect(),
         }
     }
 
@@ -105,6 +121,7 @@ impl Column {
             }
             Column::I64(v) => v[i] as f64,
             Column::Str(_) => f64::NAN,
+            Column::Datetime(v) => v[i] as f64,
         }
     }
 
@@ -115,6 +132,7 @@ impl Column {
             Column::Bool(v) => Column::Bool(v[start..end].to_vec()),
             Column::I64(v) => Column::I64(v[start..end].to_vec()),
             Column::Str(v) => Column::Str(v[start..end].to_vec()),
+            Column::Datetime(v) => Column::Datetime(v[start..end].to_vec()),
         }
     }
 
@@ -125,6 +143,7 @@ impl Column {
             Column::Bool(v) => Column::Bool(idx.iter().map(|&i| v[i]).collect()),
             Column::I64(v) => Column::I64(idx.iter().map(|&i| v[i]).collect()),
             Column::Str(v) => Column::Str(idx.iter().map(|&i| v[i].clone()).collect()),
+            Column::Datetime(v) => Column::Datetime(idx.iter().map(|&i| v[i]).collect()),
         }
     }
 
@@ -147,11 +166,79 @@ impl Column {
                 a.extend_from_slice(b);
                 Ok(())
             }
+            (Column::Datetime(a), Column::Datetime(b)) => {
+                a.extend_from_slice(b);
+                Ok(())
+            }
             (s, o) => Err(VolasError::DType(format!(
                 "cannot append a {} column onto a {} column",
                 o.dtype(),
                 s.dtype()
             ))),
         }
+    }
+
+    /// Parse this column into a [`Column::Datetime`] (epoch ns). `Str` cells are
+    /// parsed via [`datetime::parse_ns`]; an already-`Datetime` column is
+    /// returned unchanged. Errors on an unparseable cell or an unsupported dtype.
+    pub fn to_datetime(&self) -> Result<Column> {
+        match self {
+            Column::Datetime(_) => Ok(self.clone()),
+            Column::Str(v) => {
+                let mut out = Vec::with_capacity(v.len());
+                for s in v {
+                    let ns = datetime::parse_ns(s).ok_or_else(|| {
+                        VolasError::Value(format!("could not parse datetime {s:?}"))
+                    })?;
+                    out.push(ns);
+                }
+                Ok(Column::Datetime(out))
+            }
+            other => Err(VolasError::DType(format!(
+                "cannot parse a {} column as datetime",
+                other.dtype()
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn datetime_column_basics() {
+        let c = Column::Datetime(vec![10, 20, 30]);
+        assert_eq!(c.len(), 3);
+        assert_eq!(c.dtype(), DType::Datetime);
+        assert_eq!(c.as_datetime().unwrap(), &[10, 20, 30]);
+        assert_eq!(c.get_f64(1), 20.0);
+        assert_eq!(c.to_f64_vec(), vec![10.0, 20.0, 30.0]);
+        assert_eq!(c.slice(1, 3), Column::Datetime(vec![20, 30]));
+        assert_eq!(c.take(&[2, 0]), Column::Datetime(vec![30, 10]));
+    }
+
+    #[test]
+    fn datetime_append_same_dtype_only() {
+        let mut a = Column::Datetime(vec![1]);
+        a.append(&Column::Datetime(vec![2, 3])).unwrap();
+        assert_eq!(a, Column::Datetime(vec![1, 2, 3]));
+        assert!(a.append(&Column::I64(vec![4])).is_err());
+    }
+
+    #[test]
+    fn to_datetime_parses_strings() {
+        let c = Column::Str(vec!["2020-01-01".into(), "2020-01-02 03:04:05".into()]);
+        let dt = c.to_datetime().unwrap();
+        assert_eq!(dt.dtype(), DType::Datetime);
+        assert_eq!(dt.len(), 2);
+        // idempotent on an already-datetime column
+        assert_eq!(dt.to_datetime().unwrap(), dt);
+    }
+
+    #[test]
+    fn to_datetime_errors() {
+        assert!(Column::Str(vec!["not-a-date".into()]).to_datetime().is_err());
+        assert!(Column::I64(vec![1, 2]).to_datetime().is_err());
     }
 }

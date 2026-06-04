@@ -145,6 +145,21 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Move a column out of the frame and use it as the row index (pandas
+    /// `set_index`). The column is removed; its values become the index
+    /// (datetime / int64 — see [`Index::from_column`]).
+    pub fn set_index(&self, name: &str) -> Result<DataFrame> {
+        let pos = self
+            .column_pos(name)
+            .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
+        let index = Index::from_column(&self.columns[pos])?;
+        let mut names = self.names.clone();
+        let mut columns = self.columns.clone();
+        names.remove(pos);
+        columns.remove(pos);
+        DataFrame::new(names, columns, Some(index))
+    }
+
     /// Select a subset of columns into a new frame sharing this index.
     pub fn select(&self, names: &[String]) -> Result<DataFrame> {
         let mut columns = Vec::with_capacity(names.len());
@@ -278,6 +293,23 @@ mod tests {
             df.column("a").unwrap().as_f64().unwrap(),
             &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
         );
+    }
+
+    #[test]
+    fn set_index_moves_column_out() {
+        let df = DataFrame::new(
+            vec!["t".into(), "v".into()],
+            vec![Column::I64(vec![100, 200]), Column::F64(vec![1.0, 2.0])],
+            None,
+        )
+        .unwrap();
+        let indexed = df.set_index("t").unwrap();
+        assert_eq!(indexed.names(), &["v".to_string()]);
+        assert_eq!(indexed.index().as_ref(), &Index::Int64(vec![100, 200]));
+        assert!(indexed.column("t").is_err());
+        // an f64 column cannot be an index
+        assert!(df.set_index("v").is_err());
+        assert!(df.set_index("missing").is_err());
     }
 
     #[test]
