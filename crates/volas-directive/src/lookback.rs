@@ -60,6 +60,10 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "cci" => arg(args, 0, 14).saturating_sub(1),
         "mfi" => arg(args, 0, 14),
         "ultosc" => arg(args, 0, 7).max(arg(args, 1, 14)).max(arg(args, 2, 28)),
+        "plus_dm" | "minus_dm" => arg(args, 0, 14).saturating_sub(1),
+        "plus_di" | "minus_di" | "dx" => arg(args, 0, 14),
+        "adx" => 2 * arg(args, 0, 14) - 1,
+        "adxr" => 3 * arg(args, 0, 14) - 2,
         "trix" => 3 * arg(args, 0, 30).saturating_sub(1) + 1,
         "aroon" | "aroonosc" => arg(args, 0, 14),
         "sum" | "maxindex" | "minindex" | "minmax" | "minmaxindex" => {

@@ -194,6 +194,19 @@ def test_ma_matype_apo_ppo_match_talib(ohlc):
     _parity(df.exec('ppo'), talib.PPO(c, 12, 26, 0))
 
 
+def test_directional_family_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (14, 20):  # 14 is the shared TA-Lib default
+        _parity(df.exec(f'plus_dm:{p}'), talib.PLUS_DM(h, l, p))
+        _parity(df.exec(f'minus_dm:{p}'), talib.MINUS_DM(h, l, p))
+        _parity(df.exec(f'plus_di:{p}'), talib.PLUS_DI(h, l, c, p))
+        _parity(df.exec(f'minus_di:{p}'), talib.MINUS_DI(h, l, c, p))
+        _parity(df.exec(f'dx:{p}'), talib.DX(h, l, c, p))
+        _parity(df.exec(f'adx:{p}'), talib.ADX(h, l, c, p))
+        _parity(df.exec(f'adxr:{p}'), talib.ADXR(h, l, c, p))
+    _parity(df.exec('adx'), talib.ADX(h, l, c, 14))  # default resolves to 14
+
+
 def test_accbands_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (10, 20):  # 20 is the TA-Lib default

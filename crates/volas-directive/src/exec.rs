@@ -448,6 +448,47 @@ fn exec_command(
                 arg_usize(args, 2, Some(28))?,
             ))
         }
+        // Directional movement family (+DM/-DM need only high/low; the rest add close).
+        ("plus_dm", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::plus_dm(&high, &low, arg_usize(args, 0, Some(14))?))
+        }
+        ("minus_dm", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::minus_dm(&high, &low, arg_usize(args, 0, Some(14))?))
+        }
+        ("plus_di", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::plus_di(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+        }
+        ("minus_di", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::minus_di(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+        }
+        ("dx", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::dx(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+        }
+        ("adx", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::adx(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+        }
+        ("adxr", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::adxr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+        }
         ("cci", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
