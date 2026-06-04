@@ -666,6 +666,13 @@ impl PyDataFrame {
         })
     }
 
+    /// Define a column / directive alias: `as_name` resolves to `src_name`
+    /// everywhere a column is looked up (mutates in place, pandas-like).
+    fn alias(&mut self, as_name: &str, src_name: &str) -> PyResult<()> {
+        self.inner = self.inner.with_alias(as_name, src_name).map_err(pyerr)?;
+        Ok(())
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "DataFrame(columns={:?}, shape=({}, {}))",
@@ -718,10 +725,8 @@ fn row_at(df: &DataFrame, py: Python<'_>, i: usize) -> PyRow {
 }
 
 fn take_frame(df: &DataFrame, positions: &[usize]) -> DataFrame {
-    let names = df.names().to_vec();
-    let cols: Vec<Column> = df.columns().iter().map(|c| c.take(positions)).collect();
-    let index = df.index().take(positions);
-    DataFrame::new(names, cols, Some(index)).expect("take keeps shape")
+    // Delegates to core `take`, which carries column aliases onto the new frame.
+    df.take(positions)
 }
 
 /// Slice a frame by a Python slice — positional for integer bounds, label-based

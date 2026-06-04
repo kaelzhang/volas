@@ -17,6 +17,9 @@ pub struct DataFrame {
     name_to_idx: HashMap<String, usize>,
     index: Arc<Index>,
     height: usize,
+    /// Column-name aliases (`alias -> source name`), resolved on lookup. Shared
+    /// via `Arc` (cheap clone) and carried through derived frames.
+    aliases: Arc<HashMap<String, String>>,
 }
 
 impl DataFrame {
@@ -63,6 +66,7 @@ impl DataFrame {
             name_to_idx,
             index: Arc::new(index),
             height,
+            aliases: Arc::new(HashMap::new()),
         })
     }
 
@@ -91,14 +95,47 @@ impl DataFrame {
         &self.columns
     }
 
-    /// Position of a column by name.
-    pub fn column_pos(&self, name: &str) -> Option<usize> {
-        self.name_to_idx.get(name).copied()
+    /// Resolve a name through the alias map (`alias -> source`, else itself).
+    fn resolve<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map(String::as_str).unwrap_or(name)
     }
 
-    /// Whether a column exists.
+    /// Position of a column by name (alias-aware).
+    pub fn column_pos(&self, name: &str) -> Option<usize> {
+        self.name_to_idx.get(self.resolve(name)).copied()
+    }
+
+    /// Whether a column exists (alias-aware).
     pub fn has_column(&self, name: &str) -> bool {
-        self.name_to_idx.contains_key(name)
+        self.name_to_idx.contains_key(self.resolve(name))
+    }
+
+    /// Define a column alias (`as_name -> src_name`), returning a new frame.
+    /// Errors if `as_name` is already a real column, or `src_name` does not exist.
+    pub fn with_alias(&self, as_name: &str, src_name: &str) -> Result<DataFrame> {
+        if self.name_to_idx.contains_key(as_name) {
+            return Err(VolasError::Value(format!(
+                "column \"{as_name}\" already exists"
+            )));
+        }
+        if self.column_pos(src_name).is_none() {
+            return Err(VolasError::Value(format!("column \"{src_name}\" not exists")));
+        }
+        let mut aliases = (*self.aliases).clone();
+        aliases.insert(as_name.to_string(), src_name.to_string());
+        let mut df = self.clone();
+        df.aliases = Arc::new(aliases);
+        Ok(df)
+    }
+
+    /// Gather rows by position into a new frame (carries aliases).
+    pub fn take(&self, positions: &[usize]) -> DataFrame {
+        let columns: Vec<Column> = self.columns.iter().map(|c| c.take(positions)).collect();
+        let index = self.index.take(positions);
+        let mut df =
+            DataFrame::new(self.names.clone(), columns, Some(index)).expect("take keeps shape");
+        df.aliases = Arc::clone(&self.aliases);
+        df
     }
 
     /// Borrow a column by name.
@@ -157,7 +194,9 @@ impl DataFrame {
         let mut columns = self.columns.clone();
         names.remove(pos);
         columns.remove(pos);
-        DataFrame::new(names, columns, Some(index))
+        let mut df = DataFrame::new(names, columns, Some(index))?;
+        df.aliases = Arc::clone(&self.aliases);
+        Ok(df)
     }
 
     /// Select a subset of columns into a new frame sharing this index.
@@ -176,6 +215,7 @@ impl DataFrame {
             name_to_idx,
             index: Arc::clone(&self.index),
             height: self.height,
+            aliases: Arc::clone(&self.aliases),
         })
     }
 
@@ -185,7 +225,10 @@ impl DataFrame {
         let end = end.max(start).min(self.height);
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
         let index = self.index.slice(start, end);
-        DataFrame::new(self.names.clone(), columns, Some(index)).expect("slice keeps shape")
+        let mut df =
+            DataFrame::new(self.names.clone(), columns, Some(index)).expect("slice keeps shape");
+        df.aliases = Arc::clone(&self.aliases);
+        df
     }
 
     /// Filter rows by a boolean mask.
@@ -204,7 +247,9 @@ impl DataFrame {
             .collect();
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(&idx)).collect();
         let index = self.index.take(&idx);
-        DataFrame::new(self.names.clone(), columns, Some(index))
+        let mut df = DataFrame::new(self.names.clone(), columns, Some(index))?;
+        df.aliases = Arc::clone(&self.aliases);
+        Ok(df)
     }
 
     /// Append the rows of `other` (matched by column name) in place.
@@ -229,7 +274,9 @@ impl DataFrame {
             .iter()
             .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
             .collect();
-        DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))
+        let mut df = DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))?;
+        df.aliases = Arc::clone(&self.aliases);
+        Ok(df)
     }
 
     /// Cast the named columns to new dtypes (pandas `astype`), returning a new
@@ -242,7 +289,9 @@ impl DataFrame {
                 .ok_or_else(|| VolasError::ColumnNotFound(name.clone()))?;
             columns[pos] = self.columns[pos].cast(*dtype)?;
         }
-        DataFrame::new(self.names.clone(), columns, Some((*self.index).clone()))
+        let mut df = DataFrame::new(self.names.clone(), columns, Some((*self.index).clone()))?;
+        df.aliases = Arc::clone(&self.aliases);
+        Ok(df)
     }
 
     /// Value equality (pandas `DataFrame.equals`): same column names + order,
