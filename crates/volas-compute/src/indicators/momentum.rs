@@ -138,12 +138,12 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 }
 
 /// TRIX (TA-Lib): the 1-period percent rate-of-change of a triple SMA-seeded EMA of
-/// `close`. Lookback `3·(period-1) + 1`. (Reuses the verified `roc` and `ema_seeded`.)
+/// `close`. Lookback `3·(period-1) + 1`. The three cascaded EMAs are fused into a single
+/// pass via [`kernels::ema_cascade`] (one traversal, one allocation), then the verified
+/// `roc` finishes it. Bit-identical to chaining three `ema_seeded` calls.
 pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
-    let e1 = kernels::ema_seeded(av(close), period);
-    let e2 = kernels::ema_seeded(e1.view(), period);
-    let e3 = kernels::ema_seeded(e2.view(), period);
-    roc(&e3.to_vec(), 1)
+    let e3 = kernels::ema_cascade::<3>(close, period);
+    roc(&e3, 1)
 }
 
 /// Aroon up/down over a `period+1`-bar window (TA-Lib AROON): for each row the

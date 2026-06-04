@@ -204,6 +204,65 @@ pub fn ema_seeded(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     sma_seeded(data, period, move |prev, x| (x - prev).mul_add(k, prev))
 }
 
+/// `S` SMA-seeded EMAs applied in cascade (each stage's input is the previous stage's
+/// output), fused into a single pass — a lattice where every bar advances all stages,
+/// stage `j` consuming stage `j-1`'s *current* output. Returns the final stage.
+///
+/// Staggered warmup: stage `j` SMA-seeds over the first `period` finite values it sees,
+/// which begin at its predecessor's seed, so it seeds at index `j·(period-1)` and the
+/// output is valid from `S·(period-1)`. Bit-identical to chaining [`ema_seeded`] `S`
+/// times (same SMA seed, same FMA step), but one traversal and one allocation instead of
+/// `S` of each. `S` is a const generic so the per-bar `[f64; S]` cascade is scalarised
+/// into registers and unrolled (no per-stage memory traffic). For cascaded-EMA
+/// indicators (TRIX).
+pub fn ema_cascade<const S: usize>(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || S == 0 {
+        return out;
+    }
+    let lookback = S * (period - 1);
+    if lookback >= n {
+        return out;
+    }
+    let k = 2.0 / (period as f64 + 1.0);
+    let mut e = [0.0f64; S];
+    let mut acc = [0.0f64; S];
+    let mut cnt = [0usize; S];
+    let mut seeded = [false; S];
+    for &raw in &data[..=lookback] {
+        let mut x = raw;
+        for s in 0..S {
+            if seeded[s] {
+                e[s] = (x - e[s]).mul_add(k, e[s]);
+                x = e[s];
+            } else if !x.is_nan() {
+                acc[s] += x;
+                cnt[s] += 1;
+                if cnt[s] == period {
+                    e[s] = acc[s] / period as f64;
+                    seeded[s] = true;
+                    x = e[s];
+                } else {
+                    x = f64::NAN;
+                }
+            } else {
+                x = f64::NAN;
+            }
+        }
+    }
+    out[lookback] = e[S - 1];
+    for (i, slot) in out.iter_mut().enumerate().take(n).skip(lookback + 1) {
+        let mut x = data[i];
+        for e in e.iter_mut() {
+            *e = (x - *e).mul_add(k, *e);
+            x = *e;
+        }
+        *slot = e[S - 1];
+    }
+    out
+}
+
 /// EWMA seeded with an explicit initial value (used by KDJ).
 #[inline]
 pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1<f64> {
