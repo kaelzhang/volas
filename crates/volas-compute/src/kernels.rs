@@ -5,10 +5,10 @@
 //! sum / std slide a running accumulator, min / max use a monotonic deque —
 //! never the O(n·period) per-window re-scan they were ported from.
 //!
-//! The kernels are deliberately scalar. The EWMA recurrence is division-latency
-//! bound, and the two independent chains macd / rsi need ([`dual_ewma`]) are
-//! already issued in parallel by the out-of-order core (ILP); a measured `f64x2`
-//! SIMD dual-EWMA came out 1.00x, so explicit SIMD buys nothing here.
+//! The kernels are deliberately scalar: the recursive smoothers ([`ema_seeded`],
+//! [`wilder`]) are division-latency bound and the out-of-order core already extracts
+//! the available ILP, so a measured `f64x2` SIMD variant came out 1.00x — explicit
+//! SIMD buys nothing here.
 
 use ndarray::{Array1, ArrayView1};
 use std::collections::VecDeque;
@@ -27,20 +27,22 @@ pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     }
     // Fast path — a clean sliding sum with no per-element NaN bookkeeping (same
     // accumulation order, so bit-identical for NaN-free data, ~3.6x faster — the
-    // common OHLCV case). A NaN poisons the running sum permanently (subtracting
-    // finite values never clears it), so a single `sum.is_nan()` check *after* the
-    // pass detects any NaN without a separate upfront scan; on the rare NaN case we
-    // reset and fall through to the precise slow path.
+    // common OHLCV case). A **leading** NaN prefix is skipped (cascaded indicators —
+    // trima, stochastic smoothing — feed an SMA over a series that warms up with
+    // NaN), sliding from the first finite value. A NaN *after* that prefix poisons
+    // the running sum permanently, so one `sum.is_nan()` check after the pass catches
+    // it without a separate scan; then we reset and take the precise slow path.
     if let Some(src) = data.as_slice() {
+        let start = src.iter().position(|x| !x.is_nan()).unwrap_or(n);
         let mut sum = 0.0;
         {
             let dst = result.as_slice_mut().expect("from_elem is contiguous");
-            for i in 0..n {
+            for i in start..n {
                 sum += src[i];
-                if i >= period {
+                if i >= start + period {
                     sum -= src[i - period];
                 }
-                if i + 1 >= period {
+                if i + 1 >= start + period {
                     dst[i] = sum / period as f64;
                 }
             }
@@ -73,156 +75,6 @@ pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
         }
     }
     result
-}
-
-/// One in-place EWMA update step for the new value `cur` — the per-element body
-/// shared by [`ewma_com`] and [`dual_ewma`] so the recurrence lives in one place.
-#[inline(always)]
-fn ewma_step(
-    cur: f64,
-    wavg: &mut f64,
-    old_wt: &mut f64,
-    nobs: &mut usize,
-    old_wt_factor: f64,
-    new_wt: f64,
-    adjust: bool,
-    ignore_na: bool,
-) {
-    let is_observation = !cur.is_nan();
-    if is_observation {
-        *nobs += 1;
-    }
-    if !wavg.is_nan() {
-        if is_observation || !ignore_na {
-            *old_wt *= old_wt_factor;
-            if is_observation {
-                if *wavg != cur {
-                    *wavg = (*old_wt * *wavg + new_wt * cur) / (*old_wt + new_wt);
-                }
-                if adjust {
-                    *old_wt += new_wt;
-                } else {
-                    *old_wt = 1.0;
-                }
-            }
-        }
-    } else if is_observation {
-        *wavg = cur;
-    }
-}
-
-/// Exponentially weighted moving average parameterised by center-of-mass,
-/// matching pandas' `ewm(com=...)`.
-#[inline]
-pub fn ewma_com(
-    data: ArrayView1<f64>,
-    com: f64,
-    adjust: bool,
-    ignore_na: bool,
-    min_periods: usize,
-) -> Array1<f64> {
-    let n = data.len();
-    let mut result = Array1::from_elem(n, f64::NAN);
-    if n == 0 {
-        return result;
-    }
-    let min_periods = min_periods.max(1);
-    let alpha = 1.0 / (1.0 + com);
-    let old_wt_factor = 1.0 - alpha;
-    let new_wt = if adjust { 1.0 } else { alpha };
-
-    let mut wavg = data[0];
-    let mut nobs = if wavg.is_nan() { 0 } else { 1 };
-    let mut old_wt = 1.0;
-    result[0] = if nobs >= min_periods { wavg } else { f64::NAN };
-
-    for i in 1..n {
-        ewma_step(
-            data[i],
-            &mut wavg,
-            &mut old_wt,
-            &mut nobs,
-            old_wt_factor,
-            new_wt,
-            adjust,
-            ignore_na,
-        );
-        result[i] = if nobs >= min_periods { wavg } else { f64::NAN };
-    }
-    result
-}
-
-/// Two independent EWMAs in a single traversal — bit-identical to two
-/// [`ewma_com`] calls but with one pass and shared bounds. macd uses it (one
-/// input, two coms); rsi uses it (two inputs, one com).
-#[inline]
-#[allow(clippy::too_many_arguments)]
-pub fn dual_ewma(
-    a: ArrayView1<f64>,
-    com_a: f64,
-    min_a: usize,
-    b: ArrayView1<f64>,
-    com_b: f64,
-    min_b: usize,
-    adjust: bool,
-    ignore_na: bool,
-) -> (Array1<f64>, Array1<f64>) {
-    let n = a.len();
-    let mut ra = Array1::from_elem(n, f64::NAN);
-    let mut rb = Array1::from_elem(n, f64::NAN);
-    if n == 0 {
-        return (ra, rb);
-    }
-    let min_a = min_a.max(1);
-    let min_b = min_b.max(1);
-    let alpha_a = 1.0 / (1.0 + com_a);
-    let alpha_b = 1.0 / (1.0 + com_b);
-    let owf_a = 1.0 - alpha_a;
-    let owf_b = 1.0 - alpha_b;
-    let nw_a = if adjust { 1.0 } else { alpha_a };
-    let nw_b = if adjust { 1.0 } else { alpha_b };
-
-    let mut wavg_a = a[0];
-    let mut nobs_a = if wavg_a.is_nan() { 0 } else { 1 };
-    let mut old_wt_a = 1.0;
-    ra[0] = if nobs_a >= min_a { wavg_a } else { f64::NAN };
-
-    let mut wavg_b = b[0];
-    let mut nobs_b = if wavg_b.is_nan() { 0 } else { 1 };
-    let mut old_wt_b = 1.0;
-    rb[0] = if nobs_b >= min_b { wavg_b } else { f64::NAN };
-
-    for i in 1..n {
-        ewma_step(
-            a[i],
-            &mut wavg_a,
-            &mut old_wt_a,
-            &mut nobs_a,
-            owf_a,
-            nw_a,
-            adjust,
-            ignore_na,
-        );
-        ewma_step(
-            b[i],
-            &mut wavg_b,
-            &mut old_wt_b,
-            &mut nobs_b,
-            owf_b,
-            nw_b,
-            adjust,
-            ignore_na,
-        );
-        ra[i] = if nobs_a >= min_a { wavg_a } else { f64::NAN };
-        rb[i] = if nobs_b >= min_b { wavg_b } else { f64::NAN };
-    }
-    (ra, rb)
-}
-
-/// Smoothed moving average (EWMA with `alpha = 1/period`).
-#[inline]
-pub fn smma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    ewma_com(data, (period - 1) as f64, true, false, period)
 }
 
 /// SMA-seeded recursive smoother — the shape TA-Lib uses for EMA / Wilder. The
@@ -278,10 +130,6 @@ pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     sma_seeded(data, period, move |prev, x| prev.mul_add(a, x * b))
 }
 
-/// Exponential moving average, TA-Lib arithmetic:
-/// `out[i] = out[i-1] + k*(x[i] - out[i-1])` with `k = 2/(period+1)`, SMA-seeded
-/// (TA-Lib's default EMA seeding).
-#[inline]
 /// Fused `ema(fast) - ema(slow)` (the MACD line) in a single pass. The two
 /// SMA-seeded EMAs are **independent** recurrences, so interleaving them in one
 /// loop lets the out-of-order core overlap the two FMA dependency chains (ILP) —
@@ -326,8 +174,8 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
     let src = data.as_slice().expect("MACD inputs are contiguous");
     let dst = out.as_slice_mut().expect("from_elem is contiguous");
     let mut pf = sf_sum / fast as f64; // fast EMA at its seed `sf`
-    // Warm the fast EMA up to the slow seed (the slow EMA is not valid yet, so the
-    // difference stays NaN until `ss`).
+                                       // Warm the fast EMA up to the slow seed (the slow EMA is not valid yet, so the
+                                       // difference stays NaN until `ss`).
     for &x in &src[sf + 1..=ss] {
         pf = (x - pf).mul_add(kf, pf);
     }
@@ -343,6 +191,10 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
     out
 }
 
+/// Exponential moving average, TA-Lib arithmetic:
+/// `out[i] = out[i-1] + k*(x[i] - out[i-1])` with `k = 2/(period+1)`, SMA-seeded
+/// (TA-Lib's default EMA seeding).
+#[inline]
 pub fn ema_seeded(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     let k = 2.0 / (period as f64 + 1.0);
     // `(x - prev) * k + prev` via a fused multiply-add: one rounding (slightly more
@@ -721,7 +573,6 @@ mod tests {
     fn empty_input_and_invalid_periods_return_nan() {
         let empty = Array1::<f64>::zeros(0);
         assert_eq!(sma(empty.view(), 3).len(), 0);
-        assert_eq!(ewma_com(empty.view(), 1.0, true, false, 1).len(), 0);
         assert_eq!(ewma_with_init(empty.view(), 3, 0.0).len(), 0);
 
         let d = array![1.0, 2.0];
@@ -730,16 +581,6 @@ mod tests {
         assert!(rolling_std(d.view(), 5, 1).iter().all(|x| x.is_nan()));
         assert!(rolling_min(d.view(), 0).iter().all(|x| x.is_nan())); // period == 0
         assert!(rolling_std(d.view(), 2, 2).iter().all(|x| x.is_nan())); // ddof >= period
-    }
-
-    #[test]
-    fn ewma_handles_nan_and_adjust_variants() {
-        let d = array![1.0, f64::NAN, 3.0, 4.0];
-        assert_eq!(ewma_com(d.view(), 1.0, true, true, 1).len(), 4); // adjust + ignore_na
-        assert_eq!(ewma_com(d.view(), 1.0, false, false, 1).len(), 4); // neither
-                                                                       // a leading NaN keeps nobs below min_periods -> result[0] is NaN
-        let lead = array![f64::NAN, 2.0, 3.0];
-        assert!(ewma_com(lead.view(), 1.0, true, false, 1)[0].is_nan());
     }
 
     // --- O(n) rewrite safety net -------------------------------------------
@@ -894,37 +735,5 @@ mod tests {
         assert_eq!(m[2], 1.0);
         assert_eq!(m[3], 1.0);
         assert!(m[4].is_nan());
-    }
-
-    #[test]
-    fn dual_ewma_matches_two_ewma_com_bit_exact() {
-        let d = series(300);
-        let mut g = series(300);
-        g[5] = f64::NAN; // a distinct second input with an interior NaN
-        let (a, b) = (av(&d), av(&g));
-        // one input, two coms (the macd shape)
-        let (f, s) = dual_ewma(a, 5.5, 12, a, 12.5, 26, true, false);
-        approx_eq_nan(
-            &f.to_vec(),
-            &ewma_com(a, 5.5, true, false, 12).to_vec(),
-            0.0,
-        );
-        approx_eq_nan(
-            &s.to_vec(),
-            &ewma_com(a, 12.5, true, false, 26).to_vec(),
-            0.0,
-        );
-        // two inputs, one com (the rsi shape)
-        let (ga, gb) = dual_ewma(a, 13.0, 14, b, 13.0, 14, true, false);
-        approx_eq_nan(
-            &ga.to_vec(),
-            &ewma_com(a, 13.0, true, false, 14).to_vec(),
-            0.0,
-        );
-        approx_eq_nan(
-            &gb.to_vec(),
-            &ewma_com(b, 13.0, true, false, 14).to_vec(),
-            0.0,
-        );
     }
 }
