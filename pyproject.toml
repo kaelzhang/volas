@@ -42,6 +42,11 @@ dev = [
   "pytest-cov",
   "pytest-benchmark",
   "twine",
+  # Test-time oracles only: the parity tests and the 3-way benchmark compare
+  # volas against pandas / stock-pandas. These are NOT runtime dependencies --
+  # volas is intentionally independent of pandas.
+  "pandas>=2.0.0",
+  "stock-pandas>=5.4",
   # PEP 639 / Metadata 2.4 license fields require packaging >= 24.2 to publish
   "packaging>=24.2",
   "numpy>=2.0.0",
