@@ -229,19 +229,25 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     if period == 0 || period + 1 > n {
         return out;
     }
-    let tp = |i: usize| (high[i] + low[i] + close[i]) / 3.0;
-    // Per-bar (positive, negative) money flow, signed by tp's change vs the prior bar.
-    let mf = |i: usize| -> (f64, f64) {
-        let diff = tp(i) - tp(i - 1);
-        let flow = tp(i) * volume[i];
+    // Precompute the per-bar (positive, negative) money flow once. The typical price is
+    // carried across bars (`prev_tp`), so each bar's `(high+low+close)/3` is divided
+    // exactly once instead of the four times the previous slide incurred (the leaving
+    // and entering bars each re-derived `tp(i)` and `tp(i-1)`). Bit-identical: same tp,
+    // same per-bar flow, and the slide below keeps the subtract-then-add order.
+    let mut pos = vec![0.0; n];
+    let mut neg = vec![0.0; n];
+    let mut prev_tp = (high[0] + low[0] + close[0]) / 3.0;
+    for i in 1..n {
+        let tp = (high[i] + low[i] + close[i]) / 3.0;
+        let diff = tp - prev_tp;
+        let flow = tp * volume[i];
         if diff < 0.0 {
-            (0.0, flow)
+            neg[i] = flow;
         } else if diff > 0.0 {
-            (flow, 0.0)
-        } else {
-            (0.0, 0.0)
+            pos[i] = flow;
         }
-    };
+        prev_tp = tp;
+    }
     let mfi_val = |pos: f64, neg: f64| {
         let total = pos + neg;
         if total < 1.0 {
@@ -253,18 +259,15 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     let mut pos_sum = 0.0;
     let mut neg_sum = 0.0;
     for i in 1..=period {
-        let (p, ng) = mf(i);
-        pos_sum += p;
-        neg_sum += ng;
+        pos_sum += pos[i];
+        neg_sum += neg[i];
     }
     out[period] = mfi_val(pos_sum, neg_sum);
     for i in (period + 1)..n {
-        let (dp, dn) = mf(i - period); // bar leaving the window
-        pos_sum -= dp;
-        neg_sum -= dn;
-        let (ap, an) = mf(i); // bar entering
-        pos_sum += ap;
-        neg_sum += an;
+        pos_sum -= pos[i - period]; // bar leaving the window
+        neg_sum -= neg[i - period];
+        pos_sum += pos[i]; // bar entering
+        neg_sum += neg[i];
         out[i] = mfi_val(pos_sum, neg_sum);
     }
     out
