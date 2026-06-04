@@ -113,6 +113,8 @@ pub fn is_command(name: &str) -> bool {
             | "linearreg_intercept"
             | "linearreg_angle"
             | "tsf"
+            | "var"
+            | "stddev"
             | "avgprice"
             | "medprice"
             | "typprice"
@@ -163,6 +165,8 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf",
             None,
         ) => (vec![Int(14)], vec!["close"]),
+        ("var", None) => (vec![Int(5)], vec!["close"]),
+        ("stddev", None) => (vec![Int(5), Float(1.0)], vec!["close"]),
         ("avgprice", None) => (vec![], vec!["open", "high", "low", "close"]),
         ("medprice", None) => (vec![], vec!["high", "low"]),
         ("typprice", None) => (vec![], vec!["high", "low", "close"]),

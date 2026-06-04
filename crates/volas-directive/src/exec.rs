@@ -380,6 +380,12 @@ fn exec_command(
             f64col(ind::linearreg_angle(&close(0)?, arg_usize(args, 0, Some(14))?))
         }
         ("tsf", _) => f64col(ind::tsf(&close(0)?, arg_usize(args, 0, Some(14))?)),
+        ("var", _) => f64col(ind::var(&close(0)?, arg_usize(args, 0, Some(5))?)),
+        ("stddev", _) => f64col(ind::stddev(
+            &close(0)?,
+            arg_usize(args, 0, Some(5))?,
+            arg_f64(args, 1, 1.0)?,
+        )),
 
         ("avgprice", _) => {
             let open = series_f64(df, series, 0, "open")?;

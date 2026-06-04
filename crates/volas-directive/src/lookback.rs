@@ -41,6 +41,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf" => {
             arg(args, 0, 14).saturating_sub(1)
         }
+        "var" | "stddev" => arg(args, 0, 5).saturating_sub(1),
         "avgprice" | "medprice" | "typprice" | "wclprice" => 0,
         _ => return None,
     };

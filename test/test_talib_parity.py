@@ -107,6 +107,15 @@ def test_linear_regression_matches_talib(ohlc):
     _parity(df.exec('tsf'), talib.TSF(c, 14))  # default resolves to 14
 
 
+def test_variance_stddev_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (5, 20):  # 5 is the shared TA-Lib default
+        _parity(df.exec(f'var:{p}'), talib.VAR(c, p))
+        _parity(df.exec(f'stddev:{p}'), talib.STDDEV(c, p))  # nbdev defaults to 1
+        _parity(df.exec(f'stddev:{p},2'), talib.STDDEV(c, p, nbdev=2.0))
+    _parity(df.exec('var'), talib.VAR(c, 5))  # default resolves to 5
+
+
 def test_range_based_match_talib(ohlc):
     df, h, l, c = ohlc
     for p in (7, 14):  # 14 is the shared TA-Lib default
