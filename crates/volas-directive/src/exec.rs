@@ -278,6 +278,27 @@ fn exec_command(
             let s = ma_typed(&data, arg_usize(args, 1, Some(26))?, mt)?;
             f64col((0..data.len()).map(|i| f[i] - s[i]).collect())
         }
+        // MACDEXT: a MACD whose fast/slow/signal MAs each take a configurable type
+        // (matypes default to SMA, not macd's fixed EMA). The line is emitted at its
+        // natural start (best practice, like macd); signal/histogram follow.
+        ("macdext", sub) => {
+            let data = close(0)?;
+            let f = ma_typed(&data, arg_usize(args, 0, Some(12))?, arg_usize(args, 1, Some(0))?)?;
+            let s = ma_typed(&data, arg_usize(args, 2, Some(26))?, arg_usize(args, 3, Some(0))?)?;
+            let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
+            match sub {
+                None => f64col(line),
+                _ => {
+                    let signal =
+                        ma_typed(&line, arg_usize(args, 4, Some(9))?, arg_usize(args, 5, Some(0))?)?;
+                    if sub == Some("signal") {
+                        f64col(signal)
+                    } else {
+                        f64col((0..line.len()).map(|i| line[i] - signal[i]).collect())
+                    }
+                }
+            }
+        }
         ("ppo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2, Some(0))?;

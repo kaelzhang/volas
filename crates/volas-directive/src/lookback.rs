@@ -31,6 +31,14 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "ma" => ma_lookback(arg(args, 0, 1), arg(args, 1, 0)),
         // apo/ppo warm up with the slower MA of the chosen type.
         "apo" | "ppo" => ma_lookback(arg(args, 1, 26), arg(args, 2, 0)),
+        "macdext" => {
+            let line = ma_lookback(arg(args, 0, 12), arg(args, 1, 0))
+                .max(ma_lookback(arg(args, 2, 26), arg(args, 3, 0)));
+            match sub {
+                None => line,
+                _ => line + ma_lookback(arg(args, 4, 9), arg(args, 5, 0)),
+            }
+        }
         "wma" | "trima" => arg(args, 0, 30).saturating_sub(1),
         "dema" => 2 * arg(args, 0, 30).saturating_sub(1),
         "tema" => 3 * arg(args, 0, 30).saturating_sub(1),

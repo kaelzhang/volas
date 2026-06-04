@@ -63,9 +63,9 @@ pub struct CommandSpec {
 /// `upper`). Returns the canonical sub, or `None` for the main command.
 pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
     match (name, sub) {
-        ("macd", None | Some("dif")) => None,
-        ("macd", Some("s" | "signal" | "dea")) => Some("signal".into()),
-        ("macd", Some("h" | "histogram" | "macd")) => Some("histogram".into()),
+        ("macd" | "macdext", None | Some("dif")) => None,
+        ("macd" | "macdext", Some("s" | "signal" | "dea")) => Some("signal".into()),
+        ("macd" | "macdext", Some("h" | "histogram" | "macd")) => Some("histogram".into()),
         ("aroon", Some("u" | "up")) => Some("up".into()),
         ("aroon", Some("d" | "down")) => Some("down".into()),
         ("stoch", Some("k" | "slowk")) => Some("k".into()),
@@ -93,6 +93,7 @@ pub fn is_command(name: &str) -> bool {
             | "smma"
             | "apo"
             | "ppo"
+            | "macdext"
             | "wma"
             | "dema"
             | "tema"
@@ -179,6 +180,13 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("ma", None) => (vec![Required, Int(0)], vec!["close"]),
         ("ema" | "smma", None) => (vec![Required], vec!["close"]),
         ("apo" | "ppo", None) => (vec![Int(12), Int(26), Int(0)], vec!["close"]),
+        // macdext: fast, fastmatype, slow, slowmatype[, signal, signalmatype]. Matypes
+        // default to SMA (0), unlike macd's fixed EMA.
+        ("macdext", None) => (vec![Int(12), Int(0), Int(26), Int(0)], vec!["close"]),
+        ("macdext", Some("signal" | "histogram")) => (
+            vec![Int(12), Int(0), Int(26), Int(0), Int(9), Int(0)],
+            vec!["close"],
+        ),
         ("wma" | "dema" | "tema" | "trima", None) => (vec![Int(30)], vec!["close"]),
         ("t3", None) => (vec![Int(5), Float(0.7)], vec!["close"]),
         ("kama", None) => (vec![Int(30)], vec!["close"]),

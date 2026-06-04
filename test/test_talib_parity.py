@@ -256,6 +256,19 @@ def test_directional_family_matches_talib(ohlc):
     _parity(df.exec('adx'), talib.ADX(h, l, c, 14))  # default resolves to 14
 
 
+def test_macdext_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    macd, signal, hist = talib.MACDEXT(c)  # all matypes default to SMA
+    _parity(df.exec('macdext'), macd, mask_want=True)  # line at natural start
+    _parity(df.exec('macdext.signal'), signal)
+    _parity(df.exec('macdext.histogram'), hist)
+    # With a seeded MA (EMA fast), volas computes the clean standalone MA difference
+    # (best practice, like macd); talib.MACDEXT instead uses its own seeded/aligned MAs
+    # so its line != standalone MA(12,1)-MA(26,0). Compare against the clean diff.
+    clean = talib.MA(c, 12, 1) - talib.MA(c, 26, 0)
+    _parity(df.exec('macdext:12,1,26,0'), clean, mask_want=True)
+
+
 def test_accbands_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (10, 20):  # 20 is the TA-Lib default
