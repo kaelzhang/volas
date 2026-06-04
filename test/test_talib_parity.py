@@ -76,3 +76,12 @@ def test_macd_is_clean_ema_difference(ohlc):
     # macd.signal = EMA(9) of the (clean) line; macd.histogram = line - signal.
     # Both follow from the verified line + ema_seeded, so are not re-checked against
     # talib's quirk-based MACD signal / hist.
+
+
+def test_price_transform_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    o = df['open'].to_numpy()
+    _parity(df.exec('avgprice'), talib.AVGPRICE(o, h, l, c))
+    _parity(df.exec('medprice'), talib.MEDPRICE(h, l))
+    _parity(df.exec('typprice'), talib.TYPPRICE(h, l, c))
+    _parity(df.exec('wclprice'), talib.WCLPRICE(h, l, c))

@@ -325,6 +325,31 @@ fn exec_command(
         ("repeat", _) => boolcol(ind::repeat(&series_bool(df, series, 0)?, arg_usize(args, 0, Some(1))?)),
         ("change", _) => f64col(ind::change(&close(0)?, arg_usize(args, 0, Some(2))?)),
 
+        ("avgprice", _) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let high = series_f64(df, series, 1, "high")?;
+            let low = series_f64(df, series, 2, "low")?;
+            let close = series_f64(df, series, 3, "close")?;
+            f64col(ind::avgprice(&open, &high, &low, &close))
+        }
+        ("medprice", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::medprice(&high, &low))
+        }
+        ("typprice", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::typprice(&high, &low, &close))
+        }
+        ("wclprice", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::wclprice(&high, &low, &close))
+        }
+
         (other, _) => Err(VolasError::Value(format!("unknown command '{other}'"))),
     }
 }
