@@ -229,25 +229,6 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     if period == 0 || period + 1 > n {
         return out;
     }
-    // Precompute the per-bar (positive, negative) money flow once. The typical price is
-    // carried across bars (`prev_tp`), so each bar's `(high+low+close)/3` is divided
-    // exactly once instead of the four times the previous slide incurred (the leaving
-    // and entering bars each re-derived `tp(i)` and `tp(i-1)`). Bit-identical: same tp,
-    // same per-bar flow, and the slide below keeps the subtract-then-add order.
-    let mut pos = vec![0.0; n];
-    let mut neg = vec![0.0; n];
-    let mut prev_tp = (high[0] + low[0] + close[0]) / 3.0;
-    for i in 1..n {
-        let tp = (high[i] + low[i] + close[i]) / 3.0;
-        let diff = tp - prev_tp;
-        let flow = tp * volume[i];
-        if diff < 0.0 {
-            neg[i] = flow;
-        } else if diff > 0.0 {
-            pos[i] = flow;
-        }
-        prev_tp = tp;
-    }
     let mfi_val = |pos: f64, neg: f64| {
         let total = pos + neg;
         if total < 1.0 {
@@ -256,19 +237,53 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
             100.0 * pos / total
         }
     };
+    // Single pass over O(period) memory (TA-Lib's shape): a ring buffer holds the last
+    // `period` per-bar (positive, negative) money flows so the window can drop the
+    // departing bar without an n-sized side array. The typical price is carried across
+    // bars (`prev_tp`), so `(high+low+close)/3` is divided exactly once per bar, and the
+    // slide keeps the subtract-then-add order — bit-identical to the per-bar-flow form.
+    let mut ring_pos = vec![0.0; period];
+    let mut ring_neg = vec![0.0; period];
+    let mut prev_tp = (high[0] + low[0] + close[0]) / 3.0;
+    let flow_of = |prev: f64, i: usize| -> (f64, f64, f64) {
+        let tp = (high[i] + low[i] + close[i]) / 3.0;
+        let flow = tp * volume[i];
+        let (p, ng) = if tp - prev < 0.0 {
+            (0.0, flow)
+        } else if tp - prev > 0.0 {
+            (flow, 0.0)
+        } else {
+            (0.0, 0.0)
+        };
+        (p, ng, tp)
+    };
     let mut pos_sum = 0.0;
     let mut neg_sum = 0.0;
+    // Warm up the first window — bars `1..=period` fill ring slots `0..period`.
     for i in 1..=period {
-        pos_sum += pos[i];
-        neg_sum += neg[i];
+        let (p, ng, tp) = flow_of(prev_tp, i);
+        ring_pos[i - 1] = p;
+        ring_neg[i - 1] = ng;
+        pos_sum += p;
+        neg_sum += ng;
+        prev_tp = tp;
     }
     out[period] = mfi_val(pos_sum, neg_sum);
+    let mut slot = 0usize; // ring slot holding the oldest in-window bar (to evict next)
     for i in (period + 1)..n {
-        pos_sum -= pos[i - period]; // bar leaving the window
-        neg_sum -= neg[i - period];
-        pos_sum += pos[i]; // bar entering
-        neg_sum += neg[i];
+        pos_sum -= ring_pos[slot]; // bar leaving the window
+        neg_sum -= ring_neg[slot];
+        let (p, ng, tp) = flow_of(prev_tp, i);
+        ring_pos[slot] = p; // bar entering
+        ring_neg[slot] = ng;
+        pos_sum += p;
+        neg_sum += ng;
         out[i] = mfi_val(pos_sum, neg_sum);
+        prev_tp = tp;
+        slot += 1;
+        if slot == period {
+            slot = 0;
+        }
     }
     out
 }
