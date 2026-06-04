@@ -294,16 +294,38 @@ impl DataFrame {
     pub fn slice(&self, start: usize, end: usize) -> DataFrame {
         let start = start.min(self.height);
         let end = end.max(start).min(self.height);
+        let len = end - start;
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
         let index = self.index.slice(start, end);
         let mut df =
             DataFrame::new(self.names.clone(), columns, Some(index)).expect("slice keeps shape");
         df.aliases = Arc::clone(&self.aliases);
-        // The sliced cached-directive *values* are carried (correct, full-history),
-        // but the computed *metadata* is dropped: the columns become plain data.
-        // Exact continuation across `slice -> append` for recursive indicators
-        // (carrying each indicator's internal recursive state) is a deferred
-        // feature; until then a slice is a read-only snapshot, not continuable.
+        // SP-9: carry cached-directive columns *as continuable computed columns*
+        // through a contiguous slice. The cached values are already correct (they
+        // were computed with full history) and are carried verbatim; we re-tag the
+        // `ComputedMeta` cursor so a later `append` refreshes the tail incrementally
+        // — re-deriving it from the retained raw columns over a `lookback` window,
+        // exactly as a non-sliced frame would (the engine re-warms from raw data,
+        // never from cached output, so composite recursive indicators continue
+        // correctly too). This is only sound when the slice keeps at least
+        // `lookback` warm-up rows; a shorter slice would re-warm from its own start
+        // (a seed that is *not* `lookback` rows back) and silently diverge, so there
+        // we drop the computed status and the column stays plain data (honest:
+        // values correct, but not continuable). Non-contiguous derivations
+        // (`take` / `filter_mask`) go through `DataFrame::new` and already drop it.
+        for (name, meta) in &self.computed {
+            if len >= meta.lookback {
+                let valid = meta.valid_rows.saturating_sub(start).min(len);
+                df.computed.insert(
+                    name.clone(),
+                    ComputedMeta {
+                        directive: meta.directive.clone(),
+                        lookback: meta.lookback,
+                        valid_rows: valid,
+                    },
+                );
+            }
+        }
         df
     }
 
@@ -808,6 +830,25 @@ mod tests {
         assert!(df.update_computed_tail("b", 0, &Column::f64(vec![1.0])).is_err());
         // an unknown column errors
         assert!(df.update_computed_tail("nope", 0, &Column::f64(vec![1.0])).is_err());
+    }
+
+    #[test]
+    fn slice_carries_computed_only_with_enough_warmup() {
+        // a frame with a cached recursive directive of lookback 11 (ema:12)
+        let mut df = DataFrame::new(
+            vec!["close".into()],
+            vec![Column::f64((0..60).map(|i| i as f64).collect())],
+            None,
+        )
+        .unwrap();
+        df.set_computed("close", "ema:12".into(), 11);
+        // a slice keeping >= lookback rows carries the column as continuable.
+        let keep = df.slice(40, 60); // 20 rows >= 11
+        assert_eq!(keep.computed_columns().len(), 1);
+        assert_eq!(keep.computed_columns()[0].1.valid_rows, 20);
+        // a slice keeping < lookback rows drops the computed status (not continuable).
+        let too_short = df.slice(55, 60); // 5 rows < 11
+        assert!(too_short.computed_columns().is_empty());
     }
 
     #[test]
