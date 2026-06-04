@@ -82,6 +82,13 @@ pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
         "3outside" => (Plain(cdl_3outside as _), 3),
         "3whitesoldiers" => (Plain(cdl_3whitesoldiers as _), 12),
         "3blackcrows" => (Plain(cdl_3blackcrows as _), 13),
+        "morningdojistar" => (pen(cdl_morningdojistar, 0.3), 12),
+        "eveningdojistar" => (pen(cdl_eveningdojistar, 0.3), 12),
+        "abandonedbaby" => (pen(cdl_abandonedbaby, 0.3), 12),
+        "2crows" => (Plain(cdl_2crows as _), 12),
+        "upsidegap2crows" => (Plain(cdl_upsidegap2crows as _), 12),
+        "advanceblock" => (Plain(cdl_advanceblock as _), 12),
+        "stalledpattern" => (Plain(cdl_stalledpattern as _), 12),
         _ => return None,
     };
     Some(entry)

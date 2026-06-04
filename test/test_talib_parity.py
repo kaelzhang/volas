@@ -293,6 +293,12 @@ def test_candlestick_patterns_match_talib(ohlc):
         ('3inside', talib.CDL3INSIDE, 12), ('3outside', talib.CDL3OUTSIDE, 3),
         ('3whitesoldiers', talib.CDL3WHITESOLDIERS, 12),
         ('3blackcrows', talib.CDL3BLACKCROWS, 13),
+        ('morningdojistar', talib.CDLMORNINGDOJISTAR, 12),
+        ('eveningdojistar', talib.CDLEVENINGDOJISTAR, 12),
+        ('abandonedbaby', talib.CDLABANDONEDBABY, 12), ('2crows', talib.CDL2CROWS, 12),
+        ('upsidegap2crows', talib.CDLUPSIDEGAP2CROWS, 12),
+        ('advanceblock', talib.CDLADVANCEBLOCK, 12),
+        ('stalledpattern', talib.CDLSTALLEDPATTERN, 12),
     ]
     for name, fn, lb in patterns:
         want = fn(o, h, l, c)
