@@ -21,6 +21,9 @@ Cargo.lock
 .coverage.*
 htmlcov/
 /.benchmarks
+# llvm-cov coverage artifacts (cargo test doctests scatter these into crate dirs)
+*.profraw
+*.profdata
 
 # Tooling caches
 /.ruff_cache

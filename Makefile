@@ -1,7 +1,7 @@
 files = volas test *.py
 test_files = *
 
-.PHONY: install install-rust build build-pkg build-ext clean test benchmark lint fix fmt check cargo-test upload publish dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test coverage coverage-html benchmark lint fix fmt check cargo-test upload publish dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -44,9 +44,20 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 
-# Run tests
+# Run tests (functional; benchmarks are skipped here — see `make benchmark`).
+# `--ignore` does not exclude an explicitly-globbed file, so use `--benchmark-skip`.
 test:
-	pytest -s -v test/test_$(test_files).py --ignore=test/test_benchmark.py --doctest-modules --cov volas --cov-report term-missing
+	pytest -s -v test/test_$(test_files).py --benchmark-skip
+
+# End-to-end Rust line coverage: the Rust unit tests AND the Python suite
+# exercising the compiled extension, merged (see scripts/coverage.sh for why
+# `pytest --cov` is not meaningful for a Rust-backed package).
+coverage:
+	@bash scripts/coverage.sh
+
+# Same, as a browsable HTML report under target/llvm-cov/html/.
+coverage-html:
+	@bash scripts/coverage.sh --html
 
 # Run the 3-way performance benchmark (pandas vs stock-pandas vs volas).
 # Depends on `build` so the volas extension is compiled in release mode.
