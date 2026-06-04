@@ -274,6 +274,22 @@ fn exec_command(
             let low = series_f64(df, series, 1, "low")?;
             f64col(ind::sar(&high, &low, arg_f64(args, 0, 0.02)?, arg_f64(args, 1, 0.2)?))
         }
+        ("sarext", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::sarext(
+                &high,
+                &low,
+                arg_f64(args, 0, 0.0)?,
+                arg_f64(args, 1, 0.0)?,
+                arg_f64(args, 2, 0.02)?,
+                arg_f64(args, 3, 0.02)?,
+                arg_f64(args, 4, 0.2)?,
+                arg_f64(args, 5, 0.02)?,
+                arg_f64(args, 6, 0.02)?,
+                arg_f64(args, 7, 0.2)?,
+            ))
+        }
         // Price oscillators: fast MA - slow MA, of a chosen MA type (default SMA).
         ("apo", _) => {
             let data = close(0)?;

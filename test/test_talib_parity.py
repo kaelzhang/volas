@@ -102,6 +102,12 @@ def test_overlap_ma_variants_match_talib(ohlc):
         _parity(df.exec(f'kama:{p}'), talib.KAMA(c, p))
     _parity(df.exec('sar'), talib.SAR(h, l))  # defaults 0.02 / 0.2
     _parity(df.exec('sar:0.01,0.1'), talib.SAR(h, l, acceleration=0.01, maximum=0.1))
+    # sarext: signed SAR (negative while short). Defaults, then a forced-short start + offset.
+    _parity(df.exec('sarext'), talib.SAREXT(h, l))
+    _parity(df.exec('sarext:-0.5,0.1,0.02,0.03,0.25,0.02,0.04,0.3'),
+            talib.SAREXT(h, l, startvalue=-0.5, offsetonreverse=0.1,
+                         accelerationinitlong=0.02, accelerationlong=0.03, accelerationmaxlong=0.25,
+                         accelerationinitshort=0.02, accelerationshort=0.04, accelerationmaxshort=0.3))
     _parity(df.exec('wma'), talib.WMA(c, 30))  # default resolves to 30
     _parity(df.exec('trima'), talib.TRIMA(c, 30))
     _parity(df.exec('t3'), talib.T3(c, 5))

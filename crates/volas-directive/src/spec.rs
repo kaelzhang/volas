@@ -101,6 +101,7 @@ pub fn is_command(name: &str) -> bool {
             | "t3"
             | "kama"
             | "sar"
+            | "sarext"
             | "accbands"
             | "macd"
             | "boll"
@@ -191,6 +192,14 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("t3", None) => (vec![Int(5), Float(0.7)], vec!["close"]),
         ("kama", None) => (vec![Int(30)], vec!["close"]),
         ("sar", None) => (vec![Float(0.02), Float(0.2)], vec!["high", "low"]),
+        // sarext: start, offset_on_reverse, then long (init/step/max) + short (init/step/max).
+        ("sarext", None) => (
+            vec![
+                Float(0.0), Float(0.0), Float(0.02), Float(0.02), Float(0.2), Float(0.02),
+                Float(0.02), Float(0.2),
+            ],
+            vec!["high", "low"],
+        ),
         ("macd", None) => (vec![Int(12), Int(26)], vec!["close"]),
         ("macd", Some("signal" | "histogram")) => {
             (vec![Int(12), Int(26), Int(9)], vec!["close"])
