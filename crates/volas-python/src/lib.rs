@@ -178,8 +178,13 @@ fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> {
 }
 
 /// Parse a Python timestamp to UTC epoch-ns, interpreting a **naive** string in
-/// `tz` (an offset-aware string is already absolute; an integer is epoch-ns).
+/// `tz`. A [`PyTimestamp`] carries its own tz and resolves to an absolute instant
+/// (so it matches across zones); an offset-aware string is already absolute; an
+/// integer is epoch-ns.
 pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
+    if let Ok(ts) = key.extract::<PyRef<PyTimestamp>>() {
+        return Ok(ts.ns);
+    }
     if let Ok(s) = key.extract::<String>() {
         return datetime::parse_ns_in_tz(&s, tz)
             .ok_or_else(|| PyKeyError::new_err(format!("invalid datetime label {s:?}")));
@@ -188,6 +193,76 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
         return Ok(i);
     }
     Err(PyKeyError::new_err("label must be a datetime string or integer"))
+}
+
+/// `volas.Timestamp(value, tz=None)` — a typed datetime label carrying its own
+/// timezone, resolving to an absolute **UTC** instant. Use it for precise /
+/// cross-tz `.loc` / `.loc[a:b]` / `.at` lookups: a Timestamp built in one zone
+/// matches the right row of a frame displayed in another, because both compare on
+/// the UTC axis. A bare string label is instead interpreted in the index's tz.
+#[pyclass(name = "Timestamp")]
+pub struct PyTimestamp {
+    /// UTC epoch-ns (the absolute instant).
+    ns: i64,
+    /// The zone `value` was specified in (for display).
+    tz: Tz,
+}
+
+#[pymethods]
+impl PyTimestamp {
+    #[new]
+    #[pyo3(signature = (value, tz = None))]
+    fn new(value: &Bound<'_, PyAny>, tz: Option<String>) -> PyResult<Self> {
+        let tzv = match tz {
+            Some(s) => Tz::parse(&s).map_err(pyerr)?,
+            None => Tz::Utc,
+        };
+        Ok(PyTimestamp {
+            ns: parse_ts_in_tz(value, tzv)?,
+            tz: tzv,
+        })
+    }
+
+    /// The absolute instant as UTC epoch nanoseconds.
+    #[getter]
+    fn value(&self) -> i64 {
+        self.ns
+    }
+
+    /// The timezone name, or `None` if UTC / unspecified.
+    #[getter]
+    fn tz(&self) -> Option<String> {
+        match self.tz {
+            Tz::Utc => None,
+            other => Some(other.name()),
+        }
+    }
+
+    /// The wall-clock as a NumPy `datetime64[ns]` (UTC instant).
+    fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let arr = vec![self.ns].into_pyarray(py);
+        Ok(arr.call_method1("astype", ("datetime64[ns]",))?)
+    }
+
+    fn __repr__(&self) -> String {
+        match self.tz {
+            Tz::Utc => format!("Timestamp('{}')", datetime::format_ns(self.ns)),
+            other => format!(
+                "Timestamp('{}', tz='{}')",
+                datetime::format_ns_tz(self.ns, other),
+                other.name()
+            ),
+        }
+    }
+
+    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: pyo3::basic::CompareOp) -> PyResult<bool> {
+        let rhs = parse_ts_in_tz(other, Tz::Utc)?;
+        Ok(op.matches(self.ns.cmp(&rhs)))
+    }
+
+    fn __hash__(&self) -> i64 {
+        self.ns
+    }
 }
 
 /// Parse a Python timestamp (datetime string or epoch-ns integer) to UTC ns,
@@ -1948,6 +2023,7 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PySeries>()?;
     m.add_class::<PyRow>()?;
+    m.add_class::<PyTimestamp>()?;
     m.add_class::<DataFrameILoc>()?;
     m.add_class::<DataFrameLoc>()?;
     m.add_class::<DataFrameIat>()?;

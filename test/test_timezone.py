@@ -77,3 +77,62 @@ def test_tz_requires_date_col():
 def test_unknown_tz_errors():
     with pytest.raises(ValueError):
         DataFrame({'t': ['2020-01-01'], 'c': [1.0]}, date_col='t', tz='Not/AZone')
+
+
+# --- volas.Timestamp (typed, cross-tz label) -------------------------------
+
+def test_timestamp_resolves_to_utc():
+    ts = volas.Timestamp('2021-01-04 09:30:00', tz='America/New_York')
+    assert ts.tz == 'America/New_York'
+    assert ts.to_numpy()[0] == np.datetime64('2021-01-04 14:30:00')   # 09:30 NY -> 14:30 UTC
+
+
+def test_timestamp_cross_tz_loc_match():
+    # frame displayed in NY; query with a Shanghai Timestamp at the same instant
+    df = DataFrame(
+        {'t': ['2021-01-04 09:30:00', '2021-01-04 09:31:00'], 'c': [1.0, 2.0]},
+        date_col='t', tz='America/New_York')
+    # 2021-01-04 22:30 +08:00 == 14:30 UTC == 09:30 NY -> matches row 0
+    ts = volas.Timestamp('2021-01-04 22:30:00', tz='+08:00')
+    assert df.at[ts, 'c'] == 1.0
+
+
+def test_timestamp_slice_bounds():
+    df = DataFrame(
+        {'t': ['2021-01-04 09:30:00', '2021-01-04 09:31:00', '2021-01-04 09:32:00'],
+         'c': [1.0, 2.0, 3.0]},
+        date_col='t', tz='America/New_York')
+    lo = volas.Timestamp('2021-01-04 09:31:00', tz='America/New_York')
+    hi = volas.Timestamp('2021-01-04 09:32:00', tz='America/New_York')
+    sub = df.loc[lo:hi]
+    assert sub['c'].to_list() == [2.0, 3.0]
+
+
+def test_timestamp_compare():
+    a = volas.Timestamp('2021-01-01 00:00:00')
+    b = volas.Timestamp('2021-01-02 00:00:00')
+    assert a < b and b > a and a == volas.Timestamp('2021-01-01')
+
+
+# --- cumulate aligns daily buckets to the frame tz -------------------------
+
+def test_cumulate_daily_buckets_align_to_ny_day():
+    # two bars on different NY calendar days that fall on the SAME UTC day
+    # (23:00 NY -> 04:00 UTC next day; 01:00 NY next day -> 06:00 UTC same day)
+    df_ny = DataFrame(
+        {'t': ['2021-01-04 23:00:00', '2021-01-05 01:00:00'],
+         'open': [1.0, 2.0], 'high': [1.0, 2.0], 'low': [1.0, 2.0],
+         'close': [1.0, 2.0], 'volume': [10.0, 20.0]},
+        date_col='t', tz='America/New_York')
+    daily_ny = df_ny.cumulate('1d')
+    # NY-day grouping -> two distinct trading days
+    assert daily_ny.shape[0] == 2
+
+    # same instants as a UTC frame collapse into one UTC day
+    df_utc = DataFrame(
+        {'t': ['2021-01-05 04:00:00', '2021-01-05 06:00:00'],
+         'open': [1.0, 2.0], 'high': [1.0, 2.0], 'low': [1.0, 2.0],
+         'close': [1.0, 2.0], 'volume': [10.0, 20.0]},
+        date_col='t')
+    daily_utc = df_utc.cumulate('1d')
+    assert daily_utc.shape[0] == 1
