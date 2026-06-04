@@ -314,6 +314,22 @@ pub fn donchian(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     ((&hhv + &llv) / 2.0).to_vec()
 }
 
+/// Midpoint over `period` of a single series: `(max + min) / 2` (TA-Lib MIDPOINT).
+/// Lookback `period-1`.
+pub fn midpoint(data: &[f64], period: usize) -> Vec<f64> {
+    let hh = kernels::rolling_max(av(data), period);
+    let ll = kernels::rolling_min(av(data), period);
+    ((&hh + &ll) / 2.0).to_vec()
+}
+
+/// Midpoint price over `period`: `(max(high) + min(low)) / 2` (TA-Lib MIDPRICE).
+/// Lookback `period-1`. (Same arithmetic as the Donchian middle channel.)
+pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    let hh = kernels::rolling_max(av(high), period);
+    let ll = kernels::rolling_min(av(low), period);
+    ((&hh + &ll) / 2.0).to_vec()
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
@@ -480,6 +496,25 @@ pub fn rocr(data: &[f64], period: usize) -> Vec<f64> {
 /// Rate of change ratio ×100: `100 * data/data[period ago]` (TA-Lib ROCR100).
 pub fn rocr100(data: &[f64], period: usize) -> Vec<f64> {
     roc_ratio(data, period, |cur, prior| cur / prior * 100.0)
+}
+
+/// Williams %R: `-100 * (HH - close) / (HH - LL)` over `period`, where HH/LL are
+/// the highest high / lowest low (TA-Lib WILLR). A flat range (HH == LL) yields 0.
+/// Lookback `period-1`. The operation order mirrors TA-Lib bit-for-bit.
+pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let hh = kernels::rolling_max(av(high), period);
+    let ll = kernels::rolling_min(av(low), period);
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    for i in 0..n {
+        let diff = (hh[i] - ll[i]) / -100.0; // NaN during warm-up -> stays NaN below
+        if diff != 0.0 {
+            out[i] = (hh[i] - close[i]) / diff;
+        } else if !hh[i].is_nan() {
+            out[i] = 0.0; // finite flat range
+        }
+    }
+    out
 }
 
 #[cfg(test)]

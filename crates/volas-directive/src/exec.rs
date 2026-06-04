@@ -298,6 +298,13 @@ fn exec_command(
             f64col(ind::llv(&series_f64(df, series, 0, "low")?, arg_usize(args, 0, None)?))
         }
 
+        ("midpoint", _) => f64col(ind::midpoint(&close(0)?, arg_usize(args, 0, Some(14))?)),
+        ("midprice", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::midprice(&high, &low, arg_usize(args, 0, Some(14))?))
+        }
+
         ("hv", _) => {
             let close = series_f64(df, series, 0, "close")?;
             let period = arg_usize(args, 0, None)?;
@@ -333,6 +340,13 @@ fn exec_command(
         ("rocp", _) => f64col(ind::rocp(&close(0)?, arg_usize(args, 0, Some(10))?)),
         ("rocr", _) => f64col(ind::rocr(&close(0)?, arg_usize(args, 0, Some(10))?)),
         ("rocr100", _) => f64col(ind::rocr100(&close(0)?, arg_usize(args, 0, Some(10))?)),
+
+        ("willr", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::willr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+        }
 
         ("avgprice", _) => {
             let open = series_f64(df, series, 0, "open")?;

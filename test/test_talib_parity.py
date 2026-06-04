@@ -96,6 +96,15 @@ def test_overlap_ma_variants_match_talib(ohlc):
     _parity(df.exec('wma'), talib.WMA(c, 30))  # default resolves to 30
 
 
+def test_range_based_match_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (7, 14):  # 14 is the shared TA-Lib default
+        _parity(df.exec(f'midpoint:{p}'), talib.MIDPOINT(c, p))
+        _parity(df.exec(f'midprice:{p}'), talib.MIDPRICE(h, l, p))
+        _parity(df.exec(f'willr:{p}'), talib.WILLR(h, l, c, p))
+    _parity(df.exec('willr'), talib.WILLR(h, l, c, 14))  # default resolves to 14
+
+
 def test_momentum_roc_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (10, 14):  # 10 is the shared TA-Lib default
