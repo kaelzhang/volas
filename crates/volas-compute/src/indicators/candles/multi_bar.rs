@@ -213,3 +213,112 @@ pub fn cdl_xsidegap3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f
         }
     })
 }
+
+/// Hikkake (TA-Lib CDLHIKKAKE): an inside bar then a breakout (`±100`), optionally
+/// confirmed within the next 3 bars by a close beyond the inside bar's extreme (`±200`).
+/// Stateful (carries the pending setup across bars). Lookback 5.
+pub fn cdl_hikkake(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let _ = o;
+    let n = c.len();
+    let mut out = vec![f64::NAN; n];
+    if n < 6 {
+        return out;
+    }
+    // Setup: bars i-2/i-1 form an inside bar, then bar i breaks out (bull = lower, bear
+    // = higher). Returns the signed result, or None.
+    let setup = |i: usize| -> Option<f64> {
+        if h[i - 1] < h[i - 2]
+            && l[i - 1] > l[i - 2]
+            && ((h[i] < h[i - 1] && l[i] < l[i - 1]) || (h[i] > h[i - 1] && l[i] > l[i - 1]))
+        {
+            Some(if h[i] < h[i - 1] { 100.0 } else { -100.0 })
+        } else {
+            None
+        }
+    };
+    let confirm = |i: usize, idx: usize, res: f64| {
+        idx != 0
+            && i <= idx + 3
+            && ((res > 0.0 && c[i] > h[idx - 1]) || (res < 0.0 && c[i] < l[idx - 1]))
+    };
+    let (mut idx, mut res) = (0usize, 0.0_f64);
+    for i in 2..6 {
+        if let Some(r) = setup(i) {
+            res = r;
+            idx = i;
+            if i >= 5 {
+                out[i] = r;
+            }
+        } else if confirm(i, idx, res) {
+            if i >= 5 {
+                out[i] = res + res.signum() * 100.0;
+            }
+            idx = 0;
+        } else if i >= 5 {
+            out[i] = 0.0;
+        }
+    }
+    for i in 6..n {
+        if let Some(r) = setup(i) {
+            res = r;
+            idx = i;
+            out[i] = r;
+        } else if confirm(i, idx, res) {
+            out[i] = res + res.signum() * 100.0;
+            idx = 0;
+        } else {
+            out[i] = 0.0;
+        }
+    }
+    out
+}
+
+/// Modified Hikkake (TA-Lib CDLHIKKAKEMOD): a stricter hikkake — two nested inside bars
+/// with the middle bar closing near its extreme — then the breakout (`±100`) and optional
+/// 3-bar confirmation (`±200`). Stateful. Lookback 10.
+pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let n = c.len();
+    let mut out = vec![f64::NAN; n];
+    let start = NEAR.avg_period.max(1) + 5;
+    if n <= start {
+        return out;
+    }
+    let setup = |i: usize| -> Option<f64> {
+        let near = candle_average(NEAR, o, h, l, c, i - 2);
+        if h[i - 2] < h[i - 3]
+            && l[i - 2] > l[i - 3]
+            && h[i - 1] < h[i - 2]
+            && l[i - 1] > l[i - 2]
+            && ((h[i] < h[i - 1] && l[i] < l[i - 1] && c[i - 2] <= l[i - 2] + near)
+                || (h[i] > h[i - 1] && l[i] > l[i - 1] && c[i - 2] >= h[i - 2] - near))
+        {
+            Some(if h[i] < h[i - 1] { 100.0 } else { -100.0 })
+        } else {
+            None
+        }
+    };
+    let confirm = |i: usize, idx: usize, res: f64| {
+        idx != 0
+            && i <= idx + 3
+            && ((res > 0.0 && c[i] > h[idx - 1]) || (res < 0.0 && c[i] < l[idx - 1]))
+    };
+    let (mut idx, mut res) = (0usize, 0.0_f64);
+    for i in (start - 3)..n {
+        let emit = i >= start;
+        if let Some(r) = setup(i) {
+            res = r;
+            idx = i;
+            if emit {
+                out[i] = r;
+            }
+        } else if confirm(i, idx, res) {
+            if emit {
+                out[i] = res + res.signum() * 100.0;
+            }
+            idx = 0;
+        } else if emit {
+            out[i] = 0.0;
+        }
+    }
+    out
+}

@@ -312,7 +312,9 @@ def test_candlestick_patterns_match_talib(ohlc):
         ('mathold', talib.CDLMATHOLD, 14),
         ('risefall3methods', talib.CDLRISEFALL3METHODS, 14),
         ('xsidegap3methods', talib.CDLXSIDEGAP3METHODS, 2),
+        ('hikkake', talib.CDLHIKKAKE, 5), ('hikkakemod', talib.CDLHIKKAKEMOD, 10),
     ]
+    assert len(patterns) == 61, 'all 61 TA-Lib candlestick patterns covered'
     for name, fn, lb in patterns:
         want = fn(o, h, l, c)
         pat(df.exec(f'style.{name}'), want, lb)

@@ -106,6 +106,8 @@ pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
         "mathold" => (pen(cdl_mathold, 0.5), 14),
         "risefall3methods" => (Plain(cdl_risefall3methods as _), 14),
         "xsidegap3methods" => (Plain(cdl_xsidegap3methods as _), 2),
+        "hikkake" => (Plain(cdl_hikkake as _), 5),
+        "hikkakemod" => (Plain(cdl_hikkakemod as _), 10),
         _ => return None,
     };
     Some(entry)
