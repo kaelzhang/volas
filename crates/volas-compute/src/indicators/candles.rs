@@ -9,8 +9,11 @@
 // uniform convention — TA-Lib fills its integer outputs with 0, which would be
 // indistinguishable from "no pattern"). Parity holds on the valid region.
 
-/// The range a candle-setting measures.
+/// The range a candle-setting measures. The full set is kept (it mirrors TA-Lib's
+/// settings table); a variant is only *constructed* once a pattern that needs it lands,
+/// so allow the lint until then.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum RangeType {
     RealBody,
     HighLow,
