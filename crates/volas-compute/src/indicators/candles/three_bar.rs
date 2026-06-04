@@ -2,8 +2,8 @@
 
 use super::{
     candle_average, candle_gap_down, candle_gap_up, color, each_bar, lowershadow, realbody,
-    realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT, FAR, NEAR,
-    SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_SHORT,
+    realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT, EQUAL, FAR,
+    NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_SHORT,
 };
 
 /// Morning Star (TA-Lib CDLMORNINGSTAR): a long black body, a short star gapping down,
@@ -314,6 +314,161 @@ pub fn cdl_stalledpattern(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
             && o[i] >= c[i - 1] - realbody(o, c, i) - candle_average(NEAR, o, h, l, c, i - 1)
         {
             -100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Identical Three Crows (TA-Lib CDLIDENTICAL3CROWS): three declining black candles with
+/// tiny lower shadows, each opening ≈ the prior close — bearish `-100`. Lookback 12.
+pub fn cdl_identical3crows(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = SHADOW_VERY_SHORT.avg_period.max(EQUAL.avg_period) + 2;
+    each_bar(c.len(), lb, |i| {
+        let short_lower = |k: usize| lowershadow(o, l, c, k) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, k);
+        let eq2 = candle_average(EQUAL, o, h, l, c, i - 2);
+        let eq1 = candle_average(EQUAL, o, h, l, c, i - 1);
+        if color(o, c, i - 2) < 0.0
+            && short_lower(i - 2)
+            && color(o, c, i - 1) < 0.0
+            && short_lower(i - 1)
+            && color(o, c, i) < 0.0
+            && short_lower(i)
+            && c[i - 2] > c[i - 1]
+            && c[i - 1] > c[i]
+            && o[i - 1] <= c[i - 2] + eq2
+            && o[i - 1] >= c[i - 2] - eq2
+            && o[i] <= c[i - 1] + eq1
+            && o[i] >= c[i - 1] - eq1
+        {
+            -100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Stick Sandwich (TA-Lib CDLSTICKSANDWICH): black, white (its low above the 1st close),
+/// black with the same close as the 1st — bullish `100`. Lookback 7.
+pub fn cdl_sticksandwich(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = EQUAL.avg_period + 2;
+    each_bar(c.len(), lb, |i| {
+        let eq = candle_average(EQUAL, o, h, l, c, i - 2);
+        if color(o, c, i - 2) < 0.0
+            && color(o, c, i - 1) > 0.0
+            && color(o, c, i) < 0.0
+            && l[i - 1] > c[i - 2]
+            && c[i] <= c[i - 2] + eq
+            && c[i] >= c[i - 2] - eq
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Tristar (TA-Lib CDLTRISTAR): three doji, the middle one gapping; `-100` if it gaps up
+/// (3rd not higher), `+100` if it gaps down (3rd not lower), else 0. Lookback 12. (All
+/// three doji bodies are tested against the threshold computed at `i-2`.)
+pub fn cdl_tristar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    each_bar(c.len(), BODY_DOJI.avg_period + 2, |i| {
+        let doji = candle_average(BODY_DOJI, o, h, l, c, i - 2);
+        if realbody(o, c, i - 2) <= doji
+            && realbody(o, c, i - 1) <= doji
+            && realbody(o, c, i) <= doji
+        {
+            if realbody_gap_up(o, c, i - 1, i - 2) && o[i].max(c[i]) < o[i - 1].max(c[i - 1]) {
+                -100.0
+            } else if realbody_gap_down(o, c, i - 1, i - 2) && o[i].min(c[i]) > o[i - 1].min(c[i - 1])
+            {
+                100.0
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Unique Three River Bottom (TA-Lib CDLUNIQUE3RIVER): a long black, a black harami with
+/// a new low, then a small white opening above the 2nd low — bullish `100`. Lookback 12.
+pub fn cdl_unique3river(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 2;
+    each_bar(c.len(), lb, |i| {
+        if realbody(o, c, i - 2) > candle_average(BODY_LONG, o, h, l, c, i - 2)
+            && color(o, c, i - 2) < 0.0
+            && color(o, c, i - 1) < 0.0
+            && c[i - 1] > c[i - 2]
+            && o[i - 1] <= o[i - 2]
+            && l[i - 1] < l[i - 2]
+            && realbody(o, c, i) < candle_average(BODY_SHORT, o, h, l, c, i)
+            && color(o, c, i) > 0.0
+            && o[i] > l[i - 1]
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Gapping Side-by-Side White Lines (TA-Lib CDLGAPSIDESIDEWHITE): two same-size white
+/// candles with the same open, gapping the same way off the 1st. `+100` for an up-gap,
+/// `-100` for a down-gap. Lookback 7.
+pub fn cdl_gapsidesidewhite(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = NEAR.avg_period.max(EQUAL.avg_period) + 2;
+    each_bar(c.len(), lb, |i| {
+        let up = realbody_gap_up(o, c, i - 1, i - 2) && realbody_gap_up(o, c, i, i - 2);
+        let down = realbody_gap_down(o, c, i - 1, i - 2) && realbody_gap_down(o, c, i, i - 2);
+        let near = candle_average(NEAR, o, h, l, c, i - 1);
+        let eq = candle_average(EQUAL, o, h, l, c, i - 1);
+        if (up || down)
+            && color(o, c, i - 1) > 0.0
+            && color(o, c, i) > 0.0
+            && realbody(o, c, i) >= realbody(o, c, i - 1) - near
+            && realbody(o, c, i) <= realbody(o, c, i - 1) + near
+            && o[i] >= o[i - 1] - eq
+            && o[i] <= o[i - 1] + eq
+        {
+            if up {
+                100.0
+            } else {
+                -100.0
+            }
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Tasuki Gap (TA-Lib CDLTASUKIGAP): a gap, a candle, then an opposite candle opening
+/// within and closing back into the gap with a similar body. `color(1st of pair)·100`.
+/// Lookback 7.
+pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = NEAR.avg_period + 2;
+    each_bar(c.len(), lb, |i| {
+        let near = candle_average(NEAR, o, h, l, c, i - 1);
+        let similar = (realbody(o, c, i - 1) - realbody(o, c, i)).abs() < near;
+        let up = realbody_gap_up(o, c, i - 1, i - 2)
+            && color(o, c, i - 1) > 0.0
+            && color(o, c, i) < 0.0
+            && o[i] < c[i - 1]
+            && o[i] > o[i - 1]
+            && c[i] < o[i - 1]
+            && c[i] > c[i - 2].max(o[i - 2])
+            && similar;
+        let down = realbody_gap_down(o, c, i - 1, i - 2)
+            && color(o, c, i - 1) < 0.0
+            && color(o, c, i) > 0.0
+            && o[i] < o[i - 1]
+            && o[i] > c[i - 1]
+            && c[i] > o[i - 1]
+            && c[i] < c[i - 2].min(o[i - 2])
+            && similar;
+        if up || down {
+            color(o, c, i - 1) * 100.0
         } else {
             0.0
         }
