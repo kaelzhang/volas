@@ -61,6 +61,21 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "cci" => arg(args, 0, 14).saturating_sub(1),
         "mfi" => arg(args, 0, 14),
         "ultosc" => arg(args, 0, 7).max(arg(args, 1, 14)).max(arg(args, 2, 28)),
+        // %K (lookback fastk-1) then matype-MA smoothing stage(s).
+        "stoch" => {
+            let base = arg(args, 0, 5).saturating_sub(1) + ma_lookback(arg(args, 1, 3), arg(args, 2, 0));
+            match sub {
+                Some("d") => base + ma_lookback(arg(args, 3, 3), arg(args, 4, 0)),
+                _ => base,
+            }
+        }
+        "stochf" => {
+            let base = arg(args, 0, 5).saturating_sub(1);
+            match sub {
+                Some("d") => base + ma_lookback(arg(args, 1, 3), arg(args, 2, 0)),
+                _ => base,
+            }
+        }
         "plus_dm" | "minus_dm" => arg(args, 0, 14).saturating_sub(1),
         "plus_di" | "minus_di" | "dx" => arg(args, 0, 14),
         "adx" => 2 * arg(args, 0, 14) - 1,

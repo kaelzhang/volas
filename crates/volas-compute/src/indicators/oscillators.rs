@@ -35,6 +35,28 @@ pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     result
 }
 
+/// TA-Lib stochastic raw %K: `100·(close − LL) / (HH − LL)` over `period` (HH/LL the
+/// highest high / lowest low). A flat range yields 0, but — unlike [`rsv`] — the
+/// warm-up is NaN, so the smoothing MAs in `stoch`/`stochf` begin at the right row.
+/// Lookback `period-1`.
+pub fn stoch_fastk(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let hh = kernels::rolling_max(av(high), period);
+    let ll = kernels::rolling_min(av(low), period);
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    for i in 0..n {
+        if !hh[i].is_nan() {
+            let diff = hh[i] - ll[i];
+            out[i] = if diff != 0.0 {
+                100.0 * (close[i] - ll[i]) / diff
+            } else {
+                0.0
+            };
+        }
+    }
+    out
+}
+
 fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Array1<f64> {
     let llv = kernels::rolling_min(av(low), period_rsv);
     let hhv = kernels::rolling_max(av(high), period_rsv);

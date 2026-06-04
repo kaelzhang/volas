@@ -466,6 +466,31 @@ fn exec_command(
                 arg_usize(args, 2, Some(28))?,
             ))
         }
+        // Stochastic family: raw %K (NaN warm-up) then matype-MA smoothing stages.
+        ("stoch", Some(line @ ("k" | "d"))) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let fastk = ind::stoch_fastk(&high, &low, &close, arg_usize(args, 0, Some(5))?);
+            let slowk = ma_typed(&fastk, arg_usize(args, 1, Some(3))?, arg_usize(args, 2, Some(0))?)?;
+            if line == "k" {
+                f64col(slowk)
+            } else {
+                f64col(ma_typed(&slowk, arg_usize(args, 3, Some(3))?, arg_usize(args, 4, Some(0))?)?)
+            }
+        }
+        ("stochf", Some(line @ ("k" | "d"))) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let fastk = ind::stoch_fastk(&high, &low, &close, arg_usize(args, 0, Some(5))?);
+            if line == "k" {
+                f64col(fastk)
+            } else {
+                f64col(ma_typed(&fastk, arg_usize(args, 1, Some(3))?, arg_usize(args, 2, Some(0))?)?)
+            }
+        }
+
         // Directional movement family (+DM/-DM need only high/low; the rest add close).
         ("plus_dm", _) => {
             let high = series_f64(df, series, 0, "high")?;

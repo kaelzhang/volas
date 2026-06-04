@@ -196,6 +196,29 @@ def test_ma_matype_apo_ppo_match_talib(ohlc):
     _parity(df.exec('ppo'), talib.PPO(c, 12, 26, 0))
 
 
+def test_stochastic_family_matches_talib(ohlc):
+    # The k line (slowk/fastk) is emitted at its natural first-valid row; TA-Lib delays
+    # it to align with the d line (so STOCH's two outputs share a start). Best practice,
+    # same as the MACD line — so the k line is compared where TA-Lib emits (mask_want),
+    # the d line exactly. TA-Lib computes k internally at its natural start regardless,
+    # so the d values match outright.
+    df, h, l, c = ohlc
+    sk, sd = talib.STOCH(h, l, c)  # defaults 5,3,SMA,3,SMA
+    _parity(df.exec('stoch.k'), sk, mask_want=True)
+    _parity(df.exec('stoch.d'), sd)
+    sk, sd = talib.STOCH(h, l, c, 9, 3, 1, 3, 1)  # EMA smoothing (matype 1)
+    _parity(df.exec('stoch.k:9,3,1,3,1'), sk, mask_want=True)
+    _parity(df.exec('stoch.d:9,3,1,3,1'), sd)
+    fk, fd = talib.STOCHF(h, l, c)  # defaults 5,3,SMA
+    _parity(df.exec('stochf.k'), fk, mask_want=True)
+    _parity(df.exec('stochf.d'), fd)
+    fk, fd = talib.STOCHF(h, l, c, 9, 4, 1)
+    _parity(df.exec('stochf.k:9,4,1'), fk, mask_want=True)
+    _parity(df.exec('stochf.d:9,4,1'), fd)
+    with pytest.raises(Exception):
+        df.exec('stoch')  # multi-output: requires a sub-command
+
+
 def test_correl_beta_match_talib(ohlc):
     df, h, l, c = ohlc
     v = np.asarray(df['volume'].to_numpy(), dtype=float)

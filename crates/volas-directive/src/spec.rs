@@ -68,6 +68,10 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         ("macd", Some("h" | "histogram" | "macd")) => Some("histogram".into()),
         ("aroon", Some("u" | "up")) => Some("up".into()),
         ("aroon", Some("d" | "down")) => Some("down".into()),
+        ("stoch", Some("k" | "slowk")) => Some("k".into()),
+        ("stoch", Some("d" | "slowd")) => Some("d".into()),
+        ("stochf", Some("k" | "fastk")) => Some("k".into()),
+        ("stochf", Some("d" | "fastd")) => Some("d".into()),
         ("boll" | "donchian", None | Some("middle" | "m")) => None,
         ("boll" | "donchian", Some("u" | "upper")) => Some("upper".into()),
         ("boll" | "donchian", Some("l" | "lower")) => Some("lower".into()),
@@ -123,6 +127,8 @@ pub fn is_command(name: &str) -> bool {
             | "trix"
             | "mfi"
             | "ultosc"
+            | "stoch"
+            | "stochf"
             | "plus_dm"
             | "minus_dm"
             | "plus_di"
@@ -211,6 +217,15 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("trix", None) => (vec![Int(30)], vec!["close"]),
         ("mfi", None) => (vec![Int(14)], vec!["high", "low", "close", "volume"]),
         ("ultosc", None) => (vec![Int(7), Int(14), Int(28)], vec!["high", "low", "close"]),
+        // stoch: fastk_period, slowk_period, slowk_matype, slowd_period, slowd_matype.
+        ("stoch", Some("k" | "d")) => (
+            vec![Int(5), Int(3), Int(0), Int(3), Int(0)],
+            vec!["high", "low", "close"],
+        ),
+        // stochf: fastk_period, fastd_period, fastd_matype.
+        ("stochf", Some("k" | "d")) => {
+            (vec![Int(5), Int(3), Int(0)], vec!["high", "low", "close"])
+        }
         ("plus_dm" | "minus_dm", None) => (vec![Int(14)], vec!["high", "low"]),
         ("plus_di" | "minus_di" | "dx" | "adx" | "adxr", None) => {
             (vec![Int(14)], vec!["high", "low", "close"])
