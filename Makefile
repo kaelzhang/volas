@@ -49,13 +49,13 @@ clean:
 test:
 	pytest -s -v test/test_$(test_files).py --benchmark-skip
 
-# End-to-end Rust line coverage: the Rust unit tests AND the Python suite
-# exercising the compiled extension, merged (see scripts/coverage.sh for why
-# `pytest --cov` is not meaningful for a Rust-backed package).
+# True-union Rust line coverage: `cargo test` ∪ the Python suite exercising the
+# compiled extension (see scripts/coverage.sh for why llvm-cov cannot union the
+# two builds itself, and why `pytest --cov` is meaningless for a Rust package).
 coverage:
 	@bash scripts/coverage.sh
 
-# Same, as a browsable HTML report under target/llvm-cov/html/.
+# Same, rendered to a browsable HTML report under target/volas-cov/html/.
 coverage-html:
 	@bash scripts/coverage.sh --html
 
