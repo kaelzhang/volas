@@ -363,6 +363,90 @@ impl PySeries {
         self.to_list(py)
     }
 
+    /// Shift values by `n` rows (positive = down; vacated cells -> NaN).
+    #[pyo3(signature = (n = 1))]
+    fn shift(&self, n: isize) -> PySeries {
+        let a = self.inner.data.to_f64_vec();
+        let len = a.len();
+        let mut out = vec![f64::NAN; len];
+        if n >= 0 {
+            let n = (n as usize).min(len);
+            out[n..].copy_from_slice(&a[..len - n]);
+        } else {
+            let n = ((-n) as usize).min(len);
+            out[..len - n].copy_from_slice(&a[n..]);
+        }
+        f64_series(&self.inner, out)
+    }
+
+    /// First difference `x[i] - x[i-n]` (the first `n` rows -> NaN).
+    #[pyo3(signature = (n = 1))]
+    fn diff(&self, n: isize) -> PySeries {
+        let a = self.inner.data.to_f64_vec();
+        let len = a.len();
+        let mut out = vec![f64::NAN; len];
+        if n >= 0 {
+            let n = n as usize;
+            for i in n..len {
+                out[i] = a[i] - a[i - n];
+            }
+        } else {
+            let n = (-n) as usize;
+            for i in 0..len.saturating_sub(n) {
+                out[i] = a[i] - a[i + n];
+            }
+        }
+        f64_series(&self.inner, out)
+    }
+
+    /// Replace NaN with `value` (F64 columns; others returned unchanged).
+    fn fillna(&self, value: f64) -> PySeries {
+        let col = match &self.inner.data {
+            Column::F64(v) => {
+                Column::f64(v.iter().map(|&x| if x.is_nan() { value } else { x }).collect())
+            }
+            other => other.clone(),
+        };
+        PySeries {
+            inner: Series::new(self.inner.name.clone(), col, Arc::clone(&self.inner.index)),
+        }
+    }
+
+    /// Boolean mask of missing (NaN) values (non-F64 columns -> all False).
+    fn isna(&self) -> PySeries {
+        let out = match &self.inner.data {
+            Column::F64(v) => v.iter().map(|x| x.is_nan()).collect(),
+            other => vec![false; other.len()],
+        };
+        bool_series(&self.inner, out)
+    }
+
+    /// Boolean mask of present (non-NaN) values.
+    fn notna(&self) -> PySeries {
+        let out = match &self.inner.data {
+            Column::F64(v) => v.iter().map(|x| !x.is_nan()).collect(),
+            other => vec![true; other.len()],
+        };
+        bool_series(&self.inner, out)
+    }
+
+    /// Drop missing (NaN) elements (carries their index labels with them).
+    fn dropna(&self) -> PySeries {
+        let keep: Vec<usize> = match &self.inner.data {
+            Column::F64(v) => v
+                .iter()
+                .enumerate()
+                .filter_map(|(i, x)| (!x.is_nan()).then_some(i))
+                .collect(),
+            other => (0..other.len()).collect(),
+        };
+        let data = self.inner.data.take(&keep);
+        let index = Arc::new(self.inner.index.take(&keep));
+        PySeries {
+            inner: Series::new(self.inner.name.clone(), data, index),
+        }
+    }
+
     /// pandas-style equality: **same dtype** and value-equal (NaN equals NaN).
     fn equals(&self, other: &PySeries) -> bool {
         self.inner.data.dtype() == other.inner.data.dtype()
@@ -514,6 +598,20 @@ fn series_rhs_f64(other: &Bound<'_, PyAny>, len: usize) -> PyResult<Vec<f64>> {
         Ok(vec![scalar; len])
     } else {
         Err(PyTypeError::new_err("unsupported operand for a Series operation"))
+    }
+}
+
+/// A new F64 `Series` carrying `s`'s name and index.
+fn f64_series(s: &Series, out: Vec<f64>) -> PySeries {
+    PySeries {
+        inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)),
+    }
+}
+
+/// A new Bool `Series` carrying `s`'s name and index.
+fn bool_series(s: &Series, out: Vec<bool>) -> PySeries {
+    PySeries {
+        inner: Series::new(s.name.clone(), Column::bool(out), Arc::clone(&s.index)),
     }
 }
 
@@ -820,6 +918,57 @@ impl PyDataFrame {
             d.set_item(name, col.dtype().to_string())?;
         }
         Ok(d)
+    }
+
+    /// Drop rows containing missing values. `how='any'` (default) drops a row if
+    /// any F64 column is NaN there; `how='all'` only if every column is NaN.
+    #[pyo3(signature = (how = "any"))]
+    fn dropna(&self, how: &str) -> PyDataFrame {
+        let cols = self.inner.columns();
+        let total = cols.len();
+        let keep: Vec<usize> = (0..self.inner.height())
+            .filter(|&i| {
+                let nan = cols
+                    .iter()
+                    .filter(|c| matches!(c, Column::F64(v) if v[i].is_nan()))
+                    .count();
+                match how {
+                    "all" => nan < total.max(1),
+                    _ => nan == 0,
+                }
+            })
+            .collect();
+        PyDataFrame {
+            inner: take_frame(&self.inner, &keep),
+        }
+    }
+
+    /// Sort rows by index label (pandas `sort_index`).
+    #[pyo3(signature = (ascending = true))]
+    fn sort_index(&self, ascending: bool) -> PyDataFrame {
+        let perm = self.inner.index().argsort(ascending);
+        PyDataFrame {
+            inner: take_frame(&self.inner, &perm),
+        }
+    }
+
+    /// Move the row index into an `'index'` column and restore a RangeIndex
+    /// (pandas `reset_index`); `drop=True` discards the old index.
+    #[pyo3(signature = (drop = false))]
+    fn reset_index(&self, drop: bool) -> PyResult<PyDataFrame> {
+        let h = self.inner.height();
+        let (names, columns): (Vec<String>, Vec<Column>) = if drop {
+            (self.inner.names().to_vec(), self.inner.columns().to_vec())
+        } else {
+            let mut names = vec!["index".to_string()];
+            names.extend(self.inner.names().iter().cloned());
+            let mut cols = vec![self.inner.index().to_column()];
+            cols.extend(self.inner.columns().iter().cloned());
+            (names, cols)
+        };
+        Ok(PyDataFrame {
+            inner: DataFrame::new(names, columns, Some(Index::Range(h))).map_err(pyerr)?,
+        })
     }
 
     fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {

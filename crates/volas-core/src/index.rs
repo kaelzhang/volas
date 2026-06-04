@@ -120,6 +120,31 @@ impl Index {
         }
     }
 
+    /// The positions that sort the index by label (`sort_index`). Numeric kinds
+    /// sort numerically, a string index lexicographically.
+    pub fn argsort(&self, ascending: bool) -> Vec<usize> {
+        let mut idx: Vec<usize> = (0..self.len()).collect();
+        let cmp_dir = |o: std::cmp::Ordering| if ascending { o } else { o.reverse() };
+        match self {
+            Index::Str(v) => idx.sort_by(|&a, &b| cmp_dir(v[a].cmp(&v[b]))),
+            _ => {
+                let labels = self.to_i64_labels();
+                idx.sort_by(|&a, &b| cmp_dir(labels[a].cmp(&labels[b])));
+            }
+        }
+        idx
+    }
+
+    /// Materialize the labels as a [`Column`] (for `reset_index`).
+    pub fn to_column(&self) -> Column {
+        match self {
+            Index::Range(n) => Column::i64((0..*n as i64).collect()),
+            Index::Int64(v) => Column::i64(v.clone()),
+            Index::Datetime(v) => Column::datetime(v.clone()),
+            Index::Str(v) => Column::str(v.clone()),
+        }
+    }
+
     /// Concatenate two indexes (extending labels). Same-kind indexes preserve
     /// their kind; mixing numeric kinds yields `Int64`; mixing a string index
     /// with a numeric one is an error.
