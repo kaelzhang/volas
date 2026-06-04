@@ -58,7 +58,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0, 10),
         "willr" | "midpoint" | "midprice" => arg(args, 0, 14).saturating_sub(1),
         "cmo" | "natr" => arg(args, 0, 14),
-        "cci" => arg(args, 0, 14).saturating_sub(1),
+        "cci" | "imi" => arg(args, 0, 14).saturating_sub(1),
         "mfi" => arg(args, 0, 14),
         "ultosc" => arg(args, 0, 7).max(arg(args, 1, 14)).max(arg(args, 2, 28)),
         // %K (lookback fastk-1) then matype-MA smoothing stage(s).

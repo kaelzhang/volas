@@ -551,6 +551,11 @@ fn exec_command(
             let close = series_f64(df, series, 2, "close")?;
             f64col(ind::cci(&high, &low, &close, arg_usize(args, 0, Some(14))?))
         }
+        ("imi", _) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let close = series_f64(df, series, 1, "close")?;
+            f64col(ind::imi(&open, &close, arg_usize(args, 0, Some(14))?))
+        }
         ("trix", _) => f64col(ind::trix(&close(0)?, arg_usize(args, 0, Some(30))?)),
         ("aroon", Some(dir @ ("up" | "down"))) => {
             let high = series_f64(df, series, 0, "high")?;

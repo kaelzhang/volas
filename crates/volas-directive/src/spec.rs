@@ -127,6 +127,7 @@ pub fn is_command(name: &str) -> bool {
             | "cmo"
             | "cci"
             | "trix"
+            | "imi"
             | "mfi"
             | "ultosc"
             | "stoch"
@@ -217,6 +218,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("willr", None) => (vec![Int(14)], vec!["high", "low", "close"]),
         ("cmo", None) => (vec![Int(14)], vec!["close"]),
         ("cci", None) => (vec![Int(14)], vec!["high", "low", "close"]),
+        ("imi", None) => (vec![Int(14)], vec!["open", "close"]),
         ("trix", None) => (vec![Int(30)], vec!["close"]),
         ("mfi", None) => (vec![Int(14)], vec!["high", "low", "close", "volume"]),
         ("ultosc", None) => (vec![Int(7), Int(14), Int(28)], vec!["high", "low", "close"]),

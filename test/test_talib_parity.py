@@ -284,6 +284,9 @@ def test_cci_trix_match_talib(ohlc):
     _parity(df.exec('ultosc:5,10,20'), talib.ULTOSC(h, l, c, 5, 10, 20))
     _parity(df.exec('cci'), talib.CCI(h, l, c, 14))  # default resolves to 14
     _parity(df.exec('trix'), talib.TRIX(c, 30))
+    o = df['open'].to_numpy()
+    for p in (14, 20):
+        _parity(df.exec(f'imi:{p}'), talib.IMI(o, c, p))
 
 
 def test_bop_cmo_natr_match_talib(ohlc):

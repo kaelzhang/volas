@@ -83,6 +83,32 @@ pub fn bop(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Intraday Momentum Index (TA-Lib IMI): `100·upSum/(upSum+downSum)` over `period`,
+/// where each up bar (`close>open`) adds `close-open` to upSum and each down bar adds
+/// `open-close` to downSum. Lookback `period-1`. (An all-doji window yields NaN, as in
+/// TA-Lib — no divide-by-zero guard. O(n·period), matching TA-Lib.)
+pub fn imi(open: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period > n {
+        return out;
+    }
+    let lookback = period - 1;
+    for today in lookback..n {
+        let (mut up_sum, mut down_sum) = (0.0, 0.0);
+        for i in (today - lookback)..=today {
+            let (c, o) = (close[i], open[i]);
+            if c > o {
+                up_sum += c - o;
+            } else {
+                down_sum += o - c;
+            }
+        }
+        out[today] = 100.0 * (up_sum / (up_sum + down_sum));
+    }
+    out
+}
+
 /// Commodity Channel Index (TA-Lib CCI): `(tp − SMA(tp)) / (0.015 · meanDev)` over
 /// `period`, where `tp = (high+low+close)/3` and `meanDev` is the mean absolute
 /// deviation of `tp` from its average. A zero numerator or zero deviation yields 0
