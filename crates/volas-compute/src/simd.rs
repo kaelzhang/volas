@@ -4,6 +4,11 @@
 //! populated; min / max reduce over the values present. All kernels are O(n):
 //! sum / std slide a running accumulator, min / max use a monotonic deque —
 //! never the O(n·period) per-window re-scan they were ported from.
+//!
+//! The kernels are deliberately scalar. The EWMA recurrence is division-latency
+//! bound, and the two independent chains macd / rsi need ([`dual_ewma`]) are
+//! already issued in parallel by the out-of-order core (ILP); a measured `f64x2`
+//! SIMD dual-EWMA came out 1.00x, so explicit SIMD buys nothing here.
 
 use ndarray::{Array1, ArrayView1};
 use std::collections::VecDeque;
