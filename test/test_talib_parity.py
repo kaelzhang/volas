@@ -87,6 +87,15 @@ def test_price_transform_matches_talib(ohlc):
     _parity(df.exec('wclprice'), talib.WCLPRICE(h, l, c))
 
 
+def test_overlap_ma_variants_match_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (10, 30):  # 30 is the shared TA-Lib default
+        _parity(df.exec(f'wma:{p}'), talib.WMA(c, p))
+        _parity(df.exec(f'dema:{p}'), talib.DEMA(c, p))
+        _parity(df.exec(f'tema:{p}'), talib.TEMA(c, p))
+    _parity(df.exec('wma'), talib.WMA(c, 30))  # default resolves to 30
+
+
 def test_momentum_roc_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (10, 14):  # 10 is the shared TA-Lib default

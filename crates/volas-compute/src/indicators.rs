@@ -31,6 +31,52 @@ pub fn smma(close: &[f64], period: usize) -> Vec<f64> {
     kernels::wilder(av(close), period).to_vec()
 }
 
+/// Weighted moving average — linearly increasing weights `1..=period`, the newest
+/// bar weighted heaviest (TA-Lib WMA). O(n) via a running sum + running weighted
+/// sum. Lookback `period-1`.
+pub fn wma(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period > n {
+        return out;
+    }
+    let denom = (period * (period + 1) / 2) as f64; // sum of weights 1..=period
+    let pf = period as f64;
+    // Seed the first full window directly.
+    let mut sum = 0.0; // plain window sum
+    let mut wsum = 0.0; // weighted sum: newest bar * period ... oldest * 1
+    for j in 0..period {
+        sum += data[j];
+        wsum += data[j] * (j + 1) as f64;
+    }
+    out[period - 1] = wsum / denom;
+    // Slide: dropping the oldest (weight 1) raises every retained weight by one.
+    for i in period..n {
+        wsum += pf * data[i] - sum;
+        sum += data[i] - data[i - period];
+        out[i] = wsum / denom;
+    }
+    out
+}
+
+/// Double EMA: `2*EMA - EMA(EMA)` (TA-Lib DEMA). Lookback `2*(period-1)`.
+pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
+    let e1 = kernels::ema_seeded(av(data), period);
+    let e2 = kernels::ema_seeded(e1.view(), period);
+    (0..data.len()).map(|i| 2.0 * e1[i] - e2[i]).collect()
+}
+
+/// Triple EMA: `3*EMA - 3*EMA(EMA) + EMA(EMA(EMA))` (TA-Lib TEMA).
+/// Lookback `3*(period-1)`.
+pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
+    let e1 = kernels::ema_seeded(av(data), period);
+    let e2 = kernels::ema_seeded(e1.view(), period);
+    let e3 = kernels::ema_seeded(e2.view(), period);
+    (0..data.len())
+        .map(|i| 3.0 * e1[i] - 3.0 * e2[i] + e3[i])
+        .collect()
+}
+
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     let data = av(close);
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the

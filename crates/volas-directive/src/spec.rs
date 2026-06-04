@@ -80,6 +80,9 @@ pub fn is_command(name: &str) -> bool {
         name,
         "ma" | "ema"
             | "smma"
+            | "wma"
+            | "dema"
+            | "tema"
             | "macd"
             | "boll"
             | "bbw"
@@ -116,6 +119,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
     use ArgDefault::*;
     let (args, series): (Vec<ArgDefault>, Vec<&'static str>) = match (name, sub) {
         ("ma" | "ema" | "smma", None) => (vec![Required], vec!["close"]),
+        ("wma" | "dema" | "tema", None) => (vec![Int(30)], vec!["close"]),
         ("macd", None) => (vec![Int(12), Int(26)], vec!["close"]),
         ("macd", Some("signal" | "histogram")) => {
             (vec![Int(12), Int(26), Int(9)], vec!["close"])

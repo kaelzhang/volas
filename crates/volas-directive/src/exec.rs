@@ -198,6 +198,9 @@ fn exec_command(
         ("ma", _) => f64col(ind::ma(&close(0)?, arg_usize(args, 0, None)?)),
         ("ema", _) => f64col(ind::ema(&close(0)?, arg_usize(args, 0, None)?)),
         ("smma", _) => f64col(ind::smma(&close(0)?, arg_usize(args, 0, None)?)),
+        ("wma", _) => f64col(ind::wma(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("dema", _) => f64col(ind::dema(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("tema", _) => f64col(ind::tema(&close(0)?, arg_usize(args, 0, Some(30))?)),
 
         ("macd", None) => {
             f64col(ind::macd(&close(0)?, arg_usize(args, 0, Some(12))?, arg_usize(args, 1, Some(26))?))
