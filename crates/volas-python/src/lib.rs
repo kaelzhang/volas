@@ -14,7 +14,7 @@ use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
-use volas_core::{datetime, Column, DataFrame, DType, Index, Label, Series, VolasError};
+use volas_core::{datetime, Column, DataFrame, DType, Index, Label, Series, Tz, VolasError};
 use volas_directive::{execute, parse};
 
 mod readers;
@@ -166,7 +166,7 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
 /// for a DatetimeIndex, else the integer label).
 fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> {
     match index {
-        Index::Datetime(v) => datetime::format_ns(v[i])
+        Index::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz)
             .into_pyobject(py)
             .unwrap()
             .into_any()
@@ -177,10 +177,11 @@ fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> {
     }
 }
 
-/// Parse a Python timestamp (datetime string or epoch-ns integer) to i64 ns.
-pub(crate) fn parse_ts(key: &Bound<'_, PyAny>) -> PyResult<i64> {
+/// Parse a Python timestamp to UTC epoch-ns, interpreting a **naive** string in
+/// `tz` (an offset-aware string is already absolute; an integer is epoch-ns).
+pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
     if let Ok(s) = key.extract::<String>() {
-        return datetime::parse_ns(&s)
+        return datetime::parse_ns_in_tz(&s, tz)
             .ok_or_else(|| PyKeyError::new_err(format!("invalid datetime label {s:?}")));
     }
     if let Ok(i) = key.extract::<i64>() {
@@ -189,23 +190,33 @@ pub(crate) fn parse_ts(key: &Bound<'_, PyAny>) -> PyResult<i64> {
     Err(PyKeyError::new_err("label must be a datetime string or integer"))
 }
 
+/// Parse a Python timestamp (datetime string or epoch-ns integer) to UTC ns,
+/// interpreting a naive string as UTC.
+pub(crate) fn parse_ts(key: &Bound<'_, PyAny>) -> PyResult<i64> {
+    parse_ts_in_tz(key, Tz::Utc)
+}
+
 /// Parse a Python label to the [`Label`] kind expected by `index`: a string for
-/// a string index, a parsed datetime / integer for the numeric kinds.
+/// a string index, a parsed datetime (in the index's tz) / integer for the
+/// numeric kinds.
 pub(crate) fn parse_label(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Label> {
     match index {
         Index::Str(_) => key
             .extract::<String>()
             .map(Label::Str)
             .map_err(|_| PyKeyError::new_err("label must be a string for a string index")),
+        Index::Datetime(_, tz) => parse_ts_in_tz(key, *tz).map(Label::I64),
         _ => parse_ts(key).map(Label::I64),
     }
 }
 
-/// Build the `.index` as a NumPy array (datetime64[ns] for a DatetimeIndex,
-/// an object array for a string index).
+/// Build the `.index` as a NumPy array. A DatetimeIndex exports its **UTC**
+/// instants as `datetime64[ns]` (matching pandas `.values`; the frame tz governs
+/// string rendering / matching, not the numeric export); a string index becomes
+/// an object array.
 fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
     match index {
-        Index::Datetime(v) => {
+        Index::Datetime(v, _) => {
             let arr = v.clone().into_pyarray(py);
             Ok(arr.call_method1("astype", ("datetime64[ns]",))?)
         }
@@ -1628,7 +1639,7 @@ fn index_label_csv(index: &Index, i: usize) -> String {
     match index {
         Index::Range(_) => i.to_string(),
         Index::Int64(v) => v[i].to_string(),
-        Index::Datetime(v) => datetime::format_ns(v[i]),
+        Index::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz),
         Index::Str(v) => v[i].clone(),
     }
 }

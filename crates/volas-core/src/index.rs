@@ -2,18 +2,26 @@
 
 use crate::column::Column;
 use crate::error::{Result, VolasError};
+use crate::tz::Tz;
 
 /// Row labels. Defaults to an implicit `0..n` range; a `Datetime` index is the
 /// common OHLCV case (i64 nanoseconds since the Unix epoch); a `Str` index
 /// (pandas object/string index) supports symbol-keyed lookup.
+///
+/// A `Datetime` index carries its own [`Tz`]: storage is always UTC epoch-ns, but
+/// the tz governs how those instants render and how bare-string / day-bucket
+/// matching maps to wall-clock time (see [`crate::tz`]). The tz rides with the
+/// shared `Arc<Index>`, so a frame and every series drawn from it agree on it for
+/// free.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Index {
     /// Implicit `0..n` integer labels.
     Range(usize),
     /// Explicit integer labels.
     Int64(Vec<i64>),
-    /// Datetime labels as i64 nanoseconds since the Unix epoch.
-    Datetime(Vec<i64>),
+    /// Datetime labels as i64 nanoseconds since the Unix epoch, with a display /
+    /// matching timezone (UTC by default).
+    Datetime(Vec<i64>, Tz),
     /// String labels (pandas object/string index).
     Str(Vec<String>),
 }
@@ -54,8 +62,14 @@ impl Index {
     /// becomes a `DatetimeIndex`, an `I64` column an `Int64Index`, a `Str`
     /// column a string index. Float / bool columns are not valid labels.
     pub fn from_column(col: &Column) -> Result<Index> {
+        Index::from_column_tz(col, Tz::Utc)
+    }
+
+    /// Build an index from a column, tagging a `Datetime` column with `tz` (UTC
+    /// otherwise the tz is ignored).
+    pub fn from_column_tz(col: &Column, tz: Tz) -> Result<Index> {
         match col {
-            Column::Datetime(v) => Ok(Index::Datetime(v.to_vec())),
+            Column::Datetime(v) => Ok(Index::Datetime(v.to_vec(), tz)),
             Column::I64(v) => Ok(Index::Int64(v.to_vec())),
             Column::Str(v) => Ok(Index::Str(v.to_vec())),
             other => Err(VolasError::DType(format!(
@@ -65,12 +79,28 @@ impl Index {
         }
     }
 
+    /// The timezone of a `Datetime` index ([`Tz::Utc`] for every other kind).
+    pub fn tz(&self) -> Tz {
+        match self {
+            Index::Datetime(_, tz) => *tz,
+            _ => Tz::Utc,
+        }
+    }
+
+    /// Return this index with its timezone set (no-op for a non-datetime index).
+    pub fn with_tz(self, tz: Tz) -> Index {
+        match self {
+            Index::Datetime(v, _) => Index::Datetime(v, tz),
+            other => other,
+        }
+    }
+
     /// Number of labels.
     pub fn len(&self) -> usize {
         match self {
             Index::Range(n) => *n,
             Index::Int64(v) => v.len(),
-            Index::Datetime(v) => v.len(),
+            Index::Datetime(v, _) => v.len(),
             Index::Str(v) => v.len(),
         }
     }
@@ -79,7 +109,8 @@ impl Index {
     pub fn label_at(&self, i: usize) -> Label {
         match self {
             Index::Range(_) => Label::I64(i as i64),
-            Index::Int64(v) | Index::Datetime(v) => Label::I64(v[i]),
+            Index::Int64(v) => Label::I64(v[i]),
+            Index::Datetime(v, _) => Label::I64(v[i]),
             Index::Str(v) => Label::Str(v[i].clone()),
         }
     }
@@ -95,27 +126,27 @@ impl Index {
         match self {
             Index::Range(n) => (0..*n as i64).collect(),
             Index::Int64(v) => v.clone(),
-            Index::Datetime(v) => v.clone(),
+            Index::Datetime(v, _) => v.clone(),
             Index::Str(_) => unreachable!("string indexes have no i64 labels"),
         }
     }
 
-    /// A `[start, end)` slice.
+    /// A `[start, end)` slice (a datetime slice keeps the tz).
     pub fn slice(&self, start: usize, end: usize) -> Index {
         match self {
             Index::Range(_) => Index::Range(end.saturating_sub(start)),
             Index::Int64(v) => Index::Int64(v[start..end].to_vec()),
-            Index::Datetime(v) => Index::Datetime(v[start..end].to_vec()),
+            Index::Datetime(v, tz) => Index::Datetime(v[start..end].to_vec(), *tz),
             Index::Str(v) => Index::Str(v[start..end].to_vec()),
         }
     }
 
-    /// Gather the given positions.
+    /// Gather the given positions (a datetime gather keeps the tz).
     pub fn take(&self, idx: &[usize]) -> Index {
         match self {
             Index::Range(_) => Index::Int64(idx.iter().map(|&i| i as i64).collect()),
             Index::Int64(v) => Index::Int64(idx.iter().map(|&i| v[i]).collect()),
-            Index::Datetime(v) => Index::Datetime(idx.iter().map(|&i| v[i]).collect()),
+            Index::Datetime(v, tz) => Index::Datetime(idx.iter().map(|&i| v[i]).collect(), *tz),
             Index::Str(v) => Index::Str(idx.iter().map(|&i| v[i].clone()).collect()),
         }
     }
@@ -140,7 +171,7 @@ impl Index {
         match self {
             Index::Range(n) => Column::i64((0..*n as i64).collect()),
             Index::Int64(v) => Column::i64(v.clone()),
-            Index::Datetime(v) => Column::datetime(v.clone()),
+            Index::Datetime(v, _) => Column::datetime(v.clone()),
             Index::Str(v) => Column::str(v.clone()),
         }
     }
@@ -152,7 +183,7 @@ impl Index {
         use Index::*;
         Ok(match (self, other) {
             (Range(a), Range(b)) => Range(a + b),
-            (Datetime(a), Datetime(b)) => Datetime([a.as_slice(), b].concat()),
+            (Datetime(a, ta), Datetime(b, _)) => Datetime([a.as_slice(), b].concat(), *ta),
             (Str(a), Str(b)) => Str([a.as_slice(), b].concat()),
             (Str(_), _) | (_, Str(_)) => {
                 return Err(VolasError::Shape(
@@ -172,7 +203,7 @@ impl Index {
         use Index::*;
         match (&mut *self, other) {
             (Range(a), Range(b)) => *a += b,
-            (Datetime(a), Datetime(b)) => a.extend_from_slice(b),
+            (Datetime(a, _), Datetime(b, _)) => a.extend_from_slice(b),
             (Int64(a), Int64(b)) => a.extend_from_slice(b),
             (Str(a), Str(b)) => a.extend(b.iter().cloned()),
             (Str(_), _) | (_, Str(_)) => {
@@ -201,9 +232,8 @@ impl Index {
                     None
                 }
             }
-            (Index::Int64(vs) | Index::Datetime(vs), Label::I64(v)) => {
-                vs.iter().position(|x| x == v)
-            }
+            (Index::Int64(vs), Label::I64(v)) => vs.iter().position(|x| x == v),
+            (Index::Datetime(vs, _), Label::I64(v)) => vs.iter().position(|x| x == v),
             (Index::Str(vs), Label::Str(s)) => vs.iter().position(|x| x == s),
             _ => None,
         }
@@ -246,7 +276,7 @@ mod tests {
     fn from_datetime_and_int_columns() {
         assert_eq!(
             Index::from_column(&Column::datetime(vec![5, 6])).unwrap(),
-            Index::Datetime(vec![5, 6])
+            Index::Datetime(vec![5, 6], Tz::Utc)
         );
         assert_eq!(
             Index::from_column(&Column::i64(vec![1, 2])).unwrap(),
@@ -268,7 +298,7 @@ mod tests {
 
         assert_eq!(Index::Range(3).to_i64_labels(), vec![0, 1, 2]);
         assert_eq!(Index::Int64(vec![5, 6]).to_i64_labels(), vec![5, 6]);
-        assert_eq!(Index::Datetime(vec![10, 20]).to_i64_labels(), vec![10, 20]);
+        assert_eq!(Index::Datetime(vec![10, 20], Tz::Utc).to_i64_labels(), vec![10, 20]);
 
         let i64 = Label::I64;
         assert_eq!(Index::Range(5).position_of(&i64(3)), Some(3));
@@ -276,7 +306,7 @@ mod tests {
         assert_eq!(Index::Range(5).position_of(&i64(-1)), None);
         assert_eq!(Index::Int64(vec![10, 20, 30]).position_of(&i64(20)), Some(1));
         assert_eq!(Index::Int64(vec![10, 20]).position_of(&i64(99)), None);
-        assert_eq!(Index::Datetime(vec![100, 200]).position_of(&i64(200)), Some(1));
+        assert_eq!(Index::Datetime(vec![100, 200], Tz::Utc).position_of(&i64(200)), Some(1));
 
         // take() on an Int64 index gathers the labels at those positions
         assert_eq!(
@@ -336,9 +366,9 @@ mod tests {
         r.extend(&Index::Range(2)).unwrap();
         assert_eq!(r, Index::Range(5));
 
-        let mut d = Index::Datetime(vec![1, 2]);
-        d.extend(&Index::Datetime(vec![3])).unwrap();
-        assert_eq!(d, Index::Datetime(vec![1, 2, 3]));
+        let mut d = Index::Datetime(vec![1, 2], Tz::Utc);
+        d.extend(&Index::Datetime(vec![3], Tz::Utc)).unwrap();
+        assert_eq!(d, Index::Datetime(vec![1, 2, 3], Tz::Utc));
 
         let mut s = str_index(&["a", "b"]);
         s.extend(&str_index(&["c"])).unwrap();
@@ -364,6 +394,6 @@ mod tests {
         // label_at over the numeric index kinds
         assert_eq!(Index::Range(3).label_at(2), Label::I64(2));
         assert_eq!(Index::Int64(vec![10, 20]).label_at(1), Label::I64(20));
-        assert_eq!(Index::Datetime(vec![100, 200]).label_at(0), Label::I64(100));
+        assert_eq!(Index::Datetime(vec![100, 200], Tz::Utc).label_at(0), Label::I64(100));
     }
 }

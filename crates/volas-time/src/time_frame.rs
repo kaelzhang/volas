@@ -1,7 +1,6 @@
 //! Time frames and their period-key unification.
 
-use volas_core::datetime;
-use volas_core::{Result, VolasError};
+use volas_core::{Result, Tz, VolasError};
 
 // Magnitude-positional encoding of a truncated civil datetime (matches
 // stock-pandas, so `unify("2020-01-02 03:04:05")` for seconds == 20200102030405).
@@ -109,10 +108,17 @@ impl TimeFrame {
         }
     }
 
-    /// Unify an epoch-ns timestamp to its period key. Two timestamps are in the
-    /// same period iff their keys are equal.
+    /// Unify an epoch-ns timestamp to its period key (in **UTC** wall-clock). Two
+    /// timestamps are in the same period iff their keys are equal.
     pub fn unify(&self, ns: i64) -> i64 {
-        let (y, mo, d, h, mi, s) = datetime::civil_parts(ns);
+        self.unify_tz(ns, Tz::Utc)
+    }
+
+    /// Unify an epoch-ns timestamp to its period key in `tz`'s wall-clock, so that
+    /// hour+ buckets (e.g. daily bars) align to the local trading day — DST-aware
+    /// for a named zone. Storage stays UTC; only the bucketing uses `tz`.
+    pub fn unify_tz(&self, ns: i64, tz: Tz) -> i64 {
+        let (y, mo, d, h, mi, s) = tz.civil_parts(ns);
         use TimeFrame::*;
         match self {
             Sec1 => s * SEC + mi * MIN + h * HOUR + d * DAY + mo * MONTH + y * YEAR,
@@ -139,6 +145,7 @@ impl TimeFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use volas_core::datetime;
 
     #[test]
     fn labels_and_parse() {

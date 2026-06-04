@@ -1,6 +1,6 @@
 //! Cumulation: group fine bars into coarser periods and aggregate.
 
-use volas_core::{DataFrame, Index, Result, VolasError};
+use volas_core::{DataFrame, Index, Result, Tz, VolasError};
 
 use crate::agg::AggSpec;
 use crate::time_frame::TimeFrame;
@@ -46,8 +46,8 @@ impl Cumulator {
             None => fine.clone(),
         };
 
-        let ts: Vec<i64> = match raw.index().as_ref() {
-            Index::Datetime(v) => v.clone(),
+        let (ts, tz): (Vec<i64>, _) = match raw.index().as_ref() {
+            Index::Datetime(v, tz) => (v.clone(), *tz),
             _ => {
                 return Err(VolasError::Value(
                     "cumulation target must have a DatetimeIndex".into(),
@@ -55,7 +55,7 @@ impl Cumulator {
             }
         };
 
-        let runs = group_runs(&ts, self.tf);
+        let runs = group_runs(&ts, self.tf, tz);
         let last = runs.len() - 1;
 
         // Finalize every run except the last.
@@ -112,13 +112,14 @@ pub fn cumulate(df: &DataFrame, tf: TimeFrame, spec: &AggSpec) -> Result<DataFra
     cumulator.frame()
 }
 
-/// Split a sorted timestamp slice into `[start, end)` runs of equal period key.
-fn group_runs(ts: &[i64], tf: TimeFrame) -> Vec<(usize, usize)> {
+/// Split a sorted timestamp slice into `[start, end)` runs of equal period key,
+/// bucketing in `tz`'s wall-clock so hour+ periods align to the local trading day.
+fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
     let mut start = 0;
-    let mut key = tf.unify(ts[0]);
+    let mut key = tf.unify_tz(ts[0], tz);
     for i in 1..ts.len() {
-        let k = tf.unify(ts[i]);
+        let k = tf.unify_tz(ts[i], tz);
         if k != key {
             runs.push((start, i));
             start = i;
@@ -139,8 +140,8 @@ fn dedup_keep_last(ts: &[i64]) -> Vec<usize> {
 /// Aggregate one period's raw bars into a single coarse row (1-row frame). The
 /// index label is the period's first timestamp.
 fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame> {
-    let ts: &[i64] = match period.index().as_ref() {
-        Index::Datetime(v) => v,
+    let (ts, tz): (&[i64], _) = match period.index().as_ref() {
+        Index::Datetime(v, tz) => (v, *tz),
         _ => {
             return Err(VolasError::Value(
                 "cumulation period must have a DatetimeIndex".into(),
@@ -155,7 +156,7 @@ fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame> {
     for (name, col) in names.iter().zip(period.columns()) {
         columns.push(spec.agg_for(name).reduce(col, &kept)?);
     }
-    DataFrame::new(names, columns, Some(Index::Datetime(vec![start_ns])))
+    DataFrame::new(names, columns, Some(Index::Datetime(vec![start_ns], tz)))
 }
 
 #[cfg(test)]
@@ -180,7 +181,7 @@ mod tests {
                 Column::f64(close.to_vec()),
                 Column::f64(vol.to_vec()),
             ],
-            Some(Index::Datetime(idx)),
+            Some(Index::Datetime(idx, Tz::Utc)),
         )
         .unwrap()
     }
@@ -220,7 +221,7 @@ mod tests {
         assert_eq!(out.column("volume").unwrap().as_f64().unwrap()[1], 50.0);
         // index = period-start timestamps
         match out.index().as_ref() {
-            Index::Datetime(v) => {
+            Index::Datetime(v, _) => {
                 assert_eq!(v[0], datetime::parse_ns("2020-01-01 00:00:00").unwrap());
                 assert_eq!(v[1], datetime::parse_ns("2020-01-01 00:05:00").unwrap());
             }
@@ -285,7 +286,7 @@ mod tests {
         let empty = DataFrame::new(
             vec!["open".into()],
             vec![Column::f64(vec![])],
-            Some(Index::Datetime(vec![])),
+            Some(Index::Datetime(vec![], Tz::Utc)),
         )
         .unwrap();
         assert!(cum.append(&empty).is_err());

@@ -103,6 +103,16 @@ pub fn format_ns(ns: i64) -> String {
         .unwrap_or_default()
 }
 
+/// Format epoch nanoseconds as the wall-clock `YYYY-MM-DD HH:MM:SS` in `tz` (the
+/// human/string form; bulk numpy export stays UTC).
+pub fn format_ns_tz(ns: i64, tz: Tz) -> String {
+    if tz.is_utc() {
+        return format_ns(ns);
+    }
+    let (y, mo, d, h, mi, s) = tz.civil_parts(ns);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
