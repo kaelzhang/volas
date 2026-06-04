@@ -25,28 +25,30 @@ pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     if period == 0 || period > n {
         return result;
     }
-    // Fast path — contiguous data with no NaN: a clean sliding sum with no
-    // per-element NaN bookkeeping. Same accumulation order (add the entering
-    // value, then subtract the leaving one), so it is bit-identical to the slow
-    // path for NaN-free data while running ~3.6x faster — the common case for
-    // real OHLCV.
+    // Fast path — a clean sliding sum with no per-element NaN bookkeeping (same
+    // accumulation order, so bit-identical for NaN-free data, ~3.6x faster — the
+    // common OHLCV case). A NaN poisons the running sum permanently (subtracting
+    // finite values never clears it), so a single `sum.is_nan()` check *after* the
+    // pass detects any NaN without a separate upfront scan; on the rare NaN case we
+    // reset and fall through to the precise slow path.
     if let Some(src) = data.as_slice() {
-        if !src.iter().any(|x| x.is_nan()) {
-            {
-                let dst = result.as_slice_mut().expect("from_elem is contiguous");
-                let mut sum = 0.0;
-                for i in 0..n {
-                    sum += src[i];
-                    if i >= period {
-                        sum -= src[i - period];
-                    }
-                    if i + 1 >= period {
-                        dst[i] = sum / period as f64;
-                    }
+        let mut sum = 0.0;
+        {
+            let dst = result.as_slice_mut().expect("from_elem is contiguous");
+            for i in 0..n {
+                sum += src[i];
+                if i >= period {
+                    sum -= src[i - period];
+                }
+                if i + 1 >= period {
+                    dst[i] = sum / period as f64;
                 }
             }
+        }
+        if !sum.is_nan() {
             return result;
         }
+        result.fill(f64::NAN);
     }
     // Slow path — NaN-aware: a window containing any NaN yields NaN.
     let mut sum = 0.0;
@@ -527,32 +529,37 @@ pub fn rolling_mean_std(
     }
     let p = period as f64;
     let denom = (period - ddof) as f64;
-    // Fast path — no NaN: one clean sliding pass emitting both outputs.
+    // Fast path — one clean sliding pass emitting both outputs, no per-element NaN
+    // bookkeeping. A NaN permanently poisons the running sum, so a single
+    // `sum.is_nan()` check after the pass replaces a separate upfront scan; reset
+    // and fall through on the rare NaN case.
     if let Some(src) = data.as_slice() {
-        if !src.iter().any(|x| x.is_nan()) {
-            {
-                let md = mean.as_slice_mut().expect("from_elem is contiguous");
-                let sd = std.as_slice_mut().expect("from_elem is contiguous");
-                let mut sum = 0.0;
-                let mut sum_sq = 0.0;
-                for i in 0..n {
-                    let x = src[i];
-                    sum += x;
-                    sum_sq += x * x;
-                    if i >= period {
-                        let leaving = src[i - period];
-                        sum -= leaving;
-                        sum_sq -= leaving * leaving;
-                    }
-                    if i + 1 >= period {
-                        md[i] = sum / p;
-                        let variance = (sum_sq - sum * sum / p) / denom;
-                        sd[i] = variance.max(0.0).sqrt();
-                    }
+        let mut sum = 0.0;
+        let mut sum_sq = 0.0;
+        {
+            let md = mean.as_slice_mut().expect("from_elem is contiguous");
+            let sd = std.as_slice_mut().expect("from_elem is contiguous");
+            for i in 0..n {
+                let x = src[i];
+                sum += x;
+                sum_sq += x * x;
+                if i >= period {
+                    let leaving = src[i - period];
+                    sum -= leaving;
+                    sum_sq -= leaving * leaving;
+                }
+                if i + 1 >= period {
+                    md[i] = sum / p;
+                    let variance = (sum_sq - sum * sum / p) / denom;
+                    sd[i] = variance.max(0.0).sqrt();
                 }
             }
+        }
+        if !sum.is_nan() {
             return (mean, std);
         }
+        mean.fill(f64::NAN);
+        std.fill(f64::NAN);
     }
     // Slow path — NaN-aware: a window with any NaN yields NaN in both outputs.
     let mut sum = 0.0;
