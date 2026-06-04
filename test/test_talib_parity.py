@@ -268,17 +268,21 @@ def test_candlestick_patterns_match_talib(ohlc):
         np.testing.assert_array_equal(got[lb:], np.asarray(want, dtype=float)[lb:])
 
     patterns = [
-        ('doji', talib.CDLDOJI), ('marubozu', talib.CDLMARUBOZU),
-        ('closingmarubozu', talib.CDLCLOSINGMARUBOZU), ('longline', talib.CDLLONGLINE),
-        ('shortline', talib.CDLSHORTLINE), ('highwave', talib.CDLHIGHWAVE),
-        ('spinningtop', talib.CDLSPINNINGTOP), ('dragonflydoji', talib.CDLDRAGONFLYDOJI),
-        ('gravestonedoji', talib.CDLGRAVESTONEDOJI), ('longleggeddoji', talib.CDLLONGLEGGEDDOJI),
-        ('rickshawman', talib.CDLRICKSHAWMAN), ('belthold', talib.CDLBELTHOLD),
+        ('doji', talib.CDLDOJI, 10), ('marubozu', talib.CDLMARUBOZU, 10),
+        ('closingmarubozu', talib.CDLCLOSINGMARUBOZU, 10), ('longline', talib.CDLLONGLINE, 10),
+        ('shortline', talib.CDLSHORTLINE, 10), ('highwave', talib.CDLHIGHWAVE, 10),
+        ('spinningtop', talib.CDLSPINNINGTOP, 10), ('dragonflydoji', talib.CDLDRAGONFLYDOJI, 10),
+        ('gravestonedoji', talib.CDLGRAVESTONEDOJI, 10),
+        ('longleggeddoji', talib.CDLLONGLEGGEDDOJI, 10),
+        ('rickshawman', talib.CDLRICKSHAWMAN, 10), ('belthold', talib.CDLBELTHOLD, 10),
+        ('hammer', talib.CDLHAMMER, 11), ('hangingman', talib.CDLHANGINGMAN, 11),
+        ('invertedhammer', talib.CDLINVERTEDHAMMER, 11),
+        ('shootingstar', talib.CDLSHOOTINGSTAR, 11), ('takuri', talib.CDLTAKURI, 10),
     ]
-    for name, fn in patterns:
+    for name, fn, lb in patterns:
         want = fn(o, h, l, c)
-        pat(df.exec(f'style.{name}'), want, 10)
-        pat(df.exec(f'cdl.{name}'), want, 10)  # the cdl alias matches
+        pat(df.exec(f'style.{name}'), want, lb)
+        pat(df.exec(f'cdl.{name}'), want, lb)  # the cdl alias matches
 
 
 def test_math_transform_series_methods_match_talib(ohlc):

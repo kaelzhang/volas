@@ -37,6 +37,11 @@ pub fn candle_pattern(name: &str) -> Option<(CandleFn, usize)> {
         "longleggeddoji" => (cdl_longleggeddoji, 10),
         "rickshawman" => (cdl_rickshawman, 10),
         "belthold" => (cdl_belthold, 10),
+        "hammer" => (cdl_hammer, 11),
+        "hangingman" => (cdl_hangingman, 11),
+        "invertedhammer" => (cdl_invertedhammer, 11),
+        "shootingstar" => (cdl_shootingstar, 11),
+        "takuri" => (cdl_takuri, 10),
         _ => return None,
     };
     Some(entry)
@@ -99,6 +104,18 @@ fn color(o: &[f64], c: &[f64], i: usize) -> f64 {
     } else {
         -1.0
     }
+}
+
+/// Real-body gap up between bar `i` and an earlier bar `j` (TA-Lib `TA_REALBODYGAPUP`):
+/// the whole real body of `i` sits above that of `j`.
+#[inline]
+fn realbody_gap_up(o: &[f64], c: &[f64], i: usize, j: usize) -> bool {
+    o[i].min(c[i]) > o[j].max(c[j])
+}
+/// Real-body gap down (TA-Lib `TA_REALBODYGAPDOWN`).
+#[inline]
+fn realbody_gap_down(o: &[f64], c: &[f64], i: usize, j: usize) -> bool {
+    o[i].max(c[i]) < o[j].min(c[j])
 }
 
 /// The setting's range at bar `i`.

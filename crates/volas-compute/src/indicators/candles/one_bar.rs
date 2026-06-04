@@ -1,8 +1,9 @@
 //! Single-bar candlestick patterns.
 
 use super::{
-    candle_average, color, lowershadow, realbody, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT,
-    NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_LONG, SHADOW_VERY_SHORT,
+    candle_average, color, lowershadow, realbody, realbody_gap_down, realbody_gap_up, uppershadow,
+    BODY_DOJI, BODY_LONG, BODY_SHORT, NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_LONG,
+    SHADOW_VERY_SHORT,
 };
 
 /// Build a per-bar pattern: NaN before `lookback`, then `f(i)` (0 / ±100) per bar.
@@ -209,6 +210,94 @@ pub fn cdl_belthold(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             || (!white && uppershadow(o, h, c, i) < vs);
         if realbody(o, c, i) > candle_average(BODY_LONG, o, h, l, c, i) && opens_at_extreme {
             color(o, c, i) * 100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Shared body/shadow test for hammer-family candles: a small body with one long shadow
+/// and a very short shadow on the other end. `long_below` true ⇒ long lower / short upper
+/// (hammer, hanging man); false ⇒ long upper / short lower (inverted hammer, shooting star).
+#[inline]
+fn hammer_shape(o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize, long_below: bool) -> bool {
+    let long = candle_average(SHADOW_LONG, o, h, l, c, i);
+    let very_short = candle_average(SHADOW_VERY_SHORT, o, h, l, c, i);
+    let small_body = realbody(o, c, i) < candle_average(BODY_SHORT, o, h, l, c, i);
+    let (upper, lower) = (uppershadow(o, h, c, i), lowershadow(o, l, c, i));
+    if long_below {
+        small_body && lower > long && upper < very_short
+    } else {
+        small_body && upper > long && lower < very_short
+    }
+}
+
+/// Hammer (TA-Lib CDLHAMMER): a hammer-shape candle whose body sits near the prior bar's
+/// low — bullish reversal `100`. Lookback 11 (prior-bar reference).
+pub fn cdl_hammer(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_SHORT.avg_period).max(NEAR.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if hammer_shape(o, h, l, c, i, true)
+            && o[i].min(c[i]) <= l[i - 1] + candle_average(NEAR, o, h, l, c, i - 1)
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Hanging Man (TA-Lib CDLHANGINGMAN): a hammer-shape candle whose body sits near the
+/// prior bar's high — bearish reversal `-100`. Lookback 11.
+pub fn cdl_hangingman(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_SHORT.avg_period).max(NEAR.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if hammer_shape(o, h, l, c, i, true)
+            && o[i].min(c[i]) >= h[i - 1] - candle_average(NEAR, o, h, l, c, i - 1)
+        {
+            -100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Inverted Hammer (TA-Lib CDLINVERTEDHAMMER): inverted hammer-shape gapping down from
+/// the prior body — bullish `100`. Lookback 11.
+pub fn cdl_invertedhammer(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_SHORT.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if hammer_shape(o, h, l, c, i, false) && realbody_gap_down(o, c, i, i - 1) {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Shooting Star (TA-Lib CDLSHOOTINGSTAR): inverted hammer-shape gapping up from the
+/// prior body — bearish `-100`. Lookback 11.
+pub fn cdl_shootingstar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_SHORT.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if hammer_shape(o, h, l, c, i, false) && realbody_gap_up(o, c, i, i - 1) {
+            -100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Takuri (TA-Lib CDLTAKURI): a dragonfly doji with an exceptionally long lower shadow.
+/// Non-directional `100`. Lookback 10.
+pub fn cdl_takuri(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_DOJI.avg_period.max(SHADOW_VERY_SHORT.avg_period).max(SHADOW_VERY_LONG.avg_period);
+    each_bar(c.len(), lb, |i| {
+        if realbody(o, c, i) <= candle_average(BODY_DOJI, o, h, l, c, i)
+            && uppershadow(o, h, c, i) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, i)
+            && lowershadow(o, l, c, i) > candle_average(SHADOW_VERY_LONG, o, h, l, c, i)
+        {
+            100.0
         } else {
             0.0
         }
