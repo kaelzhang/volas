@@ -271,7 +271,9 @@ def test_candlestick_patterns_match_talib(ohlc):
         ('doji', talib.CDLDOJI), ('marubozu', talib.CDLMARUBOZU),
         ('closingmarubozu', talib.CDLCLOSINGMARUBOZU), ('longline', talib.CDLLONGLINE),
         ('shortline', talib.CDLSHORTLINE), ('highwave', talib.CDLHIGHWAVE),
-        ('spinningtop', talib.CDLSPINNINGTOP),
+        ('spinningtop', talib.CDLSPINNINGTOP), ('dragonflydoji', talib.CDLDRAGONFLYDOJI),
+        ('gravestonedoji', talib.CDLGRAVESTONEDOJI), ('longleggeddoji', talib.CDLLONGLEGGEDDOJI),
+        ('rickshawman', talib.CDLRICKSHAWMAN), ('belthold', talib.CDLBELTHOLD),
     ]
     for name, fn in patterns:
         want = fn(o, h, l, c)

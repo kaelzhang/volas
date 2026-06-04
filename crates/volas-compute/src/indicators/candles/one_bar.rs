@@ -2,7 +2,7 @@
 
 use super::{
     candle_average, color, lowershadow, realbody, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT,
-    SHADOW_SHORT, SHADOW_VERY_LONG, SHADOW_VERY_SHORT,
+    NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_LONG, SHADOW_VERY_SHORT,
 };
 
 /// Build a per-bar pattern: NaN before `lookback`, then `f(i)` (0 / ±100) per bar.
@@ -117,6 +117,97 @@ pub fn cdl_spinningtop(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             && uppershadow(o, h, c, i) > body
             && lowershadow(o, l, c, i) > body
         {
+            color(o, c, i) * 100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Dragonfly Doji (TA-Lib CDLDRAGONFLYDOJI): doji body, very short upper shadow, long
+/// lower shadow. Non-directional: `100` or `0`. Lookback 10.
+pub fn cdl_dragonflydoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_DOJI.avg_period.max(SHADOW_VERY_SHORT.avg_period);
+    each_bar(c.len(), lb, |i| {
+        let vs = candle_average(SHADOW_VERY_SHORT, o, h, l, c, i);
+        if realbody(o, c, i) <= candle_average(BODY_DOJI, o, h, l, c, i)
+            && uppershadow(o, h, c, i) < vs
+            && lowershadow(o, l, c, i) > vs
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Gravestone Doji (TA-Lib CDLGRAVESTONEDOJI): doji body, very short lower shadow, long
+/// upper shadow. Non-directional: `100` or `0`. Lookback 10.
+pub fn cdl_gravestonedoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_DOJI.avg_period.max(SHADOW_VERY_SHORT.avg_period);
+    each_bar(c.len(), lb, |i| {
+        let vs = candle_average(SHADOW_VERY_SHORT, o, h, l, c, i);
+        if realbody(o, c, i) <= candle_average(BODY_DOJI, o, h, l, c, i)
+            && lowershadow(o, l, c, i) < vs
+            && uppershadow(o, h, c, i) > vs
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Long-Legged Doji (TA-Lib CDLLONGLEGGEDDOJI): doji body with at least one long shadow.
+/// Non-directional: `100` or `0`. Lookback 10. (ShadowLong has avg_period 0, so its
+/// threshold is the bar's own real body.)
+pub fn cdl_longleggeddoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_DOJI.avg_period.max(SHADOW_LONG.avg_period);
+    each_bar(c.len(), lb, |i| {
+        let long = candle_average(SHADOW_LONG, o, h, l, c, i);
+        if realbody(o, c, i) <= candle_average(BODY_DOJI, o, h, l, c, i)
+            && (lowershadow(o, l, c, i) > long || uppershadow(o, h, c, i) > long)
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Rickshaw Man (TA-Lib CDLRICKSHAWMAN): a long-legged doji whose body sits near the
+/// midpoint of the high-low range. Non-directional: `100` or `0`. Lookback 10.
+pub fn cdl_rickshawman(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_DOJI.avg_period.max(SHADOW_LONG.avg_period).max(NEAR.avg_period);
+    each_bar(c.len(), lb, |i| {
+        let long = candle_average(SHADOW_LONG, o, h, l, c, i);
+        let near = candle_average(NEAR, o, h, l, c, i);
+        let mid = l[i] + (h[i] - l[i]) / 2.0;
+        let body_lo = o[i].min(c[i]);
+        let body_hi = o[i].max(c[i]);
+        if realbody(o, c, i) <= candle_average(BODY_DOJI, o, h, l, c, i)
+            && lowershadow(o, l, c, i) > long
+            && uppershadow(o, h, c, i) > long
+            && body_lo <= mid + near
+            && body_hi >= mid - near
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Belt-Hold (TA-Lib CDLBELTHOLD): a long body opening at its extreme — white with no
+/// lower shadow (bullish) or black with no upper shadow (bearish). Lookback 10.
+pub fn cdl_belthold(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_LONG.avg_period.max(SHADOW_VERY_SHORT.avg_period);
+    each_bar(c.len(), lb, |i| {
+        let vs = candle_average(SHADOW_VERY_SHORT, o, h, l, c, i);
+        let white = color(o, c, i) > 0.0;
+        let opens_at_extreme = (white && lowershadow(o, l, c, i) < vs)
+            || (!white && uppershadow(o, h, c, i) < vs);
+        if realbody(o, c, i) > candle_average(BODY_LONG, o, h, l, c, i) && opens_at_extreme {
             color(o, c, i) * 100.0
         } else {
             0.0

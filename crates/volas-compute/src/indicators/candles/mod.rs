@@ -32,6 +32,11 @@ pub fn candle_pattern(name: &str) -> Option<(CandleFn, usize)> {
         "shortline" => (cdl_shortline, 10),
         "highwave" => (cdl_highwave, 10),
         "spinningtop" => (cdl_spinningtop, 10),
+        "dragonflydoji" => (cdl_dragonflydoji, 10),
+        "gravestonedoji" => (cdl_gravestonedoji, 10),
+        "longleggeddoji" => (cdl_longleggeddoji, 10),
+        "rickshawman" => (cdl_rickshawman, 10),
+        "belthold" => (cdl_belthold, 10),
         _ => return None,
     };
     Some(entry)
@@ -72,7 +77,7 @@ const EQUAL: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.05 };
 
 // Settings not yet consumed by a landed pattern (shrinks to nothing as patterns arrive).
 #[allow(dead_code)]
-const _UNUSED_SETTINGS: [Setting; 5] = [BODY_VERY_LONG, SHADOW_LONG, NEAR, FAR, EQUAL];
+const _UNUSED_SETTINGS: [Setting; 3] = [BODY_VERY_LONG, FAR, EQUAL];
 
 #[inline]
 fn realbody(o: &[f64], c: &[f64], i: usize) -> f64 {
