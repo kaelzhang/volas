@@ -31,8 +31,9 @@ def test_boll_stable_after_drop_and_readd():
     restored = dropped.append(origin_last)
     assert restored['boll'].iloc[-1] == last_boll   # same bar back -> same value
 
-    # a *different* last bar changes boll
-    changed = dropped.append(
+    # a *different* last bar changes boll (re-drop: append now mutates in place)
+    dropped2 = stock.drop([last_index])
+    changed = dropped2.append(
         volas.DataFrame({'open': [30.0], 'high': [30.0], 'low': [30.0], 'close': [30.0]})
     )
     assert changed['boll'].iloc[-1] != last_boll

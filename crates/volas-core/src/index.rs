@@ -139,6 +139,32 @@ impl Index {
         })
     }
 
+    /// Extend in place by the labels of `other` — the amortized-O(1) counterpart
+    /// of [`append`](Self::append), used by the live single-bar hot path. Same-
+    /// kind indexes grow their buffer; a numeric-kind mix collapses to `Int64`;
+    /// mixing a string index with a numeric one is an error.
+    pub fn extend(&mut self, other: &Index) -> Result<()> {
+        use Index::*;
+        match (&mut *self, other) {
+            (Range(a), Range(b)) => *a += b,
+            (Datetime(a), Datetime(b)) => a.extend_from_slice(b),
+            (Int64(a), Int64(b)) => a.extend_from_slice(b),
+            (Str(a), Str(b)) => a.extend(b.iter().cloned()),
+            (Str(_), _) | (_, Str(_)) => {
+                return Err(VolasError::Shape(
+                    "cannot append a string index to a non-string index".into(),
+                ))
+            }
+            // numeric-kind mix (Range / Int64 / Datetime) -> Int64 labels
+            (slot, b) => {
+                let mut labels = slot.to_i64_labels();
+                labels.extend(b.to_i64_labels());
+                *slot = Int64(labels);
+            }
+        }
+        Ok(())
+    }
+
     /// Position of the first label exactly equal to `label`. Returns `None` if
     /// the label's kind does not match the index's kind.
     pub fn position_of(&self, label: &Label) -> Option<usize> {
@@ -276,6 +302,31 @@ mod tests {
         // mixing a string index with a numeric one is an error
         assert!(a.append(&Index::Range(2)).is_err());
         assert!(Index::Range(2).append(&a).is_err());
+    }
+
+    #[test]
+    fn extend_grows_in_place_per_kind() {
+        // same-kind grows the buffer in place (the live append hot path)
+        let mut r = Index::Range(3);
+        r.extend(&Index::Range(2)).unwrap();
+        assert_eq!(r, Index::Range(5));
+
+        let mut d = Index::Datetime(vec![1, 2]);
+        d.extend(&Index::Datetime(vec![3])).unwrap();
+        assert_eq!(d, Index::Datetime(vec![1, 2, 3]));
+
+        let mut s = str_index(&["a", "b"]);
+        s.extend(&str_index(&["c"])).unwrap();
+        assert_eq!(s, str_index(&["a", "b", "c"]));
+
+        // a numeric-kind mix collapses to Int64 (matches `append`)
+        let mut m = Index::Range(2);
+        m.extend(&Index::Int64(vec![5, 6])).unwrap();
+        assert_eq!(m, Index::Int64(vec![0, 1, 5, 6]));
+
+        // mixing string with numeric is an error, either way
+        assert!(str_index(&["x"]).extend(&Index::Range(1)).is_err());
+        assert!(Index::Range(1).extend(&str_index(&["x"])).is_err());
     }
 
     #[test]

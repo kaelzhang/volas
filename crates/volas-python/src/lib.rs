@@ -721,16 +721,26 @@ impl PyDataFrame {
 
     /// Append the rows of another DataFrame or a single Row, returning a new
     /// DataFrame (pandas semantics; not in place).
-    fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let mut inner = self.inner.clone();
-        if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
-            inner.append(&df.inner).map_err(pyerr)?;
+    /// Append `other`'s rows in place (amortized O(1), like `list.append`) and
+    /// return the same frame. Missing columns are NaN-padded; computed columns
+    /// go stale until `fulfill`. This is the live single-bar hot path — it grows
+    /// one frame with no full-column copy (a snapshot taken via `copy` / `iloc`
+    /// still pays one copy-on-write the next time *it* is appended to).
+    fn append<'py>(
+        slf: Bound<'py, Self>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        // Extract `other` into an owned frame first so its borrow is released
+        // before we mutably borrow `slf` (so `df.append(df)` cannot deadlock).
+        let other_inner = if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
+            df.inner.clone()
         } else if let Ok(row) = other.extract::<PyRef<PyRow>>() {
-            inner.append(&row.inner).map_err(pyerr)?;
+            row.inner.clone()
         } else {
             return Err(PyTypeError::new_err("append expects a DataFrame or Row"));
-        }
-        Ok(PyDataFrame { inner })
+        };
+        slf.borrow_mut().inner.append(&other_inner).map_err(pyerr)?;
+        Ok(slf)
     }
 
     fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {

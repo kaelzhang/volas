@@ -1,14 +1,17 @@
 """volas append tests.
 
 Ported / adapted from stock-pandas's ``test_append.py`` and
-``test_commands_after_append.py``. volas ``append`` returns a NEW frame (pandas
-semantics, not in place); a datetime index label is preserved across append. A
-``Row`` is a faithful 1-row frame, so appending one preserves every column's
-dtype (an integer ``volume`` stays ``int64``).
+``test_commands_after_append.py``. volas ``append`` mutates the frame in place
+(amortized O(1), like ``list.append``) and returns it — the live single-bar hot
+path; a datetime index label is preserved across append. A ``Row`` is a faithful
+1-row frame, so appending one preserves every column's dtype (an integer
+``volume`` stays ``int64``).
 """
 
+import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import volas
@@ -22,13 +25,14 @@ def stock():
     return volas.read_csv(TENCENT, parse_dates=['time_key'], index_col='time_key')
 
 
-def test_append_dataframe_returns_new(stock):
+def test_append_dataframe_in_place(stock):
     head = stock.iloc[:10]
     new = stock.iloc[10:15]
     out = head.append(new)
     assert isinstance(out, DataFrame)
+    assert out is head      # append is in place and returns the same frame
     assert len(out) == 15
-    assert len(head) == 10  # original is untouched (append is not in place)
+    assert len(head) == 15  # the original frame is mutated
     assert out.iloc[-1].name == new.iloc[-1].name  # datetime label preserved
 
 
@@ -69,3 +73,33 @@ def test_commands_stable_after_append(stock):
         index -= 1
         cur = cur.append(s)
         assert cur['kdj.j'].iloc[index] == j
+
+
+def test_append_is_in_place_and_returns_self(stock):
+    # append mutates the frame in place (like list.append) and returns the same
+    # object, so the live loop `df.append(bar)` grows one frame with no copy.
+    head = stock.iloc[:10]
+    out = head.append(stock.iloc[10:15])
+    assert out is head            # returns the same object
+    assert len(head) == 15        # the original frame is mutated in place
+    assert len(out) == 15
+
+
+def test_append_per_bar_is_amortized_constant_time():
+    # a single-bar append must not scale with frame size — the whole point of the
+    # in-place change (the immutable O(n)-copy append made a live loop O(n^2)).
+    cols = ['open', 'high', 'low', 'close', 'volume']
+    one = volas.DataFrame({c: [1.0] for c in cols})
+
+    def per_bar_us(n):
+        df = volas.DataFrame({c: np.arange(n, dtype=float) for c in cols})
+        for _ in range(100):                       # warm: absorb capacity growth
+            df.append(one)
+        t = time.perf_counter()
+        for _ in range(1000):
+            df.append(one)
+        return (time.perf_counter() - t) / 1000 * 1e6
+
+    small = per_bar_us(2_000)
+    large = per_bar_us(200_000)
+    assert large < small * 5, (small, large)        # O(1)-ish, not ~100x

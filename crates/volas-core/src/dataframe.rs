@@ -301,8 +301,7 @@ impl DataFrame {
                 }
             }
         }
-        let new_index = self.index.append(&other.index)?;
-        self.index = Arc::new(new_index);
+        Arc::make_mut(&mut self.index).extend(&other.index)?;
         self.height += oh;
         Ok(())
     }
