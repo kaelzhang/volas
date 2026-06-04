@@ -150,25 +150,19 @@ pub fn boll(close: &[f64], period: usize) -> Vec<f64> {
 
 /// Bollinger upper band (`ma + times * std`, population std).
 pub fn boll_upper(close: &[f64], period: usize, times: f64) -> Vec<f64> {
-    let data = av(close);
-    let ma = kernels::sma(data, period);
-    let std = kernels::rolling_std(data, period, 0);
+    let (ma, std) = kernels::rolling_mean_std(av(close), period, 0);
     (&ma + times * &std).to_vec()
 }
 
 /// Bollinger lower band (`ma - times * std`, population std).
 pub fn boll_lower(close: &[f64], period: usize, times: f64) -> Vec<f64> {
-    let data = av(close);
-    let ma = kernels::sma(data, period);
-    let std = kernels::rolling_std(data, period, 0);
+    let (ma, std) = kernels::rolling_mean_std(av(close), period, 0);
     (&ma - times * &std).to_vec()
 }
 
 /// Bollinger Band Width (`4 * std / ma`).
 pub fn bbw(close: &[f64], period: usize) -> Vec<f64> {
-    let data = av(close);
-    let ma = kernels::sma(data, period);
-    let std = kernels::rolling_std(data, period, 0);
+    let (ma, std) = kernels::rolling_mean_std(av(close), period, 0);
     (4.0 * &std / &ma).to_vec()
 }
 

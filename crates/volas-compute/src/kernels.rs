@@ -473,6 +473,82 @@ pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize) -> Array1<
     result
 }
 
+/// Fused rolling **mean and std** in a single pass — one NaN scan, one sliding
+/// accumulation of Σx and Σx². Bit-identical to calling [`sma`] and
+/// [`rolling_std`] separately (same accumulation order), but Bollinger
+/// bands / bandwidth need both, so this halves the rolling work (one buffer
+/// init, one scan, one loop instead of two).
+#[inline]
+pub fn rolling_mean_std(
+    data: ArrayView1<f64>,
+    period: usize,
+    ddof: usize,
+) -> (Array1<f64>, Array1<f64>) {
+    let n = data.len();
+    let mut mean = Array1::from_elem(n, f64::NAN);
+    let mut std = Array1::from_elem(n, f64::NAN);
+    if period == 0 || period > n || period <= ddof {
+        return (mean, std);
+    }
+    let p = period as f64;
+    let denom = (period - ddof) as f64;
+    // Fast path — no NaN: one clean sliding pass emitting both outputs.
+    if let Some(src) = data.as_slice() {
+        if !src.iter().any(|x| x.is_nan()) {
+            {
+                let md = mean.as_slice_mut().expect("from_elem is contiguous");
+                let sd = std.as_slice_mut().expect("from_elem is contiguous");
+                let mut sum = 0.0;
+                let mut sum_sq = 0.0;
+                for i in 0..n {
+                    let x = src[i];
+                    sum += x;
+                    sum_sq += x * x;
+                    if i >= period {
+                        let leaving = src[i - period];
+                        sum -= leaving;
+                        sum_sq -= leaving * leaving;
+                    }
+                    if i + 1 >= period {
+                        md[i] = sum / p;
+                        let variance = (sum_sq - sum * sum / p) / denom;
+                        sd[i] = variance.max(0.0).sqrt();
+                    }
+                }
+            }
+            return (mean, std);
+        }
+    }
+    // Slow path — NaN-aware: a window with any NaN yields NaN in both outputs.
+    let mut sum = 0.0;
+    let mut sum_sq = 0.0;
+    let mut nan_count = 0usize;
+    for i in 0..n {
+        let x = data[i];
+        if x.is_nan() {
+            nan_count += 1;
+        } else {
+            sum += x;
+            sum_sq += x * x;
+        }
+        if i >= period {
+            let leaving = data[i - period];
+            if leaving.is_nan() {
+                nan_count -= 1;
+            } else {
+                sum -= leaving;
+                sum_sq -= leaving * leaving;
+            }
+        }
+        if i + 1 >= period && nan_count == 0 {
+            mean[i] = sum / p;
+            let variance = (sum_sq - sum * sum / p) / denom;
+            std[i] = variance.max(0.0).sqrt();
+        }
+    }
+    (mean, std)
+}
+
 /// First difference (`data[i] - data[i-1]`).
 #[inline]
 pub fn diff(data: ArrayView1<f64>) -> Array1<f64> {
