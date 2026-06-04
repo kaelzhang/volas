@@ -1,29 +1,43 @@
 //! Core rolling / moving-window kernels operating on `f64` arrays.
 //!
-//! Ported from stock-pandas's Rust core. `NaN` denotes a missing value and a
-//! window is only valid when all of its values are present.
+//! `NaN` denotes a missing value. Sum / std windows are valid only when fully
+//! populated; min / max reduce over the values present. All kernels are O(n):
+//! sum / std slide a running accumulator, min / max use a monotonic deque —
+//! never the O(n·period) per-window re-scan they were ported from.
 
 use ndarray::{Array1, ArrayView1};
+use std::collections::VecDeque;
 
 /// Simple moving average (a window is valid only when fully populated).
+///
+/// O(n) sliding running sum: each step adds the entering value and subtracts
+/// the leaving one. A running count of in-window NaNs gates emission so the
+/// result is identical to a per-window re-sum (any NaN in a window -> NaN).
 #[inline]
 pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     let n = data.len();
     let mut result = Array1::from_elem(n, f64::NAN);
-    if period > n || period == 0 {
+    if period == 0 || period > n {
         return result;
     }
-    for i in (period - 1)..n {
-        let window = data.slice(ndarray::s![i + 1 - period..=i]);
-        let mut sum = 0.0;
-        let mut valid_count = 0;
-        for &val in window.iter() {
-            if !val.is_nan() {
-                sum += val;
-                valid_count += 1;
+    let mut sum = 0.0;
+    let mut nan_count = 0usize;
+    for i in 0..n {
+        let x = data[i];
+        if x.is_nan() {
+            nan_count += 1;
+        } else {
+            sum += x;
+        }
+        if i >= period {
+            let leaving = data[i - period];
+            if leaving.is_nan() {
+                nan_count -= 1;
+            } else {
+                sum -= leaving;
             }
         }
-        if valid_count == period {
+        if i + 1 >= period && nan_count == 0 {
             result[i] = sum / period as f64;
         }
     }
@@ -117,83 +131,125 @@ pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1
     result
 }
 
-/// Rolling minimum over fully-populated windows.
+/// Rolling minimum over the values present in each window.
+///
+/// O(n) via an ascending monotonic deque of indices: the front is always the
+/// window minimum. NaNs are never enqueued, so a window is `NaN` only when it
+/// holds no present value — matching the original per-window scan.
 #[inline]
 pub fn rolling_min(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     let n = data.len();
     let mut result = Array1::from_elem(n, f64::NAN);
-    if period > n || period == 0 {
+    if period == 0 || period > n {
         return result;
     }
-    for i in (period - 1)..n {
-        let window = data.slice(ndarray::s![i + 1 - period..=i]);
-        let mut min_val = f64::INFINITY;
-        let mut has_valid = false;
-        for &val in window.iter() {
-            if !val.is_nan() {
-                min_val = min_val.min(val);
-                has_valid = true;
+    let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
+    for i in 0..n {
+        while let Some(&front) = dq.front() {
+            if front + period <= i {
+                dq.pop_front();
+            } else {
+                break;
             }
         }
-        if has_valid {
-            result[i] = min_val;
+        let x = data[i];
+        if !x.is_nan() {
+            while let Some(&back) = dq.back() {
+                if data[back] >= x {
+                    dq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            dq.push_back(i);
+        }
+        if i + 1 >= period {
+            if let Some(&front) = dq.front() {
+                result[i] = data[front];
+            }
         }
     }
     result
 }
 
-/// Rolling maximum over fully-populated windows.
+/// Rolling maximum over the values present in each window.
+///
+/// O(n) via a descending monotonic deque of indices (mirror of [`rolling_min`]).
 #[inline]
 pub fn rolling_max(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     let n = data.len();
     let mut result = Array1::from_elem(n, f64::NAN);
-    if period > n || period == 0 {
+    if period == 0 || period > n {
         return result;
     }
-    for i in (period - 1)..n {
-        let window = data.slice(ndarray::s![i + 1 - period..=i]);
-        let mut max_val = f64::NEG_INFINITY;
-        let mut has_valid = false;
-        for &val in window.iter() {
-            if !val.is_nan() {
-                max_val = max_val.max(val);
-                has_valid = true;
+    let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
+    for i in 0..n {
+        while let Some(&front) = dq.front() {
+            if front + period <= i {
+                dq.pop_front();
+            } else {
+                break;
             }
         }
-        if has_valid {
-            result[i] = max_val;
+        let x = data[i];
+        if !x.is_nan() {
+            while let Some(&back) = dq.back() {
+                if data[back] <= x {
+                    dq.pop_back();
+                } else {
+                    break;
+                }
+            }
+            dq.push_back(i);
+        }
+        if i + 1 >= period {
+            if let Some(&front) = dq.front() {
+                result[i] = data[front];
+            }
         }
     }
     result
 }
 
 /// Rolling standard deviation with `ddof` degrees of freedom.
+///
+/// O(n) sliding sums of `x` and `x²`: `var = (Σx² - (Σx)²/period) / (period -
+/// ddof)`, emitted only for fully-populated windows. The variance is clamped at
+/// zero before the square root to absorb floating-point cancellation; for the
+/// magnitudes seen in OHLCV data this stays well within the parity tolerance of
+/// the two-pass form it replaces.
 #[inline]
 pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize) -> Array1<f64> {
     let n = data.len();
     let mut result = Array1::from_elem(n, f64::NAN);
-    if period > n || period == 0 || period <= ddof {
+    if period == 0 || period > n || period <= ddof {
         return result;
     }
-    for i in (period - 1)..n {
-        let window = data.slice(ndarray::s![i + 1 - period..=i]);
-        let mut sum = 0.0;
-        let mut count = 0usize;
-        for &val in window.iter() {
-            if !val.is_nan() {
-                sum += val;
-                count += 1;
+    let mut sum = 0.0;
+    let mut sum_sq = 0.0;
+    let mut nan_count = 0usize;
+    let p = period as f64;
+    let denom = (period - ddof) as f64;
+    for i in 0..n {
+        let x = data[i];
+        if x.is_nan() {
+            nan_count += 1;
+        } else {
+            sum += x;
+            sum_sq += x * x;
+        }
+        if i >= period {
+            let leaving = data[i - period];
+            if leaving.is_nan() {
+                nan_count -= 1;
+            } else {
+                sum -= leaving;
+                sum_sq -= leaving * leaving;
             }
         }
-        if count > ddof && count == period {
-            let mean = sum / count as f64;
-            let variance: f64 = window
-                .iter()
-                .filter(|x| !x.is_nan())
-                .map(|&x| (x - mean).powi(2))
-                .sum::<f64>()
-                / (count - ddof) as f64;
-            result[i] = variance.sqrt();
+        if i + 1 >= period && nan_count == 0 {
+            let variance = (sum_sq - sum * sum / p) / denom;
+            result[i] = variance.max(0.0).sqrt();
         }
     }
     result
@@ -279,5 +335,143 @@ mod tests {
         // a leading NaN keeps nobs below min_periods -> result[0] is NaN
         let lead = array![f64::NAN, 2.0, 3.0];
         assert!(ewma_com(lead.view(), 1.0, true, false, 1)[0].is_nan());
+    }
+
+    // --- O(n) rewrite safety net -------------------------------------------
+    // Independent naive (re-scan-every-window) oracles. The fast sliding /
+    // deque kernels MUST match these 1:1 (NaN-aware), including interior NaNs
+    // that slide through a window — the case real OHLCV parity data never hits.
+
+    fn av(s: &[f64]) -> ArrayView1<'_, f64> {
+        ArrayView1::from(s)
+    }
+
+    fn naive_sma(d: &[f64], p: usize) -> Vec<f64> {
+        let n = d.len();
+        let mut out = vec![f64::NAN; n];
+        if p == 0 || p > n {
+            return out;
+        }
+        for i in (p - 1)..n {
+            let w = &d[i + 1 - p..=i];
+            if w.iter().all(|x| !x.is_nan()) {
+                out[i] = w.iter().sum::<f64>() / p as f64;
+            }
+        }
+        out
+    }
+
+    fn naive_std(d: &[f64], p: usize, ddof: usize) -> Vec<f64> {
+        let n = d.len();
+        let mut out = vec![f64::NAN; n];
+        if p == 0 || p > n || p <= ddof {
+            return out;
+        }
+        for i in (p - 1)..n {
+            let w = &d[i + 1 - p..=i];
+            if w.iter().all(|x| !x.is_nan()) {
+                let m = w.iter().sum::<f64>() / p as f64;
+                let v = w.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (p - ddof) as f64;
+                out[i] = v.sqrt();
+            }
+        }
+        out
+    }
+
+    fn naive_minmax(d: &[f64], p: usize, max: bool) -> Vec<f64> {
+        let n = d.len();
+        let mut out = vec![f64::NAN; n];
+        if p == 0 || p > n {
+            return out;
+        }
+        for i in (p - 1)..n {
+            let mut acc = if max { f64::NEG_INFINITY } else { f64::INFINITY };
+            let mut any = false;
+            for &x in &d[i + 1 - p..=i] {
+                if !x.is_nan() {
+                    acc = if max { acc.max(x) } else { acc.min(x) };
+                    any = true;
+                }
+            }
+            if any {
+                out[i] = acc;
+            }
+        }
+        out
+    }
+
+    fn approx_eq_nan(a: &[f64], b: &[f64], tol: f64) {
+        assert_eq!(a.len(), b.len(), "length mismatch");
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            if x.is_nan() || y.is_nan() {
+                assert!(x.is_nan() && y.is_nan(), "idx {i}: {x} vs {y}");
+            } else {
+                assert!((x - y).abs() <= tol + tol * y.abs(), "idx {i}: {x} vs {y}");
+            }
+        }
+    }
+
+    /// Deterministic Park–Miller series with stock-price-like magnitude.
+    fn series(n: usize) -> Vec<f64> {
+        let mut x: i64 = 1_234_567;
+        let mut s = Vec::with_capacity(n);
+        for _ in 0..n {
+            x = (x * 16807) % 2_147_483_647;
+            s.push(100.0 + (x as f64 / 2_147_483_647.0) * 50.0);
+        }
+        s
+    }
+
+    #[test]
+    fn sma_matches_naive_including_interior_nan() {
+        let mut d = series(500);
+        d[7] = f64::NAN;
+        d[123] = f64::NAN; // interior NaNs that slide through windows
+        for p in [1usize, 2, 5, 20, 50] {
+            approx_eq_nan(&sma(av(&d), p).to_vec(), &naive_sma(&d, p), 1e-9);
+        }
+    }
+
+    #[test]
+    fn rolling_std_matches_naive_within_tolerance() {
+        let mut d = series(500);
+        d[50] = f64::NAN;
+        for p in [2usize, 5, 20] {
+            for ddof in [0usize, 1] {
+                approx_eq_nan(&rolling_std(av(&d), p, ddof).to_vec(), &naive_std(&d, p, ddof), 1e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn rolling_min_max_match_naive_with_interior_nan() {
+        let mut d = series(500);
+        d[10] = f64::NAN;
+        d[11] = f64::NAN; // a fully-NaN sub-run
+        for p in [1usize, 3, 10, 30] {
+            approx_eq_nan(&rolling_min(av(&d), p).to_vec(), &naive_minmax(&d, p, false), 0.0);
+            approx_eq_nan(&rolling_max(av(&d), p).to_vec(), &naive_minmax(&d, p, true), 0.0);
+        }
+    }
+
+    #[test]
+    fn rolling_min_deque_resurfaces_after_min_leaves_window() {
+        // when the running min leaves the window, the next-smallest must surface
+        let z = [5.0, 1.0, 2.0, 3.0, 4.0, 6.0];
+        let m = rolling_min(av(&z), 3).to_vec();
+        assert!(m[0].is_nan() && m[1].is_nan());
+        assert_eq!(&m[2..], &[1.0, 1.0, 2.0, 3.0]);
+        let x = rolling_max(av(&z), 3).to_vec();
+        assert_eq!(&x[2..], &[5.0, 3.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn all_nan_window_is_nan_for_minmax() {
+        let d = [f64::NAN, f64::NAN, 1.0, f64::NAN, f64::NAN];
+        let m = rolling_min(av(&d), 2).to_vec();
+        assert!(m[1].is_nan());
+        assert_eq!(m[2], 1.0);
+        assert_eq!(m[3], 1.0);
+        assert!(m[4].is_nan());
     }
 }

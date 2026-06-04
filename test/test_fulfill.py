@@ -31,7 +31,11 @@ def test_getitem_auto_refreshes_after_append():
     df['ma:20']                                  # cache
     df = df.append(full.iloc[40:41])
     expected = volas.read_csv(TENCENT).iloc[:41]['ma:20'].to_numpy()[-1]
-    assert df['ma:20'].to_numpy()[-1] == expected
+    # The O(n) sliding sma is path-dependent: the incremental tail-refresh and a
+    # full recompute accumulate the running sum from different offsets, so they
+    # agree to float tolerance, not bit-for-bit (same contract as
+    # test_fulfill_matches_full_recompute; EWMA indicators were always like this).
+    assert np.isclose(df['ma:20'].to_numpy()[-1], expected, rtol=1e-9)
 
 
 def test_fulfill_refreshes_bulk_read():
@@ -45,7 +49,8 @@ def test_fulfill_refreshes_bulk_read():
     assert np.isnan(df.to_numpy()[-1, j])        # stale before fulfill
     df.fulfill()                                 # batch tail recompute (in place)
     expected = volas.read_csv(TENCENT).iloc[:41]['ma:20'].to_numpy()[-1]
-    assert df.to_numpy()[-1, j] == expected      # fresh after fulfill
+    # fresh after fulfill, to float tolerance (sliding sma is path-dependent)
+    assert np.isclose(df.to_numpy()[-1, j], expected, rtol=1e-9)
 
 
 def test_fulfill_matches_full_recompute():
