@@ -1,0 +1,60 @@
+//! Lookback (warm-up) computation for a directive — the minimum number of prior
+//! rows needed before an indicator produces a valid value.
+
+use crate::types::{Command, Node};
+
+fn arg(args: &[Option<String>], i: usize, default: usize) -> usize {
+    args.get(i)
+        .and_then(|o| o.as_deref())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+/// The command's own lookback (ignoring its series operands). `None` for a
+/// plain column name.
+fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Option<usize> {
+    let lb = match name {
+        "ma" | "ema" | "smma" => arg(args, 0, 1).saturating_sub(1),
+        "boll" | "bbw" => arg(args, 0, 20).saturating_sub(1),
+        "macd" => match sub {
+            None => arg(args, 0, 12).max(arg(args, 1, 26)).saturating_sub(1),
+            Some(_) => arg(args, 0, 12).max(arg(args, 1, 26)) + arg(args, 2, 9) - 2,
+        },
+        "bbi" => arg(args, 0, 3)
+            .max(arg(args, 1, 6))
+            .max(arg(args, 2, 12))
+            .max(arg(args, 3, 24)),
+        "tr" => 1,
+        "atr" => arg(args, 0, 14),
+        "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),
+        "kdj" => arg(args, 0, 9) * 3,
+        "rsi" => arg(args, 0, 14),
+        "hv" => arg(args, 0, 1),
+        "increase" | "repeat" => arg(args, 0, 1).saturating_sub(1),
+        "style" => 0,
+        "change" => arg(args, 0, 2).saturating_sub(1),
+        _ => return None,
+    };
+    Some(lb)
+}
+
+/// Lookback for a parsed directive: a command's own lookback plus the largest
+/// lookback among its series operands; operators take the max of their operands.
+pub fn lookback(node: &Node) -> usize {
+    match node {
+        Node::Scalar(_) => 0,
+        Node::Name(name) => own_lookback(name, None, &[]).unwrap_or(0),
+        Node::Command(Command {
+            name,
+            sub,
+            args,
+            series,
+        }) => {
+            let own = own_lookback(name, sub.as_deref(), args).unwrap_or(0);
+            let series_max = series.iter().map(lookback).max().unwrap_or(0);
+            own + series_max
+        }
+        Node::Unary { operand, .. } => lookback(operand),
+        Node::Binary { left, right, .. } => lookback(left).max(lookback(right)),
+    }
+}

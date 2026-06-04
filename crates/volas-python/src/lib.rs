@@ -509,6 +509,13 @@ impl PyDataFrame {
         Ok(column_to_numpy(py, &col))
     }
 
+    /// The minimum number of prior rows a directive needs (its lookback).
+    #[staticmethod]
+    fn directive_lookback(directive: &str) -> PyResult<usize> {
+        let node = parse(directive).map_err(pyerr)?;
+        Ok(volas_directive::lookback::lookback(&node))
+    }
+
     fn get_column(&self, key: &str) -> PyResult<PySeries> {
         let col = self.inner.column(key).map_err(pyerr)?.clone();
         Ok(self.wrap_series(key.to_string(), col))

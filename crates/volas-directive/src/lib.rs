@@ -2,6 +2,7 @@
 //! them against a `volas_core::DataFrame`.
 
 pub mod exec;
+pub mod lookback;
 pub mod parser;
 pub mod types;
 
