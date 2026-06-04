@@ -1,6 +1,9 @@
 //! Two-bar candlestick patterns.
 
-use super::{candle_average, color, each_bar, realbody, BODY_DOJI, BODY_LONG, BODY_SHORT};
+use super::{
+    candle_average, color, each_bar, realbody, realbody_gap_down, realbody_gap_up, BODY_DOJI,
+    BODY_LONG, BODY_SHORT, EQUAL,
+};
 
 /// Engulfing (TA-Lib CDLENGULFING): the 2nd real body engulfs the 1st of the opposite
 /// colour. `color(i)·100` for a strict engulf, `color(i)·80` when a boundary just
@@ -106,6 +109,119 @@ pub fn cdl_darkcloudcover(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetratio
             && o[i] > h[i - 1]
             && c[i] > o[i - 1]
             && c[i] < c[i - 1] - realbody(o, c, i - 1) * penetration
+        {
+            -100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Doji Star (TA-Lib CDLDOJISTAR): a long body then a doji gapping in the body's
+/// direction. `-color(prev)·100` (potential reversal) or 0. Lookback 11.
+pub fn cdl_dojistar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_DOJI.avg_period.max(BODY_LONG.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        let star = (color(o, c, i - 1) > 0.0 && realbody_gap_up(o, c, i, i - 1))
+            || (color(o, c, i - 1) < 0.0 && realbody_gap_down(o, c, i, i - 1));
+        if realbody(o, c, i - 1) > candle_average(BODY_LONG, o, h, l, c, i - 1)
+            && realbody(o, c, i) <= candle_average(BODY_DOJI, o, h, l, c, i)
+            && star
+        {
+            -color(o, c, i - 1) * 100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Homing Pigeon (TA-Lib CDLHOMINGPIGEON): two black candles, the 2nd short body inside
+/// the 1st long body — bullish `100`. Lookback 11.
+pub fn cdl_homingpigeon(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if color(o, c, i - 1) < 0.0
+            && color(o, c, i) < 0.0
+            && realbody(o, c, i - 1) > candle_average(BODY_LONG, o, h, l, c, i - 1)
+            && realbody(o, c, i) <= candle_average(BODY_SHORT, o, h, l, c, i)
+            && o[i] < o[i - 1]
+            && c[i] > c[i - 1]
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Matching Low (TA-Lib CDLMATCHINGLOW): two black candles with equal closes — bullish
+/// `100`. Lookback 6 (Equal average).
+pub fn cdl_matchinglow(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = EQUAL.avg_period + 1;
+    each_bar(c.len(), lb, |i| {
+        let eq = candle_average(EQUAL, o, h, l, c, i - 1);
+        if color(o, c, i - 1) < 0.0
+            && color(o, c, i) < 0.0
+            && c[i] <= c[i - 1] + eq
+            && c[i] >= c[i - 1] - eq
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// In-Neck (TA-Lib CDLINNECK): a long black candle then a white candle closing just into
+/// the prior body (≈ prior close) — bearish continuation `-100`. Lookback 11.
+pub fn cdl_inneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = EQUAL.avg_period.max(BODY_LONG.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if color(o, c, i - 1) < 0.0
+            && realbody(o, c, i - 1) > candle_average(BODY_LONG, o, h, l, c, i - 1)
+            && color(o, c, i) > 0.0
+            && o[i] < l[i - 1]
+            && c[i] <= c[i - 1] + candle_average(EQUAL, o, h, l, c, i - 1)
+            && c[i] >= c[i - 1]
+        {
+            -100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// On-Neck (TA-Lib CDLONNECK): a long black candle then a white candle closing ≈ the
+/// prior low — bearish continuation `-100`. Lookback 11.
+pub fn cdl_onneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = EQUAL.avg_period.max(BODY_LONG.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        let eq = candle_average(EQUAL, o, h, l, c, i - 1);
+        if color(o, c, i - 1) < 0.0
+            && realbody(o, c, i - 1) > candle_average(BODY_LONG, o, h, l, c, i - 1)
+            && color(o, c, i) > 0.0
+            && o[i] < l[i - 1]
+            && c[i] <= l[i - 1] + eq
+            && c[i] >= l[i - 1] - eq
+        {
+            -100.0
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Thrusting (TA-Lib CDLTHRUSTING): a long black candle then a white candle closing into
+/// the prior body but below its midpoint — bearish continuation `-100`. Lookback 11.
+pub fn cdl_thrusting(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = EQUAL.avg_period.max(BODY_LONG.avg_period) + 1;
+    each_bar(c.len(), lb, |i| {
+        if color(o, c, i - 1) < 0.0
+            && realbody(o, c, i - 1) > candle_average(BODY_LONG, o, h, l, c, i - 1)
+            && color(o, c, i) > 0.0
+            && o[i] < l[i - 1]
+            && c[i] > c[i - 1] + candle_average(EQUAL, o, h, l, c, i - 1)
+            && c[i] <= c[i - 1] + realbody(o, c, i - 1) * 0.5
         {
             -100.0
         } else {

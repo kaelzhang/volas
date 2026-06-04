@@ -281,7 +281,10 @@ def test_candlestick_patterns_match_talib(ohlc):
         # two-bar
         ('engulfing', talib.CDLENGULFING, 2), ('harami', talib.CDLHARAMI, 11),
         ('haramicross', talib.CDLHARAMICROSS, 11), ('piercing', talib.CDLPIERCING, 11),
-        ('darkcloudcover', talib.CDLDARKCLOUDCOVER, 11),
+        ('darkcloudcover', talib.CDLDARKCLOUDCOVER, 11), ('dojistar', talib.CDLDOJISTAR, 11),
+        ('homingpigeon', talib.CDLHOMINGPIGEON, 11), ('matchinglow', talib.CDLMATCHINGLOW, 6),
+        ('inneck', talib.CDLINNECK, 11), ('onneck', talib.CDLONNECK, 11),
+        ('thrusting', talib.CDLTHRUSTING, 11),
     ]
     for name, fn, lb in patterns:
         want = fn(o, h, l, c)
