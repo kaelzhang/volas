@@ -13,9 +13,11 @@
 // fills its integer outputs with 0, which is indistinguishable from "no pattern").
 // Parity holds on the valid region.
 
+mod multi_bar;
 mod one_bar;
 mod three_bar;
 mod two_bar;
+pub use multi_bar::*;
 pub use one_bar::*;
 pub use three_bar::*;
 pub use two_bar::*;
@@ -95,6 +97,12 @@ pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
         "unique3river" => (Plain(cdl_unique3river as _), 12),
         "gapsidesidewhite" => (Plain(cdl_gapsidesidewhite as _), 7),
         "tasukigap" => (Plain(cdl_tasukigap as _), 7),
+        "3starsinsouth" => (Plain(cdl_3starsinsouth as _), 12),
+        // four / five-bar
+        "3linestrike" => (Plain(cdl_3linestrike as _), 8),
+        "breakaway" => (Plain(cdl_breakaway as _), 14),
+        "ladderbottom" => (Plain(cdl_ladderbottom as _), 14),
+        "concealbabyswall" => (Plain(cdl_concealbabyswall as _), 13),
         _ => return None,
     };
     Some(entry)

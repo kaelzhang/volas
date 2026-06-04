@@ -474,3 +474,33 @@ pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         }
     })
 }
+
+/// Three Stars in the South (TA-Lib CDL3STARSINSOUTH): a long black with a long lower
+/// shadow, a smaller black holding above the prior low, then a small black marubozu
+/// inside the 2nd's range — bullish reversal `100`. Lookback 12.
+pub fn cdl_3starsinsouth(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let lb = SHADOW_VERY_SHORT.avg_period.max(SHADOW_LONG.avg_period).max(BODY_LONG.avg_period).max(BODY_SHORT.avg_period) + 2;
+    each_bar(c.len(), lb, |i| {
+        if color(o, c, i - 2) < 0.0
+            && color(o, c, i - 1) < 0.0
+            && color(o, c, i) < 0.0
+            && realbody(o, c, i - 2) > candle_average(BODY_LONG, o, h, l, c, i - 2)
+            && lowershadow(o, l, c, i - 2) > candle_average(SHADOW_LONG, o, h, l, c, i - 2)
+            && realbody(o, c, i - 1) < realbody(o, c, i - 2)
+            && o[i - 1] > c[i - 2]
+            && o[i - 1] <= h[i - 2]
+            && l[i - 1] < c[i - 2]
+            && l[i - 1] >= l[i - 2]
+            && lowershadow(o, l, c, i - 1) > candle_average(SHADOW_VERY_SHORT, o, h, l, c, i - 1)
+            && realbody(o, c, i) < candle_average(BODY_SHORT, o, h, l, c, i)
+            && lowershadow(o, l, c, i) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, i)
+            && uppershadow(o, h, c, i) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, i)
+            && l[i] > l[i - 1]
+            && h[i] < h[i - 1]
+        {
+            100.0
+        } else {
+            0.0
+        }
+    })
+}
