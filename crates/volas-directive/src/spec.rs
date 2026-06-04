@@ -108,6 +108,11 @@ pub fn is_command(name: &str) -> bool {
             | "willr"
             | "midpoint"
             | "midprice"
+            | "linearreg"
+            | "linearreg_slope"
+            | "linearreg_intercept"
+            | "linearreg_angle"
+            | "tsf"
             | "avgprice"
             | "medprice"
             | "typprice"
@@ -154,6 +159,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("midpoint", None) => (vec![Int(14)], vec!["close"]),
         ("midprice", None) => (vec![Int(14)], vec!["high", "low"]),
         ("willr", None) => (vec![Int(14)], vec!["high", "low", "close"]),
+        (
+            "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf",
+            None,
+        ) => (vec![Int(14)], vec!["close"]),
         ("avgprice", None) => (vec![], vec!["open", "high", "low", "close"]),
         ("medprice", None) => (vec![], vec!["high", "low"]),
         ("typprice", None) => (vec![], vec!["high", "low", "close"]),

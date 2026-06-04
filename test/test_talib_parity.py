@@ -96,6 +96,17 @@ def test_overlap_ma_variants_match_talib(ohlc):
     _parity(df.exec('wma'), talib.WMA(c, 30))  # default resolves to 30
 
 
+def test_linear_regression_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (9, 14):  # 14 is the shared TA-Lib default
+        _parity(df.exec(f'linearreg:{p}'), talib.LINEARREG(c, p))
+        _parity(df.exec(f'linearreg_slope:{p}'), talib.LINEARREG_SLOPE(c, p))
+        _parity(df.exec(f'linearreg_intercept:{p}'), talib.LINEARREG_INTERCEPT(c, p))
+        _parity(df.exec(f'linearreg_angle:{p}'), talib.LINEARREG_ANGLE(c, p))
+        _parity(df.exec(f'tsf:{p}'), talib.TSF(c, p))
+    _parity(df.exec('tsf'), talib.TSF(c, 14))  # default resolves to 14
+
+
 def test_range_based_match_talib(ohlc):
     df, h, l, c = ohlc
     for p in (7, 14):  # 14 is the shared TA-Lib default
