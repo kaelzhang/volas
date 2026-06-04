@@ -5,7 +5,7 @@
 
 use ndarray::{Array1, ArrayView1};
 
-use crate::simd;
+use crate::kernels;
 
 #[inline]
 fn av(s: &[f64]) -> ArrayView1<'_, f64> {
@@ -18,18 +18,18 @@ fn av(s: &[f64]) -> ArrayView1<'_, f64> {
 
 /// Simple moving average.
 pub fn ma(close: &[f64], period: usize) -> Vec<f64> {
-    simd::sma(av(close), period).to_vec()
+    kernels::sma(av(close), period).to_vec()
 }
 
 /// Exponential moving average (`com = (period - 1) / 2`).
 pub fn ema(close: &[f64], period: usize) -> Vec<f64> {
     let com = (period as f64 - 1.0) / 2.0;
-    simd::ewma_com(av(close), com, true, false, period).to_vec()
+    kernels::ewma_com(av(close), com, true, false, period).to_vec()
 }
 
 /// Smoothed moving average.
 pub fn smma(close: &[f64], period: usize) -> Vec<f64> {
-    simd::smma(av(close), period).to_vec()
+    kernels::smma(av(close), period).to_vec()
 }
 
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
@@ -37,7 +37,7 @@ fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     let com_fast = (fast as f64 - 1.0) / 2.0;
     let com_slow = (slow as f64 - 1.0) / 2.0;
     // fast and slow EWMA in one fused pass (was two ewma_com traversals)
-    let (f, s) = simd::dual_ewma(data, com_fast, fast, data, com_slow, slow, true, false);
+    let (f, s) = kernels::dual_ewma(data, com_fast, fast, data, com_slow, slow, true, false);
     &f - &s
 }
 
@@ -50,24 +50,24 @@ pub fn macd(close: &[f64], fast: usize, slow: usize) -> Vec<f64> {
 pub fn macd_signal(close: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
     let line = macd_line(close, fast, slow);
     let com = (signal as f64 - 1.0) / 2.0;
-    simd::ewma_com(line.view(), com, true, false, signal).to_vec()
+    kernels::ewma_com(line.view(), com, true, false, signal).to_vec()
 }
 
 /// MACD histogram (`2 * (MACD - signal)`).
 pub fn macd_histogram(close: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
     let line = macd_line(close, fast, slow);
     let com = (signal as f64 - 1.0) / 2.0;
-    let sig = simd::ewma_com(line.view(), com, true, false, signal);
+    let sig = kernels::ewma_com(line.view(), com, true, false, signal);
     (2.0 * (&line - &sig)).to_vec()
 }
 
 /// Bull and Bear Index (`mean of ma:a, ma:b, ma:c, ma:d`).
 pub fn bbi(close: &[f64], a: usize, b: usize, c: usize, d: usize) -> Vec<f64> {
     let data = av(close);
-    let ma_a = simd::sma(data, a);
-    let ma_b = simd::sma(data, b);
-    let ma_c = simd::sma(data, c);
-    let ma_d = simd::sma(data, d);
+    let ma_a = kernels::sma(data, a);
+    let ma_b = kernels::sma(data, b);
+    let ma_c = kernels::sma(data, c);
+    let ma_d = kernels::sma(data, d);
     ((&ma_a + &ma_b + &ma_c + &ma_d) / 4.0).to_vec()
 }
 
@@ -91,7 +91,7 @@ pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 /// Average True Range (`ma:period` of TR).
 pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let tr = tr(high, low, close);
-    simd::sma(av(&tr), period).to_vec()
+    kernels::sma(av(&tr), period).to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -100,30 +100,30 @@ pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 
 /// Bollinger middle band (= MA).
 pub fn boll(close: &[f64], period: usize) -> Vec<f64> {
-    simd::sma(av(close), period).to_vec()
+    kernels::sma(av(close), period).to_vec()
 }
 
 /// Bollinger upper band (`ma + times * std`, population std).
 pub fn boll_upper(close: &[f64], period: usize, times: f64) -> Vec<f64> {
     let data = av(close);
-    let ma = simd::sma(data, period);
-    let std = simd::rolling_std(data, period, 0);
+    let ma = kernels::sma(data, period);
+    let std = kernels::rolling_std(data, period, 0);
     (&ma + times * &std).to_vec()
 }
 
 /// Bollinger lower band (`ma - times * std`, population std).
 pub fn boll_lower(close: &[f64], period: usize, times: f64) -> Vec<f64> {
     let data = av(close);
-    let ma = simd::sma(data, period);
-    let std = simd::rolling_std(data, period, 0);
+    let ma = kernels::sma(data, period);
+    let std = kernels::rolling_std(data, period, 0);
     (&ma - times * &std).to_vec()
 }
 
 /// Bollinger Band Width (`4 * std / ma`).
 pub fn bbw(close: &[f64], period: usize) -> Vec<f64> {
     let data = av(close);
-    let ma = simd::sma(data, period);
-    let std = simd::rolling_std(data, period, 0);
+    let ma = kernels::sma(data, period);
+    let std = kernels::rolling_std(data, period, 0);
     (4.0 * &std / &ma).to_vec()
 }
 
@@ -136,7 +136,7 @@ pub fn hv(close: &[f64], period: usize, minutes: i64, trading_days: i64) -> Vec<
             log_return[i] = (close[i] / close[i - 1]).ln();
         }
     }
-    let std = simd::rolling_std(log_return.view(), period, 1);
+    let std = kernels::rolling_std(log_return.view(), period, 1);
     let day_minutes = 1440.0;
     let annualization = ((trading_days as f64) * day_minutes / (minutes as f64)).sqrt();
     (&std * annualization).to_vec()
@@ -148,18 +148,18 @@ pub fn hv(close: &[f64], period: usize, minutes: i64, trading_days: i64) -> Vec<
 
 /// Lowest of low values.
 pub fn llv(data: &[f64], period: usize) -> Vec<f64> {
-    simd::rolling_min(av(data), period).to_vec()
+    kernels::rolling_min(av(data), period).to_vec()
 }
 
 /// Highest of high values.
 pub fn hhv(data: &[f64], period: usize) -> Vec<f64> {
-    simd::rolling_max(av(data), period).to_vec()
+    kernels::rolling_max(av(data), period).to_vec()
 }
 
 /// Raw Stochastic Value.
 pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let llv = simd::rolling_min(av(low), period);
-    let hhv = simd::rolling_max(av(high), period);
+    let llv = kernels::rolling_min(av(low), period);
+    let hhv = kernels::rolling_max(av(high), period);
     let n = close.len();
     let mut result = vec![f64::NAN; n];
     for i in 0..n {
@@ -174,8 +174,8 @@ pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 }
 
 fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Array1<f64> {
-    let llv = simd::rolling_min(av(low), period_rsv);
-    let hhv = simd::rolling_max(av(high), period_rsv);
+    let llv = kernels::rolling_min(av(low), period_rsv);
+    let hhv = kernels::rolling_max(av(high), period_rsv);
     let n = close.len();
     let mut rsv = Array1::from_elem(n, 0.0);
     for i in 0..n {
@@ -197,7 +197,7 @@ pub fn kdj_k(
     init: f64,
 ) -> Vec<f64> {
     let rsv = kdj_rsv(high, low, close, period_rsv);
-    simd::ewma_with_init(rsv.view(), period_k, init).to_vec()
+    kernels::ewma_with_init(rsv.view(), period_k, init).to_vec()
 }
 
 /// KDJ %D line.
@@ -211,8 +211,8 @@ pub fn kdj_d(
     init: f64,
 ) -> Vec<f64> {
     let rsv = kdj_rsv(high, low, close, period_rsv);
-    let k = simd::ewma_with_init(rsv.view(), period_k, init);
-    simd::ewma_with_init(k.view(), period_d, init).to_vec()
+    let k = kernels::ewma_with_init(rsv.view(), period_k, init);
+    kernels::ewma_with_init(k.view(), period_d, init).to_vec()
 }
 
 /// KDJ %J line (`3K - 2D`).
@@ -226,15 +226,15 @@ pub fn kdj_j(
     init: f64,
 ) -> Vec<f64> {
     let rsv = kdj_rsv(high, low, close, period_rsv);
-    let k = simd::ewma_with_init(rsv.view(), period_k, init);
-    let d = simd::ewma_with_init(k.view(), period_d, init);
+    let k = kernels::ewma_with_init(rsv.view(), period_k, init);
+    let d = kernels::ewma_with_init(k.view(), period_d, init);
     (3.0 * &k - 2.0 * &d).to_vec()
 }
 
 /// Relative Strength Index.
 pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
     let n = close.len();
-    let delta = simd::diff(av(close));
+    let delta = kernels::diff(av(close));
     let mut gains = Array1::from_elem(n, f64::NAN);
     let mut losses = Array1::from_elem(n, f64::NAN);
     for i in 1..n {
@@ -247,7 +247,7 @@ pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
     }
     // both smoothed averages in one fused pass (smma = ewma_com, com = period-1)
     let com = (period - 1) as f64;
-    let (sg, sl) = simd::dual_ewma(gains.view(), com, period, losses.view(), com, period, true, false);
+    let (sg, sl) = kernels::dual_ewma(gains.view(), com, period, losses.view(), com, period, true, false);
     let mut result = vec![f64::NAN; n];
     for i in 0..n {
         if sg[i].is_nan() || sl[i].is_nan() {
@@ -264,8 +264,8 @@ pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
 
 /// Donchian middle channel (`(hhv + llv) / 2`).
 pub fn donchian(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    let hhv = simd::rolling_max(av(high), period);
-    let llv = simd::rolling_min(av(low), period);
+    let hhv = kernels::rolling_max(av(high), period);
+    let llv = kernels::rolling_min(av(low), period);
     ((&hhv + &llv) / 2.0).to_vec()
 }
 
