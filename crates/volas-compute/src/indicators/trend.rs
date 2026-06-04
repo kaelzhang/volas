@@ -68,6 +68,22 @@ pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Triangular moving average (TA-Lib TRIMA): a double SMA whose net weights rise to
+/// the window centre then fall. Since convolution commutes, the two SMA windows are
+/// `((n+1)/2, (n+1)/2)` for odd `n` and `(n/2, n/2+1)` for even `n` (either order).
+/// Lookback `period-1`.
+pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
+    let (a, b) = if period % 2 == 1 {
+        let m = (period + 1) / 2;
+        (m, m)
+    } else {
+        let m = period / 2;
+        (m, m + 1)
+    };
+    let inner = kernels::sma(av(data), a);
+    kernels::sma(inner.view(), b).to_vec()
+}
+
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     let data = av(close);
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the

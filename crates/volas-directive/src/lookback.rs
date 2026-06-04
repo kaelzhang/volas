@@ -15,7 +15,7 @@ fn arg(args: &[Option<String>], i: usize, default: usize) -> usize {
 fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Option<usize> {
     let lb = match name {
         "ma" | "ema" | "smma" => arg(args, 0, 1).saturating_sub(1),
-        "wma" => arg(args, 0, 30).saturating_sub(1),
+        "wma" | "trima" => arg(args, 0, 30).saturating_sub(1),
         "dema" => 2 * arg(args, 0, 30).saturating_sub(1),
         "tema" => 3 * arg(args, 0, 30).saturating_sub(1),
         "boll" | "bbw" => arg(args, 0, 20).saturating_sub(1),
