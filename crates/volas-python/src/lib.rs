@@ -337,6 +337,19 @@ impl PySeries {
         }
     }
 
+    /// The values as a Python list of typed scalars (pandas `to_list`).
+    fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let items: Vec<Py<PyAny>> = (0..self.inner.len())
+            .map(|i| scalar_to_py(py, &self.inner.data, i))
+            .collect();
+        PyList::new(py, items)
+    }
+
+    /// Alias of [`to_list`](Self::to_list) (the numpy / pandas spelling).
+    fn tolist<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        self.to_list(py)
+    }
+
     /// pandas-style equality (NaN equals NaN, by value).
     fn equals(&self, other: &PySeries) -> bool {
         let a = self.inner.data.to_f64_vec();
@@ -751,6 +764,44 @@ impl PyDataFrame {
 
     fn __len__(&self) -> usize {
         self.inner.height()
+    }
+
+    /// `name in df` — whether a column exists (alias-aware).
+    fn __contains__(&self, key: &str) -> bool {
+        self.inner.has_column(key)
+    }
+
+    /// `for x in df` — iterate the column names (pandas semantics).
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let names = PyList::new(py, self.inner.names())?;
+        Ok(names.try_iter()?.into_any().unbind())
+    }
+
+    /// First `n` rows (pandas `head`).
+    #[pyo3(signature = (n = 5))]
+    fn head(&self, n: usize) -> PyDataFrame {
+        PyDataFrame {
+            inner: self.inner.slice(0, n.min(self.inner.height())),
+        }
+    }
+
+    /// Last `n` rows (pandas `tail`).
+    #[pyo3(signature = (n = 5))]
+    fn tail(&self, n: usize) -> PyDataFrame {
+        let h = self.inner.height();
+        PyDataFrame {
+            inner: self.inner.slice(h.saturating_sub(n), h),
+        }
+    }
+
+    /// Per-column dtypes as `{name: dtype_str}` (pandas `dtypes`).
+    #[getter]
+    fn dtypes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+            d.set_item(name, col.dtype().to_string())?;
+        }
+        Ok(d)
     }
 
     fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
