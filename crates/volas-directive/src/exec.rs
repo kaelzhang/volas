@@ -392,6 +392,20 @@ fn exec_command(
             let low = series_f64(df, series, 1, "low")?;
             f64col(ind::aroonosc(&high, &low, arg_usize(args, 0, Some(14))?))
         }
+
+        ("sum", _) => f64col(ind::sum(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("maxindex", _) => f64col(ind::maxindex(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("minindex", _) => f64col(ind::minindex(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        // minmax / minmaxindex are the (min, max) value / index pair over the window;
+        // their outputs are exactly llv/hhv (values) and minindex/maxindex (indices).
+        ("minmax", Some("min")) => f64col(ind::llv(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("minmax", Some("max")) => f64col(ind::hhv(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("minmaxindex", Some("min")) => {
+            f64col(ind::minindex(&close(0)?, arg_usize(args, 0, Some(30))?))
+        }
+        ("minmaxindex", Some("max")) => {
+            f64col(ind::maxindex(&close(0)?, arg_usize(args, 0, Some(30))?))
+        }
         ("natr", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;

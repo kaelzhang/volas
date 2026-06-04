@@ -129,6 +129,32 @@ def test_variance_stddev_matches_talib(ohlc):
     _parity(df.exec('var'), talib.VAR(c, 5))  # default resolves to 5
 
 
+def test_math_operators_match_talib(ohlc):
+    df, h, l, c = ohlc
+
+    def idx_parity(got, want, start):
+        # MAXINDEX/MININDEX/MINMAXINDEX emit integer indices; TA-Lib fills their
+        # warm-up with 0, whereas volas uses NaN — its uniform warm-up convention,
+        # and 0 is a valid index, so emitting it would be ambiguous. Assert the NaN
+        # warm-up, then compare the valid region (the index values themselves match).
+        got = np.asarray(got, dtype=float)
+        assert np.all(np.isnan(got[:start])), 'index outputs warm up with NaN'
+        np.testing.assert_allclose(got[start:], np.asarray(want, dtype=float)[start:],
+                                   rtol=1e-9, atol=1e-9)
+
+    for p in (10, 30):  # 30 is the shared TA-Lib default
+        _parity(df.exec(f'sum:{p}'), talib.SUM(c, p))
+        idx_parity(df.exec(f'maxindex:{p}'), talib.MAXINDEX(c, p), p - 1)
+        idx_parity(df.exec(f'minindex:{p}'), talib.MININDEX(c, p), p - 1)
+        mn, mx = talib.MINMAX(c, p)  # value outputs: NaN warm-up, matches volas
+        _parity(df.exec(f'minmax.min:{p}'), mn)
+        _parity(df.exec(f'minmax.max:{p}'), mx)
+        mni, mxi = talib.MINMAXINDEX(c, p)
+        idx_parity(df.exec(f'minmaxindex.min:{p}'), mni, p - 1)
+        idx_parity(df.exec(f'minmaxindex.max:{p}'), mxi, p - 1)
+    _parity(df.exec('sum'), talib.SUM(c, 30))  # default resolves to 30
+
+
 def test_aroon_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (14, 25):  # 14 is the TA-Lib default

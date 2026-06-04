@@ -113,6 +113,11 @@ pub fn is_command(name: &str) -> bool {
             | "trix"
             | "aroon"
             | "aroonosc"
+            | "sum"
+            | "maxindex"
+            | "minindex"
+            | "minmax"
+            | "minmaxindex"
             | "natr"
             | "bop"
             | "midpoint"
@@ -178,6 +183,8 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("trix", None) => (vec![Int(30)], vec!["close"]),
         ("aroon", Some("up" | "down")) => (vec![Int(14)], vec!["high", "low"]),
         ("aroonosc", None) => (vec![Int(14)], vec!["high", "low"]),
+        ("sum" | "maxindex" | "minindex", None) => (vec![Int(30)], vec!["close"]),
+        ("minmax" | "minmaxindex", Some("min" | "max")) => (vec![Int(30)], vec!["close"]),
         ("natr", None) => (vec![Int(14)], vec!["high", "low", "close"]),
         ("bop", None) => (vec![], vec!["open", "high", "low", "close"]),
         (
