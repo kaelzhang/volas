@@ -8,9 +8,12 @@ express, is simply skipped — the web report omits it):
   * ``stock_pandas`` — ``StockDataFrame`` directive engine (Rust backend).
   * ``polars``       — polars rolling / ewm expressions.
   * ``talib``        — TA-Lib (the C library) via its Python wheel.
-  * ``duckdb``       — SQL window functions (only the *non-recursive* indicators;
-                        ema / macd / rsi / atr cannot be expressed as a plain SQL
-                        window, so duckdb is skipped for those).
+  * ``duckdb``       — SQL window functions. DuckDB is a general analytical-query
+                        engine, not an indicator library, and ~100x slower on this
+                        kind of microbenchmark. It is included **only on the first
+                        indicator's ``calc`` test**, to document its positioning,
+                        and skipped everywhere else (all other ``calc`` tests and
+                        the entire ``append`` group).
   * ``volas``        — ``volas.DataFrame`` directive kernel.
 
 Two benchmark groups per indicator:
@@ -19,16 +22,16 @@ Two benchmark groups per indicator:
   * ``append`` — a new bar arrives → produce the updated indicator. ``volas`` and
                  ``stock_pandas`` refresh their cached column incrementally
                  (``O(lookback)``); the libraries with no indicator cache
-                 (pandas / polars / talib / duckdb) must recompute the series
-                 (``O(n)``) — that *is* the honest cost of a new bar for them.
+                 (pandas / polars / talib) must recompute the series (``O(n)``) —
+                 that *is* the honest cost of a new bar for them.
 
 Run::
 
     make benchmark                 # console table (installs .[dev,benchmark])
     make benchmark WEB_REPORT=1     # also (re)generate benchmark-report.html
 
-pandas / stock_pandas live in the ``dev`` extra (the parity tests use them);
-polars / talib / duckdb live in the ``benchmark`` extra (only this file uses them).
+pandas / stock_pandas / talib live in the ``dev`` extra (the parity tests use them
+as oracles); polars / duckdb live in the ``benchmark`` extra.
 """
 
 from pathlib import Path
@@ -293,6 +296,13 @@ def states():
 def test_calc(benchmark, states, indicator, candidate):
     if not HAVE[candidate]:
         pytest.skip(f'{candidate} not installed')
+    # DuckDB is a general analytical-query engine, not an indicator library, and
+    # is ~100x slower on these microbenchmarks (a different class of tool). Show
+    # it once — on the first indicator — to document its positioning, and skip it
+    # for every other test so the charts stay clean comparisons among the fast
+    # in-memory libraries.
+    if candidate == 'duckdb' and indicator != INDICATORS[0]:
+        pytest.skip('duckdb shown only on the first indicator (positioning demo)')
     fn = CALC[candidate].get(indicator)
     if fn is None:
         pytest.skip(f'{candidate} cannot express {indicator}')
@@ -336,6 +346,10 @@ def _stock_pandas_append(indicator):
 def test_append(benchmark, states, indicator, candidate):
     if not HAVE[candidate]:
         pytest.skip(f'{candidate} not installed')
+    # DuckDB is excluded from every append test (it appears once, in the first
+    # calc test, only to show its positioning — see test_calc).
+    if candidate == 'duckdb':
+        pytest.skip('duckdb excluded from the append benchmark (positioning / too slow)')
     if CALC[candidate].get(indicator) is None:
         pytest.skip(f'{candidate} cannot express {indicator}')
 
