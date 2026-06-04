@@ -5,6 +5,7 @@
 
 pub mod column;
 pub mod dataframe;
+pub mod datetime;
 pub mod dtype;
 pub mod error;
 pub mod index;

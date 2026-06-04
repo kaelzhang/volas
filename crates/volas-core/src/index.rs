@@ -70,4 +70,34 @@ impl Index {
             }
         }
     }
+
+    /// Position of the first label exactly equal to `value`.
+    pub fn position_of(&self, value: i64) -> Option<usize> {
+        match self {
+            Index::Range(n) => {
+                if value >= 0 && (value as usize) < *n {
+                    Some(value as usize)
+                } else {
+                    None
+                }
+            }
+            Index::Int64(v) | Index::Datetime(v) => v.iter().position(|&x| x == value),
+        }
+    }
+
+    /// `[start, end)` positions covering the inclusive label range `[lo, hi]`
+    /// (ascending labels; pandas `.loc` slice semantics). Either bound may be
+    /// `None` for open-ended.
+    pub fn label_slice(&self, lo: Option<i64>, hi: Option<i64>) -> (usize, usize) {
+        let labels = self.to_i64_labels();
+        let start = match lo {
+            Some(lo) => labels.iter().position(|&x| x >= lo).unwrap_or(labels.len()),
+            None => 0,
+        };
+        let end = match hi {
+            Some(hi) => labels.iter().rposition(|&x| x <= hi).map(|p| p + 1).unwrap_or(0),
+            None => labels.len(),
+        };
+        (start, end.max(start))
+    }
 }
