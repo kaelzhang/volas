@@ -105,6 +105,63 @@ pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Kaufman Adaptive Moving Average (TA-Lib KAMA). The smoothing constant adapts each
+/// bar via the efficiency ratio `ER = |price[i]-price[i-period]| / Σ|1-bar changes|`:
+/// `SC = (ER·(fast−slow) + slow)²` with fast `=2/3`, slow `=2/31`; then
+/// `KAMA[i] = KAMA[i-1] + SC·(price[i] − KAMA[i-1])`, seeded `KAMA[period-1] =
+/// price[period-1]`. First value at index `period` (lookback = period). Faithful port
+/// of TA-Lib's sliding-sum recurrence.
+pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period + 1 > n {
+        return out;
+    }
+    const CONST_MAX: f64 = 2.0 / (30.0 + 1.0); // slow smoothing constant
+    let const_diff = 2.0 / (2.0 + 1.0) - CONST_MAX; // fast − slow
+
+    let efficiency_sc = |period_roc: f64, sum_roc1: f64| {
+        let er = if sum_roc1 <= period_roc || sum_roc1.abs() < 1e-14 {
+            1.0
+        } else {
+            (period_roc / sum_roc1).abs()
+        };
+        let sc = er * const_diff + CONST_MAX;
+        sc * sc
+    };
+
+    // sumROC1 = Σ_{j=0}^{period-1} |price[j] − price[j+1]| (the first window).
+    let mut sum_roc1 = 0.0;
+    for j in 0..period {
+        sum_roc1 += (data[j] - data[j + 1]).abs();
+    }
+    let mut trailing_idx = 0usize;
+    let mut today = period;
+    // First KAMA (index `period`): the prior KAMA is seeded with yesterday's price.
+    let mut prev_kama = data[today - 1];
+    let mut trailing_value = data[trailing_idx];
+    let period_roc = data[today] - trailing_value;
+    trailing_idx += 1;
+    let sc = efficiency_sc(period_roc, sum_roc1);
+    prev_kama += (data[today] - prev_kama) * sc;
+    out[today] = prev_kama;
+    today += 1;
+
+    while today < n {
+        let tr2 = data[trailing_idx];
+        trailing_idx += 1;
+        let period_roc = data[today] - tr2;
+        sum_roc1 -= (trailing_value - tr2).abs(); // drop the oldest 1-bar change
+        sum_roc1 += (data[today] - data[today - 1]).abs(); // add the newest
+        trailing_value = tr2;
+        let sc = efficiency_sc(period_roc, sum_roc1);
+        prev_kama += (data[today] - prev_kama) * sc;
+        out[today] = prev_kama;
+        today += 1;
+    }
+    out
+}
+
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     let data = av(close);
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the

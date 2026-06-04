@@ -228,6 +228,7 @@ fn exec_command(
             arg_usize(args, 0, Some(5))?,
             arg_f64(args, 1, 0.7)?,
         )),
+        ("kama", _) => f64col(ind::kama(&close(0)?, arg_usize(args, 0, Some(30))?)),
 
         ("macd", None) => {
             f64col(ind::macd(&close(0)?, arg_usize(args, 0, Some(12))?, arg_usize(args, 1, Some(26))?))
