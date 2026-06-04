@@ -74,39 +74,66 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
     }
 }
 
+/// Whether `name` is a known command (regardless of sub-command).
+pub fn is_command(name: &str) -> bool {
+    matches!(
+        name,
+        "ma" | "ema"
+            | "smma"
+            | "macd"
+            | "boll"
+            | "bbw"
+            | "rsv"
+            | "kdj"
+            | "rsi"
+            | "bbi"
+            | "tr"
+            | "atr"
+            | "llv"
+            | "hhv"
+            | "donchian"
+            | "hv"
+            | "increase"
+            | "style"
+            | "repeat"
+            | "change"
+    )
+}
+
 /// The spec for a command given its (already-canonicalized) sub. `None` for an
-/// unknown command.
+/// unknown command **or an invalid sub-command** (the match is sub-strict, so it
+/// also drives sub validation).
 pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
     use ArgDefault::*;
     let (args, series): (Vec<ArgDefault>, Vec<&'static str>) = match (name, sub) {
-        ("ma" | "ema" | "smma", _) => (vec![Required], vec!["close"]),
+        ("ma" | "ema" | "smma", None) => (vec![Required], vec!["close"]),
         ("macd", None) => (vec![Int(12), Int(26)], vec!["close"]),
         ("macd", Some("signal" | "histogram")) => {
             (vec![Int(12), Int(26), Int(9)], vec!["close"])
         }
         ("boll", None) => (vec![Int(20)], vec!["close"]),
         ("boll", Some("upper" | "lower")) => (vec![Int(20), Float(2.0)], vec!["close"]),
-        ("bbw", _) => (vec![Int(20)], vec!["close"]),
-        ("rsv", _) => (vec![Required], vec!["high", "low", "close"]),
+        ("bbw", None) => (vec![Int(20)], vec!["close"]),
+        ("rsv", None) => (vec![Required], vec!["high", "low", "close"]),
         ("kdj", Some("k")) => (vec![Int(9), Int(3), Float(50.0)], vec!["high", "low", "close"]),
         ("kdj", Some("d" | "j")) => (
             vec![Int(9), Int(3), Int(3), Float(50.0)],
             vec!["high", "low", "close"],
         ),
-        ("rsi", _) => (vec![Required], vec!["close"]),
-        ("bbi", _) => (vec![Int(3), Int(6), Int(12), Int(24)], vec!["close"]),
-        ("tr", _) => (vec![], vec!["high", "low", "close"]),
-        ("atr", _) => (vec![Int(14)], vec!["high", "low", "close"]),
-        ("llv", _) => (vec![Required], vec!["low"]),
-        ("hhv", _) => (vec![Required], vec!["high"]),
+        ("rsi", None) => (vec![Required], vec!["close"]),
+        ("bbi", None) => (vec![Int(3), Int(6), Int(12), Int(24)], vec!["close"]),
+        ("tr", None) => (vec![], vec!["high", "low", "close"]),
+        ("atr", None) => (vec![Int(14)], vec!["high", "low", "close"]),
+        ("llv", None) => (vec![Required], vec!["low"]),
+        ("hhv", None) => (vec![Required], vec!["high"]),
         ("donchian", None) => (vec![Required], vec!["high", "low"]),
         ("donchian", Some("upper")) => (vec![Required], vec!["high"]),
         ("donchian", Some("lower")) => (vec![Required], vec!["low"]),
-        ("hv", _) => (vec![Required, Str("1d"), I64(252)], vec!["close"]),
-        ("increase", _) => (vec![Int(1), I64(1)], vec!["close"]),
-        ("style", _) => (vec![Required], vec!["open", "close"]),
-        ("repeat", _) => (vec![Int(1)], vec![]),
-        ("change", _) => (vec![Int(2)], vec!["close"]),
+        ("hv", None) => (vec![Required, Str("1d"), I64(252)], vec!["close"]),
+        ("increase", None) => (vec![Int(1), I64(1)], vec!["close"]),
+        ("style", None) => (vec![Required], vec!["open", "close"]),
+        ("repeat", None) => (vec![Int(1)], vec![]),
+        ("change", None) => (vec![Int(2)], vec!["close"]),
         _ => return None,
     };
     Some(CommandSpec { args, series })

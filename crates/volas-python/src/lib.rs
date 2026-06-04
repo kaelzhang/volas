@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
+use pyo3::create_exception;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice};
@@ -26,6 +27,46 @@ fn pyerr(e: VolasError) -> PyErr {
         VolasError::Shape(m) | VolasError::Index(m) | VolasError::Value(m) => {
             PyValueError::new_err(m)
         }
+    }
+}
+
+// Typed directive exceptions (both subclass ValueError, so existing
+// `except ValueError` keeps working while callers can catch the specific type).
+create_exception!(
+    volas_rs,
+    DirectiveError,
+    PyValueError,
+    "Base class for volas directive errors."
+);
+create_exception!(
+    volas_rs,
+    DirectiveSyntaxError,
+    DirectiveError,
+    "A directive string could not be parsed (with line / column)."
+);
+create_exception!(
+    volas_rs,
+    DirectiveValueError,
+    DirectiveError,
+    "A directive has an unknown command / sub-command or an invalid argument."
+);
+
+/// Map a parse-time error to `DirectiveSyntaxError`.
+fn syntax_err(e: VolasError) -> PyErr {
+    match e {
+        VolasError::Value(m) => DirectiveSyntaxError::new_err(m),
+        other => DirectiveSyntaxError::new_err(other.to_string()),
+    }
+}
+
+/// Map a directive execution error to `DirectiveValueError`.
+fn value_err(e: VolasError) -> PyErr {
+    match e {
+        VolasError::Value(m) => DirectiveValueError::new_err(m),
+        VolasError::ColumnNotFound(n) => {
+            DirectiveValueError::new_err(format!("column \"{n}\" not found"))
+        }
+        other => pyerr(other),
     }
 }
 
@@ -408,15 +449,6 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
-    fn eval(&self, key: &str) -> Result<Column, VolasError> {
-        if self.inner.has_column(key) {
-            Ok(self.inner.column(key)?.clone())
-        } else {
-            let node = parse(key)?;
-            execute(&self.inner, &node)
-        }
-    }
-
     fn wrap_series(&self, name: String, col: Column) -> PySeries {
         PySeries {
             inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
@@ -455,8 +487,8 @@ impl PyDataFrame {
         for (name, meta) in stale {
             let start = meta.valid_rows.saturating_sub(meta.lookback);
             let slice = base.slice(start, height);
-            let node = parse(&meta.directive).map_err(pyerr)?;
-            let recomputed = execute(&slice, &node).map_err(pyerr)?;
+            let node = parse(&meta.directive).map_err(value_err)?;
+            let recomputed = execute(&slice, &node).map_err(value_err)?;
             let vals = recomputed.to_f64_vec();
             let tail = &vals[meta.valid_rows - start..];
             self.inner
@@ -573,12 +605,12 @@ impl PyDataFrame {
             // A directive: materialize (auto-cache) under its canonical name; on
             // later access its stale tail is refreshed incrementally, so the
             // result is always fresh AND cheap (O(lookback), not O(n)).
-            let node = parse(&name).map_err(pyerr)?;
+            let node = parse(&name).map_err(syntax_err)?;
             let canonical = volas_directive::stringify(&node);
             if self.inner.has_column(&canonical) {
                 self.refresh_computed(Some(&canonical))?;
             } else {
-                let col = execute(&self.inner, &node).map_err(pyerr)?;
+                let col = execute(&self.inner, &node).map_err(value_err)?;
                 let lookback = volas_directive::lookback::lookback(&node);
                 self.inner.set_column(&canonical, col).map_err(pyerr)?;
                 self.inner.set_computed(&canonical, canonical.clone(), lookback);
@@ -590,7 +622,13 @@ impl PyDataFrame {
         if let Ok(list) = key.extract::<Vec<String>>() {
             let mut cols = Vec::with_capacity(list.len());
             for n in &list {
-                cols.push(self.eval(n).map_err(pyerr)?);
+                let col = if self.inner.has_column(n) {
+                    self.inner.column(n).map_err(pyerr)?.clone()
+                } else {
+                    let node = parse(n).map_err(syntax_err)?;
+                    execute(&self.inner, &node).map_err(value_err)?
+                };
+                cols.push(col);
             }
             let idx = (*self.inner.index().as_ref()).clone();
             let df = DataFrame::new(list, cols, Some(idx)).map_err(pyerr)?;
@@ -609,21 +647,26 @@ impl PyDataFrame {
         create_column: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let _ = create_column;
-        let col = self.eval(directive).map_err(pyerr)?;
+        let col = if self.inner.has_column(directive) {
+            self.inner.column(directive).map_err(pyerr)?.clone()
+        } else {
+            let node = parse(directive).map_err(syntax_err)?;
+            execute(&self.inner, &node).map_err(value_err)?
+        };
         Ok(column_to_numpy(py, &col))
     }
 
     /// The minimum number of prior rows a directive needs (its lookback).
     #[staticmethod]
     fn directive_lookback(directive: &str) -> PyResult<usize> {
-        let node = parse(directive).map_err(pyerr)?;
+        let node = parse(directive).map_err(syntax_err)?;
         Ok(volas_directive::lookback::lookback(&node))
     }
 
     /// The canonical string form of a directive (default args / series dropped).
     #[staticmethod]
     fn directive_stringify(directive: &str) -> PyResult<String> {
-        let node = parse(directive).map_err(pyerr)?;
+        let node = parse(directive).map_err(syntax_err)?;
         Ok(volas_directive::stringify(&node))
     }
 
@@ -1223,6 +1266,9 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SeriesLoc>()?;
     m.add_class::<PyTimeFrame>()?;
     m.add_class::<PyCumulator>()?;
+    m.add("DirectiveError", m.py().get_type::<DirectiveError>())?;
+    m.add("DirectiveSyntaxError", m.py().get_type::<DirectiveSyntaxError>())?;
+    m.add("DirectiveValueError", m.py().get_type::<DirectiveValueError>())?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     Ok(())
 }

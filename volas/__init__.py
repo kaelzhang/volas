@@ -2,7 +2,10 @@
 candlestick (OHLCV) time-series data.
 """
 
-from volas_rs import DataFrame, Series, read_csv, TimeFrame, Cumulator
+from volas_rs import (
+    DataFrame, Series, read_csv, TimeFrame, Cumulator,
+    DirectiveError, DirectiveSyntaxError, DirectiveValueError,
+)
 
 from ._rolling import rolling_calc
 
@@ -12,5 +15,7 @@ __version__ = _get_version('volas')
 
 __all__ = [
     'DataFrame', 'Series', 'read_csv', 'TimeFrame', 'Cumulator',
-    'rolling_calc', '__version__'
+    'rolling_calc',
+    'DirectiveError', 'DirectiveSyntaxError', 'DirectiveValueError',
+    '__version__',
 ]

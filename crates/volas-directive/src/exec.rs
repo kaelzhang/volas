@@ -170,6 +170,26 @@ fn exec_command(
 ) -> Result<Column> {
     let sub = canon_sub(name, sub);
     let sub = sub.as_deref();
+
+    // Validate the command, sub-command, and argument count against the spec.
+    match crate::spec::command_spec(name, sub) {
+        Some(spec) if args.len() > spec.args.len() => {
+            return Err(VolasError::Value(format!(
+                "command \"{name}\" accepts at most {} argument(s), got {}",
+                spec.args.len(),
+                args.len()
+            )));
+        }
+        Some(_) => {}
+        None if crate::spec::is_command(name) => {
+            return Err(VolasError::Value(match sub {
+                Some(s) => format!("command \"{name}\" has no sub-command \"{s}\""),
+                None => format!("command \"{name}\" requires a sub-command"),
+            }));
+        }
+        None => return Err(VolasError::Value(format!("unknown command \"{name}\""))),
+    }
+
     let close = |i| series_f64(df, series, i, "close");
     let f64col = |v: Vec<f64>| Ok(Column::f64(v));
     let boolcol = |v: Vec<bool>| Ok(Column::bool(v));

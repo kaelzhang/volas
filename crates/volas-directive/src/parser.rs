@@ -12,15 +12,12 @@ pub fn parse(input: &str) -> Result<Node> {
     let mut p = Parser::new(input);
     p.skip_ws();
     if p.eof() {
-        return Err(VolasError::Value("empty directive".into()));
+        return Err(p.err("empty directive"));
     }
     let node = p.parse_expr()?;
     p.skip_ws();
     if !p.eof() {
-        return Err(VolasError::Value(format!(
-            "unexpected trailing input at position {}",
-            p.i
-        )));
+        return Err(p.err("expected end of directive"));
     }
     Ok(node)
 }
@@ -73,6 +70,19 @@ impl<'a> Parser<'a> {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
             self.i += 1;
         }
+    }
+
+    /// A syntax error annotated with the current 1-based line / column.
+    fn err(&self, message: impl Into<String>) -> VolasError {
+        let consumed = &self.s[..self.i.min(self.s.len())];
+        let line = 1 + consumed.iter().filter(|&&b| b == b'\n').count();
+        let line_start = consumed
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let column = self.i - line_start + 1;
+        VolasError::Value(format!("{} (line {line}, column {column})", message.into()))
     }
 
     // --- precedence levels ---
@@ -180,11 +190,8 @@ impl<'a> Parser<'a> {
             }
             Some(c) if is_number_start(c, self.peek2()) => self.parse_number(),
             Some(c) if is_ident_start(c) => self.parse_command(),
-            other => Err(VolasError::Value(format!(
-                "unexpected token {:?} at position {}",
-                other.map(|c| c as char),
-                self.i
-            ))),
+            Some(c) => Err(self.err(format!("unexpected token '{}'", c as char))),
+            None => Err(self.err("unexpected end of directive")),
         }
     }
 
@@ -221,10 +228,7 @@ impl<'a> Parser<'a> {
             self.bump();
             Ok(())
         } else {
-            Err(VolasError::Value(format!(
-                "expected '{}' at position {}",
-                c as char, self.i
-            )))
+            Err(self.err(format!("expected '{}'", c as char)))
         }
     }
 
@@ -236,10 +240,11 @@ impl<'a> Parser<'a> {
         while matches!(self.peek(), Some(c) if c.is_ascii_digit() || c == b'.') {
             self.bump();
         }
-        let text = String::from_utf8_lossy(&self.s[start..self.i]);
-        text.parse::<f64>()
-            .map(Node::Scalar)
-            .map_err(|_| VolasError::Value(format!("invalid number '{text}'")))
+        let text = String::from_utf8_lossy(&self.s[start..self.i]).into_owned();
+        match text.parse::<f64>() {
+            Ok(v) => Ok(Node::Scalar(v)),
+            Err(_) => Err(self.err(format!("invalid number '{text}'"))),
+        }
     }
 
     fn read_ident(&mut self) -> String {
