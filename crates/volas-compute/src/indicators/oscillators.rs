@@ -9,12 +9,13 @@ use crate::kernels;
 
 /// Lowest of low values.
 pub fn llv(data: &[f64], period: usize) -> Vec<f64> {
-    kernels::rolling_min(av(data), period).to_vec()
+    // Move the kernel's owned buffer out (no copy) rather than `to_vec`.
+    kernels::rolling_min(av(data), period).into_raw_vec_and_offset().0
 }
 
 /// Highest of high values.
 pub fn hhv(data: &[f64], period: usize) -> Vec<f64> {
-    kernels::rolling_max(av(data), period).to_vec()
+    kernels::rolling_max(av(data), period).into_raw_vec_and_offset().0
 }
 
 /// Raw Stochastic Value.

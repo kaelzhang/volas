@@ -9,12 +9,13 @@ use crate::kernels;
 
 /// Simple moving average.
 pub fn ma(close: &[f64], period: usize) -> Vec<f64> {
-    kernels::sma(av(close), period).to_vec()
+    // Move the kernel's owned buffer out (no copy) rather than `to_vec`.
+    kernels::sma(av(close), period).into_raw_vec_and_offset().0
 }
 
 /// Exponential moving average (TA-Lib: SMA-seeded, `k = 2/(period+1)`).
 pub fn ema(close: &[f64], period: usize) -> Vec<f64> {
-    kernels::ema_seeded(av(close), period).to_vec()
+    kernels::ema_seeded(av(close), period).into_raw_vec_and_offset().0
 }
 
 /// Smoothed moving average (Wilder's RMA: SMA-seeded, `alpha = 1/period`).
