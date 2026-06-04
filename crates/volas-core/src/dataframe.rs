@@ -249,6 +249,11 @@ impl DataFrame {
         let mut df =
             DataFrame::new(self.names.clone(), columns, Some(index)).expect("slice keeps shape");
         df.aliases = Arc::clone(&self.aliases);
+        // The sliced cached-directive *values* are carried (correct, full-history),
+        // but the computed *metadata* is dropped: the columns become plain data.
+        // Exact continuation across `slice -> append` for recursive indicators
+        // (carrying each indicator's internal recursive state) is a deferred
+        // feature; until then a slice is a read-only snapshot, not continuable.
         df
     }
 

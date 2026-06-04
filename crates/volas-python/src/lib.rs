@@ -12,7 +12,7 @@ use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySlice};
+use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices};
 
 use volas_core::{datetime, Column, DataFrame, DType, Index, Label, Series, VolasError};
 use volas_directive::{execute, parse};
@@ -1334,8 +1334,7 @@ impl DataFrameILoc {
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             let info = slice.indices(self.inner.height() as isize)?;
-            let positions = strided(info.start, info.stop, info.step);
-            let sub = take_frame(&self.inner, &positions);
+            let sub = positional_slice(&self.inner, &info);
             return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
         }
         Err(PyIndexError::new_err("iloc key must be an integer or slice"))
@@ -1353,6 +1352,16 @@ fn row_at(df: &DataFrame, i: usize) -> PyRow {
 fn take_frame(df: &DataFrame, positions: &[usize]) -> DataFrame {
     // Delegates to core `take`, which carries column aliases onto the new frame.
     df.take(positions)
+}
+
+/// A positional slice: a contiguous `step == 1` slice uses `DataFrame::slice` (a
+/// contiguous copy); a strided slice gathers the individual positions.
+fn positional_slice(df: &DataFrame, info: &PySliceIndices) -> DataFrame {
+    if info.step == 1 {
+        df.slice(info.start.max(0) as usize, info.stop.max(0) as usize)
+    } else {
+        take_frame(df, &strided(info.start, info.stop, info.step))
+    }
 }
 
 /// Slice a frame by a Python slice — positional for integer bounds, label-based
@@ -1377,8 +1386,7 @@ fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResult<DataFrame
         Ok(df.slice(a, b))
     } else {
         let info = slice.indices(df.height() as isize)?;
-        let positions = strided(info.start, info.stop, info.step);
-        Ok(take_frame(df, &positions))
+        Ok(positional_slice(df, &info))
     }
 }
 
