@@ -41,9 +41,13 @@ fn wilder_sum(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Vec<f64> 
         s += term(i);
     }
     out[period - 1] = s;
-    let pf = period as f64;
+    // `s - s/period + term` == `s*(1 - 1/period) + term`: precompute the factor and
+    // fuse (mul_add), taking the per-element division off the recurrence's critical
+    // path. Wilder smoothing is contractive, so the ~1e-16 reassociation decays —
+    // within the 1e-9 parity tolerance. Speeds every directional indicator.
+    let a = 1.0 - 1.0 / period as f64;
     for i in period..n {
-        s = s - s / pf + term(i);
+        s = s.mul_add(a, term(i));
         out[i] = s;
     }
     out
