@@ -61,7 +61,13 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "rsi" => arg(args, 0, 14),
         "hv" => arg(args, 0, 1),
         "increase" | "repeat" => arg(args, 0, 1).saturating_sub(1),
-        "style" => 0,
+        // style.<x>: candlestick patterns warm up over their candle-settings avg period;
+        // bullish/bearish (and the `cdl` alias for either) need no warm-up. (Patterns
+        // reached via `cdl` resolve here under "cdl".)
+        "style" | "cdl" => match sub {
+            Some("doji") | Some("marubozu") => 10,
+            _ => 0,
+        },
         "change" => arg(args, 0, 2).saturating_sub(1),
         "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0, 10),
         "willr" | "midpoint" | "midprice" => arg(args, 0, 14).saturating_sub(1),

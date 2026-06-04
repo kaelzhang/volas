@@ -219,6 +219,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("increase", None) => (vec![Int(1), I64(1)], vec!["close"]),
         ("style", None) => (vec![Required], vec!["open", "close"]), // arg form: style:bullish
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]), // style.bullish
+        // Candlestick patterns (style.<pattern> / cdl.<pattern>).
+        ("style", Some("doji" | "marubozu")) => {
+            (vec![], vec!["open", "high", "low", "close"])
+        }
         ("repeat", None) => (vec![Int(1)], vec![]),
         ("change", None) => (vec![Int(2)], vec!["close"]),
         ("mom" | "roc" | "rocp" | "rocr" | "rocr100", None) => (vec![Int(10)], vec!["close"]),

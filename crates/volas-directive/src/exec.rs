@@ -444,6 +444,19 @@ fn exec_command(
             arg_usize(args, 0, Some(1))?,
             arg_i64(args, 1, 1)? as i32,
         )),
+        // Candlestick patterns: style.<pattern> / cdl.<pattern>. Output f64 -100/0/100.
+        ("style", Some(pat @ ("doji" | "marubozu"))) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let high = series_f64(df, series, 1, "high")?;
+            let low = series_f64(df, series, 2, "low")?;
+            let close = series_f64(df, series, 3, "close")?;
+            let v = match pat {
+                "doji" => ind::cdl_doji(&open, &high, &low, &close),
+                _ => ind::cdl_marubozu(&open, &high, &low, &close),
+            };
+            f64col(v)
+        }
+
         ("style", sub) => {
             // Direction from the sub-command (`style.bullish`, also `cdl.bullish`) or,
             // for back-compat, the first argument (`style:bullish`).

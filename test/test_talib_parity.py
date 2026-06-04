@@ -256,6 +256,23 @@ def test_directional_family_matches_talib(ohlc):
     _parity(df.exec('adx'), talib.ADX(h, l, c, 14))  # default resolves to 14
 
 
+def test_candlestick_patterns_match_talib(ohlc):
+    # style.<pattern> / cdl.<pattern>; output f64 -100/0/100, warm-up NaN (TA-Lib fills
+    # its int output's warm-up with 0). Values are exact, so compare the valid region.
+    df, h, l, c = ohlc
+    o = df['open'].to_numpy()
+
+    def pat(got, want, lb):
+        got = np.asarray(got, dtype=float)
+        assert np.all(np.isnan(got[:lb])), 'pattern warm-up is NaN'
+        np.testing.assert_array_equal(got[lb:], np.asarray(want, dtype=float)[lb:])
+
+    for name, fn in [('doji', talib.CDLDOJI), ('marubozu', talib.CDLMARUBOZU)]:
+        want = fn(o, h, l, c)
+        pat(df.exec(f'style.{name}'), want, 10)
+        pat(df.exec(f'cdl.{name}'), want, 10)  # the cdl alias matches
+
+
 def test_math_transform_series_methods_match_talib(ohlc):
     # TA-Lib "Math Transform" group, implemented as element-wise Series methods (not
     # directives). Parity holds on the raw close series — out-of-domain inputs (acos of
