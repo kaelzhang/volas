@@ -92,20 +92,71 @@ pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
 /// `c3=-6v²−3(v−c1)`, `c4=1+3v−c1+3v²` (computed in TA-Lib's exact float order).
 /// Default period 5, vfactor 0.7; lookback `6·(period-1)`.
 pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
-    let e1 = kernels::ema_seeded(av(data), period);
-    let e2 = kernels::ema_seeded(e1.view(), period);
-    let e3 = kernels::ema_seeded(e2.view(), period);
-    let e4 = kernels::ema_seeded(e3.view(), period);
-    let e5 = kernels::ema_seeded(e4.view(), period);
-    let e6 = kernels::ema_seeded(e5.view(), period);
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
     let v2 = vfactor * vfactor;
     let c1 = -(v2 * vfactor);
     let c2 = 3.0 * (v2 - c1);
     let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
     let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
-    (0..data.len())
-        .map(|i| c1 * e6[i] + c2 * e5[i] + c3 * e4[i] + c4 * e3[i])
-        .collect()
+    if period == 0 {
+        return out;
+    }
+    let lookback = 6 * (period - 1);
+    if lookback >= n {
+        return out;
+    }
+    let k = 2.0 / (period as f64 + 1.0);
+    // Single-pass lattice instead of six sequential `ema_seeded` passes (six allocs,
+    // six seed scans, six recurrences, a combine pass). The six EMAs cascade — stage j
+    // consumes stage j-1's *current* output — so they share one traversal. Bit-identical
+    // to the six-call form: same SMA seed (`Σ/period`), same FMA EMA step, same combine.
+    //
+    // Staggered warmup: each stage SMA-seeds over the first `period` finite values it
+    // sees, which begin at its predecessor's seed index, so stage j seeds at j·(period-1)
+    // and the output is valid from `lookback = 6·(period-1)`. The stages propagate NaN
+    // forward until seeded (mirroring the leading-NaN prefix of each intermediate array).
+    let mut e = [0.0f64; 6];
+    let mut acc = [0.0f64; 6];
+    let mut cnt = [0usize; 6];
+    let mut seeded = [false; 6];
+    for &raw in &data[..=lookback] {
+        let mut x = raw;
+        for s in 0..6 {
+            if seeded[s] {
+                e[s] = (x - e[s]).mul_add(k, e[s]);
+                x = e[s];
+            } else if !x.is_nan() {
+                acc[s] += x;
+                cnt[s] += 1;
+                if cnt[s] == period {
+                    e[s] = acc[s] / period as f64;
+                    seeded[s] = true;
+                    x = e[s];
+                } else {
+                    x = f64::NAN;
+                }
+            } else {
+                x = f64::NAN;
+            }
+        }
+    }
+    out[lookback] = c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2];
+    // Steady state: all six stages seeded. The cascade is inherently sequential (a
+    // six-deep FMA dependency chain per bar, exactly as in TA-Lib's lattice), so we
+    // unroll it into registers and emit the combine in the same pass.
+    let (mut e0, mut e1, mut e2, mut e3, mut e4, mut e5) =
+        (e[0], e[1], e[2], e[3], e[4], e[5]);
+    for i in (lookback + 1)..n {
+        e0 = (data[i] - e0).mul_add(k, e0);
+        e1 = (e0 - e1).mul_add(k, e1);
+        e2 = (e1 - e2).mul_add(k, e2);
+        e3 = (e2 - e3).mul_add(k, e3);
+        e4 = (e3 - e4).mul_add(k, e4);
+        e5 = (e4 - e5).mul_add(k, e5);
+        out[i] = c1 * e5 + c2 * e4 + c3 * e3 + c4 * e2;
+    }
+    out
 }
 
 /// Kaufman Adaptive Moving Average (TA-Lib KAMA). The smoothing constant adapts each
