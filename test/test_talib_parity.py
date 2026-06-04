@@ -177,6 +177,22 @@ def test_aroon_matches_talib(ohlc):
     _parity(df.exec('aroon.d'), talib.AROON(h, l, 14)[0])
 
 
+def test_accbands_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (10, 20):  # 20 is the TA-Lib default
+        up, mid, low = talib.ACCBANDS(h, l, c, p)  # talib returns (upper, middle, lower)
+        _parity(df.exec(f'accbands.upper:{p}'), up)
+        _parity(df.exec(f'accbands:{p}'), mid)  # bare = middle band
+        _parity(df.exec(f'accbands.lower:{p}'), low)
+    up, mid, low = talib.ACCBANDS(h, l, c, 20)
+    _parity(df.exec('accbands.u'), up)  # abbreviations
+    _parity(df.exec('accbands.m'), mid)
+    _parity(df.exec('accbands.l'), low)
+    # the .m abbreviation also resolves the Bollinger middle band
+    np.testing.assert_allclose(np.asarray(df.exec('boll.m'), dtype=float),
+                               np.asarray(df.exec('boll'), dtype=float), equal_nan=True)
+
+
 def test_cci_trix_match_talib(ohlc):
     df, h, l, c = ohlc
     for p in (14, 20):

@@ -259,6 +259,20 @@ fn exec_command(
         )),
         ("bbw", _) => f64col(ind::bbw(&close(0)?, arg_usize(args, 0, Some(20))?)),
 
+        ("accbands", None) => {
+            f64col(ind::accbands_middle(&close(0)?, arg_usize(args, 0, Some(20))?))
+        }
+        ("accbands", Some("upper")) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::accbands_upper(&high, &low, arg_usize(args, 0, Some(20))?))
+        }
+        ("accbands", Some("lower")) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::accbands_lower(&high, &low, arg_usize(args, 0, Some(20))?))
+        }
+
         ("rsv", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;

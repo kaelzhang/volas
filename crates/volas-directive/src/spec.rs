@@ -68,9 +68,12 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         ("macd", Some("h" | "histogram" | "macd")) => Some("histogram".into()),
         ("aroon", Some("u" | "up")) => Some("up".into()),
         ("aroon", Some("d" | "down")) => Some("down".into()),
-        ("boll" | "donchian", None | Some("middle")) => None,
+        ("boll" | "donchian", None | Some("middle" | "m")) => None,
         ("boll" | "donchian", Some("u" | "upper")) => Some("upper".into()),
         ("boll" | "donchian", Some("l" | "lower")) => Some("lower".into()),
+        ("accbands", None | Some("middle" | "m")) => None,
+        ("accbands", Some("u" | "upper")) => Some("upper".into()),
+        ("accbands", Some("l" | "lower")) => Some("lower".into()),
         (_, Some(s)) => Some(s.to_string()),
         (_, None) => None,
     }
@@ -88,6 +91,7 @@ pub fn is_command(name: &str) -> bool {
             | "trima"
             | "t3"
             | "kama"
+            | "accbands"
             | "macd"
             | "boll"
             | "bbw"
@@ -159,6 +163,8 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("boll", None) => (vec![Int(20)], vec!["close"]),
         ("boll", Some("upper" | "lower")) => (vec![Int(20), Float(2.0)], vec!["close"]),
         ("bbw", None) => (vec![Int(20)], vec!["close"]),
+        ("accbands", None) => (vec![Int(20)], vec!["close"]),
+        ("accbands", Some("upper" | "lower")) => (vec![Int(20)], vec!["high", "low"]),
         ("rsv", None) => (vec![Required], vec!["high", "low", "close"]),
         ("kdj", Some("k")) => (vec![Int(9), Int(3), Float(50.0)], vec!["high", "low", "close"]),
         ("kdj", Some("d" | "j")) => (
