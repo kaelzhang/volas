@@ -814,10 +814,11 @@ impl PyDataFrame {
             let slice = base.slice(start, height);
             let node = parse(&meta.directive).map_err(value_err)?;
             let recomputed = execute(&slice, &node).map_err(value_err)?;
-            let vals = recomputed.to_f64_vec();
-            let tail = &vals[meta.valid_rows - start..];
+            // The recomputed slice is F64 or Bool (directive result); write its
+            // stale tail back into the column at its original dtype.
+            let tail = recomputed.slice(meta.valid_rows - start, recomputed.len());
             self.inner
-                .update_computed_tail(&name, meta.valid_rows, tail)
+                .update_computed_tail(&name, meta.valid_rows, &tail)
                 .map_err(pyerr)?;
         }
         Ok(())

@@ -41,17 +41,6 @@ pub struct DataFrame {
     computed: HashMap<String, ComputedMeta>,
 }
 
-/// A column of `n` NaN values matching `col`'s dtype (only `F64` is paddable).
-fn pad_nan(col: &Column, n: usize) -> Result<Column> {
-    match col {
-        Column::F64(_) => Ok(Column::f64(vec![f64::NAN; n])),
-        other => Err(VolasError::DType(format!(
-            "cannot NaN-pad a {} column on append",
-            other.dtype()
-        ))),
-    }
-}
-
 impl DataFrame {
     /// Construct a frame from parallel `names` / `columns`, validating shape.
     pub fn new(names: Vec<String>, columns: Vec<Column>, index: Option<Index>) -> Result<Self> {
@@ -296,8 +285,34 @@ impl DataFrame {
             match other.column(n) {
                 Ok(oc) => self.columns[pos].append(oc)?,
                 Err(_) => {
-                    let pad = pad_nan(&self.columns[pos], oh)?;
-                    self.columns[pos].append(&pad)?;
+                    // column `n` is missing from `other` — pad the new rows.
+                    let is_computed = self.computed.contains_key(n);
+                    match (&self.columns[pos], is_computed) {
+                        // F64: NaN marks the gap.
+                        (Column::F64(_), _) => {
+                            self.columns[pos].append(&Column::f64(vec![f64::NAN; oh]))?;
+                        }
+                        // A cached *bool* directive: pad a stale `false` placeholder;
+                        // `fulfill` rewrites the correct bool tail (the column stays a mask).
+                        (Column::Bool(_), true) => {
+                            self.columns[pos].append(&Column::bool(vec![false; oh]))?;
+                        }
+                        // A plain int column: upcast to F64 so NaN can mark the gap
+                        // (NaN distinguishes "missing" from a real 0).
+                        (Column::I64(v), false) => {
+                            let mut f: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+                            f.extend(std::iter::repeat(f64::NAN).take(oh));
+                            self.columns[pos] = Column::f64(f);
+                        }
+                        // Plain bool / str / datetime cannot represent "missing".
+                        (other_col, _) => {
+                            return Err(VolasError::DType(format!(
+                                "cannot append: column \"{n}\" ({}) is missing from the \
+                                 appended frame and has no missing-value representation",
+                                other_col.dtype()
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -327,27 +342,38 @@ impl DataFrame {
             .collect()
     }
 
-    /// Overwrite an `F64` column's rows `[from, from + values.len())` in place
-    /// (copy-on-write) and mark it valid up to the full height. O(values.len()).
-    pub fn update_computed_tail(&mut self, name: &str, from: usize, values: &[f64]) -> Result<()> {
+    /// Overwrite a computed column's rows `[from, from + tail.len())` in place
+    /// (copy-on-write) with the recomputed `tail`, and mark it valid up to the
+    /// full height. Directive results are F64 or Bool, so both are handled.
+    /// O(tail.len()).
+    pub fn update_computed_tail(&mut self, name: &str, from: usize, tail: &Column) -> Result<()> {
         let pos = self
             .name_to_idx
             .get(name)
             .copied()
             .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
-        match &mut self.columns[pos] {
-            Column::F64(arc) => {
+        match (&mut self.columns[pos], tail) {
+            (Column::F64(arc), Column::F64(t)) => {
                 let buf = Arc::make_mut(arc);
-                for (i, &v) in values.iter().enumerate() {
+                for (i, &v) in t.iter().enumerate() {
                     if from + i < buf.len() {
                         buf[from + i] = v;
                     }
                 }
             }
-            other => {
+            (Column::Bool(arc), Column::Bool(t)) => {
+                let buf = Arc::make_mut(arc);
+                for (i, &v) in t.iter().enumerate() {
+                    if from + i < buf.len() {
+                        buf[from + i] = v;
+                    }
+                }
+            }
+            (col, t) => {
                 return Err(VolasError::DType(format!(
-                    "computed column \"{name}\" is {}, not f64",
-                    other.dtype()
+                    "computed tail dtype {} does not match column \"{name}\" dtype {}",
+                    t.dtype(),
+                    col.dtype()
                 )))
             }
         }
@@ -552,26 +578,40 @@ mod tests {
     }
 
     #[test]
-    fn append_nan_pads_f64_but_rejects_other_dtypes() {
-        // appending a frame missing an F64 column NaN-pads it ...
-        let mut df = sample();
+    fn append_pads_missing_columns_by_dtype() {
+        // a plain int column missing on append -> upcast to f64 + NaN (EX-11).
+        let mut df = sample(); // a: f64, b: i64
         let only_a =
             DataFrame::new(vec!["a".into()], vec![Column::f64(vec![4.0])], None).unwrap();
-        // "b" (i64) is missing from `only_a` and i64 is not NaN-paddable -> error
-        assert!(df.append(&only_a).is_err());
+        df.append(&only_a).unwrap();
+        assert_eq!(df.height(), 4);
+        let b = df.column("b").unwrap();
+        assert!(b.as_f64().is_some()); // upcast to F64
+        assert!(b.as_f64().unwrap()[3].is_nan());
 
-        // an all-F64 frame pads cleanly
-        let mut f = DataFrame::new(
-            vec!["a".into(), "b".into()],
-            vec![Column::f64(vec![1.0]), Column::f64(vec![2.0])],
+        // a plain bool column missing on append -> error (no missing representation).
+        let mut g = DataFrame::new(
+            vec!["a".into(), "flag".into()],
+            vec![Column::f64(vec![1.0]), Column::bool(vec![true])],
             None,
         )
         .unwrap();
         let only_a2 =
-            DataFrame::new(vec!["a".into()], vec![Column::f64(vec![3.0])], None).unwrap();
-        f.append(&only_a2).unwrap();
-        assert_eq!(f.height(), 2);
-        assert!(f.column("b").unwrap().as_f64().unwrap()[1].is_nan());
+            DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
+        assert!(g.append(&only_a2).is_err());
+
+        // a cached *bool directive* column missing on append -> padded false, stays bool.
+        let mut h = DataFrame::new(
+            vec!["a".into(), "sig".into()],
+            vec![Column::f64(vec![1.0]), Column::bool(vec![true])],
+            None,
+        )
+        .unwrap();
+        h.set_computed("sig", "a > 0".into(), 0);
+        let only_a3 =
+            DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
+        h.append(&only_a3).unwrap();
+        assert_eq!(h.column("sig").unwrap().as_bool().unwrap(), &[true, false]);
     }
 
     #[test]
@@ -579,12 +619,12 @@ mod tests {
         let mut df = sample();
         df.set_computed("a", "ma:2".into(), 1);
         assert_eq!(df.computed_columns().len(), 1);
-        // overwrite the tail of the F64 column "a"
-        df.update_computed_tail("a", 1, &[8.0, 9.0]).unwrap();
+        // overwrite the tail of the F64 column "a" with an F64 tail
+        df.update_computed_tail("a", 1, &Column::f64(vec![8.0, 9.0])).unwrap();
         assert_eq!(df.column("a").unwrap().as_f64().unwrap(), &[1.0, 8.0, 9.0]);
-        // a non-F64 column cannot be a computed tail
-        assert!(df.update_computed_tail("b", 0, &[1.0]).is_err());
+        // an F64 tail into the I64 column "b" is a dtype mismatch
+        assert!(df.update_computed_tail("b", 0, &Column::f64(vec![1.0])).is_err());
         // an unknown column errors
-        assert!(df.update_computed_tail("nope", 0, &[1.0]).is_err());
+        assert!(df.update_computed_tail("nope", 0, &Column::f64(vec![1.0])).is_err());
     }
 }
