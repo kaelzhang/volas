@@ -514,6 +514,31 @@ impl PyDataFrame {
         Ok(self.wrap_series(key.to_string(), col))
     }
 
+    /// A copy of the frame.
+    fn copy(&self) -> PyDataFrame {
+        PyDataFrame {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Drop rows by index label (`axis=0`) — returns a new DataFrame.
+    #[pyo3(signature = (labels, axis = 0))]
+    fn drop(&self, labels: Vec<i64>, axis: i64) -> PyResult<PyDataFrame> {
+        let _ = axis;
+        let positions: Vec<usize> = (0..self.inner.height())
+            .filter(|&i| {
+                let lab = match self.inner.index().as_ref() {
+                    Index::Range(_) => i as i64,
+                    Index::Int64(v) | Index::Datetime(v) => v[i],
+                };
+                !labels.contains(&lab)
+            })
+            .collect();
+        Ok(PyDataFrame {
+            inner: take_frame(&self.inner, &positions),
+        })
+    }
+
     /// Append the rows of another DataFrame or a single Row, returning a new
     /// DataFrame (pandas semantics; not in place).
     fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
