@@ -63,6 +63,10 @@ pub fn read_csv(
         }
     };
 
+    // `header`: omitted / `True` -> the first row is the header; `None` / `False`
+    // -> no header (columns named "0".."n-1"). This matches pandas for the
+    // `None` / bool forms (the integer `header=N` position form is not supported;
+    // `header=0`, pandas's default, is the omitted / `True` case).
     let opts = volas_io::ReadCsvOptions {
         delimiter: delim_bytes[0],
         has_header: matches!(header, Some(true)),

@@ -97,6 +97,19 @@ fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(a) = v.extract::<PyReadonlyArray1<bool>>() {
         return Ok(Column::bool(a.as_slice()?.to_vec()));
     }
+    // A Python list infers its dtype like pandas/NumPy: all-bool -> bool, all-int
+    // -> int64, else float64 (empty -> float64). Bool / int are tried before float
+    // because a strict bool/int extraction won't match a float list.
+    if let Ok(vv) = v.extract::<Vec<bool>>() {
+        if !vv.is_empty() {
+            return Ok(Column::bool(vv));
+        }
+    }
+    if let Ok(vv) = v.extract::<Vec<i64>>() {
+        if !vv.is_empty() {
+            return Ok(Column::i64(vv));
+        }
+    }
     if let Ok(vv) = v.extract::<Vec<f64>>() {
         return Ok(Column::f64(vv));
     }
@@ -350,14 +363,10 @@ impl PySeries {
         self.to_list(py)
     }
 
-    /// pandas-style equality (NaN equals NaN, by value).
+    /// pandas-style equality: **same dtype** and value-equal (NaN equals NaN).
     fn equals(&self, other: &PySeries) -> bool {
-        let a = self.inner.data.to_f64_vec();
-        let b = other.inner.data.to_f64_vec();
-        a.len() == b.len()
-            && a.iter()
-                .zip(&b)
-                .all(|(&x, &y)| x == y || (x.is_nan() && y.is_nan()))
+        self.inner.data.dtype() == other.inner.data.dtype()
+            && self.inner.data.equals(&other.inner.data)
     }
 
     fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -632,6 +641,15 @@ impl PyRow {
             .into_pyarray(py))
     }
 
+    /// The row as a typed `{column: value}` dict (pandas `Series.to_dict`).
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+            d.set_item(name, scalar_to_py(py, col, 0))?;
+        }
+        Ok(d)
+    }
+
     fn __repr__(&self) -> String {
         format!("Row(columns={:?})", self.inner.names())
     }
@@ -869,19 +887,33 @@ impl PyDataFrame {
 
     #[pyo3(signature = (directive, create_column = false))]
     fn exec<'py>(
-        &self,
+        &mut self,
         py: Python<'py>,
         directive: &str,
         create_column: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let _ = create_column;
-        let col = if self.inner.has_column(directive) {
-            self.inner.column(directive).map_err(pyerr)?.clone()
+        if self.inner.has_column(directive) {
+            let col = self.inner.column(directive).map_err(pyerr)?.clone();
+            return Ok(column_to_numpy(py, &col));
+        }
+        let node = parse(directive).map_err(syntax_err)?;
+        if create_column {
+            // Materialize + cache under the canonical name, exactly like `df[directive]`.
+            let canonical = volas_directive::stringify(&node);
+            if self.inner.has_column(&canonical) {
+                self.refresh_computed(Some(&canonical))?;
+            } else {
+                let col = execute(&self.inner, &node).map_err(value_err)?;
+                let lookback = volas_directive::lookback::lookback(&node);
+                self.inner.set_column(&canonical, col).map_err(pyerr)?;
+                self.inner.set_computed(&canonical, canonical.clone(), lookback);
+            }
+            let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
+            Ok(column_to_numpy(py, &col))
         } else {
-            let node = parse(directive).map_err(syntax_err)?;
-            execute(&self.inner, &node).map_err(value_err)?
-        };
-        Ok(column_to_numpy(py, &col))
+            let col = execute(&self.inner, &node).map_err(value_err)?;
+            Ok(column_to_numpy(py, &col))
+        }
     }
 
     /// The minimum number of prior rows a directive needs (its lookback).
@@ -910,11 +942,26 @@ impl PyDataFrame {
         }
     }
 
-    /// Drop rows by index label (`axis=0`) — returns a new DataFrame. Labels are
-    /// parsed against the index kind, so a string index drops by string label.
+    /// Drop rows by index label (`axis=0`) or columns by name (`axis=1`) —
+    /// returns a new DataFrame. Row labels are parsed against the index kind.
     #[pyo3(signature = (labels, axis = 0))]
     fn drop(&self, py: Python<'_>, labels: Vec<Py<PyAny>>, axis: i64) -> PyResult<PyDataFrame> {
-        let _ = axis;
+        if axis == 1 {
+            let drop_names: Vec<String> = labels
+                .iter()
+                .map(|l| l.bind(py).extract::<String>())
+                .collect::<PyResult<_>>()?;
+            let keep: Vec<String> = self
+                .inner
+                .names()
+                .iter()
+                .filter(|n| !drop_names.contains(n))
+                .cloned()
+                .collect();
+            return Ok(PyDataFrame {
+                inner: self.inner.select(&keep).map_err(pyerr)?,
+            });
+        }
         let index = self.inner.index();
         let targets: Vec<Label> = labels
             .iter()
