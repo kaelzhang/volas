@@ -121,3 +121,75 @@ pub enum Node {
         right: Box<Node>,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_OPS: [Op; 16] = [
+        Op::Lt,
+        Op::Le,
+        Op::Eq,
+        Op::Ne,
+        Op::Ge,
+        Op::Gt,
+        Op::CrossUp,
+        Op::CrossDown,
+        Op::Cross,
+        Op::Add,
+        Op::Sub,
+        Op::Mul,
+        Op::Div,
+        Op::And,
+        Op::Or,
+        Op::Xor,
+    ];
+
+    #[test]
+    fn op_token_and_priority_for_every_variant() {
+        for op in ALL_OPS {
+            assert!(!op.token().is_empty());
+            assert!((1..=4).contains(&op.priority()));
+        }
+        assert_eq!(Op::And.priority(), 1);
+        assert_eq!(Op::Lt.priority(), 2);
+        assert_eq!(Op::Add.priority(), 3);
+        assert_eq!(Op::Mul.priority(), 4);
+        assert_eq!(Op::CrossUp.token(), "//");
+        assert_eq!(Op::CrossDown.token(), "\\\\");
+        assert_eq!(Op::Cross.token(), "><");
+        assert_eq!(Op::Ne.token(), "!=");
+    }
+
+    #[test]
+    fn nodes_construct_and_debug() {
+        let cmd = Command {
+            name: "ma".into(),
+            sub: Some("x".into()),
+            args: vec![Some("5".into()), None],
+            series: vec![Node::Name("close".into())],
+        };
+        assert_eq!(cmd.clone().name, "ma");
+        let nodes = [
+            Node::Name("a".into()),
+            Node::Scalar(1.5),
+            Node::Command(cmd),
+            Node::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(Node::Name("b".into())),
+            },
+            Node::Unary {
+                op: UnaryOp::Neg,
+                operand: Box::new(Node::Scalar(2.0)),
+            },
+            Node::Binary {
+                left: Box::new(Node::Name("c".into())),
+                op: Op::Gt,
+                right: Box::new(Node::Scalar(0.0)),
+            },
+        ];
+        for n in &nodes {
+            assert!(!format!("{n:?}").is_empty());
+        }
+    }
+}

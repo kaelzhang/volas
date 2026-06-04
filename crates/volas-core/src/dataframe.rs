@@ -497,4 +497,95 @@ mod tests {
         assert_eq!((h, w), (3, 2));
         assert_eq!(data, vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
     }
+
+    #[test]
+    fn new_validates_shape() {
+        // names / columns count mismatch
+        assert!(DataFrame::new(vec!["a".into()], vec![], None).is_err());
+        // a column shorter than the frame height
+        assert!(DataFrame::new(
+            vec!["a".into(), "b".into()],
+            vec![Column::f64(vec![1.0, 2.0]), Column::f64(vec![1.0])],
+            None,
+        )
+        .is_err());
+        // an index whose length disagrees with the height
+        assert!(DataFrame::new(
+            vec!["a".into()],
+            vec![Column::f64(vec![1.0, 2.0])],
+            Some(Index::Range(3)),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn series_extracts_a_named_column() {
+        let df = sample();
+        let s = df.series("a").unwrap();
+        assert_eq!(s.name.as_deref(), Some("a"));
+        assert_eq!(s.data.as_f64().unwrap(), &[1.0, 2.0, 3.0]);
+        assert!(Arc::ptr_eq(&s.index, df.index()));
+        assert!(df.series("missing").is_err());
+    }
+
+    #[test]
+    fn set_column_add_replace_and_errors() {
+        // adding the first column to an empty frame seeds the height + index
+        let mut empty = DataFrame::new(vec![], vec![], None).unwrap();
+        empty.set_column("x", Column::f64(vec![1.0, 2.0])).unwrap();
+        assert_eq!(empty.height(), 2);
+        assert_eq!(empty.index().as_ref(), &Index::Range(2));
+
+        // replace in place, then add a second column
+        let mut df = sample();
+        df.set_column("a", Column::f64(vec![9.0, 9.0, 9.0])).unwrap();
+        assert_eq!(df.column("a").unwrap().as_f64().unwrap(), &[9.0, 9.0, 9.0]);
+        df.set_column("c", Column::f64(vec![7.0, 7.0, 7.0])).unwrap();
+        assert_eq!(df.width(), 3);
+
+        // a wrong-height column is rejected
+        assert!(df.set_column("d", Column::f64(vec![1.0])).is_err());
+    }
+
+    #[test]
+    fn filter_mask_rejects_wrong_length() {
+        assert!(sample().filter_mask(&[true, false]).is_err());
+    }
+
+    #[test]
+    fn append_nan_pads_f64_but_rejects_other_dtypes() {
+        // appending a frame missing an F64 column NaN-pads it ...
+        let mut df = sample();
+        let only_a =
+            DataFrame::new(vec!["a".into()], vec![Column::f64(vec![4.0])], None).unwrap();
+        // "b" (i64) is missing from `only_a` and i64 is not NaN-paddable -> error
+        assert!(df.append(&only_a).is_err());
+
+        // an all-F64 frame pads cleanly
+        let mut f = DataFrame::new(
+            vec!["a".into(), "b".into()],
+            vec![Column::f64(vec![1.0]), Column::f64(vec![2.0])],
+            None,
+        )
+        .unwrap();
+        let only_a2 =
+            DataFrame::new(vec!["a".into()], vec![Column::f64(vec![3.0])], None).unwrap();
+        f.append(&only_a2).unwrap();
+        assert_eq!(f.height(), 2);
+        assert!(f.column("b").unwrap().as_f64().unwrap()[1].is_nan());
+    }
+
+    #[test]
+    fn computed_tail_update_and_dtype_guard() {
+        let mut df = sample();
+        df.set_computed("a", "ma:2".into(), 1);
+        assert_eq!(df.computed_columns().len(), 1);
+        // overwrite the tail of the F64 column "a"
+        df.update_computed_tail("a", 1, &[8.0, 9.0]).unwrap();
+        assert_eq!(df.column("a").unwrap().as_f64().unwrap(), &[1.0, 8.0, 9.0]);
+        // a non-F64 column cannot be a computed tail
+        assert!(df.update_computed_tail("b", 0, &[1.0]).is_err());
+        // an unknown column errors
+        assert!(df.update_computed_tail("nope", 0, &[1.0]).is_err());
+    }
 }

@@ -163,4 +163,40 @@ mod tests {
         // first/last still work on strings
         assert_eq!(Agg::First.reduce(&col, &[0, 1]).unwrap(), Column::str(vec!["a".into()]));
     }
+
+    #[test]
+    fn from_name_parses_all_and_rejects_unknown() {
+        assert_eq!(Agg::from_name("first").unwrap(), Agg::First);
+        assert_eq!(Agg::from_name("max").unwrap(), Agg::Max);
+        assert_eq!(Agg::from_name("min").unwrap(), Agg::Min);
+        assert_eq!(Agg::from_name("last").unwrap(), Agg::Last);
+        assert_eq!(Agg::from_name("sum").unwrap(), Agg::Sum);
+        assert!(Agg::from_name("median").is_err());
+    }
+
+    #[test]
+    fn reduce_over_i64_and_datetime_columns() {
+        let ints = Column::i64(vec![3, 1, 4, 1]);
+        assert_eq!(Agg::Max.reduce(&ints, &[0, 1, 2, 3]).unwrap(), Column::i64(vec![4]));
+        assert_eq!(Agg::Min.reduce(&ints, &[0, 1, 2, 3]).unwrap(), Column::i64(vec![1]));
+        assert_eq!(Agg::Sum.reduce(&ints, &[0, 1, 2, 3]).unwrap(), Column::i64(vec![9]));
+
+        // Datetime max/min stay in the datetime dtype.
+        let ts = Column::datetime(vec![100, 500, 200]);
+        assert_eq!(Agg::Max.reduce(&ts, &[0, 1, 2]).unwrap(), Column::datetime(vec![500]));
+        assert_eq!(Agg::Min.reduce(&ts, &[0, 1, 2]).unwrap(), Column::datetime(vec![100]));
+
+        // Sum on a bool column is a dtype error (hits the fallback arm).
+        let flags = Column::bool(vec![true, false]);
+        assert!(Agg::Sum.reduce(&flags, &[0, 1]).is_err());
+    }
+
+    #[test]
+    fn default_spec_and_max_min_dtype_errors() {
+        assert_eq!(AggSpec::default().agg_for("open"), Agg::First);
+        // Max / Min on a non-numeric column hit the dtype-error path (exercises name()).
+        let flags = Column::bool(vec![true, false]);
+        assert!(Agg::Max.reduce(&flags, &[0, 1]).is_err());
+        assert!(Agg::Min.reduce(&flags, &[0, 1]).is_err());
+    }
 }

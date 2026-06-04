@@ -159,4 +159,14 @@ mod tests {
         assert_eq!(s("kdj.j:,4"), "kdj.j:,4");
         assert_eq!(s("kdj.j:@,high"), "kdj.j@,high");
     }
+
+    #[test]
+    fn left_parens_fractional_scalar_and_expression_series() {
+        // left child binds looser than the parent -> it gets parenthesised
+        assert_eq!(s("(close + 1) * 2.5"), "(close+1)*2.5");
+        // a fractional scalar renders with its decimals (the non-integer branch)
+        assert_eq!(s("close > 2.5"), "close>2.5");
+        // an expression as a series operand stays grouped so it re-parses
+        assert_eq!(s("ma:5@(close + 1)"), "ma:5@(close+1)");
+    }
 }

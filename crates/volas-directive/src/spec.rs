@@ -146,3 +146,27 @@ pub fn arg_int_default(name: &str, sub: Option<&str>, i: usize, fallback: usize)
         .and_then(|s| s.args.get(i).and_then(ArgDefault::as_usize))
         .unwrap_or(fallback)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arg_default_as_usize_and_to_token() {
+        assert_eq!(ArgDefault::Int(5).as_usize(), Some(5));
+        assert_eq!(ArgDefault::Float(2.0).as_usize(), None);
+        assert_eq!(ArgDefault::Required.to_token(), None);
+        assert_eq!(ArgDefault::Int(12).to_token().as_deref(), Some("12"));
+        assert_eq!(ArgDefault::Float(2.0).to_token().as_deref(), Some("2")); // integral float
+        assert_eq!(ArgDefault::Float(2.5).to_token().as_deref(), Some("2.5")); // fractional
+        assert_eq!(ArgDefault::I64(-1).to_token().as_deref(), Some("-1"));
+        assert_eq!(ArgDefault::Str("close").to_token().as_deref(), Some("close"));
+    }
+
+    #[test]
+    fn arg_int_default_uses_spec_then_fallback() {
+        assert_eq!(arg_int_default("macd", None, 0, 99), 12); // macd's Int default
+        assert_eq!(arg_int_default("ma", None, 0, 7), 7); // a Required arg -> fallback
+        assert_eq!(arg_int_default("nope", None, 0, 3), 3); // unknown command -> fallback
+    }
+}

@@ -340,4 +340,110 @@ mod tests {
         assert!(Column::str(vec!["not-a-date".into()]).to_datetime().is_err());
         assert!(Column::i64(vec![1, 2]).to_datetime().is_err());
     }
+
+    #[test]
+    fn cast_between_dtypes_and_errors() {
+        // no-op when already the target dtype
+        let f = Column::f64(vec![1.0, 2.0]);
+        assert_eq!(f.cast(DType::F64).unwrap(), f);
+
+        // -> F64 (incl. the Str -> NaN arm of to_f64_vec)
+        assert_eq!(Column::i64(vec![3]).cast(DType::F64).unwrap(), Column::f64(vec![3.0]));
+        assert_eq!(
+            Column::bool(vec![true, false]).cast(DType::F64).unwrap(),
+            Column::f64(vec![1.0, 0.0])
+        );
+        let from_str = Column::str(vec!["a".into(), "b".into()]).cast(DType::F64).unwrap();
+        assert_eq!(from_str.dtype(), DType::F64);
+        assert!(from_str.to_f64_vec().iter().all(|x| x.is_nan()));
+
+        // -> I64 (F64 / Bool / Datetime; Str errors)
+        assert_eq!(Column::f64(vec![2.9]).cast(DType::I64).unwrap(), Column::i64(vec![2]));
+        assert_eq!(Column::bool(vec![true]).cast(DType::I64).unwrap(), Column::i64(vec![1]));
+        assert_eq!(Column::datetime(vec![5]).cast(DType::I64).unwrap(), Column::i64(vec![5]));
+        assert!(Column::str(vec!["x".into()]).cast(DType::I64).is_err());
+
+        // -> Bool (F64 / I64; Str errors)
+        assert_eq!(
+            Column::f64(vec![0.0, 1.5]).cast(DType::Bool).unwrap(),
+            Column::bool(vec![false, true])
+        );
+        assert_eq!(
+            Column::i64(vec![0, 2]).cast(DType::Bool).unwrap(),
+            Column::bool(vec![false, true])
+        );
+        assert!(Column::str(vec!["x".into()]).cast(DType::Bool).is_err());
+
+        // -> Utf8 (every source variant of to_string_vec)
+        assert_eq!(Column::f64(vec![1.5]).cast(DType::Utf8).unwrap(), Column::str(vec!["1.5".into()]));
+        assert_eq!(Column::i64(vec![7]).cast(DType::Utf8).unwrap(), Column::str(vec!["7".into()]));
+        assert_eq!(
+            Column::bool(vec![true, false]).cast(DType::Utf8).unwrap(),
+            Column::str(vec!["True".into(), "False".into()])
+        );
+        let dt_str = Column::datetime(vec![0]).cast(DType::Utf8).unwrap();
+        assert_eq!(dt_str.dtype(), DType::Utf8);
+        assert_eq!(dt_str.len(), 1);
+
+        // -> Datetime (delegates to to_datetime)
+        assert_eq!(
+            Column::str(vec!["2020-01-01".into()]).cast(DType::Datetime).unwrap().dtype(),
+            DType::Datetime
+        );
+    }
+
+    #[test]
+    fn equals_treats_nan_as_equal() {
+        let a = Column::f64(vec![1.0, f64::NAN]);
+        let b = Column::f64(vec![1.0, f64::NAN]);
+        assert!(a.equals(&b)); // NaN == NaN here ...
+        assert_ne!(a, b); // ... but derived PartialEq says NaN != NaN
+        assert!(!a.equals(&Column::f64(vec![1.0]))); // length mismatch
+        assert!(Column::i64(vec![1, 2]).equals(&Column::i64(vec![1, 2]))); // non-F64 fallback
+        assert!(!Column::i64(vec![1]).equals(&Column::str(vec!["1".into()]))); // dtype mismatch
+    }
+
+    #[test]
+    fn typed_accessors_reject_wrong_variant() {
+        let f = Column::f64(vec![1.0]);
+        assert!(f.as_bool().is_none());
+        assert!(f.as_i64().is_none());
+        assert!(f.as_str().is_none());
+        assert!(f.as_datetime().is_none());
+        assert!(Column::bool(vec![true]).as_f64().is_none());
+        assert!(Column::f64(vec![]).is_empty());
+    }
+
+    #[test]
+    fn per_variant_get_slice_take() {
+        // get_f64 across the Bool / I64 / Str / F64 arms
+        assert_eq!(Column::f64(vec![2.5]).get_f64(0), 2.5);
+        assert_eq!(Column::bool(vec![true, false]).get_f64(0), 1.0);
+        assert_eq!(Column::i64(vec![5]).get_f64(0), 5.0);
+        assert!(Column::str(vec!["x".into()]).get_f64(0).is_nan());
+
+        // slice / take across Bool / I64 / Str
+        assert_eq!(Column::bool(vec![true, false, true]).slice(1, 3), Column::bool(vec![false, true]));
+        assert_eq!(Column::i64(vec![1, 2, 3]).take(&[2, 0]), Column::i64(vec![3, 1]));
+        assert_eq!(
+            Column::str(vec!["a".into(), "b".into(), "c".into()]).take(&[1, 2]),
+            Column::str(vec!["b".into(), "c".into()])
+        );
+        assert_eq!(
+            Column::str(vec!["a".into(), "b".into()]).slice(0, 1),
+            Column::str(vec!["a".into()])
+        );
+
+        // to_f64_vec Bool / I64 arms
+        assert_eq!(Column::bool(vec![true, false]).to_f64_vec(), vec![1.0, 0.0]);
+        assert_eq!(Column::i64(vec![3, 4]).to_f64_vec(), vec![3.0, 4.0]);
+    }
+
+    #[test]
+    fn bool_get_false_branch_and_bool_append() {
+        assert_eq!(Column::bool(vec![true, false]).get_f64(1), 0.0); // the `else { 0.0 }` arm
+        let mut a = Column::bool(vec![true]);
+        a.append(&Column::bool(vec![false, true])).unwrap();
+        assert_eq!(a.as_bool().unwrap(), &[true, false, true]);
+    }
 }

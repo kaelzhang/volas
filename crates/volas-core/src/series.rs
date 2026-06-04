@@ -56,3 +56,30 @@ impl Series {
         self.data.dtype()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_f64_has_range_index_and_query_methods() {
+        let s = Series::from_f64(Some("x".into()), vec![1.0, 2.0, 3.0]);
+        assert_eq!(s.len(), 3);
+        assert!(!s.is_empty());
+        assert_eq!(s.dtype(), DType::F64);
+        assert_eq!(s.name.as_deref(), Some("x"));
+        assert_eq!(s.index.len(), 3);
+    }
+
+    #[test]
+    fn new_preserves_parts_and_empty_is_empty() {
+        let s = Series::new(None, Column::i64(vec![7, 8]), Arc::new(Index::Range(2)));
+        assert_eq!(s.dtype(), DType::I64);
+        assert_eq!(s.len(), 2);
+        assert!(s.name.is_none());
+
+        let empty = Series::from_f64(None, vec![]);
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+    }
+}

@@ -423,4 +423,10 @@ mod tests {
             panic!();
         }
     }
+
+    #[test]
+    fn malformed_number_is_a_syntax_error() {
+        // parse_number scans digits/'.' greedily, so "1.2.3" fails f64 parsing
+        assert!(parse("1.2.3").is_err());
+    }
 }

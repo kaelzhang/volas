@@ -255,4 +255,29 @@ mod tests {
         assert!((d[1] - 2.0).abs() < 1e-10);
         assert!((d[2] - 3.0).abs() < 1e-10);
     }
+
+    #[test]
+    fn empty_input_and_invalid_periods_return_nan() {
+        let empty = Array1::<f64>::zeros(0);
+        assert_eq!(sma(empty.view(), 3).len(), 0);
+        assert_eq!(ewma_com(empty.view(), 1.0, true, false, 1).len(), 0);
+        assert_eq!(ewma_with_init(empty.view(), 3, 0.0).len(), 0);
+
+        let d = array![1.0, 2.0];
+        assert!(rolling_min(d.view(), 5).iter().all(|x| x.is_nan())); // period > n
+        assert!(rolling_max(d.view(), 5).iter().all(|x| x.is_nan()));
+        assert!(rolling_std(d.view(), 5, 1).iter().all(|x| x.is_nan()));
+        assert!(rolling_min(d.view(), 0).iter().all(|x| x.is_nan())); // period == 0
+        assert!(rolling_std(d.view(), 2, 2).iter().all(|x| x.is_nan())); // ddof >= period
+    }
+
+    #[test]
+    fn ewma_handles_nan_and_adjust_variants() {
+        let d = array![1.0, f64::NAN, 3.0, 4.0];
+        assert_eq!(ewma_com(d.view(), 1.0, true, true, 1).len(), 4); // adjust + ignore_na
+        assert_eq!(ewma_com(d.view(), 1.0, false, false, 1).len(), 4); // neither
+        // a leading NaN keeps nobs below min_periods -> result[0] is NaN
+        let lead = array![f64::NAN, 2.0, 3.0];
+        assert!(ewma_com(lead.view(), 1.0, true, false, 1)[0].is_nan());
+    }
 }

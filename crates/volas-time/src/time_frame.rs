@@ -164,4 +164,57 @@ mod tests {
         assert_eq!(TimeFrame::Min5.unify(a), TimeFrame::Min5.unify(b));
         assert_ne!(TimeFrame::Min5.unify(a), TimeFrame::Min5.unify(c));
     }
+
+    const ALL: [TimeFrame; 17] = [
+        TimeFrame::Sec1,
+        TimeFrame::Min1,
+        TimeFrame::Min3,
+        TimeFrame::Min5,
+        TimeFrame::Min15,
+        TimeFrame::Min30,
+        TimeFrame::Hour1,
+        TimeFrame::Hour2,
+        TimeFrame::Hour4,
+        TimeFrame::Hour6,
+        TimeFrame::Hour8,
+        TimeFrame::Hour12,
+        TimeFrame::Day1,
+        TimeFrame::Day3,
+        TimeFrame::Week1,
+        TimeFrame::Month1,
+        TimeFrame::Year1,
+    ];
+
+    #[test]
+    fn label_roundtrips_and_minutes_for_every_frame() {
+        for tf in ALL {
+            // label -> from_label is a round-trip, and minutes() is positive.
+            assert_eq!(TimeFrame::from_label(tf.label()).unwrap(), tf);
+            assert!(tf.minutes() > 0);
+        }
+        // Spot-check a few minute values and the upper-case aliases.
+        assert_eq!(TimeFrame::Hour12.minutes(), 720);
+        assert_eq!(TimeFrame::Day3.minutes(), 4320);
+        for alias in ["1S", "2H", "4H", "6H", "8H", "12H", "3D", "1W", "1Y"] {
+            assert!(TimeFrame::from_label(alias).is_ok());
+        }
+    }
+
+    #[test]
+    fn unify_covers_every_branch() {
+        // A timestamp whose every civil field is non-trivial, so each frame's
+        // truncation arm is exercised and yields a well-formed key.
+        let ns = datetime::parse_ns("2021-07-19 22:47:53").unwrap();
+        for tf in ALL {
+            assert!(tf.unify(ns) > 0);
+        }
+        // Same-period vs next-period contract for each granularity boundary.
+        let mid = datetime::parse_ns("2021-07-19 22:47:53").unwrap();
+        let same_hour = datetime::parse_ns("2021-07-19 22:00:00").unwrap();
+        assert_eq!(TimeFrame::Hour1.unify(mid), TimeFrame::Hour1.unify(same_hour));
+        let same_day = datetime::parse_ns("2021-07-19 00:00:00").unwrap();
+        assert_eq!(TimeFrame::Day1.unify(mid), TimeFrame::Day1.unify(same_day));
+        let same_month = datetime::parse_ns("2021-07-01 00:00:00").unwrap();
+        assert_eq!(TimeFrame::Month1.unify(mid), TimeFrame::Month1.unify(same_month));
+    }
 }

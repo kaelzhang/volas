@@ -249,6 +249,18 @@ mod tests {
     }
 
     #[test]
+    fn cumulator_empty_then_open_only() {
+        let mut cum = Cumulator::new(TimeFrame::Min5, AggSpec::ohlcv());
+        // nothing fed yet: empty frame, no live bar
+        assert_eq!(cum.frame().unwrap().height(), 0);
+        assert!(cum.last().unwrap().is_none());
+        // feed part of the first period: only an open period exists
+        cum.append(&sample().slice(0, 2)).unwrap();
+        assert!(cum.last().unwrap().is_some());
+        assert_eq!(cum.frame().unwrap().height(), 1);
+    }
+
+    #[test]
     fn dedup_keeps_last_same_timestamp() {
         // two bars share 00:00:00 — the later one (volume 7) overrides the first.
         let df = frame(

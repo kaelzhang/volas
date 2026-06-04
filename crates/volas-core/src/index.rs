@@ -141,4 +141,27 @@ mod tests {
         assert!(Index::from_column(&Column::f64(vec![1.0])).is_err());
         assert!(Index::from_column(&Column::str(vec!["x".into()])).is_err());
     }
+
+    #[test]
+    fn is_empty_labels_and_position_of() {
+        assert!(Index::Range(0).is_empty());
+        assert!(!Index::Range(3).is_empty());
+
+        assert_eq!(Index::Range(3).to_i64_labels(), vec![0, 1, 2]);
+        assert_eq!(Index::Int64(vec![5, 6]).to_i64_labels(), vec![5, 6]);
+        assert_eq!(Index::Datetime(vec![10, 20]).to_i64_labels(), vec![10, 20]);
+
+        assert_eq!(Index::Range(5).position_of(3), Some(3));
+        assert_eq!(Index::Range(5).position_of(9), None);
+        assert_eq!(Index::Range(5).position_of(-1), None);
+        assert_eq!(Index::Int64(vec![10, 20, 30]).position_of(20), Some(1));
+        assert_eq!(Index::Int64(vec![10, 20]).position_of(99), None);
+        assert_eq!(Index::Datetime(vec![100, 200]).position_of(200), Some(1));
+
+        // take() on an Int64 index gathers the labels at those positions
+        assert_eq!(
+            Index::Int64(vec![10, 20, 30]).take(&[2, 0]),
+            Index::Int64(vec![30, 10])
+        );
+    }
 }

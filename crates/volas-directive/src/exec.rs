@@ -398,4 +398,151 @@ mod tests {
         let r = run(&stock(), "close");
         assert_eq!(r, vec![5.0, 6.0, 7.0, 8.0, 9.0]);
     }
+
+    /// A 30-row OHLCV frame so every indicator produces a full-length result.
+    fn ohlcv() -> DataFrame {
+        let close: Vec<f64> = (1..=30).map(|i| i as f64).collect();
+        let high: Vec<f64> = close.iter().map(|c| c + 1.0).collect();
+        let low: Vec<f64> = close.iter().map(|c| c - 1.0).collect();
+        let open: Vec<f64> = close.iter().map(|c| c - 0.5).collect();
+        let volume: Vec<f64> = close.iter().map(|c| c * 100.0).collect();
+        DataFrame::new(
+            vec![
+                "open".into(),
+                "high".into(),
+                "low".into(),
+                "close".into(),
+                "volume".into(),
+            ],
+            vec![
+                Column::f64(open),
+                Column::f64(high),
+                Column::f64(low),
+                Column::f64(close),
+                Column::f64(volume),
+            ],
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_command_arm_executes() {
+        let df = ohlcv();
+        for d in [
+            "ma:5",
+            "ema:5",
+            "smma:5",
+            "macd",
+            "macd:12,26",
+            "macd.signal",
+            "macd.signal:12,26,9",
+            "macd.histogram",
+            "boll",
+            "boll:20",
+            "boll.upper",
+            "boll.upper:20,2",
+            "boll.lower",
+            "boll.lower:20,2",
+            "bbw:20",
+            "rsv:9",
+            "kdj.k:9,3",
+            "kdj.d:9,3,3",
+            "kdj.j:9,3,3",
+            "rsi:14",
+            "bbi:3,6,12,24",
+            "tr",
+            "atr:14",
+            "llv:5",
+            "hhv:5",
+            "donchian:20",
+            "donchian.upper:20",
+            "donchian.lower:20",
+            "increase:1",
+            "increase:3,-1@close",
+            "style:bullish",
+            "style:bearish",
+            "repeat:2@(style:bullish)",
+            "repeat:1@(close>10)",
+            "repeat:2@close", // non-bool series -> coerced
+            "change:2",
+        ] {
+            let col = execute(&df, &parse(d).unwrap())
+                .unwrap_or_else(|e| panic!("directive {d:?} failed: {e:?}"));
+            assert_eq!(col.len(), 30, "directive {d:?} returned wrong length");
+        }
+    }
+
+    #[test]
+    fn hv_covers_every_time_frame_unit() {
+        let df = ohlcv();
+        for d in [
+            "hv:10",
+            "hv:10,1d,252",
+            "hv:10,15m",
+            "hv:10,1h",
+            "hv:10,1W",
+            "hv:10,1M",
+            "hv:10,1Y",
+            "hv:10,30s", // seconds -> minutes clamps to >= 1
+        ] {
+            assert_eq!(execute(&df, &parse(d).unwrap()).unwrap().len(), 30);
+        }
+    }
+
+    #[test]
+    fn command_and_argument_validation_errors() {
+        let df = ohlcv();
+        let is_err = |d: &str| execute(&df, &parse(d).unwrap()).is_err();
+        assert!(is_err("ma:5,6"), "too many args");
+        assert!(is_err("frobnicate:5"), "unknown command");
+        assert!(is_err("kdj:9"), "missing required sub-command");
+        assert!(is_err("macd.bogus"), "unknown sub-command");
+        assert!(is_err("ma:abc"), "non-integer arg");
+        assert!(is_err("style:cartoon"), "invalid style descriptor");
+        assert!(is_err("hv:10,5x"), "invalid time-frame unit");
+        assert!(is_err("hv:10,xm"), "invalid time-frame number");
+    }
+
+    #[test]
+    fn operators_crosses_and_unary() {
+        let df = ohlcv();
+        let len = |d: &str| execute(&df, &parse(d).unwrap()).unwrap().len();
+        // comparisons
+        for d in [
+            "close > 10",
+            "close < 10",
+            "close >= 10",
+            "close <= 10",
+            "close == 10",
+            "close != 10",
+        ] {
+            assert_eq!(len(d), 30, "{d}");
+        }
+        // crosses (// up, \\ down, >< either)
+        for d in ["ma:5 // ma:10", "ma:5 \\\\ ma:10", "ma:5 >< ma:10"] {
+            assert_eq!(len(d), 30, "{d}");
+        }
+        // arithmetic
+        for d in ["close + 1", "close - 1", "close * 2", "close / 2"] {
+            assert_eq!(len(d), 30, "{d}");
+        }
+        // logical (& | ^), with a non-bool right operand to coerce
+        for d in [
+            "(close>10) & (close<20)",
+            "(close>10) | (close<5)",
+            "(close>10) ^ (close<20)",
+            "(close>10) & close",
+        ] {
+            assert_eq!(len(d), 30, "{d}");
+        }
+        // unary not / negate
+        assert_eq!(len("~(close>10)"), 30);
+        assert_eq!(len("-close"), 30);
+    }
+
+    #[test]
+    fn empty_name_is_an_error() {
+        assert!(execute(&stock(), &Node::Name(String::new())).is_err());
+    }
 }

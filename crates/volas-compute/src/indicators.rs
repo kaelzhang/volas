@@ -399,4 +399,14 @@ mod tests {
         let r = repeat(&[true, true, true, false], 2);
         assert_eq!(r, vec![false, true, true, false]);
     }
+
+    #[test]
+    fn nan_delta_and_oversized_windows() {
+        // rsi skips NaN deltas (the `continue` branch)
+        let r = rsi(&[1.0, f64::NAN, 3.0, 4.0, 5.0], 2);
+        assert_eq!(r.len(), 5);
+        // increase / repeat return all-false when the window exceeds the length
+        assert_eq!(increase(&[1.0, 2.0], 5, 1), vec![false, false]);
+        assert_eq!(repeat(&[true, true], 5), vec![false, false]);
+    }
 }
