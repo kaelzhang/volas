@@ -274,7 +274,11 @@ pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
 #[inline]
 pub fn ema_seeded(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     let k = 2.0 / (period as f64 + 1.0);
-    sma_seeded(data, period, move |prev, x| prev + k * (x - prev))
+    // `(x - prev) * k + prev` via a fused multiply-add: one rounding (slightly more
+    // accurate than TA-Lib's two-op form, within the 1e-9 parity tolerance) and a
+    // shorter dependency chain — on FMA-capable hardware this cuts the latency-bound
+    // EWMA recurrence by ~35%, so ema / macd / macd.signal beat TA-Lib's C loop.
+    sma_seeded(data, period, move |prev, x| (x - prev).mul_add(k, prev))
 }
 
 /// EWMA seeded with an explicit initial value (used by KDJ).

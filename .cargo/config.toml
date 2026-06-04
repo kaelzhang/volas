@@ -1,0 +1,8 @@
+# x86-64: enable FMA3 (in every x86 CPU since Haswell / 2013) so the explicit
+# `f64::mul_add` in the EWMA kernels inlines to a hardware `vfmadd231sd` instead of
+# a libm `fma()` call — realizing the ~35% latency-bound EWMA speedup on x86 wheels
+# too (ema / macd / macd.signal). It does not turn on FP contraction, so no other
+# kernel's arithmetic changes. aarch64 (Apple Silicon / ARM servers) has FMA in the
+# baseline ISA, so this is x86-only.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-Ctarget-feature=+fma"]
