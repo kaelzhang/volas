@@ -971,6 +971,23 @@ impl PyDataFrame {
         })
     }
 
+    /// `df[name] = value` — add or replace a column. `value` may be a scalar
+    /// (broadcast), a 1-D array / list, or a Series (positional, length must
+    /// equal the frame height). Copy-on-write: a prior `copy()` is unaffected.
+    fn __setitem__(&mut self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let h = self.inner.height();
+        let col = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
+            s.inner.data.clone()
+        } else if let Ok(b) = value.extract::<bool>() {
+            Column::bool(vec![b; h])
+        } else if let Ok(scalar) = value.extract::<f64>() {
+            Column::f64(vec![scalar; h])
+        } else {
+            pyany_to_column(value)?
+        };
+        self.inner.set_column(name, col).map_err(pyerr)
+    }
+
     fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // boolean mask (Series or numpy)
         if let Ok(s) = key.extract::<PyRef<PySeries>>() {
