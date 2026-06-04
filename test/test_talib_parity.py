@@ -107,6 +107,19 @@ def test_linear_regression_matches_talib(ohlc):
     _parity(df.exec('tsf'), talib.TSF(c, 14))  # default resolves to 14
 
 
+def test_volume_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    v = np.asarray(df['volume'].to_numpy(), dtype=float)  # talib requires double
+    _parity(df.exec('obv'), talib.OBV(c, v))
+    _parity(df.exec('ad'), talib.AD(h, l, c, v))
+    for fast, slow in ((3, 10), (5, 20)):
+        _parity(
+            df.exec(f'adosc:{fast},{slow}'),
+            talib.ADOSC(h, l, c, v, fastperiod=fast, slowperiod=slow),
+        )
+    _parity(df.exec('adosc'), talib.ADOSC(h, l, c, v))  # defaults 3, 10
+
+
 def test_variance_stddev_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (5, 20):  # 5 is the shared TA-Lib default

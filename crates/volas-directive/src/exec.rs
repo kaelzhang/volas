@@ -387,6 +387,33 @@ fn exec_command(
             arg_f64(args, 1, 1.0)?,
         )),
 
+        ("obv", _) => {
+            let real = series_f64(df, series, 0, "close")?;
+            let volume = series_f64(df, series, 1, "volume")?;
+            f64col(ind::obv(&real, &volume))
+        }
+        ("ad", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let volume = series_f64(df, series, 3, "volume")?;
+            f64col(ind::ad(&high, &low, &close, &volume))
+        }
+        ("adosc", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let volume = series_f64(df, series, 3, "volume")?;
+            f64col(ind::adosc(
+                &high,
+                &low,
+                &close,
+                &volume,
+                arg_usize(args, 0, Some(3))?,
+                arg_usize(args, 1, Some(10))?,
+            ))
+        }
+
         ("avgprice", _) => {
             let open = series_f64(df, series, 0, "open")?;
             let high = series_f64(df, series, 1, "high")?;

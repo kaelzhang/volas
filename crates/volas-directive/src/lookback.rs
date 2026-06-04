@@ -42,6 +42,8 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
             arg(args, 0, 14).saturating_sub(1)
         }
         "var" | "stddev" => arg(args, 0, 5).saturating_sub(1),
+        "obv" | "ad" => 0,
+        "adosc" => arg(args, 0, 3).max(arg(args, 1, 10)).saturating_sub(1),
         "avgprice" | "medprice" | "typprice" | "wclprice" => 0,
         _ => return None,
     };
