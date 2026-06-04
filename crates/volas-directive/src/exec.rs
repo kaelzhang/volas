@@ -269,6 +269,36 @@ fn exec_command(
             arg_f64(args, 1, 0.7)?,
         )),
         ("kama", _) => f64col(ind::kama(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        // MA with a per-row variable period: the period for row i is the (truncated,
+        // clamped) value of the required second `periods` series. Each distinct period's
+        // MA is computed once and cached.
+        ("mavp", _) => {
+            let real = close(0)?;
+            let periods = series_f64_required(df, series, 1)?;
+            let min_p = arg_usize(args, 0, Some(2))?;
+            let max_p = arg_usize(args, 1, Some(30))?;
+            let matype = arg_usize(args, 2, Some(0))?;
+            let lb = crate::lookback::ma_lookback(max_p, matype);
+            let n = real.len();
+            let mut out = vec![f64::NAN; n];
+            // Each distinct period's MA is computed once, over the sub-slice that makes its
+            // first valid value land exactly at `lb` — i.e. TA-Lib re-seeds every period's
+            // MA at the output start (matters for recursive MAs like EMA; windowed MAs are
+            // position-independent). `cache[p] = (start, sub_ma)`; MAVP[i] = sub_ma[i-start].
+            let mut cache: std::collections::HashMap<usize, (usize, Vec<f64>)> =
+                std::collections::HashMap::new();
+            for i in lb..n {
+                let p = (periods[i] as i64).clamp(min_p as i64, max_p as i64) as usize;
+                if !cache.contains_key(&p) {
+                    let start = lb - crate::lookback::ma_lookback(p, matype);
+                    let sub = ma_typed(&real[start..], p, matype)?;
+                    cache.insert(p, (start, sub));
+                }
+                let (start, sub) = &cache[&p];
+                out[i] = sub[i - start];
+            }
+            f64col(out)
+        }
         ("sar", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;

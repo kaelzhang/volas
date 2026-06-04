@@ -13,7 +13,7 @@ fn arg(args: &[Option<String>], i: usize, default: usize) -> usize {
 /// Lookback of a TA-Lib MA-type over `period` (mirrors `exec::ma_typed`): DEMA is
 /// `2·(period-1)`, TEMA `3·(period-1)`, KAMA `period`, T3 `6·(period-1)`, and the
 /// rest (SMA/EMA/WMA/TRIMA) `period-1`.
-fn ma_lookback(period: usize, matype: usize) -> usize {
+pub(crate) fn ma_lookback(period: usize, matype: usize) -> usize {
     match matype {
         3 => 2 * period.saturating_sub(1),
         4 => 3 * period.saturating_sub(1),
@@ -31,6 +31,8 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "ma" => ma_lookback(arg(args, 0, 1), arg(args, 1, 0)),
         // apo/ppo warm up with the slower MA of the chosen type.
         "apo" | "ppo" => ma_lookback(arg(args, 1, 26), arg(args, 2, 0)),
+        // mavp warms up over the maximum period's MA (args: min, max, matype).
+        "mavp" => ma_lookback(arg(args, 1, 30), arg(args, 2, 0)),
         "macdext" => {
             let line = ma_lookback(arg(args, 0, 12), arg(args, 1, 0))
                 .max(ma_lookback(arg(args, 2, 26), arg(args, 3, 0)));

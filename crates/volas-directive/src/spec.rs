@@ -100,6 +100,7 @@ pub fn is_command(name: &str) -> bool {
             | "trima"
             | "t3"
             | "kama"
+            | "mavp"
             | "sar"
             | "sarext"
             | "accbands"
@@ -191,6 +192,9 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("wma" | "dema" | "tema" | "trima", None) => (vec![Int(30)], vec!["close"]),
         ("t3", None) => (vec![Int(5), Float(0.7)], vec!["close"]),
         ("kama", None) => (vec![Int(30)], vec!["close"]),
+        // mavp: min_period, max_period, matype; real defaults to close, periods is the
+        // required second series.
+        ("mavp", None) => (vec![Int(2), Int(30), Int(0)], vec!["close"]),
         ("sar", None) => (vec![Float(0.02), Float(0.2)], vec!["high", "low"]),
         // sarext: start, offset_on_reverse, then long (init/step/max) + short (init/step/max).
         ("sarext", None) => (
