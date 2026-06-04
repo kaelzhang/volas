@@ -1,10 +1,10 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
-use super::types::{Node, Op};
-use crate::column::Column;
-use crate::dataframe::DataFrame;
-use crate::error::{Result, VolasError};
-use crate::indicators as ind;
+use crate::types::{Node, Op};
+use volas_core::Column;
+use volas_core::DataFrame;
+use volas_core::{Result, VolasError};
+use volas_compute::indicators as ind;
 
 /// Execute a directive node against `df`.
 pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
@@ -286,7 +286,7 @@ fn tf_to_minutes(s: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::directive::parse;
+    use crate::parse;
 
     fn stock() -> DataFrame {
         DataFrame::new(

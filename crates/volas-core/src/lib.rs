@@ -1,17 +1,12 @@
-//! volas-core: the pure-Rust kernel behind the `volas` Python package.
+//! volas-core: the pure-Rust data model behind the `volas` Python package.
 //!
-//! This crate has no Python / pyo3 dependency, so it builds and unit-tests with
-//! plain `cargo test` and is reusable from other Rust code. It provides the
-//! column-oriented [`DataFrame`] / [`Series`] storage plus (later) the indicator
-//! and directive engine.
+//! Storage primitives only (no pyo3, no numeric kernels, no directive engine) so
+//! it builds and unit-tests with plain `cargo test` and is reusable as a library.
 
 pub mod column;
-pub mod compute;
 pub mod dataframe;
-pub mod directive;
 pub mod dtype;
 pub mod error;
-pub mod indicators;
 pub mod index;
 pub mod series;
 

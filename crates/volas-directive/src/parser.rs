@@ -1,7 +1,7 @@
 //! A whitespace-tolerant recursive-descent parser for directive strings.
 
 use super::types::{Command, Node, Op};
-use crate::error::{Result, VolasError};
+use volas_core::{Result, VolasError};
 
 /// Parse a directive string into an AST [`Node`].
 pub fn parse(input: &str) -> Result<Node> {

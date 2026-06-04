@@ -1,0 +1,8 @@
+//! volas-compute: numeric kernels (`simd`) and the technical `indicators`, as
+//! pure functions over `f64` / `bool` slices.
+//!
+//! Depends on `volas-core` only for the shared error type; it does not touch the
+//! DataFrame data model.
+
+pub mod indicators;
+pub mod simd;

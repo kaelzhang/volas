@@ -11,7 +11,7 @@ use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use volas_core::directive::{execute, parse};
+use volas_directive::{execute, parse};
 use volas_core::{Column, DataFrame, Series, VolasError};
 
 /// Map a core error to the closest Python exception.

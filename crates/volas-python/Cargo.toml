@@ -14,6 +14,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 volas-core = { path = "../volas-core" }
+volas-compute = { path = "../volas-compute" }
+volas-directive = { path = "../volas-directive" }
 pyo3 = { version = "0.25", features = ["extension-module"] }
 numpy = "0.25"
 ndarray = "0.16"

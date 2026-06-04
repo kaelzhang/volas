@@ -1,6 +1,6 @@
 [package]
-name = "volas-core"
-description = "Pure-Rust data model for volas: DataFrame / Series / Index"
+name = "volas-compute"
+description = "Numeric kernels and technical indicators for volas (pure functions over slices)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -9,4 +9,5 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-thiserror = "1.0"
+volas-core = { path = "../volas-core" }
+ndarray = "0.16"

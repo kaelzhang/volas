@@ -5,8 +5,8 @@
 
 use ndarray::{Array1, ArrayView1};
 
-use crate::compute::simd;
-use crate::error::{Result, VolasError};
+use crate::simd;
+use volas_core::{Result, VolasError};
 
 #[inline]
 fn av(s: &[f64]) -> ArrayView1<'_, f64> {

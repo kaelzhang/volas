@@ -1,0 +1,13 @@
+[package]
+name = "volas-directive"
+description = "The volas directive engine: parser, AST, and executor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+volas-core = { path = "../volas-core" }
+volas-compute = { path = "../volas-compute" }

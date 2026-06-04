@@ -1,5 +1,5 @@
-//! The directive engine: parse `"ma:5@close"`-style strings into an AST and
-//! execute them against a [`crate::DataFrame`].
+//! volas-directive: parse `"ma:5@close"`-style strings into an AST and execute
+//! them against a `volas_core::DataFrame`.
 
 pub mod exec;
 pub mod parser;

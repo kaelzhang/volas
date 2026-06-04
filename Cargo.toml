@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/volas-core", "crates/volas-python"]
+members = [
+  "crates/volas-core",
+  "crates/volas-compute",
+  "crates/volas-directive",
+  "crates/volas-python",
+]
 
 [workspace.package]
 version = "0.0.0"
