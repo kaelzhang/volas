@@ -15,7 +15,9 @@ pub fn ma(close: &[f64], period: usize) -> Vec<f64> {
 
 /// Exponential moving average (TA-Lib: SMA-seeded, `k = 2/(period+1)`).
 pub fn ema(close: &[f64], period: usize) -> Vec<f64> {
-    kernels::ema_seeded(av(close), period).into_raw_vec_and_offset().0
+    kernels::ema_seeded(av(close), period)
+        .into_raw_vec_and_offset()
+        .0
 }
 
 /// Smoothed moving average (Wilder's RMA: SMA-seeded, `alpha = 1/period`).
@@ -175,10 +177,14 @@ pub fn sar(high: &[f64], low: &[f64], acceleration: f64, maximum: f64) -> Vec<f6
         return out;
     }
     let af_init = acceleration.min(maximum); // TA-Lib clamps the step to the cap
-    // Initial direction from the one-period −DM at bar 1: a positive −DM ⇒ short.
+                                             // Initial direction from the one-period −DM at bar 1: a positive −DM ⇒ short.
     let diff_p = high[1] - high[0];
     let diff_m = low[0] - low[1];
-    let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m { diff_m } else { 0.0 };
+    let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m {
+        diff_m
+    } else {
+        0.0
+    };
     let mut is_long = !(minus_dm1 > 0.0);
 
     let mut af = af_init;

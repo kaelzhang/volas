@@ -53,7 +53,11 @@ fn accbands_raw(high: &[f64], low: &[f64], upper: bool) -> Vec<f64> {
         .map(|i| {
             let sum = high[i] + low[i];
             if sum.abs() < 1e-14 {
-                if upper { high[i] } else { low[i] }
+                if upper {
+                    high[i]
+                } else {
+                    low[i]
+                }
             } else {
                 let factor = 4.0 * (high[i] - low[i]) / sum;
                 if upper {

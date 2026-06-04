@@ -120,7 +120,9 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
         return out;
     }
     let p = period as f64;
-    let tp: Vec<f64> = (0..n).map(|i| (high[i] + low[i] + close[i]) / 3.0).collect();
+    let tp: Vec<f64> = (0..n)
+        .map(|i| (high[i] + low[i] + close[i]) / 3.0)
+        .collect();
     for i in (period - 1)..n {
         let window = &tp[i + 1 - period..=i];
         let avg = window.iter().sum::<f64>() / p;
