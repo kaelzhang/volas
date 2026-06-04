@@ -10,7 +10,7 @@ use std::sync::Arc;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PySlice};
+use pyo3::types::{PyDict, PyList, PySlice};
 
 use volas_core::{datetime, Column, DataFrame, Index, Series, VolasError};
 use volas_directive::{execute, parse};
@@ -40,8 +40,11 @@ fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(vv) = v.extract::<Vec<f64>>() {
         return Ok(Column::F64(vv));
     }
+    if let Ok(vv) = v.extract::<Vec<String>>() {
+        return Ok(Column::Str(vv));
+    }
     Err(PyTypeError::new_err(
-        "column values must be a 1-D numeric array or a list of numbers",
+        "column values must be a 1-D numeric array, a list of numbers, or a list of strings",
     ))
 }
 
@@ -50,6 +53,16 @@ fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
         Column::F64(v) => v.clone().into_pyarray(py).into_any(),
         Column::Bool(v) => v.clone().into_pyarray(py).into_any(),
         Column::I64(v) => v.clone().into_pyarray(py).into_any(),
+        // String columns become NumPy object arrays (pandas `object` dtype).
+        Column::Str(v) => {
+            let list = PyList::new(py, v).expect("build str list");
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "object").expect("set dtype=object");
+            py.import("numpy")
+                .expect("import numpy")
+                .call_method("array", (list,), Some(&kwargs))
+                .expect("np.array(object)")
+        }
     }
 }
 
@@ -59,6 +72,7 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
         Column::F64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         Column::I64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         Column::Bool(v) => v[i].into_pyobject(py).unwrap().to_owned().into_any().unbind(),
+        Column::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
     }
 }
 
@@ -772,6 +786,42 @@ impl SeriesLoc {
     }
 }
 
+/// Read a CSV file into a `DataFrame`, inferring per-column dtypes.
+///
+/// `date_col`, when given, names a string column to parse into the
+/// `DatetimeIndex` (the column is consumed, mirroring the `DataFrame`
+/// constructor's `date_col`).
+#[pyfunction]
+#[pyo3(signature = (path, date_col = None))]
+fn read_csv(path: String, date_col: Option<String>) -> PyResult<PyDataFrame> {
+    let df = volas_io::read_csv(&path).map_err(pyerr)?;
+    let Some(dc) = date_col else {
+        return Ok(PyDataFrame { inner: df });
+    };
+    let col = df.column(&dc).map_err(pyerr)?;
+    let strings = col
+        .as_str()
+        .ok_or_else(|| PyTypeError::new_err(format!("date_col {dc:?} is not a string column")))?;
+    let mut epochs = Vec::with_capacity(strings.len());
+    for s in strings {
+        epochs.push(
+            datetime::parse_ns(s)
+                .ok_or_else(|| PyValueError::new_err(format!("could not parse datetime {s:?}")))?,
+        );
+    }
+    let mut names = Vec::with_capacity(df.width().saturating_sub(1));
+    let mut cols = Vec::with_capacity(names.capacity());
+    for (n, c) in df.names().iter().zip(df.columns()) {
+        if n == &dc {
+            continue;
+        }
+        names.push(n.clone());
+        cols.push(c.clone());
+    }
+    let out = DataFrame::new(names, cols, Some(Index::Datetime(epochs))).map_err(pyerr)?;
+    Ok(PyDataFrame { inner: out })
+}
+
 /// The compiled module backing the `volas` package.
 #[pymodule]
 fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -784,5 +834,6 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DataFrameAt>()?;
     m.add_class::<SeriesILoc>()?;
     m.add_class::<SeriesLoc>()?;
+    m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     Ok(())
 }

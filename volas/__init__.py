@@ -2,10 +2,10 @@
 candlestick (OHLCV) time-series data.
 """
 
-from volas_rs import DataFrame, Series
+from volas_rs import DataFrame, Series, read_csv
 
 from importlib.metadata import version as _get_version
 
 __version__ = _get_version('volas')
 
-__all__ = ['DataFrame', 'Series', '__version__']
+__all__ = ['DataFrame', 'Series', 'read_csv', '__version__']

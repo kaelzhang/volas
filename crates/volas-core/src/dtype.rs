@@ -15,16 +15,19 @@ pub enum DType {
     I64,
     /// Datetime stored as i64 nanoseconds since the Unix epoch.
     Datetime,
+    /// UTF-8 string (pandas reports such columns as `object`).
+    Utf8,
 }
 
 impl DType {
-    /// A short, stable, lower-case name for the dtype.
+    /// A short, stable name for the dtype.
     pub fn name(&self) -> &'static str {
         match self {
             DType::F64 => "float64",
             DType::Bool => "bool",
             DType::I64 => "int64",
             DType::Datetime => "datetime64[ns]",
+            DType::Utf8 => "object",
         }
     }
 }

@@ -15,6 +15,8 @@ pub enum Column {
     Bool(Vec<bool>),
     /// 64-bit signed integers.
     I64(Vec<i64>),
+    /// UTF-8 strings.
+    Str(Vec<String>),
 }
 
 impl Column {
@@ -24,6 +26,7 @@ impl Column {
             Column::F64(v) => v.len(),
             Column::Bool(v) => v.len(),
             Column::I64(v) => v.len(),
+            Column::Str(v) => v.len(),
         }
     }
 
@@ -38,6 +41,7 @@ impl Column {
             Column::F64(_) => DType::F64,
             Column::Bool(_) => DType::Bool,
             Column::I64(_) => DType::I64,
+            Column::Str(_) => DType::Utf8,
         }
     }
 
@@ -68,13 +72,23 @@ impl Column {
         }
     }
 
-    /// Materialize the values as `f64` (`bool` -> 0.0/1.0, `i64` -> as f64).
-    /// Used to feed indicator kernels, which operate on `f64`.
+    /// Borrow the underlying `String` slice, if this is a `Str` column.
+    pub fn as_str(&self) -> Option<&[String]> {
+        if let Column::Str(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    /// Materialize the values as `f64` (`bool` -> 0.0/1.0, `i64` -> as f64,
+    /// `str` -> NaN). Used to feed indicator kernels, which operate on `f64`.
     pub fn to_f64_vec(&self) -> Vec<f64> {
         match self {
             Column::F64(v) => v.clone(),
             Column::Bool(v) => v.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect(),
             Column::I64(v) => v.iter().map(|&i| i as f64).collect(),
+            Column::Str(v) => vec![f64::NAN; v.len()],
         }
     }
 
@@ -90,6 +104,7 @@ impl Column {
                 }
             }
             Column::I64(v) => v[i] as f64,
+            Column::Str(_) => f64::NAN,
         }
     }
 
@@ -99,6 +114,7 @@ impl Column {
             Column::F64(v) => Column::F64(v[start..end].to_vec()),
             Column::Bool(v) => Column::Bool(v[start..end].to_vec()),
             Column::I64(v) => Column::I64(v[start..end].to_vec()),
+            Column::Str(v) => Column::Str(v[start..end].to_vec()),
         }
     }
 
@@ -108,6 +124,7 @@ impl Column {
             Column::F64(v) => Column::F64(idx.iter().map(|&i| v[i]).collect()),
             Column::Bool(v) => Column::Bool(idx.iter().map(|&i| v[i]).collect()),
             Column::I64(v) => Column::I64(idx.iter().map(|&i| v[i]).collect()),
+            Column::Str(v) => Column::Str(idx.iter().map(|&i| v[i].clone()).collect()),
         }
     }
 
@@ -123,6 +140,10 @@ impl Column {
                 Ok(())
             }
             (Column::I64(a), Column::I64(b)) => {
+                a.extend_from_slice(b);
+                Ok(())
+            }
+            (Column::Str(a), Column::Str(b)) => {
                 a.extend_from_slice(b);
                 Ok(())
             }
