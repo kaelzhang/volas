@@ -279,15 +279,61 @@ impl PySeries {
 
     /// NaN-skipping mean of the values.
     fn mean(&self) -> f64 {
-        let v = self.inner.data.to_f64_vec();
-        let (sum, cnt) = v
-            .iter()
-            .filter(|x| !x.is_nan())
-            .fold((0.0, 0usize), |(s, c), &x| (s + x, c + 1));
-        if cnt == 0 {
+        let v = non_nan(&self.inner.data);
+        if v.is_empty() {
             f64::NAN
         } else {
-            sum / cnt as f64
+            v.iter().sum::<f64>() / v.len() as f64
+        }
+    }
+
+    /// NaN-skipping sum (0.0 when empty / all-NaN, matching pandas).
+    fn sum(&self) -> f64 {
+        non_nan(&self.inner.data).iter().sum()
+    }
+
+    /// NaN-skipping minimum (NaN when empty / all-NaN).
+    fn min(&self) -> f64 {
+        non_nan(&self.inner.data)
+            .into_iter()
+            .fold(f64::NAN, |m, x| if m.is_nan() { x } else { m.min(x) })
+    }
+
+    /// NaN-skipping maximum (NaN when empty / all-NaN).
+    fn max(&self) -> f64 {
+        non_nan(&self.inner.data)
+            .into_iter()
+            .fold(f64::NAN, |m, x| if m.is_nan() { x } else { m.max(x) })
+    }
+
+    /// NaN-skipping sample variance (`ddof=1`; NaN with fewer than 2 values).
+    fn var(&self) -> f64 {
+        let v = non_nan(&self.inner.data);
+        let n = v.len();
+        if n < 2 {
+            return f64::NAN;
+        }
+        let mean = v.iter().sum::<f64>() / n as f64;
+        v.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1) as f64
+    }
+
+    /// NaN-skipping sample standard deviation (`ddof=1`).
+    fn std(&self) -> f64 {
+        self.var().sqrt()
+    }
+
+    /// NaN-skipping median.
+    fn median(&self) -> f64 {
+        let mut v = non_nan(&self.inner.data);
+        let n = v.len();
+        if n == 0 {
+            return f64::NAN;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            (v[n / 2 - 1] + v[n / 2]) / 2.0
         }
     }
 
@@ -483,6 +529,11 @@ fn series_cmp(
     Ok(PySeries {
         inner: Series::new(s.name.clone(), Column::bool(out), Arc::clone(&s.index)),
     })
+}
+
+/// The non-NaN `f64` values of a column (for NaN-skipping reductions).
+fn non_nan(col: &Column) -> Vec<f64> {
+    col.to_f64_vec().into_iter().filter(|x| !x.is_nan()).collect()
 }
 
 /// A column coerced to bool (a `Bool` column as-is, else `x != 0.0`).

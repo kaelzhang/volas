@@ -59,3 +59,28 @@ def test_reflected_logical_operand():
     df = make()
     m = df['a'] < df['b']
     assert (True & m).to_numpy().tolist() == m.to_numpy().tolist()
+
+
+def test_reductions_match_pandas():
+    s = make()['a']                 # [1.0, nan, 3.0, 4.0]
+    ps = PA
+    assert s.sum() == ps.sum()
+    assert s.mean() == ps.mean()
+    assert s.min() == ps.min()
+    assert s.max() == ps.max()
+    assert abs(s.var() - ps.var()) < 1e-12        # ddof=1
+    assert abs(s.std() - ps.std()) < 1e-12
+    assert s.median() == ps.median()
+
+
+def test_reduction_edge_cases():
+    from volas import DataFrame as DF
+    allnan = DF({'x': [np.nan, np.nan]})['x']
+    assert allnan.sum() == 0.0                    # pandas: sum of all-NaN is 0
+    assert np.isnan(allnan.mean())
+    assert np.isnan(allnan.min()) and np.isnan(allnan.max())
+    one = DF({'x': [5.0, np.nan]})['x']
+    assert np.isnan(one.var()) and np.isnan(one.std())   # ddof=1 needs >=2 values
+    # even-length median = mean of the two middle values
+    even = DF({'x': [1.0, 2.0, 3.0, 4.0]})['x']
+    assert even.median() == 2.5
