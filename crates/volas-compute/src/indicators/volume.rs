@@ -63,8 +63,7 @@ pub fn adosc(
     fast: usize,
     slow: usize,
 ) -> Vec<f64> {
-    let line = ad(high, low, close, volume);
-    let n = line.len();
+    let n = close.len();
     let mut out = vec![f64::NAN; n];
     if n == 0 {
         return out;
@@ -72,14 +71,22 @@ pub fn adosc(
     let lookback = fast.max(slow).saturating_sub(1);
     let fastk = 2.0 / (fast as f64 + 1.0);
     let slowk = 2.0 / (slow as f64 + 1.0);
-    let mut fast_ema = line[0];
-    let mut slow_ema = line[0];
+    // Fuse the Chaikin A/D line into the oscillator's single pass: accumulate the A/D
+    // value on the fly and feed both EMAs, so the intermediate A/D array is never
+    // materialised (TA-Lib computes ADOSC in one pass). The EMAs use TA-Lib's
+    // `(price − prev)·k + prev` form, fused to a single rounding off the recurrence's
+    // critical path; the two independent chains interleave (ILP). EMA is contractive
+    // (k < 1), so the ~1e-16 divergence decays — within the parity tolerance.
+    let mut ad_line = money_flow_volume(high[0], low[0], close[0], volume[0]);
+    let mut fast_ema = ad_line;
+    let mut slow_ema = ad_line;
     if lookback == 0 {
         out[0] = fast_ema - slow_ema;
     }
     for i in 1..n {
-        fast_ema = fastk * line[i] + (1.0 - fastk) * fast_ema;
-        slow_ema = slowk * line[i] + (1.0 - slowk) * slow_ema;
+        ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
+        fast_ema = (ad_line - fast_ema).mul_add(fastk, fast_ema);
+        slow_ema = (ad_line - slow_ema).mul_add(slowk, slow_ema);
         if i >= lookback {
             out[i] = fast_ema - slow_ema;
         }
