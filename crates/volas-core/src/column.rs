@@ -212,12 +212,20 @@ impl Column {
     /// parsed via [`datetime::parse_ns`]; an already-`Datetime` column is shared
     /// back (cheap). Errors on an unparseable cell or an unsupported dtype.
     pub fn to_datetime(&self) -> Result<Column> {
+        self.to_datetime_tz(crate::tz::Tz::Utc)
+    }
+
+    /// Parse a string column to a UTC `Datetime` column, interpreting **naive**
+    /// strings in `tz` (offset-aware strings are absolute; an existing `Datetime`
+    /// column is already UTC and returned as-is). The tz is then attached to the
+    /// *index* (storage stays UTC).
+    pub fn to_datetime_tz(&self, tz: crate::tz::Tz) -> Result<Column> {
         match self {
             Column::Datetime(_) => Ok(self.clone()),
             Column::Str(v) => {
                 let mut out = Vec::with_capacity(v.len());
                 for s in v.iter() {
-                    let ns = datetime::parse_ns(s).ok_or_else(|| {
+                    let ns = datetime::parse_ns_in_tz(s, tz).ok_or_else(|| {
                         VolasError::Value(format!("could not parse datetime {s:?}"))
                     })?;
                     out.push(ns);
@@ -226,6 +234,28 @@ impl Column {
             }
             other => Err(VolasError::DType(format!(
                 "cannot parse a {} column as datetime",
+                other.dtype()
+            ))),
+        }
+    }
+
+    /// Interpret a numeric (epoch) column as a UTC `Datetime` column, scaling by
+    /// `unit` (`"s"` / `"ms"` / `"us"` / `"ns"`). The robust ingestion path for
+    /// exchange APIs that return numeric timestamps.
+    pub fn epoch_to_datetime(&self, unit: &str) -> Result<Column> {
+        let to_ns = |x: i64| {
+            datetime::epoch_to_ns(x, unit)
+                .ok_or_else(|| VolasError::Value(format!("invalid epoch unit {unit:?} or overflow")))
+        };
+        match self {
+            Column::I64(v) => v.iter().map(|&x| to_ns(x)).collect::<Result<Vec<_>>>().map(Column::datetime),
+            Column::F64(v) => v
+                .iter()
+                .map(|&x| to_ns(x as i64))
+                .collect::<Result<Vec<_>>>()
+                .map(Column::datetime),
+            other => Err(VolasError::DType(format!(
+                "cannot read a {} column as an epoch timestamp (need int64 / float64)",
                 other.dtype()
             ))),
         }

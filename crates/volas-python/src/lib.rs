@@ -242,6 +242,33 @@ pub(crate) fn norm_idx(i: isize, len: usize) -> PyResult<usize> {
     }
 }
 
+/// Parse column `dc` to a UTC `Datetime` column, move it into the index, and tag
+/// the index with `tz` (PD-20 ingestion). A **naive** string column is
+/// interpreted in `tz`; with `date_unit` the column is read as an epoch integer
+/// (`"s"`/`"ms"`/`"us"`/`"ns"`, absolute) and `tz` only sets the display zone.
+pub(crate) fn build_datetime_index(
+    mut df: DataFrame,
+    dc: &str,
+    tz: Option<&str>,
+    date_unit: Option<&str>,
+) -> PyResult<DataFrame> {
+    let tzv = match tz {
+        Some(s) => Tz::parse(s).map_err(pyerr)?,
+        None => Tz::Utc,
+    };
+    let parsed = match date_unit {
+        Some(unit) => df.column(dc).map_err(pyerr)?.epoch_to_datetime(unit).map_err(pyerr)?,
+        None => df.column(dc).map_err(pyerr)?.to_datetime_tz(tzv).map_err(pyerr)?,
+    };
+    df.set_column(dc, parsed).map_err(pyerr)?;
+    let mut df = df.set_index(dc).map_err(pyerr)?;
+    // The instants are already correct UTC; tag the display / matching tz.
+    if !tzv.is_utc() {
+        df = df.tz_convert(tzv).map_err(pyerr)?;
+    }
+    Ok(df)
+}
+
 /// Raise if the frame has stale computed columns after an `append`. The per-column
 /// `df[directive]` access auto-refreshes; bulk / positional reads (`to_numpy`,
 /// `.iloc` / `.loc` / `.at` / `.iat`) do not, so they must be fresh — call
@@ -280,6 +307,16 @@ impl PySeries {
     #[getter]
     fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         index_to_numpy(py, &self.inner.index)
+    }
+
+    /// The DatetimeIndex timezone name, or `None` for a tz-naive / non-datetime
+    /// index (mirrors `df.tz`).
+    #[getter]
+    fn tz(&self) -> Option<String> {
+        match self.inner.index.tz() {
+            Tz::Utc => None,
+            other => Some(other.name()),
+        }
     }
 
     #[getter]
@@ -854,8 +891,13 @@ impl PyDataFrame {
 #[pymethods]
 impl PyDataFrame {
     #[new]
-    #[pyo3(signature = (data, date_col = None))]
-    fn new(data: &Bound<'_, PyDict>, date_col: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (data, date_col = None, tz = None, date_unit = None))]
+    fn new(
+        data: &Bound<'_, PyDict>,
+        date_col: Option<String>,
+        tz: Option<String>,
+        date_unit: Option<String>,
+    ) -> PyResult<Self> {
         let mut names = Vec::new();
         let mut columns = Vec::new();
         for (k, v) in data.iter() {
@@ -863,14 +905,47 @@ impl PyDataFrame {
             columns.push(pyany_to_column(&v)?);
         }
         let mut df = DataFrame::new(names, columns, None).map_err(pyerr)?;
-        // Same string -> DatetimeIndex path as read_csv: parse the named column
-        // to datetime, then move it into the index.
+        // Same string -> DatetimeIndex path as read_csv, with timezone ingestion:
+        // parse the named column to a UTC datetime, move it into the index, then
+        // tag the index tz (see `build_datetime_index`).
         if let Some(dc) = date_col {
-            let parsed = df.column(&dc).map_err(pyerr)?.to_datetime().map_err(pyerr)?;
-            df.set_column(&dc, parsed).map_err(pyerr)?;
-            df = df.set_index(&dc).map_err(pyerr)?;
+            df = build_datetime_index(df, &dc, tz.as_deref(), date_unit.as_deref())?;
+        } else if tz.is_some() || date_unit.is_some() {
+            return Err(PyValueError::new_err(
+                "tz / date_unit require date_col (the column to use as the datetime index)",
+            ));
         }
         Ok(PyDataFrame { inner: df })
+    }
+
+    /// The DatetimeIndex timezone name (`"+08:00"` / `"America/New_York"`), or
+    /// `None` for a tz-naive (UTC-default) or non-datetime index — mirroring
+    /// pandas `df.index.tz`.
+    #[getter]
+    fn tz(&self) -> Option<String> {
+        match self.inner.index().tz() {
+            Tz::Utc => None,
+            other => Some(other.name()),
+        }
+    }
+
+    /// Reinterpret the index wall-clock as `tz` (pandas `tz_localize`): the
+    /// displayed wall-clock is unchanged, each instant is recomputed. Use when
+    /// data was ingested without a tz. Returns a new frame.
+    fn tz_localize(&self, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = Tz::parse(tz).map_err(pyerr)?;
+        Ok(PyDataFrame {
+            inner: self.inner.tz_localize(tzv).map_err(pyerr)?,
+        })
+    }
+
+    /// Change the index display / matching tz without moving any instant (pandas
+    /// `tz_convert`). Returns a new frame.
+    fn tz_convert(&self, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = Tz::parse(tz).map_err(pyerr)?;
+        Ok(PyDataFrame {
+            inner: self.inner.tz_convert(tzv).map_err(pyerr)?,
+        })
     }
 
     #[getter]

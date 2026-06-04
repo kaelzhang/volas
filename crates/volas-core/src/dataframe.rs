@@ -219,6 +219,56 @@ impl DataFrame {
         Ok(df)
     }
 
+    /// Change the DatetimeIndex's **display / matching** timezone without moving
+    /// any instant (pandas `tz_convert`): stored UTC ns are unchanged; only how
+    /// they render and how bare-string `.loc` matches changes. Returns a new frame
+    /// (columns shared). Errors if the index is not a DatetimeIndex.
+    pub fn tz_convert(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
+        match self.index.as_ref() {
+            Index::Datetime(_, _) => {
+                let mut df = self.clone();
+                df.index = Arc::new((*self.index).clone().with_tz(tz));
+                Ok(df)
+            }
+            _ => Err(VolasError::DType(
+                "tz_convert requires a DatetimeIndex".into(),
+            )),
+        }
+    }
+
+    /// Reinterpret the index's **wall-clock** as `tz` (pandas `tz_localize`): each
+    /// instant is recomputed so the displayed wall-clock is unchanged but now
+    /// correct for `tz`. Use this when data was ingested without a tz and you need
+    /// to attach the right one. Returns a new frame. Errors if the index is not a
+    /// DatetimeIndex or a wall-clock does not exist in `tz` (a DST spring-forward
+    /// gap).
+    pub fn tz_localize(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
+        let (values, cur) = match self.index.as_ref() {
+            Index::Datetime(v, cur) => (v.clone(), *cur),
+            _ => {
+                return Err(VolasError::DType(
+                    "tz_localize requires a DatetimeIndex".into(),
+                ))
+            }
+        };
+        let mut shifted = Vec::with_capacity(values.len());
+        for ns in values {
+            let (y, mo, d, h, mi, s) = cur.civil_parts(ns);
+            let new = tz
+                .wall_to_utc_ns(y as i32, mo as u32, d as u32, h as u32, mi as u32, s as u32)
+                .ok_or_else(|| {
+                    VolasError::Value(format!(
+                        "wall-clock {y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02} does not exist in {}",
+                        tz.name()
+                    ))
+                })?;
+            shifted.push(new);
+        }
+        let mut df = self.clone();
+        df.index = Arc::new(Index::Datetime(shifted, tz));
+        Ok(df)
+    }
+
     /// Select a subset of columns into a new frame sharing this index.
     pub fn select(&self, names: &[String]) -> Result<DataFrame> {
         let mut columns = Vec::with_capacity(names.len());
@@ -788,6 +838,46 @@ mod tests {
         // a manual write into the cached column drops its computed status
         df.assign_positions(0, &[0], &Column::f64(vec![7.0])).unwrap();
         assert!(df.computed_columns().is_empty());
+    }
+
+    #[test]
+    fn tz_convert_keeps_instant_localize_shifts() {
+        use crate::tz::Tz;
+        // a frame whose datetime index was ingested as UTC instants
+        let ns = crate::datetime::parse_ns("2021-01-01 12:00:00").unwrap();
+        let df = DataFrame::new(
+            vec!["c".into()],
+            vec![Column::f64(vec![1.0])],
+            Some(Index::Datetime(vec![ns], Tz::Utc)),
+        )
+        .unwrap();
+
+        // tz_convert: instant unchanged, only the tag changes.
+        let conv = df.tz_convert(Tz::parse("America/New_York").unwrap()).unwrap();
+        match conv.index().as_ref() {
+            Index::Datetime(v, tz) => {
+                assert_eq!(v[0], ns);
+                assert_eq!(*tz, Tz::parse("America/New_York").unwrap());
+            }
+            _ => panic!("datetime"),
+        }
+
+        // tz_localize: wall-clock 12:00 reinterpreted as NY -> instant moves +5h to UTC.
+        let loc = df.tz_localize(Tz::parse("America/New_York").unwrap()).unwrap();
+        match loc.index().as_ref() {
+            Index::Datetime(v, _) => {
+                assert_eq!(crate::datetime::format_ns(v[0]), "2021-01-01 17:00:00");
+            }
+            _ => panic!("datetime"),
+        }
+    }
+
+    #[test]
+    fn tz_ops_require_datetime_index() {
+        use crate::tz::Tz;
+        let df = sample(); // Range index
+        assert!(df.tz_convert(Tz::Utc).is_err());
+        assert!(df.tz_localize(Tz::Utc).is_err());
     }
 
     #[test]

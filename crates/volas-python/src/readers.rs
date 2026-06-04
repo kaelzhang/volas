@@ -3,7 +3,7 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::{norm_idx, pyerr, PyDataFrame};
+use crate::{build_datetime_index, norm_idx, pyerr, PyDataFrame};
 
 /// Read a CSV file into a `DataFrame`, inferring per-column dtypes.
 ///
@@ -16,6 +16,14 @@ use crate::{norm_idx, pyerr, PyDataFrame};
 /// - `index_col` — a column name or integer position to move into the row index;
 ///   applied after `parse_dates`, so naming a parsed date column yields a
 ///   `DatetimeIndex`.
+/// - `tz` — timezone for the `index_col` datetime (PD-20): a **naive** date
+///   string column is interpreted in `tz` (stored UTC, the index tagged with
+///   `tz`); a fixed offset (`"+08:00"`) or IANA name (`"America/New_York"`). For
+///   tz ingestion pass the date column via `index_col` and do **not** also list
+///   it in `parse_dates` (which would parse it as UTC first).
+/// - `date_unit` — read the `index_col` column as an epoch integer with this unit
+///   (`"s"`/`"ms"`/`"us"`/`"ns"`, absolute UTC); `tz` then only sets the display
+///   zone.
 #[pyfunction]
 #[pyo3(signature = (
     path,
@@ -26,6 +34,8 @@ use crate::{norm_idx, pyerr, PyDataFrame};
     index_col = None,
     na_values = None,
     keep_default_na = true,
+    tz = None,
+    date_unit = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn read_csv(
@@ -37,6 +47,8 @@ pub fn read_csv(
     index_col: Option<Bound<'_, PyAny>>,
     na_values: Option<Bound<'_, PyAny>>,
     keep_default_na: bool,
+    tz: Option<String>,
+    date_unit: Option<String>,
 ) -> PyResult<PyDataFrame> {
     // Resolve the delimiter (a single byte).
     let delim_str = delimiter.or(sep).unwrap_or_else(|| ",".to_string());
@@ -95,7 +107,16 @@ pub fn read_csv(
                 "index_col must be a column name or an integer position",
             ));
         };
-        df = df.set_index(&name).map_err(pyerr)?;
+        // With tz / date_unit, parse + tag the datetime index; else a plain move.
+        df = if tz.is_some() || date_unit.is_some() {
+            build_datetime_index(df, &name, tz.as_deref(), date_unit.as_deref())?
+        } else {
+            df.set_index(&name).map_err(pyerr)?
+        };
+    } else if tz.is_some() || date_unit.is_some() {
+        return Err(PyValueError::new_err(
+            "tz / date_unit require index_col (the column to use as the datetime index)",
+        ));
     }
 
     Ok(PyDataFrame { inner: df })
