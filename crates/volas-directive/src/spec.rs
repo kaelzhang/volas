@@ -107,6 +107,8 @@ pub fn is_command(name: &str) -> bool {
             | "rocr100"
             | "willr"
             | "cmo"
+            | "cci"
+            | "trix"
             | "natr"
             | "bop"
             | "midpoint"
@@ -168,6 +170,8 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("midprice", None) => (vec![Int(14)], vec!["high", "low"]),
         ("willr", None) => (vec![Int(14)], vec!["high", "low", "close"]),
         ("cmo", None) => (vec![Int(14)], vec!["close"]),
+        ("cci", None) => (vec![Int(14)], vec!["high", "low", "close"]),
+        ("trix", None) => (vec![Int(30)], vec!["close"]),
         ("natr", None) => (vec![Int(14)], vec!["high", "low", "close"]),
         ("bop", None) => (vec![], vec!["open", "high", "low", "close"]),
         (

@@ -82,3 +82,38 @@ pub fn bop(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
         })
         .collect()
 }
+
+/// Commodity Channel Index (TA-Lib CCI): `(tp − SMA(tp)) / (0.015 · meanDev)` over
+/// `period`, where `tp = (high+low+close)/3` and `meanDev` is the mean absolute
+/// deviation of `tp` from its average. A zero numerator or zero deviation yields 0
+/// (TA-Lib's guard). Lookback `period-1`. O(n·period), as in TA-Lib.
+pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period > n {
+        return out;
+    }
+    let p = period as f64;
+    let tp: Vec<f64> = (0..n).map(|i| (high[i] + low[i] + close[i]) / 3.0).collect();
+    for i in (period - 1)..n {
+        let window = &tp[i + 1 - period..=i];
+        let avg = window.iter().sum::<f64>() / p;
+        let sum_dev: f64 = window.iter().map(|x| (x - avg).abs()).sum();
+        let num = tp[i] - avg;
+        out[i] = if num != 0.0 && sum_dev != 0.0 {
+            num / (0.015 * (sum_dev / p))
+        } else {
+            0.0
+        };
+    }
+    out
+}
+
+/// TRIX (TA-Lib): the 1-period percent rate-of-change of a triple SMA-seeded EMA of
+/// `close`. Lookback `3·(period-1) + 1`. (Reuses the verified `roc` and `ema_seeded`.)
+pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
+    let e1 = kernels::ema_seeded(av(close), period);
+    let e2 = kernels::ema_seeded(e1.view(), period);
+    let e3 = kernels::ema_seeded(e2.view(), period);
+    roc(&e3.to_vec(), 1)
+}

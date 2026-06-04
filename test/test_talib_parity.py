@@ -129,6 +129,16 @@ def test_variance_stddev_matches_talib(ohlc):
     _parity(df.exec('var'), talib.VAR(c, 5))  # default resolves to 5
 
 
+def test_cci_trix_match_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (14, 20):
+        _parity(df.exec(f'cci:{p}'), talib.CCI(h, l, c, p))
+    for p in (15, 30):  # 30 is the TA-Lib default
+        _parity(df.exec(f'trix:{p}'), talib.TRIX(c, p))
+    _parity(df.exec('cci'), talib.CCI(h, l, c, 14))  # default resolves to 14
+    _parity(df.exec('trix'), talib.TRIX(c, 30))
+
+
 def test_bop_cmo_natr_match_talib(ohlc):
     df, h, l, c = ohlc
     o = df['open'].to_numpy()
