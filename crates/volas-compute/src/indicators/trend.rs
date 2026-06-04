@@ -180,7 +180,7 @@ pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
         } else {
             (period_roc / sum_roc1).abs()
         };
-        let sc = er * const_diff + CONST_MAX;
+        let sc = er.mul_add(const_diff, CONST_MAX);
         sc * sc
     };
 
@@ -197,7 +197,10 @@ pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
     let period_roc = data[today] - trailing_value;
     trailing_idx += 1;
     let sc = efficiency_sc(period_roc, sum_roc1);
-    prev_kama += (data[today] - prev_kama) * sc;
+    // `(price − prev)·sc + prev` fused: one rounding off the recurrence's critical
+    // path. KAMA is contractive (sc ≤ (2/3)² < 1), so the ~1e-16 divergence decays —
+    // within the 1e-9 TA-Lib parity tolerance.
+    prev_kama = (data[today] - prev_kama).mul_add(sc, prev_kama);
     out[today] = prev_kama;
     today += 1;
 
@@ -209,7 +212,7 @@ pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
         sum_roc1 += (data[today] - data[today - 1]).abs(); // add the newest
         trailing_value = tr2;
         let sc = efficiency_sc(period_roc, sum_roc1);
-        prev_kama += (data[today] - prev_kama) * sc;
+        prev_kama = (data[today] - prev_kama).mul_add(sc, prev_kama);
         out[today] = prev_kama;
         today += 1;
     }
