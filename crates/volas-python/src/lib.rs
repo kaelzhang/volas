@@ -16,11 +16,16 @@ use pyo3::types::{PyDict, PyList, PySlice};
 
 use volas_core::{datetime, Column, DataFrame, DType, Index, Series, VolasError};
 use volas_directive::{execute, parse};
-use volas_time::{Agg, AggSpec, Cumulator, TimeFrame};
+
+mod readers;
+mod timeframe;
+
+use readers::read_csv;
+use timeframe::{build_agg_spec, resolve_time_frame, PyCumulator, PyTimeFrame};
 
 // --- helpers ---------------------------------------------------------------
 
-fn pyerr(e: VolasError) -> PyErr {
+pub(crate) fn pyerr(e: VolasError) -> PyErr {
     match e {
         VolasError::ColumnNotFound(n) => PyKeyError::new_err(format!("column \"{n}\" not found")),
         VolasError::DType(m) => PyTypeError::new_err(m),
@@ -159,7 +164,7 @@ fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> {
 }
 
 /// Parse a Python label (datetime string or integer) to the i64 used by the index.
-fn parse_label(key: &Bound<'_, PyAny>) -> PyResult<i64> {
+pub(crate) fn parse_label(key: &Bound<'_, PyAny>) -> PyResult<i64> {
     if let Ok(s) = key.extract::<String>() {
         return datetime::parse_ns(&s)
             .ok_or_else(|| PyKeyError::new_err(format!("invalid datetime label {s:?}")));
@@ -183,7 +188,7 @@ fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, Py
 }
 
 /// Resolve a possibly-negative index to `[0, len)`.
-fn norm_idx(i: isize, len: usize) -> PyResult<usize> {
+pub(crate) fn norm_idx(i: isize, len: usize) -> PyResult<usize> {
     let n = len as isize;
     let i = if i < 0 { i + n } else { i };
     if i < 0 || i >= n {
@@ -955,273 +960,6 @@ impl SeriesLoc {
     }
 }
 
-// --- TimeFrame / cumulation -------------------------------------------------
-
-/// `volas.TimeFrame` — an OHLCV sampling period.
-#[pyclass(name = "TimeFrame")]
-#[derive(Clone)]
-pub struct PyTimeFrame {
-    inner: TimeFrame,
-}
-
-#[pymethods]
-#[allow(non_snake_case)]
-impl PyTimeFrame {
-    fn __str__(&self) -> String {
-        self.inner.label().to_string()
-    }
-    fn __repr__(&self) -> String {
-        format!("TimeFrame.{}", self.inner.label())
-    }
-    #[getter]
-    fn minutes(&self) -> i64 {
-        self.inner.minutes()
-    }
-    /// Unify a timestamp (datetime string or epoch-ns int) to its period key.
-    fn unify(&self, ts: &Bound<'_, PyAny>) -> PyResult<i64> {
-        Ok(self.inner.unify(parse_label(ts)?))
-    }
-
-    #[classattr]
-    fn s1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Sec1 }
-    }
-    #[classattr]
-    fn m1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min1 }
-    }
-    #[classattr]
-    fn m3() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min3 }
-    }
-    #[classattr]
-    fn m5() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min5 }
-    }
-    #[classattr]
-    fn m15() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min15 }
-    }
-    #[classattr]
-    fn m30() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min30 }
-    }
-    #[classattr]
-    fn H1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour1 }
-    }
-    #[classattr]
-    fn H2() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour2 }
-    }
-    #[classattr]
-    fn H4() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour4 }
-    }
-    #[classattr]
-    fn H6() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour6 }
-    }
-    #[classattr]
-    fn H8() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour8 }
-    }
-    #[classattr]
-    fn H12() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour12 }
-    }
-    #[classattr]
-    fn D1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Day1 }
-    }
-    #[classattr]
-    fn D3() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Day3 }
-    }
-    #[classattr]
-    fn W1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Week1 }
-    }
-    #[classattr]
-    fn M1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Month1 }
-    }
-    #[classattr]
-    fn Y1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Year1 }
-    }
-}
-
-/// Resolve a `TimeFrame` from a `PyTimeFrame` or a label string.
-fn resolve_time_frame(obj: &Bound<'_, PyAny>) -> PyResult<TimeFrame> {
-    if let Ok(tf) = obj.extract::<PyRef<PyTimeFrame>>() {
-        return Ok(tf.inner);
-    }
-    if let Ok(s) = obj.extract::<String>() {
-        return TimeFrame::from_label(&s).map_err(pyerr);
-    }
-    Err(PyTypeError::new_err(
-        "time_frame must be a TimeFrame or a label string like '5m'",
-    ))
-}
-
-/// Build an aggregation spec from the OHLCV defaults plus optional overrides
-/// (`{'volume': 'sum', 'open': 'first', ...}`).
-fn build_agg_spec(cumulators: Option<&Bound<'_, PyDict>>) -> PyResult<AggSpec> {
-    let mut spec = AggSpec::ohlcv();
-    if let Some(dict) = cumulators {
-        for (k, v) in dict.iter() {
-            let name: String = k.extract()?;
-            let agg_name: String = v.extract().map_err(|_| {
-                PyTypeError::new_err("cumulator values must be aggregator names like 'sum'")
-            })?;
-            spec.set(name, Agg::from_name(&agg_name).map_err(pyerr)?);
-        }
-    }
-    Ok(spec)
-}
-
-/// `volas.Cumulator` — a stateful, incremental OHLCV cumulator (live cum_append):
-/// feed fine bars with `.append`, read the cumulated frame from `.frame`.
-#[pyclass(name = "Cumulator")]
-pub struct PyCumulator {
-    inner: Cumulator,
-}
-
-#[pymethods]
-impl PyCumulator {
-    #[new]
-    #[pyo3(signature = (time_frame, cumulators = None))]
-    fn new(
-        time_frame: &Bound<'_, PyAny>,
-        cumulators: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
-        let tf = resolve_time_frame(time_frame)?;
-        let spec = build_agg_spec(cumulators)?;
-        Ok(PyCumulator {
-            inner: Cumulator::new(tf, spec),
-        })
-    }
-
-    /// Feed fine bars (a DataFrame with a DatetimeIndex).
-    fn append(&mut self, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let df = data
-            .extract::<PyRef<PyDataFrame>>()
-            .map_err(|_| PyTypeError::new_err("Cumulator.append expects a DataFrame"))?;
-        self.inner.append(&df.inner).map_err(pyerr)
-    }
-
-    /// The current cumulated frame (closed periods + the open period as the live
-    /// last row).
-    #[getter]
-    fn frame(&self) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame {
-            inner: self.inner.frame().map_err(pyerr)?,
-        })
-    }
-
-    /// The current open period aggregated into a single live bar, or `None`.
-    #[getter]
-    fn last(&self) -> PyResult<Option<PyDataFrame>> {
-        Ok(self
-            .inner
-            .last()
-            .map_err(pyerr)?
-            .map(|inner| PyDataFrame { inner }))
-    }
-}
-
-/// Read a CSV file into a `DataFrame`, inferring per-column dtypes.
-///
-/// A pandas-subset of `pandas.read_csv`:
-/// - `sep` / `delimiter` — field delimiter (single character; default `,`).
-/// - `header` — `True`/omitted = first row is the header; `None`/`False` = no
-///   header (columns named `"0".."n-1"`).
-/// - `na_values` / `keep_default_na` — extra / default missing-value tokens.
-/// - `parse_dates` — column names to parse into datetime columns.
-/// - `index_col` — a column name or integer position to move into the row index;
-///   applied after `parse_dates`, so naming a parsed date column yields a
-///   `DatetimeIndex`.
-#[pyfunction]
-#[pyo3(signature = (
-    path,
-    sep = None,
-    delimiter = None,
-    header = Some(true),
-    parse_dates = None,
-    index_col = None,
-    na_values = None,
-    keep_default_na = true,
-))]
-#[allow(clippy::too_many_arguments)]
-fn read_csv(
-    path: String,
-    sep: Option<String>,
-    delimiter: Option<String>,
-    header: Option<bool>,
-    parse_dates: Option<Vec<String>>,
-    index_col: Option<Bound<'_, PyAny>>,
-    na_values: Option<Bound<'_, PyAny>>,
-    keep_default_na: bool,
-) -> PyResult<PyDataFrame> {
-    // Resolve the delimiter (a single byte).
-    let delim_str = delimiter.or(sep).unwrap_or_else(|| ",".to_string());
-    let delim_bytes = delim_str.as_bytes();
-    if delim_bytes.len() != 1 {
-        return Err(PyValueError::new_err(
-            "sep / delimiter must be a single-byte character",
-        ));
-    }
-
-    // na_values: a string or a list of strings.
-    let na_list: Vec<String> = match na_values {
-        None => Vec::new(),
-        Some(obj) => {
-            if let Ok(s) = obj.extract::<String>() {
-                vec![s]
-            } else if let Ok(v) = obj.extract::<Vec<String>>() {
-                v
-            } else {
-                return Err(PyTypeError::new_err(
-                    "na_values must be a string or a list of strings",
-                ));
-            }
-        }
-    };
-
-    let opts = volas_io::ReadCsvOptions {
-        delimiter: delim_bytes[0],
-        has_header: matches!(header, Some(true)),
-        na_values: na_list,
-        keep_default_na,
-    };
-    let mut df = volas_io::read_csv(&path, &opts).map_err(pyerr)?;
-
-    // parse_dates: convert each named column to a datetime column in place.
-    if let Some(cols) = parse_dates {
-        for name in &cols {
-            let parsed = df.column(name).map_err(pyerr)?.to_datetime().map_err(pyerr)?;
-            df.set_column(name, parsed).map_err(pyerr)?;
-        }
-    }
-
-    // index_col: move a column (by name or position) into the row index.
-    if let Some(ic) = index_col {
-        let name = if let Ok(s) = ic.extract::<String>() {
-            s
-        } else if let Ok(i) = ic.extract::<isize>() {
-            let pos = norm_idx(i, df.width())?;
-            df.names()[pos].clone()
-        } else {
-            return Err(PyTypeError::new_err(
-                "index_col must be a column name or an integer position",
-            ));
-        };
-        df = df.set_index(&name).map_err(pyerr)?;
-    }
-
-    Ok(PyDataFrame { inner: df })
-}
 
 /// The compiled module backing the `volas` package.
 #[pymodule]
