@@ -78,6 +78,18 @@ def test_macd_is_clean_ema_difference(ohlc):
     # talib's quirk-based MACD signal / hist.
 
 
+def test_macdfix_matches_macd_with_fixed_periods(ohlc):
+    # MACDFIX is MACD with fast/slow fixed at 12/26; it reuses the verified macd
+    # line/signal/histogram, so it equals macd:12,26 exactly. Like macd, the line is
+    # the clean EMA(12)-EMA(26) difference (diverging from talib.MACDFIX's internally
+    # inconsistent EMA by the same documented quirk).
+    df, h, l, c = ohlc
+    np.testing.assert_array_equal(df.exec('macdfix'), df.exec('macd:12,26'))
+    np.testing.assert_array_equal(df.exec('macdfix.signal:9'), df.exec('macd.signal:12,26,9'))
+    np.testing.assert_array_equal(df.exec('macdfix.histogram'), df.exec('macd.histogram:12,26,9'))
+    _parity(df.exec('macdfix'), talib.EMA(c, 12) - talib.EMA(c, 26), mask_want=True)
+
+
 def test_price_transform_matches_talib(ohlc):
     df, h, l, c = ohlc
     o = df['open'].to_numpy()

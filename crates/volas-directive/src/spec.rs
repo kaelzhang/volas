@@ -63,9 +63,11 @@ pub struct CommandSpec {
 /// `upper`). Returns the canonical sub, or `None` for the main command.
 pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
     match (name, sub) {
-        ("macd" | "macdext", None | Some("dif")) => None,
-        ("macd" | "macdext", Some("s" | "signal" | "dea")) => Some("signal".into()),
-        ("macd" | "macdext", Some("h" | "histogram" | "macd")) => Some("histogram".into()),
+        ("macd" | "macdext" | "macdfix", None | Some("dif")) => None,
+        ("macd" | "macdext" | "macdfix", Some("s" | "signal" | "dea")) => Some("signal".into()),
+        ("macd" | "macdext" | "macdfix", Some("h" | "histogram" | "macd")) => {
+            Some("histogram".into())
+        }
         ("aroon", Some("u" | "up")) => Some("up".into()),
         ("aroon", Some("d" | "down")) => Some("down".into()),
         ("stoch", Some("k" | "slowk")) => Some("k".into()),
@@ -101,6 +103,7 @@ pub fn is_command(name: &str) -> bool {
             | "apo"
             | "ppo"
             | "macdext"
+            | "macdfix"
             | "wma"
             | "dema"
             | "tema"
@@ -222,6 +225,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("macd", Some("signal" | "histogram")) => {
             (vec![Int(12), Int(26), Int(9)], vec!["close"])
         }
+        // macdfix: fast/slow fixed at 12/26; the line takes no args, the signal/histogram
+        // take only the signal period.
+        ("macdfix", None) => (vec![], vec!["close"]),
+        ("macdfix", Some("signal" | "histogram")) => (vec![Int(9)], vec!["close"]),
         ("boll", None) => (vec![Int(20)], vec!["close"]),
         ("boll", Some("upper" | "lower")) => (vec![Int(20), Float(2.0)], vec!["close"]),
         ("bbw", None) => (vec![Int(20)], vec!["close"]),

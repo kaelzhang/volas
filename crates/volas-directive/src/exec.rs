@@ -374,6 +374,16 @@ fn exec_command(
             arg_usize(args, 2, Some(9))?,
         )),
 
+        // MACDFIX: MACD with fast/slow fixed at 12/26; only the signal period is
+        // configurable. Reuses the (verified) macd line / signal / histogram.
+        ("macdfix", None) => f64col(ind::macd(&close(0)?, 12, 26)),
+        ("macdfix", Some("signal")) => {
+            f64col(ind::macd_signal(&close(0)?, 12, 26, arg_usize(args, 0, Some(9))?))
+        }
+        ("macdfix", Some("histogram")) => {
+            f64col(ind::macd_histogram(&close(0)?, 12, 26, arg_usize(args, 0, Some(9))?))
+        }
+
         ("boll", None) => f64col(ind::boll(&close(0)?, arg_usize(args, 0, Some(20))?)),
         ("boll", Some("upper")) => f64col(ind::boll_upper(
             &close(0)?,
@@ -905,6 +915,9 @@ mod tests {
             "macd.signal",
             "macd.signal:12,26,9",
             "macd.histogram",
+            "macdfix",
+            "macdfix.signal:9",
+            "macdfix.histogram",
             "boll",
             "boll:20",
             "boll.upper",

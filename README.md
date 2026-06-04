@@ -255,7 +255,7 @@ classic stock-pandas name differs, both spellings are accepted.
 
 | Directive | Indicator | Example |
 | --- | --- | --- |
-| `macd` / `macdext` | MACD (`.signal`/`.dea`, `.histogram`) / with per-line MA types | `macd.signal`, `macdext` |
+| `macd` / `macdext` / `macdfix` | MACD (`.signal`/`.dea`, `.histogram`) / per-line MA types / fixed 12-26 | `macd.signal`, `macdfix` |
 | `rsi` `cmo` `cci` `mfi` `bop` `willr` | RSI / Chande momentum / CCI / Money Flow / Balance of Power / Williams %R | `rsi:14`, `cci:14` |
 | `mom` `roc` `rocp` `rocr` `rocr100` | Momentum / rate-of-change family | `roc:10` |
 | `apo` / `ppo` | Absolute / percentage price oscillator | `ppo:12,26,0` |

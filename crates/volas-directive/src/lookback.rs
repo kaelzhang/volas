@@ -53,6 +53,11 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
             None => arg(args, 0, 12).max(arg(args, 1, 26)).saturating_sub(1),
             Some(_) => arg(args, 0, 12).max(arg(args, 1, 26)) + arg(args, 2, 9) - 2,
         },
+        // macdfix: fast/slow fixed at 12/26; signal period is arg 0 on the sub-lines.
+        "macdfix" => match sub {
+            None => 25,
+            _ => 24 + arg(args, 0, 9),
+        },
         "bbi" => arg(args, 0, 3)
             .max(arg(args, 1, 6))
             .max(arg(args, 2, 12))
