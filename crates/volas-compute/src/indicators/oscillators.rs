@@ -67,12 +67,20 @@ pub fn stoch_fastk(high: &[f64], low: &[f64], close: &[f64], period: usize) -> V
 /// (index `rsi_period + fastk_period - 1`). The `fastd` line is then `ma_typed` of this.
 pub fn stochrsi_fastk(close: &[f64], rsi_period: usize, fastk_period: usize) -> Vec<f64> {
     let rsi = rsi(close, rsi_period);
-    let mut fk = stoch_fastk(&rsi, &rsi, &rsi, fastk_period);
-    // rolling max/min skip NaN, so they would emit over a partial RSI window; suppress
-    // those rows — the %K is valid only once the whole window of RSI is finite.
-    let start = (rsi_period + fastk_period).saturating_sub(1).min(fk.len());
-    for v in fk.iter_mut().take(start) {
-        *v = f64::NAN;
+    let n = rsi.len();
+    let mut fk = vec![f64::NAN; n];
+    // RSI warms up with a leading-NaN prefix, so a rolling min/max over the whole line
+    // fails the NaN-free check and drops to the slow monotonic-deque path — StochRSI's
+    // hot spot. Run the stochastic %K on RSI's *finite tail* instead (NaN-free → the
+    // van Herk fast path) and place it back at `start`. The first valid value then
+    // lands at the first fully-finite RSI window — exactly the rows the old explicit
+    // mask kept — and the result is bit-identical (min/max over a finite window is
+    // order-independent and exact), so the separate masking pass is no longer needed.
+    let start = rsi.iter().position(|x| !x.is_nan()).unwrap_or(n);
+    let tail = &rsi[start..];
+    if tail.len() >= fastk_period {
+        let fk_tail = stoch_fastk(tail, tail, tail, fastk_period);
+        fk[start..].copy_from_slice(&fk_tail);
     }
     fk
 }
