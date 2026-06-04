@@ -35,6 +35,9 @@ classifiers = [
 Homepage = "https://github.com/kaelzhang/volas"
 
 [project.optional-dependencies]
+# `dev` is everything the *test* suite needs -- this is all CI installs. It
+# includes pandas / stock-pandas because the parity tests use them as oracles;
+# they are test-time only, NOT runtime dependencies (volas is pandas-independent).
 dev = [
   "coverage",
   "ruff",
@@ -42,9 +45,7 @@ dev = [
   "pytest-cov",
   "pytest-benchmark",
   "twine",
-  # Test-time oracles only: the parity tests and the 3-way benchmark compare
-  # volas against pandas / stock-pandas. These are NOT runtime dependencies --
-  # volas is intentionally independent of pandas.
+  # Test-time oracles: the parity tests compare volas against pandas / stock-pandas.
   "pandas>=3.0.0",
   "stock-pandas>=5.4",
   # PEP 639 / Metadata 2.4 license fields require packaging >= 24.2 to publish
@@ -52,6 +53,17 @@ dev = [
   "numpy>=2.0.0",
   "mypy",
   "maturin>=1.4"
+]
+# `benchmark` is the extra comparison libraries used ONLY by the benchmark, never
+# by the test suite. Principle: a library needed only at benchmark time belongs
+# here, so CI test runs stay lean (`.[dev]`) while benchmarking installs
+# `.[dev,benchmark]`. The harness skips any of these that is not importable, so
+# the group is effectively optional.
+benchmark = [
+  "polars>=1.0",
+  "duckdb>=1.0",
+  # TA-Lib's Python wheel needs the TA-Lib C library present on the system.
+  "TA-Lib>=0.4",
 ]
 
 [tool.maturin]

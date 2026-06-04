@@ -59,10 +59,28 @@ coverage:
 coverage-html:
 	@bash scripts/coverage.sh --html
 
-# Run the 3-way performance benchmark (pandas vs stock-pandas vs volas).
-# Depends on `build` so the volas extension is compiled in release mode.
+# Run the multi-library performance benchmark (pandas / stock-pandas / polars /
+# TA-Lib / DuckDB / volas), for both batch indicator computation and the
+# incremental "append one bar" path. Depends on `build` so the volas extension is
+# compiled in release mode, then installs the dev + benchmark comparison libraries
+# (read straight from pyproject so the list stays single-sourced; the volas
+# extension itself is NOT reinstalled, preserving the release build). A comparison
+# library that is absent is skipped by the harness.
+#
+#   make benchmark              # console table only
+#   make benchmark WEB_REPORT=1 # also (re)generate ./benchmark-report.html
+BENCH_OPTS := --benchmark-only --benchmark-group-by=func,param:indicator \
+              --benchmark-columns=mean,median,ops,rounds --benchmark-sort=name
 benchmark: build
-	pytest test/test_benchmark.py --benchmark-only --benchmark-group-by=param:spec --benchmark-columns=mean,median,ops,rounds --benchmark-sort=name
+	@echo "\033[1m>> Installing dev + benchmark comparison libraries... <<\033[0m"
+	@python -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | pip install -q -r /dev/stdin
+ifdef WEB_REPORT
+	@mkdir -p .benchmarks
+	pytest test/test_benchmark.py $(BENCH_OPTS) --benchmark-json=.benchmarks/last.json
+	@python scripts/benchmark_report.py .benchmarks/last.json benchmark-report.html
+else
+	pytest test/test_benchmark.py $(BENCH_OPTS)
+endif
 
 # Run linters
 lint:

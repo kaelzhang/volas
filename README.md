@@ -481,9 +481,36 @@ make install        # Rust toolchain + maturin + Python dev deps
 make build          # build the Rust extension, install the package in-place
 make test           # run the Python test suite
 make coverage       # true cargo-test ∪ pytest line coverage (see scripts/coverage.sh)
-make benchmark      # 3-way performance benchmark: pandas vs stock-pandas vs volas
+make benchmark      # multi-library benchmark: pandas / stock-pandas / polars / TA-Lib / DuckDB / volas
 make build-pkg      # build a release wheel + sdist into dist/
 ```
+
+### Dependency groups
+
+- **`dev`** (`pip install -e .[dev]`) — everything the test suite needs; this is all
+  CI installs. It includes pandas / stock-pandas because the *parity tests* use them
+  as oracles (test-time only — volas has no pandas runtime dependency).
+- **`benchmark`** (`pip install -e .[benchmark]`) — the extra comparison libraries
+  (polars, TA-Lib, DuckDB) used *only* by the benchmark. `make benchmark` installs
+  `.[dev,benchmark]`; a library that is only needed to benchmark, never to test,
+  belongs here so CI test runs stay lean.
+
+### Benchmark & web report
+
+`make benchmark` times every candidate on two workloads — **batch** indicator
+computation and the incremental **append-one-bar** path — and prints a table. Add
+`WEB_REPORT=1` to also (re)generate a self-contained HTML report:
+
+```sh
+make benchmark WEB_REPORT=1     # writes ./benchmark-report.html (overwrites)
+```
+
+[`benchmark-report.html`](benchmark-report.html) (committed) has, per indicator, a
+bar chart of median time (shorter = faster) and a table of `Mean / Median / OPS /
+rounds / Perf`, where `Perf` shows the slowest candidate as `1.00×` and each faster
+candidate as `{slowest ÷ this}×`. A comparison library that is not installed is
+simply omitted; DuckDB only appears for the non-recursive indicators a SQL window
+can express. TA-Lib needs the TA-Lib C library on the system.
 
 ## License
 
