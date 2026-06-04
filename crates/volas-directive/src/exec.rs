@@ -180,6 +180,25 @@ fn arg_str<'a>(args: &'a [Option<String>], i: usize) -> Result<&'a str> {
     arg_at(args, i).ok_or_else(|| VolasError::Value(format!("missing required argument #{i}")))
 }
 
+/// Dispatch a TA-Lib MA-type code to the matching moving average over `data`.
+/// Codes follow TA-Lib's `TA_MAType`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
+/// 6 KAMA, 8 T3 (with vfactor 0.7, as TA-Lib's MA dispatch fixes it). 7 (MAMA) is not
+/// yet implemented. Shared by `ma`, `apo`, and `ppo`.
+fn ma_typed(data: &[f64], period: usize, matype: usize) -> Result<Vec<f64>> {
+    Ok(match matype {
+        0 => ind::ma(data, period),
+        1 => ind::ema(data, period),
+        2 => ind::wma(data, period),
+        3 => ind::dema(data, period),
+        4 => ind::tema(data, period),
+        5 => ind::trima(data, period),
+        6 => ind::kama(data, period),
+        8 => ind::t3(data, period, 0.7),
+        7 => return Err(VolasError::Value("ma type 7 (MAMA) is not yet implemented".into())),
+        other => return Err(VolasError::Value(format!("unknown ma type {other}"))),
+    })
+}
+
 // --- command dispatch -------------------------------------------------------
 
 fn exec_command(
@@ -216,7 +235,11 @@ fn exec_command(
     let boolcol = |v: Vec<bool>| Ok(Column::bool(v));
 
     match (name, sub) {
-        ("ma", _) => f64col(ind::ma(&close(0)?, arg_usize(args, 0, None)?)),
+        ("ma", _) => f64col(ma_typed(
+            &close(0)?,
+            arg_usize(args, 0, None)?,
+            arg_usize(args, 1, Some(0))?,
+        )?),
         ("ema", _) => f64col(ind::ema(&close(0)?, arg_usize(args, 0, None)?)),
         ("smma", _) => f64col(ind::smma(&close(0)?, arg_usize(args, 0, None)?)),
         ("wma", _) => f64col(ind::wma(&close(0)?, arg_usize(args, 0, Some(30))?)),
@@ -229,6 +252,21 @@ fn exec_command(
             arg_f64(args, 1, 0.7)?,
         )),
         ("kama", _) => f64col(ind::kama(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        // Price oscillators: fast MA - slow MA, of a chosen MA type (default SMA).
+        ("apo", _) => {
+            let data = close(0)?;
+            let mt = arg_usize(args, 2, Some(0))?;
+            let f = ma_typed(&data, arg_usize(args, 0, Some(12))?, mt)?;
+            let s = ma_typed(&data, arg_usize(args, 1, Some(26))?, mt)?;
+            f64col((0..data.len()).map(|i| f[i] - s[i]).collect())
+        }
+        ("ppo", _) => {
+            let data = close(0)?;
+            let mt = arg_usize(args, 2, Some(0))?;
+            let f = ma_typed(&data, arg_usize(args, 0, Some(12))?, mt)?;
+            let s = ma_typed(&data, arg_usize(args, 1, Some(26))?, mt)?;
+            f64col((0..data.len()).map(|i| (f[i] - s[i]) / s[i] * 100.0).collect())
+        }
 
         ("macd", None) => {
             f64col(ind::macd(&close(0)?, arg_usize(args, 0, Some(12))?, arg_usize(args, 1, Some(26))?))

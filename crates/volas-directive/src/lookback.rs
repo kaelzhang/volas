@@ -10,11 +10,27 @@ fn arg(args: &[Option<String>], i: usize, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Lookback of a TA-Lib MA-type over `period` (mirrors `exec::ma_typed`): DEMA is
+/// `2·(period-1)`, TEMA `3·(period-1)`, KAMA `period`, T3 `6·(period-1)`, and the
+/// rest (SMA/EMA/WMA/TRIMA) `period-1`.
+fn ma_lookback(period: usize, matype: usize) -> usize {
+    match matype {
+        3 => 2 * period.saturating_sub(1),
+        4 => 3 * period.saturating_sub(1),
+        6 => period,
+        8 => 6 * period.saturating_sub(1),
+        _ => period.saturating_sub(1),
+    }
+}
+
 /// The command's own lookback (ignoring its series operands). `None` for a
 /// plain column name.
 fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Option<usize> {
     let lb = match name {
-        "ma" | "ema" | "smma" => arg(args, 0, 1).saturating_sub(1),
+        "ema" | "smma" => arg(args, 0, 1).saturating_sub(1),
+        "ma" => ma_lookback(arg(args, 0, 1), arg(args, 1, 0)),
+        // apo/ppo warm up with the slower MA of the chosen type.
+        "apo" | "ppo" => ma_lookback(arg(args, 1, 26), arg(args, 2, 0)),
         "wma" | "trima" => arg(args, 0, 30).saturating_sub(1),
         "dema" => 2 * arg(args, 0, 30).saturating_sub(1),
         "tema" => 3 * arg(args, 0, 30).saturating_sub(1),

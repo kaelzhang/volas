@@ -177,6 +177,23 @@ def test_aroon_matches_talib(ohlc):
     _parity(df.exec('aroon.d'), talib.AROON(h, l, 14)[0])
 
 
+def test_ma_matype_apo_ppo_match_talib(ohlc):
+    df, h, l, c = ohlc
+    # MA across every supported type: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
+    # 6 KAMA, 8 T3 (period 10 keeps the heaviest warm-ups within the dataset).
+    for mt in (0, 1, 2, 3, 4, 5, 6, 8):
+        _parity(df.exec(f'ma:10,{mt}'), talib.MA(c, 10, mt))
+    _parity(df.exec('ma:20'), talib.MA(c, 20, 0))  # default matype 0 = SMA
+    with pytest.raises(Exception):
+        df.exec('ma:10,7')  # MAMA (matype 7) is not yet implemented
+    # Price oscillators across MA types
+    for mt in (0, 1, 5):
+        _parity(df.exec(f'apo:12,26,{mt}'), talib.APO(c, 12, 26, mt))
+        _parity(df.exec(f'ppo:12,26,{mt}'), talib.PPO(c, 12, 26, mt))
+    _parity(df.exec('apo'), talib.APO(c, 12, 26, 0))  # defaults 12/26/SMA
+    _parity(df.exec('ppo'), talib.PPO(c, 12, 26, 0))
+
+
 def test_accbands_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (10, 20):  # 20 is the TA-Lib default

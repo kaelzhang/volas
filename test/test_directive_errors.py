@@ -39,8 +39,8 @@ def test_syntax_error(df, directive):
     ('invalid_cmd:5', 'unknown command'),
     ('macd.unknown', 'sub-command'),       # known command, bad sub
     ('kdj', 'requires a sub-command'),     # sub required
-    ('ma:2,3', 'at most'),                 # too many arguments
-    ('ma:2,3@close', 'at most'),
+    ('ema:2,3', 'at most'),                # too many arguments (ema takes one period)
+    ('ema:2,3@close', 'at most'),
     ('style:cartoon', 'bullish'),          # bad style value
 ])
 def test_value_error(df, directive, fragment):
