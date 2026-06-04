@@ -16,9 +16,17 @@ and a small, pandas-compatible indexing surface (`.loc` / `.iloc` / `.at`), with
 the storage and compute core implemented in **Rust** for low, predictable latency
 on the incremental ("append one bar") hot path of live trading.
 
-It is a drop-in replacement for the pandas subset that
-[stock-pandas](https://github.com/kaelzhang/stock-pandas) uses, and mirrors its
-directive syntax — but with no pandas dependency and a Rust kernel.
+It is a **drop-in replacement** for the slice of two libraries that candlestick /
+quant code actually uses:
+
+- **pandas** — the same `DataFrame` / `Series` construction, `.loc` / `.iloc` /
+  `.at` / `.iat` indexing, `read_csv`, `to_numpy`, and resampling. (For what is
+  intentionally *not* covered, see [Index limitations](#index-limitations-vs-pandas)
+  and [non-goals](#design-notes--non-goals).)
+- **[stock-pandas](https://github.com/kaelzhang/stock-pandas)** — the same
+  indicator-directive syntax (`df['macd.signal']`, `df['ma:5 > ma:20']`).
+
+…all with **no pandas dependency** and a Rust kernel.
 
 - [Why volas](#why-volas)
 - [Installation](#installation)
@@ -251,6 +259,23 @@ df.loc['aa':'bb']      # inclusive, lexicographic slice
 df.at['cc', 'px']      # 3.0
 df.drop(['bb'])        # drop by string label
 ```
+
+### Index limitations (vs pandas)
+
+The index is deliberately simple — a **single level** of one homogeneous label
+type. Relative to pandas, volas does **not** support:
+
+- **`MultiIndex`** (hierarchical / multi-level indexes), on rows *or* columns —
+  columns are a flat list of unique string names.
+- **Arbitrary label dtypes** — an index is exactly one of range, datetime
+  (`datetime64[ns]`), integer, or string. There is no float, categorical,
+  interval, period, timedelta, or mixed-type `object` index.
+- **Index algebra** — reindexing, index set operations (union / intersection),
+  and automatic alignment-on-index when combining frames.
+- **Duplicate-label** lookups (label access assumes unique labels).
+
+If your workflow needs any of these, keep using pandas; volas targets the
+single-level, OHLCV-shaped index that candlestick data uses.
 
 ## Reading CSV
 
