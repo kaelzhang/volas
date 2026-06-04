@@ -309,9 +309,18 @@ fn exec_command(
             arg_i64(args, 1, 1)? as i32,
         )),
         ("style", _) => {
+            let style = match arg_str(args, 0)? {
+                "bullish" => ind::Style::Bullish,
+                "bearish" => ind::Style::Bearish,
+                other => {
+                    return Err(VolasError::Value(format!(
+                        "style should be 'bullish' or 'bearish', got '{other}'"
+                    )))
+                }
+            };
             let open = series_f64(df, series, 0, "open")?;
             let close = series_f64(df, series, 1, "close")?;
-            boolcol(ind::style(arg_str(args, 0)?, &open, &close)?)
+            boolcol(ind::style(style, &open, &close))
         }
         ("repeat", _) => boolcol(ind::repeat(&series_bool(df, series, 0)?, arg_usize(args, 0, Some(1))?)),
         ("change", _) => f64col(ind::change(&close(0)?, arg_usize(args, 0, Some(2))?)),

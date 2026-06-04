@@ -6,7 +6,6 @@
 use ndarray::{Array1, ArrayView1};
 
 use crate::simd;
-use volas_core::{Result, VolasError};
 
 #[inline]
 fn av(s: &[f64]) -> ArrayView1<'_, f64> {
@@ -302,28 +301,24 @@ pub fn increase(data: &[f64], repeat: usize, direction: i32) -> Vec<bool> {
     result
 }
 
-/// Candlestick style (`bullish` => close > open, `bearish` => close < open).
-pub fn style(style: &str, open: &[f64], close: &[f64]) -> Result<Vec<bool>> {
-    let n = open.len();
-    let mut result = vec![false; n];
-    match style {
-        "bullish" => {
-            for i in 0..n {
-                result[i] = close[i] > open[i];
-            }
-        }
-        "bearish" => {
-            for i in 0..n {
-                result[i] = close[i] < open[i];
-            }
-        }
-        other => {
-            return Err(VolasError::Value(format!(
-                "style should be 'bullish' or 'bearish', got '{other}'"
-            )));
-        }
-    }
-    Ok(result)
+/// Candlestick style. Parsing the DSL string (`"bullish"` / `"bearish"`) is the
+/// directive layer's job — this numeric kernel takes a typed value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Style {
+    /// close > open.
+    Bullish,
+    /// close < open.
+    Bearish,
+}
+
+/// Whether each candle matches `style` (`Bullish` => close > open).
+pub fn style(style: Style, open: &[f64], close: &[f64]) -> Vec<bool> {
+    (0..open.len())
+        .map(|i| match style {
+            Style::Bullish => close[i] > open[i],
+            Style::Bearish => close[i] < open[i],
+        })
+        .collect()
 }
 
 /// Whether a boolean condition holds for `repeat` consecutive periods.
@@ -399,9 +394,8 @@ mod tests {
 
     #[test]
     fn style_and_repeat() {
-        let s = style("bullish", &[1.0, 2.0], &[2.0, 1.0]).unwrap();
-        assert_eq!(s, vec![true, false]);
-        assert!(style("x", &[1.0], &[1.0]).is_err());
+        assert_eq!(style(Style::Bullish, &[1.0, 2.0], &[2.0, 1.0]), vec![true, false]);
+        assert_eq!(style(Style::Bearish, &[1.0, 2.0], &[2.0, 1.0]), vec![false, true]);
         let r = repeat(&[true, true, true, false], 2);
         assert_eq!(r, vec![false, true, true, false]);
     }

@@ -9,5 +9,4 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-volas-core = { path = "../volas-core" }
 ndarray = "0.16"
