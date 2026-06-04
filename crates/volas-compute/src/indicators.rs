@@ -75,9 +75,8 @@ pub fn bbi(close: &[f64], a: usize, b: usize, c: usize, d: usize) -> Vec<f64> {
 pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     let n = high.len();
     let mut tr = vec![f64::NAN; n];
-    if n > 0 {
-        tr[0] = high[0] - low[0];
-    }
+    // TA-Lib TRANGE: index 0 has no prior close, so it has no TR (NaN); TR is
+    // defined from index 1 onward.
     for i in 1..n {
         let prev_close = close[i - 1];
         let hl = high[i] - low[i];
@@ -88,10 +87,12 @@ pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     tr
 }
 
-/// Average True Range (`ma:period` of TR).
+/// Average True Range — TA-Lib semantics: SMA-seeded Wilder smoothing of TR (the
+/// first ATR, at index `period`, is the SMA of the first `period` TRs; thereafter
+/// `ATR[i] = (ATR[i-1]*(period-1) + TR[i]) / period`).
 pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let tr = tr(high, low, close);
-    kernels::sma(av(&tr), period).to_vec()
+    kernels::wilder(av(&tr), period).to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -377,12 +378,14 @@ mod tests {
         let low = [8.0, 9.0, 10.0];
         let close = [9.0, 11.0, 10.5];
         let t = tr(&high, &low, &close);
-        assert!((t[0] - 2.0).abs() < 1e-10);
-        // tr[1] = max(hl=3, hc=|12-9|=3, lc=|9-9|=0) = 3
+        assert!(t[0].is_nan()); // TA-Lib: no TR at index 0
+        // tr[1] = max(hl=3, hc=|12-9|=3, lc=|9-9|=0) = 3 ; tr[2] = max(1,0,1) = 1
         assert!((t[1] - 3.0).abs() < 1e-10);
+        assert!((t[2] - 1.0).abs() < 1e-10);
+        // atr:2 SMA-seeded Wilder -> seed at idx 2 = mean(tr[1], tr[2]) = mean(3,1) = 2
         let a = atr(&high, &low, &close, 2);
-        assert!(a[0].is_nan());
-        assert!((a[1] - 2.5).abs() < 1e-10);
+        assert!(a[0].is_nan() && a[1].is_nan());
+        assert!((a[2] - 2.0).abs() < 1e-10);
     }
 
     #[test]

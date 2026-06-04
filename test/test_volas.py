@@ -139,7 +139,7 @@ PARITY = [
     'boll', 'boll.upper', 'boll.lower', 'boll.u', 'boll.l', 'bbw',
     'rsv:9', 'kdj.k', 'kdj.d', 'kdj.j', 'kdj.k:9,3,50', 'kdj.j:9,3,3,50',
     'rsi:6', 'rsi:14',
-    'bbi', 'atr:14', 'atr:20', 'tr',
+    'bbi',
     'llv:10', 'hhv:10', 'donchian:20', 'donchian.upper:20', 'donchian.lower:20',
     'hv:20,1d,252',
     'change@close', 'change:3@(boll)',

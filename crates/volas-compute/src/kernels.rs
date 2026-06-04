@@ -174,6 +174,44 @@ pub fn smma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     ewma_com(data, (period - 1) as f64, true, false, period)
 }
 
+/// Wilder's smoothing (RMA) seeded the way TA-Lib does it (ATR / RSI / ADX): the
+/// first output, at the `period`-th finite value, is the SMA of the first
+/// `period` finite values; thereafter `out[i] = (out[i-1]*(period-1) + x[i]) /
+/// period`. Rows before the seed are warm-up `NaN`; leading `NaN` in `data`
+/// (e.g. `tr[0]`) is skipped when finding the seed.
+#[inline]
+pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+    let n = data.len();
+    let mut out = Array1::from_elem(n, f64::NAN);
+    if period == 0 || n == 0 {
+        return out;
+    }
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    let mut seed_idx = None;
+    for i in 0..n {
+        let x = data[i];
+        if !x.is_nan() {
+            sum += x;
+            count += 1;
+            if count == period {
+                seed_idx = Some(i);
+                break;
+            }
+        }
+    }
+    let Some(si) = seed_idx else { return out };
+    let p1 = period as f64 - 1.0;
+    let pf = period as f64;
+    let mut prev = sum / pf;
+    out[si] = prev;
+    for i in (si + 1)..n {
+        prev = (prev * p1 + data[i]) / pf;
+        out[i] = prev;
+    }
+    out
+}
+
 /// EWMA seeded with an explicit initial value (used by KDJ).
 #[inline]
 pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1<f64> {

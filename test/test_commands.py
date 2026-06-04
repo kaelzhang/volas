@@ -202,8 +202,8 @@ def test_tr(stock):
     assert to_fixed(tr.iloc[idx], 4) == to_fixed(expected_tr, 4)
 
 
-def test_atr(stock):
-    assert 9.8 < stock['atr:14']['2020-03-06'] < 9.9
+# test_atr removed: ATR now follows TA-Lib (SMA-seeded Wilder), not stock-pandas
+# (SMA of TR). Its 1:1 parity is asserted in test_talib_parity.py against talib.ATR.
 
 
 def test_ema(stock):
