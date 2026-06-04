@@ -265,9 +265,17 @@ fn sma_seeded(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f
 /// `out[i] = (out[i-1]*(period-1) + x[i]) / period`, SMA-seeded.
 #[inline]
 pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    let p1 = period as f64 - 1.0;
     let pf = period as f64;
-    sma_seeded(data, period, move |prev, x| (prev * p1 + x) / pf)
+    // `(prev*(period-1) + x) / period` rewritten as `prev*a + x*b` with the two
+    // reciprocals precomputed, then fused (`mul_add`). This takes the per-element
+    // **division** (~14-cycle latency, on the recurrence's critical path) off the
+    // hot loop, leaving a single FMA — a large win for the division-bound Wilder
+    // smoother (ATR / SMMA). Wilder smoothing is contractive (factor `a < 1`), so
+    // the ~1e-16 reassociation error decays rather than accumulates: well within
+    // the 1e-9 TA-Lib parity tolerance.
+    let a = (pf - 1.0) / pf;
+    let b = 1.0 / pf;
+    sma_seeded(data, period, move |prev, x| prev.mul_add(a, x * b))
 }
 
 /// Exponential moving average, TA-Lib arithmetic:
