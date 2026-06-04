@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use super::av;
 use crate::kernels;
 
@@ -157,22 +159,34 @@ fn aroon_up_down(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64
     }
     let factor = 100.0 / period as f64;
     let pf = period as f64;
-    for i in period..n {
-        let lo = i - period;
-        let (mut hi_idx, mut hi) = (lo, high[lo]);
-        let (mut lo_idx, mut lo_v) = (lo, low[lo]);
-        for j in (lo + 1)..=i {
-            if high[j] >= hi {
-                hi = high[j];
-                hi_idx = j;
-            }
-            if low[j] <= lo_v {
-                lo_v = low[j];
-                lo_idx = j;
-            }
+    // O(n) rolling argmax / argmin over the window `[i-period, i]` via two monotonic
+    // deques of indices (front = the extremum's index). Replaces the O(n·period)
+    // per-window rescan. Ties keep the *latest* index (pop equal-valued backs), so
+    // it is bit-identical to the `>=` / `<=` scan.
+    let mut dmax: VecDeque<usize> = VecDeque::with_capacity(period + 1);
+    let mut dmin: VecDeque<usize> = VecDeque::with_capacity(period + 1);
+    for i in 0..n {
+        let wstart = i.saturating_sub(period);
+        while dmax.front().is_some_and(|&f| f < wstart) {
+            dmax.pop_front();
         }
-        up[i] = factor * (pf - (i - hi_idx) as f64);
-        down[i] = factor * (pf - (i - lo_idx) as f64);
+        while dmin.front().is_some_and(|&f| f < wstart) {
+            dmin.pop_front();
+        }
+        while dmax.back().is_some_and(|&b| high[b] <= high[i]) {
+            dmax.pop_back();
+        }
+        dmax.push_back(i);
+        while dmin.back().is_some_and(|&b| low[b] >= low[i]) {
+            dmin.pop_back();
+        }
+        dmin.push_back(i);
+        if i >= period {
+            let hi_idx = *dmax.front().unwrap();
+            let lo_idx = *dmin.front().unwrap();
+            up[i] = factor * (pf - (i - hi_idx) as f64);
+            down[i] = factor * (pf - (i - lo_idx) as f64);
+        }
     }
     (up, down)
 }
