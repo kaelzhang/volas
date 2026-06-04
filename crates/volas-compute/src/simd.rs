@@ -44,6 +44,42 @@ pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     result
 }
 
+/// One in-place EWMA update step for the new value `cur` — the per-element body
+/// shared by [`ewma_com`] and [`dual_ewma`] so the recurrence lives in one place.
+#[inline(always)]
+fn ewma_step(
+    cur: f64,
+    wavg: &mut f64,
+    old_wt: &mut f64,
+    nobs: &mut usize,
+    old_wt_factor: f64,
+    new_wt: f64,
+    adjust: bool,
+    ignore_na: bool,
+) {
+    let is_observation = !cur.is_nan();
+    if is_observation {
+        *nobs += 1;
+    }
+    if !wavg.is_nan() {
+        if is_observation || !ignore_na {
+            *old_wt *= old_wt_factor;
+            if is_observation {
+                if *wavg != cur {
+                    *wavg = (*old_wt * *wavg + new_wt * cur) / (*old_wt + new_wt);
+                }
+                if adjust {
+                    *old_wt += new_wt;
+                } else {
+                    *old_wt = 1.0;
+                }
+            }
+        }
+    } else if is_observation {
+        *wavg = cur;
+    }
+}
+
 /// Exponentially weighted moving average parameterised by center-of-mass,
 /// matching pandas' `ewm(com=...)`.
 #[inline]
@@ -64,47 +100,67 @@ pub fn ewma_com(
     let old_wt_factor = 1.0 - alpha;
     let new_wt = if adjust { 1.0 } else { alpha };
 
-    let mut weighted_avg = data[0];
-    let mut is_observation = !weighted_avg.is_nan();
-    let mut nobs = if is_observation { 1 } else { 0 };
-    result[0] = if nobs >= min_periods {
-        weighted_avg
-    } else {
-        f64::NAN
-    };
+    let mut wavg = data[0];
+    let mut nobs = if wavg.is_nan() { 0 } else { 1 };
     let mut old_wt = 1.0;
+    result[0] = if nobs >= min_periods { wavg } else { f64::NAN };
 
     for i in 1..n {
-        let cur = data[i];
-        is_observation = !cur.is_nan();
-        if is_observation {
-            nobs += 1;
-        }
-        if !weighted_avg.is_nan() {
-            if is_observation || !ignore_na {
-                old_wt *= old_wt_factor;
-                if is_observation {
-                    if weighted_avg != cur {
-                        weighted_avg =
-                            (old_wt * weighted_avg + new_wt * cur) / (old_wt + new_wt);
-                    }
-                    if adjust {
-                        old_wt += new_wt;
-                    } else {
-                        old_wt = 1.0;
-                    }
-                }
-            }
-        } else if is_observation {
-            weighted_avg = cur;
-        }
-        result[i] = if nobs >= min_periods {
-            weighted_avg
-        } else {
-            f64::NAN
-        };
+        ewma_step(
+            data[i], &mut wavg, &mut old_wt, &mut nobs, old_wt_factor, new_wt, adjust, ignore_na,
+        );
+        result[i] = if nobs >= min_periods { wavg } else { f64::NAN };
     }
     result
+}
+
+/// Two independent EWMAs in a single traversal — bit-identical to two
+/// [`ewma_com`] calls but with one pass and shared bounds. macd uses it (one
+/// input, two coms); rsi uses it (two inputs, one com).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn dual_ewma(
+    a: ArrayView1<f64>,
+    com_a: f64,
+    min_a: usize,
+    b: ArrayView1<f64>,
+    com_b: f64,
+    min_b: usize,
+    adjust: bool,
+    ignore_na: bool,
+) -> (Array1<f64>, Array1<f64>) {
+    let n = a.len();
+    let mut ra = Array1::from_elem(n, f64::NAN);
+    let mut rb = Array1::from_elem(n, f64::NAN);
+    if n == 0 {
+        return (ra, rb);
+    }
+    let min_a = min_a.max(1);
+    let min_b = min_b.max(1);
+    let alpha_a = 1.0 / (1.0 + com_a);
+    let alpha_b = 1.0 / (1.0 + com_b);
+    let owf_a = 1.0 - alpha_a;
+    let owf_b = 1.0 - alpha_b;
+    let nw_a = if adjust { 1.0 } else { alpha_a };
+    let nw_b = if adjust { 1.0 } else { alpha_b };
+
+    let mut wavg_a = a[0];
+    let mut nobs_a = if wavg_a.is_nan() { 0 } else { 1 };
+    let mut old_wt_a = 1.0;
+    ra[0] = if nobs_a >= min_a { wavg_a } else { f64::NAN };
+
+    let mut wavg_b = b[0];
+    let mut nobs_b = if wavg_b.is_nan() { 0 } else { 1 };
+    let mut old_wt_b = 1.0;
+    rb[0] = if nobs_b >= min_b { wavg_b } else { f64::NAN };
+
+    for i in 1..n {
+        ewma_step(a[i], &mut wavg_a, &mut old_wt_a, &mut nobs_a, owf_a, nw_a, adjust, ignore_na);
+        ewma_step(b[i], &mut wavg_b, &mut old_wt_b, &mut nobs_b, owf_b, nw_b, adjust, ignore_na);
+        ra[i] = if nobs_a >= min_a { wavg_a } else { f64::NAN };
+        rb[i] = if nobs_b >= min_b { wavg_b } else { f64::NAN };
+    }
+    (ra, rb)
 }
 
 /// Smoothed moving average (EWMA with `alpha = 1/period`).
@@ -473,5 +529,21 @@ mod tests {
         assert_eq!(m[2], 1.0);
         assert_eq!(m[3], 1.0);
         assert!(m[4].is_nan());
+    }
+
+    #[test]
+    fn dual_ewma_matches_two_ewma_com_bit_exact() {
+        let d = series(300);
+        let mut g = series(300);
+        g[5] = f64::NAN; // a distinct second input with an interior NaN
+        let (a, b) = (av(&d), av(&g));
+        // one input, two coms (the macd shape)
+        let (f, s) = dual_ewma(a, 5.5, 12, a, 12.5, 26, true, false);
+        approx_eq_nan(&f.to_vec(), &ewma_com(a, 5.5, true, false, 12).to_vec(), 0.0);
+        approx_eq_nan(&s.to_vec(), &ewma_com(a, 12.5, true, false, 26).to_vec(), 0.0);
+        // two inputs, one com (the rsi shape)
+        let (ga, gb) = dual_ewma(a, 13.0, 14, b, 13.0, 14, true, false);
+        approx_eq_nan(&ga.to_vec(), &ewma_com(a, 13.0, true, false, 14).to_vec(), 0.0);
+        approx_eq_nan(&gb.to_vec(), &ewma_com(b, 13.0, true, false, 14).to_vec(), 0.0);
     }
 }

@@ -36,8 +36,8 @@ fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     let data = av(close);
     let com_fast = (fast as f64 - 1.0) / 2.0;
     let com_slow = (slow as f64 - 1.0) / 2.0;
-    let f = simd::ewma_com(data, com_fast, true, false, fast);
-    let s = simd::ewma_com(data, com_slow, true, false, slow);
+    // fast and slow EWMA in one fused pass (was two ewma_com traversals)
+    let (f, s) = simd::dual_ewma(data, com_fast, fast, data, com_slow, slow, true, false);
     &f - &s
 }
 
@@ -245,8 +245,9 @@ pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
         gains[i] = d.max(0.0);
         losses[i] = (-d).max(0.0);
     }
-    let sg = simd::smma(gains.view(), period);
-    let sl = simd::smma(losses.view(), period);
+    // both smoothed averages in one fused pass (smma = ewma_com, com = period-1)
+    let com = (period - 1) as f64;
+    let (sg, sl) = simd::dual_ewma(gains.view(), com, period, losses.view(), com, period, true, false);
     let mut result = vec![f64::NAN; n];
     for i in 0..n {
         if sg[i].is_nan() || sl[i].is_nan() {
