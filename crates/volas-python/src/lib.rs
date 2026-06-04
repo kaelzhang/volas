@@ -1135,6 +1135,77 @@ impl PyDataFrame {
         }
     }
 
+    /// Convert to a `pandas.DataFrame`. pandas is imported lazily (only here), so
+    /// volas stays pandas-free at import.
+    fn to_pandas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        ensure_fresh(&self.inner)?;
+        let pd = py.import("pandas")?;
+        let data = PyDict::new(py);
+        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+            data.set_item(name, column_to_numpy(py, col))?;
+        }
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("index", index_to_numpy(py, self.inner.index())?)?;
+        pd.call_method("DataFrame", (data,), Some(&kwargs))
+    }
+
+    /// Write the frame as CSV (pandas-subset). With no `path`, returns the CSV
+    /// string. Datetime columns are written as formatted strings (round-trips
+    /// with `read_csv`).
+    #[pyo3(signature = (path = None, sep = ",", index = true, header = true, na_rep = "", columns = None))]
+    fn to_csv(
+        &self,
+        path: Option<String>,
+        sep: &str,
+        index: bool,
+        header: bool,
+        na_rep: &str,
+        columns: Option<Vec<String>>,
+    ) -> PyResult<Option<String>> {
+        ensure_fresh(&self.inner)?;
+        let names = self.inner.names();
+        let positions: Vec<usize> = match &columns {
+            Some(cols) => cols
+                .iter()
+                .map(|n| {
+                    self.inner
+                        .column_pos(n)
+                        .ok_or_else(|| PyKeyError::new_err(format!("column \"{n}\" not found")))
+                })
+                .collect::<PyResult<_>>()?,
+            None => (0..self.inner.width()).collect(),
+        };
+        let mut out = String::new();
+        if header {
+            if index {
+                out.push_str("index");
+                out.push_str(sep);
+            }
+            let hdr: Vec<&str> = positions.iter().map(|&j| names[j].as_str()).collect();
+            out.push_str(&hdr.join(sep));
+            out.push('\n');
+        }
+        for i in 0..self.inner.height() {
+            if index {
+                out.push_str(&index_label_csv(self.inner.index(), i));
+                out.push_str(sep);
+            }
+            let cells: Vec<String> = positions
+                .iter()
+                .map(|&j| cell_to_csv(&self.inner.columns()[j], i, na_rep))
+                .collect();
+            out.push_str(&cells.join(sep));
+            out.push('\n');
+        }
+        match path {
+            Some(p) => {
+                std::fs::write(&p, out).map_err(|e| PyValueError::new_err(e.to_string()))?;
+                Ok(None)
+            }
+            None => Ok(Some(out)),
+        }
+    }
+
     /// Drop rows by index label (`axis=0`) or columns by name (`axis=1`) —
     /// returns a new DataFrame. Row labels are parsed against the index kind.
     #[pyo3(signature = (labels, axis = 0))]
@@ -1352,6 +1423,33 @@ fn row_at(df: &DataFrame, i: usize) -> PyRow {
 fn take_frame(df: &DataFrame, positions: &[usize]) -> DataFrame {
     // Delegates to core `take`, which carries column aliases onto the new frame.
     df.take(positions)
+}
+
+/// Format the `i`-th cell of a column as a CSV field (`na_rep` for NaN).
+fn cell_to_csv(col: &Column, i: usize, na_rep: &str) -> String {
+    match col {
+        Column::F64(v) => {
+            if v[i].is_nan() {
+                na_rep.to_string()
+            } else {
+                v[i].to_string()
+            }
+        }
+        Column::Bool(v) => if v[i] { "True" } else { "False" }.to_string(),
+        Column::I64(v) => v[i].to_string(),
+        Column::Str(v) => v[i].clone(),
+        Column::Datetime(v) => datetime::format_ns(v[i]),
+    }
+}
+
+/// Format the `i`-th index label as a CSV field.
+fn index_label_csv(index: &Index, i: usize) -> String {
+    match index {
+        Index::Range(_) => i.to_string(),
+        Index::Int64(v) => v[i].to_string(),
+        Index::Datetime(v) => datetime::format_ns(v[i]),
+        Index::Str(v) => v[i].clone(),
+    }
 }
 
 /// A positional slice: a contiguous `step == 1` slice uses `DataFrame::slice` (a
