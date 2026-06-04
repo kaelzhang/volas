@@ -41,6 +41,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "cmo" | "natr" => arg(args, 0, 14),
         "cci" => arg(args, 0, 14).saturating_sub(1),
         "trix" => 3 * arg(args, 0, 30).saturating_sub(1) + 1,
+        "aroon" | "aroonosc" => arg(args, 0, 14),
         "bop" => 0,
         "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf" => {
             arg(args, 0, 14).saturating_sub(1)

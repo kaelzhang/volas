@@ -376,6 +376,22 @@ fn exec_command(
             f64col(ind::cci(&high, &low, &close, arg_usize(args, 0, Some(14))?))
         }
         ("trix", _) => f64col(ind::trix(&close(0)?, arg_usize(args, 0, Some(30))?)),
+        ("aroon", Some(dir @ ("up" | "down"))) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let period = arg_usize(args, 0, Some(14))?;
+            let v = if dir == "up" {
+                ind::aroon_up(&high, &low, period)
+            } else {
+                ind::aroon_down(&high, &low, period)
+            };
+            f64col(v)
+        }
+        ("aroonosc", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::aroonosc(&high, &low, arg_usize(args, 0, Some(14))?))
+        }
         ("natr", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;

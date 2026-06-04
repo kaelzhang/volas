@@ -117,3 +117,52 @@ pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
     let e3 = kernels::ema_seeded(e2.view(), period);
     roc(&e3.to_vec(), 1)
 }
+
+/// Aroon up/down over a `period+1`-bar window (TA-Lib AROON): for each row the
+/// most-recent highest high / lowest low in `[i-period, i]` gives "days since the
+/// extreme", and up/down = `(100/period)·(period − daysSince)`. Both NaN until index
+/// `period`; ties resolve to the most recent bar, matching TA-Lib's tracker.
+fn aroon_up_down(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
+    let n = high.len();
+    let mut up = vec![f64::NAN; n];
+    let mut down = vec![f64::NAN; n];
+    if period == 0 {
+        return (up, down);
+    }
+    let factor = 100.0 / period as f64;
+    let pf = period as f64;
+    for i in period..n {
+        let lo = i - period;
+        let (mut hi_idx, mut hi) = (lo, high[lo]);
+        let (mut lo_idx, mut lo_v) = (lo, low[lo]);
+        for j in (lo + 1)..=i {
+            if high[j] >= hi {
+                hi = high[j];
+                hi_idx = j;
+            }
+            if low[j] <= lo_v {
+                lo_v = low[j];
+                lo_idx = j;
+            }
+        }
+        up[i] = factor * (pf - (i - hi_idx) as f64);
+        down[i] = factor * (pf - (i - lo_idx) as f64);
+    }
+    (up, down)
+}
+
+/// Aroon Up (TA-Lib AROON, up output). Lookback `period`.
+pub fn aroon_up(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    aroon_up_down(high, low, period).0
+}
+
+/// Aroon Down (TA-Lib AROON, down output). Lookback `period`.
+pub fn aroon_down(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    aroon_up_down(high, low, period).1
+}
+
+/// Aroon Oscillator: `aroonUp − aroonDown` (TA-Lib AROONOSC). Lookback `period`.
+pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    let (up, down) = aroon_up_down(high, low, period);
+    up.iter().zip(&down).map(|(u, d)| u - d).collect()
+}

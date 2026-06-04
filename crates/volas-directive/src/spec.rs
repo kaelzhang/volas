@@ -66,6 +66,8 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         ("macd", None | Some("dif")) => None,
         ("macd", Some("s" | "signal" | "dea")) => Some("signal".into()),
         ("macd", Some("h" | "histogram" | "macd")) => Some("histogram".into()),
+        ("aroon", Some("u" | "up")) => Some("up".into()),
+        ("aroon", Some("d" | "down")) => Some("down".into()),
         ("boll" | "donchian", None | Some("middle")) => None,
         ("boll" | "donchian", Some("u" | "upper")) => Some("upper".into()),
         ("boll" | "donchian", Some("l" | "lower")) => Some("lower".into()),
@@ -109,6 +111,8 @@ pub fn is_command(name: &str) -> bool {
             | "cmo"
             | "cci"
             | "trix"
+            | "aroon"
+            | "aroonosc"
             | "natr"
             | "bop"
             | "midpoint"
@@ -172,6 +176,8 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("cmo", None) => (vec![Int(14)], vec!["close"]),
         ("cci", None) => (vec![Int(14)], vec!["high", "low", "close"]),
         ("trix", None) => (vec![Int(30)], vec!["close"]),
+        ("aroon", Some("up" | "down")) => (vec![Int(14)], vec!["high", "low"]),
+        ("aroonosc", None) => (vec![Int(14)], vec!["high", "low"]),
         ("natr", None) => (vec![Int(14)], vec!["high", "low", "close"]),
         ("bop", None) => (vec![], vec!["open", "high", "low", "close"]),
         (

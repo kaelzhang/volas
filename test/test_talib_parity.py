@@ -129,6 +129,18 @@ def test_variance_stddev_matches_talib(ohlc):
     _parity(df.exec('var'), talib.VAR(c, 5))  # default resolves to 5
 
 
+def test_aroon_matches_talib(ohlc):
+    df, h, l, c = ohlc
+    for p in (14, 25):  # 14 is the TA-Lib default
+        down, up = talib.AROON(h, l, p)  # talib returns (down, up)
+        _parity(df.exec(f'aroon.up:{p}'), up)
+        _parity(df.exec(f'aroon.down:{p}'), down)
+        _parity(df.exec(f'aroonosc:{p}'), talib.AROONOSC(h, l, p))
+    # default resolves to 14, and the .u/.d abbreviations match the full names
+    _parity(df.exec('aroon.u'), talib.AROON(h, l, 14)[1])
+    _parity(df.exec('aroon.d'), talib.AROON(h, l, 14)[0])
+
+
 def test_cci_trix_match_talib(ohlc):
     df, h, l, c = ohlc
     for p in (14, 20):
