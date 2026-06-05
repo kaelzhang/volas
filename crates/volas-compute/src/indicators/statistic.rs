@@ -157,6 +157,11 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
         return out;
     }
     let pf = period as f64;
+    // Precompute 1/period: the means are then per-element multiplies, not divisions
+    // (TA-Lib divides by period three times per bar). The ~1e-16 difference from a true
+    // divide is well within the 1e-9 parity tolerance (a near-zero denominator is gated
+    // to 0 either way, so the catastrophic-cancellation case is unaffected).
+    let inv_pf = 1.0 / pf;
     let (mut sx, mut sy, mut sx2, mut sy2, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
     for i in 0..period {
         let (xi, yi) = (x[i], y[i]);
@@ -167,11 +172,11 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
         sxy += xi * yi;
     }
     let value = |sx: f64, sy: f64, sx2: f64, sy2: f64, sxy: f64| {
-        let denom = (sx2 - sx * sx / pf) * (sy2 - sy * sy / pf);
+        let denom = (sx2 - sx * sx * inv_pf) * (sy2 - sy * sy * inv_pf);
         if denom < 1e-14 {
             0.0
         } else {
-            (sxy - sx * sy / pf) / denom.sqrt()
+            (sxy - sx * sy * inv_pf) / denom.sqrt()
         }
     };
     out[period - 1] = value(sx, sy, sx2, sy2, sxy);
