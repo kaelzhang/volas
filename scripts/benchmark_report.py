@@ -145,8 +145,8 @@ def _table(entries: list[tuple[str, dict]]) -> str:
 
 
 def _coverage_section(by_indicator: dict) -> str:
-    """A single volas-vs-TA-Lib table over the whole coverage set, slowest-volas
-    (the optimization targets) first; a win/loss summary on top."""
+    """A single volas-vs-TA-Lib table over the whole coverage set, ordered by the
+    ``volas vs TA-Lib`` speedup from largest to smallest; a win/loss summary on top."""
     rows = []
     for ind, entries in by_indicator.items():
         d = dict(entries)
@@ -154,7 +154,7 @@ def _coverage_section(by_indicator: dict) -> str:
             continue
         v, t = d['volas']['median'], d['talib']['median']
         rows.append((ind, v, t, (t / v) if v > 0 else 0.0))
-    rows.sort(key=lambda r: r[3])  # ascending speedup: where volas trails, first
+    rows.sort(key=lambda r: r[3], reverse=True)  # descending: largest speedup first
     wins = sum(1 for *_, s in rows if s >= 1.0)
     body = []
     for ind, v, t, s in rows:
