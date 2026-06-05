@@ -20,11 +20,22 @@ pub fn mom(data: &[f64], period: usize) -> Vec<f64> {
 /// divide-by-zero guard (purely theoretical for a positive price series).
 fn roc_ratio(data: &[f64], period: usize, f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
     let n = data.len();
-    let mut out = vec![f64::NAN; n];
-    for i in period..n {
-        let prior = data[i - period];
-        out[i] = if prior == 0.0 { 0.0 } else { f(data[i], prior) };
+    if period >= n {
+        return vec![f64::NAN; n];
     }
+    // Fill only the warm-up with NaN, then compute the valid region once via `extend`
+    // rather than `vec![NaN; n]` followed by an index-overwrite of `[period, n)` — the
+    // latter writes that range twice (NaN, then the result). Halves the result-buffer
+    // writes; a meaningful share of these tiny division-bound kernels' cost.
+    let mut out = vec![f64::NAN; period];
+    out.extend((period..n).map(|i| {
+        let prior = data[i - period];
+        if prior == 0.0 {
+            0.0
+        } else {
+            f(data[i], prior)
+        }
+    }));
     out
 }
 
