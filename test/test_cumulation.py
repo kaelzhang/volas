@@ -219,13 +219,10 @@ def test_tf_fir_indicator_incremental_matches_one_shot():
     )
 
 
-@pytest.mark.xfail(
-    reason="recursive (IIR) incremental refresh re-seeds the recursion — origin's fix",
-    strict=False,
-)
 def test_tf_iir_indicator_incremental_matches_one_shot():
-    # Recursive indicators (EMA, ...) are wrong under incremental refresh until
-    # origin fixes the streaming state; the batch `exec` path is already correct.
+    # Recursive indicators (EMA, ...) also match one-shot under incremental
+    # folding: the directive cache carries the recursive state across appends,
+    # so the forming bar recomputes correctly rather than re-seeding the window.
     fine = get_1m()
     df = _seed(fine)
     _ = df['ema:2']
