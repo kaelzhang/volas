@@ -322,6 +322,82 @@ fn each_bar_avg<const K: usize>(
     out
 }
 
+/// Like [`each_bar_avg`] but for two-bar patterns: the closure also receives the prior
+/// bar's averages (`prev`), so `candle_average(s, i-1)` reads `prev[k]` and
+/// `candle_average(s, i)` reads `cur[k]` — both from the same scalar running totals (no
+/// arrays). Seeds at bar `lookback-1`, carries `prev` forward each step.
+#[inline]
+fn each_bar_avg2<const K: usize>(
+    settings: [Setting; K],
+    lookback: usize,
+    o: &[f64],
+    h: &[f64],
+    l: &[f64],
+    c: &[f64],
+    f: impl Fn(usize, &[f64; K], &[f64; K]) -> f64,
+) -> Vec<f64> {
+    let n = c.len();
+    let mut out = vec![f64::NAN; n];
+    if lookback == 0 || lookback >= n {
+        return out;
+    }
+    // Seed each total over bar (lookback-1)'s window `[(lookback-1)-avg_period, lookback-2]`.
+    let mut total = [0.0f64; K];
+    for k in 0..K {
+        let s = settings[k];
+        if s.avg_period != 0 {
+            for j in ((lookback - 1) - s.avg_period)..(lookback - 1) {
+                total[k] += range(s, o, h, l, c, j);
+            }
+        }
+    }
+    // Averages at bar (lookback-1) — the first `prev`. (Everything inlined, no inner
+    // closures: the closure form here failed to inline and ran ~4x slower for K >= 2.)
+    let mut prev = [0.0f64; K];
+    for k in 0..K {
+        let s = settings[k];
+        let div = if matches!(s.range, RangeType::Shadows) {
+            2.0
+        } else {
+            1.0
+        };
+        prev[k] = if s.avg_period != 0 {
+            s.factor * (total[k] / s.avg_period as f64) / div
+        } else {
+            s.factor * range(s, o, h, l, c, lookback - 1) / div
+        };
+        if s.avg_period != 0 {
+            total[k] += range(s, o, h, l, c, lookback - 1)
+                - range(s, o, h, l, c, (lookback - 1) - s.avg_period);
+        }
+    }
+    let mut cur = [0.0f64; K];
+    for i in lookback..n {
+        for k in 0..K {
+            let s = settings[k];
+            let div = if matches!(s.range, RangeType::Shadows) {
+                2.0
+            } else {
+                1.0
+            };
+            cur[k] = if s.avg_period != 0 {
+                s.factor * (total[k] / s.avg_period as f64) / div
+            } else {
+                s.factor * range(s, o, h, l, c, i) / div
+            };
+        }
+        out[i] = f(i, &cur, &prev);
+        prev = cur;
+        for k in 0..K {
+            let s = settings[k];
+            if s.avg_period != 0 {
+                total[k] += range(s, o, h, l, c, i) - range(s, o, h, l, c, i - s.avg_period);
+            }
+        }
+    }
+    out
+}
+
 /// Build a per-bar pattern column: NaN before `lookback`, then `f(i)` (0 / ±100 / ±80)
 /// per bar. Shared by all pattern submodules.
 #[inline]
