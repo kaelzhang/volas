@@ -214,11 +214,24 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
     Err(PyKeyError::new_err("label must be a datetime string or integer"))
 }
 
-/// `volas.Timestamp(value, tz=None)` — a typed datetime label carrying its own
-/// timezone, resolving to an absolute **UTC** instant. Use it for precise /
-/// cross-tz `.loc` / `.loc[a:b]` / `.at` lookups: a Timestamp built in one zone
-/// matches the right row of a frame displayed in another, because both compare on
-/// the UTC axis. A bare string label is instead interpreted in the index's tz.
+/// ``volas.Timestamp(value, tz=None)`` — a typed datetime label carrying its own
+/// timezone, resolving to an absolute **UTC** instant.
+///
+/// Use it for precise / cross-tz ``.loc`` / ``.loc[a:b]`` / ``.at`` lookups: a
+/// Timestamp built in one zone matches the right row of a frame displayed in
+/// another, because both compare on the UTC axis. (A bare string label is
+/// instead interpreted in the index's own tz.)
+///
+/// Args:
+///     value (str | int): a datetime string (e.g. ``'2021-01-04 09:30'``) or
+///         epoch nanoseconds. A naive string is interpreted in ``tz``.
+///     tz (str, optional): the zone the value is given in, e.g.
+///         ``'America/New_York'`` or ``'+08:00'`` (default UTC).
+///
+/// Usage::
+///
+///     ts = volas.Timestamp('2021-01-04 09:30', tz='America/New_York')
+///     df.at[ts, 'close']    # matches the right row across timezones
 #[pyclass(name = "Timestamp")]
 pub struct PyTimestamp {
     /// UTC epoch-ns (the absolute instant).
@@ -229,6 +242,8 @@ pub struct PyTimestamp {
 
 #[pymethods]
 impl PyTimestamp {
+    // Constructor — args & usage live in the class docstring (pyo3 does not
+    // surface a `#[new]` doc comment to Python).
     #[new]
     #[pyo3(signature = (value, tz = None))]
     fn new(value: &Bound<'_, PyAny>, tz: Option<String>) -> PyResult<Self> {
@@ -380,7 +395,24 @@ fn ensure_fresh(df: &DataFrame) -> PyResult<()> {
 
 // --- Series ----------------------------------------------------------------
 
-/// `volas.Series` — a single named, indexed column.
+/// ``volas.Series`` — a single named, indexed column (usually obtained from
+/// ``df['col']`` or a directive like ``df['ma:5']``).
+///
+/// Supports NaN-skipping reductions (``mean`` / ``sum`` / ``min`` / ``max`` /
+/// ``std`` / ``var`` / ``median``), element-wise arithmetic / comparison /
+/// boolean operators (``+ - * /``, ``< <= == != >= >``, ``& | ^ ~``) against a
+/// scalar or another equal-length Series, the TA-Lib math transforms
+/// (``sin`` / ``sqrt`` / ``ln`` / …), and ``shift`` / ``diff`` / ``fillna`` /
+/// ``isna`` / ``notna`` / ``dropna``. Index by position via ``s.iloc[...]`` or
+/// label via ``s.loc[...]``; export with ``to_numpy`` / ``to_list``.
+///
+/// Usage::
+///
+///     close = df['close']
+///     close.mean()            # NaN-skipping mean
+///     (close - df['open'])    # element-wise difference
+///     close.shift(1)          # lag by one bar
+///     close.iloc[-1]          # last value
 #[pyclass(name = "Series")]
 pub struct PySeries {
     pub(crate) inner: Series,
@@ -388,16 +420,31 @@ pub struct PySeries {
 
 #[pymethods]
 impl PySeries {
+    /// The series name — the column it was drawn from, or ``None``.
+    ///
+    /// Returns:
+    ///     str | None
     #[getter]
     fn name(&self) -> Option<String> {
         self.inner.name.clone()
     }
 
+    /// The dtype name (``'float64'``, ``'bool'``, ``'int64'``, ``'object'`` or
+    /// ``'datetime64[ns]'``).
+    ///
+    /// Returns:
+    ///     str
     #[getter]
     fn dtype(&self) -> String {
         self.inner.dtype().to_string()
     }
 
+    /// The row index shared with the parent frame, as a NumPy array (a
+    /// ``datetime64[ns]`` array for a DatetimeIndex, an object array for a string
+    /// index).
+    ///
+    /// Returns:
+    ///     numpy.ndarray
     #[getter]
     fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         index_to_numpy(py, &self.inner.index)
@@ -413,6 +460,15 @@ impl PySeries {
         }
     }
 
+    /// Positional (integer-location) accessor: ``s.iloc[i]`` returns the i-th
+    /// value (negative indices count from the end); ``s.iloc[a:b]`` returns a
+    /// sub-series. Read-only.
+    ///
+    /// Usage::
+    ///
+    ///     s.iloc[0]      # first value
+    ///     s.iloc[-1]     # last value
+    ///     s.iloc[1:4]    # a sub-series
     #[getter]
     fn iloc(&self) -> SeriesILoc {
         SeriesILoc {
@@ -420,6 +476,13 @@ impl PySeries {
         }
     }
 
+    /// Label-based accessor: ``s.loc[label]`` returns the value at an index
+    /// label; ``s.loc[a:b]`` returns the (stop-inclusive) label slice. Read-only.
+    ///
+    /// Usage::
+    ///
+    ///     s.loc[20210104]              # by integer label
+    ///     s.loc['2021-01-04':'2021-02-01']  # inclusive datetime slice
     #[getter]
     fn loc(&self) -> SeriesLoc {
         SeriesLoc {
@@ -531,7 +594,18 @@ impl PySeries {
         self.to_list(py)
     }
 
-    /// Shift values by `n` rows (positive = down; vacated cells -> NaN).
+    /// Shift the values by ``n`` rows, padding vacated cells with NaN.
+    ///
+    /// Args:
+    ///     n (int): rows to shift; positive shifts down (default 1), negative up.
+    ///
+    /// Usage::
+    ///
+    ///     s.shift(1)    # lag by one bar
+    ///     s.shift(-1)   # lead by one bar
+    ///
+    /// Returns:
+    ///     Series: a new series of the same length.
     #[pyo3(signature = (n = 1))]
     fn shift(&self, n: isize) -> PySeries {
         let a = self.inner.data.to_f64_vec();
@@ -547,7 +621,14 @@ impl PySeries {
         f64_series(&self.inner, out)
     }
 
-    /// First difference `x[i] - x[i-n]` (the first `n` rows -> NaN).
+    /// Discrete difference ``x[i] - x[i-n]`` (equivalent to ``s - s.shift(n)``).
+    ///
+    /// Args:
+    ///     n (int): periods to difference; the first ``n`` rows are NaN
+    ///         (default 1). Negative ``n`` differences against later rows.
+    ///
+    /// Returns:
+    ///     Series: a new series of the same length.
     #[pyo3(signature = (n = 1))]
     fn diff(&self, n: isize) -> PySeries {
         let a = self.inner.data.to_f64_vec();
@@ -567,7 +648,13 @@ impl PySeries {
         f64_series(&self.inner, out)
     }
 
-    /// Replace NaN with `value` (F64 columns; others returned unchanged).
+    /// Replace missing (NaN) values with a constant.
+    ///
+    /// Args:
+    ///     value (float): the value written into every NaN cell.
+    ///
+    /// Returns:
+    ///     Series: a new series (non-float columns are returned unchanged).
     fn fillna(&self, value: f64) -> PySeries {
         let col = match &self.inner.data {
             Column::F64(v) => {
@@ -969,12 +1056,19 @@ impl PyRow {
         label_to_py(py, self.inner.index(), 0)
     }
 
-    /// A scalar by column name (`row[col]`).
+    /// A single value by column name (``row[col]``).
+    ///
+    /// Returns:
+    ///     the typed scalar at that column.
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let col = self.inner.column(key).map_err(pyerr)?;
         Ok(scalar_to_py(py, col, 0))
     }
 
+    /// The row's values as a ``(1, n_columns)`` float64 NumPy array.
+    ///
+    /// Returns:
+    ///     numpy.ndarray
     fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
         let (data, h, w) = self.inner.to_row_major_f64();
         Ok(ndarray::Array2::from_shape_vec((h, w), data)
@@ -998,8 +1092,38 @@ impl PyRow {
 
 // --- DataFrame -------------------------------------------------------------
 
-/// `volas.DataFrame` — an ordered, named, time-indexed table with directive
-/// indexing and pandas-compatible positional / label access.
+/// ``volas.DataFrame`` — an ordered, named, time-indexed OHLCV table with
+/// indicator-directive indexing and pandas-compatible positional / label access.
+///
+/// Construct from a dict of columns, or read a CSV::
+///
+///     df = volas.DataFrame({'close': [10.0, 11.0], 'volume': [100, 120]})
+///     df = volas.read_csv('ohlcv.csv', index_col='time')
+///
+/// The headline feature is string indexing: a plain column name returns that
+/// column, and an *indicator directive* is computed on demand, cached, and
+/// incrementally refreshed thereafter::
+///
+///     df['close']            # a column, as a Series
+///     df['ma:5']             # SMA(5) of close (directive) — computed & cached
+///     df['macd.signal']      # MACD signal line
+///     df['close > open']     # a boolean directive -> bool Series
+///     df[['open', 'close']]  # a sub-frame
+///     df[df['close'] > 100]  # boolean-mask row filter
+///
+/// Positional / label access mirrors pandas via ``.iloc`` / ``.loc`` (2-D get +
+/// set) and the scalar ``.iat`` / ``.at``; common transforms (``head``,
+/// ``tail``, ``dropna``, ``sort_index``, ``reset_index``, ``set_index``,
+/// ``rename``, ``astype``, ``to_numpy``, ``to_pandas``, ``to_csv``) follow the
+/// pandas spelling. ``cumulate`` resamples to a coarser timeframe; ``append``
+/// grows the frame in place for live streaming.
+///
+/// Args:
+///     data (dict[str, Sequence]): column name -> equal-length values.
+///     date_col (str, optional): a column to parse into a DatetimeIndex.
+///     tz (str, optional): timezone for that index (requires ``date_col``).
+///     date_unit (str, optional): read ``date_col`` as an epoch integer in this
+///         unit (``'s'`` / ``'ms'`` / ``'us'`` / ``'ns'``); requires ``date_col``.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
     pub(crate) inner: DataFrame,
@@ -1057,6 +1181,8 @@ impl PyDataFrame {
 
 #[pymethods]
 impl PyDataFrame {
+    // Constructor — the user-facing argument list & usage live in the class
+    // docstring (pyo3 does not surface a `#[new]` doc comment to Python).
     #[new]
     #[pyo3(signature = (data, date_col = None, tz = None, date_unit = None))]
     fn new(
@@ -1115,16 +1241,29 @@ impl PyDataFrame {
         })
     }
 
+    /// The column names, in order.
+    ///
+    /// Returns:
+    ///     list[str]
     #[getter]
     fn columns(&self) -> Vec<String> {
         self.inner.names().to_vec()
     }
 
+    /// The frame dimensions as ``(n_rows, n_columns)`` (pandas ``shape``).
+    ///
+    /// Returns:
+    ///     tuple[int, int]
     #[getter]
     fn shape(&self) -> (usize, usize) {
         (self.inner.height(), self.inner.width())
     }
 
+    /// The row index as a NumPy array (``datetime64[ns]`` for a DatetimeIndex,
+    /// an object array for a string index, else an integer array).
+    ///
+    /// Returns:
+    ///     numpy.ndarray
     #[getter]
     fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         index_to_numpy(py, self.inner.index())
@@ -1133,21 +1272,62 @@ impl PyDataFrame {
     // The indexers hold a live reference to this frame (`Py<PyDataFrame>`), not a
     // snapshot, so `df.iloc[...] = ` / `df.loc[...] = ` mutate the frame in place
     // (copy-on-write under the hood) and reads always see the current rows.
+
+    /// Purely integer-location indexing for selection and assignment.
+    ///
+    /// Get ``df.iloc[i]`` (a row), ``df.iloc[a:b]`` (a sub-frame),
+    /// ``df.iloc[i, j]`` (a cell), ``df.iloc[:, j]`` (a column as a Series), or
+    /// ``df.iloc[rows, cols]`` (a sub-frame). Assign ``df.iloc[rows, j] = value``
+    /// (copy-on-write; a prior ``copy()`` is unaffected).
+    ///
+    /// Usage::
+    ///
+    ///     df.iloc[0]            # first row
+    ///     df.iloc[-1, 3]        # last row, 4th column -> scalar
+    ///     df.iloc[:, 0]         # first column as a Series
+    ///     df.iloc[10:20, 0:2]   # a block
+    ///     df.iloc[mask, 1] = 0  # assign a column where a boolean mask is True
     #[getter]
     fn iloc(slf: Bound<'_, Self>) -> DataFrameILoc {
         DataFrameILoc { parent: slf.unbind() }
     }
 
+    /// Label-based indexing for selection and assignment.
+    ///
+    /// Get ``df.loc[label]`` (a row), ``df.loc[a:b]`` (a stop-inclusive label
+    /// slice), ``df.loc[label, col]`` (a cell), ``df.loc[:, col]`` (a column),
+    /// or ``df.loc[mask, col]``. Assign ``df.loc[mask, 'signal'] = 1``
+    /// (copy-on-write).
+    ///
+    /// Usage::
+    ///
+    ///     df.loc['2021-01-04']               # row by datetime label
+    ///     df.loc['2021-01':'2021-03']        # inclusive label slice
+    ///     df.loc[df['close'] > df['open'], 'signal'] = 1
     #[getter]
     fn loc(slf: Bound<'_, Self>) -> DataFrameLoc {
         DataFrameLoc { parent: slf.unbind() }
     }
 
+    /// Fast scalar access by integer position: ``df.iat[i, j]`` to get or set a
+    /// single cell (copy-on-write).
+    ///
+    /// Usage::
+    ///
+    ///     df.iat[0, 3]        # the cell at row 0, column 3
+    ///     df.iat[0, 3] = 1.5  # set it
     #[getter]
     fn iat(slf: Bound<'_, Self>) -> DataFrameIat {
         DataFrameIat { parent: slf.unbind() }
     }
 
+    /// Fast scalar access by label + column name: ``df.at[label, col]`` to get
+    /// or set a single cell (copy-on-write).
+    ///
+    /// Usage::
+    ///
+    ///     df.at['2021-01-04', 'close']         # one cell
+    ///     df.at['2021-01-04', 'close'] = 100.0 # set it
     #[getter]
     fn at(slf: Bound<'_, Self>) -> DataFrameAt {
         DataFrameAt { parent: slf.unbind() }
@@ -1263,6 +1443,9 @@ impl PyDataFrame {
         self.inner.set_column(name, col).map_err(pyerr)
     }
 
+    // `df[key]` — column name / indicator directive / list / boolean mask /
+    // slice. The user-facing usage lives in the class docstring (pyo3 implements
+    // `__getitem__` as a type slot and does not surface its doc comment).
     fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // boolean mask (Series or numpy)
         if let Ok(s) = key.extract::<PyRef<PySeries>>() {
@@ -1341,6 +1524,25 @@ impl PyDataFrame {
         ))
     }
 
+    /// Evaluate an indicator directive and return its values as a NumPy array.
+    ///
+    /// Unlike ``df['ma:5']`` (which returns a Series and caches the column),
+    /// ``exec`` returns the raw array; pass ``create_column=True`` to also cache
+    /// it on the frame under its canonical name.
+    ///
+    /// Args:
+    ///     directive (str): the directive, e.g. ``'macd'``, ``'boll.upper:20'``,
+    ///         ``'close > open'``.
+    ///     create_column (bool): if True, materialize and cache the result as a
+    ///         column (default False).
+    ///
+    /// Usage::
+    ///
+    ///     df.exec('ma:5')               # ndarray of SMA(5)
+    ///     df.exec('kdj.j', create_column=True)  # also caches the column
+    ///
+    /// Returns:
+    ///     numpy.ndarray
     #[pyo3(signature = (directive, create_column = false))]
     fn exec<'py>(
         &mut self,
@@ -1372,20 +1574,52 @@ impl PyDataFrame {
         }
     }
 
-    /// The minimum number of prior rows a directive needs (its lookback).
+    /// Gets the lookback period of the given directive — the minimum number of
+    /// prior rows it needs before it can emit a (non-NaN) value.
+    ///
+    /// Args:
+    ///     directive (str): directive
+    ///
+    /// Usage::
+    ///
+    ///     volas.DataFrame.directive_lookback('boll:20')
+    ///     # It gets 19
+    ///
+    /// Returns:
+    ///     int
     #[staticmethod]
     fn directive_lookback(directive: &str) -> PyResult<usize> {
         let node = parse(directive).map_err(syntax_err)?;
         Ok(volas_directive::lookback::lookback(&node))
     }
 
-    /// The canonical string form of a directive (default args / series dropped).
+    /// Gets the full (canonical) name of the ``directive``, which is also the
+    /// actual column name cached on the frame — default args and series are
+    /// filled in.
+    ///
+    /// Args:
+    ///     directive (str): directive
+    ///
+    /// Usage::
+    ///
+    ///     volas.DataFrame.directive_stringify('boll')
+    ///     # It gets "boll:20@close"
+    ///
+    /// Returns:
+    ///     str
     #[staticmethod]
     fn directive_stringify(directive: &str) -> PyResult<String> {
         let node = parse(directive).map_err(syntax_err)?;
         Ok(volas_directive::stringify(&node))
     }
 
+    /// Gets a column from the frame by name (alias-aware), as a Series.
+    ///
+    /// Args:
+    ///     key (str): the column name.
+    ///
+    /// Returns:
+    ///     Series
     fn get_column(&self, key: &str) -> PyResult<PySeries> {
         let col = self.inner.column(key).map_err(pyerr)?.clone();
         Ok(self.wrap_series(key.to_string(), col))
@@ -1502,13 +1736,24 @@ impl PyDataFrame {
         })
     }
 
-    /// Append the rows of another DataFrame or a single Row, returning a new
-    /// DataFrame (pandas semantics; not in place).
-    /// Append `other`'s rows in place (amortized O(1), like `list.append`) and
-    /// return the same frame. Missing columns are NaN-padded; computed columns
-    /// go stale until `fulfill`. This is the live single-bar hot path — it grows
-    /// one frame with no full-column copy (a snapshot taken via `copy` / `iloc`
-    /// still pays one copy-on-write the next time *it* is appended to).
+    /// Append the rows of another DataFrame or a single Row **in place** and
+    /// return the same frame (amortized O(1), like ``list.append`` — the live
+    /// single-bar hot path, no full-column copy).
+    ///
+    /// Missing columns are NaN-padded; cached directive columns go stale until
+    /// ``fulfill()``. A snapshot taken via ``copy()`` / ``iloc`` is unaffected
+    /// (it pays one copy-on-write the next time *it* is appended to).
+    ///
+    /// Args:
+    ///     other (DataFrame | Row): the rows to append.
+    ///
+    /// Usage::
+    ///
+    ///     df.append(bar)           # append one Row
+    ///     df.append(other_frame)   # append many rows
+    ///
+    /// Returns:
+    ///     DataFrame: ``self`` (enabling chaining).
     fn append<'py>(
         slf: Bound<'py, Self>,
         other: &Bound<'py, PyAny>,
@@ -1578,9 +1823,25 @@ impl PyDataFrame {
         self.inner.equals(&other.inner)
     }
 
-    /// Resample to a coarser `time_frame` (OHLCV cumulation). Requires a
-    /// DatetimeIndex; `cumulators` overrides per-column aggregators, e.g.
-    /// `{'volume': 'sum'}`.
+    /// Resample to a coarser timeframe (OHLCV cumulation / down-sampling).
+    ///
+    /// Requires a DatetimeIndex. Each column is aggregated with a sensible
+    /// default (open=first, high=max, low=min, close=last, volume=sum); override
+    /// per column via ``cumulators``.
+    ///
+    /// Args:
+    ///     time_frame (str | TimeFrame): the target bucket, e.g. ``'1d'``,
+    ///         ``'15m'``, ``'1w'``.
+    ///     cumulators (dict[str, str], optional): per-column aggregator
+    ///         overrides, e.g. ``{'volume': 'sum', 'close': 'last'}``.
+    ///
+    /// Usage::
+    ///
+    ///     daily = df.cumulate('1d')
+    ///     df.cumulate('1h', cumulators={'amount': 'sum'})
+    ///
+    /// Returns:
+    ///     DataFrame: the resampled frame.
     #[pyo3(signature = (time_frame, cumulators = None))]
     fn cumulate(
         &self,

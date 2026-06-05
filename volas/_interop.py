@@ -11,7 +11,20 @@ def from_pandas(pdf):
 
     Numeric / bool columns are carried natively; string / object columns become
     string columns; datetime columns are carried as formatted strings (a datetime
-    *index* is parsed back to a DatetimeIndex). pandas is imported lazily.
+    *index* is parsed back to a DatetimeIndex). pandas is imported lazily, so
+    volas stays pandas-free at import.
+
+    Args:
+        pdf (pandas.DataFrame): the source frame.
+
+    Usage::
+
+        import pandas as pd, volas
+        vdf = volas.from_pandas(pd.read_csv('ohlcv.csv', index_col='time',
+                                            parse_dates=['time']))
+
+    Returns:
+        DataFrame: the equivalent volas frame (the inverse of ``df.to_pandas()``).
     """
     import pandas as pd  # noqa: PLC0415  (intentional lazy import)
     from volas_rs import DataFrame

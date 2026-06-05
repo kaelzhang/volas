@@ -5,25 +5,40 @@ use pyo3::prelude::*;
 
 use crate::{build_datetime_index, norm_idx, pyerr, PyDataFrame};
 
-/// Read a CSV file into a `DataFrame`, inferring per-column dtypes.
+/// Read a CSV file into a ``DataFrame``, inferring per-column dtypes.
 ///
-/// A pandas-subset of `pandas.read_csv`:
-/// - `sep` / `delimiter` — field delimiter (single character; default `,`).
-/// - `header` — `True`/omitted = first row is the header; `None`/`False` = no
-///   header (columns named `"0".."n-1"`).
-/// - `na_values` / `keep_default_na` — extra / default missing-value tokens.
-/// - `parse_dates` — column names to parse into datetime columns.
-/// - `index_col` — a column name or integer position to move into the row index;
-///   applied after `parse_dates`, so naming a parsed date column yields a
-///   `DatetimeIndex`.
-/// - `tz` — timezone for the `index_col` datetime (PD-20): a **naive** date
-///   string column is interpreted in `tz` (stored UTC, the index tagged with
-///   `tz`); a fixed offset (`"+08:00"`) or IANA name (`"America/New_York"`). For
-///   tz ingestion pass the date column via `index_col` and do **not** also list
-///   it in `parse_dates` (which would parse it as UTC first).
-/// - `date_unit` — read the `index_col` column as an epoch integer with this unit
-///   (`"s"`/`"ms"`/`"us"`/`"ns"`, absolute UTC); `tz` then only sets the display
-///   zone.
+/// A pandas-subset of ``pandas.read_csv``.
+///
+/// Args:
+///     path (str): path to the CSV file.
+///     sep (str, optional): field delimiter (single character; default ``','``).
+///     delimiter (str, optional): alias for ``sep``.
+///     header (bool, optional): ``True`` / omitted = the first row is the header;
+///         ``None`` / ``False`` = no header (columns named ``"0".."n-1"``).
+///     parse_dates (list[str], optional): column names to parse into datetime
+///         columns.
+///     index_col (str | int, optional): a column name or integer position to
+///         move into the row index; applied after ``parse_dates``, so naming a
+///         parsed date column yields a DatetimeIndex.
+///     na_values (str | list[str], optional): extra missing-value tokens.
+///     keep_default_na (bool): also treat the default tokens as missing
+///         (default True).
+///     tz (str, optional): timezone for the ``index_col`` datetime — a *naive*
+///         date string is interpreted in ``tz`` (stored UTC, the index tagged);
+///         accepts a fixed offset (``'+08:00'``) or IANA name
+///         (``'America/New_York'``). For tz ingestion pass the date column via
+///         ``index_col`` and do *not* also list it in ``parse_dates``.
+///     date_unit (str, optional): read ``index_col`` as an epoch integer in this
+///         unit (``'s'`` / ``'ms'`` / ``'us'`` / ``'ns'``, absolute UTC); ``tz``
+///         then only sets the display zone.
+///
+/// Usage::
+///
+///     df = volas.read_csv('ohlcv.csv')
+///     df = volas.read_csv('ohlcv.csv', index_col='time', tz='America/New_York')
+///
+/// Returns:
+///     DataFrame
 #[pyfunction]
 #[pyo3(signature = (
     path,

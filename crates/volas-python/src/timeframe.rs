@@ -8,7 +8,17 @@ use volas_time::{Agg, AggSpec, Cumulator, TimeFrame};
 
 use crate::{parse_ts, pyerr, PyDataFrame};
 
-/// `volas.TimeFrame` — an OHLCV sampling period.
+/// ``volas.TimeFrame`` — an OHLCV sampling period.
+///
+/// Use the predefined class constants as the ``time_frame`` argument to
+/// ``df.cumulate`` / ``Cumulator``: ``s1``, ``m1``, ``m3``, ``m5``, ``m15``,
+/// ``m30``, ``H1``, ``H2``, ``H4``, ``H6``, ``H8``, ``H12``, ``D1``, ``D3``,
+/// ``W1``, ``M1``, ``Y1`` (label strings like ``'5m'`` / ``'1d'`` also work).
+///
+/// Usage::
+///
+///     df.cumulate(volas.TimeFrame.D1)   # daily bars
+///     df.cumulate('15m')                # same idea, by label
 #[pyclass(name = "TimeFrame")]
 #[derive(Clone)]
 pub struct PyTimeFrame {
@@ -24,11 +34,22 @@ impl PyTimeFrame {
     fn __repr__(&self) -> String {
         format!("TimeFrame.{}", self.inner.label())
     }
+    /// The period length in minutes.
+    ///
+    /// Returns:
+    ///     int
     #[getter]
     fn minutes(&self) -> i64 {
         self.inner.minutes()
     }
-    /// Unify a timestamp (datetime string or epoch-ns int) to its period key.
+    /// Snap a timestamp (datetime string or epoch-ns int) down to its period key
+    /// — the epoch-ns of the bucket it falls in.
+    ///
+    /// Args:
+    ///     ts (str | int): the timestamp to bucket.
+    ///
+    /// Returns:
+    ///     int: the bucket key as epoch nanoseconds.
     fn unify(&self, ts: &Bound<'_, PyAny>) -> PyResult<i64> {
         Ok(self.inner.unify(parse_ts(ts)?))
     }
@@ -132,8 +153,21 @@ pub(crate) fn build_agg_spec(cumulators: Option<&Bound<'_, PyDict>>) -> PyResult
     Ok(spec)
 }
 
-/// `volas.Cumulator` — a stateful, incremental OHLCV cumulator (live cum_append):
-/// feed fine bars with `.append`, read the cumulated frame from `.frame`.
+/// ``volas.Cumulator`` — a stateful, incremental OHLCV cumulator for live
+/// streaming: feed fine bars with ``.append`` and read the cumulated frame from
+/// ``.frame`` (closed periods + the live open period as the last row).
+///
+/// Args:
+///     time_frame (str | TimeFrame): the coarse bucket to cumulate into
+///         (e.g. ``volas.TimeFrame.m5`` or ``'5m'``).
+///     cumulators (dict[str, str], optional): per-column aggregator overrides
+///         (e.g. ``{'volume': 'sum'}``); defaults to OHLCV.
+///
+/// Usage::
+///
+///     cum = volas.Cumulator(volas.TimeFrame.m5)
+///     cum.append(one_minute_bars)
+///     five_minute = cum.frame
 #[pyclass(name = "Cumulator")]
 pub struct PyCumulator {
     inner: Cumulator,
@@ -141,6 +175,8 @@ pub struct PyCumulator {
 
 #[pymethods]
 impl PyCumulator {
+    // Constructor — args & usage live in the class docstring (pyo3 does not
+    // surface a `#[new]` doc comment to Python).
     #[new]
     #[pyo3(signature = (time_frame, cumulators = None))]
     fn new(
