@@ -92,7 +92,7 @@ df.to_numpy()                    # 2-D ndarray (rows x columns)
 
 ```py
 from volas import (
-    DataFrame, Series, read_csv, Cumulator, TimeFrame, Timestamp,
+    DataFrame, Series, read_csv, TimeFrame, Timestamp,
 )
 ```
 
@@ -352,33 +352,32 @@ row.to_dict()          # {column: value}
 row.to_numpy()         # the numeric cells as a 1-D ndarray
 ```
 
-### Cumulator(time_frame: TimeFrame | str, cumulators: dict[str, str] | None = None)
+### Live cumulation — a tf-aware DataFrame
 
-For **live** streaming, feed bars to a `Cumulator` and read the running result,
-instead of re-cumulating the whole frame each time. The constructor takes the
-same `time_frame` and `cumulators` as `df.cumulate`:
+For **live** streaming, give a DataFrame a `time_frame` and `append` finer bars
+into it, instead of re-cumulating the whole frame each tick. `df.cumulate(tf)`
+returns such a frame (the forming period kept live), or build one directly with
+`DataFrame(data, time_frame=..., cumulators=...)` (the given rows are taken as
+already-final bars at that frame; requires a DatetimeIndex).
 
-- **time_frame** `TimeFrame | str` the target bar interval, e.g. `TimeFrame.m5`
-  or `'5m'`. See [TimeFrame](#timeframe).
-- **cumulators?** `dict[str, str] | None = None` per-column aggregator overrides;
-  defaults to OHLCV semantics.
+On a tf-aware frame:
 
-Instance methods and properties:
-
-- **cum.append(data: DataFrame) -> None** feeds one or more new bars. A bar whose
-  timestamp matches the still-open period **updates** it instead of duplicating
-  it (matching exchange data that revises the latest bar).
-- **cum.frame -> DataFrame** (property) the closed periods plus the open period as
-  a live last row.
-- **cum.last -> DataFrame | None** (property) just the current (still-open)
-  period, aggregated; `None` before any bar has been appended.
+- **df.append(bar)** folds the bar in: one in the open period **updates the
+  forming last row** (`df.iloc[-1]`); one in a new period rolls over into a fresh
+  row; a re-sent forming bar (same timestamp) updates rather than double-counts.
+- **df.iloc[-1]** is the current (still-open) period — the live bar.
+- **df[directive]** / **df.exec(directive)** computes indicators over the
+  cumulated frame, including the forming row.
+- **df.cumulate(target)** must be a whole multiple of the source frame (e.g.
+  `5m→15m`, not `5m→7m`; a week or 3-day bar does not nest into a month/year);
+  the same frame is a `copy()`.
 
 ```py
-cum = Cumulator('5m')
-for bar in stream:        # each `bar` is a 1-row DataFrame
-    cum.append(bar)
-    cum.frame             # closed periods + the open period as a live last row
-    cum.last              # just the current (still-open) period, aggregated
+df = history.cumulate('5m')   # a tf-aware 5m frame (history is finer, e.g. 1m)
+for bar in stream:            # each `bar` is a finer DataFrame
+    df.append(bar)            # folds into the forming 5m bar
+    df.iloc[-1]               # the live, still-forming bar
+    df['macd']               # indicators over the cumulated frame
 ```
 
 See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
@@ -516,25 +515,27 @@ df.cumulate('1h', cumulators={'volume': 'last'})
 The `time_frame` may be a string label or a `TimeFrame` constant — see
 [TimeFrame](#timeframe) for the full list.
 
-For **live** streaming, feed bars to a `Cumulator` and read the running result,
-instead of re-cumulating the whole frame each time:
+For **live** streaming, the result of `cumulate` is a **tf-aware DataFrame** you
+keep `append`-ing finer bars into, instead of re-cumulating the whole frame each
+time:
 
 ```py
-cum = Cumulator('5m')
-for bar in stream:               # each `bar` is a 1-row DataFrame
-    cum.append(bar)
-    cum.frame                    # closed periods + the open period as a live last row
-    cum.last                     # just the current (still-open) period, aggregated
+df = history.cumulate('5m')      # a tf-aware 5m frame
+for bar in stream:               # each `bar` is a finer DataFrame
+    df.append(bar)               # folds into the forming 5m bar
+    df.iloc[-1]                  # the current (still-open) period — the live bar
+    df['macd']                  # indicators over the cumulated frame
 ```
 
 Re-sending a bar with a timestamp already seen **updates** that period (it does
-not double-count), which matches exchange data that revises the latest bar.
+not double-count), which matches exchange data that revises the latest bar. See
+[Live cumulation](#live-cumulation--a-tf-aware-dataframe).
 
 ## TimeFrame
 
 A `TimeFrame` names a bar interval. It is accepted anywhere volas resamples —
-`df.cumulate`, `Cumulator`, and the `hv` indicator — either as a `TimeFrame`
-constant or as its equivalent **string label**. There is no `TimeFrame(...)`
+`df.cumulate`, the `time_frame` DataFrame argument, and the `hv` indicator —
+either as a `TimeFrame` constant or as its equivalent **string label**. There is no `TimeFrame(...)`
 constructor — use one of the constants below or a label string.
 
 ```py

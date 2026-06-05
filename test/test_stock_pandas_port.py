@@ -7,9 +7,9 @@ test_manipulate). These fill the remaining behavioural gaps.
 stock-pandas-only surface is intentionally NOT part of volas and is not ported:
 backend switching (volas is Rust-only), ``define_command`` / custom command
 registration, the ``_stock_columns_info_map`` internals, ``cum_append`` from a
-dict / Series / list (volas's ``Cumulator.append`` takes a DataFrame),
-the ``source=`` constructor, callable indexing (``df[lambda d: ...]``), and the
-``DirectiveNonSenseWarning``.
+dict / Series / list (volas folds finer bars into a tf-aware DataFrame via
+``df.append``), the ``source=`` constructor, callable indexing
+(``df[lambda d: ...]``), and the ``DirectiveNonSenseWarning``.
 """
 
 from pathlib import Path
