@@ -7,20 +7,22 @@
 /// when flat. Seeded with `volume[0]`; lookback 0 (no warm-up).
 pub fn obv(real: &[f64], volume: &[f64]) -> Vec<f64> {
     let n = real.len();
-    let mut out = vec![f64::NAN; n];
     if n == 0 {
-        return out;
+        return Vec::new();
     }
+    // Every bar is written, so `vec![NaN; n]` would be fully overwritten — build into a
+    // reserved buffer with `push` instead (each slot written once).
+    let mut out = Vec::with_capacity(n);
     let mut obv = volume[0];
     let mut prev = real[0];
-    out[0] = obv;
+    out.push(obv);
     for i in 1..n {
-        if real[i] > prev {
-            obv += volume[i];
-        } else if real[i] < prev {
-            obv -= volume[i];
-        }
-        out[i] = obv;
+        // Branchless direction sign (+1 up / -1 down / 0 flat): the up/down branch is
+        // unpredictable on real price data, so a misprediction-free form is faster.
+        // Bit-identical: `+1.0·v == +v`, `-1.0·v == -v`, `0·v == 0`.
+        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
+        obv += dir * volume[i];
+        out.push(obv);
         prev = real[i];
     }
     out
@@ -42,11 +44,13 @@ fn money_flow_volume(high: f64, low: f64, close: f64, volume: f64) -> f64 {
 /// bar's money flow volume. Lookback 0 (no warm-up).
 pub fn ad(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
     let n = close.len();
-    let mut out = vec![f64::NAN; n];
+    // Every bar is written — push into a reserved buffer (one write per slot) rather
+    // than allocate-and-fill `vec![NaN; n]` only to overwrite all of it.
+    let mut out = Vec::with_capacity(n);
     let mut ad = 0.0;
     for i in 0..n {
         ad += money_flow_volume(high[i], low[i], close[i], volume[i]);
-        out[i] = ad;
+        out.push(ad);
     }
     out
 }
