@@ -216,14 +216,35 @@ CALC = _calc_registry()
 # --- coverage: every indicator BOTH volas and TA-Lib implement -------------
 #
 # (directive, TA-Lib call) pairs drawn from the TA-Lib parity suite — the
-# authoritative volas∩TA-Lib set, beyond the core 10 above. Timed volas-vs-TA-Lib
-# only. A multi-output TA-Lib function indexes the output the directive selects.
+# authoritative volas∩TA-Lib set. Includes the core indicators also charted in the
+# append / calc sections, so Full Coverage is the complete set. Timed volas-vs-TA-Lib
+# only. A multi-output TA-Lib function indexes the output the directive selects, and
+# every band of a multi-band indicator is listed as its own row.
 
 def _coverage_pairs():
     if talib is None:
         return []
     c, h, lo, o, v = (ARR['close'], ARR['high'], ARR['low'], ARR['open'], ARR['volume'])
     pairs = [
+        # core indicators — also shown across libraries in the append / calc charts,
+        # listed here too so Full Coverage is the complete volas-vs-TA-Lib set. Each
+        # multi-band indicator is timed band-by-band (request: every band separately).
+        ('ma:20', lambda: talib.MA(c, 20, 0)),
+        ('ema:12', lambda: talib.EMA(c, 12)),
+        ('rsi:14', lambda: talib.RSI(c, 14)),
+        ('atr:14', lambda: talib.ATR(h, lo, c, 14)),
+        ('llv:10', lambda: talib.MIN(lo, 10)),
+        ('hhv:10', lambda: talib.MAX(h, 10)),
+        # MACD bands. volas's line is the clean EMA(fast)-EMA(slow); TA-Lib's own MACD
+        # (its internally-inconsistent quirk) is the natural speed reference.
+        ('macd', lambda: talib.MACD(c, 12, 26, 9)[0]),
+        ('macd.signal', lambda: talib.MACD(c, 12, 26, 9)[1]),
+        ('macd.histogram', lambda: talib.MACD(c, 12, 26, 9)[2]),
+        # Bollinger bands (upper / middle / lower) + band-width.
+        ('boll.upper', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[0]),
+        ('boll.middle', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[1]),
+        ('boll.lower', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[2]),
+        ('bbw', lambda: (lambda u, m, low: (u - low) / m)(*talib.BBANDS(c, 20, 2.0, 2.0))),
         # price transforms
         ('avgprice', lambda: talib.AVGPRICE(o, h, lo, c)),
         ('medprice', lambda: talib.MEDPRICE(h, lo)),
@@ -305,11 +326,13 @@ def _coverage_pairs():
         ('rocr100:10', lambda: talib.ROCR100(c, 10)),
         # volatility
         ('tr', lambda: talib.TRANGE(h, lo, c)),
-        # extended MACD variants
+        # extended MACD variants (every band timed separately)
         ('macdext', lambda: talib.MACDEXT(c)[0]),
         ('macdext.signal', lambda: talib.MACDEXT(c)[1]),
+        ('macdext.histogram', lambda: talib.MACDEXT(c)[2]),
         ('macdfix', lambda: talib.MACDFIX(c)[0]),
         ('macdfix.signal', lambda: talib.MACDFIX(c)[1]),
+        ('macdfix.histogram', lambda: talib.MACDFIX(c)[2]),
         # adaptive / extended overlap studies
         ('mama', lambda: talib.MAMA(c)[0]),
         ('mama.fama', lambda: talib.MAMA(c)[1]),

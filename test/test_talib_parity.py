@@ -192,6 +192,14 @@ def test_math_operators_match_talib(ohlc):
     _parity(df.exec('sum'), talib.SUM(c, 30))  # default resolves to 30
 
 
+def test_llv_hhv_match_talib(ohlc):
+    # llv / hhv = rolling lowest-low / highest-high (TA-Lib MIN over low, MAX over high).
+    df, h, l, c = ohlc
+    for p in (10, 20):
+        _parity(df.exec(f'llv:{p}'), talib.MIN(l, p))
+        _parity(df.exec(f'hhv:{p}'), talib.MAX(h, p))
+
+
 def test_aroon_matches_talib(ohlc):
     df, h, l, c = ohlc
     for p in (14, 25):  # 14 is the TA-Lib default
@@ -491,6 +499,8 @@ def test_bollinger_bands_match_talib(ohlc):
     up, mid, low = talib.BBANDS(c, 20, 2.0, 2.0, 0)
     _parity(df.exec('boll.upper'), up)
     _parity(df.exec('boll.l:20,2'), low)
+    # band-width = (upper - lower) / middle, the same BBANDS-derived quantity.
+    _parity(df.exec('bbw'), (up - low) / mid)
 
 
 def test_cci_trix_match_talib(ohlc):
