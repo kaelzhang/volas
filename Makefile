@@ -1,7 +1,7 @@
 files = volas test *.py
 test_files = *
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick coverage coverage-html benchmark lint fix fmt check cargo-test upload publish dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick coverage coverage-html benchmark lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -129,6 +129,25 @@ upload:
 publish:
 	make build-pkg
 	make upload
+
+# Bump the workspace version, commit, tag (no `v` prefix), then push the commit and
+# the tag to origin. The pushed tag triggers the GitHub release workflow, which
+# verifies the tag matches the Cargo.toml version, then builds wheels and publishes
+# to PyPI via Trusted Publishing. Usage: make bump TYPE={major|minor|patch}
+bump:
+	@test -n "$(TYPE)" || { echo "TYPE is required: make bump TYPE={major|minor|patch}"; exit 1; }
+	@test -z "$$(git status --porcelain)" || { echo "working tree is not clean -- commit or stash first"; exit 1; }
+	@next=$$(python3 scripts/bump_version.py --next "$(TYPE)") || exit 1; \
+	if git rev-parse -q --verify "refs/tags/$$next" >/dev/null 2>&1; then \
+		echo "tag $$next already exists -- aborting"; exit 1; \
+	fi; \
+	echo "\033[1m>> Bumping version to $$next <<\033[0m"; \
+	python3 scripts/bump_version.py "$(TYPE)" >/dev/null || exit 1; \
+	git add Cargo.toml; \
+	git commit -m "chore(release): $$next" -- Cargo.toml; \
+	git tag "$$next"; \
+	git push origin HEAD "refs/tags/$$next"; \
+	echo "\033[1m>> Released $$next -- pushed commit + tag <<\033[0m"
 
 # Development workflow: build and fast test (no coverage) for a tight inner loop.
 dev: build test-quick
