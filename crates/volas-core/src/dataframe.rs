@@ -518,7 +518,7 @@ impl DataFrame {
                     f[p] = src[pick(k)];
                 }
                 self.columns[col] = Column::f64(f);
-                self.drop_computed_at(col);
+                self.invalidate_computed_on_write_at(col);
                 return Ok(());
             }
         }
@@ -575,7 +575,7 @@ impl DataFrame {
                 )));
             }
         }
-        self.drop_computed_at(col);
+        self.invalidate_computed_on_write_at(col);
         Ok(())
     }
 
@@ -583,6 +583,26 @@ impl DataFrame {
     fn drop_computed_at(&mut self, col: usize) {
         if let Some(name) = self.names.get(col) {
             self.computed.remove(name);
+        }
+    }
+
+    /// A user write to column `col` invalidates the directive cache: `col` loses any
+    /// computed status, and every OTHER cached directive column is marked fully stale —
+    /// it may have been derived from `col`, so it is recomputed on next access (a bulk
+    /// read raises until `fulfill`, exactly like an append). Conservative (no per-column
+    /// dependency tracking), but writes are rare relative to reads.
+    fn invalidate_computed_on_write_at(&mut self, col: usize) {
+        self.drop_computed_at(col);
+        for meta in self.computed.values_mut() {
+            meta.valid_rows = 0;
+        }
+    }
+
+    /// Name-based variant for the `df[name] = value` whole-column replace path.
+    pub fn invalidate_computed_on_write(&mut self, written_name: &str) {
+        self.computed.remove(written_name);
+        for meta in self.computed.values_mut() {
+            meta.valid_rows = 0;
         }
     }
 

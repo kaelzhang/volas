@@ -67,27 +67,11 @@ _SLICE_STATEFUL = frozenset({
     'trix:30',
 })  # 36
 
-# BUG 2 — an in-place update of a base column does NOT invalidate dependent cached
-# indicators, so a re-read returns the pre-update (stale) values. Hit by test_update.
-_UPDATE_BUG = frozenset({
-    'accbands:20', 'ad', 'adosc', 'apo', 'atr:14', 'avgprice', 'boll.lower',
-    'boll.middle', 'boll.upper', 'bop', 'cci:14', 'cdl.3inside', 'cdl.closingmarubozu',
-    'cdl.harami', 'cmo:14', 'dema:30', 'ema:12', 'ht_dcperiod', 'ht_dcphase',
-    'ht_phasor.quadrature', 'ht_sine.leadsine', 'ht_sine.sine', 'ht_trendline',
-    'ht_trendmode', 'kama:30', 'linearreg:14', 'linearreg_angle:14',
-    'linearreg_intercept:14', 'linearreg_slope:14', 'ma:20', 'macd', 'macd.histogram',
-    'macd.signal', 'macdext', 'macdext.histogram', 'macdext.signal', 'macdfix',
-    'macdfix.histogram', 'macdfix.signal', 'mama', 'mama.fama', 'mavp@close,periods',
-    'maxindex:30', 'mfi:14', 'midpoint:14', 'minmax.max:30', 'minmaxindex.max:30',
-    'minus_di:14', 'mom:10', 'natr:14', 'obv', 'plus_di:14', 'ppo', 'roc:10', 'rocp:10',
-    'rocr100:10', 'rocr:10', 'rsi:14', 'stddev:5', 'stoch.d', 'stoch.k', 'stochf.d',
-    'stochf.k', 'stochrsi.d', 'stochrsi.k', 'sum:30', 't3:5', 'tema:30', 'tr',
-    'trima:30', 'trix:30', 'tsf:14', 'typprice', 'ultosc', 'var:5', 'wclprice',
-    'willr:14', 'wma:30',
-})  # 78
+# BUG 2 (in-place update of a base column/row did not invalidate dependent cached
+# indicators) is FIXED — test_update_cell and test_update_column are exact for every
+# indicator.
 
 _SLICE_REASON = 'a slice drops its head, so a stateful indicator cannot be continued past it without state-carry'
-_UPDATE_REASON = 'in-place base-column update does not invalidate dependent cached indicators (stale read; fix pending)'
 
 
 def _params(bug_set, reason):
@@ -135,13 +119,36 @@ def test_append(directive):
     _eq(df[directive].to_numpy(), _gt(directive, A_APP))
 
 
-@pytest.mark.parametrize('directive', _params(_UPDATE_BUG, _UPDATE_REASON))
-def test_update(directive):
-    """Cache, then update a recent close cell: dependent indicators must recompute."""
+@pytest.mark.parametrize('directive', DIRECTIVES)
+def test_update_cell(directive):
+    """Cache, then update a recent close cell IN A ROW (df.iloc[i, j] = v): dependent
+    indicators must recompute, not return stale cached values."""
     df = DataFrame(A)
     _cache(df, directive)
     df.iloc[N - 3, _CLOSE] = A['close'][N - 3] * 1.05
     _eq(df[directive].to_numpy(), _gt(directive, A_UPD))
+
+
+@pytest.mark.parametrize('directive', DIRECTIVES)
+def test_update_column(directive):
+    """Cache, then replace a whole base COLUMN (df['close'] = ...): dependent indicators
+    must recompute."""
+    df = DataFrame(A)
+    _cache(df, directive)
+    df['close'] = A_UPD['close']
+    _eq(df[directive].to_numpy(), _gt(directive, A_UPD))
+
+
+@pytest.mark.parametrize('directive', DIRECTIVES)
+def test_update_then_append(directive):
+    """Combination: cache, update a cell, append, fulfill — both mutations honored."""
+    df = DataFrame(A)
+    _cache(df, directive)
+    df.iloc[N - 3, _CLOSE] = A['close'][N - 3] * 1.05
+    df.append(DataFrame(BARS))
+    df.fulfill()
+    h = {k: np.concatenate([A_UPD[k], BARS[k]]) for k in A_UPD}
+    _eq(df[directive].to_numpy(), _gt(directive, h))
 
 
 @pytest.mark.parametrize('directive', _params(_SLICE_STATEFUL, _SLICE_REASON))

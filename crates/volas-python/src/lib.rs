@@ -1478,7 +1478,15 @@ impl PyDataFrame {
         } else {
             pyany_to_column(value)?
         };
-        self.inner.set_column(name, col).map_err(pyerr)
+        // Overwriting an EXISTING column may invalidate any cached indicator derived
+        // from it (e.g. `df['close'] = …` stales `ma:20`); mark those for recompute on
+        // next access. Adding a brand-new column cannot affect existing caches.
+        let existed = self.inner.has_column(name);
+        self.inner.set_column(name, col).map_err(pyerr)?;
+        if existed {
+            self.inner.invalidate_computed_on_write(name);
+        }
+        Ok(())
     }
 
     // `df[key]` — column name / indicator directive / list / boolean mask /
