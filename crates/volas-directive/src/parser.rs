@@ -4,11 +4,38 @@
 //! (`< <= == != >= > // \\ ><`) < additive (`+ -`) < multiplicative (`* /`) <
 //! unary (`~ -`) < primary (command, scalar, parenthesised expression).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use super::types::{Command, Node, Op, UnaryOp};
 use volas_core::{Result, VolasError};
 
-/// Parse a directive string into an AST [`Node`].
+thread_local! {
+    /// Per-thread parse memo. `parse` is a pure function of its input, so caching the
+    /// AST is bit-identical — and `df.exec` re-parses on every call, so repeated
+    /// directives in a hot loop hit the cache instead of re-tokenizing.
+    static PARSE_CACHE: RefCell<HashMap<String, Node>> = RefCell::new(HashMap::new());
+}
+
+/// Parse a directive string into an AST [`Node`] (memoized per thread).
 pub fn parse(input: &str) -> Result<Node> {
+    if let Some(node) = PARSE_CACHE.with(|c| c.borrow().get(input).cloned()) {
+        return Ok(node);
+    }
+    let node = parse_uncached(input)?;
+    PARSE_CACHE.with(|c| {
+        let mut m = c.borrow_mut();
+        // Bound the memo (clear wholesale — cheap and correct) so generated / adversarial
+        // directive churn can't grow it without limit. Only successful parses are cached.
+        if m.len() >= 512 {
+            m.clear();
+        }
+        m.insert(input.to_string(), node.clone());
+    });
+    Ok(node)
+}
+
+fn parse_uncached(input: &str) -> Result<Node> {
     let mut p = Parser::new(input);
     p.skip_ws();
     if p.eof() {
