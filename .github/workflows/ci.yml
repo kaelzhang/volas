@@ -53,8 +53,11 @@ jobs:
       - name: Build the extension
         run: maturin develop --release
 
+      # Fast functional run across the Python matrix; the combined Python+Rust
+      # coverage report is produced once by the dedicated `coverage` job below
+      # (which has the llvm-tools / cargo-llvm-cov toolchain).
       - name: Python tests
-        run: make test
+        run: make test-quick
 
   coverage:
     name: coverage / codecov
