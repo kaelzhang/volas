@@ -104,7 +104,7 @@ API that behaves exactly as it does in pandas. (A top-level name imported from
 `volas`, such as `read_csv` or `rolling_calc`, is written without a `volas.`
 prefix.)
 
-### DataFrame
+### DataFrame(data, date_col=None, tz=None, date_unit=None)
 
 `DataFrame` has a **pandas-compatible API**, so if you are familiar with
 `pandas.DataFrame`, you are already ready to use volas. Unlike pandas, volas is
@@ -219,7 +219,7 @@ By default, appending new rows does not update the indicator columns of the new
 rows; they stay stale until they are read again or until `df.fulfill()` is
 called (see below).
 
-### df.cumulate(time_frame, cumulators=None) -> DataFrame
+### df.cumulate(time_frame: TimeFrame | str, cumulators: dict | None = None) -> DataFrame
 
 Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
 `DataFrame`. Requires a `DatetimeIndex`.
@@ -350,7 +350,7 @@ row.to_dict()          # {column: value}
 row.to_numpy()         # the numeric cells as a 1-D ndarray
 ```
 
-### Cumulator(time_frame, cumulators=None)
+### Cumulator(time_frame: TimeFrame | str, cumulators: dict[str, str] | None = None)
 
 For **live** streaming, feed bars to a `Cumulator` and read the running result,
 instead of re-cumulating the whole frame each time. The constructor takes the
