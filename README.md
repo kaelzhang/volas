@@ -193,12 +193,12 @@ computes it against the frame, returning a `Series` (or a `DataFrame` for a list
 of directives). The directive grammar mirrors stock-pandas.
 
 ```
-command : args . sub @ series  op  command ...
-   |       |    |     |
-   |       |    |     └── operand column / sub-expression  (e.g. @open, @(boll))
-   |       |    └── sub-command                            (e.g. macd.signal)
-   |       └── comma-separated arguments                   (e.g. ma:20, kdj.k:9,3)
-   └── indicator name                                      (e.g. ma, macd, boll)
+command . sub : args @ series  op  command ...
+   |      |     |      |
+   |      |     |      └── operand column / sub-expression  (e.g. @open, @(boll))
+   |      |     └── comma-separated arguments               (e.g. ma:20, kdj.k:9,3)
+   |      └── sub-command                                   (e.g. macd.signal)
+   └── indicator name                                       (e.g. ma, macd, boll)
 ```
 
 ```py
