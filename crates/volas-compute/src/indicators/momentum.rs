@@ -7,10 +7,12 @@ use crate::kernels;
 /// Momentum: `data[i] - data[i-period]` (TA-Lib MOM). NaN during warm-up.
 pub fn mom(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
-    let mut out = vec![f64::NAN; n];
-    for i in period..n {
-        out[i] = data[i] - data[i - period];
+    if period >= n {
+        return vec![f64::NAN; n];
     }
+    // Warm-up NaN, then compute the valid region once (no `vec![NaN; n]` re-write).
+    let mut out = vec![f64::NAN; period];
+    out.extend((period..n).map(|i| data[i] - data[i - period]));
     out
 }
 

@@ -465,9 +465,9 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
 /// per bar. Shared by all pattern submodules.
 #[inline]
 fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
-    let mut out = vec![f64::NAN; n];
-    for i in lookback..n {
-        out[i] = f(i);
-    }
+    // Warm-up NaN, then the valid region once via `extend` (no `vec![NaN; n]` +
+    // index-overwrite, which writes `[lookback, n)` twice).
+    let mut out = vec![f64::NAN; lookback.min(n)];
+    out.extend((lookback..n).map(f));
     out
 }
