@@ -1,7 +1,7 @@
 //! Four- and five-bar candlestick patterns.
 
 use super::{
-    candle_average, candle_average_series, color, each_bar, each_bar_avg_n, lowershadow, realbody,
+    candle_average_series, color, each_bar, each_bar_avg_n, lowershadow, realbody,
     realbody_gap_down, realbody_gap_up, uppershadow, BODY_LONG, BODY_SHORT, NEAR, SHADOW_VERY_SHORT,
 };
 
@@ -80,7 +80,7 @@ pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// Lookback 14.
 pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period + 4;
-    each_bar(c.len(), lb, |i| {
+    each_bar_avg_n::<1, 2>([SHADOW_VERY_SHORT], lb, o, h, l, c, |i, hist| {
         if color(o, c, i - 4) < 0.0
             && color(o, c, i - 3) < 0.0
             && color(o, c, i - 2) < 0.0
@@ -89,7 +89,7 @@ pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> 
             && c[i - 4] > c[i - 3]
             && c[i - 3] > c[i - 2]
             && color(o, c, i - 1) < 0.0
-            && uppershadow(o, h, c, i - 1) > candle_average(SHADOW_VERY_SHORT, o, h, l, c, i - 1)
+            && uppershadow(o, h, c, i - 1) > hist[1][0] // SHADOW_VERY_SHORT at i-1
             && color(o, c, i) > 0.0
             && o[i] > o[i - 1]
             && c[i] > h[i - 1]
@@ -106,17 +106,19 @@ pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> 
 /// 3rd including its shadows — bullish `100`. Lookback 13.
 pub fn cdl_concealbabyswall(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period + 3;
-    each_bar(c.len(), lb, |i| {
-        let vss = |k: usize| candle_average(SHADOW_VERY_SHORT, o, h, l, c, k);
-        let marubozu = |k: usize| uppershadow(o, h, c, k) < vss(k) && lowershadow(o, l, c, k) < vss(k);
+    each_bar_avg_n::<1, 4>([SHADOW_VERY_SHORT], lb, o, h, l, c, |i, hist| {
+        // SHADOW_VERY_SHORT average at bar `i-lag`.
+        let marubozu = |bar: usize, lag: usize| {
+            uppershadow(o, h, c, bar) < hist[lag][0] && lowershadow(o, l, c, bar) < hist[lag][0]
+        };
         if color(o, c, i - 3) < 0.0
             && color(o, c, i - 2) < 0.0
             && color(o, c, i - 1) < 0.0
             && color(o, c, i) < 0.0
-            && marubozu(i - 3)
-            && marubozu(i - 2)
+            && marubozu(i - 3, 3)
+            && marubozu(i - 2, 2)
             && realbody_gap_down(o, c, i - 1, i - 2)
-            && uppershadow(o, h, c, i - 1) > vss(i - 1)
+            && uppershadow(o, h, c, i - 1) > hist[1][0] // SHADOW_VERY_SHORT at i-1
             && h[i - 1] > c[i - 2]
             && h[i] > h[i - 1]
             && l[i] < l[i - 1]
@@ -133,12 +135,12 @@ pub fn cdl_concealbabyswall(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f
 /// above the reaction highs — bullish continuation `100`. Lookback 14.
 pub fn cdl_mathold(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: f64) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 4;
-    each_bar(c.len(), lb, |i| {
+    each_bar_avg_n::<2, 5>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, hist| {
         let floor = c[i - 4] - realbody(o, c, i - 4) * penetration;
-        if realbody(o, c, i - 4) > candle_average(BODY_LONG, o, h, l, c, i - 4)
-            && realbody(o, c, i - 3) < candle_average(BODY_SHORT, o, h, l, c, i - 3)
-            && realbody(o, c, i - 2) < candle_average(BODY_SHORT, o, h, l, c, i - 2)
-            && realbody(o, c, i - 1) < candle_average(BODY_SHORT, o, h, l, c, i - 1)
+        if realbody(o, c, i - 4) > hist[4][0] // BODY_LONG at i-4
+            && realbody(o, c, i - 3) < hist[3][1] // BODY_SHORT at i-3
+            && realbody(o, c, i - 2) < hist[2][1] // BODY_SHORT at i-2
+            && realbody(o, c, i - 1) < hist[1][1] // BODY_SHORT at i-1
             && color(o, c, i - 4) > 0.0
             && color(o, c, i - 3) < 0.0
             && color(o, c, i) > 0.0
@@ -164,14 +166,14 @@ pub fn cdl_mathold(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: f64)
 /// `color(1st)·100`. Lookback 14. (The `*color` multiplier handles both directions.)
 pub fn cdl_risefall3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 4;
-    each_bar(c.len(), lb, |i| {
+    each_bar_avg_n::<2, 5>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, hist| {
         let dir = color(o, c, i - 4);
         let within = |k: usize| o[k].min(c[k]) < h[i - 4] && o[k].max(c[k]) > l[i - 4];
-        if realbody(o, c, i - 4) > candle_average(BODY_LONG, o, h, l, c, i - 4)
-            && realbody(o, c, i - 3) < candle_average(BODY_SHORT, o, h, l, c, i - 3)
-            && realbody(o, c, i - 2) < candle_average(BODY_SHORT, o, h, l, c, i - 2)
-            && realbody(o, c, i - 1) < candle_average(BODY_SHORT, o, h, l, c, i - 1)
-            && realbody(o, c, i) > candle_average(BODY_LONG, o, h, l, c, i)
+        if realbody(o, c, i - 4) > hist[4][0] // BODY_LONG at i-4
+            && realbody(o, c, i - 3) < hist[3][1] // BODY_SHORT at i-3
+            && realbody(o, c, i - 2) < hist[2][1] // BODY_SHORT at i-2
+            && realbody(o, c, i - 1) < hist[1][1] // BODY_SHORT at i-1
+            && realbody(o, c, i) > hist[0][0] // BODY_LONG at i
             && dir == -color(o, c, i - 3)
             && color(o, c, i - 3) == color(o, c, i - 2)
             && color(o, c, i - 2) == color(o, c, i - 1)
