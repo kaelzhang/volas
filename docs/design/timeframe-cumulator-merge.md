@@ -1,6 +1,12 @@
 # 设计 Spec：TimeFrame 修正 + 把 Cumulator 合并进 DataFrame
 
-状态：待评审（写代码前过一遍）。语言：尽量说人话、给具体公式与边界。
+状态：**已实现**（Part A1/A2/A3 + Part B 均已落地并提交，全套件绿）。语言：尽量说人话、给具体公式与边界。
+
+> 实现说明（与本 spec 的差异 / 未尽项）：
+> - 周线锚定**默认周一**已实现；**可配置 `week_start`（周日等）**与**股票 session-日线**按 spec 列为未来扩展，尚未加参数。
+> - 锚定时区已支持（`unify_tz(tz)`，默认 UTC；`cumulate` 沿用帧的 tz）。
+> - forming 行的指标在折叠时通过 `assign_positions` 触发 cache 失效重算（origin 的 `fix(cache)`），不再需要本 spec 设想的显式 `invalidate_computed_from`。
+> - 递归（IIR）指标的增量正确性由 **origin 的 directive state-carry resume** 提供；tf-aware 帧上 `ema` 等增量结果已与一次性一致（原 xfail 已转正）。
 
 ---
 
