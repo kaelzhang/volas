@@ -58,12 +58,13 @@ DIRECTIVES = list(COVERAGE_IDS)
 # continue correctly. Only test_slice_then_append is affected; xfail(strict) so a future
 # state-carry enhancement flips these to xpass.
 _SLICE_STATEFUL = frozenset({
-    'ht_dcperiod', 'ht_dcphase', 'ht_phasor.inphase', 'ht_phasor.quadrature',
-    'ht_sine.leadsine', 'ht_sine.sine', 'mama.fama', 'maxindex:30', 'minindex:30',
-    'minmaxindex.max:30', 'minmaxindex.min:30', 'stochrsi.d', 'stochrsi.k',
-})  # 13 — the EMA-recursion family (ema/dema/tema/t3/trix/macd*/macdfix*/kama) AND the
-   # Wilder-smoothing family (rsi/atr/natr/cmo/adx/adxr/dx/±di/±dm) are now state-carry-
-   # continuable across a slice; the remainder is HT / index / stochrsi.
+    'maxindex:30', 'minindex:30', 'minmaxindex.max:30', 'minmaxindex.min:30',
+    'stochrsi.d', 'stochrsi.k',
+})  # 6 — the EMA-recursion family (ema/dema/tema/t3/trix/macd*/macdfix*/kama), the
+   # Wilder-smoothing family (rsi/atr/natr/cmo/adx/adxr/dx/±di/±dm), AND the entire
+   # Hilbert-transform family (ht_dcperiod/ht_dcphase/ht_phasor/ht_sine/ht_trendline/
+   # ht_trendmode/mama/fama) are now state-carry-continuable across a slice; the
+   # remainder is the index family (maxindex/minindex/minmaxindex) and stochrsi.
 
 # BUG 2 (in-place update of a base column/row did not invalidate dependent cached
 # indicators) is FIXED — test_update_cell and test_update_column are exact for every

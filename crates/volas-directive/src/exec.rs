@@ -986,6 +986,23 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             arg_usize(args, 0, Some(14)).ok()?,
         ),
 
+        // Hilbert-transform family — carry the shared core state (WMA smoother + 4
+        // Hilbert channels + homodyne discriminator) plus each output's small tail
+        // (DC-phase ring, trendline iTrend triple, MAMA/FAMA accumulators). All read
+        // the single `close` series (default), matching their dispatch in `execute`.
+        ("ht_dcperiod", _) | ("ht_phasor", _) => {
+            ind::ht_core_state(&series_f64(df, series, 0, "close").ok()?)
+        }
+        ("ht_dcphase", _) => ind::ht_dcphase_state(&series_f64(df, series, 0, "close").ok()?),
+        ("ht_sine", _) => ind::ht_sine_state(&series_f64(df, series, 0, "close").ok()?),
+        ("ht_trendline", _) => ind::ht_trendline_state(&series_f64(df, series, 0, "close").ok()?),
+        ("ht_trendmode", _) => ind::ht_trendmode_state(&series_f64(df, series, 0, "close").ok()?),
+        ("mama", _) => ind::mama_state(
+            &series_f64(df, series, 0, "close").ok()?,
+            arg_f64(args, 0, 0.5).ok()?,
+            arg_f64(args, 1, 0.05).ok()?,
+        ),
+
         _ => None,
     }
 }
@@ -1227,6 +1244,48 @@ pub fn execute_resume(
             let close = series_f64(df, series, 2, "close").ok()?;
             let (vals, st) =
                 ind::adxr_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+
+        // Hilbert-transform family — reconstruct the shared core + per-output tail and
+        // step the recurrence over the new rows. A resume at/under the core warm-up
+        // (or, for the price-windowed trendline/trendmode, before a full dominant-cycle
+        // window is visible) returns `None` and falls back to the full recompute.
+        ("ht_dcperiod", _) => {
+            let (vals, st) = ind::ht_dcperiod_resume(&close().ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("ht_phasor", sub) => {
+            let (vals, st) =
+                ind::ht_phasor_resume(&close().ok()?, sub == Some("quadrature"), from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("ht_dcphase", _) => {
+            let (vals, st) = ind::ht_dcphase_resume(&close().ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("ht_sine", sub) => {
+            let (vals, st) =
+                ind::ht_sine_resume(&close().ok()?, sub == Some("leadsine"), from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("ht_trendline", _) => {
+            let (vals, st) = ind::ht_trendline_resume(&close().ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("ht_trendmode", _) => {
+            let (vals, st) = ind::ht_trendmode_resume(&close().ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("mama", sub) => {
+            let (vals, st) = ind::mama_resume(
+                &close().ok()?,
+                arg_f64(args, 0, 0.5).ok()?,
+                arg_f64(args, 1, 0.05).ok()?,
+                sub == Some("fama"),
+                from_row,
+                prev_state,
+            )?;
             Some((Column::f64(vals), st))
         }
 
