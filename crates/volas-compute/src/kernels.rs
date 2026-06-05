@@ -266,6 +266,64 @@ pub fn ema_cascade<const S: usize>(data: &[f64], period: usize) -> Vec<f64> {
     out
 }
 
+/// The seeded stage vector `[e0..e_{S-1}]` of [`ema_cascade`] *after consuming all of
+/// `data`* — the cascade state as of the last row, the seed a TRIX resume needs to
+/// continue at row `n`. `None` if the cascade never fully seeds (`lookback >= n`, the
+/// output is all-NaN → keep the full-recompute fallback). Runs the exact warmup +
+/// per-bar lattice of [`ema_cascade`], so the captured stages are bit-identical.
+pub fn ema_cascade_final<const S: usize>(data: &[f64], period: usize) -> Option<[f64; S]> {
+    let n = data.len();
+    if period == 0 || S == 0 {
+        return None;
+    }
+    let lookback = S * (period - 1);
+    if lookback >= n {
+        return None;
+    }
+    let k = 2.0 / (period as f64 + 1.0);
+    let mut e = [0.0f64; S];
+    let mut acc = [0.0f64; S];
+    let mut cnt = [0usize; S];
+    let mut seeded = [false; S];
+    for &raw in &data[..=lookback] {
+        let mut x = raw;
+        for s in 0..S {
+            if seeded[s] {
+                e[s] = (x - e[s]).mul_add(k, e[s]);
+                x = e[s];
+            } else if !x.is_nan() {
+                acc[s] += x;
+                cnt[s] += 1;
+                if cnt[s] == period {
+                    e[s] = acc[s] / period as f64;
+                    seeded[s] = true;
+                    x = e[s];
+                } else {
+                    x = f64::NAN;
+                }
+            } else {
+                x = f64::NAN;
+            }
+        }
+    }
+    for &raw in &data[lookback + 1..] {
+        ema_cascade_step(&mut e, raw, k);
+    }
+    Some(e)
+}
+
+/// Advance an `S`-deep EMA cascade one bar from the carried stage vector `e` (each stage
+/// consumes the previous stage's *current* output). The exact lattice step of
+/// [`ema_cascade`] / [`ema_cascade_final`], shared by the TRIX resume.
+#[inline]
+pub fn ema_cascade_step<const S: usize>(e: &mut [f64; S], x: f64, k: f64) {
+    let mut x = x;
+    for stage in e.iter_mut() {
+        *stage = (x - *stage).mul_add(k, *stage);
+        x = *stage;
+    }
+}
+
 /// EWMA seeded with an explicit initial value (used by KDJ).
 #[inline]
 pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1<f64> {

@@ -19,13 +19,27 @@ def _ohlc(n, seed=0):
     return {'high': high, 'low': low, 'close': close}
 
 
-@pytest.mark.xfail(
-    reason='Superseded by the BUG-1 fix: a non-sliced append is now exact, but a slice '
-    'dropped its head so a stateful indicator cannot be continued past it without '
-    'state-carry. A future state-carry enhancement would flip these to xpass.',
-    strict=True,
-)
-@pytest.mark.parametrize('directive', ['ema:12', 'kdj.j', 'macd.signal', 'rsi:14', 'smma:7'])
+# State-carry now continues the EMA-recursion family (ema / smma / macd.signal) exactly
+# across a head-dropping slice, so those flip from xfail to a real pass. The Wilder/KDJ
+# recursions (rsi / kdj) are not yet state-carry-converted, so they stay xfail(strict):
+# a slice dropped their head and they cannot be continued past it without their state.
+_NO_SLICE_CARRY = frozenset({'kdj.j', 'rsi:14'})
+_SLICE_CARRY_PARAMS = [
+    pytest.param(
+        d,
+        marks=pytest.mark.xfail(
+            reason='Wilder/KDJ recursion not yet state-carry-converted: a slice dropped '
+            'its head, so it cannot be continued past it without carrying its state.',
+            strict=True,
+        ),
+    )
+    if d in _NO_SLICE_CARRY
+    else d
+    for d in ['ema:12', 'kdj.j', 'macd.signal', 'rsi:14', 'smma:7']
+]
+
+
+@pytest.mark.parametrize('directive', _SLICE_CARRY_PARAMS)
 def test_slice_then_append_matches_nonsliced(directive):
     data = _ohlc(80, seed=1)
     bar = {'high': [data['high'][-1] + 0.5],

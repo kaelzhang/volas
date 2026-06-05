@@ -158,6 +158,38 @@ pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
     roc(&e3, 1)
 }
 
+/// Final TRIX state `[e0, e1, e2]` — the three cascaded EMAs as of the last row (the
+/// 3rd stage `e2` is the prior cascade output the 1-period ROC needs). `None` if the
+/// cascade never seeds (`3·(period−1) >= n` → all-NaN, keep the fallback). Pairs with
+/// [`trix_resume`].
+pub fn trix_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
+    let e = kernels::ema_cascade_final::<3>(close, period)?;
+    Some(e.to_vec())
+}
+
+/// Resume [`trix`] from `state = [e0, e1, e2]` over rows `[from, n)`, bit-identical to a
+/// full recompute: advance the 3-deep cascade per bar, then the 1-period ROC of the 3rd
+/// stage, `(e2_new / e2_prev − 1)·100` — the exact `roc(., 1)` arithmetic, with `e2_prev`
+/// the carried 3rd-stage value (= the cascade output at `from−1`). Reads only
+/// `close[from..]`.
+pub fn trix_resume(
+    close: &[f64],
+    period: usize,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let k = 2.0 / (period as f64 + 1.0);
+    let n = close.len();
+    let mut e = [state[0], state[1], state[2]];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for &x in &close[from..n] {
+        let prev = e[2]; // the cascade output at the previous row (ROC's denominator)
+        kernels::ema_cascade_step(&mut e, x, k);
+        out.push((e[2] / prev - 1.0) * 100.0);
+    }
+    (out, e.to_vec())
+}
+
 /// Aroon up/down over a `period+1`-bar window (TA-Lib AROON): for each row the
 /// most-recent highest high / lowest low in `[i-period, i]` gives "days since the
 /// extreme", and up/down = `(100/period)·(period − daysSince)`. Both NaN until index

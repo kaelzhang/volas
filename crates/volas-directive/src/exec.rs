@@ -845,29 +845,63 @@ fn as_command(node: &Node) -> Option<(String, Option<String>, &[Option<String>],
 /// family recomputes its (tiny) state from the raw inputs to stay bit-exact with
 /// the canonical kernel.
 pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<Vec<f64>> {
-    let (name, _sub, _args, series) = as_command(node)?;
-    match name.as_str() {
-        "obv" => {
+    let (name, sub, args, series) = as_command(node)?;
+    let sub = sub.as_deref();
+    match (name.as_str(), sub) {
+        ("obv", _) => {
             let real = series_f64(df, series, 0, "close").ok()?;
             let volume = series_f64(df, series, 1, "volume").ok()?;
             ind::obv_final_state(&real, &volume)
         }
-        "ad" => {
+        ("ad", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
             let volume = series_f64(df, series, 3, "volume").ok()?;
             ind::ad_final_state(&high, &low, &close, &volume)
         }
-        "adosc" => {
+        ("adosc", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
             let volume = series_f64(df, series, 3, "volume").ok()?;
-            let fast = arg_usize(_args, 0, Some(3)).ok()?;
-            let slow = arg_usize(_args, 1, Some(10)).ok()?;
+            let fast = arg_usize(args, 0, Some(3)).ok()?;
+            let slow = arg_usize(args, 1, Some(10)).ok()?;
             ind::adosc_final_state(&high, &low, &close, &volume, fast, slow)
         }
+
+        // EMA-recursion family — carry the sub-EMA stage states (see exec's resume block).
+        ("ema", _) => ind::ema_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, None).ok()?),
+        ("smma", _) => ind::smma_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, None).ok()?),
+        ("dema", _) => ind::dema_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
+        ("tema", _) => ind::tema_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
+        // T3's carried state is just the six EMA stages (vfactor only scales the combine,
+        // not the cascade), so `t3_final_state` needs no vfactor.
+        ("t3", _) => ind::t3_final_state(
+            &series_f64(df, series, 0, "close").ok()?,
+            arg_usize(args, 0, Some(5)).ok()?,
+        ),
+        ("trix", _) => ind::trix_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
+
+        ("macd", None) => ind::macd_final_state(
+            &series_f64(df, series, 0, "close").ok()?,
+            arg_usize(args, 0, Some(12)).ok()?,
+            arg_usize(args, 1, Some(26)).ok()?,
+        ),
+        ("macd", Some("signal" | "histogram")) => ind::macd_signal_final_state(
+            &series_f64(df, series, 0, "close").ok()?,
+            arg_usize(args, 0, Some(12)).ok()?,
+            arg_usize(args, 1, Some(26)).ok()?,
+            arg_usize(args, 2, Some(9)).ok()?,
+        ),
+        ("macdfix", None) => ind::macd_final_state(&series_f64(df, series, 0, "close").ok()?, 12, 26),
+        ("macdfix", Some("signal" | "histogram")) => ind::macd_signal_final_state(
+            &series_f64(df, series, 0, "close").ok()?,
+            12,
+            26,
+            arg_usize(args, 0, Some(9)).ok()?,
+        ),
+
         _ => None,
     }
 }
@@ -883,15 +917,17 @@ pub fn execute_resume(
     prev_state: &[f64],
     from_row: usize,
 ) -> Option<(Column, Vec<f64>)> {
-    let (name, _sub, args, series) = as_command(node)?;
-    match name.as_str() {
-        "obv" => {
+    let (name, sub, args, series) = as_command(node)?;
+    let sub = sub.as_deref();
+    let close = || series_f64(df, series, 0, "close");
+    match (name.as_str(), sub) {
+        ("obv", _) => {
             let real = series_f64(df, series, 0, "close").ok()?;
             let volume = series_f64(df, series, 1, "volume").ok()?;
             let (vals, st) = ind::obv_resume(&real, &volume, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
-        "ad" => {
+        ("ad", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
@@ -899,7 +935,7 @@ pub fn execute_resume(
             let (vals, st) = ind::ad_resume(&high, &low, &close, &volume, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
-        "adosc" => {
+        ("adosc", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
@@ -910,6 +946,79 @@ pub fn execute_resume(
                 ind::adosc_resume(&high, &low, &close, &volume, fast, slow, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
+
+        // EMA-recursion family — resume each carried sub-EMA from its last value (skipping
+        // the SMA seed), bit-identical to the full kernel's steady-state recurrence.
+        ("ema", _) => {
+            let (vals, st) = ind::ema_resume(&close().ok()?, arg_usize(args, 0, None).ok()?, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("smma", _) => {
+            let (vals, st) = ind::smma_resume(&close().ok()?, arg_usize(args, 0, None).ok()?, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("dema", _) => {
+            let (vals, st) = ind::dema_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("tema", _) => {
+            let (vals, st) = ind::tema_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("t3", _) => {
+            let (vals, st) = ind::t3_resume(
+                &close().ok()?,
+                arg_usize(args, 0, Some(5)).ok()?,
+                arg_f64(args, 1, 0.7).ok()?,
+                from_row,
+                prev_state,
+            );
+            Some((Column::f64(vals), st))
+        }
+        ("trix", _) => {
+            let (vals, st) = ind::trix_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+
+        ("macd", None) => {
+            let (vals, st) = ind::macd_resume(
+                &close().ok()?,
+                arg_usize(args, 0, Some(12)).ok()?,
+                arg_usize(args, 1, Some(26)).ok()?,
+                from_row,
+                prev_state,
+            );
+            Some((Column::f64(vals), st))
+        }
+        ("macd", Some(line @ ("signal" | "histogram"))) => {
+            let (vals, st) = ind::macd_signal_resume(
+                &close().ok()?,
+                arg_usize(args, 0, Some(12)).ok()?,
+                arg_usize(args, 1, Some(26)).ok()?,
+                arg_usize(args, 2, Some(9)).ok()?,
+                line == "histogram",
+                from_row,
+                prev_state,
+            );
+            Some((Column::f64(vals), st))
+        }
+        ("macdfix", None) => {
+            let (vals, st) = ind::macd_resume(&close().ok()?, 12, 26, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("macdfix", Some(line @ ("signal" | "histogram"))) => {
+            let (vals, st) = ind::macd_signal_resume(
+                &close().ok()?,
+                12,
+                26,
+                arg_usize(args, 0, Some(9)).ok()?,
+                line == "histogram",
+                from_row,
+                prev_state,
+            );
+            Some((Column::f64(vals), st))
+        }
+
         _ => None,
     }
 }

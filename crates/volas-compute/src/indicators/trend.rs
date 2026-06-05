@@ -25,6 +25,100 @@ pub fn smma(close: &[f64], period: usize) -> Vec<f64> {
     kernels::wilder(av(close), period).to_vec()
 }
 
+// --- EMA-family state-carry (additive; the full-recompute fallback stays correct) ---
+//
+// A recursive EMA-style indicator compresses its whole history into a small fixed
+// state: the single carried EMA (ema), the Wilder running value (smma), or the vector
+// of cascaded sub-EMA stage values (dema/tema/t3/trix/macd). `*_final_state` captures
+// that state after a full compute (returning `None` before the indicator has seeded, so
+// the caller keeps the correct fallback); `*_resume` continues the recursion over only
+// the new rows `[from, n)`, reading nothing before `from`, with arithmetic bit-identical
+// to each kernel's steady-state loop. `from` is the cache's `valid_rows`; the carried
+// state is the internal state as of row `from - 1`, which the plumbing guarantees is at
+// or past the seed (a fresh full compute captured it on a non-empty column, and a slice
+// only carries it when its end reaches `valid_rows`). The resume never reads `data[< from]`,
+// so it continues correctly across a head-dropping slice.
+
+/// The k used by every SMA-seeded EMA stage: `2/(period+1)`.
+#[inline]
+fn ema_k(period: usize) -> f64 {
+    2.0 / (period as f64 + 1.0)
+}
+
+/// Index of the EMA seed (the `period`-th finite value of `data`), or `None` if fewer
+/// than `period` finite values exist. Mirrors `kernels::sma_seeded`'s seeding scan, so a
+/// captured state corresponds to the same seed the full kernel used.
+fn ema_seed_idx(data: &[f64], period: usize) -> Option<usize> {
+    if period == 0 {
+        return None;
+    }
+    let mut count = 0usize;
+    for (i, &x) in data.iter().enumerate() {
+        if !x.is_nan() {
+            count += 1;
+            if count == period {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Final single-EMA state `[ema]` after a full [`ema`] compute, or `None` if `data`
+/// never seeded (the column is all-NaN → nothing to carry, keep the fallback). The EMA
+/// is advanced with the same fused `(x-prev)·k+prev` step as `kernels::ema_seeded`.
+pub fn ema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    let k = ema_k(period);
+    let si = ema_seed_idx(data, period)?;
+    let mut e = data[si - period + 1..=si].iter().sum::<f64>() / period as f64;
+    for &x in &data[si + 1..] {
+        e = (x - e).mul_add(k, e);
+    }
+    Some(vec![e])
+}
+
+/// Resume [`ema`] from `state = [ema_{from-1}]` over rows `[from, n)`, bit-identical to a
+/// full recompute. Reads only `data[from..]`.
+pub fn ema_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let k = ema_k(period);
+    let n = data.len();
+    let mut e = state[0];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for &x in &data[from..n] {
+        e = (x - e).mul_add(k, e);
+        out.push(e);
+    }
+    (out, vec![e])
+}
+
+/// Final Wilder/SMMA state `[rma]` after a full [`smma`] compute, or `None` if `data`
+/// never seeded. Uses `kernels::wilder`'s exact fused `prev·a + x·b` step.
+pub fn smma_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    let pf = period as f64;
+    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
+    let si = ema_seed_idx(data, period)?;
+    let mut w = data[si - period + 1..=si].iter().sum::<f64>() / pf;
+    for &x in &data[si + 1..] {
+        w = w.mul_add(a, x * b);
+    }
+    Some(vec![w])
+}
+
+/// Resume [`smma`] from `state = [rma_{from-1}]` over rows `[from, n)`. Reads only
+/// `data[from..]`.
+pub fn smma_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let pf = period as f64;
+    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
+    let n = data.len();
+    let mut w = state[0];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for &x in &data[from..n] {
+        w = w.mul_add(a, x * b);
+        out.push(w);
+    }
+    (out, vec![w])
+}
+
 /// Weighted moving average — linearly increasing weights `1..=period`, the newest
 /// bar weighted heaviest (TA-Lib WMA). O(n) via a running sum + running weighted
 /// sum. Lookback `period-1`.
@@ -249,6 +343,79 @@ pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
         out[i] = c1 * e5 + c2 * e4 + c3 * e3 + c4 * e2;
     }
     out
+}
+
+/// Final DEMA state `[e0, e1]` (the two cascaded EMAs as of the last row), or `None` if
+/// unseeded. Pairs with [`dema_resume`].
+pub fn dema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    let e = kernels::ema_cascade_final::<2>(data, period)?;
+    Some(e.to_vec())
+}
+
+/// Resume [`dema`] from `state = [e0, e1]` over rows `[from, n)`, bit-identical to a full
+/// recompute (the same `2·e0 − e1` lattice). Reads only `data[from..]`.
+pub fn dema_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let k = ema_k(period);
+    let n = data.len();
+    let mut e = [state[0], state[1]];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for &x in &data[from..n] {
+        kernels::ema_cascade_step(&mut e, x, k);
+        out.push(2.0 * e[0] - e[1]);
+    }
+    (out, e.to_vec())
+}
+
+/// Final TEMA state `[e0, e1, e2]`, or `None` if unseeded. Pairs with [`tema_resume`].
+pub fn tema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    let e = kernels::ema_cascade_final::<3>(data, period)?;
+    Some(e.to_vec())
+}
+
+/// Resume [`tema`] from `state = [e0, e1, e2]` over rows `[from, n)`, bit-identical to a
+/// full recompute (the `3·e0 − 3·e1 + e2` lattice). Reads only `data[from..]`.
+pub fn tema_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let k = ema_k(period);
+    let n = data.len();
+    let mut e = [state[0], state[1], state[2]];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for &x in &data[from..n] {
+        kernels::ema_cascade_step(&mut e, x, k);
+        out.push(3.0 * e[0] - 3.0 * e[1] + e[2]);
+    }
+    (out, e.to_vec())
+}
+
+/// Final T3 state `[e0..e5]`, or `None` if unseeded. Pairs with [`t3_resume`].
+pub fn t3_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    let e = kernels::ema_cascade_final::<6>(data, period)?;
+    Some(e.to_vec())
+}
+
+/// Resume [`t3`] from `state = [e0..e5]` over rows `[from, n)`, bit-identical to a full
+/// recompute (the same six-deep lattice + `c1·e5 + c2·e4 + c3·e3 + c4·e2` combine, with
+/// `vfactor`-derived coefficients in TA-Lib's float order). Reads only `data[from..]`.
+pub fn t3_resume(
+    data: &[f64],
+    period: usize,
+    vfactor: f64,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let v2 = vfactor * vfactor;
+    let c1 = -(v2 * vfactor);
+    let c2 = 3.0 * (v2 - c1);
+    let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
+    let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
+    let k = ema_k(period);
+    let n = data.len();
+    let mut e = [state[0], state[1], state[2], state[3], state[4], state[5]];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for &x in &data[from..n] {
+        kernels::ema_cascade_step(&mut e, x, k);
+        out.push(c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2]);
+    }
+    (out, e.to_vec())
 }
 
 /// Kaufman Adaptive Moving Average (TA-Lib KAMA). The smoothing constant adapts each
@@ -514,6 +681,102 @@ pub fn macd_histogram(close: &[f64], fast: usize, slow: usize, signal: usize) ->
     let line = macd_line(close, fast, slow);
     let sig = kernels::ema_seeded(line.view(), signal);
     (&line - &sig).to_vec()
+}
+
+/// The fast/slow EMA pair `(pf, ps)` as of the last row after a full MACD-line compute,
+/// or `None` if the slow EMA never seeds (the line is all-NaN → keep the fallback).
+/// Mirrors `kernels::ema_diff_seeded`: each EMA SMA-seeds at its own period-th finite
+/// value, then advances with the fused `(x-prev)·k+prev` step. Requires `fast <= slow`.
+fn macd_emas_final(close: &[f64], fast: usize, slow: usize) -> Option<(f64, f64)> {
+    let (kf, ks) = (ema_k(fast), ema_k(slow));
+    let sf = ema_seed_idx(close, fast)?;
+    let ss = ema_seed_idx(close, slow)?;
+    let mut pf = close[sf - fast + 1..=sf].iter().sum::<f64>() / fast as f64;
+    for &x in &close[sf + 1..] {
+        pf = (x - pf).mul_add(kf, pf);
+    }
+    let mut ps = close[ss - slow + 1..=ss].iter().sum::<f64>() / slow as f64;
+    for &x in &close[ss + 1..] {
+        ps = (x - ps).mul_add(ks, ps);
+    }
+    Some((pf, ps))
+}
+
+/// Final MACD-line state `[pf, ps]`, or `None` if unseeded. Pairs with [`macd_resume`].
+pub fn macd_final_state(close: &[f64], fast: usize, slow: usize) -> Option<Vec<f64>> {
+    let (pf, ps) = macd_emas_final(close, fast, slow)?;
+    Some(vec![pf, ps])
+}
+
+/// Resume the MACD line from `state = [pf, ps]` over rows `[from, n)`, bit-identical to a
+/// full recompute (`fast EMA − slow EMA`, same fused step). Reads only `close[from..]`.
+pub fn macd_resume(
+    close: &[f64],
+    fast: usize,
+    slow: usize,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let (kf, ks) = (ema_k(fast), ema_k(slow));
+    let n = close.len();
+    let (mut pf, mut ps) = (state[0], state[1]);
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for &x in &close[from..n] {
+        pf = (x - pf).mul_add(kf, pf);
+        ps = (x - ps).mul_add(ks, ps);
+        out.push(pf - ps);
+    }
+    (out, vec![pf, ps])
+}
+
+/// Final MACD signal/histogram state `[pf, ps, sig]`: the line's fast/slow EMAs plus the
+/// signal EMA (an SMA-seeded EMA of the line), all as of the last row. `None` if the
+/// signal never seeds. Shared by macd.signal and macd.histogram (their per-row outputs
+/// differ — `sig` vs `line − sig` — but the carried recursion is identical).
+pub fn macd_signal_final_state(
+    close: &[f64],
+    fast: usize,
+    slow: usize,
+    signal: usize,
+) -> Option<Vec<f64>> {
+    // The line over full history (its NaN warm-up is what the signal SMA-seeds past).
+    let line = macd_line(close, fast, slow);
+    let line = line.as_slice().expect("macd line is contiguous");
+    let (pf, ps) = macd_emas_final(close, fast, slow)?;
+    let ksig = ema_k(signal);
+    let si = ema_seed_idx(line, signal)?;
+    let mut sig = line[si - signal + 1..=si].iter().sum::<f64>() / signal as f64;
+    for &x in &line[si + 1..] {
+        sig = (x - sig).mul_add(ksig, sig);
+    }
+    Some(vec![pf, ps, sig])
+}
+
+/// Resume MACD signal/histogram from `state = [pf, ps, sig]` over rows `[from, n)`. The
+/// `histogram` flag selects the per-row output (`line − sig` vs `sig`); both advance the
+/// same fast/slow/signal recursion, bit-identical to the full recompute. Reads only
+/// `close[from..]`.
+pub fn macd_signal_resume(
+    close: &[f64],
+    fast: usize,
+    slow: usize,
+    signal: usize,
+    histogram: bool,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let (kf, ks, ksig) = (ema_k(fast), ema_k(slow), ema_k(signal));
+    let n = close.len();
+    let (mut pf, mut ps, mut sig) = (state[0], state[1], state[2]);
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for &x in &close[from..n] {
+        pf = (x - pf).mul_add(kf, pf);
+        ps = (x - ps).mul_add(ks, ps);
+        let line = pf - ps;
+        sig = (line - sig).mul_add(ksig, sig);
+        out.push(if histogram { line - sig } else { sig });
+    }
+    (out, vec![pf, ps, sig])
 }
 
 /// Bull and Bear Index (`mean of ma:a, ma:b, ma:c, ma:d`).
