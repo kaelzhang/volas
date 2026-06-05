@@ -47,11 +47,6 @@ def test_time_frame_str():
     assert f'{TimeFrame.m5}' == '5m'
 
 
-def test_time_frame_minutes():
-    assert TimeFrame.m5.minutes == 5
-    assert TimeFrame.H1.minutes == 60
-
-
 def test_time_frame_unify_second():
     assert TimeFrame.s1.unify('2020-01-02 03:04:05') == 20200102030405
 

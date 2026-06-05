@@ -539,7 +539,6 @@ constructor — use one of the constants below or a label string.
 
 ```py
 TimeFrame.m5            # the 5-minute frame
-TimeFrame.m5.minutes    # 5
 '5m'                    # the equivalent label string, accepted everywhere too
 
 df.cumulate(TimeFrame.m5)     # identical to df.cumulate('5m')
@@ -556,7 +555,6 @@ Supported frames (constant ⇄ label):
 | `TimeFrame.m15` | `'15m'` | `TimeFrame.H6` | `'6h'` | `TimeFrame.M1` | `'1M'` |
 | | | `TimeFrame.H8` | `'8h'` | `TimeFrame.Y1` | `'1y'` |
 
-`tf.minutes` is the interval in minutes (e.g. `TimeFrame.H1.minutes == 60`);
 `tf.unify(ts)` snaps a timestamp to the start of its bar (used internally by
 cumulation).
 

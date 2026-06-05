@@ -34,14 +34,6 @@ impl PyTimeFrame {
     fn __repr__(&self) -> String {
         format!("TimeFrame.{}", self.inner.label())
     }
-    /// The period length in minutes.
-    ///
-    /// Returns:
-    ///     int
-    #[getter]
-    fn minutes(&self) -> i64 {
-        self.inner.minutes()
-    }
     /// Snap a timestamp (datetime string or epoch-ns int) down to its period key
     /// — the epoch-ns of the bucket it falls in.
     ///

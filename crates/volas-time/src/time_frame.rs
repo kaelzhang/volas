@@ -84,30 +84,6 @@ impl TimeFrame {
         }
     }
 
-    /// The (approximate) number of minutes in the frame (parity field).
-    pub fn minutes(&self) -> i64 {
-        use TimeFrame::*;
-        match self {
-            Sec1 => 1,
-            Min1 => 1,
-            Min3 => 3,
-            Min5 => 5,
-            Min15 => 15,
-            Min30 => 30,
-            Hour1 => 60,
-            Hour2 => 120,
-            Hour4 => 240,
-            Hour6 => 360,
-            Hour8 => 480,
-            Hour12 => 720,
-            Day1 => 1440,
-            Day3 => 4320,
-            Week1 => 10080,
-            Month1 => 525600,
-            Year1 => 525600,
-        }
-    }
-
     /// Unify an epoch-ns timestamp to its period key (in **UTC** wall-clock). Two
     /// timestamps are in the same period iff their keys are equal.
     pub fn unify(&self, ns: i64) -> i64 {
@@ -193,15 +169,11 @@ mod tests {
     ];
 
     #[test]
-    fn label_roundtrips_and_minutes_for_every_frame() {
+    fn label_roundtrips_for_every_frame() {
         for tf in ALL {
-            // label -> from_label is a round-trip, and minutes() is positive.
             assert_eq!(TimeFrame::from_label(tf.label()).unwrap(), tf);
-            assert!(tf.minutes() > 0);
         }
-        // Spot-check a few minute values and the upper-case aliases.
-        assert_eq!(TimeFrame::Hour12.minutes(), 720);
-        assert_eq!(TimeFrame::Day3.minutes(), 4320);
+        // Upper-case aliases also parse.
         for alias in ["1S", "2H", "4H", "6H", "8H", "12H", "3D", "1W", "1Y"] {
             assert!(TimeFrame::from_label(alias).is_ok());
         }
