@@ -109,7 +109,8 @@ def test_overlap_ma_variants_match_talib(ohlc):
         _parity(df.exec(f'trima:{p}'), talib.TRIMA(c, p))
     for p in (5, 10):
         _parity(df.exec(f't3:{p}'), talib.T3(c, p))  # vfactor defaults to 0.7
-        _parity(df.exec(f't3:{p},0.5'), talib.T3(c, p, vfactor=0.5))
+        for vf in (0.0, 0.3, 0.5, 0.9, 1.0):  # cover the vfactor range incl. boundaries
+            _parity(df.exec(f't3:{p},{vf}'), talib.T3(c, p, vfactor=vf))
     for p in (10, 30):  # 30 is the TA-Lib default
         _parity(df.exec(f'kama:{p}'), talib.KAMA(c, p))
     # mavp: per-row period from a (required) second series; use (high-low) as the periods.
@@ -160,7 +161,8 @@ def test_variance_stddev_matches_talib(ohlc):
     for p in (5, 20):  # 5 is the shared TA-Lib default
         _parity(df.exec(f'var:{p}'), talib.VAR(c, p))
         _parity(df.exec(f'stddev:{p}'), talib.STDDEV(c, p))  # nbdev defaults to 1
-        _parity(df.exec(f'stddev:{p},2'), talib.STDDEV(c, p, nbdev=2.0))
+        for nb in (0.5, 1.5, 2.0, 3.0):  # the standard-deviation multiplier
+            _parity(df.exec(f'stddev:{p},{nb}'), talib.STDDEV(c, p, nbdev=nb))
     _parity(df.exec('var'), talib.VAR(c, 5))  # default resolves to 5
 
 
@@ -247,6 +249,12 @@ def test_stochastic_family_matches_talib(ohlc):
     fk, fd = talib.STOCHRSI(c, 10, 5, 4, 1)
     _parity(df.exec('stochrsi.k:10,5,4,1'), fk, mask_want=True)
     _parity(df.exec('stochrsi.d:10,5,4,1'), fd)
+    # The slow / fast-d line can be smoothed by ANY TA-Lib MA type. WMA/TRIMA/KAMA
+    # (and DEMA/TEMA/T3) previously mishandled the %K line's leading-NaN warm-up
+    # (all-NaN, or seeded too early with garbage); verify every smoothing type.
+    for mt in (0, 1, 2, 3, 4, 5, 6, 8):  # SMA EMA WMA DEMA TEMA TRIMA KAMA T3
+        _parity(df.exec(f'stochf.d:5,3,{mt}'), talib.STOCHF(h, l, c, 5, 3, mt)[1])
+        _parity(df.exec(f'stoch.d:5,3,{mt},3,{mt}'), talib.STOCH(h, l, c, 5, 3, mt, 3, mt)[1])
 
 
 def test_correl_beta_match_talib(ohlc):
@@ -444,6 +452,13 @@ def test_macdext_matches_talib(ohlc):
     # so its line != standalone MA(12,1)-MA(26,0). Compare against the clean diff.
     clean = talib.MA(c, 12, 1) - talib.MA(c, 26, 0)
     _parity(df.exec('macdext:12,1,26,0'), clean, mask_want=True)
+    # The signal line can use any MA type. With an SMA line (no EMA-seeding quirk) the
+    # signal/histogram match talib.MACDEXT exactly across every smoothing type — and
+    # this exercises the leading-NaN-skip fix, since the macd line warms up with NaN.
+    for sig_mt in (0, 1, 2, 3, 4, 5, 6, 8):  # SMA EMA WMA DEMA TEMA TRIMA KAMA T3
+        _m, sig, hist = talib.MACDEXT(c, 12, 0, 26, 0, 9, sig_mt)
+        _parity(df.exec(f'macdext.signal:12,0,26,0,9,{sig_mt}'), sig)
+        _parity(df.exec(f'macdext.histogram:12,0,26,0,9,{sig_mt}'), hist)
 
 
 def test_accbands_matches_talib(ohlc):
@@ -462,6 +477,22 @@ def test_accbands_matches_talib(ohlc):
                                np.asarray(df.exec('boll'), dtype=float), equal_nan=True)
 
 
+def test_bollinger_bands_match_talib(ohlc):
+    # boll == TA-Lib BBANDS: an SMA middle band ± nbdev * population (ddof 0) stddev.
+    # The bare directive is the middle band; upper/lower take (period, nbdev). BBANDS
+    # uses one nbdev for both sides with matype 0 (SMA).
+    df, h, l, c = ohlc
+    for p, nb in [(20, 2.0), (5, 2.0), (20, 1.0), (10, 3.0)]:
+        up, mid, low = talib.BBANDS(c, timeperiod=p, nbdevup=nb, nbdevdn=nb, matype=0)
+        _parity(df.exec(f'boll:{p}'), mid)
+        _parity(df.exec(f'boll.upper:{p},{nb}'), up)
+        _parity(df.exec(f'boll.lower:{p},{nb}'), low)
+    # default form (period 20, nbdev 2) + abbreviations
+    up, mid, low = talib.BBANDS(c, 20, 2.0, 2.0, 0)
+    _parity(df.exec('boll.upper'), up)
+    _parity(df.exec('boll.l:20,2'), low)
+
+
 def test_cci_trix_match_talib(ohlc):
     df, h, l, c = ohlc
     v = np.asarray(df['volume'].to_numpy(), dtype=float)
@@ -471,7 +502,12 @@ def test_cci_trix_match_talib(ohlc):
     for p in (15, 30):  # 30 is the TA-Lib default
         _parity(df.exec(f'trix:{p}'), talib.TRIX(c, p))
     _parity(df.exec('ultosc'), talib.ULTOSC(h, l, c))  # defaults 7/14/28
-    _parity(df.exec('ultosc:5,10,20'), talib.ULTOSC(h, l, c, 5, 10, 20))
+    # A non-default triplet and the upper boundary. (The degenerate (1,1,1) is omitted:
+    # its values agree, but TA-Lib emits at row 0 from a high-low TR while volas's TR is
+    # NaN with no prior close — its documented convention, see test_tr — so volas warms
+    # up one row later there.)
+    for t in ((5, 10, 20), (30, 30, 30)):
+        _parity(df.exec(f'ultosc:{t[0]},{t[1]},{t[2]}'), talib.ULTOSC(h, l, c, *t))
     _parity(df.exec('cci'), talib.CCI(h, l, c, 14))  # default resolves to 14
     _parity(df.exec('trix'), talib.TRIX(c, 30))
     o = df['open'].to_numpy()
