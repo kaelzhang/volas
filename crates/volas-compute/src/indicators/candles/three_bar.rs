@@ -1,9 +1,9 @@
 //! Three-bar candlestick patterns.
 
 use super::{
-    candle_average, candle_gap_down, candle_gap_up, color, each_bar, lowershadow, realbody,
-    realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT, EQUAL, FAR,
-    NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_SHORT,
+    candle_average, candle_gap_down, candle_gap_up, color, each_bar, each_bar_avg_n, lowershadow,
+    realbody, realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT,
+    EQUAL, FAR, NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_SHORT,
 };
 
 /// Morning Star (TA-Lib CDLMORNINGSTAR): a long black body, a short star gapping down,
@@ -372,8 +372,8 @@ pub fn cdl_sticksandwich(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64>
 /// (3rd not higher), `+100` if it gaps down (3rd not lower), else 0. Lookback 12. (All
 /// three doji bodies are tested against the threshold computed at `i-2`.)
 pub fn cdl_tristar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
-    each_bar(c.len(), BODY_DOJI.avg_period + 2, |i| {
-        let doji = candle_average(BODY_DOJI, o, h, l, c, i - 2);
+    each_bar_avg_n::<1, 3>([BODY_DOJI], BODY_DOJI.avg_period + 2, o, h, l, c, |i, hist| {
+        let doji = hist[2][0]; // BODY_DOJI average at bar i-2
         if realbody(o, c, i - 2) <= doji
             && realbody(o, c, i - 1) <= doji
             && realbody(o, c, i) <= doji

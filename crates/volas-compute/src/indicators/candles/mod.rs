@@ -398,6 +398,69 @@ fn each_bar_avg2<const K: usize>(
     out
 }
 
+/// Multi-bar generalisation of [`each_bar_avg`]: carries the last `L` bars' averages as
+/// scalar running sums, handing the closure `hist` where `hist[lag][k]` is `settings[k]`'s
+/// average at bar `i-lag` (lag `0` = current). For patterns that read a candle average a
+/// fixed number of bars back (e.g. tristar at `i-2`, breakaway at `i-4`). No arrays — a
+/// short `[[f64; K]; L]` history is shifted each bar.
+#[inline]
+fn each_bar_avg_n<const K: usize, const L: usize>(
+    settings: [Setting; K],
+    lookback: usize,
+    o: &[f64],
+    h: &[f64],
+    l: &[f64],
+    c: &[f64],
+    f: impl Fn(usize, &[[f64; K]; L]) -> f64,
+) -> Vec<f64> {
+    let n = c.len();
+    let mut out = vec![f64::NAN; n];
+    if lookback + 1 < L || lookback >= n {
+        return out;
+    }
+    let first = lookback + 1 - L; // first bar whose averages enter the history
+    let mut total = [0.0f64; K];
+    for k in 0..K {
+        let s = settings[k];
+        if s.avg_period != 0 {
+            for j in (first - s.avg_period)..first {
+                total[k] += range(s, o, h, l, c, j);
+            }
+        }
+    }
+    let mut hist = [[0.0f64; K]; L];
+    for bar in first..n {
+        let mut a = [0.0f64; K];
+        for k in 0..K {
+            let s = settings[k];
+            let div = if matches!(s.range, RangeType::Shadows) {
+                2.0
+            } else {
+                1.0
+            };
+            a[k] = if s.avg_period != 0 {
+                s.factor * (total[k] / s.avg_period as f64) / div
+            } else {
+                s.factor * range(s, o, h, l, c, bar) / div
+            };
+        }
+        for j in (1..L).rev() {
+            hist[j] = hist[j - 1];
+        }
+        hist[0] = a;
+        if bar >= lookback {
+            out[bar] = f(bar, &hist);
+        }
+        for k in 0..K {
+            let s = settings[k];
+            if s.avg_period != 0 {
+                total[k] += range(s, o, h, l, c, bar) - range(s, o, h, l, c, bar - s.avg_period);
+            }
+        }
+    }
+    out
+}
+
 /// Build a per-bar pattern column: NaN before `lookback`, then `f(i)` (0 / ±100 / ±80)
 /// per bar. Shared by all pattern submodules.
 #[inline]

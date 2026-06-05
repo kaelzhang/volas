@@ -1,8 +1,8 @@
 //! Four- and five-bar candlestick patterns.
 
 use super::{
-    candle_average, color, each_bar, lowershadow, realbody, realbody_gap_down, realbody_gap_up,
-    uppershadow, BODY_LONG, BODY_SHORT, NEAR, SHADOW_VERY_SHORT,
+    candle_average, candle_average_series, color, each_bar, each_bar_avg_n, lowershadow, realbody,
+    realbody_gap_down, realbody_gap_up, uppershadow, BODY_LONG, BODY_SHORT, NEAR, SHADOW_VERY_SHORT,
 };
 
 /// Three-Line Strike (TA-Lib CDL3LINESTRIKE): three same-colour candles in a row, each
@@ -14,11 +14,11 @@ pub fn cdl_3linestrike(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let near_open = |o: &[f64], c: &[f64], at: usize, body: usize, near: f64| {
         o[at] >= o[body].min(c[body]) - near && o[at] <= o[body].max(c[body]) + near
     };
-    each_bar(c.len(), lb, |i| {
+    each_bar_avg_n::<1, 4>([NEAR], lb, o, h, l, c, |i, hist| {
         let same3 =
             color(o, c, i - 3) == color(o, c, i - 2) && color(o, c, i - 2) == color(o, c, i - 1);
-        let opens_ok = near_open(o, c, i - 2, i - 3, candle_average(NEAR, o, h, l, c, i - 3))
-            && near_open(o, c, i - 1, i - 2, candle_average(NEAR, o, h, l, c, i - 2));
+        let opens_ok = near_open(o, c, i - 2, i - 3, hist[3][0]) // NEAR at i-3
+            && near_open(o, c, i - 1, i - 2, hist[2][0]); // NEAR at i-2
         let three_white = color(o, c, i - 1) > 0.0
             && c[i - 1] > c[i - 2]
             && c[i - 2] > c[i - 3]
@@ -45,7 +45,7 @@ pub fn cdl_3linestrike(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// then a 5th opposite candle closing back into the gap. `color(i)·100`. Lookback 14.
 pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_LONG.avg_period + 4;
-    each_bar(c.len(), lb, |i| {
+    each_bar_avg_n::<1, 5>([BODY_LONG], lb, o, h, l, c, |i, hist| {
         let black = color(o, c, i - 4) < 0.0
             && realbody_gap_down(o, c, i - 3, i - 4)
             && h[i - 2] < h[i - 3]
@@ -62,7 +62,7 @@ pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             && l[i - 1] > l[i - 2]
             && c[i] < o[i - 3]
             && c[i] > c[i - 4];
-        if realbody(o, c, i - 4) > candle_average(BODY_LONG, o, h, l, c, i - 4)
+        if realbody(o, c, i - 4) > hist[4][0] // BODY_LONG average at i-4
             && color(o, c, i - 4) == color(o, c, i - 3)
             && color(o, c, i - 3) == color(o, c, i - 1)
             && color(o, c, i - 1) == -color(o, c, i)
@@ -283,8 +283,11 @@ pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     if n <= start {
         return out;
     }
+    // Stateful loop, so precompute the NEAR average as an O(n) running-sum series and
+    // read it at i-2 (instead of rescanning the window every setup test).
+    let near_series = candle_average_series(NEAR, o, h, l, c);
     let setup = |i: usize| -> Option<f64> {
-        let near = candle_average(NEAR, o, h, l, c, i - 2);
+        let near = near_series[i - 2];
         if h[i - 2] < h[i - 3]
             && l[i - 2] > l[i - 3]
             && h[i - 1] < h[i - 2]
