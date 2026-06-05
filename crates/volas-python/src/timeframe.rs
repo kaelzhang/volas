@@ -1,12 +1,13 @@
-//! `volas.TimeFrame` and `volas.Cumulator` — time-frame cumulation bindings.
+//! `volas.TimeFrame` + the time-frame / aggregator resolvers shared by the
+//! tf-aware DataFrame (`time_frame` constructor arg, `cumulate`).
 
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use volas_time::{Agg, AggSpec, Cumulator, TimeFrame};
+use volas_time::{Agg, AggSpec, TimeFrame};
 
-use crate::{parse_ts, pyerr, PyDataFrame};
+use crate::{parse_ts, pyerr};
 
 /// ``volas.TimeFrame`` — an OHLCV sampling period.
 ///
@@ -146,67 +147,6 @@ pub(crate) fn build_agg_spec(cumulators: Option<&Bound<'_, PyDict>>) -> PyResult
     Ok(spec)
 }
 
-/// ``volas.Cumulator`` — a stateful, incremental OHLCV cumulator for live
-/// streaming: feed fine bars with ``.append`` and read the cumulated frame from
-/// ``.frame`` (closed periods + the live open period as the last row).
-///
-/// Args:
-///     time_frame (str | TimeFrame): the coarse bucket to cumulate into
-///         (e.g. ``volas.TimeFrame.m5`` or ``'5m'``).
-///     cumulators (dict[str, str], optional): per-column aggregator overrides
-///         (e.g. ``{'volume': 'sum'}``); defaults to OHLCV.
-///
-/// Usage::
-///
-///     cum = volas.Cumulator(volas.TimeFrame.m5)
-///     cum.append(one_minute_bars)
-///     five_minute = cum.frame
-#[pyclass(name = "Cumulator")]
-pub struct PyCumulator {
-    inner: Cumulator,
-}
-
-#[pymethods]
-impl PyCumulator {
-    // Constructor — args & usage live in the class docstring (pyo3 does not
-    // surface a `#[new]` doc comment to Python).
-    #[new]
-    #[pyo3(signature = (time_frame, cumulators = None))]
-    fn new(
-        time_frame: &Bound<'_, PyAny>,
-        cumulators: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
-        let tf = resolve_time_frame(time_frame)?;
-        let spec = build_agg_spec(cumulators)?;
-        Ok(PyCumulator {
-            inner: Cumulator::new(tf, spec),
-        })
-    }
-
-    /// Feed fine bars (a DataFrame with a DatetimeIndex).
-    fn append(&mut self, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let df = data
-            .extract::<PyRef<PyDataFrame>>()
-            .map_err(|_| PyTypeError::new_err("Cumulator.append expects a DataFrame"))?;
-        self.inner.append(&df.inner).map_err(pyerr)
-    }
-
-    /// The current cumulated frame (closed periods + the open period as the live
-    /// last row).
-    #[getter]
-    fn frame(&self) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame {
-            inner: self.inner.frame().map_err(pyerr)?,
-        })
-    }
-
-    /// The current open period aggregated into a single live bar, or `None`.
-    #[getter]
-    fn last(&self) -> PyResult<Option<PyDataFrame>> {
-        Ok(self
-            .inner
-            .last()
-            .map_err(pyerr)?
-            .map(|inner| PyDataFrame { inner }))
-    }
-}
+// `volas.Cumulator` was merged into the tf-aware DataFrame: build one with
+// `DataFrame(..., time_frame=...)` or `df.cumulate(tf)`, then `append` fine bars
+// (the forming period is `df.iloc[-1]`). See `PyDataFrame`.

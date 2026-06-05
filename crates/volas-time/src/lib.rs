@@ -10,5 +10,5 @@ pub mod cumulate;
 pub mod time_frame;
 
 pub use agg::{Agg, AggSpec};
-pub use cumulate::{cumulate, Cumulator};
+pub use cumulate::{aggregate_period, cumulate, Cumulator};
 pub use time_frame::TimeFrame;

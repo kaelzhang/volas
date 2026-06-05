@@ -103,6 +103,13 @@ impl Cumulator {
             None => Ok(None),
         }
     }
+
+    /// A clone of the still-open period's raw fine bars (`None` if nothing is
+    /// open) — lets a caller carry the folding state forward after a one-shot
+    /// `cumulate`, so further fine bars fold into the same forming period.
+    pub fn open_clone(&self) -> Option<DataFrame> {
+        self.open.clone()
+    }
 }
 
 /// One-shot resample of `df` (must have a `DatetimeIndex`) into `tf` periods.
@@ -139,7 +146,7 @@ fn dedup_keep_last(ts: &[i64]) -> Vec<usize> {
 
 /// Aggregate one period's raw bars into a single coarse row (1-row frame). The
 /// index label is the period's first timestamp.
-fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame> {
+pub fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame> {
     let (ts, tz): (&[i64], _) = match period.index().as_ref() {
         Index::Datetime(v, tz) => (v, *tz),
         _ => {

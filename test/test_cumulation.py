@@ -1,10 +1,11 @@
 """volas cumulation (TimeFrame resampling) tests.
 
 Ported / adapted from stock-pandas's ``test_time_frame.py`` and
-``test_cum_append.py`` to volas's native API (decision B): the stateless
-``df.cumulate(tf)`` one-shot and the explicit ``volas.Cumulator(tf)`` live
-aggregator (``.append`` / ``.frame`` / ``.last``). 1-minute Tencent bars are
-re-stamped and aggregated to coarser frames.
+``test_cum_append.py`` to volas's native API: the one-shot ``df.cumulate(tf)``
+(which returns a **tf-aware** DataFrame) and live folding via ``df.append`` —
+a finer bar in the open period updates the forming last row, a bar in a new
+period rolls over. 1-minute Tencent bars are re-stamped and aggregated to
+coarser frames.
 """
 
 import math
@@ -15,7 +16,7 @@ import numpy as np
 import pytest
 
 import volas
-from volas import DataFrame, TimeFrame, Cumulator
+from volas import DataFrame, TimeFrame
 
 TENCENT = str((Path(__file__).parent / 'data' / 'tencent.csv').resolve())
 COLUMNS = ['open', 'high', 'low', 'close', 'volume']
@@ -121,57 +122,115 @@ def test_cumulate_requires_datetime_index():
         plain.cumulate('5m')
 
 
-# --- Cumulator (live incremental) -------------------------------------------
+# --- tf-aware DataFrame (live folding) --------------------------------------
 
-def test_cumulator_incremental_matches_one_shot():
+def _seed(fine, tf='5m'):
+    """A tf-aware frame seeded with the first fine bar (the rest get folded)."""
+    return fine.iloc[0:1].cumulate(tf)
+
+
+def test_tf_append_incremental_matches_one_shot():
     fine = get_1m()
-    one_shot = fine.cumulate('5m')
-    cum = Cumulator('5m')
-    for i in range(len(fine)):
-        cum.append(fine.iloc[i:i + 1])
-    assert cum.frame.equals(one_shot)
+    df = _seed(fine)
+    for i in range(1, len(fine)):
+        df.append(fine.iloc[i:i + 1])
+    assert df.equals(fine.cumulate('5m'))
 
 
-def test_cumulator_batch_matches_one_shot():
+def test_tf_append_batch_matches_one_shot():
     fine = get_1m()
-    cum = Cumulator('5m')
-    cum.append(fine)
-    assert cum.frame.equals(fine.cumulate('5m'))
+    df = _seed(fine)
+    df.append(fine.iloc[1:])  # fold the rest in one call
+    assert df.equals(fine.cumulate('5m'))
 
 
-def test_cumulator_step_lengths():
+def test_tf_append_step_lengths():
     fine = get_1m()
-    cum = Cumulator('5m')
-    for i in range(len(fine)):
-        cum.append(fine.iloc[i:i + 1])
-        expect_cumulated(fine, cum.frame, i + 1)
+    df = _seed(fine)
+    expect_cumulated(fine, df, 1)
+    for i in range(1, len(fine)):
+        df.append(fine.iloc[i:i + 1])
+        expect_cumulated(fine, df, i + 1)
 
 
-def test_cumulator_last_is_open_period():
+def test_tf_forming_bar_is_last_row():
     fine = get_1m()
-    cum = Cumulator('5m')
-    cum.append(fine.iloc[:3])
-    last = cum.last
-    assert last.shape[0] == 1
-    assert last['volume'].to_numpy()[0] == fine.iloc[:3]['volume'].to_numpy().sum()
+    df = _seed(fine)
+    df.append(fine.iloc[1:3])  # bars 0,1,2 all in the first 5m period
+    assert df.shape[0] == 1  # still the single, forming period
+    assert df['volume'].to_numpy()[-1] == fine.iloc[0:3]['volume'].to_numpy().sum()
 
 
-def test_cumulator_empty_append_raises():
-    cum = Cumulator('5m')
-    empty = volas.read_csv(TENCENT).iloc[0:0]
+def test_tf_empty_append_raises():
+    df = _seed(get_1m())
     with pytest.raises(Exception):
-        cum.append(empty)
+        df.append(volas.read_csv(TENCENT).iloc[0:0])
 
 
-def test_cumulator_dedups_duplicate_timestamps():
+def test_tf_dedups_resent_forming_bar():
     fine = get_1m(3)
-    feed = (
-        fine.iloc[0:1]
-        .append(fine.iloc[1:2])
-        .append(fine.iloc[1:2])  # re-sent bar 1
-        .append(fine.iloc[2:3])
+    df = _seed(fine)
+    df.append(fine.iloc[1:2])
+    df.append(fine.iloc[1:2])  # re-sent bar 1
+    df.append(fine.iloc[2:3])
+    # all in one 5m period; the re-sent bar updates, not accumulates
+    assert df['volume'].to_numpy()[0] == fine['volume'].to_numpy().sum()
+
+
+def test_tf_construct_requires_datetime_index():
+    with pytest.raises(Exception):
+        volas.DataFrame({'close': [1.0, 2.0]}, time_frame='5m')  # RangeIndex
+
+
+def test_tf_cumulators_requires_time_frame():
+    with pytest.raises(Exception):
+        volas.DataFrame({'close': [1.0]}, cumulators={'volume': 'sum'})
+
+
+def test_tf_illegal_coarsen_raises():
+    df3 = get_1m().cumulate('3m')
+    with pytest.raises(Exception):  # 5 is not a whole multiple of 3
+        df3.cumulate('5m')
+    assert df3.cumulate('15m').shape[0] >= 1  # 15 = 5 * 3 is legal
+
+
+def test_tf_same_frame_cumulate_is_copy():
+    df5 = get_1m().cumulate('5m')
+    assert df5.cumulate('5m').equals(df5)
+
+
+def test_tf_copy_preserves_folding():
+    fine = get_1m()
+    df = fine.iloc[0:5].cumulate('5m')  # one full 5m period (bars 0-4), forming
+    c = df.copy()
+    c.append(fine.iloc[5:6])  # bar 5 starts a new period in the copy
+    assert c.shape[0] == 2 and df.shape[0] == 1  # original untouched
+
+
+def test_tf_fir_indicator_incremental_matches_one_shot():
+    # A finite-window (FIR) indicator cached across folds matches the one-shot.
+    fine = get_1m()
+    df = _seed(fine)
+    _ = df['ma:2']  # cache the directive column
+    for i in range(1, len(fine)):
+        df.append(fine.iloc[i:i + 1])
+    np.testing.assert_allclose(
+        df['ma:2'].to_numpy(), fine.cumulate('5m').exec('ma:2'), equal_nan=True
     )
-    cum = Cumulator('5m')
-    cum.append(feed)
-    # all in one 5m period; the duplicate updates, not accumulates
-    assert cum.frame['volume'].to_numpy()[0] == fine['volume'].to_numpy().sum()
+
+
+@pytest.mark.xfail(
+    reason="recursive (IIR) incremental refresh re-seeds the recursion — origin's fix",
+    strict=False,
+)
+def test_tf_iir_indicator_incremental_matches_one_shot():
+    # Recursive indicators (EMA, ...) are wrong under incremental refresh until
+    # origin fixes the streaming state; the batch `exec` path is already correct.
+    fine = get_1m()
+    df = _seed(fine)
+    _ = df['ema:2']
+    for i in range(1, len(fine)):
+        df.append(fine.iloc[i:i + 1])
+    np.testing.assert_allclose(
+        df['ema:2'].to_numpy(), fine.cumulate('5m').exec('ema:2'), equal_nan=True
+    )

@@ -134,5 +134,5 @@ pub fn read_csv(
         ));
     }
 
-    Ok(PyDataFrame { inner: df })
+    Ok(PyDataFrame::plain(df))
 }

@@ -16,12 +16,13 @@ use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{datetime, Column, DataFrame, DType, Index, Label, Series, Tz, VolasError};
 use volas_directive::{execute, parse};
+use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
 
 mod readers;
 mod timeframe;
 
 use readers::read_csv;
-use timeframe::{build_agg_spec, resolve_time_frame, PyCumulator, PyTimeFrame};
+use timeframe::{build_agg_spec, resolve_time_frame, PyTimeFrame};
 
 // --- helpers ---------------------------------------------------------------
 
@@ -1124,9 +1125,25 @@ impl PyRow {
 ///     tz (str, optional): timezone for that index (requires ``date_col``).
 ///     date_unit (str, optional): read ``date_col`` as an epoch integer in this
 ///         unit (``'s'`` / ``'ms'`` / ``'us'`` / ``'ns'``); requires ``date_col``.
+/// Live cumulation state carried by a tf-aware DataFrame (set via the
+/// `time_frame` constructor arg or `cumulate`): the target frame, the per-column
+/// aggregators, and the raw fine bars of the still-open (forming) period —
+/// `df.iloc[-1]` is that period's running bar, which `append` keeps updating.
+#[derive(Clone)]
+struct TfState {
+    time_frame: TimeFrame,
+    cumulators: AggSpec,
+    /// Raw fine bars of the current open period (`None` until the first
+    /// folded append), kept so a re-sent forming bar updates (deduped) rather
+    /// than double-counts.
+    open: Option<DataFrame>,
+}
+
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
     pub(crate) inner: DataFrame,
+    /// Cumulation state when this is a tf-aware frame; `None` for a plain frame.
+    tf: Option<TfState>,
 }
 
 /// Read cell `i` of a directive-result column as f64 (`Bool` -> 0/1, `I64` -> as f64),
@@ -1147,6 +1164,71 @@ fn col_value(col: &Column, i: usize) -> f64 {
 }
 
 impl PyDataFrame {
+    /// Wrap a core frame as a plain (non-cumulating) DataFrame — the default for
+    /// every derived frame (slices, projections, head/tail, ...).
+    pub(crate) fn plain(inner: DataFrame) -> Self {
+        PyDataFrame { inner, tf: None }
+    }
+
+    /// Fold incoming fine bars into a tf-aware frame: each bar either extends the
+    /// open period's forming bar (update `inner`'s last row in place + mark its
+    /// computed tail stale) or rolls over into a new period (append a fresh
+    /// forming row). Assumes `self.tf` is `Some`. A re-sent forming bar (same
+    /// timestamp) updates the period rather than double-counting it.
+    fn fold_append(&mut self, fine: &DataFrame) -> PyResult<()> {
+        let last_dt = |df: &DataFrame| -> i64 {
+            match df.index().as_ref() {
+                Index::Datetime(v, _) => v[v.len() - 1],
+                _ => unreachable!("checked by caller"),
+            }
+        };
+        let PyDataFrame { inner, tf } = self;
+        let tfs = tf.as_mut().expect("fold_append on a plain frame");
+        let frame = tfs.time_frame;
+        let (fine_ts, tz) = match fine.index().as_ref() {
+            Index::Datetime(v, tz) => (v.clone(), *tz),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "append to a time_frame DataFrame requires a DatetimeIndex",
+                ))
+            }
+        };
+        for i in 0..fine.height() {
+            let bar_ts = fine_ts[i];
+            let key = frame.unify_tz(bar_ts, tz);
+            let same_period = tfs
+                .open
+                .as_ref()
+                .is_some_and(|open| frame.unify_tz(last_dt(open), tz) == key);
+            let bar = fine.slice(i, i + 1);
+            if same_period {
+                let open = tfs.open.as_mut().unwrap();
+                // A re-sent forming bar (same ts) replaces the last open bar.
+                if last_dt(open) == bar_ts {
+                    *open = open.slice(0, open.height() - 1);
+                }
+                open.append(&bar).map_err(pyerr)?;
+                let agg = aggregate_period(open, &tfs.cumulators).map_err(pyerr)?;
+                let last = inner.height() - 1;
+                // `assign_positions` invalidates each written column's dependent
+                // directive columns, so the forming row's indicators recompute
+                // correctly on the next read — no explicit invalidate needed.
+                for (name, col) in agg.names().iter().zip(agg.columns()) {
+                    if let Some(j) = inner.column_pos(name) {
+                        inner.assign_positions(j, &[last], col).map_err(pyerr)?;
+                    }
+                }
+            } else {
+                // Roll over: the previous forming bar (if any) is already final in
+                // `inner`; start a new open period and append its forming row.
+                let agg = aggregate_period(&bar, &tfs.cumulators).map_err(pyerr)?;
+                tfs.open = Some(bar);
+                inner.append(&agg).map_err(pyerr)?;
+            }
+        }
+        Ok(())
+    }
+
     fn wrap_series(&self, name: String, col: Column) -> PySeries {
         PySeries {
             inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
@@ -1252,12 +1334,14 @@ impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
     // docstring (pyo3 does not surface a `#[new]` doc comment to Python).
     #[new]
-    #[pyo3(signature = (data, date_col = None, tz = None, date_unit = None))]
+    #[pyo3(signature = (data, date_col = None, tz = None, date_unit = None, time_frame = None, cumulators = None))]
     fn new(
         data: &Bound<'_, PyDict>,
         date_col: Option<String>,
         tz: Option<String>,
         date_unit: Option<String>,
+        time_frame: Option<&Bound<'_, PyAny>>,
+        cumulators: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let mut names = Vec::new();
         let mut columns = Vec::new();
@@ -1276,7 +1360,26 @@ impl PyDataFrame {
                 "tz / date_unit require date_col (the column to use as the datetime index)",
             ));
         }
-        Ok(PyDataFrame { inner: df })
+        // A `time_frame` makes this a cumulating frame: the given rows are taken
+        // as already-final bars at that frame (not re-aggregated), and later
+        // `append`s fold finer bars into them. Requires a DatetimeIndex.
+        if let Some(tf_obj) = time_frame {
+            let frame = resolve_time_frame(tf_obj)?;
+            if !matches!(df.index().as_ref(), Index::Datetime(..)) {
+                return Err(PyValueError::new_err(
+                    "time_frame requires a DatetimeIndex (pass date_col to build one)",
+                ));
+            }
+            let spec = build_agg_spec(cumulators)?;
+            return Ok(PyDataFrame {
+                inner: df,
+                tf: Some(TfState { time_frame: frame, cumulators: spec, open: None }),
+            });
+        }
+        if cumulators.is_some() {
+            return Err(PyValueError::new_err("cumulators requires time_frame"));
+        }
+        Ok(PyDataFrame::plain(df))
     }
 
     /// The DatetimeIndex timezone name (`"+08:00"` / `"America/New_York"`), or
@@ -1295,18 +1398,14 @@ impl PyDataFrame {
     /// data was ingested without a tz. Returns a new frame.
     fn tz_localize(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
-        Ok(PyDataFrame {
-            inner: self.inner.tz_localize(tzv).map_err(pyerr)?,
-        })
+        Ok(PyDataFrame::plain(self.inner.tz_localize(tzv).map_err(pyerr)?))
     }
 
     /// Change the index display / matching tz without moving any instant (pandas
     /// `tz_convert`). Returns a new frame.
     fn tz_convert(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
-        Ok(PyDataFrame {
-            inner: self.inner.tz_convert(tzv).map_err(pyerr)?,
-        })
+        Ok(PyDataFrame::plain(self.inner.tz_convert(tzv).map_err(pyerr)?))
     }
 
     /// The column names, in order.
@@ -1419,18 +1518,14 @@ impl PyDataFrame {
     /// First `n` rows (pandas `head`).
     #[pyo3(signature = (n = 5))]
     fn head(&self, n: usize) -> PyDataFrame {
-        PyDataFrame {
-            inner: self.inner.slice(0, n.min(self.inner.height())),
-        }
+        PyDataFrame::plain(self.inner.slice(0, n.min(self.inner.height())))
     }
 
     /// Last `n` rows (pandas `tail`).
     #[pyo3(signature = (n = 5))]
     fn tail(&self, n: usize) -> PyDataFrame {
         let h = self.inner.height();
-        PyDataFrame {
-            inner: self.inner.slice(h.saturating_sub(n), h),
-        }
+        PyDataFrame::plain(self.inner.slice(h.saturating_sub(n), h))
     }
 
     /// Per-column dtypes as `{name: dtype_str}` (pandas `dtypes`).
@@ -1461,18 +1556,14 @@ impl PyDataFrame {
                 }
             })
             .collect();
-        PyDataFrame {
-            inner: take_frame(&self.inner, &keep),
-        }
+        PyDataFrame::plain(take_frame(&self.inner, &keep))
     }
 
     /// Sort rows by index label (pandas `sort_index`).
     #[pyo3(signature = (ascending = true))]
     fn sort_index(&self, ascending: bool) -> PyDataFrame {
         let perm = self.inner.index().argsort(ascending);
-        PyDataFrame {
-            inner: take_frame(&self.inner, &perm),
-        }
+        PyDataFrame::plain(take_frame(&self.inner, &perm))
     }
 
     /// Move the row index into an `'index'` column and restore a RangeIndex
@@ -1489,9 +1580,7 @@ impl PyDataFrame {
             cols.extend(self.inner.columns().iter().cloned());
             (names, cols)
         };
-        Ok(PyDataFrame {
-            inner: DataFrame::new(names, columns, Some(Index::Range(h))).map_err(pyerr)?,
-        })
+        Ok(PyDataFrame::plain(DataFrame::new(names, columns, Some(Index::Range(h))).map_err(pyerr)?))
     }
 
     /// `df[name] = value` — add or replace a column. `value` may be a scalar
@@ -1527,12 +1616,12 @@ impl PyDataFrame {
         if let Ok(s) = key.extract::<PyRef<PySeries>>() {
             if let Column::Bool(mask) = &s.inner.data {
                 let sub = self.inner.filter_mask(mask).map_err(pyerr)?;
-                return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
+                return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
             }
         }
         if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
             let sub = self.inner.filter_mask(arr.as_slice()?).map_err(pyerr)?;
-            return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
+            return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // boolean mask as a plain Python list (df[[True, False, ...]]). An empty
         // list is an empty column projection, not a mask, so it falls through.
@@ -1546,13 +1635,13 @@ impl PyDataFrame {
                     )));
                 }
                 let sub = self.inner.filter_mask(&mask).map_err(pyerr)?;
-                return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
+                return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
             }
         }
         // label / positional slice: df[:'date'], df[1:5]
         if let Ok(slice) = key.downcast::<PySlice>() {
             let sub = slice_frame(&self.inner, slice)?;
-            return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
+            return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // column name or directive
         if let Ok(name) = key.extract::<String>() {
@@ -1598,7 +1687,7 @@ impl PyDataFrame {
             }
             let idx = (*self.inner.index().as_ref()).clone();
             let df = DataFrame::new(list, cols, Some(idx)).map_err(pyerr)?;
-            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
+            return Ok(Py::new(py, PyDataFrame::plain(df))?.into_any());
         }
         Err(PyKeyError::new_err(
             "key must be a column name, directive, list, boolean mask, or slice",
@@ -1708,10 +1797,12 @@ impl PyDataFrame {
         Ok(self.wrap_series(key.to_string(), col))
     }
 
-    /// A copy of the frame.
+    /// A copy of the frame — preserving the cached directive columns / cursor and
+    /// (for a tf-aware frame) the cumulation state, so the copy keeps folding.
     fn copy(&self) -> PyDataFrame {
         PyDataFrame {
             inner: self.inner.clone(),
+            tf: self.tf.clone(),
         }
     }
 
@@ -1802,9 +1893,7 @@ impl PyDataFrame {
                 .filter(|n| !drop_names.contains(n))
                 .cloned()
                 .collect();
-            return Ok(PyDataFrame {
-                inner: self.inner.select(&keep).map_err(pyerr)?,
-            });
+            return Ok(PyDataFrame::plain(self.inner.select(&keep).map_err(pyerr)?));
         }
         let index = self.inner.index();
         let targets: Vec<Label> = labels
@@ -1814,26 +1903,30 @@ impl PyDataFrame {
         let positions: Vec<usize> = (0..self.inner.height())
             .filter(|&i| !targets.contains(&index.label_at(i)))
             .collect();
-        Ok(PyDataFrame {
-            inner: take_frame(&self.inner, &positions),
-        })
+        Ok(PyDataFrame::plain(take_frame(&self.inner, &positions)))
     }
 
     /// Append the rows of another DataFrame or a single Row **in place** and
     /// return the same frame (amortized O(1), like ``list.append`` — the live
     /// single-bar hot path, no full-column copy).
     ///
+    /// On a **time_frame** frame (see the constructor / ``cumulate``) the rows
+    /// are treated as *finer* bars and folded into the current period: a bar in
+    /// the open period updates the forming last row (``df.iloc[-1]``), a bar in a
+    /// new period rolls over into a fresh row. A re-sent forming bar (same
+    /// timestamp) updates rather than double-counts.
+    ///
     /// Missing columns are NaN-padded; cached directive columns go stale until
     /// ``fulfill()``. A snapshot taken via ``copy()`` / ``iloc`` is unaffected
     /// (it pays one copy-on-write the next time *it* is appended to).
     ///
     /// Args:
-    ///     other (DataFrame | Row): the rows to append.
+    ///     other (DataFrame | Row): the rows to append (fine bars if tf-aware).
     ///
     /// Usage::
     ///
-    ///     df.append(bar)           # append one Row
-    ///     df.append(other_frame)   # append many rows
+    ///     df.append(bar)           # append / fold one bar
+    ///     df.append(other_frame)   # append / fold many bars
     ///
     /// Returns:
     ///     DataFrame: ``self`` (enabling chaining).
@@ -1850,7 +1943,14 @@ impl PyDataFrame {
         } else {
             return Err(PyTypeError::new_err("append expects a DataFrame or Row"));
         };
-        slf.borrow_mut().inner.append(&other_inner).map_err(pyerr)?;
+        {
+            let mut me = slf.borrow_mut();
+            if me.tf.is_some() {
+                me.fold_append(&other_inner)?;
+            } else {
+                me.inner.append(&other_inner).map_err(pyerr)?;
+            }
+        }
         Ok(slf)
     }
 
@@ -1906,11 +2006,15 @@ impl PyDataFrame {
         self.inner.equals(&other.inner)
     }
 
-    /// Resample to a coarser timeframe (OHLCV cumulation / down-sampling).
+    /// Resample to a coarser timeframe (OHLCV cumulation / down-sampling),
+    /// returning a **tf-aware** DataFrame you can keep ``append``-ing finer bars
+    /// into (the forming period is the live last row).
     ///
     /// Requires a DatetimeIndex. Each column is aggregated with a sensible
     /// default (open=first, high=max, low=min, close=last, volume=sum); override
-    /// per column via ``cumulators``.
+    /// per column via ``cumulators``. If the source already has a ``time_frame``,
+    /// the target must be a whole multiple of it (e.g. 5m→15m, not 5m→7m, and not
+    /// a week/3-day into a month); cumulating to the *same* frame is a ``copy()``.
     ///
     /// Args:
     ///     time_frame (str | TimeFrame): the target bucket, e.g. ``'1d'``,
@@ -1920,21 +2024,45 @@ impl PyDataFrame {
     ///
     /// Usage::
     ///
-    ///     daily = df.cumulate('1d')
-    ///     df.cumulate('1h', cumulators={'amount': 'sum'})
+    ///     daily = df.cumulate('1d')          # a tf-aware 1d frame
+    ///     daily.append(intraday_bar)         # folds into the forming day
     ///
     /// Returns:
-    ///     DataFrame: the resampled frame.
+    ///     DataFrame: the resampled, tf-aware frame.
     #[pyo3(signature = (time_frame, cumulators = None))]
     fn cumulate(
         &self,
         time_frame: &Bound<'_, PyAny>,
         cumulators: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let tf = resolve_time_frame(time_frame)?;
+        let target = resolve_time_frame(time_frame)?;
+        if let Some(tfs) = &self.tf {
+            // Same frame is a no-op resample == copy() (keeps the cursor & state).
+            if target == tfs.time_frame {
+                return Ok(self.copy());
+            }
+            if !tfs.time_frame.can_coarsen(target) {
+                return Err(PyValueError::new_err(format!(
+                    "cannot cumulate {} -> {}: the target is not a whole multiple of the source frame",
+                    tfs.time_frame.label(),
+                    target.label()
+                )));
+            }
+        }
         let spec = build_agg_spec(cumulators)?;
-        let out = volas_time::cumulate(&self.inner, tf, &spec).map_err(pyerr)?;
-        Ok(PyDataFrame { inner: out })
+        let mut cum = Cumulator::new(target, spec.clone());
+        cum.append(&self.inner).map_err(pyerr)?;
+        let frame = cum.frame().map_err(pyerr)?;
+        // The result is a fresh frame (no cached directive columns -> cursor 0)
+        // that carries the open period's fine bars so further appends fold in.
+        Ok(PyDataFrame {
+            inner: frame,
+            tf: Some(TfState {
+                time_frame: target,
+                cumulators: spec,
+                open: cum.open_clone(),
+            }),
+        })
     }
 
     /// Rename columns (pandas `rename(columns={old: new})`), returning a new
@@ -1945,18 +2073,14 @@ impl PyDataFrame {
         for (k, v) in columns.iter() {
             mapping.insert(k.extract::<String>()?, v.extract::<String>()?);
         }
-        Ok(PyDataFrame {
-            inner: self.inner.rename(&mapping).map_err(pyerr)?,
-        })
+        Ok(PyDataFrame::plain(self.inner.rename(&mapping).map_err(pyerr)?))
     }
 
     /// Move a column into the row index (pandas `set_index(col)`), returning a
     /// new frame. A datetime / int / string column becomes the matching index.
     #[pyo3(signature = (keys))]
     fn set_index(&self, keys: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame {
-            inner: self.inner.set_index(keys).map_err(pyerr)?,
-        })
+        Ok(PyDataFrame::plain(self.inner.set_index(keys).map_err(pyerr)?))
     }
 
     /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
@@ -1966,9 +2090,7 @@ impl PyDataFrame {
         for (k, v) in dtypes.iter() {
             mapping.insert(k.extract::<String>()?, parse_dtype(&v.extract::<String>()?)?);
         }
-        Ok(PyDataFrame {
-            inner: self.inner.astype(&mapping).map_err(pyerr)?,
-        })
+        Ok(PyDataFrame::plain(self.inner.astype(&mapping).map_err(pyerr)?))
     }
 
     /// Define a column / directive alias: `as_name` resolves to `src_name`
@@ -2267,7 +2389,7 @@ fn select_2d(
         }
         (AxisSel::Many(r), AxisSel::Many(c)) => {
             let sub = project_cols(df, &c)?.take(&r);
-            Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any())
+            Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any())
         }
     }
 }
@@ -2316,11 +2438,11 @@ impl DataFrameILoc {
         if let Ok(slice) = key.downcast::<PySlice>() {
             let info = slice.indices(pf.inner.height() as isize)?;
             let sub = positional_slice(&pf.inner, &info);
-            return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
+            return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // int-list / boolean-mask row selection -> sub-frame.
         let positions = iloc_positions(key, pf.inner.height())?;
-        Ok(Py::new(py, PyDataFrame { inner: take_frame(&pf.inner, &positions) })?.into_any())
+        Ok(Py::new(py, PyDataFrame::plain(take_frame(&pf.inner, &positions)))?.into_any())
     }
 
     /// `df.iloc[i, j] = scalar` or `df.iloc[rows, j] = scalar | array` (positional;
@@ -2462,13 +2584,13 @@ impl DataFrameLoc {
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, index)?;
             let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
-            return Ok(Py::new(py, PyDataFrame { inner: pf.inner.slice(a, b) })?.into_any());
+            return Ok(Py::new(py, PyDataFrame::plain(pf.inner.slice(a, b)))?.into_any());
         }
         // boolean-mask / label-list row selection -> sub-frame.
         if as_bool_mask(key, pf.inner.height()).is_some() || key.downcast::<PyList>().is_ok() {
             let positions = loc_positions(key, index, pf.inner.height())?;
             return Ok(
-                Py::new(py, PyDataFrame { inner: take_frame(&pf.inner, &positions) })?.into_any(),
+                Py::new(py, PyDataFrame::plain(take_frame(&pf.inner, &positions)))?.into_any(),
             );
         }
         let label = parse_label(key, index)?;
@@ -2636,7 +2758,6 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SeriesILoc>()?;
     m.add_class::<SeriesLoc>()?;
     m.add_class::<PyTimeFrame>()?;
-    m.add_class::<PyCumulator>()?;
     m.add("DirectiveError", m.py().get_type::<DirectiveError>())?;
     m.add("DirectiveSyntaxError", m.py().get_type::<DirectiveSyntaxError>())?;
     m.add("DirectiveValueError", m.py().get_type::<DirectiveValueError>())?;
