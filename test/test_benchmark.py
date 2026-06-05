@@ -508,11 +508,13 @@ API_CANDIDATES = ['pandas', 'polars', 'volas']
 
 
 @pytest.mark.parametrize('candidate', API_CANDIDATES)
-@pytest.mark.parametrize('op', API_OPS)
-def test_api(benchmark, op, candidate):
+# The op is exposed under the `indicator` param name so it shares the report grouping
+# and the `--benchmark-group-by=param:indicator` console grouping with the other sections.
+@pytest.mark.parametrize('indicator', API_OPS)
+def test_api(benchmark, indicator, candidate):
     if candidate == 'polars' and pl is None:
         pytest.skip('polars not installed')
-    fn = API_REG.get(candidate, {}).get(op)
+    fn = API_REG.get(candidate, {}).get(indicator)
     if fn is None:
-        pytest.skip(f'{candidate} has no {op}')
+        pytest.skip(f'{candidate} has no {indicator}')
     benchmark(fn)
