@@ -148,7 +148,10 @@ fn ht_core(price: &[f64]) -> Vec<HtBar> {
     let mut i1_even_prev2 = 0.0f64;
 
     while today < n {
-        let adj = 0.075 * period + 0.54;
+        // The homodyne smoothings below are `a·x + (1-a)·y` with `a+b=1`; fuse each as
+        // `(x-y)·a + y` (one rounding, one fewer multiply). They are contractive
+        // (b ∈ {0.8, 0.67}), so the ~1e-16 reassociation decays — within parity tolerance.
+        let adj = period.mul_add(0.075, 0.54);
         let today_value = price[today];
         let smoothed = wma.push(price, today_value);
         let even = today % 2 == 0;
@@ -163,8 +166,8 @@ fn ht_core(price: &[f64]) -> Vec<HtBar> {
             if hilbert_idx == 3 {
                 hilbert_idx = 0;
             }
-            q2 = 0.2 * (q1c + jiv) + 0.8 * prev_q2;
-            i2 = 0.2 * (i1_even_prev3 - jqv) + 0.8 * prev_i2;
+            q2 = (q1c + jiv - prev_q2).mul_add(0.2, prev_q2);
+            i2 = (i1_even_prev3 - jqv - prev_i2).mul_add(0.2, prev_i2);
             i1 = i1_even_prev3;
             q1 = q1c;
             i1_odd_prev3 = i1_odd_prev2;
@@ -174,8 +177,8 @@ fn ht_core(price: &[f64]) -> Vec<HtBar> {
             let q1c = q1v.transform(det, hilbert_idx, false, adj);
             let jiv = ji.transform(i1_odd_prev3, hilbert_idx, false, adj);
             let jqv = jq.transform(q1c, hilbert_idx, false, adj);
-            q2 = 0.2 * (q1c + jiv) + 0.8 * prev_q2;
-            i2 = 0.2 * (i1_odd_prev3 - jqv) + 0.8 * prev_i2;
+            q2 = (q1c + jiv - prev_q2).mul_add(0.2, prev_q2);
+            i2 = (i1_odd_prev3 - jqv - prev_i2).mul_add(0.2, prev_i2);
             i1 = i1_odd_prev3;
             q1 = q1c;
             i1_even_prev3 = i1_even_prev2;
@@ -183,8 +186,8 @@ fn ht_core(price: &[f64]) -> Vec<HtBar> {
         }
 
         // Homodyne discriminator -> dominant cycle period.
-        re = 0.2 * (i2 * prev_i2 + q2 * prev_q2) + 0.8 * re;
-        im = 0.2 * (i2 * prev_q2 - q2 * prev_i2) + 0.8 * im;
+        re = (i2 * prev_i2 + q2 * prev_q2 - re).mul_add(0.2, re);
+        im = (i2 * prev_q2 - q2 * prev_i2 - im).mul_add(0.2, im);
         prev_q2 = q2;
         prev_i2 = i2;
         let prev_period = period;
@@ -204,8 +207,8 @@ fn ht_core(price: &[f64]) -> Vec<HtBar> {
         } else if period > 50.0 {
             period = 50.0;
         }
-        period = 0.2 * period + 0.8 * prev_period;
-        smooth_period = 0.33 * period + 0.67 * smooth_period;
+        period = (period - prev_period).mul_add(0.2, prev_period);
+        smooth_period = (period - smooth_period).mul_add(0.33, smooth_period);
 
         bars[today] = HtBar { smooth_period, smoothed, i1, q1 };
         today += 1;
