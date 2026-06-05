@@ -325,3 +325,28 @@ pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hikkake initial scan (`for i in 2..6`) only reaches its `i >= 5` output
+    /// branches for a setup or confirmation landing exactly on bar 5 — which the long
+    /// fuzz series (whose hikkakes occur later, in the continuation loop) never does.
+    /// Both six-bar cases are derived directly from the setup/confirm geometry; full
+    /// correctness vs TA-Lib is covered by the Python parity suite.
+    #[test]
+    fn hikkake_initial_loop_index_5_branches() {
+        let o = [10.0; 6];
+        let c = [10.0; 6];
+        // Setup detected at bar 5: inside bar at 3-4, then a bullish breakout at 5.
+        let h_a = [20.0, 20.0, 20.0, 18.0, 16.0, 15.0];
+        let l_a = [5.0, 5.0, 5.0, 8.0, 10.0, 7.0];
+        assert_eq!(cdl_hikkake(&o, &h_a, &l_a, &c)[5], 100.0);
+        // Setup at bar 3, then confirmed at bar 5 -> ±200 and the index resets.
+        let c_b = [10.0, 10.0, 10.0, 10.0, 10.0, 20.0];
+        let h_b = [20.0, 20.0, 18.0, 16.0, 17.0, 21.0];
+        let l_b = [5.0, 5.0, 8.0, 6.0, 9.0, 19.0];
+        assert_eq!(cdl_hikkake(&o, &h_b, &l_b, &c_b)[5], 200.0);
+    }
+}

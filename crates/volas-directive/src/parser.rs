@@ -370,7 +370,7 @@ mod tests {
                 assert_eq!(c.name, "ma");
                 assert_eq!(c.args, vec![Some("5".to_string())]);
             }
-            _ => panic!(),
+            _ => panic!(), // LCOV_EXCL_LINE
         }
     }
 
@@ -381,7 +381,7 @@ mod tests {
                 assert_eq!(op, Op::Lt);
                 assert_eq!(*right, Node::Scalar(0.0));
             }
-            _ => panic!(),
+            _ => panic!(), // LCOV_EXCL_LINE
         }
     }
 
@@ -394,7 +394,7 @@ mod tests {
         if let Node::Command(c) = parse("increase:3@(ma:20@close)").unwrap() {
             assert!(matches!(c.series[0], Node::Command(_)));
         } else {
-            panic!();
+            panic!(); // LCOV_EXCL_LINE
         }
     }
 
@@ -405,7 +405,7 @@ mod tests {
             Node::Binary { op: Op::Ne, left, .. } => {
                 assert!(matches!(*left, Node::Binary { op: Op::Add, .. }));
             }
-            _ => panic!(),
+            _ => panic!(), // LCOV_EXCL_LINE
         }
         // (a > 1) | (a <= 1)
         assert!(matches!(
@@ -425,7 +425,7 @@ mod tests {
         if let Node::Command(c) = parse("macd.signal:,,10").unwrap() {
             assert_eq!(c.args, vec![None, None, Some("10".into())]);
         } else {
-            panic!();
+            panic!(); // LCOV_EXCL_LINE
         }
     }
 

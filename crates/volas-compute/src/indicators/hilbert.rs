@@ -248,12 +248,11 @@ impl DcPhase {
         let abs_imag = imag_part.abs();
         if abs_imag > 0.0 {
             self.phase = (real_part / imag_part).atan() * RAD2DEG;
-        } else if abs_imag <= 0.01 {
-            if real_part < 0.0 {
-                self.phase -= 90.0;
-            } else if real_part > 0.0 {
-                self.phase += 90.0;
-            }
+        } else if abs_imag <= 0.01 && real_part != 0.0 {
+            // imagPart == 0 (TA-Lib's defensive carry): nudge the previous phase ±90°
+            // by the sign of realPart. (real == 0 leaves the phase unchanged, as in
+            // TA-Lib; folded into the guard so there is no empty fall-through branch.)
+            self.phase += if real_part < 0.0 { -90.0 } else { 90.0 };
         }
         self.phase += 90.0;
         // Compensate for the one-bar lag of the weighted moving average.

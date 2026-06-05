@@ -127,7 +127,7 @@ impl Index {
             Index::Range(n) => (0..*n as i64).collect(),
             Index::Int64(v) => v.clone(),
             Index::Datetime(v, _) => v.clone(),
-            Index::Str(_) => unreachable!("string indexes have no i64 labels"),
+            Index::Str(_) => unreachable!("string indexes have no i64 labels"), // LCOV_EXCL_LINE
         }
     }
 
@@ -395,5 +395,46 @@ mod tests {
         assert_eq!(Index::Range(3).label_at(2), Label::I64(2));
         assert_eq!(Index::Int64(vec![10, 20]).label_at(1), Label::I64(20));
         assert_eq!(Index::Datetime(vec![100, 200], Tz::Utc).label_at(0), Label::I64(100));
+    }
+
+    #[test]
+    fn index_kind_branch_coverage() {
+        // tz() / with_tz() are no-ops on a non-datetime index.
+        assert_eq!(Index::Range(3).tz(), Tz::Utc);
+        assert!(matches!(Index::Range(3).with_tz(Tz::Utc), Index::Range(3)));
+        // slice over the non-range kinds.
+        assert_eq!(Index::Int64(vec![1, 2, 3]).slice(0, 2), Index::Int64(vec![1, 2]));
+        assert!(matches!(Index::Datetime(vec![1, 2], Tz::Utc).slice(0, 1), Index::Datetime(_, _)));
+        assert_eq!(
+            Index::Str(vec!["a".into(), "b".into()]).slice(1, 2),
+            Index::Str(vec!["b".into()])
+        );
+        // argsort lexicographically over a string index.
+        assert_eq!(Index::Str(vec!["b".into(), "a".into()]).argsort(true), vec![1, 0]);
+        // to_column over every kind.
+        assert_eq!(Index::Range(2).to_column().len(), 2);
+        assert_eq!(Index::Datetime(vec![5], Tz::Utc).to_column().len(), 1);
+        assert_eq!(Index::Str(vec!["x".into()]).to_column().len(), 1);
+        // append: same-kind datetime / string, and a numeric mix -> Int64.
+        assert!(matches!(
+            Index::Datetime(vec![1], Tz::Utc)
+                .append(&Index::Datetime(vec![2], Tz::Utc))
+                .unwrap(),
+            Index::Datetime(_, _)
+        ));
+        assert!(matches!(
+            Index::Str(vec!["a".into()]).append(&Index::Str(vec!["b".into()])).unwrap(),
+            Index::Str(_)
+        ));
+        assert!(matches!(
+            Index::Range(2).append(&Index::Range(3)).unwrap(),
+            Index::Range(5)
+        ));
+        assert!(matches!(
+            Index::Range(2).append(&Index::Int64(vec![5])).unwrap(),
+            Index::Int64(_)
+        ));
+        // mixing a string index with a numeric one is an error.
+        assert!(Index::Str(vec!["a".into()]).append(&Index::Range(1)).is_err());
     }
 }

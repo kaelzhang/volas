@@ -900,7 +900,7 @@ mod tests {
                 assert_eq!(v[0], ns);
                 assert_eq!(*tz, Tz::parse("America/New_York").unwrap());
             }
-            _ => panic!("datetime"),
+            _ => panic!("datetime"), // LCOV_EXCL_LINE
         }
 
         // tz_localize: wall-clock 12:00 reinterpreted as NY -> instant moves +5h to UTC.
@@ -909,7 +909,7 @@ mod tests {
             Index::Datetime(v, _) => {
                 assert_eq!(crate::datetime::format_ns(v[0]), "2021-01-01 17:00:00");
             }
-            _ => panic!("datetime"),
+            _ => panic!("datetime"), // LCOV_EXCL_LINE
         }
     }
 
@@ -930,5 +930,42 @@ mod tests {
         assert!(df.assign_positions(0, &[9], &Column::f64(vec![1.0])).is_err());
         // bool into a numeric column
         assert!(df.assign_positions(0, &[0], &Column::bool(vec![true])).is_err());
+    }
+
+    #[test]
+    fn assign_positions_type_combinations_and_col_out_of_range() {
+        let mut df = DataFrame::new(
+            vec!["f".into(), "b".into(), "s".into(), "d".into()],
+            vec![
+                Column::f64(vec![1.0, 2.0, 3.0]),
+                Column::bool(vec![true, false, true]),
+                Column::str(vec!["a".into(), "b".into(), "c".into()]),
+                Column::datetime(vec![10, 20, 30]),
+            ],
+            None,
+        )
+        .unwrap();
+        // column position out of range
+        assert!(df.assign_positions(99, &[0], &Column::f64(vec![1.0])).is_err());
+        df.assign_positions(0, &[1], &Column::i64(vec![7])).unwrap(); // F64 <- I64
+        df.assign_positions(1, &[0], &Column::bool(vec![false])).unwrap(); // Bool <- Bool
+        df.assign_positions(2, &[0], &Column::str(vec!["z".into()])).unwrap(); // Str <- Str
+        df.assign_positions(3, &[2], &Column::datetime(vec![99])).unwrap(); // Datetime <- Datetime
+        assert_eq!(df.columns()[0].as_f64().unwrap()[1], 7.0);
+        assert_eq!(df.columns()[3].as_datetime().unwrap()[2], 99);
+    }
+
+    #[test]
+    fn tz_localize_rejects_nonexistent_wall_time() {
+        use crate::tz::Tz;
+        // 02:30 on 2020-03-08 does not exist in America/New_York (spring-forward gap).
+        let ns = crate::datetime::parse_ns("2020-03-08 02:30:00").unwrap();
+        let df = DataFrame::new(
+            vec!["c".into()],
+            vec![Column::f64(vec![1.0])],
+            Some(Index::Datetime(vec![ns], Tz::Utc)),
+        )
+        .unwrap();
+        assert!(df.tz_localize(Tz::parse("America/New_York").unwrap()).is_err());
     }
 }

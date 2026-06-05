@@ -151,7 +151,7 @@ mod tests {
                     assert_eq!(v[0], 1.0);
                     assert!(v[1].is_nan());
                 }
-                other => panic!("expected F64, got {other:?}"),
+                other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
             }
         }
     }
@@ -160,7 +160,7 @@ mod tests {
     fn all_na_column_is_f64_all_nan() {
         match infer(&["NA", "null", ""]) {
             Column::F64(v) => assert!(v.iter().all(|x| x.is_nan())),
-            other => panic!("expected F64, got {other:?}"),
+            other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
 
@@ -168,7 +168,7 @@ mod tests {
     fn scientific_and_negative_are_f64() {
         match infer(&["-1.5", "1e3"]) {
             Column::F64(v) => assert_eq!(**v, vec![-1.5, 1000.0]),
-            other => panic!("expected F64, got {other:?}"),
+            other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
 
@@ -202,7 +202,7 @@ mod tests {
         // "NA" is no longer missing -> the column is object/string, not float.
         match infer_column(vec!["1".into(), "NA".into()], &na) {
             Column::Str(v) => assert_eq!(**v, vec!["1".to_string(), "NA".to_string()]),
-            other => panic!("expected Str, got {other:?}"),
+            other => panic!("expected Str, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
 
@@ -217,7 +217,7 @@ mod tests {
                 assert_eq!(v[0], 1.0);
                 assert!(v[1].is_nan());
             }
-            other => panic!("expected F64, got {other:?}"),
+            other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
 

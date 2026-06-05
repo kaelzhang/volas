@@ -170,4 +170,13 @@ mod tests {
         assert_eq!(epoch_to_ns(1_577_836_800, "s").unwrap(), 1_577_836_800_000_000_000);
         assert!(epoch_to_ns(1, "weeks").is_none());
     }
+
+    #[test]
+    fn civil_parts_and_format_ns_tz() {
+        assert_eq!(civil_parts(0), (1970, 1, 1, 0, 0, 0));
+        // format_ns_tz: the UTC fast path matches format_ns; a named zone shifts.
+        assert_eq!(format_ns_tz(0, crate::tz::Tz::Utc), format_ns(0));
+        let ny = crate::tz::Tz::parse("America/New_York").unwrap();
+        assert!(format_ns_tz(0, ny).starts_with("1969")); // UTC epoch is 1969 in NY
+    }
 }

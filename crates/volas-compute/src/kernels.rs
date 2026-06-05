@@ -166,7 +166,7 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
                     ss_idx = Some(i);
                 }
             }
-        }
+        } // LCOV_EXCL_LINE
     }
     let (Some(sf), Some(ss)) = (sf_idx, ss_idx) else {
         return out;
@@ -891,5 +891,21 @@ mod tests {
         let (m, sd) = rolling_mean_std(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2, 0);
         assert_eq!(m[1], 1.5);
         assert!(m[2].is_nan() && sd[2].is_nan());
+
+        // Non-contiguous (strided) input: `as_slice()` is None, so the fast path's
+        // if-let does not match and the NaN-aware slow path runs instead.
+        let arr = ndarray::Array1::from(vec![1.0, 9.0, 2.0, 8.0, 3.0, 7.0, 4.0, 6.0]);
+        let strided = arr.slice(ndarray::s![..;2]); // [1, 2, 3, 4], stride 2
+        assert!(!strided.is_standard_layout() || strided.as_slice().is_none());
+        let _ = sma(strided, 2);
+        let _ = rolling_min(strided, 2);
+        let _ = rolling_max(strided, 2);
+        let _ = rolling_std(strided, 2, 1);
+        let _ = rolling_mean_std(strided, 2, 0);
+
+        // The naive reference helpers' own degenerate-period guards.
+        assert!(naive_sma(&[1.0], 0).iter().all(|x| x.is_nan()));
+        assert!(naive_std(&[1.0], 0, 1).iter().all(|x| x.is_nan()));
+        assert!(naive_minmax(&[1.0], 5, true).iter().all(|x| x.is_nan()));
     }
 }

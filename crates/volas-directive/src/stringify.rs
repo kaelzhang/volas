@@ -169,4 +169,17 @@ mod tests {
         // an expression as a series operand stays grouped so it re-parses
         assert_eq!(s("ma:5@(close + 1)"), "ma:5@(close+1)");
     }
+
+    #[test]
+    fn scalar_series_operand() {
+        // a bare scalar in a series slot exercises stringify_series's Scalar arm
+        use crate::types::{Command, Node};
+        let node = Node::Command(Command {
+            name: "correl".into(),
+            sub: None,
+            args: vec![Some("5".into())],
+            series: vec![Node::Name("close".into()), Node::Scalar(3.0)],
+        });
+        assert!(stringify(&node).contains('3'));
+    }
 }

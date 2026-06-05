@@ -19,6 +19,7 @@ If UNION_OUT is given, the merged (max-count) LCOV is written there too, so it
 can be rendered to HTML with `genhtml`.
 Exit code is non-zero if either input is missing or empty.
 """
+import os
 import sys
 
 EXCLUDE = "volas-python"  # the pyo3 glue: pytest-only, reported behaviourally
@@ -29,6 +30,28 @@ def normalize(path):
     """Repo-relative key, e.g. 'volas-directive/src/exec.rs'."""
     i = path.find(MARK)
     return path[i + len(MARK):] if i >= 0 else path
+
+
+def excluded_lines(name):
+    """Line numbers a source opts out of coverage with the standard LCOV markers
+    (`// LCOV_EXCL_LINE` on a line, or a `// LCOV_EXCL_START` … `// LCOV_EXCL_STOP`
+    block). Reserved for genuinely-unreachable defensive code — `unreachable!()`,
+    invariant `panic!()` guards, and test-scaffolding match arms that only fire on a
+    bug — which cannot be executed without failing."""
+    excl = set()
+    try:
+        with open(os.path.join(MARK, name)) as fh:
+            in_block = False
+            for i, line in enumerate(fh, 1):
+                if "LCOV_EXCL_START" in line:
+                    in_block = True
+                if in_block or "LCOV_EXCL_LINE" in line:
+                    excl.add(i)
+                if "LCOV_EXCL_STOP" in line:
+                    in_block = False
+    except OSError:
+        pass
+    return excl
 
 
 def parse(path):
@@ -61,11 +84,13 @@ def main():
         sys.exit(f"error: empty coverage ({len(cargo)} cargo / {len(pytest)} pytest files)")
 
     names = sorted(set(cargo) | set(pytest))
-    # merged[name] = {line -> unioned (max) hit count}
+    # merged[name] = {line -> unioned (max) hit count}, minus lines that opt out of
+    # coverage via LCOV_EXCL markers (unreachable defensive code).
     merged = {
         name: {
             ln: max(cargo.get(name, {}).get(ln, 0), pytest.get(name, {}).get(ln, 0))
             for ln in set(cargo.get(name, {})) | set(pytest.get(name, {}))
+            if ln not in excluded_lines(name)
         }
         for name in names
     }

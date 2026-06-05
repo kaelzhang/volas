@@ -476,4 +476,16 @@ mod tests {
         a.append(&Column::bool(vec![false, true])).unwrap();
         assert_eq!(a.as_bool().unwrap(), &[true, false, true]);
     }
+
+    #[test]
+    fn epoch_to_datetime_and_to_string_vec() {
+        // epoch_to_datetime over int64 and float64 epochs; non-numeric dtypes error.
+        assert!(Column::i64(vec![1, 2]).epoch_to_datetime("s").is_ok());
+        assert!(Column::f64(vec![1.0, 2.0]).epoch_to_datetime("s").is_ok());
+        assert!(Column::bool(vec![true]).epoch_to_datetime("s").is_err());
+        // to_string_vec renders each supported dtype.
+        assert_eq!(Column::str(vec!["a".into()]).to_string_vec(), vec!["a".to_string()]);
+        assert_eq!(Column::f64(vec![1.5]).to_string_vec(), vec!["1.5".to_string()]);
+        assert_eq!(Column::i64(vec![3]).to_string_vec(), vec!["3".to_string()]);
+    }
 }

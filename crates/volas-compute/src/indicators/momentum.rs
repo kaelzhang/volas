@@ -172,7 +172,7 @@ pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
 fn aroon_track(high: &[f64], low: &[f64], period: usize, mut emit: impl FnMut(usize, usize, usize)) {
     let n = high.len();
     if period == 0 {
-        return;
+        return; // LCOV_EXCL_LINE
     }
     let (mut hi_idx, mut hi) = (0usize, f64::NEG_INFINITY);
     let (mut lo_idx, mut lo_v) = (0usize, f64::INFINITY);

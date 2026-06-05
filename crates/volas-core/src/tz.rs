@@ -207,4 +207,18 @@ mod tests {
         assert_eq!(ny.civil_parts(w), (2021, 1, 1, 12, 0, 0));
         assert_eq!(ny.civil_parts(s), (2021, 7, 1, 12, 0, 0));
     }
+
+    #[test]
+    fn tz_edge_branches() {
+        let ny = Tz::parse("America/New_York").unwrap();
+        assert_eq!(ny.fixed_offset_secs(), None); // a named zone has no fixed offset
+        assert_eq!(Tz::Utc.name(), "UTC");
+        // DST fall-back (01:30 on 2020-11-01) is ambiguous -> the earlier instant;
+        // the spring-forward gap (02:30 on 2020-03-08) does not exist -> None.
+        assert!(ny.wall_to_utc_ns(2020, 11, 1, 1, 30, 0).is_some());
+        assert!(ny.wall_to_utc_ns(2020, 3, 8, 2, 30, 0).is_none());
+        // parse rejects 3-char rests and out-of-range hours.
+        assert!(Tz::parse("+123").is_err());
+        assert!(Tz::parse("+25:00").is_err());
+    }
 }

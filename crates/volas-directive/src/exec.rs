@@ -60,7 +60,7 @@ fn apply_binary(op: Op, l: &Column, r: &Column) -> Column {
                     Op::Sub => lf[i] - rf[i],
                     Op::Mul => lf[i] * rf[i],
                     Op::Div => lf[i] / rf[i],
-                    _ => unreachable!(),
+                    _ => unreachable!(), // LCOV_EXCL_LINE
                 };
             }
             Column::f64(out)
@@ -74,7 +74,7 @@ fn apply_binary(op: Op, l: &Column, r: &Column) -> Column {
                     Op::And => lb[i] && rb[i],
                     Op::Or => lb[i] || rb[i],
                     Op::Xor => lb[i] ^ rb[i],
-                    _ => unreachable!(),
+                    _ => unreachable!(), // LCOV_EXCL_LINE
                 };
             }
             Column::bool(out)
@@ -99,7 +99,7 @@ fn apply_cmp(op: Op, l: &[f64], r: &[f64]) -> Vec<bool> {
             out[i] = (l[i - 1] <= r[i - 1] && l[i] > r[i])
                 || (l[i - 1] >= r[i - 1] && l[i] < r[i])
         }),
-        _ => unreachable!("non-comparison op in apply_cmp"),
+        _ => unreachable!("non-comparison op in apply_cmp"), // LCOV_EXCL_LINE
     }
     out
 }
@@ -802,7 +802,7 @@ fn exec_command(
             ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).1,
         ),
 
-        (other, _) => Err(VolasError::Value(format!("unknown command '{other}'"))),
+        (other, _) => Err(VolasError::Value(format!("unknown command '{other}'"))), // LCOV_EXCL_LINE
     }
 }
 
@@ -960,6 +960,17 @@ mod tests {
             let col = execute(&df, &parse(d).unwrap()).unwrap();
             assert_eq!(col.len(), 4, "directive {d:?}");
         }
+    }
+
+    #[test]
+    fn required_series_and_unknown_matype_errors() {
+        let df = ohlcv();
+        // correl needs a second series operand; absent or empty -> error
+        // (series_f64_required's None and empty-Name arms).
+        assert!(execute(&df, &parse("correl:30").unwrap()).is_err());
+        assert!(execute(&df, &parse("correl:30@close,").unwrap()).is_err());
+        // unknown MA type (9) -> ma_typed error propagates through the `ma` arm's `?`.
+        assert!(execute(&df, &parse("ma:5,9").unwrap()).is_err());
     }
 
     #[test]

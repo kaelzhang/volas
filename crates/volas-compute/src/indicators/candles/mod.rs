@@ -471,3 +471,42 @@ fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
     out.extend((lookback..n).map(f));
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The candle-settings averagers have branches (Shadows range → ÷2, `avg_period == 0`
+    /// → the bar's own range, and the short-series guards) that the 61 landed patterns
+    /// never select for these specific helpers. Exercise them directly so the framework
+    /// is fully covered regardless of which settings the current patterns happen to use.
+    #[test]
+    fn candle_average_helper_branches() {
+        let o = vec![1.0; 20];
+        let h = vec![3.0; 20];
+        let l = vec![0.0; 20];
+        let c = vec![2.0; 20];
+        let s3 = vec![1.0; 3];
+
+        // candle_average_series: Shadows range (÷2), avg_period 0, and period > n.
+        candle_average_series(SHADOW_SHORT, &o, &h, &l, &c);
+        candle_average_series(SHADOW_LONG, &o, &h, &l, &c);
+        candle_average_series(NEAR, &s3, &s3, &s3, &s3);
+
+        // candle_average (per-bar): Shadows range and avg_period 0.
+        let _ = candle_average(SHADOW_SHORT, &o, &h, &l, &c, 12);
+        let _ = candle_average(SHADOW_LONG, &o, &h, &l, &c, 12);
+
+        // each_bar_avg2: a zero lookback trips its guard; a valid call with an
+        // avg_period-0 (SHADOW_LONG) and a Shadows (SHADOW_SHORT) setting covers the
+        // body's ÷2 and own-range branches in both the seed and per-bar loops.
+        each_bar_avg2([BODY_LONG, NEAR], 0, &o, &h, &l, &c, |_, a, _| a[0]);
+        each_bar_avg2([SHADOW_LONG, SHADOW_SHORT], 12, &o, &h, &l, &c, |_, a, b| a[0] + b[0]);
+
+        // each_bar_avg_n: the lookback guard, a Shadows setting (÷2), and an
+        // avg_period-0 setting (the bar's own range).
+        each_bar_avg_n::<1, 2>([NEAR], 0, &o, &h, &l, &c, |_, hist| hist[0][0]);
+        each_bar_avg_n::<1, 2>([SHADOW_SHORT], 12, &o, &h, &l, &c, |_, hist| hist[0][0]);
+        each_bar_avg_n::<1, 2>([SHADOW_LONG], 6, &o, &h, &l, &c, |_, hist| hist[0][0]);
+    }
+}

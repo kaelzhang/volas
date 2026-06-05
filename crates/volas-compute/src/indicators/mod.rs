@@ -101,4 +101,88 @@ mod tests {
         assert_eq!(increase(&[1.0, 2.0], 5, 1), vec![false, false]);
         assert_eq!(repeat(&[true, true], 5), vec![false, false]);
     }
+
+    /// Zero-denominator / flat-data branches (no range, no variance, no directional
+    /// movement) — the `… == 0 { 0.0 }` fall-backs that real price series never reach.
+    #[test]
+    fn flat_data_zero_denominator_branches() {
+        const N: usize = 40;
+        let f = vec![100.0; N]; // perfectly flat OHLC: every range / variance is 0
+        let vol = vec![1000.0; N];
+        // willr flat range; bop no range; cci zero deviation; mfi zero/again-flat flow.
+        assert!(willr(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
+        assert!(bop(&f, &f, &f, &f).iter().all(|x| *x == 0.0));
+        assert!(cci(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
+        assert!(mfi(&f, &f, &f, &vol, 14).iter().any(|x| *x == 0.0));
+        // directional: smoothed TR is 0, so +DI / −DI / DX are 0.
+        assert!(plus_di(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
+        assert!(minus_di(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
+        assert!(dx(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
+        // statistics: zero variance / zero regression denominator.
+        assert!(stddev(&f, 5, 1.0).iter().any(|x| *x == 0.0));
+        assert!(correl(&f, &f, 30).iter().any(|x| *x == 0.0));
+        assert!(beta(&f, &f, 5).iter().any(|x| *x == 0.0));
+        // oscillators: flat stochastic range; CMO's flat-window guard; volume: zero
+        // money-flow multiplier.
+        assert!(stoch_fastk(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
+        assert!(cmo(&f, 14).iter().any(|x| *x == 0.0));
+        assert!(ad(&f, &f, &f, &vol).iter().any(|x| *x == 0.0));
+        // kama efficiency ratio defaults to 1.0 when there is no net change.
+        assert_eq!(kama(&f, 30).len(), N);
+
+        // cmo skips NaN deltas (the shared gains/losses helper's `continue`).
+        assert_eq!(cmo(&[100.0, f64::NAN, 102.0, 103.0, 104.0], 2).len(), 5);
+
+        // DX inner zero: inside bars give nonzero TR but no directional movement, so
+        // +DI + −DI == 0 while smoothed TR != 0.
+        let hi: Vec<f64> = (0..N).map(|i| 110.0 - i as f64 * 0.3).collect();
+        let lo: Vec<f64> = (0..N).map(|i| 90.0 + i as f64 * 0.3).collect();
+        assert!(dx(&hi, &lo, &f, 14).iter().any(|x| *x == 0.0));
+
+        // roc / beta: a zero prior price yields a 0 result (the divide-by-zero guard).
+        let z = [0.0, 0.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0];
+        assert_eq!(roc(&z, 2)[2], 0.0);
+        assert!(beta(&z, &f[..z.len()].to_vec(), 5).iter().any(|x| *x == 0.0));
+
+        // accbands: high + low == 0 falls back to the bare high / low edge.
+        let pos = vec![5.0; N];
+        let neg = vec![-5.0; N];
+        assert!(accbands_upper(&pos, &neg, 20).iter().any(|x| (*x - 5.0).abs() < 1e-9));
+        assert!(accbands_lower(&pos, &neg, 20).iter().any(|x| (*x + 5.0).abs() < 1e-9));
+
+        // adosc with fast == slow == 1 has lookback 0, so it emits at index 0.
+        assert!(!adosc(&f, &f, &f, &vol, 1, 1)[0].is_nan());
+    }
+
+    /// SAR initial-direction branches (down-opening) and SAREXT start-value sign
+    /// branches, which the upward-opening tencent series does not exercise.
+    #[test]
+    fn sar_initial_direction_branches() {
+        // Down-opening: −DM at bar 1 is positive, so SAR starts short.
+        let hi = [110.0, 105.0, 104.0, 106.0, 108.0, 107.0];
+        let lo = [100.0, 95.0, 94.0, 96.0, 98.0, 97.0];
+        assert_eq!(sar(&hi, &lo, 0.02, 0.2).len(), 6);
+        // SAREXT with an explicit positive then negative start value.
+        assert_eq!(
+            sarext(&hi, &lo, 1.0, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2).len(),
+            6
+        );
+        assert_eq!(
+            sarext(&hi, &lo, -1.0, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2).len(),
+            6
+        );
+    }
+
+    /// Warm-up guards reached only by degenerate periods / inputs.
+    #[test]
+    fn warmup_guards() {
+        assert!(mom(&[1.0, 2.0], 5).iter().all(|x| x.is_nan())); // period >= n
+        assert!(roc(&[1.0, 2.0], 5).iter().all(|x| x.is_nan()));
+        assert!(imi(&[1.0, 2.0], &[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
+        assert!(aroon_up(&[1.0], &[1.0], 0).iter().all(|x| x.is_nan())); // period == 0
+        let f = vec![100.0; 5];
+        assert!(ultosc(&f, &f, &f, 0, 14, 28).iter().all(|x| x.is_nan())); // p1 == 0
+        assert!(adx(&f, &f, &f, 14).iter().all(|x| x.is_nan())); // 2*period-1 >= n
+        assert!(t3(&f, 10, 0.7).iter().all(|x| x.is_nan())); // 6*(period-1) >= n
+    }
 }

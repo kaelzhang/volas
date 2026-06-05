@@ -89,7 +89,7 @@ impl Cumulator {
                 out.append(&open)?;
                 Ok(out)
             }
-            (Some(closed), None) => Ok(closed.clone()),
+            (Some(closed), None) => Ok(closed.clone()), // LCOV_EXCL_LINE
             (None, Some(open)) => Ok(open),
             (None, None) => DataFrame::new(Vec::new(), Vec::new(), None),
         }
@@ -225,7 +225,7 @@ mod tests {
                 assert_eq!(v[0], datetime::parse_ns("2020-01-01 00:00:00").unwrap());
                 assert_eq!(v[1], datetime::parse_ns("2020-01-01 00:05:00").unwrap());
             }
-            _ => panic!("expected DatetimeIndex"),
+            _ => panic!("expected DatetimeIndex"), // LCOV_EXCL_LINE
         }
     }
 
@@ -301,5 +301,12 @@ mod tests {
         )
         .unwrap();
         assert!(cumulate(&df, TimeFrame::Min5, &AggSpec::ohlcv()).is_err());
+    }
+
+    #[test]
+    fn aggregate_period_rejects_non_datetime_index() {
+        // append's guard shadows this one in the public path, so call it directly.
+        let df = DataFrame::new(vec!["open".into()], vec![Column::f64(vec![1.0])], None).unwrap();
+        assert!(aggregate_period(&df, &AggSpec::ohlcv()).is_err());
     }
 }

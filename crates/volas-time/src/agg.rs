@@ -60,7 +60,7 @@ impl Agg {
                     Agg::Max => it.fold(f64::NEG_INFINITY, f64::max),
                     Agg::Min => it.fold(f64::INFINITY, f64::min),
                     Agg::Sum => it.sum(),
-                    _ => unreachable!(),
+                    _ => unreachable!(), // LCOV_EXCL_LINE
                 };
                 Ok(Column::f64(vec![val]))
             }
@@ -70,7 +70,7 @@ impl Agg {
                     Agg::Max => it.max().unwrap(),
                     Agg::Min => it.min().unwrap(),
                     Agg::Sum => it.sum(),
-                    _ => unreachable!(),
+                    _ => unreachable!(), // LCOV_EXCL_LINE
                 };
                 Ok(if matches!(col, Column::Datetime(_)) {
                     Column::datetime(vec![val])
@@ -198,5 +198,12 @@ mod tests {
         let flags = Column::bool(vec![true, false]);
         assert!(Agg::Max.reduce(&flags, &[0, 1]).is_err());
         assert!(Agg::Min.reduce(&flags, &[0, 1]).is_err());
+    }
+
+    #[test]
+    fn agg_name_first_last() {
+        // first / last names (the other variants are exercised via reduce errors).
+        assert_eq!(Agg::First.name(), "first");
+        assert_eq!(Agg::Last.name(), "last");
     }
 }
