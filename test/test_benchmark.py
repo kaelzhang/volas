@@ -27,6 +27,7 @@ as oracles); polars lives in the ``benchmark`` extra.
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -53,7 +54,15 @@ INDICATORS = [
     'ma:20', 'ema:12', 'macd', 'macd.signal', 'boll.upper',
     'bbw', 'rsi:14', 'atr:14', 'llv:10', 'hhv:10',
 ]
+# The append section omits the rolling extrema (llv / hhv): their incremental refresh
+# is a trivial running min/max and not an informative cross-library append comparison
+# (they remain in the batch `calc` section and in coverage's MIN/MAX-derived family).
+APPEND_INDICATORS = [i for i in INDICATORS if i not in ('llv:10', 'hhv:10')]
 CANDIDATES = ['pandas', 'stock_pandas', 'polars', 'talib', 'volas']
+
+# A varying per-row period (2..30) for MAVP (TA-Lib's variable-period MA), supplied to
+# volas as a `periods` column and to TA-Lib as the periods array.
+PERIODS = (np.arange(N, dtype=float) % 29.0) + 2.0
 
 HAVE = {
     'pandas': True,
@@ -214,7 +223,7 @@ def _coverage_pairs():
     if talib is None:
         return []
     c, h, lo, o, v = (ARR['close'], ARR['high'], ARR['low'], ARR['open'], ARR['volume'])
-    return [
+    pairs = [
         # price transforms
         ('avgprice', lambda: talib.AVGPRICE(o, h, lo, c)),
         ('medprice', lambda: talib.MEDPRICE(h, lo)),
@@ -294,7 +303,42 @@ def _coverage_pairs():
         ('rocp:10', lambda: talib.ROCP(c, 10)),
         ('rocr:10', lambda: talib.ROCR(c, 10)),
         ('rocr100:10', lambda: talib.ROCR100(c, 10)),
+        # volatility
+        ('tr', lambda: talib.TRANGE(h, lo, c)),
+        # extended MACD variants
+        ('macdext', lambda: talib.MACDEXT(c)[0]),
+        ('macdext.signal', lambda: talib.MACDEXT(c)[1]),
+        ('macdfix', lambda: talib.MACDFIX(c)[0]),
+        ('macdfix.signal', lambda: talib.MACDFIX(c)[1]),
+        # adaptive / extended overlap studies
+        ('mama', lambda: talib.MAMA(c)[0]),
+        ('mama.fama', lambda: talib.MAMA(c)[1]),
+        ('mavp@close,periods', lambda: talib.MAVP(c, PERIODS, 2, 30, 0)),
+        ('sarext', lambda: talib.SAREXT(h, lo)),
+        # extended math-operator index pair
+        ('minmaxindex.min:30', lambda: talib.MINMAXINDEX(c, 30)[0]),
+        ('minmaxindex.max:30', lambda: talib.MINMAXINDEX(c, 30)[1]),
+        # Hilbert-transform cycle family
+        ('ht_trendline', lambda: talib.HT_TRENDLINE(c)),
+        ('ht_dcperiod', lambda: talib.HT_DCPERIOD(c)),
+        ('ht_dcphase', lambda: talib.HT_DCPHASE(c)),
+        ('ht_phasor.inphase', lambda: talib.HT_PHASOR(c)[0]),
+        ('ht_phasor.quadrature', lambda: talib.HT_PHASOR(c)[1]),
+        ('ht_sine.sine', lambda: talib.HT_SINE(c)[0]),
+        ('ht_sine.leadsine', lambda: talib.HT_SINE(c)[1]),
+        ('ht_trendmode', lambda: talib.HT_TRENDMODE(c)),
     ]
+    # Candlestick patterns: every TA-Lib CDL* maps to a volas `cdl.<name>` directive
+    # (name = the CDL-stripped function name, lower-cased: CDL2CROWS -> cdl.2crows).
+    # Auto-generated from TA-Lib's group so the full 61-pattern set stays in sync;
+    # penetration patterns use TA-Lib's default. Both compute -100/0/100 over OHLC.
+    for fn_name in talib.get_function_groups()['Pattern Recognition']:
+        talib_fn = getattr(talib, fn_name)
+        pairs.append((
+            f'cdl.{fn_name[3:].lower()}',
+            lambda fn=talib_fn: fn(o, h, lo, c),
+        ))
+    return pairs
 
 
 COVERAGE = dict(_coverage_pairs())
@@ -308,7 +352,9 @@ def states():
     st = {
         'pandas': _CSV,
         'stock_pandas': StockDataFrame(_CSV.copy()),
-        'volas': VolasDataFrame({c: ARR[c] for c in COLUMNS}),
+        # `periods` rides alongside OHLCV so coverage can exercise MAVP; every other
+        # directive ignores the extra column.
+        'volas': VolasDataFrame({**{c: ARR[c] for c in COLUMNS}, 'periods': PERIODS}),
     }
     if pl is not None:
         st['polars'] = pl.DataFrame({c: ARR[c] for c in COLUMNS})
@@ -350,7 +396,7 @@ def _stock_pandas_append(indicator):
 
 
 @pytest.mark.parametrize('candidate', CANDIDATES)
-@pytest.mark.parametrize('indicator', INDICATORS)
+@pytest.mark.parametrize('indicator', APPEND_INDICATORS)
 def test_append(benchmark, states, indicator, candidate):
     if not HAVE[candidate]:
         pytest.skip(f'{candidate} not installed')
