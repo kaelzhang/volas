@@ -21,9 +21,8 @@ use std::collections::VecDeque;
 #[inline]
 pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     let n = data.len();
-    let mut result = Array1::from_elem(n, f64::NAN);
     if period == 0 || period > n {
-        return result;
+        return Array1::from_elem(n, f64::NAN);
     }
     // Fast path — a clean sliding sum with no per-element NaN bookkeeping (same
     // accumulation order, so bit-identical for NaN-free data, ~3.6x faster — the
@@ -31,28 +30,32 @@ pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     // trima, stochastic smoothing — feed an SMA over a series that warms up with
     // NaN), sliding from the first finite value. A NaN *after* that prefix poisons
     // the running sum permanently, so one `sum.is_nan()` check after the pass catches
-    // it without a separate scan; then we reset and take the precise slow path.
+    // it without a separate scan; then we discard and take the precise slow path.
+    //
+    // The result is built write-once: the warm-up is filled with NaN, then each mean is
+    // pushed in the same accumulation order — so the valid region is written once
+    // instead of `from_elem(NaN)` + index-overwrite (which writes it twice).
     if let Some(src) = data.as_slice() {
         let start = src.iter().position(|x| !x.is_nan()).unwrap_or(n);
+        let valid_start = (start + period - 1).min(n);
+        let mut out = Vec::with_capacity(n); // reserve the full length so push never reallocs
+        out.resize(valid_start, f64::NAN);
         let mut sum = 0.0;
-        {
-            let dst = result.as_slice_mut().expect("from_elem is contiguous");
-            for i in start..n {
-                sum += src[i];
-                if i >= start + period {
-                    sum -= src[i - period];
-                }
-                if i + 1 >= start + period {
-                    dst[i] = sum / period as f64;
-                }
+        for i in start..n {
+            sum += src[i];
+            if i >= start + period {
+                sum -= src[i - period];
+            }
+            if i + 1 >= start + period {
+                out.push(sum / period as f64);
             }
         }
         if !sum.is_nan() {
-            return result;
+            return Array1::from_vec(out);
         }
-        result.fill(f64::NAN);
     }
     // Slow path — NaN-aware: a window containing any NaN yields NaN.
+    let mut result = Array1::from_elem(n, f64::NAN);
     let mut sum = 0.0;
     let mut nan_count = 0usize;
     for i in 0..n {
