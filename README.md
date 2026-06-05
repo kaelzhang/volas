@@ -320,7 +320,8 @@ pandas-compatible: arithmetic / comparison / logical operators, `.sum()` /
 `.mean()` / `.std()` / …, `.shift()` / `.diff()` / `.fillna()`, `.iloc` /
 `.loc`, `.to_numpy()` / `.to_list()`. See
 [the rest of the pandas-compatible API](#the-rest-of-the-pandas-compatible-api)
-for the full list.
+for the full list. There is no public `Series` constructor — a `Series` is
+always obtained by indexing a `DataFrame`.
 
 ```py
 s = df['close']
@@ -341,7 +342,9 @@ df['high'].sqrt()
 ### Row
 
 `df.iloc[i]` and `df.loc[label]` return a `Row` — a single record whose `.name`
-is its index label.
+is its index label. A `Row` has **no public constructor** (`Row(...)` raises
+`TypeError: No constructor defined for Row`); you only obtain one by indexing a
+frame, and you may pass it to `df.append`.
 
 ```py
 row = df.iloc[-1]      # the latest bar
@@ -553,7 +556,8 @@ not double-count), which matches exchange data that revises the latest bar.
 
 A `TimeFrame` names a bar interval. It is accepted anywhere volas resamples —
 `df.cumulate`, `Cumulator`, and the `hv` indicator — either as a `TimeFrame`
-constant or as its equivalent **string label**.
+constant or as its equivalent **string label**. There is no `TimeFrame(...)`
+constructor — use one of the constants below or a label string.
 
 ```py
 TimeFrame.m5            # the 5-minute frame
@@ -858,6 +862,8 @@ df.at['2021-01-04 09:30:00', 'close']   # 100.0
 # 22:30+08:00, and it still matches, regardless of df.tz:
 ts = Timestamp('2021-01-04 22:30:00', tz='+08:00')   # == 09:30 New York
 df.at[ts, 'close']                       # 100.0
+ts.value                                 # its UTC epoch-nanoseconds (int)
+ts.tz                                    # '+08:00'
 
 # date_unit: when the source column is integer epochs, date_unit gives the unit
 # and tz tags the zone for rendering / matching. 1609770600000 ms == 14:30Z:
