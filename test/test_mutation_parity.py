@@ -48,21 +48,24 @@ A_UPD['close'][N - 3] *= 1.05
 
 DIRECTIVES = list(COVERAGE_IDS)
 
-# --- known-bug blast radius (mapped 2026-06-05) ----------------------------
-# BUG 1 — the incremental refresh after append (append + fulfill) recomputes the NEW
-# rows wrong for recursive / smoothed / cumulative / index-tracking indicators. The
-# frame body and a fresh recompute are correct; only the cached-then-refreshed tail is
-# wrong. Hit by test_append and test_slice_then_append.
-_REFRESH_BUG = frozenset({
-    'ad', 'adosc', 'adx:14', 'adxr:14', 'atr:14', 'cmo:14', 'dema:30', 'dx:14', 'ema:12',
-    'ht_dcperiod', 'ht_dcphase', 'ht_phasor.inphase', 'ht_phasor.quadrature',
-    'ht_sine.leadsine', 'ht_sine.sine', 'ht_trendline', 'kama:30', 'macd',
-    'macd.histogram', 'macd.signal', 'macdfix', 'macdfix.histogram', 'macdfix.signal',
-    'mama', 'mama.fama', 'maxindex:30', 'minindex:30', 'minmaxindex.max:30',
-    'minmaxindex.min:30', 'minus_di:14', 'minus_dm:14', 'natr:14', 'obv', 'plus_di:14',
-    'plus_dm:14', 'rsi:14', 'sar', 'sarext', 'stochrsi.d', 'stochrsi.k', 't3:5',
-    'tema:30', 'trix:30',
-})  # 43
+# --- known limitation -------------------------------------------------------
+# BUG 1 (incremental append refresh) is FIXED — append+fulfill now recomputes over the
+# full history, so test_append is exact for every indicator. What remains is an inherent
+# LIMITATION, not the same bug: a contiguous slice drops its head, so a *stateful*
+# indicator (whose value at row i depends on the whole prefix [0,i] — EMA/Wilder/MACD/
+# SAR/HT/cumulative/index) cannot be continued past the dropped history without carrying
+# its recursive state. Finite-memory indicators (SMA, ROC, price transforms, CDL, ...)
+# continue correctly. Only test_slice_then_append is affected; xfail(strict) so a future
+# state-carry enhancement flips these to xpass.
+_SLICE_STATEFUL = frozenset({
+    'ad', 'adx:14', 'adxr:14', 'atr:14', 'cmo:14', 'dema:30', 'dx:14', 'ht_dcperiod',
+    'ht_dcphase', 'ht_phasor.inphase', 'ht_phasor.quadrature', 'ht_sine.leadsine',
+    'ht_sine.sine', 'kama:30', 'macd', 'macd.histogram', 'macd.signal', 'macdfix',
+    'macdfix.histogram', 'macdfix.signal', 'mama.fama', 'maxindex:30', 'minindex:30',
+    'minmaxindex.max:30', 'minmaxindex.min:30', 'minus_di:14', 'minus_dm:14', 'natr:14',
+    'obv', 'plus_di:14', 'plus_dm:14', 'rsi:14', 'stochrsi.d', 'stochrsi.k', 'tema:30',
+    'trix:30',
+})  # 36
 
 # BUG 2 — an in-place update of a base column does NOT invalidate dependent cached
 # indicators, so a re-read returns the pre-update (stale) values. Hit by test_update.
@@ -83,7 +86,7 @@ _UPDATE_BUG = frozenset({
     'willr:14', 'wma:30',
 })  # 78
 
-_REFRESH_REASON = 'incremental append+fulfill refresh recomputes new rows wrong for stateful indicators (fix pending)'
+_SLICE_REASON = 'a slice drops its head, so a stateful indicator cannot be continued past it without state-carry'
 _UPDATE_REASON = 'in-place base-column update does not invalidate dependent cached indicators (stale read; fix pending)'
 
 
@@ -122,7 +125,7 @@ def test_slice(directive):
     _eq(sub[directive].to_numpy(), _gt(directive, A)[LO:N])
 
 
-@pytest.mark.parametrize('directive', _params(_REFRESH_BUG, _REFRESH_REASON))
+@pytest.mark.parametrize('directive', DIRECTIVES)
 def test_append(directive):
     """Cache, append M bars, fulfill: the result must match a fresh recompute on A+bars."""
     df = DataFrame(A)
@@ -141,7 +144,7 @@ def test_update(directive):
     _eq(df[directive].to_numpy(), _gt(directive, A_UPD))
 
 
-@pytest.mark.parametrize('directive', _params(_REFRESH_BUG, _REFRESH_REASON))
+@pytest.mark.parametrize('directive', _params(_SLICE_STATEFUL, _SLICE_REASON))
 def test_slice_then_append(directive):
     """Combination: cache, slice off the head, append, fulfill."""
     df = DataFrame(A)

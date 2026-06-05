@@ -1,6 +1,9 @@
-"""SP-9: a contiguous slice carries cached recursive indicators as *continuable*
-computed columns — exact continuation across slice->append, matching a non-sliced
-frame, with a lookback-warmup guard (no silent divergence)."""
+"""A contiguous slice carries the cached indicator's *body* (a correct full-history
+snapshot of the visible rows). It does NOT enable exact continuation of a stateful
+indicator across slice->append: the slice has dropped its head, so a recursive value
+(which depends on the whole prefix) cannot be continued without carrying its state.
+That used to appear to work only because the incremental refresh was wrong on both the
+sliced and non-sliced sides by the same amount (BUG 1, now fixed)."""
 
 import numpy as np
 import pytest
@@ -16,6 +19,12 @@ def _ohlc(n, seed=0):
     return {'high': high, 'low': low, 'close': close}
 
 
+@pytest.mark.xfail(
+    reason='Superseded by the BUG-1 fix: a non-sliced append is now exact, but a slice '
+    'dropped its head so a stateful indicator cannot be continued past it without '
+    'state-carry. A future state-carry enhancement would flip these to xpass.',
+    strict=True,
+)
 @pytest.mark.parametrize('directive', ['ema:12', 'kdj.j', 'macd.signal', 'rsi:14', 'smma:7'])
 def test_slice_then_append_matches_nonsliced(directive):
     data = _ohlc(80, seed=1)

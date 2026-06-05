@@ -1129,6 +1129,23 @@ pub struct PyDataFrame {
     pub(crate) inner: DataFrame,
 }
 
+/// Read cell `i` of a directive-result column as f64 (`Bool` -> 0/1, `I64` -> as f64),
+/// for the finite-memory-vs-recursive refresh probe. NaN for other dtypes.
+fn col_value(col: &Column, i: usize) -> f64 {
+    match col {
+        Column::F64(v) => v[i],
+        Column::Bool(v) => {
+            if v[i] {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Column::I64(v) => v[i] as f64,
+        _ => f64::NAN,
+    }
+}
+
 impl PyDataFrame {
     fn wrap_series(&self, name: String, col: Column) -> PySeries {
         PySeries {
@@ -1164,15 +1181,36 @@ impl PyDataFrame {
             .collect();
         let base = self.inner.select(&real_names).map_err(pyerr)?;
         for (name, meta) in stale {
-            let start = meta.valid_rows.saturating_sub(meta.lookback);
-            let slice = base.slice(start, height);
             let node = parse(&meta.directive).map_err(value_err)?;
-            let recomputed = execute(&slice, &node).map_err(value_err)?;
-            // The recomputed slice is F64 or Bool (directive result); write its
-            // stale tail back into the column at its original dtype.
-            let tail = recomputed.slice(meta.valid_rows - start, recomputed.len());
+            let (lb, vr) = (meta.lookback, meta.valid_rows);
+            // A finite-memory indicator (SMA, ROC, price transforms, CDL, …) depends
+            // only on a fixed trailing window, so a windowed recompute is exact and
+            // O(lookback). A recursive / stateful one (EMA / Wilder / MACD / SAR /
+            // cumulative OBV / HT / index) depends on the WHOLE prefix `[0, i]`, so a
+            // window re-warms-up and silently diverges (the bug). Probe with a
+            // `2*lookback` window that overlaps the last KNOWN row (`vr-1`): if it
+            // reproduces that cached value the window is exact, else recompute the full
+            // column from row 0 — O(n) but exact for every indicator. (A slice that
+            // dropped its head only has the visible rows, so a stateful indicator there
+            // cannot be continued past the missing history.)
+            let (recomputed, off) = if lb > 0 && vr > 2 * lb {
+                let start = vr - 2 * lb;
+                let windowed = execute(&base.slice(start, height), &node).map_err(value_err)?;
+                let cached_val = col_value(self.inner.column(&name).map_err(pyerr)?, vr - 1);
+                let probe = col_value(&windowed, vr - 1 - start);
+                if probe.is_finite() && (probe - cached_val).abs() <= 1e-9 * cached_val.abs().max(1.0)
+                {
+                    (windowed, vr - start)
+                } else {
+                    (execute(&base, &node).map_err(value_err)?, vr)
+                }
+            } else {
+                (execute(&base, &node).map_err(value_err)?, vr)
+            };
+            // Write the stale tail back into the column at its original dtype.
+            let tail = recomputed.slice(off, recomputed.len());
             self.inner
-                .update_computed_tail(&name, meta.valid_rows, &tail)
+                .update_computed_tail(&name, vr, &tail)
                 .map_err(pyerr)?;
         }
         Ok(())
