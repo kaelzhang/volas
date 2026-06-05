@@ -34,6 +34,14 @@ pub fn wma(data: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period > n {
         return out;
     }
+    // Skip a leading-NaN warm-up prefix (derived inputs — e.g. the stochastic %K line —
+    // warm up with NaN): compute from the first finite value onward, mirroring sma/ema.
+    let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
+    if start > 0 {
+        let sub = wma(&data[start..], period);
+        out[start..].copy_from_slice(&sub);
+        return out;
+    }
     let denom = (period * (period + 1) / 2) as f64; // sum of weights 1..=period
     let pf = period as f64;
     // Seed the first full window directly.
@@ -64,7 +72,12 @@ fn cascade_warmup<const S: usize>(data: &[f64], period: usize, k: f64) -> Option
     if period == 0 {
         return None;
     }
-    let lookback = S * (period - 1);
+    // Account for a leading-NaN warm-up prefix (derived inputs — e.g. the stochastic
+    // %K line — warm up with NaN). The cascade seeds over the first finite values, so
+    // the last stage is ready at `start + S*(period-1)`, not from index 0; computing
+    // the lookback from index 0 returns unseeded stages (garbage) too early.
+    let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
+    let lookback = start + S * (period - 1);
     if lookback >= n {
         return None;
     }
@@ -145,6 +158,13 @@ pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
+        return out;
+    }
+    // Skip a leading-NaN warm-up prefix (see `wma`).
+    let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
+    if start > 0 {
+        let sub = trima(&data[start..], period);
+        out[start..].copy_from_slice(&sub);
         return out;
     }
     let (a, b) = if period % 2 == 1 {
@@ -241,6 +261,13 @@ pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period + 1 > n {
+        return out;
+    }
+    // Skip a leading-NaN warm-up prefix (see `wma`).
+    let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
+    if start > 0 {
+        let sub = kama(&data[start..], period);
+        out[start..].copy_from_slice(&sub);
         return out;
     }
     const CONST_MAX: f64 = 2.0 / (30.0 + 1.0); // slow smoothing constant
