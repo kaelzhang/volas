@@ -170,8 +170,11 @@ pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     let dxv = dx(high, low, close, period);
     let n = dxv.len();
     let mut out = vec![f64::NAN; n];
+    if period == 0 {
+        return out;
+    }
     let first = 2 * period - 1;
-    if period == 0 || first >= n {
+    if first >= n {
         return out;
     }
     let pf = period as f64;
