@@ -21,8 +21,10 @@ The difference is speed that **volas** beats every solution in terms of indicato
 - **Fastest in the field.** Quicker than pandas, polars, TA-Lib and DuckDB on
   nearly every indicator — and faster than pandas even off the trading desk.
   ([benchmark](benchmark-report.html))
-  - Beats TA-Lib on 112 / 144 covered indicators for first calculation.
-  - 10-110x faster than pandas on incremental indicator calculation, 3-4x faster even than TA-Lib
+  - Beats TA-Lib on **122 / 158** covered indicators in batch computation.
+  - Refreshes indicators incrementally on each new bar — up to **~2.7×** faster
+    than TA-Lib on the heavier ones (MACD / RSI / ATR; simple MAs are on par),
+    and many times faster than pandas.
 - **Built for the live tick.** A new bar touches only the affected tail
   (`O(lookback)`, not `O(n)`); indicators refresh in microseconds, never a full
   recompute.
@@ -32,9 +34,9 @@ The difference is speed that **volas** beats every solution in terms of indicato
 ## Table of Content
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [API at a glance](#api-at-a-glance)
 - [Usage](#usage)
 - [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex)
+- [TimeFrame](#timeframe)
 - [Syntax of directive](#syntax-of-directive)
 - [Built-in indicators](#built-in-indicators)
 - [Indexing & selection](#indexing--selection)
@@ -87,80 +89,20 @@ df['close'].to_numpy()           # 1-D ndarray
 df.to_numpy()                    # 2-D ndarray (rows x columns)
 ```
 
-## API at a glance
-
-A compact reference of the entire public surface (handy for tooling and agents).
-
-```py
-import volas
-from volas import (
-    DataFrame, Series, Row, Timestamp, TimeFrame, Cumulator,
-    read_csv, from_pandas, rolling_calc,
-    DirectiveError, DirectiveSyntaxError, DirectiveValueError,
-)
-
-# --- construction ---------------------------------------------------------
-DataFrame(data: dict[str, list | np.ndarray],
-          date_col=None, tz=None, date_unit=None)   # tz / date_unit: see Timezones
-read_csv(path, sep=None, delimiter=None, header=True,
-         parse_dates=None, index_col=None, na_values=None, keep_default_na=True,
-         tz=None, date_unit=None)
-from_pandas(pdf)                 # lazy bridge from a pandas.DataFrame
-Timestamp(value, tz=None)        # typed, cross-tz datetime label -> UTC instant
-
-# --- DataFrame ------------------------------------------------------------
-df.columns / df.shape / len(df) / df.dtypes      # metadata (dtypes -> dict)
-df.index / df.tz                 # row labels (ndarray); DatetimeIndex tz or None
-col in df ; for col in df        # membership / iterate column names
-df[col] / df[directive]          # -> Series
-df[[col_or_directive, ...]]      # -> DataFrame
-df[bool_mask]                    # -> DataFrame (filter rows; mask = Series | ndarray)
-df[col] = scalar | array | Series          # add / replace a column (positional)
-df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
-df.get_column(name)              # -> Series (plain column, no directive parsing)
-df.exec(directive, create_column=False)   # -> np.ndarray (compute without caching)
-df.fulfill()                     # batch-refresh cached directive columns in place
-df.append(other)                 # -> DataFrame (other: DataFrame | Row)
-df.head(n=5) / df.tail(n=5)
-df.drop([label, ...], axis=0)    # drop rows by index label (axis=1 -> columns)
-df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
-df.rename({old: new})            # -> DataFrame
-df.astype({col: dtype})          # -> DataFrame ('float'|'int'|'bool'|'str'|'datetime')
-df.set_index(col)                # -> DataFrame (move a column into the row index)
-df.tz_localize(tz) / df.tz_convert(tz)     # attach / change the DatetimeIndex tz
-df.alias(new_name, src_name)     # add a column alias (in place)
-df.cumulate(time_frame, cumulators=None)  # -> DataFrame (resample OHLCV)
-df.copy() / df.to_numpy(dtype=None)
-df.iloc[...] / df.loc[...] / df.at[label, col] / df.iat[i, j]
-df.to_pandas() / df.to_csv(path=None, sep=',', index=True, header=True, ...)
-
-# --- Series ---------------------------------------------------------------
-s.name / s.dtype / len(s) / s.tz / s.to_numpy(dtype=None) / s.to_list()
-s.iloc[...] / s.loc[...]
-s + s, s - 1, -s, ...            # elementwise arithmetic
-s > 0, s == t, s != t, ...       # comparison -> bool Series
-s & t, s | t, ~s, s ^ t          # logical -> bool Series
-s.sum() / s.mean() / s.min() / s.max() / s.std() / s.var() / s.median()   # NaN-skipping
-s.shift(n=1) / s.diff(n=1) / s.fillna(v) / s.isna() / s.notna() / s.dropna()
-
-# --- resampling -----------------------------------------------------------
-TimeFrame.m5 / TimeFrame.H1 / ...   # or the labels '5m', '1h', '1d', ...
-TimeFrame.m5.minutes                # 5
-Cumulator(time_frame, cumulators=None)
-cum.append(df) ; cum.frame ; cum.last
-
-# --- misc -----------------------------------------------------------------
-rolling_calc(values, window, apply, forward=False, fill=nan)  # -> np.ndarray
-```
-
 ## Usage
 
 ```py
-from volas import DataFrame
-
-# or
-import volas
+from volas import (
+    DataFrame, Series, read_csv, rolling_calc, Cumulator, TimeFrame, Timestamp,
+)
 ```
+
+The sub-sections below follow volas's public surface in order: the `DataFrame`
+class, then its instance methods, its static methods, the other classes, and the
+top-level package functions — closing with the rest of the **pandas-compatible**
+API that behaves exactly as it does in pandas. (A top-level name imported from
+`volas`, such as `read_csv` or `rolling_calc`, is written without a `volas.`
+prefix.)
 
 ### DataFrame
 
@@ -169,8 +111,7 @@ import volas
 backed by a Rust kernel and has no pandas runtime dependency.
 
 ```py
-import volas
-df = volas.read_csv('stock.csv')
+df = read_csv('stock.csv')
 ```
 
 As we know, we could use `[]`, which is called **pandas indexing** (a.k.a.
@@ -179,9 +120,9 @@ indexing with `colname` (the column name of the `DataFrame`), we could also do
 indexing by `directive`s.
 
 ```py
-df[directive]                  # Gets a volas.Series
+df[directive]                  # Gets a Series
 
-df[[directive0, directive1]]   # Gets a volas.DataFrame
+df[[directive0, directive1]]   # Gets a DataFrame
 ```
 
 We have an example to show the most basic indexing using `[directive]`
@@ -239,33 +180,12 @@ The difference between `df[directive]` and `df.exec(directive)` is that
   parameter `create_column` as `True`
 - the former one accepts other pandas indexing targets, while
   `df.exec(directive)` only accepts a valid **volas** directive string
-- the former one returns a `volas.Series` or `volas.DataFrame` object while the
-  latter one returns an [`np.ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html)
-
-### df.alias(as_name: str, src_name: str) -> None
-
-Defines a column alias.
-
-- **as_name** `str` the alias name
-- **src_name** `str` the name of an existing column
-
-```py
-# Some plot libraries such as `mplfinance` require a column named capitalized
-# `Open`, but it is ok, we could create an alias.
-df.alias('Open', 'open')
-```
-
-The alias resolves everywhere a column is looked up, **including inside
-directives**, and survives `drop` / `copy` / slicing.
-
-```py
-df['Open']        # same data as df['open']
-df['ma:5@Open']   # the alias resolves inside directives too
-```
+- the former one returns a `Series` or `DataFrame` object while the latter one
+  returns an [`np.ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html)
 
 ### df.get_column(key: str) -> Series
 
-Directly gets the column value by `key`, returning a volas `Series`.
+Directly gets the column value by `key`, returning a `Series`.
 
 If the given `key` is an alias name, it returns the value of the corresponding
 original column. If the column is not found, a `KeyError` is raised.
@@ -297,27 +217,6 @@ By default, appending new rows does not update the indicator columns of the new
 rows; they stay stale until they are read again or until `df.fulfill()` is
 called (see below).
 
-### volas.rolling_calc(values, window, apply, forward=False, fill=nan) -> np.ndarray
-
-Applies a 1-D function along `values` (a column / `Series` / array) over a
-trailing (or forward) window — the escape hatch for indicators not expressible
-as a directive.
-
-- **values** the array / `Series` / column to roll over
-- **window** `int` the size of the rolling window
-- **apply** `Callable[[np.ndarray], Any]` the 1-D function to apply
-- **forward?** `bool = False` whether to look forward (instead of backward) to
-  form each rolling window
-- **fill?** `Any = np.nan` the value used where there are not enough items to
-  form a full window
-
-```py
-volas.rolling_calc(df['high'], 5, max)
-
-# Whose return value equals to
-df['hhv:5@high'].to_numpy()
-```
-
 ### df.cumulate(time_frame, cumulators=None) -> DataFrame
 
 Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
@@ -326,23 +225,6 @@ Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
 ```py
 # from 1-minute klines to 5-minute klines
 five_minute = one_minute.cumulate('5m')
-```
-
-See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
-
-### volas.Cumulator(time_frame, cumulators=None)
-
-For **live** streaming, feed bars to a `Cumulator` and read the running result,
-instead of re-cumulating the whole frame each time.
-
-```py
-from volas import Cumulator
-
-cum = Cumulator('5m')
-for bar in stream:        # each `bar` is a 1-row DataFrame
-    cum.append(bar)
-    cum.frame             # closed periods + the open period as a live last row
-    cum.last              # just the current (still-open) period, aggregated
 ```
 
 See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
@@ -359,10 +241,31 @@ incrementally (`O(lookback)`, not an `O(n)` recompute); for bulk reads
 directive column in place.
 
 ```py
-df['ma:20']                 # cache the 20-period SMA as a column
+df['ma:20']              # cache the 20-period SMA as a column
 df = df.append(new_bar)  # the new row's ma:20 is stale (NaN)
-df.fulfill()                # recompute only the tail of every cached column
-df.to_numpy()               # now fresh
+df.fulfill()             # recompute only the tail of every cached column
+df.to_numpy()            # now fresh
+```
+
+### df.alias(as_name: str, src_name: str) -> None
+
+Defines a column alias.
+
+- **as_name** `str` the alias name
+- **src_name** `str` the name of an existing column
+
+```py
+# Some plot libraries such as `mplfinance` require a column named capitalized
+# `Open`, but it is ok, we could create an alias.
+df.alias('Open', 'open')
+```
+
+The alias resolves everywhere a column is looked up, **including inside
+directives**, and survives `drop` / `copy` / slicing.
+
+```py
+df['Open']        # same data as df['open']
+df['ma:5@Open']   # the alias resolves inside directives too
 ```
 
 ### DataFrame.directive_stringify(directive: str) -> str
@@ -402,13 +305,140 @@ DataFrame.directive_lookback('repeat:5@(close > boll.upper)')
 # 23
 ```
 
+### Series
+
+`df[col]` and `df[directive]` return a `Series` — a named 1-D column whose API is
+pandas-compatible: arithmetic / comparison / logical operators, `.sum()` /
+`.mean()` / `.std()` / …, `.shift()` / `.diff()` / `.fillna()`, `.iloc` /
+`.loc`, `.to_numpy()` / `.to_list()`. See
+[the rest of the pandas-compatible API](#the-rest-of-the-pandas-compatible-api)
+for the full list.
+
+```py
+s = df['close']
+s.name                 # 'close'
+(s - s.shift(1)).mean()
+df['ma:5 > ma:20']     # a directive likewise returns a Series (here a bool one)
+```
+
+Beyond pandas, a `Series` also exposes the 15 TA-Lib **Math Transform** functions
+as methods — `acos` `asin` `atan` `ceil` `cos` `cosh` `exp` `floor` `ln`
+`log10` `sin` `sinh` `sqrt` `tan` `tanh`:
+
+```py
+df['close'].ln()
+df['high'].sqrt()
+```
+
+### Row
+
+`df.iloc[i]` and `df.loc[label]` return a `Row` — a single record whose `.name`
+is its index label.
+
+```py
+row = df.iloc[-1]      # the latest bar
+row.name               # its index label (e.g. a Timestamp for a DatetimeIndex)
+row.to_dict()          # {column: value}
+row.to_numpy()         # the numeric cells as a 1-D ndarray
+```
+
+### Cumulator
+
+For **live** streaming, feed bars to a `Cumulator` and read the running result,
+instead of re-cumulating the whole frame each time.
+
+```py
+cum = Cumulator('5m')
+for bar in stream:        # each `bar` is a 1-row DataFrame
+    cum.append(bar)
+    cum.frame             # closed periods + the open period as a live last row
+    cum.last              # just the current (still-open) period, aggregated
+```
+
+See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
+
+### rolling_calc(values, window, apply, forward=False, fill=nan) -> np.ndarray
+
+A top-level function that applies a 1-D function along `values` (a column /
+`Series` / array) over a trailing (or forward) window — the escape hatch for
+indicators not expressible as a directive.
+
+- **values** the array / `Series` / column to roll over
+- **window** `int` the size of the rolling window
+- **apply** `Callable[[np.ndarray], Any]` the 1-D function to apply
+- **forward?** `bool = False` whether to look forward (instead of backward) to
+  form each rolling window
+- **fill?** `Any = np.nan` the value used where there are not enough items to
+  form a full window
+
+```py
+rolling_calc(df['high'], 5, max)
+
+# Whose return value equals to
+df['hhv:5@high'].to_numpy()
+```
+
+### read_csv
+
+A top-level function — `read_csv(path, ...)` reads a CSV file into a `DataFrame`,
+inferring per-column dtypes. See [Reading CSV](#reading-csv).
+
+### from_pandas
+
+A top-level function — `from_pandas(pdf)` bridges a `pandas.DataFrame` into volas
+(and `df.to_pandas()` bridges back). See [pandas interop](#pandas-interop).
+
+### The rest of the pandas-compatible API
+
+Everything below behaves like its `pandas` counterpart — if you know it from
+pandas, it works the same in volas.
+
+```py
+# --- DataFrame: metadata --------------------------------------------------
+df.columns / df.shape / len(df) / df.dtypes      # dtypes -> dict
+df.index                          # row labels, as a NumPy array
+col in df ; for col in df         # membership / iterate column names
+df.tz / df.tz_localize(tz) / df.tz_convert(tz)   # DatetimeIndex tz; see Timezones
+
+# --- DataFrame: selection -------------------------------------------------
+df[col]                           # -> Series
+df[[col, ...]]                    # -> DataFrame
+df[bool_mask]                     # -> DataFrame (filter rows; mask = Series | ndarray)
+df.iloc[...] / df.loc[...] / df.at[label, col] / df.iat[i, j]
+df.head(n=5) / df.tail(n=5)
+
+# --- DataFrame: reshaping & dtypes ----------------------------------------
+df.drop([label, ...], axis=0)     # drop rows by label (axis=1 -> columns)
+df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
+df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)
+df.copy() / df.to_numpy(dtype=None) / df.equals(other) / df.to_csv(path=None, ...)
+
+# --- DataFrame: writing ---------------------------------------------------
+df[col] = scalar | array | Series          # add / replace a column (positional)
+df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
+
+# --- Series ---------------------------------------------------------------
+s.name / s.dtype / len(s) / s.tz / s.index
+s.to_numpy(dtype=None) / s.to_list()
+s.iloc[...] / s.loc[...]
+s + s, s - 1, -s, ...             # elementwise arithmetic
+s > 0, s == t, s != t, ...        # comparison -> bool Series
+s & t, s | t, ~s, s ^ t           # logical -> bool Series
+s.sum() / s.mean() / s.min() / s.max() / s.std() / s.var() / s.median()   # NaN-skipping
+s.shift(n=1) / s.diff(n=1) / s.fillna(v) / s.isna() / s.notna() / s.dropna() / s.equals(t)
+```
+
+The pandas-shaped indexing and writing details have their own sections —
+[Indexing & selection](#indexing--selection) and
+[Writing & assignment](#writing--assignment).
+
 ## Cumulation and DatetimeIndex
 
 Suppose we have a csv file containing kline data of a stock in the 1-minute time
 frame:
 
 ```py
-csv = volas.read_csv(csv_path)
+csv = read_csv(csv_path)
 
 print(csv)
 ```
@@ -432,7 +462,7 @@ print(csv)
 Read the same csv, but parse the `date` column into a `DatetimeIndex`:
 
 ```py
-df = volas.read_csv(
+df = read_csv(
     csv_path,
     parse_dates=['date'],
     index_col='date'
@@ -477,16 +507,13 @@ Now we get a 5-minute kline:
 df.cumulate('1h', cumulators={'volume': 'last'})
 ```
 
-Time frames: `'1s' '1m' '3m' '5m' '15m' '30m' '1h' '2h' '4h' '6h' '8h' '12h'
-'1d' '3d' '1w' '1M' '1y'` (or the `TimeFrame.s1 / m1 / m5 / H1 / D1 / W1 / M1 /
-Y1` constants).
+The `time_frame` may be a string label or a `TimeFrame` constant — see
+[TimeFrame](#timeframe) for the full list.
 
 For **live** streaming, feed bars to a `Cumulator` and read the running result,
 instead of re-cumulating the whole frame each time:
 
 ```py
-from volas import Cumulator
-
 cum = Cumulator('5m')
 for bar in stream:               # each `bar` is a 1-row DataFrame
     cum.append(bar)
@@ -496,6 +523,35 @@ for bar in stream:               # each `bar` is a 1-row DataFrame
 
 Re-sending a bar with a timestamp already seen **updates** that period (it does
 not double-count), which matches exchange data that revises the latest bar.
+
+## TimeFrame
+
+A `TimeFrame` names a bar interval. It is accepted anywhere volas resamples —
+`df.cumulate`, `Cumulator`, and the `hv` indicator — either as a `TimeFrame`
+constant or as its equivalent **string label**.
+
+```py
+TimeFrame.m5            # the 5-minute frame
+TimeFrame.m5.minutes    # 5
+'5m'                    # the equivalent label string, accepted everywhere too
+
+df.cumulate(TimeFrame.m5)     # identical to df.cumulate('5m')
+```
+
+Supported frames (constant ⇄ label):
+
+| Constant | Label | Constant | Label | Constant | Label |
+| --- | --- | --- | --- | --- | --- |
+| `TimeFrame.s1` | `'1s'` | `TimeFrame.m30` | `'30m'` | `TimeFrame.H12` | `'12h'` |
+| `TimeFrame.m1` | `'1m'` | `TimeFrame.H1` | `'1h'` | `TimeFrame.D1` | `'1d'` |
+| `TimeFrame.m3` | `'3m'` | `TimeFrame.H2` | `'2h'` | `TimeFrame.D3` | `'3d'` |
+| `TimeFrame.m5` | `'5m'` | `TimeFrame.H4` | `'4h'` | `TimeFrame.W1` | `'1w'` |
+| `TimeFrame.m15` | `'15m'` | `TimeFrame.H6` | `'6h'` | `TimeFrame.M1` | `'1M'` |
+| | | `TimeFrame.H8` | `'8h'` | `TimeFrame.Y1` | `'1y'` |
+
+`tf.minutes` is the interval in minutes (e.g. `TimeFrame.H1.minutes == 60`);
+`tf.unify(ts)` snaps a timestamp to the start of its bar (used internally by
+cumulation).
 
 ## Syntax of `directive`
 
@@ -733,42 +789,67 @@ later `fulfill()` can never silently overwrite your edit.
 A fast, pandas-subset CSV reader that infers per-column dtypes.
 
 ```py
-import volas
+from volas import read_csv
 
-df = volas.read_csv('klines.csv')                       # RangeIndex
-df = volas.read_csv('klines.csv',
-                    parse_dates=['time_key'],           # parse to datetime
-                    index_col='time_key')               # -> DatetimeIndex
-df = volas.read_csv('data.tsv', sep='\t', header=False, # no header -> '0'..'n-1'
-                    na_values=['NA', 'null'])
+df = read_csv('klines.csv')                       # RangeIndex
+df = read_csv('klines.csv',
+             parse_dates=['time_key'],            # parse to datetime
+             index_col='time_key')                # -> DatetimeIndex
+df = read_csv('data.tsv', sep='\t', header=False, # no header -> '0'..'n-1'
+             na_values=['NA', 'null'])
 ```
 
 ## Timezones
 
-Storage is always **UTC epoch-ns** — the universal axis on which crypto, US, HK
-and A-share frames coexist and align on the absolute instant. A `DatetimeIndex`
-additionally carries a **per-frame timezone** that governs how those instants
-render, how bare-string labels match, and how `cumulate` aligns day+ buckets. A
-tz is either a **fixed offset** (cheap; crypto / A-share / HK) or a **named IANA
-zone** (DST-aware via `chrono-tz`; US / EU). The default is UTC.
+Storage is always **UTC epoch-nanoseconds** — the universal axis on which crypto,
+US, HK and A-share frames coexist and align on the absolute instant. A
+`DatetimeIndex` additionally carries a **per-frame timezone** that governs how
+those instants render, how bare-string labels match, and how `cumulate` aligns
+day-and-coarser buckets. A timezone is either a **fixed offset** (`'+08:00'`,
+cheap; crypto / A-share / HK) or a **named IANA zone** (`'America/New_York'`,
+DST-aware via `chrono-tz`; US / EU). The default is UTC.
+
+Here is the whole picture in one example. A US exchange opens at 09:30 local on
+2021-01-04, and we hold that bar as a naive local string:
 
 ```py
-# ingest naive local strings in a zone (stored UTC, index tagged):
-df = volas.DataFrame({'t': ['2021-01-04 09:30:00'], 'close': [100.0]},
-                     date_col='t', tz='America/New_York')   # or '+08:00'
-df.tz                                  # 'America/New_York'
+from volas import DataFrame, Timestamp
 
-# offset-aware strings and epoch integers are absolute:
-volas.DataFrame({'t': ['2021-01-04T09:30:00+08:00'], 'c': [1.0]}, date_col='t')
-volas.read_csv('klines.csv', index_col='ts', date_unit='ms')   # epoch milliseconds
+# date_col + tz: parse the 't' column as the index, reading its naive wall-clock
+# strings *as New York local time*. The instant is stored UTC (14:30Z), but the
+# index renders and matches in New York.
+df = DataFrame(
+    {'t': ['2021-01-04 09:30:00'], 'close': [100.0]},
+    date_col='t',
+    tz='America/New_York',
+)
+df.tz       # 'America/New_York'
+df.index    # ['2021-01-04T14:30:00.000000000']  (raw .index is UTC, matching pandas .values)
 
-# attach / change a tz after the fact:
-df.tz_localize('America/New_York')     # reinterpret the wall-clock (instant moves)
-df.tz_convert('+08:00')                # keep the instant, change display
+# The tz is what lets a bare local string match the right row — it is parsed in df.tz:
+df.at['2021-01-04 09:30:00', 'close']   # 100.0
 
-# Timestamp is a typed, cross-tz label that matches on the absolute instant:
-ts = volas.Timestamp('2021-01-04 22:30:00', tz='+08:00')   # == 09:30 New York
-df.at[ts, 'close']                     # matches the right row regardless of df.tz
+# A Timestamp is a typed, cross-tz label. The SAME instant in Shanghai is
+# 22:30+08:00, and it still matches, regardless of df.tz:
+ts = Timestamp('2021-01-04 22:30:00', tz='+08:00')   # == 09:30 New York
+df.at[ts, 'close']                       # 100.0
+
+# date_unit: when the source column is integer epochs, date_unit gives the unit
+# and tz tags the zone for rendering / matching. 1609770600000 ms == 14:30Z:
+DataFrame({'t': [1609770600000], 'close': [100.0]},
+          date_col='t', date_unit='ms', tz='America/New_York').index
+# ['2021-01-04T14:30:00.000000000']
+
+# An offset-aware string is already absolute, so tz only affects display:
+DataFrame({'t': ['2021-01-04T09:30:00+08:00'], 'close': [1.0]}, date_col='t').index
+# ['2021-01-04T01:30:00.000000000']  (09:30+08:00 == 01:30Z)
+```
+
+Once a frame carries a tz, you can re-interpret or re-display it:
+
+```py
+df.tz_localize('America/New_York')   # reinterpret the naive wall-clock (the instant moves)
+df.tz_convert('+08:00')              # keep the instant, change only how it displays
 ```
 
 `cumulate` to a daily (or coarser) bar aligns buckets to the frame's local
@@ -781,9 +862,11 @@ pandas is **not** a runtime dependency; these bridges import it lazily, only whe
 called, so `import volas` stays pandas-free.
 
 ```py
-df = volas.from_pandas(pandas_df)      # numeric/bool native; a DatetimeIndex round-trips
-pdf = df.to_pandas()                   # -> pandas.DataFrame
-df.to_csv('out.csv', index=True)       # subset of pandas to_csv; returns a str if path=None
+from volas import from_pandas
+
+df = from_pandas(pandas_df)        # numeric/bool native; a DatetimeIndex round-trips
+pdf = df.to_pandas()               # -> pandas.DataFrame
+df.to_csv('out.csv', index=True)   # subset of pandas to_csv; returns a str if path=None
 ```
 
 ## Error handling
