@@ -450,3 +450,69 @@ def test_coverage(benchmark, states, indicator, candidate):
         except Exception:
             pytest.skip(f'volas cannot express {indicator}')
         benchmark(lambda d=indicator: v.exec(d))
+
+
+# --- section 4: core DataFrame API (the data-handling flows, not indicators) -
+#
+# The plumbing a live system runs around every indicator call — frame
+# construction, column access, row slicing, boolean masking, column assignment,
+# copy — timed volas vs pandas / polars. These are the core APIs whose overhead
+# the user wants tracked alongside the kernels.
+
+_API_THRESH = float(_CSV['close'].median())
+
+
+def _api_registry():
+    """candidate -> {op: thunk}. `construct` rebuilds each call; the rest run over
+    a prebuilt per-candidate frame; `setitem` overwrites a scratch column (so it
+    stays idempotent under repeated timing)."""
+
+    def cols():
+        return {c: ARR[c] for c in COLUMNS}
+
+    reg = {
+        'pandas': (lambda pdf: {
+            'construct': lambda: pd.DataFrame(cols()),
+            'getcol': lambda: pdf['close'],
+            'slice': lambda: pdf[100:1900],
+            'mask': lambda: pdf[pdf['close'] > _API_THRESH],
+            'setitem': lambda: pdf.__setitem__('scratch', ARR['close']),
+            'copy': lambda: pdf.copy(),
+        })(pd.DataFrame(cols())),
+        'volas': (lambda vdf: {
+            'construct': lambda: VolasDataFrame(cols()),
+            'getcol': lambda: vdf['close'],
+            'slice': lambda: vdf[100:1900],
+            'mask': lambda: vdf[vdf['close'] > _API_THRESH],
+            'setitem': lambda: vdf.__setitem__('scratch', ARR['close']),
+            'copy': lambda: vdf.copy(),
+        })(VolasDataFrame(cols())),
+    }
+    if pl is not None:
+        ldf = pl.DataFrame(cols())
+        reg['polars'] = {
+            'construct': lambda: pl.DataFrame(cols()),
+            'getcol': lambda: ldf['close'],
+            'slice': lambda: ldf[100:1900],
+            'mask': lambda: ldf.filter(pl.col('close') > _API_THRESH),
+            # polars frames are immutable; the idiomatic "add a column" is with_columns.
+            'setitem': lambda: ldf.with_columns(pl.Series('scratch', ARR['close'])),
+            'copy': lambda: ldf.clone(),
+        }
+    return reg
+
+
+API_REG = _api_registry()
+API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'copy']
+API_CANDIDATES = ['pandas', 'polars', 'volas']
+
+
+@pytest.mark.parametrize('candidate', API_CANDIDATES)
+@pytest.mark.parametrize('op', API_OPS)
+def test_api(benchmark, op, candidate):
+    if candidate == 'polars' and pl is None:
+        pytest.skip('polars not installed')
+    fn = API_REG.get(candidate, {}).get(op)
+    if fn is None:
+        pytest.skip(f'{candidate} has no {op}')
+    benchmark(fn)

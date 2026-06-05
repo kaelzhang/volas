@@ -36,10 +36,11 @@ COLORS = {
     'volas': '#6F5EF9',
 }
 # Section order in the report: append first, then batch, then the full coverage.
-CATEGORY_ORDER = ['append', 'calc', 'coverage']
+CATEGORY_ORDER = ['append', 'api', 'calc', 'coverage']
 CATEGORY_TITLES = {
     'calc': 'Batch indicator computation',
     'append': 'Append one new bar → updated indicator',
+    'api': 'Core DataFrame API (construct / slice / mask / assign / copy)',
     'coverage': 'Full coverage — volas vs TA-Lib',
 }
 CATEGORY_BLURB = {
@@ -48,6 +49,9 @@ CATEGORY_BLURB = {
                'cached column incrementally (O(lookback)); the libraries with no indicator cache '
                '(pandas / polars / talib) must recompute the series (O(n)). Every candidate is '
                'measured with the same round count so the <code>rounds</code> column is comparable.'),
+    'api': ('The data-handling plumbing a live system runs around every indicator call — frame '
+            'construction, column access, row slicing, boolean masking, column assignment, copy — '
+            'timed against pandas / polars. Not indicator math; the surrounding core APIs.'),
     'coverage': ('Every indicator <strong>both volas and TA-Lib implement</strong> (the set the parity '
                  'suite aligns), batch-computed and timed against TA-Lib only — an indicator only one '
                  'of them has is omitted. <code>volas vs TA-Lib</code> &gt; 1.00× means volas is faster.'),
@@ -77,10 +81,12 @@ def parse(data: dict) -> dict:
             category = 'calc'
         elif name.startswith('test_coverage'):
             category = 'coverage'
+        elif name.startswith('test_api'):
+            category = 'api'
         else:
             category = 'append'
         params = b.get('params') or {}
-        indicator = params.get('indicator', name)
+        indicator = params.get('indicator') or params.get('op') or name
         candidate = params.get('candidate', name)
         groups[category][indicator].append((candidate, b['stats']))
     return groups
