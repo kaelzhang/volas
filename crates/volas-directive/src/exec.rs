@@ -870,6 +870,30 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             ind::adosc_final_state(&high, &low, &close, &volume, fast, slow)
         }
 
+        // SAR family — carry the recurrence's loop state (trend, accel factor(s),
+        // extreme point, current SAR, and the prior bar's high/low).
+        ("sar", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            ind::sar_final_state(&high, &low, arg_f64(args, 0, 0.02).ok()?, arg_f64(args, 1, 0.2).ok()?)
+        }
+        ("sarext", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            ind::sarext_final_state(
+                &high,
+                &low,
+                arg_f64(args, 0, 0.0).ok()?,
+                arg_f64(args, 1, 0.0).ok()?,
+                arg_f64(args, 2, 0.02).ok()?,
+                arg_f64(args, 3, 0.02).ok()?,
+                arg_f64(args, 4, 0.2).ok()?,
+                arg_f64(args, 5, 0.02).ok()?,
+                arg_f64(args, 6, 0.02).ok()?,
+                arg_f64(args, 7, 0.2).ok()?,
+            )
+        }
+
         // EMA-recursion family — carry the sub-EMA stage states (see exec's resume block).
         ("ema", _) => ind::ema_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, None).ok()?),
         ("smma", _) => ind::smma_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, None).ok()?),
@@ -1004,6 +1028,41 @@ pub fn execute_resume(
             let slow = arg_usize(args, 1, Some(10)).ok()?;
             let (vals, st) =
                 ind::adosc_resume(&high, &low, &close, &volume, fast, slow, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+
+        // SAR family — resume the state machine from the carried tuple. A resume at
+        // `from_row < 2` (the SAR bootstrap needs bars 0 and 1) returns `None` and falls back.
+        ("sar", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let (vals, st) = ind::sar_resume(
+                &high,
+                &low,
+                arg_f64(args, 0, 0.02).ok()?,
+                arg_f64(args, 1, 0.2).ok()?,
+                from_row,
+                prev_state,
+            )?;
+            Some((Column::f64(vals), st))
+        }
+        ("sarext", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            // `start_value` (arg 0) only steers the bar-1 bootstrap, never re-run on resume.
+            let (vals, st) = ind::sarext_resume(
+                &high,
+                &low,
+                arg_f64(args, 1, 0.0).ok()?,
+                arg_f64(args, 2, 0.02).ok()?,
+                arg_f64(args, 3, 0.02).ok()?,
+                arg_f64(args, 4, 0.2).ok()?,
+                arg_f64(args, 5, 0.02).ok()?,
+                arg_f64(args, 6, 0.02).ok()?,
+                arg_f64(args, 7, 0.2).ok()?,
+                from_row,
+                prev_state,
+            )?;
             Some((Column::f64(vals), st))
         }
 
