@@ -128,6 +128,23 @@ def test_iloc_rowlist_scalar_col_is_a_series():
     assert _1d(df.iloc[[1, 3], 0]).tolist() == [2.0, 4.0]
 
 
+def test_iloc_single_row_with_column_selector():
+    # scalar row + multi-column -> the row (volas's 1-row frame).
+    df = _df({"A": [1, 2, 3], "B": [10, 20, 30], "C": [100, 200, 300]})
+    assert _1d(df.iloc[1, :]).tolist() == [2.0, 20.0, 200.0]
+    assert _1d(df.iloc[0, [0, 2]]).tolist() == [1.0, 100.0]
+
+
+def test_iloc_wrong_type_column_selector_raises():
+    with pytest.raises(TypeError):
+        _df({"A": [1, 2], "B": [3, 4]}).iloc[:, "A"]
+
+
+def test_loc_wrong_type_column_selector_raises():
+    with pytest.raises(Exception):
+        _df({"A": [1, 2], "B": [3, 4]}).loc[:, 0]
+
+
 @pytest.mark.parametrize(
     "op",
     [
