@@ -8,9 +8,34 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  verify-version:
+    name: verify-tag-matches-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify the pushed tag matches the Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
+          echo "pushed tag:         $tag"
+          echo "Cargo.toml version: $version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::pushed tag '$tag' does not match the Cargo.toml version '$version'. Use 'make bump TYPE={major|minor|patch}' so the tag and the package version always agree."
+            exit 1
+          fi
+          echo "OK: tag and version agree ($version)"
+
   build-wheels:
     name: wheel-${{ matrix.platform.label }}-py${{ matrix.python-version }}
+    needs: verify-version
     runs-on: ${{ matrix.platform.os }}
 
     strategy:
@@ -72,6 +97,7 @@ jobs:
 
   build-sdist:
     name: sdist
+    needs: verify-version
     runs-on: ubuntu-latest
 
     steps:
@@ -104,8 +130,6 @@ jobs:
     environment:
       name: pypi
       url: https://pypi.org/p/volas
-    env:
-      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
 
     steps:
       - name: Download wheel artifacts
@@ -124,14 +148,5 @@ jobs:
       - name: Check artifacts
         run: ls -lh dist
 
-      - name: Ensure PYPI_API_TOKEN is configured
-        run: |
-          if [ -z "${PYPI_API_TOKEN}" ]; then
-            echo "PYPI_API_TOKEN secret is required for publishing."
-            exit 1
-          fi
-
-      - name: Publish to PyPI
+      - name: Publish to PyPI (Trusted Publishing / OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ env.PYPI_API_TOKEN }}
