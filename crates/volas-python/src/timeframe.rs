@@ -34,14 +34,15 @@ impl PyTimeFrame {
     fn __repr__(&self) -> String {
         format!("TimeFrame.{}", self.inner.label())
     }
-    /// Snap a timestamp (datetime string or epoch-ns int) down to its period key
-    /// — the epoch-ns of the bucket it falls in.
+    /// Map a timestamp (datetime string or epoch-ns int) to its **period key**:
+    /// an opaque, monotonic integer that is equal for two timestamps iff they
+    /// fall in the same bar of this timeframe (used internally by cumulation).
     ///
     /// Args:
     ///     ts (str | int): the timestamp to bucket.
     ///
     /// Returns:
-    ///     int: the bucket key as epoch nanoseconds.
+    ///     int: the period key (compare for equality; not an epoch).
     fn unify(&self, ts: &Bound<'_, PyAny>) -> PyResult<i64> {
         Ok(self.inner.unify(parse_ts(ts)?))
     }

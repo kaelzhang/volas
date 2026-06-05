@@ -94,6 +94,16 @@ pub fn civil_parts(ns: i64) -> (i64, i64, i64, i64, i64, i64) {
     )
 }
 
+/// Continuous count of days from the Unix epoch (`1970-01-01` = 0) for a civil
+/// date — the basis for continuous, month-independent week / multi-day buckets.
+/// `1970-01-01` is a Thursday, so a Monday-anchored week index is
+/// `(days_from_civil(y, mo, d) + 3).div_euclid(7)`.
+pub fn days_from_civil(y: i64, mo: i64, d: i64) -> i64 {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+    let date = NaiveDate::from_ymd_opt(y as i32, mo as u32, d as u32).unwrap_or(epoch);
+    date.signed_duration_since(epoch).num_days()
+}
+
 /// Format epoch nanoseconds as `YYYY-MM-DD HH:MM:SS` (UTC, naive).
 pub fn format_ns(ns: i64) -> String {
     let secs = ns.div_euclid(1_000_000_000);

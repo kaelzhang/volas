@@ -110,11 +110,73 @@ impl TimeFrame {
             Hour8 => (h / 8) * HOUR + d * DAY + mo * MONTH + y * YEAR,
             Hour12 => (h / 12) * HOUR + d * DAY + mo * MONTH + y * YEAR,
             Day1 => d * DAY + mo * MONTH + y * YEAR,
-            Day3 => (d / 3) * DAY + mo * MONTH + y * YEAR,
-            Week1 => (d / 7) * DAY + mo * MONTH + y * YEAR,
+            // Day3 and Week1 are CONTINUOUS, epoch-anchored buckets — never reset
+            // at a month boundary (the old `(d/3)`/`(d/7)` civil-field scheme split
+            // a real 3-day/week run at the month edge). They key off the continuous
+            // day count since the Unix epoch; the key is monotonic and unique per
+            // bucket, which is all `group_runs` needs.
+            Day3 => volas_core::datetime::days_from_civil(y, mo, d).div_euclid(3),
+            // 1970-01-01 is a Thursday, so `+3` anchors week boundaries on Monday.
+            Week1 => (volas_core::datetime::days_from_civil(y, mo, d) + 3).div_euclid(7),
             Month1 => mo * MONTH + y * YEAR,
             Year1 => y * YEAR,
         }
+    }
+
+    /// Whether this frame can be cleanly coarsened (aggregated) up to `dst` —
+    /// i.e. every `dst` bucket boundary is also a boundary of `self`, so each
+    /// `dst` bar is a whole number of `self` bars with none straddling.
+    ///
+    /// Fixed-duration frames (≤ `Week1`) nest by duration divisibility on the
+    /// epoch grid. The calendar frames need care: a sub-day / 1-day frame nests
+    /// into a week / month / year (its boundaries fall on every UTC midnight,
+    /// hence on Monday week-starts and on the 1st), and a month nests into a year
+    /// — but a **week or a 3-day bar does NOT nest into a month or year** (ISO
+    /// weeks and epoch-anchored 3-day bars straddle calendar boundaries).
+    pub fn can_coarsen(self, dst: TimeFrame) -> bool {
+        use TimeFrame::*;
+        if self == dst {
+            return true;
+        }
+        let day_aligned = matches!(
+            self,
+            Sec1 | Min1 | Min3 | Min5 | Min15 | Min30 | Hour1 | Hour2 | Hour4 | Hour6 | Hour8
+                | Hour12 | Day1
+        );
+        match dst {
+            Year1 => self == Month1 || day_aligned,
+            Month1 => day_aligned,
+            Week1 => day_aligned,
+            _ => match (self.duration_secs(), dst.duration_secs()) {
+                (Some(s), Some(d)) => d > s && d % s == 0,
+                _ => false,
+            },
+        }
+    }
+
+    /// The fixed duration in seconds for the fixed-length frames; `None` for the
+    /// variable-length calendar frames (`Month1` / `Year1`). Used only by
+    /// [`can_coarsen`](Self::can_coarsen).
+    fn duration_secs(self) -> Option<i64> {
+        use TimeFrame::*;
+        Some(match self {
+            Sec1 => 1,
+            Min1 => 60,
+            Min3 => 180,
+            Min5 => 300,
+            Min15 => 900,
+            Min30 => 1800,
+            Hour1 => 3600,
+            Hour2 => 7200,
+            Hour4 => 14400,
+            Hour6 => 21600,
+            Hour8 => 28800,
+            Hour12 => 43200,
+            Day1 => 86400,
+            Day3 => 259200,
+            Week1 => 604800,
+            Month1 | Year1 => return None,
+        })
     }
 }
 
@@ -146,6 +208,71 @@ mod tests {
         let c = datetime::parse_ns("2020-01-01 00:05:00").unwrap();
         assert_eq!(TimeFrame::Min5.unify(a), TimeFrame::Min5.unify(b));
         assert_ne!(TimeFrame::Min5.unify(a), TimeFrame::Min5.unify(c));
+    }
+
+    #[test]
+    fn week_is_continuous_and_monday_anchored() {
+        // 2024-01-29 is a Monday; the run Mon..Sun (2024-02-04) crosses Feb 1.
+        let mon = datetime::parse_ns("2024-01-29 00:00:00").unwrap();
+        let sun = datetime::parse_ns("2024-02-04 23:59:59").unwrap();
+        let prev_sun = datetime::parse_ns("2024-01-28 23:59:59").unwrap();
+        let next_mon = datetime::parse_ns("2024-02-05 00:00:00").unwrap();
+        // one continuous week, even across the month boundary (the old (d/7) split it)
+        assert_eq!(TimeFrame::Week1.unify(mon), TimeFrame::Week1.unify(sun));
+        // boundaries land on Monday
+        assert_ne!(TimeFrame::Week1.unify(mon), TimeFrame::Week1.unify(prev_sun));
+        assert_ne!(TimeFrame::Week1.unify(mon), TimeFrame::Week1.unify(next_mon));
+    }
+
+    #[test]
+    fn day3_is_continuous_across_month_boundary() {
+        // Each calendar day advances the epoch-anchored 3-day bucket by 0 or 1 —
+        // never the month-reset jump the old (d/3) scheme produced at Feb 1.
+        let mut prev = TimeFrame::Day3.unify(datetime::parse_ns("2024-01-28 00:00:00").unwrap());
+        for day in ["2024-01-29", "2024-01-30", "2024-01-31", "2024-02-01", "2024-02-02"] {
+            let k = TimeFrame::Day3.unify(datetime::parse_ns(&format!("{day} 00:00:00")).unwrap());
+            assert!(k == prev || k == prev + 1, "{day}: bucket {k}, prev {prev}");
+            prev = k;
+        }
+    }
+
+    #[test]
+    fn can_coarsen_truth_table() {
+        use TimeFrame::*;
+        for (s, d) in [
+            (Min5, Min5),    // identity (= copy)
+            (Min1, Min5),
+            (Min5, Min15),
+            (Min15, Hour1),
+            (Min5, Hour1),
+            (Hour1, Hour4),
+            (Hour4, Hour12),
+            (Hour1, Day1),
+            (Day1, Day3),
+            (Hour12, Day3),
+            (Day1, Week1),
+            (Min5, Week1),
+            (Day1, Month1),
+            (Hour1, Month1),
+            (Month1, Year1),
+            (Day1, Year1),
+        ] {
+            assert!(s.can_coarsen(d), "{s:?} -> {d:?} should be valid");
+        }
+        for (s, d) in [
+            (Min3, Min5),
+            (Hour4, Hour6),
+            (Day3, Week1),
+            (Week1, Month1),
+            (Week1, Year1),
+            (Day3, Month1),
+            (Day3, Year1),
+            (Day1, Hour1), // refining, not coarsening
+            (Week1, Day1),
+            (Month1, Day1),
+        ] {
+            assert!(!s.can_coarsen(d), "{s:?} -> {d:?} should be invalid");
+        }
     }
 
     const ALL: [TimeFrame; 17] = [
