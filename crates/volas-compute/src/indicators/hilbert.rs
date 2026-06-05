@@ -444,3 +444,46 @@ pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f
     }
     (mama_out, fama_out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ht_core_short_input_returns_warmup_only() {
+        // Inputs at or below the WMA warm-up never enter the main loop (covers the
+        // early return); every bar stays at the HtBar default.
+        for n in [0usize, 1, CORE_START, CORE_START - 1] {
+            let price: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
+            let bars = ht_core(&price);
+            assert_eq!(bars.len(), n);
+            assert!(bars.iter().all(|b| b.smooth_period == 0.0 && b.q1 == 0.0));
+        }
+    }
+
+    #[test]
+    fn dcphase_zero_imaginary_carry_branch() {
+        // The `imagPart == 0` carry branch (a verbatim port of TA-Lib's defensive
+        // path) only runs when the cosine-weighted sum cancels exactly while the
+        // sine-weighted sum does not. Force it with DCPeriodInt == 2 over two equal
+        // buffer values: cos(0)+cos(π) = 1 + (-1) = 0 exactly, while
+        // sin(0)+sin(π) = sin(π) ≈ 1.2e-16 ≠ 0, so `real_part` keeps the sign of the
+        // (positive / negative) prices and the ±90 nudge is exercised.
+        assert_eq!((TWO_PI / 2.0).cos(), -1.0, "cos(π) must be exactly -1 for the cancellation");
+
+        let mut up = DcPhase::new();
+        let _ = up.push(5.0, 2.0); // warm the buffer; smooth_period 2.0 -> DCPeriodInt 2
+        let p_up = up.push(5.0, 2.0); // window [5, 5] -> imag == 0, real > 0 (+90)
+        assert!(p_up.is_finite());
+
+        let mut down = DcPhase::new();
+        let _ = down.push(-5.0, 2.0);
+        let p_down = down.push(-5.0, 2.0); // window [-5, -5] -> imag == 0, real < 0 (-90)
+        assert!(p_down.is_finite());
+
+        // imag == 0 AND real == 0 (DCPeriodInt 0 -> empty window): the carry block is
+        // entered but neither ±90 nudge fires (the fall-through).
+        let p_flat = up.push(5.0, 0.4); // smooth_period 0.4 -> DCPeriodInt 0
+        assert!(p_flat.is_finite());
+    }
+}

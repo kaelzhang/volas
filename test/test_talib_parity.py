@@ -279,18 +279,8 @@ def test_directional_family_matches_talib(ohlc):
     _parity(df.exec('adx'), talib.ADX(h, l, c, 14))  # default resolves to 14
 
 
-def test_candlestick_patterns_match_talib(ohlc):
-    # style.<pattern> / cdl.<pattern>; output f64 -100/0/100, warm-up NaN (TA-Lib fills
-    # its int output's warm-up with 0). Values are exact, so compare the valid region.
-    df, h, l, c = ohlc
-    o = df['open'].to_numpy()
-
-    def pat(got, want, lb):
-        got = np.asarray(got, dtype=float)
-        assert np.all(np.isnan(got[:lb])), 'pattern warm-up is NaN'
-        np.testing.assert_array_equal(got[lb:], np.asarray(want, dtype=float)[lb:])
-
-    patterns = [
+# All 61 TA-Lib candlestick patterns: (volas name, talib function, lookback).
+_CANDLE_PATTERNS = [
         ('doji', talib.CDLDOJI, 10), ('marubozu', talib.CDLMARUBOZU, 10),
         ('closingmarubozu', talib.CDLCLOSINGMARUBOZU, 10), ('longline', talib.CDLLONGLINE, 10),
         ('shortline', talib.CDLSHORTLINE, 10), ('highwave', talib.CDLHIGHWAVE, 10),
@@ -336,15 +326,93 @@ def test_candlestick_patterns_match_talib(ohlc):
         ('risefall3methods', talib.CDLRISEFALL3METHODS, 14),
         ('xsidegap3methods', talib.CDLXSIDEGAP3METHODS, 2),
         ('hikkake', talib.CDLHIKKAKE, 5), ('hikkakemod', talib.CDLHIKKAKEMOD, 10),
-    ]
-    assert len(patterns) == 61, 'all 61 TA-Lib candlestick patterns covered'
-    for name, fn, lb in patterns:
+]
+assert len(_CANDLE_PATTERNS) == 61, 'all 61 TA-Lib candlestick patterns covered'
+
+
+def _candle_pat(got, want, lb):
+    # f64 -100/0/100, warm-up NaN (TA-Lib fills its int output's warm-up with 0).
+    # Values are exact, so compare the valid region.
+    got = np.asarray(got, dtype=float)
+    assert np.all(np.isnan(got[:lb])), 'pattern warm-up is NaN'
+    np.testing.assert_array_equal(got[lb:], np.asarray(want, dtype=float)[lb:])
+
+
+def test_candlestick_patterns_match_talib(ohlc):
+    df, h, l, c = ohlc
+    o = df['open'].to_numpy()
+    for name, fn, lb in _CANDLE_PATTERNS:
         want = fn(o, h, l, c)
-        pat(df.exec(f'style.{name}'), want, lb)
-        pat(df.exec(f'cdl.{name}'), want, lb)  # the cdl alias matches
+        _candle_pat(df.exec(f'style.{name}'), want, lb)
+        _candle_pat(df.exec(f'cdl.{name}'), want, lb)  # the cdl alias matches
     # the penetration ratio is an optional arg (default 0.5)
-    pat(df.exec('cdl.darkcloudcover:0.6'),
-        talib.CDLDARKCLOUDCOVER(o, h, l, c, penetration=0.6), 11)
+    _candle_pat(df.exec('cdl.darkcloudcover:0.6'),
+                talib.CDLDARKCLOUDCOVER(o, h, l, c, penetration=0.6), 11)
+
+
+def _synthetic_candle_ohlc():
+    """A long deterministic OHLC series that triggers every candlestick pattern.
+
+    The tencent set fires only ~38 of the 61 patterns, leaving most pattern-geometry
+    branches unexercised. A pseudo-random walk (deterministic LCG) fires 55; six rare
+    patterns (3whitesoldiers, identical3crows, kicking, kickingbylength, breakaway,
+    concealbabyswall) need exact geometry, appended as hand-built motifs (each preceded
+    by flat context so its candle-settings averages are clean). Every value is still
+    checked 1:1 against TA-Lib, so this doubles as a fuzz parity test."""
+    def lcg(seed, count):
+        out = []
+        x = seed
+        for _ in range(count):
+            x = (1103515245 * x + 12345) & 0x7FFFFFFF
+            out.append(x / 0x7FFFFFFF)
+        return out
+
+    n = 20000
+    r = lcg(123456789, n * 5)
+    o, h, l, c = [], [], [], []
+    price = 100.0
+    for i in range(n):
+        g, bd, us, ls, dr = r[5 * i: 5 * i + 5]
+        price += (g - 0.5) * (8 if dr > 0.8 else 2)
+        op = price
+        cl = op + (bd - 0.5) * (6 if us > 0.7 else 1.5)
+        hi = max(op, cl) + us * 3.0 * (0.2 if ls < 0.3 else 1.0)
+        lo = min(op, cl) - ls * 3.0 * (0.2 if us < 0.3 else 1.0)
+        o.append(op); h.append(hi); l.append(lo); c.append(cl); price = cl
+
+    # [open, high, low, close] motifs for the six patterns a random walk won't produce.
+    motifs = [
+        [[100, 110.05, 99.9, 110], [105, 115.05, 104.9, 115], [110, 120.05, 109.9, 120]],
+        [[120, 120.05, 109.95, 110], [110, 110.05, 99.95, 100], [100, 100.05, 89.95, 90]],
+        [[110, 110, 100, 100], [115, 125, 115, 125]],
+        [[120, 120.1, 109.9, 110], [108, 108.1, 103.9, 104], [105, 105.1, 101.9, 102],
+         [103, 103.1, 99.9, 100], [101, 109.1, 100.9, 109]],
+        [[110, 110, 100, 100], [99, 99, 90, 90], [88, 92, 84, 85], [95, 95.5, 81, 82]],
+    ]
+    for m in motifs:
+        for k in range(16):  # flat context isolates the motif's candle-settings averages
+            base = 100.0 + (k % 2) * 0.2
+            bo, bc = base, base + (0.3 if k % 2 == 0 else -0.3)
+            o.append(bo); h.append(max(bo, bc) + 0.2); l.append(min(bo, bc) - 0.2); c.append(bc)
+        for b in m:
+            o.append(b[0]); h.append(b[1]); l.append(b[2]); c.append(b[3])
+    return tuple(np.array(x, dtype=float) for x in (o, h, l, c))
+
+
+@pytest.fixture(scope='module')
+def synth_candle_ohlc():
+    return _synthetic_candle_ohlc()
+
+
+def test_candlestick_patterns_match_talib_synthetic(synth_candle_ohlc):
+    # Exercises every pattern's signal branch (tencent fires only ~38/61) while still
+    # asserting exact parity with TA-Lib on a long deterministic series.
+    o, h, l, c = synth_candle_ohlc
+    df = volas.DataFrame({'open': o, 'high': h, 'low': l, 'close': c})
+    for name, fn, lb in _CANDLE_PATTERNS:
+        got = np.asarray(df.exec(f'style.{name}'), dtype=float)
+        np.testing.assert_array_equal(got[lb:], np.asarray(fn(o, h, l, c), dtype=float)[lb:])
+        assert np.any(got[lb:] != 0), f'{name} never fired on the synthetic series'
 
 
 def test_math_transform_series_methods_match_talib(ohlc):

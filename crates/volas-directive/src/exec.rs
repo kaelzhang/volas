@@ -876,9 +876,9 @@ mod tests {
         assert_eq!(r, vec![5.0, 6.0, 7.0, 8.0, 9.0]);
     }
 
-    /// A 30-row OHLCV frame so every indicator produces a full-length result.
-    fn ohlcv() -> DataFrame {
-        let close: Vec<f64> = (1..=30).map(|i| i as f64).collect();
+    /// An `n`-row OHLCV frame (close 1..=n; high/low/open offset; volume scaled).
+    fn ohlcv_n(n: usize) -> DataFrame {
+        let close: Vec<f64> = (1..=n).map(|i| i as f64).collect();
         let high: Vec<f64> = close.iter().map(|c| c + 1.0).collect();
         let low: Vec<f64> = close.iter().map(|c| c - 1.0).collect();
         let open: Vec<f64> = close.iter().map(|c| c - 0.5).collect();
@@ -901,6 +901,65 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    /// A 30-row OHLCV frame so every indicator produces a full-length result.
+    fn ohlcv() -> DataFrame {
+        ohlcv_n(30)
+    }
+
+    /// Degenerate periods (0, or larger than the frame) must trip every indicator's
+    /// warm-up guard and return an all-length result rather than panic — these guard
+    /// branches are otherwise unreached by valid-period parity tests.
+    #[test]
+    fn degenerate_periods_hit_compute_guards() {
+        let df = ohlcv();
+        let n = 30;
+        let zero = [
+            "ma:0", "ema:0", "smma:0", "wma:0", "dema:0", "tema:0", "trima:0", "t3:0",
+            "kama:0", "mom:0", "roc:0", "rocp:0", "rocr:0", "rocr100:0", "willr:0", "cci:0",
+            "cmo:0", "mfi:0", "trix:0", "midpoint:0", "midprice:0", "atr:0", "natr:0", "rsi:0",
+            "plus_dm:0", "minus_dm:0", "plus_di:0", "minus_di:0", "dx:0", "adx:0", "adxr:0",
+            "aroon.up:0", "aroonosc:0", "sum:0", "maxindex:0", "minindex:0", "minmax.min:0",
+            "minmaxindex.min:0", "linearreg:0", "linearreg_slope:0", "linearreg_intercept:0",
+            "linearreg_angle:0", "tsf:0", "var:0", "stddev:0", "llv:0", "hhv:0", "boll:0",
+            "bbw:0", "accbands:0", "correl:0@close,close", "beta:0@close,close",
+            // period larger than the frame trips the `period > n` arm.
+            "ma:99", "atr:99", "rsi:99", "sum:99", "linearreg:99",
+        ];
+        for d in zero {
+            let col = execute(&df, &parse(d).unwrap())
+                .unwrap_or_else(|e| panic!("directive {d:?} failed: {e:?}"));
+            assert_eq!(col.len(), n, "directive {d:?} returned wrong length");
+        }
+    }
+
+    /// An empty frame must trip the `n == 0` guards (volume / SAR / price transforms).
+    #[test]
+    fn empty_frame_hits_compute_guards() {
+        let df = ohlcv_n(0);
+        for d in [
+            "obv", "ad", "adosc:3,10", "sar", "sarext", "ma:5", "tr", "avgprice",
+            "ht_dcperiod", "mama",
+        ] {
+            let col = execute(&df, &parse(d).unwrap()).unwrap();
+            assert_eq!(col.len(), 0, "directive {d:?}");
+        }
+    }
+
+    /// A frame shorter than the candlestick lookbacks must trip their short-series
+    /// guards (multi-bar `n < 6`, the candle-settings `avg_period > n`, etc.).
+    #[test]
+    fn short_frame_hits_candle_guards() {
+        let df = ohlcv_n(4);
+        for d in [
+            "style.doji", "style.engulfing", "style.morningstar", "style.hikkake",
+            "style.hikkakemod", "style.concealbabyswall", "style.3whitesoldiers",
+            "style.risefall3methods", "style.breakaway", "style.mathold",
+        ] {
+            let col = execute(&df, &parse(d).unwrap()).unwrap();
+            assert_eq!(col.len(), 4, "directive {d:?}");
+        }
     }
 
     #[test]

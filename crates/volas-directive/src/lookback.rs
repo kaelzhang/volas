@@ -152,3 +152,45 @@ pub fn lookback(node: &Node) -> usize {
         Node::Binary { left, right, .. } => lookback(left).max(lookback(right)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::lookback;
+    use crate::parser::parse;
+
+    /// Every `own_lookback` arm (and every `ma_lookback` MA-type) must compute without
+    /// panicking. `lookback` is only reached on column caching, so `df.exec`-based
+    /// parity tests never touch it — this is its coverage.
+    #[test]
+    fn lookback_covers_every_arm() {
+        let directives = [
+            // ma_lookback: every MA type (3 DEMA, 4 TEMA, 6 KAMA, 7 MAMA, 8 T3, _ rest)
+            "ma:5", "ma:5,1", "ma:5,3", "ma:5,4", "ma:5,6", "ma:5,7", "ma:5,8",
+            "ema:5", "smma:5", "apo:12,26,1", "ppo:12,26,1",
+            "mavp:2,30,1@close,close",
+            "macdext", "macdext.signal", "macdfix", "macdfix.signal",
+            "wma:30", "trima:30", "dema:30", "tema:30", "t3:5", "kama:30",
+            "sar", "sarext", "boll", "bbw", "accbands", "macd", "macd.signal",
+            "bbi", "tr", "atr:14", "llv:5", "hhv:5", "donchian:20", "rsv:9",
+            "kdj.k:9,3", "rsi:14", "hv:10", "increase:3", "repeat:2",
+            "style.doji", "cdl.doji", "change:2",
+            "mom:10", "roc:10", "rocp:10", "rocr:10", "rocr100:10",
+            "willr:14", "midpoint:14", "midprice:14", "cmo:14", "natr:14",
+            "cci:14", "imi:14", "mfi:14", "ultosc",
+            "stoch.k", "stoch.d", "stochf.k", "stochf.d", "stochrsi.k", "stochrsi.d",
+            "plus_dm:14", "minus_dm:14", "plus_di:14", "minus_di:14", "dx:14",
+            "adx:14", "adxr:14", "trix:30", "aroon.up:14", "aroonosc:14",
+            "sum:30", "maxindex:30", "minindex:30", "minmax.min:30", "minmaxindex.min:30",
+            "bop", "linearreg:14", "linearreg_slope:14", "tsf:14",
+            "var:5", "stddev:5", "correl:30@close,close", "beta:5@close,close",
+            "obv", "ad", "adosc:3,10", "avgprice", "medprice", "typprice", "wclprice",
+            "ht_dcperiod", "ht_phasor", "ht_phasor.quadrature", "mama", "mama.fama",
+            "ht_dcphase", "ht_sine", "ht_sine.leadsine", "ht_trendline", "ht_trendmode",
+            // node kinds: scalar, plain column name, unary, binary
+            "5", "close", "~(close > 5)", "ma:5 + ma:10",
+        ];
+        for d in directives {
+            let _ = lookback(&parse(d).unwrap());
+        }
+    }
+}

@@ -844,4 +844,52 @@ mod tests {
         assert_eq!(m[3], 1.0);
         assert!(m[4].is_nan());
     }
+
+    /// Edge / dual-path branches the production callers never reach: a kernel's
+    /// fast path when its only caller feeds NaN (or vice-versa), plus the
+    /// empty / zero-period / no-seed / period-too-large guards.
+    #[test]
+    fn kernel_edge_and_dual_paths() {
+        // sma: a NaN *after* a finite prefix poisons the fast running sum, forcing
+        // the precise slow path.
+        let s = sma(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2).to_vec();
+        assert_eq!(s[1], 1.5);
+        assert!(s[2].is_nan() && s[3].is_nan());
+        assert_eq!(s[4], 4.5);
+
+        // sma_seeded (via wilder / ema_seeded): empty, zero period, and fewer than
+        // `period` finite values (no seed found).
+        assert_eq!(wilder(av(&[]), 3).len(), 0);
+        assert_eq!(ema_seeded(av(&[1.0, 2.0]), 0).len(), 2);
+        assert!(wilder(av(&[f64::NAN, 1.0]), 3).iter().all(|x| x.is_nan()));
+
+        // ema_diff_seeded: zero period, and data too short for the slow seed.
+        assert!(ema_diff_seeded(av(&[1.0, 2.0]), 0, 2).iter().all(|x| x.is_nan()));
+        assert!(ema_diff_seeded(av(&[1.0, 2.0]), 2, 5).iter().all(|x| x.is_nan()));
+
+        // ema_cascade: zero period, and lookback exceeding the input length.
+        assert!(ema_cascade::<3>(&[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
+        assert!(ema_cascade::<3>(&[1.0, 2.0, 3.0], 5).iter().all(|x| x.is_nan()));
+
+        // rolling_max_min: invalid period, then the interior-NaN fallback to the deque.
+        let (hh, ll) = rolling_max_min(&[1.0, 2.0], &[1.0, 2.0], 0);
+        assert!(hh.iter().all(|x| x.is_nan()) && ll.iter().all(|x| x.is_nan()));
+        let (hh, ll) = rolling_max_min(&[1.0, f64::NAN, 3.0, 4.0], &[1.0, 2.0, 3.0, 4.0], 2);
+        assert_eq!(hh[3], 4.0);
+        assert_eq!(ll[3], 3.0);
+
+        // rolling_min / rolling_max: zero period and period > n.
+        assert!(rolling_min(av(&[1.0]), 0).iter().all(|x| x.is_nan()));
+        assert!(rolling_max(av(&[1.0]), 5).iter().all(|x| x.is_nan()));
+
+        // rolling_std: NaN-free fast path (its only caller `hv` feeds NaN).
+        let std = rolling_std(av(&[1.0, 2.0, 3.0, 4.0, 5.0]), 3, 1).to_vec();
+        assert!(std[0].is_nan() && std[1].is_nan());
+        assert!((std[2] - 1.0).abs() < 1e-12);
+
+        // rolling_mean_std: interior-NaN slow path (its callers feed clean closes).
+        let (m, sd) = rolling_mean_std(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2, 0);
+        assert_eq!(m[1], 1.5);
+        assert!(m[2].is_nan() && sd[2].is_nan());
+    }
 }
