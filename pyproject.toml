@@ -55,6 +55,7 @@ dev = [
   "packaging>=24.2",
   "numpy>=2.0.0",
   "mypy",
+  "pyright",
   "maturin>=1.4"
 ]
 # `benchmark` is the extra comparison libraries used ONLY by the benchmark, never
@@ -73,6 +74,10 @@ module-name = "volas_rs"
 binding = "pyo3"
 # Pure-Python package to include alongside the compiled module
 python-packages = ["volas"]
+# Ship the hand-written stub for the compiled module + the PEP 561 marker so type
+# checkers see the full API. Static-analysis only — no runtime effect. `volas/py.typed`
+# rides along via `python-packages`; the top-level `volas_rs.pyi` needs an explicit include.
+include = ["volas_rs.pyi"]
 
 [tool.mypy]
 warn_return_any = true

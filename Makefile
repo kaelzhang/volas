@@ -103,6 +103,22 @@ lint:
 	@echo "\033[1m>> Running cargo check... <<\033[0m"
 	@cargo check
 
+# Static type gates — deterministic oracles that prove the shipped typings are correct
+# (no human review needed). Needs the extension built so the stub is installed.
+#   stubtest      — the .pyi matches the runtime module (signatures, params, attrs)
+#   mypy/pyright  — the @overload-driven dynamic surfaces resolve to the right types,
+#                   and known-wrong usage is flagged (negative_types.py)
+#   --verifytypes — the public API is 100% typed
+types: build
+	@echo "\033[1m>> stubtest (stub == runtime)... <<\033[0m"
+	@python -m mypy.stubtest volas_rs --allowlist stubtest_allowlist.txt
+	@echo "\033[1m>> mypy --strict (assert_type + negative)... <<\033[0m"
+	@mypy --strict test/typing/check_types.py test/typing/negative_types.py
+	@echo "\033[1m>> pyright (assert_type + negative)... <<\033[0m"
+	@pyright test/typing/check_types.py test/typing/negative_types.py
+	@echo "\033[1m>> pyright --verifytypes (public-API completeness)... <<\033[0m"
+	@pyright --verifytypes volas --ignoreexternal
+
 # Auto-fix lint issues
 fix:
 	ruff check --fix $(files)

@@ -1,0 +1,3 @@
+# The compiled extension is installed as volas_rs/volas_rs.<abi>.so and re-exported by
+# volas_rs/__init__.py; the public API is typed at the package level (__init__.pyi).
+volas_rs.volas_rs

@@ -107,3 +107,45 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  types:
+    name: types
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Create virtual environment
+        run: |
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip maturin
+          pip install -e .[dev]
+
+      - name: Build the extension (installs the stub + py.typed)
+        run: maturin develop --release
+
+      # Deterministic type gates — prove the shipped typings are correct without review:
+      # stub == runtime, the dynamic overloads resolve right, misuse is flagged, and the
+      # public API is 100% typed. Any future Rust change that breaks the stub fails here.
+      - name: Type gates (stubtest + mypy + pyright + verifytypes)
+        run: |
+          python -m mypy.stubtest volas_rs --allowlist stubtest_allowlist.txt
+          mypy --strict test/typing/check_types.py test/typing/negative_types.py
+          pyright test/typing/check_types.py test/typing/negative_types.py
+          pyright --verifytypes volas --ignoreexternal

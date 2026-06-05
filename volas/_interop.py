@@ -1,12 +1,19 @@
 """Lazy pandas interop. pandas is imported only when these are called, so volas
 stays pandas-free at import (`to_pandas` is a DataFrame method, also lazy)."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from volas_rs import DataFrame
 
 _FMT = '%Y-%m-%d %H:%M:%S'
 
 
-def from_pandas(pdf):
+def from_pandas(pdf: Any) -> DataFrame:
     """Build a volas ``DataFrame`` from a ``pandas.DataFrame``.
 
     Numeric / bool columns are carried natively; string / object columns become
