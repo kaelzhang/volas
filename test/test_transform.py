@@ -1,17 +1,30 @@
-"""shift / diff / fillna / dropna / sort_index / reset_index (PD-7/8/9/10)."""
+"""shift / diff / fillna / dropna / sort_index / reset_index (PD-7/8/9/10).
+
+Expected values are inlined (pandas semantics, hand-computed) so the suite is
+pandas-free; the exhaustive vs-pandas parity lives in ``test_pandas_series_methods``.
+"""
 
 import numpy as np
-import pandas as pd
 from volas import DataFrame
 
 
-def test_shift_diff_match_pandas():
+def test_shift_diff():
+    # x = [1, 2, 4, 7]
     s = DataFrame({'x': [1.0, 2.0, 4.0, 7.0]})['x']
-    ps = pd.Series([1.0, 2.0, 4.0, 7.0])
-    for k in (1, 2, -1):
-        assert np.allclose(s.shift(k).to_numpy(), ps.shift(k).to_numpy(), equal_nan=True)
-        assert np.allclose(s.diff(k).to_numpy(), ps.diff(k).to_numpy(), equal_nan=True)
-    assert np.allclose(s.shift().to_numpy(), ps.shift().to_numpy(), equal_nan=True)
+    nan = float('nan')
+    exp = {
+        ('shift', 1): [nan, 1.0, 2.0, 4.0],
+        ('shift', 2): [nan, nan, 1.0, 2.0],
+        ('shift', -1): [2.0, 4.0, 7.0, nan],
+        ('diff', 1): [nan, 1.0, 2.0, 3.0],
+        ('diff', 2): [nan, nan, 3.0, 5.0],
+        ('diff', -1): [-1.0, -2.0, -3.0, nan],   # x - x.shift(-1)
+    }
+    for (op, k), want in exp.items():
+        got = getattr(s, op)(k).to_numpy()
+        assert np.allclose(got, want, equal_nan=True), f"{op}({k}): {got.tolist()} != {want}"
+    # default n=1 == shift(1)
+    assert np.allclose(s.shift().to_numpy(), [nan, 1.0, 2.0, 4.0], equal_nan=True)
 
 
 def test_fillna_isna_notna():

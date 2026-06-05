@@ -4,6 +4,8 @@ Indicator/operator correctness is verified by 1:1 parity against stock-pandas on
 real Tencent data (`test_parity_*`). Core API behaviour is covered directly.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,7 +14,16 @@ from stock_pandas import StockDataFrame
 
 from volas import DataFrame, Series
 
-from .common import COLUMNS, create_stock, get_last, get_tencent, read_tencent_csv, to_fixed
+from .common import COLUMNS, create_stock, get_last, get_tencent, to_fixed
+
+_TENCENT = str((Path(__file__).parent / 'data' / 'tencent.csv').resolve())
+
+
+def _read_tencent_pandas() -> pd.DataFrame:
+    """Raw Tencent CSV as a pandas frame — used only to build the stock-pandas
+    parity oracle below (the sole pandas data path left in the non-interop tests).
+    """
+    return pd.read_csv(_TENCENT)
 
 
 @pytest.fixture
@@ -23,8 +34,7 @@ def stock():
 @pytest.fixture(scope='module')
 def spd():
     """A stock-pandas StockDataFrame on the same data, as the parity oracle."""
-    csv = read_tencent_csv()
-    return StockDataFrame(csv.copy())
+    return StockDataFrame(_read_tencent_pandas())
 
 
 # ---------------------------------------------------------------------------

@@ -1,50 +1,37 @@
-"""Shared test fixtures and helpers (volas port of stock-pandas's test/common.py)."""
+"""Shared test fixtures and helpers (volas port of stock-pandas's test/common.py).
 
-from datetime import datetime, timedelta
+Fully pandas-free: the Tencent kline data is loaded natively with
+``volas.read_csv``. (The stock-pandas parity oracle, which does need a raw pandas
+frame, builds its own in ``test_volas.py``.)
+"""
+
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
-from volas import DataFrame
+from volas import DataFrame, read_csv
 
 _data_dir = Path(__file__).parent / 'data'
 
 COLUMNS = ['open', 'high', 'low', 'close', 'volume']
 TIME_KEY = 'time_key'
-FORMAT = '%Y-%m-%d %H:%M:%S'
 simple_list = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
 names = 'abcdef'
 
 
-def read_tencent_csv(filename: str = 'tencent.csv') -> pd.DataFrame:
-    """Read the raw Tencent kline CSV as a plain pandas DataFrame."""
-    return pd.read_csv((_data_dir / filename).resolve())
+def _tencent_path(filename: str = 'tencent.csv') -> str:
+    return str((_data_dir / filename).resolve())
 
 
-def get_tencent(date_col: bool = True, stock: bool = True, filename: str = 'tencent.csv'):
-    """A volas DataFrame of the Tencent data (or the raw pandas frame when stock=False)."""
-    csv = read_tencent_csv(filename)
-    if not stock:
-        return csv
-    data = {c: csv[c].to_numpy(dtype=float) for c in COLUMNS}
-    if date_col:
-        data[TIME_KEY] = csv[TIME_KEY].to_numpy()
-        return DataFrame(data, date_col=TIME_KEY)
-    return DataFrame(data)
+def get_tencent(date_col: bool = True, filename: str = 'tencent.csv') -> DataFrame:
+    """A native volas DataFrame of the Tencent kline data (OHLCV columns).
 
-
-def get_1m_tencent(hour_offset: int = 0) -> pd.DataFrame:
-    """Tencent data re-stamped at a 1-minute interval (raw pandas frame)."""
-    csv = read_tencent_csv().copy()
-    time_array = []
-    date = datetime(2020, 1, 1, hour_offset)
-    step = timedelta(minutes=1)
-    for _ in range(len(csv)):
-        time_array.append(date.strftime(FORMAT))
-        date += step
-    csv[TIME_KEY] = np.array(time_array)
-    return csv[[TIME_KEY, *COLUMNS]]
+    With ``date_col`` (default) the ``time_key`` column becomes a DatetimeIndex;
+    otherwise the frame keeps a default RangeIndex.
+    """
+    path = _tencent_path(filename)
+    df = read_csv(path, parse_dates=[TIME_KEY], index_col=TIME_KEY) if date_col else read_csv(path)
+    return df[COLUMNS]
 
 
 def create_stock() -> DataFrame:

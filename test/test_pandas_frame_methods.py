@@ -2,8 +2,8 @@
 
 Ported from pandas/tests/frame/methods/ (head/tail, dropna, sort_index,
 reset_index, rename, set_index, astype, copy) — restricted to the all-numeric
-frames volas models. Each case builds the same frame in volas and in pandas and
-asserts the results agree, so pandas itself is the oracle.
+frames volas models. Expected values follow pandas semantics and are inlined
+(derived from the fixed ``ROWS`` matrix), so the suite is pandas-free.
 
 volas detail difference (allowed by the porting brief, root cause noted):
   * ``reset_index(drop=False)`` restores the former index under the conventional
@@ -13,81 +13,76 @@ volas detail difference (allowed by the porting brief, root cause noted):
 """
 
 import numpy as np
-import pandas as pd
 import pytest
 
 import volas
 
 nan = float("nan")
 
-
-def _pair(cols):
-    data = {k: list(v) for k, v in cols.items()}
-    return volas.DataFrame(data), pd.DataFrame(data)
-
-
-def _same(vframe, pframe):
-    va = np.asarray(vframe.to_numpy(), dtype=float)
-    pa = np.asarray(pframe.to_numpy(), dtype=float)
-    assert va.shape == pa.shape, f"{va.shape} != {pa.shape}"
-    assert np.array_equal(va, pa, equal_nan=True), f"{va.tolist()} != {pa.tolist()}"
-
-
+# The shared fixture, and its value matrix (row-major: a, b, c).
 D = {"a": [3.0, 1.0, 2.0, nan], "b": [10.0, nan, 30.0, 40.0], "c": [5.0, 6.0, 7.0, 8.0]}
+ROWS = [[3.0, 10.0, 5.0], [1.0, nan, 6.0], [2.0, 30.0, 7.0], [nan, 40.0, 8.0]]
+
+
+def _df():
+    return volas.DataFrame({k: list(v) for k, v in D.items()})
+
+
+def _eq(frame, expected):
+    got = np.asarray(frame.to_numpy(), dtype=float).reshape(-1)
+    exp = np.asarray(expected, dtype=float).reshape(-1)
+    assert got.shape == exp.shape, f"{got.shape} != {exp.shape}"
+    assert np.array_equal(got, exp, equal_nan=True), f"{got.tolist()} != {exp.tolist()}"
 
 
 @pytest.mark.parametrize("n", [0, 1, 2, 4, 10])
-def test_head_matches_pandas(n):
-    v, p = _pair(D)
-    _same(v.head(n), p.head(n))
+def test_head(n):
+    _eq(_df().head(n), ROWS[:n])
 
 
 @pytest.mark.parametrize("n", [1, 2, 4, 10])
-def test_tail_matches_pandas(n):
-    v, p = _pair(D)
-    _same(v.tail(n), p.tail(n))
+def test_tail(n):
+    _eq(_df().tail(n), ROWS[-n:])
 
 
-@pytest.mark.parametrize("how", ["any", "all"])
-def test_dropna_matches_pandas(how):
-    v, p = _pair(D)
-    _same(v.dropna(how), p.dropna(how=how))
+def test_dropna_any_drops_rows_with_any_nan():
+    _eq(_df().dropna("any"), [ROWS[0], ROWS[2]])   # rows 1 & 3 have a NaN
 
 
-def test_dropna_all_only_drops_fully_nan_rows():
-    cols = {"a": [1.0, nan, nan], "b": [2.0, nan, 5.0]}
-    v, p = _pair(cols)
-    _same(v.dropna("all"), p.dropna(how="all"))
+def test_dropna_all_keeps_partial_rows():
+    _eq(_df().dropna("all"), ROWS)                  # no row is entirely NaN
 
 
-@pytest.mark.parametrize("ascending", [True, False])
-def test_sort_index_matches_pandas(ascending):
-    v, p = _pair(D)
-    _same(v.sort_index(ascending), p.sort_index(ascending=ascending))
+def test_dropna_all_drops_only_fully_nan_rows():
+    df = volas.DataFrame({"a": [1.0, nan, nan], "b": [2.0, nan, 5.0]})
+    _eq(df.dropna("all"), [[1.0, 2.0], [nan, 5.0]])  # only row 1 (all NaN) dropped
 
 
-def test_rename_columns_matches_pandas():
-    v, p = _pair(D)
-    vr = v.rename({"a": "A", "c": "Z"})
-    pr = p.rename(columns={"a": "A", "c": "Z"})
-    assert vr.columns == list(pr.columns)
-    _same(vr, pr)
+def test_sort_index_ascending_is_identity_on_rangeindex():
+    _eq(_df().sort_index(True), ROWS)
+
+
+def test_sort_index_descending_reverses_rows():
+    _eq(_df().sort_index(False), ROWS[::-1])
+
+
+def test_rename_columns():
+    r = _df().rename({"a": "A", "c": "Z"})
+    assert r.columns == ["A", "b", "Z"]
+    _eq(r, ROWS)                                    # values unchanged
 
 
 def test_set_index_moves_column_to_index():
-    cols = {"A": [1.0, 2.0, 3.0], "k": [7, 8, 9]}
-    v, p = _pair(cols)
-    vi, pi = v.set_index("k"), p.set_index("k")
-    assert vi.columns == list(pi.columns)  # 'k' removed from the columns
-    assert np.asarray(vi.index).tolist() == list(pi.index)
-    _same(vi, pi)
+    v = volas.DataFrame({"A": [1.0, 2.0, 3.0], "k": [7, 8, 9]}).set_index("k")
+    assert v.columns == ["A"]                       # 'k' removed from the columns
+    assert np.asarray(v.index).tolist() == [7, 8, 9]
+    _eq(v, [[1.0], [2.0], [3.0]])
 
 
-def test_astype_to_int_matches_pandas():
-    v, p = _pair({"a": [1.0, 2.0, 3.0]})
-    vi = v.astype({"a": "int64"})
-    assert dict(vi.dtypes)["a"] == "int64"
-    _same(vi, p.astype({"a": "int64"}))
+def test_astype_to_int():
+    v = volas.DataFrame({"a": [1.0, 2.0, 3.0]}).astype({"a": "int64"})
+    assert dict(v.dtypes)["a"] == "int64"
+    _eq(v, [[1.0], [2.0], [3.0]])
 
 
 def test_dtypes_reports_float_and_bool():
@@ -95,12 +90,10 @@ def test_dtypes_reports_float_and_bool():
     assert dict(v.dtypes) == {"a": "float64", "f": "bool"}
 
 
-def test_to_numpy_matches_pandas():
-    v, p = _pair(D)
-    assert np.array_equal(
-        np.asarray(v.to_numpy()), np.asarray(p.to_numpy()), equal_nan=True
-    )
+def test_to_numpy_is_float64_matrix():
+    v = _df()
     assert v.to_numpy().dtype == np.float64
+    _eq(v, ROWS)
 
 
 def test_copy_is_independent():
@@ -110,13 +103,12 @@ def test_copy_is_independent():
     assert np.asarray(c["a"].to_numpy(), dtype=float).tolist() == [1.0, 2.0, 3.0]
 
 
-def test_reset_index_drop_true_matches_pandas():
-    cols = {"A": [1.0, 2.0, 3.0], "k": [7, 8, 9]}
-    v, p = _pair(cols)
-    vr = v.set_index("k").reset_index(True)
-    pr = p.set_index("k").reset_index(drop=True)
-    assert vr.columns == list(pr.columns)
-    _same(vr, pr)
+def test_reset_index_drop_true():
+    v = volas.DataFrame({"A": [1.0, 2.0, 3.0], "k": [7, 8, 9]}).set_index("k")
+    r = v.reset_index(True)
+    assert r.columns == ["A"]
+    assert np.asarray(r.index).tolist() == [0, 1, 2]
+    _eq(r, [[1.0], [2.0], [3.0]])
 
 
 def test_reset_index_uses_conventional_name():
