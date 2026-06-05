@@ -34,6 +34,7 @@ The difference is speed that **volas** beats every solution in terms of indicato
 - [Quick start](#quick-start)
 - [API at a glance](#api-at-a-glance)
 - [Usage](#usage)
+- [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex)
 - [Syntax of directive](#syntax-of-directive)
 - [Built-in indicators](#built-in-indicators)
 - [Indexing & selection](#indexing--selection)
@@ -41,7 +42,6 @@ The difference is speed that **volas** beats every solution in terms of indicato
 - [Reading CSV](#reading-csv)
 - [Timezones](#timezones)
 - [pandas interop](#pandas-interop)
-- [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex)
 - [Error handling](#error-handling)
 - [Design notes & non-goals](#design-notes--non-goals)
 - [Development](#development)
@@ -170,7 +170,7 @@ backed by a Rust kernel and has no pandas runtime dependency.
 
 ```py
 import volas
-stock = volas.read_csv('stock.csv')
+df = volas.read_csv('stock.csv')
 ```
 
 As we know, we could use `[]`, which is called **pandas indexing** (a.k.a.
@@ -179,22 +179,22 @@ indexing with `colname` (the column name of the `DataFrame`), we could also do
 indexing by `directive`s.
 
 ```py
-stock[directive]                  # Gets a volas.Series
+df[directive]                  # Gets a volas.Series
 
-stock[[directive0, directive1]]   # Gets a volas.DataFrame
+df[[directive0, directive1]]   # Gets a volas.DataFrame
 ```
 
 We have an example to show the most basic indexing using `[directive]`
 
 ```py
-stock = DataFrame({
+df = DataFrame({
     'open' : ...,
     'high' : ...,
     'low'  : ...,
     'close': [5, 6, 7, 8, 9]
 })
 
-stock['ma:2']
+df['ma:2']
 
 # 0    NaN
 # 1    5.5
@@ -217,32 +217,32 @@ Which gets the 2-period simple moving average on column `"close"`.
 - **date_unit** `Optional[str] = None` The unit of integer epoch timestamps
   (`'s'`, `'ms'`, `'us'`, `'ns'`). See [Timezones](#timezones).
 
-### stock.exec(directive: str, create_column: bool = False) -> np.ndarray
+### df.exec(directive: str, create_column: bool = False) -> np.ndarray
 
 Executes the given directive and returns a numpy ndarray according to the
 directive.
 
 ```py
-stock['ma:5']  # returns a Series
+df['ma:5']  # returns a Series
 
-stock.exec('ma:5', create_column=True)  # returns a numpy ndarray
+df.exec('ma:5', create_column=True)  # returns a numpy ndarray
 ```
 
 ```py
 # This will only calculate without creating a new column in the dataframe
-stock.exec('ma:20')
+df.exec('ma:20')
 ```
 
-The difference between `stock[directive]` and `stock.exec(directive)` is that
+The difference between `df[directive]` and `df.exec(directive)` is that
 - the former will create a new column for the result of `directive` as a cache
-  for later use, while `stock.exec(directive)` does not unless we pass the
+  for later use, while `df.exec(directive)` does not unless we pass the
   parameter `create_column` as `True`
 - the former one accepts other pandas indexing targets, while
-  `stock.exec(directive)` only accepts a valid **volas** directive string
+  `df.exec(directive)` only accepts a valid **volas** directive string
 - the former one returns a `volas.Series` or `volas.DataFrame` object while the
   latter one returns an [`np.ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html)
 
-### stock.alias(as_name: str, src_name: str) -> None
+### df.alias(as_name: str, src_name: str) -> None
 
 Defines a column alias.
 
@@ -252,18 +252,18 @@ Defines a column alias.
 ```py
 # Some plot libraries such as `mplfinance` require a column named capitalized
 # `Open`, but it is ok, we could create an alias.
-stock.alias('Open', 'open')
+df.alias('Open', 'open')
 ```
 
 The alias resolves everywhere a column is looked up, **including inside
 directives**, and survives `drop` / `copy` / slicing.
 
 ```py
-stock['Open']        # same data as stock['open']
-stock['ma:5@Open']   # the alias resolves inside directives too
+df['Open']        # same data as df['open']
+df['ma:5@Open']   # the alias resolves inside directives too
 ```
 
-### stock.get_column(key: str) -> Series
+### df.get_column(key: str) -> Series
 
 Directly gets the column value by `key`, returning a volas `Series`.
 
@@ -271,14 +271,14 @@ If the given `key` is an alias name, it returns the value of the corresponding
 original column. If the column is not found, a `KeyError` is raised.
 
 ```py
-stock = DataFrame({
+df = DataFrame({
     'open' : ...,
     'high' : ...,
     'low'  : ...,
     'close': [5, 6, 7, 8, 9]
 })
 
-stock.get_column('close')
+df.get_column('close')
 # 0    5
 # 1    6
 # 2    7
@@ -287,14 +287,14 @@ stock.get_column('close')
 # Name: close, dtype: float64
 ```
 
-### stock.append(other) -> DataFrame
+### df.append(other) -> DataFrame
 
 Appends rows of `other` (a `DataFrame` or a `Row`) to the end of the caller,
 returning a new object, and applies the `DatetimeIndex` to the newly-appended
 row(s) if possible.
 
 By default, appending new rows does not update the indicator columns of the new
-rows; they stay stale until they are read again or until `stock.fulfill()` is
+rows; they stay stale until they are read again or until `df.fulfill()` is
 called (see below).
 
 ### volas.rolling_calc(values, window, apply, forward=False, fill=nan) -> np.ndarray
@@ -312,13 +312,13 @@ as a directive.
   form a full window
 
 ```py
-volas.rolling_calc(stock['high'], 5, max)
+volas.rolling_calc(df['high'], 5, max)
 
 # Whose return value equals to
-stock['hhv:5@high'].to_numpy()
+df['hhv:5@high'].to_numpy()
 ```
 
-### stock.cumulate(time_frame, cumulators=None) -> DataFrame
+### df.cumulate(time_frame, cumulators=None) -> DataFrame
 
 Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
 `DataFrame`. Requires a `DatetimeIndex`.
@@ -347,22 +347,22 @@ for bar in stream:        # each `bar` is a 1-row DataFrame
 
 See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
 
-### stock.fulfill() -> None
+### df.fulfill() -> None
 
 Fulfill all indicator columns. By default, adding new rows to a `DataFrame` will
 not update the indicators of the new rows.
 
 Indicators are only updated when accessing the indicator column or calling
-`stock.fulfill()`. Accessing `stock[directive]` refreshes only the affected tail
+`df.fulfill()`. Accessing `df[directive]` refreshes only the affected tail
 incrementally (`O(lookback)`, not an `O(n)` recompute); for bulk reads
 (`to_numpy()`, `.iloc`) call `fulfill()` once to batch-refresh every cached
 directive column in place.
 
 ```py
-stock['ma:20']                 # cache the 20-period SMA as a column
-stock = stock.append(new_bar)  # the new row's ma:20 is stale (NaN)
-stock.fulfill()                # recompute only the tail of every cached column
-stock.to_numpy()               # now fresh
+df['ma:20']                 # cache the 20-period SMA as a column
+df = df.append(new_bar)  # the new row's ma:20 is stale (NaN)
+df.fulfill()                # recompute only the tail of every cached column
+df.to_numpy()               # now fresh
 ```
 
 ### DataFrame.directive_stringify(directive: str) -> str
@@ -402,6 +402,101 @@ DataFrame.directive_lookback('repeat:5@(close > boll.upper)')
 # 23
 ```
 
+## Cumulation and DatetimeIndex
+
+Suppose we have a csv file containing kline data of a stock in the 1-minute time
+frame:
+
+```py
+csv = volas.read_csv(csv_path)
+
+print(csv)
+```
+
+```
+                   date   open   high    low  close    volume
+0   2020-01-01 00:00:00  329.4  331.6  327.6  328.8  14202519
+1   2020-01-01 00:01:00  330.0  332.0  328.0  331.0  13953191
+2   2020-01-01 00:02:00  332.8  332.8  328.4  331.0  10339120
+3   2020-01-01 00:03:00  332.0  334.2  330.2  331.0   9904468
+4   2020-01-01 00:04:00  329.6  330.2  324.9  324.9  13947162
+5   2020-01-01 00:04:00  329.6  330.2  324.8  324.8  13947163    <- an update of
+                                                                    2020-01-01 00:04:00
+...
+19  2020-01-01 00:19:00  327.0  327.2  322.0  323.0  15086985
+```
+
+> Note that duplicated records of the same timestamp are not cumulated. All
+> records except the latest one are discarded.
+
+Read the same csv, but parse the `date` column into a `DatetimeIndex`:
+
+```py
+df = volas.read_csv(
+    csv_path,
+    parse_dates=['date'],
+    index_col='date'
+)
+
+print(df)
+```
+
+```
+                      open   high    low  close    volume
+2020-01-01 00:00:00  329.4  331.6  327.6  328.8  14202519
+2020-01-01 00:01:00  330.0  332.0  328.0  331.0  13953191
+...
+2020-01-01 00:19:00  327.0  327.2  322.0  323.0  15086985
+```
+
+You must have figured it out that the data frame now has a
+[`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html).
+
+But it will not become a 5-minute kline unless we cumulate it:
+
+```py
+df_5m = df.cumulate('5m')
+
+print(df_5m)
+```
+
+Now we get a 5-minute kline:
+
+```
+                      open   high    low  close      volume
+2020-01-01 00:00:00  329.4  334.2  324.8  324.8  62346461.0
+2020-01-01 00:05:00  325.0  327.8  316.2  322.0  82176419.0
+2020-01-01 00:10:00  323.0  327.8  314.6  327.6  74409815.0
+2020-01-01 00:15:00  330.0  335.2  322.0  323.0  82452902.0
+```
+
+`cumulate` defaults to OHLCV semantics (`open`=first, `high`=max, `low`=min,
+`close`=last, `volume`=sum); pass `cumulators=` to override an aggregator:
+
+```py
+df.cumulate('1h', cumulators={'volume': 'last'})
+```
+
+Time frames: `'1s' '1m' '3m' '5m' '15m' '30m' '1h' '2h' '4h' '6h' '8h' '12h'
+'1d' '3d' '1w' '1M' '1y'` (or the `TimeFrame.s1 / m1 / m5 / H1 / D1 / W1 / M1 /
+Y1` constants).
+
+For **live** streaming, feed bars to a `Cumulator` and read the running result,
+instead of re-cumulating the whole frame each time:
+
+```py
+from volas import Cumulator
+
+cum = Cumulator('5m')
+for bar in stream:               # each `bar` is a 1-row DataFrame
+    cum.append(bar)
+    cum.frame                    # closed periods + the open period as a live last row
+    cum.last                     # just the current (still-open) period, aggregated
+```
+
+Re-sending a bar with a timestamp already seen **updates** that period (it does
+not double-count), which matches exchange data that revises the latest bar.
+
 ## Syntax of `directive`
 
 ```
@@ -420,23 +515,23 @@ Here lists several use cases of column names
 ```py
 # The middle band of bollinger bands
 #   which is actually a 20-period (default) moving average
-stock['boll']
+df['boll']
 
 # kdj j less than 0
 # This returns a series of bool type
-stock['kdj.j < 0']
+df['kdj.j < 0']
 
 # kdj %K cross up kdj %D
-stock['kdj.k // kdj.d']
+df['kdj.k // kdj.d']
 
 # 5-period simple moving average
-stock['ma:5']
+df['ma:5']
 
 # 10-period simple moving average on (@) open prices
-stock['ma:10@open']
+df['ma:10@open']
 
 # A DataFrame of 5-period, 10-period and 30-period ma
-stock[[
+df[[
     'ma:5',
     'ma:10',
     'ma:30'
@@ -444,14 +539,14 @@ stock[[
 
 # Which means we use the default values of the first and the second parameters,
 # and specify the third parameter (for macd.signal)
-stock['macd.signal:,,10']
+df['macd.signal:,,10']
 
 # We must wrap a parameter which is a nested command or directive
-stock['increase:3@(ma:20@close)']
+df['increase:3@(ma:20@close)']
 
 # volas has a powerful directive parser,
 # so we could even write directives like this:
-stock['''
+df['''
 repeat
     :   5
     @   (
@@ -467,7 +562,7 @@ left operator right
 ```
 
 - `//` — whether `left` **crosses up** through `right` (from below to above),
-  which we call a "gold cross": `stock['macd // macd.signal']`.
+  which we call a "gold cross": `df['macd // macd.signal']`.
 - `\\` — whether `left` **crosses down** through `right`, a "dead cross". In a
   Python string the backslash must be escaped, so we write `'macd \\ macd.signal'`.
 - `><` — whether `left` crosses `right`, either up or down.
@@ -475,9 +570,9 @@ left operator right
   `left` and `right`, returning a `bool` series.
 - arithmetic `+ - * /`, logical `& | ^`, and unary `~` (not) / `-` (negate).
 
-`stock[directive]` **caches** the result as a real column (so repeated reads are
+`df[directive]` **caches** the result as a real column (so repeated reads are
 free), then auto-refreshes its stale tail on access after an `append`. Use
-`stock.exec(directive)` to compute a directive as a NumPy array **without**
+`df.exec(directive)` to compute a directive as a NumPy array **without**
 caching it (see [Usage](#usage)).
 
 ## Built-in indicators
@@ -690,101 +785,6 @@ df = volas.from_pandas(pandas_df)      # numeric/bool native; a DatetimeIndex ro
 pdf = df.to_pandas()                   # -> pandas.DataFrame
 df.to_csv('out.csv', index=True)       # subset of pandas to_csv; returns a str if path=None
 ```
-
-## Cumulation and DatetimeIndex
-
-Suppose we have a csv file containing kline data of a stock in the 1-minute time
-frame:
-
-```py
-csv = volas.read_csv(csv_path)
-
-print(csv)
-```
-
-```
-                   date   open   high    low  close    volume
-0   2020-01-01 00:00:00  329.4  331.6  327.6  328.8  14202519
-1   2020-01-01 00:01:00  330.0  332.0  328.0  331.0  13953191
-2   2020-01-01 00:02:00  332.8  332.8  328.4  331.0  10339120
-3   2020-01-01 00:03:00  332.0  334.2  330.2  331.0   9904468
-4   2020-01-01 00:04:00  329.6  330.2  324.9  324.9  13947162
-5   2020-01-01 00:04:00  329.6  330.2  324.8  324.8  13947163    <- an update of
-                                                                    2020-01-01 00:04:00
-...
-19  2020-01-01 00:19:00  327.0  327.2  322.0  323.0  15086985
-```
-
-> Note that duplicated records of the same timestamp are not cumulated. All
-> records except the latest one are discarded.
-
-Read the same csv, but parse the `date` column into a `DatetimeIndex`:
-
-```py
-stock = volas.read_csv(
-    csv_path,
-    parse_dates=['date'],
-    index_col='date'
-)
-
-print(stock)
-```
-
-```
-                      open   high    low  close    volume
-2020-01-01 00:00:00  329.4  331.6  327.6  328.8  14202519
-2020-01-01 00:01:00  330.0  332.0  328.0  331.0  13953191
-...
-2020-01-01 00:19:00  327.0  327.2  322.0  323.0  15086985
-```
-
-You must have figured it out that the data frame now has a
-[`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html).
-
-But it will not become a 5-minute kline unless we cumulate it:
-
-```py
-stock_5m = stock.cumulate('5m')
-
-print(stock_5m)
-```
-
-Now we get a 5-minute kline:
-
-```
-                      open   high    low  close      volume
-2020-01-01 00:00:00  329.4  334.2  324.8  324.8  62346461.0
-2020-01-01 00:05:00  325.0  327.8  316.2  322.0  82176419.0
-2020-01-01 00:10:00  323.0  327.8  314.6  327.6  74409815.0
-2020-01-01 00:15:00  330.0  335.2  322.0  323.0  82452902.0
-```
-
-`cumulate` defaults to OHLCV semantics (`open`=first, `high`=max, `low`=min,
-`close`=last, `volume`=sum); pass `cumulators=` to override an aggregator:
-
-```py
-stock.cumulate('1h', cumulators={'volume': 'last'})
-```
-
-Time frames: `'1s' '1m' '3m' '5m' '15m' '30m' '1h' '2h' '4h' '6h' '8h' '12h'
-'1d' '3d' '1w' '1M' '1y'` (or the `TimeFrame.s1 / m1 / m5 / H1 / D1 / W1 / M1 /
-Y1` constants).
-
-For **live** streaming, feed bars to a `Cumulator` and read the running result,
-instead of re-cumulating the whole frame each time:
-
-```py
-from volas import Cumulator
-
-cum = Cumulator('5m')
-for bar in stream:               # each `bar` is a 1-row DataFrame
-    cum.append(bar)
-    cum.frame                    # closed periods + the open period as a live last row
-    cum.last                     # just the current (still-open) period, aggregated
-```
-
-Re-sending a bar with a timestamp already seen **updates** that period (it does
-not double-count), which matches exchange data that revises the latest bar.
 
 ## Error handling
 
