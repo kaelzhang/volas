@@ -461,4 +461,17 @@ mod tests {
         // parse_number scans digits/'.' greedily, so "1.2.3" fails f64 parsing
         assert!(parse("1.2.3").is_err());
     }
+
+    #[test]
+    fn parse_memo_hit_and_eviction() {
+        // Each test runs on its own thread, so the thread-local parse memo starts
+        // empty. A repeated parse returns the cached AST (the cache-hit branch), and
+        // parsing past the 512-entry bound clears the memo wholesale (the eviction
+        // branch) — both invisible to the rest of the suite.
+        assert_eq!(parse("ma:5").unwrap(), parse("ma:5").unwrap()); // 2nd hits the cache
+        for i in 0..600 {
+            let _ = parse(&format!("ma:{i}")).unwrap(); // crosses 512 -> wholesale clear
+        }
+        assert_eq!(parse("ma:5").unwrap(), parse("ma:5").unwrap()); // correct post-eviction
+    }
 }
