@@ -227,6 +227,101 @@ fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usi
     s.factor * base / div
 }
 
+/// TA-Lib's `TA_CANDLEAVERAGE` precomputed for **every** bar in O(n): a running window
+/// sum of the setting's range over `[i-avg_period, i-1]` replaces [`candle_average`]'s
+/// per-bar O(avg_period) rescan (the dominant cost of most CDL patterns — TA-Lib itself
+/// slides this total). `out[i]` is valid for `i >= avg_period`; callers read only
+/// `i >= lookback >= avg_period`. For `avg_period == 0` it is the bar's own range. The
+/// final scaling keeps TA-Lib's exact `factor·(total/period)/div` order.
+fn candle_average_series(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+    let n = c.len();
+    let mut out = vec![0.0; n];
+    let div = if matches!(s.range, RangeType::Shadows) {
+        2.0
+    } else {
+        1.0
+    };
+    if s.avg_period == 0 {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = s.factor * range(s, o, h, l, c, i) / div;
+        }
+        return out;
+    }
+    let p = s.avg_period;
+    if p > n {
+        return out;
+    }
+    let pf = p as f64;
+    // Seed the window [0, p-1] (so the first valid average lands at i = p), then slide
+    // add-new / subtract-trailing — one range evaluation per bar instead of `p`.
+    let mut total = 0.0;
+    for j in 0..p {
+        total += range(s, o, h, l, c, j);
+    }
+    for i in p..n {
+        out[i] = s.factor * (total / pf) / div;
+        total += range(s, o, h, l, c, i) - range(s, o, h, l, c, i - p);
+    }
+    out
+}
+
+/// Per-bar pattern builder that carries a **scalar** running window-sum for each of the
+/// `K` settings (TA-Lib's own approach), so a pattern reads its candle averages in O(1)
+/// per bar with no per-bar rescan and no materialised average arrays. Each total is
+/// seeded over `[lookback - avg_period, lookback - 1]` (TA-Lib's trailing-index start)
+/// and slid add-new / subtract-trailing; `avgs[k]` handed to `f` is `settings[k]`'s
+/// average at bar `i` (window `[i-avg_period, i-1]`; the bar's own range when
+/// `avg_period == 0`). NaN before `lookback`.
+#[inline]
+fn each_bar_avg<const K: usize>(
+    settings: [Setting; K],
+    lookback: usize,
+    o: &[f64],
+    h: &[f64],
+    l: &[f64],
+    c: &[f64],
+    f: impl Fn(usize, &[f64; K]) -> f64,
+) -> Vec<f64> {
+    let n = c.len();
+    let mut out = vec![f64::NAN; n];
+    if lookback >= n {
+        return out;
+    }
+    let mut total = [0.0f64; K];
+    for k in 0..K {
+        let s = settings[k];
+        if s.avg_period != 0 {
+            for j in (lookback - s.avg_period)..lookback {
+                total[k] += range(s, o, h, l, c, j);
+            }
+        }
+    }
+    let mut avgs = [0.0f64; K];
+    for i in lookback..n {
+        for k in 0..K {
+            let s = settings[k];
+            let div = if matches!(s.range, RangeType::Shadows) {
+                2.0
+            } else {
+                1.0
+            };
+            avgs[k] = if s.avg_period != 0 {
+                s.factor * (total[k] / s.avg_period as f64) / div
+            } else {
+                s.factor * range(s, o, h, l, c, i) / div
+            };
+        }
+        out[i] = f(i, &avgs);
+        for k in 0..K {
+            let s = settings[k];
+            if s.avg_period != 0 {
+                total[k] += range(s, o, h, l, c, i) - range(s, o, h, l, c, i - s.avg_period);
+            }
+        }
+    }
+    out
+}
+
 /// Build a per-bar pattern column: NaN before `lookback`, then `f(i)` (0 / ±100 / ±80)
 /// per bar. Shared by all pattern submodules.
 #[inline]
