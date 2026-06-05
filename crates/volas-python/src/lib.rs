@@ -1275,6 +1275,21 @@ impl PyDataFrame {
             let sub = self.inner.filter_mask(arr.as_slice()?).map_err(pyerr)?;
             return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
         }
+        // boolean mask as a plain Python list (df[[True, False, ...]]). An empty
+        // list is an empty column projection, not a mask, so it falls through.
+        if let Ok(mask) = key.extract::<Vec<bool>>() {
+            if !mask.is_empty() {
+                if mask.len() != self.inner.height() {
+                    return Err(PyIndexError::new_err(format!(
+                        "boolean index has wrong length: {} instead of {}",
+                        mask.len(),
+                        self.inner.height()
+                    )));
+                }
+                let sub = self.inner.filter_mask(&mask).map_err(pyerr)?;
+                return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
+            }
+        }
         // label / positional slice: df[:'date'], df[1:5]
         if let Ok(slice) = key.downcast::<PySlice>() {
             let sub = slice_frame(&self.inner, slice)?;
@@ -1784,6 +1799,135 @@ fn loc_positions(sel: &Bound<'_, PyAny>, index: &Index, height: usize) -> PyResu
     Ok(vec![pos])
 }
 
+/// One axis of a 2-D `iloc` / `loc` get: a single scalar position (the axis is
+/// reduced away, pandas-style) or a list of positions (the axis is kept).
+enum AxisSel {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+/// Resolve an `iloc` row axis: a bare int reduces the axis (`AxisSel::One`); a
+/// slice / int-list / boolean mask keeps it (`AxisSel::Many`).
+fn iloc_row_axis(sel: &Bound<'_, PyAny>, height: usize) -> PyResult<AxisSel> {
+    if let Ok(i) = sel.extract::<isize>() {
+        return Ok(AxisSel::One(norm_idx(i, height)?));
+    }
+    Ok(AxisSel::Many(iloc_positions(sel, height)?))
+}
+
+/// Resolve an `iloc` column axis (int / slice / int-list) to column positions.
+fn iloc_col_axis(sel: &Bound<'_, PyAny>, width: usize) -> PyResult<AxisSel> {
+    if let Ok(j) = sel.extract::<isize>() {
+        return Ok(AxisSel::One(norm_idx(j, width)?));
+    }
+    if let Ok(slice) = sel.downcast::<PySlice>() {
+        let info = slice.indices(width as isize)?;
+        return Ok(AxisSel::Many(strided(info.start, info.stop, info.step)));
+    }
+    if let Ok(idxs) = sel.extract::<Vec<isize>>() {
+        return Ok(AxisSel::Many(
+            idxs.into_iter()
+                .map(|j| norm_idx(j, width))
+                .collect::<PyResult<_>>()?,
+        ));
+    }
+    Err(PyTypeError::new_err(
+        "iloc column selector must be an int, slice, or int list",
+    ))
+}
+
+/// Resolve a `loc` row axis: a single label reduces the axis (`AxisSel::One`); a
+/// label-slice / label-list / boolean mask keeps it (`AxisSel::Many`).
+fn loc_row_axis(sel: &Bound<'_, PyAny>, index: &Index, height: usize) -> PyResult<AxisSel> {
+    if as_bool_mask(sel, height).is_some()
+        || sel.downcast::<PySlice>().is_ok()
+        || sel.downcast::<PyList>().is_ok()
+    {
+        return Ok(AxisSel::Many(loc_positions(sel, index, height)?));
+    }
+    let label = parse_label(sel, index)?;
+    let pos = index
+        .position_of(&label)
+        .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+    Ok(AxisSel::One(pos))
+}
+
+/// Resolve a `loc` column axis (name / name-list / inclusive name-slice) to
+/// column positions.
+fn loc_col_axis(sel: &Bound<'_, PyAny>, df: &DataFrame) -> PyResult<AxisSel> {
+    let pos_of = |name: &str| {
+        df.column_pos(name)
+            .ok_or_else(|| PyKeyError::new_err(format!("column {name:?} not found")))
+    };
+    if let Ok(name) = sel.extract::<String>() {
+        return Ok(AxisSel::One(pos_of(&name)?));
+    }
+    if let Ok(names) = sel.extract::<Vec<String>>() {
+        return Ok(AxisSel::Many(
+            names.iter().map(|n| pos_of(n)).collect::<PyResult<_>>()?,
+        ));
+    }
+    if let Ok(slice) = sel.downcast::<PySlice>() {
+        let start = slice.getattr("start")?;
+        let stop = slice.getattr("stop")?;
+        let lo = if start.is_none() {
+            0
+        } else {
+            pos_of(&start.extract::<String>()?)?
+        };
+        let hi = if stop.is_none() {
+            df.width().saturating_sub(1)
+        } else {
+            pos_of(&stop.extract::<String>()?)?
+        };
+        return Ok(AxisSel::Many((lo..=hi).collect()));
+    }
+    Err(PyTypeError::new_err(
+        "loc column selector must be a name, name list, or name slice",
+    ))
+}
+
+/// Project `df` onto `cols` (by position), carrying the index — the column-axis
+/// counterpart of `DataFrame::take` (which selects rows).
+fn project_cols(df: &DataFrame, cols: &[usize]) -> PyResult<DataFrame> {
+    let names: Vec<String> = cols.iter().map(|&j| df.names()[j].clone()).collect();
+    let data: Vec<Column> = cols.iter().map(|&j| df.columns()[j].clone()).collect();
+    let idx = (*df.index().as_ref()).clone();
+    DataFrame::new(names, data, Some(idx)).map_err(pyerr)
+}
+
+/// Build a 2-D `iloc` / `loc` get result from already-resolved row & column
+/// positions, reproducing pandas's shape rules: scalar×scalar -> cell,
+/// rows×col -> a column Series, row×cols -> the row (volas's 1-row frame), and
+/// rows×cols -> a sub-frame.
+fn select_2d(
+    py: Python<'_>,
+    df: &DataFrame,
+    rows: AxisSel,
+    cols: AxisSel,
+) -> PyResult<Py<PyAny>> {
+    match (rows, cols) {
+        (AxisSel::One(i), AxisSel::One(j)) => Ok(scalar_to_py(py, &df.columns()[j], i)),
+        (AxisSel::Many(r), AxisSel::One(j)) => {
+            let sub = project_cols(df, &[j])?.take(&r);
+            let name = sub.names()[0].clone();
+            let col = sub.columns()[0].clone();
+            let series = PySeries {
+                inner: Series::new(Some(name), col, Arc::clone(sub.index())),
+            };
+            Ok(Py::new(py, series)?.into_any())
+        }
+        (AxisSel::One(i), AxisSel::Many(c)) => {
+            let sub = project_cols(df, &c)?.take(&[i]);
+            Ok(Py::new(py, PyRow { inner: sub })?.into_any())
+        }
+        (AxisSel::Many(r), AxisSel::Many(c)) => {
+            let sub = project_cols(df, &c)?.take(&r);
+            Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any())
+        }
+    }
+}
+
 /// Split a `df.loc[rows, col]` / `df.iloc[rows, col]` assignment key into its two
 /// parts, with a clear error directing to the supported 2-tuple form.
 fn split_row_col<'py>(
@@ -1813,6 +1957,14 @@ impl DataFrameILoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
         ensure_fresh(&pf.inner)?;
+        // 2-D positional get: df.iloc[rows, cols], symmetric with __setitem__.
+        if let Ok(tup) = key.downcast::<PyTuple>() {
+            if tup.len() == 2 {
+                let rows = iloc_row_axis(&tup.get_item(0)?, pf.inner.height())?;
+                let cols = iloc_col_axis(&tup.get_item(1)?, pf.inner.width())?;
+                return select_2d(py, &pf.inner, rows, cols);
+            }
+        }
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, pf.inner.height())?;
             return Ok(Py::new(py, row_at(&pf.inner, i))?.into_any());
@@ -1822,7 +1974,9 @@ impl DataFrameILoc {
             let sub = positional_slice(&pf.inner, &info);
             return Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any());
         }
-        Err(PyIndexError::new_err("iloc key must be an integer or slice"))
+        // int-list / boolean-mask row selection -> sub-frame.
+        let positions = iloc_positions(key, pf.inner.height())?;
+        Ok(Py::new(py, PyDataFrame { inner: take_frame(&pf.inner, &positions) })?.into_any())
     }
 
     /// `df.iloc[i, j] = scalar` or `df.iloc[rows, j] = scalar | array` (positional;
@@ -1953,10 +2107,25 @@ impl DataFrameLoc {
         let pf = self.parent.borrow(py);
         ensure_fresh(&pf.inner)?;
         let index = pf.inner.index();
+        // 2-D label get: df.loc[rows, col], symmetric with __setitem__.
+        if let Ok(tup) = key.downcast::<PyTuple>() {
+            if tup.len() == 2 {
+                let rows = loc_row_axis(&tup.get_item(0)?, index, pf.inner.height())?;
+                let cols = loc_col_axis(&tup.get_item(1)?, &pf.inner)?;
+                return select_2d(py, &pf.inner, rows, cols);
+            }
+        }
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, index)?;
             let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
             return Ok(Py::new(py, PyDataFrame { inner: pf.inner.slice(a, b) })?.into_any());
+        }
+        // boolean-mask / label-list row selection -> sub-frame.
+        if as_bool_mask(key, pf.inner.height()).is_some() || key.downcast::<PyList>().is_ok() {
+            let positions = loc_positions(key, index, pf.inner.height())?;
+            return Ok(
+                Py::new(py, PyDataFrame { inner: take_frame(&pf.inner, &positions) })?.into_any(),
+            );
         }
         let label = parse_label(key, index)?;
         let pos = index
