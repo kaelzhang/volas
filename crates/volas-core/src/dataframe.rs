@@ -20,6 +20,14 @@ pub struct ComputedMeta {
     pub lookback: usize,
     /// Rows `[0, valid_rows)` currently hold valid values.
     pub valid_rows: usize,
+    /// Carried recursive state for an O(new-rows) append resume: a small,
+    /// fixed-size per-indicator vector capturing the internal recursive state as
+    /// of the last valid row (`valid_rows - 1`), so an `append`/`fulfill` can
+    /// continue the recursion over only the new rows, bit-identical to a fresh
+    /// full recompute. `None` when the directive has no resume implementation (it
+    /// then falls back to the correct full recompute) or the state is unknown
+    /// (e.g. after a slice that did not reach the parent's `valid_rows`).
+    pub state: Option<Vec<f64>>,
 }
 
 /// A 2-D, column-oriented, time-indexed table. All columns share one index and
@@ -316,12 +324,26 @@ impl DataFrame {
         for (name, meta) in &self.computed {
             if len >= meta.lookback {
                 let valid = meta.valid_rows.saturating_sub(start).min(len);
+                // Carry the recursive state only when this slice's END reaches the
+                // parent's `valid_rows`: the captured state is the internal state as
+                // of the parent row `valid_rows - 1`, which is THIS sub-frame's last
+                // valid row exactly when `start + len >= valid_rows` (so `valid` ==
+                // the parent's last-valid offset). A shorter slice (end before
+                // `valid_rows`) would leave the state attached to a row the sub-frame
+                // no longer ends on, so we drop it (the column stays correct via the
+                // full-recompute fallback, just not O(new-rows) continuable).
+                let carried = if end >= meta.valid_rows {
+                    meta.state.clone()
+                } else {
+                    None
+                };
                 df.computed.insert(
                     name.clone(),
                     ComputedMeta {
                         directive: meta.directive.clone(),
                         lookback: meta.lookback,
                         valid_rows: valid,
+                        state: carried,
                     },
                 );
             }
@@ -407,8 +429,18 @@ impl DataFrame {
                 directive,
                 lookback,
                 valid_rows: self.height,
+                state: None,
             },
         );
+    }
+
+    /// Attach (or replace) the carried recursive [`ComputedMeta::state`] for a
+    /// cached column, enabling an O(new-rows) append resume. No-op if `name` is
+    /// not a tracked computed column.
+    pub fn set_computed_state(&mut self, name: &str, state: Option<Vec<f64>>) {
+        if let Some(meta) = self.computed.get_mut(name) {
+            meta.state = state;
+        }
     }
 
     /// Whether any materialized directive column is stale (its `valid_rows` lags
@@ -595,6 +627,10 @@ impl DataFrame {
         self.drop_computed_at(col);
         for meta in self.computed.values_mut() {
             meta.valid_rows = 0;
+            // The carried recursive state described row `valid_rows - 1`; resetting
+            // `valid_rows` to 0 breaks that correspondence, so drop it. A later refresh
+            // recomputes from scratch (correct) and repopulates the state.
+            meta.state = None;
         }
     }
 
@@ -603,6 +639,7 @@ impl DataFrame {
         self.computed.remove(written_name);
         for meta in self.computed.values_mut() {
             meta.valid_rows = 0;
+            meta.state = None;
         }
     }
 

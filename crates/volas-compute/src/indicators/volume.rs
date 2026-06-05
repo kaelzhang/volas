@@ -28,6 +28,147 @@ pub fn obv(real: &[f64], volume: &[f64]) -> Vec<f64> {
     out
 }
 
+/// Final OBV state `[running_obv, prev_real]` after a full [`obv`] compute over
+/// `real`/`volume` — the seed an [`obv_resume`] needs to continue at row `n`.
+/// Mirrors [`obv`]'s recurrence exactly (seed `obv = volume[0]`, `prev = real[0]`).
+/// `None` for an empty series (no state to carry).
+pub fn obv_final_state(real: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
+    let n = real.len();
+    if n == 0 {
+        return None;
+    }
+    let mut obv = volume[0];
+    let mut prev = real[0];
+    for i in 1..n {
+        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
+        obv += dir * volume[i];
+        prev = real[i];
+    }
+    Some(vec![obv, prev])
+}
+
+/// Final AD state `[running_ad]` after a full [`ad`] compute. `None` for an empty
+/// series.
+pub fn ad_final_state(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
+    let n = close.len();
+    if n == 0 {
+        return None;
+    }
+    let mut ad = 0.0;
+    for i in 0..n {
+        ad += money_flow_volume(high[i], low[i], close[i], volume[i]);
+    }
+    Some(vec![ad])
+}
+
+/// Final ADOSC state `[ad_line, fast_ema, slow_ema]` after a full [`adosc`]
+/// compute. Mirrors [`adosc`]'s exact fused EMA recurrence so an [`adosc_resume`]
+/// continues on identical bits. `None` for an empty series.
+pub fn adosc_final_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    fast: usize,
+    slow: usize,
+) -> Option<Vec<f64>> {
+    let n = close.len();
+    if n == 0 {
+        return None;
+    }
+    let fastk = 2.0 / (fast as f64 + 1.0);
+    let slowk = 2.0 / (slow as f64 + 1.0);
+    let mut ad_line = money_flow_volume(high[0], low[0], close[0], volume[0]);
+    let mut fast_ema = ad_line;
+    let mut slow_ema = ad_line;
+    for i in 1..n {
+        ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
+        fast_ema = (ad_line - fast_ema).mul_add(fastk, fast_ema);
+        slow_ema = (ad_line - slow_ema).mul_add(slowk, slow_ema);
+    }
+    Some(vec![ad_line, fast_ema, slow_ema])
+}
+
+/// Resume OBV from a carried state over the new rows `[from, n)`, bit-identical to
+/// a full [`obv`] recompute. `state = [running_obv, prev_real]` is the internal
+/// state as of row `from - 1` (the last valid row). Returns the values for rows
+/// `[from, n)` and the new `[running_obv, prev_real]` state as of row `n - 1`.
+///
+/// `from >= 1` always (a fresh compute, `from == 0`, uses [`obv`] directly), and
+/// the recurrence reads only `real[from..]`/`volume[from..]` plus the carried
+/// `prev_real`, so it never reaches before `from` — sound after a head-dropping
+/// slice that retained none of the pre-`from` rows.
+pub fn obv_resume(real: &[f64], volume: &[f64], from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let n = real.len();
+    let mut obv = state[0];
+    let mut prev = state[1];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for i in from..n {
+        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
+        obv += dir * volume[i];
+        out.push(obv);
+        prev = real[i];
+    }
+    (out, vec![obv, prev])
+}
+
+/// Resume AD (Chaikin A/D line) from a carried state over the new rows `[from, n)`,
+/// bit-identical to a full [`ad`] recompute. `state = [running_ad]` as of row
+/// `from - 1`. AD's per-bar money-flow term is independent of prior bars, so only
+/// the running total is carried. Returns the new-row values and the updated
+/// `[running_ad]`.
+pub fn ad_resume(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let n = close.len();
+    let mut ad = state[0];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for i in from..n {
+        ad += money_flow_volume(high[i], low[i], close[i], volume[i]);
+        out.push(ad);
+    }
+    (out, vec![ad])
+}
+
+/// Resume ADOSC (Chaikin A/D Oscillator) from a carried state over the new rows
+/// `[from, n)`, bit-identical to a full [`adosc`] recompute.
+/// `state = [ad_line, fast_ema, slow_ema]` as of row `from - 1`. The two EMAs are
+/// advanced with TA-Lib's exact `(price − prev)·k + prev` (fused) recurrence — the
+/// same instruction sequence as [`adosc`], so the carried-state continuation lands
+/// on identical bits. `from > lookback` on every resume (the cached tail starts at
+/// `valid_rows == lookback + 1` at the earliest), so every emitted row is past the
+/// warm-up mask and finite. Returns the new-row values and the updated state.
+pub fn adosc_resume(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    fast: usize,
+    slow: usize,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let n = close.len();
+    let fastk = 2.0 / (fast as f64 + 1.0);
+    let slowk = 2.0 / (slow as f64 + 1.0);
+    let mut ad_line = state[0];
+    let mut fast_ema = state[1];
+    let mut slow_ema = state[2];
+    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    for i in from..n {
+        ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
+        fast_ema = (ad_line - fast_ema).mul_add(fastk, fast_ema);
+        slow_ema = (ad_line - slow_ema).mul_add(slowk, slow_ema);
+        out.push(fast_ema - slow_ema);
+    }
+    (out, vec![ad_line, fast_ema, slow_ema])
+}
+
 /// Money flow volume for one bar: `((close-low) - (high-close)) / (high-low) ·
 /// volume`, with a zero high-low range contributing nothing (TA-Lib's guard).
 #[inline]

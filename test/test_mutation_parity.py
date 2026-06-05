@@ -58,14 +58,14 @@ DIRECTIVES = list(COVERAGE_IDS)
 # continue correctly. Only test_slice_then_append is affected; xfail(strict) so a future
 # state-carry enhancement flips these to xpass.
 _SLICE_STATEFUL = frozenset({
-    'ad', 'adx:14', 'adxr:14', 'atr:14', 'cmo:14', 'dema:30', 'dx:14', 'ht_dcperiod',
+    'adx:14', 'adxr:14', 'atr:14', 'cmo:14', 'dema:30', 'dx:14', 'ht_dcperiod',
     'ht_dcphase', 'ht_phasor.inphase', 'ht_phasor.quadrature', 'ht_sine.leadsine',
     'ht_sine.sine', 'kama:30', 'macd', 'macd.histogram', 'macd.signal', 'macdfix',
     'macdfix.histogram', 'macdfix.signal', 'mama.fama', 'maxindex:30', 'minindex:30',
     'minmaxindex.max:30', 'minmaxindex.min:30', 'minus_di:14', 'minus_dm:14', 'natr:14',
-    'obv', 'plus_di:14', 'plus_dm:14', 'rsi:14', 'stochrsi.d', 'stochrsi.k', 'tema:30',
+    'plus_di:14', 'plus_dm:14', 'rsi:14', 'stochrsi.d', 'stochrsi.k', 'tema:30',
     'trix:30',
-})  # 36
+})  # 34 (was 36; obv + ad now state-carry-continuable across a slice)
 
 # BUG 2 (in-place update of a base column/row did not invalidate dependent cached
 # indicators) is FIXED — test_update_cell and test_update_column are exact for every

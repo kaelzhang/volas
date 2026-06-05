@@ -1183,6 +1183,25 @@ impl PyDataFrame {
         for (name, meta) in stale {
             let node = parse(&meta.directive).map_err(value_err)?;
             let (lb, vr) = (meta.lookback, meta.valid_rows);
+            // State-carry fast-path (additive): if this column carries a recursive
+            // state, continue the recursion over only the new rows `[vr, height)` —
+            // O(new rows), bit-identical to a full recompute — then refresh the carried
+            // state. This is the high-performance append path for recursive indicators
+            // (and continues correctly across a head-dropping slice, since the state is
+            // self-contained and the resume never reads before `vr`). On `None` (no
+            // resume kernel for this directive) we fall through to the existing
+            // probe / full-recompute path unchanged — always correct.
+            if let Some(state) = &meta.state {
+                if let Some((tail, new_state)) =
+                    volas_directive::exec::execute_resume(&base, &node, state, vr)
+                {
+                    self.inner
+                        .update_computed_tail(&name, vr, &tail)
+                        .map_err(pyerr)?;
+                    self.inner.set_computed_state(&name, Some(new_state));
+                    continue;
+                }
+            }
             // A finite-memory indicator (SMA, ROC, price transforms, CDL, …) depends
             // only on a fixed trailing window, so a windowed recompute is exact and
             // O(lookback). A recursive / stateful one (EMA / Wilder / MACD / SAR /
@@ -1212,6 +1231,17 @@ impl PyDataFrame {
             self.inner
                 .update_computed_tail(&name, vr, &tail)
                 .map_err(pyerr)?;
+            // The column is now valid for all rows. If this directive supports a
+            // resume, (re)capture its recursive state so the NEXT append takes the
+            // O(new-rows) fast-path. This repopulates state dropped by an invalidating
+            // base-column write or a head-dropping slice. `None` leaves it on the
+            // fallback. (`recomputed` is the full column on the full-recompute branch
+            // and the window tail otherwise; `initial_state` derives the cumulative
+            // family's state from the raw inputs in `base`, so either is fine.)
+            let new_state = volas_directive::exec::initial_state(&base, &node, &recomputed);
+            if new_state.is_some() {
+                self.inner.set_computed_state(&name, new_state);
+            }
         }
         Ok(())
     }
@@ -1543,8 +1573,13 @@ impl PyDataFrame {
             } else {
                 let col = execute(&self.inner, &node).map_err(value_err)?;
                 let lookback = volas_directive::lookback::lookback(&node);
+                // Capture the recursive state (if this directive supports an O(new-rows)
+                // resume) BEFORE moving the column in, so a later append/fulfill can
+                // continue without a full recompute. `None` for non-resumable directives.
+                let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
                 self.inner.set_column(&canonical, col).map_err(pyerr)?;
                 self.inner.set_computed(&canonical, canonical.clone(), lookback);
+                self.inner.set_computed_state(&canonical, state);
             }
             let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
             return Ok(Py::new(py, self.wrap_series(canonical, col))?.into_any());
@@ -1609,8 +1644,10 @@ impl PyDataFrame {
             } else {
                 let col = execute(&self.inner, &node).map_err(value_err)?;
                 let lookback = volas_directive::lookback::lookback(&node);
+                let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
                 self.inner.set_column(&canonical, col).map_err(pyerr)?;
                 self.inner.set_computed(&canonical, canonical.clone(), lookback);
+                self.inner.set_computed_state(&canonical, state);
             }
             let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
             Ok(column_to_numpy(py, &col))

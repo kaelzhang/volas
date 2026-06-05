@@ -806,6 +806,114 @@ fn exec_command(
     }
 }
 
+// --- state-carry resume (additive; fallback path stays correct) -------------
+//
+// A recursive indicator's whole history compresses into a small fixed-size state
+// (a `Vec<f64>`). `initial_state` captures that state after a full compute;
+// `execute_resume` continues the recursion over only the new tail rows, producing
+// values bit-identical to a fresh full recompute. Both return `None` for any
+// directive without a resume kernel, so the caller transparently falls back to the
+// correct full-recompute path. Only the canonical no-operand forms (the directives
+// volas auto-caches) are handled; an unusual `@`-operand override returns `None`
+// and stays on the fallback.
+
+/// Resolve a command node to `(name_lc, sub, args, series)` when it is a plain
+/// `Node::Command` (or a bare `Node::Name` no-arg command, e.g. `obv`/`ad`); `None`
+/// otherwise. The name is lower-cased and `cdl`→`style` aliased, matching
+/// [`exec_command`]. A `Node::Name` carries no sub / args / series — the same way
+/// [`execute`] dispatches it via `exec_command(df, name, None, &[], &[])`.
+fn as_command(node: &Node) -> Option<(String, Option<String>, &[Option<String>], &[Node])> {
+    let lc = |name: &str| {
+        let name = name.to_ascii_lowercase();
+        if name == "cdl" {
+            "style".to_string()
+        } else {
+            name
+        }
+    };
+    match node {
+        Node::Command(cmd) => Some((lc(&cmd.name), cmd.sub.clone(), &cmd.args, &cmd.series)),
+        Node::Name(name) if !name.is_empty() => Some((lc(name), None, &[], &[])),
+        _ => None,
+    }
+}
+
+/// The final recursive state after a full compute of `node` against `df`, matching
+/// the just-computed `computed` column. `None` when `node` has no resume kernel
+/// (the caller then keeps the full-recompute fallback). `computed` is accepted for
+/// kernels that can read their state off the output column directly; the cumulative
+/// family recomputes its (tiny) state from the raw inputs to stay bit-exact with
+/// the canonical kernel.
+pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<Vec<f64>> {
+    let (name, _sub, _args, series) = as_command(node)?;
+    match name.as_str() {
+        "obv" => {
+            let real = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            ind::obv_final_state(&real, &volume)
+        }
+        "ad" => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let volume = series_f64(df, series, 3, "volume").ok()?;
+            ind::ad_final_state(&high, &low, &close, &volume)
+        }
+        "adosc" => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let volume = series_f64(df, series, 3, "volume").ok()?;
+            let fast = arg_usize(_args, 0, Some(3)).ok()?;
+            let slow = arg_usize(_args, 1, Some(10)).ok()?;
+            ind::adosc_final_state(&high, &low, &close, &volume, fast, slow)
+        }
+        _ => None,
+    }
+}
+
+/// Resume `node` from `prev_state` over rows `[from_row, height)`, returning the
+/// new-row [`Column`] and the updated state. `None` when `node` has no resume
+/// kernel (caller falls back to a full recompute). The values are bit-identical to
+/// a fresh full recompute, so writing them into the stale tail keeps the cached
+/// column exact.
+pub fn execute_resume(
+    df: &DataFrame,
+    node: &Node,
+    prev_state: &[f64],
+    from_row: usize,
+) -> Option<(Column, Vec<f64>)> {
+    let (name, _sub, args, series) = as_command(node)?;
+    match name.as_str() {
+        "obv" => {
+            let real = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let (vals, st) = ind::obv_resume(&real, &volume, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        "ad" => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let volume = series_f64(df, series, 3, "volume").ok()?;
+            let (vals, st) = ind::ad_resume(&high, &low, &close, &volume, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        "adosc" => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let volume = series_f64(df, series, 3, "volume").ok()?;
+            let fast = arg_usize(args, 0, Some(3)).ok()?;
+            let slow = arg_usize(args, 1, Some(10)).ok()?;
+            let (vals, st) =
+                ind::adosc_resume(&high, &low, &close, &volume, fast, slow, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        _ => None,
+    }
+}
+
 /// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.
 fn tf_to_minutes(s: &str) -> Result<i64> {
     let s = s.trim();
