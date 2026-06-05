@@ -208,7 +208,10 @@ fn range(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> f6
 /// TA-Lib's `TA_CANDLEAVERAGE`: `factor · (avg of range over the prior avg_period bars,
 /// or the bar's own range when avg_period == 0) / (2 if Shadows else 1)`. The average
 /// window is `[i-avg_period, i-1]` — the bars *before* `i` (so callers start at `i >=
-/// avg_period`).
+/// avg_period`). Now a **test-only reference oracle**: every CDL pattern computes its
+/// averages through the O(n) [`candle_average_series`] / [`each_bar_avg`] family, leaving
+/// this simple O(period) per-bar form as the canonical correctness reference for tests.
+#[cfg(test)]
 fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> f64 {
     let base = if s.avg_period != 0 {
         let mut sum = 0.0;
@@ -228,7 +231,7 @@ fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usi
 }
 
 /// TA-Lib's `TA_CANDLEAVERAGE` precomputed for **every** bar in O(n): a running window
-/// sum of the setting's range over `[i-avg_period, i-1]` replaces [`candle_average`]'s
+/// sum of the setting's range over `[i-avg_period, i-1]` replaces `candle_average`'s
 /// per-bar O(avg_period) rescan (the dominant cost of most CDL patterns — TA-Lib itself
 /// slides this total). `out[i]` is valid for `i >= avg_period`; callers read only
 /// `i >= lookback >= avg_period`. For `avg_period == 0` it is the bar's own range. The
