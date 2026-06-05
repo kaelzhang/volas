@@ -7,37 +7,29 @@
 
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
-**volas** is a Rust-powered `DataFrame` / `Series` with a **pandas-compatible
-API** — if you know pandas, you already know volas. It is a drop-in replacement
-for the slice of pandas that candlestick and quant code actually uses, with a
-compiled **Rust** core underneath instead of pandas. And it is **fast**: in
-head-to-head benchmarks volas **beats TA-Lib — the C-library speed benchmark — on
-110 of 144 covered indicators**, the fastest OHLCV indicator engine we have
-measured. If you trade live it is a must-use — as each new bar arrives, volas
-refreshes every indicator incrementally, often **3–4× faster than TA-Lib**.
+**volas** is a Rust-powered, **pandas-compatible** `DataFrame` for candlestick
+(OHLCV) data, with trading-indicator directives built in. Know pandas? You
+already know volas. The difference is speed: it **beats TA-Lib on 110 of 144
+indicators** — the fastest OHLCV engine we have measured — and refreshes live
+indicators **3–4× faster than TA-Lib** as each new bar lands. For live trading,
+that is a must-have.
 
 ## Why volas
 
-- **Know pandas? You already know volas.** Pandas-shaped construction, `.loc` /
-  `.iloc` / `.at` / `.iat` indexing, `read_csv`, `to_numpy` and resampling — port
-  existing candlestick code by changing the import. (For what is intentionally
-  *not* covered, see [Index limitations](#index-limitations-vs-pandas) and
-  [non-goals](#design-notes--non-goals).)
-- **Faster than the whole field.** Benchmarked head-to-head against pandas,
-  polars, TA-Lib and DuckDB on both batch and per-bar workloads — and faster than
-  pandas even when you are not trading. Browse the per-indicator
-  [benchmark report](benchmark-report.html).
-- **Built for live trading.** On the incremental "append one bar" hot path it
-  refreshes only the affected tail (`O(lookback)`, not `O(n)`), so each new bar
-  updates every indicator in microseconds — no full-series recompute.
-- **Every TA-Lib indicator, by directive.** Index with a string — `df['ma:20']`,
-  `df['boll.upper']`, `df['macd.signal']`, `df['ma:5 > ma:20']` — covering the
-  full [TA-Lib](https://ta-lib.org) 0.6.4 catalogue (all 61 candlestick patterns
-  included), each verified 1:1 against TA-Lib.
-- **Rust core, pandas-free.** Storage, the directive parser and the indicator
-  kernels live in a compiled Rust extension; pandas is *not* a runtime dependency.
-- **First-class NumPy / Torch interop.** `to_numpy()` exports columns and frames
-  for NumPy and `torch.Tensor` pipelines.
+- **Drop-in for pandas.** The same `.loc` / `.iloc` / `.at`, `read_csv`,
+  `to_numpy` and resampling — change the import, keep your code. (See
+  [what's not covered](#index-limitations-vs-pandas).)
+- **Fastest in the field.** Quicker than pandas, polars, TA-Lib and DuckDB on
+  nearly every indicator — and faster than pandas even off the trading desk.
+  ([benchmark](benchmark-report.html))
+- **Built for the live tick.** A new bar touches only the affected tail
+  (`O(lookback)`, not `O(n)`); indicators refresh in microseconds, never a full
+  recompute.
+- **Every TA-Lib indicator, by string.** The full 0.6.4 catalogue, all 61
+  candlestick patterns, each verified 1:1 — `df['macd.signal']`,
+  `df['ma:5 > ma:20']`.
+- **Rust inside, NumPy / Torch out.** Compiled kernels, zero pandas at runtime;
+  `to_numpy()` feeds NumPy and `torch.Tensor` pipelines.
 
 - [Installation](#installation)
 - [Quick start](#quick-start)
