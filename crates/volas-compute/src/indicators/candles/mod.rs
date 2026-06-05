@@ -208,10 +208,7 @@ fn range(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> f6
 /// TA-Lib's `TA_CANDLEAVERAGE`: `factor · (avg of range over the prior avg_period bars,
 /// or the bar's own range when avg_period == 0) / (2 if Shadows else 1)`. The average
 /// window is `[i-avg_period, i-1]` — the bars *before* `i` (so callers start at `i >=
-/// avg_period`). Now a **test-only reference oracle**: every CDL pattern computes its
-/// averages through the O(n) [`candle_average_series`] / [`each_bar_avg`] family, leaving
-/// this simple O(period) per-bar form as the canonical correctness reference for tests.
-#[cfg(test)]
+/// avg_period`).
 fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> f64 {
     let base = if s.avg_period != 0 {
         let mut sum = 0.0;
@@ -231,7 +228,7 @@ fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usi
 }
 
 /// TA-Lib's `TA_CANDLEAVERAGE` precomputed for **every** bar in O(n): a running window
-/// sum of the setting's range over `[i-avg_period, i-1]` replaces `candle_average`'s
+/// sum of the setting's range over `[i-avg_period, i-1]` replaces [`candle_average`]'s
 /// per-bar O(avg_period) rescan (the dominant cost of most CDL patterns — TA-Lib itself
 /// slides this total). `out[i]` is valid for `i >= avg_period`; callers read only
 /// `i >= lookback >= avg_period`. For `avg_period == 0` it is the bar's own range. The
@@ -406,6 +403,14 @@ fn each_bar_avg2<const K: usize>(
 /// average at bar `i-lag` (lag `0` = current). For patterns that read a candle average a
 /// fixed number of bars back (e.g. tristar at `i-2`, breakaway at `i-4`). No arrays — a
 /// short `[[f64; K]; L]` history is shifted each bar.
+///
+/// Maintains all `K` running sums *unconditionally* on every bar, so it wins when a
+/// pattern reads its averages on most bars (weak early gating) or has several settings
+/// whose per-bar rescans add up. For *strongly-gated* patterns — those that reject most
+/// bars on cheap geometry first (three same-colour candles, a required gap) — plain
+/// [`each_bar`] + lazy [`candle_average`] is faster, since the average is only computed on
+/// the few bars that pass the gate; several three-/multi-bar patterns deliberately keep
+/// `each_bar` for that reason (measured against this helper — do not blindly migrate them).
 #[inline]
 fn each_bar_avg_n<const K: usize, const L: usize>(
     settings: [Setting; K],

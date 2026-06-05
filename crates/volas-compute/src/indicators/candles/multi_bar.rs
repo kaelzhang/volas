@@ -1,7 +1,7 @@
 //! Four- and five-bar candlestick patterns.
 
 use super::{
-    candle_average_series, color, each_bar, each_bar_avg_n, lowershadow, realbody,
+    candle_average, candle_average_series, color, each_bar, each_bar_avg_n, lowershadow, realbody,
     realbody_gap_down, realbody_gap_up, uppershadow, BODY_LONG, BODY_SHORT, NEAR, SHADOW_VERY_SHORT,
 };
 
@@ -80,7 +80,7 @@ pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// Lookback 14.
 pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period + 4;
-    each_bar_avg_n::<1, 2>([SHADOW_VERY_SHORT], lb, o, h, l, c, |i, hist| {
+    each_bar(c.len(), lb, |i| {
         if color(o, c, i - 4) < 0.0
             && color(o, c, i - 3) < 0.0
             && color(o, c, i - 2) < 0.0
@@ -89,7 +89,7 @@ pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> 
             && c[i - 4] > c[i - 3]
             && c[i - 3] > c[i - 2]
             && color(o, c, i - 1) < 0.0
-            && uppershadow(o, h, c, i - 1) > hist[1][0] // SHADOW_VERY_SHORT at i-1
+            && uppershadow(o, h, c, i - 1) > candle_average(SHADOW_VERY_SHORT, o, h, l, c, i - 1)
             && color(o, c, i) > 0.0
             && o[i] > o[i - 1]
             && c[i] > h[i - 1]

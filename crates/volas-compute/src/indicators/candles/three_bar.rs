@@ -1,7 +1,7 @@
 //! Three-bar candlestick patterns.
 
 use super::{
-    candle_gap_down, candle_gap_up, color, each_bar, each_bar_avg_n, lowershadow,
+    candle_average, candle_gap_down, candle_gap_up, color, each_bar, each_bar_avg_n, lowershadow,
     realbody, realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT,
     EQUAL, FAR, NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_SHORT,
 };
@@ -30,12 +30,12 @@ pub fn cdl_morningstar(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: 
 /// white, short star gapping up, then black closing well into the 1st — `-100`. Lookback 12.
 pub fn cdl_eveningstar(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: f64) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 2;
-    each_bar_avg_n::<2, 3>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, hist| {
-        if realbody(o, c, i - 2) > hist[2][0] // BODY_LONG at i-2
+    each_bar(c.len(), lb, |i| {
+        if realbody(o, c, i - 2) > candle_average(BODY_LONG, o, h, l, c, i - 2)
             && color(o, c, i - 2) > 0.0
-            && realbody(o, c, i - 1) <= hist[1][1] // BODY_SHORT at i-1
+            && realbody(o, c, i - 1) <= candle_average(BODY_SHORT, o, h, l, c, i - 1)
             && realbody_gap_up(o, c, i - 1, i - 2)
-            && realbody(o, c, i) > hist[0][1] // BODY_SHORT at i
+            && realbody(o, c, i) > candle_average(BODY_SHORT, o, h, l, c, i)
             && color(o, c, i) < 0.0
             && c[i] < c[i - 2] - realbody(o, c, i - 2) * penetration
         {
@@ -125,16 +125,15 @@ pub fn cdl_3whitesoldiers(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
 /// Lookback 13.
 pub fn cdl_3blackcrows(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period + 3;
-    each_bar_avg_n::<1, 3>([SHADOW_VERY_SHORT], lb, o, h, l, c, |i, hist| {
-        // SHADOW_VERY_SHORT average at bar `i-lag`.
-        let short_lower = |bar: usize, lag: usize| lowershadow(o, l, c, bar) < hist[lag][0];
+    each_bar(c.len(), lb, |i| {
+        let short_lower = |k: usize| lowershadow(o, l, c, k) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, k);
         if color(o, c, i - 3) > 0.0
             && color(o, c, i - 2) < 0.0
-            && short_lower(i - 2, 2)
+            && short_lower(i - 2)
             && color(o, c, i - 1) < 0.0
-            && short_lower(i - 1, 1)
+            && short_lower(i - 1)
             && color(o, c, i) < 0.0
-            && short_lower(i, 0)
+            && short_lower(i)
             && o[i - 1] < o[i - 2]
             && o[i - 1] > c[i - 2]
             && o[i] < o[i - 1]
@@ -219,9 +218,9 @@ pub fn cdl_abandonedbaby(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration
 /// inside the 2nd and closing inside the 1st — bearish `-100`. Lookback 12.
 pub fn cdl_2crows(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_LONG.avg_period + 2;
-    each_bar_avg_n::<1, 3>([BODY_LONG], lb, o, h, l, c, |i, hist| {
+    each_bar(c.len(), lb, |i| {
         if color(o, c, i - 2) > 0.0
-            && realbody(o, c, i - 2) > hist[2][0] // BODY_LONG at i-2
+            && realbody(o, c, i - 2) > candle_average(BODY_LONG, o, h, l, c, i - 2)
             && color(o, c, i - 1) < 0.0
             && realbody_gap_up(o, c, i - 1, i - 2)
             && color(o, c, i) < 0.0
@@ -300,26 +299,19 @@ pub fn cdl_advanceblock(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> 
 pub fn cdl_stalledpattern(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_LONG.avg_period.max(BODY_SHORT.avg_period).max(SHADOW_VERY_SHORT.avg_period)
         .max(NEAR.avg_period) + 2;
-    each_bar_avg_n::<4, 3>(
-        [BODY_LONG, SHADOW_VERY_SHORT, NEAR, BODY_SHORT],
-        lb,
-        o,
-        h,
-        l,
-        c,
-        |i, hist| {
+    each_bar(c.len(), lb, |i| {
         if color(o, c, i - 2) > 0.0
             && color(o, c, i - 1) > 0.0
             && color(o, c, i) > 0.0
             && c[i] > c[i - 1]
             && c[i - 1] > c[i - 2]
-            && realbody(o, c, i - 2) > hist[2][0] // BODY_LONG at i-2
-            && realbody(o, c, i - 1) > hist[1][0] // BODY_LONG at i-1
-            && uppershadow(o, h, c, i - 1) < hist[1][1] // SHADOW_VERY_SHORT at i-1
+            && realbody(o, c, i - 2) > candle_average(BODY_LONG, o, h, l, c, i - 2)
+            && realbody(o, c, i - 1) > candle_average(BODY_LONG, o, h, l, c, i - 1)
+            && uppershadow(o, h, c, i - 1) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, i - 1)
             && o[i - 1] > o[i - 2]
-            && o[i - 1] <= c[i - 2] + hist[2][2] // NEAR at i-2
-            && realbody(o, c, i) < hist[0][3] // BODY_SHORT at i
-            && o[i] >= c[i - 1] - realbody(o, c, i) - hist[1][2] // NEAR at i-1
+            && o[i - 1] <= c[i - 2] + candle_average(NEAR, o, h, l, c, i - 2)
+            && realbody(o, c, i) < candle_average(BODY_SHORT, o, h, l, c, i)
+            && o[i] >= c[i - 1] - realbody(o, c, i) - candle_average(NEAR, o, h, l, c, i - 1)
         {
             -100.0
         } else {
@@ -405,14 +397,14 @@ pub fn cdl_tristar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// a new low, then a small white opening above the 2nd low — bullish `100`. Lookback 12.
 pub fn cdl_unique3river(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 2;
-    each_bar_avg_n::<2, 3>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, hist| {
-        if realbody(o, c, i - 2) > hist[2][0] // BODY_LONG at i-2
+    each_bar(c.len(), lb, |i| {
+        if realbody(o, c, i - 2) > candle_average(BODY_LONG, o, h, l, c, i - 2)
             && color(o, c, i - 2) < 0.0
             && color(o, c, i - 1) < 0.0
             && c[i - 1] > c[i - 2]
             && o[i - 1] <= o[i - 2]
             && l[i - 1] < l[i - 2]
-            && realbody(o, c, i) < hist[0][1] // BODY_SHORT at i
+            && realbody(o, c, i) < candle_average(BODY_SHORT, o, h, l, c, i)
             && color(o, c, i) > 0.0
             && o[i] > l[i - 1]
         {
@@ -457,8 +449,8 @@ pub fn cdl_gapsidesidewhite(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f
 /// Lookback 7.
 pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = NEAR.avg_period + 2;
-    each_bar_avg_n::<1, 3>([NEAR], lb, o, h, l, c, |i, hist| {
-        let near = hist[1][0]; // NEAR at i-1
+    each_bar(c.len(), lb, |i| {
+        let near = candle_average(NEAR, o, h, l, c, i - 1);
         let similar = (realbody(o, c, i - 1) - realbody(o, c, i)).abs() < near;
         let up = realbody_gap_up(o, c, i - 1, i - 2)
             && color(o, c, i - 1) > 0.0
@@ -489,21 +481,21 @@ pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// inside the 2nd's range — bullish reversal `100`. Lookback 12.
 pub fn cdl_3starsinsouth(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period.max(SHADOW_LONG.avg_period).max(BODY_LONG.avg_period).max(BODY_SHORT.avg_period) + 2;
-    each_bar_avg_n::<4, 3>([BODY_LONG, SHADOW_LONG, SHADOW_VERY_SHORT, BODY_SHORT], lb, o, h, l, c, |i, hist| {
+    each_bar(c.len(), lb, |i| {
         if color(o, c, i - 2) < 0.0
             && color(o, c, i - 1) < 0.0
             && color(o, c, i) < 0.0
-            && realbody(o, c, i - 2) > hist[2][0] // BODY_LONG at i-2
-            && lowershadow(o, l, c, i - 2) > hist[2][1] // SHADOW_LONG at i-2
+            && realbody(o, c, i - 2) > candle_average(BODY_LONG, o, h, l, c, i - 2)
+            && lowershadow(o, l, c, i - 2) > candle_average(SHADOW_LONG, o, h, l, c, i - 2)
             && realbody(o, c, i - 1) < realbody(o, c, i - 2)
             && o[i - 1] > c[i - 2]
             && o[i - 1] <= h[i - 2]
             && l[i - 1] < c[i - 2]
             && l[i - 1] >= l[i - 2]
-            && lowershadow(o, l, c, i - 1) > hist[1][2] // SHADOW_VERY_SHORT at i-1
-            && realbody(o, c, i) < hist[0][3] // BODY_SHORT at i
-            && lowershadow(o, l, c, i) < hist[0][2] // SHADOW_VERY_SHORT at i
-            && uppershadow(o, h, c, i) < hist[0][2] // SHADOW_VERY_SHORT at i
+            && lowershadow(o, l, c, i - 1) > candle_average(SHADOW_VERY_SHORT, o, h, l, c, i - 1)
+            && realbody(o, c, i) < candle_average(BODY_SHORT, o, h, l, c, i)
+            && lowershadow(o, l, c, i) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, i)
+            && uppershadow(o, h, c, i) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, i)
             && l[i] > l[i - 1]
             && h[i] < h[i - 1]
         {
