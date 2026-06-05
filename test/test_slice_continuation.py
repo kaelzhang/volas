@@ -19,17 +19,18 @@ def _ohlc(n, seed=0):
     return {'high': high, 'low': low, 'close': close}
 
 
-# State-carry now continues the EMA-recursion family (ema / smma / macd.signal) exactly
-# across a head-dropping slice, so those flip from xfail to a real pass. The Wilder/KDJ
-# recursions (rsi / kdj) are not yet state-carry-converted, so they stay xfail(strict):
-# a slice dropped their head and they cannot be continued past it without their state.
-_NO_SLICE_CARRY = frozenset({'kdj.j', 'rsi:14'})
+# State-carry now continues the EMA-recursion family (ema / smma / macd.signal) AND the
+# Wilder-smoothing family (rsi / atr / adx / …) exactly across a head-dropping slice, so
+# those flip from xfail to a real pass. The KDJ recursion (kdj) is not yet state-carry-
+# converted, so it stays xfail(strict): a slice dropped its head and it cannot be
+# continued past it without carrying its state.
+_NO_SLICE_CARRY = frozenset({'kdj.j'})
 _SLICE_CARRY_PARAMS = [
     pytest.param(
         d,
         marks=pytest.mark.xfail(
-            reason='Wilder/KDJ recursion not yet state-carry-converted: a slice dropped '
-            'its head, so it cannot be continued past it without carrying its state.',
+            reason='KDJ recursion not yet state-carry-converted: a slice dropped its '
+            'head, so it cannot be continued past it without carrying its state.',
             strict=True,
         ),
     )

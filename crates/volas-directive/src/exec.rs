@@ -903,6 +903,65 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             arg_usize(args, 0, Some(9)).ok()?,
         ),
 
+        // Wilder-smoothing family — carry the running average(s). RSI/CMO carry
+        // [avg_gain, avg_loss]; ATR/NATR carry the running ATR; the directional ratios
+        // carry the +DM/−DM/TR Wilder sums (and ADX/ADXR additionally the running ADX /
+        // its trailing window).
+        ("rsi", _) => ind::rsi_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, None).ok()?),
+        ("cmo", _) => ind::cmo_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(14)).ok()?),
+        ("atr", _) => ind::atr_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            &series_f64(df, series, 2, "close").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+        ("natr", _) => ind::atr_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            &series_f64(df, series, 2, "close").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+        ("plus_dm", _) => ind::plus_dm_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+        ("minus_dm", _) => ind::minus_dm_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+        ("plus_di", _) => ind::plus_di_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            &series_f64(df, series, 2, "close").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+        ("minus_di", _) => ind::minus_di_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            &series_f64(df, series, 2, "close").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+        ("dx", _) => ind::dx_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            &series_f64(df, series, 2, "close").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+        ("adx", _) => ind::adx_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            &series_f64(df, series, 2, "close").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+        ("adxr", _) => ind::adxr_final_state(
+            &series_f64(df, series, 0, "high").ok()?,
+            &series_f64(df, series, 1, "low").ok()?,
+            &series_f64(df, series, 2, "close").ok()?,
+            arg_usize(args, 0, Some(14)).ok()?,
+        ),
+
         _ => None,
     }
 }
@@ -1023,6 +1082,92 @@ pub fn execute_resume(
                 from_row,
                 prev_state,
             );
+            Some((Column::f64(vals), st))
+        }
+
+        // Wilder-smoothing family — resume the running average(s) over the new rows.
+        // Each reads only `…[from_row-1..]` (the per-bar term needs the prior bar), so a
+        // resume at `from_row == 0` returns `None` (falls back). DM/DI/DX/ADX/ADXR pull
+        // high/low(/close); RSI/CMO/ATR/NATR their named series.
+        ("rsi", _) => {
+            let (vals, st) = ind::rsi_resume(&close().ok()?, arg_usize(args, 0, None).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("cmo", _) => {
+            let (vals, st) =
+                ind::cmo_resume(&close().ok()?, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("atr", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) =
+                ind::atr_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("natr", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) =
+                ind::natr_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("plus_dm", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let (vals, st) =
+                ind::plus_dm_resume(&high, &low, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("minus_dm", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let (vals, st) =
+                ind::minus_dm_resume(&high, &low, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("plus_di", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) = ind::plus_di_resume(
+                &high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state,
+            )?;
+            Some((Column::f64(vals), st))
+        }
+        ("minus_di", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) = ind::minus_di_resume(
+                &high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state,
+            )?;
+            Some((Column::f64(vals), st))
+        }
+        ("dx", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) =
+                ind::dx_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("adx", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) =
+                ind::adx_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
+            Some((Column::f64(vals), st))
+        }
+        ("adxr", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) =
+                ind::adxr_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
             Some((Column::f64(vals), st))
         }
 
