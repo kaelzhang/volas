@@ -882,6 +882,7 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             arg_usize(args, 0, Some(5)).ok()?,
         ),
         ("trix", _) => ind::trix_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
+        ("kama", _) => ind::kama_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
 
         ("macd", None) => ind::macd_final_state(
             &series_f64(df, series, 0, "close").ok()?,
@@ -977,6 +978,12 @@ pub fn execute_resume(
         }
         ("trix", _) => {
             let (vals, st) = ind::trix_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        // KAMA's sliding-sum resume can decline (short retained head) → None falls back.
+        ("kama", _) => {
+            let (vals, st) =
+                ind::kama_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state)?;
             Some((Column::f64(vals), st))
         }
 
