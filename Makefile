@@ -1,7 +1,7 @@
 files = volas test *.py
 test_files = *
 
-.PHONY: install install-rust build build-pkg build-ext clean test coverage coverage-html benchmark lint fix fmt check cargo-test upload publish dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick coverage coverage-html benchmark lint fix fmt check cargo-test upload publish dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -10,6 +10,9 @@ install:
 	@rustup update stable
 	@echo "\033[1m>> Installing maturin... <<\033[0m"
 	@pip install maturin
+	@echo "\033[1m>> Installing coverage tooling (cargo-llvm-cov + llvm-tools)... <<\033[0m"
+	@rustup component add llvm-tools-preview
+	@cargo install cargo-llvm-cov --locked || true
 	@echo "\033[1m>> Installing Python dependencies... <<\033[0m"
 	@pip install -e .[dev]
 
@@ -44,14 +47,23 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 
-# Run tests (functional; benchmarks are skipped here — see `make benchmark`).
-# `--ignore` does not exclude an explicitly-globbed file, so use `--benchmark-skip`.
-test:
+# Run the full suite (cargo test + the Python suite) and finish by printing the
+# combined Python+Rust line-coverage report. An alias for `coverage` so the
+# default test run always ends with the coverage summary. Needs cargo-llvm-cov +
+# llvm-tools-preview (installed by `make install`); for a fast inner loop without
+# coverage instrumentation use `make test-quick`.
+test: coverage
+
+# Fast functional tests only — no coverage, no instrumented rebuild (the dev loop).
+# Benchmarks are skipped here (see `make benchmark`); `--ignore` does not exclude an
+# explicitly-globbed file, so use `--benchmark-skip`.
+test-quick:
 	pytest -s -v test/test_$(test_files).py --benchmark-skip
 
 # True-union Rust line coverage: `cargo test` ∪ the Python suite exercising the
 # compiled extension (see scripts/coverage.sh for why llvm-cov cannot union the
-# two builds itself, and why `pytest --cov` is meaningless for a Rust package).
+# two builds itself, and why `pytest --cov` is meaningless for a Rust package). Runs
+# both suites and prints the combined per-file + total report.
 coverage:
 	@bash scripts/coverage.sh
 
@@ -118,8 +130,8 @@ publish:
 	make build-pkg
 	make upload
 
-# Development workflow: build and test
-dev: build test
+# Development workflow: build and fast test (no coverage) for a tight inner loop.
+dev: build test-quick
 
-# Full CI check
-ci: lint cargo-test test
+# Full CI check: lint, then the full suite with the combined coverage report.
+ci: lint test

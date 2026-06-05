@@ -85,7 +85,7 @@ fi
 
 echo ">> running Python suite against the instrumented extension..."
 LLVM_PROFILE_FILE="$PROF_DIR/pytest-%p-%m.profraw" \
-    pytest test/ --benchmark-skip -q >/dev/null
+    pytest test/ --benchmark-skip -q
 
 "$PROFDATA" merge -sparse "$PROF_DIR"/pytest-*.profraw -o "$PROF_DIR/pytest.profdata"
 "$COV" export --format=lcov --instr-profile="$PROF_DIR/pytest.profdata" "$SO" \
