@@ -7,28 +7,38 @@
 
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
-**Status:** early development — version `0.0.0`. APIs are not yet stable and may change at any time.
+**volas** is a Rust-powered `DataFrame` / `Series` with a **pandas-compatible
+API** — if you know pandas, you already know volas. It is a drop-in replacement
+for the slice of pandas that candlestick and quant code actually uses, with a
+compiled **Rust** core underneath instead of pandas. And it is **fast**: in
+head-to-head benchmarks volas **beats TA-Lib — the C-library speed benchmark — on
+110 of 144 covered indicators**, the fastest OHLCV indicator engine we have
+measured. If you trade live it is a must-use — as each new bar arrives, volas
+refreshes every indicator incrementally, often **3–4× faster than TA-Lib**.
 
-`volas` is a focused, pandas-independent `DataFrame` / `Series` purpose-built for
-financial candlestick (OHLCV) time series and quantitative-trading workflows. It
-gives you **stock-indicator "directives"** (`df['macd.signal']`, `df['ma:5 > ma:20']`)
-and a small, pandas-compatible indexing surface (`.loc` / `.iloc` / `.at`), with
-the storage and compute core implemented in **Rust** for low, predictable latency
-on the incremental ("append one bar") hot path of live trading.
+## Why volas
 
-It is a **drop-in replacement** for the slice of two libraries that candlestick /
-quant code actually uses:
+- **Know pandas? You already know volas.** Pandas-shaped construction, `.loc` /
+  `.iloc` / `.at` / `.iat` indexing, `read_csv`, `to_numpy` and resampling — port
+  existing candlestick code by changing the import. (For what is intentionally
+  *not* covered, see [Index limitations](#index-limitations-vs-pandas) and
+  [non-goals](#design-notes--non-goals).)
+- **Faster than the whole field.** Benchmarked head-to-head against pandas,
+  polars, TA-Lib and DuckDB on both batch and per-bar workloads — and faster than
+  pandas even when you are not trading. Browse the per-indicator
+  [benchmark report](benchmark-report.html).
+- **Built for live trading.** On the incremental "append one bar" hot path it
+  refreshes only the affected tail (`O(lookback)`, not `O(n)`), so each new bar
+  updates every indicator in microseconds — no full-series recompute.
+- **Every TA-Lib indicator, by directive.** Index with a string — `df['ma:20']`,
+  `df['boll.upper']`, `df['macd.signal']`, `df['ma:5 > ma:20']` — covering the
+  full [TA-Lib](https://ta-lib.org) 0.6.4 catalogue (all 61 candlestick patterns
+  included), each verified 1:1 against TA-Lib.
+- **Rust core, pandas-free.** Storage, the directive parser and the indicator
+  kernels live in a compiled Rust extension; pandas is *not* a runtime dependency.
+- **First-class NumPy / Torch interop.** `to_numpy()` exports columns and frames
+  for NumPy and `torch.Tensor` pipelines.
 
-- **pandas** — the same `DataFrame` / `Series` construction, `.loc` / `.iloc` /
-  `.at` / `.iat` indexing, `read_csv`, `to_numpy`, and resampling. (For what is
-  intentionally *not* covered, see [Index limitations](#index-limitations-vs-pandas)
-  and [non-goals](#design-notes--non-goals).)
-- **[stock-pandas](https://github.com/kaelzhang/stock-pandas)** — the same
-  indicator-directive syntax (`df['macd.signal']`, `df['ma:5 > ma:20']`).
-
-…all with **no pandas dependency** and a Rust kernel.
-
-- [Why volas](#why-volas)
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [API at a glance](#api-at-a-glance)
@@ -46,21 +56,6 @@ quant code actually uses:
 - [Error handling](#error-handling)
 - [Design notes & non-goals](#design-notes--non-goals)
 - [Development](#development)
-
-## Why volas
-
-- **Live-trading first** — optimized for the incremental hot path: append a new
-  bar, refresh indicators on only the affected tail (`O(lookback)`, not `O(n)`),
-  read the result, with minimal per-bar latency.
-- **Indicator directives** — compute moving averages, MACD, Bollinger Bands, KDJ,
-  RSI, ATR and more by indexing with a string: `df['ma:20']`, `df['boll.upper']`.
-- **Small, regular data model** — a row index (range / datetime / integer /
-  **string**) plus 2-D columns of numbers, booleans, integers and strings; no
-  multi-level indexes, no general-purpose reshaping.
-- **Rust core, pandas-free** — storage, the directive parser and the indicator
-  kernels live in a compiled Rust extension; pandas is *not* a runtime dependency.
-- **First-class NumPy interop** — `to_numpy()` exports columns / frames for
-  NumPy and `torch.Tensor` pipelines.
 
 ## Installation
 
@@ -190,7 +185,7 @@ df = DataFrame(data, date_col='time_key')   # -> DatetimeIndex
 
 The headline feature: index with a **directive** string and volas parses and
 computes it against the frame, returning a `Series` (or a `DataFrame` for a list
-of directives). The directive grammar mirrors stock-pandas.
+of directives).
 
 ```
 command . sub : args @ series  op  command ...
@@ -230,10 +225,10 @@ df.exec('ma:5', create_column=True)   # also materialize it as a column
 
 volas implements every [TA-Lib](https://ta-lib.org) 0.6.4 function (all 10 groups,
 including all 61 candlestick patterns), each verified 1:1 against the `talib`
-package, plus a handful of stock-pandas-style extras. Directive names are lowercase
+package, plus a handful of extra OHLCV indicators. Directive names are lowercase
 and case-insensitive; multi-output indicators expose each line as a sub-command
 (`macd.signal`, `boll.upper`). Names mirror TA-Lib (e.g. `ht_dcperiod`); where a
-classic stock-pandas name differs, both spellings are accepted.
+common alternative name exists, both spellings are accepted.
 
 **Overlap studies (trend / moving averages)**
 
@@ -306,7 +301,7 @@ penetration ratio accept it as an arg (e.g. `style.morningstar:0.3`):
 `shootingstar` `shortline` `spinningtop` `stalledpattern` `sticksandwich` `takuri`
 `tasukigap` `thrusting` `tristar` `unique3river` `upsidegap2crows` `xsidegap3methods`
 
-**stock-pandas extras**
+**Extras beyond TA-Lib**
 
 | Directive | Indicator | Example |
 | --- | --- | --- |
@@ -537,8 +532,8 @@ except DirectiveSyntaxError as e:
 - **Not a general-purpose DataFrame.** volas models exactly what OHLCV
   quant workflows need; it deliberately omits multi-level indexes, heterogeneous
   per-cell storage, joins and general reshaping.
-- **pandas-independent at runtime.** pandas / stock-pandas are used only as test
-  oracles (1:1 parity tests and a 3-way benchmark), never imported at runtime.
+- **pandas-independent at runtime.** pandas and TA-Lib are used only as test
+  oracles (1:1 parity tests and the benchmark), never imported at runtime.
 - **External API cleanliness first.** The Python surface is kept clean and
   pandas-shaped; internal layering is secondary to per-bar latency.
 
@@ -551,15 +546,15 @@ make install        # Rust toolchain + maturin + Python dev deps
 make build          # build the Rust extension, install the package in-place
 make test           # run the Python test suite
 make coverage       # true cargo-test ∪ pytest line coverage (see scripts/coverage.sh)
-make benchmark      # multi-library benchmark: pandas / stock-pandas / polars / TA-Lib / DuckDB / volas
+make benchmark      # multi-library benchmark: pandas / polars / TA-Lib / DuckDB / volas
 make build-pkg      # build a release wheel + sdist into dist/
 ```
 
 ### Dependency groups
 
 - **`dev`** (`pip install -e .[dev]`) — everything the test suite needs; this is all
-  CI installs. It includes pandas / stock-pandas because the *parity tests* use them
-  as oracles (test-time only — volas has no pandas runtime dependency).
+  CI installs. It includes pandas because the *parity tests* use it as an oracle
+  (test-time only — volas has no pandas runtime dependency).
 - **`benchmark`** (`pip install -e .[benchmark]`) — the extra comparison libraries
   (polars, TA-Lib, DuckDB) used *only* by the benchmark. `make benchmark` installs
   `.[dev,benchmark]`; a library that is only needed to benchmark, never to test,
