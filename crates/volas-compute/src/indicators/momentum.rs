@@ -290,13 +290,13 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     let flow_of = |prev: f64, i: usize| -> (f64, f64, f64) {
         let tp = (high[i] + low[i] + close[i]) / 3.0;
         let flow = tp * volume[i];
-        let (p, ng) = if tp - prev < 0.0 {
-            (0.0, flow)
-        } else if tp - prev > 0.0 {
-            (flow, 0.0)
-        } else {
-            (0.0, 0.0)
-        };
+        // Branchless direction split (the tp-vs-prev sign is unpredictable on real
+        // data). Bit-identical: `1·flow == flow`, `0·flow == 0`.
+        let d = tp - prev;
+        let (p, ng) = (
+            (d > 0.0) as i8 as f64 * flow,
+            (d < 0.0) as i8 as f64 * flow,
+        );
         (p, ng, tp)
     };
     let mut pos_sum = 0.0;
