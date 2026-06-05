@@ -53,22 +53,88 @@ pub fn wma(data: &[f64], period: usize) -> Vec<f64> {
     out
 }
 
-/// Double EMA: `2*EMA - EMA(EMA)` (TA-Lib DEMA). Lookback `2*(period-1)`.
-pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
-    let e1 = kernels::ema_seeded(av(data), period);
-    let e2 = kernels::ema_seeded(e1.view(), period);
-    (0..data.len()).map(|i| 2.0 * e1[i] - e2[i]).collect()
+/// Staggered warm-up for a cascade of `S` SMA-seeded EMAs (`k = 2/(period+1)`): each
+/// stage SMA-seeds over the first `period` finite values of its predecessor, so stage
+/// `j` seeds at `j·(period-1)`. Returns `(lookback, stage values at lookback)` where
+/// `lookback = S·(period-1)` is the first fully-valid bar, or `None` if it never seeds.
+/// Shared by DEMA/TEMA/T3 — their combine and steady-state recurrence differ, but the
+/// warm-up is identical (and bit-identical to chaining `ema_seeded` `S` times).
+fn cascade_warmup<const S: usize>(data: &[f64], period: usize, k: f64) -> Option<(usize, [f64; S])> {
+    let n = data.len();
+    if period == 0 {
+        return None;
+    }
+    let lookback = S * (period - 1);
+    if lookback >= n {
+        return None;
+    }
+    let mut e = [0.0f64; S];
+    let mut acc = [0.0f64; S];
+    let mut cnt = [0usize; S];
+    let mut seeded = [false; S];
+    for &raw in &data[..=lookback] {
+        let mut x = raw;
+        for s in 0..S {
+            if seeded[s] {
+                e[s] = (x - e[s]).mul_add(k, e[s]);
+                x = e[s];
+            } else if !x.is_nan() {
+                acc[s] += x;
+                cnt[s] += 1;
+                if cnt[s] == period {
+                    e[s] = acc[s] / period as f64;
+                    seeded[s] = true;
+                    x = e[s];
+                } else {
+                    x = f64::NAN;
+                }
+            } else {
+                x = f64::NAN;
+            }
+        }
+    }
+    Some((lookback, e))
 }
 
-/// Triple EMA: `3*EMA - 3*EMA(EMA) + EMA(EMA(EMA))` (TA-Lib TEMA).
-/// Lookback `3*(period-1)`.
+/// Double EMA: `2*EMA - EMA(EMA)` (TA-Lib DEMA). Lookback `2*(period-1)`. Single-pass
+/// lattice over the two cascaded EMAs (vs two `ema_seeded` passes + a combine);
+/// bit-identical to `2·e1 − e2`.
+pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    let k = 2.0 / (period as f64 + 1.0);
+    let Some((lookback, e)) = cascade_warmup::<2>(data, period, k) else {
+        return out;
+    };
+    out[lookback] = 2.0 * e[0] - e[1];
+    let (mut e0, mut e1) = (e[0], e[1]);
+    for i in (lookback + 1)..n {
+        e0 = (data[i] - e0).mul_add(k, e0);
+        e1 = (e0 - e1).mul_add(k, e1);
+        out[i] = 2.0 * e0 - e1;
+    }
+    out
+}
+
+/// Triple EMA: `3*EMA - 3*EMA(EMA) + EMA(EMA(EMA))` (TA-Lib TEMA). Lookback
+/// `3*(period-1)`. Single-pass lattice over the three cascaded EMAs; bit-identical to
+/// `3·e1 − 3·e2 + e3`.
 pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
-    let e1 = kernels::ema_seeded(av(data), period);
-    let e2 = kernels::ema_seeded(e1.view(), period);
-    let e3 = kernels::ema_seeded(e2.view(), period);
-    (0..data.len())
-        .map(|i| 3.0 * e1[i] - 3.0 * e2[i] + e3[i])
-        .collect()
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    let k = 2.0 / (period as f64 + 1.0);
+    let Some((lookback, e)) = cascade_warmup::<3>(data, period, k) else {
+        return out;
+    };
+    out[lookback] = 3.0 * e[0] - 3.0 * e[1] + e[2];
+    let (mut e0, mut e1, mut e2) = (e[0], e[1], e[2]);
+    for i in (lookback + 1)..n {
+        e0 = (data[i] - e0).mul_add(k, e0);
+        e1 = (e0 - e1).mul_add(k, e1);
+        e2 = (e1 - e2).mul_add(k, e2);
+        out[i] = 3.0 * e0 - 3.0 * e1 + e2;
+    }
+    out
 }
 
 /// Triangular moving average (TA-Lib TRIMA): a double SMA whose net weights rise to
@@ -138,48 +204,15 @@ pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
     let c2 = 3.0 * (v2 - c1);
     let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
     let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
-    if period == 0 {
-        return out;
-    }
-    let lookback = 6 * (period - 1);
-    if lookback >= n {
-        return out;
-    }
     let k = 2.0 / (period as f64 + 1.0);
-    // Single-pass lattice instead of six sequential `ema_seeded` passes (six allocs,
-    // six seed scans, six recurrences, a combine pass). The six EMAs cascade — stage j
-    // consumes stage j-1's *current* output — so they share one traversal. Bit-identical
-    // to the six-call form: same SMA seed (`Σ/period`), same FMA EMA step, same combine.
-    //
-    // Staggered warmup: each stage SMA-seeds over the first `period` finite values it
-    // sees, which begin at its predecessor's seed index, so stage j seeds at j·(period-1)
-    // and the output is valid from `lookback = 6·(period-1)`. The stages propagate NaN
-    // forward until seeded (mirroring the leading-NaN prefix of each intermediate array).
-    let mut e = [0.0f64; 6];
-    let mut acc = [0.0f64; 6];
-    let mut cnt = [0usize; 6];
-    let mut seeded = [false; 6];
-    for &raw in &data[..=lookback] {
-        let mut x = raw;
-        for s in 0..6 {
-            if seeded[s] {
-                e[s] = (x - e[s]).mul_add(k, e[s]);
-                x = e[s];
-            } else if !x.is_nan() {
-                acc[s] += x;
-                cnt[s] += 1;
-                if cnt[s] == period {
-                    e[s] = acc[s] / period as f64;
-                    seeded[s] = true;
-                    x = e[s];
-                } else {
-                    x = f64::NAN;
-                }
-            } else {
-                x = f64::NAN;
-            }
-        }
-    }
+    // Single-pass lattice instead of six sequential `ema_seeded` passes: the six EMAs
+    // cascade (stage j consumes stage j-1's *current* output) so they share one
+    // staggered-warmup traversal ([`cascade_warmup`]); the steady state then advances a
+    // six-deep FMA chain per bar (TA-Lib's lattice) and emits the combine in place.
+    // Bit-identical to the six-call form.
+    let Some((lookback, e)) = cascade_warmup::<6>(data, period, k) else {
+        return out;
+    };
     out[lookback] = c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2];
     // Steady state: all six stages seeded. The cascade is inherently sequential (a
     // six-deep FMA dependency chain per bar, exactly as in TA-Lib's lattice), so we
