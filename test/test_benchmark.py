@@ -240,11 +240,13 @@ def _coverage_pairs():
         ('macd', lambda: talib.MACD(c, 12, 26, 9)[0]),
         ('macd.signal', lambda: talib.MACD(c, 12, 26, 9)[1]),
         ('macd.histogram', lambda: talib.MACD(c, 12, 26, 9)[2]),
-        # Bollinger bands (upper / middle / lower) + band-width.
+        # Bollinger bands (upper / middle / lower). bbw (band-width) is a volas-derived
+        # quantity — TA-Lib has no native BBW function — so it is not a volas∩TA-Lib
+        # coverage row; it lives in the cross-library append / calc charts (and its
+        # correctness is still checked in the parity suite).
         ('boll.upper', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[0]),
         ('boll.middle', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[1]),
         ('boll.lower', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[2]),
-        ('bbw', lambda: (lambda u, m, low: (u - low) / m)(*talib.BBANDS(c, 20, 2.0, 2.0))),
         # price transforms
         ('avgprice', lambda: talib.AVGPRICE(o, h, lo, c)),
         ('medprice', lambda: talib.MEDPRICE(h, lo)),
