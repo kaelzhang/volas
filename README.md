@@ -18,13 +18,12 @@ The difference is speed that **volas** beats every solution in terms of indicato
 - **Drop-in for pandas.** The same `.loc` / `.iloc` / `.at`, `read_csv`,
   `to_numpy` and resampling — change the import, keep your code. (See
   [what's not covered](#index-limitations-vs-pandas))
-- **Fastest in the field.** Quicker than pandas, polars, TA-Lib and DuckDB on
+- **Fastest in the field.** Quicker than pandas, polars and TA-Lib on
   nearly every indicator — and faster than pandas even off the trading desk.
   ([benchmark](benchmark-report.html))
   - Beats TA-Lib on **129 / 158** covered indicators in batch computation.
   - Refreshes indicators incrementally on each new bar — up to **~2.7×** faster
-    than TA-Lib on the heavier ones (MACD / RSI / ATR; simple MAs are on par),
-    and many times faster than pandas.
+    than TA-Lib, and 9-110x faster than pandas.
 - **Built for the live tick.** A new bar touches only the affected tail
   (`O(lookback)`, not `O(n)`); indicators refresh in microseconds, never a full
   recompute.
