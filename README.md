@@ -92,7 +92,7 @@ df.to_numpy()                    # 2-D ndarray (rows x columns)
 
 ```py
 from volas import (
-    DataFrame, Series, read_csv, rolling_calc, Cumulator, TimeFrame, Timestamp,
+    DataFrame, Series, read_csv, Cumulator, TimeFrame, Timestamp,
 )
 ```
 
@@ -100,7 +100,7 @@ The sub-sections below follow volas's public surface in order: the `DataFrame`
 class, then its instance methods, its static methods, the other classes, and the
 top-level package functions — closing with the rest of the **pandas-compatible**
 API that behaves exactly as it does in pandas. (A top-level name imported from
-`volas`, such as `read_csv` or `rolling_calc`, is written without a `volas.`
+`volas`, such as `read_csv`, is written without a `volas.`
 prefix.)
 
 ### DataFrame(data, date_col=None, tz=None, date_unit=None)
@@ -382,27 +382,6 @@ for bar in stream:        # each `bar` is a 1-row DataFrame
 ```
 
 See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
-
-### rolling_calc(values, window, apply, forward=False, fill=nan) -> np.ndarray
-
-A top-level function that applies a 1-D function along `values` (a column /
-`Series` / array) over a trailing (or forward) window — the escape hatch for
-indicators not expressible as a directive.
-
-- **values** the array / `Series` / column to roll over
-- **window** `int` the size of the rolling window
-- **apply** `Callable[[np.ndarray], Any]` the 1-D function to apply
-- **forward?** `bool = False` whether to look forward (instead of backward) to
-  form each rolling window
-- **fill?** `Any = np.nan` the value used where there are not enough items to
-  form a full window
-
-```py
-rolling_calc(df['high'], 5, max)
-
-# Whose return value equals to
-df['hhv:5@high'].to_numpy()
-```
 
 ### read_csv(path, ...) -> DataFrame
 
