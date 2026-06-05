@@ -21,7 +21,7 @@ The difference is speed that **volas** beats every solution in terms of indicato
 - **Fastest in the field.** Quicker than pandas, polars, TA-Lib and DuckDB on
   nearly every indicator — and faster than pandas even off the trading desk.
   ([benchmark](benchmark-report.html))
-  - Beats TA-Lib on **122 / 158** covered indicators in batch computation.
+  - Beats TA-Lib on **129 / 158** covered indicators in batch computation.
   - Refreshes indicators incrementally on each new bar — up to **~2.7×** faster
     than TA-Lib on the heavier ones (MACD / RSI / ATR; simple MAs are on par),
     and many times faster than pandas.
@@ -149,6 +149,8 @@ Which gets the 2-period simple moving average on column `"close"`.
 
 #### Parameters
 
+- **data** `dict[str, list | np.ndarray]` the column data: a dict mapping each
+  column name to an equal-length list or NumPy array (float, int, bool or string).
 - **date_col** `Optional[str] = None` If set, the column named `date_col` is
   parsed and set as the [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)
   of the data frame.
@@ -207,7 +209,7 @@ df.get_column('close')
 # Name: close, dtype: float64
 ```
 
-### df.append(other) -> DataFrame
+### df.append(other: DataFrame | Row) -> DataFrame
 
 Appends rows of `other` (a `DataFrame` or a `Row`) to the end of the caller,
 returning a new object, and applies the `DatetimeIndex` to the newly-appended
@@ -221,6 +223,12 @@ called (see below).
 
 Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
 `DataFrame`. Requires a `DatetimeIndex`.
+
+- **time_frame** `TimeFrame | str` the target bar interval, e.g. `TimeFrame.m5`
+  or `'5m'`. See [TimeFrame](#timeframe).
+- **cumulators?** `dict[str, str] | None = None` per-column aggregator overrides
+  (e.g. `{'volume': 'last'}`); defaults to OHLCV semantics (`open`=first,
+  `high`=max, `low`=min, `close`=last, `volume`=sum).
 
 ```py
 # from 1-minute klines to 5-minute klines
@@ -342,10 +350,26 @@ row.to_dict()          # {column: value}
 row.to_numpy()         # the numeric cells as a 1-D ndarray
 ```
 
-### Cumulator
+### Cumulator(time_frame, cumulators=None)
 
 For **live** streaming, feed bars to a `Cumulator` and read the running result,
-instead of re-cumulating the whole frame each time.
+instead of re-cumulating the whole frame each time. The constructor takes the
+same `time_frame` and `cumulators` as `df.cumulate`:
+
+- **time_frame** `TimeFrame | str` the target bar interval, e.g. `TimeFrame.m5`
+  or `'5m'`. See [TimeFrame](#timeframe).
+- **cumulators?** `dict[str, str] | None = None` per-column aggregator overrides;
+  defaults to OHLCV semantics.
+
+Instance methods and properties:
+
+- **cum.append(data: DataFrame) -> None** feeds one or more new bars. A bar whose
+  timestamp matches the still-open period **updates** it instead of duplicating
+  it (matching exchange data that revises the latest bar).
+- **cum.frame -> DataFrame** (property) the closed periods plus the open period as
+  a live last row.
+- **cum.last -> DataFrame | None** (property) just the current (still-open)
+  period, aggregated; `None` before any bar has been appended.
 
 ```py
 cum = Cumulator('5m')
@@ -378,15 +402,16 @@ rolling_calc(df['high'], 5, max)
 df['hhv:5@high'].to_numpy()
 ```
 
-### read_csv
+### read_csv(path, ...) -> DataFrame
 
-A top-level function — `read_csv(path, ...)` reads a CSV file into a `DataFrame`,
-inferring per-column dtypes. See [Reading CSV](#reading-csv).
+A top-level function that reads a CSV file into a `DataFrame`, inferring
+per-column dtypes. Its full parameter list (`sep`, `parse_dates`, `index_col`,
+`na_values`, `tz`, `date_unit`, …) is documented under [Reading CSV](#reading-csv).
 
-### from_pandas
+### from_pandas(pdf) -> DataFrame
 
-A top-level function — `from_pandas(pdf)` bridges a `pandas.DataFrame` into volas
-(and `df.to_pandas()` bridges back). See [pandas interop](#pandas-interop).
+A top-level function that bridges a `pandas.DataFrame` (`pdf`) into volas (and
+`df.to_pandas()` bridges back). See [pandas interop](#pandas-interop).
 
 ### The rest of the pandas-compatible API
 
