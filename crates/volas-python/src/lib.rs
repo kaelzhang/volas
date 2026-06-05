@@ -1018,21 +1018,19 @@ impl PyDataFrame {
     /// directive recomputes and no cached buffer is pinned.
     fn refresh_computed(&mut self, only: Option<&str>) -> PyResult<()> {
         let height = self.inner.height();
-        let stale: Vec<_> = self
-            .inner
-            .computed_columns()
-            .into_iter()
+        // Materialize the computed-column set once (per tick on the live append path)
+        // and derive both the stale list and the name set from it, instead of cloning
+        // the computed map twice.
+        let computed = self.inner.computed_columns();
+        let stale: Vec<_> = computed
+            .iter()
             .filter(|(n, m)| m.valid_rows < height && only.is_none_or(|o| o == n))
+            .cloned()
             .collect();
         if stale.is_empty() {
             return Ok(());
         }
-        let computed_names: HashSet<String> = self
-            .inner
-            .computed_columns()
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
+        let computed_names: HashSet<String> = computed.iter().map(|(n, _)| n.clone()).collect();
         let real_names: Vec<String> = self
             .inner
             .names()
