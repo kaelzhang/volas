@@ -1,36 +1,35 @@
-# volas
-
 [![ci](https://github.com/kaelzhang/volas/actions/workflows/ci.yml/badge.svg)](https://github.com/kaelzhang/volas/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/kaelzhang/volas/branch/main/graph/badge.svg)](https://codecov.io/gh/kaelzhang/volas)
 [![PyPI version](https://img.shields.io/pypi/v/volas.svg)](https://pypi.org/project/volas/)
 [![Python versions](https://img.shields.io/pypi/pyversions/volas.svg)](https://pypi.org/project/volas/)
 
+# volas
+
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
 **volas** is a Rust-powered, **pandas-compatible** `DataFrame` for candlestick
 (OHLCV) data, with trading-indicator directives built in. Know pandas? You
-already know volas. The difference is speed: it **beats TA-Lib on 110 of 144
-indicators** — the fastest OHLCV engine we have measured — and refreshes live
-indicators **3–4× faster than TA-Lib** as each new bar lands. For live trading,
-that is a must-have.
+already know to use volas.
+
+The difference is speed that **volas** beats every solution in terms of indicator calculating.
 
 ## Why volas
 
 - **Drop-in for pandas.** The same `.loc` / `.iloc` / `.at`, `read_csv`,
   `to_numpy` and resampling — change the import, keep your code. (See
-  [what's not covered](#index-limitations-vs-pandas).)
+  [what's not covered](#index-limitations-vs-pandas))
 - **Fastest in the field.** Quicker than pandas, polars, TA-Lib and DuckDB on
   nearly every indicator — and faster than pandas even off the trading desk.
   ([benchmark](benchmark-report.html))
+  - Beats TA-Lib on 112 / 144 covered indicators for first calculation.
+  - 10-110x faster than pandas on incremental indicator calculation, 3-4x faster even than TA-Lib
 - **Built for the live tick.** A new bar touches only the affected tail
   (`O(lookback)`, not `O(n)`); indicators refresh in microseconds, never a full
   recompute.
-- **Every TA-Lib indicator, by string.** The full 0.6.4 catalogue, all 61
-  candlestick patterns, each verified 1:1 — `df['macd.signal']`,
-  `df['ma:5 > ma:20']`.
 - **Rust inside, NumPy / Torch out.** Compiled kernels, zero pandas at runtime;
   `to_numpy()` feeds NumPy and `torch.Tensor` pipelines.
 
+## Table of Content
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [API at a glance](#api-at-a-glance)
