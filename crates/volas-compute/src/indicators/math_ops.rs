@@ -281,3 +281,78 @@ pub fn minindex_resume(
     }
     Some((out, vec![(lo_idx + origin) as f64, lo]))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::test_support::*;
+
+    /// MAXINDEX/MININDEX resume (origin 0), fed the carried tracker state of a full
+    /// compute over the head, reproduces the tail of a full compute over the whole
+    /// input — bit-for-bit. Long resume spans over an oscillating series fire both the
+    /// window-rebuild arm (the tracked extreme leaves the window) and the new-extreme
+    /// `>=`/`<=` arm.
+    #[test]
+    fn index_resume_is_bit_identical_to_full() {
+        let data = series(120);
+        let period = 30usize;
+        let max_full = maxindex(&data, period);
+        let min_full = minindex(&data, period);
+        // `from >= period` so the head `data[..from]` is long enough to seed a state
+        // (a head of exactly `period - 1` rows never fills a window — see the guard test).
+        for &from in &[period, period + 1, 40, 60, 119] {
+            let st = maxindex_final_state(&data[..from], period).unwrap();
+            let (tail, _) = maxindex_resume(&data, period, from, 0, &st).unwrap();
+            assert_bits(&tail, &max_full[from..], "maxindex");
+
+            let st = minindex_final_state(&data[..from], period).unwrap();
+            let (tail, _) = minindex_resume(&data, period, from, 0, &st).unwrap();
+            assert_bits(&tail, &min_full[from..], "minindex");
+        }
+    }
+
+    /// With a non-zero `origin` (a head-dropped slice), the resume still emits
+    /// ORIGINAL-frame absolute positions: continue a slice that drops the first `cut`
+    /// rows and compare to the full-frame `maxindex` absolute indices.
+    #[test]
+    fn index_resume_emits_absolute_positions_with_origin() {
+        let data = series(120);
+        let period = 30usize;
+        let cut = 20usize; // drop the head; this sub-frame's row 0 == original row `cut`
+        let sub = &data[cut..];
+        let max_full = maxindex(&data, period); // original-absolute ground truth
+        let min_full = minindex(&data, period);
+
+        // The carried state is original-absolute (computed over the original head), and
+        // `origin == cut` rebases the sub-frame window while keeping emitted positions
+        // original-absolute.
+        let from_sub = 40usize; // a sub-frame row well past warm-up
+        let head_orig = &data[..cut + from_sub];
+
+        let st = maxindex_final_state(head_orig, period).unwrap();
+        let (tail, end) = maxindex_resume(sub, period, from_sub, cut, &st).unwrap();
+        assert_bits(&tail, &max_full[cut + from_sub..], "maxindex origin");
+        assert_eq!(end[0], *max_full.last().unwrap(), "maxindex end pos");
+
+        let st = minindex_final_state(head_orig, period).unwrap();
+        let (tail, end) = minindex_resume(sub, period, from_sub, cut, &st).unwrap();
+        assert_bits(&tail, &min_full[cut + from_sub..], "minindex origin");
+        assert_eq!(end[0], *min_full.last().unwrap(), "minindex end pos");
+    }
+
+    /// Warm-up guards: `*_final_state` declines when the period never fills a window
+    /// (`period > n`), and `*_resume` declines below the tracker's warm-up
+    /// (`from < period - 1`).
+    #[test]
+    fn index_guards_decline() {
+        let data = series(120);
+        // period > n -> no full window ever forms.
+        assert!(maxindex_final_state(&data, 200).is_none()); // math_ops.rs:136
+        assert!(minindex_final_state(&data, 200).is_none()); // math_ops.rs:215
+        // from < period - 1 -> tracker not yet warm.
+        let st = maxindex_final_state(&data, 10).unwrap();
+        assert!(maxindex_resume(&data, 10, 5, 0, &st).is_none()); // math_ops.rs:179
+        let st = minindex_final_state(&data, 10).unwrap();
+        assert!(minindex_resume(&data, 10, 5, 0, &st).is_none()); // math_ops.rs:256
+    }
+}
