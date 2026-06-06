@@ -519,6 +519,12 @@ impl PySeries {
         }
     }
 
+    /// The shape as a 1-tuple `(len,)` (pandas `Series.shape`).
+    #[getter]
+    fn shape(&self) -> (usize,) {
+        (self.inner.len(),)
+    }
+
     fn __len__(&self) -> usize {
         self.inner.len()
     }
@@ -705,23 +711,43 @@ impl PySeries {
         f64_series(&self.inner, out)
     }
 
-    /// Replace missing (NaN) values with a constant.
+    /// Replace missing (NaN) values with a constant, or forward/backward-fill.
     ///
     /// Args:
-    ///     value (float): the value written into every NaN cell.
+    ///     value (float, optional): the constant written into every NaN cell.
+    ///     method (str, optional): ``'ffill'`` / ``'pad'`` carries the last valid
+    ///         value forward; ``'bfill'`` / ``'backfill'`` carries the next valid
+    ///         value backward. Mutually exclusive with ``value``.
     ///
     /// Returns:
     ///     Series: a new series (non-float columns are returned unchanged).
-    fn fillna(&self, value: f64) -> PySeries {
-        let col = match &self.inner.data {
-            Column::F64(v) => {
-                Column::f64(v.iter().map(|&x| if x.is_nan() { value } else { x }).collect())
+    #[pyo3(signature = (value = None, method = None))]
+    fn fillna(&self, value: Option<f64>, method: Option<&str>) -> PyResult<PySeries> {
+        let v = match &self.inner.data {
+            Column::F64(v) => v,
+            other => {
+                return Ok(PySeries {
+                    inner: Series::new(
+                        self.inner.name.clone(),
+                        other.clone(),
+                        Arc::clone(&self.inner.index),
+                    ),
+                })
             }
-            other => other.clone(),
         };
-        PySeries {
-            inner: Series::new(self.inner.name.clone(), col, Arc::clone(&self.inner.index)),
-        }
+        let out: Vec<f64> = match (value, method) {
+            (Some(_), Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "fillna: pass either `value` or `method`, not both",
+                ))
+            }
+            (Some(val), None) => v.iter().map(|&x| if x.is_nan() { val } else { x }).collect(),
+            (None, Some(m)) => fill_directional(v.as_slice(), m)?,
+            (None, None) => {
+                return Err(PyValueError::new_err("fillna: pass a `value` or a `method`"))
+            }
+        };
+        Ok(f64_series(&self.inner, out))
     }
 
     /// Boolean mask of missing (NaN) values (non-F64 columns -> all False).
@@ -763,6 +789,99 @@ impl PySeries {
     fn equals(&self, other: &PySeries) -> bool {
         self.inner.data.dtype() == other.inner.data.dtype()
             && self.inner.data.equals(&other.inner.data)
+    }
+
+    /// Cast to a dtype (`'float64'` / `'int64'` / `'bool'` / `'str'` /
+    /// `'datetime64[ns]'` / ...), pandas `astype`.
+    fn astype(&self, dtype: &str) -> PyResult<PySeries> {
+        let col = if let Some(unit) = datetime_unit_of(dtype) {
+            match &self.inner.data {
+                Column::Datetime(_) | Column::Str(_) => {
+                    self.inner.data.to_datetime().map_err(value_err)?
+                }
+                _ => self.inner.data.epoch_to_datetime(unit).map_err(value_err)?,
+            }
+        } else {
+            self.inner.data.cast(parse_dtype(dtype)?).map_err(value_err)?
+        };
+        Ok(PySeries {
+            inner: Series::new(self.inner.name.clone(), col, Arc::clone(&self.inner.index)),
+        })
+    }
+
+    /// Cumulative sum: NaN is skipped in the running total and kept NaN in place
+    /// (pandas `cumsum`, skipna=True).
+    fn cumsum(&self) -> PySeries {
+        let mut acc = 0.0;
+        let out: Vec<f64> = self
+            .inner
+            .data
+            .to_f64_vec()
+            .iter()
+            .map(|&x| {
+                if x.is_nan() {
+                    f64::NAN
+                } else {
+                    acc += x;
+                    acc
+                }
+            })
+            .collect();
+        f64_series(&self.inner, out)
+    }
+
+    /// Round each value to `decimals` places (pandas `round`); NaN stays NaN.
+    #[pyo3(signature = (decimals = 0))]
+    fn round(&self, decimals: i32) -> PySeries {
+        let factor = 10f64.powi(decimals);
+        self.map_f64(move |x| (x * factor).round() / factor)
+    }
+
+    /// Element-wise absolute value (pandas `abs`).
+    fn abs(&self) -> PySeries {
+        self.map_f64(f64::abs)
+    }
+
+    /// Clip values into `[lower, upper]` (either bound optional); NaN stays NaN
+    /// (pandas `clip`).
+    #[pyo3(signature = (lower = None, upper = None))]
+    fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PySeries {
+        self.map_f64(move |x| {
+            if x.is_nan() {
+                return x;
+            }
+            let x = lower.map_or(x, |lo| x.max(lo));
+            upper.map_or(x, |hi| x.min(hi))
+        })
+    }
+
+    /// The `q`-quantile in `[0, 1]` (linear interpolation, NaN-skipping) — pandas
+    /// `quantile`.
+    #[pyo3(signature = (q = 0.5))]
+    fn quantile(&self, q: f64) -> PyResult<f64> {
+        if !(0.0..=1.0).contains(&q) {
+            return Err(PyValueError::new_err("quantile: q must be in [0, 1]"));
+        }
+        let mut v = non_nan(&self.inner.data);
+        if v.is_empty() {
+            return Ok(f64::NAN);
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pos = q * (v.len() - 1) as f64;
+        let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+        Ok(v[lo] + (v[hi] - v[lo]) * (pos - lo as f64))
+    }
+
+    /// The index **label** of the maximum value (NaN-skipping); raises on an
+    /// all-NA series (pandas `idxmax`).
+    fn idxmax(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(label_to_py(py, &self.inner.index, argext(&self.inner.data, true)?))
+    }
+
+    /// The index **label** of the minimum value (NaN-skipping); raises on an
+    /// all-NA series (pandas `idxmin`).
+    fn idxmin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(label_to_py(py, &self.inner.index, argext(&self.inner.data, false)?))
     }
 
     fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -1058,6 +1177,52 @@ fn series_cmp(
 /// The non-NaN `f64` values of a column (for NaN-skipping reductions).
 fn non_nan(col: &Column) -> Vec<f64> {
     col.to_f64_vec().into_iter().filter(|x| !x.is_nan()).collect()
+}
+
+/// Forward (`ffill` / `pad`) or backward (`bfill` / `backfill`) fill of NaN cells.
+fn fill_directional(v: &[f64], method: &str) -> PyResult<Vec<f64>> {
+    let mut out = v.to_vec();
+    match method {
+        "ffill" | "pad" => {
+            let mut last = f64::NAN;
+            for x in out.iter_mut() {
+                if x.is_nan() {
+                    *x = last;
+                } else {
+                    last = *x;
+                }
+            }
+        }
+        "bfill" | "backfill" => {
+            let mut next = f64::NAN;
+            for x in out.iter_mut().rev() {
+                if x.is_nan() {
+                    *x = next;
+                } else {
+                    next = *x;
+                }
+            }
+        }
+        _ => return Err(PyValueError::new_err(format!("fillna: unknown method '{method}'"))),
+    }
+    Ok(out)
+}
+
+/// The position of the first maximum (`want_max`) or minimum non-NaN value; errors
+/// on an all-NA column. Backs `Series.idxmax` / `idxmin`.
+fn argext(col: &Column, want_max: bool) -> PyResult<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, x) in col.to_f64_vec().into_iter().enumerate() {
+        if x.is_nan() {
+            continue;
+        }
+        match best {
+            Some((_, b)) if (want_max && x <= b) || (!want_max && x >= b) => {}
+            _ => best = Some((i, x)),
+        }
+    }
+    best.map(|(i, _)| i)
+        .ok_or_else(|| PyValueError::new_err("idxmax / idxmin of an all-NA series"))
 }
 
 /// A column coerced to bool (a `Bool` column as-is, else `x != 0.0`).
