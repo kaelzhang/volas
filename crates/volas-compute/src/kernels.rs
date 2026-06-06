@@ -699,6 +699,20 @@ mod tests {
     use super::*;
     use ndarray::array;
 
+    /// `ema_cascade_final` declines (returns `None`) for the two degenerate shapes that
+    /// produce an all-NaN cascade: a zero period or zero-depth cascade (kernels.rs:277),
+    /// and a lookback that never fully seeds within the data (kernels.rs:281).
+    #[test]
+    fn ema_cascade_final_declines_on_degenerate_shape() {
+        let data: Vec<f64> = (0..40).map(|i| 100.0 + i as f64).collect();
+        // S == 0 -> the cascade has no stages.
+        assert!(ema_cascade_final::<0>(&data, 12).is_none());
+        // period == 0 -> the smoothing factor is undefined.
+        assert!(ema_cascade_final::<3>(&data, 0).is_none());
+        // lookback = S*(period-1) = 3*29 = 87 >= n (3) -> never seeds.
+        assert!(ema_cascade_final::<3>(&[1.0, 2.0, 3.0], 30).is_none());
+    }
+
     #[test]
     fn test_sma() {
         let data = array![1.0, 2.0, 3.0, 4.0, 5.0];
