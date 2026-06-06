@@ -113,7 +113,7 @@ backed by a Rust kernel and has no pandas runtime dependency.
 df = read_csv('stock.csv')
 ```
 
-As we know, we could use `[]`, which is called **pandas indexing** (a.k.a.
+We can use `[]`, which is called **pandas indexing** (a.k.a.
 `__getitem__` in python) to select out lower-dimensional slices. In addition to
 indexing with `colname` (the column name of the `DataFrame`), we could also do
 indexing by `directive`s.
@@ -381,7 +381,8 @@ On a tf-aware frame:
   row; a re-sent forming bar (same timestamp) updates rather than double-counts.
 - **df.iloc[-1]** is the current (still-open) period — the live bar.
 - **df[directive]** / **df.exec(directive)** computes indicators over the
-  cumulated frame, including the forming row.
+  cumulated frame including the forming row — lazily, on read: an `append` only
+  marks them stale, and the next read recomputes just the tail.
 - **df.cumulate(target)** must be a whole multiple of the source frame (e.g.
   `5m→15m`, not `5m→7m`; a week or 3-day bar does not nest into a month/year);
   the same frame is a `copy()`.
@@ -536,26 +537,18 @@ The `time_frame` may be a string label or a `TimeFrame` constant — see
 
 For **live** streaming you do not re-cumulate the whole history on every tick —
 you keep the current 5-minute bar *forming* and update it as each finer bar
-arrives. That is exactly what a **tf-aware DataFrame** does.
+arrives. A **tf-aware DataFrame** does exactly that: it stays an ordinary
+DataFrame (read columns, run directives, slice it), except `append` **folds**
+each finer bar into the bar currently forming instead of adding a row. You make
+one with `df.cumulate('5m')` or `DataFrame(data, time_frame='5m')`, and the live
+loop is then just:
 
-#### The tf-aware DataFrame *is* the cumulator
-
-In some libraries this job belongs to a separate **`Cumulator`** object that you
-feed bars to. volas has no such class: **a DataFrame that carries a `time_frame`
-is itself the cumulator.** `cumulate` returns one, or you build one directly with
-`DataFrame(data, time_frame='5m')`. The whole "accumulator" idea is then just
-ordinary DataFrame operations:
-
-| what you want                   | tf-aware DataFrame          |
-| ------------------------------- | --------------------------- |
-| a cumulator for the `5m` frame  | `cum = df.cumulate('5m')`   |
-| feed it the next (finer) bar    | `cum.append(bar)`           |
-| the whole accumulated history   | `cum`                       |
-| the current, still-forming bar  | `cum.iloc[-1]`              |
-| a live indicator over it        | `cum['macd']`               |
-
-> A `Cumulator` engine still lives in volas's Rust core, but it is an internal
-> implementation detail; the Python API exposes only the DataFrame.
+| step                           | call                      |
+| ------------------------------ | ------------------------- |
+| make a `5m` frame              | `cum = df.cumulate('5m')` |
+| feed it the next finer bar     | `cum.append(bar)`         |
+| read the current forming bar   | `cum.iloc[-1]`            |
+| read an indicator over it      | `cum['macd']`             |
 
 #### Watch the forming bar grow
 
@@ -610,9 +603,14 @@ print(cum)
 
 Two properties make this safe for a live feed:
 
-- **Indicators stay live.** `cum['ema:9']` (or any directive) computes over the
-  whole frame *including* the forming row, so it updates on every `append` and
-  always equals what cumulating-then-computing in one shot would give.
+- **Indicators are lazy, and fresh on read.** `append` does not recompute
+  anything — it only flags the dependent directive columns as stale (their
+  valid-row cursor now lags the frame height). The recompute happens when you
+  **read** `cum['ema:9']` (or any directive): only the stale tail is refreshed —
+  `O(lookback)`, not the whole column — over the frame *including* the forming
+  row, bit-identical to a one-shot cumulate-then-compute. (A bulk read such as
+  `to_numpy()` does not auto-refresh; call `cum.fulfill()` first, or just read
+  the directive.)
 - **Re-sent bars do not double-count.** Folding a bar whose timestamp you have
   already seen **updates** that period instead of adding to it — the same dedup
   rule shown at the top of this section — matching exchanges that revise their
