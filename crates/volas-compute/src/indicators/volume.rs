@@ -238,3 +238,69 @@ pub fn adosc(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::test_support::*;
+
+    /// Empty-series guards: every `*_final_state` declines to carry state for `n == 0`
+    /// (the `return None` arms — no first bar to seed from).
+    #[test]
+    fn final_state_declines_on_empty() {
+        assert!(obv_final_state(&[], &[]).is_none()); // volume.rs:38
+        assert!(ad_final_state(&[], &[], &[], &[]).is_none()); // volume.rs:55
+        assert!(adosc_final_state(&[], &[], &[], &[], 3, 10).is_none()); // volume.rs:77
+    }
+
+    /// Each resume, fed the carried state of a full compute over the head, reproduces
+    /// the tail of a full compute over the whole input — bit-for-bit.
+    #[test]
+    fn resume_is_bit_identical_to_full() {
+        let (high, low, close) = ohlc(120);
+        // A volume track that rises and falls (so OBV's up/down/flat sign all fire).
+        let vol: Vec<f64> = (0..120)
+            .map(|i| 1000.0 + 300.0 * ((i as f64) * 0.27).sin())
+            .collect();
+        let (fast, slow) = (3usize, 10usize);
+
+        let obv_full = obv(&close, &vol);
+        let ad_full = ad(&high, &low, &close, &vol);
+        let adosc_full = adosc(&high, &low, &close, &vol, fast, slow);
+
+        // OBV / AD carry no warm-up (lookback 0), so any `from >= 1` matches the full.
+        for &from in &[1usize, 2, 30, 60, 119] {
+            let head = &close[..from];
+
+            let st = obv_final_state(head, &vol[..from]).unwrap();
+            let (tail, _) = obv_resume(&close, &vol, from, &st);
+            assert_bits(&tail, &obv_full[from..], "obv");
+
+            let st = ad_final_state(&high[..from], &low[..from], head, &vol[..from]).unwrap();
+            let (tail, _) = ad_resume(&high, &low, &close, &vol, from, &st);
+            assert_bits(&tail, &ad_full[from..], "ad");
+        }
+
+        // ADOSC resumes only past its `max(fast,slow)-1` warm-up (the cached tail starts
+        // at `valid_rows == lookback + 1`), where the full output is already finite.
+        let lookback = fast.max(slow) - 1;
+        for &from in &[lookback + 1, lookback + 5, 60, 119] {
+            let st =
+                adosc_final_state(&high[..from], &low[..from], &close[..from], &vol[..from], fast, slow)
+                    .unwrap();
+            let (tail, _) = adosc_resume(&high, &low, &close, &vol, fast, slow, from, &st);
+            assert_bits(&tail, &adosc_full[from..], "adosc");
+        }
+    }
+
+    /// A zero high-low range bar contributes nothing to the A/D line (the `range > 0`
+    /// guard's `else` arm), so a flat bar leaves the running total unchanged.
+    #[test]
+    fn flat_bar_adds_zero_money_flow() {
+        let high = [10.0, 10.0];
+        let low = [10.0, 10.0];
+        let close = [10.0, 10.0];
+        let vol = [5.0, 5.0];
+        assert_eq!(ad(&high, &low, &close, &vol), vec![0.0, 0.0]);
+    }
+}

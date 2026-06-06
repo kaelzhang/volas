@@ -42,6 +42,58 @@ pub use transform::*;
 pub use trend::*;
 pub use volume::*;
 
+/// Shared deterministic test fixtures + the bit-exact state-carry oracle, reused by
+/// every submodule's `#[cfg(test)] mod tests` (via `use crate::indicators::test_support::*;`).
+/// Kept in the parent so the generators and the `assert_bits` comparator are not
+/// duplicated across files.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// A non-degenerate oscillating series (sine carrier + slow drift), long enough
+    /// that every indicator is well past its warm-up. Iterating a resume's `from`
+    /// across this naturally fires the rare rolling-extreme rebuild / new-extreme arms.
+    pub fn series(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|i| {
+                let t = i as f64;
+                100.0 + 0.05 * t + 6.0 * (t * 0.30).sin() + 2.0 * (t * 0.11).cos()
+            })
+            .collect()
+    }
+
+    /// Oscillating high/low/close triplet. The carrier swings hard enough (and the
+    /// two sines beat against each other) that a Parabolic-SAR walk reverses in BOTH
+    /// directions repeatedly, and the directional-movement extremes flip sign — so a
+    /// resume iterated over many `from` offsets exercises every reversal arm.
+    pub fn ohlc(n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            let mid = 100.0 + 0.04 * t + 8.0 * (t * 0.25).sin() + 3.0 * (t * 0.13).cos();
+            let span = 1.5 + 0.8 * (t * 0.37).sin().abs();
+            high.push(mid + span);
+            low.push(mid - span);
+            // Close walks within the bar, sometimes near the high, sometimes the low.
+            close.push(mid + span * 0.6 * (t * 0.41).sin());
+        }
+        (high, low, close)
+    }
+
+    /// Compare two slices for exact bit equality (NaN == NaN) — the state-carry oracle:
+    /// a resume fed the carried state of a full compute over the head must reproduce
+    /// the tail of a full compute over the whole input, bit-for-bit.
+    pub fn assert_bits(a: &[f64], b: &[f64], what: &str) {
+        assert_eq!(a.len(), b.len(), "{what}: length {} != {}", a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            assert!(
+                x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+                "{what}: bar {i}: resume {x:?} != full {y:?}",
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
