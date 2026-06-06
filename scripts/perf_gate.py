@@ -1,51 +1,41 @@
 #!/usr/bin/env python3
-"""Performance-regression gate for CI.
+"""Performance-regression gate for CI — compares this commit against its parent.
 
-Compares per-item **volas-vs-reference ratios** from a pytest-benchmark JSON against a
-committed baseline and exits non-zero on regression. The ratio (volas median / reference
-median) cancels the runner's absolute speed — both candidates run in the *same* CI job.
-Reference = TA-Lib for the ``coverage`` section, the fastest of pandas / polars for the
-``api`` section. Lower ratio = volas faster.
+The benchmark runs twice in the SAME CI job, on the SAME runner: once for the current
+commit (HEAD) and once for the base commit (the PR merge-base, or the previous tip on a
+push). This gate compares volas's own median times between the two runs.
 
-A regression is flagged when an item's ratio grows past ``baseline * (1 + threshold)``
-(volas got relatively slower). **Two robustness rules keep the gate from firing on noise:**
+Because HEAD and base run on one machine, absolute runner speed AND CPU microarchitecture
+both cancel out — so the thresholds are architecture-independent, and there is no stored
+baseline to drift across machines or to regenerate by hand.
 
-* **Noise exclusions.** Per-item gating (and the win-count) skip items whose ratio is timing
-  noise rather than signal: (a) a *reference* median below ``--min-ref-us`` (the price
-  transforms run in ~2 µs, where constant Python/dispatch overhead dominates the ratio), and
-  (b) the candlestick family (``cdl.*``) — branch-heavy and data-dependent, so its per-call
-  cost, and thus the volas/TA-Lib ratio, swings run-to-run far past any threshold even on the
-  same machine (the items that tripped the old gate were always candlesticks). What remains is
-  the ~60 straight-line arithmetic indicators, whose ratios are stable.
-* **Win-count tolerance (``--win-tolerance``).** The number of ``coverage`` items where volas
-  wins (ratio ≤ 1) may drop by up to this many before failing — a broad regression no single
-  item trips, with slack for the noisy fast items and for runner-to-runner / cross-architecture
-  drift (the baseline is regenerated *in CI* — see ``perf.yml`` ``workflow_dispatch`` — so it
-  matches the gate's environment; otherwise a dev-machine baseline adds a systematic offset).
+A regression (volas got slower from base to HEAD) is flagged when, over the items whose
+base median is at least ``--min-us`` microseconds (faster items are pure timing noise):
+
+* the geometric mean of the per-item HEAD/base ratios exceeds ``--geomean-max`` — a broad
+  slowdown across the suite, or
+* any single item slows by more than ``--item-max`` — a sharp regression in one indicator.
+
+The gate is fail-safe: a missing or unreadable base file means "no comparison available",
+which passes (a regression gate must not block CI on its own plumbing).
 
 Usage::
 
-    python scripts/perf_gate.py BENCH_JSON [--baseline F] [--threshold 0.25] [--min-ref-us 8]
-    python scripts/perf_gate.py BENCH_JSON --update      # (re)write the baseline (do this in CI)
+    python scripts/perf_gate.py HEAD.json --base BASE.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 
-# Reference candidate per section (best-of for the API plumbing comparison).
-_REFERENCE = {'coverage': ('talib',), 'api': ('pandas', 'polars')}
 
-
-def _ratios(data: dict) -> dict:
-    """``{section: {item: (volas/reference ratio, reference median seconds)}}``.
-
-    The reference median is kept so the gate can apply an absolute-time noise floor; the
-    committed baseline stores only the ratio (see ``--update``)."""
-    cells: dict[tuple[str, str], dict[str, float]] = {}
+def _volas_medians(data: dict) -> dict:
+    """``{(section, item): volas median seconds}`` over the coverage + api sections."""
+    out: dict[tuple[str, str], float] = {}
     for b in data['benchmarks']:
         name = b['name']
         if name.startswith('test_coverage'):
@@ -57,110 +47,91 @@ def _ratios(data: dict) -> dict:
         params = b.get('params') or {}
         cand = params.get('candidate')
         item = params.get('indicator') or params.get('op')
-        if cand is None or item is None:  # fall back to parsing name[cand-item]
+        if cand is None or item is None:  # fall back to parsing "[indicator-candidate]"
             m = re.search(r'\[(.+)\]', name)
             if m:
                 inside = m.group(1)
                 for c in ('talib', 'volas', 'pandas', 'polars'):
-                    if inside.startswith(c + '-'):
-                        cand, item = c, inside[len(c) + 1:]
+                    if inside.endswith('-' + c):
+                        item, cand = inside[: -(len(c) + 1)], c
                         break
-        if cand and item:
-            cells.setdefault((section, item), {})[cand] = b['stats']['median']
-
-    out: dict[str, dict[str, tuple[float, float]]] = {'coverage': {}, 'api': {}}
-    for (section, item), m in cells.items():
-        v = m.get('volas')
-        if not v:
-            continue
-        refs = [m[c] for c in _REFERENCE[section] if c in m and m[c] > 0]
-        if refs:
-            ref = min(refs)
-            out[section][item] = (round(v / ref, 4), ref)
+        if cand == 'volas' and item:
+            out[(section, item)] = b['stats']['median']
     return out
+
+
+def _load(path: str) -> dict | None:
+    try:
+        with open(path) as f:
+            return _volas_medians(json.load(f))
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('bench', help='pytest-benchmark JSON to check')
-    ap.add_argument('--baseline', default='scripts/perf_baseline.json')
-    ap.add_argument('--threshold', type=float, default=0.25,
-                    help='max tolerated relative ratio increase (default 0.25 = 25%%)')
-    ap.add_argument('--min-ref-us', type=float, default=8.0,
-                    help='only gate items whose reference median is at least this many '
-                         'microseconds; faster items have noise-dominated ratios (default 8)')
-    ap.add_argument('--win-tolerance', type=int, default=8,
-                    help='max tolerated drop in the coverage win-count (default 8)')
-    ap.add_argument('--update', action='store_true', help='(re)write the baseline and exit')
+    ap.add_argument('head', help='pytest-benchmark JSON for the current commit')
+    ap.add_argument('--base', required=True, help='pytest-benchmark JSON for the base commit')
+    ap.add_argument('--min-us', type=float, default=5.0,
+                    help='only gate items whose base median is at least this many '
+                         'microseconds; faster items are timing noise (default 5)')
+    ap.add_argument('--geomean-max', type=float, default=1.10,
+                    help='max tolerated geometric-mean HEAD/base ratio (default 1.10 = +10%%)')
+    ap.add_argument('--item-max', type=float, default=1.60,
+                    help='max tolerated single-item HEAD/base ratio (default 1.60 = +60%%)')
     a = ap.parse_args(argv)
 
-    ratios = _ratios(json.load(open(a.bench)))
-
-    if a.update:
-        flat = {s: {i: rr[0] for i, rr in d.items()} for s, d in ratios.items()}
-        with open(a.baseline, 'w') as f:
-            json.dump(flat, f, indent=1, sort_keys=True)
-            f.write('\n')
-        n = sum(len(v) for v in flat.values())
-        print(f'baseline written to {a.baseline} ({n} items)')
+    head = _load(a.head)
+    base = _load(a.base)
+    if head is None:
+        print(f'PERF GATE: cannot read HEAD benchmark {a.head}; skipping.')
+        return 0
+    if base is None:
+        print(f'PERF GATE: no readable base benchmark at {a.base} '
+              '(first commit, or the base build/benchmark did not run); skipping.')
         return 0
 
-    try:
-        base = json.load(open(a.baseline))
-    except FileNotFoundError:
-        print(f'PERF GATE: no baseline at {a.baseline}; run with --update to create it.')
+    ratios: dict[tuple[str, str], float] = {}
+    sub_floor = 0
+    for key, bmed in base.items():
+        if key not in head:
+            continue
+        if bmed * 1e6 < a.min_us:
+            sub_floor += 1
+            continue
+        ratios[key] = head[key] / bmed
+
+    if not ratios:
+        print('perf gate: no comparable items above the time floor; skipping.')
         return 0
 
-    regressions, new_items, skipped = [], [], []
-    for section, items in ratios.items():
-        for item, (r, ref) in items.items():
-            br = base.get(section, {}).get(item)
-            if br is None:
-                new_items.append((section, item, r))
-            elif r > br * (1 + a.threshold):
-                # Skip where the ratio is timing noise, not signal: a sub-floor reference
-                # (Python/dispatch overhead dominates) or the branch-heavy candlestick family.
-                if ref * 1e6 < a.min_ref_us or item.startswith('cdl.'):
-                    skipped.append((section, item))
-                else:
-                    regressions.append((section, item, br, r, ref * 1e6))
+    geomean = math.exp(sum(math.log(r) for r in ratios.values()) / len(ratios))
+    regressions = sorted((kv for kv in ratios.items() if kv[1] > a.item_max),
+                         key=lambda kv: -kv[1])
+    faster = sum(1 for r in ratios.values() if r < 1.0)
 
-    # Win-count over the stable (non-candlestick) coverage items only.
-    base_wins = sum(1 for i, r in base.get('coverage', {}).items()
-                    if r <= 1.0 and not i.startswith('cdl.'))
-    now_wins = sum(1 for i, (r, _) in ratios.get('coverage', {}).items()
-                   if r <= 1.0 and not i.startswith('cdl.'))
-    win_drop = base_wins - now_wins
-
-    total = sum(len(v) for v in ratios.values())
-    print(f'perf gate: {total} items, threshold {a.threshold:.0%}, ref-floor {a.min_ref_us:g}us; '
-          f'coverage wins {now_wins} (baseline {base_wins}).')
-    if skipped:
-        print(f'  {len(skipped)} item(s) over threshold but not gated (timing noise — fast '
-              f'reference or candlestick): ' + ', '.join(f'{s}:{i}' for s, i in skipped[:8])
-              + (' …' if len(skipped) > 8 else ''))
-    if new_items:
-        print(f'  {len(new_items)} new item(s) without a baseline (not gated): '
-              + ', '.join(f'{s}:{i}' for s, i, _ in new_items[:8])
-              + (' …' if len(new_items) > 8 else ''))
+    print(f'perf gate: {len(ratios)} items gated (>= {a.min_us:g}us), {sub_floor} sub-floor '
+          f'skipped; geomean HEAD/base = {geomean:.3f} (max {a.geomean_max:.2f}); '
+          f'{faster} item(s) faster.')
+    for (s, i), r in sorted(ratios.items(), key=lambda kv: -kv[1])[:5]:
+        print(f'    biggest mover: [{s}] {i}: x{r:.2f}')
 
     failed = False
+    if geomean > a.geomean_max:
+        failed = True
+        print(f'FAIL: broad slowdown — geomean HEAD/base {geomean:.3f} > {a.geomean_max:.2f}.')
     if regressions:
         failed = True
-        print(f'FAIL: {len(regressions)} item(s) regressed > {a.threshold:.0%} '
-              '(volas got relatively slower):')
-        for s, i, br, r, ref_us in sorted(regressions, key=lambda x: -(x[3] / x[2])):
-            print(f'    [{s}] {i}: {br:.3f} -> {r:.3f}  (+{r / br - 1:.0%}, ref {ref_us:.0f}us)')
-    if win_drop > a.win_tolerance:
-        failed = True
-        print(f'FAIL: coverage win-count dropped by {win_drop} (> tolerance {a.win_tolerance}).')
+        print(f'FAIL: {len(regressions)} item(s) slowed by > {(a.item_max - 1) * 100:.0f}%:')
+        for (s, i), r in regressions:
+            print(f'    [{s}] {i}: x{r:.2f}  '
+                  f'(base {base[(s, i)] * 1e6:.0f}us -> head {head[(s, i)] * 1e6:.0f}us)')
 
     if failed:
-        print('\nIf this regression is intentional, regenerate the baseline (in CI, so it matches '
-              'the gate environment):\n'
-              '  perf.yml -> Run workflow -> update_baseline=true   # commits scripts/perf_baseline.json')
+        print('\nThis compares HEAD against its parent on the same runner. If the slowdown is '
+              'intentional, say so in the change; otherwise profile the flagged indicator(s).')
         return 1
-    print('PASS: no performance regression beyond threshold.')
+    print('PASS: no performance regression vs the parent commit.')
     return 0
 
 

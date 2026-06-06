@@ -1,17 +1,18 @@
 name: perf-gate
 
-# Performance regression gate. Runs the coverage (vs TA-Lib) and core-API (vs
-# pandas/polars) benchmark sections and fails if a *stable* item regresses past the
-# threshold relative to the committed baseline (scripts/perf_baseline.json). The gate
-# compares volas-vs-reference *ratios* (both candidates run in the same job, so the
-# runner's absolute speed cancels) and excludes the noise-dominated items — the
-# candlestick family and sub-microsecond references — whose ratios swing run-to-run
-# regardless of machine (see scripts/perf_gate.py).
+# Performance-regression gate. The benchmark runs TWICE in this one job, on the SAME
+# runner: once for this commit (HEAD) and once for its parent (the PR merge-base, or the
+# previous tip on a push). scripts/perf_gate.py then compares volas's own median times
+# between the two runs.
 #
-# The baseline is environment-specific: the volas/TA-Lib ratio differs by architecture
-# (a dev-machine baseline systematically mismatches the x86 CI runner). Regenerate it ON
-# CI, not locally: run this workflow manually with `update_baseline: true` and commit the
-# uploaded `perf-baseline` artifact.
+# Comparing HEAD against its parent on one machine is what makes the gate reliable: the
+# runner's absolute speed AND its CPU microarchitecture both cancel, so the thresholds are
+# architecture-independent and there is no stored baseline to drift across machines (a
+# committed volas/TA-Lib-ratio baseline is meaningless here — that ratio is not portable
+# from a dev machine to the x86 runner).
+#
+# Fail-safe: if the parent can't be resolved, or its build/benchmark fails, the gate is
+# skipped rather than failed — a regression gate must never block CI on its own plumbing.
 
 on:
   push:
@@ -20,11 +21,6 @@ on:
       - main
   pull_request:
   workflow_dispatch:
-    inputs:
-      update_baseline:
-        description: "Regenerate scripts/perf_baseline.json from this CI run (x86) and upload it"
-        type: boolean
-        default: false
 
 # A newer push to the same ref supersedes an in-flight run.
 concurrency:
@@ -37,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history — needed to reach the parent / merge-base
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -58,45 +56,62 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip maturin
-          # `benchmark` extra brings polars; `dev` brings pandas + TA-Lib (the
-          # references the gate compares volas against).
+          # The benchmark module imports the comparison libraries (pandas / polars / TA-Lib)
+          # at collection time; the CI run times only volas (`-k "... and volas"`), which is
+          # all the head-vs-base gate compares.
           pip install -e .[dev,benchmark]
 
-      - name: Build the extension (release)
-        run: maturin develop --release
-
-      - name: Run the benchmark (coverage + core API)
+      - name: Resolve the base commit
         run: |
-          mkdir -p .benchmarks
-          pytest test/test_benchmark.py -k "test_coverage or test_api" \
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="$(git merge-base "${{ github.event.pull_request.base.sha }}" HEAD || true)"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          # Use it only if it is a real, reachable commit (not empty, not the all-zeros
+          # sentinel of a brand-new ref).
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "No usable parent commit — the gate will be skipped."
+            BASE=""
+          fi
+          echo "BASE_SHA=$BASE" >> "$GITHUB_ENV"
+
+      - name: Benchmark HEAD
+        run: |
+          maturin develop --release
+          pytest test/test_benchmark.py -k "(test_coverage or test_api) and volas" \
             --benchmark-only --benchmark-sort=name \
-            --benchmark-columns=median --benchmark-json=.benchmarks/ci.json -q
+            --benchmark-columns=median --benchmark-json="$RUNNER_TEMP/head.json" -q
+
+      - name: Benchmark the base commit
+        if: ${{ env.BASE_SHA != '' }}
+        continue-on-error: true       # fail-safe: a base build/benchmark failure skips the gate
+        run: |
+          git checkout --quiet --force "$BASE_SHA"
+          maturin develop --release
+          pytest test/test_benchmark.py -k "(test_coverage or test_api) and volas" \
+            --benchmark-only --benchmark-sort=name \
+            --benchmark-columns=median --benchmark-json="$RUNNER_TEMP/base.json" -q
+
+      - name: Restore HEAD
+        if: ${{ always() }}           # ensure the gate runs against HEAD's perf_gate.py
+        run: git checkout --quiet --force "$HEAD_SHA"
 
       - name: Performance gate
-        if: ${{ github.event.inputs.update_baseline != 'true' }}
         run: |
-          python scripts/perf_gate.py .benchmarks/ci.json \
-            --baseline scripts/perf_baseline.json --threshold 0.25
-
-      - name: Regenerate baseline (manual workflow_dispatch only)
-        if: ${{ github.event.inputs.update_baseline == 'true' }}
-        run: |
-          python scripts/perf_gate.py .benchmarks/ci.json \
-            --baseline scripts/perf_baseline.json --update
-          echo "Regenerated scripts/perf_baseline.json on the CI (x86) runner — download the"
-          echo "'perf-baseline' artifact below and commit it to make the gate x86-native."
-
-      - name: Upload regenerated baseline
-        if: ${{ github.event.inputs.update_baseline == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-baseline
-          path: scripts/perf_baseline.json
+          if [ -f "$RUNNER_TEMP/base.json" ]; then
+            python scripts/perf_gate.py "$RUNNER_TEMP/head.json" --base "$RUNNER_TEMP/base.json"
+          else
+            echo "No base benchmark (first commit, or the base build/benchmark failed) — gate skipped."
+          fi
 
       - name: Upload benchmark JSON
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-json
-          path: .benchmarks/ci.json
+          path: ${{ runner.temp }}/*.json
           retention-days: 14
