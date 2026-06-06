@@ -381,11 +381,21 @@ impl DcPhase {
         let mut real_part = 0.0f64;
         let mut imag_part = 0.0f64;
         let mut k = self.idx;
-        for i in 0..dc_period_int {
-            let t = (i as f64) * TWO_PI / (dc_period_int as f64);
+        // The DFT bins are evenly spaced angles `t_i = i·Δ` with `Δ = 2π/dc_period_int`, so
+        // rotate a unit phasor by the constant step Δ instead of calling sin/cos per bin —
+        // `dc_period_int` transcendental pairs collapse to one `sin_cos` per bar. The rotation
+        // drifts ~1e-15 over `dc_period_int` (≤ SMOOTH_PRICE_SIZE) steps, far inside the HT
+        // convergence tolerance; and the full compute and the resume share this path, so they
+        // stay bit-identical to each other.
+        let (sin_d, cos_d) = (TWO_PI / dc_period_int as f64).sin_cos();
+        let (mut s, mut c) = (0.0f64, 1.0f64); // sin(0·Δ), cos(0·Δ)
+        for _ in 0..dc_period_int {
             let v = self.smooth_price[k];
-            real_part += t.sin() * v;
-            imag_part += t.cos() * v;
+            real_part += s * v;
+            imag_part += c * v;
+            let (ns, nc) = (s * cos_d + c * sin_d, c * cos_d - s * sin_d);
+            s = ns;
+            c = nc;
             k = if k == 0 { SMOOTH_PRICE_SIZE - 1 } else { k - 1 };
         }
         let abs_imag = imag_part.abs();
