@@ -912,11 +912,20 @@ mod tests {
         )
         .unwrap();
         df.set_computed("close", "ema:12".into(), 11);
-        // a slice keeping >= lookback rows carries the column as continuable.
-        let keep = df.slice(40, 60); // 20 rows >= 11
+        df.set_computed_state("close", Some(vec![42.0])); // a carried EMA state as of row 59
+        // a slice keeping >= lookback rows AND ending at `valid_rows` carries the column
+        // as continuable, threading the recursive state through (the `Some` branch).
+        let keep = df.slice(40, 60); // 20 rows >= 11, end == valid_rows (60)
         assert_eq!(keep.computed_columns().len(), 1);
         assert_eq!(keep.computed_columns()[0].1.valid_rows, 20);
-        // a slice keeping < lookback rows drops the computed status (not continuable).
+        assert_eq!(keep.computed_columns()[0].1.state, Some(vec![42.0]));
+        // a TAIL slice keeps >= lookback rows but ends BEFORE `valid_rows`, so the carried
+        // state (attached to a row this sub-frame no longer ends on) is dropped — the column
+        // stays computed but state-less, continuable only via the full-recompute fallback.
+        let tail = df.slice(0, 50); // 50 rows >= 11, end (50) < valid_rows (60)
+        assert_eq!(tail.computed_columns().len(), 1);
+        assert_eq!(tail.computed_columns()[0].1.state, None);
+        // a slice keeping < lookback rows drops the computed status entirely (not continuable).
         let too_short = df.slice(55, 60); // 5 rows < 11
         assert!(too_short.computed_columns().is_empty());
     }
