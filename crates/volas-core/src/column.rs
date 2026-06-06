@@ -240,18 +240,43 @@ impl Column {
     }
 
     /// Interpret a numeric (epoch) column as a UTC `Datetime` column, scaling by
-    /// `unit` (`"s"` / `"ms"` / `"us"` / `"ns"`). The robust ingestion path for
-    /// exchange APIs that return numeric timestamps.
+    /// `unit` (`"s"` / `"ms"` / `"us"` / `"ns"`). Float epochs are **truncated** to
+    /// the whole `unit` (matching a NumPy / pandas `astype('datetime64[unit]')`
+    /// cast). The robust ingestion path for exchange APIs that return numeric
+    /// timestamps.
     pub fn epoch_to_datetime(&self, unit: &str) -> Result<Column> {
-        let to_ns = |x: i64| {
-            datetime::epoch_to_ns(x, unit)
-                .ok_or_else(|| VolasError::Value(format!("invalid epoch unit {unit:?} or overflow")))
-        };
+        self.epoch_to_datetime_with(unit, |x| datetime::epoch_to_ns(x as i64, unit))
+    }
+
+    /// Like [`epoch_to_datetime`](Self::epoch_to_datetime) but **rounds** float
+    /// epochs to the nearest nanosecond, preserving sub-`unit` fractions (matching
+    /// `pandas.to_datetime(..., unit=...)`). Identical for integer columns.
+    pub fn epoch_to_datetime_rounded(&self, unit: &str) -> Result<Column> {
+        self.epoch_to_datetime_with(unit, |x| datetime::epoch_to_ns_f64(x, unit))
+    }
+
+    /// Shared epoch → `Datetime` conversion; `f64_to_ns` chooses how float epochs
+    /// map to nanoseconds (truncate vs round). Integers always scale exactly.
+    fn epoch_to_datetime_with(
+        &self,
+        unit: &str,
+        f64_to_ns: impl Fn(f64) -> Option<i64>,
+    ) -> Result<Column> {
         match self {
-            Column::I64(v) => v.iter().map(|&x| to_ns(x)).collect::<Result<Vec<_>>>().map(Column::datetime),
+            Column::I64(v) => v
+                .iter()
+                .map(|&x| {
+                    datetime::epoch_to_ns(x, unit)
+                        .ok_or_else(|| VolasError::Value(format!("invalid epoch unit {unit:?} or overflow")))
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(Column::datetime),
             Column::F64(v) => v
                 .iter()
-                .map(|&x| to_ns(x as i64))
+                .map(|&x| {
+                    f64_to_ns(x)
+                        .ok_or_else(|| VolasError::Value(format!("invalid epoch unit {unit:?} or overflow")))
+                })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::datetime),
             other => Err(VolasError::DType(format!(
@@ -483,6 +508,24 @@ mod tests {
         assert!(Column::i64(vec![1, 2]).epoch_to_datetime("s").is_ok());
         assert!(Column::f64(vec![1.0, 2.0]).epoch_to_datetime("s").is_ok());
         assert!(Column::bool(vec![true]).epoch_to_datetime("s").is_err());
+        // epoch_to_datetime_rounded preserves a fractional second; integers agree.
+        assert_eq!(
+            Column::f64(vec![1.5]).epoch_to_datetime_rounded("s").unwrap(),
+            Column::datetime(vec![1_500_000_000])
+        );
+        assert_eq!(
+            Column::f64(vec![2.0]).epoch_to_datetime("s").unwrap(),
+            Column::datetime(vec![2_000_000_000])
+        );
+        assert_eq!(
+            Column::i64(vec![3]).epoch_to_datetime_rounded("s").unwrap(),
+            Column::datetime(vec![3_000_000_000])
+        );
+        // the error closure on each numeric arm fires on an unknown unit
+        assert!(Column::i64(vec![1]).epoch_to_datetime("weeks").is_err());
+        assert!(Column::f64(vec![1.0]).epoch_to_datetime("weeks").is_err());
+        assert!(Column::f64(vec![1.0]).epoch_to_datetime_rounded("weeks").is_err());
+        assert!(Column::bool(vec![true]).epoch_to_datetime_rounded("s").is_err());
         // to_string_vec renders each supported dtype.
         assert_eq!(Column::str(vec!["a".into()]).to_string_vec(), vec!["a".to_string()]);
         assert_eq!(Column::f64(vec![1.5]).to_string_vec(), vec!["1.5".to_string()]);

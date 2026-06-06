@@ -88,6 +88,19 @@ fn parse_dtype(s: &str) -> PyResult<DType> {
     })
 }
 
+/// The epoch unit a `datetime64[...]` dtype string implies, or `None` when `s` is
+/// not a datetime dtype. Bare `datetime` / `datetime64` / `datetime64[ns]` mean
+/// nanoseconds; `datetime64[s|ms|us]` carry their own unit (pandas-aligned).
+fn datetime_unit_of(s: &str) -> Option<&'static str> {
+    match s {
+        "datetime" | "datetime64" | "datetime64[ns]" => Some("ns"),
+        "datetime64[s]" => Some("s"),
+        "datetime64[ms]" => Some("ms"),
+        "datetime64[us]" => Some("us"),
+        _ => None,
+    }
+}
+
 fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(a) = v.extract::<PyReadonlyArray1<f64>>() {
         return Ok(Column::f64(a.as_slice()?.to_vec()));
@@ -2086,11 +2099,29 @@ impl PyDataFrame {
     /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
     /// new frame.
     fn astype(&self, dtypes: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
+        let mut df = self.inner.clone();
         let mut mapping = HashMap::new();
         for (k, v) in dtypes.iter() {
-            mapping.insert(k.extract::<String>()?, parse_dtype(&v.extract::<String>()?)?);
+            let name = k.extract::<String>()?;
+            let dt = v.extract::<String>()?;
+            if let Some(unit) = datetime_unit_of(&dt) {
+                // datetime target: parse a string column, or scale a numeric epoch
+                // column by the dtype's unit (truncating, like a NumPy
+                // `datetime64[unit]` cast).
+                let col = df.column(&name).map_err(pyerr)?.clone();
+                let converted = match &col {
+                    Column::Datetime(_) | Column::Str(_) => col.to_datetime().map_err(value_err)?,
+                    _ => col.epoch_to_datetime(unit).map_err(value_err)?,
+                };
+                df.set_column(&name, converted).map_err(pyerr)?;
+            } else {
+                mapping.insert(name, parse_dtype(&dt)?);
+            }
         }
-        Ok(PyDataFrame::plain(self.inner.astype(&mapping).map_err(pyerr)?))
+        if !mapping.is_empty() {
+            df = df.astype(&mapping).map_err(pyerr)?;
+        }
+        Ok(PyDataFrame::plain(df))
     }
 
     /// Define a column / directive alias: `as_name` resolves to `src_name`
@@ -2744,6 +2775,43 @@ impl SeriesLoc {
 }
 
 
+/// Convert epoch numbers or datetime strings to a datetime `Series`, mirroring
+/// `pandas.to_datetime`. Numeric input is read as an epoch in `unit`
+/// (`"s"`/`"ms"`/`"us"`/`"ns"`), preserving sub-`unit` fractions; string input is
+/// parsed (naive strings interpreted in `tz`, default UTC); an already-datetime
+/// input is returned unchanged. Accepts a volas `Series` (its name and index are
+/// preserved), a 1-D NumPy array, or a list.
+#[pyfunction]
+#[pyo3(signature = (obj, unit = "ns", tz = None))]
+fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, tz: Option<&str>) -> PyResult<PySeries> {
+    let (col, name, index) = match obj.extract::<PyRef<PySeries>>() {
+        Ok(s) => (
+            s.inner.data.clone(),
+            s.inner.name.clone(),
+            Arc::clone(&s.inner.index),
+        ),
+        Err(_) => {
+            let col = pyany_to_column(obj)?;
+            let n = col.len();
+            (col, None, Arc::new(Index::Range(n)))
+        }
+    };
+    let converted = match &col {
+        Column::Datetime(_) => col,
+        Column::Str(_) => {
+            let tzv = match tz {
+                Some(s) => Tz::parse(s).map_err(pyerr)?,
+                None => Tz::Utc,
+            };
+            col.to_datetime_tz(tzv).map_err(value_err)?
+        }
+        _ => col.epoch_to_datetime_rounded(unit).map_err(value_err)?,
+    };
+    Ok(PySeries {
+        inner: Series::new(name, converted, index),
+    })
+}
+
 /// The compiled module backing the `volas` package.
 #[pymodule]
 fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -2762,5 +2830,6 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DirectiveSyntaxError", m.py().get_type::<DirectiveSyntaxError>())?;
     m.add("DirectiveValueError", m.py().get_type::<DirectiveValueError>())?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
+    m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
     Ok(())
 }

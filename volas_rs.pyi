@@ -32,6 +32,7 @@ __all__ = [
     "TimeFrame",
     "Timestamp",
     "read_csv",
+    "to_datetime",
 ]
 
 # A single cell read out of a Series / Row / cell-accessor. The concrete type depends
@@ -329,3 +330,9 @@ def read_csv(
     tz: str | None = ...,
     date_unit: str | None = ...,
 ) -> DataFrame: ...
+
+def to_datetime(
+    obj: Any,
+    unit: str = ...,
+    tz: str | None = ...,
+) -> Series: ...

@@ -92,7 +92,7 @@ df.to_numpy()                    # 2-D ndarray (rows x columns)
 
 ```py
 from volas import (
-    DataFrame, Series, read_csv, TimeFrame, Timestamp,
+    DataFrame, Series, read_csv, to_datetime, TimeFrame, Timestamp,
 )
 ```
 
@@ -408,6 +408,33 @@ per-column dtypes. Its full parameter list (`sep`, `parse_dates`, `index_col`,
 A top-level function that bridges a `pandas.DataFrame` (`pdf`) into volas (and
 `df.to_pandas()` bridges back). See [pandas interop](#pandas-interop).
 
+### to_datetime(obj, unit='ns', tz=None) -> Series
+
+A top-level function that converts epoch numbers or datetime strings to a
+datetime `Series`, mirroring `pandas.to_datetime`. `obj` may be a `Series`, a 1-D
+NumPy array, or a list.
+
+- **obj** the values to convert — numeric epochs, datetime strings, or an
+  already-datetime `Series` (returned unchanged).
+- **unit?** `str = 'ns'` the epoch unit for **numeric** input (`'s'` / `'ms'` /
+  `'us'` / `'ns'`); sub-unit fractions are preserved, like `pd.to_datetime`.
+- **tz?** `str | None = None` for **string** input, the zone a naive string is
+  read in (a fixed offset such as `'+08:00'`, or an IANA name); default UTC.
+
+```py
+from volas import to_datetime
+
+# a float64 epoch-seconds column -> a datetime column, then set it as the index
+df['time'] = to_datetime(df['time'], unit='s')
+df = df.set_index('time')                       # -> DatetimeIndex
+
+# parse strings (a naive string is read in tz; default UTC)
+to_datetime(['2021-01-04 09:30:00'], tz='America/New_York')
+```
+
+For an in-place, **truncating** cast (the NumPy / pandas `astype` idiom), use
+`df.astype({'time': 'datetime64[s]'})` instead.
+
 ### The rest of the pandas-compatible API
 
 Everything below behaves like its `pandas` counterpart — if you know it from
@@ -431,6 +458,7 @@ df.head(n=5) / df.tail(n=5)
 df.drop([label, ...], axis=0)     # drop rows by label (axis=1 -> columns)
 df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
 df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)
+df.astype({col: 'datetime64[s]'})  # numeric epoch -> datetime (unit s|ms|us|ns; truncating)
 df.copy() / df.to_numpy(dtype=None) / df.equals(other) / df.to_csv(path=None, ...)
 
 # --- DataFrame: writing ---------------------------------------------------

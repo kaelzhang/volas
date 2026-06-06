@@ -76,6 +76,26 @@ pub fn epoch_to_ns(value: i64, unit: &str) -> Option<i64> {
     value.checked_mul(scale)
 }
 
+/// Scale a **floating-point** epoch `value` to nanoseconds, rounding to the
+/// nearest nanosecond so sub-`unit` fractions are preserved (matching
+/// `pandas.to_datetime(..., unit=...)`). Returns `None` on an unknown `unit` or a
+/// non-finite / out-of-`i64`-range result.
+pub fn epoch_to_ns_f64(value: f64, unit: &str) -> Option<i64> {
+    let scale: f64 = match unit {
+        "s" => 1_000_000_000.0,
+        "ms" => 1_000_000.0,
+        "us" => 1_000.0,
+        "ns" => 1.0,
+        _ => return None,
+    };
+    let ns = (value * scale).round();
+    if ns.is_finite() && ns >= i64::MIN as f64 && ns <= i64::MAX as f64 {
+        Some(ns as i64)
+    } else {
+        None
+    }
+}
+
 /// Decompose epoch nanoseconds into civil UTC parts
 /// `(year, month, day, hour, minute, second)` — used by time-frame unification.
 pub fn civil_parts(ns: i64) -> (i64, i64, i64, i64, i64, i64) {
@@ -179,6 +199,23 @@ mod tests {
         );
         assert_eq!(epoch_to_ns(1_577_836_800, "s").unwrap(), 1_577_836_800_000_000_000);
         assert!(epoch_to_ns(1, "weeks").is_none());
+    }
+
+    #[test]
+    fn epoch_units_f64_preserves_fraction() {
+        // whole seconds match the integer path
+        assert_eq!(epoch_to_ns_f64(1_577_836_800.0, "s").unwrap(), 1_577_836_800_000_000_000);
+        // a fractional second is preserved (0.5 s == 500_000_000 ns)
+        assert_eq!(epoch_to_ns_f64(1_577_836_800.5, "s").unwrap(), 1_577_836_800_500_000_000);
+        // ms / us / ns scales
+        assert_eq!(epoch_to_ns_f64(1.0, "ms").unwrap(), 1_000_000);
+        assert_eq!(epoch_to_ns_f64(1.0, "us").unwrap(), 1_000);
+        assert_eq!(epoch_to_ns_f64(1.0, "ns").unwrap(), 1);
+        // unknown unit, non-finite, and out-of-range all return None
+        assert!(epoch_to_ns_f64(1.0, "weeks").is_none());
+        assert!(epoch_to_ns_f64(f64::NAN, "s").is_none());
+        assert!(epoch_to_ns_f64(f64::INFINITY, "s").is_none());
+        assert!(epoch_to_ns_f64(1e30, "s").is_none());
     }
 
     #[test]
