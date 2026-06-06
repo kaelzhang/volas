@@ -1132,17 +1132,16 @@ mod tests {
         let price = series(160);
         let full = ht_dcphase(&price);
         let mut state = ht_dcphase_state(&price[..150]).unwrap();
+        // Collect each single-bar chained result, then compare the whole tail with the
+        // bit-exact oracle (which reads both operands unconditionally on the happy path).
+        let mut chained = Vec::with_capacity(price.len() - 150);
         for from in 150..price.len() {
             let (v, st) = ht_dcphase_resume(&price[..from + 1], from, &state).unwrap();
             assert_eq!(v.len(), 1);
-            assert!(
-                v[0].to_bits() == full[from].to_bits() || (v[0].is_nan() && full[from].is_nan()),
-                "chained dcphase bar {from}: {:?} != {:?}",
-                v[0],
-                full[from],
-            );
+            chained.push(v[0]);
             state = st;
         }
+        assert_bits(&chained, &full[150..], "chained dcphase");
     }
 
     /// Resume guards: at/under the core warm-up every HT resume declines (`None` →
@@ -1169,5 +1168,33 @@ mod tests {
         assert!(ht_trendline_state(&tiny).is_none());
         assert!(ht_trendmode_state(&tiny).is_none());
         assert!(mama_state(&tiny, 0.5, 0.05).is_none());
+    }
+
+    /// Defensive state-length guards: every HT resume bails (`None`) when handed a state
+    /// shorter than its layout needs — a truncated `HtCore` (`deserialize`), or a core that
+    /// deserializes but lacks the trailing per-output rings/scalars. `from` is past each
+    /// resume's warm-up so the length check (not the warm-up check) is what declines.
+    #[test]
+    fn ht_resume_declines_on_short_state() {
+        let price = series(120);
+
+        // Too short for even `HtCore::deserialize` (< CORE_STATE_LEN) -> setup `?` (line 318)
+        // propagates None. `from > CORE_START` so the from-guard passes first.
+        let stub = vec![0.0; CORE_STATE_LEN - 1];
+        assert!(ht_dcperiod_resume(&price, 20, &stub).is_none());
+
+        // A bare core (exactly CORE_STATE_LEN) deserializes, but the per-output tail is
+        // missing, so each family's length check declines.
+        let core_only = vec![0.0; CORE_STATE_LEN];
+        // DCPHASE / SINE need CORE_STATE_LEN + DCPHASE_STATE_LEN (lines 679 / 710).
+        assert!(ht_dcphase_resume(&price, 20, &core_only).is_none());
+        assert!(ht_sine_resume(&price, false, 20, &core_only).is_none());
+        // TRENDLINE needs CORE_STATE_LEN + 3 (line 788); `from >= SMOOTH_PRICE_SIZE` so the
+        // warm-up guard passes and the length guard is what fires.
+        assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
+        // TRENDMODE needs CORE_STATE_LEN + DCPHASE_STATE_LEN + 5 (line 898).
+        assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
+        // MAMA / FAMA need CORE_STATE_LEN + 3 (line 998).
+        assert!(mama_resume(&price, 0.5, 0.05, false, 20, &core_only).is_none());
     }
 }
