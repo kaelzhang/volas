@@ -241,7 +241,12 @@ mod tests {
         use TimeFrame::*;
         for (s, d) in [
             (Min5, Min5),    // identity (= copy)
+            // every fixed-duration source frame tiles a coarser one on the epoch grid
+            (Sec1, Min1),
             (Min1, Min5),
+            (Min30, Hour1),
+            (Hour2, Hour6),
+            (Hour8, Day1),
             (Min5, Min15),
             (Min15, Hour1),
             (Min5, Hour1),
