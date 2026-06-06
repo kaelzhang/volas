@@ -1781,45 +1781,6 @@ impl PyDataFrame {
         }
     }
 
-    /// Gets the lookback period of the given directive — the minimum number of
-    /// prior rows it needs before it can emit a (non-NaN) value.
-    ///
-    /// Args:
-    ///     directive (str): directive
-    ///
-    /// Usage::
-    ///
-    ///     volas.DataFrame.directive_lookback('boll:20')
-    ///     # It gets 19
-    ///
-    /// Returns:
-    ///     int
-    #[staticmethod]
-    fn directive_lookback(directive: &str) -> PyResult<usize> {
-        let node = parse(directive).map_err(syntax_err)?;
-        Ok(volas_directive::lookback::lookback(&node))
-    }
-
-    /// Gets the full (canonical) name of the ``directive``, which is also the
-    /// actual column name cached on the frame — default args and series are
-    /// filled in.
-    ///
-    /// Args:
-    ///     directive (str): directive
-    ///
-    /// Usage::
-    ///
-    ///     volas.DataFrame.directive_stringify('boll')
-    ///     # It gets "boll:20@close"
-    ///
-    /// Returns:
-    ///     str
-    #[staticmethod]
-    fn directive_stringify(directive: &str) -> PyResult<String> {
-        let node = parse(directive).map_err(syntax_err)?;
-        Ok(volas_directive::stringify(&node))
-    }
-
     /// Gets a column from the frame by name (alias-aware), as a Series.
     ///
     /// Args:
@@ -2839,6 +2800,30 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str) -> PyResult<PySeries> {
     })
 }
 
+/// Get the canonical full name of a `directive` — the actual column name volas caches it
+/// under. The command name is lowercased and default arguments / series are dropped.
+///
+/// Usage::
+///
+///     volas.directive_stringify('MACD:12,26')   # -> "macd"
+#[pyfunction]
+fn directive_stringify(directive: &str) -> PyResult<String> {
+    let node = parse(directive).map_err(syntax_err)?;
+    Ok(volas_directive::stringify(&node))
+}
+
+/// Get the lookback period of a `directive` — the minimum number of prior rows it needs
+/// before it can emit a (non-NaN) value.
+///
+/// Usage::
+///
+///     volas.directive_lookback('boll:20')   # -> 19
+#[pyfunction]
+fn directive_lookback(directive: &str) -> PyResult<usize> {
+    let node = parse(directive).map_err(syntax_err)?;
+    Ok(volas_directive::lookback::lookback(&node))
+}
+
 /// The compiled module backing the `volas` package.
 #[pymodule]
 fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -2858,5 +2843,7 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DirectiveValueError", m.py().get_type::<DirectiveValueError>())?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
+    m.add_function(wrap_pyfunction!(directive_stringify, m)?)?;
+    m.add_function(wrap_pyfunction!(directive_lookback, m)?)?;
     Ok(())
 }

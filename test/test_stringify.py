@@ -9,9 +9,7 @@ so `100` stays `100` rather than `100.0`.)
 
 import pytest
 
-from volas import DataFrame
-
-stringify = DataFrame.directive_stringify
+from volas import directive_stringify as stringify
 
 
 @pytest.mark.parametrize('directive,expected', [

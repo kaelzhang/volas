@@ -285,40 +285,43 @@ df['Open']        # same data as df['open']
 df['ma:5@Open']   # the alias resolves inside directives too
 ```
 
-### DataFrame.directive_stringify(directive: str) -> str
+### directive_stringify(directive: str) -> str
 
-The staticmethod to get the canonical full name of the `directive`, which is also
-the actual column name of the data frame. The command name is lowercased and the
-default arguments / series are omitted to save space.
+Get the canonical full name of a `directive` — the actual column name volas caches
+it under. The command name is lowercased and default arguments / series are dropped
+to save space.
 
 ```py
-DataFrame.directive_stringify('kdj.j')
+from volas import directive_stringify
+
+directive_stringify('kdj.j')
 # 'kdj.j'
 
-DataFrame.directive_stringify('kdj.j:9,3,2,100@high,close,close')
+directive_stringify('kdj.j:9,3,2,100@high,close,close')
 # 'kdj.j:,,2,100@,close'
 
 # command names are case-insensitive and canonicalize to lowercase
-DataFrame.directive_stringify('MACD:12,26')
+directive_stringify('MACD:12,26')
 # 'macd'
 ```
 
-### DataFrame.directive_lookback(directive: str) -> int
+### directive_lookback(directive: str) -> int
 
-The staticmethod to get the lookback period of a `directive`, which is the
-minimum number of prior data points required before the indicator produces a
-valid result.
+Get the lookback period of a `directive` — the minimum number of prior data points
+required before the indicator produces a valid result.
 
 ```py
-DataFrame.directive_lookback('ma:20')
+from volas import directive_lookback
+
+directive_lookback('ma:20')
 # 19
 
-DataFrame.directive_lookback('boll')
+directive_lookback('boll')
 # 19 (default period 20)
 
 # Compound directive: lookback accumulates across nested expressions.
 # repeat:5 needs 4 extra points, boll.upper (period 20) needs 19 -> 23
-DataFrame.directive_lookback('repeat:5@(close > boll.upper)')
+directive_lookback('repeat:5@(close > boll.upper)')
 # 23
 ```
 

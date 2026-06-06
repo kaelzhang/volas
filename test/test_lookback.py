@@ -1,13 +1,13 @@
 """volas directive-lookback tests.
 
 Ported 1:1 from stock-pandas's ``test_basic.py::test_lookback`` — the minimum
-number of prior rows a directive needs before it yields a valid value. volas
-exposes the same staticmethod ``DataFrame.directive_lookback(directive)``.
+number of prior rows a directive needs before it yields a valid value, exposed by
+the top-level ``directive_lookback(directive)``.
 """
 
 import pytest
 
-from volas import DataFrame
+from volas import directive_lookback
 
 # (directive, expected_lookback) — identical to the stock-pandas suite.
 CASES = [
@@ -48,4 +48,4 @@ CASES = [
 
 @pytest.mark.parametrize('directive,expected', CASES)
 def test_directive_lookback(directive, expected):
-    assert DataFrame.directive_lookback(directive) == expected
+    assert directive_lookback(directive) == expected
