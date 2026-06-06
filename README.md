@@ -285,46 +285,6 @@ df['Open']        # same data as df['open']
 df['ma:5@Open']   # the alias resolves inside directives too
 ```
 
-### directive_stringify(directive: str) -> str
-
-Get the canonical full name of a `directive` — the actual column name volas caches
-it under. The command name is lowercased and default arguments / series are dropped
-to save space.
-
-```py
-from volas import directive_stringify
-
-directive_stringify('kdj.j')
-# 'kdj.j'
-
-directive_stringify('kdj.j:9,3,2,100@high,close,close')
-# 'kdj.j:,,2,100@,close'
-
-# command names are case-insensitive and canonicalize to lowercase
-directive_stringify('MACD:12,26')
-# 'macd'
-```
-
-### directive_lookback(directive: str) -> int
-
-Get the lookback period of a `directive` — the minimum number of prior data points
-required before the indicator produces a valid result.
-
-```py
-from volas import directive_lookback
-
-directive_lookback('ma:20')
-# 19
-
-directive_lookback('boll')
-# 19 (default period 20)
-
-# Compound directive: lookback accumulates across nested expressions.
-# repeat:5 needs 4 extra points, boll.upper (period 20) needs 19 -> 23
-directive_lookback('repeat:5@(close > boll.upper)')
-# 23
-```
-
 ### Series
 
 `df[col]` and `df[directive]` return a `Series` — a named 1-D column whose API is
@@ -462,6 +422,46 @@ df = df.tz_localize('America/New_York')         # tag the display zone (see Time
 
 For an in-place, **truncating** cast (the NumPy / pandas `astype` idiom), use
 `df.astype({'time': 'datetime64[s]'})` instead.
+
+### directive_stringify(directive: str) -> str
+
+Get the canonical full name of a `directive` — the actual column name volas caches
+it under. The command name is lowercased and default arguments / series are dropped
+to save space.
+
+```py
+from volas import directive_stringify
+
+directive_stringify('kdj.j')
+# 'kdj.j'
+
+directive_stringify('kdj.j:9,3,2,100@high,close,close')
+# 'kdj.j:,,2,100@,close'
+
+# command names are case-insensitive and canonicalize to lowercase
+directive_stringify('MACD:12,26')
+# 'macd'
+```
+
+### directive_lookback(directive: str) -> int
+
+Get the lookback period of a `directive` — the minimum number of prior data points
+required before the indicator produces a valid result.
+
+```py
+from volas import directive_lookback
+
+directive_lookback('ma:20')
+# 19
+
+directive_lookback('boll')
+# 19 (default period 20)
+
+# Compound directive: lookback accumulates across nested expressions.
+# repeat:5 needs 4 extra points, boll.upper (period 20) needs 19 -> 23
+directive_lookback('repeat:5@(close > boll.upper)')
+# 23
+```
 
 ### The rest of the pandas-compatible API
 
