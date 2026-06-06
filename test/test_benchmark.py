@@ -221,10 +221,15 @@ CALC = _calc_registry()
 # only. A multi-output TA-Lib function indexes the output the directive selects, and
 # every band of a multi-band indicator is listed as its own row.
 
-def _coverage_pairs():
+# Pattern-recognition function names, fetched once; the candle directives map to them.
+_PATTERN_NAMES = talib.get_function_groups()['Pattern Recognition'] if talib is not None else []
+
+
+def _coverage_pairs(arr):
     if talib is None:
         return []
-    c, h, lo, o, v = (ARR['close'], ARR['high'], ARR['low'], ARR['open'], ARR['volume'])
+    c, h, lo, o, v = (arr['close'], arr['high'], arr['low'], arr['open'], arr['volume'])
+    periods = arr['periods']
     pairs = [
         # core indicators — also shown across libraries in the append / calc charts,
         # listed here too so Full Coverage is the complete volas-vs-TA-Lib set. Each
@@ -338,7 +343,7 @@ def _coverage_pairs():
         # adaptive / extended overlap studies
         ('mama', lambda: talib.MAMA(c)[0]),
         ('mama.fama', lambda: talib.MAMA(c)[1]),
-        ('mavp@close,periods', lambda: talib.MAVP(c, PERIODS, 2, 30, 0)),
+        ('mavp@close,periods', lambda: talib.MAVP(c, periods, 2, 30, 0)),
         ('sarext', lambda: talib.SAREXT(h, lo)),
         # extended math-operator index pair
         ('minmaxindex.min:30', lambda: talib.MINMAXINDEX(c, 30)[0]),
@@ -357,7 +362,7 @@ def _coverage_pairs():
     # (name = the CDL-stripped function name, lower-cased: CDL2CROWS -> cdl.2crows).
     # Auto-generated from TA-Lib's group so the full 61-pattern set stays in sync;
     # penetration patterns use TA-Lib's default. Both compute -100/0/100 over OHLC.
-    for fn_name in talib.get_function_groups()['Pattern Recognition']:
+    for fn_name in _PATTERN_NAMES:
         talib_fn = getattr(talib, fn_name)
         pairs.append((
             f'cdl.{fn_name[3:].lower()}',
@@ -366,8 +371,16 @@ def _coverage_pairs():
     return pairs
 
 
-COVERAGE = dict(_coverage_pairs())
+COVERAGE = dict(_coverage_pairs({**ARR, 'periods': PERIODS}))
 COVERAGE_IDS = list(COVERAGE)
+
+
+def talib_expected(directive, data):
+    """The TA-Lib reference array for `directive`, computed on `data` (an OHLCV+`periods`
+    dict). The single source of the directive->TA-Lib mapping, shared with the
+    mutation-parity TA-Lib oracle (test_mutation_talib): `data` must carry every column
+    the directive reads (open/high/low/close/volume, plus `periods` for MAVP)."""
+    return np.asarray(dict(_coverage_pairs(data))[directive](), dtype=float)
 
 
 # --- per-candidate state ----------------------------------------------------
