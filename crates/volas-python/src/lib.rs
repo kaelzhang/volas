@@ -523,6 +523,17 @@ impl PySeries {
         self.inner.len()
     }
 
+    /// Guard the ambiguous `if series:` footgun: a Series has a single truth value
+    /// only when it holds exactly one element (pandas-style).
+    fn __bool__(&self) -> PyResult<bool> {
+        match self.inner.len() {
+            1 => Ok(to_bool_vec(&self.inner.data)[0]),
+            _ => Err(PyValueError::new_err(
+                "The truth value of a Series is ambiguous — use s.any() or s.all()",
+            )),
+        }
+    }
+
     /// The values as a typed NumPy array; `dtype` casts (e.g. `'float32'`).
     #[pyo3(signature = (dtype = None))]
     fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
@@ -607,6 +618,23 @@ impl PySeries {
             v[n / 2]
         } else {
             (v[n / 2 - 1] + v[n / 2]) / 2.0
+        }
+    }
+
+    /// True if any element is truthy (NaN skipped) — pandas `any` (skipna=True).
+    fn any(&self) -> bool {
+        match &self.inner.data {
+            Column::Bool(v) => v.iter().any(|&b| b),
+            other => other.to_f64_vec().iter().any(|&x| !x.is_nan() && x != 0.0),
+        }
+    }
+
+    /// True if every non-NaN element is truthy (empty / all-NaN -> True) — pandas
+    /// `all` (skipna=True).
+    fn all(&self) -> bool {
+        match &self.inner.data {
+            Column::Bool(v) => v.iter().all(|&b| b),
+            other => other.to_f64_vec().iter().all(|&x| x.is_nan() || x != 0.0),
         }
     }
 
@@ -948,15 +976,32 @@ fn slice_series(s: &Series, slice: &Bound<'_, PySlice>) -> PyResult<PySeries> {
     })
 }
 
-/// The RHS of a Series binary op as an `f64` vector — another Series (positional,
-/// no index alignment) or a broadcast scalar.
-fn series_rhs_f64(other: &Bound<'_, PyAny>, len: usize) -> PyResult<Vec<f64>> {
+/// The RHS of a Series binary op as an `f64` vector — another Series (aligned by
+/// position) or a broadcast scalar. Two Series must share an index (see
+/// [`require_aligned`]); volas never silently aligns by label.
+fn series_rhs_f64(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
     if let Ok(o) = other.extract::<PyRef<PySeries>>() {
+        require_aligned(&s.index, &o.inner.index)?;
         Ok(o.inner.data.to_f64_vec())
     } else if let Ok(scalar) = other.extract::<f64>() {
-        Ok(vec![scalar; len])
+        Ok(vec![scalar; s.len()])
     } else {
         Err(PyTypeError::new_err("unsupported operand for a Series operation"))
+    }
+}
+
+/// Guard a positional Series binary op: the two operands must share an index.
+/// Same-frame columns share the index handle (`Arc::ptr_eq`, O(1)); otherwise the
+/// indexes are compared by value. A mismatch is an error rather than a silently
+/// misaligned (positional) result — volas does not auto-align by label.
+fn require_aligned(a: &Arc<Index>, b: &Arc<Index>) -> PyResult<()> {
+    if Arc::ptr_eq(a, b) || **a == **b {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(
+            "operands have different indexes; volas aligns by position, not by \
+             label — reindex or slice them to a common index first",
+        ))
     }
 }
 
@@ -980,7 +1025,7 @@ fn series_binop(
     f: impl Fn(f64, f64) -> f64,
 ) -> PyResult<PySeries> {
     let a = s.data.to_f64_vec();
-    let rhs = series_rhs_f64(other, a.len())?;
+    let rhs = series_rhs_f64(s, other)?;
     let n = a.len().min(rhs.len());
     let mut out = vec![f64::NAN; a.len()];
     for i in 0..n {
@@ -999,7 +1044,7 @@ fn series_cmp(
     f: impl Fn(f64, f64) -> bool,
 ) -> PyResult<PySeries> {
     let a = s.data.to_f64_vec();
-    let rhs = series_rhs_f64(other, a.len())?;
+    let rhs = series_rhs_f64(s, other)?;
     let n = a.len().min(rhs.len());
     let mut out = vec![false; a.len()];
     for i in 0..n {
@@ -1031,6 +1076,7 @@ fn series_logical(
 ) -> PyResult<PySeries> {
     let a = to_bool_vec(&s.data);
     let rhs = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
+        require_aligned(&s.index, &o.inner.index)?;
         to_bool_vec(&o.inner.data)
     } else if let Ok(b) = other.extract::<bool>() {
         vec![b; a.len()]
@@ -1201,6 +1247,50 @@ impl PyDataFrame {
     /// every derived frame (slices, projections, head/tail, ...).
     pub(crate) fn plain(inner: DataFrame) -> Self {
         PyDataFrame { inner, tf: None }
+    }
+
+    /// Element-wise comparison backing `__eq__` / `__ne__`: against another
+    /// DataFrame (identical column names + shared index) or a scalar (broadcast),
+    /// producing a bool DataFrame. Compared by position; never auto-aligned.
+    fn compare(
+        &self,
+        other: &Bound<'_, PyAny>,
+        f: impl Fn(f64, f64) -> bool,
+    ) -> PyResult<PyDataFrame> {
+        let cols: Vec<Column> = if let Ok(o) = other.extract::<PyRef<PyDataFrame>>() {
+            if self.inner.names() != o.inner.names() {
+                return Err(PyValueError::new_err(
+                    "cannot compare DataFrames with different columns",
+                ));
+            }
+            require_aligned(self.inner.index(), o.inner.index())?;
+            self.inner
+                .columns()
+                .iter()
+                .zip(o.inner.columns())
+                .map(|(a, b)| {
+                    let (av, bv) = (a.to_f64_vec(), b.to_f64_vec());
+                    Column::bool(av.iter().zip(&bv).map(|(&x, &y)| f(x, y)).collect())
+                })
+                .collect()
+        } else if let Ok(scalar) = other.extract::<f64>() {
+            self.inner
+                .columns()
+                .iter()
+                .map(|c| Column::bool(c.to_f64_vec().iter().map(|&x| f(x, scalar)).collect()))
+                .collect()
+        } else {
+            return Err(PyTypeError::new_err(
+                "unsupported operand for a DataFrame comparison",
+            ));
+        };
+        DataFrame::new(
+            self.inner.names().to_vec(),
+            cols,
+            Some((**self.inner.index()).clone()),
+        )
+        .map(PyDataFrame::plain)
+        .map_err(pyerr)
     }
 
     /// Fold incoming fine bars into a tf-aware frame: each bar either extends the
@@ -1548,6 +1638,25 @@ impl PyDataFrame {
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let names = PyList::new(py, self.inner.names())?;
         Ok(names.try_iter()?.into_any().unbind())
+    }
+
+    /// Guard the ambiguous `if df:` footgun: a DataFrame has no single truth
+    /// value (pandas-style).
+    fn __bool__(&self) -> PyResult<bool> {
+        Err(PyValueError::new_err(
+            "The truth value of a DataFrame is ambiguous — use len(df) or an explicit reduction",
+        ))
+    }
+
+    /// Element-wise `==` -> a bool DataFrame (pandas semantics), not identity. The
+    /// operand is another DataFrame (same columns + shared index) or a scalar.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.compare(other, |a, b| a == b)
+    }
+
+    /// Element-wise `!=` -> a bool DataFrame.
+    fn __ne__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.compare(other, |a, b| a != b)
     }
 
     /// First `n` rows (pandas `head`).
