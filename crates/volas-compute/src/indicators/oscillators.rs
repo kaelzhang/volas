@@ -480,3 +480,115 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     let ll = kernels::rolling_min(av(low), period);
     ((&hh + &ll) / 2.0).to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::test_support::*;
+
+    /// StochRSI `.k` and `.d` resumes, fed the carried RSI Wilder pair + context tail of
+    /// a full compute over the head, reproduce the tail of a full compute over the whole
+    /// input — bit-for-bit. The full `.d` is the SMA (matype 0) of the full `.k`.
+    #[test]
+    fn stochrsi_resume_is_bit_identical_to_full() {
+        let close = series(200);
+        let (rp, fk, fd) = (14usize, 14usize, 3usize);
+        let k_full = stochrsi_fastk(&close, rp, fk);
+        let d_full = crate::indicators::ma(&k_full, fd);
+
+        // `from` past the deepest context (`.d` reach = rp + (fk-1) + (fd-1)) so the head
+        // always carries a full finite-RSI context.
+        for &from in &[60usize, 70, 120, 199] {
+            let head = &close[..from];
+
+            // `.k` line (is_d = false).
+            let st = stochrsi_final_state(head, rp, fk, false, fd).unwrap();
+            let (tail, _) = stochrsi_resume(&close, rp, fk, false, fd, from, &st).unwrap();
+            assert_bits(&tail, &k_full[from..], "stochrsi.k");
+
+            // `.d` line (is_d = true). The `.d` SMA-of-%K rolls a running sum whose start
+            // point differs between the windowed resume buffer and the full frame, so the
+            // two agree to the production parity tolerance (~1e-9) rather than bit-for-bit.
+            let st = stochrsi_final_state(head, rp, fk, true, fd).unwrap();
+            let (tail, _) = stochrsi_resume(&close, rp, fk, true, fd, from, &st).unwrap();
+            let want = &d_full[from..];
+            assert_eq!(tail.len(), want.len(), "stochrsi.d length");
+            for (i, (x, y)) in tail.iter().zip(want).enumerate() {
+                assert!(
+                    (x - y).abs() <= 1e-9 || (x.is_nan() && y.is_nan()),
+                    "stochrsi.d bar {i}: resume {x} != full {y}",
+                );
+            }
+        }
+    }
+
+    /// StochRSI guards: a too-short close (RSI never accrues `C+1` finite rows) declines
+    /// the final state; a bad state length / `from` declines the resume; and an embedded
+    /// NaN in the close keeps an RSI row NaN, tripping the resume's NaN-in-buffer bail-out.
+    #[test]
+    fn stochrsi_guards_decline() {
+        let (rp, fk, fd) = (14usize, 14usize, 3usize);
+
+        // n < c || n - c < rsi_period -> final state declines (oscillators.rs:135).
+        let short = series(20);
+        assert!(stochrsi_final_state(&short, rp, fk, false, fd).is_none());
+
+        // Bad state length / from -> resume declines (oscillators.rs:159).
+        let close = series(200);
+        let st = stochrsi_final_state(&close[..120], rp, fk, false, fd).unwrap();
+        let bad = vec![0.0; 1]; // wrong length (!= c + 2)
+        assert!(stochrsi_resume(&close, rp, fk, false, fd, 120, &bad).is_none());
+        assert!(stochrsi_resume(&close, rp, fk, false, fd, 0, &st).is_none()); // from == 0
+
+        // NaN-in-buffer -> resume declines (oscillators.rs:170). Embed a NaN late in the
+        // close so a resumed RSI row stays NaN; the carried context is still finite (the
+        // length/warm guards pass) but the freshly-resumed RSI tail carries the NaN.
+        let mut nanclose = series(200);
+        nanclose[150] = f64::NAN; // poisons RSI from row 150 onward
+        let st = stochrsi_final_state(&nanclose[..140], rp, fk, false, fd).unwrap();
+        assert!(stochrsi_resume(&nanclose, rp, fk, false, fd, 140, &st).is_none());
+    }
+
+    /// RSI / CMO resume parity plus the flat-window output arms. A strictly increasing
+    /// close drives RSI's `avg_loss == 0` branch (output 100); a flat close drives CMO's
+    /// `gain + loss == 0` branch (output 0).
+    #[test]
+    fn rsi_cmo_resume_and_flat_window_arms() {
+        let close = series(120);
+        let p = 14usize;
+        let rsi_full = rsi(&close, p);
+        let cmo_full = cmo(&close, p);
+        for &from in &[p + 1, 30, 60, 119] {
+            let st = rsi_final_state(&close[..from], p).unwrap();
+            let (tail, _) = rsi_resume(&close, p, from, &st).unwrap();
+            assert_bits(&tail, &rsi_full[from..], "rsi");
+
+            let st = cmo_final_state(&close[..from], p).unwrap();
+            let (tail, _) = cmo_resume(&close, p, from, &st).unwrap();
+            assert_bits(&tail, &cmo_full[from..], "cmo");
+        }
+
+        // from == 0 -> both resumes decline (oscillators.rs:384, 440).
+        let st = rsi_final_state(&close, p).unwrap();
+        assert!(rsi_resume(&close, p, 0, &st).is_none());
+        let st = cmo_final_state(&close, p).unwrap();
+        assert!(cmo_resume(&close, p, 0, &st).is_none());
+
+        // period == 0 / n <= period -> final states decline (oscillators.rs:355, 415).
+        assert!(rsi_final_state(&[1.0, 2.0], 5).is_none());
+        assert!(cmo_final_state(&[1.0, 2.0], 5).is_none());
+
+        // Strictly increasing close: avg_loss == 0, so RSI's `emit` returns 100 in the
+        // resume's flat-loss arm (oscillators.rs:391).
+        let up: Vec<f64> = (0..40).map(|i| i as f64).collect();
+        let st = rsi_final_state(&up[..20], p).unwrap();
+        let (tail, _) = rsi_resume(&up, p, 20, &st).unwrap();
+        assert!(tail.iter().all(|&x| x == 100.0), "rsi flat-loss -> 100");
+
+        // Flat close: gain + loss == 0, so CMO's resume returns 0 (oscillators.rs:453).
+        let flat = vec![7.0; 40];
+        let st = cmo_final_state(&flat[..20], p).unwrap();
+        let (tail, _) = cmo_resume(&flat, p, 20, &st).unwrap();
+        assert!(tail.iter().all(|&x| x == 0.0), "cmo flat-window -> 0");
+    }
+}
