@@ -168,6 +168,20 @@ pub fn strftime(ns: i64, tz: Tz, fmt: &str) -> Option<String> {
     Some(dt.format_with_items(items.iter()).to_string())
 }
 
+/// Parse `s` with an explicit `strptime`-style `fmt` to **UTC** epoch ns (naive,
+/// like [`parse_ns`]). Tries a full datetime, then a date-only format (→ midnight).
+/// Returns `None` when `s` does not match `fmt`.
+pub fn parse_ns_format(s: &str, fmt: &str) -> Option<i64> {
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
+        return dt.and_utc().timestamp_nanos_opt();
+    }
+    NaiveDate::parse_from_str(s, fmt)
+        .ok()?
+        .and_hms_opt(0, 0, 0)?
+        .and_utc()
+        .timestamp_nanos_opt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2216,7 +2216,7 @@ impl PyDataFrame {
     /// Write the frame as CSV (pandas-subset). With no `path`, returns the CSV
     /// string. Datetime columns are written as formatted strings (round-trips
     /// with `read_csv`).
-    #[pyo3(signature = (path = None, sep = ",", index = true, header = true, na_rep = "", columns = None))]
+    #[pyo3(signature = (path = None, sep = ",", index = true, header = true, na_rep = "", columns = None, float_format = None))]
     fn to_csv(
         &self,
         path: Option<String>,
@@ -2225,8 +2225,15 @@ impl PyDataFrame {
         header: bool,
         na_rep: &str,
         columns: Option<Vec<String>>,
+        float_format: Option<&str>,
     ) -> PyResult<Option<String>> {
         ensure_fresh(&self.inner)?;
+        let ff = match float_format {
+            Some(f) => Some(parse_float_format(f).ok_or_else(|| {
+                PyValueError::new_err(format!("unsupported float_format \"{f}\""))
+            })?),
+            None => None,
+        };
         let names = self.inner.names();
         let positions: Vec<usize> = match &columns {
             Some(cols) => cols
@@ -2256,7 +2263,7 @@ impl PyDataFrame {
             }
             let cells: Vec<String> = positions
                 .iter()
-                .map(|&j| cell_to_csv(&self.inner.columns()[j], i, na_rep))
+                .map(|&j| cell_to_csv(&self.inner.columns()[j], i, na_rep, ff))
                 .collect();
             out.push_str(&cells.join(sep));
             out.push('\n');
@@ -2891,19 +2898,60 @@ fn take_frame(df: &DataFrame, positions: &[usize]) -> DataFrame {
 }
 
 /// Format the `i`-th cell of a column as a CSV field (`na_rep` for NaN).
-fn cell_to_csv(col: &Column, i: usize, na_rep: &str) -> String {
+fn cell_to_csv(col: &Column, i: usize, na_rep: &str, ff: Option<(Option<usize>, char)>) -> String {
     match col {
         Column::F64(v) => {
             if v[i].is_nan() {
                 na_rep.to_string()
             } else {
-                v[i].to_string()
+                match ff {
+                    Some((prec, kind)) => fmt_f64_with(prec, kind, v[i]),
+                    // Default: the shortest round-trippable form that keeps the
+                    // decimal point, so `1.0` writes as "1.0" (Rust's `to_string`
+                    // drops it to "1").
+                    None => format!("{:?}", v[i]),
+                }
             }
         }
         Column::Bool(v) => if v[i] { "True" } else { "False" }.to_string(),
         Column::I64(v) => v[i].to_string(),
         Column::Str(v) => v[i].clone(),
         Column::Datetime(v) => datetime::format_ns(v[i]),
+    }
+}
+
+/// Parse a printf-style float format `%[.prec](f|e|g)` (the common pandas
+/// `float_format` forms) into `(precision, kind)`; `None` if unrecognized.
+fn parse_float_format(fmt: &str) -> Option<(Option<usize>, char)> {
+    let body = fmt.strip_prefix('%')?;
+    let kind = body.chars().last()?;
+    if !matches!(kind, 'f' | 'e' | 'g') {
+        return None;
+    }
+    let prec = match body.strip_prefix('.') {
+        Some(rest) => Some(rest[..rest.len() - 1].parse().ok()?),
+        None if body.len() == 1 => None,
+        None => return None,
+    };
+    Some((prec, kind))
+}
+
+/// Apply a parsed [`parse_float_format`] spec to `x`.
+fn fmt_f64_with(prec: Option<usize>, kind: char, x: f64) -> String {
+    match kind {
+        'e' => match prec {
+            Some(p) => format!("{x:.p$e}"),
+            None => format!("{x:e}"),
+        },
+        'g' => match prec {
+            Some(p) => format!("{x:.p$}"),
+            None => format!("{x:?}"),
+        },
+        // 'f' — the only remaining kind `parse_float_format` admits.
+        _ => match prec {
+            Some(p) => format!("{x:.p$}"),
+            None => format!("{x:.6}"),
+        },
     }
 }
 
@@ -3163,8 +3211,8 @@ impl SeriesLoc {
 /// (read a naive wall-clock in a zone) or `df.tz_convert` (re-display an absolute instant).
 /// Accepts a volas `Series` (its name and index are preserved), a 1-D NumPy array, or a list.
 #[pyfunction]
-#[pyo3(signature = (obj, unit = "ns"))]
-fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str) -> PyResult<PySeries> {
+#[pyo3(signature = (obj, unit = "ns", format = None))]
+fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyResult<PySeries> {
     let (col, name, index) = match obj.extract::<PyRef<PySeries>>() {
         Ok(s) => (
             s.inner.data.clone(),
@@ -3179,7 +3227,21 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str) -> PyResult<PySeries> {
     };
     let converted = match col {
         c @ Column::Datetime(_) => c,
-        c @ Column::Str(_) => c.to_datetime().map_err(value_err)?,
+        Column::Str(v) => match format {
+            // An explicit format parses faster and unambiguously (pandas `format=`).
+            Some(fmt) => {
+                let ns = v
+                    .iter()
+                    .map(|s| {
+                        datetime::parse_ns_format(s, fmt).ok_or_else(|| {
+                            PyValueError::new_err(format!("\"{s}\" does not match format \"{fmt}\""))
+                        })
+                    })
+                    .collect::<PyResult<Vec<i64>>>()?;
+                Column::datetime(ns)
+            }
+            None => Column::Str(v).to_datetime().map_err(value_err)?,
+        },
         c => c.epoch_to_datetime_rounded(unit).map_err(value_err)?,
     };
     Ok(PySeries {
