@@ -150,12 +150,10 @@ Which gets the 2-period simple moving average on column `"close"`.
 - **data** `dict[str, list | np.ndarray] | DataFrame` the column data — a dict
   mapping each column name to an equal-length list or NumPy array (float, int,
   bool, `datetime64` or string) — **or another volas `DataFrame`, which is then
-  copied** (like `pandas.DataFrame(df)`). There is no `date_col` / `tz` /
-  `date_unit` shortcut: attach a
-  [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)
-  the pandas way — parse a column with `to_datetime`, promote it with
-  `set_index`, then tag a zone with `tz_localize` / `tz_convert`. See
-  [Timezones](#timezones).
+  copied** (like `pandas.DataFrame(df)`). To attach a
+  [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html),
+  parse a column with `to_datetime`, promote it with `set_index`, then tag a zone
+  with `tz_localize` / `tz_convert`. See [Timezones](#timezones).
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are
   taken as already-final bars at that frame, and later `append`s fold finer
@@ -942,12 +940,11 @@ day-and-coarser buckets. A timezone is either a **fixed offset** (`'+08:00'`,
 cheap; crypto / A-share / HK) or a **named IANA zone** (`'America/New_York'`,
 DST-aware via `chrono-tz`; US / EU). The default is UTC.
 
-Here is the whole picture. There is **no constructor shortcut** — you build a
-`DatetimeIndex` the pandas way: parse a column with `to_datetime`, promote it with
-`set_index`, then tag the display zone with `tz_localize` (reinterpret a naive
-wall-clock *as* that zone — the instant moves) or `tz_convert` (keep the instant,
-restate the zone). A US exchange opens at 09:30 local on 2021-01-04, held as a
-naive local string:
+Here is the whole picture. Build a `DatetimeIndex` by parsing a column with
+`to_datetime`, promoting it with `set_index`, then tagging the display zone with
+`tz_localize` (reinterpret a naive wall-clock *as* that zone — the instant moves)
+or `tz_convert` (keep the instant, restate the zone). A US exchange opens at 09:30
+local on 2021-01-04, held as a naive local string:
 
 ```py
 from volas import DataFrame, to_datetime, Timestamp

@@ -1,10 +1,10 @@
 """Per-frame timezone ingestion + tz_localize/convert + matching (audit PD-20).
 
-Timezone handling is pandas-aligned: there is no constructor ``tz``/``date_col`` shortcut.
-You parse a column to UTC instants with :func:`volas.to_datetime`, promote it to the index
-with ``set_index``, then tag the display zone with ``tz_localize`` (reinterpret naive
-wall-clock as that zone) or ``tz_convert`` (keep the instant, restate the zone). ``_ingest``
-below is exactly that idiom; the tests exercise it across the A-share / HK / US / crypto cases.
+Timezone handling is pandas-aligned: parse a column to UTC instants with
+:func:`volas.to_datetime`, promote it to the index with ``set_index``, then tag the display
+zone with ``tz_localize`` (reinterpret naive wall-clock as that zone) or ``tz_convert`` (keep
+the instant, restate the zone). ``_ingest`` below is exactly that idiom; the tests exercise
+it across the A-share / HK / US / crypto cases.
 """
 
 import numpy as np
@@ -16,8 +16,7 @@ from volas import DataFrame, to_datetime
 def _ingest(data, col='t', tz=None, unit='ns'):
     """parse ``col`` to UTC instants, set it as the index, optionally localize a display zone.
 
-    This is the canonical ingestion chain (``to_datetime`` -> ``set_index`` -> ``tz_localize``)
-    that replaced the old ``DataFrame(..., date_col=, tz=, date_unit=)`` shortcut."""
+    The canonical ingestion chain: ``to_datetime`` -> ``set_index`` -> ``tz_localize``."""
     df = DataFrame(data)
     df[col] = to_datetime(df[col], unit=unit)
     df = df.set_index(col)
