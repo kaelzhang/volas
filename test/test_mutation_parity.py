@@ -50,21 +50,17 @@ DIRECTIVES = list(COVERAGE_IDS)
 
 # --- known limitation -------------------------------------------------------
 # BUG 1 (incremental append refresh) is FIXED — append+fulfill now recomputes over the
-# full history, so test_append is exact for every indicator. What remains is an inherent
-# LIMITATION, not the same bug: a contiguous slice drops its head, so a *stateful*
-# indicator (whose value at row i depends on the whole prefix [0,i] — EMA/Wilder/MACD/
-# SAR/HT/cumulative/index) cannot be continued past the dropped history without carrying
-# its recursive state. Finite-memory indicators (SMA, ROC, price transforms, CDL, ...)
-# continue correctly. Only test_slice_then_append is affected; xfail(strict) so a future
-# state-carry enhancement flips these to xpass.
-_SLICE_STATEFUL = frozenset({
-    'maxindex:30', 'minindex:30', 'minmaxindex.max:30', 'minmaxindex.min:30',
-    'stochrsi.d', 'stochrsi.k',
-})  # 6 — the EMA-recursion family (ema/dema/tema/t3/trix/macd*/macdfix*/kama), the
-   # Wilder-smoothing family (rsi/atr/natr/cmo/adx/adxr/dx/±di/±dm), AND the entire
-   # Hilbert-transform family (ht_dcperiod/ht_dcphase/ht_phasor/ht_sine/ht_trendline/
-   # ht_trendmode/mama/fama) are now state-carry-continuable across a slice; the
-   # remainder is the index family (maxindex/minindex/minmaxindex) and stochrsi.
+# full history, so test_append is exact for every indicator. The earlier slice LIMITATION
+# is now ALSO closed: every recursive / absolute-position indicator carries enough state to
+# continue past a head-dropping slice in O(new rows), bit-identical to a full recompute.
+# The EMA-recursion family (ema/dema/tema/t3/trix/macd*/macdfix*/kama), the Wilder-smoothing
+# family (rsi/atr/natr/cmo/adx/adxr/dx/±di/±dm), the Hilbert-transform family
+# (ht_dcperiod/ht_dcphase/ht_phasor/ht_sine/ht_trendline/ht_trendmode/mama/fama), the index
+# family (maxindex/minindex/minmaxindex — carry the arg-extreme tracker + an origin offset),
+# and StochRSI (carry the RSI Wilder state + the RSI window feeding %K/%D) are all
+# state-carry-continuable across a slice. Finite-memory indicators (SMA, ROC, price
+# transforms, CDL, ...) always continued. So nothing remains on the slice fallback.
+_SLICE_STATEFUL = frozenset()  # empty — every indicator now continues across a slice.
 
 # BUG 2 (in-place update of a base column/row did not invalidate dependent cached
 # indicators) is FIXED — test_update_cell and test_update_column are exact for every

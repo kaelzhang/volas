@@ -1003,6 +1003,32 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             arg_f64(args, 1, 0.05).ok()?,
         ),
 
+        // Index family — carry the incremental tracker's final running extreme
+        // `[idx_abs, value]`. Captured at first compute, where `origin == 0`, so the
+        // stored index is original-absolute (stable across a later slice).
+        ("maxindex", _) | ("minmaxindex", Some("max")) => {
+            ind::maxindex_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?)
+        }
+        ("minindex", _) | ("minmaxindex", Some("min")) => {
+            ind::minindex_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?)
+        }
+
+        // StochRSI — carry the RSI Wilder pair + the recent RSI tail feeding the windows.
+        // A recursive-MA `.d` (matype != 0) keeps the fallback (no resume).
+        ("stochrsi", Some(line @ ("k" | "d"))) => {
+            let is_d = line == "d";
+            if is_d && arg_usize(args, 3, Some(0)).ok()? != 0 {
+                return None;
+            }
+            ind::stochrsi_final_state(
+                &series_f64(df, series, 0, "close").ok()?,
+                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(args, 1, Some(5)).ok()?,
+                is_d,
+                arg_usize(args, 2, Some(3)).ok()?,
+            )
+        }
+
         _ => None,
     }
 }
@@ -1012,11 +1038,17 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
 /// kernel (caller falls back to a full recompute). The values are bit-identical to
 /// a fresh full recompute, so writing them into the stale tail keeps the cached
 /// column exact.
+///
+/// `origin` is the original-frame row this (possibly sliced) frame's row 0 maps to
+/// (`ComputedMeta::origin`). Recursive *value* indicators ignore it; the
+/// absolute-position index family adds it back so emitted positions stay
+/// original-absolute across a head-dropping slice.
 pub fn execute_resume(
     df: &DataFrame,
     node: &Node,
     prev_state: &[f64],
     from_row: usize,
+    origin: usize,
 ) -> Option<(Column, Vec<f64>)> {
     let (name, sub, args, series) = as_command(node)?;
     let sub = sub.as_deref();
@@ -1283,6 +1315,51 @@ pub fn execute_resume(
                 arg_f64(args, 0, 0.5).ok()?,
                 arg_f64(args, 1, 0.05).ok()?,
                 sub == Some("fama"),
+                from_row,
+                prev_state,
+            )?;
+            Some((Column::f64(vals), st))
+        }
+
+        // Index family — windowed arg-extreme emitting ABSOLUTE positions. The carried
+        // state is the incremental tracker's running extreme `[idx_abs, value]`; `origin`
+        // rebases sub-frame positions back to original-absolute. minmaxindex.max / .min
+        // are exactly maxindex / minindex (see `execute`).
+        ("maxindex", _) | ("minmaxindex", Some("max")) => {
+            let (vals, st) = ind::maxindex_resume(
+                &close().ok()?,
+                arg_usize(args, 0, Some(30)).ok()?,
+                from_row,
+                origin,
+                prev_state,
+            )?;
+            Some((Column::f64(vals), st))
+        }
+        ("minindex", _) | ("minmaxindex", Some("min")) => {
+            let (vals, st) = ind::minindex_resume(
+                &close().ok()?,
+                arg_usize(args, 0, Some(30)).ok()?,
+                from_row,
+                origin,
+                prev_state,
+            )?;
+            Some((Column::f64(vals), st))
+        }
+
+        // StochRSI — a windowed %K (and SMA `.d`) of the Wilder-recursive RSI; resume by
+        // carrying the RSI Wilder pair + the recent RSI values feeding the windows. Only
+        // the canonical SMA `.d` (matype 0) resumes; a recursive-MA `.d` declines.
+        ("stochrsi", Some(line @ ("k" | "d"))) => {
+            let is_d = line == "d";
+            if is_d && arg_usize(args, 3, Some(0)).ok()? != 0 {
+                return None; // non-SMA `.d` smoothing is recursive — fall back.
+            }
+            let (vals, st) = ind::stochrsi_resume(
+                &close().ok()?,
+                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(args, 1, Some(5)).ok()?,
+                is_d,
+                arg_usize(args, 2, Some(3)).ok()?,
                 from_row,
                 prev_state,
             )?;

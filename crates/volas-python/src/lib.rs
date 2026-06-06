@@ -1275,7 +1275,7 @@ impl PyDataFrame {
             // probe / full-recompute path unchanged — always correct.
             if let Some(state) = &meta.state {
                 if let Some((tail, new_state)) =
-                    volas_directive::exec::execute_resume(&base, &node, state, vr)
+                    volas_directive::exec::execute_resume(&base, &node, state, vr, meta.origin)
                 {
                     self.inner
                         .update_computed_tail(&name, vr, &tail)

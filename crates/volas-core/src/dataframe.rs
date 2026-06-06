@@ -28,6 +28,14 @@ pub struct ComputedMeta {
     /// then falls back to the correct full recompute) or the state is unknown
     /// (e.g. after a slice that did not reach the parent's `valid_rows`).
     pub state: Option<Vec<f64>>,
+    /// The original-frame row that THIS (possibly sliced) frame's row 0 maps to.
+    /// `0` for a freshly-computed column; a contiguous slice from `start` bumps it
+    /// by `start`. It lets an absolute-position indicator (the index family —
+    /// maxindex/minindex/minmaxindex) keep emitting ABSOLUTE positions after a
+    /// head-dropping slice: a sub-frame position `p` is original row `p + origin`,
+    /// matching the verbatim-carried (original-absolute) head. Recursive *value*
+    /// indicators ignore it (their state is offset-free).
+    pub origin: usize,
 }
 
 /// A 2-D, column-oriented, time-indexed table. All columns share one index and
@@ -344,6 +352,10 @@ impl DataFrame {
                         lookback: meta.lookback,
                         valid_rows: valid,
                         state: carried,
+                        // This sub-frame's row 0 is the parent's row `start`, so its
+                        // origin shifts by `start` (an absolute-index resume adds it
+                        // back to stay original-absolute, matching the carried head).
+                        origin: meta.origin + start,
                     },
                 );
             }
@@ -430,6 +442,7 @@ impl DataFrame {
                 lookback,
                 valid_rows: self.height,
                 state: None,
+                origin: 0,
             },
         );
     }
