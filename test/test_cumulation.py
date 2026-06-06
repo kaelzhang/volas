@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 import volas
-from volas import DataFrame, TimeFrame
+from volas import DataFrame, TimeFrame, to_datetime
 
 TENCENT = str((Path(__file__).parent / 'data' / 'tencent.csv').resolve())
 COLUMNS = ['open', 'high', 'low', 'close', 'volume']
@@ -35,7 +35,9 @@ def get_1m(n=LENGTH):
         date += step
     data = {c: raw[c].to_numpy()[:n].astype(float) for c in COLUMNS}
     data['time_key'] = times  # a list of str -> parsed to the DatetimeIndex
-    return DataFrame(data, date_col='time_key')
+    df = DataFrame(data)
+    df['time_key'] = to_datetime(df['time_key'])
+    return df.set_index('time_key')
 
 
 # --- TimeFrame --------------------------------------------------------------

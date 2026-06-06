@@ -5,21 +5,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
 if TYPE_CHECKING:
     from volas_rs import DataFrame
-
-_FMT = '%Y-%m-%d %H:%M:%S'
 
 
 def from_pandas(pdf: Any) -> DataFrame:
     """Build a volas ``DataFrame`` from a ``pandas.DataFrame``.
 
-    Numeric / bool columns are carried natively; string / object columns become
-    string columns; datetime columns are carried as formatted strings (a datetime
-    *index* is parsed back to a DatetimeIndex). pandas is imported lazily, so
-    volas stays pandas-free at import.
+    Numeric / bool columns are carried natively; string / object columns become string
+    columns; datetime columns and a datetime *index* are carried natively as
+    ``datetime64[ns]`` instants (no string round-trip), and a tz-aware index keeps its zone
+    for display. pandas is imported lazily, so volas stays pandas-free at import.
 
     Args:
         pdf (pandas.DataFrame): the source frame.
@@ -37,8 +33,9 @@ def from_pandas(pdf: Any) -> DataFrame:
     from volas_rs import DataFrame
 
     def to_values(s):
-        if np.issubdtype(s.dtype, np.datetime64):
-            return s.dt.strftime(_FMT).tolist()
+        # datetime (naive or tz-aware) -> native UTC datetime64[ns]; no strftime round-trip.
+        if pd.api.types.is_datetime64_any_dtype(s.dtype):
+            return s.to_numpy(dtype='datetime64[ns]')
         if s.dtype == object:
             return s.tolist()
         return s.to_numpy()
@@ -50,8 +47,18 @@ def from_pandas(pdf: Any) -> DataFrame:
         return DataFrame(data)
 
     name = str(idx.name) if idx.name is not None else 'index'
-    if np.issubdtype(idx.dtype, np.datetime64):
-        merged = {name: idx.strftime(_FMT).tolist(), **data}
-        return DataFrame(merged, date_col=name)
+    if pd.api.types.is_datetime64_any_dtype(idx.dtype):
+        # Carry the absolute instants natively (UTC), set them as the index, then re-attach
+        # the source zone for display (a tz-naive index stays UTC-default).
+        tz = getattr(idx, 'tz', None)
+        merged = {name: idx.to_numpy(dtype='datetime64[ns]'), **data}
+        df = DataFrame(merged).set_index(name)
+        if tz is None:
+            return df
+        # pandas renders a fixed offset as 'UTC+08:00'; volas's tz name for that is '+08:00'.
+        tzname = str(tz)
+        if tzname.startswith(('UTC+', 'UTC-')):
+            tzname = tzname[3:]
+        return df.tz_convert(tzname)
     merged = {name: idx.to_numpy(), **data}
     return DataFrame(merged).set_index(name)

@@ -56,9 +56,9 @@ def test_loc_label_slice():
 
 
 def test_loc_datetime_index_label():
-    df = volas.DataFrame(
-        {'t': ['2020-01-01', '2020-01-02', '2020-01-03'], 'c': [1., 2., 3.]},
-        date_col='t')
+    df = volas.DataFrame({'t': ['2020-01-01', '2020-01-02', '2020-01-03'], 'c': [1., 2., 3.]})
+    df['t'] = volas.to_datetime(df['t'])
+    df = df.set_index('t')
     df.at['2020-01-02', 'c'] = 9.
     assert df['c'].to_list() == [1., 9., 3.]
 

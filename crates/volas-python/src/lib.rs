@@ -102,6 +102,21 @@ fn datetime_unit_of(s: &str) -> Option<&'static str> {
 }
 
 fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
+    // A numpy datetime64 array -> a Datetime column (carried as epoch-ns). This is the
+    // pandas-aligned ingestion (`pd.DataFrame` accepts datetime64 arrays) and the no-copy
+    // path `from_pandas` relies on. Normalise any datetime64[unit] to ns, then take its
+    // int64 view (datetime64[ns] is int64 epoch-ns underneath).
+    if v.getattr("dtype")
+        .and_then(|d| d.getattr("kind"))
+        .and_then(|k| k.extract::<String>())
+        .map(|k| k == "M")
+        .unwrap_or(false)
+    {
+        let ns = v.call_method1("astype", ("datetime64[ns]",))?;
+        let view = ns.call_method1("view", ("int64",))?;
+        let a = view.extract::<PyReadonlyArray1<i64>>()?;
+        return Ok(Column::datetime(a.as_slice()?.to_vec())); // int64 ns view == epoch-ns
+    }
     if let Ok(a) = v.extract::<PyReadonlyArray1<f64>>() {
         return Ok(Column::f64(a.as_slice()?.to_vec()));
     }
@@ -1133,11 +1148,16 @@ impl PyRow {
 /// grows the frame in place for live streaming.
 ///
 /// Args:
-///     data (dict[str, Sequence]): column name -> equal-length values.
-///     date_col (str, optional): a column to parse into a DatetimeIndex.
-///     tz (str, optional): timezone for that index (requires ``date_col``).
-///     date_unit (str, optional): read ``date_col`` as an epoch integer in this
-///         unit (``'s'`` / ``'ms'`` / ``'us'`` / ``'ns'``); requires ``date_col``.
+///     data (dict[str, Sequence] | DataFrame): a dict of column name -> equal-length
+///         values, or another volas DataFrame to copy (its index, aliases and tf-state are
+///         carried — like ``df.copy()``). A pandas DataFrame is not accepted; use
+///         ``from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
+///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
+///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
+///         this bar interval; the given rows are taken as already-final bars and later
+///         ``append``s fold finer bars into them. Requires a DatetimeIndex.
+///     cumulators (dict[str, str], optional): per-column aggregator overrides for folding
+///         (e.g. ``{'amount': 'sum'}``); only meaningful together with ``time_frame``.
 /// Live cumulation state carried by a tf-aware DataFrame (set via the
 /// `time_frame` constructor arg or `cumulate`): the target frame, the per-column
 /// aggregators, and the raw fine bars of the still-open (forming) period —
@@ -1347,40 +1367,42 @@ impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
     // docstring (pyo3 does not surface a `#[new]` doc comment to Python).
     #[new]
-    #[pyo3(signature = (data, date_col = None, tz = None, date_unit = None, time_frame = None, cumulators = None))]
+    #[pyo3(signature = (data, time_frame = None, cumulators = None))]
     fn new(
-        data: &Bound<'_, PyDict>,
-        date_col: Option<String>,
-        tz: Option<String>,
-        date_unit: Option<String>,
+        data: &Bound<'_, PyAny>,
         time_frame: Option<&Bound<'_, PyAny>>,
         cumulators: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let mut names = Vec::new();
-        let mut columns = Vec::new();
-        for (k, v) in data.iter() {
-            names.push(k.extract::<String>()?);
-            columns.push(pyany_to_column(&v)?);
-        }
-        let mut df = DataFrame::new(names, columns, None).map_err(pyerr)?;
-        // Same string -> DatetimeIndex path as read_csv, with timezone ingestion:
-        // parse the named column to a UTC datetime, move it into the index, then
-        // tag the index tz (see `build_datetime_index`).
-        if let Some(dc) = date_col {
-            df = build_datetime_index(df, &dc, tz.as_deref(), date_unit.as_deref())?;
-        } else if tz.is_some() || date_unit.is_some() {
-            return Err(PyValueError::new_err(
-                "tz / date_unit require date_col (the column to use as the datetime index)",
+        // `data` is polymorphic over volas's own inputs: another volas DataFrame (copied —
+        // index, aliases and any tf-state carried, exactly like `df.copy()`), or a dict of
+        // columns (a fresh RangeIndex). A pandas DataFrame is deliberately NOT accepted here —
+        // use `from_pandas`, which keeps volas pandas-free at import. To build a DatetimeIndex
+        // from a column, parse it with `to_datetime` then `set_index` (or use `read_csv`).
+        let (df, tf) = if let Ok(other) = data.extract::<PyRef<PyDataFrame>>() {
+            (other.inner.clone(), other.tf.clone())
+        } else if let Ok(dict) = data.downcast::<PyDict>() {
+            let mut names = Vec::new();
+            let mut columns = Vec::new();
+            for (k, v) in dict.iter() {
+                names.push(k.extract::<String>()?);
+                columns.push(pyany_to_column(&v)?);
+            }
+            (DataFrame::new(names, columns, None).map_err(pyerr)?, None)
+        } else {
+            return Err(PyTypeError::new_err(
+                "DataFrame(data): data must be a dict of columns or a volas DataFrame \
+                 (for a pandas DataFrame use from_pandas)",
             ));
-        }
-        // A `time_frame` makes this a cumulating frame: the given rows are taken
-        // as already-final bars at that frame (not re-aggregated), and later
-        // `append`s fold finer bars into them. Requires a DatetimeIndex.
+        };
+        // A `time_frame` makes this a cumulating frame: the given rows are taken as
+        // already-final bars at that frame (not re-aggregated), and later `append`s fold
+        // finer bars into them. Requires a DatetimeIndex (build one with `set_index` first).
         if let Some(tf_obj) = time_frame {
             let frame = resolve_time_frame(tf_obj)?;
             if !matches!(df.index().as_ref(), Index::Datetime(..)) {
                 return Err(PyValueError::new_err(
-                    "time_frame requires a DatetimeIndex (pass date_col to build one)",
+                    "time_frame requires a DatetimeIndex \
+                     (build one with to_datetime(df[col]) then df.set_index(col))",
                 ));
             }
             let spec = build_agg_spec(cumulators)?;
@@ -1392,7 +1414,7 @@ impl PyDataFrame {
         if cumulators.is_some() {
             return Err(PyValueError::new_err("cumulators requires time_frame"));
         }
-        Ok(PyDataFrame::plain(df))
+        Ok(PyDataFrame { inner: df, tf })
     }
 
     /// The DatetimeIndex timezone name (`"+08:00"` / `"America/New_York"`), or
@@ -1830,7 +1852,17 @@ impl PyDataFrame {
         }
         let kwargs = PyDict::new(py);
         kwargs.set_item("index", index_to_numpy(py, self.inner.index())?)?;
-        pd.call_method("DataFrame", (data,), Some(&kwargs))
+        let pdf = pd.call_method("DataFrame", (data,), Some(&kwargs))?;
+        // A tz-aware frame exports a UTC-naive datetime64 index (index_to_numpy); restore the
+        // display zone so the pandas index is tz-aware — a faithful round-trip with from_pandas.
+        if let Some(tz) = self.tz() {
+            let aware = pdf
+                .getattr("index")?
+                .call_method1("tz_localize", ("UTC",))?
+                .call_method1("tz_convert", (&tz,))?;
+            pdf.setattr("index", aware)?;
+        }
+        Ok(pdf)
     }
 
     /// Write the frame as CSV (pandas-subset). With no `path`, returns the CSV
@@ -2777,13 +2809,14 @@ impl SeriesLoc {
 
 /// Convert epoch numbers or datetime strings to a datetime `Series`, mirroring
 /// `pandas.to_datetime`. Numeric input is read as an epoch in `unit`
-/// (`"s"`/`"ms"`/`"us"`/`"ns"`), preserving sub-`unit` fractions; string input is
-/// parsed (naive strings interpreted in `tz`, default UTC); an already-datetime
-/// input is returned unchanged. Accepts a volas `Series` (its name and index are
-/// preserved), a 1-D NumPy array, or a list.
+/// (`"s"`/`"ms"`/`"us"`/`"ns"`), preserving sub-`unit` fractions; string input is parsed
+/// (naive strings as UTC; offset-aware strings are absolute); an already-datetime input is
+/// returned unchanged. To attach a timezone, `set_index` the result and then `df.tz_localize`
+/// (read a naive wall-clock in a zone) or `df.tz_convert` (re-display an absolute instant).
+/// Accepts a volas `Series` (its name and index are preserved), a 1-D NumPy array, or a list.
 #[pyfunction]
-#[pyo3(signature = (obj, unit = "ns", tz = None))]
-fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, tz: Option<&str>) -> PyResult<PySeries> {
+#[pyo3(signature = (obj, unit = "ns"))]
+fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str) -> PyResult<PySeries> {
     let (col, name, index) = match obj.extract::<PyRef<PySeries>>() {
         Ok(s) => (
             s.inner.data.clone(),
@@ -2796,16 +2829,10 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, tz: Option<&str>) -> PyResult
             (col, None, Arc::new(Index::Range(n)))
         }
     };
-    let converted = match &col {
-        Column::Datetime(_) => col,
-        Column::Str(_) => {
-            let tzv = match tz {
-                Some(s) => Tz::parse(s).map_err(pyerr)?,
-                None => Tz::Utc,
-            };
-            col.to_datetime_tz(tzv).map_err(value_err)?
-        }
-        _ => col.epoch_to_datetime_rounded(unit).map_err(value_err)?,
+    let converted = match col {
+        c @ Column::Datetime(_) => c,
+        c @ Column::Str(_) => c.to_datetime().map_err(value_err)?,
+        c => c.epoch_to_datetime_rounded(unit).map_err(value_err)?,
     };
     Ok(PySeries {
         inner: Series::new(name, converted, index),

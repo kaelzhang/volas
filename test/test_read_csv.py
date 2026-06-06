@@ -5,7 +5,8 @@ cases are ported from pandas's parser test suite (``pandas/tests/io/parser``)
 and adapted to volas's native, path-based API. Where volas supports the same
 behaviour, results are checked against ``pandas.read_csv`` directly; volas only
 implements the pandas-subset relevant to OHLCV time-series (dtype inference,
-default NA tokens, quoting, and an optional ``date_col`` -> ``DatetimeIndex``).
+default NA tokens, quoting, and an optional ``index_col`` + ``parse_dates`` ->
+``DatetimeIndex``).
 """
 
 from pathlib import Path

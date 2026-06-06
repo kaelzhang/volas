@@ -61,12 +61,6 @@ def test_to_datetime_strings_utc_matches_pandas():
     np.testing.assert_array_equal(ns(to_datetime(strs)), pd_ns(strs))
 
 
-def test_to_datetime_naive_string_in_tz():
-    # 09:30 read in +08:00 is 01:30Z
-    got = to_datetime(['2021-01-04 09:30:00'], tz='+08:00')
-    assert ns(got)[0] == pd.Timestamp('2021-01-04 01:30:00').value
-
-
 def test_to_datetime_offset_aware_string_is_absolute():
     got = to_datetime(['2021-01-04T09:30:00+08:00'])
     assert ns(got)[0] == pd.Timestamp('2021-01-04 01:30:00').value
@@ -104,11 +98,6 @@ def test_to_datetime_bad_unit_raises():
 def test_to_datetime_unparseable_string_raises():
     with pytest.raises(ValueError):
         to_datetime(['not-a-date'])
-
-
-def test_to_datetime_bad_tz_raises():
-    with pytest.raises(Exception):
-        to_datetime(['2021-01-04 09:30:00'], tz='Not/AZone')
 
 
 def test_to_datetime_bad_input_type_raises():

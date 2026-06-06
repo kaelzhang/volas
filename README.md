@@ -103,7 +103,7 @@ API that behaves exactly as it does in pandas. (A top-level name imported from
 `volas`, such as `read_csv`, is written without a `volas.`
 prefix.)
 
-### DataFrame(data, date_col=None, tz=None, date_unit=None, time_frame=None, cumulators=None)
+### DataFrame(data, time_frame=None, cumulators=None)
 
 `DataFrame` has a **pandas-compatible API**, so if you are familiar with
 `pandas.DataFrame`, you are already ready to use volas. Unlike pandas, volas is
@@ -148,16 +148,15 @@ Which gets the 2-period simple moving average on column `"close"`.
 
 #### Parameters
 
-- **data** `dict[str, list | np.ndarray]` the column data: a dict mapping each
-  column name to an equal-length list or NumPy array (float, int, bool or string).
-- **date_col** `Optional[str] = None` If set, the column named `date_col` is
-  parsed and set as the [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)
-  of the data frame.
-- **tz** `Optional[str] = None` The timezone of the `DatetimeIndex` — a fixed
-  offset such as `'+08:00'`, or a named IANA zone such as `'America/New_York'`.
-  See [Timezones](#timezones).
-- **date_unit** `Optional[str] = None` The unit of integer epoch timestamps
-  (`'s'`, `'ms'`, `'us'`, `'ns'`). See [Timezones](#timezones).
+- **data** `dict[str, list | np.ndarray] | DataFrame` the column data — a dict
+  mapping each column name to an equal-length list or NumPy array (float, int,
+  bool, `datetime64` or string) — **or another volas `DataFrame`, which is then
+  copied** (like `pandas.DataFrame(df)`). There is no `date_col` / `tz` /
+  `date_unit` shortcut: attach a
+  [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)
+  the pandas way — parse a column with `to_datetime`, promote it with
+  `set_index`, then tag a zone with `tz_localize` / `tz_convert`. See
+  [Timezones](#timezones).
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are
   taken as already-final bars at that frame, and later `append`s fold finer
@@ -408,7 +407,7 @@ per-column dtypes. Its full parameter list (`sep`, `parse_dates`, `index_col`,
 A top-level function that bridges a `pandas.DataFrame` (`pdf`) into volas (and
 `df.to_pandas()` bridges back). See [pandas interop](#pandas-interop).
 
-### to_datetime(obj, unit='ns', tz=None) -> Series
+### to_datetime(obj, unit='ns') -> Series
 
 A top-level function that converts epoch numbers or datetime strings to a
 datetime `Series`, mirroring `pandas.to_datetime`. `obj` may be a `Series`, a 1-D
@@ -418,18 +417,18 @@ NumPy array, or a list.
   already-datetime `Series` (returned unchanged).
 - **unit?** `str = 'ns'` the epoch unit for **numeric** input (`'s'` / `'ms'` /
   `'us'` / `'ns'`); sub-unit fractions are preserved, like `pd.to_datetime`.
-- **tz?** `str | None = None` for **string** input, the zone a naive string is
-  read in (a fixed offset such as `'+08:00'`, or an IANA name); default UTC.
+
+Naive strings parse as UTC and offset-aware strings (`…+08:00`) are absolute. To
+*display* the resulting index in a zone, make it the index and tag the zone with
+`tz_localize` / `tz_convert` (see [Timezones](#timezones)).
 
 ```py
 from volas import to_datetime
 
-# a float64 epoch-seconds column -> a datetime column, then set it as the index
+# parse an epoch-seconds column to datetime, then make it the index
 df['time'] = to_datetime(df['time'], unit='s')
 df = df.set_index('time')                       # -> DatetimeIndex
-
-# parse strings (a naive string is read in tz; default UTC)
-to_datetime(['2021-01-04 09:30:00'], tz='America/New_York')
+df = df.tz_localize('America/New_York')         # tag the display zone (see Timezones)
 ```
 
 For an in-place, **truncating** cast (the NumPy / pandas `astype` idiom), use
@@ -930,20 +929,22 @@ day-and-coarser buckets. A timezone is either a **fixed offset** (`'+08:00'`,
 cheap; crypto / A-share / HK) or a **named IANA zone** (`'America/New_York'`,
 DST-aware via `chrono-tz`; US / EU). The default is UTC.
 
-Here is the whole picture in one example. A US exchange opens at 09:30 local on
-2021-01-04, and we hold that bar as a naive local string:
+Here is the whole picture. There is **no constructor shortcut** — you build a
+`DatetimeIndex` the pandas way: parse a column with `to_datetime`, promote it with
+`set_index`, then tag the display zone with `tz_localize` (reinterpret a naive
+wall-clock *as* that zone — the instant moves) or `tz_convert` (keep the instant,
+restate the zone). A US exchange opens at 09:30 local on 2021-01-04, held as a
+naive local string:
 
 ```py
-from volas import DataFrame, Timestamp
+from volas import DataFrame, to_datetime, Timestamp
 
-# date_col + tz: parse the 't' column as the index, reading its naive wall-clock
-# strings *as New York local time*. The instant is stored UTC (14:30Z), but the
-# index renders and matches in New York.
-df = DataFrame(
-    {'t': ['2021-01-04 09:30:00'], 'close': [100.0]},
-    date_col='t',
-    tz='America/New_York',
-)
+# Parse the naive 't' strings to UTC instants and make them the index, then read
+# the wall-clock *as New York local time* with tz_localize. The instant is stored
+# UTC (14:30Z), but the index renders and matches in New York.
+df = DataFrame({'t': ['2021-01-04 09:30:00'], 'close': [100.0]})
+df['t'] = to_datetime(df['t'])
+df = df.set_index('t').tz_localize('America/New_York')
 df.tz       # 'America/New_York'
 df.index    # ['2021-01-04T14:30:00.000000000']  (raw .index is UTC, matching pandas .values)
 
@@ -957,14 +958,17 @@ df.at[ts, 'close']                       # 100.0
 ts.value                                 # its UTC epoch-nanoseconds (int)
 ts.tz                                    # '+08:00'
 
-# date_unit: when the source column is integer epochs, date_unit gives the unit
-# and tz tags the zone for rendering / matching. 1609770600000 ms == 14:30Z:
-DataFrame({'t': [1609770600000], 'close': [100.0]},
-          date_col='t', date_unit='ms', tz='America/New_York').index
+# Integer epochs: to_datetime(unit=...) reads the unit. An epoch is *absolute*, so
+# tag the zone with tz_convert (display only). 1609770600000 ms == 14:30Z:
+e = DataFrame({'t': [1609770600000], 'close': [100.0]})
+e['t'] = to_datetime(e['t'], unit='ms')
+e.set_index('t').tz_convert('America/New_York').index
 # ['2021-01-04T14:30:00.000000000']
 
-# An offset-aware string is already absolute, so tz only affects display:
-DataFrame({'t': ['2021-01-04T09:30:00+08:00'], 'close': [1.0]}, date_col='t').index
+# An offset-aware string is already absolute too — to_datetime resolves the offset:
+o = DataFrame({'t': ['2021-01-04T09:30:00+08:00'], 'close': [1.0]})
+o['t'] = to_datetime(o['t'])
+o.set_index('t').index
 # ['2021-01-04T01:30:00.000000000']  (09:30+08:00 == 01:30Z)
 ```
 
@@ -987,7 +991,7 @@ called, so `import volas` stays pandas-free.
 ```py
 from volas import from_pandas
 
-df = from_pandas(pandas_df)        # numeric/bool native; a DatetimeIndex round-trips
+df = from_pandas(pandas_df)        # numeric/bool/datetime native; a (tz-aware) DatetimeIndex round-trips
 pdf = df.to_pandas()               # -> pandas.DataFrame
 df.to_csv('out.csv', index=True)   # subset of pandas to_csv; returns a str if path=None
 ```

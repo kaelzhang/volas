@@ -187,10 +187,7 @@ class Row:
 class DataFrame:
     def __new__(
         cls,
-        data: dict[str, Any],
-        date_col: str | None = ...,
-        tz: str | None = ...,
-        date_unit: str | None = ...,
+        data: dict[str, Any] | DataFrame,
         time_frame: str | TimeFrame | None = ...,
         cumulators: dict[str, Any] | None = ...,
     ) -> DataFrame: ...
@@ -334,5 +331,4 @@ def read_csv(
 def to_datetime(
     obj: Any,
     unit: str = ...,
-    tz: str | None = ...,
 ) -> Series: ...
