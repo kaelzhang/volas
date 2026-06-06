@@ -629,3 +629,130 @@ pub fn adxr_resume(
         st
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::test_support::*;
+
+    /// Every directional resume, fed the carried Wilder accumulator(s) of a full compute
+    /// over the head, reproduces the tail of a full compute over the whole input —
+    /// bit-for-bit. Iterating `from` over an oscillating OHLC series advances the fused
+    /// `dm1`/`tr1` recurrences through their steady state for all seven families.
+    #[test]
+    fn directional_resume_is_bit_identical_to_full() {
+        let (high, low, close) = ohlc(120);
+        let p = 14usize;
+
+        // ±DM warm up at `period-1`; ±DI/DX at `period`; ADX at `2p-1`; ADXR at `3p-2`.
+        // Pick `from` values comfortably past each family's seed (the largest seed is
+        // ADXR's 3*14-2 = 40), so every head produces a valid carried state.
+        for &from in &[41usize, 45, 60, 90, 119] {
+            let h = &high[..from];
+            let l = &low[..from];
+            let c = &close[..from];
+
+            let st = plus_dm_final_state(h, l, p).unwrap();
+            let (tail, _) = plus_dm_resume(&high, &low, p, from, &st).unwrap();
+            assert_bits(&tail, &plus_dm(&high, &low, p)[from..], "plus_dm");
+
+            let st = minus_dm_final_state(h, l, p).unwrap();
+            let (tail, _) = minus_dm_resume(&high, &low, p, from, &st).unwrap();
+            assert_bits(&tail, &minus_dm(&high, &low, p)[from..], "minus_dm");
+
+            let st = plus_di_final_state(h, l, c, p).unwrap();
+            let (tail, _) = plus_di_resume(&high, &low, &close, p, from, &st).unwrap();
+            assert_bits(&tail, &plus_di(&high, &low, &close, p)[from..], "plus_di");
+
+            let st = minus_di_final_state(h, l, c, p).unwrap();
+            let (tail, _) = minus_di_resume(&high, &low, &close, p, from, &st).unwrap();
+            assert_bits(&tail, &minus_di(&high, &low, &close, p)[from..], "minus_di");
+
+            let st = dx_final_state(h, l, c, p).unwrap();
+            let (tail, _) = dx_resume(&high, &low, &close, p, from, &st).unwrap();
+            assert_bits(&tail, &dx(&high, &low, &close, p)[from..], "dx");
+
+            let st = adx_final_state(h, l, c, p).unwrap();
+            let (tail, _) = adx_resume(&high, &low, &close, p, from, &st).unwrap();
+            assert_bits(&tail, &adx(&high, &low, &close, p)[from..], "adx");
+
+            let st = adxr_final_state(h, l, c, p).unwrap();
+            let (tail, _) = adxr_resume(&high, &low, &close, p, from, &st).unwrap();
+            assert_bits(&tail, &adxr(&high, &low, &close, p)[from..], "adxr");
+        }
+    }
+
+    /// `from == 0` resumes decline (no prior bar to read the one-period term from) — the
+    /// early `None` arm of every `*_resume`.
+    #[test]
+    fn directional_resume_declines_at_from_zero() {
+        let (high, low, close) = ohlc(60);
+        let p = 14usize;
+        let dummy = vec![0.0; 8]; // longer than any family's state, unread on the None path
+        assert!(plus_dm_resume(&high, &low, p, 0, &dummy).is_none()); // :284
+        assert!(minus_dm_resume(&high, &low, p, 0, &dummy).is_none()); // :305
+        assert!(plus_di_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :378
+        assert!(minus_di_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :409
+        assert!(dx_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :457
+        assert!(adx_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :525
+        assert!(adxr_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :605
+    }
+
+    /// `*_final_state` declines before the indicator seeds, so the caller keeps the
+    /// full-recompute fallback: `period >= n` for the Wilder-sum families, `period == 0`
+    /// and the staged `2p-1 >= n` / `3p-2 >= n` seeds for ADX / ADXR.
+    #[test]
+    fn directional_final_state_declines_before_seed() {
+        let (high, low, close) = ohlc(120);
+        // period >= n -> the Wilder sum never seeds.
+        assert!(plus_dm_final_state(&high, &low, 200).is_none()); // :236
+        assert!(minus_dm_final_state(&high, &low, 200).is_none());
+        assert!(plus_di_final_state(&high, &low, &close, 200).is_none()); // :322 (via dm_tr_sums_final)
+        assert!(minus_di_final_state(&high, &low, &close, 200).is_none());
+        assert!(dx_final_state(&high, &low, &close, 200).is_none());
+        // ADX: period == 0 (:476) and 2*period-1 >= n (:480).
+        assert!(adx_final_state(&high, &low, &close, 0).is_none());
+        assert!(adx_final_state(&high, &low, &close, 70).is_none());
+        // ADXR: period == 0 (:550) and 3*period-2 >= n (:553).
+        assert!(adxr_final_state(&high, &low, &close, 0).is_none());
+        assert!(adxr_final_state(&high, &low, &close, 50).is_none());
+    }
+
+    /// The TA-Lib ~0-divisor guards in `di_val` / `dx_val` — which are reached only on the
+    /// RESUME paths (the public `plus_di`/`dx` use their own inline `di`/loop). Drive the
+    /// resumes with degenerate inputs so every zero arm fires.
+    #[test]
+    fn di_dx_zero_divisor_guards() {
+        let p = 14usize;
+
+        // Flat series (constant high == low == close): smoothed TR ~ 0, so di_val (:355)
+        // and dx_val's outer guard (:427) both return 0 on resume.
+        let flat = vec![50.0; 40];
+        let from = 20usize;
+        let st = plus_di_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
+        let (tail, _) = plus_di_resume(&flat, &flat, &flat, p, from, &st).unwrap();
+        assert!(tail.iter().all(|&x| x == 0.0), "plus_di resume flat TR -> 0"); // :355
+        let st = minus_di_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
+        let (tail, _) = minus_di_resume(&flat, &flat, &flat, p, from, &st).unwrap();
+        assert!(tail.iter().all(|&x| x == 0.0), "minus_di resume flat TR -> 0");
+        let st = dx_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
+        let (tail, _) = dx_resume(&flat, &flat, &flat, p, from, &st).unwrap();
+        assert!(tail.iter().all(|&x| x == 0.0), "dx resume flat TR -> 0"); // :427
+
+        // +DI + −DI ~ 0 while TR > 0 -> dx_val's inner sum guard (:433). Strictly shrinking
+        // inside bars: each high lower than the prior high AND each low higher than the
+        // prior low, so every one-period +DM and −DM is 0 (no new extreme), yet the
+        // high-low range stays positive so the smoothed TR is non-zero.
+        let n = 40usize;
+        let high: Vec<f64> = (0..n).map(|i| 100.0 - i as f64 * 0.5).collect();
+        let low: Vec<f64> = (0..n).map(|i| 60.0 + i as f64 * 0.5).collect();
+        let close: Vec<f64> = (0..n).map(|i| 80.0 + (i as f64 * 0.3).sin()).collect();
+        // Sanity: the constructed bars really are inside bars with positive range.
+        for i in 1..n {
+            assert!(high[i] < high[i - 1] && low[i] > low[i - 1] && high[i] > low[i]);
+        }
+        let st = dx_final_state(&high[..from], &low[..from], &close[..from], p).unwrap();
+        let (tail, _) = dx_resume(&high, &low, &close, p, from, &st).unwrap();
+        assert!(tail.iter().all(|&x| x == 0.0), "dx resume zero DI-sum -> 0"); // :433
+    }
+}
