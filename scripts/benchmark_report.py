@@ -158,20 +158,33 @@ def _coverage_section(by_indicator: dict) -> str:
         d = dict(entries)
         if 'volas' not in d or 'talib' not in d:
             continue
-        v, t = d['volas']['median'], d['talib']['median']
+        # `min` (the fastest of many rounds) is the most reproducible statistic: it
+        # filters the OS-scheduling / CPU-frequency-scaling noise that makes a
+        # borderline indicator's `median` flip the win count between runs.
+        v, t = d['volas']['min'], d['talib']['min']
         rows.append((ind, v, t, (t / v) if v > 0 else 0.0))
     rows.sort(key=lambda r: r[3], reverse=True)  # descending: largest speedup first
-    wins = sum(1 for *_, s in rows if s >= 1.0)
+    # Dead-band: an indicator within ±`TIE_BAND` of even counts as a tie, not a win
+    # or a loss, so run-to-run noise on a near-even indicator cannot swing the
+    # headline count (a borderline indicator used to flip it by ±1).
+    TIE_BAND = 0.03
+
+    def verdict(s: float) -> str:
+        return 'win' if s >= 1.0 + TIE_BAND else 'loss' if s <= 1.0 - TIE_BAND else 'tie'
+
+    wins = sum(1 for *_, s in rows if verdict(s) == 'win')
+    ties = sum(1 for *_, s in rows if verdict(s) == 'tie')
+    losses = len(rows) - wins - ties
     body = []
     for ind, v, t, s in rows:
-        cls = 'win' if s >= 1.0 else 'loss'
         body.append(
             f'<tr><td class="ind-name">{html.escape(ind)}</td>'
             f'<td>{_fmt_time(v)}</td><td>{_fmt_time(t)}</td>'
-            f'<td class="perf {cls}">{s:.2f}×</td></tr>'
+            f'<td class="perf {verdict(s)}">{s:.2f}×</td></tr>'
         )
     summary = (f'<p class="blurb">volas beats TA-Lib on <strong>{wins} / {len(rows)}</strong> '
-               f'covered indicators.</p>')
+               f'covered indicators by a clear &gt;{TIE_BAND:.0%} margin '
+               f'({ties} within ±{TIE_BAND:.0%}, {losses} slower).</p>')
     return (f'{summary}<table class="stats cov"><thead><tr>'
             f'<th>Indicator</th><th>volas</th><th>TA-Lib</th><th>volas vs TA-Lib</th>'
             f'</tr></thead><tbody>{"".join(body)}</tbody></table>')
@@ -246,6 +259,7 @@ def render(data: dict) -> str:
   .stats.cov td.ind-name {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }}
   .stats .perf.win {{ color: #1f9d57; }}
   .stats .perf.loss {{ color: #d4493f; }}
+  .stats .perf.tie {{ color: #8a8a8a; }}
   footer {{ margin-top: 40px; color: #9aa0aa; font-size: 12px; }}
 </style></head>
 <body><div class="wrap">
