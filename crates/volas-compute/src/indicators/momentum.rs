@@ -106,17 +106,31 @@ pub fn imi(open: &[f64], close: &[f64], period: usize) -> Vec<f64> {
         return out;
     }
     let lookback = period - 1;
-    for today in lookback..n {
-        let (mut up_sum, mut down_sum) = (0.0, 0.0);
-        for i in (today - lookback)..=today {
-            let (c, o) = (close[i], open[i]);
-            if c > o {
-                up_sum += c - o;
-            } else {
-                down_sum += o - c;
-            }
+    // Each bar's up / down move; the window sums slide (add the entering bar, drop the leaving
+    // one) -> O(n) instead of re-scanning the window each bar. The slide drifts ~1e-13, inside
+    // the 1e-9 TA-Lib tolerance, as the var / cci / linear-regression slides already rely on.
+    let updown = |i: usize| -> (f64, f64) {
+        let (c, o) = (close[i], open[i]);
+        if c > o {
+            (c - o, 0.0)
+        } else {
+            (0.0, o - c)
         }
+    };
+    let (mut up_sum, mut down_sum) = (0.0, 0.0);
+    for i in 0..lookback {
+        let (u, d) = updown(i);
+        up_sum += u;
+        down_sum += d;
+    }
+    for today in lookback..n {
+        let (u, d) = updown(today);
+        up_sum += u;
+        down_sum += d;
         out[today] = 100.0 * (up_sum / (up_sum + down_sum));
+        let (lu, ld) = updown(today - lookback);
+        up_sum -= lu;
+        down_sum -= ld;
     }
     out
 }
