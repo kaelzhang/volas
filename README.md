@@ -103,7 +103,7 @@ API that behaves exactly as it does in pandas. (A top-level name imported from
 `volas`, such as `read_csv`, is written without a `volas.`
 prefix.)
 
-### DataFrame(data, date_col=None, tz=None, date_unit=None)
+### DataFrame(data, date_col=None, tz=None, date_unit=None, time_frame=None, cumulators=None)
 
 `DataFrame` has a **pandas-compatible API**, so if you are familiar with
 `pandas.DataFrame`, you are already ready to use volas. Unlike pandas, volas is
@@ -158,6 +158,15 @@ Which gets the 2-period simple moving average on column `"close"`.
   See [Timezones](#timezones).
 - **date_unit** `Optional[str] = None` The unit of integer epoch timestamps
   (`'s'`, `'ms'`, `'us'`, `'ns'`). See [Timezones](#timezones).
+- **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
+  **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are
+  taken as already-final bars at that frame, and later `append`s fold finer
+  bars into the forming bar. Requires a `DatetimeIndex`. See
+  [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex).
+- **cumulators** `Optional[dict[str, str]] = None` Per-column aggregator
+  overrides used when folding (e.g. `{'volume': 'last'}`); defaults to OHLCV
+  semantics (`open`=first, `high`=max, `low`=min, `close`=last, `volume`=sum).
+  Only meaningful together with `time_frame`.
 
 ### df.exec(directive: str, create_column: bool = False) -> np.ndarray
 
@@ -213,6 +222,11 @@ df.get_column('close')
 Appends rows of `other` (a `DataFrame` or a `Row`) to the end of the caller,
 returning a new object, and applies the `DatetimeIndex` to the newly-appended
 row(s) if possible.
+
+If the caller is a **tf-aware** DataFrame (one built with a `time_frame`, or
+the result of `cumulate`), `append` instead **folds** each finer bar into the
+forming bar rather than adding a row — see
+[Live cumulation](#live-cumulation--a-tf-aware-dataframe).
 
 By default, appending new rows does not update the indicator columns of the new
 rows; they stay stale until they are read again or until `df.fulfill()` is
@@ -515,21 +529,91 @@ df.cumulate('1h', cumulators={'volume': 'last'})
 The `time_frame` may be a string label or a `TimeFrame` constant — see
 [TimeFrame](#timeframe) for the full list.
 
-For **live** streaming, the result of `cumulate` is a **tf-aware DataFrame** you
-keep `append`-ing finer bars into, instead of re-cumulating the whole frame each
-time:
+For **live** streaming you do not re-cumulate the whole history on every tick —
+you keep the current 5-minute bar *forming* and update it as each finer bar
+arrives. That is exactly what a **tf-aware DataFrame** does.
+
+#### The tf-aware DataFrame *is* the cumulator
+
+In some libraries this job belongs to a separate **`Cumulator`** object that you
+feed bars to. volas has no such class: **a DataFrame that carries a `time_frame`
+is itself the cumulator.** `cumulate` returns one, or you build one directly with
+`DataFrame(data, time_frame='5m')`. The whole "accumulator" idea is then just
+ordinary DataFrame operations:
+
+| what you want                   | tf-aware DataFrame          |
+| ------------------------------- | --------------------------- |
+| a cumulator for the `5m` frame  | `cum = df.cumulate('5m')`   |
+| feed it the next (finer) bar    | `cum.append(bar)`           |
+| the whole accumulated history   | `cum`                       |
+| the current, still-forming bar  | `cum.iloc[-1]`              |
+| a live indicator over it        | `cum['macd']`               |
+
+> A `Cumulator` engine still lives in volas's Rust core, but it is an internal
+> implementation detail; the Python API exposes only the DataFrame.
+
+#### Watch the forming bar grow
+
+Build the 5-minute frame from the 1-minute `df` above one bar at a time. Seed it
+with the `00:00` bar, then fold in `00:01`. Both fall in the same `00:00`–`00:05`
+window, so the frame still holds **one** row — the forming bar — now updated
+(`high` rose to `332.0`, `close` to `331.0`, `volume` summed):
 
 ```py
-df = history.cumulate('5m')      # a tf-aware 5m frame
-for bar in stream:               # each `bar` is a finer DataFrame
-    df.append(bar)               # folds into the forming 5m bar
-    df.iloc[-1]                  # the current (still-open) period — the live bar
-    df['macd']                  # indicators over the cumulated frame
+cum = df.iloc[0:1].cumulate('5m')   # seed the 5m frame with the 00:00 bar
+cum.append(df.iloc[1:2])            # fold in 00:01 (same 5m window)
+
+print(cum)
 ```
 
-Re-sending a bar with a timestamp already seen **updates** that period (it does
-not double-count), which matches exchange data that revises the latest bar. See
-[Live cumulation](#live-cumulation--a-tf-aware-dataframe).
+```
+                      open   high    low  close      volume
+2020-01-01 00:00:00  329.4  332.0  327.6  331.0  28155710.0
+```
+
+Fold in `00:02`, `00:03` and `00:04` and the window fills up. That single forming
+row is now the **finished** first 5-minute bar — identical to the first row of
+the one-shot `df.cumulate('5m')` printed earlier:
+
+```py
+for i in range(2, 5):
+    cum.append(df.iloc[i:i + 1])
+
+print(cum)
+```
+
+```
+                      open   high    low  close      volume
+2020-01-01 00:00:00  329.4  334.2  324.8  324.8  62346461.0
+```
+
+Now fold in `00:05`. It opens the **next** window, so the `00:00` bar is finalized
+and a fresh forming bar starts; the frame grows to two rows and `cum.iloc[-1]` is
+the new, still-forming `00:05` bar:
+
+```py
+cum.append(df.iloc[5:6])
+
+print(cum)
+```
+
+```
+                      open   high    low  close      volume
+2020-01-01 00:00:00  329.4  334.2  324.8  324.8  62346461.0   <- finalized
+2020-01-01 00:05:00  325.0  327.8  324.8  327.6  10448427.0   <- still forming
+```
+
+Two properties make this safe for a live feed:
+
+- **Indicators stay live.** `cum['ema:9']` (or any directive) computes over the
+  whole frame *including* the forming row, so it updates on every `append` and
+  always equals what cumulating-then-computing in one shot would give.
+- **Re-sent bars do not double-count.** Folding a bar whose timestamp you have
+  already seen **updates** that period instead of adding to it — the same dedup
+  rule shown at the top of this section — matching exchanges that revise their
+  most recent bar.
+
+See [Live cumulation](#live-cumulation--a-tf-aware-dataframe) for the API summary.
 
 ## TimeFrame
 
