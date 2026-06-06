@@ -135,9 +135,16 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     let tp: Vec<f64> = (0..n)
         .map(|i| (high[i] + low[i] + close[i]) / 3.0)
         .collect();
+    // The window mean is a sliding sum (add the entering bar, drop the leaving one) — O(1)
+    // per bar instead of re-summing the window. The mean-absolute-deviation still scans the
+    // window (each `|x - avg|` depends on the just-computed mean, so it cannot slide). The
+    // sliding sum drifts ~1e-13 relative, well inside the 1e-9 TA-Lib parity tolerance, as the
+    // var / linear-regression slides already rely on.
+    let mut sum: f64 = tp[..period - 1].iter().sum();
     for i in (period - 1)..n {
+        sum += tp[i];
+        let avg = sum / p;
         let window = &tp[i + 1 - period..=i];
-        let avg = window.iter().sum::<f64>() / p;
         let sum_dev: f64 = window.iter().map(|x| (x - avg).abs()).sum();
         let num = tp[i] - avg;
         out[i] = if num != 0.0 && sum_dev != 0.0 {
@@ -145,6 +152,7 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
         } else {
             0.0
         };
+        sum -= tp[i + 1 - period];
     }
     out
 }
