@@ -307,6 +307,50 @@ impl PyTimestamp {
         Ok(arr.call_method1("astype", ("datetime64[ns]",))?)
     }
 
+    /// Calendar year in the timestamp's timezone (pandas `Timestamp.year`).
+    #[getter]
+    fn year(&self) -> i64 {
+        datetime::civil_parts_tz(self.ns, self.tz).0
+    }
+    /// Calendar month, 1..=12 (pandas `Timestamp.month`).
+    #[getter]
+    fn month(&self) -> i64 {
+        datetime::civil_parts_tz(self.ns, self.tz).1
+    }
+    /// Day of month, 1..=31 (pandas `Timestamp.day`).
+    #[getter]
+    fn day(&self) -> i64 {
+        datetime::civil_parts_tz(self.ns, self.tz).2
+    }
+    /// Hour, 0..=23 (pandas `Timestamp.hour`).
+    #[getter]
+    fn hour(&self) -> i64 {
+        datetime::civil_parts_tz(self.ns, self.tz).3
+    }
+    /// Minute, 0..=59 (pandas `Timestamp.minute`).
+    #[getter]
+    fn minute(&self) -> i64 {
+        datetime::civil_parts_tz(self.ns, self.tz).4
+    }
+    /// Second, 0..=59 (pandas `Timestamp.second`).
+    #[getter]
+    fn second(&self) -> i64 {
+        datetime::civil_parts_tz(self.ns, self.tz).5
+    }
+
+    /// Day of week with Monday=0 .. Sunday=6 (pandas `Timestamp.weekday()`).
+    fn weekday(&self) -> i64 {
+        let (y, mo, d, ..) = datetime::civil_parts_tz(self.ns, self.tz);
+        (datetime::days_from_civil(y, mo, d) + 3).rem_euclid(7)
+    }
+
+    /// Format the wall-clock time with a `strftime` format string (pandas
+    /// `Timestamp.strftime`). Raises `ValueError` on an invalid format.
+    fn strftime(&self, fmt: &str) -> PyResult<String> {
+        datetime::strftime(self.ns, self.tz, fmt)
+            .ok_or_else(|| PyValueError::new_err("invalid strftime format string"))
+    }
+
     fn __repr__(&self) -> String {
         match self.tz {
             Tz::Utc => format!("Timestamp('{}')", datetime::format_ns(self.ns)),

@@ -143,6 +143,31 @@ pub fn format_ns_tz(ns: i64, tz: Tz) -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
 }
 
+/// The wall-clock civil parts `(year, month, day, hour, minute, second)` of the
+/// instant `ns` in `tz` (UTC parts when `tz` is UTC).
+pub fn civil_parts_tz(ns: i64, tz: Tz) -> (i64, i64, i64, i64, i64, i64) {
+    if tz.is_utc() {
+        civil_parts(ns)
+    } else {
+        tz.civil_parts(ns)
+    }
+}
+
+/// Format the instant `ns` as wall-clock in `tz` with a `strftime` `fmt`. Returns
+/// `None` for an invalid format string (so the caller can raise a clean error
+/// instead of chrono panicking) or an out-of-range civil date.
+pub fn strftime(ns: i64, tz: Tz, fmt: &str) -> Option<String> {
+    use chrono::format::{Item, StrftimeItems};
+    let (y, mo, d, h, mi, s) = civil_parts_tz(ns, tz);
+    let dt = NaiveDate::from_ymd_opt(y as i32, mo as u32, d as u32)?
+        .and_hms_opt(h as u32, mi as u32, s as u32)?;
+    let items: Vec<Item> = StrftimeItems::new(fmt).collect();
+    if items.iter().any(|it| matches!(it, Item::Error)) {
+        return None;
+    }
+    Some(dt.format_with_items(items.iter()).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
