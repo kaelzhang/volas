@@ -1449,6 +1449,12 @@ impl PyDataFrame {
                 "unsupported operand for a DataFrame comparison",
             ));
         };
+        self.with_columns(cols)
+    }
+
+    /// Rebuild a plain frame from `cols`, reusing this frame's names and index (the
+    /// columns must be height-aligned). Backs `compare` / `fillna` / `mask_na`.
+    fn with_columns(&self, cols: Vec<Column>) -> PyResult<PyDataFrame> {
         DataFrame::new(
             self.inner.names().to_vec(),
             cols,
@@ -1456,6 +1462,20 @@ impl PyDataFrame {
         )
         .map(PyDataFrame::plain)
         .map_err(pyerr)
+    }
+
+    /// Per-cell NaN mask -> a bool frame; backs `isna` (want_na=true) / `notna`.
+    fn mask_na(&self, want_na: bool) -> PyResult<PyDataFrame> {
+        let cols = self
+            .inner
+            .columns()
+            .iter()
+            .map(|c| match c {
+                Column::F64(v) => Column::bool(v.iter().map(|x| x.is_nan() == want_na).collect()),
+                other => Column::bool(vec![!want_na; other.len()]),
+            })
+            .collect();
+        self.with_columns(cols)
     }
 
     /// Fold incoming fine bars into a tf-aware frame: each bar either extends the
@@ -1866,6 +1886,55 @@ impl PyDataFrame {
             })
             .collect();
         PyDataFrame::plain(take_frame(&self.inner, &keep))
+    }
+
+    /// Replace missing (NaN) values, or forward/backward-fill, in every float
+    /// column (pandas `fillna`); non-float columns are unchanged. Pass exactly one
+    /// of `value` / `method` (`'ffill'` / `'pad'`, `'bfill'` / `'backfill'`).
+    #[pyo3(signature = (value = None, method = None))]
+    fn fillna(&self, value: Option<f64>, method: Option<&str>) -> PyResult<PyDataFrame> {
+        let cols: Vec<Column> = match (value, method) {
+            (Some(_), Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "fillna: pass either `value` or `method`, not both",
+                ))
+            }
+            (None, None) => {
+                return Err(PyValueError::new_err("fillna: pass a `value` or a `method`"))
+            }
+            (Some(val), None) => self
+                .inner
+                .columns()
+                .iter()
+                .map(|c| match c {
+                    Column::F64(v) => {
+                        Column::f64(v.iter().map(|&x| if x.is_nan() { val } else { x }).collect())
+                    }
+                    other => other.clone(),
+                })
+                .collect(),
+            (None, Some(m)) => self
+                .inner
+                .columns()
+                .iter()
+                .map(|c| match c {
+                    Column::F64(v) => Ok(Column::f64(fill_directional(v.as_slice(), m)?)),
+                    other => Ok(other.clone()),
+                })
+                .collect::<PyResult<Vec<Column>>>()?,
+        };
+        self.with_columns(cols)
+    }
+
+    /// Boolean mask of missing (NaN) cells -> a bool DataFrame (pandas `isna`);
+    /// non-float columns are all-False.
+    fn isna(&self) -> PyResult<PyDataFrame> {
+        self.mask_na(true)
+    }
+
+    /// Boolean mask of present (non-NaN) cells -> a bool DataFrame (pandas `notna`).
+    fn notna(&self) -> PyResult<PyDataFrame> {
+        self.mask_na(false)
     }
 
     /// Sort rows by index label (pandas `sort_index`).
