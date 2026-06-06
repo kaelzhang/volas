@@ -40,7 +40,6 @@ The difference is speed that **volas** beats every solution in terms of indicato
 - [Built-in indicators](#built-in-indicators)
 - [Indexing & selection](#indexing--selection)
 - [Writing & assignment](#writing--assignment)
-- [Reading CSV](#reading-csv)
 - [Timezones](#timezones)
 - [pandas interop](#pandas-interop)
 - [Error handling](#error-handling)
@@ -396,11 +395,40 @@ for bar in stream:            # each `bar` is a finer DataFrame
 
 See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
 
-### read_csv(path, ...) -> DataFrame
+### read_csv(path, sep=',', header=True, parse_dates=None, index_col=None, na_values=None, keep_default_na=True, tz=None, date_unit=None) -> DataFrame
 
-A top-level function that reads a CSV file into a `DataFrame`, inferring
-per-column dtypes. Its full parameter list (`sep`, `parse_dates`, `index_col`,
-`na_values`, `tz`, `date_unit`, …) is documented under [Reading CSV](#reading-csv).
+A top-level function that reads a CSV file into a `DataFrame`, inferring per-column
+dtypes — a fast, pandas-subset CSV reader.
+
+- **path** `str` the CSV file path.
+- **sep?** `str = ','` the field delimiter (a single character); `delimiter` is an
+  accepted alias.
+- **header?** `bool = True` `True` (or omitted) treats the first row as the header;
+  `False` / `None` means no header (columns are named `'0'`…`'n-1'`).
+- **parse_dates?** `list[str] | None = None` column names to parse into datetime
+  columns.
+- **index_col?** `str | int | None = None` a column name or integer position to move
+  into the row index; applied *after* `parse_dates`, so naming a parsed date column
+  yields a `DatetimeIndex`.
+- **na_values?** `str | list[str] | None = None` extra missing-value tokens.
+- **keep_default_na?** `bool = True` also treat the default NA tokens as missing.
+- **tz?** `str | None = None` the timezone for the `index_col` datetime: a *naive*
+  date string is read in `tz` (stored UTC, the index tagged). Accepts a fixed offset
+  (`'+08:00'`) or an IANA name (`'America/New_York'`); pass the date column via
+  `index_col` and do *not* also list it in `parse_dates`. See [Timezones](#timezones).
+- **date_unit?** `str | None = None` read `index_col` as an epoch integer in this unit
+  (`'s'` / `'ms'` / `'us'` / `'ns'`, absolute UTC); `tz` then only sets the display zone.
+
+```py
+from volas import read_csv
+
+df = read_csv('klines.csv')                        # RangeIndex
+df = read_csv('klines.csv',
+              parse_dates=['time_key'],            # parse to datetime
+              index_col='time_key')                # -> DatetimeIndex
+df = read_csv('data.tsv', sep='\t', header=False,  # no header -> '0'..'n-1'
+              na_values=['NA', 'null'])
+```
 
 ### from_pandas(pdf) -> DataFrame
 
@@ -903,21 +931,6 @@ df.loc[df['close'] > df['open'], 'signal'] = 1.0   # masked column assignment
 Writing a fractional value into an integer column widens it to float (pandas
 semantics). Writing into a cached directive column drops its cached status, so a
 later `fulfill()` can never silently overwrite your edit.
-
-## Reading CSV
-
-A fast, pandas-subset CSV reader that infers per-column dtypes.
-
-```py
-from volas import read_csv
-
-df = read_csv('klines.csv')                       # RangeIndex
-df = read_csv('klines.csv',
-             parse_dates=['time_key'],            # parse to datetime
-             index_col='time_key')                # -> DatetimeIndex
-df = read_csv('data.tsv', sep='\t', header=False, # no header -> '0'..'n-1'
-             na_values=['NA', 'null'])
-```
 
 ## Timezones
 
