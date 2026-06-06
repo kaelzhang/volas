@@ -164,9 +164,9 @@ Which gets the 2-period simple moving average on column `"close"`.
   bars into the forming bar. Requires a `DatetimeIndex`. See
   [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex).
 - **cumulators** `Optional[dict[str, str]] = None` Per-column aggregator
-  overrides used when folding (e.g. `{'volume': 'last'}`); defaults to OHLCV
-  semantics (`open`=first, `high`=max, `low`=min, `close`=last, `volume`=sum).
-  Only meaningful together with `time_frame`.
+  overrides used when folding (e.g. `{'amount': 'sum'}`); defaults to OHLCV
+  semantics (`open`=first, `high`=max, `low`=min, `close`=last, `volume`=sum;
+  any other column `last`). Only meaningful together with `time_frame`.
 
 ### df.exec(directive: str, create_column: bool = False) -> np.ndarray
 
@@ -240,8 +240,8 @@ Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
 - **time_frame** `TimeFrame | str` the target bar interval, e.g. `TimeFrame.m5`
   or `'5m'`. See [TimeFrame](#timeframe).
 - **cumulators?** `dict[str, str] | None = None` per-column aggregator overrides
-  (e.g. `{'volume': 'last'}`); defaults to OHLCV semantics (`open`=first,
-  `high`=max, `low`=min, `close`=last, `volume`=sum).
+  (e.g. `{'amount': 'sum'}`); defaults to OHLCV semantics (`open`=first,
+  `high`=max, `low`=min, `close`=last, `volume`=sum; any other column `last`).
 
 ```py
 # from 1-minute klines to 5-minute klines
@@ -519,12 +519,17 @@ Now we get a 5-minute kline:
 2020-01-01 00:15:00  330.0  335.2  322.0  323.0  82452902.0
 ```
 
-`cumulate` defaults to OHLCV semantics (`open`=first, `high`=max, `low`=min,
-`close`=last, `volume`=sum); pass `cumulators=` to override an aggregator:
+`cumulate` defaults to OHLCV semantics — `open`=first, `high`=max, `low`=min,
+`close`=last, `volume`=sum — and **any other column falls back to `last`**. Pass
+`cumulators=` to override a column's aggregator; the common case is a non-OHLCV
+column that should be summed, such as a turnover (`amount`) column that would
+otherwise default to `last`:
 
 ```py
-df.cumulate('1h', cumulators={'volume': 'last'})
+df.cumulate('1h', cumulators={'amount': 'sum'})
 ```
+
+The supported aggregators are `first`, `max`, `min`, `last` and `sum`.
 
 The `time_frame` may be a string label or a `TimeFrame` constant — see
 [TimeFrame](#timeframe) for the full list.
