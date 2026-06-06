@@ -286,16 +286,18 @@ fn exec_command(
             // first valid value land exactly at `lb` — i.e. TA-Lib re-seeds every period's
             // MA at the output start (matters for recursive MAs like EMA; windowed MAs are
             // position-independent). `cache[p] = (start, sub_ma)`; MAVP[i] = sub_ma[i-start].
-            let mut cache: std::collections::HashMap<usize, (usize, Vec<f64>)> =
-                std::collections::HashMap::new();
+            // `cache[p] = (start, sub_ma)` indexed by the clamped period directly: `p` is a
+            // small bounded usize (`<= max_p`), so a flat Vec beats a HashMap whose per-bar
+            // hash + probe dominated this loop. Values are unchanged — only the lookup is faster.
+            let mut cache: Vec<Option<(usize, Vec<f64>)>> = vec![None; max_p + 1];
             for i in lb..n {
                 let p = (periods[i] as i64).clamp(min_p as i64, max_p as i64) as usize;
-                if !cache.contains_key(&p) {
+                if cache[p].is_none() {
                     let start = lb - crate::lookback::ma_lookback(p, matype);
                     let sub = ma_typed(&real[start..], p, matype)?;
-                    cache.insert(p, (start, sub));
+                    cache[p] = Some((start, sub));
                 }
-                let (start, sub) = &cache[&p];
+                let (start, sub) = cache[p].as_ref().unwrap();
                 out[i] = sub[i - start];
             }
             f64col(out)
