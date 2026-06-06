@@ -17,7 +17,6 @@ import numpy as np
 import numpy.typing as npt
 
 __all__ = [
-    "Cumulator",
     "DataFrame",
     "DataFrameAt",
     "DataFrameILoc",
@@ -191,6 +190,8 @@ class DataFrame:
         date_col: str | None = ...,
         tz: str | None = ...,
         date_unit: str | None = ...,
+        time_frame: str | TimeFrame | None = ...,
+        cumulators: dict[str, Any] | None = ...,
     ) -> DataFrame: ...
     @property
     def tz(self) -> str | None: ...
@@ -312,20 +313,7 @@ class TimeFrame:
     Y1: ClassVar[TimeFrame]
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
-    @property
-    def minutes(self) -> int: ...
     def unify(self, ts: Any) -> int: ...
-
-# --- Cumulator --------------------------------------------------------------
-
-@final
-class Cumulator:
-    def __new__(cls, time_frame: TimeFrame, cumulators: dict[str, Any] | None = ...) -> Cumulator: ...
-    def append(self, data: Any) -> None: ...
-    @property
-    def frame(self) -> DataFrame: ...
-    @property
-    def last(self) -> DataFrame | None: ...
 
 # --- module-level functions -------------------------------------------------
 
