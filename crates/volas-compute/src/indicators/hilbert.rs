@@ -13,6 +13,7 @@
 //! so results are bit-identical to TA-Lib 0.6.4. Warm-up entries are `NaN`.
 
 use std::f64::consts::PI;
+use std::sync::OnceLock;
 
 /// Hilbert weighting coefficients (`ta_utility.h`'s `DO_HILBERT_TRANSFORM`).
 const A: f64 = 0.0962;
@@ -364,6 +365,23 @@ fn ht_core(price: &[f64]) -> Vec<HtBar> {
 /// and `HT_TRENDMODE`). `push` consumes one bar and returns its DC phase in
 /// degrees; the phase carries across bars (the `imagPart == 0` branch nudges the
 /// previous value by ±90°).
+/// Twiddle factors `(sin(i·2π/p), cos(i·2π/p))` for every DC period `p ≤ SMOOTH_PRICE_SIZE`,
+/// indexed `[p][i]`. Built once on first use so the DC-phase DFT reads its sin/cos from a table
+/// instead of recomputing them per bar. Row `p = 0` (a degenerate empty window) is never summed.
+type DftTwiddle = [[(f64, f64); SMOOTH_PRICE_SIZE]; SMOOTH_PRICE_SIZE + 1];
+static DFT_TWIDDLE: OnceLock<Box<DftTwiddle>> = OnceLock::new();
+
+fn build_dft_twiddle() -> Box<DftTwiddle> {
+    let mut t: Box<DftTwiddle> = Box::new([[(0.0, 0.0); SMOOTH_PRICE_SIZE]; SMOOTH_PRICE_SIZE + 1]);
+    for (p, row) in t.iter_mut().enumerate().skip(1) {
+        let delta = TWO_PI / p as f64;
+        for (i, slot) in row.iter_mut().enumerate().take(p) {
+            *slot = (i as f64 * delta).sin_cos();
+        }
+    }
+    t
+}
+
 struct DcPhase {
     smooth_price: [f64; SMOOTH_PRICE_SIZE],
     idx: usize,
@@ -381,21 +399,16 @@ impl DcPhase {
         let mut real_part = 0.0f64;
         let mut imag_part = 0.0f64;
         let mut k = self.idx;
-        // The DFT bins are evenly spaced angles `t_i = i·Δ` with `Δ = 2π/dc_period_int`, so
-        // rotate a unit phasor by the constant step Δ instead of calling sin/cos per bin —
-        // `dc_period_int` transcendental pairs collapse to one `sin_cos` per bar. The rotation
-        // drifts ~1e-15 over `dc_period_int` (≤ SMOOTH_PRICE_SIZE) steps, far inside the HT
-        // convergence tolerance; and the full compute and the resume share this path, so they
-        // stay bit-identical to each other.
-        let (sin_d, cos_d) = (TWO_PI / dc_period_int as f64).sin_cos();
-        let (mut s, mut c) = (0.0f64, 1.0f64); // sin(0·Δ), cos(0·Δ)
-        for _ in 0..dc_period_int {
+        // The DFT bins t_i = i·(2π/dc_period_int) have the same sin/cos for every bar of the
+        // same period, so read them from a twiddle table built once (lazily) for all periods
+        // rather than recomputing per bar — no per-bar transcendentals, no serial rotation
+        // chain. The table holds the direct sin/cos (well inside the HT convergence tolerance),
+        // and the full compute and the resume share it so they stay bit-identical to each other.
+        let twiddle = &DFT_TWIDDLE.get_or_init(build_dft_twiddle)[dc_period_int];
+        for &(s, c) in &twiddle[..dc_period_int] {
             let v = self.smooth_price[k];
             real_part += s * v;
             imag_part += c * v;
-            let (ns, nc) = (s * cos_d + c * sin_d, c * cos_d - s * sin_d);
-            s = ns;
-            c = nc;
             k = if k == 0 { SMOOTH_PRICE_SIZE - 1 } else { k - 1 };
         }
         let abs_imag = imag_part.abs();
