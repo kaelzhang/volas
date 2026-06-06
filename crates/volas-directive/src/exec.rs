@@ -1029,6 +1029,23 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             )
         }
 
+        // KDJ — carry the recursive %K (and %D for `.d`/`.j`). RSV is finite-memory and is
+        // recomputed on resume, not carried; the `init` seed only affects the warm-up.
+        ("kdj", Some(line @ ("k" | "d" | "j"))) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let period_rsv = arg_usize(args, 0, Some(9)).ok()?;
+            let period_k = arg_usize(args, 1, Some(3)).ok()?;
+            let want_d = line != "k";
+            let (period_d, init) = if want_d {
+                (arg_usize(args, 2, Some(3)).ok()?, arg_f64(args, 3, 50.0).ok()?)
+            } else {
+                (3, arg_f64(args, 2, 50.0).ok()?)
+            };
+            ind::kdj_final_state(&high, &low, &close, period_rsv, period_k, period_d, init, want_d)
+        }
+
         _ => None,
     }
 }
@@ -1362,6 +1379,26 @@ pub fn execute_resume(
                 arg_usize(args, 2, Some(3)).ok()?,
                 from_row,
                 prev_state,
+            )?;
+            Some((Column::f64(vals), st))
+        }
+
+        // KDJ — resume the recursive %K (+ %D for `.d`/`.j`) from the carried state; RSV is
+        // finite-memory, recomputed over the windowed high/low/close tail.
+        ("kdj", Some(line @ ("k" | "d" | "j"))) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let period_rsv = arg_usize(args, 0, Some(9)).ok()?;
+            let period_k = arg_usize(args, 1, Some(3)).ok()?;
+            let kline = match line {
+                "k" => ind::KdjLine::K,
+                "d" => ind::KdjLine::D,
+                _ => ind::KdjLine::J,
+            };
+            let period_d = if line == "k" { 3 } else { arg_usize(args, 2, Some(3)).ok()? };
+            let (vals, st) = ind::kdj_resume(
+                &high, &low, &close, period_rsv, period_k, period_d, kline, from_row, prev_state,
             )?;
             Some((Column::f64(vals), st))
         }
@@ -1711,6 +1748,11 @@ mod tests {
         let idx_state = vec![3.0, 100.0];
         assert!(execute_resume(&df, &p("maxindex:30"), &idx_state, 5, 0).is_none());
         assert!(execute_resume(&df, &p("minindex:30"), &idx_state, 5, 0).is_none());
+
+        // execute_resume: KDJ below its RSV window warm-up (from_row + 1 < period_rsv = 9) ->
+        // kdj_resume None, the `?` propagates (exec:1402).
+        let kdj_state = vec![50.0, 50.0];
+        assert!(execute_resume(&df, &p("kdj.j"), &kdj_state, 2, 0).is_none());
 
         // execute_resume: stochrsi `.d` non-SMA matype -> `return None` (exec:1355).
         let sr_state = vec![0.0; 20];
