@@ -70,7 +70,7 @@ fn ema_seed_idx(data: &[f64], period: usize) -> Option<usize> {
 pub fn ema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
     let k = ema_k(period);
     let si = ema_seed_idx(data, period)?;
-    let mut e = data[si - period + 1..=si].iter().sum::<f64>() / period as f64;
+    let mut e = data[si + 1 - period..=si].iter().sum::<f64>() / period as f64;
     for &x in &data[si + 1..] {
         e = (x - e).mul_add(k, e);
     }
@@ -97,7 +97,7 @@ pub fn smma_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
     let pf = period as f64;
     let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
     let si = ema_seed_idx(data, period)?;
-    let mut w = data[si - period + 1..=si].iter().sum::<f64>() / pf;
+    let mut w = data[si + 1 - period..=si].iter().sum::<f64>() / pf;
     for &x in &data[si + 1..] {
         w = w.mul_add(a, x * b);
     }
@@ -1066,11 +1066,11 @@ fn macd_emas_final(close: &[f64], fast: usize, slow: usize) -> Option<(f64, f64)
     let (kf, ks) = (ema_k(fast), ema_k(slow));
     let sf = ema_seed_idx(close, fast)?;
     let ss = ema_seed_idx(close, slow)?;
-    let mut pf = close[sf - fast + 1..=sf].iter().sum::<f64>() / fast as f64;
+    let mut pf = close[sf + 1 - fast..=sf].iter().sum::<f64>() / fast as f64;
     for &x in &close[sf + 1..] {
         pf = (x - pf).mul_add(kf, pf);
     }
-    let mut ps = close[ss - slow + 1..=ss].iter().sum::<f64>() / slow as f64;
+    let mut ps = close[ss + 1 - slow..=ss].iter().sum::<f64>() / slow as f64;
     for &x in &close[ss + 1..] {
         ps = (x - ps).mul_add(ks, ps);
     }
@@ -1120,7 +1120,7 @@ pub fn macd_signal_final_state(
     let (pf, ps) = macd_emas_final(close, fast, slow)?;
     let ksig = ema_k(signal);
     let si = ema_seed_idx(line, signal)?;
-    let mut sig = line[si - signal + 1..=si].iter().sum::<f64>() / signal as f64;
+    let mut sig = line[si + 1 - signal..=si].iter().sum::<f64>() / signal as f64;
     for &x in &line[si + 1..] {
         sig = (x - sig).mul_add(ksig, sig);
     }
