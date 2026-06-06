@@ -23,7 +23,7 @@ The difference is speed that **volas** beats every solution in terms of indicato
   ([benchmark](benchmark-report.html))
   - Beats TA-Lib on **129 / 158** covered indicators in batch computation.
   - Refreshes indicators incrementally on each new bar — up to **~2.7×** faster
-    than TA-Lib, and 9-110x faster than pandas.
+    than TA-Lib, and 10-140x faster than pandas.
 - **Built for the live tick.** A new bar touches only the affected tail
   (`O(lookback)`, not `O(n)`); indicators refresh in microseconds, never a full
   recompute.
