@@ -1,11 +1,17 @@
 name: perf-gate
 
 # Performance regression gate. Runs the coverage (vs TA-Lib) and core-API (vs
-# pandas/polars) benchmark sections and fails if any item regresses past the
-# threshold relative to the committed baseline (scripts/perf_baseline.json). The
-# gate compares volas-vs-reference *ratios*, which are machine-independent (both run
-# in the same job), so it is robust to the runner-to-runner speed variation that
-# makes absolute-time gates flaky on shared CI.
+# pandas/polars) benchmark sections and fails if a *stable* item regresses past the
+# threshold relative to the committed baseline (scripts/perf_baseline.json). The gate
+# compares volas-vs-reference *ratios* (both candidates run in the same job, so the
+# runner's absolute speed cancels) and excludes the noise-dominated items — the
+# candlestick family and sub-microsecond references — whose ratios swing run-to-run
+# regardless of machine (see scripts/perf_gate.py).
+#
+# The baseline is environment-specific: the volas/TA-Lib ratio differs by architecture
+# (a dev-machine baseline systematically mismatches the x86 CI runner). Regenerate it ON
+# CI, not locally: run this workflow manually with `update_baseline: true` and commit the
+# uploaded `perf-baseline` artifact.
 
 on:
   push:
@@ -13,6 +19,12 @@ on:
       - master
       - main
   pull_request:
+  workflow_dispatch:
+    inputs:
+      update_baseline:
+        description: "Regenerate scripts/perf_baseline.json from this CI run (x86) and upload it"
+        type: boolean
+        default: false
 
 # A newer push to the same ref supersedes an in-flight run.
 concurrency:
@@ -61,9 +73,25 @@ jobs:
             --benchmark-columns=median --benchmark-json=.benchmarks/ci.json -q
 
       - name: Performance gate
+        if: ${{ github.event.inputs.update_baseline != 'true' }}
         run: |
           python scripts/perf_gate.py .benchmarks/ci.json \
             --baseline scripts/perf_baseline.json --threshold 0.25
+
+      - name: Regenerate baseline (manual workflow_dispatch only)
+        if: ${{ github.event.inputs.update_baseline == 'true' }}
+        run: |
+          python scripts/perf_gate.py .benchmarks/ci.json \
+            --baseline scripts/perf_baseline.json --update
+          echo "Regenerated scripts/perf_baseline.json on the CI (x86) runner — download the"
+          echo "'perf-baseline' artifact below and commit it to make the gate x86-native."
+
+      - name: Upload regenerated baseline
+        if: ${{ github.event.inputs.update_baseline == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baseline
+          path: scripts/perf_baseline.json
 
       - name: Upload benchmark JSON
         if: always()
