@@ -151,7 +151,7 @@ def test_idxmax_returns_datetime_label():
 
 
 def test_idxmax_all_nan_raises():
-    with pytest.raises(ValueError, match="all-NA"):
+    with pytest.raises(ValueError, match="all NA"):
         _s([nan, nan]).idxmax()
-    with pytest.raises(ValueError, match="all-NA"):
+    with pytest.raises(ValueError, match="all NA"):
         _s([nan, nan]).idxmin()

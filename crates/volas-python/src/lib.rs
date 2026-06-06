@@ -1266,7 +1266,7 @@ fn argext(col: &Column, want_max: bool) -> PyResult<usize> {
         }
     }
     best.map(|(i, _)| i)
-        .ok_or_else(|| PyValueError::new_err("idxmax / idxmin of an all-NA series"))
+        .ok_or_else(|| PyValueError::new_err("Encountered all NA values"))
 }
 
 /// A column coerced to bool (a `Bool` column as-is, else `x != 0.0`).
