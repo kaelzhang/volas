@@ -5,12 +5,12 @@ Usage::
 
     python scripts/benchmark_report.py <benchmark.json> [output.html]
 
-For every benchmark group — one per (category, indicator), where category is
-``calc`` (batch) or ``append`` (one new bar) — the report shows a vertical bar
-chart of median time (shorter = faster) plus a table with columns
-``Mean``, ``Median``, ``OPS``, ``rounds`` and ``Perf``. ``Perf`` expresses
-relative speed with the **slowest** candidate as ``1.00x`` and every faster
-candidate as ``{slowest_time / this_time}x``.
+For charted benchmark groups — one per (category, indicator), where category is
+``calc`` (batch), ``append`` (one new bar), or core ``api`` — the report shows a
+vertical bar chart of median time (shorter = faster) plus a table with columns
+``Mean``, ``Median``, ``OPS``, ``rounds`` and ``Perf``. Full coverage is a single
+table with one row per TA-Lib-backed indicator and additional ratio columns for
+configured generated lengths and cached append refresh.
 
 The output is a single self-contained HTML file (inline CSS + inline SVG, no
 external assets) so it can be committed and opened directly. It overwrites any
@@ -35,7 +35,7 @@ COLORS = {
     'talib': '#F6BD16',
     'volas': '#6F5EF9',
 }
-# Section order in the report: append first, then batch, then the full coverage.
+# Section order in the report: keep the existing chart sections first, then coverage.
 CATEGORY_ORDER = ['append', 'api', 'calc', 'coverage']
 CATEGORY_TITLES = {
     'calc': 'Batch indicator computation',
@@ -53,8 +53,9 @@ CATEGORY_BLURB = {
             'construction, column access, row slicing, boolean masking, column assignment, copy — '
             'timed against pandas / polars. Not indicator math; the surrounding core APIs.'),
     'coverage': ('Every indicator <strong>both volas and TA-Lib implement</strong> (the set the parity '
-                 'suite aligns), batch-computed and timed against TA-Lib only — an indicator only one '
-                 'of them has is omitted. <code>volas vs TA-Lib</code> &gt; 1.00× means volas is faster.'),
+                 'suite aligns), one row per indicator. The default <code>volas vs TA-Lib</code> '
+                 'column is the Tencent fixture; optional generated lengths and cached append '
+                 'refresh appear as additional ratio columns. Values &gt; 1.00× mean volas is faster.'),
 }
 
 
@@ -79,6 +80,10 @@ def parse(data: dict) -> dict:
         name = b['name']
         if name.startswith('test_calc'):
             category = 'calc'
+        elif name.startswith('test_coverage_extended'):
+            category = 'coverage_extended'
+        elif name.startswith('test_coverage_after_append'):
+            category = 'coverage_after_append'
         elif name.startswith('test_coverage'):
             category = 'coverage'
         elif name.startswith('test_api'):
@@ -87,6 +92,8 @@ def parse(data: dict) -> dict:
             category = 'append'
         params = b.get('params') or {}
         indicator = params.get('indicator') or params.get('op') or name
+        if category == 'coverage_extended':
+            indicator = (indicator, params.get('length'))
         candidate = params.get('candidate', name)
         groups[category][indicator].append((candidate, b['stats']))
     return groups
@@ -150,19 +157,34 @@ def _table(entries: list[tuple[str, dict]]) -> str:
     return ''.join(out)
 
 
-def _coverage_section(by_indicator: dict) -> str:
+def _coverage_ratio(entries: list[tuple[str, dict]]) -> tuple[float, float, float] | None:
+    d = dict(entries)
+    if 'volas' not in d or 'talib' not in d:
+        return None
+    # `min` (the fastest of many rounds) is the most reproducible statistic: it
+    # filters the OS-scheduling / CPU-frequency-scaling noise that makes a
+    # borderline indicator's `median` flip the win count between runs.
+    v, t = d['volas']['min'], d['talib']['min']
+    return v, t, (t / v) if v > 0 else 0.0
+
+
+def _coverage_section(groups: dict) -> str:
     """A single volas-vs-TA-Lib table over the whole coverage set, ordered by the
     ``volas vs TA-Lib`` speedup from largest to smallest; a win/loss summary on top."""
+    by_indicator = groups.get('coverage', {})
+    by_length = groups.get('coverage_extended', {})
+    after_append = groups.get('coverage_after_append', {})
+    lengths = sorted({length for _, length in by_length if length is not None})
     rows = []
     for ind, entries in by_indicator.items():
-        d = dict(entries)
-        if 'volas' not in d or 'talib' not in d:
+        base = _coverage_ratio(entries)
+        if base is None:
             continue
-        # `min` (the fastest of many rounds) is the most reproducible statistic: it
-        # filters the OS-scheduling / CPU-frequency-scaling noise that makes a
-        # borderline indicator's `median` flip the win count between runs.
-        v, t = d['volas']['min'], d['talib']['min']
-        rows.append((ind, v, t, (t / v) if v > 0 else 0.0))
+        ext = {
+            length: _coverage_ratio(by_length.get((ind, length), []))
+            for length in lengths
+        }
+        rows.append((ind, *base, ext, _coverage_ratio(after_append.get(ind, []))))
     rows.sort(key=lambda r: r[3], reverse=True)  # descending: largest speedup first
     # Dead-band: an indicator within ±`TIE_BAND` of even counts as a tie, not a win
     # or a loss, so run-to-run noise on a near-even indicator cannot swing the
@@ -172,21 +194,34 @@ def _coverage_section(by_indicator: dict) -> str:
     def verdict(s: float) -> str:
         return 'win' if s >= 1.0 + TIE_BAND else 'loss' if s <= 1.0 - TIE_BAND else 'tie'
 
-    wins = sum(1 for *_, s in rows if verdict(s) == 'win')
-    ties = sum(1 for *_, s in rows if verdict(s) == 'tie')
+    def perf_cell(metric: tuple[float, float, float] | None) -> str:
+        if metric is None:
+            return '<td class="perf missing">n/a</td>'
+        score = metric[2]
+        return f'<td class="perf {verdict(score)}">{score:.2f}×</td>'
+
+    wins = sum(1 for _, _, _, s, _, _ in rows if verdict(s) == 'win')
+    ties = sum(1 for _, _, _, s, _, _ in rows if verdict(s) == 'tie')
     losses = len(rows) - wins - ties
+    extra_heads = ''.join(
+        f'<th>volas vs TA-Lib ({html.escape(str(length))})</th>'
+        for length in lengths
+    )
     body = []
-    for ind, v, t, s in rows:
+    for ind, v, t, s, ext, append_metric in rows:
+        extra_cells = ''.join(perf_cell(ext[length]) for length in lengths)
         body.append(
             f'<tr><td class="ind-name">{html.escape(ind)}</td>'
             f'<td>{_fmt_time(v)}</td><td>{_fmt_time(t)}</td>'
-            f'<td class="perf {verdict(s)}">{s:.2f}×</td></tr>'
+            f'<td class="perf {verdict(s)}">{s:.2f}×</td>'
+            f'{extra_cells}{perf_cell(append_metric)}</tr>'
         )
     summary = (f'<p class="blurb">volas beats TA-Lib on <strong>{wins} / {len(rows)}</strong> '
                f'covered indicators by a clear &gt;{TIE_BAND:.0%} margin '
                f'({ties} within ±{TIE_BAND:.0%}, {losses} slower).</p>')
     return (f'{summary}<table class="stats cov"><thead><tr>'
             f'<th>Indicator</th><th>volas</th><th>TA-Lib</th><th>volas vs TA-Lib</th>'
+            f'{extra_heads}<th>volas vs TA-Lib (after append)</th>'
             f'</tr></thead><tbody>{"".join(body)}</tbody></table>')
 
 
@@ -211,7 +246,7 @@ def render(data: dict) -> str:
             continue
         blurb = f'<p class="blurb">{CATEGORY_BLURB[category]}</p>'
         if category == 'coverage':
-            inner = _coverage_section(groups[category])
+            inner = _coverage_section(groups)
         else:
             inner = ''.join(
                 f'<section class="ind"><h3>{html.escape(indicator)}</h3>'
@@ -260,6 +295,7 @@ def render(data: dict) -> str:
   .stats .perf.win {{ color: #1f9d57; }}
   .stats .perf.loss {{ color: #d4493f; }}
   .stats .perf.tie {{ color: #8a8a8a; }}
+  .stats .perf.missing {{ color: #9aa0aa; font-weight: 400; }}
   footer {{ margin-top: 40px; color: #9aa0aa; font-size: 12px; }}
 </style></head>
 <body><div class="wrap">

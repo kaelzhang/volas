@@ -19,6 +19,7 @@ Candidates: ``pandas`` (idiomatic), ``stock_pandas`` (StockDataFrame), ``polars`
 Run::
 
     make benchmark                 # console table (installs .[dev,benchmark])
+    make benchmark INDICATOR=roc:10 # one coverage row, no web report
     make benchmark WEB_REPORT=1     # also (re)generate benchmark-report.html
 
 pandas / stock_pandas / talib live in the ``dev`` extra (the parity tests use them
@@ -64,28 +65,33 @@ CANDIDATES = ['pandas', 'stock_pandas', 'polars', 'talib', 'volas']
 # volas as a `periods` column and to TA-Lib as the periods array.
 PERIODS = (np.arange(N, dtype=float) % 29.0) + 2.0
 
-# Representative length matrix for the performance-sensitive families where a
-# single 1999-row benchmark can hide fixed-cost vs streaming tradeoffs.
-LENGTHS = [100, 250, 1999, 20_000]
-LENGTH_COVERAGE_IDS = [
-    'hhv:10',
-    'aroon.up:14',
-    'aroon.down:14',
-    'aroonosc:14',
-    'stoch.d',
-    'stochf.d',
-    'stochrsi.d',
-    'mfi:14',
-    'roc:10',
-    'mama',
-    'ht_dcperiod',
-    # Long-data candle candidates that still need TA-Lib comparisons outside the
-    # historical 1999-row fixture.
-    'cdl.3linestrike',
-    'cdl.breakaway',
-    'cdl.hikkake',
-    'cdl.tristar',
-]
+# Extended coverage is opt-in by directive: these families have already shown
+# length-sensitive behavior where the 1999-row Tencent fixture can hide fixed-cost
+# vs streaming tradeoffs. The default full-coverage row stays one row per
+# TA-Lib-backed indicator; these generated lengths become extra report columns.
+EXTENDED_COVERAGE_LENGTHS = {
+    directive: (100, 250, 20_000)
+    for directive in [
+        'hhv:10',
+        'aroon.up:14',
+        'aroon.down:14',
+        'aroonosc:14',
+        'stoch.d',
+        'stochf.d',
+        'stochrsi.d',
+        'mfi:14',
+        'roc:10',
+        'mama',
+        'ht_dcperiod',
+        # Long-data candle candidates that still need TA-Lib comparisons outside
+        # the historical Tencent fixture.
+        'cdl.3linestrike',
+        'cdl.breakaway',
+        'cdl.hikkake',
+        'cdl.tristar',
+    ]
+}
+EXTENDED_LENGTHS = sorted({n for lengths in EXTENDED_COVERAGE_LENGTHS.values() for n in lengths})
 
 HAVE = {
     'pandas': True,
@@ -537,24 +543,25 @@ def length_states():
             'data': (data := _generated_ohlcv(n)),
             'volas': VolasDataFrame(data),
         }
-        for n in LENGTHS
+        for n in EXTENDED_LENGTHS
     }
 
 
-_LENGTH_COVERAGE_PARAMS = [
-    pytest.param(f'{directive}@n={n}', directive, n, id=f'{directive}@n={n}')
-    for n in LENGTHS
-    for directive in LENGTH_COVERAGE_IDS
+_EXTENDED_COVERAGE_PARAMS = [
+    pytest.param(directive, directive, n, id=f'{directive}@n={n}')
+    for directive, lengths in EXTENDED_COVERAGE_LENGTHS.items()
+    for n in lengths
 ]
 
 
 @pytest.mark.parametrize('candidate', ['talib', 'volas'])
-@pytest.mark.parametrize('indicator,directive,length', _LENGTH_COVERAGE_PARAMS)
-def test_coverage_lengths(benchmark, length_states, indicator, directive, length, candidate):
+@pytest.mark.parametrize('indicator,directive,length', _EXTENDED_COVERAGE_PARAMS)
+def test_coverage_extended(benchmark, length_states, indicator, directive, length, candidate):
     """Representative volas-vs-TA-Lib coverage across data lengths.
 
-    The full coverage table remains on the historical 1999-row Tencent fixture; this
-    focused matrix catches length-sensitive regressions and optimizations.
+    The full coverage table keeps the historical Tencent fixture as the primary row;
+    this opt-in matrix catches length-sensitive regressions and becomes additional
+    columns in the HTML report.
     """
     if talib is None:
         pytest.skip('talib not installed')
@@ -568,6 +575,53 @@ def test_coverage_lengths(benchmark, length_states, indicator, directive, length
         except Exception:
             pytest.skip(f'volas cannot express {directive}')
         benchmark(lambda d=directive: v.exec(d))
+
+
+def _volas_coverage_after_append(indicator):
+    """Cache one indicator over n-1 rows, append the last bar, then refresh it."""
+    history = {c: ARR[c][:-1] for c in COLUMNS}
+    history['periods'] = PERIODS[:-1]
+    bar = {c: ARR[c][-1:] for c in COLUMNS}
+    bar['periods'] = PERIODS[-1:]
+    bar_df = VolasDataFrame(bar)
+
+    def setup():
+        d = VolasDataFrame(history)
+        _ = d[indicator]
+        return (d,), {}
+
+    def run(d):
+        d.append(bar_df)
+        d.fulfill()
+
+    return run, setup
+
+
+def _talib_coverage_after_append(indicator):
+    def run():
+        COVERAGE[indicator]()
+
+    def setup():
+        return (), {}
+
+    return run, setup
+
+
+@pytest.mark.parametrize('candidate', ['talib', 'volas'])
+@pytest.mark.parametrize('indicator', COVERAGE_IDS)
+def test_coverage_after_append(benchmark, indicator, candidate):
+    """volas cached append+fulfill vs TA-Lib full recompute after one appended bar."""
+    if talib is None:
+        pytest.skip('talib not installed')
+    if candidate == 'talib':
+        run, setup = _talib_coverage_after_append(indicator)
+    else:
+        try:
+            VolasDataFrame({**{c: ARR[c][:-1] for c in COLUMNS}, 'periods': PERIODS[:-1]})[indicator]
+        except Exception:
+            pytest.skip(f'volas cannot express {indicator}')
+        run, setup = _volas_coverage_after_append(indicator)
+    benchmark.pedantic(run, setup=setup, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
 
 
 # --- section 4: core DataFrame API (the data-handling flows, not indicators) -

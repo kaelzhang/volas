@@ -1,0 +1,39 @@
+import re
+
+from scripts import benchmark_report
+
+
+def _entry(test_name, indicator, candidate, min_seconds, **params):
+    return {
+        'name': test_name,
+        'params': {'indicator': indicator, 'candidate': candidate, **params},
+        'stats': {
+            'min': min_seconds,
+            'mean': min_seconds,
+            'median': min_seconds,
+            'ops': 1.0 / min_seconds,
+            'rounds': 10,
+        },
+    }
+
+
+def test_coverage_report_keeps_extended_metrics_on_one_indicator_row():
+    html = benchmark_report.render({
+        'datetime': '2026-06-07',
+        'machine_info': {'python_version': '3.12'},
+        'benchmarks': [
+            _entry('test_coverage[roc:10-talib]', 'roc:10', 'talib', 2.0),
+            _entry('test_coverage[roc:10-volas]', 'roc:10', 'volas', 1.0),
+            _entry('test_coverage_extended[roc:10-20000-talib]', 'roc:10', 'talib', 4.0, length=20000),
+            _entry('test_coverage_extended[roc:10-20000-volas]', 'roc:10', 'volas', 2.0, length=20000),
+            _entry('test_coverage_after_append[roc:10-talib]', 'roc:10', 'talib', 8.0),
+            _entry('test_coverage_after_append[roc:10-volas]', 'roc:10', 'volas', 2.0),
+        ],
+    })
+
+    assert html.count('<td class="ind-name">roc:10</td>') == 1
+    assert '<th>volas vs TA-Lib</th>' in html
+    assert '<th>volas vs TA-Lib (20000)</th>' in html
+    assert '<th>volas vs TA-Lib (after append)</th>' in html
+    assert re.search(r'<td class="perf win">2\.00×</td>.*<td class="perf win">2\.00×</td>'
+                     r'.*<td class="perf win">4\.00×</td>', html, re.S)

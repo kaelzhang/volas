@@ -1,5 +1,11 @@
 files = volas test *.py
 test_files = *
+PYTHON ?= python
+PIP ?= $(PYTHON) -m pip
+PYTEST ?= $(PYTHON) -m pytest
+MATURIN ?= $(PYTHON) -m maturin
+PY_PREFIX := $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
+MATURIN_DEVELOP_ENV := VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
 .PHONY: install install-rust build build-pkg build-ext clean test test-quick coverage coverage-html benchmark lint fix fmt check cargo-test upload publish bump dev ci
 
@@ -24,18 +30,18 @@ install-rust:
 # Build the Rust extension and install the package in-place (development)
 build: clean
 	@echo "\033[1m>> Building Rust extension... <<\033[0m"
-	@maturin develop --release
+	@$(MATURIN_DEVELOP_ENV) $(MATURIN) develop --release
 	@echo "\033[1m>> Build complete! <<\033[0m"
 
 # Build the release package (wheel and sdist) into dist/
 build-pkg: clean
 	@echo "\033[1m>> Building release package... <<\033[0m"
-	@maturin build --release --sdist -o dist
+	@$(MATURIN) build --release --sdist -o dist
 	@echo "\033[1m>> Package built in dist/ <<\033[0m"
 
 # Build the Rust extension only (development mode)
 build-ext:
-	@maturin develop
+	@$(MATURIN_DEVELOP_ENV) $(MATURIN) develop
 
 # Clean build artifacts
 clean:
@@ -58,7 +64,7 @@ test: coverage
 # Benchmarks are skipped here (see `make benchmark`); `--ignore` does not exclude an
 # explicitly-globbed file, so use `--benchmark-skip`.
 test-quick:
-	pytest -s -v test/test_$(test_files).py --benchmark-skip
+	$(PYTEST) -s -v test/test_$(test_files).py --benchmark-skip
 
 # True-union Rust line coverage: `cargo test` ∪ the Python suite exercising the
 # compiled extension (see scripts/coverage.sh for why llvm-cov cannot union the
@@ -79,19 +85,25 @@ coverage-html:
 # extension itself is NOT reinstalled, preserving the release build). A comparison
 # library that is absent is skipped by the harness.
 #
-#   make benchmark              # console table only
-#   make benchmark WEB_REPORT=1 # also (re)generate ./benchmark-report.html
+#   make benchmark                    # console table only
+#   make benchmark INDICATOR=roc:10   # one coverage row, no web report
+#   make benchmark WEB_REPORT=1       # full run + ./benchmark-report.html
 BENCH_OPTS := --benchmark-only --benchmark-group-by=func,param:indicator \
               --benchmark-columns=mean,median,ops,rounds --benchmark-sort=name
 benchmark: build
 	@echo "\033[1m>> Installing dev + benchmark comparison libraries... <<\033[0m"
-	@python -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | pip install -q -r /dev/stdin
+	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(PIP) install -q -r /dev/stdin
+ifdef INDICATOR
+	@if [ -n "$(WEB_REPORT)" ]; then echo "WEB_REPORT is ignored when INDICATOR is set."; fi
+	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --volas-benchmark-indicator="$(INDICATOR)"
+else
 ifdef WEB_REPORT
 	@mkdir -p .benchmarks
-	pytest test/test_benchmark.py $(BENCH_OPTS) --benchmark-json=.benchmarks/last.json
-	@python scripts/benchmark_report.py .benchmarks/last.json benchmark-report.html
+	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --benchmark-json=.benchmarks/last.json
+	@$(PYTHON) scripts/benchmark_report.py .benchmarks/last.json benchmark-report.html
 else
-	pytest test/test_benchmark.py $(BENCH_OPTS)
+	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS)
+endif
 endif
 
 # Run linters
@@ -111,7 +123,7 @@ lint:
 #   --verifytypes — the public API is 100% typed
 types: build
 	@echo "\033[1m>> stubtest (stub == runtime)... <<\033[0m"
-	@python -m mypy.stubtest volas_rs --allowlist stubtest_allowlist.txt
+	@$(PYTHON) -m mypy.stubtest volas_rs --allowlist stubtest_allowlist.txt
 	@echo "\033[1m>> mypy --strict (assert_type + negative)... <<\033[0m"
 	@mypy --strict test/typing/check_types.py test/typing/negative_types.py
 	@echo "\033[1m>> pyright (assert_type + negative)... <<\033[0m"
