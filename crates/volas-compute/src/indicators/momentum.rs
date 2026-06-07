@@ -605,25 +605,32 @@ pub fn ultosc(
         (bp, tr)
     };
     let start = max_p; // first output index
+    let mut bp_ring = vec![0.0; max_p];
+    let mut tr_ring = vec![0.0; max_p];
     let (mut a1, mut b1, mut a2, mut b2, mut a3, mut b3) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    for i in (start - p1 + 1)..start {
+    // Cache BP/TR terms in one max-period ring so the hot loop computes today's
+    // term once instead of recomputing three trailing terms after every output.
+    for i in (start - max_p + 1)..start {
         let (a, b) = term(i);
-        a1 += a;
-        b1 += b;
-    }
-    for i in (start - p2 + 1)..start {
-        let (a, b) = term(i);
-        a2 += a;
-        b2 += b;
-    }
-    for i in (start - p3 + 1)..start {
-        let (a, b) = term(i);
+        bp_ring[i % max_p] = a;
+        tr_ring[i % max_p] = b;
+        if i >= start - p1 + 1 {
+            a1 += a;
+            b1 += b;
+        }
+        if i >= start - p2 + 1 {
+            a2 += a;
+            b2 += b;
+        }
         a3 += a;
         b3 += b;
     }
     let (mut t1, mut t2, mut t3) = (start - p1 + 1, start - p2 + 1, start - p3 + 1);
     for today in start..n {
         let (a, b) = term(today);
+        let slot = today % max_p;
+        bp_ring[slot] = a;
+        tr_ring[slot] = b;
         a1 += a;
         a2 += a;
         a3 += a;
@@ -640,15 +647,18 @@ pub fn ultosc(
         if b3.abs() >= 1e-14 {
             output += a3 / b3;
         }
-        let (at, bt) = term(t1);
+        let at = bp_ring[t1 % max_p];
+        let bt = tr_ring[t1 % max_p];
         a1 -= at;
         b1 -= bt;
         t1 += 1;
-        let (at, bt) = term(t2);
+        let at = bp_ring[t2 % max_p];
+        let bt = tr_ring[t2 % max_p];
         a2 -= at;
         b2 -= bt;
         t2 += 1;
-        let (at, bt) = term(t3);
+        let at = bp_ring[t3 % max_p];
+        let bt = tr_ring[t3 % max_p];
         a3 -= at;
         b3 -= bt;
         t3 += 1;
