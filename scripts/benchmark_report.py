@@ -186,13 +186,12 @@ def _coverage_section(groups: dict) -> str:
         }
         rows.append((ind, *base, ext, _coverage_ratio(after_append.get(ind, []))))
     rows.sort(key=lambda r: r[3], reverse=True)  # descending: largest speedup first
-    # Dead-band: an indicator within ±`TIE_BAND` of even counts as a tie, not a win
-    # or a loss, so run-to-run noise on a near-even indicator cannot swing the
-    # headline count (a borderline indicator used to flip it by ±1).
-    TIE_BAND = 0.03
-
     def verdict(s: float) -> str:
-        return 'win' if s >= 1.0 + TIE_BAND else 'loss' if s <= 1.0 - TIE_BAND else 'tie'
+        if s > 1.0:
+            return 'win'
+        if s < 1.0:
+            return 'loss'
+        return 'tie'
 
     def perf_cell(metric: tuple[float, float, float] | None) -> str:
         if metric is None:
@@ -200,6 +199,9 @@ def _coverage_section(groups: dict) -> str:
         score = metric[2]
         return f'<td class="perf {verdict(score)}">{score:.2f}×</td>'
 
+    # The headline is deliberately based only on the default Tencent fixture
+    # ratio (`volas vs TA-Lib`). Generated lengths and cached append refresh
+    # columns are diagnostics and must not change the top-line coverage count.
     wins = sum(1 for _, _, _, s, _, _ in rows if verdict(s) == 'win')
     ties = sum(1 for _, _, _, s, _, _ in rows if verdict(s) == 'tie')
     losses = len(rows) - wins - ties
@@ -217,8 +219,8 @@ def _coverage_section(groups: dict) -> str:
             f'{extra_cells}{perf_cell(append_metric)}</tr>'
         )
     summary = (f'<p class="blurb">volas beats TA-Lib on <strong>{wins} / {len(rows)}</strong> '
-               f'covered indicators by a clear &gt;{TIE_BAND:.0%} margin '
-               f'({ties} within ±{TIE_BAND:.0%}, {losses} slower).</p>')
+               f'covered indicators by the default ratio '
+               f'({ties} exactly even, {losses} slower).</p>')
     return (f'{summary}<table class="stats cov"><thead><tr>'
             f'<th>Indicator</th><th>volas</th><th>TA-Lib</th><th>volas vs TA-Lib</th>'
             f'{extra_heads}<th>volas vs TA-Lib (after append)</th>'

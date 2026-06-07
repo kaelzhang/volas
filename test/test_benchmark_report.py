@@ -37,3 +37,27 @@ def test_coverage_report_keeps_extended_metrics_on_one_indicator_row():
     assert '<th>volas vs TA-Lib (after append)</th>' in html
     assert re.search(r'<td class="perf win">2\.00×</td>.*<td class="perf win">2\.00×</td>'
                      r'.*<td class="perf win">4\.00×</td>', html, re.S)
+
+
+def test_coverage_headline_counts_only_default_ratio_column():
+    html = benchmark_report.render({
+        'datetime': '2026-06-07',
+        'machine_info': {'python_version': '3.12'},
+        'benchmarks': [
+            _entry('test_coverage[base_fast-talib]', 'base_fast', 'talib', 1.01),
+            _entry('test_coverage[base_fast-volas]', 'base_fast', 'volas', 1.0),
+            _entry('test_coverage_extended[base_fast-20000-talib]', 'base_fast', 'talib', 1.0, length=20000),
+            _entry('test_coverage_extended[base_fast-20000-volas]', 'base_fast', 'volas', 2.0, length=20000),
+            _entry('test_coverage_after_append[base_fast-talib]', 'base_fast', 'talib', 1.0),
+            _entry('test_coverage_after_append[base_fast-volas]', 'base_fast', 'volas', 2.0),
+            _entry('test_coverage[append_fast-talib]', 'append_fast', 'talib', 0.99),
+            _entry('test_coverage[append_fast-volas]', 'append_fast', 'volas', 1.0),
+            _entry('test_coverage_extended[append_fast-20000-talib]', 'append_fast', 'talib', 2.0, length=20000),
+            _entry('test_coverage_extended[append_fast-20000-volas]', 'append_fast', 'volas', 1.0, length=20000),
+            _entry('test_coverage_after_append[append_fast-talib]', 'append_fast', 'talib', 2.0),
+            _entry('test_coverage_after_append[append_fast-volas]', 'append_fast', 'volas', 1.0),
+        ],
+    })
+
+    assert html.count('<td class="ind-name">') == 2
+    assert 'volas beats TA-Lib on <strong>1 / 2</strong> covered indicators' in html
