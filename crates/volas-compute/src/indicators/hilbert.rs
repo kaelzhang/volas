@@ -722,6 +722,37 @@ pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f
     (mama_out, fama_out)
 }
 
+/// Single-line `MAMA`/`FAMA` used by directive execution. The recurrence still
+/// updates both MAMA accumulators exactly like TA-Lib; it only skips the sibling
+/// output vector that the caller will discard.
+pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: bool) -> Vec<f64> {
+    let n = price.len();
+    let mut out = vec![f64::NAN; n];
+    if n <= CORE_START {
+        return out;
+    }
+    let mut mama = 0.0f64;
+    let mut fama = 0.0f64;
+    let mut prev_phase = 0.0f64;
+    let mut core = HtCoreState::seed(price);
+    for i in CORE_START..n {
+        let b = core.step(price, i);
+        mama_step(
+            &b,
+            price[i],
+            fast_limit,
+            slow_limit,
+            &mut mama,
+            &mut fama,
+            &mut prev_phase,
+        );
+        if i >= LB_PERIOD {
+            out[i] = if want_fama { fama } else { mama };
+        }
+    }
+    out
+}
+
 // --- state-carry: resume the Hilbert core (additive; fallback stays correct) ----
 //
 // Every HT output's whole history compresses into the shared [`HtCoreState`]

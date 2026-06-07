@@ -917,12 +917,18 @@ fn exec_command(
         ("ht_phasor", Some("quadrature")) => f64col(ind::ht_phasor_line(&close(0)?, true)),
         ("ht_sine", None) => f64col(ind::ht_sine(&close(0)?).0),
         ("ht_sine", Some("leadsine")) => f64col(ind::ht_sine(&close(0)?).1),
-        ("mama", None) => {
-            f64col(ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).0)
-        }
-        ("mama", Some("fama")) => {
-            f64col(ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).1)
-        }
+        ("mama", None) => f64col(ind::mama_line(
+            &close(0)?,
+            arg_f64(args, 0, 0.5)?,
+            arg_f64(args, 1, 0.05)?,
+            false,
+        )),
+        ("mama", Some("fama")) => f64col(ind::mama_line(
+            &close(0)?,
+            arg_f64(args, 0, 0.5)?,
+            arg_f64(args, 1, 0.05)?,
+            true,
+        )),
 
         (other, _) => Err(VolasError::Value(format!("unknown command '{other}'"))), // LCOV_EXCL_LINE
     }
