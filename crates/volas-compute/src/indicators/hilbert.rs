@@ -52,10 +52,15 @@ impl HilbertVar {
     /// place and returning its output (scaled by `adj_period`).
     #[inline]
     fn transform_even(&mut self, input: f64, idx: usize, adj_period: f64) -> f64 {
+        debug_assert!(idx < 3);
         let temp = A * input;
         let buf = &mut self.even;
-        let mut out = -buf[idx];
-        buf[idx] = temp;
+        // `hilbert_idx` is a 0..3 ring cursor maintained by `HtCoreState::step`;
+        // avoid four bounds checks per bar across the Hilbert channels.
+        let mut out = -unsafe { *buf.get_unchecked(idx) };
+        unsafe {
+            *buf.get_unchecked_mut(idx) = temp;
+        }
         out += temp;
         out -= self.prev_even;
         self.prev_even = B * self.prev_in_even;
@@ -68,10 +73,14 @@ impl HilbertVar {
     /// buffers explicit mirrors TA-Lib's macro split and avoids a hot bool branch.
     #[inline]
     fn transform_odd(&mut self, input: f64, idx: usize, adj_period: f64) -> f64 {
+        debug_assert!(idx < 3);
         let temp = A * input;
         let buf = &mut self.odd;
-        let mut out = -buf[idx];
-        buf[idx] = temp;
+        // Same invariant as the even channel: `idx` is the 3-slot Hilbert ring.
+        let mut out = -unsafe { *buf.get_unchecked(idx) };
+        unsafe {
+            *buf.get_unchecked_mut(idx) = temp;
+        }
         out += temp;
         out -= self.prev_odd;
         self.prev_odd = B * self.prev_in_odd;
@@ -132,7 +141,9 @@ impl PriceWma {
         self.sub += new_price;
         self.sub -= self.trailing;
         self.sum += new_price * 4.0;
-        self.trailing = price[today - 3];
+        // The WMA warm-up and Hilbert main loop only call this with `today >= 3`
+        // and `today < price.len()`, so the trailing word is always in-bounds.
+        self.trailing = unsafe { *price.get_unchecked(today - 3) };
         let smoothed = self.sum * 0.1;
         self.sum -= self.sub;
         smoothed
@@ -241,7 +252,9 @@ impl HtCoreState {
         // Keep TA-Lib's explicit `a*x + b*y` smoothing form. On the release target
         // this beats the algebraic `mul_add` rewrite and preserves the C recurrence order.
         let adj = self.period.mul_add(0.075, 0.54);
-        let today_value = price[today];
+        // All callers keep `today` inside the input slice; this is the innermost
+        // loop for every Hilbert-derived indicator.
+        let today_value = unsafe { *price.get_unchecked(today) };
         let smoothed = self.wma.push(price, today, today_value);
         let even = today % 2 == 0;
 

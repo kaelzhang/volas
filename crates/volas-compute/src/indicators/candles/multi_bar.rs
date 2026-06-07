@@ -1,7 +1,7 @@
 //! Four- and five-bar candlestick patterns.
 
 use super::{
-    candle_average, candle_average_series, candle_output, color, each_bar, each_bar_avg_n,
+    candle_average, candle_average_from_total, candle_output, color, each_bar, each_bar_avg_n,
     lowershadow, range, realbody, realbody_gap_down, realbody_gap_up, uppershadow, BODY_LONG,
     BODY_SHORT, NEAR, SHADOW_VERY_SHORT,
 };
@@ -342,11 +342,18 @@ pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     if n <= start {
         return out;
     }
-    // Stateful loop, so precompute the NEAR average as an O(n) running-sum series and
-    // read it at i-2 (instead of rescanning the window every setup test).
-    let near_series = candle_average_series(NEAR, o, h, l, c);
-    let setup = |i: usize| -> Option<f64> {
-        let near = near_series[i - 2];
+    // Keep TA-Lib's single rolling NEAR total instead of materialising a full
+    // average series. The pattern is stateful, so the setup test uses the current
+    // total first, then the loop slides it for the next bar.
+    let mut near_total = 0.0;
+    let mut near_trailing = start - 3 - NEAR.avg_period;
+    let mut j = near_trailing;
+    while j < start - 3 {
+        near_total += range(NEAR, o, h, l, c, j - 2);
+        j += 1;
+    }
+    let setup = |i: usize, near_total: f64| -> Option<f64> {
+        let near = candle_average_from_total(NEAR, near_total);
         if h[i - 2] < h[i - 3]
             && l[i - 2] > l[i - 3]
             && h[i - 1] < h[i - 2]
@@ -367,7 +374,7 @@ pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let (mut idx, mut res) = (0usize, 0.0_f64);
     for i in (start - 3)..n {
         let emit = i >= start;
-        if let Some(r) = setup(i) {
+        if let Some(r) = setup(i, near_total) {
             res = r;
             idx = i;
             if emit {
@@ -381,6 +388,8 @@ pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         } else if emit {
             out[i] = 0.0;
         }
+        near_total += range(NEAR, o, h, l, c, i - 2) - range(NEAR, o, h, l, c, near_trailing - 2);
+        near_trailing += 1;
     }
     out
 }

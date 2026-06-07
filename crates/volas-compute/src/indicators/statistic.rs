@@ -152,10 +152,14 @@ pub fn stddev(data: &[f64], period: usize, nbdev: f64) -> Vec<f64> {
 /// yields 0 (TA-Lib's guard). Lookback `period-1`.
 pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     let n = x.len();
-    let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
-        return out;
+        return vec![f64::NAN; n];
     }
+    let mut out = Vec::with_capacity(n);
+    unsafe {
+        out.set_len(n);
+    }
+    out[..period - 1].fill(f64::NAN);
     let pf = period as f64;
     // Precompute 1/period: the means are then per-element multiplies, not divisions
     // (TA-Lib divides by period three times per bar). The ~1e-16 difference from a true
@@ -163,8 +167,12 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     // to 0 either way, so the catastrophic-cancellation case is unaffected).
     let inv_pf = 1.0 / pf;
     let (mut sx, mut sy, mut sx2, mut sy2, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let x_ptr = x.as_ptr();
+    let y_ptr = y.as_ptr();
+    let out_ptr = out.as_mut_ptr();
     for i in 0..period {
-        let (xi, yi) = (x[i], y[i]);
+        // `period <= n` and the hot loop below keeps both indices in range.
+        let (xi, yi) = unsafe { (*x_ptr.add(i), *y_ptr.add(i)) };
         sx += xi;
         sy += yi;
         sx2 += xi * xi;
@@ -179,24 +187,28 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
             (sxy - sx * sy * inv_pf) / denom.sqrt()
         }
     };
-    out[period - 1] = value(sx, sy, sx2, sy2, sxy);
+    unsafe {
+        *out_ptr.add(period - 1) = value(sx, sy, sx2, sy2, sxy);
+    }
     let mut trailing = 0;
     for i in period..n {
         // Drop the trailing values, then add the new ones (TA-Lib's order).
-        let (tx, ty) = (x[trailing], y[trailing]);
+        let (tx, ty) = unsafe { (*x_ptr.add(trailing), *y_ptr.add(trailing)) };
         trailing += 1;
         sx -= tx;
         sx2 -= tx * tx;
         sxy -= tx * ty;
         sy -= ty;
         sy2 -= ty * ty;
-        let (xi, yi) = (x[i], y[i]);
+        let (xi, yi) = unsafe { (*x_ptr.add(i), *y_ptr.add(i)) };
         sx += xi;
         sx2 += xi * xi;
         sxy += xi * yi;
         sy += yi;
         sy2 += yi * yi;
-        out[i] = value(sx, sy, sx2, sy2, sxy);
+        unsafe {
+            *out_ptr.add(i) = value(sx, sy, sx2, sy2, sxy);
+        }
     }
     out
 }
@@ -207,10 +219,14 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
 /// gives 0). First value at index `period` (lookback = period).
 pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     let n = x.len();
-    let mut out = vec![f64::NAN; n];
     if period == 0 || period + 1 > n {
-        return out;
+        return vec![f64::NAN; n];
     }
+    let mut out = Vec::with_capacity(n);
+    unsafe {
+        out.set_len(n);
+    }
+    out[..period].fill(f64::NAN);
     let ret = |arr: &[f64], i: usize| -> f64 {
         let prev = arr[i - 1];
         if prev.abs() < 1e-14 {
@@ -221,16 +237,24 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     };
     let pf = period as f64;
     let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+    // Keep the return values that are currently inside the rolling window. TA-Lib
+    // conceptually drops a return after emitting a row; storing it once avoids
+    // recalculating the departing high/low returns, which are division-heavy.
+    let mut rx_ring = vec![0.0; period];
+    let mut ry_ring = vec![0.0; period];
     for i in 1..period {
         let (rx, ry) = (ret(x, i), ret(y, i));
+        rx_ring[i] = rx;
+        ry_ring[i] = ry;
         sx += rx;
         sy += ry;
         sxx += rx * rx;
         sxy += rx * ry;
     }
-    let mut trailing = 1;
     for i in period..n {
         let (rx, ry) = (ret(x, i), ret(y, i));
+        rx_ring[i % period] = rx;
+        ry_ring[i % period] = ry;
         sx += rx;
         sy += ry;
         sxx += rx * rx;
@@ -241,8 +265,8 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
         } else {
             (pf * sxy - sx * sy) / denom
         };
-        let (tx, ty) = (ret(x, trailing), ret(y, trailing));
-        trailing += 1;
+        let leaving = i + 1 - period;
+        let (tx, ty) = (rx_ring[leaving % period], ry_ring[leaving % period]);
         sx -= tx;
         sy -= ty;
         sxx -= tx * tx;
