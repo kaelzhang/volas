@@ -1277,6 +1277,9 @@ indicators also accept short aliases where documented by the parser, for example
 # Ordinary defaulted positional arguments
 df.exec('macd.signal:12,26,9@close')
 
+# Directive command names are case-insensitive; column names after @ stay as written.
+df.exec('RSI:14@close')
+
 # Skip fast and slow defaults, override only the signal period
 df.exec('macd.signal:,,5')
 
