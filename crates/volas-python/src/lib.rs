@@ -76,6 +76,16 @@ fn value_err(e: VolasError) -> PyErr {
     }
 }
 
+fn directive_uses_default_series(node: &volas_directive::types::Node) -> bool {
+    match node {
+        volas_directive::types::Node::Name(_) => true,
+        volas_directive::types::Node::Command(cmd) => cmd.series.iter().all(
+            |series| matches!(series, volas_directive::types::Node::Name(name) if name.is_empty()),
+        ),
+        _ => false,
+    }
+}
+
 /// Parse a pandas-style dtype string to a volas [`DType`].
 fn parse_dtype(s: &str) -> PyResult<DType> {
     Ok(match s {
@@ -1644,30 +1654,41 @@ impl PyDataFrame {
     /// directive recomputes and no cached buffer is pinned.
     fn refresh_computed(&mut self, only: Option<&str>) -> PyResult<()> {
         let height = self.inner.height();
-        // Materialize the computed-column set once (per tick on the live append path)
-        // and derive both the stale list and the name set from it, instead of cloning
-        // the computed map twice.
-        let computed = self.inner.computed_columns();
-        let stale: Vec<_> = computed
-            .iter()
-            .filter(|(n, m)| m.valid_rows < height && only.is_none_or(|o| o == n))
-            .cloned()
-            .collect();
+        let stale = self.inner.stale_computed_columns(only);
         if stale.is_empty() {
             return Ok(());
         }
-        let computed_names: HashSet<String> = computed.iter().map(|(n, _)| n.clone()).collect();
-        let real_names: Vec<String> = self
-            .inner
-            .names()
-            .iter()
-            .filter(|n| !computed_names.contains(*n))
-            .cloned()
-            .collect();
-        let base = self.inner.select(&real_names).map_err(pyerr)?;
+        let mut base: Option<DataFrame> = None;
         for (name, meta) in stale {
-            let node = parse(&meta.directive).map_err(value_err)?;
             let (lb, vr) = (meta.lookback, meta.valid_rows);
+            if meta.state.is_some() {
+                if height == vr + 1 {
+                    if let Some(value) = volas_directive::exec::execute_resume_default_series_one(
+                        &self.inner,
+                        &meta.directive,
+                        vr,
+                    ) {
+                        self.inner
+                            .update_computed_f64_value(&name, vr, value)
+                            .map_err(pyerr)?;
+                        continue;
+                    }
+                }
+                if let Some((tail, new_state)) =
+                    volas_directive::exec::execute_resume_default_series(
+                        &self.inner,
+                        &meta.directive,
+                        vr,
+                    )
+                {
+                    self.inner
+                        .update_computed_tail(&name, vr, &tail)
+                        .map_err(pyerr)?;
+                    self.inner.set_computed_state(&name, Some(new_state));
+                    continue;
+                }
+            }
+            let node = parse(&meta.directive).map_err(value_err)?;
             // State-carry fast-path (additive): if this column carries a recursive
             // state, continue the recursion over only the new rows `[vr, height)` —
             // O(new rows), bit-identical to a full recompute — then refresh the carried
@@ -1677,8 +1698,44 @@ impl PyDataFrame {
             // resume kernel for this directive) we fall through to the existing
             // probe / full-recompute path unchanged — always correct.
             if let Some(state) = &meta.state {
+                // Default-series resumes only read canonical input columns, so they
+                // can skip building a non-computed base frame on the single-column
+                // append hot path. Explicit series may reference stale computed
+                // columns, so those still use the base-frame fallback below.
+                if directive_uses_default_series(&node) {
+                    if let Some((tail, new_state)) = volas_directive::exec::execute_resume(
+                        &self.inner,
+                        &node,
+                        state,
+                        vr,
+                        meta.origin,
+                    ) {
+                        self.inner
+                            .update_computed_tail(&name, vr, &tail)
+                            .map_err(pyerr)?;
+                        self.inner.set_computed_state(&name, Some(new_state));
+                        continue;
+                    }
+                }
+            }
+            if base.is_none() {
+                let computed_names: HashSet<String> =
+                    self.inner.computed_names().into_iter().collect();
+                let real_names: Vec<String> = self
+                    .inner
+                    .names()
+                    .iter()
+                    .filter(|n| !computed_names.contains(*n))
+                    .cloned()
+                    .collect();
+                base = Some(self.inner.select(&real_names).map_err(pyerr)?);
+            }
+            let base = base
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("internal base frame was not initialized"))?;
+            if let Some(state) = &meta.state {
                 if let Some((tail, new_state)) =
-                    volas_directive::exec::execute_resume(&base, &node, state, vr, meta.origin)
+                    volas_directive::exec::execute_resume(base, &node, state, vr, meta.origin)
                 {
                     self.inner
                         .update_computed_tail(&name, vr, &tail)
@@ -2407,24 +2464,38 @@ impl PyDataFrame {
     /// Returns:
     ///     DataFrame: ``self`` (enabling chaining).
     fn append<'py>(slf: Bound<'py, Self>, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
-        // Extract `other` into an owned frame first so its borrow is released
-        // before we mutably borrow `slf` (so `df.append(df)` cannot deadlock).
-        let other_inner = if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
-            df.inner.clone()
-        } else if let Ok(row) = other.extract::<PyRef<PyRow>>() {
-            row.inner.clone()
-        } else {
-            return Err(PyTypeError::new_err("append expects a DataFrame or Row"));
-        };
-        {
+        if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
+            if slf.as_ptr() == other.as_ptr() {
+                // `df.append(df)` needs an owned snapshot before taking `self` mutably.
+                let other_inner = df.inner.clone();
+                drop(df);
+                let mut me = slf.borrow_mut();
+                if me.tf.is_some() {
+                    me.fold_append(&other_inner)?;
+                } else {
+                    me.inner.append(&other_inner).map_err(pyerr)?;
+                }
+                return Ok(slf);
+            }
+            // Normal live path: append a distinct one-row frame without cloning it.
             let mut me = slf.borrow_mut();
             if me.tf.is_some() {
-                me.fold_append(&other_inner)?;
+                me.fold_append(&df.inner)?;
             } else {
-                me.inner.append(&other_inner).map_err(pyerr)?;
+                me.inner.append(&df.inner).map_err(pyerr)?;
             }
+            return Ok(slf);
         }
-        Ok(slf)
+        if let Ok(row) = other.extract::<PyRef<PyRow>>() {
+            let mut me = slf.borrow_mut();
+            if me.tf.is_some() {
+                me.fold_append(&row.inner)?;
+            } else {
+                me.inner.append(&row.inner).map_err(pyerr)?;
+            }
+            return Ok(slf);
+        }
+        Err(PyTypeError::new_err("append expects a DataFrame or Row"))
     }
 
     /// The frame as a 2-D NumPy array (pandas `to_numpy`). With no `dtype`: a fast

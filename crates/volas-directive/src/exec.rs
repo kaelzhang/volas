@@ -928,7 +928,9 @@ fn exec_command(
     }
 }
 
-pub use crate::exec_resume::{execute_resume, initial_state};
+pub use crate::exec_resume::{
+    execute_resume, execute_resume_default_series, execute_resume_default_series_one, initial_state,
+};
 
 /// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.
 fn tf_to_minutes(s: &str) -> Result<i64> {

@@ -392,40 +392,40 @@ impl DataFrame {
     /// directive columns can take raw bars; `fulfill` then refreshes them).
     /// Computed-column metadata is retained, leaving the new rows stale.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
-        let names = self.names.clone();
         let oh = other.height;
-        for n in &names {
-            let pos = *self.name_to_idx.get(n).expect("name came from self");
-            match other.column(n) {
-                Ok(oc) => self.columns[pos].append(oc)?,
-                Err(_) => {
-                    // column `n` is missing from `other` — pad the new rows.
-                    let is_computed = self.computed.contains_key(n);
-                    match (&self.columns[pos], is_computed) {
-                        // F64: NaN marks the gap.
-                        (Column::F64(_), _) => {
-                            self.columns[pos].append(&Column::f64(vec![f64::NAN; oh]))?;
-                        }
-                        // A cached *bool* directive: pad a stale `false` placeholder;
-                        // `fulfill` rewrites the correct bool tail (the column stays a mask).
-                        (Column::Bool(_), true) => {
-                            self.columns[pos].append(&Column::bool(vec![false; oh]))?;
-                        }
-                        // A plain int column: upcast to F64 so NaN can mark the gap
-                        // (NaN distinguishes "missing" from a real 0).
-                        (Column::I64(v), false) => {
-                            let mut f: Vec<f64> = v.iter().map(|&x| x as f64).collect();
-                            f.extend(std::iter::repeat(f64::NAN).take(oh));
-                            self.columns[pos] = Column::f64(f);
-                        }
-                        // Plain bool / str / datetime cannot represent "missing".
-                        (other_col, _) => {
-                            return Err(VolasError::DType(format!(
-                                "cannot append: column \"{n}\" ({}) is missing from the \
+        // Iterate by position to avoid cloning every column name and then
+        // re-hashing it back into this same frame on the live append path.
+        for pos in 0..self.names.len() {
+            let n = &self.names[pos];
+            if let Some(other_pos) = other.column_pos(n) {
+                self.columns[pos].append(&other.columns[other_pos])?;
+            } else {
+                // column `n` is missing from `other` — pad the new rows.
+                let is_computed = self.computed.contains_key(n);
+                match (&self.columns[pos], is_computed) {
+                    // F64: NaN marks the gap.
+                    (Column::F64(_), _) => {
+                        self.columns[pos].append_missing(oh)?;
+                    }
+                    // A cached *bool* directive: pad a stale `false` placeholder;
+                    // `fulfill` rewrites the correct bool tail (the column stays a mask).
+                    (Column::Bool(_), true) => {
+                        self.columns[pos].append_missing(oh)?;
+                    }
+                    // A plain int column: upcast to F64 so NaN can mark the gap
+                    // (NaN distinguishes "missing" from a real 0).
+                    (Column::I64(v), false) => {
+                        let mut f: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+                        f.extend(std::iter::repeat(f64::NAN).take(oh));
+                        self.columns[pos] = Column::f64(f);
+                    }
+                    // Plain bool / str / datetime cannot represent "missing".
+                    (other_col, _) => {
+                        return Err(VolasError::DType(format!(
+                            "cannot append: column \"{n}\" ({}) is missing from the \
                                  appended frame and has no missing-value representation",
-                                other_col.dtype()
-                            )));
-                        }
+                            other_col.dtype()
+                        )));
                     }
                 }
             }
@@ -473,6 +473,23 @@ impl DataFrame {
             .collect()
     }
 
+    /// Snapshot only stale materialized-directive columns. This keeps the live
+    /// append/fulfill path from cloning unrelated computed metadata.
+    pub fn stale_computed_columns(&self, only: Option<&str>) -> Vec<(String, ComputedMeta)> {
+        self.computed
+            .iter()
+            .filter(|(name, meta)| {
+                meta.valid_rows < self.height && only.is_none_or(|target| target == name.as_str())
+            })
+            .map(|(name, meta)| (name.clone(), meta.clone()))
+            .collect()
+    }
+
+    /// Names of all materialized-directive columns.
+    pub fn computed_names(&self) -> Vec<String> {
+        self.computed.keys().cloned().collect()
+    }
+
     /// Overwrite a computed column's rows `[from, from + tail.len())` in place
     /// (copy-on-write) with the recomputed `tail`, and mark it valid up to the
     /// full height. Directive results are F64 or Bool, so both are handled.
@@ -504,6 +521,34 @@ impl DataFrame {
                 return Err(VolasError::DType(format!(
                     "computed tail dtype {} does not match column \"{name}\" dtype {}",
                     t.dtype(),
+                    col.dtype()
+                )))
+            }
+        }
+        if let Some(meta) = self.computed.get_mut(name) {
+            meta.valid_rows = self.height;
+        }
+        Ok(())
+    }
+
+    /// Overwrite one F64 computed value and mark the computed column current.
+    /// This avoids allocating a one-value tail column on the single-bar append path.
+    pub fn update_computed_f64_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
+        let pos = self
+            .name_to_idx
+            .get(name)
+            .copied()
+            .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
+        match &mut self.columns[pos] {
+            Column::F64(arc) => {
+                let buf = Arc::make_mut(arc);
+                if row < buf.len() {
+                    buf[row] = value;
+                }
+            }
+            col => {
+                return Err(VolasError::DType(format!(
+                    "computed scalar dtype F64 does not match column \"{name}\" dtype {}",
                     col.dtype()
                 )))
             }

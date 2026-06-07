@@ -208,6 +208,25 @@ impl Column {
         }
     }
 
+    /// Extend a stale computed column with placeholder missing values, avoiding a
+    /// temporary one-row [`Column`] allocation on the live append path.
+    pub fn append_missing(&mut self, len: usize) -> Result<()> {
+        match self {
+            Column::F64(v) => {
+                Arc::make_mut(v).extend(std::iter::repeat(f64::NAN).take(len));
+                Ok(())
+            }
+            Column::Bool(v) => {
+                Arc::make_mut(v).extend(std::iter::repeat(false).take(len));
+                Ok(())
+            }
+            other => Err(VolasError::DType(format!(
+                "column type {} has no missing-value placeholder",
+                other.dtype()
+            ))),
+        }
+    }
+
     /// Parse this column into a [`Column::Datetime`] (epoch ns). `Str` cells are
     /// parsed via [`datetime::parse_ns`]; an already-`Datetime` column is shared
     /// back (cheap). Errors on an unparseable cell or an unsupported dtype.
