@@ -51,20 +51,32 @@ impl HilbertVar {
     /// Transform `input` for the current bar, updating this channel's state in
     /// place and returning its output (scaled by `adj_period`).
     #[inline]
-    fn transform(&mut self, input: f64, idx: usize, even: bool, adj_period: f64) -> f64 {
+    fn transform_even(&mut self, input: f64, idx: usize, adj_period: f64) -> f64 {
         let temp = A * input;
-        let (buf, prev, prev_in) = if even {
-            (&mut self.even, &mut self.prev_even, &mut self.prev_in_even)
-        } else {
-            (&mut self.odd, &mut self.prev_odd, &mut self.prev_in_odd)
-        };
+        let buf = &mut self.even;
         let mut out = -buf[idx];
         buf[idx] = temp;
         out += temp;
-        out -= *prev;
-        *prev = B * *prev_in;
-        out += *prev;
-        *prev_in = input;
+        out -= self.prev_even;
+        self.prev_even = B * self.prev_in_even;
+        out += self.prev_even;
+        self.prev_in_even = input;
+        out * adj_period
+    }
+
+    /// Odd-bar variant of [`transform_even`](Self::transform_even). Keeping the
+    /// buffers explicit mirrors TA-Lib's macro split and avoids a hot bool branch.
+    #[inline]
+    fn transform_odd(&mut self, input: f64, idx: usize, adj_period: f64) -> f64 {
+        let temp = A * input;
+        let buf = &mut self.odd;
+        let mut out = -buf[idx];
+        buf[idx] = temp;
+        out += temp;
+        out -= self.prev_odd;
+        self.prev_odd = B * self.prev_in_odd;
+        out += self.prev_odd;
+        self.prev_in_odd = input;
         out * adj_period
     }
 
@@ -237,12 +249,12 @@ impl HtCoreState {
         if even {
             let det = self
                 .detrender
-                .transform(smoothed, self.hilbert_idx, true, adj);
-            let q1c = self.q1v.transform(det, self.hilbert_idx, true, adj);
+                .transform_even(smoothed, self.hilbert_idx, adj);
+            let q1c = self.q1v.transform_even(det, self.hilbert_idx, adj);
             let jiv = self
                 .ji
-                .transform(self.i1_even_prev3, self.hilbert_idx, true, adj);
-            let jqv = self.jq.transform(q1c, self.hilbert_idx, true, adj);
+                .transform_even(self.i1_even_prev3, self.hilbert_idx, adj);
+            let jqv = self.jq.transform_even(q1c, self.hilbert_idx, adj);
             self.hilbert_idx += 1;
             if self.hilbert_idx == 3 {
                 self.hilbert_idx = 0;
@@ -256,12 +268,12 @@ impl HtCoreState {
         } else {
             let det = self
                 .detrender
-                .transform(smoothed, self.hilbert_idx, false, adj);
-            let q1c = self.q1v.transform(det, self.hilbert_idx, false, adj);
+                .transform_odd(smoothed, self.hilbert_idx, adj);
+            let q1c = self.q1v.transform_odd(det, self.hilbert_idx, adj);
             let jiv = self
                 .ji
-                .transform(self.i1_odd_prev3, self.hilbert_idx, false, adj);
-            let jqv = self.jq.transform(q1c, self.hilbert_idx, false, adj);
+                .transform_odd(self.i1_odd_prev3, self.hilbert_idx, adj);
+            let jqv = self.jq.transform_odd(q1c, self.hilbert_idx, adj);
             q2 = 0.2 * (q1c + jiv) + 0.8 * self.prev_q2;
             i2 = 0.2 * (self.i1_odd_prev3 - jqv) + 0.8 * self.prev_i2;
             i1 = self.i1_odd_prev3;
