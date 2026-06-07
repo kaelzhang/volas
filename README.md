@@ -37,12 +37,12 @@ The difference is speed that **volas** beats every solution in terms of indicato
 - [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex)
 - [TimeFrame](#timeframe)
 - [Syntax of directive](#syntax-of-directive)
-- [Built-in indicators](#built-in-indicators)
 - [Indexing & selection](#indexing--selection)
 - [Writing & assignment](#writing--assignment)
 - [Timezones](#timezones)
 - [pandas interop](#pandas-interop)
 - [Error handling](#error-handling)
+- [Built-in Indicators](#built-in-indicators)
 - [License](#license)
 - [For Developers](#for-developers)
 
@@ -780,99 +780,6 @@ free), then auto-refreshes its stale tail on access after an `append`. Use
 `df.exec(directive)` to compute a directive as a NumPy array **without**
 caching it (see [Usage](#usage)).
 
-## Built-in indicators
-
-volas implements every [TA-Lib](https://ta-lib.org) 0.6.4 function (all 10 groups,
-including all 61 candlestick patterns), each verified 1:1 against the `talib`
-package, plus a handful of extra OHLCV indicators. Directive names are lowercase
-and case-insensitive; multi-output indicators expose each line as a sub-command
-(`macd.signal`, `boll.upper`). Names mirror TA-Lib (e.g. `ht_dcperiod`); where a
-common alternative name exists, both spellings are accepted.
-
-**Overlap studies (trend / moving averages)**
-
-| Directive | Indicator | Example |
-| --- | --- | --- |
-| `ma` | Moving average — optional MA type `0..8` (SMA/EMA/WMA/DEMA/TEMA/TRIMA/KAMA/MAMA/T3) | `ma:20`, `ma:10,1` |
-| `ema` / `smma` | Exponential / smoothed (Wilder) MA | `ema:12`, `smma:7` |
-| `wma` `dema` `tema` `trima` `kama` `t3` | Weighted / (triple-)double-exp / triangular / adaptive / T3 MA | `dema:30`, `t3:5,0.7` |
-| `mama` | MESA adaptive MA (`.fama`) | `mama`, `mama.fama:0.5,0.05` |
-| `mavp` | MA with a variable per-row period | `mavp:2,30@,periods` |
-| `midpoint` / `midprice` | Midpoint of value / of high-low | `midpoint:14`, `midprice:14` |
-| `bbi` | Bull and Bear Index | `bbi` |
-| `boll` / `bbw` | Bollinger Bands (`.upper`/`.lower`) / band width | `boll.upper:20,2`, `bbw` |
-| `accbands` | Acceleration Bands (`.upper`/`.lower`) | `accbands:20` |
-| `sar` / `sarext` | Parabolic SAR / extended SAR | `sar:0.02,0.2`, `sarext` |
-| `ht_trendline` | Hilbert Transform — instantaneous trendline | `ht_trendline` |
-
-**Momentum**
-
-| Directive | Indicator | Example |
-| --- | --- | --- |
-| `macd` / `macdext` / `macdfix` | MACD (`.signal`/`.dea`, `.histogram`) / per-line MA types / fixed 12-26 | `macd.signal`, `macdfix` |
-| `rsi` `cmo` `cci` `mfi` `bop` `willr` | RSI / Chande momentum / CCI / Money Flow / Balance of Power / Williams %R | `rsi:14`, `cci:14` |
-| `mom` `roc` `rocp` `rocr` `rocr100` | Momentum / rate-of-change family | `roc:10` |
-| `apo` / `ppo` | Absolute / percentage price oscillator | `ppo:12,26,0` |
-| `stoch` / `stochf` / `stochrsi` | Stochastic (slow/fast) / Stochastic RSI (`.k`/`.d`) | `stoch.k`, `stochrsi.d` |
-| `trix` `ultosc` `imi` | TRIX / Ultimate Oscillator / Intraday Momentum Index | `trix:30`, `ultosc` |
-| `aroon` / `aroonosc` | Aroon (`.up`/`.down`) / Aroon oscillator | `aroon.up:14` |
-| `plus_di` `minus_di` `plus_dm` `minus_dm` `dx` `adx` `adxr` | Directional movement system | `adx:14`, `plus_di:14` |
-
-**Volume · Volatility · Price transform**
-
-| Directive | Indicator | Example |
-| --- | --- | --- |
-| `obv` `ad` `adosc` | On-Balance Volume / Chaikin A/D line / A/D oscillator | `adosc:3,10` |
-| `tr` `atr` `natr` | (Normalized) (Average) True Range | `atr:14`, `natr:14` |
-| `avgprice` `medprice` `typprice` `wclprice` | Average / median / typical / weighted-close price | `typprice` |
-
-**Cycle (Hilbert Transform)**
-
-| Directive | Indicator | Example |
-| --- | --- | --- |
-| `ht_dcperiod` / `ht_dcphase` | Dominant cycle period / phase | `ht_dcperiod` |
-| `ht_phasor` / `ht_sine` | Phasor (`.quadrature`) / sine wave (`.leadsine`) | `ht_sine.leadsine` |
-| `ht_trendmode` | Trend (1) vs cycle (0) mode | `ht_trendmode` |
-
-**Statistic functions**
-
-| Directive | Indicator | Example |
-| --- | --- | --- |
-| `linearreg` (`_slope`/`_intercept`/`_angle`) / `tsf` | Linear regression / time-series forecast | `linearreg:14`, `tsf:14` |
-| `var` `stddev` `correl` `beta` | Variance / std-dev / Pearson correlation / beta | `correl:30@high,low` |
-| `sum` `maxindex` `minindex` `minmax` `minmaxindex` | Rolling sum / arg-extrema / extrema (`.min`/`.max`) | `sum:30`, `minmax.max:30` |
-
-`PySeries` also exposes the 15 Math Transform functions (`acos`…`tanh`) as methods.
-
-**Pattern recognition** — all 61 TA-Lib candlesticks via `style.<name>` (alias
-`cdl.<name>`), output `-100`/`0`/`+100` (some `±80`/`±200`). Patterns taking a
-penetration ratio accept it as an arg (e.g. `style.morningstar:0.3`):
-
-`2crows` `3blackcrows` `3inside` `3linestrike` `3outside` `3starsinsouth`
-`3whitesoldiers` `abandonedbaby` `advanceblock` `belthold` `breakaway`
-`closingmarubozu` `concealbabyswall` `counterattack` `darkcloudcover` `doji`
-`dojistar` `dragonflydoji` `engulfing` `eveningdojistar` `eveningstar`
-`gapsidesidewhite` `gravestonedoji` `hammer` `hangingman` `harami` `haramicross`
-`highwave` `hikkake` `hikkakemod` `homingpigeon` `identical3crows` `inneck`
-`invertedhammer` `kicking` `kickingbylength` `ladderbottom` `longleggeddoji`
-`longline` `marubozu` `matchinglow` `mathold` `morningdojistar` `morningstar`
-`onneck` `piercing` `rickshawman` `risefall3methods` `separatinglines`
-`shootingstar` `shortline` `spinningtop` `stalledpattern` `sticksandwich` `takuri`
-`tasukigap` `thrusting` `tristar` `unique3river` `upsidegap2crows` `xsidegap3methods`
-
-**Extras beyond TA-Lib**
-
-| Directive | Indicator | Example |
-| --- | --- | --- |
-| `rsv` / `kdj` | Raw stochastic value / KDJ (`.k`/`.d`/`.j`) | `rsv:9`, `kdj.j` |
-| `llv` / `hhv` | Lowest-low / highest-high value | `llv:10`, `hhv:10@high` |
-| `donchian` | Donchian channel (`.upper`/`.lower`) | `donchian:20` |
-| `hv` | Historical volatility | `hv:20,1d,252` |
-| `change` | Percentage change over N bars | `change:2` |
-| `increase` | Monotonic increase/decrease over N bars | `increase:3@close` |
-| `style` | Candle color (`bullish` / `bearish`) | `style:bullish` |
-| `repeat` | A boolean condition holding N bars in a row | `repeat:2@(style:bullish)` |
-
 ## Indexing & selection
 
 A pandas-compatible subset for label and positional access. The row index may be
@@ -1028,11 +935,528 @@ except DirectiveSyntaxError as e:
     ...                          # message carries the line / column of the error
 ```
 
-## License
+# Built-in Indicators
+
+Volas supports indicators in two groups. The first group is native to Volas or
+inherits stock-pandas directive names; TA-Lib either has no equivalent or no
+first-class function with the same directive name and OHLCV defaults. The second
+group follows TA-Lib's function surface: directive names are lowercase,
+arguments are positional, and multi-output indicators expose each line as a
+sub-command such as `macd.signal`, `boll.upper`, or `ht_sine.leadsine`.
+
+## Volas-exclusive indicators
+
+These directives are implemented by Volas itself. Many of them follow the
+stock-pandas directive vocabulary, with the examples adapted to `volas.DataFrame`.
+
+### `smma`, Smoothed Moving Average
+
+```
+smma:<period>@<on>
+```
+
+Gets the `period`-period smoothed moving average on column or directive `on`.
+`SMA` is often confused between simple moving average and smoothed moving
+average, so Volas uses `ma` for simple moving average and `smma` for smoothed
+moving average.
+
+- **period** `int` (required)
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+# Equivalent to df['smma:5@close']
+df['smma:5']
+
+df['smma:10@open']
+```
+
+### `bbi`, Bull and Bear Index
+
+```
+bbi:<a>,<b>,<c>,<d>@<on>
+```
+
+Calculates BBI (Bull and Bear Index), which is the average of `ma:3`, `ma:6`,
+`ma:12`, and `ma:24` by default.
+
+- **a?** `int=3`
+- **b?** `int=6`
+- **c?** `int=12`
+- **d?** `int=24`
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+# Uses default parameters
+df['bbi']
+
+# Custom parameters
+df['bbi:5,10,20,30@close']
+```
+
+### `bbw`, Bollinger Band Width
+
+```
+bbw:<period>@<on>
+```
+
+Gets Bollinger Band Width for a series.
+
+- **period?** `int=20`
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+# Bollinger band width
+df['bbw']
+
+# Equivalent definition
+(df['boll.upper'] - df['boll.lower']) / df['boll']
+
+# Or as a directive expression
+df['(boll.upper - boll.lower) / boll']
+```
+
+### `rsv`, Raw Stochastic Value
+
+```
+rsv:<period>@<high>,<low>,<close>
+```
+
+Calculates the raw stochastic value, which is often used to calculate KDJ.
+
+- **period** `int` (required)
+- **high?** `str='high'` The column name for high prices.
+- **low?** `str='low'` The column name for low prices.
+- **close?** `str='close'` The column name for close prices.
+
+```py
+# Uses default columns: high, low, close
+df['rsv:9']
+
+# Specify custom columns
+df['rsv:9@high,low,close']
+```
+
+### `kdj`, A Variety of Stochastic Oscillator
+
+KDJ is a variety of the [Stochastic Oscillator](https://en.wikipedia.org/wiki/Stochastic_oscillator)
+indicator created by [Dr. George Lane](https://en.wikipedia.org/wiki/George_Lane_(technical_analyst)),
+which follows the formula:
+
+```
+RSV = rsv(period_rsv)
+%K = ewma(RSV, period_k, init_value)
+%D = ewma(%K, period_d, init_value)
+%J = 3 * %K - 2 * %D
+```
+
+The EWMA here is seeded by `init_value`. Trading software from different vendors
+usually uses one of `0.0`, `50.0`, or `100.0` as the initial value; Volas defaults
+to `50.0`.
+
+```
+kdj.k:<period_rsv>,<period_k>,<init_value>@<high>,<low>,<close>
+kdj.d:<period_rsv>,<period_k>,<period_d>,<init_value>@<high>,<low>,<close>
+kdj.j:<period_rsv>,<period_k>,<period_d>,<init_value>@<high>,<low>,<close>
+```
+
+- **period_rsv?** `int=9` The period for calculating RSV.
+- **period_k?** `int=3` The period for smoothing RSV into %K.
+- **period_d?** `int=3` The period for smoothing %K into %D.
+- **init_value?** `float=50.0` The initial value for smoothing.
+- **high?** `str='high'` The column name for high prices.
+- **low?** `str='low'` The column name for low prices.
+- **close?** `str='close'` The column name for close prices.
+
+```py
+# The %D series of KDJ
+df['kdj.d']
+
+# Equivalent to default parameters and columns
+df['kdj.d:9,3,3,50@high,low,close']
+
+# KDJ lines with custom periods
+df[['kdj.k:9,9,50', 'kdj.d:9,9,9,50', 'kdj.j:9,9,9,50']]
+```
+
+### `llv`, Lowest of Low Values
+
+```
+llv:<period>@<on>
+```
+
+Gets the lowest value in N periods. By default, it reads the `low` column.
+
+- **period** `int` (required)
+- **on?** `str='low'` Which column or directive the calculation is based on.
+
+```py
+# The 10-period lowest low prices
+df['llv:10']
+
+# The 10-period lowest close prices
+df['llv:10@close']
+```
+
+### `hhv`, Highest of High Values
+
+```
+hhv:<period>@<on>
+```
+
+Gets the highest value in N periods. By default, it reads the `high` column.
+
+- **period** `int` (required)
+- **on?** `str='high'` Which column or directive the calculation is based on.
+
+```py
+# The 10-period highest high prices
+df['hhv:10']
+
+# The 10-period highest close prices
+df['hhv:10@close']
+```
+
+### `donchian`, Donchian Channels
+
+```
+donchian:<period>@<high>,<low>
+donchian.upper:<period>@<high>
+donchian.lower:<period>@<low>
+```
+
+Gets Donchian channels, the historical view of price volatility by charting a
+security's highest and lowest prices over a set period.
+
+- **period** `int` (required)
+- **high?** `str='high'` The column to calculate highest high values.
+- **low?** `str='low'` The column to calculate lowest low values.
+
+```py
+# Donchian middle channel with default columns
+df['donchian:20']
+
+# Donchian upper and lower channels
+df['donchian.upper:20']
+df['donchian.lower:20']
+
+# Short aliases
+df['donchian.u:20']
+df['donchian.l:20']
+```
+
+### `hv`, Historical Volatility
+
+```
+hv:<period>,<time_frame>,<trading_days>@<on>
+```
+
+Gets historical volatility, the statistical measure of the dispersion of returns
+for a security or index over a period of time.
+
+- **period** `int` (required)
+- **time_frame?** `str='1d'` Time frame such as `1m`, `15m`, `1h`, or `1d`.
+- **trading_days?** `int=252` Trading days in a year; crypto workflows often use
+  `365`.
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+# 10-period historical volatility for 15-minute data based on 365 yearly days
+df['hv:10,15m,365']
+
+# Uses default time_frame and trading_days
+df['hv:10']
+```
+
+### `change`, Percentage Change
+
+```
+change:<period>@<on>
+```
+
+Percentage change between the current and a prior element on a certain series.
+It computes the percentage change from the immediately previous element by
+default, which is useful when comparing percentage change in a time series of
+prices.
+
+- **period?** `int=2` `2` means the start value and the end value of a two-period
+  window are compared.
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+# Percentage change of the close column
+df['change']
+
+# Percentage change with a custom period
+df['change:5@close']
+
+# Percentage change of a nested directive
+df['change@(ma:20)']
+```
+
+### `increase`, Consecutive Increase or Decrease
+
+```
+increase:<repeat>,<direction>@<on>
+```
+
+Gets a `bool` series where each item is `True` if the value of `on` increases in
+the last `repeat` steps. Use `direction=-1` to detect repeated decreases.
+
+- **repeat?** `int=1`
+- **direction?** `int=1` `1` means increasing; `-1` means decreasing.
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+# Whether the 20-period moving average has increased repeatedly for 3 bars
+df['increase:3@(ma:20@close)']
+
+# Whether close has decreased repeatedly for 5 bars
+df['increase:5,-1@close']
+```
+
+### `style`, Candle Color
+
+```
+style:<style>@<open>,<close>
+style.<style>@<open>,<close>
+```
+
+Gets a `bool` series indicating whether the candlestick of a period is of the
+given style. This native form is for candle color only; TA-Lib candlestick
+patterns are exposed as `cdl.<pattern>` in the table below.
+
+- **style** `'bullish'` or `'bearish'` (required)
+- **open?** `str='open'` The column name for open prices.
+- **close?** `str='close'` The column name for close prices.
+
+```py
+# Uses default open and close columns
+df['style:bullish']
+df['style.bearish']
+
+# Specify custom columns
+df['style:bearish@open,close']
+```
+
+### `repeat`, Consecutive Boolean Condition
+
+```
+repeat:<repeat>@<bool_directive>
+```
+
+The `repeat` command first gets the result of `bool_directive`, then detects
+whether `True` repeats for `repeat` consecutive periods.
+
+- **repeat?** `int=1` Must be larger than `0`.
+- **bool_directive** `str | (Directive)` A column name or a directive wrapped in
+  parentheses.
+
+```py
+# Whether bullish candlesticks repeat for 3 periods
+df['repeat:3@(style:bullish)']
+
+# Repeat check on a directive expression
+df['repeat:5@(close > ma:20)']
+```
+
+## TA-Lib-compatible directives
+
+TA-Lib-related directives use lowercase Volas names, but the `TA-Lib original`
+column below lists the upstream TA-Lib function they correspond to. Arguments
+before `@` are positional; input series after `@` override the default columns.
+Square brackets mean an argument has a default. Required arguments are written
+without brackets. Empty argument slots keep earlier defaults, so
+`macd.signal:,,5` means fast period `12`, slow period `26`, and signal period `5`.
+
+`matype` follows TA-Lib's integer convention: `0=SMA`, `1=EMA`, `2=WMA`,
+`3=DEMA`, `4=TEMA`, `5=TRIMA`, `6=KAMA`, `7=MAMA`, and `8=T3`. Multi-output
+indicators also accept short aliases where documented by the parser, for example
+`macd.s` for `macd.signal`, `boll.u` for `boll.upper`, `aroon.d` for
+`aroon.down`, and `style.<pattern>` as an alias for `cdl.<pattern>`.
+
+```py
+# Ordinary defaulted positional arguments
+df.exec('macd.signal:12,26,9@close')
+
+# Skip fast and slow defaults, override only the signal period
+df.exec('macd.signal:,,5')
+
+# A directive with multiple input series
+df.exec('stoch.d:5,3,0,3,0@high,low,close')
+
+# MAVP needs a second series for the variable period
+df.exec('mavp:2,30,0@close,periods')
+```
+
+The TA-Lib Math Transform group is exposed on `Series` rather than as directive
+strings: `acos`, `asin`, `atan`, `ceil`, `cos`, `cosh`, `exp`, `floor`, `ln`,
+`log10`, `sin`, `sinh`, `sqrt`, `tan`, and `tanh`.
+
+| Volas directive | TA-Lib original | Meaning | Parameters |
+| --- | --- | --- | --- |
+| `ma` | `MA` | Generic moving average selected by MA type. | `:<period>[,<matype=0>]@series=close` |
+| `ema` | `EMA` | Exponential moving average. | `:<period>@series=close` |
+| `wma` | `WMA` | Weighted moving average. | `[:period=30]@series=close` |
+| `dema` | `DEMA` | Double exponential moving average. | `[:period=30]@series=close` |
+| `tema` | `TEMA` | Triple exponential moving average. | `[:period=30]@series=close` |
+| `trima` | `TRIMA` | Triangular moving average. | `[:period=30]@series=close` |
+| `kama` | `KAMA` | Kaufman adaptive moving average. | `[:period=30]@series=close` |
+| `t3` | `T3` | T3 moving average. | `[:period=5,vfactor=0.7]@series=close` |
+| `mama` | `MAMA` | MESA adaptive moving average main line. | `[:fast_limit=0.5,slow_limit=0.05]@series=close` |
+| `mama.fama` | `MAMA` | Following adaptive moving average line. | `[:fast_limit=0.5,slow_limit=0.05]@series=close` |
+| `mavp` | `MAVP` | Moving average with per-row variable periods. | `[:min=2,max=30,matype=0]@series=close,periods` |
+| `sar` | `SAR` | Parabolic SAR. | `[:acceleration=0.02,maximum=0.2]@high,low` |
+| `sarext` | `SAREXT` | Extended Parabolic SAR. | `[:start=0,offset=0,long_init=0.02,long_step=0.02,long_max=0.2,short_init=0.02,short_step=0.02,short_max=0.2]@high,low` |
+| `boll` | `BBANDS` | Bollinger middle band. | `[:period=20]@series=close` |
+| `boll.upper` | `BBANDS` | Bollinger upper band. | `[:period=20,times=2]@series=close` |
+| `boll.lower` | `BBANDS` | Bollinger lower band. | `[:period=20,times=2]@series=close` |
+| `accbands` | `ACCBANDS` | Acceleration Bands middle line. | `[:period=20]@series=close` |
+| `accbands.upper` | `ACCBANDS` | Acceleration Bands upper line. | `[:period=20]@high,low` |
+| `accbands.lower` | `ACCBANDS` | Acceleration Bands lower line. | `[:period=20]@high,low` |
+| `midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `[:period=14]@series=close` |
+| `midprice` | `MIDPRICE` | Midpoint price over high and low. | `[:period=14]@high,low` |
+| `ht_trendline` | `HT_TRENDLINE` | Hilbert Transform instantaneous trendline. | `@series=close` |
+| `macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. | `[:fast=12,slow=26]@series=close` |
+| `macd.signal` | `MACD` | Signal line of the Volas MACD line. | `[:fast=12,slow=26,signal=9]@series=close` |
+| `macd.histogram` | `MACD` | MACD histogram: line minus signal. | `[:fast=12,slow=26,signal=9]@series=close` |
+| `macdext` | `MACDEXT` | MACD line with independent MA types. | `[:fast=12,fast_matype=0,slow=26,slow_matype=0]@series=close` |
+| `macdext.signal` | `MACDEXT` | MACDEXT signal line. | `[:fast=12,fast_matype=0,slow=26,slow_matype=0,signal=9,signal_matype=0]@series=close` |
+| `macdext.histogram` | `MACDEXT` | MACDEXT histogram. | `[:fast=12,fast_matype=0,slow=26,slow_matype=0,signal=9,signal_matype=0]@series=close` |
+| `macdfix` | `MACDFIX` | Fixed 12/26 MACD line; Volas uses standalone EMA fast minus EMA slow. | `@series=close` |
+| `macdfix.signal` | `MACDFIX` | Signal line of the Volas fixed 12/26 MACD line. | `[:signal=9]@series=close` |
+| `macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `[:signal=9]@series=close` |
+| `apo` | `APO` | Absolute price oscillator. | `[:fast=12,slow=26,matype=0]@series=close` |
+| `ppo` | `PPO` | Percentage price oscillator. | `[:fast=12,slow=26,matype=0]@series=close` |
+| `rsi` | `RSI` | Relative Strength Index. | `:<period>@series=close` |
+| `cmo` | `CMO` | Chande Momentum Oscillator. | `[:period=14]@series=close` |
+| `cci` | `CCI` | Commodity Channel Index. | `[:period=14]@high,low,close` |
+| `imi` | `IMI` | Intraday Momentum Index. | `[:period=14]@open,close` |
+| `mfi` | `MFI` | Money Flow Index. | `[:period=14]@high,low,close,volume` |
+| `bop` | `BOP` | Balance of Power. | `@open,high,low,close` |
+| `willr` | `WILLR` | Williams Percent Range. | `[:period=14]@high,low,close` |
+| `mom` | `MOM` | Momentum. | `[:period=10]@series=close` |
+| `roc` | `ROC` | Rate of change. | `[:period=10]@series=close` |
+| `rocp` | `ROCP` | Rate of change percentage. | `[:period=10]@series=close` |
+| `rocr` | `ROCR` | Rate of change ratio. | `[:period=10]@series=close` |
+| `rocr100` | `ROCR100` | Rate of change ratio multiplied by 100. | `[:period=10]@series=close` |
+| `stoch.k` | `STOCH` | Slow stochastic percent K. | `[:fastk=5,slowk=3,slowk_matype=0,slowd=3,slowd_matype=0]@high,low,close` |
+| `stoch.d` | `STOCH` | Slow stochastic percent D. | `[:fastk=5,slowk=3,slowk_matype=0,slowd=3,slowd_matype=0]@high,low,close` |
+| `stochf.k` | `STOCHF` | Fast stochastic percent K. | `[:fastk=5,fastd=3,fastd_matype=0]@high,low,close` |
+| `stochf.d` | `STOCHF` | Fast stochastic percent D. | `[:fastk=5,fastd=3,fastd_matype=0]@high,low,close` |
+| `stochrsi.k` | `STOCHRSI` | Fast stochastic RSI percent K. | `[:rsi=14,fastk=5,fastd=3,fastd_matype=0]@series=close` |
+| `stochrsi.d` | `STOCHRSI` | Fast stochastic RSI percent D. | `[:rsi=14,fastk=5,fastd=3,fastd_matype=0]@series=close` |
+| `trix` | `TRIX` | One-period ROC of a triple EMA. | `[:period=30]@series=close` |
+| `ultosc` | `ULTOSC` | Ultimate Oscillator. | `[:short=7,medium=14,long=28]@high,low,close` |
+| `aroon.up` | `AROON` | Aroon up line. | `[:period=14]@high,low` |
+| `aroon.down` | `AROON` | Aroon down line. | `[:period=14]@high,low` |
+| `aroonosc` | `AROONOSC` | Aroon oscillator. | `[:period=14]@high,low` |
+| `plus_dm` | `PLUS_DM` | Plus directional movement. | `[:period=14]@high,low` |
+| `minus_dm` | `MINUS_DM` | Minus directional movement. | `[:period=14]@high,low` |
+| `plus_di` | `PLUS_DI` | Plus directional indicator. | `[:period=14]@high,low,close` |
+| `minus_di` | `MINUS_DI` | Minus directional indicator. | `[:period=14]@high,low,close` |
+| `dx` | `DX` | Directional Movement Index. | `[:period=14]@high,low,close` |
+| `adx` | `ADX` | Average Directional Movement Index. | `[:period=14]@high,low,close` |
+| `adxr` | `ADXR` | Average Directional Movement Index Rating. | `[:period=14]@high,low,close` |
+| `obv` | `OBV` | On-Balance Volume. | `@close,volume` |
+| `ad` | `AD` | Chaikin Accumulation Distribution line. | `@high,low,close,volume` |
+| `adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `[:fast=3,slow=10]@high,low,close,volume` |
+| `tr` | `TRANGE` | True Range. | `@high,low,close` |
+| `atr` | `ATR` | Average True Range. | `[:period=14]@high,low,close` |
+| `natr` | `NATR` | Normalized Average True Range. | `[:period=14]@high,low,close` |
+| `avgprice` | `AVGPRICE` | Average price. | `@open,high,low,close` |
+| `medprice` | `MEDPRICE` | Median price. | `@high,low` |
+| `typprice` | `TYPPRICE` | Typical price. | `@high,low,close` |
+| `wclprice` | `WCLPRICE` | Weighted close price. | `@high,low,close` |
+| `ht_dcperiod` | `HT_DCPERIOD` | Hilbert Transform dominant cycle period. | `@series=close` |
+| `ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. | `@series=close` |
+| `ht_phasor` | `HT_PHASOR` | Hilbert Transform phasor in-phase line. | `@series=close` |
+| `ht_phasor.quadrature` | `HT_PHASOR` | Hilbert Transform phasor quadrature line. | `@series=close` |
+| `ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@series=close` |
+| `ht_sine.leadsine` | `HT_SINE` | Hilbert Transform lead sine wave. | `@series=close` |
+| `ht_trendmode` | `HT_TRENDMODE` | Hilbert Transform trend versus cycle mode. | `@series=close` |
+| `linearreg` | `LINEARREG` | Linear regression value. | `[:period=14]@series=close` |
+| `linearreg_slope` | `LINEARREG_SLOPE` | Linear regression slope. | `[:period=14]@series=close` |
+| `linearreg_intercept` | `LINEARREG_INTERCEPT` | Linear regression intercept. | `[:period=14]@series=close` |
+| `linearreg_angle` | `LINEARREG_ANGLE` | Linear regression angle. | `[:period=14]@series=close` |
+| `tsf` | `TSF` | Time Series Forecast. | `[:period=14]@series=close` |
+| `var` | `VAR` | Variance. | `[:period=5]@series=close` |
+| `stddev` | `STDDEV` | Standard deviation. | `[:period=5,nbdev=1]@series=close` |
+| `correl` | `CORREL` | Pearson correlation coefficient. | `[:period=30]@series0=close,series1` |
+| `beta` | `BETA` | Beta. | `[:period=5]@series0=close,series1` |
+| `sum` | `SUM` | Rolling sum. | `[:period=30]@series=close` |
+| `maxindex` | `MAXINDEX` | Index of the rolling maximum. | `[:period=30]@series=close` |
+| `minindex` | `MININDEX` | Index of the rolling minimum. | `[:period=30]@series=close` |
+| `minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `[:period=30]@series=close` |
+| `minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `[:period=30]@series=close` |
+| `minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `[:period=30]@series=close` |
+| `minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `[:period=30]@series=close` |
+| `cdl.2crows` | `CDL2CROWS` | Two Crows | `@open,high,low,close` |
+| `cdl.3blackcrows` | `CDL3BLACKCROWS` | Three Black Crows | `@open,high,low,close` |
+| `cdl.3inside` | `CDL3INSIDE` | Three Inside Up/Down | `@open,high,low,close` |
+| `cdl.3linestrike` | `CDL3LINESTRIKE` | Three-Line Strike  | `@open,high,low,close` |
+| `cdl.3outside` | `CDL3OUTSIDE` | Three Outside Up/Down | `@open,high,low,close` |
+| `cdl.3starsinsouth` | `CDL3STARSINSOUTH` | Three Stars In The South | `@open,high,low,close` |
+| `cdl.3whitesoldiers` | `CDL3WHITESOLDIERS` | Three Advancing White Soldiers | `@open,high,low,close` |
+| `cdl.abandonedbaby` | `CDLABANDONEDBABY` | Abandoned Baby | `[:penetration=0.3]@open,high,low,close` |
+| `cdl.advanceblock` | `CDLADVANCEBLOCK` | Advance Block | `@open,high,low,close` |
+| `cdl.belthold` | `CDLBELTHOLD` | Belt-hold | `@open,high,low,close` |
+| `cdl.breakaway` | `CDLBREAKAWAY` | Breakaway | `@open,high,low,close` |
+| `cdl.closingmarubozu` | `CDLCLOSINGMARUBOZU` | Closing Marubozu | `@open,high,low,close` |
+| `cdl.concealbabyswall` | `CDLCONCEALBABYSWALL` | Concealing Baby Swallow | `@open,high,low,close` |
+| `cdl.counterattack` | `CDLCOUNTERATTACK` | Counterattack | `@open,high,low,close` |
+| `cdl.darkcloudcover` | `CDLDARKCLOUDCOVER` | Dark Cloud Cover | `[:penetration=0.5]@open,high,low,close` |
+| `cdl.doji` | `CDLDOJI` | Doji | `@open,high,low,close` |
+| `cdl.dojistar` | `CDLDOJISTAR` | Doji Star | `@open,high,low,close` |
+| `cdl.dragonflydoji` | `CDLDRAGONFLYDOJI` | Dragonfly Doji | `@open,high,low,close` |
+| `cdl.engulfing` | `CDLENGULFING` | Engulfing Pattern | `@open,high,low,close` |
+| `cdl.eveningdojistar` | `CDLEVENINGDOJISTAR` | Evening Doji Star | `[:penetration=0.3]@open,high,low,close` |
+| `cdl.eveningstar` | `CDLEVENINGSTAR` | Evening Star | `[:penetration=0.3]@open,high,low,close` |
+| `cdl.gapsidesidewhite` | `CDLGAPSIDESIDEWHITE` | Up/Down-gap side-by-side white lines | `@open,high,low,close` |
+| `cdl.gravestonedoji` | `CDLGRAVESTONEDOJI` | Gravestone Doji | `@open,high,low,close` |
+| `cdl.hammer` | `CDLHAMMER` | Hammer | `@open,high,low,close` |
+| `cdl.hangingman` | `CDLHANGINGMAN` | Hanging Man | `@open,high,low,close` |
+| `cdl.harami` | `CDLHARAMI` | Harami Pattern | `@open,high,low,close` |
+| `cdl.haramicross` | `CDLHARAMICROSS` | Harami Cross Pattern | `@open,high,low,close` |
+| `cdl.highwave` | `CDLHIGHWAVE` | High-Wave Candle | `@open,high,low,close` |
+| `cdl.hikkake` | `CDLHIKKAKE` | Hikkake Pattern | `@open,high,low,close` |
+| `cdl.hikkakemod` | `CDLHIKKAKEMOD` | Modified Hikkake Pattern | `@open,high,low,close` |
+| `cdl.homingpigeon` | `CDLHOMINGPIGEON` | Homing Pigeon | `@open,high,low,close` |
+| `cdl.identical3crows` | `CDLIDENTICAL3CROWS` | Identical Three Crows | `@open,high,low,close` |
+| `cdl.inneck` | `CDLINNECK` | In-Neck Pattern | `@open,high,low,close` |
+| `cdl.invertedhammer` | `CDLINVERTEDHAMMER` | Inverted Hammer | `@open,high,low,close` |
+| `cdl.kicking` | `CDLKICKING` | Kicking | `@open,high,low,close` |
+| `cdl.kickingbylength` | `CDLKICKINGBYLENGTH` | Kicking - bull/bear determined by the longer marubozu | `@open,high,low,close` |
+| `cdl.ladderbottom` | `CDLLADDERBOTTOM` | Ladder Bottom | `@open,high,low,close` |
+| `cdl.longleggeddoji` | `CDLLONGLEGGEDDOJI` | Long Legged Doji | `@open,high,low,close` |
+| `cdl.longline` | `CDLLONGLINE` | Long Line Candle | `@open,high,low,close` |
+| `cdl.marubozu` | `CDLMARUBOZU` | Marubozu | `@open,high,low,close` |
+| `cdl.matchinglow` | `CDLMATCHINGLOW` | Matching Low | `@open,high,low,close` |
+| `cdl.mathold` | `CDLMATHOLD` | Mat Hold | `[:penetration=0.5]@open,high,low,close` |
+| `cdl.morningdojistar` | `CDLMORNINGDOJISTAR` | Morning Doji Star | `[:penetration=0.3]@open,high,low,close` |
+| `cdl.morningstar` | `CDLMORNINGSTAR` | Morning Star | `[:penetration=0.3]@open,high,low,close` |
+| `cdl.onneck` | `CDLONNECK` | On-Neck Pattern | `@open,high,low,close` |
+| `cdl.piercing` | `CDLPIERCING` | Piercing Pattern | `@open,high,low,close` |
+| `cdl.rickshawman` | `CDLRICKSHAWMAN` | Rickshaw Man | `@open,high,low,close` |
+| `cdl.risefall3methods` | `CDLRISEFALL3METHODS` | Rising/Falling Three Methods | `@open,high,low,close` |
+| `cdl.separatinglines` | `CDLSEPARATINGLINES` | Separating Lines | `@open,high,low,close` |
+| `cdl.shootingstar` | `CDLSHOOTINGSTAR` | Shooting Star | `@open,high,low,close` |
+| `cdl.shortline` | `CDLSHORTLINE` | Short Line Candle | `@open,high,low,close` |
+| `cdl.spinningtop` | `CDLSPINNINGTOP` | Spinning Top | `@open,high,low,close` |
+| `cdl.stalledpattern` | `CDLSTALLEDPATTERN` | Stalled Pattern | `@open,high,low,close` |
+| `cdl.sticksandwich` | `CDLSTICKSANDWICH` | Stick Sandwich | `@open,high,low,close` |
+| `cdl.takuri` | `CDLTAKURI` | Takuri (Dragonfly Doji with very long lower shadow) | `@open,high,low,close` |
+| `cdl.tasukigap` | `CDLTASUKIGAP` | Tasuki Gap | `@open,high,low,close` |
+| `cdl.thrusting` | `CDLTHRUSTING` | Thrusting Pattern | `@open,high,low,close` |
+| `cdl.tristar` | `CDLTRISTAR` | Tristar Pattern | `@open,high,low,close` |
+| `cdl.unique3river` | `CDLUNIQUE3RIVER` | Unique 3 River | `@open,high,low,close` |
+| `cdl.upsidegap2crows` | `CDLUPSIDEGAP2CROWS` | Upside Gap Two Crows | `@open,high,low,close` |
+| `cdl.xsidegap3methods` | `CDLXSIDEGAP3METHODS` | Upside/Downside Gap Three Methods | `@open,high,low,close` |
+
+# License
 
 [MIT](LICENSE)
 
-## For Developers
+# For Developers
 
 Developer notes, local build commands, dependency groups, and benchmark report
 guidance live in [DEVELOPMENT.md](DEVELOPMENT.md).
