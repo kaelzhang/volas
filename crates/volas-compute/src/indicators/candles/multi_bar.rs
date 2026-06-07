@@ -278,25 +278,24 @@ pub fn cdl_hikkake(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let Some(mut out) = candle_output(n, 5) else {
         return vec![f64::NAN; n];
     };
-    // TA-Lib's state only needs the pending direction, expiry, and confirmation level.
-    // Keep the direction as an integer and convert to f64 only for emitted rows.
-    let (mut until, mut res, mut confirm_level) = (0usize, 0_i32, 0.0_f64);
+    // Match TA-Lib's minimal state machine: pending setup index + signed result.
+    // Confirmation rereads the inside bar's extreme only on the rare confirmation path.
+    let (mut pattern_idx, mut pattern_result) = (0usize, 0_i32);
     for i in 2..5 {
         if h[i - 1] < h[i - 2] && l[i - 1] > l[i - 2] {
             let lower_break = h[i] < h[i - 1] && l[i] < l[i - 1];
             let higher_break = h[i] > h[i - 1] && l[i] > l[i - 1];
             if lower_break || higher_break {
-                res = if lower_break { 100 } else { -100 };
-                until = i + 3;
-                confirm_level = if lower_break { h[i - 1] } else { l[i - 1] };
+                pattern_result = if lower_break { 100 } else { -100 };
+                pattern_idx = i;
                 continue;
             }
         }
-        if until != 0
-            && i <= until
-            && ((res > 0 && c[i] > confirm_level) || (res < 0 && c[i] < confirm_level))
+        if i <= pattern_idx + 3
+            && ((pattern_result > 0 && c[i] > h[pattern_idx - 1])
+                || (pattern_result < 0 && c[i] < l[pattern_idx - 1]))
         {
-            until = 0;
+            pattern_idx = 0;
         }
     }
     for i in 5..n {
@@ -305,26 +304,25 @@ pub fn cdl_hikkake(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             let higher_break = h[i] > h[i - 1] && l[i] > l[i - 1];
             if lower_break || higher_break {
                 let r = if lower_break { 100 } else { -100 };
-                res = r;
-                until = i + 3;
-                confirm_level = if lower_break { h[i - 1] } else { l[i - 1] };
+                pattern_result = r;
+                pattern_idx = i;
                 r as f64
-            } else if until != 0
-                && i <= until
-                && ((res > 0 && c[i] > confirm_level) || (res < 0 && c[i] < confirm_level))
+            } else if i <= pattern_idx + 3
+                && ((pattern_result > 0 && c[i] > h[pattern_idx - 1])
+                    || (pattern_result < 0 && c[i] < l[pattern_idx - 1]))
             {
-                let confirmed = res + if res > 0 { 100 } else { -100 };
-                until = 0;
+                let confirmed = pattern_result + if pattern_result > 0 { 100 } else { -100 };
+                pattern_idx = 0;
                 confirmed as f64
             } else {
                 0.0
             }
-        } else if until != 0
-            && i <= until
-            && ((res > 0 && c[i] > confirm_level) || (res < 0 && c[i] < confirm_level))
+        } else if i <= pattern_idx + 3
+            && ((pattern_result > 0 && c[i] > h[pattern_idx - 1])
+                || (pattern_result < 0 && c[i] < l[pattern_idx - 1]))
         {
-            let confirmed = res + if res > 0 { 100 } else { -100 };
-            until = 0;
+            let confirmed = pattern_result + if pattern_result > 0 { 100 } else { -100 };
+            pattern_idx = 0;
             confirmed as f64
         } else {
             0.0
