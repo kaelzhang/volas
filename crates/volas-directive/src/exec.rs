@@ -913,8 +913,8 @@ fn exec_command(
         ("ht_dcphase", _) => f64col(ind::ht_dcphase(&close(0)?)),
         ("ht_trendline", _) => f64col(ind::ht_trendline(&close(0)?)),
         ("ht_trendmode", _) => f64col(ind::ht_trendmode(&close(0)?)),
-        ("ht_phasor", None) => f64col(ind::ht_phasor(&close(0)?).0),
-        ("ht_phasor", Some("quadrature")) => f64col(ind::ht_phasor(&close(0)?).1),
+        ("ht_phasor", None) => f64col(ind::ht_phasor_line(&close(0)?, false)),
+        ("ht_phasor", Some("quadrature")) => f64col(ind::ht_phasor_line(&close(0)?, true)),
         ("ht_sine", None) => f64col(ind::ht_sine(&close(0)?).0),
         ("ht_sine", Some("leadsine")) => f64col(ind::ht_sine(&close(0)?).1),
         ("mama", None) => {

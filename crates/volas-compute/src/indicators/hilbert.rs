@@ -582,6 +582,25 @@ pub fn ht_phasor(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
     (inphase, quad)
 }
 
+/// Single-line `HT_PHASOR` used by directive execution. TA-Lib exposes both
+/// arrays, but a directive requests one line at a time; avoid allocating and
+/// writing the sibling line on that hot path.
+pub fn ht_phasor_line(price: &[f64], quadrature: bool) -> Vec<f64> {
+    let n = price.len();
+    let mut out = vec![f64::NAN; n];
+    if n <= CORE_START {
+        return out;
+    }
+    let mut core = HtCoreState::seed(price);
+    for i in CORE_START..n {
+        let b = core.step(price, i);
+        if i >= LB_PERIOD {
+            out[i] = if quadrature { b.q1 } else { b.i1 };
+        }
+    }
+    out
+}
+
 /// `HT_DCPHASE`: the dominant-cycle phase in degrees.
 pub fn ht_dcphase(price: &[f64]) -> Vec<f64> {
     let core = ht_core(price);
