@@ -403,8 +403,15 @@ pub fn cdl_stalledpattern(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
         .max(SHADOW_VERY_SHORT.avg_period)
         .max(NEAR.avg_period)
         + 2;
-    each_bar(c.len(), lb, |i| {
-        if color(o, c, i - 2) > 0.0
+    let Some(mut out) = candle_output(c.len(), lb) else {
+        return vec![f64::NAN; c.len()];
+    };
+    // This branch-heavy pattern regressed when routed through the generic
+    // per-bar closure helper; keep the hot loop local and benchmark before
+    // moving it back to shared candle infrastructure.
+    let mut i = lb;
+    while i < c.len() {
+        out[i] = if color(o, c, i - 2) > 0.0
             && color(o, c, i - 1) > 0.0
             && color(o, c, i) > 0.0
             && c[i] > c[i - 1]
@@ -420,8 +427,10 @@ pub fn cdl_stalledpattern(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
             -100.0
         } else {
             0.0
-        }
-    })
+        };
+        i += 1;
+    }
+    out
 }
 
 /// Identical Three Crows (TA-Lib CDLIDENTICAL3CROWS): three declining black candles with
