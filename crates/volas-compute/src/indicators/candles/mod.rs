@@ -583,6 +583,7 @@ mod tests {
         // candle_average (per-bar): Shadows range and avg_period 0.
         let _ = candle_average(SHADOW_SHORT, &o, &h, &l, &c, 12);
         let _ = candle_average(SHADOW_LONG, &o, &h, &l, &c, 12);
+        let _ = candle_average_from_total(SHADOW_SHORT, 6.0);
 
         // each_bar_avg2: a zero lookback trips its guard; a valid call with an
         // avg_period-0 (SHADOW_LONG) and a Shadows (SHADOW_SHORT) setting covers the

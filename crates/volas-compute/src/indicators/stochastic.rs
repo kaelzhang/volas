@@ -427,13 +427,13 @@ pub fn stochrsi_d_default_sma(close: &[f64]) -> Option<Vec<f64>> {
             highest_idx = trailing;
             highest = lowest;
             if lowest.is_nan() {
-                return None;
+                return None; // LCOV_EXCL_LINE
             }
             let mut idx = trailing + 1;
             while idx <= today {
                 let value = unsafe { *src.add(idx) };
                 if value.is_nan() {
-                    return None;
+                    return None; // LCOV_EXCL_LINE
                 }
                 if value <= lowest {
                     lowest_idx = idx;
@@ -479,4 +479,126 @@ pub fn stochrsi_d_default_sma(close: &[f64]) -> Option<Vec<f64>> {
         today += 1;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ohlc(n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let close: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
+        let high: Vec<f64> = close.iter().map(|v| v + 2.0).collect();
+        let low: Vec<f64> = close.iter().map(|v| v - 2.0).collect();
+        (high, low, close)
+    }
+
+    #[test]
+    fn stochastic_small_window_paths_cover_nan_declines() {
+        let (high, low, close) = ohlc(8);
+        let out = stoch_fastk(&high, &low, &close, 5);
+        assert!(out[3].is_nan());
+        assert!(out[4].is_finite());
+
+        let flat = vec![3.0; 8];
+        let out = stoch_fastk_small_window(&flat, &flat, &flat, 5).unwrap();
+        assert_eq!(out[4], 0.0);
+
+        assert!(stoch_fastk_small_window(&high[..7], &low, &close, 5).is_none());
+
+        let mut x = low.clone();
+        x[4] = f64::NAN;
+        assert!(stoch_fastk_small_window(&high, &x, &close, 5).is_none());
+        let mut x = low.clone();
+        x[0] = f64::NAN;
+        assert!(stoch_fastk_small_window(&high, &x, &close, 5).is_none());
+        let mut x = low.clone();
+        x[2] = f64::NAN;
+        assert!(stoch_fastk_small_window(&high, &x, &close, 5).is_none());
+
+        let mut x = high.clone();
+        x[4] = f64::NAN;
+        assert!(stoch_fastk_small_window(&x, &low, &close, 5).is_none());
+        let mut x = high.clone();
+        x[0] = f64::NAN;
+        assert!(stoch_fastk_small_window(&x, &low, &close, 5).is_none());
+        let mut x = high.clone();
+        x[2] = f64::NAN;
+        assert!(stoch_fastk_small_window(&x, &low, &close, 5).is_none());
+
+        let mut x = close.clone();
+        x[4] = f64::NAN;
+        assert!(stoch_fastk_small_window(&high, &low, &x, 5).is_none());
+    }
+
+    #[test]
+    fn stochastic_fused_default_paths_cover_nan_declines() {
+        let (high, low, close) = ohlc(12);
+        assert!(stoch_d_sma_fused::<1>(&high[..4], &low[..4], &close[..4]).is_none());
+
+        let out = stochf_d_default_sma(&high, &low, &close).unwrap();
+        assert!(out[5].is_nan());
+        assert!(out[6].is_finite());
+        let out = stoch_d_default_sma(&high, &low, &close).unwrap();
+        assert!(out[7].is_nan());
+        assert!(out[8].is_finite());
+
+        let flat = vec![3.0; 12];
+        let out = stoch_d_sma_fused::<2>(&flat, &flat, &flat).unwrap();
+        assert_eq!(out[8], 0.0);
+
+        let mut x = low.clone();
+        x[4] = f64::NAN;
+        assert!(stoch_d_sma_fused::<2>(&high, &x, &close).is_none());
+        let mut x = low.clone();
+        x[0] = f64::NAN;
+        assert!(stoch_d_sma_fused::<2>(&high, &x, &close).is_none());
+        let mut x = low.clone();
+        x[2] = f64::NAN;
+        assert!(stoch_d_sma_fused::<2>(&high, &x, &close).is_none());
+
+        let mut x = high.clone();
+        x[4] = f64::NAN;
+        assert!(stoch_d_sma_fused::<2>(&x, &low, &close).is_none());
+        let mut x = high.clone();
+        x[0] = f64::NAN;
+        assert!(stoch_d_sma_fused::<2>(&x, &low, &close).is_none());
+        let mut x = high.clone();
+        x[2] = f64::NAN;
+        assert!(stoch_d_sma_fused::<2>(&x, &low, &close).is_none());
+
+        let mut x = close.clone();
+        x[4] = f64::NAN;
+        assert!(stoch_d_sma_fused::<2>(&high, &low, &x).is_none());
+    }
+
+    #[test]
+    fn same_series_and_stochrsi_paths_cover_guard_branches() {
+        let flat = vec![7.0; 8];
+        let out = stoch_fastk_same_series_small_window(&flat, 5).unwrap();
+        assert_eq!(out[4], 0.0);
+
+        let mut x = (0..8).map(|i| 10.0 + i as f64).collect::<Vec<_>>();
+        x[4] = f64::NAN;
+        assert!(stoch_fastk_same_series_small_window(&x, 5).is_none());
+        let mut x = (0..8).map(|i| 10.0 + i as f64).collect::<Vec<_>>();
+        x[0] = f64::NAN;
+        assert!(stoch_fastk_same_series_small_window(&x, 5).is_none());
+        let mut x = (0..8).map(|i| 10.0 + i as f64).collect::<Vec<_>>();
+        x[2] = f64::NAN;
+        assert!(stoch_fastk_same_series_small_window(&x, 5).is_none());
+
+        let short = (0..20).map(|i| 100.0 + i as f64).collect::<Vec<_>>();
+        let out = stochrsi_d_default_sma(&short).unwrap();
+        assert!(out.iter().all(|v| v.is_nan()));
+
+        let long = (0..80)
+            .map(|i| 100.0 + (i as f64 * 0.17).sin() * 4.0 + i as f64 * 0.1)
+            .collect::<Vec<_>>();
+        let out = stochrsi_d_default_sma(&long).unwrap();
+        assert!(out.iter().any(|v| v.is_finite()));
+
+        let mut with_nan = long;
+        with_nan[20] = f64::NAN;
+        assert!(stochrsi_d_default_sma(&with_nan).is_none());
+    }
 }

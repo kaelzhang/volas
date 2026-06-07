@@ -239,11 +239,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assert_bits_reports_length_mismatch() {
+        let err = std::panic::catch_unwind(|| {
+            test_support::assert_bits(&[1.0], &[], "length-check");
+        });
+        assert!(err.is_err());
+    }
+
     /// Warm-up guards reached only by degenerate periods / inputs.
     #[test]
     fn warmup_guards() {
         assert!(mom(&[1.0, 2.0], 5).iter().all(|x| x.is_nan())); // period >= n
         assert!(roc(&[1.0, 2.0], 5).iter().all(|x| x.is_nan()));
+        assert!(rocp(&[1.0, 2.0], 5).iter().all(|x| x.is_nan()));
+        assert_eq!(rocr(&[0.0, 2.0], 1)[1], 0.0);
         assert!(imi(&[1.0, 2.0], &[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
         assert!(aroon_up(&[1.0], &[1.0], 0).iter().all(|x| x.is_nan())); // period == 0
         let f = vec![100.0; 5];

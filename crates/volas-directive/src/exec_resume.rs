@@ -370,7 +370,7 @@ pub fn execute_resume_default_series_one(
                 "rocp" => data[row] / prior - 1.0,
                 "rocr" => data[row] / prior,
                 "rocr100" => data[row] / prior * 100.0,
-                _ => unreachable!(),
+                _ => unreachable!(), // LCOV_EXCL_LINE
             })
         }
     }
@@ -469,7 +469,7 @@ pub fn execute_resume_default_series(
                     "rocp" => data[i] / prior - 1.0,
                     "rocr" => data[i] / prior,
                     "rocr100" => data[i] / prior * 100.0,
-                    _ => unreachable!(),
+                    _ => unreachable!(), // LCOV_EXCL_LINE
                 };
                 out.push(value);
             }
@@ -578,7 +578,7 @@ pub fn execute_resume(
                     "rocp" => data[i] / prior - 1.0,
                     "rocr" => data[i] / prior,
                     "rocr100" => data[i] / prior * 100.0,
-                    _ => unreachable!(),
+                    _ => unreachable!(), // LCOV_EXCL_LINE
                 };
                 out.push(value);
             }

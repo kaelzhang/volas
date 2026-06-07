@@ -17,7 +17,8 @@ lines are counted, as that tool already does).
 Usage: lcov_union.py CARGO.lcov PYTEST.lcov [UNION_OUT.lcov]
 If UNION_OUT is given, the merged (max-count) LCOV is written there too, so it
 can be rendered to HTML with `genhtml`.
-Exit code is non-zero if either input is missing or empty.
+Exit code is non-zero if either input is missing / empty or if any in-scope
+source line remains uncovered.
 """
 import os
 import sys
@@ -129,6 +130,9 @@ def main():
                 found = len(merged[name])
                 hit = sum(1 for c in merged[name].values() if c > 0)
                 out.write(f"LF:{found}\nLH:{hit}\nend_of_record\n")
+
+    if gaps:
+        sys.exit("error: coverage is below 100%")
 
 
 if __name__ == "__main__":
