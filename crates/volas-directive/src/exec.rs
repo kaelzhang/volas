@@ -571,18 +571,11 @@ fn exec_command(
             f64col(v)
         }
 
-        ("style", sub) => {
-            // Direction from the sub-command (`style.bullish`, also `cdl.bullish`) or,
-            // for back-compat, the first argument (`style:bullish`).
-            let style = match sub.or_else(|| arg_at(args, 0)) {
-                Some("bullish") => ind::Style::Bullish,
-                Some("bearish") => ind::Style::Bearish,
-                other => {
-                    return Err(VolasError::Value(format!(
-                        "style should be 'bullish' or 'bearish', got '{}'",
-                        other.unwrap_or("")
-                    )))
-                }
+        ("style", Some(sub @ ("bullish" | "bearish"))) => {
+            let style = match sub {
+                "bullish" => ind::Style::Bullish,
+                "bearish" => ind::Style::Bearish,
+                _ => unreachable!("style color sub-command is validated by command_spec"),
             };
             let open = series_f64(df, series, 0, "open")?;
             let close = series_f64(df, series, 1, "close")?;
@@ -1214,9 +1207,9 @@ mod tests {
             "donchian.lower:20",
             "increase:1",
             "increase:3,-1@close",
-            "style:bullish",
-            "style:bearish",
-            "repeat:2@(style:bullish)",
+            "style.bullish",
+            "style.bearish",
+            "repeat:2@(style.bullish)",
             "repeat:1@(close>10)",
             "repeat:2@close", // non-bool series -> coerced
             "change:2",
@@ -1271,7 +1264,7 @@ mod tests {
         assert!(is_err("kdj:9"), "missing required sub-command");
         assert!(is_err("macd.bogus"), "unknown sub-command");
         assert!(is_err("ma:abc"), "non-integer arg");
-        assert!(is_err("style:cartoon"), "invalid style descriptor");
+        assert!(is_err("style.cartoon"), "invalid style sub-command");
         assert!(is_err("hv:10,5x"), "invalid time-frame unit");
         assert!(is_err("hv:10,xm"), "invalid time-frame number");
     }

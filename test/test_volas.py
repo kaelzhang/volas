@@ -150,8 +150,7 @@ PARITY = [
     'llv:10', 'hhv:10', 'donchian:20', 'donchian.upper:20', 'donchian.lower:20',
     'hv:20,1d,252',
     'change@close', 'change:3@(boll)',
-    'increase:3@close', 'increase:3,-1@close', 'style:bullish', 'style:bearish',
-    'repeat:2@(style:bullish)',
+    'increase:3@close', 'increase:3,-1@close',
     'ma:2@(boll.upper)',
     'close > open', 'close >= open', 'close < open', 'close == open',
     'ma:5 > ma:10', 'kdj.j < 0',
@@ -218,9 +217,9 @@ def test_empty_directive_raises(stock):
         stock.exec('')
 
 
-def test_style_directive_invalid_raises(stock):
+def test_style_directive_invalid_subcommand_raises(stock):
     with pytest.raises((ValueError, KeyError)):
-        stock.exec('style:sideways')
+        stock.exec('style.sideways')
 
 
 def test_bbw_matches_definition(stock):

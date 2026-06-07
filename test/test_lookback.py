@@ -30,8 +30,8 @@ CASES = [
     # Historical Volatility (lookback = period, due to log return)
     ('hv:20', 20),
     # Tools
-    ('increase:1@close', 0), ('style:bullish', 0),
-    ('repeat:2@(style:bullish)', 1), ('change:2@close', 1),
+    ('increase:1@close', 0), ('style.bullish', 0),
+    ('repeat:2@(style.bullish)', 1), ('change:2@close', 1),
     # Compound directives: lookback = base_lb + series_lb
     ('repeat:5@(close > boll.upper)', 23),
     ('repeat:3@(ma:10 > ma:20)', 21),

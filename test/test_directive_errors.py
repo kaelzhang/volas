@@ -41,7 +41,7 @@ def test_syntax_error(df, directive):
     ('kdj', 'requires a sub-command'),     # sub required
     ('ema:2,3', 'at most'),                # too many arguments (ema takes one period)
     ('ema:2,3@close', 'at most'),
-    ('style:cartoon', 'bullish'),          # bad style value
+    ('style.cartoon', 'sub-command'),
 ])
 def test_value_error(df, directive, fragment):
     with pytest.raises(DirectiveValueError) as ei:

@@ -258,8 +258,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("donchian", Some("lower")) => (vec![Required], vec!["low"]),
         ("hv", None) => (vec![Required, Str("1d"), I64(252)], vec!["close"]),
         ("increase", None) => (vec![Int(1), I64(1)], vec!["close"]),
-        ("style", None) => (vec![Required], vec!["open", "close"]), // arg form: style:bullish
-        ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]), // style.bullish
+        ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns
         // taking a `penetration` ratio accept one optional Float arg (default 0.5).

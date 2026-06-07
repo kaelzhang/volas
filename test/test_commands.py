@@ -27,12 +27,11 @@ def test_command_names_are_case_insensitive(stock):
 
 
 def test_style_namespace_and_cdl_alias(stock):
-    """style.bullish/.bearish (sub form) and the `cdl` alias match the style:bullish
-    arg form; `cdl` is case-insensitive too."""
-    bull = np.asarray(stock['style:bullish'], dtype=float)
+    """style.bullish/.bearish and the `cdl` alias match; `cdl` is case-insensitive too."""
+    bull = np.asarray(stock['style.bullish'], dtype=float)
     for d in ('style.bullish', 'cdl.bullish', 'CDL.bullish'):
         np.testing.assert_array_equal(np.asarray(stock[d], dtype=float), bull)
-    bear = np.asarray(stock['style:bearish'], dtype=float)
+    bear = np.asarray(stock['style.bearish'], dtype=float)
     for d in ('style.bearish', 'cdl.bearish'):
         np.testing.assert_array_equal(np.asarray(stock[d], dtype=float), bear)
 
@@ -114,10 +113,10 @@ def test_increase(stock):
 def test_repeat(stock):
     stock = stock[:'2020-02-13']  # type: ignore
 
-    assert stock['repeat:1@(style:bullish)']['2020-02-13']
-    assert stock['repeat:2@(style:bullish)']['2020-02-13']
-    assert stock['repeat:6@(style:bullish)']['2020-02-13']
-    assert not stock['repeat:7@(style:bullish)']['2020-02-13']
+    assert stock['repeat:1@(style.bullish)']['2020-02-13']
+    assert stock['repeat:2@(style.bullish)']['2020-02-13']
+    assert stock['repeat:6@(style.bullish)']['2020-02-13']
+    assert not stock['repeat:7@(style.bullish)']['2020-02-13']
 
 
 def test_indexing(stock):

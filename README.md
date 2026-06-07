@@ -1217,7 +1217,6 @@ df['increase:5,-1@close']
 ### `style`, Candle Color
 
 ```
-style:<style>@<open>,<close>
 style.<style>@<open>,<close>
 ```
 
@@ -1231,11 +1230,11 @@ patterns are exposed as `cdl.<pattern>` in the table below.
 
 ```py
 # Uses default open and close columns
-df['style:bullish']
+df['style.bullish']
 df['style.bearish']
 
 # Specify custom columns
-df['style:bearish@open,close']
+df['style.bearish@open,close']
 ```
 
 ### `repeat`, Consecutive Boolean Condition
@@ -1253,7 +1252,7 @@ whether `True` repeats for `repeat` consecutive periods.
 
 ```py
 # Whether bullish candlesticks repeat for 3 periods
-df['repeat:3@(style:bullish)']
+df['repeat:3@(style.bullish)']
 
 # Repeat check on a directive expression
 df['repeat:5@(close > ma:20)']
