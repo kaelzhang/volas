@@ -1,6 +1,7 @@
 use ndarray::Array1;
 
 use super::av;
+use super::stochastic::stoch_fastk;
 use crate::kernels;
 
 // ---------------------------------------------------------------------------
@@ -17,9 +18,64 @@ pub fn llv(data: &[f64], period: usize) -> Vec<f64> {
 
 /// Highest of high values.
 pub fn hhv(data: &[f64], period: usize) -> Vec<f64> {
+    // TA-Lib `MAX` is tuned around a track-and-rescan loop for small default periods.
+    // For `hhv:10`, pre-scan once for NaN and then keep that C-shaped tracker across
+    // all lengths; NaN-bearing data falls back to `rolling_max`'s precise semantics.
+    if period == 10 && period <= data.len() && !data.iter().any(|x| x.is_nan()) {
+        return hhv10_no_nan(data);
+    }
     kernels::rolling_max(av(data), period)
         .into_raw_vec_and_offset()
         .0
+}
+
+fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
+    let n = data.len();
+    let mut out = Vec::with_capacity(n);
+    unsafe {
+        out.set_len(n);
+    }
+    out[..9].fill(f64::NAN);
+
+    let src = data.as_ptr();
+    let dst = out.as_mut_ptr();
+    let mut highest_idx = 0usize;
+    let mut highest = unsafe { *src };
+    for i in 1..10 {
+        let value = unsafe { *src.add(i) };
+        if value > highest {
+            highest_idx = i;
+            highest = value;
+        }
+    }
+    unsafe {
+        *dst.add(9) = highest;
+    }
+
+    for today in 10..n {
+        let trailing = today - 9;
+        let x = unsafe { *src.add(today) };
+        if highest_idx < trailing {
+            highest_idx = trailing;
+            highest = unsafe { *src.add(trailing) };
+            let mut idx = trailing + 1;
+            while idx <= today {
+                let value = unsafe { *src.add(idx) };
+                if value > highest {
+                    highest_idx = idx;
+                    highest = value;
+                }
+                idx += 1;
+            }
+        } else if x >= highest {
+            highest_idx = today;
+            highest = x;
+        }
+        unsafe {
+            *dst.add(today) = highest;
+        }
+    }
+    out
 }
 
 /// Raw Stochastic Value.
@@ -37,52 +93,6 @@ pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
         }
     }
     result
-}
-
-/// TA-Lib stochastic raw %K: `100·(close − LL) / (HH − LL)` over `period` (HH/LL the
-/// highest high / lowest low). A flat range yields 0, but — unlike [`rsv`] — the
-/// warm-up is NaN, so the smoothing MAs in `stoch`/`stochf` begin at the right row.
-/// Lookback `period-1`.
-pub fn stoch_fastk(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // One fused pass for max(high) and min(low) instead of two separate van Herk sweeps.
-    let (hh, ll) = kernels::rolling_max_min(high, low, period);
-    let n = close.len();
-    let mut out = vec![f64::NAN; n];
-    for i in 0..n {
-        if !hh[i].is_nan() {
-            let diff = hh[i] - ll[i];
-            out[i] = if diff != 0.0 {
-                100.0 * (close[i] - ll[i]) / diff
-            } else {
-                0.0
-            };
-        }
-    }
-    out
-}
-
-/// TA-Lib StochRSI raw %K: the stochastic %K of the RSI line — `stoch_fastk` applied
-/// to `rsi(close, rsi_period)` over `fastk_period`. Because RSI itself warms up, the
-/// %K is masked to NaN until a full `fastk_period` window of finite RSI is available
-/// (index `rsi_period + fastk_period - 1`). The `fastd` line is then `ma_typed` of this.
-pub fn stochrsi_fastk(close: &[f64], rsi_period: usize, fastk_period: usize) -> Vec<f64> {
-    let rsi = rsi(close, rsi_period);
-    let n = rsi.len();
-    let mut fk = vec![f64::NAN; n];
-    // RSI warms up with a leading-NaN prefix, so a rolling min/max over the whole line
-    // fails the NaN-free check and drops to the slow monotonic-deque path — StochRSI's
-    // hot spot. Run the stochastic %K on RSI's *finite tail* instead (NaN-free → the
-    // van Herk fast path) and place it back at `start`. The first valid value then
-    // lands at the first fully-finite RSI window — exactly the rows the old explicit
-    // mask kept — and the result is bit-identical (min/max over a finite window is
-    // order-independent and exact), so the separate masking pass is no longer needed.
-    let start = rsi.iter().position(|x| !x.is_nan()).unwrap_or(n);
-    let tail = &rsi[start..];
-    if tail.len() >= fastk_period {
-        let fk_tail = stoch_fastk(tail, tail, tail, fastk_period);
-        fk[start..].copy_from_slice(&fk_tail);
-    }
-    fk
 }
 
 // --- StochRSI state-carry (additive; the full-recompute fallback stays correct) ---
@@ -164,8 +174,8 @@ pub fn stochrsi_resume(
     let mut buf = Vec::with_capacity(c + new_rsi.len());
     buf.extend_from_slice(&state[2..]); // rsi[from-c .. from)
     buf.extend_from_slice(&new_rsi); // rsi[from .. n)
-    // Every buffered RSI must be finite for the van-Herk %K (the warm guard above ensures
-    // `from - c >= rsi_period`, so it is) — bail out defensively otherwise.
+                                     // Every buffered RSI must be finite for the van-Herk %K (the warm guard above ensures
+                                     // `from - c >= rsi_period`, so it is) — bail out defensively otherwise.
     if buf.iter().any(|x| x.is_nan()) {
         return None;
     }
@@ -332,7 +342,11 @@ pub fn kdj_resume(
             for &r in rsv.iter().skip(skip) {
                 k_prev = bk * k_prev + ak * r;
                 d_prev = bd * d_prev + ad * k_prev;
-                out.push(if is_j { 3.0 * k_prev - 2.0 * d_prev } else { d_prev });
+                out.push(if is_j {
+                    3.0 * k_prev - 2.0 * d_prev
+                } else {
+                    d_prev
+                });
             }
             Some((out, vec![k_prev, d_prev]))
         }
@@ -472,7 +486,12 @@ pub fn rsi_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
 /// Resume [`rsi`] from `state = [avg_gain, avg_loss]` over rows `[from, n)`. `None` at
 /// `from == 0`. Reads only `close[from-1..]`. The recurrence and the
 /// `100 - 100/(1 + g/l)` (flat-loss → 100) output match [`rsi`] bit-for-bit.
-pub fn rsi_resume(close: &[f64], period: usize, from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+pub fn rsi_resume(
+    close: &[f64],
+    period: usize,
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
     if from == 0 {
         return None;
     }
@@ -528,7 +547,12 @@ pub fn cmo_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
 /// Resume [`cmo`] from `state = [avg_gain, avg_loss]` over rows `[from, n)`. `None` at
 /// `from == 0`. Reads only `close[from-1..]`. The fused Wilder recurrence and the
 /// `100·(g-l)/(g+l)` (flat-window → 0) output match [`cmo`] bit-for-bit.
-pub fn cmo_resume(close: &[f64], period: usize, from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+pub fn cmo_resume(
+    close: &[f64],
+    period: usize,
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
     if from == 0 {
         return None;
     }
@@ -577,6 +601,7 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indicators::stochrsi_fastk;
     use crate::indicators::test_support::*;
 
     /// StochRSI `.k` and `.d` resumes, fed the carried RSI Wilder pair + context tail of
@@ -658,9 +683,17 @@ mod tests {
         // large offset; the carried %K/%D continue the recursion past the dropped head.
         for &from in &[p - 1, p, 30, 80, 149] {
             // `.k` carries just [%K].
-            let st_k =
-                kdj_final_state(&high[..from], &low[..from], &close[..from], p, pk, pd, init, false)
-                    .unwrap();
+            let st_k = kdj_final_state(
+                &high[..from],
+                &low[..from],
+                &close[..from],
+                p,
+                pk,
+                pd,
+                init,
+                false,
+            )
+            .unwrap();
             assert_eq!(st_k.len(), 1, "kdj.k carries [%K]");
             let (tail, ret) =
                 kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, from, &st_k).unwrap();
@@ -668,9 +701,17 @@ mod tests {
             assert_eq!(ret.len(), 1);
 
             // `.d` / `.j` carry [%K, %D].
-            let st_d =
-                kdj_final_state(&high[..from], &low[..from], &close[..from], p, pk, pd, init, true)
-                    .unwrap();
+            let st_d = kdj_final_state(
+                &high[..from],
+                &low[..from],
+                &close[..from],
+                p,
+                pk,
+                pd,
+                init,
+                true,
+            )
+            .unwrap();
             assert_eq!(st_d.len(), 2, "kdj.d/.j carry [%K, %D]");
             let (tail, ret) =
                 kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::D, from, &st_d).unwrap();
@@ -693,13 +734,15 @@ mod tests {
 
         assert!(kdj_final_state(&[], &[], &[], p, pk, pd, init, false).is_none()); // empty series
 
-        let st = kdj_final_state(&high[..40], &low[..40], &close[..40], p, pk, pd, init, true).unwrap();
+        let st =
+            kdj_final_state(&high[..40], &low[..40], &close[..40], p, pk, pd, init, true).unwrap();
         assert!(kdj_resume(&high, &low, &close, 0, pk, pd, KdjLine::K, 40, &st).is_none()); // period_rsv == 0
         assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, 0, &st).is_none()); // from == 0
         assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, n + 1, &st).is_none()); // from > n
         assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, p - 2, &st).is_none()); // from + 1 < p
         assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, 40, &[]).is_none()); // empty state
-        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::D, 40, &[1.0]).is_none()); // `.d` needs [%K, %D]
+        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::D, 40, &[1.0]).is_none());
+        // `.d` needs [%K, %D]
     }
 
     /// RSI / CMO resume parity plus the flat-window output arms. A strictly increasing

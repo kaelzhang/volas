@@ -134,17 +134,61 @@ struct Setting {
 }
 
 use RangeType::{HighLow, RealBody, Shadows};
-const BODY_LONG: Setting = Setting { range: RealBody, avg_period: 10, factor: 1.0 };
-const BODY_VERY_LONG: Setting = Setting { range: RealBody, avg_period: 10, factor: 3.0 };
-const BODY_SHORT: Setting = Setting { range: RealBody, avg_period: 10, factor: 1.0 };
-const BODY_DOJI: Setting = Setting { range: HighLow, avg_period: 10, factor: 0.1 };
-const SHADOW_LONG: Setting = Setting { range: RealBody, avg_period: 0, factor: 1.0 };
-const SHADOW_VERY_LONG: Setting = Setting { range: RealBody, avg_period: 0, factor: 2.0 };
-const SHADOW_SHORT: Setting = Setting { range: Shadows, avg_period: 10, factor: 1.0 };
-const SHADOW_VERY_SHORT: Setting = Setting { range: HighLow, avg_period: 10, factor: 0.1 };
-const NEAR: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.2 };
-const FAR: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.6 };
-const EQUAL: Setting = Setting { range: HighLow, avg_period: 5, factor: 0.05 };
+const BODY_LONG: Setting = Setting {
+    range: RealBody,
+    avg_period: 10,
+    factor: 1.0,
+};
+const BODY_VERY_LONG: Setting = Setting {
+    range: RealBody,
+    avg_period: 10,
+    factor: 3.0,
+};
+const BODY_SHORT: Setting = Setting {
+    range: RealBody,
+    avg_period: 10,
+    factor: 1.0,
+};
+const BODY_DOJI: Setting = Setting {
+    range: HighLow,
+    avg_period: 10,
+    factor: 0.1,
+};
+const SHADOW_LONG: Setting = Setting {
+    range: RealBody,
+    avg_period: 0,
+    factor: 1.0,
+};
+const SHADOW_VERY_LONG: Setting = Setting {
+    range: RealBody,
+    avg_period: 0,
+    factor: 2.0,
+};
+const SHADOW_SHORT: Setting = Setting {
+    range: Shadows,
+    avg_period: 10,
+    factor: 1.0,
+};
+const SHADOW_VERY_SHORT: Setting = Setting {
+    range: HighLow,
+    avg_period: 10,
+    factor: 0.1,
+};
+const NEAR: Setting = Setting {
+    range: HighLow,
+    avg_period: 5,
+    factor: 0.2,
+};
+const FAR: Setting = Setting {
+    range: HighLow,
+    avg_period: 5,
+    factor: 0.6,
+};
+const EQUAL: Setting = Setting {
+    range: HighLow,
+    avg_period: 5,
+    factor: 0.05,
+};
 
 // Settings not yet consumed by a landed pattern (shrinks to nothing as patterns arrive).
 #[allow(dead_code)]
@@ -225,6 +269,16 @@ fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usi
         1.0
     };
     s.factor * base / div
+}
+
+#[inline]
+fn candle_average_from_total(s: Setting, total: f64) -> f64 {
+    let div = if matches!(s.range, RangeType::Shadows) {
+        2.0
+    } else {
+        1.0
+    };
+    s.factor * (total / s.avg_period as f64) / div
 }
 
 /// TA-Lib's `TA_CANDLEAVERAGE` precomputed for **every** bar in O(n): a running window
@@ -473,11 +527,36 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
 /// per bar. Shared by all pattern submodules.
 #[inline]
 fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
-    // Warm-up NaN, then the valid region once via `extend` (no `vec![NaN; n]` +
-    // index-overwrite, which writes `[lookback, n)` twice).
-    let mut out = vec![f64::NAN; lookback.min(n)];
-    out.extend((lookback..n).map(f));
+    let warm = lookback.min(n);
+    let mut out = Vec::with_capacity(n);
+    // Write the candle result once: warm-up NaNs first, then a tight valid-region
+    // loop. The old `extend(map(...))` measured slower for simple two-bar patterns.
+    unsafe {
+        out.set_len(n);
+    }
+    out[..warm].fill(f64::NAN);
+    let mut i = warm;
+    while i < n {
+        out[i] = f(i);
+        i += 1;
+    }
     out
+}
+
+/// Output buffer for specialised CDL loops: initialize only the warm-up NaN prefix and
+/// let the caller write every valid row exactly once. `f64` has no destructor, so the
+/// temporary uninitialised valid region is safe as long as callers fill `[lookback, n)`.
+#[inline]
+fn candle_output(n: usize, lookback: usize) -> Option<Vec<f64>> {
+    if lookback >= n {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n);
+    unsafe {
+        out.set_len(n);
+    }
+    out[..lookback].fill(f64::NAN);
+    Some(out)
 }
 
 #[cfg(test)]
@@ -509,7 +588,15 @@ mod tests {
         // avg_period-0 (SHADOW_LONG) and a Shadows (SHADOW_SHORT) setting covers the
         // body's ÷2 and own-range branches in both the seed and per-bar loops.
         each_bar_avg2([BODY_LONG, NEAR], 0, &o, &h, &l, &c, |_, a, _| a[0]);
-        each_bar_avg2([SHADOW_LONG, SHADOW_SHORT], 12, &o, &h, &l, &c, |_, a, b| a[0] + b[0]);
+        each_bar_avg2(
+            [SHADOW_LONG, SHADOW_SHORT],
+            12,
+            &o,
+            &h,
+            &l,
+            &c,
+            |_, a, b| a[0] + b[0],
+        );
 
         // each_bar_avg_n: the lookback guard, a Shadows setting (÷2), and an
         // avg_period-0 setting (the bar's own range).

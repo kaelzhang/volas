@@ -4,10 +4,10 @@ use std::borrow::Cow;
 
 use crate::spec::canon_sub;
 use crate::types::{Node, Op, UnaryOp};
+use volas_compute::indicators as ind;
 use volas_core::Column;
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
-use volas_compute::indicators as ind;
 
 /// Execute a directive node against `df`.
 pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
@@ -96,8 +96,7 @@ fn apply_cmp(op: Op, l: &[f64], r: &[f64]) -> Vec<bool> {
         Op::CrossUp => (1..n).for_each(|i| out[i] = l[i - 1] <= r[i - 1] && l[i] > r[i]),
         Op::CrossDown => (1..n).for_each(|i| out[i] = l[i - 1] >= r[i - 1] && l[i] < r[i]),
         Op::Cross => (1..n).for_each(|i| {
-            out[i] = (l[i - 1] <= r[i - 1] && l[i] > r[i])
-                || (l[i - 1] >= r[i - 1] && l[i] < r[i])
+            out[i] = (l[i - 1] <= r[i - 1] && l[i] > r[i]) || (l[i - 1] >= r[i - 1] && l[i] < r[i])
         }),
         _ => unreachable!("non-comparison op in apply_cmp"), // LCOV_EXCL_LINE
     }
@@ -110,7 +109,11 @@ fn arg_at<'a>(args: &'a [Option<String>], i: usize) -> Option<&'a str> {
     args.get(i).and_then(|o| o.as_deref())
 }
 
-fn arg_usize(args: &[Option<String>], i: usize, default: Option<usize>) -> Result<usize> {
+pub(crate) fn arg_usize(
+    args: &[Option<String>],
+    i: usize,
+    default: Option<usize>,
+) -> Result<usize> {
     match arg_at(args, i) {
         Some(s) => s
             .parse()
@@ -119,7 +122,7 @@ fn arg_usize(args: &[Option<String>], i: usize, default: Option<usize>) -> Resul
     }
 }
 
-fn arg_f64(args: &[Option<String>], i: usize, default: f64) -> Result<f64> {
+pub(crate) fn arg_f64(args: &[Option<String>], i: usize, default: f64) -> Result<f64> {
     match arg_at(args, i) {
         Some(s) => s
             .parse()
@@ -143,7 +146,7 @@ fn arg_i64(args: &[Option<String>], i: usize, default: i64) -> Result<i64> {
 /// (`Cow::Borrowed`, no copy — the common case, e.g. `close`/`high`/`low`); a
 /// computed sub-expression or a non-`F64` column is materialised (`Cow::Owned`).
 /// Callers pass `&resolved` to the kernels, which deref-coerces to `&[f64]`.
-fn series_f64<'a>(
+pub(crate) fn series_f64<'a>(
     df: &'a DataFrame,
     series: &[Node],
     i: usize,
@@ -175,7 +178,9 @@ fn series_f64_required<'a>(df: &'a DataFrame, series: &[Node], i: usize) -> Resu
             "series argument #{i} is required"
         ))),
         Some(node) => Ok(Cow::Owned(execute(df, node)?.to_f64_vec())),
-        None => Err(VolasError::Value(format!("series argument #{i} is required"))),
+        None => Err(VolasError::Value(format!(
+            "series argument #{i} is required"
+        ))),
     }
 }
 
@@ -188,7 +193,6 @@ fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
         other => Ok(other.to_f64_vec().iter().map(|&x| x != 0.0).collect()),
     }
 }
-
 
 /// Dispatch a TA-Lib MA-type code to the matching moving average over `data`.
 /// Codes follow TA-Lib's `TA_MAType`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
@@ -305,7 +309,12 @@ fn exec_command(
         ("sar", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
-            f64col(ind::sar(&high, &low, arg_f64(args, 0, 0.02)?, arg_f64(args, 1, 0.2)?))
+            f64col(ind::sar(
+                &high,
+                &low,
+                arg_f64(args, 0, 0.02)?,
+                arg_f64(args, 1, 0.2)?,
+            ))
         }
         ("sarext", _) => {
             let high = series_f64(df, series, 0, "high")?;
@@ -336,14 +345,25 @@ fn exec_command(
         // natural start (best practice, like macd); signal/histogram follow.
         ("macdext", sub) => {
             let data = close(0)?;
-            let f = ma_typed(&data, arg_usize(args, 0, Some(12))?, arg_usize(args, 1, Some(0))?)?;
-            let s = ma_typed(&data, arg_usize(args, 2, Some(26))?, arg_usize(args, 3, Some(0))?)?;
+            let f = ma_typed(
+                &data,
+                arg_usize(args, 0, Some(12))?,
+                arg_usize(args, 1, Some(0))?,
+            )?;
+            let s = ma_typed(
+                &data,
+                arg_usize(args, 2, Some(26))?,
+                arg_usize(args, 3, Some(0))?,
+            )?;
             let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
             match sub {
                 None => f64col(line),
                 _ => {
-                    let signal =
-                        ma_typed(&line, arg_usize(args, 4, Some(9))?, arg_usize(args, 5, Some(0))?)?;
+                    let signal = ma_typed(
+                        &line,
+                        arg_usize(args, 4, Some(9))?,
+                        arg_usize(args, 5, Some(0))?,
+                    )?;
                     if sub == Some("signal") {
                         f64col(signal)
                     } else {
@@ -357,12 +377,18 @@ fn exec_command(
             let mt = arg_usize(args, 2, Some(0))?;
             let f = ma_typed(&data, arg_usize(args, 0, Some(12))?, mt)?;
             let s = ma_typed(&data, arg_usize(args, 1, Some(26))?, mt)?;
-            f64col((0..data.len()).map(|i| (f[i] - s[i]) / s[i] * 100.0).collect())
+            f64col(
+                (0..data.len())
+                    .map(|i| (f[i] - s[i]) / s[i] * 100.0)
+                    .collect(),
+            )
         }
 
-        ("macd", None) => {
-            f64col(ind::macd(&close(0)?, arg_usize(args, 0, Some(12))?, arg_usize(args, 1, Some(26))?))
-        }
+        ("macd", None) => f64col(ind::macd(
+            &close(0)?,
+            arg_usize(args, 0, Some(12))?,
+            arg_usize(args, 1, Some(26))?,
+        )),
         ("macd", Some("signal")) => f64col(ind::macd_signal(
             &close(0)?,
             arg_usize(args, 0, Some(12))?,
@@ -379,12 +405,18 @@ fn exec_command(
         // MACDFIX: MACD with fast/slow fixed at 12/26; only the signal period is
         // configurable. Reuses the (verified) macd line / signal / histogram.
         ("macdfix", None) => f64col(ind::macd(&close(0)?, 12, 26)),
-        ("macdfix", Some("signal")) => {
-            f64col(ind::macd_signal(&close(0)?, 12, 26, arg_usize(args, 0, Some(9))?))
-        }
-        ("macdfix", Some("histogram")) => {
-            f64col(ind::macd_histogram(&close(0)?, 12, 26, arg_usize(args, 0, Some(9))?))
-        }
+        ("macdfix", Some("signal")) => f64col(ind::macd_signal(
+            &close(0)?,
+            12,
+            26,
+            arg_usize(args, 0, Some(9))?,
+        )),
+        ("macdfix", Some("histogram")) => f64col(ind::macd_histogram(
+            &close(0)?,
+            12,
+            26,
+            arg_usize(args, 0, Some(9))?,
+        )),
 
         ("boll", None) => f64col(ind::boll(&close(0)?, arg_usize(args, 0, Some(20))?)),
         ("boll", Some("upper")) => f64col(ind::boll_upper(
@@ -399,18 +431,27 @@ fn exec_command(
         )),
         ("bbw", _) => f64col(ind::bbw(&close(0)?, arg_usize(args, 0, Some(20))?)),
 
-        ("accbands", None) => {
-            f64col(ind::accbands_middle(&close(0)?, arg_usize(args, 0, Some(20))?))
-        }
+        ("accbands", None) => f64col(ind::accbands_middle(
+            &close(0)?,
+            arg_usize(args, 0, Some(20))?,
+        )),
         ("accbands", Some("upper")) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
-            f64col(ind::accbands_upper(&high, &low, arg_usize(args, 0, Some(20))?))
+            f64col(ind::accbands_upper(
+                &high,
+                &low,
+                arg_usize(args, 0, Some(20))?,
+            ))
         }
         ("accbands", Some("lower")) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
-            f64col(ind::accbands_lower(&high, &low, arg_usize(args, 0, Some(20))?))
+            f64col(ind::accbands_lower(
+                &high,
+                &low,
+                arg_usize(args, 0, Some(20))?,
+            ))
         }
 
         ("rsv", _) => {
@@ -465,20 +506,28 @@ fn exec_command(
             f64col(ind::atr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
         }
 
-        ("llv", _) => f64col(ind::llv(&series_f64(df, series, 0, "low")?, arg_usize(args, 0, None)?)),
-        ("hhv", _) => f64col(ind::hhv(&series_f64(df, series, 0, "high")?, arg_usize(args, 0, None)?)),
+        ("llv", _) => f64col(ind::llv(
+            &series_f64(df, series, 0, "low")?,
+            arg_usize(args, 0, None)?,
+        )),
+        ("hhv", _) => f64col(ind::hhv(
+            &series_f64(df, series, 0, "high")?,
+            arg_usize(args, 0, None)?,
+        )),
 
         ("donchian", None) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
             f64col(ind::donchian(&high, &low, arg_usize(args, 0, None)?))
         }
-        ("donchian", Some("upper")) => {
-            f64col(ind::hhv(&series_f64(df, series, 0, "high")?, arg_usize(args, 0, None)?))
-        }
-        ("donchian", Some("lower")) => {
-            f64col(ind::llv(&series_f64(df, series, 0, "low")?, arg_usize(args, 0, None)?))
-        }
+        ("donchian", Some("upper")) => f64col(ind::hhv(
+            &series_f64(df, series, 0, "high")?,
+            arg_usize(args, 0, None)?,
+        )),
+        ("donchian", Some("lower")) => f64col(ind::llv(
+            &series_f64(df, series, 0, "low")?,
+            arg_usize(args, 0, None)?,
+        )),
 
         ("midpoint", _) => f64col(ind::midpoint(&close(0)?, arg_usize(args, 0, Some(14))?)),
         ("midprice", _) => {
@@ -534,7 +583,10 @@ fn exec_command(
             let close = series_f64(df, series, 1, "close")?;
             boolcol(ind::style(style, &open, &close))
         }
-        ("repeat", _) => boolcol(ind::repeat(&series_bool(df, series, 0)?, arg_usize(args, 0, Some(1))?)),
+        ("repeat", _) => boolcol(ind::repeat(
+            &series_bool(df, series, 0)?,
+            arg_usize(args, 0, Some(1))?,
+        )),
         ("change", _) => f64col(ind::change(&close(0)?, arg_usize(args, 0, Some(2))?)),
 
         ("mom", _) => f64col(ind::mom(&close(0)?, arg_usize(args, 0, Some(10))?)),
@@ -547,7 +599,12 @@ fn exec_command(
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
             let close = series_f64(df, series, 2, "close")?;
-            f64col(ind::willr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+            f64col(ind::willr(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(14))?,
+            ))
         }
         ("cmo", _) => f64col(ind::cmo(&close(0)?, arg_usize(args, 0, Some(14))?)),
         ("mfi", _) => {
@@ -555,7 +612,13 @@ fn exec_command(
             let low = series_f64(df, series, 1, "low")?;
             let close = series_f64(df, series, 2, "close")?;
             let volume = series_f64(df, series, 3, "volume")?;
-            f64col(ind::mfi(&high, &low, &close, &volume, arg_usize(args, 0, Some(14))?))
+            f64col(ind::mfi(
+                &high,
+                &low,
+                &close,
+                &volume,
+                arg_usize(args, 0, Some(14))?,
+            ))
         }
         ("ultosc", _) => {
             let high = series_f64(df, series, 0, "high")?;
@@ -575,36 +638,70 @@ fn exec_command(
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
             let close = series_f64(df, series, 2, "close")?;
-            let fastk = ind::stoch_fastk(&high, &low, &close, arg_usize(args, 0, Some(5))?);
-            let slowk = ma_typed(&fastk, arg_usize(args, 1, Some(3))?, arg_usize(args, 2, Some(0))?)?;
+            let fastk_period = arg_usize(args, 0, Some(5))?;
+            let slowk_period = arg_usize(args, 1, Some(3))?;
+            let slowk_matype = arg_usize(args, 2, Some(0))?;
+            let slowd_period = arg_usize(args, 3, Some(3))?;
+            let slowd_matype = arg_usize(args, 4, Some(0))?;
+            if line == "d"
+                && fastk_period == 5
+                && slowk_period == 3
+                && slowk_matype == 0
+                && slowd_period == 3
+                && slowd_matype == 0
+            {
+                if let Some(out) = ind::stoch_d_default_sma(&high, &low, &close) {
+                    return f64col(out);
+                }
+            }
+            let fastk = ind::stoch_fastk(&high, &low, &close, fastk_period);
+            let slowk = ma_typed(&fastk, slowk_period, slowk_matype)?;
             if line == "k" {
                 f64col(slowk)
             } else {
-                f64col(ma_typed(&slowk, arg_usize(args, 3, Some(3))?, arg_usize(args, 4, Some(0))?)?)
+                f64col(ma_typed(&slowk, slowd_period, slowd_matype)?)
             }
         }
         ("stochf", Some(line @ ("k" | "d"))) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
             let close = series_f64(df, series, 2, "close")?;
-            let fastk = ind::stoch_fastk(&high, &low, &close, arg_usize(args, 0, Some(5))?);
+            let fastk_period = arg_usize(args, 0, Some(5))?;
+            let fastd_period = arg_usize(args, 1, Some(3))?;
+            let fastd_matype = arg_usize(args, 2, Some(0))?;
+            if line == "d" && fastk_period == 5 && fastd_period == 3 && fastd_matype == 0 {
+                if let Some(out) = ind::stochf_d_default_sma(&high, &low, &close) {
+                    return f64col(out);
+                }
+            }
+            let fastk = ind::stoch_fastk(&high, &low, &close, fastk_period);
             if line == "k" {
                 f64col(fastk)
             } else {
-                f64col(ma_typed(&fastk, arg_usize(args, 1, Some(3))?, arg_usize(args, 2, Some(0))?)?)
+                f64col(ma_typed(&fastk, fastd_period, fastd_matype)?)
             }
         }
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let close = close(0)?;
-            let fastk = ind::stochrsi_fastk(
-                &close,
-                arg_usize(args, 0, Some(14))?,
-                arg_usize(args, 1, Some(5))?,
-            );
+            let rsi_period = arg_usize(args, 0, Some(14))?;
+            let fastk_period = arg_usize(args, 1, Some(5))?;
+            let fastd_period = arg_usize(args, 2, Some(3))?;
+            let fastd_matype = arg_usize(args, 3, Some(0))?;
+            if line == "d"
+                && rsi_period == 14
+                && fastk_period == 5
+                && fastd_period == 3
+                && fastd_matype == 0
+            {
+                if let Some(out) = ind::stochrsi_d_default_sma(&close) {
+                    return f64col(out);
+                }
+            }
+            let fastk = ind::stochrsi_fastk(&close, rsi_period, fastk_period);
             if line == "k" {
                 f64col(fastk)
             } else {
-                f64col(ma_typed(&fastk, arg_usize(args, 2, Some(3))?, arg_usize(args, 3, Some(0))?)?)
+                f64col(ma_typed(&fastk, fastd_period, fastd_matype)?)
             }
         }
 
@@ -623,13 +720,23 @@ fn exec_command(
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
             let close = series_f64(df, series, 2, "close")?;
-            f64col(ind::plus_di(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+            f64col(ind::plus_di(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(14))?,
+            ))
         }
         ("minus_di", _) => {
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
             let close = series_f64(df, series, 2, "close")?;
-            f64col(ind::minus_di(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+            f64col(ind::minus_di(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(14))?,
+            ))
         }
         ("dx", _) => {
             let high = series_f64(df, series, 0, "high")?;
@@ -647,7 +754,12 @@ fn exec_command(
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
             let close = series_f64(df, series, 2, "close")?;
-            f64col(ind::adxr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+            f64col(ind::adxr(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(14))?,
+            ))
         }
         ("cci", _) => {
             let high = series_f64(df, series, 0, "high")?;
@@ -695,7 +807,12 @@ fn exec_command(
             let high = series_f64(df, series, 0, "high")?;
             let low = series_f64(df, series, 1, "low")?;
             let close = series_f64(df, series, 2, "close")?;
-            f64col(ind::natr(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+            f64col(ind::natr(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(14))?,
+            ))
         }
         ("bop", _) => {
             let open = series_f64(df, series, 0, "open")?;
@@ -706,15 +823,18 @@ fn exec_command(
         }
 
         ("linearreg", _) => f64col(ind::linearreg(&close(0)?, arg_usize(args, 0, Some(14))?)),
-        ("linearreg_slope", _) => {
-            f64col(ind::linearreg_slope(&close(0)?, arg_usize(args, 0, Some(14))?))
-        }
-        ("linearreg_intercept", _) => {
-            f64col(ind::linearreg_intercept(&close(0)?, arg_usize(args, 0, Some(14))?))
-        }
-        ("linearreg_angle", _) => {
-            f64col(ind::linearreg_angle(&close(0)?, arg_usize(args, 0, Some(14))?))
-        }
+        ("linearreg_slope", _) => f64col(ind::linearreg_slope(
+            &close(0)?,
+            arg_usize(args, 0, Some(14))?,
+        )),
+        ("linearreg_intercept", _) => f64col(ind::linearreg_intercept(
+            &close(0)?,
+            arg_usize(args, 0, Some(14))?,
+        )),
+        ("linearreg_angle", _) => f64col(ind::linearreg_angle(
+            &close(0)?,
+            arg_usize(args, 0, Some(14))?,
+        )),
         ("tsf", _) => f64col(ind::tsf(&close(0)?, arg_usize(args, 0, Some(14))?)),
         // beta/correl relate two series: the first defaults to close, the second is required.
         ("correl", _) => {
@@ -797,617 +917,18 @@ fn exec_command(
         ("ht_phasor", Some("quadrature")) => f64col(ind::ht_phasor(&close(0)?).1),
         ("ht_sine", None) => f64col(ind::ht_sine(&close(0)?).0),
         ("ht_sine", Some("leadsine")) => f64col(ind::ht_sine(&close(0)?).1),
-        ("mama", None) => f64col(
-            ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).0,
-        ),
-        ("mama", Some("fama")) => f64col(
-            ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).1,
-        ),
+        ("mama", None) => {
+            f64col(ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).0)
+        }
+        ("mama", Some("fama")) => {
+            f64col(ind::mama(&close(0)?, arg_f64(args, 0, 0.5)?, arg_f64(args, 1, 0.05)?).1)
+        }
 
         (other, _) => Err(VolasError::Value(format!("unknown command '{other}'"))), // LCOV_EXCL_LINE
     }
 }
 
-// --- state-carry resume (additive; fallback path stays correct) -------------
-//
-// A recursive indicator's whole history compresses into a small fixed-size state
-// (a `Vec<f64>`). `initial_state` captures that state after a full compute;
-// `execute_resume` continues the recursion over only the new tail rows, producing
-// values bit-identical to a fresh full recompute. Both return `None` for any
-// directive without a resume kernel, so the caller transparently falls back to the
-// correct full-recompute path. Only the canonical no-operand forms (the directives
-// volas auto-caches) are handled; an unusual `@`-operand override returns `None`
-// and stays on the fallback.
-
-/// Resolve a command node to `(name_lc, sub, args, series)` when it is a plain
-/// `Node::Command` (or a bare `Node::Name` no-arg command, e.g. `obv`/`ad`); `None`
-/// otherwise. The name is lower-cased and `cdl`→`style` aliased, matching
-/// [`exec_command`]. A `Node::Name` carries no sub / args / series — the same way
-/// [`execute`] dispatches it via `exec_command(df, name, None, &[], &[])`.
-fn as_command(node: &Node) -> Option<(String, Option<String>, &[Option<String>], &[Node])> {
-    let lc = |name: &str| {
-        let name = name.to_ascii_lowercase();
-        if name == "cdl" {
-            "style".to_string()
-        } else {
-            name
-        }
-    };
-    match node {
-        Node::Command(cmd) => Some((lc(&cmd.name), cmd.sub.clone(), &cmd.args, &cmd.series)),
-        Node::Name(name) if !name.is_empty() => Some((lc(name), None, &[], &[])),
-        _ => None,
-    }
-}
-
-/// The final recursive state after a full compute of `node` against `df`, matching
-/// the just-computed `computed` column. `None` when `node` has no resume kernel
-/// (the caller then keeps the full-recompute fallback). `computed` is accepted for
-/// kernels that can read their state off the output column directly; the cumulative
-/// family recomputes its (tiny) state from the raw inputs to stay bit-exact with
-/// the canonical kernel.
-pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<Vec<f64>> {
-    let (name, sub, args, series) = as_command(node)?;
-    let sub = sub.as_deref();
-    match (name.as_str(), sub) {
-        ("obv", _) => {
-            let real = series_f64(df, series, 0, "close").ok()?;
-            let volume = series_f64(df, series, 1, "volume").ok()?;
-            ind::obv_final_state(&real, &volume)
-        }
-        ("ad", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let volume = series_f64(df, series, 3, "volume").ok()?;
-            ind::ad_final_state(&high, &low, &close, &volume)
-        }
-        ("adosc", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let volume = series_f64(df, series, 3, "volume").ok()?;
-            let fast = arg_usize(args, 0, Some(3)).ok()?;
-            let slow = arg_usize(args, 1, Some(10)).ok()?;
-            ind::adosc_final_state(&high, &low, &close, &volume, fast, slow)
-        }
-
-        // SAR family — carry the recurrence's loop state (trend, accel factor(s),
-        // extreme point, current SAR, and the prior bar's high/low).
-        ("sar", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            ind::sar_final_state(&high, &low, arg_f64(args, 0, 0.02).ok()?, arg_f64(args, 1, 0.2).ok()?)
-        }
-        ("sarext", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            ind::sarext_final_state(
-                &high,
-                &low,
-                arg_f64(args, 0, 0.0).ok()?,
-                arg_f64(args, 1, 0.0).ok()?,
-                arg_f64(args, 2, 0.02).ok()?,
-                arg_f64(args, 3, 0.02).ok()?,
-                arg_f64(args, 4, 0.2).ok()?,
-                arg_f64(args, 5, 0.02).ok()?,
-                arg_f64(args, 6, 0.02).ok()?,
-                arg_f64(args, 7, 0.2).ok()?,
-            )
-        }
-
-        // EMA-recursion family — carry the sub-EMA stage states (see exec's resume block).
-        ("ema", _) => ind::ema_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, None).ok()?),
-        ("smma", _) => ind::smma_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, None).ok()?),
-        ("dema", _) => ind::dema_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
-        ("tema", _) => ind::tema_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
-        // T3's carried state is just the six EMA stages (vfactor only scales the combine,
-        // not the cascade), so `t3_final_state` needs no vfactor.
-        ("t3", _) => ind::t3_final_state(
-            &series_f64(df, series, 0, "close").ok()?,
-            arg_usize(args, 0, Some(5)).ok()?,
-        ),
-        ("trix", _) => ind::trix_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
-        ("kama", _) => ind::kama_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?),
-
-        ("macd", None) => ind::macd_final_state(
-            &series_f64(df, series, 0, "close").ok()?,
-            arg_usize(args, 0, Some(12)).ok()?,
-            arg_usize(args, 1, Some(26)).ok()?,
-        ),
-        ("macd", Some("signal" | "histogram")) => ind::macd_signal_final_state(
-            &series_f64(df, series, 0, "close").ok()?,
-            arg_usize(args, 0, Some(12)).ok()?,
-            arg_usize(args, 1, Some(26)).ok()?,
-            arg_usize(args, 2, Some(9)).ok()?,
-        ),
-        ("macdfix", None) => ind::macd_final_state(&series_f64(df, series, 0, "close").ok()?, 12, 26),
-        ("macdfix", Some("signal" | "histogram")) => ind::macd_signal_final_state(
-            &series_f64(df, series, 0, "close").ok()?,
-            12,
-            26,
-            arg_usize(args, 0, Some(9)).ok()?,
-        ),
-
-        // Wilder-smoothing family — carry the running average(s). RSI/CMO carry
-        // [avg_gain, avg_loss]; ATR/NATR carry the running ATR; the directional ratios
-        // carry the +DM/−DM/TR Wilder sums (and ADX/ADXR additionally the running ADX /
-        // its trailing window).
-        ("rsi", _) => ind::rsi_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, None).ok()?),
-        ("cmo", _) => ind::cmo_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(14)).ok()?),
-        ("atr", _) => ind::atr_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            &series_f64(df, series, 2, "close").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-        ("natr", _) => ind::atr_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            &series_f64(df, series, 2, "close").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-        ("plus_dm", _) => ind::plus_dm_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-        ("minus_dm", _) => ind::minus_dm_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-        ("plus_di", _) => ind::plus_di_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            &series_f64(df, series, 2, "close").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-        ("minus_di", _) => ind::minus_di_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            &series_f64(df, series, 2, "close").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-        ("dx", _) => ind::dx_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            &series_f64(df, series, 2, "close").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-        ("adx", _) => ind::adx_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            &series_f64(df, series, 2, "close").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-        ("adxr", _) => ind::adxr_final_state(
-            &series_f64(df, series, 0, "high").ok()?,
-            &series_f64(df, series, 1, "low").ok()?,
-            &series_f64(df, series, 2, "close").ok()?,
-            arg_usize(args, 0, Some(14)).ok()?,
-        ),
-
-        // Hilbert-transform family — carry the shared core state (WMA smoother + 4
-        // Hilbert channels + homodyne discriminator) plus each output's small tail
-        // (DC-phase ring, trendline iTrend triple, MAMA/FAMA accumulators). All read
-        // the single `close` series (default), matching their dispatch in `execute`.
-        ("ht_dcperiod", _) | ("ht_phasor", _) => {
-            ind::ht_core_state(&series_f64(df, series, 0, "close").ok()?)
-        }
-        ("ht_dcphase", _) => ind::ht_dcphase_state(&series_f64(df, series, 0, "close").ok()?),
-        ("ht_sine", _) => ind::ht_sine_state(&series_f64(df, series, 0, "close").ok()?),
-        ("ht_trendline", _) => ind::ht_trendline_state(&series_f64(df, series, 0, "close").ok()?),
-        ("ht_trendmode", _) => ind::ht_trendmode_state(&series_f64(df, series, 0, "close").ok()?),
-        ("mama", _) => ind::mama_state(
-            &series_f64(df, series, 0, "close").ok()?,
-            arg_f64(args, 0, 0.5).ok()?,
-            arg_f64(args, 1, 0.05).ok()?,
-        ),
-
-        // Index family — carry the incremental tracker's final running extreme
-        // `[idx_abs, value]`. Captured at first compute, where `origin == 0`, so the
-        // stored index is original-absolute (stable across a later slice).
-        ("maxindex", _) | ("minmaxindex", Some("max")) => {
-            ind::maxindex_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?)
-        }
-        ("minindex", _) | ("minmaxindex", Some("min")) => {
-            ind::minindex_final_state(&series_f64(df, series, 0, "close").ok()?, arg_usize(args, 0, Some(30)).ok()?)
-        }
-
-        // StochRSI — carry the RSI Wilder pair + the recent RSI tail feeding the windows.
-        // A recursive-MA `.d` (matype != 0) keeps the fallback (no resume).
-        ("stochrsi", Some(line @ ("k" | "d"))) => {
-            let is_d = line == "d";
-            if is_d && arg_usize(args, 3, Some(0)).ok()? != 0 {
-                return None;
-            }
-            ind::stochrsi_final_state(
-                &series_f64(df, series, 0, "close").ok()?,
-                arg_usize(args, 0, Some(14)).ok()?,
-                arg_usize(args, 1, Some(5)).ok()?,
-                is_d,
-                arg_usize(args, 2, Some(3)).ok()?,
-            )
-        }
-
-        // KDJ — carry the recursive %K (and %D for `.d`/`.j`). RSV is finite-memory and is
-        // recomputed on resume, not carried; the `init` seed only affects the warm-up.
-        ("kdj", Some(line @ ("k" | "d" | "j"))) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let period_rsv = arg_usize(args, 0, Some(9)).ok()?;
-            let period_k = arg_usize(args, 1, Some(3)).ok()?;
-            let want_d = line != "k";
-            let (period_d, init) = if want_d {
-                (arg_usize(args, 2, Some(3)).ok()?, arg_f64(args, 3, 50.0).ok()?)
-            } else {
-                (3, arg_f64(args, 2, 50.0).ok()?)
-            };
-            ind::kdj_final_state(&high, &low, &close, period_rsv, period_k, period_d, init, want_d)
-        }
-
-        _ => None,
-    }
-}
-
-/// Resume `node` from `prev_state` over rows `[from_row, height)`, returning the
-/// new-row [`Column`] and the updated state. `None` when `node` has no resume
-/// kernel (caller falls back to a full recompute). The values are bit-identical to
-/// a fresh full recompute, so writing them into the stale tail keeps the cached
-/// column exact.
-///
-/// `origin` is the original-frame row this (possibly sliced) frame's row 0 maps to
-/// (`ComputedMeta::origin`). Recursive *value* indicators ignore it; the
-/// absolute-position index family adds it back so emitted positions stay
-/// original-absolute across a head-dropping slice.
-pub fn execute_resume(
-    df: &DataFrame,
-    node: &Node,
-    prev_state: &[f64],
-    from_row: usize,
-    origin: usize,
-) -> Option<(Column, Vec<f64>)> {
-    let (name, sub, args, series) = as_command(node)?;
-    let sub = sub.as_deref();
-    let close = || series_f64(df, series, 0, "close");
-    match (name.as_str(), sub) {
-        ("obv", _) => {
-            let real = series_f64(df, series, 0, "close").ok()?;
-            let volume = series_f64(df, series, 1, "volume").ok()?;
-            let (vals, st) = ind::obv_resume(&real, &volume, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-        ("ad", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let volume = series_f64(df, series, 3, "volume").ok()?;
-            let (vals, st) = ind::ad_resume(&high, &low, &close, &volume, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-        ("adosc", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let volume = series_f64(df, series, 3, "volume").ok()?;
-            let fast = arg_usize(args, 0, Some(3)).ok()?;
-            let slow = arg_usize(args, 1, Some(10)).ok()?;
-            let (vals, st) =
-                ind::adosc_resume(&high, &low, &close, &volume, fast, slow, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-
-        // SAR family — resume the state machine from the carried tuple. A resume at
-        // `from_row < 2` (the SAR bootstrap needs bars 0 and 1) returns `None` and falls back.
-        ("sar", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let (vals, st) = ind::sar_resume(
-                &high,
-                &low,
-                arg_f64(args, 0, 0.02).ok()?,
-                arg_f64(args, 1, 0.2).ok()?,
-                from_row,
-                prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-        ("sarext", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            // `start_value` (arg 0) only steers the bar-1 bootstrap, never re-run on resume.
-            let (vals, st) = ind::sarext_resume(
-                &high,
-                &low,
-                arg_f64(args, 1, 0.0).ok()?,
-                arg_f64(args, 2, 0.02).ok()?,
-                arg_f64(args, 3, 0.02).ok()?,
-                arg_f64(args, 4, 0.2).ok()?,
-                arg_f64(args, 5, 0.02).ok()?,
-                arg_f64(args, 6, 0.02).ok()?,
-                arg_f64(args, 7, 0.2).ok()?,
-                from_row,
-                prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-
-        // EMA-recursion family — resume each carried sub-EMA from its last value (skipping
-        // the SMA seed), bit-identical to the full kernel's steady-state recurrence.
-        ("ema", _) => {
-            let (vals, st) = ind::ema_resume(&close().ok()?, arg_usize(args, 0, None).ok()?, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-        ("smma", _) => {
-            let (vals, st) = ind::smma_resume(&close().ok()?, arg_usize(args, 0, None).ok()?, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-        ("dema", _) => {
-            let (vals, st) = ind::dema_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-        ("tema", _) => {
-            let (vals, st) = ind::tema_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-        ("t3", _) => {
-            let (vals, st) = ind::t3_resume(
-                &close().ok()?,
-                arg_usize(args, 0, Some(5)).ok()?,
-                arg_f64(args, 1, 0.7).ok()?,
-                from_row,
-                prev_state,
-            );
-            Some((Column::f64(vals), st))
-        }
-        ("trix", _) => {
-            let (vals, st) = ind::trix_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-        // KAMA's sliding-sum resume can decline (short retained head) → None falls back.
-        ("kama", _) => {
-            let (vals, st) =
-                ind::kama_resume(&close().ok()?, arg_usize(args, 0, Some(30)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-
-        ("macd", None) => {
-            let (vals, st) = ind::macd_resume(
-                &close().ok()?,
-                arg_usize(args, 0, Some(12)).ok()?,
-                arg_usize(args, 1, Some(26)).ok()?,
-                from_row,
-                prev_state,
-            );
-            Some((Column::f64(vals), st))
-        }
-        ("macd", Some(line @ ("signal" | "histogram"))) => {
-            let (vals, st) = ind::macd_signal_resume(
-                &close().ok()?,
-                arg_usize(args, 0, Some(12)).ok()?,
-                arg_usize(args, 1, Some(26)).ok()?,
-                arg_usize(args, 2, Some(9)).ok()?,
-                line == "histogram",
-                from_row,
-                prev_state,
-            );
-            Some((Column::f64(vals), st))
-        }
-        ("macdfix", None) => {
-            let (vals, st) = ind::macd_resume(&close().ok()?, 12, 26, from_row, prev_state);
-            Some((Column::f64(vals), st))
-        }
-        ("macdfix", Some(line @ ("signal" | "histogram"))) => {
-            let (vals, st) = ind::macd_signal_resume(
-                &close().ok()?,
-                12,
-                26,
-                arg_usize(args, 0, Some(9)).ok()?,
-                line == "histogram",
-                from_row,
-                prev_state,
-            );
-            Some((Column::f64(vals), st))
-        }
-
-        // Wilder-smoothing family — resume the running average(s) over the new rows.
-        // Each reads only `…[from_row-1..]` (the per-bar term needs the prior bar), so a
-        // resume at `from_row == 0` returns `None` (falls back). DM/DI/DX/ADX/ADXR pull
-        // high/low(/close); RSI/CMO/ATR/NATR their named series.
-        ("rsi", _) => {
-            let (vals, st) = ind::rsi_resume(&close().ok()?, arg_usize(args, 0, None).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("cmo", _) => {
-            let (vals, st) =
-                ind::cmo_resume(&close().ok()?, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("atr", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let (vals, st) =
-                ind::atr_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("natr", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let (vals, st) =
-                ind::natr_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("plus_dm", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let (vals, st) =
-                ind::plus_dm_resume(&high, &low, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("minus_dm", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let (vals, st) =
-                ind::minus_dm_resume(&high, &low, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("plus_di", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let (vals, st) = ind::plus_di_resume(
-                &high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-        ("minus_di", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let (vals, st) = ind::minus_di_resume(
-                &high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-        ("dx", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let (vals, st) =
-                ind::dx_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("adx", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let (vals, st) =
-                ind::adx_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("adxr", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let (vals, st) =
-                ind::adxr_resume(&high, &low, &close, arg_usize(args, 0, Some(14)).ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-
-        // Hilbert-transform family — reconstruct the shared core + per-output tail and
-        // step the recurrence over the new rows. A resume at/under the core warm-up
-        // (or, for the price-windowed trendline/trendmode, before a full dominant-cycle
-        // window is visible) returns `None` and falls back to the full recompute.
-        ("ht_dcperiod", _) => {
-            let (vals, st) = ind::ht_dcperiod_resume(&close().ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("ht_phasor", sub) => {
-            let (vals, st) =
-                ind::ht_phasor_resume(&close().ok()?, sub == Some("quadrature"), from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("ht_dcphase", _) => {
-            let (vals, st) = ind::ht_dcphase_resume(&close().ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("ht_sine", sub) => {
-            let (vals, st) =
-                ind::ht_sine_resume(&close().ok()?, sub == Some("leadsine"), from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("ht_trendline", _) => {
-            let (vals, st) = ind::ht_trendline_resume(&close().ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("ht_trendmode", _) => {
-            let (vals, st) = ind::ht_trendmode_resume(&close().ok()?, from_row, prev_state)?;
-            Some((Column::f64(vals), st))
-        }
-        ("mama", sub) => {
-            let (vals, st) = ind::mama_resume(
-                &close().ok()?,
-                arg_f64(args, 0, 0.5).ok()?,
-                arg_f64(args, 1, 0.05).ok()?,
-                sub == Some("fama"),
-                from_row,
-                prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-
-        // Index family — windowed arg-extreme emitting ABSOLUTE positions. The carried
-        // state is the incremental tracker's running extreme `[idx_abs, value]`; `origin`
-        // rebases sub-frame positions back to original-absolute. minmaxindex.max / .min
-        // are exactly maxindex / minindex (see `execute`).
-        ("maxindex", _) | ("minmaxindex", Some("max")) => {
-            let (vals, st) = ind::maxindex_resume(
-                &close().ok()?,
-                arg_usize(args, 0, Some(30)).ok()?,
-                from_row,
-                origin,
-                prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-        ("minindex", _) | ("minmaxindex", Some("min")) => {
-            let (vals, st) = ind::minindex_resume(
-                &close().ok()?,
-                arg_usize(args, 0, Some(30)).ok()?,
-                from_row,
-                origin,
-                prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-
-        // StochRSI — a windowed %K (and SMA `.d`) of the Wilder-recursive RSI; resume by
-        // carrying the RSI Wilder pair + the recent RSI values feeding the windows. Only
-        // the canonical SMA `.d` (matype 0) resumes; a recursive-MA `.d` declines.
-        ("stochrsi", Some(line @ ("k" | "d"))) => {
-            let is_d = line == "d";
-            if is_d && arg_usize(args, 3, Some(0)).ok()? != 0 {
-                return None; // non-SMA `.d` smoothing is recursive — fall back.
-            }
-            let (vals, st) = ind::stochrsi_resume(
-                &close().ok()?,
-                arg_usize(args, 0, Some(14)).ok()?,
-                arg_usize(args, 1, Some(5)).ok()?,
-                is_d,
-                arg_usize(args, 2, Some(3)).ok()?,
-                from_row,
-                prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-
-        // KDJ — resume the recursive %K (+ %D for `.d`/`.j`) from the carried state; RSV is
-        // finite-memory, recomputed over the windowed high/low/close tail.
-        ("kdj", Some(line @ ("k" | "d" | "j"))) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let period_rsv = arg_usize(args, 0, Some(9)).ok()?;
-            let period_k = arg_usize(args, 1, Some(3)).ok()?;
-            let kline = match line {
-                "k" => ind::KdjLine::K,
-                "d" => ind::KdjLine::D,
-                _ => ind::KdjLine::J,
-            };
-            let period_d = if line == "k" { 3 } else { arg_usize(args, 2, Some(3)).ok()? };
-            let (vals, st) = ind::kdj_resume(
-                &high, &low, &close, period_rsv, period_k, period_d, kline, from_row, prev_state,
-            )?;
-            Some((Column::f64(vals), st))
-        }
-
-        _ => None,
-    }
-}
+pub use crate::exec_resume::{execute_resume, initial_state};
 
 /// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.
 fn tf_to_minutes(s: &str) -> Result<i64> {
@@ -1425,7 +946,11 @@ fn tf_to_minutes(s: &str) -> Result<i64> {
         "Y" => 525600,
         // seconds: minutes = n/60, clamped to >= 1 to avoid division by zero
         "s" => return Ok((n / 60).max(1)),
-        _ => return Err(VolasError::Value(format!("invalid time frame unit in '{s}'"))),
+        _ => {
+            return Err(VolasError::Value(format!(
+                "invalid time frame unit in '{s}'"
+            )))
+        }
     };
     Ok(n * mult)
 }
@@ -1519,16 +1044,64 @@ mod tests {
         let df = ohlcv();
         let n = 30;
         let zero = [
-            "ma:0", "ema:0", "smma:0", "wma:0", "dema:0", "tema:0", "trima:0", "t3:0",
-            "kama:0", "mom:0", "roc:0", "rocp:0", "rocr:0", "rocr100:0", "willr:0", "cci:0",
-            "cmo:0", "mfi:0", "trix:0", "midpoint:0", "midprice:0", "atr:0", "natr:0", "rsi:0",
-            "plus_dm:0", "minus_dm:0", "plus_di:0", "minus_di:0", "dx:0", "adx:0", "adxr:0",
-            "aroon.up:0", "aroonosc:0", "sum:0", "maxindex:0", "minindex:0", "minmax.min:0",
-            "minmaxindex.min:0", "linearreg:0", "linearreg_slope:0", "linearreg_intercept:0",
-            "linearreg_angle:0", "tsf:0", "var:0", "stddev:0", "llv:0", "hhv:0", "boll:0",
-            "bbw:0", "accbands:0", "correl:0@close,close", "beta:0@close,close",
+            "ma:0",
+            "ema:0",
+            "smma:0",
+            "wma:0",
+            "dema:0",
+            "tema:0",
+            "trima:0",
+            "t3:0",
+            "kama:0",
+            "mom:0",
+            "roc:0",
+            "rocp:0",
+            "rocr:0",
+            "rocr100:0",
+            "willr:0",
+            "cci:0",
+            "cmo:0",
+            "mfi:0",
+            "trix:0",
+            "midpoint:0",
+            "midprice:0",
+            "atr:0",
+            "natr:0",
+            "rsi:0",
+            "plus_dm:0",
+            "minus_dm:0",
+            "plus_di:0",
+            "minus_di:0",
+            "dx:0",
+            "adx:0",
+            "adxr:0",
+            "aroon.up:0",
+            "aroonosc:0",
+            "sum:0",
+            "maxindex:0",
+            "minindex:0",
+            "minmax.min:0",
+            "minmaxindex.min:0",
+            "linearreg:0",
+            "linearreg_slope:0",
+            "linearreg_intercept:0",
+            "linearreg_angle:0",
+            "tsf:0",
+            "var:0",
+            "stddev:0",
+            "llv:0",
+            "hhv:0",
+            "boll:0",
+            "bbw:0",
+            "accbands:0",
+            "correl:0@close,close",
+            "beta:0@close,close",
             // period larger than the frame trips the `period > n` arm.
-            "ma:99", "atr:99", "rsi:99", "sum:99", "linearreg:99",
+            "ma:99",
+            "atr:99",
+            "rsi:99",
+            "sum:99",
+            "linearreg:99",
         ];
         for d in zero {
             let col = execute(&df, &parse(d).unwrap())
@@ -1542,8 +1115,16 @@ mod tests {
     fn empty_frame_hits_compute_guards() {
         let df = ohlcv_n(0);
         for d in [
-            "obv", "ad", "adosc:3,10", "sar", "sarext", "ma:5", "tr", "avgprice",
-            "ht_dcperiod", "mama",
+            "obv",
+            "ad",
+            "adosc:3,10",
+            "sar",
+            "sarext",
+            "ma:5",
+            "tr",
+            "avgprice",
+            "ht_dcperiod",
+            "mama",
         ] {
             let col = execute(&df, &parse(d).unwrap()).unwrap();
             assert_eq!(col.len(), 0, "directive {d:?}");
@@ -1556,9 +1137,16 @@ mod tests {
     fn short_frame_hits_candle_guards() {
         let df = ohlcv_n(4);
         for d in [
-            "style.doji", "style.engulfing", "style.morningstar", "style.hikkake",
-            "style.hikkakemod", "style.concealbabyswall", "style.3whitesoldiers",
-            "style.risefall3methods", "style.breakaway", "style.mathold",
+            "style.doji",
+            "style.engulfing",
+            "style.morningstar",
+            "style.hikkake",
+            "style.hikkakemod",
+            "style.concealbabyswall",
+            "style.3whitesoldiers",
+            "style.risefall3methods",
+            "style.breakaway",
+            "style.mathold",
         ] {
             let col = execute(&df, &parse(d).unwrap()).unwrap();
             assert_eq!(col.len(), 4, "directive {d:?}");
@@ -1663,7 +1251,10 @@ mod tests {
         let is_err = |d: &str| execute(&df, &parse(d).unwrap()).is_err();
         assert!(is_err("ema:5,6"), "too many args"); // ema takes one period (ma now takes matype too)
         assert!(is_err("frobnicate:5"), "unknown command");
-        assert!(is_err("MACD.bogus"), "case-insensitive name, still bad sub (P6)");
+        assert!(
+            is_err("MACD.bogus"),
+            "case-insensitive name, still bad sub (P6)"
+        );
         assert!(is_err("kdj:9"), "missing required sub-command");
         assert!(is_err("macd.bogus"), "unknown sub-command");
         assert!(is_err("ma:abc"), "non-integer arg");

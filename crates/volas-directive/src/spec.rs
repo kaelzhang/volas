@@ -216,15 +216,19 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // sarext: start, offset_on_reverse, then long (init/step/max) + short (init/step/max).
         ("sarext", None) => (
             vec![
-                Float(0.0), Float(0.0), Float(0.02), Float(0.02), Float(0.2), Float(0.02),
-                Float(0.02), Float(0.2),
+                Float(0.0),
+                Float(0.0),
+                Float(0.02),
+                Float(0.02),
+                Float(0.2),
+                Float(0.02),
+                Float(0.02),
+                Float(0.2),
             ],
             vec!["high", "low"],
         ),
         ("macd", None) => (vec![Int(12), Int(26)], vec!["close"]),
-        ("macd", Some("signal" | "histogram")) => {
-            (vec![Int(12), Int(26), Int(9)], vec!["close"])
-        }
+        ("macd", Some("signal" | "histogram")) => (vec![Int(12), Int(26), Int(9)], vec!["close"]),
         // macdfix: fast/slow fixed at 12/26; the line takes no args, the signal/histogram
         // take only the signal period.
         ("macdfix", None) => (vec![], vec!["close"]),
@@ -235,7 +239,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("accbands", None) => (vec![Int(20)], vec!["close"]),
         ("accbands", Some("upper" | "lower")) => (vec![Int(20)], vec!["high", "low"]),
         ("rsv", None) => (vec![Required], vec!["high", "low", "close"]),
-        ("kdj", Some("k")) => (vec![Int(9), Int(3), Float(50.0)], vec!["high", "low", "close"]),
+        ("kdj", Some("k")) => (
+            vec![Int(9), Int(3), Float(50.0)],
+            vec!["high", "low", "close"],
+        ),
         ("kdj", Some("d" | "j")) => (
             vec![Int(9), Int(3), Int(3), Float(50.0)],
             vec!["high", "low", "close"],
@@ -283,9 +290,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             vec!["high", "low", "close"],
         ),
         // stochf: fastk_period, fastd_period, fastd_matype.
-        ("stochf", Some("k" | "d")) => {
-            (vec![Int(5), Int(3), Int(0)], vec!["high", "low", "close"])
-        }
+        ("stochf", Some("k" | "d")) => (vec![Int(5), Int(3), Int(0)], vec!["high", "low", "close"]),
         // stochrsi: rsi_period, fastk_period, fastd_period, fastd_matype.
         ("stochrsi", Some("k" | "d")) => (vec![Int(14), Int(5), Int(3), Int(0)], vec!["close"]),
         ("plus_dm" | "minus_dm", None) => (vec![Int(14)], vec!["high", "low"]),
@@ -309,7 +314,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("stddev", None) => (vec![Int(5), Float(1.0)], vec!["close"]),
         ("obv", None) => (vec![], vec!["close", "volume"]),
         ("ad", None) => (vec![], vec!["high", "low", "close", "volume"]),
-        ("adosc", None) => (vec![Int(3), Int(10)], vec!["high", "low", "close", "volume"]),
+        ("adosc", None) => (
+            vec![Int(3), Int(10)],
+            vec!["high", "low", "close", "volume"],
+        ),
         ("avgprice", None) => (vec![], vec!["open", "high", "low", "close"]),
         ("medprice", None) => (vec![], vec!["high", "low"]),
         ("typprice", None) => (vec![], vec!["high", "low", "close"]),
@@ -348,7 +356,10 @@ mod tests {
         assert_eq!(ArgDefault::Float(2.0).to_token().as_deref(), Some("2")); // integral float
         assert_eq!(ArgDefault::Float(2.5).to_token().as_deref(), Some("2.5")); // fractional
         assert_eq!(ArgDefault::I64(-1).to_token().as_deref(), Some("-1"));
-        assert_eq!(ArgDefault::Str("close").to_token().as_deref(), Some("close"));
+        assert_eq!(
+            ArgDefault::Str("close").to_token().as_deref(),
+            Some("close")
+        );
     }
 
     #[test]

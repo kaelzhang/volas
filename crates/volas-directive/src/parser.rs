@@ -60,7 +60,15 @@ fn bin(left: Node, op: Op, right: Node) -> Node {
 fn is_cmp(op: Op) -> bool {
     matches!(
         op,
-        Op::Lt | Op::Le | Op::Eq | Op::Ne | Op::Ge | Op::Gt | Op::CrossUp | Op::CrossDown | Op::Cross
+        Op::Lt
+            | Op::Le
+            | Op::Eq
+            | Op::Ne
+            | Op::Ge
+            | Op::Gt
+            | Op::CrossUp
+            | Op::CrossDown
+            | Op::Cross
     )
 }
 
@@ -416,7 +424,10 @@ mod tests {
     fn parse_cross_and_nested() {
         assert!(matches!(
             parse("macd // macd.signal").unwrap(),
-            Node::Binary { op: Op::CrossUp, .. }
+            Node::Binary {
+                op: Op::CrossUp,
+                ..
+            }
         ));
         if let Node::Command(c) = parse("increase:3@(ma:20@close)").unwrap() {
             assert!(matches!(c.series[0], Node::Command(_)));
@@ -429,7 +440,9 @@ mod tests {
     fn parse_precedence() {
         // (kdj.j + 1) != kdj.j
         match parse("kdj.j + 1 != kdj.j").unwrap() {
-            Node::Binary { op: Op::Ne, left, .. } => {
+            Node::Binary {
+                op: Op::Ne, left, ..
+            } => {
                 assert!(matches!(*left, Node::Binary { op: Op::Add, .. }));
             }
             _ => panic!(), // LCOV_EXCL_LINE
@@ -442,9 +455,15 @@ mod tests {
         // unary not / neg
         assert!(matches!(
             parse("~(kdj.j <= 0)").unwrap(),
-            Node::Unary { op: UnaryOp::Not, .. }
+            Node::Unary {
+                op: UnaryOp::Not,
+                ..
+            }
         ));
-        assert!(matches!(parse("kdj.j * 2").unwrap(), Node::Binary { op: Op::Mul, .. }));
+        assert!(matches!(
+            parse("kdj.j * 2").unwrap(),
+            Node::Binary { op: Op::Mul, .. }
+        ));
     }
 
     #[test]

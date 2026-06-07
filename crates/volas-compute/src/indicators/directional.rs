@@ -359,7 +359,12 @@ fn di_val(dm_sm: f64, tr_sm: f64) -> f64 {
 }
 
 /// Final +DI state `[sp, st]` (+DM and TR running sums) — pairs with [`plus_di_resume`].
-pub fn plus_di_final_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Option<Vec<f64>> {
+pub fn plus_di_final_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
     let (sp, _sm, st) = dm_tr_sums_final(high, low, close, period)?;
     Some(vec![sp, st])
 }
@@ -390,7 +395,12 @@ pub fn plus_di_resume(
 }
 
 /// Final −DI state `[sm, st]` (−DM and TR running sums) — pairs with [`minus_di_resume`].
-pub fn minus_di_final_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Option<Vec<f64>> {
+pub fn minus_di_final_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
     let (_sp, sm, st) = dm_tr_sums_final(high, low, close, period)?;
     Some(vec![sm, st])
 }
@@ -470,7 +480,12 @@ pub fn dx_resume(
 /// Final ADX state `[sp, sm, st, adx]`: the DX running sums plus the running ADX average
 /// (the SMA-seeded Wilder average of DX) as of the last row. `None` before ADX seeds
 /// (`2·period-1 >= n`), so the caller keeps the fallback. Pairs with [`adx_resume`].
-pub fn adx_final_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Option<Vec<f64>> {
+pub fn adx_final_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
     let n = high.len();
     if period == 0 {
         return None;
@@ -544,7 +559,12 @@ pub fn adx_resume(
 /// the trailing `period` ADX values (oldest→newest), so a resume can form
 /// `(adx[i] + adx[i-(period-1)])/2`. `None` before ADXR seeds (`3·period-2 >= n`). Pairs
 /// with [`adxr_resume`].
-pub fn adxr_final_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Option<Vec<f64>> {
+pub fn adxr_final_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
     let n = high.len();
     if period == 0 {
         return None;
@@ -731,10 +751,16 @@ mod tests {
         let from = 20usize;
         let st = plus_di_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
         let (tail, _) = plus_di_resume(&flat, &flat, &flat, p, from, &st).unwrap();
-        assert!(tail.iter().all(|&x| x == 0.0), "plus_di resume flat TR -> 0"); // :355
+        assert!(
+            tail.iter().all(|&x| x == 0.0),
+            "plus_di resume flat TR -> 0"
+        ); // :355
         let st = minus_di_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
         let (tail, _) = minus_di_resume(&flat, &flat, &flat, p, from, &st).unwrap();
-        assert!(tail.iter().all(|&x| x == 0.0), "minus_di resume flat TR -> 0");
+        assert!(
+            tail.iter().all(|&x| x == 0.0),
+            "minus_di resume flat TR -> 0"
+        );
         let st = dx_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
         let (tail, _) = dx_resume(&flat, &flat, &flat, p, from, &st).unwrap();
         assert!(tail.iter().all(|&x| x == 0.0), "dx resume flat TR -> 0"); // :427

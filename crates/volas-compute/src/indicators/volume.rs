@@ -49,7 +49,12 @@ pub fn obv_final_state(real: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
 
 /// Final AD state `[running_ad]` after a full [`ad`] compute. `None` for an empty
 /// series.
-pub fn ad_final_state(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
+pub fn ad_final_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+) -> Option<Vec<f64>> {
     let n = close.len();
     if n == 0 {
         return None;
@@ -98,7 +103,12 @@ pub fn adosc_final_state(
 /// the recurrence reads only `real[from..]`/`volume[from..]` plus the carried
 /// `prev_real`, so it never reaches before `from` — sound after a head-dropping
 /// slice that retained none of the pre-`from` rows.
-pub fn obv_resume(real: &[f64], volume: &[f64], from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub fn obv_resume(
+    real: &[f64],
+    volume: &[f64],
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
     let n = real.len();
     let mut obv = state[0];
     let mut prev = state[1];
@@ -285,9 +295,15 @@ mod tests {
         // at `valid_rows == lookback + 1`), where the full output is already finite.
         let lookback = fast.max(slow) - 1;
         for &from in &[lookback + 1, lookback + 5, 60, 119] {
-            let st =
-                adosc_final_state(&high[..from], &low[..from], &close[..from], &vol[..from], fast, slow)
-                    .unwrap();
+            let st = adosc_final_state(
+                &high[..from],
+                &low[..from],
+                &close[..from],
+                &vol[..from],
+                fast,
+                slow,
+            )
+            .unwrap();
             let (tail, _) = adosc_resume(&high, &low, &close, &vol, fast, slow, from, &st);
             assert_bits(&tail, &adosc_full[from..], "adosc");
         }

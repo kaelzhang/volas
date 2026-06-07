@@ -106,7 +106,12 @@ pub fn smma_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`smma`] from `state = [rma_{from-1}]` over rows `[from, n)`. Reads only
 /// `data[from..]`.
-pub fn smma_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub fn smma_resume(
+    data: &[f64],
+    period: usize,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
     let pf = period as f64;
     let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
     let n = data.len();
@@ -161,7 +166,11 @@ pub fn wma(data: &[f64], period: usize) -> Vec<f64> {
 /// `lookback = S·(period-1)` is the first fully-valid bar, or `None` if it never seeds.
 /// Shared by DEMA/TEMA/T3 — their combine and steady-state recurrence differ, but the
 /// warm-up is identical (and bit-identical to chaining `ema_seeded` `S` times).
-fn cascade_warmup<const S: usize>(data: &[f64], period: usize, k: f64) -> Option<(usize, [f64; S])> {
+fn cascade_warmup<const S: usize>(
+    data: &[f64],
+    period: usize,
+    k: f64,
+) -> Option<(usize, [f64; S])> {
     let n = data.len();
     if period == 0 {
         return None;
@@ -331,8 +340,7 @@ pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
     // Steady state: all six stages seeded. The cascade is inherently sequential (a
     // six-deep FMA dependency chain per bar, exactly as in TA-Lib's lattice), so we
     // unroll it into registers and emit the combine in the same pass.
-    let (mut e0, mut e1, mut e2, mut e3, mut e4, mut e5) =
-        (e[0], e[1], e[2], e[3], e[4], e[5]);
+    let (mut e0, mut e1, mut e2, mut e3, mut e4, mut e5) = (e[0], e[1], e[2], e[3], e[4], e[5]);
     for i in (lookback + 1)..n {
         e0 = (data[i] - e0).mul_add(k, e0);
         e1 = (e0 - e1).mul_add(k, e1);
@@ -354,7 +362,12 @@ pub fn dema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`dema`] from `state = [e0, e1]` over rows `[from, n)`, bit-identical to a full
 /// recompute (the same `2·e0 − e1` lattice). Reads only `data[from..]`.
-pub fn dema_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub fn dema_resume(
+    data: &[f64],
+    period: usize,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
     let k = ema_k(period);
     let n = data.len();
     let mut e = [state[0], state[1]];
@@ -374,7 +387,12 @@ pub fn tema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`tema`] from `state = [e0, e1, e2]` over rows `[from, n)`, bit-identical to a
 /// full recompute (the `3·e0 − 3·e1 + e2` lattice). Reads only `data[from..]`.
-pub fn tema_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub fn tema_resume(
+    data: &[f64],
+    period: usize,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
     let k = ema_k(period);
     let n = data.len();
     let mut e = [state[0], state[1], state[2]];
@@ -538,7 +556,12 @@ pub fn kama_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 /// fallback) when `from <= period` (the trailing window would underflow), which the slice
 /// carry can produce at a very short retained head; that case is rare and stays correct
 /// via the fallback.
-pub fn kama_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+pub fn kama_resume(
+    data: &[f64],
+    period: usize,
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
     let n = data.len();
     // Need `data[from-period-1]` (the oldest 1-bar change to drop) and `data[from-1]`.
     if period == 0 || from <= period || from > n {
@@ -648,7 +671,12 @@ pub fn sar(high: &[f64], low: &[f64], acceleration: f64, maximum: f64) -> Vec<f6
 /// Final SAR state `[is_long, af, ep, sar, prev_high, prev_low]` after a full [`sar`] compute,
 /// or `None` when `n < 2` (SAR never produces a value). Replays [`sar`]'s exact recurrence and
 /// captures the loop variables as of the last bar (`n-1`) — i.e. the entering state for bar `n`.
-pub fn sar_final_state(high: &[f64], low: &[f64], acceleration: f64, maximum: f64) -> Option<Vec<f64>> {
+pub fn sar_final_state(
+    high: &[f64],
+    low: &[f64],
+    acceleration: f64,
+    maximum: f64,
+) -> Option<Vec<f64>> {
     let n = high.len();
     if n < 2 {
         return None;
@@ -656,10 +684,18 @@ pub fn sar_final_state(high: &[f64], low: &[f64], acceleration: f64, maximum: f6
     let af_init = acceleration.min(maximum);
     let diff_p = high[1] - high[0];
     let diff_m = low[0] - low[1];
-    let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m { diff_m } else { 0.0 };
+    let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m {
+        diff_m
+    } else {
+        0.0
+    };
     let mut is_long = !(minus_dm1 > 0.0);
     let mut af = af_init;
-    let (mut ep, mut sar) = if is_long { (high[1], low[0]) } else { (low[1], high[0]) };
+    let (mut ep, mut sar) = if is_long {
+        (high[1], low[0])
+    } else {
+        (low[1], high[0])
+    };
     let mut new_low = low[1];
     let mut new_high = high[1];
     for today in 1..n {
@@ -759,7 +795,10 @@ pub fn sar_resume(
             sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
         }
     }
-    Some((out, vec![is_long as u8 as f64, af, ep, sar, new_high, new_low]))
+    Some((
+        out,
+        vec![is_long as u8 as f64, af, ep, sar, new_high, new_low],
+    ))
 }
 
 /// Parabolic SAR Extended (TA-Lib SAREXT). As [`sar`], but with separate long/short
@@ -795,14 +834,22 @@ pub fn sarext(
     let mut is_long = if start_value == 0.0 {
         let diff_p = high[1] - high[0];
         let diff_m = low[0] - low[1];
-        let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m { diff_m } else { 0.0 };
+        let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m {
+            diff_m
+        } else {
+            0.0
+        };
         !(minus_dm1 > 0.0)
     } else {
         start_value > 0.0
     };
 
     let (mut ep, mut sar) = if start_value == 0.0 {
-        if is_long { (high[1], low[0]) } else { (low[1], high[0]) }
+        if is_long {
+            (high[1], low[0])
+        } else {
+            (low[1], high[0])
+        }
     } else if start_value > 0.0 {
         (high[1], start_value)
     } else {
@@ -894,13 +941,21 @@ pub fn sarext_final_state(
     let mut is_long = if start_value == 0.0 {
         let diff_p = high[1] - high[0];
         let diff_m = low[0] - low[1];
-        let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m { diff_m } else { 0.0 };
+        let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m {
+            diff_m
+        } else {
+            0.0
+        };
         !(minus_dm1 > 0.0)
     } else {
         start_value > 0.0
     };
     let (mut ep, mut sar) = if start_value == 0.0 {
-        if is_long { (high[1], low[0]) } else { (low[1], high[0]) }
+        if is_long {
+            (high[1], low[0])
+        } else {
+            (low[1], high[0])
+        }
     } else if start_value > 0.0 {
         (high[1], start_value)
     } else {
@@ -948,7 +1003,15 @@ pub fn sarext_final_state(
             sar = (sar + af_short * (ep - sar)).max(prev_high).max(new_high);
         }
     }
-    Some(vec![is_long as u8 as f64, af_long, af_short, ep, sar, new_high, new_low])
+    Some(vec![
+        is_long as u8 as f64,
+        af_long,
+        af_short,
+        ep,
+        sar,
+        new_high,
+        new_low,
+    ])
 }
 
 /// Resume [`sarext`] from `state = [is_long, af_long, af_short, ep, sar, prev_high, prev_low]`
@@ -1028,7 +1091,18 @@ pub fn sarext_resume(
             sar = (sar + af_short * (ep - sar)).max(prev_high).max(new_high);
         }
     }
-    Some((out, vec![is_long as u8 as f64, af_long, af_short, ep, sar, new_high, new_low]))
+    Some((
+        out,
+        vec![
+            is_long as u8 as f64,
+            af_long,
+            af_short,
+            ep,
+            sar,
+            new_high,
+            new_low,
+        ],
+    ))
 }
 
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
@@ -1220,7 +1294,12 @@ fn tr1(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
 /// (`period == 0 || period >= n`, since `tr[0]` is NaN so the SMA of the first `period`
 /// TRs seeds at index `period`). Reproduces `kernels::wilder(tr)` exactly: SMA-seed the
 /// first `period` TRs (indices `1..=period`), then the fused Wilder step.
-pub fn atr_final_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Option<Vec<f64>> {
+pub fn atr_final_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+) -> Option<Vec<f64>> {
     let n = high.len();
     if period == 0 || period >= n {
         return None;
@@ -1329,7 +1408,16 @@ mod tests {
             let full = sarext(&high, &low, start, offset, ail, al, aml, ais, as_, ams);
             for &from in &[2usize, 5, 30, 70, 110, 159] {
                 let st = sarext_final_state(
-                    &high[..from], &low[..from], start, offset, ail, al, aml, ais, as_, ams,
+                    &high[..from],
+                    &low[..from],
+                    start,
+                    offset,
+                    ail,
+                    al,
+                    aml,
+                    ais,
+                    as_,
+                    ams,
                 )
                 .unwrap();
                 let (tail, _) =
@@ -1353,24 +1441,42 @@ mod tests {
         // seeded directly from `sar`, so the three starts produce visibly different series.
         let bootstrap = |start: f64| -> (Vec<f64>, Vec<f64>) {
             let full = sarext(&high, &low, start, 0.0, al, al, aml, as_, as_, ams);
-            let st = sarext_final_state(&high, &low, start, 0.0, al, al, aml, as_, as_, ams).unwrap();
+            let st =
+                sarext_final_state(&high, &low, start, 0.0, al, al, aml, as_, as_, ams).unwrap();
             (full, st)
         };
         let (full_zero, _) = bootstrap(0.0);
         let (full_long, _) = bootstrap(5.0); // forced long: sar seeded from +start (904-905)
         let (full_short, _) = bootstrap(-5.0); // forced short: sar seeded from |start| (906-907)
-        // The three distinct bootstrap arms seed distinct stops, so the first computed value
-        // differs across all three (proving the forced-long and forced-short arms both ran,
-        // not just the directional `start == 0` arm).
-        assert_ne!(full_zero[1].to_bits(), full_long[1].to_bits(), "long bootstrap distinct");
-        assert_ne!(full_zero[1].to_bits(), full_short[1].to_bits(), "short bootstrap distinct");
-        assert_ne!(full_long[1].to_bits(), full_short[1].to_bits(), "long != short bootstrap");
+                                               // The three distinct bootstrap arms seed distinct stops, so the first computed value
+                                               // differs across all three (proving the forced-long and forced-short arms both ran,
+                                               // not just the directional `start == 0` arm).
+        assert_ne!(
+            full_zero[1].to_bits(),
+            full_long[1].to_bits(),
+            "long bootstrap distinct"
+        );
+        assert_ne!(
+            full_zero[1].to_bits(),
+            full_short[1].to_bits(),
+            "short bootstrap distinct"
+        );
+        assert_ne!(
+            full_long[1].to_bits(),
+            full_short[1].to_bits(),
+            "long != short bootstrap"
+        );
 
         // With offset != 0 the carried `sar` differs from the offset == 0 run (the reversal
         // nudge at 922/938 changed it). A long enough oscillating series has reversed by n-1.
-        let s_no_off = sarext_final_state(&high, &low, 0.0, 0.0, al, al, aml, as_, as_, ams).unwrap();
+        let s_no_off =
+            sarext_final_state(&high, &low, 0.0, 0.0, al, al, aml, as_, as_, ams).unwrap();
         let s_off = sarext_final_state(&high, &low, 0.0, 0.1, al, al, aml, as_, as_, ams).unwrap();
-        assert_ne!(s_no_off[4].to_bits(), s_off[4].to_bits(), "offset must move the stop");
+        assert_ne!(
+            s_no_off[4].to_bits(),
+            s_off[4].to_bits(),
+            "offset must move the stop"
+        );
     }
 
     /// SAR / SAREXT warm-up guards: `*_final_state` declines for `n < 2` (no SAR value), and
@@ -1381,7 +1487,10 @@ mod tests {
         let one_l = [8.0];
         // n < 2 -> no state (654 / 888).
         assert!(sar_final_state(&one_h, &one_l, 0.02, 0.2).is_none());
-        assert!(sarext_final_state(&one_h, &one_l, 0.0, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2).is_none());
+        assert!(
+            sarext_final_state(&one_h, &one_l, 0.0, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2)
+                .is_none()
+        );
         // from < 2 -> resume declines (714 / 973). State is unread on the None path.
         let st = vec![1.0, 0.02, 10.0, 8.0, 10.0, 8.0];
         let (h, l, _c) = ohlc(20);
@@ -1411,7 +1520,11 @@ mod tests {
         // A finite-tail KAMA state still computes; it must equal the state of the tail alone.
         let via_head = kama_final_state(&nan_head, 10).unwrap();
         let via_tail = kama_final_state(&nan_head[3..], 10).unwrap();
-        assert_eq!(via_head[0].to_bits(), via_tail[0].to_bits(), "kama leading-NaN recursion");
+        assert_eq!(
+            via_head[0].to_bits(),
+            via_tail[0].to_bits(),
+            "kama leading-NaN recursion"
+        );
         assert_eq!(via_head[1].to_bits(), via_tail[1].to_bits());
 
         // kama_resume underflow: period == 0 / from <= period / from > n -> None (trend.rs:545).

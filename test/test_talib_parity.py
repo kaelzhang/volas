@@ -41,6 +41,50 @@ def _parity(got, want, mask_want=False):
         np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9, equal_nan=True)
 
 
+def _generated_ohlcv(n, seed=20260606):
+    rng = np.random.default_rng(seed)
+    close = 100.0 + np.cumsum(rng.normal(0.0, 1.0, n))
+    open_ = close + rng.normal(0.0, 0.2, n)
+    high = np.maximum(open_, close) + rng.random(n) * 1.5
+    low = np.minimum(open_, close) - rng.random(n) * 1.5
+    volume = np.abs(rng.normal(1.0e6, 2.0e5, n)) + 1.0
+    return {'open': open_, 'high': high, 'low': low, 'close': close, 'volume': volume}
+
+
+def _parity_common_finite(got, want, directive):
+    got = np.asarray(got, dtype=float)
+    want = np.asarray(want, dtype=float)
+    both = np.isfinite(got) & np.isfinite(want)
+    assert int(both.sum()) >= 10, f'{directive}: insufficient common finite rows'
+    np.testing.assert_allclose(got[both], want[both], rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize('n', [100, 250, 1999])
+def test_representative_indicators_match_talib_across_lengths(n):
+    data = _generated_ohlcv(n)
+    df = volas.DataFrame(data)
+    o, h, l, c, v = (data[k] for k in ('open', 'high', 'low', 'close', 'volume'))
+    cases = [
+        ('hhv:10', lambda: talib.MAX(h, 10)),
+        ('aroon.up:14', lambda: talib.AROON(h, l, 14)[1]),
+        ('aroon.down:14', lambda: talib.AROON(h, l, 14)[0]),
+        ('aroonosc:14', lambda: talib.AROONOSC(h, l, 14)),
+        ('stoch.d', lambda: talib.STOCH(h, l, c)[1]),
+        ('stochf.d', lambda: talib.STOCHF(h, l, c)[1]),
+        ('stochrsi.d', lambda: talib.STOCHRSI(c)[1]),
+        ('mfi:14', lambda: talib.MFI(h, l, c, v, 14)),
+        ('roc:10', lambda: talib.ROC(c, 10)),
+        ('mama', lambda: talib.MAMA(c)[0]),
+        ('ht_dcperiod', lambda: talib.HT_DCPERIOD(c)),
+        ('cdl.3linestrike', lambda: talib.CDL3LINESTRIKE(o, h, l, c)),
+        ('cdl.breakaway', lambda: talib.CDLBREAKAWAY(o, h, l, c)),
+        ('cdl.hikkake', lambda: talib.CDLHIKKAKE(o, h, l, c)),
+        ('cdl.tristar', lambda: talib.CDLTRISTAR(o, h, l, c)),
+    ]
+    for directive, expected in cases:
+        _parity_common_finite(df.exec(directive), expected(), directive)
+
+
 def test_tr_matches_talib(ohlc):
     df, h, l, c = ohlc
     _parity(df.exec('tr'), talib.TRANGE(h, l, c))
@@ -523,6 +567,15 @@ def test_cci_trix_match_talib(ohlc):
     o = df['open'].to_numpy()
     for p in (14, 20):
         _parity(df.exec(f'imi:{p}'), talib.IMI(o, c, p))
+
+
+def test_mfi_matches_talib(ohlc):
+    # Dedicated name keeps `pytest ... -k mfi` tied to the MFI parity gate while the
+    # broader oscillator test above continues to cover grouped TA-Lib comparisons.
+    df, h, l, c = ohlc
+    v = np.asarray(df['volume'].to_numpy(), dtype=float)
+    for p in (14, 20):
+        _parity(df.exec(f'mfi:{p}'), talib.MFI(h, l, c, v, p))
 
 
 def test_bop_cmo_natr_match_talib(ohlc):

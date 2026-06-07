@@ -939,12 +939,18 @@ mod tests {
         assert!(wilder(av(&[f64::NAN, 1.0]), 3).iter().all(|x| x.is_nan()));
 
         // ema_diff_seeded: zero period, and data too short for the slow seed.
-        assert!(ema_diff_seeded(av(&[1.0, 2.0]), 0, 2).iter().all(|x| x.is_nan()));
-        assert!(ema_diff_seeded(av(&[1.0, 2.0]), 2, 5).iter().all(|x| x.is_nan()));
+        assert!(ema_diff_seeded(av(&[1.0, 2.0]), 0, 2)
+            .iter()
+            .all(|x| x.is_nan()));
+        assert!(ema_diff_seeded(av(&[1.0, 2.0]), 2, 5)
+            .iter()
+            .all(|x| x.is_nan()));
 
         // ema_cascade: zero period, and lookback exceeding the input length.
         assert!(ema_cascade::<3>(&[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
-        assert!(ema_cascade::<3>(&[1.0, 2.0, 3.0], 5).iter().all(|x| x.is_nan()));
+        assert!(ema_cascade::<3>(&[1.0, 2.0, 3.0], 5)
+            .iter()
+            .all(|x| x.is_nan()));
 
         // rolling_max_min: invalid period, then the interior-NaN fallback to the deque.
         let (hh, ll) = rolling_max_min(&[1.0, 2.0], &[1.0, 2.0], 0);

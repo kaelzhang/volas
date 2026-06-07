@@ -64,6 +64,29 @@ CANDIDATES = ['pandas', 'stock_pandas', 'polars', 'talib', 'volas']
 # volas as a `periods` column and to TA-Lib as the periods array.
 PERIODS = (np.arange(N, dtype=float) % 29.0) + 2.0
 
+# Representative length matrix for the performance-sensitive families where a
+# single 1999-row benchmark can hide fixed-cost vs streaming tradeoffs.
+LENGTHS = [100, 250, 1999, 20_000]
+LENGTH_COVERAGE_IDS = [
+    'hhv:10',
+    'aroon.up:14',
+    'aroon.down:14',
+    'aroonosc:14',
+    'stoch.d',
+    'stochf.d',
+    'stochrsi.d',
+    'mfi:14',
+    'roc:10',
+    'mama',
+    'ht_dcperiod',
+    # Long-data candle candidates that still need TA-Lib comparisons outside the
+    # historical 1999-row fixture.
+    'cdl.3linestrike',
+    'cdl.breakaway',
+    'cdl.hikkake',
+    'cdl.tristar',
+]
+
 HAVE = {
     'pandas': True,
     'stock_pandas': True,
@@ -71,6 +94,23 @@ HAVE = {
     'talib': talib is not None,
     'volas': True,
 }
+
+
+def _generated_ohlcv(n, seed=20260606):
+    rng = np.random.default_rng(seed)
+    close = 100.0 + np.cumsum(rng.normal(0.0, 1.0, n))
+    open_ = close + rng.normal(0.0, 0.2, n)
+    high = np.maximum(open_, close) + rng.random(n) * 1.5
+    low = np.minimum(open_, close) - rng.random(n) * 1.5
+    volume = np.abs(rng.normal(1.0e6, 2.0e5, n)) + 1.0
+    return {
+        'open': open_,
+        'high': high,
+        'low': low,
+        'close': close,
+        'volume': volume,
+        'periods': (np.arange(n, dtype=float) % 29.0) + 2.0,
+    }
 
 # Every append candidate is measured through `pedantic` with this fixed round count
 # (volas / stock_pandas need fresh per-round state, so they cannot use the
@@ -488,6 +528,46 @@ def test_coverage(benchmark, states, indicator, candidate):
         except Exception:
             pytest.skip(f'volas cannot express {indicator}')
         benchmark(lambda d=indicator: v.exec(d))
+
+
+@pytest.fixture(scope='module')
+def length_states():
+    return {
+        n: {
+            'data': (data := _generated_ohlcv(n)),
+            'volas': VolasDataFrame(data),
+        }
+        for n in LENGTHS
+    }
+
+
+_LENGTH_COVERAGE_PARAMS = [
+    pytest.param(f'{directive}@n={n}', directive, n, id=f'{directive}@n={n}')
+    for n in LENGTHS
+    for directive in LENGTH_COVERAGE_IDS
+]
+
+
+@pytest.mark.parametrize('candidate', ['talib', 'volas'])
+@pytest.mark.parametrize('indicator,directive,length', _LENGTH_COVERAGE_PARAMS)
+def test_coverage_lengths(benchmark, length_states, indicator, directive, length, candidate):
+    """Representative volas-vs-TA-Lib coverage across data lengths.
+
+    The full coverage table remains on the historical 1999-row Tencent fixture; this
+    focused matrix catches length-sensitive regressions and optimizations.
+    """
+    if talib is None:
+        pytest.skip('talib not installed')
+    state = length_states[length]
+    if candidate == 'talib':
+        benchmark(dict(_coverage_pairs(state['data']))[directive])
+    else:
+        v = state['volas']
+        try:
+            v.exec(directive)
+        except Exception:
+            pytest.skip(f'volas cannot express {directive}')
+        benchmark(lambda d=directive: v.exec(d))
 
 
 # --- section 4: core DataFrame API (the data-handling flows, not indicators) -

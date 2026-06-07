@@ -24,6 +24,7 @@ mod math_ops;
 mod momentum;
 mod oscillators;
 mod statistic;
+mod stochastic;
 mod tools;
 mod transform;
 mod trend;
@@ -37,6 +38,7 @@ pub use math_ops::*;
 pub use momentum::*;
 pub use oscillators::*;
 pub use statistic::*;
+pub use stochastic::*;
 pub use tools::*;
 pub use transform::*;
 pub use trend::*;
@@ -84,7 +86,13 @@ pub(crate) mod test_support {
     /// a resume fed the carried state of a full compute over the head must reproduce
     /// the tail of a full compute over the whole input, bit-for-bit.
     pub fn assert_bits(a: &[f64], b: &[f64], what: &str) {
-        assert_eq!(a.len(), b.len(), "{what}: length {} != {}", a.len(), b.len());
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "{what}: length {} != {}",
+            a.len(),
+            b.len()
+        );
         for (i, (x, y)) in a.iter().zip(b).enumerate() {
             assert!(
                 x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
@@ -194,13 +202,19 @@ mod tests {
         // roc / beta: a zero prior price yields a 0 result (the divide-by-zero guard).
         let z = [0.0, 0.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0];
         assert_eq!(roc(&z, 2)[2], 0.0);
-        assert!(beta(&z, &f[..z.len()].to_vec(), 5).iter().any(|x| *x == 0.0));
+        assert!(beta(&z, &f[..z.len()].to_vec(), 5)
+            .iter()
+            .any(|x| *x == 0.0));
 
         // accbands: high + low == 0 falls back to the bare high / low edge.
         let pos = vec![5.0; N];
         let neg = vec![-5.0; N];
-        assert!(accbands_upper(&pos, &neg, 20).iter().any(|x| (*x - 5.0).abs() < 1e-9));
-        assert!(accbands_lower(&pos, &neg, 20).iter().any(|x| (*x + 5.0).abs() < 1e-9));
+        assert!(accbands_upper(&pos, &neg, 20)
+            .iter()
+            .any(|x| (*x - 5.0).abs() < 1e-9));
+        assert!(accbands_lower(&pos, &neg, 20)
+            .iter()
+            .any(|x| (*x + 5.0).abs() < 1e-9));
 
         // adosc with fast == slow == 1 has lookback 0, so it emits at index 0.
         assert!(!adosc(&f, &f, &f, &vol, 1, 1)[0].is_nan());

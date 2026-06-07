@@ -1,9 +1,9 @@
 //! Single-bar candlestick patterns.
 
 use super::{
-    candle_average_series, color, each_bar_avg, lowershadow, realbody, realbody_gap_down,
-    realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT, NEAR, SHADOW_LONG,
-    SHADOW_SHORT, SHADOW_VERY_LONG, SHADOW_VERY_SHORT,
+    candle_average_series, candle_output, color, each_bar_avg, lowershadow, range, realbody,
+    realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT, NEAR,
+    SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_LONG, SHADOW_VERY_SHORT,
 };
 
 // Each pattern carries a scalar running window-sum per candle setting via `each_bar_avg`
@@ -26,7 +26,8 @@ pub fn cdl_marubozu(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_LONG.avg_period.max(SHADOW_VERY_SHORT.avg_period);
     each_bar_avg([BODY_LONG, SHADOW_VERY_SHORT], lb, o, h, l, c, |i, a| {
         let vs = a[1];
-        if realbody(o, c, i) > a[0] && uppershadow(o, h, c, i) < vs && lowershadow(o, l, c, i) < vs {
+        if realbody(o, c, i) > a[0] && uppershadow(o, h, c, i) < vs && lowershadow(o, l, c, i) < vs
+        {
             color(o, c, i) * 100.0
         } else {
             0.0
@@ -42,8 +43,8 @@ pub fn cdl_closingmarubozu(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f6
         let vs = a[1];
         let white = color(o, c, i) > 0.0;
         let long_body = realbody(o, c, i) > a[0];
-        let closed_marubozu = (white && uppershadow(o, h, c, i) < vs)
-            || (!white && lowershadow(o, l, c, i) < vs);
+        let closed_marubozu =
+            (white && uppershadow(o, h, c, i) < vs) || (!white && lowershadow(o, l, c, i) < vs);
         if long_body && closed_marubozu {
             color(o, c, i) * 100.0
         } else {
@@ -118,9 +119,7 @@ pub fn cdl_dragonflydoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64>
     let lb = BODY_DOJI.avg_period.max(SHADOW_VERY_SHORT.avg_period);
     each_bar_avg([BODY_DOJI, SHADOW_VERY_SHORT], lb, o, h, l, c, |i, a| {
         let vs = a[1];
-        if realbody(o, c, i) <= a[0]
-            && uppershadow(o, h, c, i) < vs
-            && lowershadow(o, l, c, i) > vs
+        if realbody(o, c, i) <= a[0] && uppershadow(o, h, c, i) < vs && lowershadow(o, l, c, i) > vs
         {
             100.0
         } else {
@@ -135,9 +134,7 @@ pub fn cdl_gravestonedoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
     let lb = BODY_DOJI.avg_period.max(SHADOW_VERY_SHORT.avg_period);
     each_bar_avg([BODY_DOJI, SHADOW_VERY_SHORT], lb, o, h, l, c, |i, a| {
         let vs = a[1];
-        if realbody(o, c, i) <= a[0]
-            && lowershadow(o, l, c, i) < vs
-            && uppershadow(o, h, c, i) > vs
+        if realbody(o, c, i) <= a[0] && lowershadow(o, l, c, i) < vs && uppershadow(o, h, c, i) > vs
         {
             100.0
         } else {
@@ -166,7 +163,10 @@ pub fn cdl_longleggeddoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
 /// Rickshaw Man (TA-Lib CDLRICKSHAWMAN): a long-legged doji whose body sits near the
 /// midpoint of the high-low range. Non-directional: `100` or `0`. Lookback 10.
 pub fn cdl_rickshawman(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
-    let lb = BODY_DOJI.avg_period.max(SHADOW_LONG.avg_period).max(NEAR.avg_period);
+    let lb = BODY_DOJI
+        .avg_period
+        .max(SHADOW_LONG.avg_period)
+        .max(NEAR.avg_period);
     each_bar_avg([BODY_DOJI, SHADOW_LONG, NEAR], lb, o, h, l, c, |i, a| {
         let long = a[1];
         let nr = a[2];
@@ -193,8 +193,8 @@ pub fn cdl_belthold(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     each_bar_avg([BODY_LONG, SHADOW_VERY_SHORT], lb, o, h, l, c, |i, a| {
         let vs = a[1];
         let white = color(o, c, i) > 0.0;
-        let opens_at_extreme = (white && lowershadow(o, l, c, i) < vs)
-            || (!white && uppershadow(o, h, c, i) < vs);
+        let opens_at_extreme =
+            (white && lowershadow(o, l, c, i) < vs) || (!white && uppershadow(o, h, c, i) < vs);
         if realbody(o, c, i) > a[0] && opens_at_extreme {
             color(o, c, i) * 100.0
         } else {
@@ -208,7 +208,15 @@ pub fn cdl_belthold(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// (hammer, hanging man); false ⇒ long upper / short lower (inverted hammer, shooting
 /// star). `a = [shadow_long, shadow_very_short, body_short]` averages at bar `i`.
 #[inline]
-fn hammer_shape(o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize, long_below: bool, a: &[f64; 3]) -> bool {
+fn hammer_shape(
+    o: &[f64],
+    h: &[f64],
+    l: &[f64],
+    c: &[f64],
+    i: usize,
+    long_below: bool,
+    a: &[f64; 3],
+) -> bool {
     let long = a[0];
     let very_short = a[1];
     let small_body = realbody(o, c, i) < a[2];
@@ -223,7 +231,11 @@ fn hammer_shape(o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize, long_below
 /// Hammer (TA-Lib CDLHAMMER): a hammer-shape candle whose body sits near the prior bar's
 /// low — bullish reversal `100`. Lookback 11 (prior-bar reference).
 pub fn cdl_hammer(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
-    let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_SHORT.avg_period).max(NEAR.avg_period) + 1;
+    let lb = BODY_SHORT
+        .avg_period
+        .max(SHADOW_VERY_SHORT.avg_period)
+        .max(NEAR.avg_period)
+        + 1;
     let near = candle_average_series(NEAR, o, h, l, c); // read at i-1
     each_bar_avg(
         [SHADOW_LONG, SHADOW_VERY_SHORT, BODY_SHORT],
@@ -245,23 +257,57 @@ pub fn cdl_hammer(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// Hanging Man (TA-Lib CDLHANGINGMAN): a hammer-shape candle whose body sits near the
 /// prior bar's high — bearish reversal `-100`. Lookback 11.
 pub fn cdl_hangingman(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
-    let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_SHORT.avg_period).max(NEAR.avg_period) + 1;
-    let near = candle_average_series(NEAR, o, h, l, c); // read at i-1
-    each_bar_avg(
-        [SHADOW_LONG, SHADOW_VERY_SHORT, BODY_SHORT],
-        lb,
-        o,
-        h,
-        l,
-        c,
-        |i, a| {
-            if hammer_shape(o, h, l, c, i, true, a) && o[i].min(c[i]) >= h[i - 1] - near[i - 1] {
-                -100.0
-            } else {
-                0.0
-            }
-        },
-    )
+    let lb = BODY_SHORT
+        .avg_period
+        .max(SHADOW_VERY_SHORT.avg_period)
+        .max(NEAR.avg_period)
+        + 1;
+    let n = c.len();
+    let Some(mut out) = candle_output(n, lb) else {
+        return vec![f64::NAN; n];
+    };
+    // TA-Lib keeps BodyShort, ShadowVeryShort, and Near as rolling totals; ShadowLong
+    // has avg_period 0, so its threshold is just the current real body. This avoids the
+    // extra `near` Vec and the generic helper's per-bar setting loop.
+    let mut body_total = 0.0;
+    let mut very_short_total = 0.0;
+    let mut near_total = 0.0;
+    let mut body_trailing = lb - BODY_SHORT.avg_period;
+    let mut very_short_trailing = lb - SHADOW_VERY_SHORT.avg_period;
+    let mut near_trailing = lb - 1 - NEAR.avg_period;
+    for j in body_trailing..lb {
+        body_total += range(BODY_SHORT, o, h, l, c, j);
+    }
+    for j in very_short_trailing..lb {
+        very_short_total += range(SHADOW_VERY_SHORT, o, h, l, c, j);
+    }
+    for j in near_trailing..(lb - 1) {
+        near_total += range(NEAR, o, h, l, c, j);
+    }
+    let body_short_scale = BODY_SHORT.factor / BODY_SHORT.avg_period as f64;
+    let very_short_scale = SHADOW_VERY_SHORT.factor / SHADOW_VERY_SHORT.avg_period as f64;
+    let near_scale = NEAR.factor / NEAR.avg_period as f64;
+    for i in lb..n {
+        let body = realbody(o, c, i);
+        out[i] = if body < body_total * body_short_scale
+            && lowershadow(o, l, c, i) > body
+            && uppershadow(o, h, c, i) < very_short_total * very_short_scale
+            && o[i].min(c[i]) >= h[i - 1] - near_total * near_scale
+        {
+            -100.0
+        } else {
+            0.0
+        };
+        body_total +=
+            range(BODY_SHORT, o, h, l, c, i) - range(BODY_SHORT, o, h, l, c, body_trailing);
+        very_short_total += range(SHADOW_VERY_SHORT, o, h, l, c, i)
+            - range(SHADOW_VERY_SHORT, o, h, l, c, very_short_trailing);
+        near_total += range(NEAR, o, h, l, c, i - 1) - range(NEAR, o, h, l, c, near_trailing);
+        body_trailing += 1;
+        very_short_trailing += 1;
+        near_trailing += 1;
+    }
+    out
 }
 
 /// Inverted Hammer (TA-Lib CDLINVERTEDHAMMER): inverted hammer-shape gapping down from

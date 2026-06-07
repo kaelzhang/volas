@@ -13,7 +13,15 @@ use volas_core::{Column, DataFrame};
 use volas_directive::{execute, parse};
 
 const DIRECTIVES: &[&str] = &[
-    "ma:20", "ema:12", "macd", "macd.signal", "boll.upper", "bbw", "rsi:14", "atr:14", "llv:10",
+    "ma:20",
+    "ema:12",
+    "macd",
+    "macd.signal",
+    "boll.upper",
+    "bbw",
+    "rsi:14",
+    "atr:14",
+    "llv:10",
     "hhv:10",
 ];
 
@@ -102,7 +110,11 @@ fn main() {
         })
     };
 
-    println!("phase profile  ({} rows, {} iters, median µs/call)", df.height(), iters);
+    println!(
+        "phase profile  ({} rows, {} iters, median µs/call)",
+        df.height(),
+        iters
+    );
     println!(
         "{:<14} | {:>7} | {:>8} | {:>8} | {:>12}",
         "directive", "parse", "kernel", "execute", "exec overhead"

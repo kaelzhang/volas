@@ -30,20 +30,61 @@ fn roc_ratio(data: &[f64], period: usize, f: impl Fn(f64, f64) -> f64) -> Vec<f6
     // latter writes that range twice (NaN, then the result). Halves the result-buffer
     // writes; a meaningful share of these tiny division-bound kernels' cost.
     let mut out = vec![f64::NAN; period];
-    out.extend((period..n).map(|i| {
-        let prior = data[i - period];
-        if prior == 0.0 {
-            0.0
-        } else {
-            f(data[i], prior)
-        }
-    }));
+    out.extend(
+        data[period..]
+            .iter()
+            .zip(&data[..(n - period)])
+            .map(
+                |(&current, &prior)| {
+                    if prior == 0.0 {
+                        0.0
+                    } else {
+                        f(current, prior)
+                    }
+                },
+            ),
+    );
     out
 }
 
 /// Rate of change: `100 * (data/data[period ago] - 1)` (TA-Lib ROC).
 pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
-    roc_ratio(data, period, |cur, prior| (cur / prior - 1.0) * 100.0)
+    let n = data.len();
+    if period >= n {
+        return vec![f64::NAN; n];
+    }
+    let mut out = Vec::with_capacity(n);
+    // ROC is a coverage hot spot by itself, so keep the canonical line specialized:
+    // one explicit loop avoids the generic closure/iterator adapter used by ROCP/ROCR.
+    unsafe {
+        out.set_len(n);
+    }
+    out[..period].fill(f64::NAN);
+    let data_ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+    let mut cur_ptr = unsafe { data_ptr.add(period) };
+    let mut prior_ptr = data_ptr;
+    let mut out_write = unsafe { out_ptr.add(period) };
+    let mut remaining = n - period;
+    while remaining > 0 {
+        // The three pointers advance together over `[period, n)`, `[0, n-period)`,
+        // and the valid output region. This keeps the hot loop in TA-Lib's
+        // trailing-index shape without recomputing `i` and `i-period` addresses.
+        let prior = unsafe { *prior_ptr };
+        let value = if prior == 0.0 {
+            0.0
+        } else {
+            (unsafe { *cur_ptr } / prior - 1.0) * 100.0
+        };
+        unsafe {
+            *out_write = value;
+            cur_ptr = cur_ptr.add(1);
+            prior_ptr = prior_ptr.add(1);
+            out_write = out_write.add(1);
+        }
+        remaining -= 1;
+    }
+    out
 }
 
 /// Rate of change percentage: `data/data[period ago] - 1` (TA-Lib ROCP).
@@ -63,19 +104,75 @@ pub fn rocr100(data: &[f64], period: usize) -> Vec<f64> {
 
 /// Williams %R: `-100 * (HH - close) / (HH - LL)` over `period`, where HH/LL are
 /// the highest high / lowest low (TA-Lib WILLR). A flat range (HH == LL) yields 0.
-/// Lookback `period-1`. The operation order mirrors TA-Lib bit-for-bit.
+/// Lookback `period-1`; the tracker preserves TA-Lib's window and tie semantics.
 pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // One fused pass for max(high) and min(low) instead of two separate van Herk sweeps.
-    let (hh, ll) = kernels::rolling_max_min(high, low, period);
     let n = close.len();
-    let mut out = vec![f64::NAN; n];
-    for i in 0..n {
-        let diff = (hh[i] - ll[i]) / -100.0; // NaN during warm-up -> stays NaN below
-        if diff != 0.0 {
-            out[i] = (hh[i] - close[i]) / diff;
-        } else if !hh[i].is_nan() {
-            out[i] = 0.0; // finite flat range
+    if period == 0 || period > n {
+        return vec![f64::NAN; n];
+    }
+    let lookback = period - 1;
+    let mut out = Vec::with_capacity(n);
+    // Every slot is written before return: warm-up rows are filled with NaN here,
+    // and the loop below writes all valid rows `[lookback, n)`.
+    unsafe {
+        out.set_len(n);
+    }
+    out[..lookback].fill(f64::NAN);
+    let mut today = lookback;
+    let mut trailing = 0usize;
+    let mut highest_idx = usize::MAX;
+    let mut lowest_idx = usize::MAX;
+    let mut highest = 0.0;
+    let mut lowest = 0.0;
+    while today < n {
+        // `today < n`, `trailing <= today`, and rescan `idx <= today`, so all
+        // unchecked loads below stay inside the input slices.
+        let low_today = unsafe { *low.get_unchecked(today) };
+        if lowest_idx == usize::MAX || lowest_idx < trailing {
+            lowest_idx = trailing;
+            lowest = unsafe { *low.get_unchecked(trailing) };
+            let mut idx = trailing + 1;
+            while idx <= today {
+                let value = unsafe { *low.get_unchecked(idx) };
+                if value < lowest {
+                    lowest_idx = idx;
+                    lowest = value;
+                }
+                idx += 1;
+            }
+        } else if low_today <= lowest {
+            lowest_idx = today;
+            lowest = low_today;
         }
+
+        let high_today = unsafe { *high.get_unchecked(today) };
+        if highest_idx == usize::MAX || highest_idx < trailing {
+            highest_idx = trailing;
+            highest = unsafe { *high.get_unchecked(trailing) };
+            let mut idx = trailing + 1;
+            while idx <= today {
+                let value = unsafe { *high.get_unchecked(idx) };
+                if value > highest {
+                    highest_idx = idx;
+                    highest = value;
+                }
+                idx += 1;
+            }
+        } else if high_today >= highest {
+            highest_idx = today;
+            highest = high_today;
+        }
+
+        // Same Williams %R formula as TA-Lib, but with one range reciprocal instead
+        // of TA-Lib's `(range / -100)` followed by a second division.
+        let range = highest - lowest;
+        if range != 0.0 {
+            out[today] = (highest - unsafe { *close.get_unchecked(today) }) * (-100.0 / range);
+        } else {
+            out[today] = 0.0;
+        }
+        trailing += 1;
+        today += 1;
     }
     out
 }
@@ -212,90 +309,76 @@ pub fn trix_resume(
     (out, e.to_vec())
 }
 
-/// Aroon up/down over a `period+1`-bar window (TA-Lib AROON): for each row the
-/// most-recent highest high / lowest low in `[i-period, i]` gives "days since the
-/// extreme", and up/down = `(100/period)·(period − daysSince)`. Both NaN until index
-/// `period`; ties resolve to the most recent bar, matching TA-Lib's tracker.
-/// Track-and-rescan rolling argmax(high) / argmin(low) over the window `[i-period, i]`
-/// (the algorithm TA-Lib's Aroon family uses): keep each running extremum's index and
-/// rescan its window only when it expires. O(n) amortized with a very low constant on
-/// real data. Ties keep the *latest* index (`>=` / `<=`, matching TA-Lib), and the
-/// rescans scan the window as a slice (no per-element bounds checks). `emit(i, hi_idx,
-/// lo_idx)` fires for every output bar `i >= period`. Shared by the Aroon up/down lines
-/// and the oscillator so the dual extremum sweep is written once.
-fn aroon_track(high: &[f64], low: &[f64], period: usize, mut emit: impl FnMut(usize, usize, usize)) {
+/// Aroon Up (TA-Lib AROON, up output). Lookback `period`.
+pub fn aroon_up(high: &[f64], _low: &[f64], period: usize) -> Vec<f64> {
     let n = high.len();
-    if period == 0 {
-        return; // LCOV_EXCL_LINE
+    if period == 0 || period >= n {
+        return vec![f64::NAN; n];
     }
-    let (mut hi_idx, mut hi) = (0usize, f64::NEG_INFINITY);
-    let (mut lo_idx, mut lo_v) = (0usize, f64::INFINITY);
-    for i in 0..n {
-        let wstart = i.saturating_sub(period);
-        if hi_idx < wstart {
-            let win = &high[wstart..i];
-            let mut h = f64::NEG_INFINITY;
-            let mut hidx = wstart;
-            for (off, &val) in win.iter().enumerate() {
-                if val >= h {
-                    h = val;
-                    hidx = wstart + off;
-                }
-            }
-            hi = h;
-            hi_idx = hidx;
-        }
-        if high[i] >= hi {
-            hi = high[i];
-            hi_idx = i;
-        }
-        if lo_idx < wstart {
-            let win = &low[wstart..i];
-            let mut l = f64::INFINITY;
-            let mut lidx = wstart;
-            for (off, &val) in win.iter().enumerate() {
-                if val <= l {
-                    l = val;
-                    lidx = wstart + off;
-                }
-            }
-            lo_v = l;
-            lo_idx = lidx;
-        }
-        if low[i] <= lo_v {
-            lo_v = low[i];
-            lo_idx = i;
-        }
-        if i >= period {
-            emit(i, hi_idx, lo_idx);
-        }
-    }
-}
-
-fn aroon_up_down(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
-    let n = high.len();
-    let mut up = vec![f64::NAN; n];
-    let mut down = vec![f64::NAN; n];
-    if period == 0 {
-        return (up, down);
-    }
+    let mut out = Vec::with_capacity(n);
+    out.resize(period, f64::NAN);
     let factor = 100.0 / period as f64;
     let pf = period as f64;
-    aroon_track(high, low, period, |i, hi_idx, lo_idx| {
-        up[i] = factor * (pf - (i - hi_idx) as f64);
-        down[i] = factor * (pf - (i - lo_idx) as f64);
-    });
-    (up, down)
-}
-
-/// Aroon Up (TA-Lib AROON, up output). Lookback `period`.
-pub fn aroon_up(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    aroon_up_down(high, low, period).0
+    let mut today = period;
+    let mut trailing = 0usize;
+    let mut highest_idx = usize::MAX;
+    let mut highest = 0.0;
+    while today < n {
+        let value = high[today];
+        if highest_idx == usize::MAX || highest_idx < trailing {
+            highest_idx = trailing;
+            highest = high[trailing];
+            for (off, &candidate) in high[(trailing + 1)..=today].iter().enumerate() {
+                if candidate >= highest {
+                    highest_idx = trailing + 1 + off;
+                    highest = candidate;
+                }
+            }
+        } else if value >= highest {
+            highest_idx = today;
+            highest = value;
+        }
+        out.push(factor * (pf - (today - highest_idx) as f64));
+        trailing += 1;
+        today += 1;
+    }
+    out
 }
 
 /// Aroon Down (TA-Lib AROON, down output). Lookback `period`.
-pub fn aroon_down(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    aroon_up_down(high, low, period).1
+pub fn aroon_down(_high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    let n = low.len();
+    if period == 0 || period >= n {
+        return vec![f64::NAN; n];
+    }
+    let mut out = Vec::with_capacity(n);
+    out.resize(period, f64::NAN);
+    let factor = 100.0 / period as f64;
+    let pf = period as f64;
+    let mut today = period;
+    let mut trailing = 0usize;
+    let mut lowest_idx = usize::MAX;
+    let mut lowest = 0.0;
+    while today < n {
+        let value = low[today];
+        if lowest_idx == usize::MAX || lowest_idx < trailing {
+            lowest_idx = trailing;
+            lowest = low[trailing];
+            for (off, &candidate) in low[(trailing + 1)..=today].iter().enumerate() {
+                if candidate <= lowest {
+                    lowest_idx = trailing + 1 + off;
+                    lowest = candidate;
+                }
+            }
+        } else if value <= lowest {
+            lowest_idx = today;
+            lowest = value;
+        }
+        out.push(factor * (pf - (today - lowest_idx) as f64));
+        trailing += 1;
+        today += 1;
+    }
+    out
 }
 
 /// Aroon Oscillator (TA-Lib AROONOSC): `factor·(hiIdx − loIdx)` — the algebraic identity
@@ -303,14 +386,92 @@ pub fn aroon_down(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// line nor a subtraction pass. Lookback `period`.
 pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     let n = high.len();
-    let mut out = vec![f64::NAN; n];
-    if period == 0 {
-        return out;
+    if period == 0 || period >= n {
+        return vec![f64::NAN; n];
     }
+    let mut out = Vec::with_capacity(n);
+    // Every valid slot is written exactly once below. The loop invariants mirror
+    // `willr`: `today < n`, `trailing <= today`, and rescans stay inside
+    // `[trailing, today]`, so the hot tracker can use unchecked slice access.
+    unsafe {
+        out.set_len(n);
+    }
+    out[..period].fill(f64::NAN);
     let factor = 100.0 / period as f64;
-    aroon_track(high, low, period, |i, hi_idx, lo_idx| {
-        out[i] = factor * (hi_idx as i64 - lo_idx as i64) as f64;
-    });
+    let high_ptr = high.as_ptr();
+    let low_ptr = low.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+    // Seed the first `[0, period]` window exactly as TA-Lib's first rescan does.
+    // After that the hot loop only needs the expiry check, not a sentinel state.
+    let mut highest_idx = 0usize;
+    let mut lowest_idx = 0usize;
+    let mut highest = unsafe { *high_ptr };
+    let mut lowest = unsafe { *low_ptr };
+    let mut idx = 1usize;
+    while idx <= period {
+        let low_value = unsafe { *low_ptr.add(idx) };
+        if low_value <= lowest {
+            lowest_idx = idx;
+            lowest = low_value;
+        }
+        let high_value = unsafe { *high_ptr.add(idx) };
+        if high_value >= highest {
+            highest_idx = idx;
+            highest = high_value;
+        }
+        idx += 1;
+    }
+    unsafe {
+        *out_ptr.add(period) = factor * (highest_idx as isize - lowest_idx as isize) as f64;
+    }
+    let mut today = period + 1;
+    let mut trailing = 1usize;
+    let mut out_write = unsafe { out_ptr.add(today) };
+    while today < n {
+        let low_today = unsafe { *low_ptr.add(today) };
+        if lowest_idx < trailing {
+            lowest_idx = trailing;
+            lowest = unsafe { *low_ptr.add(trailing) };
+            // Manual index loops keep the rare rescan path close to TA-Lib's C loop
+            // and avoid iterator setup cost on this short-window kernel.
+            let mut idx = trailing + 1;
+            while idx <= today {
+                let value = unsafe { *low_ptr.add(idx) };
+                if value <= lowest {
+                    lowest_idx = idx;
+                    lowest = value;
+                }
+                idx += 1;
+            }
+        } else if low_today <= lowest {
+            lowest_idx = today;
+            lowest = low_today;
+        }
+
+        let high_today = unsafe { *high_ptr.add(today) };
+        if highest_idx < trailing {
+            highest_idx = trailing;
+            highest = unsafe { *high_ptr.add(trailing) };
+            let mut idx = trailing + 1;
+            while idx <= today {
+                let value = unsafe { *high_ptr.add(idx) };
+                if value >= highest {
+                    highest_idx = idx;
+                    highest = value;
+                }
+                idx += 1;
+            }
+        } else if high_today >= highest {
+            highest_idx = today;
+            highest = high_today;
+        }
+        unsafe {
+            *out_write = factor * (highest_idx as isize - lowest_idx as isize) as f64;
+            out_write = out_write.add(1);
+        }
+        trailing += 1;
+        today += 1;
+    }
     out
 }
 
@@ -321,18 +482,16 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// which is bit-identical to TA-Lib's stored value.
 pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
     let n = close.len();
-    let mut out = vec![f64::NAN; n];
     if period == 0 || period + 1 > n {
-        return out;
+        return vec![f64::NAN; n];
     }
-    let mfi_val = |pos: f64, neg: f64| {
-        let total = pos + neg;
-        if total < 1.0 {
-            0.0
-        } else {
-            100.0 * pos / total
-        }
-    };
+    let mut out = Vec::with_capacity(n);
+    // Warm-up slots are filled below and every valid slot `[period, n)` is written
+    // exactly once by the two loops, so this avoids a full-buffer NaN initialization.
+    unsafe {
+        out.set_len(n);
+    }
+    out[..period].fill(f64::NAN);
     // Single pass over O(period) memory (TA-Lib's shape): a ring buffer holds the last
     // `period` per-bar (positive, negative) money flows so the window can drop the
     // departing bar without an n-sized side array. The typical price is carried across
@@ -340,46 +499,77 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     // slide keeps the subtract-then-add order — bit-identical to the per-bar-flow form.
     let mut ring_pos = vec![0.0; period];
     let mut ring_neg = vec![0.0; period];
-    let mut prev_tp = (high[0] + low[0] + close[0]) / 3.0;
-    let flow_of = |prev: f64, i: usize| -> (f64, f64, f64) {
-        let tp = (high[i] + low[i] + close[i]) / 3.0;
-        let flow = tp * volume[i];
-        // Branchless direction split (the tp-vs-prev sign is unpredictable on real
-        // data). Bit-identical: `1·flow == flow`, `0·flow == 0`.
-        let d = tp - prev;
-        let (p, ng) = (
-            (d > 0.0) as i8 as f64 * flow,
-            (d < 0.0) as i8 as f64 * flow,
-        );
-        (p, ng, tp)
-    };
+    // `period + 1 <= n` and both loops keep `i < n`, so the unchecked OHLCV loads
+    // stay in bounds while removing checks from MFI's hot path.
+    let mut prev_tp = (unsafe { *high.get_unchecked(0) }
+        + unsafe { *low.get_unchecked(0) }
+        + unsafe { *close.get_unchecked(0) })
+        / 3.0;
     let mut pos_sum = 0.0;
     let mut neg_sum = 0.0;
     // Warm up the first window — bars `1..=period` fill ring slots `0..period`.
-    for i in 1..=period {
-        let (p, ng, tp) = flow_of(prev_tp, i);
+    let mut i = 1usize;
+    while i <= period {
+        let tp = (unsafe { *high.get_unchecked(i) }
+            + unsafe { *low.get_unchecked(i) }
+            + unsafe { *close.get_unchecked(i) })
+            / 3.0;
+        let flow = tp * unsafe { *volume.get_unchecked(i) };
+        // Match TA-Lib's signed-flow branch shape; on real price series adjacent
+        // typical-price direction is predictable enough to beat boolean-to-float masks.
+        let (p, ng) = if tp > prev_tp {
+            (flow, 0.0)
+        } else if tp < prev_tp {
+            (0.0, flow)
+        } else {
+            (0.0, 0.0)
+        };
         ring_pos[i - 1] = p;
         ring_neg[i - 1] = ng;
         pos_sum += p;
         neg_sum += ng;
         prev_tp = tp;
+        i += 1;
     }
-    out[period] = mfi_val(pos_sum, neg_sum);
+    let total = pos_sum + neg_sum;
+    out[period] = if total < 1.0 {
+        0.0
+    } else {
+        100.0 * pos_sum / total
+    };
     let mut slot = 0usize; // ring slot holding the oldest in-window bar (to evict next)
-    for i in (period + 1)..n {
+    i = period + 1;
+    while i < n {
         pos_sum -= ring_pos[slot]; // bar leaving the window
         neg_sum -= ring_neg[slot];
-        let (p, ng, tp) = flow_of(prev_tp, i);
+        let tp = (unsafe { *high.get_unchecked(i) }
+            + unsafe { *low.get_unchecked(i) }
+            + unsafe { *close.get_unchecked(i) })
+            / 3.0;
+        let flow = tp * unsafe { *volume.get_unchecked(i) };
+        let (p, ng) = if tp > prev_tp {
+            (flow, 0.0)
+        } else if tp < prev_tp {
+            (0.0, flow)
+        } else {
+            (0.0, 0.0)
+        };
         ring_pos[slot] = p; // bar entering
         ring_neg[slot] = ng;
         pos_sum += p;
         neg_sum += ng;
-        out[i] = mfi_val(pos_sum, neg_sum);
+        let total = pos_sum + neg_sum;
+        out[i] = if total < 1.0 {
+            0.0
+        } else {
+            100.0 * pos_sum / total
+        };
         prev_tp = tp;
         slot += 1;
         if slot == period {
             slot = 0;
         }
+        i += 1;
     }
     out
 }

@@ -43,7 +43,14 @@ impl Op {
     pub fn priority(&self) -> u8 {
         match self {
             Op::And | Op::Or | Op::Xor => 1,
-            Op::Lt | Op::Le | Op::Eq | Op::Ne | Op::Ge | Op::Gt | Op::CrossUp | Op::CrossDown
+            Op::Lt
+            | Op::Le
+            | Op::Eq
+            | Op::Ne
+            | Op::Ge
+            | Op::Gt
+            | Op::CrossUp
+            | Op::CrossDown
             | Op::Cross => 2,
             Op::Add | Op::Sub => 3,
             Op::Mul | Op::Div => 4,

@@ -349,7 +349,7 @@ mod tests {
         // period > n -> no full window ever forms.
         assert!(maxindex_final_state(&data, 200).is_none()); // math_ops.rs:136
         assert!(minindex_final_state(&data, 200).is_none()); // math_ops.rs:215
-        // from < period - 1 -> tracker not yet warm.
+                                                             // from < period - 1 -> tracker not yet warm.
         let st = maxindex_final_state(&data, 10).unwrap();
         assert!(maxindex_resume(&data, 10, 5, 0, &st).is_none()); // math_ops.rs:179
         let st = minindex_final_state(&data, 10).unwrap();

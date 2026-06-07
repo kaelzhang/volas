@@ -190,7 +190,11 @@ impl HtCoreState {
         sum += price[1] * 2.0;
         sub += price[2];
         sum += price[2] * 3.0;
-        let mut wma = PriceWma { sub, sum, trailing: 0.0 };
+        let mut wma = PriceWma {
+            sub,
+            sum,
+            trailing: 0.0,
+        };
         // Nine discarded warm-up pushes (bars 3..=11); each loads `price[bar-3]`.
         for bar in 3..CORE_START {
             let tv = price[bar];
@@ -220,11 +224,10 @@ impl HtCoreState {
     /// [`HtBar`]. This is the verbatim body of [`ht_core`]'s main loop — the single
     /// source of truth shared by the full compute and every resume, guaranteeing
     /// bit-identical continuation.
-    #[inline]
+    #[inline(always)]
     fn step(&mut self, price: &[f64], today: usize) -> HtBar {
-        // The homodyne smoothings below are `a·x + (1-a)·y` with `a+b=1`; fuse each as
-        // `(x-y)·a + y` (one rounding, one fewer multiply). They are contractive
-        // (b ∈ {0.8, 0.67}), so the ~1e-16 reassociation decays — within parity tolerance.
+        // Keep TA-Lib's explicit `a*x + b*y` smoothing form. On the release target
+        // this beats the algebraic `mul_add` rewrite and preserves the C recurrence order.
         let adj = self.period.mul_add(0.075, 0.54);
         let today_value = price[today];
         let smoothed = self.wma.push(price, today, today_value);
@@ -232,27 +235,35 @@ impl HtCoreState {
 
         let (i1, q1, q2, i2);
         if even {
-            let det = self.detrender.transform(smoothed, self.hilbert_idx, true, adj);
+            let det = self
+                .detrender
+                .transform(smoothed, self.hilbert_idx, true, adj);
             let q1c = self.q1v.transform(det, self.hilbert_idx, true, adj);
-            let jiv = self.ji.transform(self.i1_even_prev3, self.hilbert_idx, true, adj);
+            let jiv = self
+                .ji
+                .transform(self.i1_even_prev3, self.hilbert_idx, true, adj);
             let jqv = self.jq.transform(q1c, self.hilbert_idx, true, adj);
             self.hilbert_idx += 1;
             if self.hilbert_idx == 3 {
                 self.hilbert_idx = 0;
             }
-            q2 = (q1c + jiv - self.prev_q2).mul_add(0.2, self.prev_q2);
-            i2 = (self.i1_even_prev3 - jqv - self.prev_i2).mul_add(0.2, self.prev_i2);
+            q2 = 0.2 * (q1c + jiv) + 0.8 * self.prev_q2;
+            i2 = 0.2 * (self.i1_even_prev3 - jqv) + 0.8 * self.prev_i2;
             i1 = self.i1_even_prev3;
             q1 = q1c;
             self.i1_odd_prev3 = self.i1_odd_prev2;
             self.i1_odd_prev2 = det;
         } else {
-            let det = self.detrender.transform(smoothed, self.hilbert_idx, false, adj);
+            let det = self
+                .detrender
+                .transform(smoothed, self.hilbert_idx, false, adj);
             let q1c = self.q1v.transform(det, self.hilbert_idx, false, adj);
-            let jiv = self.ji.transform(self.i1_odd_prev3, self.hilbert_idx, false, adj);
+            let jiv = self
+                .ji
+                .transform(self.i1_odd_prev3, self.hilbert_idx, false, adj);
             let jqv = self.jq.transform(q1c, self.hilbert_idx, false, adj);
-            q2 = (q1c + jiv - self.prev_q2).mul_add(0.2, self.prev_q2);
-            i2 = (self.i1_odd_prev3 - jqv - self.prev_i2).mul_add(0.2, self.prev_i2);
+            q2 = 0.2 * (q1c + jiv) + 0.8 * self.prev_q2;
+            i2 = 0.2 * (self.i1_odd_prev3 - jqv) + 0.8 * self.prev_i2;
             i1 = self.i1_odd_prev3;
             q1 = q1c;
             self.i1_even_prev3 = self.i1_even_prev2;
@@ -260,8 +271,8 @@ impl HtCoreState {
         }
 
         // Homodyne discriminator -> dominant cycle period.
-        self.re = (i2 * self.prev_i2 + q2 * self.prev_q2 - self.re).mul_add(0.2, self.re);
-        self.im = (i2 * self.prev_q2 - q2 * self.prev_i2 - self.im).mul_add(0.2, self.im);
+        self.re = 0.2 * (i2 * self.prev_i2 + q2 * self.prev_q2) + 0.8 * self.re;
+        self.im = 0.2 * (i2 * self.prev_q2 - q2 * self.prev_i2) + 0.8 * self.im;
         self.prev_q2 = q2;
         self.prev_i2 = i2;
         let prev_period = self.period;
@@ -281,10 +292,15 @@ impl HtCoreState {
         } else if self.period > 50.0 {
             self.period = 50.0;
         }
-        self.period = (self.period - prev_period).mul_add(0.2, prev_period);
-        self.smooth_period = (self.period - self.smooth_period).mul_add(0.33, self.smooth_period);
+        self.period = 0.2 * self.period + 0.8 * prev_period;
+        self.smooth_period = 0.33 * self.period + 0.67 * self.smooth_period;
 
-        HtBar { smooth_period: self.smooth_period, smoothed, i1, q1 }
+        HtBar {
+            smooth_period: self.smooth_period,
+            smoothed,
+            i1,
+            q1,
+        }
     }
 
     /// Serialise to `CORE_STATE_LEN` `f64` words (see the type doc for the layout).
@@ -318,7 +334,11 @@ impl HtCoreState {
         if s.len() < CORE_STATE_LEN {
             return None;
         }
-        let wma = PriceWma { sub: s[0], sum: s[1], trailing: s[2] };
+        let wma = PriceWma {
+            sub: s[0],
+            sum: s[1],
+            trailing: s[2],
+        };
         let hilbert_idx = s[3] as usize;
         let mut off = 4usize;
         let detrender = HilbertVar::from_state(s, &mut off);
@@ -390,7 +410,11 @@ struct DcPhase {
 
 impl DcPhase {
     fn new() -> Self {
-        Self { smooth_price: [0.0; SMOOTH_PRICE_SIZE], idx: 0, phase: 0.0 }
+        Self {
+            smooth_price: [0.0; SMOOTH_PRICE_SIZE],
+            idx: 0,
+            phase: 0.0,
+        }
     }
 
     fn push(&mut self, smoothed: f64, smooth_period: f64) -> f64 {
@@ -429,7 +453,11 @@ impl DcPhase {
         if self.phase > 315.0 {
             self.phase -= 360.0;
         }
-        self.idx = if self.idx + 1 == SMOOTH_PRICE_SIZE { 0 } else { self.idx + 1 };
+        self.idx = if self.idx + 1 == SMOOTH_PRICE_SIZE {
+            0
+        } else {
+            self.idx + 1
+        };
         self.phase
     }
 
@@ -448,7 +476,11 @@ impl DcPhase {
         let mut smooth_price = [0.0f64; SMOOTH_PRICE_SIZE];
         smooth_price.copy_from_slice(&s[o + 2..o + 2 + SMOOTH_PRICE_SIZE]);
         *off += DCPHASE_STATE_LEN;
-        DcPhase { smooth_price, idx: s[o + 1] as usize, phase: s[o] }
+        DcPhase {
+            smooth_price,
+            idx: s[o + 1] as usize,
+            phase: s[o],
+        }
     }
 }
 
@@ -499,23 +531,41 @@ fn trendline_all(core: &[HtBar], price: &[f64]) -> Vec<f64> {
 
 /// `HT_DCPERIOD`: the smoothed dominant-cycle period.
 pub fn ht_dcperiod(price: &[f64]) -> Vec<f64> {
-    let core = ht_core(price);
-    let mut out = vec![f64::NAN; price.len()];
-    for i in LB_PERIOD..price.len() {
-        out[i] = core[i].smooth_period;
+    let n = price.len();
+    if n <= LB_PERIOD {
+        return vec![f64::NAN; n];
+    }
+    let mut out = Vec::with_capacity(n);
+    out.resize(LB_PERIOD, f64::NAN);
+    let mut core = HtCoreState::seed(price);
+    for i in CORE_START..LB_PERIOD {
+        let _ = core.step(price, i);
+    }
+    for i in LB_PERIOD..n {
+        // TA-Lib's HT_DCPERIOD writes the smoothed period directly from the
+        // Hilbert loop; streaming here avoids materialising the shared HtBar vector.
+        out.push(core.step(price, i).smooth_period);
     }
     out
 }
 
 /// `HT_PHASOR`: the in-phase and quadrature components `(inPhase, quadrature)`.
 pub fn ht_phasor(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let core = ht_core(price);
     let n = price.len();
     let mut inphase = vec![f64::NAN; n];
     let mut quad = vec![f64::NAN; n];
-    for i in LB_PERIOD..n {
-        inphase[i] = core[i].i1;
-        quad[i] = core[i].q1;
+    if n <= CORE_START {
+        return (inphase, quad);
+    }
+    let mut core = HtCoreState::seed(price);
+    for i in CORE_START..n {
+        // PHASOR is also a direct TA-Lib Hilbert-loop output; keep both lines in
+        // the same pass but skip the full-history HtBar scratch vector.
+        let b = core.step(price, i);
+        if i >= LB_PERIOD {
+            inphase[i] = b.i1;
+            quad[i] = b.q1;
+        }
     }
     (inphase, quad)
 }
@@ -548,11 +598,31 @@ pub fn ht_sine(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
 
 /// `HT_TRENDLINE`: the instantaneous trendline (a dominant-cycle-window average).
 pub fn ht_trendline(price: &[f64]) -> Vec<f64> {
-    let core = ht_core(price);
-    let trend = trendline_all(&core, price);
-    let mut out = vec![f64::NAN; price.len()];
-    for i in LB_PHASE..price.len() {
-        out[i] = trend[i];
+    let n = price.len();
+    let mut out = vec![f64::NAN; n];
+    if n <= CORE_START {
+        return out;
+    }
+    let mut prefix = Vec::with_capacity(n + 1);
+    prefix.push(0.0);
+    for &p in price {
+        prefix.push(prefix[prefix.len() - 1] + p);
+    }
+    let mut core = HtCoreState::seed(price);
+    let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
+    for today in CORE_START..n {
+        let b = core.step(price, today);
+        // Keep the full-compute prefix-sum average while streaming the Hilbert core:
+        // TA-Lib's iTrend recurrence is per-bar, but only bars >= LB_PHASE are visible.
+        let dc = (b.smooth_period + 0.5) as usize;
+        let lo = (today + 1).saturating_sub(dc);
+        let avg = (prefix[today + 1] - prefix[lo]) / dc as f64;
+        if today >= LB_PHASE {
+            out[today] = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
+        }
+        it3 = it2;
+        it2 = it1;
+        it1 = avg;
     }
     out
 }
@@ -589,16 +659,30 @@ pub fn ht_trendmode(price: &[f64]) -> Vec<f64> {
 /// returned as `(mama, fama)`. `fast_limit`/`slow_limit` bound the adaptive alpha
 /// (TA-Lib defaults 0.5 / 0.05).
 pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f64>) {
-    let core = ht_core(price);
     let n = price.len();
     let mut mama_out = vec![f64::NAN; n];
     let mut fama_out = vec![f64::NAN; n];
+    if n <= CORE_START {
+        return (mama_out, fama_out);
+    }
     let mut mama = 0.0f64;
     let mut fama = 0.0f64;
     let mut prev_phase = 0.0f64;
+    let mut core = HtCoreState::seed(price);
     for i in CORE_START..n {
-        let b = core[i];
-        mama_step(&b, price[i], fast_limit, slow_limit, &mut mama, &mut fama, &mut prev_phase);
+        // TA-Lib advances the Hilbert core and MAMA recurrence in one pass; keeping
+        // that order avoids the temporary `HtBar` vector without changing the
+        // per-bar state transition used by parity and resume.
+        let b = core.step(price, i);
+        mama_step(
+            &b,
+            price[i],
+            fast_limit,
+            slow_limit,
+            &mut mama,
+            &mut fama,
+            &mut prev_phase,
+        );
         if i >= LB_PERIOD {
             mama_out[i] = mama;
             fama_out[i] = fama;
@@ -653,7 +737,11 @@ pub fn ht_core_state(price: &[f64]) -> Option<Vec<f64>> {
 
 /// Resume `HT_DCPERIOD` over `[from, n)`: step the core, emit `smooth_period`.
 /// Every emitted bar is past the `LB_PERIOD` mask (`from >= valid_rows > LB_PERIOD`).
-pub fn ht_dcperiod_resume(price: &[f64], from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+pub fn ht_dcperiod_resume(
+    price: &[f64],
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
     let mut core = ht_core_resume_setup(state, from)?;
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
@@ -707,7 +795,11 @@ pub fn ht_dcphase_state(price: &[f64]) -> Option<Vec<f64>> {
 
 /// Resume `HT_DCPHASE` over `[from, n)`: step the core, push each smoothed bar
 /// through the carried [`DcPhase`], emit the phase (all past the `LB_PHASE` mask).
-pub fn ht_dcphase_resume(price: &[f64], from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+pub fn ht_dcphase_resume(
+    price: &[f64],
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
     let mut core = ht_core_resume_setup(state, from)?;
     let mut off = CORE_STATE_LEN;
     if state.len() < CORE_STATE_LEN + DCPHASE_STATE_LEN {
@@ -814,7 +906,11 @@ fn trendline_avg(price: &[f64], today: usize, smooth_period: f64) -> f64 {
 /// advance the `iTrend` recurrence, emit `(4·avg + 3·it1 + 2·it2 + it3)/10`. Guarded
 /// by `from >= SMOOTH_PRICE_SIZE` so the raw-price window is fully in range (and the
 /// dominant-cycle window is complete) on a head-dropping slice.
-pub fn ht_trendline_resume(price: &[f64], from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+pub fn ht_trendline_resume(
+    price: &[f64],
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
     if from < SMOOTH_PRICE_SIZE {
         return None;
     }
@@ -822,8 +918,11 @@ pub fn ht_trendline_resume(price: &[f64], from: usize, state: &[f64]) -> Option<
     if state.len() < CORE_STATE_LEN + 3 {
         return None;
     }
-    let (mut it1, mut it2, mut it3) =
-        (state[CORE_STATE_LEN], state[CORE_STATE_LEN + 1], state[CORE_STATE_LEN + 2]);
+    let (mut it1, mut it2, mut it3) = (
+        state[CORE_STATE_LEN],
+        state[CORE_STATE_LEN + 1],
+        state[CORE_STATE_LEN + 2],
+    );
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
@@ -898,7 +997,12 @@ fn ht_trendmode_final_state(price: &[f64]) -> Option<Vec<f64>> {
         let avg = trendline_avg(price, today, b.smooth_period);
         let trend_line = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
         let _ = trendmode_decide(
-            phase, prev_phase, b.smooth_period, b.smoothed, trend_line, &mut days_in_trend,
+            phase,
+            prev_phase,
+            b.smooth_period,
+            b.smoothed,
+            trend_line,
+            &mut days_in_trend,
         );
         it3 = it2;
         it2 = it1;
@@ -923,7 +1027,11 @@ pub fn ht_trendmode_state(price: &[f64]) -> Option<Vec<f64>> {
 /// Resume `HT_TRENDMODE` over `[from, n)`. Steps the core, reconstructs the DC phase
 /// + trendline, runs the shared decision with the carried `days_in_trend`, and
 /// emits `0.0`/`1.0`. Guarded by `from >= SMOOTH_PRICE_SIZE` (trendline window).
-pub fn ht_trendmode_resume(price: &[f64], from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+pub fn ht_trendmode_resume(
+    price: &[f64],
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
     if from < SMOOTH_PRICE_SIZE {
         return None;
     }
@@ -945,7 +1053,12 @@ pub fn ht_trendmode_resume(price: &[f64], from: usize, state: &[f64]) -> Option<
         let avg = trendline_avg(price, today, b.smooth_period);
         let trend_line = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
         let trend = trendmode_decide(
-            phase, prev_phase, b.smooth_period, b.smoothed, trend_line, &mut days_in_trend,
+            phase,
+            prev_phase,
+            b.smooth_period,
+            b.smoothed,
+            trend_line,
+            &mut days_in_trend,
         );
         out.push(trend as f64);
         it3 = it2;
@@ -975,7 +1088,15 @@ fn mama_final_state(price: &[f64], fast_limit: f64, slow_limit: f64) -> Option<V
     let (mut mama, mut fama, mut prev_phase) = (0.0f64, 0.0f64, 0.0f64);
     for today in CORE_START..n {
         let b = core.step(price, today);
-        mama_step(&b, price[today], fast_limit, slow_limit, &mut mama, &mut fama, &mut prev_phase);
+        mama_step(
+            &b,
+            price[today],
+            fast_limit,
+            slow_limit,
+            &mut mama,
+            &mut fama,
+            &mut prev_phase,
+        );
     }
     let mut v = core.serialize();
     v.push(mama);
@@ -1002,7 +1123,11 @@ fn mama_step(
     fama: &mut f64,
     prev_phase: &mut f64,
 ) {
-    let phase = if b.i1 != 0.0 { (b.q1 / b.i1).atan() * RAD2DEG } else { 0.0 };
+    let phase = if b.i1 != 0.0 {
+        (b.q1 / b.i1).atan() * RAD2DEG
+    } else {
+        0.0
+    };
     let mut delta = *prev_phase - phase;
     *prev_phase = phase;
     if delta < 1.0 {
@@ -1032,13 +1157,24 @@ pub fn mama_resume(
     if state.len() < CORE_STATE_LEN + 3 {
         return None;
     }
-    let (mut mama, mut fama, mut prev_phase) =
-        (state[CORE_STATE_LEN], state[CORE_STATE_LEN + 1], state[CORE_STATE_LEN + 2]);
+    let (mut mama, mut fama, mut prev_phase) = (
+        state[CORE_STATE_LEN],
+        state[CORE_STATE_LEN + 1],
+        state[CORE_STATE_LEN + 2],
+    );
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
-        mama_step(&b, price[today], fast_limit, slow_limit, &mut mama, &mut fama, &mut prev_phase);
+        mama_step(
+            &b,
+            price[today],
+            fast_limit,
+            slow_limit,
+            &mut mama,
+            &mut fama,
+            &mut prev_phase,
+        );
         out.push(if want_fama { fama } else { mama });
     }
     let mut v = core.serialize();
@@ -1049,201 +1185,5 @@ pub fn mama_resume(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ht_core_short_input_returns_warmup_only() {
-        // Inputs at or below the WMA warm-up never enter the main loop (covers the
-        // early return); every bar stays at the HtBar default.
-        for n in [0usize, 1, CORE_START, CORE_START - 1] {
-            let price: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
-            let bars = ht_core(&price);
-            assert_eq!(bars.len(), n);
-            assert!(bars.iter().all(|b| b.smooth_period == 0.0 && b.q1 == 0.0));
-        }
-    }
-
-    #[test]
-    fn dcphase_zero_imaginary_carry_branch() {
-        // The `imagPart == 0` carry branch (a verbatim port of TA-Lib's defensive
-        // path) only runs when the cosine-weighted sum cancels exactly while the
-        // sine-weighted sum does not. Force it with DCPeriodInt == 2 over two equal
-        // buffer values: cos(0)+cos(π) = 1 + (-1) = 0 exactly, while
-        // sin(0)+sin(π) = sin(π) ≈ 1.2e-16 ≠ 0, so `real_part` keeps the sign of the
-        // (positive / negative) prices and the ±90 nudge is exercised.
-        assert_eq!((TWO_PI / 2.0).cos(), -1.0, "cos(π) must be exactly -1 for the cancellation");
-
-        let mut up = DcPhase::new();
-        let _ = up.push(5.0, 2.0); // warm the buffer; smooth_period 2.0 -> DCPeriodInt 2
-        let p_up = up.push(5.0, 2.0); // window [5, 5] -> imag == 0, real > 0 (+90)
-        assert!(p_up.is_finite());
-
-        let mut down = DcPhase::new();
-        let _ = down.push(-5.0, 2.0);
-        let p_down = down.push(-5.0, 2.0); // window [-5, -5] -> imag == 0, real < 0 (-90)
-        assert!(p_down.is_finite());
-
-        // imag == 0 AND real == 0 (DCPeriodInt 0 -> empty window): the carry block is
-        // entered but neither ±90 nudge fires (the fall-through).
-        let p_flat = up.push(5.0, 0.4); // smooth_period 0.4 -> DCPeriodInt 0
-        assert!(p_flat.is_finite());
-    }
-
-    /// A non-degenerate ~250-bar series so every HT output is well past its lookback
-    /// (a sine carrier + slow drift, like the parity fixtures).
-    fn series(n: usize) -> Vec<f64> {
-        (0..n)
-            .map(|i| {
-                let t = i as f64;
-                100.0 + 0.05 * t + 6.0 * (t * 0.30).sin() + 2.0 * (t * 0.11).cos()
-            })
-            .collect()
-    }
-
-    /// Compare two slices for exact bit equality (NaN == NaN), the state-carry oracle.
-    fn assert_bits(a: &[f64], b: &[f64], what: &str) {
-        assert_eq!(a.len(), b.len(), "{what}: length");
-        for (i, (x, y)) in a.iter().zip(b).enumerate() {
-            assert!(
-                x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
-                "{what}: bar {i}: resume {x:?} != full {y:?}",
-            );
-        }
-    }
-
-    /// Tolerant resume-vs-full check for the **windowed-average** outputs
-    /// (TRENDLINE / TRENDMODE): the full pass sums each DC-period window via O(n)
-    /// price prefix sums while the per-bar resume keeps the exact O(period) rescan,
-    /// so the two agree only to a **non-accumulating ~1e-12** (the same window, a
-    /// different summation order). The recursive core they share stays bit-exact
-    /// (`assert_bits` above); these outputs are independently pinned to TA-Lib.
-    fn assert_near(a: &[f64], b: &[f64], what: &str) {
-        assert_eq!(a.len(), b.len(), "{what}: length");
-        for (i, (x, y)) in a.iter().zip(b).enumerate() {
-            let ok = (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-9 + 1e-9 * y.abs();
-            assert!(ok, "{what}: bar {i}: resume {x:?} !~= full {y:?}");
-        }
-    }
-
-    /// Every HT resume, fed the carried state of a full compute over `price[..from]`,
-    /// must reproduce the tail of a full compute over all of `price` — bit-for-bit.
-    /// This is the kernel-level twin of `test_mutation_parity`'s append/slice oracle.
-    #[test]
-    fn ht_resume_is_bit_identical_to_full() {
-        let price = series(250);
-        // `from` values spanning a fresh resume just past lookback, an even and an odd
-        // bar (the core alternates), and a generic large offset.
-        for &from in &[64usize, 65, 100, 200, 249] {
-            let head = &price[..from];
-
-            // DCPERIOD / PHASOR (core-only state).
-            let st = ht_core_state(head).unwrap();
-            let (v, _) = ht_dcperiod_resume(&price, from, &st).unwrap();
-            assert_bits(&v, &ht_dcperiod(&price)[from..], "dcperiod");
-            let (v, _) = ht_phasor_resume(&price, false, from, &st).unwrap();
-            assert_bits(&v, &ht_phasor(&price).0[from..], "phasor.inphase");
-            let (v, _) = ht_phasor_resume(&price, true, from, &st).unwrap();
-            assert_bits(&v, &ht_phasor(&price).1[from..], "phasor.quadrature");
-
-            // DCPHASE / SINE (core + DC-phase ring).
-            let st = ht_dcphase_state(head).unwrap();
-            let (v, _) = ht_dcphase_resume(&price, from, &st).unwrap();
-            assert_bits(&v, &ht_dcphase(&price)[from..], "dcphase");
-            let st = ht_sine_state(head).unwrap();
-            let (v, _) = ht_sine_resume(&price, false, from, &st).unwrap();
-            assert_bits(&v, &ht_sine(&price).0[from..], "sine.sine");
-            let (v, _) = ht_sine_resume(&price, true, from, &st).unwrap();
-            assert_bits(&v, &ht_sine(&price).1[from..], "sine.leadsine");
-
-            // TRENDLINE / TRENDMODE (core + iTrend triple [+ DC-phase / counters]).
-            let st = ht_trendline_state(head).unwrap();
-            let (v, _) = ht_trendline_resume(&price, from, &st).unwrap();
-            assert_near(&v, &ht_trendline(&price)[from..], "trendline");
-            let st = ht_trendmode_state(head).unwrap();
-            let (v, _) = ht_trendmode_resume(&price, from, &st).unwrap();
-            assert_near(&v, &ht_trendmode(&price)[from..], "trendmode");
-
-            // MAMA / FAMA (core + [mama, fama, prev_phase]).
-            let st = mama_state(head, 0.5, 0.05).unwrap();
-            let (v, _) = mama_resume(&price, 0.5, 0.05, false, from, &st).unwrap();
-            assert_bits(&v, &mama(&price, 0.5, 0.05).0[from..], "mama");
-            let (v, _) = mama_resume(&price, 0.5, 0.05, true, from, &st).unwrap();
-            assert_bits(&v, &mama(&price, 0.5, 0.05).1[from..], "mama.fama");
-        }
-    }
-
-    /// Chained resumes (append one bar at a time, threading the returned state) must
-    /// also stay bit-identical — the live-tick pattern, where each fulfill resumes
-    /// from the previous fulfill's carried state.
-    #[test]
-    fn ht_resume_chains_bit_identical() {
-        let price = series(160);
-        let full = ht_dcphase(&price);
-        let mut state = ht_dcphase_state(&price[..150]).unwrap();
-        // Collect each single-bar chained result, then compare the whole tail with the
-        // bit-exact oracle (which reads both operands unconditionally on the happy path).
-        let mut chained = Vec::with_capacity(price.len() - 150);
-        for from in 150..price.len() {
-            let (v, st) = ht_dcphase_resume(&price[..from + 1], from, &state).unwrap();
-            assert_eq!(v.len(), 1);
-            chained.push(v[0]);
-            state = st;
-        }
-        assert_bits(&chained, &full[150..], "chained dcphase");
-    }
-
-    /// Resume guards: at/under the core warm-up every HT resume declines (`None` →
-    /// caller falls back); the price-windowed trendline / trendmode additionally
-    /// decline before a full dominant-cycle window is visible.
-    #[test]
-    fn ht_resume_declines_below_warmup() {
-        let price = series(120);
-        let st = ht_core_state(&price).unwrap();
-        assert!(ht_dcperiod_resume(&price, CORE_START, &st).is_none());
-        assert!(ht_phasor_resume(&price, false, CORE_START, &st).is_none());
-        let st = ht_dcphase_state(&price).unwrap();
-        assert!(ht_dcphase_resume(&price, CORE_START, &st).is_none());
-        assert!(ht_sine_resume(&price, true, CORE_START, &st).is_none());
-        // Trendline / trendmode need `from >= SMOOTH_PRICE_SIZE` for the raw-price window.
-        let st = ht_trendline_state(&price).unwrap();
-        assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE - 1, &st).is_none());
-        let st = ht_trendmode_state(&price).unwrap();
-        assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE - 1, &st).is_none());
-        // Under-warm-up series carry no state at all.
-        let tiny = series(CORE_START);
-        assert!(ht_core_state(&tiny).is_none());
-        assert!(ht_dcphase_state(&tiny).is_none());
-        assert!(ht_trendline_state(&tiny).is_none());
-        assert!(ht_trendmode_state(&tiny).is_none());
-        assert!(mama_state(&tiny, 0.5, 0.05).is_none());
-    }
-
-    /// Defensive state-length guards: every HT resume bails (`None`) when handed a state
-    /// shorter than its layout needs — a truncated `HtCore` (`deserialize`), or a core that
-    /// deserializes but lacks the trailing per-output rings/scalars. `from` is past each
-    /// resume's warm-up so the length check (not the warm-up check) is what declines.
-    #[test]
-    fn ht_resume_declines_on_short_state() {
-        let price = series(120);
-
-        // Too short for even `HtCore::deserialize` (< CORE_STATE_LEN) -> setup `?` (line 318)
-        // propagates None. `from > CORE_START` so the from-guard passes first.
-        let stub = vec![0.0; CORE_STATE_LEN - 1];
-        assert!(ht_dcperiod_resume(&price, 20, &stub).is_none());
-
-        // A bare core (exactly CORE_STATE_LEN) deserializes, but the per-output tail is
-        // missing, so each family's length check declines.
-        let core_only = vec![0.0; CORE_STATE_LEN];
-        // DCPHASE / SINE need CORE_STATE_LEN + DCPHASE_STATE_LEN (lines 679 / 710).
-        assert!(ht_dcphase_resume(&price, 20, &core_only).is_none());
-        assert!(ht_sine_resume(&price, false, 20, &core_only).is_none());
-        // TRENDLINE needs CORE_STATE_LEN + 3 (line 788); `from >= SMOOTH_PRICE_SIZE` so the
-        // warm-up guard passes and the length guard is what fires.
-        assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
-        // TRENDMODE needs CORE_STATE_LEN + DCPHASE_STATE_LEN + 5 (line 898).
-        assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
-        // MAMA / FAMA need CORE_STATE_LEN + 3 (line 998).
-        assert!(mama_resume(&price, 0.5, 0.05, false, 20, &core_only).is_none());
-    }
-}
+#[path = "hilbert_tests.rs"]
+mod hilbert_tests;
