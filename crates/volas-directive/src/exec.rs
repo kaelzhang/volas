@@ -226,8 +226,13 @@ fn exec_command(
     // Command names are case-insensitive (P6). The parser already lower-cases names it
     // knows are commands; this also covers a bare no-arg command reached as a Node::Name
     // (e.g. `TR`). Columns are resolved before this function, so their case is preserved.
-    let name_lc = name.to_ascii_lowercase();
-    let name = name_lc.as_str();
+    let name_lc;
+    let name = if name.as_bytes().iter().any(u8::is_ascii_uppercase) {
+        name_lc = name.to_ascii_lowercase();
+        name_lc.as_str()
+    } else {
+        name
+    };
     // `cdl` is an alias for `style` (the candlestick namespace): cdl.<x> == style.<x>.
     let name = if name == "cdl" { "style" } else { name };
     let sub = canon_sub(name, sub);
