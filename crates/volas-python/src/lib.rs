@@ -14,7 +14,7 @@ use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
-use volas_core::{datetime, Column, DataFrame, DType, Index, Label, Series, Tz, VolasError};
+use volas_core::{datetime, Column, DType, DataFrame, Index, Label, Series, Tz, VolasError};
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
 
@@ -178,7 +178,9 @@ fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
         Column::Str(v) => {
             let list = PyList::new(py, v.as_slice()).expect("build str list");
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "object").expect("set dtype=object");
+            kwargs
+                .set_item("dtype", "object")
+                .expect("set dtype=object");
             py.import("numpy")
                 .expect("import numpy")
                 .call_method("array", (list,), Some(&kwargs))
@@ -198,7 +200,12 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
     match col {
         Column::F64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         Column::I64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
-        Column::Bool(v) => v[i].into_pyobject(py).unwrap().to_owned().into_any().unbind(),
+        Column::Bool(v) => v[i]
+            .into_pyobject(py)
+            .unwrap()
+            .to_owned()
+            .into_any()
+            .unbind(),
         Column::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
         Column::Datetime(v) => py
             .import("numpy")
@@ -240,7 +247,9 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
     if let Ok(i) = key.extract::<i64>() {
         return Ok(i);
     }
-    Err(PyKeyError::new_err("label must be a datetime string or integer"))
+    Err(PyKeyError::new_err(
+        "label must be a datetime string or integer",
+    ))
 }
 
 /// ``volas.Timestamp(value, tz=None)`` — a typed datetime label carrying its own
@@ -403,12 +412,17 @@ fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, Py
             Ok(arr.call_method1("astype", ("datetime64[ns]",))?)
         }
         Index::Int64(v) => Ok(v.clone().into_pyarray(py).into_any()),
-        Index::Range(n) => Ok((0..*n as i64).collect::<Vec<_>>().into_pyarray(py).into_any()),
+        Index::Range(n) => Ok((0..*n as i64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py)
+            .into_any()),
         Index::Str(v) => {
             let list = PyList::new(py, v.as_slice())?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("dtype", "object")?;
-            Ok(py.import("numpy")?.call_method("array", (list,), Some(&kwargs))?)
+            Ok(py
+                .import("numpy")?
+                .call_method("array", (list,), Some(&kwargs))?)
         }
     }
 }
@@ -439,8 +453,16 @@ pub(crate) fn build_datetime_index(
         None => Tz::Utc,
     };
     let parsed = match date_unit {
-        Some(unit) => df.column(dc).map_err(pyerr)?.epoch_to_datetime(unit).map_err(pyerr)?,
-        None => df.column(dc).map_err(pyerr)?.to_datetime_tz(tzv).map_err(pyerr)?,
+        Some(unit) => df
+            .column(dc)
+            .map_err(pyerr)?
+            .epoch_to_datetime(unit)
+            .map_err(pyerr)?,
+        None => df
+            .column(dc)
+            .map_err(pyerr)?
+            .to_datetime_tz(tzv)
+            .map_err(pyerr)?,
     };
     df.set_column(dc, parsed).map_err(pyerr)?;
     let mut df = df.set_index(dc).map_err(pyerr)?;
@@ -785,10 +807,15 @@ impl PySeries {
                     "fillna: pass either `value` or `method`, not both",
                 ))
             }
-            (Some(val), None) => v.iter().map(|&x| if x.is_nan() { val } else { x }).collect(),
+            (Some(val), None) => v
+                .iter()
+                .map(|&x| if x.is_nan() { val } else { x })
+                .collect(),
             (None, Some(m)) => fill_directional(v.as_slice(), m)?,
             (None, None) => {
-                return Err(PyValueError::new_err("fillna: pass a `value` or a `method`"))
+                return Err(PyValueError::new_err(
+                    "fillna: pass a `value` or a `method`",
+                ))
             }
         };
         Ok(f64_series(&self.inner, out))
@@ -846,7 +873,10 @@ impl PySeries {
                 _ => self.inner.data.epoch_to_datetime(unit).map_err(value_err)?,
             }
         } else {
-            self.inner.data.cast(parse_dtype(dtype)?).map_err(value_err)?
+            self.inner
+                .data
+                .cast(parse_dtype(dtype)?)
+                .map_err(value_err)?
         };
         Ok(PySeries {
             inner: Series::new(self.inner.name.clone(), col, Arc::clone(&self.inner.index)),
@@ -919,13 +949,21 @@ impl PySeries {
     /// The index **label** of the maximum value (NaN-skipping); raises on an
     /// all-NA series (pandas `idxmax`).
     fn idxmax(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(label_to_py(py, &self.inner.index, argext(&self.inner.data, true)?))
+        Ok(label_to_py(
+            py,
+            &self.inner.index,
+            argext(&self.inner.data, true)?,
+        ))
     }
 
     /// The index **label** of the minimum value (NaN-skipping); raises on an
     /// all-NA series (pandas `idxmin`).
     fn idxmin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(label_to_py(py, &self.inner.index, argext(&self.inner.data, false)?))
+        Ok(label_to_py(
+            py,
+            &self.inner.index,
+            argext(&self.inner.data, false)?,
+        ))
     }
 
     fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -1123,7 +1161,9 @@ impl SeriesILoc {
         if let Ok(slice) = key.downcast::<PySlice>() {
             return Ok(Py::new(py, slice_series(&self.inner, slice)?)?.into_any());
         }
-        Err(PyIndexError::new_err("iloc key must be an integer or slice"))
+        Err(PyIndexError::new_err(
+            "iloc key must be an integer or slice",
+        ))
     }
 }
 
@@ -1149,7 +1189,9 @@ fn series_rhs_f64(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
     } else if let Ok(scalar) = other.extract::<f64>() {
         Ok(vec![scalar; s.len()])
     } else {
-        Err(PyTypeError::new_err("unsupported operand for a Series operation"))
+        Err(PyTypeError::new_err(
+            "unsupported operand for a Series operation",
+        ))
     }
 }
 
@@ -1220,7 +1262,10 @@ fn series_cmp(
 
 /// The non-NaN `f64` values of a column (for NaN-skipping reductions).
 fn non_nan(col: &Column) -> Vec<f64> {
-    col.to_f64_vec().into_iter().filter(|x| !x.is_nan()).collect()
+    col.to_f64_vec()
+        .into_iter()
+        .filter(|x| !x.is_nan())
+        .collect()
 }
 
 /// Forward (`ffill` / `pad`) or backward (`bfill` / `backfill`) fill of NaN cells.
@@ -1247,7 +1292,11 @@ fn fill_directional(v: &[f64], method: &str) -> PyResult<Vec<f64>> {
                 }
             }
         }
-        _ => return Err(PyValueError::new_err(format!("fillna: unknown method '{method}'"))),
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "fillna: unknown method '{method}'"
+            )))
+        }
     }
     Ok(out)
 }
@@ -1292,7 +1341,9 @@ fn series_logical(
     } else if let Ok(x) = other.extract::<f64>() {
         vec![x != 0.0; a.len()]
     } else {
-        return Err(PyTypeError::new_err("unsupported operand for a Series logical op"));
+        return Err(PyTypeError::new_err(
+            "unsupported operand for a Series logical op",
+        ));
     };
     let n = a.len().min(rhs.len());
     let mut out = vec![false; a.len()];
@@ -1651,7 +1702,8 @@ impl PyDataFrame {
                 let windowed = execute(&base.slice(start, height), &node).map_err(value_err)?;
                 let cached_val = col_value(self.inner.column(&name).map_err(pyerr)?, vr - 1);
                 let probe = col_value(&windowed, vr - 1 - start);
-                if probe.is_finite() && (probe - cached_val).abs() <= 1e-9 * cached_val.abs().max(1.0)
+                if probe.is_finite()
+                    && (probe - cached_val).abs() <= 1e-9 * cached_val.abs().max(1.0)
                 {
                     (windowed, vr - start)
                 } else {
@@ -1727,7 +1779,11 @@ impl PyDataFrame {
             let spec = build_agg_spec(cumulators)?;
             return Ok(PyDataFrame {
                 inner: df,
-                tf: Some(TfState { time_frame: frame, cumulators: spec, open: None }),
+                tf: Some(TfState {
+                    time_frame: frame,
+                    cumulators: spec,
+                    open: None,
+                }),
             });
         }
         if cumulators.is_some() {
@@ -1752,14 +1808,18 @@ impl PyDataFrame {
     /// data was ingested without a tz. Returns a new frame.
     fn tz_localize(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
-        Ok(PyDataFrame::plain(self.inner.tz_localize(tzv).map_err(pyerr)?))
+        Ok(PyDataFrame::plain(
+            self.inner.tz_localize(tzv).map_err(pyerr)?,
+        ))
     }
 
     /// Change the index display / matching tz without moving any instant (pandas
     /// `tz_convert`). Returns a new frame.
     fn tz_convert(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
-        Ok(PyDataFrame::plain(self.inner.tz_convert(tzv).map_err(pyerr)?))
+        Ok(PyDataFrame::plain(
+            self.inner.tz_convert(tzv).map_err(pyerr)?,
+        ))
     }
 
     /// The column names, in order.
@@ -1810,7 +1870,9 @@ impl PyDataFrame {
     ///     df.iloc[mask, 1] = 0  # assign a column where a boolean mask is True
     #[getter]
     fn iloc(slf: Bound<'_, Self>) -> DataFrameILoc {
-        DataFrameILoc { parent: slf.unbind() }
+        DataFrameILoc {
+            parent: slf.unbind(),
+        }
     }
 
     /// Label-based indexing for selection and assignment.
@@ -1827,7 +1889,9 @@ impl PyDataFrame {
     ///     df.loc[df['close'] > df['open'], 'signal'] = 1
     #[getter]
     fn loc(slf: Bound<'_, Self>) -> DataFrameLoc {
-        DataFrameLoc { parent: slf.unbind() }
+        DataFrameLoc {
+            parent: slf.unbind(),
+        }
     }
 
     /// Fast scalar access by integer position: ``df.iat[i, j]`` to get or set a
@@ -1839,7 +1903,9 @@ impl PyDataFrame {
     ///     df.iat[0, 3] = 1.5  # set it
     #[getter]
     fn iat(slf: Bound<'_, Self>) -> DataFrameIat {
-        DataFrameIat { parent: slf.unbind() }
+        DataFrameIat {
+            parent: slf.unbind(),
+        }
     }
 
     /// Fast scalar access by label + column name: ``df.at[label, col]`` to get
@@ -1851,7 +1917,9 @@ impl PyDataFrame {
     ///     df.at['2021-01-04', 'close'] = 100.0 # set it
     #[getter]
     fn at(slf: Bound<'_, Self>) -> DataFrameAt {
-        DataFrameAt { parent: slf.unbind() }
+        DataFrameAt {
+            parent: slf.unbind(),
+        }
     }
 
     fn __len__(&self) -> usize {
@@ -1944,16 +2012,20 @@ impl PyDataFrame {
                 ))
             }
             (None, None) => {
-                return Err(PyValueError::new_err("fillna: pass a `value` or a `method`"))
+                return Err(PyValueError::new_err(
+                    "fillna: pass a `value` or a `method`",
+                ))
             }
             (Some(val), None) => self
                 .inner
                 .columns()
                 .iter()
                 .map(|c| match c {
-                    Column::F64(v) => {
-                        Column::f64(v.iter().map(|&x| if x.is_nan() { val } else { x }).collect())
-                    }
+                    Column::F64(v) => Column::f64(
+                        v.iter()
+                            .map(|&x| if x.is_nan() { val } else { x })
+                            .collect(),
+                    ),
                     other => other.clone(),
                 })
                 .collect(),
@@ -2002,7 +2074,9 @@ impl PyDataFrame {
             cols.extend(self.inner.columns().iter().cloned());
             (names, cols)
         };
-        Ok(PyDataFrame::plain(DataFrame::new(names, columns, Some(Index::Range(h))).map_err(pyerr)?))
+        Ok(PyDataFrame::plain(
+            DataFrame::new(names, columns, Some(Index::Range(h))).map_err(pyerr)?,
+        ))
     }
 
     /// `df[name] = value` — add or replace a column. `value` may be a scalar
@@ -2089,7 +2163,8 @@ impl PyDataFrame {
                 // continue without a full recompute. `None` for non-resumable directives.
                 let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
                 self.inner.set_column(&canonical, col).map_err(pyerr)?;
-                self.inner.set_computed(&canonical, canonical.clone(), lookback);
+                self.inner
+                    .set_computed(&canonical, canonical.clone(), lookback);
                 self.inner.set_computed_state(&canonical, state);
             }
             let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
@@ -2157,7 +2232,8 @@ impl PyDataFrame {
                 let lookback = volas_directive::lookback::lookback(&node);
                 let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
                 self.inner.set_column(&canonical, col).map_err(pyerr)?;
-                self.inner.set_computed(&canonical, canonical.clone(), lookback);
+                self.inner
+                    .set_computed(&canonical, canonical.clone(), lookback);
                 self.inner.set_computed_state(&canonical, state);
             }
             let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
@@ -2330,10 +2406,7 @@ impl PyDataFrame {
     ///
     /// Returns:
     ///     DataFrame: ``self`` (enabling chaining).
-    fn append<'py>(
-        slf: Bound<'py, Self>,
-        other: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
+    fn append<'py>(slf: Bound<'py, Self>, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
         // Extract `other` into an owned frame first so its borrow is released
         // before we mutably borrow `slf` (so `df.append(df)` cannot deadlock).
         let other_inner = if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
@@ -2361,7 +2434,11 @@ impl PyDataFrame {
     #[pyo3(signature = (dtype = None))]
     fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
         ensure_fresh(&self.inner)?;
-        let has_str = self.inner.columns().iter().any(|c| matches!(c, Column::Str(_)));
+        let has_str = self
+            .inner
+            .columns()
+            .iter()
+            .any(|c| matches!(c, Column::Str(_)));
         let (h, w) = (self.inner.height(), self.inner.width());
 
         if let Some(dt) = dtype {
@@ -2398,7 +2475,9 @@ impl PyDataFrame {
         let kwargs = PyDict::new(py);
         kwargs.set_item("dtype", "object")?;
         let _ = w;
-        Ok(py.import("numpy")?.call_method("array", (rows,), Some(&kwargs))?)
+        Ok(py
+            .import("numpy")?
+            .call_method("array", (rows,), Some(&kwargs))?)
     }
 
     /// Value equality (same columns + index + values, `NaN == NaN`).
@@ -2473,14 +2552,18 @@ impl PyDataFrame {
         for (k, v) in columns.iter() {
             mapping.insert(k.extract::<String>()?, v.extract::<String>()?);
         }
-        Ok(PyDataFrame::plain(self.inner.rename(&mapping).map_err(pyerr)?))
+        Ok(PyDataFrame::plain(
+            self.inner.rename(&mapping).map_err(pyerr)?,
+        ))
     }
 
     /// Move a column into the row index (pandas `set_index(col)`), returning a
     /// new frame. A datetime / int / string column becomes the matching index.
     #[pyo3(signature = (keys))]
     fn set_index(&self, keys: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::plain(self.inner.set_index(keys).map_err(pyerr)?))
+        Ok(PyDataFrame::plain(
+            self.inner.set_index(keys).map_err(pyerr)?,
+        ))
     }
 
     /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
@@ -2784,12 +2867,7 @@ fn project_cols(df: &DataFrame, cols: &[usize]) -> PyResult<DataFrame> {
 /// positions, reproducing pandas's shape rules: scalar×scalar -> cell,
 /// rows×col -> a column Series, row×cols -> the row (volas's 1-row frame), and
 /// rows×cols -> a sub-frame.
-fn select_2d(
-    py: Python<'_>,
-    df: &DataFrame,
-    rows: AxisSel,
-    cols: AxisSel,
-) -> PyResult<Py<PyAny>> {
+fn select_2d(py: Python<'_>, df: &DataFrame, rows: AxisSel, cols: AxisSel) -> PyResult<Py<PyAny>> {
     match (rows, cols) {
         (AxisSel::One(i), AxisSel::One(j)) => Ok(scalar_to_py(py, &df.columns()[j], i)),
         (AxisSel::Many(r), AxisSel::One(j)) => {
@@ -2880,7 +2958,9 @@ impl DataFrameILoc {
         let positions = iloc_positions(&rows, height)?;
         let target = pf.inner.columns()[j].dtype();
         let val = resolve_assignment(value, target, positions.len())?;
-        pf.inner.assign_positions(j, &positions, &val).map_err(pyerr)
+        pf.inner
+            .assign_positions(j, &positions, &val)
+            .map_err(pyerr)
     }
 }
 
@@ -3085,7 +3165,9 @@ impl DataFrameLoc {
             .ok_or_else(|| PyKeyError::new_err(format!("column {colname:?} not found")))?;
         let target = pf.inner.columns()[j].dtype();
         let val = resolve_assignment(value, target, positions.len())?;
-        pf.inner.assign_positions(j, &positions, &val).map_err(pyerr)
+        pf.inner
+            .assign_positions(j, &positions, &val)
+            .map_err(pyerr)
     }
 }
 
@@ -3202,7 +3284,6 @@ impl SeriesLoc {
     }
 }
 
-
 /// Convert epoch numbers or datetime strings to a datetime `Series`, mirroring
 /// `pandas.to_datetime`. Numeric input is read as an epoch in `unit`
 /// (`"s"`/`"ms"`/`"us"`/`"ns"`), preserving sub-`unit` fractions; string input is parsed
@@ -3234,7 +3315,9 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
                     .iter()
                     .map(|s| {
                         datetime::parse_ns_format(s, fmt).ok_or_else(|| {
-                            PyValueError::new_err(format!("\"{s}\" does not match format \"{fmt}\""))
+                            PyValueError::new_err(format!(
+                                "\"{s}\" does not match format \"{fmt}\""
+                            ))
                         })
                     })
                     .collect::<PyResult<Vec<i64>>>()?;
@@ -3288,8 +3371,14 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SeriesLoc>()?;
     m.add_class::<PyTimeFrame>()?;
     m.add("DirectiveError", m.py().get_type::<DirectiveError>())?;
-    m.add("DirectiveSyntaxError", m.py().get_type::<DirectiveSyntaxError>())?;
-    m.add("DirectiveValueError", m.py().get_type::<DirectiveValueError>())?;
+    m.add(
+        "DirectiveSyntaxError",
+        m.py().get_type::<DirectiveSyntaxError>(),
+    )?;
+    m.add(
+        "DirectiveValueError",
+        m.py().get_type::<DirectiveValueError>(),
+    )?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
     m.add_function(wrap_pyfunction!(directive_stringify, m)?)?;

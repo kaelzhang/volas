@@ -266,16 +266,18 @@ impl Column {
             Column::I64(v) => v
                 .iter()
                 .map(|&x| {
-                    datetime::epoch_to_ns(x, unit)
-                        .ok_or_else(|| VolasError::Value(format!("invalid epoch unit {unit:?} or overflow")))
+                    datetime::epoch_to_ns(x, unit).ok_or_else(|| {
+                        VolasError::Value(format!("invalid epoch unit {unit:?} or overflow"))
+                    })
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::datetime),
             Column::F64(v) => v
                 .iter()
                 .map(|&x| {
-                    f64_to_ns(x)
-                        .ok_or_else(|| VolasError::Value(format!("invalid epoch unit {unit:?} or overflow")))
+                    f64_to_ns(x).ok_or_else(|| {
+                        VolasError::Value(format!("invalid epoch unit {unit:?} or overflow"))
+                    })
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::datetime),
@@ -392,7 +394,9 @@ mod tests {
 
     #[test]
     fn to_datetime_errors() {
-        assert!(Column::str(vec!["not-a-date".into()]).to_datetime().is_err());
+        assert!(Column::str(vec!["not-a-date".into()])
+            .to_datetime()
+            .is_err());
         assert!(Column::i64(vec![1, 2]).to_datetime().is_err());
     }
 
@@ -403,19 +407,33 @@ mod tests {
         assert_eq!(f.cast(DType::F64).unwrap(), f);
 
         // -> F64 (incl. the Str -> NaN arm of to_f64_vec)
-        assert_eq!(Column::i64(vec![3]).cast(DType::F64).unwrap(), Column::f64(vec![3.0]));
+        assert_eq!(
+            Column::i64(vec![3]).cast(DType::F64).unwrap(),
+            Column::f64(vec![3.0])
+        );
         assert_eq!(
             Column::bool(vec![true, false]).cast(DType::F64).unwrap(),
             Column::f64(vec![1.0, 0.0])
         );
-        let from_str = Column::str(vec!["a".into(), "b".into()]).cast(DType::F64).unwrap();
+        let from_str = Column::str(vec!["a".into(), "b".into()])
+            .cast(DType::F64)
+            .unwrap();
         assert_eq!(from_str.dtype(), DType::F64);
         assert!(from_str.to_f64_vec().iter().all(|x| x.is_nan()));
 
         // -> I64 (F64 / Bool / Datetime; Str errors)
-        assert_eq!(Column::f64(vec![2.9]).cast(DType::I64).unwrap(), Column::i64(vec![2]));
-        assert_eq!(Column::bool(vec![true]).cast(DType::I64).unwrap(), Column::i64(vec![1]));
-        assert_eq!(Column::datetime(vec![5]).cast(DType::I64).unwrap(), Column::i64(vec![5]));
+        assert_eq!(
+            Column::f64(vec![2.9]).cast(DType::I64).unwrap(),
+            Column::i64(vec![2])
+        );
+        assert_eq!(
+            Column::bool(vec![true]).cast(DType::I64).unwrap(),
+            Column::i64(vec![1])
+        );
+        assert_eq!(
+            Column::datetime(vec![5]).cast(DType::I64).unwrap(),
+            Column::i64(vec![5])
+        );
         assert!(Column::str(vec!["x".into()]).cast(DType::I64).is_err());
 
         // -> Bool (F64 / I64; Str errors)
@@ -430,8 +448,14 @@ mod tests {
         assert!(Column::str(vec!["x".into()]).cast(DType::Bool).is_err());
 
         // -> Utf8 (every source variant of to_string_vec)
-        assert_eq!(Column::f64(vec![1.5]).cast(DType::Utf8).unwrap(), Column::str(vec!["1.5".into()]));
-        assert_eq!(Column::i64(vec![7]).cast(DType::Utf8).unwrap(), Column::str(vec!["7".into()]));
+        assert_eq!(
+            Column::f64(vec![1.5]).cast(DType::Utf8).unwrap(),
+            Column::str(vec!["1.5".into()])
+        );
+        assert_eq!(
+            Column::i64(vec![7]).cast(DType::Utf8).unwrap(),
+            Column::str(vec!["7".into()])
+        );
         assert_eq!(
             Column::bool(vec![true, false]).cast(DType::Utf8).unwrap(),
             Column::str(vec!["True".into(), "False".into()])
@@ -442,7 +466,10 @@ mod tests {
 
         // -> Datetime (delegates to to_datetime)
         assert_eq!(
-            Column::str(vec!["2020-01-01".into()]).cast(DType::Datetime).unwrap().dtype(),
+            Column::str(vec!["2020-01-01".into()])
+                .cast(DType::Datetime)
+                .unwrap()
+                .dtype(),
             DType::Datetime
         );
     }
@@ -478,8 +505,14 @@ mod tests {
         assert!(Column::str(vec!["x".into()]).get_f64(0).is_nan());
 
         // slice / take across Bool / I64 / Str
-        assert_eq!(Column::bool(vec![true, false, true]).slice(1, 3), Column::bool(vec![false, true]));
-        assert_eq!(Column::i64(vec![1, 2, 3]).take(&[2, 0]), Column::i64(vec![3, 1]));
+        assert_eq!(
+            Column::bool(vec![true, false, true]).slice(1, 3),
+            Column::bool(vec![false, true])
+        );
+        assert_eq!(
+            Column::i64(vec![1, 2, 3]).take(&[2, 0]),
+            Column::i64(vec![3, 1])
+        );
         assert_eq!(
             Column::str(vec!["a".into(), "b".into(), "c".into()]).take(&[1, 2]),
             Column::str(vec!["b".into(), "c".into()])
@@ -510,7 +543,9 @@ mod tests {
         assert!(Column::bool(vec![true]).epoch_to_datetime("s").is_err());
         // epoch_to_datetime_rounded preserves a fractional second; integers agree.
         assert_eq!(
-            Column::f64(vec![1.5]).epoch_to_datetime_rounded("s").unwrap(),
+            Column::f64(vec![1.5])
+                .epoch_to_datetime_rounded("s")
+                .unwrap(),
             Column::datetime(vec![1_500_000_000])
         );
         assert_eq!(
@@ -524,11 +559,21 @@ mod tests {
         // the error closure on each numeric arm fires on an unknown unit
         assert!(Column::i64(vec![1]).epoch_to_datetime("weeks").is_err());
         assert!(Column::f64(vec![1.0]).epoch_to_datetime("weeks").is_err());
-        assert!(Column::f64(vec![1.0]).epoch_to_datetime_rounded("weeks").is_err());
-        assert!(Column::bool(vec![true]).epoch_to_datetime_rounded("s").is_err());
+        assert!(Column::f64(vec![1.0])
+            .epoch_to_datetime_rounded("weeks")
+            .is_err());
+        assert!(Column::bool(vec![true])
+            .epoch_to_datetime_rounded("s")
+            .is_err());
         // to_string_vec renders each supported dtype.
-        assert_eq!(Column::str(vec!["a".into()]).to_string_vec(), vec!["a".to_string()]);
-        assert_eq!(Column::f64(vec![1.5]).to_string_vec(), vec!["1.5".to_string()]);
+        assert_eq!(
+            Column::str(vec!["a".into()]).to_string_vec(),
+            vec!["a".to_string()]
+        );
+        assert_eq!(
+            Column::f64(vec![1.5]).to_string_vec(),
+            vec!["1.5".to_string()]
+        );
         assert_eq!(Column::i64(vec![3]).to_string_vec(), vec!["3".to_string()]);
     }
 }

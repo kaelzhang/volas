@@ -155,7 +155,9 @@ impl DataFrame {
             )));
         }
         if self.column_pos(src_name).is_none() {
-            return Err(VolasError::Value(format!("column \"{src_name}\" not exists")));
+            return Err(VolasError::Value(format!(
+                "column \"{src_name}\" not exists"
+            )));
         }
         let mut aliases = (*self.aliases).clone();
         aliases.insert(as_name.to_string(), src_name.to_string());
@@ -210,7 +212,8 @@ impl DataFrame {
         match self.column_pos(name) {
             Some(i) => self.columns[i] = col,
             None => {
-                self.name_to_idx.insert(name.to_string(), self.columns.len());
+                self.name_to_idx
+                    .insert(name.to_string(), self.columns.len());
                 self.names.push(name.to_string());
                 self.columns.push(col);
             }
@@ -837,9 +840,11 @@ mod tests {
 
         // replace in place, then add a second column
         let mut df = sample();
-        df.set_column("a", Column::f64(vec![9.0, 9.0, 9.0])).unwrap();
+        df.set_column("a", Column::f64(vec![9.0, 9.0, 9.0]))
+            .unwrap();
         assert_eq!(df.column("a").unwrap().as_f64().unwrap(), &[9.0, 9.0, 9.0]);
-        df.set_column("c", Column::f64(vec![7.0, 7.0, 7.0])).unwrap();
+        df.set_column("c", Column::f64(vec![7.0, 7.0, 7.0]))
+            .unwrap();
         assert_eq!(df.width(), 3);
 
         // a wrong-height column is rejected
@@ -855,8 +860,7 @@ mod tests {
     fn append_pads_missing_columns_by_dtype() {
         // a plain int column missing on append -> upcast to f64 + NaN (EX-11).
         let mut df = sample(); // a: f64, b: i64
-        let only_a =
-            DataFrame::new(vec!["a".into()], vec![Column::f64(vec![4.0])], None).unwrap();
+        let only_a = DataFrame::new(vec!["a".into()], vec![Column::f64(vec![4.0])], None).unwrap();
         df.append(&only_a).unwrap();
         assert_eq!(df.height(), 4);
         let b = df.column("b").unwrap();
@@ -870,8 +874,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let only_a2 =
-            DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
+        let only_a2 = DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
         assert!(g.append(&only_a2).is_err());
 
         // a cached *bool directive* column missing on append -> padded false, stays bool.
@@ -882,8 +885,7 @@ mod tests {
         )
         .unwrap();
         h.set_computed("sig", "a > 0".into(), 0);
-        let only_a3 =
-            DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
+        let only_a3 = DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
         h.append(&only_a3).unwrap();
         assert_eq!(h.column("sig").unwrap().as_bool().unwrap(), &[true, false]);
     }
@@ -894,12 +896,17 @@ mod tests {
         df.set_computed("a", "ma:2".into(), 1);
         assert_eq!(df.computed_columns().len(), 1);
         // overwrite the tail of the F64 column "a" with an F64 tail
-        df.update_computed_tail("a", 1, &Column::f64(vec![8.0, 9.0])).unwrap();
+        df.update_computed_tail("a", 1, &Column::f64(vec![8.0, 9.0]))
+            .unwrap();
         assert_eq!(df.column("a").unwrap().as_f64().unwrap(), &[1.0, 8.0, 9.0]);
         // an F64 tail into the I64 column "b" is a dtype mismatch
-        assert!(df.update_computed_tail("b", 0, &Column::f64(vec![1.0])).is_err());
+        assert!(df
+            .update_computed_tail("b", 0, &Column::f64(vec![1.0]))
+            .is_err());
         // an unknown column errors
-        assert!(df.update_computed_tail("nope", 0, &Column::f64(vec![1.0])).is_err());
+        assert!(df
+            .update_computed_tail("nope", 0, &Column::f64(vec![1.0]))
+            .is_err());
     }
 
     #[test]
@@ -912,8 +919,9 @@ mod tests {
         )
         .unwrap();
         df.set_computed("close", "ema:12".into(), 11);
-        df.set_computed_state("close", Some(vec![42.0])); // a carried EMA state as of row 59
-        // a slice keeping >= lookback rows AND ending at `valid_rows` carries the column
+        // A carried EMA state as of row 59.
+        df.set_computed_state("close", Some(vec![42.0]));
+        // A slice keeping >= lookback rows AND ending at `valid_rows` carries the column
         // as continuable, threading the recursive state through (the `Some` branch).
         let keep = df.slice(40, 60); // 20 rows >= 11, end == valid_rows (60)
         assert_eq!(keep.computed_columns().len(), 1);
@@ -934,10 +942,12 @@ mod tests {
     fn assign_positions_scalar_and_array() {
         let mut df = sample();
         // broadcast a scalar into two rows of the F64 column "a"
-        df.assign_positions(0, &[0, 2], &Column::f64(vec![9.0])).unwrap();
+        df.assign_positions(0, &[0, 2], &Column::f64(vec![9.0]))
+            .unwrap();
         assert_eq!(df.column("a").unwrap().as_f64().unwrap(), &[9.0, 2.0, 9.0]);
         // element-wise array into the I64 column "b" (integral -> stays i64)
-        df.assign_positions(1, &[1, 2], &Column::f64(vec![40.0, 50.0])).unwrap();
+        df.assign_positions(1, &[1, 2], &Column::f64(vec![40.0, 50.0]))
+            .unwrap();
         assert_eq!(df.column("b").unwrap().as_i64().unwrap(), &[10, 40, 50]);
     }
 
@@ -945,9 +955,13 @@ mod tests {
     fn assign_positions_widens_int_on_fractional() {
         let mut df = sample();
         // a fractional write into the I64 column widens the whole column to F64
-        df.assign_positions(1, &[0], &Column::f64(vec![1.5])).unwrap();
+        df.assign_positions(1, &[0], &Column::f64(vec![1.5]))
+            .unwrap();
         assert_eq!(df.column("b").unwrap().dtype(), DType::F64);
-        assert_eq!(df.column("b").unwrap().as_f64().unwrap(), &[1.5, 20.0, 30.0]);
+        assert_eq!(
+            df.column("b").unwrap().as_f64().unwrap(),
+            &[1.5, 20.0, 30.0]
+        );
     }
 
     #[test]
@@ -956,7 +970,8 @@ mod tests {
         df.set_computed("a", "ma:2".into(), 1);
         assert_eq!(df.computed_columns().len(), 1);
         // a manual write into the cached column drops its computed status
-        df.assign_positions(0, &[0], &Column::f64(vec![7.0])).unwrap();
+        df.assign_positions(0, &[0], &Column::f64(vec![7.0]))
+            .unwrap();
         assert!(df.computed_columns().is_empty());
     }
 
@@ -973,7 +988,9 @@ mod tests {
         .unwrap();
 
         // tz_convert: instant unchanged, only the tag changes.
-        let conv = df.tz_convert(Tz::parse("America/New_York").unwrap()).unwrap();
+        let conv = df
+            .tz_convert(Tz::parse("America/New_York").unwrap())
+            .unwrap();
         match conv.index().as_ref() {
             Index::Datetime(v, tz) => {
                 assert_eq!(v[0], ns);
@@ -983,7 +1000,9 @@ mod tests {
         }
 
         // tz_localize: wall-clock 12:00 reinterpreted as NY -> instant moves +5h to UTC.
-        let loc = df.tz_localize(Tz::parse("America/New_York").unwrap()).unwrap();
+        let loc = df
+            .tz_localize(Tz::parse("America/New_York").unwrap())
+            .unwrap();
         match loc.index().as_ref() {
             Index::Datetime(v, _) => {
                 assert_eq!(crate::datetime::format_ns(v[0]), "2021-01-01 17:00:00");
@@ -1004,11 +1023,17 @@ mod tests {
     fn assign_positions_length_and_dtype_guards() {
         let mut df = sample();
         // wrong-length array
-        assert!(df.assign_positions(0, &[0, 1], &Column::f64(vec![1.0, 2.0, 3.0])).is_err());
+        assert!(df
+            .assign_positions(0, &[0, 1], &Column::f64(vec![1.0, 2.0, 3.0]))
+            .is_err());
         // out-of-range row
-        assert!(df.assign_positions(0, &[9], &Column::f64(vec![1.0])).is_err());
+        assert!(df
+            .assign_positions(0, &[9], &Column::f64(vec![1.0]))
+            .is_err());
         // bool into a numeric column
-        assert!(df.assign_positions(0, &[0], &Column::bool(vec![true])).is_err());
+        assert!(df
+            .assign_positions(0, &[0], &Column::bool(vec![true]))
+            .is_err());
     }
 
     #[test]
@@ -1025,11 +1050,16 @@ mod tests {
         )
         .unwrap();
         // column position out of range
-        assert!(df.assign_positions(99, &[0], &Column::f64(vec![1.0])).is_err());
+        assert!(df
+            .assign_positions(99, &[0], &Column::f64(vec![1.0]))
+            .is_err());
         df.assign_positions(0, &[1], &Column::i64(vec![7])).unwrap(); // F64 <- I64
-        df.assign_positions(1, &[0], &Column::bool(vec![false])).unwrap(); // Bool <- Bool
-        df.assign_positions(2, &[0], &Column::str(vec!["z".into()])).unwrap(); // Str <- Str
-        df.assign_positions(3, &[2], &Column::datetime(vec![99])).unwrap(); // Datetime <- Datetime
+        df.assign_positions(1, &[0], &Column::bool(vec![false]))
+            .unwrap(); // Bool <- Bool
+        df.assign_positions(2, &[0], &Column::str(vec!["z".into()]))
+            .unwrap(); // Str <- Str
+        df.assign_positions(3, &[2], &Column::datetime(vec![99]))
+            .unwrap(); // Datetime <- Datetime
         assert_eq!(df.columns()[0].as_f64().unwrap()[1], 7.0);
         assert_eq!(df.columns()[3].as_datetime().unwrap()[2], 99);
     }
@@ -1045,6 +1075,8 @@ mod tests {
             Some(Index::Datetime(vec![ns], Tz::Utc)),
         )
         .unwrap();
-        assert!(df.tz_localize(Tz::parse("America/New_York").unwrap()).is_err());
+        assert!(df
+            .tz_localize(Tz::parse("America/New_York").unwrap())
+            .is_err());
     }
 }

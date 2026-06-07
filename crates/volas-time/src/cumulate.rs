@@ -141,7 +141,9 @@ fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Vec<(usize, usize)> {
 /// last of each run — a re-sent / corrected tick updates rather than accumulates).
 fn dedup_keep_last(ts: &[i64]) -> Vec<usize> {
     let n = ts.len();
-    (0..n).filter(|&i| i + 1 == n || ts[i + 1] != ts[i]).collect()
+    (0..n)
+        .filter(|&i| i + 1 == n || ts[i + 1] != ts[i])
+        .collect()
 }
 
 /// Aggregate one period's raw bars into a single coarse row (1-row frame). The
@@ -171,8 +173,18 @@ mod tests {
     use super::*;
     use volas_core::{datetime, Column};
 
-    fn frame(times: &[&str], open: &[f64], high: &[f64], low: &[f64], close: &[f64], vol: &[f64]) -> DataFrame {
-        let idx: Vec<i64> = times.iter().map(|t| datetime::parse_ns(t).unwrap()).collect();
+    fn frame(
+        times: &[&str],
+        open: &[f64],
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        vol: &[f64],
+    ) -> DataFrame {
+        let idx: Vec<i64> = times
+            .iter()
+            .map(|t| datetime::parse_ns(t).unwrap())
+            .collect();
         DataFrame::new(
             vec![
                 "open".into(),
@@ -272,7 +284,11 @@ mod tests {
     fn dedup_keeps_last_same_timestamp() {
         // two bars share 00:00:00 — the later one (volume 7) overrides the first.
         let df = frame(
-            &["2020-01-01 00:00:00", "2020-01-01 00:00:00", "2020-01-01 00:01:00"],
+            &[
+                "2020-01-01 00:00:00",
+                "2020-01-01 00:00:00",
+                "2020-01-01 00:01:00",
+            ],
             &[10.0, 99.0, 12.0],
             &[15.0, 99.0, 17.0],
             &[5.0, 99.0, 7.0],

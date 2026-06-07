@@ -149,11 +149,26 @@ mod tests {
     fn reduce_numeric_and_first_last() {
         let col = Column::f64(vec![3.0, 1.0, 4.0, 1.0]);
         let kept = [0, 1, 2, 3];
-        assert_eq!(Agg::First.reduce(&col, &kept).unwrap(), Column::f64(vec![3.0]));
-        assert_eq!(Agg::Last.reduce(&col, &kept).unwrap(), Column::f64(vec![1.0]));
-        assert_eq!(Agg::Max.reduce(&col, &kept).unwrap(), Column::f64(vec![4.0]));
-        assert_eq!(Agg::Min.reduce(&col, &kept).unwrap(), Column::f64(vec![1.0]));
-        assert_eq!(Agg::Sum.reduce(&col, &kept).unwrap(), Column::f64(vec![9.0]));
+        assert_eq!(
+            Agg::First.reduce(&col, &kept).unwrap(),
+            Column::f64(vec![3.0])
+        );
+        assert_eq!(
+            Agg::Last.reduce(&col, &kept).unwrap(),
+            Column::f64(vec![1.0])
+        );
+        assert_eq!(
+            Agg::Max.reduce(&col, &kept).unwrap(),
+            Column::f64(vec![4.0])
+        );
+        assert_eq!(
+            Agg::Min.reduce(&col, &kept).unwrap(),
+            Column::f64(vec![1.0])
+        );
+        assert_eq!(
+            Agg::Sum.reduce(&col, &kept).unwrap(),
+            Column::f64(vec![9.0])
+        );
     }
 
     #[test]
@@ -161,7 +176,10 @@ mod tests {
         let col = Column::str(vec!["a".into(), "b".into()]);
         assert!(Agg::Sum.reduce(&col, &[0, 1]).is_err());
         // first/last still work on strings
-        assert_eq!(Agg::First.reduce(&col, &[0, 1]).unwrap(), Column::str(vec!["a".into()]));
+        assert_eq!(
+            Agg::First.reduce(&col, &[0, 1]).unwrap(),
+            Column::str(vec!["a".into()])
+        );
     }
 
     #[test]
@@ -177,14 +195,29 @@ mod tests {
     #[test]
     fn reduce_over_i64_and_datetime_columns() {
         let ints = Column::i64(vec![3, 1, 4, 1]);
-        assert_eq!(Agg::Max.reduce(&ints, &[0, 1, 2, 3]).unwrap(), Column::i64(vec![4]));
-        assert_eq!(Agg::Min.reduce(&ints, &[0, 1, 2, 3]).unwrap(), Column::i64(vec![1]));
-        assert_eq!(Agg::Sum.reduce(&ints, &[0, 1, 2, 3]).unwrap(), Column::i64(vec![9]));
+        assert_eq!(
+            Agg::Max.reduce(&ints, &[0, 1, 2, 3]).unwrap(),
+            Column::i64(vec![4])
+        );
+        assert_eq!(
+            Agg::Min.reduce(&ints, &[0, 1, 2, 3]).unwrap(),
+            Column::i64(vec![1])
+        );
+        assert_eq!(
+            Agg::Sum.reduce(&ints, &[0, 1, 2, 3]).unwrap(),
+            Column::i64(vec![9])
+        );
 
         // Datetime max/min stay in the datetime dtype.
         let ts = Column::datetime(vec![100, 500, 200]);
-        assert_eq!(Agg::Max.reduce(&ts, &[0, 1, 2]).unwrap(), Column::datetime(vec![500]));
-        assert_eq!(Agg::Min.reduce(&ts, &[0, 1, 2]).unwrap(), Column::datetime(vec![100]));
+        assert_eq!(
+            Agg::Max.reduce(&ts, &[0, 1, 2]).unwrap(),
+            Column::datetime(vec![500])
+        );
+        assert_eq!(
+            Agg::Min.reduce(&ts, &[0, 1, 2]).unwrap(),
+            Column::datetime(vec![100])
+        );
 
         // Sum on a bool column is a dtype error (hits the fallback arm).
         let flags = Column::bool(vec![true, false]);

@@ -42,7 +42,11 @@ fn parse_offset_aware(s: &str) -> Option<i64> {
 
 /// Parse the supported **naive** forms into civil parts (no tz applied yet).
 fn naive_parts(s: &str) -> Option<(i32, u32, u32, u32, u32, u32)> {
-    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d %H:%M:%S"] {
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+    ] {
         if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
             return Some((
                 dt.year(),
@@ -236,16 +240,25 @@ mod tests {
             format_ns(epoch_to_ns(1_577_836_800_000, "ms").unwrap()),
             "2020-01-01 00:00:00"
         );
-        assert_eq!(epoch_to_ns(1_577_836_800, "s").unwrap(), 1_577_836_800_000_000_000);
+        assert_eq!(
+            epoch_to_ns(1_577_836_800, "s").unwrap(),
+            1_577_836_800_000_000_000
+        );
         assert!(epoch_to_ns(1, "weeks").is_none());
     }
 
     #[test]
     fn epoch_units_f64_preserves_fraction() {
         // whole seconds match the integer path
-        assert_eq!(epoch_to_ns_f64(1_577_836_800.0, "s").unwrap(), 1_577_836_800_000_000_000);
+        assert_eq!(
+            epoch_to_ns_f64(1_577_836_800.0, "s").unwrap(),
+            1_577_836_800_000_000_000
+        );
         // a fractional second is preserved (0.5 s == 500_000_000 ns)
-        assert_eq!(epoch_to_ns_f64(1_577_836_800.5, "s").unwrap(), 1_577_836_800_500_000_000);
+        assert_eq!(
+            epoch_to_ns_f64(1_577_836_800.5, "s").unwrap(),
+            1_577_836_800_500_000_000
+        );
         // ms / us / ns scales
         assert_eq!(epoch_to_ns_f64(1.0, "ms").unwrap(), 1_000_000);
         assert_eq!(epoch_to_ns_f64(1.0, "us").unwrap(), 1_000);

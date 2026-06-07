@@ -103,7 +103,10 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
     let trimmed: Vec<&str> = cells.iter().map(|c| c.trim()).collect();
     let is_na = |t: &str| na.contains(t);
     // i64: every cell present and integral.
-    if trimmed.iter().all(|t| !is_na(t) && t.parse::<i64>().is_ok()) {
+    if trimmed
+        .iter()
+        .all(|t| !is_na(t) && t.parse::<i64>().is_ok())
+    {
         return Column::i64(trimmed.iter().map(|t| t.parse().unwrap()).collect());
     }
     // f64: every cell is either missing (-> NaN) or float-parseable.
@@ -111,7 +114,13 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
         return Column::f64(
             trimmed
                 .iter()
-                .map(|t| if is_na(t) { f64::NAN } else { t.parse().unwrap() })
+                .map(|t| {
+                    if is_na(t) {
+                        f64::NAN
+                    } else {
+                        t.parse().unwrap()
+                    }
+                })
                 .collect(),
         );
     }
@@ -120,7 +129,12 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
         .iter()
         .all(|t| matches!(t.to_ascii_lowercase().as_str(), "true" | "false"))
     {
-        return Column::bool(trimmed.iter().map(|t| t.eq_ignore_ascii_case("true")).collect());
+        return Column::bool(
+            trimmed
+                .iter()
+                .map(|t| t.eq_ignore_ascii_case("true"))
+                .collect(),
+        );
     }
     Column::str(cells)
 }
@@ -182,7 +196,10 @@ mod tests {
 
     #[test]
     fn non_numeric_is_str() {
-        assert_eq!(infer(&["a", "b"]), Column::str(vec!["a".into(), "b".into()]));
+        assert_eq!(
+            infer(&["a", "b"]),
+            Column::str(vec!["a".into(), "b".into()])
+        );
     }
 
     #[test]
@@ -258,13 +275,20 @@ mod tests {
         };
         let df = read_csv(path.to_str().unwrap(), &opts).unwrap();
         assert_eq!((df.height(), df.width()), (2, 3));
-        assert_eq!(df.names(), &["0".to_string(), "1".to_string(), "2".to_string()]);
+        assert_eq!(
+            df.names(),
+            &["0".to_string(), "1".to_string(), "2".to_string()]
+        );
         assert_eq!(df.column("0").unwrap().as_i64().unwrap(), &[1, 4]);
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn missing_path_errors() {
-        assert!(read_csv("/no/such/dir/volas_io_missing.csv", &ReadCsvOptions::default()).is_err());
+        assert!(read_csv(
+            "/no/such/dir/volas_io_missing.csv",
+            &ReadCsvOptions::default()
+        )
+        .is_err());
     }
 }

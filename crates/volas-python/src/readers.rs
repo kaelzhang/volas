@@ -105,7 +105,11 @@ pub fn read_csv(
     // parse_dates: convert each named column to a datetime column in place.
     if let Some(cols) = parse_dates {
         for name in &cols {
-            let parsed = df.column(name).map_err(pyerr)?.to_datetime().map_err(pyerr)?;
+            let parsed = df
+                .column(name)
+                .map_err(pyerr)?
+                .to_datetime()
+                .map_err(pyerr)?;
             df.set_column(name, parsed).map_err(pyerr)?;
         }
     }

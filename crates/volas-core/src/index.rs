@@ -247,10 +247,16 @@ impl Index {
         match self {
             Index::Str(labels) => {
                 let start = lo.and_then(Label::as_str).map_or(0, |lo| {
-                    labels.iter().position(|x| x.as_str() >= lo).unwrap_or(labels.len())
+                    labels
+                        .iter()
+                        .position(|x| x.as_str() >= lo)
+                        .unwrap_or(labels.len())
                 });
                 let end = hi.and_then(Label::as_str).map_or(labels.len(), |hi| {
-                    labels.iter().rposition(|x| x.as_str() <= hi).map_or(0, |p| p + 1)
+                    labels
+                        .iter()
+                        .rposition(|x| x.as_str() <= hi)
+                        .map_or(0, |p| p + 1)
                 });
                 (start, end.max(start))
             }
@@ -298,15 +304,24 @@ mod tests {
 
         assert_eq!(Index::Range(3).to_i64_labels(), vec![0, 1, 2]);
         assert_eq!(Index::Int64(vec![5, 6]).to_i64_labels(), vec![5, 6]);
-        assert_eq!(Index::Datetime(vec![10, 20], Tz::Utc).to_i64_labels(), vec![10, 20]);
+        assert_eq!(
+            Index::Datetime(vec![10, 20], Tz::Utc).to_i64_labels(),
+            vec![10, 20]
+        );
 
         let i64 = Label::I64;
         assert_eq!(Index::Range(5).position_of(&i64(3)), Some(3));
         assert_eq!(Index::Range(5).position_of(&i64(9)), None);
         assert_eq!(Index::Range(5).position_of(&i64(-1)), None);
-        assert_eq!(Index::Int64(vec![10, 20, 30]).position_of(&i64(20)), Some(1));
+        assert_eq!(
+            Index::Int64(vec![10, 20, 30]).position_of(&i64(20)),
+            Some(1)
+        );
         assert_eq!(Index::Int64(vec![10, 20]).position_of(&i64(99)), None);
-        assert_eq!(Index::Datetime(vec![100, 200], Tz::Utc).position_of(&i64(200)), Some(1));
+        assert_eq!(
+            Index::Datetime(vec![100, 200], Tz::Utc).position_of(&i64(200)),
+            Some(1)
+        );
 
         // take() on an Int64 index gathers the labels at those positions
         assert_eq!(
@@ -394,7 +409,10 @@ mod tests {
         // label_at over the numeric index kinds
         assert_eq!(Index::Range(3).label_at(2), Label::I64(2));
         assert_eq!(Index::Int64(vec![10, 20]).label_at(1), Label::I64(20));
-        assert_eq!(Index::Datetime(vec![100, 200], Tz::Utc).label_at(0), Label::I64(100));
+        assert_eq!(
+            Index::Datetime(vec![100, 200], Tz::Utc).label_at(0),
+            Label::I64(100)
+        );
     }
 
     #[test]
@@ -403,14 +421,23 @@ mod tests {
         assert_eq!(Index::Range(3).tz(), Tz::Utc);
         assert!(matches!(Index::Range(3).with_tz(Tz::Utc), Index::Range(3)));
         // slice over the non-range kinds.
-        assert_eq!(Index::Int64(vec![1, 2, 3]).slice(0, 2), Index::Int64(vec![1, 2]));
-        assert!(matches!(Index::Datetime(vec![1, 2], Tz::Utc).slice(0, 1), Index::Datetime(_, _)));
+        assert_eq!(
+            Index::Int64(vec![1, 2, 3]).slice(0, 2),
+            Index::Int64(vec![1, 2])
+        );
+        assert!(matches!(
+            Index::Datetime(vec![1, 2], Tz::Utc).slice(0, 1),
+            Index::Datetime(_, _)
+        ));
         assert_eq!(
             Index::Str(vec!["a".into(), "b".into()]).slice(1, 2),
             Index::Str(vec!["b".into()])
         );
         // argsort lexicographically over a string index.
-        assert_eq!(Index::Str(vec!["b".into(), "a".into()]).argsort(true), vec![1, 0]);
+        assert_eq!(
+            Index::Str(vec!["b".into(), "a".into()]).argsort(true),
+            vec![1, 0]
+        );
         // to_column over every kind.
         assert_eq!(Index::Range(2).to_column().len(), 2);
         assert_eq!(Index::Datetime(vec![5], Tz::Utc).to_column().len(), 1);
@@ -423,7 +450,9 @@ mod tests {
             Index::Datetime(_, _)
         ));
         assert!(matches!(
-            Index::Str(vec!["a".into()]).append(&Index::Str(vec!["b".into()])).unwrap(),
+            Index::Str(vec!["a".into()])
+                .append(&Index::Str(vec!["b".into()]))
+                .unwrap(),
             Index::Str(_)
         ));
         assert!(matches!(
@@ -435,6 +464,8 @@ mod tests {
             Index::Int64(_)
         ));
         // mixing a string index with a numeric one is an error.
-        assert!(Index::Str(vec!["a".into()]).append(&Index::Range(1)).is_err());
+        assert!(Index::Str(vec!["a".into()])
+            .append(&Index::Range(1))
+            .is_err());
     }
 }

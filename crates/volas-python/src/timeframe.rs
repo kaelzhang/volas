@@ -50,71 +50,105 @@ impl PyTimeFrame {
 
     #[classattr]
     fn s1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Sec1 }
+        PyTimeFrame {
+            inner: TimeFrame::Sec1,
+        }
     }
     #[classattr]
     fn m1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min1 }
+        PyTimeFrame {
+            inner: TimeFrame::Min1,
+        }
     }
     #[classattr]
     fn m3() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min3 }
+        PyTimeFrame {
+            inner: TimeFrame::Min3,
+        }
     }
     #[classattr]
     fn m5() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min5 }
+        PyTimeFrame {
+            inner: TimeFrame::Min5,
+        }
     }
     #[classattr]
     fn m15() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min15 }
+        PyTimeFrame {
+            inner: TimeFrame::Min15,
+        }
     }
     #[classattr]
     fn m30() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Min30 }
+        PyTimeFrame {
+            inner: TimeFrame::Min30,
+        }
     }
     #[classattr]
     fn H1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour1 }
+        PyTimeFrame {
+            inner: TimeFrame::Hour1,
+        }
     }
     #[classattr]
     fn H2() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour2 }
+        PyTimeFrame {
+            inner: TimeFrame::Hour2,
+        }
     }
     #[classattr]
     fn H4() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour4 }
+        PyTimeFrame {
+            inner: TimeFrame::Hour4,
+        }
     }
     #[classattr]
     fn H6() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour6 }
+        PyTimeFrame {
+            inner: TimeFrame::Hour6,
+        }
     }
     #[classattr]
     fn H8() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour8 }
+        PyTimeFrame {
+            inner: TimeFrame::Hour8,
+        }
     }
     #[classattr]
     fn H12() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Hour12 }
+        PyTimeFrame {
+            inner: TimeFrame::Hour12,
+        }
     }
     #[classattr]
     fn D1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Day1 }
+        PyTimeFrame {
+            inner: TimeFrame::Day1,
+        }
     }
     #[classattr]
     fn D3() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Day3 }
+        PyTimeFrame {
+            inner: TimeFrame::Day3,
+        }
     }
     #[classattr]
     fn W1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Week1 }
+        PyTimeFrame {
+            inner: TimeFrame::Week1,
+        }
     }
     #[classattr]
     fn M1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Month1 }
+        PyTimeFrame {
+            inner: TimeFrame::Month1,
+        }
     }
     #[classattr]
     fn Y1() -> PyTimeFrame {
-        PyTimeFrame { inner: TimeFrame::Year1 }
+        PyTimeFrame {
+            inner: TimeFrame::Year1,
+        }
     }
 }
 

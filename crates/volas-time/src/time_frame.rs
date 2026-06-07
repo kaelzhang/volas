@@ -56,7 +56,11 @@ impl TimeFrame {
             "1w" | "1W" => Week1,
             "1M" => Month1,
             "1y" | "1Y" => Year1,
-            _ => return Err(VolasError::Value(format!("\"{s}\" is an invalid time frame"))),
+            _ => {
+                return Err(VolasError::Value(format!(
+                    "\"{s}\" is an invalid time frame"
+                )))
+            }
         })
     }
 
@@ -140,8 +144,18 @@ impl TimeFrame {
         }
         let day_aligned = matches!(
             self,
-            Sec1 | Min1 | Min3 | Min5 | Min15 | Min30 | Hour1 | Hour2 | Hour4 | Hour6 | Hour8
-                | Hour12 | Day1
+            Sec1 | Min1
+                | Min3
+                | Min5
+                | Min15
+                | Min30
+                | Hour1
+                | Hour2
+                | Hour4
+                | Hour6
+                | Hour8
+                | Hour12
+                | Day1
         );
         match dst {
             Year1 => self == Month1 || day_aligned,
@@ -220,8 +234,14 @@ mod tests {
         // one continuous week, even across the month boundary (the old (d/7) split it)
         assert_eq!(TimeFrame::Week1.unify(mon), TimeFrame::Week1.unify(sun));
         // boundaries land on Monday
-        assert_ne!(TimeFrame::Week1.unify(mon), TimeFrame::Week1.unify(prev_sun));
-        assert_ne!(TimeFrame::Week1.unify(mon), TimeFrame::Week1.unify(next_mon));
+        assert_ne!(
+            TimeFrame::Week1.unify(mon),
+            TimeFrame::Week1.unify(prev_sun)
+        );
+        assert_ne!(
+            TimeFrame::Week1.unify(mon),
+            TimeFrame::Week1.unify(next_mon)
+        );
     }
 
     #[test]
@@ -229,7 +249,13 @@ mod tests {
         // Each calendar day advances the epoch-anchored 3-day bucket by 0 or 1 —
         // never the month-reset jump the old (d/3) scheme produced at Feb 1.
         let mut prev = TimeFrame::Day3.unify(datetime::parse_ns("2024-01-28 00:00:00").unwrap());
-        for day in ["2024-01-29", "2024-01-30", "2024-01-31", "2024-02-01", "2024-02-02"] {
+        for day in [
+            "2024-01-29",
+            "2024-01-30",
+            "2024-01-31",
+            "2024-02-01",
+            "2024-02-02",
+        ] {
             let k = TimeFrame::Day3.unify(datetime::parse_ns(&format!("{day} 00:00:00")).unwrap());
             assert!(k == prev || k == prev + 1, "{day}: bucket {k}, prev {prev}");
             prev = k;
@@ -240,7 +266,7 @@ mod tests {
     fn can_coarsen_truth_table() {
         use TimeFrame::*;
         for (s, d) in [
-            (Min5, Min5),    // identity (= copy)
+            (Min5, Min5), // identity (= copy)
             // every fixed-duration source frame tiles a coarser one on the epoch grid
             (Sec1, Min1),
             (Min1, Min5),
@@ -322,10 +348,16 @@ mod tests {
         // Same-period vs next-period contract for each granularity boundary.
         let mid = datetime::parse_ns("2021-07-19 22:47:53").unwrap();
         let same_hour = datetime::parse_ns("2021-07-19 22:00:00").unwrap();
-        assert_eq!(TimeFrame::Hour1.unify(mid), TimeFrame::Hour1.unify(same_hour));
+        assert_eq!(
+            TimeFrame::Hour1.unify(mid),
+            TimeFrame::Hour1.unify(same_hour)
+        );
         let same_day = datetime::parse_ns("2021-07-19 00:00:00").unwrap();
         assert_eq!(TimeFrame::Day1.unify(mid), TimeFrame::Day1.unify(same_day));
         let same_month = datetime::parse_ns("2021-07-01 00:00:00").unwrap();
-        assert_eq!(TimeFrame::Month1.unify(mid), TimeFrame::Month1.unify(same_month));
+        assert_eq!(
+            TimeFrame::Month1.unify(mid),
+            TimeFrame::Month1.unify(same_month)
+        );
     }
 }

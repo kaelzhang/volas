@@ -67,7 +67,11 @@ impl Tz {
                 let local = ns + off * 1_000_000_000;
                 let secs = local.div_euclid(1_000_000_000);
                 let nsub = local.rem_euclid(1_000_000_000) as u32;
-                parts(DateTime::from_timestamp(secs, nsub).unwrap_or_default().naive_utc())
+                parts(
+                    DateTime::from_timestamp(secs, nsub)
+                        .unwrap_or_default()
+                        .naive_utc(),
+                )
             }
             Tz::Named(tz) => {
                 let secs = ns.div_euclid(1_000_000_000);
@@ -150,7 +154,10 @@ fn parse_offset_seconds(s: &str) -> Option<i32> {
     } else if rest.len() <= 2 {
         (rest.parse::<i32>().ok()?, 0)
     } else if rest.len() == 4 {
-        (rest[..2].parse::<i32>().ok()?, rest[2..].parse::<i32>().ok()?)
+        (
+            rest[..2].parse::<i32>().ok()?,
+            rest[2..].parse::<i32>().ok()?,
+        )
     } else {
         return None;
     };
@@ -179,7 +186,10 @@ mod tests {
         assert_eq!(Tz::parse("+0800").unwrap(), Tz::Offset(28800));
         assert_eq!(Tz::parse("+8").unwrap(), Tz::Offset(28800));
         assert_eq!(Tz::parse("-05:00").unwrap(), Tz::Offset(-18000));
-        assert!(matches!(Tz::parse("America/New_York").unwrap(), Tz::Named(_)));
+        assert!(matches!(
+            Tz::parse("America/New_York").unwrap(),
+            Tz::Named(_)
+        ));
         assert!(Tz::parse("Not/AZone").is_err());
     }
 
