@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/volas.svg)](https://pypi.org/project/volas/)
 [![Python versions](https://img.shields.io/pypi/pyversions/volas.svg)](https://pypi.org/project/volas/)
 
-# volas
+# [volas](https://github.com/kaelzhang/volas)
 
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
