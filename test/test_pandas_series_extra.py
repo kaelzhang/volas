@@ -100,6 +100,31 @@ def test_prod_skips_nan_and_empty_is_one():
     assert _s([]).prod() == 1.0           # empty -> 1.0
 
 
+def test_sem_skew_kurt_match_pandas():
+    import math
+    s = _s([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])  # values cross-checked vs pandas 3.0
+    assert abs(s.sem() - 0.7559289460184544) < 1e-9
+    assert abs(s.skew() - 0.8184875533567997) < 1e-9
+    assert abs(s.kurt() - 0.9406250000000004) < 1e-9
+    assert math.isnan(_s([1.0]).sem())          # n < 2
+    assert math.isnan(_s([1.0, 2.0]).skew())    # n < 3
+    assert math.isnan(_s([1.0, 2.0, 3.0]).kurt())  # n < 4
+
+
+def test_rank_methods_and_pct():
+    src = [3.0, 1.0, 1.0, 2.0, nan]
+    np.testing.assert_array_equal(_s(src).rank().to_numpy(), [4, 1.5, 1.5, 3, nan])
+    np.testing.assert_array_equal(_s(src).rank(method="min").to_numpy(), [4, 1, 1, 3, nan])
+    np.testing.assert_array_equal(_s(src).rank(method="dense").to_numpy(), [3, 1, 1, 2, nan])
+    np.testing.assert_array_equal(_s(src).rank(ascending=False).to_numpy(), [1, 3.5, 3.5, 2, nan])
+    np.testing.assert_array_equal(_s(src).rank(pct=True).to_numpy(), [1.0, 0.375, 0.375, 0.75, nan])
+
+
+def test_rank_unknown_method_raises():
+    with pytest.raises(ValueError):
+        _s([1.0, 2.0]).rank(method="bogus")
+
+
 def test_round_default_and_decimals_and_negative():
     np.testing.assert_array_equal(_s([1.4, 1.6]).round().to_numpy(), [1, 2])
     np.testing.assert_array_equal(_s([1.234, 2.567]).round(1).to_numpy(), [1.2, 2.6])

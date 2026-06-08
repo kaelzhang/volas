@@ -726,6 +726,21 @@ impl PySeries {
         }
     }
 
+    /// NaN-skipping standard error of the mean (pandas `sem`, ddof=1).
+    fn sem(&self) -> f64 {
+        stats::sem(&self.inner.data.to_f64_vec())
+    }
+
+    /// NaN-skipping adjusted Fisher-Pearson skewness (pandas `skew`).
+    fn skew(&self) -> f64 {
+        stats::skew(&self.inner.data.to_f64_vec())
+    }
+
+    /// NaN-skipping excess kurtosis, Fisher's definition (pandas `kurt`).
+    fn kurt(&self) -> f64 {
+        stats::kurt(&self.inner.data.to_f64_vec())
+    }
+
     /// True if any element is truthy (NaN skipped) — pandas `any` (skipna=True).
     fn any(&self) -> bool {
         match &self.inner.data {
@@ -933,6 +948,25 @@ impl PySeries {
     fn round(&self, decimals: i32) -> PySeries {
         let factor = 10f64.powi(decimals);
         self.map_f64(move |x| (x * factor).round_ties_even() / factor)
+    }
+
+    /// Numerical rank (pandas `rank`, 1-based, NaN kept as NaN). Ties resolve by
+    /// `method` (`'average'` | `'min'` | `'max'` | `'first'` | `'dense'`); `pct`
+    /// returns ranks scaled to (0, 1].
+    #[pyo3(signature = (method = "average", ascending = true, pct = false))]
+    fn rank(&self, method: &str, ascending: bool, pct: bool) -> PyResult<PySeries> {
+        let m = match method {
+            "average" => stats::RankMethod::Average,
+            "min" => stats::RankMethod::Min,
+            "max" => stats::RankMethod::Max,
+            "first" => stats::RankMethod::First,
+            "dense" => stats::RankMethod::Dense,
+            other => return Err(PyValueError::new_err(format!("rank: unknown method '{other}'"))),
+        };
+        Ok(f64_series(
+            &self.inner,
+            stats::rank(&self.inner.data.to_f64_vec(), m, ascending, pct),
+        ))
     }
 
     /// Element-wise absolute value (pandas `abs`).
