@@ -47,10 +47,10 @@ def test_numeric_columns_match_pandas():
         )
 
 
-def test_object_column_matches_pandas():
+def test_string_column_matches_pandas():
     df = volas.read_csv(TENCENT)
     pf = pd.read_csv(TENCENT)
-    assert df['time_key'].dtype == 'object'
+    assert df['time_key'].dtype == 'str'
     assert list(np.asarray(df['time_key'])) == list(pf['time_key'].astype(str))
 
 
@@ -116,10 +116,10 @@ def test_bool_lowercase(tmp_path):
     np.testing.assert_array_equal(np.asarray(df['A']), [True, False])
 
 
-def test_string_object_column(tmp_path):
+def test_string_column(tmp_path):
     path = write_csv(tmp_path, "A,B\nx,1\ny,2\n")
     df = volas.read_csv(path)
-    assert df['A'].dtype == 'object'
+    assert df['A'].dtype == 'str'
     assert list(np.asarray(df['A'])) == ['x', 'y']
 
 
@@ -205,7 +205,7 @@ def test_custom_na_values(tmp_path):
 def test_keep_default_na_false_keeps_token_as_string(tmp_path):
     path = write_csv(tmp_path, "A\nx\nNA\ny\n")
     df = volas.read_csv(path, keep_default_na=False)
-    assert df['A'].dtype == 'object'
+    assert df['A'].dtype == 'str'
     assert list(np.asarray(df['A'])) == ['x', 'NA', 'y']
 
 

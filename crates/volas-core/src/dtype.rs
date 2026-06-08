@@ -15,7 +15,8 @@ pub enum DType {
     I64,
     /// Datetime stored as i64 nanoseconds since the Unix epoch.
     Datetime,
-    /// UTF-8 string (pandas reports such columns as `object`).
+    /// UTF-8 string. Reported as `str`, matching pandas 3.0's default string
+    /// dtype (pandas <= 2.x called these columns `object`).
     Utf8,
 }
 
@@ -27,7 +28,7 @@ impl DType {
             DType::Bool => "bool",
             DType::I64 => "int64",
             DType::Datetime => "datetime64[ns]",
-            DType::Utf8 => "object",
+            DType::Utf8 => "str",
         }
     }
 }

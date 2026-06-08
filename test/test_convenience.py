@@ -28,7 +28,7 @@ def test_dtypes():
     df = DataFrame({'a': [1.0, 2.0], 'b': np.array([10, 20], dtype=np.int64),
                     's': ['x', 'y']})
     dt = df.dtypes
-    assert dt == {'a': 'float64', 'b': 'int64', 's': 'object'}
+    assert dt == {'a': 'float64', 'b': 'int64', 's': 'str'}
 
 
 def test_to_list():

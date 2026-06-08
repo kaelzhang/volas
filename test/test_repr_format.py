@@ -3,10 +3,6 @@
 The expected strings are pandas's exact console output (pandas 3.0), captured and
 inlined so the suite stays pandas-free. ``repr`` and ``str`` are identical for
 every type (as in pandas).
-
-One deliberate divergence: volas reports the string dtype as ``object``
-(consistent with ``Series.dtype`` / ``DataFrame.dtypes``) where pandas 3.0 reports
-``str``; the footer follows volas's own dtype vocabulary.
 """
 
 import numpy as np
@@ -145,7 +141,7 @@ SERIES_CASES = {
     "float": (lambda: vdf({"open": [1.0, 2.0, 3.0]})["open"], "0    1.0\n1    2.0\n2    3.0\nName: open, dtype: float64"),
     "int": (lambda: vdf({"v": [10, 20, 30]})["v"], "0    10\n1    20\n2    30\nName: v, dtype: int64"),
     "bool": (lambda: vdf({"x": [True, False]})["x"], "0     True\n1    False\nName: x, dtype: bool"),
-    "str_object": (lambda: vdf({"sym": ["a", "bb"]})["sym"], "0     a\n1    bb\nName: sym, dtype: object"),
+    "str": (lambda: vdf({"sym": ["a", "bb"]})["sym"], "0     a\n1    bb\nName: sym, dtype: str"),
     "negative": (lambda: vdf({"d": [1.0, -2.5]})["d"], "0    1.0\n1   -2.5\nName: d, dtype: float64"),
     "single": (lambda: vdf({"x": [1.0]})["x"], "0    1.0\nName: x, dtype: float64"),
     "named_index": (
