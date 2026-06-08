@@ -1,0 +1,256 @@
+"""Source-pinned reference oracle for non-TA-Lib indicators.
+
+These indicators have **no TA-Lib function**, so volas's "parity vs TA-Lib" gate
+(``test_talib_parity``) cannot cover them. This module supplies an *independent*
+reference for each: a small pure-numpy / pandas implementation whose formula is
+**pinned to a cited authoritative source**. ``test_oracle.py`` then checks the volas
+directive against this reference on the Tencent fixture.
+
+Scope (this stage): the **Group A** roadmap indicators from
+``tasks/04/research/2026-06-07-volas-indicator-gap-and-naming-report.md`` §9, plus the
+already-shipped non-TA-Lib ``bbi`` which validates the harness end-to-end *today* (its
+oracle test runs and passes now; the Group A cases skip until each indicator lands).
+
+Convention pins (matching volas's kernels, so a reference will agree once the indicator
+is implemented):
+
+* ``_sma`` — rolling mean, NaN for the first ``n-1`` rows.
+* ``_ema`` — EMA seeded with the SMA of the first ``n`` (TA-Lib convention, which volas's
+  ``ema`` uses), not pandas's first-value seed.
+* ``_rsi`` — Wilder RSI seeded with the SMA of the first ``n`` gains/losses (TA-Lib).
+
+Caveat: a reference is only as correct as its cited formula. Cross-validating each one
+against a second independent source / library (e.g. pandas-ta) is the deferred "thorough
+oracle" work; until then every reference carries a source URL and a pinned convention so
+it is reviewable, and each is exercised for shape/finiteness by ``test_oracle.py``.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+
+# --- shared, convention-pinned primitives ----------------------------------
+
+def _s(x) -> pd.Series:
+    return pd.Series(np.asarray(x, dtype=float))
+
+
+def _sma(x, n: int) -> pd.Series:
+    return _s(x).rolling(n, min_periods=n).mean()
+
+
+def _ema(x, n: int) -> pd.Series:
+    """EMA with TA-Lib seeding (first value = SMA of the first ``n`` valid samples, which
+    volas's ``ema`` uses). Leading NaNs are skipped so chained EMAs (TSI, Mass Index) seed
+    from the first real value instead of an all-NaN window."""
+    vals = _s(x).to_numpy()
+    out = np.full(len(vals), np.nan)
+    valid = np.flatnonzero(~np.isnan(vals))
+    if len(valid) >= n:
+        fv = int(valid[0])
+        start = fv + n - 1
+        out[start] = vals[fv:fv + n].mean()
+        alpha = 2.0 / (n + 1.0)
+        for i in range(start + 1, len(vals)):
+            out[i] = alpha * vals[i] + (1.0 - alpha) * out[i - 1]
+    return pd.Series(out)
+
+
+def _rsi(x, n: int) -> pd.Series:
+    """Wilder RSI (TA-Lib seeding): SMA of the first ``n`` gains/losses, then Wilder smoothing."""
+    s = _s(x)
+    d = s.diff()
+    gain = d.clip(lower=0.0)
+    loss = (-d).clip(lower=0.0)
+    ag = np.full(len(s), np.nan)
+    al = np.full(len(s), np.nan)
+    if len(s) > n:
+        ag[n] = gain.iloc[1:n + 1].mean()
+        al[n] = loss.iloc[1:n + 1].mean()
+        for i in range(n + 1, len(s)):
+            ag[i] = (ag[i - 1] * (n - 1) + gain.iat[i]) / n
+            al[i] = (al[i - 1] * (n - 1) + loss.iat[i]) / n
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = ag / al
+    return pd.Series(100.0 - 100.0 / (1.0 + rs))
+
+
+def _true_range(h, lo, c) -> pd.Series:
+    h, lo, c = _s(h), _s(lo), _s(c)
+    pc = c.shift(1)
+    return pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
+
+
+# --- Group A references (each cites its pinned source) ----------------------
+
+def bbi(o, h, lo, c, v):
+    """BBI 多空指标 = mean(MA3, MA6, MA12, MA24) of close (SMA).
+    Source: MBA Wiki 多空指数 (BBI). Already shipped by volas; validates the harness."""
+    cs = _s(c)
+    return (_sma(cs, 3) + _sma(cs, 6) + _sma(cs, 12) + _sma(cs, 24)) / 4.0
+
+
+def psy(o, h, lo, c, v, n=12):
+    """PSY 心理线 = 100 * (rising days in last n) / n; rising = close > prev close.
+    Source: Eastmoney 心理线 <https://baike.eastmoney.com/item/心理线>."""
+    up = (_s(c).diff() > 0).astype(float)
+    return up.rolling(n, min_periods=n).sum() / n * 100.0
+
+
+def emv(o, h, lo, c, v, n=14, scale=100_000_000.0):
+    """EMV Ease of Movement (StockCharts). distance = mid - prev mid;
+    box = (volume/scale)/(high-low); 1-period EMV = distance/box; EMV = SMA_n.
+    Source: StockCharts ChartSchool — Ease of Movement. The volume `scale` is a
+    presentation convention pinned here to StockCharts' 100,000,000."""
+    h, lo, vv = _s(h), _s(lo), _s(v)
+    mid = (h + lo) / 2.0
+    distance = mid - mid.shift(1)
+    box = (vv / scale) / (h - lo)
+    return (distance / box).rolling(n, min_periods=n).mean()
+
+
+def cmf(o, h, lo, c, v, n=20):
+    """Chaikin Money Flow = sum_n(MFV) / sum_n(volume), MFV = ((C-L)-(H-C))/(H-L) * V.
+    Source: StockCharts ChartSchool / Fidelity — Chaikin Money Flow."""
+    h, lo, c, vv = _s(h), _s(lo), _s(c), _s(v)
+    mfm = ((c - lo) - (h - c)) / (h - lo)
+    mfv = mfm * vv
+    return mfv.rolling(n, min_periods=n).sum() / vv.rolling(n, min_periods=n).sum()
+
+
+def dpo(o, h, lo, c, v, n=20):
+    """Detrended Price Oscillator = Price[(n/2 + 1) ago] - SMA_n.
+    Source: StockCharts ChartSchool — Detrended Price Oscillator (displaced form)."""
+    c = _s(c)
+    shift = n // 2 + 1
+    return c.shift(shift) - _sma(c, n)
+
+
+def pvt(o, h, lo, c, v):
+    """Price Volume Trend (cumulative): PVT_i = PVT_{i-1} + (C_i-C_{i-1})/C_{i-1} * V_i,
+    PVT_0 = 0. Source: StockCharts / Investopedia — Price Volume Trend."""
+    c, vv = _s(c), _s(v)
+    term = (c.pct_change() * vv).fillna(0.0)
+    return term.cumsum()
+
+
+def nvi(o, h, lo, c, v, base=1000.0):
+    """Negative Volume Index: starts at base; on a down-volume day NVI *= (1 + ROC),
+    else unchanged. Source: StockCharts — Negative Volume Index."""
+    c, vv = _s(c), _s(v)
+    roc = c.pct_change()
+    out = np.full(len(c), base)
+    for i in range(1, len(c)):
+        out[i] = out[i - 1] * (1.0 + roc.iat[i]) if vv.iat[i] < vv.iat[i - 1] else out[i - 1]
+    return pd.Series(out)
+
+
+def pvi(o, h, lo, c, v, base=1000.0):
+    """Positive Volume Index: starts at base; on an up-volume day PVI *= (1 + ROC),
+    else unchanged. Source: StockCharts — Positive Volume Index."""
+    c, vv = _s(c), _s(v)
+    roc = c.pct_change()
+    out = np.full(len(c), base)
+    for i in range(1, len(c)):
+        out[i] = out[i - 1] * (1.0 + roc.iat[i]) if vv.iat[i] > vv.iat[i - 1] else out[i - 1]
+    return pd.Series(out)
+
+
+def mass_index(o, h, lo, c, v, n=25, ema_n=9):
+    """Mass Index = sum_n( EMA9(H-L) / EMA9(EMA9(H-L)) ).
+    Source: StockCharts ChartSchool — Mass Index."""
+    rng = _s(h) - _s(lo)
+    single = _ema(rng, ema_n)
+    double = _ema(single, ema_n)
+    return (single / double).rolling(n, min_periods=n).sum()
+
+
+def efi(o, h, lo, c, v, n=13):
+    """Elder Force Index = EMA_n( (C - prev C) * volume ).
+    Source: StockCharts / Investopedia — Force Index."""
+    raw = (_s(c).diff() * _s(v))
+    return _ema(raw, n)
+
+
+def tsi(o, h, lo, c, v, long=25, short=13):
+    """True Strength Index = 100 * EMA_short(EMA_long(m)) / EMA_short(EMA_long(|m|)),
+    m = C - prev C. Source: StockCharts ChartSchool — True Strength Index."""
+    m = _s(c).diff()
+    num = _ema(_ema(m, long), short)
+    den = _ema(_ema(m.abs(), long), short)
+    return 100.0 * num / den
+
+
+def kst(o, h, lo, c, v):
+    """Know Sure Thing (Pring): weighted sum of four SMA-smoothed ROCs.
+    RCMA1=SMA10(ROC10), RCMA2=SMA10(ROC15), RCMA3=SMA10(ROC20), RCMA4=SMA15(ROC30);
+    KST = 1*RCMA1 + 2*RCMA2 + 3*RCMA3 + 4*RCMA4. Source: StockCharts — KST."""
+    c = _s(c)
+
+    def roc(n):
+        return (c / c.shift(n) - 1.0) * 100.0
+
+    r1 = _sma(roc(10), 10)
+    r2 = _sma(roc(15), 10)
+    r3 = _sma(roc(20), 10)
+    r4 = _sma(roc(30), 15)
+    return r1 * 1.0 + r2 * 2.0 + r3 * 3.0 + r4 * 4.0
+
+
+def chop(o, h, lo, c, v, n=14):
+    """Choppiness Index = 100 * log10( sum_n(TR) / (maxHigh_n - minLow_n) ) / log10(n).
+    Source: TradingView — Choppiness Index."""
+    tr = _true_range(h, lo, c)
+    num = tr.rolling(n, min_periods=n).sum()
+    rng = _s(h).rolling(n, min_periods=n).max() - _s(lo).rolling(n, min_periods=n).min()
+    return 100.0 * np.log10(num / rng) / np.log10(n)
+
+
+def crsi(o, h, lo, c, v, rsi_len=3, streak_len=2, rank_len=100):
+    """Connors RSI = mean( RSI(close, rsi_len), RSI(streak, streak_len),
+    PercentRank(1-period ROC, rank_len) ). streak = signed run length of up/down closes;
+    PercentRank = % of the last rank_len values strictly below the current one.
+    Source: Connors Research / TradingView — Connors RSI."""
+    c = _s(c)
+    diff = c.diff()
+    streak = np.zeros(len(c))
+    for i in range(1, len(c)):
+        if diff.iat[i] > 0:
+            streak[i] = streak[i - 1] + 1 if streak[i - 1] > 0 else 1.0
+        elif diff.iat[i] < 0:
+            streak[i] = streak[i - 1] - 1 if streak[i - 1] < 0 else -1.0
+        else:
+            streak[i] = 0.0
+    roc1 = c.pct_change() * 100.0
+    prank = np.full(len(c), np.nan)
+    vals = roc1.to_numpy()
+    for i in range(len(c)):
+        lo = i - rank_len
+        if lo >= 1:  # need a full rank_len window of prior values
+            window = vals[lo:i]
+            prank[i] = (window < vals[i]).sum() / rank_len * 100.0
+    return (_rsi(c, rsi_len) + _rsi(pd.Series(streak), streak_len) + pd.Series(prank)) / 3.0
+
+
+# --- the oracle case registry ----------------------------------------------
+# (directive, reference_fn(o,h,lo,c,v) -> Series, tolerance). The directive strings are
+# the proposed command interface the Group A implementation should match.
+
+CASES: list[tuple] = [
+    ("bbi", bbi, 1e-7),                         # already implemented -> runs + passes today
+    ("psy:12", lambda o, h, lo, c, v: psy(o, h, lo, c, v, 12), 1e-7),
+    ("emv:14", lambda o, h, lo, c, v: emv(o, h, lo, c, v, 14), 1e-6),
+    ("cmf:20", lambda o, h, lo, c, v: cmf(o, h, lo, c, v, 20), 1e-7),
+    ("dpo:20", lambda o, h, lo, c, v: dpo(o, h, lo, c, v, 20), 1e-7),
+    ("pvt", pvt, 1e-6),
+    ("nvi", nvi, 1e-6),
+    ("pvi", pvi, 1e-6),
+    ("mass_index:25", lambda o, h, lo, c, v: mass_index(o, h, lo, c, v, 25), 1e-6),
+    ("efi:13", lambda o, h, lo, c, v: efi(o, h, lo, c, v, 13), 1e-6),
+    ("tsi:25,13", lambda o, h, lo, c, v: tsi(o, h, lo, c, v, 25, 13), 1e-6),
+    ("kst", kst, 1e-6),
+    ("chop:14", lambda o, h, lo, c, v: chop(o, h, lo, c, v, 14), 1e-7),
+    ("crsi:3,2,100", lambda o, h, lo, c, v: crsi(o, h, lo, c, v, 3, 2, 100), 1e-6),
+]
