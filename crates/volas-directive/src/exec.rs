@@ -575,7 +575,7 @@ fn exec_command(
             let style = match sub {
                 "bullish" => ind::Style::Bullish,
                 "bearish" => ind::Style::Bearish,
-                _ => unreachable!("style color sub-command is validated by command_spec"),
+                _ => unreachable!("style color sub-command is validated by command_spec"), // LCOV_EXCL_LINE
             };
             let open = series_f64(df, series, 0, "open")?;
             let close = series_f64(df, series, 1, "close")?;
