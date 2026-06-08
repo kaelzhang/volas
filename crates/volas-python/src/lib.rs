@@ -1868,6 +1868,44 @@ impl PyDataFrame {
         .map_err(pyerr)
     }
 
+    /// One column as a `PySeries` (carrying its name + the frame index), for
+    /// column-wise delegation to Series methods.
+    fn col_as_series(&self, name: &str, col: &Column) -> PySeries {
+        PySeries {
+            inner: Series::new(Some(name.to_string()), col.clone(), Arc::clone(self.inner.index())),
+        }
+    }
+
+    /// Apply a Series transform to every column -> a new frame (pandas column-wise
+    /// `df.cumsum()` etc.). Each column's own dtype rule applies; a column the op
+    /// rejects (e.g. a string column under a numeric transform) propagates its error.
+    fn map_cols(&self, op: impl Fn(&PySeries) -> PyResult<PySeries>) -> PyResult<PyDataFrame> {
+        let cols = self
+            .inner
+            .names()
+            .iter()
+            .zip(self.inner.columns())
+            .map(|(name, col)| Ok(op(&self.col_as_series(name, col))?.inner.data))
+            .collect::<PyResult<Vec<_>>>()?;
+        self.with_columns(cols)
+    }
+
+    /// Reduce each numeric column to a scalar -> a Series indexed by column name
+    /// (pandas column-wise `df.sem()` etc.; non-numeric columns are skipped).
+    fn reduce_cols(&self, op: impl Fn(&PySeries) -> f64) -> PySeries {
+        let mut names = Vec::new();
+        let mut vals = Vec::new();
+        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+            if matches!(col.dtype(), DType::F64 | DType::I64) {
+                names.push(name.clone());
+                vals.push(op(&self.col_as_series(name, col)));
+            }
+        }
+        PySeries {
+            inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
+        }
+    }
+
     /// Directional NaN fill (`forward` = ffill, else bfill) over every float
     /// column; non-float columns are unchanged. Backs `ffill` / `bfill`.
     fn fill_dir(&self, forward: bool) -> PyResult<PyDataFrame> {
@@ -2596,6 +2634,67 @@ impl PyDataFrame {
             .collect::<Result<Vec<_>, _>>()
             .map_err(pyerr)?;
         self.with_columns(cols)
+    }
+
+    // --- column-wise numeric transforms (-> a new frame, dtype-preserving per
+    // column, pandas df.cumsum() etc.). cumulatives / abs / clip keep dtype;
+    // diff / shift / rank are always float. -------------------------------------
+
+    /// Column-wise cumulative sum (pandas `cumsum`), dtype-preserving.
+    fn cumsum(&self) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.cumsum())
+    }
+    /// Column-wise cumulative maximum (pandas `cummax`).
+    fn cummax(&self) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.cummax())
+    }
+    /// Column-wise cumulative minimum (pandas `cummin`).
+    fn cummin(&self) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.cummin())
+    }
+    /// Column-wise cumulative product (pandas `cumprod`).
+    fn cumprod(&self) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.cumprod())
+    }
+    /// Column-wise absolute value (pandas `abs`), dtype-preserving.
+    fn abs(&self) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.abs())
+    }
+    /// Column-wise clip into `[lower, upper]` (pandas `clip`), dtype-preserving.
+    #[pyo3(signature = (lower = None, upper = None))]
+    fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.clip(lower, upper))
+    }
+    /// Column-wise discrete difference (pandas `diff`); always float.
+    #[pyo3(signature = (n = 1))]
+    fn diff(&self, n: isize) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| Ok(s.diff(n)))
+    }
+    /// Column-wise shift by `n` rows (pandas `shift`); fills NaN, always float.
+    #[pyo3(signature = (n = 1))]
+    fn shift(&self, n: isize) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| Ok(s.shift(n)))
+    }
+    /// Column-wise rank (pandas `rank`); always float.
+    #[pyo3(signature = (method = "average", ascending = true, pct = false))]
+    fn rank(&self, method: &str, ascending: bool, pct: bool) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.rank(method, ascending, pct))
+    }
+
+    // --- column-wise reductions (-> a Series indexed by column name; numeric
+    // columns only, pandas df.sem() etc.). -------------------------------------
+
+    /// Per-column standard error of the mean (pandas `sem`).
+    fn sem(&self) -> PySeries {
+        self.reduce_cols(|s| s.sem())
+    }
+    /// Per-column unbiased skewness (pandas `skew`).
+    fn skew(&self) -> PySeries {
+        self.reduce_cols(|s| s.skew())
+    }
+    /// Per-column unbiased excess kurtosis (pandas `kurt`).
+    fn kurt(&self) -> PySeries {
+        self.reduce_cols(|s| s.kurt())
     }
 
     /// Per-column summary statistics over the numeric columns (pandas `describe`):
