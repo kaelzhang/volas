@@ -121,6 +121,10 @@ pub fn is_command(name: &str) -> bool {
             | "kdj"
             | "rsi"
             | "bbi"
+            | "psy"
+            | "pvt"
+            | "nvi"
+            | "pvi"
             | "tr"
             | "atr"
             | "llv"
@@ -258,6 +262,9 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("donchian", Some("lower")) => (vec![Required], vec!["low"]),
         ("hv", None) => (vec![Required, Str("1d"), I64(252)], vec!["close"]),
         ("increase", None) => (vec![Int(1), I64(1)], vec!["close"]),
+        // Group A non-TA-Lib indicators (gap report 2026-06-07).
+        ("psy", None) => (vec![Int(12)], vec!["close"]),
+        ("pvt" | "nvi" | "pvi", None) => (vec![], vec!["close", "volume"]),
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns

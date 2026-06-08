@@ -770,6 +770,22 @@ fn exec_command(
             let close = series_f64(df, series, 1, "close")?;
             f64col(ind::imi(&open, &close, arg_usize(args, 0, Some(14))?))
         }
+        ("psy", _) => f64col(ind::psy(&close(0)?, arg_usize(args, 0, Some(12))?)),
+        ("pvt", _) => {
+            let close = series_f64(df, series, 0, "close")?;
+            let volume = series_f64(df, series, 1, "volume")?;
+            f64col(ind::pvt(&close, &volume))
+        }
+        ("nvi", _) => {
+            let close = series_f64(df, series, 0, "close")?;
+            let volume = series_f64(df, series, 1, "volume")?;
+            f64col(ind::nvi(&close, &volume))
+        }
+        ("pvi", _) => {
+            let close = series_f64(df, series, 0, "close")?;
+            let volume = series_f64(df, series, 1, "volume")?;
+            f64col(ind::pvi(&close, &volume))
+        }
         ("trix", _) => f64col(ind::trix(&close(0)?, arg_usize(args, 0, Some(30))?)),
         ("aroon", Some(dir @ ("up" | "down"))) => {
             let high = series_f64(df, series, 0, "high")?;
