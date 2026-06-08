@@ -5,56 +5,67 @@
 //! NaN handling mirrors pandas's `skipna=True`: a NaN does not contribute to a
 //! running accumulator / reduction, and in the cumulative forms it is kept as
 //! NaN in place.
+//!
+//! The cumulative kernels are generic over [`Numeric`] so they preserve the
+//! input dtype (int stays int) and compute natively (no f64 round-trip); the
+//! reductions / moment kernels stay f64. A missing element (`NaN`, f64 only —
+//! `i64::is_missing` is always false) passes through unchanged.
 
-/// Cumulative sum (pandas `cumsum`, skipna=True).
-pub fn cumsum(v: &[f64]) -> Vec<f64> {
-    let mut acc = 0.0;
+use crate::numeric::Numeric;
+
+/// Cumulative sum (pandas `cumsum`, skipna=True), dtype-preserving.
+pub fn cumsum<T: Numeric>(v: &[T]) -> Vec<T> {
+    let mut acc = T::ZERO;
     v.iter()
         .map(|&x| {
-            if x.is_nan() {
-                f64::NAN
+            if x.is_missing() {
+                x
             } else {
-                acc += x;
+                acc = acc.wrapping_add(x);
                 acc
             }
         })
         .collect()
 }
 
-/// Cumulative maximum (pandas `cummax`, skipna=True).
-pub fn cummax(v: &[f64]) -> Vec<f64> {
-    cum_extreme(v, f64::max)
+/// Cumulative maximum (pandas `cummax`, skipna=True), dtype-preserving.
+pub fn cummax<T: Numeric>(v: &[T]) -> Vec<T> {
+    cum_extreme(v, true)
 }
 
-/// Cumulative minimum (pandas `cummin`, skipna=True).
-pub fn cummin(v: &[f64]) -> Vec<f64> {
-    cum_extreme(v, f64::min)
+/// Cumulative minimum (pandas `cummin`, skipna=True), dtype-preserving.
+pub fn cummin<T: Numeric>(v: &[T]) -> Vec<T> {
+    cum_extreme(v, false)
 }
 
-/// Shared running-extreme for `cummax` / `cummin`.
-fn cum_extreme(v: &[f64], pick: fn(f64, f64) -> f64) -> Vec<f64> {
-    let mut acc = f64::NAN;
+/// Shared running-extreme for `cummax` (`want_max`) / `cummin`. NaN is excluded
+/// before any comparison, so the partial order is total over what we compare.
+fn cum_extreme<T: Numeric>(v: &[T], want_max: bool) -> Vec<T> {
+    let mut acc: Option<T> = None;
     v.iter()
         .map(|&x| {
-            if x.is_nan() {
-                f64::NAN
-            } else {
-                acc = if acc.is_nan() { x } else { pick(acc, x) };
-                acc
+            if x.is_missing() {
+                return x;
             }
+            let next = match acc {
+                Some(a) if (x > a) != want_max => a,
+                _ => x,
+            };
+            acc = Some(next);
+            next
         })
         .collect()
 }
 
-/// Cumulative product (pandas `cumprod`, skipna=True).
-pub fn cumprod(v: &[f64]) -> Vec<f64> {
-    let mut acc = 1.0;
+/// Cumulative product (pandas `cumprod`, skipna=True), dtype-preserving.
+pub fn cumprod<T: Numeric>(v: &[T]) -> Vec<T> {
+    let mut acc = T::ONE;
     v.iter()
         .map(|&x| {
-            if x.is_nan() {
-                f64::NAN
+            if x.is_missing() {
+                x
             } else {
-                acc *= x;
+                acc = acc.wrapping_mul(x);
                 acc
             }
         })
@@ -124,9 +135,9 @@ pub fn kurt(v: &[f64]) -> f64 {
     num / den - adj
 }
 
-/// Element-wise choose: `cond[i] ? a[i] : b[i]`. Backs `where` / `mask` and
-/// boolean-mask assignment. `cond` / `a` / `b` are the same length.
-pub fn select(cond: &[bool], a: &[f64], b: &[f64]) -> Vec<f64> {
+/// Element-wise choose: `cond[i] ? a[i] : b[i]`. Backs `where` / `mask`. Generic
+/// so it preserves dtype (picks i64 natively). `cond` / `a` / `b` are equal length.
+pub fn select<T: Numeric>(cond: &[bool], a: &[T], b: &[T]) -> Vec<T> {
     cond.iter()
         .enumerate()
         .map(|(i, &c)| if c { a[i] } else { b[i] })

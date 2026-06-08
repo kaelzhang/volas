@@ -9,11 +9,13 @@ pub mod datetime;
 pub mod dtype;
 pub mod error;
 pub mod index;
+pub mod numeric;
 pub mod series;
 pub mod stats;
 pub mod tz;
 
-pub use column::{Column, SetVal};
+pub use column::{BinOp, Column, SetVal};
+pub use numeric::Numeric;
 pub use dataframe::DataFrame;
 pub use dtype::DType;
 pub use error::{Result, VolasError};

@@ -13,6 +13,37 @@ use std::sync::Arc;
 use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};
+use crate::numeric::{binary_supertype, fits, Numeric};
+use crate::stats;
+
+/// Run a numeric kernel over a column's element type, monomorphised per dtype
+/// (`F64` / `I64`) with no f64 round-trip. A `Bool` column is treated as `i64`
+/// (0/1) — bool is the 1-bit integer, matching pandas `bool.cumsum() -> int64`.
+/// `$slice` is bound to the typed slice; `$body` must produce a `Column` (via
+/// [`Numeric::into_column`]). A `Str` / `Datetime` column is a `DType` error.
+macro_rules! numeric_dispatch {
+    ($col:expr, $slice:ident => $body:expr) => {
+        match $col {
+            Column::F64(buf) => {
+                let $slice: &[f64] = buf.as_slice();
+                Ok($body)
+            }
+            Column::I64(buf) => {
+                let $slice: &[i64] = buf.as_slice();
+                Ok($body)
+            }
+            Column::Bool(buf) => {
+                let coerced: Vec<i64> = buf.iter().map(|&b| b as i64).collect();
+                let $slice: &[i64] = &coerced;
+                Ok($body)
+            }
+            other => Err(VolasError::DType(format!(
+                "expected a numeric column, got {}",
+                other.dtype()
+            ))),
+        }
+    };
+}
 
 /// A typed, contiguous column of values. The buffer is `Arc`-shared (cheap clone)
 /// and mutated copy-on-write.
@@ -40,6 +71,18 @@ pub enum SetVal {
     Bool(bool),
     /// A numeric scalar (an integral, finite value can stay in an int column).
     Num(f64),
+}
+
+/// A dtype-preserving binary arithmetic op for [`Column::binary`] (pandas
+/// `+ - *`). True division is always float, so it is [`Column::div`], not here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinOp {
+    /// Addition.
+    Add,
+    /// Subtraction.
+    Sub,
+    /// Multiplication.
+    Mul,
 }
 
 impl Column {
@@ -425,6 +468,135 @@ impl Column {
         }
     }
 
+    // --- dtype-preserving numeric transforms (pandas 3.0) ---------------------
+    // Each dispatches the kernel over the column's element type so an int column
+    // stays int and computes natively (no f64 round-trip). A non-numeric column
+    // is a `DType` error.
+
+    /// Cumulative sum (pandas `cumsum`, skipna), dtype-preserving.
+    pub fn cumsum(&self) -> Result<Column> {
+        numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v)))
+    }
+    /// Cumulative maximum (pandas `cummax`), dtype-preserving.
+    pub fn cummax(&self) -> Result<Column> {
+        numeric_dispatch!(self, v => Numeric::into_column(stats::cummax(v)))
+    }
+    /// Cumulative minimum (pandas `cummin`), dtype-preserving.
+    pub fn cummin(&self) -> Result<Column> {
+        numeric_dispatch!(self, v => Numeric::into_column(stats::cummin(v)))
+    }
+    /// Cumulative product (pandas `cumprod`), dtype-preserving.
+    pub fn cumprod(&self) -> Result<Column> {
+        numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v)))
+    }
+
+    /// Element-wise absolute value (pandas `abs`), dtype-preserving. `abs` of a
+    /// missing (`NaN`) stays missing; `abs(i64::MIN)` wraps to `i64::MIN` (pandas).
+    pub fn abs(&self) -> Result<Column> {
+        numeric_dispatch!(self, v => Numeric::into_column(
+            v.iter()
+                .map(|&x| if x.is_missing() { x } else { x.wrapping_abs() })
+                .collect::<Vec<_>>()
+        ))
+    }
+
+    /// Round to `decimals` places (pandas `round`), dtype-preserving: banker's
+    /// (half-to-even) for floats, and for ints an identity at `decimals >= 0` or a
+    /// banker's round to the nearest power-of-ten multiple at negative `decimals`.
+    pub fn round(&self, decimals: i32) -> Result<Column> {
+        match self {
+            Column::F64(v) => Ok(Column::f64(v.iter().map(|&x| round_f64(x, decimals)).collect())),
+            Column::I64(v) => Ok(Column::i64(v.iter().map(|&x| round_i64(x, decimals)).collect())),
+            Column::Bool(v) => {
+                Column::i64(v.iter().map(|&b| b as i64).collect()).round(decimals)
+            }
+            other => Err(VolasError::DType(format!("cannot round a {} column", other.dtype()))),
+        }
+    }
+
+    /// Clamp to `[lower, upper]` (either bound optional), pandas `clip`. Stays in
+    /// the column dtype when every present bound fits it losslessly; otherwise (an
+    /// int column with a non-integral bound) promotes to float, matching pandas.
+    pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Column> {
+        match self {
+            Column::Bool(v) => {
+                return Column::i64(v.iter().map(|&b| b as i64).collect()).clip(lower, upper)
+            }
+            Column::F64(_) | Column::I64(_) => {}
+            other => return Err(VolasError::DType(format!("cannot clip a {} column", other.dtype()))),
+        }
+        let bound_fits = |b: Option<f64>| b.map_or(true, |x| fits(self.dtype(), x));
+        // Stay in dtype when every present bound fits it losslessly (f64 always
+        // does); an int column with a non-integral bound promotes to float.
+        let stay = self.dtype() == DType::F64 || (bound_fits(lower) && bound_fits(upper));
+        if stay {
+            numeric_dispatch!(self, v => Numeric::into_column(clip_vec(v, lower, upper)))
+        } else {
+            Ok(Column::f64(clip_vec(&self.to_f64_vec(), lower, upper)))
+        }
+    }
+
+    /// `where` / `mask` core: pick `self` where `cond` is true, else `other`,
+    /// producing `target` dtype (the caller resolves keep-vs-promote so the fill's
+    /// value/type is accounted for). Picks i64 natively when `target` is `I64`
+    /// (no f64 round-trip, so large ints stay exact). Equal lengths assumed.
+    pub fn select(&self, cond: &[bool], other: &Column, target: DType) -> Result<Column> {
+        match target {
+            DType::I64 => Ok(Column::i64(stats::select(
+                cond,
+                &self.as_i64_vec()?,
+                &other.as_i64_vec()?,
+            ))),
+            _ => Ok(Column::f64(stats::select(
+                cond,
+                &self.to_f64_vec(),
+                &other.to_f64_vec(),
+            ))),
+        }
+    }
+
+    /// Binary `+ - *` against `other`, dtype-preserving via [`binary_supertype`]
+    /// (`int ∘ int → i64`, else f64). Wrapping int ops match pandas overflow.
+    /// Equal lengths assumed.
+    pub fn binary(&self, other: &Column, op: BinOp) -> Result<Column> {
+        match binary_supertype(self.dtype(), other.dtype()) {
+            DType::I64 => Ok(Column::i64(binary_kernel(
+                &self.as_i64_vec()?,
+                &other.as_i64_vec()?,
+                op,
+            ))),
+            _ => Ok(Column::f64(binary_kernel(
+                &self.to_f64_vec(),
+                &other.to_f64_vec(),
+                op,
+            ))),
+        }
+    }
+
+    /// True division `self / other` (pandas `/`): always float, like pandas.
+    pub fn div(&self, other: &Column) -> Column {
+        let (a, b) = (self.to_f64_vec(), other.to_f64_vec());
+        Column::f64(a.iter().zip(&b).map(|(&x, &y)| x / y).collect())
+    }
+
+    /// The column as `i64` values: an `I64` column directly (exact), otherwise via
+    /// lossless narrowing (errors if any value is non-integral / out of range).
+    /// Used by the int paths of `select` / `binary`, where the caller has already
+    /// established the values fit.
+    fn as_i64_vec(&self) -> Result<Vec<i64>> {
+        match self {
+            Column::I64(v) => Ok(v.to_vec()),
+            _ => self
+                .to_f64_vec()
+                .iter()
+                .map(|&x| {
+                    i64::try_from_f64(x)
+                        .ok_or_else(|| VolasError::DType(format!("value {x} does not fit int64")))
+                })
+                .collect(),
+        }
+    }
+
     /// Render each value as a `String` (for `astype(str)`).
     fn to_string_vec(&self) -> Vec<String> {
         match self {
@@ -452,6 +624,72 @@ impl Column {
             _ => self == other,
         }
     }
+}
+
+/// Banker's (half-to-even) round of `x` to `decimals` places; `NaN` stays `NaN`.
+fn round_f64(x: f64, decimals: i32) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let f = 10f64.powi(decimals);
+    (x * f).round_ties_even() / f
+}
+
+/// Round an int to `decimals` places: identity for `decimals >= 0`; for negative
+/// `decimals`, banker's round to the nearest `10^|decimals|` multiple (integer
+/// arithmetic, exact for all i64 — no f64 round-trip).
+fn round_i64(x: i64, decimals: i32) -> i64 {
+    if decimals >= 0 {
+        return x;
+    }
+    let factor = match 10i64.checked_pow(decimals.unsigned_abs()) {
+        Some(f) => f,
+        None => return 0, // 10^k beyond i64 -> everything rounds to 0
+    };
+    let q = x.div_euclid(factor);
+    let r = x.rem_euclid(factor); // 0..factor
+    let half = factor / 2; // factor = 10^k is even, so this is exact
+    let up = r > half || (r == half && q.rem_euclid(2) != 0); // tie -> even multiple
+    if up { q + 1 } else { q }.wrapping_mul(factor)
+}
+
+/// Clamp each element to `[lo, hi]` (either optional); missing passes through.
+/// Bounds are narrowed to `T` losslessly (the caller only stays in an int dtype
+/// when the bounds fit it).
+fn clip_vec<T: Numeric>(v: &[T], lo: Option<f64>, hi: Option<f64>) -> Vec<T> {
+    let lo = lo.and_then(T::try_from_f64);
+    let hi = hi.and_then(T::try_from_f64);
+    v.iter()
+        .map(|&x| {
+            if x.is_missing() {
+                return x;
+            }
+            let mut y = x;
+            if let Some(l) = lo {
+                if y < l {
+                    y = l;
+                }
+            }
+            if let Some(h) = hi {
+                if y > h {
+                    y = h;
+                }
+            }
+            y
+        })
+        .collect()
+}
+
+/// Element-wise `a ∘ b` for `Add` / `Sub` / `Mul` (wrapping, pandas overflow).
+fn binary_kernel<T: Numeric>(a: &[T], b: &[T], op: BinOp) -> Vec<T> {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| match op {
+            BinOp::Add => x.wrapping_add(y),
+            BinOp::Sub => x.wrapping_sub(y),
+            BinOp::Mul => x.wrapping_mul(y),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -707,5 +945,111 @@ mod tests {
         assert!(b.set_scalar_at(&[0], Num(0.0)).is_err());
         // A scalar into a str column is unsupported -> error.
         assert!(Column::str(vec!["a".into()]).set_scalar_at(&[0], Num(1.0)).is_err());
+    }
+
+    #[test]
+    fn cumulatives_preserve_dtype() {
+        // i64 stays i64, computed natively
+        assert_eq!(Column::i64(vec![1, 2, 3, 4]).cumsum().unwrap(), Column::i64(vec![1, 3, 6, 10]));
+        assert_eq!(Column::i64(vec![3, 1, 4, 1]).cummax().unwrap(), Column::i64(vec![3, 3, 4, 4]));
+        assert_eq!(Column::i64(vec![3, 1, 4, 1]).cummin().unwrap(), Column::i64(vec![3, 1, 1, 1]));
+        assert_eq!(Column::i64(vec![1, 2, 3]).cumprod().unwrap(), Column::i64(vec![1, 2, 6]));
+        // f64 keeps NaN in place (compare with equals: NaN == NaN)
+        assert!(Column::f64(vec![1.0, f64::NAN, 2.0, 4.0]).cumsum().unwrap()
+            .equals(&Column::f64(vec![1.0, f64::NAN, 3.0, 7.0])));
+        assert!(Column::f64(vec![1.0, f64::NAN, 4.0, 2.0]).cummax().unwrap()
+            .equals(&Column::f64(vec![1.0, f64::NAN, 4.0, 4.0])));
+        assert!(Column::f64(vec![3.0, f64::NAN, 1.0]).cummin().unwrap()
+            .equals(&Column::f64(vec![3.0, f64::NAN, 1.0])));
+        assert!(Column::f64(vec![2.0, f64::NAN, 3.0]).cumprod().unwrap()
+            .equals(&Column::f64(vec![2.0, f64::NAN, 6.0])));
+        // bool is treated as i64 (pandas bool.cumsum -> int64); str -> error
+        assert_eq!(Column::bool(vec![true, false, true]).cumsum().unwrap(), Column::i64(vec![1, 1, 2]));
+        assert!(Column::str(vec!["a".into()]).cumsum().is_err());
+    }
+
+    #[test]
+    fn abs_preserves_dtype_and_wraps() {
+        assert!(Column::f64(vec![-1.0, f64::NAN, 2.0]).abs().unwrap()
+            .equals(&Column::f64(vec![1.0, f64::NAN, 2.0])));
+        // abs(i64::MIN) wraps to i64::MIN (pandas / numpy)
+        assert_eq!(Column::i64(vec![-3, 4, i64::MIN]).abs().unwrap(), Column::i64(vec![3, 4, i64::MIN]));
+    }
+
+    #[test]
+    fn round_preserves_dtype() {
+        // f64 banker's, NaN passthrough
+        assert!(Column::f64(vec![0.5, 1.5, 2.5, f64::NAN]).round(0).unwrap()
+            .equals(&Column::f64(vec![0.0, 2.0, 2.0, f64::NAN])));
+        // i64 identity at decimals>=0; banker's-to-multiple at negative decimals
+        assert_eq!(Column::i64(vec![7, 8]).round(0).unwrap(), Column::i64(vec![7, 8]));
+        assert_eq!(Column::i64(vec![15, 25, 35, 45, 5]).round(-1).unwrap(), Column::i64(vec![20, 20, 40, 40, 0]));
+        assert_eq!(Column::i64(vec![16, 13]).round(-1).unwrap(), Column::i64(vec![20, 10])); // r>half / r<half
+        assert_eq!(Column::i64(vec![-15, -25]).round(-1).unwrap(), Column::i64(vec![-20, -20])); // negative
+        assert_eq!(Column::i64(vec![123]).round(-25).unwrap(), Column::i64(vec![0])); // 10^25 overflows -> 0
+        assert_eq!(Column::bool(vec![true, false]).round(0).unwrap(), Column::i64(vec![1, 0]));
+        assert!(Column::str(vec!["a".into()]).round(0).is_err());
+    }
+
+    #[test]
+    fn clip_preserves_dtype_or_promotes() {
+        use DType::{F64, I64};
+        // f64: both bounds, lo-only, hi-only, no bounds, NaN passthrough
+        assert!(Column::f64(vec![-1.0, 1.0, 3.0, f64::NAN]).clip(Some(0.0), Some(2.0)).unwrap()
+            .equals(&Column::f64(vec![0.0, 1.0, 2.0, f64::NAN])));
+        assert_eq!(Column::f64(vec![-1.0, 5.0]).clip(Some(0.0), None).unwrap(), Column::f64(vec![0.0, 5.0]));
+        assert_eq!(Column::f64(vec![-1.0, 5.0]).clip(None, Some(2.0)).unwrap(), Column::f64(vec![-1.0, 2.0]));
+        assert_eq!(Column::f64(vec![1.0, 5.0]).clip(None, None).unwrap(), Column::f64(vec![1.0, 5.0]));
+        // i64 with integral bounds stays int
+        assert_eq!(Column::i64(vec![1, 5, 9]).clip(Some(2.0), Some(8.0)).unwrap(), Column::i64(vec![2, 5, 8]));
+        // i64 with a non-integral bound promotes to float (pandas)
+        let p = Column::i64(vec![1, 5, 9]).clip(Some(2.5), None).unwrap();
+        assert_eq!(p.dtype(), F64);
+        assert_eq!(p, Column::f64(vec![2.5, 5.0, 9.0]));
+        let _ = I64;
+        // bool -> i64; str -> error
+        assert_eq!(Column::bool(vec![true, false]).clip(Some(0.0), Some(1.0)).unwrap(), Column::i64(vec![1, 0]));
+        assert!(Column::str(vec!["a".into()]).clip(None, None).is_err());
+    }
+
+    #[test]
+    fn select_picks_in_target_dtype() {
+        let cond = [true, false, true];
+        let a = Column::i64(vec![1, 2, 3]);
+        // target I64: other is i64 (direct) and f64-integral (lossless narrow)
+        assert_eq!(a.select(&cond, &Column::i64(vec![10, 20, 30]), DType::I64).unwrap(),
+                   Column::i64(vec![1, 20, 3]));
+        assert_eq!(a.select(&cond, &Column::f64(vec![10.0, 20.0, 30.0]), DType::I64).unwrap(),
+                   Column::i64(vec![1, 20, 3]));
+        // target F64
+        assert_eq!(Column::f64(vec![1.0, 2.0, 3.0])
+            .select(&cond, &Column::f64(vec![10.0, 20.0, 30.0]), DType::F64).unwrap(),
+            Column::f64(vec![1.0, 20.0, 3.0]));
+        // as_i64_vec error: target I64 but a value is non-integral
+        assert!(a.select(&cond, &Column::f64(vec![1.5, 2.0, 3.0]), DType::I64).is_err());
+    }
+
+    #[test]
+    fn binary_and_div_dtype() {
+        use DType::{F64, I64};
+        let a = Column::i64(vec![5, 7]);
+        let b = Column::i64(vec![2, 3]);
+        assert_eq!(a.binary(&b, BinOp::Add).unwrap(), Column::i64(vec![7, 10]));
+        assert_eq!(a.binary(&b, BinOp::Sub).unwrap(), Column::i64(vec![3, 4]));
+        assert_eq!(a.binary(&b, BinOp::Mul).unwrap(), Column::i64(vec![10, 21]));
+        // bool + bool -> i64 (True + True == 2)
+        assert_eq!(Column::bool(vec![true, true]).binary(&Column::bool(vec![true, false]), BinOp::Add).unwrap(),
+                   Column::i64(vec![2, 1]));
+        // int + float -> f64
+        let r = a.binary(&Column::f64(vec![2.0, 3.0]), BinOp::Add).unwrap();
+        assert_eq!(r.dtype(), F64);
+        assert_eq!(r, Column::f64(vec![7.0, 10.0]));
+        // wrapping overflow matches pandas int64
+        assert_eq!(Column::i64(vec![i64::MAX]).binary(&Column::i64(vec![1]), BinOp::Add).unwrap(),
+                   Column::i64(vec![i64::MIN]));
+        // div is always float
+        assert_eq!(a.div(&b).dtype(), F64);
+        assert_eq!(a.div(&b), Column::f64(vec![2.5, 7.0 / 3.0]));
+        let _ = I64;
     }
 }
