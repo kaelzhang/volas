@@ -1170,6 +1170,223 @@ df['hv:10,15m,365']
 df['hv:10']
 ```
 
+### `psy`, Psychological Line
+
+```
+psy:<period>@<on>
+```
+
+The percentage of rising days (close above the previous close) over the last
+`period` bars.
+
+- **period?** `int=12`
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['psy']
+df['psy:6']
+```
+
+### `dpo`, Detrended Price Oscillator
+
+```
+dpo:<period>@<on>
+```
+
+The price `period/2 + 1` bars ago minus the `period`-bar SMA, removing the trend
+to expose shorter cycles.
+
+- **period?** `int=20`
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['dpo']
+df['dpo:10']
+```
+
+### `tsi`, True Strength Index
+
+```
+tsi:<long>,<short>@<on>
+```
+
+A double-EMA-smoothed momentum oscillator: `100 * EMA_short(EMA_long(Δclose)) /
+EMA_short(EMA_long(|Δclose|))`.
+
+- **long?** `int=25`
+- **short?** `int=13`
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['tsi']
+df['tsi:25,13']
+```
+
+### `kst`, Know Sure Thing
+
+```
+kst@<on>
+```
+
+Pring's momentum oscillator: a weighted sum of four SMA-smoothed rate-of-change
+terms (ROC 10/15/20/30, smoothed by SMA 10/10/10/15, weighted 1/2/3/4).
+
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['kst']
+```
+
+### `crsi`, Connors RSI
+
+```
+crsi:<rsi>,<streak>,<rank>@<on>
+```
+
+Connors' composite: the average of `rsi:<rsi>`, the RSI of the consecutive up /
+down streak length, and the percent-rank of the 1-bar return over the last `rank`
+bars.
+
+- **rsi?** `int=3`
+- **streak?** `int=2`
+- **rank?** `int=100`
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['crsi']
+df['crsi:3,2,100']
+```
+
+### `chop`, Choppiness Index
+
+```
+chop:<period>@<high>,<low>,<close>
+```
+
+How choppy versus trending the market is over `period` bars:
+`100 * log10(sum(TR) / (HHV − LLV)) / log10(period)`. Higher is choppier.
+
+- **period?** `int=14`
+- **high? / low? / close?** `str` the input columns; default to the like-named frame columns.
+
+```py
+df['chop']
+df['chop:14']
+```
+
+### `cmf`, Chaikin Money Flow
+
+```
+cmf:<period>@<high>,<low>,<close>,<volume>
+```
+
+The `period`-bar sum of money-flow volume divided by the sum of volume — positive
+is buying pressure, negative is selling pressure.
+
+- **period?** `int=20`
+- **high? / low? / close? / volume?** `str` the input columns; default to the like-named frame columns.
+
+```py
+df['cmf']
+df['cmf:20']
+```
+
+### `emv`, Ease of Movement
+
+```
+emv:<period>@<high>,<low>,<volume>
+```
+
+The `period`-bar SMA of price displacement per unit of volume (StockCharts' 1e8
+volume scale) — how easily price moves.
+
+- **period?** `int=14`
+- **high? / low? / volume?** `str` the input columns; default to the like-named frame columns.
+
+```py
+df['emv']
+df['emv:14']
+```
+
+### `efi`, Elder Force Index
+
+```
+efi:<period>@<close>,<volume>
+```
+
+`EMA_period(Δclose * volume)` — the force of a move, combining its direction, size,
+and volume.
+
+- **period?** `int=13`
+- **close? / volume?** `str` the input columns; default to the like-named frame columns.
+
+```py
+df['efi']
+df['efi:13']
+```
+
+### `pvt`, Price Volume Trend
+
+```
+pvt@<close>,<volume>
+```
+
+A cumulative volume line weighted by each bar's return:
+`PVT += (Δclose / prev close) * volume`.
+
+- **close? / volume?** `str` the input columns; default to the like-named frame columns.
+
+```py
+df['pvt']
+```
+
+### `nvi`, Negative Volume Index
+
+```
+nvi@<close>,<volume>
+```
+
+A cumulative line (base 1000) that compounds the return only on bars where volume
+fell — tracking the "smart money" days.
+
+- **close? / volume?** `str` the input columns; default to the like-named frame columns.
+
+```py
+df['nvi']
+```
+
+### `pvi`, Positive Volume Index
+
+```
+pvi@<close>,<volume>
+```
+
+A cumulative line (base 1000) that compounds the return only on bars where volume
+rose — tracking the "crowd" days.
+
+- **close? / volume?** `str` the input columns; default to the like-named frame columns.
+
+```py
+df['pvi']
+```
+
+### `mass_index`, Mass Index
+
+```
+mass_index:<period>@<high>,<low>
+```
+
+The `period`-bar sum of the 9-EMA / double-9-EMA ratio of the high−low range; a
+range "bulge" can flag a coming reversal.
+
+- **period?** `int=25`
+- **high? / low?** `str` the input columns; default to the like-named frame columns.
+
+```py
+df['mass_index']
+df['mass_index:25']
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change
