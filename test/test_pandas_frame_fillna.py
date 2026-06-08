@@ -1,6 +1,6 @@
-"""P2 DataFrame methods: fillna(value=, method=), isna, notna — per-column,
-mirroring the Series versions; non-float columns pass through (fillna) or read
-as never-missing (isna / notna)."""
+"""P2 DataFrame methods: fillna(value=), ffill, bfill, isna, notna — per-column,
+mirroring the Series versions; non-float columns pass through (fillna / ffill /
+bfill) or read as never-missing (isna / notna)."""
 
 import numpy as np
 import pytest
@@ -15,7 +15,7 @@ def _mixed():
     return DataFrame({"f": [1.0, nan, 3.0], "s": ["a", "b", "c"]})
 
 
-# --- fillna -----------------------------------------------------------------
+# --- fillna / ffill / bfill -------------------------------------------------
 
 def test_fillna_value_fills_float_columns():
     d = DataFrame({"a": [1.0, nan, 3.0], "b": [nan, 5.0, 6.0]})
@@ -24,16 +24,16 @@ def test_fillna_value_fills_float_columns():
     np.testing.assert_array_equal(out["b"].to_numpy(), [0, 5, 6])
 
 
-def test_fillna_ffill_per_column():
+def test_ffill_per_column():
     d = DataFrame({"a": [nan, 2.0, nan], "b": [1.0, nan, nan]})
-    out = d.fillna(method="ffill")
+    out = d.ffill()
     np.testing.assert_array_equal(out["a"].to_numpy(), [nan, 2, 2])
     np.testing.assert_array_equal(out["b"].to_numpy(), [1, 1, 1])
 
 
-def test_fillna_bfill_per_column():
+def test_bfill_per_column():
     d = DataFrame({"a": [nan, 2.0, nan]})
-    np.testing.assert_array_equal(d.fillna(method="bfill")["a"].to_numpy(), [2, 2, nan])
+    np.testing.assert_array_equal(d.bfill()["a"].to_numpy(), [2, 2, nan])
 
 
 def test_fillna_leaves_non_float_columns_untouched():
@@ -42,24 +42,15 @@ def test_fillna_leaves_non_float_columns_untouched():
     assert list(out["s"].to_numpy()) == ["a", "b", "c"]
 
 
-def test_fillna_ffill_leaves_non_float_columns_untouched():
-    out = _mixed().fillna(method="ffill")
+def test_ffill_leaves_non_float_columns_untouched():
+    out = _mixed().ffill()
     assert list(out["s"].to_numpy()) == ["a", "b", "c"]
 
 
-def test_fillna_both_raises():
-    with pytest.raises(ValueError, match="not both"):
-        DataFrame({"a": [nan]}).fillna(0.0, method="ffill")
-
-
-def test_fillna_neither_raises():
-    with pytest.raises(ValueError):
+def test_fillna_requires_a_value():
+    # pandas 3.0 removed fillna(method=); fillna now needs a value
+    with pytest.raises(TypeError):
         DataFrame({"a": [nan]}).fillna()
-
-
-def test_fillna_unknown_method_raises():
-    with pytest.raises(ValueError, match="unknown method"):
-        DataFrame({"a": [nan]}).fillna(method="spline")
 
 
 # --- isna / notna -----------------------------------------------------------

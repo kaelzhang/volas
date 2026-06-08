@@ -316,7 +316,17 @@ impl Column {
         match to {
             DType::F64 => Ok(Column::f64(self.to_f64_vec())),
             DType::I64 => match self {
-                Column::F64(v) => Ok(Column::i64(v.iter().map(|&x| x as i64).collect())),
+                Column::F64(v) => {
+                    // pandas raises (IntCastingNaNError) rather than silently
+                    // turning NaN -> 0 / inf -> i64::MAX, which corrupts data.
+                    if let Some(x) = v.iter().copied().find(|x| !x.is_finite()) {
+                        return Err(VolasError::Value(format!(
+                            "cannot convert non-finite value ({x}) to int64 (NaN / inf); \
+                             fill or drop it first"
+                        )));
+                    }
+                    Ok(Column::i64(v.iter().map(|&x| x as i64).collect()))
+                }
                 Column::Bool(v) => Ok(Column::i64(v.iter().map(|&b| b as i64).collect())),
                 Column::Datetime(v) => Ok(Column::i64(v.to_vec())),
                 other => Err(VolasError::DType(format!(

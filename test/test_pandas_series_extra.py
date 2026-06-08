@@ -1,5 +1,5 @@
 """P2 Series methods added for pandas parity (OHLCV-relevant convenience):
-shape, fillna(method=), astype, cumsum, round, abs, clip, quantile, idxmax/idxmin.
+shape, fillna, ffill, bfill, astype, cumsum, round, abs, clip, quantile, idxmax/idxmin.
 
 Numeric results are checked against pandas where a parity oracle is cheap.
 """
@@ -25,37 +25,26 @@ def test_shape_is_one_tuple():
     assert _s([]).shape == (0,)
 
 
-# --- fillna(value=, method=) ------------------------------------------------
+# --- fillna / ffill / bfill -------------------------------------------------
 
 def test_fillna_value():
     np.testing.assert_array_equal(_s([3.0, nan, 1.0]).fillna(0.0).to_numpy(), [3, 0, 1])
 
 
-def test_fillna_ffill_and_pad_alias():
+def test_ffill():
     src = [nan, 3.0, nan, nan, 1.0]
-    np.testing.assert_array_equal(_s(src).fillna(method="ffill").to_numpy(), [nan, 3, 3, 3, 1])
-    np.testing.assert_array_equal(_s(src).fillna(method="pad").to_numpy(), [nan, 3, 3, 3, 1])
+    np.testing.assert_array_equal(_s(src).ffill().to_numpy(), [nan, 3, 3, 3, 1])
 
 
-def test_fillna_bfill_and_backfill_alias():
+def test_bfill():
     src = [3.0, nan, nan, 1.0, nan]
-    np.testing.assert_array_equal(_s(src).fillna(method="bfill").to_numpy(), [3, 1, 1, 1, nan])
-    np.testing.assert_array_equal(_s(src).fillna(method="backfill").to_numpy(), [3, 1, 1, 1, nan])
+    np.testing.assert_array_equal(_s(src).bfill().to_numpy(), [3, 1, 1, 1, nan])
 
 
-def test_fillna_both_value_and_method_raises():
-    with pytest.raises(ValueError, match="not both"):
-        _s([nan]).fillna(0.0, method="ffill")
-
-
-def test_fillna_neither_raises():
-    with pytest.raises(ValueError):
+def test_fillna_requires_a_value():
+    # pandas 3.0 removed fillna(method=); fillna now needs a value
+    with pytest.raises(TypeError):
         _s([nan]).fillna()
-
-
-def test_fillna_unknown_method_raises():
-    with pytest.raises(ValueError, match="unknown method"):
-        _s([nan]).fillna(method="interpolate")
 
 
 def test_fillna_on_non_float_column_is_passthrough():
@@ -68,6 +57,14 @@ def test_fillna_on_non_float_column_is_passthrough():
 def test_astype_numeric():
     assert _s([1.0, 2.0]).astype("int64").dtype == "int64"
     assert _s([1.0, 0.0]).astype("bool").dtype == "bool"
+
+
+def test_astype_int_with_non_finite_raises():
+    # pandas raises IntCastingNaNError; volas raises rather than silently NaN->0 / inf->i64::MAX
+    with pytest.raises(ValueError):
+        _s([1.0, nan, 3.0]).astype("int64")
+    with pytest.raises(ValueError):
+        _s([1.0, float("inf"), 3.0]).astype("int64")
 
 
 def test_astype_string_to_datetime():
@@ -94,7 +91,12 @@ def test_cumsum_skips_nan_in_place():
 def test_round_default_and_decimals_and_negative():
     np.testing.assert_array_equal(_s([1.4, 1.6]).round().to_numpy(), [1, 2])
     np.testing.assert_array_equal(_s([1.234, 2.567]).round(1).to_numpy(), [1.2, 2.6])
-    np.testing.assert_array_equal(_s([14.0, 25.0]).round(-1).to_numpy(), [10, 30])
+    np.testing.assert_array_equal(_s([14.0, 25.0]).round(-1).to_numpy(), [10, 20])  # 25 -> 20 (banker's)
+
+
+def test_round_is_banker_half_to_even():
+    # round-half-to-even (banker's), matching pandas / NumPy — ties go to the even neighbour
+    np.testing.assert_array_equal(_s([0.5, 1.5, 2.5, 3.5]).round(0).to_numpy(), [0, 2, 2, 4])
 
 
 def test_abs():

@@ -813,38 +813,29 @@ impl PySeries {
     ///
     /// Returns:
     ///     Series: a new series (non-float columns are returned unchanged).
-    #[pyo3(signature = (value = None, method = None))]
-    fn fillna(&self, value: Option<f64>, method: Option<&str>) -> PyResult<PySeries> {
-        let v = match &self.inner.data {
-            Column::F64(v) => v,
-            other => {
-                return Ok(PySeries {
-                    inner: Series::new(
-                        self.inner.name.clone(),
-                        other.clone(),
-                        Arc::clone(&self.inner.index),
-                    ),
-                })
-            }
-        };
-        let out: Vec<f64> = match (value, method) {
-            (Some(_), Some(_)) => {
-                return Err(PyValueError::new_err(
-                    "fillna: pass either `value` or `method`, not both",
-                ))
-            }
-            (Some(val), None) => v
-                .iter()
-                .map(|&x| if x.is_nan() { val } else { x })
-                .collect(),
-            (None, Some(m)) => fill_directional(v.as_slice(), m)?,
-            (None, None) => {
-                return Err(PyValueError::new_err(
-                    "fillna: pass a `value` or a `method`",
-                ))
-            }
-        };
-        Ok(f64_series(&self.inner, out))
+    /// Replace NaN cells with `value` (pandas `fillna`); a non-float series is
+    /// returned unchanged. For directional fill use `ffill` / `bfill` (pandas 3.0
+    /// removed `fillna(method=)`).
+    fn fillna(&self, value: f64) -> PySeries {
+        match &self.inner.data {
+            Column::F64(v) => f64_series(
+                &self.inner,
+                v.iter().map(|&x| if x.is_nan() { value } else { x }).collect(),
+            ),
+            _ => PySeries {
+                inner: self.inner.clone(),
+            },
+        }
+    }
+
+    /// Forward-fill NaN cells from the last valid value (pandas `ffill`).
+    fn ffill(&self) -> PySeries {
+        self.fill_dir(true)
+    }
+
+    /// Backward-fill NaN cells from the next valid value (pandas `bfill`).
+    fn bfill(&self) -> PySeries {
+        self.fill_dir(false)
     }
 
     /// Boolean mask of missing (NaN) values (non-F64 columns -> all False).
@@ -931,10 +922,11 @@ impl PySeries {
     }
 
     /// Round each value to `decimals` places (pandas `round`); NaN stays NaN.
+    /// Uses round-half-to-even (banker's rounding), matching pandas / NumPy.
     #[pyo3(signature = (decimals = 0))]
     fn round(&self, decimals: i32) -> PySeries {
         let factor = 10f64.powi(decimals);
-        self.map_f64(move |x| (x * factor).round() / factor)
+        self.map_f64(move |x| (x * factor).round_ties_even() / factor)
     }
 
     /// Element-wise absolute value (pandas `abs`).
@@ -1189,6 +1181,17 @@ impl PySeries {
             inner: Series::new(self.inner.name.clone(), data, Arc::clone(&self.inner.index)),
         }
     }
+
+    /// Directional NaN fill (`forward` = ffill, else bfill) over an F64 column;
+    /// a non-float series is returned unchanged. Shared by `ffill` / `bfill`.
+    fn fill_dir(&self, forward: bool) -> PySeries {
+        match &self.inner.data {
+            Column::F64(v) => f64_series(&self.inner, fill_directional(v.as_slice(), forward)),
+            _ => PySeries {
+                inner: self.inner.clone(),
+            },
+        }
+    }
 }
 
 /// `series.iloc[...]` positional indexer.
@@ -1314,37 +1317,29 @@ fn non_nan(col: &Column) -> Vec<f64> {
         .collect()
 }
 
-/// Forward (`ffill` / `pad`) or backward (`bfill` / `backfill`) fill of NaN cells.
-fn fill_directional(v: &[f64], method: &str) -> PyResult<Vec<f64>> {
+/// Forward (`forward = true`, `ffill`) or backward (`bfill`) fill of NaN cells.
+fn fill_directional(v: &[f64], forward: bool) -> Vec<f64> {
     let mut out = v.to_vec();
-    match method {
-        "ffill" | "pad" => {
-            let mut last = f64::NAN;
-            for x in out.iter_mut() {
-                if x.is_nan() {
-                    *x = last;
-                } else {
-                    last = *x;
-                }
+    if forward {
+        let mut last = f64::NAN;
+        for x in out.iter_mut() {
+            if x.is_nan() {
+                *x = last;
+            } else {
+                last = *x;
             }
         }
-        "bfill" | "backfill" => {
-            let mut next = f64::NAN;
-            for x in out.iter_mut().rev() {
-                if x.is_nan() {
-                    *x = next;
-                } else {
-                    next = *x;
-                }
+    } else {
+        let mut next = f64::NAN;
+        for x in out.iter_mut().rev() {
+            if x.is_nan() {
+                *x = next;
+            } else {
+                next = *x;
             }
-        }
-        _ => {
-            return Err(PyValueError::new_err(format!(
-                "fillna: unknown method '{method}'"
-            )))
         }
     }
-    Ok(out)
+    out
 }
 
 /// The position of the first maximum (`want_max`) or minimum non-NaN value; errors
@@ -1619,6 +1614,21 @@ impl PyDataFrame {
         )
         .map(PyDataFrame::plain)
         .map_err(pyerr)
+    }
+
+    /// Directional NaN fill (`forward` = ffill, else bfill) over every float
+    /// column; non-float columns are unchanged. Backs `ffill` / `bfill`.
+    fn fill_dir(&self, forward: bool) -> PyResult<PyDataFrame> {
+        let cols: Vec<Column> = self
+            .inner
+            .columns()
+            .iter()
+            .map(|c| match c {
+                Column::F64(v) => Column::f64(fill_directional(v.as_slice(), forward)),
+                other => other.clone(),
+            })
+            .collect();
+        self.with_columns(cols)
     }
 
     /// Per-cell NaN mask -> a bool frame; backs `isna` (want_na=true) / `notna`.
@@ -2165,46 +2175,32 @@ impl PyDataFrame {
         PyDataFrame::plain(take_frame(&self.inner, &keep))
     }
 
-    /// Replace missing (NaN) values, or forward/backward-fill, in every float
-    /// column (pandas `fillna`); non-float columns are unchanged. Pass exactly one
-    /// of `value` / `method` (`'ffill'` / `'pad'`, `'bfill'` / `'backfill'`).
-    #[pyo3(signature = (value = None, method = None))]
-    fn fillna(&self, value: Option<f64>, method: Option<&str>) -> PyResult<PyDataFrame> {
-        let cols: Vec<Column> = match (value, method) {
-            (Some(_), Some(_)) => {
-                return Err(PyValueError::new_err(
-                    "fillna: pass either `value` or `method`, not both",
-                ))
-            }
-            (None, None) => {
-                return Err(PyValueError::new_err(
-                    "fillna: pass a `value` or a `method`",
-                ))
-            }
-            (Some(val), None) => self
-                .inner
-                .columns()
-                .iter()
-                .map(|c| match c {
-                    Column::F64(v) => Column::f64(
-                        v.iter()
-                            .map(|&x| if x.is_nan() { val } else { x })
-                            .collect(),
-                    ),
-                    other => other.clone(),
-                })
-                .collect(),
-            (None, Some(m)) => self
-                .inner
-                .columns()
-                .iter()
-                .map(|c| match c {
-                    Column::F64(v) => Ok(Column::f64(fill_directional(v.as_slice(), m)?)),
-                    other => Ok(other.clone()),
-                })
-                .collect::<PyResult<Vec<Column>>>()?,
-        };
+    /// Replace missing (NaN) values with `value` in every float column (pandas
+    /// `fillna`); non-float columns are unchanged. For directional fill use
+    /// `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
+    fn fillna(&self, value: f64) -> PyResult<PyDataFrame> {
+        let cols: Vec<Column> = self
+            .inner
+            .columns()
+            .iter()
+            .map(|c| match c {
+                Column::F64(v) => {
+                    Column::f64(v.iter().map(|&x| if x.is_nan() { value } else { x }).collect())
+                }
+                other => other.clone(),
+            })
+            .collect();
         self.with_columns(cols)
+    }
+
+    /// Forward-fill NaN cells in every float column (pandas `ffill`).
+    fn ffill(&self) -> PyResult<PyDataFrame> {
+        self.fill_dir(true)
+    }
+
+    /// Backward-fill NaN cells in every float column (pandas `bfill`).
+    fn bfill(&self) -> PyResult<PyDataFrame> {
+        self.fill_dir(false)
     }
 
     /// Boolean mask of missing (NaN) cells -> a bool DataFrame (pandas `isna`);
