@@ -801,6 +801,33 @@ fn exec_command(
             f64col(ind::chop(&high, &low, &close, arg_usize(args, 0, Some(14))?))
         }
         ("kst", _) => f64col(ind::kst(&close(0)?)),
+        ("emv", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let volume = series_f64(df, series, 2, "volume")?;
+            f64col(ind::emv(&high, &low, &volume, arg_usize(args, 0, Some(14))?))
+        }
+        ("mass_index", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            f64col(ind::mass_index(&high, &low, arg_usize(args, 0, Some(25))?))
+        }
+        ("efi", _) => {
+            let close = series_f64(df, series, 0, "close")?;
+            let volume = series_f64(df, series, 1, "volume")?;
+            f64col(ind::efi(&close, &volume, arg_usize(args, 0, Some(13))?))
+        }
+        ("tsi", _) => f64col(ind::tsi(
+            &close(0)?,
+            arg_usize(args, 0, Some(25))?,
+            arg_usize(args, 1, Some(13))?,
+        )),
+        ("crsi", _) => f64col(ind::crsi(
+            &close(0)?,
+            arg_usize(args, 0, Some(3))?,
+            arg_usize(args, 1, Some(2))?,
+            arg_usize(args, 2, Some(100))?,
+        )),
         ("trix", _) => f64col(ind::trix(&close(0)?, arg_usize(args, 0, Some(30))?)),
         ("aroon", Some(dir @ ("up" | "down"))) => {
             let high = series_f64(df, series, 0, "high")?;

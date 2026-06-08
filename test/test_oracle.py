@@ -25,6 +25,7 @@ def ohlcv():
     rng = np.random.default_rng(20260608)
     n = 300
     close = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.01, n)))
+    close[150] = close[149]  # one flat bar — exercises the unchanged-close path (Connors RSI streak)
     high = close + rng.uniform(0.3, 2.0, n)
     low = close - rng.uniform(0.3, 2.0, n)
     open_ = low + (high - low) * rng.uniform(0.0, 1.0, n)

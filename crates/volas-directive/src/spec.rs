@@ -129,6 +129,11 @@ pub fn is_command(name: &str) -> bool {
             | "cmf"
             | "chop"
             | "kst"
+            | "emv"
+            | "mass_index"
+            | "efi"
+            | "tsi"
+            | "crsi"
             | "tr"
             | "atr"
             | "llv"
@@ -273,6 +278,11 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("cmf", None) => (vec![Int(20)], vec!["high", "low", "close", "volume"]),
         ("chop", None) => (vec![Int(14)], vec!["high", "low", "close"]),
         ("kst", None) => (vec![], vec!["close"]),
+        ("emv", None) => (vec![Int(14)], vec!["high", "low", "volume"]),
+        ("mass_index", None) => (vec![Int(25)], vec!["high", "low"]),
+        ("efi", None) => (vec![Int(13)], vec!["close", "volume"]),
+        ("tsi", None) => (vec![Int(25), Int(13)], vec!["close"]),
+        ("crsi", None) => (vec![Int(3), Int(2), Int(100)], vec!["close"]),
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns

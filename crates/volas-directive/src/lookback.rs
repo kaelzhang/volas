@@ -72,6 +72,12 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "chop" => arg(args, 0, 14),
         // kst's slowest term is SMA15 over ROC30: 30 + 15 - 1.
         "kst" => 44,
+        "emv" => arg(args, 0, 14),
+        // mass_index: EMA9 of EMA9 warms up at 2*(9-1)=16, then the n-sum adds n-1.
+        "mass_index" => 15 + arg(args, 0, 25),
+        "efi" => arg(args, 0, 13),
+        "tsi" => arg(args, 0, 25) + arg(args, 1, 13) - 1,
+        "crsi" => arg(args, 2, 100) + 1,
         "tr" => 1,
         "atr" => arg(args, 0, 14),
         "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),
