@@ -107,3 +107,39 @@ def test_int_arithmetic_wraps_like_pandas():
     out = _vi([big]) + _vi([1])
     assert out.dtype == "int64"
     assert int(np.asarray(out.to_numpy())[0]) == np.iinfo(np.int64).min  # wraps
+
+
+# --- bool: per-operation, matching pandas 3.0 -------------------------------
+
+def _vbool(values):
+    # a real bool Series (from a comparison)
+    return _vf([1.0 if v else 0.0 for v in values]) > 0.5
+
+
+def test_bool_dtype_matches_pandas():
+    b = _vbool([True, False, True])
+    # cumsum/cumprod -> int64; cummax/cummin/abs/round/clip -> bool
+    assert b.cumsum().dtype == "int64"
+    assert b.cumprod().dtype == "int64"
+    assert b.cummax().dtype == "bool"
+    assert b.cummin().dtype == "bool"
+    assert b.abs().dtype == "bool"
+    assert b.round().dtype == "bool"
+    assert b.clip(False, True).dtype == "bool"
+    np.testing.assert_array_equal(b.cummax().to_numpy(), [True, True, True])   # running OR
+    np.testing.assert_array_equal(b.cummin().to_numpy(), [True, False, False])  # running AND
+
+
+def test_bool_arithmetic_matches_pandas():
+    b = _vbool([True, False, True])
+    c = _vbool([True, True, False])
+    assert (b + c).dtype == "bool"   # OR
+    assert (b * c).dtype == "bool"   # AND
+    np.testing.assert_array_equal((b + c).to_numpy(), [True, True, True])
+    np.testing.assert_array_equal((b * c).to_numpy(), [True, False, False])
+    assert (b + 1).dtype == "int64"     # bool ∘ int -> int
+    assert (b + 1.0).dtype == "float64"  # bool ∘ float -> float
+    with pytest.raises(Exception):
+        _ = b - c   # bool subtraction unsupported (pandas raises)
+    with pytest.raises(Exception):
+        _ = b / c   # bool division unsupported (pandas raises)

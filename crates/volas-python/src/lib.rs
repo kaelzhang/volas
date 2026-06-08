@@ -1474,7 +1474,7 @@ fn series_arith(
 fn series_div(s: &Series, other: &Bound<'_, PyAny>, swap: bool) -> PyResult<PySeries> {
     let rhs = series_rhs_col(s, other)?;
     let (lhs, rhs) = if swap { (&rhs, &s.data) } else { (&s.data, &rhs) };
-    Ok(col_to_series(s, lhs.div(rhs)))
+    Ok(col_to_series(s, lhs.div(rhs).map_err(pyerr)?))
 }
 
 /// Element-wise comparison -> bool Series (positional; NaN compares `false` for

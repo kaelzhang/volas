@@ -17,10 +17,10 @@ use crate::numeric::{binary_supertype, fits, Numeric};
 use crate::stats;
 
 /// Run a numeric kernel over a column's element type, monomorphised per dtype
-/// (`F64` / `I64`) with no f64 round-trip. A `Bool` column is treated as `i64`
-/// (0/1) — bool is the 1-bit integer, matching pandas `bool.cumsum() -> int64`.
-/// `$slice` is bound to the typed slice; `$body` must produce a `Column` (via
-/// [`Numeric::into_column`]). A `Str` / `Datetime` column is a `DType` error.
+/// (`F64` / `I64`) with no f64 round-trip. `$slice` is bound to the typed slice;
+/// `$body` must produce a `Column` (via [`Numeric::into_column`]). `Bool` is
+/// handled per-op by the caller (pandas treats it inconsistently — `cumsum -> int`
+/// but `abs/cummax -> bool`); a `Bool` / `Str` / `Datetime` column here is an error.
 macro_rules! numeric_dispatch {
     ($col:expr, $slice:ident => $body:expr) => {
         match $col {
@@ -30,11 +30,6 @@ macro_rules! numeric_dispatch {
             }
             Column::I64(buf) => {
                 let $slice: &[i64] = buf.as_slice();
-                Ok($body)
-            }
-            Column::Bool(buf) => {
-                let coerced: Vec<i64> = buf.iter().map(|&b| b as i64).collect();
-                let $slice: &[i64] = &coerced;
                 Ok($body)
             }
             other => Err(VolasError::DType(format!(
@@ -473,26 +468,46 @@ impl Column {
     // stays int and computes natively (no f64 round-trip). A non-numeric column
     // is a `DType` error.
 
-    /// Cumulative sum (pandas `cumsum`, skipna), dtype-preserving.
+    /// Cumulative sum (pandas `cumsum`, skipna), dtype-preserving. A `bool` column
+    /// sums to `int64` (counts trues), matching pandas.
     pub fn cumsum(&self) -> Result<Column> {
+        if let Column::Bool(v) = self {
+            return Ok(Column::i64(stats::cumsum(&bool_as_i64(v))));
+        }
         numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v)))
     }
-    /// Cumulative maximum (pandas `cummax`), dtype-preserving.
+    /// Cumulative maximum (pandas `cummax`), dtype-preserving. A `bool` column
+    /// stays `bool` (running OR).
     pub fn cummax(&self) -> Result<Column> {
+        if let Column::Bool(v) = self {
+            return Ok(Column::bool(bool_running(v, true)));
+        }
         numeric_dispatch!(self, v => Numeric::into_column(stats::cummax(v)))
     }
-    /// Cumulative minimum (pandas `cummin`), dtype-preserving.
+    /// Cumulative minimum (pandas `cummin`), dtype-preserving. A `bool` column
+    /// stays `bool` (running AND).
     pub fn cummin(&self) -> Result<Column> {
+        if let Column::Bool(v) = self {
+            return Ok(Column::bool(bool_running(v, false)));
+        }
         numeric_dispatch!(self, v => Numeric::into_column(stats::cummin(v)))
     }
-    /// Cumulative product (pandas `cumprod`), dtype-preserving.
+    /// Cumulative product (pandas `cumprod`), dtype-preserving. A `bool` column
+    /// products to `int64`, matching pandas.
     pub fn cumprod(&self) -> Result<Column> {
+        if let Column::Bool(v) = self {
+            return Ok(Column::i64(stats::cumprod(&bool_as_i64(v))));
+        }
         numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v)))
     }
 
     /// Element-wise absolute value (pandas `abs`), dtype-preserving. `abs` of a
-    /// missing (`NaN`) stays missing; `abs(i64::MIN)` wraps to `i64::MIN` (pandas).
+    /// missing (`NaN`) stays missing; `abs(i64::MIN)` wraps to `i64::MIN` (pandas);
+    /// a `bool` column is unchanged (`abs(bool) == bool`).
     pub fn abs(&self) -> Result<Column> {
+        if matches!(self, Column::Bool(_)) {
+            return Ok(self.clone());
+        }
         numeric_dispatch!(self, v => Numeric::into_column(stats::abs(v)))
     }
 
@@ -503,9 +518,7 @@ impl Column {
         match self {
             Column::F64(v) => Ok(Column::f64(v.iter().map(|&x| round_f64(x, decimals)).collect())),
             Column::I64(v) => Ok(Column::i64(v.iter().map(|&x| round_i64(x, decimals)).collect())),
-            Column::Bool(v) => {
-                Column::i64(v.iter().map(|&b| b as i64).collect()).round(decimals)
-            }
+            Column::Bool(_) => Ok(self.clone()), // round(bool) == bool (pandas no-op)
             other => Err(VolasError::DType(format!("cannot round a {} column", other.dtype()))),
         }
     }
@@ -515,9 +528,9 @@ impl Column {
     /// int column with a non-integral bound) promotes to float, matching pandas.
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Column> {
         match self {
-            Column::Bool(v) => {
-                return Column::i64(v.iter().map(|&b| b as i64).collect()).clip(lower, upper)
-            }
+            // bool stays bool (pandas): a True lower bound forces all true, a
+            // False upper bound forces all false, otherwise unchanged.
+            Column::Bool(v) => return Ok(Column::bool(clip_bool(v, lower, upper))),
             Column::F64(_) | Column::I64(_) => {}
             other => return Err(VolasError::DType(format!("cannot clip a {} column", other.dtype()))),
         }
@@ -552,9 +565,20 @@ impl Column {
     }
 
     /// Binary `+ - *` against `other`, dtype-preserving via [`binary_supertype`]
-    /// (`int ∘ int → i64`, else f64). Wrapping int ops match pandas overflow.
-    /// Equal lengths assumed.
+    /// (`int ∘ int → i64`, else f64). `bool ∘ bool` is logical, matching pandas:
+    /// `+` is OR, `*` is AND, `-` is an error (numpy disallows bool subtraction);
+    /// `bool ∘ number` promotes (bool acts as 0/1). Wrapping int ops match pandas
+    /// overflow. Equal lengths assumed.
     pub fn binary(&self, other: &Column, op: BinOp) -> Result<Column> {
+        if let (Column::Bool(a), Column::Bool(b)) = (self, other) {
+            return match op {
+                BinOp::Add => Ok(Column::bool(a.iter().zip(b.iter()).map(|(&x, &y)| x || y).collect())),
+                BinOp::Mul => Ok(Column::bool(a.iter().zip(b.iter()).map(|(&x, &y)| x && y).collect())),
+                BinOp::Sub => Err(VolasError::DType(
+                    "the `-` operator is not supported for bool columns (use `^`)".into(),
+                )),
+            };
+        }
         match binary_supertype(self.dtype(), other.dtype()) {
             DType::I64 => Ok(Column::i64(binary_kernel(
                 &self.as_i64_vec()?,
@@ -569,10 +593,16 @@ impl Column {
         }
     }
 
-    /// True division `self / other` (pandas `/`): always float, like pandas.
-    pub fn div(&self, other: &Column) -> Column {
+    /// True division `self / other` (pandas `/`): always float. `bool / bool` is
+    /// an error, matching pandas (division is not defined on bool).
+    pub fn div(&self, other: &Column) -> Result<Column> {
+        if matches!((self, other), (Column::Bool(_), Column::Bool(_))) {
+            return Err(VolasError::DType(
+                "division is not supported between two bool columns".into(),
+            ));
+        }
         let (a, b) = (self.to_f64_vec(), other.to_f64_vec());
-        Column::f64(a.iter().zip(&b).map(|(&x, &y)| x / y).collect())
+        Ok(Column::f64(a.iter().zip(&b).map(|(&x, &y)| x / y).collect()))
     }
 
     /// The column as `i64` values: an `I64` column directly (exact), otherwise via
@@ -673,6 +703,33 @@ fn clip_vec<T: Numeric>(v: &[T], lo: Option<f64>, hi: Option<f64>) -> Vec<T> {
             }
             y
         })
+        .collect()
+}
+
+/// A bool column as `i64` (0/1), for `cumsum` / `cumprod` (pandas -> int64).
+fn bool_as_i64(v: &[bool]) -> Vec<i64> {
+    v.iter().map(|&b| b as i64).collect()
+}
+
+/// Running OR (`or = true`, backs bool `cummax`) / running AND (`cummin`).
+fn bool_running(v: &[bool], or: bool) -> Vec<bool> {
+    let mut acc = !or; // OR seeds false; AND seeds true
+    v.iter()
+        .map(|&b| {
+            acc = if or { acc || b } else { acc && b };
+            acc
+        })
+        .collect()
+}
+
+/// Clamp a bool column (pandas `clip`): a `True` lower bound forces all true, a
+/// `False` upper bound forces all false, otherwise unchanged (bool has only the
+/// two values, so the bounds decide the whole column).
+fn clip_bool(v: &[bool], lo: Option<f64>, hi: Option<f64>) -> Vec<bool> {
+    let force_true = lo.map_or(false, |x| x != 0.0);
+    let force_false = hi.map_or(false, |x| x == 0.0);
+    v.iter()
+        .map(|&b| if force_false { false } else if force_true { true } else { b })
         .collect()
 }
 
@@ -983,7 +1040,7 @@ mod tests {
         assert_eq!(Column::i64(vec![16, 13]).round(-1).unwrap(), Column::i64(vec![20, 10])); // r>half / r<half
         assert_eq!(Column::i64(vec![-15, -25]).round(-1).unwrap(), Column::i64(vec![-20, -20])); // negative
         assert_eq!(Column::i64(vec![123]).round(-25).unwrap(), Column::i64(vec![0])); // 10^25 overflows -> 0
-        assert_eq!(Column::bool(vec![true, false]).round(0).unwrap(), Column::i64(vec![1, 0]));
+        assert_eq!(Column::bool(vec![true, false]).round(0).unwrap(), Column::bool(vec![true, false])); // bool no-op
         assert!(Column::str(vec!["a".into()]).round(0).is_err());
     }
 
@@ -1003,8 +1060,15 @@ mod tests {
         assert_eq!(p.dtype(), F64);
         assert_eq!(p, Column::f64(vec![2.5, 5.0, 9.0]));
         let _ = I64;
-        // bool -> i64; str -> error
-        assert_eq!(Column::bool(vec![true, false]).clip(Some(0.0), Some(1.0)).unwrap(), Column::i64(vec![1, 0]));
+        // bool stays bool: clip(F,T) no-op, clip(T,T) forces true, clip(F,F) forces false
+        assert_eq!(Column::bool(vec![true, false]).clip(Some(0.0), Some(1.0)).unwrap(),
+                   Column::bool(vec![true, false]));
+        assert_eq!(Column::bool(vec![true, false]).clip(Some(1.0), Some(1.0)).unwrap(),
+                   Column::bool(vec![true, true]));
+        assert_eq!(Column::bool(vec![true, false]).clip(Some(0.0), Some(0.0)).unwrap(),
+                   Column::bool(vec![false, false]));
+        assert_eq!(Column::bool(vec![true, false]).clip(None, None).unwrap(),
+                   Column::bool(vec![true, false]));
         assert!(Column::str(vec!["a".into()]).clip(None, None).is_err());
     }
 
@@ -1033,9 +1097,6 @@ mod tests {
         assert_eq!(a.binary(&b, BinOp::Add).unwrap(), Column::i64(vec![7, 10]));
         assert_eq!(a.binary(&b, BinOp::Sub).unwrap(), Column::i64(vec![3, 4]));
         assert_eq!(a.binary(&b, BinOp::Mul).unwrap(), Column::i64(vec![10, 21]));
-        // bool + bool -> i64 (True + True == 2)
-        assert_eq!(Column::bool(vec![true, true]).binary(&Column::bool(vec![true, false]), BinOp::Add).unwrap(),
-                   Column::i64(vec![2, 1]));
         // int + float -> f64
         let r = a.binary(&Column::f64(vec![2.0, 3.0]), BinOp::Add).unwrap();
         assert_eq!(r.dtype(), F64);
@@ -1044,8 +1105,31 @@ mod tests {
         assert_eq!(Column::i64(vec![i64::MAX]).binary(&Column::i64(vec![1]), BinOp::Add).unwrap(),
                    Column::i64(vec![i64::MIN]));
         // div is always float
-        assert_eq!(a.div(&b).dtype(), F64);
-        assert_eq!(a.div(&b), Column::f64(vec![2.5, 7.0 / 3.0]));
+        assert_eq!(a.div(&b).unwrap().dtype(), F64);
+        assert_eq!(a.div(&b).unwrap(), Column::f64(vec![2.5, 7.0 / 3.0]));
         let _ = I64;
+    }
+
+    #[test]
+    fn bool_matches_pandas() {
+        let b = || Column::bool(vec![true, false, true]);
+        let c = Column::bool(vec![true, true, false]);
+        // cumsum / cumprod -> int64 (counts / product)
+        assert_eq!(b().cumsum().unwrap(), Column::i64(vec![1, 1, 2]));
+        assert_eq!(b().cumprod().unwrap(), Column::i64(vec![1, 0, 0]));
+        // cummax / cummin -> bool (running OR / AND)
+        assert_eq!(b().cummax().unwrap(), Column::bool(vec![true, true, true]));
+        assert_eq!(b().cummin().unwrap(), Column::bool(vec![true, false, false]));
+        // abs -> bool (identity)
+        assert_eq!(b().abs().unwrap(), b());
+        // + is OR, * is AND, - is an error
+        assert_eq!(b().binary(&c, BinOp::Add).unwrap(), Column::bool(vec![true, true, true]));
+        assert_eq!(b().binary(&c, BinOp::Mul).unwrap(), Column::bool(vec![true, false, false]));
+        assert!(b().binary(&c, BinOp::Sub).is_err());
+        // bool / bool -> error; bool ∘ number promotes (bool acts as 0/1)
+        assert!(b().div(&c).is_err());
+        assert_eq!(b().binary(&Column::i64(vec![1, 1, 1]), BinOp::Add).unwrap(), Column::i64(vec![2, 1, 2]));
+        let f = b().binary(&Column::f64(vec![1.0, 1.0, 1.0]), BinOp::Add).unwrap();
+        assert_eq!(f.dtype(), DType::F64);
     }
 }
