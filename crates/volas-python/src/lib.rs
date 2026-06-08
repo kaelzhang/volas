@@ -1469,6 +1469,9 @@ impl PyRow {
 ///         carried — like ``df.copy()``). A pandas DataFrame is not accepted; use
 ///         ``from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
 ///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
+///     columns (list[str], optional): select and order the columns to keep (like
+///         ``df[[...]]``); a name not present raises ``KeyError``. An empty list or a
+///         duplicate name is rejected, and an absent column is never NaN-filled.
 ///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
 ///         this bar interval; the given rows are taken as already-final bars and later
 ///         ``append``s fold finer bars into them. Requires a DatetimeIndex.
@@ -1795,27 +1798,83 @@ impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
     // docstring (pyo3 does not surface a `#[new]` doc comment to Python).
     #[new]
-    #[pyo3(signature = (data, time_frame = None, cumulators = None))]
+    #[pyo3(signature = (data, columns = None, time_frame = None, cumulators = None))]
     fn new(
         data: &Bound<'_, PyAny>,
+        columns: Option<Vec<String>>,
         time_frame: Option<&Bound<'_, PyAny>>,
         cumulators: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        // `columns`, when given, selects and orders the columns — a strict projection, like
+        // `df[[...]]`: a name not present raises KeyError, and an empty list or a duplicate
+        // name is rejected. It never silently NaN-fills an absent column.
+        if let Some(cols) = &columns {
+            if cols.is_empty() {
+                return Err(PyValueError::new_err("columns must not be empty"));
+            }
+            let mut seen = HashSet::with_capacity(cols.len());
+            for c in cols {
+                if !seen.insert(c.as_str()) {
+                    return Err(PyValueError::new_err(format!(
+                        "duplicate column \"{c}\" in columns"
+                    )));
+                }
+            }
+        }
         // `data` is polymorphic over volas's own inputs: another volas DataFrame (copied —
         // index, aliases and any tf-state carried, exactly like `df.copy()`), or a dict of
-        // columns (a fresh RangeIndex). A pandas DataFrame is deliberately NOT accepted here —
-        // use `from_pandas`, which keeps volas pandas-free at import. To build a DatetimeIndex
-        // from a column, parse it with `to_datetime` then `set_index` (or use `read_csv`).
+        // columns (a fresh RangeIndex); with `columns` the frame is projected onto them. A
+        // pandas DataFrame is deliberately NOT accepted here — use `from_pandas`, which keeps
+        // volas pandas-free at import. To build a DatetimeIndex from a column, parse it with
+        // `to_datetime` then `set_index` (or use `read_csv`).
         let (df, tf) = if let Ok(other) = data.extract::<PyRef<PyDataFrame>>() {
-            (other.inner.clone(), other.tf.clone())
-        } else if let Ok(dict) = data.downcast::<PyDict>() {
-            let mut names = Vec::new();
-            let mut columns = Vec::new();
-            for (k, v) in dict.iter() {
-                names.push(k.extract::<String>()?);
-                columns.push(pyany_to_column(&v)?);
+            match &columns {
+                None => (other.inner.clone(), other.tf.clone()),
+                Some(cols) => {
+                    // Project the frame, and a tf-aware frame's forming-period state, onto
+                    // `cols`. The cumulator spec is per-column with a default, so the dropped
+                    // columns' rules simply go unused — folding stays correct on the kept ones.
+                    let inner = other.inner.select(cols).map_err(pyerr)?;
+                    let tf = match &other.tf {
+                        None => None,
+                        Some(t) => Some(TfState {
+                            time_frame: t.time_frame,
+                            cumulators: t.cumulators.clone(),
+                            open: t
+                                .open
+                                .as_ref()
+                                .map(|o| o.select(cols))
+                                .transpose()
+                                .map_err(pyerr)?,
+                        }),
+                    };
+                    (inner, tf)
+                }
             }
-            (DataFrame::new(names, columns, None).map_err(pyerr)?, None)
+        } else if let Ok(dict) = data.downcast::<PyDict>() {
+            let (names, vcols) = match &columns {
+                None => {
+                    let mut names = Vec::new();
+                    let mut vcols = Vec::new();
+                    for (k, v) in dict.iter() {
+                        names.push(k.extract::<String>()?);
+                        vcols.push(pyany_to_column(&v)?);
+                    }
+                    (names, vcols)
+                }
+                Some(cols) => {
+                    // Strict select: build only the named columns, in order.
+                    let mut vcols = Vec::with_capacity(cols.len());
+                    for name in cols {
+                        let v = dict.get_item(name)?.ok_or_else(|| {
+                            PyKeyError::new_err(format!("column \"{name}\" not found"))
+                        })?;
+                        vcols.push(pyany_to_column(&v)?);
+                    }
+                    (cols.clone(), vcols)
+                }
+            };
+            (DataFrame::new(names, vcols, None).map_err(pyerr)?, None)
         } else {
             return Err(PyTypeError::new_err(
                 "DataFrame(data): data must be a dict of columns or a volas DataFrame \

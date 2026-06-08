@@ -102,7 +102,7 @@ API that behaves exactly as it does in pandas. (A top-level name imported from
 `volas`, such as `read_csv`, is written without a `volas.`
 prefix.)
 
-### DataFrame(data, time_frame=None, cumulators=None)
+### DataFrame(data, columns=None, time_frame=None, cumulators=None)
 
 `DataFrame` has a **pandas-compatible API**, so if you are familiar with
 `pandas.DataFrame`, you are already ready to use volas. Unlike pandas, volas is
@@ -154,6 +154,9 @@ Which gets the 2-period simple moving average on column `"close"`.
   [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html),
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone
   with `tz_localize` / `tz_convert`. See [Timezones](#timezones).
+- **columns** `Optional[list[str]] = None` Select and order the columns to keep —
+  the same projection as `df[[...]]`. A name not present raises `KeyError`; an empty
+  list or a duplicate name is rejected, and an absent column is never NaN-filled.
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are
   taken as already-final bars at that frame, and later `append`s fold finer

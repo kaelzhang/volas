@@ -217,6 +217,7 @@ class DataFrame:
     def __new__(
         cls,
         data: dict[str, Any] | DataFrame,
+        columns: list[str] | None = ...,
         time_frame: str | TimeFrame | None = ...,
         cumulators: dict[str, Any] | None = ...,
     ) -> DataFrame: ...
