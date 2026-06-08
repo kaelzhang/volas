@@ -35,8 +35,19 @@ pub(crate) fn cell_to_csv(
                 }
             }
         }
+        Column::F32(v) => {
+            if v[i].is_nan() {
+                na_rep.to_string()
+            } else {
+                match ff {
+                    Some((prec, kind)) => fmt_f64_with(prec, kind, v[i] as f64),
+                    None => format!("{:?}", v[i]),
+                }
+            }
+        }
         Column::Bool(v) => if v[i] { "True" } else { "False" }.to_string(),
         Column::I64(v) => v[i].to_string(),
+        Column::I32(v) => v[i].to_string(),
         Column::Str(v) => v[i].clone(),
         Column::Datetime(v) => datetime::format_ns(v[i]),
     }
@@ -248,7 +259,29 @@ fn data_cells(
                 })
                 .collect()
         }
+        Column::F32(v) => {
+            let asf: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+            let d = float_decimals(&asf);
+            rows.iter()
+                .map(|&i| {
+                    let x = v[i] as f64;
+                    if x.is_nan() {
+                        na_rep.to_string()
+                    } else {
+                        let s = match ff {
+                            Some((prec, kind)) => fmt_f64_with(prec, kind, x),
+                            None => format!("{x:.d$}"),
+                        };
+                        lead_num(x < 0.0, s)
+                    }
+                })
+                .collect()
+        }
         Column::I64(v) => rows
+            .iter()
+            .map(|&i| lead_num(v[i] < 0, v[i].to_string()))
+            .collect(),
+        Column::I32(v) => rows
             .iter()
             .map(|&i| lead_num(v[i] < 0, v[i].to_string()))
             .collect(),

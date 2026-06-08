@@ -28,8 +28,16 @@ macro_rules! numeric_dispatch {
                 let $slice: &[f64] = buf.as_slice();
                 Ok($body)
             }
+            Column::F32(buf) => {
+                let $slice: &[f32] = buf.as_slice();
+                Ok($body)
+            }
             Column::I64(buf) => {
                 let $slice: &[i64] = buf.as_slice();
+                Ok($body)
+            }
+            Column::I32(buf) => {
+                let $slice: &[i32] = buf.as_slice();
                 Ok($body)
             }
             other => Err(VolasError::DType(format!(
@@ -46,10 +54,14 @@ macro_rules! numeric_dispatch {
 pub enum Column {
     /// 64-bit floats; `NaN` denotes missing.
     F64(Arc<Vec<f64>>),
+    /// 32-bit floats (narrow storage); `NaN` denotes missing.
+    F32(Arc<Vec<f32>>),
     /// Booleans (comparison / signal results).
     Bool(Arc<Vec<bool>>),
     /// 64-bit signed integers.
     I64(Arc<Vec<i64>>),
+    /// 32-bit signed integers (narrow storage).
+    I32(Arc<Vec<i32>>),
     /// UTF-8 strings.
     Str(Arc<Vec<String>>),
     /// Datetimes as i64 nanoseconds since the Unix epoch (UTC-naive).
@@ -73,10 +85,14 @@ pub enum SetVal {
 /// matching numpy scalar (`np.int64` / `np.float64` / `np.bool_`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scalar {
-    /// A float result (`mean`, a float column's `sum`/`min`/`max`, …).
+    /// A float64 result (`mean`, an f64 column's `sum`/`min`/`max`, …).
     F64(f64),
-    /// An integer result (an int/bool column's `sum`/`prod`, an int `min`/`max`).
+    /// A float32 result (an f32 column's `sum`/`min`/`max`).
+    F32(f32),
+    /// An int64 result (an i64/bool column's `sum`/`prod`, an i64 `min`/`max`).
     I64(i64),
+    /// An int32 result (an i32 column's `sum`/`prod`/`min`/`max`).
+    I32(i32),
     /// A boolean result (a bool column's `min`/`max`).
     Bool(bool),
 }
@@ -97,6 +113,14 @@ impl Column {
     /// Build an `F64` column.
     pub fn f64(v: Vec<f64>) -> Column {
         Column::F64(Arc::new(v))
+    }
+    /// Build an `F32` column.
+    pub fn f32(v: Vec<f32>) -> Column {
+        Column::F32(Arc::new(v))
+    }
+    /// Build an `I32` column.
+    pub fn i32(v: Vec<i32>) -> Column {
+        Column::I32(Arc::new(v))
     }
     /// Build a `Bool` column.
     pub fn bool(v: Vec<bool>) -> Column {
@@ -119,8 +143,10 @@ impl Column {
     pub fn len(&self) -> usize {
         match self {
             Column::F64(v) => v.len(),
+            Column::F32(v) => v.len(),
             Column::Bool(v) => v.len(),
             Column::I64(v) => v.len(),
+            Column::I32(v) => v.len(),
             Column::Str(v) => v.len(),
             Column::Datetime(v) => v.len(),
         }
@@ -135,8 +161,10 @@ impl Column {
     pub fn dtype(&self) -> DType {
         match self {
             Column::F64(_) => DType::F64,
+            Column::F32(_) => DType::F32,
             Column::Bool(_) => DType::Bool,
             Column::I64(_) => DType::I64,
+            Column::I32(_) => DType::I32,
             Column::Str(_) => DType::Utf8,
             Column::Datetime(_) => DType::Datetime,
         }
@@ -193,8 +221,10 @@ impl Column {
     pub fn to_f64_vec(&self) -> Vec<f64> {
         match self {
             Column::F64(v) => v.to_vec(),
+            Column::F32(v) => v.iter().map(|&x| x as f64).collect(),
             Column::Bool(v) => v.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect(),
             Column::I64(v) => v.iter().map(|&i| i as f64).collect(),
+            Column::I32(v) => v.iter().map(|&i| i as f64).collect(),
             Column::Str(v) => vec![f64::NAN; v.len()],
             Column::Datetime(v) => v.iter().map(|&i| i as f64).collect(),
         }
@@ -204,6 +234,7 @@ impl Column {
     pub fn get_f64(&self, i: usize) -> f64 {
         match self {
             Column::F64(v) => v[i],
+            Column::F32(v) => v[i] as f64,
             Column::Bool(v) => {
                 if v[i] {
                     1.0
@@ -212,6 +243,7 @@ impl Column {
                 }
             }
             Column::I64(v) => v[i] as f64,
+            Column::I32(v) => v[i] as f64,
             Column::Str(_) => f64::NAN,
             Column::Datetime(v) => v[i] as f64,
         }
@@ -221,8 +253,10 @@ impl Column {
     pub fn slice(&self, start: usize, end: usize) -> Column {
         match self {
             Column::F64(v) => Column::f64(v[start..end].to_vec()),
+            Column::F32(v) => Column::f32(v[start..end].to_vec()),
             Column::Bool(v) => Column::bool(v[start..end].to_vec()),
             Column::I64(v) => Column::i64(v[start..end].to_vec()),
+            Column::I32(v) => Column::i32(v[start..end].to_vec()),
             Column::Str(v) => Column::str(v[start..end].to_vec()),
             Column::Datetime(v) => Column::datetime(v[start..end].to_vec()),
         }
@@ -232,8 +266,10 @@ impl Column {
     pub fn take(&self, idx: &[usize]) -> Column {
         match self {
             Column::F64(v) => Column::f64(idx.iter().map(|&i| v[i]).collect()),
+            Column::F32(v) => Column::f32(idx.iter().map(|&i| v[i]).collect()),
             Column::Bool(v) => Column::bool(idx.iter().map(|&i| v[i]).collect()),
             Column::I64(v) => Column::i64(idx.iter().map(|&i| v[i]).collect()),
+            Column::I32(v) => Column::i32(idx.iter().map(|&i| v[i]).collect()),
             Column::Str(v) => Column::str(idx.iter().map(|&i| v[i].clone()).collect()),
             Column::Datetime(v) => Column::datetime(idx.iter().map(|&i| v[i]).collect()),
         }
@@ -247,11 +283,19 @@ impl Column {
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
+            (Column::F32(a), Column::F32(b)) => {
+                Arc::make_mut(a).extend_from_slice(b);
+                Ok(())
+            }
             (Column::Bool(a), Column::Bool(b)) => {
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
             (Column::I64(a), Column::I64(b)) => {
+                Arc::make_mut(a).extend_from_slice(b);
+                Ok(())
+            }
+            (Column::I32(a), Column::I32(b)) => {
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
@@ -277,6 +321,10 @@ impl Column {
         match self {
             Column::F64(v) => {
                 Arc::make_mut(v).extend(std::iter::repeat(f64::NAN).take(len));
+                Ok(())
+            }
+            Column::F32(v) => {
+                Arc::make_mut(v).extend(std::iter::repeat(f32::NAN).take(len));
                 Ok(())
             }
             Column::Bool(v) => {
@@ -405,6 +453,19 @@ impl Column {
                     other.dtype()
                 ))),
             },
+            DType::F32 => Ok(Column::f32(self.to_f64_vec().iter().map(|&x| x as f32).collect())),
+            DType::I32 => self
+                .to_f64_vec()
+                .iter()
+                .map(|&x| {
+                    i32::try_from_f64(x).ok_or_else(|| {
+                        VolasError::Value(format!(
+                            "cannot convert {x} to int32 (non-finite / non-integral / out of range)"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(Column::i32),
             DType::Utf8 => Ok(Column::str(self.to_string_vec())),
             DType::Datetime => self.to_datetime(),
         }
@@ -417,59 +478,27 @@ impl Column {
     /// error — surfaces as `TypeError`, like pandas' `LossySetitemError`.
     /// `positions` are assumed in bounds (callers validate the mask / index).
     pub fn set_scalar_at(&self, positions: &[usize], value: SetVal) -> Result<Column> {
-        let lossy = |x: f64, dt: &str| VolasError::DType(format!("Invalid value '{x}' for dtype '{dt}'"));
-        match (self, value) {
-            (Column::F64(v), SetVal::Num(x)) => {
-                let mut nv = v.to_vec();
-                for &i in positions {
-                    nv[i] = x;
-                }
-                Ok(Column::f64(nv))
-            }
-            (Column::F64(v), SetVal::Bool(b)) => {
-                let x = if b { 1.0 } else { 0.0 };
-                let mut nv = v.to_vec();
-                for &i in positions {
-                    nv[i] = x;
-                }
-                Ok(Column::f64(nv))
-            }
-            (Column::I64(v), SetVal::Num(x)) => {
-                if x.is_nan() {
-                    // NaN cannot live in int64 -> upcast the column to float (pandas).
-                    let mut nv: Vec<f64> = v.iter().map(|&n| n as f64).collect();
-                    for &i in positions {
-                        nv[i] = x;
-                    }
-                    Ok(Column::f64(nv))
-                } else if x.is_finite() && x.fract() == 0.0 {
-                    let iv = x as i64;
+        match self {
+            // A float column absorbs any value (with rounding for f32).
+            Column::F64(v) => Ok(set_float_at(v, positions, value)),
+            Column::F32(v) => Ok(set_float_at(v, positions, value)),
+            // An int column keeps the value if it fits, upcasts to float for NaN,
+            // and rejects a lossy (non-integral / out-of-range) write.
+            Column::I64(v) => set_int_at(v, positions, value, "int64"),
+            Column::I32(v) => set_int_at(v, positions, value, "int32"),
+            Column::Bool(v) => match value {
+                SetVal::Bool(b) => {
                     let mut nv = v.to_vec();
                     for &i in positions {
-                        nv[i] = iv;
+                        nv[i] = b;
                     }
-                    Ok(Column::i64(nv))
-                } else {
-                    Err(lossy(x, "int64"))
+                    Ok(Column::bool(nv))
                 }
-            }
-            (Column::I64(v), SetVal::Bool(b)) => {
-                let iv = b as i64;
-                let mut nv = v.to_vec();
-                for &i in positions {
-                    nv[i] = iv;
-                }
-                Ok(Column::i64(nv))
-            }
-            (Column::Bool(v), SetVal::Bool(b)) => {
-                let mut nv = v.to_vec();
-                for &i in positions {
-                    nv[i] = b;
-                }
-                Ok(Column::bool(nv))
-            }
-            (Column::Bool(_), SetVal::Num(x)) => Err(lossy(x, "bool")),
-            (other, _) => Err(VolasError::DType(format!(
+                SetVal::Num(x) => Err(VolasError::DType(format!(
+                    "Invalid value '{x}' for dtype 'bool'"
+                ))),
+            },
+            other => Err(VolasError::DType(format!(
                 "cannot assign a scalar into a {} column",
                 other.dtype()
             ))),
@@ -530,7 +559,13 @@ impl Column {
     pub fn round(&self, decimals: i32) -> Result<Column> {
         match self {
             Column::F64(v) => Ok(Column::f64(v.iter().map(|&x| round_f64(x, decimals)).collect())),
+            Column::F32(v) => {
+                Ok(Column::f32(v.iter().map(|&x| round_f64(x as f64, decimals) as f32).collect()))
+            }
             Column::I64(v) => Ok(Column::i64(v.iter().map(|&x| round_i64(x, decimals)).collect())),
+            Column::I32(v) => Ok(Column::i32(
+                v.iter().map(|&x| round_i64(x as i64, decimals) as i32).collect(),
+            )),
             Column::Bool(_) => Ok(self.clone()), // round(bool) == bool (pandas no-op)
             other => Err(VolasError::DType(format!("cannot round a {} column", other.dtype()))),
         }
@@ -544,13 +579,13 @@ impl Column {
             // bool stays bool (pandas): a True lower bound forces all true, a
             // False upper bound forces all false, otherwise unchanged.
             Column::Bool(v) => return Ok(Column::bool(clip_bool(v, lower, upper))),
-            Column::F64(_) | Column::I64(_) => {}
+            Column::F64(_) | Column::F32(_) | Column::I64(_) | Column::I32(_) => {}
             other => return Err(VolasError::DType(format!("cannot clip a {} column", other.dtype()))),
         }
         let bound_fits = |b: Option<f64>| b.map_or(true, |x| fits(self.dtype(), x));
-        // Stay in dtype when every present bound fits it losslessly (f64 always
-        // does); an int column with a non-integral bound promotes to float.
-        let stay = self.dtype() == DType::F64 || (bound_fits(lower) && bound_fits(upper));
+        // Stay in dtype when every present bound fits it losslessly (a float dtype
+        // always does); an int column with a non-integral bound promotes to float.
+        let stay = self.dtype().is_float() || (bound_fits(lower) && bound_fits(upper));
         if stay {
             numeric_dispatch!(self, v => Numeric::into_column(clip_vec(v, lower, upper)))
         } else {
@@ -564,16 +599,10 @@ impl Column {
     /// (no f64 round-trip, so large ints stay exact). Equal lengths assumed.
     pub fn select(&self, cond: &[bool], other: &Column, target: DType) -> Result<Column> {
         match target {
-            DType::I64 => Ok(Column::i64(stats::select(
-                cond,
-                &self.as_i64_vec()?,
-                &other.as_i64_vec()?,
-            ))),
-            _ => Ok(Column::f64(stats::select(
-                cond,
-                &self.to_f64_vec(),
-                &other.to_f64_vec(),
-            ))),
+            DType::I64 => Ok(Column::i64(stats::select(cond, &self.as_i64_vec()?, &other.as_i64_vec()?))),
+            DType::I32 => Ok(Column::i32(stats::select(cond, &self.as_i32_vec()?, &other.as_i32_vec()?))),
+            DType::F32 => Ok(Column::f32(stats::select(cond, &self.to_f32_vec(), &other.to_f32_vec()))),
+            _ => Ok(Column::f64(stats::select(cond, &self.to_f64_vec(), &other.to_f64_vec()))),
         }
     }
 
@@ -593,16 +622,10 @@ impl Column {
             };
         }
         match binary_supertype(self.dtype(), other.dtype()) {
-            DType::I64 => Ok(Column::i64(binary_kernel(
-                &self.as_i64_vec()?,
-                &other.as_i64_vec()?,
-                op,
-            ))),
-            _ => Ok(Column::f64(binary_kernel(
-                &self.to_f64_vec(),
-                &other.to_f64_vec(),
-                op,
-            ))),
+            DType::I64 => Ok(Column::i64(binary_kernel(&self.as_i64_vec()?, &other.as_i64_vec()?, op))),
+            DType::I32 => Ok(Column::i32(binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op))),
+            DType::F32 => Ok(Column::f32(binary_kernel(&self.to_f32_vec(), &other.to_f32_vec(), op))),
+            _ => Ok(Column::f64(binary_kernel(&self.to_f64_vec(), &other.to_f64_vec(), op))),
         }
     }
 
@@ -623,7 +646,10 @@ impl Column {
     pub fn sum(&self) -> Scalar {
         match self {
             Column::F64(v) => Scalar::F64(stats::sum(v.as_slice())),
+            Column::F32(v) => Scalar::F32(stats::sum(v.as_slice())),
             Column::I64(v) => Scalar::I64(stats::sum(v.as_slice())),
+            // int32 sum promotes to int64 (pandas / numpy accumulator)
+            Column::I32(v) => Scalar::I64(stats::sum(&v.iter().map(|&x| x as i64).collect::<Vec<_>>())),
             Column::Bool(v) => Scalar::I64(stats::sum(&bool_as_i64(v))),
             other => Scalar::F64(stats::sum(&other.to_f64_vec())),
         }
@@ -633,7 +659,9 @@ impl Column {
     pub fn prod(&self) -> Scalar {
         match self {
             Column::F64(v) => Scalar::F64(stats::prod(v.as_slice())),
+            Column::F32(v) => Scalar::F32(stats::prod(v.as_slice())),
             Column::I64(v) => Scalar::I64(stats::prod(v.as_slice())),
+            Column::I32(v) => Scalar::I64(stats::prod(&v.iter().map(|&x| x as i64).collect::<Vec<_>>())),
             Column::Bool(v) => Scalar::I64(stats::prod(&bool_as_i64(v))),
             other => Scalar::F64(stats::prod(&other.to_f64_vec())),
         }
@@ -647,6 +675,13 @@ impl Column {
                 Some(x) => Scalar::I64(x),
                 None => Scalar::F64(f64::NAN),
             },
+            Column::I32(v) => match stats::extreme(v.as_slice(), want_max) {
+                Some(x) => Scalar::I32(x),
+                None => Scalar::F64(f64::NAN),
+            },
+            Column::F32(v) => {
+                Scalar::F32(stats::extreme(v.as_slice(), want_max).unwrap_or(f32::NAN))
+            }
             Column::Bool(v) => {
                 // min = all (AND), max = any (OR); empty -> NaN
                 if v.is_empty() {
@@ -682,12 +717,39 @@ impl Column {
         }
     }
 
+    /// The column as `i32` values: an `I32` column directly, a `Bool` as 0/1,
+    /// otherwise via lossless narrowing (errors if out of range / non-integral).
+    fn as_i32_vec(&self) -> Result<Vec<i32>> {
+        match self {
+            Column::I32(v) => Ok(v.to_vec()),
+            Column::Bool(v) => Ok(v.iter().map(|&b| b as i32).collect()),
+            _ => self
+                .to_f64_vec()
+                .iter()
+                .map(|&x| {
+                    i32::try_from_f64(x)
+                        .ok_or_else(|| VolasError::DType(format!("value {x} does not fit int32")))
+                })
+                .collect(),
+        }
+    }
+
+    /// The column as `f32` values (an `F32` column directly; else converted).
+    pub fn to_f32_vec(&self) -> Vec<f32> {
+        match self {
+            Column::F32(v) => v.to_vec(),
+            _ => self.to_f64_vec().iter().map(|&x| x as f32).collect(),
+        }
+    }
+
     /// Render each value as a `String` (for `astype(str)`).
     fn to_string_vec(&self) -> Vec<String> {
         match self {
             Column::Str(v) => v.to_vec(),
             Column::F64(v) => v.iter().map(|x| x.to_string()).collect(),
+            Column::F32(v) => v.iter().map(|x| x.to_string()).collect(),
             Column::I64(v) => v.iter().map(|x| x.to_string()).collect(),
+            Column::I32(v) => v.iter().map(|x| x.to_string()).collect(),
             Column::Bool(v) => v
                 .iter()
                 .map(|&b| if b { "True" } else { "False" }.to_string())
@@ -701,6 +763,12 @@ impl Column {
     pub fn equals(&self, other: &Column) -> bool {
         match (self, other) {
             (Column::F64(a), Column::F64(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| x == y || (x.is_nan() && y.is_nan()))
+            }
+            (Column::F32(a), Column::F32(b)) => {
                 a.len() == b.len()
                     && a.iter()
                         .zip(b.iter())
@@ -763,6 +831,62 @@ fn clip_vec<T: Numeric>(v: &[T], lo: Option<f64>, hi: Option<f64>) -> Vec<T> {
             y
         })
         .collect()
+}
+
+/// Write a scalar into a float column at `positions` (any value fits; f32 rounds).
+fn set_float_at<T: Numeric>(v: &[T], positions: &[usize], value: SetVal) -> Column {
+    let x = match value {
+        SetVal::Num(x) => T::try_from_f64(x).unwrap_or(T::ZERO), // float try_from is always Some
+        SetVal::Bool(b) => {
+            if b {
+                T::ONE
+            } else {
+                T::ZERO
+            }
+        }
+    };
+    let mut nv = v.to_vec();
+    for &i in positions {
+        nv[i] = x;
+    }
+    T::into_column(nv)
+}
+
+/// Write a scalar into an int column: keep the dtype if it fits, upcast to float
+/// for `NaN`, error on a lossy (non-integral / out-of-range) write.
+fn set_int_at<T: Numeric>(
+    v: &[T],
+    positions: &[usize],
+    value: SetVal,
+    dtype: &str,
+) -> Result<Column> {
+    match value {
+        SetVal::Num(x) if x.is_nan() => {
+            let mut nv: Vec<f64> = v.iter().map(|&n| n.to_f64()).collect();
+            for &i in positions {
+                nv[i] = x;
+            }
+            Ok(Column::f64(nv))
+        }
+        SetVal::Num(x) => match T::try_from_f64(x) {
+            Some(iv) => {
+                let mut nv = v.to_vec();
+                for &i in positions {
+                    nv[i] = iv;
+                }
+                Ok(T::into_column(nv))
+            }
+            None => Err(VolasError::DType(format!("Invalid value '{x}' for dtype '{dtype}'"))),
+        },
+        SetVal::Bool(b) => {
+            let iv = if b { T::ONE } else { T::ZERO };
+            let mut nv = v.to_vec();
+            for &i in positions {
+                nv[i] = iv;
+            }
+            Ok(T::into_column(nv))
+        }
+    }
 }
 
 /// A bool column as `i64` (0/1), for `cumsum` / `cumprod` (pandas -> int64).
@@ -1192,6 +1316,84 @@ mod tests {
         assert!(matches!(Column::i64(vec![]).extreme(false), F64(x) if x.is_nan()));
         assert!(matches!(Column::bool(vec![]).extreme(true), F64(x) if x.is_nan()));
         assert!(matches!(Column::f64(vec![]).extreme(true), F64(x) if x.is_nan()));
+    }
+
+    #[test]
+    fn f32_i32_columns() {
+        use Scalar::{F32, I32, I64};
+        let f = Column::f32(vec![1.5, 2.5, 3.5]);
+        let i = Column::i32(vec![3, 1, 4]);
+        // storage basics
+        assert_eq!((f.dtype(), i.dtype(), f.len()), (DType::F32, DType::I32, 3));
+        assert_eq!(f.to_f64_vec(), vec![1.5, 2.5, 3.5]);
+        assert_eq!(i.get_f64(0), 3.0);
+        assert_eq!(f.slice(0, 2), Column::f32(vec![1.5, 2.5]));
+        assert_eq!(i.take(&[2, 0]), Column::i32(vec![4, 3]));
+        assert_eq!(Column::i64(vec![1, 2]).to_f32_vec(), vec![1.0_f32, 2.0]);
+        assert_eq!(i.to_string_vec(), vec!["3", "1", "4"]);
+        assert!(Column::f32(vec![f32::NAN]).equals(&Column::f32(vec![f32::NAN]))); // NaN == NaN
+        let mut a = Column::f32(vec![1.0]);
+        a.append(&Column::f32(vec![2.0])).unwrap();
+        assert_eq!(a, Column::f32(vec![1.0, 2.0]));
+        // cast
+        assert_eq!(Column::f64(vec![1.5]).cast(DType::F32).unwrap(), Column::f32(vec![1.5]));
+        assert_eq!(Column::f64(vec![3.0]).cast(DType::I32).unwrap(), Column::i32(vec![3]));
+        assert!(Column::f64(vec![2.5]).cast(DType::I32).is_err()); // non-integral
+        assert!(Column::f64(vec![3e9]).cast(DType::I32).is_err()); // out of range
+        assert_eq!(f.cast(DType::F64).unwrap(), Column::f64(vec![1.5, 2.5, 3.5]));
+        // reductions: f32 -> F32; i32 sum -> I64 (promotes), min -> I32
+        assert_eq!(f.sum(), F32(7.5));
+        assert_eq!(f.extreme(false), F32(1.5));
+        assert_eq!(i.sum(), I64(8));
+        assert_eq!(i.prod(), I64(12));
+        assert_eq!(i.extreme(true), I32(4));
+        // round / clip preserve dtype
+        assert_eq!(Column::f32(vec![1.4, 2.6]).round(0).unwrap(), Column::f32(vec![1.0, 3.0]));
+        assert_eq!(i.round(-1).unwrap().dtype(), DType::I32);
+        assert_eq!(f.clip(Some(2.0), Some(3.0)).unwrap(), Column::f32(vec![2.0, 2.5, 3.0]));
+        assert_eq!(i.clip(Some(2.0), Some(3.0)).unwrap().dtype(), DType::I32);
+        // binary: same-dtype preserves
+        assert_eq!(f.binary(&f, BinOp::Add).unwrap(), Column::f32(vec![3.0, 5.0, 7.0]));
+        assert_eq!(i.binary(&i, BinOp::Add).unwrap(), Column::i32(vec![6, 2, 8]));
+        // select (where/mask) in f32 / i32 target
+        let cond = [true, false, true];
+        assert_eq!(f.select(&cond, &Column::f32(vec![0.0, 0.0, 0.0]), DType::F32).unwrap(),
+                   Column::f32(vec![1.5, 0.0, 3.5]));
+        assert_eq!(i.select(&cond, &Column::i32(vec![0, 0, 0]), DType::I32).unwrap(),
+                   Column::i32(vec![3, 0, 4]));
+        // assignment: f32 writes, i32 keeps / upcasts NaN / rejects lossy
+        assert_eq!(f.set_scalar_at(&[1], SetVal::Num(9.0)).unwrap(), Column::f32(vec![1.5, 9.0, 3.5]));
+        assert_eq!(i.set_scalar_at(&[1], SetVal::Bool(true)).unwrap(), Column::i32(vec![3, 1, 4]));
+        assert_eq!(i.set_scalar_at(&[1], SetVal::Num(9.0)).unwrap(), Column::i32(vec![3, 9, 4]));
+        assert_eq!(i.set_scalar_at(&[0], SetVal::Num(f64::NAN)).unwrap().dtype(), DType::F64);
+        assert!(i.set_scalar_at(&[0], SetVal::Num(2.5)).is_err());
+        assert_eq!(f.set_scalar_at(&[0], SetVal::Bool(false)).unwrap(), Column::f32(vec![0.0, 2.5, 3.5]));
+        // remaining f32/i32 arms (both directions of slice/take, the other reductions,
+        // sub/mul kernels through the trait, bool->i32, append/append_missing)
+        assert_eq!(f.get_f64(0), 1.5);
+        assert_eq!(i.slice(1, 3), Column::i32(vec![1, 4]));
+        assert_eq!(f.take(&[2, 0]), Column::f32(vec![3.5, 1.5]));
+        assert_eq!(f.to_string_vec(), vec!["1.5", "2.5", "3.5"]);
+        assert_eq!(f.prod(), F32(13.125));
+        assert!(matches!(Column::i32(vec![]).extreme(false), Scalar::F64(x) if x.is_nan()));
+        assert_eq!(f.binary(&f, BinOp::Sub).unwrap(), Column::f32(vec![0.0, 0.0, 0.0]));
+        assert_eq!(f.binary(&f, BinOp::Mul).unwrap(), Column::f32(vec![2.25, 6.25, 12.25]));
+        assert_eq!(i.binary(&i, BinOp::Sub).unwrap(), Column::i32(vec![0, 0, 0]));
+        assert_eq!(i.binary(&i, BinOp::Mul).unwrap(), Column::i32(vec![9, 1, 16]));
+        assert_eq!(Column::bool(vec![true, false, true]).binary(&i, BinOp::Add).unwrap(),
+                   Column::i32(vec![4, 1, 5]));
+        // as_i32_vec f64 fallback (lossless narrow + lossy error)
+        assert_eq!(i.select(&cond, &Column::f64(vec![0.0, 0.0, 0.0]), DType::I32).unwrap(),
+                   Column::i32(vec![3, 0, 4]));
+        assert!(i.select(&cond, &Column::f64(vec![2.5, 0.0, 0.0]), DType::I32).is_err());
+        assert_eq!(f.set_scalar_at(&[0], SetVal::Bool(true)).unwrap(), Column::f32(vec![1.0, 2.5, 3.5]));
+        let mut ii = Column::i32(vec![1]);
+        ii.append(&Column::i32(vec![2])).unwrap();
+        assert_eq!(ii, Column::i32(vec![1, 2]));
+        assert!(Column::f32(vec![1.0]).append(&Column::i32(vec![1])).is_err());
+        let mut fm = Column::f32(vec![1.0]);
+        fm.append_missing(2).unwrap();
+        assert!(matches!(&fm, Column::F32(v) if v.len() == 3 && v[1].is_nan()));
     }
 
     #[test]

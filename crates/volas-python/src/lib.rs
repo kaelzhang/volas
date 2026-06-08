@@ -99,7 +99,9 @@ fn directive_uses_default_series(node: &volas_directive::types::Node) -> bool {
 fn parse_dtype(s: &str) -> PyResult<DType> {
     Ok(match s {
         "float" | "float64" | "float_" | "double" | "f64" => DType::F64,
+        "float32" | "single" | "f32" => DType::F32,
         "int" | "int64" | "int_" | "long" | "i64" => DType::I64,
+        "int32" | "i32" => DType::I32,
         "bool" | "boolean" => DType::Bool,
         "str" | "string" | "object" | "O" => DType::Utf8,
         "datetime" | "datetime64" | "datetime64[ns]" => DType::Datetime,
@@ -139,8 +141,14 @@ fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(a) = v.extract::<PyReadonlyArray1<f64>>() {
         return Ok(Column::f64(a.as_slice()?.to_vec()));
     }
+    if let Ok(a) = v.extract::<PyReadonlyArray1<f32>>() {
+        return Ok(Column::f32(a.as_slice()?.to_vec()));
+    }
     if let Ok(a) = v.extract::<PyReadonlyArray1<i64>>() {
         return Ok(Column::i64(a.as_slice()?.to_vec()));
+    }
+    if let Ok(a) = v.extract::<PyReadonlyArray1<i32>>() {
+        return Ok(Column::i32(a.as_slice()?.to_vec()));
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<bool>>() {
         return Ok(Column::bool(a.as_slice()?.to_vec()));
@@ -191,8 +199,10 @@ fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> Bound<'py, PyAny> {
 fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
     match col {
         Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
+        Column::F32(v) => v.to_vec().into_pyarray(py).into_any(),
         Column::Bool(v) => v.to_vec().into_pyarray(py).into_any(),
         Column::I64(v) => v.to_vec().into_pyarray(py).into_any(),
+        Column::I32(v) => v.to_vec().into_pyarray(py).into_any(),
         // String columns become NumPy object arrays (pandas `object` dtype).
         Column::Str(v) => {
             let list = PyList::new(py, v.as_slice()).expect("build str list");
@@ -218,7 +228,9 @@ fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
 fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
     match col {
         Column::F64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
+        Column::F32(v) => (v[i] as f64).into_pyobject(py).unwrap().into_any().unbind(),
         Column::I64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
+        Column::I32(v) => (v[i] as i64).into_pyobject(py).unwrap().into_any().unbind(),
         Column::Bool(v) => v[i]
             .into_pyobject(py)
             .unwrap()
@@ -242,7 +254,9 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
 /// directly. Indexed by [`DType`] for `O(1)` lookup.
 struct NumpyTypes {
     float64: Py<PyAny>,
+    float32: Py<PyAny>,
     int64: Py<PyAny>,
+    int32: Py<PyAny>,
     bool_: Py<PyAny>,
 }
 static NUMPY_TYPES: GILOnceCell<NumpyTypes> = GILOnceCell::new();
@@ -252,7 +266,9 @@ fn numpy_types(py: Python<'_>) -> &'static NumpyTypes {
         let ty = |n: &str| np.getattr(n).expect("numpy scalar type").unbind();
         NumpyTypes {
             float64: ty("float64"),
+            float32: ty("float32"),
             int64: ty("int64"),
+            int32: ty("int32"),
             bool_: ty("bool_"),
         }
     })
@@ -265,20 +281,28 @@ fn numpy_scalar(py: Python<'_>, dtype: DType, value: &Bound<'_, PyAny>) -> Py<Py
     let t = numpy_types(py);
     let ty = match dtype {
         DType::F64 => &t.float64,
+        DType::F32 => &t.float32,
         DType::I64 => &t.int64,
+        DType::I32 => &t.int32,
         DType::Bool => &t.bool_,
         _ => return value.clone().unbind(), // not a numpy-numeric dtype
     };
     ty.bind(py).call1((value,)).expect("numpy scalar box").unbind()
 }
 
-/// A boxed f64 / i64 / bool as its numpy scalar (`np.float64` / `np.int64` /
-/// `np.bool_`).
+/// A boxed scalar as its numpy type (`np.float64` / `np.float32` / `np.int64` /
+/// `np.int32` / `np.bool_`).
 fn np_f64(py: Python<'_>, x: f64) -> Py<PyAny> {
     numpy_scalar(py, DType::F64, &x.into_pyobject(py).unwrap())
 }
+fn np_f32(py: Python<'_>, x: f32) -> Py<PyAny> {
+    numpy_scalar(py, DType::F32, &x.into_pyobject(py).unwrap())
+}
 fn np_i64(py: Python<'_>, x: i64) -> Py<PyAny> {
     numpy_scalar(py, DType::I64, &x.into_pyobject(py).unwrap())
+}
+fn np_i32(py: Python<'_>, x: i32) -> Py<PyAny> {
+    numpy_scalar(py, DType::I32, &x.into_pyobject(py).unwrap())
 }
 fn np_bool(py: Python<'_>, b: bool) -> Py<PyAny> {
     numpy_scalar(py, DType::Bool, &b.into_pyobject(py).unwrap().to_owned())
@@ -290,8 +314,10 @@ fn np_bool(py: Python<'_>, b: bool) -> Py<PyAny> {
 fn np_scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
     match col {
         Column::F64(v) => np_f64(py, v[i]),
+        Column::F32(v) => np_f32(py, v[i]),
         Column::I64(v) => np_i64(py, v[i]),
-        Column::Bool(v) => numpy_scalar(py, DType::Bool, &v[i].into_pyobject(py).unwrap().to_owned()),
+        Column::I32(v) => np_i32(py, v[i]),
+        Column::Bool(v) => np_bool(py, v[i]),
         // str -> Python str; datetime -> np.datetime64 (already numpy) — as scalar_to_py.
         Column::Str(_) | Column::Datetime(_) => scalar_to_py(py, col, i),
     }
@@ -303,8 +329,10 @@ fn np_scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
 fn scalar_to_numpy(py: Python<'_>, s: Scalar) -> Py<PyAny> {
     match s {
         Scalar::F64(x) => np_f64(py, x),
+        Scalar::F32(x) => np_f32(py, x),
         Scalar::I64(x) => np_i64(py, x),
-        Scalar::Bool(b) => numpy_scalar(py, DType::Bool, &b.into_pyobject(py).unwrap().to_owned()),
+        Scalar::I32(x) => np_i32(py, x),
+        Scalar::Bool(b) => np_bool(py, b),
     }
 }
 
@@ -741,7 +769,7 @@ impl PySeries {
 
     /// NaN-skipping mean (pandas `mean`) -> `np.float64`.
     fn mean(&self, py: Python<'_>) -> Py<PyAny> {
-        np_f64(py, self.mean_f64())
+        self.box_float(py, self.mean_f64())
     }
     /// Sum (pandas `sum`), dtype-preserving: float -> `np.float64`, int / bool ->
     /// `np.int64` (computed natively).
@@ -762,27 +790,27 @@ impl PySeries {
     }
     /// Sample variance (`ddof=1`, pandas `var`) -> `np.float64`.
     fn var(&self, py: Python<'_>) -> Py<PyAny> {
-        np_f64(py, self.var_f64())
+        self.box_float(py, self.var_f64())
     }
     /// Sample standard deviation (`ddof=1`, pandas `std`) -> `np.float64`.
     fn std(&self, py: Python<'_>) -> Py<PyAny> {
-        np_f64(py, self.var_f64().sqrt())
+        self.box_float(py, self.var_f64().sqrt())
     }
     /// Median (pandas `median`) -> `np.float64`.
     fn median(&self, py: Python<'_>) -> Py<PyAny> {
-        np_f64(py, self.median_f64())
+        self.box_float(py, self.median_f64())
     }
     /// Standard error of the mean (`ddof=1`, pandas `sem`) -> `np.float64`.
     fn sem(&self, py: Python<'_>) -> Py<PyAny> {
-        np_f64(py, stats::sem(&self.inner.data.to_f64_vec()))
+        self.box_float(py, stats::sem(&self.inner.data.to_f64_vec()))
     }
     /// Adjusted Fisher-Pearson skewness (pandas `skew`) -> `np.float64`.
     fn skew(&self, py: Python<'_>) -> Py<PyAny> {
-        np_f64(py, stats::skew(&self.inner.data.to_f64_vec()))
+        self.box_float(py, stats::skew(&self.inner.data.to_f64_vec()))
     }
     /// Excess kurtosis, Fisher's definition (pandas `kurt`) -> `np.float64`.
     fn kurt(&self, py: Python<'_>) -> Py<PyAny> {
-        np_f64(py, stats::kurt(&self.inner.data.to_f64_vec()))
+        self.box_float(py, stats::kurt(&self.inner.data.to_f64_vec()))
     }
 
     /// Pairwise Pearson correlation with `other` (pandas `corr`); positional
@@ -1068,7 +1096,7 @@ impl PySeries {
     /// `quantile` -> `np.float64`.
     #[pyo3(signature = (q = 0.5))]
     fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
-        Ok(np_f64(py, self.quantile_f64(q)?))
+        Ok(self.box_float(py, self.quantile_f64(q)?))
     }
 
     /// The index **label** of the maximum value (NaN-skipping); raises on an
@@ -1333,6 +1361,16 @@ impl PySeries {
 }
 
 impl PySeries {
+    /// Box a float statistic as the column's float dtype: `np.float32` for an f32
+    /// column, else `np.float64` (pandas: `f32.mean() -> np.float32`).
+    fn box_float(&self, py: Python<'_>, value: f64) -> Py<PyAny> {
+        if self.inner.data.dtype() == DType::F32 {
+            np_f32(py, value as f32)
+        } else {
+            np_f64(py, value)
+        }
+    }
+
     // Raw f64 reduction values (the public methods box these as numpy scalars;
     // `describe` reuses them, so they stay unboxed here).
     fn mean_f64(&self) -> f64 {
@@ -1408,7 +1446,14 @@ impl PySeries {
             c.iter_mut().for_each(|b| *b = !*b);
         }
         let (other_col, other_dt) = where_other_resolve(other, &self.inner)?;
-        let target = binary_supertype(self.inner.data.dtype(), other_dt);
+        // A float column keeps its float dtype (it absorbs any fill); an int
+        // column promotes by the type-based supertype.
+        let self_dt = self.inner.data.dtype();
+        let target = if self_dt.is_float() {
+            self_dt
+        } else {
+            binary_supertype(self_dt, other_dt)
+        };
         Ok(col_to_series(
             &self.inner,
             self.inner.data.select(&c, &other_col, target).map_err(pyerr)?,
@@ -2055,7 +2100,8 @@ impl PyDataFrame {
                 if !is_where {
                     c.iter_mut().for_each(|b| *b = !*b);
                 }
-                let target = binary_supertype(keep_col.dtype(), other_dt);
+                let kd = keep_col.dtype();
+                let target = if kd.is_float() { kd } else { binary_supertype(kd, other_dt) };
                 let other_col = Column::f64(vec![fill; keep_col.len()]);
                 keep_col.select(&c, &other_col, target)
             })
@@ -2354,12 +2400,13 @@ impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
     // docstring (pyo3 does not surface a `#[new]` doc comment to Python).
     #[new]
-    #[pyo3(signature = (data, columns = None, time_frame = None, cumulators = None))]
+    #[pyo3(signature = (data, columns = None, time_frame = None, cumulators = None, dtype = None))]
     fn new(
         data: &Bound<'_, PyAny>,
         columns: Option<Vec<String>>,
         time_frame: Option<&Bound<'_, PyAny>>,
         cumulators: Option<&Bound<'_, PyDict>>,
+        dtype: Option<&str>,
     ) -> PyResult<Self> {
         // `columns`, when given, selects and orders the columns — a strict projection, like
         // `df[[...]]`: a name not present raises KeyError, and an empty list or a duplicate
@@ -2436,6 +2483,22 @@ impl PyDataFrame {
                 "DataFrame(data): data must be a dict of columns or a volas DataFrame \
                  (for a pandas DataFrame use from_pandas)",
             ));
+        };
+        // `dtype=` casts every column to a single dtype (pandas `DataFrame(data,
+        // dtype=...)`), e.g. dtype='float32'.
+        let df = match dtype {
+            None => df,
+            Some(dt_str) => {
+                let dt = parse_dtype(dt_str)?;
+                let cols = df
+                    .columns()
+                    .iter()
+                    .map(|c| c.cast(dt))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(pyerr)?;
+                DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
+                    .map_err(pyerr)?
+            }
         };
         // A `time_frame` makes this a cumulating frame: the given rows are taken as
         // already-final bars at that frame (not re-aggregated), and later `append`s fold
@@ -3535,6 +3598,24 @@ fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
                 Ok(Column::f64(vec![x]))
             }
         }
+        DType::F32 => {
+            let x = v
+                .extract::<f64>()
+                .map_err(|_| PyTypeError::new_err("expected a number"))?;
+            Ok(Column::f32(vec![x as f32]))
+        }
+        DType::I32 => match v.extract::<i64>() {
+            Ok(i) => match i32::try_from(i) {
+                Ok(v32) => Ok(Column::i32(vec![v32])),
+                Err(_) => Ok(Column::i64(vec![i])), // out of i32 range -> i64 (core widens)
+            },
+            Err(_) => {
+                let x = v
+                    .extract::<f64>()
+                    .map_err(|_| PyTypeError::new_err("expected a number"))?;
+                Ok(Column::f64(vec![x]))
+            }
+        },
         DType::Bool => {
             let b = v
                 .extract::<bool>()

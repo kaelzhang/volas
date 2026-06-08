@@ -82,6 +82,88 @@ impl Numeric for f64 {
     }
 }
 
+impl Numeric for f32 {
+    const DTYPE: DType = DType::F32;
+    const ZERO: Self = 0.0;
+    const ONE: Self = 1.0;
+
+    #[inline]
+    fn into_column(values: Vec<Self>) -> Column {
+        Column::f32(values)
+    }
+    #[inline]
+    fn is_missing(self) -> bool {
+        self.is_nan()
+    }
+    #[inline]
+    fn to_f64(self) -> f64 {
+        self as f64
+    }
+    #[inline]
+    fn try_from_f64(x: f64) -> Option<Self> {
+        Some(x as f32) // f32 absorbs any float (with rounding), like f64
+    }
+    #[inline]
+    fn wrapping_add(self, other: Self) -> Self {
+        self + other
+    }
+    #[inline]
+    fn wrapping_sub(self, other: Self) -> Self {
+        self - other
+    }
+    #[inline]
+    fn wrapping_mul(self, other: Self) -> Self {
+        self * other
+    }
+    #[inline]
+    fn wrapping_abs(self) -> Self {
+        self.abs()
+    }
+}
+
+impl Numeric for i32 {
+    const DTYPE: DType = DType::I32;
+    const ZERO: Self = 0;
+    const ONE: Self = 1;
+
+    #[inline]
+    fn into_column(values: Vec<Self>) -> Column {
+        Column::i32(values)
+    }
+    #[inline]
+    fn is_missing(self) -> bool {
+        false
+    }
+    #[inline]
+    fn to_f64(self) -> f64 {
+        self as f64
+    }
+    #[inline]
+    fn try_from_f64(x: f64) -> Option<Self> {
+        if x.is_finite() && x.fract() == 0.0 && x >= i32::MIN as f64 && x <= i32::MAX as f64 {
+            Some(x as i32)
+        } else {
+            None
+        }
+    }
+    #[inline]
+    fn wrapping_add(self, other: Self) -> Self {
+        i32::wrapping_add(self, other)
+    }
+    #[inline]
+    fn wrapping_sub(self, other: Self) -> Self {
+        i32::wrapping_sub(self, other)
+    }
+    #[inline]
+    fn wrapping_mul(self, other: Self) -> Self {
+        i32::wrapping_mul(self, other)
+    }
+    #[inline]
+    fn wrapping_abs(self) -> Self {
+        i32::wrapping_abs(self)
+    }
+}
+
 impl Numeric for i64 {
     const DTYPE: DType = DType::I64;
     const ZERO: Self = 0;
@@ -129,17 +211,30 @@ impl Numeric for i64 {
 
 // --- dtype promotion (single source of truth for pandas 3.0 result dtypes) ---
 
-/// Result dtype of a binary arithmetic op (`+` `-` `*`) by operand *type*:
-/// `int ∘ int → i64` (bool counts as int — `True + True == 2`), anything
-/// involving `f64` (or a non-numeric operand) → f64. This is type-based, matching
-/// pandas (`int * 2.0 → float64` even though `2.0` is integral); the value-based
-/// rule is [`fits`], used by clip / where / assign. (`/` is always f64.)
+/// Result dtype of a binary arithmetic op (`+` `-` `*`) by operand *type*
+/// (numpy-style promotion): same numeric dtype stays (`f32+f32→f32`,
+/// `i32+i32→i32`); same kind widens (`f32+f64→f64`, `i32+i64→i64`); mixed
+/// int+float → `f64` (safe); bool counts as `i32`. Type-based, matching pandas
+/// (`int * 2.0 → float64`); the value-based rule is [`fits`] (clip / where /
+/// assign). (`/` is always f64.)
 pub fn binary_supertype(a: DType, b: DType) -> DType {
-    let int_like = |d| matches!(d, DType::I64 | DType::Bool);
-    if int_like(a) && int_like(b) {
-        DType::I64
+    use DType::{Bool, F32, F64, I32, I64};
+    if a == b && matches!(a, F64 | F32 | I64 | I32) {
+        return a;
+    }
+    let int_like = |d| matches!(d, I64 | I32 | Bool);
+    if a.is_float() || b.is_float() {
+        if a.is_float() && b.is_float() {
+            // both float -> the wider one
+            if a == F64 || b == F64 { F64 } else { F32 }
+        } else {
+            F64 // int + float -> f64
+        }
+    } else if int_like(a) && int_like(b) {
+        // both int (bool counts) -> the wider one (bool -> i32)
+        if a == I64 || b == I64 { I64 } else { I32 }
     } else {
-        DType::F64
+        F64
     }
 }
 
@@ -147,8 +242,9 @@ pub fn binary_supertype(a: DType, b: DType) -> DType {
 /// clip / where / mask / assignment (e.g. `0.0` fits `int64`, `2.5` does not).
 pub fn fits(target: DType, x: f64) -> bool {
     match target {
-        DType::F64 => true,
+        DType::F64 | DType::F32 => true, // any float fits a float dtype (rounding)
         DType::I64 => i64::try_from_f64(x).is_some(),
+        DType::I32 => i32::try_from_f64(x).is_some(),
         _ => false,
     }
 }
@@ -186,16 +282,50 @@ mod tests {
     }
 
     #[test]
+    fn f32_i32_element_semantics() {
+        // f32: NaN sentinel, lossless to_f64, always-fits try_from (rounding)
+        assert_eq!(f32::DTYPE, DType::F32);
+        assert!(f32::NAN.is_missing() && !1.5_f32.is_missing());
+        assert_eq!(2.5_f32.to_f64(), 2.5);
+        assert_eq!(f32::try_from_f64(2.5), Some(2.5_f32));
+        assert_eq!(f32::try_from_f64(0.1).map(|x| x.is_finite()), Some(true)); // rounds, still fits
+        assert_eq!(3.0_f32.wrapping_add(4.0), 7.0);
+        assert_eq!((-2.0_f32).wrapping_abs(), 2.0);
+        assert!(matches!(f32::into_column(vec![1.0_f32]), Column::F32(_)));
+        // i32: no missing, wrapping, range-checked try_from
+        assert_eq!(i32::DTYPE, DType::I32);
+        assert!(!5_i32.is_missing());
+        assert_eq!(i32::try_from_f64(5.0), Some(5));
+        assert_eq!(i32::try_from_f64(2.5), None); // non-integral
+        assert_eq!(i32::try_from_f64(3e9), None); // out of i32 range
+        assert_eq!(i32::MAX.wrapping_add(1), i32::MIN); // wraps
+        assert_eq!(i32::MIN.wrapping_abs(), i32::MIN);
+        assert_eq!(7_i32.wrapping_sub(10), -3);
+        assert_eq!(3_i32.wrapping_mul(4), 12);
+        assert!(matches!(i32::into_column(vec![1_i32]), Column::I32(_)));
+    }
+
+    #[test]
     fn promotion_rules() {
-        use DType::{Bool, F64, I64, Utf8};
+        use DType::{Bool, F32, F64, I32, I64, Utf8};
+        // same numeric dtype stays
         assert_eq!(binary_supertype(I64, I64), I64);
+        assert_eq!(binary_supertype(F32, F32), F32);
+        assert_eq!(binary_supertype(I32, I32), I32);
+        // same kind widens
+        assert_eq!(binary_supertype(F32, F64), F64);
+        assert_eq!(binary_supertype(I32, I64), I64);
+        // mixed int + float -> f64
         assert_eq!(binary_supertype(I64, F64), F64);
-        assert_eq!(binary_supertype(F64, I64), F64);
-        assert_eq!(binary_supertype(Bool, Bool), I64); // bool is int-like (True+True==2)
-        assert_eq!(binary_supertype(I64, Bool), I64);
+        assert_eq!(binary_supertype(I32, F32), F64);
+        // bool counts as i32 (its arithmetic is special-cased elsewhere)
+        assert_eq!(binary_supertype(Bool, I32), I32);
+        assert_eq!(binary_supertype(Bool, I64), I64);
         assert_eq!(binary_supertype(I64, Utf8), F64); // non-numeric operand -> f64
-        assert!(fits(I64, 3.0) && !fits(I64, 2.5)); // value-based
-        assert!(fits(F64, 2.5)); // anything fits f64
-        assert!(!fits(Bool, 1.0)); // not a numeric target
+        // value-based fits (clip / where / assign)
+        assert!(fits(I64, 3.0) && !fits(I64, 2.5));
+        assert!(fits(I32, 3.0) && !fits(I32, 1e20)); // out of i32 range
+        assert!(fits(F64, 2.5) && fits(F32, 2.5)); // any float fits a float dtype
+        assert!(!fits(Bool, 1.0));
     }
 }

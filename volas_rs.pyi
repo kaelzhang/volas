@@ -249,6 +249,7 @@ class DataFrame:
         columns: list[str] | None = ...,
         time_frame: str | TimeFrame | None = ...,
         cumulators: dict[str, Any] | None = ...,
+        dtype: str | None = ...,
     ) -> DataFrame: ...
     @property
     def tz(self) -> str | None: ...
