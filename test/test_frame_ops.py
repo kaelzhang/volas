@@ -55,6 +55,26 @@ def test_round_per_column_bankers():
     assert list(out['s'].to_numpy()) == ['x', 'y', 'z']
 
 
+def test_describe_numeric_columns_only():
+    df = DataFrame({'a': [1.0, 2.0, 3.0, 4.0], 's': ['w', 'x', 'y', 'z']})
+    d = df.describe()
+    assert d.columns == ['a']  # the string column is excluded
+    assert list(np.asarray(d.index)) == ['count', 'mean', 'std', 'min', '25%', '50%', '75%', 'max']
+    np.testing.assert_allclose(np.asarray(d['a'].to_numpy(), float),
+                               [4.0, 2.5, 1.2909944487358056, 1.0, 1.75, 2.5, 3.25, 4.0])
+
+
+def test_corr_cov_matrix():
+    df = DataFrame({'a': [1.0, 2.0, 3.0, 4.0], 'b': [1.0, 2.0, 3.0, 5.0]})
+    c = df.corr()
+    assert c.columns == ['a', 'b'] and list(np.asarray(c.index)) == ['a', 'b']
+    m = np.asarray(c.to_numpy(), float)
+    assert m[0][0] == 1.0 and m[1][1] == 1.0           # unit diagonal
+    assert abs(m[0][1] - m[1][0]) < 1e-12              # symmetric
+    assert abs(m[0][1] - 0.9827076298239906) < 1e-9
+    assert abs(np.asarray(df.cov().to_numpy(), float)[0][1] - 2.1666666666666665) < 1e-9
+
+
 def test_astype_unknown_dtype_raises():
     df = DataFrame({'a': [1.0]})
     import pytest

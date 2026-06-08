@@ -125,6 +125,24 @@ def test_rank_unknown_method_raises():
         _s([1.0, 2.0]).rank(method="bogus")
 
 
+def test_describe_index_and_values():
+    d = _s([1.0, 2.0, nan, 4.0, 5.0]).describe()
+    assert list(np.asarray(d.index)) == ["count", "mean", "std", "min", "25%", "50%", "75%", "max"]
+    np.testing.assert_allclose(
+        np.asarray(d.to_numpy(), float),
+        [4.0, 3.0, 1.8257418583505538, 1.0, 1.75, 3.0, 4.25, 5.0],
+    )
+
+
+def test_corr_cov_positional_pairwise():
+    a = _s([1.0, 2.0, 3.0, 4.0])
+    b = _s([1.0, 2.0, 3.0, 5.0])
+    assert abs(a.corr(b) - 0.9827076298239906) < 1e-9
+    assert abs(a.cov(b) - 2.1666666666666665) < 1e-9
+    # NaN pairs dropped: drops index 1 -> corr([1,3],[1,3]) == 1
+    assert abs(_s([1.0, nan, 3.0]).corr(_s([1.0, 5.0, 3.0])) - 1.0) < 1e-9
+
+
 def test_round_default_and_decimals_and_negative():
     np.testing.assert_array_equal(_s([1.4, 1.6]).round().to_numpy(), [1, 2])
     np.testing.assert_array_equal(_s([1.234, 2.567]).round(1).to_numpy(), [1.2, 2.6])

@@ -741,6 +741,42 @@ impl PySeries {
         stats::kurt(&self.inner.data.to_f64_vec())
     }
 
+    /// Pairwise Pearson correlation with `other` (pandas `corr`); positional
+    /// alignment (volas does not reindex), dropping NaN pairs.
+    fn corr(&self, other: &PySeries) -> f64 {
+        stats::corr(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec())
+    }
+
+    /// Pairwise sample covariance with `other`, ddof=1 (pandas `cov`); positional
+    /// alignment, dropping NaN pairs.
+    fn cov(&self, other: &PySeries) -> f64 {
+        stats::cov(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec())
+    }
+
+    /// Summary statistics (pandas `describe`): a Series indexed by
+    /// `count / mean / std / min / 25% / 50% / 75% / max`.
+    fn describe(&self) -> PyResult<PySeries> {
+        let count = non_nan(&self.inner.data).len() as f64;
+        let vals = vec![
+            count,
+            self.mean(),
+            self.std(),
+            self.min(),
+            self.quantile(0.25)?,
+            self.quantile(0.5)?,
+            self.quantile(0.75)?,
+            self.max(),
+        ];
+        let labels = describe_labels();
+        Ok(PySeries {
+            inner: Series::new(
+                self.inner.name.clone(),
+                Column::f64(vals),
+                Arc::new(Index::str(labels)),
+            ),
+        })
+    }
+
     /// True if any element is truthy (NaN skipped) — pandas `any` (skipna=True).
     fn any(&self) -> bool {
         match &self.inner.data {
@@ -1306,6 +1342,14 @@ fn f64_series(s: &Series, out: Vec<f64>) -> PySeries {
     }
 }
 
+/// The pandas `describe` row labels (the index of a describe result).
+fn describe_labels() -> Vec<String> {
+    ["count", "mean", "std", "min", "25%", "50%", "75%", "max"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// A new Bool `Series` carrying `s`'s name and index.
 fn bool_series(s: &Series, out: Vec<bool>) -> PySeries {
     PySeries {
@@ -1669,6 +1713,28 @@ impl PyDataFrame {
             })
             .collect();
         self.with_columns(cols)
+    }
+
+    /// Pairwise matrix (corr / cov) over the numeric columns; result column `j`
+    /// is `[op(col_i, col_j) for i]`, indexed and labelled by the column names.
+    /// Backs `corr` / `cov`.
+    fn corr_cov(&self, op: fn(&[f64], &[f64]) -> f64) -> PyResult<PyDataFrame> {
+        let numeric: Vec<(String, Vec<f64>)> = self
+            .inner
+            .names()
+            .iter()
+            .zip(self.inner.columns())
+            .filter(|(_, c)| matches!(c.dtype(), DType::F64 | DType::I64))
+            .map(|(n, c)| (n.clone(), c.to_f64_vec()))
+            .collect();
+        let names: Vec<String> = numeric.iter().map(|(n, _)| n.clone()).collect();
+        let cols: Vec<Column> = numeric
+            .iter()
+            .map(|(_, cj)| Column::f64(numeric.iter().map(|(_, ci)| op(ci, cj)).collect()))
+            .collect();
+        DataFrame::new(names.clone(), cols, Some(Index::str(names)))
+            .map(PyDataFrame::plain)
+            .map_err(pyerr)
     }
 
     /// Per-cell NaN mask -> a bool frame; backs `isna` (want_na=true) / `notna`.
@@ -2260,6 +2326,36 @@ impl PyDataFrame {
             })
             .collect();
         self.with_columns(cols)
+    }
+
+    /// Per-column summary statistics over the numeric columns (pandas `describe`):
+    /// a frame indexed by `count / mean / std / min / 25% / 50% / 75% / max`.
+    fn describe(&self) -> PyResult<PyDataFrame> {
+        let mut names = Vec::new();
+        let mut cols = Vec::new();
+        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+            if matches!(col.dtype(), DType::F64 | DType::I64) {
+                let s = PySeries {
+                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(self.inner.index())),
+                };
+                names.push(name.clone());
+                cols.push(s.describe()?.inner.data);
+            }
+        }
+        DataFrame::new(names, cols, Some(Index::str(describe_labels())))
+            .map(PyDataFrame::plain)
+            .map_err(pyerr)
+    }
+
+    /// Pairwise Pearson correlation matrix over the numeric columns (pandas
+    /// `corr`): a square frame indexed and labelled by those column names.
+    fn corr(&self) -> PyResult<PyDataFrame> {
+        self.corr_cov(stats::corr)
+    }
+
+    /// Pairwise sample covariance matrix over the numeric columns (pandas `cov`).
+    fn cov(&self) -> PyResult<PyDataFrame> {
+        self.corr_cov(stats::cov)
     }
 
     /// Boolean mask of missing (NaN) cells -> a bool DataFrame (pandas `isna`);

@@ -124,6 +124,55 @@ pub fn kurt(v: &[f64]) -> f64 {
     num / den - adj
 }
 
+/// The aligned `(x, y)` pairs with neither value NaN (pandas pairwise NaN drop).
+fn pairs(x: &[f64], y: &[f64]) -> Vec<(f64, f64)> {
+    x.iter()
+        .zip(y)
+        .filter(|(a, b)| !a.is_nan() && !b.is_nan())
+        .map(|(&a, &b)| (a, b))
+        .collect()
+}
+
+/// Pairwise sample covariance, ddof=1 (pandas `cov`); NaN with fewer than two
+/// finite pairs. `x` / `y` are aligned positionally.
+pub fn cov(x: &[f64], y: &[f64]) -> f64 {
+    let p = pairs(x, y);
+    let n = p.len();
+    if n < 2 {
+        return f64::NAN;
+    }
+    let nf = n as f64;
+    let mx = p.iter().map(|t| t.0).sum::<f64>() / nf;
+    let my = p.iter().map(|t| t.1).sum::<f64>() / nf;
+    p.iter().map(|(a, b)| (a - mx) * (b - my)).sum::<f64>() / (nf - 1.0)
+}
+
+/// Pairwise Pearson correlation (pandas `corr`); NaN with fewer than two finite
+/// pairs or a zero-variance input. `x` / `y` are aligned positionally.
+pub fn corr(x: &[f64], y: &[f64]) -> f64 {
+    let p = pairs(x, y);
+    let n = p.len();
+    if n < 2 {
+        return f64::NAN;
+    }
+    let nf = n as f64;
+    let mx = p.iter().map(|t| t.0).sum::<f64>() / nf;
+    let my = p.iter().map(|t| t.1).sum::<f64>() / nf;
+    let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+    for (a, b) in &p {
+        let (dx, dy) = (a - mx, b - my);
+        sxy += dx * dy;
+        sxx += dx * dx;
+        syy += dy * dy;
+    }
+    if sxx == 0.0 || syy == 0.0 {
+        return f64::NAN;
+    }
+    // sqrt(sxx*syy) (not sqrt(sxx)*sqrt(syy)) so a column with itself is exactly
+    // 1.0; clamp to [-1, 1] against rounding (matching NumPy / pandas).
+    (sxy / (sxx * syy).sqrt()).clamp(-1.0, 1.0)
+}
+
 /// How tied values share ranks (pandas `rank(method=)`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RankMethod {
@@ -264,5 +313,18 @@ mod tests {
         assert!(eq(&r(Dense, true, true), &[1.0, 1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, nan()]));
         // all-NaN: every rank is NaN, pct is a no-op
         assert!(eq(&rank(&[nan(), nan()], Average, true, true), &[nan(), nan()]));
+    }
+
+    #[test]
+    fn corr_cov_pairwise() {
+        assert!(close(corr(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]), 1.0));
+        assert!(close(corr(&[1.0, 2.0, 3.0], &[3.0, 2.0, 1.0]), -1.0));
+        assert!(close(cov(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]), 1.0)); // == sample var
+        // NaN pairs are dropped (drops index 1 -> corr([1,3],[1,3]) == 1)
+        assert!(close(corr(&[1.0, nan(), 3.0], &[1.0, 5.0, 3.0]), 1.0));
+        // guards: fewer than two pairs / zero variance -> NaN
+        assert!(corr(&[1.0], &[2.0]).is_nan());
+        assert!(cov(&[1.0], &[2.0]).is_nan());
+        assert!(corr(&[1.0, 1.0, 1.0], &[1.0, 2.0, 3.0]).is_nan());
     }
 }
