@@ -32,7 +32,7 @@ def from_pandas(pdf: Any) -> DataFrame:
     import pandas as pd  # noqa: PLC0415  (intentional lazy import)
     from volas_rs import DataFrame
 
-    def to_values(s):
+    def to_values(s: Any) -> Any:
         # datetime (naive or tz-aware) -> native UTC datetime64[ns]; no strftime round-trip.
         if pd.api.types.is_datetime64_any_dtype(s.dtype):
             return s.to_numpy(dtype='datetime64[ns]')
