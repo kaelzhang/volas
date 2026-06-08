@@ -124,6 +124,15 @@ pub fn kurt(v: &[f64]) -> f64 {
     num / den - adj
 }
 
+/// Element-wise choose: `cond[i] ? a[i] : b[i]`. Backs `where` / `mask` and
+/// boolean-mask assignment. `cond` / `a` / `b` are the same length.
+pub fn select(cond: &[bool], a: &[f64], b: &[f64]) -> Vec<f64> {
+    cond.iter()
+        .enumerate()
+        .map(|(i, &c)| if c { a[i] } else { b[i] })
+        .collect()
+}
+
 /// The aligned `(x, y)` pairs with neither value NaN (pandas pairwise NaN drop).
 fn pairs(x: &[f64], y: &[f64]) -> Vec<(f64, f64)> {
     x.iter()
@@ -326,5 +335,15 @@ mod tests {
         assert!(corr(&[1.0], &[2.0]).is_nan());
         assert!(cov(&[1.0], &[2.0]).is_nan());
         assert!(corr(&[1.0, 1.0, 1.0], &[1.0, 2.0, 3.0]).is_nan());
+    }
+
+    #[test]
+    fn select_picks_per_condition() {
+        let cond = [true, false, true];
+        let a = [1.0, 2.0, 3.0];
+        let b = [10.0, 20.0, 30.0];
+        assert_eq!(select(&cond, &a, &b), vec![1.0, 20.0, 3.0]);
+        // backs `mask` by swapping the branches
+        assert_eq!(select(&cond, &b, &a), vec![10.0, 2.0, 30.0]);
     }
 }

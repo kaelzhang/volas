@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::column::Column;
 use crate::dtype::DType;
+use crate::error::{Result, VolasError};
 use crate::index::Index;
 
 /// A one-dimensional, named, indexed column.
@@ -55,6 +56,28 @@ impl Series {
     pub fn dtype(&self) -> DType {
         self.data.dtype()
     }
+
+    /// Rows where `mask` is `true`, as a new Series (pandas `s[bool_mask]`).
+    /// Surviving index labels are preserved (a `RangeIndex` becomes `Int64`).
+    pub fn filter_mask(&self, mask: &[bool]) -> Result<Series> {
+        if mask.len() != self.len() {
+            return Err(VolasError::Shape(format!(
+                "boolean mask length {} != series length {}",
+                mask.len(),
+                self.len()
+            )));
+        }
+        let idx: Vec<usize> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &b)| if b { Some(i) } else { None })
+            .collect();
+        Ok(Series::new(
+            self.name.clone(),
+            self.data.take(&idx),
+            Arc::new(self.index.take(&idx)),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -81,5 +104,19 @@ mod tests {
         let empty = Series::from_f64(None, vec![]);
         assert!(empty.is_empty());
         assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn filter_mask_keeps_true_rows_and_labels() {
+        let s = Series::new(
+            Some("v".into()),
+            Column::f64(vec![10.0, 20.0, 30.0]),
+            Arc::new(Index::range(3)),
+        );
+        let sub = s.filter_mask(&[false, true, true]).unwrap();
+        assert_eq!(sub.data.to_f64_vec(), vec![20.0, 30.0]);
+        // RangeIndex -> the surviving original labels (1, 2)
+        assert_eq!(sub.index.label_at(0), Index::range(3).label_at(1));
+        assert!(s.filter_mask(&[true, false]).is_err()); // length mismatch
     }
 }

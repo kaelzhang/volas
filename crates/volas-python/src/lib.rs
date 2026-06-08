@@ -1137,6 +1137,11 @@ impl PySeries {
 
     /// `series[key]`: an integer position, a datetime label, or a slice.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // boolean mask -> the True rows, as a new Series (pandas `s[bool_mask]`)
+        if let Some(mask) = bool_mask_key(key)? {
+            let sub = self.inner.filter_mask(&mask).map_err(pyerr)?;
+            return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+        }
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.len())?;
             return Ok(scalar_to_py(py, &self.inner.data, i));
@@ -1152,6 +1157,56 @@ impl PySeries {
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
         Ok(scalar_to_py(py, &self.inner.data, pos))
+    }
+
+    /// In-place assignment by boolean mask (`s[mask] = v`) or integer position
+    /// (`s[i] = v`). The fill is a scalar; the column is taken as float (volas's
+    /// numeric model), so assigning into an int/bool series yields a float one.
+    fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: f64) -> PyResult<()> {
+        let n = self.inner.len();
+        let mut v = self.inner.data.to_f64_vec();
+        if let Some(mask) = bool_mask_key(key)? {
+            if mask.len() != n {
+                return Err(PyValueError::new_err(format!(
+                    "boolean mask length {} != series length {n}",
+                    mask.len()
+                )));
+            }
+            for (i, &m) in mask.iter().enumerate() {
+                if m {
+                    v[i] = value;
+                }
+            }
+        } else if let Ok(i) = key.extract::<isize>() {
+            v[norm_idx(i, n)?] = value;
+        } else {
+            return Err(PyTypeError::new_err(
+                "Series assignment takes a boolean mask or an integer position",
+            ));
+        }
+        self.inner.data = Column::f64(v);
+        Ok(())
+    }
+
+    /// pandas `Series.where`: keep self where `cond` is True, else `other`
+    /// (default NaN). `cond` is a boolean Series; `other` is a scalar or a
+    /// (same-index) Series.
+    #[pyo3(name = "where", signature = (cond, other = None))]
+    fn where_(&self, cond: &PySeries, other: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        let c = self.cond_mask(cond)?;
+        let keep = self.inner.data.to_f64_vec();
+        let oth = where_other(other, &self.inner.index, self.inner.len())?;
+        Ok(f64_series(&self.inner, stats::select(&c, &keep, &oth)))
+    }
+
+    /// pandas `Series.mask`: the inverse of `where` — replace with `other` where
+    /// `cond` is True, keep self elsewhere.
+    #[pyo3(signature = (cond, other = None))]
+    fn mask(&self, cond: &PySeries, other: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        let c = self.cond_mask(cond)?;
+        let keep = self.inner.data.to_f64_vec();
+        let oth = where_other(other, &self.inner.index, self.inner.len())?;
+        Ok(f64_series(&self.inner, stats::select(&c, &oth, &keep)))
     }
 
     /// pandas-style vertical repr (`label   value` rows + a
@@ -1249,6 +1304,20 @@ impl PySeries {
 }
 
 impl PySeries {
+    /// The boolean mask for a `where` / `mask` condition, validating it matches
+    /// this series' length (pandas requires equal-shape conditionals).
+    fn cond_mask(&self, cond: &PySeries) -> PyResult<Vec<bool>> {
+        let c = to_bool_vec(&cond.inner.data);
+        if c.len() != self.inner.len() {
+            return Err(PyValueError::new_err(format!(
+                "Array conditional must be same shape as self ({} != {})",
+                c.len(),
+                self.inner.len()
+            )));
+        }
+        Ok(c)
+    }
+
     /// Apply an element-wise `f64 -> f64` map, preserving name and index. Non-F64
     /// columns are coerced to f64 first. Shared by the Math Transform methods.
     fn map_f64(&self, f: impl Fn(f64) -> f64) -> PySeries {
@@ -1448,6 +1517,50 @@ fn to_bool_vec(col: &Column) -> Vec<bool> {
     match col {
         Column::Bool(v) => v.to_vec(),
         other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
+    }
+}
+
+/// Recognise a boolean-mask key (`s[mask]` / `df[mask] = v`): a boolean Series, a
+/// boolean ndarray, or a non-empty `list[bool]`. Returns `None` for any other key
+/// so the caller can fall through to its label / position / column handling.
+fn bool_mask_key(key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
+    if let Ok(s) = key.extract::<PyRef<PySeries>>() {
+        return Ok(match &s.inner.data {
+            Column::Bool(m) => Some(m.to_vec()),
+            _ => None,
+        });
+    }
+    if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
+        return Ok(Some(arr.as_slice()?.to_vec()));
+    }
+    match key.extract::<Vec<bool>>() {
+        Ok(m) if !m.is_empty() => Ok(Some(m)),
+        _ => Ok(None),
+    }
+}
+
+/// Resolve the `other` argument of `where` / `mask` to a length-`n` f64 vector: a
+/// scalar broadcasts, an (index-aligned) Series contributes element-wise, and the
+/// default (`None`) fills NaN.
+fn where_other(
+    other: Option<&Bound<'_, PyAny>>,
+    index: &Arc<Index>,
+    n: usize,
+) -> PyResult<Vec<f64>> {
+    match other {
+        None => Ok(vec![f64::NAN; n]),
+        Some(o) => {
+            if let Ok(s) = o.extract::<PyRef<PySeries>>() {
+                require_aligned(index, &s.inner.index)?;
+                Ok(s.inner.data.to_f64_vec())
+            } else if let Ok(x) = o.extract::<f64>() {
+                Ok(vec![x; n])
+            } else {
+                Err(PyTypeError::new_err(
+                    "where/mask: `other` must be a number or a Series",
+                ))
+            }
+        }
     }
 }
 
@@ -1735,6 +1848,85 @@ impl PyDataFrame {
         DataFrame::new(names.clone(), cols, Some(Index::str(names)))
             .map(PyDataFrame::plain)
             .map_err(pyerr)
+    }
+
+    /// `df.where` / `df.mask` shared core: per-cell keep/replace against a
+    /// same-shape boolean frame, taking each column as float.
+    fn where_mask(
+        &self,
+        cond: &PyDataFrame,
+        other: Option<f64>,
+        is_where: bool,
+    ) -> PyResult<PyDataFrame> {
+        if cond.inner.width() != self.inner.width() || cond.inner.height() != self.inner.height() {
+            return Err(PyValueError::new_err(
+                "where/mask: `cond` must have the same shape as the frame",
+            ));
+        }
+        let fill = other.unwrap_or(f64::NAN);
+        let cols = self
+            .inner
+            .columns()
+            .iter()
+            .zip(cond.inner.columns())
+            .map(|(keep_col, cond_col)| {
+                let keep = keep_col.to_f64_vec();
+                let oth = vec![fill; keep.len()];
+                let c = to_bool_vec(cond_col);
+                Column::f64(if is_where {
+                    stats::select(&c, &keep, &oth)
+                } else {
+                    stats::select(&c, &oth, &keep)
+                })
+            })
+            .collect();
+        self.with_columns(cols)
+    }
+
+    /// Rebuild `inner` from new columns, preserving names and index (drops the
+    /// directive cache, which a write would stale anyway). Backs mask assignment.
+    fn rebuild_with(&mut self, cols: Vec<Column>) -> PyResult<()> {
+        self.inner = DataFrame::new(
+            self.inner.names().to_vec(),
+            cols,
+            Some((**self.inner.index()).clone()),
+        )
+        .map_err(pyerr)?;
+        Ok(())
+    }
+
+    /// `df[row_mask] = v`: set every column's True rows to the scalar (taken as
+    /// float), matching pandas' whole-row boolean assignment.
+    fn assign_row_mask(&mut self, mask: &[bool], value: f64) -> PyResult<()> {
+        if mask.len() != self.inner.height() {
+            return Err(PyValueError::new_err(format!(
+                "boolean mask length {} != frame height {}",
+                mask.len(),
+                self.inner.height()
+            )));
+        }
+        let cols = self
+            .inner
+            .columns()
+            .iter()
+            .map(|c| {
+                let mut v = c.to_f64_vec();
+                for (i, &m) in mask.iter().enumerate() {
+                    if m {
+                        v[i] = value;
+                    }
+                }
+                Column::f64(v)
+            })
+            .collect();
+        self.rebuild_with(cols)
+    }
+
+    /// `df[bool_frame] = v`: per-cell assignment where the mask is True (the
+    /// in-place form of `mask`).
+    fn assign_cell_mask(&mut self, cond: &PyDataFrame, value: f64) -> PyResult<()> {
+        self.inner = self.where_mask(cond, Some(value), false)?.inner;
+        Ok(())
     }
 
     /// Per-cell NaN mask -> a bool frame; backs `isna` (want_na=true) / `notna`.
@@ -2358,6 +2550,21 @@ impl PyDataFrame {
         self.corr_cov(stats::cov)
     }
 
+    /// pandas `DataFrame.where`: keep each cell where `cond` is True, else `other`
+    /// (default NaN). `cond` is a same-shape boolean frame (e.g. from `isna`);
+    /// columns are taken as float. The inverse is `mask`.
+    #[pyo3(name = "where", signature = (cond, other = None))]
+    fn where_(&self, cond: &PyDataFrame, other: Option<f64>) -> PyResult<PyDataFrame> {
+        self.where_mask(cond, other, true)
+    }
+
+    /// pandas `DataFrame.mask`: replace each cell with `other` where `cond` is
+    /// True, keep it elsewhere — the inverse of `where`.
+    #[pyo3(signature = (cond, other = None))]
+    fn mask(&self, cond: &PyDataFrame, other: Option<f64>) -> PyResult<PyDataFrame> {
+        self.where_mask(cond, other, false)
+    }
+
     /// Boolean mask of missing (NaN) cells -> a bool DataFrame (pandas `isna`);
     /// non-float columns are all-False.
     fn isna(&self) -> PyResult<PyDataFrame> {
@@ -2403,10 +2610,26 @@ impl PyDataFrame {
         ))
     }
 
-    /// `df[name] = value` — add or replace a column. `value` may be a scalar
-    /// (broadcast), a 1-D array / list, or a Series (positional, length must
-    /// equal the frame height). Copy-on-write: a prior `copy()` is unaffected.
-    fn __setitem__(&mut self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    /// `df[key] = value`. With a column name, add or replace that column —
+    /// `value` may be a scalar (broadcast), a 1-D array / list, or a Series
+    /// (positional, length must equal the frame height). With a boolean mask and
+    /// a scalar fill, assign by mask: a boolean Series / array sets whole rows
+    /// (`df[df['a'] > 0] = 0`), a boolean frame sets cells (`df[df.isna()] = 0`).
+    /// Copy-on-write: a prior `copy()` is unaffected.
+    fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        // Boolean-mask assignment with a scalar fill: df[mask] = v
+        if let Ok(fill) = value.extract::<f64>() {
+            if let Some(mask) = bool_mask_key(key)? {
+                return self.assign_row_mask(&mask, fill);
+            }
+            if let Ok(cond) = key.extract::<PyRef<PyDataFrame>>() {
+                return self.assign_cell_mask(&cond, fill);
+            }
+        }
+        // Column assignment: df[name] = value
+        let name: String = key.extract().map_err(|_| {
+            PyTypeError::new_err("DataFrame key must be a column name or a boolean mask")
+        })?;
         let h = self.inner.height();
         let col = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
             s.inner.data.clone()
@@ -2420,10 +2643,10 @@ impl PyDataFrame {
         // Overwriting an EXISTING column may invalidate any cached indicator derived
         // from it (e.g. `df['close'] = …` stales `ma:20`); mark those for recompute on
         // next access. Adding a brand-new column cannot affect existing caches.
-        let existed = self.inner.has_column(name);
-        self.inner.set_column(name, col).map_err(pyerr)?;
+        let existed = self.inner.has_column(&name);
+        self.inner.set_column(&name, col).map_err(pyerr)?;
         if existed {
-            self.inner.invalidate_computed_on_write(name);
+            self.inner.invalidate_computed_on_write(&name);
         }
         Ok(())
     }
