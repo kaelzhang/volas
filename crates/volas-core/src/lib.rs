@@ -16,6 +16,6 @@ pub use column::Column;
 pub use dataframe::DataFrame;
 pub use dtype::DType;
 pub use error::{Result, VolasError};
-pub use index::{Index, Label};
+pub use index::{Index, IndexKind, Label};
 pub use series::Series;
 pub use tz::Tz;

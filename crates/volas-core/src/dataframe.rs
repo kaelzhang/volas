@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::column::Column;
 use crate::error::{Result, VolasError};
-use crate::index::Index;
+use crate::index::{Index, IndexKind};
 use crate::series::Series;
 
 /// Metadata for a materialized (cached) directive column: the directive that
@@ -89,7 +89,7 @@ impl DataFrame {
                 }
                 ix
             }
-            None => Index::Range(height),
+            None => Index::range(height),
         };
         let mut name_to_idx = HashMap::with_capacity(names.len());
         for (i, n) in names.iter().enumerate() {
@@ -199,7 +199,7 @@ impl DataFrame {
         if self.columns.is_empty() {
             self.height = col.len();
             if self.index.len() != self.height {
-                self.index = Arc::new(Index::Range(self.height));
+                self.index = Arc::new(Index::range(self.height));
             }
         } else if col.len() != self.height {
             return Err(VolasError::Shape(format!(
@@ -228,7 +228,9 @@ impl DataFrame {
         let pos = self
             .column_pos(name)
             .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
-        let index = Index::from_column(&self.columns[pos])?;
+        // Record the source column's name on the index (pandas keeps it, so
+        // `reset_index` can restore the original column label).
+        let index = Index::from_column(&self.columns[pos])?.with_name(Some(name.to_string()));
         let mut names = self.names.clone();
         let mut columns = self.columns.clone();
         names.remove(pos);
@@ -243,8 +245,8 @@ impl DataFrame {
     /// they render and how bare-string `.loc` matches changes. Returns a new frame
     /// (columns shared). Errors if the index is not a DatetimeIndex.
     pub fn tz_convert(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
-        match self.index.as_ref() {
-            Index::Datetime(_, _) => {
+        match self.index.kind() {
+            IndexKind::Datetime(_, _) => {
                 let mut df = self.clone();
                 df.index = Arc::new((*self.index).clone().with_tz(tz));
                 Ok(df)
@@ -262,8 +264,8 @@ impl DataFrame {
     /// DatetimeIndex or a wall-clock does not exist in `tz` (a DST spring-forward
     /// gap).
     pub fn tz_localize(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
-        let (values, cur) = match self.index.as_ref() {
-            Index::Datetime(v, cur) => (v.clone(), *cur),
+        let (values, cur) = match self.index.kind() {
+            IndexKind::Datetime(v, cur) => (v.clone(), *cur),
             _ => {
                 return Err(VolasError::DType(
                     "tz_localize requires a DatetimeIndex".into(),
@@ -284,7 +286,8 @@ impl DataFrame {
             shifted.push(new);
         }
         let mut df = self.clone();
-        df.index = Arc::new(Index::Datetime(shifted, tz));
+        // tz_localize moves the instants but keeps the index identity (and name).
+        df.index = Arc::new(Index::datetime(shifted, tz).with_name(self.index.name().map(String::from)));
         Ok(df)
     }
 
@@ -830,7 +833,12 @@ mod tests {
         .unwrap();
         let indexed = df.set_index("t").unwrap();
         assert_eq!(indexed.names(), &["v".to_string()]);
-        assert_eq!(indexed.index().as_ref(), &Index::Int64(vec![100, 200]));
+        // the index carries the source column's name (pandas parity)
+        assert_eq!(indexed.index().name(), Some("t"));
+        assert_eq!(
+            indexed.index().as_ref(),
+            &Index::int64(vec![100, 200]).with_name(Some("t".into()))
+        );
         assert!(indexed.column("t").is_err());
         // an f64 column cannot be an index
         assert!(df.set_index("v").is_err());
@@ -860,7 +868,7 @@ mod tests {
         assert!(DataFrame::new(
             vec!["a".into()],
             vec![Column::f64(vec![1.0, 2.0])],
-            Some(Index::Range(3)),
+            Some(Index::range(3)),
         )
         .is_err());
     }
@@ -881,7 +889,7 @@ mod tests {
         let mut empty = DataFrame::new(vec![], vec![], None).unwrap();
         empty.set_column("x", Column::f64(vec![1.0, 2.0])).unwrap();
         assert_eq!(empty.height(), 2);
-        assert_eq!(empty.index().as_ref(), &Index::Range(2));
+        assert_eq!(empty.index().as_ref(), &Index::range(2));
 
         // replace in place, then add a second column
         let mut df = sample();
@@ -1028,7 +1036,7 @@ mod tests {
         let df = DataFrame::new(
             vec!["c".into()],
             vec![Column::f64(vec![1.0])],
-            Some(Index::Datetime(vec![ns], Tz::Utc)),
+            Some(Index::datetime(vec![ns], Tz::Utc)),
         )
         .unwrap();
 
@@ -1036,8 +1044,8 @@ mod tests {
         let conv = df
             .tz_convert(Tz::parse("America/New_York").unwrap())
             .unwrap();
-        match conv.index().as_ref() {
-            Index::Datetime(v, tz) => {
+        match conv.index().kind() {
+            IndexKind::Datetime(v, tz) => {
                 assert_eq!(v[0], ns);
                 assert_eq!(*tz, Tz::parse("America/New_York").unwrap());
             }
@@ -1048,8 +1056,8 @@ mod tests {
         let loc = df
             .tz_localize(Tz::parse("America/New_York").unwrap())
             .unwrap();
-        match loc.index().as_ref() {
-            Index::Datetime(v, _) => {
+        match loc.index().kind() {
+            IndexKind::Datetime(v, _) => {
                 assert_eq!(crate::datetime::format_ns(v[0]), "2021-01-01 17:00:00");
             }
             _ => panic!("datetime"), // LCOV_EXCL_LINE
@@ -1117,7 +1125,7 @@ mod tests {
         let df = DataFrame::new(
             vec!["c".into()],
             vec![Column::f64(vec![1.0])],
-            Some(Index::Datetime(vec![ns], Tz::Utc)),
+            Some(Index::datetime(vec![ns], Tz::Utc)),
         )
         .unwrap();
         assert!(df

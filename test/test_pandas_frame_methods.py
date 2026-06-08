@@ -4,12 +4,6 @@ Ported from pandas/tests/frame/methods/ (head/tail, dropna, sort_index,
 reset_index, rename, set_index, astype, copy) — restricted to the all-numeric
 frames volas models. Expected values follow pandas semantics and are inlined
 (derived from the fixed ``ROWS`` matrix), so the suite is pandas-free.
-
-volas detail difference (allowed by the porting brief, root cause noted):
-  * ``reset_index(drop=False)`` restores the former index under the conventional
-    name ``"index"`` (which is exactly what pandas uses for an *unnamed* index);
-    volas's ``Index`` carries no name field, so a name given by ``set_index`` is
-    not round-tripped. Pinned in ``test_reset_index_uses_conventional_name``.
 """
 
 import numpy as np
@@ -111,11 +105,19 @@ def test_reset_index_drop_true():
     _eq(r, [[1.0], [2.0], [3.0]])
 
 
-def test_reset_index_uses_conventional_name():
-    # volas's Index has no name field, so reset_index restores the former index
-    # under the literal "index" label (pandas does the same for an *unnamed*
-    # index; the difference only shows after a named set_index).
+def test_reset_index_restores_set_index_name():
+    # set_index records the source column's name on the index, so reset_index
+    # restores that original label (pandas parity), not the literal "index".
     df = volas.DataFrame({"A": [1.0, 2.0, 3.0], "k": [7, 8, 9]})
     restored = df.set_index("k").reset_index(False)
+    assert restored.columns == ["k", "A"]
+    assert np.asarray(restored["k"].to_numpy(), dtype=float).tolist() == [7.0, 8.0, 9.0]
+
+
+def test_reset_index_unnamed_uses_conventional_name():
+    # An unnamed index (the default RangeIndex) resets under the conventional
+    # "index" label, exactly as pandas does for an unnamed index.
+    df = volas.DataFrame({"A": [1.0, 2.0, 3.0]})
+    restored = df.reset_index(False)
     assert restored.columns == ["index", "A"]
-    assert np.asarray(restored["index"].to_numpy(), dtype=float).tolist() == [7.0, 8.0, 9.0]
+    assert np.asarray(restored["index"].to_numpy(), dtype=float).tolist() == [0.0, 1.0, 2.0]

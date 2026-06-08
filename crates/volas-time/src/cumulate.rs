@@ -1,6 +1,6 @@
 //! Cumulation: group fine bars into coarser periods and aggregate.
 
-use volas_core::{DataFrame, Index, Result, Tz, VolasError};
+use volas_core::{DataFrame, Index, IndexKind, Result, Tz, VolasError};
 
 use crate::agg::AggSpec;
 use crate::time_frame::TimeFrame;
@@ -46,8 +46,8 @@ impl Cumulator {
             None => fine.clone(),
         };
 
-        let (ts, tz): (Vec<i64>, _) = match raw.index().as_ref() {
-            Index::Datetime(v, tz) => (v.clone(), *tz),
+        let (ts, tz): (Vec<i64>, _) = match raw.index().kind() {
+            IndexKind::Datetime(v, tz) => (v.clone(), *tz),
             _ => {
                 return Err(VolasError::Value(
                     "cumulation target must have a DatetimeIndex".into(),
@@ -149,8 +149,8 @@ fn dedup_keep_last(ts: &[i64]) -> Vec<usize> {
 /// Aggregate one period's raw bars into a single coarse row (1-row frame). The
 /// index label is the period's first timestamp.
 pub fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame> {
-    let (ts, tz): (&[i64], _) = match period.index().as_ref() {
-        Index::Datetime(v, tz) => (v, *tz),
+    let (ts, tz): (&[i64], _) = match period.index().kind() {
+        IndexKind::Datetime(v, tz) => (v, *tz),
         _ => {
             return Err(VolasError::Value(
                 "cumulation period must have a DatetimeIndex".into(),
@@ -165,7 +165,7 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame>
     for (name, col) in names.iter().zip(period.columns()) {
         columns.push(spec.agg_for(name).reduce(col, &kept)?);
     }
-    DataFrame::new(names, columns, Some(Index::Datetime(vec![start_ns], tz)))
+    DataFrame::new(names, columns, Some(Index::datetime(vec![start_ns], tz)))
 }
 
 #[cfg(test)]
@@ -200,7 +200,7 @@ mod tests {
                 Column::f64(close.to_vec()),
                 Column::f64(vol.to_vec()),
             ],
-            Some(Index::Datetime(idx, Tz::Utc)),
+            Some(Index::datetime(idx, Tz::Utc)),
         )
         .unwrap()
     }
@@ -239,8 +239,8 @@ mod tests {
         assert_eq!(out.column("open").unwrap().as_f64().unwrap()[1], 20.0);
         assert_eq!(out.column("volume").unwrap().as_f64().unwrap()[1], 50.0);
         // index = period-start timestamps
-        match out.index().as_ref() {
-            Index::Datetime(v, _) => {
+        match out.index().kind() {
+            IndexKind::Datetime(v, _) => {
                 assert_eq!(v[0], datetime::parse_ns("2020-01-01 00:00:00").unwrap());
                 assert_eq!(v[1], datetime::parse_ns("2020-01-01 00:05:00").unwrap());
             }
@@ -309,7 +309,7 @@ mod tests {
         let empty = DataFrame::new(
             vec!["open".into()],
             vec![Column::f64(vec![])],
-            Some(Index::Datetime(vec![], Tz::Utc)),
+            Some(Index::datetime(vec![], Tz::Utc)),
         )
         .unwrap();
         assert!(cum.append(&empty).is_err());

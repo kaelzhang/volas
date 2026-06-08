@@ -14,7 +14,7 @@ use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
-use volas_core::{datetime, Column, DType, DataFrame, Index, Label, Series, Tz, VolasError};
+use volas_core::{datetime, Column, DType, DataFrame, Index, IndexKind, Label, Series, Tz, VolasError};
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
 
@@ -230,15 +230,15 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
 /// Render an index label at position `i` as a Python object (a datetime string
 /// for a DatetimeIndex, else the integer label).
 fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> {
-    match index {
-        Index::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz)
+    match index.kind() {
+        IndexKind::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz)
             .into_pyobject(py)
             .unwrap()
             .into_any()
             .unbind(),
-        Index::Int64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
-        Index::Range(_) => (i as i64).into_pyobject(py).unwrap().into_any().unbind(),
-        Index::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
+        IndexKind::Int64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
+        IndexKind::Range(_) => (i as i64).into_pyobject(py).unwrap().into_any().unbind(),
+        IndexKind::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
     }
 }
 
@@ -401,12 +401,12 @@ pub(crate) fn parse_ts(key: &Bound<'_, PyAny>) -> PyResult<i64> {
 /// a string index, a parsed datetime (in the index's tz) / integer for the
 /// numeric kinds.
 pub(crate) fn parse_label(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Label> {
-    match index {
-        Index::Str(_) => key
+    match index.kind() {
+        IndexKind::Str(_) => key
             .extract::<String>()
             .map(Label::Str)
             .map_err(|_| PyKeyError::new_err("label must be a string for a string index")),
-        Index::Datetime(_, tz) => parse_ts_in_tz(key, *tz).map(Label::I64),
+        IndexKind::Datetime(_, tz) => parse_ts_in_tz(key, *tz).map(Label::I64),
         _ => parse_ts(key).map(Label::I64),
     }
 }
@@ -416,17 +416,17 @@ pub(crate) fn parse_label(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Lab
 /// string rendering / matching, not the numeric export); a string index becomes
 /// an object array.
 fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
-    match index {
-        Index::Datetime(v, _) => {
+    match index.kind() {
+        IndexKind::Datetime(v, _) => {
             let arr = v.clone().into_pyarray(py);
             Ok(arr.call_method1("astype", ("datetime64[ns]",))?)
         }
-        Index::Int64(v) => Ok(v.clone().into_pyarray(py).into_any()),
-        Index::Range(n) => Ok((0..*n as i64)
+        IndexKind::Int64(v) => Ok(v.clone().into_pyarray(py).into_any()),
+        IndexKind::Range(n) => Ok((0..*n as i64)
             .collect::<Vec<_>>()
             .into_pyarray(py)
             .into_any()),
-        Index::Str(v) => {
+        IndexKind::Str(v) => {
             let list = PyList::new(py, v.as_slice())?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("dtype", "object")?;
@@ -1593,16 +1593,16 @@ impl PyDataFrame {
     /// timestamp) updates the period rather than double-counting it.
     fn fold_append(&mut self, fine: &DataFrame) -> PyResult<()> {
         let last_dt = |df: &DataFrame| -> i64 {
-            match df.index().as_ref() {
-                Index::Datetime(v, _) => v[v.len() - 1],
+            match df.index().kind() {
+                IndexKind::Datetime(v, _) => v[v.len() - 1],
                 _ => unreachable!("checked by caller"),
             }
         };
         let PyDataFrame { inner, tf } = self;
         let tfs = tf.as_mut().expect("fold_append on a plain frame");
         let frame = tfs.time_frame;
-        let (fine_ts, tz) = match fine.index().as_ref() {
-            Index::Datetime(v, tz) => (v.clone(), *tz),
+        let (fine_ts, tz) = match fine.index().kind() {
+            IndexKind::Datetime(v, tz) => (v.clone(), *tz),
             _ => {
                 return Err(PyValueError::new_err(
                     "append to a time_frame DataFrame requires a DatetimeIndex",
@@ -1886,7 +1886,7 @@ impl PyDataFrame {
         // finer bars into them. Requires a DatetimeIndex (build one with `set_index` first).
         if let Some(tf_obj) = time_frame {
             let frame = resolve_time_frame(tf_obj)?;
-            if !matches!(df.index().as_ref(), Index::Datetime(..)) {
+            if !matches!(df.index().kind(), IndexKind::Datetime(..)) {
                 return Err(PyValueError::new_err(
                     "time_frame requires a DatetimeIndex \
                      (build one with to_datetime(df[col]) then df.set_index(col))",
@@ -2184,14 +2184,22 @@ impl PyDataFrame {
         let (names, columns): (Vec<String>, Vec<Column>) = if drop {
             (self.inner.names().to_vec(), self.inner.columns().to_vec())
         } else {
-            let mut names = vec!["index".to_string()];
+            // Restore the index's name as the new column label (pandas parity);
+            // an unnamed index falls back to "index".
+            let label = self
+                .inner
+                .index()
+                .name()
+                .unwrap_or("index")
+                .to_string();
+            let mut names = vec![label];
             names.extend(self.inner.names().iter().cloned());
             let mut cols = vec![self.inner.index().to_column()];
             cols.extend(self.inner.columns().iter().cloned());
             (names, cols)
         };
         Ok(PyDataFrame::plain(
-            DataFrame::new(names, columns, Some(Index::Range(h))).map_err(pyerr)?,
+            DataFrame::new(names, columns, Some(Index::range(h))).map_err(pyerr)?,
         ))
     }
 
@@ -3167,11 +3175,11 @@ fn fmt_f64_with(prec: Option<usize>, kind: char, x: f64) -> String {
 
 /// Format the `i`-th index label as a CSV field.
 fn index_label_csv(index: &Index, i: usize) -> String {
-    match index {
-        Index::Range(_) => i.to_string(),
-        Index::Int64(v) => v[i].to_string(),
-        Index::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz),
-        Index::Str(v) => v[i].clone(),
+    match index.kind() {
+        IndexKind::Range(_) => i.to_string(),
+        IndexKind::Int64(v) => v[i].to_string(),
+        IndexKind::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz),
+        IndexKind::Str(v) => v[i].clone(),
     }
 }
 
@@ -3433,7 +3441,7 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
         Err(_) => {
             let col = pyany_to_column(obj)?;
             let n = col.len();
-            (col, None, Arc::new(Index::Range(n)))
+            (col, None, Arc::new(Index::range(n)))
         }
     };
     let converted = match col {

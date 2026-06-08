@@ -38,7 +38,7 @@ impl Series {
     /// Build a float series with an implicit range index.
     pub fn from_f64(name: Option<String>, values: Vec<f64>) -> Self {
         let n = values.len();
-        Series::new(name, Column::f64(values), Arc::new(Index::Range(n)))
+        Series::new(name, Column::f64(values), Arc::new(Index::range(n)))
     }
 
     /// Number of elements.
@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn new_preserves_parts_and_empty_is_empty() {
-        let s = Series::new(None, Column::i64(vec![7, 8]), Arc::new(Index::Range(2)));
+        let s = Series::new(None, Column::i64(vec![7, 8]), Arc::new(Index::range(2)));
         assert_eq!(s.dtype(), DType::I64);
         assert_eq!(s.len(), 2);
         assert!(s.name.is_none());

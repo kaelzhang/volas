@@ -59,7 +59,8 @@ def test_sort_index():
 def test_reset_index():
     df = DataFrame({'k': np.array([10, 20], dtype=np.int64), 'v': [1.0, 2.0]}).set_index('k')
     r = df.reset_index()
-    assert r.columns == ['index', 'v']
-    assert r['index'].to_numpy().tolist() == [10, 20]
+    # reset_index restores the original column label recorded by set_index (pandas parity)
+    assert r.columns == ['k', 'v']
+    assert r['k'].to_numpy().tolist() == [10, 20]
     assert r.index.tolist() == [0, 1]
     assert df.reset_index(drop=True).columns == ['v']

@@ -4,17 +4,33 @@ use crate::column::Column;
 use crate::error::{Result, VolasError};
 use crate::tz::Tz;
 
-/// Row labels. Defaults to an implicit `0..n` range; a `Datetime` index is the
-/// common OHLCV case (i64 nanoseconds since the Unix epoch); a `Str` index
-/// (pandas object/string index) supports symbol-keyed lookup.
+/// Row labels plus an optional name.
 ///
-/// A `Datetime` index carries its own [`Tz`]: storage is always UTC epoch-ns, but
-/// the tz governs how those instants render and how bare-string / day-bucket
-/// matching maps to wall-clock time (see [`crate::tz`]). The tz rides with the
-/// shared `Arc<Index>`, so a frame and every series drawn from it agree on it for
-/// free.
+/// `name` is index-wide metadata (pandas `Index.name`): it is recorded by
+/// `set_index` (from the source column), restored by `reset_index`, and shown in
+/// a frame's / series' repr. It is `None` for an unnamed index (the default
+/// `Range` index, a freshly built datetime index, …).
+///
+/// `kind` is the label storage. A `Datetime` kind carries its own [`Tz`]:
+/// storage is always UTC epoch-ns, but the tz governs how those instants render
+/// and how bare-string / day-bucket matching maps to wall-clock time (see
+/// [`crate::tz`]). Both the name and a datetime kind's tz ride with the shared
+/// `Arc<Index>`, so a frame and every series drawn from it agree on them for free.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Index {
+pub struct Index {
+    /// Optional index name (pandas `Index.name`); `None` when unnamed.
+    pub name: Option<String>,
+    /// The label storage / kind.
+    pub kind: IndexKind,
+}
+
+/// The label storage backing an [`Index`].
+///
+/// Defaults to an implicit `0..n` range; a `Datetime` kind is the common OHLCV
+/// case (i64 nanoseconds since the Unix epoch); a `Str` kind (pandas
+/// object/string index) supports symbol-keyed lookup.
+#[derive(Clone, Debug, PartialEq)]
+pub enum IndexKind {
     /// Implicit `0..n` integer labels.
     Range(usize),
     /// Explicit integer labels.
@@ -24,6 +40,19 @@ pub enum Index {
     Datetime(Vec<i64>, Tz),
     /// String labels (pandas object/string index).
     Str(Vec<String>),
+}
+
+impl IndexKind {
+    /// Materialize the numeric labels as `i64`. Numeric kinds only — a string
+    /// kind has no i64 labels (its callers guard against it).
+    fn to_i64_labels(&self) -> Vec<i64> {
+        match self {
+            IndexKind::Range(n) => (0..*n as i64).collect(),
+            IndexKind::Int64(v) => v.clone(),
+            IndexKind::Datetime(v, _) => v.clone(),
+            IndexKind::Str(_) => unreachable!("string indexes have no i64 labels"), // LCOV_EXCL_LINE
+        }
+    }
 }
 
 /// A single row-index label: an integer / datetime (`I64`, ns) or a string
@@ -58,60 +87,112 @@ impl Label {
 }
 
 impl Index {
-    /// Build an index from a column (for `set_index`): a `Datetime` column
-    /// becomes a `DatetimeIndex`, an `I64` column an `Int64Index`, a `Str`
+    /// An unnamed implicit `0..n` range index.
+    pub fn range(n: usize) -> Index {
+        Index {
+            name: None,
+            kind: IndexKind::Range(n),
+        }
+    }
+
+    /// An unnamed explicit integer index.
+    pub fn int64(labels: Vec<i64>) -> Index {
+        Index {
+            name: None,
+            kind: IndexKind::Int64(labels),
+        }
+    }
+
+    /// An unnamed datetime index (UTC-ns `labels`, tagged with `tz`).
+    pub fn datetime(labels: Vec<i64>, tz: Tz) -> Index {
+        Index {
+            name: None,
+            kind: IndexKind::Datetime(labels, tz),
+        }
+    }
+
+    /// An unnamed string index.
+    pub fn str(labels: Vec<String>) -> Index {
+        Index {
+            name: None,
+            kind: IndexKind::Str(labels),
+        }
+    }
+
+    /// The label storage / kind.
+    pub fn kind(&self) -> &IndexKind {
+        &self.kind
+    }
+
+    /// The index name, if any (pandas `Index.name`).
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Return this index with its name set (builder; consumes `self`).
+    pub fn with_name(mut self, name: Option<String>) -> Index {
+        self.name = name;
+        self
+    }
+
+    /// Build an unnamed index from a column (for `set_index`): a `Datetime`
+    /// column becomes a `DatetimeIndex`, an `I64` column an `Int64Index`, a `Str`
     /// column a string index. Float / bool columns are not valid labels.
     pub fn from_column(col: &Column) -> Result<Index> {
         Index::from_column_tz(col, Tz::Utc)
     }
 
-    /// Build an index from a column, tagging a `Datetime` column with `tz` (UTC
-    /// otherwise the tz is ignored).
+    /// Build an unnamed index from a column, tagging a `Datetime` column with
+    /// `tz` (otherwise the tz is ignored).
     pub fn from_column_tz(col: &Column, tz: Tz) -> Result<Index> {
-        match col {
-            Column::Datetime(v) => Ok(Index::Datetime(v.to_vec(), tz)),
-            Column::I64(v) => Ok(Index::Int64(v.to_vec())),
-            Column::Str(v) => Ok(Index::Str(v.to_vec())),
-            other => Err(VolasError::DType(format!(
-                "cannot use a {} column as an index (only datetime / int64 / string)",
-                other.dtype()
-            ))),
-        }
+        let kind = match col {
+            Column::Datetime(v) => IndexKind::Datetime(v.to_vec(), tz),
+            Column::I64(v) => IndexKind::Int64(v.to_vec()),
+            Column::Str(v) => IndexKind::Str(v.to_vec()),
+            other => {
+                return Err(VolasError::DType(format!(
+                    "cannot use a {} column as an index (only datetime / int64 / string)",
+                    other.dtype()
+                )))
+            }
+        };
+        Ok(Index { name: None, kind })
     }
 
     /// The timezone of a `Datetime` index ([`Tz::Utc`] for every other kind).
     pub fn tz(&self) -> Tz {
-        match self {
-            Index::Datetime(_, tz) => *tz,
+        match &self.kind {
+            IndexKind::Datetime(_, tz) => *tz,
             _ => Tz::Utc,
         }
     }
 
-    /// Return this index with its timezone set (no-op for a non-datetime index).
-    pub fn with_tz(self, tz: Tz) -> Index {
-        match self {
-            Index::Datetime(v, _) => Index::Datetime(v, tz),
-            other => other,
+    /// Return this index with its timezone set (no-op for a non-datetime index);
+    /// the name is preserved.
+    pub fn with_tz(mut self, tz: Tz) -> Index {
+        if let IndexKind::Datetime(_, cur) = &mut self.kind {
+            *cur = tz;
         }
+        self
     }
 
     /// Number of labels.
     pub fn len(&self) -> usize {
-        match self {
-            Index::Range(n) => *n,
-            Index::Int64(v) => v.len(),
-            Index::Datetime(v, _) => v.len(),
-            Index::Str(v) => v.len(),
+        match &self.kind {
+            IndexKind::Range(n) => *n,
+            IndexKind::Int64(v) => v.len(),
+            IndexKind::Datetime(v, _) => v.len(),
+            IndexKind::Str(v) => v.len(),
         }
     }
 
     /// The label at position `i` (for membership tests like `drop`).
     pub fn label_at(&self, i: usize) -> Label {
-        match self {
-            Index::Range(_) => Label::I64(i as i64),
-            Index::Int64(v) => Label::I64(v[i]),
-            Index::Datetime(v, _) => Label::I64(v[i]),
-            Index::Str(v) => Label::Str(v[i].clone()),
+        match &self.kind {
+            IndexKind::Range(_) => Label::I64(i as i64),
+            IndexKind::Int64(v) => Label::I64(v[i]),
+            IndexKind::Datetime(v, _) => Label::I64(v[i]),
+            IndexKind::Str(v) => Label::Str(v[i].clone()),
         }
     }
 
@@ -123,31 +204,36 @@ impl Index {
     /// Materialize the numeric labels as `i64`. Numeric indexes only — string
     /// indexes are handled by their own paths (`label_slice` / `append` guard).
     pub fn to_i64_labels(&self) -> Vec<i64> {
-        match self {
-            Index::Range(n) => (0..*n as i64).collect(),
-            Index::Int64(v) => v.clone(),
-            Index::Datetime(v, _) => v.clone(),
-            Index::Str(_) => unreachable!("string indexes have no i64 labels"), // LCOV_EXCL_LINE
-        }
+        self.kind.to_i64_labels()
     }
 
-    /// A `[start, end)` slice (a datetime slice keeps the tz).
+    /// A `[start, end)` slice (the name and a datetime tz are preserved).
     pub fn slice(&self, start: usize, end: usize) -> Index {
-        match self {
-            Index::Range(_) => Index::Range(end.saturating_sub(start)),
-            Index::Int64(v) => Index::Int64(v[start..end].to_vec()),
-            Index::Datetime(v, tz) => Index::Datetime(v[start..end].to_vec(), *tz),
-            Index::Str(v) => Index::Str(v[start..end].to_vec()),
+        let kind = match &self.kind {
+            IndexKind::Range(_) => IndexKind::Range(end.saturating_sub(start)),
+            IndexKind::Int64(v) => IndexKind::Int64(v[start..end].to_vec()),
+            IndexKind::Datetime(v, tz) => IndexKind::Datetime(v[start..end].to_vec(), *tz),
+            IndexKind::Str(v) => IndexKind::Str(v[start..end].to_vec()),
+        };
+        Index {
+            name: self.name.clone(),
+            kind,
         }
     }
 
-    /// Gather the given positions (a datetime gather keeps the tz).
+    /// Gather the given positions (the name and a datetime tz are preserved).
     pub fn take(&self, idx: &[usize]) -> Index {
-        match self {
-            Index::Range(_) => Index::Int64(idx.iter().map(|&i| i as i64).collect()),
-            Index::Int64(v) => Index::Int64(idx.iter().map(|&i| v[i]).collect()),
-            Index::Datetime(v, tz) => Index::Datetime(idx.iter().map(|&i| v[i]).collect(), *tz),
-            Index::Str(v) => Index::Str(idx.iter().map(|&i| v[i].clone()).collect()),
+        let kind = match &self.kind {
+            IndexKind::Range(_) => IndexKind::Int64(idx.iter().map(|&i| i as i64).collect()),
+            IndexKind::Int64(v) => IndexKind::Int64(idx.iter().map(|&i| v[i]).collect()),
+            IndexKind::Datetime(v, tz) => {
+                IndexKind::Datetime(idx.iter().map(|&i| v[i]).collect(), *tz)
+            }
+            IndexKind::Str(v) => IndexKind::Str(idx.iter().map(|&i| v[i].clone()).collect()),
+        };
+        Index {
+            name: self.name.clone(),
+            kind,
         }
     }
 
@@ -156,8 +242,8 @@ impl Index {
     pub fn argsort(&self, ascending: bool) -> Vec<usize> {
         let mut idx: Vec<usize> = (0..self.len()).collect();
         let cmp_dir = |o: std::cmp::Ordering| if ascending { o } else { o.reverse() };
-        match self {
-            Index::Str(v) => idx.sort_by(|&a, &b| cmp_dir(v[a].cmp(&v[b]))),
+        match &self.kind {
+            IndexKind::Str(v) => idx.sort_by(|&a, &b| cmp_dir(v[a].cmp(&v[b]))),
             _ => {
                 let labels = self.to_i64_labels();
                 idx.sort_by(|&a, &b| cmp_dir(labels[a].cmp(&labels[b])));
@@ -168,20 +254,20 @@ impl Index {
 
     /// Materialize the labels as a [`Column`] (for `reset_index`).
     pub fn to_column(&self) -> Column {
-        match self {
-            Index::Range(n) => Column::i64((0..*n as i64).collect()),
-            Index::Int64(v) => Column::i64(v.clone()),
-            Index::Datetime(v, _) => Column::datetime(v.clone()),
-            Index::Str(v) => Column::str(v.clone()),
+        match &self.kind {
+            IndexKind::Range(n) => Column::i64((0..*n as i64).collect()),
+            IndexKind::Int64(v) => Column::i64(v.clone()),
+            IndexKind::Datetime(v, _) => Column::datetime(v.clone()),
+            IndexKind::Str(v) => Column::str(v.clone()),
         }
     }
 
-    /// Concatenate two indexes (extending labels). Same-kind indexes preserve
-    /// their kind; mixing numeric kinds yields `Int64`; mixing a string index
-    /// with a numeric one is an error.
+    /// Concatenate two indexes (extending labels), keeping the left index's name.
+    /// Same-kind indexes preserve their kind; mixing numeric kinds yields
+    /// `Int64`; mixing a string index with a numeric one is an error.
     pub fn append(&self, other: &Index) -> Result<Index> {
-        use Index::*;
-        Ok(match (self, other) {
+        use IndexKind::*;
+        let kind = match (&self.kind, &other.kind) {
             (Range(a), Range(b)) => Range(a + b),
             (Datetime(a, ta), Datetime(b, _)) => Datetime([a.as_slice(), b].concat(), *ta),
             (Str(a), Str(b)) => Str([a.as_slice(), b].concat()),
@@ -192,16 +278,22 @@ impl Index {
             }
             // remaining: numeric mixes (Range / Int64 / Datetime) -> Int64 labels
             (a, b) => Int64([a.to_i64_labels(), b.to_i64_labels()].concat()),
+        };
+        Ok(Index {
+            name: self.name.clone(),
+            kind,
         })
     }
 
     /// Extend in place by the labels of `other` — the amortized-O(1) counterpart
-    /// of [`append`](Self::append), used by the live single-bar hot path. Same-
-    /// kind indexes grow their buffer; a numeric-kind mix collapses to `Int64`;
-    /// mixing a string index with a numeric one is an error.
+    /// of [`append`](Self::append), used by the live single-bar hot path; the
+    /// growing index keeps its own name (so appending an unnamed bar to a named
+    /// index does not drop the name). Same-kind indexes grow their buffer; a
+    /// numeric-kind mix collapses to `Int64`; mixing a string index with a
+    /// numeric one is an error.
     pub fn extend(&mut self, other: &Index) -> Result<()> {
-        use Index::*;
-        match (&mut *self, other) {
+        use IndexKind::*;
+        match (&mut self.kind, &other.kind) {
             (Range(a), Range(b)) => *a += b,
             (Datetime(a, _), Datetime(b, _)) => a.extend_from_slice(b),
             (Int64(a), Int64(b)) => a.extend_from_slice(b),
@@ -224,17 +316,17 @@ impl Index {
     /// Position of the first label exactly equal to `label`. Returns `None` if
     /// the label's kind does not match the index's kind.
     pub fn position_of(&self, label: &Label) -> Option<usize> {
-        match (self, label) {
-            (Index::Range(n), Label::I64(v)) => {
+        match (&self.kind, label) {
+            (IndexKind::Range(n), Label::I64(v)) => {
                 if *v >= 0 && (*v as usize) < *n {
                     Some(*v as usize)
                 } else {
                     None
                 }
             }
-            (Index::Int64(vs), Label::I64(v)) => vs.iter().position(|x| x == v),
-            (Index::Datetime(vs, _), Label::I64(v)) => vs.iter().position(|x| x == v),
-            (Index::Str(vs), Label::Str(s)) => vs.iter().position(|x| x == s),
+            (IndexKind::Int64(vs), Label::I64(v)) => vs.iter().position(|x| x == v),
+            (IndexKind::Datetime(vs, _), Label::I64(v)) => vs.iter().position(|x| x == v),
+            (IndexKind::Str(vs), Label::Str(s)) => vs.iter().position(|x| x == s),
             _ => None,
         }
     }
@@ -244,8 +336,8 @@ impl Index {
     /// `None` for open-ended. Numeric indexes compare numerically; a string
     /// index compares lexicographically.
     pub fn label_slice(&self, lo: Option<&Label>, hi: Option<&Label>) -> (usize, usize) {
-        match self {
-            Index::Str(labels) => {
+        match &self.kind {
+            IndexKind::Str(labels) => {
                 let start = lo.and_then(Label::as_str).map_or(0, |lo| {
                     labels
                         .iter()
@@ -282,11 +374,11 @@ mod tests {
     fn from_datetime_and_int_columns() {
         assert_eq!(
             Index::from_column(&Column::datetime(vec![5, 6])).unwrap(),
-            Index::Datetime(vec![5, 6], Tz::Utc)
+            Index::datetime(vec![5, 6], Tz::Utc)
         );
         assert_eq!(
             Index::from_column(&Column::i64(vec![1, 2])).unwrap(),
-            Index::Int64(vec![1, 2])
+            Index::int64(vec![1, 2])
         );
     }
 
@@ -299,39 +391,36 @@ mod tests {
 
     #[test]
     fn is_empty_labels_and_position_of() {
-        assert!(Index::Range(0).is_empty());
-        assert!(!Index::Range(3).is_empty());
+        assert!(Index::range(0).is_empty());
+        assert!(!Index::range(3).is_empty());
 
-        assert_eq!(Index::Range(3).to_i64_labels(), vec![0, 1, 2]);
-        assert_eq!(Index::Int64(vec![5, 6]).to_i64_labels(), vec![5, 6]);
+        assert_eq!(Index::range(3).to_i64_labels(), vec![0, 1, 2]);
+        assert_eq!(Index::int64(vec![5, 6]).to_i64_labels(), vec![5, 6]);
         assert_eq!(
-            Index::Datetime(vec![10, 20], Tz::Utc).to_i64_labels(),
+            Index::datetime(vec![10, 20], Tz::Utc).to_i64_labels(),
             vec![10, 20]
         );
 
         let i64 = Label::I64;
-        assert_eq!(Index::Range(5).position_of(&i64(3)), Some(3));
-        assert_eq!(Index::Range(5).position_of(&i64(9)), None);
-        assert_eq!(Index::Range(5).position_of(&i64(-1)), None);
+        assert_eq!(Index::range(5).position_of(&i64(3)), Some(3));
+        assert_eq!(Index::range(5).position_of(&i64(9)), None);
+        assert_eq!(Index::range(5).position_of(&i64(-1)), None);
+        assert_eq!(Index::int64(vec![10, 20, 30]).position_of(&i64(20)), Some(1));
+        assert_eq!(Index::int64(vec![10, 20]).position_of(&i64(99)), None);
         assert_eq!(
-            Index::Int64(vec![10, 20, 30]).position_of(&i64(20)),
-            Some(1)
-        );
-        assert_eq!(Index::Int64(vec![10, 20]).position_of(&i64(99)), None);
-        assert_eq!(
-            Index::Datetime(vec![100, 200], Tz::Utc).position_of(&i64(200)),
+            Index::datetime(vec![100, 200], Tz::Utc).position_of(&i64(200)),
             Some(1)
         );
 
         // take() on an Int64 index gathers the labels at those positions
         assert_eq!(
-            Index::Int64(vec![10, 20, 30]).take(&[2, 0]),
-            Index::Int64(vec![30, 10])
+            Index::int64(vec![10, 20, 30]).take(&[2, 0]),
+            Index::int64(vec![30, 10])
         );
     }
 
     fn str_index(labels: &[&str]) -> Index {
-        Index::Str(labels.iter().map(|s| s.to_string()).collect())
+        Index::str(labels.iter().map(|s| s.to_string()).collect())
     }
 
     #[test]
@@ -370,33 +459,55 @@ mod tests {
         let b = str_index(&["z"]);
         assert_eq!(a.append(&b).unwrap(), str_index(&["x", "y", "z"]));
         // mixing a string index with a numeric one is an error
-        assert!(a.append(&Index::Range(2)).is_err());
-        assert!(Index::Range(2).append(&a).is_err());
+        assert!(a.append(&Index::range(2)).is_err());
+        assert!(Index::range(2).append(&a).is_err());
     }
 
     #[test]
     fn extend_grows_in_place_per_kind() {
         // same-kind grows the buffer in place (the live append hot path)
-        let mut r = Index::Range(3);
-        r.extend(&Index::Range(2)).unwrap();
-        assert_eq!(r, Index::Range(5));
+        let mut r = Index::range(3);
+        r.extend(&Index::range(2)).unwrap();
+        assert_eq!(r, Index::range(5));
 
-        let mut d = Index::Datetime(vec![1, 2], Tz::Utc);
-        d.extend(&Index::Datetime(vec![3], Tz::Utc)).unwrap();
-        assert_eq!(d, Index::Datetime(vec![1, 2, 3], Tz::Utc));
+        let mut d = Index::datetime(vec![1, 2], Tz::Utc);
+        d.extend(&Index::datetime(vec![3], Tz::Utc)).unwrap();
+        assert_eq!(d, Index::datetime(vec![1, 2, 3], Tz::Utc));
 
         let mut s = str_index(&["a", "b"]);
         s.extend(&str_index(&["c"])).unwrap();
         assert_eq!(s, str_index(&["a", "b", "c"]));
 
         // a numeric-kind mix collapses to Int64 (matches `append`)
-        let mut m = Index::Range(2);
-        m.extend(&Index::Int64(vec![5, 6])).unwrap();
-        assert_eq!(m, Index::Int64(vec![0, 1, 5, 6]));
+        let mut m = Index::range(2);
+        m.extend(&Index::int64(vec![5, 6])).unwrap();
+        assert_eq!(m, Index::int64(vec![0, 1, 5, 6]));
 
         // mixing string with numeric is an error, either way
-        assert!(str_index(&["x"]).extend(&Index::Range(1)).is_err());
-        assert!(Index::Range(1).extend(&str_index(&["x"])).is_err());
+        assert!(str_index(&["x"]).extend(&Index::range(1)).is_err());
+        assert!(Index::range(1).extend(&str_index(&["x"])).is_err());
+    }
+
+    #[test]
+    fn name_set_and_propagates_through_ops() {
+        let ix = Index::datetime(vec![1, 2, 3], Tz::Utc).with_name(Some("date".into()));
+        assert_eq!(ix.name(), Some("date"));
+        // an unnamed index reports None
+        assert_eq!(Index::range(3).name(), None);
+        // the name rides through identity-preserving ops
+        assert_eq!(ix.slice(0, 2).name(), Some("date"));
+        assert_eq!(ix.take(&[2, 0]).name(), Some("date"));
+        assert_eq!(ix.clone().with_tz(Tz::Offset(28800)).name(), Some("date"));
+        // append / extend keep the left (growing) index's name
+        assert_eq!(
+            ix.append(&Index::datetime(vec![4], Tz::Utc)).unwrap().name(),
+            Some("date")
+        );
+        let mut g = ix.clone();
+        g.extend(&Index::datetime(vec![4], Tz::Utc)).unwrap();
+        assert_eq!(g.name(), Some("date"));
+        // with_name(None) clears it
+        assert_eq!(ix.with_name(None).name(), None);
     }
 
     #[test]
@@ -407,10 +518,10 @@ mod tests {
         assert_eq!(Label::Str("x".into()).as_str(), Some("x"));
         assert_eq!(Label::Str("x".into()).as_i64(), None);
         // label_at over the numeric index kinds
-        assert_eq!(Index::Range(3).label_at(2), Label::I64(2));
-        assert_eq!(Index::Int64(vec![10, 20]).label_at(1), Label::I64(20));
+        assert_eq!(Index::range(3).label_at(2), Label::I64(2));
+        assert_eq!(Index::int64(vec![10, 20]).label_at(1), Label::I64(20));
         assert_eq!(
-            Index::Datetime(vec![100, 200], Tz::Utc).label_at(0),
+            Index::datetime(vec![100, 200], Tz::Utc).label_at(0),
             Label::I64(100)
         );
     }
@@ -418,54 +529,59 @@ mod tests {
     #[test]
     fn index_kind_branch_coverage() {
         // tz() / with_tz() are no-ops on a non-datetime index.
-        assert_eq!(Index::Range(3).tz(), Tz::Utc);
-        assert!(matches!(Index::Range(3).with_tz(Tz::Utc), Index::Range(3)));
+        assert_eq!(Index::range(3).tz(), Tz::Utc);
+        assert!(matches!(
+            Index::range(3).with_tz(Tz::Utc).kind,
+            IndexKind::Range(3)
+        ));
         // slice over the non-range kinds.
         assert_eq!(
-            Index::Int64(vec![1, 2, 3]).slice(0, 2),
-            Index::Int64(vec![1, 2])
+            Index::int64(vec![1, 2, 3]).slice(0, 2),
+            Index::int64(vec![1, 2])
         );
         assert!(matches!(
-            Index::Datetime(vec![1, 2], Tz::Utc).slice(0, 1),
-            Index::Datetime(_, _)
+            Index::datetime(vec![1, 2], Tz::Utc).slice(0, 1).kind,
+            IndexKind::Datetime(_, _)
         ));
         assert_eq!(
-            Index::Str(vec!["a".into(), "b".into()]).slice(1, 2),
-            Index::Str(vec!["b".into()])
+            Index::str(vec!["a".into(), "b".into()]).slice(1, 2),
+            Index::str(vec!["b".into()])
         );
         // argsort lexicographically over a string index.
         assert_eq!(
-            Index::Str(vec!["b".into(), "a".into()]).argsort(true),
+            Index::str(vec!["b".into(), "a".into()]).argsort(true),
             vec![1, 0]
         );
         // to_column over every kind.
-        assert_eq!(Index::Range(2).to_column().len(), 2);
-        assert_eq!(Index::Datetime(vec![5], Tz::Utc).to_column().len(), 1);
-        assert_eq!(Index::Str(vec!["x".into()]).to_column().len(), 1);
+        assert_eq!(Index::range(2).to_column().len(), 2);
+        assert_eq!(Index::datetime(vec![5], Tz::Utc).to_column().len(), 1);
+        assert_eq!(Index::str(vec!["x".into()]).to_column().len(), 1);
         // append: same-kind datetime / string, and a numeric mix -> Int64.
         assert!(matches!(
-            Index::Datetime(vec![1], Tz::Utc)
-                .append(&Index::Datetime(vec![2], Tz::Utc))
-                .unwrap(),
-            Index::Datetime(_, _)
+            Index::datetime(vec![1], Tz::Utc)
+                .append(&Index::datetime(vec![2], Tz::Utc))
+                .unwrap()
+                .kind,
+            IndexKind::Datetime(_, _)
         ));
         assert!(matches!(
-            Index::Str(vec!["a".into()])
-                .append(&Index::Str(vec!["b".into()]))
-                .unwrap(),
-            Index::Str(_)
+            Index::str(vec!["a".into()])
+                .append(&Index::str(vec!["b".into()]))
+                .unwrap()
+                .kind,
+            IndexKind::Str(_)
         ));
         assert!(matches!(
-            Index::Range(2).append(&Index::Range(3)).unwrap(),
-            Index::Range(5)
+            Index::range(2).append(&Index::range(3)).unwrap().kind,
+            IndexKind::Range(5)
         ));
         assert!(matches!(
-            Index::Range(2).append(&Index::Int64(vec![5])).unwrap(),
-            Index::Int64(_)
+            Index::range(2).append(&Index::int64(vec![5])).unwrap().kind,
+            IndexKind::Int64(_)
         ));
         // mixing a string index with a numeric one is an error.
-        assert!(Index::Str(vec!["a".into()])
-            .append(&Index::Range(1))
+        assert!(Index::str(vec!["a".into()])
+            .append(&Index::range(1))
             .is_err());
     }
 }
