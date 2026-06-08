@@ -185,6 +185,13 @@ fn node_resume_dispatch_covers_stateless_and_recursive_indicators() {
         "kdj.k",
         "kdj.d",
         "kdj.j",
+        // Group A cumulative / EMA-recursion family.
+        "pvt",
+        "nvi",
+        "pvi",
+        "efi:13",
+        "tsi:25,13",
+        "mass_index:25",
     ] {
         resume_matches_full(&df, directive, 120);
     }

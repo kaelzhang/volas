@@ -74,6 +74,38 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             ind::adosc_final_state(&high, &low, &close, &volume, fast, slow)
         }
 
+        // Group A cumulative / EMA-recursion family (volas-exclusive).
+        ("pvt", _) => {
+            let close = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            ind::pvt_final_state(&close, &volume)
+        }
+        ("nvi", _) => {
+            let close = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            ind::nvi_final_state(&close, &volume)
+        }
+        ("pvi", _) => {
+            let close = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            ind::pvi_final_state(&close, &volume)
+        }
+        ("efi", _) => {
+            let close = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            ind::efi_final_state(&close, &volume, arg_usize(args, 0, Some(13)).ok()?)
+        }
+        ("tsi", _) => ind::tsi_final_state(
+            &series_f64(df, series, 0, "close").ok()?,
+            arg_usize(args, 0, Some(25)).ok()?,
+            arg_usize(args, 1, Some(13)).ok()?,
+        ),
+        ("mass_index", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            ind::mass_index_final_state(&high, &low, arg_usize(args, 0, Some(25)).ok()?)
+        }
+
         // SAR family — carry the recurrence's loop state (trend, accel factor(s),
         // extreme point, current SAR, and the prior bar's high/low).
         ("sar", _) => {
@@ -609,6 +641,50 @@ pub fn execute_resume(
             let (vals, st) = ind::adosc_resume(
                 &high, &low, &close, &volume, fast, slow, from_row, prev_state,
             );
+            Some((Column::f64(vals), st))
+        }
+
+        // Group A cumulative / EMA-recursion family (volas-exclusive).
+        ("pvt", _) => {
+            let close = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let (vals, st) = ind::pvt_resume(&close, &volume, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("nvi", _) => {
+            let close = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let (vals, st) = ind::nvi_resume(&close, &volume, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("pvi", _) => {
+            let close = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let (vals, st) = ind::pvi_resume(&close, &volume, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("efi", _) => {
+            let close = series_f64(df, series, 0, "close").ok()?;
+            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let (vals, st) =
+                ind::efi_resume(&close, &volume, arg_usize(args, 0, Some(13)).ok()?, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("tsi", _) => {
+            let (vals, st) = ind::tsi_resume(
+                &close().ok()?,
+                arg_usize(args, 0, Some(25)).ok()?,
+                arg_usize(args, 1, Some(13)).ok()?,
+                from_row,
+                prev_state,
+            );
+            Some((Column::f64(vals), st))
+        }
+        ("mass_index", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let (vals, st) =
+                ind::mass_index_resume(&high, &low, arg_usize(args, 0, Some(25)).ok()?, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
 

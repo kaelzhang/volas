@@ -63,8 +63,8 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
             .max(arg(args, 2, 12))
             .max(arg(args, 3, 24)),
         "psy" => arg(args, 0, 12).saturating_sub(1),
-        // pvt / nvi / pvi are cumulative — a lookback of 0 makes the engine refresh them on
-        // append with its exact full-recompute fallback rather than a windowed fast-path.
+        // pvt / nvi / pvi are cumulative (lookback 0); like obv/ad they carry a running-line
+        // state so append resumes in O(new rows) and continues past a slice (see exec_resume).
         "pvt" | "nvi" | "pvi" => 0,
         "dpo" => arg(args, 0, 20).saturating_sub(1),
         "cmf" => arg(args, 0, 20).saturating_sub(1),
