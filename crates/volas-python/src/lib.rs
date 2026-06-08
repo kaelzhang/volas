@@ -15,8 +15,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{
-    datetime, stats, Column, DType, DataFrame, Index, IndexKind, Label, Series, SetVal, Tz,
-    VolasError,
+    binary_supertype, datetime, fits, stats, BinOp, Column, DType, DataFrame, Index, IndexKind,
+    Label, Series, SetVal, Tz, VolasError,
 };
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
@@ -959,32 +959,31 @@ impl PySeries {
         })
     }
 
-    /// Cumulative sum (pandas `cumsum`, skipna=True).
-    fn cumsum(&self) -> PySeries {
-        f64_series(&self.inner, stats::cumsum(&self.inner.data.to_f64_vec()))
+    /// Cumulative sum (pandas `cumsum`, skipna=True), dtype-preserving.
+    fn cumsum(&self) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.cumsum().map_err(pyerr)?))
     }
 
-    /// Cumulative maximum (pandas `cummax`, skipna=True).
-    fn cummax(&self) -> PySeries {
-        f64_series(&self.inner, stats::cummax(&self.inner.data.to_f64_vec()))
+    /// Cumulative maximum (pandas `cummax`, skipna=True), dtype-preserving.
+    fn cummax(&self) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.cummax().map_err(pyerr)?))
     }
 
-    /// Cumulative minimum (pandas `cummin`, skipna=True).
-    fn cummin(&self) -> PySeries {
-        f64_series(&self.inner, stats::cummin(&self.inner.data.to_f64_vec()))
+    /// Cumulative minimum (pandas `cummin`, skipna=True), dtype-preserving.
+    fn cummin(&self) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.cummin().map_err(pyerr)?))
     }
 
-    /// Cumulative product (pandas `cumprod`, skipna=True).
-    fn cumprod(&self) -> PySeries {
-        f64_series(&self.inner, stats::cumprod(&self.inner.data.to_f64_vec()))
+    /// Cumulative product (pandas `cumprod`, skipna=True), dtype-preserving.
+    fn cumprod(&self) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.cumprod().map_err(pyerr)?))
     }
 
-    /// Round each value to `decimals` places (pandas `round`); NaN stays NaN.
-    /// Uses round-half-to-even (banker's rounding), matching pandas / NumPy.
+    /// Round each value to `decimals` places (pandas `round`), dtype-preserving:
+    /// banker's (half-to-even) for floats, integer-exact for ints; NaN stays NaN.
     #[pyo3(signature = (decimals = 0))]
-    fn round(&self, decimals: i32) -> PySeries {
-        let factor = 10f64.powi(decimals);
-        self.map_f64(move |x| (x * factor).round_ties_even() / factor)
+    fn round(&self, decimals: i32) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.round(decimals).map_err(pyerr)?))
     }
 
     /// Numerical rank (pandas `rank`, 1-based, NaN kept as NaN). Ties resolve by
@@ -1006,22 +1005,17 @@ impl PySeries {
         ))
     }
 
-    /// Element-wise absolute value (pandas `abs`).
-    fn abs(&self) -> PySeries {
-        self.map_f64(f64::abs)
+    /// Element-wise absolute value (pandas `abs`), dtype-preserving.
+    fn abs(&self) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.abs().map_err(pyerr)?))
     }
 
-    /// Clip values into `[lower, upper]` (either bound optional); NaN stays NaN
+    /// Clip values into `[lower, upper]` (either bound optional), dtype-preserving;
+    /// NaN stays NaN. An int column with a non-integral bound promotes to float
     /// (pandas `clip`).
     #[pyo3(signature = (lower = None, upper = None))]
-    fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PySeries {
-        self.map_f64(move |x| {
-            if x.is_nan() {
-                return x;
-            }
-            let x = lower.map_or(x, |lo| x.max(lo));
-            upper.map_or(x, |hi| x.min(hi))
-        })
+    fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.clip(lower, upper).map_err(pyerr)?))
     }
 
     /// The `q`-quantile in `[0, 1]` (linear interpolation, NaN-skipping) — pandas
@@ -1062,28 +1056,28 @@ impl PySeries {
     }
 
     fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_binop(&self.inner, other, |a, b| a + b)
+        series_arith(&self.inner, other, BinOp::Add, false)
     }
     fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_binop(&self.inner, other, |a, b| a - b)
+        series_arith(&self.inner, other, BinOp::Sub, false)
     }
     fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_binop(&self.inner, other, |a, b| a * b)
+        series_arith(&self.inner, other, BinOp::Mul, false)
     }
     fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_binop(&self.inner, other, |a, b| a / b)
+        series_div(&self.inner, other, false)
     }
     fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_binop(&self.inner, other, |a, b| b + a)
+        series_arith(&self.inner, other, BinOp::Add, true)
     }
     fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_binop(&self.inner, other, |a, b| b - a)
+        series_arith(&self.inner, other, BinOp::Sub, true)
     }
     fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_binop(&self.inner, other, |a, b| b * a)
+        series_arith(&self.inner, other, BinOp::Mul, true)
     }
     fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_binop(&self.inner, other, |a, b| b / a)
+        series_div(&self.inner, other, true)
     }
 
     // Element-wise comparisons -> bool Series (pandas-style).
@@ -1198,20 +1192,14 @@ impl PySeries {
     /// (same-index) Series.
     #[pyo3(name = "where", signature = (cond, other = None))]
     fn where_(&self, cond: &PySeries, other: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
-        let c = self.cond_mask(cond)?;
-        let keep = self.inner.data.to_f64_vec();
-        let oth = where_other(other, &self.inner.index, self.inner.len())?;
-        Ok(f64_series(&self.inner, stats::select(&c, &keep, &oth)))
+        self.select_where(cond, other, false)
     }
 
     /// pandas `Series.mask`: the inverse of `where` — replace with `other` where
     /// `cond` is True, keep self elsewhere.
     #[pyo3(signature = (cond, other = None))]
     fn mask(&self, cond: &PySeries, other: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
-        let c = self.cond_mask(cond)?;
-        let keep = self.inner.data.to_f64_vec();
-        let oth = where_other(other, &self.inner.index, self.inner.len())?;
-        Ok(f64_series(&self.inner, stats::select(&c, &oth, &keep)))
+        self.select_where(cond, other, true)
     }
 
     /// pandas-style vertical repr (`label   value` rows + a
@@ -1323,6 +1311,27 @@ impl PySeries {
         Ok(c)
     }
 
+    /// `where` (`invert = false`) / `mask` (`invert = true`) shared core: pick
+    /// `self` where the (possibly inverted) condition holds, else `other`, in the
+    /// promoted dtype. `mask` is `where(!cond)`.
+    fn select_where(
+        &self,
+        cond: &PySeries,
+        other: Option<&Bound<'_, PyAny>>,
+        invert: bool,
+    ) -> PyResult<PySeries> {
+        let mut c = self.cond_mask(cond)?;
+        if invert {
+            c.iter_mut().for_each(|b| *b = !*b);
+        }
+        let (other_col, other_dt) = where_other_resolve(other, &self.inner)?;
+        let target = binary_supertype(self.inner.data.dtype(), other_dt);
+        Ok(col_to_series(
+            &self.inner,
+            self.inner.data.select(&c, &other_col, target).map_err(pyerr)?,
+        ))
+    }
+
     /// Apply an element-wise `f64 -> f64` map, preserving name and index. Non-F64
     /// columns are coerced to f64 first. Shared by the Math Transform methods.
     fn map_f64(&self, f: impl Fn(f64) -> f64) -> PySeries {
@@ -1381,12 +1390,20 @@ fn slice_series(s: &Series, slice: &Bound<'_, PySlice>) -> PyResult<PySeries> {
 /// The RHS of a Series binary op as an `f64` vector — another Series (aligned by
 /// position) or a broadcast scalar. Two Series must share an index (see
 /// [`require_aligned`]); volas never silently aligns by label.
-fn series_rhs_f64(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
+/// The right-hand operand of a Series arithmetic op as a length-aligned column.
+/// A Series must share the index; a scalar broadcasts with a *type-based* dtype
+/// (Python `int`/`bool` -> i64, `float` -> f64) so `int_series + 2 -> int64` but
+/// `+ 2.0 -> float64`, matching pandas. Anything else is unsupported.
+fn series_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(o) = other.extract::<PyRef<PySeries>>() {
         require_aligned(&s.index, &o.inner.index)?;
-        Ok(o.inner.data.to_f64_vec())
-    } else if let Ok(scalar) = other.extract::<f64>() {
-        Ok(vec![scalar; s.len()])
+        Ok(o.inner.data.clone())
+    } else if let Ok(b) = other.extract::<bool>() {
+        Ok(Column::i64(vec![b as i64; s.len()]))
+    } else if let Ok(i) = other.extract::<i64>() {
+        Ok(Column::i64(vec![i; s.len()]))
+    } else if let Ok(x) = other.extract::<f64>() {
+        Ok(Column::f64(vec![x; s.len()]))
     } else {
         Err(PyTypeError::new_err(
             "unsupported operand for a Series operation",
@@ -1416,6 +1433,14 @@ fn f64_series(s: &Series, out: Vec<f64>) -> PySeries {
     }
 }
 
+/// A new `Series` carrying `s`'s name and index over an already-built column.
+/// Used by the dtype-preserving transforms (the typed Column ops decide dtype).
+fn col_to_series(s: &Series, data: Column) -> PySeries {
+    PySeries {
+        inner: Series::new(s.name.clone(), data, Arc::clone(&s.index)),
+    }
+}
+
 /// The pandas `describe` row labels (the index of a describe result).
 fn describe_labels() -> Vec<String> {
     ["count", "mean", "std", "min", "25%", "50%", "75%", "max"]
@@ -1431,21 +1456,25 @@ fn bool_series(s: &Series, out: Vec<bool>) -> PySeries {
     }
 }
 
-fn series_binop(
+/// A Series `+ - *` op against `other` (scalar / aligned Series), dtype-preserving
+/// via the typed [`Column::binary`]. `swap` puts `other` on the left (the reflected
+/// `__radd__` etc.). True division is separate ([`series_div`], always float).
+fn series_arith(
     s: &Series,
     other: &Bound<'_, PyAny>,
-    f: impl Fn(f64, f64) -> f64,
+    op: BinOp,
+    swap: bool,
 ) -> PyResult<PySeries> {
-    let a = s.data.to_f64_vec();
-    let rhs = series_rhs_f64(s, other)?;
-    let n = a.len().min(rhs.len());
-    let mut out = vec![f64::NAN; a.len()];
-    for i in 0..n {
-        out[i] = f(a[i], rhs[i]);
-    }
-    Ok(PySeries {
-        inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)),
-    })
+    let rhs = series_rhs_col(s, other)?;
+    let (lhs, rhs) = if swap { (&rhs, &s.data) } else { (&s.data, &rhs) };
+    Ok(col_to_series(s, lhs.binary(rhs, op).map_err(pyerr)?))
+}
+
+/// A Series `/` op (always float). `swap` reflects it (`__rtruediv__`).
+fn series_div(s: &Series, other: &Bound<'_, PyAny>, swap: bool) -> PyResult<PySeries> {
+    let rhs = series_rhs_col(s, other)?;
+    let (lhs, rhs) = if swap { (&rhs, &s.data) } else { (&s.data, &rhs) };
+    Ok(col_to_series(s, lhs.div(rhs)))
 }
 
 /// Element-wise comparison -> bool Series (positional; NaN compares `false` for
@@ -1456,7 +1485,7 @@ fn series_cmp(
     f: impl Fn(f64, f64) -> bool,
 ) -> PyResult<PySeries> {
     let a = s.data.to_f64_vec();
-    let rhs = series_rhs_f64(s, other)?;
+    let rhs = series_rhs_col(s, other)?.to_f64_vec(); // comparisons compare as f64 -> bool
     let n = a.len().min(rhs.len());
     let mut out = vec![false; a.len()];
     for i in 0..n {
@@ -1547,19 +1576,25 @@ fn bool_mask_key(key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
 /// Resolve the `other` argument of `where` / `mask` to a length-`n` f64 vector: a
 /// scalar broadcasts, an (index-aligned) Series contributes element-wise, and the
 /// default (`None`) fills NaN.
-fn where_other(
+/// Resolve the `other` argument of `where` / `mask` to a length-`n` fill column
+/// plus the dtype it contributes to the result. A scalar broadcasts (its dtype is
+/// value-based: an integral value contributes int); a Series contributes its own
+/// dtype (index-aligned); the default (`None`) fills NaN (float).
+fn where_other_resolve(
     other: Option<&Bound<'_, PyAny>>,
-    index: &Arc<Index>,
-    n: usize,
-) -> PyResult<Vec<f64>> {
+    s: &Series,
+) -> PyResult<(Column, DType)> {
+    let n = s.len();
     match other {
-        None => Ok(vec![f64::NAN; n]),
+        None => Ok((Column::f64(vec![f64::NAN; n]), DType::F64)),
         Some(o) => {
-            if let Ok(s) = o.extract::<PyRef<PySeries>>() {
-                require_aligned(index, &s.inner.index)?;
-                Ok(s.inner.data.to_f64_vec())
+            if let Ok(ser) = o.extract::<PyRef<PySeries>>() {
+                require_aligned(&s.index, &ser.inner.index)?;
+                let dt = ser.inner.data.dtype();
+                Ok((ser.inner.data.clone(), dt))
             } else if let Ok(x) = o.extract::<f64>() {
-                Ok(vec![x; n])
+                let dt = if fits(DType::I64, x) { DType::I64 } else { DType::F64 };
+                Ok((Column::f64(vec![x; n]), dt))
             } else {
                 Err(PyTypeError::new_err(
                     "where/mask: `other` must be a number or a Series",
@@ -1884,22 +1919,27 @@ impl PyDataFrame {
             ));
         }
         let fill = other.unwrap_or(f64::NAN);
+        let other_dt = match other {
+            Some(x) if fits(DType::I64, x) => DType::I64,
+            _ => DType::F64,
+        };
         let cols = self
             .inner
             .columns()
             .iter()
             .zip(cond.inner.columns())
             .map(|(keep_col, cond_col)| {
-                let keep = keep_col.to_f64_vec();
-                let oth = vec![fill; keep.len()];
-                let c = to_bool_vec(cond_col);
-                Column::f64(if is_where {
-                    stats::select(&c, &keep, &oth)
-                } else {
-                    stats::select(&c, &oth, &keep)
-                })
+                // mask = where(!cond); pick per column in its own promoted dtype.
+                let mut c = to_bool_vec(cond_col);
+                if !is_where {
+                    c.iter_mut().for_each(|b| *b = !*b);
+                }
+                let target = binary_supertype(keep_col.dtype(), other_dt);
+                let other_col = Column::f64(vec![fill; keep_col.len()]);
+                keep_col.select(&c, &other_col, target)
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(pyerr)?;
         self.with_columns(cols)
     }
 
@@ -2543,18 +2583,18 @@ impl PyDataFrame {
     /// rounding; non-float columns are unchanged.
     #[pyo3(signature = (decimals = 0))]
     fn round(&self, decimals: i32) -> PyResult<PyDataFrame> {
-        let factor = 10f64.powi(decimals);
+        // Round numeric columns dtype-preservingly (banker's f64, integer-exact
+        // i64); leave bool / str / datetime untouched, like pandas df.round.
         let cols: Vec<Column> = self
             .inner
             .columns()
             .iter()
-            .map(|c| match c {
-                Column::F64(v) => {
-                    Column::f64(v.iter().map(|&x| (x * factor).round_ties_even() / factor).collect())
-                }
-                other => other.clone(),
+            .map(|c| match c.dtype() {
+                DType::F64 | DType::I64 => c.round(decimals),
+                _ => Ok(c.clone()),
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(pyerr)?;
         self.with_columns(cols)
     }
 

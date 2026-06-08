@@ -493,11 +493,7 @@ impl Column {
     /// Element-wise absolute value (pandas `abs`), dtype-preserving. `abs` of a
     /// missing (`NaN`) stays missing; `abs(i64::MIN)` wraps to `i64::MIN` (pandas).
     pub fn abs(&self) -> Result<Column> {
-        numeric_dispatch!(self, v => Numeric::into_column(
-            v.iter()
-                .map(|&x| if x.is_missing() { x } else { x.wrapping_abs() })
-                .collect::<Vec<_>>()
-        ))
+        numeric_dispatch!(self, v => Numeric::into_column(stats::abs(v)))
     }
 
     /// Round to `decimals` places (pandas `round`), dtype-preserving: banker's

@@ -57,6 +57,15 @@ fn cum_extreme<T: Numeric>(v: &[T], want_max: bool) -> Vec<T> {
         .collect()
 }
 
+/// Element-wise absolute value (pandas `abs`), dtype-preserving; a missing value
+/// passes through. Generic so the wrapping `abs` resolves to the [`Numeric`] impl
+/// (matching pandas int64 overflow: `abs(i64::MIN) == i64::MIN`).
+pub fn abs<T: Numeric>(v: &[T]) -> Vec<T> {
+    v.iter()
+        .map(|&x| if x.is_missing() { x } else { x.wrapping_abs() })
+        .collect()
+}
+
 /// Cumulative product (pandas `cumprod`, skipna=True), dtype-preserving.
 pub fn cumprod<T: Numeric>(v: &[T]) -> Vec<T> {
     let mut acc = T::ONE;

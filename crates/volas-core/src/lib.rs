@@ -15,7 +15,7 @@ pub mod stats;
 pub mod tz;
 
 pub use column::{BinOp, Column, SetVal};
-pub use numeric::Numeric;
+pub use numeric::{binary_supertype, fits, Numeric};
 pub use dataframe::DataFrame;
 pub use dtype::DType;
 pub use error::{Result, VolasError};
