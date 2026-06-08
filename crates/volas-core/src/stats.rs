@@ -81,9 +81,42 @@ pub fn cumprod<T: Numeric>(v: &[T]) -> Vec<T> {
         .collect()
 }
 
-/// NaN-skipping product (1.0 when empty / all-NaN, matching pandas).
-pub fn prod(v: &[f64]) -> f64 {
-    v.iter().filter(|x| !x.is_nan()).product()
+/// Missing-skipping sum (`0` when empty / all-missing, matching pandas),
+/// dtype-preserving (i64 sums in i64, wrapping like pandas).
+pub fn sum<T: Numeric>(v: &[T]) -> T {
+    let mut acc = T::ZERO;
+    for &x in v {
+        if !x.is_missing() {
+            acc = acc.wrapping_add(x);
+        }
+    }
+    acc
+}
+
+/// Missing-skipping product (`1` when empty / all-missing, matching pandas),
+/// dtype-preserving.
+pub fn prod<T: Numeric>(v: &[T]) -> T {
+    let mut acc = T::ONE;
+    for &x in v {
+        if !x.is_missing() {
+            acc = acc.wrapping_mul(x);
+        }
+    }
+    acc
+}
+
+/// Missing-skipping minimum (`want_max = false`) / maximum, dtype-preserving;
+/// `None` when empty / all-missing. The `want_max` branch is hoisted out of the
+/// loop so each fold is a single tight comparison (as fast as a specialized
+/// min/max, and no intermediate allocation).
+pub fn extreme<T: Numeric>(v: &[T], want_max: bool) -> Option<T> {
+    let mut it = v.iter().copied().filter(|x| !x.is_missing());
+    let first = it.next()?;
+    Some(if want_max {
+        it.fold(first, |a, x| if x > a { x } else { a })
+    } else {
+        it.fold(first, |a, x| if x < a { x } else { a })
+    })
 }
 
 /// The finite (non-NaN) values, in order.
@@ -297,10 +330,23 @@ mod tests {
     }
 
     #[test]
-    fn product_skips_nan_and_empty_is_one() {
+    fn reductions_skip_missing_and_preserve_dtype() {
+        // float: skip NaN; empty/all-NaN -> identity
         assert_eq!(prod(&[1.0, nan(), 2.0, 3.0]), 6.0);
         assert_eq!(prod(&[nan(), nan()]), 1.0);
-        assert_eq!(prod(&[]), 1.0);
+        assert_eq!(prod::<f64>(&[]), 1.0);
+        assert_eq!(sum(&[1.0, nan(), 2.0, 3.0]), 6.0);
+        assert_eq!(sum::<f64>(&[]), 0.0);
+        // int: native i64 (wrapping like pandas)
+        assert_eq!(sum(&[1_i64, 2, 3]), 6);
+        assert_eq!(prod(&[2_i64, 3, 4]), 24);
+        assert_eq!(sum(&[i64::MAX, 1]), i64::MIN); // wraps
+        // extreme: skip NaN, None when empty/all-missing
+        assert_eq!(extreme(&[3.0, nan(), 1.0, 2.0], false), Some(1.0));
+        assert_eq!(extreme(&[3.0, nan(), 1.0, 2.0], true), Some(3.0));
+        assert_eq!(extreme(&[1_i64, 5, 2], true), Some(5));
+        assert_eq!(extreme::<f64>(&[], false), None);
+        assert_eq!(extreme(&[nan(), nan()], true), None);
     }
 
     fn close(a: f64, b: f64) -> bool {

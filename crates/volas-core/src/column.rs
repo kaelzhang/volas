@@ -68,6 +68,19 @@ pub enum SetVal {
     Num(f64),
 }
 
+/// The result of a dtype-preserving scalar reduction ([`Column::sum`] etc.),
+/// carrying the value in its pandas result dtype so the binding can box it as the
+/// matching numpy scalar (`np.int64` / `np.float64` / `np.bool_`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Scalar {
+    /// A float result (`mean`, a float column's `sum`/`min`/`max`, …).
+    F64(f64),
+    /// An integer result (an int/bool column's `sum`/`prod`, an int `min`/`max`).
+    I64(i64),
+    /// A boolean result (a bool column's `min`/`max`).
+    Bool(bool),
+}
+
 /// A dtype-preserving binary arithmetic op for [`Column::binary`] (pandas
 /// `+ - *`). True division is always float, so it is [`Column::div`], not here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -605,6 +618,52 @@ impl Column {
         Ok(Column::f64(a.iter().zip(&b).map(|(&x, &y)| x / y).collect()))
     }
 
+    /// Sum, dtype-preserving (pandas): a float column -> float, int/bool -> i64
+    /// (bool counts trues). Computed natively (i64 in i64, exact past 2^53).
+    pub fn sum(&self) -> Scalar {
+        match self {
+            Column::F64(v) => Scalar::F64(stats::sum(v.as_slice())),
+            Column::I64(v) => Scalar::I64(stats::sum(v.as_slice())),
+            Column::Bool(v) => Scalar::I64(stats::sum(&bool_as_i64(v))),
+            other => Scalar::F64(stats::sum(&other.to_f64_vec())),
+        }
+    }
+
+    /// Product, dtype-preserving (float -> float, int/bool -> i64).
+    pub fn prod(&self) -> Scalar {
+        match self {
+            Column::F64(v) => Scalar::F64(stats::prod(v.as_slice())),
+            Column::I64(v) => Scalar::I64(stats::prod(v.as_slice())),
+            Column::Bool(v) => Scalar::I64(stats::prod(&bool_as_i64(v))),
+            other => Scalar::F64(stats::prod(&other.to_f64_vec())),
+        }
+    }
+
+    /// Minimum (`want_max = false`) / maximum, dtype-preserving (float -> float,
+    /// int -> i64, bool -> bool). Empty / all-missing -> `F64(NaN)`.
+    pub fn extreme(&self, want_max: bool) -> Scalar {
+        match self {
+            Column::I64(v) => match stats::extreme(v.as_slice(), want_max) {
+                Some(x) => Scalar::I64(x),
+                None => Scalar::F64(f64::NAN),
+            },
+            Column::Bool(v) => {
+                // min = all (AND), max = any (OR); empty -> NaN
+                if v.is_empty() {
+                    Scalar::F64(f64::NAN)
+                } else if want_max {
+                    Scalar::Bool(v.iter().any(|&b| b))
+                } else {
+                    Scalar::Bool(v.iter().all(|&b| b))
+                }
+            }
+            Column::F64(v) => Scalar::F64(stats::extreme(v.as_slice(), want_max).unwrap_or(f64::NAN)),
+            other => {
+                Scalar::F64(stats::extreme(&other.to_f64_vec(), want_max).unwrap_or(f64::NAN))
+            }
+        }
+    }
+
     /// The column as `i64` values: an `I64` column directly (exact), otherwise via
     /// lossless narrowing (errors if any value is non-integral / out of range).
     /// Used by the int paths of `select` / `binary`, where the caller has already
@@ -1108,6 +1167,31 @@ mod tests {
         assert_eq!(a.div(&b).unwrap().dtype(), F64);
         assert_eq!(a.div(&b).unwrap(), Column::f64(vec![2.5, 7.0 / 3.0]));
         let _ = I64;
+    }
+
+    #[test]
+    fn reductions_carry_result_dtype() {
+        use Scalar::{Bool as SB, F64, I64};
+        // sum / prod: float -> F64; int / bool -> I64; non-numeric -> F64 (f64 fallback)
+        assert_eq!(Column::f64(vec![1.0, f64::NAN, 2.0]).sum(), F64(3.0));
+        assert_eq!(Column::i64(vec![1, 2, 3]).sum(), I64(6));
+        assert_eq!(Column::bool(vec![true, false, true]).sum(), I64(2));
+        assert!(matches!(Column::str(vec!["a".into()]).sum(), F64(_)));
+        assert_eq!(Column::f64(vec![2.0, 3.0]).prod(), F64(6.0));
+        assert_eq!(Column::i64(vec![2, 3, 4]).prod(), I64(24));
+        assert_eq!(Column::bool(vec![true, true]).prod(), I64(1));
+        assert!(matches!(Column::str(vec!["a".into()]).prod(), F64(_)));
+        // min / max keep dtype: int -> I64, bool -> Bool, float -> F64
+        assert_eq!(Column::i64(vec![3, 1, 2]).extreme(false), I64(1));
+        assert_eq!(Column::i64(vec![3, 1, 2]).extreme(true), I64(3));
+        assert_eq!(Column::bool(vec![true, false, true]).extreme(false), SB(false)); // AND
+        assert_eq!(Column::bool(vec![true, false, true]).extreme(true), SB(true)); // OR
+        assert_eq!(Column::f64(vec![3.0, 1.0]).extreme(false), F64(1.0));
+        assert!(matches!(Column::str(vec!["a".into()]).extreme(true), F64(_)));
+        // empty / all-missing extreme -> NaN (F64)
+        assert!(matches!(Column::i64(vec![]).extreme(false), F64(x) if x.is_nan()));
+        assert!(matches!(Column::bool(vec![]).extreme(true), F64(x) if x.is_nan()));
+        assert!(matches!(Column::f64(vec![]).extreme(true), F64(x) if x.is_nan()));
     }
 
     #[test]

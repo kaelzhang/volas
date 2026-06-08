@@ -17,7 +17,7 @@ use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{
     binary_supertype, datetime, fits, stats, BinOp, Column, DType, DataFrame, Index, IndexKind,
-    Label, Series, SetVal, Tz, VolasError,
+    Label, Scalar, Series, SetVal, Tz, VolasError,
 };
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
@@ -280,6 +280,9 @@ fn np_f64(py: Python<'_>, x: f64) -> Py<PyAny> {
 fn np_i64(py: Python<'_>, x: i64) -> Py<PyAny> {
     numpy_scalar(py, DType::I64, &x.into_pyobject(py).unwrap())
 }
+fn np_bool(py: Python<'_>, b: bool) -> Py<PyAny> {
+    numpy_scalar(py, DType::Bool, &b.into_pyobject(py).unwrap().to_owned())
+}
 
 /// Element `i` as a **numpy** scalar (pandas' direct `s[i]` / `iloc` / `at`
 /// semantics), matching the column dtype. Bulk paths (`to_list`, iteration) use
@@ -291,6 +294,17 @@ fn np_scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
         Column::Bool(v) => numpy_scalar(py, DType::Bool, &v[i].into_pyobject(py).unwrap().to_owned()),
         // str -> Python str; datetime -> np.datetime64 (already numpy) — as scalar_to_py.
         Column::Str(_) | Column::Datetime(_) => scalar_to_py(py, col, i),
+    }
+}
+
+/// Box a [`Scalar`] reduction result as its matching numpy scalar (the external
+/// representation of `sum` / `min` / … — pandas returns `np.int64` / `np.float64`
+/// / `np.bool_`).
+fn scalar_to_numpy(py: Python<'_>, s: Scalar) -> Py<PyAny> {
+    match s {
+        Scalar::F64(x) => np_f64(py, x),
+        Scalar::I64(x) => np_i64(py, x),
+        Scalar::Bool(b) => numpy_scalar(py, DType::Bool, &b.into_pyobject(py).unwrap().to_owned()),
     }
 }
 
@@ -721,84 +735,54 @@ impl PySeries {
         }
     }
 
-    /// NaN-skipping mean of the values.
-    fn mean(&self) -> f64 {
-        let v = non_nan(&self.inner.data);
-        if v.is_empty() {
-            f64::NAN
-        } else {
-            v.iter().sum::<f64>() / v.len() as f64
-        }
-    }
+    // Reductions return numpy scalars (pandas' boundary representation). The
+    // dtype-preserving ones (sum/prod/min/max) carry the column's result dtype
+    // (np.int64 for an int column, etc.); the always-float statistics box np.float64.
 
-    /// NaN-skipping sum (0.0 when empty / all-NaN, matching pandas).
-    fn sum(&self) -> f64 {
-        non_nan(&self.inner.data).iter().sum()
+    /// NaN-skipping mean (pandas `mean`) -> `np.float64`.
+    fn mean(&self, py: Python<'_>) -> Py<PyAny> {
+        np_f64(py, self.mean_f64())
     }
-
-    /// NaN-skipping product (1.0 when empty / all-NaN, matching pandas).
-    fn prod(&self) -> f64 {
-        stats::prod(&self.inner.data.to_f64_vec())
+    /// Sum (pandas `sum`), dtype-preserving: float -> `np.float64`, int / bool ->
+    /// `np.int64` (computed natively).
+    fn sum(&self, py: Python<'_>) -> Py<PyAny> {
+        scalar_to_numpy(py, self.inner.data.sum())
     }
-
-    /// NaN-skipping minimum (NaN when empty / all-NaN).
-    fn min(&self) -> f64 {
-        non_nan(&self.inner.data)
-            .into_iter()
-            .fold(f64::NAN, |m, x| if m.is_nan() { x } else { m.min(x) })
+    /// Product (pandas `prod`), dtype-preserving.
+    fn prod(&self, py: Python<'_>) -> Py<PyAny> {
+        scalar_to_numpy(py, self.inner.data.prod())
     }
-
-    /// NaN-skipping maximum (NaN when empty / all-NaN).
-    fn max(&self) -> f64 {
-        non_nan(&self.inner.data)
-            .into_iter()
-            .fold(f64::NAN, |m, x| if m.is_nan() { x } else { m.max(x) })
+    /// Minimum (pandas `min`), dtype-preserving (int -> `np.int64`, etc.).
+    fn min(&self, py: Python<'_>) -> Py<PyAny> {
+        scalar_to_numpy(py, self.inner.data.extreme(false))
     }
-
-    /// NaN-skipping sample variance (`ddof=1`; NaN with fewer than 2 values).
-    fn var(&self) -> f64 {
-        let v = non_nan(&self.inner.data);
-        let n = v.len();
-        if n < 2 {
-            return f64::NAN;
-        }
-        let mean = v.iter().sum::<f64>() / n as f64;
-        v.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1) as f64
+    /// Maximum (pandas `max`), dtype-preserving.
+    fn max(&self, py: Python<'_>) -> Py<PyAny> {
+        scalar_to_numpy(py, self.inner.data.extreme(true))
     }
-
-    /// NaN-skipping sample standard deviation (`ddof=1`).
-    fn std(&self) -> f64 {
-        self.var().sqrt()
+    /// Sample variance (`ddof=1`, pandas `var`) -> `np.float64`.
+    fn var(&self, py: Python<'_>) -> Py<PyAny> {
+        np_f64(py, self.var_f64())
     }
-
-    /// NaN-skipping median.
-    fn median(&self) -> f64 {
-        let mut v = non_nan(&self.inner.data);
-        let n = v.len();
-        if n == 0 {
-            return f64::NAN;
-        }
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        if n % 2 == 1 {
-            v[n / 2]
-        } else {
-            (v[n / 2 - 1] + v[n / 2]) / 2.0
-        }
+    /// Sample standard deviation (`ddof=1`, pandas `std`) -> `np.float64`.
+    fn std(&self, py: Python<'_>) -> Py<PyAny> {
+        np_f64(py, self.var_f64().sqrt())
     }
-
-    /// NaN-skipping standard error of the mean (pandas `sem`, ddof=1).
-    fn sem(&self) -> f64 {
-        stats::sem(&self.inner.data.to_f64_vec())
+    /// Median (pandas `median`) -> `np.float64`.
+    fn median(&self, py: Python<'_>) -> Py<PyAny> {
+        np_f64(py, self.median_f64())
     }
-
-    /// NaN-skipping adjusted Fisher-Pearson skewness (pandas `skew`).
-    fn skew(&self) -> f64 {
-        stats::skew(&self.inner.data.to_f64_vec())
+    /// Standard error of the mean (`ddof=1`, pandas `sem`) -> `np.float64`.
+    fn sem(&self, py: Python<'_>) -> Py<PyAny> {
+        np_f64(py, stats::sem(&self.inner.data.to_f64_vec()))
     }
-
-    /// NaN-skipping excess kurtosis, Fisher's definition (pandas `kurt`).
-    fn kurt(&self) -> f64 {
-        stats::kurt(&self.inner.data.to_f64_vec())
+    /// Adjusted Fisher-Pearson skewness (pandas `skew`) -> `np.float64`.
+    fn skew(&self, py: Python<'_>) -> Py<PyAny> {
+        np_f64(py, stats::skew(&self.inner.data.to_f64_vec()))
+    }
+    /// Excess kurtosis, Fisher's definition (pandas `kurt`) -> `np.float64`.
+    fn kurt(&self, py: Python<'_>) -> Py<PyAny> {
+        np_f64(py, stats::kurt(&self.inner.data.to_f64_vec()))
     }
 
     /// Pairwise Pearson correlation with `other` (pandas `corr`); positional
@@ -816,16 +800,17 @@ impl PySeries {
     /// Summary statistics (pandas `describe`): a Series indexed by
     /// `count / mean / std / min / 25% / 50% / 75% / max`.
     fn describe(&self) -> PyResult<PySeries> {
+        let v = self.inner.data.to_f64_vec();
         let count = non_nan(&self.inner.data).len() as f64;
         let vals = vec![
             count,
-            self.mean(),
-            self.std(),
-            self.min(),
-            self.quantile(0.25)?,
-            self.quantile(0.5)?,
-            self.quantile(0.75)?,
-            self.max(),
+            self.mean_f64(),
+            self.var_f64().sqrt(),
+            stats::extreme(&v, false).unwrap_or(f64::NAN),
+            self.quantile_f64(0.25)?,
+            self.quantile_f64(0.5)?,
+            self.quantile_f64(0.75)?,
+            stats::extreme(&v, true).unwrap_or(f64::NAN),
         ];
         let labels = describe_labels();
         Ok(PySeries {
@@ -837,21 +822,23 @@ impl PySeries {
         })
     }
 
-    /// True if any element is truthy (NaN skipped) — pandas `any` (skipna=True).
-    fn any(&self) -> bool {
-        match &self.inner.data {
+    /// True if any element is truthy (NaN skipped) — pandas `any` -> `np.bool_`.
+    fn any(&self, py: Python<'_>) -> Py<PyAny> {
+        let r = match &self.inner.data {
             Column::Bool(v) => v.iter().any(|&b| b),
             other => other.to_f64_vec().iter().any(|&x| !x.is_nan() && x != 0.0),
-        }
+        };
+        np_bool(py, r)
     }
 
     /// True if every non-NaN element is truthy (empty / all-NaN -> True) — pandas
-    /// `all` (skipna=True).
-    fn all(&self) -> bool {
-        match &self.inner.data {
+    /// `all` -> `np.bool_`.
+    fn all(&self, py: Python<'_>) -> Py<PyAny> {
+        let r = match &self.inner.data {
             Column::Bool(v) => v.iter().all(|&b| b),
             other => other.to_f64_vec().iter().all(|&x| x.is_nan() || x != 0.0),
-        }
+        };
+        np_bool(py, r)
     }
 
     /// The values as a Python list of typed scalars (pandas `to_list`).
@@ -1078,20 +1065,10 @@ impl PySeries {
     }
 
     /// The `q`-quantile in `[0, 1]` (linear interpolation, NaN-skipping) — pandas
-    /// `quantile`.
+    /// `quantile` -> `np.float64`.
     #[pyo3(signature = (q = 0.5))]
-    fn quantile(&self, q: f64) -> PyResult<f64> {
-        if !(0.0..=1.0).contains(&q) {
-            return Err(PyValueError::new_err("quantile: q must be in [0, 1]"));
-        }
-        let mut v = non_nan(&self.inner.data);
-        if v.is_empty() {
-            return Ok(f64::NAN);
-        }
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let pos = q * (v.len() - 1) as f64;
-        let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
-        Ok(v[lo] + (v[hi] - v[lo]) * (pos - lo as f64))
+    fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
+        Ok(np_f64(py, self.quantile_f64(q)?))
     }
 
     /// The index **label** of the maximum value (NaN-skipping); raises on an
@@ -1356,6 +1333,53 @@ impl PySeries {
 }
 
 impl PySeries {
+    // Raw f64 reduction values (the public methods box these as numpy scalars;
+    // `describe` reuses them, so they stay unboxed here).
+    fn mean_f64(&self) -> f64 {
+        let v = non_nan(&self.inner.data);
+        if v.is_empty() {
+            f64::NAN
+        } else {
+            v.iter().sum::<f64>() / v.len() as f64
+        }
+    }
+    fn var_f64(&self) -> f64 {
+        let v = non_nan(&self.inner.data);
+        let n = v.len();
+        if n < 2 {
+            return f64::NAN;
+        }
+        let mean = v.iter().sum::<f64>() / n as f64;
+        v.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1) as f64
+    }
+    fn median_f64(&self) -> f64 {
+        let mut v = non_nan(&self.inner.data);
+        let n = v.len();
+        if n == 0 {
+            return f64::NAN;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            (v[n / 2 - 1] + v[n / 2]) / 2.0
+        }
+    }
+    /// The `q`-quantile as a raw f64 (linear interpolation, NaN-skipping).
+    fn quantile_f64(&self, q: f64) -> PyResult<f64> {
+        if !(0.0..=1.0).contains(&q) {
+            return Err(PyValueError::new_err("quantile: q must be in [0, 1]"));
+        }
+        let mut v = non_nan(&self.inner.data);
+        if v.is_empty() {
+            return Ok(f64::NAN);
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pos = q * (v.len() - 1) as f64;
+        let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+        Ok(v[lo] + (v[hi] - v[lo]) * (pos - lo as f64))
+    }
+
     /// The boolean mask for a `where` / `mask` condition, validating it matches
     /// this series' length (pandas requires equal-shape conditionals).
     fn cond_mask(&self, cond: &PySeries) -> PyResult<Vec<bool>> {
@@ -1951,13 +1975,13 @@ impl PyDataFrame {
 
     /// Reduce each numeric column to a scalar -> a Series indexed by column name
     /// (pandas column-wise `df.sem()` etc.; non-numeric columns are skipped).
-    fn reduce_cols(&self, op: impl Fn(&PySeries) -> f64) -> PySeries {
+    fn reduce_cols(&self, op: impl Fn(&Column) -> f64) -> PySeries {
         let mut names = Vec::new();
         let mut vals = Vec::new();
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
             if matches!(col.dtype(), DType::F64 | DType::I64) {
                 names.push(name.clone());
-                vals.push(op(&self.col_as_series(name, col)));
+                vals.push(op(col));
             }
         }
         PySeries {
@@ -2745,15 +2769,15 @@ impl PyDataFrame {
 
     /// Per-column standard error of the mean (pandas `sem`).
     fn sem(&self) -> PySeries {
-        self.reduce_cols(|s| s.sem())
+        self.reduce_cols(|c| stats::sem(&c.to_f64_vec()))
     }
     /// Per-column unbiased skewness (pandas `skew`).
     fn skew(&self) -> PySeries {
-        self.reduce_cols(|s| s.skew())
+        self.reduce_cols(|c| stats::skew(&c.to_f64_vec()))
     }
     /// Per-column unbiased excess kurtosis (pandas `kurt`).
     fn kurt(&self) -> PySeries {
-        self.reduce_cols(|s| s.kurt())
+        self.reduce_cols(|c| stats::kurt(&c.to_f64_vec()))
     }
 
     /// Per-column summary statistics over the numeric columns (pandas `describe`):

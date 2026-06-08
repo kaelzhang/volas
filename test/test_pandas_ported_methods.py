@@ -133,13 +133,13 @@ class TestAnyAll:
     def test_all_any(self):
         # ts = arange(10); bool = ts > 0
         bool_series = _s(list(range(10))) > 0
-        assert bool_series.all() is False
-        assert bool_series.any() is True
+        assert not bool_series.all()  # np.bool_, like pandas
+        assert bool_series.any()
 
     def test_all_any_numeric_skipna(self):
         # volas (float model): NaN is skipped, like pandas skipna=True
-        assert _s([nan, 1.0]).all() is True
-        assert _s([nan, 0.0]).any() is False
+        assert _s([nan, 1.0]).all()
+        assert not _s([nan, 0.0]).any()
 
 
 class TestIdxMinMax:

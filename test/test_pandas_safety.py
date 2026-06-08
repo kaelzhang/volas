@@ -61,31 +61,31 @@ def test_bool_dataframe_always_raises():
 # --- any / all (skipna=True) ------------------------------------------------
 
 def test_any_true_when_some_nonzero():
-    assert _df(a=[0.0, 0.0, 3.0])["a"].any() is True
+    assert _df(a=[0.0, 0.0, 3.0])["a"].any()  # np.bool_, like pandas
 
 
 def test_any_false_when_all_zero_or_nan():
-    assert _df(a=[0.0, 0.0, nan])["a"].any() is False
+    assert not _df(a=[0.0, 0.0, nan])["a"].any()
 
 
 def test_all_true_skips_nan():
-    assert _df(a=[1.0, 2.0, nan])["a"].all() is True
+    assert _df(a=[1.0, 2.0, nan])["a"].all()
 
 
 def test_all_false_when_a_value_is_zero():
-    assert _df(a=[1.0, 0.0])["a"].all() is False
+    assert not _df(a=[1.0, 0.0])["a"].all()
 
 
 def test_empty_all_true_any_false():
     s = _df(a=[])["a"]
-    assert s.all() is True
-    assert s.any() is False
+    assert s.all()
+    assert not s.any()
 
 
 def test_any_all_on_bool_column():
     mask = _df(a=[1.0, 2.0])["a"] > 1.5  # [False, True]
-    assert mask.any() is True
-    assert mask.all() is False
+    assert mask.any()
+    assert not mask.all()
 
 
 # --- Series alignment guard -------------------------------------------------

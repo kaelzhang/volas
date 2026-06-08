@@ -14,7 +14,7 @@ pub mod series;
 pub mod stats;
 pub mod tz;
 
-pub use column::{BinOp, Column, SetVal};
+pub use column::{BinOp, Column, Scalar, SetVal};
 pub use numeric::{binary_supertype, fits, Numeric};
 pub use dataframe::DataFrame;
 pub use dtype::DType;
