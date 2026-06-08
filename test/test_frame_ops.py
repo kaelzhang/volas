@@ -47,6 +47,14 @@ def test_astype_to_bool():
     np.testing.assert_array_equal(out['a'].to_numpy(), [False, True, True])
 
 
+def test_round_per_column_bankers():
+    # banker's rounding per float column; non-float columns unchanged
+    df = DataFrame({'a': [0.5, 1.5, 2.5], 's': ['x', 'y', 'z']})
+    out = df.round(0)
+    np.testing.assert_array_equal(out['a'].to_numpy(), [0, 2, 2])
+    assert list(out['s'].to_numpy()) == ['x', 'y', 'z']
+
+
 def test_astype_unknown_dtype_raises():
     df = DataFrame({'a': [1.0]})
     import pytest

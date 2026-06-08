@@ -88,6 +88,18 @@ def test_cumsum_skips_nan_in_place():
     np.testing.assert_array_equal(_s([1.0, nan, 2.0, 3.0]).cumsum().to_numpy(), [1, nan, 3, 6])
 
 
+def test_cummax_cummin_cumprod_skip_nan():
+    np.testing.assert_array_equal(_s([1.0, nan, 2.0, 4.0]).cummax().to_numpy(), [1, nan, 2, 4])
+    np.testing.assert_array_equal(_s([3.0, nan, 1.0, 2.0]).cummin().to_numpy(), [3, nan, 1, 1])
+    np.testing.assert_array_equal(_s([1.0, nan, 2.0, 4.0]).cumprod().to_numpy(), [1, nan, 2, 8])
+
+
+def test_prod_skips_nan_and_empty_is_one():
+    assert _s([1.0, nan, 2.0, 3.0]).prod() == 6.0
+    assert _s([nan, nan]).prod() == 1.0   # all-NaN -> 1.0 (pandas)
+    assert _s([]).prod() == 1.0           # empty -> 1.0
+
+
 def test_round_default_and_decimals_and_negative():
     np.testing.assert_array_equal(_s([1.4, 1.6]).round().to_numpy(), [1, 2])
     np.testing.assert_array_equal(_s([1.234, 2.567]).round(1).to_numpy(), [1.2, 2.6])

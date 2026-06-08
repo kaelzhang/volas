@@ -14,7 +14,9 @@ use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
-use volas_core::{datetime, Column, DType, DataFrame, Index, IndexKind, Label, Series, Tz, VolasError};
+use volas_core::{
+    datetime, stats, Column, DType, DataFrame, Index, IndexKind, Label, Series, Tz, VolasError,
+};
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
 
@@ -674,6 +676,11 @@ impl PySeries {
         non_nan(&self.inner.data).iter().sum()
     }
 
+    /// NaN-skipping product (1.0 when empty / all-NaN, matching pandas).
+    fn prod(&self) -> f64 {
+        stats::prod(&self.inner.data.to_f64_vec())
+    }
+
     /// NaN-skipping minimum (NaN when empty / all-NaN).
     fn min(&self) -> f64 {
         non_nan(&self.inner.data)
@@ -900,25 +907,24 @@ impl PySeries {
         })
     }
 
-    /// Cumulative sum: NaN is skipped in the running total and kept NaN in place
-    /// (pandas `cumsum`, skipna=True).
+    /// Cumulative sum (pandas `cumsum`, skipna=True).
     fn cumsum(&self) -> PySeries {
-        let mut acc = 0.0;
-        let out: Vec<f64> = self
-            .inner
-            .data
-            .to_f64_vec()
-            .iter()
-            .map(|&x| {
-                if x.is_nan() {
-                    f64::NAN
-                } else {
-                    acc += x;
-                    acc
-                }
-            })
-            .collect();
-        f64_series(&self.inner, out)
+        f64_series(&self.inner, stats::cumsum(&self.inner.data.to_f64_vec()))
+    }
+
+    /// Cumulative maximum (pandas `cummax`, skipna=True).
+    fn cummax(&self) -> PySeries {
+        f64_series(&self.inner, stats::cummax(&self.inner.data.to_f64_vec()))
+    }
+
+    /// Cumulative minimum (pandas `cummin`, skipna=True).
+    fn cummin(&self) -> PySeries {
+        f64_series(&self.inner, stats::cummin(&self.inner.data.to_f64_vec()))
+    }
+
+    /// Cumulative product (pandas `cumprod`, skipna=True).
+    fn cumprod(&self) -> PySeries {
+        f64_series(&self.inner, stats::cumprod(&self.inner.data.to_f64_vec()))
     }
 
     /// Round each value to `decimals` places (pandas `round`); NaN stays NaN.
@@ -2201,6 +2207,25 @@ impl PyDataFrame {
     /// Backward-fill NaN cells in every float column (pandas `bfill`).
     fn bfill(&self) -> PyResult<PyDataFrame> {
         self.fill_dir(false)
+    }
+
+    /// Round each float column to `decimals` places (pandas `round`), banker's
+    /// rounding; non-float columns are unchanged.
+    #[pyo3(signature = (decimals = 0))]
+    fn round(&self, decimals: i32) -> PyResult<PyDataFrame> {
+        let factor = 10f64.powi(decimals);
+        let cols: Vec<Column> = self
+            .inner
+            .columns()
+            .iter()
+            .map(|c| match c {
+                Column::F64(v) => {
+                    Column::f64(v.iter().map(|&x| (x * factor).round_ties_even() / factor).collect())
+                }
+                other => other.clone(),
+            })
+            .collect();
+        self.with_columns(cols)
     }
 
     /// Boolean mask of missing (NaN) cells -> a bool DataFrame (pandas `isna`);

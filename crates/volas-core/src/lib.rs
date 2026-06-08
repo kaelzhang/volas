@@ -10,6 +10,7 @@ pub mod dtype;
 pub mod error;
 pub mod index;
 pub mod series;
+pub mod stats;
 pub mod tz;
 
 pub use column::Column;
