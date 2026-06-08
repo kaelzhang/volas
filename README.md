@@ -1167,6 +1167,8 @@ df['hv:10,15m,365']
 df['hv:10']
 ```
 
+## Built-in Commands for Statistics
+
 ### `change`, Percentage Change
 
 ```
@@ -1275,19 +1277,19 @@ indicators also accept short aliases where documented by the parser, for example
 
 ```py
 # Ordinary defaulted positional arguments
-df.exec('macd.signal:12,26,9@close')
+df['macd.signal:12,26,9@close']
 
 # Directive command names are case-insensitive; column names after @ stay as written.
-df.exec('RSI:14@close')
+df['RSI:14@close']
 
 # Skip fast and slow defaults, override only the signal period
-df.exec('macd.signal:,,5')
+df['macd.signal:,,5']
 
 # A directive with multiple input series
-df.exec('stoch.d:5,3,0,3,0@high,low,close')
+df['stoch.d:5,3,0,3,0@high,low,close']
 
 # MAVP needs a second series for the variable period
-df.exec('mavp:2,30,0@close,periods')
+df['mavp:2,30,0@close,periods']
 ```
 
 The TA-Lib Math Transform group is exposed on `Series` rather than as directive
