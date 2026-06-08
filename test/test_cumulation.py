@@ -146,6 +146,12 @@ def test_tf_append_batch_matches_one_shot():
     assert df.equals(fine.cumulate('5m'))
 
 
+def test_cumulate_keeps_index_name():
+    # pandas resample keeps the source index name; volas matches
+    fine = get_1m()  # index named 'time_key'
+    assert fine.cumulate('5m').reset_index().columns[0] == 'time_key'
+
+
 def test_tf_append_step_lengths():
     fine = get_1m()
     df = _seed(fine)

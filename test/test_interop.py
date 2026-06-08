@@ -93,3 +93,33 @@ def test_to_csv_string_and_file(tmp_path):
     assert lines[0] == 'a,b'
     df2 = volas.read_csv(str(p))            # round-trips
     assert df2.columns == ['a', 'b']
+
+
+def test_equals_ignores_index_name():
+    # pandas .equals ignores the index name; volas matches (same values, different name -> equal)
+    a = DataFrame({'A': [1.0, 2.0], 'k': [7, 8]}).set_index('k')
+    b = DataFrame({'A': [1.0, 2.0], 'j': [7, 8]}).set_index('j')
+    assert a.equals(b)
+
+
+def test_to_pandas_carries_index_name():
+    v = DataFrame({'A': [1.0, 2.0], 'k': [7, 8]}).set_index('k')
+    assert v.to_pandas().index.name == 'k'
+
+
+def test_to_csv_named_index_round_trips(tmp_path):
+    v = DataFrame({'A': [1.0, 2.0], 'k': [7, 8]}).set_index('k')
+    csv = v.to_csv()
+    assert csv.splitlines()[0] == 'k,A'          # the index name (pandas parity)
+    p = tmp_path / "named.csv"
+    p.write_text(csv)
+    back = volas.read_csv(str(p), index_col='k')  # restores the named index
+    assert back.columns == ['A']
+    assert back.reset_index().columns[0] == 'k'
+
+
+def test_read_csv_empty_header_is_unnamed(tmp_path):
+    # an empty header field becomes "Unnamed: {i}" (pandas parity)
+    p = tmp_path / "empty.csv"
+    p.write_text(",A\n0,1.0\n1,2.0\n")
+    assert volas.read_csv(str(p)).columns == ['Unnamed: 0', 'A']
