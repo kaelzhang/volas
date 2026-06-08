@@ -30,6 +30,18 @@ pub enum Column {
     Datetime(Arc<Vec<i64>>),
 }
 
+/// A scalar to assign into a column (boolean-mask / positional assignment). Kept
+/// distinct from a plain `f64` so a real `bool` can be told from a number — they
+/// fit different dtypes (pandas rejects a number into a bool column, and an
+/// integral number stays in an int column while a real bool does not change it).
+#[derive(Clone, Copy, Debug)]
+pub enum SetVal {
+    /// A boolean scalar.
+    Bool(bool),
+    /// A numeric scalar (an integral, finite value can stay in an int column).
+    Num(f64),
+}
+
 impl Column {
     /// Build an `F64` column.
     pub fn f64(v: Vec<f64>) -> Column {
@@ -347,6 +359,72 @@ impl Column {
         }
     }
 
+    /// Assign a scalar at the given positions, following pandas 3.0's in-place
+    /// dtype rules: keep the column dtype when the value fits losslessly; upcast
+    /// an int column to float for `NaN`; reject a lossy write (a non-integral
+    /// number into an int column, or a number into a bool column) with a `DType`
+    /// error — surfaces as `TypeError`, like pandas' `LossySetitemError`.
+    /// `positions` are assumed in bounds (callers validate the mask / index).
+    pub fn set_scalar_at(&self, positions: &[usize], value: SetVal) -> Result<Column> {
+        let lossy = |x: f64, dt: &str| VolasError::DType(format!("Invalid value '{x}' for dtype '{dt}'"));
+        match (self, value) {
+            (Column::F64(v), SetVal::Num(x)) => {
+                let mut nv = v.to_vec();
+                for &i in positions {
+                    nv[i] = x;
+                }
+                Ok(Column::f64(nv))
+            }
+            (Column::F64(v), SetVal::Bool(b)) => {
+                let x = if b { 1.0 } else { 0.0 };
+                let mut nv = v.to_vec();
+                for &i in positions {
+                    nv[i] = x;
+                }
+                Ok(Column::f64(nv))
+            }
+            (Column::I64(v), SetVal::Num(x)) => {
+                if x.is_nan() {
+                    // NaN cannot live in int64 -> upcast the column to float (pandas).
+                    let mut nv: Vec<f64> = v.iter().map(|&n| n as f64).collect();
+                    for &i in positions {
+                        nv[i] = x;
+                    }
+                    Ok(Column::f64(nv))
+                } else if x.is_finite() && x.fract() == 0.0 {
+                    let iv = x as i64;
+                    let mut nv = v.to_vec();
+                    for &i in positions {
+                        nv[i] = iv;
+                    }
+                    Ok(Column::i64(nv))
+                } else {
+                    Err(lossy(x, "int64"))
+                }
+            }
+            (Column::I64(v), SetVal::Bool(b)) => {
+                let iv = b as i64;
+                let mut nv = v.to_vec();
+                for &i in positions {
+                    nv[i] = iv;
+                }
+                Ok(Column::i64(nv))
+            }
+            (Column::Bool(v), SetVal::Bool(b)) => {
+                let mut nv = v.to_vec();
+                for &i in positions {
+                    nv[i] = b;
+                }
+                Ok(Column::bool(nv))
+            }
+            (Column::Bool(_), SetVal::Num(x)) => Err(lossy(x, "bool")),
+            (other, _) => Err(VolasError::DType(format!(
+                "cannot assign a scalar into a {} column",
+                other.dtype()
+            ))),
+        }
+    }
+
     /// Render each value as a `String` (for `astype(str)`).
     fn to_string_vec(&self) -> Vec<String> {
         match self {
@@ -604,5 +682,30 @@ mod tests {
             vec!["1.5".to_string()]
         );
         assert_eq!(Column::i64(vec![3]).to_string_vec(), vec!["3".to_string()]);
+    }
+
+    #[test]
+    fn set_scalar_at_follows_pandas_dtype_rules() {
+        use SetVal::{Bool, Num};
+        // F64 stays F64 for a number or a bool.
+        let f = Column::f64(vec![1.0, 2.0, 3.0]);
+        assert_eq!(f.set_scalar_at(&[1], Num(9.0)).unwrap(), Column::f64(vec![1.0, 9.0, 3.0]));
+        assert_eq!(f.set_scalar_at(&[0], Bool(false)).unwrap(), Column::f64(vec![0.0, 2.0, 3.0]));
+        // I64 keeps int for an integral number or a bool.
+        let i = Column::i64(vec![1, 2, 3]);
+        assert_eq!(i.set_scalar_at(&[2], Num(0.0)).unwrap(), Column::i64(vec![1, 2, 0]));
+        assert_eq!(i.set_scalar_at(&[0], Bool(false)).unwrap(), Column::i64(vec![0, 2, 3]));
+        // I64 + NaN upcasts the whole column to float.
+        let up = i.set_scalar_at(&[1], Num(f64::NAN)).unwrap();
+        assert_eq!(up.dtype(), DType::F64);
+        assert!(matches!(&up, Column::F64(v) if v[0] == 1.0 && v[1].is_nan() && v[2] == 3.0));
+        // I64 + a non-integral number is lossy -> error.
+        assert!(i.set_scalar_at(&[0], Num(2.5)).is_err());
+        // Bool keeps bool for a bool; a number into bool is lossy -> error.
+        let b = Column::bool(vec![true, false]);
+        assert_eq!(b.set_scalar_at(&[1], Bool(true)).unwrap(), Column::bool(vec![true, true]));
+        assert!(b.set_scalar_at(&[0], Num(0.0)).is_err());
+        // A scalar into a str column is unsupported -> error.
+        assert!(Column::str(vec!["a".into()]).set_scalar_at(&[0], Num(1.0)).is_err());
     }
 }

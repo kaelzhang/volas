@@ -15,7 +15,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{
-    datetime, stats, Column, DType, DataFrame, Index, IndexKind, Label, Series, Tz, VolasError,
+    datetime, stats, Column, DType, DataFrame, Index, IndexKind, Label, Series, SetVal, Tz,
+    VolasError,
 };
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
@@ -1160,31 +1161,35 @@ impl PySeries {
     }
 
     /// In-place assignment by boolean mask (`s[mask] = v`) or integer position
-    /// (`s[i] = v`). The fill is a scalar; the column is taken as float (volas's
-    /// numeric model), so assigning into an int/bool series yields a float one.
-    fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: f64) -> PyResult<()> {
+    /// (`s[i] = v`). Follows pandas 3.0 dtype rules: the column dtype is kept when
+    /// the value fits (an integral number stays in an int series), `NaN` upcasts
+    /// an int series to float, and a lossy write (e.g. `2.5` into an int series)
+    /// raises `TypeError`.
+    fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let n = self.inner.len();
-        let mut v = self.inner.data.to_f64_vec();
-        if let Some(mask) = bool_mask_key(key)? {
+        let positions: Vec<usize> = if let Some(mask) = bool_mask_key(key)? {
             if mask.len() != n {
                 return Err(PyValueError::new_err(format!(
                     "boolean mask length {} != series length {n}",
                     mask.len()
                 )));
             }
-            for (i, &m) in mask.iter().enumerate() {
-                if m {
-                    v[i] = value;
-                }
-            }
+            mask.iter()
+                .enumerate()
+                .filter_map(|(i, &m)| m.then_some(i))
+                .collect()
         } else if let Ok(i) = key.extract::<isize>() {
-            v[norm_idx(i, n)?] = value;
+            vec![norm_idx(i, n)?]
         } else {
             return Err(PyTypeError::new_err(
                 "Series assignment takes a boolean mask or an integer position",
             ));
-        }
-        self.inner.data = Column::f64(v);
+        };
+        self.inner.data = self
+            .inner
+            .data
+            .set_scalar_at(&positions, extract_set_val(value)?)
+            .map_err(pyerr)?;
         Ok(())
     }
 
@@ -1564,6 +1569,21 @@ fn where_other(
     }
 }
 
+/// The scalar fill for a boolean-mask / positional assignment. A real `bool` is
+/// kept distinct from a number (they fit different column dtypes — see
+/// [`SetVal`]); `bool` is tried first because Python `bool` is an `int` subclass.
+fn extract_set_val(value: &Bound<'_, PyAny>) -> PyResult<SetVal> {
+    if let Ok(b) = value.extract::<bool>() {
+        Ok(SetVal::Bool(b))
+    } else if let Ok(x) = value.extract::<f64>() {
+        Ok(SetVal::Num(x))
+    } else {
+        Err(PyTypeError::new_err(
+            "assignment value must be a number or a bool",
+        ))
+    }
+}
+
 /// Element-wise boolean logic -> bool Series (both operands coerced to bool).
 fn series_logical(
     s: &Series,
@@ -1895,9 +1915,10 @@ impl PyDataFrame {
         Ok(())
     }
 
-    /// `df[row_mask] = v`: set every column's True rows to the scalar (taken as
-    /// float), matching pandas' whole-row boolean assignment.
-    fn assign_row_mask(&mut self, mask: &[bool], value: f64) -> PyResult<()> {
+    /// `df[row_mask] = v`: set every column's True rows to the scalar, keeping
+    /// each column's dtype (pandas' whole-row boolean assignment). Atomic — if any
+    /// column would take the value lossily, nothing is written.
+    fn assign_row_mask(&mut self, mask: &[bool], value: SetVal) -> PyResult<()> {
         if mask.len() != self.inner.height() {
             return Err(PyValueError::new_err(format!(
                 "boolean mask length {} != frame height {}",
@@ -1905,28 +1926,45 @@ impl PyDataFrame {
                 self.inner.height()
             )));
         }
+        let positions: Vec<usize> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &m)| m.then_some(i))
+            .collect();
         let cols = self
             .inner
             .columns()
             .iter()
-            .map(|c| {
-                let mut v = c.to_f64_vec();
-                for (i, &m) in mask.iter().enumerate() {
-                    if m {
-                        v[i] = value;
-                    }
-                }
-                Column::f64(v)
-            })
-            .collect();
+            .map(|c| c.set_scalar_at(&positions, value))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(pyerr)?;
         self.rebuild_with(cols)
     }
 
-    /// `df[bool_frame] = v`: per-cell assignment where the mask is True (the
-    /// in-place form of `mask`).
-    fn assign_cell_mask(&mut self, cond: &PyDataFrame, value: f64) -> PyResult<()> {
-        self.inner = self.where_mask(cond, Some(value), false)?.inner;
-        Ok(())
+    /// `df[bool_frame] = v`: per-cell assignment where the mask is True, keeping
+    /// each column's dtype. Atomic, like `assign_row_mask`.
+    fn assign_cell_mask(&mut self, cond: &PyDataFrame, value: SetVal) -> PyResult<()> {
+        if cond.inner.width() != self.inner.width() || cond.inner.height() != self.inner.height() {
+            return Err(PyValueError::new_err(
+                "df[mask] = v: `mask` must have the same shape as the frame",
+            ));
+        }
+        let cols = self
+            .inner
+            .columns()
+            .iter()
+            .zip(cond.inner.columns())
+            .map(|(col, cond_col)| {
+                let positions: Vec<usize> = to_bool_vec(cond_col)
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &m)| m.then_some(i))
+                    .collect();
+                col.set_scalar_at(&positions, value)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(pyerr)?;
+        self.rebuild_with(cols)
     }
 
     /// Per-cell NaN mask -> a bool frame; backs `isna` (want_na=true) / `notna`.
@@ -2618,13 +2656,11 @@ impl PyDataFrame {
     /// Copy-on-write: a prior `copy()` is unaffected.
     fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         // Boolean-mask assignment with a scalar fill: df[mask] = v
-        if let Ok(fill) = value.extract::<f64>() {
-            if let Some(mask) = bool_mask_key(key)? {
-                return self.assign_row_mask(&mask, fill);
-            }
-            if let Ok(cond) = key.extract::<PyRef<PyDataFrame>>() {
-                return self.assign_cell_mask(&cond, fill);
-            }
+        if let Some(mask) = bool_mask_key(key)? {
+            return self.assign_row_mask(&mask, extract_set_val(value)?);
+        }
+        if let Ok(cond) = key.extract::<PyRef<PyDataFrame>>() {
+            return self.assign_cell_mask(&cond, extract_set_val(value)?);
         }
         // Column assignment: df[name] = value
         let name: String = key.extract().map_err(|_| {

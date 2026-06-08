@@ -98,6 +98,63 @@ def test_series_mask_assignment_length_mismatch_raises():
         _s([1.0, 2.0, 3.0])[_bool_s([True, False])] = 0.0
 
 
+# --- assignment dtype rules (pandas 3.0: fit->keep, NaN->upcast, lossy->raise) -
+
+def _si(values):
+    return volas.DataFrame({"a": np.array(list(values), dtype=np.int64)})["a"]
+
+
+def test_int_series_assignment_keeps_int64():
+    z = _si([1, 2, 3, 4])
+    z[z > 2] = 0  # integral fill stays int64
+    assert z.dtype == "int64"
+    np.testing.assert_array_equal(z.to_numpy(), [1, 2, 0, 0])
+    z2 = _si([1, 2, 3, 4])
+    z2[z2 > 2] = 0.0  # an integral float is still lossless -> int64
+    assert z2.dtype == "int64"
+    z3 = _si([1, 2, 3, 4])
+    z3[1] = 9  # positional, same rule
+    assert z3.dtype == "int64"
+    np.testing.assert_array_equal(z3.to_numpy(), [1, 9, 3, 4])
+
+
+def test_int_series_assignment_nan_upcasts_to_float():
+    z = _si([1, 2, 3, 4])
+    z[z > 2] = float("nan")
+    assert z.dtype == "float64"
+    np.testing.assert_array_equal(z.to_numpy(), [1, 2, nan, nan])
+
+
+def test_int_series_lossy_assignment_raises():
+    z = _si([1, 2, 3, 4])
+    with pytest.raises(TypeError):
+        z[z > 2] = 2.5  # non-integral cannot fit int64 -> raise (no silent upcast)
+
+
+def test_float_series_assignment_stays_float():
+    z = _s([1.0, 2.0, 3.0, 4.0])
+    z[z > 2] = 0  # int fill into float column stays float
+    assert z.dtype == "float64"
+    np.testing.assert_array_equal(z.to_numpy(), [1, 2, 0, 0])
+
+
+def test_frame_mixed_dtype_row_assignment_keeps_per_column():
+    d = volas.DataFrame({"i": np.array([1, 2, 3], dtype=np.int64), "f": [1.0, 2.0, 3.0]})
+    d[d["i"] > 1] = 0  # 0 fits both columns -> each keeps its dtype
+    assert d["i"].dtype == "int64" and d["f"].dtype == "float64"
+    np.testing.assert_array_equal(d["i"].to_numpy(), [1, 0, 0])
+    np.testing.assert_array_equal(d["f"].to_numpy(), [1, 0, 0])
+
+
+def test_frame_lossy_row_assignment_raises_and_leaves_frame_unchanged():
+    d = volas.DataFrame({"i": np.array([1, 2, 3], dtype=np.int64), "f": [1.0, 2.0, 3.0]})
+    with pytest.raises(TypeError):
+        d[d["i"] > 1] = 0.5  # lossy for the int column
+    # atomic: nothing was written
+    assert d["i"].dtype == "int64"
+    np.testing.assert_array_equal(d["i"].to_numpy(), [1, 2, 3])
+
+
 # --- DataFrame.where / mask -------------------------------------------------
 
 def test_frame_where_and_mask_via_isna():
