@@ -66,6 +66,12 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         // pvt / nvi / pvi are cumulative — a lookback of 0 makes the engine refresh them on
         // append with its exact full-recompute fallback rather than a windowed fast-path.
         "pvt" | "nvi" | "pvi" => 0,
+        "dpo" => arg(args, 0, 20).saturating_sub(1),
+        "cmf" => arg(args, 0, 20).saturating_sub(1),
+        // chop's TR sum needs one prior close, so it warms up one bar past the window.
+        "chop" => arg(args, 0, 14),
+        // kst's slowest term is SMA15 over ROC30: 30 + 15 - 1.
+        "kst" => 44,
         "tr" => 1,
         "atr" => arg(args, 0, 14),
         "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),

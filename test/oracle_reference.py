@@ -80,7 +80,11 @@ def _rsi(x, n: int) -> pd.Series:
 def _true_range(h, lo, c) -> pd.Series:
     h, lo, c = _s(h), _s(lo), _s(c)
     pc = c.shift(1)
-    return pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
+    tr = pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
+    # The first bar has no prior close, so TR is undefined there (TA-Lib TRANGE /
+    # TradingView `ta.tr` default). pandas `.max(axis=1)` skips the NaN, so blank it.
+    tr[pc.isna()] = np.nan
+    return tr
 
 
 # --- Group A references (each cites its pinned source) ----------------------

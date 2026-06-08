@@ -786,6 +786,21 @@ fn exec_command(
             let volume = series_f64(df, series, 1, "volume")?;
             f64col(ind::pvi(&close, &volume))
         }
+        ("dpo", _) => f64col(ind::dpo(&close(0)?, arg_usize(args, 0, Some(20))?)),
+        ("cmf", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let volume = series_f64(df, series, 3, "volume")?;
+            f64col(ind::cmf(&high, &low, &close, &volume, arg_usize(args, 0, Some(20))?))
+        }
+        ("chop", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::chop(&high, &low, &close, arg_usize(args, 0, Some(14))?))
+        }
+        ("kst", _) => f64col(ind::kst(&close(0)?)),
         ("trix", _) => f64col(ind::trix(&close(0)?, arg_usize(args, 0, Some(30))?)),
         ("aroon", Some(dir @ ("up" | "down"))) => {
             let high = series_f64(df, series, 0, "high")?;
