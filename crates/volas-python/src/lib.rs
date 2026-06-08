@@ -12,6 +12,7 @@ use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{
@@ -232,6 +233,64 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
             .expect("np.datetime64")
             .into_any()
             .unbind(),
+    }
+}
+
+/// Cached numpy scalar **type** objects (`np.float64` etc.), so a boundary box is
+/// a single call rather than a re-import + attribute lookup per value. Holds only
+/// the numeric types that need boxing; `bool` / `str` / `datetime` are handled
+/// directly. Indexed by [`DType`] for `O(1)` lookup.
+struct NumpyTypes {
+    float64: Py<PyAny>,
+    int64: Py<PyAny>,
+    bool_: Py<PyAny>,
+}
+static NUMPY_TYPES: GILOnceCell<NumpyTypes> = GILOnceCell::new();
+fn numpy_types(py: Python<'_>) -> &'static NumpyTypes {
+    NUMPY_TYPES.get_or_init(py, || {
+        let np = py.import("numpy").expect("import numpy");
+        let ty = |n: &str| np.getattr(n).expect("numpy scalar type").unbind();
+        NumpyTypes {
+            float64: ty("float64"),
+            int64: ty("int64"),
+            bool_: ty("bool_"),
+        }
+    })
+}
+
+/// Box `value` as the numpy scalar `dtype` (the external-boundary representation,
+/// e.g. `np.float64(0.0)`); the call narrows it to the target type. Non-numeric
+/// dtypes never reach here.
+fn numpy_scalar(py: Python<'_>, dtype: DType, value: &Bound<'_, PyAny>) -> Py<PyAny> {
+    let t = numpy_types(py);
+    let ty = match dtype {
+        DType::F64 => &t.float64,
+        DType::I64 => &t.int64,
+        DType::Bool => &t.bool_,
+        _ => return value.clone().unbind(), // not a numpy-numeric dtype
+    };
+    ty.bind(py).call1((value,)).expect("numpy scalar box").unbind()
+}
+
+/// A boxed f64 / i64 / bool as its numpy scalar (`np.float64` / `np.int64` /
+/// `np.bool_`).
+fn np_f64(py: Python<'_>, x: f64) -> Py<PyAny> {
+    numpy_scalar(py, DType::F64, &x.into_pyobject(py).unwrap())
+}
+fn np_i64(py: Python<'_>, x: i64) -> Py<PyAny> {
+    numpy_scalar(py, DType::I64, &x.into_pyobject(py).unwrap())
+}
+
+/// Element `i` as a **numpy** scalar (pandas' direct `s[i]` / `iloc` / `at`
+/// semantics), matching the column dtype. Bulk paths (`to_list`, iteration) use
+/// [`scalar_to_py`] instead, which yields native Python scalars like pandas.
+fn np_scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
+    match col {
+        Column::F64(v) => np_f64(py, v[i]),
+        Column::I64(v) => np_i64(py, v[i]),
+        Column::Bool(v) => numpy_scalar(py, DType::Bool, &v[i].into_pyobject(py).unwrap().to_owned()),
+        // str -> Python str; datetime -> np.datetime64 (already numpy) — as scalar_to_py.
+        Column::Str(_) | Column::Datetime(_) => scalar_to_py(py, col, i),
     }
 }
 
@@ -1139,7 +1198,7 @@ impl PySeries {
         }
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.len())?;
-            return Ok(scalar_to_py(py, &self.inner.data, i));
+            return Ok(np_scalar_to_py(py, &self.inner.data, i));
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             return Ok(Py::new(py, slice_series(&self.inner, slice)?)?.into_any());
@@ -1151,7 +1210,7 @@ impl PySeries {
             .index
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-        Ok(scalar_to_py(py, &self.inner.data, pos))
+        Ok(np_scalar_to_py(py, &self.inner.data, pos))
     }
 
     /// In-place assignment by boolean mask (`s[mask] = v`) or integer position
@@ -1364,7 +1423,7 @@ impl SeriesILoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.len())?;
-            return Ok(scalar_to_py(py, &self.inner.data, i));
+            return Ok(np_scalar_to_py(py, &self.inner.data, i));
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             return Ok(Py::new(py, slice_series(&self.inner, slice)?)?.into_any());
@@ -1690,7 +1749,7 @@ impl PyRow {
     ///     the typed scalar at that column.
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let col = self.inner.column(key).map_err(pyerr)?;
-        Ok(scalar_to_py(py, col, 0))
+        Ok(np_scalar_to_py(py, col, 0))
     }
 
     /// The row's values as a ``(1, n_columns)`` float64 NumPy array.
@@ -3678,7 +3737,7 @@ fn project_cols(df: &DataFrame, cols: &[usize]) -> PyResult<DataFrame> {
 /// rows×cols -> a sub-frame.
 fn select_2d(py: Python<'_>, df: &DataFrame, rows: AxisSel, cols: AxisSel) -> PyResult<Py<PyAny>> {
     match (rows, cols) {
-        (AxisSel::One(i), AxisSel::One(j)) => Ok(scalar_to_py(py, &df.columns()[j], i)),
+        (AxisSel::One(i), AxisSel::One(j)) => Ok(np_scalar_to_py(py, &df.columns()[j], i)),
         (AxisSel::Many(r), AxisSel::One(j)) => {
             let sub = project_cols(df, &[j])?.take(&r);
             let name = sub.names()[0].clone();
@@ -3925,7 +3984,7 @@ impl DataFrameIat {
         ensure_fresh(&pf.inner)?;
         let i = norm_idx(key.0, pf.inner.height())?;
         let j = norm_idx(key.1, pf.inner.width())?;
-        Ok(scalar_to_py(py, &pf.inner.columns()[j], i))
+        Ok(np_scalar_to_py(py, &pf.inner.columns()[j], i))
     }
 
     /// `df.iat[i, j] = scalar` — set a single cell by position (copy-on-write).
@@ -3962,7 +4021,7 @@ impl DataFrameAt {
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
         let col = pf.inner.column(&key.1).map_err(pyerr)?;
-        Ok(scalar_to_py(py, col, i))
+        Ok(np_scalar_to_py(py, col, i))
     }
 
     /// `df.at[label, col] = scalar` — set a single cell by label + column name
@@ -4021,7 +4080,7 @@ impl SeriesLoc {
             .index
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-        Ok(scalar_to_py(py, &self.inner.data, pos))
+        Ok(np_scalar_to_py(py, &self.inner.data, pos))
     }
 }
 
