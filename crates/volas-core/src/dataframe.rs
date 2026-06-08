@@ -736,11 +736,12 @@ impl DataFrame {
     }
 
     /// Value equality (pandas `DataFrame.equals`): same column names + order,
-    /// same index, and value-equal columns (`NaN == NaN`).
+    /// same index *labels*, and value-equal columns (`NaN == NaN`). The index
+    /// *name* is metadata and is ignored, matching pandas (`.equals` ignores it).
     pub fn equals(&self, other: &DataFrame) -> bool {
         self.height == other.height
             && self.names == other.names
-            && self.index.as_ref() == other.index.as_ref()
+            && self.index.kind() == other.index.kind()
             && self
                 .columns
                 .iter()

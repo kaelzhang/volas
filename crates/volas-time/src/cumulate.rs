@@ -165,7 +165,9 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame>
     for (name, col) in names.iter().zip(period.columns()) {
         columns.push(spec.agg_for(name).reduce(col, &kept)?);
     }
-    DataFrame::new(names, columns, Some(Index::datetime(vec![start_ns], tz)))
+    // The aggregated index keeps the source index's name (pandas resample parity).
+    let index = Index::datetime(vec![start_ns], tz).with_name(period.index().name().map(String::from));
+    DataFrame::new(names, columns, Some(index))
 }
 
 #[cfg(test)]

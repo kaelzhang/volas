@@ -2459,6 +2459,11 @@ impl PyDataFrame {
                 .call_method1("tz_convert", (&tz,))?;
             pdf.setattr("index", aware)?;
         }
+        // Carry the index name onto the pandas index (pandas parity).
+        if let Some(name) = self.inner.index().name() {
+            let renamed = pdf.getattr("index")?.call_method1("rename", (name,))?;
+            pdf.setattr("index", renamed)?;
+        }
         Ok(pdf)
     }
 
@@ -2493,7 +2498,8 @@ impl PyDataFrame {
         let mut out = String::new();
         if header {
             if index {
-                out.push_str("index");
+                // pandas writes the index name, or an empty field for an unnamed index.
+                out.push_str(self.inner.index().name().unwrap_or(""));
                 out.push_str(sep);
             }
             let hdr: Vec<&str> = positions.iter().map(|&j| names[j].as_str()).collect();

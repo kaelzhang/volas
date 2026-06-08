@@ -53,7 +53,16 @@ pub fn read_csv(path: &str, opts: &ReadCsvOptions) -> Result<DataFrame> {
         rdr.headers()
             .map_err(|e| VolasError::Value(format!("bad CSV header: {e}")))?
             .iter()
-            .map(String::from)
+            .enumerate()
+            // An empty header field becomes `Unnamed: {i}` (pandas parity) — e.g.
+            // the empty index column `DataFrame.to_csv` writes for an unnamed index.
+            .map(|(i, h)| {
+                if h.is_empty() {
+                    format!("Unnamed: {i}")
+                } else {
+                    h.to_string()
+                }
+            })
             .collect()
     } else {
         Vec::new()

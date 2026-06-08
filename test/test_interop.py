@@ -85,7 +85,8 @@ def test_tz_roundtrip_volas_pandas_volas():
 def test_to_csv_string_and_file(tmp_path):
     df = DataFrame({'a': [1., 2.], 'b': [3., 4.]})
     s = df.to_csv()
-    assert s.splitlines()[0] == 'index,a,b'
+    # an unnamed index writes an empty header field (pandas 3.0), not "index"
+    assert s.splitlines()[0] == ',a,b'
     p = tmp_path / "o.csv"
     assert df.to_csv(str(p), index=False) is None
     lines = p.read_text().splitlines()
