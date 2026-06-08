@@ -18,9 +18,14 @@ use volas_core::{datetime, Column, DType, DataFrame, Index, IndexKind, Label, Se
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
 
+mod format;
 mod readers;
 mod timeframe;
 
+use format::{
+    cell_to_csv, index_label_csv, parse_float_format, render_frame, render_frame_html, render_row,
+    render_series, Dimensions, DisplayOpts,
+};
 use readers::read_csv;
 use timeframe::{build_agg_spec, resolve_time_frame, PyTimeFrame};
 
@@ -495,6 +500,17 @@ fn ensure_fresh(df: &DataFrame) -> PyResult<()> {
         ))
     } else {
         Ok(())
+    }
+}
+
+/// Parse an optional printf-style `float_format` spec (shared by `to_csv` /
+/// `to_string`), raising a `ValueError` on an unsupported form.
+fn parse_ff(float_format: Option<&str>) -> PyResult<Option<(Option<usize>, char)>> {
+    match float_format {
+        Some(f) => Ok(Some(parse_float_format(f).ok_or_else(|| {
+            PyValueError::new_err(format!("unsupported float_format \"{f}\""))
+        })?)),
+        None => Ok(None),
     }
 }
 
@@ -1070,13 +1086,33 @@ impl PySeries {
         Ok(scalar_to_py(py, &self.inner.data, pos))
     }
 
+    /// pandas-style vertical repr (`label   value` rows + a
+    /// `Name: <name>, dtype: <dtype>` footer), truncating to 5 head + 5 tail rows
+    /// past 60 (`display.max_rows` / `min_rows`). `str` and `repr` are identical.
     fn __repr__(&self) -> String {
-        format!(
-            "Series(name={:?}, dtype={}, len={})",
-            self.inner.name,
-            self.inner.dtype(),
-            self.inner.len()
-        )
+        let truncate = if self.inner.len() > 60 { Some(5) } else { None };
+        render_series(&self.inner, "NaN", None, truncate, true)
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+
+    /// Render the whole series as text (pandas `Series.to_string`): no truncation
+    /// by default and no `Name/dtype` footer; `max_rows` truncates.
+    #[pyo3(signature = (na_rep = "NaN", float_format = None, max_rows = None))]
+    fn to_string(
+        &self,
+        na_rep: &str,
+        float_format: Option<&str>,
+        max_rows: Option<usize>,
+    ) -> PyResult<String> {
+        let ff = parse_ff(float_format)?;
+        let truncate = match max_rows {
+            Some(m) if self.inner.len() > m => Some((m / 2).max(1)),
+            _ => None,
+        };
+        Ok(render_series(&self.inner, na_rep, ff, truncate, false))
     }
 
     // --- TA-Lib "Math Transform" group: element-wise, NaN-preserving (a NaN or an
@@ -1430,8 +1466,21 @@ impl PyRow {
         Ok(d)
     }
 
+    /// pandas-style vertical repr — like a row Series: `column   value` rows plus
+    /// a `Name: <row label>, dtype: <dtype>` footer (the row's single dtype, or
+    /// `object` when columns differ). `str` and `repr` are identical.
     fn __repr__(&self) -> String {
-        format!("Row(columns={:?})", self.inner.names())
+        render_row(&self.inner, true)
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+
+    /// Render the row as text without the `Name/dtype` footer (pandas
+    /// `Series.to_string`).
+    fn to_string(&self) -> String {
+        render_row(&self.inner, false)
     }
 }
 
@@ -2428,12 +2477,7 @@ impl PyDataFrame {
         float_format: Option<&str>,
     ) -> PyResult<Option<String>> {
         ensure_fresh(&self.inner)?;
-        let ff = match float_format {
-            Some(f) => Some(parse_float_format(f).ok_or_else(|| {
-                PyValueError::new_err(format!("unsupported float_format \"{f}\""))
-            })?),
-            None => None,
-        };
+        let ff = parse_ff(float_format)?;
         let names = self.inner.names();
         let positions: Vec<usize> = match &columns {
             Some(cols) => cols
@@ -2747,13 +2791,85 @@ impl PyDataFrame {
         self.refresh_computed(None)
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "DataFrame(columns={:?}, shape=({}, {}))",
-            self.inner.names(),
-            self.inner.height(),
-            self.inner.width()
-        )
+    /// pandas-style aligned-table repr: a left-justified index column + right-
+    /// justified data columns, truncating to 5 head + 5 tail rows past 60
+    /// (`display.max_rows` / `min_rows`) with a `[N rows x M columns]` footer.
+    /// `str` and `repr` are identical.
+    fn __repr__(&self) -> PyResult<String> {
+        ensure_fresh(&self.inner)?;
+        let truncate = if self.inner.height() > 60 { Some(5) } else { None };
+        let opts = DisplayOpts {
+            header: true,
+            index: true,
+            na_rep: "NaN",
+            float_format: None,
+            dimensions: Dimensions::OnTruncate,
+            truncate,
+        };
+        let cols: Vec<usize> = (0..self.inner.width()).collect();
+        Ok(render_frame(&self.inner, &cols, &opts))
+    }
+
+    fn __str__(&self) -> PyResult<String> {
+        self.__repr__()
+    }
+
+    /// Render the whole frame as text (pandas `DataFrame.to_string`), implementing
+    /// the core parameters. No truncation by default; `max_rows` truncates to 5
+    /// head + 5 tail (or `min_rows`). Legacy / non-applicable pandas params
+    /// (`sparsify`, `index_names`, `col_space`, `justify`, `formatters`,
+    /// `line_width`, `encoding`, `decimal`, `buf`) are intentionally omitted.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (columns = None, header = true, index = true, na_rep = "NaN", float_format = None, max_rows = None, min_rows = None, show_dimensions = false))]
+    fn to_string(
+        &self,
+        columns: Option<Vec<String>>,
+        header: bool,
+        index: bool,
+        na_rep: &str,
+        float_format: Option<&str>,
+        max_rows: Option<usize>,
+        min_rows: Option<usize>,
+        show_dimensions: bool,
+    ) -> PyResult<String> {
+        ensure_fresh(&self.inner)?;
+        let ff = parse_ff(float_format)?;
+        let col_pos: Vec<usize> = match &columns {
+            Some(cols) => cols
+                .iter()
+                .map(|n| {
+                    self.inner
+                        .column_pos(n)
+                        .ok_or_else(|| PyKeyError::new_err(format!("column \"{n}\" not found")))
+                })
+                .collect::<PyResult<_>>()?,
+            None => (0..self.inner.width()).collect(),
+        };
+        let truncate = match max_rows {
+            Some(m) if self.inner.height() > m => Some((min_rows.unwrap_or(m) / 2).max(1)),
+            _ => None,
+        };
+        let opts = DisplayOpts {
+            header,
+            index,
+            na_rep,
+            float_format: ff,
+            dimensions: if show_dimensions {
+                Dimensions::Always
+            } else {
+                Dimensions::Never
+            },
+            truncate,
+        };
+        Ok(render_frame(&self.inner, &col_pos, &opts))
+    }
+
+    /// Rich HTML table for Jupyter (`_repr_html_`). pandas defines this only on
+    /// DataFrame — a Series falls back to its text repr — so volas matches and
+    /// exposes it on DataFrame alone.
+    fn _repr_html_(&self) -> PyResult<String> {
+        ensure_fresh(&self.inner)?;
+        Ok(render_frame_html(&self.inner))
     }
 }
 
@@ -3113,74 +3229,6 @@ fn row_at(df: &DataFrame, i: usize) -> PyRow {
 fn take_frame(df: &DataFrame, positions: &[usize]) -> DataFrame {
     // Delegates to core `take`, which carries column aliases onto the new frame.
     df.take(positions)
-}
-
-/// Format the `i`-th cell of a column as a CSV field (`na_rep` for NaN).
-fn cell_to_csv(col: &Column, i: usize, na_rep: &str, ff: Option<(Option<usize>, char)>) -> String {
-    match col {
-        Column::F64(v) => {
-            if v[i].is_nan() {
-                na_rep.to_string()
-            } else {
-                match ff {
-                    Some((prec, kind)) => fmt_f64_with(prec, kind, v[i]),
-                    // Default: the shortest round-trippable form that keeps the
-                    // decimal point, so `1.0` writes as "1.0" (Rust's `to_string`
-                    // drops it to "1").
-                    None => format!("{:?}", v[i]),
-                }
-            }
-        }
-        Column::Bool(v) => if v[i] { "True" } else { "False" }.to_string(),
-        Column::I64(v) => v[i].to_string(),
-        Column::Str(v) => v[i].clone(),
-        Column::Datetime(v) => datetime::format_ns(v[i]),
-    }
-}
-
-/// Parse a printf-style float format `%[.prec](f|e|g)` (the common pandas
-/// `float_format` forms) into `(precision, kind)`; `None` if unrecognized.
-fn parse_float_format(fmt: &str) -> Option<(Option<usize>, char)> {
-    let body = fmt.strip_prefix('%')?;
-    let kind = body.chars().last()?;
-    if !matches!(kind, 'f' | 'e' | 'g') {
-        return None;
-    }
-    let prec = match body.strip_prefix('.') {
-        Some(rest) => Some(rest[..rest.len() - 1].parse().ok()?),
-        None if body.len() == 1 => None,
-        None => return None,
-    };
-    Some((prec, kind))
-}
-
-/// Apply a parsed [`parse_float_format`] spec to `x`.
-fn fmt_f64_with(prec: Option<usize>, kind: char, x: f64) -> String {
-    match kind {
-        'e' => match prec {
-            Some(p) => format!("{x:.p$e}"),
-            None => format!("{x:e}"),
-        },
-        'g' => match prec {
-            Some(p) => format!("{x:.p$}"),
-            None => format!("{x:?}"),
-        },
-        // 'f' — the only remaining kind `parse_float_format` admits.
-        _ => match prec {
-            Some(p) => format!("{x:.p$}"),
-            None => format!("{x:.6}"),
-        },
-    }
-}
-
-/// Format the `i`-th index label as a CSV field.
-fn index_label_csv(index: &Index, i: usize) -> String {
-    match index.kind() {
-        IndexKind::Range(_) => i.to_string(),
-        IndexKind::Int64(v) => v[i].to_string(),
-        IndexKind::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz),
-        IndexKind::Str(v) => v[i].clone(),
-    }
 }
 
 /// A positional slice: a contiguous `step == 1` slice uses `DataFrame::slice` (a

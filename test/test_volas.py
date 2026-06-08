@@ -127,11 +127,16 @@ def test_bool_mask_filter_via_numpy(stock):
 
 
 def test_series_repr(stock):
-    assert 'Series' in repr(stock['close'])
+    # pandas-style vertical repr with a Name/dtype footer (not the old summary)
+    last = repr(stock['close']).splitlines()[-1]
+    assert last.startswith('Name: close,') and last.endswith('dtype: float64')
 
 
 def test_dataframe_repr(stock):
-    assert 'DataFrame' in repr(stock)
+    # pandas-style aligned table, not the old `DataFrame(columns=..., shape=...)`
+    r = repr(stock)
+    assert 'shape=' not in r and 'columns=' not in r
+    assert 'close' in r
 
 
 def test_series_dtype_bool(stock):
