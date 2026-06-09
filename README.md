@@ -416,16 +416,20 @@ df = read_csv('data.tsv', sep='\t', header=False,  # no header -> '0'..'n-1'
 A top-level function that bridges a `pandas.DataFrame` (`pdf`) into volas (and
 `df.to_pandas()` bridges back). See [pandas interop](#pandas-interop).
 
-### to_datetime(obj, unit='ns') -> Series
+### to_datetime(obj, unit='ns', format=None) -> Series
 
 A top-level function that converts epoch numbers or datetime strings to a
 datetime `Series`, mirroring `pandas.to_datetime`. `obj` may be a `Series`, a 1-D
-NumPy array, or a list.
+NumPy array, or a list. A **missing** input (a float `NaN`, or a `volas.NA` in an
+int column) becomes `NaT`, like `pd.to_datetime`.
 
 - **obj** the values to convert — numeric epochs, datetime strings, or an
   already-datetime `Series` (returned unchanged).
 - **unit?** `str = 'ns'` the epoch unit for **numeric** input (`'s'` / `'ms'` /
   `'us'` / `'ns'`); sub-unit fractions are preserved, like `pd.to_datetime`.
+- **format?** `str | None = None` an explicit datetime format for **string**
+  input (pandas `format=`, e.g. `'%Y-%m-%d %H:%M:%S'`) — faster and unambiguous;
+  ignored for numeric input.
 
 Naive strings parse as UTC and offset-aware strings (`…+08:00`) are absolute. To
 *display* the resulting index in a zone, make it the index and tag the zone with
@@ -734,6 +738,13 @@ Supported frames (constant ⇄ label):
 | `TimeFrame.W1` | `'1w'` | Continuous Monday-start weeks, including runs that cross month boundaries. |
 | `TimeFrame.M1` | `'1M'` | Civil calendar month in the frame timezone. |
 | `TimeFrame.Y1` | `'1y'` | Civil calendar year in the frame timezone. |
+
+Every bucket is aligned in the **frame timezone's local wall-clock** while storage
+stays UTC: the hour-of-day frames (`2h`/`4h`/`6h`/`8h`/`12h`) start at local `00`
+and step in local hours; `3d` counts continuous 3-local-civil-day buckets keyed
+from the Unix epoch day in that zone (not reset at month boundaries); `1w` is
+Monday-start in local civil time. So a daily/weekly bar follows the local trading
+day, and a named zone makes the hour buckets DST-aware.
 
 `tf.unify(ts)` snaps a timestamp to the start of its bar (used internally by
 cumulation).

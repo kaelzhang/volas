@@ -12,10 +12,14 @@ if TYPE_CHECKING:
 def from_pandas(pdf: Any) -> DataFrame:
     """Build a volas ``DataFrame`` from a ``pandas.DataFrame``.
 
-    Numeric / bool columns are carried natively; string / object columns become string
-    columns; datetime columns and a datetime *index* are carried natively as
-    ``datetime64[ns]`` instants (no string round-trip), and a tz-aware index keeps its zone
-    for display. pandas is imported lazily, so volas stays pandas-free at import.
+    Numeric / bool columns are carried natively, with a pandas **nullable** column
+    (``Int64`` / ``boolean`` / ``string``) read back as the volas dtype + ``volas.NA``.
+    A pandas ``object`` column of plain strings is read as a ``str`` column; volas has
+    **no** ``object`` dtype, so an object column mixing strings with other values
+    (e.g. ``np.nan``) is rejected rather than silently widened. Datetime columns and a
+    datetime *index* are carried natively as ``datetime64[ns]`` instants (no string
+    round-trip), and a tz-aware index keeps its zone for display. pandas is imported
+    lazily, so volas stays pandas-free at import.
 
     Args:
         pdf (pandas.DataFrame): the source frame.
