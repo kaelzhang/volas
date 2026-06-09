@@ -91,3 +91,41 @@ def test_na_construction_from_none():
     # an all-None column, and a NaN-containing list, are float (NaN is a float value)
     assert volas.DataFrame({"a": [None, None]})["a"].dtype == "float64"
     assert volas.DataFrame({"a": [1, np.nan, 3]})["a"].dtype == "float64"
+
+
+def test_na_to_pandas_dtype_backend():
+    df = volas.DataFrame({"i": [1, None, 3], "b": [True, None, False], "f": [1.5, None, 2.5]})
+    # default 'numpy': numpy can't hold NA, so int/bool become float64 + NaN
+    p = df.to_pandas()
+    assert str(p["i"].dtype) == "float64" and str(p["f"].dtype) == "float64"
+    # 'numpy_nullable': faithful masked Int64 / boolean (float stays numpy)
+    pn = df.to_pandas(dtype_backend="numpy_nullable")
+    assert str(pn["i"].dtype) == "Int64"
+    assert str(pn["b"].dtype) == "boolean"
+    assert str(pn["f"].dtype) == "float64"
+    assert pn["i"].isna().tolist() == [False, True, False]
+    # an int32 column -> nullable Int32
+    fi32 = volas.DataFrame({"a": np.array([1, 2, 3], dtype=np.int32)}).shift()
+    assert str(fi32.to_pandas(dtype_backend="numpy_nullable")["a"].dtype) == "Int32"
+    with pytest.raises(ValueError):
+        df.to_pandas(dtype_backend="arrow")
+
+
+def test_na_from_pandas_nullable_round_trip():
+    import pandas as pd
+
+    pdf = pd.DataFrame(
+        {
+            "i": pd.array([1, None, 3], dtype="Int64"),
+            "b": pd.array([True, None, False], dtype="boolean"),
+        }
+    )
+    v = volas.from_pandas(pdf)
+    assert v["i"].dtype == "int64" and v["i"][1] is volas.NA
+    assert v["b"].dtype == "bool" and v["b"][1] is volas.NA
+    # lossless round-trip: volas int+NA -> pandas nullable -> volas int+NA
+    orig = volas.DataFrame({"i": [1, None, 3]})
+    rt = volas.from_pandas(orig.to_pandas(dtype_backend="numpy_nullable"))
+    assert rt["i"].dtype == "int64"
+    lst = rt["i"].to_list()
+    assert lst[0] == 1 and lst[1] is volas.NA and lst[2] == 3

@@ -225,6 +225,38 @@ fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> Bound<'py, PyAny> {
     }
 }
 
+/// A column as a pandas array for `to_pandas`. With `nullable`, an int/bool
+/// column becomes a pandas masked `Int64` / `Int32` / `boolean` (a faithful,
+/// lossless NA round-trip); otherwise it is the numpy export (a missing value
+/// becomes NaN, like `Int64.to_numpy()`).
+fn column_to_pandas<'py>(
+    py: Python<'py>,
+    pd: &Bound<'py, PyModule>,
+    col: &Column,
+    nullable: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    if !nullable {
+        return Ok(column_to_numpy(py, col));
+    }
+    let arrays = pd.getattr("arrays")?;
+    let mask = |val: &Validity, n: usize| {
+        (0..n).map(|i| !val.is_valid(i)).collect::<Vec<bool>>().into_pyarray(py)
+    };
+    match col {
+        Column::I64(v, val) => {
+            arrays.call_method1("IntegerArray", (v.to_vec().into_pyarray(py), mask(val, v.len())))
+        }
+        Column::I32(v, val) => {
+            arrays.call_method1("IntegerArray", (v.to_vec().into_pyarray(py), mask(val, v.len())))
+        }
+        Column::Bool(v, val) => {
+            arrays.call_method1("BooleanArray", (v.to_vec().into_pyarray(py), mask(val, v.len())))
+        }
+        // float (NaN in-band) / str / datetime have no nullable masked form here.
+        _ => Ok(column_to_numpy(py, col)),
+    }
+}
+
 fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
     match col {
         Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
@@ -3160,12 +3192,25 @@ impl PyDataFrame {
 
     /// Convert to a `pandas.DataFrame`. pandas is imported lazily (only here), so
     /// volas stays pandas-free at import.
-    fn to_pandas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (dtype_backend = "numpy"))]
+    fn to_pandas<'py>(&self, py: Python<'py>, dtype_backend: &str) -> PyResult<Bound<'py, PyAny>> {
         ensure_fresh(&self.inner)?;
+        // 'numpy' (default): an int/bool column with NA exports as float64+NaN, the
+        // most ecosystem-compatible form. 'numpy_nullable': a faithful, lossless
+        // masked Int64 / boolean. Mirrors pandas' own `dtype_backend`.
+        let nullable = match dtype_backend {
+            "numpy" => false,
+            "numpy_nullable" => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "dtype_backend must be 'numpy' or 'numpy_nullable', got {other:?}"
+                )))
+            }
+        };
         let pd = py.import("pandas")?;
         let data = PyDict::new(py);
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
-            data.set_item(name, column_to_numpy(py, col))?;
+            data.set_item(name, column_to_pandas(py, &pd, col, nullable)?)?;
         }
         let kwargs = PyDict::new(py);
         kwargs.set_item("index", index_to_numpy(py, self.inner.index())?)?;

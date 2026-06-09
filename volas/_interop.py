@@ -36,6 +36,13 @@ def from_pandas(pdf: Any) -> DataFrame:
         # datetime (naive or tz-aware) -> native UTC datetime64[ns]; no strftime round-trip.
         if pd.api.types.is_datetime64_any_dtype(s.dtype):
             return s.to_numpy(dtype='datetime64[ns]')
+        # A nullable masked int / boolean column becomes a list with None, so volas
+        # keeps the int/bool dtype with volas.NA — the faithful inverse of
+        # to_pandas(dtype_backend='numpy_nullable').
+        if pd.api.types.is_extension_array_dtype(s.dtype) and (
+            pd.api.types.is_integer_dtype(s.dtype) or pd.api.types.is_bool_dtype(s.dtype)
+        ):
+            return [None if pd.isna(v) else v for v in s.tolist()]
         if s.dtype == object:
             return s.tolist()
         return s.to_numpy()
