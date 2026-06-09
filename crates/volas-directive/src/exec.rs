@@ -560,6 +560,21 @@ fn exec_command(
                 f64col(ind::ttm_squeeze_momentum(&high, &low, &close, n))
             }
         }
+        ("pivot_points", sub) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let line = match sub {
+                Some("r1") => ind::PivotLine::R1,
+                Some("s1") => ind::PivotLine::S1,
+                Some("r2") => ind::PivotLine::R2,
+                Some("s2") => ind::PivotLine::S2,
+                Some("r3") => ind::PivotLine::R3,
+                Some("s3") => ind::PivotLine::S3,
+                _ => ind::PivotLine::Pp,
+            };
+            f64col(ind::pivot_points(&high, &low, &close, line))
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

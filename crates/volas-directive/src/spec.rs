@@ -99,6 +99,8 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         ("keltner", None | Some("middle" | "m")) => None,
         ("keltner", Some("u" | "upper")) => Some("upper".into()),
         ("keltner", Some("l" | "lower")) => Some("lower".into()),
+        // Pivot Points: the pivot itself is the main line; the R/S levels are sub-commands.
+        ("pivot_points", None | Some("p" | "pp")) => None,
         (_, Some(s)) => Some(s.to_string()),
         (_, None) => None,
     }
@@ -158,6 +160,7 @@ pub fn is_command(name: &str) -> bool {
             | "keltner"
             | "stoch_momentum"
             | "ttm_squeeze"
+            | "pivot_points"
             | "tr"
             | "atr"
             | "llv"
@@ -344,6 +347,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // ttm_squeeze: period, Bollinger σ-multiplier, Keltner range-multiplier.
         ("ttm_squeeze", None | Some("on")) => {
             (vec![Int(20), Float(2.0), Float(1.5)], vec!["high", "low", "close"])
+        }
+        // pivot_points: PP plus the R1/R2/R3 / S1/S2/S3 levels, all from the prior bar.
+        ("pivot_points", None | Some("r1" | "r2" | "r3" | "s1" | "s2" | "s3")) => {
+            (vec![], vec!["high", "low", "close"])
         }
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the

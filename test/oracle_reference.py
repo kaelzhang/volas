@@ -417,6 +417,20 @@ def mike(o, h, lo, c, v, n=12, line='weakr'):
     }[line]
 
 
+def pivot_points(o, h, lo, c, v, line='pp'):
+    """Standard floor Pivot Points (prior bar): PP=(H+L+C)/3; R1=2PP-L, S1=2PP-H,
+    R2=PP+(H-L), S2=PP-(H-L), R3=H+2(PP-L), S3=L-2(H-PP).
+    Source: Investopedia / floor-trader standard — Pivot Points."""
+    h, lo, c = _s(h).shift(1), _s(lo).shift(1), _s(c).shift(1)
+    pp = (h + lo + c) / 3.0
+    return {
+        'pp': pp,
+        'r1': 2 * pp - lo, 's1': 2 * pp - h,
+        'r2': pp + (h - lo), 's2': pp - (h - lo),
+        'r3': h + 2 * (pp - lo), 's3': lo - 2 * (h - pp),
+    }[line]
+
+
 def keltner(o, h, lo, c, v, ema_period=20, atr_period=10, mult=2.0, band=None):
     """Keltner Channels (modern): middle = EMA(close, ema_period); bands = middle ± mult*ATR.
     Source: StockCharts ChartSchool — Keltner Channels."""
@@ -512,4 +526,11 @@ CASES: list[tuple] = [
     ("stoch_momentum.signal:10,3,3", lambda o, h, lo, c, v: stoch_momentum(o, h, lo, c, v, 10, 3, 3, 'signal'), 1e-6),
     ("ttm_squeeze:20,2,1.5", lambda o, h, lo, c, v: ttm_squeeze(o, h, lo, c, v, 20, 2.0, 1.5, 'momentum'), 1e-6),
     ("ttm_squeeze.on:20,2,1.5", lambda o, h, lo, c, v: ttm_squeeze(o, h, lo, c, v, 20, 2.0, 1.5, 'on'), 1e-9),
+    ("pivot_points", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 'pp'), 1e-9),
+    ("pivot_points.r1", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 'r1'), 1e-9),
+    ("pivot_points.s1", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 's1'), 1e-9),
+    ("pivot_points.r2", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 'r2'), 1e-9),
+    ("pivot_points.s2", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 's2'), 1e-9),
+    ("pivot_points.r3", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 'r3'), 1e-9),
+    ("pivot_points.s3", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 's3'), 1e-9),
 ]

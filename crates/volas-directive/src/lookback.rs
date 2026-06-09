@@ -111,7 +111,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         },
         "wvad" => arg(args, 0, 24).saturating_sub(1),
         // cdp reads only the prior bar; mike's TYP±range is gated by the n-day HH/LL.
-        "cdp" => 1,
+        "cdp" | "pivot_points" => 1,
         "mike" => arg(args, 0, 12).saturating_sub(1),
         // keltner: middle = EMA (ema_period−1); bands also wait for the ATR (atr_period).
         "keltner" => {

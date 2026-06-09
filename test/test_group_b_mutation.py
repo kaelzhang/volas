@@ -29,6 +29,8 @@ DIRECTIVES = [
     'keltner', 'keltner.upper', 'keltner.lower',
     'stoch_momentum', 'stoch_momentum.signal',
     'ttm_squeeze', 'ttm_squeeze.on',
+    'pivot_points', 'pivot_points.r1', 'pivot_points.s1', 'pivot_points.r2',
+    'pivot_points.s2', 'pivot_points.r3', 'pivot_points.s3',
 ]
 
 

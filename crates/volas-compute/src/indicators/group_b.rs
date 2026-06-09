@@ -196,6 +196,42 @@ pub fn cdp(high: &[f64], low: &[f64], close: &[f64], line: CdpLine) -> Vec<f64> 
         .collect()
 }
 
+/// Which standard pivot-point level to emit.
+#[derive(Clone, Copy)]
+pub enum PivotLine {
+    Pp,
+    R1,
+    S1,
+    R2,
+    S2,
+    R3,
+    S3,
+}
+
+/// Standard floor Pivot Points, from the PRIOR bar: `PP = (H + L + C) / 3`; `R1 = 2·PP − L`,
+/// `S1 = 2·PP − H`, `R2 = PP + (H − L)`, `S2 = PP − (H − L)`, `R3 = H + 2·(PP − L)`,
+/// `S3 = L − 2·(H − PP)`. Source: Investopedia / floor-trader standard — Pivot Points.
+pub fn pivot_points(high: &[f64], low: &[f64], close: &[f64], line: PivotLine) -> Vec<f64> {
+    (0..high.len())
+        .map(|i| {
+            if i == 0 {
+                return f64::NAN;
+            }
+            let (h, l, c) = (high[i - 1], low[i - 1], close[i - 1]);
+            let pp = (h + l + c) / 3.0;
+            match line {
+                PivotLine::Pp => pp,
+                PivotLine::R1 => 2.0 * pp - l,
+                PivotLine::S1 => 2.0 * pp - h,
+                PivotLine::R2 => pp + (h - l),
+                PivotLine::S2 => pp - (h - l),
+                PivotLine::R3 => h + 2.0 * (pp - l),
+                PivotLine::S3 => l - 2.0 * (h - pp),
+            }
+        })
+        .collect()
+}
+
 /// Which MIKE support / resistance line to emit.
 #[derive(Clone, Copy)]
 pub enum MikeLine {

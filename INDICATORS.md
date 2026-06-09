@@ -740,6 +740,26 @@ df['ttm_squeeze']       # momentum histogram
 df['ttm_squeeze.on']    # 1.0 = squeeze on
 ```
 
+### `pivot_points`, Pivot Points
+
+```
+pivot_points@<high>,<low>,<close>
+pivot_points.r1@<high>,<low>,<close>   (also .r2, .r3)
+pivot_points.s1@<high>,<low>,<close>   (also .s2, .s3)
+```
+
+The floor-trader support / resistance levels computed from the **prior** bar: `PP = (H+L+C)/3`
+(the pivot), then `r1 = 2·PP − L`, `s1 = 2·PP − H`, `r2 = PP + (H−L)`, `s2 = PP − (H−L)`,
+`r3 = H + 2·(PP − L)`, `s3 = L − 2·(H − PP)`. `pivot_points.p` is an alias of the pivot.
+
+- **high? / low? / close?** `str` the input columns (read from the prior bar).
+
+```py
+df['pivot_points']      # the pivot
+df['pivot_points.r1']   # first resistance
+df['pivot_points.s1']   # first support
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change
