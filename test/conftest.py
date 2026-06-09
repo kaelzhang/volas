@@ -1,8 +1,43 @@
+import warnings
+
+
+_PANDAS_ORACLE_VERSION = None
+
 _TARGETED_BENCHMARK_TESTS = {
     'test_coverage',
     'test_coverage_extended',
     'test_coverage_after_append',
 }
+
+
+def _configure_pandas_oracle_warnings():
+    global _PANDAS_ORACLE_VERSION
+
+    try:
+        import pandas as pd
+    except ModuleNotFoundError:
+        _PANDAS_ORACLE_VERSION = 'not installed'
+        return
+
+    _PANDAS_ORACLE_VERSION = pd.__version__
+    warning_cls = getattr(pd.errors, 'PandasChangeWarning', None)
+    if warning_cls is not None:
+        # pandas is an oracle for the supported pandas-shaped API. Its migration
+        # warnings are compatibility failures, not background test noise.
+        warnings.simplefilter('error', warning_cls)
+    pandas4_warning_cls = getattr(pd.errors, 'Pandas4Warning', None)
+    if pandas4_warning_cls is not None and pandas4_warning_cls is not warning_cls:
+        warnings.simplefilter('error', pandas4_warning_cls)
+
+
+def pytest_configure(config):
+    _configure_pandas_oracle_warnings()
+
+
+def pytest_report_header(config):
+    if _PANDAS_ORACLE_VERSION is None:
+        _configure_pandas_oracle_warnings()
+    return f'pandas oracle: {_PANDAS_ORACLE_VERSION}'
 
 
 def pytest_addoption(parser):
