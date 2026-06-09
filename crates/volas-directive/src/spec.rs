@@ -95,6 +95,10 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         // Vortex has no primary line — both outputs are required sub-commands.
         ("vortex", Some("p" | "plus")) => Some("plus".into()),
         ("vortex", Some("m" | "minus")) => Some("minus".into()),
+        // Keltner: middle line (main) plus upper / lower bands.
+        ("keltner", None | Some("middle" | "m")) => None,
+        ("keltner", Some("u" | "upper")) => Some("upper".into()),
+        ("keltner", Some("l" | "lower")) => Some("lower".into()),
         (_, Some(s)) => Some(s.to_string()),
         (_, None) => None,
     }
@@ -151,6 +155,7 @@ pub fn is_command(name: &str) -> bool {
             | "wvad"
             | "cdp"
             | "mike"
+            | "keltner"
             | "tr"
             | "atr"
             | "llv"
@@ -324,6 +329,11 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // mike: six support/resistance lines — all required sub-commands, no primary line.
         ("mike", Some("weakr" | "midr" | "strongr" | "weaks" | "mids" | "strongs")) => {
             (vec![Int(12)], vec!["high", "low", "close"])
+        }
+        // keltner: middle = EMA(close) (ema_period only); bands add atr_period + multiplier.
+        ("keltner", None) => (vec![Int(20)], vec!["close"]),
+        ("keltner", Some("upper" | "lower")) => {
+            (vec![Int(20), Int(10), Float(2.0)], vec!["high", "low", "close"])
         }
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the

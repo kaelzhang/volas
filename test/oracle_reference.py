@@ -103,6 +103,18 @@ def _true_range(h, lo, c) -> pd.Series:
     return tr
 
 
+def _atr(h, lo, c, n: int) -> pd.Series:
+    """Wilder ATR (TA-Lib seeding): SMA of the first ``n`` true ranges (tr[0] is NaN), then
+    Wilder smoothing. Matches volas's ``atr``."""
+    tr = _true_range(h, lo, c).to_numpy()
+    out = np.full(len(tr), np.nan)
+    if len(tr) > n:
+        out[n] = float(np.nanmean(tr[1:n + 1]))
+        for i in range(n + 1, len(tr)):
+            out[i] = out[i - 1] * (n - 1) / n + tr[i] / n
+    return pd.Series(out)
+
+
 # --- Group A references (each cites its pinned source) ----------------------
 
 def bbi(o, h, lo, c, v):
@@ -379,6 +391,17 @@ def mike(o, h, lo, c, v, n=12, line='weakr'):
     }[line]
 
 
+def keltner(o, h, lo, c, v, ema_period=20, atr_period=10, mult=2.0, band=None):
+    """Keltner Channels (modern): middle = EMA(close, ema_period); bands = middle ± mult*ATR.
+    Source: StockCharts ChartSchool — Keltner Channels."""
+    mid = _ema(c, ema_period)
+    if band is None:
+        return mid
+    atr = _atr(h, lo, c, atr_period)
+    sign = 1.0 if band == 'upper' else -1.0
+    return mid + sign * mult * atr
+
+
 # --- the oracle case registry ----------------------------------------------
 # (directive, reference_fn(o,h,lo,c,v) -> Series, tolerance). The directive strings are
 # the proposed command interface the Group A implementation should match.
@@ -421,4 +444,7 @@ CASES: list[tuple] = [
     ("mike.weaks:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'weaks'), 1e-7),
     ("mike.mids:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'mids'), 1e-7),
     ("mike.strongs:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'strongs'), 1e-7),
+    ("keltner:20", lambda o, h, lo, c, v: keltner(o, h, lo, c, v, 20, 10, 2.0, None), 1e-6),
+    ("keltner.upper:20,10,2", lambda o, h, lo, c, v: keltner(o, h, lo, c, v, 20, 10, 2.0, 'upper'), 1e-6),
+    ("keltner.lower:20,10,2", lambda o, h, lo, c, v: keltner(o, h, lo, c, v, 20, 10, 2.0, 'lower'), 1e-6),
 ]

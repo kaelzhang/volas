@@ -503,6 +503,26 @@ fn exec_command(
             };
             f64col(ind::mike(&high, &low, &close, arg_usize(args, 0, Some(12))?, line))
         }
+        ("keltner", sub) => {
+            let ema_period = arg_usize(args, 0, Some(20))?;
+            match sub {
+                None => f64col(ind::ema(&series_f64(df, series, 0, "close")?, ema_period)),
+                _ => {
+                    let high = series_f64(df, series, 0, "high")?;
+                    let low = series_f64(df, series, 1, "low")?;
+                    let close = series_f64(df, series, 2, "close")?;
+                    f64col(ind::keltner_band(
+                        &close,
+                        &high,
+                        &low,
+                        ema_period,
+                        arg_usize(args, 1, Some(10))?,
+                        arg_f64(args, 2, 2.0)?,
+                        sub == Some("upper"),
+                    ))
+                }
+            }
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

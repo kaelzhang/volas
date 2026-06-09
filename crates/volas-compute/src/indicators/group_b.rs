@@ -229,3 +229,55 @@ pub fn mike(high: &[f64], low: &[f64], close: &[f64], n: usize, line: MikeLine) 
         })
         .collect()
 }
+
+/// Keltner Channel band (modern convention): `EMA(close, ema_period) ± mult · ATR(atr_period)`.
+/// `upper` selects the `+` band. The middle line is just `EMA(close)`, so callers emit that
+/// via `ema` directly. Source: StockCharts ChartSchool — Keltner Channels.
+pub fn keltner_band(
+    close: &[f64],
+    high: &[f64],
+    low: &[f64],
+    ema_period: usize,
+    atr_period: usize,
+    mult: f64,
+    upper: bool,
+) -> Vec<f64> {
+    let ema = super::ema(close, ema_period);
+    let atr = super::atr(high, low, close, atr_period);
+    let sign = if upper { 1.0 } else { -1.0 };
+    (0..close.len()).map(|i| ema[i] + sign * mult * atr[i]).collect()
+}
+
+/// Keltner band state `[ema, atr]` after a full compute, or `None` before both seed. The
+/// middle line reuses `ema_final_state`. Source: StockCharts ChartSchool — Keltner Channels.
+pub fn keltner_band_final_state(
+    close: &[f64],
+    high: &[f64],
+    low: &[f64],
+    ema_period: usize,
+    atr_period: usize,
+) -> Option<Vec<f64>> {
+    let e = super::ema_final_state(close, ema_period)?;
+    let a = super::atr_final_state(high, low, close, atr_period)?;
+    Some(vec![e[0], a[0]])
+}
+
+/// Resume a Keltner band over `[from, n)` by composing the EMA and ATR resumes — bit-identical
+/// to a full recompute. `None` at `from == 0` (the ATR resume declines).
+pub fn keltner_band_resume(
+    close: &[f64],
+    high: &[f64],
+    low: &[f64],
+    ema_period: usize,
+    atr_period: usize,
+    mult: f64,
+    upper: bool,
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let (e_vals, e_state) = super::ema_resume(close, ema_period, from, &state[0..1]);
+    let (a_vals, a_state) = super::atr_resume(high, low, close, atr_period, from, &state[1..2])?;
+    let sign = if upper { 1.0 } else { -1.0 };
+    let vals: Vec<f64> = (0..e_vals.len()).map(|i| e_vals[i] + sign * mult * a_vals[i]).collect();
+    Some((vals, vec![e_state[0], a_state[0]]))
+}

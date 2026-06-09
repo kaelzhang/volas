@@ -106,6 +106,25 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             ind::mass_index_final_state(&high, &low, arg_usize(args, 0, Some(25)).ok()?)
         }
 
+        // Keltner Channels (Group B): the middle line reuses the EMA state; the bands carry
+        // the EMA + ATR pair.
+        ("keltner", None) => ind::ema_final_state(
+            &series_f64(df, series, 0, "close").ok()?,
+            arg_usize(args, 0, Some(20)).ok()?,
+        ),
+        ("keltner", Some(_)) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            ind::keltner_band_final_state(
+                &close,
+                &high,
+                &low,
+                arg_usize(args, 0, Some(20)).ok()?,
+                arg_usize(args, 1, Some(10)).ok()?,
+            )
+        }
+
         // SAR family — carry the recurrence's loop state (trend, accel factor(s),
         // extreme point, current SAR, and the prior bar's high/low).
         ("sar", _) => {
@@ -685,6 +704,34 @@ pub fn execute_resume(
             let low = series_f64(df, series, 1, "low").ok()?;
             let (vals, st) =
                 ind::mass_index_resume(&high, &low, arg_usize(args, 0, Some(25)).ok()?, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+
+        // Keltner Channels (Group B): middle resumes the EMA; bands resume the EMA + ATR pair.
+        ("keltner", None) => {
+            let (vals, st) = ind::ema_resume(
+                &series_f64(df, series, 0, "close").ok()?,
+                arg_usize(args, 0, Some(20)).ok()?,
+                from_row,
+                prev_state,
+            );
+            Some((Column::f64(vals), st))
+        }
+        ("keltner", Some(sub)) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) = ind::keltner_band_resume(
+                &close,
+                &high,
+                &low,
+                arg_usize(args, 0, Some(20)).ok()?,
+                arg_usize(args, 1, Some(10)).ok()?,
+                arg_f64(args, 2, 2.0).ok()?,
+                sub == "upper",
+                from_row,
+                prev_state,
+            )?;
             Some((Column::f64(vals), st))
         }
 

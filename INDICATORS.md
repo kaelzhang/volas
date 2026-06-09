@@ -673,6 +673,29 @@ df['mike.strongr']   # strong resistance
 df['mike.weaks']     # weak support
 ```
 
+### `keltner`, Keltner Channels
+
+```
+keltner:<ema_period>@<close>
+keltner.upper:<ema_period>,<atr_period>,<mult>@<high>,<low>,<close>
+keltner.lower:<ema_period>,<atr_period>,<mult>@<high>,<low>,<close>
+```
+
+An EMA with an ATR-scaled envelope (the modern convention). The middle line is
+`EMA(close, ema_period)`; the bands are `middle ± mult · ATR(atr_period)`. Price riding the
+upper band signals strength, the lower band weakness.
+
+- **ema_period?** `int=20`
+- **atr_period?** `int=10` (bands only)
+- **mult?** `float=2.0` (bands only)
+- **high? / low? / close?** `str` the input columns (the middle line uses only close).
+
+```py
+df['keltner']          # middle (EMA)
+df['keltner.upper']
+df['keltner.lower']
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change

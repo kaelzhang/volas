@@ -273,6 +273,8 @@ fn resume_decline_paths_cover_question_mark_branches() {
         "adxr:14",
         "ht_phasor",
         "ht_sine",
+        // keltner bands compose the EMA + ATR resumes; the ATR resume declines at from 0.
+        "keltner.upper:20,10,2",
     ] {
         assert!(
             execute_resume(&df, &p(directive), &[0.0; 8], 0, 0).is_none(),
