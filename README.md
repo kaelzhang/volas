@@ -973,7 +973,7 @@ df['smma:5']
 df['smma:10@open']
 ```
 
-### `bbi`, Bull and Bear Index
+### `bbi`, Bull and Bear Index (多空指标)
 
 ```
 bbi:<a>,<b>,<c>,<d>@<on>
@@ -1018,7 +1018,7 @@ df['bbw']
 df['(boll.upper - boll.lower) / boll']
 ```
 
-### `rsv`, Raw Stochastic Value
+### `rsv`, Raw Stochastic Value (未成熟随机值)
 
 ```
 rsv:<period>@<high>,<low>,<close>
@@ -1039,7 +1039,7 @@ df['rsv:9']
 df['rsv:9@high,low,close']
 ```
 
-### `kdj`, A Variety of Stochastic Oscillator
+### `kdj`, A Variety of Stochastic Oscillator (随机指标)
 
 KDJ is a variety of the [Stochastic Oscillator](https://en.wikipedia.org/wiki/Stochastic_oscillator)
 indicator created by [Dr. George Lane](https://en.wikipedia.org/wiki/George_Lane_(technical_analyst)),
@@ -1170,7 +1170,7 @@ df['hv:10,15m,365']
 df['hv:10']
 ```
 
-### `psy`, Psychological Line
+### `psy`, Psychological Line (心理线)
 
 ```
 psy:<period>@<on>
