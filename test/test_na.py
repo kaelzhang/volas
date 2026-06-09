@@ -91,6 +91,11 @@ def test_na_construction_from_none():
     # an all-None column, and a NaN-containing list, are float (NaN is a float value)
     assert volas.DataFrame({"a": [None, None]})["a"].dtype == "float64"
     assert volas.DataFrame({"a": [1, np.nan, 3]})["a"].dtype == "float64"
+    # volas.NA itself in a list (round-tripping to_list output) is recognised too
+    s2 = volas.DataFrame({"a": [1, volas.NA, 3]})["a"]
+    assert s2.dtype == "int64" and s2.to_list()[1] is volas.NA
+    rt = volas.DataFrame({"a": [1, None, 3]})["a"].to_list()  # contains volas.NA
+    assert volas.DataFrame({"a": rt})["a"].to_list()[1] is volas.NA
 
 
 def test_na_to_pandas_dtype_backend():

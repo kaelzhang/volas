@@ -189,6 +189,21 @@ fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
         // a float carries missing in-band as NaN (also the all-`None` fallback).
         return Ok(Column::f64(vv.iter().map(|x| x.unwrap_or(f64::NAN)).collect()));
     }
+    // A list may carry the `volas.NA` symbol itself (not `None`) — normalise it to
+    // `None` and retry, so `to_list()` output round-trips back into a frame.
+    if let Ok(list) = v.downcast::<PyList>() {
+        let py = v.py();
+        let na_obj = na(py);
+        let na_bound = na_obj.bind(py);
+        if list.iter().any(|item| item.is(na_bound)) {
+            let items: Vec<Bound<'_, PyAny>> = list
+                .iter()
+                .map(|item| if item.is(na_bound) { py.None().into_bound(py) } else { item })
+                .collect();
+            let normalized = PyList::new(py, items)?;
+            return pyany_to_column(normalized.as_any());
+        }
+    }
     Err(PyTypeError::new_err(
         "column values must be a 1-D numeric array, a list of numbers, or a list of strings",
     ))
