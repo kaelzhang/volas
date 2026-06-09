@@ -1101,15 +1101,15 @@ impl PySeries {
         let col = if let Some(unit) = datetime_unit_of(dtype) {
             match &self.inner.data {
                 Column::Datetime(_) | Column::Str(_, _) => {
-                    self.inner.data.to_datetime().map_err(value_err)?
+                    self.inner.data.to_datetime().map_err(pyerr)?
                 }
-                _ => self.inner.data.epoch_to_datetime(unit).map_err(value_err)?,
+                _ => self.inner.data.epoch_to_datetime(unit).map_err(pyerr)?,
             }
         } else {
             self.inner
                 .data
                 .cast(parse_dtype(dtype)?)
-                .map_err(value_err)?
+                .map_err(pyerr)?
         };
         Ok(PySeries {
             inner: Series::new(self.inner.name.clone(), col, Arc::clone(&self.inner.index)),
@@ -3545,8 +3545,8 @@ impl PyDataFrame {
                 // `datetime64[unit]` cast).
                 let col = df.column(&name).map_err(pyerr)?.clone();
                 let converted = match &col {
-                    Column::Datetime(_) | Column::Str(_, _) => col.to_datetime().map_err(value_err)?,
-                    _ => col.epoch_to_datetime(unit).map_err(value_err)?,
+                    Column::Datetime(_) | Column::Str(_, _) => col.to_datetime().map_err(pyerr)?,
+                    _ => col.epoch_to_datetime(unit).map_err(pyerr)?,
                 };
                 df.set_column(&name, converted).map_err(pyerr)?;
             } else {
@@ -4310,9 +4310,9 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
                     .collect::<PyResult<Vec<i64>>>()?;
                 Column::datetime(ns)
             }
-            None => Column::Str(v, Validity::dense()).to_datetime().map_err(value_err)?,
+            None => Column::Str(v, Validity::dense()).to_datetime().map_err(pyerr)?,
         },
-        c => c.epoch_to_datetime_rounded(unit).map_err(value_err)?,
+        c => c.epoch_to_datetime_rounded(unit).map_err(pyerr)?,
     };
     Ok(PySeries {
         inner: Series::new(name, converted, index),

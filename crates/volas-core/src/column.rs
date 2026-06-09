@@ -481,21 +481,32 @@ impl Column {
         f64_to_ns: impl Fn(f64) -> Option<i64>,
     ) -> Result<Column> {
         match self {
-            Column::I64(v, _) => v
+            // A missing input maps to `NaT` (i64::MIN), not 1970 / an error: read
+            // the i64 validity bit, and treat a float `NaN` as missing.
+            Column::I64(v, val) => v
                 .iter()
-                .map(|&x| {
-                    datetime::epoch_to_ns(x, unit).ok_or_else(|| {
-                        VolasError::Value(format!("invalid epoch unit {unit:?} or overflow"))
-                    })
+                .enumerate()
+                .map(|(i, &x)| {
+                    if !val.is_valid(i) {
+                        Ok(i64::MIN)
+                    } else {
+                        datetime::epoch_to_ns(x, unit).ok_or_else(|| {
+                            VolasError::Value(format!("invalid epoch unit {unit:?} or overflow"))
+                        })
+                    }
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::datetime),
             Column::F64(v) => v
                 .iter()
                 .map(|&x| {
-                    f64_to_ns(x).ok_or_else(|| {
-                        VolasError::Value(format!("invalid epoch unit {unit:?} or overflow"))
-                    })
+                    if x.is_nan() {
+                        Ok(i64::MIN)
+                    } else {
+                        f64_to_ns(x).ok_or_else(|| {
+                            VolasError::Value(format!("invalid epoch unit {unit:?} or overflow"))
+                        })
+                    }
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::datetime),
@@ -1703,6 +1714,26 @@ mod tests {
         assert!(Column::bool(vec![true])
             .epoch_to_datetime_rounded("s")
             .is_err());
+        // A missing epoch maps to NaT (i64::MIN), not 1970 / an error: a float NaN
+        // and an int64 NA-bit both yield NaT, in both the truncating and rounded
+        // variants; a present value still converts, and a bad unit still errors.
+        let fnan = Column::f64(vec![f64::NAN, 2.0]).epoch_to_datetime("s").unwrap();
+        assert!(!fnan.is_valid(0) && fnan.is_valid(1) && fnan.null_count() == 1);
+        let fnan_r = Column::f64(vec![f64::NAN, 1.5]).epoch_to_datetime_rounded("s").unwrap();
+        assert!(!fnan_r.is_valid(0) && fnan_r.is_valid(1));
+        let ina = Column::i64_with(vec![0, 100], Validity::from_valid_iter(2, [false, true]))
+            .epoch_to_datetime("s")
+            .unwrap();
+        assert!(!ina.is_valid(0) && ina.is_valid(1)); // NA-bit -> NaT, not epoch 0 -> 1970
+        let ina_r = Column::i64_with(vec![5, 0], Validity::from_valid_iter(2, [true, false]))
+            .epoch_to_datetime_rounded("s")
+            .unwrap();
+        assert!(ina_r.is_valid(0) && !ina_r.is_valid(1));
+        // an all-NA float column is all NaT
+        assert_eq!(
+            Column::f64(vec![f64::NAN, f64::NAN]).epoch_to_datetime("s").unwrap().null_count(),
+            2
+        );
         // to_string_vec renders each supported dtype.
         assert_eq!(
             Column::str(vec!["a".into()]).to_string_vec(),
