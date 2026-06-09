@@ -110,6 +110,9 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
             _ => 19,
         },
         "wvad" => arg(args, 0, 24).saturating_sub(1),
+        // cdp reads only the prior bar; mike's TYP±range is gated by the n-day HH/LL.
+        "cdp" => 1,
+        "mike" => arg(args, 0, 12).saturating_sub(1),
         "tr" => 1,
         "atr" => arg(args, 0, 14),
         "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),

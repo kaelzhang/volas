@@ -24,6 +24,8 @@ from test.test_mutation_parity import A, BARS, A_UPD, N, LO, _CLOSE, _gt, _eq
 DIRECTIVES = [
     'vortex.plus', 'vortex.minus', 'brar.ar', 'brar.br', 'vr',
     'coppock', 'relative_vigor', 'relative_vigor.signal', 'dkx', 'dkx.ma', 'wvad',
+    'cdp', 'cdp.ah', 'cdp.nh', 'cdp.nl', 'cdp.al',
+    'mike.weakr', 'mike.midr', 'mike.strongr', 'mike.weaks', 'mike.mids', 'mike.strongs',
 ]
 
 

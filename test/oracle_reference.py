@@ -347,6 +347,38 @@ def wvad(o, h, lo, c, v, n=24):
     return w.rolling(n, min_periods=n).sum()
 
 
+def cdp(o, h, lo, c, v, line='cdp'):
+    """CDP 逆势操作 (prior bar): CDP=(H+L+2C)/4; AH=CDP+(H-L), NH=2CDP-L, NL=2CDP-H, AL=CDP-(H-L).
+    Source: 百度百科 / 维基 — 逆势操作 (CDP)."""
+    h, lo, c = _s(h).shift(1), _s(lo).shift(1), _s(c).shift(1)
+    cdp_ = (h + lo + 2.0 * c) / 4.0
+    return {
+        'cdp': cdp_,
+        'ah': cdp_ + (h - lo),
+        'nh': 2.0 * cdp_ - lo,
+        'nl': 2.0 * cdp_ - h,
+        'al': cdp_ - (h - lo),
+    }[line]
+
+
+def mike(o, h, lo, c, v, n=12, line='weakr'):
+    """MIKE 麦克支撑压力. TYP=(H+L+C)/3, HH/LL = n-day max(H)/min(L). WEKR=TYP+(TYP-LL),
+    MIDR=TYP+(HH-LL), STOR=2HH-LL; WEKS=TYP-(HH-TYP), MIDS=TYP-(HH-LL), STOS=2LL-HH.
+    Source: 百度百科 / MBA智库 — 麦克指标 (MIKE)."""
+    h, lo, c = _s(h), _s(lo), _s(c)
+    typ = (h + lo + c) / 3.0
+    hh = h.rolling(n, min_periods=n).max()
+    ll = lo.rolling(n, min_periods=n).min()
+    return {
+        'weakr': typ + (typ - ll),
+        'midr': typ + (hh - ll),
+        'strongr': 2.0 * hh - ll,
+        'weaks': typ - (hh - typ),
+        'mids': typ - (hh - ll),
+        'strongs': 2.0 * ll - hh,
+    }[line]
+
+
 # --- the oracle case registry ----------------------------------------------
 # (directive, reference_fn(o,h,lo,c,v) -> Series, tolerance). The directive strings are
 # the proposed command interface the Group A implementation should match.
@@ -378,4 +410,15 @@ CASES: list[tuple] = [
     ("dkx", dkx, 1e-6),
     ("dkx.ma:10", lambda o, h, lo, c, v: dkx_ma(o, h, lo, c, v, 10), 1e-6),
     ("wvad:24", lambda o, h, lo, c, v: wvad(o, h, lo, c, v, 24), 1e-6),
+    ("cdp", lambda o, h, lo, c, v: cdp(o, h, lo, c, v, 'cdp'), 1e-7),
+    ("cdp.ah", lambda o, h, lo, c, v: cdp(o, h, lo, c, v, 'ah'), 1e-7),
+    ("cdp.nh", lambda o, h, lo, c, v: cdp(o, h, lo, c, v, 'nh'), 1e-7),
+    ("cdp.nl", lambda o, h, lo, c, v: cdp(o, h, lo, c, v, 'nl'), 1e-7),
+    ("cdp.al", lambda o, h, lo, c, v: cdp(o, h, lo, c, v, 'al'), 1e-7),
+    ("mike.weakr:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'weakr'), 1e-7),
+    ("mike.midr:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'midr'), 1e-7),
+    ("mike.strongr:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'strongr'), 1e-7),
+    ("mike.weaks:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'weaks'), 1e-7),
+    ("mike.mids:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'mids'), 1e-7),
+    ("mike.strongs:12", lambda o, h, lo, c, v: mike(o, h, lo, c, v, 12, 'strongs'), 1e-7),
 ]

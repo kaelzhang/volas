@@ -626,6 +626,53 @@ df['wvad']
 df['wvad:24']
 ```
 
+### `cdp`, Counter-Trend Operation (逆势操作)
+
+```
+cdp@<high>,<low>,<close>
+cdp.ah@<high>,<low>,<close>
+cdp.nh@<high>,<low>,<close>
+cdp.nl@<high>,<low>,<close>
+cdp.al@<high>,<low>,<close>
+```
+
+Five intraday levels computed from the **prior** bar: `CDP = (H + L + 2C) / 4` (the center),
+with `cdp.ah = CDP + (H−L)`, `cdp.nh = 2·CDP − L`, `cdp.nl = 2·CDP − H`,
+`cdp.al = CDP − (H−L)`, ordered AH > NH > CDP > NL > AL — a short-term reversal system for
+range-bound days.
+
+- **high? / low? / close?** `str` the input columns (read from the prior bar).
+
+```py
+df['cdp']        # the CDP center
+df['cdp.ah']     # AH (highest)
+df['cdp.al']     # AL (lowest)
+```
+
+### `mike`, MIKE Support/Resistance (麦克指标)
+
+```
+mike.weakr:<period>@<high>,<low>,<close>
+mike.midr:<period>@<high>,<low>,<close>
+mike.strongr:<period>@<high>,<low>,<close>
+mike.weaks:<period>@<high>,<low>,<close>
+mike.mids:<period>@<high>,<low>,<close>
+mike.strongs:<period>@<high>,<low>,<close>
+```
+
+Six support / resistance bands around the typical price `TYP = (H+L+C)/3`, using the
+`period`-bar high-of-high `HH` and low-of-low `LL`. Resistance: weak `TYP+(TYP−LL)`, mid
+`TYP+(HH−LL)`, strong `2·HH−LL`; support mirrors them — weak `TYP−(HH−TYP)`, mid
+`TYP−(HH−LL)`, strong `2·LL−HH`. MIKE has no single line — request one of the six.
+
+- **period?** `int=12`
+- **high? / low? / close?** `str` the input columns.
+
+```py
+df['mike.strongr']   # strong resistance
+df['mike.weaks']     # weak support
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change

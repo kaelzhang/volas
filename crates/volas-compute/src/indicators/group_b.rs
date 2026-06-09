@@ -163,3 +163,69 @@ pub fn wvad(
         .collect();
     rolling_sum(&w, n)
 }
+
+/// Which CDP support/resistance line to emit.
+#[derive(Clone, Copy)]
+pub enum CdpLine {
+    Cdp,
+    Ah,
+    Nh,
+    Nl,
+    Al,
+}
+
+/// CDP 逆势操作: from the PRIOR bar, `CDP = (H + L + 2C) / 4`, then `AH = CDP + (H − L)`,
+/// `NH = 2·CDP − L`, `NL = 2·CDP − H`, `AL = CDP − (H − L)` — five intraday levels.
+/// Source: 百度百科 / 维基 — 逆势操作 (CDP).
+pub fn cdp(high: &[f64], low: &[f64], close: &[f64], line: CdpLine) -> Vec<f64> {
+    (0..high.len())
+        .map(|i| {
+            if i == 0 {
+                return f64::NAN;
+            }
+            let (h, l, c) = (high[i - 1], low[i - 1], close[i - 1]);
+            let cdp = (h + l + 2.0 * c) / 4.0;
+            match line {
+                CdpLine::Cdp => cdp,
+                CdpLine::Ah => cdp + (h - l),
+                CdpLine::Nh => 2.0 * cdp - l,
+                CdpLine::Nl => 2.0 * cdp - h,
+                CdpLine::Al => cdp - (h - l),
+            }
+        })
+        .collect()
+}
+
+/// Which MIKE support / resistance line to emit.
+#[derive(Clone, Copy)]
+pub enum MikeLine {
+    WeakR,
+    MidR,
+    StrongR,
+    WeakS,
+    MidS,
+    StrongS,
+}
+
+/// MIKE 麦克支撑压力: `TYP = (H+L+C)/3`, `HH`/`LL` = n-day high-of-high / low-of-low.
+/// Resistance WEKR = TYP+(TYP−LL), MIDR = TYP+(HH−LL), STOR = 2·HH−LL; support mirrors them:
+/// WEKS = TYP−(HH−TYP), MIDS = TYP−(HH−LL), STOS = 2·LL−HH. Source: 百度百科 / MBA智库 — 麦克指标.
+pub fn mike(high: &[f64], low: &[f64], close: &[f64], n: usize, line: MikeLine) -> Vec<f64> {
+    let len = high.len();
+    let hh = super::hhv(high, n);
+    let ll = super::llv(low, n);
+    (0..len)
+        .map(|i| {
+            let typ = (high[i] + low[i] + close[i]) / 3.0;
+            let (hi, lo) = (hh[i], ll[i]);
+            match line {
+                MikeLine::WeakR => typ + (typ - lo),
+                MikeLine::MidR => typ + (hi - lo),
+                MikeLine::StrongR => 2.0 * hi - lo,
+                MikeLine::WeakS => typ - (hi - typ),
+                MikeLine::MidS => typ - (hi - lo),
+                MikeLine::StrongS => 2.0 * lo - hi,
+            }
+        })
+        .collect()
+}

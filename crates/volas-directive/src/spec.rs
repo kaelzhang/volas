@@ -149,6 +149,8 @@ pub fn is_command(name: &str) -> bool {
             | "relative_vigor"
             | "dkx"
             | "wvad"
+            | "cdp"
+            | "mike"
             | "tr"
             | "atr"
             | "llv"
@@ -317,6 +319,12 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("dkx", None) => (vec![], vec!["open", "high", "low", "close"]),
         ("dkx", Some("ma")) => (vec![Int(10)], vec!["open", "high", "low", "close"]),
         ("wvad", None) => (vec![Int(24)], vec!["open", "high", "low", "close", "volume"]),
+        // cdp: five intraday levels from the prior bar (no window parameter).
+        ("cdp", None | Some("ah" | "nh" | "nl" | "al")) => (vec![], vec!["high", "low", "close"]),
+        // mike: six support/resistance lines — all required sub-commands, no primary line.
+        ("mike", Some("weakr" | "midr" | "strongr" | "weaks" | "mids" | "strongs")) => {
+            (vec![Int(12)], vec!["high", "low", "close"])
+        }
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns

@@ -476,6 +476,33 @@ fn exec_command(
             let volume = series_f64(df, series, 4, "volume")?;
             f64col(ind::wvad(&open, &high, &low, &close, &volume, arg_usize(args, 0, Some(24))?))
         }
+        ("cdp", sub) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let line = match sub {
+                Some("ah") => ind::CdpLine::Ah,
+                Some("nh") => ind::CdpLine::Nh,
+                Some("nl") => ind::CdpLine::Nl,
+                Some("al") => ind::CdpLine::Al,
+                _ => ind::CdpLine::Cdp,
+            };
+            f64col(ind::cdp(&high, &low, &close, line))
+        }
+        ("mike", sub) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let line = match sub {
+                Some("midr") => ind::MikeLine::MidR,
+                Some("strongr") => ind::MikeLine::StrongR,
+                Some("weaks") => ind::MikeLine::WeakS,
+                Some("mids") => ind::MikeLine::MidS,
+                Some("strongs") => ind::MikeLine::StrongS,
+                _ => ind::MikeLine::WeakR,
+            };
+            f64col(ind::mike(&high, &low, &close, arg_usize(args, 0, Some(12))?, line))
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,
