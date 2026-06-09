@@ -2395,6 +2395,27 @@ mod tests {
         // a bool fill into an int column converts (pandas), keeping validity
         let rib = c.set_scalar_at(&[1], SetVal::Bool(true)).unwrap();
         assert!(rib.dtype() == DType::I64 && rib.is_valid(1));
+        // a NaN write into a bool column marks the cell NA, keeping bool
+        let bn = Column::bool(vec![true, false]).set_scalar_at(&[0], SetVal::Num(f64::NAN)).unwrap();
+        assert!(bn.dtype() == DType::Bool && !bn.is_valid(0) && bn.is_valid(1));
+    }
+
+    #[test]
+    fn na_of_and_select_edge_arms() {
+        // `na_of` (the where/mask default `other`) for the remaining dtypes
+        assert!(matches!(Column::na_of(DType::F32, 2), Column::F32(_)));
+        let i32na = Column::na_of(DType::I32, 2);
+        assert!(i32na.dtype() == DType::I32 && !i32na.is_valid(0) && !i32na.is_valid(1));
+        let bna = Column::na_of(DType::Bool, 2);
+        assert!(bna.dtype() == DType::Bool && !bna.is_valid(0));
+        // `select` errors when the str / datetime arm gets a mismatched `other`
+        let cond = vec![true, false];
+        assert!(Column::str(vec!["a".into(), "b".into()])
+            .select(&cond, &Column::i64(vec![0, 0]), DType::Utf8)
+            .is_err());
+        assert!(Column::datetime(vec![1, 2])
+            .select(&cond, &Column::i64(vec![0, 0]), DType::Datetime)
+            .is_err());
     }
 
     #[test]

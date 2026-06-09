@@ -268,6 +268,7 @@ mod tests {
         assert_eq!(i64::DTYPE, DType::I64);
         assert!(!5_i64.is_missing()); // i64 has no missing
         assert_eq!(5_i64.to_f64(), 5.0);
+        assert_eq!(3_i32.to_f64(), 3.0);
         // lossless narrowing
         assert_eq!(i64::try_from_f64(5.0), Some(5));
         assert_eq!(i64::try_from_f64(2.5), None); // non-integral
