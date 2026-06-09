@@ -145,6 +145,10 @@ pub fn is_command(name: &str) -> bool {
             | "vortex"
             | "brar"
             | "vr"
+            | "coppock"
+            | "relative_vigor"
+            | "dkx"
+            | "wvad"
             | "tr"
             | "atr"
             | "llv"
@@ -304,6 +308,15 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("brar", Some("ar")) => (vec![Int(26)], vec!["open", "high", "low"]),
         ("brar", Some("br")) => (vec![Int(26)], vec!["high", "low", "close"]),
         ("vr", None) => (vec![Int(26)], vec!["close", "volume"]),
+        // coppock: wma_period, roc_long, roc_short.
+        ("coppock", None) => (vec![Int(10), Int(14), Int(11)], vec!["close"]),
+        ("relative_vigor", None | Some("signal")) => {
+            (vec![Int(10)], vec!["open", "high", "low", "close"])
+        }
+        // dkx's DKX line is a fixed 20-period weighted MA (no args); the MADKX signal adds m.
+        ("dkx", None) => (vec![], vec!["open", "high", "low", "close"]),
+        ("dkx", Some("ma")) => (vec![Int(10)], vec!["open", "high", "low", "close"]),
+        ("wvad", None) => (vec![Int(24)], vec!["open", "high", "low", "close", "volume"]),
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns

@@ -58,6 +58,22 @@ def _ema(x, n: int) -> pd.Series:
     return pd.Series(out)
 
 
+def _wma(x, n: int) -> pd.Series:
+    """TA-Lib WMA: linear weights 1..n (newest heaviest), NaN for the first n-1 valid samples.
+    Leading NaNs are skipped (matching volas's ``wma``), so it seeds from the first real value."""
+    vals = _s(x).to_numpy()
+    out = np.full(len(vals), np.nan)
+    valid = np.flatnonzero(~np.isnan(vals))
+    if len(valid) >= n:
+        w = np.arange(1, n + 1, dtype=float)
+        denom = w.sum()
+        for i in range(int(valid[0]) + n - 1, len(vals)):
+            window = vals[i - n + 1:i + 1]
+            if not np.isnan(window).any():
+                out[i] = float((window * w).sum() / denom)
+    return pd.Series(out)
+
+
 def _rsi(x, n: int) -> pd.Series:
     """Wilder RSI (TA-Lib seeding): SMA of the first ``n`` gains/losses, then Wilder smoothing."""
     s = _s(x)
@@ -283,6 +299,54 @@ def vr(o, h, lo, c, v, n=26):
     return (suv + 0.5 * spv) / (sdv + 0.5 * spv) * 100.0
 
 
+def _swma4(x) -> pd.Series:
+    """4-bar symmetric weighted MA, weights [1, 2, 2, 1] / 6 (newest first)."""
+    x = _s(x)
+    return (x + 2.0 * x.shift(1) + 2.0 * x.shift(2) + x.shift(3)) / 6.0
+
+
+def coppock(o, h, lo, c, v, w=10, roc_long=14, roc_short=11):
+    """Coppock Curve = WMA_w(ROC_long + ROC_short), ROC_p = (C/C_p - 1) * 100.
+    Source: StockCharts ChartSchool / Wikipedia — Coppock Curve."""
+    c = _s(c)
+
+    def roc(p):
+        return (c / c.shift(p) - 1.0) * 100.0
+
+    return _wma(roc(roc_long) + roc(roc_short), w)
+
+
+def relative_vigor(o, h, lo, c, v, n=10):
+    """RVI = SMA_n(swma4(C-O)) / SMA_n(swma4(H-L)).
+    Source: Fidelity / MetaTrader — Relative Vigor Index."""
+    co = _s(c) - _s(o)
+    hl = _s(h) - _s(lo)
+    return _sma(_swma4(co), n) / _sma(_swma4(hl), n)
+
+
+def relative_vigor_signal(o, h, lo, c, v, n=10):
+    """RVI signal line = swma4(RVI). Source: Fidelity / MetaTrader — Relative Vigor Index."""
+    return _swma4(relative_vigor(o, h, lo, c, v, n))
+
+
+def dkx(o, h, lo, c, v):
+    """DKX 多空线 = WMA(MID, 20), MID = (3C + L + O + H) / 6.
+    Source: 百度百科 / 东方财富 — 多空线 (DKX)."""
+    mid = (3.0 * _s(c) + _s(lo) + _s(o) + _s(h)) / 6.0
+    return _wma(mid, 20)
+
+
+def dkx_ma(o, h, lo, c, v, m=10):
+    """MADKX = SMA_m(DKX). Source: 百度百科 / 东方财富 — 多空线 (DKX)."""
+    return _sma(dkx(o, h, lo, c, v), m)
+
+
+def wvad(o, h, lo, c, v, n=24):
+    """WVAD 威廉变异离散量 = Σn( (C-O)/(H-L) * V ). Source: 通达信 / MBA智库 — WVAD."""
+    w = (_s(c) - _s(o)) / (_s(h) - _s(lo)) * _s(v)
+    return w.rolling(n, min_periods=n).sum()
+
+
 # --- the oracle case registry ----------------------------------------------
 # (directive, reference_fn(o,h,lo,c,v) -> Series, tolerance). The directive strings are
 # the proposed command interface the Group A implementation should match.
@@ -308,4 +372,10 @@ CASES: list[tuple] = [
     ("brar.ar:26", lambda o, h, lo, c, v: brar_ar(o, h, lo, c, v, 26), 1e-7),
     ("brar.br:26", lambda o, h, lo, c, v: brar_br(o, h, lo, c, v, 26), 1e-7),
     ("vr:26", lambda o, h, lo, c, v: vr(o, h, lo, c, v, 26), 1e-7),
+    ("coppock:10,14,11", lambda o, h, lo, c, v: coppock(o, h, lo, c, v, 10, 14, 11), 1e-6),
+    ("relative_vigor:10", lambda o, h, lo, c, v: relative_vigor(o, h, lo, c, v, 10), 1e-7),
+    ("relative_vigor.signal:10", lambda o, h, lo, c, v: relative_vigor_signal(o, h, lo, c, v, 10), 1e-7),
+    ("dkx", dkx, 1e-6),
+    ("dkx.ma:10", lambda o, h, lo, c, v: dkx_ma(o, h, lo, c, v, 10), 1e-6),
+    ("wvad:24", lambda o, h, lo, c, v: wvad(o, h, lo, c, v, 24), 1e-6),
 ]

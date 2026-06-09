@@ -84,3 +84,82 @@ pub fn vr(close: &[f64], volume: &[f64], n: usize) -> Vec<f64> {
         .map(|i| (suv[i] + 0.5 * spv[i]) / (sdv[i] + 0.5 * spv[i]) * 100.0)
         .collect()
 }
+
+/// Coppock Curve = `WMA_w(ROC_long + ROC_short)`, `ROC_p = (C / C₋ₚ − 1) × 100`.
+/// Source: StockCharts ChartSchool / Wikipedia — Coppock Curve.
+pub fn coppock(close: &[f64], w: usize, roc_long: usize, roc_short: usize) -> Vec<f64> {
+    let len = close.len();
+    let roc = |p: usize| -> Vec<f64> {
+        (0..len)
+            .map(|i| if i >= p { (close[i] / close[i - p] - 1.0) * 100.0 } else { f64::NAN })
+            .collect::<Vec<_>>()
+    };
+    let (rl, rs) = (roc(roc_long), roc(roc_short));
+    let sum: Vec<f64> = (0..len).map(|i| rl[i] + rs[i]).collect();
+    super::wma(&sum, w)
+}
+
+/// 4-bar symmetric weighted MA, weights `[1, 2, 2, 1] / 6` (newest first); NaN until 3 prior
+/// bars exist. The RVI numerator / denominator / signal smoother.
+fn swma4(x: &[f64]) -> Vec<f64> {
+    (0..x.len())
+        .map(|i| {
+            if i >= 3 {
+                (x[i] + 2.0 * x[i - 1] + 2.0 * x[i - 2] + x[i - 3]) / 6.0
+            } else {
+                f64::NAN
+            }
+        })
+        .collect()
+}
+
+/// Relative Vigor Index = `SMAₙ(swma4(C − O)) / SMAₙ(swma4(H − L))`.
+/// Source: Fidelity / MetaTrader — Relative Vigor Index.
+pub fn relative_vigor(open: &[f64], high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
+    let len = close.len();
+    let co: Vec<f64> = (0..len).map(|i| close[i] - open[i]).collect();
+    let hl: Vec<f64> = (0..len).map(|i| high[i] - low[i]).collect();
+    let num = kernels::sma(av(&swma4(&co)), n);
+    let den = kernels::sma(av(&swma4(&hl)), n);
+    (0..len).map(|i| num[i] / den[i]).collect()
+}
+
+/// RVI signal line = `swma4(RVI)`. Source: Fidelity / MetaTrader — Relative Vigor Index.
+pub fn relative_vigor_signal(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    n: usize,
+) -> Vec<f64> {
+    swma4(&relative_vigor(open, high, low, close, n))
+}
+
+/// DKX 多空线 = `WMA(MID, 20)`, `MID = (3·C + L + O + H) / 6`. The fixed 20-period linear
+/// weights 20…1 are exactly TA-Lib WMA's. Source: 百度百科 / 东方财富 — 多空线 (DKX).
+pub fn dkx(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
+    let mid: Vec<f64> = (0..close.len())
+        .map(|i| (3.0 * close[i] + low[i] + open[i] + high[i]) / 6.0)
+        .collect();
+    super::wma(&mid, 20)
+}
+
+/// MADKX = `SMA_m(DKX)`, the DKX signal line. Source: 百度百科 / 东方财富 — 多空线 (DKX).
+pub fn dkx_ma(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize) -> Vec<f64> {
+    super::ma(&dkx(open, high, low, close), m)
+}
+
+/// WVAD 威廉变异离散量 = `Σₙ( (C − O) / (H − L) · V )`. Source: 通达信 / MBA智库 — WVAD.
+pub fn wvad(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+) -> Vec<f64> {
+    let w: Vec<f64> = (0..close.len())
+        .map(|i| (close[i] - open[i]) / (high[i] - low[i]) * volume[i])
+        .collect();
+    rolling_sum(&w, n)
+}

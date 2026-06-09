@@ -439,6 +439,43 @@ fn exec_command(
             let volume = series_f64(df, series, 1, "volume")?;
             f64col(ind::vr(&close, &volume, arg_usize(args, 0, Some(26))?))
         }
+        ("coppock", _) => f64col(ind::coppock(
+            &close(0)?,
+            arg_usize(args, 0, Some(10))?,
+            arg_usize(args, 1, Some(14))?,
+            arg_usize(args, 2, Some(11))?,
+        )),
+        ("relative_vigor", sub) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let high = series_f64(df, series, 1, "high")?;
+            let low = series_f64(df, series, 2, "low")?;
+            let close = series_f64(df, series, 3, "close")?;
+            let n = arg_usize(args, 0, Some(10))?;
+            if sub == Some("signal") {
+                f64col(ind::relative_vigor_signal(&open, &high, &low, &close, n))
+            } else {
+                f64col(ind::relative_vigor(&open, &high, &low, &close, n))
+            }
+        }
+        ("dkx", sub) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let high = series_f64(df, series, 1, "high")?;
+            let low = series_f64(df, series, 2, "low")?;
+            let close = series_f64(df, series, 3, "close")?;
+            if sub == Some("ma") {
+                f64col(ind::dkx_ma(&open, &high, &low, &close, arg_usize(args, 0, Some(10))?))
+            } else {
+                f64col(ind::dkx(&open, &high, &low, &close))
+            }
+        }
+        ("wvad", _) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let high = series_f64(df, series, 1, "high")?;
+            let low = series_f64(df, series, 2, "low")?;
+            let close = series_f64(df, series, 3, "close")?;
+            let volume = series_f64(df, series, 4, "volume")?;
+            f64col(ind::wvad(&open, &high, &low, &close, &volume, arg_usize(args, 0, Some(24))?))
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

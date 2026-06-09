@@ -97,6 +97,19 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
             Some("br") => arg(args, 0, 26),
             _ => arg(args, 0, 26).saturating_sub(1),
         },
+        // coppock: the longer ROC plus the WMA warm-up.
+        "coppock" => arg(args, 1, 14) + arg(args, 0, 10).saturating_sub(1),
+        // relative_vigor: swma4 (3) + SMAₙ (n−1) = n+2; the signal adds another swma4 (3).
+        "relative_vigor" => match sub {
+            Some("signal") => arg(args, 0, 10) + 5,
+            _ => arg(args, 0, 10) + 2,
+        },
+        // dkx: the DDX line is WMA(20) (19); the MADKX signal adds SMA_m (m−1).
+        "dkx" => match sub {
+            Some("ma") => 18 + arg(args, 0, 10),
+            _ => 19,
+        },
+        "wvad" => arg(args, 0, 24).saturating_sub(1),
         "tr" => 1,
         "atr" => arg(args, 0, 14),
         "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),

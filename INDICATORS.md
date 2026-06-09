@@ -549,6 +549,83 @@ df['vr']
 df['vr:26']
 ```
 
+### `coppock`, Coppock Curve
+
+```
+coppock:<wma>,<roc_long>,<roc_short>@<on>
+```
+
+A long-term momentum oscillator: the `wma`-period weighted MA of the sum of two
+rate-of-change terms, `WMA(ROC_long + ROC_short)`. A cross above zero is the classic buy
+signal.
+
+- **wma?** `int=10`
+- **roc_long?** `int=14`
+- **roc_short?** `int=11`
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['coppock']
+df['coppock:10,14,11']
+```
+
+### `relative_vigor`, Relative Vigor Index
+
+```
+relative_vigor:<period>@<open>,<high>,<low>,<close>
+relative_vigor.signal:<period>@<open>,<high>,<low>,<close>
+```
+
+An oscillator built on the idea that price closes higher than it opens in up-trends:
+`SMAₙ(swma(C−O)) / SMAₙ(swma(H−L))`, where `swma` is the 4-bar symmetric weighted average
+`[1, 2, 2, 1] / 6`. `relative_vigor.signal` is the `swma` of the index. (Named in full
+because `RVI` also denotes the Relative Volatility Index.)
+
+- **period?** `int=10`
+- **open? / high? / low? / close?** `str` the input columns.
+
+```py
+df['relative_vigor']
+df['relative_vigor.signal']
+```
+
+### `dkx`, Bull-Bear Line (多空线)
+
+```
+dkx@<open>,<high>,<low>,<close>
+dkx.ma:<m>@<open>,<high>,<low>,<close>
+```
+
+The DKX line is the 20-period weighted MA of a typical price `MID = (3C + L + O + H) / 6`
+(a China-market trend line); `dkx.ma` is its `m`-bar SMA signal. DKX crossing above its
+signal is bullish.
+
+- **m?** `int=10` The MADKX signal period (only on `dkx.ma`).
+- **open? / high? / low? / close?** `str` the input columns.
+
+```py
+df['dkx']
+df['dkx.ma']
+```
+
+### `wvad`, Williams Variable Accumulation/Distribution (威廉变异离散量)
+
+```
+wvad:<period>@<open>,<high>,<low>,<close>,<volume>
+```
+
+A volume-weighted gauge of intraday buying vs selling power:
+`Σₙ( (C − O) / (H − L) × V )`. Positive means buyers dominated the open-to-close range,
+negative means sellers.
+
+- **period?** `int=24`
+- **open? / high? / low? / close? / volume?** `str` the input columns.
+
+```py
+df['wvad']
+df['wvad:24']
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change
