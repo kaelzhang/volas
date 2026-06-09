@@ -110,6 +110,18 @@ pub enum BinOp {
     Mul,
 }
 
+/// A three-valued logical op for [`Column::logical`] (pandas `&` / `|` / `^` on
+/// bool columns, Kleene semantics).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoolOp {
+    /// Logical AND (a present `false` short-circuits to `false`).
+    And,
+    /// Logical OR (a present `true` short-circuits to `true`).
+    Or,
+    /// Logical XOR (missing if either operand is missing).
+    Xor,
+}
+
 impl Column {
     /// Build an `F64` column.
     pub fn f64(v: Vec<f64>) -> Column {
@@ -916,6 +928,65 @@ impl Column {
         Ok(Column::f64(a.iter().zip(&b).map(|(&x, &y)| x / y).collect()))
     }
 
+    /// Three-valued logical `and` / `or` / `xor` (pandas `&` / `|` / `^`), Kleene
+    /// semantics: a present `false` makes `and` false and a present `true` makes
+    /// `or` true even when the other side is missing; otherwise a missing operand
+    /// yields NA. A non-bool operand is read as `x != 0` (present). Equal lengths.
+    pub fn logical(&self, other: &Column, op: BoolOp) -> Column {
+        let n = self.len();
+        from_option_bools(
+            n,
+            (0..n).map(|i| {
+                let (a, ap) = self.bool_at(i);
+                let (b, bp) = other.bool_at(i);
+                match op {
+                    BoolOp::And => {
+                        if (ap && !a) || (bp && !b) {
+                            Some(false)
+                        } else if ap && bp {
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    }
+                    BoolOp::Or => {
+                        if (ap && a) || (bp && b) {
+                            Some(true)
+                        } else if ap && bp {
+                            Some(false)
+                        } else {
+                            None
+                        }
+                    }
+                    BoolOp::Xor => (ap && bp).then(|| a ^ b),
+                }
+            }),
+        )
+    }
+
+    /// Logical NOT (pandas `~`), propagating missing (NA in -> NA out). A non-bool
+    /// column is read as `x != 0` first.
+    pub fn not(&self) -> Column {
+        let n = self.len();
+        from_option_bools(
+            n,
+            (0..n).map(|i| {
+                let (a, ap) = self.bool_at(i);
+                ap.then(|| !a)
+            }),
+        )
+    }
+
+    /// The value (`x != 0` for a non-bool) and presence of element `i`, for the
+    /// logical ops. A non-bool is always present (its missing-as-bool question is
+    /// the comparison policy: a missing value compares/reads `false`-y).
+    fn bool_at(&self, i: usize) -> (bool, bool) {
+        match self {
+            Column::Bool(v, val) => (v[i], val.is_valid(i)),
+            _ => (self.get_f64(i) != 0.0, true),
+        }
+    }
+
     /// Sum, dtype-preserving (pandas): a float column -> float, int/bool -> i64
     /// (bool counts trues). Computed natively (i64 in i64, exact past 2^53).
     pub fn sum(&self) -> Scalar {
@@ -1082,6 +1153,16 @@ fn mask_f64(vals: impl Iterator<Item = f64>, validity: &Validity) -> Vec<f64> {
 /// A bool / i32 column widened to `i64` (for the i64-accumulator reductions).
 fn widen_i64<T: Copy + Into<i64>>(v: &[T]) -> Vec<i64> {
     v.iter().map(|&x| x.into()).collect()
+}
+
+/// Collect `Option<bool>`s into a `Bool` column: `None` -> `volas.NA`.
+fn from_option_bools(n: usize, it: impl Iterator<Item = Option<bool>>) -> Column {
+    let (mut values, mut valid) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    for o in it {
+        values.push(o.unwrap_or(false));
+        valid.push(o.is_some());
+    }
+    Column::bool_with(values, Validity::from_valid_iter(n, valid))
 }
 
 /// Shift `v` by `n` (pandas `shift`), filling vacated cells with `fill`; the kept
@@ -2063,5 +2144,26 @@ mod tests {
         assert_na(&Column::datetime(vec![i64::MIN, 20]).fill_dir(false), &[20.0, 20.0]);
         assert_eq!(Column::i64(vec![1, 2]).fill_dir(true), Column::i64(vec![1, 2])); // dense clone
         assert_eq!(Column::str(vec!["a".into()]).fill_dir(true), Column::str(vec!["a".into()]));
+    }
+
+    #[test]
+    fn na_logical_kleene_and_not() {
+        let b = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, true, false])); // T,F,NA
+        let t = Column::bool(vec![true, true, true]);
+        let f = Column::bool(vec![false, false, false]);
+        // Kleene AND: NA & True = NA, NA & False = False
+        assert_na(&b.logical(&t, BoolOp::And), &[1.0, 0.0, f64::NAN]);
+        assert_na(&b.logical(&f, BoolOp::And), &[0.0, 0.0, 0.0]);
+        // Kleene OR: NA | True = True, NA | False = NA
+        assert_na(&b.logical(&t, BoolOp::Or), &[1.0, 1.0, 1.0]);
+        assert_na(&b.logical(&f, BoolOp::Or), &[1.0, 0.0, f64::NAN]);
+        // XOR: missing if either is missing
+        assert_na(&b.logical(&t, BoolOp::Xor), &[0.0, 1.0, f64::NAN]);
+        // NOT propagates NA
+        assert_na(&b.not(), &[0.0, 1.0, f64::NAN]);
+        // a non-bool operand reads as x != 0 (present), so it never injects NA
+        let i = Column::i64(vec![1, 0, 5]);
+        assert_na(&i.not(), &[0.0, 1.0, 0.0]);
+        assert_na(&b.logical(&i, BoolOp::And), &[1.0, 0.0, f64::NAN]);
     }
 }

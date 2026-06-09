@@ -131,6 +131,24 @@ def test_na_from_pandas_nullable_round_trip():
     assert lst[0] == 1 and lst[1] is volas.NA and lst[2] == 3
 
 
+def test_na_bool_logic_kleene():
+    NA = volas.NA
+    b = volas.DataFrame({"a": [True, None, False]})["a"]  # T, NA, F
+    # ~ propagates NA (was silently !placeholder -> True)
+    assert (~b).to_list() == [False, NA, True]
+    # & / | use Kleene three-valued logic
+    assert (b & True).to_list() == [True, NA, False]  # NA & True  = NA
+    assert (b & False).to_list() == [False, False, False]  # NA & False = False
+    assert (b | True).to_list() == [True, True, True]  # NA | True  = True
+    assert (b | False).to_list() == [True, NA, False]  # NA | False = NA
+    assert (b ^ True).to_list() == [False, NA, True]  # XOR is NA if either is NA
+    # a dense mask is unchanged
+    import numpy as np
+
+    c = volas.DataFrame({"a": np.arange(5.0)})["a"]
+    assert ((c > 1) & (c < 3)).to_list() == [False, False, True, False, False]
+
+
 def test_na_display_symbol():
     # an int/bool missing cell renders as <NA> (like element access); a float keeps NaN
     assert "<NA>" in repr(volas.DataFrame({"a": [1, None, 3]})["a"])

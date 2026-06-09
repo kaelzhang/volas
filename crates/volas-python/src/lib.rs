@@ -16,8 +16,8 @@ use pyo3::sync::GILOnceCell;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{
-    binary_supertype, datetime, fits, stats, BinOp, Column, DType, DataFrame, Index, IndexKind,
-    Label, Scalar, Series, SetVal, Tz, Validity, VolasError,
+    binary_supertype, datetime, fits, stats, BinOp, BoolOp, Column, DType, DataFrame, Index,
+    IndexKind, Label, Scalar, Series, SetVal, Tz, Validity, VolasError,
 };
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
@@ -1220,32 +1220,25 @@ impl PySeries {
 
     // Element-wise boolean logic -> bool Series (operands coerced to bool).
     fn __and__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_logical(&self.inner, other, |a, b| a && b)
+        series_logical(&self.inner, other, BoolOp::And)
     }
     fn __or__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_logical(&self.inner, other, |a, b| a || b)
+        series_logical(&self.inner, other, BoolOp::Or)
     }
     fn __xor__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_logical(&self.inner, other, |a, b| a ^ b)
+        series_logical(&self.inner, other, BoolOp::Xor)
     }
     fn __rand__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_logical(&self.inner, other, |a, b| a && b)
+        series_logical(&self.inner, other, BoolOp::And)
     }
     fn __ror__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_logical(&self.inner, other, |a, b| a || b)
+        series_logical(&self.inner, other, BoolOp::Or)
     }
     fn __rxor__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_logical(&self.inner, other, |a, b| a ^ b)
+        series_logical(&self.inner, other, BoolOp::Xor)
     }
     fn __invert__(&self) -> PySeries {
-        let out: Vec<bool> = to_bool_vec(&self.inner.data).iter().map(|&b| !b).collect();
-        PySeries {
-            inner: Series::new(
-                self.inner.name.clone(),
-                Column::bool(out),
-                Arc::clone(&self.inner.index),
-            ),
-        }
+        col_to_series(&self.inner, self.inner.data.not())
     }
 
     /// `series[key]`: an integer position, a datetime label, or a slice.
@@ -1803,32 +1796,22 @@ fn extract_set_val(value: &Bound<'_, PyAny>) -> PyResult<SetVal> {
 }
 
 /// Element-wise boolean logic -> bool Series (both operands coerced to bool).
-fn series_logical(
-    s: &Series,
-    other: &Bound<'_, PyAny>,
-    f: impl Fn(bool, bool) -> bool,
-) -> PyResult<PySeries> {
-    let a = to_bool_vec(&s.data);
-    let rhs = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
+fn series_logical(s: &Series, other: &Bound<'_, PyAny>, op: BoolOp) -> PyResult<PySeries> {
+    let n = s.data.len();
+    let rhs: Column = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
         require_aligned(&s.index, &o.inner.index)?;
-        to_bool_vec(&o.inner.data)
+        o.inner.data.clone()
     } else if let Ok(b) = other.extract::<bool>() {
-        vec![b; a.len()]
+        Column::bool(vec![b; n])
     } else if let Ok(x) = other.extract::<f64>() {
-        vec![x != 0.0; a.len()]
+        Column::bool(vec![x != 0.0; n])
     } else {
         return Err(PyTypeError::new_err(
             "unsupported operand for a Series logical op",
         ));
     };
-    let n = a.len().min(rhs.len());
-    let mut out = vec![false; a.len()];
-    for i in 0..n {
-        out[i] = f(a[i], rhs[i]);
-    }
-    Ok(PySeries {
-        inner: Series::new(s.name.clone(), Column::bool(out), Arc::clone(&s.index)),
-    })
+    // Kleene three-valued logic, propagating volas.NA.
+    Ok(col_to_series(s, s.data.logical(&rhs, op)))
 }
 
 fn strided(start: isize, stop: isize, step: isize) -> Vec<usize> {
