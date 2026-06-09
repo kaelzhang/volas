@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(i32::MIN.wrapping_abs(), i32::MIN);
         assert_eq!(7_i32.wrapping_sub(10), -3);
         assert_eq!(3_i32.wrapping_mul(4), 12);
-        assert!(matches!(i32::into_column(vec![1_i32]), Column::I32(_)));
+        assert!(matches!(i32::into_column(vec![1_i32]), Column::I32(_, _)));
     }
 
     #[test]

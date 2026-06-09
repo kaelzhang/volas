@@ -147,7 +147,7 @@ impl Index {
     pub fn from_column_tz(col: &Column, tz: Tz) -> Result<Index> {
         let kind = match col {
             Column::Datetime(v) => IndexKind::Datetime(v.to_vec(), tz),
-            Column::I64(v) => IndexKind::Int64(v.to_vec()),
+            Column::I64(v, _) => IndexKind::Int64(v.to_vec()),
             Column::Str(v) => IndexKind::Str(v.to_vec()),
             other => {
                 return Err(VolasError::DType(format!(

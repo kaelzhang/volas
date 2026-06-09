@@ -412,12 +412,12 @@ impl DataFrame {
                     }
                     // A cached *bool* directive: pad a stale `false` placeholder;
                     // `fulfill` rewrites the correct bool tail (the column stays a mask).
-                    (Column::Bool(_), true) => {
+                    (Column::Bool(_, _), true) => {
                         self.columns[pos].append_missing(oh)?;
                     }
                     // A plain int column: upcast to F64 so NaN can mark the gap
                     // (NaN distinguishes "missing" from a real 0).
-                    (Column::I64(v), false) => {
+                    (Column::I64(v, _), false) => {
                         let mut f: Vec<f64> = v.iter().map(|&x| x as f64).collect();
                         f.extend(std::iter::repeat(f64::NAN).take(oh));
                         self.columns[pos] = Column::f64(f);
@@ -512,7 +512,7 @@ impl DataFrame {
                     }
                 }
             }
-            (Column::Bool(arc), Column::Bool(t)) => {
+            (Column::Bool(arc, _), Column::Bool(t, _)) => {
                 let buf = Arc::make_mut(arc);
                 for (i, &v) in t.iter().enumerate() {
                     if from + i < buf.len() {
@@ -607,7 +607,7 @@ impl DataFrame {
         let pick = |k: usize| if values.len() == 1 { 0 } else { k };
 
         // I64 column + a fractional / NaN F64 write -> widen the column to F64.
-        if let (Column::I64(arc), Column::F64(src)) = (&self.columns[col], values) {
+        if let (Column::I64(arc, _), Column::F64(src)) = (&self.columns[col], values) {
             if src.iter().any(|x| x.is_nan() || x.fract() != 0.0) {
                 let mut f: Vec<f64> = arc.iter().map(|&x| x as f64).collect();
                 for (k, &p) in positions.iter().enumerate() {
@@ -626,26 +626,26 @@ impl DataFrame {
                     buf[p] = src[pick(k)];
                 }
             }
-            (Column::F64(arc), Column::I64(src)) => {
+            (Column::F64(arc), Column::I64(src, _)) => {
                 let buf = Arc::make_mut(arc);
                 for (k, &p) in positions.iter().enumerate() {
                     buf[p] = src[pick(k)] as f64;
                 }
             }
-            (Column::I64(arc), Column::I64(src)) => {
+            (Column::I64(arc, _), Column::I64(src, _)) => {
                 let buf = Arc::make_mut(arc);
                 for (k, &p) in positions.iter().enumerate() {
                     buf[p] = src[pick(k)];
                 }
             }
             // All-integral F64 (the widening branch above did not fire) -> store as i64.
-            (Column::I64(arc), Column::F64(src)) => {
+            (Column::I64(arc, _), Column::F64(src)) => {
                 let buf = Arc::make_mut(arc);
                 for (k, &p) in positions.iter().enumerate() {
                     buf[p] = src[pick(k)] as i64;
                 }
             }
-            (Column::Bool(arc), Column::Bool(src)) => {
+            (Column::Bool(arc, _), Column::Bool(src, _)) => {
                 let buf = Arc::make_mut(arc);
                 for (k, &p) in positions.iter().enumerate() {
                     buf[p] = src[pick(k)];

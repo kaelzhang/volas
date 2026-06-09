@@ -45,9 +45,9 @@ pub(crate) fn cell_to_csv(
                 }
             }
         }
-        Column::Bool(v) => if v[i] { "True" } else { "False" }.to_string(),
-        Column::I64(v) => v[i].to_string(),
-        Column::I32(v) => v[i].to_string(),
+        Column::Bool(v, _) => if v[i] { "True" } else { "False" }.to_string(),
+        Column::I64(v, _) => v[i].to_string(),
+        Column::I32(v, _) => v[i].to_string(),
         Column::Str(v) => v[i].clone(),
         Column::Datetime(v) => datetime::format_ns(v[i]),
     }
@@ -277,15 +277,15 @@ fn data_cells(
                 })
                 .collect()
         }
-        Column::I64(v) => rows
+        Column::I64(v, _) => rows
             .iter()
             .map(|&i| lead_num(v[i] < 0, v[i].to_string()))
             .collect(),
-        Column::I32(v) => rows
+        Column::I32(v, _) => rows
             .iter()
             .map(|&i| lead_num(v[i] < 0, v[i].to_string()))
             .collect(),
-        Column::Bool(v) => rows
+        Column::Bool(v, _) => rows
             .iter()
             .map(|&i| format!(" {}", if v[i] { "True" } else { "False" }))
             .collect(),

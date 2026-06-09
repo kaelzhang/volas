@@ -64,7 +64,7 @@ impl Agg {
                 };
                 Ok(Column::f64(vec![val]))
             }
-            Column::I64(v) | Column::Datetime(v) => {
+            Column::I64(v, _) | Column::Datetime(v) => {
                 let it = kept.iter().map(|&i| v[i]);
                 let val = match self {
                     Agg::Max => it.max().unwrap(),

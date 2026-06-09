@@ -43,7 +43,7 @@ pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
 
 fn as_bool(col: &Column) -> Vec<bool> {
     match col {
-        Column::Bool(v) => v.to_vec(),
+        Column::Bool(v, _) => v.to_vec(),
         other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
     }
 }
@@ -189,7 +189,7 @@ fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
         .get(i)
         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
     match execute(df, node)? {
-        Column::Bool(v) => Ok(v.to_vec()),
+        Column::Bool(v, _) => Ok(v.to_vec()),
         other => Ok(other.to_f64_vec().iter().map(|&x| x != 0.0).collect()),
     }
 }

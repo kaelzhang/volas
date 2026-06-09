@@ -190,8 +190,8 @@ fn arc_into_vec<T: Clone>(arc: Arc<Vec<T>>) -> Vec<T> {
 fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> Bound<'py, PyAny> {
     match col {
         Column::F64(a) => arc_into_vec(a).into_pyarray(py).into_any(),
-        Column::Bool(a) => arc_into_vec(a).into_pyarray(py).into_any(),
-        Column::I64(a) => arc_into_vec(a).into_pyarray(py).into_any(),
+        Column::Bool(a, _) => arc_into_vec(a).into_pyarray(py).into_any(),
+        Column::I64(a, _) => arc_into_vec(a).into_pyarray(py).into_any(),
         other => column_to_numpy(py, &other),
     }
 }
@@ -200,9 +200,9 @@ fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
     match col {
         Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
         Column::F32(v) => v.to_vec().into_pyarray(py).into_any(),
-        Column::Bool(v) => v.to_vec().into_pyarray(py).into_any(),
-        Column::I64(v) => v.to_vec().into_pyarray(py).into_any(),
-        Column::I32(v) => v.to_vec().into_pyarray(py).into_any(),
+        Column::Bool(v, _) => v.to_vec().into_pyarray(py).into_any(),
+        Column::I64(v, _) => v.to_vec().into_pyarray(py).into_any(),
+        Column::I32(v, _) => v.to_vec().into_pyarray(py).into_any(),
         // String columns become NumPy object arrays (pandas `object` dtype).
         Column::Str(v) => {
             let list = PyList::new(py, v.as_slice()).expect("build str list");
@@ -229,9 +229,9 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
     match col {
         Column::F64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         Column::F32(v) => (v[i] as f64).into_pyobject(py).unwrap().into_any().unbind(),
-        Column::I64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
-        Column::I32(v) => (v[i] as i64).into_pyobject(py).unwrap().into_any().unbind(),
-        Column::Bool(v) => v[i]
+        Column::I64(v, _) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
+        Column::I32(v, _) => (v[i] as i64).into_pyobject(py).unwrap().into_any().unbind(),
+        Column::Bool(v, _) => v[i]
             .into_pyobject(py)
             .unwrap()
             .to_owned()
@@ -315,9 +315,9 @@ fn np_scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
     match col {
         Column::F64(v) => np_f64(py, v[i]),
         Column::F32(v) => np_f32(py, v[i]),
-        Column::I64(v) => np_i64(py, v[i]),
-        Column::I32(v) => np_i32(py, v[i]),
-        Column::Bool(v) => np_bool(py, v[i]),
+        Column::I64(v, _) => np_i64(py, v[i]),
+        Column::I32(v, _) => np_i32(py, v[i]),
+        Column::Bool(v, _) => np_bool(py, v[i]),
         // str -> Python str; datetime -> np.datetime64 (already numpy) — as scalar_to_py.
         Column::Str(_) | Column::Datetime(_) => scalar_to_py(py, col, i),
     }
@@ -853,7 +853,7 @@ impl PySeries {
     /// True if any element is truthy (NaN skipped) — pandas `any` -> `np.bool_`.
     fn any(&self, py: Python<'_>) -> Py<PyAny> {
         let r = match &self.inner.data {
-            Column::Bool(v) => v.iter().any(|&b| b),
+            Column::Bool(v, _) => v.iter().any(|&b| b),
             other => other.to_f64_vec().iter().any(|&x| !x.is_nan() && x != 0.0),
         };
         np_bool(py, r)
@@ -863,7 +863,7 @@ impl PySeries {
     /// `all` -> `np.bool_`.
     fn all(&self, py: Python<'_>) -> Py<PyAny> {
         let r = match &self.inner.data {
-            Column::Bool(v) => v.iter().all(|&b| b),
+            Column::Bool(v, _) => v.iter().all(|&b| b),
             other => other.to_f64_vec().iter().all(|&x| x.is_nan() || x != 0.0),
         };
         np_bool(py, r)
@@ -1679,7 +1679,7 @@ fn argext(col: &Column, want_max: bool) -> PyResult<usize> {
 /// A column coerced to bool (a `Bool` column as-is, else `x != 0.0`).
 fn to_bool_vec(col: &Column) -> Vec<bool> {
     match col {
-        Column::Bool(v) => v.to_vec(),
+        Column::Bool(v, _) => v.to_vec(),
         other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
     }
 }
@@ -1690,7 +1690,7 @@ fn to_bool_vec(col: &Column) -> Vec<bool> {
 fn bool_mask_key(key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
     if let Ok(s) = key.extract::<PyRef<PySeries>>() {
         return Ok(match &s.inner.data {
-            Column::Bool(m) => Some(m.to_vec()),
+            Column::Bool(m, _) => Some(m.to_vec()),
             _ => None,
         });
     }
@@ -1933,14 +1933,14 @@ pub struct PyDataFrame {
 fn col_value(col: &Column, i: usize) -> f64 {
     match col {
         Column::F64(v) => v[i],
-        Column::Bool(v) => {
+        Column::Bool(v, _) => {
             if v[i] {
                 1.0
             } else {
                 0.0
             }
         }
-        Column::I64(v) => v[i] as f64,
+        Column::I64(v, _) => v[i] as f64,
         _ => f64::NAN,
     }
 }
@@ -2984,7 +2984,7 @@ impl PyDataFrame {
     fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // boolean mask (Series or numpy)
         if let Ok(s) = key.extract::<PyRef<PySeries>>() {
-            if let Column::Bool(mask) = &s.inner.data {
+            if let Column::Bool(mask, _) = &s.inner.data {
                 let sub = self.inner.filter_mask(mask).map_err(pyerr)?;
                 return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
             }
@@ -3683,7 +3683,7 @@ fn as_bool_mask(sel: &Bound<'_, PyAny>, height: usize) -> Option<Vec<usize>> {
         return a.as_slice().ok().and_then(collect);
     }
     if let Ok(ser) = sel.extract::<PyRef<PySeries>>() {
-        if let Column::Bool(v) = &ser.inner.data {
+        if let Column::Bool(v, _) = &ser.inner.data {
             return collect(v);
         }
         return None;

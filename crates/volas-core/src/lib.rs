@@ -13,9 +13,11 @@ pub mod numeric;
 pub mod series;
 pub mod stats;
 pub mod tz;
+pub mod validity;
 
 pub use column::{BinOp, Column, Scalar, SetVal};
 pub use numeric::{binary_supertype, fits, Numeric};
+pub use validity::{Bitmap, Validity};
 pub use dataframe::DataFrame;
 pub use dtype::DType;
 pub use error::{Result, VolasError};
