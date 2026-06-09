@@ -1895,10 +1895,10 @@ mod tests {
         let i = Column::i64(vec![1, 2, 3]);
         assert_eq!(i.set_scalar_at(&[2], Num(0.0)).unwrap(), Column::i64(vec![1, 2, 0]));
         assert_eq!(i.set_scalar_at(&[0], Bool(false)).unwrap(), Column::i64(vec![0, 2, 3]));
-        // I64 + NaN upcasts the whole column to float.
-        let up = i.set_scalar_at(&[1], Num(f64::NAN)).unwrap();
-        assert_eq!(up.dtype(), DType::F64);
-        assert!(matches!(&up, Column::F64(v) if v[0] == 1.0 && v[1].is_nan() && v[2] == 3.0));
+        // I64 + NaN keeps int64, marking that cell NA (the NA model; no float upcast).
+        let na = i.set_scalar_at(&[1], Num(f64::NAN)).unwrap();
+        assert_eq!(na.dtype(), DType::I64);
+        assert!(na.is_valid(0) && !na.is_valid(1) && na.is_valid(2));
         // I64 + a non-integral number is lossy -> error.
         assert!(i.set_scalar_at(&[0], Num(2.5)).is_err());
         // Bool keeps bool for a bool; a number into bool is lossy -> error.
@@ -2087,11 +2087,13 @@ mod tests {
                    Column::f32(vec![1.5, 0.0, 3.5]));
         assert_eq!(i.select(&cond, &Column::i32(vec![0, 0, 0]), DType::I32).unwrap(),
                    Column::i32(vec![3, 0, 4]));
-        // assignment: f32 writes, i32 keeps / upcasts NaN / rejects lossy
+        // assignment: f32 writes; i32 keeps the dtype (a NaN write marks the cell
+        // NA, no float upcast), rejects a lossy value
         assert_eq!(f.set_scalar_at(&[1], SetVal::Num(9.0)).unwrap(), Column::f32(vec![1.5, 9.0, 3.5]));
         assert_eq!(i.set_scalar_at(&[1], SetVal::Bool(true)).unwrap(), Column::i32(vec![3, 1, 4]));
         assert_eq!(i.set_scalar_at(&[1], SetVal::Num(9.0)).unwrap(), Column::i32(vec![3, 9, 4]));
-        assert_eq!(i.set_scalar_at(&[0], SetVal::Num(f64::NAN)).unwrap().dtype(), DType::F64);
+        let i_na = i.set_scalar_at(&[0], SetVal::Num(f64::NAN)).unwrap();
+        assert!(i_na.dtype() == DType::I32 && !i_na.is_valid(0) && i_na.is_valid(1));
         assert!(i.set_scalar_at(&[0], SetVal::Num(2.5)).is_err());
         assert_eq!(f.set_scalar_at(&[0], SetVal::Bool(false)).unwrap(), Column::f32(vec![0.0, 2.5, 3.5]));
         // remaining f32/i32 arms (both directions of slice/take, the other reductions,
