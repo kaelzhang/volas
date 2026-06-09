@@ -1446,11 +1446,13 @@ impl PySeries {
             c.iter_mut().for_each(|b| *b = !*b);
         }
         let (other_col, other_dt) = where_other_resolve(other, &self.inner)?;
-        // A float column keeps its float dtype (it absorbs any fill); an int
-        // column promotes by the type-based supertype.
+        // A float column keeps its float dtype (it absorbs any fill); bool ∘ bool
+        // stays bool (pandas); an int column promotes by the type-based supertype.
         let self_dt = self.inner.data.dtype();
         let target = if self_dt.is_float() {
             self_dt
+        } else if self_dt == DType::Bool && other_dt == DType::Bool {
+            DType::Bool
         } else {
             binary_supertype(self_dt, other_dt)
         };
@@ -1720,6 +1722,10 @@ fn where_other_resolve(
                 require_aligned(&s.index, &ser.inner.index)?;
                 let dt = ser.inner.data.dtype();
                 Ok((ser.inner.data.clone(), dt))
+            } else if let Ok(b) = o.extract::<bool>() {
+                // a bool fill contributes a bool result (checked before f64, since
+                // Python bool is an int subclass)
+                Ok((Column::bool(vec![b; n]), DType::Bool))
             } else if let Ok(x) = o.extract::<f64>() {
                 let dt = if fits(DType::I64, x) { DType::I64 } else { DType::F64 };
                 Ok((Column::f64(vec![x; n]), dt))

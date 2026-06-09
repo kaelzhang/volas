@@ -143,3 +143,15 @@ def test_bool_arithmetic_matches_pandas():
         _ = b - c   # bool subtraction unsupported (pandas raises)
     with pytest.raises(Exception):
         _ = b / c   # bool division unsupported (pandas raises)
+
+
+def test_bool_where_mask_with_bool_fill_stays_bool():
+    # pandas: a bool column where/mask'd with a bool fill stays bool
+    b = _vbool([True, False, True])
+    c = _vbool([True, True, False])
+    assert b.where(c, False).dtype == "bool"
+    assert b.mask(c, True).dtype == "bool"
+    assert b.where(c, c).dtype == "bool"  # bool Series fill
+    np.testing.assert_array_equal(b.where(c, False).to_numpy(), [True, False, False])
+    # (a numeric fill -> pandas object, which volas has no dtype for; that case is
+    # intentionally left as int64 and tracked separately.)

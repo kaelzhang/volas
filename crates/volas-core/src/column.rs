@@ -602,7 +602,21 @@ impl Column {
             DType::I64 => Ok(Column::i64(stats::select(cond, &self.as_i64_vec()?, &other.as_i64_vec()?))),
             DType::I32 => Ok(Column::i32(stats::select(cond, &self.as_i32_vec()?, &other.as_i32_vec()?))),
             DType::F32 => Ok(Column::f32(stats::select(cond, &self.to_f32_vec(), &other.to_f32_vec()))),
+            // bool ∘ bool stays bool (pandas keeps a bool result when the fill is
+            // also bool); `bool` isn't `Numeric`, so the pick is inlined.
+            DType::Bool => {
+                let (a, b) = (self.as_bool_vec()?, other.as_bool_vec()?);
+                Ok(Column::bool((0..cond.len()).map(|i| if cond[i] { a[i] } else { b[i] }).collect()))
+            }
             _ => Ok(Column::f64(stats::select(cond, &self.to_f64_vec(), &other.to_f64_vec()))),
+        }
+    }
+
+    /// The column as `bool` values (a `Bool` column directly; else an error).
+    fn as_bool_vec(&self) -> Result<Vec<bool>> {
+        match self {
+            Column::Bool(v) => Ok(v.to_vec()),
+            other => Err(VolasError::DType(format!("expected a bool column, got {}", other.dtype()))),
         }
     }
 
@@ -1417,5 +1431,12 @@ mod tests {
         assert_eq!(b().binary(&Column::i64(vec![1, 1, 1]), BinOp::Add).unwrap(), Column::i64(vec![2, 1, 2]));
         let f = b().binary(&Column::f64(vec![1.0, 1.0, 1.0]), BinOp::Add).unwrap();
         assert_eq!(f.dtype(), DType::F64);
+        // where/mask with a bool fill stays bool (Column::select Bool target)
+        let cond = [true, false, true];
+        assert_eq!(
+            b().select(&cond, &Column::bool(vec![false, false, false]), DType::Bool).unwrap(),
+            Column::bool(vec![true, false, true])
+        );
+        assert!(Column::i64(vec![1]).as_bool_vec().is_err()); // non-bool -> error
     }
 }
