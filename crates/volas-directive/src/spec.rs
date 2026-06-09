@@ -89,6 +89,9 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         ("ht_sine", Some("lead" | "leadsine")) => Some("leadsine".into()),
         ("mama", None | Some("mama")) => None,
         ("mama", Some("fama")) => Some("fama".into()),
+        // DMA (China 平行线差): the DDD difference line is the main command; AMA is its signal.
+        ("dma", None | Some("ddd")) => None,
+        ("dma", Some("ama")) => Some("ama".into()),
         (_, Some(s)) => Some(s.to_string()),
         (_, None) => None,
     }
@@ -134,6 +137,8 @@ pub fn is_command(name: &str) -> bool {
             | "efi"
             | "tsi"
             | "crsi"
+            | "bias"
+            | "dma"
             | "tr"
             | "atr"
             | "llv"
@@ -283,6 +288,11 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("efi", None) => (vec![Int(13)], vec!["close", "volume"]),
         ("tsi", None) => (vec![Int(25), Int(13)], vec!["close"]),
         ("crsi", None) => (vec![Int(3), Int(2), Int(100)], vec!["close"]),
+        // Group E formula-equivalent wrappers (China-market names): bias ≡ ppo:1,N,0;
+        // dma's DDD line ≡ apo:fast,slow,0, with AMA = the M-period SMA of that line.
+        ("bias", None) => (vec![Int(6)], vec!["close"]),
+        ("dma", None) => (vec![Int(10), Int(50)], vec!["close"]),
+        ("dma", Some("ama")) => (vec![Int(10), Int(50), Int(10)], vec!["close"]),
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns

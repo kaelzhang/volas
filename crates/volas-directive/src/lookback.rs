@@ -78,6 +78,16 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         "efi" => arg(args, 0, 13),
         "tsi" => arg(args, 0, 25) + arg(args, 1, 13) - 1,
         "crsi" => arg(args, 2, 100) + 1,
+        // bias ≡ ppo:1,N,0 — the slow SMA_N gates it (the fast SMA_1 has no warm-up).
+        "bias" => arg(args, 0, 6).saturating_sub(1),
+        // dma's DDD line ≡ apo:fast,slow,0 (slow SMA gates it); AMA adds its own SMA_M warm-up.
+        "dma" => {
+            let line = arg(args, 1, 50).saturating_sub(1);
+            match sub {
+                None => line,
+                _ => line + arg(args, 2, 10).saturating_sub(1),
+            }
+        }
         "tr" => 1,
         "atr" => arg(args, 0, 14),
         "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),

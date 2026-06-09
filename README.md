@@ -1387,6 +1387,48 @@ df['mass_index']
 df['mass_index:25']
 ```
 
+### `bias`, Bias Ratio (乖离率)
+
+```
+bias:<period>@<on>
+```
+
+The percentage deviation of the series from its `period`-bar SMA,
+`(close − SMA) / SMA × 100`. This is the China-market name for `ppo:1,<period>,0`; the
+classic triple is `bias:6`, `bias:12`, `bias:24`.
+
+- **period?** `int=6`
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['bias']
+df['bias:24']
+```
+
+### `dma`, Difference of Moving Average (平行线差)
+
+```
+dma:<fast>,<slow>@<on>
+dma.ama:<fast>,<slow>,<m>@<on>
+```
+
+The DDD line is the difference of two SMAs, `SMA_fast − SMA_slow` — the China-market name for
+`apo:<fast>,<slow>,0`. The AMA signal line is the `m`-bar SMA of the DDD line. `dma.ddd` is an
+alias of the main `dma` line.
+
+- **fast?** `int=10`
+- **slow?** `int=50`
+- **m?** `int=10` The AMA signal period (only on `dma.ama`).
+- **on?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+# DDD difference line
+df['dma']
+
+# AMA signal line
+df['dma.ama']
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change

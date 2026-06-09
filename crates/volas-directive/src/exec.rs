@@ -389,6 +389,26 @@ fn exec_command(
             )
         }
 
+        // Group E China-market wrappers (formula-equivalent to apo/ppo, fixed to SMA).
+        // bias:N ≡ ppo:1,N,0 — the percentage deviation of close from its N-period SMA.
+        ("bias", _) => {
+            let data = close(0)?;
+            let f = ma_typed(&data, 1, 0)?;
+            let s = ma_typed(&data, arg_usize(args, 0, Some(6))?, 0)?;
+            f64col((0..data.len()).map(|i| (f[i] - s[i]) / s[i] * 100.0).collect())
+        }
+        // dma's DDD line ≡ apo:fast,slow,0; dma.ama is the M-period SMA of that line.
+        ("dma", sub) => {
+            let data = close(0)?;
+            let f = ma_typed(&data, arg_usize(args, 0, Some(10))?, 0)?;
+            let s = ma_typed(&data, arg_usize(args, 1, Some(50))?, 0)?;
+            let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
+            match sub {
+                None => f64col(line),
+                _ => f64col(ma_typed(&line, arg_usize(args, 2, Some(10))?, 0)?),
+            }
+        }
+
         ("macd", None) => f64col(ind::macd(
             &close(0)?,
             arg_usize(args, 0, Some(12))?,
