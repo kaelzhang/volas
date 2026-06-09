@@ -653,25 +653,48 @@ impl Column {
     /// error — surfaces as `TypeError`, like pandas' `LossySetitemError`.
     /// `positions` are assumed in bounds (callers validate the mask / index).
     pub fn set_scalar_at(&self, positions: &[usize], value: SetVal) -> Result<Column> {
+        let len = self.len();
         match self {
-            // A float column absorbs any value (with rounding for f32).
+            // A float column absorbs any value (with rounding for f32); NaN is its
+            // in-band missing, so no separate validity is needed.
             Column::F64(v) => Ok(set_float_at(v, positions, value)),
             Column::F32(v) => Ok(set_float_at(v, positions, value)),
-            // An int column keeps the value if it fits, upcasts to float for NaN,
-            // and rejects a lossy (non-integral / out-of-range) write.
-            Column::I64(v, _) => set_int_at(v, positions, value, "int64"),
-            Column::I32(v, _) => set_int_at(v, positions, value, "int32"),
-            Column::Bool(v, _) => match value {
-                SetVal::Bool(b) => {
-                    let mut nv = v.to_vec();
-                    for &i in positions {
-                        nv[i] = b;
-                    }
-                    Ok(Column::bool(nv))
+            // An int column keeps its dtype AND its existing validity bitmap: a real
+            // (integral) value marks those positions present, a NaN marks them
+            // missing (NA, *not* an f64 upcast), a lossy value errors. Other rows'
+            // NA is preserved (the bug fix: a scalar write used to drop the mask).
+            Column::I64(v, val) => match value {
+                SetVal::Num(x) if x.is_nan() => {
+                    Ok(Column::i64_with(v.to_vec(), validity_set(val, positions, false, len)))
                 }
-                SetVal::Num(x) => Err(VolasError::DType(format!(
-                    "Invalid value '{x}' for dtype 'bool'"
-                ))),
+                SetVal::Num(x) => match i64::try_from_f64(x) {
+                    Some(iv) => Ok(Column::i64_with(set_each(v, positions, iv), validity_set(val, positions, true, len))),
+                    None => Err(VolasError::DType(format!("Invalid value '{x}' for dtype 'int64'"))),
+                },
+                SetVal::Bool(b) => {
+                    Ok(Column::i64_with(set_each(v, positions, b as i64), validity_set(val, positions, true, len)))
+                }
+            },
+            Column::I32(v, val) => match value {
+                SetVal::Num(x) if x.is_nan() => {
+                    Ok(Column::i32_with(v.to_vec(), validity_set(val, positions, false, len)))
+                }
+                SetVal::Num(x) => match i32::try_from_f64(x) {
+                    Some(iv) => Ok(Column::i32_with(set_each(v, positions, iv), validity_set(val, positions, true, len))),
+                    None => Err(VolasError::DType(format!("Invalid value '{x}' for dtype 'int32'"))),
+                },
+                SetVal::Bool(b) => {
+                    Ok(Column::i32_with(set_each(v, positions, b as i32), validity_set(val, positions, true, len)))
+                }
+            },
+            Column::Bool(v, val) => match value {
+                SetVal::Bool(b) => {
+                    Ok(Column::bool_with(set_each(v, positions, b), validity_set(val, positions, true, len)))
+                }
+                SetVal::Num(x) if x.is_nan() => {
+                    Ok(Column::bool_with(v.to_vec(), validity_set(val, positions, false, len)))
+                }
+                SetVal::Num(x) => Err(VolasError::DType(format!("Invalid value '{x}' for dtype 'bool'"))),
             },
             other => Err(VolasError::DType(format!(
                 "cannot assign a scalar into a {} column",
@@ -1473,41 +1496,28 @@ fn set_float_at<T: Numeric>(v: &[T], positions: &[usize], value: SetVal) -> Colu
     T::into_column(nv)
 }
 
-/// Write a scalar into an int column: keep the dtype if it fits, upcast to float
-/// for `NaN`, error on a lossy (non-integral / out-of-range) write.
-fn set_int_at<T: Numeric>(
-    v: &[T],
-    positions: &[usize],
-    value: SetVal,
-    dtype: &str,
-) -> Result<Column> {
-    match value {
-        SetVal::Num(x) if x.is_nan() => {
-            let mut nv: Vec<f64> = v.iter().map(|&n| n.to_f64()).collect();
-            for &i in positions {
-                nv[i] = x;
-            }
-            Ok(Column::f64(nv))
-        }
-        SetVal::Num(x) => match T::try_from_f64(x) {
-            Some(iv) => {
-                let mut nv = v.to_vec();
-                for &i in positions {
-                    nv[i] = iv;
-                }
-                Ok(T::into_column(nv))
-            }
-            None => Err(VolasError::DType(format!("Invalid value '{x}' for dtype '{dtype}'"))),
-        },
-        SetVal::Bool(b) => {
-            let iv = if b { T::ONE } else { T::ZERO };
-            let mut nv = v.to_vec();
-            for &i in positions {
-                nv[i] = iv;
-            }
-            Ok(T::into_column(nv))
-        }
+/// Copy `v` and write `x` into each of `positions` (scalar assignment).
+fn set_each<T: Copy>(v: &[T], positions: &[usize], x: T) -> Vec<T> {
+    let mut nv = v.to_vec();
+    for &i in positions {
+        nv[i] = x;
     }
+    nv
+}
+
+/// The validity after a scalar write: every other row keeps its existing validity;
+/// `positions` become present (`present = true`) or missing (a NA write). A dense
+/// column stays dense when the write only sets values present (no allocation in
+/// the common case).
+fn validity_set(val: &Validity, positions: &[usize], present: bool, len: usize) -> Validity {
+    if present && !val.has_nulls() {
+        return Validity::dense();
+    }
+    let mut flags: Vec<bool> = (0..len).map(|i| val.is_valid(i)).collect();
+    for &i in positions {
+        flags[i] = present;
+    }
+    Validity::from_valid_iter(len, flags)
 }
 
 /// Running OR (`or = true`, backs bool `cummax`) / running AND (`cummin`).
@@ -2280,6 +2290,29 @@ mod tests {
         )
         .fillna(0.0)
         .is_err());
+    }
+
+    #[test]
+    fn set_scalar_at_preserves_validity() {
+        // a scalar write keeps every other row's NA (regression: it used to return
+        // a dense column and silently turn pre-existing NA into 0 / false)
+        let c = na_i64(&[1, 0, 3], &[true, false, true]); // 1, NA, 3
+        let r = c.set_scalar_at(&[0], SetVal::Num(9.0)).unwrap();
+        assert_eq!(r.dtype(), DType::I64);
+        assert!(r.is_valid(0) && !r.is_valid(1) && r.is_valid(2)); // 9, NA, 3
+        // writing NaN marks the position NA and keeps int (no f64 upcast)
+        let r2 = c.set_scalar_at(&[2], SetVal::Num(f64::NAN)).unwrap();
+        assert_eq!(r2.dtype(), DType::I64);
+        assert!(r2.is_valid(0) && !r2.is_valid(1) && !r2.is_valid(2));
+        // bool keeps its validity too
+        let b = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, false, true]));
+        let rb = b.set_scalar_at(&[0], SetVal::Bool(false)).unwrap();
+        assert!(rb.dtype() == DType::Bool && rb.is_valid(0) && !rb.is_valid(1) && rb.is_valid(2));
+        // a dense column stays dense (no validity allocated) on a real write
+        assert_eq!(Column::i64(vec![1, 2, 3]).set_scalar_at(&[0], SetVal::Num(9.0)).unwrap().null_count(), 0);
+        // a bool fill into an int column converts (pandas), keeping validity
+        let rib = c.set_scalar_at(&[1], SetVal::Bool(true)).unwrap();
+        assert!(rib.dtype() == DType::I64 && rib.is_valid(1));
     }
 
     #[test]

@@ -103,3 +103,25 @@ def test_loc_single_key_errors():
     df = base()
     with pytest.raises(TypeError):
         df.loc[0] = 5.               # whole-row assignment unsupported
+
+
+def test_setitem_preserves_int_bool_validity():
+    # a scalar write keeps other rows' NA (regression: the NA at idx 1 used to
+    # become a dense 0 / false). Series and the DataFrame indexers must agree.
+    s = DataFrame({'a': [1, None, 3]})['a']
+    s[0] = 9
+    assert s.dtype == 'int64' and s.to_list() == [9, volas.NA, 3]
+    b = DataFrame({'a': [True, None, False]})['a']
+    b[0] = True
+    assert b.dtype == 'bool' and b.to_list() == [True, volas.NA, False]
+    # writing NA (NaN) keeps the int dtype, marking the cell missing (no upcast)
+    s2 = DataFrame({'a': [1, 2, 3]})['a']
+    s2[1] = float('nan')
+    assert s2.dtype == 'int64' and s2.isna().to_list() == [False, True, False]
+    # df.iat and df.iloc agree (they share the same column assignment)
+    df = DataFrame({'a': [1, None, 3]})
+    df.iat[0, 0] = 9
+    assert df['a'].to_list() == [9, volas.NA, 3]
+    df2 = DataFrame({'a': [1, None, 3]})
+    df2.iloc[0, 0] = 9
+    assert df2['a'].to_list() == [9, volas.NA, 3]
