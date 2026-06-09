@@ -158,7 +158,7 @@ Which gets the 2-period simple moving average on column `"close"`.
   with `tz_localize` / `tz_convert`. See [Timezones](#timezones).
 - **columns** `Optional[list[str]] = None` Select and order the columns to keep —
   the same projection as `df[[...]]`. A name not present raises `KeyError`; an empty
-  list or a duplicate name is rejected, and an absent column is never NaN-filled.
+  list or a duplicate name is rejected, and an absent column is never silently filled.
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are
   taken as already-final bars at that frame, and later `append`s fold finer
