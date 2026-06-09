@@ -764,14 +764,18 @@ impl DataFrame {
     }
 
     /// Flatten to a row-major (C-order) 2-D `f64` buffer for NumPy export,
-    /// returning `(data, height, width)`.
+    /// returning `(data, height, width)`. Each column is materialized through the
+    /// validity-aware `to_f64_vec`, so a missing cell (int/bool NA, datetime NaT,
+    /// str) exports as `NaN` — not the raw placeholder — matching the 1-D
+    /// `Series` export and `pandas` `Int64.to_numpy()`.
     pub fn to_row_major_f64(&self) -> (Vec<f64>, usize, usize) {
         let h = self.height;
         let w = self.columns.len();
         let mut out = vec![0.0f64; h * w];
         for (j, c) in self.columns.iter().enumerate() {
+            let col = c.to_f64_vec();
             for i in 0..h {
-                out[i * w + j] = c.get_f64(i);
+                out[i * w + j] = col[i];
             }
         }
         (out, h, w)
@@ -866,6 +870,22 @@ mod tests {
         let (data, h, w) = df.to_row_major_f64();
         assert_eq!((h, w), (3, 2));
         assert_eq!(data, vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
+        // A missing cell (int NA, bool NA, datetime NaT) exports as NaN, never the
+        // raw placeholder — the row-major path honors validity like the 1-D path.
+        let na_df = DataFrame::new(
+            vec!["i".into(), "b".into(), "t".into()],
+            vec![
+                Column::i64_with(vec![1, 0, 3], crate::Validity::from_valid_iter(3, [true, false, true])),
+                Column::bool_with(vec![true, false, false], crate::Validity::from_valid_iter(3, [true, false, true])),
+                Column::datetime(vec![100, i64::MIN, 300]),
+            ],
+            None,
+        )
+        .unwrap();
+        let (d2, _, _) = na_df.to_row_major_f64(); // row-major, w = 3
+        assert_eq!(d2[0], 1.0); // i[0]
+        assert!(d2[3].is_nan() && d2[4].is_nan() && d2[5].is_nan()); // row 1: NA, NA, NaT
+        assert_eq!(d2[6], 3.0); // i[2]
     }
 
     #[test]
