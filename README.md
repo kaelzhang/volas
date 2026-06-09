@@ -1424,6 +1424,8 @@ alias of the main `dma` line.
 ```py
 # DDD difference line
 df['dma']
+# , which is equivalent to
+df['dma.ddd']
 
 # AMA signal line
 df['dma.ama']
