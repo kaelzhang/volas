@@ -428,6 +428,39 @@ impl Column {
         }
     }
 
+    /// Extend a **plain** (non-computed) column with `len` genuine missing values,
+    /// dtype-preserving: float / datetime use their in-band sentinel (`NaN` /
+    /// `NaT`), while int / bool / str grow the validity bitmap with `len` invalid
+    /// bits. Used when a column is absent from an appended frame; a cached
+    /// directive instead uses the cheaper [`append_missing`] placeholder, which
+    /// `fulfill` overwrites.
+    pub fn append_na(&mut self, len: usize) {
+        let old = self.len();
+        let na_validity =
+            |val: &Validity| Validity::from_valid_iter(old + len, (0..old + len).map(|i| i < old && val.is_valid(i)));
+        match self {
+            Column::F64(v) => Arc::make_mut(v).extend(std::iter::repeat(f64::NAN).take(len)),
+            Column::F32(v) => Arc::make_mut(v).extend(std::iter::repeat(f32::NAN).take(len)),
+            Column::Datetime(v) => Arc::make_mut(v).extend(std::iter::repeat(i64::MIN).take(len)),
+            Column::I64(v, val) => {
+                *val = na_validity(val);
+                Arc::make_mut(v).extend(std::iter::repeat(0).take(len));
+            }
+            Column::I32(v, val) => {
+                *val = na_validity(val);
+                Arc::make_mut(v).extend(std::iter::repeat(0).take(len));
+            }
+            Column::Bool(v, val) => {
+                *val = na_validity(val);
+                Arc::make_mut(v).extend(std::iter::repeat(false).take(len));
+            }
+            Column::Str(v, val) => {
+                *val = na_validity(val);
+                Arc::make_mut(v).extend(std::iter::repeat(String::new()).take(len));
+            }
+        }
+    }
+
     /// Parse this column into a [`Column::Datetime`] (epoch ns). `Str` cells are
     /// parsed via [`datetime::parse_ns`]; an already-`Datetime` column is shared
     /// back (cheap). Errors on an unparseable cell or an unsupported dtype.
@@ -2269,6 +2302,34 @@ mod tests {
             Validity::from_valid_iter(2, [false, false]),
         );
         assert_eq!(allna.fill_dir(true).null_count(), 2);
+    }
+
+    #[test]
+    fn append_na_pads_dtype_preserving() {
+        // a plain column padded on append keeps its dtype and marks the new rows NA
+        let mut i = Column::i64(vec![1, 2]);
+        i.append_na(2);
+        assert_eq!(i.dtype(), DType::I64); // no upcast to float
+        assert!(i.is_valid(0) && i.is_valid(1) && !i.is_valid(2) && !i.is_valid(3));
+        let mut i32c = Column::i32(vec![7]);
+        i32c.append_na(1);
+        assert!(i32c.is_valid(0) && !i32c.is_valid(1) && i32c.dtype() == DType::I32);
+        let mut b = Column::bool(vec![true]);
+        b.append_na(1);
+        assert!(b.is_valid(0) && !b.is_valid(1) && b.dtype() == DType::Bool);
+        let mut s = Column::str(vec!["a".into()]);
+        s.append_na(1);
+        assert!(s.is_valid(0) && !s.is_valid(1) && s.dtype() == DType::Utf8);
+        let mut d = Column::datetime(vec![100]);
+        d.append_na(1);
+        assert!(d.is_valid(0) && !d.is_valid(1)); // NaT sentinel
+        let mut f = Column::f64(vec![1.0]);
+        f.append_na(1);
+        assert!(f.is_valid(0) && !f.is_valid(1)); // NaN in-band
+        // an existing hole is preserved, the appended rows are added as NA
+        let mut i2 = Column::i64_with(vec![1, 0], Validity::from_valid_iter(2, [true, false]));
+        i2.append_na(1);
+        assert!(i2.is_valid(0) && !i2.is_valid(1) && !i2.is_valid(2) && i2.null_count() == 2);
     }
 
     #[test]

@@ -420,32 +420,16 @@ impl DataFrame {
                 self.columns[pos].append(&other.columns[other_pos])?;
             } else {
                 // column `n` is missing from `other` — pad the new rows.
-                let is_computed = self.computed.contains_key(n);
-                match (&self.columns[pos], is_computed) {
-                    // F64: NaN marks the gap.
-                    (Column::F64(_), _) => {
-                        self.columns[pos].append_missing(oh)?;
-                    }
-                    // A cached *bool* directive: pad a stale `false` placeholder;
-                    // `fulfill` rewrites the correct bool tail (the column stays a mask).
-                    (Column::Bool(_, _), true) => {
-                        self.columns[pos].append_missing(oh)?;
-                    }
-                    // A plain int column: upcast to F64 so NaN can mark the gap
-                    // (NaN distinguishes "missing" from a real 0).
-                    (Column::I64(v, _), false) => {
-                        let mut f: Vec<f64> = v.iter().map(|&x| x as f64).collect();
-                        f.extend(std::iter::repeat(f64::NAN).take(oh));
-                        self.columns[pos] = Column::f64(f);
-                    }
-                    // Plain bool / str / datetime cannot represent "missing".
-                    (other_col, _) => {
-                        return Err(VolasError::DType(format!(
-                            "cannot append: column \"{n}\" ({}) is missing from the \
-                                 appended frame and has no missing-value representation",
-                            other_col.dtype()
-                        )));
-                    }
+                if self.computed.contains_key(n) {
+                    // A cached directive (F64 indicator / Bool mask): a cheap stale
+                    // placeholder (NaN / `false`); `fulfill` recomputes and overwrites
+                    // the appended tail, so a dense placeholder keeps validity simple.
+                    self.columns[pos].append_missing(oh)?;
+                } else {
+                    // A plain column keeps its data semantics: pad with dtype-preserving
+                    // NA (int / bool / str grow the validity bitmap; datetime -> NaT;
+                    // float -> NaN), never upcasting the dtype or erroring.
+                    self.columns[pos].append_na(oh);
                 }
             }
         }
