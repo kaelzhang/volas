@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use volas_core::{Column, DataFrame, Result, VolasError};
+use volas_core::{Column, DataFrame, Result, Validity, VolasError};
 
 /// pandas's default missing-value tokens (`STR_NA_VALUES`). A numeric column
 /// with any of these (trimmed) entries upcasts to `f64` with `NaN`, exactly as
@@ -145,7 +145,12 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
                 .collect(),
         );
     }
-    Column::str(cells)
+    // str: NA tokens (empty / `NA` / `null` / ...) become NA via the validity
+    // bitmap — like pandas, and so a parse_dates column with blank cells parses
+    // to NaT instead of failing on the "" placeholder. Present cells keep their
+    // original (untrimmed) value.
+    let validity = Validity::from_valid_iter(cells.len(), trimmed.iter().map(|t| !is_na(t)));
+    Column::str_with(cells, validity)
 }
 
 #[cfg(test)]
@@ -177,6 +182,15 @@ mod tests {
                 other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
             }
         }
+    }
+
+    #[test]
+    fn str_column_na_tokens_are_missing() {
+        // a str column marks NA tokens (blank / NA / null) as missing via validity,
+        // keeping present cells — so a parse_dates column with blanks -> NaT.
+        let c = infer(&["x", "", "z", "NA"]);
+        assert!(matches!(c, Column::Str(..)));
+        assert!(c.is_valid(0) && !c.is_valid(1) && c.is_valid(2) && !c.is_valid(3));
     }
 
     #[test]

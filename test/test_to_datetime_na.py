@@ -98,3 +98,35 @@ def test_to_datetime_non_numeric_column_is_typeerror():
     # reading a bool column as an epoch is a type error, surfaced as TypeError
     with pytest.raises(TypeError):
         DataFrame({"t": [True, False]}).astype({"t": "datetime64[s]"})
+
+
+def test_to_datetime_str_column_na_maps_to_nat():
+    # a str column with a missing cell parses to NaT, not a `could not parse ""`
+    # error (regression: the str parse path ignored validity)
+    s = to_datetime(DataFrame({"t": ["2021-01-01", None, "2021-01-03"]})["t"])
+    assert s.dtype == "datetime64[ns]"
+    assert s.isna().to_list() == [False, True, False]
+    # an explicit format honours NA too
+    assert to_datetime(["2021-01-01", None], format="%Y-%m-%d").isna().to_list() == [False, True]
+    # astype on a str column with a hole
+    a = DataFrame({"t": ["2021-01-01", None]}).astype({"t": "datetime64[s]"})["t"]
+    assert a.isna().to_list() == [False, True]
+
+
+def test_read_csv_parse_dates_with_blank_cell():
+    import os
+    import tempfile
+
+    from volas import read_csv
+
+    p = tempfile.mktemp(suffix=".csv")
+    with open(p, "w") as f:
+        f.write("date,px\n2021-01-01,10\n,20\n2021-01-03,30\n")  # blank date on row 2
+    try:
+        df = read_csv(p, parse_dates=["date"])  # used to raise `could not parse ""`
+        assert df["date"].dtype == "datetime64[ns]"
+        assert df["date"].isna().to_list() == [False, True, False]  # blank -> NaT
+        # a blank cell in a plain (unparsed) str column reads as NA, like pandas
+        assert read_csv(p)["date"].isna().to_list() == [False, True, False]
+    finally:
+        os.unlink(p)

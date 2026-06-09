@@ -475,9 +475,15 @@ impl Column {
     pub fn to_datetime_tz(&self, tz: crate::tz::Tz) -> Result<Column> {
         match self {
             Column::Datetime(_) => Ok(self.clone()),
-            Column::Str(v, _) => {
+            Column::Str(v, val) => {
                 let mut out = Vec::with_capacity(v.len());
-                for s in v.iter() {
+                for (i, s) in v.iter().enumerate() {
+                    // A missing (NA) string cell parses to NaT, not the "" placeholder
+                    // (which would fail) — matching the float/int epoch NA paths.
+                    if !val.is_valid(i) {
+                        out.push(i64::MIN);
+                        continue;
+                    }
                     let ns = datetime::parse_ns_in_tz(s, tz).ok_or_else(|| {
                         VolasError::Value(format!("could not parse datetime {s:?}"))
                     })?;

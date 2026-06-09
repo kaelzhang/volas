@@ -4267,12 +4267,17 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
     };
     let converted = match col {
         c @ Column::Datetime(_) => c,
-        Column::Str(v, _) => match format {
+        Column::Str(v, val) => match format {
             // An explicit format parses faster and unambiguously (pandas `format=`).
+            // A missing (NA) cell maps to NaT, not parsed from its "" placeholder.
             Some(fmt) => {
                 let ns = v
                     .iter()
-                    .map(|s| {
+                    .enumerate()
+                    .map(|(i, s)| {
+                        if !val.is_valid(i) {
+                            return Ok(i64::MIN);
+                        }
                         datetime::parse_ns_format(s, fmt).ok_or_else(|| {
                             PyValueError::new_err(format!(
                                 "\"{s}\" does not match format \"{fmt}\""
@@ -4282,7 +4287,7 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
                     .collect::<PyResult<Vec<i64>>>()?;
                 Column::datetime(ns)
             }
-            None => Column::Str(v, Validity::dense()).to_datetime().map_err(pyerr)?,
+            None => Column::Str(v, val).to_datetime().map_err(pyerr)?,
         },
         c => c.epoch_to_datetime_rounded(unit).map_err(pyerr)?,
     };
