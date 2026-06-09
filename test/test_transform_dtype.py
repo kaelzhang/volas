@@ -84,7 +84,10 @@ def test_where_dtype_parity():
     vi, pi = _vi([1, 2, 3, 4]), pd.Series([1, 2, 3, 4], dtype="int64")
     _assert_parity(vi.where(vi > 2, 0), pi.where(pi > 2, 0))          # int fill -> int64
     _assert_parity(vi.where(vi > 2, 2.5), pi.where(pi > 2, 2.5))      # non-integral -> float64
-    _assert_parity(vi.where(vi > 2), pi.where(pi > 2))                # default NaN -> float64
+    # default other: volas keeps int64 + NA (the NA model), a deliberate divergence
+    # from pandas (which upcasts the whole column to float64)
+    r = vi.where(vi > 2)
+    assert r.dtype == "int64" and r.isna().to_list() == [True, True, False, False]
     _assert_parity(vi.mask(vi > 2, 0), pi.mask(pi > 2, 0))
 
 
