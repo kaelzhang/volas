@@ -72,10 +72,24 @@ df = DataFrame({
 })
 
 # A plain column -> Series
-df['close']                      # Series([3, 4, 5, 6, 7, 8], name='close')
+df['close']
+# 0    3.0
+# 1    4.0
+# 2    5.0
+# 3    6.0
+# 4    7.0
+# 5    8.0
+# Name: close, dtype: float64
 
 # An indicator directive -> Series (2-period SMA of `close`)
-df['ma:2']                       # Series([nan, 3.5, 4.5, 5.5, 6.5, 7.5])
+df['ma:2']
+# 0    NaN
+# 1    3.5
+# 2    4.5
+# 3    5.5
+# 4    6.5
+# 5    7.5
+# Name: ma:2, dtype: float64
 
 # A boolean directive -> bool Series, usable as a row mask
 bullish = df['close > open']
@@ -215,7 +229,7 @@ df.get_column('close')
 # 2    7
 # 3    8
 # 4    9
-# Name: close, dtype: float64
+# Name: close, dtype: int64
 ```
 
 ### df.append(other: DataFrame | Row) -> DataFrame
