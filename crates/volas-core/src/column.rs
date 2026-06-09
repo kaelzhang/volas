@@ -131,6 +131,18 @@ impl Column {
     pub fn i64(v: Vec<i64>) -> Column {
         Column::I64(Arc::new(v), Validity::dense())
     }
+    /// Build an `I64` column with an explicit validity (missing-aware).
+    pub fn i64_with(v: Vec<i64>, validity: Validity) -> Column {
+        Column::I64(Arc::new(v), validity)
+    }
+    /// Build an `I32` column with an explicit validity (missing-aware).
+    pub fn i32_with(v: Vec<i32>, validity: Validity) -> Column {
+        Column::I32(Arc::new(v), validity)
+    }
+    /// Build a `Bool` column with an explicit validity (missing-aware).
+    pub fn bool_with(v: Vec<bool>, validity: Validity) -> Column {
+        Column::Bool(Arc::new(v), validity)
+    }
     /// Build a `Str` column.
     pub fn str(v: Vec<String>) -> Column {
         Column::Str(Arc::new(v))
@@ -168,6 +180,53 @@ impl Column {
             Column::I32(_, _) => DType::I32,
             Column::Str(_) => DType::Utf8,
             Column::Datetime(_) => DType::Datetime,
+        }
+    }
+
+    /// Whether the value at `i` is present (not `volas.NA`). Each dtype reads its
+    /// natural missing representation: a float `NaN`, an int/bool validity mask,
+    /// or a datetime `NaT` (`i64::MIN`). `i` is assumed in bounds.
+    pub fn is_valid(&self, i: usize) -> bool {
+        match self {
+            Column::F64(v) => !v[i].is_nan(),
+            Column::F32(v) => !v[i].is_nan(),
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => val.is_valid(i),
+            Column::Datetime(v) => v[i] != i64::MIN,
+            Column::Str(_) => true,
+        }
+    }
+
+    /// Count of missing (`volas.NA`) values.
+    pub fn null_count(&self) -> usize {
+        match self {
+            Column::F64(v) => v.iter().filter(|x| x.is_nan()).count(),
+            Column::F32(v) => v.iter().filter(|x| x.is_nan()).count(),
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => val.null_count(),
+            Column::Datetime(v) => v.iter().filter(|&&x| x == i64::MIN).count(),
+            Column::Str(_) => 0,
+        }
+    }
+
+    /// Attach a validity to a (nullable) column produced by a value-only kernel,
+    /// so an element-wise transform carries the input's missing positions through.
+    /// A float/str/datetime column is returned unchanged (its missing lives in the
+    /// values, not a side mask).
+    fn with_validity(self, validity: Validity) -> Column {
+        match self {
+            Column::I64(v, _) => Column::I64(v, validity),
+            Column::I32(v, _) => Column::I32(v, validity),
+            // bool transforms build their column with the mask directly; float /
+            // str / datetime carry missing in the values, so leave them unchanged.
+            other => other,
+        }
+    }
+
+    /// The validity of a nullable (int / bool) column, else `None` (a float column
+    /// carries its missing in `NaN`, not a mask).
+    fn validity(&self) -> Option<&Validity> {
+        match self {
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => Some(val),
+            _ => None,
         }
     }
 
@@ -223,9 +282,9 @@ impl Column {
         match self {
             Column::F64(v) => v.to_vec(),
             Column::F32(v) => v.iter().map(|&x| x as f64).collect(),
-            Column::Bool(v, _) => v.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect(),
-            Column::I64(v, _) => v.iter().map(|&i| i as f64).collect(),
-            Column::I32(v, _) => v.iter().map(|&i| i as f64).collect(),
+            Column::Bool(v, val) => mask_f64(v.iter().map(|&b| if b { 1.0 } else { 0.0 }), val),
+            Column::I64(v, val) => mask_f64(v.iter().map(|&i| i as f64), val),
+            Column::I32(v, val) => mask_f64(v.iter().map(|&i| i as f64), val),
             Column::Str(v) => vec![f64::NAN; v.len()],
             Column::Datetime(v) => v.iter().map(|&i| i as f64).collect(),
         }
@@ -511,37 +570,75 @@ impl Column {
     // stays int and computes natively (no f64 round-trip). A non-numeric column
     // is a `DType` error.
 
-    /// Cumulative sum (pandas `cumsum`, skipna), dtype-preserving. A `bool` column
-    /// sums to `int64` (counts trues), matching pandas.
+    /// Cumulative sum (pandas `cumsum`, skipna), dtype-preserving (`bool` -> int64
+    /// counting trues). Missing values are skipped and stay missing (NA in → NA out).
     pub fn cumsum(&self) -> Result<Column> {
-        if let Column::Bool(v, _) = self {
-            return Ok(Column::i64(stats::cumsum(&bool_as_i64(v))));
+        match self {
+            Column::Bool(v, val) => {
+                let iv = widen_i64(v);
+                let out = if val.has_nulls() {
+                    cum_valid(&iv, val, 0, i64::wrapping_add)
+                } else {
+                    stats::cumsum(&iv)
+                };
+                Ok(Column::i64_with(out, val.clone()))
+            }
+            Column::I64(v, val) => Ok(cum(v, val, stats::cumsum, i64::wrapping_add)),
+            Column::I32(v, val) => Ok(cum(v, val, stats::cumsum, i32::wrapping_add)),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v))),
         }
-        numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v)))
     }
-    /// Cumulative maximum (pandas `cummax`), dtype-preserving. A `bool` column
-    /// stays `bool` (running OR).
+    /// Cumulative maximum (pandas `cummax`), dtype-preserving (`bool` running OR).
+    /// Missing values are skipped and stay missing.
     pub fn cummax(&self) -> Result<Column> {
-        if let Column::Bool(v, _) = self {
-            return Ok(Column::bool(bool_running(v, true)));
+        match self {
+            Column::Bool(v, val) => {
+                let out = if val.has_nulls() {
+                    cum_valid(v, val, false, |a, b| a || b)
+                } else {
+                    bool_running(v, true)
+                };
+                Ok(Column::bool_with(out, val.clone()))
+            }
+            Column::I64(v, val) => Ok(cum(v, val, stats::cummax, |a, x| if x > a { x } else { a })),
+            Column::I32(v, val) => Ok(cum(v, val, stats::cummax, |a, x| if x > a { x } else { a })),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cummax(v))),
         }
-        numeric_dispatch!(self, v => Numeric::into_column(stats::cummax(v)))
     }
-    /// Cumulative minimum (pandas `cummin`), dtype-preserving. A `bool` column
-    /// stays `bool` (running AND).
+    /// Cumulative minimum (pandas `cummin`), dtype-preserving (`bool` running AND).
+    /// Missing values are skipped and stay missing.
     pub fn cummin(&self) -> Result<Column> {
-        if let Column::Bool(v, _) = self {
-            return Ok(Column::bool(bool_running(v, false)));
+        match self {
+            Column::Bool(v, val) => {
+                let out = if val.has_nulls() {
+                    cum_valid(v, val, true, |a, b| a && b)
+                } else {
+                    bool_running(v, false)
+                };
+                Ok(Column::bool_with(out, val.clone()))
+            }
+            Column::I64(v, val) => Ok(cum(v, val, stats::cummin, |a, x| if x < a { x } else { a })),
+            Column::I32(v, val) => Ok(cum(v, val, stats::cummin, |a, x| if x < a { x } else { a })),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cummin(v))),
         }
-        numeric_dispatch!(self, v => Numeric::into_column(stats::cummin(v)))
     }
-    /// Cumulative product (pandas `cumprod`), dtype-preserving. A `bool` column
-    /// products to `int64`, matching pandas.
+    /// Cumulative product (pandas `cumprod`), dtype-preserving (`bool` -> int64).
+    /// Missing values are skipped and stay missing.
     pub fn cumprod(&self) -> Result<Column> {
-        if let Column::Bool(v, _) = self {
-            return Ok(Column::i64(stats::cumprod(&bool_as_i64(v))));
+        match self {
+            Column::Bool(v, val) => {
+                let iv = widen_i64(v);
+                let out = if val.has_nulls() {
+                    cum_valid(&iv, val, 1, i64::wrapping_mul)
+                } else {
+                    stats::cumprod(&iv)
+                };
+                Ok(Column::i64_with(out, val.clone()))
+            }
+            Column::I64(v, val) => Ok(cum(v, val, stats::cumprod, i64::wrapping_mul)),
+            Column::I32(v, val) => Ok(cum(v, val, stats::cumprod, i32::wrapping_mul)),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v))),
         }
-        numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v)))
     }
 
     /// Element-wise absolute value (pandas `abs`), dtype-preserving. `abs` of a
@@ -551,7 +648,9 @@ impl Column {
         if matches!(self, Column::Bool(_, _)) {
             return Ok(self.clone());
         }
-        numeric_dispatch!(self, v => Numeric::into_column(stats::abs(v)))
+        let validity = self.validity().cloned().unwrap_or_default();
+        let out = numeric_dispatch!(self, v => Numeric::into_column(stats::abs(v)))?;
+        Ok(out.with_validity(validity))
     }
 
     /// Round to `decimals` places (pandas `round`), dtype-preserving: banker's
@@ -563,9 +662,12 @@ impl Column {
             Column::F32(v) => {
                 Ok(Column::f32(v.iter().map(|&x| round_f64(x as f64, decimals) as f32).collect()))
             }
-            Column::I64(v, _) => Ok(Column::i64(v.iter().map(|&x| round_i64(x, decimals)).collect())),
-            Column::I32(v, _) => Ok(Column::i32(
+            Column::I64(v, val) => {
+                Ok(Column::i64_with(v.iter().map(|&x| round_i64(x, decimals)).collect(), val.clone()))
+            }
+            Column::I32(v, val) => Ok(Column::i32_with(
                 v.iter().map(|&x| round_i64(x as i64, decimals) as i32).collect(),
+                val.clone(),
             )),
             Column::Bool(_, _) => Ok(self.clone()), // round(bool) == bool (pandas no-op)
             other => Err(VolasError::DType(format!("cannot round a {} column", other.dtype()))),
@@ -579,7 +681,7 @@ impl Column {
         match self {
             // bool stays bool (pandas): a True lower bound forces all true, a
             // False upper bound forces all false, otherwise unchanged.
-            Column::Bool(v, _) => return Ok(Column::bool(clip_bool(v, lower, upper))),
+            Column::Bool(v, val) => return Ok(Column::bool_with(clip_bool(v, lower, upper), val.clone())),
             Column::F64(_) | Column::F32(_) | Column::I64(_, _) | Column::I32(_, _) => {}
             other => return Err(VolasError::DType(format!("cannot clip a {} column", other.dtype()))),
         }
@@ -588,8 +690,11 @@ impl Column {
         // always does); an int column with a non-integral bound promotes to float.
         let stay = self.dtype().is_float() || (bound_fits(lower) && bound_fits(upper));
         if stay {
+            let validity = self.validity().cloned().unwrap_or_default();
             numeric_dispatch!(self, v => Numeric::into_column(clip_vec(v, lower, upper)))
+                .map(|c| c.with_validity(validity))
         } else {
+            // int -> f64 promotion: to_f64_vec already maps a missing value to NaN
             Ok(Column::f64(clip_vec(&self.to_f64_vec(), lower, upper)))
         }
     }
@@ -600,17 +705,43 @@ impl Column {
     /// (no f64 round-trip, so large ints stay exact). Equal lengths assumed.
     pub fn select(&self, cond: &[bool], other: &Column, target: DType) -> Result<Column> {
         match target {
-            DType::I64 => Ok(Column::i64(stats::select(cond, &self.as_i64_vec()?, &other.as_i64_vec()?))),
-            DType::I32 => Ok(Column::i32(stats::select(cond, &self.as_i32_vec()?, &other.as_i32_vec()?))),
+            DType::I64 => Ok(Column::i64_with(
+                stats::select(cond, &self.as_i64_vec()?, &other.as_i64_vec()?),
+                self.select_nulls(cond, other),
+            )),
+            DType::I32 => Ok(Column::i32_with(
+                stats::select(cond, &self.as_i32_vec()?, &other.as_i32_vec()?),
+                self.select_nulls(cond, other),
+            )),
             DType::F32 => Ok(Column::f32(stats::select(cond, &self.to_f32_vec(), &other.to_f32_vec()))),
             // bool ∘ bool stays bool (pandas keeps a bool result when the fill is
             // also bool); `bool` isn't `Numeric`, so the pick is inlined.
             DType::Bool => {
                 let (a, b) = (self.as_bool_vec()?, other.as_bool_vec()?);
-                Ok(Column::bool((0..cond.len()).map(|i| if cond[i] { a[i] } else { b[i] }).collect()))
+                Ok(Column::bool_with(
+                    (0..cond.len()).map(|i| if cond[i] { a[i] } else { b[i] }).collect(),
+                    self.select_nulls(cond, other),
+                ))
             }
             _ => Ok(Column::f64(stats::select(cond, &self.to_f64_vec(), &other.to_f64_vec()))),
         }
+    }
+
+    /// Picked validity for `select`: position `i` is present when the *chosen*
+    /// side (`self` where `cond`, else `other`) is present there.
+    fn select_nulls(&self, cond: &[bool], other: &Column) -> Validity {
+        Validity::from_valid_iter(
+            cond.len(),
+            (0..cond.len()).map(|i| if cond[i] { self.is_valid(i) } else { other.is_valid(i) }),
+        )
+    }
+
+    /// Combined validity of `self` and `other` (present only where both are) —
+    /// the missing-value rule for a dtype-preserving binary op.
+    fn combined_nulls(&self, other: &Column) -> Validity {
+        let a = self.validity().cloned().unwrap_or_default();
+        let b = other.validity().cloned().unwrap_or_default();
+        a.and(&b)
     }
 
     /// The column as `bool` values (a `Bool` column directly; else an error).
@@ -627,18 +758,29 @@ impl Column {
     /// `bool ∘ number` promotes (bool acts as 0/1). Wrapping int ops match pandas
     /// overflow. Equal lengths assumed.
     pub fn binary(&self, other: &Column, op: BinOp) -> Result<Column> {
-        if let (Column::Bool(a, _), Column::Bool(b, _)) = (self, other) {
+        if let (Column::Bool(a, av), Column::Bool(b, bv)) = (self, other) {
+            let nulls = av.and(bv);
             return match op {
-                BinOp::Add => Ok(Column::bool(a.iter().zip(b.iter()).map(|(&x, &y)| x || y).collect())),
-                BinOp::Mul => Ok(Column::bool(a.iter().zip(b.iter()).map(|(&x, &y)| x && y).collect())),
+                BinOp::Add => {
+                    Ok(Column::bool_with(a.iter().zip(b.iter()).map(|(&x, &y)| x || y).collect(), nulls))
+                }
+                BinOp::Mul => {
+                    Ok(Column::bool_with(a.iter().zip(b.iter()).map(|(&x, &y)| x && y).collect(), nulls))
+                }
                 BinOp::Sub => Err(VolasError::DType(
                     "the `-` operator is not supported for bool columns (use `^`)".into(),
                 )),
             };
         }
         match binary_supertype(self.dtype(), other.dtype()) {
-            DType::I64 => Ok(Column::i64(binary_kernel(&self.as_i64_vec()?, &other.as_i64_vec()?, op))),
-            DType::I32 => Ok(Column::i32(binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op))),
+            DType::I64 => Ok(Column::i64_with(
+                binary_kernel(&self.as_i64_vec()?, &other.as_i64_vec()?, op),
+                self.combined_nulls(other),
+            )),
+            DType::I32 => Ok(Column::i32_with(
+                binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op),
+                self.combined_nulls(other),
+            )),
             DType::F32 => Ok(Column::f32(binary_kernel(&self.to_f32_vec(), &other.to_f32_vec(), op))),
             _ => Ok(Column::f64(binary_kernel(&self.to_f64_vec(), &other.to_f64_vec(), op))),
         }
@@ -662,10 +804,10 @@ impl Column {
         match self {
             Column::F64(v) => Scalar::F64(stats::sum(v.as_slice())),
             Column::F32(v) => Scalar::F32(stats::sum(v.as_slice())),
-            Column::I64(v, _) => Scalar::I64(stats::sum(v.as_slice())),
-            // int32 sum promotes to int64 (pandas / numpy accumulator)
-            Column::I32(v, _) => Scalar::I64(stats::sum(&v.iter().map(|&x| x as i64).collect::<Vec<_>>())),
-            Column::Bool(v, _) => Scalar::I64(stats::sum(&bool_as_i64(v))),
+            Column::I64(v, val) => Scalar::I64(sum_valid(v, val)),
+            // int32 / bool sum promotes to int64 (pandas / numpy accumulator)
+            Column::I32(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)),
+            Column::Bool(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)),
             other => Scalar::F64(stats::sum(&other.to_f64_vec())),
         }
     }
@@ -675,9 +817,9 @@ impl Column {
         match self {
             Column::F64(v) => Scalar::F64(stats::prod(v.as_slice())),
             Column::F32(v) => Scalar::F32(stats::prod(v.as_slice())),
-            Column::I64(v, _) => Scalar::I64(stats::prod(v.as_slice())),
-            Column::I32(v, _) => Scalar::I64(stats::prod(&v.iter().map(|&x| x as i64).collect::<Vec<_>>())),
-            Column::Bool(v, _) => Scalar::I64(stats::prod(&bool_as_i64(v))),
+            Column::I64(v, val) => Scalar::I64(prod_valid(v, val)),
+            Column::I32(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)),
+            Column::Bool(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)),
             other => Scalar::F64(stats::prod(&other.to_f64_vec())),
         }
     }
@@ -686,25 +828,26 @@ impl Column {
     /// int -> i64, bool -> bool). Empty / all-missing -> `F64(NaN)`.
     pub fn extreme(&self, want_max: bool) -> Scalar {
         match self {
-            Column::I64(v, _) => match stats::extreme(v.as_slice(), want_max) {
+            Column::I64(v, val) => match extreme_valid(v, val, want_max) {
                 Some(x) => Scalar::I64(x),
                 None => Scalar::F64(f64::NAN),
             },
-            Column::I32(v, _) => match stats::extreme(v.as_slice(), want_max) {
+            Column::I32(v, val) => match extreme_valid(v, val, want_max) {
                 Some(x) => Scalar::I32(x),
                 None => Scalar::F64(f64::NAN),
             },
             Column::F32(v) => {
                 Scalar::F32(stats::extreme(v.as_slice(), want_max).unwrap_or(f32::NAN))
             }
-            Column::Bool(v, _) => {
-                // min = all (AND), max = any (OR); empty -> NaN
-                if v.is_empty() {
+            Column::Bool(v, val) => {
+                // min = all (AND) / max = any (OR), over present values; none -> NaN
+                let present = |i: usize| val.is_valid(i);
+                if !(0..v.len()).any(present) {
                     Scalar::F64(f64::NAN)
                 } else if want_max {
-                    Scalar::Bool(v.iter().any(|&b| b))
+                    Scalar::Bool((0..v.len()).any(|i| present(i) && v[i]))
                 } else {
-                    Scalar::Bool(v.iter().all(|&b| b))
+                    Scalar::Bool((0..v.len()).all(|i| !present(i) || v[i]))
                 }
             }
             Column::F64(v) => Scalar::F64(stats::extreme(v.as_slice(), want_max).unwrap_or(f64::NAN)),
@@ -724,9 +867,14 @@ impl Column {
             _ => self
                 .to_f64_vec()
                 .iter()
-                .map(|&x| {
-                    i64::try_from_f64(x)
-                        .ok_or_else(|| VolasError::DType(format!("value {x} does not fit int64")))
+                .enumerate()
+                .map(|(i, &x)| {
+                    if self.is_valid(i) {
+                        i64::try_from_f64(x)
+                            .ok_or_else(|| VolasError::DType(format!("value {x} does not fit int64")))
+                    } else {
+                        Ok(0) // placeholder for a missing value (masked by the result validity)
+                    }
                 })
                 .collect(),
         }
@@ -741,9 +889,14 @@ impl Column {
             _ => self
                 .to_f64_vec()
                 .iter()
-                .map(|&x| {
-                    i32::try_from_f64(x)
-                        .ok_or_else(|| VolasError::DType(format!("value {x} does not fit int32")))
+                .enumerate()
+                .map(|(i, &x)| {
+                    if self.is_valid(i) {
+                        i32::try_from_f64(x)
+                            .ok_or_else(|| VolasError::DType(format!("value {x} does not fit int32")))
+                    } else {
+                        Ok(0) // placeholder for a missing value (masked by the result validity)
+                    }
                 })
                 .collect(),
         }
@@ -792,6 +945,91 @@ impl Column {
             _ => self == other,
         }
     }
+}
+
+/// Collect a value iterator to `f64`, mapping missing positions to `NaN` so the
+/// f64-funnel reductions (mean / std / median …) skip them. Dense ⇒ a plain
+/// collect with no per-element validity check, so the indicator feed path stays
+/// unchanged.
+fn mask_f64(vals: impl Iterator<Item = f64>, validity: &Validity) -> Vec<f64> {
+    if validity.has_nulls() {
+        vals.enumerate()
+            .map(|(i, x)| if validity.is_valid(i) { x } else { f64::NAN })
+            .collect()
+    } else {
+        vals.collect()
+    }
+}
+
+/// A bool / i32 column widened to `i64` (for the i64-accumulator reductions).
+fn widen_i64<T: Copy + Into<i64>>(v: &[T]) -> Vec<i64> {
+    v.iter().map(|&x| x.into()).collect()
+}
+
+/// Sum of the present values in their element type (skip `volas.NA`). Dense ⇒
+/// the plain kernel (no per-element validity check).
+fn sum_valid<T: Numeric>(v: &[T], val: &Validity) -> T {
+    if !val.has_nulls() {
+        return stats::sum(v);
+    }
+    v.iter()
+        .enumerate()
+        .filter(|(i, _)| val.is_valid(*i))
+        .fold(T::ZERO, |a, (_, &x)| a.wrapping_add(x))
+}
+
+/// Product of the present values (skip `volas.NA`). Dense ⇒ the plain kernel.
+fn prod_valid<T: Numeric>(v: &[T], val: &Validity) -> T {
+    if !val.has_nulls() {
+        return stats::prod(v);
+    }
+    v.iter()
+        .enumerate()
+        .filter(|(i, _)| val.is_valid(*i))
+        .fold(T::ONE, |a, (_, &x)| a.wrapping_mul(x))
+}
+
+/// Min / max of the present values (skip `volas.NA`); `None` when none present.
+fn extreme_valid<T: Numeric>(v: &[T], val: &Validity, want_max: bool) -> Option<T> {
+    if !val.has_nulls() {
+        return stats::extreme(v, want_max);
+    }
+    let mut it = v.iter().enumerate().filter(|(i, _)| val.is_valid(*i)).map(|(_, &x)| x);
+    let first = it.next()?;
+    Some(if want_max {
+        it.fold(first, |a, x| if x > a { x } else { a })
+    } else {
+        it.fold(first, |a, x| if x < a { x } else { a })
+    })
+}
+
+/// Running cumulative `op` over present values; a missing position gets
+/// `placeholder` (masked by the carried validity, so its value is irrelevant).
+fn cum_valid<T: Copy>(v: &[T], val: &Validity, placeholder: T, op: impl Fn(T, T) -> T) -> Vec<T> {
+    let mut acc: Option<T> = None;
+    v.iter()
+        .enumerate()
+        .map(|(i, &x)| {
+            if val.is_valid(i) {
+                let next = acc.map_or(x, |a| op(a, x));
+                acc = Some(next);
+                next
+            } else {
+                placeholder
+            }
+        })
+        .collect()
+}
+
+/// Dtype-preserving cumulative for a numeric column: the dense kernel when fully
+/// present, else a skip-and-propagate fold carrying the input validity through.
+fn cum<T: Numeric>(v: &[T], val: &Validity, dense: fn(&[T]) -> Vec<T>, op: fn(T, T) -> T) -> Column {
+    let out = if val.has_nulls() {
+        cum_valid(v, val, T::ZERO, op)
+    } else {
+        dense(v)
+    };
+    T::into_column(out).with_validity(val.clone())
 }
 
 /// Banker's (half-to-even) round of `x` to `decimals` places; `NaN` stays `NaN`.
@@ -902,11 +1140,6 @@ fn set_int_at<T: Numeric>(
             Ok(T::into_column(nv))
         }
     }
-}
-
-/// A bool column as `i64` (0/1), for `cumsum` / `cumprod` (pandas -> int64).
-fn bool_as_i64(v: &[bool]) -> Vec<i64> {
-    v.iter().map(|&b| b as i64).collect()
 }
 
 /// Running OR (`or = true`, backs bool `cummax`) / running AND (`cummin`).
@@ -1439,5 +1672,135 @@ mod tests {
             Column::bool(vec![true, false, true])
         );
         assert!(Column::i64(vec![1]).as_bool_vec().is_err()); // non-bool -> error
+    }
+
+    // --- NA (validity) behaviour ---------------------------------------------
+
+    fn na_i64(vals: &[i64], present: &[bool]) -> Column {
+        Column::i64_with(vals.to_vec(), Validity::from_valid_iter(present.len(), present.iter().copied()))
+    }
+
+    /// Assert a column's present/missing pattern and present values (NA -> NaN).
+    fn assert_na(c: &Column, expected: &[f64]) {
+        let got = c.to_f64_vec();
+        assert_eq!(got.len(), expected.len());
+        for (g, e) in got.iter().zip(expected) {
+            if e.is_nan() {
+                assert!(g.is_nan(), "expected NA, got {g}");
+            } else {
+                assert_eq!(g, e);
+            }
+        }
+    }
+
+    #[test]
+    fn na_is_valid_and_null_count() {
+        let c = na_i64(&[1, 0, 3], &[true, false, true]);
+        assert!(c.is_valid(0) && !c.is_valid(1) && c.is_valid(2));
+        assert_eq!(c.null_count(), 1);
+        // float -> NaN, datetime -> NaT (i64::MIN), str -> never missing
+        let f = Column::f64(vec![1.0, f64::NAN]);
+        assert!(!f.is_valid(1) && f.null_count() == 1);
+        let f32c = Column::f32(vec![1.0, f32::NAN]);
+        assert!(!f32c.is_valid(1) && f32c.null_count() == 1);
+        let d = Column::datetime(vec![i64::MIN, 5]);
+        assert!(!d.is_valid(0) && d.is_valid(1) && d.null_count() == 1);
+        let s = Column::str(vec!["a".into()]);
+        assert!(s.is_valid(0) && s.null_count() == 0);
+        // to_f64_vec maps NA -> NaN
+        assert_na(&c, &[1.0, f64::NAN, 3.0]);
+    }
+
+    #[test]
+    fn na_reductions_skip_missing() {
+        let c = na_i64(&[1, 0, 3], &[true, false, true]); // 1, NA, 3
+        assert_eq!(c.sum(), Scalar::I64(4));
+        assert_eq!(c.prod(), Scalar::I64(3));
+        assert_eq!(c.extreme(false), Scalar::I64(1));
+        assert_eq!(c.extreme(true), Scalar::I64(3));
+        // all-NA int -> NaN
+        assert!(matches!(na_i64(&[0, 0], &[false, false]).extreme(true), Scalar::F64(x) if x.is_nan()));
+        // i32 / bool skip NA, promote to i64
+        let i = Column::i32_with(vec![5, 0, 7], Validity::from_valid_iter(3, [true, false, true]));
+        assert_eq!(i.sum(), Scalar::I64(12));
+        assert_eq!(i.extreme(false), Scalar::I32(5));
+        let b = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, false, true]));
+        assert_eq!(b.sum(), Scalar::I64(1)); // present trues: pos0
+        assert_eq!(b.extreme(true), Scalar::Bool(true)); // any present
+        assert_eq!(b.extreme(false), Scalar::Bool(false)); // all present (true && false)
+        assert!(matches!(
+            Column::bool_with(vec![false], Validity::from_valid_iter(1, [false])).extreme(true),
+            Scalar::F64(x) if x.is_nan()
+        ));
+        // the f64-funnel (mean / std / …) skips NA because to_f64_vec maps it to
+        // NaN: here the present values are 1 and 3.
+        let present: Vec<f64> = c.to_f64_vec().into_iter().filter(|x| !x.is_nan()).collect();
+        assert_eq!(present, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn na_cumulatives_propagate() {
+        assert_na(&na_i64(&[1, 0, 3], &[true, false, true]).cumsum().unwrap(), &[1.0, f64::NAN, 4.0]);
+        assert_na(&na_i64(&[2, 0, 3], &[true, false, true]).cumprod().unwrap(), &[2.0, f64::NAN, 6.0]);
+        assert_na(&na_i64(&[3, 0, 1], &[true, false, true]).cummax().unwrap(), &[3.0, f64::NAN, 3.0]);
+        assert_na(&na_i64(&[3, 0, 1], &[true, false, true]).cummin().unwrap(), &[3.0, f64::NAN, 1.0]);
+        // i32
+        let i = Column::i32_with(vec![1, 0, 3], Validity::from_valid_iter(3, [true, false, true]));
+        assert_na(&i.cumsum().unwrap(), &[1.0, f64::NAN, 4.0]);
+        assert_na(&i.cummax().unwrap(), &[1.0, f64::NAN, 3.0]);
+        assert_na(&i.cummin().unwrap(), &[1.0, f64::NAN, 1.0]);
+        assert_na(&i.cumprod().unwrap(), &[1.0, f64::NAN, 3.0]);
+        // bool: cumsum/cumprod -> i64; cummax = running OR, cummin = running AND
+        let b = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, false, true]));
+        assert_eq!(b.cumsum().unwrap().dtype(), DType::I64);
+        assert_na(&b.cumsum().unwrap(), &[1.0, f64::NAN, 1.0]);
+        assert_na(&b.cumprod().unwrap(), &[1.0, f64::NAN, 0.0]);
+        assert_na(&b.cummax().unwrap(), &[1.0, f64::NAN, 1.0]);
+        assert_na(&b.cummin().unwrap(), &[1.0, f64::NAN, 0.0]);
+    }
+
+    #[test]
+    fn na_elementwise_propagate() {
+        assert_na(&na_i64(&[-1, 0, -3], &[true, false, true]).abs().unwrap(), &[1.0, f64::NAN, 3.0]);
+        assert_na(&na_i64(&[12, 0, 28], &[true, false, true]).round(-1).unwrap(), &[10.0, f64::NAN, 30.0]);
+        assert_na(&na_i64(&[1, 0, 9], &[true, false, true]).clip(Some(2.0), Some(8.0)).unwrap(), &[2.0, f64::NAN, 8.0]);
+        // a non-integral bound promotes int -> float; NA stays NA (NaN)
+        let promoted = na_i64(&[1, 0, 9], &[true, false, true]).clip(Some(2.5), None).unwrap();
+        assert_eq!(promoted.dtype(), DType::F64);
+        assert_na(&promoted, &[2.5, f64::NAN, 9.0]);
+        // i32 round keeps i32 + validity
+        let r = Column::i32_with(vec![28, 0, 12], Validity::from_valid_iter(3, [true, false, true])).round(-1).unwrap();
+        assert_eq!(r.dtype(), DType::I32);
+        assert_na(&r, &[30.0, f64::NAN, 10.0]);
+    }
+
+    #[test]
+    fn na_binary_and_select_propagate() {
+        // x ∘ NA = NA: combined validity (present only where both present)
+        let a = na_i64(&[1, 0, 3], &[true, false, true]);
+        let b = na_i64(&[10, 20, 0], &[true, true, false]);
+        assert_na(&a.binary(&b, BinOp::Add).unwrap(), &[11.0, f64::NAN, f64::NAN]);
+        // bool ∘ bool keeps bool, combined validity
+        let bt = Column::bool_with(vec![true, false, true], Validity::from_valid_iter(3, [true, false, true]));
+        let bf = Column::bool_with(vec![false, true, true], Validity::from_valid_iter(3, [true, true, false]));
+        assert_na(&bt.binary(&bf, BinOp::Add).unwrap(), &[1.0, f64::NAN, f64::NAN]); // OR
+        // bool ∘ int promotes to int (validity()'s Bool arm)
+        assert_na(&bt.binary(&Column::i64(vec![1, 1, 1]), BinOp::Add).unwrap(), &[2.0, f64::NAN, 2.0]);
+        // division funnels through f64 (NA -> NaN automatically)
+        assert_na(&a.div(&Column::f64(vec![2.0, 2.0, 2.0])).unwrap(), &[0.5, f64::NAN, 1.5]);
+        // select carries the chosen side's validity
+        let other = na_i64(&[9, 9, 9], &[true, true, true]);
+        let r = a.select(&[true, true, false], &other, DType::I64).unwrap();
+        assert_na(&r, &[1.0, f64::NAN, 9.0]);
+        // bool select target carries validity too
+        let rb = bt.select(&[true, true, false], &Column::bool(vec![false, false, false]), DType::Bool).unwrap();
+        assert_eq!(rb.dtype(), DType::Bool);
+        assert_na(&rb, &[1.0, f64::NAN, 0.0]);
+        // as_i32_vec's NA-placeholder branch: an i32 target with an f64 fill whose
+        // NaN is selected becomes NA (value 0, masked).
+        let i32c = Column::i32(vec![1, 2, 3]);
+        let r32 = i32c.select(&[true, false, false], &Column::f64(vec![9.0, f64::NAN, 9.0]), DType::I32).unwrap();
+        assert_eq!(r32.dtype(), DType::I32);
+        assert_na(&r32, &[1.0, f64::NAN, 9.0]);
     }
 }

@@ -142,6 +142,20 @@ impl Validity {
     pub fn bitmap(&self) -> Option<&Bitmap> {
         self.0.as_deref()
     }
+
+    /// Combined validity of two equal-length columns: present only where **both**
+    /// are present — the missing-value rule for a binary op (`x ∘ NA = NA`).
+    pub fn and(&self, other: &Validity) -> Validity {
+        match (&self.0, &other.0) {
+            (None, None) => Validity::dense(),
+            // One side dense ⇒ the other's holes win (a `Some` already has a hole).
+            (Some(a), None) | (None, Some(a)) => Validity(Some(Arc::clone(a))),
+            (Some(a), Some(b)) => {
+                let n = a.len();
+                Validity::from_valid_iter(n, (0..n).map(|i| a.get(i) && b.get(i)))
+            }
+        }
+    }
 }
 
 impl PartialEq for Validity {
@@ -235,5 +249,17 @@ mod tests {
         assert_ne!(dense, holed);
         assert_ne!(holed, dense);
         assert_ne!(holed, Validity::from_valid_iter(2, [false, true]));
+    }
+
+    #[test]
+    fn validity_and_combines_holes() {
+        let dense = Validity::dense();
+        let a = Validity::from_valid_iter(3, [true, false, true]);
+        let b = Validity::from_valid_iter(3, [true, true, false]);
+        assert_eq!(dense.and(&dense), Validity::dense()); // both dense
+        assert_eq!(dense.and(&a), a); // dense ∧ holed -> holed
+        assert_eq!(a.and(&dense), a); // holed ∧ dense -> holed
+        // hole from either side wins
+        assert_eq!(a.and(&b), Validity::from_valid_iter(3, [true, false, false]));
     }
 }
