@@ -729,6 +729,27 @@ impl Column {
         }
     }
 
+    /// Write a string scalar into a `Str` column at `positions`, preserving the
+    /// existing validity (the written cells become present). Errors for a
+    /// non-string column. Mirrors `set_scalar_at` for the string case (which a
+    /// numeric `SetVal` cannot represent).
+    pub fn set_str_scalar_at(&self, positions: &[usize], s: &str) -> Result<Column> {
+        match self {
+            Column::Str(v, val) => {
+                let len = v.len();
+                let mut nv = (**v).clone();
+                for &i in positions {
+                    nv[i] = s.to_string();
+                }
+                Ok(Column::str_with(nv, validity_set(val, positions, true, len)))
+            }
+            other => Err(VolasError::DType(format!(
+                "cannot assign a string into a {} column",
+                other.dtype()
+            ))),
+        }
+    }
+
     // --- dtype-preserving numeric transforms (pandas 3.0) ---------------------
     // Each dispatches the kernel over the column's element type so an int column
     // stays int and computes natively (no f64 round-trip). A non-numeric column

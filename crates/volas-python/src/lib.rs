@@ -1311,11 +1311,14 @@ impl PySeries {
                 "Series assignment takes a boolean mask or an integer position",
             ));
         };
-        self.inner.data = self
-            .inner
-            .data
-            .set_scalar_at(&positions, extract_set_val(value)?)
-            .map_err(pyerr)?;
+        // A string scalar (which a numeric `SetVal` cannot carry) takes the typed
+        // str path, like the DataFrame indexers; a number / bool extracts to neither
+        // a `str` here, so it falls through to the numeric `SetVal` path.
+        self.inner.data = if let Ok(s) = value.extract::<String>() {
+            self.inner.data.set_str_scalar_at(&positions, &s).map_err(pyerr)?
+        } else {
+            self.inner.data.set_scalar_at(&positions, extract_set_val(value)?).map_err(pyerr)?
+        };
         Ok(())
     }
 

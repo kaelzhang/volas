@@ -125,3 +125,15 @@ def test_setitem_preserves_int_bool_validity():
     df2 = DataFrame({'a': [1, None, 3]})
     df2.iloc[0, 0] = 9
     assert df2['a'].to_list() == [9, volas.NA, 3]
+
+
+def test_series_setitem_string_scalar():
+    # a str scalar assignment works on the Series surface too (was a TypeError),
+    # preserving the existing validity — parity with the DataFrame indexers
+    s = DataFrame({'a': ['x', None, 'z']})['a']
+    s[0] = 'q'
+    assert s.dtype == 'str' and s.to_list() == ['q', volas.NA, 'z']
+    # a string into a numeric column is a clear TypeError (not a silent coercion)
+    si = DataFrame({'a': [1, 2, 3]})['a']
+    with pytest.raises(TypeError):
+        si[0] = 'q'
