@@ -596,6 +596,19 @@ fn exec_command(
                 line,
             ))
         }
+        ("wad", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::wad(&high, &low, &close))
+        }
+        ("asi", _) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let high = series_f64(df, series, 1, "high")?;
+            let low = series_f64(df, series, 2, "low")?;
+            let close = series_f64(df, series, 3, "close")?;
+            f64col(ind::asi(&open, &high, &low, &close, arg_f64(args, 0, 3.0)?))
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

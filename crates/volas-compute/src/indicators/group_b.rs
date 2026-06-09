@@ -196,6 +196,134 @@ pub fn cdp(high: &[f64], low: &[f64], close: &[f64], line: CdpLine) -> Vec<f64> 
         .collect()
 }
 
+/// WAD Williams Accumulation/Distribution (威廉多空力度线), cumulative: on an up close
+/// `+= C − min(prev C, L)`, on a down close `+= C − max(prev C, H)`, otherwise unchanged.
+/// Distinct from TA-Lib's AD. Source: Larry Williams / Tulip Indicators — Williams A/D.
+pub fn wad(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; close.len()];
+    let mut acc = 0.0;
+    for i in 1..close.len() {
+        acc += wad_step(high[i], low[i], close[i], close[i - 1]);
+        out[i] = acc;
+    }
+    out
+}
+
+/// One WAD increment vs the prior close.
+fn wad_step(h: f64, l: f64, c: f64, prev_c: f64) -> f64 {
+    if c > prev_c {
+        c - prev_c.min(l)
+    } else if c < prev_c {
+        c - prev_c.max(h)
+    } else {
+        0.0
+    }
+}
+
+/// `[wad, prev_close]` after a full [`wad`] — `None` for an empty series.
+pub fn wad_final_state(high: &[f64], low: &[f64], close: &[f64]) -> Option<Vec<f64>> {
+    let n = close.len();
+    if n == 0 {
+        return None;
+    }
+    let mut acc = 0.0;
+    for i in 1..n {
+        acc += wad_step(high[i], low[i], close[i], close[i - 1]);
+    }
+    Some(vec![acc, close[n - 1]])
+}
+
+/// Resume [`wad`] from `[wad_{from-1}, close_{from-1}]` over `[from, n)`, bit-identical to a
+/// full recompute.
+pub fn wad_resume(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let mut acc = state[0];
+    let mut prev = state[1];
+    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    for i in from..close.len() {
+        acc += wad_step(high[i], low[i], close[i], prev);
+        out.push(acc);
+        prev = close[i];
+    }
+    (out, vec![acc, prev])
+}
+
+/// One Wilder Swing Index increment. `op` / `cp` are the prior bar's open / close; `t` is the
+/// limit-move scaling. `SI = 50·(N/R)·(K/T)` with Wilder's R selected by the largest of
+/// `|H−Cp|`, `|L−Cp|`, `|H−L|`.
+fn asi_si(o: f64, h: f64, l: f64, c: f64, op: f64, cp: f64, t: f64) -> f64 {
+    let n = (c - cp) + 0.5 * (c - o) + 0.25 * (cp - op);
+    let (tr1, tr2, tr3) = ((h - cp).abs(), (l - cp).abs(), (h - l).abs());
+    let move_term = 0.25 * (cp - op).abs();
+    let r = if tr1 >= tr2 && tr1 >= tr3 {
+        tr1 - 0.5 * tr2 + move_term
+    } else if tr2 >= tr1 && tr2 >= tr3 {
+        tr2 - 0.5 * tr1 + move_term
+    } else {
+        tr3 + move_term
+    };
+    let k = tr1.max(tr2);
+    50.0 * (n / r) * (k / t)
+}
+
+/// ASI Accumulative Swing Index (Wilder, 振动升降指标), cumulative: `ASI = Σ SI`, with the
+/// Swing Index per [`asi_si`]. `t` is Wilder's limit-move parameter. Source: J. Welles Wilder,
+/// *New Concepts in Technical Trading Systems*.
+pub fn asi(open: &[f64], high: &[f64], low: &[f64], close: &[f64], t: f64) -> Vec<f64> {
+    let mut out = vec![0.0; close.len()];
+    let mut acc = 0.0;
+    for i in 1..close.len() {
+        acc += asi_si(open[i], high[i], low[i], close[i], open[i - 1], close[i - 1], t);
+        out[i] = acc;
+    }
+    out
+}
+
+/// `[asi, prev_close, prev_open]` after a full [`asi`] — `None` for an empty series.
+pub fn asi_final_state(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    t: f64,
+) -> Option<Vec<f64>> {
+    let n = close.len();
+    if n == 0 {
+        return None;
+    }
+    let mut acc = 0.0;
+    for i in 1..n {
+        acc += asi_si(open[i], high[i], low[i], close[i], open[i - 1], close[i - 1], t);
+    }
+    Some(vec![acc, close[n - 1], open[n - 1]])
+}
+
+/// Resume [`asi`] from `[asi_{from-1}, close_{from-1}, open_{from-1}]` over `[from, n)`.
+pub fn asi_resume(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    t: f64,
+    from: usize,
+    state: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let (mut acc, mut pc, mut po) = (state[0], state[1], state[2]);
+    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    for i in from..close.len() {
+        acc += asi_si(open[i], high[i], low[i], close[i], po, pc, t);
+        out.push(acc);
+        pc = close[i];
+        po = open[i];
+    }
+    (out, vec![acc, pc, po])
+}
+
 /// Which standard pivot-point level to emit.
 #[derive(Clone, Copy)]
 pub enum PivotLine {
@@ -445,4 +573,40 @@ pub fn ttm_squeeze_on(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::test_support::*;
+
+    /// The cumulative `*_final_state` guards decline on an empty series (no first bar to seed).
+    #[test]
+    fn cumulative_final_state_declines_on_empty() {
+        assert!(wad_final_state(&[], &[], &[]).is_none());
+        assert!(asi_final_state(&[], &[], &[], &[], 3.0).is_none());
+    }
+
+    /// wad / asi resume, fed the carried state of a full compute over the head `[0, from)`,
+    /// reproduces the tail of a full compute over the whole input — bit-for-bit.
+    #[test]
+    fn cumulative_resume_is_bit_identical_to_full() {
+        let (high, low, close) = ohlc(160);
+        let open: Vec<f64> = close.iter().map(|c| c - 0.3).collect();
+        let wad_full = wad(&high, &low, &close);
+        let asi_full = asi(&open, &high, &low, &close, 3.0);
+        for &from in &[1usize, 2, 40, 80, 159] {
+            let st = wad_final_state(&high[..from], &low[..from], &close[..from]).unwrap();
+            assert_bits(&wad_resume(&high, &low, &close, from, &st).0, &wad_full[from..], "wad");
+
+            let st =
+                asi_final_state(&open[..from], &high[..from], &low[..from], &close[..from], 3.0)
+                    .unwrap();
+            assert_bits(
+                &asi_resume(&open, &high, &low, &close, 3.0, from, &st).0,
+                &asi_full[from..],
+                "asi",
+            );
+        }
+    }
 }

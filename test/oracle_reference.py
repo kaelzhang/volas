@@ -451,6 +451,38 @@ def ichimoku(o, h, lo, c, v, tenkan=9, kijun=26, senkou_b=52, line='tenkan'):
     return c  # chikou (causal)
 
 
+def wad(o, h, lo, c, v):
+    """WAD Williams Accumulation/Distribution (cumulative): up close += C-min(prevC,L),
+    down close += C-max(prevC,H). Source: Larry Williams / Tulip Indicators — Williams A/D."""
+    h, lo, c = _s(h), _s(lo), _s(c)
+    pc = c.shift(1)
+    up = c - np.minimum(pc, lo)
+    dn = c - np.maximum(pc, h)
+    step = pd.Series(np.where(c > pc, up, np.where(c < pc, dn, 0.0)))
+    step.iloc[0] = 0.0  # bar 0 has no prior close
+    return step.cumsum()
+
+
+def asi(o, h, lo, c, v, t=3.0):
+    """ASI Accumulative Swing Index (Wilder): SI=50*(N/R)*(K/T), N=(C-Cp)+0.5(C-O)+0.25(Cp-Op),
+    K=max(|H-Cp|,|L-Cp|), R selected by the largest of |H-Cp|,|L-Cp|,|H-L|; ASI=ΣSI.
+    Source: J. Welles Wilder — New Concepts in Technical Trading Systems."""
+    o, h, lo, c = _s(o), _s(h), _s(lo), _s(c)
+    op, cp = o.shift(1), c.shift(1)
+    n = (c - cp) + 0.5 * (c - o) + 0.25 * (cp - op)
+    tr1, tr2, tr3 = (h - cp).abs(), (lo - cp).abs(), (h - lo).abs()
+    mv = 0.25 * (cp - op).abs()
+    r = np.where(
+        (tr1 >= tr2) & (tr1 >= tr3),
+        tr1 - 0.5 * tr2 + mv,
+        np.where((tr2 >= tr1) & (tr2 >= tr3), tr2 - 0.5 * tr1 + mv, tr3 + mv),
+    )
+    k = np.maximum(tr1, tr2)
+    si = pd.Series(50.0 * (n / r) * (k / t))
+    si.iloc[0] = 0.0  # bar 0 has no prior bar
+    return si.cumsum()
+
+
 def keltner(o, h, lo, c, v, ema_period=20, atr_period=10, mult=2.0, band=None):
     """Keltner Channels (modern): middle = EMA(close, ema_period); bands = middle ± mult*ATR.
     Source: StockCharts ChartSchool — Keltner Channels."""
@@ -558,4 +590,6 @@ CASES: list[tuple] = [
     ("ichimoku.senkou_a", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'senkou_a'), 1e-9),
     ("ichimoku.senkou_b", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'senkou_b'), 1e-9),
     ("ichimoku.chikou", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'chikou'), 1e-9),
+    ("wad", wad, 1e-6),
+    ("asi", lambda o, h, lo, c, v: asi(o, h, lo, c, v, 3.0), 1e-6),
 ]

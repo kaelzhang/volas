@@ -125,6 +125,21 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             )
         }
 
+        // Group B cumulative family (volas-exclusive): carry the running line + prior bar.
+        ("wad", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            ind::wad_final_state(&high, &low, &close)
+        }
+        ("asi", _) => {
+            let open = series_f64(df, series, 0, "open").ok()?;
+            let high = series_f64(df, series, 1, "high").ok()?;
+            let low = series_f64(df, series, 2, "low").ok()?;
+            let close = series_f64(df, series, 3, "close").ok()?;
+            ind::asi_final_state(&open, &high, &low, &close, arg_f64(args, 0, 3.0).ok()?)
+        }
+
         // SAR family — carry the recurrence's loop state (trend, accel factor(s),
         // extreme point, current SAR, and the prior bar's high/low).
         ("sar", _) => {
@@ -732,6 +747,31 @@ pub fn execute_resume(
                 from_row,
                 prev_state,
             )?;
+            Some((Column::f64(vals), st))
+        }
+
+        // Group B cumulative family (volas-exclusive): resume the running line.
+        ("wad", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) = ind::wad_resume(&high, &low, &close, from_row, prev_state);
+            Some((Column::f64(vals), st))
+        }
+        ("asi", _) => {
+            let open = series_f64(df, series, 0, "open").ok()?;
+            let high = series_f64(df, series, 1, "high").ok()?;
+            let low = series_f64(df, series, 2, "low").ok()?;
+            let close = series_f64(df, series, 3, "close").ok()?;
+            let (vals, st) = ind::asi_resume(
+                &open,
+                &high,
+                &low,
+                &close,
+                arg_f64(args, 0, 3.0).ok()?,
+                from_row,
+                prev_state,
+            );
             Some((Column::f64(vals), st))
         }
 

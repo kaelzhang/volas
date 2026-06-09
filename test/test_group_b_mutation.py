@@ -33,6 +33,7 @@ DIRECTIVES = [
     'pivot_points.s2', 'pivot_points.r3', 'pivot_points.s3',
     'ichimoku.tenkan', 'ichimoku.kijun', 'ichimoku.senkou_a', 'ichimoku.senkou_b',
     'ichimoku.chikou',
+    'wad', 'asi',
 ]
 
 

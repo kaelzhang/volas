@@ -168,6 +168,8 @@ pub fn is_command(name: &str) -> bool {
             | "ttm_squeeze"
             | "pivot_points"
             | "ichimoku"
+            | "wad"
+            | "asi"
             | "tr"
             | "atr"
             | "llv"
@@ -363,6 +365,9 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("ichimoku", Some("tenkan" | "kijun" | "senkou_a" | "senkou_b" | "chikou")) => {
             (vec![Int(9), Int(26), Int(52)], vec!["high", "low", "close"])
         }
+        // wad: cumulative, no parameters. asi: Wilder's limit-move scaling `t`.
+        ("wad", None) => (vec![], vec!["high", "low", "close"]),
+        ("asi", None) => (vec![Float(3.0)], vec!["open", "high", "low", "close"]),
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns

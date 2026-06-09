@@ -789,6 +789,40 @@ df['ichimoku.kijun']
 df['ichimoku.senkou_a']   # the cloud's leading edge, displaced to each bar
 ```
 
+### `wad`, Williams Accumulation/Distribution (威廉多空力度线)
+
+```
+wad@<high>,<low>,<close>
+```
+
+Larry Williams' cumulative accumulation/distribution line (distinct from the TA-Lib `ad`): on
+an up close it adds `C − min(prev C, L)`, on a down close `C − max(prev C, H)`, and is held
+flat otherwise.
+
+- **high? / low? / close?** `str` the input columns.
+
+```py
+df['wad']
+```
+
+### `asi`, Accumulative Swing Index (振动升降指标)
+
+```
+asi:<limit_move>@<open>,<high>,<low>,<close>
+```
+
+Welles Wilder's cumulative Swing Index, `ASI = Σ SI`, where each
+`SI = 50 · (N / R) · (K / limit_move)` weighs the bar's directional move (`N`) against a
+Wilder true-range denominator (`R`). `limit_move` is Wilder's per-market limit-move scaling.
+
+- **limit_move?** `float=3.0`
+- **open? / high? / low? / close?** `str` the input columns.
+
+```py
+df['asi']
+df['asi:3']
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change
