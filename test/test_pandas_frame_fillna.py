@@ -133,3 +133,8 @@ def test_boolean_mask_from_dataframe_isna_filters_rows():
     d = DataFrame({"i": [1, None, 3]})
     only_missing = d[d.isna()["i"]]
     assert len(only_missing) == 1
+
+
+def test_dropna_invalid_how_raises():
+    with pytest.raises(ValueError):
+        DataFrame({"a": [1.0, nan]}).dropna(how="bad")

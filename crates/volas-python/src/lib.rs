@@ -1038,16 +1038,6 @@ impl PySeries {
         Ok(col_to_series(&self.inner, self.inner.data.diff(n).map_err(pyerr)?))
     }
 
-    /// Replace missing (NaN) values with a constant, or forward/backward-fill.
-    ///
-    /// Args:
-    ///     value (float, optional): the constant written into every NaN cell.
-    ///     method (str, optional): ``'ffill'`` / ``'pad'`` carries the last valid
-    ///         value forward; ``'bfill'`` / ``'backfill'`` carries the next valid
-    ///         value backward. Mutually exclusive with ``value``.
-    ///
-    /// Returns:
-    ///     Series: a new series (non-float columns are returned unchanged).
     /// Replace a missing cell with `value` (pandas `fillna`). Fills the numeric
     /// family (float / int / bool, promoting the dtype only when the fill needs
     /// it); a non-numeric `str` / `datetime` column with a missing cell raises a
@@ -1556,8 +1546,8 @@ impl PySeries {
         }
     }
 
-    /// Directional NaN fill (`forward` = ffill, else bfill) over an F64 column;
-    /// a non-float series is returned unchanged. Shared by `ffill` / `bfill`.
+    /// Directional fill (`forward` = ffill, else bfill), dtype-aware over every
+    /// dtype (int / bool / str / datetime / float). Shared by `ffill` / `bfill`.
     fn fill_dir(&self, forward: bool) -> PySeries {
         col_to_series(&self.inner, self.inner.data.fill_dir(forward))
     }
@@ -2786,10 +2776,17 @@ impl PyDataFrame {
         Ok(d)
     }
 
-    /// Drop rows containing missing values. `how='any'` (default) drops a row if
-    /// any F64 column is NaN there; `how='all'` only if every column is NaN.
+    /// Drop rows containing missing values, across every dtype (via the column
+    /// validity). `how='any'` (default) drops a row if any column is missing
+    /// there; `how='all'` only if every column is missing. An invalid `how`
+    /// raises `ValueError`.
     #[pyo3(signature = (how = "any"))]
-    fn dropna(&self, how: &str) -> PyDataFrame {
+    fn dropna(&self, how: &str) -> PyResult<PyDataFrame> {
+        if how != "any" && how != "all" {
+            return Err(PyValueError::new_err(format!(
+                "dropna: invalid `how` {how:?} (expected 'any' or 'all')"
+            )));
+        }
         let cols = self.inner.columns();
         let total = cols.len();
         let keep: Vec<usize> = (0..self.inner.height())
@@ -2801,7 +2798,7 @@ impl PyDataFrame {
                 }
             })
             .collect();
-        PyDataFrame::plain(take_frame(&self.inner, &keep))
+        Ok(PyDataFrame::plain(take_frame(&self.inner, &keep)))
     }
 
     /// Replace missing values with `value` in every column (pandas `fillna`),
@@ -2827,7 +2824,7 @@ impl PyDataFrame {
         self.fill_dir(true)
     }
 
-    /// Backward-fill NaN cells in every float column (pandas `bfill`).
+    /// Backward-fill missing cells in every column (pandas `bfill`), dtype-aware.
     fn bfill(&self) -> PyResult<PyDataFrame> {
         self.fill_dir(false)
     }
@@ -2959,8 +2956,8 @@ impl PyDataFrame {
         self.where_mask(cond, other, false)
     }
 
-    /// Boolean mask of missing (NaN) cells -> a bool DataFrame (pandas `isna`);
-    /// non-float columns are all-False.
+    /// Boolean mask of missing cells (every dtype via the column validity) -> a
+    /// bool DataFrame (pandas `isna`).
     fn isna(&self) -> PyResult<PyDataFrame> {
         self.mask_na(true)
     }

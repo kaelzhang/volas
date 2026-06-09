@@ -548,7 +548,9 @@ impl Column {
                         Ok(i64::MIN)
                     } else {
                         datetime::epoch_to_ns(x, unit).ok_or_else(|| {
-                            VolasError::Value(format!("invalid epoch unit {unit:?} or overflow"))
+                            VolasError::Value(format!(
+                            "could not convert epoch with unit {unit:?}: unknown unit or value out of nanosecond range"
+                        ))
                         })
                     }
                 })
@@ -561,7 +563,9 @@ impl Column {
                         Ok(i64::MIN)
                     } else {
                         f64_to_ns(x).ok_or_else(|| {
-                            VolasError::Value(format!("invalid epoch unit {unit:?} or overflow"))
+                            VolasError::Value(format!(
+                            "could not convert epoch with unit {unit:?}: unknown unit or value out of nanosecond range"
+                        ))
                         })
                     }
                 })
