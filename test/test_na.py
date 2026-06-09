@@ -136,6 +136,21 @@ def test_na_from_pandas_nullable_round_trip():
     assert lst[0] == 1 and lst[1] is volas.NA and lst[2] == 3
 
 
+def test_na_astype_carries_validity():
+    NA = volas.NA
+    s = volas.DataFrame({"a": [1, None, 3]})["a"]  # int64 + NA
+    # int -> int32 / bool keeps the missing cell (was: error / silently False)
+    assert s.astype("int32").dtype == "int32"
+    assert s.astype("int32").to_list() == [1, NA, 3]
+    assert s.astype("bool").to_list() == [True, NA, True]
+    # int -> float keeps NA as NaN
+    assert np.isnan(s.astype("float64").to_numpy()[1])
+    # a present out-of-range value still errors
+    big = volas.DataFrame({"a": np.array([3_000_000_000], dtype=np.int64)})["a"]
+    with pytest.raises(Exception):
+        big.astype("int32")
+
+
 def test_na_bool_logic_kleene():
     NA = volas.NA
     b = volas.DataFrame({"a": [True, None, False]})["a"]  # T, NA, F

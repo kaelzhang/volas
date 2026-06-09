@@ -503,6 +503,13 @@ impl Column {
         if self.dtype() == to {
             return Ok(self.clone());
         }
+        // An int/bool source to an int/bool target keeps its missing cells and
+        // converts present values exactly (no f64 round-trip; range-checked).
+        if matches!(self, Column::I64(..) | Column::I32(..) | Column::Bool(..))
+            && matches!(to, DType::I64 | DType::I32 | DType::Bool)
+        {
+            return self.cast_int_bool(to);
+        }
         match to {
             DType::F64 => Ok(Column::f64(self.to_f64_vec())),
             DType::I64 => match self {
@@ -517,7 +524,7 @@ impl Column {
                     }
                     Ok(Column::i64(v.iter().map(|&x| x as i64).collect()))
                 }
-                Column::Bool(v, _) => Ok(Column::i64(v.iter().map(|&b| b as i64).collect())),
+                // int/bool sources are handled by `cast_int_bool` above.
                 Column::Datetime(v) => Ok(Column::i64(v.to_vec())),
                 other => Err(VolasError::DType(format!(
                     "cannot cast a {} column to int64",
@@ -526,7 +533,7 @@ impl Column {
             },
             DType::Bool => match self {
                 Column::F64(v) => Ok(Column::bool(v.iter().map(|&x| x != 0.0).collect())),
-                Column::I64(v, _) => Ok(Column::bool(v.iter().map(|&x| x != 0).collect())),
+                // int sources are handled by `cast_int_bool` above.
                 other => Err(VolasError::DType(format!(
                     "cannot cast a {} column to bool",
                     other.dtype()
@@ -547,6 +554,37 @@ impl Column {
                 .map(Column::i32),
             DType::Utf8 => Ok(Column::str(self.to_string_vec())),
             DType::Datetime => self.to_datetime(),
+        }
+    }
+
+    /// Cast an int/bool column to another int/bool dtype, carrying its validity (a
+    /// missing cell stays missing) and converting present values exactly (no f64
+    /// round-trip). Only a present, out-of-range value (a large `i64` into `i32`)
+    /// errors; a missing cell never does.
+    fn cast_int_bool(&self, to: DType) -> Result<Column> {
+        let validity = self.validity().cloned().unwrap_or_default();
+        let narrow_i32 = |v: &[i64]| -> Result<Vec<i32>> {
+            v.iter()
+                .enumerate()
+                .map(|(i, &x)| {
+                    if validity.is_valid(i) {
+                        i32::try_from(x).map_err(|_| {
+                            VolasError::Value(format!("cannot convert {x} to int32 (out of range)"))
+                        })
+                    } else {
+                        Ok(0)
+                    }
+                })
+                .collect()
+        };
+        match (self, to) {
+            (Column::I64(v, _), DType::I32) => Ok(Column::i32_with(narrow_i32(v)?, validity)),
+            (Column::I64(v, _), DType::Bool) => Ok(Column::bool_with(v.iter().map(|&x| x != 0).collect(), validity)),
+            (Column::I32(v, _), DType::I64) => Ok(Column::i64_with(v.iter().map(|&x| x as i64).collect(), validity)),
+            (Column::I32(v, _), DType::Bool) => Ok(Column::bool_with(v.iter().map(|&x| x != 0).collect(), validity)),
+            (Column::Bool(v, _), DType::I64) => Ok(Column::i64_with(v.iter().map(|&b| b as i64).collect(), validity)),
+            (Column::Bool(v, _), DType::I32) => Ok(Column::i32_with(v.iter().map(|&b| b as i32).collect(), validity)),
+            _ => unreachable!("same-dtype is handled in cast"), // LCOV_EXCL_LINE
         }
     }
 
@@ -2165,5 +2203,23 @@ mod tests {
         let i = Column::i64(vec![1, 0, 5]);
         assert_na(&i.not(), &[0.0, 1.0, 0.0]);
         assert_na(&b.logical(&i, BoolOp::And), &[1.0, 0.0, f64::NAN]);
+    }
+
+    #[test]
+    fn na_cast_int_bool_carries_validity() {
+        let i = na_i64(&[1, 0, 3], &[true, false, true]); // 1, NA, 3
+        assert_eq!(i.cast(DType::I32).unwrap().dtype(), DType::I32);
+        assert_na(&i.cast(DType::I32).unwrap(), &[1.0, f64::NAN, 3.0]);
+        assert_na(&i.cast(DType::Bool).unwrap(), &[1.0, f64::NAN, 1.0]);
+        assert_na(&i.cast(DType::F64).unwrap(), &[1.0, f64::NAN, 3.0]); // int+NA -> float (NaN)
+        let i32c = Column::i32_with(vec![1, 0, 5], Validity::from_valid_iter(3, [true, false, true]));
+        assert_eq!(i32c.cast(DType::I64).unwrap().dtype(), DType::I64);
+        assert_na(&i32c.cast(DType::I64).unwrap(), &[1.0, f64::NAN, 5.0]);
+        assert_na(&i32c.cast(DType::Bool).unwrap(), &[1.0, f64::NAN, 1.0]);
+        let b = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, false, true]));
+        assert_na(&b.cast(DType::I64).unwrap(), &[1.0, f64::NAN, 0.0]);
+        assert_na(&b.cast(DType::I32).unwrap(), &[1.0, f64::NAN, 0.0]);
+        // a present out-of-range i64 -> i32 errors (a missing one never does)
+        assert!(Column::i64(vec![3_000_000_000]).cast(DType::I32).is_err());
     }
 }
