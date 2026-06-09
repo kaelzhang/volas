@@ -156,6 +156,7 @@ pub fn is_command(name: &str) -> bool {
             | "cdp"
             | "mike"
             | "keltner"
+            | "stoch_momentum"
             | "tr"
             | "atr"
             | "llv"
@@ -334,6 +335,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("keltner", None) => (vec![Int(20)], vec!["close"]),
         ("keltner", Some("upper" | "lower")) => {
             (vec![Int(20), Int(10), Float(2.0)], vec!["high", "low", "close"])
+        }
+        // stoch_momentum: k (HH/LL), d (double-EMA smoothing), signal (EMA of SMI).
+        ("stoch_momentum", None | Some("signal")) => {
+            (vec![Int(10), Int(3), Int(3)], vec!["high", "low", "close"])
         }
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the

@@ -402,6 +402,21 @@ def keltner(o, h, lo, c, v, ema_period=20, atr_period=10, mult=2.0, band=None):
     return mid + sign * mult * atr
 
 
+def stoch_momentum(o, h, lo, c, v, k=10, d=3, signal=3, line='smi'):
+    """Stochastic Momentum Index (Blau / LazyBear): HH=max(H,k), LL=min(L,k); D=C-(HH+LL)/2;
+    Ds=EMA_d(EMA_d(D)), Dhl=EMA_d(EMA_d(HH-LL)); SMI=Ds/(Dhl/2)*100; signal=EMA_signal(SMI).
+    Source: William Blau / LazyBear — Stochastic Momentum Index."""
+    h, lo, c = _s(h), _s(lo), _s(c)
+    hh = h.rolling(k, min_periods=k).max()
+    ll = lo.rolling(k, min_periods=k).min()
+    rdiff = c - (hh + ll) / 2.0
+    diff = hh - ll
+    ds = _ema(_ema(rdiff, d), d)
+    dhl = _ema(_ema(diff, d), d)
+    smi = ds / (dhl * 0.5) * 100.0
+    return _ema(smi, signal) if line == 'signal' else smi
+
+
 # --- the oracle case registry ----------------------------------------------
 # (directive, reference_fn(o,h,lo,c,v) -> Series, tolerance). The directive strings are
 # the proposed command interface the Group A implementation should match.
@@ -447,4 +462,6 @@ CASES: list[tuple] = [
     ("keltner:20", lambda o, h, lo, c, v: keltner(o, h, lo, c, v, 20, 10, 2.0, None), 1e-6),
     ("keltner.upper:20,10,2", lambda o, h, lo, c, v: keltner(o, h, lo, c, v, 20, 10, 2.0, 'upper'), 1e-6),
     ("keltner.lower:20,10,2", lambda o, h, lo, c, v: keltner(o, h, lo, c, v, 20, 10, 2.0, 'lower'), 1e-6),
+    ("stoch_momentum:10,3,3", lambda o, h, lo, c, v: stoch_momentum(o, h, lo, c, v, 10, 3, 3, 'smi'), 1e-6),
+    ("stoch_momentum.signal:10,3,3", lambda o, h, lo, c, v: stoch_momentum(o, h, lo, c, v, 10, 3, 3, 'signal'), 1e-6),
 ]

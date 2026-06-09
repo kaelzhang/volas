@@ -523,6 +523,25 @@ fn exec_command(
                 }
             }
         }
+        ("stoch_momentum", sub) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let k = arg_usize(args, 0, Some(10))?;
+            let d = arg_usize(args, 1, Some(3))?;
+            if sub == Some("signal") {
+                f64col(ind::stoch_momentum_signal(
+                    &high,
+                    &low,
+                    &close,
+                    k,
+                    d,
+                    arg_usize(args, 2, Some(3))?,
+                ))
+            } else {
+                f64col(ind::stoch_momentum(&high, &low, &close, k, d))
+            }
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

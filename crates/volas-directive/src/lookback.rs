@@ -121,6 +121,14 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
                 _ => ema.max(arg(args, 1, 10)),
             }
         }
+        // stoch_momentum: HH/LL (k−1) + the double EMA_d (2·(d−1)); the signal adds EMA_signal.
+        "stoch_momentum" => {
+            let base = arg(args, 0, 10).saturating_sub(1) + 2 * arg(args, 1, 3).saturating_sub(1);
+            match sub {
+                Some("signal") => base + arg(args, 2, 3).saturating_sub(1),
+                _ => base,
+            }
+        }
         "tr" => 1,
         "atr" => arg(args, 0, 14),
         "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),

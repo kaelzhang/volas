@@ -27,6 +27,7 @@ DIRECTIVES = [
     'cdp', 'cdp.ah', 'cdp.nh', 'cdp.nl', 'cdp.al',
     'mike.weakr', 'mike.midr', 'mike.strongr', 'mike.weaks', 'mike.mids', 'mike.strongs',
     'keltner', 'keltner.upper', 'keltner.lower',
+    'stoch_momentum', 'stoch_momentum.signal',
 ]
 
 

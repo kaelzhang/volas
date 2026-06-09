@@ -696,6 +696,28 @@ df['keltner.upper']
 df['keltner.lower']
 ```
 
+### `stoch_momentum`, Stochastic Momentum Index
+
+```
+stoch_momentum:<k>,<d>,<signal>@<high>,<low>,<close>
+stoch_momentum.signal:<k>,<d>,<signal>@<high>,<low>,<close>
+```
+
+A refined stochastic measuring the close relative to the **midpoint** of the `k`-bar range,
+double-EMA smoothed: `SMI = Ds / (Dhl/2) × 100`, where `Ds = EMA_d(EMA_d(C − (HH+LL)/2))` and
+`Dhl = EMA_d(EMA_d(HH − LL))`. `stoch_momentum.signal` is the `signal`-period EMA of SMI.
+(Named in full because `SMI` collides with SMI Ergodic on some platforms.)
+
+- **k?** `int=10` (the high/low range)
+- **d?** `int=3` (double-EMA smoothing)
+- **signal?** `int=3` (signal EMA; only on `.signal`)
+- **high? / low? / close?** `str` the input columns.
+
+```py
+df['stoch_momentum']
+df['stoch_momentum.signal']
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change
