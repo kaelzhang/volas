@@ -2326,6 +2326,9 @@ mod tests {
         let mut f = Column::f64(vec![1.0]);
         f.append_na(1);
         assert!(f.is_valid(0) && !f.is_valid(1)); // NaN in-band
+        let mut f32c = Column::f32(vec![1.0]);
+        f32c.append_na(1);
+        assert!(f32c.is_valid(0) && !f32c.is_valid(1)); // f32 NaN in-band
         // an existing hole is preserved, the appended rows are added as NA
         let mut i2 = Column::i64_with(vec![1, 0], Validity::from_valid_iter(2, [true, false]));
         i2.append_na(1);
