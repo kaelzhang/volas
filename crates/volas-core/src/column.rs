@@ -286,7 +286,9 @@ impl Column {
             Column::I64(v, val) => mask_f64(v.iter().map(|&i| i as f64), val),
             Column::I32(v, val) => mask_f64(v.iter().map(|&i| i as f64), val),
             Column::Str(v) => vec![f64::NAN; v.len()],
-            Column::Datetime(v) => v.iter().map(|&i| i as f64).collect(),
+            Column::Datetime(v) => {
+                v.iter().map(|&i| if i == i64::MIN { f64::NAN } else { i as f64 }).collect()
+            }
         }
     }
 
@@ -314,9 +316,9 @@ impl Column {
         match self {
             Column::F64(v) => Column::f64(v[start..end].to_vec()),
             Column::F32(v) => Column::f32(v[start..end].to_vec()),
-            Column::Bool(v, _) => Column::bool(v[start..end].to_vec()),
-            Column::I64(v, _) => Column::i64(v[start..end].to_vec()),
-            Column::I32(v, _) => Column::i32(v[start..end].to_vec()),
+            Column::Bool(v, val) => Column::bool_with(v[start..end].to_vec(), val.slice(start, end)),
+            Column::I64(v, val) => Column::i64_with(v[start..end].to_vec(), val.slice(start, end)),
+            Column::I32(v, val) => Column::i32_with(v[start..end].to_vec(), val.slice(start, end)),
             Column::Str(v) => Column::str(v[start..end].to_vec()),
             Column::Datetime(v) => Column::datetime(v[start..end].to_vec()),
         }
@@ -327,9 +329,9 @@ impl Column {
         match self {
             Column::F64(v) => Column::f64(idx.iter().map(|&i| v[i]).collect()),
             Column::F32(v) => Column::f32(idx.iter().map(|&i| v[i]).collect()),
-            Column::Bool(v, _) => Column::bool(idx.iter().map(|&i| v[i]).collect()),
-            Column::I64(v, _) => Column::i64(idx.iter().map(|&i| v[i]).collect()),
-            Column::I32(v, _) => Column::i32(idx.iter().map(|&i| v[i]).collect()),
+            Column::Bool(v, val) => Column::bool_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx)),
+            Column::I64(v, val) => Column::i64_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx)),
+            Column::I32(v, val) => Column::i32_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx)),
             Column::Str(v) => Column::str(idx.iter().map(|&i| v[i].clone()).collect()),
             Column::Datetime(v) => Column::datetime(idx.iter().map(|&i| v[i]).collect()),
         }
@@ -347,15 +349,18 @@ impl Column {
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
-            (Column::Bool(a, _), Column::Bool(b, _)) => {
+            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+                append_validity(av, a.len(), bv, b.len());
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
-            (Column::I64(a, _), Column::I64(b, _)) => {
+            (Column::I64(a, av), Column::I64(b, bv)) => {
+                append_validity(av, a.len(), bv, b.len());
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
-            (Column::I32(a, _), Column::I32(b, _)) => {
+            (Column::I32(a, av), Column::I32(b, bv)) => {
+                append_validity(av, a.len(), bv, b.len());
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
@@ -387,6 +392,8 @@ impl Column {
                 Arc::make_mut(v).extend(std::iter::repeat(f32::NAN).take(len));
                 Ok(())
             }
+            // The refresh path overwrites these placeholder rows on recompute, so a
+            // dense `false` keeps the validity simple (no lingering NA to clear).
             Column::Bool(v, _) => {
                 Arc::make_mut(v).extend(std::iter::repeat(false).take(len));
                 Ok(())
@@ -699,6 +706,117 @@ impl Column {
         }
     }
 
+    /// Shift values by `n` periods (pandas `shift`), dtype-preserving. Vacated
+    /// cells become missing (`NaN` for float, `volas.NA` for int/bool, `NaT` for
+    /// datetime); a shifted-in value keeps its own missingness. A `str` column has
+    /// no missing value of its own, so it degrades to an all-missing float column.
+    pub fn shift(&self, n: isize) -> Column {
+        let len = self.len();
+        // Validity of the result: a cell is present when its source cell exists and
+        // was itself present. Only the nullable (int/bool) variants build it; the
+        // value buffers shift with a single `memcpy` via `shift_fill`.
+        let nulls = || {
+            Validity::from_valid_iter(
+                len,
+                (0..len).map(|i| {
+                    let s = i as isize - n;
+                    s >= 0 && (s as usize) < len && self.is_valid(s as usize)
+                }),
+            )
+        };
+        match self {
+            Column::F64(v) => Column::f64(shift_fill(v, n, f64::NAN)),
+            Column::F32(v) => Column::f32(shift_fill(v, n, f32::NAN)),
+            Column::I64(v, _) => Column::i64_with(shift_fill(v, n, 0), nulls()),
+            Column::I32(v, _) => Column::i32_with(shift_fill(v, n, 0), nulls()),
+            Column::Bool(v, _) => Column::bool_with(shift_fill(v, n, false), nulls()),
+            Column::Datetime(v) => Column::datetime(shift_fill(v, n, i64::MIN)),
+            Column::Str(_) => Column::f64(vec![f64::NAN; len]),
+        }
+    }
+
+    /// Discrete difference `x[i] - x[i-n]` (pandas `diff`), dtype-preserving: the
+    /// first `n` cells (the shift gap) are missing. A `bool` / `str` / `datetime`
+    /// column differences in f64 (no defined subtraction of its own).
+    pub fn diff(&self, n: isize) -> Result<Column> {
+        match self {
+            Column::F64(v) => Ok(Column::f64(diff_kernel(v, n, f64::NAN))),
+            Column::F32(v) => Ok(Column::f32(diff_kernel(v, n, f32::NAN))),
+            Column::Bool(_, _) | Column::Str(_) | Column::Datetime(_) => {
+                let (a, b) = (self.to_f64_vec(), self.shift(n).to_f64_vec());
+                Ok(Column::f64(a.iter().zip(&b).map(|(&x, &y)| x - y).collect()))
+            }
+            // int stays int with an NA gap and NA-propagating subtraction.
+            _ => self.binary(&self.shift(n), BinOp::Sub),
+        }
+    }
+
+    /// Replace missing cells with the constant `value` (pandas `fillna`),
+    /// dtype-preserving when `value` fits the dtype, else promoting an int column
+    /// to float (a non-integral fill).
+    pub fn fillna(&self, value: f64) -> Column {
+        if self.null_count() == 0 {
+            return self.clone();
+        }
+        let len = self.len();
+        match self {
+            Column::F64(v) => Column::f64(v.iter().map(|&x| if x.is_nan() { value } else { x }).collect()),
+            Column::F32(v) => {
+                Column::f32(v.iter().map(|&x| if x.is_nan() { value as f32 } else { x }).collect())
+            }
+            Column::I64(v, val) => match i64::try_from_f64(value) {
+                Some(iv) => Column::i64((0..len).map(|i| if val.is_valid(i) { v[i] } else { iv }).collect()),
+                None => Column::f64((0..len).map(|i| if val.is_valid(i) { v[i] as f64 } else { value }).collect()),
+            },
+            Column::I32(v, val) => match i32::try_from_f64(value) {
+                Some(iv) => Column::i32((0..len).map(|i| if val.is_valid(i) { v[i] } else { iv }).collect()),
+                None => Column::f64((0..len).map(|i| if val.is_valid(i) { v[i] as f64 } else { value }).collect()),
+            },
+            // a 0/1 fill keeps bool; anything else promotes to float.
+            Column::Bool(v, val) if value == 0.0 || value == 1.0 => {
+                Column::bool((0..len).map(|i| if val.is_valid(i) { v[i] } else { value != 0.0 }).collect())
+            }
+            // datetime / str (and a non-0/1 bool fill) degrade to the f64 funnel.
+            _ => Column::f64(self.to_f64_vec().iter().map(|&x| if x.is_nan() { value } else { x }).collect()),
+        }
+    }
+
+    /// Forward-fill (`forward = true`, pandas `ffill`) or backward-fill (`bfill`)
+    /// missing cells from the nearest present value in that direction,
+    /// dtype-preserving; leading / trailing cells with no source stay missing.
+    pub fn fill_dir(&self, forward: bool) -> Column {
+        if self.null_count() == 0 {
+            return self.clone();
+        }
+        let len = self.len();
+        // For each position, the source index of the value to carry in, or `None`.
+        let mut src = vec![None; len];
+        let mut last: Option<usize> = None;
+        for k in 0..len {
+            let i = if forward { k } else { len - 1 - k };
+            if self.is_valid(i) {
+                last = Some(i);
+            }
+            src[i] = last;
+        }
+        let validity = Validity::from_valid_iter(len, src.iter().map(|s| s.is_some()));
+        match self {
+            Column::F64(v) => Column::f64(src.iter().map(|s| s.map_or(f64::NAN, |j| v[j])).collect()),
+            Column::F32(v) => Column::f32(src.iter().map(|s| s.map_or(f32::NAN, |j| v[j])).collect()),
+            Column::I64(v, _) => Column::i64_with(src.iter().map(|s| s.map_or(0, |j| v[j])).collect(), validity),
+            Column::I32(v, _) => Column::i32_with(src.iter().map(|s| s.map_or(0, |j| v[j])).collect(), validity),
+            Column::Bool(v, _) => {
+                Column::bool_with(src.iter().map(|s| s.map_or(false, |j| v[j])).collect(), validity)
+            }
+            Column::Datetime(v) => {
+                Column::datetime(src.iter().map(|s| s.map_or(i64::MIN, |j| v[j])).collect())
+            }
+            // a str column is never missing, so it returns via the early `null_count
+            // == 0` check above and never reaches here.
+            Column::Str(_) => unreachable!("str has no missing value"), // LCOV_EXCL_LINE
+        }
+    }
+
     /// `where` / `mask` core: pick `self` where `cond` is true, else `other`,
     /// producing `target` dtype (the caller resolves keep-vs-promote so the fill's
     /// value/type is accounted for). Picks i64 natively when `target` is `I64`
@@ -964,6 +1082,51 @@ fn mask_f64(vals: impl Iterator<Item = f64>, validity: &Validity) -> Vec<f64> {
 /// A bool / i32 column widened to `i64` (for the i64-accumulator reductions).
 fn widen_i64<T: Copy + Into<i64>>(v: &[T]) -> Vec<i64> {
     v.iter().map(|&x| x.into()).collect()
+}
+
+/// Shift `v` by `n` (pandas `shift`), filling vacated cells with `fill`; the kept
+/// region moves as a single `memcpy`.
+fn shift_fill<T: Copy>(v: &[T], n: isize, fill: T) -> Vec<T> {
+    let len = v.len();
+    let mut out = vec![fill; len];
+    if n >= 0 {
+        let n = (n as usize).min(len);
+        out[n..].copy_from_slice(&v[..len - n]);
+    } else {
+        let n = ((-n) as usize).min(len);
+        out[..len - n].copy_from_slice(&v[n..]);
+    }
+    out
+}
+
+/// `x[i] - x[i-n]` (pandas `diff`) in one pass; the shift-gap cells are `missing`.
+fn diff_kernel<T: Copy + std::ops::Sub<Output = T>>(v: &[T], n: isize, missing: T) -> Vec<T> {
+    let len = v.len();
+    let mut out = vec![missing; len];
+    if n >= 0 {
+        let k = n as usize;
+        for i in k..len {
+            out[i] = v[i] - v[i - k];
+        }
+    } else {
+        let k = (-n) as usize;
+        for i in 0..len.saturating_sub(k) {
+            out[i] = v[i] - v[i + k];
+        }
+    }
+    out
+}
+
+/// Extend `av` (validity of an `alen`-long column) with `bv` (a `blen`-long
+/// column's validity) so it stays aligned after an `append`. Dense + dense is a
+/// no-op (the result is still fully present).
+fn append_validity(av: &mut Validity, alen: usize, bv: &Validity, blen: usize) {
+    if !av.has_nulls() && !bv.has_nulls() {
+        return;
+    }
+    let flags: Vec<bool> =
+        (0..alen).map(|i| av.is_valid(i)).chain((0..blen).map(|i| bv.is_valid(i))).collect();
+    *av = Validity::from_valid_iter(alen + blen, flags);
 }
 
 /// Sum of the present values in their element type (skip `volas.NA`). Dense ⇒
@@ -1802,5 +1965,103 @@ mod tests {
         let r32 = i32c.select(&[true, false, false], &Column::f64(vec![9.0, f64::NAN, 9.0]), DType::I32).unwrap();
         assert_eq!(r32.dtype(), DType::I32);
         assert_na(&r32, &[1.0, f64::NAN, 9.0]);
+    }
+
+    #[test]
+    fn na_shift_and_diff() {
+        // float gap = NaN
+        assert_na(&Column::f64(vec![1.0, 2.0, 3.0]).shift(1), &[f64::NAN, 1.0, 2.0]);
+        assert_na(&Column::f32(vec![1.0, 2.0, 3.0]).shift(1), &[f64::NAN, 1.0, 2.0]);
+        // int / bool keep their dtype with an NA gap (PDEP-16 alignment)
+        let i = Column::i64(vec![1, 2, 3]);
+        assert_eq!(i.shift(1).dtype(), DType::I64);
+        assert_na(&i.shift(1), &[f64::NAN, 1.0, 2.0]);
+        assert_na(&i.shift(-1), &[2.0, 3.0, f64::NAN]);
+        assert_na(&Column::i32(vec![1, 2, 3]).shift(1), &[f64::NAN, 1.0, 2.0]);
+        let b = Column::bool(vec![true, false, true]);
+        assert_eq!(b.shift(1).dtype(), DType::Bool);
+        assert_na(&b.shift(1), &[f64::NAN, 1.0, 0.0]);
+        // datetime gap = NaT; str degrades to an all-missing float column
+        assert_na(&Column::datetime(vec![10, 20, 30]).shift(1), &[f64::NAN, 10.0, 20.0]);
+        assert_na(&Column::str(vec!["a".into(), "b".into()]).shift(1), &[f64::NAN, f64::NAN]);
+        // shift carries a pre-existing NA; shift(0) is identity; beyond len -> all NA
+        assert_na(&na_i64(&[1, 0, 3], &[true, false, true]).shift(1), &[f64::NAN, 1.0, f64::NAN]);
+        assert_na(&i.shift(0), &[1.0, 2.0, 3.0]);
+        assert_na(&i.shift(5), &[f64::NAN, f64::NAN, f64::NAN]);
+
+        // diff: int keeps int + NA gap, float stays float, bool/datetime -> f64
+        assert_eq!(Column::i64(vec![1, 3, 6]).diff(1).unwrap().dtype(), DType::I64);
+        assert_na(&Column::i64(vec![1, 3, 6]).diff(1).unwrap(), &[f64::NAN, 2.0, 3.0]);
+        assert_na(&Column::f64(vec![1.0, 3.0, 6.0]).diff(1).unwrap(), &[f64::NAN, 2.0, 3.0]);
+        assert_na(&Column::f32(vec![1.0, 3.0, 6.0]).diff(1).unwrap(), &[f64::NAN, 2.0, 3.0]);
+        // negative-n diff (the backward branch of diff_kernel)
+        assert_na(&Column::f64(vec![1.0, 3.0, 6.0]).diff(-1).unwrap(), &[-2.0, -3.0, f64::NAN]);
+        let bd = Column::bool(vec![true, false, true]).diff(1).unwrap();
+        assert_eq!(bd.dtype(), DType::F64);
+        assert_na(&bd, &[f64::NAN, -1.0, 1.0]);
+        assert_na(&Column::datetime(vec![10, 25, 30]).diff(1).unwrap(), &[f64::NAN, 15.0, 5.0]);
+    }
+
+    #[test]
+    fn na_take_slice_append_preserve_validity() {
+        let c = na_i64(&[1, 0, 3, 0, 5], &[true, false, true, false, true]); // 1,NA,3,NA,5
+        assert_na(&c.slice(1, 4), &[f64::NAN, 3.0, f64::NAN]);
+        assert_na(&c.take(&[4, 1, 0]), &[5.0, f64::NAN, 1.0]);
+        // dense slice / take stay dense (the validity fast path)
+        assert_eq!(Column::i64(vec![1, 2, 3]).slice(0, 2).null_count(), 0);
+        assert_eq!(Column::i64(vec![1, 2, 3]).take(&[2, 0]).null_count(), 0);
+        // append concatenates validity (NA ++ NA)
+        let mut a = na_i64(&[1, 0], &[true, false]);
+        a.append(&na_i64(&[0, 4], &[false, true])).unwrap();
+        assert_na(&a, &[1.0, f64::NAN, f64::NAN, 4.0]);
+        // dense ++ dense stays dense
+        let mut d = Column::i64(vec![1, 2]);
+        d.append(&Column::i64(vec![3])).unwrap();
+        assert_eq!(d.null_count(), 0);
+        // append_missing keeps the new bool rows dense `false` (refresh placeholder)
+        let mut b = Column::bool(vec![true, false]);
+        b.append_missing(2).unwrap();
+        assert_eq!(b.null_count(), 0);
+        assert_na(&b, &[1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn na_fillna() {
+        // keep dtype when the fill fits; promote int -> float on a non-integral fill
+        let c = na_i64(&[1, 0, 3], &[true, false, true]);
+        assert_eq!(c.fillna(9.0).dtype(), DType::I64);
+        assert_na(&c.fillna(9.0), &[1.0, 9.0, 3.0]);
+        assert_eq!(c.fillna(2.5).dtype(), DType::F64);
+        assert_na(&c.fillna(2.5), &[1.0, 2.5, 3.0]);
+        let i32c = Column::i32_with(vec![1, 0, 3], Validity::from_valid_iter(3, [true, false, true]));
+        assert_eq!(i32c.fillna(9.0).dtype(), DType::I32);
+        assert_na(&i32c.fillna(9.0), &[1.0, 9.0, 3.0]);
+        assert_eq!(i32c.fillna(2.5).dtype(), DType::F64);
+        // bool: a 0/1 fill keeps bool, else promote to float
+        let bc = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, false, true]));
+        assert_eq!(bc.fillna(1.0).dtype(), DType::Bool);
+        assert_na(&bc.fillna(1.0), &[1.0, 1.0, 0.0]);
+        assert_eq!(bc.fillna(5.0).dtype(), DType::F64);
+        // float fill; datetime degrades to f64; a dense column is cloned unchanged
+        assert_na(&Column::f64(vec![1.0, f64::NAN]).fillna(0.0), &[1.0, 0.0]);
+        assert_na(&Column::f32(vec![1.0, f32::NAN]).fillna(0.0), &[1.0, 0.0]);
+        assert_eq!(Column::datetime(vec![i64::MIN, 20]).fillna(9.0).dtype(), DType::F64);
+        assert_eq!(Column::i64(vec![1, 2]).fillna(9.0), Column::i64(vec![1, 2]));
+    }
+
+    #[test]
+    fn na_fill_dir() {
+        let c = na_i64(&[0, 2, 0, 0, 5], &[false, true, false, false, true]); // NA,2,NA,NA,5
+        assert_na(&c.fill_dir(true), &[f64::NAN, 2.0, 2.0, 2.0, 5.0]); // ffill: leading NA stays
+        assert_na(&c.fill_dir(false), &[2.0, 2.0, 5.0, 5.0, 5.0]); // bfill: trailing filled
+        let i32c = Column::i32_with(vec![7, 0, 0], Validity::from_valid_iter(3, [true, false, false]));
+        assert_na(&i32c.fill_dir(true), &[7.0, 7.0, 7.0]);
+        let bc = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, false, false]));
+        assert_na(&bc.fill_dir(true), &[1.0, 1.0, 1.0]);
+        assert_na(&Column::f64(vec![1.0, f64::NAN, 3.0]).fill_dir(true), &[1.0, 1.0, 3.0]);
+        assert_na(&Column::f32(vec![1.0, f32::NAN]).fill_dir(true), &[1.0, 1.0]);
+        assert_na(&Column::datetime(vec![i64::MIN, 20]).fill_dir(false), &[20.0, 20.0]);
+        assert_eq!(Column::i64(vec![1, 2]).fill_dir(true), Column::i64(vec![1, 2])); // dense clone
+        assert_eq!(Column::str(vec!["a".into()]).fill_dir(true), Column::str(vec!["a".into()]));
     }
 }

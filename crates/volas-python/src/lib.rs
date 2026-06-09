@@ -200,9 +200,15 @@ fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
     match col {
         Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
         Column::F32(v) => v.to_vec().into_pyarray(py).into_any(),
-        Column::Bool(v, _) => v.to_vec().into_pyarray(py).into_any(),
-        Column::I64(v, _) => v.to_vec().into_pyarray(py).into_any(),
-        Column::I32(v, _) => v.to_vec().into_pyarray(py).into_any(),
+        // numpy int/bool cannot hold a missing value, so a column with any NA
+        // exports as float64 with NaN (pandas `Int64.to_numpy()` semantics); a
+        // dense column keeps its native dtype.
+        Column::Bool(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
+        Column::I64(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
+        Column::I32(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
+        Column::Bool(..) | Column::I64(..) | Column::I32(..) => {
+            col.to_f64_vec().into_pyarray(py).into_any()
+        }
         // String columns become NumPy object arrays (pandas `object` dtype).
         Column::Str(v) => {
             let list = PyList::new(py, v.as_slice()).expect("build str list");
@@ -229,14 +235,13 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
     match col {
         Column::F64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         Column::F32(v) => (v[i] as f64).into_pyobject(py).unwrap().into_any().unbind(),
-        Column::I64(v, _) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
-        Column::I32(v, _) => (v[i] as i64).into_pyobject(py).unwrap().into_any().unbind(),
-        Column::Bool(v, _) => v[i]
-            .into_pyobject(py)
-            .unwrap()
-            .to_owned()
-            .into_any()
-            .unbind(),
+        // an int/bool missing cell is the volas.NA symbol (pandas tolist semantics)
+        Column::I64(v, val) if val.is_valid(i) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
+        Column::I32(v, val) if val.is_valid(i) => (v[i] as i64).into_pyobject(py).unwrap().into_any().unbind(),
+        Column::Bool(v, val) if val.is_valid(i) => {
+            v[i].into_pyobject(py).unwrap().to_owned().into_any().unbind()
+        }
+        Column::I64(..) | Column::I32(..) | Column::Bool(..) => na(py),
         Column::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
         Column::Datetime(v) => py
             .import("numpy")
@@ -272,6 +277,35 @@ fn numpy_types(py: Python<'_>) -> &'static NumpyTypes {
             bool_: ty("bool_"),
         }
     })
+}
+
+/// `volas.NA` — the singleton missing-value marker shown to users and returned by
+/// element access on a missing int/bool cell. A pure symbol: physical storage
+/// stays dtype-optimal (a float keeps `NaN`, an int/bool a validity bit).
+#[pyclass(frozen, name = "NAType", module = "volas_rs")]
+struct NaType;
+
+#[pymethods]
+impl NaType {
+    fn __repr__(&self) -> &'static str {
+        "<NA>"
+    }
+    // pandas' NA raises on truthiness; mirror it so `if s[i]:` can't silently
+    // treat a missing value as False.
+    fn __bool__(&self) -> PyResult<bool> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "boolean value of volas.NA is ambiguous",
+        ))
+    }
+}
+
+static NA_SINGLETON: GILOnceCell<Py<PyAny>> = GILOnceCell::new();
+
+/// The cached `volas.NA` singleton object.
+fn na(py: Python<'_>) -> Py<PyAny> {
+    NA_SINGLETON
+        .get_or_init(py, || Py::new(py, NaType).expect("create volas.NA").into_any())
+        .clone_ref(py)
 }
 
 /// Box `value` as the numpy scalar `dtype` (the external-boundary representation,
@@ -313,11 +347,13 @@ fn np_bool(py: Python<'_>, b: bool) -> Py<PyAny> {
 /// [`scalar_to_py`] instead, which yields native Python scalars like pandas.
 fn np_scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
     match col {
+        // a float carries missing in-band as NaN -> np.float64(nan), like pandas.
         Column::F64(v) => np_f64(py, v[i]),
         Column::F32(v) => np_f32(py, v[i]),
-        Column::I64(v, _) => np_i64(py, v[i]),
-        Column::I32(v, _) => np_i32(py, v[i]),
-        Column::Bool(v, _) => np_bool(py, v[i]),
+        // an int/bool missing cell surfaces as the volas.NA symbol.
+        Column::I64(v, val) => if val.is_valid(i) { np_i64(py, v[i]) } else { na(py) },
+        Column::I32(v, val) => if val.is_valid(i) { np_i32(py, v[i]) } else { na(py) },
+        Column::Bool(v, val) => if val.is_valid(i) { np_bool(py, v[i]) } else { na(py) },
         // str -> Python str; datetime -> np.datetime64 (already numpy) — as scalar_to_py.
         Column::Str(_) | Column::Datetime(_) => scalar_to_py(py, col, i),
     }
@@ -896,17 +932,7 @@ impl PySeries {
     ///     Series: a new series of the same length.
     #[pyo3(signature = (n = 1))]
     fn shift(&self, n: isize) -> PySeries {
-        let a = self.inner.data.to_f64_vec();
-        let len = a.len();
-        let mut out = vec![f64::NAN; len];
-        if n >= 0 {
-            let n = (n as usize).min(len);
-            out[n..].copy_from_slice(&a[..len - n]);
-        } else {
-            let n = ((-n) as usize).min(len);
-            out[..len - n].copy_from_slice(&a[n..]);
-        }
-        f64_series(&self.inner, out)
+        col_to_series(&self.inner, self.inner.data.shift(n))
     }
 
     /// Discrete difference ``x[i] - x[i-n]`` (equivalent to ``s - s.shift(n)``).
@@ -918,22 +944,8 @@ impl PySeries {
     /// Returns:
     ///     Series: a new series of the same length.
     #[pyo3(signature = (n = 1))]
-    fn diff(&self, n: isize) -> PySeries {
-        let a = self.inner.data.to_f64_vec();
-        let len = a.len();
-        let mut out = vec![f64::NAN; len];
-        if n >= 0 {
-            let n = n as usize;
-            for i in n..len {
-                out[i] = a[i] - a[i - n];
-            }
-        } else {
-            let n = (-n) as usize;
-            for i in 0..len.saturating_sub(n) {
-                out[i] = a[i] - a[i + n];
-            }
-        }
-        f64_series(&self.inner, out)
+    fn diff(&self, n: isize) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.diff(n).map_err(pyerr)?))
     }
 
     /// Replace missing (NaN) values with a constant, or forward/backward-fill.
@@ -950,15 +962,7 @@ impl PySeries {
     /// returned unchanged. For directional fill use `ffill` / `bfill` (pandas 3.0
     /// removed `fillna(method=)`).
     fn fillna(&self, value: f64) -> PySeries {
-        match &self.inner.data {
-            Column::F64(v) => f64_series(
-                &self.inner,
-                v.iter().map(|&x| if x.is_nan() { value } else { x }).collect(),
-            ),
-            _ => PySeries {
-                inner: self.inner.clone(),
-            },
-        }
+        col_to_series(&self.inner, self.inner.data.fillna(value))
     }
 
     /// Forward-fill NaN cells from the last valid value (pandas `ffill`).
@@ -971,34 +975,23 @@ impl PySeries {
         self.fill_dir(false)
     }
 
-    /// Boolean mask of missing (NaN) values (non-F64 columns -> all False).
+    /// Boolean mask of missing (`volas.NA`) values, across every dtype (a float
+    /// `NaN`, an int/bool validity hole, a datetime `NaT`).
     fn isna(&self) -> PySeries {
-        let out = match &self.inner.data {
-            Column::F64(v) => v.iter().map(|x| x.is_nan()).collect(),
-            other => vec![false; other.len()],
-        };
-        bool_series(&self.inner, out)
+        let c = &self.inner.data;
+        bool_series(&self.inner, (0..c.len()).map(|i| !c.is_valid(i)).collect())
     }
 
-    /// Boolean mask of present (non-NaN) values.
+    /// Boolean mask of present (non-missing) values.
     fn notna(&self) -> PySeries {
-        let out = match &self.inner.data {
-            Column::F64(v) => v.iter().map(|x| !x.is_nan()).collect(),
-            other => vec![true; other.len()],
-        };
-        bool_series(&self.inner, out)
+        let c = &self.inner.data;
+        bool_series(&self.inner, (0..c.len()).map(|i| c.is_valid(i)).collect())
     }
 
     /// Drop missing (NaN) elements (carries their index labels with them).
     fn dropna(&self) -> PySeries {
-        let keep: Vec<usize> = match &self.inner.data {
-            Column::F64(v) => v
-                .iter()
-                .enumerate()
-                .filter_map(|(i, x)| (!x.is_nan()).then_some(i))
-                .collect(),
-            other => (0..other.len()).collect(),
-        };
+        let c = &self.inner.data;
+        let keep: Vec<usize> = (0..c.len()).filter(|&i| c.is_valid(i)).collect();
         let data = self.inner.data.take(&keep);
         let index = Arc::new(self.inner.index.take(&keep));
         PySeries {
@@ -1474,12 +1467,7 @@ impl PySeries {
     /// Directional NaN fill (`forward` = ffill, else bfill) over an F64 column;
     /// a non-float series is returned unchanged. Shared by `ffill` / `bfill`.
     fn fill_dir(&self, forward: bool) -> PySeries {
-        match &self.inner.data {
-            Column::F64(v) => f64_series(&self.inner, fill_directional(v.as_slice(), forward)),
-            _ => PySeries {
-                inner: self.inner.clone(),
-            },
-        }
+        col_to_series(&self.inner, self.inner.data.fill_dir(forward))
     }
 }
 
@@ -2817,12 +2805,14 @@ impl PyDataFrame {
     fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PyDataFrame> {
         self.map_cols(|s| s.clip(lower, upper))
     }
-    /// Column-wise discrete difference (pandas `diff`); always float.
+    /// Column-wise discrete difference (pandas `diff`), dtype-preserving; the gap
+    /// is missing (`volas.NA` for int/bool).
     #[pyo3(signature = (n = 1))]
     fn diff(&self, n: isize) -> PyResult<PyDataFrame> {
-        self.map_cols(|s| Ok(s.diff(n)))
+        self.map_cols(|s| s.diff(n))
     }
-    /// Column-wise shift by `n` rows (pandas `shift`); fills NaN, always float.
+    /// Column-wise shift by `n` rows (pandas `shift`), dtype-preserving; the
+    /// vacated cells are missing (`volas.NA` for int/bool).
     #[pyo3(signature = (n = 1))]
     fn shift(&self, n: isize) -> PyResult<PyDataFrame> {
         self.map_cols(|s| Ok(s.shift(n)))
@@ -4294,5 +4284,7 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
     m.add_function(wrap_pyfunction!(directive_stringify, m)?)?;
     m.add_function(wrap_pyfunction!(directive_lookback, m)?)?;
+    m.add_class::<NaType>()?;
+    m.add("NA", na(m.py()))?;
     Ok(())
 }

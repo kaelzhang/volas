@@ -15,6 +15,7 @@ import numpy.typing as npt
 
 import volas
 from volas import DataFrame, Row, Series, Timestamp, TimeFrame
+from volas_rs import NAType
 
 df = DataFrame({"open": np.arange(10.0), "close": np.arange(10.0)})
 
@@ -30,7 +31,7 @@ assert_type(df.exec("ma:5"), npt.NDArray[Any])
 
 # Series surfaces
 s = df["close"]
-assert_type(s[0], float | int | bool | str | Timestamp)
+assert_type(s[0], float | int | bool | str | Timestamp | NAType)
 assert_type(s[1:5], Series)
 assert_type(s + 1, Series)
 assert_type(s * 2.0, Series)
@@ -39,13 +40,13 @@ assert_type(~(s > 0.0), Series)
 assert_type(s.mean(), np.float64)
 assert_type(s.shift(1), Series)
 assert_type(s.sqrt(), Series)
-assert_type(s.iloc[0], float | int | bool | str | Timestamp)
+assert_type(s.iloc[0], float | int | bool | str | Timestamp | NAType)
 assert_type(s.to_numpy(), npt.NDArray[Any])
 
 # indexers
 assert_type(df.iloc[0], Row)
 assert_type(df.iloc[0:5], DataFrame)
-assert_type(df.iat[0, 0], float | int | bool | str | Timestamp)
+assert_type(df.iat[0, 0], float | int | bool | str | Timestamp | NAType)
 
 # misc precise returns
 assert_type(df.copy(), DataFrame)

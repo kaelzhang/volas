@@ -21,30 +21,21 @@ pub(crate) fn cell_to_csv(
     na_rep: &str,
     ff: Option<(Option<usize>, char)>,
 ) -> String {
+    // A missing cell (float NaN, int/bool NA, datetime NaT) renders as `na_rep`.
+    if !col.is_valid(i) {
+        return na_rep.to_string();
+    }
     match col {
-        Column::F64(v) => {
-            if v[i].is_nan() {
-                na_rep.to_string()
-            } else {
-                match ff {
-                    Some((prec, kind)) => fmt_f64_with(prec, kind, v[i]),
-                    // Default: the shortest round-trippable form that keeps the
-                    // decimal point, so `1.0` writes as "1.0" (Rust's `to_string`
-                    // drops it to "1").
-                    None => format!("{:?}", v[i]),
-                }
-            }
-        }
-        Column::F32(v) => {
-            if v[i].is_nan() {
-                na_rep.to_string()
-            } else {
-                match ff {
-                    Some((prec, kind)) => fmt_f64_with(prec, kind, v[i] as f64),
-                    None => format!("{:?}", v[i]),
-                }
-            }
-        }
+        Column::F64(v) => match ff {
+            Some((prec, kind)) => fmt_f64_with(prec, kind, v[i]),
+            // Default: the shortest round-trippable form that keeps the decimal
+            // point, so `1.0` writes as "1.0" (Rust's `to_string` drops it to "1").
+            None => format!("{:?}", v[i]),
+        },
+        Column::F32(v) => match ff {
+            Some((prec, kind)) => fmt_f64_with(prec, kind, v[i] as f64),
+            None => format!("{:?}", v[i]),
+        },
         Column::Bool(v, _) => if v[i] { "True" } else { "False" }.to_string(),
         Column::I64(v, _) => v[i].to_string(),
         Column::I32(v, _) => v[i].to_string(),
@@ -277,17 +268,23 @@ fn data_cells(
                 })
                 .collect()
         }
-        Column::I64(v, _) => rows
+        Column::I64(v, val) => rows
             .iter()
-            .map(|&i| lead_num(v[i] < 0, v[i].to_string()))
+            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { na_rep.to_string() })
             .collect(),
-        Column::I32(v, _) => rows
+        Column::I32(v, val) => rows
             .iter()
-            .map(|&i| lead_num(v[i] < 0, v[i].to_string()))
+            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { na_rep.to_string() })
             .collect(),
-        Column::Bool(v, _) => rows
+        Column::Bool(v, val) => rows
             .iter()
-            .map(|&i| format!(" {}", if v[i] { "True" } else { "False" }))
+            .map(|&i| {
+                if val.is_valid(i) {
+                    format!(" {}", if v[i] { "True" } else { "False" })
+                } else {
+                    na_rep.to_string()
+                }
+            })
             .collect(),
         Column::Str(v) => rows.iter().map(|&i| format!(" {}", v[i])).collect(),
         Column::Datetime(v) => {

@@ -6,6 +6,7 @@ from volas_rs import (
     DataFrame, Series, Row, Timestamp, read_csv, to_datetime, TimeFrame,
     directive_stringify, directive_lookback,
     DirectiveError, DirectiveSyntaxError, DirectiveValueError,
+    NA,
 )
 
 from ._interop import from_pandas
@@ -17,7 +18,7 @@ __version__ = _get_version('volas')
 __all__ = [
     'DataFrame', 'Series', 'Row', 'Timestamp', 'read_csv', 'to_datetime', 'TimeFrame',
     'directive_stringify', 'directive_lookback',
-    'from_pandas',
+    'from_pandas', 'NA',
     'DirectiveError', 'DirectiveSyntaxError', 'DirectiveValueError',
     '__version__',
 ]

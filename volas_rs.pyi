@@ -25,6 +25,8 @@ __all__ = [
     "DirectiveError",
     "DirectiveSyntaxError",
     "DirectiveValueError",
+    "NA",
+    "NAType",
     "Row",
     "Series",
     "SeriesILoc",
@@ -38,11 +40,20 @@ __all__ = [
 ]
 
 # A single cell read out of a Series / Row / cell-accessor. The concrete type depends
-# on the column dtype (float / int / bool / string / datetime), so the honest static
-# type is their union.
-_Scalar: TypeAlias = "float | int | bool | str | Timestamp"
+# on the column dtype (float / int / bool / string / datetime), and a missing int/bool
+# cell is `volas.NA`, so the honest static type is their union.
+_Scalar: TypeAlias = "float | int | bool | str | Timestamp | NAType"
 # Anything accepted as a boolean row-mask on a frame.
 _BoolMask: TypeAlias = "Series | npt.NDArray[np.bool_] | list[bool]"
+
+# The singleton missing-value marker, `volas.NA`. A pure user-facing symbol: an
+# int/bool column stores missing as a validity bit, a float column as NaN.
+@final
+class NAType:
+    def __repr__(self) -> str: ...
+    def __bool__(self) -> bool: ...
+
+NA: NAType
 
 # --- exceptions -------------------------------------------------------------
 

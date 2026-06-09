@@ -26,7 +26,9 @@ def _assert_frame(vfr, pfr):
         np.testing.assert_allclose(np.nan_to_num(va, nan=-9e9), np.nan_to_num(pa, nan=-9e9))
 
 
-@pytest.mark.parametrize("op", ["cumsum", "cummax", "cummin", "cumprod", "abs", "diff", "shift", "rank"])
+# shift / diff diverge from pandas on an int column (volas keeps int64 + NA where
+# pandas upcasts to float64), so they are checked separately in test_int_shift_diff_na.
+@pytest.mark.parametrize("op", ["cumsum", "cummax", "cummin", "cumprod", "abs", "rank"])
 def test_frame_transform_parity(op):
     v, p = _frames()
     _assert_frame(getattr(v, op)(), getattr(p, op)())
@@ -34,11 +36,26 @@ def test_frame_transform_parity(op):
 
 def test_frame_transforms_preserve_int_dtype():
     v, _ = _frames()
-    # cumsum/cummax/cummin/cumprod/abs keep the int column int64; diff/shift/rank float
+    # cumsum/cummax/cummin/cumprod/abs/diff/shift keep the int column int64 (with NA
+    # for the diff/shift gap); rank is always float.
     assert v.cumsum()["i"].dtype == "int64"
     assert v.abs()["i"].dtype == "int64"
-    assert v.diff()["i"].dtype == "float64"
+    assert v.diff()["i"].dtype == "int64"
+    assert v.shift()["i"].dtype == "int64"
     assert v.rank()["i"].dtype == "float64"
+
+
+def test_int_shift_diff_na():
+    # volas keeps the int dtype and fills the gap with volas.NA (PDEP-16 aligned),
+    # where pandas 3.0 still upcasts an int shift/diff to float64.
+    v, _ = _frames()
+    sh = v.shift()["i"]
+    assert sh.dtype == "int64"
+    assert sh[0] is volas.NA and sh[1] == 3
+    assert sh.isna().to_numpy().tolist() == [True, False, False, False]
+    df = v.diff()["i"]
+    assert df.dtype == "int64"
+    assert df[0] is volas.NA and df[1] == -2  # 1 - 3
 
 
 def test_frame_clip_parity():

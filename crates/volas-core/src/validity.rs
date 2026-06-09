@@ -156,6 +156,22 @@ impl Validity {
             }
         }
     }
+
+    /// Gather present-flags at `idx` (fancy indexing / dropna). Dense stays dense.
+    pub fn take(&self, idx: &[usize]) -> Validity {
+        match &self.0 {
+            None => Validity::dense(),
+            Some(bm) => Validity::from_valid_iter(idx.len(), idx.iter().map(|&i| bm.get(i))),
+        }
+    }
+
+    /// Present-flags over `[start, end)` (slicing). Dense stays dense.
+    pub fn slice(&self, start: usize, end: usize) -> Validity {
+        match &self.0 {
+            None => Validity::dense(),
+            Some(bm) => Validity::from_valid_iter(end - start, (start..end).map(|i| bm.get(i))),
+        }
+    }
 }
 
 impl PartialEq for Validity {
