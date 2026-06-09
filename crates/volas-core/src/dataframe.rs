@@ -930,16 +930,17 @@ mod tests {
 
     #[test]
     fn append_pads_missing_columns_by_dtype() {
-        // a plain int column missing on append -> upcast to f64 + NaN (EX-11).
+        // a plain int column missing on append -> stays int64 with an NA at the gap
+        // (no upcast to f64; the NA model preserves the dtype).
         let mut df = sample(); // a: f64, b: i64
         let only_a = DataFrame::new(vec!["a".into()], vec![Column::f64(vec![4.0])], None).unwrap();
         df.append(&only_a).unwrap();
         assert_eq!(df.height(), 4);
         let b = df.column("b").unwrap();
-        assert!(b.as_f64().is_some()); // upcast to F64
-        assert!(b.as_f64().unwrap()[3].is_nan());
+        assert_eq!(b.dtype(), DType::I64); // not upcast
+        assert!(b.is_valid(0) && !b.is_valid(3)); // the padded row is NA
 
-        // a plain bool column missing on append -> error (no missing representation).
+        // a plain bool column missing on append -> padded bool+NA (was an error).
         let mut g = DataFrame::new(
             vec!["a".into(), "flag".into()],
             vec![Column::f64(vec![1.0]), Column::bool(vec![true])],
@@ -947,7 +948,10 @@ mod tests {
         )
         .unwrap();
         let only_a2 = DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
-        assert!(g.append(&only_a2).is_err());
+        g.append(&only_a2).unwrap();
+        let flag = g.column("flag").unwrap();
+        assert_eq!(flag.dtype(), DType::Bool);
+        assert!(flag.is_valid(0) && !flag.is_valid(1));
 
         // a cached *bool directive* column missing on append -> padded false, stays bool.
         let mut h = DataFrame::new(
