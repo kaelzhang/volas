@@ -1705,31 +1705,6 @@ fn non_nan(col: &Column) -> Vec<f64> {
         .collect()
 }
 
-/// Forward (`forward = true`, `ffill`) or backward (`bfill`) fill of NaN cells.
-fn fill_directional(v: &[f64], forward: bool) -> Vec<f64> {
-    let mut out = v.to_vec();
-    if forward {
-        let mut last = f64::NAN;
-        for x in out.iter_mut() {
-            if x.is_nan() {
-                *x = last;
-            } else {
-                last = *x;
-            }
-        }
-    } else {
-        let mut next = f64::NAN;
-        for x in out.iter_mut().rev() {
-            if x.is_nan() {
-                *x = next;
-            } else {
-                next = *x;
-            }
-        }
-    }
-    out
-}
-
 /// The position of the first maximum (`want_max`) or minimum non-NaN value; errors
 /// on an all-NA column. Backs `Series.idxmax` / `idxmin`.
 fn argext(col: &Column, want_max: bool) -> PyResult<usize> {
@@ -2101,17 +2076,16 @@ impl PyDataFrame {
         }
     }
 
-    /// Directional NaN fill (`forward` = ffill, else bfill) over every float
-    /// column; non-float columns are unchanged. Backs `ffill` / `bfill`.
+    /// Directional fill (`forward` = ffill, else bfill) over every column,
+    /// delegating to the per-column validity-aware `Column::fill_dir` so int /
+    /// bool / str holes carry directionally too (like the Series version), not
+    /// only float NaN. Backs `ffill` / `bfill`.
     fn fill_dir(&self, forward: bool) -> PyResult<PyDataFrame> {
         let cols: Vec<Column> = self
             .inner
             .columns()
             .iter()
-            .map(|c| match c {
-                Column::F64(v) => Column::f64(fill_directional(v.as_slice(), forward)),
-                other => other.clone(),
-            })
+            .map(|c| c.fill_dir(forward))
             .collect();
         self.with_columns(cols)
     }
@@ -2241,16 +2215,15 @@ impl PyDataFrame {
         self.rebuild_with(cols)
     }
 
-    /// Per-cell NaN mask -> a bool frame; backs `isna` (want_na=true) / `notna`.
+    /// Per-cell missing mask -> a bool frame; backs `isna` (want_na=true) /
+    /// `notna`. Reads the column validity (every dtype), so an int/bool/str NA
+    /// and a datetime NaT are detected, not just a float NaN.
     fn mask_na(&self, want_na: bool) -> PyResult<PyDataFrame> {
         let cols = self
             .inner
             .columns()
             .iter()
-            .map(|c| match c {
-                Column::F64(v) => Column::bool(v.iter().map(|x| x.is_nan() == want_na).collect()),
-                other => Column::bool(vec![!want_na; other.len()]),
-            })
+            .map(|c| Column::bool((0..c.len()).map(|i| (!c.is_valid(i)) == want_na).collect()))
             .collect();
         self.with_columns(cols)
     }
@@ -2789,10 +2762,7 @@ impl PyDataFrame {
         let total = cols.len();
         let keep: Vec<usize> = (0..self.inner.height())
             .filter(|&i| {
-                let nan = cols
-                    .iter()
-                    .filter(|c| matches!(c, Column::F64(v) if v[i].is_nan()))
-                    .count();
+                let nan = cols.iter().filter(|c| !c.is_valid(i)).count();
                 match how {
                     "all" => nan < total.max(1),
                     _ => nan == 0,
@@ -2802,20 +2772,17 @@ impl PyDataFrame {
         PyDataFrame::plain(take_frame(&self.inner, &keep))
     }
 
-    /// Replace missing (NaN) values with `value` in every float column (pandas
-    /// `fillna`); non-float columns are unchanged. For directional fill use
-    /// `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
+    /// Replace missing values with `value` in every column (pandas `fillna`),
+    /// delegating to the per-column validity-aware `Column::fillna` so int / bool
+    /// holes are filled dtype-preserving (like the Series version), not just float
+    /// NaN. For directional fill use `ffill` / `bfill` (pandas 3.0 removed
+    /// `fillna(method=)`).
     fn fillna(&self, value: f64) -> PyResult<PyDataFrame> {
         let cols: Vec<Column> = self
             .inner
             .columns()
             .iter()
-            .map(|c| match c {
-                Column::F64(v) => {
-                    Column::f64(v.iter().map(|&x| if x.is_nan() { value } else { x }).collect())
-                }
-                other => other.clone(),
-            })
+            .map(|c| c.fillna(value))
             .collect();
         self.with_columns(cols)
     }
