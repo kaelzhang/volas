@@ -74,3 +74,20 @@ def test_na_diff_keeps_int():
     s = volas.DataFrame({"a": np.array([1, 3, 6], dtype=np.int64)})["a"].diff()
     assert s.dtype == "int64"
     assert s[0] is volas.NA and s[1] == 2 and s[2] == 3
+
+
+def test_na_construction_from_none():
+    # None in a list carries a missing value; int/bool keep their dtype + NA where
+    # pandas 3.0 upcasts to float/object.
+    s = volas.DataFrame({"a": [1, None, 3]})["a"]
+    assert s.dtype == "int64"
+    lst = s.to_list()
+    assert lst[0] == 1 and lst[1] is volas.NA and lst[2] == 3
+    assert s.sum() == 4
+    b = volas.DataFrame({"a": [True, None, False]})["a"]
+    assert b.dtype == "bool" and b[1] is volas.NA
+    f = volas.DataFrame({"a": [1.5, None, 3.0]})["a"]
+    assert f.dtype == "float64" and np.isnan(f.to_numpy()[1])
+    # an all-None column, and a NaN-containing list, are float (NaN is a float value)
+    assert volas.DataFrame({"a": [None, None]})["a"].dtype == "float64"
+    assert volas.DataFrame({"a": [1, np.nan, 3]})["a"].dtype == "float64"

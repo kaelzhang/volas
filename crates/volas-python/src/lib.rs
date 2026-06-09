@@ -17,7 +17,7 @@ use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{
     binary_supertype, datetime, fits, stats, BinOp, Column, DType, DataFrame, Index, IndexKind,
-    Label, Scalar, Series, SetVal, Tz, VolasError,
+    Label, Scalar, Series, SetVal, Tz, Validity, VolasError,
 };
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
@@ -172,9 +172,38 @@ fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(vv) = v.extract::<Vec<String>>() {
         return Ok(Column::str(vv));
     }
+    // A list containing `None` carries missing values: infer the present values'
+    // dtype (bool -> int -> float, like the dense case) and mark each `None` cell
+    // `volas.NA`. int/bool keep their dtype (pandas upcasts to float/object).
+    if let Ok(vv) = v.extract::<Vec<Option<bool>>>() {
+        if vv.iter().any(Option::is_some) {
+            return Ok(option_bool_column(vv));
+        }
+    }
+    if let Ok(vv) = v.extract::<Vec<Option<i64>>>() {
+        if vv.iter().any(Option::is_some) {
+            return Ok(option_i64_column(vv));
+        }
+    }
+    if let Ok(vv) = v.extract::<Vec<Option<f64>>>() {
+        // a float carries missing in-band as NaN (also the all-`None` fallback).
+        return Ok(Column::f64(vv.iter().map(|x| x.unwrap_or(f64::NAN)).collect()));
+    }
     Err(PyTypeError::new_err(
         "column values must be a 1-D numeric array, a list of numbers, or a list of strings",
     ))
+}
+
+/// Build a `Bool` column from `Option`s, marking `None` cells `volas.NA`.
+fn option_bool_column(vv: Vec<Option<bool>>) -> Column {
+    let validity = Validity::from_valid_iter(vv.len(), vv.iter().map(Option::is_some));
+    Column::bool_with(vv.iter().map(|x| x.unwrap_or(false)).collect(), validity)
+}
+
+/// Build an `I64` column from `Option`s, marking `None` cells `volas.NA`.
+fn option_i64_column(vv: Vec<Option<i64>>) -> Column {
+    let validity = Validity::from_valid_iter(vv.len(), vv.iter().map(Option::is_some));
+    Column::i64_with(vv.iter().map(|x| x.unwrap_or(0)).collect(), validity)
 }
 
 /// Move an `Arc<Vec<T>>` out to an owned `Vec<T>` without copying when it is
