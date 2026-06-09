@@ -885,9 +885,12 @@ impl Column {
             Column::Datetime(v) => {
                 Column::datetime(src.iter().map(|s| s.map_or(i64::MIN, |j| v[j])).collect())
             }
-            // a str column is never missing, so it returns via the early `null_count
-            // == 0` check above and never reaches here.
-            Column::Str(_, _) => unreachable!("str has no missing value"), // LCOV_EXCL_LINE
+            // str carries missing too: gather the carried value (empty placeholder
+            // for an unfilled cell, which `validity` then marks NA), like int/bool.
+            Column::Str(v, _) => Column::str_with(
+                src.iter().map(|s| s.map_or_else(String::new, |j| v[j].clone())).collect(),
+                validity,
+            ),
         }
     }
 
@@ -2206,6 +2209,33 @@ mod tests {
         assert_na(&Column::datetime(vec![i64::MIN, 20]).fill_dir(false), &[20.0, 20.0]);
         assert_eq!(Column::i64(vec![1, 2]).fill_dir(true), Column::i64(vec![1, 2])); // dense clone
         assert_eq!(Column::str(vec!["a".into()]).fill_dir(true), Column::str(vec!["a".into()]));
+        // str + NA carries values directionally like every other dtype (regression:
+        // the Str arm used to `unreachable!()` and panic on a missing cell).
+        let sc = Column::str_with(
+            vec!["x".into(), String::new(), String::new(), "z".into()],
+            Validity::from_valid_iter(4, [true, false, false, true]),
+        ); // "x", NA, NA, "z"
+        assert_eq!(
+            sc.fill_dir(true), // ffill -> x, x, x, z (no holes left -> dense)
+            Column::str(vec!["x".into(), "x".into(), "x".into(), "z".into()])
+        );
+        assert_eq!(
+            sc.fill_dir(false), // bfill -> x, z, z, z
+            Column::str(vec!["x".into(), "z".into(), "z".into(), "z".into()])
+        );
+        // a leading gap stays NA on ffill (nothing to carry in)
+        let ff = Column::str_with(
+            vec![String::new(), "a".into()],
+            Validity::from_valid_iter(2, [false, true]),
+        )
+        .fill_dir(true);
+        assert!(!ff.is_valid(0) && ff.is_valid(1)); // NA, "a"
+        // a fully-missing str column ffills to itself (all still NA)
+        let allna = Column::str_with(
+            vec![String::new(), String::new()],
+            Validity::from_valid_iter(2, [false, false]),
+        );
+        assert_eq!(allna.fill_dir(true).null_count(), 2);
     }
 
     #[test]

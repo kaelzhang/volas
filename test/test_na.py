@@ -189,6 +189,28 @@ def test_na_str_column():
     assert v["a"].dtype == "str" and v["a"][1] is NA
 
 
+def test_na_str_directional_fill():
+    # Regression: a str column with a hole used to panic in Column::fill_dir
+    # (`unreachable!("str has no missing value")`). str now fills like every dtype.
+    NA = volas.NA
+
+    def col(vals):
+        return volas.DataFrame({"a": vals})["a"]
+
+    # ffill carries the last valid value forward; a leading gap stays NA
+    assert col(["x", None, None, "z"]).ffill().to_list() == ["x", "x", "x", "z"]
+    assert col([None, "a", None]).ffill().to_list() == [NA, "a", "a"]
+    # bfill carries the next valid value back; a trailing gap stays NA
+    assert col(["x", None, None, "z"]).bfill().to_list() == ["x", "z", "z", "z"]
+    assert col([None, "a", None]).bfill().to_list() == ["a", "a", NA]
+    # a fully-missing str column fills to itself; a dense column is unchanged
+    all_na = volas.DataFrame({"a": ["x", "y"]})["a"].shift(2)  # [NA, NA], still str
+    assert all_na.dtype == "str" and all_na.ffill().to_list() == [NA, NA]
+    assert col(["a", "b"]).bfill().to_list() == ["a", "b"]
+    # dtype is preserved throughout
+    assert col(["x", None, "z"]).ffill().dtype == "str"
+
+
 def test_na_display_symbol():
     # Every dtype prints a missing cell as the single <NA> symbol — a float NaN,
     # an int/bool/str NA, and a datetime NaT all render identically (storage and
