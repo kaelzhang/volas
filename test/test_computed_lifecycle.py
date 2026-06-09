@@ -14,21 +14,25 @@ def test_bool_directive_survives_append():        # EX-16 (was a crash)
     assert df['close > open'].dtype == 'bool'     # stays a usable mask
 
 
-def test_append_missing_int_column_upcasts():     # EX-11
+def test_append_missing_int_column_keeps_int_na():     # EX-11 (NA model)
     df = DataFrame({'f': [1., 2.], 'i': np.array([10, 20], dtype=np.int64)})
-    df = df.append(DataFrame({'f': [3.]}))         # 'i' missing
-    assert df['i'].dtype == 'float64'              # upcast
-    col = df['i'].to_numpy()
+    df = df.append(DataFrame({'f': [3.]}))         # 'i' missing from the appended frame
+    assert df['i'].dtype == 'int64'                # stays int64 — no upcast to float
+    assert df['i'].to_list() == [10, 20, volas.NA]
+    df.fulfill()
+    col = df['i'].to_numpy()                        # NumPy export: int NA -> NaN
     assert col[0] == 10.0 and col[1] == 20.0 and np.isnan(col[2])
 
 
-def test_append_missing_plain_bool_or_str_errors():   # EX-11
+def test_append_missing_plain_bool_or_str_pads_na():   # EX-11 (NA model)
     df = DataFrame({'f': [1., 2.], 'flag': [True, False]})
-    with pytest.raises(Exception):
-        df.append(DataFrame({'f': [3.]}))          # plain bool missing -> error
+    df = df.append(DataFrame({'f': [3.]}))         # plain bool missing -> bool+NA (was an error)
+    assert df['flag'].dtype == 'bool'
+    assert df['flag'].to_list() == [True, False, volas.NA]
     df2 = DataFrame({'f': [1., 2.], 's': ['a', 'b']})
-    with pytest.raises(Exception):
-        df2.append(DataFrame({'f': [3.]}))         # str missing -> error
+    df2 = df2.append(DataFrame({'f': [3.]}))       # str missing -> str+NA (was an error)
+    assert df2['s'].dtype == 'str'
+    assert df2['s'].to_list() == ['a', 'b', volas.NA]
 
 
 def test_stale_bulk_read_raises_until_fulfill():   # EX-1
