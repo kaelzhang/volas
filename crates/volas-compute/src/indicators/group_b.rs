@@ -575,6 +575,133 @@ pub fn ttm_squeeze_on(
         .collect()
 }
 
+/// One Supertrend recurrence step: tighten the bands against the prior bar, then flip the
+/// trend (`+1` up / `−1` down) on a close crossing the relevant band. Returns the new
+/// `(trend, final_upper, final_lower)`. Source: TradingView — Supertrend.
+fn supertrend_step(
+    hl2: f64,
+    atr: f64,
+    close: f64,
+    mult: f64,
+    prev_trend: f64,
+    prev_fu: f64,
+    prev_fl: f64,
+    prev_close: f64,
+) -> (f64, f64, f64) {
+    let (bu, bl) = (hl2 + mult * atr, hl2 - mult * atr);
+    let fu = if bu < prev_fu || prev_close > prev_fu { bu } else { prev_fu };
+    let fl = if bl > prev_fl || prev_close < prev_fl { bl } else { prev_fl };
+    let trend = if prev_trend < 0.0 {
+        if close > fu { 1.0 } else { -1.0 }
+    } else if close < fl {
+        -1.0
+    } else {
+        1.0
+    };
+    (trend, fu, fl)
+}
+
+/// The Supertrend output at a bar given its `(trend, final_upper, final_lower)`: the line
+/// (lower band in an up-trend, upper band in a down-trend) or the trend direction.
+fn supertrend_out(trend: f64, fu: f64, fl: f64, want_direction: bool) -> f64 {
+    if want_direction {
+        trend
+    } else if trend > 0.0 {
+        fl
+    } else {
+        fu
+    }
+}
+
+/// Supertrend (TradingView): `hl2 ± mult·ATR` bands, recursively tightened and flipped into a
+/// single trailing line. `want_direction` returns the `+1`/`−1` trend instead of the line.
+/// Source: TradingView — Supertrend.
+pub fn supertrend(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    want_direction: bool,
+) -> Vec<f64> {
+    let len = close.len();
+    let mut out = vec![f64::NAN; len];
+    let atr = super::atr(high, low, close, period);
+    if period >= len {
+        return out; // ATR never seeds
+    }
+    let hl2 = |i: usize| (high[i] + low[i]) / 2.0;
+    // Seed at the first ATR-valid bar: trend starts down (the upper band), per TradingView.
+    let (mut trend, mut fu, mut fl, mut pc) = (
+        -1.0_f64,
+        hl2(period) + mult * atr[period],
+        hl2(period) - mult * atr[period],
+        close[period],
+    );
+    out[period] = supertrend_out(trend, fu, fl, want_direction);
+    for i in (period + 1)..len {
+        let step = supertrend_step(hl2(i), atr[i], close[i], mult, trend, fu, fl, pc);
+        (trend, fu, fl) = step;
+        out[i] = supertrend_out(trend, fu, fl, want_direction);
+        pc = close[i];
+    }
+    out
+}
+
+/// `[trend, final_upper, final_lower, prev_close, atr]` after a full [`supertrend`], or `None`
+/// before the ATR seeds. The shared state for both the line and direction sub-commands.
+pub fn supertrend_final_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+) -> Option<Vec<f64>> {
+    let len = close.len();
+    // `atr_final_state` already declines (returns None) when `period >= len`, so reaching here
+    // guarantees `period < len` — the seed index is in range.
+    let atr_end = super::atr_final_state(high, low, close, period)?;
+    let atr = super::atr(high, low, close, period);
+    let hl2 = |i: usize| (high[i] + low[i]) / 2.0;
+    let (mut trend, mut fu, mut fl, mut pc) = (
+        -1.0_f64,
+        hl2(period) + mult * atr[period],
+        hl2(period) - mult * atr[period],
+        close[period],
+    );
+    for i in (period + 1)..len {
+        let step = supertrend_step(hl2(i), atr[i], close[i], mult, trend, fu, fl, pc);
+        (trend, fu, fl) = step;
+        pc = close[i];
+    }
+    Some(vec![trend, fu, fl, close[len - 1], atr_end[0]])
+}
+
+/// Resume [`supertrend`] over `[from, n)` by advancing the carried trend / bands with the ATR
+/// resume — bit-identical to a full recompute. `None` at `from == 0` (the ATR resume declines).
+pub fn supertrend_resume(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    want_direction: bool,
+    from: usize,
+    state: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let (mut trend, mut fu, mut fl, mut pc) = (state[0], state[1], state[2], state[3]);
+    let (atr_tail, atr_new) = super::atr_resume(high, low, close, period, from, &state[4..5])?;
+    let hl2 = |i: usize| (high[i] + low[i]) / 2.0;
+    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    for (j, i) in (from..close.len()).enumerate() {
+        let step = supertrend_step(hl2(i), atr_tail[j], close[i], mult, trend, fu, fl, pc);
+        (trend, fu, fl) = step;
+        out.push(supertrend_out(trend, fu, fl, want_direction));
+        pc = close[i];
+    }
+    Some((out, vec![trend, fu, fl, pc, atr_new[0]]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +734,31 @@ mod tests {
                 &asi_full[from..],
                 "asi",
             );
+        }
+    }
+
+    /// Supertrend blanks before its ATR seeds, and its resume reproduces a full recompute
+    /// bit-for-bit — including the recursive band-tightening and trend flips.
+    #[test]
+    fn supertrend_resume_and_guards() {
+        let (high, low, close) = ohlc(160);
+        // Too-short frame: the ATR never seeds → an all-NaN line and no carried state.
+        assert!(supertrend(&high[..5], &low[..5], &close[..5], 10, 3.0, false)
+            .iter()
+            .all(|x| x.is_nan()));
+        assert!(supertrend_final_state(&high[..5], &low[..5], &close[..5], 10, 3.0).is_none());
+
+        let line_full = supertrend(&high, &low, &close, 10, 3.0, false);
+        let dir_full = supertrend(&high, &low, &close, 10, 3.0, true);
+        for &from in &[11usize, 20, 80, 159] {
+            let st = supertrend_final_state(&high[..from], &low[..from], &close[..from], 10, 3.0)
+                .unwrap();
+            let (line, _) =
+                supertrend_resume(&high, &low, &close, 10, 3.0, false, from, &st).unwrap();
+            assert_bits(&line, &line_full[from..], "supertrend");
+            let (dir, _) =
+                supertrend_resume(&high, &low, &close, 10, 3.0, true, from, &st).unwrap();
+            assert_bits(&dir, &dir_full[from..], "supertrend.direction");
         }
     }
 }

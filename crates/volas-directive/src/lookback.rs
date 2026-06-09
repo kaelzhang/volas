@@ -115,6 +115,8 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         // wad / asi are cumulative (lookback 0); like obv they carry state for O(new rows)
         // append and slice continuation (see exec_resume).
         "wad" | "asi" => 0,
+        // supertrend seeds with its ATR.
+        "supertrend" => arg(args, 0, 10),
         "mike" => arg(args, 0, 12).saturating_sub(1),
         // ichimoku: midpoint lines warm up at period−1; the leading spans add the kijun
         // displacement; the lagging span (chikou = close) has none.

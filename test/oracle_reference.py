@@ -483,6 +483,35 @@ def asi(o, h, lo, c, v, t=3.0):
     return si.cumsum()
 
 
+def supertrend(o, h, lo, c, v, period=10, mult=3.0, line='line'):
+    """Supertrend (TradingView): hl2 ± mult*ATR bands, recursively tightened against the prior
+    bar and flipped into a trailing line; trend = +1 (up, lower band) / -1 (down, upper band).
+    Source: TradingView — Supertrend."""
+    hl2 = ((_s(h) + _s(lo)) / 2.0).to_numpy()
+    atr = _atr(h, lo, c, period).to_numpy()
+    cc = _s(c).to_numpy()
+    n = len(cc)
+    trend = np.full(n, np.nan)
+    st = np.full(n, np.nan)
+    if period < n:
+        fu = hl2[period] + mult * atr[period]
+        fl = hl2[period] - mult * atr[period]
+        tr, pc = -1.0, cc[period]
+        trend[period], st[period] = tr, fu
+        for i in range(period + 1, n):
+            bu, bl = hl2[i] + mult * atr[i], hl2[i] - mult * atr[i]
+            fu = bu if (bu < fu or pc > fu) else fu
+            fl = bl if (bl > fl or pc < fl) else fl
+            if tr < 0.0:
+                tr = 1.0 if cc[i] > fu else -1.0
+            else:
+                tr = -1.0 if cc[i] < fl else 1.0
+            trend[i] = tr
+            st[i] = fl if tr > 0.0 else fu
+            pc = cc[i]
+    return pd.Series(trend if line == 'direction' else st)
+
+
 def keltner(o, h, lo, c, v, ema_period=20, atr_period=10, mult=2.0, band=None):
     """Keltner Channels (modern): middle = EMA(close, ema_period); bands = middle ± mult*ATR.
     Source: StockCharts ChartSchool — Keltner Channels."""
@@ -592,4 +621,6 @@ CASES: list[tuple] = [
     ("ichimoku.chikou", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'chikou'), 1e-9),
     ("wad", wad, 1e-6),
     ("asi", lambda o, h, lo, c, v: asi(o, h, lo, c, v, 3.0), 1e-6),
+    ("supertrend:10,3", lambda o, h, lo, c, v: supertrend(o, h, lo, c, v, 10, 3.0, 'line'), 1e-6),
+    ("supertrend.direction:10,3", lambda o, h, lo, c, v: supertrend(o, h, lo, c, v, 10, 3.0, 'direction'), 1e-9),
 ]

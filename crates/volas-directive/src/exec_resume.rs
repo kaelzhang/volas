@@ -139,6 +139,18 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
             let close = series_f64(df, series, 3, "close").ok()?;
             ind::asi_final_state(&open, &high, &low, &close, arg_f64(args, 0, 3.0).ok()?)
         }
+        ("supertrend", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            ind::supertrend_final_state(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(10)).ok()?,
+                arg_f64(args, 1, 3.0).ok()?,
+            )
+        }
 
         // SAR family — carry the recurrence's loop state (trend, accel factor(s),
         // extreme point, current SAR, and the prior bar's high/low).
@@ -772,6 +784,22 @@ pub fn execute_resume(
                 from_row,
                 prev_state,
             );
+            Some((Column::f64(vals), st))
+        }
+        ("supertrend", sub) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            let close = series_f64(df, series, 2, "close").ok()?;
+            let (vals, st) = ind::supertrend_resume(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(10)).ok()?,
+                arg_f64(args, 1, 3.0).ok()?,
+                sub == Some("direction"),
+                from_row,
+                prev_state,
+            )?;
             Some((Column::f64(vals), st))
         }
 

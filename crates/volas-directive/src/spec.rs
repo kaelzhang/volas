@@ -107,6 +107,9 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         ("ichimoku", Some("senkou_a" | "span_a")) => Some("senkou_a".into()),
         ("ichimoku", Some("senkou_b" | "span_b")) => Some("senkou_b".into()),
         ("ichimoku", Some("chikou" | "lagging")) => Some("chikou".into()),
+        // Supertrend: the trailing line is the main output; `.direction` gives the +1/−1 trend.
+        ("supertrend", None | Some("line")) => None,
+        ("supertrend", Some("direction" | "trend" | "d")) => Some("direction".into()),
         (_, Some(s)) => Some(s.to_string()),
         (_, None) => None,
     }
@@ -170,6 +173,7 @@ pub fn is_command(name: &str) -> bool {
             | "ichimoku"
             | "wad"
             | "asi"
+            | "supertrend"
             | "tr"
             | "atr"
             | "llv"
@@ -368,6 +372,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // wad: cumulative, no parameters. asi: Wilder's limit-move scaling `t`.
         ("wad", None) => (vec![], vec!["high", "low", "close"]),
         ("asi", None) => (vec![Float(3.0)], vec!["open", "high", "low", "close"]),
+        // supertrend: ATR period + band multiplier (shared by the line and direction).
+        ("supertrend", None | Some("direction")) => {
+            (vec![Int(10), Float(3.0)], vec!["high", "low", "close"])
+        }
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns

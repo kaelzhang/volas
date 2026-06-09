@@ -823,6 +823,27 @@ df['asi']
 df['asi:3']
 ```
 
+### `supertrend`, Supertrend
+
+```
+supertrend:<period>,<mult>@<high>,<low>,<close>
+supertrend.direction:<period>,<mult>@<high>,<low>,<close>
+```
+
+An ATR trailing-stop trend indicator: `hl2 ± mult · ATR` bands, recursively tightened against
+the prior bar and flipped into a single trailing line. `supertrend` is that line (support in an
+up-trend, resistance in a down-trend); `supertrend.direction` is the `+1` (up) / `−1` (down)
+trend.
+
+- **period?** `int=10` (the ATR period)
+- **mult?** `float=3.0` (the band multiplier)
+- **high? / low? / close?** `str` the input columns.
+
+```py
+df['supertrend']            # the trailing line
+df['supertrend.direction']  # +1 up / -1 down
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change

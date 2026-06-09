@@ -609,6 +609,19 @@ fn exec_command(
             let close = series_f64(df, series, 3, "close")?;
             f64col(ind::asi(&open, &high, &low, &close, arg_f64(args, 0, 3.0)?))
         }
+        ("supertrend", sub) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::supertrend(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(10))?,
+                arg_f64(args, 1, 3.0)?,
+                sub == Some("direction"),
+            ))
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

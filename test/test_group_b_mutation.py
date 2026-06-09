@@ -34,6 +34,7 @@ DIRECTIVES = [
     'ichimoku.tenkan', 'ichimoku.kijun', 'ichimoku.senkou_a', 'ichimoku.senkou_b',
     'ichimoku.chikou',
     'wad', 'asi',
+    'supertrend', 'supertrend.direction',
 ]
 
 
