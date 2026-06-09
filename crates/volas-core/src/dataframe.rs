@@ -42,9 +42,12 @@ pub struct ComputedMeta {
 /// have equal length (`height`).
 #[derive(Clone, Debug)]
 pub struct DataFrame {
-    names: Vec<String>,
+    // Schema (names + lookup) is `Arc`-shared so a frame clone / same-schema
+    // derivation (slice / take / mask / astype) is an O(1) refcount bump, not a
+    // rebuild of the name strings + hash map (copy-on-write on mutation).
+    names: Arc<Vec<String>>,
     columns: Vec<Column>,
-    name_to_idx: HashMap<String, usize>,
+    name_to_idx: Arc<HashMap<String, usize>>,
     index: Arc<Index>,
     height: usize,
     /// Column-name aliases (`alias -> source name`), resolved on lookup. Shared
@@ -96,9 +99,9 @@ impl DataFrame {
             name_to_idx.insert(n.clone(), i);
         }
         Ok(DataFrame {
-            names,
+            names: Arc::new(names),
             columns,
-            name_to_idx,
+            name_to_idx: Arc::new(name_to_idx),
             index: Arc::new(index),
             height,
             aliases: Arc::new(HashMap::new()),
@@ -166,14 +169,28 @@ impl DataFrame {
         Ok(df)
     }
 
+    /// Build a frame that **shares this frame's schema** (names + lookup +
+    /// aliases, all `Arc`-cloned) over freshly derived `columns` / `index` — for
+    /// the same-shape derivations (slice / take / mask / astype), with no
+    /// name-string or hash-map rebuild. Computed-column status is dropped; the
+    /// caller re-attaches it where the derivation preserves it (a contiguous slice).
+    fn same_schema(&self, columns: Vec<Column>, index: Index) -> DataFrame {
+        let height = columns.first().map_or(0, |c| c.len());
+        DataFrame {
+            names: Arc::clone(&self.names),
+            name_to_idx: Arc::clone(&self.name_to_idx),
+            columns,
+            index: Arc::new(index),
+            height,
+            aliases: Arc::clone(&self.aliases),
+            computed: HashMap::new(),
+        }
+    }
+
     /// Gather rows by position into a new frame (carries aliases).
     pub fn take(&self, positions: &[usize]) -> DataFrame {
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(positions)).collect();
-        let index = self.index.take(positions);
-        let mut df =
-            DataFrame::new(self.names.clone(), columns, Some(index)).expect("take keeps shape");
-        df.aliases = Arc::clone(&self.aliases);
-        df
+        self.same_schema(columns, self.index.take(positions))
     }
 
     /// Borrow a column by name.
@@ -212,9 +229,8 @@ impl DataFrame {
         match self.column_pos(name) {
             Some(i) => self.columns[i] = col,
             None => {
-                self.name_to_idx
-                    .insert(name.to_string(), self.columns.len());
-                self.names.push(name.to_string());
+                Arc::make_mut(&mut self.name_to_idx).insert(name.to_string(), self.columns.len());
+                Arc::make_mut(&mut self.names).push(name.to_string());
                 self.columns.push(col);
             }
         }
@@ -231,7 +247,7 @@ impl DataFrame {
         // Record the source column's name on the index (pandas keeps it, so
         // `reset_index` can restore the original column label).
         let index = Index::from_column(&self.columns[pos])?.with_name(Some(name.to_string()));
-        let mut names = self.names.clone();
+        let mut names = (*self.names).clone();
         let mut columns = self.columns.clone();
         names.remove(pos);
         columns.remove(pos);
@@ -302,9 +318,9 @@ impl DataFrame {
             name_to_idx.insert(n.clone(), i);
         }
         Ok(DataFrame {
-            names: names.to_vec(),
+            names: Arc::new(names.to_vec()),
             columns,
-            name_to_idx,
+            name_to_idx: Arc::new(name_to_idx),
             index: Arc::clone(&self.index),
             height: self.height,
             aliases: Arc::clone(&self.aliases),
@@ -313,15 +329,18 @@ impl DataFrame {
     }
 
     /// A `[start, end)` row slice.
+    ///
+    /// Deliberately a **value copy** (each column's window is copied), not a
+    /// zero-copy view into the parent buffer: a slice is an independent frame, so
+    /// slicing the recent tail of a long history does not pin the whole history
+    /// alive — the right default for a live system. (A view would be ~1.5x faster
+    /// here but would retain the parent's full buffer; we keep the safer copy.)
     pub fn slice(&self, start: usize, end: usize) -> DataFrame {
         let start = start.min(self.height);
         let end = end.max(start).min(self.height);
         let len = end - start;
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
-        let index = self.index.slice(start, end);
-        let mut df =
-            DataFrame::new(self.names.clone(), columns, Some(index)).expect("slice keeps shape");
-        df.aliases = Arc::clone(&self.aliases);
+        let mut df = self.same_schema(columns, self.index.slice(start, end));
         // SP-9: carry cached-directive columns *as continuable computed columns*
         // through a contiguous slice. The cached values are already correct (they
         // were computed with full history) and are carried verbatim; we re-tag the
@@ -384,10 +403,7 @@ impl DataFrame {
             .filter_map(|(i, &b)| if b { Some(i) } else { None })
             .collect();
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(&idx)).collect();
-        let index = self.index.take(&idx);
-        let mut df = DataFrame::new(self.names.clone(), columns, Some(index))?;
-        df.aliases = Arc::clone(&self.aliases);
-        Ok(df)
+        Ok(self.same_schema(columns, self.index.take(&idx)))
     }
 
     /// Append the rows of `other` (matched by column name) in place. Columns of
@@ -730,9 +746,7 @@ impl DataFrame {
                 .ok_or_else(|| VolasError::ColumnNotFound(name.clone()))?;
             columns[pos] = self.columns[pos].cast(*dtype)?;
         }
-        let mut df = DataFrame::new(self.names.clone(), columns, Some((*self.index).clone()))?;
-        df.aliases = Arc::clone(&self.aliases);
-        Ok(df)
+        Ok(self.same_schema(columns, (*self.index).clone()))
     }
 
     /// Value equality (pandas `DataFrame.equals`): same column names + order,
