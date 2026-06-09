@@ -8,10 +8,11 @@
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
 **volas** is a Rust-powered, **pandas-compatible** `DataFrame` for candlestick
-(OHLCV) data, with trading-indicator directives built in. Know pandas? You
-already know to use volas.
+(OHLCV) data, with **191** trading-indicator directives built in.
 
-The difference is speed that **volas** beats every solution in terms of indicator calculating.
+Know pandas? You already know to use volas.
+
+The difference is speed that **volas** beats **EVERY** solution on earth in terms of indicator calculating.
 
 ## Why volas
 
@@ -40,6 +41,7 @@ The difference is speed that **volas** beats every solution in terms of indicato
 - [Indexing & selection](#indexing--selection)
 - [Writing & assignment](#writing--assignment)
 - [Timezones](#timezones)
+- [Missing values (`volas.NA`)](#missing-values-volasna)
 - [pandas interop](#pandas-interop)
 - [Error handling](#error-handling)
 - [Built-in Indicators](#built-in-indicators)
@@ -504,9 +506,14 @@ s.iloc[...] / s.loc[...]
 s + s, s - 1, -s, ...             # elementwise arithmetic
 s > 0, s == t, s != t, ...        # comparison -> bool Series
 s & t, s | t, ~s, s ^ t           # logical -> bool Series
-s.sum() / s.mean() / s.min() / s.max() / s.std() / s.var() / s.median()   # NaN-skipping
-s.shift(n=1) / s.diff(n=1) / s.fillna(v) / s.isna() / s.notna() / s.dropna() / s.equals(t)
+s.sum() / s.mean() / s.min() / s.max() / s.std() / s.var() / s.median()   # skip missing
+s.shift(n=1) / s.diff(n=1) / s.fillna(v) / s.ffill() / s.bfill()           # see Missing values: NA keeps the dtype
+s.isna() / s.notna() / s.dropna() / s.equals(t)
 ```
+
+> `shift` / `diff` / `fillna` and friends differ from pandas on one point only:
+> a missing value keeps the column's dtype as [`volas.NA`](#missing-values-volasna)
+> instead of upcasting an int/bool/str column to float/object.
 
 The pandas-shaped indexing and writing details have their own sections —
 [Indexing & selection](#indexing--selection) and
@@ -918,6 +925,47 @@ df.tz_convert('+08:00')              # keep the instant, change only how it disp
 trading day — DST-aware for a named zone — while the raw `.index` numpy export
 stays UTC (matching pandas `.values`).
 
+## Missing values (`volas.NA`)
+
+`volas.NA` is the single missing-value marker, and **every dtype supports it** —
+crucially, a missing value **never changes the column's dtype**:
+
+| dtype | how missing is stored | element access |
+|---|---|---|
+| `float64` / `float32` | `NaN`, in-band | `np.float64(nan)` |
+| `int64` / `int32` / `bool` / `str` | a validity mask (dtype kept) | `volas.NA` |
+| `datetime64[ns]` | `NaT` | `np.datetime64('NaT')` |
+
+This tracks pandas' own direction ([PDEP-16]) and means volas has **no `object`
+dtype**: an `int` / `bool` / `str` column with a hole stays `int` / `bool` /
+`str`, where pandas 3.0 upcasts to `float64` / `object`.
+
+```py
+import volas
+s = volas.DataFrame({'a': [1, None, 3]})['a']
+s.dtype                  # 'int64'        (pandas would give float64)
+s[1]                     # <NA>           (s[1] is volas.NA; a float hole stays np.nan)
+s.sum()                  # np.int64(4)    reductions skip NA
+s.fillna(0).to_list()    # [1, 0, 3]
+s.isna().to_numpy()      # [False, True, False]
+print(s)                 # the missing cell prints as <NA>
+
+# shift / diff keep the int dtype (pandas upcasts to float); the gap is NA:
+volas.DataFrame({'a': [10, 20, 30]})['a'].shift(1).to_list()   # [<NA>, 10, 20]
+```
+
+- **Producing NA** — `None` (or `volas.NA`) in a constructor list, the `shift` /
+  `diff` gap, and the default fill of `where` / `mask`.
+- **Consuming NA** — reductions (`sum` / `mean` / `min` / …) and `count` skip it;
+  arithmetic propagates it (`x ∘ NA = NA`); `~` / `&` / `|` / `^` use Kleene
+  three-valued logic (`NA & False = False`, `NA | True = True`); `cumsum` / `abs`
+  / `round` / `clip` / indexing carry it through; `isna` / `notna` / `dropna` /
+  `fillna` / `ffill` / `bfill` work on every dtype.
+- **Comparisons** (`>`, `==`, …) treat a missing value as `False` (IEEE / numpy
+  semantics), so a boolean mask is always pure `bool` — clean for `df[mask]`.
+
+[PDEP-16]: https://github.com/pandas-dev/pandas/pull/58988
+
 ## pandas interop
 
 pandas is **not** a runtime dependency; these bridges import it lazily, only when
@@ -926,8 +974,10 @@ called, so `import volas` stays pandas-free.
 ```py
 from volas import from_pandas
 
-df = from_pandas(pandas_df)        # numeric/bool/datetime native; a (tz-aware) DatetimeIndex round-trips
-pdf = df.to_pandas()               # -> pandas.DataFrame
+df = from_pandas(pandas_df)        # numeric / bool / str / datetime native; a (tz-aware) DatetimeIndex round-trips;
+                                   # a nullable Int64 / boolean / string column reads back as int / bool / str + volas.NA
+pdf = df.to_pandas()               # -> pandas.DataFrame ('numpy' backend: an int/bool column with NA becomes float64 + NaN)
+pdf = df.to_pandas(dtype_backend='numpy_nullable')  # faithful masked Int64 / boolean (a lossless NA round-trip)
 df.to_csv('out.csv', index=True)   # subset of pandas to_csv; returns a str if path=None
 ```
 
