@@ -71,10 +71,31 @@ def test_dataframe_isna_matches_series_isna():
 
 
 def test_fillna_fills_int_and_bool_dtype_preserving():
-    out = _df_na().fillna(0.0)
+    # numeric-family columns only (str fillna is covered separately below)
+    out = DataFrame({"i": [1, None, 3], "b": [True, None, False], "f": [1.5, None, 3.0]}).fillna(0.0)
     assert out["i"].to_list() == [1, 0, 3] and out["i"].dtype == "int64"  # 0 is integral -> stays int
     assert out["b"].to_list() == [True, False, False] and out["b"].dtype == "bool"  # 0 -> False, keeps bool
     assert out["f"].to_list() == [1.5, 0.0, 3.0]
+
+
+def test_numeric_fillna_on_str_or_datetime_raises():
+    # volas has no object dtype, so a numeric fill cannot apply to a non-numeric
+    # column with a missing cell — it raises instead of silently corrupting
+    # (str -> all 0.0, datetime -> raw f64 epoch).
+    with pytest.raises(TypeError):
+        DataFrame({"s": ["x", None, "z"]})["s"].fillna(0)  # Series
+    with pytest.raises(TypeError):
+        DataFrame({"i": [1, None, 3], "s": ["x", None, "z"]}).fillna(0)  # DataFrame: str col has a hole
+    dt = vs_datetime()
+    with pytest.raises(TypeError):
+        dt.fillna(0)
+    # a DENSE (no-hole) str column is untouched by a numeric frame fillna
+    out = DataFrame({"i": [1, None, 3], "s": ["a", "b", "c"]}).fillna(0)
+    assert out["i"].to_list() == [1, 0, 3] and out["s"].to_list() == ["a", "b", "c"]
+
+
+def vs_datetime():
+    return DataFrame({"t": np.array(["2021-01-01", "NaT"], dtype="datetime64[ns]")})["t"]
 
 
 def test_ffill_bfill_int_bool_str():

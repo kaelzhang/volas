@@ -874,12 +874,12 @@ impl Column {
     /// Replace missing cells with the constant `value` (pandas `fillna`),
     /// dtype-preserving when `value` fits the dtype, else promoting an int column
     /// to float (a non-integral fill).
-    pub fn fillna(&self, value: f64) -> Column {
+    pub fn fillna(&self, value: f64) -> Result<Column> {
         if self.null_count() == 0 {
-            return self.clone();
+            return Ok(self.clone());
         }
         let len = self.len();
-        match self {
+        Ok(match self {
             Column::F64(v) => Column::f64(v.iter().map(|&x| if x.is_nan() { value } else { x }).collect()),
             Column::F32(v) => {
                 Column::f32(v.iter().map(|&x| if x.is_nan() { value as f32 } else { x }).collect())
@@ -892,13 +892,26 @@ impl Column {
                 Some(iv) => Column::i32((0..len).map(|i| if val.is_valid(i) { v[i] } else { iv }).collect()),
                 None => Column::f64((0..len).map(|i| if val.is_valid(i) { v[i] as f64 } else { value }).collect()),
             },
-            // a 0/1 fill keeps bool; anything else promotes to float.
+            // a 0/1 fill keeps bool; a non-0/1 fill promotes the (numeric-family)
+            // bool column to float.
             Column::Bool(v, val) if value == 0.0 || value == 1.0 => {
                 Column::bool((0..len).map(|i| if val.is_valid(i) { v[i] } else { value != 0.0 }).collect())
             }
-            // datetime / str (and a non-0/1 bool fill) degrade to the f64 funnel.
-            _ => Column::f64(self.to_f64_vec().iter().map(|&x| if x.is_nan() { value } else { x }).collect()),
-        }
+            Column::Bool(..) => {
+                Column::f64(self.to_f64_vec().iter().map(|&x| if x.is_nan() { value } else { x }).collect())
+            }
+            // A numeric fill cannot apply to a non-numeric column: volas has no
+            // `object` dtype to hold a mixed string/number or datetime/number
+            // column, and the old f64 funnel silently turned valid strings into the
+            // fill and lost the datetime dtype. Reject it.
+            Column::Str(..) | Column::Datetime(..) => {
+                return Err(VolasError::DType(format!(
+                    "cannot fill a {} column with the numeric value {value} (volas has \
+                     no object dtype); drop or select the missing rows instead",
+                    self.dtype(),
+                )))
+            }
+        })
     }
 
     /// Forward-fill (`forward = true`, pandas `ffill`) or backward-fill (`bfill`)
@@ -2241,24 +2254,32 @@ mod tests {
     fn na_fillna() {
         // keep dtype when the fill fits; promote int -> float on a non-integral fill
         let c = na_i64(&[1, 0, 3], &[true, false, true]);
-        assert_eq!(c.fillna(9.0).dtype(), DType::I64);
-        assert_na(&c.fillna(9.0), &[1.0, 9.0, 3.0]);
-        assert_eq!(c.fillna(2.5).dtype(), DType::F64);
-        assert_na(&c.fillna(2.5), &[1.0, 2.5, 3.0]);
+        assert_eq!(c.fillna(9.0).unwrap().dtype(), DType::I64);
+        assert_na(&c.fillna(9.0).unwrap(), &[1.0, 9.0, 3.0]);
+        assert_eq!(c.fillna(2.5).unwrap().dtype(), DType::F64);
+        assert_na(&c.fillna(2.5).unwrap(), &[1.0, 2.5, 3.0]);
         let i32c = Column::i32_with(vec![1, 0, 3], Validity::from_valid_iter(3, [true, false, true]));
-        assert_eq!(i32c.fillna(9.0).dtype(), DType::I32);
-        assert_na(&i32c.fillna(9.0), &[1.0, 9.0, 3.0]);
-        assert_eq!(i32c.fillna(2.5).dtype(), DType::F64);
+        assert_eq!(i32c.fillna(9.0).unwrap().dtype(), DType::I32);
+        assert_na(&i32c.fillna(9.0).unwrap(), &[1.0, 9.0, 3.0]);
+        assert_eq!(i32c.fillna(2.5).unwrap().dtype(), DType::F64);
         // bool: a 0/1 fill keeps bool, else promote to float
         let bc = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, false, true]));
-        assert_eq!(bc.fillna(1.0).dtype(), DType::Bool);
-        assert_na(&bc.fillna(1.0), &[1.0, 1.0, 0.0]);
-        assert_eq!(bc.fillna(5.0).dtype(), DType::F64);
-        // float fill; datetime degrades to f64; a dense column is cloned unchanged
-        assert_na(&Column::f64(vec![1.0, f64::NAN]).fillna(0.0), &[1.0, 0.0]);
-        assert_na(&Column::f32(vec![1.0, f32::NAN]).fillna(0.0), &[1.0, 0.0]);
-        assert_eq!(Column::datetime(vec![i64::MIN, 20]).fillna(9.0).dtype(), DType::F64);
-        assert_eq!(Column::i64(vec![1, 2]).fillna(9.0), Column::i64(vec![1, 2]));
+        assert_eq!(bc.fillna(1.0).unwrap().dtype(), DType::Bool);
+        assert_na(&bc.fillna(1.0).unwrap(), &[1.0, 1.0, 0.0]);
+        assert_eq!(bc.fillna(5.0).unwrap().dtype(), DType::F64);
+        // float fill; a dense column is cloned unchanged
+        assert_na(&Column::f64(vec![1.0, f64::NAN]).fillna(0.0).unwrap(), &[1.0, 0.0]);
+        assert_na(&Column::f32(vec![1.0, f32::NAN]).fillna(0.0).unwrap(), &[1.0, 0.0]);
+        assert_eq!(Column::i64(vec![1, 2]).fillna(9.0).unwrap(), Column::i64(vec![1, 2]));
+        // a numeric fill on a non-numeric column (str / datetime) is rejected, not
+        // silently funneled through f64 (which corrupted strings / lost the dtype)
+        assert!(Column::datetime(vec![i64::MIN, 20]).fillna(9.0).is_err());
+        assert!(Column::str_with(
+            vec!["a".into(), String::new()],
+            Validity::from_valid_iter(2, [true, false])
+        )
+        .fillna(0.0)
+        .is_err());
     }
 
     #[test]

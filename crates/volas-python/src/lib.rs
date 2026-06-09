@@ -1048,11 +1048,13 @@ impl PySeries {
     ///
     /// Returns:
     ///     Series: a new series (non-float columns are returned unchanged).
-    /// Replace NaN cells with `value` (pandas `fillna`); a non-float series is
-    /// returned unchanged. For directional fill use `ffill` / `bfill` (pandas 3.0
-    /// removed `fillna(method=)`).
-    fn fillna(&self, value: f64) -> PySeries {
-        col_to_series(&self.inner, self.inner.data.fillna(value))
+    /// Replace a missing cell with `value` (pandas `fillna`). Fills the numeric
+    /// family (float / int / bool, promoting the dtype only when the fill needs
+    /// it); a non-numeric `str` / `datetime` column with a missing cell raises a
+    /// `TypeError` (volas has no `object` dtype to hold a mixed column). For
+    /// directional fill use `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
+    fn fillna(&self, value: f64) -> PyResult<PySeries> {
+        Ok(col_to_series(&self.inner, self.inner.data.fillna(value).map_err(pyerr)?))
     }
 
     /// Forward-fill NaN cells from the last valid value (pandas `ffill`).
@@ -2775,19 +2777,22 @@ impl PyDataFrame {
     /// Replace missing values with `value` in every column (pandas `fillna`),
     /// delegating to the per-column validity-aware `Column::fillna` so int / bool
     /// holes are filled dtype-preserving (like the Series version), not just float
-    /// NaN. For directional fill use `ffill` / `bfill` (pandas 3.0 removed
-    /// `fillna(method=)`).
+    /// NaN. A `str` / `datetime` column with a missing cell raises a `TypeError`
+    /// (a numeric fill cannot apply; volas has no `object` dtype) — a dense
+    /// (no-hole) str / datetime column is untouched. For directional fill use
+    /// `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
     fn fillna(&self, value: f64) -> PyResult<PyDataFrame> {
         let cols: Vec<Column> = self
             .inner
             .columns()
             .iter()
             .map(|c| c.fillna(value))
-            .collect();
+            .collect::<volas_core::Result<_>>()
+            .map_err(pyerr)?;
         self.with_columns(cols)
     }
 
-    /// Forward-fill NaN cells in every float column (pandas `ffill`).
+    /// Forward-fill missing cells in every column (pandas `ffill`), dtype-aware.
     fn ffill(&self) -> PyResult<PyDataFrame> {
         self.fill_dir(true)
     }
