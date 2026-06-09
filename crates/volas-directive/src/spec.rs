@@ -101,6 +101,12 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         ("keltner", Some("l" | "lower")) => Some("lower".into()),
         // Pivot Points: the pivot itself is the main line; the R/S levels are sub-commands.
         ("pivot_points", None | Some("p" | "pp")) => None,
+        // Ichimoku: five required lines, no primary — accept the English aliases too.
+        ("ichimoku", Some("tenkan" | "conversion")) => Some("tenkan".into()),
+        ("ichimoku", Some("kijun" | "base")) => Some("kijun".into()),
+        ("ichimoku", Some("senkou_a" | "span_a")) => Some("senkou_a".into()),
+        ("ichimoku", Some("senkou_b" | "span_b")) => Some("senkou_b".into()),
+        ("ichimoku", Some("chikou" | "lagging")) => Some("chikou".into()),
         (_, Some(s)) => Some(s.to_string()),
         (_, None) => None,
     }
@@ -161,6 +167,7 @@ pub fn is_command(name: &str) -> bool {
             | "stoch_momentum"
             | "ttm_squeeze"
             | "pivot_points"
+            | "ichimoku"
             | "tr"
             | "atr"
             | "llv"
@@ -351,6 +358,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // pivot_points: PP plus the R1/R2/R3 / S1/S2/S3 levels, all from the prior bar.
         ("pivot_points", None | Some("r1" | "r2" | "r3" | "s1" | "s2" | "s3")) => {
             (vec![], vec!["high", "low", "close"])
+        }
+        // ichimoku: tenkan / kijun / senkou_b periods (the displacement is the kijun period).
+        ("ichimoku", Some("tenkan" | "kijun" | "senkou_a" | "senkou_b" | "chikou")) => {
+            (vec![Int(9), Int(26), Int(52)], vec!["high", "low", "close"])
         }
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the

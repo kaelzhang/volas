@@ -344,6 +344,55 @@ pub fn stoch_momentum_signal(
     super::ema(&stoch_momentum(high, low, close, k, d), signal)
 }
 
+/// Shift a series forward by `k` bars: `out[i] = x[i-k]` (NaN for the first `k`). Used to
+/// displace Ichimoku's leading spans to the bar where they are read (a causal, leading-NaN
+/// line — the future projection beyond the data is a charting concern, not a value one).
+fn shift_forward(x: &[f64], k: usize) -> Vec<f64> {
+    (0..x.len()).map(|i| if i >= k { x[i - k] } else { f64::NAN }).collect()
+}
+
+/// Which Ichimoku line to emit.
+#[derive(Clone, Copy)]
+pub enum IchimokuLine {
+    Tenkan,
+    Kijun,
+    SenkouA,
+    SenkouB,
+    Chikou,
+}
+
+/// Ichimoku Cloud. Tenkan = `(HH_t + LL_t)/2`, Kijun = `(HH_k + LL_k)/2`; Senkou A =
+/// `(Tenkan+Kijun)/2` and Senkou B = `(HH_sb + LL_sb)/2`, each displaced forward `kijun`
+/// bars to the bar where they apply; Chikou = the close (the lagging span — plotted `kijun`
+/// bars back, returned causally so it never depends on a future bar). Source: StockCharts /
+/// Fidelity — Ichimoku Cloud.
+pub fn ichimoku(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    tenkan: usize,
+    kijun: usize,
+    senkou_b: usize,
+    line: IchimokuLine,
+) -> Vec<f64> {
+    let midpoint = |period: usize| -> Vec<f64> {
+        let hh = super::hhv(high, period);
+        let ll = super::llv(low, period);
+        (0..high.len()).map(|i| (hh[i] + ll[i]) / 2.0).collect()
+    };
+    match line {
+        IchimokuLine::Tenkan => midpoint(tenkan),
+        IchimokuLine::Kijun => midpoint(kijun),
+        IchimokuLine::SenkouA => {
+            let (t, k) = (midpoint(tenkan), midpoint(kijun));
+            let raw: Vec<f64> = (0..high.len()).map(|i| (t[i] + k[i]) / 2.0).collect();
+            shift_forward(&raw, kijun)
+        }
+        IchimokuLine::SenkouB => shift_forward(&midpoint(senkou_b), kijun),
+        IchimokuLine::Chikou => close.to_vec(),
+    }
+}
+
 /// TTM Squeeze momentum = `linregₙ( C − ((HHₙ + LLₙ)/2 + SMAₙ(C)) / 2 )` (John Carter /
 /// thinkorswim). Source: John Carter / StockCharts — TTM Squeeze.
 pub fn ttm_squeeze_momentum(high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {

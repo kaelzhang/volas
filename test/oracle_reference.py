@@ -431,6 +431,26 @@ def pivot_points(o, h, lo, c, v, line='pp'):
     }[line]
 
 
+def ichimoku(o, h, lo, c, v, tenkan=9, kijun=26, senkou_b=52, line='tenkan'):
+    """Ichimoku Cloud. tenkan=(HH_t+LL_t)/2, kijun=(HH_k+LL_k)/2; senkou_a=(tenkan+kijun)/2 and
+    senkou_b=(HH_sb+LL_sb)/2 each displaced forward `kijun` bars; chikou=close (causal lagging
+    span, plotted `kijun` bars back). Source: StockCharts / Fidelity — Ichimoku Cloud."""
+    h, lo, c = _s(h), _s(lo), _s(c)
+
+    def mid(p):
+        return (h.rolling(p, min_periods=p).max() + lo.rolling(p, min_periods=p).min()) / 2.0
+
+    if line == 'tenkan':
+        return mid(tenkan)
+    if line == 'kijun':
+        return mid(kijun)
+    if line == 'senkou_a':
+        return ((mid(tenkan) + mid(kijun)) / 2.0).shift(kijun)
+    if line == 'senkou_b':
+        return mid(senkou_b).shift(kijun)
+    return c  # chikou (causal)
+
+
 def keltner(o, h, lo, c, v, ema_period=20, atr_period=10, mult=2.0, band=None):
     """Keltner Channels (modern): middle = EMA(close, ema_period); bands = middle ± mult*ATR.
     Source: StockCharts ChartSchool — Keltner Channels."""
@@ -533,4 +553,9 @@ CASES: list[tuple] = [
     ("pivot_points.s2", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 's2'), 1e-9),
     ("pivot_points.r3", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 'r3'), 1e-9),
     ("pivot_points.s3", lambda o, h, lo, c, v: pivot_points(o, h, lo, c, v, 's3'), 1e-9),
+    ("ichimoku.tenkan", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'tenkan'), 1e-9),
+    ("ichimoku.kijun", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'kijun'), 1e-9),
+    ("ichimoku.senkou_a", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'senkou_a'), 1e-9),
+    ("ichimoku.senkou_b", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'senkou_b'), 1e-9),
+    ("ichimoku.chikou", lambda o, h, lo, c, v: ichimoku(o, h, lo, c, v, 9, 26, 52, 'chikou'), 1e-9),
 ]

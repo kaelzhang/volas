@@ -760,6 +760,35 @@ df['pivot_points.r1']   # first resistance
 df['pivot_points.s1']   # first support
 ```
 
+### `ichimoku`, Ichimoku Cloud
+
+```
+ichimoku.tenkan:<t>,<k>,<sb>@<high>,<low>,<close>
+ichimoku.kijun:<t>,<k>,<sb>@<high>,<low>,<close>
+ichimoku.senkou_a:<t>,<k>,<sb>@<high>,<low>,<close>
+ichimoku.senkou_b:<t>,<k>,<sb>@<high>,<low>,<close>
+ichimoku.chikou:<t>,<k>,<sb>@<high>,<low>,<close>
+```
+
+The five Ichimoku lines (no primary — request one):
+
+- **tenkan** (alias `conversion`) = `(HH_t + LL_t) / 2`.
+- **kijun** (`base`) = `(HH_k + LL_k) / 2`.
+- **senkou_a** (`span_a`) = `(tenkan + kijun) / 2`, displaced forward `k` bars.
+- **senkou_b** (`span_b`) = `(HH_sb + LL_sb) / 2`, displaced forward `k` bars.
+- **chikou** (`lagging`) = the close — the lagging span. It is returned **causally** (so it
+  never depends on a future bar); plot it shifted `−k` for charting, or compare `close` to
+  `close.shift(k)` for the chikou-vs-price signal.
+
+- **t?** `int=9` · **k?** `int=26` · **sb?** `int=52` (the kijun period `k` is also the forward displacement).
+- **high? / low? / close?** `str` the input columns.
+
+```py
+df['ichimoku.tenkan']
+df['ichimoku.kijun']
+df['ichimoku.senkou_a']   # the cloud's leading edge, displaced to each bar
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change

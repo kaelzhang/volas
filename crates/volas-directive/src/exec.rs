@@ -575,6 +575,27 @@ fn exec_command(
             };
             f64col(ind::pivot_points(&high, &low, &close, line))
         }
+        ("ichimoku", sub) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let line = match sub {
+                Some("kijun") => ind::IchimokuLine::Kijun,
+                Some("senkou_a") => ind::IchimokuLine::SenkouA,
+                Some("senkou_b") => ind::IchimokuLine::SenkouB,
+                Some("chikou") => ind::IchimokuLine::Chikou,
+                _ => ind::IchimokuLine::Tenkan,
+            };
+            f64col(ind::ichimoku(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(9))?,
+                arg_usize(args, 1, Some(26))?,
+                arg_usize(args, 2, Some(52))?,
+                line,
+            ))
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

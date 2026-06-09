@@ -113,6 +113,18 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         // cdp reads only the prior bar; mike's TYP±range is gated by the n-day HH/LL.
         "cdp" | "pivot_points" => 1,
         "mike" => arg(args, 0, 12).saturating_sub(1),
+        // ichimoku: midpoint lines warm up at period−1; the leading spans add the kijun
+        // displacement; the lagging span (chikou = close) has none.
+        "ichimoku" => {
+            let (t, k, sb) = (arg(args, 0, 9), arg(args, 1, 26), arg(args, 2, 52));
+            match sub {
+                Some("tenkan") => t.saturating_sub(1),
+                Some("kijun") => k.saturating_sub(1),
+                Some("senkou_a") => k.saturating_sub(1) + k,
+                Some("senkou_b") => sb.saturating_sub(1) + k,
+                _ => 0,
+            }
+        }
         // keltner: middle = EMA (ema_period−1); bands also wait for the ATR (atr_period).
         "keltner" => {
             let ema = arg(args, 0, 20).saturating_sub(1);
