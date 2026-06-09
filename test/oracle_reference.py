@@ -238,6 +238,51 @@ def crsi(o, h, lo, c, v, rsi_len=3, streak_len=2, rank_len=100):
     return (_rsi(c, rsi_len) + _rsi(pd.Series(streak), streak_len) + pd.Series(prank)) / 3.0
 
 
+# --- Group B references (gap report §9; each cites its pinned convention) ----
+
+def vortex(o, h, lo, c, v, n=14, plus=True):
+    """Vortex Indicator. +VM=|H-prevL|, -VM=|L-prevH|; +VI=Σn(+VM)/Σn(TR), -VI=Σn(-VM)/Σn(TR).
+    Source: StockCharts ChartSchool / Wikipedia — Vortex Indicator."""
+    h, lo, c = _s(h), _s(lo), _s(c)
+    tr = _true_range(h, lo, c)
+    vm = (h - lo.shift(1)).abs() if plus else (lo - h.shift(1)).abs()
+    return vm.rolling(n, min_periods=n).sum() / tr.rolling(n, min_periods=n).sum()
+
+
+def brar_ar(o, h, lo, c, v, n=26):
+    """BRAR AR (人气指标) = Σn(H-O) / Σn(O-L) * 100.
+    Source: 通达信 / MBA智库 — 人气意愿指标 (BRAR)."""
+    o, h, lo = _s(o), _s(h), _s(lo)
+    return (h - o).rolling(n, min_periods=n).sum() / (o - lo).rolling(n, min_periods=n).sum() * 100.0
+
+
+def brar_br(o, h, lo, c, v, n=26):
+    """BRAR BR (意愿指标) = Σn max(0,H-Cy) / Σn max(0,Cy-L) * 100, Cy=prev close (通达信 clamp).
+    Source: 通达信 / MBA智库 — 人气意愿指标 (BRAR)."""
+    h, lo, c = _s(h), _s(lo), _s(c)
+    cy = c.shift(1)
+    up = (h - cy).clip(lower=0.0)
+    dn = (cy - lo).clip(lower=0.0)
+    return up.rolling(n, min_periods=n).sum() / dn.rolling(n, min_periods=n).sum() * 100.0
+
+
+def vr(o, h, lo, c, v, n=26):
+    """VR 成交量比率 = (UVS + ½PVS) / (DVS + ½PVS) * 100 over n bars (up/down/flat-close volume).
+    Source: MBA智库 — 成交量比率 (VR)."""
+    c, vv = _s(c), _s(v)
+    dc = c.diff()
+    uv = vv.where(dc > 0, 0.0)
+    dv = vv.where(dc < 0, 0.0)
+    pv = vv.where(dc == 0, 0.0)
+    uv[dc.isna()] = np.nan
+    dv[dc.isna()] = np.nan
+    pv[dc.isna()] = np.nan
+    suv = uv.rolling(n, min_periods=n).sum()
+    sdv = dv.rolling(n, min_periods=n).sum()
+    spv = pv.rolling(n, min_periods=n).sum()
+    return (suv + 0.5 * spv) / (sdv + 0.5 * spv) * 100.0
+
+
 # --- the oracle case registry ----------------------------------------------
 # (directive, reference_fn(o,h,lo,c,v) -> Series, tolerance). The directive strings are
 # the proposed command interface the Group A implementation should match.
@@ -257,4 +302,10 @@ CASES: list[tuple] = [
     ("kst", kst, 1e-6),
     ("chop:14", lambda o, h, lo, c, v: chop(o, h, lo, c, v, 14), 1e-7),
     ("crsi:3,2,100", lambda o, h, lo, c, v: crsi(o, h, lo, c, v, 3, 2, 100), 1e-6),
+    # Group B (gap report §9).
+    ("vortex.plus:14", lambda o, h, lo, c, v: vortex(o, h, lo, c, v, 14, True), 1e-7),
+    ("vortex.minus:14", lambda o, h, lo, c, v: vortex(o, h, lo, c, v, 14, False), 1e-7),
+    ("brar.ar:26", lambda o, h, lo, c, v: brar_ar(o, h, lo, c, v, 26), 1e-7),
+    ("brar.br:26", lambda o, h, lo, c, v: brar_br(o, h, lo, c, v, 26), 1e-7),
+    ("vr:26", lambda o, h, lo, c, v: vr(o, h, lo, c, v, 26), 1e-7),
 ]

@@ -92,6 +92,9 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         // DMA (China 平行线差): the DDD difference line is the main command; AMA is its signal.
         ("dma", None | Some("ddd")) => None,
         ("dma", Some("ama")) => Some("ama".into()),
+        // Vortex has no primary line — both outputs are required sub-commands.
+        ("vortex", Some("p" | "plus")) => Some("plus".into()),
+        ("vortex", Some("m" | "minus")) => Some("minus".into()),
         (_, Some(s)) => Some(s.to_string()),
         (_, None) => None,
     }
@@ -139,6 +142,9 @@ pub fn is_command(name: &str) -> bool {
             | "crsi"
             | "bias"
             | "dma"
+            | "vortex"
+            | "brar"
+            | "vr"
             | "tr"
             | "atr"
             | "llv"
@@ -293,6 +299,11 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("bias", None) => (vec![Int(6)], vec!["close"]),
         ("dma", None) => (vec![Int(10), Int(50)], vec!["close"]),
         ("dma", Some("ama")) => (vec![Int(10), Int(50), Int(10)], vec!["close"]),
+        // Group B convention-sensitive indicators (gap report §9).
+        ("vortex", Some("plus" | "minus")) => (vec![Int(14)], vec!["high", "low", "close"]),
+        ("brar", Some("ar")) => (vec![Int(26)], vec!["open", "high", "low"]),
+        ("brar", Some("br")) => (vec![Int(26)], vec!["high", "low", "close"]),
+        ("vr", None) => (vec![Int(26)], vec!["close", "volume"]),
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns

@@ -409,6 +409,37 @@ fn exec_command(
             }
         }
 
+        // Group B convention-sensitive indicators (gap report §9).
+        ("vortex", sub) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::vortex(
+                &high,
+                &low,
+                &close,
+                arg_usize(args, 0, Some(14))?,
+                sub == Some("plus"),
+            ))
+        }
+        ("brar", Some("br")) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::brar_br(&high, &low, &close, arg_usize(args, 0, Some(26))?))
+        }
+        ("brar", _) => {
+            let open = series_f64(df, series, 0, "open")?;
+            let high = series_f64(df, series, 1, "high")?;
+            let low = series_f64(df, series, 2, "low")?;
+            f64col(ind::brar_ar(&open, &high, &low, arg_usize(args, 0, Some(26))?))
+        }
+        ("vr", _) => {
+            let close = series_f64(df, series, 0, "close")?;
+            let volume = series_f64(df, series, 1, "volume")?;
+            f64col(ind::vr(&close, &volume, arg_usize(args, 0, Some(26))?))
+        }
+
         ("macd", None) => f64col(ind::macd(
             &close(0)?,
             arg_usize(args, 0, Some(12))?,

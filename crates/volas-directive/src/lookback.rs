@@ -88,6 +88,15 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
                 _ => line + arg(args, 2, 10).saturating_sub(1),
             }
         }
+        // +VM/−VM/TR each need one prior bar, so the n-sum warms up at bar n.
+        "vortex" => arg(args, 0, 14),
+        // up/down/flat volume is classified vs the prior close, so the n-sum warms up at n.
+        "vr" => arg(args, 0, 26),
+        // brar AR (H−O, O−L) has no prior-bar term (n−1); BR (vs prior close) has one (n).
+        "brar" => match sub {
+            Some("br") => arg(args, 0, 26),
+            _ => arg(args, 0, 26).saturating_sub(1),
+        },
         "tr" => 1,
         "atr" => arg(args, 0, 14),
         "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),

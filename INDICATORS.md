@@ -493,6 +493,62 @@ df['dma.ddd']
 df['dma.ama']
 ```
 
+### `vortex`, Vortex Indicator
+
+```
+vortex.plus:<period>@<high>,<low>,<close>
+vortex.minus:<period>@<high>,<low>,<close>
+```
+
+Two trend lines built from directional movement relative to the true range:
+`+VI = Σₙ|high − prev low| / Σₙ TR` and `−VI = Σₙ|low − prev high| / Σₙ TR`. `+VI` above
+`−VI` signals an up-trend, the reverse a down-trend, and their crossings mark turns. Vortex
+has no single primary line — request `vortex.plus` (alias `.p`) or `vortex.minus` (alias `.m`).
+
+- **period?** `int=14`
+- **high? / low? / close?** `str` the input columns.
+
+```py
+df['vortex.plus']
+df['vortex.minus']
+```
+
+### `brar`, BRAR Sentiment (人气意愿指标)
+
+```
+brar.ar:<period>@<open>,<high>,<low>
+brar.br:<period>@<high>,<low>,<close>
+```
+
+Two China-market sentiment lines. AR (人气, popularity) = `Σₙ(H−O) / Σₙ(O−L) × 100`; BR
+(意愿, willingness) = `Σₙ max(0, H−Cᵧ) / Σₙ max(0, Cᵧ−L) × 100`, where `Cᵧ` is the prior close
+and the `max(0, …)` clamp follows the 通达信 convention. Request `brar.ar` or `brar.br`.
+
+- **period?** `int=26`
+- **open? / high? / low? / close?** `str` the input columns (AR uses open/high/low; BR uses high/low/close).
+
+```py
+df['brar.ar']
+df['brar.br']
+```
+
+### `vr`, Volume Ratio (成交量比率)
+
+```
+vr:<period>@<close>,<volume>
+```
+
+A volume-sentiment ratio over `period` bars: `(UVS + ½·PVS) / (DVS + ½·PVS) × 100`, where
+UVS / DVS / PVS sum the volume of up- / down- / flat-close days (classified vs the prior close).
+
+- **period?** `int=26`
+- **close? / volume?** `str` the input columns.
+
+```py
+df['vr']
+df['vr:26']
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change
