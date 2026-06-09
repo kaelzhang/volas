@@ -43,7 +43,7 @@ pub(crate) fn cell_to_csv(
         Column::Bool(v, _) => if v[i] { "True" } else { "False" }.to_string(),
         Column::I64(v, _) => v[i].to_string(),
         Column::I32(v, _) => v[i].to_string(),
-        Column::Str(v) => v[i].clone(),
+        Column::Str(v, _) => v[i].clone(),
         Column::Datetime(v) => datetime::format_ns(v[i]),
     }
 }
@@ -292,7 +292,10 @@ fn data_cells(
                 }
             })
             .collect(),
-        Column::Str(v) => rows.iter().map(|&i| format!(" {}", v[i])).collect(),
+        Column::Str(v, val) => rows
+            .iter()
+            .map(|&i| if val.is_valid(i) { format!(" {}", v[i]) } else { NA_REPR.to_string() })
+            .collect(),
         Column::Datetime(v) => {
             let all_midnight = rows.iter().all(|&i| is_midnight(v[i], Tz::Utc));
             rows.iter()

@@ -227,7 +227,7 @@ mod tests {
         });
         // "NA" is no longer missing -> the column is object/string, not float.
         match infer_column(vec!["1".into(), "NA".into()], &na) {
-            Column::Str(v) => assert_eq!(**v, vec!["1".to_string(), "NA".to_string()]),
+            Column::Str(v, _) => assert_eq!(**v, vec!["1".to_string(), "NA".to_string()]),
             other => panic!("expected Str, got {other:?}"), // LCOV_EXCL_LINE
         }
     }

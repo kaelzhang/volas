@@ -651,7 +651,7 @@ impl DataFrame {
                     buf[p] = src[pick(k)];
                 }
             }
-            (Column::Str(arc), Column::Str(src)) => {
+            (Column::Str(arc, _), Column::Str(src, _)) => {
                 let buf = Arc::make_mut(arc);
                 for (k, &p) in positions.iter().enumerate() {
                     buf[p] = src[pick(k)].clone();

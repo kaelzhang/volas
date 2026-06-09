@@ -63,8 +63,8 @@ pub enum Column {
     I64(Arc<Vec<i64>>, Validity),
     /// 32-bit signed integers (narrow storage); `Validity` marks missing cells.
     I32(Arc<Vec<i32>>, Validity),
-    /// UTF-8 strings.
-    Str(Arc<Vec<String>>),
+    /// UTF-8 strings; `Validity` marks missing cells.
+    Str(Arc<Vec<String>>, Validity),
     /// Datetimes as i64 nanoseconds since the Unix epoch (UTC-naive).
     Datetime(Arc<Vec<i64>>),
 }
@@ -155,9 +155,13 @@ impl Column {
     pub fn bool_with(v: Vec<bool>, validity: Validity) -> Column {
         Column::Bool(Arc::new(v), validity)
     }
-    /// Build a `Str` column.
+    /// Build a `Str` column (all values present).
     pub fn str(v: Vec<String>) -> Column {
-        Column::Str(Arc::new(v))
+        Column::Str(Arc::new(v), Validity::dense())
+    }
+    /// Build a `Str` column with an explicit validity (missing-aware).
+    pub fn str_with(v: Vec<String>, validity: Validity) -> Column {
+        Column::Str(Arc::new(v), validity)
     }
     /// Build a `Datetime` column (epoch nanoseconds).
     pub fn datetime(v: Vec<i64>) -> Column {
@@ -172,7 +176,7 @@ impl Column {
             Column::Bool(v, _) => v.len(),
             Column::I64(v, _) => v.len(),
             Column::I32(v, _) => v.len(),
-            Column::Str(v) => v.len(),
+            Column::Str(v, _) => v.len(),
             Column::Datetime(v) => v.len(),
         }
     }
@@ -190,7 +194,7 @@ impl Column {
             Column::Bool(_, _) => DType::Bool,
             Column::I64(_, _) => DType::I64,
             Column::I32(_, _) => DType::I32,
-            Column::Str(_) => DType::Utf8,
+            Column::Str(_, _) => DType::Utf8,
             Column::Datetime(_) => DType::Datetime,
         }
     }
@@ -202,9 +206,10 @@ impl Column {
         match self {
             Column::F64(v) => !v[i].is_nan(),
             Column::F32(v) => !v[i].is_nan(),
-            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => val.is_valid(i),
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) | Column::Str(_, val) => {
+                val.is_valid(i)
+            }
             Column::Datetime(v) => v[i] != i64::MIN,
-            Column::Str(_) => true,
         }
     }
 
@@ -213,9 +218,10 @@ impl Column {
         match self {
             Column::F64(v) => v.iter().filter(|x| x.is_nan()).count(),
             Column::F32(v) => v.iter().filter(|x| x.is_nan()).count(),
-            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => val.null_count(),
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) | Column::Str(_, val) => {
+                val.null_count()
+            }
             Column::Datetime(v) => v.iter().filter(|&&x| x == i64::MIN).count(),
-            Column::Str(_) => 0,
         }
     }
 
@@ -237,7 +243,9 @@ impl Column {
     /// carries its missing in `NaN`, not a mask).
     fn validity(&self) -> Option<&Validity> {
         match self {
-            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => Some(val),
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) | Column::Str(_, val) => {
+                Some(val)
+            }
             _ => None,
         }
     }
@@ -271,7 +279,7 @@ impl Column {
 
     /// Borrow the underlying `String` slice, if this is a `Str` column.
     pub fn as_str(&self) -> Option<&[String]> {
-        if let Column::Str(v) = self {
+        if let Column::Str(v, _) = self {
             Some(v.as_slice())
         } else {
             None
@@ -297,7 +305,7 @@ impl Column {
             Column::Bool(v, val) => mask_f64(v.iter().map(|&b| if b { 1.0 } else { 0.0 }), val),
             Column::I64(v, val) => mask_f64(v.iter().map(|&i| i as f64), val),
             Column::I32(v, val) => mask_f64(v.iter().map(|&i| i as f64), val),
-            Column::Str(v) => vec![f64::NAN; v.len()],
+            Column::Str(v, _) => vec![f64::NAN; v.len()],
             Column::Datetime(v) => {
                 v.iter().map(|&i| if i == i64::MIN { f64::NAN } else { i as f64 }).collect()
             }
@@ -318,7 +326,7 @@ impl Column {
             }
             Column::I64(v, _) => v[i] as f64,
             Column::I32(v, _) => v[i] as f64,
-            Column::Str(_) => f64::NAN,
+            Column::Str(_, _) => f64::NAN,
             Column::Datetime(v) => v[i] as f64,
         }
     }
@@ -331,7 +339,7 @@ impl Column {
             Column::Bool(v, val) => Column::bool_with(v[start..end].to_vec(), val.slice(start, end)),
             Column::I64(v, val) => Column::i64_with(v[start..end].to_vec(), val.slice(start, end)),
             Column::I32(v, val) => Column::i32_with(v[start..end].to_vec(), val.slice(start, end)),
-            Column::Str(v) => Column::str(v[start..end].to_vec()),
+            Column::Str(v, val) => Column::str_with(v[start..end].to_vec(), val.slice(start, end)),
             Column::Datetime(v) => Column::datetime(v[start..end].to_vec()),
         }
     }
@@ -344,7 +352,7 @@ impl Column {
             Column::Bool(v, val) => Column::bool_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx)),
             Column::I64(v, val) => Column::i64_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx)),
             Column::I32(v, val) => Column::i32_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx)),
-            Column::Str(v) => Column::str(idx.iter().map(|&i| v[i].clone()).collect()),
+            Column::Str(v, val) => Column::str_with(idx.iter().map(|&i| v[i].clone()).collect(), val.take(idx)),
             Column::Datetime(v) => Column::datetime(idx.iter().map(|&i| v[i]).collect()),
         }
     }
@@ -376,7 +384,8 @@ impl Column {
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
-            (Column::Str(a), Column::Str(b)) => {
+            (Column::Str(a, av), Column::Str(b, bv)) => {
+                append_validity(av, a.len(), bv, b.len());
                 Arc::make_mut(a).extend_from_slice(b);
                 Ok(())
             }
@@ -431,7 +440,7 @@ impl Column {
     pub fn to_datetime_tz(&self, tz: crate::tz::Tz) -> Result<Column> {
         match self {
             Column::Datetime(_) => Ok(self.clone()),
-            Column::Str(v) => {
+            Column::Str(v, _) => {
                 let mut out = Vec::with_capacity(v.len());
                 for s in v.iter() {
                     let ns = datetime::parse_ns_in_tz(s, tz).ok_or_else(|| {
@@ -552,7 +561,10 @@ impl Column {
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::i32),
-            DType::Utf8 => Ok(Column::str(self.to_string_vec())),
+            // int/bool sources carry their validity into the rendered strings.
+            DType::Utf8 => {
+                Ok(Column::str_with(self.to_string_vec(), self.validity().cloned().unwrap_or_default()))
+            }
             DType::Datetime => self.to_datetime(),
         }
     }
@@ -781,7 +793,19 @@ impl Column {
             Column::I32(v, _) => Column::i32_with(shift_fill(v, n, 0), nulls()),
             Column::Bool(v, _) => Column::bool_with(shift_fill(v, n, false), nulls()),
             Column::Datetime(v) => Column::datetime(shift_fill(v, n, i64::MIN)),
-            Column::Str(_) => Column::f64(vec![f64::NAN; len]),
+            Column::Str(v, _) => {
+                let vals = (0..len)
+                    .map(|i| {
+                        let s = i as isize - n;
+                        if s >= 0 && (s as usize) < len {
+                            v[s as usize].clone()
+                        } else {
+                            String::new() // placeholder, masked by the gap validity
+                        }
+                    })
+                    .collect();
+                Column::str_with(vals, nulls())
+            }
         }
     }
 
@@ -792,7 +816,7 @@ impl Column {
         match self {
             Column::F64(v) => Ok(Column::f64(diff_kernel(v, n, f64::NAN))),
             Column::F32(v) => Ok(Column::f32(diff_kernel(v, n, f32::NAN))),
-            Column::Bool(_, _) | Column::Str(_) | Column::Datetime(_) => {
+            Column::Bool(_, _) | Column::Str(_, _) | Column::Datetime(_) => {
                 let (a, b) = (self.to_f64_vec(), self.shift(n).to_f64_vec());
                 Ok(Column::f64(a.iter().zip(&b).map(|(&x, &y)| x - y).collect()))
             }
@@ -863,7 +887,7 @@ impl Column {
             }
             // a str column is never missing, so it returns via the early `null_count
             // == 0` check above and never reaches here.
-            Column::Str(_) => unreachable!("str has no missing value"), // LCOV_EXCL_LINE
+            Column::Str(_, _) => unreachable!("str has no missing value"), // LCOV_EXCL_LINE
         }
     }
 
@@ -1140,7 +1164,7 @@ impl Column {
     /// Render each value as a `String` (for `astype(str)`).
     fn to_string_vec(&self) -> Vec<String> {
         match self {
-            Column::Str(v) => v.to_vec(),
+            Column::Str(v, _) => v.to_vec(),
             Column::F64(v) => v.iter().map(|x| x.to_string()).collect(),
             Column::F32(v) => v.iter().map(|x| x.to_string()).collect(),
             Column::I64(v, _) => v.iter().map(|x| x.to_string()).collect(),
@@ -2221,5 +2245,30 @@ mod tests {
         assert_na(&b.cast(DType::I32).unwrap(), &[1.0, f64::NAN, 0.0]);
         // a present out-of-range i64 -> i32 errors (a missing one never does)
         assert!(Column::i64(vec![3_000_000_000]).cast(DType::I32).is_err());
+    }
+
+    #[test]
+    fn na_str_carries_validity() {
+        let s = Column::str_with(
+            vec!["a".into(), String::new(), "c".into()],
+            Validity::from_valid_iter(3, [true, false, true]),
+        ); // a, NA, c
+        assert!(s.is_valid(0) && !s.is_valid(1) && s.is_valid(2) && s.null_count() == 1);
+        // shift keeps str with an NA gap: [NA, a, NA] (the trailing NA was already missing)
+        let sh = s.shift(1);
+        assert_eq!(sh.dtype(), DType::Utf8);
+        assert!(!sh.is_valid(0) && sh.is_valid(1) && !sh.is_valid(2));
+        assert_eq!(sh.as_str().unwrap()[1], "a");
+        // slice / take carry validity
+        assert!(!s.slice(1, 3).is_valid(0) && s.slice(1, 3).is_valid(1));
+        assert!(!s.take(&[1, 0]).is_valid(0) && s.take(&[1, 0]).is_valid(1));
+        // append concatenates validity
+        let mut a = Column::str_with(vec!["x".into(), String::new()], Validity::from_valid_iter(2, [true, false]));
+        a.append(&Column::str(vec!["y".into()])).unwrap();
+        assert!(a.len() == 3 && a.is_valid(0) && !a.is_valid(1) && a.is_valid(2));
+        // int + NA -> str carries the missing cell
+        let i = na_i64(&[1, 0, 3], &[true, false, true]).cast(DType::Utf8).unwrap();
+        assert_eq!(i.dtype(), DType::Utf8);
+        assert!(!i.is_valid(1) && i.null_count() == 1);
     }
 }

@@ -169,6 +169,26 @@ def test_na_bool_logic_kleene():
     assert ((c > 1) & (c < 3)).to_list() == [False, False, True, False, False]
 
 
+def test_na_str_column():
+    NA = volas.NA
+    s = volas.DataFrame({"a": ["x", None, "z"]})["a"]
+    assert s.dtype == "str"
+    assert s.to_list() == ["x", NA, "z"]
+    assert s[1] is NA
+    assert s.isna().to_numpy().tolist() == [False, True, False]
+    assert s.dropna().to_list() == ["x", "z"]
+    assert s.shift(1).to_list() == [NA, "x", NA]
+    arr = s.to_numpy()  # object array with None at the missing cell
+    assert arr[0] == "x" and arr[1] is None
+    assert "<NA>" in repr(s)
+    # round-trip through a pandas nullable string column
+    import pandas as pd
+
+    pdf = pd.DataFrame({"a": pd.array(["x", None, "z"], dtype="string")})
+    v = volas.from_pandas(pdf)
+    assert v["a"].dtype == "str" and v["a"][1] is NA
+
+
 def test_na_display_symbol():
     # an int/bool missing cell renders as <NA> (like element access); a float keeps NaN
     assert "<NA>" in repr(volas.DataFrame({"a": [1, None, 3]})["a"])

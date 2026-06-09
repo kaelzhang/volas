@@ -148,7 +148,7 @@ impl Index {
         let kind = match col {
             Column::Datetime(v) => IndexKind::Datetime(v.to_vec(), tz),
             Column::I64(v, _) => IndexKind::Int64(v.to_vec()),
-            Column::Str(v) => IndexKind::Str(v.to_vec()),
+            Column::Str(v, _) => IndexKind::Str(v.to_vec()),
             other => {
                 return Err(VolasError::DType(format!(
                     "cannot use a {} column as an index (only datetime / int64 / string)",

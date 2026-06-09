@@ -189,6 +189,10 @@ fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
         // a float carries missing in-band as NaN (also the all-`None` fallback).
         return Ok(Column::f64(vv.iter().map(|x| x.unwrap_or(f64::NAN)).collect()));
     }
+    if let Ok(vv) = v.extract::<Vec<Option<String>>>() {
+        let validity = Validity::from_valid_iter(vv.len(), vv.iter().map(Option::is_some));
+        return Ok(Column::str_with(vv.into_iter().map(Option::unwrap_or_default).collect(), validity));
+    }
     // A list may carry the `volas.NA` symbol itself (not `None`) — normalise it to
     // `None` and retry, so `to_list()` output round-trips back into a frame.
     if let Ok(list) = v.downcast::<PyList>() {
@@ -286,8 +290,18 @@ fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
             col.to_f64_vec().into_pyarray(py).into_any()
         }
         // String columns become NumPy object arrays (pandas `object` dtype).
-        Column::Str(v) => {
-            let list = PyList::new(py, v.as_slice()).expect("build str list");
+        Column::Str(v, val) => {
+            // a missing cell becomes Python `None` in the object array (pandas parity)
+            let items: Vec<Bound<'_, PyAny>> = (0..v.len())
+                .map(|i| {
+                    if val.is_valid(i) {
+                        v[i].clone().into_pyobject(py).unwrap().into_any()
+                    } else {
+                        py.None().into_bound(py)
+                    }
+                })
+                .collect();
+            let list = PyList::new(py, items).expect("build str list");
             let kwargs = PyDict::new(py);
             kwargs
                 .set_item("dtype", "object")
@@ -317,8 +331,8 @@ fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
         Column::Bool(v, val) if val.is_valid(i) => {
             v[i].into_pyobject(py).unwrap().to_owned().into_any().unbind()
         }
-        Column::I64(..) | Column::I32(..) | Column::Bool(..) => na(py),
-        Column::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
+        Column::Str(v, val) if val.is_valid(i) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
+        Column::I64(..) | Column::I32(..) | Column::Bool(..) | Column::Str(..) => na(py),
         Column::Datetime(v) => py
             .import("numpy")
             .expect("import numpy")
@@ -431,7 +445,7 @@ fn np_scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
         Column::I32(v, val) => if val.is_valid(i) { np_i32(py, v[i]) } else { na(py) },
         Column::Bool(v, val) => if val.is_valid(i) { np_bool(py, v[i]) } else { na(py) },
         // str -> Python str; datetime -> np.datetime64 (already numpy) — as scalar_to_py.
-        Column::Str(_) | Column::Datetime(_) => scalar_to_py(py, col, i),
+        Column::Str(_, _) | Column::Datetime(_) => scalar_to_py(py, col, i),
     }
 }
 
@@ -1086,7 +1100,7 @@ impl PySeries {
     fn astype(&self, dtype: &str) -> PyResult<PySeries> {
         let col = if let Some(unit) = datetime_unit_of(dtype) {
             match &self.inner.data {
-                Column::Datetime(_) | Column::Str(_) => {
+                Column::Datetime(_) | Column::Str(_, _) => {
                     self.inner.data.to_datetime().map_err(value_err)?
                 }
                 _ => self.inner.data.epoch_to_datetime(unit).map_err(value_err)?,
@@ -3389,7 +3403,7 @@ impl PyDataFrame {
             .inner
             .columns()
             .iter()
-            .any(|c| matches!(c, Column::Str(_)));
+            .any(|c| matches!(c, Column::Str(_, _)));
         let (h, w) = (self.inner.height(), self.inner.width());
 
         if let Some(dt) = dtype {
@@ -3531,7 +3545,7 @@ impl PyDataFrame {
                 // `datetime64[unit]` cast).
                 let col = df.column(&name).map_err(pyerr)?.clone();
                 let converted = match &col {
-                    Column::Datetime(_) | Column::Str(_) => col.to_datetime().map_err(value_err)?,
+                    Column::Datetime(_) | Column::Str(_, _) => col.to_datetime().map_err(value_err)?,
                     _ => col.epoch_to_datetime(unit).map_err(value_err)?,
                 };
                 df.set_column(&name, converted).map_err(pyerr)?;
@@ -4281,7 +4295,7 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
     };
     let converted = match col {
         c @ Column::Datetime(_) => c,
-        Column::Str(v) => match format {
+        Column::Str(v, _) => match format {
             // An explicit format parses faster and unambiguously (pandas `format=`).
             Some(fmt) => {
                 let ns = v
@@ -4296,7 +4310,7 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
                     .collect::<PyResult<Vec<i64>>>()?;
                 Column::datetime(ns)
             }
-            None => Column::Str(v).to_datetime().map_err(value_err)?,
+            None => Column::Str(v, Validity::dense()).to_datetime().map_err(value_err)?,
         },
         c => c.epoch_to_datetime_rounded(unit).map_err(value_err)?,
     };
