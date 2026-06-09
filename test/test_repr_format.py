@@ -1,8 +1,10 @@
 """pandas-parity tests for ``repr`` / ``str`` / ``to_string`` / ``_repr_html_``.
 
-The expected strings are pandas's exact console output (pandas 3.0), captured and
-inlined so the suite stays pandas-free. ``repr`` and ``str`` are identical for
-every type (as in pandas).
+The expected strings match pandas 3.0's console output, captured and inlined so
+the suite stays pandas-free — with one deliberate divergence: volas prints every
+missing value as the single ``<NA>`` symbol (``volas.NA``), where pandas prints
+``NaN`` for a numpy float column and ``NaT`` for datetime. ``repr`` and ``str``
+are identical for every type (as in pandas).
 """
 
 import numpy as np
@@ -33,7 +35,7 @@ DF_CASES = {
         lambda: vdf({"a": [1.5, 2.25, 3.125], "b": [0.1 + 0.2, 1.0, 100.0]}),
         "       a      b\n0  1.500    0.3\n1  2.250    1.0\n2  3.125  100.0",
     ),
-    "nan": (lambda: vdf({"a": [1.0, nan, 3.0]}), "     a\n0  1.0\n1  NaN\n2  3.0"),
+    "nan": (lambda: vdf({"a": [1.0, nan, 3.0]}), "     a\n0  1.0\n1 <NA>\n2  3.0"),
     "negative": (lambda: vdf({"x": [1.0, -1.0]}), "     x\n0  1.0\n1 -1.0"),
     "negative_int": (lambda: vdf({"x": [1, -20, 3]}), "    x\n0   1\n1 -20\n2   3"),
     "bool_col": (
@@ -80,18 +82,18 @@ def _df():
 
 
 TO_STRING_CASES = {
-    "default": ({}, "   open  close\n0   1.0    4.5\n1   2.0    5.0\n2   3.0    NaN"),
+    "default": ({}, "   open  close\n0   1.0    4.5\n1   2.0    5.0\n2   3.0   <NA>"),
     "na_rep": ({"na_rep": "-"}, "   open  close\n0   1.0    4.5\n1   2.0    5.0\n2   3.0      -"),
     "float_format": (
         {"float_format": "%.2f"},
-        "   open  close\n0  1.00   4.50\n1  2.00   5.00\n2  3.00    NaN",
+        "   open  close\n0  1.00   4.50\n1  2.00   5.00\n2  3.00   <NA>",
     ),
-    "no_header": ({"header": False}, "0  1.0  4.5\n1  2.0  5.0\n2  3.0  NaN"),
-    "no_index": ({"index": False}, " open  close\n  1.0    4.5\n  2.0    5.0\n  3.0    NaN"),
-    "columns": ({"columns": ["close"]}, "   close\n0    4.5\n1    5.0\n2    NaN"),
+    "no_header": ({"header": False}, "0  1.0  4.5\n1  2.0  5.0\n2  3.0 <NA>"),
+    "no_index": ({"index": False}, " open  close\n  1.0    4.5\n  2.0    5.0\n  3.0   <NA>"),
+    "columns": ({"columns": ["close"]}, "   close\n0    4.5\n1    5.0\n2   <NA>"),
     "show_dimensions": (
         {"show_dimensions": True},
-        "   open  close\n0   1.0    4.5\n1   2.0    5.0\n2   3.0    NaN\n\n[3 rows x 2 columns]",
+        "   open  close\n0   1.0    4.5\n1   2.0    5.0\n2   3.0   <NA>\n\n[3 rows x 2 columns]",
     ),
 }
 

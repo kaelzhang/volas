@@ -2,7 +2,7 @@
 
 `columns` selects and orders the columns to keep (the same projection as ``df[[...]]``):
 a name not present raises ``KeyError``; an empty list or a duplicate name is rejected;
-an absent column is never NaN-filled. It works over a dict and over a volas DataFrame —
+an absent column is never silently filled. It works over a dict and over a volas DataFrame —
 and a tf-aware frame keeps its ``time_frame``, with the forming-period state projected to
 match the kept columns.
 """

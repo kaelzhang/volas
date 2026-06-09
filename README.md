@@ -83,7 +83,7 @@ df['close']
 
 # An indicator directive -> Series (2-period SMA of `close`)
 df['ma:2']
-# 0    NaN
+# 0   <NA>
 # 1    3.5
 # 2    4.5
 # 3    5.5
@@ -151,7 +151,7 @@ df = DataFrame({
 
 df['ma:2']
 
-# 0    NaN
+# 0   <NA>
 # 1    5.5
 # 2    6.5
 # 3    7.5
@@ -279,7 +279,7 @@ directive column in place.
 
 ```py
 df['ma:20']              # cache the 20-period SMA as a column
-df = df.append(new_bar)  # the new row's ma:20 is stale (NaN)
+df = df.append(new_bar)  # the new row's ma:20 is stale (a missing placeholder)
 df.fulfill()             # recompute only the tail of every cached column
 df.to_numpy()            # now fresh
 ```
@@ -944,11 +944,17 @@ stays UTC (matching pandas `.values`).
 `volas.NA` is the single missing-value marker, and **every dtype supports it** —
 crucially, a missing value **never changes the column's dtype**:
 
-| dtype | how missing is stored | element access |
-|---|---|---|
-| `float64` / `float32` | `NaN`, in-band | `np.float64(nan)` |
-| `int64` / `int32` / `bool` / `str` | a validity mask (dtype kept) | `volas.NA` |
-| `datetime64[ns]` | `NaT` | `np.datetime64('NaT')` |
+| dtype | how missing is stored | element access | console display |
+|---|---|---|---|
+| `float64` / `float32` | `NaN`, in-band | `np.float64(nan)` | `<NA>` |
+| `int64` / `int32` / `bool` / `str` | a validity mask (dtype kept) | `volas.NA` | `<NA>` |
+| `datetime64[ns]` | `NaT` | `np.datetime64('NaT')` | `<NA>` |
+
+Whatever the storage, the **console always prints `<NA>`** — one symbol for a
+missing value, regardless of dtype (a float `NaN`, a datetime `NaT`, and an int /
+bool / str hole all render identically; `to_string(na_rep=...)` overrides it).
+Element access and `to_numpy` stay dtype-specific (a float hole reads back as
+`np.nan`), so numpy / pandas interop is lossless.
 
 This tracks pandas' own direction ([PDEP-16]) and means volas has **no `object`
 dtype**: an `int` / `bool` / `str` column with a hole stays `int` / `bool` /

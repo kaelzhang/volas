@@ -190,8 +190,18 @@ def test_na_str_column():
 
 
 def test_na_display_symbol():
-    # an int/bool missing cell renders as <NA> (like element access); a float keeps NaN
+    # Every dtype prints a missing cell as the single <NA> symbol — a float NaN,
+    # an int/bool/str NA, and a datetime NaT all render identically (storage and
+    # element access stay dtype-specific; only the console display is unified).
     assert "<NA>" in repr(volas.DataFrame({"a": [1, None, 3]})["a"])
     assert "<NA>" in repr(volas.DataFrame({"a": [True, None, False]})["a"])
     f = repr(volas.DataFrame({"a": [1.5, None, 3.0]})["a"])
-    assert "NaN" in f and "<NA>" not in f
+    assert "<NA>" in f and "NaN" not in f
+    sd = repr(
+        volas.DataFrame(
+            {"a": np.array(["2021-01-01", "NaT", "2021-01-03"], dtype="datetime64[ns]")}
+        )["a"]
+    )
+    assert "<NA>" in sd and "NaT" not in sd  # NaT no longer renders as a garbage date
+    # a user-supplied na_rep overrides the default for every dtype, uniformly
+    assert "NULL" in volas.DataFrame({"a": [1.5, None, 3.0]}).to_string(na_rep="NULL")

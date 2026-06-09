@@ -10,15 +10,17 @@
 
 use volas_core::{datetime, Column, DataFrame, Index, IndexKind, Series, Tz};
 
-/// How a missing int/bool cell renders in the console (the `volas.NA` symbol); a
-/// float keeps its `NaN` na-rep.
-const NA_REPR: &str = "<NA>";
+/// The console display for *any* missing value, regardless of dtype — the single
+/// `volas.NA` symbol. A float `NaN`, an int / bool / str NA, and a datetime `NaT`
+/// all render identically here; only storage and element access stay dtype-specific.
+/// It is the default `na_rep` for every text/HTML renderer (CSV keeps its own).
+pub(crate) const NA_REPR: &str = "<NA>";
 
 // ===========================================================================
 // CSV cell formatting (shared with `DataFrame.to_csv`)
 // ===========================================================================
 
-/// Format the `i`-th cell of a column as a CSV field (`na_rep` for NaN).
+/// Format the `i`-th cell of a column as a CSV field (`na_rep` for any missing cell).
 pub(crate) fn cell_to_csv(
     col: &Column,
     i: usize,
@@ -115,7 +117,7 @@ pub(crate) struct DisplayOpts<'a> {
     pub header: bool,
     /// Whether to print the index column.
     pub index: bool,
-    /// String used for missing (NaN) cells.
+    /// String used for any missing cell (the `volas.NA` symbol `<NA>` by default).
     pub na_rep: &'a str,
     /// Parsed `float_format` spec; `None` uses the per-column decimal format.
     pub float_format: Option<(Option<usize>, char)>,
@@ -228,8 +230,8 @@ fn lead_num(neg: bool, s: String) -> String {
 
 /// Format a data column's cells at `rows`, pandas-style: per-column float
 /// decimals (or `float_format`), a leading sign-space on numeric / bool / string
-/// cells, `na_rep` for NaN, and date-or-full datetimes. Datetime cells get no
-/// leading space (matching pandas).
+/// cells, `na_rep` for any missing cell, and date-or-full datetimes. Datetime
+/// cells get no leading space (matching pandas).
 fn data_cells(
     col: &Column,
     rows: &[usize],
@@ -272,15 +274,15 @@ fn data_cells(
                 })
                 .collect()
         }
-        // An int/bool missing cell renders as the `volas.NA` symbol (matching
-        // element access); a float keeps `na_rep` (NaN) for its in-band missing.
+        // Every dtype renders a missing cell as `na_rep` (the `volas.NA` symbol
+        // `<NA>` by default), uniform with the float arms above.
         Column::I64(v, val) => rows
             .iter()
-            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { NA_REPR.to_string() })
+            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { na_rep.to_string() })
             .collect(),
         Column::I32(v, val) => rows
             .iter()
-            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { NA_REPR.to_string() })
+            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { na_rep.to_string() })
             .collect(),
         Column::Bool(v, val) => rows
             .iter()
@@ -288,19 +290,26 @@ fn data_cells(
                 if val.is_valid(i) {
                     format!(" {}", if v[i] { "True" } else { "False" })
                 } else {
-                    NA_REPR.to_string()
+                    na_rep.to_string()
                 }
             })
             .collect(),
         Column::Str(v, val) => rows
             .iter()
-            .map(|&i| if val.is_valid(i) { format!(" {}", v[i]) } else { NA_REPR.to_string() })
+            .map(|&i| if val.is_valid(i) { format!(" {}", v[i]) } else { na_rep.to_string() })
             .collect(),
         Column::Datetime(v) => {
-            let all_midnight = rows.iter().all(|&i| is_midnight(v[i], Tz::Utc));
+            // A `NaT` (i64::MIN) renders as `na_rep`; the date-vs-timestamp choice
+            // looks only at the present instants (a NaT is neither midnight nor a date).
+            let all_midnight = rows
+                .iter()
+                .filter(|&&i| v[i] != i64::MIN)
+                .all(|&i| is_midnight(v[i], Tz::Utc));
             rows.iter()
                 .map(|&i| {
-                    if all_midnight {
+                    if v[i] == i64::MIN {
+                        na_rep.to_string()
+                    } else if all_midnight {
                         fmt_date(v[i], Tz::Utc)
                     } else {
                         datetime::format_ns(v[i])
@@ -522,7 +531,7 @@ pub(crate) fn render_row(df: &DataFrame, footer: bool) -> String {
     let values: Vec<String> = df
         .columns()
         .iter()
-        .map(|c| data_cells(c, &[0], "NaN", None).pop().unwrap())
+        .map(|c| data_cells(c, &[0], NA_REPR, None).pop().unwrap())
         .collect();
     // When uniform-float, re-derive decimals across the whole row for alignment.
     let values = match uniform {
@@ -536,7 +545,7 @@ pub(crate) fn render_row(df: &DataFrame, footer: bool) -> String {
             xs.iter()
                 .map(|&x| {
                     if x.is_nan() {
-                        "NaN".to_string()
+                        NA_REPR.to_string()
                     } else {
                         lead_num(x < 0.0, format!("{x:.d$}"))
                     }
@@ -582,7 +591,7 @@ pub(crate) fn render_frame_html(df: &DataFrame) -> String {
     let mut body: Vec<Vec<String>> = cols
         .iter()
         .map(|&j| {
-            data_cells(&df.columns()[j], &rows, "NaN", None)
+            data_cells(&df.columns()[j], &rows, NA_REPR, None)
                 .into_iter()
                 // strip the leading sign-space; HTML aligns via CSS, not padding
                 .map(|s| s.trim_start().to_string())

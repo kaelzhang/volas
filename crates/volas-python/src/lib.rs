@@ -28,7 +28,7 @@ mod timeframe;
 
 use format::{
     cell_to_csv, index_label_csv, parse_float_format, render_frame, render_frame_html, render_row,
-    render_series, Dimensions, DisplayOpts,
+    render_series, Dimensions, DisplayOpts, NA_REPR,
 };
 use readers::read_csv;
 use timeframe::{build_agg_spec, resolve_time_frame, PyTimeFrame};
@@ -1347,7 +1347,7 @@ impl PySeries {
     /// past 60 (`display.max_rows` / `min_rows`). `str` and `repr` are identical.
     fn __repr__(&self) -> String {
         let truncate = if self.inner.len() > 60 { Some(5) } else { None };
-        render_series(&self.inner, "NaN", None, truncate, true)
+        render_series(&self.inner, NA_REPR, None, truncate, true)
     }
 
     fn __str__(&self) -> String {
@@ -1356,7 +1356,7 @@ impl PySeries {
 
     /// Render the whole series as text (pandas `Series.to_string`): no truncation
     /// by default and no `Name/dtype` footer; `max_rows` truncates.
-    #[pyo3(signature = (na_rep = "NaN", float_format = None, max_rows = None))]
+    #[pyo3(signature = (na_rep = NA_REPR, float_format = None, max_rows = None))]
     fn to_string(
         &self,
         na_rep: &str,
@@ -3584,7 +3584,7 @@ impl PyDataFrame {
         let opts = DisplayOpts {
             header: true,
             index: true,
-            na_rep: "NaN",
+            na_rep: NA_REPR,
             float_format: None,
             dimensions: Dimensions::OnTruncate,
             truncate,
@@ -3603,7 +3603,7 @@ impl PyDataFrame {
     /// (`sparsify`, `index_names`, `col_space`, `justify`, `formatters`,
     /// `line_width`, `encoding`, `decimal`, `buf`) are intentionally omitted.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (columns = None, header = true, index = true, na_rep = "NaN", float_format = None, max_rows = None, min_rows = None, show_dimensions = false))]
+    #[pyo3(signature = (columns = None, header = true, index = true, na_rep = NA_REPR, float_format = None, max_rows = None, min_rows = None, show_dimensions = false))]
     fn to_string(
         &self,
         columns: Option<Vec<String>>,
