@@ -542,6 +542,24 @@ fn exec_command(
                 f64col(ind::stoch_momentum(&high, &low, &close, k, d))
             }
         }
+        ("ttm_squeeze", sub) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let n = arg_usize(args, 0, Some(20))?;
+            if sub == Some("on") {
+                f64col(ind::ttm_squeeze_on(
+                    &high,
+                    &low,
+                    &close,
+                    n,
+                    arg_f64(args, 1, 2.0)?,
+                    arg_f64(args, 2, 1.5)?,
+                ))
+            } else {
+                f64col(ind::ttm_squeeze_momentum(&high, &low, &close, n))
+            }
+        }
 
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

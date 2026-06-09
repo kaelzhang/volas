@@ -115,6 +115,32 @@ def _atr(h, lo, c, n: int) -> pd.Series:
     return pd.Series(out)
 
 
+def _stddev(x, n: int) -> pd.Series:
+    """Population rolling standard deviation (TA-Lib STDDEV, nbdev=1)."""
+    return _s(x).rolling(n, min_periods=n).std(ddof=0)
+
+
+def _linreg(x, n: int) -> pd.Series:
+    """TA-Lib LINEARREG endpoint = intercept + slope·(n−1), regressing on x = 0..n−1
+    (oldest→newest). Skips a leading-NaN prefix (matching the volas kernel fed a finite tail)."""
+    vals = _s(x).to_numpy()
+    out = np.full(len(vals), np.nan)
+    valid = np.flatnonzero(~np.isnan(vals))
+    if len(valid) >= n:
+        xs = np.arange(n, dtype=float)
+        sx, sxx = xs.sum(), (xs * xs).sum()
+        denom = n * sxx - sx * sx
+        for i in range(int(valid[0]) + n - 1, len(vals)):
+            window = vals[i - n + 1:i + 1]
+            if np.isnan(window).any():
+                continue
+            sy, sxy = window.sum(), (xs * window).sum()
+            m = (n * sxy - sx * sy) / denom
+            b = (sy - m * sx) / n
+            out[i] = b + m * (n - 1)
+    return pd.Series(out)
+
+
 # --- Group A references (each cites its pinned source) ----------------------
 
 def bbi(o, h, lo, c, v):
@@ -417,6 +443,26 @@ def stoch_momentum(o, h, lo, c, v, k=10, d=3, signal=3, line='smi'):
     return _ema(smi, signal) if line == 'signal' else smi
 
 
+def ttm_squeeze(o, h, lo, c, v, n=20, bb_mult=2.0, kc_mult=1.5, line='momentum'):
+    """TTM Squeeze (John Carter / thinkorswim). momentum = linreg_n(C − ((HHn+LLn)/2 + SMAn)/2);
+    on = 1 when Bollinger(n, bb_mult·σ) sits inside Keltner(n, kc_mult·SMAn(TR)), else 0.
+    Source: John Carter / StockCharts — TTM Squeeze."""
+    h, lo, c = _s(h), _s(lo), _s(c)
+    sma = _sma(c, n)
+    if line == 'on':
+        sd = _stddev(c, n)
+        atr = _sma(_true_range(h, lo, c), n)
+        bb_u, bb_l = sma + bb_mult * sd, sma - bb_mult * sd
+        kc_u, kc_l = sma + kc_mult * atr, sma - kc_mult * atr
+        on = ((bb_l > kc_l) & (bb_u < kc_u)).astype(float)
+        on[bb_u.isna() | kc_u.isna()] = np.nan
+        return on
+    hh = h.rolling(n, min_periods=n).max()
+    ll = lo.rolling(n, min_periods=n).min()
+    delta = c - ((hh + ll) / 2.0 + sma) / 2.0
+    return _linreg(delta, n)
+
+
 # --- the oracle case registry ----------------------------------------------
 # (directive, reference_fn(o,h,lo,c,v) -> Series, tolerance). The directive strings are
 # the proposed command interface the Group A implementation should match.
@@ -464,4 +510,6 @@ CASES: list[tuple] = [
     ("keltner.lower:20,10,2", lambda o, h, lo, c, v: keltner(o, h, lo, c, v, 20, 10, 2.0, 'lower'), 1e-6),
     ("stoch_momentum:10,3,3", lambda o, h, lo, c, v: stoch_momentum(o, h, lo, c, v, 10, 3, 3, 'smi'), 1e-6),
     ("stoch_momentum.signal:10,3,3", lambda o, h, lo, c, v: stoch_momentum(o, h, lo, c, v, 10, 3, 3, 'signal'), 1e-6),
+    ("ttm_squeeze:20,2,1.5", lambda o, h, lo, c, v: ttm_squeeze(o, h, lo, c, v, 20, 2.0, 1.5, 'momentum'), 1e-6),
+    ("ttm_squeeze.on:20,2,1.5", lambda o, h, lo, c, v: ttm_squeeze(o, h, lo, c, v, 20, 2.0, 1.5, 'on'), 1e-9),
 ]

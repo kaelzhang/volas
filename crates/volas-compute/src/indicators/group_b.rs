@@ -307,3 +307,57 @@ pub fn stoch_momentum_signal(
 ) -> Vec<f64> {
     super::ema(&stoch_momentum(high, low, close, k, d), signal)
 }
+
+/// TTM Squeeze momentum = `linregₙ( C − ((HHₙ + LLₙ)/2 + SMAₙ(C)) / 2 )` (John Carter /
+/// thinkorswim). Source: John Carter / StockCharts — TTM Squeeze.
+pub fn ttm_squeeze_momentum(high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
+    let len = high.len();
+    let hh = super::hhv(high, n);
+    let ll = super::llv(low, n);
+    let sma = super::ma(close, n);
+    let delta: Vec<f64> = (0..len)
+        .map(|i| close[i] - ((hh[i] + ll[i]) / 2.0 + sma[i]) / 2.0)
+        .collect();
+    // `delta` warms up with NaN; linearreg's running sum would propagate it, so run the
+    // regression over the finite tail and place it back at the matching offset.
+    let start = delta.iter().position(|x| !x.is_nan()).unwrap_or(len);
+    let mut out = vec![f64::NAN; len];
+    if start < len {
+        let sub = super::linearreg(&delta[start..], n);
+        out[start..].copy_from_slice(&sub);
+    }
+    out
+}
+
+/// TTM Squeeze on/off: `1.0` when the Bollinger Bands (n, `bb_mult`·σ) sit inside the Keltner
+/// Channels (n, `kc_mult`·SMAₙ(TR)), else `0.0`; NaN until both warm up. Source: John Carter /
+/// StockCharts — TTM Squeeze (Carter's original SMA-of-range Keltner).
+pub fn ttm_squeeze_on(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    n: usize,
+    bb_mult: f64,
+    kc_mult: f64,
+) -> Vec<f64> {
+    let len = high.len();
+    let sma = super::ma(close, n);
+    let sd = super::stddev(close, n, 1.0);
+    let tr = super::tr(high, low, close);
+    let atr = kernels::sma(av(&tr), n).to_vec(); // SMA of TR (skips the leading-NaN tr[0])
+    (0..len)
+        .map(|i| {
+            let bb_u = sma[i] + bb_mult * sd[i];
+            let bb_l = sma[i] - bb_mult * sd[i];
+            let kc_u = sma[i] + kc_mult * atr[i];
+            let kc_l = sma[i] - kc_mult * atr[i];
+            if bb_u.is_nan() || kc_u.is_nan() {
+                f64::NAN
+            } else if bb_l > kc_l && bb_u < kc_u {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}

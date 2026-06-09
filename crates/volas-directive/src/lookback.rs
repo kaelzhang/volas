@@ -129,6 +129,12 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
                 _ => base,
             }
         }
+        // ttm_squeeze: the squeeze flag waits for SMAₙ(TR) (n); the momentum's linreg over the
+        // n-bar delta (itself gated at n−1) warms up at 2·(n−1).
+        "ttm_squeeze" => match sub {
+            Some("on") => arg(args, 0, 20),
+            _ => 2 * arg(args, 0, 20).saturating_sub(1),
+        },
         "tr" => 1,
         "atr" => arg(args, 0, 14),
         "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),

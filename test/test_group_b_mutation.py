@@ -28,6 +28,7 @@ DIRECTIVES = [
     'mike.weakr', 'mike.midr', 'mike.strongr', 'mike.weaks', 'mike.mids', 'mike.strongs',
     'keltner', 'keltner.upper', 'keltner.lower',
     'stoch_momentum', 'stoch_momentum.signal',
+    'ttm_squeeze', 'ttm_squeeze.on',
 ]
 
 

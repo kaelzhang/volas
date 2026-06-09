@@ -157,6 +157,7 @@ pub fn is_command(name: &str) -> bool {
             | "mike"
             | "keltner"
             | "stoch_momentum"
+            | "ttm_squeeze"
             | "tr"
             | "atr"
             | "llv"
@@ -339,6 +340,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // stoch_momentum: k (HH/LL), d (double-EMA smoothing), signal (EMA of SMI).
         ("stoch_momentum", None | Some("signal")) => {
             (vec![Int(10), Int(3), Int(3)], vec!["high", "low", "close"])
+        }
+        // ttm_squeeze: period, Bollinger σ-multiplier, Keltner range-multiplier.
+        ("ttm_squeeze", None | Some("on")) => {
+            (vec![Int(20), Float(2.0), Float(1.5)], vec!["high", "low", "close"])
         }
         ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the

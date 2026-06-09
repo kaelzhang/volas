@@ -718,6 +718,28 @@ df['stoch_momentum']
 df['stoch_momentum.signal']
 ```
 
+### `ttm_squeeze`, TTM Squeeze
+
+```
+ttm_squeeze:<period>,<bb_mult>,<kc_mult>@<high>,<low>,<close>
+ttm_squeeze.on:<period>,<bb_mult>,<kc_mult>@<high>,<low>,<close>
+```
+
+John Carter's volatility-breakout indicator. `ttm_squeeze` is the momentum histogram — the
+linear regression over `period` of `close − ((HH+LL)/2 + SMA(close))/2`. `ttm_squeeze.on` is
+`1.0` while the market is "squeezed" (the Bollinger Bands sit inside the Keltner Channels —
+low volatility, a breakout is brewing), else `0.0`.
+
+- **period?** `int=20`
+- **bb_mult?** `float=2.0` The Bollinger σ multiplier (squeeze flag only).
+- **kc_mult?** `float=1.5` The Keltner range multiplier (squeeze flag only).
+- **high? / low? / close?** `str` the input columns.
+
+```py
+df['ttm_squeeze']       # momentum histogram
+df['ttm_squeeze.on']    # 1.0 = squeeze on
+```
+
 ## Built-in Commands for Statistics
 
 ### `change`, Percentage Change
