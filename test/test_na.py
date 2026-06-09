@@ -129,3 +129,11 @@ def test_na_from_pandas_nullable_round_trip():
     assert rt["i"].dtype == "int64"
     lst = rt["i"].to_list()
     assert lst[0] == 1 and lst[1] is volas.NA and lst[2] == 3
+
+
+def test_na_display_symbol():
+    # an int/bool missing cell renders as <NA> (like element access); a float keeps NaN
+    assert "<NA>" in repr(volas.DataFrame({"a": [1, None, 3]})["a"])
+    assert "<NA>" in repr(volas.DataFrame({"a": [True, None, False]})["a"])
+    f = repr(volas.DataFrame({"a": [1.5, None, 3.0]})["a"])
+    assert "NaN" in f and "<NA>" not in f

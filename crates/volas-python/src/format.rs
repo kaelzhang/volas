@@ -10,6 +10,10 @@
 
 use volas_core::{datetime, Column, DataFrame, Index, IndexKind, Series, Tz};
 
+/// How a missing int/bool cell renders in the console (the `volas.NA` symbol); a
+/// float keeps its `NaN` na-rep.
+const NA_REPR: &str = "<NA>";
+
 // ===========================================================================
 // CSV cell formatting (shared with `DataFrame.to_csv`)
 // ===========================================================================
@@ -268,13 +272,15 @@ fn data_cells(
                 })
                 .collect()
         }
+        // An int/bool missing cell renders as the `volas.NA` symbol (matching
+        // element access); a float keeps `na_rep` (NaN) for its in-band missing.
         Column::I64(v, val) => rows
             .iter()
-            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { na_rep.to_string() })
+            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { NA_REPR.to_string() })
             .collect(),
         Column::I32(v, val) => rows
             .iter()
-            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { na_rep.to_string() })
+            .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { NA_REPR.to_string() })
             .collect(),
         Column::Bool(v, val) => rows
             .iter()
@@ -282,7 +288,7 @@ fn data_cells(
                 if val.is_valid(i) {
                     format!(" {}", if v[i] { "True" } else { "False" })
                 } else {
-                    na_rep.to_string()
+                    NA_REPR.to_string()
                 }
             })
             .collect(),
