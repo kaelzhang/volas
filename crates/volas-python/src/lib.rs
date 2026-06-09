@@ -1499,6 +1499,12 @@ impl PySeries {
     /// The boolean mask for a `where` / `mask` condition, validating it matches
     /// this series' length (pandas requires equal-shape conditionals).
     fn cond_mask(&self, cond: &PySeries) -> PyResult<Vec<bool>> {
+        if !matches!(cond.inner.data, Column::Bool(..)) {
+            return Err(PyTypeError::new_err(format!(
+                "where/mask: `cond` must be a boolean Series, got {}",
+                cond.inner.data.dtype()
+            )));
+        }
         let c = to_bool_vec(&cond.inner.data);
         if c.len() != self.inner.len() {
             return Err(PyValueError::new_err(format!(
@@ -1524,13 +1530,14 @@ impl PySeries {
             c.iter_mut().for_each(|b| *b = !*b);
         }
         let (other_col, other_dt) = where_other_resolve(other, &self.inner)?;
-        // A float column keeps its float dtype (it absorbs any fill); bool ∘ bool
-        // stays bool (pandas); an int column promotes by the type-based supertype.
+        // A float column keeps its float dtype (it absorbs any fill); a same-dtype
+        // `other` (incl. the default NA, and bool/str/datetime) keeps that dtype so
+        // it is not funneled to f64; a mixed int/float promotes by the supertype.
         let self_dt = self.inner.data.dtype();
         let target = if self_dt.is_float() {
             self_dt
-        } else if self_dt == DType::Bool && other_dt == DType::Bool {
-            DType::Bool
+        } else if self_dt == other_dt {
+            self_dt
         } else {
             binary_supertype(self_dt, other_dt)
         };
@@ -1764,7 +1771,13 @@ fn where_other_resolve(
 ) -> PyResult<(Column, DType)> {
     let n = s.len();
     match other {
-        None => Ok((Column::f64(vec![f64::NAN; n]), DType::F64)),
+        // the default `other` is a dtype-preserving all-NA column (str -> NA str,
+        // datetime -> NaT, int/bool -> their NA), so a str/datetime `where` keeps
+        // its kept values instead of funneling them to NaN.
+        None => {
+            let dt = s.data.dtype();
+            Ok((Column::na_of(dt, n), dt))
+        }
         Some(o) => {
             if let Ok(ser) = o.extract::<PyRef<PySeries>>() {
                 require_aligned(&s.index, &ser.inner.index)?;
@@ -2127,7 +2140,18 @@ impl PyDataFrame {
                 "where/mask: `cond` must have the same shape as the frame",
             ));
         }
-        let fill = other.unwrap_or(f64::NAN);
+        // the condition must be boolean — a numeric mask is rejected (pandas-shaped)
+        if let Some(cc) = cond
+            .inner
+            .columns()
+            .iter()
+            .find(|c| !matches!(c, Column::Bool(..)))
+        {
+            return Err(PyTypeError::new_err(format!(
+                "where/mask: `cond` must be a boolean frame, got a {} column",
+                cc.dtype()
+            )));
+        }
         let other_dt = match other {
             Some(x) if fits(DType::I64, x) => DType::I64,
             _ => DType::F64,
@@ -2138,14 +2162,20 @@ impl PyDataFrame {
             .iter()
             .zip(cond.inner.columns())
             .map(|(keep_col, cond_col)| {
-                // mask = where(!cond); pick per column in its own promoted dtype.
                 let mut c = to_bool_vec(cond_col);
                 if !is_where {
                     c.iter_mut().for_each(|b| *b = !*b);
                 }
                 let kd = keep_col.dtype();
-                let target = if kd.is_float() { kd } else { binary_supertype(kd, other_dt) };
-                let other_col = Column::f64(vec![fill; keep_col.len()]);
+                // the default `other` is a dtype-preserving NA (keeps str / datetime /
+                // int values); an explicit numeric fill promotes via the supertype.
+                let (other_col, target) = match other {
+                    None => (Column::na_of(kd, keep_col.len()), kd),
+                    Some(x) => {
+                        let target = if kd.is_float() { kd } else { binary_supertype(kd, other_dt) };
+                        (Column::f64(vec![x; keep_col.len()]), target)
+                    }
+                };
                 keep_col.select(&c, &other_col, target)
             })
             .collect::<Result<Vec<_>, _>>()

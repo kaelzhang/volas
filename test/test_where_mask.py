@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 import volas
+from volas import DataFrame
 
 nan = float("nan")
 
@@ -118,10 +119,14 @@ def test_int_series_assignment_keeps_int64():
     np.testing.assert_array_equal(z3.to_numpy(), [1, 9, 3, 4])
 
 
-def test_int_series_assignment_nan_upcasts_to_float():
+def test_int_series_assignment_na_keeps_int_dtype():
+    # writing NA (NaN) into an int series via a boolean mask keeps the int dtype
+    # (the NA model: a missing int stays int with a validity bit, no float upcast)
     z = _si([1, 2, 3, 4])
     z[z > 2] = float("nan")
-    assert z.dtype == "float64"
+    assert z.dtype == "int64"
+    assert z.isna().to_list() == [False, False, True, True]
+    # to_numpy still exports the NA as NaN (float), like pandas Int64.to_numpy()
     np.testing.assert_array_equal(z.to_numpy(), [1, 2, nan, nan])
 
 
@@ -200,3 +205,22 @@ def test_frame_column_assignment_still_works():
     assert d.columns == ["a", "b", "c"]
     np.testing.assert_array_equal(d["b"].to_numpy(), [5, 5])
     np.testing.assert_array_equal(d["c"].to_numpy(), [1, 2])
+
+
+def test_where_preserves_str_and_datetime_dtype():
+    # default `other` is dtype-preserving NA, not an f64 funnel that dropped values
+    m = DataFrame({'m': [True, False, True]})['m']
+    r = DataFrame({'a': ['x', 'y', 'z']})['a'].where(m)
+    assert r.dtype == 'str' and r.to_list() == ['x', volas.NA, 'z']
+    t = DataFrame({'t': np.array(['2021-01-01', '2021-01-02', '2021-01-03'], dtype='datetime64[ns]')})['t']
+    assert t.where(m).isna().to_list() == [False, True, False]
+    i = DataFrame({'i': [1, 2, 3]})['i'].where(m)
+    assert i.dtype == 'int64' and i.to_list() == [1, volas.NA, 3]
+    assert DataFrame({'a': ['x', 'y', 'z']}).where(DataFrame({'a': [True, False, True]}))['a'].to_list() == ['x', volas.NA, 'z']
+
+
+def test_where_rejects_numeric_condition():
+    with pytest.raises(TypeError):
+        DataFrame({'a': [1, 2, 3]})['a'].where(DataFrame({'c': [1, 0, 1]})['c'])
+    with pytest.raises(TypeError):
+        DataFrame({'a': [1, 2]}).where(DataFrame({'a': [1, 0]}))

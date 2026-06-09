@@ -168,6 +168,22 @@ impl Column {
         Column::Datetime(Arc::new(v))
     }
 
+    /// An all-missing column of `dtype` with `len` rows — the dtype-preserving
+    /// default `other` for `where` / `mask` (so a kept value stays in its dtype
+    /// and a replaced one becomes NA, never an f64-funnel NaN).
+    pub fn na_of(dtype: DType, len: usize) -> Column {
+        let all_na = || Validity::from_valid_iter(len, std::iter::repeat(false).take(len));
+        match dtype {
+            DType::F64 => Column::f64(vec![f64::NAN; len]),
+            DType::F32 => Column::f32(vec![f32::NAN; len]),
+            DType::I64 => Column::i64_with(vec![0; len], all_na()),
+            DType::I32 => Column::i32_with(vec![0; len], all_na()),
+            DType::Bool => Column::bool_with(vec![false; len], all_na()),
+            DType::Utf8 => Column::str_with(vec![String::new(); len], all_na()),
+            DType::Datetime => Column::datetime(vec![i64::MIN; len]),
+        }
+    }
+
     /// Number of elements.
     pub fn len(&self) -> usize {
         match self {
@@ -1006,6 +1022,22 @@ impl Column {
                     self.select_nulls(cond, other),
                 ))
             }
+            // str / datetime stay in their dtype (a default `other` of NA keeps the
+            // kept values and marks the rest missing) instead of an f64 funnel that
+            // turned every kept string into NaN.
+            DType::Utf8 => {
+                let (a, b) = (self.as_str_vec()?, other.as_str_vec()?);
+                Ok(Column::str_with(
+                    (0..cond.len()).map(|i| if cond[i] { a[i].clone() } else { b[i].clone() }).collect(),
+                    self.select_nulls(cond, other),
+                ))
+            }
+            DType::Datetime => {
+                let (a, b) = (self.as_datetime_vec()?, other.as_datetime_vec()?);
+                Ok(Column::datetime(
+                    (0..cond.len()).map(|i| if cond[i] { a[i] } else { b[i] }).collect(),
+                ))
+            }
             _ => Ok(Column::f64(stats::select(cond, &self.to_f64_vec(), &other.to_f64_vec()))),
         }
     }
@@ -1219,6 +1251,23 @@ impl Column {
                     }
                 })
                 .collect(),
+        }
+    }
+
+    /// The column's `String` values (a `Str` column directly); errors otherwise.
+    /// Used by `select` so a str `where` / `mask` keeps its values dtype-preserving.
+    fn as_str_vec(&self) -> Result<Vec<String>> {
+        match self {
+            Column::Str(v, _) => Ok((**v).clone()),
+            other => Err(VolasError::DType(format!("cannot select a {} column as str", other.dtype()))),
+        }
+    }
+
+    /// The column's epoch-ns values (a `Datetime` column directly); errors otherwise.
+    fn as_datetime_vec(&self) -> Result<Vec<i64>> {
+        match self {
+            Column::Datetime(v) => Ok((**v).clone()),
+            other => Err(VolasError::DType(format!("cannot select a {} column as datetime", other.dtype()))),
         }
     }
 
