@@ -513,6 +513,16 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
             .ok_or_else(|| PyKeyError::new_err(format!("invalid datetime label {s:?}")));
     }
     if let Ok(i) = key.extract::<i64>() {
+        // i64::MIN is the NaT sentinel (D2): a missing instant is volas.NA, not a
+        // constructable timestamp. Reject it here — the single chokepoint for
+        // Timestamp(...), TimeFrame.unify(...), and datetime label lookups — so a
+        // raw NaT can never become a bucketable / civil timestamp (which would
+        // render "NaT" yet expose a real 1677 .year, an internal inconsistency).
+        if i == i64::MIN {
+            return Err(PyValueError::new_err(
+                "NaT (i64::MIN) is not a valid timestamp; a missing instant is volas.NA",
+            ));
+        }
         return Ok(i);
     }
     Err(PyKeyError::new_err(

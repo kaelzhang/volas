@@ -109,8 +109,14 @@ pub fn epoch_to_ns_f64(value: f64, unit: &str) -> Option<i64> {
 pub fn civil_parts(ns: i64) -> (i64, i64, i64, i64, i64, i64) {
     let secs = ns.div_euclid(1_000_000_000);
     let nsub = ns.rem_euclid(1_000_000_000) as u32;
+    // An i64 ns count spans ~1677..=2262, well inside chrono's range, so this is
+    // always `Some` — the previous `unwrap_or_default()` would have silently
+    // returned the 1970 epoch for an out-of-range value instead of failing loud.
+    // `NaT` (`i64::MIN`) decodes to a real 1677 civil date here, so callers MUST
+    // pre-filter it (the binding now rejects raw NaT at the Timestamp / unify
+    // boundary), per the doc above.
     let dt = DateTime::from_timestamp(secs, nsub)
-        .unwrap_or_default()
+        .expect("an i64-ns timestamp is within chrono's representable range")
         .naive_utc();
     (
         dt.year() as i64,
