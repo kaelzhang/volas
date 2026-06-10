@@ -85,11 +85,19 @@ coverage-html:
 # extension itself is NOT reinstalled, preserving the release build). A comparison
 # library that is absent is skipped by the harness.
 #
-#   make benchmark                    # console table only
-#   make benchmark INDICATOR=roc:10   # one coverage row, no web report
-#   make benchmark WEB_REPORT=1       # full run + ./benchmark-report.html
+#   make benchmark                    # full run, archived under .benchmarks/<stamp>/
+#   make benchmark INDICATOR=roc:10   # one coverage row only, not archived
+#
+# Every full run is persisted to .benchmarks/<date>-<short-commit>[-dirty]/ (the
+# whole dir is gitignored), each holding benchmark.json + report.html + meta.txt,
+# so a given Git commit's performance can be retrieved and compared later (e.g.
+#   python scripts/perf_gate.py .benchmarks/<new>/benchmark.json \
+#       --base .benchmarks/<old>/benchmark.json
+# ). The latest run is also mirrored to .benchmarks/last.json + ./benchmark-report.html.
 BENCH_OPTS := --benchmark-only --benchmark-group-by=func,param:indicator \
               --benchmark-columns=mean,median,ops,rounds --benchmark-sort=name
+BENCH_STAMP := $(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+BENCH_DIR := .benchmarks/$(BENCH_STAMP)
 benchmark: build
 	@echo "\033[1m>> Installing dev + benchmark comparison libraries... <<\033[0m"
 	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(PIP) install -q -r /dev/stdin
@@ -97,13 +105,13 @@ ifdef INDICATOR
 	@if [ -n "$(WEB_REPORT)" ]; then echo "WEB_REPORT is ignored when INDICATOR is set."; fi
 	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --volas-benchmark-indicator="$(INDICATOR)"
 else
-ifdef WEB_REPORT
-	@mkdir -p .benchmarks
-	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --benchmark-json=.benchmarks/last.json
-	@$(PYTHON) scripts/benchmark_report.py .benchmarks/last.json benchmark-report.html
-else
-	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS)
-endif
+	@mkdir -p $(BENCH_DIR)
+	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --benchmark-json=$(BENCH_DIR)/benchmark.json
+	@$(PYTHON) scripts/benchmark_report.py $(BENCH_DIR)/benchmark.json $(BENCH_DIR)/report.html
+	@printf 'commit: %s\ndate:   %s\ndirty:  %s\n' "$$(git rev-parse HEAD 2>/dev/null || echo none)" "$$(date -u +%FT%TZ)" "$$(git diff --quiet HEAD 2>/dev/null && echo no || echo yes)" > $(BENCH_DIR)/meta.txt
+	@cp $(BENCH_DIR)/benchmark.json .benchmarks/last.json
+	@cp $(BENCH_DIR)/report.html benchmark-report.html
+	@echo "\033[1m>> Benchmark archived to $(BENCH_DIR)/ <<\033[0m"
 endif
 
 # Run linters
