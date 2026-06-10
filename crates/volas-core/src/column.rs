@@ -8,6 +8,8 @@
 //! export) is still alive. `F64` columns use `NaN` for missing values (matching
 //! stock-pandas / pandas semantics).
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::datetime;
@@ -360,6 +362,76 @@ impl Column {
             Column::I32(v, val) => Column::i32_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx)),
             Column::Str(v, val) => Column::str_with(idx.iter().map(|&i| v[i].clone()).collect(), val.take(idx)),
             Column::Datetime(v) => Column::datetime(idx.iter().map(|&i| v[i]).collect()),
+        }
+    }
+
+    /// Number of present (non-missing) values (pandas `count`): `len - null_count`,
+    /// reading the validity for every dtype (a float `NaN`, an int/bool/str NA, a
+    /// datetime `NaT`).
+    pub fn count(&self) -> usize {
+        self.len() - self.null_count()
+    }
+
+    /// Number of distinct present values (pandas `nunique`, `dropna=True`).
+    pub fn nunique(&self) -> usize {
+        self.group_records().iter().filter(|(_, _, na)| !na).count()
+    }
+
+    /// First-appearance index of each distinct value (pandas `unique` order),
+    /// **including one missing slot** if the column has any NA — so `take`ing these
+    /// indices yields the distinct values with a single `NA` where present.
+    pub fn unique_indices(&self) -> Vec<usize> {
+        self.group_records().iter().map(|(first, _, _)| *first).collect()
+    }
+
+    /// Distinct-value group records `(first_index, count, is_na)` in order of first
+    /// appearance — the shared basis of `nunique` / `unique` / `value_counts`. Every
+    /// missing value (`NaN` / NA / `NaT`) collapses into one `is_na = true` group.
+    pub(crate) fn group_records(&self) -> Vec<(usize, usize, bool)> {
+        let len = self.len();
+        match self {
+            Column::F64(v) => group_by(len, |i| float_key(v[i])),
+            Column::F32(v) => group_by(len, |i| float_key(v[i] as f64)),
+            Column::I64(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i])),
+            Column::I32(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i] as i64)),
+            Column::Bool(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i] as i64)),
+            Column::Str(v, val) => group_by(len, |i| val.is_valid(i).then(|| v[i].clone())),
+            Column::Datetime(v) => group_by(len, |i| (v[i] != i64::MIN).then_some(v[i])),
+        }
+    }
+
+    /// Indices that sort the column (pandas `sort_values`), **stable**, with every
+    /// missing value placed last regardless of `ascending` (pandas `na_position =
+    /// 'last'`). Present values compare per dtype (float by value, str lexically).
+    pub fn argsort(&self, ascending: bool) -> Vec<usize> {
+        let mut idx: Vec<usize> = (0..self.len()).collect();
+        idx.sort_by(|&a, &b| match (self.is_valid(a), self.is_valid(b)) {
+            (false, false) => Ordering::Equal,
+            (false, true) => Ordering::Greater, // NA sinks to the end
+            (true, false) => Ordering::Less,
+            (true, true) => {
+                let o = self.cmp_at(a, b);
+                if ascending {
+                    o
+                } else {
+                    o.reverse()
+                }
+            }
+        });
+        idx
+    }
+
+    /// Order two **present** values at `a` / `b` (helper for [`argsort`](Self::argsort);
+    /// floats are non-`NaN` here, so `partial_cmp` is total).
+    fn cmp_at(&self, a: usize, b: usize) -> Ordering {
+        match self {
+            Column::F64(v) => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
+            Column::F32(v) => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
+            Column::I64(v, _) => v[a].cmp(&v[b]),
+            Column::I32(v, _) => v[a].cmp(&v[b]),
+            Column::Bool(v, _) => v[a].cmp(&v[b]),
+            Column::Str(v, _) => v[a].cmp(&v[b]),
+            Column::Datetime(v) => v[a].cmp(&v[b]),
         }
     }
 
@@ -1151,6 +1223,44 @@ impl Column {
         Ok(Column::f64(a.iter().zip(&b).map(|(&x, &y)| x / y).collect()))
     }
 
+    /// Floor division `self // other` (pandas `//`), dtype-preserving like pandas:
+    /// `int // int` stays integer (the supertype, exact even past 2^53) **unless** a
+    /// present divisor is `0`, in which case the whole result is float64 (`inf` /
+    /// `-inf` / `nan`) — exactly how pandas computes it; anything involving a float
+    /// is float64. NA in either operand propagates. `bool // bool` is an error, like
+    /// true division.
+    pub fn floordiv(&self, other: &Column) -> Result<Column> {
+        if matches!((self, other), (Column::Bool(_, _), Column::Bool(_, _))) {
+            return Err(VolasError::DType(
+                "floor division is not supported between two bool columns".into(),
+            ));
+        }
+        let n = self.len();
+        let st = binary_supertype(self.dtype(), other.dtype());
+        // A present divisor of 0 forces pandas' float path (`inf` / `-inf` / `nan`).
+        let int_path = matches!(st, DType::I64 | DType::I32)
+            && !(0..n).any(|i| other.is_valid(i) && other.get_f64(i) == 0.0);
+        if int_path {
+            let (a, b) = (self.as_i64_vec()?, other.as_i64_vec()?);
+            let present = |i: usize| self.is_valid(i) && other.is_valid(i);
+            // exact i64 floor division (the divisor is non-zero where present);
+            // NA positions hold a 0 placeholder, masked by the result validity.
+            let out: Vec<i64> = (0..n)
+                .map(|i| if present(i) { ifloordiv(a[i], b[i]) } else { 0 })
+                .collect();
+            let val = Validity::from_valid_iter(n, (0..n).map(present));
+            // i32 // i32 stays i32 (the result fits); any i64 operand widens to i64.
+            Ok(if st == DType::I32 {
+                Column::i32_with(out.iter().map(|&x| x as i32).collect(), val)
+            } else {
+                Column::i64_with(out, val)
+            })
+        } else {
+            let (a, b) = (self.to_f64_vec(), other.to_f64_vec());
+            Ok(Column::f64(a.iter().zip(&b).map(|(&x, &y)| (x / y).floor()).collect()))
+        }
+    }
+
     /// Three-valued logical `and` / `or` / `xor` (pandas `&` / `|` / `^`), Kleene
     /// semantics: a present `false` makes `and` false and a present `true` makes
     /// `or` true even when the other side is missing; otherwise a missing operand
@@ -1568,6 +1678,61 @@ fn clip_vec<T: Numeric>(v: &[T], lo: Option<f64>, hi: Option<f64>) -> Vec<T> {
             y
         })
         .collect()
+}
+
+/// Integer floor division (toward negative infinity, unlike Rust's truncating
+/// `/`), wrapping on overflow like numpy. The divisor is non-zero (callers route
+/// a zero divisor through the float path).
+fn ifloordiv(a: i64, b: i64) -> i64 {
+    let q = a.wrapping_div(b);
+    let r = a.wrapping_rem(b);
+    if r != 0 && (r < 0) != (b < 0) {
+        q - 1
+    } else {
+        q
+    }
+}
+
+/// A hashable key for a float value, or `None` for `NaN` (which groups as NA).
+/// `-0.0` is canonicalized to `+0.0` so the two zeros count as one value.
+fn float_key(x: f64) -> Option<u64> {
+    if x.is_nan() {
+        None
+    } else if x == 0.0 {
+        Some(0)
+    } else {
+        Some(x.to_bits())
+    }
+}
+
+/// Group `0..len` by `key(i)` (a `None` key is the single NA group), returning
+/// `(first_index, count, is_na)` per distinct value in order of first appearance.
+fn group_by<K: Eq + std::hash::Hash>(
+    len: usize,
+    key: impl Fn(usize) -> Option<K>,
+) -> Vec<(usize, usize, bool)> {
+    let mut order: Vec<(usize, usize, bool)> = Vec::new();
+    let mut seen: HashMap<K, usize> = HashMap::new();
+    let mut na: Option<usize> = None;
+    for i in 0..len {
+        match key(i) {
+            None => match na {
+                Some(g) => order[g].1 += 1,
+                None => {
+                    na = Some(order.len());
+                    order.push((i, 1, true));
+                }
+            },
+            Some(k) => match seen.get(&k) {
+                Some(&g) => order[g].1 += 1,
+                None => {
+                    seen.insert(k, order.len());
+                    order.push((i, 1, false));
+                }
+            },
+        }
+    }
+    order
 }
 
 /// Running OR (`or = true`, backs bool `cummax`) / running AND (`cummin`).

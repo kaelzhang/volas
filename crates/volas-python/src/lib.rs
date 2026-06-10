@@ -976,6 +976,43 @@ impl PySeries {
         })
     }
 
+    /// Number of non-missing values (pandas `count`) -> `int`.
+    fn count(&self) -> usize {
+        self.inner.data.count()
+    }
+
+    /// Number of distinct non-missing values (pandas `nunique`) -> `int`.
+    fn nunique(&self) -> usize {
+        self.inner.data.nunique()
+    }
+
+    /// The distinct values in order of first appearance (pandas `unique`) as a
+    /// NumPy array, keeping a single missing slot if the series has any NA.
+    fn unique<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
+        let idx = self.inner.data.unique_indices();
+        column_to_numpy(py, &self.inner.data.take(&idx))
+    }
+
+    /// Sort by value (pandas `sort_values`), stable, with missing values last; the
+    /// index follows the permutation.
+    #[pyo3(signature = (ascending = true))]
+    fn sort_values(&self, ascending: bool) -> PySeries {
+        self.reindexed(&self.inner.data.argsort(ascending))
+    }
+
+    /// First `n` rows (pandas `head`).
+    #[pyo3(signature = (n = 5))]
+    fn head(&self, n: usize) -> PySeries {
+        self.sliced(0, n.min(self.inner.len()))
+    }
+
+    /// Last `n` rows (pandas `tail`).
+    #[pyo3(signature = (n = 5))]
+    fn tail(&self, n: usize) -> PySeries {
+        let len = self.inner.len();
+        self.sliced(len.saturating_sub(n), len)
+    }
+
     /// True if any element is truthy (NaN skipped) — pandas `any` -> `np.bool_`.
     fn any(&self, py: Python<'_>) -> Py<PyAny> {
         let r = match &self.inner.data {
@@ -1218,6 +1255,12 @@ impl PySeries {
     fn __rtruediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         series_div(&self.inner, other, true)
     }
+    fn __floordiv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_floordiv(&self.inner, other, false)
+    }
+    fn __rfloordiv__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        series_floordiv(&self.inner, other, true)
+    }
 
     // Element-wise comparisons -> bool Series (pandas-style).
     fn __lt__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -1429,6 +1472,30 @@ impl PySeries {
 }
 
 impl PySeries {
+    /// A new Series whose data and index are gathered by `idx` (backs
+    /// `sort_values` and any fancy-index reorder).
+    fn reindexed(&self, idx: &[usize]) -> PySeries {
+        PySeries {
+            inner: Series::new(
+                self.inner.name.clone(),
+                self.inner.data.take(idx),
+                Arc::new(self.inner.index.take(idx)),
+            ),
+        }
+    }
+
+    /// A new Series with the `[start, end)` row slice of both data and index
+    /// (backs `head` / `tail`).
+    fn sliced(&self, start: usize, end: usize) -> PySeries {
+        PySeries {
+            inner: Series::new(
+                self.inner.name.clone(),
+                self.inner.data.slice(start, end),
+                Arc::new(self.inner.index.slice(start, end)),
+            ),
+        }
+    }
+
     /// Box a float statistic as the column's float dtype: `np.float32` for an f32
     /// column, else `np.float64` (pandas: `f32.mean() -> np.float32`).
     fn box_float(&self, py: Python<'_>, value: f64) -> Py<PyAny> {
@@ -1675,6 +1742,14 @@ fn series_div(s: &Series, other: &Bound<'_, PyAny>, swap: bool) -> PyResult<PySe
     let rhs = series_rhs_col(s, other)?;
     let (lhs, rhs) = if swap { (&rhs, &s.data) } else { (&s.data, &rhs) };
     Ok(col_to_series(s, lhs.div(rhs).map_err(pyerr)?))
+}
+
+/// A Series `//` op (floor division, dtype-preserving). `swap` reflects it
+/// (`__rfloordiv__`).
+fn series_floordiv(s: &Series, other: &Bound<'_, PyAny>, swap: bool) -> PyResult<PySeries> {
+    let rhs = series_rhs_col(s, other)?;
+    let (lhs, rhs) = if swap { (&rhs, &s.data) } else { (&s.data, &rhs) };
+    Ok(col_to_series(s, lhs.floordiv(rhs).map_err(pyerr)?))
 }
 
 /// Element-wise comparison -> bool Series (positional; NaN compares `false` for
@@ -2760,6 +2835,16 @@ impl PyDataFrame {
     fn tail(&self, n: usize) -> PyDataFrame {
         let h = self.inner.height();
         PyDataFrame::plain(self.inner.slice(h.saturating_sub(n), h))
+    }
+
+    /// Per-column count of non-missing values (pandas `count`) -> a Series indexed
+    /// by column name (`int64`), reading each column's validity.
+    fn count(&self) -> PySeries {
+        let names: Vec<String> = self.inner.names().to_vec();
+        let counts: Vec<i64> = self.inner.columns().iter().map(|c| c.count() as i64).collect();
+        PySeries {
+            inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
+        }
     }
 
     /// Per-column dtypes as `{name: dtype_str}` (pandas `dtypes`).

@@ -210,7 +210,12 @@ impl Index {
     /// A `[start, end)` slice (the name and a datetime tz are preserved).
     pub fn slice(&self, start: usize, end: usize) -> Index {
         let kind = match &self.kind {
-            IndexKind::Range(_) => IndexKind::Range(end.saturating_sub(start)),
+            // A range starting at 0 stays an (implicit) range; a non-zero start
+            // cannot be expressed as `Range`, so it materializes the actual labels
+            // (`start..end`) — e.g. `tail(2)` of `0..7` keeps labels `[5, 6]`, not
+            // a reset `[0, 1]`, matching pandas.
+            IndexKind::Range(_) if start == 0 => IndexKind::Range(end),
+            IndexKind::Range(_) => IndexKind::Int64((start as i64..end as i64).collect()),
             IndexKind::Int64(v) => IndexKind::Int64(v[start..end].to_vec()),
             IndexKind::Datetime(v, tz) => IndexKind::Datetime(v[start..end].to_vec(), *tz),
             IndexKind::Str(v) => IndexKind::Str(v[start..end].to_vec()),
