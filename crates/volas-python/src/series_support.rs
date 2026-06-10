@@ -242,41 +242,67 @@ pub(crate) fn where_other_resolve(
                 let dt = ser.inner.data.dtype();
                 return Ok((ser.inner.data.clone(), dt));
             }
-            // a scalar fill into a str / datetime column is typed to that dtype (a
-            // str scalar, a timestamp / datetime string), like the assignment path;
-            // an incompatible scalar (a number into a str or datetime column) is a
-            // TypeError — never a silent numeric -> non-numeric coercion (C4).
-            match s.data.dtype() {
-                DType::Utf8 => {
-                    let v = o.extract::<String>().map_err(|_| {
-                        PyTypeError::new_err("fill for a str column must be a string")
-                    })?;
-                    Ok((Column::str(vec![v; n]), DType::Utf8))
-                }
-                DType::Datetime => {
-                    // a bare number is not a datetime — require a volas.Timestamp or
-                    // a datetime string (parse_ts handles both); reject the rest so a
-                    // number cannot silently become an epoch-ns instant.
-                    if o.extract::<PyRef<PyTimestamp>>().is_err() && o.extract::<String>().is_err() {
-                        return Err(PyTypeError::new_err(
-                            "fill for a datetime column must be a Timestamp or datetime string, not a number",
-                        ));
-                    }
-                    Ok((Column::datetime(vec![parse_ts(o)?; n]), DType::Datetime))
-                }
-                // numeric / bool columns: the value-based promotion (an integral
-                // value contributes int, so it stays int; bool stays bool).
-                _ if o.extract::<bool>().is_ok() => {
-                    Ok((Column::bool(vec![o.extract::<bool>()?; n]), DType::Bool))
-                }
-                _ => {
-                    let x = o.extract::<f64>().map_err(|_| {
-                        PyTypeError::new_err("fill must be a number, a matching-dtype scalar, or a Series")
-                    })?;
-                    let dt = if fits(DType::I64, x) { DType::I64 } else { DType::F64 };
-                    Ok((Column::f64(vec![x; n]), dt))
-                }
+            scalar_fill_col(o, s.data.dtype(), n)
+        }
+    }
+}
+
+/// Resolve a scalar `other` fill to a length-`n` column typed to the target
+/// `dtype`, plus the dtype it contributes. The shared typed-scalar rule for both
+/// the Series and the (per-column) DataFrame `where` / `mask` / `fillna` surfaces:
+/// a str scalar into a str column, a Timestamp / datetime string into a datetime
+/// column, a bool/number into a numeric-family column. An incompatible scalar (a
+/// number into a str or datetime column) is a `TypeError` — never a silent
+/// numeric -> non-numeric coercion (C4).
+pub(crate) fn scalar_fill_col(
+    o: &Bound<'_, PyAny>,
+    dtype: DType,
+    n: usize,
+) -> PyResult<(Column, DType)> {
+    match dtype {
+        DType::Utf8 => {
+            let v = o.extract::<String>().map_err(|_| {
+                PyTypeError::new_err("fill for a str column must be a string")
+            })?;
+            Ok((Column::str(vec![v; n]), DType::Utf8))
+        }
+        DType::Datetime => {
+            // a bare number is not a datetime — require a volas.Timestamp or a
+            // datetime string (parse_ts handles both); reject the rest so a number
+            // cannot silently become an epoch-ns instant.
+            if o.extract::<PyRef<PyTimestamp>>().is_err() && o.extract::<String>().is_err() {
+                return Err(PyTypeError::new_err(
+                    "fill for a datetime column must be a Timestamp or datetime string, not a number",
+                ));
             }
+            Ok((Column::datetime(vec![parse_ts(o)?; n]), DType::Datetime))
+        }
+        // a bool column keeps bool for a bool fill or a 0/1 numeric fill; any other
+        // number promotes the (numeric-family) bool column to float — matching
+        // Column::fillna, so the Series and DataFrame surfaces agree on bool fills.
+        DType::Bool => {
+            if let Ok(b) = o.extract::<bool>() {
+                return Ok((Column::bool(vec![b; n]), DType::Bool));
+            }
+            let x = o.extract::<f64>().map_err(|_| {
+                PyTypeError::new_err("fill must be a number, a matching-dtype scalar, or a Series")
+            })?;
+            if x == 0.0 || x == 1.0 {
+                Ok((Column::bool(vec![x != 0.0; n]), DType::Bool))
+            } else {
+                Ok((Column::f64(vec![x; n]), DType::F64))
+            }
+        }
+        // a numeric column with a bool fill contributes bool (value-based promotion).
+        _ if o.extract::<bool>().is_ok() => {
+            Ok((Column::bool(vec![o.extract::<bool>()?; n]), DType::Bool))
+        }
+        _ => {
+            let x = o.extract::<f64>().map_err(|_| {
+                PyTypeError::new_err("fill must be a number, a matching-dtype scalar, or a Series")
+            })?;
+            let dt = if fits(DType::I64, x) { DType::I64 } else { DType::F64 };
+            Ok((Column::f64(vec![x; n]), dt))
         }
     }
 }

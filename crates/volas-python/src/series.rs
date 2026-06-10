@@ -910,6 +910,13 @@ impl PySeries {
     /// `mask` / `fillna`, so all three resolve a fill the same dtype-typed way
     /// (str scalar, parsed timestamp, NA-preserving) instead of funnelling to f64.
     pub(crate) fn select_with(&self, keep: &[bool], other: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
+        // Lazy: if every cell is kept, no fill is applied, so the fill's type /
+        // alignment is irrelevant — return self unchanged (dtype intact). This keeps
+        // an all-keep where/mask (and a dense-column fillna) from type-checking a
+        // fill it never uses, matching the per-column DataFrame surface.
+        if keep.iter().all(|&b| b) {
+            return Ok(PySeries { inner: self.inner.clone() });
+        }
         let (other_col, other_dt) = where_other_resolve(other, &self.inner)?;
         // A float column keeps its float dtype (it absorbs any fill); a same-dtype
         // `other` (incl. the default NA, and bool/str/datetime) keeps that dtype so

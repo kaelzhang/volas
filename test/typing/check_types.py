@@ -55,3 +55,21 @@ assert_type(df.columns, list[str])
 assert_type(df.head(), DataFrame)
 assert_type(volas.read_csv("x.csv"), DataFrame)
 assert_type(TimeFrame.m5, TimeFrame)  # preset is a TimeFrame instance, not a method
+
+# Typed scalar fills accepted by where / mask / fillna (FU-P1-01 / FU-P2-04): the
+# widened stubs must accept a str / Timestamp / volas.NA / bool fill, not just a
+# number — these calls work at runtime but previously failed mypy --strict.
+mask = s > 0.0
+assert_type(s.where(mask, "z"), Series)
+assert_type(s.where(mask, Timestamp("2021-01-01")), Series)
+assert_type(s.where(mask, volas.NA), Series)
+assert_type(s.mask(mask, True), Series)
+assert_type(s.fillna("z"), Series)
+assert_type(s.fillna(volas.NA), Series)
+
+fmask = df.isna()
+assert_type(df.where(fmask, "z"), DataFrame)
+assert_type(df.where(fmask, volas.NA), DataFrame)
+assert_type(df.mask(fmask, 0), DataFrame)
+assert_type(df.fillna("z"), DataFrame)
+assert_type(df.fillna(volas.NA), DataFrame)

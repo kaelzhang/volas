@@ -8,7 +8,7 @@ use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use volas_core::{
-    stats, CmpOp, Column, DataFrame, Index,
+    binary_supertype, stats, CmpOp, Column, DataFrame, Index,
     IndexKind, Series, Tz,
 };
 
@@ -371,20 +371,51 @@ impl PyDataFrame {
     }
 
     /// Replace missing values with `value` in every column (pandas `fillna`),
-    /// delegating to the per-column validity-aware `Column::fillna` so int / bool
-    /// holes are filled dtype-preserving (like the Series version), not just float
-    /// NaN. A `str` / `datetime` column with a missing cell raises a `TypeError`
-    /// (a numeric fill cannot apply; volas has no `object` dtype) — a dense
-    /// (no-hole) str / datetime column is untouched. For directional fill use
-    /// `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
-    pub(crate) fn fillna(&self, value: f64) -> PyResult<PyDataFrame> {
-        let cols: Vec<Column> = self
+    /// dtype-preserving like the Series version: `value` is a typed scalar — a
+    /// string fills a str column, a Timestamp / datetime string fills a datetime
+    /// column, a number / bool fills the numeric family, and `volas.NA` is a no-op.
+    /// A dense (no-hole) column is untouched (so a numeric `fillna(0)` over a mixed
+    /// frame skips its holeless str / datetime columns); a column whose hole the
+    /// fill can't take raises a `TypeError` (volas has no `object` dtype to mix
+    /// types — C4). For directional fill use `ffill` / `bfill` (pandas 3.0 removed
+    /// `fillna(method=)`).
+    pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        // Per column, fill the missing cells with the typed scalar (str into str,
+        // Timestamp / datetime string into datetime, number / bool into a numeric-
+        // family column), mirroring the Series surface. A `volas.NA` fill is a
+        // dtype-preserving no-op. A dense (no-hole) column is untouched, so a numeric
+        // `fillna(0)` over a mixed frame skips its holeless str / datetime columns
+        // and only rejects a column that actually has a hole the fill can't take
+        // (C4 — no silent numeric -> non-numeric coercion). Atomic: every column is
+        // resolved before any frame is built, so a rejected column mutates nothing.
+        let na_like = is_na_like_py(value);
+        let cols = self
             .inner
             .columns()
             .iter()
-            .map(|c| c.fillna(value))
-            .collect::<volas_core::Result<_>>()
-            .map_err(pyerr)?;
+            .map(|c| -> PyResult<Column> {
+                if c.null_count() == 0 {
+                    return Ok(c.clone());
+                }
+                let n = c.len();
+                let kd = c.dtype();
+                let keep: Vec<bool> = (0..n).map(|i| c.is_valid(i)).collect();
+                let (other_col, target) = if na_like {
+                    (Column::na_of(kd, n), kd)
+                } else {
+                    let (oc, odt) = scalar_fill_col(value, kd, n)?;
+                    let target = if kd.is_float() {
+                        kd
+                    } else if kd == odt {
+                        kd
+                    } else {
+                        binary_supertype(kd, odt)
+                    };
+                    (oc, target)
+                };
+                c.select(&keep, &other_col, target).map_err(pyerr)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         self.with_columns(cols)
     }
 
@@ -514,17 +545,26 @@ impl PyDataFrame {
     }
 
     /// pandas `DataFrame.where`: keep each cell where `cond` is True, else `other`
-    /// (default NaN). `cond` is a same-shape boolean frame (e.g. from `isna`);
-    /// columns are taken as float. The inverse is `mask`.
+    /// (a typed scalar, resolved per column like the Series surface; default /
+    /// `volas.NA` is a dtype-preserving NA fill). `cond` is a same-shape boolean
+    /// frame (e.g. from `isna`). The inverse is `mask`.
     #[pyo3(name = "where", signature = (cond, other = None))]
-    pub(crate) fn where_(&self, cond: &PyDataFrame, other: Option<f64>) -> PyResult<PyDataFrame> {
+    pub(crate) fn where_(
+        &self,
+        cond: &PyDataFrame,
+        other: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
         self.where_mask(cond, other, true)
     }
 
     /// pandas `DataFrame.mask`: replace each cell with `other` where `cond` is
     /// True, keep it elsewhere — the inverse of `where`.
     #[pyo3(signature = (cond, other = None))]
-    pub(crate) fn mask(&self, cond: &PyDataFrame, other: Option<f64>) -> PyResult<PyDataFrame> {
+    pub(crate) fn mask(
+        &self,
+        cond: &PyDataFrame,
+        other: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
         self.where_mask(cond, other, false)
     }
 

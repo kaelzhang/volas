@@ -299,7 +299,7 @@ impl PyDataFrame {
     pub(crate) fn where_mask(
         &self,
         cond: &PyDataFrame,
-        other: Option<f64>,
+        other: Option<&Bound<'_, PyAny>>,
         is_where: bool,
     ) -> PyResult<PyDataFrame> {
         if cond.inner.width() != self.inner.width() || cond.inner.height() != self.inner.height() {
@@ -319,34 +319,45 @@ impl PyDataFrame {
                 cc.dtype()
             )));
         }
-        let other_dt = match other {
-            Some(x) if fits(DType::I64, x) => DType::I64,
-            _ => DType::F64,
-        };
+        // a missing `other` (default) or an explicit NA / NaN fill is a dtype-
+        // preserving all-NA fill — the typed scalar (str / Timestamp / number /
+        // bool) path runs per column otherwise (C2/C4), mirroring the Series surface.
+        let na_like = other.map(is_na_like_py).unwrap_or(true);
         let cols = self
             .inner
             .columns()
             .iter()
             .zip(cond.inner.columns())
-            .map(|(keep_col, cond_col)| {
+            .map(|(keep_col, cond_col)| -> PyResult<Column> {
                 let mut c = to_bool_vec(cond_col);
                 if !is_where {
                     c.iter_mut().for_each(|b| *b = !*b);
                 }
+                // Lazy: a column whose cells are all kept is returned unchanged, so an
+                // all-keep column never type-checks a fill it does not use (parity with
+                // Series.select_with).
+                if c.iter().all(|&b| b) {
+                    return Ok(keep_col.clone());
+                }
                 let kd = keep_col.dtype();
-                // the default `other` is a dtype-preserving NA (keeps str / datetime /
-                // int values); an explicit numeric fill promotes via the supertype.
-                let (other_col, target) = match other {
-                    None => (Column::na_of(kd, keep_col.len()), kd),
-                    Some(x) => {
-                        let target = if kd.is_float() { kd } else { binary_supertype(kd, other_dt) };
-                        (Column::f64(vec![x; keep_col.len()]), target)
-                    }
+                let (other_col, target) = if na_like {
+                    (Column::na_of(kd, keep_col.len()), kd)
+                } else {
+                    let (oc, odt) = scalar_fill_col(other.unwrap(), kd, keep_col.len())?;
+                    // a float column absorbs any fill; a same-dtype fill keeps that
+                    // dtype; a mixed numeric fill promotes by the supertype.
+                    let target = if kd.is_float() {
+                        kd
+                    } else if kd == odt {
+                        kd
+                    } else {
+                        binary_supertype(kd, odt)
+                    };
+                    (oc, target)
                 };
-                keep_col.select(&c, &other_col, target)
+                keep_col.select(&c, &other_col, target).map_err(pyerr)
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(pyerr)?;
+            .collect::<PyResult<Vec<_>>>()?;
         self.with_columns(cols)
     }
 
