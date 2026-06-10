@@ -181,21 +181,30 @@ def test_series_has_no_repr_html():
 
 # --- Row repr (== str) -------------------------------------------------------
 
+# A Row is a typed record, not a Series: its footer carries the row label but
+# never claims a dtype (pandas prints `dtype: object` only because its row IS an
+# object Series — volas bans object).
 ROW_CASES = {
     "floats": (
         lambda: vdf({"open": [1.5, 2.0], "close": [3.0, 4.0]}).iloc[0],
-        "open     1.5\nclose    3.0\nName: 0, dtype: float64",
+        "open     1.5\nclose    3.0\nName: 0",
     ),
-    "mixed_object": (
+    "mixed": (
         lambda: vdf({"a": [1.0], "s": ["x"], "n": [5]}).iloc[0],
-        "a    1.0\ns      x\nn      5\nName: 0, dtype: object",
+        "a    1.0\ns      x\nn      5\nName: 0",
     ),
-    "int": (lambda: vdf({"a": [1], "b": [2]}).iloc[0], "a    1\nb    2\nName: 0, dtype: int64"),
+    "int": (lambda: vdf({"a": [1], "b": [2]}).iloc[0], "a    1\nb    2\nName: 0"),
     "datetime_label": (
         lambda: vdt(["2020-01-01 09:30", "2020-01-01 09:31"], close=[1.0, 2.0]).iloc[0],
-        "close    1.0\nName: 2020-01-01 09:30:00, dtype: float64",
+        "close    1.0\nName: 2020-01-01 09:30:00",
     ),
 }
+
+
+def test_row_repr_never_claims_a_dtype():
+    # uniform and mixed rows alike: no `dtype:` in the footer
+    assert "dtype" not in repr(vdf({"a": [1.0], "b": [2.0]}).iloc[0])
+    assert "dtype" not in repr(vdf({"a": [1.0], "s": ["x"]}).iloc[0])
 
 
 @pytest.mark.parametrize("name", list(ROW_CASES))

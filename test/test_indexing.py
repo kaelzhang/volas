@@ -45,6 +45,25 @@ def test_iloc_out_of_range_raises(stock):
         stock.iloc[len(stock)]
 
 
+# --- row labels are typed (Timestamp on a DatetimeIndex) ----------------------
+
+def test_row_name_is_typed_timestamp(stock):
+    row = stock.iloc[-1]
+    assert isinstance(row.name, volas.Timestamp)
+    # the typed label round-trips through .loc / .at on the absolute instant
+    assert stock.loc[row.name].name == row.name
+    assert stock.at[row.name, 'close'] == row['close']
+    # while the repr renders the readable wall-clock string, not the object form
+    assert 'Name: 20' in repr(row)
+
+
+def test_idxmax_idxmin_on_datetime_index_return_timestamp(stock):
+    s = stock['close']
+    assert isinstance(s.idxmax(), volas.Timestamp)
+    assert isinstance(s.idxmin(), volas.Timestamp)
+    assert s.loc[s.idxmax()] == s.max()
+
+
 # --- .loc (label) -----------------------------------------------------------
 
 def test_loc_slice_from_label(stock):

@@ -518,14 +518,14 @@ pub(crate) fn render_series(
     out
 }
 
-/// Render a `Row` (a 1-row frame) as pandas renders a row Series: vertical,
-/// `column   value`, with a `Name: <row label>, dtype: <dtype>` footer. The
-/// dtype is the row's single column type when uniform, else `object` (pandas's
-/// upcast).
+/// Render a `Row` (a 1-row frame) vertically — `column   value` lines with a
+/// `Name: <row label>` footer. Unlike pandas (whose row IS an object Series and
+/// prints `dtype: object`), a volas Row is a typed record with no single dtype,
+/// so the footer never claims one.
 pub(crate) fn render_row(df: &DataFrame, footer: bool) -> String {
     let labels: Vec<String> = df.names().to_vec();
     // A uniform row formats its values in that one dtype (floats share decimals);
-    // a mixed row is `object`, each value formatted in its own dtype.
+    // a mixed row formats each value in its own dtype.
     let first = df.columns().first().map(|c| c.dtype());
     let uniform = first.filter(|d0| df.columns().iter().all(|c| c.dtype() == *d0));
     let values: Vec<String> = df
@@ -554,14 +554,10 @@ pub(crate) fn render_row(df: &DataFrame, footer: bool) -> String {
         }
         _ => values,
     };
-    let dtype = match uniform {
-        Some(d) => d.name().to_string(),
-        None => "object".to_string(),
-    };
     let mut out = vertical_body(&labels, &values);
     if footer {
         let label = index_label_csv(df.index(), 0);
-        out.push_str(&format!("\nName: {label}, dtype: {dtype}"));
+        out.push_str(&format!("\nName: {label}"));
     }
     out
 }
