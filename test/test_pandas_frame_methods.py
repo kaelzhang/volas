@@ -60,6 +60,18 @@ def test_sort_index_descending_reverses_rows():
     _eq(_df().sort_index(False), ROWS[::-1])
 
 
+def test_sort_index_datetime_nat_sorts_last_both_directions():
+    # V9: a NaT index label sinks to the end in both directions (pandas
+    # na_position='last' / parity with sort_values), not sorted as the smallest
+    # i64 — which used to put NaT first.
+    dates = np.array(["2021-01-03", "NaT", "2021-01-01"], dtype="datetime64[ns]")
+    d = volas.DataFrame({"date": dates, "v": [3.0, 99.0, 1.0]}).set_index("date")
+    # ascending: 01-01, 01-03, then NaT
+    assert d.sort_index(True)["v"].to_list() == [1.0, 3.0, 99.0]
+    # descending: 01-03, 01-01, then NaT (NaT stays last, not reversed to first)
+    assert d.sort_index(False)["v"].to_list() == [3.0, 1.0, 99.0]
+
+
 def test_rename_columns():
     r = _df().rename({"a": "A", "c": "Z"})
     assert r.columns == ["A", "b", "Z"]

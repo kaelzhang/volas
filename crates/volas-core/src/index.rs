@@ -265,6 +265,18 @@ impl Index {
         let cmp_dir = |o: std::cmp::Ordering| if ascending { o } else { o.reverse() };
         match &self.kind {
             IndexKind::Str(v) => idx.sort_by(|&a, &b| cmp_dir(v[a].cmp(&v[b]))),
+            // a datetime index sinks a NaT label (i64::MIN) to the end in both
+            // directions — matching sort_values / pandas na_position='last' (V9) —
+            // rather than sorting it as the smallest i64, which put NaT first.
+            IndexKind::Datetime(v, _) => idx.sort_by(|&a, &b| {
+                use std::cmp::Ordering::*;
+                match (v[a] == i64::MIN, v[b] == i64::MIN) {
+                    (true, true) => Equal,
+                    (true, false) => Greater,
+                    (false, true) => Less,
+                    (false, false) => cmp_dir(v[a].cmp(&v[b])),
+                }
+            }),
             _ => {
                 let labels = self.to_i64_labels();
                 idx.sort_by(|&a, &b| cmp_dir(labels[a].cmp(&labels[b])));
