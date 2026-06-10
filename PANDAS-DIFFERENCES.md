@@ -209,6 +209,22 @@ for `==`/`<`/…​ and `True` for `!=`, following IEEE / numpy.
 expected to propagate `<NA>` will instead resolve to `False`/`True`. This is
 documented and intentional; it is what keeps the boolean-mask contract simple.
 
+A comparison never produces an NA mask, but you *can* build a bool column that
+carries `volas.NA` (e.g. `DataFrame({'m': [True, None, False]})['m']`). Using such
+a mask to filter (`df[mask]`), condition (`.where` / `.mask`), or assign is
+**rejected** — not silently read as `False`:
+
+```py
+>>> m = volas.DataFrame({'m': [True, None, False]})['m']
+>>> df[m]
+ValueError: boolean mask/condition contains volas.NA; an unknown signal is not
+            treated as False — fill or drop the NA before masking
+```
+
+An unknown signal must not silently act like a deliberate negative — in a live
+system that would turn a data gap into a trade decision. Fill or drop the NA
+(`m.fillna(False)` / `m.dropna()`) to state your intent explicitly.
+
 ### Numeric operations on non-numeric columns raise
 
 A `str` or `datetime` column has no numeric meaning, so arithmetic and numeric

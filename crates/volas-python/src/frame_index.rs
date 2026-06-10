@@ -142,7 +142,10 @@ pub(crate) fn resolve_assignment(v: &Bound<'_, PyAny>, target: DType, n: usize) 
 
 /// If `sel` is a boolean mask of length `height` (NumPy bool array, bool `Series`,
 /// or `list[bool]`), return the selected row positions; else `None`.
-pub(crate) fn as_bool_mask(sel: &Bound<'_, PyAny>, height: usize) -> Option<Vec<usize>> {
+pub(crate) fn as_bool_mask(
+    sel: &Bound<'_, PyAny>,
+    height: usize,
+) -> PyResult<Option<Vec<usize>>> {
     let collect = |bits: &[bool]| -> Option<Vec<usize>> {
         (bits.len() == height).then(|| {
             bits.iter()
@@ -152,24 +155,26 @@ pub(crate) fn as_bool_mask(sel: &Bound<'_, PyAny>, height: usize) -> Option<Vec<
         })
     };
     if let Ok(a) = sel.extract::<PyReadonlyArray1<bool>>() {
-        return a.as_slice().ok().and_then(collect);
+        return Ok(a.as_slice().ok().and_then(collect));
     }
     if let Ok(ser) = sel.extract::<PyRef<PySeries>>() {
-        if let Column::Bool(v, _) = &ser.inner.data {
-            return collect(v);
+        if let Column::Bool(..) = &ser.inner.data {
+            // O5: a bool Series mask carrying any volas.NA is rejected — an unknown
+            // signal must not silently filter like a deliberate False.
+            return Ok(collect(&bool_mask_vec(&ser.inner.data)?));
         }
-        return None;
+        return Ok(None);
     }
     if let Ok(v) = sel.extract::<Vec<bool>>() {
-        return collect(&v);
+        return Ok(collect(&v));
     }
-    None
+    Ok(None)
 }
 
 /// Resolve an `iloc` row selector (int / slice / int-list / bool-mask) to row
 /// positions.
 pub(crate) fn iloc_positions(sel: &Bound<'_, PyAny>, height: usize) -> PyResult<Vec<usize>> {
-    if let Some(pos) = as_bool_mask(sel, height) {
+    if let Some(pos) = as_bool_mask(sel, height)? {
         return Ok(pos);
     }
     if let Ok(i) = sel.extract::<isize>() {
@@ -190,7 +195,7 @@ pub(crate) fn iloc_positions(sel: &Bound<'_, PyAny>, height: usize) -> PyResult<
 /// Resolve a `loc` row selector (bool-mask / label-slice / label / label-list) to
 /// row positions.
 pub(crate) fn loc_positions(sel: &Bound<'_, PyAny>, index: &Index, height: usize) -> PyResult<Vec<usize>> {
-    if let Some(pos) = as_bool_mask(sel, height) {
+    if let Some(pos) = as_bool_mask(sel, height)? {
         return Ok(pos);
     }
     if let Ok(slice) = sel.downcast::<PySlice>() {
@@ -257,7 +262,7 @@ pub(crate) fn iloc_col_axis(sel: &Bound<'_, PyAny>, width: usize) -> PyResult<Ax
 /// Resolve a `loc` row axis: a single label reduces the axis (`AxisSel::One`); a
 /// label-slice / label-list / boolean mask keeps it (`AxisSel::Many`).
 pub(crate) fn loc_row_axis(sel: &Bound<'_, PyAny>, index: &Index, height: usize) -> PyResult<AxisSel> {
-    if as_bool_mask(sel, height).is_some()
+    if as_bool_mask(sel, height)?.is_some()
         || sel.downcast::<PySlice>().is_ok()
         || sel.downcast::<PyList>().is_ok()
     {
@@ -509,7 +514,7 @@ impl DataFrameLoc {
             return Ok(Py::new(py, PyDataFrame::plain(pf.inner.slice(a, b)))?.into_any());
         }
         // boolean-mask / label-list row selection -> sub-frame.
-        if as_bool_mask(key, pf.inner.height()).is_some() || key.downcast::<PyList>().is_ok() {
+        if as_bool_mask(key, pf.inner.height())?.is_some() || key.downcast::<PyList>().is_ok() {
             let positions = loc_positions(key, index, pf.inner.height())?;
             return Ok(
                 Py::new(py, PyDataFrame::plain(take_frame(&pf.inner, &positions)))?.into_any(),

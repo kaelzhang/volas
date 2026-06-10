@@ -67,8 +67,10 @@ impl PyDataFrame {
     pub(crate) fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // boolean mask (Series or numpy)
         if let Ok(s) = key.extract::<PyRef<PySeries>>() {
-            if let Column::Bool(mask, _) = &s.inner.data {
-                let sub = self.inner.filter_mask(mask).map_err(pyerr)?;
+            if let Column::Bool(..) = &s.inner.data {
+                // O5: reject an NA-carrying mask (an unknown signal is not False).
+                let mask = bool_mask_vec(&s.inner.data)?;
+                let sub = self.inner.filter_mask(&mask).map_err(pyerr)?;
                 return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
             }
         }

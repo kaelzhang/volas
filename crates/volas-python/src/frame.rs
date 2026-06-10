@@ -329,7 +329,7 @@ impl PyDataFrame {
             .iter()
             .zip(cond.inner.columns())
             .map(|(keep_col, cond_col)| -> PyResult<Column> {
-                let mut c = to_bool_vec(cond_col);
+                let mut c = bool_mask_vec(cond_col)?;
                 if !is_where {
                     c.iter_mut().for_each(|b| *b = !*b);
                 }
@@ -426,7 +426,7 @@ impl PyDataFrame {
             .iter()
             .zip(cond.inner.columns())
             .map(|(col, cond_col)| {
-                let positions: Vec<usize> = to_bool_vec(cond_col)
+                let positions: Vec<usize> = bool_mask_vec(cond_col)?
                     .iter()
                     .enumerate()
                     .filter_map(|(i, &m)| m.then_some(i))

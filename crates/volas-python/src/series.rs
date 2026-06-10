@@ -878,7 +878,7 @@ impl PySeries {
                 cond.inner.data.dtype()
             )));
         }
-        let c = to_bool_vec(&cond.inner.data);
+        let c = bool_mask_vec(&cond.inner.data)?;
         if c.len() != self.inner.len() {
             return Err(PyValueError::new_err(format!(
                 "Array conditional must be same shape as self ({} != {})",

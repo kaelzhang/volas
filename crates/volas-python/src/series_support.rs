@@ -194,13 +194,31 @@ pub(crate) fn to_bool_vec(col: &Column) -> Vec<bool> {
     }
 }
 
+/// A boolean mask / condition column as a `Vec<bool>`, rejecting any `volas.NA`
+/// (O5). A missing condition is an *unknown* signal — silently reading it as
+/// `False` would drop a row (filtering) or fill it in the `False` direction
+/// (`where` / `mask`) exactly like a deliberate negative, which in a live system
+/// turns a data gap into a trade signal. The user must fill or drop the NA first.
+/// A dense bool mask passes straight through.
+pub(crate) fn bool_mask_vec(col: &Column) -> PyResult<Vec<bool>> {
+    if let Column::Bool(v, val) = col {
+        if (0..v.len()).any(|i| !val.is_valid(i)) {
+            return Err(PyValueError::new_err(
+                "boolean mask/condition contains volas.NA; an unknown signal is not \
+                 treated as False — fill or drop the NA before masking",
+            ));
+        }
+    }
+    Ok(to_bool_vec(col))
+}
+
 /// Recognise a boolean-mask key (`s[mask]` / `df[mask] = v`): a boolean Series, a
 /// boolean ndarray, or a non-empty `list[bool]`. Returns `None` for any other key
 /// so the caller can fall through to its label / position / column handling.
 pub(crate) fn bool_mask_key(key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
     if let Ok(s) = key.extract::<PyRef<PySeries>>() {
         return Ok(match &s.inner.data {
-            Column::Bool(m, _) => Some(m.to_vec()),
+            Column::Bool(..) => Some(bool_mask_vec(&s.inner.data)?),
             _ => None,
         });
     }
