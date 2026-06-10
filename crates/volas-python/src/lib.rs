@@ -1087,25 +1087,29 @@ impl PySeries {
     }
 
     /// True if any element is truthy (NaN skipped) — pandas `any` -> `np.bool_`.
-    fn any(&self, py: Python<'_>) -> Py<PyAny> {
+    /// A bool/numeric truthiness reduction, so str/datetime raise rather than
+    /// funnel to a silent (and dtype-dependent) answer (C4).
+    fn any(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
         let r = match &self.inner.data {
             // skipna: a NA bool is its `false` placeholder in the buffer, so read the
             // validity — only a *present* true counts (matching pandas nullable any).
             Column::Bool(v, val) => v.iter().enumerate().any(|(i, &b)| val.is_valid(i) && b),
             other => other.to_f64_vec().iter().any(|&x| !x.is_nan() && x != 0.0),
         };
-        np_bool(py, r)
+        Ok(np_bool(py, r))
     }
 
     /// True if every non-missing element is truthy (empty / all-NA -> True) — pandas
-    /// `all` -> `np.bool_`, default `skipna=True`.
-    fn all(&self, py: Python<'_>) -> Py<PyAny> {
+    /// `all` -> `np.bool_`, default `skipna=True`. Bool/numeric only (see `any`).
+    fn all(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
         let r = match &self.inner.data {
             // skipna: a NA is ignored (vacuously satisfies), only a present false fails.
             Column::Bool(v, val) => v.iter().enumerate().all(|(i, &b)| !val.is_valid(i) || b),
             other => other.to_f64_vec().iter().all(|&x| x.is_nan() || x != 0.0),
         };
-        np_bool(py, r)
+        Ok(np_bool(py, r))
     }
 
     /// The values as a Python list of typed scalars (pandas `to_list`).
