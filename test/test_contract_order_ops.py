@@ -86,3 +86,32 @@ def test_rank_datetime():
 def test_rank_numeric_unchanged():
     s = _s([3.0, 1.0, 4.0, 1.0])
     assert list(s.rank().to_numpy()) == [3.0, 1.5, 4.0, 1.5]
+
+
+# --- cummax / cummin (order-based, dtype-preserving) --------------------------
+
+def test_cummax_cummin_str_lexical():
+    s = _s(['b', 'a', 'c'])
+    assert list(s.cummax().to_numpy()) == ['b', 'b', 'c']
+    assert list(s.cummin().to_numpy()) == ['b', 'a', 'a']
+
+
+def test_cummax_cummin_datetime():
+    base = np.datetime64('2024-01-01', 'ns')
+    days = lambda d: base + np.timedelta64(d, 'D')  # noqa: E731
+    s = _s(np.array([base, days(2), days(1)], dtype='datetime64[ns]'))
+    assert list(s.cummax().to_numpy()) == [base, days(2), days(2)]
+    assert list(s.cummin().to_numpy()) == [base, base, base]
+
+
+def test_cummax_str_keeps_interior_na():
+    # a missing cell stays missing; the running max ignores it (pandas semantics)
+    s = _s(['b', None, 'a', 'd'])
+    out = list(s.cummax().to_numpy())
+    assert out[0] == 'b' and out[1] is None and out[2] == 'b' and out[3] == 'd'
+
+
+def test_cummax_cummin_numeric_unchanged():
+    s = _s([3.0, 1.0, 4.0, 1.0])
+    assert list(s.cummax().to_numpy()) == [3.0, 3.0, 4.0, 4.0]
+    assert list(s.cummin().to_numpy()) == [3.0, 1.0, 1.0, 1.0]

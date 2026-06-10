@@ -500,6 +500,36 @@ impl Column {
         best
     }
 
+    /// Cumulative running extreme (pandas `cummax` if `want_max`, else `cummin`),
+    /// dtype-aware and dtype-preserving via [`cmp_at`](Self::cmp_at): numeric by
+    /// value, `str` lexically, `datetime` by instant. A present cell takes the
+    /// running extreme of the present values seen so far; a missing cell stays
+    /// missing (skipped, not filled — pandas `cummax([3, NA, 5]) == [3, NA, 5]`).
+    /// Built by gathering each output position from the cell that holds its
+    /// running extreme (or itself, when missing).
+    pub fn cum_extreme(&self, want_max: bool) -> Result<Column> {
+        let n = self.len();
+        let mut positions: Vec<usize> = (0..n).collect(); // missing cells point at self -> stay NA
+        let mut best: Option<usize> = None;
+        for (i, slot) in positions.iter_mut().enumerate() {
+            if self.is_valid(i) {
+                best = Some(match best {
+                    None => i,
+                    Some(b) => {
+                        let o = self.cmp_at(i, b);
+                        if (want_max && o == Ordering::Greater) || (!want_max && o == Ordering::Less) {
+                            i
+                        } else {
+                            b
+                        }
+                    }
+                });
+                *slot = best.expect("just set"); // present cell -> running extreme so far
+            }
+        }
+        Ok(self.take(&positions))
+    }
+
     /// Order-based rank (pandas `rank`, 1-based, missing -> `NaN`), dtype-aware
     /// via [`cmp_at`](Self::cmp_at): numeric by value, `str` lexically, `datetime`
     /// by raw `i64`, `bool` by `false < true`. The result is always `f64` (ties
@@ -1024,6 +1054,9 @@ impl Column {
             }
             Column::I64(v, val) => Ok(cum(v, val, stats::cummax, |a, x| if x > a { x } else { a })),
             Column::I32(v, val) => Ok(cum(v, val, stats::cummax, |a, x| if x > a { x } else { a })),
+            // running extreme is order-based, so str (lexical) / datetime (instant)
+            // are valid, like min/max — not a numeric-only op.
+            Column::Str(..) | Column::Datetime(..) => self.cum_extreme(true),
             _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cummax(v))),
         }
     }
@@ -1041,6 +1074,7 @@ impl Column {
             }
             Column::I64(v, val) => Ok(cum(v, val, stats::cummin, |a, x| if x < a { x } else { a })),
             Column::I32(v, val) => Ok(cum(v, val, stats::cummin, |a, x| if x < a { x } else { a })),
+            Column::Str(..) | Column::Datetime(..) => self.cum_extreme(false),
             _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cummin(v))),
         }
     }
