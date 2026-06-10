@@ -18,6 +18,6 @@ volas-compute = { path = "../volas-compute" }
 volas-directive = { path = "../volas-directive" }
 volas-io = { path = "../volas-io" }
 volas-time = { path = "../volas-time" }
-pyo3 = { version = "0.25", features = ["extension-module"] }
+pyo3 = { version = "0.25", features = ["extension-module", "multiple-pymethods"] }
 numpy = "0.25"
 ndarray = "0.16"
