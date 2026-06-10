@@ -1930,18 +1930,31 @@ fn where_other_resolve(
             if let Ok(ser) = o.extract::<PyRef<PySeries>>() {
                 require_aligned(&s.index, &ser.inner.index)?;
                 let dt = ser.inner.data.dtype();
-                Ok((ser.inner.data.clone(), dt))
-            } else if let Ok(b) = o.extract::<bool>() {
-                // a bool fill contributes a bool result (checked before f64, since
-                // Python bool is an int subclass)
-                Ok((Column::bool(vec![b; n]), DType::Bool))
-            } else if let Ok(x) = o.extract::<f64>() {
-                let dt = if fits(DType::I64, x) { DType::I64 } else { DType::F64 };
-                Ok((Column::f64(vec![x; n]), dt))
-            } else {
-                Err(PyTypeError::new_err(
-                    "where/mask: `other` must be a number or a Series",
-                ))
+                return Ok((ser.inner.data.clone(), dt));
+            }
+            // a scalar fill into a str / datetime column is typed to that dtype (a
+            // str scalar, a parsed timestamp), like the assignment path; an
+            // incompatible scalar (a number into a str column) is a TypeError.
+            match s.data.dtype() {
+                DType::Utf8 => {
+                    let v = o.extract::<String>().map_err(|_| {
+                        PyTypeError::new_err("where/mask: a str column needs a string fill")
+                    })?;
+                    Ok((Column::str(vec![v; n]), DType::Utf8))
+                }
+                DType::Datetime => Ok((Column::datetime(vec![parse_ts(o)?; n]), DType::Datetime)),
+                // numeric / bool columns: the value-based promotion (an integral
+                // value contributes int, so it stays int; bool stays bool).
+                _ if o.extract::<bool>().is_ok() => {
+                    Ok((Column::bool(vec![o.extract::<bool>()?; n]), DType::Bool))
+                }
+                _ => {
+                    let x = o.extract::<f64>().map_err(|_| {
+                        PyTypeError::new_err("where/mask: `other` must be a number, a matching scalar, or a Series")
+                    })?;
+                    let dt = if fits(DType::I64, x) { DType::I64 } else { DType::F64 };
+                    Ok((Column::f64(vec![x; n]), dt))
+                }
             }
         }
     }
