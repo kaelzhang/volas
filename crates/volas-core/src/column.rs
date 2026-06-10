@@ -750,6 +750,113 @@ impl Column {
         }
     }
 
+    /// Scatter `values` into `self` at `positions` — the column-source assignment
+    /// that backs `df.loc / iloc / at / iat = ` — **keeping `self`'s dtype** and
+    /// updating its validity: each written position takes the source's presence,
+    /// every other position keeps its own. A length-1 `values` broadcasts.
+    /// Mirrors [`set_scalar_at`](Self::set_scalar_at)'s dtype rules at column
+    /// granularity:
+    /// - a float target absorbs any numeric source (a missing source -> in-band `NaN`);
+    /// - an int target stays int — a present integral value is stored, a missing /
+    ///   `NaN` source marks the cell NA (no float widening, per the NA model), a
+    ///   present non-integral value is a lossy [`VolasError::DType`];
+    /// - a `Bool` / `Str` / `Datetime` target requires a matching-kind source (else
+    ///   a `DType` error); a missing source marks the cell NA (`NaT` for datetime).
+    ///
+    /// `positions` are assumed in bounds (callers validate the mask / index).
+    pub fn scatter(&self, positions: &[usize], values: &Column) -> Result<Column> {
+        let len = self.len();
+        let m = values.len();
+        let pick = |k: usize| if m == 1 { 0 } else { k };
+        // A numeric target accepts only a numeric / bool source. A `Str` source
+        // would funnel through `to_f64_vec` to `NaN` and a `Datetime` source to raw
+        // epoch nanos — both silent corruption — so reject them up front. (The
+        // `Bool` / `Str` / `Datetime` targets are already strict via their
+        // `as_*_vec` helpers, which error on a mismatched-kind source.)
+        if matches!(
+            self.dtype(),
+            DType::F64 | DType::F32 | DType::I64 | DType::I32
+        ) && matches!(values.dtype(), DType::Utf8 | DType::Datetime)
+        {
+            return Err(VolasError::DType(format!(
+                "cannot assign {} values into a {} column",
+                values.dtype(),
+                self.dtype()
+            )));
+        }
+        // The validity-carrying targets (int / bool / str) share one rule: keep
+        // each row's own presence, then stamp every written position with the
+        // source's. (Float and datetime carry missing in-band, so they skip this.)
+        let scatter_validity = |val: &Validity| -> Validity {
+            let mut flags: Vec<bool> = (0..len).map(|i| val.is_valid(i)).collect();
+            for (k, &p) in positions.iter().enumerate() {
+                flags[p] = values.is_valid(pick(k));
+            }
+            Validity::from_valid_iter(len, flags)
+        };
+        match self {
+            Column::F64(v) => {
+                let src = values.to_f64_vec(); // validity-aware: missing -> NaN
+                let mut nv = (**v).clone();
+                for (k, &p) in positions.iter().enumerate() {
+                    nv[p] = src[pick(k)];
+                }
+                Ok(Column::f64(nv))
+            }
+            Column::F32(v) => {
+                let src = values.to_f32_vec();
+                let mut nv = (**v).clone();
+                for (k, &p) in positions.iter().enumerate() {
+                    nv[p] = src[pick(k)];
+                }
+                Ok(Column::f32(nv))
+            }
+            // Int targets keep their dtype: `as_i*_vec` yields a 0 placeholder for a
+            // missing/`NaN` source (the presence is restored by `scatter_validity`)
+            // and errors on a present non-integral value — exactly the Series rule.
+            Column::I64(v, val) => {
+                let src = values.as_i64_vec()?;
+                let mut nv = (**v).clone();
+                for (k, &p) in positions.iter().enumerate() {
+                    nv[p] = src[pick(k)];
+                }
+                Ok(Column::i64_with(nv, scatter_validity(val)))
+            }
+            Column::I32(v, val) => {
+                let src = values.as_i32_vec()?;
+                let mut nv = (**v).clone();
+                for (k, &p) in positions.iter().enumerate() {
+                    nv[p] = src[pick(k)];
+                }
+                Ok(Column::i32_with(nv, scatter_validity(val)))
+            }
+            Column::Bool(v, val) => {
+                let src = values.as_bool_vec()?;
+                let mut nv = (**v).clone();
+                for (k, &p) in positions.iter().enumerate() {
+                    nv[p] = src[pick(k)];
+                }
+                Ok(Column::bool_with(nv, scatter_validity(val)))
+            }
+            Column::Str(v, val) => {
+                let src = values.as_str_vec()?;
+                let mut nv = (**v).clone();
+                for (k, &p) in positions.iter().enumerate() {
+                    nv[p] = src[pick(k)].clone();
+                }
+                Ok(Column::str_with(nv, scatter_validity(val)))
+            }
+            Column::Datetime(v) => {
+                let src = values.as_datetime_vec()?; // `NaT` (i64::MIN) is in-band missing
+                let mut nv = (**v).clone();
+                for (k, &p) in positions.iter().enumerate() {
+                    nv[p] = src[pick(k)];
+                }
+                Ok(Column::datetime(nv))
+            }
+        }
+    }
+
     // --- dtype-preserving numeric transforms (pandas 3.0) ---------------------
     // Each dispatches the kernel over the column's element type so an int column
     // stays int and computes natively (no f64 round-trip). A non-numeric column

@@ -567,11 +567,11 @@ impl DataFrame {
     /// length 1, otherwise its length must equal `positions.len()`. This backs
     /// `df.loc[...] = `, `df.iloc[...] = `, `df.at[...] = ` and `df.iat[...] = `.
     ///
-    /// Dtype handling, matching pandas where reasonable:
-    /// - numeric kinds cross-cast (`I64` <-> `F64`);
-    /// - an `I64` column receiving a **fractional** (or NaN) `F64` value upgrades
-    ///   the whole column to `F64` (pandas widens an int column on a float write);
-    /// - `Bool` / `Str` / `Datetime` targets require a matching-kind value.
+    /// Dtype handling is delegated to [`Column::scatter`], which **keeps the target
+    /// column's dtype** and updates its validity (a write into an existing NA cell
+    /// makes it present; a missing / `NaN` source marks the cell NA without widening
+    /// an int column to float; a present non-integral value into an int column is a
+    /// lossy error) — matching the `Series` `set_scalar_at` rules exactly.
     ///
     /// A manual write into a cached directive column **drops its computed status**
     /// (it becomes plain data) so a later `fulfill` can never silently clobber the
@@ -603,74 +603,7 @@ impl DataFrame {
                 )));
             }
         }
-        // Broadcast a length-1 value across every position.
-        let pick = |k: usize| if values.len() == 1 { 0 } else { k };
-
-        // I64 column + a fractional / NaN F64 write -> widen the column to F64.
-        if let (Column::I64(arc, _), Column::F64(src)) = (&self.columns[col], values) {
-            if src.iter().any(|x| x.is_nan() || x.fract() != 0.0) {
-                let mut f: Vec<f64> = arc.iter().map(|&x| x as f64).collect();
-                for (k, &p) in positions.iter().enumerate() {
-                    f[p] = src[pick(k)];
-                }
-                self.columns[col] = Column::f64(f);
-                self.invalidate_computed_on_write_at(col);
-                return Ok(());
-            }
-        }
-
-        match (&mut self.columns[col], values) {
-            (Column::F64(arc), Column::F64(src)) => {
-                let buf = Arc::make_mut(arc);
-                for (k, &p) in positions.iter().enumerate() {
-                    buf[p] = src[pick(k)];
-                }
-            }
-            (Column::F64(arc), Column::I64(src, _)) => {
-                let buf = Arc::make_mut(arc);
-                for (k, &p) in positions.iter().enumerate() {
-                    buf[p] = src[pick(k)] as f64;
-                }
-            }
-            (Column::I64(arc, _), Column::I64(src, _)) => {
-                let buf = Arc::make_mut(arc);
-                for (k, &p) in positions.iter().enumerate() {
-                    buf[p] = src[pick(k)];
-                }
-            }
-            // All-integral F64 (the widening branch above did not fire) -> store as i64.
-            (Column::I64(arc, _), Column::F64(src)) => {
-                let buf = Arc::make_mut(arc);
-                for (k, &p) in positions.iter().enumerate() {
-                    buf[p] = src[pick(k)] as i64;
-                }
-            }
-            (Column::Bool(arc, _), Column::Bool(src, _)) => {
-                let buf = Arc::make_mut(arc);
-                for (k, &p) in positions.iter().enumerate() {
-                    buf[p] = src[pick(k)];
-                }
-            }
-            (Column::Str(arc, _), Column::Str(src, _)) => {
-                let buf = Arc::make_mut(arc);
-                for (k, &p) in positions.iter().enumerate() {
-                    buf[p] = src[pick(k)].clone();
-                }
-            }
-            (Column::Datetime(arc), Column::Datetime(src)) => {
-                let buf = Arc::make_mut(arc);
-                for (k, &p) in positions.iter().enumerate() {
-                    buf[p] = src[pick(k)];
-                }
-            }
-            (target, src) => {
-                return Err(VolasError::DType(format!(
-                    "cannot assign {} values into a {} column",
-                    src.dtype(),
-                    target.dtype()
-                )));
-            }
-        }
+        self.columns[col] = self.columns[col].scatter(positions, values)?;
         self.invalidate_computed_on_write_at(col);
         Ok(())
     }
@@ -1028,16 +961,28 @@ mod tests {
     }
 
     #[test]
-    fn assign_positions_widens_int_on_fractional() {
+    fn assign_positions_fractional_into_int_errors() {
         let mut df = sample();
-        // a fractional write into the I64 column widens the whole column to F64
-        df.assign_positions(1, &[0], &Column::f64(vec![1.5]))
+        // a fractional write into the I64 column is lossy and errors (no float
+        // widening) — the column stays unchanged, matching the Series scalar path
+        assert!(df
+            .assign_positions(1, &[0], &Column::f64(vec![1.5]))
+            .is_err());
+        assert_eq!(df.column("b").unwrap().dtype(), DType::I64);
+        assert_eq!(df.column("b").unwrap().as_i64().unwrap(), &[10, 20, 30]);
+    }
+
+    #[test]
+    fn assign_positions_nan_into_int_keeps_int_na() {
+        let mut df = sample();
+        // a NaN write into the I64 column keeps int64 and marks the cell NA
+        // (Decision 1: no float widening, the native-NA model)
+        df.assign_positions(1, &[0], &Column::f64(vec![f64::NAN]))
             .unwrap();
-        assert_eq!(df.column("b").unwrap().dtype(), DType::F64);
-        assert_eq!(
-            df.column("b").unwrap().as_f64().unwrap(),
-            &[1.5, 20.0, 30.0]
-        );
+        let b = df.column("b").unwrap();
+        assert_eq!(b.dtype(), DType::I64);
+        assert!(!b.is_valid(0) && b.is_valid(1) && b.is_valid(2));
+        assert_eq!(b.as_i64().unwrap()[1..], [20, 30]);
     }
 
     #[test]
@@ -1106,9 +1051,18 @@ mod tests {
         assert!(df
             .assign_positions(0, &[9], &Column::f64(vec![1.0]))
             .is_err());
-        // bool into a numeric column
+        // a bool into a numeric column COERCES (true -> 1.0), matching the Series
+        // `set_float_at` path (Python `bool` is an int subclass)
+        df.assign_positions(0, &[0], &Column::bool(vec![true]))
+            .unwrap();
+        assert_eq!(df.column("a").unwrap().as_f64().unwrap()[0], 1.0);
+        // a str / datetime into a numeric column is a hard dtype error (no silent
+        // funnel through `to_f64_vec`)
         assert!(df
-            .assign_positions(0, &[0], &Column::bool(vec![true]))
+            .assign_positions(0, &[0], &Column::str(vec!["x".into()]))
+            .is_err());
+        assert!(df
+            .assign_positions(1, &[0], &Column::datetime(vec![123]))
             .is_err());
     }
 

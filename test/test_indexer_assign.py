@@ -63,12 +63,25 @@ def test_loc_datetime_index_label():
     assert df['c'].to_list() == [1., 9., 3.]
 
 
-def test_assign_widens_int_column():
+def test_assign_fractional_into_int_raises():
+    # A fractional write into an int column is lossy and raises — consistent with
+    # the Series path (`s[0] = 1.5` also raises), NOT the old silent widening to
+    # float64. The NA model keeps int columns int.
     df = DataFrame({'i': np.array([1, 2, 3], dtype=np.int64)})
     assert str(df.dtypes['i']) == 'int64'
-    df.iat[0, 0] = 1.5               # fractional write widens to float64
-    assert str(df.dtypes['i']) == 'float64'
-    assert df['i'].to_list() == [1.5, 2., 3.]
+    with pytest.raises(TypeError):
+        df.iat[0, 0] = 1.5
+    assert str(df.dtypes['i']) == 'int64' and df['i'].to_list() == [1, 2, 3]  # unchanged
+
+
+def test_assign_nan_into_int_keeps_int_na():
+    # A NaN write into an int column keeps int64 and marks the cell NA (Decision 1:
+    # no float widening) — again matching the Series path.
+    df = DataFrame({'i': np.array([1, 2, 3], dtype=np.int64)})
+    df.iat[0, 0] = float('nan')
+    assert str(df.dtypes['i']) == 'int64'
+    assert df.isna()['i'].to_list() == [True, False, False]
+    assert df['i'].to_list()[1:] == [2, 3]
 
 
 def test_assign_int_stays_int():
@@ -137,3 +150,53 @@ def test_series_setitem_string_scalar():
     si = DataFrame({'a': [1, 2, 3]})['a']
     with pytest.raises(TypeError):
         si[0] = 'q'
+
+
+# --- P0-01: writing into an existing NA cell (the validity-aware `scatter`) ----
+# A DataFrame indexer write used to mutate the value buffer but NOT the validity,
+# so assigning a real value INTO an NA cell silently left it NA (data loss). The
+# matrix is surface (iat / iloc / at) x storage dtype, each filling the middle NA
+# cell and asserting it becomes present with the value, dtype unchanged.
+
+def _dt(strs):
+    return np.array(strs, dtype='datetime64[ns]')
+
+
+@pytest.mark.parametrize('surface', ['iat', 'iloc', 'at'])
+@pytest.mark.parametrize('col,val,want', [
+    (np.array([1., 0., 3.], dtype=np.float64), 9., 9.),       # f64
+    (np.array([1., 0., 3.], dtype=np.float32), 9., 9.),       # f32
+    ([1, None, 3], 9, 9),                                     # i64
+    (np.array([1, 0, 3], dtype=np.int32), 9, 9),             # i32
+    ([True, None, False], True, True),                        # bool
+    (['x', None, 'z'], 'q', 'q'),                             # str
+    (_dt(['2021-01-01', 'NaT', '2021-01-03']), '2021-01-02', '2021-01-02'),  # datetime
+])
+def test_indexer_fills_na_cell(surface, col, val, want):
+    # seed the middle cell as NA for the dtypes whose constructor doesn't (f32/i32/
+    # f64 numpy arrays carry no None) so every case writes into a real hole. A NaN
+    # write keeps f32/f64 (in-band) and marks i32 NA — independent of the surface.
+    df = DataFrame({'a': col})
+    before_dt = df['a'].dtype
+    if df.isna()['a'].to_list()[1] is False:
+        df.iloc[1, 0] = float('nan')
+    assert df.isna()['a'].to_list()[1] is True  # confirmed a hole before the write
+    if surface == 'at':
+        df.at[df.index[1], 'a'] = val
+    else:
+        getattr(df, surface)[1, 0] = val
+    assert df.isna()['a'].to_list() == [False, False, False]
+    assert df['a'].dtype == before_dt
+    got = df['a'].to_list()[1]
+    assert (got == np.datetime64(want)) if before_dt == 'datetime64[ns]' else (got == want)
+
+
+def test_dataframe_iloc_int_nan_keeps_int():
+    # P1-01: int + NaN via .iloc keeps int64 + NA (unified with Series / mask),
+    # not the old float64 widening. int32 likewise stays int32.
+    df = DataFrame({'a': [1, 2, 3]})
+    df.iloc[1:3, 0] = float('nan')
+    assert df['a'].dtype == 'int64' and df.isna()['a'].to_list() == [False, True, True]
+    d32 = DataFrame({'a': np.array([1, 2, 3], dtype=np.int32)})
+    d32.iloc[1:3, 0] = float('nan')
+    assert d32['a'].dtype == 'int32' and d32.isna()['a'].to_list() == [False, True, True]
