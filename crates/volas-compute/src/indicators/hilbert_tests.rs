@@ -1,4 +1,5 @@
 use super::*;
+use super::engine::*; // the Hilbert engine internals these tests inspect directly
 
 #[test]
 fn ht_core_short_input_returns_warmup_only() {
