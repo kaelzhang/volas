@@ -673,7 +673,7 @@ impl DataFrame {
     pub fn equals(&self, other: &DataFrame) -> bool {
         self.height == other.height
             && self.names == other.names
-            && self.index.kind() == other.index.kind()
+            && self.index.label_eq(&other.index)
             && self
                 .columns
                 .iter()

@@ -242,6 +242,22 @@ impl Index {
         }
     }
 
+    /// Value equality of the **labels** (pandas `.equals` index semantics): a
+    /// `RangeIndex` equals the same integer labels materialized as `Int64`, but an
+    /// integer index never equals a datetime or string index. The index *name* and
+    /// a datetime *tz* (display metadata) are ignored.
+    pub fn label_eq(&self, other: &Index) -> bool {
+        use IndexKind::*;
+        match (&self.kind, &other.kind) {
+            (Range(_) | Int64(_), Range(_) | Int64(_)) => {
+                self.to_i64_labels() == other.to_i64_labels()
+            }
+            (Datetime(a, _), Datetime(b, _)) => a == b,
+            (Str(a), Str(b)) => a == b,
+            _ => false, // different label kinds are never equal
+        }
+    }
+
     /// The positions that sort the index by label (`sort_index`). Numeric kinds
     /// sort numerically, a string index lexicographically.
     pub fn argsort(&self, ascending: bool) -> Vec<usize> {

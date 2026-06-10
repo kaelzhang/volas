@@ -593,9 +593,10 @@ impl Column {
             Column::Str(v, val) => {
                 let mut out = Vec::with_capacity(v.len());
                 for (i, s) in v.iter().enumerate() {
-                    // A missing (NA) string cell parses to NaT, not the "" placeholder
-                    // (which would fail) — matching the float/int epoch NA paths.
-                    if !val.is_valid(i) {
+                    // A missing (NA) string cell — or a present but empty/blank one —
+                    // parses to NaT, matching read_csv(parse_dates) and pandas
+                    // `to_datetime("")`. A non-empty unparseable string still errors.
+                    if !val.is_valid(i) || s.trim().is_empty() {
                         out.push(i64::MIN);
                         continue;
                     }

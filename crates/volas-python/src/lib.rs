@@ -1869,6 +1869,12 @@ fn where_other_resolve(
             let dt = s.data.dtype();
             Ok((Column::na_of(dt, n), dt))
         }
+        // an explicit `None` / `NaN` / `volas.NA` fill is the same dtype-preserving
+        // NA as the default, so `where(mask, volas.NA)` keeps the column's dtype.
+        Some(o) if is_na_like_py(o) => {
+            let dt = s.data.dtype();
+            Ok((Column::na_of(dt, n), dt))
+        }
         Some(o) => {
             if let Ok(ser) = o.extract::<PyRef<PySeries>>() {
                 require_aligned(&s.index, &ser.inner.index)?;
@@ -3763,14 +3769,24 @@ impl PyDataFrame {
 /// `df.iloc[...]` positional indexer.
 // --- indexer assignment helpers (PD-12) ------------------------------------
 
+/// Whether `v` is a missing-value scalar: Python `None`, a `NaN` float, or the
+/// `volas.NA` singleton. The one predicate every scalar boundary shares, so the
+/// canonical `volas.NA` symbol (what `to_list()` returns) is usable wherever
+/// `None` is — constructor, Series setitem, DataFrame indexers, mask assignment,
+/// and `where` / `mask` `other`.
+fn is_na_like_py(v: &Bound<'_, PyAny>) -> bool {
+    let py = v.py();
+    v.is_none() || v.is(na(py).bind(py)) || v.extract::<f64>().is_ok_and(|x| x.is_nan())
+}
+
 /// Build a length-1 [`Column`] from a Python scalar, coerced toward the target
 /// column's dtype (so a string can land in a datetime column, etc.). An `I64`
 /// target given a float yields an `F64` value — core then widens the column.
 fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
-    // `None` / `NaN` -> a typed single-cell NA (marks the position missing while
-    // keeping the dtype), so `x[i] = None` / `x[i] = nan` is uniform across every
-    // dtype and every assignment surface (Series setitem, df[mask], df indexers).
-    if v.is_none() || v.extract::<f64>().is_ok_and(|x| x.is_nan()) {
+    // `None` / `NaN` / `volas.NA` -> a typed single-cell NA (marks the position
+    // missing while keeping the dtype), so `x[i] = None / nan / volas.NA` is
+    // uniform across every dtype and every assignment surface.
+    if is_na_like_py(v) {
         return Ok(Column::na_of(target, 1));
     }
     match target {
@@ -4434,7 +4450,9 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
                     .iter()
                     .enumerate()
                     .map(|(i, s)| {
-                        if !val.is_valid(i) {
+                        // a missing (NA) or empty/blank cell -> NaT, like the
+                        // default path; a non-empty value must match the format.
+                        if !val.is_valid(i) || s.trim().is_empty() {
                             return Ok(i64::MIN);
                         }
                         datetime::parse_ns_format(s, fmt).ok_or_else(|| {
