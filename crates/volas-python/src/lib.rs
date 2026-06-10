@@ -123,6 +123,13 @@ fn datetime_unit_of(s: &str) -> Option<&'static str> {
 }
 
 fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
+    // A volas Series is an internal column, not a numpy boundary value: clone its
+    // Column directly (preserving dtype + volas.NA). Without this it would fall
+    // through to the array path below, invoking Series.__array__ and re-importing
+    // the lossy float64 export — contract C1/C2 (parity with `df['x'] = series`).
+    if let Ok(s) = v.extract::<PyRef<PySeries>>() {
+        return Ok(s.inner.data.clone());
+    }
     // A numpy datetime64 array -> a Datetime column (carried as epoch-ns). This is the
     // pandas-aligned ingestion (`pd.DataFrame` accepts datetime64 arrays) and the no-copy
     // path `from_pandas` relies on. Normalise any datetime64[unit] to ns, then take its
