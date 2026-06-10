@@ -39,3 +39,12 @@ def test_str_arithmetic_raises():
     for fn in [lambda: s + t, lambda: s - t, lambda: s * t, lambda: s / t, lambda: s // t, lambda: -s]:
         with pytest.raises(Exception):
             fn()
+
+
+def test_corr_cov_either_operand_str_raises():
+    # both require_numeric guards (self AND other) must fire
+    n = _s([1.0, 2.0, 3.0])
+    s = _s(['a', 'b', 'c'])
+    for fn in [lambda: s.cov(n), lambda: n.corr(s), lambda: n.cov(s)]:
+        with pytest.raises(Exception):
+            fn()
