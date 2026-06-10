@@ -127,6 +127,17 @@ impl Column {
                 return Self::cast_str_to_numeric(v, val, to);
             }
         }
+        // D5: a datetime -> float cast is a lossy reinterpret of the i64 epoch-ns
+        // (values past 2^53 quantize to ~256ns), so reject it (pandas does too).
+        // `astype('int64')` gives the exact ns; an explicit `to_numpy(dtype=...)`
+        // export is the deliberate opt-in lossy channel.
+        if matches!(self, Column::Datetime(_)) && matches!(to, DType::F64 | DType::F32) {
+            return Err(VolasError::DType(
+                "cannot cast a datetime column to float (lossy past 2^53 ns); \
+                 use astype('int64') for the exact epoch nanoseconds"
+                    .to_string(),
+            ));
+        }
         match to {
             DType::F64 => Ok(Column::f64(self.to_f64_vec())),
             DType::I64 => match self {

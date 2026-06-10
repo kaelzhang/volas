@@ -20,8 +20,16 @@ pub(crate) fn parse_dtype(s: &str) -> PyResult<DType> {
         "int" | "int64" | "int_" | "long" | "i64" => DType::I64,
         "int32" | "i32" => DType::I32,
         "bool" | "boolean" => DType::Bool,
-        "str" | "string" | "object" | "O" => DType::Utf8,
+        "str" | "string" => DType::Utf8,
         "datetime" | "datetime64" | "datetime64[ns]" => DType::Datetime,
+        // C3: volas has no object dtype. Reject pandas's catch-all spelling at the
+        // boundary rather than silently aliasing it to str (which would stringify
+        // numbers and reintroduce the object vocabulary into the API).
+        "object" | "O" => {
+            return Err(PyValueError::new_err(
+                "volas has no object dtype; use \"str\" for text columns",
+            ))
+        }
         _ => return Err(PyValueError::new_err(format!("unknown dtype {s:?}"))),
     })
 }
