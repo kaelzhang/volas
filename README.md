@@ -490,7 +490,9 @@ directive_lookback('repeat:5@(close > boll.upper)')
 ### The rest of the pandas-compatible API
 
 Everything below behaves like its `pandas` counterpart — if you know it from
-pandas, it works the same in volas.
+pandas, it works the same in volas, except for the deliberate
+[NA-model divergences](#known-pandas-divergences-the-volasna-model) noted after
+the listing.
 
 ```py
 # --- DataFrame: metadata --------------------------------------------------
@@ -529,9 +531,21 @@ s.shift(n=1) / s.diff(n=1) / s.fillna(v) / s.ffill() / s.bfill()           # see
 s.isna() / s.notna() / s.dropna() / s.equals(t)
 ```
 
-> `shift` / `diff` / `fillna` and friends differ from pandas on one point only:
-> a missing value keeps the column's dtype as [`volas.NA`](#missing-values-volasna)
-> instead of upcasting an int/bool/str column to float/object.
+#### Known pandas divergences (the `volas.NA` model)
+
+A handful of APIs diverge from pandas **by design**, because volas stores missing
+values natively as [`volas.NA`](#missing-values-volasna) (no `object` dtype, no
+silent float upcast):
+
+- **`shift` / `diff` / `fillna` and friends** keep the column's dtype — a missing
+  value is `volas.NA`, not an int/bool/str column upcast to float/object.
+- **Comparisons** (`==` `!=` `<` `<=` `>` `>=`) return a *non-nullable* bool mask:
+  a missing value compares `False` (and `!=` compares `True`), following IEEE /
+  NumPy — not pandas-nullable's three-valued `NA`. This keeps masks free of `NA`
+  so `df[mask]` and assignment stay total.
+- **`to_numpy()`** exports a missing cell as `NaN` (NumPy has no `NA`), so an
+  int / bool / datetime column materializes as `float64` / `NaT`. Storage and
+  `to_list()` keep the dtype and `volas.NA`.
 
 The pandas-shaped indexing and writing details have their own sections —
 [Indexing & selection](#indexing--selection) and
