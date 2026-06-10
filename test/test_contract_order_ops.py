@@ -36,3 +36,53 @@ def test_idxmax_numeric_unchanged():
 def test_idxmax_skips_na():
     s = _s([1.0, float('nan'), 5.0, float('nan')])
     assert s.idxmax() == 2 and s.idxmin() == 0
+
+
+# --- min / max (typed VALUE, not f64) -----------------------------------------
+
+def test_minmax_datetime_keeps_instant():
+    base = np.datetime64('2024-01-01T00:00:00.000000000')
+    s = _s(base + np.array([0, 100, 200, 300], dtype='timedelta64[ns]'))
+    # the extreme VALUE is a datetime64, exact to the nanosecond (no f64 collapse)
+    assert s.max() == base + np.timedelta64(300, 'ns')
+    assert s.min() == base
+    assert isinstance(s.max(), np.datetime64)
+
+
+def test_minmax_str_lexical():
+    s = _s(['banana', 'apple', 'cherry'])
+    assert s.max() == 'cherry'   # lexical max, returned as a Python str
+    assert s.min() == 'apple'
+    assert isinstance(s.max(), str)
+
+
+def test_minmax_numeric_unchanged():
+    s = _s([3.0, 1.0, 4.0, 1.0])
+    assert s.max() == 4.0 and s.min() == 1.0
+    assert isinstance(s.max(), np.float64)        # numeric reductions stay numpy
+    si = _s([3, 1, 4, 1])
+    assert isinstance(si.max(), np.int64)
+
+
+def test_minmax_bool():
+    s = _s([False, True, False])
+    assert s.max() == True and s.min() == False  # noqa: E712
+
+
+# --- rank (order-based, result always float64) --------------------------------
+
+def test_rank_str_lexical():
+    s = _s(['banana', 'apple', 'cherry'])
+    # apple<banana<cherry -> ranks 2,1,3; result dtype is float64
+    assert list(s.rank().to_numpy()) == [2.0, 1.0, 3.0]
+
+
+def test_rank_datetime():
+    base = np.datetime64('2024-01-01T00:00:00.000000000')
+    s = _s(base + np.array([0, 300, 100, 200], dtype='timedelta64[ns]'))
+    assert list(s.rank().to_numpy()) == [1.0, 4.0, 2.0, 3.0]
+
+
+def test_rank_numeric_unchanged():
+    s = _s([3.0, 1.0, 4.0, 1.0])
+    assert list(s.rank().to_numpy()) == [3.0, 1.5, 4.0, 1.5]

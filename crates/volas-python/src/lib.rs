@@ -469,6 +469,22 @@ fn scalar_to_numpy(py: Python<'_>, s: Scalar) -> Py<PyAny> {
     }
 }
 
+/// The min/max **value** at `want_max`, typed by dtype: numeric/bool reduce to a
+/// numpy scalar (native and exact — an i64 extreme survives past 2^53), `str` to
+/// a Python `str`, `datetime` to `np.datetime64`. Order-based selection, so it
+/// never routes str/datetime through the f64 funnel (which would collapse them).
+/// An all-NA str/datetime column yields `volas.NA`; numeric yields `np.float64`
+/// NaN (the existing [`Column::extreme`] behaviour). Backs `Series.min`/`max`.
+fn extreme_value(py: Python<'_>, col: &Column, want_max: bool) -> Py<PyAny> {
+    match col {
+        Column::Str(..) | Column::Datetime(..) => match col.arg_extreme(want_max) {
+            Some(i) => scalar_to_py(py, col, i),
+            None => na(py),
+        },
+        _ => scalar_to_numpy(py, col.extreme(want_max)),
+    }
+}
+
 /// Render an index label at position `i` as a **typed** Python object: a
 /// [`Timestamp`](PyTimestamp) for a DatetimeIndex (carrying the frame tz, so
 /// `df.loc[row.name]` round-trips on the absolute instant), else the int / str
@@ -926,15 +942,16 @@ impl PySeries {
         self.inner.data.require_numeric().map_err(pyerr)?;
         Ok(scalar_to_numpy(py, self.inner.data.prod()))
     }
-    /// Minimum (pandas `min`), dtype-preserving (int -> `np.int64`, etc.).
-    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(scalar_to_numpy(py, self.inner.data.extreme(false)))
+    /// Minimum (pandas `min`). Order-based, so it serves any ordered dtype:
+    /// numeric/bool reduce to a numpy scalar (int -> `np.int64`, exact even past
+    /// 2^53), str to a Python str, datetime to `np.datetime64` — not the f64
+    /// funnel. See [`extreme_value`].
+    fn min(&self, py: Python<'_>) -> Py<PyAny> {
+        extreme_value(py, &self.inner.data, false)
     }
-    /// Maximum (pandas `max`), dtype-preserving.
-    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(scalar_to_numpy(py, self.inner.data.extreme(true)))
+    /// Maximum (pandas `max`), order-based and dtype-typed. See [`extreme_value`].
+    fn max(&self, py: Python<'_>) -> Py<PyAny> {
+        extreme_value(py, &self.inner.data, true)
     }
     /// Sample variance (`ddof=1`, pandas `var`) -> `np.float64`.
     fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -1226,7 +1243,9 @@ impl PySeries {
     /// returns ranks scaled to (0, 1].
     #[pyo3(signature = (method = "average", ascending = true, pct = false))]
     fn rank(&self, method: &str, ascending: bool, pct: bool) -> PyResult<PySeries> {
-        self.inner.data.require_numeric().map_err(pyerr)?; // str/datetime rank -> error (C4)
+        // rank is order-based, so it serves any ordered dtype (str lexically,
+        // datetime by raw i64) — not the f64 funnel, which loses sub-256ns
+        // datetime order. The rank VALUES are always float64 (pandas).
         let m = match method {
             "average" => stats::RankMethod::Average,
             "min" => stats::RankMethod::Min,
@@ -1235,10 +1254,7 @@ impl PySeries {
             "dense" => stats::RankMethod::Dense,
             other => return Err(PyValueError::new_err(format!("rank: unknown method '{other}'"))),
         };
-        Ok(f64_series(
-            &self.inner,
-            stats::rank(&self.inner.data.to_f64_vec(), m, ascending, pct),
-        ))
+        Ok(f64_series(&self.inner, self.inner.data.rank(m, ascending, pct)))
     }
 
     /// Element-wise absolute value (pandas `abs`), dtype-preserving.

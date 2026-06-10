@@ -11,6 +11,8 @@
 //! reductions / moment kernels stay f64. A missing element (`NaN`, f64 only —
 //! `i64::is_missing` is always false) passes through unchanged.
 
+use std::cmp::Ordering;
+
 use crate::numeric::Numeric;
 
 /// Cumulative sum (pandas `cumsum`, skipna=True), dtype-preserving.
@@ -254,11 +256,34 @@ pub enum RankMethod {
 /// stays NaN). `pct` divides by the count of finite values (max dense rank for
 /// `Dense`).
 pub fn rank(v: &[f64], method: RankMethod, ascending: bool, pct: bool) -> Vec<f64> {
-    let mut idx: Vec<usize> = (0..v.len()).filter(|&i| !v[i].is_nan()).collect();
+    rank_by(
+        v.len(),
+        |i| !v[i].is_nan(),
+        |a, b| v[a].partial_cmp(&v[b]).unwrap(),
+        method,
+        ascending,
+        pct,
+    )
+}
+
+/// Order-based rank over `n` positions, driven by an `is_valid` predicate and a
+/// total `cmp` over present positions — so the one rank algorithm (tie handling,
+/// `pct`) serves every ordered dtype (numeric by value, `str` lexically,
+/// `datetime` by raw `i64`), not just `f64`. Invalid positions rank `NaN`; `cmp`
+/// is only ever called on positions that pass `is_valid`.
+pub fn rank_by(
+    n: usize,
+    is_valid: impl Fn(usize) -> bool,
+    cmp: impl Fn(usize, usize) -> Ordering,
+    method: RankMethod,
+    ascending: bool,
+    pct: bool,
+) -> Vec<f64> {
+    let mut idx: Vec<usize> = (0..n).filter(|&i| is_valid(i)).collect();
     let cnt = idx.len();
     // Sort surviving positions by value (stable, so `First` keeps input order).
     idx.sort_by(|&a, &b| {
-        let o = v[a].partial_cmp(&v[b]).unwrap();
+        let o = cmp(a, b);
         if ascending {
             o
         } else {
@@ -266,13 +291,13 @@ pub fn rank(v: &[f64], method: RankMethod, ascending: bool, pct: bool) -> Vec<f6
         }
     });
 
-    let mut out = vec![f64::NAN; v.len()];
+    let mut out = vec![f64::NAN; n];
     let mut dense_rank = 0.0;
     let mut i = 0;
     while i < idx.len() {
-        // [i, j) is a run of tied values.
+        // [i, j) is a run of tied values (equal regardless of sort direction).
         let mut j = i + 1;
-        while j < idx.len() && v[idx[j]] == v[idx[i]] {
+        while j < idx.len() && cmp(idx[j], idx[i]) == Ordering::Equal {
             j += 1;
         }
         dense_rank += 1.0;

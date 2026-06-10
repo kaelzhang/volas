@@ -500,6 +500,21 @@ impl Column {
         best
     }
 
+    /// Order-based rank (pandas `rank`, 1-based, missing -> `NaN`), dtype-aware
+    /// via [`cmp_at`](Self::cmp_at): numeric by value, `str` lexically, `datetime`
+    /// by raw `i64`, `bool` by `false < true`. The result is always `f64` (ties
+    /// can average to `x.5`), so rank is order-based, not a numeric-arithmetic op.
+    pub fn rank(&self, method: stats::RankMethod, ascending: bool, pct: bool) -> Vec<f64> {
+        stats::rank_by(
+            self.len(),
+            |i| self.is_valid(i),
+            |a, b| self.cmp_at(a, b),
+            method,
+            ascending,
+            pct,
+        )
+    }
+
     /// Append another column of the same dtype, copy-on-write (grows in place
     /// when the buffer is uniquely owned).
     pub fn append(&mut self, other: &Column) -> Result<()> {
