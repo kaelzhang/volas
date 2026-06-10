@@ -979,6 +979,10 @@ impl PySeries {
     /// Summary statistics (pandas `describe`): a Series indexed by
     /// `count / mean / std / min / 25% / 50% / 75% / max`.
     fn describe(&self) -> PyResult<PySeries> {
+        // describe is a numeric summary (mean/std/quantiles); a str/datetime column
+        // would funnel through to_f64_vec to nonsense, so it raises (C4) until a
+        // dtype-aware categorical/datetime describe is designed.
+        self.inner.data.require_numeric().map_err(pyerr)?;
         let v = self.inner.data.to_f64_vec();
         let count = non_nan(&self.inner.data).len() as f64;
         let vals = vec![
@@ -1450,63 +1454,63 @@ impl PySeries {
     // out-of-domain input — e.g. sqrt of a negative, asin outside [-1, 1] — yields
     // NaN, matching TA-Lib). Implemented as Series methods, not directives.
     /// Element-wise arc cosine (TA-Lib ACOS).
-    fn acos(&self) -> PySeries {
+    fn acos(&self) -> PyResult<PySeries> {
         self.map_f64(f64::acos)
     }
     /// Element-wise arc sine (TA-Lib ASIN).
-    fn asin(&self) -> PySeries {
+    fn asin(&self) -> PyResult<PySeries> {
         self.map_f64(f64::asin)
     }
     /// Element-wise arc tangent (TA-Lib ATAN).
-    fn atan(&self) -> PySeries {
+    fn atan(&self) -> PyResult<PySeries> {
         self.map_f64(f64::atan)
     }
     /// Element-wise ceiling (TA-Lib CEIL).
-    fn ceil(&self) -> PySeries {
+    fn ceil(&self) -> PyResult<PySeries> {
         self.map_f64(f64::ceil)
     }
     /// Element-wise cosine (TA-Lib COS).
-    fn cos(&self) -> PySeries {
+    fn cos(&self) -> PyResult<PySeries> {
         self.map_f64(f64::cos)
     }
     /// Element-wise hyperbolic cosine (TA-Lib COSH).
-    fn cosh(&self) -> PySeries {
+    fn cosh(&self) -> PyResult<PySeries> {
         self.map_f64(f64::cosh)
     }
     /// Element-wise base-e exponential (TA-Lib EXP).
-    fn exp(&self) -> PySeries {
+    fn exp(&self) -> PyResult<PySeries> {
         self.map_f64(f64::exp)
     }
     /// Element-wise floor (TA-Lib FLOOR).
-    fn floor(&self) -> PySeries {
+    fn floor(&self) -> PyResult<PySeries> {
         self.map_f64(f64::floor)
     }
     /// Element-wise natural logarithm (TA-Lib LN).
-    fn ln(&self) -> PySeries {
+    fn ln(&self) -> PyResult<PySeries> {
         self.map_f64(f64::ln)
     }
     /// Element-wise base-10 logarithm (TA-Lib LOG10).
-    fn log10(&self) -> PySeries {
+    fn log10(&self) -> PyResult<PySeries> {
         self.map_f64(f64::log10)
     }
     /// Element-wise sine (TA-Lib SIN).
-    fn sin(&self) -> PySeries {
+    fn sin(&self) -> PyResult<PySeries> {
         self.map_f64(f64::sin)
     }
     /// Element-wise hyperbolic sine (TA-Lib SINH).
-    fn sinh(&self) -> PySeries {
+    fn sinh(&self) -> PyResult<PySeries> {
         self.map_f64(f64::sinh)
     }
     /// Element-wise square root (TA-Lib SQRT).
-    fn sqrt(&self) -> PySeries {
+    fn sqrt(&self) -> PyResult<PySeries> {
         self.map_f64(f64::sqrt)
     }
     /// Element-wise tangent (TA-Lib TAN).
-    fn tan(&self) -> PySeries {
+    fn tan(&self) -> PyResult<PySeries> {
         self.map_f64(f64::tan)
     }
     /// Element-wise hyperbolic tangent (TA-Lib TANH).
-    fn tanh(&self) -> PySeries {
+    fn tanh(&self) -> PyResult<PySeries> {
         self.map_f64(f64::tanh)
     }
 }
@@ -1644,13 +1648,16 @@ impl PySeries {
         ))
     }
 
-    /// Apply an element-wise `f64 -> f64` map, preserving name and index. Non-F64
-    /// columns are coerced to f64 first. Shared by the Math Transform methods.
-    fn map_f64(&self, f: impl Fn(f64) -> f64) -> PySeries {
+    /// Apply an element-wise `f64 -> f64` map, preserving name and index. The single
+    /// guard for the whole Math Transform family: a `str` / `datetime` column would
+    /// funnel through `to_f64_vec` to silent `NaN` (str) or `sin(epoch-as-f64)`
+    /// (datetime), which the contract (C4) forbids, so it raises here.
+    fn map_f64(&self, f: impl Fn(f64) -> f64) -> PyResult<PySeries> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
         let data = Column::f64(self.inner.data.to_f64_vec().iter().map(|&x| f(x)).collect());
-        PySeries {
+        Ok(PySeries {
             inner: Series::new(self.inner.name.clone(), data, Arc::clone(&self.inner.index)),
-        }
+        })
     }
 
     /// Directional fill (`forward` = ffill, else bfill), dtype-aware over every
