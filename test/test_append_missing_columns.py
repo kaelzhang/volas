@@ -59,3 +59,32 @@ def test_padded_na_participates_in_missing_methods():
     assert out.fillna(0.0)["i"].to_list() == [1, 2, 0]  # padded int NA filled, stays int
     assert out["i"].ffill().to_list() == [1, 2, 2]  # carries the last value forward
     assert len(out.dropna()) == 2  # the padded row is dropped
+
+
+# --- R4-P2-01: an EXTRA column is rejected (a missing one is padded above) ---
+
+import pytest
+
+
+def test_append_extra_column_is_rejected():
+    # the inverse of the padding above: an appended frame with a column the target
+    # lacks used to be silently dropped (data loss); it now raises.
+    df = DataFrame({"x": [1.0]})
+    with pytest.raises(ValueError):
+        df.append(DataFrame({"x": [2.0], "z": [9.0]}))  # 'z' not in target
+    # the original frame is untouched by the rejected append
+    assert df.columns == ["x"] and df["x"].to_list() == [1.0]
+
+
+def test_append_extra_column_rejected_for_row_too():
+    df = DataFrame({"x": [1.0], "y": [2.0]})
+    extra_row = DataFrame({"x": [3.0], "y": [4.0], "z": [5.0]}).iloc[0]
+    with pytest.raises(ValueError):
+        df.append(extra_row)
+
+
+def test_append_same_columns_reordered_still_works():
+    # column-name alignment (not position) is unaffected: same names, any order.
+    df = DataFrame({"a": [1.0], "b": [2.0]})
+    out = df.append(DataFrame({"b": [4.0], "a": [3.0]}))
+    assert out["a"].to_list() == [1.0, 3.0] and out["b"].to_list() == [2.0, 4.0]

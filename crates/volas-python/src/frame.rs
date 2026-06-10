@@ -473,6 +473,39 @@ impl PyDataFrame {
                 ))
             }
         };
+        // R4-P1-01 / R4-P1-02: a live fold must see present, non-decreasing
+        // timestamps. Validate every bar BEFORE folding any (atomic — a bad bar
+        // mutates nothing): a NaT bar has no period (symmetric with the cumulate()
+        // entry's D2 rejection), and a bar earlier than the latest one already
+        // folded would roll over into a non-monotonic index / fold later bars into
+        // the wrong period. Late or disordered feed data must be handled explicitly
+        // by the caller, never silently corrupt the OHLCV.
+        let mut prev_ts: Option<i64> = match tfs.open.as_ref() {
+            Some(o) => Some(last_dt(o)),
+            None => match inner.index().kind() {
+                IndexKind::Datetime(v, _) if !v.is_empty() => Some(v[v.len() - 1]),
+                _ => None,
+            },
+        };
+        for &ts in &fine_ts {
+            if ts == i64::MIN {
+                return Err(PyValueError::new_err(
+                    "cannot append a NaT-timestamped bar to a time_frame DataFrame; a \
+                     missing instant has no period (drop it or supply a real timestamp)",
+                ));
+            }
+            if let Some(p) = prev_ts {
+                if ts < p {
+                    return Err(PyValueError::new_err(
+                        "cannot append an out-of-order bar to a time_frame DataFrame \
+                         (its timestamp precedes the forming period's latest bar); handle \
+                         late / re-ordered feed data before folding so the OHLCV stays \
+                         monotonic",
+                    ));
+                }
+            }
+            prev_ts = Some(ts);
+        }
         for i in 0..fine.height() {
             let bar_ts = fine_ts[i];
             let key = frame.unify_tz(bar_ts, tz);

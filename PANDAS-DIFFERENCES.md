@@ -297,6 +297,29 @@ corrupted. volas keeps datetime a distinct logical type (so it is never summed,
 averaged, or compared through the float funnel), with `NaT` as its missing value and
 a per-frame timezone that governs display and matching while storage stays UTC.
 
+### `append` aligns by name; the live fold demands ordered, present timestamps
+
+`df.append(rows)` aligns columns **by name**, not position. A column the appended
+rows are *missing* is padded with dtype-preserving NA (see above); a column they add
+that the target lacks is **rejected**, not silently dropped:
+
+```py
+>>> volas.DataFrame({'x': [1.0]}).append(volas.DataFrame({'x': [2.0], 'z': [9.0]}))
+ValueError: append: column 'z' is not in the target frame — appended rows must not
+            introduce a new column ...
+```
+
+pandas (`concat`, outer) would instead grow the frame with the new column. volas
+rejects it so an exchange adding a field can never quietly lose data.
+
+On a `time_frame` frame the appended bars are *folded* into the forming period, so
+the live feed must be well-ordered: a `NaT`-timestamped bar (no period — symmetric
+with `cumulate`, which also rejects `NaT`) and an **out-of-order** bar (a timestamp
+earlier than the forming period's latest bar) both **raise**, rather than silently
+producing a `NaT` period row or a non-monotonic index. Re-sending the current forming
+bar (same timestamp) is still accepted. Handle late / re-ordered data explicitly
+before folding.
+
 ### Index limitations
 
 The index is deliberately a **single level** of one homogeneous label type. Relative

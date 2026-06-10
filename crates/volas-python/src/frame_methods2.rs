@@ -20,6 +20,21 @@ use crate::timeframe::{build_agg_spec, resolve_time_frame};
 #[allow(unused_imports)]
 use crate::*;
 
+/// R4-P2-01: appended rows must not introduce a column absent from the target.
+/// The name-aligned append NaN-pads a *missing* column (fine), but it silently
+/// dropped an *extra* one — so an exchange adding a field would lose data without
+/// a trace. Reject the extra column instead.
+fn require_no_new_columns(target: &DataFrame, src: &DataFrame) -> PyResult<()> {
+    if let Some(name) = src.names().iter().find(|n| !target.has_column(n)) {
+        return Err(PyValueError::new_err(format!(
+            "append: column {name:?} is not in the target frame — appended rows must not \
+             introduce a new column (a missing column is NaN-padded; an extra one is \
+             rejected so data is never silently dropped)"
+        )));
+    }
+    Ok(())
+}
+
 #[pymethods]
 impl PyDataFrame {
     /// `df[key] = value`. With a column name, add or replace that column —
@@ -386,6 +401,7 @@ impl PyDataFrame {
                 let other_inner = df.inner.clone();
                 drop(df);
                 let mut me = slf.borrow_mut();
+                require_no_new_columns(&me.inner, &other_inner)?;
                 if me.tf.is_some() {
                     me.fold_append(&other_inner)?;
                 } else {
@@ -395,6 +411,7 @@ impl PyDataFrame {
             }
             // Normal live path: append a distinct one-row frame without cloning it.
             let mut me = slf.borrow_mut();
+            require_no_new_columns(&me.inner, &df.inner)?;
             if me.tf.is_some() {
                 me.fold_append(&df.inner)?;
             } else {
@@ -404,6 +421,7 @@ impl PyDataFrame {
         }
         if let Ok(row) = other.extract::<PyRef<PyRow>>() {
             let mut me = slf.borrow_mut();
+            require_no_new_columns(&me.inner, &row.inner)?;
             if me.tf.is_some() {
                 me.fold_append(&row.inner)?;
             } else {
