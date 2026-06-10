@@ -1155,13 +1155,18 @@ impl PySeries {
         Ok(col_to_series(&self.inner, self.inner.data.diff(n).map_err(pyerr)?))
     }
 
-    /// Replace a missing cell with `value` (pandas `fillna`). Fills the numeric
-    /// family (float / int / bool, promoting the dtype only when the fill needs
-    /// it); a non-numeric `str` / `datetime` column with a missing cell raises a
-    /// `TypeError` (volas has no `object` dtype to hold a mixed column). For
-    /// directional fill use `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
-    fn fillna(&self, value: f64) -> PyResult<PySeries> {
-        Ok(col_to_series(&self.inner, self.inner.data.fillna(value).map_err(pyerr)?))
+    /// Replace a missing cell with `value` (pandas `fillna`), typed to the
+    /// column's dtype like `where` / `mask`: a numeric column fills with a number
+    /// (promoting only when the fill needs it — an integral fill keeps int, a
+    /// fractional fill promotes to float), a `str` column with a string, a
+    /// `datetime` column with a parsed timestamp. An incompatible fill (a number
+    /// into a `str` column) raises a `TypeError`. For directional fill use
+    /// `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
+    fn fillna(&self, value: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        // fillna keeps present cells and fills missing ones, so it is `where` over
+        // the validity mask — reusing the same typed-fill resolution.
+        let keep: Vec<bool> = (0..self.inner.len()).map(|i| self.inner.data.is_valid(i)).collect();
+        self.select_with(&keep, Some(value))
     }
 
     /// Forward-fill NaN cells from the last valid value (pandas `ffill`).
@@ -1667,6 +1672,14 @@ impl PySeries {
         if invert {
             c.iter_mut().for_each(|b| *b = !*b);
         }
+        self.select_with(&c, other)
+    }
+
+    /// Keep `self` where `keep[i]` is true, else take the resolved `other` (the
+    /// typed-scalar / Series / default-NA fill). The shared core of `where` /
+    /// `mask` / `fillna`, so all three resolve a fill the same dtype-typed way
+    /// (str scalar, parsed timestamp, NA-preserving) instead of funnelling to f64.
+    fn select_with(&self, keep: &[bool], other: Option<&Bound<'_, PyAny>>) -> PyResult<PySeries> {
         let (other_col, other_dt) = where_other_resolve(other, &self.inner)?;
         // A float column keeps its float dtype (it absorbs any fill); a same-dtype
         // `other` (incl. the default NA, and bool/str/datetime) keeps that dtype so
@@ -1681,7 +1694,7 @@ impl PySeries {
         };
         Ok(col_to_series(
             &self.inner,
-            self.inner.data.select(&c, &other_col, target).map_err(pyerr)?,
+            self.inner.data.select(keep, &other_col, target).map_err(pyerr)?,
         ))
     }
 
@@ -1955,16 +1968,27 @@ fn where_other_resolve(
                 return Ok((ser.inner.data.clone(), dt));
             }
             // a scalar fill into a str / datetime column is typed to that dtype (a
-            // str scalar, a parsed timestamp), like the assignment path; an
-            // incompatible scalar (a number into a str column) is a TypeError.
+            // str scalar, a timestamp / datetime string), like the assignment path;
+            // an incompatible scalar (a number into a str or datetime column) is a
+            // TypeError — never a silent numeric -> non-numeric coercion (C4).
             match s.data.dtype() {
                 DType::Utf8 => {
                     let v = o.extract::<String>().map_err(|_| {
-                        PyTypeError::new_err("where/mask: a str column needs a string fill")
+                        PyTypeError::new_err("fill for a str column must be a string")
                     })?;
                     Ok((Column::str(vec![v; n]), DType::Utf8))
                 }
-                DType::Datetime => Ok((Column::datetime(vec![parse_ts(o)?; n]), DType::Datetime)),
+                DType::Datetime => {
+                    // a bare number is not a datetime — require a volas.Timestamp or
+                    // a datetime string (parse_ts handles both); reject the rest so a
+                    // number cannot silently become an epoch-ns instant.
+                    if o.extract::<PyRef<PyTimestamp>>().is_err() && o.extract::<String>().is_err() {
+                        return Err(PyTypeError::new_err(
+                            "fill for a datetime column must be a Timestamp or datetime string, not a number",
+                        ));
+                    }
+                    Ok((Column::datetime(vec![parse_ts(o)?; n]), DType::Datetime))
+                }
                 // numeric / bool columns: the value-based promotion (an integral
                 // value contributes int, so it stays int; bool stays bool).
                 _ if o.extract::<bool>().is_ok() => {
@@ -1972,7 +1996,7 @@ fn where_other_resolve(
                 }
                 _ => {
                     let x = o.extract::<f64>().map_err(|_| {
-                        PyTypeError::new_err("where/mask: `other` must be a number, a matching scalar, or a Series")
+                        PyTypeError::new_err("fill must be a number, a matching-dtype scalar, or a Series")
                     })?;
                     let dt = if fits(DType::I64, x) { DType::I64 } else { DType::F64 };
                     Ok((Column::f64(vec![x; n]), dt))
