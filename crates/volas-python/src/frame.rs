@@ -9,7 +9,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use volas_core::{
-    binary_supertype, fits, CmpOp, Column, DType, DataFrame, Index,
+    binary_supertype, CmpOp, Column, DataFrame, Index,
     IndexKind, Series,
 };
 use volas_directive::{execute, parse};

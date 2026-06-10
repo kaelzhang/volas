@@ -72,6 +72,16 @@ def test_sort_index_datetime_nat_sorts_last_both_directions():
     assert d.sort_index(False)["v"].to_list() == [3.0, 1.0, 99.0]
 
 
+def test_sort_index_multiple_nat_labels_all_sink_last_stably():
+    # two NaT labels exercise the NaT-vs-NaT comparison: both sink to the end, and
+    # equal (NaT) labels keep their original relative order (stable sort).
+    dates = np.array(["2021-01-02", "NaT", "2021-01-01", "NaT"], dtype="datetime64[ns]")
+    d = volas.DataFrame({"date": dates, "v": [2.0, 98.0, 1.0, 99.0]}).set_index("date")
+    asc = d.sort_index(True)["v"].to_list()
+    assert asc[:2] == [1.0, 2.0]      # the real dates sort ahead, ascending
+    assert asc[2:] == [98.0, 99.0]    # both NaT rows last, in original order
+
+
 def test_rename_columns():
     r = _df().rename({"a": "A", "c": "Z"})
     assert r.columns == ["A", "b", "Z"]
