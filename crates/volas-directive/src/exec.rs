@@ -28,6 +28,7 @@ pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
         }
         Node::Unary { op, operand } => {
             let c = execute(df, operand)?;
+            require_numeric(&c)?; // a str/datetime operand can't go through the f64 funnel (C4)
             Ok(match op {
                 UnaryOp::Not => Column::bool(c.to_f64_vec().iter().map(|&x| x == 0.0).collect()),
                 UnaryOp::Neg => Column::f64(c.to_f64_vec().iter().map(|&x| -x).collect()),
@@ -36,6 +37,8 @@ pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
         Node::Binary { left, op, right } => {
             let l = execute(df, left)?;
             let r = execute(df, right)?;
+            require_numeric(&l)?; // both operands must be numeric (or bool) — C4, no
+            require_numeric(&r)?; // silent str -> NaN arithmetic / comparison
             Ok(apply_binary(*op, &l, &r))
         }
     }
@@ -154,8 +157,27 @@ pub(crate) fn series_f64<'a>(
 ) -> Result<Cow<'a, [f64]>> {
     match series.get(i) {
         Some(Node::Name(s)) if s.is_empty() => col_f64(df, default_col),
-        Some(node) => Ok(Cow::Owned(execute(df, node)?.to_f64_vec())),
+        Some(node) => {
+            let c = execute(df, node)?;
+            require_numeric(&c)?;
+            Ok(Cow::Owned(c.to_f64_vec()))
+        }
         None => col_f64(df, default_col),
+    }
+}
+
+/// A directive numeric operand must be a numeric column (float / int / bool —
+/// bool acts as 0/1). A `Str` / `Datetime` column funneled through `to_f64_vec`
+/// would silently become all-`NaN` (or, for datetime, f64-quantized epoch), so
+/// reject it (API contract C4 — a lossy implicit conversion errors, never a silent
+/// all-NaN feature column).
+fn require_numeric(col: &Column) -> Result<()> {
+    match col {
+        Column::Str(..) | Column::Datetime(..) => Err(VolasError::Value(format!(
+            "directive operand must be a numeric column, got {}",
+            col.dtype()
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -163,6 +185,7 @@ pub(crate) fn series_f64<'a>(
 /// otherwise convert (e.g. an `I64` volume column).
 fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
     let col = df.column(name)?;
+    require_numeric(col)?;
     Ok(match col.as_f64() {
         Some(s) => Cow::Borrowed(s),
         None => Cow::Owned(col.to_f64_vec()),
@@ -177,7 +200,11 @@ fn series_f64_required<'a>(df: &'a DataFrame, series: &[Node], i: usize) -> Resu
         Some(Node::Name(s)) if s.is_empty() => Err(VolasError::Value(format!(
             "series argument #{i} is required"
         ))),
-        Some(node) => Ok(Cow::Owned(execute(df, node)?.to_f64_vec())),
+        Some(node) => {
+            let c = execute(df, node)?;
+            require_numeric(&c)?;
+            Ok(Cow::Owned(c.to_f64_vec()))
+        }
         None => Err(VolasError::Value(format!(
             "series argument #{i} is required"
         ))),
@@ -190,7 +217,10 @@ fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
     match execute(df, node)? {
         Column::Bool(v, _) => Ok(v.to_vec()),
-        other => Ok(other.to_f64_vec().iter().map(|&x| x != 0.0).collect()),
+        other => {
+            require_numeric(&other)?;
+            Ok(other.to_f64_vec().iter().map(|&x| x != 0.0).collect())
+        }
     }
 }
 
