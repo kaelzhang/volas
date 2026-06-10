@@ -528,7 +528,16 @@ impl PyDataFrame {
                 cols.push(s.describe()?.inner.data);
             }
         }
-        DataFrame::new(names, cols, Some(Index::str(describe_labels())))
+        // No numeric columns (empty / str-only / datetime-only frame) -> a 0x0
+        // frame, consistent with corr / cov — not an 8-row describe index over zero
+        // columns, which the core rejects as a height mismatch. volas describe is
+        // numeric-only (pandas would return object-column stats here instead).
+        let index = if cols.is_empty() {
+            Index::str(Vec::new())
+        } else {
+            Index::str(describe_labels())
+        };
+        DataFrame::new(names, cols, Some(index))
             .map(PyDataFrame::plain)
             .map_err(pyerr)
     }

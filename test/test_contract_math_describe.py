@@ -45,3 +45,25 @@ def test_describe_datetime_raises():
 def test_describe_numeric_still_works():
     d = _s([1.0, 2.0, 3.0, 4.0]).describe()
     assert d.to_list()[0] == 4.0  # count
+
+
+# --- DataFrame.describe over a no-numeric column subset (FU-P2-03) -----------
+# A frame with no numeric columns returns a 0x0 frame (consistent with corr / cov),
+# not an internal "index length 8 != frame height 0" shape error.
+
+def test_frame_describe_empty_is_0x0():
+    assert DataFrame({}).describe().shape == (0, 0)
+
+
+def test_frame_describe_str_only_is_0x0():
+    assert DataFrame({"s": ["a", "b"]}).describe().shape == (0, 0)
+
+
+def test_frame_describe_datetime_only_is_0x0():
+    t = np.array(["2021-01-01", "2021-01-02"], dtype="datetime64[ns]")
+    assert DataFrame({"t": t}).describe().shape == (0, 0)
+
+
+def test_frame_describe_mixed_keeps_only_numeric_columns():
+    d = DataFrame({"x": [1.0, 2.0], "s": ["a", "b"]}).describe()
+    assert d.columns == ["x"] and d.shape == (8, 1)  # the 8 describe stats for x
