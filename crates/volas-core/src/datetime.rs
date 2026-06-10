@@ -102,6 +102,10 @@ pub fn epoch_to_ns_f64(value: f64, unit: &str) -> Option<i64> {
 
 /// Decompose epoch nanoseconds into civil UTC parts
 /// `(year, month, day, hour, minute, second)` — used by time-frame unification.
+/// Wall-clock civil parts of `ns`. Callers that produce user-visible output MUST
+/// pre-filter `NaT` (`i64::MIN`) — the string layer renders it as `"NaT"` (see
+/// [`format_ns`] / [`strftime`]) since a missing instant has no civil date to put
+/// in this `i64` tuple.
 pub fn civil_parts(ns: i64) -> (i64, i64, i64, i64, i64, i64) {
     let secs = ns.div_euclid(1_000_000_000);
     let nsub = ns.rem_euclid(1_000_000_000) as u32;
@@ -130,6 +134,9 @@ pub fn days_from_civil(y: i64, mo: i64, d: i64) -> i64 {
 
 /// Format epoch nanoseconds as `YYYY-MM-DD HH:MM:SS` (UTC, naive).
 pub fn format_ns(ns: i64) -> String {
+    if ns == i64::MIN {
+        return "NaT".to_string(); // missing instant — not a real 1677 civil date
+    }
     let secs = ns.div_euclid(1_000_000_000);
     let nsub = ns.rem_euclid(1_000_000_000) as u32;
     DateTime::from_timestamp(secs, nsub)
@@ -140,6 +147,9 @@ pub fn format_ns(ns: i64) -> String {
 /// Format epoch nanoseconds as the wall-clock `YYYY-MM-DD HH:MM:SS` in `tz` (the
 /// human/string form; bulk numpy export stays UTC).
 pub fn format_ns_tz(ns: i64, tz: Tz) -> String {
+    if ns == i64::MIN {
+        return "NaT".to_string();
+    }
     if tz.is_utc() {
         return format_ns(ns);
     }
@@ -162,6 +172,9 @@ pub fn civil_parts_tz(ns: i64, tz: Tz) -> (i64, i64, i64, i64, i64, i64) {
 /// instead of chrono panicking) or an out-of-range civil date.
 pub fn strftime(ns: i64, tz: Tz, fmt: &str) -> Option<String> {
     use chrono::format::{Item, StrftimeItems};
+    if ns == i64::MIN {
+        return Some("NaT".to_string()); // missing instant formats as NaT, like pandas
+    }
     let (y, mo, d, h, mi, s) = civil_parts_tz(ns, tz);
     let dt = NaiveDate::from_ymd_opt(y as i32, mo as u32, d as u32)?
         .and_hms_opt(h as u32, mi as u32, s as u32)?;

@@ -55,6 +55,18 @@ impl Cumulator {
             }
         };
 
+        // A NaT (i64::MIN) index row has no timestamp to bucket; without this guard
+        // it falls into its own period (silently splitting same-period bars and
+        // emitting a NaT-labelled coarse row). A live ingest with a timeless bar is
+        // a data-quality problem that must be handled explicitly, not aggregated.
+        if ts.iter().any(|&t| t == i64::MIN) {
+            return Err(VolasError::Value(
+                "cannot cumulate over a DatetimeIndex containing NaT; drop or fill \
+                 the missing index timestamps first"
+                    .into(),
+            ));
+        }
+
         let runs = group_runs(&ts, self.tf, tz);
         let last = runs.len() - 1;
 
