@@ -42,6 +42,14 @@ impl DType {
     pub fn is_float(&self) -> bool {
         matches!(self, DType::F64 | DType::F32)
     }
+
+    /// Whether this is a numeric dtype — the float and integer kinds (`F64` / `F32`
+    /// / `I64` / `I32`), but **not** `Bool`. The single predicate the DataFrame
+    /// numeric APIs (`round`, `describe`, `corr` / `cov`, `sem` / `skew` / `kurt`)
+    /// and assignment coercion share, so narrow dtypes are never silently dropped.
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, DType::F64 | DType::F32 | DType::I64 | DType::I32)
+    }
 }
 
 impl std::fmt::Display for DType {

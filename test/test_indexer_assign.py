@@ -152,6 +152,24 @@ def test_series_setitem_string_scalar():
         si[0] = 'q'
 
 
+def test_series_setitem_datetime_string_scalar():
+    # P2-01 / Decision 2: a parseable datetime string assigns into a datetime
+    # Series, including a NaT cell — parity with df.iat (was a TypeError)
+    s = DataFrame({'a': np.array(['2021-01-01', 'NaT'], dtype='datetime64[ns]')})['a']
+    s[1] = '2021-01-02'
+    assert s.to_list()[1] == np.datetime64('2021-01-02') and s.isna().to_list() == [False, False]
+
+
+def test_series_setitem_none_marks_na():
+    # assigning None marks the cell NA, keeping the dtype (uniform across surfaces)
+    s = DataFrame({'a': [1, 2, 3]})['a']
+    s[1] = None
+    assert s.dtype == 'int64' and s.isna().to_list() == [False, True, False]
+    sf = DataFrame({'a': [1.0, 2.0, 3.0]})['a']
+    sf[0] = None
+    assert sf.dtype == 'float64' and sf.isna().to_list() == [True, False, False]
+
+
 # --- P0-01: writing into an existing NA cell (the validity-aware `scatter`) ----
 # A DataFrame indexer write used to mutate the value buffer but NOT the validity,
 # so assigning a real value INTO an NA cell silently left it NA (data loss). The

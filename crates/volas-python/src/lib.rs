@@ -17,7 +17,7 @@ use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{
     binary_supertype, datetime, fits, stats, BinOp, BoolOp, Column, DType, DataFrame, Index,
-    IndexKind, Label, Scalar, Series, SetVal, Tz, Validity, VolasError,
+    IndexKind, Label, Scalar, Series, Tz, Validity, VolasError,
 };
 use volas_directive::{execute, parse};
 use volas_time::{aggregate_period, AggSpec, Cumulator, TimeFrame};
@@ -1311,14 +1311,11 @@ impl PySeries {
                 "Series assignment takes a boolean mask or an integer position",
             ));
         };
-        // A string scalar (which a numeric `SetVal` cannot carry) takes the typed
-        // str path, like the DataFrame indexers; a number / bool extracts to neither
-        // a `str` here, so it falls through to the numeric `SetVal` path.
-        self.inner.data = if let Ok(s) = value.extract::<String>() {
-            self.inner.data.set_str_scalar_at(&positions, &s).map_err(pyerr)?
-        } else {
-            self.inner.data.set_scalar_at(&positions, extract_set_val(value)?).map_err(pyerr)?
-        };
+        // One assignment path for every value kind (number, bool, string, datetime
+        // string, None/NaN): convert to a typed single-cell column for this dtype
+        // and scatter it — identical rules to the DataFrame indexers and mask
+        // assignment (keep dtype, update validity, lossy values error).
+        self.inner.data = scatter_scalar(&self.inner.data, &positions, value)?;
         Ok(())
     }
 
@@ -1751,13 +1748,10 @@ fn bool_mask_key(key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
     }
 }
 
-/// Resolve the `other` argument of `where` / `mask` to a length-`n` f64 vector: a
-/// scalar broadcasts, an (index-aligned) Series contributes element-wise, and the
-/// default (`None`) fills NaN.
 /// Resolve the `other` argument of `where` / `mask` to a length-`n` fill column
 /// plus the dtype it contributes to the result. A scalar broadcasts (its dtype is
 /// value-based: an integral value contributes int); a Series contributes its own
-/// dtype (index-aligned); the default (`None`) fills NaN (float).
+/// dtype (index-aligned); the default (`None`) fills a dtype-preserving NA.
 fn where_other_resolve(
     other: Option<&Bound<'_, PyAny>>,
     s: &Series,
@@ -1789,21 +1783,6 @@ fn where_other_resolve(
                 ))
             }
         }
-    }
-}
-
-/// The scalar fill for a boolean-mask / positional assignment. A real `bool` is
-/// kept distinct from a number (they fit different column dtypes — see
-/// [`SetVal`]); `bool` is tried first because Python `bool` is an `int` subclass.
-fn extract_set_val(value: &Bound<'_, PyAny>) -> PyResult<SetVal> {
-    if let Ok(b) = value.extract::<bool>() {
-        Ok(SetVal::Bool(b))
-    } else if let Ok(x) = value.extract::<f64>() {
-        Ok(SetVal::Num(x))
-    } else {
-        Err(PyTypeError::new_err(
-            "assignment value must be a number or a bool",
-        ))
     }
 }
 
@@ -2074,7 +2053,7 @@ impl PyDataFrame {
         let mut names = Vec::new();
         let mut vals = Vec::new();
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
-            if matches!(col.dtype(), DType::F64 | DType::I64) {
+            if col.dtype().is_numeric() {
                 names.push(name.clone());
                 vals.push(op(col));
             }
@@ -2107,7 +2086,7 @@ impl PyDataFrame {
             .names()
             .iter()
             .zip(self.inner.columns())
-            .filter(|(_, c)| matches!(c.dtype(), DType::F64 | DType::I64))
+            .filter(|(_, c)| c.dtype().is_numeric())
             .map(|(n, c)| (n.clone(), c.to_f64_vec()))
             .collect();
         let names: Vec<String> = numeric.iter().map(|(n, _)| n.clone()).collect();
@@ -2121,7 +2100,9 @@ impl PyDataFrame {
     }
 
     /// `df.where` / `df.mask` shared core: per-cell keep/replace against a
-    /// same-shape boolean frame, taking each column as float.
+    /// same-shape boolean frame, dtype-preservingly per column (the default
+    /// `other = None` keeps each column's dtype and fills NA; an explicit numeric
+    /// `other` promotes via the supertype).
     fn where_mask(
         &self,
         cond: &PyDataFrame,
@@ -2188,10 +2169,11 @@ impl PyDataFrame {
         Ok(())
     }
 
-    /// `df[row_mask] = v`: set every column's True rows to the scalar, keeping
-    /// each column's dtype (pandas' whole-row boolean assignment). Atomic — if any
-    /// column would take the value lossily, nothing is written.
-    fn assign_row_mask(&mut self, mask: &[bool], value: SetVal) -> PyResult<()> {
+    /// `df[row_mask] = v`: set every column's True rows to the scalar, keeping each
+    /// column's dtype (pandas' whole-row boolean assignment), via the shared
+    /// `scatter_scalar` primitive. Atomic — if any column would take the value
+    /// lossily, the per-column map errors and nothing is written.
+    fn assign_row_mask(&mut self, mask: &[bool], value: &Bound<'_, PyAny>) -> PyResult<()> {
         if mask.len() != self.inner.height() {
             return Err(PyValueError::new_err(format!(
                 "boolean mask length {} != frame height {}",
@@ -2208,19 +2190,31 @@ impl PyDataFrame {
             .inner
             .columns()
             .iter()
-            .map(|c| c.set_scalar_at(&positions, value))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(pyerr)?;
+            .map(|c| scatter_scalar(c, &positions, value))
+            .collect::<PyResult<Vec<_>>>()?;
         self.rebuild_with(cols)
     }
 
     /// `df[bool_frame] = v`: per-cell assignment where the mask is True, keeping
-    /// each column's dtype. Atomic, like `assign_row_mask`.
-    fn assign_cell_mask(&mut self, cond: &PyDataFrame, value: SetVal) -> PyResult<()> {
+    /// each column's dtype. Atomic, like `assign_row_mask`. The condition frame
+    /// must be boolean — the same contract as `DataFrame.where` (a numeric / string
+    /// mask is rejected up front, not coerced through `x != 0.0`).
+    fn assign_cell_mask(&mut self, cond: &PyDataFrame, value: &Bound<'_, PyAny>) -> PyResult<()> {
         if cond.inner.width() != self.inner.width() || cond.inner.height() != self.inner.height() {
             return Err(PyValueError::new_err(
                 "df[mask] = v: `mask` must have the same shape as the frame",
             ));
+        }
+        if let Some(cc) = cond
+            .inner
+            .columns()
+            .iter()
+            .find(|c| !matches!(c, Column::Bool(..)))
+        {
+            return Err(PyTypeError::new_err(format!(
+                "df[mask] = v: `mask` must be a boolean frame, got a {} column",
+                cc.dtype()
+            )));
         }
         let cols = self
             .inner
@@ -2233,10 +2227,9 @@ impl PyDataFrame {
                     .enumerate()
                     .filter_map(|(i, &m)| m.then_some(i))
                     .collect();
-                col.set_scalar_at(&positions, value)
+                scatter_scalar(col, &positions, value)
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(pyerr)?;
+            .collect::<PyResult<Vec<_>>>()?;
         self.rebuild_with(cols)
     }
 
@@ -2842,9 +2835,12 @@ impl PyDataFrame {
             .inner
             .columns()
             .iter()
-            .map(|c| match c.dtype() {
-                DType::F64 | DType::I64 => c.round(decimals),
-                _ => Ok(c.clone()),
+            .map(|c| {
+                if c.dtype().is_numeric() {
+                    c.round(decimals)
+                } else {
+                    Ok(c.clone())
+                }
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(pyerr)?;
@@ -2920,7 +2916,7 @@ impl PyDataFrame {
         let mut names = Vec::new();
         let mut cols = Vec::new();
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
-            if matches!(col.dtype(), DType::F64 | DType::I64) {
+            if col.dtype().is_numeric() {
                 let s = PySeries {
                     inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(self.inner.index())),
                 };
@@ -3013,10 +3009,10 @@ impl PyDataFrame {
     fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         // Boolean-mask assignment with a scalar fill: df[mask] = v
         if let Some(mask) = bool_mask_key(key)? {
-            return self.assign_row_mask(&mask, extract_set_val(value)?);
+            return self.assign_row_mask(&mask, value);
         }
         if let Ok(cond) = key.extract::<PyRef<PyDataFrame>>() {
-            return self.assign_cell_mask(&cond, extract_set_val(value)?);
+            return self.assign_cell_mask(&cond, value);
         }
         // Column assignment: df[name] = value
         let name: String = key.extract().map_err(|_| {
@@ -3665,6 +3661,12 @@ impl PyDataFrame {
 /// column's dtype (so a string can land in a datetime column, etc.). An `I64`
 /// target given a float yields an `F64` value — core then widens the column.
 fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
+    // `None` / `NaN` -> a typed single-cell NA (marks the position missing while
+    // keeping the dtype), so `x[i] = None` / `x[i] = nan` is uniform across every
+    // dtype and every assignment surface (Series setitem, df[mask], df indexers).
+    if v.is_none() || v.extract::<f64>().is_ok_and(|x| x.is_nan()) {
+        return Ok(Column::na_of(target, 1));
+    }
     match target {
         DType::F64 => {
             let x = v
@@ -3714,6 +3716,27 @@ fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
         }
         DType::Datetime => Ok(Column::datetime(vec![parse_ts(v)?])),
     }
+}
+
+/// Assign a Python **scalar** into `col` at `positions`, via the shared
+/// `scalar_to_column` + [`Column::scatter`] primitive — the single assignment
+/// path behind Series setitem and DataFrame boolean-mask assignment (the
+/// `.loc/.iloc/.at/.iat` indexers reach `scatter` through `assign_positions`).
+///
+/// A column with **no selected positions** is returned unchanged, so a typed fill
+/// (a string into a str column, say) errors only when it actually targets a cell
+/// of an incompatible column — the mixed-frame atomic rule: nothing is written
+/// unless every targeted column accepts the value.
+fn scatter_scalar(
+    col: &Column,
+    positions: &[usize],
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Column> {
+    if positions.is_empty() {
+        return Ok(col.clone());
+    }
+    let src = scalar_to_column(value, col.dtype())?;
+    col.scatter(positions, &src).map_err(pyerr)
 }
 
 /// Convert an array-like assignment value (list / NumPy array / `Series`) to a

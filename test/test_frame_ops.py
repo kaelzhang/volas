@@ -80,3 +80,46 @@ def test_astype_unknown_dtype_raises():
     import pytest
     with pytest.raises(Exception):
         df.astype({'a': 'complex128'})
+
+
+def test_round_includes_narrow_numeric_dtypes():
+    # P1-04: round must round float32 / int32 too (was: only f64/i64 touched)
+    df = DataFrame({
+        'f32': np.array([1.25, 2.75], dtype=np.float32),
+        'i32': np.array([15, 25], dtype=np.int32),
+        'f64': [1.25, 2.75],
+        'i64': [15, 25],
+    })
+    r1 = df.round(1)
+    assert r1['f32'].dtype == 'float32' and r1['i32'].dtype == 'int32'
+    np.testing.assert_allclose(np.asarray(r1['f32'].to_numpy(), float), [1.2, 2.8], rtol=1e-5)
+    np.testing.assert_allclose(np.asarray(r1['f64'].to_numpy(), float), [1.2, 2.8])
+    rneg = df.round(-1)
+    np.testing.assert_array_equal(np.asarray(rneg['i32'].to_numpy()), [20, 20])  # tens, like i64
+    np.testing.assert_array_equal(np.asarray(rneg['i64'].to_numpy()), [20, 20])
+
+
+def test_describe_corr_cov_include_narrow_numeric_dtypes():
+    # P1-04: describe / corr / cov must treat float32 / int32 as numeric (str excluded)
+    wide = DataFrame({
+        'f32': np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        'i32': np.array([1, 2, 3], dtype=np.int32),
+        'f64': [1.0, 2.0, 3.0],
+        'i64': [1, 2, 3],
+        's': ['a', 'b', 'c'],
+    })
+    assert wide.describe().columns == ['f32', 'i32', 'f64', 'i64']
+    assert wide.corr().columns == ['f32', 'i32', 'f64', 'i64']
+    assert wide.cov().columns == ['f32', 'i32', 'f64', 'i64']
+
+
+def test_sem_skew_kurt_include_narrow_numeric_dtypes():
+    # P1-04: the column reductions (sem/skew/kurt) must include float32 / int32
+    df = DataFrame({
+        'f32': np.array([1.0, 2.0, 4.0, 7.0], dtype=np.float32),
+        'i32': np.array([1, 2, 4, 7], dtype=np.int32),
+        'f64': [1.0, 2.0, 4.0, 7.0],
+    })
+    for op in ['sem', 'skew', 'kurt']:
+        idx = list(np.asarray(getattr(df, op)().index))
+        assert {'f32', 'i32', 'f64'}.issubset(set(idx)), f"{op}: {idx}"

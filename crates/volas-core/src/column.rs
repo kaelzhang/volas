@@ -69,18 +69,6 @@ pub enum Column {
     Datetime(Arc<Vec<i64>>),
 }
 
-/// A scalar to assign into a column (boolean-mask / positional assignment). Kept
-/// distinct from a plain `f64` so a real `bool` can be told from a number — they
-/// fit different dtypes (pandas rejects a number into a bool column, and an
-/// integral number stays in an int column while a real bool does not change it).
-#[derive(Clone, Copy, Debug)]
-pub enum SetVal {
-    /// A boolean scalar.
-    Bool(bool),
-    /// A numeric scalar (an integral, finite value can stay in an int column).
-    Num(f64),
-}
-
 /// The result of a dtype-preserving scalar reduction ([`Column::sum`] etc.),
 /// carrying the value in its pandas result dtype so the binding can box it as the
 /// matching numpy scalar (`np.int64` / `np.float64` / `np.bool_`).
@@ -672,90 +660,12 @@ impl Column {
         }
     }
 
-    /// Assign a scalar at the given positions, following pandas 3.0's in-place
-    /// dtype rules: keep the column dtype when the value fits losslessly; upcast
-    /// an int column to float for `NaN`; reject a lossy write (a non-integral
-    /// number into an int column, or a number into a bool column) with a `DType`
-    /// error — surfaces as `TypeError`, like pandas' `LossySetitemError`.
-    /// `positions` are assumed in bounds (callers validate the mask / index).
-    pub fn set_scalar_at(&self, positions: &[usize], value: SetVal) -> Result<Column> {
-        let len = self.len();
-        match self {
-            // A float column absorbs any value (with rounding for f32); NaN is its
-            // in-band missing, so no separate validity is needed.
-            Column::F64(v) => Ok(set_float_at(v, positions, value)),
-            Column::F32(v) => Ok(set_float_at(v, positions, value)),
-            // An int column keeps its dtype AND its existing validity bitmap: a real
-            // (integral) value marks those positions present, a NaN marks them
-            // missing (NA, *not* an f64 upcast), a lossy value errors. Other rows'
-            // NA is preserved (the bug fix: a scalar write used to drop the mask).
-            Column::I64(v, val) => match value {
-                SetVal::Num(x) if x.is_nan() => {
-                    Ok(Column::i64_with(v.to_vec(), validity_set(val, positions, false, len)))
-                }
-                SetVal::Num(x) => match i64::try_from_f64(x) {
-                    Some(iv) => Ok(Column::i64_with(set_each(v, positions, iv), validity_set(val, positions, true, len))),
-                    None => Err(VolasError::DType(format!("Invalid value '{x}' for dtype 'int64'"))),
-                },
-                SetVal::Bool(b) => {
-                    Ok(Column::i64_with(set_each(v, positions, b as i64), validity_set(val, positions, true, len)))
-                }
-            },
-            Column::I32(v, val) => match value {
-                SetVal::Num(x) if x.is_nan() => {
-                    Ok(Column::i32_with(v.to_vec(), validity_set(val, positions, false, len)))
-                }
-                SetVal::Num(x) => match i32::try_from_f64(x) {
-                    Some(iv) => Ok(Column::i32_with(set_each(v, positions, iv), validity_set(val, positions, true, len))),
-                    None => Err(VolasError::DType(format!("Invalid value '{x}' for dtype 'int32'"))),
-                },
-                SetVal::Bool(b) => {
-                    Ok(Column::i32_with(set_each(v, positions, b as i32), validity_set(val, positions, true, len)))
-                }
-            },
-            Column::Bool(v, val) => match value {
-                SetVal::Bool(b) => {
-                    Ok(Column::bool_with(set_each(v, positions, b), validity_set(val, positions, true, len)))
-                }
-                SetVal::Num(x) if x.is_nan() => {
-                    Ok(Column::bool_with(v.to_vec(), validity_set(val, positions, false, len)))
-                }
-                SetVal::Num(x) => Err(VolasError::DType(format!("Invalid value '{x}' for dtype 'bool'"))),
-            },
-            other => Err(VolasError::DType(format!(
-                "cannot assign a scalar into a {} column",
-                other.dtype()
-            ))),
-        }
-    }
-
-    /// Write a string scalar into a `Str` column at `positions`, preserving the
-    /// existing validity (the written cells become present). Errors for a
-    /// non-string column. Mirrors `set_scalar_at` for the string case (which a
-    /// numeric `SetVal` cannot represent).
-    pub fn set_str_scalar_at(&self, positions: &[usize], s: &str) -> Result<Column> {
-        match self {
-            Column::Str(v, val) => {
-                let len = v.len();
-                let mut nv = (**v).clone();
-                for &i in positions {
-                    nv[i] = s.to_string();
-                }
-                Ok(Column::str_with(nv, validity_set(val, positions, true, len)))
-            }
-            other => Err(VolasError::DType(format!(
-                "cannot assign a string into a {} column",
-                other.dtype()
-            ))),
-        }
-    }
-
-    /// Scatter `values` into `self` at `positions` — the column-source assignment
-    /// that backs `df.loc / iloc / at / iat = ` — **keeping `self`'s dtype** and
-    /// updating its validity: each written position takes the source's presence,
-    /// every other position keeps its own. A length-1 `values` broadcasts.
-    /// Mirrors [`set_scalar_at`](Self::set_scalar_at)'s dtype rules at column
-    /// granularity:
+    /// Scatter `values` into `self` at `positions` — **the single assignment
+    /// primitive** behind every surface (`df.loc / iloc / at / iat = `, Series
+    /// setitem, and boolean-mask assignment; a scalar write passes a length-1
+    /// `values`, which broadcasts). It **keeps `self`'s dtype** and updates its
+    /// validity: each written position takes the source's presence, every other
+    /// position keeps its own. The dtype rules are:
     /// - a float target absorbs any numeric source (a missing source -> in-band `NaN`);
     /// - an int target stays int — a present integral value is stored, a missing /
     ///   `NaN` source marks the cell NA (no float widening, per the NA model), a
@@ -773,11 +683,7 @@ impl Column {
         // epoch nanos — both silent corruption — so reject them up front. (The
         // `Bool` / `Str` / `Datetime` targets are already strict via their
         // `as_*_vec` helpers, which error on a mismatched-kind source.)
-        if matches!(
-            self.dtype(),
-            DType::F64 | DType::F32 | DType::I64 | DType::I32
-        ) && matches!(values.dtype(), DType::Utf8 | DType::Datetime)
-        {
+        if self.dtype().is_numeric() && matches!(values.dtype(), DType::Utf8 | DType::Datetime) {
             return Err(VolasError::DType(format!(
                 "cannot assign {} values into a {} column",
                 values.dtype(),
@@ -991,10 +897,10 @@ impl Column {
         }
     }
 
-    /// Shift values by `n` periods (pandas `shift`), dtype-preserving. Vacated
-    /// cells become missing (`NaN` for float, `volas.NA` for int/bool, `NaT` for
-    /// datetime); a shifted-in value keeps its own missingness. A `str` column has
-    /// no missing value of its own, so it degrades to an all-missing float column.
+    /// Shift values by `n` periods (pandas `shift`), dtype-preserving for every
+    /// dtype (`str` included). Vacated cells become missing (`NaN` for float,
+    /// `volas.NA` for int/bool/str, `NaT` for datetime); a shifted-in value keeps
+    /// its own missingness.
     pub fn shift(&self, n: isize) -> Column {
         let len = self.len();
         // Validity of the result: a cell is present when its source cell exists and
@@ -1664,49 +1570,6 @@ fn clip_vec<T: Numeric>(v: &[T], lo: Option<f64>, hi: Option<f64>) -> Vec<T> {
         .collect()
 }
 
-/// Write a scalar into a float column at `positions` (any value fits; f32 rounds).
-fn set_float_at<T: Numeric>(v: &[T], positions: &[usize], value: SetVal) -> Column {
-    let x = match value {
-        SetVal::Num(x) => T::try_from_f64(x).unwrap_or(T::ZERO), // float try_from is always Some
-        SetVal::Bool(b) => {
-            if b {
-                T::ONE
-            } else {
-                T::ZERO
-            }
-        }
-    };
-    let mut nv = v.to_vec();
-    for &i in positions {
-        nv[i] = x;
-    }
-    T::into_column(nv)
-}
-
-/// Copy `v` and write `x` into each of `positions` (scalar assignment).
-fn set_each<T: Copy>(v: &[T], positions: &[usize], x: T) -> Vec<T> {
-    let mut nv = v.to_vec();
-    for &i in positions {
-        nv[i] = x;
-    }
-    nv
-}
-
-/// The validity after a scalar write: every other row keeps its existing validity;
-/// `positions` become present (`present = true`) or missing (a NA write). A dense
-/// column stays dense when the write only sets values present (no allocation in
-/// the common case).
-fn validity_set(val: &Validity, positions: &[usize], present: bool, len: usize) -> Validity {
-    if present && !val.has_nulls() {
-        return Validity::dense();
-    }
-    let mut flags: Vec<bool> = (0..len).map(|i| val.is_valid(i)).collect();
-    for &i in positions {
-        flags[i] = present;
-    }
-    Validity::from_valid_iter(len, flags)
-}
-
 /// Running OR (`or = true`, backs bool `cummax`) / running AND (`cummin`).
 fn bool_running(v: &[bool], or: bool) -> Vec<bool> {
     let mut acc = !or; // OR seeds false; AND seeds true
@@ -1992,28 +1855,29 @@ mod tests {
     }
 
     #[test]
-    fn set_scalar_at_follows_pandas_dtype_rules() {
-        use SetVal::{Bool, Num};
-        // F64 stays F64 for a number or a bool.
+    fn scatter_follows_dtype_rules() {
+        // `scatter` is the single assignment primitive (a 1-element source is a
+        // scalar write); it keeps the target dtype and updates validity.
+        // F64 stays F64 for a number or a bool source.
         let f = Column::f64(vec![1.0, 2.0, 3.0]);
-        assert_eq!(f.set_scalar_at(&[1], Num(9.0)).unwrap(), Column::f64(vec![1.0, 9.0, 3.0]));
-        assert_eq!(f.set_scalar_at(&[0], Bool(false)).unwrap(), Column::f64(vec![0.0, 2.0, 3.0]));
-        // I64 keeps int for an integral number or a bool.
+        assert_eq!(f.scatter(&[1], &Column::f64(vec![9.0])).unwrap(), Column::f64(vec![1.0, 9.0, 3.0]));
+        assert_eq!(f.scatter(&[0], &Column::bool(vec![false])).unwrap(), Column::f64(vec![0.0, 2.0, 3.0]));
+        // I64 keeps int for an integral number or a bool source.
         let i = Column::i64(vec![1, 2, 3]);
-        assert_eq!(i.set_scalar_at(&[2], Num(0.0)).unwrap(), Column::i64(vec![1, 2, 0]));
-        assert_eq!(i.set_scalar_at(&[0], Bool(false)).unwrap(), Column::i64(vec![0, 2, 3]));
+        assert_eq!(i.scatter(&[2], &Column::f64(vec![0.0])).unwrap(), Column::i64(vec![1, 2, 0]));
+        assert_eq!(i.scatter(&[0], &Column::bool(vec![false])).unwrap(), Column::i64(vec![0, 2, 3]));
         // I64 + NaN keeps int64, marking that cell NA (the NA model; no float upcast).
-        let na = i.set_scalar_at(&[1], Num(f64::NAN)).unwrap();
+        let na = i.scatter(&[1], &Column::f64(vec![f64::NAN])).unwrap();
         assert_eq!(na.dtype(), DType::I64);
         assert!(na.is_valid(0) && !na.is_valid(1) && na.is_valid(2));
         // I64 + a non-integral number is lossy -> error.
-        assert!(i.set_scalar_at(&[0], Num(2.5)).is_err());
-        // Bool keeps bool for a bool; a number into bool is lossy -> error.
+        assert!(i.scatter(&[0], &Column::f64(vec![2.5])).is_err());
+        // Bool keeps bool for a bool source; a number into bool is lossy -> error.
         let b = Column::bool(vec![true, false]);
-        assert_eq!(b.set_scalar_at(&[1], Bool(true)).unwrap(), Column::bool(vec![true, true]));
-        assert!(b.set_scalar_at(&[0], Num(0.0)).is_err());
-        // A scalar into a str column is unsupported -> error.
-        assert!(Column::str(vec!["a".into()]).set_scalar_at(&[0], Num(1.0)).is_err());
+        assert_eq!(b.scatter(&[1], &Column::bool(vec![true])).unwrap(), Column::bool(vec![true, true]));
+        assert!(b.scatter(&[0], &Column::f64(vec![0.0])).is_err());
+        // A number / datetime into a str column is unsupported -> error.
+        assert!(Column::str(vec!["a".into()]).scatter(&[0], &Column::f64(vec![1.0])).is_err());
     }
 
     #[test]
@@ -2194,15 +2058,15 @@ mod tests {
                    Column::f32(vec![1.5, 0.0, 3.5]));
         assert_eq!(i.select(&cond, &Column::i32(vec![0, 0, 0]), DType::I32).unwrap(),
                    Column::i32(vec![3, 0, 4]));
-        // assignment: f32 writes; i32 keeps the dtype (a NaN write marks the cell
-        // NA, no float upcast), rejects a lossy value
-        assert_eq!(f.set_scalar_at(&[1], SetVal::Num(9.0)).unwrap(), Column::f32(vec![1.5, 9.0, 3.5]));
-        assert_eq!(i.set_scalar_at(&[1], SetVal::Bool(true)).unwrap(), Column::i32(vec![3, 1, 4]));
-        assert_eq!(i.set_scalar_at(&[1], SetVal::Num(9.0)).unwrap(), Column::i32(vec![3, 9, 4]));
-        let i_na = i.set_scalar_at(&[0], SetVal::Num(f64::NAN)).unwrap();
+        // assignment (scatter, 1-elem source): f32 writes; i32 keeps the dtype (a
+        // NaN write marks the cell NA, no float upcast), rejects a lossy value
+        assert_eq!(f.scatter(&[1], &Column::f32(vec![9.0])).unwrap(), Column::f32(vec![1.5, 9.0, 3.5]));
+        assert_eq!(i.scatter(&[1], &Column::bool(vec![true])).unwrap(), Column::i32(vec![3, 1, 4]));
+        assert_eq!(i.scatter(&[1], &Column::f64(vec![9.0])).unwrap(), Column::i32(vec![3, 9, 4]));
+        let i_na = i.scatter(&[0], &Column::f64(vec![f64::NAN])).unwrap();
         assert!(i_na.dtype() == DType::I32 && !i_na.is_valid(0) && i_na.is_valid(1));
-        assert!(i.set_scalar_at(&[0], SetVal::Num(2.5)).is_err());
-        assert_eq!(f.set_scalar_at(&[0], SetVal::Bool(false)).unwrap(), Column::f32(vec![0.0, 2.5, 3.5]));
+        assert!(i.scatter(&[0], &Column::f64(vec![2.5])).is_err());
+        assert_eq!(f.scatter(&[0], &Column::bool(vec![false])).unwrap(), Column::f32(vec![0.0, 2.5, 3.5]));
         // remaining f32/i32 arms (both directions of slice/take, the other reductions,
         // sub/mul kernels through the trait, bool->i32, append/append_missing)
         assert_eq!(f.get_f64(0), 1.5);
@@ -2221,7 +2085,7 @@ mod tests {
         assert_eq!(i.select(&cond, &Column::f64(vec![0.0, 0.0, 0.0]), DType::I32).unwrap(),
                    Column::i32(vec![3, 0, 4]));
         assert!(i.select(&cond, &Column::f64(vec![2.5, 0.0, 0.0]), DType::I32).is_err());
-        assert_eq!(f.set_scalar_at(&[0], SetVal::Bool(true)).unwrap(), Column::f32(vec![1.0, 2.5, 3.5]));
+        assert_eq!(f.scatter(&[0], &Column::bool(vec![true])).unwrap(), Column::f32(vec![1.0, 2.5, 3.5]));
         let mut ii = Column::i32(vec![1]);
         ii.append(&Column::i32(vec![2])).unwrap();
         assert_eq!(ii, Column::i32(vec![1, 2]));
@@ -2482,28 +2346,29 @@ mod tests {
     }
 
     #[test]
-    fn set_scalar_at_preserves_validity() {
-        // a scalar write keeps every other row's NA (regression: it used to return
-        // a dense column and silently turn pre-existing NA into 0 / false)
+    fn scatter_preserves_validity() {
+        // a scatter keeps every other row's NA (regression: a scalar write used to
+        // return a dense column and silently turn pre-existing NA into 0 / false)
         let c = na_i64(&[1, 0, 3], &[true, false, true]); // 1, NA, 3
-        let r = c.set_scalar_at(&[0], SetVal::Num(9.0)).unwrap();
+        let r = c.scatter(&[0], &Column::f64(vec![9.0])).unwrap();
         assert_eq!(r.dtype(), DType::I64);
         assert!(r.is_valid(0) && !r.is_valid(1) && r.is_valid(2)); // 9, NA, 3
         // writing NaN marks the position NA and keeps int (no f64 upcast)
-        let r2 = c.set_scalar_at(&[2], SetVal::Num(f64::NAN)).unwrap();
+        let r2 = c.scatter(&[2], &Column::f64(vec![f64::NAN])).unwrap();
         assert_eq!(r2.dtype(), DType::I64);
         assert!(r2.is_valid(0) && !r2.is_valid(1) && !r2.is_valid(2));
         // bool keeps its validity too
         let b = Column::bool_with(vec![true, false, false], Validity::from_valid_iter(3, [true, false, true]));
-        let rb = b.set_scalar_at(&[0], SetVal::Bool(false)).unwrap();
+        let rb = b.scatter(&[0], &Column::bool(vec![false])).unwrap();
         assert!(rb.dtype() == DType::Bool && rb.is_valid(0) && !rb.is_valid(1) && rb.is_valid(2));
-        // a dense column stays dense (no validity allocated) on a real write
-        assert_eq!(Column::i64(vec![1, 2, 3]).set_scalar_at(&[0], SetVal::Num(9.0)).unwrap().null_count(), 0);
-        // a bool fill into an int column converts (pandas), keeping validity
-        let rib = c.set_scalar_at(&[1], SetVal::Bool(true)).unwrap();
+        // a present write introduces no NA (null_count stays 0)
+        assert_eq!(Column::i64(vec![1, 2, 3]).scatter(&[0], &Column::f64(vec![9.0])).unwrap().null_count(), 0);
+        // a bool source into an int column converts (pandas), keeping validity
+        let rib = c.scatter(&[1], &Column::bool(vec![true])).unwrap();
         assert!(rib.dtype() == DType::I64 && rib.is_valid(1));
-        // a NaN write into a bool column marks the cell NA, keeping bool
-        let bn = Column::bool(vec![true, false]).set_scalar_at(&[0], SetVal::Num(f64::NAN)).unwrap();
+        // a typed-NA source (what the binding builds for None / NaN into bool) marks
+        // the cell NA, keeping bool
+        let bn = Column::bool(vec![true, false]).scatter(&[0], &Column::na_of(DType::Bool, 1)).unwrap();
         assert!(bn.dtype() == DType::Bool && !bn.is_valid(0) && bn.is_valid(1));
     }
 

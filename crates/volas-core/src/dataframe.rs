@@ -567,11 +567,12 @@ impl DataFrame {
     /// length 1, otherwise its length must equal `positions.len()`. This backs
     /// `df.loc[...] = `, `df.iloc[...] = `, `df.at[...] = ` and `df.iat[...] = `.
     ///
-    /// Dtype handling is delegated to [`Column::scatter`], which **keeps the target
-    /// column's dtype** and updates its validity (a write into an existing NA cell
-    /// makes it present; a missing / `NaN` source marks the cell NA without widening
-    /// an int column to float; a present non-integral value into an int column is a
-    /// lossy error) — matching the `Series` `set_scalar_at` rules exactly.
+    /// Dtype handling is delegated to [`Column::scatter`], the single assignment
+    /// primitive shared with the Series and boolean-mask surfaces: it **keeps the
+    /// target column's dtype** and updates its validity (a write into an existing NA
+    /// cell makes it present; a missing / `NaN` source marks the cell NA without
+    /// widening an int column to float; a present non-integral value into an int
+    /// column is a lossy error).
     ///
     /// A manual write into a cached directive column **drops its computed status**
     /// (it becomes plain data) so a later `fulfill` can never silently clobber the
