@@ -1217,12 +1217,30 @@ impl Column {
         }
     }
 
+    /// Error if this column is not numeric (`float` / `int` / `bool` — bool acts as
+    /// 0/1). The guard for the numeric-only operations (arithmetic, reductions): a
+    /// `Str` / `Datetime` column would funnel through `to_f64_vec` to `NaN` (str) or
+    /// a quantized epoch (datetime), which the API contract (C4) forbids as a silent
+    /// lossy conversion.
+    pub fn require_numeric(&self) -> Result<()> {
+        if self.dtype().is_numeric() || matches!(self, Column::Bool(..)) {
+            Ok(())
+        } else {
+            Err(VolasError::DType(format!(
+                "a numeric operation is not supported on a {} column",
+                self.dtype()
+            )))
+        }
+    }
+
     /// Binary `+ - *` against `other`, dtype-preserving via [`binary_supertype`]
     /// (`int ∘ int → i64`, else f64). `bool ∘ bool` is logical, matching pandas:
     /// `+` is OR, `*` is AND, `-` is an error (numpy disallows bool subtraction);
     /// `bool ∘ number` promotes (bool acts as 0/1). Wrapping int ops match pandas
     /// overflow. Equal lengths assumed.
     pub fn binary(&self, other: &Column, op: BinOp) -> Result<Column> {
+        self.require_numeric()?;
+        other.require_numeric()?;
         if let (Column::Bool(a, av), Column::Bool(b, bv)) = (self, other) {
             let nulls = av.and(bv);
             return match op {
@@ -1254,6 +1272,8 @@ impl Column {
     /// True division `self / other` (pandas `/`): always float. `bool / bool` is
     /// an error, matching pandas (division is not defined on bool).
     pub fn div(&self, other: &Column) -> Result<Column> {
+        self.require_numeric()?;
+        other.require_numeric()?;
         if matches!((self, other), (Column::Bool(_, _), Column::Bool(_, _))) {
             return Err(VolasError::DType(
                 "division is not supported between two bool columns".into(),
@@ -1270,6 +1290,8 @@ impl Column {
     /// is float64. NA in either operand propagates. `bool // bool` is an error, like
     /// true division.
     pub fn floordiv(&self, other: &Column) -> Result<Column> {
+        self.require_numeric()?;
+        other.require_numeric()?;
         if matches!((self, other), (Column::Bool(_, _), Column::Bool(_, _))) {
             return Err(VolasError::DType(
                 "floor division is not supported between two bool columns".into(),

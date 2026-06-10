@@ -462,15 +462,15 @@ fn scalar_to_numpy(py: Python<'_>, s: Scalar) -> Py<PyAny> {
     }
 }
 
-/// Render an index label at position `i` as a Python object (a datetime string
-/// for a DatetimeIndex, else the integer label).
+/// Render an index label at position `i` as a **typed** Python object: a
+/// [`Timestamp`](PyTimestamp) for a DatetimeIndex (carrying the frame tz, so
+/// `df.loc[row.name]` round-trips on the absolute instant), else the int / str
+/// label. Display layers render the readable string form separately.
 fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> {
     match index.kind() {
-        IndexKind::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz)
-            .into_pyobject(py)
+        IndexKind::Datetime(v, tz) => Py::new(py, PyTimestamp { ns: v[i], tz: *tz })
             .unwrap()
-            .into_any()
-            .unbind(),
+            .into_any(),
         IndexKind::Int64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         IndexKind::Range(_) => (i as i64).into_pyobject(py).unwrap().into_any().unbind(),
         IndexKind::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
@@ -614,6 +614,12 @@ impl PyTimestamp {
                 other.name()
             ),
         }
+    }
+
+    /// The readable wall-clock string (pandas `str(Timestamp)` form) — the
+    /// object form stays in `repr`.
+    fn __str__(&self) -> String {
+        datetime::format_ns_tz(self.ns, self.tz)
     }
 
     fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: pyo3::basic::CompareOp) -> PyResult<bool> {
@@ -893,62 +899,81 @@ impl PySeries {
     // dtype-preserving ones (sum/prod/min/max) carry the column's result dtype
     // (np.int64 for an int column, etc.); the always-float statistics box np.float64.
 
+    // Each numeric reduction first asserts the column is numeric — a str/datetime
+    // reduction used to funnel through to_f64_vec and silently return 0.0 / NaN,
+    // which the API contract (C4) forbids (V3).
+
     /// NaN-skipping mean (pandas `mean`) -> `np.float64`.
-    fn mean(&self, py: Python<'_>) -> Py<PyAny> {
-        self.box_float(py, self.mean_f64())
+    fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(self.box_float(py, self.mean_f64()))
     }
     /// Sum (pandas `sum`), dtype-preserving: float -> `np.float64`, int / bool ->
     /// `np.int64` (computed natively).
-    fn sum(&self, py: Python<'_>) -> Py<PyAny> {
-        scalar_to_numpy(py, self.inner.data.sum())
+    fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(scalar_to_numpy(py, self.inner.data.sum()))
     }
     /// Product (pandas `prod`), dtype-preserving.
-    fn prod(&self, py: Python<'_>) -> Py<PyAny> {
-        scalar_to_numpy(py, self.inner.data.prod())
+    fn prod(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(scalar_to_numpy(py, self.inner.data.prod()))
     }
     /// Minimum (pandas `min`), dtype-preserving (int -> `np.int64`, etc.).
-    fn min(&self, py: Python<'_>) -> Py<PyAny> {
-        scalar_to_numpy(py, self.inner.data.extreme(false))
+    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(scalar_to_numpy(py, self.inner.data.extreme(false)))
     }
     /// Maximum (pandas `max`), dtype-preserving.
-    fn max(&self, py: Python<'_>) -> Py<PyAny> {
-        scalar_to_numpy(py, self.inner.data.extreme(true))
+    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(scalar_to_numpy(py, self.inner.data.extreme(true)))
     }
     /// Sample variance (`ddof=1`, pandas `var`) -> `np.float64`.
-    fn var(&self, py: Python<'_>) -> Py<PyAny> {
-        self.box_float(py, self.var_f64())
+    fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(self.box_float(py, self.var_f64()))
     }
     /// Sample standard deviation (`ddof=1`, pandas `std`) -> `np.float64`.
-    fn std(&self, py: Python<'_>) -> Py<PyAny> {
-        self.box_float(py, self.var_f64().sqrt())
+    fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(self.box_float(py, self.var_f64().sqrt()))
     }
     /// Median (pandas `median`) -> `np.float64`.
-    fn median(&self, py: Python<'_>) -> Py<PyAny> {
-        self.box_float(py, self.median_f64())
+    fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(self.box_float(py, self.median_f64()))
     }
     /// Standard error of the mean (`ddof=1`, pandas `sem`) -> `np.float64`.
-    fn sem(&self, py: Python<'_>) -> Py<PyAny> {
-        self.box_float(py, stats::sem(&self.inner.data.to_f64_vec()))
+    fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(self.box_float(py, stats::sem(&self.inner.data.to_f64_vec())))
     }
     /// Adjusted Fisher-Pearson skewness (pandas `skew`) -> `np.float64`.
-    fn skew(&self, py: Python<'_>) -> Py<PyAny> {
-        self.box_float(py, stats::skew(&self.inner.data.to_f64_vec()))
+    fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(self.box_float(py, stats::skew(&self.inner.data.to_f64_vec())))
     }
     /// Excess kurtosis, Fisher's definition (pandas `kurt`) -> `np.float64`.
-    fn kurt(&self, py: Python<'_>) -> Py<PyAny> {
-        self.box_float(py, stats::kurt(&self.inner.data.to_f64_vec()))
+    fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(self.box_float(py, stats::kurt(&self.inner.data.to_f64_vec())))
     }
 
     /// Pairwise Pearson correlation with `other` (pandas `corr`); positional
     /// alignment (volas does not reindex), dropping NaN pairs.
-    fn corr(&self, other: &PySeries) -> f64 {
-        stats::corr(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec())
+    fn corr(&self, other: &PySeries) -> PyResult<f64> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        other.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(stats::corr(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec()))
     }
 
     /// Pairwise sample covariance with `other`, ddof=1 (pandas `cov`); positional
     /// alignment, dropping NaN pairs.
-    fn cov(&self, other: &PySeries) -> f64 {
-        stats::cov(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec())
+    fn cov(&self, other: &PySeries) -> PyResult<f64> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        other.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(stats::cov(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec()))
     }
 
     /// Summary statistics (pandas `describe`): a Series indexed by
@@ -1180,6 +1205,7 @@ impl PySeries {
     /// returns ranks scaled to (0, 1].
     #[pyo3(signature = (method = "average", ascending = true, pct = false))]
     fn rank(&self, method: &str, ascending: bool, pct: bool) -> PyResult<PySeries> {
+        self.inner.data.require_numeric().map_err(pyerr)?; // str/datetime rank -> error (C4)
         let m = match method {
             "average" => stats::RankMethod::Average,
             "min" => stats::RankMethod::Min,
@@ -1211,6 +1237,7 @@ impl PySeries {
     /// `quantile` -> `np.float64`.
     #[pyo3(signature = (q = 0.5))]
     fn quantile(&self, py: Python<'_>, q: f64) -> PyResult<Py<PyAny>> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
         Ok(self.box_float(py, self.quantile_f64(q)?))
     }
 
@@ -1980,9 +2007,10 @@ impl PyRow {
         Ok(d)
     }
 
-    /// pandas-style vertical repr — like a row Series: `column   value` rows plus
-    /// a `Name: <row label>, dtype: <dtype>` footer (the row's single dtype, or
-    /// `object` when columns differ). `str` and `repr` are identical.
+    /// Vertical repr — `column   value` lines plus a `Name: <row label>` footer.
+    /// No `dtype:` is printed: a Row is a typed record, not a Series, and has no
+    /// single dtype (pandas prints `dtype: object` only because its row IS an
+    /// object Series). `str` and `repr` are identical.
     fn __repr__(&self) -> String {
         render_row(&self.inner, true)
     }
@@ -1991,7 +2019,7 @@ impl PyRow {
         self.__repr__()
     }
 
-    /// Render the row as text without the `Name/dtype` footer (pandas
+    /// Render the row as text without the `Name` footer (pandas
     /// `Series.to_string`).
     fn to_string(&self) -> String {
         render_row(&self.inner, false)
