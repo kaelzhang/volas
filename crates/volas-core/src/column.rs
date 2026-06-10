@@ -732,6 +732,15 @@ impl Column {
         {
             return self.cast_int_bool(to);
         }
+        // `astype` is an EXPLICIT cast, so a str source to a numeric target parses
+        // each cell rather than funnelling to a silent all-NaN (`to_f64_vec` reads
+        // a str column as NaN): a valid numeric string converts, an empty/missing
+        // cell becomes NA, any other non-empty string raises (contract C4).
+        if let Column::Str(v, val) = self {
+            if matches!(to, DType::F64 | DType::F32 | DType::I64 | DType::I32) {
+                return Self::cast_str_to_numeric(v, val, to);
+            }
+        }
         match to {
             DType::F64 => Ok(Column::f64(self.to_f64_vec())),
             DType::I64 => match self {
@@ -810,6 +819,68 @@ impl Column {
             (Column::Bool(v, _), DType::I64) => Ok(Column::i64_with(v.iter().map(|&b| b as i64).collect(), validity)),
             (Column::Bool(v, _), DType::I32) => Ok(Column::i32_with(v.iter().map(|&b| b as i32).collect(), validity)),
             _ => unreachable!("same-dtype is handled in cast"), // LCOV_EXCL_LINE
+        }
+    }
+
+    /// Parse a str column into a numeric target for explicit `astype` (Q2): a
+    /// present, non-empty cell parses (int target -> int literal, so `"1.5"`
+    /// raises; float target -> float literal), an empty / whitespace / missing
+    /// cell becomes NA, and any other non-empty string raises with the offending
+    /// value. Never a silent NaN (contract C4). `to` is numeric (caller guard).
+    fn cast_str_to_numeric(v: &[String], val: &Validity, to: DType) -> Result<Column> {
+        // The cells we parse: present AND not blank. Blank / missing cells are NA
+        // in the result (an int target carries this in its validity; a float
+        // target writes NaN).
+        let parse_me: Vec<bool> = (0..v.len())
+            .map(|i| val.is_valid(i) && !v[i].trim().is_empty())
+            .collect();
+        let bad = |i: usize, target: &str| {
+            VolasError::Value(format!(
+                "cannot convert string {:?} to {target} (astype)",
+                v[i]
+            ))
+        };
+        match to {
+            DType::F64 | DType::F32 => {
+                let mut out = vec![f64::NAN; v.len()];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    if parse_me[i] {
+                        *slot = v[i].trim().parse::<f64>().map_err(|_| bad(i, "float64"))?;
+                    }
+                }
+                Ok(if to == DType::F32 {
+                    Column::f32(out.iter().map(|&x| x as f32).collect())
+                } else {
+                    Column::f64(out)
+                })
+            }
+            // int targets: parse an integer literal (no funnel, so "1.5" raises
+            // rather than truncating), carrying the blank/missing cells as NA.
+            _ => {
+                let validity = Validity::from_valid_iter(v.len(), parse_me.iter().copied());
+                let mut out = vec![0i64; v.len()];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    if parse_me[i] {
+                        *slot = v[i].trim().parse::<i64>().map_err(|_| bad(i, "int64"))?;
+                    }
+                }
+                if to == DType::I32 {
+                    let narrowed = out
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &x)| {
+                            if parse_me[i] {
+                                i32::try_from(x).map_err(|_| bad(i, "int32"))
+                            } else {
+                                Ok(0)
+                            }
+                        })
+                        .collect::<Result<Vec<i32>>>()?;
+                    Ok(Column::i32_with(narrowed, validity))
+                } else {
+                    Ok(Column::i64_with(out, validity))
+                }
+            }
         }
     }
 
@@ -1980,7 +2051,7 @@ mod tests {
         let f = Column::f64(vec![1.0, 2.0]);
         assert_eq!(f.cast(DType::F64).unwrap(), f);
 
-        // -> F64 (incl. the Str -> NaN arm of to_f64_vec)
+        // -> F64
         assert_eq!(
             Column::i64(vec![3]).cast(DType::F64).unwrap(),
             Column::f64(vec![3.0])
@@ -1989,11 +2060,17 @@ mod tests {
             Column::bool(vec![true, false]).cast(DType::F64).unwrap(),
             Column::f64(vec![1.0, 0.0])
         );
-        let from_str = Column::str(vec!["a".into(), "b".into()])
+        // Str -> F64 PARSES (explicit astype, Q2): a valid number converts, a
+        // blank cell -> NaN, and a non-empty non-numeric string raises rather
+        // than funnelling silently to NaN.
+        let parsed = Column::str(vec!["1.5".into(), "".into()])
             .cast(DType::F64)
             .unwrap();
-        assert_eq!(from_str.dtype(), DType::F64);
-        assert!(from_str.to_f64_vec().iter().all(|x| x.is_nan()));
+        assert_eq!(parsed.dtype(), DType::F64);
+        let pv = parsed.to_f64_vec();
+        assert_eq!(pv[0], 1.5);
+        assert!(pv[1].is_nan());
+        assert!(Column::str(vec!["a".into()]).cast(DType::F64).is_err());
 
         // -> I64 (F64 / Bool / Datetime; Str errors)
         assert_eq!(
@@ -2046,6 +2123,32 @@ mod tests {
                 .dtype(),
             DType::Datetime
         );
+    }
+
+    #[test]
+    fn cast_str_to_numeric_parses_blanks_and_rejects() {
+        let s = |xs: &[&str]| Column::str(xs.iter().map(|x| x.to_string()).collect());
+
+        // F32: a valid number parses, a blank cell -> NaN.
+        let f32c = s(&["3.25", "  "]).cast(DType::F32).unwrap();
+        assert_eq!(f32c.dtype(), DType::F32);
+        let f32v = f32c.to_f64_vec();
+        assert_eq!(f32v[0], 3.25);
+        assert!(f32v[1].is_nan());
+
+        // I32: a valid integer parses, a blank cell is NA (validity), and an
+        // out-of-i32-range value raises.
+        let i32c = s(&["5", "", "-7"]).cast(DType::I32).unwrap();
+        assert_eq!(i32c.dtype(), DType::I32);
+        assert_eq!(i32c.to_f64_vec()[0], 5.0);
+        assert!(!i32c.is_valid(1)); // blank -> NA
+        assert_eq!(i32c.to_f64_vec()[2], -7.0);
+        assert!(s(&["9999999999"]).cast(DType::I32).is_err()); // > i32::MAX
+
+        // int target rejects a non-integral / non-numeric literal (no truncation).
+        assert!(s(&["1.5"]).cast(DType::I64).is_err());
+        assert!(s(&["abc"]).cast(DType::I64).is_err());
+        assert!(s(&["nope"]).cast(DType::F32).is_err());
     }
 
     #[test]
