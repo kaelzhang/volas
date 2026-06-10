@@ -1859,20 +1859,12 @@ fn non_nan(col: &Column) -> Vec<f64> {
         .collect()
 }
 
-/// The position of the first maximum (`want_max`) or minimum non-NaN value; errors
-/// on an all-NA column. Backs `Series.idxmax` / `idxmin`.
+/// The position of the first maximum (`want_max`) or minimum present value,
+/// dtype-aware (numeric by value, str lexically, datetime by raw i64 — NOT the
+/// f64 funnel, which loses sub-256ns datetime ordering); errors on an all-NA
+/// column. Backs `Series.idxmax` / `idxmin`.
 fn argext(col: &Column, want_max: bool) -> PyResult<usize> {
-    let mut best: Option<(usize, f64)> = None;
-    for (i, x) in col.to_f64_vec().into_iter().enumerate() {
-        if x.is_nan() {
-            continue;
-        }
-        match best {
-            Some((_, b)) if (want_max && x <= b) || (!want_max && x >= b) => {}
-            _ => best = Some((i, x)),
-        }
-    }
-    best.map(|(i, _)| i)
+    col.arg_extreme(want_max)
         .ok_or_else(|| PyValueError::new_err("Encountered all NA values"))
 }
 

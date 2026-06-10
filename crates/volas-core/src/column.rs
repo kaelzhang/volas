@@ -474,6 +474,32 @@ impl Column {
         }
     }
 
+    /// Position of the maximum (`want_max`) or minimum **present** value,
+    /// dtype-aware via [`cmp_at`](Self::cmp_at) — numeric by value, `str`
+    /// lexically, `datetime` by raw `i64` (so sub-256ns ordering survives, unlike
+    /// the `to_f64_vec` funnel which collapses it past 2^53). Ties keep the FIRST
+    /// occurrence (pandas `idxmax`/`idxmin`). `None` if every value is missing.
+    /// The typed basis of `idxmax` / `idxmin` / `min` / `max`.
+    pub fn arg_extreme(&self, want_max: bool) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for i in 0..self.len() {
+            if !self.is_valid(i) {
+                continue;
+            }
+            let take = match best {
+                None => true,
+                Some(b) => {
+                    let o = self.cmp_at(i, b);
+                    (want_max && o == Ordering::Greater) || (!want_max && o == Ordering::Less)
+                }
+            };
+            if take {
+                best = Some(i);
+            }
+        }
+        best
+    }
+
     /// Append another column of the same dtype, copy-on-write (grows in place
     /// when the buffer is uniquely owned).
     pub fn append(&mut self, other: &Column) -> Result<()> {
