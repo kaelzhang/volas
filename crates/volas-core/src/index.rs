@@ -605,4 +605,19 @@ mod tests {
             .append(&Index::range(1))
             .is_err());
     }
+
+    #[test]
+    fn label_eq_value_semantics() {
+        // a RangeIndex equals the same integer labels materialized as Int64
+        assert!(Index::range(3).label_eq(&Index::int64(vec![0, 1, 2])));
+        assert!(!Index::range(3).label_eq(&Index::int64(vec![0, 1, 9])));
+        // datetime and string indexes compare by value
+        assert!(Index::datetime(vec![1, 2], Tz::Utc).label_eq(&Index::datetime(vec![1, 2], Tz::Utc)));
+        assert!(!Index::datetime(vec![1, 2], Tz::Utc).label_eq(&Index::datetime(vec![1, 9], Tz::Utc)));
+        assert!(Index::str(vec!["a".into()]).label_eq(&Index::str(vec!["a".into()])));
+        assert!(!Index::str(vec!["a".into()]).label_eq(&Index::str(vec!["b".into()])));
+        // different label kinds are never equal
+        assert!(!Index::range(2).label_eq(&Index::datetime(vec![0, 1], Tz::Utc)));
+        assert!(!Index::str(vec!["a".into()]).label_eq(&Index::int64(vec![0])));
+    }
 }

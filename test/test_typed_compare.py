@@ -80,3 +80,11 @@ def test_dataframe_eq_str_column():
     eq = a == b
     assert eq['s'].to_list() == [True, False, True]
     assert eq['n'].to_list() == [True, True, False]
+
+
+def test_compare_incompatible_kinds_errors():
+    # comparing a str column to an int column is a hard error (no silent all-False
+    # mask) — same-frame so the shared index passes alignment first
+    df = DataFrame({'s': ['a', 'b'], 'i': [1, 2]})
+    with pytest.raises(Exception):
+        _ = df['s'] == df['i']

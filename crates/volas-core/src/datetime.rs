@@ -172,8 +172,10 @@ pub fn civil_parts_tz(ns: i64, tz: Tz) -> (i64, i64, i64, i64, i64, i64) {
 /// instead of chrono panicking) or an out-of-range civil date.
 pub fn strftime(ns: i64, tz: Tz, fmt: &str) -> Option<String> {
     use chrono::format::{Item, StrftimeItems};
+    // Defensive NaT guard (the civil_parts contract): currently unreachable from the
+    // binding because `volas.Timestamp` cannot be constructed as NaT.
     if ns == i64::MIN {
-        return Some("NaT".to_string()); // missing instant formats as NaT, like pandas
+        return Some("NaT".to_string()); // missing instant -> NaT // LCOV_EXCL_LINE
     }
     let (y, mo, d, h, mi, s) = civil_parts_tz(ns, tz);
     let dt = NaiveDate::from_ymd_opt(y as i32, mo as u32, d as u32)?
