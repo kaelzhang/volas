@@ -785,12 +785,21 @@ impl Column {
                     }
                     Ok(Column::i64(v.iter().map(|&x| x as i64).collect()))
                 }
+                // F32 truncates like F64 (consistent with F32 -> I32), finite-checked.
+                Column::F32(v) => {
+                    if let Some(x) = v.iter().copied().find(|x| !x.is_finite()) {
+                        return Err(VolasError::Value(format!(
+                            "cannot convert non-finite value ({x}) to int64 (NaN / inf); \
+                             fill or drop it first"
+                        )));
+                    }
+                    Ok(Column::i64(v.iter().map(|&x| x as i64).collect()))
+                }
                 // int/bool sources are handled by `cast_int_bool` above.
                 Column::Datetime(v) => Ok(Column::i64(v.to_vec())),
-                other => Err(VolasError::DType(format!(
-                    "cannot cast a {} column to int64",
-                    other.dtype()
-                ))),
+                // unreachable: int/bool go through cast_int_bool, str through
+                // cast_str_to_numeric, and F64/F32/Datetime are handled above.
+                _ => unreachable!("non-numeric int64 cast handled earlier"), // LCOV_EXCL_LINE
             },
             DType::Bool => match self {
                 Column::F64(v) => Ok(Column::bool(v.iter().map(|&x| x != 0.0).collect())),
@@ -2106,11 +2115,16 @@ mod tests {
         assert!(pv[1].is_nan());
         assert!(Column::str(vec!["a".into()]).cast(DType::F64).is_err());
 
-        // -> I64 (F64 / Bool / Datetime; Str errors)
+        // -> I64 (F64 / F32 truncate, Bool / Datetime; Str parses, see below)
         assert_eq!(
             Column::f64(vec![2.9]).cast(DType::I64).unwrap(),
             Column::i64(vec![2])
         );
+        assert_eq!(
+            Column::f32(vec![2.9]).cast(DType::I64).unwrap(),
+            Column::i64(vec![2])
+        );
+        assert!(Column::f32(vec![f32::NAN]).cast(DType::I64).is_err()); // non-finite
         assert_eq!(
             Column::bool(vec![true]).cast(DType::I64).unwrap(),
             Column::i64(vec![1])
