@@ -112,6 +112,45 @@ pub enum BoolOp {
     Xor,
 }
 
+/// An element-wise comparison op for [`Column::compare`] (pandas `== != < <= > >=`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CmpOp {
+    /// Whether `ordering` (the result of comparing two **present** values)
+    /// satisfies this op.
+    fn matches(self, o: Ordering) -> bool {
+        match self {
+            CmpOp::Eq => o == Ordering::Equal,
+            CmpOp::Ne => o != Ordering::Equal,
+            CmpOp::Lt => o == Ordering::Less,
+            CmpOp::Le => o != Ordering::Greater,
+            CmpOp::Gt => o == Ordering::Greater,
+            CmpOp::Ge => o != Ordering::Less,
+        }
+    }
+
+    /// The op applied to two `f64`s (the numeric path); `NaN` follows IEEE — `!=`
+    /// is `true`, every other op `false`.
+    fn matches_f64(self, a: f64, b: f64) -> bool {
+        match self {
+            CmpOp::Eq => a == b,
+            CmpOp::Ne => a != b,
+            CmpOp::Lt => a < b,
+            CmpOp::Le => a <= b,
+            CmpOp::Gt => a > b,
+            CmpOp::Ge => a >= b,
+        }
+    }
+}
+
 impl Column {
     /// Build an `F64` column.
     pub fn f64(v: Vec<f64>) -> Column {
@@ -1261,6 +1300,43 @@ impl Column {
         }
     }
 
+    /// Element-wise comparison (pandas `== != < <= > >=`) producing a **non-nullable
+    /// bool** mask (decision ②): `str` / `datetime` / `bool` compare by their native
+    /// value (NOT through the `to_f64_vec` funnel, which maps `str` to `NaN` and
+    /// loses `datetime` precision), numeric kinds compare as `f64`. A missing slot
+    /// (either side NA) follows IEEE — `!=` is `true`, every other op `false`,
+    /// matching the existing numeric comparison. Comparing two incompatible kinds
+    /// (e.g. `str` vs a number) is a [`VolasError::DType`]. Equal lengths assumed.
+    pub fn compare(&self, other: &Column, op: CmpOp) -> Result<Column> {
+        let n = self.len();
+        let numeric_like = |c: &Column| c.dtype().is_numeric() || matches!(c, Column::Bool(..));
+        let out = match (self, other) {
+            (Column::Str(a, av), Column::Str(b, bv)) => cmp_typed(n, op, |i| {
+                (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i]))
+            }),
+            (Column::Datetime(a), Column::Datetime(b)) => cmp_typed(n, op, |i| {
+                (a[i] != i64::MIN && b[i] != i64::MIN).then(|| a[i].cmp(&b[i]))
+            }),
+            (Column::Bool(a, av), Column::Bool(b, bv)) => cmp_typed(n, op, |i| {
+                (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i]))
+            }),
+            // numeric (and bool-vs-numeric) compare as f64 — NaN follows IEEE here
+            // (`==` false, `!=` true), the established mask policy.
+            (a, b) if numeric_like(a) && numeric_like(b) => {
+                let (x, y) = (a.to_f64_vec(), b.to_f64_vec());
+                (0..n).map(|i| op.matches_f64(x[i], y[i])).collect()
+            }
+            _ => {
+                return Err(VolasError::DType(format!(
+                    "cannot compare a {} column with a {} column",
+                    self.dtype(),
+                    other.dtype()
+                )))
+            }
+        };
+        Ok(Column::bool(out))
+    }
+
     /// Three-valued logical `and` / `or` / `xor` (pandas `&` / `|` / `^`), Kleene
     /// semantics: a present `false` makes `and` false and a present `true` makes
     /// `or` true even when the other side is missing; otherwise a missing operand
@@ -1676,6 +1752,19 @@ fn clip_vec<T: Numeric>(v: &[T], lo: Option<f64>, hi: Option<f64>) -> Vec<T> {
                 }
             }
             y
+        })
+        .collect()
+}
+
+/// Build a non-nullable bool mask from a per-index ordering of present pairs: a
+/// present pair (`Some(ord)`) applies `op`; a missing slot (`None`) follows IEEE,
+/// so only `!=` is `true`. Backs the typed (`str` / `datetime` / `bool`) arms of
+/// [`Column::compare`].
+fn cmp_typed(n: usize, op: CmpOp, key: impl Fn(usize) -> Option<Ordering>) -> Vec<bool> {
+    (0..n)
+        .map(|i| match key(i) {
+            Some(ord) => op.matches(ord),
+            None => op == CmpOp::Ne,
         })
         .collect()
 }

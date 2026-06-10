@@ -16,7 +16,7 @@ use pyo3::sync::GILOnceCell;
 use pyo3::types::{PyDict, PyList, PySlice, PySliceIndices, PyTuple};
 
 use volas_core::{
-    binary_supertype, datetime, fits, stats, BinOp, BoolOp, Column, DType, DataFrame, Index,
+    binary_supertype, datetime, fits, stats, BinOp, BoolOp, CmpOp, Column, DType, DataFrame, Index,
     IndexKind, Label, Scalar, Series, Tz, Validity, VolasError,
 };
 use volas_directive::{execute, parse};
@@ -1016,17 +1016,20 @@ impl PySeries {
     /// True if any element is truthy (NaN skipped) — pandas `any` -> `np.bool_`.
     fn any(&self, py: Python<'_>) -> Py<PyAny> {
         let r = match &self.inner.data {
-            Column::Bool(v, _) => v.iter().any(|&b| b),
+            // skipna: a NA bool is its `false` placeholder in the buffer, so read the
+            // validity — only a *present* true counts (matching pandas nullable any).
+            Column::Bool(v, val) => v.iter().enumerate().any(|(i, &b)| val.is_valid(i) && b),
             other => other.to_f64_vec().iter().any(|&x| !x.is_nan() && x != 0.0),
         };
         np_bool(py, r)
     }
 
-    /// True if every non-NaN element is truthy (empty / all-NaN -> True) — pandas
-    /// `all` -> `np.bool_`.
+    /// True if every non-missing element is truthy (empty / all-NA -> True) — pandas
+    /// `all` -> `np.bool_`, default `skipna=True`.
     fn all(&self, py: Python<'_>) -> Py<PyAny> {
         let r = match &self.inner.data {
-            Column::Bool(v, _) => v.iter().all(|&b| b),
+            // skipna: a NA is ignored (vacuously satisfies), only a present false fails.
+            Column::Bool(v, val) => v.iter().enumerate().all(|(i, &b)| !val.is_valid(i) || b),
             other => other.to_f64_vec().iter().all(|&x| x.is_nan() || x != 0.0),
         };
         np_bool(py, r)
@@ -1262,24 +1265,24 @@ impl PySeries {
         series_floordiv(&self.inner, other, true)
     }
 
-    // Element-wise comparisons -> bool Series (pandas-style).
+    // Element-wise comparisons -> bool Series (pandas-style), dtype-aware.
     fn __lt__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_cmp(&self.inner, other, |a, b| a < b)
+        series_cmp(&self.inner, other, CmpOp::Lt)
     }
     fn __le__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_cmp(&self.inner, other, |a, b| a <= b)
+        series_cmp(&self.inner, other, CmpOp::Le)
     }
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_cmp(&self.inner, other, |a, b| a == b)
+        series_cmp(&self.inner, other, CmpOp::Eq)
     }
     fn __ne__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_cmp(&self.inner, other, |a, b| a != b)
+        series_cmp(&self.inner, other, CmpOp::Ne)
     }
     fn __ge__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_cmp(&self.inner, other, |a, b| a >= b)
+        series_cmp(&self.inner, other, CmpOp::Ge)
     }
     fn __gt__(&self, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        series_cmp(&self.inner, other, |a, b| a > b)
+        series_cmp(&self.inner, other, CmpOp::Gt)
     }
 
     // Element-wise boolean logic -> bool Series (operands coerced to bool).
@@ -1752,23 +1755,49 @@ fn series_floordiv(s: &Series, other: &Bound<'_, PyAny>, swap: bool) -> PyResult
     Ok(col_to_series(s, lhs.floordiv(rhs).map_err(pyerr)?))
 }
 
-/// Element-wise comparison -> bool Series (positional; NaN compares `false` for
-/// ordering/equality and `true` for `!=`, matching IEEE / pandas element-wise).
-fn series_cmp(
-    s: &Series,
-    other: &Bound<'_, PyAny>,
-    f: impl Fn(f64, f64) -> bool,
-) -> PyResult<PySeries> {
-    let a = s.data.to_f64_vec();
-    let rhs = series_rhs_col(s, other)?.to_f64_vec(); // comparisons compare as f64 -> bool
-    let n = a.len().min(rhs.len());
-    let mut out = vec![false; a.len()];
-    for i in 0..n {
-        out[i] = f(a[i], rhs[i]);
+/// Element-wise comparison -> bool Series (positional), dtype-aware via
+/// [`Column::compare`]: `str` / `datetime` / `bool` compare by native value (no f64
+/// funnel), numeric as f64. A missing slot follows IEEE (`!=` true, else false).
+/// The right operand is built to the left column's dtype (a str scalar for a str
+/// column, a parsed timestamp for a datetime column, a number for a numeric one).
+fn series_cmp(s: &Series, other: &Bound<'_, PyAny>, op: CmpOp) -> PyResult<PySeries> {
+    let rhs = compare_rhs_col(s, other)?;
+    Ok(col_to_series(s, s.data.compare(&rhs, op).map_err(pyerr)?))
+}
+
+/// Build the right operand of a comparison as a column matching the left column's
+/// dtype: a `Series` contributes its own column (index-aligned); a scalar is
+/// broadcast and typed by the left dtype.
+fn compare_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<Column> {
+    if let Ok(o) = other.extract::<PyRef<PySeries>>() {
+        require_aligned(&s.index, &o.inner.index)?;
+        return Ok(o.inner.data.clone());
     }
-    Ok(PySeries {
-        inner: Series::new(s.name.clone(), Column::bool(out), Arc::clone(&s.index)),
-    })
+    cmp_scalar_col(other, s.data.dtype(), s.len())
+}
+
+/// Broadcast a comparison scalar to `n` rows, typed for a `dtype` column: a `str`
+/// scalar for a `Str` column, a parsed timestamp for a `Datetime` column,
+/// otherwise a bool / int / float column. A scalar that cannot match the dtype is
+/// a `TypeError` (rather than a silent all-`False` mask).
+fn cmp_scalar_col(v: &Bound<'_, PyAny>, dtype: DType, n: usize) -> PyResult<Column> {
+    match dtype {
+        DType::Utf8 => {
+            let s = v.extract::<String>().map_err(|_| {
+                PyTypeError::new_err("cannot compare a str column with a non-string scalar")
+            })?;
+            Ok(Column::str(vec![s; n]))
+        }
+        DType::Datetime => Ok(Column::datetime(vec![parse_ts(v)?; n])),
+        _ if v.extract::<bool>().is_ok() => Ok(Column::bool(vec![v.extract::<bool>()?; n])),
+        _ if v.extract::<i64>().is_ok() => Ok(Column::i64(vec![v.extract::<i64>()?; n])),
+        _ => {
+            let x = v
+                .extract::<f64>()
+                .map_err(|_| PyTypeError::new_err("unsupported operand for a comparison"))?;
+            Ok(Column::f64(vec![x; n]))
+        }
+    }
 }
 
 /// The non-NaN `f64` values of a column (for NaN-skipping reductions).
@@ -2053,11 +2082,7 @@ impl PyDataFrame {
     /// Element-wise comparison backing `__eq__` / `__ne__`: against another
     /// DataFrame (identical column names + shared index) or a scalar (broadcast),
     /// producing a bool DataFrame. Compared by position; never auto-aligned.
-    fn compare(
-        &self,
-        other: &Bound<'_, PyAny>,
-        f: impl Fn(f64, f64) -> bool,
-    ) -> PyResult<PyDataFrame> {
+    fn compare(&self, other: &Bound<'_, PyAny>, op: CmpOp) -> PyResult<PyDataFrame> {
         let cols: Vec<Column> = if let Ok(o) = other.extract::<PyRef<PyDataFrame>>() {
             if self.inner.names() != o.inner.names() {
                 return Err(PyValueError::new_err(
@@ -2069,21 +2094,17 @@ impl PyDataFrame {
                 .columns()
                 .iter()
                 .zip(o.inner.columns())
-                .map(|(a, b)| {
-                    let (av, bv) = (a.to_f64_vec(), b.to_f64_vec());
-                    Column::bool(av.iter().zip(&bv).map(|(&x, &y)| f(x, y)).collect())
-                })
-                .collect()
-        } else if let Ok(scalar) = other.extract::<f64>() {
+                .map(|(a, b)| a.compare(b, op))
+                .collect::<Result<_, _>>()
+                .map_err(pyerr)?
+        } else {
+            // a scalar is broadcast and typed per column; a column whose dtype the
+            // scalar cannot match is a TypeError (no silent all-False mask).
             self.inner
                 .columns()
                 .iter()
-                .map(|c| Column::bool(c.to_f64_vec().iter().map(|&x| f(x, scalar)).collect()))
-                .collect()
-        } else {
-            return Err(PyTypeError::new_err(
-                "unsupported operand for a DataFrame comparison",
-            ));
+                .map(|c| c.compare(&cmp_scalar_col(other, c.dtype(), c.len())?, op).map_err(pyerr))
+                .collect::<PyResult<_>>()?
         };
         self.with_columns(cols)
     }
@@ -2816,12 +2837,12 @@ impl PyDataFrame {
     /// Element-wise `==` -> a bool DataFrame (pandas semantics), not identity. The
     /// operand is another DataFrame (same columns + shared index) or a scalar.
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.compare(other, |a, b| a == b)
+        self.compare(other, CmpOp::Eq)
     }
 
     /// Element-wise `!=` -> a bool DataFrame.
     fn __ne__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.compare(other, |a, b| a != b)
+        self.compare(other, CmpOp::Ne)
     }
 
     /// First `n` rows (pandas `head`).
