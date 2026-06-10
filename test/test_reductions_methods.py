@@ -47,17 +47,19 @@ def test_series_nunique_parity():
 # --- unique ------------------------------------------------------------------
 
 def test_series_unique_int_order():
-    # appearance order, no NA -> a plain int64 array
-    assert list(_s([3, 1, 3, 1, 2]).unique()) == [3, 1, 2]
+    # appearance order, no NA -> a Series keeping int64 (C1)
+    u = _s([3, 1, 3, 1, 2]).unique()
+    assert u.dtype == 'int64' and u.to_list() == [3, 1, 2]
 
 
 def test_series_unique_keeps_one_na_slot():
     u = _s([2.0, float('nan'), 2.0, 1.0, float('nan')]).unique()
-    assert u[0] == 2.0 and np.isnan(u[1]) and u[2] == 1.0 and len(u) == 3
+    assert u.to_list()[0] == 2.0 and u.to_list()[2] == 1.0 and len(u) == 3
+    assert u.isna().to_list() == [False, True, False]
 
 
 def test_series_unique_string():
-    assert list(_s(['b', 'a', 'b', 'c']).unique()) == ['b', 'a', 'c']
+    assert _s(['b', 'a', 'b', 'c']).unique().to_list() == ['b', 'a', 'c']
 
 
 # --- sort_values -------------------------------------------------------------
@@ -111,14 +113,17 @@ def test_tail_preserves_range_index_offset():
 
 def test_nunique_unique_all_dtypes():
     assert _s([2.0, 1.0, 2.0], np.float32).nunique() == 2
-    assert list(_s([2.0, 1.0, 2.0], np.float32).unique()) == [2.0, 1.0]
+    u32 = _s([2.0, 1.0, 2.0], np.float32).unique()
+    assert u32.dtype == 'float32' and u32.to_list() == [2.0, 1.0]    # dtype preserved
     assert _s([2, 1, 2], np.int32).nunique() == 2
-    assert list(_s([2, 1, 2], np.int32).unique()) == [2, 1]
+    ui32 = _s([2, 1, 2], np.int32).unique()
+    assert ui32.dtype == 'int32' and ui32.to_list() == [2, 1]
     assert DataFrame({'a': [True, False, True, True]})['a'].nunique() == 2
-    assert list(DataFrame({'a': [True, False, True]})['a'].unique()) == [True, False]
+    ub = DataFrame({'a': [True, False, True]})['a'].unique()
+    assert ub.dtype == 'bool' and ub.to_list() == [True, False]
     dt = _s(['2021-01-02', '2021-01-01', '2021-01-02'], 'datetime64[ns]')
     assert dt.nunique() == 2
-    u = dt.unique()
+    u = dt.unique().to_list()
     assert u[0] == np.datetime64('2021-01-02') and u[1] == np.datetime64('2021-01-01') and len(u) == 2
 
 
@@ -143,5 +148,5 @@ def test_nunique_unique_canonicalize_zero():
     # +0.0 and -0.0 are one value (pandas), and 0.0 participates as a real group
     s = _s([0.0, -0.0, 1.0, 0.0])
     assert s.nunique() == 2                         # {0.0, 1.0}
-    u = s.unique()
+    u = s.unique().to_list()
     assert u[0] == 0.0 and u[1] == 1.0 and len(u) == 2

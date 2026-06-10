@@ -1011,11 +1011,21 @@ impl PySeries {
         self.inner.data.nunique()
     }
 
-    /// The distinct values in order of first appearance (pandas `unique`) as a
-    /// NumPy array, keeping a single missing slot if the series has any NA.
-    fn unique<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
+    /// The distinct values in order of first appearance (pandas `unique`), as a
+    /// **`Series`** that preserves the dtype and `volas.NA` (API contract C1: a
+    /// variable-length column result stays a `Series`, not a numpy array that would
+    /// collapse a nullable int/bool to float64 + NaN). One missing slot is kept if
+    /// the series has any NA; the result carries a fresh `RangeIndex` (the distinct
+    /// values have no row correspondence to the original).
+    fn unique(&self) -> PySeries {
         let idx = self.inner.data.unique_indices();
-        column_to_numpy(py, &self.inner.data.take(&idx))
+        PySeries {
+            inner: Series::new(
+                self.inner.name.clone(),
+                self.inner.data.take(&idx),
+                Arc::new(Index::range(idx.len())),
+            ),
+        }
     }
 
     /// Sort by value (pandas `sort_values`), stable, with missing values last; the
