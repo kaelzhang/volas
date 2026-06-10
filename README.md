@@ -547,6 +547,10 @@ silent float upcast):
   int / bool / datetime column materializes as `float64` / `NaT`. Storage and
   `to_list()` keep the dtype and `volas.NA`.
 
+For the full picture — why volas's type system is built this way, where pandas's
+breaks, and the migration gotchas — see
+[volas vs pandas — the type system](PANDAS-DIFFERENCES.md).
+
 The pandas-shaped indexing and writing details have their own sections —
 [Indexing & selection](#indexing--selection) and
 [Writing & assignment](#writing--assignment).
@@ -866,10 +870,18 @@ df.at['cc', 'px']      # 3.0
 df.drop(['bb'])        # drop by string label
 ```
 
-### Index limitations (vs pandas)
+### Differences from pandas (vs pandas)
 
-The index is deliberately simple — a **single level** of one homogeneous label
-type. Relative to pandas, volas does **not** support:
+volas is pandas-shaped on the surface, but its **type system is deliberately
+different** in more than the index: missing values keep their dtype, there is no
+`object` dtype, value-returning methods stay `Series`, and a lossy conversion
+raises instead of degrading silently. **See
+[volas vs pandas — the type system](PANDAS-DIFFERENCES.md) for the full
+comparison — why volas is built this way, where pandas's type system breaks, and
+the migration gotchas.**
+
+The index specifically is a **single level** of one homogeneous label type.
+Relative to pandas, volas does **not** support:
 
 - **`MultiIndex`** (hierarchical / multi-level indexes), on rows *or* columns —
   columns are a flat list of unique string names.
@@ -897,9 +909,12 @@ df.iloc[10:20, 0] = 0.0                 # a column slice
 df.loc[df['close'] > df['open'], 'signal'] = 1.0   # masked column assignment
 ```
 
-Writing a fractional value into an integer column widens it to float (pandas
-semantics). Writing into a cached directive column drops its cached status, so a
-later `fulfill()` can never silently overwrite your edit.
+Writing a fractional value into an integer column **raises** — the int dtype is
+kept, and a lossy write errors rather than silently widening to float (see
+[Differences from pandas](PANDAS-DIFFERENCES.md); writing `volas.NA` / `None`
+keeps the int dtype and marks the cell missing). Writing into a cached directive
+column drops its cached status, so a later `fulfill()` can never silently
+overwrite your edit.
 
 ## Timezones
 
