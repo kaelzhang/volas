@@ -1997,11 +1997,17 @@ impl PyRow {
         Ok(np_scalar_to_py(py, col, 0))
     }
 
-    /// The row's values as a ``(1, n_columns)`` float64 NumPy array.
+    /// The row's values as a ``(1, n_columns)`` float64 NumPy array. Only valid for
+    /// an all-numeric row — a str / datetime cell cannot be represented as float64
+    /// without a silent NaN, so it errors (contract R2 / C4); read those via
+    /// ``to_dict()`` or ``row[col]`` instead.
     ///
     /// Returns:
     ///     numpy.ndarray
     fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        for c in self.inner.columns() {
+            c.require_numeric().map_err(pyerr)?;
+        }
         let (data, h, w) = self.inner.to_row_major_f64();
         Ok(ndarray::Array2::from_shape_vec((h, w), data)
             .map_err(|e| PyValueError::new_err(e.to_string()))?
