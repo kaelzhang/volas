@@ -2,9 +2,11 @@
 
 /// The logical data type of a [`crate::Column`].
 ///
-/// v1 keeps this deliberately small. Missing values in `F64` columns are encoded
-/// in-band as `NaN` (matching stock-pandas / pandas semantics); a separate
-/// validity-bitmap `null` model is a documented future refinement.
+/// Deliberately small (the OHLCV / numeric-time-series domain). Missing values
+/// are encoded per dtype: `F64` / `F32` use in-band `NaN` (matching stock-pandas
+/// / pandas float semantics), `Datetime` uses the `i64::MIN` `NaT` sentinel, and
+/// `Bool` / `I64` / `I32` / `Utf8` carry a validity bitmap ([`crate::Validity`])
+/// that marks each missing cell.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum DType {
     /// 64-bit float (the OHLCV / indicator type). `NaN` denotes a missing value.
