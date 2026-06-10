@@ -124,13 +124,13 @@ pub(crate) fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> 
         }
         Column::Str(v, val) if val.is_valid(i) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
         Column::I64(..) | Column::I32(..) | Column::Bool(..) | Column::Str(..) => na(py),
-        Column::Datetime(v) => py
-            .import("numpy")
-            .expect("import numpy")
-            .call_method1("datetime64", (v[i], "ns"))
-            .expect("np.datetime64")
-            .into_any()
-            .unbind(),
+        // O1 (-> B): a datetime cell is a volas.Timestamp (matching the index-label
+        // scalar type and pandas); a NaT cell is volas.NA (the unified missing
+        // singleton). Columns are UTC-naive ns, so the cell tz is UTC.
+        Column::Datetime(v) if v[i] == i64::MIN => na(py),
+        Column::Datetime(v) => Py::new(py, PyTimestamp { ns: v[i], tz: Tz::Utc })
+            .expect("create Timestamp")
+            .into_any(),
     }
 }
 
@@ -280,8 +280,31 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
         }
         return Ok(i);
     }
+    // A numpy datetime64 scalar (any unit): take its epoch-ns. This lets a Timestamp
+    // cell compare against `np.datetime64(...)` and lets `df.loc[np.datetime64(...)]`
+    // resolve — the same instant, just spelled in numpy's vocabulary. Detected by
+    // dtype.kind == "M" so non-datetime numpy scalars still fall through to the error.
+    if key
+        .getattr("dtype")
+        .and_then(|d| d.getattr("kind"))
+        .and_then(|k| k.extract::<String>())
+        .map(|k| k == "M")
+        .unwrap_or(false)
+    {
+        let ns = key
+            .call_method1("astype", ("datetime64[ns]",))?
+            .call_method1("astype", ("int64",))?
+            .call_method0("item")?
+            .extract::<i64>()?;
+        if ns == i64::MIN {
+            return Err(PyValueError::new_err(
+                "NaT (i64::MIN) is not a valid timestamp; a missing instant is volas.NA",
+            ));
+        }
+        return Ok(ns);
+    }
     Err(PyKeyError::new_err(
-        "label must be a datetime string or integer",
+        "label must be a datetime string, integer, or numpy datetime64",
     ))
 }
 

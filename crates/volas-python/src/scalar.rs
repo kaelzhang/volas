@@ -42,6 +42,19 @@ pub(crate) fn na(py: Python<'_>) -> Py<PyAny> {
         .clone_ref(py)
 }
 
+/// A timedelta operand as nanoseconds: an `np.timedelta64` (normalised to ns) or a
+/// raw integer nanosecond count. Backs `Timestamp` `+` / `-` arithmetic.
+fn delta_ns(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
+    if let Ok(n) = delta.extract::<i64>() {
+        return Ok(n);
+    }
+    delta
+        .call_method1("astype", ("timedelta64[ns]",))?
+        .call_method1("astype", ("int64",))?
+        .call_method0("item")?
+        .extract::<i64>()
+}
+
 /// ``volas.Timestamp(value, tz=None)`` — a typed datetime label carrying its own
 /// timezone, resolving to an absolute **UTC** instant.
 ///
@@ -148,6 +161,37 @@ impl PyTimestamp {
     fn strftime(&self, fmt: &str) -> PyResult<String> {
         datetime::strftime(self.ns, self.tz, fmt)
             .ok_or_else(|| PyValueError::new_err("invalid strftime format string"))
+    }
+
+    /// As a Python `datetime.datetime` (wall-clock in this Timestamp's tz, at
+    /// microsecond precision — `datetime`'s maximum; sub-µs ns are truncated).
+    fn to_pydatetime<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let (y, mo, d, h, mi, s) = datetime::civil_parts_tz(self.ns, self.tz);
+        let micros = self.ns.rem_euclid(1_000_000_000) / 1_000;
+        py.import("datetime")?
+            .getattr("datetime")?
+            .call1((y, mo, d, h, mi, s, micros))
+    }
+
+    /// `ts + delta` where `delta` is an `np.timedelta64` or an integer count of
+    /// nanoseconds, yielding a Timestamp (pandas `Timestamp + Timedelta`).
+    fn __add__(&self, delta: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
+        Ok(PyTimestamp { ns: self.ns.wrapping_add(delta_ns(delta)?), tz: self.tz })
+    }
+
+    /// `ts - other`: another Timestamp gives the `np.timedelta64` difference; an
+    /// `np.timedelta64` / nanosecond count gives a shifted Timestamp.
+    fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(o) = other.extract::<PyRef<PyTimestamp>>() {
+            return Ok(py
+                .import("numpy")?
+                .getattr("timedelta64")?
+                .call1((self.ns - o.ns, "ns"))?
+                .into_any()
+                .unbind());
+        }
+        Ok(Py::new(py, PyTimestamp { ns: self.ns.wrapping_sub(delta_ns(other)?), tz: self.tz })?
+            .into_any())
     }
 
     fn __repr__(&self) -> String {

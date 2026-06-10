@@ -5,6 +5,7 @@ collapses it past 2^53); str uses lexical order; numeric is unchanged."""
 
 import numpy as np
 import pytest
+import volas
 from volas import DataFrame
 
 
@@ -43,10 +44,11 @@ def test_idxmax_skips_na():
 def test_minmax_datetime_keeps_instant():
     base = np.datetime64('2024-01-01T00:00:00.000000000')
     s = _s(base + np.array([0, 100, 200, 300], dtype='timedelta64[ns]'))
-    # the extreme VALUE is a datetime64, exact to the nanosecond (no f64 collapse)
+    # the extreme VALUE is a Timestamp (O1->B), exact to the nanosecond (no f64
+    # collapse) — and it compares equal to the matching np.datetime64 instant.
     assert s.max() == base + np.timedelta64(300, 'ns')
     assert s.min() == base
-    assert isinstance(s.max(), np.datetime64)
+    assert isinstance(s.max(), volas.Timestamp)
 
 
 def test_minmax_str_lexical():
