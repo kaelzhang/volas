@@ -820,3 +820,5 @@ fn binary_kernel<T: Numeric>(a: &[T], b: &[T], op: BinOp) -> Vec<T> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_na;
