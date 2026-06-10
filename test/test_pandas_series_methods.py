@@ -124,10 +124,12 @@ def test_series_method_matches_pandas(values, method, args, expected):
     _assert_vals(getattr(_series(values), method)(*args), expected)
 
 
-def test_diff_on_bool_series_promotes_to_float():
-    # pandas keeps a bool Series's diff as float64 (True/False -> 1.0/0.0/-1.0).
-    got = _series([False, True, True, False, False]).diff(1)
-    _assert_vals(got, [nan, 1.0, 0.0, -1.0, 0.0])
+def test_diff_on_bool_series_raises():
+    # diff is subtraction, and bool - bool is unsupported (use ^), so a bool
+    # Series's diff raises rather than funnelling through float64 (contract C4,
+    # consistent with bool-bool subtraction).
+    with pytest.raises(Exception):
+        _series([False, True, True, False, False]).diff(1)
 
 
 # (id, values, expected_values, surviving_index) — dropna returns a shorter

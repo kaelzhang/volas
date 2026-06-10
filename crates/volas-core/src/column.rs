@@ -1051,17 +1051,16 @@ impl Column {
     }
 
     /// Discrete difference `x[i] - x[i-n]` (pandas `diff`), dtype-preserving: the
-    /// first `n` cells (the shift gap) are missing. A `bool` / `str` / `datetime`
-    /// column differences in f64 (no defined subtraction of its own).
+    /// first `n` cells (the shift gap) are missing. `diff` **is** subtraction, so it
+    /// inherits [`binary`](Self::binary)'s rules: int stays int (NA gap), bool-bool
+    /// subtraction is unsupported, and `str` / `datetime` raise — a datetime
+    /// difference is a `timedelta64`, the open `O3` decision, not a float64-of-ns.
     pub fn diff(&self, n: isize) -> Result<Column> {
         match self {
             Column::F64(v) => Ok(Column::f64(diff_kernel(v, n, f64::NAN))),
             Column::F32(v) => Ok(Column::f32(diff_kernel(v, n, f32::NAN))),
-            Column::Bool(_, _) | Column::Str(_, _) | Column::Datetime(_) => {
-                let (a, b) = (self.to_f64_vec(), self.shift(n).to_f64_vec());
-                Ok(Column::f64(a.iter().zip(&b).map(|(&x, &y)| x - y).collect()))
-            }
-            // int stays int with an NA gap and NA-propagating subtraction.
+            // int -> int diff; bool -> "bool subtraction unsupported"; str/datetime
+            // -> require_numeric error (all enforced by `binary`).
             _ => self.binary(&self.shift(n), BinOp::Sub),
         }
     }
@@ -2554,17 +2553,18 @@ mod tests {
         assert_na(&i.shift(0), &[1.0, 2.0, 3.0]);
         assert_na(&i.shift(5), &[f64::NAN, f64::NAN, f64::NAN]);
 
-        // diff: int keeps int + NA gap, float stays float, bool/datetime -> f64
+        // diff is subtraction: int keeps int + NA gap, float stays float.
         assert_eq!(Column::i64(vec![1, 3, 6]).diff(1).unwrap().dtype(), DType::I64);
         assert_na(&Column::i64(vec![1, 3, 6]).diff(1).unwrap(), &[f64::NAN, 2.0, 3.0]);
         assert_na(&Column::f64(vec![1.0, 3.0, 6.0]).diff(1).unwrap(), &[f64::NAN, 2.0, 3.0]);
         assert_na(&Column::f32(vec![1.0, 3.0, 6.0]).diff(1).unwrap(), &[f64::NAN, 2.0, 3.0]);
         // negative-n diff (the backward branch of diff_kernel)
         assert_na(&Column::f64(vec![1.0, 3.0, 6.0]).diff(-1).unwrap(), &[-2.0, -3.0, f64::NAN]);
-        let bd = Column::bool(vec![true, false, true]).diff(1).unwrap();
-        assert_eq!(bd.dtype(), DType::F64);
-        assert_na(&bd, &[f64::NAN, -1.0, 1.0]);
-        assert_na(&Column::datetime(vec![10, 25, 30]).diff(1).unwrap(), &[f64::NAN, 15.0, 5.0]);
+        // bool / str / datetime diff raises (bool-bool subtraction unsupported;
+        // str/datetime not numeric / a datetime difference is a timedelta, not f64).
+        assert!(Column::bool(vec![true, false, true]).diff(1).is_err());
+        assert!(Column::str(vec!["a".into(), "b".into()]).diff(1).is_err());
+        assert!(Column::datetime(vec![10, 25, 30]).diff(1).is_err());
     }
 
     #[test]
