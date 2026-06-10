@@ -49,8 +49,9 @@ impl PySeries {
         self.inner.name.clone()
     }
 
-    /// The dtype name (``'float64'``, ``'bool'``, ``'int64'``, ``'object'`` or
-    /// ``'datetime64[ns]'``).
+    /// The dtype name (``'float64'``, ``'float32'``, ``'int64'``, ``'int32'``,
+    /// ``'bool'``, ``'str'``, or ``'datetime64[ns]'`` — never ``'object'``, which
+    /// volas has no dtype for).
     ///
     /// Returns:
     ///     str

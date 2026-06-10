@@ -17,7 +17,7 @@ def _s(data, dtype=None):
 def test_fillna_str_with_string():
     s = _s(['a', None, 'c'])
     out = s.fillna('z')
-    assert out.dtype == 'object' or out.dtype == 'str'
+    assert out.dtype == 'str'   # C3: volas has no object dtype
     assert list(out.to_numpy()) == ['a', 'z', 'c']
 
 

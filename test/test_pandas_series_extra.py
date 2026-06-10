@@ -199,12 +199,16 @@ def test_idxmax_skips_nan_and_takes_first_max():
 
 
 def test_idxmax_returns_datetime_label():
-    # On a DatetimeIndex the label is rendered as volas does everywhere (a string,
-    # like ``Row.name``), not a pandas Timestamp.
+    # On a DatetimeIndex the label is a volas.Timestamp (R6), like ``Row.name``. It
+    # compares equal to a datetime string (a display / lookup convenience), but the
+    # type is Timestamp — assert that explicitly so a regression to a bare string or
+    # np.datetime64 is caught (Timestamp.__eq__ on a string would otherwise hide it).
     d = DataFrame({"v": [1.0, 9.0, 3.0], "t": ["2020-01-01", "2020-01-02", "2020-01-03"]})
     d["t"] = volas.to_datetime(d["t"])
     d = d.set_index("t")
-    assert d["v"].idxmax() == "2020-01-02 00:00:00"
+    label = d["v"].idxmax()
+    assert isinstance(label, volas.Timestamp)
+    assert label == "2020-01-02 00:00:00"   # string equality still works (lookup)
 
 
 def test_idxmax_all_nan_raises():
