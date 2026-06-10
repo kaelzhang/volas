@@ -3581,22 +3581,27 @@ impl PyDataFrame {
         Err(PyTypeError::new_err("append expects a DataFrame or Row"))
     }
 
-    /// The frame as a 2-D NumPy array (pandas `to_numpy`). With no `dtype`: a fast
-    /// `float64` matrix when every column is numeric, else a lossless `object`
-    /// array (string columns kept, not NaN-poisoned). `dtype` casts (e.g.
-    /// `'float32'`); requesting a float over a string column raises.
+    /// The frame as a 2-D NumPy array (pandas `to_numpy`). With no `dtype`, an
+    /// honest boundary representation chosen by the column dtypes:
+    /// - every column numeric/bool -> a fast `float64` matrix;
+    /// - every column datetime -> a 2-D `datetime64[ns]` array (NaT-aware), so
+    ///   datetime never rides the f64 channel D5 forbids;
+    /// - any other mix (datetime+numeric, datetime+str, str+numeric, str-only)
+    ///   -> a lossless `object` array, each cell its own typed Python value.
+    ///
+    /// An explicit `dtype` casts the float64 matrix (e.g. `'float32'`). Requesting
+    /// a float over a **str** column raises; requesting a float over a **datetime**
+    /// column is an allowed lossy export of the epoch-ns (Q3) — the caller has
+    /// opted in, so it is not blocked, but it does lose precision past 2^53 ns.
     #[pyo3(signature = (dtype = None))]
     fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
         ensure_fresh(&self.inner)?;
-        let has_str = self
-            .inner
-            .columns()
-            .iter()
-            .any(|c| matches!(c, Column::Str(_, _)));
+        let cols = self.inner.columns();
         let (h, w) = (self.inner.height(), self.inner.width());
 
         if let Some(dt) = dtype {
             let floaty = dt.contains("float") || dt == "f32" || dt == "f64" || dt == "double";
+            let has_str = cols.iter().any(|c| matches!(c, Column::Str(_, _)));
             if has_str && floaty {
                 return Err(PyValueError::new_err(format!(
                     "cannot convert a string column to {dt}"
@@ -3609,25 +3614,39 @@ impl PyDataFrame {
             return Ok(arr.call_method1("astype", (dt,))?);
         }
 
-        if !has_str {
-            // fast all-numeric path: a float64 matrix
+        // fast path: a frame that is entirely numeric/bool is exactly the f64
+        // matrix (an empty frame counts — `all` over no columns is true).
+        let all_numeric = cols.iter().all(|c| {
+            matches!(
+                c,
+                Column::F64(_)
+                    | Column::F32(_)
+                    | Column::I64(..)
+                    | Column::I32(..)
+                    | Column::Bool(..)
+            )
+        });
+        if all_numeric {
             let (data, h, w) = self.inner.to_row_major_f64();
             let arr = ndarray::Array2::from_shape_vec((h, w), data)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             return Ok(arr.into_pyarray(py).into_any());
         }
 
-        // mixed/string frame: a lossless 2-D object array (each cell typed)
+        // Otherwise build a lossless 2-D array, one typed cell each: a datetime-
+        // only frame becomes `datetime64[ns]` (scalar_to_py boxes NaT-aware
+        // np.datetime64), every other mix becomes `object`.
+        let all_datetime = cols.iter().all(|c| matches!(c, Column::Datetime(_)));
         let rows = PyList::empty(py);
         for i in 0..h {
             let row = PyList::empty(py);
-            for col in self.inner.columns() {
+            for col in cols {
                 row.append(scalar_to_py(py, col, i))?;
             }
             rows.append(row)?;
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "object")?;
+        kwargs.set_item("dtype", if all_datetime { "datetime64[ns]" } else { "object" })?;
         let _ = w;
         Ok(py
             .import("numpy")?
