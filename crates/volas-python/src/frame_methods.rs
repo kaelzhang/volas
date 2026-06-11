@@ -168,13 +168,14 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: df, tf })
     }
 
-    /// The DatetimeIndex timezone name (`"+08:00"` / `"America/New_York"`), or
-    /// `None` for a tz-naive (UTC-default) or non-datetime index — mirroring
-    /// pandas `df.index.tz`.
+    /// The DatetimeIndex timezone name (`"UTC"` / `"+08:00"` /
+    /// `"America/New_York"`), or `None` for a tz-naive or non-datetime index —
+    /// mirroring pandas `df.index.tz`. UTC-aware reports `"UTC"` (F13): a naive
+    /// axis and a UTC-anchored one are different states.
     #[getter]
     pub(crate) fn tz(&self) -> Option<String> {
         match self.inner.index().tz() {
-            Tz::Utc => None,
+            Tz::Naive => None,
             other => Some(other.name()),
         }
     }
@@ -191,6 +192,14 @@ impl PyDataFrame {
 
     /// Change the index display / matching tz without moving any instant (pandas
     /// `tz_convert`). Returns a new frame.
+    /// Tag the index's zone directly (interop-internal): `from_pandas` imports a
+    /// tz-aware pandas index whose instants are ALREADY true UTC, so the zone is
+    /// attached without the naive-guard that protects user-facing `tz_convert`.
+    pub(crate) fn _set_index_tz(&self, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = Tz::parse(tz).map_err(pyerr)?;
+        Ok(PyDataFrame::plain(self.inner.set_index_tz(tzv).map_err(pyerr)?))
+    }
+
     pub(crate) fn tz_convert(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
         Ok(PyDataFrame::plain(

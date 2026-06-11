@@ -262,13 +262,38 @@ impl DataFrame {
     /// (columns shared). Errors if the index is not a DatetimeIndex.
     pub fn tz_convert(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
         match self.index.kind() {
-            IndexKind::Datetime(_, _) => {
+            IndexKind::Datetime(_, cur) => {
+                // A naive axis is an unanchored wall-clock — there is no source
+                // zone to convert FROM, so converting it would silently relabel
+                // wrong instants. Anchor with tz_localize first (pandas parity).
+                if !cur.is_aware() {
+                    return Err(VolasError::DType(
+                        "cannot tz_convert a tz-naive DatetimeIndex; use tz_localize to anchor it first"
+                            .into(),
+                    ));
+                }
                 let mut df = self.clone();
                 df.index = Arc::new((*self.index).clone().with_tz(tz));
                 Ok(df)
             }
             _ => Err(VolasError::DType(
                 "tz_convert requires a DatetimeIndex".into(),
+            )),
+        }
+    }
+
+    /// Tag the DatetimeIndex's zone directly, without the naive-axis guard of
+    /// [`Self::tz_convert`]. For importers (`from_pandas`) whose instants are
+    /// ALREADY true UTC and arrive carrying their zone — not a user-facing API.
+    pub fn set_index_tz(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
+        match self.index.kind() {
+            IndexKind::Datetime(_, _) => {
+                let mut df = self.clone();
+                df.index = Arc::new((*self.index).clone().with_tz(tz));
+                Ok(df)
+            }
+            _ => Err(VolasError::DType(
+                "set_index_tz requires a DatetimeIndex".into(),
             )),
         }
     }
@@ -288,6 +313,14 @@ impl DataFrame {
                 ))
             }
         };
+        // Localize anchors an UNanchored wall-clock; an already-aware axis must
+        // use tz_convert (re-localizing would silently reinterpret instants).
+        if cur.is_aware() {
+            return Err(VolasError::DType(format!(
+                "index is already tz-aware ({}); use tz_convert",
+                cur.name()
+            )));
+        }
         let mut shifted = Vec::with_capacity(values.len());
         for ns in values {
             let (y, mo, d, h, mi, s) = cur.civil_parts(ns);
@@ -295,7 +328,7 @@ impl DataFrame {
                 .wall_to_utc_ns(y as i32, mo as u32, d as u32, h as u32, mi as u32, s as u32)
                 .ok_or_else(|| {
                     VolasError::Value(format!(
-                        "wall-clock {y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02} does not exist in {}",
+                        "wall-clock {y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02} does not exist in {} (or is DST-ambiguous)",
                         tz.name()
                     ))
                 })?;

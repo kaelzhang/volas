@@ -68,10 +68,8 @@ def test_bool_fillna_non_binary_raises():
         s.fillna(2)
 
 
-# F42 (NA-synonym gap): fillna accepts np.nan and volas.NA but rejects pd.NA
-# with TypeError. pd.NA is a legitimate missing-value synonym and should
-# propagate (all-NA), like the others. xfail(strict).
-@pytest.mark.xfail(reason="F42: fillna(pd.NA) rejected (np.nan/volas.NA accepted)", strict=True)
+# F42 (FIXED): fillna accepts pd.NA like np.nan / volas.NA — the NA synonyms
+# are uniform at the boundary.
 def test_fillna_pd_na_accepted():
     import pandas as pd
     s = volas.DataFrame({"x": [1.0, None]})["x"]

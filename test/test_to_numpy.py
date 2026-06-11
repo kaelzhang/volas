@@ -61,4 +61,4 @@ def test_row_to_numpy_int_bool_na_is_nan():
     row = df.iloc[1].to_numpy()
     assert np.isnan(row).all()                          # [nan, nan], not [0, 0]
     # a present row is unaffected
-    assert df.iloc[0].to_numpy().tolist() == [[1.0, 1.0]]
+    assert df.iloc[0].to_numpy().tolist() == [1.0, 1.0]   # 1-D record (F14)

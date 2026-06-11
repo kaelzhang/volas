@@ -72,6 +72,8 @@ def from_pandas(pdf: Any) -> DataFrame:
         tzname = str(tz)
         if tzname.startswith(('UTC+', 'UTC-')):
             tzname = tzname[3:]
-        return df.tz_convert(tzname)
+        # the imported instants are already true UTC — tag the zone directly
+        # (tz_convert would hit the naive-axis guard; localize would shift).
+        return df._set_index_tz(tzname)
     merged = {name: idx.to_numpy(), **data}
     return DataFrame(merged).set_index(name)

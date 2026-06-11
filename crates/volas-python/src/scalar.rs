@@ -1,7 +1,7 @@
 //! Scalar Python types: `volas.Timestamp`, the `volas.NA` singleton, and its type.
 
 
-use pyo3::exceptions::{PyKeyError, PyOverflowError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
 use volas_core::{
@@ -100,10 +100,16 @@ impl PyTimestamp {
     // surface a `#[new]` doc comment to Python).
     #[new]
     #[pyo3(signature = (value, tz = None))]
-    fn new(value: &Bound<'_, PyAny>, tz: Option<String>) -> PyResult<Self> {
+    fn new(value: &Bound<'_, PyAny>, tz: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let tzv = match tz {
-            Some(s) => Tz::parse(&s).map_err(pyerr)?,
-            None => Tz::Utc,
+            Some(obj) => tz_from_py(obj)?,
+            // An offset-aware value string carries its own zone — keep it (F25),
+            // so '... 09:00:00+08:00' stays a +08:00 instant, not a naive UTC one.
+            None => match value.extract::<String>().ok().and_then(|s| datetime::offset_suffix_secs(&s)) {
+                Some(0) => Tz::Utc,
+                Some(off) => Tz::Offset(off),
+                None => Tz::Naive,
+            },
         };
         Ok(PyTimestamp {
             ns: parse_ts_in_tz(value, tzv)?,
@@ -117,11 +123,12 @@ impl PyTimestamp {
         self.ns
     }
 
-    /// The timezone name, or `None` if UTC / unspecified.
+    /// The timezone name (`"UTC"` / `"+08:00"` / IANA), or `None` if naive
+    /// (unanchored) — UTC-anchored and naive are distinct states (F13).
     #[getter]
     fn tz(&self) -> Option<String> {
         match self.tz {
-            Tz::Utc => None,
+            Tz::Naive => None,
             other => Some(other.name()),
         }
     }
@@ -219,7 +226,7 @@ impl PyTimestamp {
 
     fn __repr__(&self) -> String {
         match self.tz {
-            Tz::Utc => format!("Timestamp('{}')", datetime::format_ns(self.ns)),
+            Tz::Naive => format!("Timestamp('{}')", datetime::format_ns(self.ns)),
             other => format!(
                 "Timestamp('{}', tz='{}')",
                 datetime::format_ns_tz(self.ns, other),
@@ -235,7 +242,7 @@ impl PyTimestamp {
     }
 
     fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: pyo3::basic::CompareOp) -> PyResult<bool> {
-        let rhs = parse_ts_in_tz(other, Tz::Utc)?;
+        let rhs = parse_ts_in_tz(other, Tz::Naive)?;
         Ok(op.matches(self.ns.cmp(&rhs)))
     }
 
@@ -245,9 +252,34 @@ impl PyTimestamp {
 }
 
 /// Parse a Python timestamp (datetime string or epoch-ns integer) to UTC ns,
-/// interpreting a naive string as UTC.
+/// interpreting a naive string's wall-clock as-is (zero offset).
 pub(crate) fn parse_ts(key: &Bound<'_, PyAny>) -> PyResult<i64> {
-    parse_ts_in_tz(key, Tz::Utc)
+    parse_ts_in_tz(key, Tz::Naive)
+}
+
+/// Resolve a Python `tz=` argument: a string spec (IANA / `"+08:00"` / `"UTC"`),
+/// a `zoneinfo.ZoneInfo` (its IANA key), or any `tzinfo` object (its fixed UTC
+/// offset) — F29. An empty string is an error (F47, via `Tz::parse`).
+pub(crate) fn tz_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Tz> {
+    if let Ok(s) = obj.extract::<String>() {
+        return Tz::parse(&s).map_err(pyerr);
+    }
+    // zoneinfo.ZoneInfo carries its IANA name in `.key`.
+    if let Ok(key) = obj.getattr("key").and_then(|k| k.extract::<String>()) {
+        return Tz::parse(&key).map_err(pyerr);
+    }
+    // any datetime.tzinfo: take its UTC offset (fixed-offset zones).
+    if let Ok(off) = obj
+        .call_method1("utcoffset", (obj.py().None(),))
+        .and_then(|d| d.call_method0("total_seconds"))
+        .and_then(|s| s.extract::<f64>())
+    {
+        let secs = off as i32;
+        return Ok(if secs == 0 { Tz::Utc } else { Tz::Offset(secs) });
+    }
+    Err(PyTypeError::new_err(
+        "tz must be a timezone string (IANA name, '+08:00', 'UTC'), a zoneinfo.ZoneInfo, or a tzinfo",
+    ))
 }
 
 /// Parse a Python label to the [`Label`] kind expected by `index`: a string for

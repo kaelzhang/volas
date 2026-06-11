@@ -53,11 +53,17 @@ def test_loc_datetime_partial_string():
     assert _dt_indexed().loc["2021-02"].shape == (1, 1)        # the whole month
 
 
-# F34 (decision 1B): volas's index assumes unique labels, so set_index should
-# REJECT a duplicate-label column at creation (like it rejects NA-label columns,
-# V16) — not allow it and then leak AttributeError on .loc. xfail(strict):
-# set_index currently accepts the duplicate; a fix makes it raise -> XPASS flips.
-@pytest.mark.xfail(reason="F34: set_index should reject duplicate labels (decision 1B), currently allows", strict=True)
+# F34 (decision 1B, FIXED with a refinement): set_index REJECTS a duplicate-label
+# int64/str column at creation (label access assumes unique labels — the same
+# creation-time guard as the NA-label rule V16). DATETIME is exempt: real market
+# data legitimately carries duplicate timestamps (resent forming bars, multiple
+# ticks per instant, NaT batches) and cumulate/sort own those semantics.
 def test_set_index_rejects_duplicate_labels():
     with pytest.raises((ValueError, KeyError)):
-        _indexed([1, 1, 2])              # set_index on a column with the duplicate label 1
+        _indexed([1, 1, 2])              # int64 duplicate label -> rejected
+
+
+def test_set_index_allows_duplicate_datetime():
+    df = volas.DataFrame({"v": [1.0, 2.0]})
+    df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01", "2021-01-01"]})["t"])
+    assert df.set_index("t").shape == (2, 1)   # duplicate ts is market reality

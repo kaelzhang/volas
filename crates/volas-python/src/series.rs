@@ -76,7 +76,7 @@ impl PySeries {
     #[getter]
     pub(crate) fn tz(&self) -> Option<String> {
         match self.inner.index.tz() {
-            Tz::Utc => None,
+            Tz::Naive => None,
             other => Some(other.name()),
         }
     }

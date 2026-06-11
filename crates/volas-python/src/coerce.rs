@@ -2,7 +2,7 @@
 
 
 use numpy::PyReadonlyArray1;
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use volas_core::{
@@ -98,6 +98,18 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
             return Ok(Column::i64(vv));
         }
     }
+    // Values with NO exact volas representation must error (C4), never silently
+    // demote to lossy float64:
+    //  - F32: a python int beyond i64 (no uint64 dtype; 2^63 and 2^63+1 would
+    //    collapse to the same f64).
+    //  - F41: a Decimal (exact-decimal intent; no object dtype to keep it).
+    // And a list of datetime-like scalars builds a datetime column (F20) rather
+    // than falling through to the generic error.
+    if let Ok(list) = v.downcast::<PyList>() {
+        if let Some(col) = list_special_cases(list)? {
+            return Ok(col);
+        }
+    }
     if let Ok(vv) = v.extract::<Vec<f64>>() {
         return Ok(Column::f64(vv));
     }
@@ -155,4 +167,69 @@ pub(crate) fn option_bool_column(vv: Vec<Option<bool>>) -> Column {
 pub(crate) fn option_i64_column(vv: Vec<Option<i64>>) -> Column {
     let validity = Validity::from_valid_iter(vv.len(), vv.iter().map(Option::is_some));
     Column::i64_with(vv.iter().map(|x| x.unwrap_or(0)).collect(), validity)
+}
+
+/// The list shapes that must NOT fall through to the lossy-float path: a list of
+/// datetime-like scalars (F20 -> a Datetime column), an out-of-i64 integer (F32
+/// -> OverflowError), or a Decimal (F41 -> TypeError). Returns `Ok(None)` when
+/// the list is none of these and ordinary inference should continue.
+fn list_special_cases(list: &Bound<'_, PyList>) -> PyResult<Option<Column>> {
+    let mut all_datetime = !list.is_empty();
+    let mut any_present = false;
+    for item in list.iter() {
+        if item.get_type().name()?.to_string() == "Decimal" {
+            return Err(PyTypeError::new_err(
+                "Decimal has no exact volas dtype (no object dtype); convert explicitly \
+                 (e.g. float(x) for a float64 column) if lossy float is acceptable",
+            ));
+        }
+        // An int element that does not fit i64 has no exact volas representation
+        // (no uint64) -> error per item, so a valid [int, None, ...] list with
+        // in-range ints is untouched. bool is a PyInt subclass but always fits.
+        if item.is_instance_of::<pyo3::types::PyInt>() && item.extract::<i64>().is_err() {
+            return Err(PyOverflowError::new_err(
+                "integer does not fit int64 (volas has no uint64); pass floats explicitly \
+                 if lossy float64 is acceptable",
+            ));
+        }
+        if item.is_none() {
+            // None is a missing slot in either interpretation.
+        } else {
+            any_present = true;
+            if !is_datetime_like(&item) {
+                all_datetime = false;
+            }
+        }
+    }
+    if all_datetime && any_present {
+        // F20: a list of datetime scalars (python datetime/date, pd.Timestamp,
+        // volas.Timestamp, np.datetime64) infers a datetime column, like pandas.
+        // None becomes the NaT slot (D2 sentinel).
+        let mut ns = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            if item.is_none() {
+                ns.push(i64::MIN);
+            } else {
+                ns.push(crate::scalar::parse_ts(&item)?);
+            }
+        }
+        return Ok(Some(Column::datetime(ns)));
+    }
+    Ok(None)
+}
+
+/// Whether a scalar is datetime-like: python datetime/date (and subclasses, e.g.
+/// pd.Timestamp), volas.Timestamp, or a numpy datetime64 scalar.
+fn is_datetime_like(item: &Bound<'_, PyAny>) -> bool {
+    if item.is_instance_of::<pyo3::types::PyDate>()
+        || item.is_instance_of::<pyo3::types::PyDateTime>()
+        || item.extract::<PyRef<crate::scalar::PyTimestamp>>().is_ok()
+    {
+        return true;
+    }
+    item.getattr("dtype")
+        .and_then(|d| d.getattr("kind"))
+        .and_then(|k| k.extract::<String>())
+        .map(|k| k == "M")
+        .unwrap_or(false)
 }

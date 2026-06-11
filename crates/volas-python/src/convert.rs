@@ -128,7 +128,7 @@ pub(crate) fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> 
         // scalar type and pandas); a NaT cell is volas.NA (the unified missing
         // singleton). Columns are UTC-naive ns, so the cell tz is UTC.
         Column::Datetime(v) if v[i] == i64::MIN => na(py),
-        Column::Datetime(v) => Py::new(py, PyTimestamp { ns: v[i], tz: Tz::Utc })
+        Column::Datetime(v) => Py::new(py, PyTimestamp { ns: v[i], tz: Tz::Naive })
             .expect("create Timestamp")
             .into_any(),
     }
@@ -260,12 +260,35 @@ pub(crate) fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> 
 /// (so it matches across zones); an offset-aware string is already absolute; an
 /// integer is epoch-ns.
 pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
+    // None is not a constructable instant: volas has no NaT scalar — a missing
+    // instant is volas.NA (decision 2 / D2). A clean ValueError, never a label
+    // KeyError (F16).
+    if key.is_none() {
+        return Err(PyValueError::new_err(
+            "None is not a valid timestamp; a missing instant is volas.NA",
+        ));
+    }
     if let Ok(ts) = key.extract::<PyRef<PyTimestamp>>() {
         return Ok(ts.ns);
     }
     if let Ok(s) = key.extract::<String>() {
         return datetime::parse_ns_in_tz(&s, tz)
             .ok_or_else(|| PyKeyError::new_err(format!("invalid datetime label {s:?}")));
+    }
+    // A stdlib `datetime.datetime` / `datetime.date` — and their subclasses,
+    // notably `pd.Timestamp` and `pd.NaT` (F15/F23): round-trip through
+    // `isoformat()`, which the string parser understands for both naive (then
+    // interpreted in `tz`) and offset-aware (absolute) forms. `pd.NaT`
+    // isoformat()s to "NaT", failing the parse -> a clean ValueError
+    // (decision 2), not a label KeyError.
+    if key.is_instance_of::<pyo3::types::PyDate>() || key.is_instance_of::<pyo3::types::PyDateTime>()
+    {
+        let s = key.call_method0("isoformat")?.extract::<String>()?;
+        return datetime::parse_ns_in_tz(&s, tz).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "{s:?} is not a valid timestamp; a missing instant is volas.NA"
+            ))
+        });
     }
     if let Ok(i) = key.extract::<i64>() {
         // i64::MIN is the NaT sentinel (D2): a missing instant is volas.NA, not a
@@ -373,7 +396,7 @@ pub(crate) fn build_datetime_index(
 ) -> PyResult<DataFrame> {
     let tzv = match tz {
         Some(s) => Tz::parse(s).map_err(pyerr)?,
-        None => Tz::Utc,
+        None => Tz::Naive,
     };
     let parsed = match date_unit {
         Some(unit) => df

@@ -346,8 +346,18 @@
             _ => panic!("datetime"), // LCOV_EXCL_LINE
         }
 
+        // tz_localize anchors a NAIVE frame only: an already-aware frame errors
+        // (use tz_convert), and a naive frame cannot tz_convert (no source zone).
+        assert!(df.tz_localize(Tz::parse("America/New_York").unwrap()).is_err());
+        let naive = DataFrame::new(
+            vec!["c".into()],
+            vec![Column::f64(vec![1.0])],
+            Some(Index::datetime(vec![ns], Tz::Naive)),
+        )
+        .unwrap();
+        assert!(naive.tz_convert(Tz::Utc).is_err());
         // tz_localize: wall-clock 12:00 reinterpreted as NY -> instant moves +5h to UTC.
-        let loc = df
+        let loc = naive
             .tz_localize(Tz::parse("America/New_York").unwrap())
             .unwrap();
         match loc.index().kind() {

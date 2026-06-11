@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use numpy::{IntoPyArray, PyArray2};
+use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -51,14 +51,14 @@ impl PyRow {
     ///
     /// Returns:
     ///     numpy.ndarray
-    pub(crate) fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    pub(crate) fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         for c in self.inner.columns() {
             c.require_numeric().map_err(pyerr)?;
         }
-        let (data, h, w) = self.inner.to_row_major_f64();
-        Ok(ndarray::Array2::from_shape_vec((h, w), data)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?
-            .into_pyarray(py))
+        // F14: a Row is a single 1-D record -> shape (n,), like pandas
+        // df.iloc[0].to_numpy() (was a 2-D (1, n) frame export).
+        let (data, _h, _w) = self.inner.to_row_major_f64();
+        Ok(data.into_pyarray(py))
     }
 
     /// The row as a typed `{column: value}` dict (pandas `Series.to_dict`).
@@ -307,6 +307,32 @@ impl PyDataFrame {
                 "where/mask: `cond` must have the same shape as the frame",
             ));
         }
+        // F36: a DataFrame condition pairs with columns by NAME, never by
+        // position — a same-set/different-order cond is reordered to match, and
+        // a different name set is an error (silently mis-applying a mask to the
+        // wrong column is the worst failure mode for signal filtering).
+        let cond_inner = if cond.inner.names() == self.inner.names() {
+            cond.inner.clone()
+        } else {
+            let mut sorted_a: Vec<&String> = self.inner.names().iter().collect();
+            let mut sorted_b: Vec<&String> = cond.inner.names().iter().collect();
+            sorted_a.sort();
+            sorted_b.sort();
+            if sorted_a != sorted_b {
+                return Err(PyValueError::new_err(
+                    "where/mask: `cond` columns must match the frame's columns by name",
+                ));
+            }
+            cond.inner.select(self.inner.names()).map_err(pyerr)?
+        };
+        // and the row labels must agree — a cond built on a different index would
+        // silently filter the wrong rows.
+        if *cond_inner.index() != *self.inner.index() {
+            return Err(PyValueError::new_err(
+                "where/mask: `cond` index must equal the frame's index",
+            ));
+        }
+        let cond = &PyDataFrame::plain(cond_inner);
         // the condition must be boolean — a numeric mask is rejected (pandas-shaped)
         if let Some(cc) = cond
             .inner

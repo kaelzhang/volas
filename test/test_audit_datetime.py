@@ -84,63 +84,56 @@ def test_timestamp_out_of_scope_absent():
 # disposition: ok=accept & match pandas · F<n>=finding. Findings use strict-xfail
 # markers (NOT imperative pytest.xfail) and the body asserts the *target*
 # behaviour, so a volas fix XPASSes and flips the marker loudly (review feedback).
+# All construction categories now FIXED (F16/F23/F24/F25 landed): natural
+# datetime scalars are accepted, None/NaT raise a clean ValueError (no NaT
+# scalar, decision 2), an offset string keeps its zone, time-only means today.
 _CONSTRUCT = {
-    "py-datetime": "F23", "py-date": "F23", "py-datetime-aware": "F23",
-    "pd-Timestamp": "F23", "volas-Timestamp": "F23",
-    "str-time-only": "F24", "str-offset": "F25",
-    "None": "F16", "pd-NaT": "F16", "np-NaT": "natok",   # np-NaT already -> clean ValueError ✓
+    "py-datetime": "ok", "py-date": "ok", "py-datetime-aware": "ok",
+    "pd-Timestamp": "ok", "volas-Timestamp": "ok",
+    "str-time-only": "today", "str-offset": "tz-kept",
+    "None": "na-raises", "pd-NaT": "na-raises", "np-NaT": "na-raises",
     "np-datetime64": "ok", "int-ns": "ok", "str-date": "ok",
     "str-datetime": "ok", "str-iso-T": "ok",
 }
 
 
-def _construct_params():
-    for label, val in I.datetime_scalars():
-        disp = _CONSTRUCT[label]
-        marks = [pytest.mark.xfail(reason=f"{disp}: construction diverges (findings-ledger)", strict=True)] \
-            if disp.startswith("F") else []
-        yield pytest.param(label, val, id=label, marks=marks)
-
-
-@pytest.mark.parametrize("label,val", list(_construct_params()))
+@pytest.mark.parametrize("label,val", I.datetime_scalars(),
+                         ids=[l for l, _ in I.datetime_scalars()])
 def test_timestamp_construct_census(label, val):
     disp = _CONSTRUCT[label]
-    if disp in ("F16", "natok"):            # None / NaT -> clean ValueError (no NaT scalar)
-        with pytest.raises(ValueError):     # natok already correct (no mark); F16 leaks KeyError (xfail)
+    if disp == "na-raises":                 # None / NaT -> clean ValueError (no NaT scalar)
+        with pytest.raises(ValueError):
             volas.Timestamp(val)
-    elif disp == "F25":                     # offset string -> tz-aware wall-clock hour kept (9, not UTC 1)
-        assert volas.Timestamp(val).hour == 9
-    else:                                   # ok / F23 / F24 -> accept + match pandas instant
+    elif disp == "tz-kept":                 # F25: offset string keeps its zone -> wall-clock 9, not UTC 1
+        t = volas.Timestamp(val)
+        assert t.hour == 9 and t.tz == "+08:00"
+        assert t.value == pd.Timestamp(val).value          # same absolute instant
+    elif disp == "today":                   # F24: time-only means today at that wall-clock
+        t = volas.Timestamp("09:30")
+        assert (t.hour, t.minute) == (9, 30)               # date is "today" (env-dependent)
+    elif label == "volas-Timestamp":        # pandas can't parse a volas Timestamp;
+        assert volas.Timestamp(val).value == val.value     # identity round-trip
+    else:                                   # accept + match the pandas instant
         assert volas.Timestamp(val).value == pd.Timestamp(val).value
 
 
 # --- Layer 2: tz-parameter census (every tz value-category) -----------------
+# tz param now FIXED (F29/F47): tzinfo/zoneinfo objects are accepted, the empty
+# string errors; tz=8 (int) stays rejected (out-of-scope: ambiguous, use '+08:00').
 _TZ = {
     "str-iana": "ok", "str-utc": "ok", "str-offset": "ok", "None": "ok",
-    "int-offset": "out-of-scope",          # tz=8 ambiguous -> use '+08:00'
-    "tzinfo-obj": "F29", "zoneinfo": "F29",  # align: tzinfo/zoneinfo objects should work
-    "empty": "F47", "invalid": "raise",    # invalid zone -> error; empty silently accepted (F47)
-}
-_TZ_REASON = {
-    "F29": "F29: tz= rejects non-str tzinfo/zoneinfo (only str accepted)",
-    "F47": "F47: empty-string tz silently accepted (should error, C4)",
+    "tzinfo-obj": "ok", "zoneinfo": "ok",
+    "int-offset": "raise", "empty": "raise", "invalid": "raise",
 }
 
 
-def _tz_params():
-    for label, tz in I.tz_values():
-        disp = _TZ[label]
-        marks = [pytest.mark.xfail(reason=_TZ_REASON[disp], strict=True)] if disp in _TZ_REASON else []
-        yield pytest.param(label, tz, id=label, marks=marks)
-
-
-@pytest.mark.parametrize("label,tz", list(_tz_params()))
+@pytest.mark.parametrize("label,tz", I.tz_values(), ids=[l for l, _ in I.tz_values()])
 def test_timestamp_tz_param_census(label, tz):
     base = "2021-06-15 09:30:00"
-    if _TZ[label] in ("raise", "out-of-scope", "F47"):   # should reject
+    if _TZ[label] == "raise":
         with pytest.raises((TypeError, ValueError, KeyError)):
             volas.Timestamp(base, tz=tz)
-    else:                                                # ok / F29 -> accept + match pandas instant
+    else:                                                # accept + match pandas instant
         assert volas.Timestamp(base, tz=tz).value == pd.Timestamp(base, tz=tz).value
 
 
@@ -149,26 +142,24 @@ def test_timestamp_tz_param_census(label, tz):
 # a list of datetime-ish scalars; volas rejects every natural form (only a
 # prebuilt np.array works). list[str] -> str is pandas-consistent (waiver: both
 # keep it as a string column unless explicitly to_datetime'd).
+# F20 FIXED: a list of natural datetime scalars infers a datetime column.
 _COLUMN = {
-    "py-datetime": "F20", "np-datetime64": "F20", "pd-Timestamp": "F20",
-    "volas-Timestamp": "F20", "str-datetime": "waiver-str",
+    "py-datetime": "datetime", "np-datetime64": "datetime", "pd-Timestamp": "datetime",
+    "volas-Timestamp": "datetime", "str-datetime": "waiver-str",
 }
 
 
-def _column_params():
-    for label, disp in _COLUMN.items():
-        marks = [pytest.mark.xfail(reason="F20: rejects a list of natural datetime scalars", strict=True)] \
-            if disp == "F20" else []
-        yield pytest.param(label, id=label, marks=marks)
-
-
-@pytest.mark.parametrize("label", list(_column_params()))
+@pytest.mark.parametrize("label", list(_COLUMN), ids=list(_COLUMN))
 def test_datetime_column_construct_census(label):
     val = dict(I.datetime_scalars())[label]
     if _COLUMN[label] == "waiver-str":      # str list stays str in BOTH (no auto-datetime) — consistent
         assert volas.DataFrame({"t": [val]})["t"].dtype == "str"
-    else:                                   # F20 -> should accept + infer datetime64
+    else:                                   # accepted + inferred datetime64
         assert str(volas.DataFrame({"t": [val]})["t"].dtype).startswith("datetime64")
+    # a None slot in a datetime list is the missing instant
+    if _COLUMN[label] == "datetime":
+        s = volas.DataFrame({"t": [val, None]})["t"]
+        assert s.isna().to_list() == [False, True]
 
 
 # --- Layer 2: to_datetime parser census (the primary ingestion entry) -------
@@ -178,43 +169,26 @@ _TO_DT = {
     "list[str-iso-T]": (["2021-01-01T09:30:00"], "ok"),
     "list[str-with-NA]": (["2021-01-01", None], "ok"),
     "list[int-ns]": ([1609459200000000000], "ok"),
-    "list[py-datetime]": ([datetime(2021, 1, 1)], "F20"),
+    "list[py-datetime]": ([datetime(2021, 1, 1)], "ok"),   # F20 fixed
     "list[str-mixed-fmt]": (["2021-01-01", "2021/06/15"], "lenient"),
 }
 
 
-def _todt_params():
-    for label, (xs, disp) in _TO_DT.items():
-        marks = [pytest.mark.xfail(reason="F20: to_datetime rejects a list of python datetimes", strict=True)] \
-            if disp == "F20" else []
-        yield pytest.param(label, xs, id=label, marks=marks)
-
-
-@pytest.mark.parametrize("label,xs", list(_todt_params()))
+@pytest.mark.parametrize("label,xs", [(l, x) for l, (x, _) in _TO_DT.items()],
+                         ids=list(_TO_DT))
 def test_to_datetime_census(label, xs):
-    # ns (D1; pandas us is fine). F20 cells rejected today -> xfail; `lenient`
-    # (mixed formats pandas 2.0+ rejects) volas parses -> documented divergence.
+    # ns (D1; pandas us is fine). `lenient` (mixed formats pandas 2.0+ rejects)
+    # volas parses -> documented divergence, pinned.
     out = volas.to_datetime(volas.DataFrame({"t": xs})["t"])
     assert str(out.dtype).startswith("datetime64")
 
 
 # --- Layer 2: scalar-operand I-rep census (F15: `Timestamp == <scalar>`) -----
-_OPERANDS = {
-    "volas-Timestamp": "ok", "np-datetime64": "ok", "str-datetime": "ok",
-    "pd-Timestamp": "F15", "py-datetime": "F15",
-}
+# F15 FIXED: pandas / stdlib datetime operands compare correctly.
+_OPERANDS = ["volas-Timestamp", "np-datetime64", "str-datetime", "pd-Timestamp", "py-datetime"]
 
 
-def _operand_params():
-    for label, disp in _OPERANDS.items():
-        marks = [pytest.mark.xfail(reason="F15: == pandas/stdlib datetime scalar leaks label KeyError", strict=True)] \
-            if disp == "F15" else []
-        yield pytest.param(label, id=label, marks=marks)
-
-
-@pytest.mark.parametrize("label", list(_operand_params()))
+@pytest.mark.parametrize("label", _OPERANDS, ids=_OPERANDS)
 def test_timestamp_compare_operand_census(label):
     rhs = dict(I.datetime_scalars())[label]
-    # volas / numpy / string operands compare correctly (same instant -> True);
-    # F15 cells (pd.Timestamp / stdlib datetime) leak today -> xfail, flip on fix.
     assert bool(volas.Timestamp("2021-06-15 09:30:00") == rhs) is True

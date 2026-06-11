@@ -954,11 +954,11 @@ df.at[ts, 'close']                       # 100.0
 ts.value                                 # its UTC epoch-nanoseconds (int)
 ts.tz                                    # '+08:00'
 
-# Integer epochs: to_datetime(unit=...) reads the unit. An epoch is *absolute*, so
-# tag the zone with tz_convert (display only). 1609770600000 ms == 14:30Z:
+# Integer epochs: to_datetime(unit=...) reads the unit. An epoch is *absolute* —
+# anchor it as UTC, then restate the zone for display. 1609770600000 ms == 14:30Z:
 e = DataFrame({'t': [1609770600000], 'close': [100.0]})
 e['t'] = to_datetime(e['t'], unit='ms')
-e.set_index('t').tz_convert('America/New_York').index
+e.set_index('t').tz_localize('UTC').tz_convert('America/New_York').index
 # ['2021-01-04T14:30:00.000000000']
 
 # An offset-aware string is already absolute too — to_datetime resolves the offset:
@@ -968,11 +968,20 @@ o.set_index('t').index
 # ['2021-01-04T01:30:00.000000000']  (09:30+08:00 == 01:30Z)
 ```
 
-Once a frame carries a tz, you can re-interpret or re-display it:
+A frame's time axis is in one of two states (the pandas model): **naive** (an
+unanchored wall-clock, `df.tz is None`) or **tz-aware** (anchored, `df.tz` names
+the zone — `'UTC'` included). `tz_localize` anchors a naive axis (the instant
+moves to match the wall-clock in that zone); `tz_convert` restates an aware
+axis in another zone (the instant is unchanged). Each refuses the other state —
+converting an unanchored clock or re-anchoring an anchored one would silently
+shift instants:
 
 ```py
-df.tz_localize('America/New_York')   # reinterpret the naive wall-clock (the instant moves)
-df.tz_convert('+08:00')              # keep the instant, change only how it displays
+naive = df                                   # df.tz is None
+aware = naive.tz_localize('America/New_York')   # anchor: instants move, wall-clock kept
+aware.tz_convert('+08:00')                   # restate: instants kept, wall-clock moves
+naive.tz_convert('+08:00')                   # TypeError — anchor with tz_localize first
+aware.tz_localize('UTC')                     # TypeError — already anchored; use tz_convert
 ```
 
 `cumulate` to a daily (or coarser) bar aligns buckets to the frame's local

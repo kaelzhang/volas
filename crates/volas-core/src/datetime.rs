@@ -19,10 +19,51 @@ pub fn parse_ns_in_tz(s: &str, tz: Tz) -> Option<i64> {
     if let Some(ns) = parse_offset_aware(s) {
         return Some(ns);
     }
-    let (y, mo, d, h, mi, se, subsec) = naive_parts(s)?;
-    // The fractional second is tz-independent (offsets are whole minutes), so it
-    // is added after the wall-clock -> UTC conversion of the whole-second part.
-    tz.wall_to_utc_ns(y, mo, d, h, mi, se)?.checked_add(subsec)
+    if let Some((y, mo, d, h, mi, se, subsec)) = naive_parts(s) {
+        // The fractional second is tz-independent (offsets are whole minutes), so
+        // it is added after the wall-clock -> UTC conversion of the whole-second part.
+        return tz.wall_to_utc_ns(y, mo, d, h, mi, se)?.checked_add(subsec);
+    }
+    // A bare time-of-day ("09:30" / "09:30:15") means *today* at that wall-clock
+    // (pandas `Timestamp('09:00')` parity, F24) — today as seen in `tz`.
+    for fmt in ["%H:%M:%S", "%H:%M"] {
+        if let Ok(t) = chrono::NaiveTime::parse_from_str(s, fmt) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos() as i64;
+            let (y, mo, d, _, _, _) = tz.civil_parts(now);
+            return tz.wall_to_utc_ns(
+                y as i32,
+                mo as u32,
+                d as u32,
+                t.hour(),
+                t.minute(),
+                t.second(),
+            );
+        }
+    }
+    None
+}
+
+/// The fixed offset (seconds east of UTC) carried by an **offset-aware** string,
+/// or `None` for a naive one — so a constructor can keep the zone the user wrote
+/// (`'... 09:00:00+08:00'` stays a +08:00-zoned instant, F25).
+pub fn offset_suffix_secs(s: &str) -> Option<i32> {
+    let s = s.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(chrono::Offset::fix(dt.offset()).local_minus_utc());
+    }
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%.f%:z",
+        "%Y-%m-%d %H:%M:%S%.f%z",
+        "%Y-%m-%dT%H:%M:%S%.f%z",
+    ] {
+        if let Ok(dt) = DateTime::parse_from_str(s, fmt) {
+            return Some(chrono::Offset::fix(dt.offset()).local_minus_utc());
+        }
+    }
+    None
 }
 
 /// Parse an **offset-aware** string (RFC3339 / `%z`) to an absolute UTC instant.

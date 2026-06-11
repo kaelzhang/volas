@@ -63,7 +63,6 @@ def test_row_getitem_name_dict():
 
 # F14 (findings-ledger): Row.to_numpy() returns a 2-D (1, n) array; a Row is a
 # single 1-D record (pandas df.iloc[0].to_numpy() -> shape (n,)). xfail(strict).
-@pytest.mark.xfail(reason="F14: Row.to_numpy() is 2-D (1,n), expected 1-D (n,)", strict=True)
 def test_row_to_numpy_is_1d():
     r = volas.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]}).iloc[0]
     assert np.asarray(r.to_numpy()).shape == (2,)

@@ -139,7 +139,7 @@ impl Index {
     /// column becomes a `DatetimeIndex`, an `I64` column an `Int64Index`, a `Str`
     /// column a string index. Float / bool columns are not valid labels.
     pub fn from_column(col: &Column) -> Result<Index> {
-        Index::from_column_tz(col, Tz::Utc)
+        Index::from_column_tz(col, Tz::Naive)
     }
 
     /// Build an unnamed index from a column, tagging a `Datetime` column with
@@ -153,13 +153,19 @@ impl Index {
     /// `NaT` and sorted last.
     pub fn from_column_tz(col: &Column, tz: Tz) -> Result<Index> {
         let kind = match col {
+            // Datetime is exempt from the unique-label rule (F34 refinement):
+            // real market data legitimately carries duplicate timestamps (resent
+            // forming bars, multiple ticks per ts, NaT batches) and cumulate /
+            // sort own the dedup semantics. int64/str labels stay strictly unique.
             Column::Datetime(v) => IndexKind::Datetime(v.to_vec(), tz),
             Column::I64(v, _) => {
                 require_no_missing_labels(col, "int64")?;
+                require_unique_labels(v, "int64")?;
                 IndexKind::Int64(v.to_vec())
             }
             Column::Str(v, _) => {
                 require_no_missing_labels(col, "str")?;
+                require_unique_labels(v, "str")?;
                 IndexKind::Str(v.to_vec())
             }
             other => {
@@ -172,11 +178,11 @@ impl Index {
         Ok(Index { name: None, kind })
     }
 
-    /// The timezone of a `Datetime` index ([`Tz::Utc`] for every other kind).
+    /// The timezone of a `Datetime` index ([`Tz::Naive`] for every other kind).
     pub fn tz(&self) -> Tz {
         match &self.kind {
             IndexKind::Datetime(_, tz) => *tz,
-            _ => Tz::Utc,
+            _ => Tz::Naive,
         }
     }
 
@@ -425,6 +431,22 @@ fn require_no_missing_labels(col: &Column, kind: &str) -> Result<()> {
     Ok(())
 }
 
+/// Label access assumes unique labels (F34, decision 1B): a duplicate-label
+/// index makes `.loc[label]` ill-defined (one row or many?), so it is rejected
+/// at creation — the same creation-time guard as the NA-label rule above.
+fn require_unique_labels<T: std::hash::Hash + Eq>(labels: &[T], kind: &str) -> Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(labels.len());
+    for l in labels {
+        if !seen.insert(l) {
+            return Err(VolasError::Value(format!(
+                "cannot use a {kind} column with duplicate labels as an index \
+                 (label access assumes unique labels)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,7 +455,7 @@ mod tests {
     fn from_datetime_and_int_columns() {
         assert_eq!(
             Index::from_column(&Column::datetime(vec![5, 6])).unwrap(),
-            Index::datetime(vec![5, 6], Tz::Utc)
+            Index::datetime(vec![5, 6], Tz::Naive)
         );
         assert_eq!(
             Index::from_column(&Column::i64(vec![1, 2])).unwrap(),
@@ -588,7 +610,7 @@ mod tests {
     #[test]
     fn index_kind_branch_coverage() {
         // tz() / with_tz() are no-ops on a non-datetime index.
-        assert_eq!(Index::range(3).tz(), Tz::Utc);
+        assert_eq!(Index::range(3).tz(), Tz::Naive);
         assert!(matches!(
             Index::range(3).with_tz(Tz::Utc).kind,
             IndexKind::Range(3)

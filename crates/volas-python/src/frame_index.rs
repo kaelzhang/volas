@@ -25,7 +25,12 @@ use crate::*;
 /// and `where` / `mask` `other`.
 pub(crate) fn is_na_like_py(v: &Bound<'_, PyAny>) -> bool {
     let py = v.py();
-    v.is_none() || v.is(na(py).bind(py)) || v.extract::<f64>().is_ok_and(|x| x.is_nan())
+    v.is_none()
+        || v.is(na(py).bind(py))
+        || v.extract::<f64>().is_ok_and(|x| x.is_nan())
+        // pd.NA (pandas's NAType) is a legitimate missing-value synonym at the
+        // boundary (F42) — volas's own NAType is already covered by `is(na)`.
+        || v.get_type().name().map(|n| n.to_string() == "NAType").unwrap_or(false)
 }
 
 /// Build a length-1 [`Column`] from a Python scalar, coerced toward the target

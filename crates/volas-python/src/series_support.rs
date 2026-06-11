@@ -37,6 +37,14 @@ pub(crate) fn series_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<C
     if let Ok(o) = other.extract::<PyRef<PySeries>>() {
         require_aligned(&s.index, &o.inner.index)?;
         Ok(o.inner.data.clone())
+    } else if other.is_none()
+        || other.is(crate::scalar::na(other.py()).bind(other.py()))
+        || other.get_type().name().map(|n| n.to_string() == "NAType").unwrap_or(false)
+    {
+        // F7: an NA scalar operand poisons the whole result (known op unknown =
+        // unknown), dtype-preserved — consistent with column-NA propagation and
+        // with accepting np.nan. Broadcast an all-NA column of the series' dtype.
+        Ok(Column::na_of(s.data.dtype(), s.len()))
     } else if let Ok(b) = other.extract::<bool>() {
         Ok(Column::i64(vec![b as i64; s.len()]))
     } else if let Ok(i) = other.extract::<i64>() {

@@ -121,7 +121,6 @@ def test_scalar_rhs(d):
 # F7 (findings-ledger): an NA scalar operand is rejected with TypeError instead
 # of poisoning the column to all-NA — inconsistent with column-NA arithmetic,
 # which propagates correctly. xfail(strict).
-@pytest.mark.xfail(reason="F7: NA scalar operand raises instead of all-NA", strict=True)
 def test_scalar_na_operand():
     s = A.series("i64", "N0")
     assert (s + volas.NA).isna().to_list() == [True, True, True]  # # C2 / # pandas

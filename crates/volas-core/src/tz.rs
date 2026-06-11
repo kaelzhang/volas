@@ -20,10 +20,19 @@ use crate::error::{Result, VolasError};
 
 /// The timezone attached to a `DatetimeIndex`. Storage is always UTC epoch-ns;
 /// this drives wall-clock conversion only.
+///
+/// `Naive` vs `Utc` (the pandas two-state model): a **naive** axis is an
+/// unanchored wall-clock (`.tz` is None; `tz_convert` refuses it), while a
+/// **UTC-aware** axis is anchored (`.tz` is `"UTC"`; convertible). Both convert
+/// wall-clock <-> instant with zero offset, so the hot path is identical — the
+/// distinction is semantic state, not arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tz {
-    /// UTC — no conversion. The default.
+    /// No timezone attached — an unanchored wall-clock (pandas "naive"). The
+    /// default for ingested data until `tz_localize` anchors it.
     #[default]
+    Naive,
+    /// UTC — anchored, zero offset.
     Utc,
     /// A fixed offset east of UTC, in **seconds** (e.g. `28800` for UTC+8). DST-free.
     Offset(i32),
@@ -32,12 +41,19 @@ pub enum Tz {
 }
 
 impl Tz {
-    /// Parse a timezone spec: `""` / `"UTC"` / `"Z"` -> [`Tz::Utc`]; a fixed offset
+    /// Parse a timezone spec: `"UTC"` / `"Z"` -> [`Tz::Utc`]; a fixed offset
     /// (`"+08:00"`, `"+0800"`, `"+8"`, `"-05:00"`) -> [`Tz::Offset`]; otherwise an
     /// IANA name (`"America/New_York"`, `"Asia/Shanghai"`) -> [`Tz::Named`].
+    /// An empty spec is an error (F47): "no timezone" is expressed by not calling,
+    /// never by a silent empty string.
     pub fn parse(s: &str) -> Result<Tz> {
         let s = s.trim();
-        if s.is_empty() || s.eq_ignore_ascii_case("utc") || s == "Z" {
+        if s.is_empty() {
+            return Err(VolasError::Value(
+                "empty timezone — pass an IANA name, an offset like \"+08:00\", or \"UTC\"".into(),
+            ));
+        }
+        if s.eq_ignore_ascii_case("utc") || s == "Z" {
             return Ok(Tz::Utc);
         }
         if let Some(off) = parse_offset_seconds(s) {
@@ -52,7 +68,7 @@ impl Tz {
     /// offset depends on the instant.
     pub fn fixed_offset_secs(&self) -> Option<i32> {
         match self {
-            Tz::Utc => Some(0),
+            Tz::Naive | Tz::Utc => Some(0),
             Tz::Offset(s) => Some(*s),
             Tz::Named(_) => None,
         }
@@ -62,7 +78,7 @@ impl Tz {
     /// instant `ns` as seen in this timezone.
     pub fn civil_parts(&self, ns: i64) -> (i64, i64, i64, i64, i64, i64) {
         match self {
-            Tz::Utc | Tz::Offset(_) => {
+            Tz::Naive | Tz::Utc | Tz::Offset(_) => {
                 let off = self.fixed_offset_secs().unwrap_or(0) as i64;
                 let local = ns + off * 1_000_000_000;
                 let secs = local.div_euclid(1_000_000_000);
@@ -93,12 +109,13 @@ impl Tz {
 
     /// UTC epoch-ns of a naive wall-clock time interpreted in this timezone.
     /// Returns `None` if the civil time is invalid or (for a named zone) falls in
-    /// a spring-forward gap. An ambiguous fall-back time resolves to the earlier
-    /// instant (matching pandas' default).
+    /// a DST anomaly: a spring-forward **gap** (the time does not exist) or a
+    /// fall-back **fold** (the time occurs twice — ambiguous; silently picking
+    /// one would shift instants invisibly, F33, so it is rejected like the gap).
     pub fn wall_to_utc_ns(&self, y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> Option<i64> {
         let naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
         match self {
-            Tz::Utc | Tz::Offset(_) => {
+            Tz::Naive | Tz::Utc | Tz::Offset(_) => {
                 let off = self.fixed_offset_secs().unwrap_or(0) as i64;
                 naive
                     .and_utc()
@@ -107,25 +124,33 @@ impl Tz {
             }
             Tz::Named(tz) => match tz.from_local_datetime(&naive) {
                 chrono::LocalResult::Single(dt) => dt.timestamp_nanos_opt(),
-                chrono::LocalResult::Ambiguous(earlier, _) => earlier.timestamp_nanos_opt(),
+                chrono::LocalResult::Ambiguous(_, _) => None,
                 chrono::LocalResult::None => None,
             },
         }
     }
 
-    /// A display name: `"UTC"`, a `"+08:00"`-style offset, or the IANA name.
+    /// A display name: `"naive"` (unanchored), `"UTC"`, a `"+08:00"`-style
+    /// offset, or the IANA name.
     pub fn name(&self) -> String {
         match self {
+            Tz::Naive => "naive".to_string(),
             Tz::Utc => "UTC".to_string(),
             Tz::Offset(s) => format_offset(*s),
             Tz::Named(tz) => tz.name().to_string(),
         }
     }
 
-    /// Whether this is anything other than plain UTC (so callers can keep the
-    /// zero-cost path when it is).
+    /// Whether wall-clock == stored instant (zero offset, no DST) — the
+    /// zero-cost hot path. True for both the naive and the UTC states.
     pub fn is_utc(&self) -> bool {
-        matches!(self, Tz::Utc)
+        matches!(self, Tz::Naive | Tz::Utc)
+    }
+
+    /// Whether the axis is anchored to a zone (pandas "tz-aware"). A naive axis
+    /// answers `False`: it can be `tz_localize`d but never `tz_convert`ed.
+    pub fn is_aware(&self) -> bool {
+        !matches!(self, Tz::Naive)
     }
 }
 
@@ -179,7 +204,7 @@ mod tests {
 
     #[test]
     fn parse_forms() {
-        assert_eq!(Tz::parse("").unwrap(), Tz::Utc);
+        assert!(Tz::parse("").is_err()); // F47: empty spec is an error, never silent
         assert_eq!(Tz::parse("UTC").unwrap(), Tz::Utc);
         assert_eq!(Tz::parse("+00:00").unwrap(), Tz::Utc);
         assert_eq!(Tz::parse("+08:00").unwrap(), Tz::Offset(28800));
@@ -223,10 +248,15 @@ mod tests {
         let ny = Tz::parse("America/New_York").unwrap();
         assert_eq!(ny.fixed_offset_secs(), None); // a named zone has no fixed offset
         assert_eq!(Tz::Utc.name(), "UTC");
-        // DST fall-back (01:30 on 2020-11-01) is ambiguous -> the earlier instant;
-        // the spring-forward gap (02:30 on 2020-03-08) does not exist -> None.
-        assert!(ny.wall_to_utc_ns(2020, 11, 1, 1, 30, 0).is_some());
+        // DST fall-back (01:30 on 2020-11-01) is ambiguous -> rejected (F33,
+        // symmetric with the gap); the spring-forward gap (02:30 on 2020-03-08)
+        // does not exist -> None.
+        assert!(ny.wall_to_utc_ns(2020, 11, 1, 1, 30, 0).is_none());
         assert!(ny.wall_to_utc_ns(2020, 3, 8, 2, 30, 0).is_none());
+        // the two states: naive is unanchored, UTC is anchored.
+        assert!(!Tz::Naive.is_aware());
+        assert!(Tz::Utc.is_aware());
+        assert_eq!(Tz::Naive.name(), "naive");
         // parse rejects 3-char rests and out-of-range hours.
         assert!(Tz::parse("+123").is_err());
         assert!(Tz::parse("+25:00").is_err());
