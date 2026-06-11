@@ -404,3 +404,16 @@ pub fn iso_calendar(y: i64, mo: i64, d: i64) -> (i64, i64, i64) {
         date.weekday().number_from_monday() as i64,
     )
 }
+
+#[cfg(test)]
+mod offset_suffix_tests {
+    use super::*;
+
+    #[test]
+    fn offset_suffix_forms() {
+        assert_eq!(offset_suffix_secs("2021-01-01T09:00:00+08:00"), Some(28800));
+        assert_eq!(offset_suffix_secs("2021-01-01 09:00:00+08:00"), Some(28800));
+        assert_eq!(offset_suffix_secs("2021-01-01T09:00:00+0800"), Some(28800));
+        assert_eq!(offset_suffix_secs("2021-01-01 09:00:00"), None);
+    }
+}

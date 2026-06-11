@@ -278,6 +278,19 @@ mod tests {
     }
 
     #[test]
+    fn offset_and_dst_at_instant() {
+        // fixed offsets: constant offset, zero DST; named zones answer per instant.
+        let fixed = Tz::parse("+08:00").unwrap();
+        assert_eq!(fixed.offset_secs_at(0), 28800);
+        assert_eq!(fixed.dst_secs_at(0), 0);
+        assert_eq!(Tz::Utc.offset_secs_at(0), 0);
+        let ny = Tz::parse("America/New_York").unwrap();
+        let summer = ny.wall_to_utc_ns(2021, 7, 1, 12, 0, 0).unwrap();
+        assert_eq!(ny.offset_secs_at(summer), -4 * 3600);   // EDT
+        assert_eq!(ny.dst_secs_at(summer), 3600);           // one DST hour
+    }
+
+    #[test]
     fn tz_edge_branches() {
         let ny = Tz::parse("America/New_York").unwrap();
         assert_eq!(ny.fixed_offset_secs(), None); // a named zone has no fixed offset

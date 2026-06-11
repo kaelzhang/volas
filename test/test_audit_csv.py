@@ -74,3 +74,10 @@ def test_read_csv_duplicate_header_mangles(tmp_path):
     p = tmp_path / "dup.csv"
     p.write_text("a,a,b\n1,2,3\n")
     assert list(volas.read_csv(str(p)).columns) == ["a", "a.1", "b"]
+
+
+def test_read_csv_dup_header_collision_with_existing_mangled(tmp_path):
+    # the mangle must dodge an EXISTING a.1 column: a, a.1, a -> a, a.1, a.2
+    p = tmp_path / "tricky.csv"
+    p.write_text("a,a.1,a\n1,2,3\n")
+    assert list(volas.read_csv(str(p)).columns) == ["a", "a.1", "a.2"]

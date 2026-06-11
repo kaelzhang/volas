@@ -323,6 +323,17 @@
     }
 
     #[test]
+    fn set_index_tz_requires_datetime_index() {
+        let df = DataFrame::new(
+            vec!["c".into()],
+            vec![Column::f64(vec![1.0])],
+            None, // RangeIndex
+        )
+        .unwrap();
+        assert!(df.set_index_tz(crate::tz::Tz::Utc).is_err());
+    }
+
+    #[test]
     fn tz_convert_keeps_instant_localize_shifts() {
         use crate::tz::Tz;
         // a frame whose datetime index was ingested as UTC instants
