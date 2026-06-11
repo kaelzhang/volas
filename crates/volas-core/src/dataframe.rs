@@ -542,6 +542,34 @@ impl DataFrame {
         }
         (out, h, w)
     }
+
+    /// Flatten to a row-major (C-order) 2-D `i64` buffer for an **exact** integer
+    /// (or `datetime64[ns]`) NumPy export, returning `(data, height, width)`. A
+    /// datetime column contributes its raw epoch-ns — so sub-2⁵³ ns and `NaT`
+    /// (which stays `i64::MIN`, the datetime64 sentinel) survive, unlike the
+    /// `to_row_major_f64` channel — and an `i64` column its exact value (no
+    /// float round-trip past 2⁵³). A float column truncates toward zero. A `str`
+    /// column has no integer meaning; the export boundary rejects it before
+    /// calling this, so it contributes a `0` placeholder it never reaches.
+    pub fn to_row_major_i64(&self) -> (Vec<i64>, usize, usize) {
+        let h = self.height;
+        let w = self.columns.len();
+        let mut out = vec![0i64; h * w];
+        for (j, c) in self.columns.iter().enumerate() {
+            for i in 0..h {
+                out[i * w + j] = match c {
+                    Column::Datetime(v) => v[i],
+                    Column::I64(v, _) => v[i],
+                    Column::I32(v, _) => v[i] as i64,
+                    Column::Bool(v, _) => v[i] as i64,
+                    Column::F64(v) => v[i] as i64,
+                    Column::F32(v) => v[i] as i64,
+                    Column::Str(..) => 0,
+                };
+            }
+        }
+        (out, h, w)
+    }
 }
 
 mod computed;

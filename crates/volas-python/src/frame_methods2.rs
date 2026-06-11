@@ -432,41 +432,70 @@ impl PyDataFrame {
         Err(PyTypeError::new_err("append expects a DataFrame or Row"))
     }
 
-    /// The frame as a 2-D NumPy array (pandas `to_numpy`). With no `dtype`, an
-    /// honest boundary representation chosen by the column dtypes:
-    /// - every column numeric/bool -> a fast `float64` matrix;
-    /// - every column datetime -> a 2-D `datetime64[ns]` array (NaT-aware), so
-    ///   datetime never rides the f64 channel D5 forbids;
-    /// - any other mix (datetime+numeric, datetime+str, str+numeric, str-only)
-    ///   -> a lossless `object` array, each cell its own typed Python value.
+    /// The frame as a 2-D NumPy array (pandas `to_numpy`). `to_numpy` is an export
+    /// boundary — leaving volas — so an explicit `dtype` is honored per cell like
+    /// pandas (the internal no-lossy contract governs *computation*, not what the
+    /// caller asks to convert *out* to). The matrix:
     ///
-    /// An explicit `dtype` casts the float64 matrix (e.g. `'float32'`). Requesting
-    /// a float over a **str** column raises; requesting a float over a **datetime**
-    /// column is an allowed lossy export of the epoch-ns (Q3) — the caller has
-    /// opted in, so it is not blocked, but it does lose precision past 2^53 ns.
+    /// | frame \\ dtype | `None` (default)        | `"object"`          | int / bool          | float                 |
+    /// |---|---|---|---|---|
+    /// | numeric / bool | `float64` matrix        | typed-cell object   | exact cast          | cast                  |
+    /// | datetime       | 2-D `datetime64[ns]`    | `Timestamp` / `NA`  | **exact epoch-ns** (NaT→`i64::MIN`) | epoch-ns as float (lossy past 2⁵³, NaT→NaN) |
+    /// | mixed          | object (typed cells)    | typed-cell object   | exact cast          | cast (str → error)    |
+    /// | contains str   | object (typed cells)    | str kept            | **error**           | **error**             |
+    ///
+    /// So `dtype="object"` is always lossless (each cell its own typed value —
+    /// `Timestamp` / `volas.NA` / str / number), an integer dtype takes the exact
+    /// `i64` channel (datetime never round-trips through `f64`), a float dtype is
+    /// the caller's opt-in lossy export, and a `str` column rejects any numeric
+    /// dtype (no numeric meaning) pointing at `dtype="object"`.
     #[pyo3(signature = (dtype = None))]
     pub(crate) fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
         ensure_fresh(&self.inner)?;
         let cols = self.inner.columns();
-        let (h, w) = (self.inner.height(), self.inner.width());
+        let has_str = cols.iter().any(|c| matches!(c, Column::Str(..)));
 
         if let Some(dt) = dtype {
-            let floaty = dt.contains("float") || dt == "f32" || dt == "f64" || dt == "double";
-            let has_str = cols.iter().any(|c| matches!(c, Column::Str(_, _)));
-            if has_str && floaty {
+            // `object`: a lossless typed-cell array (never the f64 channel) — the
+            // inspection / interop export that keeps datetime, str and NA intact.
+            if dt == "object" || dt == "O" {
+                return self.object_array(py);
+            }
+            // Any numeric / temporal target: a str column has no numeric value
+            // (pandas raises here too), so reject it and point at the object route.
+            if has_str {
                 return Err(PyValueError::new_err(format!(
-                    "cannot convert a string column to {dt}"
+                    "cannot convert a string column to {dt}; use dtype='object' to keep strings"
                 )));
             }
-            let (data, h, w) = self.inner.to_row_major_f64();
+            // A float target rides the (lossy) f64 channel — the caller opted into
+            // float, so a datetime epoch-ns past 2⁵³ quantises and a NaT becomes
+            // NaN. A non-float (integer / bool / datetime) target takes the EXACT
+            // i64 channel so a datetime exports its true epoch-ns (NaT→i64::MIN)
+            // and a large i64 column survives, instead of an f64 round-trip.
+            let floaty = dt.contains("float")
+                || dt == "f32"
+                || dt == "f64"
+                || dt == "double"
+                || dt == "single";
+            let (data, h, w) = if floaty {
+                let (d, h, w) = self.inner.to_row_major_f64();
+                let arr = ndarray::Array2::from_shape_vec((h, w), d)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?
+                    .into_pyarray(py);
+                return Ok(arr.call_method1("astype", (dt,))?);
+            } else {
+                self.inner.to_row_major_i64()
+            };
             let arr = ndarray::Array2::from_shape_vec((h, w), data)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?
                 .into_pyarray(py);
             return Ok(arr.call_method1("astype", (dt,))?);
         }
 
-        // fast path: a frame that is entirely numeric/bool is exactly the f64
-        // matrix (an empty frame counts — `all` over no columns is true).
+        // Default (no dtype) — the honest representation chosen by the dtypes.
+        // Fast path: an entirely numeric/bool frame is exactly the f64 matrix (an
+        // empty frame counts — `all` over no columns is true, checked first).
         let all_numeric = cols.iter().all(|c| {
             matches!(
                 c,
@@ -483,11 +512,27 @@ impl PyDataFrame {
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             return Ok(arr.into_pyarray(py).into_any());
         }
+        // A datetime-only frame -> a 2-D `datetime64[ns]` built DIRECTLY from the
+        // raw i64 ns buffer (ns-exact, NaT = i64::MIN native). The old path boxed
+        // each cell into a Python `Timestamp` then let NumPy re-coerce it, which
+        // truncated ns and failed outright on a NaT cell (P1-01 / D1 / D2).
+        if cols.iter().all(|c| matches!(c, Column::Datetime(_))) {
+            let (data, h, w) = self.inner.to_row_major_i64();
+            let arr = ndarray::Array2::from_shape_vec((h, w), data)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+                .into_pyarray(py);
+            return Ok(arr.call_method1("astype", ("datetime64[ns]",))?);
+        }
+        // Any other mix -> a lossless object array, each cell its own typed value.
+        self.object_array(py)
+    }
 
-        // Otherwise build a lossless 2-D array, one typed cell each: a datetime-
-        // only frame becomes `datetime64[ns]` (scalar_to_py boxes NaT-aware
-        // np.datetime64), every other mix becomes `object`.
-        let all_datetime = cols.iter().all(|c| matches!(c, Column::Datetime(_)));
+    /// A lossless 2-D `object` NumPy array: each cell its own typed Python value
+    /// (`volas.Timestamp` / `volas.NA` / str / number) via `scalar_to_py`. Backs
+    /// the default mixed-frame export and `to_numpy(dtype="object")`.
+    fn object_array<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let cols = self.inner.columns();
+        let (h, w) = (self.inner.height(), self.inner.width());
         let rows = PyList::empty(py);
         for i in 0..h {
             let row = PyList::empty(py);
@@ -497,11 +542,10 @@ impl PyDataFrame {
             rows.append(row)?;
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", if all_datetime { "datetime64[ns]" } else { "object" })?;
-        let _ = w;
-        Ok(py
-            .import("numpy")?
-            .call_method("array", (rows,), Some(&kwargs))?)
+        kwargs.set_item("dtype", "object")?;
+        let arr = py.import("numpy")?.call_method("array", (rows,), Some(&kwargs))?;
+        // An empty or single-column frame can collapse to the wrong ndim; pin (h, w).
+        Ok(arr.call_method1("reshape", ((h, w),))?)
     }
 
     /// Value equality (same columns + index + values, `NaN == NaN`).

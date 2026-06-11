@@ -289,6 +289,24 @@ array([ 1., nan,  3.])                    # the pandas-style upcast, but only he
 **only** at this boundary, where you asked for it. Storage and `to_list()` keep the
 dtype and `volas.NA`.
 
+`DataFrame.to_numpy(dtype=...)` is an export boundary — you are *leaving* volas — so
+an explicit `dtype` is honored per cell exactly like pandas (the internal no-lossy
+contract governs *computation*, not what you convert *out*). The matrix:
+
+| frame \ dtype | `None` (default) | `"object"` | integer / bool | float |
+|---|---|---|---|---|
+| numeric / bool | `float64` matrix | typed-cell object | exact cast | cast |
+| datetime | 2-D `datetime64[ns]` | `Timestamp` / `NA` | **exact epoch-ns** (NaT → `i64::MIN`) | epoch-ns as float (lossy past 2⁵³, NaT → `NaN`) |
+| mixed | object (typed cells) | typed-cell object | exact cast | cast |
+| contains `str` | object (typed cells) | strings kept | **error** | **error** |
+
+So `dtype="object"` is always **lossless** (each cell its own typed value —
+`Timestamp` / `volas.NA` / str / number), an **integer** dtype takes the exact `i64`
+channel (a datetime exports its true epoch-ns; a large `int64` survives past 2⁵³ —
+neither round-trips through `float64`), a **float** dtype is your sanctioned lossy
+opt-in (epoch-ns as float), and a `str` column rejects any **numeric** dtype (it has
+no numeric meaning — use `dtype="object"`). This mirrors `pandas.DataFrame.to_numpy`.
+
 ### A `Row` is a typed record, not an `object` Series
 
 Indexing a single row gives a `Row` — a read-only, per-column-typed record — not a

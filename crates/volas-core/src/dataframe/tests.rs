@@ -103,6 +103,32 @@
     }
 
     #[test]
+    fn row_major_i64_export_is_exact() {
+        // The integer export takes each column's raw value (no f64 round-trip): a
+        // datetime keeps exact epoch-ns with NaT = i64::MIN, a large i64 survives
+        // past 2^53, a float truncates toward zero, a str (rejected by the caller
+        // before this) contributes its 0 placeholder.
+        let big = (1i64 << 60) + 1;
+        let df = DataFrame::new(
+            vec!["t".into(), "n".into(), "f".into(), "s".into()],
+            vec![
+                Column::datetime(vec![123, i64::MIN]),
+                Column::i64(vec![big, -7]),
+                Column::f64(vec![2.9, -2.9]),
+                Column::str(vec!["a".into(), "b".into()]),
+            ],
+            None,
+        )
+        .unwrap();
+        let (data, h, w) = df.to_row_major_i64();
+        assert_eq!((h, w), (2, 4));
+        // row 0: datetime 123 (exact), i64 2^60+1 (exact), f64 2.9->2, str->0
+        assert_eq!(&data[0..4], &[123, big, 2, 0]);
+        // row 1: NaT stays i64::MIN, -7, -2.9->-2, str->0
+        assert_eq!(&data[4..8], &[i64::MIN, -7, -2, 0]);
+    }
+
+    #[test]
     fn new_validates_shape() {
         // names / columns count mismatch
         assert!(DataFrame::new(vec!["a".into()], vec![], None).is_err());
