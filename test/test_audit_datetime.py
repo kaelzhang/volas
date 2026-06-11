@@ -29,7 +29,7 @@ _pub = lambda o: {n for n in dir(o) if not n.startswith("_")}
 # --- Layer 1: Timestamp surface disposition (alignment-disposition §1) -------
 # `align`: volas SHOULD have these (pandas-parity, real value) — currently
 # missing → backlog. `out-of-scope`: deliberately not implemented.
-_ALIGN = {
+_IMPLEMENTED = {
     # tz
     "tz_localize", "tz_convert", "astimezone", "utcoffset", "tzname", "dst", "tzinfo",
     # rounding (bar alignment)
@@ -48,6 +48,7 @@ _ALIGN = {
     # convenience constructors
     "now", "today",
 }
+_ALIGN: set[str] = set()          # the F21 backlog: fully implemented
 _OUT_OF_SCOPE = {
     "to_period", "to_julian_date", "toordinal", "fromordinal", "fromisocalendar",
     "fromisoformat", "fromtimestamp", "utcfromtimestamp", "utcnow", "combine",
@@ -66,10 +67,9 @@ def test_timestamp_surface_dispositioned():
     assert not orphan, f"disposition names a non-missing member: {sorted(orphan)}"
 
 
-@pytest.mark.parametrize("m", sorted(_ALIGN))
-@pytest.mark.xfail(reason="P8 align-backlog: pandas-parity datetime API not yet implemented", strict=True)
-def test_timestamp_align_backlog(m):
-    """Each `align` member SHOULD exist; strict-xfail flips loudly when added."""
+@pytest.mark.parametrize("m", sorted(_IMPLEMENTED))
+def test_timestamp_align_implemented(m):
+    """The F21 align backlog, fully landed: each member exists."""
     assert hasattr(volas.Timestamp("2021-06-15"), m)
 
 

@@ -393,3 +393,14 @@ mod tests {
         assert!(format_ns_tz(0, ny).starts_with("1969")); // UTC epoch is 1969 in NY
     }
 }
+
+/// The ISO calendar triple `(iso_year, iso_week, iso_weekday)` of a civil date.
+pub fn iso_calendar(y: i64, mo: i64, d: i64) -> (i64, i64, i64) {
+    let date = NaiveDate::from_ymd_opt(y as i32, mo as u32, d as u32).unwrap_or_default();
+    let iw = date.iso_week();
+    (
+        iw.year() as i64,
+        iw.week() as i64,
+        date.weekday().number_from_monday() as i64,
+    )
+}

@@ -96,6 +96,18 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "year": "T12", "month": "T12", "day": "T12", "hour": "T12", "minute": "T12",
         "second": "T12", "weekday": "T12", "strftime": "T12",
         "to_numpy": "T12", "to_pydatetime": "T12", "value": "T12", "tz": "T12",
+        # F21 align backlog, landed (pandas-parity datetime surface):
+        **{m: "T12" for m in (
+            "microsecond", "nanosecond", "quarter", "dayofweek", "day_of_week",
+            "isoweekday", "dayofyear", "day_of_year", "week", "weekofyear",
+            "isocalendar", "days_in_month", "daysinmonth", "is_month_start",
+            "is_month_end", "is_quarter_start", "is_quarter_end", "is_year_start",
+            "is_year_end", "is_leap_year", "day_name", "month_name", "date",
+            "time", "replace", "floor", "ceil", "round", "normalize",
+            "tz_localize", "tz_convert", "astimezone", "utcoffset", "tzname",
+            "dst", "tzinfo", "timestamp", "to_datetime64", "isoformat", "unit",
+            "as_unit", "now", "today",
+        )},
     },
     "TimeFrame": {
         "__new__": "ignore:no public TimeFrame constructor",

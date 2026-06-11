@@ -152,6 +152,40 @@ impl Tz {
     pub fn is_aware(&self) -> bool {
         !matches!(self, Tz::Naive)
     }
+
+    /// Seconds east of UTC at the given instant (DST-correct for a named zone).
+    pub fn offset_secs_at(&self, ns: i64) -> i32 {
+        match self {
+            Tz::Naive | Tz::Utc => 0,
+            Tz::Offset(s) => *s,
+            Tz::Named(tz) => {
+                use chrono::Offset;
+                let secs = ns.div_euclid(1_000_000_000);
+                let nsub = ns.rem_euclid(1_000_000_000) as u32;
+                let utc = DateTime::from_timestamp(secs, nsub).unwrap_or_default();
+                tz.offset_from_utc_datetime(&utc.naive_utc()).fix().local_minus_utc()
+            }
+        }
+    }
+
+    /// The DST component of the offset at the instant, in seconds (0 for fixed
+    /// zones / UTC / naive).
+    pub fn dst_secs_at(&self, ns: i64) -> i32 {
+        match self {
+            Tz::Named(_) => {
+                // the DST component = the offset now minus the zone's standard
+                // (January) offset for that year — robust without chrono-tz
+                // internals, and exact for the IANA zones volas serves.
+                let (y, ..) = self.civil_parts(ns);
+                let jan = self
+                    .wall_to_utc_ns(y as i32, 1, 15, 12, 0, 0)
+                    .map(|jns| self.offset_secs_at(jns))
+                    .unwrap_or(0);
+                self.offset_secs_at(ns) - jan.min(self.offset_secs_at(ns))
+            }
+            _ => 0,
+        }
+    }
 }
 
 fn parts(dt: NaiveDateTime) -> (i64, i64, i64, i64, i64, i64) {
