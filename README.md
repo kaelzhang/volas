@@ -1021,8 +1021,10 @@ volas.DataFrame({'a': [10, 20, 30]})['a'].shift(1).to_list()   # [<NA>, 10, 20]
   three-valued logic (`NA & False = False`, `NA | True = True`); `cumsum` / `abs`
   / `round` / `clip` / indexing carry it through; `isna` / `notna` / `dropna` /
   `fillna` / `ffill` / `bfill` work on every dtype.
-- **Comparisons** (`>`, `==`, …) treat a missing value as `False` (IEEE / numpy
-  semantics), so a boolean mask is always pure `bool` — clean for `df[mask]`.
+- **Comparisons** treat a missing value IEEE / numpy style: `==`, `<`, `<=`,
+  `>`, `>=` involving NA compare `False`, while `!=` compares `True` — so a
+  boolean mask is always pure `bool`, clean for `df[mask]`. Note the `!=`
+  exception: `s != value` therefore *includes* missing rows.
 
 [PDEP-16]: https://github.com/pandas-dev/pandas/pull/58988
 

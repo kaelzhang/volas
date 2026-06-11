@@ -192,6 +192,23 @@ the README's [Known pandas divergences](README.md#known-pandas-divergences-the-v
 dtype too — where pandas would upcast an `int` column to `float` (or a `str`/`bool`
 column to `object`), volas keeps the dtype and marks the cell `volas.NA`.
 
+A frame-level `fillna(value)` resolves the typed fill **per column, atomically,
+and lazily**: a column with no holes is untouched (so the everyday `df.fillna(0)`
+skips a holeless `str` column on a mixed frame), but a column whose hole the fill
+cannot legally take raises a `TypeError` for the *whole frame* — nothing is
+partially written:
+
+```py
+>>> volas.DataFrame({'x': [1.0, None], 's': ['a', 'b']}).fillna(0)   # dense str: ok
+>>> volas.DataFrame({'x': [1.0, None], 's': ['a', None]}).fillna(0)
+TypeError: fill for a str column must be a string
+```
+
+volas has no `object` dtype to absorb a mismatched fill, so the error is the only
+honest outcome — silently filling the numeric columns while leaving the `str` hole
+as NA would defeat the very "no NA left after fillna" expectation the call states.
+Fill heterogeneous frames per column (`df['s'] = df['s'].fillna('')`).
+
 ### Comparisons return a non-nullable bool mask
 
 ```py
@@ -296,6 +313,13 @@ in ~256 ns increments — so any timestamp routed through `f64` is quantised and
 corrupted. volas keeps datetime a distinct logical type (so it is never summed,
 averaged, or compared through the float funnel), with `NaT` as its missing value and
 a per-frame timezone that governs display and matching while storage stays UTC.
+
+The timezone lives on the **DatetimeIndex only** — there is no column-level tz
+(pandas attaches one to every datetime column). A consequence: `reset_index()` on a
+tz-aware frame moves the labels into a plain datetime column, which has no tz slot,
+so the display zone is dropped (the column shows naive-UTC wall clocks). The absolute
+instants are lossless — `set_index` + `tz_convert` restores the original display —
+but the zone itself does not ride along through a reset/set round-trip.
 
 ### `append` aligns by name; the live fold demands ordered, present timestamps
 
