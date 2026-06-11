@@ -77,3 +77,26 @@ def test_int_overflow_is_lossy_float_obs():
     i64::MAX falls to float64 (lossy) since volas has no uint64; pandas uses
     uint64. C4 (no silent precision loss) would prefer an error. Pinned visible."""
     assert _col([2 ** 63]).dtype == "float64"
+
+
+# --- V_STR: string value boundaries (empty / whitespace / unicode / long) ----
+# str is sound here: every boundary constructs as `str`, and sort/unique/compare
+# /isna behave correctly. `.str` accessor is intentionally absent (string
+# manipulation is out-of-scope, like rolling/apply). Pinned against regression.
+@pytest.mark.parametrize("val", ["", "  ", "日本語", "émoji🎉", "x" * 1000, "123"])
+def test_str_boundary_construct(val):
+    assert _col([val]).dtype == "str"
+
+
+def test_str_boundary_semantics():
+    s = _col(["b", "a", "", "b", "日本"])
+    assert s.sort_values().to_list() == ["", "a", "b", "b", "日本"]  # empty first, unicode ordered
+    assert sorted(s.unique().to_list()) == ["", "a", "b", "日本"]
+    assert _col(["", "a"]).isna().to_list() == [False, False]      # empty string is NOT NA
+    assert (_col(["a", "b"]) == "a").to_list() == [True, False]
+
+
+def test_str_accessor_out_of_scope():
+    """`.str` (string-manipulation accessor) is deliberately not implemented —
+    string ops are out-of-scope for a typed numeric/quant surface."""
+    assert not hasattr(_col(["a"]), "str")
