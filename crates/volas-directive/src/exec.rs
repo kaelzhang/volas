@@ -229,8 +229,12 @@ fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
 /// 6 KAMA, 7 MAMA, 8 T3 (with vfactor 0.7, as TA-Lib's MA dispatch fixes it). MAMA
 /// ignores `period` and returns its primary (`mama`) line with the default
 /// 0.5/0.05 limits, exactly as `TA_MA`. Shared by `ma`, `apo`, `ppo`, and `mavp`.
-fn ma_typed(data: &[f64], period: usize, matype: usize) -> Result<Vec<f64>> {
-    Ok(match matype {
+///
+/// Infallible: every caller's matype is either a literal or a spec-validated
+/// argument (`ArgBound::IntRange(0, 8)` at the exec boundary), so a value past
+/// 8 cannot reach here.
+fn ma_typed(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
+    match matype {
         0 => ind::ma(data, period),
         1 => ind::ema(data, period),
         2 => ind::wma(data, period),
@@ -240,8 +244,8 @@ fn ma_typed(data: &[f64], period: usize, matype: usize) -> Result<Vec<f64>> {
         6 => ind::kama(data, period),
         7 => ind::mama(data, 0.5, 0.05).0,
         8 => ind::t3(data, period, 0.7),
-        other => return Err(VolasError::Value(format!("unknown ma type {other}"))),
-    })
+        other => unreachable!("matype {other} is rejected by the spec bound"), // LCOV_EXCL_LINE
+    }
 }
 
 // --- command dispatch -------------------------------------------------------
@@ -493,10 +497,19 @@ mod tests {
             assert_eq!(col.len(), n, "directive {d:?} returned wrong length");
         }
         // The kernels' own `period == 0` defense stays (a direct Rust caller can
-        // still pass 0); the underflow-prone kernels are exercised directly.
+        // still pass 0); the kernels whose zero-guard sits on its own line —
+        // unreachable from the validated directive boundary — are exercised
+        // directly: the underflow-prone tools, the ADX/ADXR pair, and the
+        // EMA-cascade warm-up (via DEMA / TEMA / T3).
         assert!(ind::change(&[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
         assert!(ind::repeat(&[true, true], 0).iter().all(|&b| !b));
         assert!(ind::increase(&[1.0, 2.0], 0, 1).iter().any(|&b| b)); // repeat 0 -> period 1, no underflow
+        let (h, l, c) = (vec![2.0; 5], vec![1.0; 5], vec![1.5; 5]);
+        assert!(ind::adx(&h, &l, &c, 0).iter().all(|x| x.is_nan()));
+        assert!(ind::adxr(&h, &l, &c, 0).iter().all(|x| x.is_nan()));
+        assert!(ind::dema(&c, 0).iter().all(|x| x.is_nan()));
+        assert!(ind::tema(&c, 0).iter().all(|x| x.is_nan()));
+        assert!(ind::t3(&c, 0, 0.7).iter().all(|x| x.is_nan()));
     }
 
     /// Every command family rejects an out-of-domain argument at the exec
@@ -602,10 +615,9 @@ mod tests {
         // (series_f64_required's None and empty-Name arms).
         assert!(execute(&df, &parse("correl:30").unwrap()).is_err());
         assert!(execute(&df, &parse("correl:30@close,").unwrap()).is_err());
-        // a matype past 8 is rejected at the exec boundary (IntRange bound)...
+        // a matype past 8 is rejected at the exec boundary (IntRange bound);
+        // ma_typed itself is infallible — every caller's matype is validated.
         assert!(execute(&df, &parse("ma:5,9").unwrap()).is_err());
-        // ...and ma_typed keeps its own defensive arm for direct Rust callers.
-        assert!(ma_typed(&[1.0, 2.0, 3.0], 2, 9).is_err());
     }
 
     #[test]
