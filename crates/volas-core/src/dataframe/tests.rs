@@ -106,26 +106,29 @@
     fn row_major_i64_export_is_exact() {
         // The integer export takes each column's raw value (no f64 round-trip): a
         // datetime keeps exact epoch-ns with NaT = i64::MIN, a large i64 survives
-        // past 2^53, a float truncates toward zero, a str (rejected by the caller
-        // before this) contributes its 0 placeholder.
+        // past 2^53, i32 / bool widen, a float truncates toward zero, and a str
+        // (rejected by the caller before this) contributes its 0 placeholder.
         let big = (1i64 << 60) + 1;
         let df = DataFrame::new(
-            vec!["t".into(), "n".into(), "f".into(), "s".into()],
+            vec!["t".into(), "n".into(), "i32".into(), "b".into(), "f".into(), "f32".into(), "s".into()],
             vec![
                 Column::datetime(vec![123, i64::MIN]),
                 Column::i64(vec![big, -7]),
+                Column::i32(vec![5, -6]),
+                Column::bool(vec![true, false]),
                 Column::f64(vec![2.9, -2.9]),
+                Column::f32(vec![1.9, -1.9]),
                 Column::str(vec!["a".into(), "b".into()]),
             ],
             None,
         )
         .unwrap();
         let (data, h, w) = df.to_row_major_i64();
-        assert_eq!((h, w), (2, 4));
-        // row 0: datetime 123 (exact), i64 2^60+1 (exact), f64 2.9->2, str->0
-        assert_eq!(&data[0..4], &[123, big, 2, 0]);
-        // row 1: NaT stays i64::MIN, -7, -2.9->-2, str->0
-        assert_eq!(&data[4..8], &[i64::MIN, -7, -2, 0]);
+        assert_eq!((h, w), (2, 7));
+        // row 0: datetime 123 (exact), i64 2^60+1 (exact), i32 5, bool->1, f64 2.9->2, f32 1.9->1, str->0
+        assert_eq!(&data[0..7], &[123, big, 5, 1, 2, 1, 0]);
+        // row 1: NaT stays i64::MIN, -7, i32 -6, bool->0, -2.9->-2, -1.9->-1, str->0
+        assert_eq!(&data[7..14], &[i64::MIN, -7, -6, 0, -2, -1, 0]);
     }
 
     #[test]

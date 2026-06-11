@@ -527,27 +527,6 @@ impl PyDataFrame {
         self.object_array(py)
     }
 
-    /// A lossless 2-D `object` NumPy array: each cell its own typed Python value
-    /// (`volas.Timestamp` / `volas.NA` / str / number) via `scalar_to_py`. Backs
-    /// the default mixed-frame export and `to_numpy(dtype="object")`.
-    fn object_array<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let cols = self.inner.columns();
-        let (h, w) = (self.inner.height(), self.inner.width());
-        let rows = PyList::empty(py);
-        for i in 0..h {
-            let row = PyList::empty(py);
-            for col in cols {
-                row.append(scalar_to_py(py, col, i))?;
-            }
-            rows.append(row)?;
-        }
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "object")?;
-        let arr = py.import("numpy")?.call_method("array", (rows,), Some(&kwargs))?;
-        // An empty or single-column frame can collapse to the wrong ndim; pin (h, w).
-        Ok(arr.call_method1("reshape", ((h, w),))?)
-    }
-
     /// Value equality (same columns + index + values, `NaN == NaN`).
     pub(crate) fn equals(&self, other: &PyDataFrame) -> bool {
         self.inner.equals(&other.inner)
@@ -756,5 +735,30 @@ impl PyDataFrame {
     pub(crate) fn _repr_html_(&self) -> PyResult<String> {
         ensure_fresh(&self.inner)?;
         Ok(render_frame_html(&self.inner))
+    }
+}
+
+// Internal helpers (a plain impl, NOT `#[pymethods]`, so they are not exposed to
+// Python — they back the methods above).
+impl PyDataFrame {
+    /// A lossless 2-D `object` NumPy array: each cell its own typed Python value
+    /// (`volas.Timestamp` / `volas.NA` / str / number) via `scalar_to_py`. Backs
+    /// the default mixed-frame export and `to_numpy(dtype="object")`.
+    fn object_array<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let cols = self.inner.columns();
+        let (h, w) = (self.inner.height(), self.inner.width());
+        let rows = PyList::empty(py);
+        for i in 0..h {
+            let row = PyList::empty(py);
+            for col in cols {
+                row.append(scalar_to_py(py, col, i))?;
+            }
+            rows.append(row)?;
+        }
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "object")?;
+        let arr = py.import("numpy")?.call_method("array", (rows,), Some(&kwargs))?;
+        // An empty or single-column frame can collapse to the wrong ndim; pin (h, w).
+        Ok(arr.call_method1("reshape", ((h, w),))?)
     }
 }
