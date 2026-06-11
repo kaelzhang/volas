@@ -50,6 +50,18 @@ pub(crate) fn cell_to_csv(
     }
 }
 
+/// RFC-4180-escape a CSV field (F38): a field containing the separator, a
+/// double-quote, or a line break is wrapped in double quotes with inner quotes
+/// doubled — otherwise volas's own read_csv (or any CSV reader) cannot parse
+/// the file back (silent structural corruption).
+pub(crate) fn csv_escape(field: String, sep: &str) -> String {
+    if field.contains(sep) || field.contains('"') || field.contains('\n') || field.contains('\r') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field
+    }
+}
+
 /// Format the `i`-th index label as a CSV field.
 pub(crate) fn index_label_csv(index: &Index, i: usize) -> String {
     match index.kind() {

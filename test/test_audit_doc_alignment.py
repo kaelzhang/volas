@@ -117,7 +117,8 @@ def test_doc_example_runs(label, block):
 
 # --- 4. remove-candidates: doc must not outlive the API --------------------
 def test_remove_candidates_doc_state():
-    """§6.6 remove-candidates: pin the current doc state so the cleanup is
-    visible when removal lands (a lingering mention then = dangling reference)."""
+    """§6.6 removals LANDED (unify / tolist deleted): the docs must not retain
+    dangling references to the removed APIs."""
     text = _doc_text()
-    assert "unify" in text, "unify doc state changed — re-check §6.6 removal cleanup"
+    assert "tf.unify" not in text and ".unify(" not in text, "dangling unify doc reference"
+    assert ".tolist(" not in text, "dangling tolist doc reference"

@@ -50,8 +50,12 @@ def test_time_frame_str():
     assert f'{TimeFrame.m5}' == '5m'
 
 
-def test_time_frame_unify_second():
-    assert TimeFrame.s1.unify('2020-01-02 03:04:05') == 20200102030405
+def test_time_frame_second_buckets():
+    # unify is gone from the public surface (§6.6; the key contract lives in the
+    # Rust unit tests). Observable contract: distinct seconds = distinct buckets.
+    df = DataFrame({'close': [1.0, 2.0], 't': ['2020-01-02 03:04:05', '2020-01-02 03:04:06']})
+    df['t'] = to_datetime(df['t'])
+    assert df.set_index('t').cumulate('1s').shape[0] == 2
 
 
 def test_time_frame_invalid_label_raises():

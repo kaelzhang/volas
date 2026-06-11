@@ -72,26 +72,32 @@ def test_mixed_int_and_float_upcasts(tmp_path):
     np.testing.assert_array_equal(np.asarray(df['A']), [1.0, 2.5, 3.0])
 
 
-def test_blank_upcasts_int_to_float_nan(tmp_path):
+def test_blank_int_keeps_int_with_na(tmp_path):
+    # F35: an integral column with a blank cell keeps int64 + volas.NA (native-NA
+    # model, like the constructor) — NOT the legacy demote-to-float64 (pandas
+    # numpy-backed does that; volas's own model is the oracle here).
     path = write_csv(tmp_path, "A,B\n1,1\n,2\n3,3\n")
     df = volas.read_csv(path)
-    pf = pd.read_csv(path)
-    assert df['A'].dtype == 'float64'
+    assert df['A'].dtype == 'int64'
+    assert df['A'].isna().to_list() == [False, True, False]
     assert df['B'].dtype == 'int64'
+    # the numpy export of the NA-bearing int demotes to float+NaN (boundary),
+    # matching what pandas reads directly.
+    pf = pd.read_csv(path)
     np.testing.assert_allclose(
         np.asarray(df['A']), pf['A'].to_numpy(float), equal_nan=True
     )
 
 
 @pytest.mark.parametrize('token', ['NA', 'null', 'N/A', 'NaN', 'None', 'nan'])
-def test_default_na_tokens_become_nan(tmp_path, token):
+def test_default_na_tokens_become_na(tmp_path, token):
+    # F35: the surrounding cells are integral, so the column stays int64 and the
+    # NA token becomes volas.NA (native-NA), not a float demotion.
     path = write_csv(tmp_path, f"A\n1\n{token}\n2\n")
     df = volas.read_csv(path)
-    pf = pd.read_csv(path)
-    assert df['A'].dtype == 'float64'
-    np.testing.assert_allclose(
-        np.asarray(df['A']), pf['A'].to_numpy(float), equal_nan=True
-    )
+    assert df['A'].dtype == 'int64'
+    assert df['A'].isna().to_list() == [False, True, False]
+    assert [x for x in df['A'].to_list() if x is not volas.NA] == [1, 2]
 
 
 def test_all_blank_column_is_float_nan(tmp_path):
@@ -193,13 +199,11 @@ def test_header_none_generates_positional_names(tmp_path):
 
 
 def test_custom_na_values(tmp_path):
+    # F35: the custom NA token in an integral column -> int64 + volas.NA.
     path = write_csv(tmp_path, "A\n1\nMISSING\n3\n")
     df = volas.read_csv(path, na_values='MISSING')
-    pf = pd.read_csv(path, na_values='MISSING')
-    assert df['A'].dtype == 'float64'
-    np.testing.assert_allclose(
-        np.asarray(df['A']), pf['A'].to_numpy(float), equal_nan=True
-    )
+    assert df['A'].dtype == 'int64'
+    assert df['A'].isna().to_list() == [False, True, False]
 
 
 def test_keep_default_na_false_keeps_token_as_string(tmp_path):

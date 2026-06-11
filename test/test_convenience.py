@@ -34,4 +34,4 @@ def test_dtypes():
 def test_to_list():
     df = make()
     assert df['a'].to_list() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-    assert df['a'].tolist() == df['a'].to_list()
+    assert not hasattr(df['a'], 'tolist')   # §6.6: the numpy alias was removed

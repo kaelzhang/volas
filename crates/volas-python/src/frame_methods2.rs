@@ -14,7 +14,8 @@ use volas_directive::{execute, parse};
 use volas_time::Cumulator;
 
 use crate::format::{
-    cell_to_csv, index_label_csv, render_frame, render_frame_html, Dimensions, DisplayOpts, NA_REPR,
+    cell_to_csv, csv_escape, index_label_csv, render_frame, render_frame_html, Dimensions,
+    DisplayOpts, NA_REPR,
 };
 use crate::timeframe::{build_agg_spec, resolve_time_frame};
 #[allow(unused_imports)]
@@ -316,7 +317,10 @@ impl PyDataFrame {
                 out.push_str(self.inner.index().name().unwrap_or(""));
                 out.push_str(sep);
             }
-            let hdr: Vec<&str> = positions.iter().map(|&j| names[j].as_str()).collect();
+            let hdr: Vec<String> = positions
+                .iter()
+                .map(|&j| csv_escape(names[j].clone(), sep))
+                .collect();
             out.push_str(&hdr.join(sep));
             out.push('\n');
         }
@@ -327,7 +331,7 @@ impl PyDataFrame {
             }
             let cells: Vec<String> = positions
                 .iter()
-                .map(|&j| cell_to_csv(&self.inner.columns()[j], i, na_rep, ff))
+                .map(|&j| csv_escape(cell_to_csv(&self.inner.columns()[j], i, na_rep, ff), sep))
                 .collect();
             out.push_str(&cells.join(sep));
             out.push('\n');

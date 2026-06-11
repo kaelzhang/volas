@@ -40,15 +40,26 @@ def from_pandas(pdf: Any) -> DataFrame:
         # datetime (naive or tz-aware) -> native UTC datetime64[ns]; no strftime round-trip.
         if pd.api.types.is_datetime64_any_dtype(s.dtype):
             return s.to_numpy(dtype='datetime64[ns]')
-        # A nullable masked int / boolean / string column becomes a list with None,
-        # so volas keeps the dtype with volas.NA — the faithful inverse of
+        # A nullable masked int / boolean / string column passes through the typed
+        # masked channel `(values, missing_mask, dtype)`, so volas keeps the
+        # DECLARED dtype + volas.NA even when the column is all-NA or empty (F9)
+        # and an Int32 stays int32 (F10) — the faithful inverse of
         # to_pandas(dtype_backend='numpy_nullable') and the pandas 3.0 str dtype.
         if pd.api.types.is_extension_array_dtype(s.dtype) and (
             pd.api.types.is_integer_dtype(s.dtype)
             or pd.api.types.is_bool_dtype(s.dtype)
             or pd.api.types.is_string_dtype(s.dtype)
         ):
-            return [None if pd.isna(v) else v for v in s.tolist()]
+            mask = s.isna().tolist()
+            if pd.api.types.is_integer_dtype(s.dtype):
+                volas_dtype = 'int32' if str(s.dtype) == 'Int32' else 'int64'
+                filler: Any = 0
+            elif pd.api.types.is_bool_dtype(s.dtype):
+                volas_dtype, filler = 'bool', False
+            else:
+                volas_dtype, filler = 'str', ''
+            values = [filler if m else v for v, m in zip(s.tolist(), mask)]
+            return (values, mask, volas_dtype)
         if s.dtype == object:
             return s.tolist()
         return s.to_numpy()

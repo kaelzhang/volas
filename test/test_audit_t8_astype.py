@@ -66,12 +66,10 @@ _PENDING = frozenset(
 )
 
 
-# F4 (findings-ledger): a *stringify* of an NA-bearing float/datetime column
-# materialises the in-band sentinel as a literal 'NaN'/'NaT' string instead of
-# carrying the NA into the target str validity bitmap (# C2 str=validity; # C4
-# forbids placeholder collapse). xfail(strict). (Note: float->INT with NA is
-# NOT a bug — it correctly raises ValueError, contract line 40 — handled below.)
-_F4_TO_STR = {("f64", "str"), ("f32", "str"), ("datetime", "str")}
+# F4 FIXED: stringify carries EVERY source's missing cells into the str target's
+# validity (incl the in-band float-NaN / datetime-NaT sentinels) — no more
+# literal 'NaN'/'NaT' placeholder collapse. (float->INT with NA correctly raises
+# ValueError, contract line 40 — handled below.)
 _FLOAT = ("f64", "f32")
 _INT = ("i64", "i32")
 
@@ -80,10 +78,7 @@ def _ids():
     for s in A.DTYPES:
         for d in A.DTYPES:
             for n in A.NA_STATES:
-                marks = []
-                if (s, d) in _F4_TO_STR and n in ("N1", "N2"):
-                    marks = [pytest.mark.xfail(reason="F4: stringify drops NA -> 'NaN'/'NaT'", strict=True)]
-                yield pytest.param(s, d, n, id=f"{s}->{d}/N={n}", marks=marks)
+                yield pytest.param(s, d, n, id=f"{s}->{d}/N={n}")
 
 
 @pytest.mark.parametrize("src,dst,n", list(_ids()))

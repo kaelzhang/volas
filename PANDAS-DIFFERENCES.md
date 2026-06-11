@@ -395,3 +395,25 @@ genuinely needs what volas leaves out:
 For everything on the numeric / trading hot path, volas's promise is the one pandas
 cannot make: **the dtype you see is the dtype you get, missing values are lossless,
 and anything lossy is an exception — never a silent wrong number.**
+
+## `pct_change` → the `change` directive
+
+volas has no `Series.pct_change()` / `DataFrame.pct_change()` method: rate-of-change
+is an *indicator*, and indicators live in the directive engine (one computation
+path). The equivalent of pandas `df['close'].pct_change()` is:
+
+```py
+df['change']          # (close - prev_close) / prev_close, first row NaN
+df.exec('change')     # same values as a raw ndarray
+```
+
+Mapping notes: `change` operates on the `close` column with a 1-bar period
+(`pct_change()`'s default `periods=1`); the warm-up row is missing in both. For
+a different period or column, see the directive syntax in `README.md`.
+
+## int `min` / `max` over an all-NA column
+
+A reduction with no surviving value returns `np.float64(nan)` (reductions return
+numpy scalars, and numpy int has no missing representation) — pandas's
+numpy-backed behaviour. pandas's *nullable* backend returns `pd.NA` instead;
+volas deliberately keeps the numpy-scalar boundary (C1).

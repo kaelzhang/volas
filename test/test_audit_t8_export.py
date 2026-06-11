@@ -92,18 +92,21 @@ def test_array_protocol_matches_to_numpy(d):
     assert np.asarray(s).tolist() == s.to_numpy().tolist()
 
 
-def test_to_numpy_na_representation_backlog():
-    """The NA-bearing export representation is un-ruled (SPEC §5).
-
-    pandas default for a nullable column is an object array carrying pd.NA, but
-    whether volas should yield object-with-NA, float-with-NaN, or a typed array
-    + mask is an owner decision — tracked in findings-ledger, not asserted here.
-    Until ruled, we only assert it does not *crash* (P7: never a panic).
-    """
-    for d in A.DTYPES:
-        for n in ("N1", "N2"):
-            arr = A.series(d, n).to_numpy()       # must not panic
-            assert isinstance(arr, np.ndarray) and arr.shape == (3,)
+def test_to_numpy_na_representation():
+    """The NA-bearing export representation, per the NA-model interop ruling:
+    float keeps float64+NaN; int demotes to float64+NaN (numpy int has no NA);
+    BOOL exports as an OBJECT array (True/nan/False — F17, float64 would destroy
+    the bool identity); str is object with None; datetime keeps NaT."""
+    import math
+    for n in ("N1", "N2"):
+        assert A.series("f64", n).to_numpy().dtype == np.float64
+        assert A.series("i64", n).to_numpy().dtype == np.float64    # NaN-demoted
+        b = A.series("bool", n).to_numpy()
+        assert b.dtype == object, "F17: bool+NA exports as object"
+        if n == "N1":
+            assert b[0] is True and math.isnan(b[1]) and b[2] is True
+        assert A.series("str", n).to_numpy().dtype == object
+        assert str(A.series("datetime", n).to_numpy().dtype).startswith("datetime64")
 
 
 # --- DataFrame.to_numpy: the F (frame-composition) axis, no NA -------------

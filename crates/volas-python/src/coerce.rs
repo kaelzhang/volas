@@ -47,7 +47,53 @@ pub(crate) fn datetime_unit_of(s: &str) -> Option<&'static str> {
     }
 }
 
+/// The interop-private masked construction channel: a 3-tuple
+/// `(values, missing_mask, dtype)` builds a TYPED column with a validity bitmap
+/// in one step — `from_pandas`'s faithful inverse of `to_pandas`'s
+/// `IntegerArray(values, mask)` export (F9/F10: a valueless or Int32 nullable
+/// column keeps its declared dtype instead of decaying to float64/int64).
+fn masked_typed_column(t: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Option<Column>> {
+    if t.len() != 3 {
+        return Ok(None);
+    }
+    let Ok(dtype) = t.get_item(2)?.extract::<String>() else {
+        return Ok(None);
+    };
+    let Ok(mask) = t.get_item(1)?.extract::<Vec<bool>>() else {
+        return Ok(None);
+    };
+    let dt = parse_dtype(&dtype)?;
+    let vals = t.get_item(0)?;
+    // mask = True means missing (pandas .isna()).
+    let validity = Validity::from_valid_iter(mask.len(), mask.iter().map(|m| !m));
+    Ok(Some(match dt {
+        DType::I64 => Column::i64_with(vals.extract::<Vec<i64>>()?, validity),
+        DType::I32 => Column::i32_with(vals.extract::<Vec<i32>>()?, validity),
+        DType::Bool => Column::bool_with(vals.extract::<Vec<bool>>()?, validity),
+        DType::Utf8 => Column::str_with(vals.extract::<Vec<String>>()?, validity),
+        DType::F64 => {
+            let mut v = vals.extract::<Vec<f64>>()?;
+            for (i, m) in mask.iter().enumerate() {
+                if *m {
+                    v[i] = f64::NAN;
+                }
+            }
+            Column::f64(v)
+        }
+        _ => {
+            return Err(PyTypeError::new_err(
+                "masked construction supports int64/int32/bool/str/float64",
+            ))
+        }
+    }))
+}
+
 pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
+    if let Ok(t) = v.downcast::<pyo3::types::PyTuple>() {
+        if let Some(c) = masked_typed_column(t)? {
+            return Ok(c);
+        }
+    }
     // A volas Series is an internal column, not a numpy boundary value: clone its
     // Column directly (preserving dtype + volas.NA). Without this it would fall
     // through to the array path below, invoking Series.__array__ and re-importing

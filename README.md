@@ -210,7 +210,13 @@ The difference between `df[directive]` and `df.exec(directive)` is that
 
 ### df.get_column(key: str) -> Series
 
-Directly gets the column value by `key`, returning a `Series`.
+Directly gets the column value by `key`, returning a `Series` — and **never
+computes**: unlike `df[key]`, which parses an unknown key as an indicator
+directive and executes it, `get_column` only fetches an existing column and
+raises `KeyError` otherwise. Use it whenever the column name comes from
+external data (CSV headers, user input, configuration), so a name that happens
+to look like a directive (e.g. `"ma:5"`) can never silently trigger a
+computation.
 
 If the given `key` is an alias name, it returns the value of the corresponding
 original column. If the column is not found, a `KeyError` is raised.
@@ -763,9 +769,6 @@ and step in local hours; `3d` counts continuous 3-local-civil-day buckets keyed
 from the Unix epoch day in that zone (not reset at month boundaries); `1w` is
 Monday-start in local civil time. So a daily/weekly bar follows the local trading
 day, and a named zone makes the hour buckets DST-aware.
-
-`tf.unify(ts)` snaps a timestamp to the start of its bar (used internally by
-cumulation).
 
 ## Syntax of `directive`
 

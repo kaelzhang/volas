@@ -67,6 +67,29 @@ pub fn read_csv(path: &str, opts: &ReadCsvOptions) -> Result<DataFrame> {
     } else {
         Vec::new()
     };
+    // F46: duplicate header names are disambiguated pandas-style (a, a.1, a.2) —
+    // erroring would leave the user no way to load the file; duplicate columns
+    // would breach the unique-name contract.
+    {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut used: HashSet<String> = HashSet::new();
+        for h in headers.iter_mut() {
+            if used.contains(h.as_str()) {
+                let base = h.clone();
+                let mut k = *counts.get(&base).unwrap_or(&0);
+                loop {
+                    k += 1;
+                    let cand = format!("{base}.{k}");
+                    if !used.contains(&cand) {
+                        *h = cand;
+                        break;
+                    }
+                }
+                counts.insert(base, k);
+            }
+            used.insert(h.clone());
+        }
+    }
     let mut ncol = headers.len();
     let mut raw: Vec<Vec<String>> = if ncol > 0 {
         vec![Vec::new(); ncol]
@@ -117,6 +140,23 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
         .all(|t| !is_na(t) && t.parse::<i64>().is_ok())
     {
         return Column::i64(trimmed.iter().map(|t| t.parse().unwrap()).collect());
+    }
+    // i64 + NA: every present cell integral, with >= 1 missing -> a native
+    // int64 column with a validity bitmap (volas's NA model, F35) — the legacy
+    // demote-to-float path would diverge from the constructor's own inference.
+    if trimmed
+        .iter()
+        .all(|t| is_na(t) || t.parse::<i64>().is_ok())
+        && trimmed.iter().any(|t| !is_na(t))
+    {
+        let validity = Validity::from_valid_iter(trimmed.len(), trimmed.iter().map(|t| !is_na(t)));
+        return Column::i64_with(
+            trimmed
+                .iter()
+                .map(|t| if is_na(t) { 0 } else { t.parse().unwrap() })
+                .collect(),
+            validity,
+        );
     }
     // f64: every cell is either missing (-> NaN) or float-parseable.
     if trimmed.iter().all(|t| is_na(t) || t.parse::<f64>().is_ok()) {

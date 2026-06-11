@@ -35,10 +35,14 @@ def test_cumulate_clean_index_still_works():
     assert out.shape == (1, 5) and out['close'].to_list() == [3.0]
 
 
-def test_nat_astype_str_is_nat_not_garbage_date():
-    # P1-03 (civil_parts/format): NaT must stringify as 'NaT', not 1677-09-21
+def test_nat_astype_str_stays_missing():
+    # P1-03 guarded the garbage-date leak (1677-09-21); F4 goes further: the
+    # missing slot stays MISSING in the str target (validity carries), never a
+    # literal 'NaT' string value the column would report as present.
     s = DataFrame({'d': np.array(['2021-03-15', 'NaT'], dtype='datetime64[ns]')})['d']
-    assert s.astype('str').to_list() == ['2021-03-15 00:00:00', 'NaT']
+    out = s.astype('str')
+    assert out.to_list()[0] == '2021-03-15 00:00:00'
+    assert out.isna().to_list() == [False, True]
 
 
 # --- tf-aware append guards: the live fold is symmetric with cumulate ---------

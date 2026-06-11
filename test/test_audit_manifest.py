@@ -55,7 +55,11 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "alias": "T0", "copy": "T0", "equals": "T0", "rename": "T0",
         "columns": "T0", "shape": "T0", "index": "T0", "dtypes": "T0",
         "head": "T6", "tail": "T6",
-        "get_column": "remove",  # §6.6: stock-pandas internal raw-column accessor
+        # decision 1 (2026-06-11) REVERSED the §6.6 removal: get_column is the
+        # compute-free safe accessor — df[name] EXECUTES a directive when the
+        # name is not an existing column (an injection surface for external
+        # names); get_column only fetches, KeyError otherwise. Kept + documented.
+        "get_column": "T7",
     },
     "Series": {
         **_ops(_COMPARE, _ARITH, _LOGIC, subject="T3"),
@@ -79,7 +83,6 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "to_numpy": "T8", "to_list": "T8", "astype": "T8",
         "name": "T0", "dtype": "T0", "index": "T0", "shape": "T0", "equals": "T0",
         "tz": "T13",
-        "tolist": "remove",  # §6.6: redundant numpy alias of to_list
     },
     "Row": {
         "__new__": "ignore:no public Row constructor",
@@ -99,7 +102,6 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "__repr__": "T0", "__str__": "T0",
         **{p: "T10" for p in ("s1", "m1", "m3", "m5", "m15", "m30", "H1", "H2", "H4",
                               "H6", "H8", "H12", "D1", "D3", "W1", "M1", "Y1")},
-        "unify": "remove",  # §6.6: leaked internal period-key primitive (stock-pandas)
     },
     "NAType": {
         "__new__": "ignore:singleton", "__bool__": "T0", "__repr__": "T0",
@@ -167,8 +169,12 @@ def test_no_unclassified_class_on_the_surface():
         assert cls_name in CLASSIFICATION, f"public class {cls_name} not in manifest"
 
 
-def test_removal_candidates_are_flagged_not_audited():
-    """§6.6: the three remove-candidates are classified `remove`, never a subject."""
-    assert CLASSIFICATION["TimeFrame"]["unify"] == "remove"
-    assert CLASSIFICATION["Series"]["tolist"] == "remove"
-    assert CLASSIFICATION["DataFrame"]["get_column"] == "remove"
+def test_removals_landed_and_reversal_kept():
+    """§6.6 dispositions, final state: unify / tolist are REMOVED from the
+    runtime surface; get_column was REVERSED to keep (decision 1: the
+    compute-free safe accessor vs df[name]'s directive execution)."""
+    import volas
+    assert not hasattr(volas.TimeFrame, "unify")
+    assert not hasattr(volas.DataFrame({"x": [1]})["x"], "tolist")
+    assert hasattr(volas.DataFrame({"x": [1]}), "get_column")
+    assert CLASSIFICATION["DataFrame"]["get_column"] == "T7"

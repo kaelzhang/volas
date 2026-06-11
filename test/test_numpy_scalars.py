@@ -53,11 +53,11 @@ def test_bool_scalar_is_numpy_bool():
 
 # --- bulk materialization stays native Python -------------------------------
 
-def test_tolist_stays_python_scalars():
+def test_to_list_stays_python_scalars():
     df = _df()
     assert type(df["a"].to_list()[0]) is float        # not np.float64
     assert type(df["b"].to_list()[0]) is int           # not np.int64
-    assert type(df["a"].tolist()[0]) is float
+    assert type(df["a"].to_list()[0]) is float
 
 
 def test_row_to_dict_stays_python():

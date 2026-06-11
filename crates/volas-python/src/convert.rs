@@ -62,7 +62,25 @@ pub(crate) fn column_to_pandas<'py>(
         Column::Bool(v, val) => {
             arrays.call_method1("BooleanArray", (v.to_vec().into_pyarray(py), mask(val, v.len())))
         }
-        // float (NaN in-band) / str / datetime have no nullable masked form here.
+        // F9b: a str column exports as the pandas string dtype under the
+        // nullable backend, so its declared dtype survives a round-trip even
+        // when all-NA / empty (an object array of None carries no dtype).
+        Column::Str(v, val) => {
+            let items: Vec<Bound<'_, PyAny>> = (0..v.len())
+                .map(|i| {
+                    if val.is_valid(i) {
+                        v[i].clone().into_pyobject(py).unwrap().into_any()
+                    } else {
+                        py.None().into_bound(py)
+                    }
+                })
+                .collect();
+            let list = PyList::new(py, items)?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "str")?;
+            pd.call_method("array", (list,), Some(&kwargs))
+        }
+        // float (NaN in-band) / datetime have no nullable masked form here.
         _ => Ok(column_to_numpy(py, col)),
     }
 }
@@ -77,7 +95,30 @@ pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, 
         Column::Bool(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
         Column::I64(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
         Column::I32(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
-        Column::Bool(..) | Column::I64(..) | Column::I32(..) => {
+        // F17 (NA-model interop ruling): a bool column with missing exports as an
+        // OBJECT array (True / nan / False) — float64 would destroy the bool
+        // identity (1.0/0.0). Matches pandas nullable boolean .to_numpy().
+        Column::Bool(v, val) => {
+            let items: Vec<Bound<'_, PyAny>> = (0..v.len())
+                .map(|i| {
+                    if val.is_valid(i) {
+                        pyo3::types::PyBool::new(py, v[i]).to_owned().into_any()
+                    } else {
+                        f64::NAN.into_pyobject(py).unwrap().into_any()
+                    }
+                })
+                .collect();
+            let list = PyList::new(py, items).expect("build bool list");
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "object").expect("set dtype=object");
+            py.import("numpy")
+                .expect("import numpy")
+                .call_method("array", (list,), Some(&kwargs))
+                .expect("np.array(object)")
+        }
+        // numpy int cannot hold a missing value -> float64 with NaN (pandas
+        // Int64.to_numpy() semantics); a dense column keeps its native dtype.
+        Column::I64(..) | Column::I32(..) => {
             col.to_f64_vec().into_pyarray(py).into_any()
         }
         // String columns become NumPy object arrays (pandas `object` dtype).

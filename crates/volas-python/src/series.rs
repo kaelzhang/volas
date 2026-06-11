@@ -354,11 +354,6 @@ impl PySeries {
         PyList::new(py, items)
     }
 
-    /// Alias of [`to_list`](Self::to_list) (the numpy / pandas spelling).
-    pub(crate) fn tolist<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        self.to_list(py)
-    }
-
     /// Shift the values by ``n`` rows, padding vacated cells with NaN.
     ///
     /// Args:

@@ -191,11 +191,19 @@ impl Column {
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::i32),
-            // int/bool sources carry their validity into the rendered strings.
-            DType::Utf8 => Ok(Column::str_with(
-                self.to_string_vec(),
-                self.validity().cloned().unwrap_or_default(),
-            )),
+            // F4: EVERY source's missing cells stay missing in the str target —
+            // including the in-band sentinels (float NaN, datetime NaT), which the
+            // raw bitmap doesn't cover. Without this, stringify materialises the
+            // sentinel as a literal 'NaN'/'NaT' value (isna -> False), a C2/C4
+            // placeholder collapse. The unified is_valid covers all three NA forms.
+            DType::Utf8 => {
+                let n = self.len();
+                let validity = crate::column::Validity::from_valid_iter(
+                    n,
+                    (0..n).map(|i| self.is_valid(i)),
+                );
+                Ok(Column::str_with(self.to_string_vec(), validity))
+            }
             DType::Datetime => self.to_datetime(),
         }
     }

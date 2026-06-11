@@ -172,24 +172,12 @@ def test_e7_default_backend_is_legacy_lossy():
     assert df.to_pandas(dtype_backend="numpy_nullable")["x"].dtype == "Int64"  # faithful
 
 
-# Both round-trip findings are on the *import* (from_pandas) side — to_pandas
-# emits the faithful nullable dtype; from_pandas drops fidelity:
-#   F10 — from_pandas(Int32) widens to int64 (width not preserved): all i32.
-#   F9  — from_pandas of a *valueless* nullable column (all-NA/empty Int64 /
-#         boolean / object) defaults to float64: i64/bool/str at N2/N3.
-def _e7_params():
-    for d in A.DTYPES:
-        for n in A.NA_STATES:
-            reason = None
-            if d == "i32":
-                reason = "F10: from_pandas widens Int32->int64"
-            elif d in ("i64", "bool", "str") and n in ("N2", "N3"):
-                reason = "F9: from_pandas reads valueless nullable column as float64"
-            marks = [pytest.mark.xfail(reason=reason, strict=True)] if reason else []
-            yield pytest.param(d, n, id=f"{d}-{n}", marks=marks)
-
-
-@pytest.mark.parametrize("d,n", list(_e7_params()))
+# F9/F10 FIXED: from_pandas imports a nullable column through the typed masked
+# channel, so the DECLARED dtype survives (Int32 stays int32; an all-NA or empty
+# nullable column keeps its dtype instead of decaying to float64). The nullable
+# round-trip is now lossless across the full D x N matrix.
+@pytest.mark.parametrize("n", A.NA_STATES)
+@pytest.mark.parametrize("d", A.DTYPES)
 def test_e7_pandas_roundtrip(d, n):
     df = A.frame(d, n)
     back = volas.from_pandas(df.to_pandas(dtype_backend="numpy_nullable"))
