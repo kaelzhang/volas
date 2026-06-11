@@ -67,6 +67,21 @@ impl Cumulator {
             ));
         }
 
+        // The consecutive-run grouping below (and the open/close aggregation,
+        // which is position-ordered) assumes a non-decreasing timeline. An
+        // out-of-order input would silently split a period into duplicate coarse
+        // rows and pick open/close by row position instead of time — reject it,
+        // symmetric with the live fold path's out-of-order-bar guard. Sorting is
+        // deliberately NOT done here: OHLCV open/close and the live cursor are
+        // position-sensitive, so reordering must be an explicit caller action.
+        if ts.windows(2).any(|w| w[1] < w[0]) {
+            return Err(VolasError::Value(
+                "cannot cumulate over a non-monotonic DatetimeIndex (bars out of \
+                 order); sort the input by time first"
+                    .into(),
+            ));
+        }
+
         let runs = group_runs(&ts, self.tf, tz);
         let last = runs.len() - 1;
 

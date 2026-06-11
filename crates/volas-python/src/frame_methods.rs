@@ -126,11 +126,31 @@ impl PyDataFrame {
         // finer bars into them. Requires a DatetimeIndex (build one with `set_index` first).
         if let Some(tf_obj) = time_frame {
             let frame = resolve_time_frame(tf_obj)?;
-            if !matches!(df.index().kind(), IndexKind::Datetime(..)) {
-                return Err(PyValueError::new_err(
-                    "time_frame requires a DatetimeIndex \
-                     (build one with to_datetime(df[col]) then df.set_index(col))",
-                ));
+            match df.index().kind() {
+                IndexKind::Datetime(v, _) => {
+                    // The rows are taken as final bars and the last row becomes the
+                    // forming-period cursor, so the live-fold invariants must hold
+                    // from the start: a present, non-decreasing timeline — symmetric
+                    // with the append-fold and batch-cumulate guards.
+                    if v.iter().any(|&t| t == i64::MIN) {
+                        return Err(PyValueError::new_err(
+                            "time_frame requires a DatetimeIndex without NaT; drop or \
+                             fill the missing index timestamps first",
+                        ));
+                    }
+                    if v.windows(2).any(|w| w[1] < w[0]) {
+                        return Err(PyValueError::new_err(
+                            "time_frame requires a monotonic (time-sorted) \
+                             DatetimeIndex; sort the bars by time first",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(PyValueError::new_err(
+                        "time_frame requires a DatetimeIndex \
+                         (build one with to_datetime(df[col]) then df.set_index(col))",
+                    ));
+                }
             }
             let spec = build_agg_spec(cumulators)?;
             return Ok(PyDataFrame {
