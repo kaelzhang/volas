@@ -16,6 +16,8 @@ Findings pinned here: F23–F31 (datetime-audit-plan §4).
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import pytest
 
@@ -147,3 +149,44 @@ def test_datetime_column_construct_census(label):
     # waiver-str: a list of date strings stays a str column in BOTH volas and
     # pandas (no auto-datetime inference on construction) — consistent, not a bug.
     assert volas.DataFrame({"t": [val]})["t"].dtype == "str"
+
+
+# --- Layer 2: to_datetime parser census (the primary ingestion entry) -------
+_TO_DT = {
+    "list[str-date]": (["2021-01-01", "2021-06-15"], "ok"),
+    "list[str-datetime]": (["2021-01-01 09:30:00"], "ok"),
+    "list[str-iso-T]": (["2021-01-01T09:30:00"], "ok"),
+    "list[str-with-NA]": (["2021-01-01", None], "ok"),
+    "list[int-ns]": ([1609459200000000000], "ok"),
+    "list[py-datetime]": ([datetime(2021, 1, 1)], "F20"),
+    "list[str-mixed-fmt]": (["2021-01-01", "2021/06/15"], "lenient"),
+}
+
+
+@pytest.mark.parametrize("label", list(_TO_DT), ids=list(_TO_DT))
+def test_to_datetime_census(label):
+    xs, disp = _TO_DT[label]
+    if disp == "F20":
+        pytest.xfail("F20: to_datetime rejects a list of python datetime objects")
+    out = volas.to_datetime(volas.DataFrame({"t": xs})["t"])
+    # ns precision (contract D1); pandas defaults to us — volas's ns is fine.
+    assert str(out.dtype).startswith("datetime64")
+    # `lenient`: volas parses mixed date formats that pandas 2.0+ rejects with a
+    # ValueError. A documented divergence (lenient ingestion), pinned so a future
+    # strictness change is a conscious diff — NOT silently leniency-as-bug.
+
+
+# --- Layer 2: scalar-operand I-rep census (F15: `Timestamp == <scalar>`) -----
+_OPERANDS = {
+    "volas-Timestamp": "ok", "np-datetime64": "ok", "str-datetime": "ok",
+    "pd-Timestamp": "F15", "py-datetime": "F15",
+}
+
+
+@pytest.mark.parametrize("label", list(_OPERANDS), ids=list(_OPERANDS))
+def test_timestamp_compare_operand_census(label):
+    rhs = dict(I.datetime_scalars())[label]
+    if _OPERANDS[label] == "F15":
+        pytest.xfail("F15: comparing Timestamp to a pandas/stdlib datetime scalar leaks a label KeyError")
+    # volas / numpy / string operands compare correctly (same instant -> True).
+    assert bool(volas.Timestamp("2021-06-15 09:30:00") == rhs) is True
