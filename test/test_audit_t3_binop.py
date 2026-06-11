@@ -6,8 +6,10 @@ is the *unambiguous core* + the high-risk NA cells, not the full cartesian:
   * value — computed directly from the integer-valued N-basis (1/2/3), so it is
     exact without a float oracle (P6).
   * container/length — Series OP Series -> Series, length preserved (`# C1`).
-  * NA propagation — any NA operand -> NA result, position-wise (`# C2`); and
-    crucially a comparison against NA yields NA, *not* False (the classic bug).
+  * NA — *arithmetic* propagates (any NA operand -> NA, `# C2`), but *comparison*
+    follows IEEE NaN semantics (`# O6`): NA==x is False, NA!=x is True, every
+    ordering is False — a concrete bool, NOT a propagated NA. The two differ by
+    design (volas chose IEEE over pandas-nullable propagation).
   * dtype *family* (int/float/bool) is asserted; exact integer-width promotion
     (i32⊕i32 -> i32 vs i64) and bool-arithmetic dtype are un-ruled design
     questions -> backlog meta-test, not hand-guessed.
@@ -76,7 +78,7 @@ def test_arith_na_propagates(d, op):
     assert out.isna().to_list() == [False, True, False], "NA must propagate (# C2)"
 
 
-# --- comparison: bool result, correct truth, NA->NA (not False) ------------
+# --- comparison: bool result, correct truth, NA -> IEEE (not propagated) ----
 @pytest.mark.parametrize("op", list(COMPARE))
 @pytest.mark.parametrize("d", ("f64", "i64"))
 def test_comparison_value(d, op):
