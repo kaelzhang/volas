@@ -182,3 +182,31 @@ def test_e7_pandas_roundtrip(d, n):
     df = A.frame(d, n)
     back = volas.from_pandas(df.to_pandas(dtype_backend="numpy_nullable"))
     _equiv(back["x"], df["x"], f"E7/{d}/{n}")
+
+
+# --- Layer-2 deep transitions (review CG-8): cached directive lifecycle ------
+def test_cached_directive_detracks_on_rename():
+    """rename rebuilds the frame and DE-TRACKS cached directive columns: they
+    become plain data (still readable), an append NaN-pads them like any plain
+    column (visible missing, not silent wrong values), and fulfill leaves them
+    alone — the coherent de-track semantics, pinned."""
+    cols = ["open", "high", "low", "close", "volume"]
+    df = volas.DataFrame({c: [float(i + 1) for i in range(6)] for c in cols})
+    cached = df["ma:2"].to_list()                      # materialise + cache
+    renamed = df.rename({"close": "px"})
+    got = renamed["ma:2"].to_list()                    # plain data survives
+    assert all((math.isnan(g) and math.isnan(c)) or g == c for g, c in zip(got, cached))
+    renamed.append(volas.DataFrame({(c if c != "close" else "px"): [9.0] for c in cols}))
+    renamed.fulfill()
+    assert renamed["ma:2"].isna().to_list()[-1] is True   # NaN-padded, visibly
+
+
+def test_cumulators_typo_fails_loud():
+    """A cumulator key that names no column errors (was silently ignored — the
+    user believed an aggregation override was applied when it was not)."""
+    df = volas.DataFrame({"close": [1.0], "volume": [10.0]})
+    df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01 00:00:00"]})["t"])
+    df = df.set_index("t")
+    with pytest.raises(ValueError):
+        df.cumulate("5m", cumulators={"volumee": "sum"})    # misspelled
+    assert df.cumulate("5m", cumulators={"volume": "sum"}).shape[0] == 1

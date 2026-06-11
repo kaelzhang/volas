@@ -12,7 +12,7 @@ use volas_core::{
     IndexKind, Series, Tz,
 };
 
-use crate::timeframe::{build_agg_spec, resolve_time_frame};
+use crate::timeframe::{build_agg_spec_for, resolve_time_frame};
 #[allow(unused_imports)]
 use crate::*;
 
@@ -165,7 +165,7 @@ impl PyDataFrame {
                     ));
                 }
             }
-            let spec = build_agg_spec(cumulators)?;
+            let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
             return Ok(PyDataFrame {
                 inner: df,
                 tf: Some(TfState {

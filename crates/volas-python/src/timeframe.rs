@@ -1,7 +1,7 @@
 //! `volas.TimeFrame` + the time-frame / aggregator resolvers shared by the
 //! tf-aware DataFrame (`time_frame` constructor arg, `cumulate`).
 
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -154,11 +154,25 @@ pub(crate) fn resolve_time_frame(obj: &Bound<'_, PyAny>) -> PyResult<TimeFrame> 
 
 /// Build an aggregation spec from the OHLCV defaults plus optional overrides
 /// (`{'volume': 'sum', 'open': 'first', ...}`).
-pub(crate) fn build_agg_spec(cumulators: Option<&Bound<'_, PyDict>>) -> PyResult<AggSpec> {
+/// Build the aggregation spec, validating that every cumulator key
+/// names an existing column when the target frame's names are known — a
+/// misspelled key would otherwise be SILENTLY ignored, leaving the user
+/// convinced they overrode an aggregation they did not (fail-loud, C4).
+pub(crate) fn build_agg_spec_for(
+    cumulators: Option<&Bound<'_, PyDict>>,
+    names: Option<&[String]>,
+) -> PyResult<AggSpec> {
     let mut spec = AggSpec::ohlcv();
     if let Some(dict) = cumulators {
         for (k, v) in dict.iter() {
             let name: String = k.extract()?;
+            if let Some(cols) = names {
+                if !cols.iter().any(|c| c == &name) {
+                    return Err(PyValueError::new_err(format!(
+                        "cumulators: column {name:?} does not exist in the frame"
+                    )));
+                }
+            }
             let agg_name: String = v.extract().map_err(|_| {
                 PyTypeError::new_err("cumulator values must be aggregator names like 'sum'")
             })?;

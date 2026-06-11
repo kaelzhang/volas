@@ -17,7 +17,7 @@ use crate::format::{
     cell_to_csv, csv_escape, index_label_csv, render_frame, render_frame_html, Dimensions,
     DisplayOpts, NA_REPR,
 };
-use crate::timeframe::{build_agg_spec, resolve_time_frame};
+use crate::timeframe::{build_agg_spec_for, resolve_time_frame};
 #[allow(unused_imports)]
 use crate::*;
 
@@ -606,7 +606,7 @@ impl PyDataFrame {
                 )));
             }
         }
-        let spec = build_agg_spec(cumulators)?;
+        let spec = build_agg_spec_for(cumulators, Some(self.inner.names()))?;
         let mut cum = Cumulator::new(target, spec.clone());
         cum.append(&self.inner).map_err(pyerr)?;
         let frame = cum.frame().map_err(pyerr)?;
