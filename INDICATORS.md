@@ -1,6 +1,8 @@
 # Built-in Indicators
 
-This page is the complete directive reference for `volas`.
+This page is the complete directive reference for `volas` — **236** indicators
+(each main command, every multi-output sub-command line, and each candlestick
+pattern; counted by `scripts/count_indicators.py` from the Rust source).
 
 Volas supports indicators in two groups. The first group is native to Volas or
 inherits stock-pandas directive names; TA-Lib either has no equivalent or no

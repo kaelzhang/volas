@@ -113,6 +113,25 @@ pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
     Some(entry)
 }
 
+/// Every candlestick-pattern name (the `style.<pattern>` / `cdl.<pattern>`
+/// vocabulary), as an enumerable list — the single source the indicator-count
+/// script derives the pattern total from. A test keeps it in lock-step with
+/// `candle_pattern`, so a pattern can never be in one and not the other.
+pub const CANDLE_PATTERNS: &[&str] = &[
+    "doji", "marubozu", "closingmarubozu", "longline", "shortline", "highwave",
+    "spinningtop", "dragonflydoji", "gravestonedoji", "longleggeddoji", "rickshawman",
+    "belthold", "hammer", "hangingman", "invertedhammer", "shootingstar", "takuri",
+    "engulfing", "harami", "haramicross", "piercing", "darkcloudcover", "dojistar",
+    "homingpigeon", "matchinglow", "inneck", "onneck", "thrusting", "kicking",
+    "kickingbylength", "separatinglines", "counterattack", "morningstar", "eveningstar",
+    "3inside", "3outside", "3whitesoldiers", "3blackcrows", "morningdojistar",
+    "eveningdojistar", "abandonedbaby", "2crows", "upsidegap2crows", "advanceblock",
+    "stalledpattern", "identical3crows", "sticksandwich", "tristar", "unique3river",
+    "gapsidesidewhite", "tasukigap", "3starsinsouth", "3linestrike", "breakaway",
+    "ladderbottom", "concealbabyswall", "mathold", "risefall3methods", "xsidegap3methods",
+    "hikkake", "hikkakemod",
+];
+
 /// The range a candle-setting measures. The full set mirrors TA-Lib's settings table;
 /// a variant is only *constructed* once a pattern needing it lands, so allow the lint.
 #[derive(Clone, Copy)]
@@ -562,6 +581,21 @@ fn candle_output(n: usize, lookback: usize) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CANDLE_PATTERNS` must stay in lock-step with `candle_pattern`: every listed
+    /// name resolves (so the indicator count never lists a phantom pattern), and the
+    /// list is duplicate-free. The reverse (every `candle_pattern` arm is listed) is
+    /// guarded by the count being pinned in the test suite.
+    #[test]
+    fn candle_patterns_list_matches_registry() {
+        for name in CANDLE_PATTERNS {
+            assert!(candle_pattern(name).is_some(), "CANDLE_PATTERNS has a phantom {name:?}");
+        }
+        let mut sorted = CANDLE_PATTERNS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), CANDLE_PATTERNS.len(), "CANDLE_PATTERNS has duplicates");
+    }
 
     /// The candle-settings averagers have branches (Shadows range → ÷2, `avg_period == 0`
     /// → the bar's own range, and the short-series guards) that the 61 landed patterns

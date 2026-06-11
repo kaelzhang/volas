@@ -293,132 +293,30 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
     }
 }
 
+/// Every command name (the indicator vocabulary), as an enumerable list — the
+/// single source `is_command` checks against and `scripts/count_indicators.py`
+/// derives the documented indicator count from, so README / INDICATORS.md never
+/// drift from the actual command set.
+pub const COMMANDS: &[&str] = &[
+    "ma", "ema", "smma", "apo", "ppo", "macdext", "macdfix", "wma", "dema", "tema",
+    "trima", "t3", "kama", "mavp", "sar", "sarext", "accbands", "macd", "boll", "bbw",
+    "rsv", "kdj", "rsi", "bbi", "psy", "pvt", "nvi", "pvi", "dpo", "cmf",
+    "chop", "kst", "emv", "mass_index", "efi", "tsi", "crsi", "bias", "dma", "vortex",
+    "brar", "vr", "coppock", "relative_vigor", "dkx", "wvad", "cdp", "mike", "keltner",
+    "stoch_momentum", "ttm_squeeze", "pivot_points", "ichimoku", "wad", "asi", "supertrend",
+    "tr", "atr", "llv", "hhv", "donchian", "hv", "increase", "style", "repeat", "change",
+    "mom", "roc", "rocp", "rocr", "rocr100", "willr", "cmo", "cci", "trix", "imi", "mfi",
+    "ultosc", "stoch", "stochf", "stochrsi", "plus_dm", "minus_dm", "plus_di", "minus_di",
+    "dx", "adx", "adxr", "aroon", "aroonosc", "sum", "maxindex", "minindex", "minmax",
+    "minmaxindex", "natr", "bop", "midpoint", "midprice", "linearreg", "linearreg_slope",
+    "linearreg_intercept", "linearreg_angle", "tsf", "var", "stddev", "correl", "beta",
+    "obv", "ad", "adosc", "avgprice", "medprice", "typprice", "wclprice", "ht_dcperiod",
+    "ht_dcphase", "ht_phasor", "ht_sine", "ht_trendline", "ht_trendmode", "mama",
+];
+
 /// Whether `name` is a known command (regardless of sub-command).
 pub fn is_command(name: &str) -> bool {
-    matches!(
-        name,
-        "ma" | "ema"
-            | "smma"
-            | "apo"
-            | "ppo"
-            | "macdext"
-            | "macdfix"
-            | "wma"
-            | "dema"
-            | "tema"
-            | "trima"
-            | "t3"
-            | "kama"
-            | "mavp"
-            | "sar"
-            | "sarext"
-            | "accbands"
-            | "macd"
-            | "boll"
-            | "bbw"
-            | "rsv"
-            | "kdj"
-            | "rsi"
-            | "bbi"
-            | "psy"
-            | "pvt"
-            | "nvi"
-            | "pvi"
-            | "dpo"
-            | "cmf"
-            | "chop"
-            | "kst"
-            | "emv"
-            | "mass_index"
-            | "efi"
-            | "tsi"
-            | "crsi"
-            | "bias"
-            | "dma"
-            | "vortex"
-            | "brar"
-            | "vr"
-            | "coppock"
-            | "relative_vigor"
-            | "dkx"
-            | "wvad"
-            | "cdp"
-            | "mike"
-            | "keltner"
-            | "stoch_momentum"
-            | "ttm_squeeze"
-            | "pivot_points"
-            | "ichimoku"
-            | "wad"
-            | "asi"
-            | "supertrend"
-            | "tr"
-            | "atr"
-            | "llv"
-            | "hhv"
-            | "donchian"
-            | "hv"
-            | "increase"
-            | "style"
-            | "repeat"
-            | "change"
-            | "mom"
-            | "roc"
-            | "rocp"
-            | "rocr"
-            | "rocr100"
-            | "willr"
-            | "cmo"
-            | "cci"
-            | "trix"
-            | "imi"
-            | "mfi"
-            | "ultosc"
-            | "stoch"
-            | "stochf"
-            | "stochrsi"
-            | "plus_dm"
-            | "minus_dm"
-            | "plus_di"
-            | "minus_di"
-            | "dx"
-            | "adx"
-            | "adxr"
-            | "aroon"
-            | "aroonosc"
-            | "sum"
-            | "maxindex"
-            | "minindex"
-            | "minmax"
-            | "minmaxindex"
-            | "natr"
-            | "bop"
-            | "midpoint"
-            | "midprice"
-            | "linearreg"
-            | "linearreg_slope"
-            | "linearreg_intercept"
-            | "linearreg_angle"
-            | "tsf"
-            | "var"
-            | "stddev"
-            | "correl"
-            | "beta"
-            | "obv"
-            | "ad"
-            | "adosc"
-            | "avgprice"
-            | "medprice"
-            | "typprice"
-            | "wclprice"
-            | "ht_dcperiod"
-            | "ht_dcphase"
-            | "ht_phasor"
-            | "ht_sine"
-            | "ht_trendline"
-            | "ht_trendmode"
-            | "mama"
-    )
+    COMMANDS.contains(&name)
 }
 
 /// The spec for a command given its (already-canonicalized) sub. `None` for an

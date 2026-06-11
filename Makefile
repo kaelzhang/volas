@@ -7,7 +7,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX := $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV := VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick coverage coverage-html benchmark lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -65,6 +65,12 @@ test: coverage
 # explicitly-globbed file, so use `--benchmark-skip`.
 test-quick:
 	$(PYTEST) -s -v test/test_$(test_files).py --benchmark-skip
+
+# Print the built-in indicator count (main commands + sub-command lines + candle
+# patterns), derived from the Rust source; `--check` (run by the test suite)
+# asserts README / INDICATORS.md cite it.
+count-indicators:
+	@$(PYTHON) scripts/count_indicators.py
 
 # True-union Rust line coverage: `cargo test` ∪ the Python suite exercising the
 # compiled extension (see scripts/coverage.sh for why llvm-cov cannot union the
