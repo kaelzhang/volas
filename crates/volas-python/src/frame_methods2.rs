@@ -347,19 +347,30 @@ impl PyDataFrame {
 
     /// Drop rows by index label (`axis=0`) or columns by name (`axis=1`) —
     /// returns a new DataFrame. Row labels are parsed against the index kind.
-    #[pyo3(signature = (labels, axis = 0))]
-    pub(crate) fn drop(&self, py: Python<'_>, labels: Vec<Py<PyAny>>, axis: i64) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (labels, axis = 0, errors = "raise"))]
+    pub(crate) fn drop(&self, py: Python<'_>, labels: Vec<Py<PyAny>>, axis: i64, errors: &str) -> PyResult<PyDataFrame> {
+        let ignore_missing = match errors {
+            "raise" => false,
+            "ignore" => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "drop: errors must be 'raise' or 'ignore', got {other:?}"
+                )))
+            }
+        };
         if axis == 1 {
             let drop_names: Vec<String> = labels
                 .iter()
                 .map(|l| l.bind(py).extract::<String>())
                 .collect::<PyResult<_>>()?;
             // F37: a missing label is an error (pandas KeyError), not a silent
-            // no-op — never claim to have dropped a column that wasn't there (C4).
+            // no-op — unless explicitly opted out with errors='ignore' (F44).
             let names = self.inner.names();
-            for n in &drop_names {
-                if !names.iter().any(|m| m == n) {
-                    return Err(PyKeyError::new_err(format!("[{n:?}] not found in axis")));
+            if !ignore_missing {
+                for n in &drop_names {
+                    if !names.iter().any(|m| m == n) {
+                        return Err(PyKeyError::new_err(format!("[{n:?}] not found in axis")));
+                    }
                 }
             }
             let keep: Vec<String> = names
@@ -374,11 +385,14 @@ impl PyDataFrame {
             .iter()
             .map(|l| parse_label(l.bind(py), index))
             .collect::<PyResult<_>>()?;
-        // F37 (row axis): every label must exist in the index, else KeyError.
-        let present: Vec<Label> = (0..self.inner.height()).map(|i| index.label_at(i)).collect();
-        for t in &targets {
-            if !present.contains(t) {
-                return Err(PyKeyError::new_err("label not found in axis"));
+        // F37 (row axis): every label must exist in the index, else KeyError —
+        // unless errors='ignore' (F44).
+        if !ignore_missing {
+            let present: Vec<Label> = (0..self.inner.height()).map(|i| index.label_at(i)).collect();
+            for t in &targets {
+                if !present.contains(t) {
+                    return Err(PyKeyError::new_err("label not found in axis"));
+                }
             }
         }
         let positions: Vec<usize> = (0..self.inner.height())

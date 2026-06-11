@@ -46,11 +46,13 @@ def test_loc_datetime_index():
     assert df.loc["2021-02-15"]["v"] == 2.0                    # full-date string label
 
 
-# F28 (findings-ledger): partial-string datetime indexing (a month/year selects
-# the range) is a core pandas feature; volas leaks the .loc label KeyError.
-@pytest.mark.xfail(reason="F28: partial-string datetime indexing missing (label KeyError leak)", strict=True)
+# F28 (FIXED): partial-string datetime indexing — a year/month string selects
+# the period's rows (pandas parity); a missing period is a clean KeyError.
 def test_loc_datetime_partial_string():
     assert _dt_indexed().loc["2021-02"].shape == (1, 1)        # the whole month
+    assert _dt_indexed().loc["2021"].shape == (3, 1)           # the whole year
+    with pytest.raises(KeyError):
+        _dt_indexed().loc["2022"]                              # empty period
 
 
 # F34 (decision 1B, FIXED with a refinement): set_index REJECTS a duplicate-label

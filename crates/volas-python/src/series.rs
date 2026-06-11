@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PySlice};
+use pyo3::types::{PyDict, PyList, PySlice};
 use volas_core::{
     binary_supertype, stats, BinOp, BoolOp, CmpOp, Column, DType, Index, Series, Tz,
 };
@@ -297,11 +297,28 @@ impl PySeries {
         }
     }
 
-    /// Sort by value (pandas `sort_values`), stable, with missing values last; the
-    /// index follows the permutation.
-    #[pyo3(signature = (ascending = true))]
-    pub(crate) fn sort_values(&self, ascending: bool) -> PySeries {
-        self.reindexed(&self.inner.data.argsort(ascending))
+    /// Sort by value (pandas `sort_values`), stable; `na_position` places the
+    /// missing values `'last'` (default) or `'first'`; the index follows.
+    #[pyo3(signature = (ascending = true, na_position = "last"))]
+    pub(crate) fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PySeries> {
+        let perm = self.inner.data.argsort(ascending);
+        let perm = match na_position {
+            "last" => perm,
+            "first" => {
+                // argsort sinks NA last; rotate the NA block to the front, both
+                // halves keeping their stable order.
+                let (mut nas, present): (Vec<usize>, Vec<usize>) =
+                    perm.into_iter().partition(|&i| !self.inner.data.is_valid(i));
+                nas.extend(present);
+                nas
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "sort_values: na_position must be 'first' or 'last', got {other:?}"
+                )))
+            }
+        };
+        Ok(self.reindexed(&perm))
     }
 
     /// First `n` rows (pandas `head` = `iloc[:n]`, so a negative `n` drops the
@@ -347,6 +364,360 @@ impl PySeries {
     }
 
     /// The values as a Python list of typed scalars (pandas `to_list`).
+    /// Counts of unique values, most frequent first, indexed by the value
+    /// (pandas `value_counts`). Discrete dtypes only: volas has no float index,
+    /// so a float series must be rounded / astype'd first (C4 fail-loud).
+    pub(crate) fn value_counts(&self) -> PyResult<PySeries> {
+        let n = self.inner.len();
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut sample: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for i in 0..n {
+            let Some(key) = cell_key(&self.inner.data, i) else { continue };
+            match counts.get_mut(&key) {
+                Some(c) => *c += 1,
+                None => {
+                    counts.insert(key.clone(), 1);
+                    sample.insert(key.clone(), i);
+                    order.push(key);
+                }
+            }
+        }
+        // most frequent first; ties keep first-appearance order (stable sort).
+        order.sort_by_key(|k| std::cmp::Reverse(counts[k]));
+        let positions: Vec<usize> = order.iter().map(|k| sample[k]).collect();
+        let labels = self.inner.data.take(&positions);
+        let index = match &labels {
+            Column::I64(v, _) => Index::int64(v.to_vec()),
+            Column::I32(v, _) => Index::int64(v.iter().map(|&x| x as i64).collect()),
+            Column::Bool(v, _) => Index::int64(v.iter().map(|&b| b as i64).collect()),
+            Column::Str(v, _) => Index::str(v.to_vec()),
+            Column::Datetime(v) => Index::datetime(v.to_vec(), self.inner.index.tz()),
+            _ => {
+                return Err(PyTypeError::new_err(
+                    "value_counts needs discrete labels; volas has no float index — \
+                     round or astype the series first",
+                ))
+            }
+        };
+        let data = Column::i64(order.iter().map(|k| counts[k]).collect());
+        Ok(PySeries { inner: Series::new(None, data, Arc::new(index)) })
+    }
+
+    /// The most frequent value(s), ascending, on a fresh RangeIndex (pandas `mode`).
+    pub(crate) fn mode(&self) -> PySeries {
+        let n = self.inner.len();
+        let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut sample: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for i in 0..n {
+            let Some(key) = cell_key(&self.inner.data, i) else { continue };
+            *counts.entry(key.clone()).or_insert(0) += 1;
+            sample.entry(key).or_insert(i);
+        }
+        let top = counts.values().copied().max().unwrap_or(0);
+        let mut positions: Vec<usize> = counts
+            .iter()
+            .filter(|(_, &c)| c == top)
+            .map(|(k, _)| sample[k])
+            .collect();
+        positions.sort_unstable();
+        let data = self.inner.data.take(&positions);
+        let h = positions.len();
+        PySeries { inner: Series::new(self.inner.name.clone(), data, Arc::new(Index::range(h))) }
+    }
+
+    /// Element-wise membership in `values` -> bool Series (pandas `isin`).
+    /// A missing cell is False (NA is not "in" anything).
+    pub(crate) fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let probe = pyany_to_column(values)?;
+        let keys: std::collections::HashSet<String> =
+            (0..probe.len()).filter_map(|i| cell_key(&probe, i)).collect();
+        let out: Vec<bool> = (0..self.inner.len())
+            .map(|i| cell_key(&self.inner.data, i).is_some_and(|k| keys.contains(&k)))
+            .collect();
+        Ok(bool_series(&self.inner, out))
+    }
+
+    /// `left <= x <= right` (pandas `between`, inclusive='both') -> bool Series;
+    /// a missing cell is False.
+    pub(crate) fn between(&self, left: f64, right: f64) -> PyResult<PySeries> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        let v = self.inner.data.to_f64_vec();
+        let out: Vec<bool> = (0..v.len())
+            .map(|i| self.inner.data.is_valid(i) && v[i] >= left && v[i] <= right)
+            .collect();
+        Ok(bool_series(&self.inner, out))
+    }
+
+    /// Replace every cell equal to `to_replace` with `value`, dtype-preserving
+    /// (pandas scalar `replace`). Types that cannot match the column are an error.
+    pub(crate) fn replace(
+        &self,
+        to_replace: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PySeries> {
+        let n = self.inner.len();
+        let old = cmp_scalar_col(to_replace, self.inner.data.dtype(), 1)?;
+        let newc = scalar_to_column(value, self.inner.data.dtype())?;
+        let old_key = cell_key(&old, 0);
+        let positions: Vec<usize> = (0..n)
+            .filter(|&i| cell_key(&self.inner.data, i) == old_key)
+            .collect();
+        if positions.is_empty() {
+            return Ok(col_to_series(&self.inner, self.inner.data.clone()));
+        }
+        let data = self.inner.data.scatter(&positions, &newc).map_err(pyerr)?;
+        Ok(col_to_series(&self.inner, data))
+    }
+
+    /// The `n` largest values, descending (pandas `nlargest`).
+    pub(crate) fn nlargest(&self, n: usize) -> PyResult<PySeries> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        let sorted = self.sort_values(false, "last")?;
+        Ok(slice_head(&sorted.inner, n))
+    }
+
+    /// The `n` smallest values, ascending (pandas `nsmallest`).
+    pub(crate) fn nsmallest(&self, n: usize) -> PyResult<PySeries> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        let sorted = self.sort_values(true, "last")?;
+        Ok(slice_head(&sorted.inner, n))
+    }
+
+    /// Drop later duplicate values, keeping the first occurrence (pandas
+    /// `drop_duplicates(keep='first')`).
+    pub(crate) fn drop_duplicates(&self) -> PySeries {
+        let dup = duplicated_mask(&self.inner.data);
+        let positions: Vec<usize> = (0..self.inner.len()).filter(|&i| !dup[i]).collect();
+        let data = self.inner.data.take(&positions);
+        let index = Arc::new(self.inner.index.take(&positions));
+        PySeries { inner: Series::new(self.inner.name.clone(), data, index) }
+    }
+
+    /// True for each later occurrence of a duplicate value (pandas
+    /// `duplicated(keep='first')`).
+    pub(crate) fn duplicated(&self) -> PySeries {
+        bool_series(&self.inner, duplicated_mask(&self.inner.data))
+    }
+
+    /// Whether the values are monotonically non-decreasing, NA-free (pandas).
+    #[getter]
+    pub(crate) fn is_monotonic_increasing(&self) -> bool {
+        monotonic(&self.inner.data, true)
+    }
+
+    /// Whether the values are monotonically non-increasing, NA-free (pandas).
+    #[getter]
+    pub(crate) fn is_monotonic_decreasing(&self) -> bool {
+        monotonic(&self.inner.data, false)
+    }
+
+    /// Whether every value is distinct (pandas `is_unique`); NA cells count as
+    /// one shared "missing" value.
+    #[getter]
+    pub(crate) fn is_unique(&self) -> bool {
+        !duplicated_mask(&self.inner.data).iter().any(|&d| d)
+    }
+
+    /// Restore a RangeIndex. `drop=True` returns a Series; otherwise (pandas)
+    /// the old index becomes an `'index'` column of a 2-column DataFrame.
+    #[pyo3(signature = (drop = false))]
+    pub(crate) fn reset_index(&self, py: Python<'_>, drop: bool) -> PyResult<Py<PyAny>> {
+        let h = self.inner.len();
+        if drop {
+            let s = PySeries {
+                inner: Series::new(
+                    self.inner.name.clone(),
+                    self.inner.data.clone(),
+                    Arc::new(Index::range(h)),
+                ),
+            };
+            return Ok(Py::new(py, s)?.into_any());
+        }
+        let label = self.inner.index.name().unwrap_or("index").to_string();
+        let vname = self.inner.name.clone().unwrap_or_else(|| "0".to_string());
+        let df = volas_core::DataFrame::new(
+            vec![label, vname],
+            vec![self.inner.index.to_column(), self.inner.data.clone()],
+            Some(Index::range(h)),
+        )
+        .map_err(pyerr)?;
+        Ok(Py::new(py, PyDataFrame::plain(df))?.into_any())
+    }
+
+    /// Sort by index labels (pandas `sort_index`).
+    #[pyo3(signature = (ascending = true))]
+    pub(crate) fn sort_index(&self, ascending: bool) -> PySeries {
+        let perm = self.inner.index.argsort(ascending);
+        let data = self.inner.data.take(&perm);
+        let index = Arc::new(self.inner.index.take(&perm));
+        PySeries { inner: Series::new(self.inner.name.clone(), data, index) }
+    }
+
+    /// A copy with a new name (pandas scalar `rename`).
+    #[pyo3(signature = (name = None))]
+    pub(crate) fn rename(&self, name: Option<String>) -> PySeries {
+        PySeries {
+            inner: Series::new(name, self.inner.data.clone(), Arc::clone(&self.inner.index)),
+        }
+    }
+
+    /// An independent copy (pandas `copy`; columns are copy-on-write).
+    pub(crate) fn copy(&self) -> PySeries {
+        PySeries { inner: self.inner.clone() }
+    }
+
+    /// This series as a 1-column DataFrame (pandas `to_frame`).
+    #[pyo3(signature = (name = None))]
+    pub(crate) fn to_frame(&self, name: Option<String>) -> PyResult<PyDataFrame> {
+        let col_name = name
+            .or_else(|| self.inner.name.clone())
+            .unwrap_or_else(|| "0".to_string());
+        let df = volas_core::DataFrame::new(
+            vec![col_name],
+            vec![self.inner.data.clone()],
+            Some((*self.inner.index).clone()),
+        )
+        .map_err(pyerr)?;
+        Ok(PyDataFrame::plain(df))
+    }
+
+    /// `{label: value}` (pandas `to_dict`); a missing value is `volas.NA`.
+    pub(crate) fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        for i in 0..self.inner.len() {
+            d.set_item(
+                label_to_py(py, &self.inner.index, i),
+                scalar_to_py(py, &self.inner.data, i),
+            )?;
+        }
+        Ok(d)
+    }
+
+    /// `[(label, value), ...]` (pandas `items()`, materialised).
+    pub(crate) fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let pairs: Vec<(Py<PyAny>, Py<PyAny>)> = (0..self.inner.len())
+            .map(|i| {
+                (
+                    label_to_py(py, &self.inner.index, i),
+                    scalar_to_py(py, &self.inner.data, i),
+                )
+            })
+            .collect();
+        PyList::new(py, pairs)
+    }
+
+    /// Anchor a NAIVE DatetimeIndex's wall-clock in `tz` (pandas `tz_localize`)
+    /// — the Series-level mirror of `df.tz_localize` (F27).
+    pub(crate) fn tz_localize(&self, tz: &str) -> PyResult<PySeries> {
+        let tzv = Tz::parse(tz).map_err(pyerr)?;
+        let df = volas_core::DataFrame::new(
+            vec![self.inner.name.clone().unwrap_or_else(|| "x".to_string())],
+            vec![self.inner.data.clone()],
+            Some((*self.inner.index).clone()),
+        )
+        .map_err(pyerr)?
+        .tz_localize(tzv)
+        .map_err(pyerr)?;
+        Ok(PySeries {
+            inner: Series::new(
+                self.inner.name.clone(),
+                df.columns()[0].clone(),
+                Arc::clone(df.index()),
+            ),
+        })
+    }
+
+    /// Restate an AWARE DatetimeIndex in another zone (pandas `tz_convert`) —
+    /// the Series-level mirror of `df.tz_convert` (F27).
+    pub(crate) fn tz_convert(&self, tz: &str) -> PyResult<PySeries> {
+        let tzv = Tz::parse(tz).map_err(pyerr)?;
+        let df = volas_core::DataFrame::new(
+            vec![self.inner.name.clone().unwrap_or_else(|| "x".to_string())],
+            vec![self.inner.data.clone()],
+            Some((*self.inner.index).clone()),
+        )
+        .map_err(pyerr)?
+        .tz_convert(tzv)
+        .map_err(pyerr)?;
+        Ok(PySeries {
+            inner: Series::new(
+                self.inner.name.clone(),
+                df.columns()[0].clone(),
+                Arc::clone(df.index()),
+            ),
+        })
+    }
+
+    /// Scalar positional accessor (pandas `iat`): `s.iat[i]` == `s.iloc[i]`.
+    #[getter]
+    pub(crate) fn iat(&self) -> SeriesILoc {
+        SeriesILoc { inner: self.inner.clone() }
+    }
+
+    /// Scalar label accessor (pandas `at`): `s.at[label]` == `s.loc[label]`.
+    #[getter]
+    pub(crate) fn at(&self) -> SeriesLoc {
+        SeriesLoc { inner: self.inner.clone() }
+    }
+
+    /// Linear interpolation across interior missing values (pandas
+    /// `interpolate(method='linear')`); leading/trailing gaps stay missing.
+    pub(crate) fn interpolate(&self) -> PyResult<PySeries> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        let v = self.inner.data.to_f64_vec();
+        let n = v.len();
+        let valid: Vec<bool> = (0..n).map(|i| self.inner.data.is_valid(i)).collect();
+        let mut out = v.clone();
+        let mut last: Option<usize> = None;
+        for i in 0..n {
+            if valid[i] {
+                if let Some(l) = last {
+                    if i > l + 1 {
+                        let step = (v[i] - v[l]) / (i - l) as f64;
+                        for (k, slot) in out.iter_mut().enumerate().take(i).skip(l + 1) {
+                            *slot = v[l] + step * (k - l) as f64;
+                        }
+                    }
+                }
+                last = Some(i);
+            }
+        }
+        Ok(col_to_series(&self.inner, Column::f64(out)))
+    }
+
+    /// A fixed-window rolling aggregator (pandas `rolling(window)`):
+    /// `s.rolling(20).mean()` etc. `min_periods` defaults to the window.
+    #[pyo3(signature = (window, min_periods = None))]
+    pub(crate) fn rolling(&self, window: usize, min_periods: Option<usize>) -> PyResult<PyRolling> {
+        if window == 0 {
+            return Err(PyValueError::new_err("rolling window must be >= 1"));
+        }
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(PyRolling {
+            series: self.inner.clone(),
+            window,
+            min_periods: min_periods.unwrap_or(window),
+        })
+    }
+
+    /// An expanding (cumulative) window aggregator (pandas `expanding()`).
+    #[pyo3(signature = (min_periods = 1))]
+    pub(crate) fn expanding(&self, min_periods: usize) -> PyResult<PyExpanding> {
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(PyExpanding { series: self.inner.clone(), min_periods })
+    }
+
+    /// An exponentially-weighted aggregator (pandas `ewm(span=...)`).
+    #[pyo3(signature = (span))]
+    pub(crate) fn ewm(&self, span: f64) -> PyResult<PyEwm> {
+        if span < 1.0 {
+            return Err(PyValueError::new_err("ewm span must be >= 1"));
+        }
+        self.inner.data.require_numeric().map_err(pyerr)?;
+        Ok(PyEwm { series: self.inner.clone(), span })
+    }
+
     pub(crate) fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Py<PyAny>> = (0..self.inner.len())
             .map(|i| scalar_to_py(py, &self.inner.data, i))
@@ -391,10 +762,24 @@ impl PySeries {
     /// `datetime` column with a parsed timestamp. An incompatible fill (a number
     /// into a `str` column) raises a `TypeError`. For directional fill use
     /// `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
-    pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+    #[pyo3(signature = (value, limit = None))]
+    pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>, limit: Option<usize>) -> PyResult<PySeries> {
         // fillna keeps present cells and fills missing ones, so it is `where` over
-        // the validity mask — reusing the same typed-fill resolution.
-        let keep: Vec<bool> = (0..self.inner.len()).map(|i| self.inner.data.is_valid(i)).collect();
+        // the validity mask — reusing the same typed-fill resolution. `limit`
+        // caps how many leading missing cells are filled (pandas).
+        let mut budget = limit.unwrap_or(usize::MAX);
+        let keep: Vec<bool> = (0..self.inner.len())
+            .map(|i| {
+                if self.inner.data.is_valid(i) {
+                    true
+                } else if budget > 0 {
+                    budget -= 1;
+                    false                       // fill this one
+                } else {
+                    true                        // budget spent: keep it missing
+                }
+            })
+            .collect();
         self.select_with(&keep, Some(value))
     }
 
@@ -489,8 +874,13 @@ impl PySeries {
     /// Numerical rank (pandas `rank`, 1-based, NaN kept as NaN). Ties resolve by
     /// `method` (`'average'` | `'min'` | `'max'` | `'first'` | `'dense'`); `pct`
     /// returns ranks scaled to (0, 1].
-    #[pyo3(signature = (method = "average", ascending = true, pct = false))]
-    pub(crate) fn rank(&self, method: &str, ascending: bool, pct: bool) -> PyResult<PySeries> {
+    #[pyo3(signature = (method = "average", ascending = true, pct = false, na_option = "keep"))]
+    pub(crate) fn rank(&self, method: &str, ascending: bool, pct: bool, na_option: &str) -> PyResult<PySeries> {
+        if !matches!(na_option, "keep" | "top" | "bottom") {
+            return Err(PyValueError::new_err(format!(
+                "rank: na_option must be 'keep', 'top' or 'bottom', got {na_option:?}"
+            )));
+        }
         // rank is order-based, so it serves any ordered dtype (str lexically,
         // datetime by raw i64) — not the f64 funnel, which loses sub-256ns
         // datetime order. The rank VALUES are always float64 (pandas).
@@ -502,7 +892,25 @@ impl PySeries {
             "dense" => stats::RankMethod::Dense,
             other => return Err(PyValueError::new_err(format!("rank: unknown method '{other}'"))),
         };
-        Ok(f64_series(&self.inner, self.inner.data.rank(m, ascending, pct)))
+        let mut ranks = self.inner.data.rank(m, ascending, pct);
+        if na_option != "keep" {
+            // 'top'/'bottom': NA cells receive the extreme ranks instead of NaN;
+            // present ranks shift to make room (pandas semantics).
+            let n = self.inner.len();
+            let na_count = (0..n).filter(|&i| !self.inner.data.is_valid(i)).count();
+            if na_count > 0 && !pct {
+                let mut na_rank = if na_option == "top" { 1.0 } else { (n - na_count + 1) as f64 };
+                for (i, r) in ranks.iter_mut().enumerate() {
+                    if !self.inner.data.is_valid(i) {
+                        *r = na_rank;
+                        na_rank += 1.0;
+                    } else if na_option == "top" {
+                        *r += na_count as f64;
+                    }
+                }
+            }
+        }
+        Ok(f64_series(&self.inner, ranks))
     }
 
     /// Element-wise absolute value (pandas `abs`), dtype-preserving.
@@ -981,5 +1389,204 @@ impl SeriesILoc {
         Err(PyIndexError::new_err(
             "iloc key must be an integer or slice",
         ))
+    }
+}
+
+/// A dtype-exact, hash-able key for a cell: `None` for a missing cell, else a
+/// string discriminated by dtype (float by bit pattern, so distinct values never
+/// collide). Backs value_counts / mode / isin / duplicated / replace.
+pub(crate) fn cell_key(col: &Column, i: usize) -> Option<String> {
+    if !col.is_valid(i) {
+        return None;
+    }
+    Some(match col {
+        Column::F64(v) => format!("f{:x}", v[i].to_bits()),
+        Column::F32(v) => format!("f{:x}", (v[i] as f64).to_bits()),
+        Column::I64(v, _) => format!("i{}", v[i]),
+        Column::I32(v, _) => format!("i{}", v[i]),
+        Column::Bool(v, _) => format!("b{}", v[i]),
+        Column::Str(v, _) => format!("s{}", v[i]),
+        Column::Datetime(v) => format!("d{}", v[i]),
+    })
+}
+
+/// `True` for each later occurrence of a value already seen (NA cells share one
+/// "missing" identity).
+fn duplicated_mask(col: &Column) -> Vec<bool> {
+    let mut seen: std::collections::HashSet<Option<String>> = std::collections::HashSet::new();
+    (0..col.len()).map(|i| !seen.insert(cell_key(col, i))).collect()
+}
+
+/// Monotone non-decreasing (`asc`) / non-increasing check over present values;
+/// any missing cell makes it false (pandas).
+fn monotonic(col: &Column, asc: bool) -> bool {
+    let n = col.len();
+    if (0..n).any(|i| !col.is_valid(i)) {
+        return false;
+    }
+    let v = col.to_f64_vec();
+    v.windows(2).all(|w| if asc { w[0] <= w[1] } else { w[0] >= w[1] })
+}
+
+/// The first `n` rows of a series (saturating).
+fn slice_head(s: &Series, n: usize) -> PySeries {
+    let take: Vec<usize> = (0..n.min(s.len())).collect();
+    PySeries {
+        inner: Series::new(s.name.clone(), s.data.take(&take), Arc::new(s.index.take(&take))),
+    }
+}
+
+/// `s.rolling(window)` — a fixed-window aggregator over a numeric series. Each
+/// output cell aggregates the trailing `window` values; cells with fewer than
+/// `min_periods` present values are missing (pandas semantics).
+#[pyclass(name = "Rolling")]
+pub struct PyRolling {
+    series: Series,
+    window: usize,
+    min_periods: usize,
+}
+
+/// `s.expanding()` — the cumulative (all-history) window aggregator.
+#[pyclass(name = "Expanding")]
+pub struct PyExpanding {
+    series: Series,
+    min_periods: usize,
+}
+
+/// `s.ewm(span=...)` — the exponentially-weighted aggregator.
+#[pyclass(name = "Ewm")]
+pub struct PyEwm {
+    series: Series,
+    span: f64,
+}
+
+/// Aggregate every trailing window of `s` with `f(values_in_window)`; windows
+/// with fewer than `min_periods` present values yield NaN.
+fn window_agg(
+    s: &Series,
+    window: usize,
+    min_periods: usize,
+    f: impl Fn(&[f64]) -> f64,
+) -> PySeries {
+    let v = s.data.to_f64_vec();
+    let n = v.len();
+    let mut out = vec![f64::NAN; n];
+    // an expanding window passes usize::MAX — cap the buffer at the data length
+    // (with_capacity(MAX) would abort with a capacity overflow, P7).
+    let mut buf: Vec<f64> = Vec::with_capacity(window.min(n));
+    for i in 0..n {
+        let start = (i + 1).saturating_sub(window);
+        buf.clear();
+        for k in start..=i {
+            if s.data.is_valid(k) && !v[k].is_nan() {
+                buf.push(v[k]);
+            }
+        }
+        if buf.len() >= min_periods.max(1) {
+            out[i] = f(&buf);
+        }
+    }
+    PySeries { inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)) }
+}
+
+fn agg_mean(b: &[f64]) -> f64 {
+    b.iter().sum::<f64>() / b.len() as f64
+}
+fn agg_var(b: &[f64]) -> f64 {
+    if b.len() < 2 {
+        return f64::NAN;
+    }
+    let m = agg_mean(b);
+    b.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (b.len() - 1) as f64
+}
+
+#[pymethods]
+impl PyRolling {
+    /// Rolling mean (pandas `rolling(n).mean()`).
+    pub(crate) fn mean(&self) -> PySeries {
+        window_agg(&self.series, self.window, self.min_periods, agg_mean)
+    }
+    /// Rolling sum.
+    pub(crate) fn sum(&self) -> PySeries {
+        window_agg(&self.series, self.window, self.min_periods, |b| b.iter().sum())
+    }
+    /// Rolling minimum.
+    pub(crate) fn min(&self) -> PySeries {
+        window_agg(&self.series, self.window, self.min_periods, |b| {
+            b.iter().copied().fold(f64::INFINITY, f64::min)
+        })
+    }
+    /// Rolling maximum.
+    pub(crate) fn max(&self) -> PySeries {
+        window_agg(&self.series, self.window, self.min_periods, |b| {
+            b.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        })
+    }
+    /// Rolling sample variance (ddof=1).
+    pub(crate) fn var(&self) -> PySeries {
+        window_agg(&self.series, self.window, self.min_periods, agg_var)
+    }
+    /// Rolling sample standard deviation (ddof=1).
+    pub(crate) fn std(&self) -> PySeries {
+        window_agg(&self.series, self.window, self.min_periods, |b| agg_var(b).sqrt())
+    }
+}
+
+#[pymethods]
+impl PyExpanding {
+    /// Expanding mean.
+    pub(crate) fn mean(&self) -> PySeries {
+        window_agg(&self.series, usize::MAX, self.min_periods, agg_mean)
+    }
+    /// Expanding sum.
+    pub(crate) fn sum(&self) -> PySeries {
+        window_agg(&self.series, usize::MAX, self.min_periods, |b| b.iter().sum())
+    }
+    /// Expanding minimum.
+    pub(crate) fn min(&self) -> PySeries {
+        window_agg(&self.series, usize::MAX, self.min_periods, |b| {
+            b.iter().copied().fold(f64::INFINITY, f64::min)
+        })
+    }
+    /// Expanding maximum.
+    pub(crate) fn max(&self) -> PySeries {
+        window_agg(&self.series, usize::MAX, self.min_periods, |b| {
+            b.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        })
+    }
+    /// Expanding sample variance (ddof=1).
+    pub(crate) fn var(&self) -> PySeries {
+        window_agg(&self.series, usize::MAX, self.min_periods, agg_var)
+    }
+    /// Expanding sample standard deviation (ddof=1).
+    pub(crate) fn std(&self) -> PySeries {
+        window_agg(&self.series, usize::MAX, self.min_periods, |b| agg_var(b).sqrt())
+    }
+}
+
+#[pymethods]
+impl PyEwm {
+    /// Exponentially-weighted mean (pandas `ewm(span=s, adjust=True).mean()`).
+    pub(crate) fn mean(&self) -> PySeries {
+        let s = &self.series;
+        let v = s.data.to_f64_vec();
+        let n = v.len();
+        let alpha = 2.0 / (self.span + 1.0);
+        let mut out = vec![f64::NAN; n];
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for i in 0..n {
+            let present = s.data.is_valid(i) && !v[i].is_nan();
+            num *= 1.0 - alpha;
+            den *= 1.0 - alpha;
+            if present {
+                num += v[i];
+                den += 1.0;
+            }
+            if den > 0.0 {
+                out[i] = num / den;
+            }
+        }
+        PySeries { inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)) }
     }
 }

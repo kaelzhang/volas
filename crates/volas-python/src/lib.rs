@@ -102,6 +102,7 @@ pub(crate) use coerce::*;
 pub(crate) use series::*;
 pub(crate) use series_support::*;
 pub(crate) use frame::*;
+pub(crate) use frame_methods::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
 pub(crate) use frame_index::*;
 
 /// Raise if the frame has stale computed columns after an `append`. The per-column
@@ -225,6 +226,12 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DataFrameAt>()?;
     m.add_class::<SeriesILoc>()?;
     m.add_class::<SeriesLoc>()?;
+    m.add_class::<PyRolling>()?;
+    m.add_class::<PyExpanding>()?;
+    m.add_class::<PyEwm>()?;
+    m.add_class::<PyRollingFrame>()?;
+    m.add_class::<PyExpandingFrame>()?;
+    m.add_class::<PyEwmFrame>()?;
     m.add_class::<PyTimeFrame>()?;
     m.add("DirectiveError", m.py().get_type::<DirectiveError>())?;
     m.add(

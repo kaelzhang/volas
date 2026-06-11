@@ -21,10 +21,11 @@ impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
     // docstring (pyo3 does not surface a `#[new]` doc comment to Python).
     #[new]
-    #[pyo3(signature = (data, columns = None, time_frame = None, cumulators = None, dtype = None))]
+    #[pyo3(signature = (data, columns = None, index = None, time_frame = None, cumulators = None, dtype = None))]
     pub(crate) fn new(
         data: &Bound<'_, PyAny>,
         columns: Option<Vec<String>>,
+        index: Option<&Bound<'_, PyAny>>,
         time_frame: Option<&Bound<'_, PyAny>>,
         cumulators: Option<&Bound<'_, PyDict>>,
         dtype: Option<&str>,
@@ -104,6 +105,18 @@ impl PyDataFrame {
                 "DataFrame(data): data must be a dict of columns or a volas DataFrame \
                  (for a pandas DataFrame use from_pandas)",
             ));
+        };
+        // F45: an explicit `index=` attaches row labels at construction (pandas
+        // `DataFrame(data, index=...)`): a list / array of int64, str or
+        // datetime labels — the same kinds (and uniqueness rules) as set_index.
+        let df = match index {
+            None => df,
+            Some(ix) => {
+                let col = pyany_to_column(ix)?;
+                let new_index = Index::from_column(&col).map_err(pyerr)?;
+                DataFrame::new(df.names().to_vec(), df.columns().to_vec(), Some(new_index))
+                    .map_err(pyerr)?
+            }
         };
         // `dtype=` casts every column to a single dtype (pandas `DataFrame(data,
         // dtype=...)`), e.g. dtype='float32'.
@@ -367,6 +380,219 @@ impl PyDataFrame {
         }
     }
 
+    /// Per-column NaN-skipping sum (pandas `df.sum()`; non-numeric skipped).
+    pub(crate) fn sum(&self) -> PySeries {
+        self.reduce_cols(|c| {
+            let v = c.to_f64_vec();
+            (0..c.len()).filter(|&i| c.is_valid(i) && !v[i].is_nan()).map(|i| v[i]).sum()
+        })
+    }
+    /// Per-column NaN-skipping product (pandas `df.prod()`).
+    pub(crate) fn prod(&self) -> PySeries {
+        self.reduce_cols(|c| {
+            let v = c.to_f64_vec();
+            (0..c.len())
+                .filter(|&i| c.is_valid(i) && !v[i].is_nan())
+                .map(|i| v[i])
+                .product()
+        })
+    }
+    /// Per-column NaN-skipping mean (pandas `df.mean()`).
+    pub(crate) fn mean(&self) -> PySeries {
+        self.reduce_with(|s| s.mean_f64())
+    }
+    /// Per-column sample variance (ddof=1, pandas `df.var()`).
+    pub(crate) fn var(&self) -> PySeries {
+        self.reduce_with(|s| s.var_f64())
+    }
+    /// Per-column sample standard deviation (pandas `df.std()`).
+    pub(crate) fn std(&self) -> PySeries {
+        self.reduce_with(|s| s.var_f64().sqrt())
+    }
+    /// Per-column NaN-skipping median (pandas `df.median()`).
+    pub(crate) fn median(&self) -> PyResult<PySeries> {
+        self.try_reduce_with(|s| s.quantile_f64(0.5))
+    }
+    /// Per-column `q`-quantile (pandas `df.quantile(q)`).
+    #[pyo3(signature = (q = 0.5))]
+    pub(crate) fn quantile(&self, q: f64) -> PyResult<PySeries> {
+        self.try_reduce_with(|s| s.quantile_f64(q))
+    }
+    /// Per-column NaN-skipping minimum (pandas `df.min()`; numeric columns).
+    pub(crate) fn min(&self) -> PySeries {
+        self.reduce_cols(|c| {
+            let v = c.to_f64_vec();
+            (0..c.len())
+                .filter(|&i| c.is_valid(i) && !v[i].is_nan())
+                .map(|i| v[i])
+                .fold(f64::NAN, f64::min)
+        })
+    }
+    /// Per-column NaN-skipping maximum (pandas `df.max()`).
+    pub(crate) fn max(&self) -> PySeries {
+        self.reduce_cols(|c| {
+            let v = c.to_f64_vec();
+            (0..c.len())
+                .filter(|&i| c.is_valid(i) && !v[i].is_nan())
+                .map(|i| v[i])
+                .fold(f64::NAN, f64::max)
+        })
+    }
+    /// Per-column count of distinct present values (pandas `df.nunique()`).
+    pub(crate) fn nunique(&self) -> PySeries {
+        let names: Vec<String> = self.inner.names().to_vec();
+        let counts: Vec<i64> = self
+            .inner
+            .columns()
+            .iter()
+            .map(|c| {
+                let mut seen = std::collections::HashSet::new();
+                (0..c.len())
+                    .filter_map(|i| crate::series::cell_key(c, i))
+                    .filter(|k| seen.insert(k.clone()))
+                    .count() as i64
+            })
+            .collect();
+        PySeries {
+            inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
+        }
+    }
+    /// Per-column truthiness `any` (pandas `df.any()`): a present, non-zero /
+    /// True / non-empty cell counts.
+    pub(crate) fn any(&self) -> PySeries {
+        self.bool_reduce(true)
+    }
+    /// Per-column truthiness `all` (pandas `df.all()`), NA-skipping.
+    pub(crate) fn all(&self) -> PySeries {
+        self.bool_reduce(false)
+    }
+    /// Per-column index label of the maximum (pandas `df.idxmax()`).
+    pub(crate) fn idxmax(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.idx_extreme(py, true)
+    }
+    /// Per-column index label of the minimum (pandas `df.idxmin()`).
+    pub(crate) fn idxmin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.idx_extreme(py, false)
+    }
+
+    /// Element-wise membership in `values` -> a boolean frame (pandas `isin`).
+    pub(crate) fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.isin(values))
+    }
+    /// Replace cells equal to `to_replace` with `value`, per column,
+    /// dtype-preserving; columns whose dtype cannot hold the scalars are kept
+    /// unchanged (pandas `replace`).
+    pub(crate) fn replace(
+        &self,
+        to_replace: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| match s.replace(to_replace, value) {
+            Ok(r) => Ok(r),
+            Err(_) => Ok(PySeries { inner: s.inner.clone() }),   // dtype can't match -> untouched
+        })
+    }
+    /// The `n` rows with the largest values in `column` (pandas `nlargest`).
+    pub(crate) fn nlargest(&self, n: usize, column: &str) -> PyResult<PyDataFrame> {
+        self.extreme_rows(n, column, false)
+    }
+    /// The `n` rows with the smallest values in `column` (pandas `nsmallest`).
+    pub(crate) fn nsmallest(&self, n: usize, column: &str) -> PyResult<PyDataFrame> {
+        self.extreme_rows(n, column, true)
+    }
+    /// Drop later duplicate ROWS, keeping the first (pandas
+    /// `drop_duplicates(keep='first')`, over all columns).
+    pub(crate) fn drop_duplicates(&self) -> PyDataFrame {
+        let dup = self.row_duplicated();
+        let keep: Vec<usize> = (0..self.inner.height()).filter(|&i| !dup[i]).collect();
+        PyDataFrame::plain(take_frame(&self.inner, &keep))
+    }
+    /// True per row for a later duplicate of an earlier row (pandas `duplicated`).
+    pub(crate) fn duplicated(&self) -> PySeries {
+        let dup = self.row_duplicated();
+        PySeries {
+            inner: Series::new(
+                None,
+                Column::bool(dup),
+                Arc::clone(self.inner.index()),
+            ),
+        }
+    }
+    /// The first (smallest-position) mode of each column, as a 1-row frame.
+    /// (pandas pads multi-modal columns into extra rows; volas keeps the single
+    /// deterministic first mode per column — documented divergence.)
+    pub(crate) fn mode(&self) -> PyResult<PyDataFrame> {
+        let mut cols = Vec::with_capacity(self.inner.width());
+        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+            let s = PySeries {
+                inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(self.inner.index())),
+            };
+            let m = s.mode();
+            let take: Vec<usize> = if m.inner.is_empty() { vec![] } else { vec![0] };
+            cols.push(m.inner.data.take(&take));
+        }
+        Ok(PyDataFrame::plain(
+            DataFrame::new(self.inner.names().to_vec(), cols, None).map_err(pyerr)?,
+        ))
+    }
+    /// Counts of unique values (pandas `df.value_counts()`); volas has no
+    /// MultiIndex, so only a single-column frame is supported — call it on the
+    /// column (`df[col].value_counts()`) otherwise.
+    pub(crate) fn value_counts(&self) -> PyResult<PySeries> {
+        if self.inner.width() != 1 {
+            return Err(PyTypeError::new_err(
+                "DataFrame.value_counts needs a single column (volas has no MultiIndex); \
+                 use df[col].value_counts()",
+            ));
+        }
+        let name = self.inner.names()[0].clone();
+        let col = self.inner.columns()[0].clone();
+        let s = PySeries {
+            inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
+        };
+        s.value_counts()
+    }
+    /// Linear interpolation per numeric column (pandas `interpolate`).
+    pub(crate) fn interpolate(&self) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.interpolate())
+    }
+    /// A fixed-window rolling aggregator over every numeric column (pandas
+    /// `df.rolling(window)`).
+    #[pyo3(signature = (window, min_periods = None))]
+    pub(crate) fn rolling(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+    ) -> PyResult<PyRollingFrame> {
+        if window == 0 {
+            return Err(PyValueError::new_err("rolling window must be >= 1"));
+        }
+        Ok(PyRollingFrame {
+            frame: self.inner.clone(),
+            window,
+            min_periods: min_periods.unwrap_or(window),
+        })
+    }
+    /// An expanding (cumulative) aggregator over every numeric column.
+    #[pyo3(signature = (min_periods = 1))]
+    pub(crate) fn expanding(&self, min_periods: usize) -> PyExpandingFrame {
+        PyExpandingFrame {
+            frame: self.inner.clone(),
+            min_periods,
+        }
+    }
+    /// An exponentially-weighted aggregator over every numeric column.
+    #[pyo3(signature = (span))]
+    pub(crate) fn ewm(&self, span: f64) -> PyResult<PyEwmFrame> {
+        if span < 1.0 {
+            return Err(PyValueError::new_err("ewm span must be >= 1"));
+        }
+        Ok(PyEwmFrame {
+            frame: self.inner.clone(),
+            span,
+        })
+    }
+
     /// Per-column dtypes as `{name: dtype_str}` (pandas `dtypes`).
     #[getter]
     pub(crate) fn dtypes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -535,7 +761,7 @@ impl PyDataFrame {
     /// Column-wise rank (pandas `rank`); always float.
     #[pyo3(signature = (method = "average", ascending = true, pct = false))]
     pub(crate) fn rank(&self, method: &str, ascending: bool, pct: bool) -> PyResult<PyDataFrame> {
-        self.map_cols(|s| s.rank(method, ascending, pct))
+        self.map_cols(|s| s.rank(method, ascending, pct, "keep"))
     }
 
     // --- column-wise reductions (-> a Series indexed by column name; numeric
@@ -667,5 +893,216 @@ impl PyDataFrame {
         Ok(PyDataFrame::plain(
             DataFrame::new(names, columns, Some(Index::range(h))).map_err(pyerr)?,
         ))
+    }
+}
+
+impl PyDataFrame {
+    /// Per-numeric-column reduce via a Series-level helper -> f64 Series keyed
+    /// by column name (non-numeric columns are skipped, like `reduce_cols`).
+    fn reduce_with(&self, op: impl Fn(&PySeries) -> f64) -> PySeries {
+        let mut names = Vec::new();
+        let mut vals = Vec::new();
+        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+            if col.require_numeric().is_ok() {
+                let s = PySeries {
+                    inner: Series::new(
+                        Some(name.clone()),
+                        col.clone(),
+                        Arc::clone(self.inner.index()),
+                    ),
+                };
+                names.push(name.clone());
+                vals.push(op(&s));
+            }
+        }
+        PySeries {
+            inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
+        }
+    }
+
+    /// Like [`Self::reduce_with`] for fallible helpers (quantile).
+    fn try_reduce_with(&self, op: impl Fn(&PySeries) -> PyResult<f64>) -> PyResult<PySeries> {
+        let mut names = Vec::new();
+        let mut vals = Vec::new();
+        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+            if col.require_numeric().is_ok() {
+                let s = PySeries {
+                    inner: Series::new(
+                        Some(name.clone()),
+                        col.clone(),
+                        Arc::clone(self.inner.index()),
+                    ),
+                };
+                names.push(name.clone());
+                vals.push(op(&s)?);
+            }
+        }
+        Ok(PySeries {
+            inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
+        })
+    }
+
+    /// Per-column truthiness any/all (NA-skipping) -> bool Series by name.
+    fn bool_reduce(&self, want_any: bool) -> PySeries {
+        let names: Vec<String> = self.inner.names().to_vec();
+        let vals: Vec<bool> = self
+            .inner
+            .columns()
+            .iter()
+            .map(|c| {
+                let truth = to_bool_vec(c);
+                let present = (0..c.len()).filter(|&i| c.is_valid(i));
+                if want_any {
+                    present.into_iter().any(|i| truth[i])
+                } else {
+                    present.into_iter().all(|i| truth[i])
+                }
+            })
+            .collect();
+        PySeries {
+            inner: Series::new(None, Column::bool(vals), Arc::new(Index::str(names))),
+        }
+    }
+
+    /// Per-column index label of the extreme -> a Series of labels keyed by
+    /// column name (the label dtype follows the index kind).
+    fn idx_extreme(&self, py: Python<'_>, want_max: bool) -> PyResult<Py<PyAny>> {
+        let names: Vec<String> = self.inner.names().to_vec();
+        let mut positions = Vec::with_capacity(names.len());
+        for col in self.inner.columns() {
+            positions.push(argext(col, want_max)?);
+        }
+        let index = self.inner.index();
+        let labels = index.take(&positions).to_column();
+        let s = PySeries {
+            inner: Series::new(None, labels, Arc::new(Index::str(names))),
+        };
+        Ok(Py::new(py, s)?.into_any())
+    }
+
+    /// The `n` extreme rows by `column` (ascending for nsmallest).
+    fn extreme_rows(&self, n: usize, column: &str, ascending: bool) -> PyResult<PyDataFrame> {
+        let col = self.inner.column(column).map_err(pyerr)?;
+        col.require_numeric().map_err(pyerr)?;
+        let v = col.to_f64_vec();
+        let mut order: Vec<usize> = (0..v.len()).filter(|&i| col.is_valid(i) && !v[i].is_nan()).collect();
+        order.sort_by(|&a, &b| {
+            let o = v[a].partial_cmp(&v[b]).unwrap_or(std::cmp::Ordering::Equal);
+            if ascending { o } else { o.reverse() }
+        });
+        order.truncate(n);
+        Ok(PyDataFrame::plain(take_frame(&self.inner, &order)))
+    }
+
+    /// Row-level duplicate mask over all columns (first occurrence is False).
+    fn row_duplicated(&self) -> Vec<bool> {
+        let h = self.inner.height();
+        let mut seen = std::collections::HashSet::with_capacity(h);
+        (0..h)
+            .map(|i| {
+                let key: Vec<Option<String>> = self
+                    .inner
+                    .columns()
+                    .iter()
+                    .map(|c| crate::series::cell_key(c, i))
+                    .collect();
+                !seen.insert(key)
+            })
+            .collect()
+    }
+}
+
+/// `df.rolling(window)` — per-numeric-column rolling aggregation -> DataFrame.
+#[pyclass(name = "RollingFrame")]
+pub struct PyRollingFrame {
+    frame: DataFrame,
+    window: usize,
+    min_periods: usize,
+}
+
+/// `df.expanding()` — per-numeric-column expanding aggregation -> DataFrame.
+#[pyclass(name = "ExpandingFrame")]
+pub struct PyExpandingFrame {
+    frame: DataFrame,
+    min_periods: usize,
+}
+
+/// `df.ewm(span=...)` — per-numeric-column EW aggregation -> DataFrame.
+#[pyclass(name = "EwmFrame")]
+pub struct PyEwmFrame {
+    frame: DataFrame,
+    span: f64,
+}
+
+/// Apply a Series-level window op over every column of `frame`.
+fn frame_window(
+    frame: &DataFrame,
+    op: impl Fn(&PySeries) -> PyResult<PySeries>,
+) -> PyResult<PyDataFrame> {
+    let wrapper = PyDataFrame::plain(frame.clone());
+    wrapper.map_cols(op)
+}
+
+#[pymethods]
+impl PyRollingFrame {
+    /// Per-column rolling mean -> DataFrame.
+    fn mean(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.mean()))
+    }
+    /// Per-column rolling sum.
+    fn sum(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.sum()))
+    }
+    /// Per-column rolling minimum.
+    fn min(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.min()))
+    }
+    /// Per-column rolling maximum.
+    fn max(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.max()))
+    }
+    /// Per-column rolling sample variance.
+    fn var(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.var()))
+    }
+    /// Per-column rolling sample standard deviation.
+    fn std(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.std()))
+    }
+}
+
+#[pymethods]
+impl PyExpandingFrame {
+    /// Per-column expanding mean -> DataFrame.
+    fn mean(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.mean()))
+    }
+    /// Per-column expanding sum.
+    fn sum(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.sum()))
+    }
+    /// Per-column expanding minimum.
+    fn min(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.min()))
+    }
+    /// Per-column expanding maximum.
+    fn max(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.max()))
+    }
+    /// Per-column expanding sample variance.
+    fn var(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.var()))
+    }
+    /// Per-column expanding sample standard deviation.
+    fn std(&self) -> PyResult<PyDataFrame> {
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.std()))
+    }
+}
+
+#[pymethods]
+impl PyEwmFrame {
+    fn mean(&self) -> PyResult<PyDataFrame> {
+        let span = self.span;
+        frame_window(&self.frame, |s| Ok(s.ewm(span)?.mean()))
     }
 }
