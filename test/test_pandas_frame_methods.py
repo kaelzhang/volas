@@ -95,6 +95,25 @@ def test_set_index_moves_column_to_index():
     _eq(v, [[1.0], [2.0], [3.0]])
 
 
+def test_set_index_rejects_na_int_and_str_labels():
+    # V16: an int/str index has no missing-label representation, so a column
+    # carrying volas.NA used to silently turn each NA into its physical
+    # placeholder (0 / '') — an ordinary label that .loc could match. It raises;
+    # a former missing label can never be looked up.
+    with pytest.raises(ValueError):
+        volas.DataFrame({"i": [1, None], "v": [10, 20]}).set_index("i")
+    with pytest.raises(ValueError):
+        volas.DataFrame({"s": ["a", None], "v": [10, 20]}).set_index("s")
+
+
+def test_set_index_datetime_nat_still_allowed():
+    # datetime is the one nullable index kind: NaT is a physical sentinel in the
+    # label vector (rendered 'NaT', sorted last) — not a fabricated value.
+    t = np.array(["2021-01-01", "NaT"], dtype="datetime64[ns]")
+    v = volas.DataFrame({"t": t, "v": [10, 20]}).set_index("t")
+    assert v.shape == (2, 1)
+
+
 def test_astype_to_int():
     v = volas.DataFrame({"a": [1.0, 2.0, 3.0]}).astype({"a": "int64"})
     assert dict(v.dtypes)["a"] == "int64"

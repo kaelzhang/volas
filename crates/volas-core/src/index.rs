@@ -144,11 +144,24 @@ impl Index {
 
     /// Build an unnamed index from a column, tagging a `Datetime` column with
     /// `tz` (otherwise the tz is ignored).
+    ///
+    /// An `I64` / `Str` column carrying `volas.NA` is rejected: an int/str index
+    /// has no missing-label representation, so building one would silently turn
+    /// each NA into its physical placeholder (`0` / `""`) — an ordinary label a
+    /// `.loc` lookup can match (C2/C4). Datetime is the one nullable index kind:
+    /// `NaT` is a physical sentinel inside the label vector itself, rendered as
+    /// `NaT` and sorted last.
     pub fn from_column_tz(col: &Column, tz: Tz) -> Result<Index> {
         let kind = match col {
             Column::Datetime(v) => IndexKind::Datetime(v.to_vec(), tz),
-            Column::I64(v, _) => IndexKind::Int64(v.to_vec()),
-            Column::Str(v, _) => IndexKind::Str(v.to_vec()),
+            Column::I64(v, _) => {
+                require_no_missing_labels(col, "int64")?;
+                IndexKind::Int64(v.to_vec())
+            }
+            Column::Str(v, _) => {
+                require_no_missing_labels(col, "str")?;
+                IndexKind::Str(v.to_vec())
+            }
             other => {
                 return Err(VolasError::DType(format!(
                     "cannot use a {} column as an index (only datetime / int64 / string)",
@@ -397,6 +410,19 @@ impl Index {
             }
         }
     }
+}
+
+/// Reject building an index from a column that carries `volas.NA`: with no
+/// missing-label representation for `int64` / `str`, the NA's physical
+/// placeholder (`0` / `""`) would become an ordinary, lookup-matchable label.
+fn require_no_missing_labels(col: &Column, kind: &str) -> Result<()> {
+    if col.null_count() > 0 {
+        return Err(VolasError::Value(format!(
+            "cannot use a {kind} column containing volas.NA as an index (a missing \
+             label has no {kind} representation); drop or fill the NA rows first"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
