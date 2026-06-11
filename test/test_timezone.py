@@ -99,7 +99,9 @@ def test_unknown_tz_errors():
 def test_timestamp_resolves_to_utc():
     ts = volas.Timestamp('2021-01-04 09:30:00', tz='America/New_York')
     assert ts.tz == 'America/New_York'
-    assert ts.to_numpy()[0] == np.datetime64('2021-01-04 14:30:00')   # 09:30 NY -> 14:30 UTC
+    # to_numpy() is a datetime64 SCALAR (a scalar class converts to a scalar)
+    assert isinstance(ts.to_numpy(), np.datetime64)
+    assert ts.to_numpy() == np.datetime64('2021-01-04 14:30:00')   # 09:30 NY -> 14:30 UTC
 
 
 def test_timestamp_cross_tz_loc_match():

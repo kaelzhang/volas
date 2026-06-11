@@ -40,6 +40,9 @@ def test_nat_cell_is_na():
 
 def test_timestamp_conversions():
     ts = _dt_series().iloc[0]
+    # to_numpy() is a datetime64 SCALAR — a scalar class converts to a scalar,
+    # matching the stub's `-> np.datetime64` (not a 1-element ndarray).
+    assert isinstance(ts.to_numpy(), np.datetime64)
     assert ts.to_numpy() == np.datetime64("2021-03-04T09:30:00")
     assert ts.value == np.datetime64("2021-03-04T09:30:00", "ns").astype("int64")
     assert ts.to_pydatetime() == _dt.datetime(2021, 3, 4, 9, 30, 0)
@@ -57,3 +60,37 @@ def test_timestamp_timedelta_arithmetic():
     # Timestamp - Timestamp -> np.timedelta64
     delta = t1 - t0
     assert isinstance(delta, np.timedelta64)
+
+
+# --- checked arithmetic (D2): overflow / NaT-sentinel results raise -----------
+# wrapping arithmetic used to fold i64::MAX + 1 onto i64::MIN — an object that
+# rendered as 'NaT' yet exposed a real 1677 civil date, reopening the exact
+# inconsistency the constructor's raw-NaT rejection closed.
+
+I64_MAX = 2**63 - 1
+I64_MIN = -(2**63)
+
+
+def test_timestamp_add_overflow_raises():
+    with pytest.raises(OverflowError):
+        volas.Timestamp(I64_MAX) + 1
+
+
+def test_timestamp_sub_to_nat_sentinel_raises():
+    # (i64::MIN + 1) - 1 == i64::MIN exactly — no wrap, but the result IS the NaT
+    # sentinel, which must not become a constructed Timestamp.
+    with pytest.raises(OverflowError):
+        volas.Timestamp(I64_MIN + 1) - 1
+
+
+def test_timestamp_difference_overflow_raises():
+    # MAX - (MIN + 1) overflows i64; the wrapped result used to be a tiny -2ns.
+    with pytest.raises(OverflowError):
+        volas.Timestamp(I64_MAX) - volas.Timestamp(I64_MIN + 1)
+
+
+def test_timestamp_arithmetic_normal_values_unaffected():
+    ts = volas.Timestamp("2021-01-01 10:00")          # HH:MM parse (minute form)
+    assert (ts + np.timedelta64(1, "h")).hour == 11
+    assert (ts - np.timedelta64(30, "m")).minute == 30
+    assert (volas.Timestamp("2021-01-02") - volas.Timestamp("2021-01-01")) == np.timedelta64(1, "D")

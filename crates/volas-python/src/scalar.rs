@@ -1,8 +1,7 @@
 //! Scalar Python types: `volas.Timestamp`, the `volas.NA` singleton, and its type.
 
 
-use numpy::IntoPyArray;
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyOverflowError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
 use volas_core::{
@@ -53,6 +52,20 @@ fn delta_ns(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
         .call_method1("astype", ("int64",))?
         .call_method0("item")?
         .extract::<i64>()
+}
+
+/// Validate a checked-arithmetic result as a representable ns value: inside the
+/// i64 range and not `i64::MIN` (the NaT sentinel for both `datetime64[ns]` and
+/// `timedelta64[ns]`, D2). `None` (overflow) or the sentinel raises
+/// `OverflowError` — Timestamp arithmetic must never wrap into a value that
+/// renders as `NaT` yet exposes real civil parts.
+fn checked_ts_ns(ns: Option<i64>) -> PyResult<i64> {
+    match ns {
+        Some(v) if v != i64::MIN => Ok(v),
+        _ => Err(PyOverflowError::new_err(
+            "Timestamp arithmetic overflows the representable datetime64[ns] range",
+        )),
+    }
 }
 
 /// ``volas.Timestamp(value, tz=None)`` — a typed datetime label carrying its own
@@ -113,10 +126,12 @@ impl PyTimestamp {
         }
     }
 
-    /// The wall-clock as a NumPy `datetime64[ns]` (UTC instant).
+    /// The instant as a NumPy `datetime64[ns]` **scalar** (UTC) — a scalar class
+    /// converts to a scalar, matching the stub and pandas `Timestamp.to_numpy()`.
     fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let arr = vec![self.ns].into_pyarray(py);
-        Ok(arr.call_method1("astype", ("datetime64[ns]",))?)
+        py.import("numpy")?
+            .getattr("datetime64")?
+            .call1((self.ns, "ns"))
     }
 
     /// Calendar year in the timestamp's timezone (pandas `Timestamp.year`).
@@ -175,23 +190,31 @@ impl PyTimestamp {
 
     /// `ts + delta` where `delta` is an `np.timedelta64` or an integer count of
     /// nanoseconds, yielding a Timestamp (pandas `Timestamp + Timedelta`).
+    /// Overflow raises — arithmetic is a constructor boundary (D2), so a wrapped
+    /// result can never resurrect the NaT sentinel or a bogus 1677/2262 instant.
     fn __add__(&self, delta: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
-        Ok(PyTimestamp { ns: self.ns.wrapping_add(delta_ns(delta)?), tz: self.tz })
+        Ok(PyTimestamp { ns: checked_ts_ns(self.ns.checked_add(delta_ns(delta)?))?, tz: self.tz })
     }
 
     /// `ts - other`: another Timestamp gives the `np.timedelta64` difference; an
-    /// `np.timedelta64` / nanosecond count gives a shifted Timestamp.
+    /// `np.timedelta64` / nanosecond count gives a shifted Timestamp. Both are
+    /// checked like `__add__` — a difference that exceeds the i64 ns range (or
+    /// lands on the NaT sentinel) raises instead of wrapping.
     fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(o) = other.extract::<PyRef<PyTimestamp>>() {
+            let delta = checked_ts_ns(self.ns.checked_sub(o.ns))?;
             return Ok(py
                 .import("numpy")?
                 .getattr("timedelta64")?
-                .call1((self.ns - o.ns, "ns"))?
+                .call1((delta, "ns"))?
                 .into_any()
                 .unbind());
         }
-        Ok(Py::new(py, PyTimestamp { ns: self.ns.wrapping_sub(delta_ns(other)?), tz: self.tz })?
-            .into_any())
+        Ok(Py::new(
+            py,
+            PyTimestamp { ns: checked_ts_ns(self.ns.checked_sub(delta_ns(other)?))?, tz: self.tz },
+        )?
+        .into_any())
     }
 
     fn __repr__(&self) -> String {
