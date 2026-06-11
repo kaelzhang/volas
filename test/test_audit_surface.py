@@ -13,6 +13,8 @@ Timestamp's surface is fully name-frozen in test_audit_datetime.py.
 
 from __future__ import annotations
 
+import hashlib
+
 import pandas as pd
 import pytest
 
@@ -34,6 +36,7 @@ _SERIES_ALIGN = {
     "is_monotonic_increasing", "is_monotonic_decreasing", "is_unique",
     "reset_index", "sort_index", "rename", "copy", "to_frame", "to_dict", "items",
     "iat", "at",
+    "rolling", "ewm", "expanding", "interpolate",               # decision: backlog, not out-of-scope
 }
 _DATAFRAME_ALIGN = {
     # F8: core per-column reductions (volas has only count/sem/skew/kurt/describe)
@@ -42,6 +45,7 @@ _DATAFRAME_ALIGN = {
     # B-cluster utilities (pct_change excluded -> directive `change`)
     "value_counts", "isin", "replace", "nlargest", "nsmallest",
     "drop_duplicates", "duplicated", "mode",
+    "rolling", "ewm", "expanding", "interpolate",               # decision: backlog
 }
 
 
@@ -65,13 +69,19 @@ def test_align_backlog_is_actually_missing():
     assert not s_present and not d_present, f"already present: Series={s_present} DataFrame={d_present}"
 
 
-def test_surface_drift_tripwire():
-    """Coarse anchor (pandas 3.0.x pinned): the count of pandas members volas
-    lacks. A new pandas method or a volas add/remove shifts it -> re-disposition.
-    (Full name-freeze for Series/DataFrame is a deferred follow-up; the align set
-    above + this tripwire catch the changes that matter.)"""
-    missing = {
-        "Series": len(_pub(pd.Series(dtype="float64")) - _pub(_S)),
-        "DataFrame": len(_pub(pd.DataFrame()) - _pub(_DF)),
+def _missing_hash(pd_obj, vol_obj):
+    names = sorted(_pub(pd_obj) - _pub(vol_obj))
+    return hashlib.sha256("\n".join(names).encode()).hexdigest()[:16]
+
+
+def test_surface_drift_snapshot():
+    """Name-set snapshot (not just count, per review): the SHA of the sorted set
+    of pandas members volas lacks. A +1/-1 swap (a method removed AND another
+    added) leaves the count unchanged but changes the set -> trips here, forcing
+    re-disposition. (pandas 3.0.x pinned; rerun the differential to see the diff.)"""
+    snap = {
+        "Series": _missing_hash(pd.Series(dtype="float64"), _S),
+        "DataFrame": _missing_hash(pd.DataFrame(), _DF),
     }
-    assert missing == {"Series": 144, "DataFrame": 155}, f"surface drift: {missing}"
+    assert snap == {"Series": "49079f9070e6cd78", "DataFrame": "601eac11aca80d07"}, \
+        f"surface name-set drift (recompute differential to locate): {snap}"

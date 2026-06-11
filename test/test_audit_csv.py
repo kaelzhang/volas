@@ -55,3 +55,25 @@ def test_read_csv_int_with_gap_keeps_int(tmp_path):
     df = volas.read_csv(_write(tmp_path))
     assert df["a"].dtype == "int64"                   # currently float64
     assert df["a"].isna().to_list() == [False, False, True]
+
+
+# F38 (review NF-A, P1): to_csv has no RFC-4180 quoting — a string with a comma /
+# quote / newline is written raw, corrupting the file (volas's own read_csv then
+# can't parse it back). Silent data corruption (C4). xfail(strict).
+@pytest.mark.xfail(reason="F38: to_csv does not quote comma/quote/newline -> corrupt CSV", strict=True)
+def test_to_csv_quotes_special_chars(tmp_path):
+    df = volas.DataFrame({"s": ["a,b", 'q"x', "l1\nl2"], "v": [1.0, 2.0, 3.0]})
+    p = tmp_path / "q.csv"
+    df.to_csv(str(p), index=False)
+    back = volas.read_csv(str(p))                     # must round-trip (RFC-4180)
+    assert back["s"].to_list() == ["a,b", 'q"x', "l1\nl2"]
+
+
+# F46 (review NF-B; decision: mangle like pandas): a CSV with a duplicate header
+# must be disambiguated (a, a.1, b), not read as duplicate columns. owner ruling:
+# error is unacceptable (the user can't fix the file). xfail(strict).
+@pytest.mark.xfail(reason="F46: read_csv duplicate header -> duplicate columns, should mangle (a.1)", strict=True)
+def test_read_csv_duplicate_header_mangles(tmp_path):
+    p = tmp_path / "dup.csv"
+    p.write_text("a,a,b\n1,2,3\n")
+    assert list(volas.read_csv(str(p)).columns) == ["a", "a.1", "b"]

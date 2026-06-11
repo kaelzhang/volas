@@ -10,11 +10,18 @@ future sweep covers it automatically.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 import numpy as np
 import pandas as pd
 
 import volas
+
+try:
+    from zoneinfo import ZoneInfo
+    _ZONEINFO = ZoneInfo("Asia/Shanghai")
+except Exception:  # pragma: no cover
+    _ZONEINFO = None
 
 _TS = "2021-06-15 09:30:00"          # the canonical instant every form must express
 
@@ -24,6 +31,7 @@ def datetime_scalars():
     return [
         ("py-datetime", datetime(2021, 6, 15, 9, 30)),
         ("py-date", date(2021, 6, 15)),
+        ("py-datetime-aware", datetime(2021, 6, 15, 9, 30, tzinfo=timezone(timedelta(hours=8)))),
         ("np-datetime64", np.datetime64("2021-06-15T09:30:00", "ns")),
         ("pd-Timestamp", pd.Timestamp(_TS)),
         ("volas-Timestamp", volas.Timestamp(_TS)),
@@ -34,19 +42,43 @@ def datetime_scalars():
         ("str-time-only", "09:30"),
         ("str-offset", "2021-06-15 09:30:00+08:00"),
         ("None", None),
+        ("pd-NaT", pd.NaT),
+        ("np-NaT", np.datetime64("NaT")),
     ]
 
 
 def tz_values():
     """(label, value) — every way to express a timezone parameter."""
-    return [
+    out = [
         ("str-iana", "Asia/Shanghai"),
+        ("str-utc", "UTC"),
         ("str-offset", "+08:00"),
         ("int-offset", 8),
         ("tzinfo-obj", timezone(timedelta(hours=8))),
         ("None", None),
+        ("empty", ""),
         ("invalid", "Not/AZone"),
     ]
+    if _ZONEINFO is not None:
+        out.insert(1, ("zoneinfo", _ZONEINFO))
+    return out
+
+
+# V-axis value boundaries (SPEC §4.5) — all five vocabularies (was only INT/FLOAT).
+V_TS = [
+    ("epoch", "1970-01-01"), ("min+1", "1677-09-22"), ("max", "2262-04-11"),
+    ("leap-day", "2020-02-29"), ("dst-gap", "2021-03-14 02:30:00"),
+    ("dst-fold", "2021-11-07 01:30:00"),
+]
+V_STR = [
+    ("empty", ""), ("whitespace", "  "), ("digit", "123"), ("unicode", "日本語"),
+    ("emoji", "x🎉y"), ("long", "x" * 1000),
+    ("comma", "a,b"), ("quote", 'q"x'), ("newline", "l1\nl2"),   # RFC-4180 / to_csv traps
+]
+V_IDX = [
+    ("in-range", 1), ("zero", 0), ("last", -1), ("out-of-range", 99),
+    ("neg-out", -99),
+]
 
 
 def numeric_scalars():
@@ -58,7 +90,9 @@ def numeric_scalars():
         ("np-int64", np.int64(10)),
         ("np-int32", np.int32(10)),
         ("np-float64", np.float64(10.0)),
+        ("np-float32", np.float32(10.0)),
         ("np-bool", np.bool_(True)),
+        ("decimal", Decimal("10")),
     ]
 
 
@@ -82,6 +116,13 @@ V_INT = [
     ("zero", 0), ("one", 1), ("neg-one", -1),
     ("2**53", 2 ** 53), ("2**53+1", 2 ** 53 + 1),
     ("i64-max", 9223372036854775807), ("i64-min+1", -9223372036854775807),
+    ("i64-min", -9223372036854775808),
+]
+# Integers with NO exact volas dtype (no uint64 / object) — must error (C4), not
+# silently demote to lossy float64. F32. Kept separate from V_INT (which stays
+# in-range / exact).
+V_INT_OVERFLOW = [
+    ("2**63", 2 ** 63), ("2**63+1", 2 ** 63 + 1), ("2**64", 2 ** 64),
 ]
 V_FLOAT = [
     ("zero", 0.0), ("neg-zero", -0.0), ("inf", float("inf")),

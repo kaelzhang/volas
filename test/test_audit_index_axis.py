@@ -53,11 +53,11 @@ def test_loc_datetime_partial_string():
     assert _dt_indexed().loc["2021-02"].shape == (1, 1)        # the whole month
 
 
-# F34 (findings-ledger): .loc on a duplicate-label index leaks AttributeError;
-# pandas returns all matching rows. volas allows the duplicate index at
-# set_index but cannot look it up. xfail(strict) — oracle: matching rows (or a
-# clean rejection at set_index; owner-decidable), never an internal leak.
-@pytest.mark.xfail(reason="F34: duplicate-label .loc leaks AttributeError (pandas: matching rows)", strict=True)
-def test_loc_duplicate_label():
-    dup = _indexed([1, 1, 2])
-    assert dup.loc[1].shape[0] == 2
+# F34 (decision 1B): volas's index assumes unique labels, so set_index should
+# REJECT a duplicate-label column at creation (like it rejects NA-label columns,
+# V16) — not allow it and then leak AttributeError on .loc. xfail(strict):
+# set_index currently accepts the duplicate; a fix makes it raise -> XPASS flips.
+@pytest.mark.xfail(reason="F34: set_index should reject duplicate labels (decision 1B), currently allows", strict=True)
+def test_set_index_rejects_duplicate_labels():
+    with pytest.raises((ValueError, KeyError)):
+        _indexed([1, 1, 2])              # set_index on a column with the duplicate label 1

@@ -71,21 +71,34 @@ def test_boundary_reduction_semantics():
     assert s.isna().to_list() == [False, False, False, True]
 
 
-# --- OBS: int > i64::MAX has no volas int dtype (no uint64) -> lossy f64 ------
-def test_int_overflow_is_lossy_float_obs():
-    """OBS (owner-confirm pending, not asserted as a bug): a python int beyond
-    i64::MAX falls to float64 (lossy) since volas has no uint64; pandas uses
-    uint64. C4 (no silent precision loss) would prefer an error. Pinned visible."""
-    assert _col([2 ** 63]).dtype == "float64"
+# --- F32: int with no exact volas dtype must RAISE (decision: C4, not lossy) --
+# 2^63 / 2^63+1 currently both collapse to 9.223372036854776e+18 (silent
+# precision loss). pandas avoids loss via uint64/object; volas has neither, so
+# per C4 it must raise (suggest explicit dtype='float64'). xfail(strict).
+@pytest.mark.parametrize("label,val", I.V_INT_OVERFLOW, ids=[l for l, _ in I.V_INT_OVERFLOW])
+@pytest.mark.xfail(reason="F32: int > i64::MAX should raise (C4), volas silently demotes to lossy f64", strict=True)
+def test_int_overflow_raises(label, val):
+    with pytest.raises((OverflowError, ValueError)):
+        _col([val])
 
 
-# --- V_STR: string value boundaries (empty / whitespace / unicode / long) ----
-# str is sound here: every boundary constructs as `str`, and sort/unique/compare
-# /isna behave correctly. `.str` accessor is intentionally absent (string
-# manipulation is out-of-scope, like rolling/apply). Pinned against regression.
-@pytest.mark.parametrize("val", ["", "  ", "日本語", "émoji🎉", "x" * 1000, "123"])
-def test_str_boundary_construct(val):
+# F41 (decision: C4): Decimal has no volas dtype (no object); silent -> float64
+# loses the exact-decimal intent. Must raise. xfail(strict).
+@pytest.mark.xfail(reason="F41: Decimal should raise (C4 no object), volas silently -> float64", strict=True)
+def test_decimal_construct_raises():
+    from decimal import Decimal
+    with pytest.raises((TypeError, ValueError)):
+        _col([Decimal("1.5")])
+
+
+# --- V_STR: string value boundaries (now incl comma/quote/newline) -----------
+# str construction is sound: every boundary (incl RFC-4180 traps) constructs as
+# `str`, and sort/unique/compare/isna behave correctly. `.str` accessor is
+# intentionally absent (string manipulation out-of-scope). Pinned vs regression.
+@pytest.mark.parametrize("label,val", I.V_STR, ids=[l for l, _ in I.V_STR])
+def test_str_boundary_construct(label, val):
     assert _col([val]).dtype == "str"
+    assert _col([val]).to_list()[0] == val          # value preserved exactly
 
 
 def test_str_boundary_semantics():

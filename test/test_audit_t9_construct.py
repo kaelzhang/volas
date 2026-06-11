@@ -43,11 +43,11 @@ def test_timestamp_from_string_and_numpy():
     assert t == volas.Timestamp(np.datetime64("2021-06-15T13:45:30"))
 
 
-# F16 (findings-ledger): Timestamp(None) leaks a `.loc` label-vocabulary
-# KeyError ("label must be a datetime string, integer, or numpy datetime64")
-# instead of building NaT (pandas) or raising a clean ValueError — the same
-# boundary-leak class as the fixed F3. xfail(strict).
-@pytest.mark.xfail(reason="F16: Timestamp(None) leaks label KeyError, no NaT", strict=True)
-def test_timestamp_none_is_nat():
-    t = volas.Timestamp(None)
-    assert t is volas.NA or repr(t) in ("NaT", "<NA>")
+# F16 (decision 2): volas has NO NaT scalar, so Timestamp(None) must raise a
+# clean ValueError (it currently leaks a `.loc` label-vocabulary KeyError, the
+# same class as the fixed F3). Oracle is ValueError-only — NOT NaT (the old
+# `is NaT` assertion contradicted decision 2; corrected per review). xfail(strict).
+@pytest.mark.xfail(reason="F16: Timestamp(None) leaks label KeyError, should be clean ValueError", strict=True)
+def test_timestamp_none_raises_valueerror():
+    with pytest.raises(ValueError):
+        volas.Timestamp(None)
