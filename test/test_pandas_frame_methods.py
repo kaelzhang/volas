@@ -39,6 +39,26 @@ def test_tail(n):
     _eq(_df().tail(n), ROWS[-n:])
 
 
+@pytest.mark.parametrize("n", [-1, -3, -4, -10])
+def test_head_negative_drops_tail_rows(n):
+    # Python slicing semantics (= pandas): head(n) is iloc[:n], so head(-1) is
+    # "all but the last row"; -n >= height clamps to an empty frame.
+    _eq(_df().head(n), ROWS[:n] if -n < len(ROWS) else [])
+
+
+@pytest.mark.parametrize("n", [-1, -3, -4, -10])
+def test_tail_negative_drops_head_rows(n):
+    # tail(n) is iloc[-n:], so tail(-1) drops the first row.
+    _eq(_df().tail(n), ROWS[-n:] if -n < len(ROWS) else [])
+
+
+def test_series_head_tail_negative():
+    s = volas.DataFrame({"x": [1.0, 2.0, 3.0]})["x"]
+    assert s.head(-1).to_list() == [1.0, 2.0]
+    assert s.tail(-1).to_list() == [2.0, 3.0]
+    assert len(s.head(-5)) == 0 and len(s.tail(-5)) == 0
+
+
 def test_dropna_any_drops_rows_with_any_nan():
     _eq(_df().dropna("any"), [ROWS[0], ROWS[2]])   # rows 1 & 3 have a NaN
 

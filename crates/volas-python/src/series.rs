@@ -304,17 +304,20 @@ impl PySeries {
         self.reindexed(&self.inner.data.argsort(ascending))
     }
 
-    /// First `n` rows (pandas `head`).
+    /// First `n` rows (pandas `head` = `iloc[:n]`, so a negative `n` drops the
+    /// last `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
-    pub(crate) fn head(&self, n: usize) -> PySeries {
-        self.sliced(0, n.min(self.inner.len()))
+    pub(crate) fn head(&self, n: isize) -> PySeries {
+        let (a, b) = head_tail_window(n, self.inner.len(), true);
+        self.sliced(a, b)
     }
 
-    /// Last `n` rows (pandas `tail`).
+    /// Last `n` rows (pandas `tail` = `iloc[-n:]`, so a negative `n` drops the
+    /// first `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
-    pub(crate) fn tail(&self, n: usize) -> PySeries {
-        let len = self.inner.len();
-        self.sliced(len.saturating_sub(n), len)
+    pub(crate) fn tail(&self, n: isize) -> PySeries {
+        let (a, b) = head_tail_window(n, self.inner.len(), false);
+        self.sliced(a, b)
     }
 
     /// True if any element is truthy (NaN skipped) — pandas `any` -> `np.bool_`.

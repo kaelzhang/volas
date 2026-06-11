@@ -334,6 +334,22 @@ pub(crate) fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bo
     }
 }
 
+/// The `[start, end)` row window of pandas `head` / `tail` over `len` rows.
+/// `n` follows Python slicing (pandas-identical): `head(n)` is `iloc[:n]` — a
+/// negative `n` drops the last `-n` rows — and `tail(n)` is `iloc[-n:]` — a
+/// negative `n` drops the first `-n` rows. So `head(-1)` is "all but the last
+/// row" and `tail(-1)` is "all but the first"; past-the-length values clamp.
+pub(crate) fn head_tail_window(n: isize, len: usize, is_head: bool) -> (usize, usize) {
+    let l = len as isize;
+    if is_head {
+        let end = if n >= 0 { n.min(l) } else { (l + n).max(0) };
+        (0, end as usize)
+    } else {
+        let start = if n >= 0 { (l - n).max(0) } else { (-n).min(l) };
+        (start as usize, len)
+    }
+}
+
 /// Resolve a possibly-negative index to `[0, len)`.
 pub(crate) fn norm_idx(i: isize, len: usize) -> PyResult<usize> {
     let n = len as isize;

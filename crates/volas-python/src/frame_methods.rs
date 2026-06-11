@@ -332,17 +332,20 @@ impl PyDataFrame {
         self.compare(other, CmpOp::Ne)
     }
 
-    /// First `n` rows (pandas `head`).
+    /// First `n` rows (pandas `head` = `iloc[:n]`, so a negative `n` drops the
+    /// last `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
-    pub(crate) fn head(&self, n: usize) -> PyDataFrame {
-        PyDataFrame::plain(self.inner.slice(0, n.min(self.inner.height())))
+    pub(crate) fn head(&self, n: isize) -> PyDataFrame {
+        let (a, b) = head_tail_window(n, self.inner.height(), true);
+        PyDataFrame::plain(self.inner.slice(a, b))
     }
 
-    /// Last `n` rows (pandas `tail`).
+    /// Last `n` rows (pandas `tail` = `iloc[-n:]`, so a negative `n` drops the
+    /// first `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
-    pub(crate) fn tail(&self, n: usize) -> PyDataFrame {
-        let h = self.inner.height();
-        PyDataFrame::plain(self.inner.slice(h.saturating_sub(n), h))
+    pub(crate) fn tail(&self, n: isize) -> PyDataFrame {
+        let (a, b) = head_tail_window(n, self.inner.height(), false);
+        PyDataFrame::plain(self.inner.slice(a, b))
     }
 
     /// Per-column count of non-missing values (pandas `count`) -> a Series indexed
