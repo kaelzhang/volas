@@ -79,3 +79,27 @@ def test_offset_string_keeps_tz():
     s = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01 09:00:00+08:00"]})["t"])
     # the wall-clock should remain 09:00 with an attached zone, not collapse to 01:00.
     assert "09:00" in str(s.to_list()[0])
+
+
+# --- V-axis: DST gap / fold (the hardest tz edges) --------------------------
+def _at(t):
+    df = volas.DataFrame({"v": [1.0]})
+    df["t"] = volas.to_datetime(volas.DataFrame({"t": [t]})["t"])
+    return df.set_index("t")
+
+
+def test_dst_gap_nonexistent_rejected():
+    """A wall-clock in the spring-forward gap doesn't exist → localize raises
+    (volas matches pandas; symmetric with C4 fail-loud)."""
+    with pytest.raises((ValueError, KeyError)):
+        _at("2021-03-14 02:30:00").tz_localize("America/New_York")  # 02:00->03:00 EDT
+
+
+# F33 (findings-ledger): a wall-clock in the fall-back fold is AMBIGUOUS (occurs
+# twice). pandas demands explicit disambiguation (raises without ambiguous=);
+# volas silently picks one — asymmetric with the gap guard above, against
+# fail-loud. xfail(strict).
+@pytest.mark.xfail(reason="F33: ambiguous DST-fold time silently resolved (gap rejects, fold doesn't)", strict=True)
+def test_dst_fold_ambiguous_rejected():
+    with pytest.raises((ValueError, KeyError)):
+        _at("2021-11-07 01:30:00").tz_localize("America/New_York")  # 02:00->01:00 EST

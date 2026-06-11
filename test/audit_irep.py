@@ -47,3 +47,44 @@ def tz_values():
         ("None", None),
         ("invalid", "Not/AZone"),
     ]
+
+
+def numeric_scalars():
+    """(label, value) — every way to express the numeric scalar 10 (operands)."""
+    return [
+        ("py-int", 10),
+        ("py-float", 10.0),
+        ("py-bool", True),                 # 1
+        ("np-int64", np.int64(10)),
+        ("np-int32", np.int32(10)),
+        ("np-float64", np.float64(10.0)),
+        ("np-bool", np.bool_(True)),
+    ]
+
+
+def numeric_list_inputs():
+    """(label, list) — element-type forms for column construction of value 5."""
+    return [
+        ("py-int", [5]),
+        ("py-float", [5.0]),
+        ("np-int64", [np.int64(5)]),
+        ("np-int32", [np.int32(5)]),
+        ("np-float64", [np.float64(5.0)]),
+        ("np-bool", [np.bool_(True)]),
+        ("mixed-int-float", [5, 5.0]),
+        ("np-array-i64", np.array([5], dtype="int64")),
+        ("np-array-f64", np.array([5.0], dtype="float64")),
+    ]
+
+
+# V-axis value boundaries (SPEC §4.5), per dtype.
+V_INT = [
+    ("zero", 0), ("one", 1), ("neg-one", -1),
+    ("2**53", 2 ** 53), ("2**53+1", 2 ** 53 + 1),
+    ("i64-max", 9223372036854775807), ("i64-min+1", -9223372036854775807),
+]
+V_FLOAT = [
+    ("zero", 0.0), ("neg-zero", -0.0), ("inf", float("inf")),
+    ("-inf", float("-inf")), ("nan", float("nan")),
+    ("2**53+1", float(2 ** 53 + 1)), ("subnormal", 5e-324), ("big", 1e308),
+]
