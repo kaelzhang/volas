@@ -40,17 +40,11 @@ pub(super) fn dispatch(
         ("mavp", _) => {
             let real = close(0)?;
             let periods = series_f64_required(df, series, 1)?;
+            // min_p <= max_p is guaranteed by validate_cross_args (which runs
+            // before dispatch), so the i64::clamp below cannot panic.
             let min_p = arg_usize(args, 0, Some(2))?;
             let max_p = arg_usize(args, 1, Some(30))?;
             let matype = arg_usize(args, 2, Some(0))?;
-            // cross-argument domain: each per-bar period is clamped into
-            // [min_p, max_p], which is meaningless inverted (and i64::clamp
-            // panics when min > max).
-            if min_p > max_p {
-                return Err(VolasError::Value(format!(
-                    "mavp: min_period ({min_p}) must be <= max_period ({max_p})"
-                )));
-            }
             let lb = crate::lookback::ma_lookback(max_p, matype);
             let n = real.len();
             let mut out = vec![f64::NAN; n];

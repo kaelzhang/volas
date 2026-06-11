@@ -262,9 +262,14 @@ fn exec_command(
     args: &[Option<String>],
     series: &[Node],
 ) -> Result<Column> {
-    // Command names are case-insensitive (P6). The parser already lower-cases names it
-    // knows are commands; this also covers a bare no-arg command reached as a Node::Name
-    // (e.g. `TR`). Columns are resolved before this function, so their case is preserved.
+    // Validate the command / sub / argument count / argument domains / cross-arg
+    // rules — the single boundary (shared with directive_lookback / _stringify)
+    // where a bad configuration errors loudly instead of becoming a valid-shaped
+    // column with no signal (V17). Missing *required* args stay arg_usize's job.
+    crate::validate::validate_command(name, sub, args)?;
+
+    // Normalize for dispatch the same way the validator does: case-insensitive
+    // (P6), `cdl` aliased to the `style` candlestick namespace.
     let name_lc;
     let name = if name.as_bytes().iter().any(u8::is_ascii_uppercase) {
         name_lc = name.to_ascii_lowercase();
@@ -272,41 +277,9 @@ fn exec_command(
     } else {
         name
     };
-    // `cdl` is an alias for `style` (the candlestick namespace): cdl.<x> == style.<x>.
     let name = if name == "cdl" { "style" } else { name };
     let sub = canon_sub(name, sub);
     let sub = sub.as_deref();
-
-    // Validate the command, sub-command, argument count, and every supplied
-    // argument's domain against the spec (defaults are valid by construction).
-    // This is the single boundary where a bad configuration errors loudly —
-    // a zero window, an out-of-domain seed, a NaN multiplier — instead of
-    // becoming a valid-shaped column with no signal (V17).
-    match crate::spec::command_spec(name, sub) {
-        Some(spec) if args.len() > spec.args.len() => {
-            return Err(VolasError::Value(format!(
-                "command \"{name}\" accepts at most {} argument(s), got {}",
-                spec.args.len(),
-                args.len()
-            )));
-        }
-        Some(spec) => {
-            for (i, arg) in spec.args.iter().enumerate() {
-                if let Some(s) = arg_at(args, i) {
-                    arg.bound.validate(s).map_err(|why| {
-                        VolasError::Value(format!("{name}: argument #{i} {why}, got '{s}'"))
-                    })?;
-                }
-            }
-        }
-        None if crate::spec::is_command(name) => {
-            return Err(VolasError::Value(match sub {
-                Some(s) => format!("command \"{name}\" has no sub-command \"{s}\""),
-                None => format!("command \"{name}\" requires a sub-command"),
-            }));
-        }
-        None => return Err(VolasError::Value(format!("unknown command \"{name}\""))),
-    }
 
     overlap::dispatch(df, name, sub, args, series)
 }

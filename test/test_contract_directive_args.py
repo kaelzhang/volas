@@ -3,10 +3,16 @@ its parameter's real domain: a value whose output is degenerate by construction
 (a zero window's all-NaN column, a single-sample variance's constant zero, an
 out-of-domain seed / limit, a divide-by-zero scaling factor) raises
 DirectiveValueError instead of silently producing a valid-shaped column with no
-signal. A period merely longer than the data stays legal (pure warm-up NaN)."""
+signal. A period merely longer than the data stays legal (pure warm-up NaN).
+
+The SAME validation runs at every public boundary (P2-02): df[directive],
+volas.directive_lookback(directive), and volas.directive_stringify(directive)
+accept exactly the same set, so a bad directive can never be canonicalized,
+persisted, or have a warm-up window computed for it before execution fails."""
 
 import numpy as np
 import pytest
+import volas
 from volas import DataFrame
 
 
@@ -48,6 +54,28 @@ def test_invalid_directive_argument_raises(directive):
         _df()[directive]
 
 
+# the helper boundaries reject the identical set (P2-02), so an illegal directive
+# can't slip into a cache key / warm-up calc that only fails later at execution.
+_HELPER_INVALID = [
+    "ma:0", "rsi:0", "kdj.k:0", "change:0", "var:1", "cci:1", "ma:5,9",
+    "mama:1.5,0.05", "asi:0", "increase:3,0", "mavp:30,2@close,close",
+    "ma:0 + close",            # validation recurses into operators
+    "repeat:2@(ma:0>10)",      # ...and into @-series sub-expressions
+]
+
+
+@pytest.mark.parametrize("directive", _HELPER_INVALID)
+def test_invalid_directive_rejected_by_lookback(directive):
+    with pytest.raises(Exception):
+        volas.directive_lookback(directive)
+
+
+@pytest.mark.parametrize("directive", _HELPER_INVALID)
+def test_invalid_directive_rejected_by_stringify(directive):
+    with pytest.raises(Exception):
+        volas.directive_stringify(directive)
+
+
 @pytest.mark.parametrize("directive", [
     "ma:1",                  # a 1-period MA is the series itself — legal
     "atr:1",                 # ATR(1) is the true range — legal
@@ -62,3 +90,6 @@ def test_invalid_directive_argument_raises(directive):
 ])
 def test_domain_edge_values_still_execute(directive):
     assert len(_df()[directive]) == 30
+    # the same legal directive passes the helper boundaries too
+    volas.directive_lookback(directive)
+    volas.directive_stringify(directive)

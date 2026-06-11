@@ -37,10 +37,18 @@ from volas import directive_stringify as stringify
     ('macd.s', 'macd.signal'),
     ('boll.u:20', 'boll.upper'),
     ('(kdj.j)&(kdj.d)', 'kdj.j&kdj.d'),
-    # default argument / series slots kept as empty placeholders
-    ('boll:30,', 'boll:30'),
+    # default argument / series slots kept as empty placeholders (WITHIN the
+    # command's arity — an empty leading arg / series slot, not extra positions)
     ('kdj.j:,4', 'kdj.j:,4'),
     ('kdj.j:@,high', 'kdj.j@,high'),
 ])
 def test_stringify(directive, expected):
     assert stringify(directive) == expected
+
+
+def test_stringify_rejects_invalid_directive():
+    # P2-02: stringify validates like df[directive] / lookback, so an over-arity
+    # directive (boll takes one arg; the trailing comma is a 2nd, empty position)
+    # is rejected here too, not silently canonicalized to a form df[] would reject.
+    with pytest.raises(Exception):
+        stringify('boll:30,')

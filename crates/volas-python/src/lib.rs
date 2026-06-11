@@ -190,6 +190,9 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
 #[pyfunction]
 fn directive_stringify(directive: &str) -> PyResult<String> {
     let node = parse(directive).map_err(syntax_err)?;
+    // Reject the same invalid configurations `df[directive]` does, so an illegal
+    // directive can never be canonicalized / persisted (P2-02 / V17).
+    volas_directive::validate_node(&node).map_err(value_err)?;
     Ok(volas_directive::stringify(&node))
 }
 
@@ -202,6 +205,10 @@ fn directive_stringify(directive: &str) -> PyResult<String> {
 #[pyfunction]
 fn directive_lookback(directive: &str) -> PyResult<usize> {
     let node = parse(directive).map_err(syntax_err)?;
+    // Reject the same invalid configurations `df[directive]` does, so a bad
+    // directive can't yield a "plausible" warm-up window (e.g. ma:0 -> 0) that
+    // feeds a scheduler / cache before execution fails (P2-02 / V17).
+    volas_directive::validate_node(&node).map_err(value_err)?;
     Ok(volas_directive::lookback::lookback(&node))
 }
 
