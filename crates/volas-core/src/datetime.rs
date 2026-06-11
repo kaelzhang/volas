@@ -19,8 +19,10 @@ pub fn parse_ns_in_tz(s: &str, tz: Tz) -> Option<i64> {
     if let Some(ns) = parse_offset_aware(s) {
         return Some(ns);
     }
-    let (y, mo, d, h, mi, se) = naive_parts(s)?;
-    tz.wall_to_utc_ns(y, mo, d, h, mi, se)
+    let (y, mo, d, h, mi, se, subsec) = naive_parts(s)?;
+    // The fractional second is tz-independent (offsets are whole minutes), so it
+    // is added after the wall-clock -> UTC conversion of the whole-second part.
+    tz.wall_to_utc_ns(y, mo, d, h, mi, se)?.checked_add(subsec)
 }
 
 /// Parse an **offset-aware** string (RFC3339 / `%z`) to an absolute UTC instant.
@@ -28,10 +30,12 @@ fn parse_offset_aware(s: &str) -> Option<i64> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return dt.timestamp_nanos_opt();
     }
+    // `%.f` parses an optional `.fraction` (up to ns), so each form covers both
+    // the whole-second and the fractional spelling.
     for fmt in [
-        "%Y-%m-%d %H:%M:%S%:z",
-        "%Y-%m-%d %H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S%.f%:z",
+        "%Y-%m-%d %H:%M:%S%.f%z",
+        "%Y-%m-%dT%H:%M:%S%.f%z",
     ] {
         if let Ok(dt) = DateTime::parse_from_str(s, fmt) {
             return dt.timestamp_nanos_opt();
@@ -40,12 +44,16 @@ fn parse_offset_aware(s: &str) -> Option<i64> {
     None
 }
 
-/// Parse the supported **naive** forms into civil parts (no tz applied yet).
-fn naive_parts(s: &str) -> Option<(i32, u32, u32, u32, u32, u32)> {
+/// Parse the supported **naive** forms into civil parts plus the fractional
+/// second in nanoseconds (no tz applied yet).
+fn naive_parts(s: &str) -> Option<(i32, u32, u32, u32, u32, u32, i64)> {
+    // Full time, with an optional fractional second (`%.f` also matches its
+    // absence) — the form `format_ns` emits, so text output round-trips at ns
+    // precision (D1).
     for fmt in [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y/%m/%d %H:%M:%S%.f",
     ] {
         if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
             return Some((
@@ -55,12 +63,27 @@ fn naive_parts(s: &str) -> Option<(i32, u32, u32, u32, u32, u32)> {
                 dt.hour(),
                 dt.minute(),
                 dt.second(),
+                dt.nanosecond() as i64,
+            ));
+        }
+    }
+    // Minute resolution (`14:30` — the everyday intraday spelling, pandas-parity).
+    for fmt in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y/%m/%d %H:%M"] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Some((
+                dt.year(),
+                dt.month(),
+                dt.day(),
+                dt.hour(),
+                dt.minute(),
+                0,
+                0,
             ));
         }
     }
     for fmt in ["%Y-%m-%d", "%Y/%m/%d"] {
         if let Ok(d) = NaiveDate::parse_from_str(s, fmt) {
-            return Some((d.year(), d.month(), d.day(), 0, 0, 0));
+            return Some((d.year(), d.month(), d.day(), 0, 0, 0, 0));
         }
     }
     None
@@ -138,20 +161,45 @@ pub fn days_from_civil(y: i64, mo: i64, d: i64) -> i64 {
     date.signed_duration_since(epoch).num_days()
 }
 
-/// Format epoch nanoseconds as `YYYY-MM-DD HH:MM:SS` (UTC, naive).
+/// The `.fff` / `.ffffff` / `.fffffffff` fractional-second suffix for a
+/// sub-second remainder, empty for a whole second. Digits come in groups of
+/// three (ms / µs / ns), pandas-style, so a 123 ms value prints `.123` and a
+/// 123 ns value prints `.000000123` — text output never silently drops
+/// sub-second precision the storage still has (D1).
+fn subsec_suffix(nsub: u32) -> String {
+    if nsub == 0 {
+        String::new()
+    } else if nsub % 1_000_000 == 0 {
+        format!(".{:03}", nsub / 1_000_000)
+    } else if nsub % 1_000 == 0 {
+        format!(".{:06}", nsub / 1_000)
+    } else {
+        format!(".{nsub:09}")
+    }
+}
+
+/// Format epoch nanoseconds as `YYYY-MM-DD HH:MM:SS[.fff[fff[fff]]]` (UTC,
+/// naive). Sub-second precision is preserved (see [`subsec_suffix`]).
 pub fn format_ns(ns: i64) -> String {
     if ns == i64::MIN {
         return "NaT".to_string(); // missing instant — not a real 1677 civil date
     }
     let secs = ns.div_euclid(1_000_000_000);
     let nsub = ns.rem_euclid(1_000_000_000) as u32;
-    DateTime::from_timestamp(secs, nsub)
-        .map(|dt| dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string())
+    DateTime::from_timestamp(secs, 0)
+        .map(|dt| {
+            format!(
+                "{}{}",
+                dt.naive_utc().format("%Y-%m-%d %H:%M:%S"),
+                subsec_suffix(nsub)
+            )
+        })
         .unwrap_or_default()
 }
 
-/// Format epoch nanoseconds as the wall-clock `YYYY-MM-DD HH:MM:SS` in `tz` (the
-/// human/string form; bulk numpy export stays UTC).
+/// Format epoch nanoseconds as the wall-clock
+/// `YYYY-MM-DD HH:MM:SS[.fff[fff[fff]]]` in `tz` (the human/string form; bulk
+/// numpy export stays UTC). Sub-second precision is preserved like [`format_ns`].
 pub fn format_ns_tz(ns: i64, tz: Tz) -> String {
     if ns == i64::MIN {
         return "NaT".to_string();
@@ -160,7 +208,11 @@ pub fn format_ns_tz(ns: i64, tz: Tz) -> String {
         return format_ns(ns);
     }
     let (y, mo, d, h, mi, s) = tz.civil_parts(ns);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+    let nsub = ns.rem_euclid(1_000_000_000) as u32;
+    format!(
+        "{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}{}",
+        subsec_suffix(nsub)
+    )
 }
 
 /// The wall-clock civil parts `(year, month, day, hour, minute, second)` of the
