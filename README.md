@@ -18,7 +18,7 @@ The difference is speed that **volas** beats **EVERY** solution on earth in term
 
 - **Drop-in for pandas.** The same `.loc` / `.iloc` / `.at`, `read_csv`,
   `to_numpy` and resampling — change the import, keep your code. (See
-  [what's not covered](#index-limitations-vs-pandas))
+  [what's not covered](PANDAS-DIFFERENCES.md#index-limitations))
 - **Fastest in the field.** Quicker than pandas, polars and TA-Lib on
   nearly every indicator — and faster than pandas even off the trading desk.
   ([benchmark](benchmark-report.html))

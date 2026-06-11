@@ -101,9 +101,19 @@ jobs:
         run: make coverage
 
       - name: Upload coverage to Codecov
+        # Always upload — even if `make coverage` failed the < 100% gate above —
+        # so Codecov still gets the PR's coverage (the lcov is written before the
+        # gate exits) and can annotate exactly which lines regressed.
+        if: always()
         uses: codecov/codecov-action@v5
         with:
           files: target/volas-cov/union.lcov
+          # ONLY the true union. Without this, the Codecov CLI auto-searches the
+          # working tree and also finds the partial cargo.lcov / pytest.lcov beside
+          # it; merging those re-introduces the LCOV_EXCL_LINE defensive lines
+          # (DA:X,0 there, deliberately dropped from the union) as phantom misses,
+          # so Codecov reported 99.81% while the gate is a true 100%.
+          disable_search: true
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
