@@ -293,7 +293,14 @@ pub(crate) fn scalar_fill_col(
                     "fill for a datetime column must be a Timestamp or datetime string, not a number",
                 ));
             }
-            Ok((Column::datetime(vec![parse_ts(o)?; n]), DType::Datetime))
+            // F3: a bad datetime string is a bad *value* (ValueError), not a `.loc`
+            // label lookup — don't leak parse_ts's label-vocabulary KeyError here.
+            let ts = parse_ts(o).map_err(|_| {
+                PyValueError::new_err(
+                    "fill for a datetime column must be a valid datetime string or Timestamp",
+                )
+            })?;
+            Ok((Column::datetime(vec![ts; n]), DType::Datetime))
         }
         // a bool column keeps bool for a bool fill or a 0/1 numeric fill; any other
         // number promotes the (numeric-family) bool column to float — matching
@@ -305,10 +312,12 @@ pub(crate) fn scalar_fill_col(
             let x = o.extract::<f64>().map_err(|_| {
                 PyTypeError::new_err("fill must be a number, a matching-dtype scalar, or a Series")
             })?;
+            // F40 (decision 4): a bool column stays bool — 0/1 fills it; any other
+            // number is an error, never a silent promotion to float (C3/C4 honesty).
             if x == 0.0 || x == 1.0 {
                 Ok((Column::bool(vec![x != 0.0; n]), DType::Bool))
             } else {
-                Ok((Column::f64(vec![x; n]), DType::F64))
+                Err(PyTypeError::new_err("fill for a bool column must be a bool (or 0/1)"))
             }
         }
         // a numeric column with a bool fill contributes bool (value-based promotion).
@@ -319,7 +328,13 @@ pub(crate) fn scalar_fill_col(
             let x = o.extract::<f64>().map_err(|_| {
                 PyTypeError::new_err("fill must be a number, a matching-dtype scalar, or a Series")
             })?;
-            let dt = if fits(DType::I64, x) { DType::I64 } else { DType::F64 };
+            // F1: contribute the narrowest int width that fits, so an i32 column
+            // filled with an integer stays int32 (# C2), not widened to int64.
+            let dt = match dtype {
+                DType::I32 if fits(DType::I32, x) => DType::I32,
+                _ if fits(DType::I64, x) => DType::I64,
+                _ => DType::F64,
+            };
             Ok((Column::f64(vec![x; n]), dt))
         }
     }

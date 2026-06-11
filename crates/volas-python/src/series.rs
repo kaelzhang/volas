@@ -520,6 +520,15 @@ impl PySeries {
     /// (pandas `clip`).
     #[pyo3(signature = (lower = None, upper = None))]
     pub(crate) fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PySeries> {
+        // F19: an inverted interval (lower > upper) is a coding error -> fail-loud
+        // (C5), not a silent collapse-to-upper nor pandas's quiet interval swap.
+        if let (Some(lo), Some(hi)) = (lower, upper) {
+            if lo > hi {
+                return Err(PyValueError::new_err(format!(
+                    "clip lower ({lo}) must be <= upper ({hi})"
+                )));
+            }
+        }
         Ok(col_to_series(&self.inner, self.inner.data.clip(lower, upper).map_err(pyerr)?))
     }
 

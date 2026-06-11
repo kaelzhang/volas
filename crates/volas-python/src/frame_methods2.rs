@@ -350,9 +350,15 @@ impl PyDataFrame {
                 .iter()
                 .map(|l| l.bind(py).extract::<String>())
                 .collect::<PyResult<_>>()?;
-            let keep: Vec<String> = self
-                .inner
-                .names()
+            // F37: a missing label is an error (pandas KeyError), not a silent
+            // no-op — never claim to have dropped a column that wasn't there (C4).
+            let names = self.inner.names();
+            for n in &drop_names {
+                if !names.iter().any(|m| m == n) {
+                    return Err(PyKeyError::new_err(format!("[{n:?}] not found in axis")));
+                }
+            }
+            let keep: Vec<String> = names
                 .iter()
                 .filter(|n| !drop_names.contains(n))
                 .cloned()
@@ -364,6 +370,13 @@ impl PyDataFrame {
             .iter()
             .map(|l| parse_label(l.bind(py), index))
             .collect::<PyResult<_>>()?;
+        // F37 (row axis): every label must exist in the index, else KeyError.
+        let present: Vec<Label> = (0..self.inner.height()).map(|i| index.label_at(i)).collect();
+        for t in &targets {
+            if !present.contains(t) {
+                return Err(PyKeyError::new_err("label not found in axis"));
+            }
+        }
         let positions: Vec<usize> = (0..self.inner.height())
             .filter(|&i| !targets.contains(&index.label_at(i)))
             .collect();
@@ -598,6 +611,22 @@ impl PyDataFrame {
         let mut mapping = HashMap::new();
         for (k, v) in columns.iter() {
             mapping.insert(k.extract::<String>()?, v.extract::<String>()?);
+        }
+        // F39: a rename must not collide two columns onto one name (duplicate
+        // column names violate the unique-name contract) — fail-loud (C4).
+        let result: Vec<String> = self
+            .inner
+            .names()
+            .iter()
+            .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for n in &result {
+            if !seen.insert(n) {
+                return Err(PyValueError::new_err(format!(
+                    "rename would produce duplicate column {n:?}"
+                )));
+            }
         }
         Ok(PyDataFrame::plain(
             self.inner.rename(&mapping).map_err(pyerr)?,

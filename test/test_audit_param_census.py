@@ -62,9 +62,8 @@ def test_clip_bounds_census(lo, hi):
     assert _match(_s().clip(lo, hi).to_list(), _ps().clip(lo, hi).tolist()), f"clip({lo},{hi})"
 
 
-# F19 (findings-ledger): clip with lower > upper must raise (decision 3, fail-loud)
-# — volas silently collapses to `upper` everywhere. xfail(strict).
-@pytest.mark.xfail(reason="F19: clip(lower>upper) should raise, volas silently collapses", strict=True)
+# F19 (decision 3, FIXED): clip with lower > upper raises (was a silent collapse
+# to `upper`). fail-loud (C5).
 def test_clip_inverted_bounds_raises():
     with pytest.raises(ValueError):
         _s().clip(5, 2)

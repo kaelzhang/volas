@@ -501,6 +501,14 @@ impl PyDataFrame {
     /// Column-wise clip into `[lower, upper]` (pandas `clip`), dtype-preserving.
     #[pyo3(signature = (lower = None, upper = None))]
     pub(crate) fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> PyResult<PyDataFrame> {
+        // F19: inverted interval (lower > upper) -> fail-loud (C5), not silent.
+        if let (Some(lo), Some(hi)) = (lower, upper) {
+            if lo > hi {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "clip lower ({lo}) must be <= upper ({hi})"
+                )));
+            }
+        }
         self.map_cols(|s| s.clip(lower, upper))
     }
     /// Column-wise discrete difference (pandas `diff`), dtype-preserving; the gap
@@ -634,6 +642,13 @@ impl PyDataFrame {
                 .name()
                 .unwrap_or("index")
                 .to_string();
+            // F39: the restored index label must not collide with an existing
+            // column — a duplicate column name violates the unique-name contract.
+            if self.inner.names().iter().any(|n| n == &label) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "reset_index: column name {label:?} already exists (would duplicate)"
+                )));
+            }
             let mut names = vec![label];
             names.extend(self.inner.names().iter().cloned());
             let mut cols = vec![self.inner.index().to_column()];

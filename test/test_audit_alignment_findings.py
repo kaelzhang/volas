@@ -30,24 +30,22 @@ def test_where_mismatched_columns_raises():
         prices.where(signal)
 
 
-# F37 (decision 3): drop of a missing label is a silent no-op; pandas raises
-# KeyError. Should fail-loud (C4).
-@pytest.mark.xfail(reason="F37: drop silently ignores a missing label (should KeyError)", strict=True)
+# F37 (decision 3, FIXED): drop of a missing label raises KeyError (was a silent
+# no-op). fail-loud (C4).
 def test_drop_missing_label_raises():
     df = volas.DataFrame({"a": [1.0], "b": [2.0]})
     with pytest.raises(KeyError):
         df.drop(["z"], axis=1)
 
 
-# F39 (decision 3): three entry points can breach the unique-column contract.
-@pytest.mark.xfail(reason="F39: reset_index name collision produces duplicate columns", strict=True)
+# F39 (decision 3, FIXED): three entry points must not breach the unique-column
+# contract — reset_index name collision and rename collision now raise.
 def test_reset_index_name_collision_raises():
     df = volas.DataFrame({"index": [9.0], "a": [1.0]})   # 'index' collides with the reset name
     with pytest.raises((ValueError, KeyError)):
         df.reset_index()
 
 
-@pytest.mark.xfail(reason="F39: rename into an existing name produces duplicate columns", strict=True)
 def test_rename_collision_raises():
     df = volas.DataFrame({"a": [1.0], "b": [2.0]})
     with pytest.raises((ValueError, KeyError)):
@@ -62,10 +60,8 @@ def test_dataframe_index_kwarg():
     assert df.reset_index().iloc[:, 0].to_list() == [10, 20]
 
 
-# F40 (decision 4): a non-binary numeric fill into a bool column must raise (a
-# bool column stays bool; C3/C4 dtype honesty). Currently fillna(2) silently
-# becomes float64 [1.0, 2.0, 0.0], destroying the bool semantics. xfail(strict).
-@pytest.mark.xfail(reason="F40: bool.fillna(non-binary) should raise, volas -> float64", strict=True)
+# F40 (decision 4, FIXED): a non-binary numeric fill into a bool column raises
+# (a bool column stays bool; C3/C4) — was a silent promotion to float64.
 def test_bool_fillna_non_binary_raises():
     s = volas.DataFrame({"x": [True, None, False]})["x"]
     with pytest.raises((TypeError, ValueError)):

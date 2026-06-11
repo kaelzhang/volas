@@ -55,11 +55,11 @@ def _fill_oracle(d: str, n: str, p: str):
             return ("ok", want)          # 0/1 bool stays int
         return ("raise", TypeError)      # str / ts into a numeric column
     if d == "bool":
-        if p == "bool" or p == "int":
-            return ("ok", "bool")        # bool, or a 0/1 number, keeps bool
-        if p == "float":
-            return ("ok", "float64")     # a non-0/1 number promotes bool to float
-        return ("raise", TypeError)      # str / ts into a bool column
+        if p == "bool" or p == "int":    # bool, or 0/1 (FILL_PARAMS int=0), keeps bool
+            return ("ok", "bool")
+        # F40 (decision 4): a non-0/1 number (float 2.5) into a bool column is an
+        # error, not a silent promotion to float — C3/C4 dtype honesty.
+        return ("raise", TypeError)      # float / str / ts into a bool column
     if d == "str":
         return ("ok", "str") if p == "str" else ("raise", TypeError)
     if d == "datetime":
