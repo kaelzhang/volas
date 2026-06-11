@@ -21,7 +21,7 @@ The difference is speed that **volas** beats **EVERY** solution on earth in term
   [what's not covered](PANDAS-DIFFERENCES.md#index-limitations))
 - **Fastest in the field.** Quicker than pandas, polars and TA-Lib on
   nearly every indicator — and faster than pandas even off the trading desk.
-  ([benchmark](benchmark-report.html))
+  ([live benchmark report](https://kaelzhang.github.io/volas/))
   - Beats TA-Lib on **153 / 158** covered indicators in batch computation.
   - Refreshes indicators incrementally on each new bar — up to **~5×** faster
     than TA-Lib, and up to **~200x** faster than pandas.

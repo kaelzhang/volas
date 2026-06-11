@@ -51,7 +51,9 @@ make benchmark INDICATOR=roc:10
 make benchmark WEB_REPORT=1     # full run, writes ./benchmark-report.html
 ```
 
-[`benchmark-report.html`](benchmark-report.html) keeps the append and
+The locally generated `./benchmark-report.html` (and the always-current
+published copy at <https://kaelzhang.github.io/volas/>, deployed by the
+`pages` workflow) keeps the append and
 batch sections as charts, then summarizes full coverage as one row per
 TA-Lib indicator. Extra length fixtures and cached append-refresh
 comparisons appear as additional `volas vs TA-Lib` columns instead of
