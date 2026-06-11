@@ -212,14 +212,16 @@ mod tests {
     }
 
     #[test]
-    fn blank_or_na_upcasts_int_to_f64_nan() {
+    fn blank_or_na_keeps_int_with_validity() {
+        // F35: an integral column with NA tokens stays int64 + validity (the
+        // native-NA model, matching the constructor) — no legacy float demotion.
         for cells in [&["1", "", "3"][..], &["1", "NA", "null"][..]] {
             match infer(cells) {
-                Column::F64(v) => {
-                    assert_eq!(v[0], 1.0);
-                    assert!(v[1].is_nan());
+                Column::I64(v, val) => {
+                    assert_eq!(v[0], 1);
+                    assert!(!val.is_valid(1));
                 }
-                other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
+                other => panic!("expected I64, got {other:?}"), // LCOV_EXCL_LINE
             }
         }
     }
@@ -293,11 +295,11 @@ mod tests {
             ..Default::default()
         });
         match infer_column(vec!["1".into(), "MISSING".into()], &na) {
-            Column::F64(v) => {
-                assert_eq!(v[0], 1.0);
-                assert!(v[1].is_nan());
+            Column::I64(v, val) => {
+                assert_eq!(v[0], 1);
+                assert!(!val.is_valid(1));          // F35: custom NA token -> int64 + NA
             }
-            other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
+            other => panic!("expected I64, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
 
