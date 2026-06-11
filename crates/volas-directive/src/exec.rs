@@ -273,7 +273,11 @@ fn exec_command(
     let sub = canon_sub(name, sub);
     let sub = sub.as_deref();
 
-    // Validate the command, sub-command, and argument count against the spec.
+    // Validate the command, sub-command, argument count, and every supplied
+    // argument's domain against the spec (defaults are valid by construction).
+    // This is the single boundary where a bad configuration errors loudly —
+    // a zero window, an out-of-domain seed, a NaN multiplier — instead of
+    // becoming a valid-shaped column with no signal (V17).
     match crate::spec::command_spec(name, sub) {
         Some(spec) if args.len() > spec.args.len() => {
             return Err(VolasError::Value(format!(
@@ -282,7 +286,15 @@ fn exec_command(
                 args.len()
             )));
         }
-        Some(_) => {}
+        Some(spec) => {
+            for (i, arg) in spec.args.iter().enumerate() {
+                if let Some(s) = arg_at(args, i) {
+                    arg.bound.validate(s).map_err(|why| {
+                        VolasError::Value(format!("{name}: argument #{i} {why}, got '{s}'"))
+                    })?;
+                }
+            }
+        }
         None if crate::spec::is_command(name) => {
             return Err(VolasError::Value(match sub {
                 Some(s) => format!("command \"{name}\" has no sub-command \"{s}\""),
@@ -321,6 +333,10 @@ fn tf_to_minutes(s: &str) -> Result<i64> {
             )))
         }
     };
+    // a zero / negative span (e.g. "0m") would divide the annualization by zero
+    if n < 1 {
+        return Err(VolasError::Value(format!("invalid time frame '{s}'")));
+    }
     Ok(n * mult)
 }
 
@@ -405,77 +421,134 @@ mod tests {
         ohlcv_n(30)
     }
 
-    /// Degenerate periods (0, or larger than the frame) must trip every indicator's
-    /// warm-up guard and return an all-length result rather than panic — these guard
-    /// branches are otherwise unreached by valid-period parity tests.
+    /// A period far larger than the frame is a LEGAL configuration (pure
+    /// warm-up: a valid-length all-NaN column) and must trip every indicator's
+    /// `period == 0 || period > n` warm-up guard line rather than panic. (A
+    /// period of 0 is no longer reachable here — the exec boundary rejects it,
+    /// V17 — so the over-length form is what exercises the shared guard line;
+    /// the kernels' own `== 0` defense is covered by the direct calls below.)
     #[test]
     fn degenerate_periods_hit_compute_guards() {
         let df = ohlcv();
         let n = 30;
-        let zero = [
-            "ma:0",
-            "ema:0",
-            "smma:0",
-            "wma:0",
-            "dema:0",
-            "tema:0",
-            "trima:0",
-            "t3:0",
-            "kama:0",
-            "mom:0",
-            "roc:0",
-            "rocp:0",
-            "rocr:0",
-            "rocr100:0",
-            "willr:0",
-            "cci:0",
-            "cmo:0",
-            "mfi:0",
-            "trix:0",
-            "midpoint:0",
-            "midprice:0",
-            "atr:0",
-            "natr:0",
-            "rsi:0",
-            "plus_dm:0",
-            "minus_dm:0",
-            "plus_di:0",
-            "minus_di:0",
-            "dx:0",
-            "adx:0",
-            "adxr:0",
-            "aroon.up:0",
-            "aroonosc:0",
-            "sum:0",
-            "maxindex:0",
-            "minindex:0",
-            "minmax.min:0",
-            "minmaxindex.min:0",
-            "linearreg:0",
-            "linearreg_slope:0",
-            "linearreg_intercept:0",
-            "linearreg_angle:0",
-            "tsf:0",
-            "var:0",
-            "stddev:0",
-            "llv:0",
-            "hhv:0",
-            "boll:0",
-            "bbw:0",
-            "accbands:0",
-            "correl:0@close,close",
-            "beta:0@close,close",
-            // period larger than the frame trips the `period > n` arm.
-            "ma:99",
-            "atr:99",
-            "rsi:99",
-            "sum:99",
-            "linearreg:99",
+        let over = [
+            "ma:99999",
+            "ema:99999",
+            "smma:99999",
+            "wma:99999",
+            "dema:99999",
+            "tema:99999",
+            "trima:99999",
+            "t3:99999",
+            "kama:99999",
+            "mom:99999",
+            "roc:99999",
+            "rocp:99999",
+            "rocr:99999",
+            "rocr100:99999",
+            "willr:99999",
+            "cci:99999",
+            "cmo:99999",
+            "mfi:99999",
+            "trix:99999",
+            "midpoint:99999",
+            "midprice:99999",
+            "atr:99999",
+            "natr:99999",
+            "rsi:99999",
+            "plus_dm:99999",
+            "minus_dm:99999",
+            "plus_di:99999",
+            "minus_di:99999",
+            "dx:99999",
+            "adx:99999",
+            "adxr:99999",
+            "aroon.up:99999",
+            "aroonosc:99999",
+            "sum:99999",
+            "maxindex:99999",
+            "minindex:99999",
+            "minmax.min:99999",
+            "minmaxindex.min:99999",
+            "linearreg:99999",
+            "linearreg_slope:99999",
+            "linearreg_intercept:99999",
+            "linearreg_angle:99999",
+            "tsf:99999",
+            "var:99999",
+            "stddev:99999",
+            "llv:99999",
+            "hhv:99999",
+            "boll:99999",
+            "bbw:99999",
+            "accbands:99999",
+            "correl:99999@close,close",
+            "beta:99999@close,close",
+            "change:99999",
+            "repeat:99999@(close>10)",
         ];
-        for d in zero {
+        for d in over {
             let col = execute(&df, &parse(d).unwrap())
                 .unwrap_or_else(|e| panic!("directive {d:?} failed: {e:?}"));
             assert_eq!(col.len(), n, "directive {d:?} returned wrong length");
+        }
+        // The kernels' own `period == 0` defense stays (a direct Rust caller can
+        // still pass 0); the underflow-prone kernels are exercised directly.
+        assert!(ind::change(&[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
+        assert!(ind::repeat(&[true, true], 0).iter().all(|&b| !b));
+        assert!(ind::increase(&[1.0, 2.0], 0, 1).iter().any(|&b| b)); // repeat 0 -> period 1, no underflow
+    }
+
+    /// Every command family rejects an out-of-domain argument at the exec
+    /// boundary (V17): a zero window, a sub-2 second-moment window, an
+    /// out-of-range matype / seed / limit, a negative SAR factor, a zero ASI
+    /// divisor, a non-±1 direction, a NaN multiplier, inverted mavp limits.
+    #[test]
+    fn argument_bounds_reject_invalid_configurations() {
+        let df = ohlcv();
+        let is_err = |d: &str| execute(&df, &parse(d).unwrap()).is_err();
+        // zero periods: a valid-shaped all-NaN column is not a legal config.
+        for d in [
+            "ma:0", "ema:0", "atr:0", "rsi:0", "sum:0", "mom:0", "mfi:0",
+            "boll:0", "kdj.k:0", "stoch.k:0,3,0,3,0", "ultosc:0,14,28",
+            "repeat:0@(close>10)",
+        ] {
+            assert!(is_err(d), "{d} must be rejected");
+        }
+        // second-moment / regression windows need >= 2 samples.
+        for d in [
+            "linearreg:1", "linearreg_slope:1", "tsf:1", "var:1", "stddev:1",
+            "correl:1@close,close", "beta:1@close,close", "cci:1",
+            "aroon.up:1", "aroonosc:1", "change:1", "hv:1",
+        ] {
+            assert!(is_err(d), "{d} must be rejected");
+        }
+        // selector / domain arguments.
+        assert!(is_err("ma:5,9"), "matype past 8");
+        assert!(is_err("stoch.k:5,3,9,3,0"), "stoch matype past 8");
+        assert!(is_err("kdj.k:9,3,150"), "KDJ seed outside [0, 100]");
+        assert!(is_err("t3:5,1.5"), "T3 vfactor outside [0, 1]");
+        assert!(is_err("mama:1.5,0.05"), "MAMA fast limit outside [0.01, 0.99]");
+        assert!(is_err("mama:0,0"), "MAMA limits outside [0.01, 0.99]");
+        assert!(is_err("sar:-0.1,0.2"), "negative SAR acceleration");
+        assert!(is_err("sarext:0,-1"), "negative SAR reverse offset");
+        assert!(is_err("asi:0"), "ASI divides by its limit-move argument");
+        assert!(is_err("increase:3,0"), "direction must be +1 / -1");
+        assert!(is_err("hv:10,1d,0"), "hv trading days must be >= 1");
+        assert!(is_err("hv:10,0m"), "a zero time-frame span");
+        assert!(is_err("boll.upper:20,nan"), "NaN multiplier poisons the band");
+        assert!(is_err("mavp:30,2@close,close"), "inverted mavp period limits");
+        assert!(is_err("mavp:0,30@close,close"), "mavp min period below 1");
+        // the legal edges of the same domains still execute.
+        for d in [
+            "ma:1", "atr:1", "rsi:1", "t3:5,0", "t3:5,1", "kdj.k:9,3,0",
+            "kdj.k:9,3,100", "mama:0.01,0.01", "mama:0.99,0.99", "sar:0,0",
+            "increase:3,-1", "boll.upper:20,-2", "var:2", "linearreg:2",
+            "change:2", "aroon.up:2",
+        ] {
+            let col = execute(&df, &parse(d).unwrap())
+                .unwrap_or_else(|e| panic!("directive {d:?} failed: {e:?}"));
+            assert_eq!(col.len(), 30, "directive {d:?}");
         }
     }
 
@@ -529,8 +602,10 @@ mod tests {
         // (series_f64_required's None and empty-Name arms).
         assert!(execute(&df, &parse("correl:30").unwrap()).is_err());
         assert!(execute(&df, &parse("correl:30@close,").unwrap()).is_err());
-        // unknown MA type (9) -> ma_typed error propagates through the `ma` arm's `?`.
+        // a matype past 8 is rejected at the exec boundary (IntRange bound)...
         assert!(execute(&df, &parse("ma:5,9").unwrap()).is_err());
+        // ...and ma_typed keeps its own defensive arm for direct Rust callers.
+        assert!(ma_typed(&[1.0, 2.0, 3.0], 2, 9).is_err());
     }
 
     #[test]

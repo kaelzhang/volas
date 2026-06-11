@@ -71,7 +71,7 @@ fn stringify_command(cmd: &Command) -> String {
             let default = spec
                 .as_ref()
                 .and_then(|s| s.args.get(i))
-                .and_then(|d| d.to_token());
+                .and_then(|a| a.default.to_token());
             match a {
                 Some(v) if Some(v) != default.as_ref() => v.clone(),
                 _ => String::new(),

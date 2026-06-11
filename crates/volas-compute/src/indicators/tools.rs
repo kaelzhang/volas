@@ -58,7 +58,9 @@ pub fn repeat(data: &[bool], repeat: usize) -> Vec<bool> {
         return data.to_vec();
     }
     let mut result = vec![false; n];
-    if repeat > n {
+    // `repeat == 0` would underflow `repeat - 1` below; the directive boundary
+    // rejects it — this is the defensive in-kernel guard (all-false).
+    if repeat == 0 || repeat > n {
         return result;
     }
     for i in (repeat - 1)..n {
@@ -77,8 +79,13 @@ pub fn repeat(data: &[bool], repeat: usize) -> Vec<bool> {
 /// Percentage change over `period` (`data[i] / data[i-(period-1)] - 1`).
 pub fn change(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
-    let shift = period - 1;
     let mut result = vec![f64::NAN; n];
+    // `period == 0` would underflow `period - 1`; the directive boundary
+    // rejects it — this is the defensive in-kernel guard (all-NaN).
+    if period == 0 {
+        return result;
+    }
+    let shift = period - 1;
     for i in shift..n {
         let prev = data[i - shift];
         if prev.abs() > 1e-10 {
