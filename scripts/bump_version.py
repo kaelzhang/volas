@@ -11,6 +11,7 @@ it for the git tag.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -61,6 +62,14 @@ def main(argv: list[str]) -> None:
     new = bump(current_version(text), args[0])
     if not dry:
         CARGO.write_text(rewrite(text, new))
+        # Cargo.lock records the workspace members' versions too; the release
+        # builds pass --locked (reproducible builds), so a bump that leaves the
+        # lock stale fails every wheel job ("cannot update the lock file").
+        # `cargo update --workspace` rewrites ONLY the workspace-member entries.
+        subprocess.run(
+            ["cargo", "update", "--workspace", "--quiet"],
+            cwd=CARGO.parent, check=True,
+        )
     print(new)
 
 
