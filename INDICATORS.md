@@ -1044,10 +1044,10 @@ df['sem:20']               # uncertainty of the 20-bar mean
 
 TA-Lib-related directives use lowercase Volas names, but the `TA-Lib original`
 column below lists the upstream TA-Lib function they correspond to. Arguments
-before `@` are positional; input series after `@` override the default columns.
-Square brackets mean an argument has a default. Required arguments are written
-without brackets. Empty argument slots keep earlier defaults, so
-`macd.signal:,,5` means fast period `12`, slow period `26`, and signal period `5`.
+before `@` are positional scalars; input series after `@` are column names (or
+nested directives in parentheses) overriding the default columns. Empty
+argument slots keep earlier defaults, so `macd.signal:,,5` means fast period
+`12`, slow period `26`, and signal period `5`.
 
 `matype` follows TA-Lib's integer convention: `0=SMA`, `1=EMA`, `2=WMA`,
 `3=DEMA`, `4=TEMA`, `5=TRIMA`, `6=KAMA`, `7=MAMA`, and `8=T3`. Multi-output
@@ -1076,162 +1076,176 @@ The TA-Lib Math Transform group is exposed on `Series` rather than as directive
 strings: `acos`, `asin`, `atan`, `ceil`, `cos`, `cosh`, `exp`, `floor`, `ln`,
 `log10`, `sin`, `sinh`, `sqrt`, `tan`, and `tanh`.
 
+The `Parameters` column uses this notation:
+
+```
+:<min=2>,<max=30>,<matype=0>@<series=close>,<series_periods>
+│  │                         │              │
+│  │                         │              └ no `=` sign: the input is REQUIRED
+│  │                         └ input series with its default column — may be omitted
+│  └ scalar argument with its default value — may be omitted (or left empty)
+└ `:` introduces the scalar arguments; `@` introduces the input series
+```
+
+Every `<name=value>` argument has a default and can be omitted; a `<name>`
+**without an equals sign is required**.
+
 | Volas directive | TA-Lib original | Meaning | Parameters |
 | --- | --- | --- | --- |
-| `ma` | `MA` | Generic moving average selected by MA type. | `:<period>[,<matype=0>]@series=close` |
-| `ema` | `EMA` | Exponential moving average. | `:<period>@series=close` |
-| `wma` | `WMA` | Weighted moving average. | `[:period=30]@series=close` |
-| `dema` | `DEMA` | Double exponential moving average. | `[:period=30]@series=close` |
-| `tema` | `TEMA` | Triple exponential moving average. | `[:period=30]@series=close` |
-| `trima` | `TRIMA` | Triangular moving average. | `[:period=30]@series=close` |
-| `kama` | `KAMA` | Kaufman adaptive moving average. | `[:period=30]@series=close` |
-| `t3` | `T3` | T3 moving average. | `[:period=5,vfactor=0.7]@series=close` |
-| `mama` | `MAMA` | MESA adaptive moving average main line. | `[:fast_limit=0.5,slow_limit=0.05]@series=close` |
-| `mama.fama` | `MAMA` | Following adaptive moving average line. | `[:fast_limit=0.5,slow_limit=0.05]@series=close` |
-| `mavp` | `MAVP` | Moving average with per-row variable periods; the REQUIRED second input series supplies each row's period (clamped to `[min, max]`). | `[:min=2,max=30,matype=0]@series0=close,series1` |
-| `sar` | `SAR` | Parabolic SAR. | `[:acceleration=0.02,maximum=0.2]@high,low` |
-| `sarext` | `SAREXT` | Extended Parabolic SAR. | `[:start=0,offset=0,long_init=0.02,long_step=0.02,long_max=0.2,short_init=0.02,short_step=0.02,short_max=0.2]@high,low` |
-| `boll` | `BBANDS` | Bollinger middle band. | `[:period=20]@series=close` |
-| `boll.upper` | `BBANDS` | Bollinger upper band. | `[:period=20,times=2]@series=close` |
-| `boll.lower` | `BBANDS` | Bollinger lower band. | `[:period=20,times=2]@series=close` |
-| `accbands` | `ACCBANDS` | Acceleration Bands middle line. | `[:period=20]@series=close` |
-| `accbands.upper` | `ACCBANDS` | Acceleration Bands upper line. | `[:period=20]@high,low` |
-| `accbands.lower` | `ACCBANDS` | Acceleration Bands lower line. | `[:period=20]@high,low` |
-| `midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `[:period=14]@series=close` |
-| `midprice` | `MIDPRICE` | Midpoint price over high and low. | `[:period=14]@high,low` |
-| `ht_trendline` | `HT_TRENDLINE` | Hilbert Transform instantaneous trendline. | `@series=close` |
-| `macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. | `[:fast=12,slow=26]@series=close` |
-| `macd.signal` | `MACD` | Signal line of the Volas MACD line. | `[:fast=12,slow=26,signal=9]@series=close` |
-| `macd.histogram` | `MACD` | MACD histogram: line minus signal. | `[:fast=12,slow=26,signal=9]@series=close` |
-| `macdext` | `MACDEXT` | MACD line with independent MA types. | `[:fast=12,fast_matype=0,slow=26,slow_matype=0]@series=close` |
-| `macdext.signal` | `MACDEXT` | MACDEXT signal line. | `[:fast=12,fast_matype=0,slow=26,slow_matype=0,signal=9,signal_matype=0]@series=close` |
-| `macdext.histogram` | `MACDEXT` | MACDEXT histogram. | `[:fast=12,fast_matype=0,slow=26,slow_matype=0,signal=9,signal_matype=0]@series=close` |
-| `macdfix` | `MACDFIX` | Fixed 12/26 MACD line; Volas uses standalone EMA fast minus EMA slow. | `@series=close` |
-| `macdfix.signal` | `MACDFIX` | Signal line of the Volas fixed 12/26 MACD line. | `[:signal=9]@series=close` |
-| `macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `[:signal=9]@series=close` |
-| `apo` | `APO` | Absolute price oscillator. | `[:fast=12,slow=26,matype=0]@series=close` |
-| `ppo` | `PPO` | Percentage price oscillator. | `[:fast=12,slow=26,matype=0]@series=close` |
-| `rsi` | `RSI` | Relative Strength Index. | `:<period>@series=close` |
-| `cmo` | `CMO` | Chande Momentum Oscillator. | `[:period=14]@series=close` |
-| `cci` | `CCI` | Commodity Channel Index. | `[:period=14]@high,low,close` |
-| `imi` | `IMI` | Intraday Momentum Index. | `[:period=14]@open,close` |
-| `mfi` | `MFI` | Money Flow Index. | `[:period=14]@high,low,close,volume` |
-| `bop` | `BOP` | Balance of Power. | `@open,high,low,close` |
-| `willr` | `WILLR` | Williams Percent Range. | `[:period=14]@high,low,close` |
-| `mom` | `MOM` | Momentum. | `[:period=10]@series=close` |
-| `roc` | `ROC` | Rate of change. | `[:period=10]@series=close` |
-| `rocp` | `ROCP` | Rate of change percentage. | `[:period=10]@series=close` |
-| `rocr` | `ROCR` | Rate of change ratio. | `[:period=10]@series=close` |
-| `rocr100` | `ROCR100` | Rate of change ratio multiplied by 100. | `[:period=10]@series=close` |
-| `stoch.k` | `STOCH` | Slow stochastic percent K. | `[:fastk=5,slowk=3,slowk_matype=0,slowd=3,slowd_matype=0]@high,low,close` |
-| `stoch.d` | `STOCH` | Slow stochastic percent D. | `[:fastk=5,slowk=3,slowk_matype=0,slowd=3,slowd_matype=0]@high,low,close` |
-| `stochf.k` | `STOCHF` | Fast stochastic percent K. | `[:fastk=5,fastd=3,fastd_matype=0]@high,low,close` |
-| `stochf.d` | `STOCHF` | Fast stochastic percent D. | `[:fastk=5,fastd=3,fastd_matype=0]@high,low,close` |
-| `stochrsi.k` | `STOCHRSI` | Fast stochastic RSI percent K. | `[:rsi=14,fastk=5,fastd=3,fastd_matype=0]@series=close` |
-| `stochrsi.d` | `STOCHRSI` | Fast stochastic RSI percent D. | `[:rsi=14,fastk=5,fastd=3,fastd_matype=0]@series=close` |
-| `trix` | `TRIX` | One-period ROC of a triple EMA. | `[:period=30]@series=close` |
-| `ultosc` | `ULTOSC` | Ultimate Oscillator. | `[:short=7,medium=14,long=28]@high,low,close` |
-| `aroon.up` | `AROON` | Aroon up line. | `[:period=14]@high,low` |
-| `aroon.down` | `AROON` | Aroon down line. | `[:period=14]@high,low` |
-| `aroonosc` | `AROONOSC` | Aroon oscillator. | `[:period=14]@high,low` |
-| `plus_dm` | `PLUS_DM` | Plus directional movement. | `[:period=14]@high,low` |
-| `minus_dm` | `MINUS_DM` | Minus directional movement. | `[:period=14]@high,low` |
-| `plus_di` | `PLUS_DI` | Plus directional indicator. | `[:period=14]@high,low,close` |
-| `minus_di` | `MINUS_DI` | Minus directional indicator. | `[:period=14]@high,low,close` |
-| `dx` | `DX` | Directional Movement Index. | `[:period=14]@high,low,close` |
-| `adx` | `ADX` | Average Directional Movement Index. | `[:period=14]@high,low,close` |
-| `adxr` | `ADXR` | Average Directional Movement Index Rating. | `[:period=14]@high,low,close` |
-| `obv` | `OBV` | On-Balance Volume. | `@close,volume` |
-| `ad` | `AD` | Chaikin Accumulation Distribution line. | `@high,low,close,volume` |
-| `adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `[:fast=3,slow=10]@high,low,close,volume` |
-| `tr` | `TRANGE` | True Range. | `@high,low,close` |
-| `atr` | `ATR` | Average True Range. | `[:period=14]@high,low,close` |
-| `natr` | `NATR` | Normalized Average True Range. | `[:period=14]@high,low,close` |
-| `avgprice` | `AVGPRICE` | Average price. | `@open,high,low,close` |
-| `medprice` | `MEDPRICE` | Median price. | `@high,low` |
-| `typprice` | `TYPPRICE` | Typical price. | `@high,low,close` |
-| `wclprice` | `WCLPRICE` | Weighted close price. | `@high,low,close` |
-| `ht_dcperiod` | `HT_DCPERIOD` | Hilbert Transform dominant cycle period. | `@series=close` |
-| `ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. | `@series=close` |
-| `ht_phasor` | `HT_PHASOR` | Hilbert Transform phasor in-phase line. | `@series=close` |
-| `ht_phasor.quadrature` | `HT_PHASOR` | Hilbert Transform phasor quadrature line. | `@series=close` |
-| `ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@series=close` |
-| `ht_sine.leadsine` | `HT_SINE` | Hilbert Transform lead sine wave. | `@series=close` |
-| `ht_trendmode` | `HT_TRENDMODE` | Hilbert Transform trend versus cycle mode. | `@series=close` |
-| `linearreg` | `LINEARREG` | Linear regression value. | `[:period=14]@series=close` |
-| `linearreg_slope` | `LINEARREG_SLOPE` | Linear regression slope. | `[:period=14]@series=close` |
-| `linearreg_intercept` | `LINEARREG_INTERCEPT` | Linear regression intercept. | `[:period=14]@series=close` |
-| `linearreg_angle` | `LINEARREG_ANGLE` | Linear regression angle. | `[:period=14]@series=close` |
-| `tsf` | `TSF` | Time Series Forecast. | `[:period=14]@series=close` |
-| `var` | `VAR` | Variance. | `[:period=5]@series=close` |
-| `stddev` | `STDDEV` | Standard deviation. | `[:period=5,nbdev=1]@series=close` |
-| `correl` | `CORREL` | Pearson correlation coefficient. | `[:period=30]@series0=close,series1` |
-| `beta` | `BETA` | Beta. | `[:period=5]@series0=close,series1` |
-| `sum` | `SUM` | Rolling sum. | `[:period=30]@series=close` |
-| `maxindex` | `MAXINDEX` | Index of the rolling maximum. | `[:period=30]@series=close` |
-| `minindex` | `MININDEX` | Index of the rolling minimum. | `[:period=30]@series=close` |
-| `minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `[:period=30]@series=close` |
-| `minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `[:period=30]@series=close` |
-| `minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `[:period=30]@series=close` |
-| `minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `[:period=30]@series=close` |
-| `cdl.2crows` | `CDL2CROWS` | Two Crows | `@open,high,low,close` |
-| `cdl.3blackcrows` | `CDL3BLACKCROWS` | Three Black Crows | `@open,high,low,close` |
-| `cdl.3inside` | `CDL3INSIDE` | Three Inside Up/Down | `@open,high,low,close` |
-| `cdl.3linestrike` | `CDL3LINESTRIKE` | Three-Line Strike  | `@open,high,low,close` |
-| `cdl.3outside` | `CDL3OUTSIDE` | Three Outside Up/Down | `@open,high,low,close` |
-| `cdl.3starsinsouth` | `CDL3STARSINSOUTH` | Three Stars In The South | `@open,high,low,close` |
-| `cdl.3whitesoldiers` | `CDL3WHITESOLDIERS` | Three Advancing White Soldiers | `@open,high,low,close` |
-| `cdl.abandonedbaby` | `CDLABANDONEDBABY` | Abandoned Baby | `[:penetration=0.3]@open,high,low,close` |
-| `cdl.advanceblock` | `CDLADVANCEBLOCK` | Advance Block | `@open,high,low,close` |
-| `cdl.belthold` | `CDLBELTHOLD` | Belt-hold | `@open,high,low,close` |
-| `cdl.breakaway` | `CDLBREAKAWAY` | Breakaway | `@open,high,low,close` |
-| `cdl.closingmarubozu` | `CDLCLOSINGMARUBOZU` | Closing Marubozu | `@open,high,low,close` |
-| `cdl.concealbabyswall` | `CDLCONCEALBABYSWALL` | Concealing Baby Swallow | `@open,high,low,close` |
-| `cdl.counterattack` | `CDLCOUNTERATTACK` | Counterattack | `@open,high,low,close` |
-| `cdl.darkcloudcover` | `CDLDARKCLOUDCOVER` | Dark Cloud Cover | `[:penetration=0.5]@open,high,low,close` |
-| `cdl.doji` | `CDLDOJI` | Doji | `@open,high,low,close` |
-| `cdl.dojistar` | `CDLDOJISTAR` | Doji Star | `@open,high,low,close` |
-| `cdl.dragonflydoji` | `CDLDRAGONFLYDOJI` | Dragonfly Doji | `@open,high,low,close` |
-| `cdl.engulfing` | `CDLENGULFING` | Engulfing Pattern | `@open,high,low,close` |
-| `cdl.eveningdojistar` | `CDLEVENINGDOJISTAR` | Evening Doji Star | `[:penetration=0.3]@open,high,low,close` |
-| `cdl.eveningstar` | `CDLEVENINGSTAR` | Evening Star | `[:penetration=0.3]@open,high,low,close` |
-| `cdl.gapsidesidewhite` | `CDLGAPSIDESIDEWHITE` | Up/Down-gap side-by-side white lines | `@open,high,low,close` |
-| `cdl.gravestonedoji` | `CDLGRAVESTONEDOJI` | Gravestone Doji | `@open,high,low,close` |
-| `cdl.hammer` | `CDLHAMMER` | Hammer | `@open,high,low,close` |
-| `cdl.hangingman` | `CDLHANGINGMAN` | Hanging Man | `@open,high,low,close` |
-| `cdl.harami` | `CDLHARAMI` | Harami Pattern | `@open,high,low,close` |
-| `cdl.haramicross` | `CDLHARAMICROSS` | Harami Cross Pattern | `@open,high,low,close` |
-| `cdl.highwave` | `CDLHIGHWAVE` | High-Wave Candle | `@open,high,low,close` |
-| `cdl.hikkake` | `CDLHIKKAKE` | Hikkake Pattern | `@open,high,low,close` |
-| `cdl.hikkakemod` | `CDLHIKKAKEMOD` | Modified Hikkake Pattern | `@open,high,low,close` |
-| `cdl.homingpigeon` | `CDLHOMINGPIGEON` | Homing Pigeon | `@open,high,low,close` |
-| `cdl.identical3crows` | `CDLIDENTICAL3CROWS` | Identical Three Crows | `@open,high,low,close` |
-| `cdl.inneck` | `CDLINNECK` | In-Neck Pattern | `@open,high,low,close` |
-| `cdl.invertedhammer` | `CDLINVERTEDHAMMER` | Inverted Hammer | `@open,high,low,close` |
-| `cdl.kicking` | `CDLKICKING` | Kicking | `@open,high,low,close` |
-| `cdl.kickingbylength` | `CDLKICKINGBYLENGTH` | Kicking - bull/bear determined by the longer marubozu | `@open,high,low,close` |
-| `cdl.ladderbottom` | `CDLLADDERBOTTOM` | Ladder Bottom | `@open,high,low,close` |
-| `cdl.longleggeddoji` | `CDLLONGLEGGEDDOJI` | Long Legged Doji | `@open,high,low,close` |
-| `cdl.longline` | `CDLLONGLINE` | Long Line Candle | `@open,high,low,close` |
-| `cdl.marubozu` | `CDLMARUBOZU` | Marubozu | `@open,high,low,close` |
-| `cdl.matchinglow` | `CDLMATCHINGLOW` | Matching Low | `@open,high,low,close` |
-| `cdl.mathold` | `CDLMATHOLD` | Mat Hold | `[:penetration=0.5]@open,high,low,close` |
-| `cdl.morningdojistar` | `CDLMORNINGDOJISTAR` | Morning Doji Star | `[:penetration=0.3]@open,high,low,close` |
-| `cdl.morningstar` | `CDLMORNINGSTAR` | Morning Star | `[:penetration=0.3]@open,high,low,close` |
-| `cdl.onneck` | `CDLONNECK` | On-Neck Pattern | `@open,high,low,close` |
-| `cdl.piercing` | `CDLPIERCING` | Piercing Pattern | `@open,high,low,close` |
-| `cdl.rickshawman` | `CDLRICKSHAWMAN` | Rickshaw Man | `@open,high,low,close` |
-| `cdl.risefall3methods` | `CDLRISEFALL3METHODS` | Rising/Falling Three Methods | `@open,high,low,close` |
-| `cdl.separatinglines` | `CDLSEPARATINGLINES` | Separating Lines | `@open,high,low,close` |
-| `cdl.shootingstar` | `CDLSHOOTINGSTAR` | Shooting Star | `@open,high,low,close` |
-| `cdl.shortline` | `CDLSHORTLINE` | Short Line Candle | `@open,high,low,close` |
-| `cdl.spinningtop` | `CDLSPINNINGTOP` | Spinning Top | `@open,high,low,close` |
-| `cdl.stalledpattern` | `CDLSTALLEDPATTERN` | Stalled Pattern | `@open,high,low,close` |
-| `cdl.sticksandwich` | `CDLSTICKSANDWICH` | Stick Sandwich | `@open,high,low,close` |
-| `cdl.takuri` | `CDLTAKURI` | Takuri (Dragonfly Doji with very long lower shadow) | `@open,high,low,close` |
-| `cdl.tasukigap` | `CDLTASUKIGAP` | Tasuki Gap | `@open,high,low,close` |
-| `cdl.thrusting` | `CDLTHRUSTING` | Thrusting Pattern | `@open,high,low,close` |
-| `cdl.tristar` | `CDLTRISTAR` | Tristar Pattern | `@open,high,low,close` |
-| `cdl.unique3river` | `CDLUNIQUE3RIVER` | Unique 3 River | `@open,high,low,close` |
-| `cdl.upsidegap2crows` | `CDLUPSIDEGAP2CROWS` | Upside Gap Two Crows | `@open,high,low,close` |
-| `cdl.xsidegap3methods` | `CDLXSIDEGAP3METHODS` | Upside/Downside Gap Three Methods | `@open,high,low,close` |
+| `ma` | `MA` | Generic moving average selected by MA type. | `:<period>,<matype=0>@<series=close>` |
+| `ema` | `EMA` | Exponential moving average. | `:<period>@<series=close>` |
+| `wma` | `WMA` | Weighted moving average. | `:<period=30>@<series=close>` |
+| `dema` | `DEMA` | Double exponential moving average. | `:<period=30>@<series=close>` |
+| `tema` | `TEMA` | Triple exponential moving average. | `:<period=30>@<series=close>` |
+| `trima` | `TRIMA` | Triangular moving average. | `:<period=30>@<series=close>` |
+| `kama` | `KAMA` | Kaufman adaptive moving average. | `:<period=30>@<series=close>` |
+| `t3` | `T3` | T3 moving average. | `:<period=5>,<vfactor=0.7>@<series=close>` |
+| `mama` | `MAMA` | MESA adaptive moving average main line. | `:<fast_limit=0.5>,<slow_limit=0.05>@<series=close>` |
+| `mama.fama` | `MAMA` | Following adaptive moving average line. | `:<fast_limit=0.5>,<slow_limit=0.05>@<series=close>` |
+| `mavp` | `MAVP` | Moving average with per-row variable periods; the REQUIRED second input series supplies each row's period (clamped to `[min, max]`). | `:<min=2>,<max=30>,<matype=0>@<series=close>,<series_periods>` |
+| `sar` | `SAR` | Parabolic SAR. | `:<acceleration=0.02>,<maximum=0.2>@<series_high=high>,<series_low=low>` |
+| `sarext` | `SAREXT` | Extended Parabolic SAR. | `:<start=0>,<offset=0>,<long_init=0.02>,<long_step=0.02>,<long_max=0.2>,<short_init=0.02>,<short_step=0.02>,<short_max=0.2>@<series_high=high>,<series_low=low>` |
+| `boll` | `BBANDS` | Bollinger middle band. | `:<period=20>@<series=close>` |
+| `boll.upper` | `BBANDS` | Bollinger upper band. | `:<period=20>,<times=2>@<series=close>` |
+| `boll.lower` | `BBANDS` | Bollinger lower band. | `:<period=20>,<times=2>@<series=close>` |
+| `accbands` | `ACCBANDS` | Acceleration Bands middle line. | `:<period=20>@<series=close>` |
+| `accbands.upper` | `ACCBANDS` | Acceleration Bands upper line. | `:<period=20>@<series_high=high>,<series_low=low>` |
+| `accbands.lower` | `ACCBANDS` | Acceleration Bands lower line. | `:<period=20>@<series_high=high>,<series_low=low>` |
+| `midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `:<period=14>@<series=close>` |
+| `midprice` | `MIDPRICE` | Midpoint price over high and low. | `:<period=14>@<series_high=high>,<series_low=low>` |
+| `ht_trendline` | `HT_TRENDLINE` | Hilbert Transform instantaneous trendline. | `@<series=close>` |
+| `macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. | `:<fast=12>,<slow=26>@<series=close>` |
+| `macd.signal` | `MACD` | Signal line of the Volas MACD line. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
+| `macd.histogram` | `MACD` | MACD histogram: line minus signal. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
+| `macdext` | `MACDEXT` | MACD line with independent MA types. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>@<series=close>` |
+| `macdext.signal` | `MACDEXT` | MACDEXT signal line. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>,<signal=9>,<signal_matype=0>@<series=close>` |
+| `macdext.histogram` | `MACDEXT` | MACDEXT histogram. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>,<signal=9>,<signal_matype=0>@<series=close>` |
+| `macdfix` | `MACDFIX` | Fixed 12/26 MACD line; Volas uses standalone EMA fast minus EMA slow. | `@<series=close>` |
+| `macdfix.signal` | `MACDFIX` | Signal line of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
+| `macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
+| `apo` | `APO` | Absolute price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
+| `ppo` | `PPO` | Percentage price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
+| `rsi` | `RSI` | Relative Strength Index. | `:<period>@<series=close>` |
+| `cmo` | `CMO` | Chande Momentum Oscillator. | `:<period=14>@<series=close>` |
+| `cci` | `CCI` | Commodity Channel Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `imi` | `IMI` | Intraday Momentum Index. | `:<period=14>@<series_open=open>,<series_close=close>` |
+| `mfi` | `MFI` | Money Flow Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
+| `bop` | `BOP` | Balance of Power. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `willr` | `WILLR` | Williams Percent Range. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `mom` | `MOM` | Momentum. | `:<period=10>@<series=close>` |
+| `roc` | `ROC` | Rate of change. | `:<period=10>@<series=close>` |
+| `rocp` | `ROCP` | Rate of change percentage. | `:<period=10>@<series=close>` |
+| `rocr` | `ROCR` | Rate of change ratio. | `:<period=10>@<series=close>` |
+| `rocr100` | `ROCR100` | Rate of change ratio multiplied by 100. | `:<period=10>@<series=close>` |
+| `stoch.k` | `STOCH` | Slow stochastic percent K. | `:<fastk=5>,<slowk=3>,<slowk_matype=0>,<slowd=3>,<slowd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `stoch.d` | `STOCH` | Slow stochastic percent D. | `:<fastk=5>,<slowk=3>,<slowk_matype=0>,<slowd=3>,<slowd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `stochf.k` | `STOCHF` | Fast stochastic percent K. | `:<fastk=5>,<fastd=3>,<fastd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `stochf.d` | `STOCHF` | Fast stochastic percent D. | `:<fastk=5>,<fastd=3>,<fastd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `stochrsi.k` | `STOCHRSI` | Fast stochastic RSI percent K. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
+| `stochrsi.d` | `STOCHRSI` | Fast stochastic RSI percent D. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
+| `trix` | `TRIX` | One-period ROC of a triple EMA. | `:<period=30>@<series=close>` |
+| `ultosc` | `ULTOSC` | Ultimate Oscillator. | `:<short=7>,<medium=14>,<long=28>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `aroon.up` | `AROON` | Aroon up line. | `:<period=14>@<series_high=high>,<series_low=low>` |
+| `aroon.down` | `AROON` | Aroon down line. | `:<period=14>@<series_high=high>,<series_low=low>` |
+| `aroonosc` | `AROONOSC` | Aroon oscillator. | `:<period=14>@<series_high=high>,<series_low=low>` |
+| `plus_dm` | `PLUS_DM` | Plus directional movement. | `:<period=14>@<series_high=high>,<series_low=low>` |
+| `minus_dm` | `MINUS_DM` | Minus directional movement. | `:<period=14>@<series_high=high>,<series_low=low>` |
+| `plus_di` | `PLUS_DI` | Plus directional indicator. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `minus_di` | `MINUS_DI` | Minus directional indicator. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `dx` | `DX` | Directional Movement Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `adx` | `ADX` | Average Directional Movement Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `adxr` | `ADXR` | Average Directional Movement Index Rating. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `obv` | `OBV` | On-Balance Volume. | `@<series_close=close>,<series_volume=volume>` |
+| `ad` | `AD` | Chaikin Accumulation Distribution line. | `@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
+| `adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `:<fast=3>,<slow=10>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
+| `tr` | `TRANGE` | True Range. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `atr` | `ATR` | Average True Range. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `natr` | `NATR` | Normalized Average True Range. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `avgprice` | `AVGPRICE` | Average price. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `medprice` | `MEDPRICE` | Median price. | `@<series_high=high>,<series_low=low>` |
+| `typprice` | `TYPPRICE` | Typical price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `wclprice` | `WCLPRICE` | Weighted close price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `ht_dcperiod` | `HT_DCPERIOD` | Hilbert Transform dominant cycle period. | `@<series=close>` |
+| `ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. | `@<series=close>` |
+| `ht_phasor` | `HT_PHASOR` | Hilbert Transform phasor in-phase line. | `@<series=close>` |
+| `ht_phasor.quadrature` | `HT_PHASOR` | Hilbert Transform phasor quadrature line. | `@<series=close>` |
+| `ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@<series=close>` |
+| `ht_sine.leadsine` | `HT_SINE` | Hilbert Transform lead sine wave. | `@<series=close>` |
+| `ht_trendmode` | `HT_TRENDMODE` | Hilbert Transform trend versus cycle mode. | `@<series=close>` |
+| `linearreg` | `LINEARREG` | Linear regression value. | `:<period=14>@<series=close>` |
+| `linearreg_slope` | `LINEARREG_SLOPE` | Linear regression slope. | `:<period=14>@<series=close>` |
+| `linearreg_intercept` | `LINEARREG_INTERCEPT` | Linear regression intercept. | `:<period=14>@<series=close>` |
+| `linearreg_angle` | `LINEARREG_ANGLE` | Linear regression angle. | `:<period=14>@<series=close>` |
+| `tsf` | `TSF` | Time Series Forecast. | `:<period=14>@<series=close>` |
+| `var` | `VAR` | Variance. | `:<period=5>@<series=close>` |
+| `stddev` | `STDDEV` | Standard deviation. | `:<period=5>,<nbdev=1>@<series=close>` |
+| `correl` | `CORREL` | Pearson correlation coefficient. | `:<period=30>@<series=close>,<series_other>` |
+| `beta` | `BETA` | Beta. | `:<period=5>@<series=close>,<series_other>` |
+| `sum` | `SUM` | Rolling sum. | `:<period=30>@<series=close>` |
+| `maxindex` | `MAXINDEX` | Index of the rolling maximum. | `:<period=30>@<series=close>` |
+| `minindex` | `MININDEX` | Index of the rolling minimum. | `:<period=30>@<series=close>` |
+| `minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `:<period=30>@<series=close>` |
+| `minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `:<period=30>@<series=close>` |
+| `minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `:<period=30>@<series=close>` |
+| `minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `:<period=30>@<series=close>` |
+| `cdl.2crows` | `CDL2CROWS` | Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.3blackcrows` | `CDL3BLACKCROWS` | Three Black Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.3inside` | `CDL3INSIDE` | Three Inside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.3linestrike` | `CDL3LINESTRIKE` | Three-Line Strike  | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.3outside` | `CDL3OUTSIDE` | Three Outside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.3starsinsouth` | `CDL3STARSINSOUTH` | Three Stars In The South | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.3whitesoldiers` | `CDL3WHITESOLDIERS` | Three Advancing White Soldiers | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.abandonedbaby` | `CDLABANDONEDBABY` | Abandoned Baby | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.advanceblock` | `CDLADVANCEBLOCK` | Advance Block | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.belthold` | `CDLBELTHOLD` | Belt-hold | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.breakaway` | `CDLBREAKAWAY` | Breakaway | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.closingmarubozu` | `CDLCLOSINGMARUBOZU` | Closing Marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.concealbabyswall` | `CDLCONCEALBABYSWALL` | Concealing Baby Swallow | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.counterattack` | `CDLCOUNTERATTACK` | Counterattack | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.darkcloudcover` | `CDLDARKCLOUDCOVER` | Dark Cloud Cover | `:<penetration=0.5>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.doji` | `CDLDOJI` | Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.dojistar` | `CDLDOJISTAR` | Doji Star | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.dragonflydoji` | `CDLDRAGONFLYDOJI` | Dragonfly Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.engulfing` | `CDLENGULFING` | Engulfing Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.eveningdojistar` | `CDLEVENINGDOJISTAR` | Evening Doji Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.eveningstar` | `CDLEVENINGSTAR` | Evening Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.gapsidesidewhite` | `CDLGAPSIDESIDEWHITE` | Up/Down-gap side-by-side white lines | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.gravestonedoji` | `CDLGRAVESTONEDOJI` | Gravestone Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.hammer` | `CDLHAMMER` | Hammer | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.hangingman` | `CDLHANGINGMAN` | Hanging Man | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.harami` | `CDLHARAMI` | Harami Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.haramicross` | `CDLHARAMICROSS` | Harami Cross Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.highwave` | `CDLHIGHWAVE` | High-Wave Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.hikkake` | `CDLHIKKAKE` | Hikkake Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.hikkakemod` | `CDLHIKKAKEMOD` | Modified Hikkake Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.homingpigeon` | `CDLHOMINGPIGEON` | Homing Pigeon | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.identical3crows` | `CDLIDENTICAL3CROWS` | Identical Three Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.inneck` | `CDLINNECK` | In-Neck Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.invertedhammer` | `CDLINVERTEDHAMMER` | Inverted Hammer | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.kicking` | `CDLKICKING` | Kicking | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.kickingbylength` | `CDLKICKINGBYLENGTH` | Kicking - bull/bear determined by the longer marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.ladderbottom` | `CDLLADDERBOTTOM` | Ladder Bottom | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.longleggeddoji` | `CDLLONGLEGGEDDOJI` | Long Legged Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.longline` | `CDLLONGLINE` | Long Line Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.marubozu` | `CDLMARUBOZU` | Marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.matchinglow` | `CDLMATCHINGLOW` | Matching Low | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.mathold` | `CDLMATHOLD` | Mat Hold | `:<penetration=0.5>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.morningdojistar` | `CDLMORNINGDOJISTAR` | Morning Doji Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.morningstar` | `CDLMORNINGSTAR` | Morning Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.onneck` | `CDLONNECK` | On-Neck Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.piercing` | `CDLPIERCING` | Piercing Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.rickshawman` | `CDLRICKSHAWMAN` | Rickshaw Man | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.risefall3methods` | `CDLRISEFALL3METHODS` | Rising/Falling Three Methods | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.separatinglines` | `CDLSEPARATINGLINES` | Separating Lines | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.shootingstar` | `CDLSHOOTINGSTAR` | Shooting Star | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.shortline` | `CDLSHORTLINE` | Short Line Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.spinningtop` | `CDLSPINNINGTOP` | Spinning Top | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.stalledpattern` | `CDLSTALLEDPATTERN` | Stalled Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.sticksandwich` | `CDLSTICKSANDWICH` | Stick Sandwich | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.takuri` | `CDLTAKURI` | Takuri (Dragonfly Doji with very long lower shadow) | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.tasukigap` | `CDLTASUKIGAP` | Tasuki Gap | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.thrusting` | `CDLTHRUSTING` | Thrusting Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.tristar` | `CDLTRISTAR` | Tristar Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.unique3river` | `CDLUNIQUE3RIVER` | Unique 3 River | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.upsidegap2crows` | `CDLUPSIDEGAP2CROWS` | Upside Gap Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| `cdl.xsidegap3methods` | `CDLXSIDEGAP3METHODS` | Upside/Downside Gap Three Methods | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
