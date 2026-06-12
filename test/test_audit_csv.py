@@ -52,7 +52,7 @@ def test_to_csv_roundtrip_preserves_values(tmp_path):
 # follow volas's native-NA model (C2), not legacy float demotion. FIXED.
 def test_read_csv_int_with_gap_keeps_int(tmp_path):
     df = volas.read_csv(_write(tmp_path))
-    assert df["a"].dtype == "int64"                   # currently float64
+    assert df["a"].dtype == "int64"                   # native-NA int, not legacy float
     assert df["a"].isna().to_list() == [False, False, True]
 
 

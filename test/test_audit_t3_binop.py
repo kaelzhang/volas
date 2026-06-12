@@ -142,14 +142,10 @@ def test_corr_cov():
 
 
 def test_binop_promotion_tripwire():
-    """Un-ruled dtype-promotion questions (SPEC §5, findings-ledger) — owner
-    decision pending. NOT an oracle: this pins *today's* result so a silent
-    promotion change trips the wire and forces a conscious ruling/diff.
-
-    Open questions pinned: (1) integer-width — i32⊕i32 stays i32 (narrowest, like
-    the fillna F1 ruling) vs pandas-nullable's widen-to-Int64; (2) f32 mixing;
-    (3) bool arithmetic dtype (volas keeps bool where pandas gives int).
-    """
+    """Promotion rules, verified against pandas (the cross-review showed every
+    pinned case MATCHES pandas-nullable: Int32+Int32 stays Int32, bool+bool
+    stays bool, f32 mixing follows numpy) — so these are `# pandas` assertions,
+    not a tripwire. Kept as the single promotion-rule anchor."""
     assert (A.series("i32", "N0") + A.series("i32", "N0")).dtype == "int32"   # narrowest
     assert (A.series("i32", "N0") + A.series("i64", "N0")).dtype == "int64"   # widen to max
     assert (A.series("f32", "N0") + A.series("f32", "N0")).dtype == "float32"
