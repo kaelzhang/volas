@@ -24,8 +24,12 @@ FILTER=()
 
 echo ">> building + benchmarking BASE ($BASE_REF) in a temp worktree..."
 git -C "$ROOT" worktree add --detach "$TMP/base" "$BASE_REF" >/dev/null
-# share the main target dir so the base build reuses warm artifacts
-( cd "$TMP/base" && CARGO_TARGET_DIR="$ROOT/target" "$PYTHON" -m maturin develop --release -q )
+# The base build gets its OWN target dir: sharing $ROOT/target between two
+# checkouts of the same workspace let cargo hand the HEAD build a stale rlib
+# from the base tree (observed: HEAD's volas-directive linked against the
+# base's volas-compute, missing a newly added module). A cold build is the
+# price of a sound comparison.
+( cd "$TMP/base" && CARGO_TARGET_DIR="$TMP/base/target" "$PYTHON" -m maturin develop --release -q )
 ( cd "$ROOT" && "$PYTHON" -m pytest test/test_benchmark.py "${BENCH_OPTS[@]}" ${FILTER[@]+"${FILTER[@]}"} \
     --benchmark-json="$TMP/base.json" >/dev/null )
 
