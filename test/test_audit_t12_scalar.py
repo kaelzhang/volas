@@ -40,10 +40,9 @@ def test_comparison_irep_numpy():
     assert (t2 < np.datetime64("2021-06-17")) is True
 
 
-# F15 (findings-ledger): comparing a volas.Timestamp to a *pandas* Timestamp
-# leaks the `.loc` label-vocabulary KeyError instead of comparing — the pandas
-# scalar I-rep is not recognised as a datetime operand (numpy & volas scalars
-# are). Same boundary-leak class as F3/F16. xfail(strict).
+# F15 (FIXED): pandas / stdlib datetime scalars are recognised datetime
+# operands (isoformat round-trip in the parse layer) — the label-KeyError
+# leak is gone.
 def test_comparison_irep_pandas():
     t2 = volas.Timestamp("2021-06-16")
     assert (t2 == pd.Timestamp("2021-06-16")) is True

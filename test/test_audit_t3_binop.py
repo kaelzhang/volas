@@ -118,9 +118,8 @@ def test_scalar_rhs(d):
     assert (s + np.int64(10)).to_list() == out.to_list()
 
 
-# F7 (findings-ledger): an NA scalar operand is rejected with TypeError instead
-# of poisoning the column to all-NA — inconsistent with column-NA arithmetic,
-# which propagates correctly. xfail(strict).
+# F7 (FIXED): an NA scalar operand poisons the whole result, dtype-preserved
+# (consistent with column-NA propagation and the np.nan operand).
 def test_scalar_na_operand():
     s = A.series("i64", "N0")
     assert (s + volas.NA).isna().to_list() == [True, True, True]  # # C2 / # pandas

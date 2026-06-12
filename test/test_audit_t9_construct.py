@@ -46,7 +46,7 @@ def test_timestamp_from_string_and_numpy():
 # F16 (decision 2): volas has NO NaT scalar, so Timestamp(None) must raise a
 # clean ValueError (it currently leaks a `.loc` label-vocabulary KeyError, the
 # same class as the fixed F3). Oracle is ValueError-only — NOT NaT (the old
-# `is NaT` assertion contradicted decision 2; corrected per review). xfail(strict).
+# `is NaT` assertion contradicted decision 2; corrected per review). FIXED.
 def test_timestamp_none_raises_valueerror():
     with pytest.raises(ValueError):
         volas.Timestamp(None)

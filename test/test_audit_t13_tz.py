@@ -33,10 +33,8 @@ def test_convert_changes_zone():
     assert loc.tz_convert("Asia/Shanghai").tz == "Asia/Shanghai"
 
 
-# F13 (findings-ledger): tz_localize('UTC').tz returns None — UTC is conflated
-# with naive. tz_convert still works on the localized frame (so it *is* tz-aware
-# internally), and a non-UTC zone reports correctly; only the .tz surface drops
-# UTC. xfail(strict).
+# F13 (FIXED, decision 5): UTC-anchored and naive are distinct states —
+# tz_localize('UTC').tz reports 'UTC'.
 def test_localize_utc_reports_zone():
     loc = _dt_frame().tz_localize("UTC")
     assert loc.tz == "UTC"
@@ -63,8 +61,8 @@ def test_convert_preserves_instant_shifts_wallclock():
     assert sh.tz == "Asia/Shanghai"
 
 
-# F-new (decision 5): tz_convert on a *naive* frame must raise (pandas does) —
-# currently volas silently re-labels without shifting. xfail(strict).
+# Decision 5 (FIXED): tz_convert on a *naive* frame raises (no source zone
+# to convert from) — was a silent re-label.
 def test_naive_tz_convert_raises():
     with pytest.raises((TypeError, ValueError)):
         _dt_frame().tz_convert("Asia/Shanghai")
@@ -97,10 +95,8 @@ def test_dst_gap_nonexistent_rejected():
         _at("2021-03-14 02:30:00").tz_localize("America/New_York")  # 02:00->03:00 EDT
 
 
-# F33 (findings-ledger): a wall-clock in the fall-back fold is AMBIGUOUS (occurs
-# twice). pandas demands explicit disambiguation (raises without ambiguous=);
-# volas silently picks one — asymmetric with the gap guard above, against
-# fail-loud. xfail(strict).
+# F33 (FIXED): an ambiguous fall-back fold wall-clock is rejected like the
+# gap (symmetric fail-loud) — was silently resolved to one instant.
 def test_dst_fold_ambiguous_rejected():
     with pytest.raises((ValueError, KeyError)):
         _at("2021-11-07 01:30:00").tz_localize("America/New_York")  # 02:00->01:00 EST

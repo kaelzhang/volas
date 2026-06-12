@@ -74,7 +74,7 @@ def test_boundary_reduction_semantics():
 # --- F32: int with no exact volas dtype must RAISE (decision: C4, not lossy) --
 # 2^63 / 2^63+1 currently both collapse to 9.223372036854776e+18 (silent
 # precision loss). pandas avoids loss via uint64/object; volas has neither, so
-# per C4 it must raise (suggest explicit dtype='float64'). xfail(strict).
+# per C4 it must raise (suggest explicit dtype='float64'). FIXED: OverflowError.
 @pytest.mark.parametrize("label,val", I.V_INT_OVERFLOW, ids=[l for l, _ in I.V_INT_OVERFLOW])
 def test_int_overflow_raises(label, val):
     with pytest.raises((OverflowError, ValueError)):
@@ -82,7 +82,7 @@ def test_int_overflow_raises(label, val):
 
 
 # F41 (decision: C4): Decimal has no volas dtype (no object); silent -> float64
-# loses the exact-decimal intent. Must raise. xfail(strict).
+# loses the exact-decimal intent. Must raise. FIXED: TypeError.
 def test_decimal_construct_raises():
     from decimal import Decimal
     with pytest.raises((TypeError, ValueError)):

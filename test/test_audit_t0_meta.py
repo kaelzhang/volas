@@ -61,8 +61,8 @@ def test_row_getitem_name_dict():
     assert r.to_dict() == {"a": 1.0, "b": 3.0}
 
 
-# F14 (findings-ledger): Row.to_numpy() returns a 2-D (1, n) array; a Row is a
-# single 1-D record (pandas df.iloc[0].to_numpy() -> shape (n,)). xfail(strict).
+# F14 (FIXED): Row.to_numpy() returns the 1-D record (n,), like pandas
+# df.iloc[0].to_numpy() — was a 2-D (1, n) frame export.
 def test_row_to_numpy_is_1d():
     r = volas.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]}).iloc[0]
     assert np.asarray(r.to_numpy()).shape == (2,)

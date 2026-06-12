@@ -49,7 +49,7 @@ def test_to_csv_roundtrip_preserves_values(tmp_path):
 # F35 (findings-ledger): read_csv demotes an int column with a gap to float64
 # (legacy numpy), while volas's own constructor keeps int64 + native NA
 # (DataFrame({'a':[1,None,3]}).dtype == 'int64'). The ingestion boundary should
-# follow volas's native-NA model (C2), not legacy float demotion. xfail(strict).
+# follow volas's native-NA model (C2), not legacy float demotion. FIXED.
 def test_read_csv_int_with_gap_keeps_int(tmp_path):
     df = volas.read_csv(_write(tmp_path))
     assert df["a"].dtype == "int64"                   # currently float64
@@ -58,7 +58,7 @@ def test_read_csv_int_with_gap_keeps_int(tmp_path):
 
 # F38 (review NF-A, P1): to_csv has no RFC-4180 quoting — a string with a comma /
 # quote / newline is written raw, corrupting the file (volas's own read_csv then
-# can't parse it back). Silent data corruption (C4). xfail(strict).
+# can't parse it back). Silent data corruption (C4). FIXED: RFC-4180 quoting.
 def test_to_csv_quotes_special_chars(tmp_path):
     df = volas.DataFrame({"s": ["a,b", 'q"x', "l1\nl2"], "v": [1.0, 2.0, 3.0]})
     p = tmp_path / "q.csv"
@@ -69,7 +69,7 @@ def test_to_csv_quotes_special_chars(tmp_path):
 
 # F46 (review NF-B; decision: mangle like pandas): a CSV with a duplicate header
 # must be disambiguated (a, a.1, b), not read as duplicate columns. owner ruling:
-# error is unacceptable (the user can't fix the file). xfail(strict).
+# error is unacceptable (the user can't fix the file). FIXED: mangles a.1.
 def test_read_csv_duplicate_header_mangles(tmp_path):
     p = tmp_path / "dup.csv"
     p.write_text("a,a,b\n1,2,3\n")
