@@ -939,6 +939,107 @@ df['repeat:3@(style.bullish)']
 df['repeat:5@(close > ma:20)']
 ```
 
+### `median`, Rolling Median
+
+```
+median:<period>@<series>
+```
+
+The median of the trailing `period` values. A window containing a missing
+value yields `NA` (the full-window warm-up discipline shared by the TA family).
+
+- **period?** `int=30` Must be `>= 2`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['median:20']            # 20-bar rolling median of close
+df['median:50@volume']     # on another column
+```
+
+### `quantile`, Rolling Quantile
+
+```
+quantile:<period>,<q>@<series>
+```
+
+The `q`-quantile (linear interpolation) of the trailing `period` values — a
+percentile channel in one directive.
+
+- **period?** `int=30` Must be `>= 2`.
+- **q?** `float=0.5` The quantile level, in `[0, 1]`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['quantile:20,0.9']      # the 90th percentile of the last 20 closes
+df['quantile:20,0.1']      # the 10th percentile (lower channel edge)
+```
+
+### `rank`, Rolling Percent Rank
+
+```
+rank:<period>@<series>
+```
+
+The percent rank of the **current** bar within its own trailing window, in
+`(0, 1]` — "where does today sit inside the last `period` bars?" (`1.0` = the
+highest value of the window).
+
+- **period?** `int=30` Must be `>= 2`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['rank:252']             # percentile of today's close within the last year
+df['rank:20 > 0.95']       # near the top of its 20-bar range (bool signal)
+```
+
+### `skew`, Rolling Skewness
+
+```
+skew:<period>@<series>
+```
+
+The bias-corrected sample skewness of the trailing `period` values.
+
+- **period?** `int=30` Must be `>= 3` (skewness is undefined below 3 samples).
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['skew:60@(change)']     # skew of returns over the last 60 bars
+```
+
+### `kurt`, Rolling Kurtosis
+
+```
+kurt:<period>@<series>
+```
+
+The bias-corrected **excess** kurtosis of the trailing `period` values
+(computed with two-pass central moments — numerically exact even when the
+window mean dwarfs its spread).
+
+- **period?** `int=30` Must be `>= 4` (kurtosis is undefined below 4 samples).
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['kurt:60@(change)']     # tail-heaviness of recent returns
+```
+
+### `sem`, Rolling Standard Error of the Mean
+
+```
+sem:<period>@<series>
+```
+
+The standard error of the mean (`std / sqrt(count)`, sample `ddof=1`) of the
+trailing `period` values.
+
+- **period?** `int=30` Must be `>= 2`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['sem:20']               # uncertainty of the 20-bar mean
+```
+
 ## TA-Lib-compatible directives
 
 TA-Lib-related directives use lowercase Volas names, but the `TA-Lib original`
@@ -1064,12 +1165,6 @@ strings: `acos`, `asin`, `atan`, `ceil`, `cos`, `cosh`, `exp`, `floor`, `ln`,
 | `tsf` | `TSF` | Time Series Forecast. | `[:period=14]@series=close` |
 | `var` | `VAR` | Variance. | `[:period=5]@series=close` |
 | `stddev` | `STDDEV` | Standard deviation. | `[:period=5,nbdev=1]@series=close` |
-| `median` | — | Rolling median. | `[:period=30]@series=close` |
-| `quantile` | — | Rolling quantile (linear interpolation). | `[:period=30,q=0.5]@series=close` |
-| `rank` | — | Percent rank of the current bar within its window, in (0, 1]. | `[:period=30]@series=close` |
-| `skew` | — | Rolling bias-corrected sample skewness. | `[:period=30]@series=close` |
-| `kurt` | — | Rolling bias-corrected excess kurtosis. | `[:period=30]@series=close` |
-| `sem` | — | Rolling standard error of the mean. | `[:period=30]@series=close` |
 | `correl` | `CORREL` | Pearson correlation coefficient. | `[:period=30]@series0=close,series1` |
 | `beta` | `BETA` | Beta. | `[:period=5]@series0=close,series1` |
 | `sum` | `SUM` | Rolling sum. | `[:period=30]@series=close` |
