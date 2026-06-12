@@ -219,6 +219,36 @@ pub(super) fn dispatch(
         }
 
         ("var", _) => f64col(ind::var(&close(0)?, arg_usize(args, 0, Some(5))?)),
+
+        // pandas-window statistics as directives: one kernel source with the
+        // rolling API (volas_compute::window), full-window semantics
+        // (min_periods = period, so an NA-bearing window stays NA).
+        ("median", _) => {
+            let p = arg_usize(args, 0, Some(30))?;
+            f64col(volas_compute::window::median(&close(0)?, p, p))
+        }
+        ("quantile", _) => {
+            let p = arg_usize(args, 0, Some(30))?;
+            let q = arg_f64(args, 1, 0.5)?;
+            f64col(volas_compute::window::quantile(&close(0)?, p, p, q, "linear"))
+        }
+        // percent rank of the current bar within its window, in (0, 1].
+        ("rank", _) => {
+            let p = arg_usize(args, 0, Some(30))?;
+            f64col(volas_compute::window::rank(&close(0)?, p, p, "average", true, true))
+        }
+        ("skew", _) => {
+            let p = arg_usize(args, 0, Some(30))?;
+            f64col(volas_compute::window::skew(&close(0)?, p, p))
+        }
+        ("kurt", _) => {
+            let p = arg_usize(args, 0, Some(30))?;
+            f64col(volas_compute::window::kurt(&close(0)?, p, p))
+        }
+        ("sem", _) => {
+            let p = arg_usize(args, 0, Some(30))?;
+            f64col(volas_compute::window::sem(&close(0)?, p, p, 1))
+        }
         ("stddev", _) => f64col(ind::stddev(
             &close(0)?,
             arg_usize(args, 0, Some(5))?,

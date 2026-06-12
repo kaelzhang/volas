@@ -1,6 +1,6 @@
 # Built-in Indicators
 
-This page is the complete directive reference for `volas` — **236** indicators
+This page is the complete directive reference for `volas` — **242** indicators
 (each main command, every multi-output sub-command line, and each candlestick
 pattern; counted by `scripts/count_indicators.py` from the Rust source).
 
@@ -1064,6 +1064,12 @@ strings: `acos`, `asin`, `atan`, `ceil`, `cos`, `cosh`, `exp`, `floor`, `ln`,
 | `tsf` | `TSF` | Time Series Forecast. | `[:period=14]@series=close` |
 | `var` | `VAR` | Variance. | `[:period=5]@series=close` |
 | `stddev` | `STDDEV` | Standard deviation. | `[:period=5,nbdev=1]@series=close` |
+| `median` | — | Rolling median. | `[:period=30]@series=close` |
+| `quantile` | — | Rolling quantile (linear interpolation). | `[:period=30,q=0.5]@series=close` |
+| `rank` | — | Percent rank of the current bar within its window, in (0, 1]. | `[:period=30]@series=close` |
+| `skew` | — | Rolling bias-corrected sample skewness. | `[:period=30]@series=close` |
+| `kurt` | — | Rolling bias-corrected excess kurtosis. | `[:period=30]@series=close` |
+| `sem` | — | Rolling standard error of the mean. | `[:period=30]@series=close` |
 | `correl` | `CORREL` | Pearson correlation coefficient. | `[:period=30]@series0=close,series1` |
 | `beta` | `BETA` | Beta. | `[:period=5]@series0=close,series1` |
 | `sum` | `SUM` | Rolling sum. | `[:period=30]@series=close` |

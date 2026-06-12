@@ -8,7 +8,7 @@
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
 **volas** is a Rust-powered, **pandas-compatible** `DataFrame` for candlestick
-(OHLCV) data, with [**236** trading-indicators](INDICATORS.md) built in.
+(OHLCV) data, with [**242** trading-indicators](INDICATORS.md) built in.
 
 Know pandas? You already know to use volas.
 
@@ -551,6 +551,51 @@ s.sum() / s.mean() / s.min() / s.max() / s.std() / s.var() / s.median()   # skip
 s.shift(n=1) / s.diff(n=1) / s.fillna(v) / s.ffill() / s.bfill()           # see Missing values: NA keeps the dtype
 s.isna() / s.notna() / s.dropna() / s.equals(t)
 ```
+
+#### Window operations (`rolling` / `expanding` / `ewm`) — compatibility only
+
+> **This surface exists so pandas research / labeling code moves over verbatim.
+> It is NOT the recommended way to compute indicators, and it should NOT be
+> used in a live trading system**: a window result is a plain Series — it does
+> not join the directive cache and is **not** incrementally refreshed by
+> `append()` / `fulfill()`; every new bar costs a full `O(n)` recompute.
+> Prefer the equivalent directive (`df['ma:20']`, `df['median:30']`,
+> `df['stddev:20']`, …): same kernels, plus caching and `O(lookback)` per-bar
+> refresh.
+
+```py
+s.rolling(window, min_periods=None, center=False)   # int window; min_periods defaults to window
+s.expanding(min_periods=1)
+s.ewm(com=|span=|halflife=|alpha=, min_periods=0, adjust=True, ignore_na=False)
+                                                    # exactly ONE decay spelling
+
+# Rolling / Expanding (pandas semantics: NA skipped, min_periods gates):
+.count() .nunique()                                 # -> int64 Series (native NA)
+.sum() .mean() .median() .min() .max()
+.var(ddof=1) .std(ddof=1) .sem(ddof=1) .skew() .kurt()
+.quantile(q, interpolation='linear') .rank(method='average', ascending=True, pct=False)
+.first() .last()                                    # dtype-preserving
+.corr(other) .cov(other, ddof=1)
+
+# Ewm:
+.mean() .sum() .var(bias=False) .std(bias=False) .corr(other) .cov(other, bias=False)
+```
+
+`center=True` labels each window at its center — it reads **future** bars
+relative to the label. That is exactly what a labeling pass wants, and exactly
+what a live signal must never do; it is supported for the former.
+
+Time-based windows (`rolling('5min')` / a `timedelta`) are deliberately not
+implemented. For multi-timeframe computation, maintain **two tf-aware
+DataFrames** (see [Cumulation](#cumulation-and-datetimeindex)) and `append`
+each bar to both — that is the supported, `O(lookback)`-per-bar design;
+emulating a coarser timeframe through window arithmetic recomputes everything
+on every bar.
+
+Not provided (pandas members that conflict with volas's model): `apply` /
+`agg` / `pipe` (arbitrary-Python-per-window), `win_type`, `step`, `on`,
+`closed`, `method`, `ewm(times=...)`, `ewm.online()` — `append()` + directives
+already cover the streaming use case.
 
 #### Known pandas divergences (the `volas.NA` model)
 

@@ -310,6 +310,7 @@ pub const COMMANDS: &[&str] = &[
     "dx", "adx", "adxr", "aroon", "aroonosc", "sum", "maxindex", "minindex", "minmax",
     "minmaxindex", "natr", "bop", "midpoint", "midprice", "linearreg", "linearreg_slope",
     "linearreg_intercept", "linearreg_angle", "tsf", "var", "stddev", "correl", "beta",
+    "median", "quantile", "rank", "skew", "kurt", "sem",
     "obv", "ad", "adosc", "avgprice", "medprice", "typprice", "wclprice", "ht_dcperiod",
     "ht_dcphase", "ht_phasor", "ht_sine", "ht_trendline", "ht_trendmode", "mama",
 ];
@@ -538,6 +539,23 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // volas rejects it on the V17 no-signal principle.) stddev's second arg
         // is the sign-free deviation multiplier.
         ("var", None) => (vec![p2(5)], vec!["close"]),
+        // pandas-window statistics promoted to directives (single kernel source
+        // with the rolling API; full-window semantics — an NA in the window
+        // yields NA, like the TA family's warm-up discipline).
+        ("median", None) => (vec![p2(30)], vec!["close"]),
+        // quantile: window, then the quantile level in [0, 1].
+        ("quantile", None) => (vec![p2(30), frange(0.5, 0.0, 1.0)], vec!["close"]),
+        ("rank", None) => (vec![p2(30)], vec!["close"]),
+        // skew / kurt are undefined below 3 / 4 samples (V17: no all-NA columns).
+        ("skew", None) => (
+            vec![Arg { default: ArgDefault::Int(30), bound: ArgBound::IntMin(3) }],
+            vec!["close"],
+        ),
+        ("kurt", None) => (
+            vec![Arg { default: ArgDefault::Int(30), bound: ArgBound::IntMin(4) }],
+            vec!["close"],
+        ),
+        ("sem", None) => (vec![p2(30)], vec!["close"]),
         ("stddev", None) => (vec![p2(5), mult(1.0)], vec!["close"]),
         ("obv", None) => (vec![], vec!["close", "volume"]),
         ("ad", None) => (vec![], vec!["high", "low", "close", "volume"]),

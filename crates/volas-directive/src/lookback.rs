@@ -209,6 +209,9 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
             arg(args, 0, 14).saturating_sub(1)
         }
         "var" | "stddev" => arg(args, 0, 5).saturating_sub(1),
+        "median" | "quantile" | "rank" | "skew" | "kurt" | "sem" => {
+            arg(args, 0, 30).saturating_sub(1)
+        }
         "correl" => arg(args, 0, 30).saturating_sub(1),
         "beta" => arg(args, 0, 5),
         "obv" | "ad" => 0,

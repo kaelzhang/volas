@@ -761,3 +761,27 @@ fn bool_matches_pandas() {
     assert!(Column::i64(vec![1]).as_bool_vec().is_err()); // non-bool -> error
 }
 
+
+#[test]
+fn take_optional_every_dtype() {
+    // `Some(i)` gathers row i, `None` is a dtype-preserving NA — every arm.
+    let idx = [Some(1), None, Some(0)];
+    let f = Column::f64(vec![1.5, 2.5]).take_optional(&idx);
+    assert!(f.is_valid(0) && !f.is_valid(1) && f.to_f64_vec()[2] == 1.5);
+    let f32c = Column::f32(vec![1.5, 2.5]).take_optional(&idx);
+    assert!(f32c.is_valid(0) && !f32c.is_valid(1));
+    let i = Column::i64(vec![10, 20]).take_optional(&idx);
+    assert_eq!((i.is_valid(1), i.to_f64_vec()[0]), (false, 20.0));
+    let i32c = Column::i32(vec![10, 20]).take_optional(&idx);
+    assert_eq!((i32c.is_valid(1), i32c.to_f64_vec()[2]), (false, 10.0));
+    let b = Column::bool(vec![true, false]).take_optional(&idx);
+    assert!(!b.is_valid(1) && b.is_valid(2));
+    let s = Column::str(vec!["a".into(), "b".into()]).take_optional(&idx);
+    assert_eq!((s.to_string_vec()[0].as_str(), s.is_valid(1)), ("b", false));
+    let d = Column::datetime(vec![100, 200]).take_optional(&idx);
+    assert!(d.is_valid(0) && !d.is_valid(1));
+    // a Some(i) pointing at a missing source cell stays missing
+    let holey = Column::i64_with(vec![0, 7], crate::validity::Validity::from_valid_iter(2, [false, true].into_iter()));
+    let g = holey.take_optional(&[Some(0), Some(1)]);
+    assert!(!g.is_valid(0) && g.is_valid(1));
+}

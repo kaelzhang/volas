@@ -40,6 +40,48 @@ impl Column {
         }
     }
 
+    /// Gather optional positions into a new column of the SAME dtype: `Some(i)`
+    /// reads row `i`, `None` is a missing cell (dtype-preserving NA — int/bool/str
+    /// grow a validity hole, float `NaN`, datetime `NaT`). Backs the window
+    /// `first` / `last` aggregations.
+    pub fn take_optional(&self, idx: &[Option<usize>]) -> Column {
+        let validity = || {
+            Validity::from_valid_iter(
+                idx.len(),
+                idx.iter().map(|p| p.is_some_and(|i| self.is_valid(i))),
+            )
+        };
+        match self {
+            Column::F64(v) => {
+                Column::f64(idx.iter().map(|p| p.map_or(f64::NAN, |i| v[i])).collect())
+            }
+            Column::F32(v) => {
+                Column::f32(idx.iter().map(|p| p.map_or(f32::NAN, |i| v[i])).collect())
+            }
+            Column::Bool(v, _) => Column::bool_with(
+                idx.iter().map(|p| p.is_some_and(|i| v[i])).collect(),
+                validity(),
+            ),
+            Column::I64(v, _) => Column::i64_with(
+                idx.iter().map(|p| p.map_or(0, |i| v[i])).collect(),
+                validity(),
+            ),
+            Column::I32(v, _) => Column::i32_with(
+                idx.iter().map(|p| p.map_or(0, |i| v[i])).collect(),
+                validity(),
+            ),
+            Column::Str(v, _) => Column::str_with(
+                idx.iter()
+                    .map(|p| p.map_or_else(String::new, |i| v[i].clone()))
+                    .collect(),
+                validity(),
+            ),
+            Column::Datetime(v) => Column::datetime(
+                idx.iter().map(|p| p.map_or(i64::MIN, |i| v[i])).collect(),
+            ),
+        }
+    }
+
     /// Number of present (non-missing) values (pandas `count`): `len - null_count`,
     /// reading the validity for every dtype (a float `NaN`, an int/bool/str NA, a
     /// datetime `NaT`).

@@ -735,10 +735,20 @@ impl PySeries {
         Ok(col_to_series(&self.inner, Column::f64(out)))
     }
 
-    /// A fixed-window rolling aggregator (pandas `rolling(window)`):
-    /// `s.rolling(20).mean()` etc. `min_periods` defaults to the window.
-    #[pyo3(signature = (window, min_periods = None))]
-    pub(crate) fn rolling(&self, window: i64, min_periods: Option<i64>) -> PyResult<PyRolling> {
+    /// A fixed-window rolling aggregator (pandas `rolling(window, min_periods,
+    /// center)`): `s.rolling(20).mean()` etc. `min_periods` defaults to the
+    /// window; `center=True` labels each window at its center (reads FUTURE
+    /// rows relative to the label — fine for labeling, look-ahead in live use).
+    ///
+    /// This surface is pandas COMPATIBILITY: the result is a plain Series that
+    /// `append` does not refresh. Prefer the directive forms in live systems.
+    #[pyo3(signature = (window, min_periods = None, center = false))]
+    pub(crate) fn rolling(
+        &self,
+        window: i64,
+        min_periods: Option<i64>,
+        center: bool,
+    ) -> PyResult<crate::window::PyRolling> {
         // i64 params + explicit guards: a negative value must be a clean
         // ValueError, not pyo3's unsigned-conversion OverflowError leak (R-1).
         if window < 1 {
@@ -747,32 +757,66 @@ impl PySeries {
         if min_periods.is_some_and(|m| m < 0) {
             return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
+        if min_periods.is_some_and(|m| m > window) {
+            return Err(PyValueError::new_err(
+                "min_periods must be <= window",
+            ));
+        }
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(PyRolling {
+        Ok(crate::window::PyRolling {
             series: self.inner.clone(),
-            window: window as usize,
-            min_periods: min_periods.unwrap_or(window) as usize,
+            spec: crate::window::WinSpec {
+                window: window as usize,
+                min_periods: min_periods.unwrap_or(window) as usize,
+                center,
+            },
         })
     }
 
     /// An expanding (cumulative) window aggregator (pandas `expanding()`).
+    /// Compatibility surface — see `rolling`.
     #[pyo3(signature = (min_periods = 1))]
-    pub(crate) fn expanding(&self, min_periods: i64) -> PyResult<PyExpanding> {
+    pub(crate) fn expanding(&self, min_periods: i64) -> PyResult<crate::window::PyExpanding> {
         if min_periods < 0 {
             return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(PyExpanding { series: self.inner.clone(), min_periods: min_periods as usize })
+        Ok(crate::window::PyExpanding {
+            series: self.inner.clone(),
+            spec: crate::window::WinSpec {
+                window: usize::MAX,
+                min_periods: min_periods as usize,
+                center: false,
+            },
+        })
     }
 
-    /// An exponentially-weighted aggregator (pandas `ewm(span=...)`).
-    #[pyo3(signature = (span))]
-    pub(crate) fn ewm(&self, span: f64) -> PyResult<PyEwm> {
-        if span < 1.0 {
-            return Err(PyValueError::new_err("ewm span must be >= 1"));
+    /// An exponentially-weighted aggregator (pandas `ewm`): exactly one of
+    /// `com` / `span` / `halflife` / `alpha`, with `adjust` and `ignore_na`.
+    /// Compatibility surface — see `rolling`.
+    #[pyo3(signature = (com = None, span = None, halflife = None, alpha = None, min_periods = 0, adjust = true, ignore_na = false))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ewm(
+        &self,
+        com: Option<f64>,
+        span: Option<f64>,
+        halflife: Option<f64>,
+        alpha: Option<f64>,
+        min_periods: i64,
+        adjust: bool,
+        ignore_na: bool,
+    ) -> PyResult<crate::window::PyEwm> {
+        if min_periods < 0 {
+            return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(PyEwm { series: self.inner.clone(), span })
+        Ok(crate::window::PyEwm {
+            series: self.inner.clone(),
+            alpha: crate::window::resolve_alpha(com, span, halflife, alpha)?,
+            adjust,
+            ignore_na,
+            min_periods: min_periods as usize,
+        })
     }
 
     pub(crate) fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
@@ -1523,157 +1567,4 @@ fn slice_head(s: &Series, n: usize) -> PySeries {
     }
 }
 
-/// `s.rolling(window)` — a fixed-window aggregator over a numeric series. Each
-/// output cell aggregates the trailing `window` values; cells with fewer than
-/// `min_periods` present values are missing (pandas semantics).
-#[pyclass(name = "Rolling")]
-pub struct PyRolling {
-    series: Series,
-    window: usize,
-    min_periods: usize,
-}
 
-/// `s.expanding()` — the cumulative (all-history) window aggregator.
-#[pyclass(name = "Expanding")]
-pub struct PyExpanding {
-    series: Series,
-    min_periods: usize,
-}
-
-/// `s.ewm(span=...)` — the exponentially-weighted aggregator.
-#[pyclass(name = "Ewm")]
-pub struct PyEwm {
-    series: Series,
-    span: f64,
-}
-
-/// Aggregate every trailing window of `s` with `f(values_in_window)`; windows
-/// with fewer than `min_periods` present values yield NaN.
-fn window_agg(
-    s: &Series,
-    window: usize,
-    min_periods: usize,
-    f: impl Fn(&[f64]) -> f64,
-) -> PySeries {
-    let v = s.data.to_f64_vec();
-    let n = v.len();
-    let mut out = vec![f64::NAN; n];
-    // an expanding window passes usize::MAX — cap the buffer at the data length
-    // (with_capacity(MAX) would abort with a capacity overflow, P7).
-    let mut buf: Vec<f64> = Vec::with_capacity(window.min(n));
-    for i in 0..n {
-        let start = (i + 1).saturating_sub(window);
-        buf.clear();
-        for k in start..=i {
-            if s.data.is_valid(k) && !v[k].is_nan() {
-                buf.push(v[k]);
-            }
-        }
-        if buf.len() >= min_periods.max(1) {
-            out[i] = f(&buf);
-        }
-    }
-    PySeries { inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)) }
-}
-
-fn agg_mean(b: &[f64]) -> f64 {
-    b.iter().sum::<f64>() / b.len() as f64
-}
-fn agg_var(b: &[f64]) -> f64 {
-    if b.len() < 2 {
-        return f64::NAN;
-    }
-    let m = agg_mean(b);
-    b.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (b.len() - 1) as f64
-}
-
-#[pymethods]
-impl PyRolling {
-    /// Rolling mean (pandas `rolling(n).mean()`).
-    pub(crate) fn mean(&self) -> PySeries {
-        window_agg(&self.series, self.window, self.min_periods, agg_mean)
-    }
-    /// Rolling sum.
-    pub(crate) fn sum(&self) -> PySeries {
-        window_agg(&self.series, self.window, self.min_periods, |b| b.iter().sum())
-    }
-    /// Rolling minimum.
-    pub(crate) fn min(&self) -> PySeries {
-        window_agg(&self.series, self.window, self.min_periods, |b| {
-            b.iter().copied().fold(f64::INFINITY, f64::min)
-        })
-    }
-    /// Rolling maximum.
-    pub(crate) fn max(&self) -> PySeries {
-        window_agg(&self.series, self.window, self.min_periods, |b| {
-            b.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-        })
-    }
-    /// Rolling sample variance (ddof=1).
-    pub(crate) fn var(&self) -> PySeries {
-        window_agg(&self.series, self.window, self.min_periods, agg_var)
-    }
-    /// Rolling sample standard deviation (ddof=1).
-    pub(crate) fn std(&self) -> PySeries {
-        window_agg(&self.series, self.window, self.min_periods, |b| agg_var(b).sqrt())
-    }
-}
-
-#[pymethods]
-impl PyExpanding {
-    /// Expanding mean.
-    pub(crate) fn mean(&self) -> PySeries {
-        window_agg(&self.series, usize::MAX, self.min_periods, agg_mean)
-    }
-    /// Expanding sum.
-    pub(crate) fn sum(&self) -> PySeries {
-        window_agg(&self.series, usize::MAX, self.min_periods, |b| b.iter().sum())
-    }
-    /// Expanding minimum.
-    pub(crate) fn min(&self) -> PySeries {
-        window_agg(&self.series, usize::MAX, self.min_periods, |b| {
-            b.iter().copied().fold(f64::INFINITY, f64::min)
-        })
-    }
-    /// Expanding maximum.
-    pub(crate) fn max(&self) -> PySeries {
-        window_agg(&self.series, usize::MAX, self.min_periods, |b| {
-            b.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-        })
-    }
-    /// Expanding sample variance (ddof=1).
-    pub(crate) fn var(&self) -> PySeries {
-        window_agg(&self.series, usize::MAX, self.min_periods, agg_var)
-    }
-    /// Expanding sample standard deviation (ddof=1).
-    pub(crate) fn std(&self) -> PySeries {
-        window_agg(&self.series, usize::MAX, self.min_periods, |b| agg_var(b).sqrt())
-    }
-}
-
-#[pymethods]
-impl PyEwm {
-    /// Exponentially-weighted mean (pandas `ewm(span=s, adjust=True).mean()`).
-    pub(crate) fn mean(&self) -> PySeries {
-        let s = &self.series;
-        let v = s.data.to_f64_vec();
-        let n = v.len();
-        let alpha = 2.0 / (self.span + 1.0);
-        let mut out = vec![f64::NAN; n];
-        let mut num = 0.0_f64;
-        let mut den = 0.0_f64;
-        for i in 0..n {
-            let present = s.data.is_valid(i) && !v[i].is_nan();
-            num *= 1.0 - alpha;
-            den *= 1.0 - alpha;
-            if present {
-                num += v[i];
-                den += 1.0;
-            }
-            if den > 0.0 {
-                out[i] = num / den;
-            }
-        }
-        PySeries { inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)) }
-    }
-}

@@ -88,8 +88,11 @@ def test_rolling_zero_waiver():
         _s().rolling(0)
 
 
-# R-6 (waiver): ewm takes span only — the quant convention; pandas's
-# com/halflife/alpha quartet is out-of-scope (convert: span = 2/alpha - 1).
-def test_ewm_span_only_waiver():
+# R-6 RESOLVED (owner ruling 2026-06-12): ewm now takes the full pandas decay
+# quartet (exactly one of com/span/halflife/alpha) plus adjust / ignore_na /
+# min_periods — the old span-only waiver is retired; full census in
+# test_audit_t14_window.py.
+def test_ewm_full_decay_quartet():
     import inspect
-    assert set(inspect.signature(_s().ewm).parameters) == {"span"}
+    assert set(inspect.signature(_s().ewm).parameters) == {
+        "com", "span", "halflife", "alpha", "min_periods", "adjust", "ignore_na"}

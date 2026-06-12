@@ -12,7 +12,7 @@ use volas_core::{
     binary_supertype, CmpOp, Column, DataFrame, Index,
     IndexKind, Series,
 };
-use volas_directive::{execute, parse};
+use volas_directive::parse;
 use volas_time::{aggregate_period, AggSpec, TimeFrame};
 
 use crate::format::render_row;

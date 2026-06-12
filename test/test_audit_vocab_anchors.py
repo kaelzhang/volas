@@ -58,6 +58,7 @@ _SUBJECT_MODULES = {
     "T11": ["test_audit_t11_directive.py"],
     "T12": ["test_audit_t12_scalar.py", "test_audit_timestamp_methods.py"],
     "T13": ["test_audit_t13_tz.py"],
+    "T14": ["test_audit_t14_window.py"],
     "T15": ["test_audit_t15_dt.py"],
     "Row": ["test_audit_t0_meta.py"],
 }

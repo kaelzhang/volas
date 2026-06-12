@@ -146,16 +146,16 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
     "SeriesLoc": {"__getitem__": "T7", "__new__": "ignore:accessor"},
     # window aggregator results (like the indexers: in the stub for typing, not
     # in the runtime __all__ — reached only through rolling()/expanding()/ewm()).
-    "Rolling": {**{m: "T1" for m in ("mean", "sum", "min", "max", "var", "std")},
-                "__new__": "ignore:accessor"},
-    "Expanding": {**{m: "T1" for m in ("mean", "sum", "min", "max", "var", "std")},
-                  "__new__": "ignore:accessor"},
-    "Ewm": {"mean": "T1", "__new__": "ignore:accessor"},
-    "RollingFrame": {**{m: "T1" for m in ("mean", "sum", "min", "max", "var", "std")},
-                     "__new__": "ignore:accessor"},
-    "ExpandingFrame": {**{m: "T1" for m in ("mean", "sum", "min", "max", "var", "std")},
-                       "__new__": "ignore:accessor"},
-    "EwmFrame": {"mean": "T1", "__new__": "ignore:accessor"},
+    "Rolling": {**{m: "T14" for m in ("count", "nunique", "sum", "mean", "median", "min", "max", "var", "std", "sem", "skew", "kurt", "quantile", "rank", "first", "last")},
+                "corr": "T14", "cov": "T14", "__new__": "ignore:accessor"},
+    "Expanding": {**{m: "T14" for m in ("count", "nunique", "sum", "mean", "median", "min", "max", "var", "std", "sem", "skew", "kurt", "quantile", "rank", "first", "last")},
+                  "corr": "T14", "cov": "T14", "__new__": "ignore:accessor"},
+    "Ewm": {**{m: "T14" for m in ("mean", "sum", "var", "std", "corr", "cov")},
+            "__new__": "ignore:accessor"},
+    "RollingFrame": {**{m: "T14" for m in ("count", "nunique", "sum", "mean", "median", "min", "max", "var", "std", "sem", "skew", "kurt", "quantile", "rank", "first", "last")}, "__new__": "ignore:accessor"},
+    "ExpandingFrame": {**{m: "T14" for m in ("count", "nunique", "sum", "mean", "median", "min", "max", "var", "std", "sem", "skew", "kurt", "quantile", "rank", "first", "last")}, "__new__": "ignore:accessor"},
+    "EwmFrame": {**{m: "T14" for m in ("mean", "sum", "var", "std")},
+                 "__new__": "ignore:accessor"},
     "DirectiveError": {}, "DirectiveSyntaxError": {}, "DirectiveValueError": {},
 }
 

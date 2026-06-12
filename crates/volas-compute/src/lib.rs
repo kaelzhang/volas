@@ -6,3 +6,4 @@
 
 pub mod indicators;
 pub mod kernels;
+pub mod window;
