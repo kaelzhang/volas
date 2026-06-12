@@ -20,8 +20,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install ruff and mypy
-        run: python -m pip install ruff mypy
+      # numpy is required for type ANALYSIS, not just runtime: volas_rs.pyi types
+      # boolean masks as `npt.NDArray[np.bool_]`. Without numpy installed,
+      # `ignore_missing_imports` silently degrades those annotations to Any, which
+      # widens the first `.loc` __getitem__ overload until mypy (correctly) flags
+      # the narrower ones as unreachable [overload-cannot-match].
+      - name: Install ruff, mypy and numpy
+        run: python -m pip install ruff mypy numpy
 
       - name: ruff (package + tests)
         run: ruff check volas test
