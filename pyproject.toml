@@ -85,3 +85,11 @@ warn_return_any = true
 ignore_missing_imports = true
 no_implicit_optional = true
 strict_optional = true
+
+[tool.ruff.lint.per-file-ignores]
+# Test-only style exemptions (the volas package itself is fully strict):
+# E741 — `l` is the industry-standard OHLC low alongside o/h/c in fixtures
+#        and parity helpers; renaming it degrades, not improves, readability.
+# E731 — oracle/parity tables bind small lambdas by name on purpose.
+# E702 — compact one-line assertion pairs in generated parity sweeps.
+"test/*" = ["E741", "E731", "E702"]

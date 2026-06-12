@@ -4,7 +4,6 @@ bool), NOT through the f64 funnel. Datetime must keep sub-256ns ordering (f64
 collapses it past 2^53); str uses lexical order; numeric is unchanged."""
 
 import numpy as np
-import pytest
 import volas
 from volas import DataFrame
 
@@ -23,7 +22,7 @@ def test_idxmax_datetime_sub_256ns():
 
 
 def test_idxmax_idxmin_str_lexical():
-    s = DataFrame({'s': ['banana', 'apple', 'cherry'], 'i': [0, 1, 2]})['s']
+    DataFrame({'s': ['banana', 'apple', 'cherry'], 'i': [0, 1, 2]})['s']
     sx = DataFrame({'s': ['banana', 'apple', 'cherry'], 'i': [0, 1, 2]}).set_index('i')['s']
     assert sx.idxmax() == 2   # 'cherry' (lexical max) at label 2
     assert sx.idxmin() == 1   # 'apple' (lexical min) at label 1

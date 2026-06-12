@@ -50,7 +50,7 @@ def _df_na():
 
 
 def test_isna_notna_detect_every_dtype():
-    NA = volas.NA
+    volas.NA
     isna = _df_na().isna()
     for c in ["i", "b", "s", "f"]:
         assert isna[c].to_list() == [False, True, False], c

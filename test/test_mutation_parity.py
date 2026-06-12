@@ -60,7 +60,7 @@ DIRECTIVES = list(COVERAGE_IDS)
 # and StochRSI (carry the RSI Wilder state + the RSI window feeding %K/%D) are all
 # state-carry-continuable across a slice. Finite-memory indicators (SMA, ROC, price
 # transforms, CDL, ...) always continued. So nothing remains on the slice fallback.
-_SLICE_STATEFUL = frozenset()  # empty — every indicator now continues across a slice.
+_SLICE_STATEFUL: frozenset[str] = frozenset()  # empty — every indicator continues across a slice.
 
 # BUG 2 (in-place update of a base column/row did not invalidate dependent cached
 # indicators) is FIXED — test_update_cell and test_update_column are exact for every

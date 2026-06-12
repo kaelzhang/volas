@@ -8,6 +8,7 @@ A *cached directive* column instead keeps its cheap stale placeholder, which
 TA-Lib parity suites.
 """
 
+import pytest
 import numpy as np
 
 import volas
@@ -62,8 +63,6 @@ def test_padded_na_participates_in_missing_methods():
 
 
 # --- R4-P2-01: an EXTRA column is rejected (a missing one is padded above) ---
-
-import pytest
 
 
 def test_append_extra_column_is_rejected():

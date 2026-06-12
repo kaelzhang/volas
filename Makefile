@@ -1,4 +1,4 @@
-files = volas test *.py
+files = volas test $(wildcard *.py)
 test_files = *
 # Prefer an explicit VOLAS_PYTHON (the conda-env interpreter) so `make test` /
 # `make types` reproduce identically across shells; else the PATH python.
@@ -145,8 +145,8 @@ perf-ab:
 lint:
 	@echo "\033[1m>> Running ruff... <<\033[0m"
 	@ruff check $(files)
-	@echo "\033[1m>> Running mypy... <<\033[0m"
-	@mypy $(files)
+	@echo "\033[1m>> Running mypy (package)... <<\033[0m"
+	@mypy volas
 	@echo "\033[1m>> Running cargo check... <<\033[0m"
 	@cargo check
 

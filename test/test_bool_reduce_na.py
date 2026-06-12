@@ -3,7 +3,6 @@ nullable boolean default skipna=True — a NA must NOT be read as its `false`
 placeholder."""
 
 import pandas as pd
-import pytest
 from volas import DataFrame
 
 
@@ -26,7 +25,7 @@ def test_any_skips_na():
 
 def test_all_na_bool_vacuous():
     # a bool column that is all-NA: all() vacuously True, any() False (pandas)
-    s = _b([True, None])
+    _b([True, None])
     # force an all-NA bool column via masking out the True (use where on a bool col)
     # simpler: [None, None] infers float, so build [True,None] then check the NA-only
     # semantics through pandas parity on the mixed case above is enough; here assert

@@ -14,7 +14,7 @@ from stock_pandas import StockDataFrame
 
 from volas import DataFrame, Series
 
-from .common import COLUMNS, create_stock, get_last, get_tencent, to_fixed
+from .common import create_stock, get_last, get_tencent
 
 _TENCENT = str((Path(__file__).parent / 'data' / 'tencent.csv').resolve())
 

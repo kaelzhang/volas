@@ -8,7 +8,6 @@ directions (pandas `na_position='last'`); head / tail slice data and index.
 
 import numpy as np
 import pandas as pd
-import pytest
 from volas import DataFrame
 
 
@@ -77,7 +76,7 @@ def test_series_sort_values_na_last_both_directions():
 
 def test_series_sort_values_is_stable():
     # equal keys keep their original relative order (stable sort)
-    s = DataFrame({'a': [1, 1, 1], 'k': [10, 20, 30]})['k']
+    DataFrame({'a': [1, 1, 1], 'k': [10, 20, 30]})['k']
     # sort the 'a' column (all equal) -> index order preserved
     a = DataFrame({'a': [2, 2, 1]})['a'].sort_values()
     assert list(np.asarray(a.index)) == [2, 0, 1]  # the 1 first, then the two 2s in order
