@@ -79,14 +79,28 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --out dist --interpreter ${{ matrix.python-version }}
+          args: --release --locked --out dist --interpreter ${{ matrix.python-version }}
 
       - name: Build wheel (macOS/Windows)
         if: ${{ matrix.platform.os != 'ubuntu-latest' }}
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --interpreter python
+          args: --release --locked --out dist --interpreter python
+
+      # Owner decision D4 (2026-06-12): a wheel must prove it imports and carries its
+      # stubs before it can ship. The linux-aarch64 wheel is cross-compiled and cannot
+      # run on the x86_64 build runner, so it is excluded here (its sibling platforms
+      # exercise the identical code; only the target triple differs).
+      - name: Smoke-test the wheel
+        if: ${{ matrix.platform.label != 'linux-aarch64' }}
+        shell: bash
+        run: |
+          python -m venv smoke-env
+          if [ -e smoke-env/Scripts/python.exe ]; then PY=smoke-env/Scripts/python.exe; else PY=smoke-env/bin/python; fi
+          "$PY" -m pip install --find-links dist volas
+          "$PY" -c "import volas, volas_rs; df = volas.DataFrame({'close': [1.0, 2.0, 3.0]}); assert df['ma:2'].to_numpy()[-1] == 2.5; print('wheel smoke OK')"
+          "$PY" -c "import importlib.util, pathlib; spec = importlib.util.find_spec('volas_rs'); root = pathlib.Path(spec.origin).parent; assert list(root.parent.rglob('volas_rs.pyi')), 'stub missing from the wheel'; print('stub present')"
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
@@ -147,6 +161,11 @@ jobs:
 
       - name: Check artifacts
         run: ls -lh dist
+
+      - name: twine check (metadata sanity before publish)
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
 
       - name: Publish to PyPI (Trusted Publishing / OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
