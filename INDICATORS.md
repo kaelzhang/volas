@@ -1088,7 +1088,7 @@ strings: `acos`, `asin`, `atan`, `ceil`, `cos`, `cosh`, `exp`, `floor`, `ln`,
 | `t3` | `T3` | T3 moving average. | `[:period=5,vfactor=0.7]@series=close` |
 | `mama` | `MAMA` | MESA adaptive moving average main line. | `[:fast_limit=0.5,slow_limit=0.05]@series=close` |
 | `mama.fama` | `MAMA` | Following adaptive moving average line. | `[:fast_limit=0.5,slow_limit=0.05]@series=close` |
-| `mavp` | `MAVP` | Moving average with per-row variable periods. | `[:min=2,max=30,matype=0]@series=close,periods` |
+| `mavp` | `MAVP` | Moving average with per-row variable periods; the REQUIRED second input series supplies each row's period (clamped to `[min, max]`). | `[:min=2,max=30,matype=0]@series0=close,series1` |
 | `sar` | `SAR` | Parabolic SAR. | `[:acceleration=0.02,maximum=0.2]@high,low` |
 | `sarext` | `SAREXT` | Extended Parabolic SAR. | `[:start=0,offset=0,long_init=0.02,long_step=0.02,long_max=0.2,short_init=0.02,short_step=0.02,short_max=0.2]@high,low` |
 | `boll` | `BBANDS` | Bollinger middle band. | `[:period=20]@series=close` |
