@@ -12,7 +12,7 @@
 
 Know pandas? You already know to use volas.
 
-The difference is speed that **volas** beats **EVERY** solution on earth in terms of indicator calculating.
+The difference is speed that **volas** beats **EVERY** solution on earth in terms of overall indicator calculating.
 
 ## Why volas
 
