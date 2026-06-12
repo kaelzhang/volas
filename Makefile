@@ -94,7 +94,7 @@ coverage-html:
 #   make benchmark                    # full run, archived under .benchmarks/<stamp>/
 #   make benchmark INDICATOR=roc:10   # one coverage row only, not archived
 #
-# Every full run is persisted to .benchmarks/<date>-<short-commit>[-dirty]/ (the
+# Every full run is persisted to .benchmarks/<date>-<time>-<short-commit>[-dirty]/ (the
 # whole dir is gitignored), each holding benchmark.json + report.html + meta.txt,
 # so a given Git commit's performance can be retrieved and compared later (e.g.
 #   python scripts/perf_gate.py .benchmarks/<new>/benchmark.json \
@@ -102,13 +102,12 @@ coverage-html:
 # ). The latest run is also mirrored to .benchmarks/last.json + ./benchmark-report.html.
 BENCH_OPTS := --benchmark-only --benchmark-group-by=func,param:indicator \
               --benchmark-columns=mean,median,ops,rounds --benchmark-sort=name
-BENCH_STAMP := $(shell date +%Y-%m-%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+BENCH_STAMP := $(shell date +%Y-%m-%d-%H%M%S)-$(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
 BENCH_DIR := .benchmarks/$(BENCH_STAMP)
 benchmark: build
 	@echo "\033[1m>> Installing dev + benchmark comparison libraries... <<\033[0m"
 	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(PIP) install -q -r /dev/stdin
 ifdef INDICATOR
-	@if [ -n "$(WEB_REPORT)" ]; then echo "WEB_REPORT is ignored when INDICATOR is set."; fi
 	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --volas-benchmark-indicator="$(INDICATOR)"
 else
 	@mkdir -p $(BENCH_DIR)

@@ -48,7 +48,7 @@ writes the web report:
 
 ```sh
 make benchmark INDICATOR=roc:10
-make benchmark WEB_REPORT=1     # full run, writes ./benchmark-report.html
+make benchmark                  # full run; always writes ./benchmark-report.html
 ```
 
 The locally generated `./benchmark-report.html` (and the always-current
