@@ -704,6 +704,21 @@ The supported aggregators are `first`, `max`, `min`, `last` and `sum`.
 The `time_frame` may be a string label or a `TimeFrame` constant — see
 [TimeFrame](#timeframe) for the full list.
 
+#### Bar labels are the period start
+
+Every time frame lies on a **fixed grid**, and a cumulated bar is labelled with
+its period's grid **start** — even when the first raw bar arrives mid-period. A
+bar that opens with a `09:07` tick on a `15m` frame is labelled `09:00`, never
+`09:07`, so volas bars line up exactly with exchange klines and with pandas
+`resample` (`label='left'`).
+
+The grid origins per frame: intraday frames anchor at **midnight** of the
+index's (timezone-aware) trading day — a `15m` bar starts at `:00`/`:15`/`:30`/
+`:45`, a `4h` bar at `00:00`/`04:00`/…; `1d` starts at midnight; `1w` on
+**Monday**; `3d` is a continuous grid from the Unix epoch; `1M` / `1y` on the
+calendar month / year. If a daylight-saving transition removes or repeats a
+period's boundary, the label resolves to the period's earliest real instant.
+
 For **live** streaming you do not re-cumulate the whole history on every tick —
 you keep the current 5-minute bar *forming* and update it as each finer bar
 arrives. A **tf-aware DataFrame** does exactly that: it stays an ordinary

@@ -127,6 +127,50 @@ impl TimeFrame {
         }
     }
 
+    /// The UTC epoch-ns instant at which `ns`'s period **starts** in `tz`'s
+    /// wall-clock — the bar label of a cumulated period (owner decision
+    /// 2026-06-12: bar labels are the grid period start, origin + n·delta, not
+    /// the first raw timestamp). The grid mirrors [`TimeFrame::unify_tz`]
+    /// field-for-field: intraday frames anchor at local midnight (a 15-minute
+    /// bar starts at :00/:15/:30/:45), multi-hour frames at hours 0/k/2k…,
+    /// Day3 at the Unix epoch, Week1 on Monday, Month1/Year1 on the calendar.
+    /// A DST anomaly at the boundary resolves to the bucket's earliest real
+    /// instant (see [`Tz::wall_to_utc_ns_earliest`]).
+    pub fn period_start_ns(&self, ns: i64, tz: Tz) -> i64 {
+        let (y, mo, d, h, mi, s) = tz.civil_parts(ns);
+        use TimeFrame::*;
+        let (y, mo, d, h, mi, s) = match self {
+            Sec1 => (y, mo, d, h, mi, s),
+            Min1 => (y, mo, d, h, mi, 0),
+            Min3 => (y, mo, d, h, (mi / 3) * 3, 0),
+            Min5 => (y, mo, d, h, (mi / 5) * 5, 0),
+            Min15 => (y, mo, d, h, (mi / 15) * 15, 0),
+            Min30 => (y, mo, d, h, (mi / 30) * 30, 0),
+            Hour1 => (y, mo, d, h, 0, 0),
+            Hour2 => (y, mo, d, (h / 2) * 2, 0, 0),
+            Hour4 => (y, mo, d, (h / 4) * 4, 0, 0),
+            Hour6 => (y, mo, d, (h / 6) * 6, 0, 0),
+            Hour8 => (y, mo, d, (h / 8) * 8, 0, 0),
+            Hour12 => (y, mo, d, (h / 12) * 12, 0, 0),
+            Day1 => (y, mo, d, 0, 0, 0),
+            Day3 => {
+                let start = volas_core::datetime::days_from_civil(y, mo, d).div_euclid(3) * 3;
+                let (y, mo, d) = volas_core::datetime::civil_from_days(start);
+                (y, mo, d, 0, 0, 0)
+            }
+            Week1 => {
+                let days = volas_core::datetime::days_from_civil(y, mo, d);
+                let start = (days + 3).div_euclid(7) * 7 - 3; // Monday anchor
+                let (y, mo, d) = volas_core::datetime::civil_from_days(start);
+                (y, mo, d, 0, 0, 0)
+            }
+            Month1 => (y, mo, 1, 0, 0, 0),
+            Year1 => (y, 1, 1, 0, 0, 0),
+        };
+        tz.wall_to_utc_ns_earliest(y as i32, mo as u32, d as u32, h as u32, mi as u32, s as u32)
+            .expect("a floored civil instant derived from a valid timestamp is valid")
+    }
+
     /// Whether this frame can be cleanly coarsened (aggregated) up to `dst` —
     /// i.e. every `dst` bucket boundary is also a boundary of `self`, so each
     /// `dst` bar is a whole number of `self` bars with none straddling.
@@ -198,6 +242,82 @@ impl TimeFrame {
 mod tests {
     use super::*;
     use volas_core::datetime;
+
+    /// `period_start_ns` floors an off-grid instant to its grid origin + n·delta
+    /// for every frame kind — the bar-label contract (owner decision 2026-06-12).
+    #[test]
+    fn period_start_floors_to_the_grid() {
+        let ns = datetime::parse_ns("2024-05-22 13:47:23").unwrap(); // a Wednesday
+        let start = |tf: TimeFrame| tf.period_start_ns(ns, Tz::Utc);
+        let at = |s: &str| datetime::parse_ns(s).unwrap();
+        assert_eq!(start(TimeFrame::Sec1), at("2024-05-22 13:47:23"));
+        assert_eq!(start(TimeFrame::Min1), at("2024-05-22 13:47:00"));
+        assert_eq!(start(TimeFrame::Min3), at("2024-05-22 13:45:00"));
+        assert_eq!(start(TimeFrame::Min5), at("2024-05-22 13:45:00"));
+        assert_eq!(start(TimeFrame::Min15), at("2024-05-22 13:45:00"));
+        assert_eq!(start(TimeFrame::Min30), at("2024-05-22 13:30:00"));
+        assert_eq!(start(TimeFrame::Hour1), at("2024-05-22 13:00:00"));
+        assert_eq!(start(TimeFrame::Hour2), at("2024-05-22 12:00:00"));
+        assert_eq!(start(TimeFrame::Hour4), at("2024-05-22 12:00:00"));
+        assert_eq!(start(TimeFrame::Hour6), at("2024-05-22 12:00:00"));
+        assert_eq!(start(TimeFrame::Hour8), at("2024-05-22 08:00:00"));
+        assert_eq!(start(TimeFrame::Hour12), at("2024-05-22 12:00:00"));
+        assert_eq!(start(TimeFrame::Day1), at("2024-05-22 00:00:00"));
+        // Day3 is epoch-anchored: day 19865 (2024-05-22) floors to 19863 (05-20).
+        assert_eq!(start(TimeFrame::Day3), at("2024-05-20 00:00:00"));
+        // Week1 anchors on Monday: 2024-05-22 is Wednesday -> Monday 05-20.
+        assert_eq!(start(TimeFrame::Week1), at("2024-05-20 00:00:00"));
+        assert_eq!(start(TimeFrame::Month1), at("2024-05-01 00:00:00"));
+        assert_eq!(start(TimeFrame::Year1), at("2024-01-01 00:00:00"));
+    }
+
+    /// In a named zone the grid is the LOCAL wall-clock (a Shanghai daily bar
+    /// starts at 00:00 +08:00 = 16:00 UTC of the prior day), and a DST fold at
+    /// the boundary resolves to the earliest occurrence.
+    #[test]
+    fn period_start_uses_local_wall_clock_and_resolves_dst() {
+        let sh = Tz::parse("Asia/Shanghai").unwrap();
+        let ns = datetime::parse_ns("2024-05-22 03:30:00").unwrap(); // 11:30 in Shanghai
+        assert_eq!(
+            TimeFrame::Day1.period_start_ns(ns, sh),
+            datetime::parse_ns("2024-05-21 16:00:00").unwrap() // 05-22 00:00 +08
+        );
+        // America/New_York 2024-11-03: 01:00-02:00 EDT repeats (fold). An Hour1
+        // bar inside the fold labels the EARLIEST 01:00 (05:00 UTC, not 06:00).
+        let ny = Tz::parse("America/New_York").unwrap();
+        let in_fold = datetime::parse_ns("2024-11-03 05:30:00").unwrap(); // first 01:30 EDT
+        assert_eq!(
+            TimeFrame::Hour1.period_start_ns(in_fold, ny),
+            datetime::parse_ns("2024-11-03 05:00:00").unwrap()
+        );
+        // 2024-03-10: 02:00-03:00 EST does not exist (gap). A 02:xx-grid start is
+        // unreachable from real timestamps, but a Day1 bar over the gap day still
+        // starts at the (existing) local midnight.
+        let gap_day = datetime::parse_ns("2024-03-10 12:00:00").unwrap();
+        assert_eq!(
+            TimeFrame::Day1.period_start_ns(gap_day, ny),
+            datetime::parse_ns("2024-03-10 05:00:00").unwrap() // 00:00 EST
+        );
+        // América/São_Paulo 2018-11-04: midnight itself did not exist (the clock
+        // sprang 00:00 -> 01:00). The daily bar's start resolves to the first
+        // real instant of the day: 01:00 -02:00 = 03:00 UTC (the gap-probe path).
+        let sp = Tz::parse("America/Sao_Paulo").unwrap();
+        let mid_day = datetime::parse_ns("2018-11-04 15:00:00").unwrap();
+        assert_eq!(
+            TimeFrame::Day1.period_start_ns(mid_day, sp),
+            datetime::parse_ns("2018-11-04 03:00:00").unwrap()
+        );
+    }
+
+    /// `civil_from_days` is the exact inverse of `days_from_civil` across a wide
+    /// sweep, including the negative (pre-epoch) range.
+    #[test]
+    fn civil_from_days_roundtrips() {
+        for days in (-30000..40000).step_by(97) {
+            let (y, mo, d) = datetime::civil_from_days(days);
+            assert_eq!(datetime::days_from_civil(y, mo, d), days);
+        }
+    }
 
     #[test]
     fn labels_and_parse() {

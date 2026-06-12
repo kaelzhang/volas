@@ -87,7 +87,7 @@ impl Cumulator {
 
         // Finalize every run except the last.
         for &(a, b) in &runs[..last] {
-            let coarse = aggregate_period(&raw.slice(a, b), &self.spec)?;
+            let coarse = aggregate_period(&raw.slice(a, b), &self.spec, self.tf)?;
             self.closed = Some(match self.closed.take() {
                 Some(mut closed) => {
                     closed.append(&coarse)?;
@@ -107,7 +107,7 @@ impl Cumulator {
     /// aggregated as the (live) last row.
     pub fn frame(&self) -> Result<DataFrame> {
         let open_coarse = match &self.open {
-            Some(open) => Some(aggregate_period(open, &self.spec)?),
+            Some(open) => Some(aggregate_period(open, &self.spec, self.tf)?),
             None => None,
         };
         match (&self.closed, open_coarse) {
@@ -126,7 +126,7 @@ impl Cumulator {
     /// `None` if nothing is open. O(open period) — for live tick reads.
     pub fn last(&self) -> Result<Option<DataFrame>> {
         match &self.open {
-            Some(open) => Ok(Some(aggregate_period(open, &self.spec)?)),
+            Some(open) => Ok(Some(aggregate_period(open, &self.spec, self.tf)?)),
             None => Ok(None),
         }
     }
@@ -174,8 +174,12 @@ fn dedup_keep_last(ts: &[i64]) -> Vec<usize> {
 }
 
 /// Aggregate one period's raw bars into a single coarse row (1-row frame). The
-/// index label is the period's first timestamp.
-pub fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame> {
+/// index label is the period's grid **start** — `tf.period_start_ns` of the
+/// first raw timestamp (owner decision 2026-06-12: every TimeFrame has a fixed
+/// grid origin and a bar's label is origin + n·delta, e.g. a 15-minute bar
+/// labels :00/:15/:30/:45 — never the first raw timestamp, which can sit
+/// anywhere inside the period).
+pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame) -> Result<DataFrame> {
     let (ts, tz): (&[i64], _) = match period.index().kind() {
         IndexKind::Datetime(v, tz) => (v, *tz),
         _ => {
@@ -185,7 +189,7 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec) -> Result<DataFrame>
         }
     };
     let kept = dedup_keep_last(ts);
-    let start_ns = ts[kept[0]];
+    let start_ns = tf.period_start_ns(ts[kept[0]], tz);
 
     let names = period.names().to_vec();
     let mut columns = Vec::with_capacity(names.len());
@@ -359,6 +363,33 @@ mod tests {
     fn aggregate_period_rejects_non_datetime_index() {
         // append's guard shadows this one in the public path, so call it directly.
         let df = DataFrame::new(vec!["open".into()], vec![Column::f64(vec![1.0])], None).unwrap();
-        assert!(aggregate_period(&df, &AggSpec::ohlcv()).is_err());
+        assert!(aggregate_period(&df, &AggSpec::ohlcv(), TimeFrame::Min5).is_err());
+    }
+
+    /// Owner decision 2026-06-12: a coarse bar is labelled with its grid period
+    /// START (origin + n·delta), not the first raw timestamp. A 5-minute period
+    /// whose first bar arrives mid-period (09:07) still labels 09:05.
+    #[test]
+    fn label_is_period_start_not_first_bar() {
+        let df = frame(
+            &["2024-01-02 09:07:00", "2024-01-02 09:09:00", "2024-01-02 09:11:00"],
+            &[1.0, 2.0, 3.0],
+            &[1.0, 2.0, 3.0],
+            &[1.0, 2.0, 3.0],
+            &[1.0, 2.0, 3.0],
+            &[1.0, 1.0, 1.0],
+        );
+        let out = cumulate(&df, TimeFrame::Min5, &AggSpec::ohlcv()).unwrap();
+        let labels: Vec<i64> = match out.index().kind() {
+            IndexKind::Datetime(v, _) => v.clone(),
+            _ => unreachable!(), // LCOV_EXCL_LINE
+        };
+        assert_eq!(
+            labels,
+            vec![
+                datetime::parse_ns("2024-01-02 09:05:00").unwrap(),
+                datetime::parse_ns("2024-01-02 09:10:00").unwrap(),
+            ]
+        );
     }
 }

@@ -130,6 +130,41 @@ impl Tz {
         }
     }
 
+    /// UTC epoch-ns of a naive wall-clock interpreted in this timezone, resolved
+    /// to the **earliest** real instant — the period-start variant of
+    /// [`Tz::wall_to_utc_ns`]. Where that method rejects DST anomalies (correct
+    /// for user-entered times, F33), a derived bucket start must always resolve:
+    /// a fall-back **fold** takes the first of the two occurrences, and a
+    /// spring-forward **gap** (the wall-clock minute does not exist) advances in
+    /// 15-minute steps to the first instant that does — the true first moment of
+    /// the bucket. Returns `None` only for an invalid civil date.
+    pub fn wall_to_utc_ns_earliest(
+        &self,
+        y: i32,
+        mo: u32,
+        d: u32,
+        h: u32,
+        mi: u32,
+        s: u32,
+    ) -> Option<i64> {
+        match self {
+            Tz::Naive | Tz::Utc | Tz::Offset(_) => self.wall_to_utc_ns(y, mo, d, h, mi, s),
+            Tz::Named(tz) => {
+                let mut naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
+                // Real DST gaps are at most ~2h; 16 quarter-hour probes cover any
+                // historical rule with margin.
+                for _ in 0..16 {
+                    match tz.from_local_datetime(&naive) {
+                        chrono::LocalResult::Single(dt) => return dt.timestamp_nanos_opt(),
+                        chrono::LocalResult::Ambiguous(a, _) => return a.timestamp_nanos_opt(),
+                        chrono::LocalResult::None => naive += chrono::Duration::minutes(15),
+                    }
+                }
+                None // LCOV_EXCL_LINE — no real tz rule has a >4h gap
+            }
+        }
+    }
+
     /// A display name: `"naive"` (unanchored), `"UTC"`, a `"+08:00"`-style
     /// offset, or the IANA name.
     pub fn name(&self) -> String {

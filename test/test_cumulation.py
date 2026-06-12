@@ -243,3 +243,36 @@ def test_tf_iir_indicator_incremental_matches_one_shot():
     np.testing.assert_allclose(
         df['ema:2'].to_numpy(), fine.cumulate('5m').exec('ema:2'), equal_nan=True
     )
+
+
+# --- bar labels are the grid period start (owner decision 2026-06-12) --------
+
+def _ns(s):
+    """Epoch-ns of a naive UTC timestamp string (the raw DatetimeIndex unit)."""
+    return int(np.datetime64(s.replace(' ', 'T'), 'ns').astype(np.int64))
+
+
+def _off_grid(times):
+    """A tiny close-only frame at the given (off-grid) timestamps."""
+    df = DataFrame({'close': [float(i) for i in range(1, len(times) + 1)], 't': list(times)})
+    df['t'] = to_datetime(df['t'])
+    return df.set_index('t')
+
+
+def test_cumulate_labels_are_period_start():
+    # Every TimeFrame has a fixed grid origin (intraday anchored at midnight);
+    # a bar is labelled origin + n*delta even when its first raw bar arrives
+    # mid-period — never the first raw timestamp.
+    df = _off_grid(['2024-01-02 09:07:00', '2024-01-02 09:09:00', '2024-01-02 09:11:00'])
+    out = df.cumulate('5m')
+    assert out.index.tolist() == [_ns('2024-01-02 09:05:00'), _ns('2024-01-02 09:10:00')]
+    # The same first bar folded at 15m: one bar, labelled 09:00.
+    assert df.cumulate('15m').index.tolist() == [_ns('2024-01-02 09:00:00')]
+
+
+def test_live_append_forming_bar_labels_period_start():
+    # The live fold path labels the forming row with the period start too: a
+    # roll-over bar arriving at 09:12 opens the 09:10 period, not an 09:12 row.
+    df = _off_grid(['2024-01-02 09:07:00']).cumulate('5m')
+    df.append(_off_grid(['2024-01-02 09:12:00']))
+    assert df.index.tolist() == [_ns('2024-01-02 09:05:00'), _ns('2024-01-02 09:10:00')]

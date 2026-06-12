@@ -202,6 +202,17 @@ pub fn days_from_civil(y: i64, mo: i64, d: i64) -> i64 {
     date.signed_duration_since(epoch).num_days()
 }
 
+/// The civil date for a continuous epoch-day count — the inverse of
+/// [`days_from_civil`], used to map a multi-day bucket index back to the bucket's
+/// first calendar day (the period-start label of Day3 / Week1 bars).
+pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+    // An i64-ns timestamp spans ~1677..=2262 (see `civil_parts`), so any day count
+    // derived from one is far inside chrono's range.
+    let date = epoch + chrono::Duration::days(days);
+    (date.year() as i64, date.month() as i64, date.day() as i64)
+}
+
 /// The `.fff` / `.ffffff` / `.fffffffff` fractional-second suffix for a
 /// sub-second remainder, empty for a whole second. Digits come in groups of
 /// three (ms / µs / ns), pandas-style, so a 123 ms value prints `.123` and a

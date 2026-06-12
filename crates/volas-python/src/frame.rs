@@ -550,7 +550,7 @@ impl PyDataFrame {
                     *open = open.slice(0, open.height() - 1);
                 }
                 open.append(&bar).map_err(pyerr)?;
-                let agg = aggregate_period(open, &tfs.cumulators).map_err(pyerr)?;
+                let agg = aggregate_period(open, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                 let last = inner.height() - 1;
                 // `assign_positions` invalidates each written column's dependent
                 // directive columns, so the forming row's indicators recompute
@@ -563,7 +563,7 @@ impl PyDataFrame {
             } else {
                 // Roll over: the previous forming bar (if any) is already final in
                 // `inner`; start a new open period and append its forming row.
-                let agg = aggregate_period(&bar, &tfs.cumulators).map_err(pyerr)?;
+                let agg = aggregate_period(&bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                 tfs.open = Some(bar);
                 inner.append(&agg).map_err(pyerr)?;
             }
