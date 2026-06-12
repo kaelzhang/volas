@@ -178,7 +178,13 @@ jobs:
 
       - name: twine check (metadata sanity before publish)
         run: |
-          python -m pip install --upgrade twine
+          # maturin >= 1.14 emits PEP 639 metadata (License-File /
+          # License-Expression, Metadata-Version 2.4). twine validates through
+          # `packaging`, and the runner's SYSTEM packaging (24.0) predates
+          # PEP 639 — pip leaves it untouched ("requirement satisfied") and
+          # twine then rejects every wheel with "unrecognized field
+          # 'license-file'". Upgrade packaging explicitly alongside twine.
+          python -m pip install --upgrade twine "packaging>=25"
           python -m twine check dist/*
 
       - name: Publish to PyPI (Trusted Publishing / OIDC)
