@@ -47,11 +47,17 @@ dev = [
   "pytest-benchmark",
   "twine",
   # Test-time oracles: the parity tests compare volas against pandas / stock-pandas
-  # and TA-Lib. The `TA-Lib` wheel (>=0.6) bundles the TA-Lib C library, so no
-  # separate system install is needed in CI.
-  "pandas>=3.0.0",
-  "stock-pandas>=5.4",
-  "TA-Lib>=0.6",
+  # and TA-Lib. The `TA-Lib` wheel bundles the TA-Lib C library, so no separate
+  # system install is needed in CI.
+  #
+  # Oracles are PINNED to the verified stream (owner decision D3, 2026-06-12): a
+  # silently-newer oracle changes the expected answers and turns CI red (or worse,
+  # silently moves the contract) without any code change. Upgrading an oracle is an
+  # explicit maintenance commit that re-runs the full suite and updates snapshots,
+  # waivers, and docs together.
+  "pandas>=3.0,<3.1",
+  "stock-pandas>=5.4,<5.5",
+  "TA-Lib>=0.6,<0.7",
   # PEP 639 / Metadata 2.4 license fields require packaging >= 24.2 to publish
   "packaging>=24.2",
   "numpy>=2.0.0",
