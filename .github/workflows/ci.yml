@@ -45,6 +45,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets
 
+      - name: Cargo.lock is in sync (release builds pass --locked)
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
   test:
     name: test / py${{ matrix.python-version }}
     runs-on: ubuntu-latest

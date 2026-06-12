@@ -206,8 +206,8 @@ bump:
 	fi; \
 	echo "\033[1m>> Bumping version to $$next <<\033[0m"; \
 	python3 scripts/bump_version.py "$(TYPE)" >/dev/null || exit 1; \
-	git add Cargo.toml; \
-	git commit -m "chore(release): $$next" -- Cargo.toml; \
+	git add Cargo.toml Cargo.lock; \
+	git commit -m "chore(release): $$next" -- Cargo.toml Cargo.lock; \
 	git tag "$$next"; \
 	git push origin HEAD "refs/tags/$$next"; \
 	echo "\033[1m>> Released $$next -- pushed commit + tag <<\033[0m"

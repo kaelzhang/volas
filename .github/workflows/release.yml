@@ -32,6 +32,20 @@ jobs:
             exit 1
           fi
           echo "OK: tag and version agree ($version)"
+      - name: Verify Cargo.lock is in sync (the wheel builds pass --locked)
+        run: |
+          # A version bump (or any manifest change) that skips the lock makes
+          # every --locked wheel job fail 20 builds later; fail HERE instead.
+          lock="$(python3 -c "
+          import tomllib
+          d = tomllib.load(open('Cargo.lock','rb'))
+          print(next(p['version'] for p in d['package'] if p['name'] == 'volas-core'))")"
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
+          echo "Cargo.lock volas-core: $lock / Cargo.toml: $version"
+          if [ "$lock" != "$version" ]; then
+            echo "::error::Cargo.lock records volas-core $lock but Cargo.toml says $version — run 'cargo update --workspace' and commit the lock (make bump does this automatically)."
+            exit 1
+          fi
 
   build-wheels:
     name: wheel-${{ matrix.platform.label }}-py${{ matrix.python-version }}
