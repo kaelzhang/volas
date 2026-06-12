@@ -152,6 +152,18 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
                   "corr": "T14", "cov": "T14", "__new__": "ignore:accessor"},
     "Ewm": {**{m: "T14" for m in ("mean", "sum", "var", "std", "corr", "cov")},
             "__new__": "ignore:accessor"},
+    "DatetimeAccessor": {
+        **{m: "T15" for m in (
+            "year", "month", "day", "hour", "minute", "second", "microsecond",
+            "nanosecond", "dayofweek", "day_of_week", "weekday", "dayofyear",
+            "day_of_year", "quarter", "days_in_month", "daysinmonth",
+            "is_month_start", "is_month_end", "is_quarter_start",
+            "is_quarter_end", "is_year_start", "is_year_end", "is_leap_year",
+            "day_name", "month_name", "strftime", "normalize", "floor", "ceil",
+            "round", "isocalendar", "tz", "unit",
+        )},
+        "__new__": "ignore:accessor",
+    },
     "RollingFrame": {**{m: "T14" for m in ("count", "nunique", "sum", "mean", "median", "min", "max", "var", "std", "sem", "skew", "kurt", "quantile", "rank", "first", "last")}, "__new__": "ignore:accessor"},
     "ExpandingFrame": {**{m: "T14" for m in ("count", "nunique", "sum", "mean", "median", "min", "max", "var", "std", "sem", "skew", "kurt", "quantile", "rank", "first", "last")}, "__new__": "ignore:accessor"},
     "EwmFrame": {**{m: "T14" for m in ("mean", "sum", "var", "std")},
@@ -207,9 +219,15 @@ def test_every_public_symbol_has_a_disposition():
 
 
 def test_no_unclassified_class_on_the_surface():
-    """Every public class is in the manifest (a new class can't escape)."""
-    classes = [n for n in volas.__all__ if inspect.isclass(getattr(volas, n))]
-    for cls_name in classes + ["NAType"]:
+    """Every public class is in the manifest — including the REACHED-only
+    classes (accessor / window result types) that never appear in `__all__`.
+    The universe is reflected from the extension module itself, so a newly
+    registered pyclass cannot escape by being forgotten here (the
+    DatetimeAccessor gap, self-audit 2026-06-12)."""
+    universe = {n for n in volas.__all__ if inspect.isclass(getattr(volas, n))}
+    universe |= {n for n in dir(volas_rs)
+                 if not n.startswith("_") and inspect.isclass(getattr(volas_rs, n))}
+    for cls_name in sorted(universe | {"NAType"}):
         assert cls_name in CLASSIFICATION, f"public class {cls_name} not in manifest"
 
 

@@ -224,14 +224,41 @@ def test_skew_survives_na_gap_with_low_min_periods():
 
 
 # --- waived pandas members (recorded; restart needs explicit confirmation) ----
-def test_waived_members_absent():
-    r = VS.rolling(5)
-    for m in ("apply", "agg", "aggregate", "pipe", "win_type", "step", "on",
-              "method", "closed"):
-        assert not hasattr(r, m), m
-    e = VS.ewm(span=5)
-    for m in ("online", "times"):
-        assert not hasattr(e, m), m
+def test_window_surface_set_equality():
+    """P8 (1) machine surface differential: pandas's window-class member set
+    minus the waived members minus pandas's config-echo attributes must EQUAL
+    the volas member set — so a pandas addition, a volas addition, or a waiver
+    drift all trip this single set equation (no per-name hasattr hunting)."""
+    waived = {"apply", "agg", "aggregate", "pipe",   # arbitrary-Python-per-window
+              "win_type", "step", "on", "method", "closed"}  # owner waiver 2026-06-12
+    cfg_echo = {"center", "min_periods", "window", "obj", "ndim", "exclusions"}
+    pub = lambda o: {m for m in dir(o) if not m.startswith("_")}
+    pr = pub(pd.Series(dtype="float64").rolling(2))
+    vr = pub(VS.rolling(2))
+    assert pr - waived - cfg_echo == vr, (pr - waived - cfg_echo) ^ vr
+    pe = pub(pd.Series(dtype="float64").ewm(span=2))
+    ve = pub(VS.ewm(span=2))
+    ewm_waived = waived | {"online", "times"}
+    ewm_cfg = cfg_echo | {"adjust", "alpha", "com", "halflife", "span", "ignore_na"}
+    assert pe - ewm_waived - ewm_cfg == ve, (pe - ewm_waived - ewm_cfg) ^ ve
+
+
+@pytest.mark.parametrize("directive", ["median:20", "quantile:20,0.75", "rank:20",
+                                       "skew:20", "kurt:20", "sem:20"])
+def test_new_directive_append_refresh_and_entries(directive):
+    """The six promoted statistics directives: append+fulfill (probe path)
+    equals the batch compute (# equivalence:E3), and the three entries agree
+    (df[d] == df.exec(d), lookback consistent — # equivalence:E2)."""
+    arr = {c: 100 + rng.normal(0, 1, 120).cumsum()
+           for c in ("open", "high", "low", "close", "volume")}
+    full = volas.DataFrame(arr)
+    want = full[directive].to_numpy()
+    np.testing.assert_array_equal(full.exec(directive), want)          # E2
+    head = volas.DataFrame({c: v[:-1] for c, v in arr.items()})
+    _ = head[directive]
+    head.append(volas.DataFrame({c: v[-1:] for c, v in arr.items()}))
+    head.fulfill()
+    assert np.array_equal(head[directive].to_numpy(), want, equal_nan=True)  # E3
 
 
 def test_time_window_rolling_backlogged():

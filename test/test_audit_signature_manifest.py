@@ -49,14 +49,17 @@ GLOBAL_OUT = {
     "min_count",       # sum/prod NA quorum — volas reduces what is present
     "interpolation",   # quantile interpolation fixed to linear (pandas default)
     "ddof",            # ddof fixed to 1 (sample statistics, pandas default)
-    "min_periods",     # (corr/ewm) fixed policy; rolling's own min_periods IS implemented
     "method",          # corr=pearson only / interpolate=linear only / window engine knob
     "dropna",          # mode/nunique always drop NA; value_counts(dropna=False) errors loudly
     "into",            # to_dict container class — plain dict only
     "na_value",        # to_numpy NA representation is fixed by the NA model (F17)
     "ambiguous", "nonexistent",   # DST gap/fold are REJECTED, never resolved (F33)
-    "times", "adjust", "ignore_na", "com", "halflife", "alpha",  # ewm: span-only (R-6)
-    "center", "closed", "win_type", "on", "step",                # rolling micro-knobs
+    # R-6 RETIRED (owner ruling 2026-06-12): ewm's full decay quartet
+    # (com/span/halflife/alpha) + adjust + ignore_na + min_periods and
+    # rolling's center are IMPLEMENTED — they must never reappear here (a
+    # stale waiver would silence their regression). The remaining window
+    # knobs are true owner waivers:
+    "closed", "win_type", "on", "step",   # rolling micro-knobs (waived 2026-06-12)
     "keep",            # nlargest/nsmallest tie policy: first-k only (drop_duplicates'
                        # own keep= IS implemented and not in the gap set)
     "allow_duplicates",  # unique-column contract is unconditional
@@ -91,6 +94,12 @@ PER_METHOD = {
                          "quoting", "storage_options"},
     "DataFrame.value_counts": {"subset", "normalize", "sort", "ascending"},
     # ^ frame-level value_counts delegates to the single column; kwargs live there
+    "Series.corr": {"min_periods"}, "Series.cov": {"min_periods"},
+    "DataFrame.corr": {"min_periods"}, "DataFrame.cov": {"min_periods"},
+    # ^ pairwise quorum knob — the full-overlap policy is fixed (windowed
+    #   corr/cov DO take min_periods via rolling/expanding)
+    "Series.ewm": {"times"}, "DataFrame.ewm": {"times"},
+    # ^ irregular time-decay: backlogged with the time-window rolling family
     "Series.ffill": {"limit"}, "Series.bfill": {"limit"},
     "DataFrame.ffill": {"limit"}, "DataFrame.bfill": {"limit"},
     "Series.interpolate": {"limit"}, "DataFrame.interpolate": {"limit"},

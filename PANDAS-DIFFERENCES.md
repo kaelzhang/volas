@@ -417,3 +417,22 @@ A reduction with no surviving value returns `np.float64(nan)` (reductions return
 numpy scalars, and numpy int has no missing representation) — pandas's
 numpy-backed behaviour. pandas's *nullable* backend returns `pd.NA` instead;
 volas deliberately keeps the numpy-scalar boundary (C1).
+
+## Window aggregations (`rolling` / `expanding`): three deliberate divergences
+
+The window API is pandas-aligned and differential-tested method by method
+(`test_audit_t14_window.py`), with three deliberate departures:
+
+- **`count()` / `nunique()` return `int64`** with native NA in the warm-up
+  region. pandas returns `float64` (NaN-padded) because numpy ints cannot hold
+  a missing value; volas ints can, so a count is an integer.
+- **`kurt()` is computed with two-pass central moments.** pandas accumulates
+  raw power sums (`Σx … Σx⁴`), which loses ~8 significant digits when a
+  window's mean dwarfs its spread (a price series at 42.60 ± 0.1 is enough to
+  move pandas's kurtosis by 0.4%). volas's values are the numerically correct
+  ones; differential tests compare against pandas at a loosened tolerance and
+  pin volas against the closed form exactly.
+- **`skew()` keeps working after an NA gap at `min_periods < 3`.** pandas's
+  sliding skew kernel goes permanently NaN for every window after an interior
+  NA gap in that configuration (kernel-state bug); volas emits the correct
+  per-window value.
