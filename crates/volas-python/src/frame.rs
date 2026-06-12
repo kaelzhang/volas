@@ -326,8 +326,11 @@ impl PyDataFrame {
             cond.inner.select(self.inner.names()).map_err(pyerr)?
         };
         // and the row labels must agree — a cond built on a different index would
-        // silently filter the wrong rows.
-        if *cond_inner.index() != *self.inner.index() {
+        // silently filter the wrong rows. (Arc identity first: a cond derived
+        // from this frame shares the index handle, making the common case O(1).)
+        if !std::sync::Arc::ptr_eq(cond_inner.index(), self.inner.index())
+            && *cond_inner.index() != *self.inner.index()
+        {
             return Err(PyValueError::new_err(
                 "where/mask: `cond` index must equal the frame's index",
             ));
@@ -644,6 +647,12 @@ impl PyDataFrame {
                     }
                 }
             }
+            // The base frame strips computed columns so an `@series` reference can
+            // never read a STALE computed column. A default-series directive only
+            // reads the canonical input columns (open/high/low/close/volume), so it
+            // can execute against a cheap Arc-clone of the live frame — skipping
+            // the select (a name-filter + frame rebuild) that dominated the probe
+            // path's constant cost.
             if base.is_none() {
                 let computed_names: HashSet<String> =
                     self.inner.computed_names().into_iter().collect();
@@ -680,8 +689,13 @@ impl PyDataFrame {
             // column from row 0 — O(n) but exact for every indicator. (A slice that
             // dropped its head only has the visible rows, so a stateful indicator there
             // cannot be continued past the missing history.)
-            let (recomputed, off) = if lb > 0 && vr > 2 * lb {
-                let start = vr - 2 * lb;
+            // A lookback-0 indicator still gets the windowed path with a one-row
+            // overlap probe (start = vr-1): elementwise/CDL outputs reproduce the
+            // known row and splice in O(new rows); a cumulative lb-0 one (OBV)
+            // fails the probe and correctly falls back to the full recompute.
+            let win = (2 * lb).max(1);
+            let (recomputed, off) = if vr > win {
+                let start = vr - win;
                 let windowed = execute(&base.slice(start, height), &node).map_err(value_err)?;
                 let cached_val = col_value(self.inner.column(&name).map_err(pyerr)?, vr - 1);
                 let probe = col_value(&windowed, vr - 1 - start);

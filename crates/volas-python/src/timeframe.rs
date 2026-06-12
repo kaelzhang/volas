@@ -7,7 +7,7 @@ use pyo3::types::PyDict;
 
 use volas_time::{Agg, AggSpec, TimeFrame};
 
-use crate::{parse_ts, pyerr};
+use crate::pyerr;
 
 /// ``volas.TimeFrame`` — an OHLCV sampling period.
 ///

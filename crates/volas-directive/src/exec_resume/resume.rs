@@ -42,6 +42,14 @@ pub fn execute_resume_default_series_one(
             let low = series_f64(df, &[], 1, "low").ok()?;
             Some((high[row] + low[row]) / 2.0)
         }
+        "bop" => {
+            let open = series_f64(df, &[], 0, "open").ok()?;
+            let high = series_f64(df, &[], 1, "high").ok()?;
+            let low = series_f64(df, &[], 2, "low").ok()?;
+            let close = series_f64(df, &[], 3, "close").ok()?;
+            let range = high[row] - low[row];
+            Some(if range < 1e-14 { 0.0 } else { (close[row] - open[row]) / range })
+        }
         "typprice" => {
             let high = series_f64(df, &[], 0, "high").ok()?;
             let low = series_f64(df, &[], 1, "low").ok()?;
@@ -122,6 +130,18 @@ pub fn execute_resume_default_series(
             let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
             for i in from_row..high.len() {
                 out.push((high[i] + low[i]) / 2.0);
+            }
+            Some((Column::f64(out), Vec::new()))
+        }
+        "bop" => {
+            let open = series_f64(df, &[], 0, "open").ok()?;
+            let high = series_f64(df, &[], 1, "high").ok()?;
+            let low = series_f64(df, &[], 2, "low").ok()?;
+            let close = series_f64(df, &[], 3, "close").ok()?;
+            let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
+            for i in from_row..close.len() {
+                let range = high[i] - low[i];
+                out.push(if range < 1e-14 { 0.0 } else { (close[i] - open[i]) / range });
             }
             Some((Column::f64(out), Vec::new()))
         }
@@ -235,6 +255,18 @@ pub fn execute_resume(
             let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
             for i in from_row..high.len() {
                 out.push((high[i] + low[i]) / 2.0);
+            }
+            Some((Column::f64(out), Vec::new()))
+        }
+        ("bop", _) => {
+            let open = series_f64(df, series, 0, "open").ok()?;
+            let high = series_f64(df, series, 1, "high").ok()?;
+            let low = series_f64(df, series, 2, "low").ok()?;
+            let close = series_f64(df, series, 3, "close").ok()?;
+            let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
+            for i in from_row..close.len() {
+                let range = high[i] - low[i];
+                out.push(if range < 1e-14 { 0.0 } else { (close[i] - open[i]) / range });
             }
             Some((Column::f64(out), Vec::new()))
         }

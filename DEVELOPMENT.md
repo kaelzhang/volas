@@ -49,6 +49,14 @@ writes the web report:
 ```sh
 make benchmark INDICATOR=roc:10
 make benchmark                  # full run; always writes ./benchmark-report.html
+# Every full run is also compared against the all-time best run (the
+# "performance leader", .benchmarks/LEADER.json) and a leader-report.md is
+# written into the run's archive dir. Scoring uses WITHIN-RUN normalized
+# ratios (volas/talib measured in the same session), so runs from different
+# machines/thermal states compare meaningfully; a run that beats the leader
+# becomes the new leader. LEADER.json also carries the forward work queues:
+# the top-10 slowest-vs-talib indicators (batch + after-append) and the
+# after-append-overhead degrader list.
 ```
 
 The locally generated `./benchmark-report.html` (and the always-current

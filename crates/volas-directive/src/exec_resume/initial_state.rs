@@ -20,7 +20,7 @@ pub fn initial_state(df: &DataFrame, node: &Node, _computed: &Column) -> Option<
     match (name.as_str(), sub) {
         // Stateless finite-memory indicators need no carried values, but marking
         // them resumable lets append refresh compute only `[valid_rows, height)`.
-        ("avgprice" | "medprice" | "typprice" | "wclprice" | "tr", _)
+        ("avgprice" | "medprice" | "typprice" | "wclprice" | "tr" | "bop", _)
         | ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => Some(Vec::new()),
 
         ("obv", _) => {
