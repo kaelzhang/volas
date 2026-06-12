@@ -26,12 +26,12 @@ echo ">> building + benchmarking BASE ($BASE_REF) in a temp worktree..."
 git -C "$ROOT" worktree add --detach "$TMP/base" "$BASE_REF" >/dev/null
 # share the main target dir so the base build reuses warm artifacts
 ( cd "$TMP/base" && CARGO_TARGET_DIR="$ROOT/target" "$PYTHON" -m maturin develop --release -q )
-( cd "$ROOT" && "$PYTHON" -m pytest test/test_benchmark.py "${BENCH_OPTS[@]}" "${FILTER[@]}" \
+( cd "$ROOT" && "$PYTHON" -m pytest test/test_benchmark.py "${BENCH_OPTS[@]}" ${FILTER[@]+"${FILTER[@]}"} \
     --benchmark-json="$TMP/base.json" >/dev/null )
 
 echo ">> building + benchmarking HEAD (current tree)..."
 ( cd "$ROOT" && "$PYTHON" -m maturin develop --release -q )
-( cd "$ROOT" && "$PYTHON" -m pytest test/test_benchmark.py "${BENCH_OPTS[@]}" "${FILTER[@]}" \
+( cd "$ROOT" && "$PYTHON" -m pytest test/test_benchmark.py "${BENCH_OPTS[@]}" ${FILTER[@]+"${FILTER[@]}"} \
     --benchmark-json="$TMP/head.json" >/dev/null )
 
 echo
