@@ -135,3 +135,20 @@ def test_remove_candidates_doc_state():
     text = _doc_text()
     assert "tf.unify" not in text and ".unify(" not in text, "dangling unify doc reference"
     assert ".tolist(" not in text, "dangling tolist doc reference"
+
+
+def test_talib_parity_table_rows_have_a_talib_original():
+    """The 'TA-Lib-compatible directives' table is strictly upstream
+    correspondences: every row's `TA-Lib original` column must name a real
+    TA-Lib function — a `—` placeholder means a volas-native command was
+    appended to the wrong section (it belongs under 'Built-in Commands for
+    Statistics'; caught by owner review 2026-06-12)."""
+    import pathlib
+    text = pathlib.Path("INDICATORS.md").read_text()
+    table = text[text.index("## TA-Lib-compatible directives"):]
+    offenders = [
+        line.split("|")[1].strip()
+        for line in table.splitlines()
+        if line.startswith("| `") and line.split("|")[2].strip() in ("—", "-", "")
+    ]
+    assert not offenders, f"native commands in the TA-Lib parity table: {offenders}"
