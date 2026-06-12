@@ -9,6 +9,20 @@ use volas_core::Column;
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
 
+/// Execute for the computed-column REFRESH path: identical to [`execute`]
+/// except a bare `Name` node is dispatched as a COMMAND, never resolved as a
+/// column. The refresh caller knows the node IS the directive being recomputed
+/// (a computed meta only exists for a validated command), and the live frame
+/// already holds the *stale* cached column under that very name — resolving it
+/// would return the stale cache instead of recomputing (a self-referential
+/// no-op).
+pub fn execute_refresh(df: &DataFrame, node: &Node) -> Result<Column> {
+    match node {
+        Node::Name(name) if !name.is_empty() => exec_command(df, name, None, &[], &[]),
+        _ => execute(df, node),
+    }
+}
+
 /// Execute a directive node against `df`.
 pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
     match node {

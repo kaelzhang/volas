@@ -90,3 +90,25 @@ def test_fulfill_is_incremental_not_full_recompute():
     full_us = (time.perf_counter() - t0) * 1e6
 
     assert fulfill_us * 10 < full_us, (fulfill_us, full_us)
+
+
+# The probe path executes on the LIVE frame (incl. the stale cached column) for
+# default-series directives — safe ONLY because `execute_refresh` dispatches a
+# bare NAME node as a command. Resolving the name as a column would return the
+# directive's OWN stale cache (a self-referential no-op that "verifies" against
+# itself and splices the stale tail back). `wma` is the canonical all-defaults
+# spelling, so `wma:30` exercises exactly that node shape.
+@pytest.mark.parametrize('directive', ['wma:30', 'wma', 'linearreg:14', 'tsf:14', 'mfi:14'])
+def test_fulfill_bare_canonical_directive_not_self_referential(directive):
+    full = volas.read_csv(TENCENT)
+    expected = full[directive].to_numpy()
+    df = volas.read_csv(TENCENT)
+    head = df.iloc[:-1]
+    _ = head[directive]                      # cache over n-1 bars
+    head.append(df.iloc[-1])
+    head.fulfill()
+    got = head[directive].to_numpy()
+    # the appended row must be REFRESHED (not the stale NaN placeholder) ...
+    assert not np.isnan(got[-1])
+    # ... and the whole column must match a batch compute (probe tolerance 1e-9).
+    np.testing.assert_allclose(got, expected, rtol=1e-9, equal_nan=True)

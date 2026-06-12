@@ -647,13 +647,22 @@ impl PyDataFrame {
                     }
                 }
             }
-            // The base frame strips computed columns so an `@series` reference can
-            // never read a STALE computed column. A default-series directive only
-            // reads the canonical input columns (open/high/low/close/volume), so it
-            // can execute against a cheap Arc-clone of the live frame — skipping
-            // the select (a name-filter + frame rebuild) that dominated the probe
-            // path's constant cost.
-            if base.is_none() {
+            // The base frame strips computed columns so a column-name lookup can
+            // never read a STALE computed column. A default-series COMMAND node
+            // only reads the canonical input columns (open/high/low/close/volume),
+            // which are never computed, so it executes against the live frame
+            // directly — skipping the select (a name-filter + frame rebuild) that
+            // dominates the probe path's constant cost; this is the same invariant
+            // the state-resume fast-path above already relies on. The probe MUST
+            // therefore execute via `execute_refresh`, which dispatches a bare
+            // NAME node as a command: a bare-canonical directive (`wma`,
+            // `linearreg`, ... — the all-defaults spelling) resolved through
+            // `execute`'s column lookup would find its own stale cache on the
+            // live frame (a self-referential no-op that "verifies" and splices
+            // the stale tail back). Explicit `@series` directives still pay for
+            // the stripped base frame.
+            let use_live = directive_uses_default_series(&node);
+            if !use_live && base.is_none() {
                 let computed_names: HashSet<String> =
                     self.inner.computed_names().into_iter().collect();
                 let real_names: Vec<String> = self
@@ -665,12 +674,16 @@ impl PyDataFrame {
                     .collect();
                 base = Some(self.inner.select(&real_names).map_err(pyerr)?);
             }
-            let base = base
-                .as_ref()
-                .ok_or_else(|| PyValueError::new_err("internal base frame was not initialized"))?;
+            let frame: &DataFrame = if use_live {
+                &self.inner
+            } else {
+                base.as_ref().ok_or_else(|| {
+                    PyValueError::new_err("internal base frame was not initialized")
+                })?
+            };
             if let Some(state) = &meta.state {
                 if let Some((tail, new_state)) =
-                    volas_directive::exec::execute_resume(base, &node, state, vr, meta.origin)
+                    volas_directive::exec::execute_resume(frame, &node, state, vr, meta.origin)
                 {
                     self.inner
                         .update_computed_tail(&name, vr, &tail)
@@ -696,7 +709,8 @@ impl PyDataFrame {
             let win = (2 * lb).max(1);
             let (recomputed, off) = if vr > win {
                 let start = vr - win;
-                let windowed = execute(&base.slice(start, height), &node).map_err(value_err)?;
+                let windowed = volas_directive::exec::execute_refresh(&frame.slice(start, height), &node)
+                    .map_err(value_err)?;
                 let cached_val = col_value(self.inner.column(&name).map_err(pyerr)?, vr - 1);
                 let probe = col_value(&windowed, vr - 1 - start);
                 if probe.is_finite()
@@ -704,24 +718,25 @@ impl PyDataFrame {
                 {
                     (windowed, vr - start)
                 } else {
-                    (execute(&base, &node).map_err(value_err)?, vr)
+                    (volas_directive::exec::execute_refresh(frame, &node).map_err(value_err)?, vr)
                 }
             } else {
-                (execute(&base, &node).map_err(value_err)?, vr)
+                (volas_directive::exec::execute_refresh(frame, &node).map_err(value_err)?, vr)
             };
+            // If this directive supports a resume, (re)capture its recursive state
+            // so the NEXT append takes the O(new-rows) fast-path. This repopulates
+            // state dropped by an invalidating base-column write or a head-dropping
+            // slice. `None` leaves it on the fallback. (`recomputed` is the full
+            // column on the full-recompute branch and the window tail otherwise;
+            // `initial_state` derives the cumulative family's state from the raw
+            // inputs, so either is fine. Computed BEFORE the tail write so `frame`'s
+            // borrow of the live frame ends before the mutation.)
+            let new_state = volas_directive::exec::initial_state(frame, &node, &recomputed);
             // Write the stale tail back into the column at its original dtype.
             let tail = recomputed.slice(off, recomputed.len());
             self.inner
                 .update_computed_tail(&name, vr, &tail)
                 .map_err(pyerr)?;
-            // The column is now valid for all rows. If this directive supports a
-            // resume, (re)capture its recursive state so the NEXT append takes the
-            // O(new-rows) fast-path. This repopulates state dropped by an invalidating
-            // base-column write or a head-dropping slice. `None` leaves it on the
-            // fallback. (`recomputed` is the full column on the full-recompute branch
-            // and the window tail otherwise; `initial_state` derives the cumulative
-            // family's state from the raw inputs in `base`, so either is fine.)
-            let new_state = volas_directive::exec::initial_state(&base, &node, &recomputed);
             if new_state.is_some() {
                 self.inner.set_computed_state(&name, new_state);
             }

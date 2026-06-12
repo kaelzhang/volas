@@ -121,8 +121,8 @@ else
 	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --benchmark-json=$(BENCH_DIR)/benchmark.json
 	@$(PYTHON) scripts/benchmark_report.py $(BENCH_DIR)/benchmark.json $(BENCH_DIR)/report.html
 	@$(PYTHON) scripts/bench_trim.py $(BENCH_DIR)/benchmark.json   # drop ~1GB of per-round data; keep stats
+	@printf 'commit: %s\ndate:   %s\ndirty:  %s\nmethodology: %s\n' "$$(git rev-parse HEAD 2>/dev/null || echo none)" "$$(date -u +%FT%TZ)" "$$(git diff --quiet HEAD 2>/dev/null && echo no || echo yes)" "$$($(PYTHON) -c 'from test.test_benchmark import METHODOLOGY; print(METHODOLOGY)')" > $(BENCH_DIR)/meta.txt
 	@$(PYTHON) scripts/bench_leader.py $(BENCH_DIR)/benchmark.json # compare vs the all-time leader; crown if better
-	@printf 'commit: %s\ndate:   %s\ndirty:  %s\n' "$$(git rev-parse HEAD 2>/dev/null || echo none)" "$$(date -u +%FT%TZ)" "$$(git diff --quiet HEAD 2>/dev/null && echo no || echo yes)" > $(BENCH_DIR)/meta.txt
 	@cp $(BENCH_DIR)/benchmark.json .benchmarks/last.json
 	@cp $(BENCH_DIR)/report.html benchmark-report.html
 	@echo "\033[1m>> Benchmark archived to $(BENCH_DIR)/ <<\033[0m"

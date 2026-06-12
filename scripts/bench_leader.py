@@ -119,6 +119,18 @@ def main(argv: list[str]) -> int:
         verdict = "LEADER (inaugural)"
     else:
         lead = json.loads(LEADER.read_text())
+        # A measurement-protocol change makes cross-run movement methodological,
+        # not code-driven — flag it loudly instead of letting it read as a
+        # regression/improvement.
+        lm = lead["meta"].get("methodology", "v1")
+        nm = new["meta"].get("methodology", "v1")
+        if lm != nm:
+            report += [
+                f"> **METHODOLOGY CHANGE**: leader measured under `{lm}`, this run "
+                f"under `{nm}` — the relative numbers below compare protocols, not "
+                f"code. The verdict re-baselines the leader under the new protocol.",
+                "",
+            ]
         lr, nr = lead["ratios"], new["ratios"]
         common = sorted(set(lr) & set(nr))
         rel = {k: nr[k] / lr[k] for k in common if lr[k] > 0}
@@ -137,10 +149,14 @@ def main(argv: list[str]) -> int:
             "Biggest improvements vs leader:",
             *[f"  - {k}: x{v:.2f}" for k, v in movers[::-1][:5] if v < 0.98],
         ]
-        if g < 1.0:
+        if g < 1.0 or lm != nm:
             new["previous_leader"] = {"run": lead["meta"].get("run"), "relative_geomean": round(g, 4)}
             LEADER.write_text(json.dumps(new, indent=1))
-            verdict = f"NEW LEADER (geomean {g:.3f} vs previous)"
+            verdict = (
+                f"NEW LEADER (re-baselined: methodology {lm} -> {nm}; x{g:.3f} not comparable)"
+                if lm != nm
+                else f"NEW LEADER (geomean {g:.3f} vs previous)"
+            )
         else:
             verdict = f"leader unchanged ({lead['meta'].get('run', '?')}; this run x{g:.3f})"
 

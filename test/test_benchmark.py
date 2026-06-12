@@ -125,6 +125,14 @@ def _generated_ohlcv(n, seed=20260606):
 # keeps the timings comparable and stable.
 APPEND_ROUNDS = 500
 
+# Bumped whenever the measurement protocol changes meaning (not when indicators
+# are added): leader comparisons across different methodologies are flagged in
+# the leader report instead of read as code-driven movement.
+#   v2: the append sections measure the STEADY-STATE per-bar cost (the setup
+#       performs one warm-up append, so the one-time Vec capacity-doubling
+#       memcpy of a fresh frame is no longer charged to every measured round).
+METHODOLOGY = "append-steady-state-v2"
+
 
 # --- pandas (idiomatic, per indicator) -------------------------------------
 
@@ -450,12 +458,23 @@ def states():
 # --- section 1: append one new bar -> updated indicator --------------------
 
 def _volas_append(indicator):
-    """volas: refresh the cached directive's tail incrementally (O(lookback))."""
+    """volas: refresh the cached directive's tail incrementally (O(lookback)).
+
+    The setup appends one warm-up bar so the measured append is the STEADY-STATE
+    per-bar cost a live session pays. A freshly constructed frame's column
+    buffers have no spare capacity, so the very first append triggers the
+    one-time amortized Vec doubling (a full-column memcpy, ~3us at n=2000);
+    rebuilding the frame every round would charge that one-time event to every
+    measured round, which is not what "a new bar arrives" costs in a live system.
+    """
+    warm_bar = VolasDataFrame({c: ARR[c][-2:-1] for c in COLUMNS})
     bar = VolasDataFrame({c: ARR[c][-1:] for c in COLUMNS})
 
     def setup():
-        d = VolasDataFrame({c: ARR[c][:-1] for c in COLUMNS})
-        _ = d[indicator]                       # cache over the first n-1 bars
+        d = VolasDataFrame({c: ARR[c][:-2] for c in COLUMNS})
+        _ = d[indicator]                       # cache over the first n-2 bars
+        d.append(warm_bar)                     # one-time capacity growth +
+        d.fulfill()                            # resume-state warm-up
         return (d,), {}
 
     def run(d):
@@ -578,9 +597,14 @@ def test_coverage_extended(benchmark, length_states, indicator, directive, lengt
 
 
 def _volas_coverage_after_append(indicator):
-    """Cache one indicator over n-1 rows, append the last bar, then refresh it."""
-    history = {c: ARR[c][:-1] for c in COLUMNS}
-    history['periods'] = PERIODS[:-1]
+    """Cache one indicator over n-2 rows, warm one append (see `_volas_append`:
+    steady-state, not the one-time capacity-doubling event), then measure the
+    append+refresh of the final bar."""
+    history = {c: ARR[c][:-2] for c in COLUMNS}
+    history['periods'] = PERIODS[:-2]
+    warm = {c: ARR[c][-2:-1] for c in COLUMNS}
+    warm['periods'] = PERIODS[-2:-1]
+    warm_df = VolasDataFrame(warm)
     bar = {c: ARR[c][-1:] for c in COLUMNS}
     bar['periods'] = PERIODS[-1:]
     bar_df = VolasDataFrame(bar)
@@ -588,6 +612,8 @@ def _volas_coverage_after_append(indicator):
     def setup():
         d = VolasDataFrame(history)
         _ = d[indicator]
+        d.append(warm_df)
+        d.fulfill()
         return (d,), {}
 
     def run(d):
