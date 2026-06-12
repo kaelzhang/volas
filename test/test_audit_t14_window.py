@@ -302,3 +302,111 @@ def test_flat_window_guard_branches():
     assert np.isnan(flat["x"].rolling(5).kurt().to_numpy()[-1])
     assert np.isnan(flat["y"].rolling(4).corr(flat["x"]).to_numpy()[-1])
     assert np.isnan(flat["y"].rolling(3, min_periods=2).cov(flat["x"], ddof=2).to_numpy()[1])
+
+
+# --- self-audit round 2 (2026-06-12): P8 (2) OWAT census on the entry params --
+def test_ddof_negative_is_clean_valueerror():
+    """R-1: a negative ddof is a clean ValueError, never pyo3's
+    unsigned-conversion OverflowError leak (self-audit SA2-1)."""
+    for f in (lambda: VS.rolling(3).var(ddof=-1),
+              lambda: VS.rolling(3).std(ddof=-1),
+              lambda: VS.rolling(3).sem(ddof=-1),
+              lambda: VS.rolling(3).cov(VS, ddof=-1),
+              lambda: VS.expanding(2).var(ddof=-1),
+              lambda: volas.DataFrame({"a": [1.0, 2.0]}).rolling(2).std(ddof=-1)):
+        with pytest.raises(ValueError):
+            f()
+
+
+def test_ewm_decay_must_be_finite():
+    """SA2-2: a NaN / infinite decay spelling degenerates to alpha=0 / NaN —
+    a frozen or all-NA no-signal column. alpha=0 is rejected, so the
+    equivalent spellings must be too (same-guard symmetry, # equivalence:E8;
+    pandas silently accepts span=nan — a pinned volas fail-loud divergence)."""
+    for bad in ({"span": float("nan")}, {"span": float("inf")},
+                {"com": float("nan")}, {"com": float("inf")},
+                {"halflife": float("inf")}, {"halflife": float("nan")}):
+        with pytest.raises(ValueError):
+            VS.ewm(**bad)
+
+
+def test_quantile_nan_q_rejected():
+    """q=NaN: pandas silently emits an all-NaN column; volas rejects (C4
+    fail-loud, pinned divergence)."""
+    with pytest.raises(ValueError):
+        VS.rolling(3).quantile(float("nan"))
+
+
+def test_window_param_irep_and_boundaries():
+    """I-rep + V census pins: np.int64 windows work; a window larger than the
+    data degrades gracefully to expanding-like (min_periods still gates);
+    window == len is exact; bool window is accepted as int 1 (python bool IS
+    an int subclass; volas keeps int-parameter behaviour uniform — a pinned
+    divergence from pandas's window-only bool rejection)."""
+    assert VS.rolling(np.int64(7)).mean().to_list()[6] is not None
+    assert VS.rolling(10**9).mean().isna().to_list()[-1]      # min_periods=10^9 never met
+    assert not np.isnan(VS.rolling(10**9, min_periods=1).mean().to_numpy()[-1])
+    assert VS.rolling(1).mean().to_list()[0] == VS.to_list()[0]
+    assert volas.DataFrame({"a": [1.0, 2.0]})["a"].rolling(True).count().to_list() == [1, 1]
+
+
+def test_window_and_dt_on_empty_and_allna():
+    """N2 / N3 states: every kernel family handles the empty and the all-NA
+    column without panicking (P7) and with the right shapes."""
+    e = volas.DataFrame({"x": np.array([], dtype=float)})["x"]
+    assert len(e.rolling(3).median()) == 0
+    assert len(e.ewm(span=2).mean()) == 0
+    assert len(e.expanding().nunique()) == 0
+    allna = volas.DataFrame({"x": [float("nan")] * 4})["x"]
+    assert allna.rolling(2).median().isna().to_list() == [True] * 4
+    assert allna.rolling(2, min_periods=1).count().to_list()[1:] == [0, 0, 0]
+    # dt accessor on empty / all-NaT
+    dt_empty = volas.to_datetime(volas.DataFrame({"t": np.array([], dtype="datetime64[ns]")})["t"])
+    assert len(dt_empty.dt.year) == 0 and len(dt_empty.dt.floor("D")) == 0
+    assert dt_empty.dt.isocalendar().shape == (0, 3)
+    nat = volas.to_datetime(volas.DataFrame({"t": [None, None]})["t"])
+    assert nat.dt.year.isna().to_list() == [True, True]
+    assert nat.dt.day_name().isna().to_list() == [True, True]
+
+
+def test_frame_window_stale_guard_and_e6():
+    """Layer 2 (SA2-3): a frame-level window aggregation is a BULK read — on a
+    stale frame (post-append, pre-fulfill) it must carry the same fulfill
+    guard as to_numpy / iloc (# equivalence:E8), instead of silently
+    aggregating the stale cached-directive column as data. And E6: every
+    frame window method equals its Series counterpart per column."""
+    arr = {c: 100 + rng.normal(0, 1, 60).cumsum()
+           for c in ("open", "high", "low", "close", "volume")}
+    d = volas.DataFrame({c: v[:-1] for c, v in arr.items()})
+    _ = d["ma:5"]
+    d.append(volas.DataFrame({c: v[-1:] for c, v in arr.items()}))
+    with pytest.raises(ValueError, match="fulfill"):
+        d.rolling(3).mean()                      # stale -> guarded
+    d.fulfill()
+    out = d.rolling(3).mean()                    # fresh -> ok, incl. ma:5 column
+    assert "ma:5" in out.columns
+    # E6 across the FULL frame method set (machine loop, not spot checks)
+    df = volas.DataFrame({"a": arr["close"], "b": arr["open"]})
+    for m in ("count", "nunique", "sum", "mean", "median", "min", "max",
+              "var", "std", "sem", "skew", "kurt", "first", "last"):
+        fr = getattr(df.rolling(5, min_periods=2), m)()
+        se = getattr(df["a"].rolling(5, min_periods=2), m)()
+        np.testing.assert_allclose(
+            np.asarray(fr["a"].to_numpy(), float), np.asarray(se.to_numpy(), float),
+            rtol=1e-12, equal_nan=True, err_msg=m)
+    for m in ("mean", "sum", "var", "std"):
+        fr = getattr(df.ewm(span=6), m)()
+        se = getattr(df["b"].ewm(span=6), m)()
+        np.testing.assert_allclose(
+            np.asarray(fr["b"].to_numpy(), float), np.asarray(se.to_numpy(), float),
+            rtol=1e-12, equal_nan=True, err_msg=m)
+
+
+def test_window_result_carries_name_and_index():
+    """C1: a window result keeps the source's name and row correspondence."""
+    df = volas.DataFrame({"t": ["2021-01-01", "2021-01-02"], "v": [1.0, 2.0]})
+    df["t"] = volas.to_datetime(df["t"])
+    s = df.set_index("t")["v"]
+    out = s.rolling(2, min_periods=1).mean()
+    assert out.name == "v"
+    assert list(out.index) == list(s.index)

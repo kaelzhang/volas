@@ -111,7 +111,7 @@ pub(crate) use frame_index::*;
 /// `df[directive]` access auto-refreshes; bulk / positional reads (`to_numpy`,
 /// `.iloc` / `.loc` / `.at` / `.iat`) do not, so they must be fresh — call
 /// `fulfill()` first. Keeps the read path O(1) and never returns silent NaN.
-fn ensure_fresh(df: &DataFrame) -> PyResult<()> {
+pub(crate) fn ensure_fresh(df: &DataFrame) -> PyResult<()> {
     if df.has_stale_computed() {
         Err(PyValueError::new_err(
             "frame has stale computed (directive) columns after append; \

@@ -31,21 +31,24 @@ pub(crate) fn resolve_alpha(
             "ewm requires exactly one of com / span / halflife / alpha",
         ));
     }
+    // A NaN or infinite decay degenerates to alpha=0 / NaN — an all-NA or
+    // frozen no-signal column. alpha=0 is already rejected, so the other
+    // spellings must reject their equivalent too (same-guard symmetry, E8).
     if let Some(c) = com {
-        if c < 0.0 {
-            return Err(PyValueError::new_err("ewm com must be >= 0"));
+        if !(c >= 0.0 && c.is_finite()) {
+            return Err(PyValueError::new_err("ewm com must be finite and >= 0"));
         }
         return Ok(1.0 / (1.0 + c));
     }
     if let Some(s) = span {
-        if s < 1.0 {
-            return Err(PyValueError::new_err("ewm span must be >= 1"));
+        if !(s >= 1.0 && s.is_finite()) {
+            return Err(PyValueError::new_err("ewm span must be finite and >= 1"));
         }
         return Ok(2.0 / (s + 1.0));
     }
     if let Some(h) = halflife {
-        if h <= 0.0 {
-            return Err(PyValueError::new_err("ewm halflife must be > 0"));
+        if !(h > 0.0 && h.is_finite()) {
+            return Err(PyValueError::new_err("ewm halflife must be finite and > 0"));
         }
         return Ok(1.0 - (-(2.0f64.ln()) / h).exp());
     }
@@ -63,6 +66,15 @@ fn validate_interpolation(interpolation: &str) -> PyResult<()> {
             "interpolation must be one of linear/lower/higher/nearest/midpoint, got {other:?}"
         ))),
     }
+}
+
+/// R-1: a negative ddof must be a clean ValueError, never pyo3's
+/// unsigned-conversion OverflowError leak.
+pub(crate) fn validate_ddof(ddof: i64) -> PyResult<usize> {
+    if ddof < 0 {
+        return Err(PyValueError::new_err("ddof must be >= 0"));
+    }
+    Ok(ddof as usize)
 }
 
 fn validate_rank_method(method: &str) -> PyResult<()> {
@@ -312,18 +324,18 @@ impl PyRolling {
     }
     /// Rolling sample variance (pandas `var(ddof=1)`).
     #[pyo3(signature = (ddof = 1))]
-    fn var(&self, ddof: usize) -> PySeries {
-        self.spec.var(&self.series, ddof)
+    fn var(&self, ddof: i64) -> PyResult<PySeries> {
+        Ok(self.spec.var(&self.series, validate_ddof(ddof)?))
     }
     /// Rolling sample standard deviation (pandas `std(ddof=1)`).
     #[pyo3(signature = (ddof = 1))]
-    fn std(&self, ddof: usize) -> PySeries {
-        self.spec.std(&self.series, ddof)
+    fn std(&self, ddof: i64) -> PyResult<PySeries> {
+        Ok(self.spec.std(&self.series, validate_ddof(ddof)?))
     }
     /// Standard error of the mean (pandas `sem`).
     #[pyo3(signature = (ddof = 1))]
-    fn sem(&self, ddof: usize) -> PySeries {
-        self.spec.sem(&self.series, ddof)
+    fn sem(&self, ddof: i64) -> PyResult<PySeries> {
+        Ok(self.spec.sem(&self.series, validate_ddof(ddof)?))
     }
     /// Bias-corrected sample skewness (pandas `skew`; >= 3 present values).
     fn skew(&self) -> PySeries {
@@ -357,8 +369,8 @@ impl PyRolling {
     }
     /// Rolling sample covariance against another series (pandas `cov`).
     #[pyo3(signature = (other, ddof = 1))]
-    fn cov(&self, other: &PySeries, ddof: usize) -> PyResult<PySeries> {
-        self.spec.cov(&self.series, other, ddof)
+    fn cov(&self, other: &PySeries, ddof: i64) -> PyResult<PySeries> {
+        self.spec.cov(&self.series, other, validate_ddof(ddof)?)
     }
 }
 
@@ -394,18 +406,18 @@ impl PyExpanding {
     }
     /// Expanding sample variance (`ddof=1`).
     #[pyo3(signature = (ddof = 1))]
-    fn var(&self, ddof: usize) -> PySeries {
-        self.spec.var(&self.series, ddof)
+    fn var(&self, ddof: i64) -> PyResult<PySeries> {
+        Ok(self.spec.var(&self.series, validate_ddof(ddof)?))
     }
     /// Expanding sample standard deviation (`ddof=1`).
     #[pyo3(signature = (ddof = 1))]
-    fn std(&self, ddof: usize) -> PySeries {
-        self.spec.std(&self.series, ddof)
+    fn std(&self, ddof: i64) -> PyResult<PySeries> {
+        Ok(self.spec.std(&self.series, validate_ddof(ddof)?))
     }
     /// Expanding standard error of the mean.
     #[pyo3(signature = (ddof = 1))]
-    fn sem(&self, ddof: usize) -> PySeries {
-        self.spec.sem(&self.series, ddof)
+    fn sem(&self, ddof: i64) -> PyResult<PySeries> {
+        Ok(self.spec.sem(&self.series, validate_ddof(ddof)?))
     }
     /// Expanding skewness.
     fn skew(&self) -> PySeries {
@@ -439,8 +451,8 @@ impl PyExpanding {
     }
     /// Expanding sample covariance against another series.
     #[pyo3(signature = (other, ddof = 1))]
-    fn cov(&self, other: &PySeries, ddof: usize) -> PyResult<PySeries> {
-        self.spec.cov(&self.series, other, ddof)
+    fn cov(&self, other: &PySeries, ddof: i64) -> PyResult<PySeries> {
+        self.spec.cov(&self.series, other, validate_ddof(ddof)?)
     }
 }
 

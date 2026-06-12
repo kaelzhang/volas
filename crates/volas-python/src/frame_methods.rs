@@ -1096,11 +1096,15 @@ pub struct PyEwmFrame {
 }
 
 /// Apply a Series-level window op over every column of `frame` (a non-numeric
-/// column errors, like pandas with `numeric_only=False`).
+/// column errors, like pandas with `numeric_only=False`). A frame-level window
+/// is a BULK read — it would aggregate a stale cached-directive column as if
+/// it were data — so it carries the same fulfill guard as to_numpy / iloc
+/// (same-guard symmetry, E8; self-audit SA2-3).
 fn frame_window(
     frame: &DataFrame,
     op: impl Fn(&PySeries) -> PyResult<PySeries>,
 ) -> PyResult<PyDataFrame> {
+    crate::ensure_fresh(frame)?;
     let wrapper = PyDataFrame::plain(frame.clone());
     wrapper.map_cols(|s| {
         s.inner.data.require_numeric().map_err(pyerr)?;
@@ -1171,17 +1175,20 @@ impl PyRollingFrame {
     }
     /// Per-column rolling sample variance.
     #[pyo3(signature = (ddof = 1))]
-    fn var(&self, ddof: usize) -> PyResult<PyDataFrame> {
+    fn var(&self, ddof: i64) -> PyResult<PyDataFrame> {
+        let ddof = crate::window::validate_ddof(ddof)?;
         self.agg(|w, s| Ok(w.var(s, ddof)))
     }
     /// Per-column rolling sample standard deviation.
     #[pyo3(signature = (ddof = 1))]
-    fn std(&self, ddof: usize) -> PyResult<PyDataFrame> {
+    fn std(&self, ddof: i64) -> PyResult<PyDataFrame> {
+        let ddof = crate::window::validate_ddof(ddof)?;
         self.agg(|w, s| Ok(w.std(s, ddof)))
     }
     /// Per-column standard error of the mean.
     #[pyo3(signature = (ddof = 1))]
-    fn sem(&self, ddof: usize) -> PyResult<PyDataFrame> {
+    fn sem(&self, ddof: i64) -> PyResult<PyDataFrame> {
+        let ddof = crate::window::validate_ddof(ddof)?;
         self.agg(|w, s| Ok(w.sem(s, ddof)))
     }
     /// Per-column rolling skewness.
@@ -1244,17 +1251,20 @@ impl PyExpandingFrame {
     }
     /// Per-column expanding sample variance.
     #[pyo3(signature = (ddof = 1))]
-    fn var(&self, ddof: usize) -> PyResult<PyDataFrame> {
+    fn var(&self, ddof: i64) -> PyResult<PyDataFrame> {
+        let ddof = crate::window::validate_ddof(ddof)?;
         self.agg(|w, s| Ok(w.var(s, ddof)))
     }
     /// Per-column expanding sample standard deviation.
     #[pyo3(signature = (ddof = 1))]
-    fn std(&self, ddof: usize) -> PyResult<PyDataFrame> {
+    fn std(&self, ddof: i64) -> PyResult<PyDataFrame> {
+        let ddof = crate::window::validate_ddof(ddof)?;
         self.agg(|w, s| Ok(w.std(s, ddof)))
     }
     /// Per-column expanding standard error of the mean.
     #[pyo3(signature = (ddof = 1))]
-    fn sem(&self, ddof: usize) -> PyResult<PyDataFrame> {
+    fn sem(&self, ddof: i64) -> PyResult<PyDataFrame> {
+        let ddof = crate::window::validate_ddof(ddof)?;
         self.agg(|w, s| Ok(w.sem(s, ddof)))
     }
     /// Per-column expanding skewness.
