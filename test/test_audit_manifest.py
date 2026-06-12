@@ -91,6 +91,7 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "to_numpy": "T8", "to_list": "T8", "astype": "T8",
         "name": "T0", "dtype": "T0", "index": "T0", "shape": "T0", "equals": "T0",
         "tz": "T13", "tz_localize": "T13", "tz_convert": "T13",
+        "dt": "T15",
         # the owner-confirmed align cluster, landed:
         **{m: "T6" for m in ("value_counts", "mode", "nlargest", "nsmallest",
                              "drop_duplicates", "duplicated", "sort_index",

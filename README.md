@@ -337,6 +337,21 @@ df['close'].ln()
 df['high'].sqrt()
 ```
 
+A `datetime64[ns]` Series exposes the pandas `.dt` accessor: calendar
+components (`year` `month` `day` `hour` `minute` `second` `microsecond`
+`nanosecond` `quarter` `dayofweek` `dayofyear` `days_in_month`), calendar
+predicates (`is_month_start` … `is_year_end`, `is_leap_year`), names
+(`day_name()` / `month_name()`), formatting (`strftime(fmt)`), bar alignment
+(`floor(freq)` / `ceil(freq)` / `round(freq)` / `normalize()`), and
+`isocalendar()`. A missing element yields `NA` in every component:
+
+```py
+t = volas.to_datetime(df['time'])
+t.dt.hour                  # int64 Series, 0..23
+t.dt.dayofweek             # Monday=0 .. Sunday=6
+t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
+```
+
 ### Row
 
 `df.iloc[i]` and `df.loc[label]` return a `Row` — a single record whose `.name`

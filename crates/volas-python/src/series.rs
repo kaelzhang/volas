@@ -854,6 +854,19 @@ impl PySeries {
         self.fill_dir(false)
     }
 
+    /// The datetime accessor (pandas `Series.dt`): per-element calendar
+    /// components / predicates / names / floor-ceil-round, on a
+    /// `datetime64[ns]` Series only.
+    #[getter]
+    pub(crate) fn dt(&self) -> PyResult<crate::dt::PyDt> {
+        if !matches!(self.inner.data, Column::Datetime(_)) {
+            return Err(pyo3::exceptions::PyAttributeError::new_err(
+                "Can only use .dt accessor with datetimelike values",
+            ));
+        }
+        Ok(crate::dt::PyDt { series: self.inner.clone() })
+    }
+
     /// Boolean mask of missing (`volas.NA`) values, across every dtype (a float
     /// `NaN`, an int/bool validity hole, a datetime `NaT`).
     pub(crate) fn isna(&self) -> PySeries {

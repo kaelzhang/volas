@@ -138,6 +138,15 @@ impl Column {
                     .to_string(),
             ));
         }
+        // Epoch nanoseconds never fit int32 (except meaningless near-1970
+        // instants), so a datetime -> int32 cast is rejected like the float one.
+        if matches!(self, Column::Datetime(_)) && to == DType::I32 {
+            return Err(VolasError::DType(
+                "cannot cast a datetime column to int32 (epoch nanoseconds do not fit); \
+                 use astype('int64') for the exact epoch nanoseconds"
+                    .to_string(),
+            ));
+        }
         match to {
             DType::F64 => Ok(Column::f64(self.to_f64_vec())),
             DType::I64 => match self {
@@ -163,14 +172,35 @@ impl Column {
                     Ok(Column::i64(v.iter().map(|&x| x as i64).collect()))
                 }
                 // int/bool sources are handled by `cast_int_bool` above.
-                Column::Datetime(v) => Ok(Column::i64(v.to_vec())),
+                // The exact epoch nanoseconds; a NaT cell stays missing in the
+                // int64 validity (# C2) instead of surfacing the i64::MIN sentinel
+                // as a value (pandas raises here; volas's native-NA int carries it).
+                Column::Datetime(v) => {
+                    let validity = Validity::from_valid_iter(
+                        v.len(),
+                        (0..v.len()).map(|i| self.is_valid(i)),
+                    );
+                    Ok(Column::i64_with(v.to_vec(), validity))
+                }
                 // unreachable: int/bool go through cast_int_bool, str through
                 // cast_str_to_numeric, and F64/F32/Datetime are handled above.
                 _ => unreachable!("non-numeric int64 cast handled earlier"), // LCOV_EXCL_LINE
             },
+            // numeric -> bool is pandas-nullable truthiness (owner ruling
+            // 2026-06-12): nonzero -> True (incl ±inf), zero -> False, and a
+            // missing float cell (NaN) STAYS missing — never numpy's
+            // NaN-is-truthy footgun. int sources go through `cast_int_bool`.
             DType::Bool => match self {
-                Column::F64(v) => Ok(Column::bool(v.iter().map(|&x| x != 0.0).collect())),
-                // int sources are handled by `cast_int_bool` above.
+                Column::F64(v) => Ok(Column::bool_with(
+                    v.iter().map(|&x| x != 0.0).collect(),
+                    Validity::from_valid_iter(v.len(), v.iter().map(|x| !x.is_nan())),
+                )),
+                Column::F32(v) => Ok(Column::bool_with(
+                    v.iter().map(|&x| x != 0.0).collect(),
+                    Validity::from_valid_iter(v.len(), v.iter().map(|x| !x.is_nan())),
+                )),
+                // str -> bool has no parse policy (owner ruling: error), and a
+                // datetime has no truthiness.
                 other => Err(VolasError::DType(format!(
                     "cannot cast a {} column to bool",
                     other.dtype()

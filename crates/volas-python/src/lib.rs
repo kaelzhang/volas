@@ -90,6 +90,7 @@ mod scalar;
 mod convert;
 mod coerce;
 mod series;
+mod dt;
 mod series_support;
 mod frame;
 mod frame_methods;
@@ -220,6 +221,7 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySeries>()?;
     m.add_class::<PyRow>()?;
     m.add_class::<PyTimestamp>()?;
+    m.add_class::<dt::PyDt>()?;
     m.add_class::<DataFrameILoc>()?;
     m.add_class::<DataFrameLoc>()?;
     m.add_class::<DataFrameIat>()?;

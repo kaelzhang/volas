@@ -10,9 +10,15 @@ Oracle policy (SPEC §5 provenance, §10 triage):
     unparseable token (`# pandas`); volas must too (a guard, not a crash → P7).
   * <anything> -> str — stringify is defined in outcome (ok, dtype=str) but the
     exact string *format* is a volas design choice; value deferred.
-  * everything else (num↔datetime epoch convention, num→bool truthiness,
-    str→bool) — the contract is silent → `rejected_no_oracle`, surfaced by the
-    backlog meta-test, NOT hand-guessed.
+  * numeric -> bool (owner ruling 2026-06-12) — pandas-nullable truthiness:
+    nonzero -> True (incl ±inf), zero -> False, NA stays NA (a float NaN IS NA);
+    never numpy's NaN-is-truthy footgun.
+  * str -> bool (owner ruling) — no parse policy: raises.
+  * datetime <-> numeric (owner-approved disposition) — the exact-ns channels
+    are kept (i64 -> datetime epoch-ns; f64/i64 with an explicit unit suffix is
+    the documented ingestion divergence; datetime -> i64 exact ns, NaT -> NA per
+    C2 where pandas raises); every lossy/ambiguous pair raises (i32/f32/bool <->
+    datetime, datetime -> f64/f32/i32/bool).
 
 Cell IDs:  ASTYPE:<src>-><dst>/N=<n>
 """
@@ -33,37 +39,35 @@ def _astype_oracle(src: str, dst: str):
       ("ok", dst)        numeric cast, value-preserving, NA-preserving
       ("identity", dst)  src==dst non-op (exact, incl. str/datetime)
       ("stringify",)     ok + dtype=str, value format deferred
+      ("boolify",)       numeric -> bool truthiness, NA-preserving
+      ("epoch", dir)     i64/f64 <-> datetime via exact epoch nanoseconds
       ("raise", Exc)     a guard rejects the conversion
-      ("defer", reason)  rejected_no_oracle — owner decision pending
     """
     if src == dst:
         return ("identity", dst)                         # trivial no-op
     if src in _NUMERIC and dst in _NUMERIC:
         if dst == "bool":
-            return ("defer", "numeric->bool truthiness undecided")  # 2,3 lose info
+            return ("boolify",)                          # nonzero -> True, NA -> NA
         return ("ok", dst)                               # # pandas exact + # C2
     if src == "str" and dst in ("f64", "f32", "i64", "i32"):
         return ("raise", ValueError)                     # "a" unparseable  # pandas
     if src == "str" and dst == "datetime":
         return ("raise", ValueError)                     # "a" not a date   # pandas
     if src == "str" and dst == "bool":
-        return ("defer", "str->bool parse policy undecided")
+        return ("raise", TypeError)                      # no parse policy (owner)
     if dst == "str":                                     # numeric/bool/datetime -> str
         return ("stringify",)                            # ok+str; format deferred
-    if {src, dst} & {"datetime"}:
-        return ("defer", f"{src}->{dst} epoch convention undecided")
-    return ("defer", f"{src}->{dst} cross-family undecided")  # pragma: no cover
-
-
-# The frozen rejected_no_oracle backlog: cells whose intended behaviour the
-# contract has not yet ruled (SPEC §5). A new deferral can't sneak in silently,
-# and resolving one *forces* removing it here. Owner decision pending.
-_PENDING = frozenset(
-    (s, d)
-    for s in A.DTYPES
-    for d in A.DTYPES
-    if _astype_oracle(s, d)[0] == "defer"
-)
+    if dst == "datetime":
+        # i64 -> datetime is the exact epoch-ns read (# pandas); f64 keeps the
+        # documented float-epoch ingestion divergence (truncated to ns). The
+        # narrow/unordered sources (i32 / f32 / bool) raise.
+        return ("epoch", "to") if src in ("i64", "f64") else ("raise", TypeError)
+    if src == "datetime":
+        # datetime -> i64 is the exact ns; NaT -> NA per C2 (pandas raises).
+        # Every lossy target (f64/f32 quantize past 2^53, i32 overflows, bool
+        # is meaningless) raises.
+        return ("epoch", "from") if dst == "i64" else ("raise", TypeError)
+    return ("raise", TypeError)  # pragma: no cover — no remaining pair
 
 
 # F4 FIXED: stringify carries EVERY source's missing cells into the str target's
@@ -84,9 +88,6 @@ def _ids():
 @pytest.mark.parametrize("src,dst,n", list(_ids()))
 def test_astype_matrix(src, dst, n):
     kind = _astype_oracle(src, dst)
-    if kind[0] == "defer":
-        pytest.skip(f"rejected_no_oracle: {kind[1]} (tracked by backlog meta-test)")
-
     s = A.series(src, n)
 
     # float NaN cannot be represented as an integer: NA-bearing float->int must
@@ -97,10 +98,12 @@ def test_astype_matrix(src, dst, n):
         return
 
     if kind[0] == "raise":
-        # an all-NA / empty column has nothing to parse, so the guard may not
-        # fire — only assert the guard on columns that actually carry values.
-        if n in ("N2", "N3"):
-            pytest.skip("no present value to trigger the parse guard")
+        # str -> numeric/datetime is a PER-VALUE parse guard: an all-NA / empty
+        # column has nothing to parse and converts to all-NA instead of raising
+        # (documented: blank cells are NA). Every other guard is dtype-level
+        # and fires even on an empty column.
+        if src == "str" and dst != "bool" and n in ("N2", "N3"):
+            pytest.skip("per-value parse guard: nothing to parse in N2/N3")
         with pytest.raises(kind[1]):
             s.astype(A._DTYPE_STR[dst])
         return
@@ -111,6 +114,29 @@ def test_astype_matrix(src, dst, n):
 
     if kind[0] == "stringify":
         assert out.dtype == "str"
+        return
+
+    if kind[0] == "boolify":
+        # pandas-nullable truthiness (# pandas-nullable / owner ruling): the
+        # basis values 1/2/3 (or True/False/True) -> nonzero, NA stays NA.
+        assert out.dtype == "bool"
+        for sv, ov, m in zip(s.to_list(), out.to_list(), out.isna().to_list()):
+            if not m:
+                assert ov is (float(sv) != 0.0)
+        return
+
+    if kind[0] == "epoch":
+        # the exact epoch-ns channel: int64 ns <-> datetime round-trips losslessly.
+        if kind[1] == "to":
+            assert out.dtype == "datetime64[ns]"
+            back = out.astype("int64")
+            for sv, bv, m in zip(s.to_list(), back.to_list(), back.isna().to_list()):
+                if not m:
+                    assert int(bv) == int(float(sv))     # f64 basis is integer-valued
+        else:
+            assert out.dtype == "int64"
+            assert [str(x) for x in out.astype("datetime64[ns]").to_list()] == \
+                   [str(x) for x in s.to_list()]         # exact ns round-trip
         return
 
     # ok / identity: dtype is the target, values are preserved.
@@ -125,24 +151,9 @@ def test_astype_matrix(src, dst, n):
             assert float(ov) == float(sv), f"value drift {sv!r} -> {ov!r}"
 
 
-def test_astype_oracle_backlog():
-    """The rejected_no_oracle set is exactly the known-pending set (SPEC §5).
-
-    This is the loud surface for un-ruled astype conversions — see
-    `tasks/04/audits/findings-ledger.md`. Resolving any cell means giving it an
-    oracle above AND deleting it from this frozen set.
-    """
-    expected = {
-        # numeric -> bool: truthiness (2,3 -> True loses information)
-        ("f64", "bool"), ("f32", "bool"), ("i64", "bool"), ("i32", "bool"),
-        ("str", "bool"),
-        # datetime <-> numeric: epoch unit/sign convention unruled
-        ("f64", "datetime"), ("f32", "datetime"), ("i64", "datetime"),
-        ("i32", "datetime"), ("bool", "datetime"),
-        ("datetime", "f64"), ("datetime", "f32"), ("datetime", "i64"),
-        ("datetime", "i32"), ("datetime", "bool"),
-    }
-    assert _PENDING == expected, (
-        f"astype backlog drift — new: {_PENDING - expected}, "
-        f"resolved (delete from set): {expected - _PENDING}"
-    )
+def test_astype_oracle_resolved():
+    """Every astype cell now has an oracle (owner rulings 2026-06-12) — the
+    rejected_no_oracle backlog is EMPTY. A new deferral cannot reappear without
+    failing here."""
+    kinds = {_astype_oracle(a, b)[0] for a in A.DTYPES for b in A.DTYPES}
+    assert kinds == {"identity", "ok", "boolify", "epoch", "raise", "stringify"}

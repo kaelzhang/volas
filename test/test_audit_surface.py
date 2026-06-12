@@ -26,9 +26,8 @@ _DF = volas.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
 
 # owner-confirmed `align` (disposition §2 B-cluster + datetime symmetry).
 # Note: `pct_change` is NOT here — owner ruled it out-of-scope (the `change`
-# directive already computes it; one indicator path). `dt` stays backlog but its
-# API shape is open (owner dislikes pandas's Series-only .dt asymmetry; volas
-# should expose datetime components symmetrically on Series AND DataFrame).
+# directive already computes it; one indicator path). `dt` is implemented
+# pandas-aligned and Series-only (owner ruling 2026-06-12).
 _SERIES_IMPLEMENTED = {
     "tz_localize", "tz_convert",                                # F27, landed
     "value_counts", "mode", "isin", "between", "replace",
@@ -38,10 +37,6 @@ _SERIES_IMPLEMENTED = {
     "iat", "at",
     "rolling", "ewm", "expanding", "interpolate",
 }
-# `dt` stays the one backlog item BY OWNER DECISION: pandas's Series-only .dt
-# asymmetry is disliked; volas will expose datetime components symmetrically on
-# Series AND DataFrame — the API shape is owner-TBD, so it is not implemented yet.
-_SERIES_BACKLOG = {"dt"}
 _DATAFRAME_IMPLEMENTED = {
     "sum", "mean", "min", "max", "prod", "var", "std", "median", "quantile",
     "idxmax", "idxmin", "all", "any", "nunique",
@@ -61,13 +56,11 @@ def test_dataframe_align_implemented(m):
     assert hasattr(_DF, m)
 
 
-def test_datetime_component_access_deferred_by_owner():
-    """`dt` is deliberately NOT implemented yet (owner decision): pandas's
-    Series-only `.dt` makes Series and DataFrame usage inconsistent; volas will
-    expose datetime components SYMMETRICALLY on both — the API shape is
-    owner-TBD. This pins the deferral so it stays a conscious decision."""
-    assert sorted(_SERIES_BACKLOG) == ["dt"]
-    assert not hasattr(_S, "dt")
+def test_datetime_component_access_implemented():
+    """`dt` is implemented pandas-aligned and Series-only (owner ruling
+    2026-06-12, superseding the earlier symmetric-shape idea) — full
+    differential coverage lives in test_audit_t15_dt.py."""
+    assert "dt" in _pub(_S)
 
 
 def _missing_hash(pd_obj, vol_obj):

@@ -144,54 +144,54 @@ impl PyTimestamp {
 
     /// Calendar year in the timestamp's timezone (pandas `Timestamp.year`).
     #[getter]
-    fn year(&self) -> i64 {
+    pub(crate) fn year(&self) -> i64 {
         datetime::civil_parts_tz(self.ns, self.tz).0
     }
     /// Calendar month, 1..=12 (pandas `Timestamp.month`).
     #[getter]
-    fn month(&self) -> i64 {
+    pub(crate) fn month(&self) -> i64 {
         datetime::civil_parts_tz(self.ns, self.tz).1
     }
     /// Day of month, 1..=31 (pandas `Timestamp.day`).
     #[getter]
-    fn day(&self) -> i64 {
+    pub(crate) fn day(&self) -> i64 {
         datetime::civil_parts_tz(self.ns, self.tz).2
     }
     /// Hour, 0..=23 (pandas `Timestamp.hour`).
     #[getter]
-    fn hour(&self) -> i64 {
+    pub(crate) fn hour(&self) -> i64 {
         datetime::civil_parts_tz(self.ns, self.tz).3
     }
     /// Minute, 0..=59 (pandas `Timestamp.minute`).
     #[getter]
-    fn minute(&self) -> i64 {
+    pub(crate) fn minute(&self) -> i64 {
         datetime::civil_parts_tz(self.ns, self.tz).4
     }
     /// Second, 0..=59 (pandas `Timestamp.second`).
     #[getter]
-    fn second(&self) -> i64 {
+    pub(crate) fn second(&self) -> i64 {
         datetime::civil_parts_tz(self.ns, self.tz).5
     }
 
     /// Day of week with Monday=0 .. Sunday=6 (pandas `Timestamp.weekday()`).
-    fn weekday(&self) -> i64 {
+    pub(crate) fn weekday(&self) -> i64 {
         let (y, mo, d, ..) = datetime::civil_parts_tz(self.ns, self.tz);
         (datetime::days_from_civil(y, mo, d) + 3).rem_euclid(7)
     }
 
     /// Microsecond component, 0..=999_999 (pandas `Timestamp.microsecond`).
     #[getter]
-    fn microsecond(&self) -> i64 {
+    pub(crate) fn microsecond(&self) -> i64 {
         self.ns.rem_euclid(1_000_000_000) / 1_000
     }
     /// Nanosecond component, 0..=999 (pandas `Timestamp.nanosecond`).
     #[getter]
-    fn nanosecond(&self) -> i64 {
+    pub(crate) fn nanosecond(&self) -> i64 {
         self.ns.rem_euclid(1_000)
     }
     /// Quarter of the year, 1..=4 (pandas `Timestamp.quarter`).
     #[getter]
-    fn quarter(&self) -> i64 {
+    pub(crate) fn quarter(&self) -> i64 {
         (self.month() - 1) / 3 + 1
     }
     /// Day of week, Monday=0 (pandas `Timestamp.dayofweek` — property form of
@@ -211,7 +211,7 @@ impl PyTimestamp {
     }
     /// Ordinal day of the year, 1..=366 (pandas `Timestamp.dayofyear`).
     #[getter]
-    fn dayofyear(&self) -> i64 {
+    pub(crate) fn dayofyear(&self) -> i64 {
         let (y, mo, d, ..) = datetime::civil_parts_tz(self.ns, self.tz);
         datetime::days_from_civil(y, mo, d) - datetime::days_from_civil(y, 1, 1) + 1
     }
@@ -237,7 +237,7 @@ impl PyTimestamp {
     }
     /// Days in the timestamp's month, 28..=31 (pandas `Timestamp.days_in_month`).
     #[getter]
-    fn days_in_month(&self) -> i64 {
+    pub(crate) fn days_in_month(&self) -> i64 {
         let (y, mo, ..) = datetime::civil_parts_tz(self.ns, self.tz);
         days_in_month_of(y, mo)
     }
@@ -248,47 +248,47 @@ impl PyTimestamp {
     }
     /// Whether this is the first day of its month (pandas `is_month_start`).
     #[getter]
-    fn is_month_start(&self) -> bool {
+    pub(crate) fn is_month_start(&self) -> bool {
         self.day() == 1
     }
     /// Whether this is the last day of its month (pandas `is_month_end`).
     #[getter]
-    fn is_month_end(&self) -> bool {
+    pub(crate) fn is_month_end(&self) -> bool {
         self.day() == self.days_in_month()
     }
     /// Whether this is the first day of its quarter (pandas `is_quarter_start`).
     #[getter]
-    fn is_quarter_start(&self) -> bool {
+    pub(crate) fn is_quarter_start(&self) -> bool {
         self.day() == 1 && (self.month() - 1) % 3 == 0
     }
     /// Whether this is the last day of its quarter (pandas `is_quarter_end`).
     #[getter]
-    fn is_quarter_end(&self) -> bool {
+    pub(crate) fn is_quarter_end(&self) -> bool {
         self.month() % 3 == 0 && self.day() == self.days_in_month()
     }
     /// Whether this is January 1st (pandas `is_year_start`).
     #[getter]
-    fn is_year_start(&self) -> bool {
+    pub(crate) fn is_year_start(&self) -> bool {
         self.month() == 1 && self.day() == 1
     }
     /// Whether this is December 31st (pandas `is_year_end`).
     #[getter]
-    fn is_year_end(&self) -> bool {
+    pub(crate) fn is_year_end(&self) -> bool {
         self.month() == 12 && self.day() == 31
     }
     /// Whether the timestamp's year is a leap year (pandas `is_leap_year`).
     #[getter]
-    fn is_leap_year(&self) -> bool {
+    pub(crate) fn is_leap_year(&self) -> bool {
         let y = self.year();
         (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
     }
     /// The English day name, e.g. `"Monday"` (pandas `day_name()`).
-    fn day_name(&self) -> &'static str {
+    pub(crate) fn day_name(&self) -> &'static str {
         ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
             [self.weekday() as usize]
     }
     /// The English month name, e.g. `"June"` (pandas `month_name()`).
-    fn month_name(&self) -> &'static str {
+    pub(crate) fn month_name(&self) -> &'static str {
         ["January", "February", "March", "April", "May", "June", "July",
          "August", "September", "October", "November", "December"]
             [(self.month() - 1) as usize]
@@ -333,18 +333,18 @@ impl PyTimestamp {
 
     /// Floor to a frequency boundary in the timestamp's wall-clock:
     /// `'D' 'h' 'min' 's' 'ms' 'us' 'ns'` with an optional multiple (`'15min'`).
-    fn floor(&self, freq: &str) -> PyResult<Self> {
+    pub(crate) fn floor(&self, freq: &str) -> PyResult<Self> {
         let unit = parse_freq_ns(freq)?;
         Ok(PyTimestamp { ns: self.wall_floor(unit), tz: self.tz })
     }
     /// Ceil to a frequency boundary (see `floor`).
-    fn ceil(&self, freq: &str) -> PyResult<Self> {
+    pub(crate) fn ceil(&self, freq: &str) -> PyResult<Self> {
         let unit = parse_freq_ns(freq)?;
         let f = self.wall_floor(unit);
         Ok(PyTimestamp { ns: if f == self.ns { f } else { f + unit }, tz: self.tz })
     }
     /// Round to the nearest frequency boundary, ties to even (pandas `round`).
-    fn round(&self, freq: &str) -> PyResult<Self> {
+    pub(crate) fn round(&self, freq: &str) -> PyResult<Self> {
         let unit = parse_freq_ns(freq)?;
         let f = self.wall_floor(unit);
         let rem = self.ns - f;
@@ -360,7 +360,7 @@ impl PyTimestamp {
         Ok(PyTimestamp { ns, tz: self.tz })
     }
     /// Midnight of the timestamp's wall-clock day (pandas `normalize`).
-    fn normalize(&self) -> PyResult<Self> {
+    pub(crate) fn normalize(&self) -> PyResult<Self> {
         self.floor("D")
     }
 
@@ -648,7 +648,7 @@ fn days_in_month_of(y: i64, mo: i64) -> i64 {
 
 /// Parse a pandas-style frequency spec (`'15min'`, `'D'`, `'h'`, `'s'`, …) to a
 /// span in nanoseconds.
-fn parse_freq_ns(freq: &str) -> PyResult<i64> {
+pub(crate) fn parse_freq_ns(freq: &str) -> PyResult<i64> {
     let f = freq.trim();
     let split = f.find(|c: char| !c.is_ascii_digit()).unwrap_or(f.len());
     let (mult_s, unit_s) = f.split_at(split);
@@ -678,14 +678,14 @@ fn parse_freq_ns(freq: &str) -> PyResult<i64> {
 impl PyTimestamp {
     /// Floor the instant to a `unit_ns` boundary of the WALL clock (so a daily
     /// floor lands on the local midnight for an anchored zone).
-    fn wall_floor(&self, unit_ns: i64) -> i64 {
+    pub(crate) fn wall_floor(&self, unit_ns: i64) -> i64 {
         let off = self.tz.offset_secs_at(self.ns) as i64 * 1_000_000_000;
         let wall = self.ns + off;
         wall.div_euclid(unit_ns) * unit_ns - off
     }
 
     /// The ISO calendar triple (iso_year, iso_week, iso_weekday).
-    fn iso_calendar(&self) -> (i64, i64, i64) {
+    pub(crate) fn iso_calendar(&self) -> (i64, i64, i64) {
         let (y, mo, d, ..) = datetime::civil_parts_tz(self.ns, self.tz);
         datetime::iso_calendar(y, mo, d)
     }
