@@ -147,8 +147,8 @@ lint:
 	@ruff check $(files)
 	@echo "\033[1m>> Running mypy (package)... <<\033[0m"
 	@mypy volas
-	@echo "\033[1m>> Running cargo check... <<\033[0m"
-	@cargo check
+	@echo "\033[1m>> Running cargo clippy... <<\033[0m"
+	@cargo clippy --workspace --all-targets
 
 # Static type gates — deterministic oracles that prove the shipped typings are correct
 # (no human review needed). Needs the extension built so the stub is installed.

@@ -547,13 +547,11 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
 #[inline]
 fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
     let warm = lookback.min(n);
-    let mut out = Vec::with_capacity(n);
-    // Write the candle result once: warm-up NaNs first, then a tight valid-region
-    // loop. The old `extend(map(...))` measured slower for simple two-bar patterns.
-    unsafe {
-        out.set_len(n);
-    }
-    out[..warm].fill(f64::NAN);
+    // The old `extend(map(...))` measured slower for simple two-bar patterns.
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
     let mut i = warm;
     while i < n {
         out[i] = f(i);
@@ -570,12 +568,10 @@ fn candle_output(n: usize, lookback: usize) -> Option<Vec<f64>> {
     if lookback >= n {
         return None;
     }
-    let mut out = Vec::with_capacity(n);
-    unsafe {
-        out.set_len(n);
-    }
-    out[..lookback].fill(f64::NAN);
-    Some(out)
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    Some(vec![f64::NAN; n])
 }
 
 #[cfg(test)]

@@ -31,11 +31,10 @@ pub fn hhv(data: &[f64], period: usize) -> Vec<f64> {
 
 fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
     let n = data.len();
-    let mut out = Vec::with_capacity(n);
-    unsafe {
-        out.set_len(n);
-    }
-    out[..9].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
 
     let src = data.as_ptr();
     let dst = out.as_mut_ptr();

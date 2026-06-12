@@ -155,11 +155,10 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period > n {
         return vec![f64::NAN; n];
     }
-    let mut out = Vec::with_capacity(n);
-    unsafe {
-        out.set_len(n);
-    }
-    out[..period - 1].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
     let pf = period as f64;
     // Precompute 1/period: the means are then per-element multiplies, not divisions
     // (TA-Lib divides by period three times per bar). The ~1e-16 difference from a true
@@ -222,11 +221,10 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period + 1 > n {
         return vec![f64::NAN; n];
     }
-    let mut out = Vec::with_capacity(n);
-    unsafe {
-        out.set_len(n);
-    }
-    out[..period].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
     let ret = |arr: &[f64], i: usize| -> f64 {
         let prev = arr[i - 1];
         if prev.abs() < 1e-14 {

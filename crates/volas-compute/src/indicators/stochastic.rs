@@ -44,11 +44,10 @@ fn stoch_fastk_small_window(
         return None;
     }
     let lookback = period - 1;
-    let mut out = Vec::with_capacity(n);
-    unsafe {
-        out.set_len(n);
-    }
-    out[..lookback].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
 
     let high_ptr = high.as_ptr();
     let low_ptr = low.as_ptr();
@@ -162,12 +161,10 @@ fn stoch_d_sma_fused<const STAGES: usize>(
     if high.len() != n || low.len() != n || n < 5 {
         return None;
     }
-    let lookback = 4 + STAGES * 2;
-    let mut out = Vec::with_capacity(n);
-    unsafe {
-        out.set_len(n);
-    }
-    out[..lookback.min(n)].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
 
     let high_ptr = high.as_ptr();
     let low_ptr = low.as_ptr();
@@ -395,11 +392,10 @@ pub fn stochrsi_d_default_sma(close: &[f64]) -> Option<Vec<f64>> {
         return Some(vec![f64::NAN; n]);
     }
 
-    let mut out = Vec::with_capacity(n);
-    unsafe {
-        out.set_len(n);
-    }
-    out[..(start + 6).min(n)].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
     let out_ptr = out.as_mut_ptr();
     let src = tail.as_ptr();
     let mut today = 4usize;

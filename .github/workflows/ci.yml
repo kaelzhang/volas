@@ -28,9 +28,17 @@ jobs:
 
       - name: mypy (package)
         run: mypy volas
-      # clippy joins this job once the uninit_vec hot-path migration (owner
-      # decision D2, 2026-06-12) lands; until then `cargo clippy` is red on the
-      # 13 known set_len sites and would only train people to ignore the gate.
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets
 
   test:
     name: test / py${{ matrix.python-version }}

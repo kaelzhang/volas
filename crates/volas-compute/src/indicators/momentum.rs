@@ -53,13 +53,12 @@ pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
     if period >= n {
         return vec![f64::NAN; n];
     }
-    let mut out = Vec::with_capacity(n);
     // ROC is a coverage hot spot by itself, so keep the canonical line specialized:
     // one explicit loop avoids the generic closure/iterator adapter used by ROCP/ROCR.
-    unsafe {
-        out.set_len(n);
-    }
-    out[..period].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
     let data_ptr = data.as_ptr();
     let out_ptr = out.as_mut_ptr();
     let mut cur_ptr = unsafe { data_ptr.add(period) };
@@ -111,13 +110,10 @@ pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64
         return vec![f64::NAN; n];
     }
     let lookback = period - 1;
-    let mut out = Vec::with_capacity(n);
-    // Every slot is written before return: warm-up rows are filled with NaN here,
-    // and the loop below writes all valid rows `[lookback, n)`.
-    unsafe {
-        out.set_len(n);
-    }
-    out[..lookback].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
     let mut today = lookback;
     let mut trailing = 0usize;
     let mut highest_idx = usize::MAX;
@@ -389,14 +385,13 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period >= n {
         return vec![f64::NAN; n];
     }
-    let mut out = Vec::with_capacity(n);
-    // Every valid slot is written exactly once below. The loop invariants mirror
-    // `willr`: `today < n`, `trailing <= today`, and rescans stay inside
-    // `[trailing, today]`, so the hot tracker can use unchecked slice access.
-    unsafe {
-        out.set_len(n);
-    }
-    out[..period].fill(f64::NAN);
+    // The loop invariants mirror `willr`: `today < n`, `trailing <= today`, and
+    // rescans stay inside `[trailing, today]`, so the hot tracker can use
+    // unchecked slice access.
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
     let factor = 100.0 / period as f64;
     let high_ptr = high.as_ptr();
     let low_ptr = low.as_ptr();
@@ -485,13 +480,10 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     if period == 0 || period + 1 > n {
         return vec![f64::NAN; n];
     }
-    let mut out = Vec::with_capacity(n);
-    // Warm-up slots are filled below and every valid slot `[period, n)` is written
-    // exactly once by the two loops, so this avoids a full-buffer NaN initialization.
-    unsafe {
-        out.set_len(n);
-    }
-    out[..period].fill(f64::NAN);
+    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
+    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
+    // the prefill is a vectorized splat, measured at parity by make perf-ab).
+    let mut out = vec![f64::NAN; n];
     // Single pass over O(period) memory (TA-Lib's shape): a ring buffer holds the last
     // `period` per-bar (positive, negative) money flows so the window can drop the
     // departing bar without an n-sized side array. The typical price is carried across
