@@ -7,7 +7,6 @@ sliced and non-sliced sides by the same amount (BUG 1, now fixed)."""
 
 import numpy as np
 import pytest
-import volas
 from volas import DataFrame
 
 

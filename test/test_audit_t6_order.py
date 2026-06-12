@@ -11,7 +11,6 @@ Cell IDs:  T6.<method>[/D=<d>] · T6.sort/na-last
 from __future__ import annotations
 
 import volas
-from . import audit_dims as A
 
 
 def _present(s):

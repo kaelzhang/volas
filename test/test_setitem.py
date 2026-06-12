@@ -1,6 +1,5 @@
 """DataFrame column assignment + copy-on-write (audit PD-1)."""
 
-import numpy as np
 import pytest
 from volas import DataFrame
 

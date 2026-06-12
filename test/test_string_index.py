@@ -9,7 +9,6 @@ label lookup, lexicographic ``.loc[a:b]`` slicing, ``.at``, ``drop``, and the
 import numpy as np
 import pytest
 
-import volas
 from volas import DataFrame, Series
 
 

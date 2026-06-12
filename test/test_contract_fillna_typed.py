@@ -6,7 +6,6 @@ float). This closes the fillna leg of the typed-scalar-fill family."""
 
 import numpy as np
 import pytest
-import volas
 from volas import DataFrame
 
 

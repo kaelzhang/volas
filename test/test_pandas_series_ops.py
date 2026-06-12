@@ -13,7 +13,6 @@ volas detail differences (allowed by the porting brief, root cause noted):
     are bool-only (no integer bitwise), matching its float64/bool model.
 """
 
-import math
 import operator
 
 import numpy as np

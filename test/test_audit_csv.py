@@ -10,7 +10,6 @@ Cell IDs:  T8.read_csv/<param> · T8.to_csv.roundtrip
 
 from __future__ import annotations
 
-import pytest
 
 import volas
 

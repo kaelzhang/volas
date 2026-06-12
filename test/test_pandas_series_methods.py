@@ -12,7 +12,6 @@ volas detail differences (allowed by the porting brief, root cause noted):
     only the scalar-fill cases are portable.
 """
 
-import math
 
 import numpy as np
 import pytest

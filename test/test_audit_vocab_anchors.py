@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
 
 import volas
 import volas_rs

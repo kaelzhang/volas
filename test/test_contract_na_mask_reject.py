@@ -5,7 +5,6 @@ deliberate False would drop a row (filtering) or fill it in the False direction
 (where / mask) — in a live system that turns a data gap into a trade signal. The
 user must fill or drop the NA first. A dense bool mask is unaffected."""
 
-import numpy as np
 import pytest
 import volas
 from volas import DataFrame

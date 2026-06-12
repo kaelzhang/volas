@@ -12,7 +12,6 @@ plain ``ValueError``, not a directive-specific exception.
 import numpy as np
 import pytest
 
-import volas
 from volas import DataFrame, to_datetime
 
 nan = float("nan")

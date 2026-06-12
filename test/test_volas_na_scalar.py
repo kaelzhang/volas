@@ -3,7 +3,6 @@ be assignable / usable wherever `None` is: Series setitem, DataFrame indexers,
 boolean-mask assignment, and where/mask `other`. (P2-01)"""
 
 import numpy as np
-import pytest
 import volas
 from volas import DataFrame
 
