@@ -117,6 +117,7 @@ V_INT = [
     ("2**53", 2 ** 53), ("2**53+1", 2 ** 53 + 1),
     ("i64-max", 9223372036854775807), ("i64-min+1", -9223372036854775807),
     ("i64-min", -9223372036854775808),
+    ("i32-max", 2147483647), ("i32-min", -2147483648),
 ]
 # Integers with NO exact volas dtype (no uint64 / object) — must error (C4), not
 # silently demote to lossy float64. F32. Kept separate from V_INT (which stays

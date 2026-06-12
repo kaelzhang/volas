@@ -247,6 +247,18 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(directive_stringify, m)?)?;
     m.add_function(wrap_pyfunction!(directive_lookback, m)?)?;
     m.add_class::<NaType>()?;
+    // Machine-readable vocabularies for the systematic audit's external anchors
+    // (SPEC §6.3): the dtype set is generated FROM the Rust enum (a new dtype
+    // auto-extends the audit matrix), and the directive command list comes from
+    // the spec.rs registry (no hand-written command vocabulary).
+    m.add(
+        "_dtypes",
+        volas_core::DType::ALL
+            .iter()
+            .map(|d| d.name().to_string())
+            .collect::<Vec<_>>(),
+    )?;
+    m.add("_directive_commands", volas_directive::spec::COMMANDS.to_vec())?;
     m.add("NA", na(m.py()))?;
     Ok(())
 }

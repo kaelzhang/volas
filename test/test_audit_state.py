@@ -12,6 +12,8 @@ oracle is needed — a divergence between two paths that must agree IS the findi
   E5  copy isolation (mutating one side never touches the other)
   E6  Series.f()           ≡  DataFrame.f() per column
   E7  to_pandas -> from_pandas round-trip  ≡  original
+  E8  same-semantics guards behave the same (NaT/monotonic guards are symmetric
+      across cumulate / live append / tf-construction)
 
 Cell IDs:  E1/<d>/<n> · E2/<directive> · E5/<d> · E6/<f> · E7/<d>/<n>
 """
@@ -210,3 +212,53 @@ def test_cumulators_typo_fails_loud():
     with pytest.raises(ValueError):
         df.cumulate("5m", cumulators={"volumee": "sum"})    # misspelled
     assert df.cumulate("5m", cumulators={"volume": "sum"}).shape[0] == 1
+
+
+# --- E8: guard symmetry (same semantics -> same behaviour) -------------------
+def test_e8_nat_guard_symmetry():
+    """A NaT-bearing timeline is rejected by EVERY entry that builds or extends
+    a tf-aware frame — batch cumulate, tf-construction, and the live append —
+    never accepted by one and rejected by another (the historical V12 class).
+    (The deeper per-entry assertions live in test_cumulate_nat.py; this is the
+    audit-level law tying them together.)"""
+    import numpy as np
+    nat = volas.DataFrame({"close": [1.0, 2.0]})
+    nat["t"] = volas.DataFrame(
+        {"t": np.array(["2021-01-01", "NaT"], dtype="datetime64[ns]")})["t"]
+    nat = nat.set_index("t")
+    with pytest.raises(Exception):
+        nat.cumulate("5m")                                  # batch entry
+    with pytest.raises(Exception):
+        volas.DataFrame(nat, time_frame="5m")               # construction entry
+
+
+def test_e8_monotonic_guard_symmetry():
+    """An out-of-order timeline is likewise rejected by both entries (V11/V15)."""
+    df = volas.DataFrame({"close": [1.0, 2.0]})
+    df["t"] = volas.to_datetime(volas.DataFrame(
+        {"t": ["2021-01-01 00:05:00", "2021-01-01 00:00:00"]})["t"])
+    df = df.set_index("t")
+    with pytest.raises(Exception):
+        df.cumulate("5m")
+    with pytest.raises(Exception):
+        volas.DataFrame(df, time_frame="5m")
+
+
+# --- E7, tz-aware dimension: the round-trip carries the zone -----------------
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York", "+08:00"])
+def test_e7_tz_aware_roundtrip(zone):
+    """An ANCHORED frame keeps both its instants and its zone across
+    to_pandas -> from_pandas — the core face of the two-state tz model."""
+    df = volas.DataFrame({"v": [1.0, 2.0]})
+    df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01", "2021-07-01"]})["t"])
+    aware = df.set_index("t").tz_localize(zone)
+    back = volas.from_pandas(aware.to_pandas())
+    assert back.tz == aware.tz, f"zone lost in round-trip: {back.tz} != {aware.tz}"
+    assert back.equals(aware)
+
+
+def test_e7_naive_roundtrip_stays_naive():
+    df = volas.DataFrame({"v": [1.0]})
+    df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01"]})["t"])
+    naive = df.set_index("t")
+    assert volas.from_pandas(naive.to_pandas()).tz is None

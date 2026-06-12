@@ -1,7 +1,7 @@
 name: pages
 
 # Publish the benchmark report to GitHub Pages
-# (https://kaelzhang.github.io/volas/), so the README's performance link points at
+# (https://volas.ost.ai), so the README's performance link points at
 # a live, always-reachable report instead of a git-ignored local HTML file.
 #
 # The full benchmark (every comparison library + the 3 report sections) is heavy
@@ -60,9 +60,12 @@ jobs:
         run: make benchmark
 
       - name: Assemble the Pages site
+        # CNAME pins the custom domain (https://volas.ost.ai) so a Pages deploy
+        # can never silently reset it to the github.io default.
         run: |
           mkdir -p _site
           cp benchmark-report.html _site/index.html
+          echo "volas.ost.ai" > _site/CNAME
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

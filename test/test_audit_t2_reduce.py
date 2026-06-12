@@ -96,3 +96,17 @@ def test_describe_shape():
     assert len(d) == 8                       # count mean std min 25% 50% 75% max
     assert d.loc["count"] == 3.0
     assert d.loc["min"] == 1.0 and d.loc["max"] == 3.0
+
+
+# --- typed-order reductions: min/max/idxmax are ORDER-based, so they serve
+# str (lexicographic) and datetime (instant order) — not the f64 funnel. The
+# idxmax-datetime case is the historical P1-02 incident site; pinned here.
+@pytest.mark.parametrize("d,lo,hi", [
+    ("str", "a", "c"),
+    ("datetime", volas.Timestamp("2021-01-01"), volas.Timestamp("2021-01-03")),
+])
+@pytest.mark.parametrize("n", ("N0", "N1"))
+def test_typed_order_min_max_idx(d, lo, hi, n):
+    s = A.series(d, n)                  # basis a/b/c · 2021-01-01..03, NA skipped
+    assert s.min() == lo and s.max() == hi
+    assert s.idxmin() == 0 and s.idxmax() == 2

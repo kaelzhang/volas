@@ -493,30 +493,34 @@ impl PyDataFrame {
         })
     }
     /// The `n` rows with the largest values in `column` (pandas `nlargest`).
-    pub(crate) fn nlargest(&self, n: usize, column: &str) -> PyResult<PyDataFrame> {
-        self.extreme_rows(n, column, false)
+    pub(crate) fn nlargest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
+        if n < 0 {
+            return Err(PyValueError::new_err("n must be >= 0"));
+        }
+        self.extreme_rows(n as usize, column, false)
     }
     /// The `n` rows with the smallest values in `column` (pandas `nsmallest`).
-    pub(crate) fn nsmallest(&self, n: usize, column: &str) -> PyResult<PyDataFrame> {
-        self.extreme_rows(n, column, true)
+    pub(crate) fn nsmallest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
+        if n < 0 {
+            return Err(PyValueError::new_err("n must be >= 0"));
+        }
+        self.extreme_rows(n as usize, column, true)
     }
     /// Drop later duplicate ROWS, keeping the first (pandas
     /// `drop_duplicates(keep='first')`, over all columns).
-    pub(crate) fn drop_duplicates(&self) -> PyDataFrame {
-        let dup = self.row_duplicated();
-        let keep: Vec<usize> = (0..self.inner.height()).filter(|&i| !dup[i]).collect();
-        PyDataFrame::plain(take_frame(&self.inner, &keep))
+    #[pyo3(signature = (keep = "first"))]
+    pub(crate) fn drop_duplicates(&self, keep: &str) -> PyResult<PyDataFrame> {
+        let dup = self.row_duplicated(keep)?;
+        let positions: Vec<usize> = (0..self.inner.height()).filter(|&i| !dup[i]).collect();
+        Ok(PyDataFrame::plain(take_frame(&self.inner, &positions)))
     }
     /// True per row for a later duplicate of an earlier row (pandas `duplicated`).
-    pub(crate) fn duplicated(&self) -> PySeries {
-        let dup = self.row_duplicated();
-        PySeries {
-            inner: Series::new(
-                None,
-                Column::bool(dup),
-                Arc::clone(self.inner.index()),
-            ),
-        }
+    #[pyo3(signature = (keep = "first"))]
+    pub(crate) fn duplicated(&self, keep: &str) -> PyResult<PySeries> {
+        let dup = self.row_duplicated(keep)?;
+        Ok(PySeries {
+            inner: Series::new(None, Column::bool(dup), Arc::clone(self.inner.index())),
+        })
     }
     /// The first (smallest-position) mode of each column, as a 1-row frame.
     /// (pandas pads multi-modal columns into extra rows; volas keeps the single
@@ -550,7 +554,7 @@ impl PyDataFrame {
         let s = PySeries {
             inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
         };
-        s.value_counts()
+        s.value_counts(false, true, false, true)
     }
     /// Linear interpolation per numeric column (pandas `interpolate`).
     pub(crate) fn interpolate(&self) -> PyResult<PyDataFrame> {
@@ -561,25 +565,31 @@ impl PyDataFrame {
     #[pyo3(signature = (window, min_periods = None))]
     pub(crate) fn rolling(
         &self,
-        window: usize,
-        min_periods: Option<usize>,
+        window: i64,
+        min_periods: Option<i64>,
     ) -> PyResult<PyRollingFrame> {
-        if window == 0 {
+        if window < 1 {
             return Err(PyValueError::new_err("rolling window must be >= 1"));
+        }
+        if min_periods.is_some_and(|m| m < 0) {
+            return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
         Ok(PyRollingFrame {
             frame: self.inner.clone(),
-            window,
-            min_periods: min_periods.unwrap_or(window),
+            window: window as usize,
+            min_periods: min_periods.unwrap_or(window) as usize,
         })
     }
     /// An expanding (cumulative) aggregator over every numeric column.
     #[pyo3(signature = (min_periods = 1))]
-    pub(crate) fn expanding(&self, min_periods: usize) -> PyExpandingFrame {
-        PyExpandingFrame {
-            frame: self.inner.clone(),
-            min_periods,
+    pub(crate) fn expanding(&self, min_periods: i64) -> PyResult<PyExpandingFrame> {
+        if min_periods < 0 {
+            return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
+        Ok(PyExpandingFrame {
+            frame: self.inner.clone(),
+            min_periods: min_periods as usize,
+        })
     }
     /// An exponentially-weighted aggregator over every numeric column.
     #[pyo3(signature = (span))]
@@ -637,7 +647,8 @@ impl PyDataFrame {
     /// fill can't take raises a `TypeError` (volas has no `object` dtype to mix
     /// types — C4). For directional fill use `ffill` / `bfill` (pandas 3.0 removed
     /// `fillna(method=)`).
-    pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (value, limit = None))]
+    pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>, limit: Option<i64>) -> PyResult<PyDataFrame> {
         // Per column, fill the missing cells with the typed scalar (str into str,
         // Timestamp / datetime string into datetime, number / bool into a numeric-
         // family column), mirroring the Series surface. A `volas.NA` fill is a
@@ -646,6 +657,9 @@ impl PyDataFrame {
         // and only rejects a column that actually has a hole the fill can't take
         // (C4 — no silent numeric -> non-numeric coercion). Atomic: every column is
         // resolved before any frame is built, so a rejected column mutates nothing.
+        if limit.is_some_and(|l| l < 0) {
+            return Err(PyValueError::new_err("limit must be >= 0"));
+        }
         let na_like = is_na_like_py(value);
         let cols = self
             .inner
@@ -657,7 +671,21 @@ impl PyDataFrame {
                 }
                 let n = c.len();
                 let kd = c.dtype();
-                let keep: Vec<bool> = (0..n).map(|i| c.is_valid(i)).collect();
+                // `limit` caps how many leading holes are filled, PER COLUMN
+                // (pandas semantics); a hole beyond the budget stays missing.
+                let mut budget = limit.map(|l| l as usize).unwrap_or(usize::MAX);
+                let keep: Vec<bool> = (0..n)
+                    .map(|i| {
+                        if c.is_valid(i) {
+                            true
+                        } else if budget > 0 {
+                            budget -= 1;
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
                 let (other_col, target) = if na_like {
                     (Column::na_of(kd, n), kd)
                 } else {
@@ -759,9 +787,9 @@ impl PyDataFrame {
         self.map_cols(|s| Ok(s.shift(n)))
     }
     /// Column-wise rank (pandas `rank`); always float.
-    #[pyo3(signature = (method = "average", ascending = true, pct = false))]
-    pub(crate) fn rank(&self, method: &str, ascending: bool, pct: bool) -> PyResult<PyDataFrame> {
-        self.map_cols(|s| s.rank(method, ascending, pct, "keep"))
+    #[pyo3(signature = (method = "average", ascending = true, pct = false, na_option = "keep"))]
+    pub(crate) fn rank(&self, method: &str, ascending: bool, pct: bool, na_option: &str) -> PyResult<PyDataFrame> {
+        self.map_cols(|s| s.rank(method, ascending, pct, na_option))
     }
 
     // --- column-wise reductions (-> a Series indexed by column name; numeric
@@ -994,21 +1022,30 @@ impl PyDataFrame {
         Ok(PyDataFrame::plain(take_frame(&self.inner, &order)))
     }
 
-    /// Row-level duplicate mask over all columns (first occurrence is False).
-    fn row_duplicated(&self) -> Vec<bool> {
+    /// Row-level duplicate mask over all columns, honoring `keep` ('first'|'last').
+    fn row_duplicated(&self, keep: &str) -> PyResult<Vec<bool>> {
         let h = self.inner.height();
+        let key_of = |i: usize| -> Vec<Option<String>> {
+            self.inner
+                .columns()
+                .iter()
+                .map(|c| crate::series::cell_key(c, i))
+                .collect()
+        };
         let mut seen = std::collections::HashSet::with_capacity(h);
-        (0..h)
-            .map(|i| {
-                let key: Vec<Option<String>> = self
-                    .inner
-                    .columns()
-                    .iter()
-                    .map(|c| crate::series::cell_key(c, i))
-                    .collect();
-                !seen.insert(key)
-            })
-            .collect()
+        match keep {
+            "first" => Ok((0..h).map(|i| !seen.insert(key_of(i))).collect()),
+            "last" => {
+                let mut out = vec![false; h];
+                for i in (0..h).rev() {
+                    out[i] = !seen.insert(key_of(i));
+                }
+                Ok(out)
+            }
+            other => Err(PyValueError::new_err(format!(
+                "keep must be 'first' or 'last', got {other:?}"
+            ))),
+        }
     }
 }
 
@@ -1047,27 +1084,27 @@ fn frame_window(
 impl PyRollingFrame {
     /// Per-column rolling mean -> DataFrame.
     fn mean(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.mean()))
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window as i64, Some(self.min_periods as i64))?.mean()))
     }
     /// Per-column rolling sum.
     fn sum(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.sum()))
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window as i64, Some(self.min_periods as i64))?.sum()))
     }
     /// Per-column rolling minimum.
     fn min(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.min()))
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window as i64, Some(self.min_periods as i64))?.min()))
     }
     /// Per-column rolling maximum.
     fn max(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.max()))
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window as i64, Some(self.min_periods as i64))?.max()))
     }
     /// Per-column rolling sample variance.
     fn var(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.var()))
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window as i64, Some(self.min_periods as i64))?.var()))
     }
     /// Per-column rolling sample standard deviation.
     fn std(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.rolling(self.window, Some(self.min_periods))?.std()))
+        frame_window(&self.frame, |s| Ok(s.rolling(self.window as i64, Some(self.min_periods as i64))?.std()))
     }
 }
 
@@ -1075,27 +1112,27 @@ impl PyRollingFrame {
 impl PyExpandingFrame {
     /// Per-column expanding mean -> DataFrame.
     fn mean(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.mean()))
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods as i64)?.mean()))
     }
     /// Per-column expanding sum.
     fn sum(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.sum()))
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods as i64)?.sum()))
     }
     /// Per-column expanding minimum.
     fn min(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.min()))
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods as i64)?.min()))
     }
     /// Per-column expanding maximum.
     fn max(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.max()))
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods as i64)?.max()))
     }
     /// Per-column expanding sample variance.
     fn var(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.var()))
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods as i64)?.var()))
     }
     /// Per-column expanding sample standard deviation.
     fn std(&self) -> PyResult<PyDataFrame> {
-        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods)?.std()))
+        frame_window(&self.frame, |s| Ok(s.expanding(self.min_periods as i64)?.std()))
     }
 }
 

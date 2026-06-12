@@ -5,12 +5,17 @@ themselves an oracle and must agree with the runtime (the `unify` README
 mis-description was exactly this kind of drift, missed by eyeballing). Checks:
 
   1. coverage   — every public class + key method is documented somewhere.
-  2. doctest    — every `>>>` example block runs with its documented output
-                  (golden-checked by the doctest module).
+  2. promises   — the docs' HEADLINE behavioural claims are pinned directly to
+                  the runtime (the NA model, guard claims). NOTE the scope
+                  honestly: `>>>` doctest transcripts are NOT golden-executed
+                  (they are human-authored narratives with shared state and
+                  numpy-2 reprs); full doctest-golden remains explicitly out of
+                  scope of this module — SPEC §6.7.2 is implemented as
+                  headline-promise pins + runnable fenced blocks.
   3. runnable   — every *self-sufficient* plain ```py example still executes
-                  (catches API drift like a removed/renamed method).
-  4. remove     — the §6.6 remove-candidates' doc state is pinned so cleanup is
-                  visible when removal lands.
+                  (catches API drift like a removed/renamed method); excluded
+                  blocks are counted and reported so coverage can't silently shrink.
+  4. remove     — the §6.6 removals must leave no dangling doc references.
 
 This module is self-justifying: reading the contract+README through this lens is
 what corrected the F5/F6/F11 NA-surface oracle (see findings-ledger).
@@ -63,6 +68,14 @@ def _doc_text():
 
 
 # --- 1. coverage: doc ⊇ public API -----------------------------------------
+def test_runnable_selection_is_reported():
+    """The runnable subset is a SELECTION: pin how many fenced blocks exist vs
+    run, so a doc rewrite can't silently shrink executable coverage to zero."""
+    total = len(list(_blocks()))
+    runnable = len(_runnable_blocks())
+    assert total >= 90 and runnable >= 3, f"doc blocks drifted: {runnable}/{total} runnable"
+
+
 def test_core_classes_documented():
     text = _doc_text()
     for cls in ("DataFrame", "Series", "Timestamp", "TimeFrame", "volas.NA"):

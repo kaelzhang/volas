@@ -367,7 +367,21 @@ impl PySeries {
     /// Counts of unique values, most frequent first, indexed by the value
     /// (pandas `value_counts`). Discrete dtypes only: volas has no float index,
     /// so a float series must be rounded / astype'd first (C4 fail-loud).
-    pub(crate) fn value_counts(&self) -> PyResult<PySeries> {
+    #[pyo3(signature = (normalize = false, sort = true, ascending = false, dropna = true))]
+    pub(crate) fn value_counts(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> PyResult<PySeries> {
+        if !dropna {
+            // an NA bucket would need an NA index label, which int/str indexes
+            // forbid by design (the NA-label guard) — fail loud, not silently drop.
+            return Err(PyValueError::new_err(
+                "value_counts(dropna=False) is unsupported: a volas index has no                  missing-label slot; count NA separately via isna().sum()",
+            ));
+        }
         let n = self.inner.len();
         let mut order: Vec<String> = Vec::new();
         let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
@@ -383,8 +397,14 @@ impl PySeries {
                 }
             }
         }
-        // most frequent first; ties keep first-appearance order (stable sort).
-        order.sort_by_key(|k| std::cmp::Reverse(counts[k]));
+        // most frequent first (or ascending); ties keep first-appearance order.
+        if sort {
+            if ascending {
+                order.sort_by_key(|k| counts[k]);
+            } else {
+                order.sort_by_key(|k| std::cmp::Reverse(counts[k]));
+            }
+        }
         let positions: Vec<usize> = order.iter().map(|k| sample[k]).collect();
         let labels = self.inner.data.take(&positions);
         let index = match &labels {
@@ -400,7 +420,12 @@ impl PySeries {
                 ))
             }
         };
-        let data = Column::i64(order.iter().map(|k| counts[k]).collect());
+        let data = if normalize {
+            let total: i64 = counts.values().sum();
+            Column::f64(order.iter().map(|k| counts[k] as f64 / total as f64).collect())
+        } else {
+            Column::i64(order.iter().map(|k| counts[k]).collect())
+        };
         Ok(PySeries { inner: Series::new(None, data, Arc::new(index)) })
     }
 
@@ -438,13 +463,26 @@ impl PySeries {
         Ok(bool_series(&self.inner, out))
     }
 
-    /// `left <= x <= right` (pandas `between`, inclusive='both') -> bool Series;
-    /// a missing cell is False.
-    pub(crate) fn between(&self, left: f64, right: f64) -> PyResult<PySeries> {
+    /// Range membership -> bool Series (pandas `between`); `inclusive` selects
+    /// which bounds are closed (`'both'` | `'left'` | `'right'` | `'neither'`).
+    /// A missing cell is False.
+    #[pyo3(signature = (left, right, inclusive = "both"))]
+    pub(crate) fn between(&self, left: f64, right: f64, inclusive: &str) -> PyResult<PySeries> {
         self.inner.data.require_numeric().map_err(pyerr)?;
+        let (lo_ok, hi_ok): (fn(f64, f64) -> bool, fn(f64, f64) -> bool) = match inclusive {
+            "both" => (|x, l| x >= l, |x, r| x <= r),
+            "left" => (|x, l| x >= l, |x, r| x < r),
+            "right" => (|x, l| x > l, |x, r| x <= r),
+            "neither" => (|x, l| x > l, |x, r| x < r),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "between: inclusive must be 'both', 'left', 'right' or 'neither', got {other:?}"
+                )))
+            }
+        };
         let v = self.inner.data.to_f64_vec();
         let out: Vec<bool> = (0..v.len())
-            .map(|i| self.inner.data.is_valid(i) && v[i] >= left && v[i] <= right)
+            .map(|i| self.inner.data.is_valid(i) && lo_ok(v[i], left) && hi_ok(v[i], right))
             .collect();
         Ok(bool_series(&self.inner, out))
     }
@@ -471,33 +509,41 @@ impl PySeries {
     }
 
     /// The `n` largest values, descending (pandas `nlargest`).
-    pub(crate) fn nlargest(&self, n: usize) -> PyResult<PySeries> {
+    pub(crate) fn nlargest(&self, n: i64) -> PyResult<PySeries> {
+        if n < 0 {
+            return Err(PyValueError::new_err("n must be >= 0"));
+        }
         self.inner.data.require_numeric().map_err(pyerr)?;
         let sorted = self.sort_values(false, "last")?;
-        Ok(slice_head(&sorted.inner, n))
+        Ok(slice_head(&sorted.inner, n as usize))
     }
 
     /// The `n` smallest values, ascending (pandas `nsmallest`).
-    pub(crate) fn nsmallest(&self, n: usize) -> PyResult<PySeries> {
+    pub(crate) fn nsmallest(&self, n: i64) -> PyResult<PySeries> {
+        if n < 0 {
+            return Err(PyValueError::new_err("n must be >= 0"));
+        }
         self.inner.data.require_numeric().map_err(pyerr)?;
         let sorted = self.sort_values(true, "last")?;
-        Ok(slice_head(&sorted.inner, n))
+        Ok(slice_head(&sorted.inner, n as usize))
     }
 
-    /// Drop later duplicate values, keeping the first occurrence (pandas
-    /// `drop_duplicates(keep='first')`).
-    pub(crate) fn drop_duplicates(&self) -> PySeries {
-        let dup = duplicated_mask(&self.inner.data);
+    /// Drop duplicate values, keeping the `keep` occurrence (`'first'` |
+    /// `'last'`; pandas `drop_duplicates`).
+    #[pyo3(signature = (keep = "first"))]
+    pub(crate) fn drop_duplicates(&self, keep: &str) -> PyResult<PySeries> {
+        let dup = duplicated_mask_keep(&self.inner.data, keep)?;
         let positions: Vec<usize> = (0..self.inner.len()).filter(|&i| !dup[i]).collect();
         let data = self.inner.data.take(&positions);
         let index = Arc::new(self.inner.index.take(&positions));
-        PySeries { inner: Series::new(self.inner.name.clone(), data, index) }
+        Ok(PySeries { inner: Series::new(self.inner.name.clone(), data, index) })
     }
 
-    /// True for each later occurrence of a duplicate value (pandas
-    /// `duplicated(keep='first')`).
-    pub(crate) fn duplicated(&self) -> PySeries {
-        bool_series(&self.inner, duplicated_mask(&self.inner.data))
+    /// True for each duplicate occurrence other than the `keep` one (`'first'` |
+    /// `'last'`; pandas `duplicated`).
+    #[pyo3(signature = (keep = "first"))]
+    pub(crate) fn duplicated(&self, keep: &str) -> PyResult<PySeries> {
+        Ok(bool_series(&self.inner, duplicated_mask_keep(&self.inner.data, keep)?))
     }
 
     /// Whether the values are monotonically non-decreasing, NA-free (pandas).
@@ -516,7 +562,10 @@ impl PySeries {
     /// one shared "missing" value.
     #[getter]
     pub(crate) fn is_unique(&self) -> bool {
-        !duplicated_mask(&self.inner.data).iter().any(|&d| d)
+        !duplicated_mask_keep(&self.inner.data, "first")
+            .expect("'first' is valid")
+            .iter()
+            .any(|&d| d)
     }
 
     /// Restore a RangeIndex. `drop=True` returns a Series; otherwise (pandas)
@@ -689,23 +738,31 @@ impl PySeries {
     /// A fixed-window rolling aggregator (pandas `rolling(window)`):
     /// `s.rolling(20).mean()` etc. `min_periods` defaults to the window.
     #[pyo3(signature = (window, min_periods = None))]
-    pub(crate) fn rolling(&self, window: usize, min_periods: Option<usize>) -> PyResult<PyRolling> {
-        if window == 0 {
+    pub(crate) fn rolling(&self, window: i64, min_periods: Option<i64>) -> PyResult<PyRolling> {
+        // i64 params + explicit guards: a negative value must be a clean
+        // ValueError, not pyo3's unsigned-conversion OverflowError leak (R-1).
+        if window < 1 {
             return Err(PyValueError::new_err("rolling window must be >= 1"));
+        }
+        if min_periods.is_some_and(|m| m < 0) {
+            return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
         self.inner.data.require_numeric().map_err(pyerr)?;
         Ok(PyRolling {
             series: self.inner.clone(),
-            window,
-            min_periods: min_periods.unwrap_or(window),
+            window: window as usize,
+            min_periods: min_periods.unwrap_or(window) as usize,
         })
     }
 
     /// An expanding (cumulative) window aggregator (pandas `expanding()`).
     #[pyo3(signature = (min_periods = 1))]
-    pub(crate) fn expanding(&self, min_periods: usize) -> PyResult<PyExpanding> {
+    pub(crate) fn expanding(&self, min_periods: i64) -> PyResult<PyExpanding> {
+        if min_periods < 0 {
+            return Err(PyValueError::new_err("min_periods must be >= 0"));
+        }
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(PyExpanding { series: self.inner.clone(), min_periods })
+        Ok(PyExpanding { series: self.inner.clone(), min_periods: min_periods as usize })
     }
 
     /// An exponentially-weighted aggregator (pandas `ewm(span=...)`).
@@ -763,7 +820,11 @@ impl PySeries {
     /// into a `str` column) raises a `TypeError`. For directional fill use
     /// `ffill` / `bfill` (pandas 3.0 removed `fillna(method=)`).
     #[pyo3(signature = (value, limit = None))]
-    pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>, limit: Option<usize>) -> PyResult<PySeries> {
+    pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>, limit: Option<i64>) -> PyResult<PySeries> {
+        if limit.is_some_and(|l| l < 0) {
+            return Err(PyValueError::new_err("limit must be >= 0"));
+        }
+        let limit = limit.map(|l| l as usize);
         // fillna keeps present cells and fills missing ones, so it is `where` over
         // the validity mask — reusing the same typed-fill resolution. `limit`
         // caps how many leading missing cells are filled (pandas).
@@ -1410,11 +1471,24 @@ pub(crate) fn cell_key(col: &Column, i: usize) -> Option<String> {
     })
 }
 
-/// `True` for each later occurrence of a value already seen (NA cells share one
-/// "missing" identity).
-fn duplicated_mask(col: &Column) -> Vec<bool> {
+/// Duplicate mask honoring `keep`: with `'first'`, later occurrences are True;
+/// with `'last'`, earlier ones are. NA cells share one "missing" identity.
+fn duplicated_mask_keep(col: &Column, keep: &str) -> PyResult<Vec<bool>> {
+    let n = col.len();
     let mut seen: std::collections::HashSet<Option<String>> = std::collections::HashSet::new();
-    (0..col.len()).map(|i| !seen.insert(cell_key(col, i))).collect()
+    match keep {
+        "first" => Ok((0..n).map(|i| !seen.insert(cell_key(col, i))).collect()),
+        "last" => {
+            let mut out = vec![false; n];
+            for i in (0..n).rev() {
+                out[i] = !seen.insert(cell_key(col, i));
+            }
+            Ok(out)
+        }
+        other => Err(PyValueError::new_err(format!(
+            "keep must be 'first' or 'last', got {other:?}"
+        ))),
+    }
 }
 
 /// Monotone non-decreasing (`asc`) / non-increasing check over present values;

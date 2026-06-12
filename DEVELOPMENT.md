@@ -52,7 +52,7 @@ make benchmark                  # full run; always writes ./benchmark-report.htm
 ```
 
 The locally generated `./benchmark-report.html` (and the always-current
-published copy at <https://kaelzhang.github.io/volas/>, deployed by the
+published copy at <https://volas.ost.ai>, deployed by the
 `pages` workflow) keeps the append and
 batch sections as charts, then summarizes full coverage as one row per
 TA-Lib indicator. Extra length fixtures and cached append-refresh

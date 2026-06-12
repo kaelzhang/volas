@@ -143,6 +143,18 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
     "DataFrameAt": {"__getitem__": "T7", "__setitem__": "T7", "__new__": "ignore:accessor"},
     "SeriesILoc": {"__getitem__": "T7", "__new__": "ignore:accessor"},
     "SeriesLoc": {"__getitem__": "T7", "__new__": "ignore:accessor"},
+    # window aggregator results (like the indexers: in the stub for typing, not
+    # in the runtime __all__ — reached only through rolling()/expanding()/ewm()).
+    "Rolling": {**{m: "T1" for m in ("mean", "sum", "min", "max", "var", "std")},
+                "__new__": "ignore:accessor"},
+    "Expanding": {**{m: "T1" for m in ("mean", "sum", "min", "max", "var", "std")},
+                  "__new__": "ignore:accessor"},
+    "Ewm": {"mean": "T1", "__new__": "ignore:accessor"},
+    "RollingFrame": {**{m: "T1" for m in ("mean", "sum", "min", "max", "var", "std")},
+                     "__new__": "ignore:accessor"},
+    "ExpandingFrame": {**{m: "T1" for m in ("mean", "sum", "min", "max", "var", "std")},
+                       "__new__": "ignore:accessor"},
+    "EwmFrame": {"mean": "T1", "__new__": "ignore:accessor"},
     "DirectiveError": {}, "DirectiveSyntaxError": {}, "DirectiveValueError": {},
 }
 

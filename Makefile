@@ -1,6 +1,8 @@
 files = volas test *.py
 test_files = *
-PYTHON ?= python
+# Prefer an explicit VOLAS_PYTHON (the conda-env interpreter) so `make test` /
+# `make types` reproduce identically across shells; else the PATH python.
+PYTHON ?= $(or $(VOLAS_PYTHON),python)
 PIP ?= $(PYTHON) -m pip
 PYTEST ?= $(PYTHON) -m pytest
 MATURIN ?= $(PYTHON) -m maturin

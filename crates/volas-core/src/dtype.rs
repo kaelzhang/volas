@@ -27,6 +27,19 @@ pub enum DType {
 }
 
 impl DType {
+    /// Every dtype variant — the single machine-readable source the audit's D
+    /// vocabulary is generated from (SPEC §6.3): adding a variant here
+    /// auto-extends the Python-side audit matrix.
+    pub const ALL: [DType; 7] = [
+        DType::F64,
+        DType::F32,
+        DType::Bool,
+        DType::I64,
+        DType::I32,
+        DType::Datetime,
+        DType::Utf8,
+    ];
+
     /// A short, stable name for the dtype.
     pub fn name(&self) -> &'static str {
         match self {
