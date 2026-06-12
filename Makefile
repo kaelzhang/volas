@@ -9,7 +9,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX := $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV := VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -110,7 +110,12 @@ benchmark: build
 	@echo "\033[1m>> Installing dev + benchmark comparison libraries... <<\033[0m"
 	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(PIP) install -q -r /dev/stdin
 ifdef INDICATOR
-	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --volas-benchmark-indicator="$(INDICATOR)"
+	@$(eval _IND_JSON := $(shell mktemp -t volas-ind-bench).json)
+	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --volas-benchmark-indicator="$(INDICATOR)" \
+	    --benchmark-json=$(_IND_JSON)
+	@echo
+	@$(PYTHON) scripts/bench_indicator_report.py $(_IND_JSON) "$(INDICATOR)"
+	@rm -f $(_IND_JSON)
 else
 	@mkdir -p $(BENCH_DIR)
 	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --benchmark-json=$(BENCH_DIR)/benchmark.json
@@ -122,6 +127,19 @@ else
 	@cp $(BENCH_DIR)/report.html benchmark-report.html
 	@echo "\033[1m>> Benchmark archived to $(BENCH_DIR)/ <<\033[0m"
 endif
+
+# Standardized local A/B performance comparison (THE pipeline for "did my
+# change move performance?"): builds BASE in a temp worktree, benchmarks it,
+# rebuilds HEAD (the current tree, incl. uncommitted changes), benchmarks it,
+# and prints the verdict — perf_gate for the full suite, a compact normalized
+# report for a single indicator. Same harness, same machine, back-to-back
+# (exactly the CI gate's method). Nothing is archived.
+#
+#   make perf-ab BASE=HEAD~1                       # full suite
+#   make perf-ab BASE=HEAD~1 INDICATOR=bop         # one indicator
+BASE ?= HEAD~1
+perf-ab:
+	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)"
 
 # Run linters
 lint:

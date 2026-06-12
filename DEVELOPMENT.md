@@ -49,6 +49,17 @@ writes the web report:
 ```sh
 make benchmark INDICATOR=roc:10
 make benchmark                  # full run; always writes ./benchmark-report.html
+make benchmark INDICATOR=bop    # ONE indicator: compact normalized report to
+                                # stdout (volas vs talib, batch + after-append +
+                                # append overhead); a working probe, NOT archived
+make perf-ab BASE=HEAD~1 [INDICATOR=bop]
+                                # the standard A/B: build+bench BASE in a temp
+                                # worktree, then HEAD (incl. uncommitted changes),
+                                # back-to-back on this machine; full suite ->
+                                # perf_gate verdict, single indicator -> compact
+                                # HEAD/base report. The CI gate's exact method.
+# THE RULE: performance questions are answered through these three commands —
+# never ad-hoc timing scripts, whose methodology drifts run to run.
 # Every full run is also compared against the all-time best run (the
 # "performance leader", .benchmarks/LEADER.json) and a leader-report.md is
 # written into the run's archive dir. Scoring uses WITHIN-RUN normalized
