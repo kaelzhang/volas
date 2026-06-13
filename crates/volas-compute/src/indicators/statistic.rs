@@ -10,20 +10,21 @@
 /// `Σx` / `Σx²` of `0..period`, so only `Σy` and `Σxy` are summed per window).
 fn linreg_fit(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
     let n = data.len();
-    let mut slope = vec![f64::NAN; n];
-    let mut intercept = vec![f64::NAN; n];
     if period == 0 || period > n {
-        return (slope, intercept);
+        return (vec![f64::NAN; n], vec![f64::NAN; n]);
     }
     let p = period as f64;
     let sum_x = p * (period - 1) as f64 * 0.5;
     // (period-1)·period·(2·period-1)/6 = Σ_{k=0}^{period-1} k², always integral.
     let sum_x_sqr = (period * (period - 1) * (2 * period - 1) / 6) as f64;
     let divisor = sum_x * sum_x - p * sum_x_sqr;
+    // Single-write (D2): NaN warm-up `[0, period-1)`, each valid row written once.
+    let mut slope = crate::buf::OutBuf::warmup(n, period - 1);
+    let mut intercept = crate::buf::OutBuf::warmup(n, period - 1);
     let mut emit = |today: usize, sum_y: f64, sum_xy: f64| {
         let m = (p * sum_xy - sum_x * sum_y) / divisor;
-        slope[today] = m;
-        intercept[today] = (sum_y - m * sum_x) / p;
+        slope.set(today, m);
+        intercept.set(today, (sum_y - m * sum_x) / p);
     };
     // Seed the first window with TA-Lib's per-bar accumulation order (`i` = age, the
     // newest bar weighted 0, the oldest `period-1`), then slide in O(1): when the
@@ -48,7 +49,8 @@ fn linreg_fit(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
         sum_y += data[today] - leaving;
         emit(today, sum_y, sum_xy);
     }
-    (slope, intercept)
+    drop(emit);
+    (slope.finish(), intercept.finish())
 }
 
 /// Linear regression value at the current bar: `b + m·(period-1)` (TA-Lib LINEARREG).
@@ -92,9 +94,8 @@ pub fn tsf(data: &[f64], period: usize) -> Vec<f64> {
 /// `stddev` caller clamps such (and an exact-zero, flat window) to 0, as TA-Lib does.
 fn rolling_var(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
-    let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
-        return out;
+        return vec![f64::NAN; n];
     }
     let p = period as f64;
     let mut total1 = 0.0; // Σx over the window
@@ -104,6 +105,7 @@ fn rolling_var(data: &[f64], period: usize) -> Vec<f64> {
         total2 += x * x;
     }
     let mut trailing = 0;
+    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
     for i in (period - 1)..n {
         let x = data[i];
         total1 += x;
@@ -114,9 +116,9 @@ fn rolling_var(data: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         total1 -= old;
         total2 -= old * old;
-        out[i] = mean2 - mean1 * mean1;
+        out.set(i, mean2 - mean1 * mean1);
     }
-    out
+    out.finish()
 }
 
 /// Rolling population variance over `period` (TA-Lib VAR). Lookback period-1.
@@ -155,10 +157,9 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period > n {
         return vec![f64::NAN; n];
     }
-    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
-    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
-    // the prefill is a vectorized splat, measured at parity by make perf-ab).
-    let mut out = vec![f64::NAN; n];
+    // Single-write (D2): NaN warm-up `[0, period-1)`, valid region written once via the
+    // output pointer below (no prefill memset); `out.finish()` proves it was filled.
+    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
     let pf = period as f64;
     // Precompute 1/period: the means are then per-element multiplies, not divisions
     // (TA-Lib divides by period three times per bar). The ~1e-16 difference from a true
@@ -168,7 +169,7 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     let (mut sx, mut sy, mut sx2, mut sy2, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
     let x_ptr = x.as_ptr();
     let y_ptr = y.as_ptr();
-    let out_ptr = out.as_mut_ptr();
+    let out_ptr = out.ptr();
     for i in 0..period {
         // `period <= n` and the hot loop below keeps both indices in range.
         let (xi, yi) = unsafe { (*x_ptr.add(i), *y_ptr.add(i)) };
@@ -209,7 +210,7 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
             *out_ptr.add(i) = value(sx, sy, sx2, sy2, sxy);
         }
     }
-    out
+    out.finish()
 }
 
 /// Rolling beta of `x` against `y` over `period` (TA-Lib BETA): the slope
@@ -221,10 +222,9 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period + 1 > n {
         return vec![f64::NAN; n];
     }
-    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
-    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
-    // the prefill is a vectorized splat, measured at parity by make perf-ab).
-    let mut out = vec![f64::NAN; n];
+    // Single-write (D2): NaN warm-up `[0, period)`, valid region written once via
+    // `out.set` (no prefill memset); `out.finish()` proves it was filled.
+    let mut out = crate::buf::OutBuf::warmup(n, period);
     let ret = |arr: &[f64], i: usize| -> f64 {
         let prev = arr[i - 1];
         if prev.abs() < 1e-14 {
@@ -258,11 +258,11 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
         sxx += rx * rx;
         sxy += rx * ry;
         let denom = pf * sxx - sx * sx;
-        out[i] = if denom.abs() < 1e-14 {
+        out.set(i, if denom.abs() < 1e-14 {
             0.0
         } else {
             (pf * sxy - sx * sy) / denom
-        };
+        });
         let leaving = i + 1 - period;
         let (tx, ty) = (rx_ring[leaving % period], ry_ring[leaving % period]);
         sx -= tx;
@@ -270,5 +270,5 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
         sxx -= tx * tx;
         sxy -= tx * ty;
     }
-    out
+    out.finish()
 }
