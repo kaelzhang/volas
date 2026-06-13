@@ -1207,6 +1207,16 @@ The complete directive reference lives in [INDICATORS.md](INDICATORS.md). It
 covers Volas-exclusive indicators, built-in statistical commands, and
 TA-Lib-compatible directives.
 
+# Contributing & feedback
+
+Issues, indicator requests, benchmark challenges, and PRs are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) and start a thread in
+[Discussions](https://github.com/kaelzhang/volas/discussions). The most useful
+feedback is on the API surface and the [benchmark methodology](docs/benchmark-faq.md).
+
+If you build live OHLCV / technical-indicator pipelines in Python, star the repo
+to follow new indicators, benchmark results, and releases.
+
 # License
 
 [MIT](LICENSE)

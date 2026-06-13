@@ -1139,6 +1139,16 @@ except DirectiveSyntaxError as e:
 完整 directive 参考见 [INDICATORS.md](INDICATORS.md)，其中覆盖 Volas 独有指标、
 内置统计命令，以及与 TA-Lib 兼容的 directive。
 
+# 参与与反馈
+
+欢迎提 issue、指标请求、benchmark 挑战和 PR——参见
+[CONTRIBUTING.md](CONTRIBUTING.md),或在
+[Discussions](https://github.com/kaelzhang/volas/discussions) 开一个话题。
+最有价值的反馈是关于 API 设计和 [benchmark 方法论](docs/benchmark-faq.md) 的。
+
+如果你在 Python 里搭建实时 OHLCV / 技术指标流水线,欢迎 star 本仓库,
+关注新增指标、benchmark 结果与发布。
+
 # 许可证
 
 [MIT](LICENSE)
