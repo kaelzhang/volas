@@ -14,6 +14,10 @@ set -euo pipefail
 BASE_REF="${1:?usage: perf_ab.sh <base-ref> [indicator]}"
 INDICATOR="${2:-}"
 PYTHON="${VOLAS_PYTHON:-python}"
+# maturin needs VIRTUAL_ENV / CONDA_PREFIX to find the interpreter — set them from
+# the resolved python so this runs from a bare shell (mirrors the Makefile).
+PY_PREFIX="$("$PYTHON" -c 'import sys; print(sys.prefix)')"
+export VIRTUAL_ENV="$PY_PREFIX" CONDA_PREFIX="$PY_PREFIX"
 ROOT="$(git rev-parse --show-toplevel)"
 TMP="$(mktemp -d)"
 trap 'git -C "$ROOT" worktree remove --force "$TMP/base" 2>/dev/null || true; rm -rf "$TMP"' EXIT

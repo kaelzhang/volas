@@ -79,11 +79,11 @@ count-indicators:
 # two builds itself, and why `pytest --cov` is meaningless for a Rust package). Runs
 # both suites and prints the combined per-file + total report.
 coverage:
-	@bash scripts/coverage.sh
+	@VOLAS_PYTHON="$(PYTHON)" bash scripts/coverage.sh
 
 # Same, rendered to a browsable HTML report under target/volas-cov/html/.
 coverage-html:
-	@bash scripts/coverage.sh --html
+	@VOLAS_PYTHON="$(PYTHON)" bash scripts/coverage.sh --html
 
 # Run the multi-library performance benchmark (pandas / stock-pandas / polars /
 # TA-Lib / DuckDB / volas), for both batch indicator computation and the

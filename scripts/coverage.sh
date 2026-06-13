@@ -18,13 +18,27 @@
 # each suite independently and union them in `lcov_union.py`.
 #
 # Requires cargo-llvm-cov (`cargo install cargo-llvm-cov`) and llvm-tools-preview
-# (`rustup component add llvm-tools-preview`). Run inside the activated Python
-# env (so maturin/pytest and CONDA_PREFIX/VIRTUAL_ENV are set).
+# (`rustup component add llvm-tools-preview`). Pass VOLAS_PYTHON (the Makefile does)
+# or rely on PATH; the env maturin needs is derived from it below.
 #
 # Usage: scripts/coverage.sh
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# Resolve the interpreter and set the env maturin needs to find it, so this runs
+# from a bare shell — not only an activated one (mirrors the Makefile's
+# MATURIN_DEVELOP_ENV). Pass VOLAS_PYTHON (the Makefile does) or rely on PATH.
+PYTHON="${VOLAS_PYTHON:-${PYTHON:-python}}"
+PY_PREFIX="$("$PYTHON" -c 'import sys; print(sys.prefix)')"
+export VIRTUAL_ENV="$PY_PREFIX" CONDA_PREFIX="$PY_PREFIX"
+
+# Hostile-allocator guard: fill fresh allocations with a non-zero pattern so a
+# kernel that leaves an output slot unwritten (the `set_len` contract behind
+# `buf::build_f64`) surfaces as a wild value the parity suite rejects — never a
+# lucky zero. macOS reads MallocPreScribble; glibc reads MALLOC_PERTURB_ (each
+# ignores the other).
+export MallocPreScribble=1 MALLOC_PERTURB_=170
 
 PROF_DIR="target/volas-cov"
 rm -rf "$PROF_DIR"
@@ -45,7 +59,7 @@ restore() {
     find . -name '*.profraw' -not -path './target/*' -delete 2>/dev/null || true
     echo ">> restoring the normal extension (maturin develop --release)..."
     env -u RUSTFLAGS -u LLVM_PROFILE_FILE \
-        maturin develop --release >/dev/null 2>&1 || true
+        "$PYTHON" -m maturin develop --release >/dev/null 2>&1 || true
 }
 trap restore EXIT
 
@@ -62,10 +76,10 @@ cargo llvm-cov --workspace --exclude volas-python --quiet \
 # maturin's build), run the suite, then export LCOV for the exact .so that ran.
 echo ">> building instrumented extension..."
 export RUSTFLAGS="${RUSTFLAGS:-} -Cinstrument-coverage"
-maturin develop --quiet
+"$PYTHON" -m maturin develop --quiet
 # maturin may install volas_rs as a package shim (`from .volas_rs import *`), so
 # the native object lives inside the package dir, not at `.origin`.
-SO="$(python - <<'PY'
+SO="$("$PYTHON" - <<'PY'
 import importlib.util as u, os, glob
 s = u.find_spec("volas_rs")
 origin = (s.origin or "") if s else ""
@@ -85,7 +99,7 @@ fi
 
 echo ">> running Python suite against the instrumented extension..."
 LLVM_PROFILE_FILE="$PROF_DIR/pytest-%p-%m.profraw" \
-    pytest test/ --benchmark-skip -q
+    "$PYTHON" -m pytest test/ --benchmark-skip -q
 
 "$PROFDATA" merge -sparse "$PROF_DIR"/pytest-*.profraw -o "$PROF_DIR/pytest.profdata"
 "$COV" export --format=lcov --instr-profile="$PROF_DIR/pytest.profdata" "$SO" \
@@ -94,7 +108,7 @@ LLVM_PROFILE_FILE="$PROF_DIR/pytest-%p-%m.profraw" \
 
 # --- 3. union + report -----------------------------------------------------
 echo ">> combined coverage (true union):"
-python scripts/lcov_union.py "$PROF_DIR/cargo.lcov" "$PROF_DIR/pytest.lcov" "$PROF_DIR/union.lcov"
+"$PYTHON" scripts/lcov_union.py "$PROF_DIR/cargo.lcov" "$PROF_DIR/pytest.lcov" "$PROF_DIR/union.lcov"
 
 # Optional HTML render (requires lcov's `genhtml`).
 if [ "${1:-}" = "--html" ]; then
