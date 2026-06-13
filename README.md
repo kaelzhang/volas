@@ -7,12 +7,9 @@
 
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
-**volas** is a Rust-powered, **pandas-compatible** `DataFrame` for candlestick
-(OHLCV) data, with [**242** trading-indicators](INDICATORS.md) built in.
+**volas** is a Rust-backed, pandas-shaped `DataFrame` for live OHLCV pipelines: [**242** trading-indicators](INDICATORS.md), incremental O(lookback) refresh, and NumPy/Torch-ready output.
 
-Know pandas? You already know to use volas.
-
-The difference is speed that **volas** beats **EVERY** solution on earth in terms of overall indicator calculating.
+On our reproducible benchmark suite, **volas** is faster than pandas, polars, stock-pandas and TA-Lib on most live-update indicator workloads.
 
 ## Why volas
 
