@@ -126,7 +126,7 @@ impl PyDataFrame {
             // A directive: materialize (auto-cache) under its canonical name; on
             // later access its stale tail is refreshed incrementally, so the
             // result is always fresh AND cheap (O(lookback), not O(n)).
-            let node = parse(&name).map_err(syntax_err)?;
+            let node = parse(&name).map_err(directive_err)?;
             let canonical = volas_directive::stringify(&node);
             if self.inner.has_column(&canonical) {
                 self.refresh_computed(Some(&canonical))?;
@@ -152,7 +152,7 @@ impl PyDataFrame {
                 let col = if self.inner.has_column(n) {
                     self.inner.column(n).map_err(pyerr)?.clone()
                 } else {
-                    let node = parse(n).map_err(syntax_err)?;
+                    let node = parse(n).map_err(directive_err)?;
                     execute(&self.inner, &node).map_err(value_err)?
                 };
                 cols.push(col);
@@ -196,7 +196,7 @@ impl PyDataFrame {
             let col = self.inner.column(directive).map_err(pyerr)?.clone();
             return Ok(column_to_numpy(py, &col));
         }
-        let node = parse(directive).map_err(syntax_err)?;
+        let node = parse(directive).map_err(directive_err)?;
         if create_column {
             // Materialize + cache under the canonical name, exactly like `df[directive]`.
             let canonical = volas_directive::stringify(&node);

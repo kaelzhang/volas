@@ -2,8 +2,8 @@
 
 use std::borrow::Cow;
 
-use crate::spec::canon_sub;
-use crate::types::{Node, Op, UnaryOp};
+use crate::bind::bind_command;
+use crate::types::{ArgValue, Ast, Node, Op, UnaryOp};
 use volas_compute::indicators as ind;
 use volas_core::Column;
 use volas_core::DataFrame;
@@ -16,15 +16,15 @@ use volas_core::{Result, VolasError};
 /// already holds the *stale* cached column under that very name — resolving it
 /// would return the stale cache instead of recomputing (a self-referential
 /// no-op).
-pub fn execute_refresh(df: &DataFrame, node: &Node) -> Result<Column> {
+pub fn execute_refresh(df: &DataFrame, node: &Ast) -> Result<Column> {
     match node {
-        Node::Name(name) if !name.is_empty() => exec_command(df, name, None, &[], &[]),
+        Node::Name(name) if !name.is_empty() => exec_bare_command(df, name),
         _ => execute(df, node),
     }
 }
 
 /// Execute a directive node against `df`.
-pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
+pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
     match node {
         Node::Scalar(v) => Ok(Column::f64(vec![*v; df.height()])),
         Node::Name(name) => {
@@ -34,12 +34,10 @@ pub fn execute(df: &DataFrame, node: &Node) -> Result<Column> {
             if df.has_column(name) {
                 Ok(df.column(name)?.clone())
             } else {
-                exec_command(df, name, None, &[], &[])
+                exec_bare_command(df, name)
             }
         }
-        Node::Command(cmd) => {
-            exec_command(df, &cmd.name, cmd.sub.as_deref(), &cmd.args, &cmd.series)
-        }
+        Node::Command(cmd) => dispatch(df, &cmd.name, cmd.sub.as_deref(), &cmd.args, &cmd.series),
         Node::Unary { op, operand } => {
             let c = execute(df, operand)?;
             require_numeric(&c)?; // a str/datetime operand can't go through the f64 funnel (C4)
@@ -120,41 +118,25 @@ fn apply_cmp(op: Op, l: &[f64], r: &[f64]) -> Vec<bool> {
     out
 }
 
-// --- argument helpers -------------------------------------------------------
+// --- argument accessors -----------------------------------------------------
+// Arguments are bound once (parsed, defaulted, type-checked against the spec) by
+// `bind`, so every position is present and its variant is fixed — dispatch reads
+// the typed value directly, with no re-parsing, defaulting, or fallibility.
 
-fn arg_at<'a>(args: &'a [Option<String>], i: usize) -> Option<&'a str> {
-    args.get(i).and_then(|o| o.as_deref())
+pub(crate) fn arg_usize(args: &[ArgValue], i: usize) -> usize {
+    args[i].as_usize()
 }
 
-pub(crate) fn arg_usize(
-    args: &[Option<String>],
-    i: usize,
-    default: Option<usize>,
-) -> Result<usize> {
-    match arg_at(args, i) {
-        Some(s) => s
-            .parse()
-            .map_err(|_| VolasError::Value(format!("expected an integer, got '{s}'"))),
-        None => default.ok_or_else(|| VolasError::Value(format!("missing required argument #{i}"))),
-    }
+pub(crate) fn arg_f64(args: &[ArgValue], i: usize) -> f64 {
+    args[i].as_f64()
 }
 
-pub(crate) fn arg_f64(args: &[Option<String>], i: usize, default: f64) -> Result<f64> {
-    match arg_at(args, i) {
-        Some(s) => s
-            .parse()
-            .map_err(|_| VolasError::Value(format!("expected a number, got '{s}'"))),
-        None => Ok(default),
-    }
+pub(crate) fn arg_i64(args: &[ArgValue], i: usize) -> i64 {
+    args[i].as_i64()
 }
 
-fn arg_i64(args: &[Option<String>], i: usize, default: i64) -> Result<i64> {
-    match arg_at(args, i) {
-        Some(s) => s
-            .parse()
-            .map_err(|_| VolasError::Value(format!("expected an integer, got '{s}'"))),
-        None => Ok(default),
-    }
+pub(crate) fn arg_str(args: &[ArgValue], i: usize) -> &str {
+    args[i].as_str()
 }
 
 // --- series resolution ------------------------------------------------------
@@ -165,7 +147,7 @@ fn arg_i64(args: &[Option<String>], i: usize, default: i64) -> Result<i64> {
 /// Callers pass `&resolved` to the kernels, which deref-coerces to `&[f64]`.
 pub(crate) fn series_f64<'a>(
     df: &'a DataFrame,
-    series: &[Node],
+    series: &[Ast],
     i: usize,
     default_col: &str,
 ) -> Result<Cow<'a, [f64]>> {
@@ -209,7 +191,7 @@ fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
 /// Resolve a **required** numeric series operand at slot `i`: unlike [`series_f64`],
 /// an absent or empty operand is an error rather than a column default. Used where a
 /// command genuinely needs a second series the caller must name (e.g. `beta`/`correl`).
-fn series_f64_required<'a>(df: &'a DataFrame, series: &[Node], i: usize) -> Result<Cow<'a, [f64]>> {
+fn series_f64_required<'a>(df: &'a DataFrame, series: &[Ast], i: usize) -> Result<Cow<'a, [f64]>> {
     match series.get(i) {
         Some(Node::Name(s)) if s.is_empty() => Err(VolasError::Value(format!(
             "series argument #{i} is required"
@@ -225,7 +207,7 @@ fn series_f64_required<'a>(df: &'a DataFrame, series: &[Node], i: usize) -> Resu
     }
 }
 
-fn series_bool(df: &DataFrame, series: &[Node], i: usize) -> Result<Vec<bool>> {
+fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
     let node = series
         .get(i)
         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
@@ -269,33 +251,27 @@ mod cycle;
 mod momentum;
 mod overlap;
 
-fn exec_command(
+/// The dispatch entry point: a bound command (canonical name / sub, typed args,
+/// bound series) routed to its kernel. Validation / defaulting / normalization
+/// already happened at `bind`, so this is pure dispatch — the `overlap` ->
+/// `momentum` -> `cycle` chain is an internal split of the one command table.
+fn dispatch(
     df: &DataFrame,
     name: &str,
     sub: Option<&str>,
-    args: &[Option<String>],
-    series: &[Node],
+    args: &[ArgValue],
+    series: &[Ast],
 ) -> Result<Column> {
-    // Validate the command / sub / argument count / argument domains / cross-arg
-    // rules — the single boundary (shared with directive_lookback / _stringify)
-    // where a bad configuration errors loudly instead of becoming a valid-shaped
-    // column with no signal (V17). Missing *required* args stay arg_usize's job.
-    crate::validate::validate_command(name, sub, args)?;
-
-    // Normalize for dispatch the same way the validator does: case-insensitive
-    // (P6), `cdl` aliased to the `style` candlestick namespace.
-    let name_lc;
-    let name = if name.as_bytes().iter().any(u8::is_ascii_uppercase) {
-        name_lc = name.to_ascii_lowercase();
-        name_lc.as_str()
-    } else {
-        name
-    };
-    let name = if name == "cdl" { "style" } else { name };
-    let sub = canon_sub(name, sub);
-    let sub = sub.as_deref();
-
     overlap::dispatch(df, name, sub, args, series)
+}
+
+/// Execute a bare `Name` that is not a frame column: bind it as a no-argument
+/// command — the same single `bind` a parsed command gets, so it validates the
+/// name / sub and resolves any defaults — then dispatch. A bare name needing a
+/// sub-command, or a required argument, errors here rather than reaching dispatch.
+fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
+    let cmd = bind_command(name, None, &[], &[])?;
+    dispatch(df, &cmd.name, cmd.sub.as_deref(), &cmd.args, &cmd.series)
 }
 
 pub use crate::exec_resume::{
@@ -506,7 +482,9 @@ mod tests {
     #[test]
     fn argument_bounds_reject_invalid_configurations() {
         let df = ohlcv();
-        let is_err = |d: &str| execute(&df, &parse(d).unwrap()).is_err();
+        // `parse` now binds + validates, so an invalid directive is rejected there;
+        // chain through execute to also catch the runtime-only failures (series, columns).
+        let is_err = |d: &str| parse(d).and_then(|n| execute(&df, &n)).is_err();
         // zero periods: a valid-shaped all-NaN column is not a legal config.
         for d in [
             "ma:0", "ema:0", "atr:0", "rsi:0", "sum:0", "mom:0", "mfi:0",
@@ -598,13 +576,14 @@ mod tests {
     #[test]
     fn required_series_and_unknown_matype_errors() {
         let df = ohlcv();
-        // correl needs a second series operand; absent or empty -> error
+        let is_err = |d: &str| parse(d).and_then(|n| execute(&df, &n)).is_err();
+        // correl needs a second series operand; absent or empty -> error at execute
         // (series_f64_required's None and empty-Name arms).
-        assert!(execute(&df, &parse("correl:30").unwrap()).is_err());
-        assert!(execute(&df, &parse("correl:30@close,").unwrap()).is_err());
-        // a matype past 8 is rejected at the exec boundary (IntRange bound);
-        // ma_typed itself is infallible — every caller's matype is validated.
-        assert!(execute(&df, &parse("ma:5,9").unwrap()).is_err());
+        assert!(is_err("correl:30"));
+        assert!(is_err("correl:30@close,"));
+        // a matype past 8 is rejected when binding (IntRange bound); ma_typed itself is
+        // infallible — every caller's matype is validated.
+        assert!(is_err("ma:5,9"));
     }
 
     #[test]
@@ -691,7 +670,9 @@ mod tests {
     #[test]
     fn command_and_argument_validation_errors() {
         let df = ohlcv();
-        let is_err = |d: &str| execute(&df, &parse(d).unwrap()).is_err();
+        // `parse` now binds + validates, so an invalid directive is rejected there;
+        // chain through execute to also catch the runtime-only failures (series, columns).
+        let is_err = |d: &str| parse(d).and_then(|n| execute(&df, &n)).is_err();
         assert!(is_err("ema:5,6"), "too many args"); // ema takes one period (ma now takes matype too)
         assert!(is_err("frobnicate:5"), "unknown command");
         assert!(

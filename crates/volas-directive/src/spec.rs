@@ -6,6 +6,8 @@
 
 use std::borrow::Cow;
 
+use crate::types::ArgValue;
+
 /// A positional-argument default. `Required` means the argument has no default
 /// (the caller must supply it).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,23 +25,15 @@ pub enum ArgDefault {
 }
 
 impl ArgDefault {
-    /// The default as an integer, if it is one (used by `exec` / `lookback`).
-    pub fn as_usize(&self) -> Option<usize> {
-        match self {
-            ArgDefault::Int(n) => Some(*n),
-            _ => None,
-        }
-    }
-
-    /// The default rendered as a canonical string (used by `stringify` to decide
-    /// whether a supplied argument equals its default).
-    pub fn to_token(&self) -> Option<String> {
+    /// The default as a bound [`ArgValue`], used by `bind` to fill an omitted
+    /// argument slot. `Required` has no default (the caller must supply it).
+    pub fn value(&self) -> Option<ArgValue> {
         match self {
             ArgDefault::Required => None,
-            ArgDefault::Int(n) => Some(n.to_string()),
-            ArgDefault::Float(f) => Some(format_float(*f)),
-            ArgDefault::I64(n) => Some(n.to_string()),
-            ArgDefault::Str(s) => Some(s.to_string()),
+            ArgDefault::Int(n) => Some(ArgValue::Usize(*n)),
+            ArgDefault::Float(f) => Some(ArgValue::F64(*f)),
+            ArgDefault::I64(n) => Some(ArgValue::I64(*n)),
+            ArgDefault::Str(s) => Some(ArgValue::Str((*s).to_string())),
         }
     }
 }
@@ -88,21 +82,22 @@ pub enum ArgBound {
 }
 
 impl ArgBound {
-    /// Validate a supplied argument token against this bound. `Err` carries the
-    /// human-readable requirement (the caller adds command / position context).
-    pub fn validate(&self, s: &str) -> std::result::Result<(), String> {
+    /// Parse a supplied argument token **once** against this bound, returning the
+    /// typed [`ArgValue`] (validation and type conversion are the same single
+    /// parse — there is no separate "validate then re-read" pass). `Err` carries
+    /// the human-readable requirement (the caller adds command / position context).
+    pub fn bind(&self, s: &str) -> std::result::Result<ArgValue, String> {
         match self {
             ArgBound::IntMin(min) => match s.parse::<usize>() {
-                Ok(v) if v >= *min => Ok(()),
-                Ok(_) => Err(format!("must be an integer >= {min}")),
-                Err(_) => Err(format!("must be an integer >= {min}")),
+                Ok(v) if v >= *min => Ok(ArgValue::Usize(v)),
+                _ => Err(format!("must be an integer >= {min}")),
             },
             ArgBound::IntRange(lo, hi) => match s.parse::<usize>() {
-                Ok(v) if v >= *lo && v <= *hi => Ok(()),
+                Ok(v) if v >= *lo && v <= *hi => Ok(ArgValue::Usize(v)),
                 _ => Err(format!("must be an integer in [{lo}, {hi}]")),
             },
             ArgBound::OneOfI64(allowed) => match s.parse::<i64>() {
-                Ok(v) if allowed.contains(&v) => Ok(()),
+                Ok(v) if allowed.contains(&v) => Ok(ArgValue::I64(v)),
                 _ => Err(format!(
                     "must be one of {}",
                     allowed
@@ -113,26 +108,26 @@ impl ArgBound {
                 )),
             },
             ArgBound::I64Min(min) => match s.parse::<i64>() {
-                Ok(v) if v >= *min => Ok(()),
+                Ok(v) if v >= *min => Ok(ArgValue::I64(v)),
                 _ => Err(format!("must be an integer >= {min}")),
             },
             ArgBound::Finite => match s.parse::<f64>() {
-                Ok(v) if v.is_finite() => Ok(()),
+                Ok(v) if v.is_finite() => Ok(ArgValue::F64(v)),
                 _ => Err("must be a finite number".to_string()),
             },
             ArgBound::FloatMin(lo) => match s.parse::<f64>() {
-                Ok(v) if v.is_finite() && v >= *lo => Ok(()),
+                Ok(v) if v.is_finite() && v >= *lo => Ok(ArgValue::F64(v)),
                 _ => Err(format!("must be a finite number >= {lo}")),
             },
             ArgBound::FloatGt(lo) => match s.parse::<f64>() {
-                Ok(v) if v.is_finite() && v > *lo => Ok(()),
+                Ok(v) if v.is_finite() && v > *lo => Ok(ArgValue::F64(v)),
                 _ => Err(format!("must be a finite number > {lo}")),
             },
             ArgBound::FloatRange(lo, hi) => match s.parse::<f64>() {
-                Ok(v) if v.is_finite() && v >= *lo && v <= *hi => Ok(()),
+                Ok(v) if v.is_finite() && v >= *lo && v <= *hi => Ok(ArgValue::F64(v)),
                 _ => Err(format!("must be a number in [{lo}, {hi}]")),
             },
-            ArgBound::AnyStr => Ok(()),
+            ArgBound::AnyStr => Ok(ArgValue::Str(s.to_string())),
         }
     }
 }
@@ -219,16 +214,6 @@ fn one_of(x: i64, allowed: &'static [i64]) -> Arg {
 /// Free string argument (validated downstream).
 fn tf_str(s: &'static str) -> Arg {
     Arg { default: ArgDefault::Str(s), bound: ArgBound::AnyStr }
-}
-
-/// Render a float argument canonically (`2.0` -> "2", `2.5` -> "2.5") so it
-/// compares equal to an integer-looking supplied argument.
-fn format_float(f: f64) -> String {
-    if f.fract() == 0.0 {
-        format!("{}", f as i64)
-    } else {
-        format!("{f}")
-    }
 }
 
 /// The metadata for one command (after sub-command canonicalization).
@@ -322,6 +307,19 @@ pub fn is_command(name: &str) -> bool {
     COMMANDS.contains(&name)
 }
 
+/// Canonicalize a command name: case-insensitive (P6), with `cdl` aliased to the
+/// `style` candlestick namespace. Borrows for the common already-lowercase case
+/// (every built-in name), so binding an ordinary command costs no allocation.
+pub fn normalize(name: &str) -> Cow<'_, str> {
+    if name.eq_ignore_ascii_case("cdl") {
+        Cow::Borrowed("style")
+    } else if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
 /// The spec for a command given its (already-canonicalized) sub. `None` for an
 /// unknown command **or an invalid sub-command** (the match is sub-strict, so it
 /// also drives sub validation).
@@ -392,15 +390,20 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             vec![p(9), p(3), p(3), frange(50.0, 0.0, 100.0)],
             vec!["high", "low", "close"],
         ),
-        ("rsi", None) => (vec![p_req()], vec!["close"]),
+        // rsi: period defaults to 14 — the universal Wilder standard (and TA-Lib's
+        // `RSI` default), so a bare `rsi` is the canonical `rsi:14`.
+        ("rsi", None) => (vec![p(14)], vec!["close"]),
         ("bbi", None) => (vec![p(3), p(6), p(12), p(24)], vec!["close"]),
         ("tr", None) => (vec![], vec!["high", "low", "close"]),
         ("atr", None) => (vec![p(14)], vec!["high", "low", "close"]),
         ("llv", None) => (vec![p_req()], vec!["low"]),
         ("hhv", None) => (vec![p_req()], vec!["high"]),
-        ("donchian", None) => (vec![p_req()], vec!["high", "low"]),
-        ("donchian", Some("upper")) => (vec![p_req()], vec!["high"]),
-        ("donchian", Some("lower")) => (vec![p_req()], vec!["low"]),
+        // donchian: period defaults to 20 — the classic Donchian-channel window
+        // (matching its sibling band `boll`), so a bare `donchian` / `donchian.upper`
+        // is the canonical 20-bar form.
+        ("donchian", None) => (vec![p(20)], vec!["high", "low"]),
+        ("donchian", Some("upper")) => (vec![p(20)], vec!["high"]),
+        ("donchian", Some("lower")) => (vec![p(20)], vec!["low"]),
         // hv: window (stddev of log returns — needs >= 2), bar time-frame,
         // annualization trading-days (>= 1: 0/negative puts 0/NaN under sqrt).
         ("hv", None) => (vec![p2_req(), tf_str("1d"), i64min(252, 1)], vec!["close"]),
@@ -593,74 +596,57 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
     Some(CommandSpec { args, series })
 }
 
-/// The default integer for argument `i` of a command (its `Int` default, else
-/// `fallback`). A convenience for `exec` / `lookback`.
-pub fn arg_int_default(name: &str, sub: Option<&str>, i: usize, fallback: usize) -> usize {
-    command_spec(name, sub)
-        .and_then(|s| s.args.get(i).and_then(|a| a.default.as_usize()))
-        .unwrap_or(fallback)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn arg_default_as_usize_and_to_token() {
-        assert_eq!(ArgDefault::Int(5).as_usize(), Some(5));
-        assert_eq!(ArgDefault::Float(2.0).as_usize(), None);
-        assert_eq!(ArgDefault::Required.to_token(), None);
-        assert_eq!(ArgDefault::Int(12).to_token().as_deref(), Some("12"));
-        assert_eq!(ArgDefault::Float(2.0).to_token().as_deref(), Some("2")); // integral float
-        assert_eq!(ArgDefault::Float(2.5).to_token().as_deref(), Some("2.5")); // fractional
-        assert_eq!(ArgDefault::I64(-1).to_token().as_deref(), Some("-1"));
+    fn arg_default_value_per_kind() {
+        assert_eq!(ArgDefault::Required.value(), None);
+        assert_eq!(ArgDefault::Int(12).value(), Some(ArgValue::Usize(12)));
+        assert_eq!(ArgDefault::Float(2.5).value(), Some(ArgValue::F64(2.5)));
+        assert_eq!(ArgDefault::I64(-1).value(), Some(ArgValue::I64(-1)));
         assert_eq!(
-            ArgDefault::Str("close").to_token().as_deref(),
-            Some("close")
+            ArgDefault::Str("close").value(),
+            Some(ArgValue::Str("close".into()))
         );
     }
 
     #[test]
-    fn arg_int_default_uses_spec_then_fallback() {
-        assert_eq!(arg_int_default("macd", None, 0, 99), 12); // macd's Int default
-        assert_eq!(arg_int_default("ma", None, 0, 7), 7); // a Required arg -> fallback
-        assert_eq!(arg_int_default("nope", None, 0, 3), 3); // unknown command -> fallback
-    }
-
-    #[test]
-    fn arg_bound_validate_per_kind() {
+    fn arg_bound_bind_per_kind() {
+        // Each kind parses once into its typed value, rejecting out-of-domain tokens.
         // IntMin: the period rule (>= 1) and the second-moment rule (>= 2).
-        assert!(ArgBound::IntMin(1).validate("1").is_ok());
-        assert!(ArgBound::IntMin(1).validate("0").is_err());
-        assert!(ArgBound::IntMin(1).validate("-3").is_err()); // not a usize
-        assert!(ArgBound::IntMin(1).validate("abc").is_err());
-        assert!(ArgBound::IntMin(2).validate("2").is_ok());
-        assert!(ArgBound::IntMin(2).validate("1").is_err());
+        assert_eq!(ArgBound::IntMin(1).bind("1"), Ok(ArgValue::Usize(1)));
+        assert!(ArgBound::IntMin(1).bind("0").is_err());
+        assert!(ArgBound::IntMin(1).bind("-3").is_err()); // not a usize
+        assert!(ArgBound::IntMin(1).bind("abc").is_err());
+        assert!(ArgBound::IntMin(2).bind("2").is_ok());
+        assert!(ArgBound::IntMin(2).bind("1").is_err());
         // IntRange: matype selector / mavp period ceiling.
-        assert!(ArgBound::IntRange(0, 8).validate("0").is_ok());
-        assert!(ArgBound::IntRange(0, 8).validate("8").is_ok());
-        assert!(ArgBound::IntRange(0, 8).validate("9").is_err());
+        assert_eq!(ArgBound::IntRange(0, 8).bind("0"), Ok(ArgValue::Usize(0)));
+        assert!(ArgBound::IntRange(0, 8).bind("8").is_ok());
+        assert!(ArgBound::IntRange(0, 8).bind("9").is_err());
         // OneOfI64: increase's ±1 direction.
-        assert!(ArgBound::OneOfI64(&[-1, 1]).validate("-1").is_ok());
-        assert!(ArgBound::OneOfI64(&[-1, 1]).validate("0").is_err());
-        assert!(ArgBound::OneOfI64(&[-1, 1]).validate("x").is_err());
+        assert_eq!(ArgBound::OneOfI64(&[-1, 1]).bind("-1"), Ok(ArgValue::I64(-1)));
+        assert!(ArgBound::OneOfI64(&[-1, 1]).bind("0").is_err());
+        assert!(ArgBound::OneOfI64(&[-1, 1]).bind("x").is_err());
         // I64Min: hv trading days.
-        assert!(ArgBound::I64Min(1).validate("252").is_ok());
-        assert!(ArgBound::I64Min(1).validate("0").is_err());
+        assert_eq!(ArgBound::I64Min(1).bind("252"), Ok(ArgValue::I64(252)));
+        assert!(ArgBound::I64Min(1).bind("0").is_err());
         // Finite: multipliers take any sign but never NaN / inf.
-        assert!(ArgBound::Finite.validate("-2.5").is_ok());
-        assert!(ArgBound::Finite.validate("nan").is_err());
-        assert!(ArgBound::Finite.validate("inf").is_err());
+        assert_eq!(ArgBound::Finite.bind("-2.5"), Ok(ArgValue::F64(-2.5)));
+        assert!(ArgBound::Finite.bind("nan").is_err());
+        assert!(ArgBound::Finite.bind("inf").is_err());
         // FloatMin / FloatGt: SAR acceleration (>= 0) vs ASI divisor (> 0).
-        assert!(ArgBound::FloatMin(0.0).validate("0").is_ok());
-        assert!(ArgBound::FloatMin(0.0).validate("-0.1").is_err());
-        assert!(ArgBound::FloatGt(0.0).validate("0.5").is_ok());
-        assert!(ArgBound::FloatGt(0.0).validate("0").is_err());
+        assert_eq!(ArgBound::FloatMin(0.0).bind("0"), Ok(ArgValue::F64(0.0)));
+        assert!(ArgBound::FloatMin(0.0).bind("-0.1").is_err());
+        assert!(ArgBound::FloatGt(0.0).bind("0.5").is_ok());
+        assert!(ArgBound::FloatGt(0.0).bind("0").is_err());
         // FloatRange: T3 vfactor / KDJ seed / MAMA limits.
-        assert!(ArgBound::FloatRange(0.0, 1.0).validate("0.7").is_ok());
-        assert!(ArgBound::FloatRange(0.0, 1.0).validate("1.5").is_err());
-        assert!(ArgBound::FloatRange(0.0, 100.0).validate("150").is_err());
+        assert_eq!(ArgBound::FloatRange(0.0, 1.0).bind("0.7"), Ok(ArgValue::F64(0.7)));
+        assert!(ArgBound::FloatRange(0.0, 1.0).bind("1.5").is_err());
+        assert!(ArgBound::FloatRange(0.0, 100.0).bind("150").is_err());
         // AnyStr: free-form (validated downstream).
-        assert!(ArgBound::AnyStr.validate("1d").is_ok());
+        assert_eq!(ArgBound::AnyStr.bind("1d"), Ok(ArgValue::Str("1d".into())));
     }
 }

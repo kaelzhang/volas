@@ -617,7 +617,7 @@ impl PyDataFrame {
                     continue;
                 }
             }
-            let node = parse(&meta.directive).map_err(value_err)?;
+            let node = parse(&meta.directive).map_err(directive_err)?;
             // State-carry fast-path (additive): if this column carries a recursive
             // state, continue the recursion over only the new rows `[vr, height)` —
             // O(new rows), bit-identical to a full recompute — then refresh the carried

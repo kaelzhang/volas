@@ -186,9 +186,9 @@ df['hhv:10@close']
 ### `donchian`, Donchian Channels
 
 ```
-donchian:<period>@<high>,<low>
-donchian.upper:<period>@<high>
-donchian.lower:<period>@<low>
+donchian:<period=20>@<high>,<low>
+donchian.upper:<period=20>@<high>
+donchian.lower:<period=20>@<low>
 ```
 
 Gets Donchian channels, the historical view of price volatility by charting a
@@ -1125,7 +1125,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | `macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
 | `apo` | `APO` | Absolute price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
 | `ppo` | `PPO` | Percentage price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
-| `rsi` | `RSI` | Relative Strength Index. | `:<period>@<series=close>` |
+| `rsi` | `RSI` | Relative Strength Index. | `:<period=14>@<series=close>` |
 | `cmo` | `CMO` | Chande Momentum Oscillator. | `:<period=14>@<series=close>` |
 | `cci` | `CCI` | Commodity Channel Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | `imi` | `IMI` | Intraday Momentum Index. | `:<period=14>@<series_open=open>,<series_close=close>` |

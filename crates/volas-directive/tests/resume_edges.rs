@@ -221,8 +221,10 @@ fn execute_dispatch_covers_specialized_indicator_defaults() {
         "macdext:12,0,26,99",
         "macdext.signal:12,0,26,0,9,99",
     ] {
+        // An out-of-range matype is rejected when binding (at parse), so chain
+        // parse -> execute to assert the directive is refused somewhere.
         assert!(
-            execute(&df, &parse(directive).unwrap()).is_err(),
+            parse(directive).and_then(|n| execute(&df, &n)).is_err(),
             "{directive}"
         );
     }

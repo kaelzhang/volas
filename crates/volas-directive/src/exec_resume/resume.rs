@@ -2,7 +2,7 @@
 //! full recompute (the per-directive `execute_resume*` dispatch).
 
 use crate::exec::{arg_f64, arg_usize, series_f64};
-use crate::types::Node;
+use crate::types::Ast;
 use volas_compute::indicators as ind;
 use volas_core::{Column, DataFrame};
 
@@ -226,7 +226,7 @@ pub fn execute_resume_default_series(
 /// original-absolute across a head-dropping slice.
 pub fn execute_resume(
     df: &DataFrame,
-    node: &Node,
+    node: &Ast,
     prev_state: &[f64],
     from_row: usize,
     origin: usize,
@@ -311,7 +311,7 @@ pub fn execute_resume(
         }
         ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => {
             let data = close().ok()?;
-            let period = arg_usize(args, 0, Some(10)).ok()?;
+            let period = arg_usize(&args, 0);
             let mut out = Vec::with_capacity(data.len().saturating_sub(from_row));
             for i in from_row..data.len() {
                 if i < period {
@@ -352,8 +352,8 @@ pub fn execute_resume(
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
             let volume = series_f64(df, series, 3, "volume").ok()?;
-            let fast = arg_usize(args, 0, Some(3)).ok()?;
-            let slow = arg_usize(args, 1, Some(10)).ok()?;
+            let fast = arg_usize(&args, 0);
+            let slow = arg_usize(&args, 1);
             let (vals, st) = ind::adosc_resume(
                 &high, &low, &close, &volume, fast, slow, from_row, prev_state,
             );
@@ -383,14 +383,14 @@ pub fn execute_resume(
             let close = series_f64(df, series, 0, "close").ok()?;
             let volume = series_f64(df, series, 1, "volume").ok()?;
             let (vals, st) =
-                ind::efi_resume(&close, &volume, arg_usize(args, 0, Some(13)).ok()?, from_row, prev_state);
+                ind::efi_resume(&close, &volume, arg_usize(&args, 0), from_row, prev_state);
             Some((Column::f64(vals), st))
         }
         ("tsi", _) => {
             let (vals, st) = ind::tsi_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(25)).ok()?,
-                arg_usize(args, 1, Some(13)).ok()?,
+                arg_usize(&args, 0),
+                arg_usize(&args, 1),
                 from_row,
                 prev_state,
             );
@@ -400,7 +400,7 @@ pub fn execute_resume(
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let (vals, st) =
-                ind::mass_index_resume(&high, &low, arg_usize(args, 0, Some(25)).ok()?, from_row, prev_state);
+                ind::mass_index_resume(&high, &low, arg_usize(&args, 0), from_row, prev_state);
             Some((Column::f64(vals), st))
         }
 
@@ -408,7 +408,7 @@ pub fn execute_resume(
         ("keltner", None) => {
             let (vals, st) = ind::ema_resume(
                 &series_f64(df, series, 0, "close").ok()?,
-                arg_usize(args, 0, Some(20)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             );
@@ -422,9 +422,9 @@ pub fn execute_resume(
                 &close,
                 &high,
                 &low,
-                arg_usize(args, 0, Some(20)).ok()?,
-                arg_usize(args, 1, Some(10)).ok()?,
-                arg_f64(args, 2, 2.0).ok()?,
+                arg_usize(&args, 0),
+                arg_usize(&args, 1),
+                arg_f64(&args, 2),
                 sub == "upper",
                 from_row,
                 prev_state,
@@ -450,7 +450,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_f64(args, 0, 3.0).ok()?,
+                arg_f64(&args, 0),
                 from_row,
                 prev_state,
             );
@@ -464,8 +464,8 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(args, 0, Some(10)).ok()?,
-                arg_f64(args, 1, 3.0).ok()?,
+                arg_usize(&args, 0),
+                arg_f64(&args, 1),
                 sub == Some("direction"),
                 from_row,
                 prev_state,
@@ -481,8 +481,8 @@ pub fn execute_resume(
             let (vals, st) = ind::sar_resume(
                 &high,
                 &low,
-                arg_f64(args, 0, 0.02).ok()?,
-                arg_f64(args, 1, 0.2).ok()?,
+                arg_f64(&args, 0),
+                arg_f64(&args, 1),
                 from_row,
                 prev_state,
             )?;
@@ -495,13 +495,13 @@ pub fn execute_resume(
             let (vals, st) = ind::sarext_resume(
                 &high,
                 &low,
-                arg_f64(args, 1, 0.0).ok()?,
-                arg_f64(args, 2, 0.02).ok()?,
-                arg_f64(args, 3, 0.02).ok()?,
-                arg_f64(args, 4, 0.2).ok()?,
-                arg_f64(args, 5, 0.02).ok()?,
-                arg_f64(args, 6, 0.02).ok()?,
-                arg_f64(args, 7, 0.2).ok()?,
+                arg_f64(&args, 1),
+                arg_f64(&args, 2),
+                arg_f64(&args, 3),
+                arg_f64(&args, 4),
+                arg_f64(&args, 5),
+                arg_f64(&args, 6),
+                arg_f64(&args, 7),
                 from_row,
                 prev_state,
             )?;
@@ -513,7 +513,7 @@ pub fn execute_resume(
         ("ema", _) => {
             let (vals, st) = ind::ema_resume(
                 &close().ok()?,
-                arg_usize(args, 0, None).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             );
@@ -522,7 +522,7 @@ pub fn execute_resume(
         ("smma", _) => {
             let (vals, st) = ind::smma_resume(
                 &close().ok()?,
-                arg_usize(args, 0, None).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             );
@@ -531,7 +531,7 @@ pub fn execute_resume(
         ("dema", _) => {
             let (vals, st) = ind::dema_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(30)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             );
@@ -540,7 +540,7 @@ pub fn execute_resume(
         ("tema", _) => {
             let (vals, st) = ind::tema_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(30)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             );
@@ -549,8 +549,8 @@ pub fn execute_resume(
         ("t3", _) => {
             let (vals, st) = ind::t3_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(5)).ok()?,
-                arg_f64(args, 1, 0.7).ok()?,
+                arg_usize(&args, 0),
+                arg_f64(&args, 1),
                 from_row,
                 prev_state,
             );
@@ -559,7 +559,7 @@ pub fn execute_resume(
         ("trix", _) => {
             let (vals, st) = ind::trix_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(30)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             );
@@ -569,7 +569,7 @@ pub fn execute_resume(
         ("kama", _) => {
             let (vals, st) = ind::kama_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(30)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -579,8 +579,8 @@ pub fn execute_resume(
         ("macd", None) => {
             let (vals, st) = ind::macd_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(12)).ok()?,
-                arg_usize(args, 1, Some(26)).ok()?,
+                arg_usize(&args, 0),
+                arg_usize(&args, 1),
                 from_row,
                 prev_state,
             );
@@ -589,9 +589,9 @@ pub fn execute_resume(
         ("macd", Some(line @ ("signal" | "histogram"))) => {
             let (vals, st) = ind::macd_signal_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(12)).ok()?,
-                arg_usize(args, 1, Some(26)).ok()?,
-                arg_usize(args, 2, Some(9)).ok()?,
+                arg_usize(&args, 0),
+                arg_usize(&args, 1),
+                arg_usize(&args, 2),
                 line == "histogram",
                 from_row,
                 prev_state,
@@ -607,7 +607,7 @@ pub fn execute_resume(
                 &close().ok()?,
                 12,
                 26,
-                arg_usize(args, 0, Some(9)).ok()?,
+                arg_usize(&args, 0),
                 line == "histogram",
                 from_row,
                 prev_state,
@@ -622,7 +622,7 @@ pub fn execute_resume(
         ("rsi", _) => {
             let (vals, st) = ind::rsi_resume(
                 &close().ok()?,
-                arg_usize(args, 0, None).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -631,7 +631,7 @@ pub fn execute_resume(
         ("cmo", _) => {
             let (vals, st) = ind::cmo_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -645,7 +645,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -659,7 +659,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -671,7 +671,7 @@ pub fn execute_resume(
             let (vals, st) = ind::plus_dm_resume(
                 &high,
                 &low,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -683,7 +683,7 @@ pub fn execute_resume(
             let (vals, st) = ind::minus_dm_resume(
                 &high,
                 &low,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -697,7 +697,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -711,7 +711,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -725,7 +725,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -739,7 +739,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -753,7 +753,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(args, 0, Some(14)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -801,8 +801,8 @@ pub fn execute_resume(
         ("mama", sub) => {
             let (vals, st) = ind::mama_resume(
                 &close().ok()?,
-                arg_f64(args, 0, 0.5).ok()?,
-                arg_f64(args, 1, 0.05).ok()?,
+                arg_f64(&args, 0),
+                arg_f64(&args, 1),
                 sub == Some("fama"),
                 from_row,
                 prev_state,
@@ -817,7 +817,7 @@ pub fn execute_resume(
         ("maxindex", _) | ("minmaxindex", Some("max")) => {
             let (vals, st) = ind::maxindex_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(30)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 origin,
                 prev_state,
@@ -827,7 +827,7 @@ pub fn execute_resume(
         ("minindex", _) | ("minmaxindex", Some("min")) => {
             let (vals, st) = ind::minindex_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(30)).ok()?,
+                arg_usize(&args, 0),
                 from_row,
                 origin,
                 prev_state,
@@ -840,15 +840,15 @@ pub fn execute_resume(
         // the canonical SMA `.d` (matype 0) resumes; a recursive-MA `.d` declines.
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
-            if is_d && arg_usize(args, 3, Some(0)).ok()? != 0 {
+            if is_d && arg_usize(&args, 3) != 0 {
                 return None; // non-SMA `.d` smoothing is recursive — fall back.
             }
             let (vals, st) = ind::stochrsi_resume(
                 &close().ok()?,
-                arg_usize(args, 0, Some(14)).ok()?,
-                arg_usize(args, 1, Some(5)).ok()?,
+                arg_usize(&args, 0),
+                arg_usize(&args, 1),
                 is_d,
-                arg_usize(args, 2, Some(3)).ok()?,
+                arg_usize(&args, 2),
                 from_row,
                 prev_state,
             )?;
@@ -861,8 +861,8 @@ pub fn execute_resume(
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
-            let period_rsv = arg_usize(args, 0, Some(9)).ok()?;
-            let period_k = arg_usize(args, 1, Some(3)).ok()?;
+            let period_rsv = arg_usize(&args, 0);
+            let period_k = arg_usize(&args, 1);
             let kline = match line {
                 "k" => ind::KdjLine::K,
                 "d" => ind::KdjLine::D,
@@ -871,7 +871,7 @@ pub fn execute_resume(
             let period_d = if line == "k" {
                 3
             } else {
-                arg_usize(args, 2, Some(3)).ok()?
+                arg_usize(&args, 2)
             };
             let (vals, st) = ind::kdj_resume(
                 &high, &low, &close, period_rsv, period_k, period_d, kline, from_row, prev_state,

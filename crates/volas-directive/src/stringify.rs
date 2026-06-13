@@ -4,11 +4,11 @@
 //! `boll`). The canonical form is volas-native — numeric arguments are not
 //! coerced to a typed display (e.g. `100` stays `100`, not `100.0`).
 
-use crate::spec::{canon_sub, command_spec};
-use crate::types::{Command, Node, UnaryOp};
+use crate::spec::command_spec;
+use crate::types::{ArgValue, Ast, Command, Node, UnaryOp};
 
 /// Canonical string form of a directive AST.
-pub fn stringify(node: &Node) -> String {
+pub fn stringify(node: &Ast) -> String {
     match node {
         Node::Name(s) => s.clone(),
         Node::Scalar(v) => format_num(*v),
@@ -53,28 +53,32 @@ fn format_num(v: f64) -> String {
     }
 }
 
-fn stringify_command(cmd: &Command) -> String {
-    let sub = canon_sub(&cmd.name, cmd.sub.as_deref());
+fn stringify_command(cmd: &Command<Box<[ArgValue]>>) -> String {
+    // The name and sub are already canonical (bound), so they render directly.
     let mut out = cmd.name.clone();
-    if let Some(s) = &sub {
+    if let Some(s) = &cmd.sub {
         out.push('.');
         out.push_str(s);
     }
-    let spec = command_spec(&cmd.name, sub.as_deref());
+    let spec = command_spec(&cmd.name, cmd.sub.as_deref());
 
-    // Arguments: keep one only if it differs from its default.
+    // Arguments: keep one only if it differs from its default. Every argument is
+    // present (resolved), so an argument equal to its default renders empty and
+    // trailing defaults fall away (`boll:20@close` -> `boll`).
     let arg_tokens: Vec<String> = cmd
         .args
         .iter()
         .enumerate()
         .map(|(i, a)| {
-            let default = spec
+            let is_default = spec
                 .as_ref()
                 .and_then(|s| s.args.get(i))
-                .and_then(|a| a.default.to_token());
-            match a {
-                Some(v) if Some(v) != default.as_ref() => v.clone(),
-                _ => String::new(),
+                .and_then(|spec_arg| spec_arg.default.value())
+                .is_some_and(|default| default == *a);
+            if is_default {
+                String::new()
+            } else {
+                a.to_token()
             }
         })
         .collect();
@@ -98,7 +102,7 @@ fn stringify_command(cmd: &Command) -> String {
     out
 }
 
-fn stringify_series(node: &Node) -> String {
+fn stringify_series(node: &Ast) -> String {
     match node {
         Node::Name(s) => s.clone(),
         Node::Scalar(v) => format_num(*v),
@@ -173,11 +177,11 @@ mod tests {
     #[test]
     fn scalar_series_operand() {
         // a bare scalar in a series slot exercises stringify_series's Scalar arm
-        use crate::types::{Command, Node};
-        let node = Node::Command(Command {
+        use crate::types::{ArgValue, Ast, Command, Node};
+        let node: Ast = Node::Command(Command {
             name: "correl".into(),
             sub: None,
-            args: vec![Some("5".into())],
+            args: vec![ArgValue::Usize(5)].into_boxed_slice(),
             series: vec![Node::Name("close".into()), Node::Scalar(3.0)],
         });
         assert!(stringify(&node).contains('3'));

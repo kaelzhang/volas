@@ -6,23 +6,28 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use super::types::{Command, Node, Op, UnaryOp};
+use super::bind::bind_node;
+use super::types::{Ast, Command, Cst, Node, Op, UnaryOp};
 use volas_core::{Result, VolasError};
 
 thread_local! {
-    /// Per-thread parse memo. `parse` is a pure function of its input, so caching the
-    /// AST is bit-identical — and `df.exec` re-parses on every call, so repeated
-    /// directives in a hot loop hit the cache instead of re-tokenizing.
-    static PARSE_CACHE: RefCell<HashMap<String, Node>> = RefCell::new(HashMap::new());
+    /// Per-thread directive memo. `parse` is a pure function of its input, so caching
+    /// the bound [`Ast`] is bit-identical — and `df.exec` re-parses on every call, so a
+    /// repeated directive in a hot loop skips both tokenizing **and** binding/validation
+    /// (the whole per-exec validation cost) and shares one `Rc<Ast>` with no deep clone.
+    static PARSE_CACHE: RefCell<HashMap<String, Rc<Ast>>> = RefCell::new(HashMap::new());
 }
 
-/// Parse a directive string into an AST [`Node`] (memoized per thread).
-pub fn parse(input: &str) -> Result<Node> {
-    if let Some(node) = PARSE_CACHE.with(|c| c.borrow().get(input).cloned()) {
-        return Ok(node);
+/// Parse a directive string into a bound, validated [`Ast`] (memoized per thread).
+/// Binding happens here, once: an invalid argument / unknown command errors at parse
+/// time, and the returned tree is ready to execute with no further validation.
+pub fn parse(input: &str) -> Result<Rc<Ast>> {
+    if let Some(ast) = PARSE_CACHE.with(|c| c.borrow().get(input).cloned()) {
+        return Ok(ast);
     }
-    let node = parse_uncached(input)?;
+    let ast = Rc::new(bind_node(&parse_uncached(input)?)?);
     PARSE_CACHE.with(|c| {
         let mut m = c.borrow_mut();
         // Bound the memo (clear wholesale — cheap and correct) so generated / adversarial
@@ -30,12 +35,12 @@ pub fn parse(input: &str) -> Result<Node> {
         if m.len() >= 512 {
             m.clear();
         }
-        m.insert(input.to_string(), node.clone());
+        m.insert(input.to_string(), Rc::clone(&ast));
     });
-    Ok(node)
+    Ok(ast)
 }
 
-fn parse_uncached(input: &str) -> Result<Node> {
+fn parse_uncached(input: &str) -> Result<Cst> {
     let mut p = Parser::new(input);
     p.skip_ws();
     if p.eof() {
@@ -49,7 +54,7 @@ fn parse_uncached(input: &str) -> Result<Node> {
     Ok(node)
 }
 
-fn bin(left: Node, op: Op, right: Node) -> Node {
+fn bin(left: Cst, op: Op, right: Cst) -> Cst {
     Node::Binary {
         left: Box::new(left),
         op,
@@ -117,16 +122,16 @@ impl<'a> Parser<'a> {
             .map(|p| p + 1)
             .unwrap_or(0);
         let column = self.i - line_start + 1;
-        VolasError::Value(format!("{} (line {line}, column {column})", message.into()))
+        VolasError::Parse(format!("{} (line {line}, column {column})", message.into()))
     }
 
     // --- precedence levels ---
 
-    fn parse_expr(&mut self) -> Result<Node> {
+    fn parse_expr(&mut self) -> Result<Cst> {
         self.parse_logical()
     }
 
-    fn parse_logical(&mut self) -> Result<Node> {
+    fn parse_logical(&mut self) -> Result<Cst> {
         let mut left = self.parse_cmp()?;
         loop {
             self.skip_ws();
@@ -142,7 +147,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_cmp(&mut self) -> Result<Node> {
+    fn parse_cmp(&mut self) -> Result<Cst> {
         let mut left = self.parse_add()?;
         loop {
             self.skip_ws();
@@ -158,7 +163,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_add(&mut self) -> Result<Node> {
+    fn parse_add(&mut self) -> Result<Cst> {
         let mut left = self.parse_mul()?;
         loop {
             self.skip_ws();
@@ -174,7 +179,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_mul(&mut self) -> Result<Node> {
+    fn parse_mul(&mut self) -> Result<Cst> {
         let mut left = self.parse_unary()?;
         loop {
             self.skip_ws();
@@ -190,7 +195,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_unary(&mut self) -> Result<Node> {
+    fn parse_unary(&mut self) -> Result<Cst> {
         self.skip_ws();
         match self.peek() {
             Some(b'~') => {
@@ -213,7 +218,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_primary(&mut self) -> Result<Node> {
+    fn parse_primary(&mut self) -> Result<Cst> {
         self.skip_ws();
         match self.peek() {
             Some(b'(') => {
@@ -267,7 +272,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_number(&mut self) -> Result<Node> {
+    fn parse_number(&mut self) -> Result<Cst> {
         let start = self.i;
         if self.peek() == Some(b'-') {
             self.bump();
@@ -290,7 +295,7 @@ impl<'a> Parser<'a> {
         String::from_utf8_lossy(&self.s[start..self.i]).into_owned()
     }
 
-    fn parse_command(&mut self) -> Result<Node> {
+    fn parse_command(&mut self) -> Result<Cst> {
         let name = self.read_ident();
         let mut sub = None;
         self.skip_ws();
@@ -355,7 +360,7 @@ impl<'a> Parser<'a> {
         args
     }
 
-    fn read_series(&mut self) -> Result<Vec<Node>> {
+    fn read_series(&mut self) -> Result<Vec<Cst>> {
         let mut series = Vec::new();
         loop {
             self.skip_ws();
@@ -398,9 +403,12 @@ fn is_number_start(c: u8, next: Option<u8>) -> bool {
 mod tests {
     use super::*;
 
+    // The structure tests exercise the parser directly (`parse_uncached` -> `Cst`,
+    // arguments as raw tokens); binding/validation is `bind`'s concern, tested there.
+
     #[test]
     fn parse_simple_command() {
-        match parse("ma:5").unwrap() {
+        match parse_uncached("ma:5").unwrap() {
             Node::Command(c) => {
                 assert_eq!(c.name, "ma");
                 assert_eq!(c.args, vec![Some("5".to_string())]);
@@ -411,7 +419,7 @@ mod tests {
 
     #[test]
     fn parse_operator_and_scalar() {
-        match parse("kdj.j < 0").unwrap() {
+        match parse_uncached("kdj.j < 0").unwrap() {
             Node::Binary { op, right, .. } => {
                 assert_eq!(op, Op::Lt);
                 assert_eq!(*right, Node::Scalar(0.0));
@@ -423,13 +431,13 @@ mod tests {
     #[test]
     fn parse_cross_and_nested() {
         assert!(matches!(
-            parse("macd // macd.signal").unwrap(),
+            parse_uncached("macd // macd.signal").unwrap(),
             Node::Binary {
                 op: Op::CrossUp,
                 ..
             }
         ));
-        if let Node::Command(c) = parse("increase:3@(ma:20@close)").unwrap() {
+        if let Node::Command(c) = parse_uncached("increase:3@(ma:20@close)").unwrap() {
             assert!(matches!(c.series[0], Node::Command(_)));
         } else {
             panic!(); // LCOV_EXCL_LINE
@@ -439,7 +447,7 @@ mod tests {
     #[test]
     fn parse_precedence() {
         // (kdj.j + 1) != kdj.j
-        match parse("kdj.j + 1 != kdj.j").unwrap() {
+        match parse_uncached("kdj.j + 1 != kdj.j").unwrap() {
             Node::Binary {
                 op: Op::Ne, left, ..
             } => {
@@ -449,26 +457,26 @@ mod tests {
         }
         // (a > 1) | (a <= 1)
         assert!(matches!(
-            parse("(kdj.j > 1) | (kdj.j <= 1)").unwrap(),
+            parse_uncached("(kdj.j > 1) | (kdj.j <= 1)").unwrap(),
             Node::Binary { op: Op::Or, .. }
         ));
         // unary not / neg
         assert!(matches!(
-            parse("~(kdj.j <= 0)").unwrap(),
+            parse_uncached("~(kdj.j <= 0)").unwrap(),
             Node::Unary {
                 op: UnaryOp::Not,
                 ..
             }
         ));
         assert!(matches!(
-            parse("kdj.j * 2").unwrap(),
+            parse_uncached("kdj.j * 2").unwrap(),
             Node::Binary { op: Op::Mul, .. }
         ));
     }
 
     #[test]
     fn parse_empty_arg_slots() {
-        if let Node::Command(c) = parse("macd.signal:,,10").unwrap() {
+        if let Node::Command(c) = parse_uncached("macd.signal:,,10").unwrap() {
             assert_eq!(c.args, vec![None, None, Some("10".into())]);
         } else {
             panic!(); // LCOV_EXCL_LINE
@@ -478,18 +486,18 @@ mod tests {
     #[test]
     fn malformed_number_is_a_syntax_error() {
         // parse_number scans digits/'.' greedily, so "1.2.3" fails f64 parsing
-        assert!(parse("1.2.3").is_err());
+        assert!(parse_uncached("1.2.3").is_err());
     }
 
     #[test]
     fn parse_memo_hit_and_eviction() {
-        // Each test runs on its own thread, so the thread-local parse memo starts
-        // empty. A repeated parse returns the cached AST (the cache-hit branch), and
+        // Each test runs on its own thread, so the thread-local memo starts empty. A
+        // repeated parse returns the cached bound `Rc<Ast>` (the cache-hit branch), and
         // parsing past the 512-entry bound clears the memo wholesale (the eviction
         // branch) — both invisible to the rest of the suite.
         assert_eq!(parse("ma:5").unwrap(), parse("ma:5").unwrap()); // 2nd hits the cache
         for i in 0..600 {
-            let _ = parse(&format!("ma:{i}")).unwrap(); // crosses 512 -> wholesale clear
+            let _ = parse(&format!("ma:{}", i + 1)).unwrap(); // crosses 512 -> wholesale clear
         }
         assert_eq!(parse("ma:5").unwrap(), parse("ma:5").unwrap()); // correct post-eviction
     }

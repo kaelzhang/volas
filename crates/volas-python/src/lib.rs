@@ -30,7 +30,7 @@ pub(crate) fn pyerr(e: VolasError) -> PyErr {
     match e {
         VolasError::ColumnNotFound(n) => PyKeyError::new_err(format!("column \"{n}\" not found")),
         VolasError::DType(m) => PyTypeError::new_err(m),
-        VolasError::Shape(m) | VolasError::Index(m) | VolasError::Value(m) => {
+        VolasError::Shape(m) | VolasError::Index(m) | VolasError::Value(m) | VolasError::Parse(m) => {
             PyValueError::new_err(m)
         }
     }
@@ -57,11 +57,14 @@ create_exception!(
     "A directive has an unknown command / sub-command or an invalid argument."
 );
 
-/// Map a parse-time error to `DirectiveSyntaxError`.
-fn syntax_err(e: VolasError) -> PyErr {
+/// Map a `parse` error to its typed exception. `parse` now both tokenizes and
+/// binds, so a tokenizer failure (`VolasError::Parse`, annotated with line /
+/// column) is a `DirectiveSyntaxError`, while a well-formed directive with an
+/// unknown command / sub-command or an invalid argument is a `DirectiveValueError`.
+fn directive_err(e: VolasError) -> PyErr {
     match e {
-        VolasError::Value(m) => DirectiveSyntaxError::new_err(m),
-        other => DirectiveSyntaxError::new_err(other.to_string()),
+        VolasError::Parse(m) => DirectiveSyntaxError::new_err(m),
+        e => value_err(e),
     }
 }
 
@@ -76,7 +79,7 @@ fn value_err(e: VolasError) -> PyErr {
     }
 }
 
-fn directive_uses_default_series(node: &volas_directive::types::Node) -> bool {
+fn directive_uses_default_series(node: &volas_directive::types::Ast) -> bool {
     match node {
         volas_directive::types::Node::Name(_) => true,
         volas_directive::types::Node::Command(cmd) => cmd.series.iter().all(
@@ -192,10 +195,10 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
 ///     volas.directive_stringify('MACD:12,26')   # -> "macd"
 #[pyfunction]
 fn directive_stringify(directive: &str) -> PyResult<String> {
-    let node = parse(directive).map_err(syntax_err)?;
-    // Reject the same invalid configurations `df[directive]` does, so an illegal
-    // directive can never be canonicalized / persisted (P2-02 / V17).
-    volas_directive::validate_node(&node).map_err(value_err)?;
+    let node = parse(directive).map_err(directive_err)?;
+    // Frame-blind: a bare name is taken as a command, so reject a known command with
+    // no sub-less form (`kdj`, `stoch`, …) — `df[d]` rejects it at execute instead.
+    volas_directive::check_bare_commands(&node).map_err(value_err)?;
     Ok(volas_directive::stringify(&node))
 }
 
@@ -207,11 +210,12 @@ fn directive_stringify(directive: &str) -> PyResult<String> {
 ///     volas.directive_lookback('boll:20')   # -> 19
 #[pyfunction]
 fn directive_lookback(directive: &str) -> PyResult<usize> {
-    let node = parse(directive).map_err(syntax_err)?;
-    // Reject the same invalid configurations `df[directive]` does, so a bad
-    // directive can't yield a "plausible" warm-up window (e.g. ma:0 -> 0) that
-    // feeds a scheduler / cache before execution fails (P2-02 / V17).
-    volas_directive::validate_node(&node).map_err(value_err)?;
+    // `parse` binds + validates, so a bad directive (e.g. `ma:0`) is rejected here
+    // rather than yielding a "plausible" warm-up window that feeds a scheduler /
+    // cache before execution fails (P2-02 / V17).
+    let node = parse(directive).map_err(directive_err)?;
+    // Frame-blind: reject a bare known command with no sub-less form (`kdj`, …).
+    volas_directive::check_bare_commands(&node).map_err(value_err)?;
     Ok(volas_directive::lookback::lookback(&node))
 }
 

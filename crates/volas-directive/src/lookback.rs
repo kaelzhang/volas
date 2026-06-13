@@ -1,13 +1,13 @@
 //! Lookback (warm-up) computation for a directive — the minimum number of prior
 //! rows needed before an indicator produces a valid value.
 
-use crate::types::{Command, Node};
+use crate::types::{ArgValue, Ast, Command, Node};
 
-fn arg(args: &[Option<String>], i: usize, default: usize) -> usize {
-    args.get(i)
-        .and_then(|o| o.as_deref())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
+/// A bound period / count / matype argument. Arguments are resolved + type-checked
+/// by `bind`, so every position is present — there is no default to re-apply here
+/// (that knowledge lives only in the spec).
+fn arg(args: &[ArgValue], i: usize) -> usize {
+    args[i].as_usize()
 }
 
 /// Lookback of a TA-Lib MA-type over `period` (mirrors `exec::ma_typed`): DEMA is
@@ -24,104 +24,105 @@ pub(crate) fn ma_lookback(period: usize, matype: usize) -> usize {
     }
 }
 
-/// The command's own lookback (ignoring its series operands). `None` for a
-/// plain column name.
-fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Option<usize> {
-    let lb = match name {
-        "ema" | "smma" => arg(args, 0, 1).saturating_sub(1),
-        "ma" => ma_lookback(arg(args, 0, 1), arg(args, 1, 0)),
+/// The command's own lookback (ignoring its series operands). Only ever called
+/// with a bound command name (every caller binds first), so every command has an
+/// arm and an unrecognized name is unreachable.
+fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
+    match name {
+        "ema" | "smma" => arg(args, 0).saturating_sub(1),
+        "ma" => ma_lookback(arg(args, 0), arg(args, 1)),
         // apo/ppo warm up with the slower MA of the chosen type.
-        "apo" | "ppo" => ma_lookback(arg(args, 1, 26), arg(args, 2, 0)),
+        "apo" | "ppo" => ma_lookback(arg(args, 1), arg(args, 2)),
         // mavp warms up over the maximum period's MA (args: min, max, matype).
-        "mavp" => ma_lookback(arg(args, 1, 30), arg(args, 2, 0)),
+        "mavp" => ma_lookback(arg(args, 1), arg(args, 2)),
         "macdext" => {
-            let line = ma_lookback(arg(args, 0, 12), arg(args, 1, 0))
-                .max(ma_lookback(arg(args, 2, 26), arg(args, 3, 0)));
+            let line = ma_lookback(arg(args, 0), arg(args, 1))
+                .max(ma_lookback(arg(args, 2), arg(args, 3)));
             match sub {
                 None => line,
-                _ => line + ma_lookback(arg(args, 4, 9), arg(args, 5, 0)),
+                _ => line + ma_lookback(arg(args, 4), arg(args, 5)),
             }
         }
-        "wma" | "trima" => arg(args, 0, 30).saturating_sub(1),
-        "dema" => 2 * arg(args, 0, 30).saturating_sub(1),
-        "tema" => 3 * arg(args, 0, 30).saturating_sub(1),
-        "t3" => 6 * arg(args, 0, 5).saturating_sub(1),
-        "kama" => arg(args, 0, 30),
+        "wma" | "trima" => arg(args, 0).saturating_sub(1),
+        "dema" => 2 * arg(args, 0).saturating_sub(1),
+        "tema" => 3 * arg(args, 0).saturating_sub(1),
+        "t3" => 6 * arg(args, 0).saturating_sub(1),
+        "kama" => arg(args, 0),
         "sar" | "sarext" => 1,
-        "boll" | "bbw" | "accbands" => arg(args, 0, 20).saturating_sub(1),
+        "boll" | "bbw" | "accbands" => arg(args, 0).saturating_sub(1),
         "macd" => match sub {
-            None => arg(args, 0, 12).max(arg(args, 1, 26)).saturating_sub(1),
-            Some(_) => arg(args, 0, 12).max(arg(args, 1, 26)) + arg(args, 2, 9) - 2,
+            None => arg(args, 0).max(arg(args, 1)).saturating_sub(1),
+            Some(_) => arg(args, 0).max(arg(args, 1)) + arg(args, 2) - 2,
         },
         // macdfix: fast/slow fixed at 12/26; signal period is arg 0 on the sub-lines.
         "macdfix" => match sub {
             None => 25,
-            _ => 24 + arg(args, 0, 9),
+            _ => 24 + arg(args, 0),
         },
-        "bbi" => arg(args, 0, 3)
-            .max(arg(args, 1, 6))
-            .max(arg(args, 2, 12))
-            .max(arg(args, 3, 24)),
-        "psy" => arg(args, 0, 12).saturating_sub(1),
+        "bbi" => arg(args, 0)
+            .max(arg(args, 1))
+            .max(arg(args, 2))
+            .max(arg(args, 3)),
+        "psy" => arg(args, 0).saturating_sub(1),
         // pvt / nvi / pvi are cumulative (lookback 0); like obv/ad they carry a running-line
         // state so append resumes in O(new rows) and continues past a slice (see exec_resume).
         "pvt" | "nvi" | "pvi" => 0,
-        "dpo" => arg(args, 0, 20).saturating_sub(1),
-        "cmf" => arg(args, 0, 20).saturating_sub(1),
+        "dpo" => arg(args, 0).saturating_sub(1),
+        "cmf" => arg(args, 0).saturating_sub(1),
         // chop's TR sum needs one prior close, so it warms up one bar past the window.
-        "chop" => arg(args, 0, 14),
+        "chop" => arg(args, 0),
         // kst's slowest term is SMA15 over ROC30: 30 + 15 - 1.
         "kst" => 44,
-        "emv" => arg(args, 0, 14),
+        "emv" => arg(args, 0),
         // mass_index: EMA9 of EMA9 warms up at 2*(9-1)=16, then the n-sum adds n-1.
-        "mass_index" => 15 + arg(args, 0, 25),
-        "efi" => arg(args, 0, 13),
-        "tsi" => arg(args, 0, 25) + arg(args, 1, 13) - 1,
-        "crsi" => arg(args, 2, 100) + 1,
+        "mass_index" => 15 + arg(args, 0),
+        "efi" => arg(args, 0),
+        "tsi" => arg(args, 0) + arg(args, 1) - 1,
+        "crsi" => arg(args, 2) + 1,
         // bias ≡ ppo:1,N,0 — the slow SMA_N gates it (the fast SMA_1 has no warm-up).
-        "bias" => arg(args, 0, 6).saturating_sub(1),
+        "bias" => arg(args, 0).saturating_sub(1),
         // dma's DDD line ≡ apo:fast,slow,0 (slow SMA gates it); AMA adds its own SMA_M warm-up.
         "dma" => {
-            let line = arg(args, 1, 50).saturating_sub(1);
+            let line = arg(args, 1).saturating_sub(1);
             match sub {
                 None => line,
-                _ => line + arg(args, 2, 10).saturating_sub(1),
+                _ => line + arg(args, 2).saturating_sub(1),
             }
         }
         // +VM/−VM/TR each need one prior bar, so the n-sum warms up at bar n.
-        "vortex" => arg(args, 0, 14),
+        "vortex" => arg(args, 0),
         // up/down/flat volume is classified vs the prior close, so the n-sum warms up at n.
-        "vr" => arg(args, 0, 26),
+        "vr" => arg(args, 0),
         // brar AR (H−O, O−L) has no prior-bar term (n−1); BR (vs prior close) has one (n).
         "brar" => match sub {
-            Some("br") => arg(args, 0, 26),
-            _ => arg(args, 0, 26).saturating_sub(1),
+            Some("br") => arg(args, 0),
+            _ => arg(args, 0).saturating_sub(1),
         },
         // coppock: the longer ROC plus the WMA warm-up.
-        "coppock" => arg(args, 1, 14) + arg(args, 0, 10).saturating_sub(1),
+        "coppock" => arg(args, 1) + arg(args, 0).saturating_sub(1),
         // relative_vigor: swma4 (3) + SMAₙ (n−1) = n+2; the signal adds another swma4 (3).
         "relative_vigor" => match sub {
-            Some("signal") => arg(args, 0, 10) + 5,
-            _ => arg(args, 0, 10) + 2,
+            Some("signal") => arg(args, 0) + 5,
+            _ => arg(args, 0) + 2,
         },
         // dkx: the DDX line is WMA(20) (19); the MADKX signal adds SMA_m (m−1).
         "dkx" => match sub {
-            Some("ma") => 18 + arg(args, 0, 10),
+            Some("ma") => 18 + arg(args, 0),
             _ => 19,
         },
-        "wvad" => arg(args, 0, 24).saturating_sub(1),
+        "wvad" => arg(args, 0).saturating_sub(1),
         // cdp reads only the prior bar; mike's TYP±range is gated by the n-day HH/LL.
         "cdp" | "pivot_points" => 1,
         // wad / asi are cumulative (lookback 0); like obv they carry state for O(new rows)
         // append and slice continuation (see exec_resume).
         "wad" | "asi" => 0,
         // supertrend seeds with its ATR.
-        "supertrend" => arg(args, 0, 10),
-        "mike" => arg(args, 0, 12).saturating_sub(1),
+        "supertrend" => arg(args, 0),
+        "mike" => arg(args, 0).saturating_sub(1),
         // ichimoku: midpoint lines warm up at period−1; the leading spans add the kijun
         // displacement; the lagging span (chikou = close) has none.
         "ichimoku" => {
-            let (t, k, sb) = (arg(args, 0, 9), arg(args, 1, 26), arg(args, 2, 52));
+            let (t, k, sb) = (arg(args, 0), arg(args, 1), arg(args, 2));
             match sub {
                 Some("tenkan") => t.saturating_sub(1),
                 Some("kijun") => k.saturating_sub(1),
@@ -132,113 +133,118 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Optio
         }
         // keltner: middle = EMA (ema_period−1); bands also wait for the ATR (atr_period).
         "keltner" => {
-            let ema = arg(args, 0, 20).saturating_sub(1);
+            let ema = arg(args, 0).saturating_sub(1);
             match sub {
                 None => ema,
-                _ => ema.max(arg(args, 1, 10)),
+                _ => ema.max(arg(args, 1)),
             }
         }
         // stoch_momentum: HH/LL (k−1) + the double EMA_d (2·(d−1)); the signal adds EMA_signal.
         "stoch_momentum" => {
-            let base = arg(args, 0, 10).saturating_sub(1) + 2 * arg(args, 1, 3).saturating_sub(1);
+            let base = arg(args, 0).saturating_sub(1) + 2 * arg(args, 1).saturating_sub(1);
             match sub {
-                Some("signal") => base + arg(args, 2, 3).saturating_sub(1),
+                Some("signal") => base + arg(args, 2).saturating_sub(1),
                 _ => base,
             }
         }
         // ttm_squeeze: the squeeze flag waits for SMAₙ(TR) (n); the momentum's linreg over the
         // n-bar delta (itself gated at n−1) warms up at 2·(n−1).
         "ttm_squeeze" => match sub {
-            Some("on") => arg(args, 0, 20),
-            _ => 2 * arg(args, 0, 20).saturating_sub(1),
+            Some("on") => arg(args, 0),
+            _ => 2 * arg(args, 0).saturating_sub(1),
         },
         "tr" => 1,
-        "atr" => arg(args, 0, 14),
-        "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0, 1).saturating_sub(1),
-        "kdj" => arg(args, 0, 9) * 3,
-        "rsi" => arg(args, 0, 14),
-        "hv" => arg(args, 0, 1),
-        "increase" | "repeat" => arg(args, 0, 1).saturating_sub(1),
+        "atr" => arg(args, 0),
+        "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0).saturating_sub(1),
+        "kdj" => arg(args, 0) * 3,
+        "rsi" => arg(args, 0),
+        "hv" => arg(args, 0),
+        "increase" | "repeat" => arg(args, 0).saturating_sub(1),
         // style.<x>: candlestick patterns warm up over their candle-settings avg period
         // (from the compute registry); bullish/bearish need none. (`cdl` resolves here too.)
-        "style" | "cdl" => sub
+        "style" => sub
             .and_then(|p| volas_compute::indicators::candle_pattern(p).map(|(_, lb)| lb))
             .unwrap_or(0),
-        "change" => arg(args, 0, 2).saturating_sub(1),
-        "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0, 10),
-        "willr" | "midpoint" | "midprice" => arg(args, 0, 14).saturating_sub(1),
-        "cmo" | "natr" => arg(args, 0, 14),
-        "cci" | "imi" => arg(args, 0, 14).saturating_sub(1),
-        "mfi" => arg(args, 0, 14),
-        "ultosc" => arg(args, 0, 7).max(arg(args, 1, 14)).max(arg(args, 2, 28)),
+        "change" => arg(args, 0).saturating_sub(1),
+        "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0),
+        "willr" | "midpoint" | "midprice" => arg(args, 0).saturating_sub(1),
+        "cmo" | "natr" => arg(args, 0),
+        "cci" | "imi" => arg(args, 0).saturating_sub(1),
+        "mfi" => arg(args, 0),
+        "ultosc" => arg(args, 0).max(arg(args, 1)).max(arg(args, 2)),
         // %K (lookback fastk-1) then matype-MA smoothing stage(s).
         "stoch" => {
             let base =
-                arg(args, 0, 5).saturating_sub(1) + ma_lookback(arg(args, 1, 3), arg(args, 2, 0));
+                arg(args, 0).saturating_sub(1) + ma_lookback(arg(args, 1), arg(args, 2));
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 3, 3), arg(args, 4, 0)),
+                Some("d") => base + ma_lookback(arg(args, 3), arg(args, 4)),
                 _ => base,
             }
         }
         "stochf" => {
-            let base = arg(args, 0, 5).saturating_sub(1);
+            let base = arg(args, 0).saturating_sub(1);
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 1, 3), arg(args, 2, 0)),
+                Some("d") => base + ma_lookback(arg(args, 1), arg(args, 2)),
                 _ => base,
             }
         }
         "stochrsi" => {
             // RSI lookback (period) + the %K window (fastk_period-1), then the d-line MA.
-            let base = arg(args, 0, 14) + arg(args, 1, 5).saturating_sub(1);
+            let base = arg(args, 0) + arg(args, 1).saturating_sub(1);
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 2, 3), arg(args, 3, 0)),
+                Some("d") => base + ma_lookback(arg(args, 2), arg(args, 3)),
                 _ => base,
             }
         }
-        "plus_dm" | "minus_dm" => arg(args, 0, 14).saturating_sub(1),
-        "plus_di" | "minus_di" | "dx" => arg(args, 0, 14),
-        "adx" => 2 * arg(args, 0, 14) - 1,
-        "adxr" => 3 * arg(args, 0, 14) - 2,
-        "trix" => 3 * arg(args, 0, 30).saturating_sub(1) + 1,
-        "aroon" | "aroonosc" => arg(args, 0, 14),
+        "plus_dm" | "minus_dm" => arg(args, 0).saturating_sub(1),
+        "plus_di" | "minus_di" | "dx" => arg(args, 0),
+        "adx" => 2 * arg(args, 0) - 1,
+        "adxr" => 3 * arg(args, 0) - 2,
+        "trix" => 3 * arg(args, 0).saturating_sub(1) + 1,
+        "aroon" | "aroonosc" => arg(args, 0),
         "sum" | "maxindex" | "minindex" | "minmax" | "minmaxindex" => {
-            arg(args, 0, 30).saturating_sub(1)
+            arg(args, 0).saturating_sub(1)
         }
         "bop" => 0,
         "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf" => {
-            arg(args, 0, 14).saturating_sub(1)
+            arg(args, 0).saturating_sub(1)
         }
-        "var" | "stddev" => arg(args, 0, 5).saturating_sub(1),
+        "var" | "stddev" => arg(args, 0).saturating_sub(1),
         "median" | "quantile" | "rank" | "skew" | "kurt" | "sem" => {
-            arg(args, 0, 30).saturating_sub(1)
+            arg(args, 0).saturating_sub(1)
         }
-        "correl" => arg(args, 0, 30).saturating_sub(1),
-        "beta" => arg(args, 0, 5),
+        "correl" => arg(args, 0).saturating_sub(1),
+        "beta" => arg(args, 0),
         "obv" | "ad" => 0,
-        "adosc" => arg(args, 0, 3).max(arg(args, 1, 10)).saturating_sub(1),
+        "adosc" => arg(args, 0).max(arg(args, 1)).saturating_sub(1),
         "avgprice" | "medprice" | "typprice" | "wclprice" => 0,
         // Hilbert-transform suite: fixed warm-up (DCPERIOD/PHASOR/MAMA = 32; the
         // phase-dependent DCPHASE/SINE/TRENDLINE/TRENDMODE need 63).
         "ht_dcperiod" | "ht_phasor" | "mama" => 32,
         "ht_dcphase" | "ht_sine" | "ht_trendline" | "ht_trendmode" => 63,
-        _ => return None,
-    };
-    Some(lb)
+        _ => unreachable!("every bound command has a lookback arm"), // LCOV_EXCL_LINE
+    }
 }
 
 /// Lookback for a parsed directive: a command's own lookback plus the largest
 /// lookback among its series operands; operators take the max of their operands.
-pub fn lookback(node: &Node) -> usize {
+pub fn lookback(node: &Ast) -> usize {
     match node {
         Node::Scalar(_) => 0,
-        Node::Name(name) => own_lookback(name, None, &[]).unwrap_or(0),
+        // A bare name is a column (no warm-up) or a no-argument command: bind it to
+        // resolve its defaults — the same single bind `exec` uses — and an unbindable
+        // name (a column reference) contributes no lookback.
+        Node::Name(name) => match crate::bind::bind_command(name, None, &[], &[]) {
+            Ok(cmd) => own_lookback(&cmd.name, cmd.sub.as_deref(), &cmd.args),
+            Err(_) => 0,
+        },
         Node::Command(Command {
             name,
             sub,
             args,
             series,
         }) => {
-            let own = own_lookback(name, sub.as_deref(), args).unwrap_or(0);
+            let own = own_lookback(name, sub.as_deref(), args);
             let series_max = series.iter().map(lookback).max().unwrap_or(0);
             own + series_max
         }

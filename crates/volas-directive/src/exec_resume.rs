@@ -1,6 +1,9 @@
 //! Incremental directive resume support for cached computed columns.
 
-use crate::types::Node;
+use std::borrow::Cow;
+
+use crate::bind::bind_command;
+use crate::types::{ArgValue, Ast, Node};
 
 mod initial_state;
 mod resume;
@@ -19,23 +22,24 @@ pub use resume::{execute_resume, execute_resume_default_series, execute_resume_d
 // volas auto-caches) are handled; an unusual `@`-operand override returns `None`
 // and stays on the fallback.
 
-/// Resolve a command node to `(name_lc, sub, args, series)` when it is a plain
-/// `Node::Command` (or a bare `Node::Name` no-arg command, e.g. `obv`/`ad`); `None`
-/// otherwise. The name is lower-cased and `cdl`→`style` aliased, matching
-/// [`exec_command`]. A `Node::Name` carries no sub / args / series — the same way
-/// [`execute`] dispatches it via `exec_command(df, name, None, &[], &[])`.
-fn as_command(node: &Node) -> Option<(String, Option<String>, &[Option<String>], &[Node])> {
-    let lc = |name: &str| {
-        let name = name.to_ascii_lowercase();
-        if name == "cdl" {
-            "style".to_string()
-        } else {
-            name
-        }
-    };
+/// Resolve a command node to `(name, sub, args, series)` when it is a plain
+/// `Node::Command` (canonical name / sub and resolved arguments, borrowed) or a bare
+/// `Node::Name` no-argument command (e.g. `obv`/`ad`, or a default-only canonical form
+/// like `efi`). For a bare name the command is bound on the fly — the same single
+/// `bind` `exec` uses — so its defaults are resolved and the resume kernels read a
+/// complete argument list rather than an empty slice. `None` for anything else.
+fn as_command(node: &Ast) -> Option<(String, Option<String>, Cow<'_, [ArgValue]>, &[Ast])> {
     match node {
-        Node::Command(cmd) => Some((lc(&cmd.name), cmd.sub.clone(), &cmd.args, &cmd.series)),
-        Node::Name(name) if !name.is_empty() => Some((lc(name), None, &[], &[])),
+        Node::Command(cmd) => Some((
+            cmd.name.clone(),
+            cmd.sub.clone(),
+            Cow::Borrowed(&cmd.args[..]),
+            &cmd.series,
+        )),
+        Node::Name(name) if !name.is_empty() => {
+            let cmd = bind_command(name, None, &[], &[]).ok()?;
+            Some((cmd.name, cmd.sub, Cow::Owned(cmd.args.into_vec()), &[]))
+        }
         _ => None,
     }
 }

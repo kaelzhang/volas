@@ -25,6 +25,12 @@ pub enum VolasError {
     /// A bad argument value.
     #[error("value error: {0}")]
     Value(String),
+
+    /// A directive string that could not be tokenized / parsed (a *syntax* error,
+    /// annotated with line / column), as opposed to a [`Value`](Self::Value) error
+    /// for a well-formed directive with an invalid command / argument.
+    #[error("parse error: {0}")]
+    Parse(String),
 }
 
 /// Convenience result alias used throughout the core.
