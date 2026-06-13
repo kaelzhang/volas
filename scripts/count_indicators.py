@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC_RS = ROOT / "crates/volas-directive/src/spec.rs"
 CANDLES_RS = ROOT / "crates/volas-compute/src/indicators/candles/mod.rs"
 README = ROOT / "README.md"
+README_ZH = ROOT / "README.zh-CN.md"
 INDICATORS = ROOT / "INDICATORS.md"
 
 # Canonical sub-command tokens used by the multi-output indicators (after
@@ -98,14 +99,15 @@ def count() -> dict:
 
 def _cites(path: Path, total: int) -> bool:
     """Whether `path` states the indicator total — the number next to the word
-    'indicator' (so a coincidental number elsewhere doesn't count)."""
-    return re.search(rf"(?<!\d){total}(?!\d)\D{{0,40}}indicator", path.read_text(), re.I) is not None
+    'indicator' (English) or '指标' (Chinese README), so a coincidental number
+    elsewhere doesn't count."""
+    return re.search(rf"(?<!\d){total}(?!\d)\D{{0,40}}(indicator|指标)", path.read_text(), re.I) is not None
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
-                    help="assert README.md and INDICATORS.md cite the computed total")
+                    help="assert README.md, README.zh-CN.md and INDICATORS.md cite the computed total")
     args = ap.parse_args()
 
     r = count()
@@ -118,12 +120,12 @@ def main() -> int:
 
     if args.check:
         total = r["total"]
-        bad = [p.name for p in (README, INDICATORS) if not _cites(p, total)]
+        bad = [p.name for p in (README, README_ZH, INDICATORS) if not _cites(p, total)]
         if bad:
             print(f"\nerror: {', '.join(bad)} do not cite the indicator total {total}; "
                   f"update them (or re-run without --check to see the new number).", file=sys.stderr)
             return 1
-        print(f"\nREADME.md and INDICATORS.md both cite {total} ✓")
+        print(f"\nREADME.md, README.zh-CN.md and INDICATORS.md all cite {total} ✓")
     return 0
 
 

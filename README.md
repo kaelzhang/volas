@@ -5,6 +5,8 @@
 
 # [volas](https://github.com/kaelzhang/volas)
 
+English | [简体中文](README.zh-CN.md)
+
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
 **volas** is a Rust-backed, pandas-shaped `DataFrame` for live OHLCV pipelines: [**242** trading-indicators](INDICATORS.md), incremental O(lookback) refresh, and NumPy/Torch-ready output.
@@ -16,17 +18,33 @@ On our reproducible benchmark suite, **volas** is faster than pandas, polars, st
 - **Drop-in for pandas.** The same `.loc` / `.iloc` / `.at`, `read_csv`,
   `to_numpy` and resampling — change the import, keep your code. (See
   [what's not covered](PANDAS-DIFFERENCES.md#index-limitations))
-- **Fastest in the field.** Quicker than pandas, polars and TA-Lib on
-  nearly every indicator — and faster than pandas even off the trading desk.
-  ([live benchmark report](https://volas.ost.ai))
-  - Beats TA-Lib on **153 / 158** covered indicators in batch computation.
-  - Refreshes indicators incrementally on each new bar — **~5×** faster
-    than TA-Lib in average, and up to **~360x** faster than pandas.
+- **Fastest in the field.** Faster than pandas, polars and TA-Lib on nearly
+  every indicator — see the always-current
+  [live benchmark report](https://volas.ost.ai).
+  - Beats TA-Lib on **137 / 158** covered indicators by the default ratio on
+    the published report — reproducible via `make benchmark`.
+  - Refreshes indicators incrementally on each new bar — **~5×** faster than
+    TA-Lib, and up to **~360×** faster than pandas.
 - **Built for the live tick.** A new bar touches only the affected tail
   (`O(lookback)`, not `O(n)`); indicators refresh in microseconds, never a full
   recompute.
 - **Rust inside, NumPy / Torch out.** Compiled kernels, zero pandas at runtime;
   `to_numpy()` feeds NumPy and `torch.Tensor` pipelines.
+
+### When to reach for volas
+
+volas is **not** a general-purpose pandas replacement — for plain dataframe
+analysis, keep pandas or polars. It is a narrow, fast DataFrame for the case
+where a **new OHLCV bar arrives and indicators must refresh now**:
+
+| | pandas | polars | TA-Lib | volas |
+| --- | :---: | :---: | :---: | :---: |
+| pandas-shaped indexing (`.loc` / `.iloc` / `.at`) | ✅ | ❌ | ❌ | ✅ |
+| OHLCV-native indicator directives (`df['rsi:14']`) | ❌ | ❌ | ✅ | ✅ |
+| Indicator cache owned by the frame | ❌ | ❌ | ❌ | ✅ |
+| Incremental `O(lookback)` refresh on a new bar | ❌ | ❌ | ❌ | ✅ |
+| Rust-backed kernels, no pandas at runtime | ❌ | ✅ | C | ✅ |
+| NumPy / Torch export | ✅ | ✅ | arrays | ✅ |
 
 ## Table of Content
 - [Installation](#installation)
