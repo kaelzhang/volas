@@ -11,6 +11,16 @@ group follows TA-Lib's function surface: directive names are lowercase,
 arguments are positional, and multi-output indicators expose each line as a
 sub-command such as `macd.signal`, `boll.upper`, or `ht_sine.leadsine`.
 
+**Reading the signatures.** A parameter written `<name=value>` keeps that value as
+its default — it is the one dominant industry standard for the indicator (e.g.
+Bollinger's `20`, MACD's `12,26,9`). A parameter written `<name>` (no `=value`) is
+**required**: it has no single dominant default, so volas does not invent one — you
+supply the value your strategy uses. Common choices are indicator-specific — RSI is
+most often `14` but `9` / `21` / `25` are all used; ATR / ADX usually `14`; Donchian
+`20`, also `10` / `55`; a moving-average period or a rolling `sum` / `var` window has
+no standard at all. (`df[d]` has always required these; only `directive_stringify` /
+`directive_lookback` now reject a bare required form.)
+
 ## Volas-exclusive indicators
 
 These directives are implemented by Volas itself. Many of them follow the
@@ -186,9 +196,9 @@ df['hhv:10@close']
 ### `donchian`, Donchian Channels
 
 ```
-donchian:<period=20>@<high>,<low>
-donchian.upper:<period=20>@<high>
-donchian.lower:<period=20>@<low>
+donchian:<period>@<high>,<low>
+donchian.upper:<period>@<high>
+donchian.lower:<period>@<low>
 ```
 
 Gets Donchian channels, the historical view of price volatility by charting a
@@ -260,7 +270,7 @@ dpo:<period>@<on>
 The price `period/2 + 1` bars ago minus the `period`-bar SMA, removing the trend
 to expose shorter cycles.
 
-- **period?** `int=20`
+- **period** `int` (required)
 - **on?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
@@ -330,7 +340,7 @@ chop:<period>@<high>,<low>,<close>
 How choppy versus trending the market is over `period` bars:
 `100 * log10(sum(TR) / (HHV − LLV)) / log10(period)`. Higher is choppier.
 
-- **period?** `int=14`
+- **period** `int` (required)
 - **high? / low? / close?** `str` the input columns; default to the like-named frame columns.
 
 ```py
@@ -364,7 +374,7 @@ emv:<period>@<high>,<low>,<volume>
 The `period`-bar SMA of price displacement per unit of volume (StockCharts' 1e8
 volume scale) — how easily price moves.
 
-- **period?** `int=14`
+- **period** `int` (required)
 - **high? / low? / volume?** `str` the input columns; default to the like-named frame columns.
 
 ```py
@@ -667,7 +677,7 @@ Six support / resistance bands around the typical price `TYP = (H+L+C)/3`, using
 `TYP+(HH−LL)`, strong `2·HH−LL`; support mirrors them — weak `TYP−(HH−TYP)`, mid
 `TYP−(HH−LL)`, strong `2·LL−HH`. MIKE has no single line — request one of the six.
 
-- **period?** `int=12`
+- **period** `int` (required)
 - **high? / low? / close?** `str` the input columns.
 
 ```py
@@ -948,7 +958,7 @@ median:<period>@<series>
 The median of the trailing `period` values. A window containing a missing
 value yields `NA` (the full-window warm-up discipline shared by the TA family).
 
-- **period?** `int=30` Must be `>= 2`.
+- **period** `int` (required) Must be `>= 2`.
 - **series?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
@@ -965,7 +975,7 @@ quantile:<period>,<q>@<series>
 The `q`-quantile (linear interpolation) of the trailing `period` values — a
 percentile channel in one directive.
 
-- **period?** `int=30` Must be `>= 2`.
+- **period** `int` (required) Must be `>= 2`.
 - **q?** `float=0.5` The quantile level, in `[0, 1]`.
 - **series?** `str='close'` Which column or directive the calculation is based on.
 
@@ -984,7 +994,7 @@ The percent rank of the **current** bar within its own trailing window, in
 `(0, 1]` — "where does today sit inside the last `period` bars?" (`1.0` = the
 highest value of the window).
 
-- **period?** `int=30` Must be `>= 2`.
+- **period** `int` (required) Must be `>= 2`.
 - **series?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
@@ -1000,7 +1010,7 @@ skew:<period>@<series>
 
 The bias-corrected sample skewness of the trailing `period` values.
 
-- **period?** `int=30` Must be `>= 3` (skewness is undefined below 3 samples).
+- **period** `int` (required) Must be `>= 3` (skewness is undefined below 3 samples).
 - **series?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
@@ -1017,7 +1027,7 @@ The bias-corrected **excess** kurtosis of the trailing `period` values
 (computed with two-pass central moments — numerically exact even when the
 window mean dwarfs its spread).
 
-- **period?** `int=30` Must be `>= 4` (kurtosis is undefined below 4 samples).
+- **period** `int` (required) Must be `>= 4` (kurtosis is undefined below 4 samples).
 - **series?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
@@ -1033,7 +1043,7 @@ sem:<period>@<series>
 The standard error of the mean (`std / sqrt(count)`, sample `ddof=1`) of the
 trailing `period` values.
 
-- **period?** `int=30` Must be `>= 2`.
+- **period** `int` (required) Must be `>= 2`.
 - **series?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
@@ -1094,15 +1104,15 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | --- | --- | --- | --- |
 | `ma` | `MA` | Generic moving average selected by MA type. | `:<period>,<matype=0>@<series=close>` |
 | `ema` | `EMA` | Exponential moving average. | `:<period>@<series=close>` |
-| `wma` | `WMA` | Weighted moving average. | `:<period=30>@<series=close>` |
-| `dema` | `DEMA` | Double exponential moving average. | `:<period=30>@<series=close>` |
-| `tema` | `TEMA` | Triple exponential moving average. | `:<period=30>@<series=close>` |
-| `trima` | `TRIMA` | Triangular moving average. | `:<period=30>@<series=close>` |
-| `kama` | `KAMA` | Kaufman adaptive moving average. | `:<period=30>@<series=close>` |
-| `t3` | `T3` | T3 moving average. | `:<period=5>,<vfactor=0.7>@<series=close>` |
+| `wma` | `WMA` | Weighted moving average. | `:<period>@<series=close>` |
+| `dema` | `DEMA` | Double exponential moving average. | `:<period>@<series=close>` |
+| `tema` | `TEMA` | Triple exponential moving average. | `:<period>@<series=close>` |
+| `trima` | `TRIMA` | Triangular moving average. | `:<period>@<series=close>` |
+| `kama` | `KAMA` | Kaufman adaptive moving average. | `:<period>@<series=close>` |
+| `t3` | `T3` | T3 moving average. | `:<period>,<vfactor=0.7>@<series=close>` |
 | `mama` | `MAMA` | MESA adaptive moving average main line. | `:<fast_limit=0.5>,<slow_limit=0.05>@<series=close>` |
 | `mama.fama` | `MAMA` | Following adaptive moving average line. | `:<fast_limit=0.5>,<slow_limit=0.05>@<series=close>` |
-| `mavp` | `MAVP` | Moving average with per-row variable periods; the REQUIRED second input series supplies each row's period (clamped to `[min, max]`). | `:<min=2>,<max=30>,<matype=0>@<series_close=close>,<series_periods>` |
+| `mavp` | `MAVP` | Moving average with per-row variable periods; the REQUIRED second input series supplies each row's period (clamped to `[min, max]`). | `:<min>,<max>,<matype=0>@<series_close=close>,<series_periods>` |
 | `sar` | `SAR` | Parabolic SAR. | `:<acceleration=0.02>,<maximum=0.2>@<series_high=high>,<series_low=low>` |
 | `sarext` | `SAREXT` | Extended Parabolic SAR. | `:<start=0>,<offset=0>,<long_init=0.02>,<long_step=0.02>,<long_max=0.2>,<short_init=0.02>,<short_step=0.02>,<short_max=0.2>@<series_high=high>,<series_low=low>` |
 | `boll` | `BBANDS` | Bollinger middle band. | `:<period=20>@<series=close>` |
@@ -1111,8 +1121,8 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | `accbands` | `ACCBANDS` | Acceleration Bands middle line. | `:<period=20>@<series=close>` |
 | `accbands.upper` | `ACCBANDS` | Acceleration Bands upper line. | `:<period=20>@<series_high=high>,<series_low=low>` |
 | `accbands.lower` | `ACCBANDS` | Acceleration Bands lower line. | `:<period=20>@<series_high=high>,<series_low=low>` |
-| `midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `:<period=14>@<series=close>` |
-| `midprice` | `MIDPRICE` | Midpoint price over high and low. | `:<period=14>@<series_high=high>,<series_low=low>` |
+| `midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `:<period>@<series=close>` |
+| `midprice` | `MIDPRICE` | Midpoint price over high and low. | `:<period>@<series_high=high>,<series_low=low>` |
 | `ht_trendline` | `HT_TRENDLINE` | Hilbert Transform instantaneous trendline. | `@<series=close>` |
 | `macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. | `:<fast=12>,<slow=26>@<series=close>` |
 | `macd.signal` | `MACD` | Signal line of the Volas MACD line. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
@@ -1125,42 +1135,42 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | `macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
 | `apo` | `APO` | Absolute price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
 | `ppo` | `PPO` | Percentage price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
-| `rsi` | `RSI` | Relative Strength Index. | `:<period=14>@<series=close>` |
-| `cmo` | `CMO` | Chande Momentum Oscillator. | `:<period=14>@<series=close>` |
-| `cci` | `CCI` | Commodity Channel Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `imi` | `IMI` | Intraday Momentum Index. | `:<period=14>@<series_open=open>,<series_close=close>` |
-| `mfi` | `MFI` | Money Flow Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
+| `rsi` | `RSI` | Relative Strength Index. | `:<period>@<series=close>` |
+| `cmo` | `CMO` | Chande Momentum Oscillator. | `:<period>@<series=close>` |
+| `cci` | `CCI` | Commodity Channel Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `imi` | `IMI` | Intraday Momentum Index. | `:<period>@<series_open=open>,<series_close=close>` |
+| `mfi` | `MFI` | Money Flow Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
 | `bop` | `BOP` | Balance of Power. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `willr` | `WILLR` | Williams Percent Range. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `mom` | `MOM` | Momentum. | `:<period=10>@<series=close>` |
-| `roc` | `ROC` | Rate of change. | `:<period=10>@<series=close>` |
-| `rocp` | `ROCP` | Rate of change percentage. | `:<period=10>@<series=close>` |
-| `rocr` | `ROCR` | Rate of change ratio. | `:<period=10>@<series=close>` |
-| `rocr100` | `ROCR100` | Rate of change ratio multiplied by 100. | `:<period=10>@<series=close>` |
+| `willr` | `WILLR` | Williams Percent Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `mom` | `MOM` | Momentum. | `:<period>@<series=close>` |
+| `roc` | `ROC` | Rate of change. | `:<period>@<series=close>` |
+| `rocp` | `ROCP` | Rate of change percentage. | `:<period>@<series=close>` |
+| `rocr` | `ROCR` | Rate of change ratio. | `:<period>@<series=close>` |
+| `rocr100` | `ROCR100` | Rate of change ratio multiplied by 100. | `:<period>@<series=close>` |
 | `stoch.k` | `STOCH` | Slow stochastic percent K. | `:<fastk=5>,<slowk=3>,<slowk_matype=0>,<slowd=3>,<slowd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | `stoch.d` | `STOCH` | Slow stochastic percent D. | `:<fastk=5>,<slowk=3>,<slowk_matype=0>,<slowd=3>,<slowd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | `stochf.k` | `STOCHF` | Fast stochastic percent K. | `:<fastk=5>,<fastd=3>,<fastd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | `stochf.d` | `STOCHF` | Fast stochastic percent D. | `:<fastk=5>,<fastd=3>,<fastd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | `stochrsi.k` | `STOCHRSI` | Fast stochastic RSI percent K. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
 | `stochrsi.d` | `STOCHRSI` | Fast stochastic RSI percent D. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
-| `trix` | `TRIX` | One-period ROC of a triple EMA. | `:<period=30>@<series=close>` |
+| `trix` | `TRIX` | One-period ROC of a triple EMA. | `:<period>@<series=close>` |
 | `ultosc` | `ULTOSC` | Ultimate Oscillator. | `:<short=7>,<medium=14>,<long=28>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `aroon.up` | `AROON` | Aroon up line. | `:<period=14>@<series_high=high>,<series_low=low>` |
-| `aroon.down` | `AROON` | Aroon down line. | `:<period=14>@<series_high=high>,<series_low=low>` |
-| `aroonosc` | `AROONOSC` | Aroon oscillator. | `:<period=14>@<series_high=high>,<series_low=low>` |
-| `plus_dm` | `PLUS_DM` | Plus directional movement. | `:<period=14>@<series_high=high>,<series_low=low>` |
-| `minus_dm` | `MINUS_DM` | Minus directional movement. | `:<period=14>@<series_high=high>,<series_low=low>` |
-| `plus_di` | `PLUS_DI` | Plus directional indicator. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `minus_di` | `MINUS_DI` | Minus directional indicator. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `dx` | `DX` | Directional Movement Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `adx` | `ADX` | Average Directional Movement Index. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `adxr` | `ADXR` | Average Directional Movement Index Rating. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `aroon.up` | `AROON` | Aroon up line. | `:<period>@<series_high=high>,<series_low=low>` |
+| `aroon.down` | `AROON` | Aroon down line. | `:<period>@<series_high=high>,<series_low=low>` |
+| `aroonosc` | `AROONOSC` | Aroon oscillator. | `:<period>@<series_high=high>,<series_low=low>` |
+| `plus_dm` | `PLUS_DM` | Plus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
+| `minus_dm` | `MINUS_DM` | Minus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
+| `plus_di` | `PLUS_DI` | Plus directional indicator. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `minus_di` | `MINUS_DI` | Minus directional indicator. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `dx` | `DX` | Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `adx` | `ADX` | Average Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `adxr` | `ADXR` | Average Directional Movement Index Rating. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | `obv` | `OBV` | On-Balance Volume. | `@<series_close=close>,<series_volume=volume>` |
 | `ad` | `AD` | Chaikin Accumulation Distribution line. | `@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
 | `adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `:<fast=3>,<slow=10>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
 | `tr` | `TRANGE` | True Range. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `atr` | `ATR` | Average True Range. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `natr` | `NATR` | Normalized Average True Range. | `:<period=14>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `atr` | `ATR` | Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| `natr` | `NATR` | Normalized Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | `avgprice` | `AVGPRICE` | Average price. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | `medprice` | `MEDPRICE` | Median price. | `@<series_high=high>,<series_low=low>` |
 | `typprice` | `TYPPRICE` | Typical price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
@@ -1172,22 +1182,22 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | `ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@<series=close>` |
 | `ht_sine.leadsine` | `HT_SINE` | Hilbert Transform lead sine wave. | `@<series=close>` |
 | `ht_trendmode` | `HT_TRENDMODE` | Hilbert Transform trend versus cycle mode. | `@<series=close>` |
-| `linearreg` | `LINEARREG` | Linear regression value. | `:<period=14>@<series=close>` |
-| `linearreg_slope` | `LINEARREG_SLOPE` | Linear regression slope. | `:<period=14>@<series=close>` |
-| `linearreg_intercept` | `LINEARREG_INTERCEPT` | Linear regression intercept. | `:<period=14>@<series=close>` |
-| `linearreg_angle` | `LINEARREG_ANGLE` | Linear regression angle. | `:<period=14>@<series=close>` |
-| `tsf` | `TSF` | Time Series Forecast. | `:<period=14>@<series=close>` |
-| `var` | `VAR` | Variance. | `:<period=5>@<series=close>` |
-| `stddev` | `STDDEV` | Standard deviation. | `:<period=5>,<nbdev=1>@<series=close>` |
-| `correl` | `CORREL` | Pearson correlation coefficient. | `:<period=30>@<series=close>,<series_other>` |
-| `beta` | `BETA` | Beta. | `:<period=5>@<series=close>,<series_other>` |
-| `sum` | `SUM` | Rolling sum. | `:<period=30>@<series=close>` |
-| `maxindex` | `MAXINDEX` | Index of the rolling maximum. | `:<period=30>@<series=close>` |
-| `minindex` | `MININDEX` | Index of the rolling minimum. | `:<period=30>@<series=close>` |
-| `minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `:<period=30>@<series=close>` |
-| `minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `:<period=30>@<series=close>` |
-| `minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `:<period=30>@<series=close>` |
-| `minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `:<period=30>@<series=close>` |
+| `linearreg` | `LINEARREG` | Linear regression value. | `:<period>@<series=close>` |
+| `linearreg_slope` | `LINEARREG_SLOPE` | Linear regression slope. | `:<period>@<series=close>` |
+| `linearreg_intercept` | `LINEARREG_INTERCEPT` | Linear regression intercept. | `:<period>@<series=close>` |
+| `linearreg_angle` | `LINEARREG_ANGLE` | Linear regression angle. | `:<period>@<series=close>` |
+| `tsf` | `TSF` | Time Series Forecast. | `:<period>@<series=close>` |
+| `var` | `VAR` | Variance. | `:<period>@<series=close>` |
+| `stddev` | `STDDEV` | Standard deviation. | `:<period>,<nbdev>@<series=close>` |
+| `correl` | `CORREL` | Pearson correlation coefficient. | `:<period>@<series=close>,<series_other>` |
+| `beta` | `BETA` | Beta. | `:<period>@<series=close>,<series_other>` |
+| `sum` | `SUM` | Rolling sum. | `:<period>@<series=close>` |
+| `maxindex` | `MAXINDEX` | Index of the rolling maximum. | `:<period>@<series=close>` |
+| `minindex` | `MININDEX` | Index of the rolling minimum. | `:<period>@<series=close>` |
+| `minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `:<period>@<series=close>` |
+| `minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `:<period>@<series=close>` |
+| `minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `:<period>@<series=close>` |
+| `minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `:<period>@<series=close>` |
 | `cdl.2crows` | `CDL2CROWS` | Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | `cdl.3blackcrows` | `CDL3BLACKCROWS` | Three Black Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | `cdl.3inside` | `CDL3INSIDE` | Three Inside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
