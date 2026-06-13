@@ -66,9 +66,132 @@ pub(crate) fn build_f64(n: usize, fill: impl FnOnce(&mut [MaybeUninit<f64>])) ->
     v
 }
 
+/// A single-write output buffer with `vec![f64::NAN; n]`-style ergonomics — for the
+/// many kernels whose loop already writes `out[i]` (or walks a raw pointer) and would
+/// otherwise need re-indenting into [`build_f64`]'s closure. `[0, warm)` is NaN; the
+/// valid region `[warm, n)` is written once each via [`OutBuf::set`] (or via the raw
+/// [`OutBuf::ptr`]), then [`OutBuf::finish`] yields the column.
+///
+/// Release codegen matches the retired `set_len` pattern (no prefill memset of the
+/// valid region, raw stores). Debug poisons the valid region and `finish` asserts none
+/// survived, so a missed slot is a deterministic test failure rather than UB. Pair with
+/// `MallocPreScribble=1` / `cargo miri test` for luck-free coverage.
+pub(crate) struct OutBuf {
+    v: Vec<f64>,
+    n: usize,
+    #[cfg(debug_assertions)]
+    warm: usize,
+}
+
+impl OutBuf {
+    /// `[0, warm)` is NaN; `[warm, n)` must each be written once via [`set`]/[`ptr`]
+    /// before [`finish`].
+    #[inline]
+    pub(crate) fn warmup(n: usize, warm: usize) -> Self {
+        let warm = warm.min(n);
+        let mut v = Vec::<f64>::with_capacity(n);
+        let p = v.as_mut_ptr();
+        // SAFETY: writing the `n` reserved slots, then `set_len(n)`. The valid region is
+        // uninitialised in release (the kernel's writes fill it) and poisoned in debug
+        // (so `finish` can prove every slot was overwritten).
+        unsafe {
+            for i in 0..warm {
+                p.add(i).write(f64::NAN);
+            }
+            #[cfg(debug_assertions)]
+            for i in warm..n {
+                p.add(i).write(POISON);
+            }
+            v.set_len(n);
+        }
+        OutBuf {
+            v,
+            n,
+            #[cfg(debug_assertions)]
+            warm,
+        }
+    }
+
+    /// Write valid slot `i` (`warm <= i < n`) exactly once — a raw store: no bounds
+    /// check (the kernel's loop bounds guarantee `i < n`) and no `&mut` to uninitialised
+    /// memory.
+    #[inline]
+    pub(crate) fn set(&mut self, i: usize, val: f64) {
+        debug_assert!(i < self.n, "OutBuf::set out of range");
+        // SAFETY: `i < n == capacity`; `f64` is `Copy` so the uninitialised prior value
+        // is not dropped.
+        unsafe {
+            self.v.as_mut_ptr().add(i).write(val);
+        }
+    }
+
+    /// The raw buffer pointer, for a hand-tuned kernel that walks the output. The caller
+    /// must write every valid slot `[warm, n)` via `*p.add(i) = ..` (a raw store, sound
+    /// for the uninitialised `f64` region) before [`finish`].
+    #[inline]
+    pub(crate) fn ptr(&mut self) -> *mut f64 {
+        self.v.as_mut_ptr()
+    }
+
+    /// Yield the finished column, asserting (debug) that every valid slot was written.
+    #[inline]
+    pub(crate) fn finish(self) -> Vec<f64> {
+        #[cfg(debug_assertions)]
+        {
+            let p = self.v.as_ptr();
+            for i in self.warm..self.n {
+                // SAFETY: poisoned at `warmup`, so initialised to read back in debug.
+                let bits = unsafe { *p.add(i) }.to_bits();
+                assert!(
+                    bits != POISON.to_bits(),
+                    "indicator output slot {i} of {} left unwritten (OutBuf contract)",
+                    self.n
+                );
+            }
+        }
+        self.v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outbuf_set_and_finish() {
+        let mut out = OutBuf::warmup(5, 2);
+        for i in 2..5 {
+            out.set(i, i as f64 * 10.0);
+        }
+        let v = out.finish();
+        assert!(v[0].is_nan() && v[1].is_nan());
+        assert_eq!(&v[2..], &[20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn outbuf_ptr_walk() {
+        let mut out = OutBuf::warmup(4, 1);
+        let p = out.ptr();
+        // SAFETY: writes the valid region [1, 4).
+        unsafe {
+            for i in 1..4 {
+                *p.add(i) = i as f64;
+            }
+        }
+        let v = out.finish();
+        assert!(v[0].is_nan());
+        assert_eq!(&v[1..], &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "left unwritten")]
+    #[cfg(debug_assertions)]
+    fn outbuf_catches_a_missed_slot() {
+        let mut out = OutBuf::warmup(3, 0);
+        out.set(0, 1.0);
+        out.set(2, 3.0); // skip slot 1
+        let _ = out.finish();
+    }
 
     #[test]
     fn build_f64_writes_every_slot() {

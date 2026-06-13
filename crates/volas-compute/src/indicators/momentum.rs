@@ -55,12 +55,11 @@ pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
     }
     // ROC is a coverage hot spot by itself, so keep the canonical line specialized:
     // one explicit loop avoids the generic closure/iterator adapter used by ROCP/ROCR.
-    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
-    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
-    // the prefill is a vectorized splat, measured at parity by make perf-ab).
-    let mut out = vec![f64::NAN; n];
+    // Single-write (D2): NaN warm-up `[0, period)`, valid region written once via the
+    // walking output pointer (no prefill memset); `out.finish()` proves it was filled.
+    let mut out = crate::buf::OutBuf::warmup(n, period);
     let data_ptr = data.as_ptr();
-    let out_ptr = out.as_mut_ptr();
+    let out_ptr = out.ptr();
     let mut cur_ptr = unsafe { data_ptr.add(period) };
     let mut prior_ptr = data_ptr;
     let mut out_write = unsafe { out_ptr.add(period) };
@@ -83,7 +82,7 @@ pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
         }
         remaining -= 1;
     }
-    out
+    out.finish()
 }
 
 /// Rate of change percentage: `data/data[period ago] - 1` (TA-Lib ROCP).
@@ -110,10 +109,8 @@ pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64
         return vec![f64::NAN; n];
     }
     let lookback = period - 1;
-    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
-    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
-    // the prefill is a vectorized splat, measured at parity by make perf-ab).
-    let mut out = vec![f64::NAN; n];
+    // Single-write (D2): NaN warm-up, valid region written once via `out.set`.
+    let mut out = crate::buf::OutBuf::warmup(n, lookback);
     let mut today = lookback;
     let mut trailing = 0usize;
     let mut highest_idx = usize::MAX;
@@ -163,14 +160,14 @@ pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64
         // of TA-Lib's `(range / -100)` followed by a second division.
         let range = highest - lowest;
         if range != 0.0 {
-            out[today] = (highest - unsafe { *close.get_unchecked(today) }) * (-100.0 / range);
+            out.set(today, (highest - unsafe { *close.get_unchecked(today) }) * (-100.0 / range));
         } else {
-            out[today] = 0.0;
+            out.set(today, 0.0);
         }
         trailing += 1;
         today += 1;
     }
-    out
+    out.finish()
 }
 
 /// Balance of Power: `(close − open)/(high − low)` (TA-Lib BOP). A bar with no
@@ -194,9 +191,8 @@ pub fn bop(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 /// TA-Lib — no divide-by-zero guard. O(n·period), matching TA-Lib.)
 pub fn imi(open: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let n = close.len();
-    let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
-        return out;
+        return vec![f64::NAN; n];
     }
     let lookback = period - 1;
     // Each bar's up / down move; the window sums slide (add the entering bar, drop the leaving
@@ -216,16 +212,17 @@ pub fn imi(open: &[f64], close: &[f64], period: usize) -> Vec<f64> {
         up_sum += u;
         down_sum += d;
     }
+    let mut out = crate::buf::OutBuf::warmup(n, lookback);
     for today in lookback..n {
         let (u, d) = updown(today);
         up_sum += u;
         down_sum += d;
-        out[today] = 100.0 * (up_sum / (up_sum + down_sum));
+        out.set(today, 100.0 * (up_sum / (up_sum + down_sum)));
         let (lu, ld) = updown(today - lookback);
         up_sum -= lu;
         down_sum -= ld;
     }
-    out
+    out.finish()
 }
 
 /// Commodity Channel Index (TA-Lib CCI): `(tp − SMA(tp)) / (0.015 · meanDev)` over
@@ -234,9 +231,8 @@ pub fn imi(open: &[f64], close: &[f64], period: usize) -> Vec<f64> {
 /// (TA-Lib's guard). Lookback `period-1`. O(n·period), as in TA-Lib.
 pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let n = close.len();
-    let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
-        return out;
+        return vec![f64::NAN; n];
     }
     let p = period as f64;
     let tp: Vec<f64> = (0..n)
@@ -248,20 +244,21 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     // sliding sum drifts ~1e-13 relative, well inside the 1e-9 TA-Lib parity tolerance, as the
     // var / linear-regression slides already rely on.
     let mut sum: f64 = tp[..period - 1].iter().sum();
+    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
     for i in (period - 1)..n {
         sum += tp[i];
         let avg = sum / p;
         let window = &tp[i + 1 - period..=i];
         let sum_dev: f64 = window.iter().map(|x| (x - avg).abs()).sum();
         let num = tp[i] - avg;
-        out[i] = if num != 0.0 && sum_dev != 0.0 {
+        out.set(i, if num != 0.0 && sum_dev != 0.0 {
             num / (0.015 * (sum_dev / p))
         } else {
             0.0
-        };
+        });
         sum -= tp[i + 1 - period];
     }
-    out
+    out.finish()
 }
 
 /// TRIX (TA-Lib): the 1-period percent rate-of-change of a triple SMA-seeded EMA of
@@ -388,14 +385,13 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     // The loop invariants mirror `willr`: `today < n`, `trailing <= today`, and
     // rescans stay inside `[trailing, today]`, so the hot tracker can use
     // unchecked slice access.
-    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
-    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
-    // the prefill is a vectorized splat, measured at parity by make perf-ab).
-    let mut out = vec![f64::NAN; n];
+    // Single-write (D2): NaN warm-up `[0, period)`, valid region written once via the
+    // output pointer below (no prefill memset); `out.finish()` proves it was filled.
+    let mut out = crate::buf::OutBuf::warmup(n, period);
     let factor = 100.0 / period as f64;
     let high_ptr = high.as_ptr();
     let low_ptr = low.as_ptr();
-    let out_ptr = out.as_mut_ptr();
+    let out_ptr = out.ptr();
     // Seed the first `[0, period]` window exactly as TA-Lib's first rescan does.
     // After that the hot loop only needs the expiry check, not a sentinel state.
     let mut highest_idx = 0usize;
@@ -467,7 +463,7 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         today += 1;
     }
-    out
+    out.finish()
 }
 
 /// Money Flow Index (TA-Lib MFI): `100·posMF/(posMF+negMF)` over `period`, where each
@@ -480,10 +476,9 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     if period == 0 || period + 1 > n {
         return vec![f64::NAN; n];
     }
-    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
-    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
-    // the prefill is a vectorized splat, measured at parity by make perf-ab).
-    let mut out = vec![f64::NAN; n];
+    // Single-write (D2): NaN warm-up `[0, period)`, valid region written once via
+    // `out.set` (no prefill memset); `out.finish()` proves every slot was written.
+    let mut out = crate::buf::OutBuf::warmup(n, period);
     // Single pass over O(period) memory (TA-Lib's shape): a ring buffer holds the last
     // `period` per-bar (positive, negative) money flows so the window can drop the
     // departing bar without an n-sized side array. The typical price is carried across
@@ -524,11 +519,11 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         i += 1;
     }
     let total = pos_sum + neg_sum;
-    out[period] = if total < 1.0 {
+    out.set(period, if total < 1.0 {
         0.0
     } else {
         100.0 * pos_sum / total
-    };
+    });
     let mut slot = 0usize; // ring slot holding the oldest in-window bar (to evict next)
     i = period + 1;
     while i < n {
@@ -551,11 +546,11 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         pos_sum += p;
         neg_sum += ng;
         let total = pos_sum + neg_sum;
-        out[i] = if total < 1.0 {
+        out.set(i, if total < 1.0 {
             0.0
         } else {
             100.0 * pos_sum / total
-        };
+        });
         prev_tp = tp;
         slot += 1;
         if slot == period {
@@ -563,7 +558,7 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         }
         i += 1;
     }
-    out
+    out.finish()
 }
 
 /// Ultimate Oscillator (TA-Lib ULTOSC): a weighted blend of buying-pressure / true-
@@ -581,10 +576,9 @@ pub fn ultosc(
     p3: usize,
 ) -> Vec<f64> {
     let n = close.len();
-    let mut out = vec![f64::NAN; n];
     let max_p = p1.max(p2).max(p3);
     if p1 == 0 || p2 == 0 || p3 == 0 || max_p >= n {
-        return out;
+        return vec![f64::NAN; n];
     }
     // (buying pressure, true range) for bar i (needs the prior close, so i >= 1).
     let term = |i: usize| -> (f64, f64) {
@@ -618,6 +612,7 @@ pub fn ultosc(
         b3 += b;
     }
     let (mut t1, mut t2, mut t3) = (start - p1 + 1, start - p2 + 1, start - p3 + 1);
+    let mut out = crate::buf::OutBuf::warmup(n, start);
     for today in start..n {
         let (a, b) = term(today);
         let slot = today % max_p;
@@ -654,7 +649,7 @@ pub fn ultosc(
         a3 -= at;
         b3 -= bt;
         t3 += 1;
-        out[today] = 100.0 * (output / 7.0);
+        out.set(today, 100.0 * (output / 7.0));
     }
-    out
+    out.finish()
 }
