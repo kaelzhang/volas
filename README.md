@@ -23,8 +23,9 @@ On our reproducible benchmark suite, **volas** is faster than pandas, polars, st
   [live benchmark report](https://volas.ost.ai).
   - Beats TA-Lib on **137 / 158** covered indicators by the default ratio on
     the published report — reproducible via `make benchmark`.
-  - Refreshes indicators incrementally on each new bar — **~5×** faster than
-    TA-Lib, and up to **~360×** faster than pandas.
+  - On incremental update (each new bar), volas is the fastest of **every**
+    library across **all** indicators — **~5×** faster than TA-Lib, and up to
+    **~360×** faster than pandas.
 - **Built for the live tick.** A new bar touches only the affected tail
   (`O(lookback)`, not `O(n)`); indicators refresh in microseconds, never a full
   recompute.
