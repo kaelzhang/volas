@@ -183,10 +183,26 @@ pub(super) fn dispatch(
             arg_usize(args, 0, Some(1))?,
             arg_i64(args, 1, 1)? as i32,
         )),
+        ("style", Some(sub @ ("bullish" | "bearish"))) => {
+            let style = match sub {
+                "bullish" => ind::Style::Bullish,
+                "bearish" => ind::Style::Bearish,
+                _ => unreachable!("style color sub-command is validated by command_spec"), // LCOV_EXCL_LINE
+            };
+            let open = series_f64(df, series, 0, "open")?;
+            let close = series_f64(df, series, 1, "close")?;
+            boolcol(ind::style(style, &open, &close))
+        }
         // Candlestick patterns: style.<pattern> / cdl.<pattern>. Output f64 -100/0/100
         // (engulfing may also emit ±80). A few take an optional `penetration` ratio.
-        ("style", Some(pat)) if ind::candle_pattern(pat).is_some() => {
-            let (pattern, _) = ind::candle_pattern(pat).unwrap();
+        // One registry lookup (was a `.is_some()` guard + a `.unwrap()` body = two
+        // 61-arm matches per candle exec). `bullish`/`bearish` are handled above, and
+        // the pattern is validated before dispatch, so an unknown name is unreachable.
+        ("style", Some(pat)) => {
+            let (pattern, _) = match ind::candle_pattern(pat) {
+                Some(p) => p,
+                None => unreachable!("candle pattern validated by command_spec"), // LCOV_EXCL_LINE
+            };
             let open = series_f64(df, series, 0, "open")?;
             let high = series_f64(df, series, 1, "high")?;
             let low = series_f64(df, series, 2, "low")?;
@@ -198,17 +214,6 @@ pub(super) fn dispatch(
                 }
             };
             f64col(v)
-        }
-
-        ("style", Some(sub @ ("bullish" | "bearish"))) => {
-            let style = match sub {
-                "bullish" => ind::Style::Bullish,
-                "bearish" => ind::Style::Bearish,
-                _ => unreachable!("style color sub-command is validated by command_spec"), // LCOV_EXCL_LINE
-            };
-            let open = series_f64(df, series, 0, "open")?;
-            let close = series_f64(df, series, 1, "close")?;
-            boolcol(ind::style(style, &open, &close))
         }
         ("repeat", _) => boolcol(ind::repeat(
             &series_bool(df, series, 0)?,
