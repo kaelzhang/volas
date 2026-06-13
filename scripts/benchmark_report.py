@@ -27,9 +27,10 @@ from pathlib import Path
 
 # Fixed candidate order + colour, so the legend and bar colours are stable across
 # every chart in the report.
-CANDIDATE_ORDER = ['pandas', 'stock_pandas', 'polars', 'talib', 'volas']
+CANDIDATE_ORDER = ['pandas', 'pandas_ta', 'stock_pandas', 'polars', 'talib', 'volas']
 COLORS = {
     'pandas': '#5B8FF9',
+    'pandas_ta': '#65789B',
     'stock_pandas': '#5AD8A6',
     'polars': '#5D7092',
     'talib': '#F6BD16',
@@ -47,8 +48,9 @@ CATEGORY_BLURB = {
     'calc': 'Compute the indicator over the whole series, across every library.',
     'append': ('A new bar arrives. <code>volas</code> / <code>stock_pandas</code> refresh their '
                'cached column incrementally (O(lookback)); the libraries with no indicator cache '
-               '(pandas / polars / talib) must recompute the series (O(n)). Every candidate is '
-               'measured with the same round count so the <code>rounds</code> column is comparable.'),
+               '(pandas / pandas_ta / polars / talib) must recompute the series (O(n)). Every '
+               'candidate is measured with the same round count so the <code>rounds</code> column '
+               'is comparable.'),
     'api': ('The data-handling plumbing a live system runs around every indicator call — frame '
             'construction, column access, row slicing, boolean masking, column assignment, copy — '
             'timed against pandas / polars. Not indicator math; the surrounding core APIs.'),

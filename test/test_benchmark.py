@@ -13,17 +13,19 @@ Three report sections:
      parity suite aligns), timed **volas vs TA-Lib only**. An indicator only one of
      them has is omitted.
 
-Candidates: ``pandas`` (idiomatic), ``stock_pandas`` (StockDataFrame), ``polars``
-(rolling / ewm), ``talib`` (the C library), ``volas`` (the directive kernel).
+Candidates: ``pandas`` (idiomatic), ``pandas_ta`` (the ``.ta`` accessor),
+``stock_pandas`` (StockDataFrame), ``polars`` (rolling / ewm), ``talib`` (the C
+library), ``volas`` (the directive kernel). A candidate that cannot express a
+given indicator is dropped from the registry (probed once at build time) and
+simply shows no bar for it.
 
 Run::
 
-    make benchmark                 # console table (installs .[dev,benchmark])
-    make benchmark INDICATOR=roc:10 # one coverage row, no web report
-    make benchmark WEB_REPORT=1     # also (re)generate benchmark-report.html
+    make benchmark                 # console table + benchmark-report.html (installs .[dev,benchmark])
+    make benchmark INDICATOR=roc:10 # one coverage row, stdout only (not archived)
 
 pandas / stock_pandas / talib live in the ``dev`` extra (the parity tests use them
-as oracles); polars lives in the ``benchmark`` extra.
+as oracles); polars and pandas-ta live in the ``benchmark`` extra.
 """
 
 from pathlib import Path
@@ -43,6 +45,11 @@ try:
     import talib
 except ImportError:  # pragma: no cover
     talib = None
+try:
+    import pandas_ta  # noqa: F401  (registers the `.ta` DataFrame accessor)
+    _HAVE_PANDAS_TA = True
+except ImportError:  # pragma: no cover
+    _HAVE_PANDAS_TA = False
 
 DATA = Path(__file__).parent / 'data' / 'tencent_full.csv'
 COLUMNS = ['open', 'high', 'low', 'close', 'volume']
@@ -53,13 +60,13 @@ N = len(_CSV)
 
 INDICATORS = [
     'ma:20', 'ema:12', 'macd', 'macd.signal', 'boll.upper',
-    'bbw', 'rsi:14', 'atr:14', 'llv:10', 'hhv:10',
+    'willr:14', 'rsi:14', 'atr:14', 'llv:10', 'hhv:10',
 ]
 # The append section omits the rolling extrema (llv / hhv): their incremental refresh
 # is a trivial running min/max and not an informative cross-library append comparison
 # (they remain in the batch `calc` section and in coverage's MIN/MAX-derived family).
 APPEND_INDICATORS = [i for i in INDICATORS if i not in ('llv:10', 'hhv:10')]
-CANDIDATES = ['pandas', 'stock_pandas', 'polars', 'talib', 'volas']
+CANDIDATES = ['pandas', 'pandas_ta', 'stock_pandas', 'polars', 'talib', 'volas']
 
 # A varying per-row period (2..30) for MAVP (TA-Lib's variable-period MA), supplied to
 # volas as a `periods` column and to TA-Lib as the periods array.
@@ -95,6 +102,7 @@ EXTENDED_LENGTHS = sorted({n for lengths in EXTENDED_COVERAGE_LENGTHS.values() f
 
 HAVE = {
     'pandas': True,
+    'pandas_ta': _HAVE_PANDAS_TA,
     'stock_pandas': True,
     'polars': pl is not None,
     'talib': talib is not None,
@@ -159,9 +167,10 @@ def _pd_boll_upper(csv):
     return c.rolling(20).mean() + 2.0 * c.rolling(20).std(ddof=0)
 
 
-def _pd_bbw(csv):
-    c = csv['close']
-    return 4.0 * c.rolling(20).std(ddof=0) / c.rolling(20).mean()
+def _pd_willr(csv):
+    h, lo, c = csv['high'], csv['low'], csv['close']
+    hh, ll = h.rolling(14).max(), lo.rolling(14).min()
+    return -100.0 * (hh - c) / (hh - ll)
 
 
 def _pd_rsi(csv):
@@ -189,9 +198,37 @@ def _pd_hhv(csv):
 
 PANDAS_CALC = {
     'ma:20': _pd_ma, 'ema:12': _pd_ema, 'macd': _pd_macd,
-    'macd.signal': _pd_macd_signal, 'boll.upper': _pd_boll_upper, 'bbw': _pd_bbw,
+    'macd.signal': _pd_macd_signal, 'boll.upper': _pd_boll_upper, 'willr:14': _pd_willr,
     'rsi:14': _pd_rsi, 'atr:14': _pd_atr, 'llv:10': _pd_llv, 'hhv:10': _pd_hhv,
 }
+
+
+# --- pandas-ta (the `.ta` DataFrame accessor) ------------------------------
+# Each call returns a Series (single-output) or a DataFrame (macd / bbands);
+# for the multi-output ones the band is selected by column-name prefix so the
+# mapping survives pandas-ta's version-dependent column suffixes
+# (e.g. `BBU_20_2.0_2.0`). pandas-ta has no rolling-min-of-low / rolling-max-of-
+# high study, so llv / hhv are intentionally absent (skipped per candidate).
+
+def _pta_band(result, prefix):
+    for col in result.columns:
+        if col.startswith(prefix):
+            return result[col]
+    raise KeyError(prefix)  # pragma: no cover - guards a pandas-ta rename
+
+
+def _pta_calc(indicator):
+    table = {
+        'ma:20': lambda d: d.ta.sma(length=20),
+        'ema:12': lambda d: d.ta.ema(length=12),
+        'macd': lambda d: _pta_band(d.ta.macd(fast=12, slow=26, signal=9), 'MACD_'),
+        'macd.signal': lambda d: _pta_band(d.ta.macd(fast=12, slow=26, signal=9), 'MACDs'),
+        'boll.upper': lambda d: _pta_band(d.ta.bbands(length=20, std=2), 'BBU'),
+        'willr:14': lambda d: d.ta.willr(length=14),
+        'rsi:14': lambda d: d.ta.rsi(length=14),
+        'atr:14': lambda d: d.ta.atr(length=14),
+    }
+    return table.get(indicator)
 
 
 # --- polars (rolling / ewm expressions) ------------------------------------
@@ -208,13 +245,14 @@ def _pl_expr(indicator):
     al = pl.when(delta < 0).then(-delta).otherwise(0.0).ewm_mean(alpha=1.0 / 14, adjust=True)
     h, lo, pc = pl.col('high'), pl.col('low'), c.shift(1)
     tr = pl.max_horizontal(h - lo, (h - pc).abs(), (lo - pc).abs())
+    hh, ll = h.rolling_max(14), lo.rolling_min(14)
     return {
         'ma:20': c.rolling_mean(20),
         'ema:12': c.ewm_mean(span=12, adjust=True),
         'macd': macd,
         'macd.signal': macd.ewm_mean(span=9, adjust=True),
         'boll.upper': c.rolling_mean(20) + 2.0 * c.rolling_std(20, ddof=0),
-        'bbw': 4.0 * c.rolling_std(20, ddof=0) / c.rolling_mean(20),
+        'willr:14': -100.0 * (hh - c) / (hh - ll),
         'rsi:14': 100.0 - 100.0 / (1.0 + ag / al),
         'atr:14': tr.rolling_mean(14),
         'llv:10': pl.col('low').rolling_min(10),
@@ -241,7 +279,7 @@ def _talib_calc(indicator):
             'macd': lambda: talib.MACD(c, 12, 26, 9)[0],
             'macd.signal': lambda: talib.MACD(c, 12, 26, 9)[1],
             'boll.upper': lambda: talib.BBANDS(c, 20, 2.0, 2.0)[0],
-            'bbw': lambda: (lambda u, m, low: (u - low) / m)(*talib.BBANDS(c, 20, 2.0, 2.0)),
+            'willr:14': lambda: talib.WILLR(h, lo, c, 14),
             'rsi:14': lambda: talib.RSI(c, 14),
             'atr:14': lambda: talib.ATR(h, lo, c, 14),
             'llv:10': lambda: talib.MIN(lo, 10),
@@ -251,17 +289,55 @@ def _talib_calc(indicator):
     return run
 
 
-# --- the calc registry: CALC[candidate][indicator] = fn | None -------------
+# --- the calc registry: CALC[candidate][indicator] = fn --------------------
+#
+# A candidate only keeps an indicator it can ACTUALLY express: the registry
+# probes every (candidate, indicator) fn once against a small synthetic frame at
+# build time and drops the ones that raise. So a library missing a study
+# (stock_pandas has no `willr`; pandas-ta has no rolling extrema) simply shows no
+# bar for it — the same per-library gap polars/talib already get from a `None`
+# entry — instead of failing the benchmark at run time.
+
+def _probe_state(candidate):
+    n = 60
+    a = {c: v for c, v in _generated_ohlcv(n).items() if c in COLUMNS}
+    if candidate in ('pandas', 'pandas_ta'):
+        return pd.DataFrame(a)
+    if candidate == 'stock_pandas':
+        return StockDataFrame(pd.DataFrame(a))
+    if candidate == 'polars':
+        return pl.DataFrame(a) if pl else None
+    if candidate == 'talib':
+        return a
+    return VolasDataFrame({**a, 'periods': PERIODS[:n]})  # volas
+
 
 def _calc_registry():
     reg = {
         'pandas': dict(PANDAS_CALC),
+        'pandas_ta': {k: _pta_calc(k) for k in INDICATORS} if _HAVE_PANDAS_TA else {},
         'stock_pandas': {k: (lambda spd, d=k: spd.exec(d, create_column=False)) for k in INDICATORS},
         'polars': {k: _pl_calc(k) for k in INDICATORS} if pl else {},
         'talib': {k: _talib_calc(k) for k in INDICATORS} if talib else {},
         'volas': {k: (lambda v, d=k: v.exec(d)) for k in INDICATORS},
     }
-    return {cand: {k: fn for k, fn in m.items() if fn is not None} for cand, m in reg.items()}
+    out = {}
+    for cand, m in reg.items():
+        probe = _probe_state(cand) if HAVE.get(cand) else None
+        kept = {}
+        for k, fn in m.items():
+            if fn is None:
+                continue
+            if probe is None:
+                kept[k] = fn          # library absent — HAVE gate skips it at run time
+                continue
+            try:
+                fn(probe)
+            except Exception:
+                continue              # candidate cannot express this indicator
+            kept[k] = fn
+        out[cand] = kept
+    return out
 
 
 CALC = _calc_registry()
@@ -299,10 +375,10 @@ def _coverage_pairs(arr):
         ('macd', lambda: talib.MACD(c, 12, 26, 9)[0]),
         ('macd.signal', lambda: talib.MACD(c, 12, 26, 9)[1]),
         ('macd.histogram', lambda: talib.MACD(c, 12, 26, 9)[2]),
-        # Bollinger bands (upper / middle / lower). bbw (band-width) is a volas-derived
-        # quantity — TA-Lib has no native BBW function — so it is not a volas∩TA-Lib
-        # coverage row; it lives in the cross-library append / calc charts (and its
-        # correctness is still checked in the parity suite).
+        # Bollinger bands (upper / middle / lower). bbw (band-width) has no native
+        # TA-Lib function, so it is neither a coverage row nor a cross-library
+        # calc/append chart indicator (willr took its slot there); its correctness
+        # is still checked in the parity suite.
         ('boll.upper', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[0]),
         ('boll.middle', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[1]),
         ('boll.lower', lambda: talib.BBANDS(c, 20, 2.0, 2.0, 0)[2]),
@@ -448,6 +524,8 @@ def states():
         # directive ignores the extra column.
         'volas': VolasDataFrame({**{c: ARR[c] for c in COLUMNS}, 'periods': PERIODS}),
     }
+    if _HAVE_PANDAS_TA:
+        st['pandas_ta'] = _CSV.copy()   # the `.ta` accessor reads OHLCV by column name
     if pl is not None:
         st['polars'] = pl.DataFrame({c: ARR[c] for c in COLUMNS})
     if talib is not None:

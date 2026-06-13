@@ -78,6 +78,7 @@ dev = [
 # the group is effectively optional.
 benchmark = [
   "polars>=1.0",
+  "pandas-ta>=0.4",
 ]
 
 [tool.maturin]
