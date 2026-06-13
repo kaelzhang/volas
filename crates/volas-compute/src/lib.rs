@@ -4,6 +4,7 @@
 //! Depends on `volas-core` only for the shared error type; it does not touch the
 //! DataFrame data model.
 
+mod buf;
 pub mod indicators;
 pub mod kernels;
 pub mod window;

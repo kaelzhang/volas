@@ -356,43 +356,47 @@ fn each_bar_avg<const K: usize>(
     f: impl Fn(usize, &[f64; K]) -> f64,
 ) -> Vec<f64> {
     let n = c.len();
-    let mut out = vec![f64::NAN; n];
     if lookback >= n {
-        return out;
+        return vec![f64::NAN; n];
     }
-    let mut total = [0.0f64; K];
-    for k in 0..K {
-        let s = settings[k];
-        if s.avg_period != 0 {
-            for j in (lookback - s.avg_period)..lookback {
-                total[k] += range(s, o, h, l, c, j);
-            }
+    // Single-write (D2): NaN warm-up, then each valid bar written once via `build_f64`.
+    crate::buf::build_f64(n, |out| {
+        for slot in &mut out[..lookback] {
+            slot.write(f64::NAN);
         }
-    }
-    let mut avgs = [0.0f64; K];
-    for i in lookback..n {
-        for k in 0..K {
-            let s = settings[k];
-            let div = if matches!(s.range, RangeType::Shadows) {
-                2.0
-            } else {
-                1.0
-            };
-            avgs[k] = if s.avg_period != 0 {
-                s.factor * (total[k] / s.avg_period as f64) / div
-            } else {
-                s.factor * range(s, o, h, l, c, i) / div
-            };
-        }
-        out[i] = f(i, &avgs);
+        let mut total = [0.0f64; K];
         for k in 0..K {
             let s = settings[k];
             if s.avg_period != 0 {
-                total[k] += range(s, o, h, l, c, i) - range(s, o, h, l, c, i - s.avg_period);
+                for j in (lookback - s.avg_period)..lookback {
+                    total[k] += range(s, o, h, l, c, j);
+                }
             }
         }
-    }
-    out
+        let mut avgs = [0.0f64; K];
+        for i in lookback..n {
+            for k in 0..K {
+                let s = settings[k];
+                let div = if matches!(s.range, RangeType::Shadows) {
+                    2.0
+                } else {
+                    1.0
+                };
+                avgs[k] = if s.avg_period != 0 {
+                    s.factor * (total[k] / s.avg_period as f64) / div
+                } else {
+                    s.factor * range(s, o, h, l, c, i) / div
+                };
+            }
+            out[i].write(f(i, &avgs));
+            for k in 0..K {
+                let s = settings[k];
+                if s.avg_period != 0 {
+                    total[k] += range(s, o, h, l, c, i) - range(s, o, h, l, c, i - s.avg_period);
+                }
+            }
+        }
+    })
 }
 
 /// Like [`each_bar_avg`] but for two-bar patterns: the closure also receives the prior
@@ -410,42 +414,27 @@ fn each_bar_avg2<const K: usize>(
     f: impl Fn(usize, &[f64; K], &[f64; K]) -> f64,
 ) -> Vec<f64> {
     let n = c.len();
-    let mut out = vec![f64::NAN; n];
     if lookback == 0 || lookback >= n {
-        return out;
+        return vec![f64::NAN; n];
     }
-    // Seed each total over bar (lookback-1)'s window `[(lookback-1)-avg_period, lookback-2]`.
-    let mut total = [0.0f64; K];
-    for k in 0..K {
-        let s = settings[k];
-        if s.avg_period != 0 {
-            for j in ((lookback - 1) - s.avg_period)..(lookback - 1) {
-                total[k] += range(s, o, h, l, c, j);
+    // Single-write (D2): NaN warm-up, then each valid bar written once via `build_f64`.
+    crate::buf::build_f64(n, |out| {
+        for slot in &mut out[..lookback] {
+            slot.write(f64::NAN);
+        }
+        // Seed each total over bar (lookback-1)'s window `[(lookback-1)-avg_period, lookback-2]`.
+        let mut total = [0.0f64; K];
+        for k in 0..K {
+            let s = settings[k];
+            if s.avg_period != 0 {
+                for j in ((lookback - 1) - s.avg_period)..(lookback - 1) {
+                    total[k] += range(s, o, h, l, c, j);
+                }
             }
         }
-    }
-    // Averages at bar (lookback-1) — the first `prev`. (Everything inlined, no inner
-    // closures: the closure form here failed to inline and ran ~4x slower for K >= 2.)
-    let mut prev = [0.0f64; K];
-    for k in 0..K {
-        let s = settings[k];
-        let div = if matches!(s.range, RangeType::Shadows) {
-            2.0
-        } else {
-            1.0
-        };
-        prev[k] = if s.avg_period != 0 {
-            s.factor * (total[k] / s.avg_period as f64) / div
-        } else {
-            s.factor * range(s, o, h, l, c, lookback - 1) / div
-        };
-        if s.avg_period != 0 {
-            total[k] += range(s, o, h, l, c, lookback - 1)
-                - range(s, o, h, l, c, (lookback - 1) - s.avg_period);
-        }
-    }
-    let mut cur = [0.0f64; K];
-    for i in lookback..n {
+        // Averages at bar (lookback-1) — the first `prev`. (Everything inlined, no inner
+        // closures: the closure form here failed to inline and ran ~4x slower for K >= 2.)
+        let mut prev = [0.0f64; K];
         for k in 0..K {
             let s = settings[k];
             let div = if matches!(s.range, RangeType::Shadows) {
@@ -453,22 +442,41 @@ fn each_bar_avg2<const K: usize>(
             } else {
                 1.0
             };
-            cur[k] = if s.avg_period != 0 {
+            prev[k] = if s.avg_period != 0 {
                 s.factor * (total[k] / s.avg_period as f64) / div
             } else {
-                s.factor * range(s, o, h, l, c, i) / div
+                s.factor * range(s, o, h, l, c, lookback - 1) / div
             };
-        }
-        out[i] = f(i, &cur, &prev);
-        prev = cur;
-        for k in 0..K {
-            let s = settings[k];
             if s.avg_period != 0 {
-                total[k] += range(s, o, h, l, c, i) - range(s, o, h, l, c, i - s.avg_period);
+                total[k] += range(s, o, h, l, c, lookback - 1)
+                    - range(s, o, h, l, c, (lookback - 1) - s.avg_period);
             }
         }
-    }
-    out
+        let mut cur = [0.0f64; K];
+        for i in lookback..n {
+            for k in 0..K {
+                let s = settings[k];
+                let div = if matches!(s.range, RangeType::Shadows) {
+                    2.0
+                } else {
+                    1.0
+                };
+                cur[k] = if s.avg_period != 0 {
+                    s.factor * (total[k] / s.avg_period as f64) / div
+                } else {
+                    s.factor * range(s, o, h, l, c, i) / div
+                };
+            }
+            out[i].write(f(i, &cur, &prev));
+            prev = cur;
+            for k in 0..K {
+                let s = settings[k];
+                if s.avg_period != 0 {
+                    total[k] += range(s, o, h, l, c, i) - range(s, o, h, l, c, i - s.avg_period);
+                }
+            }
+        }
+    })
 }
 
 /// Multi-bar generalisation of [`each_bar_avg`]: carries the last `L` bars' averages as
@@ -495,51 +503,56 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
     f: impl Fn(usize, &[[f64; K]; L]) -> f64,
 ) -> Vec<f64> {
     let n = c.len();
-    let mut out = vec![f64::NAN; n];
     if lookback + 1 < L || lookback >= n {
-        return out;
+        return vec![f64::NAN; n];
     }
-    let first = lookback + 1 - L; // first bar whose averages enter the history
-    let mut total = [0.0f64; K];
-    for k in 0..K {
-        let s = settings[k];
-        if s.avg_period != 0 {
-            for j in (first - s.avg_period)..first {
-                total[k] += range(s, o, h, l, c, j);
-            }
+    // Single-write (D2): NaN warm-up, then each valid bar written once via `build_f64`.
+    // The loop visits `[first, lookback)` only to warm up `hist`/`total` (no output).
+    crate::buf::build_f64(n, |out| {
+        for slot in &mut out[..lookback] {
+            slot.write(f64::NAN);
         }
-    }
-    let mut hist = [[0.0f64; K]; L];
-    for bar in first..n {
-        let mut a = [0.0f64; K];
-        for k in 0..K {
-            let s = settings[k];
-            let div = if matches!(s.range, RangeType::Shadows) {
-                2.0
-            } else {
-                1.0
-            };
-            a[k] = if s.avg_period != 0 {
-                s.factor * (total[k] / s.avg_period as f64) / div
-            } else {
-                s.factor * range(s, o, h, l, c, bar) / div
-            };
-        }
-        for j in (1..L).rev() {
-            hist[j] = hist[j - 1];
-        }
-        hist[0] = a;
-        if bar >= lookback {
-            out[bar] = f(bar, &hist);
-        }
+        let first = lookback + 1 - L; // first bar whose averages enter the history
+        let mut total = [0.0f64; K];
         for k in 0..K {
             let s = settings[k];
             if s.avg_period != 0 {
-                total[k] += range(s, o, h, l, c, bar) - range(s, o, h, l, c, bar - s.avg_period);
+                for j in (first - s.avg_period)..first {
+                    total[k] += range(s, o, h, l, c, j);
+                }
             }
         }
-    }
-    out
+        let mut hist = [[0.0f64; K]; L];
+        for bar in first..n {
+            let mut a = [0.0f64; K];
+            for k in 0..K {
+                let s = settings[k];
+                let div = if matches!(s.range, RangeType::Shadows) {
+                    2.0
+                } else {
+                    1.0
+                };
+                a[k] = if s.avg_period != 0 {
+                    s.factor * (total[k] / s.avg_period as f64) / div
+                } else {
+                    s.factor * range(s, o, h, l, c, bar) / div
+                };
+            }
+            for j in (1..L).rev() {
+                hist[j] = hist[j - 1];
+            }
+            hist[0] = a;
+            if bar >= lookback {
+                out[bar].write(f(bar, &hist));
+            }
+            for k in 0..K {
+                let s = settings[k];
+                if s.avg_period != 0 {
+                    total[k] += range(s, o, h, l, c, bar) - range(s, o, h, l, c, bar - s.avg_period);
+                }
+            }
+        }
+    })
 }
 
 /// Build a per-bar pattern column: NaN before `lookback`, then `f(i)` (0 / ±100 / ±80)
@@ -547,17 +560,16 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
 #[inline]
 fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
     let warm = lookback.min(n);
-    // The old `extend(map(...))` measured slower for simple two-bar patterns.
-    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
-    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
-    // the prefill is a vectorized splat, measured at parity by make perf-ab).
-    let mut out = vec![f64::NAN; n];
-    let mut i = warm;
-    while i < n {
-        out[i] = f(i);
-        i += 1;
-    }
-    out
+    // Single-write (D2): NaN warm-up then one write per valid bar, no prefill memset
+    // of the valid region. `build_f64` keeps it safe (debug poison + write-all assert).
+    crate::buf::build_f64(n, |out| {
+        for slot in &mut out[..warm] {
+            slot.write(f64::NAN);
+        }
+        for i in warm..n {
+            out[i].write(f(i));
+        }
+    })
 }
 
 /// Output buffer for specialised CDL loops: initialize only the warm-up NaN prefix and
