@@ -9,6 +9,8 @@
 //! rules a single-arg bound cannot express. Missing *required* arguments stay
 //! `exec`'s concern (`arg_usize`), matching the reviewer's scope.
 
+use std::borrow::Cow;
+
 use crate::spec::{canon_sub, command_spec, is_command};
 use crate::types::Node;
 use volas_core::{Result, VolasError};
@@ -39,13 +41,16 @@ pub fn validate_node(node: &Node) -> Result<()> {
 }
 
 /// Normalize a command name the way `exec` does: case-insensitive (P6), with
-/// `cdl` aliased to the `style` candlestick namespace.
-fn normalize(name: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    if lower == "cdl" {
-        "style".to_string()
+/// `cdl` aliased to the `style` candlestick namespace. Borrows for the common
+/// already-lowercase case (every built-in command name) so the per-exec
+/// validation costs no allocation; only an uppercase name pays `to_ascii_lowercase`.
+fn normalize(name: &str) -> Cow<'_, str> {
+    if name.eq_ignore_ascii_case("cdl") {
+        Cow::Borrowed("style")
+    } else if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
     } else {
-        lower
+        Cow::Borrowed(name)
     }
 }
 
@@ -62,7 +67,7 @@ fn names_a_command(name: &str) -> bool {
 /// with no signal (V17). Shared verbatim by `exec_command`.
 pub fn validate_command(name: &str, sub: Option<&str>, args: &[Option<String>]) -> Result<()> {
     let name = normalize(name);
-    let name = name.as_str();
+    let name = name.as_ref();
     let sub = canon_sub(name, sub);
     let sub = sub.as_deref();
 
