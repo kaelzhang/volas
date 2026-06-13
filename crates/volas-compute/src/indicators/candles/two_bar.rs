@@ -46,7 +46,7 @@ pub fn cdl_engulfing(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     for i in 2..n {
         let white = c[i] >= o[i];
         let prev_white = c[i - 1] >= o[i - 1];
-        out[i] = if white
+        out.set(i, if white
             && !prev_white
             && ((c[i] >= o[i - 1] && o[i] < c[i - 1]) || (c[i] > o[i - 1] && o[i] <= c[i - 1]))
         {
@@ -66,9 +66,9 @@ pub fn cdl_engulfing(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             }
         } else {
             0.0
-        };
+        });
     }
-    out
+    out.finish()
 }
 
 /// Harami strength of the 2nd body inside the 1st: `100` when strictly contained, `80`
@@ -133,7 +133,7 @@ pub fn cdl_piercing(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     }
     for i in lb..n {
         let prev_body = realbody(o, c, i - 1);
-        out[i] = if c[i - 1] < o[i - 1]
+        out.set(i, if c[i - 1] < o[i - 1]
             && prev_body > candle_average_from_total(BODY_LONG, prev_total)
             && c[i] >= o[i]
             && realbody(o, c, i) > candle_average_from_total(BODY_LONG, cur_total)
@@ -144,13 +144,13 @@ pub fn cdl_piercing(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             100.0
         } else {
             0.0
-        };
+        });
         prev_total +=
             range(BODY_LONG, o, h, l, c, i - 1) - range(BODY_LONG, o, h, l, c, trailing - 1);
         cur_total += range(BODY_LONG, o, h, l, c, i) - range(BODY_LONG, o, h, l, c, trailing);
         trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// Dark Cloud Cover (TA-Lib CDLDARKCLOUDCOVER): a long white candle then a black candle
@@ -178,7 +178,7 @@ pub fn cdl_darkcloudcover(
     }
     for i in lb..n {
         let prev_body = realbody(o, c, i - 1);
-        out[i] = if c[i - 1] >= o[i - 1]
+        out.set(i, if c[i - 1] >= o[i - 1]
             && prev_body > candle_average_from_total(BODY_LONG, total)
             && c[i] < o[i]
             && o[i] > h[i - 1]
@@ -188,11 +188,11 @@ pub fn cdl_darkcloudcover(
             -100.0
         } else {
             0.0
-        };
+        });
         total += range(BODY_LONG, o, h, l, c, i - 1) - range(BODY_LONG, o, h, l, c, trailing - 1);
         trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// Doji Star (TA-Lib CDLDOJISTAR): a long body then a doji gapping in the body's
@@ -271,7 +271,7 @@ pub fn cdl_inneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let body_long_scale = BODY_LONG.factor / BODY_LONG.avg_period as f64;
     let equal_scale = EQUAL.factor / EQUAL.avg_period as f64;
     for i in lb..n {
-        out[i] = if c[i - 1] < o[i - 1]
+        out.set(i, if c[i - 1] < o[i - 1]
             && realbody(o, c, i - 1) > body_total * body_long_scale
             && c[i] >= o[i]
             && o[i] < l[i - 1]
@@ -281,7 +281,7 @@ pub fn cdl_inneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             -100.0
         } else {
             0.0
-        };
+        });
         body_total +=
             range(BODY_LONG, o, h, l, c, i - 1) - range(BODY_LONG, o, h, l, c, body_trailing - 1);
         equal_total +=
@@ -289,7 +289,7 @@ pub fn cdl_inneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         body_trailing += 1;
         equal_trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// On-Neck (TA-Lib CDLONNECK): a long black candle then a white candle closing ≈ the

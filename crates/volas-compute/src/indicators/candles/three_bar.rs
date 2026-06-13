@@ -299,7 +299,7 @@ pub fn cdl_2crows(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         let first_white = c[i - 2] >= o[i - 2];
         let second_black = c[i - 1] < o[i - 1];
         let third_black = c[i] < o[i];
-        out[i] = if first_white
+        out.set(i, if first_white
             && second_black
             && third_black
             && realbody(o, c, i - 2) > total * body_long_scale
@@ -312,11 +312,11 @@ pub fn cdl_2crows(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             -100.0
         } else {
             0.0
-        };
+        });
         total += range(BODY_LONG, o, h, l, c, i - 2) - range(BODY_LONG, o, h, l, c, trailing);
         trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// Upside Gap Two Crows (TA-Lib CDLUPSIDEGAP2CROWS): a long white, a short black gapping
@@ -411,7 +411,7 @@ pub fn cdl_stalledpattern(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
     // moving it back to shared candle infrastructure.
     let mut i = lb;
     while i < c.len() {
-        out[i] = if color(o, c, i - 2) > 0.0
+        out.set(i, if color(o, c, i - 2) > 0.0
             && color(o, c, i - 1) > 0.0
             && color(o, c, i) > 0.0
             && c[i] > c[i - 1]
@@ -427,10 +427,10 @@ pub fn cdl_stalledpattern(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
             -100.0
         } else {
             0.0
-        };
+        });
         i += 1;
     }
-    out
+    out.finish()
 }
 
 /// Identical Three Crows (TA-Lib CDLIDENTICAL3CROWS): three declining black candles with
@@ -507,7 +507,7 @@ pub fn cdl_tristar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         let mid_hi = o[i - 1].max(c[i - 1]);
         let cur_lo = o[i].min(c[i]);
         let cur_hi = o[i].max(c[i]);
-        out[i] = if prev_hi - prev_lo <= doji && mid_hi - mid_lo <= doji && cur_hi - cur_lo <= doji
+        out.set(i, if prev_hi - prev_lo <= doji && mid_hi - mid_lo <= doji && cur_hi - cur_lo <= doji
         {
             if mid_lo > prev_hi && cur_hi < mid_hi {
                 -100.0
@@ -518,11 +518,11 @@ pub fn cdl_tristar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             }
         } else {
             0.0
-        };
+        });
         total += (h[i - 2] - l[i - 2]) - (h[trailing] - l[trailing]);
         trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// Unique Three River Bottom (TA-Lib CDLUNIQUE3RIVER): a long black, a black harami with
@@ -613,7 +613,7 @@ pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             && o[i] > c[i - 1]
             && c[i] > o[i - 1]
             && c[i] < c[i - 2].min(o[i - 2]);
-        out[i] = if up || down {
+        out.set(i, if up || down {
             let near = near_total * near_scale;
             if (realbody(o, c, i - 1) - realbody(o, c, i)).abs() < near {
                 c1 * 100.0
@@ -622,11 +622,11 @@ pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             }
         } else {
             0.0
-        };
+        });
         near_total += range(NEAR, o, h, l, c, i - 1) - range(NEAR, o, h, l, c, trailing);
         trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// Three Stars in the South (TA-Lib CDL3STARSINSOUTH): a long black with a long lower

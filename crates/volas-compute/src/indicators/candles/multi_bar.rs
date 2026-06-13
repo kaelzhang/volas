@@ -31,7 +31,7 @@ pub fn cdl_3linestrike(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         let c1_white = c[i - 1] >= o[i - 1];
         let c0_white = c[i] >= o[i];
         let same_run = c3_white == c2_white && c2_white == c1_white && c0_white != c1_white;
-        out[i] = if same_run
+        out.set(i, if same_run
             && ((c1_white
                 && c[i - 1] > c[i - 2]
                 && c[i - 2] > c[i - 3]
@@ -66,12 +66,12 @@ pub fn cdl_3linestrike(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             }
         } else {
             0.0
-        };
+        });
         near3 += range(NEAR, o, h, l, c, i - 3) - range(NEAR, o, h, l, c, trailing - 3);
         near2 += range(NEAR, o, h, l, c, i - 2) - range(NEAR, o, h, l, c, trailing - 2);
         trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// Breakaway (TA-Lib CDLBREAKAWAY): a long body, a gap, two more in the same direction,
@@ -95,7 +95,7 @@ pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         let same_direction = (c[i - 3] >= o[i - 3]) == first_white
             && (c[i - 1] >= o[i - 1]) == first_white
             && (c[i] >= o[i]) != first_white;
-        out[i] = if same_direction && realbody(o, c, i - 4) > total * body_long_scale {
+        out.set(i, if same_direction && realbody(o, c, i - 4) > total * body_long_scale {
             if !first_white
                 && realbody_gap_down(o, c, i - 3, i - 4)
                 && h[i - 2] < h[i - 3]
@@ -121,11 +121,11 @@ pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             }
         } else {
             0.0
-        };
+        });
         total += range(BODY_LONG, o, h, l, c, i - 4) - range(BODY_LONG, o, h, l, c, trailing - 4);
         trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// Ladder Bottom (TA-Lib CDLLADDERBOTTOM): three falling black candles, a 4th black with
@@ -327,9 +327,9 @@ pub fn cdl_hikkake(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         } else {
             0.0
         };
-        out[i] = value;
+        out.set(i, value);
     }
-    out
+    out.finish()
 }
 
 /// Modified Hikkake (TA-Lib CDLHIKKAKEMOD): a stricter hikkake — two nested inside bars
@@ -337,10 +337,9 @@ pub fn cdl_hikkake(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// 3-bar confirmation (`±200`). Stateful. Lookback 10.
 pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let n = c.len();
-    let mut out = vec![f64::NAN; n];
     let start = NEAR.avg_period.max(1) + 5;
     if n <= start {
-        return out;
+        return vec![f64::NAN; n];
     }
     // Keep TA-Lib's single rolling NEAR total instead of materialising a full
     // average series. The pattern is stateful, so the setup test uses the current
@@ -372,26 +371,29 @@ pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             && ((res > 0.0 && c[i] > h[idx - 1]) || (res < 0.0 && c[i] < l[idx - 1]))
     };
     let (mut idx, mut res) = (0usize, 0.0_f64);
+    // Single-write (D2): warm-up `[0, start)` is NaN (the `i < start` loop rows emit
+    // nothing); every row `[start, n)` writes exactly one of the three branches.
+    let mut out = crate::buf::OutBuf::warmup(n, start);
     for i in (start - 3)..n {
         let emit = i >= start;
         if let Some(r) = setup(i, near_total) {
             res = r;
             idx = i;
             if emit {
-                out[i] = r;
+                out.set(i, r);
             }
         } else if confirm(i, idx, res) {
             if emit {
-                out[i] = res + res.signum() * 100.0;
+                out.set(i, res + res.signum() * 100.0);
             }
             idx = 0;
         } else if emit {
-            out[i] = 0.0;
+            out.set(i, 0.0);
         }
         near_total += range(NEAR, o, h, l, c, i - 2) - range(NEAR, o, h, l, c, near_trailing - 2);
         near_trailing += 1;
     }
-    out
+    out.finish()
 }
 
 #[cfg(test)]

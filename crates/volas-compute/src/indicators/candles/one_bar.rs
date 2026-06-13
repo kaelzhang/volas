@@ -289,7 +289,7 @@ pub fn cdl_hangingman(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let near_scale = NEAR.factor / NEAR.avg_period as f64;
     for i in lb..n {
         let body = realbody(o, c, i);
-        out[i] = if body < body_total * body_short_scale
+        out.set(i, if body < body_total * body_short_scale
             && lowershadow(o, l, c, i) > body
             && uppershadow(o, h, c, i) < very_short_total * very_short_scale
             && o[i].min(c[i]) >= h[i - 1] - near_total * near_scale
@@ -297,7 +297,7 @@ pub fn cdl_hangingman(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             -100.0
         } else {
             0.0
-        };
+        });
         body_total +=
             range(BODY_SHORT, o, h, l, c, i) - range(BODY_SHORT, o, h, l, c, body_trailing);
         very_short_total += range(SHADOW_VERY_SHORT, o, h, l, c, i)
@@ -307,7 +307,7 @@ pub fn cdl_hangingman(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         very_short_trailing += 1;
         near_trailing += 1;
     }
-    out
+    out.finish()
 }
 
 /// Inverted Hammer (TA-Lib CDLINVERTEDHAMMER): inverted hammer-shape gapping down from

@@ -572,18 +572,15 @@ fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
     })
 }
 
-/// Output buffer for specialised CDL loops: initialize only the warm-up NaN prefix and
-/// let the caller write every valid row exactly once. `f64` has no destructor, so the
-/// temporary uninitialised valid region is safe as long as callers fill `[lookback, n)`.
+/// Single-write output buffer for specialised CDL loops: NaN warm-up `[0, lookback)`,
+/// then the caller writes every valid row once via `out.set(i, ..)` and yields it with
+/// `out.finish()`. No prefill memset (D2); `OutBuf` poisons + asserts in debug.
 #[inline]
-fn candle_output(n: usize, lookback: usize) -> Option<Vec<f64>> {
+fn candle_output(n: usize, lookback: usize) -> Option<crate::buf::OutBuf> {
     if lookback >= n {
         return None;
     }
-    // NaN-prefilled buffer: the warm-up stays NaN and the loop overwrites the
-    // valid region (D2 2026-06-12 — replaces the with_capacity + set_len pattern;
-    // the prefill is a vectorized splat, measured at parity by make perf-ab).
-    Some(vec![f64::NAN; n])
+    Some(crate::buf::OutBuf::warmup(n, lookback))
 }
 
 #[cfg(test)]
