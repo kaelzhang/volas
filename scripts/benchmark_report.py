@@ -269,7 +269,22 @@ def render(data: dict) -> str:
   body {{ font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
          margin: 0; color: #1c1e26; background: #fbfbfd; }}
   .wrap {{ max-width: 1040px; margin: 0 auto; padding: 28px 20px 64px; }}
-  h1 {{ font-size: 26px; margin: 0 0 4px; }}
+  .site {{ margin: 0 0 22px; padding-bottom: 18px; border-bottom: 1px solid #e6e8ec; }}
+  .brand {{ display: flex; align-items: center; justify-content: space-between;
+           flex-wrap: wrap; gap: 12px; }}
+  h1 {{ font-size: 26px; margin: 0; letter-spacing: -0.01em; }}
+  .gh {{ display: inline-flex; align-items: center; gap: 7px; color: #3a3f4b;
+        text-decoration: none; font-size: 13px; font-weight: 500;
+        border: 1px solid #d4d8e0; border-radius: 7px; padding: 5px 11px;
+        background: #f4f6f9; }}
+  .gh:hover {{ background: #eceff4; color: #1c1e26; }}
+  .gh svg {{ flex: none; }}
+  .intro {{ color: #41464f; font-size: 14.5px; line-height: 1.55; margin: 12px 0 0;
+           max-width: 760px; }}
+  .intro code {{ background: #eef0f4; padding: 1px 5px; border-radius: 4px; }}
+  .intro a {{ color: #4845c9; text-decoration: none; }}
+  .intro a:hover {{ text-decoration: underline; }}
+  h2.rpt {{ font-size: 18px; margin: 0 0 4px; border-top: none; padding-top: 0; }}
   .meta {{ color: #6a7280; font-size: 13px; margin-bottom: 18px; }}
   .meta code {{ background: #eef0f4; padding: 1px 5px; border-radius: 4px; }}
   .legend {{ display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0 26px; }}
@@ -301,7 +316,24 @@ def render(data: dict) -> str:
   footer {{ margin-top: 40px; color: #9aa0aa; font-size: 12px; }}
 </style></head>
 <body><div class="wrap">
-  <h1>volas benchmark report</h1>
+  <header class="site">
+    <div class="brand">
+      <h1>volas</h1>
+      <a class="gh" href="https://github.com/kaelzhang/volas"
+         target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
+        github.com/kaelzhang/volas
+      </a>
+    </div>
+    <p class="intro">A Rust-backed, pandas-shaped <code>DataFrame</code> for live
+      OHLCV pipelines: 242 trading indicators, incremental <code>O(lookback)</code>
+      refresh on each new bar, and NumPy/Torch-ready output. This page is the
+      project's reproducible benchmark report — regenerated from
+      <code>make benchmark</code> on each release. See the
+      <a href="https://github.com/kaelzhang/volas">repository</a> for docs and
+      installation.</p>
+  </header>
+  <h2 class="rpt">Benchmark report</h2>
   <div class="meta">
     OHLCV technical-indicator computation across libraries ·
     {html.escape(str(when))} · {html.escape(str(cpu))} · Python {html.escape(str(pyver))}
