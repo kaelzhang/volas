@@ -35,8 +35,9 @@ def test_coverage_report_keeps_extended_metrics_on_one_indicator_row():
     assert '<th>volas vs TA-Lib</th>' in html
     assert '<th>volas vs TA-Lib (20000)</th>' in html
     assert '<th>volas vs TA-Lib (after append)</th>' in html
-    assert re.search(r'<td class="perf win">2\.00×</td>.*<td class="perf win">2\.00×</td>'
-                     r'.*<td class="perf win">4\.00×</td>', html, re.S)
+    # Column order (left to right): after-append, default ratio, extended (20000).
+    assert re.search(r'<td class="perf win">4\.00×</td>.*<td class="perf win">2\.00×</td>'
+                     r'.*<td class="perf win">2\.00×</td>', html, re.S)
 
 
 def test_coverage_headline_counts_only_default_ratio_column():
