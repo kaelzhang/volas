@@ -15,14 +15,14 @@ On our reproducible benchmark suite, **volas** is faster than pandas, polars, st
 
 ## Why volas
 
-- **Drop-in for pandas.** The same `.loc` / `.iloc` / `.at`, `read_csv`,
-  `to_numpy` and resampling — change the import, keep your code. (See
+- **pandas-shaped API.** The same `.loc` / `.iloc` / `.at`, `read_csv`,
+  `to_numpy` and resampling — for OHLCV workflows, change the import and keep
+  your code. It is **not** a general-purpose pandas replacement. (See
   [what's not covered](PANDAS-DIFFERENCES.md#index-limitations))
-- **Fastest in the field.** Faster than pandas, polars and TA-Lib on nearly
-  every indicator — see the always-current
-  [live benchmark report](https://volas.ost.ai).
-  - Beats TA-Lib on **137 / 158** covered indicators by the default ratio on
-    the published report — reproducible via `make benchmark`.
+- **Fast on live OHLCV indicator workloads**, with reproducible benchmarks —
+  see the always-current [live benchmark report](https://volas.ost.ai).
+  - On the current published report, volas beats TA-Lib on **139 / 157**
+    covered indicators by the default ratio — reproducible via `make benchmark`.
   - On incremental update (each new bar), volas is the fastest of **every**
     library across **all** indicators — **~5×** faster than TA-Lib, and up to
     **~360×** faster than pandas.
@@ -73,6 +73,15 @@ pip install volas
 Requires Python >= 3.11. Wheels are published for Linux (x86_64 / aarch64),
 macOS (x86_64 / arm64) and Windows (x86_64). For a local build from source, see
 [For Developers](#for-developers).
+
+Verify the install in 30 seconds, then see the [`examples/`](examples/) — each
+is self-contained and prints an `OK:` line:
+
+```sh
+pip install volas
+python examples/00_install_check.py
+python examples/03_live_ohlcv_append.py   # append a bar, refresh only the stale tail
+```
 
 ## Quick start
 

@@ -1,0 +1,35 @@
+name: Indicator request
+description: Request a new indicator or directive
+labels: ["indicator"]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Indicator name
+      placeholder: "e.g. Chande Momentum Oscillator (CMO)"
+    validations:
+      required: true
+  - type: textarea
+    id: formula
+    attributes:
+      label: Formula and reference
+      description: The definition plus an authoritative source (paper, vendor docs, Investopedia).
+    validations:
+      required: true
+  - type: input
+    id: inputs
+    attributes:
+      label: Input columns and defaults
+      placeholder: "e.g. close; period default 14"
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Lookback and missing-value behavior
+      description: Warm-up length, and what the indicator should do at the head / with NA.
+  - type: textarea
+    id: oracle
+    attributes:
+      label: Reference implementation or expected values
+      description: A library/snippet to pin against, or a few expected output values.

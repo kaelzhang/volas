@@ -15,12 +15,13 @@
 
 ## 为什么选 volas
 
-- **保留熟悉的 pandas 手感。** `.loc` / `.iloc` / `.at`、`read_csv`、
-  `to_numpy` 和重采样都按熟悉的方式使用——换一个 import，代码基本不动。（参见
+- **pandas 风格 API。** `.loc` / `.iloc` / `.at`、`read_csv`、
+  `to_numpy` 和重采样都按熟悉的方式使用——面向 OHLCV 工作流，换一个 import
+  代码基本不动。它**不是**通用 pandas 替代品。（参见
   [哪些不在覆盖范围内](PANDAS-DIFFERENCES.md#index-limitations)）
-- **同类最快。** 几乎所有指标都快于 pandas、polars 和 TA-Lib——
+- **在实时 OHLCV 指标计算上很快**，且 benchmark 可复现——
   具体结果以持续更新的 [实时 benchmark 报告](https://volas.ost.ai) 为准。
-  - 按已发布报告的默认口径，在 **137 / 158** 个覆盖指标上胜过 TA-Lib
+  - 按当前已发布报告的默认口径，在 **139 / 157** 个覆盖指标上胜过 TA-Lib
     ——可通过 `make benchmark` 复现。
   - 在增量更新（每来一根新 bar）计算中，volas 在**所有**指标上都是**所有**类库中
     最快的——比 TA-Lib 快 **~5×**，比 pandas 最高快约 **~360×**。
@@ -70,6 +71,15 @@ pip install volas
 要求 Python >= 3.11。Linux（x86_64 / aarch64）、macOS（x86_64 / arm64）
 和 Windows（x86_64）均提供预编译 wheel。如需从源码本地构建，请参见
 [面向开发者](#面向开发者)。
+
+30 秒内验证安装，然后查看 [`examples/`](examples/)——每个脚本都自包含、
+运行成功会打印一行 `OK:`：
+
+```sh
+pip install volas
+python examples/00_install_check.py
+python examples/03_live_ohlcv_append.py   # append 一根 bar，只刷新受影响的尾部
+```
 
 ## 快速上手
 

@@ -1,0 +1,36 @@
+name: Bug report
+description: Something behaves incorrectly or crashes
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. A minimal reproduction is the single most useful thing you can include.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you observe, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: A self-contained snippet (input frame + directive) that reproduces it.
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: volas version
+      placeholder: "e.g. 1.0.2 (pip show volas)"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python / OS
+      placeholder: "e.g. Python 3.12 on macOS 14 arm64"
+    validations:
+      required: true

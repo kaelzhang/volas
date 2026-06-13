@@ -1,0 +1,43 @@
+name: Benchmark case / challenge
+description: Propose a benchmark case — including ones where volas loses
+labels: ["benchmark"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        volas claims to be fast on **live OHLCV indicator workloads**, especially
+        append-one-bar refresh. Realistic cases that contradict that — or sharpen
+        it — are welcome. Benchmarks must be reproducible and compared within the
+        same run.
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Input shape and fixture
+      description: Number of rows/columns, how the data is generated or sourced.
+    validations:
+      required: true
+  - type: input
+    id: indicators
+    attributes:
+      label: Indicators computed
+      placeholder: "e.g. rsi:14, macd, atr:14"
+    validations:
+      required: true
+  - type: dropdown
+    id: scenario
+    attributes:
+      label: Scenario
+      options:
+        - Batch (compute over full history)
+        - Append-one-bar (incremental refresh)
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: script
+    attributes:
+      label: Reproducible script + versions + hardware
+      description: The script, library versions, and the machine/OS it ran on.
+      render: shell
+    validations:
+      required: true

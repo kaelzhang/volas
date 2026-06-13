@@ -28,12 +28,18 @@ classifiers = [
     'Intended Audience :: Developers',
     'Intended Audience :: Financial and Insurance Industry',
     'Operating System :: OS Independent',
-    'Development Status :: 1 - Planning',
-    'Topic :: Office/Business :: Financial :: Investment'
+    'Development Status :: 4 - Beta',
+    'Topic :: Office/Business :: Financial :: Investment',
+    'Topic :: Scientific/Engineering :: Information Analysis',
+    'Topic :: Software Development :: Libraries :: Python Modules'
 ]
 
 [project.urls]
 Homepage = "https://github.com/kaelzhang/volas"
+Repository = "https://github.com/kaelzhang/volas"
+Issues = "https://github.com/kaelzhang/volas/issues"
+Benchmark = "https://volas.ost.ai/"
+Changelog = "https://github.com/kaelzhang/volas/releases"
 
 [project.optional-dependencies]
 # `dev` is everything the *test* suite needs -- this is all CI installs. It
