@@ -215,15 +215,17 @@ def _coverage_section(groups: dict) -> str:
         body.append(
             f'<tr><td class="ind-name">{html.escape(ind)}</td>'
             f'<td>{_fmt_time(v)}</td><td>{_fmt_time(t)}</td>'
+            f'{perf_cell(append_metric)}'
             f'<td class="perf {verdict(s)}">{s:.2f}×</td>'
-            f'{extra_cells}{perf_cell(append_metric)}</tr>'
+            f'{extra_cells}</tr>'
         )
     summary = (f'<p class="blurb">volas beats TA-Lib on <strong>{wins} / {len(rows)}</strong> '
                f'covered indicators by the default ratio '
                f'({ties} exactly even, {losses} slower).</p>')
     return (f'{summary}<table class="stats cov"><thead><tr>'
-            f'<th>Indicator</th><th>volas</th><th>TA-Lib</th><th>volas vs TA-Lib</th>'
-            f'{extra_heads}<th>volas vs TA-Lib (after append)</th>'
+            f'<th>Indicator</th><th>volas</th><th>TA-Lib</th>'
+            f'<th>volas vs TA-Lib (after append)</th><th>volas vs TA-Lib</th>'
+            f'{extra_heads}'
             f'</tr></thead><tbody>{"".join(body)}</tbody></table>')
 
 
