@@ -4,6 +4,8 @@
 //! boundary validation), `lookback`, and `stringify`, so the values are never
 //! duplicated.
 
+use std::borrow::Cow;
+
 /// A positional-argument default. `Required` means the argument has no default
 /// (the caller must supply it).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -239,7 +241,7 @@ pub struct CommandSpec {
 
 /// Canonicalize a sub-command alias (e.g. `macd.dif` -> main, `boll.u` ->
 /// `upper`). Returns the canonical sub, or `None` for the main command.
-pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
+pub fn canon_sub<'a>(name: &str, sub: Option<&'a str>) -> Option<Cow<'a, str>> {
     match (name, sub) {
         ("macd" | "macdext" | "macdfix", None | Some("dif")) => None,
         ("macd" | "macdext" | "macdfix", Some("s" | "signal" | "dea")) => Some("signal".into()),
@@ -288,7 +290,7 @@ pub fn canon_sub(name: &str, sub: Option<&str>) -> Option<String> {
         // Supertrend: the trailing line is the main output; `.direction` gives the +1/−1 trend.
         ("supertrend", None | Some("line")) => None,
         ("supertrend", Some("direction" | "trend" | "d")) => Some("direction".into()),
-        (_, Some(s)) => Some(s.to_string()),
+        (_, Some(s)) => Some(Cow::Borrowed(s)),
         (_, None) => None,
     }
 }
@@ -475,8 +477,13 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // compute layer's pattern registry, so new patterns need no change here. Patterns
         // taking a `penetration` ratio accept one optional Float arg (default 0.5,
         // non-negative — TA-Lib's domain).
-        ("style", Some(pat)) if volas_compute::indicators::candle_pattern(pat).is_some() => {
-            let args = match volas_compute::indicators::candle_pattern(pat).unwrap().0 {
+        ("style", Some(pat)) => {
+            // One registry lookup. This was a `.is_some()` guard plus a `.unwrap()`
+            // body — two 61-arm pattern matches on every candle validate; `?` makes an
+            // unknown pattern a `None` spec (a "no such sub-command" error), exactly as
+            // the guard did. `bullish`/`bearish` are handled by the arm above.
+            let (pattern, _) = volas_compute::indicators::candle_pattern(pat)?;
+            let args = match pattern {
                 volas_compute::indicators::CandlePattern::Penetration { default, .. } => {
                     vec![fmin(default, 0.0)]
                 }
