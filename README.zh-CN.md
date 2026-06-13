@@ -11,6 +11,33 @@
 
 **volas** 是一个 Rust 驱动、pandas 风格的 `DataFrame`，专为实时 OHLCV 流水线打造：内置 [**242** 个交易指标](INDICATORS.md)，支持增量 O(lookback) 刷新，输出可直接交给 NumPy / Torch 使用。
 
+它**不是**通用 pandas 替代品，而是一个窄而快、专服务于 K 线 / OHLCV 工作流的 DataFrame：append 一根新 bar，指标列保持缓存，只刷新受影响的尾部。
+
+```python
+from volas import read_csv
+
+df = read_csv("btc_1m.csv")
+
+# 把指标 directive 作为 DataFrame 列缓存。
+df["rsi:14"]
+df[["macd", "macd.signal", "atr:14"]]
+
+# 在实时循环中：
+df.append(new_bar)     # 一行 OHLCV frame
+df["rsi:14"]           # 只刷新受影响的尾部，O(lookback)
+features = df.to_numpy()
+```
+
+- 内置 **242** 个指标，directive 与 TA-Lib 对齐
+- `append` 后增量刷新：**O(lookback)**，不是 O(n)
+- Rust 内核，运行时无 pandas 依赖
+- pandas 风格索引：`.loc` / `.iloc` / `.at` / `read_csv` / `to_numpy`
+- 输出可直接交给 NumPy / Torch
+
+```sh
+pip install volas
+```
+
 在可复现的 benchmark 套件中，**volas** 在大多数实时更新指标场景下都快于 pandas、polars、stock-pandas 和 TA-Lib。
 
 ## 为什么选 volas

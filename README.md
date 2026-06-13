@@ -11,6 +11,33 @@ English | [简体中文](README.zh-CN.md)
 
 **volas** is a Rust-backed, pandas-shaped `DataFrame` for live OHLCV pipelines: [**242** trading-indicators](INDICATORS.md), incremental O(lookback) refresh, and NumPy/Torch-ready output.
 
+It is **not** a general-purpose pandas replacement. It is a narrow, fast DataFrame for candlestick / OHLCV workflows: append a new bar, keep indicator columns cached, and refresh only the stale tail.
+
+```python
+from volas import read_csv
+
+df = read_csv("btc_1m.csv")
+
+# Cache indicator directives as DataFrame columns.
+df["rsi:14"]
+df[["macd", "macd.signal", "atr:14"]]
+
+# In a live loop:
+df.append(new_bar)     # one-row OHLCV frame
+df["rsi:14"]           # refreshes only the affected tail, O(lookback)
+features = df.to_numpy()
+```
+
+- **242** built-in indicators and TA-Lib-compatible directives
+- Incremental refresh after `append`: **O(lookback)**, not O(n)
+- Rust kernels, no pandas runtime dependency
+- pandas-shaped indexing: `.loc` / `.iloc` / `.at` / `read_csv` / `to_numpy`
+- NumPy / Torch-ready output
+
+```sh
+pip install volas
+```
+
 On our reproducible benchmark suite, **volas** is faster than pandas, polars, stock-pandas and TA-Lib on most live-update indicator workloads.
 
 ## Why volas
