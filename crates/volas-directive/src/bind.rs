@@ -100,33 +100,98 @@ pub fn bind_command(
     })
 }
 
-/// Reject the bare-`Name` commands a frame-blind directive API cannot otherwise
-/// catch. `bind` leaves a bare name unbound (without a frame it may be a column
-/// reference), so `exec` resolves it column-first and only then binds. But
-/// `directive_stringify` / `directive_lookback` have no frame and treat a bare
-/// name as a command, so a *known* command with no sub-less form — `kdj`, `stoch`,
-/// `vortex`, … — must be rejected here, exactly as `df[d]` rejects it at execute.
-/// A bare name that is not a known command is an unverifiable column reference and
-/// passes; every `Command` node was already validated by `bind`.
-pub fn check_bare_commands(node: &Ast) -> Result<()> {
+/// The bare-name rule for the frame-blind APIs: without a frame a bare name is
+/// taken as a command, so a known command with no sub-less form — `kdj`, `stoch`,
+/// `vortex`, … — is rejected, exactly as `df[d]` rejects it at execute. An unknown
+/// bare name is an unverifiable column reference and passes.
+fn check_bare_name(name: &str) -> Result<()> {
+    let name = normalize(name);
+    if is_command(&name) && command_spec(&name, None).is_none() {
+        return Err(VolasError::Value(format!(
+            "command \"{name}\" requires a sub-command"
+        )));
+    }
+    Ok(())
+}
+
+/// Walk a bound [`Ast`] applying only the bare-name rule — every `Command` was
+/// already validated when `bind` produced the tree. Used by `directive_lookback`.
+pub fn check_bare<A>(node: &Node<A>) -> Result<()> {
     match node {
-        Node::Name(name) => {
-            let name = normalize(name);
-            if is_command(&name) && command_spec(&name, None).is_none() {
+        Node::Name(name) => check_bare_name(name),
+        Node::Scalar(_) => Ok(()),
+        Node::Command(c) => c.series.iter().try_for_each(check_bare),
+        Node::Unary { operand, .. } => check_bare(operand),
+        Node::Binary { left, right, .. } => {
+            check_bare(left)?;
+            check_bare(right)
+        }
+    }
+}
+
+/// Validate a raw [`Cst`] for the form-level `directive_stringify`. Like `bind` it
+/// rejects an unknown command / sub-command, too many arguments, an out-of-domain
+/// *supplied* argument, a bad cross-argument rule, and a bare sub-requiring name —
+/// but it is lenient on a *missing required* argument, since a form such as
+/// `donchian.upper` names a real indicator whose period is supplied only at use. So
+/// `directive_stringify` rejects exactly what `df[d]` would except for the absent
+/// period of an otherwise-valid form.
+pub fn check_form(cst: &Cst) -> Result<()> {
+    match cst {
+        Node::Name(name) => check_bare_name(name),
+        Node::Scalar(_) => Ok(()),
+        Node::Command(c) => {
+            let name = normalize(&c.name);
+            let sub = canon_sub(&name, c.sub.as_deref());
+            let spec = match command_spec(&name, sub.as_deref()) {
+                Some(spec) => spec,
+                None if is_command(&name) => {
+                    return Err(VolasError::Value(match sub.as_deref() {
+                        Some(s) => format!("command \"{name}\" has no sub-command \"{s}\""),
+                        None => format!("command \"{name}\" requires a sub-command"),
+                    }));
+                }
+                None => return Err(VolasError::Value(format!("unknown command \"{name}\""))),
+            };
+            if c.args.len() > spec.args.len() {
                 return Err(VolasError::Value(format!(
-                    "command \"{name}\" requires a sub-command"
+                    "command \"{name}\" accepts at most {} argument(s), got {}",
+                    spec.args.len(),
+                    c.args.len()
                 )));
             }
-            Ok(())
+            for (i, arg) in spec.args.iter().enumerate() {
+                if let Some(s) = c.args.get(i).and_then(|o| o.as_deref()) {
+                    arg.bound.bind(s).map_err(|why| {
+                        VolasError::Value(format!("{name}: argument #{i} {why}, got '{s}'"))
+                    })?;
+                }
+            }
+            check_form_cross(&name, &c.args)?;
+            c.series.iter().try_for_each(check_form)
         }
-        Node::Command(c) => c.series.iter().try_for_each(check_bare_commands),
-        Node::Unary { operand, .. } => check_bare_commands(operand),
+        Node::Unary { operand, .. } => check_form(operand),
         Node::Binary { left, right, .. } => {
-            check_bare_commands(left)?;
-            check_bare_commands(right)
+            check_form(left)?;
+            check_form(right)
         }
-        Node::Scalar(_) => Ok(()),
     }
+}
+
+/// Cross-argument rules over *supplied* raw tokens (lenient): checked only when both
+/// operands are present, mirroring [`bind_cross_args`] without requiring them.
+fn check_form_cross(name: &str, args: &[Option<String>]) -> Result<()> {
+    if name == "mavp" {
+        let at = |i: usize| args.get(i).and_then(|o| o.as_deref()).and_then(|s| s.parse::<usize>().ok());
+        if let (Some(min_p), Some(max_p)) = (at(0), at(1)) {
+            if min_p > max_p {
+                return Err(VolasError::Value(format!(
+                    "mavp: min_period ({min_p}) must be <= max_period ({max_p})"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Cross-argument domain rules — a constraint *between* two resolved arguments
@@ -148,7 +213,7 @@ fn bind_cross_args(name: &str, args: &[ArgValue]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse;
+    use crate::{parse, parse_cst};
 
     /// `bind` (via `parse`) is the single validation boundary; an out-of-domain
     /// configuration is rejected, with the diagnostic naming the offending command.
@@ -184,35 +249,57 @@ mod tests {
 
     #[test]
     fn binds_bare_name_command_on_the_fly() {
-        // A bare name resolves its defaults (no-arg `obv`, default-only `atr` -> 14);
+        // A bare name resolves its defaults (no-arg `obv`, default-only `boll` -> 20);
         // a name needing a sub or a required argument errors; an unknown name too.
         assert!(bind_command("obv", None, &[], &[]).is_ok());
-        let atr = bind_command("atr", None, &[], &[]).unwrap();
-        assert_eq!(atr.args[0], ArgValue::Usize(14));
-        assert_eq!(atr.name, "atr");
+        let boll = bind_command("boll", None, &[], &[]).unwrap();
+        assert_eq!(boll.args[0], ArgValue::Usize(20));
+        assert_eq!(boll.name, "boll");
         // `cdl` folds to the canonical `style` namespace; sub canonicalizes.
         let doji = bind_command("CDL", Some("doji"), &[], &[]).unwrap();
         assert_eq!(doji.name, "style");
         assert!(bind_command("ema", None, &[], &[]).is_err()); // required period
+        assert!(bind_command("atr", None, &[], &[]).is_err()); // required period
         assert!(bind_command("kdj", None, &[], &[]).is_err()); // needs a sub
         assert!(bind_command("nope", None, &[], &[]).is_err()); // unknown
     }
 
     #[test]
-    fn check_bare_commands_rejects_sub_required_names() {
-        // A known command with no sub-less form is rejected, even nested in an
-        // operator or a series operand; a column reference or a command with a main
-        // line passes.
-        let bare = |d: &str| check_bare_commands(&parse(d).unwrap());
-        assert!(bare("close").is_ok()); // column reference (unknown name)
-        assert!(bare("rsi").is_ok()); // has a main line (rsi:14)
-        assert!(bare("obv").is_ok()); // no-arg command
-        assert!(bare("3.5").is_ok()); // scalar
-        assert!(bare("close > 5").is_ok()); // binary with a scalar operand
-        assert!(bare("ma:5@close").is_ok()); // command with a valid series operand
-        assert!(bare("kdj").is_err()); // needs a sub
-        assert!(bare("~kdj").is_err()); // nested in a unary
-        assert!(bare("kdj > 0").is_err()); // nested in a binary
-        assert!(bare("ma:5@vortex").is_err()); // nested in a series operand
+    fn check_directive_validates_commands_leniently() {
+        // Operates on a raw `Cst` (no binding): rejects an unknown command, a bad
+        // sub-command, and a bare sub-requiring name — even nested — but is lenient
+        // on arguments (`donchian.upper` names a real form, period supplied at use).
+        let check = |d: &str| check_form(&parse_cst(d).unwrap());
+        assert!(check("close").is_ok()); // column reference (unknown bare name)
+        assert!(check("obv").is_ok()); // no-arg command
+        assert!(check("3.5").is_ok()); // scalar
+        assert!(check("close > 5").is_ok()); // binary with a scalar operand
+        assert!(check("ma:5@close").is_ok()); // command with a valid series operand
+        assert!(check("rsi").is_ok()); // a required-arg command still has a main form
+        assert!(check("donchian.upper").is_ok()); // valid form, period absent (lenient)
+        assert!(check("kdj").is_err()); // bare name needs a sub
+        assert!(check("~kdj").is_err()); // nested in a unary
+        assert!(check("kdj > 0").is_err()); // nested in a binary
+        assert!(check("ma:5@vortex").is_err()); // bare sub-requiring name in a series
+        assert!(check("ma.foo").is_err()); // unknown sub-command
+        assert!(check("kdj:9").is_err()); // a Command whose command needs a sub-command
+        assert!(check("frobnicate:5").is_err()); // unknown command
+        assert!(check("ema:2,3").is_err()); // too many arguments
+        assert!(check("ma:0").is_err()); // out-of-domain supplied argument
+        assert!(check("mavp:2,30@close,close").is_ok()); // valid cross-arg (min <= max)
+        assert!(check("mavp:30,2@close,close").is_err()); // inverted period limits
+        assert!(check("mavp@close,close").is_ok()); // both absent -> cross-arg skipped
+    }
+
+    #[test]
+    fn check_bare_walks_every_node_kind() {
+        // `check_bare` (the bound-`Ast` path for `directive_lookback`) applies only the
+        // bare-name rule, but visits every node kind.
+        let bare = |d: &str| check_bare(&parse(d).unwrap());
+        assert!(bare("close").is_ok()); // Name (column reference)
+        assert!(bare("5").is_ok()); // Scalar
+        assert!(bare("~(close > 5)").is_ok()); // Unary -> Binary -> Name / Scalar
+        assert!(bare("ma:5 + ma:10").is_ok()); // Binary -> Command (-> series)
+        assert!(bare("kdj").is_err()); // a bare name needing a sub
     }
 }

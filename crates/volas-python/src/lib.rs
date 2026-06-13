@@ -195,10 +195,11 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
 ///     volas.directive_stringify('MACD:12,26')   # -> "macd"
 #[pyfunction]
 fn directive_stringify(directive: &str) -> PyResult<String> {
-    let node = parse(directive).map_err(directive_err)?;
-    // Frame-blind: a bare name is taken as a command, so reject a known command with
-    // no sub-less form (`kdj`, `stoch`, …) — `df[d]` rejects it at execute instead.
-    volas_directive::check_bare_commands(&node).map_err(value_err)?;
+    // Form-level: parse to a raw `Cst` (no binding) so a valid but argument-incomplete
+    // form like `donchian.upper` still canonicalizes to its name; `check_form`
+    // rejects an unknown command / sub-command or a bare sub-requiring name.
+    let node = volas_directive::parse_cst(directive).map_err(directive_err)?;
+    volas_directive::check_form(&node).map_err(value_err)?;
     Ok(volas_directive::stringify(&node))
 }
 
@@ -214,8 +215,8 @@ fn directive_lookback(directive: &str) -> PyResult<usize> {
     // rather than yielding a "plausible" warm-up window that feeds a scheduler /
     // cache before execution fails (P2-02 / V17).
     let node = parse(directive).map_err(directive_err)?;
-    // Frame-blind: reject a bare known command with no sub-less form (`kdj`, …).
-    volas_directive::check_bare_commands(&node).map_err(value_err)?;
+    // Frame-blind: reject an unknown command / sub-command or a bare sub-requiring name.
+    volas_directive::check_bare(&node).map_err(value_err)?;
     Ok(volas_directive::lookback::lookback(&node))
 }
 

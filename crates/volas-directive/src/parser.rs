@@ -27,7 +27,7 @@ pub fn parse(input: &str) -> Result<Rc<Ast>> {
     if let Some(ast) = PARSE_CACHE.with(|c| c.borrow().get(input).cloned()) {
         return Ok(ast);
     }
-    let ast = Rc::new(bind_node(&parse_uncached(input)?)?);
+    let ast = Rc::new(bind_node(&parse_cst(input)?)?);
     PARSE_CACHE.with(|c| {
         let mut m = c.borrow_mut();
         // Bound the memo (clear wholesale — cheap and correct) so generated / adversarial
@@ -40,7 +40,7 @@ pub fn parse(input: &str) -> Result<Rc<Ast>> {
     Ok(ast)
 }
 
-fn parse_uncached(input: &str) -> Result<Cst> {
+pub fn parse_cst(input: &str) -> Result<Cst> {
     let mut p = Parser::new(input);
     p.skip_ws();
     if p.eof() {
@@ -403,12 +403,12 @@ fn is_number_start(c: u8, next: Option<u8>) -> bool {
 mod tests {
     use super::*;
 
-    // The structure tests exercise the parser directly (`parse_uncached` -> `Cst`,
+    // The structure tests exercise the parser directly (`parse_cst` -> `Cst`,
     // arguments as raw tokens); binding/validation is `bind`'s concern, tested there.
 
     #[test]
     fn parse_simple_command() {
-        match parse_uncached("ma:5").unwrap() {
+        match parse_cst("ma:5").unwrap() {
             Node::Command(c) => {
                 assert_eq!(c.name, "ma");
                 assert_eq!(c.args, vec![Some("5".to_string())]);
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn parse_operator_and_scalar() {
-        match parse_uncached("kdj.j < 0").unwrap() {
+        match parse_cst("kdj.j < 0").unwrap() {
             Node::Binary { op, right, .. } => {
                 assert_eq!(op, Op::Lt);
                 assert_eq!(*right, Node::Scalar(0.0));
@@ -431,13 +431,13 @@ mod tests {
     #[test]
     fn parse_cross_and_nested() {
         assert!(matches!(
-            parse_uncached("macd // macd.signal").unwrap(),
+            parse_cst("macd // macd.signal").unwrap(),
             Node::Binary {
                 op: Op::CrossUp,
                 ..
             }
         ));
-        if let Node::Command(c) = parse_uncached("increase:3@(ma:20@close)").unwrap() {
+        if let Node::Command(c) = parse_cst("increase:3@(ma:20@close)").unwrap() {
             assert!(matches!(c.series[0], Node::Command(_)));
         } else {
             panic!(); // LCOV_EXCL_LINE
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn parse_precedence() {
         // (kdj.j + 1) != kdj.j
-        match parse_uncached("kdj.j + 1 != kdj.j").unwrap() {
+        match parse_cst("kdj.j + 1 != kdj.j").unwrap() {
             Node::Binary {
                 op: Op::Ne, left, ..
             } => {
@@ -457,26 +457,26 @@ mod tests {
         }
         // (a > 1) | (a <= 1)
         assert!(matches!(
-            parse_uncached("(kdj.j > 1) | (kdj.j <= 1)").unwrap(),
+            parse_cst("(kdj.j > 1) | (kdj.j <= 1)").unwrap(),
             Node::Binary { op: Op::Or, .. }
         ));
         // unary not / neg
         assert!(matches!(
-            parse_uncached("~(kdj.j <= 0)").unwrap(),
+            parse_cst("~(kdj.j <= 0)").unwrap(),
             Node::Unary {
                 op: UnaryOp::Not,
                 ..
             }
         ));
         assert!(matches!(
-            parse_uncached("kdj.j * 2").unwrap(),
+            parse_cst("kdj.j * 2").unwrap(),
             Node::Binary { op: Op::Mul, .. }
         ));
     }
 
     #[test]
     fn parse_empty_arg_slots() {
-        if let Node::Command(c) = parse_uncached("macd.signal:,,10").unwrap() {
+        if let Node::Command(c) = parse_cst("macd.signal:,,10").unwrap() {
             assert_eq!(c.args, vec![None, None, Some("10".into())]);
         } else {
             panic!(); // LCOV_EXCL_LINE
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn malformed_number_is_a_syntax_error() {
         // parse_number scans digits/'.' greedily, so "1.2.3" fails f64 parsing
-        assert!(parse_uncached("1.2.3").is_err());
+        assert!(parse_cst("1.2.3").is_err());
     }
 
     #[test]

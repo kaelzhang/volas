@@ -96,9 +96,9 @@ def test_fulfill_is_incremental_not_full_recompute():
 # default-series directives — safe ONLY because `execute_refresh` dispatches a
 # bare NAME node as a command. Resolving the name as a column would return the
 # directive's OWN stale cache (a self-referential no-op that "verifies" against
-# itself and splices the stale tail back). `wma` is the canonical all-defaults
-# spelling, so `wma:30` exercises exactly that node shape.
-@pytest.mark.parametrize('directive', ['wma:30', 'wma', 'linearreg:14', 'tsf:14', 'mfi:14'])
+# itself and splices the stale tail back). `macd` is an all-defaults command whose
+# canonical form is the bare name, so `macd:12,26` exercises exactly that node shape.
+@pytest.mark.parametrize('directive', ['macd', 'macd:12,26', 'boll', 'bbw', 'obv'])
 def test_fulfill_bare_canonical_directive_not_self_referential(directive):
     full = volas.read_csv(TENCENT)
     expected = full[directive].to_numpy()

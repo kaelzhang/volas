@@ -8,10 +8,9 @@ use volas_core::{Column, DataFrame};
 
 use super::as_command;
 
-fn default_period(directive: &str, name: &str, default: usize) -> Option<usize> {
-    if directive == name {
-        return Some(default);
-    }
+/// Extract the period from a `name:<period>` directive for the momentum / ROC
+/// family. These commands are required (no default), so the form is always explicit.
+fn period_of(directive: &str, name: &str) -> Option<usize> {
     directive
         .strip_prefix(name)?
         .strip_prefix(':')?
@@ -80,7 +79,7 @@ pub fn execute_resume_default_series_one(
             let (kind, period) = ["mom", "roc", "rocp", "rocr", "rocr100"]
                 .into_iter()
                 .find_map(|kind| {
-                    default_period(directive, kind, 10).map(|period| (kind, period))
+                    period_of(directive, kind).map(|period| (kind, period))
                 })?;
             if row < period {
                 return Some(f64::NAN);
@@ -188,7 +187,7 @@ pub fn execute_resume_default_series(
             let (kind, period) = ["mom", "roc", "rocp", "rocr", "rocr100"]
                 .into_iter()
                 .find_map(|kind| {
-                    default_period(directive, kind, 10).map(|period| (kind, period))
+                    period_of(directive, kind).map(|period| (kind, period))
                 })?;
             let data = series_f64(df, &[], 0, "close").ok()?;
             let mut out = Vec::with_capacity(data.len().saturating_sub(from_row));

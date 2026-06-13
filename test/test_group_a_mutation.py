@@ -25,8 +25,8 @@ from test.test_mutation_parity import A, BARS, A_UPD, N, LO, _CLOSE, _gt, _eq
 
 # All 13 Group A directives, in their canonical default-parameter forms.
 DIRECTIVES = [
-    'psy', 'dpo', 'tsi', 'kst', 'crsi', 'chop', 'cmf',
-    'emv', 'efi', 'pvt', 'nvi', 'pvi', 'mass_index',
+    'psy', 'dpo:20', 'tsi', 'kst', 'crsi', 'chop:14', 'cmf',
+    'emv:14', 'efi', 'pvt', 'nvi', 'pvi', 'mass_index',
 ]
 
 

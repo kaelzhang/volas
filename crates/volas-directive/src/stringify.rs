@@ -4,11 +4,14 @@
 //! `boll`). The canonical form is volas-native — numeric arguments are not
 //! coerced to a typed display (e.g. `100` stays `100`, not `100.0`).
 
-use crate::spec::command_spec;
-use crate::types::{ArgValue, Ast, Command, Node, UnaryOp};
+use crate::spec::{canon_sub, command_spec, normalize};
+use crate::types::{ArgTokens, Command, Node, UnaryOp};
 
-/// Canonical string form of a directive AST.
-pub fn stringify(node: &Ast) -> String {
+/// Canonical string form of a directive tree. Generic over the argument payload so
+/// it canonicalizes both a bound [`Ast`](crate::types::Ast) (the frame-cache key)
+/// and a raw [`Cst`](crate::types::Cst) (the form-level `directive_stringify`,
+/// where a required argument may be absent — the form name is still canonical).
+pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
     match node {
         Node::Name(s) => s.clone(),
         Node::Scalar(v) => format_num(*v),
@@ -53,32 +56,32 @@ fn format_num(v: f64) -> String {
     }
 }
 
-fn stringify_command(cmd: &Command<Box<[ArgValue]>>) -> String {
-    // The name and sub are already canonical (bound), so they render directly.
-    let mut out = cmd.name.clone();
-    if let Some(s) = &cmd.sub {
+fn stringify_command<A: ArgTokens>(cmd: &Command<A>) -> String {
+    // Canonicalize the name / sub here (case-folding, `cdl` -> `style`, alias subs);
+    // this is idempotent for an already-bound `Ast` and the real work for a raw `Cst`.
+    let name = normalize(&cmd.name);
+    let sub = canon_sub(&name, cmd.sub.as_deref());
+    let mut out = name.clone().into_owned();
+    if let Some(s) = &sub {
         out.push('.');
         out.push_str(s);
     }
-    let spec = command_spec(&cmd.name, cmd.sub.as_deref());
+    let spec = command_spec(&name, sub.as_deref());
 
-    // Arguments: keep one only if it differs from its default. Every argument is
-    // present (resolved), so an argument equal to its default renders empty and
-    // trailing defaults fall away (`boll:20@close` -> `boll`).
-    let arg_tokens: Vec<String> = cmd
-        .args
-        .iter()
-        .enumerate()
-        .map(|(i, a)| {
-            let is_default = spec
+    // Arguments: keep a slot only if it is present and differs from its default. An
+    // absent slot — or one equal to its default — renders empty, and trailing empties
+    // fall away (`boll:20@close` -> `boll`; the absent period of `donchian.upper`
+    // simply drops).
+    let arg_tokens: Vec<String> = (0..cmd.args.arg_len())
+        .map(|i| {
+            let default = spec
                 .as_ref()
                 .and_then(|s| s.args.get(i))
                 .and_then(|spec_arg| spec_arg.default.value())
-                .is_some_and(|default| default == *a);
-            if is_default {
-                String::new()
-            } else {
-                a.to_token()
+                .map(|d| d.to_token());
+            match cmd.args.arg_token(i) {
+                Some(v) if Some(&v) != default.as_ref() => v,
+                _ => String::new(),
             }
         })
         .collect();
@@ -102,7 +105,7 @@ fn stringify_command(cmd: &Command<Box<[ArgValue]>>) -> String {
     out
 }
 
-fn stringify_series(node: &Ast) -> String {
+fn stringify_series<A: ArgTokens>(node: &Node<A>) -> String {
     match node {
         Node::Name(s) => s.clone(),
         Node::Scalar(v) => format_num(*v),

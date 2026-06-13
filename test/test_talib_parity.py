@@ -170,10 +170,10 @@ def test_overlap_ma_variants_match_talib(ohlc):
             talib.SAREXT(h, l, startvalue=-0.5, offsetonreverse=0.1,
                          accelerationinitlong=0.02, accelerationlong=0.03, accelerationmaxlong=0.25,
                          accelerationinitshort=0.02, accelerationshort=0.04, accelerationmaxshort=0.3))
-    _parity(df.exec('wma'), talib.WMA(c, 30))  # default resolves to 30
-    _parity(df.exec('trima'), talib.TRIMA(c, 30))
-    _parity(df.exec('t3'), talib.T3(c, 5))
-    _parity(df.exec('kama'), talib.KAMA(c, 30))
+    _parity(df.exec('wma:30'), talib.WMA(c, 30))  # default resolves to 30
+    _parity(df.exec('trima:30'), talib.TRIMA(c, 30))
+    _parity(df.exec('t3:5'), talib.T3(c, 5))
+    _parity(df.exec('kama:30'), talib.KAMA(c, 30))
 
 
 def test_linear_regression_matches_talib(ohlc):
@@ -184,7 +184,7 @@ def test_linear_regression_matches_talib(ohlc):
         _parity(df.exec(f'linearreg_intercept:{p}'), talib.LINEARREG_INTERCEPT(c, p))
         _parity(df.exec(f'linearreg_angle:{p}'), talib.LINEARREG_ANGLE(c, p))
         _parity(df.exec(f'tsf:{p}'), talib.TSF(c, p))
-    _parity(df.exec('tsf'), talib.TSF(c, 14))  # default resolves to 14
+    _parity(df.exec('tsf:14'), talib.TSF(c, 14))  # default resolves to 14
 
 
 def test_volume_matches_talib(ohlc):
@@ -207,7 +207,7 @@ def test_variance_stddev_matches_talib(ohlc):
         _parity(df.exec(f'stddev:{p}'), talib.STDDEV(c, p))  # nbdev defaults to 1
         for nb in (0.5, 1.5, 2.0, 3.0):  # the standard-deviation multiplier
             _parity(df.exec(f'stddev:{p},{nb}'), talib.STDDEV(c, p, nbdev=nb))
-    _parity(df.exec('var'), talib.VAR(c, 5))  # default resolves to 5
+    _parity(df.exec('var:5'), talib.VAR(c, 5))  # default resolves to 5
 
 
 def test_math_operators_match_talib(ohlc):
@@ -233,7 +233,7 @@ def test_math_operators_match_talib(ohlc):
         mni, mxi = talib.MINMAXINDEX(c, p)
         idx_parity(df.exec(f'minmaxindex.min:{p}'), mni, p - 1)
         idx_parity(df.exec(f'minmaxindex.max:{p}'), mxi, p - 1)
-    _parity(df.exec('sum'), talib.SUM(c, 30))  # default resolves to 30
+    _parity(df.exec('sum:30'), talib.SUM(c, 30))  # default resolves to 30
 
 
 def test_llv_hhv_match_talib(ohlc):
@@ -252,8 +252,8 @@ def test_aroon_matches_talib(ohlc):
         _parity(df.exec(f'aroon.down:{p}'), down)
         _parity(df.exec(f'aroonosc:{p}'), talib.AROONOSC(h, l, p))
     # default resolves to 14, and the .u/.d abbreviations match the full names
-    _parity(df.exec('aroon.u'), talib.AROON(h, l, 14)[1])
-    _parity(df.exec('aroon.d'), talib.AROON(h, l, 14)[0])
+    _parity(df.exec('aroon.u:14'), talib.AROON(h, l, 14)[1])
+    _parity(df.exec('aroon.d:14'), talib.AROON(h, l, 14)[0])
 
 
 def test_ma_matype_apo_ppo_match_talib(ohlc):
@@ -318,7 +318,7 @@ def test_correl_beta_match_talib(ohlc):
         _parity(df.exec(f'beta:{p}@high,low'), talib.BETA(h, l, p))
     # The first series defaults to close via an empty leading operand (@,<second>).
     _parity(df.exec('correl:30@,volume'), talib.CORREL(c, v, 30))
-    _parity(df.exec('beta@,volume'), talib.BETA(c, v, 5))  # default period 5
+    _parity(df.exec('beta:5@,volume'), talib.BETA(c, v, 5))  # default period 5
     # The second series is required.
     with pytest.raises(Exception):
         df.exec('correl:30')
@@ -336,7 +336,7 @@ def test_directional_family_matches_talib(ohlc):
         _parity(df.exec(f'dx:{p}'), talib.DX(h, l, c, p))
         _parity(df.exec(f'adx:{p}'), talib.ADX(h, l, c, p))
         _parity(df.exec(f'adxr:{p}'), talib.ADXR(h, l, c, p))
-    _parity(df.exec('adx'), talib.ADX(h, l, c, 14))  # default resolves to 14
+    _parity(df.exec('adx:14'), talib.ADX(h, l, c, 14))  # default resolves to 14
 
 
 # All 61 TA-Lib candlestick patterns: (volas name, talib function, lookback).
@@ -562,8 +562,8 @@ def test_cci_trix_match_talib(ohlc):
     # up one row later there.)
     for t in ((5, 10, 20), (30, 30, 30)):
         _parity(df.exec(f'ultosc:{t[0]},{t[1]},{t[2]}'), talib.ULTOSC(h, l, c, *t))
-    _parity(df.exec('cci'), talib.CCI(h, l, c, 14))  # default resolves to 14
-    _parity(df.exec('trix'), talib.TRIX(c, 30))
+    _parity(df.exec('cci:14'), talib.CCI(h, l, c, 14))  # default resolves to 14
+    _parity(df.exec('trix:30'), talib.TRIX(c, 30))
     o = df['open'].to_numpy()
     for p in (14, 20):
         _parity(df.exec(f'imi:{p}'), talib.IMI(o, c, p))
@@ -585,7 +585,7 @@ def test_bop_cmo_natr_match_talib(ohlc):
     for p in (9, 14):  # 14 is the shared TA-Lib default
         _parity(df.exec(f'cmo:{p}'), talib.CMO(c, p))
         _parity(df.exec(f'natr:{p}'), talib.NATR(h, l, c, p))
-    _parity(df.exec('cmo'), talib.CMO(c, 14))  # default resolves to 14
+    _parity(df.exec('cmo:14'), talib.CMO(c, 14))  # default resolves to 14
 
 
 def test_range_based_match_talib(ohlc):
@@ -594,7 +594,7 @@ def test_range_based_match_talib(ohlc):
         _parity(df.exec(f'midpoint:{p}'), talib.MIDPOINT(c, p))
         _parity(df.exec(f'midprice:{p}'), talib.MIDPRICE(h, l, p))
         _parity(df.exec(f'willr:{p}'), talib.WILLR(h, l, c, p))
-    _parity(df.exec('willr'), talib.WILLR(h, l, c, 14))  # default resolves to 14
+    _parity(df.exec('willr:14'), talib.WILLR(h, l, c, 14))  # default resolves to 14
 
 
 def test_momentum_roc_matches_talib(ohlc):
@@ -606,7 +606,7 @@ def test_momentum_roc_matches_talib(ohlc):
         _parity(df.exec(f'rocr:{p}'), talib.ROCR(c, p))
         _parity(df.exec(f'rocr100:{p}'), talib.ROCR100(c, p))
     # Defaults (period 10) resolve identically to the explicit form.
-    _parity(df.exec('roc'), talib.ROC(c, 10))
+    _parity(df.exec('roc:10'), talib.ROC(c, 10))
 
 
 # --- Hilbert-transform suite ----------------------------------------------------

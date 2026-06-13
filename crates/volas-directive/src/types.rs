@@ -166,6 +166,37 @@ impl ArgValue {
     }
 }
 
+/// A directive's positional arguments, viewed as canonical tokens — the seam that
+/// lets `stringify` canonicalize both a bound [`Ast`] (frame-cache key, complete)
+/// and a raw [`Cst`] (the form-level `directive_stringify`, possibly missing a
+/// required argument). An absent slot is `None`.
+pub trait ArgTokens {
+    /// Number of positional argument slots.
+    fn arg_len(&self) -> usize;
+    /// The canonical token at slot `i`, or `None` if the slot is absent.
+    fn arg_token(&self, i: usize) -> Option<String>;
+}
+
+impl ArgTokens for Vec<Option<String>> {
+    fn arg_len(&self) -> usize {
+        self.len()
+    }
+    fn arg_token(&self, i: usize) -> Option<String> {
+        self.get(i).and_then(|o| o.clone())
+    }
+}
+
+impl ArgTokens for Box<[ArgValue]> {
+    fn arg_len(&self) -> usize {
+        self.len()
+    }
+    fn arg_token(&self, i: usize) -> Option<String> {
+        // Bound arguments are all present; an argument equal to its default renders
+        // as that token, so `stringify` drops it just like an absent raw slot.
+        self.get(i).map(|v| v.to_token())
+    }
+}
+
 /// A parsed indicator command, e.g. `macd.signal:12,26,9@close`. The argument
 /// payload `A` is raw strings in a [`Cst`] and bound [`ArgValue`]s in an [`Ast`].
 #[derive(Clone, Debug, PartialEq)]

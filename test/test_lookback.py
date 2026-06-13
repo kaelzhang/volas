@@ -18,13 +18,13 @@ CASES = [
     # BBI (lookback = max of all periods)
     ('bbi', 24),
     # TR & ATR
-    ('tr', 1), ('atr', 14),
+    ('tr', 1), ('atr:14', 14),
     # LLV, HHV, Donchian (lookback = period - 1)
     ('llv:5', 4), ('hhv:5', 4), ('donchian:5', 4),
     # RSV & KDJ
     ('rsv:9', 8), ('kdj.k', 27), ('kdj.d', 27), ('kdj.j', 27),
     # RSI (lookback = period, due to diff + SMMA warmup)
-    ('rsi', 14),
+    ('rsi:14', 14),
     # Bollinger Bands (lookback = period - 1)
     ('boll', 19), ('boll.upper', 19), ('boll.lower', 19), ('bbw', 19),
     # Historical Volatility (lookback = period, due to log return)

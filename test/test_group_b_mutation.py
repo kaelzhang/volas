@@ -25,7 +25,7 @@ DIRECTIVES = [
     'vortex.plus', 'vortex.minus', 'brar.ar', 'brar.br', 'vr',
     'coppock', 'relative_vigor', 'relative_vigor.signal', 'dkx', 'dkx.ma', 'wvad',
     'cdp', 'cdp.ah', 'cdp.nh', 'cdp.nl', 'cdp.al',
-    'mike.weakr', 'mike.midr', 'mike.strongr', 'mike.weaks', 'mike.mids', 'mike.strongs',
+    'mike.weakr:12', 'mike.midr:12', 'mike.strongr:12', 'mike.weaks:12', 'mike.mids:12', 'mike.strongs:12',
     'keltner', 'keltner.upper', 'keltner.lower',
     'stoch_momentum', 'stoch_momentum.signal',
     'ttm_squeeze', 'ttm_squeeze.on',
