@@ -63,8 +63,16 @@ def test_datetime_component_access_implemented():
     assert "dt" in _pub(_S)
 
 
+# Accessors that optional third-party oracle libs register onto pandas classes at
+# import (pandas' extension-accessor API), e.g. `pandas_ta` adds `DataFrame.ta` /
+# `Series.ta`. They are not part of the pandas surface volas tracks, and whether
+# they are present depends on test import order — exclude them so the snapshot is
+# deterministic regardless of which parity test ran first.
+_EXTERNAL_ACCESSORS = {"ta"}
+
+
 def _missing_hash(pd_obj, vol_obj):
-    names = sorted(_pub(pd_obj) - _pub(vol_obj))
+    names = sorted(_pub(pd_obj) - _pub(vol_obj) - _EXTERNAL_ACCESSORS)
     return hashlib.sha256("\n".join(names).encode()).hexdigest()[:16]
 
 
