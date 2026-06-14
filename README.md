@@ -320,6 +320,13 @@ Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
 ```py
 # from 1-minute klines to 5-minute klines
 five_minute = one_minute.cumulate('5m')
+fifteen_minute = one_minute.cumulate('15m')
+
+five_minute.append(new_candle_1m)
+# appending a 1-minute candle to a 5-minute DataFrame folds it into the 5m bar
+
+fifteen_minute.append(new_candle_1m)
+# so 1-minute data conveniently generates 5m and 15m test datasets
 ```
 
 See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
