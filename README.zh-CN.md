@@ -304,6 +304,13 @@ df.get_column('close')
 ```py
 # 从 1 分钟 K 线到 5 分钟 K 线
 five_minute = one_minute.cumulate('5m')
+fifteen_minute = one_minute.cumulate('15m')
+
+five_minute.append(new_candle_1m)
+# 5 分钟 DataFrame append 一分钟蜡烛之后，会自动聚合为 5 分钟
+
+fifteen_minute.append(new_candle_1m)
+# 这样我们可以很方便地用 1 分钟数据，来生成 5 分钟和 15 分钟的测试数据集
 ```
 
 详见 [累积与 DatetimeIndex](#累积与-datetimeindex)。
