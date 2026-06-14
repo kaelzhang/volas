@@ -302,9 +302,9 @@ the result of `cumulate`), `append` instead **folds** each finer bar into the
 forming bar rather than adding a row — see
 [Live cumulation](#live-cumulation--a-tf-aware-dataframe).
 
-By default, appending new rows does not update the indicator columns of the new
-rows; they stay stale until they are read again or until `df.fulfill()` is
-called (see below).
+`append` is lazy: it does not recompute the indicator columns of the new rows.
+They stay stale until an indicator-**column read** refreshes them or `df.fulfill()`
+is called (see below).
 
 ### df.cumulate(time_frame: TimeFrame | str, cumulators: dict | None = None) -> DataFrame
 
@@ -333,20 +333,29 @@ See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
 
 ### df.fulfill() -> None
 
-Fulfill all indicator columns. By default, adding new rows to a `DataFrame` will
-not update the indicators of the new rows.
+Batch-refresh every cached indicator column's stale tail in place
+(`O(lookback + new rows)` each, not an `O(n)` recompute), and return `None`.
 
-Indicators are only updated when accessing the indicator column or calling
-`df.fulfill()`. Accessing `df[directive]` refreshes only the affected tail
-incrementally (`O(lookback)`, not an `O(n)` recompute); for bulk reads
-(`to_numpy()`, `.iloc`) call `fulfill()` once to batch-refresh every cached
-directive column in place.
+Since `append` is lazy, the cache becomes fresh in one of two ways:
+
+- **Reading an indicator column** — `df['ma:20']` or `df[['ma:20', 'rsi:14']]` —
+  auto-refreshes just those columns' stale tails on access, so a column read is
+  always fresh and cheap. The single- and multi-column forms behave identically.
+- **Every other read** — `to_numpy()`, `.iloc` / `.loc` / `.at`, the reductions
+  (`sum` / `mean` / `max` / `describe` / …), `to_csv`, `repr`, … — does **not**
+  auto-refresh; while the frame is stale it **raises**, telling you to call
+  `fulfill()` first. This is deliberate: a half-updated frame fails loud instead
+  of silently returning stale values, and you control when the (bounded) refresh
+  cost is paid — which matters on a latency-sensitive live path.
 
 ```py
-df['ma:20']              # cache the 20-period SMA as a column
-df = df.append(new_bar)  # the new row's ma:20 is stale (a missing placeholder)
-df.fulfill()             # recompute only the tail of every cached column
-df.to_numpy()            # now fresh
+df['ma:20']              # cache + read the 20-period SMA (fresh)
+df.append(new_bar)       # lazy: the new row's ma:20 is now stale
+df['ma:20']              # a column read auto-refreshes only the tail (fresh again)
+
+df.append(new_bar)       # stale again
+df.fulfill()             # batch-refresh every cached column's tail
+df.to_numpy()            # now fresh (a bulk read would have raised while stale)
 ```
 
 ### df.alias(as_name: str, src_name: str) -> None

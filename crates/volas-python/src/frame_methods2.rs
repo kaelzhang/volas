@@ -114,47 +114,18 @@ impl PyDataFrame {
             let sub = slice_frame(&self.inner, slice)?;
             return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
-        // column name or directive
+        // column name or directive — materialize + auto-refresh a stale cached
+        // directive (O(lookback), not O(n)) so the Series is always fresh.
         if let Ok(name) = key.extract::<String>() {
-            // Existing column — a real column, or a cached directive: refresh its
-            // stale tail if cached (no-op for a plain data column), then return.
-            if self.inner.has_column(&name) {
-                self.refresh_computed(Some(&name))?;
-                let col = self.inner.column(&name).map_err(pyerr)?.clone();
-                return Ok(Py::new(py, self.wrap_series(name, col))?.into_any());
-            }
-            // A directive: materialize (auto-cache) under its canonical name; on
-            // later access its stale tail is refreshed incrementally, so the
-            // result is always fresh AND cheap (O(lookback), not O(n)).
-            let node = parse(&name).map_err(directive_err)?;
-            let canonical = volas_directive::stringify(&node);
-            if self.inner.has_column(&canonical) {
-                self.refresh_computed(Some(&canonical))?;
-            } else {
-                let col = execute(&self.inner, &node).map_err(value_err)?;
-                let lookback = volas_directive::lookback::lookback(&node);
-                // Capture the recursive state (if this directive supports an O(new-rows)
-                // resume) BEFORE moving the column in, so a later append/fulfill can
-                // continue without a full recompute. `None` for non-resumable directives.
-                let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
-                self.inner.set_column(&canonical, col).map_err(pyerr)?;
-                self.inner
-                    .set_computed(&canonical, canonical.clone(), lookback);
-                self.inner.set_computed_state(&canonical, state);
-            }
-            let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
-            return Ok(Py::new(py, self.wrap_series(canonical, col))?.into_any());
+            let (resolved, col) = self.materialize_refresh(&name)?;
+            return Ok(Py::new(py, self.wrap_series(resolved, col))?.into_any());
         }
-        // list of names / directives
+        // list of names / directives — each entry auto-refreshes exactly like the
+        // single-name form, so `df[['ma:3']]` and `df['ma:3']` stay consistent.
         if let Ok(list) = key.extract::<Vec<String>>() {
             let mut cols = Vec::with_capacity(list.len());
             for n in &list {
-                let col = if self.inner.has_column(n) {
-                    self.inner.column(n).map_err(pyerr)?.clone()
-                } else {
-                    let node = parse(n).map_err(directive_err)?;
-                    execute(&self.inner, &node).map_err(value_err)?
-                };
+                let (_, col) = self.materialize_refresh(n)?;
                 cols.push(col);
             }
             let idx = (*self.inner.index().as_ref()).clone();
@@ -349,6 +320,7 @@ impl PyDataFrame {
     /// returns a new DataFrame. Row labels are parsed against the index kind.
     #[pyo3(signature = (labels, axis = 0, errors = "raise"))]
     pub(crate) fn drop(&self, py: Python<'_>, labels: Vec<Py<PyAny>>, axis: i64, errors: &str) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let ignore_missing = match errors {
             "raise" => false,
             "ignore" => true,
@@ -559,8 +531,10 @@ impl PyDataFrame {
     }
 
     /// Value equality (same columns + index + values, `NaN == NaN`).
-    pub(crate) fn equals(&self, other: &PyDataFrame) -> bool {
-        self.inner.equals(&other.inner)
+    pub(crate) fn equals(&self, other: &PyDataFrame) -> PyResult<bool> {
+        ensure_fresh(&self.inner)?;
+        ensure_fresh(&other.inner)?;
+        Ok(self.inner.equals(&other.inner))
     }
 
     /// Resample to a coarser timeframe (OHLCV cumulation / down-sampling),
@@ -592,6 +566,7 @@ impl PyDataFrame {
         time_frame: &Bound<'_, PyAny>,
         cumulators: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let target = resolve_time_frame(time_frame)?;
         if let Some(tfs) = &self.tf {
             // Same frame is a no-op resample == copy() (keeps the cursor & state).
@@ -626,6 +601,7 @@ impl PyDataFrame {
     /// frame.
     #[pyo3(signature = (columns))]
     pub(crate) fn rename(&self, columns: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let mut mapping = HashMap::new();
         for (k, v) in columns.iter() {
             mapping.insert(k.extract::<String>()?, v.extract::<String>()?);
@@ -696,9 +672,11 @@ impl PyDataFrame {
     }
 
     /// Refresh the stale tail of every materialized (auto-cached) directive
-    /// column at once (e.g. before a bulk `to_numpy` / row read). Per-column
-    /// access already auto-refreshes; this is the batch form. In place,
-    /// incremental — O(lookback + new rows) per column, not O(n).
+    /// column at once — the batch form needed before any read that is NOT a
+    /// column projection (`to_numpy`, `.iloc`, the reductions, `to_csv`, …),
+    /// since those fail loud while the frame is stale. A column read
+    /// (`df[directive]` / `df[[...]]`) already auto-refreshes on its own. In
+    /// place, incremental — O(lookback + new rows) per column, not O(n).
     pub(crate) fn fulfill(&mut self) -> PyResult<()> {
         self.refresh_computed(None)
     }
@@ -788,6 +766,37 @@ impl PyDataFrame {
 // Internal helpers (a plain impl, NOT `#[pymethods]`, so they are not exposed to
 // Python — they back the methods above).
 impl PyDataFrame {
+    /// Resolve `name` (a real column or a directive), materializing + caching a
+    /// directive on first use and refreshing a cached directive's stale tail
+    /// (O(lookback); a no-op for a plain column or an already-fresh one). Returns
+    /// the resolved column name and a clone of its now-fresh data. Shared by the
+    /// single-name and list forms of `__getitem__` so both auto-refresh identically
+    /// after an append.
+    fn materialize_refresh(&mut self, name: &str) -> PyResult<(String, Column)> {
+        if self.inner.has_column(name) {
+            self.refresh_computed(Some(name))?;
+            let col = self.inner.column(name).map_err(pyerr)?.clone();
+            return Ok((name.to_string(), col));
+        }
+        let node = parse(name).map_err(directive_err)?;
+        let canonical = volas_directive::stringify(&node);
+        if self.inner.has_column(&canonical) {
+            self.refresh_computed(Some(&canonical))?;
+        } else {
+            let col = execute(&self.inner, &node).map_err(value_err)?;
+            let lookback = volas_directive::lookback::lookback(&node);
+            // Capture the recursive resume state (if any) BEFORE moving the column in,
+            // so a later append can continue in O(new rows) instead of recomputing.
+            let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
+            self.inner.set_column(&canonical, col).map_err(pyerr)?;
+            self.inner
+                .set_computed(&canonical, canonical.clone(), lookback);
+            self.inner.set_computed_state(&canonical, state);
+        }
+        let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
+        Ok((canonical, col))
+    }
+
     /// A lossless 2-D `object` NumPy array: each cell its own typed Python value
     /// (`volas.Timestamp` / `volas.NA` / str / number) via `scalar_to_py`. Backs
     /// the default mixed-frame export and `to_numpy(dtype="object")`.

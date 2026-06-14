@@ -4,7 +4,9 @@
 
 In a live loop a new bar arrives and the cached indicator columns must update.
 volas does NOT recompute the full series: appending marks the cache stale, and
-the next read refreshes only the affected tail in O(lookback), not O(n).
+the next indicator-column read refreshes only the affected tail in O(lookback),
+not O(n). (A bulk read like `to_numpy()` instead raises until you `fulfill()`,
+so a half-updated frame never returns stale values silently.)
 """
 
 import numpy as np
@@ -39,9 +41,9 @@ new_bar = DataFrame(
     }
 )
 bars.append(new_bar)
-bars.fulfill()
 
-# The cached directives refreshed only their tail — values are still correct.
+# Reading the indicator columns auto-refreshes only their stale tail — the new
+# bar's ma:3 / rsi:14 are computed on access, not recomputed over all history.
 print(bars[["close", "ma:3", "rsi:14"]].tail(3))
 
 print(f"OK: appended 1 live bar (now {len(bars)} bars); cached indicators refreshed incrementally.")

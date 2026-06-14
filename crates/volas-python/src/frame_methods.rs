@@ -357,38 +357,41 @@ impl PyDataFrame {
     /// First `n` rows (pandas `head` = `iloc[:n]`, so a negative `n` drops the
     /// last `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
-    pub(crate) fn head(&self, n: isize) -> PyDataFrame {
+    pub(crate) fn head(&self, n: isize) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let (a, b) = head_tail_window(n, self.inner.height(), true);
-        PyDataFrame::plain(self.inner.slice(a, b))
+        Ok(PyDataFrame::plain(self.inner.slice(a, b)))
     }
 
     /// Last `n` rows (pandas `tail` = `iloc[-n:]`, so a negative `n` drops the
     /// first `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
-    pub(crate) fn tail(&self, n: isize) -> PyDataFrame {
+    pub(crate) fn tail(&self, n: isize) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let (a, b) = head_tail_window(n, self.inner.height(), false);
-        PyDataFrame::plain(self.inner.slice(a, b))
+        Ok(PyDataFrame::plain(self.inner.slice(a, b)))
     }
 
     /// Per-column count of non-missing values (pandas `count`) -> a Series indexed
     /// by column name (`int64`), reading each column's validity.
-    pub(crate) fn count(&self) -> PySeries {
+    pub(crate) fn count(&self) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
         let names: Vec<String> = self.inner.names().to_vec();
         let counts: Vec<i64> = self.inner.columns().iter().map(|c| c.count() as i64).collect();
-        PySeries {
+        Ok(PySeries {
             inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
-        }
+        })
     }
 
     /// Per-column NaN-skipping sum (pandas `df.sum()`; non-numeric skipped).
-    pub(crate) fn sum(&self) -> PySeries {
+    pub(crate) fn sum(&self) -> PyResult<PySeries> {
         self.reduce_cols(|c| {
             let v = c.to_f64_vec();
             (0..c.len()).filter(|&i| c.is_valid(i) && !v[i].is_nan()).map(|i| v[i]).sum()
         })
     }
     /// Per-column NaN-skipping product (pandas `df.prod()`).
-    pub(crate) fn prod(&self) -> PySeries {
+    pub(crate) fn prod(&self) -> PyResult<PySeries> {
         self.reduce_cols(|c| {
             let v = c.to_f64_vec();
             (0..c.len())
@@ -398,15 +401,15 @@ impl PyDataFrame {
         })
     }
     /// Per-column NaN-skipping mean (pandas `df.mean()`).
-    pub(crate) fn mean(&self) -> PySeries {
+    pub(crate) fn mean(&self) -> PyResult<PySeries> {
         self.reduce_with(|s| s.mean_f64())
     }
     /// Per-column sample variance (ddof=1, pandas `df.var()`).
-    pub(crate) fn var(&self) -> PySeries {
+    pub(crate) fn var(&self) -> PyResult<PySeries> {
         self.reduce_with(|s| s.var_f64())
     }
     /// Per-column sample standard deviation (pandas `df.std()`).
-    pub(crate) fn std(&self) -> PySeries {
+    pub(crate) fn std(&self) -> PyResult<PySeries> {
         self.reduce_with(|s| s.var_f64().sqrt())
     }
     /// Per-column NaN-skipping median (pandas `df.median()`).
@@ -419,7 +422,7 @@ impl PyDataFrame {
         self.try_reduce_with(|s| s.quantile_f64(q))
     }
     /// Per-column NaN-skipping minimum (pandas `df.min()`; numeric columns).
-    pub(crate) fn min(&self) -> PySeries {
+    pub(crate) fn min(&self) -> PyResult<PySeries> {
         self.reduce_cols(|c| {
             let v = c.to_f64_vec();
             (0..c.len())
@@ -429,7 +432,7 @@ impl PyDataFrame {
         })
     }
     /// Per-column NaN-skipping maximum (pandas `df.max()`).
-    pub(crate) fn max(&self) -> PySeries {
+    pub(crate) fn max(&self) -> PyResult<PySeries> {
         self.reduce_cols(|c| {
             let v = c.to_f64_vec();
             (0..c.len())
@@ -439,7 +442,8 @@ impl PyDataFrame {
         })
     }
     /// Per-column count of distinct present values (pandas `df.nunique()`).
-    pub(crate) fn nunique(&self) -> PySeries {
+    pub(crate) fn nunique(&self) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
         let names: Vec<String> = self.inner.names().to_vec();
         let counts: Vec<i64> = self
             .inner
@@ -453,25 +457,29 @@ impl PyDataFrame {
                     .count() as i64
             })
             .collect();
-        PySeries {
+        Ok(PySeries {
             inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
-        }
+        })
     }
     /// Per-column truthiness `any` (pandas `df.any()`): a present, non-zero /
     /// True / non-empty cell counts.
-    pub(crate) fn any(&self) -> PySeries {
-        self.bool_reduce(true)
+    pub(crate) fn any(&self) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
+        Ok(self.bool_reduce(true))
     }
     /// Per-column truthiness `all` (pandas `df.all()`), NA-skipping.
-    pub(crate) fn all(&self) -> PySeries {
-        self.bool_reduce(false)
+    pub(crate) fn all(&self) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
+        Ok(self.bool_reduce(false))
     }
     /// Per-column index label of the maximum (pandas `df.idxmax()`).
     pub(crate) fn idxmax(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        ensure_fresh(&self.inner)?;
         self.idx_extreme(py, true)
     }
     /// Per-column index label of the minimum (pandas `df.idxmin()`).
     pub(crate) fn idxmin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        ensure_fresh(&self.inner)?;
         self.idx_extreme(py, false)
     }
 
@@ -494,6 +502,7 @@ impl PyDataFrame {
     }
     /// The `n` rows with the largest values in `column` (pandas `nlargest`).
     pub(crate) fn nlargest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
@@ -526,6 +535,7 @@ impl PyDataFrame {
     /// (pandas pads multi-modal columns into extra rows; volas keeps the single
     /// deterministic first mode per column — documented divergence.)
     pub(crate) fn mode(&self) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let mut cols = Vec::with_capacity(self.inner.width());
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
             let s = PySeries {
@@ -639,6 +649,7 @@ impl PyDataFrame {
     /// raises `ValueError`.
     #[pyo3(signature = (how = "any"))]
     pub(crate) fn dropna(&self, how: &str) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         if how != "any" && how != "all" {
             return Err(PyValueError::new_err(format!(
                 "dropna: invalid `how` {how:?} (expected 'any' or 'all')"
@@ -669,6 +680,7 @@ impl PyDataFrame {
     /// `fillna(method=)`).
     #[pyo3(signature = (value, limit = None))]
     pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>, limit: Option<i64>) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         // Per column, fill the missing cells with the typed scalar (str into str,
         // Timestamp / datetime string into datetime, number / bool into a numeric-
         // family column), mirroring the Series surface. A `volas.NA` fill is a
@@ -739,6 +751,7 @@ impl PyDataFrame {
     /// rounding; non-float columns are unchanged.
     #[pyo3(signature = (decimals = 0))]
     pub(crate) fn round(&self, decimals: i32) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         // Round numeric columns dtype-preservingly (banker's f64, integer-exact
         // i64); leave bool / str / datetime untouched, like pandas df.round.
         let cols: Vec<Column> = self
@@ -816,21 +829,22 @@ impl PyDataFrame {
     // columns only, pandas df.sem() etc.). -------------------------------------
 
     /// Per-column standard error of the mean (pandas `sem`).
-    pub(crate) fn sem(&self) -> PySeries {
+    pub(crate) fn sem(&self) -> PyResult<PySeries> {
         self.reduce_cols(|c| stats::sem(&c.to_f64_vec()))
     }
     /// Per-column unbiased skewness (pandas `skew`).
-    pub(crate) fn skew(&self) -> PySeries {
+    pub(crate) fn skew(&self) -> PyResult<PySeries> {
         self.reduce_cols(|c| stats::skew(&c.to_f64_vec()))
     }
     /// Per-column unbiased excess kurtosis (pandas `kurt`).
-    pub(crate) fn kurt(&self) -> PySeries {
+    pub(crate) fn kurt(&self) -> PyResult<PySeries> {
         self.reduce_cols(|c| stats::kurt(&c.to_f64_vec()))
     }
 
     /// Per-column summary statistics over the numeric columns (pandas `describe`):
     /// a frame indexed by `count / mean / std / min / 25% / 50% / 75% / max`.
     pub(crate) fn describe(&self) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let mut names = Vec::new();
         let mut cols = Vec::new();
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
@@ -947,7 +961,8 @@ impl PyDataFrame {
 impl PyDataFrame {
     /// Per-numeric-column reduce via a Series-level helper -> f64 Series keyed
     /// by column name (non-numeric columns are skipped, like `reduce_cols`).
-    fn reduce_with(&self, op: impl Fn(&PySeries) -> f64) -> PySeries {
+    fn reduce_with(&self, op: impl Fn(&PySeries) -> f64) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
         let mut names = Vec::new();
         let mut vals = Vec::new();
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
@@ -963,13 +978,14 @@ impl PyDataFrame {
                 vals.push(op(&s));
             }
         }
-        PySeries {
+        Ok(PySeries {
             inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
-        }
+        })
     }
 
     /// Like [`Self::reduce_with`] for fallible helpers (quantile).
     fn try_reduce_with(&self, op: impl Fn(&PySeries) -> PyResult<f64>) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
         let mut names = Vec::new();
         let mut vals = Vec::new();
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {

@@ -287,8 +287,8 @@ df.get_column('close')
 新增一行——参见
 [实时累积](#实时累积--一个-tf-aware-dataframe)。
 
-默认情况下，追加新行不会立刻更新指标列；这些列会保持过期（stale），直到再次被读取，
-或调用 `df.fulfill()`（见下文）。
+`append` 是惰性的：它不会重算新行上的指标列。这些列会保持过期（stale），
+直到对指标**列**的读取刷新它们，或调用 `df.fulfill()`（见下文）。
 
 ### df.cumulate(time_frame: TimeFrame | str, cumulators: dict | None = None) -> DataFrame
 
@@ -317,19 +317,27 @@ fifteen_minute.append(new_candle_1m)
 
 ### df.fulfill() -> None
 
-刷新（fulfill）所有指标列。默认情况下，向 `DataFrame` 追加新行不会立即更新这些新行
-上的指标。
+就地批量刷新每个已缓存指标列过期的尾部（每列 `O(lookback + 新行数)`，不是
+`O(n)` 整列重算），返回 `None`。
 
-指标只在访问指标列或调用 `df.fulfill()` 时才更新。访问 `df[directive]` 只会增量
-刷新受影响的尾部（`O(lookback)`，不是 `O(n)` 整列重算）；如果要批量读取
-（`to_numpy()`、`.iloc`），调用一次 `fulfill()` 即可就地批量刷新所有已缓存的
-directive 列。
+由于 `append` 是惰性的，缓存有两种方式变回最新：
+
+- **读取指标列**——`df['ma:20']` 或 `df[['ma:20', 'rsi:14']]`——在访问时只自动刷新
+  这些列过期的尾部，所以列读取总是最新且廉价。单列与多列形式行为完全一致。
+- **其他所有读取**——`to_numpy()`、`.iloc` / `.loc` / `.at`、归约
+  （`sum` / `mean` / `max` / `describe` / …）、`to_csv`、`repr` 等——**不会**自动刷新；
+  当 frame 处于过期状态时它会**报错**，提示你先调用 `fulfill()`。这是刻意为之：
+  半更新的 frame 失败即报错，而不是静默返回过期值；而且重算（有界）的成本时机由你掌控
+  ——这对延迟敏感的实时路径很重要。
 
 ```py
-df['ma:20']              # 把 20 周期 SMA 缓存成一列
-df = df.append(new_bar)  # 新行的 ma:20 已过期（缺失占位）
-df.fulfill()             # 只重算每个已缓存列的尾部
-df.to_numpy()            # 现在已经刷新
+df['ma:20']              # 缓存并读取 20 周期 SMA（最新）
+df.append(new_bar)       # 惰性：新行的 ma:20 现在过期
+df['ma:20']              # 列读取只自动刷新尾部（又变最新）
+
+df.append(new_bar)       # 再次过期
+df.fulfill()             # 批量刷新每个已缓存列的尾部
+df.to_numpy()            # 现在已刷新（过期时批量读取会直接报错）
 ```
 
 ### df.alias(as_name: str, src_name: str) -> None

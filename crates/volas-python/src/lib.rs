@@ -110,10 +110,12 @@ pub(crate) use frame::*;
 pub(crate) use frame_methods::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
 pub(crate) use frame_index::*;
 
-/// Raise if the frame has stale computed columns after an `append`. The per-column
-/// `df[directive]` access auto-refreshes; bulk / positional reads (`to_numpy`,
-/// `.iloc` / `.loc` / `.at` / `.iat`) do not, so they must be fresh — call
-/// `fulfill()` first. Keeps the read path O(1) and never returns silent NaN.
+/// Raise if the frame has stale computed columns after an `append`. Column
+/// projection (`df[directive]` / `df[[...]]`) auto-refreshes its columns; every
+/// OTHER read — bulk / positional (`to_numpy`, `.iloc` / `.loc` / `.at` / `.iat`),
+/// the reductions (`sum` / `max` / `describe` / …), conversions and display —
+/// guards with this instead, so it fails loud (call `fulfill()` first) rather than
+/// silently returning stale values. The check itself is O(1).
 pub(crate) fn ensure_fresh(df: &DataFrame) -> PyResult<()> {
     if df.has_stale_computed() {
         Err(PyValueError::new_err(

@@ -180,6 +180,7 @@ impl PyDataFrame {
     /// DataFrame (identical column names + shared index) or a scalar (broadcast),
     /// producing a bool DataFrame. Compared by position; never auto-aligned.
     pub(crate) fn compare(&self, other: &Bound<'_, PyAny>, op: CmpOp) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let cols: Vec<Column> = if let Ok(o) = other.extract::<PyRef<PyDataFrame>>() {
             if self.inner.names() != o.inner.names() {
                 return Err(PyValueError::new_err(
@@ -230,6 +231,7 @@ impl PyDataFrame {
     /// `df.cumsum()` etc.). Each column's own dtype rule applies; a column the op
     /// rejects (e.g. a string column under a numeric transform) propagates its error.
     pub(crate) fn map_cols(&self, op: impl Fn(&PySeries) -> PyResult<PySeries>) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let cols = self
             .inner
             .names()
@@ -242,7 +244,8 @@ impl PyDataFrame {
 
     /// Reduce each numeric column to a scalar -> a Series indexed by column name
     /// (pandas column-wise `df.sem()` etc.; non-numeric columns are skipped).
-    pub(crate) fn reduce_cols(&self, op: impl Fn(&Column) -> f64) -> PySeries {
+    pub(crate) fn reduce_cols(&self, op: impl Fn(&Column) -> f64) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
         let mut names = Vec::new();
         let mut vals = Vec::new();
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
@@ -251,9 +254,9 @@ impl PyDataFrame {
                 vals.push(op(col));
             }
         }
-        PySeries {
+        Ok(PySeries {
             inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
-        }
+        })
     }
 
     /// Directional fill (`forward` = ffill, else bfill) over every column,
@@ -261,6 +264,7 @@ impl PyDataFrame {
     /// bool / str holes carry directionally too (like the Series version), not
     /// only float NaN. Backs `ffill` / `bfill`.
     pub(crate) fn fill_dir(&self, forward: bool) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let cols: Vec<Column> = self
             .inner
             .columns()
@@ -274,6 +278,7 @@ impl PyDataFrame {
     /// is `[op(col_i, col_j) for i]`, indexed and labelled by the column names.
     /// Backs `corr` / `cov`.
     pub(crate) fn corr_cov(&self, op: fn(&[f64], &[f64]) -> f64) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let numeric: Vec<(String, Vec<f64>)> = self
             .inner
             .names()
