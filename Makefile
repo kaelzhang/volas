@@ -9,7 +9,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX := $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV := VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab anime lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -141,12 +141,16 @@ BASE ?= HEAD~1
 perf-ab:
 	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)"
 
+# Download/check the fonts used by the README / GitHub Pages animated GIFs.
+anime-fonts:
+	@$(PIP) install -q pillow
+	@$(PYTHON) docs/animated_gif/generate_gif.py --ensure-fonts --check-fonts --strict-fonts --no-render
+
 # Generate the README / GitHub Pages animated explainer GIFs locally and open a
 # preview when the host has a desktop opener. The GIF files are generated assets
 # and are ignored by git; GitHub Pages regenerates them during its own build.
-anime:
-	@$(PIP) install -q pillow
-	@$(PYTHON) docs/animated_gif/generate_gif.py
+anime: anime-fonts
+	@$(PYTHON) docs/animated_gif/generate_gif.py --strict-fonts
 	@echo "\033[1m>> Generated docs/animated_gif/after-append-indicator-en.gif <<\033[0m"
 	@echo "\033[1m>> Generated docs/animated_gif/after-append-indicator-zh-cn.gif <<\033[0m"
 	@if command -v open >/dev/null 2>&1; then \

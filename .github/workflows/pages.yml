@@ -29,7 +29,10 @@ concurrency:
 jobs:
   build:
     name: build benchmark report
-    runs-on: ubuntu-latest
+    # macOS provides the Monaco system font used by the explainer GIFs. Noto
+    # Sans SC is downloaded by the generator from Google Fonts for repeatable
+    # Chinese text rendering.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -51,10 +54,10 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk
-          python -m pip install --upgrade pip maturin pillow
+        run: python -m pip install --upgrade pip maturin pillow
+
+      - name: Prepare animated GIF fonts
+        run: python docs/animated_gif/generate_gif.py --ensure-fonts --check-fonts --strict-fonts --no-render
 
       - name: Build the benchmark report
         # `make benchmark` installs the dev + benchmark comparison libraries
@@ -65,7 +68,7 @@ jobs:
       - name: Build animated explainer GIFs
         run: |
           mkdir -p _site/animated_gif
-          python docs/animated_gif/generate_gif.py --out-dir _site/animated_gif
+          python docs/animated_gif/generate_gif.py --out-dir _site/animated_gif --strict-fonts
 
       - name: Assemble the Pages site
         # CNAME pins the custom domain (https://volas.ost.ai) so a Pages deploy

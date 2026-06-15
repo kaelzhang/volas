@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import urllib.request
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -9,6 +10,19 @@ from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1280, 640
 FRAME_MS = 95
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_FONT_DIR = SCRIPT_DIR / ".fonts"
+NOTO_SC_REGULAR_URL = (
+    "https://raw.githubusercontent.com/googlefonts/noto-cjk/main/"
+    "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
+)
+NOTO_SC_BOLD_URL = (
+    "https://raw.githubusercontent.com/googlefonts/noto-cjk/main/"
+    "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf"
+)
+NOTO_SC_REGULAR = "NotoSansCJKsc-Regular.otf"
+NOTO_SC_BOLD = "NotoSansCJKsc-Bold.otf"
+MONACO = "Monaco.ttf"
 OUT_NAMES = {
     "en": "after-append-indicator-en.gif",
     "zh-CN": "after-append-indicator-zh-cn.gif",
@@ -86,6 +100,33 @@ TEXT = {
 }
 
 
+FONT_TITLE: ImageFont.ImageFont = ImageFont.load_default()
+FONT_H2: ImageFont.ImageFont = ImageFont.load_default()
+FONT_TEXT: ImageFont.ImageFont = ImageFont.load_default()
+FONT_MONO: ImageFont.ImageFont = ImageFont.load_default()
+FONT_MONO_SMALL: ImageFont.ImageFont = ImageFont.load_default()
+FONT_PATHS: dict[str, Path] = {}
+
+
+def download_font(url: str, path: Path) -> None:
+    if path.exists() and path.stat().st_size > 0:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with urllib.request.urlopen(url, timeout=60) as response, tmp.open("wb") as output:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            output.write(chunk)
+    tmp.replace(path)
+
+
+def ensure_noto_sans_sc(font_dir: Path) -> None:
+    download_font(NOTO_SC_REGULAR_URL, font_dir / NOTO_SC_REGULAR)
+    download_font(NOTO_SC_BOLD_URL, font_dir / NOTO_SC_BOLD)
+
+
 def fontconfig_matches(families: list[str]) -> list[str]:
     matches = []
     for family in families:
@@ -104,31 +145,74 @@ def fontconfig_matches(families: list[str]) -> list[str]:
     return matches
 
 
-def load_font(size: int, *, bold: bool = False, mono: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    if mono:
-        families = ["DejaVu Sans Mono", "SF Mono", "Menlo", "Noto Sans Mono CJK SC"]
-        names = ["DejaVuSansMono.ttf", "SFNSMono.ttf", "Menlo.ttc"]
-    elif bold:
-        families = ["Noto Sans CJK SC Bold", "Arial Bold", "STHeiti", "DejaVu Sans Bold"]
-        names = ["STHeiti Medium.ttc", "NotoSansCJK-Bold.ttc", "Arial Bold.ttf", "DejaVuSans-Bold.ttf"]
-    else:
-        families = ["Noto Sans CJK SC", "Arial Unicode MS", "Arial", "STHeiti", "DejaVu Sans"]
-        names = ["STHeiti Light.ttc", "NotoSansCJK-Regular.ttc", "Arial Unicode.ttf", "Arial.ttf", "DejaVuSans.ttf"]
+def standard_font_dirs(font_dir: Path) -> list[Path]:
+    return [
+        font_dir,
+        Path.home() / "Library" / "Fonts",
+        Path("/System/Library/Fonts"),
+        Path("/System/Library/Fonts/Supplemental"),
+        Path("/Library/Fonts"),
+        Path("/usr/share/fonts"),
+        Path("/usr/local/share/fonts"),
+    ]
 
-    candidates = names + fontconfig_matches(families)
+
+def named_font_candidates(name: str, font_dir: Path) -> list[str]:
+    candidates = [str(font_dir / name), name]
+    for directory in standard_font_dirs(font_dir):
+        candidates.append(str(directory / name))
+    return candidates
+
+
+def load_required_font(
+    size: int,
+    *,
+    candidates: list[str],
+    label_name: str,
+    strict: bool,
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     for candidate in candidates:
         try:
-            return ImageFont.truetype(candidate, size)
+            font = ImageFont.truetype(candidate, size)
+            path = getattr(font, "path", candidate)
+            if path:
+                FONT_PATHS[label_name] = Path(path)
+            return font
         except OSError:
             pass
+    if strict:
+        raise SystemExit(f"required font not found for {label_name}: {', '.join(candidates[:4])}")
     return ImageFont.load_default()
 
 
-FONT_TITLE = load_font(31, bold=True)
-FONT_H2 = load_font(24, bold=True)
-FONT_TEXT = load_font(20)
-FONT_MONO = load_font(19, mono=True)
-FONT_MONO_SMALL = load_font(16, mono=True)
+def configure_fonts(font_dir: Path = DEFAULT_FONT_DIR, *, ensure_fonts: bool = False, strict: bool = False) -> None:
+    global FONT_TITLE, FONT_H2, FONT_TEXT, FONT_MONO, FONT_MONO_SMALL
+
+    if ensure_fonts:
+        ensure_noto_sans_sc(font_dir)
+
+    noto_regular = named_font_candidates(NOTO_SC_REGULAR, font_dir) + fontconfig_matches(["Noto Sans SC", "Noto Sans CJK SC"])
+    noto_bold = named_font_candidates(NOTO_SC_BOLD, font_dir) + fontconfig_matches(["Noto Sans SC Bold", "Noto Sans CJK SC Bold"])
+    monaco = named_font_candidates(MONACO, font_dir) + fontconfig_matches(["Monaco"])
+
+    FONT_TITLE = load_required_font(31, candidates=noto_bold, label_name="Noto Sans SC Bold", strict=strict)
+    FONT_H2 = load_required_font(24, candidates=noto_bold, label_name="Noto Sans SC Bold", strict=strict)
+    FONT_TEXT = load_required_font(20, candidates=noto_regular, label_name="Noto Sans SC", strict=strict)
+    FONT_MONO = load_required_font(19, candidates=monaco, label_name="Monaco", strict=strict)
+    FONT_MONO_SMALL = load_required_font(16, candidates=monaco, label_name="Monaco", strict=strict)
+
+
+def print_font_report() -> None:
+    for label_name in ["Noto Sans SC", "Noto Sans SC Bold", "Monaco"]:
+        path = FONT_PATHS.get(label_name)
+        if path is None:
+            shown = "fallback"
+        else:
+            try:
+                shown = str(path.relative_to(Path.cwd()))
+            except ValueError:
+                shown = path.name
+        print(f"{label_name}: {shown}")
 
 
 def ease(t: float) -> float:
@@ -141,11 +225,6 @@ def blend(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[i
     return tuple(round(x + (y - x) * t) for x, y in zip(a, b))
 
 
-def text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
-    box = draw.textbbox((0, 0), text, font=font)
-    return box[2] - box[0], box[3] - box[1]
-
-
 def centered(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
@@ -153,9 +232,8 @@ def centered(
     font: ImageFont.ImageFont,
     fill: tuple[int, int, int] = INK,
 ) -> None:
-    tw, th = text_size(draw, text, font)
     x0, y0, x1, y1 = box
-    draw.text((x0 + (x1 - x0 - tw) / 2, y0 + (y1 - y0 - th) / 2 - 1), text, font=font, fill=fill)
+    draw.text(((x0 + x1) / 2, (y0 + y1) / 2), text, font=font, fill=fill, anchor="mm")
 
 
 def label(
@@ -422,11 +500,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate the volas after-append explainer GIFs.")
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).parent)
     parser.add_argument("--locale", choices=["all", *OUT_NAMES], default="all")
+    parser.add_argument("--font-dir", type=Path, default=DEFAULT_FONT_DIR)
+    parser.add_argument("--ensure-fonts", action="store_true")
+    parser.add_argument("--check-fonts", action="store_true")
+    parser.add_argument("--strict-fonts", action="store_true")
+    parser.add_argument("--no-render", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    configure_fonts(args.font_dir, ensure_fonts=args.ensure_fonts, strict=args.strict_fonts)
+    if args.check_fonts:
+        print_font_report()
+    if args.no_render:
+        return
     args.out_dir.mkdir(parents=True, exist_ok=True)
     locales = OUT_NAMES if args.locale == "all" else [args.locale]
     for locale in locales:
