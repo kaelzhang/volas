@@ -2,6 +2,7 @@
 //! `csv` crate, with per-column type inference.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use volas_core::{Column, DataFrame, Result, Validity, VolasError};
 
@@ -39,7 +40,8 @@ impl Default for ReadCsvOptions {
 
 /// Read a CSV file into a [`DataFrame`], inferring each column's dtype
 /// (`i64` -> `f64` -> `bool` -> `str`).
-pub fn read_csv(path: &str, opts: &ReadCsvOptions) -> Result<DataFrame> {
+pub fn read_csv(path: impl AsRef<Path>, opts: &ReadCsvOptions) -> Result<DataFrame> {
+    let path = path.as_ref();
     let na_set = build_na_set(opts);
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(opts.delimiter)

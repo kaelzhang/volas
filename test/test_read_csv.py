@@ -26,6 +26,22 @@ def write_csv(tmp_path, text, name='t.csv'):
     return str(path)
 
 
+# --- path argument accepts str and os.PathLike ------------------------------
+
+def test_accepts_pathlike(tmp_path):
+    """`path` takes a str, a pathlib.Path, or any os.PathLike (pandas parity)."""
+    p = tmp_path / 'p.csv'
+    p.write_text('open,close\n1,2\n3,4\n')
+    from_str = volas.read_csv(str(p)).to_numpy()
+    np.testing.assert_array_equal(volas.read_csv(p).to_numpy(), from_str)  # pathlib.Path
+
+    class _PathLike:
+        def __fspath__(self):
+            return str(p)
+
+    np.testing.assert_array_equal(volas.read_csv(_PathLike()).to_numpy(), from_str)
+
+
 # --- parity with pandas on the real fixture ---------------------------------
 
 def test_basic_shape_and_columns():

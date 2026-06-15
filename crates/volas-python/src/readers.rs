@@ -10,7 +10,8 @@ use crate::{build_datetime_index, norm_idx, pyerr, PyDataFrame};
 /// A pandas-subset of ``pandas.read_csv``.
 ///
 /// Args:
-///     path (str): path to the CSV file.
+///     path (str | os.PathLike): path to the CSV file (a ``str`` or any
+///         ``os.PathLike``, e.g. ``pathlib.Path``).
 ///     sep (str, optional): field delimiter (single character; default ``','``).
 ///     delimiter (str, optional): alias for ``sep``.
 ///     header (bool, optional): ``True`` / omitted = the first row is the header;
@@ -54,7 +55,7 @@ use crate::{build_datetime_index, norm_idx, pyerr, PyDataFrame};
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn read_csv(
-    path: String,
+    path: std::path::PathBuf,
     sep: Option<String>,
     delimiter: Option<String>,
     header: Option<bool>,

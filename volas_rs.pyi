@@ -11,6 +11,7 @@ subclassable); constructors are ``__new__``; dunders are positional-only (``/``)
 from __future__ import annotations
 
 import datetime
+import os
 from collections.abc import Iterator
 from typing import Any, ClassVar, TypeAlias, final, overload
 
@@ -661,7 +662,7 @@ class TimeFrame:
 # --- module-level functions -------------------------------------------------
 
 def read_csv(
-    path: str,
+    path: str | os.PathLike[str],
     sep: str | None = ...,
     delimiter: str | None = ...,
     header: bool | None = ...,
