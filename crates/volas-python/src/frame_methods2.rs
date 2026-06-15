@@ -259,7 +259,7 @@ impl PyDataFrame {
     #[pyo3(signature = (path = None, sep = ",", index = true, header = true, na_rep = "", columns = None, float_format = None))]
     pub(crate) fn to_csv(
         &self,
-        path: Option<String>,
+        path: Option<std::path::PathBuf>,
         sep: &str,
         index: bool,
         header: bool,

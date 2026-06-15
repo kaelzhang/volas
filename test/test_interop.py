@@ -95,6 +95,21 @@ def test_to_csv_string_and_file(tmp_path):
     assert df2.columns == ['a', 'b']
 
 
+def test_to_csv_accepts_pathlike(tmp_path):
+    """to_csv's path takes a str, a pathlib.Path, or any os.PathLike (pandas parity)."""
+    df = DataFrame({'a': [1., 2.], 'b': [3., 4.]})
+    p = tmp_path / "p.csv"
+    assert df.to_csv(p, index=False) is None      # pathlib.Path
+    assert p.read_text().splitlines()[0] == 'a,b'
+
+    class _PathLike:
+        def __fspath__(self):
+            return str(tmp_path / "q.csv")
+
+    assert df.to_csv(_PathLike(), index=False) is None
+    assert (tmp_path / "q.csv").read_text() == p.read_text()
+
+
 def test_equals_ignores_index_name():
     # pandas .equals ignores the index name; volas matches (same values, different name -> equal)
     a = DataFrame({'A': [1.0, 2.0], 'k': [7, 8]}).set_index('k')

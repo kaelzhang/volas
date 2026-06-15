@@ -535,7 +535,7 @@ class DataFrame:
     def to_pandas(self, dtype_backend: str = ...) -> Any: ...
     def to_csv(
         self,
-        path: str | None = ...,
+        path: str | os.PathLike[str] | None = ...,
         sep: str = ...,
         index: bool = ...,
         header: bool = ...,
