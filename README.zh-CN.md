@@ -449,7 +449,8 @@ for bar in stream:            # 每个 `bar` 是一个更细的 DataFrame
 顶层函数，把 CSV 文件读成 `DataFrame`，并逐列推断 dtype；它是一个快速的
 pandas 子集 CSV 读取器。
 
-- **path** `str` CSV 文件路径。
+- **path** `str | os.PathLike` CSV 文件路径——字符串或任意 `os.PathLike`
+  （例如 `pathlib.Path`）。
 - **sep?** `str = ','` 字段分隔符（单个字符）；`delimiter` 是一个被接受的别名。
 - **header?** `bool = True` `True`（或省略）把第一行当作表头；`False` / `None`
   表示无表头（列被命名为 `'0'`…`'n-1'`）。

@@ -470,7 +470,8 @@ See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
 A top-level function that reads a CSV file into a `DataFrame`, inferring per-column
 dtypes — a fast, pandas-subset CSV reader.
 
-- **path** `str` the CSV file path.
+- **path** `str | os.PathLike` the CSV file path — a string or any `os.PathLike`
+  (e.g. `pathlib.Path`).
 - **sep?** `str = ','` the field delimiter (a single character); `delimiter` is an
   accepted alias.
 - **header?** `bool = True` `True` (or omitted) treats the first row as the header;
