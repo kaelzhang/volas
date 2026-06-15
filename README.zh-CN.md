@@ -57,6 +57,8 @@ pip install volas
 - **Rust 在内，NumPy / Torch 在外。** 编译型内核，运行时零 pandas 依赖；
   `to_numpy()` 直接喂给 NumPy 和 `torch.Tensor` 流水线。
 
+![volas 如何在 append 后只刷新 stale tail](https://volas.ost.ai/animated_gif/after-append-indicator-zh-cn.gif)
+
 ### 什么时候该用 volas
 
 volas **不是** 通用 pandas 替代品。一般的 DataFrame 分析请继续用 pandas 或

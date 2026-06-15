@@ -59,6 +59,8 @@ On our reproducible benchmark suite, **volas** is faster than pandas, polars, st
 - **Rust inside, NumPy / Torch out.** Compiled kernels, zero pandas at runtime;
   `to_numpy()` feeds NumPy and `torch.Tensor` pipelines.
 
+![How volas refreshes only the stale tail after append](https://volas.ost.ai/animated_gif/after-append-indicator-en.gif)
+
 ### When to reach for volas
 
 volas is **not** a general-purpose pandas replacement — for plain dataframe

@@ -9,7 +9,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX := $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV := VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab anime lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -140,6 +140,23 @@ endif
 BASE ?= HEAD~1
 perf-ab:
 	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)"
+
+# Generate the README / GitHub Pages animated explainer GIFs locally and open a
+# preview when the host has a desktop opener. The GIF files are generated assets
+# and are ignored by git; GitHub Pages regenerates them during its own build.
+anime:
+	@$(PIP) install -q pillow
+	@$(PYTHON) docs/animated_gif/generate_gif.py
+	@echo "\033[1m>> Generated docs/animated_gif/after-append-indicator-en.gif <<\033[0m"
+	@echo "\033[1m>> Generated docs/animated_gif/after-append-indicator-zh-cn.gif <<\033[0m"
+	@if command -v open >/dev/null 2>&1; then \
+		open docs/animated_gif/after-append-indicator-en.gif docs/animated_gif/after-append-indicator-zh-cn.gif; \
+	elif command -v xdg-open >/dev/null 2>&1; then \
+		xdg-open docs/animated_gif/after-append-indicator-en.gif >/dev/null 2>&1 || true; \
+		xdg-open docs/animated_gif/after-append-indicator-zh-cn.gif >/dev/null 2>&1 || true; \
+	else \
+		echo "Preview manually from docs/animated_gif/"; \
+	fi
 
 # Run linters
 lint:
