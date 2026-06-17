@@ -1,42 +1,6 @@
-//! # volas
-//!
-//! A Rust-backed, OHLCV-shaped [`DataFrame`] for candlestick / market time-series,
-//! with a technical-indicator **directive** engine.
-//!
-//! volas is intentionally narrow: it is not a general-purpose DataFrame. It targets
-//! live OHLCV pipelines — append a new bar, keep indicator columns cached, and
-//! recompute only the stale tail (`O(lookback + new rows)`, not `O(n)`).
-//!
-//! This is the umbrella crate. It re-exports the everyday types at the top level and
-//! groups the rest under modules:
-//!
-//! - top level — the data model ([`DataFrame`], [`Series`], [`Column`], [`Index`],
-//!   [`DType`], [`Scalar`], [`Tz`], [`Result`], [`VolasError`]) plus CSV [`read_csv`]
-//!   and [`TimeFrame`];
-//! - [`directive`] — parse a directive string into an `Ast`, then `execute` it;
-//! - [`compute`] — numeric kernels and technical indicators (pure functions);
-//! - [`time`] — time-frame cumulation (OHLCV resampling);
-//! - [`core`] — the full `volas-core` surface, for the less-common types.
-//!
-//! ```
-//! # fn main() -> Result<(), volas::VolasError> {
-//! use volas::{Column, DataFrame};
-//! use volas::directive::{execute, parse};
-//!
-//! let df = DataFrame::new(
-//!     vec!["close".to_string()],
-//!     vec![Column::f64(vec![1.0, 2.0, 3.0, 4.0])],
-//!     None,
-//! )?;
-//!
-//! // `ma:2` is a 2-period simple moving average over `close`.
-//! let directive = parse("ma:2")?;
-//! let ma = execute(&df, &directive)?;
-//! assert_eq!(ma.len(), 4);
-//! assert_eq!(ma.to_f64_vec()[3], 3.5); // (3.0 + 4.0) / 2
-//! # Ok(())
-//! # }
-//! ```
+// The crate-level documentation is the README, so docs.rs and crates.io show one
+// source. Its `rust` code blocks are compiled + run as doctests by `cargo test`.
+#![doc = include_str!("../README.md")]
 
 /// The full `volas-core` surface (data model, ops enums, numeric helpers), for the
 /// less-common types not re-exported at the top level.

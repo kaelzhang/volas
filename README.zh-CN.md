@@ -13,6 +13,8 @@
 
 它**不是**通用 pandas 替代品，而是一个窄而快、专服务于 K 线 / OHLCV 工作流的 DataFrame：append 一根新 bar，指标列保持缓存，只刷新受影响的尾部。
 
+**volas** 同时也是一个 Rust [crate](crates/volas/README.zh-CN.md)。
+
 ```python
 from volas import read_csv
 
