@@ -158,6 +158,93 @@ pub fn wma(data: &[f64], period: usize) -> Vec<f64> {
     out
 }
 
+/// Volume-Weighted Moving Average (TradingView `ta.vwma`): `Σ(close·volume, n) /
+/// Σ(volume, n)` over each trailing `period` window. A window whose volume sums
+/// to zero yields `NaN` (no weight). Lookback `period-1`. O(n) sliding.
+pub fn vwma(close: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period > n {
+        return out;
+    }
+    let mut pv = 0.0; // Σ close·volume
+    let mut vv = 0.0; // Σ volume
+    for i in 0..n {
+        pv += close[i] * volume[i];
+        vv += volume[i];
+        if i >= period {
+            pv -= close[i - period] * volume[i - period];
+            vv -= volume[i - period];
+        }
+        if i >= period - 1 {
+            out[i] = if vv != 0.0 { pv / vv } else { f64::NAN };
+        }
+    }
+    out
+}
+
+/// Arnaud Legoux Moving Average (TradingView `ta.alma`): a Gaussian-weighted
+/// window MA. `m = offset·(period-1)` (NOT floored — matching Pine's standard
+/// form), `s = period/sigma`, weight `wᵢ = exp(-(i-m)²/(2s²))` for `i = 0..period`
+/// applied oldest→newest, normalized to sum 1. Lookback `period-1`.
+pub fn alma(close: &[f64], period: usize, offset: f64, sigma: f64) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period > n {
+        return out;
+    }
+    let m = offset * (period - 1) as f64;
+    let s = period as f64 / sigma;
+    let mut w = vec![0.0; period];
+    let mut norm = 0.0;
+    for (i, wi) in w.iter_mut().enumerate() {
+        let d = i as f64 - m;
+        *wi = (-(d * d) / (2.0 * s * s)).exp();
+        norm += *wi;
+    }
+    for wi in w.iter_mut() {
+        *wi /= norm;
+    }
+    for i in (period - 1)..n {
+        let mut acc = 0.0;
+        for (k, &wk) in w.iter().enumerate() {
+            acc += close[i + 1 - period + k] * wk;
+        }
+        out[i] = acc;
+    }
+    out
+}
+
+/// Hull Moving Average (TradingView `ta.hma`): `WMA(2·WMA(close, n/2) −
+/// WMA(close, n), round(√n))`, with `n/2` floored. Lower lag than a plain WMA.
+/// Lookback `n + round(√n) − 2`.
+pub fn hma(close: &[f64], period: usize) -> Vec<f64> {
+    let n = close.len();
+    if period == 0 || period > n {
+        return vec![f64::NAN; n];
+    }
+    let half = period / 2;
+    let sq = (period as f64).sqrt().round() as usize;
+    let wma_half = wma(close, half);
+    let wma_full = wma(close, period);
+    let raw: Vec<f64> = (0..n).map(|i| 2.0 * wma_half[i] - wma_full[i]).collect();
+    wma(&raw, sq)
+}
+
+/// Symmetrically-Weighted Moving Average (TradingView `ta.swma`): fixed 4-bar
+/// window, weights `[1/6, 2/6, 2/6, 1/6]` (oldest→newest). Lookback 3.
+pub fn swma(close: &[f64]) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    for i in 3..n {
+        out[i] = close[i - 3] / 6.0
+            + close[i - 2] * 2.0 / 6.0
+            + close[i - 1] * 2.0 / 6.0
+            + close[i] / 6.0;
+    }
+    out
+}
+
 /// Bull and Bear Index (`mean of ma:a, ma:b, ma:c, ma:d`).
 pub fn bbi(close: &[f64], a: usize, b: usize, c: usize, d: usize) -> Vec<f64> {
     let data = av(close);

@@ -1,6 +1,6 @@
 # Built-in Indicators
 
-This page is the complete directive reference for `volas` — **242** indicators
+This page is the complete directive reference for `volas` — **246** indicators
 (each main command, every multi-output sub-command line, and each candlestick
 pattern; counted by `scripts/count_indicators.py` from the Rust source).
 
@@ -1048,6 +1048,86 @@ trailing `period` values.
 
 ```py
 df['sem:20']               # uncertainty of the 20-bar mean
+```
+
+## TradingView-compatible directives
+
+These directives mirror TradingView **Pine Script** `ta.*` indicators that have
+no TA-Lib equivalent. Each is validated against the canonical Pine formula
+(and, where the convention agrees, against `pandas-ta`). Argument notation is
+the same as the [TA-Lib-compatible](#ta-lib-compatible-directives) table:
+`<name=value>` is an optional argument with its default; a `<name>` **without
+an equals sign is required**.
+
+### `vwma`, Volume-Weighted Moving Average
+
+```
+vwma:<period>@<series=close>,<series_volume=volume>
+```
+
+`Σ(close·volume, period) / Σ(volume, period)` over each trailing window — a
+moving average that weights each bar by its traded volume. A window whose
+volume sums to zero yields `NA`.
+
+- **period** `int` (required) The window length, `>= 1`.
+- **series?** `str='close'` The price series.
+- **series_volume?** `str='volume'` The volume series.
+
+```py
+df['vwma:20']              # 20-bar volume-weighted MA of close
+df['vwma:10@(ma:5),volume'] # price = a nested directive, explicit volume
+```
+
+### `alma`, Arnaud Legoux Moving Average
+
+```
+alma:<period>,<offset=0.85>,<sigma=6>@<series=close>
+```
+
+A Gaussian-weighted window MA: weight `wᵢ = exp(-(i-m)² / 2s²)` with
+`m = offset·(period-1)` and `s = period/sigma`, normalized over the window.
+`offset` slides the Gaussian peak toward the most recent bar (1.0) or the
+oldest (0.0); `sigma` controls its width.
+
+- **period** `int` (required) The window length, `>= 1`.
+- **offset?** `float=0.85` Peak position, in `[0, 1]`.
+- **sigma?** `float=6` Gaussian width, `> 0`.
+
+```py
+df['alma:20']              # default ALMA (offset 0.85, sigma 6)
+df['alma:9,0.5,3']         # centered, narrower
+```
+
+### `hma`, Hull Moving Average
+
+```
+hma:<period>@<series=close>
+```
+
+`WMA(2·WMA(close, period/2) − WMA(close, period), round(√period))` — a
+low-lag moving average. Lookback is `period + round(√period) − 2`.
+
+- **period** `int` (required) The window length, `>= 1`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['hma:20']
+```
+
+### `swma`, Symmetrically-Weighted Moving Average
+
+```
+swma@<series=close>
+```
+
+Fixed 4-bar weighted average with weights `[1/6, 2/6, 2/6, 1/6]` (oldest →
+newest). No period argument.
+
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['swma']
+df['swma@(ema:5)']         # on a nested directive
 ```
 
 ## TA-Lib-compatible directives

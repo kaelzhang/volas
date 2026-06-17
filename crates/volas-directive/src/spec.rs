@@ -298,6 +298,7 @@ pub const COMMANDS: &[&str] = &[
     "minmaxindex", "natr", "bop", "midpoint", "midprice", "linearreg", "linearreg_slope",
     "linearreg_intercept", "linearreg_angle", "tsf", "var", "stddev", "correl", "beta",
     "median", "quantile", "rank", "skew", "kurt", "sem",
+    "vwma", "alma", "hma", "swma",
     "obv", "ad", "adosc", "avgprice", "medprice", "typprice", "wclprice", "ht_dcperiod",
     "ht_dcphase", "ht_phasor", "ht_sine", "ht_trendline", "ht_trendmode", "mama",
 ];
@@ -341,6 +342,12 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             vec!["close"],
         ),
         ("wma" | "dema" | "tema" | "trima", None) => (vec![p_req()], vec!["close"]),
+        // TradingView moving averages.
+        ("vwma", None) => (vec![p_req()], vec!["close", "volume"]),
+        // alma: period, offset (Gaussian peak position, [0,1]), sigma (>0, width).
+        ("alma", None) => (vec![p_req(), frange(0.85, 0.0, 1.0), fgt(6.0, 0.0)], vec!["close"]),
+        ("hma", None) => (vec![p_req()], vec!["close"]),
+        ("swma", None) => (vec![], vec!["close"]),
         // t3: period, vfactor (volume factor, TA-Lib domain [0, 1]).
         ("t3", None) => (vec![p_req(), frange(0.7, 0.0, 1.0)], vec!["close"]),
         ("kama", None) => (vec![p_req()], vec!["close"]),

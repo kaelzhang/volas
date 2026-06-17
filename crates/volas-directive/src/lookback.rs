@@ -44,6 +44,15 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
             }
         }
         "wma" | "trima" => arg(args, 0).saturating_sub(1),
+        "vwma" | "alma" => arg(args, 0).saturating_sub(1),
+        // hma = wma(…, round(√n)) over a series valid from n-1, so it warms an
+        // extra round(√n)-1 rows: total n + round(√n) - 2.
+        "hma" => {
+            let n = arg(args, 0);
+            let sq = (n as f64).sqrt().round() as usize;
+            n.saturating_sub(1) + sq.saturating_sub(1)
+        }
+        "swma" => 3,
         "dema" => 2 * arg(args, 0).saturating_sub(1),
         "tema" => 3 * arg(args, 0).saturating_sub(1),
         "t3" => 6 * arg(args, 0).saturating_sub(1),
