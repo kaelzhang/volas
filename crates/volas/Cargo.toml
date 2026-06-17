@@ -1,0 +1,19 @@
+[package]
+name = "volas"
+description = "Rust-backed, OHLCV-shaped DataFrame with a technical-indicator directive engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["ohlcv", "indicators", "dataframe", "trading", "candlestick"]
+categories = ["finance", "data-structures"]
+
+[dependencies]
+volas-core = { workspace = true }
+volas-compute = { workspace = true }
+volas-directive = { workspace = true }
+volas-time = { workspace = true }
+volas-io = { workspace = true }

@@ -9,5 +9,5 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-volas-core = { path = "../volas-core" }
-volas-compute = { path = "../volas-compute" }
+volas-core = { workspace = true }
+volas-compute = { workspace = true }

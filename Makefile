@@ -205,6 +205,18 @@ check:
 cargo-test:
 	cargo test
 
+# Publish the Rust crates to crates.io in dependency order. `volas-python` is the
+# PyO3 cdylib (publish = false) and is skipped; the `volas` facade goes last since
+# it depends on all the others. `cargo publish` builds + verifies each crate and
+# waits for it to appear in the index before the next dependent crate is uploaded.
+# Run after `make bump` so the workspace + dep versions agree. DRY=1 for a dry run.
+cargo-publish:
+	@flags="--locked"; [ -n "$(DRY)" ] && flags="$$flags --dry-run"; \
+	for c in volas-core volas-compute volas-directive volas-time volas-io volas; do \
+		echo "\033[1m>> cargo publish $$c $$flags <<\033[0m"; \
+		cargo publish -p $$c $$flags || exit 1; \
+	done
+
 # Upload to PyPI
 upload:
 	twine upload --config-file ~/.pypirc -r pypi dist/* --verbose

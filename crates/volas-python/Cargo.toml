@@ -1,5 +1,6 @@
 [package]
 name = "volas-python"
+publish = false  # PyO3 cdylib (Python extension), not a crates.io library
 description = "PyO3 bindings exposing volas DataFrame / Series to Python"
 version.workspace = true
 edition.workspace = true
@@ -13,11 +14,11 @@ name = "volas_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-volas-core = { path = "../volas-core" }
-volas-compute = { path = "../volas-compute" }
-volas-directive = { path = "../volas-directive" }
-volas-io = { path = "../volas-io" }
-volas-time = { path = "../volas-time" }
+volas-core = { workspace = true }
+volas-compute = { workspace = true }
+volas-directive = { workspace = true }
+volas-io = { workspace = true }
+volas-time = { workspace = true }
 pyo3 = { version = "0.25", features = ["extension-module", "multiple-pymethods"] }
 numpy = "0.25"
 ndarray = "0.16"

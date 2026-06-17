@@ -37,18 +37,25 @@ def bump(version: str, kind: str) -> str:
 
 
 def rewrite(text: str, new: str) -> str:
-    """Replace the version line inside the [workspace.package] table only."""
+    """Set the version in [workspace.package], AND in every internal volas-* entry
+    in [workspace.dependencies] (those path deps carry the same version so
+    `cargo publish` resolves them on crates.io — single source of truth)."""
     lines = text.splitlines(keepends=True)
-    in_section = False
+    section = ""
+    found_pkg = False
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
-            in_section = stripped == "[workspace.package]"
+            section = stripped
             continue
-        if in_section and re.match(r"\s*version\s*=", line):
+        if section == "[workspace.package]" and re.match(r"\s*version\s*=", line):
             lines[i] = re.sub(r'(version\s*=\s*")[^"]*(")', rf"\g<1>{new}\g<2>", line, count=1)
-            return "".join(lines)
-    sys.exit("could not find the [workspace.package] version line in Cargo.toml")
+            found_pkg = True
+        elif section == "[workspace.dependencies]" and "version" in line:
+            lines[i] = re.sub(r'(version\s*=\s*")[^"]*(")', rf"\g<1>{new}\g<2>", line, count=1)
+    if not found_pkg:
+        sys.exit("could not find the [workspace.package] version line in Cargo.toml")
+    return "".join(lines)
 
 
 def main(argv: list[str]) -> None:

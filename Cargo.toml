@@ -7,6 +7,7 @@ members = [
   "crates/volas-io",
   "crates/volas-time",
   "crates/volas-python",
+  "crates/volas",
 ]
 
 [workspace.package]
@@ -16,6 +17,17 @@ authors = ["Kael Zhang <i+pypi@kael.me>"]
 license = "MIT"
 homepage = "https://github.com/kaelzhang/volas"
 repository = "https://github.com/kaelzhang/volas"
+
+# Internal crate deps, version-pinned here so `cargo publish` resolves them on
+# crates.io (a path-only dep cannot be published). The versions equal
+# [workspace.package].version and are bumped together by scripts/bump_version.py.
+# Members reference these via `{ workspace = true }`.
+[workspace.dependencies]
+volas-core = { path = "crates/volas-core", version = "1.1.0" }
+volas-compute = { path = "crates/volas-compute", version = "1.1.0" }
+volas-directive = { path = "crates/volas-directive", version = "1.1.0" }
+volas-time = { path = "crates/volas-time", version = "1.1.0" }
+volas-io = { path = "crates/volas-io", version = "1.1.0" }
 
 [profile.release]
 lto = true
