@@ -38,6 +38,32 @@ benchmark-only dependencies are installed.
   `.[dev,benchmark]`; a library that is only needed to benchmark, never
   to test, belongs here so CI test runs stay lean.
 
+### Releasing
+
+Two artifacts ship from one version: the Python wheels (PyPI) and the Rust
+crates (crates.io). Both are driven by a git tag.
+
+```sh
+make bump TYPE={major|minor|patch}   # bump the workspace version, commit, tag, push
+```
+
+Pushing the tag triggers `.github/workflows/release.yml`, which:
+
+- verifies the tag matches the `Cargo.toml` version;
+- builds + smoke-tests the wheels and the sdist, then publishes to **PyPI**
+  (Trusted Publishing / OIDC);
+- publishes the **Rust crates** to crates.io in dependency order (the
+  `publish-crates` job runs `make cargo-publish`). `volas-python` is
+  `publish = false`; the `volas` facade goes last.
+
+crates.io publishing needs a `CARGO_REGISTRY_TOKEN` repo secret (an API token
+with publish scope). To publish the crates by hand instead:
+
+```sh
+make cargo-publish          # real publish (run `cargo login` first)
+make cargo-publish DRY=1    # dry-run: build + package every crate, upload nothing
+```
+
 ### Benchmark & web report
 
 `make benchmark` times every candidate on batch indicator computation,

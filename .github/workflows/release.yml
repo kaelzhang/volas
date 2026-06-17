@@ -148,6 +148,29 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # Publish the Rust crates to crates.io. Gated only on verify-version (NOT on the
+  # wheel build): the core crates are pyo3-free and independent of the Python
+  # pipeline, so a Python-side build flake should not block the Rust release. Order,
+  # `--locked`, and the publish=false skip for volas-python all live in the
+  # `cargo-publish` Make target (single source of truth). cargo publish builds +
+  # verifies each crate and waits for it to index before the next dependent crate.
+  # Re-publishing an already-released version fails loud (crates.io is append-only).
+  publish-crates:
+    name: publish-to-crates-io
+    needs: verify-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Publish crates to crates.io (dependency order)
+        run: make cargo-publish
+        env:
+          # A crates.io API token with publish scope, stored as a repo secret.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   publish:
     name: publish-to-pypi
     needs: [build-wheels, build-sdist]
