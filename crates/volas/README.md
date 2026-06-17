@@ -14,9 +14,10 @@ pipelines: compute an indicator by naming its *directive* (`"ma:20"`, `"macd.sig
 volas = "1"
 ```
 
-> There is also a Python package named `volas` (these same Rust kernels via PyO3) on
-> PyPI. It is a separate distribution from this crate; the directive vocabulary is
-> identical across both.
+> There is also a Python package named `volas` — the same Rust kernels exposed via
+> PyO3. See the [volas Python project on GitHub](https://github.com/kaelzhang/volas)
+> and [`volas` on PyPI](https://pypi.org/project/volas/). It is a separate
+> distribution from this crate; the directive vocabulary is identical across both.
 
 ## Quick start
 
@@ -42,8 +43,8 @@ assert_eq!(ma.to_f64_vec()[3], 3.5);  // (3.0 + 4.0) / 2
 ## The data model
 
 A `DataFrame` is a set of equal-length, named, typed `Column`s over a shared row
-`Index`. A `Column` is a contiguous typed buffer plus a validity mask (so any cell
-can be `NA` independently of its physical value).
+`Index`. A `Column` is a contiguous typed buffer; any cell can be `NA` (missing)
+independently of its value — see [Missing values](#missing-values-na) below.
 
 ```rust
 use volas::{Column, DataFrame, DType};
@@ -71,6 +72,49 @@ Column constructors: `Column::f64`, `Column::i64`, `Column::bool`,
 `Column::str`. Read values with `Column::to_f64_vec` (owned), `Column::as_f64`
 (borrowed, `None` for non-`f64`), `Column::is_valid` (per-cell NA check),
 `Column::len`, and `Column::dtype`.
+
+### Missing values (NA)
+
+A cell can be missing independently of its value. Float columns use `NaN` as the NA
+marker; integer / bool / string columns carry an explicit validity mask. Check
+missingness per cell with `is_valid`, and count it with `null_count`.
+
+```rust
+use volas::Column;
+use volas::core::Validity;
+
+// Float columns: NaN is the missing marker.
+let prices = Column::f64(vec![1.0, f64::NAN, 3.0]);
+assert_eq!(prices.null_count(), 1);
+assert!(prices.is_valid(0));
+assert!(!prices.is_valid(1));         // cell 1 is NA
+assert!(prices.get_f64(1).is_nan());  // reading an NA f64 yields NaN
+
+// Integer / bool / string columns carry a validity mask instead of a sentinel.
+let volume = Column::i64_with(
+    vec![100, 0, 300],
+    Validity::from_valid_iter(3, [true, false, true]), // cell 1 is NA
+);
+assert_eq!(volume.null_count(), 1);
+assert!(!volume.is_valid(1));
+```
+
+Indicator warm-up rows are NA too — e.g. a 2-period SMA has one NA row at the head:
+
+```rust
+use volas::{Column, DataFrame};
+use volas::directive::{execute, parse};
+
+let df = DataFrame::new(
+    vec!["close".to_string()],
+    vec![Column::f64(vec![1.0, 2.0, 3.0])],
+    None,
+).unwrap();
+let ma = execute(&df, &parse("ma:2").unwrap()).unwrap();
+
+assert!(!ma.is_valid(0));        // the warm-up row is NA
+assert_eq!(ma.null_count(), 1);
+```
 
 ## Indicators via directives
 

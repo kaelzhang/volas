@@ -14,8 +14,10 @@ volas 刻意做窄——它不是通用 DataFrame,而是面向实时 OHLCV 流�
 volas = "1"
 ```
 
-> PyPI 上还有一个同名的 Python 包 `volas`(同一套 Rust 内核,经 PyO3 暴露)。它与本
-> crate 是两个独立的发行物;两边的 directive 词汇完全一致。
+> PyPI 上还有一个同名的 Python 包 `volas`——同一套 Rust 内核,经 PyO3 暴露。参见
+> [volas Python 项目(GitHub)](https://github.com/kaelzhang/volas/blob/main/README.zh-CN.md)
+> 与 [PyPI 上的 `volas`](https://pypi.org/project/volas/)。它与本 crate 是两个独立的
+> 发行物;两边的 directive 词汇完全一致。
 
 ## 快速上手
 
@@ -41,8 +43,8 @@ assert_eq!(ma.to_f64_vec()[3], 3.5);  // (3.0 + 4.0) / 2
 ## 数据模型
 
 `DataFrame` 是一组等长、具名、带类型的 `Column`,共享同一个行 `Index`。`Column` 是一段
-连续的类型化缓冲区加一个有效性掩码(validity mask),因此任意单元格都可以独立地为
-`NA`,与其物理值无关。
+连续的类型化缓冲区;任意单元格都可以独立地为 `NA`(缺失),与其取值无关——参见下文
+[缺失值(NA)](#缺失值na)。
 
 ```rust
 use volas::{Column, DataFrame, DType};
@@ -69,6 +71,48 @@ assert_eq!(close.as_f64(), Some(&[10.5, 10.5, 13.0][..])); // 借用切片(仅 F
 列构造器:`Column::f64`、`Column::i64`、`Column::bool`、`Column::str`。取值用
 `Column::to_f64_vec`(拥有所有权)、`Column::as_f64`(借用,非 `f64` 返回 `None`)、
 `Column::is_valid`(逐单元格 NA 检查)、`Column::len`、`Column::dtype`。
+
+### 缺失值(NA)
+
+单元格的缺失与其取值无关。浮点列用 `NaN` 作为 NA 标记;整数 / 布尔 / 字符串列携带一个
+显式的有效性掩码(validity mask)。用 `is_valid` 逐单元格检查缺失,用 `null_count` 计数。
+
+```rust
+use volas::Column;
+use volas::core::Validity;
+
+// 浮点列:NaN 即缺失标记。
+let prices = Column::f64(vec![1.0, f64::NAN, 3.0]);
+assert_eq!(prices.null_count(), 1);
+assert!(prices.is_valid(0));
+assert!(!prices.is_valid(1));         // 第 1 格是 NA
+assert!(prices.get_f64(1).is_nan());  // 读取 NA 的 f64 得到 NaN
+
+// 整数 / 布尔 / 字符串列用有效性掩码,而非哨兵值。
+let volume = Column::i64_with(
+    vec![100, 0, 300],
+    Validity::from_valid_iter(3, [true, false, true]), // 第 1 格是 NA
+);
+assert_eq!(volume.null_count(), 1);
+assert!(!volume.is_valid(1));
+```
+
+指标的预热行也是 NA——例如 2 周期 SMA 在头部有一个 NA 行:
+
+```rust
+use volas::{Column, DataFrame};
+use volas::directive::{execute, parse};
+
+let df = DataFrame::new(
+    vec!["close".to_string()],
+    vec![Column::f64(vec![1.0, 2.0, 3.0])],
+    None,
+).unwrap();
+let ma = execute(&df, &parse("ma:2").unwrap()).unwrap();
+
+assert!(!ma.is_valid(0));        // 预热行是 NA
+assert_eq!(ma.null_count(), 1);
+```
 
 ## 通过 directive 计算指标
 
