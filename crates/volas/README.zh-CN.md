@@ -2,11 +2,11 @@
 
 [English](https://github.com/kaelzhang/volas/blob/main/crates/volas/README.md) | 简体中文
 
-一个 Rust 驱动、OHLCV 形态的 `DataFrame`,面向 K 线 / 行情时间序列,内置技术指标
+一个 Rust 驱动、OHLCV 形态的 `DataFrame`，面向 K 线 / 行情时间序列，内置技术指标
 **directive(指令)** 引擎。
 
-volas 刻意做窄——它不是通用 DataFrame,而是面向实时 OHLCV 流水线:通过指标的
-*directive* 名字来计算它(`"ma:20"`、`"macd.signal"`、`"close > open"`),并把 bar
+volas 刻意做窄——它不是通用 DataFrame，而是面向实时 OHLCV 流水线:通过指标的
+*directive* 名字来计算它(`"ma:20"`、`"macd.signal"`、`"close > open"`)，并把 bar
 重采样 / 累积到更粗的时间框架。
 
 ```toml
@@ -14,7 +14,7 @@ volas 刻意做窄——它不是通用 DataFrame,而是面向实时 OHLCV 流�
 volas = "1"
 ```
 
-> PyPI 上还有一个同名的 Python 包 `volas`——同一套 Rust 内核,经 PyO3 暴露。参见
+> PyPI 上还有一个同名的 Python 包 `volas`——同一套 Rust 内核，经 PyO3 暴露。参见
 > [volas Python 项目(GitHub)](https://github.com/kaelzhang/volas/blob/main/README.zh-CN.md)
 > 与 [PyPI 上的 `volas`](https://pypi.org/project/volas/)。它与本 crate 是两个独立的
 > 发行物;两边的 directive 词汇完全一致。
@@ -42,8 +42,8 @@ assert_eq!(ma.to_f64_vec()[3], 3.5);  // (3.0 + 4.0) / 2
 
 ## 数据模型
 
-`DataFrame` 是一组等长、具名、带类型的 `Column`,共享同一个行 `Index`。`Column` 是一段
-连续的类型化缓冲区;任意单元格都可以独立地为 `NA`(缺失),与其取值无关——参见下文
+`DataFrame` 是一组等长、具名、带类型的 `Column`，共享同一个行 `Index`。`Column` 是一段
+连续的类型化缓冲区;任意单元格都可以独立地为 `NA`(缺失)，与其取值无关——参见下文
 [缺失值(NA)](#缺失值na)。
 
 ```rust
@@ -69,13 +69,13 @@ assert_eq!(close.as_f64(), Some(&[10.5, 10.5, 13.0][..])); // 借用切片(仅 F
 ```
 
 列构造器:`Column::f64`、`Column::i64`、`Column::bool`、`Column::str`。取值用
-`Column::to_f64_vec`(拥有所有权)、`Column::as_f64`(借用,非 `f64` 返回 `None`)、
+`Column::to_f64_vec`(拥有所有权)、`Column::as_f64`(借用，非 `f64` 返回 `None`)、
 `Column::is_valid`(逐单元格 NA 检查)、`Column::len`、`Column::dtype`。
 
 ### 缺失值(NA)
 
 单元格的缺失与其取值无关。浮点列用 `NaN` 作为 NA 标记;整数 / 布尔 / 字符串列携带一个
-显式的有效性掩码(validity mask)。用 `is_valid` 逐单元格检查缺失,用 `null_count` 计数。
+显式的有效性掩码(validity mask)。用 `is_valid` 逐单元格检查缺失，用 `null_count` 计数。
 
 ```rust
 use volas::Column;
@@ -88,7 +88,7 @@ assert!(prices.is_valid(0));
 assert!(!prices.is_valid(1));         // 第 1 格是 NA
 assert!(prices.get_f64(1).is_nan());  // 读取 NA 的 f64 得到 NaN
 
-// 整数 / 布尔 / 字符串列用有效性掩码,而非哨兵值。
+// 整数 / 布尔 / 字符串列用有效性掩码，而非哨兵值。
 let volume = Column::i64_with(
     vec![100, 0, 300],
     Validity::from_valid_iter(3, [true, false, true]), // 第 1 格是 NA
@@ -116,7 +116,7 @@ assert_eq!(ma.null_count(), 1);
 
 ## 通过 directive 计算指标
 
-directive 引擎是计算指标的主要方式:用 `parse` 把 directive 字符串解析成 `Ast`,再
+directive 引擎是计算指标的主要方式:用 `parse` 把 directive 字符串解析成 `Ast`，再
 用 `execute` 在 `DataFrame` 上执行得到一个 `Column`。它**统一**覆盖所有内置指标——完整
 的 directive 参考见
 [INDICATORS.md](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md)。
@@ -154,8 +154,8 @@ let ast = parse("ma:20@close").unwrap();
 assert_eq!(stringify(&ast), "ma:20");
 ```
 
-directive 的形态是 `name:arg0,arg1,...@col0,col1,...`——`name` 是指标,`:` 后是它的
-参数,`@` 后是输入列(各有合理默认,例如 `close`)。多输出指标把每条线暴露为
+directive 的形态是 `name:arg0,arg1,...@col0,col1,...`——`name` 是指标，`:` 后是它的
+参数，`@` 后是输入列(各有合理默认，例如 `close`)。多输出指标把每条线暴露为
 `name.subcommand`(`macd.signal`、`boll.upper`、`kdj.k`)。所有 directive 的确切参数、
 默认值与 sub-command 见
 [INDICATORS.md](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md)。
@@ -171,9 +171,9 @@ assert_eq!(lookback(&ast), 19); // 20 周期 SMA 有 19 个预热行
 
 ### 原始 kernel(进阶)
 
-directive 引擎是推荐的 API。若想不经 `DataFrame` 直接调用,`compute` 模块以对 slice 的
+directive 引擎是推荐的 API。若想不经 `DataFrame` 直接调用，`compute` 模块以对 slice 的
 纯函数(`&[f64] -> Vec<f64>`)暴露这些数值内核;多数用户应优先用 directive——它稳定、
-完整,且与 Python 侧完全一致。
+完整，且与 Python 侧完全一致。
 
 ## 读取 CSV
 
@@ -205,7 +205,7 @@ let five_min = cumulate(&df, TimeFrame::Min5, &AggSpec::ohlcv()).unwrap();
 let _ = five_min;
 ```
 
-`TimeFrame` 是一个枚举(`Min1`、`Min5`、`Hour1`、`Day1` …),也可用
+`TimeFrame` 是一个枚举(`Min1`、`Min5`、`Hour1`、`Day1` …)，也可用
 `TimeFrame::from_label("5m")` 从标签解析。
 
 ## 错误处理
@@ -227,13 +227,13 @@ assert!(bad.is_err());
 ## crate 结构
 
 - 顶层——数据模型(`DataFrame`、`Series`、`Column`、`Index`、`DType`、`Scalar`、`Tz`、
-  `Result`、`VolasError`),以及 `read_csv` 和 `TimeFrame`;
-- `directive`——`parse` / `execute` / `stringify` / `lookback`,以及 `Ast`;
+  `Result`、`VolasError`)，以及 `read_csv` 和 `TimeFrame`;
+- `directive`——`parse` / `execute` / `stringify` / `lookback`，以及 `Ast`;
 - `compute`——数值内核与技术指标(纯函数);
 - `time`——时间框架累积(OHLCV 重采样);
-- `core`——完整的 `volas-core` 表面,用于不常用的类型。
+- `core`——完整的 `volas-core` 表面，用于不常用的类型。
 
-本 crate 是一个轻量门面,把 volas workspace(`volas-core`、`volas-compute`、
+本 crate 是一个轻量门面，把 volas workspace(`volas-core`、`volas-compute`、
 `volas-directive`、`volas-time`、`volas-io`)重导出到单一依赖之后。
 
 ## 许可证
