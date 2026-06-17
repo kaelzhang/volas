@@ -211,6 +211,41 @@ pub fn sem(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<
     })
 }
 
+/// Mean absolute deviation about the window mean (TradingView `ta.dev`):
+/// `mean(|x - mean(x)|)` over the present values — the dispersion measure CCI
+/// is built on, and the one statistic missing from var/std/sem.
+pub fn dev(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
+    per_window(data, window, min_periods, |b| {
+        let m = b.iter().sum::<f64>() / b.len() as f64;
+        b.iter().map(|x| (x - m).abs()).sum::<f64>() / b.len() as f64
+    })
+}
+
+/// Rolling mode (TradingView `ta.mode`): the most frequent present value; ties
+/// resolve to the SMALLEST value. NA cells are ignored (matching Pine).
+pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
+    per_sorted_window(data, window, min_periods, |sorted, _| {
+        // `sorted` is ascending, so equal values are contiguous: scan runs and
+        // keep the value with the longest run; on a tie the earlier (smaller)
+        // value is already held, giving "ties -> smallest" for free.
+        let (mut best_val, mut best_len) = (sorted[0], 1usize);
+        let (mut cur_val, mut cur_len) = (sorted[0], 1usize);
+        for &x in &sorted[1..] {
+            if x == cur_val {
+                cur_len += 1;
+            } else {
+                cur_val = x;
+                cur_len = 1;
+            }
+            if cur_len > best_len {
+                best_len = cur_len;
+                best_val = cur_val;
+            }
+        }
+        best_val
+    })
+}
+
 /// Bias-corrected sample skewness (pandas `skew`; needs >= 3 present values).
 pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     per_window(data, window, min_periods, |b| {

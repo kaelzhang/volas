@@ -298,7 +298,7 @@ pub const COMMANDS: &[&str] = &[
     "minmaxindex", "natr", "bop", "midpoint", "midprice", "linearreg", "linearreg_slope",
     "linearreg_intercept", "linearreg_angle", "tsf", "var", "stddev", "correl", "beta",
     "median", "quantile", "rank", "skew", "kurt", "sem",
-    "vwma", "alma", "hma", "swma",
+    "vwma", "alma", "hma", "swma", "cog", "dev", "rci", "iii", "kcw", "mode",
     "obv", "ad", "adosc", "avgprice", "medprice", "typprice", "wclprice", "ht_dcperiod",
     "ht_dcphase", "ht_phasor", "ht_sine", "ht_trendline", "ht_trendmode", "mama",
 ];
@@ -572,6 +572,15 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             vec!["close"],
         ),
         ("sem", None) => (vec![p2_req()], vec!["close"]),
+        // TradingView oscillators / dispersion. cog / rci / dev / mode follow the
+        // windowed-stat family (period required, >= 2). iii is pointwise (no arg);
+        // kcw mirrors the keltner band parameters.
+        ("cog", None) => (vec![p2_req()], vec!["close"]),
+        ("rci", None) => (vec![p2_req()], vec!["close"]),
+        ("dev", None) => (vec![p2_req()], vec!["close"]),
+        ("mode", None) => (vec![p2_req()], vec!["close"]),
+        ("iii", None) => (vec![], vec!["high", "low", "close", "volume"]),
+        ("kcw", None) => (vec![p(20), p(10), mult(2.0)], vec!["high", "low", "close"]),
         ("stddev", None) => (vec![p2_req(), mult(1.0)], vec!["close"]),
         ("obv", None) => (vec![], vec!["close", "volume"]),
         ("ad", None) => (vec![], vec!["high", "low", "close", "volume"]),

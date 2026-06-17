@@ -9,7 +9,7 @@
 
 > 面向股票 / K 线（OHLCV）时间序列数据的高性能 Rust 列式内核。
 
-**volas** 是一个 Rust 驱动、pandas 风格的 `DataFrame`，专为实时 OHLCV 流水线打造：内置 [**246** 个交易指标](INDICATORS.md)，支持增量 O(lookback) 刷新，输出可直接交给 NumPy / Torch 使用。
+**volas** 是一个 Rust 驱动、pandas 风格的 `DataFrame`，专为实时 OHLCV 流水线打造：内置 [**252** 个交易指标](INDICATORS.md)，支持增量 O(lookback) 刷新，输出可直接交给 NumPy / Torch 使用。
 
 它**不是**通用 pandas 替代品，而是一个窄而快、专服务于 K 线 / OHLCV 工作流的 DataFrame：append 一根新 bar，指标列保持缓存，只刷新受影响的尾部。
 
@@ -30,7 +30,7 @@ df["rsi:14"]           # 只刷新受影响的尾部，O(lookback)
 features = df.to_numpy()
 ```
 
-- 内置 **246** 个指标，directive 与 TA-Lib 对齐
+- 内置 **252** 个指标，directive 与 TA-Lib 对齐
 - `append` 后增量刷新：**O(lookback)**，不是 O(n)
 - Rust 内核，运行时无 pandas 依赖
 - pandas 风格索引：`.loc` / `.iloc` / `.at` / `read_csv` / `to_numpy`

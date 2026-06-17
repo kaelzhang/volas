@@ -249,6 +249,23 @@ pub fn adosc(
     out
 }
 
+/// Intraday Intensity Index (TradingView `ta.iii`, David Bostian): per-bar
+/// `((2·close - high - low) / (high - low)) · volume`. A zero-range bar
+/// (`high == low`) has no directional pressure, so it yields `0.0` (matching
+/// the `bop` range guard). No window — a pointwise transform.
+pub fn iii(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
+    (0..close.len())
+        .map(|i| {
+            let range = high[i] - low[i];
+            if range < 1e-14 {
+                0.0
+            } else {
+                (2.0 * close[i] - high[i] - low[i]) / range * volume[i]
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -597,6 +597,81 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     ((&hh + &ll) / 2.0).to_vec()
 }
 
+/// Center of Gravity oscillator (TradingView `ta.cog`, John Ehlers):
+/// `-Σ((1+i)·close[i]) / Σ(close[i])` over the trailing `period`, where `close[i]`
+/// is `i` bars back (newest weighted 1, oldest weighted `period`). A zero window
+/// sum yields `NaN`. Lookback `period-1`. O(n·period).
+pub fn cog(close: &[f64], period: usize) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    if period == 0 || period > n {
+        return out;
+    }
+    for i in (period - 1)..n {
+        let mut num = 0.0; // Σ (1+age)·price, age 0 = newest
+        let mut den = 0.0;
+        for age in 0..period {
+            let price = close[i - age];
+            num += (1 + age) as f64 * price;
+            den += price;
+        }
+        out[i] = if den != 0.0 { -num / den } else { f64::NAN };
+    }
+    out
+}
+
+/// Rank Correlation Index (TradingView `ta.rci`): Spearman's rank correlation
+/// between `close` and the bar index over `period` bars, scaled to `[-100, 100]`.
+/// Computed as the Pearson correlation of the (average-tie) value ranks against
+/// the time ranks `1..=period`, so ties are handled exactly. A degenerate
+/// (zero-variance) window yields `NaN`. Lookback `period-1`. O(n·period·log period).
+pub fn rci(close: &[f64], period: usize) -> Vec<f64> {
+    let n = close.len();
+    let mut out = vec![f64::NAN; n];
+    if period < 2 || period > n {
+        return out;
+    }
+    // time ranks 1..=period (ascending = chronological); their mean and variance
+    // are constant across windows.
+    let p = period as f64;
+    let t_mean = (p + 1.0) / 2.0;
+    let t_ss: f64 = (1..=period).map(|t| (t as f64 - t_mean).powi(2)).sum();
+    let mut idx: Vec<usize> = Vec::with_capacity(period);
+    let mut prank = vec![0.0f64; period];
+    for i in (period - 1)..n {
+        let w = &close[i + 1 - period..=i];
+        // average ranks of the window values (ascending)
+        idx.clear();
+        idx.extend(0..period);
+        idx.sort_by(|&a, &b| w[a].partial_cmp(&w[b]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut k = 0;
+        while k < period {
+            let mut j = k + 1;
+            while j < period && w[idx[j]] == w[idx[k]] {
+                j += 1;
+            }
+            // ranks k+1..=j share the average rank (1-based)
+            let avg = ((k + 1 + j) as f64) / 2.0;
+            for &pos in &idx[k..j] {
+                prank[pos] = avg;
+            }
+            k = j;
+        }
+        // Pearson(prank, time-rank). prank mean == t_mean (both are 1..=period).
+        let mut cov = 0.0;
+        let mut p_ss = 0.0;
+        for (t, &pr) in prank.iter().enumerate() {
+            let dp = pr - t_mean;
+            let dt = (t + 1) as f64 - t_mean;
+            cov += dp * dt;
+            p_ss += dp * dp;
+        }
+        let denom = (p_ss * t_ss).sqrt();
+        out[i] = if denom > 0.0 { cov / denom * 100.0 } else { f64::NAN };
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

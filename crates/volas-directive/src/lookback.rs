@@ -222,6 +222,11 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
         "median" | "quantile" | "rank" | "skew" | "kurt" | "sem" => {
             arg(args, 0).saturating_sub(1)
         }
+        "cog" | "rci" | "dev" | "mode" => arg(args, 0).saturating_sub(1),
+        // iii is pointwise (no warm-up); kcw warms with its slower component
+        // (EMA(ema_period) vs ATR(atr_period)).
+        "iii" => 0,
+        "kcw" => arg(args, 0).max(arg(args, 1)).saturating_sub(1),
         "correl" => arg(args, 0).saturating_sub(1),
         "beta" => arg(args, 0),
         "obv" | "ad" => 0,

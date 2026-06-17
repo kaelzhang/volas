@@ -249,6 +249,38 @@ pub(super) fn dispatch(
             let p = arg_usize(args, 0);
             f64col(volas_compute::window::sem(&close(0)?, p, p, 1))
         }
+        // TradingView dispersion / order statistics (window family).
+        ("dev", _) => {
+            let p = arg_usize(args, 0);
+            f64col(volas_compute::window::dev(&close(0)?, p, p))
+        }
+        ("mode", _) => {
+            let p = arg_usize(args, 0);
+            f64col(volas_compute::window::mode(&close(0)?, p, p))
+        }
+        // TradingView oscillators (cog / rci) and the per-bar volume study iii.
+        ("cog", _) => f64col(ind::cog(&close(0)?, arg_usize(args, 0))),
+        ("rci", _) => f64col(ind::rci(&close(0)?, arg_usize(args, 0))),
+        ("iii", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            let volume = series_f64(df, series, 3, "volume")?;
+            f64col(ind::iii(&high, &low, &close, &volume))
+        }
+        ("kcw", _) => {
+            let high = series_f64(df, series, 0, "high")?;
+            let low = series_f64(df, series, 1, "low")?;
+            let close = series_f64(df, series, 2, "close")?;
+            f64col(ind::kcw(
+                &close,
+                &high,
+                &low,
+                arg_usize(args, 0),
+                arg_usize(args, 1),
+                arg_f64(args, 2),
+            ))
+        }
         ("stddev", _) => f64col(ind::stddev(
             &close(0)?,
             arg_usize(args, 0),

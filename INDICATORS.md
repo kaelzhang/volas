@@ -1,6 +1,6 @@
 # Built-in Indicators
 
-This page is the complete directive reference for `volas` — **246** indicators
+This page is the complete directive reference for `volas` — **252** indicators
 (each main command, every multi-output sub-command line, and each candlestick
 pattern; counted by `scripts/count_indicators.py` from the Rust source).
 
@@ -1128,6 +1128,112 @@ newest). No period argument.
 ```py
 df['swma']
 df['swma@(ema:5)']         # on a nested directive
+```
+
+### `cog`, Center of Gravity
+
+```
+cog:<period>@<series=close>
+```
+
+John Ehlers' Center of Gravity oscillator:
+`-Σ((1+i)·source[i]) / Σ(source[i])` over the trailing `period` (the most
+recent bar weighted 1, the oldest weighted `period`).
+
+- **period** `int` (required) `>= 2`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['cog:10']
+```
+
+### `dev`, Mean Absolute Deviation
+
+```
+dev:<period>@<series=close>
+```
+
+The average absolute deviation about the window mean,
+`mean(|source − mean(source)|)` — the dispersion measure CCI is built on.
+
+- **period** `int` (required) `>= 2`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['dev:20']
+```
+
+### `rci`, Rank Correlation Index
+
+```
+rci:<period>@<series=close>
+```
+
+Spearman's rank correlation between the source and the bar index over `period`
+bars, scaled to `[-100, 100]` — how monotonically (directionally consistently)
+price is moving. `+100` is a perfectly rising window, `-100` a perfectly falling
+one.
+
+- **period** `int` (required) `>= 2`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['rci:9']
+df['rci:9 > 80']           # strong up-trend signal
+```
+
+### `iii`, Intraday Intensity Index
+
+```
+iii@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>
+```
+
+David Bostian's Intraday Intensity Index, a per-bar volume-pressure measure:
+`((2·close − high − low) / (high − low)) · volume`. A zero-range bar
+(`high == low`) yields `0`. No window parameter.
+
+- **series_high? / series_low? / series_close? / series_volume?** the OHLCV columns.
+
+```py
+df['iii']
+```
+
+### `kcw`, Keltner Channel Width
+
+```
+kcw:<ema_period=20>,<atr_period=10>,<mult=2>@<series_high=high>,<series_low=low>,<series_close=close>
+```
+
+The width of volas's Keltner Channel, normalized by the basis:
+`(upper − lower) / middle = 2·mult·ATR(atr_period) / EMA(ema_period)`. It always
+equals `(df['keltner.upper'] - df['keltner.lower']) / df['keltner']` for the same
+parameters. (TradingView's `ta.kcw` uses an EMA-of-range basis instead of ATR —
+a documented divergence that keeps volas's Keltner family internally consistent.)
+
+- **ema_period?** `int=20` The EMA basis period.
+- **atr_period?** `int=10` The ATR period.
+- **mult?** `float=2` The channel multiplier.
+
+```py
+df['kcw']
+df['kcw:20,10,2']
+```
+
+### `mode`, Rolling Mode
+
+```
+mode:<period>@<series=close>
+```
+
+The most frequent value in the trailing `period` window; on a tie, the smallest
+value. Missing cells are ignored. Most useful on a discretized series (raw
+floating-point prices rarely repeat exactly).
+
+- **period** `int` (required) `>= 2`.
+- **series?** `str='close'` Which column or directive the calculation is based on.
+
+```py
+df['mode:20']
 ```
 
 ## TA-Lib-compatible directives

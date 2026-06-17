@@ -412,6 +412,33 @@ pub fn keltner_band(
     (0..close.len()).map(|i| ema[i] + sign * mult * atr[i]).collect()
 }
 
+/// Keltner Channel Width (TradingView `ta.kcw`): the channel span normalized by
+/// the basis, `(upper - lower) / middle = 2·mult·ATR(atr_period) / EMA(ema_period)`.
+/// This is the width of volas's OWN Keltner Channel (EMA basis + ATR range), so
+/// `kcw` always equals `(keltner.upper - keltner.lower) / keltner` for the same
+/// parameters. Pine's `ta.kcw` uses an EMA-of-range basis instead of ATR — a
+/// documented divergence that keeps volas's Keltner family internally consistent.
+pub fn kcw(
+    close: &[f64],
+    high: &[f64],
+    low: &[f64],
+    ema_period: usize,
+    atr_period: usize,
+    mult: f64,
+) -> Vec<f64> {
+    let ema = super::ema(close, ema_period);
+    let atr = super::atr(high, low, close, atr_period);
+    (0..close.len())
+        .map(|i| {
+            if ema[i] != 0.0 {
+                2.0 * mult * atr[i] / ema[i]
+            } else {
+                f64::NAN
+            }
+        })
+        .collect()
+}
+
 /// Keltner band state `[ema, atr]` after a full compute, or `None` before both seed. The
 /// middle line reuses `ema_final_state`. Source: StockCharts ChartSchool — Keltner Channels.
 pub fn keltner_band_final_state(
