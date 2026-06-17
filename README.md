@@ -13,6 +13,8 @@ English | [简体中文](README.zh-CN.md)
 
 It is **not** a general-purpose pandas replacement. It is a narrow, fast DataFrame for candlestick / OHLCV workflows: append a new bar, keep indicator columns cached, and refresh only the stale tail.
 
+**volas** is also a Rust [crate](crates/volas/README.md).
+
 ```python
 from volas import read_csv
 
