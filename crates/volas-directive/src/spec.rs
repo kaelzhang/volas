@@ -299,6 +299,7 @@ pub const COMMANDS: &[&str] = &[
     "linearreg_intercept", "linearreg_angle", "tsf", "var", "stddev", "correl", "beta",
     "median", "quantile", "rank", "skew", "kurt", "sem",
     "vwma", "alma", "hma", "swma", "cog", "dev", "rci", "iii", "kcw", "mode",
+    "pivothigh", "pivotlow",
     "obv", "ad", "adosc", "avgprice", "medprice", "typprice", "wclprice", "ht_dcperiod",
     "ht_dcphase", "ht_phasor", "ht_sine", "ht_trendline", "ht_trendmode", "mama",
 ];
@@ -581,6 +582,9 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("mode", None) => (vec![p2_req()], vec!["close"]),
         ("iii", None) => (vec![], vec!["high", "low", "close", "volume"]),
         ("kcw", None) => (vec![p(20), p(10), mult(2.0)], vec!["high", "low", "close"]),
+        // fractal pivots: leftbars, rightbars (both required, >= 1).
+        ("pivothigh", None) => (vec![p_req(), p_req()], vec!["high"]),
+        ("pivotlow", None) => (vec![p_req(), p_req()], vec!["low"]),
         ("stddev", None) => (vec![p2_req(), mult(1.0)], vec!["close"]),
         ("obv", None) => (vec![], vec!["close", "volume"]),
         ("ad", None) => (vec![], vec!["high", "low", "close", "volume"]),

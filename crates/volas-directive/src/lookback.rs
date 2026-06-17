@@ -227,6 +227,9 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
         // (EMA(ema_period) vs ATR(atr_period)).
         "iii" => 0,
         "kcw" => arg(args, 0).max(arg(args, 1)).saturating_sub(1),
+        // a pivot is confirmed `rightbars` after a point needing `leftbars` of
+        // history, so the first possible output is at bar left+right.
+        "pivothigh" | "pivotlow" => arg(args, 0) + arg(args, 1),
         "correl" => arg(args, 0).saturating_sub(1),
         "beta" => arg(args, 0),
         "obv" | "ad" => 0,

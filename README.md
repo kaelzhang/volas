@@ -9,7 +9,7 @@ English | [简体中文](README.zh-CN.md)
 
 > High-performance, Rust-backed columnar kernel for stock / candlestick (OHLCV) time-series data.
 
-**volas** is a Rust-backed, pandas-shaped `DataFrame` for live OHLCV pipelines: [**252** trading-indicators](INDICATORS.md), incremental O(lookback) refresh, and NumPy/Torch-ready output.
+**volas** is a Rust-backed, pandas-shaped `DataFrame` for live OHLCV pipelines: [**254** trading-indicators](INDICATORS.md), incremental O(lookback) refresh, and NumPy/Torch-ready output.
 
 It is **not** a general-purpose pandas replacement. It is a narrow, fast DataFrame for candlestick / OHLCV workflows: append a new bar, keep indicator columns cached, and refresh only the stale tail.
 
@@ -30,7 +30,7 @@ df["rsi:14"]           # refreshes only the affected tail, O(lookback)
 features = df.to_numpy()
 ```
 
-- **252** built-in indicators and TA-Lib-compatible directives
+- **254** built-in indicators and TA-Lib-compatible directives
 - Incremental refresh after `append`: **O(lookback)**, not O(n)
 - Rust kernels, no pandas runtime dependency
 - pandas-shaped indexing: `.loc` / `.iloc` / `.at` / `read_csv` / `to_numpy`

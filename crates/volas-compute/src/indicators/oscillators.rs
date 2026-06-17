@@ -672,6 +672,34 @@ pub fn rci(close: &[f64], period: usize) -> Vec<f64> {
     out
 }
 
+/// Fractal pivot detection (TradingView `ta.pivothigh` / `ta.pivotlow`). A bar
+/// `p` is a pivot when its `source` value is the STRICT extremum of the window
+/// `[p-left, p+right]` (every other bar strictly lower for a high / strictly
+/// higher for a low — a tie disqualifies it, matching Pine). The pivot's value
+/// is emitted at the CONFIRMATION bar `p+right` (non-causal: it needs `right`
+/// future bars), `NaN` everywhere else. A `NaN` anywhere in the window
+/// disqualifies the pivot. Lookback `left+right`. O(n·(left+right)).
+pub fn pivot(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> {
+    let n = source.len();
+    let mut out = vec![f64::NAN; n];
+    let win = left + right;
+    for i in win..n {
+        let p = i - right; // candidate pivot position
+        let cand = source[p];
+        if cand.is_nan() {
+            continue;
+        }
+        let start = i - win; // = p - left
+        let is_pivot = (start..=i).all(|j| {
+            j == p || if high { source[j] < cand } else { source[j] > cand }
+        });
+        if is_pivot {
+            out[i] = cand;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

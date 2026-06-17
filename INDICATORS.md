@@ -1,6 +1,6 @@
 # Built-in Indicators
 
-This page is the complete directive reference for `volas` — **252** indicators
+This page is the complete directive reference for `volas` — **254** indicators
 (each main command, every multi-output sub-command line, and each candlestick
 pattern; counted by `scripts/count_indicators.py` from the Rust source).
 
@@ -232,7 +232,7 @@ for a security or index over a period of time.
 
 - **period** `int` (required)
 - **time_frame?** `str='1d'` Time frame such as `1m`, `15m`, `1h`, or `1d`.
-- **trading_days?** `int=252` Trading days in a year; crypto workflows often use
+- **trading_days?** `int=254` Trading days in a year; crypto workflows often use
   `365`.
 - **on?** `str='close'` Which column or directive the calculation is based on.
 
@@ -998,7 +998,7 @@ highest value of the window).
 - **series?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
-df['rank:252']             # percentile of today's close within the last year
+df['rank:254']             # percentile of today's close within the last year
 df['rank:20 > 0.95']       # near the top of its 20-bar range (bool signal)
 ```
 
@@ -1234,6 +1234,35 @@ floating-point prices rarely repeat exactly).
 
 ```py
 df['mode:20']
+```
+
+### `pivothigh` / `pivotlow`, Fractal Pivots
+
+```
+pivothigh:<leftbars>,<rightbars>@<series=high>
+pivotlow:<leftbars>,<rightbars>@<series=low>
+```
+
+Fractal swing-point detection. A bar is a **pivot high** when its value is the
+strict maximum of the window `[bar-leftbars, bar+rightbars]` (every neighbour
+strictly lower — a tie disqualifies it); `pivotlow` is the symmetric strict
+minimum. The pivot's value is emitted at the **confirmation bar**
+`pivot + rightbars` (it needs `rightbars` of future data to confirm), and `NA`
+everywhere else — so the output is a sparse series of confirmed swing points.
+
+> **This is a non-causal (look-ahead) indicator**: the value at a bar describes
+> a pivot `rightbars` bars in the past. It is correct for **labeling / research**
+> (where reading future bars is intended), but a live trading signal must never
+> treat the emitted bar as the moment the pivot occurred.
+
+- **leftbars** `int` (required) Bars of history required to the left, `>= 1`.
+- **rightbars** `int` (required) Confirmation bars to the right, `>= 1`.
+- **series?** `str='high'` (pivothigh) / `'low'` (pivotlow) — the series to scan.
+
+```py
+df['pivothigh:5,5']        # 5-left / 5-right swing highs of `high`
+df['pivotlow:2,8']         # asymmetric swing lows of `low`
+df['pivothigh:3,3@close']  # swing highs of close
 ```
 
 ## TA-Lib-compatible directives

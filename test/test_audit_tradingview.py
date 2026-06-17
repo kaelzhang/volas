@@ -235,6 +235,66 @@ def test_iii_zero_range_bar_is_zero():
     assert df["iii"].to_list()[1] == 0.0          # high == low -> 0
 
 
+def _ref_pivot(src, left, right, high):
+    src = np.asarray(src, float)
+    n = len(src)
+    out = np.full(n, np.nan)
+    win = left + right
+    for i in range(win, n):
+        p = i - right
+        cand = src[p]
+        if np.isnan(cand):
+            continue
+        ok = all((src[j] < cand if high else src[j] > cand)
+                 for j in range(i - win, i + 1) if j != p)
+        if ok:
+            out[i] = cand
+    return out
+
+
+@pytest.mark.parametrize("left,right", [(5, 5), (3, 2), (2, 8), (1, 1)])
+def test_pivothigh_matches_pine(left, right):
+    ref = _ref_pivot(H, left, right, high=True)
+    got = np.asarray(DF[f"pivothigh:{left},{right}"].to_numpy(), float)
+    # pivots are exact (no float reduction) AND sparse — match BOTH the value
+    # and the NaN pattern (where a pivot is / isn't confirmed).
+    assert np.array_equal(np.isnan(got), np.isnan(ref)), "pivot NaN pattern"
+    m = ~np.isnan(ref)
+    np.testing.assert_array_equal(got[m], ref[m])
+
+
+@pytest.mark.parametrize("left,right", [(5, 5), (3, 2), (2, 8), (1, 1)])
+def test_pivotlow_matches_pine(left, right):
+    ref = _ref_pivot(L, left, right, high=False)
+    got = np.asarray(DF[f"pivotlow:{left},{right}"].to_numpy(), float)
+    assert np.array_equal(np.isnan(got), np.isnan(ref)), "pivot NaN pattern"
+    m = ~np.isnan(ref)
+    np.testing.assert_array_equal(got[m], ref[m])
+
+
+def test_pivot_nan_candidate_is_not_a_pivot():
+    """A NaN at the candidate position can never be a pivot (the value-NaN
+    guard) — e.g. a missing bar, or the warm-up of a nested directive series."""
+    df = volas.DataFrame({"high": [1.0, 2.0, None, 4.0, 5.0, 6.0, 7.0]})
+    # candidate for confirmation bar 4 is high[2] = NaN -> no pivot there
+    assert df["pivothigh:2,2"].isna().to_list()[4]
+    # also exercised through a nested directive with NaN warm-up
+    assert len(DF["pivothigh:2,2@(ma:5)"]) == len(C)
+
+
+def test_pivot_strict_ties_are_not_pivots():
+    """A plateau (equal extremum on both sides) is NOT a pivot — Pine's strict
+    comparison. The middle of [1,2,2,2,1] is not a pivot high (ties)."""
+    df = volas.DataFrame({"high": [1.0, 2.0, 2.0, 2.0, 1.0],
+                          "low": [1.0, 2.0, 2.0, 2.0, 1.0]})
+    assert df["pivothigh:2,2"].isna().to_list() == [True] * 5
+    # but a strict peak [1,2,3,2,1] confirms at bar 4 (= pivot bar 2 + right 2)
+    df2 = volas.DataFrame({"high": [1.0, 2.0, 3.0, 2.0, 1.0]})
+    s = df2["pivothigh:2,2"]
+    assert s.to_list()[4] == 3.0
+    assert s.isna().to_list() == [True, True, True, True, False]
+
+
 def test_kcw_zero_basis_is_na():
     """A zero EMA basis makes the normalized width undefined -> NA."""
     n = 30
@@ -262,7 +322,7 @@ def test_vwma_hma_match_pandas_ta():
 @pytest.mark.parametrize("directive,lb", [
     ("vwma:20", 19), ("alma:20", 19), ("hma:20", 20 + round(20 ** 0.5) - 2), ("swma", 3),
     ("cog:10", 9), ("dev:20", 19), ("rci:9", 8), ("iii", 0), ("mode:5", 4),
-    ("kcw:20,10,2.0", 19),
+    ("kcw:20,10,2.0", 19), ("pivothigh:5,5", 10), ("pivotlow:2,8", 10),
 ])
 def test_lookback(directive, lb):
     assert volas.directive_lookback(directive) == lb
@@ -272,6 +332,7 @@ def test_lookback(directive, lb):
 @pytest.mark.parametrize("directive", [
     "vwma:20", "alma:20", "hma:20", "swma",
     "cog:10", "dev:20", "rci:9", "iii", "mode:5", "kcw:20,10,2.0",
+    "pivothigh:5,5", "pivotlow:2,8",
 ])
 def test_directive_entries_and_append_refresh(directive):
     # E2: df[d] == exec(d)
@@ -298,5 +359,8 @@ def test_guards():
     with pytest.raises(ValueError):
         DF["alma:20,0.85,0"]                       # sigma must be > 0
     for bad in ("cog:1", "rci:1", "dev:1", "mode:1"):  # windowed stats need >= 2
+        with pytest.raises(ValueError):
+            DF[bad]
+    for bad in ("pivothigh", "pivothigh:5", "pivotlow", "pivotlow:3"):  # both bars required
         with pytest.raises(ValueError):
             DF[bad]

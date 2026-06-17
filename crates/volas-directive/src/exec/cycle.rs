@@ -281,6 +281,18 @@ pub(super) fn dispatch(
                 arg_f64(args, 2),
             ))
         }
+        ("pivothigh", _) => f64col(ind::pivot(
+            &series_f64(df, series, 0, "high")?,
+            arg_usize(args, 0),
+            arg_usize(args, 1),
+            true,
+        )),
+        ("pivotlow", _) => f64col(ind::pivot(
+            &series_f64(df, series, 0, "low")?,
+            arg_usize(args, 0),
+            arg_usize(args, 1),
+            false,
+        )),
         ("stddev", _) => f64col(ind::stddev(
             &close(0)?,
             arg_usize(args, 0),
