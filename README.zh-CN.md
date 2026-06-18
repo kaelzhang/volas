@@ -88,6 +88,7 @@ polars。它是一个窄而快的 DataFrame，专门服务于这一类场景：
 - [时区](#时区)
 - [缺失值（`volas.NA`）](#缺失值volasna)
 - [与 pandas 互操作](#与-pandas-互操作)
+- [与 Arrow、DLPack 互操作（零拷贝）](#与-arrowdlpack-互操作零拷贝)
 - [错误处理](#错误处理)
 - [内置指标](#内置指标)
 - [许可证](#许可证)
@@ -1134,6 +1135,40 @@ pdf = df.to_pandas()               # -> pandas.DataFrame（'numpy' 后端：带 
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # 忠实的 masked Int64 / boolean（一次无损的 NA 往返）
 df.to_csv('out.csv', index=True)   # pandas to_csv 的一个子集；path=None 时返回一个 str
 ```
+
+## 与 Arrow、DLPack 互操作（零拷贝）
+
+volas 的每个 dtype 列各持有一块连续缓冲区（字符串列也是 Arrow 原生布局），因此
+跨到 Arrow 与 DLPack 的消费方时**无需拷贝**——消费方借用同一段字节，由 volas 负责
+保活。
+
+```py
+import pyarrow as pa, numpy as np
+
+# Arrow C-Data / C-Stream —— pyarrow、polars 等通过标准 PyCapsule 协议
+#（__arrow_c_array__ / __arrow_c_stream__）直接读取 volas。
+pa.array(df['close'])              # Series   -> pyarrow.Array（共享缓冲区）
+pa.table(df)                       # DataFrame -> pyarrow.Table（单个 RecordBatch）
+df['close'].to_arrow()             # pa.array(...) 的便捷写法
+
+Series.from_arrow(pa_array, name='close')   # Arrow array -> Series（dtype 匹配时借用）
+DataFrame.from_arrow(pa_table)              # Arrow table -> DataFrame
+
+# DLPack —— NumPy / PyTorch / JAX 借用一个稠密的数值（或 bool）列。
+np.from_dlpack(df['close'])        # 零拷贝 ndarray 视图
+```
+
+`to_numpy` 也能在不做有损 NA 折叠的前提下导出原值：
+
+```py
+values, mask = df['qty'].to_numpy(masked=True)   # 原生 dtype + 一个布尔 NA 掩码
+df['qty'].to_numpy(dtype='int64')                # 任一值为 NA 时抛错（与 pandas 对齐）
+```
+
+边界上的 NA 处理：float `NaN` 是带内值，可自由跨越；而 int / bool 的**缺失**值既无
+「无 Arrow-null」表示，也无 DLPack 表示，因此 `to_numpy(dtype=<int>)` 与
+`__dlpack__` 会抛错而非写入垃圾值——请改用 `to_numpy(masked=True)`、Arrow 路径
+（它携带空值位图），或先填充 NA。
 
 ## 错误处理
 

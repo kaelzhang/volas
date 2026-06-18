@@ -9,7 +9,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX := $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV := VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab asm-diff asm-diff-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -140,6 +140,19 @@ endif
 BASE ?= HEAD~1
 perf-ab:
 	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)"
+
+# Instruction-level regression gate: disassemble the hot-kernel probes and compare
+# each instruction count to scripts/asm_baseline.txt (numeric kernels must stay
+# byte-identical, the string kernel must not grow its per-element count). Arch-specific;
+# no-ops on a host whose arch differs from the baseline's.
+#
+#   make asm-diff           # check against the committed baseline
+#   make asm-diff-update     # refresh the baseline after a reviewed, justified change
+asm-diff:
+	@bash scripts/asm_diff.sh
+
+asm-diff-update:
+	@ASM_UPDATE=1 bash scripts/asm_diff.sh
 
 # Download/check the fonts used by the README / GitHub Pages animated GIFs.
 anime-fonts:

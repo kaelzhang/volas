@@ -90,6 +90,7 @@ where a **new OHLCV bar arrives and indicators must refresh now**:
 - [Timezones](#timezones)
 - [Missing values (`volas.NA`)](#missing-values-volasna)
 - [pandas interop](#pandas-interop)
+- [Arrow & DLPack interop (zero-copy)](#arrow--dlpack-interop-zero-copy)
 - [Error handling](#error-handling)
 - [Built-in Indicators](#built-in-indicators)
 - [License](#license)
@@ -154,7 +155,7 @@ df[bullish]                      # DataFrame of the rows where close > open
 # Several directives at once -> DataFrame
 df[['ma:2', 'ma:3', 'close > open']]
 
-# Zero-copy-ish export to NumPy
+# Export to NumPy (and, zero-copy, to Arrow / DLPack — see the interop section)
 df['close'].to_numpy()           # 1-D ndarray
 df.to_numpy()                    # 2-D ndarray (rows x columns)
 ```
@@ -1202,6 +1203,41 @@ pdf = df.to_pandas()               # -> pandas.DataFrame ('numpy' backend: an in
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # faithful masked Int64 / boolean (a lossless NA round-trip)
 df.to_csv('out.csv', index=True)   # subset of pandas to_csv; returns a str if path=None
 ```
+
+## Arrow & DLPack interop (zero-copy)
+
+A volas column owns one contiguous buffer per dtype (Arrow-native string layout
+included), so it crosses to Arrow and DLPack consumers **without a copy** — the
+consumer borrows the same bytes, kept alive by volas.
+
+```py
+import pyarrow as pa, numpy as np
+
+# Arrow C-Data / C-Stream — pyarrow, polars, … read volas directly via the
+# standard PyCapsule protocols (__arrow_c_array__ / __arrow_c_stream__).
+pa.array(df['close'])              # Series  -> pyarrow.Array  (shares the buffer)
+pa.table(df)                       # DataFrame -> pyarrow.Table (one RecordBatch)
+df['close'].to_arrow()             # convenience for pa.array(...)
+
+Series.from_arrow(pa_array, name='close')   # Arrow array  -> Series (borrowed where dtypes match)
+DataFrame.from_arrow(pa_table)              # Arrow table  -> DataFrame
+
+# DLPack — NumPy / PyTorch / JAX borrow a dense numeric (or bool) column.
+np.from_dlpack(df['close'])        # zero-copy ndarray view
+```
+
+`to_numpy` also exposes the values without a lossy NA collapse:
+
+```py
+values, mask = df['qty'].to_numpy(masked=True)   # native dtype + a bool NA mask
+df['qty'].to_numpy(dtype='int64')                # raises if any value is NA (pandas-aligned)
+```
+
+NA handling at the boundary: a float `NaN` is in-band and crosses freely; an
+int / bool **missing** value has no Arrow-null-free or DLPack representation, so
+`to_numpy(dtype=<int>)` and `__dlpack__` raise rather than write garbage — use
+`to_numpy(masked=True)`, the Arrow path (which carries the null bitmap), or fill
+the NA first.
 
 ## Error handling
 

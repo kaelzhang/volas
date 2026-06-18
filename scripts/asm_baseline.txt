@@ -1,0 +1,6 @@
+# Instruction-level baseline for `make asm-diff` (arch: arm64).
+# <probe> <kind> <count>: exact = numeric kernel (must stay byte-identical),
+# max = string kernel (must not increase). Refresh only after a reviewed change.
+probe_ma exact 183
+probe_ema exact 78
+probe_str_eq_scan max 61
