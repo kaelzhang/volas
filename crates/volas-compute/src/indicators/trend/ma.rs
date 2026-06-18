@@ -144,6 +144,7 @@ pub fn wma(data: &[f64], period: usize) -> Vec<f64> {
     // Seed the first full window directly.
     let mut sum = 0.0; // plain window sum
     let mut wsum = 0.0; // weighted sum: newest bar * period ... oldest * 1
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for j in 0..period {
         sum += data[j];
         wsum += data[j] * (j + 1) as f64;

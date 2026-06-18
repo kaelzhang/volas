@@ -6,8 +6,11 @@ PYTHON ?= $(or $(VOLAS_PYTHON),python)
 PIP ?= $(PYTHON) -m pip
 PYTEST ?= $(PYTHON) -m pytest
 MATURIN ?= $(PYTHON) -m maturin
-PY_PREFIX := $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
-MATURIN_DEVELOP_ENV := VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
+# Lazy (`=`, not `:=`): the interpreter is probed only when a maturin recipe actually
+# expands MATURIN_DEVELOP_ENV — so targets that need no Python (asm-diff, lint) don't
+# print `python: command not found` when neither `python` nor VOLAS_PYTHON is set.
+PY_PREFIX = $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
+MATURIN_DEVELOP_ENV = VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
 .PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab asm-diff asm-diff-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
@@ -181,8 +184,8 @@ lint:
 	@ruff check $(files)
 	@echo "\033[1m>> Running mypy (package)... <<\033[0m"
 	@mypy volas
-	@echo "\033[1m>> Running cargo clippy... <<\033[0m"
-	@cargo clippy --workspace --all-targets
+	@echo "\033[1m>> Running cargo clippy (warnings are errors)... <<\033[0m"
+	@cargo clippy --workspace --all-targets -- -D warnings
 
 # Static type gates — deterministic oracles that prove the shipped typings are correct
 # (no human review needed). Needs the extension built so the stub is installed.

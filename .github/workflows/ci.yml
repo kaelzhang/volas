@@ -34,16 +34,19 @@ jobs:
       - name: mypy (package)
         run: mypy volas
 
+      # Pinned (not @stable): clippy is a hard gate (`-D warnings`), so a newer stable
+      # clippy adding a lint must not spuriously fail CI on unrelated PRs. Bump this
+      # deliberately (and clear any new warnings) as a maintenance step.
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: clippy
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets
+      - name: cargo clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Cargo.lock is in sync (release builds pass --locked)
         run: cargo metadata --locked --format-version 1 > /dev/null

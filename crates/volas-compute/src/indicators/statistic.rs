@@ -105,6 +105,7 @@ fn rolling_var(data: &[f64], period: usize) -> Vec<f64> {
     }
     let mut trailing = 0;
     let mut out = crate::buf::OutBuf::warmup(n, period - 1);
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for i in (period - 1)..n {
         let x = data[i];
         total1 += x;
@@ -190,6 +191,7 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
         *out_ptr.add(period - 1) = value(sx, sy, sx2, sy2, sxy);
     }
     let mut trailing = 0;
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for i in period..n {
         // Drop the trailing values, then add the new ones (TA-Lib's order).
         let (tx, ty) = unsafe { (*x_ptr.add(trailing), *y_ptr.add(trailing)) };

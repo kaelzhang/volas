@@ -15,6 +15,7 @@ pub fn sum(data: &[f64], period: usize) -> Vec<f64> {
         total += x;
     }
     let mut trailing = 0;
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for i in (period - 1)..n {
         total += data[i];
         out[i] = total;
@@ -38,6 +39,7 @@ pub fn maxindex(data: &[f64], period: usize) -> Vec<f64> {
     let mut hi = f64::NEG_INFINITY;
     let mut first = true;
     let mut trailing = 0usize;
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for today in (period - 1)..n {
         let tmp = data[today];
         if first || hi_idx < trailing {
@@ -79,6 +81,7 @@ pub fn minindex(data: &[f64], period: usize) -> Vec<f64> {
     let mut lo = f64::INFINITY;
     let mut first = true;
     let mut trailing = 0usize;
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for today in (period - 1)..n {
         let tmp = data[today];
         if first || lo_idx < trailing {
@@ -139,6 +142,7 @@ pub fn maxindex_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
     let mut hi = f64::NEG_INFINITY;
     let mut first = true;
     let mut trailing = 0usize;
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for today in (period - 1)..n {
         let tmp = data[today];
         if first || hi_idx < trailing {
@@ -218,6 +222,7 @@ pub fn minindex_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
     let mut lo = f64::INFINITY;
     let mut first = true;
     let mut trailing = 0usize;
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for today in (period - 1)..n {
         let tmp = data[today];
         if first || lo_idx < trailing {

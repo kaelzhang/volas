@@ -137,6 +137,7 @@ pub fn kama_resume(
     let mut trailing_value = data[from - period - 1];
     let mut trailing_idx = from - period;
     let mut out = Vec::with_capacity(n - from);
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for today in from..n {
         let tr2 = data[trailing_idx];
         trailing_idx += 1;

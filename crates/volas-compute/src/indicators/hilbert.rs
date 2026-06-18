@@ -66,6 +66,7 @@ pub fn ht_phasor_line(price: &[f64], quadrature: bool) -> Vec<f64> {
         return out;
     }
     let mut core = HtCoreState::seed(price);
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in CORE_START..n {
         let b = core.step(price, i);
         if i >= LB_PERIOD {

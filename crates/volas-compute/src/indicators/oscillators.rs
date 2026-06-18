@@ -689,6 +689,7 @@ pub fn pivot(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> 
     let n = source.len();
     let mut out = vec![f64::NAN; n];
     let win = left + right;
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in win..n {
         let p = i - right; // candidate pivot position
         let cand = source[p];

@@ -454,6 +454,7 @@ fn pairwise(
     let mut out = vec![f64::NAN; n];
     let mut bx: Vec<f64> = Vec::new();
     let mut by: Vec<f64> = Vec::new();
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in 0..n {
         bx.clear();
         by.clear();

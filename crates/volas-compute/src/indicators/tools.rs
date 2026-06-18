@@ -10,6 +10,7 @@ pub fn increase(data: &[f64], repeat: usize, direction: i32) -> Vec<bool> {
     if period > n {
         return result;
     }
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in (period - 1)..n {
         let mut is_increasing = true;
         let mut current = if direction == 1 {
@@ -17,6 +18,7 @@ pub fn increase(data: &[f64], repeat: usize, direction: i32) -> Vec<bool> {
         } else {
             f64::INFINITY
         };
+        #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
         for j in (i + 1 - period)..=i {
             let value = data[j];
             if (value - current) * (direction as f64) > 0.0 {

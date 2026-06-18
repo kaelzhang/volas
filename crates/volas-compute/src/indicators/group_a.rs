@@ -398,6 +398,7 @@ pub fn tsi_resume(
     let (mut im, mut om, mut ia, mut oa, mut prev) =
         (state[0], state[1], state[2], state[3], state[4]);
     let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in from..close.len() {
         let mi = close[i] - prev;
         let ai = mi.abs();

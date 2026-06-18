@@ -54,6 +54,7 @@ fn wilder_sum(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Vec<f64> 
     // path. Wilder smoothing is contractive, so the ~1e-16 reassociation decays —
     // within the 1e-9 parity tolerance. Speeds every directional indicator.
     let a = 1.0 - 1.0 / period as f64;
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in period..n {
         s = s.mul_add(a, term(i));
         out[i] = s;
@@ -587,6 +588,7 @@ pub fn adxr_final_state(
     let mut adxv = vec![f64::NAN; n];
     let mut dx_seed_sum = 0.0;
     let mut adx = 0.0;
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in period..n {
         dm_tr_step(high, low, close, i, a_sum, &mut s);
         let dxv = dx_val(s[0], s[1], s[2]);

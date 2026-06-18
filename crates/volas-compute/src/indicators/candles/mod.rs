@@ -341,6 +341,7 @@ fn candle_average_series(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64])
     for j in 0..p {
         total += range(s, o, h, l, c, j);
     }
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in p..n {
         out[i] = s.factor * (total / pf) / div;
         total += range(s, o, h, l, c, i) - range(s, o, h, l, c, i - p);
@@ -384,6 +385,7 @@ fn each_bar_avg<const K: usize>(
             }
         }
         let mut avgs = [0.0f64; K];
+        #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
         for i in lookback..n {
             for k in 0..K {
                 let s = settings[k];
@@ -463,6 +465,7 @@ fn each_bar_avg2<const K: usize>(
             }
         }
         let mut cur = [0.0f64; K];
+        #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
         for i in lookback..n {
             for k in 0..K {
                 let s = settings[k];
@@ -533,6 +536,7 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
             }
         }
         let mut hist = [[0.0f64; K]; L];
+        #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
         for bar in first..n {
             let mut a = [0.0f64; K];
             for k in 0..K {
@@ -576,6 +580,7 @@ fn each_bar(n: usize, lookback: usize, f: impl Fn(usize) -> f64) -> Vec<f64> {
         for slot in &mut out[..warm] {
             slot.write(f64::NAN);
         }
+        #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
         for i in warm..n {
             out[i].write(f(i));
         }

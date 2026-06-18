@@ -596,6 +596,7 @@ pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     }
     let near_scale = NEAR.factor / NEAR.avg_period as f64;
     let mut trailing = lb - 1 - NEAR.avg_period;
+    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for i in lb..n {
         let c1 = if c[i - 1] >= o[i - 1] { 1.0 } else { -1.0 };
         let c0 = if c[i] >= o[i] { 1.0 } else { -1.0 };

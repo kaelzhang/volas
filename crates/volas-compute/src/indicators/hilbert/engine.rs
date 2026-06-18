@@ -394,6 +394,7 @@ pub(super) fn ht_core(price: &[f64]) -> Vec<HtBar> {
         return bars;
     }
     let mut core = HtCoreState::seed(price);
+    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for today in CORE_START..n {
         bars[today] = core.step(price, today);
     }
