@@ -10,6 +10,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1280, 640
 FRAME_MS = 95
+README_GIF_MAX_BYTES = 5 * 1024 * 1024
+GIF_COLORS = 128
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_FONT_DIR = SCRIPT_DIR / ".fonts"
 NOTO_SC_REGULAR_URL = (
@@ -475,8 +477,11 @@ def make_frames(locale: str) -> tuple[list[Image.Image], list[int]]:
 
 def write_gif(locale: str, out_dir: Path) -> Path:
     frames, durations = make_frames(locale)
-    paletted = [frame.convert("P", palette=Image.Palette.ADAPTIVE, colors=128) for frame in frames]
+    paletted = [frame.convert("P", palette=Image.Palette.ADAPTIVE, colors=GIF_COLORS) for frame in frames]
     out = out_dir / OUT_NAMES[locale]
+    # Frames are full-canvas renders. Keeping the previous frame lets GIF
+    # optimizers write deltas; restoring the background inflates the README
+    # image beyond GitHub's proxy limit without changing decoded pixels.
     paletted[0].save(
         out,
         save_all=True,
@@ -484,8 +489,14 @@ def write_gif(locale: str, out_dir: Path) -> Path:
         duration=durations,
         loop=0,
         optimize=True,
-        disposal=2,
+        disposal=1,
     )
+    size = out.stat().st_size
+    if size >= README_GIF_MAX_BYTES:
+        raise SystemExit(
+            f"{out.name} is {size} bytes; keep README GIFs below "
+            f"{README_GIF_MAX_BYTES} bytes for GitHub image proxying"
+        )
     return out
 
 
