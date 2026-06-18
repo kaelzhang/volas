@@ -213,13 +213,17 @@ df['ma:2']
 
 #### 参数
 
-- **data** `dict[str, list | np.ndarray] | DataFrame` 列数据：可以是一个 dict，
-  将每个列名映射到等长的 list 或 NumPy 数组（float、int、bool、`datetime64` 或
-  字符串）；也可以是**另一个 volas `DataFrame`，此时会被拷贝**（如同
-  `pandas.DataFrame(df)`）。如果要附加
+- **data** `dict[str, list | np.ndarray] | DataFrame` 列数据，为以下之一：
+  - 一个 **dict**，把每个列名映射到等长的 list 或 NumPy 数组（`float`、`int`、
+    `bool`、`datetime64` 或 `string`）；
+  - 另一个 volas **`DataFrame`**，此时会被拷贝（如同 `pandas.DataFrame(df)`）。
+
+  构造函数**不接受** `pandas.DataFrame` 或 Arrow 对象——请改用专门的
+  [`from_pandas`](#from_pandaspdf---dataframe) /
+  [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe) 桥接。如果要附加
   [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)，
-  用 `to_datetime` 解析某一列，用 `set_index` 把它提升为索引，再用 `tz_localize`
-  / `tz_convert` 打上时区标记。参见 [时区](#时区)。
+  用 `to_datetime` 解析某一列，用 `set_index` 把它提升为索引，再用 `tz_localize` /
+  `tz_convert` 打上时区标记。参见 [时区](#时区)。
 - **columns** `Optional[list[str]] = None` 选择并排列要保留的列，等价于
   `df[[...]]` 的投影。名字不存在会抛 `KeyError`；空 list 或重复名字会被拒绝，缺失列
   绝不会被静默填充。
@@ -228,9 +232,14 @@ df['ma:2']
   的 bar，后续的 `append` 会把更细的 bar 折叠进正在形成中的 bar。需要一个
   `DatetimeIndex`。参见 [累积与 DatetimeIndex](#累积与-datetimeindex)。
 - **cumulators** `Optional[dict[str, str]] = None` 折叠时使用的逐列聚合器覆盖
-  （例如 `{'amount': 'sum'}`）；默认采用 OHLCV 语义（`open`=first、`high`=max、
-  `low`=min、`close`=last、`volume`=sum；其他列默认 `last`）。仅在与
-  `time_frame` 同时使用时才有意义。
+  （例如 `{'amount': 'sum'}`），仅在与 `time_frame` 同时使用时才有意义。默认采用
+  OHLCV 语义（`open`=first、`high`=max、`low`=min、`close`=last、`volume`=sum；其他列
+  默认 `last`）。字典的每个**值**为以下之一：
+  - `'first'`——桶内第一个值
+  - `'last'`——桶内最后一个值
+  - `'max'`——最大值
+  - `'min'`——最小值
+  - `'sum'`——求和
 
 ### df.exec(directive: str, create_column: bool = False) -> np.ndarray
 
@@ -420,6 +429,59 @@ DataFrame({'a': [1, None]}).to_numpy(dtype='int64', na_value=0)   # -> [[1], [0]
 需要零拷贝交给 Arrow / DLPack 消费方时，参见
 [与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
 
+### df.to_arrow() -> pyarrow.Table
+
+**volas 独有**——把 DataFrame 导出为 `pyarrow.Table`，在 dtype 匹配处**零拷贝**：
+数值 / 字符串 / datetime 列缓冲区与 Arrow 共享，`bool` 与空值位图按需重打包。需要
+`pyarrow`（仅在此处惰性 import）。它是 volas Arrow **C-Stream** 桥接的便捷写法：任何
+Arrow 消费方都能经标准 `__arrow_c_stream__` PyCapsule 协议直接读取本 frame，无需调用
+`to_arrow()`，也无需让 volas 依赖 pyarrow。
+
+```py
+import pyarrow as pa
+tbl = df.to_arrow()        # -> pyarrow.Table（共享列缓冲区）
+tbl = pa.table(df)         # 等价，经 __arrow_c_stream__ 协议
+pdf = pl.from_dataframe(df)  # polars 经同一协议读取
+```
+
+返回一个 `pyarrow.Table`。完整零拷贝契约与 DLPack 导出见
+[与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
+
+### DataFrame.from_arrow(data) -> DataFrame
+
+**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）
+的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars
+`DataFrame` 等。dtype 匹配处借用数据缓冲区（否则拷贝该列），多 chunk 来源会被拼接，
+结果带一个全新的 `RangeIndex`。
+
+- **data** Arrow 来源——任何实现 `__arrow_c_stream__` 的对象。
+
+```py
+df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame
+df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
+```
+
+> `DataFrame(data=...)` **构造函数**不接受 Arrow（它只接受 `dict` 或另一个
+> `DataFrame`）；从 Arrow 对象构造请用 `from_arrow`。
+
+### df.to_pandas(dtype_backend='numpy') -> pandas.DataFrame
+
+导出为 `pandas.DataFrame`（pandas 仅在此处惰性 import——它不是运行时依赖）。
+`DatetimeIndex` 可往返；反向桥接是顶层的 [`from_pandas`](#from_pandaspdf---dataframe)。
+
+- **dtype_backend?** `str = 'numpy'` 缺失值如何带入 pandas：
+  - `'numpy'`——生态兼容性最好的形式：带缺失值的 int / bool 列变成 `float64` /
+    `object` + `NaN`（与 `pandas.Int64.to_numpy()` 一致）。
+  - `'numpy_nullable'`——忠实、无损的 masked 往返：int / bool / str 列保持
+    `Int64` / `boolean` / `string`，空洞为 `pandas.NA`。
+
+```py
+pdf = df.to_pandas()                                # 'numpy' 后端（基于 NaN）
+pdf = df.to_pandas(dtype_backend='numpy_nullable')  # 无损 masked Int64 / boolean / string
+```
+
+往返细节与 `to_csv` 见 [与 pandas 互操作](#与-pandas-互操作)。
+
 ### Series
 
 `df[col]` 和 `df[directive]` 返回一个 `Series`：一条具名的一维列，API 与
@@ -496,8 +558,37 @@ s.to_numpy(dtype='int64')
 - 与 pandas 一致，`na_value` 只改变缺失单元格——不给显式 `dtype` 时，带 NA 的 int 列仍
   导出为 `float64`（默认），`na_value` 只是填充那些 `NaN` 槽。
 - 若需要**无损**保留原生 dtype 与缺失位置（不填充、不折叠 float），用 Arrow 路径
-  （[`s.to_arrow()`](#与-arrowdlpack-互操作零拷贝) 携带空值位图）或
-  `s.to_pandas(dtype_backend='numpy_nullable')`；单独取 NA 掩码用 `s.isna().to_numpy()`。
+  （`s.to_arrow()` 携带空值位图）或 `s.to_pandas(dtype_backend='numpy_nullable')`；
+  单独取 NA 掩码用 `s.isna().to_numpy()`。
+
+### s.to_arrow() -> pyarrow.Array
+
+**volas 独有**——把列导出为 `pyarrow.Array`，在 dtype 匹配处**零拷贝**（数值 / 字符串
+/ datetime 缓冲区与 Arrow 共享，`bool` 与空值位图按需重打包）。需要 `pyarrow`（惰性
+import）。它是 volas Arrow **C-Data** 桥接的便捷写法：任何 Arrow 消费方都能经标准
+`__arrow_c_array__` PyCapsule 协议直接读取本 series。
+
+```py
+import pyarrow as pa
+arr = s.to_arrow()         # -> pyarrow.Array（共享缓冲区）
+arr = pa.array(s)          # 等价，经 __arrow_c_array__ 协议
+```
+
+返回一个 `pyarrow.Array`。本列还可经 DLPack 零拷贝导出到 NumPy / PyTorch / JAX
+（`np.from_dlpack(s)`）——见 [与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
+
+### Series.from_arrow(data, name=None) -> Series
+
+**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议
+（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。dtype
+匹配处借用数据缓冲区（否则拷贝），结果带一个全新的 `RangeIndex`。
+
+- **data** Arrow 来源——任何实现 `__arrow_c_array__` 的对象。
+- **name?** `str | None = None` 结果 `Series` 的名字。
+
+```py
+s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
+```
 
 ### Row
 
@@ -1242,12 +1333,9 @@ pdf = df.to_pandas(dtype_backend='numpy_nullable')  # 忠实的 masked Int64 / b
 df.to_csv('out.csv', index=True)   # pandas to_csv 的一个子集；path=None 时返回一个 str
 ```
 
-`to_pandas` 的 **dtype_backend** `str` 决定缺失值如何带入 pandas：
-
-- `'numpy'`（默认）——生态兼容性最好的形式：带缺失值的 int / bool 列变成
-  `float64` / `object` + `NaN`，与 `pandas.Int64.to_numpy()` 一致。
-- `'numpy_nullable'`——忠实、无损的 masked 往返：int / bool / str 列保持
-  `Int64` / `boolean` / `string`，空洞为 `pandas.NA`。
+`to_pandas` 的 **dtype_backend**（`'numpy'` 对比无损的 `'numpy_nullable'`）决定缺失值
+如何带入 pandas——逐值说明见
+[`df.to_pandas`](#dfto_pandasdtype_backendnumpy---pandasdataframe)。
 
 ## 与 Arrow、DLPack 互操作（零拷贝）
 
@@ -1271,17 +1359,43 @@ DataFrame.from_arrow(pa_table)              # Arrow table -> DataFrame
 np.from_dlpack(df['close'])        # 零拷贝 ndarray 视图
 ```
 
-整型导出遇缺失值时，`to_numpy` 遵循 pandas：
+高层入口——[`df.to_arrow`](#dfto_arrow---pyarrowtable) /
+[`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe)、
+[`s.to_arrow`](#sto_arrow---pyarrowarray) /
+[`Series.from_arrow`](#seriesfrom_arrowdata-namenone---series)——在 Usage 下有说明。
+它们建立在以下**标准协议方法**之上，Arrow / 数组消费方会自动调用它们（所以你很少需要
+自己调用）：
+
+- **`Series.__arrow_c_array__`**——Arrow C-Data 数组协议；返回 `(schema, array)`
+  PyCapsule 二元组，让 `pa.array(s)` / `pl.Series(s)` 读取一列。
+- **`Series.__arrow_c_schema__`**——只含 schema 的那一半（列的 Arrow dtype）。
+- **`DataFrame.__arrow_c_stream__`**——Arrow C-Stream 协议；frame 作为单个
+  `RecordBatch`，让 `pa.table(df)` / `pl.from_dataframe(df)` 读取一个 frame。
+- **`Series.__dlpack__` / `Series.__dlpack_device__`**——DLPack 协议，让
+  `np.from_dlpack(s)` / `torch.from_dlpack(s)` 借用一个稠密的数值 / bool 列。
+
+**零拷贝契约。** 在双向上，以下列的*数据*缓冲区被共享（无拷贝）：
+
+- 数值列（`int*` / `uint*` / `float*`）；
+- 字符串列（Arrow 原生的 UTF-8 + 偏移布局）；
+- 纳秒 datetime 列。
+
+以下因两种表示不是逐位兼容而被重打包（一次小拷贝）：
+
+- **`bool`**——volas 每个值存一个字节，Arrow 存一个*位*；
+- **空值位图**（≤ `n/8` 字节，相对数据可忽略）；
+- 仅在导入时：32 位偏移的 Arrow `Utf8` 列（加宽到 volas 的 64 位偏移）与粗于纳秒的
+  时间戳（重新缩放）。
+
+**边界上的 NA。** float `NaN` 是带内值，可自由跨越；而 int / bool 的**缺失**值既无
+DLPack 表示、也无「无 Arrow-null」表示，因此 `to_numpy(dtype=<int>)` 与 `__dlpack__`
+会抛错而非写入垃圾值——请传 `na_value=`，或用 Arrow 路径（它无损携带空值位图）：
 
 ```py
 df['qty'].to_numpy(dtype='int64')                # 任一值为 NA 时抛错（与 pandas 对齐）
 df['qty'].to_numpy(dtype='int64', na_value=0)    # 或用 na_value 填充空洞
+pa.array(df['qty'])                              # 无损：保留 int64 + 空值位图
 ```
-
-边界上的 NA 处理：float `NaN` 是带内值，可自由跨越；而 int / bool 的**缺失**值既无
-「无 Arrow-null」表示，也无 DLPack 表示，因此 `to_numpy(dtype=<int>)` 与
-`__dlpack__` 会抛错而非写入垃圾值——请传 `na_value=`、用 Arrow 路径（它无损携带空值
-位图），或先填充 NA。
 
 ## 错误处理
 

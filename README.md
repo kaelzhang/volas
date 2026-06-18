@@ -220,13 +220,17 @@ Which gets the 2-period simple moving average on column `"close"`.
 
 #### Parameters
 
-- **data** `dict[str, list | np.ndarray] | DataFrame` the column data — a dict
-  mapping each column name to an equal-length list or NumPy array (float, int,
-  bool, `datetime64` or string) — **or another volas `DataFrame`, which is then
-  copied** (like `pandas.DataFrame(df)`). To attach a
+- **data** `dict[str, list | np.ndarray] | DataFrame` the column data, one of:
+  - a **dict** mapping each column name to an equal-length list or NumPy array
+    (`float`, `int`, `bool`, `datetime64`, or `string`);
+  - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`).
+
+  The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
+  those with the dedicated [`from_pandas`](#from_pandaspdf---dataframe) /
+  [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe) instead. To attach a
   [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html),
-  parse a column with `to_datetime`, promote it with `set_index`, then tag a zone
-  with `tz_localize` / `tz_convert`. See [Timezones](#timezones).
+  parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
+  `tz_localize` / `tz_convert`. See [Timezones](#timezones).
 - **columns** `Optional[list[str]] = None` Select and order the columns to keep —
   the same projection as `df[[...]]`. A name not present raises `KeyError`; an empty
   list or a duplicate name is rejected, and an absent column is never silently filled.
@@ -235,10 +239,15 @@ Which gets the 2-period simple moving average on column `"close"`.
   taken as already-final bars at that frame, and later `append`s fold finer
   bars into the forming bar. Requires a `DatetimeIndex`. See
   [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex).
-- **cumulators** `Optional[dict[str, str]] = None` Per-column aggregator
-  overrides used when folding (e.g. `{'amount': 'sum'}`); defaults to OHLCV
-  semantics (`open`=first, `high`=max, `low`=min, `close`=last, `volume`=sum;
-  any other column `last`). Only meaningful together with `time_frame`.
+- **cumulators** `Optional[dict[str, str]] = None` Per-column aggregator overrides
+  used when folding (e.g. `{'amount': 'sum'}`), only meaningful together with
+  `time_frame`. Defaults to OHLCV semantics (`open`=first, `high`=max, `low`=min,
+  `close`=last, `volume`=sum; any other column `last`). Each dict **value** is one of:
+  - `'first'` — the first value in the bucket
+  - `'last'` — the last value in the bucket
+  - `'max'` — the maximum
+  - `'min'` — the minimum
+  - `'sum'` — the sum
 
 ### df.exec(directive: str, create_column: bool = False) -> np.ndarray
 
@@ -441,6 +450,62 @@ Notes:
 For a zero-copy hand-off to Arrow / DLPack consumers, see
 [Arrow & DLPack interop](#arrow--dlpack-interop-zero-copy).
 
+### df.to_arrow() -> pyarrow.Table
+
+A **volas-specific** export to a `pyarrow.Table`, **zero-copy** where the dtypes
+match — the numeric / string / datetime column buffers are shared with Arrow, while
+`bool` and the null bitmap are repacked. Requires `pyarrow` (imported lazily, only
+here). It is a convenience over volas's Arrow **C-Stream** bridge: any Arrow consumer
+can read the frame directly through the standard `__arrow_c_stream__` PyCapsule
+protocol, with no `to_arrow()` call and without volas depending on pyarrow.
+
+```py
+import pyarrow as pa
+tbl = df.to_arrow()        # -> pyarrow.Table (shares the column buffers)
+tbl = pa.table(df)         # identical, via the __arrow_c_stream__ protocol
+pdf = pl.from_dataframe(df)  # polars reads it through the same protocol
+```
+
+Returns a `pyarrow.Table`. See [Arrow & DLPack interop](#arrow--dlpack-interop-zero-copy)
+for the full zero-copy contract and the DLPack export.
+
+### DataFrame.from_arrow(data) -> DataFrame
+
+A **volas-specific static method** that builds a `DataFrame` from any object exposing
+the Arrow **C-Stream** protocol (`__arrow_c_stream__`) — a `pyarrow.Table` /
+`RecordBatch` / `RecordBatchReader`, a polars `DataFrame`, etc. The data buffers are
+borrowed where the dtypes match (otherwise a column is copied), a multi-chunk source
+is concatenated, and the result carries a fresh `RangeIndex`.
+
+- **data** the Arrow source — any object implementing `__arrow_c_stream__`.
+
+```py
+df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame
+df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
+```
+
+> Arrow is **not** accepted by the `DataFrame(data=...)` constructor (which takes a
+> `dict` or another `DataFrame`); build from an Arrow object through `from_arrow`.
+
+### df.to_pandas(dtype_backend='numpy') -> pandas.DataFrame
+
+Export to a `pandas.DataFrame` (pandas is imported lazily, only here — it is not a
+runtime dependency). A `DatetimeIndex` round-trips, and the reverse bridge is the
+top-level [`from_pandas`](#from_pandaspdf---dataframe).
+
+- **dtype_backend?** `str = 'numpy'` how a missing value is carried into pandas:
+  - `'numpy'` — the most ecosystem-compatible form: an int / bool column with a missing
+    value becomes `float64` / `object` with `NaN` (like `pandas.Int64.to_numpy()`).
+  - `'numpy_nullable'` — a faithful, lossless masked round-trip: an int / bool / str
+    column stays `Int64` / `boolean` / `string` with the hole as `pandas.NA`.
+
+```py
+pdf = df.to_pandas()                                # 'numpy' backend (NaN-based)
+pdf = df.to_pandas(dtype_backend='numpy_nullable')  # lossless masked Int64 / boolean / string
+```
+
+See [pandas interop](#pandas-interop) for the round-trip details and `to_csv`.
+
 ### Series
 
 `df[col]` and `df[directive]` return a `Series` — a named 1-D column whose API is
@@ -522,9 +587,41 @@ Notes:
   an int column with NA still exports `float64` (the default), and `na_value` simply
   fills the `NaN` slots.
 - For a **lossless** NA round-trip that keeps the native dtype *and* the missing
-  positions (no fill, no float collapse), use the Arrow path
-  ([`s.to_arrow()`](#arrow--dlpack-interop-zero-copy) carries the null bitmap) or
-  `s.to_pandas(dtype_backend='numpy_nullable')`; the NA mask alone is `s.isna().to_numpy()`.
+  positions (no fill, no float collapse), use the Arrow path (`s.to_arrow()` carries
+  the null bitmap) or `s.to_pandas(dtype_backend='numpy_nullable')`; the NA mask alone
+  is `s.isna().to_numpy()`.
+
+### s.to_arrow() -> pyarrow.Array
+
+A **volas-specific** export of the column to a `pyarrow.Array`, **zero-copy** where
+the dtype matches (the numeric / string / datetime buffer is shared; `bool` and the
+null bitmap are repacked). Requires `pyarrow` (imported lazily). It is a convenience
+over volas's Arrow **C-Data** bridge: any Arrow consumer can read the series directly
+through the standard `__arrow_c_array__` PyCapsule protocol.
+
+```py
+import pyarrow as pa
+arr = s.to_arrow()         # -> pyarrow.Array (shares the buffer)
+arr = pa.array(s)          # identical, via the __arrow_c_array__ protocol
+```
+
+Returns a `pyarrow.Array`. The column also exports zero-copy to NumPy / PyTorch / JAX
+via DLPack (`np.from_dlpack(s)`) — see
+[Arrow & DLPack interop](#arrow--dlpack-interop-zero-copy).
+
+### Series.from_arrow(data, name=None) -> Series
+
+A **volas-specific static method** that builds a `Series` from any object exposing the
+Arrow **C-Data** array protocol (`__arrow_c_array__`) — a `pyarrow.Array`, a polars
+`Series`, etc. The data buffer is borrowed where the dtype matches (otherwise copied);
+the result carries a fresh `RangeIndex`.
+
+- **data** the Arrow source — any object implementing `__arrow_c_array__`.
+- **name?** `str | None = None` the name for the resulting `Series`.
+
+```py
+s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
+```
 
 ### Row
 
@@ -1318,13 +1415,10 @@ pdf = df.to_pandas(dtype_backend='numpy_nullable')  # faithful masked Int64 / bo
 df.to_csv('out.csv', index=True)   # subset of pandas to_csv; returns a str if path=None
 ```
 
-`to_pandas`'s **dtype_backend** `str` selects how a missing value is carried into pandas:
-
-- `'numpy'` (the default) — the most ecosystem-compatible form: an int / bool column
-  with a missing value becomes `float64` / `object` with `NaN`, exactly like
-  `pandas.Int64.to_numpy()`.
-- `'numpy_nullable'` — a faithful, lossless masked round-trip: an int / bool / str
-  column stays `Int64` / `boolean` / `string` with the hole as `pandas.NA`.
+`to_pandas`'s **dtype_backend** (`'numpy'` vs the lossless `'numpy_nullable'`) governs
+how a missing value crosses into pandas — see
+[`df.to_pandas`](#dfto_pandasdtype_backendnumpy---pandasdataframe) for the per-value
+breakdown.
 
 ## Arrow & DLPack interop (zero-copy)
 
@@ -1348,18 +1442,45 @@ DataFrame.from_arrow(pa_table)              # Arrow table  -> DataFrame
 np.from_dlpack(df['close'])        # zero-copy ndarray view
 ```
 
-For an integer export over missing values, `to_numpy` follows pandas:
+The high-level entry points — [`df.to_arrow`](#dfto_arrow---pyarrowtable) /
+[`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe),
+[`s.to_arrow`](#sto_arrow---pyarrowarray) /
+[`Series.from_arrow`](#seriesfrom_arrowdata-namenone---series) — are documented under
+Usage. They sit on these **standard protocol methods**, which Arrow / array consumers
+call automatically (so you rarely call them yourself):
+
+- **`Series.__arrow_c_array__`** — the Arrow C-Data array protocol; returns the
+  `(schema, array)` PyCapsule pair, so `pa.array(s)` / `pl.Series(s)` read a column.
+- **`Series.__arrow_c_schema__`** — the schema-only half (the column's Arrow dtype).
+- **`DataFrame.__arrow_c_stream__`** — the Arrow C-Stream protocol; the frame as one
+  `RecordBatch`, so `pa.table(df)` / `pl.from_dataframe(df)` read a frame.
+- **`Series.__dlpack__` / `Series.__dlpack_device__`** — the DLPack protocol, so
+  `np.from_dlpack(s)` / `torch.from_dlpack(s)` borrow a dense numeric / bool column.
+
+**Zero-copy contract.** The *data* buffer is shared (no copy) in both directions for:
+
+- numeric columns (`int*` / `uint*` / `float*`);
+- string columns (the Arrow-native UTF-8 + offset layout);
+- nanosecond datetime columns.
+
+These are repacked (a small copy) because the two representations are not
+bit-compatible:
+
+- **`bool`** — volas stores one byte per value, Arrow one *bit*;
+- the **null bitmap** (≤ `n/8` bytes, negligible beside the data);
+- on import only, a 32-bit-offset Arrow `Utf8` column (widened to volas's 64-bit
+  offsets) and a coarser-than-nanosecond timestamp (rescaled).
+
+**NA at the boundary.** A float `NaN` is in-band and crosses freely. An int / bool
+**missing** value has no DLPack and no Arrow-null-free representation, so
+`to_numpy(dtype=<int>)` and `__dlpack__` raise rather than write garbage — pass
+`na_value=`, or use the Arrow path, which carries the null bitmap losslessly:
 
 ```py
 df['qty'].to_numpy(dtype='int64')                # raises if any value is NA (pandas-aligned)
 df['qty'].to_numpy(dtype='int64', na_value=0)    # or fill the holes with na_value
+pa.array(df['qty'])                              # lossless: keeps int64 + the null bitmap
 ```
-
-NA handling at the boundary: a float `NaN` is in-band and crosses freely; an
-int / bool **missing** value has no Arrow-null-free or DLPack representation, so
-`to_numpy(dtype=<int>)` and `__dlpack__` raise rather than write garbage — pass
-`na_value=`, use the Arrow path (which carries the null bitmap losslessly), or fill
-the NA first.
 
 ## Error handling
 
