@@ -21,13 +21,11 @@ pub fn column_to_arrow(col: &Column) -> ArrayRef {
         // The data buffer is still shared zero-copy; only NaN-bearing columns pay the
         // O(n) scan + the small bitmap (dense float stays null-free).
         Column::F64(v) => {
-            let nulls = (v.iter().any(|x| x.is_nan()))
-                .then(|| NullBuffer::from_iter(v.iter().map(|x| !x.is_nan())));
+            let nulls = nulls_from_validity(v.iter().map(|x| !x.is_nan()));
             Arc::new(PrimitiveArray::<Float64Type>::new(scalar(v), nulls))
         }
         Column::F32(v) => {
-            let nulls = (v.iter().any(|x| x.is_nan()))
-                .then(|| NullBuffer::from_iter(v.iter().map(|x| !x.is_nan())));
+            let nulls = nulls_from_validity(v.iter().map(|x| !x.is_nan()));
             Arc::new(PrimitiveArray::<Float32Type>::new(scalar(v), nulls))
         }
         Column::I64(v, val) => {
@@ -55,12 +53,19 @@ pub fn column_to_arrow(col: &Column) -> ArrayRef {
         }
         // `i64::MIN` is the NaT sentinel → an Arrow null; the in-band value is masked.
         Column::Datetime(v) => {
-            let nulls = v
-                .contains(&i64::MIN)
-                .then(|| NullBuffer::from_iter(v.iter().map(|&x| x != i64::MIN)));
+            let nulls = nulls_from_validity(v.iter().map(|&x| x != i64::MIN));
             Arc::new(PrimitiveArray::<TimestampNanosecondType>::new(scalar(v), nulls))
         }
     }
+}
+
+/// Build a null buffer from a per-element validity flag in a **single pass**: collect the
+/// bits while noting whether any were null, then discard the bitmap when the column is
+/// dense (no nulls → Arrow `None`). Replaces the any-then-rebuild double scan.
+fn nulls_from_validity(valid: impl Iterator<Item = bool>) -> Option<NullBuffer> {
+    let mut any_null = false;
+    let bits = BooleanBuffer::from_iter(valid.inspect(|&v| any_null |= !v));
+    any_null.then(|| NullBuffer::new(bits))
 }
 
 /// A volas numeric [`Buffer<T>`] as a zero-copy Arrow [`ScalarBuffer`].
