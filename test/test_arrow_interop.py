@@ -54,44 +54,57 @@ def test_frame_to_numpy_int_on_na_raises_but_datetime_exempt():
     assert out[1] == np.iinfo(np.int64).min
 
 
-# --- to_numpy(masked=True) -> (values, mask) ----------------------------------
+# --- to_numpy(na_value=...) : the pandas-standard NA fill ---------------------
+
+def test_na_value_with_int_dtype_keeps_dtype_and_fills():
+    out = s([1, None, 3]).to_numpy(dtype="int64", na_value=0)
+    assert out.dtype == np.int64
+    assert out.tolist() == [1, 0, 3]
+
+
+def test_na_value_default_dtype_keeps_float_like_pandas():
+    # without an explicit dtype, an int column with NA still exports float64 (the
+    # NA-model default); na_value just replaces the NaN — matching pandas.
+    out = s([1, None, 3]).to_numpy(na_value=-1)
+    assert out.dtype == np.float64
+    assert out.tolist() == [1.0, -1.0, 3.0]
+
+
+def test_na_value_preserves_large_int_exactly():
+    # the native (non-float-funnel) path keeps a value past 2**53 exact under na_value
+    out = s([2**53 + 1, None]).to_numpy(dtype="int64", na_value=0)
+    assert out[0] == 2**53 + 1
+
 
 @pytest.mark.parametrize(
-    "values,dtype,want_dtype",
+    "values,dtype,na_value,want",
     [
-        ([1, None, 3], None, np.int64),
-        ([1.5, float("nan"), 3.5], None, np.float64),
-        ([True, False, None], None, np.bool_),
+        ([1.5, float("nan")], None, 0.0, [1.5, 0.0]),         # float NaN filled
+        (["a", None, "c"], None, "X", ["a", "X", "c"]),        # str object array filled
+        ([1, None, 3], "int32", 9, [1, 9, 3]),                 # narrow int dtype
     ],
 )
-def test_masked_keeps_native_dtype(values, dtype, want_dtype):
-    vals, mask = s(values, dtype).to_numpy(masked=True)
-    assert vals.dtype == want_dtype
-    assert mask.dtype == np.bool_
-    assert mask.tolist() == [v is None or (isinstance(v, float) and np.isnan(v)) for v in values]
+def test_na_value_across_dtypes(values, dtype, na_value, want):
+    out = s(values, dtype).to_numpy(na_value=na_value)
+    assert list(out) == want
 
 
-def test_masked_str_is_object_with_none():
-    vals, mask = s(["a", None, "c"]).to_numpy(masked=True)
-    assert list(vals) == ["a", None, "c"]
-    assert mask.tolist() == [False, True, False]
+def test_na_value_no_missing_is_a_plain_export():
+    out = s([1, 2, 3]).to_numpy(dtype="int64", na_value=0)
+    assert out.dtype == np.int64 and out.tolist() == [1, 2, 3]
 
 
-def test_masked_datetime_and_narrow_dtypes():
-    vals, mask = volas.DataFrame({"t": pd.to_datetime(["2020-01-01", "NaT"])})["t"].to_numpy(masked=True)
-    assert vals.dtype == np.dtype("datetime64[ns]")
-    assert mask.tolist() == [False, True]
-    # narrow int32 / float32 storage arms, exercised through astype
-    vi, mi = s([1, None, 3]).astype("int32").to_numpy(masked=True)
-    assert vi.dtype == np.int32 and mi.tolist() == [False, True, False]
-    vf, mf = s([1.5, None]).astype("float32").to_numpy(masked=True)
-    assert vf.dtype == np.float32 and mf.tolist() == [False, True]
+def test_frame_na_value_fills_int_and_default():
+    df = volas.DataFrame({"a": [1, None, 3], "b": [4, 5, 6]})
+    assert df.to_numpy(dtype="int64", na_value=0).tolist() == [[1, 4], [0, 5], [3, 6]]
+    out = df.to_numpy(na_value=-1)
+    assert out.dtype == np.float64
+    assert out.tolist() == [[1.0, 4.0], [-1.0, 5.0], [3.0, 6.0]]
 
 
-def test_masked_with_dtype_casts_values():
-    vals, mask = s([1, None, 3]).to_numpy(dtype="float64", masked=True)
-    assert vals.dtype == np.float64
-    assert mask.tolist() == [False, True, False]
+def test_to_numpy_no_longer_accepts_masked():
+    with pytest.raises(TypeError):
+        s([1, 2, 3]).to_numpy(masked=True)
 
 
 # --- Series Arrow PyCapsule protocol ------------------------------------------

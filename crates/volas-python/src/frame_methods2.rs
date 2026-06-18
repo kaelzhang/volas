@@ -36,6 +36,36 @@ fn require_no_new_columns(target: &DataFrame, src: &DataFrame) -> PyResult<()> {
     Ok(())
 }
 
+/// The frame's 2-D NA mask (row-major `h × w`, `True` where the cell is missing) — the
+/// index for an `na_value` fill into an exported NumPy matrix.
+fn frame_na_mask<'py>(py: Python<'py>, df: &DataFrame) -> PyResult<Bound<'py, PyAny>> {
+    let (h, w) = (df.height(), df.width());
+    let cols = df.columns();
+    let mut data = Vec::with_capacity(h * w);
+    for i in 0..h {
+        for c in cols {
+            data.push(!c.is_valid(i));
+        }
+    }
+    Ok(ndarray::Array2::from_shape_vec((h, w), data)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .into_pyarray(py)
+        .into_any())
+}
+
+/// Substitute `na_value` into the missing cells (`mask`) of an exported array, in place;
+/// a no-op when either the mask or the value is absent.
+fn fill_na_2d<'py>(
+    arr: Bound<'py, PyAny>,
+    mask: Option<&Bound<'py, PyAny>>,
+    na_value: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if let (Some(m), Some(nv)) = (mask, na_value) {
+        arr.set_item(m, nv)?;
+    }
+    Ok(arr)
+}
+
 #[pymethods]
 impl PyDataFrame {
     /// `df[key] = value`. With a column name, add or replace that column —
@@ -480,17 +510,30 @@ impl PyDataFrame {
     /// `i64` channel (datetime never round-trips through `f64`), a float dtype is
     /// the caller's opt-in lossy export, and a `str` column rejects any numeric
     /// dtype (no numeric meaning) pointing at `dtype="object"`.
-    #[pyo3(signature = (dtype = None))]
-    pub(crate) fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (dtype = None, na_value = None))]
+    pub(crate) fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&str>,
+        na_value: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         ensure_fresh(&self.inner)?;
         let cols = self.inner.columns();
         let has_str = cols.iter().any(|c| matches!(c, Column::Str(..)));
+
+        // `na_value` fill plumbing: with a value AND any missing cell, build the 2-D NA
+        // mask once and substitute `na_value` into the holes of whichever array is built.
+        let nv = na_value.as_ref();
+        let mask = (nv.is_some() && cols.iter().any(|c| c.null_count() > 0))
+            .then(|| frame_na_mask(py, &self.inner))
+            .transpose()?;
+        let mask = mask.as_ref();
 
         if let Some(dt) = dtype {
             // `object`: a lossless typed-cell array (never the f64 channel) — the
             // inspection / interop export that keeps datetime, str and NA intact.
             if dt == "object" || dt == "O" {
-                return self.object_array(py);
+                return fill_na_2d(self.object_array(py)?, mask, nv);
             }
             // Any numeric / temporal target: a str column has no numeric value
             // (pandas raises here too), so reject it and point at the object route.
@@ -509,34 +552,39 @@ impl PyDataFrame {
                 || dt == "f64"
                 || dt == "double"
                 || dt == "single";
-            let (data, h, w) = if floaty {
-                let (d, h, w) = self.inner.to_row_major_f64();
-                let arr = ndarray::Array2::from_shape_vec((h, w), d)
+            // The two channels carry different Vec element types, so each builds its
+            // own (type-erased) NumPy matrix; the fill + cast is then shared.
+            let arr = if floaty {
+                let (data, h, w) = self.inner.to_row_major_f64();
+                ndarray::Array2::from_shape_vec((h, w), data)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .into_pyarray(py);
-                return Ok(arr.call_method1("astype", (dt,))?);
+                    .into_pyarray(py)
+                    .into_any()
             } else {
                 // The i64 channel serves both integer and `datetime64` targets. A
                 // datetime NaT → `i64::MIN` is its documented exact export, but a plain
                 // int/float NA has no integer representation — raise for a true integer
-                // target (pandas-aligned), exempting datetime columns' sentinel.
-                if is_integer_dtype(py, dt)?
+                // target (pandas-aligned) UNLESS `na_value` gives an explicit fill,
+                // exempting datetime columns' sentinel.
+                if nv.is_none()
+                    && is_integer_dtype(py, dt)?
                     && cols
                         .iter()
                         .any(|c| !matches!(c, Column::Datetime(..)) && c.null_count() > 0)
                 {
                     return Err(PyValueError::new_err(format!(
                         "cannot convert a frame with missing values to integer NumPy dtype \
-                         '{dt}' (an NA has no integer representation) — fill the NA or use a \
-                         float dtype"
+                         '{dt}' (an NA has no integer representation) — pass na_value=, or use \
+                         a float dtype"
                     )));
                 }
-                self.inner.to_row_major_i64()
+                let (data, h, w) = self.inner.to_row_major_i64();
+                ndarray::Array2::from_shape_vec((h, w), data)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?
+                    .into_pyarray(py)
+                    .into_any()
             };
-            let arr = ndarray::Array2::from_shape_vec((h, w), data)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .into_pyarray(py);
-            return Ok(arr.call_method1("astype", (dt,))?);
+            return fill_na_2d(arr, mask, nv)?.call_method1("astype", (dt,));
         }
 
         // Default (no dtype) — the honest representation chosen by the dtypes.
@@ -555,8 +603,10 @@ impl PyDataFrame {
         if all_numeric {
             let (data, h, w) = self.inner.to_row_major_f64();
             let arr = ndarray::Array2::from_shape_vec((h, w), data)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            return Ok(arr.into_pyarray(py).into_any());
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+                .into_pyarray(py)
+                .into_any();
+            return fill_na_2d(arr, mask, nv);
         }
         // A datetime-only frame -> a 2-D `datetime64[ns]` built DIRECTLY from the
         // raw i64 ns buffer (ns-exact, NaT = i64::MIN native). The old path boxed
@@ -566,11 +616,12 @@ impl PyDataFrame {
             let (data, h, w) = self.inner.to_row_major_i64();
             let arr = ndarray::Array2::from_shape_vec((h, w), data)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?
-                .into_pyarray(py);
-            return Ok(arr.call_method1("astype", ("datetime64[ns]",))?);
+                .into_pyarray(py)
+                .call_method1("astype", ("datetime64[ns]",))?;
+            return fill_na_2d(arr, mask, nv);
         }
         // Any other mix -> a lossless object array, each cell its own typed value.
-        self.object_array(py)
+        fill_na_2d(self.object_array(py)?, mask, nv)
     }
 
     /// Value equality (same columns + index + values, `NaN == NaN`).

@@ -145,32 +145,73 @@ pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, 
     }
 }
 
-/// A column as `(values, mask)` for `to_numpy(masked=True)`: the **native-dtype**
-/// values with no NA collapse (int stays int, datetime stays `datetime64`), paired
-/// with a boolean array that is `True` exactly at the missing cells. This is the
-/// lossless, allocation-light alternative to the float64-with-NaN export — the caller
-/// reconstructs missingness from the mask instead of from an in-band sentinel.
-pub(crate) fn column_to_masked<'py>(
+/// A column as a NumPy array, honoring an optional export `dtype` and `na_value`
+/// (pandas `Series.to_numpy` semantics):
+/// - without `na_value`, an integer `dtype` over missing values **raises** (an NA has
+///   no integer representation) — otherwise the NA-model default applies (`NaN` / `NaT`);
+/// - with `na_value`, missing cells are filled with it: for an explicit `dtype` the
+///   **native** values are kept (so a large int stays exact) and the fill happens before
+///   the cast; for the default dtype the fill lands in the NA-model array, keeping its
+///   dtype (so `na_value=-1` on an int column with NA stays `float64`, like pandas).
+pub(crate) fn column_to_numpy_with<'py>(
     py: Python<'py>,
     col: &Column,
-) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
-    let n = col.len();
-    let mask = (0..n).map(|i| !col.is_valid(i)).collect::<Vec<bool>>().into_pyarray(py).into_any();
-    let values = match col {
+    dtype: Option<&str>,
+    na_value: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let Some(nv) = na_value else {
+        let arr = column_to_numpy(py, col);
+        return match dtype {
+            Some(dt) => astype_checked(py, arr, col, dt),
+            None => Ok(arr),
+        };
+    };
+    if col.null_count() == 0 {
+        // `na_value` is irrelevant with no missing cell — a plain typed export.
+        let arr = column_to_numpy(py, col);
+        return match dtype {
+            Some(dt) => arr.call_method1("astype", (dt,)),
+            None => Ok(arr),
+        };
+    }
+    let mask = na_mask(py, col);
+    match dtype {
+        // exact native values (no float funnel) → fill the holes → cast.
+        Some(dt) => {
+            let base = column_values_native(py, col)?;
+            base.set_item(mask, nv)?;
+            base.call_method1("astype", (dt,))
+        }
+        // the NA-model array keeps its default dtype; only the holes change.
+        None => {
+            let base = column_to_numpy(py, col);
+            base.set_item(mask, nv)?;
+            Ok(base)
+        }
+    }
+}
+
+/// The boolean NA mask of a column (`True` exactly at the missing cells).
+pub(crate) fn na_mask<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
+    (0..col.len()).map(|i| !col.is_valid(i)).collect::<Vec<bool>>().into_pyarray(py).into_any()
+}
+
+/// The column values as a **native-dtype** NumPy array with no NA collapse (int stays
+/// int, datetime stays `datetime64`) — the exact base for an `na_value` fill. The value
+/// at a missing slot is unspecified (the caller overwrites it via [`na_mask`]).
+fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match col {
         Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
         Column::F32(v) => v.to_vec().into_pyarray(py).into_any(),
         Column::I64(v, _) => v.to_vec().into_pyarray(py).into_any(),
         Column::I32(v, _) => v.to_vec().into_pyarray(py).into_any(),
         Column::Bool(v, _) => v.to_vec().into_pyarray(py).into_any(),
-        // str has no fixed-width NumPy form, so its values stay an object array
-        // (the string or `None`); the mask still carries the canonical NA positions.
+        // str has no fixed-width NumPy form — an object array (string or `None`).
         Column::Str(..) => column_to_numpy(py, col),
-        Column::Datetime(v) => v
-            .to_vec()
-            .into_pyarray(py)
-            .call_method1("astype", ("datetime64[ns]",))?,
-    };
-    Ok((values, mask))
+        Column::Datetime(v) => {
+            v.to_vec().into_pyarray(py).call_method1("astype", ("datetime64[ns]",))?
+        }
+    })
 }
 
 /// Cast an exported NumPy array to `dtype`, but **raise** (pandas-aligned) when the
@@ -185,7 +226,7 @@ pub(crate) fn astype_checked<'py>(
     if col.null_count() > 0 && is_integer_dtype(py, dtype)? {
         return Err(PyValueError::new_err(format!(
             "cannot convert a column with missing values to integer NumPy dtype '{dtype}' \
-             (an NA has no integer representation) — fill the NA or use a float dtype"
+             (an NA has no integer representation) — pass na_value=, or use a float dtype"
         )));
     }
     arr.call_method1("astype", (dtype,))

@@ -132,29 +132,18 @@ impl PySeries {
         }
     }
 
-    /// The values as a typed NumPy array; `dtype` casts (e.g. `'float32'`). With
-    /// `masked=True` returns a `(values, mask)` pair instead — the native-dtype values
-    /// (no NA collapse) and a bool array that is `True` at each missing cell — a
-    /// lossless NA export that never funnels ints through float64.
-    #[pyo3(signature = (dtype = None, masked = false))]
+    /// The values as a typed NumPy array; `dtype` casts (e.g. `'float32'`). Tracks
+    /// `pandas.Series.to_numpy`: an integer `dtype` over missing values **raises** (an
+    /// NA has no integer representation) unless `na_value` is given, in which case each
+    /// missing cell is filled with it (the values stay exact for an explicit dtype).
+    #[pyo3(signature = (dtype = None, na_value = None))]
     pub(crate) fn to_numpy<'py>(
         &self,
         py: Python<'py>,
         dtype: Option<&str>,
-        masked: bool,
+        na_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if masked {
-            let (mut values, mask) = column_to_masked(py, &self.inner.data)?;
-            if let Some(dt) = dtype {
-                values = values.call_method1("astype", (dt,))?;
-            }
-            return Ok(PyTuple::new(py, [values, mask])?.into_any());
-        }
-        let arr = column_to_numpy(py, &self.inner.data);
-        match dtype {
-            Some(dt) => astype_checked(py, arr, &self.inner.data, dt),
-            None => Ok(arr),
-        }
+        column_to_numpy_with(py, &self.inner.data, dtype, na_value.as_ref())
     }
 
     /// NumPy array protocol, so `np.isnan(series)` etc. work directly. Honors a

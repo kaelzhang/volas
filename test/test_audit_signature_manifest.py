@@ -52,7 +52,6 @@ GLOBAL_OUT = {
     "method",          # corr=pearson only / interpolate=linear only / window engine knob
     "dropna",          # mode/nunique always drop NA; value_counts(dropna=False) errors loudly
     "into",            # to_dict container class — plain dict only
-    "na_value",        # to_numpy NA representation is fixed by the NA model (F17)
     "ambiguous", "nonexistent",   # DST gap/fold are REJECTED, never resolved (F33)
     # R-6 RETIRED (owner ruling 2026-06-12): ewm's full decay quartet
     # (com/span/halflife/alpha) + adjust + ignore_na + min_periods and
