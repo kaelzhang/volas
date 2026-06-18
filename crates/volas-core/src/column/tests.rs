@@ -785,3 +785,34 @@ fn take_optional_every_dtype() {
     let g = holey.take_optional(&[Some(0), Some(1)]);
     assert!(!g.is_valid(0) && g.is_valid(1));
 }
+
+/// A `Str` column must APPEND in place (amortised growth), not rebuild the whole
+/// column on every call — otherwise a live row-by-row append is O(n²). We count
+/// buffer reallocations across 100 single-row appends: a rebuild reallocates ~100
+/// times (a fresh buffer each call), amortised growth ~log n (<20).
+#[test]
+fn str_append_is_amortised_not_quadratic() {
+    fn data_ptr(c: &Column) -> *const u8 {
+        match c {
+            Column::Str(s, _) => s.buffers().1.as_ptr(),
+            _ => unreachable!(),
+        }
+    }
+    let mut a = Column::str(vec!["seed".into()]);
+    let mut last = data_ptr(&a);
+    let mut reallocs = 0;
+    for i in 0..100 {
+        a.append(&Column::str(vec![format!("row{i}")])).unwrap();
+        let p = data_ptr(&a);
+        if p != last {
+            reallocs += 1;
+            last = p;
+        }
+    }
+    assert!(
+        reallocs < 20,
+        "str append rebuilt the buffer {reallocs} times over 100 appends (expected amortised <20)"
+    );
+    assert_eq!(a.len(), 101);
+    assert_eq!(a.str_at(100).unwrap(), "row99");
+}

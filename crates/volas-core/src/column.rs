@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::buffer::Buffer;
-use crate::strbuf::{StrBuffer, StrBufferBuilder};
+use crate::strbuf::StrBuffer;
 use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};

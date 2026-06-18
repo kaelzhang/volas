@@ -104,6 +104,19 @@ impl StrBuffer {
     pub fn slice(&self, start: usize, end: usize) -> StrBuffer {
         (start..end).map(|i| self.get(i)).collect()
     }
+
+    /// Append the cells of `items` **in place** — the offset and data buffers grow via
+    /// copy-on-write rather than being rebuilt, so a live row-by-row append stays
+    /// amortised `O(1)` per cell instead of `O(n)` (which made repeated append `O(n²)`).
+    /// A borrowed (or shared) buffer materialises once on the first append.
+    pub fn extend<S: AsRef<str>>(&mut self, items: impl IntoIterator<Item = S>) {
+        let data = self.data.make_mut();
+        let offsets = self.offsets.make_mut();
+        for s in items {
+            data.extend_from_slice(s.as_ref().as_bytes());
+            offsets.push(data.len() as i64);
+        }
+    }
 }
 
 /// Incremental builder (append / scatter paths).

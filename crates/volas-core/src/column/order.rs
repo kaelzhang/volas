@@ -261,9 +261,7 @@ impl Column {
             }
             (Column::Str(a, av), Column::Str(b, bv)) => {
                 append_validity(av, a.len(), bv, b.len());
-                let mut builder = StrBufferBuilder::with_capacity(a.len() + b.len());
-                a.iter().chain(b.iter()).for_each(|s| builder.push(s));
-                *a = builder.finish();
+                a.extend(b.iter());
                 Ok(())
             }
             (Column::Datetime(a), Column::Datetime(b)) => {
@@ -335,10 +333,7 @@ impl Column {
             }
             Column::Str(v, val) => {
                 *val = na_validity(val);
-                let mut builder = StrBufferBuilder::with_capacity(v.len() + len);
-                v.iter().for_each(|s| builder.push(s));
-                (0..len).for_each(|_| builder.push(""));
-                *v = builder.finish();
+                v.extend((0..len).map(|_| ""));
             }
         }
     }
