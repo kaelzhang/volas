@@ -242,6 +242,24 @@ mod tests {
     }
 
     #[test]
+    fn c_data_capsule_pointers_roundtrip() {
+        // The raw `*mut c_void` capsule-import path the Python `__arrow_c_array__` glue
+        // uses — exercised here so coverage does not hinge on a pyarrow-backed pytest run.
+        let col = Column::i64_with(vec![10, 0, 30], na_at(3, &[1]));
+        let (mut array, schema) = column_to_c_data(&col).unwrap();
+        // SAFETY: `array`/`schema` are a fresh, valid C-Data pair; the import moves `array`
+        // out of its slot (leaving it empty/released) and borrows `schema`.
+        let back = unsafe {
+            column_from_c_capsules(
+                &mut array as *mut FFI_ArrowArray as *mut std::ffi::c_void,
+                &schema as *const FFI_ArrowSchema as *const std::ffi::c_void,
+            )
+            .unwrap()
+        };
+        assert_eq!(back, col);
+    }
+
+    #[test]
     fn reexporting_an_imported_column_borrows_through() {
         // import → a `Buffer::Borrowed` column → export again: the second export reads
         // the buffer's pointer + keep-alive through the *borrowed* arms, and the bytes
