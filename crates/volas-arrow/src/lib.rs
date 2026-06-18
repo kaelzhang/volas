@@ -22,10 +22,20 @@ use arrow_buffer::{Buffer as ArrowBuffer, NullBuffer};
 use volas_core::{Buffer, Validity};
 
 mod export;
+mod ffi;
 mod import;
+mod stream;
 
 pub use export::column_to_arrow;
+pub use ffi::{
+    column_from_c_capsules, column_from_c_data, column_to_c_data, column_to_c_schema,
+};
 pub use import::column_from_arrow;
+pub use stream::{columns_from_c_stream, columns_to_c_stream};
+// Re-exported so the Python layer wraps these in PyCapsules without depending on
+// arrow-rs directly — the bridge keeps arrow-rs entirely within this crate.
+pub use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+pub use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 
 /// Wraps a volas keep-alive (`Arc<dyn Any>`) so it satisfies Arrow's `Allocation`
 /// bound. The handle is only ever held to defer the drop of the backing
@@ -182,6 +192,53 @@ mod tests {
     fn unsupported_type_is_an_error() {
         let d: ArrayRef = Arc::new(Date32Array::from(vec![1, 2]));
         assert!(column_from_arrow(&d).is_err());
+    }
+
+    #[test]
+    fn c_data_ffi_roundtrips_every_dtype() {
+        let cols = [
+            Column::f64(vec![1.0, f64::NAN, 3.0]),
+            Column::i64_with(vec![10, 0, 30], na_at(3, &[1])),
+            Column::bool_with(vec![true, false, true], na_at(3, &[2])),
+            Column::str_with(vec!["a".into(), "".into(), "cd".into()], na_at(3, &[1])),
+            Column::datetime(vec![1_000, i64::MIN, 3_000]),
+        ];
+        for col in &cols {
+            let (array, schema) = column_to_c_data(col).unwrap();
+            // SAFETY: `array`/`schema` are a fresh, valid C-Data pair from `to_ffi`.
+            let back = unsafe { column_from_c_data(array, &schema).unwrap() };
+            // floats carry NaN, which `!=` itself — compare via dtype + null structure there
+            if matches!(col, Column::F64(_)) {
+                assert!(back.as_f64().unwrap()[1].is_nan());
+                assert_eq!(back.as_f64().unwrap()[0], 1.0);
+            } else {
+                assert_eq!(&back, col);
+            }
+        }
+    }
+
+    #[test]
+    fn c_stream_roundtrips_a_named_frame() {
+        let names = vec!["a".to_string(), "s".to_string()];
+        let cols = vec![
+            Column::i64_with(vec![1, 2, 3], na_at(3, &[1])),
+            Column::str_with(vec!["x".into(), "y".into(), "z".into()], Validity::dense()),
+        ];
+        let mut stream = columns_to_c_stream(&names, &cols).unwrap();
+        // SAFETY: `stream` is a fresh, valid C-Stream; the import moves it out.
+        let (got_names, got_cols) = unsafe {
+            columns_from_c_stream(&mut stream as *mut _ as *mut std::ffi::c_void)
+        }
+        .unwrap();
+        assert_eq!(got_names, names);
+        assert_eq!(got_cols, cols);
+    }
+
+    #[test]
+    fn c_data_schema_matches_the_column_dtype() {
+        let col = Column::i64_with(vec![1, 2], Validity::dense());
+        let schema = column_to_c_schema(&col).unwrap();
+        assert_eq!(schema.format(), "l"); // Arrow C-Data format string for int64
     }
 
     #[test]

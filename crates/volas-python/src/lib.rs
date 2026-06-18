@@ -89,6 +89,7 @@ fn directive_uses_default_series(node: &volas_directive::types::Ast) -> bool {
     }
 }
 
+mod arrow;
 mod scalar;
 mod convert;
 mod coerce;

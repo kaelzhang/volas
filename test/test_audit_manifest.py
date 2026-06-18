@@ -56,6 +56,7 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "sort_index": "T6", "rank": "T6", "drop": "T6", "reset_index": "T6", "set_index": "T6",
         "iloc": "T7", "loc": "T7", "at": "T7", "iat": "T7",
         "to_numpy": "T8", "to_pandas": "T8", "to_csv": "T8", "astype": "T8",
+        "to_arrow": "T8", "from_arrow": "T8", "__arrow_c_stream__": "T8",
         "exec": "T11",
         "cumulate": "T10", "append": "T10", "fulfill": "T10",
         "tz": "T13", "tz_localize": "T13", "tz_convert": "T13",
@@ -89,6 +90,8 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "sort_values": "T6", "rank": "T6", "unique": "T6", "head": "T6", "tail": "T6",
         "iloc": "T7", "loc": "T7",
         "to_numpy": "T8", "to_list": "T8", "astype": "T8",
+        "to_arrow": "T8", "from_arrow": "T8",
+        "__arrow_c_array__": "T8", "__arrow_c_schema__": "T8",
         "name": "T0", "dtype": "T0", "index": "T0", "shape": "T0", "equals": "T0",
         "tz": "T13", "tz_localize": "T13", "tz_convert": "T13",
         "dt": "T15",
@@ -181,6 +184,8 @@ TOPLEVEL = {
 _DUNDER_KEEP = set(_COMPARE) | set(_ARITH) | set(_LOGIC) | {
     "__getitem__", "__setitem__", "__bool__", "__len__", "__contains__", "__iter__",
     "__array__", "__hash__", "__repr__", "__str__", "__new__",
+    # Arrow PyCapsule protocol — public interop surface, audited like __array__.
+    "__arrow_c_array__", "__arrow_c_schema__", "__arrow_c_stream__",
 }
 
 

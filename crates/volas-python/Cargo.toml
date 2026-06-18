@@ -19,6 +19,7 @@ volas-compute = { workspace = true }
 volas-directive = { workspace = true }
 volas-io = { workspace = true }
 volas-time = { workspace = true }
+volas-arrow = { workspace = true }
 pyo3 = { version = "0.25", features = ["extension-module", "multiple-pymethods"] }
 numpy = "0.25"
 ndarray = "0.16"

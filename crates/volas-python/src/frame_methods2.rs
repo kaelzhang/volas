@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use numpy::{IntoPyArray, PyReadonlyArray1};
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySlice};
+use pyo3::types::{PyCapsule, PyDict, PyList, PySlice};
 use volas_core::{
     Column, DataFrame, Label,
 };
@@ -435,6 +435,34 @@ impl PyDataFrame {
         Err(PyTypeError::new_err("append expects a DataFrame or Row"))
     }
 
+    /// Arrow PyCapsule stream protocol — exposes the whole frame to Arrow consumers
+    /// (`pa.table(df)`, `pl.from_dataframe(df)`) as a single zero-copy `RecordBatch`.
+    /// `requested_schema` is accepted and ignored (the native dtypes are exported).
+    #[pyo3(signature = (requested_schema = None))]
+    pub(crate) fn __arrow_c_stream__<'py>(
+        &self,
+        py: Python<'py>,
+        requested_schema: Option<PyObject>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        let _ = requested_schema;
+        ensure_fresh(&self.inner)?;
+        crate::arrow::frame_c_stream(py, self.inner.names(), self.inner.columns())
+    }
+
+    /// Build a DataFrame from any object exposing the Arrow stream protocol
+    /// (`__arrow_c_stream__`) — a pyarrow `Table`, a polars `DataFrame`, … — zero-copy
+    /// where dtypes match. The result carries a fresh `RangeIndex`.
+    #[staticmethod]
+    pub(crate) fn from_arrow(data: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let (names, cols) = crate::arrow::frame_from_arrow_obj(data)?;
+        Ok(PyDataFrame::plain(DataFrame::new(names, cols, None).map_err(pyerr)?))
+    }
+
+    /// Export as a `pyarrow.Table` (zero-copy where dtypes match; requires pyarrow).
+    pub(crate) fn to_arrow<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("pyarrow")?.call_method1("table", (slf,))
+    }
+
     /// The frame as a 2-D NumPy array (pandas `to_numpy`). `to_numpy` is an export
     /// boundary — leaving volas — so an explicit `dtype` is honored per cell like
     /// pandas (the internal no-lossy contract governs *computation*, not what the
@@ -488,6 +516,21 @@ impl PyDataFrame {
                     .into_pyarray(py);
                 return Ok(arr.call_method1("astype", (dt,))?);
             } else {
+                // The i64 channel serves both integer and `datetime64` targets. A
+                // datetime NaT → `i64::MIN` is its documented exact export, but a plain
+                // int/float NA has no integer representation — raise for a true integer
+                // target (pandas-aligned), exempting datetime columns' sentinel.
+                if is_integer_dtype(py, dt)?
+                    && cols
+                        .iter()
+                        .any(|c| !matches!(c, Column::Datetime(..)) && c.null_count() > 0)
+                {
+                    return Err(PyValueError::new_err(format!(
+                        "cannot convert a frame with missing values to integer NumPy dtype \
+                         '{dt}' (an NA has no integer representation) — fill the NA or use a \
+                         float dtype"
+                    )));
+                }
                 self.inner.to_row_major_i64()
             };
             let arr = ndarray::Array2::from_shape_vec((h, w), data)

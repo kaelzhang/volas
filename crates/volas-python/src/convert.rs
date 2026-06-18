@@ -145,6 +145,62 @@ pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, 
     }
 }
 
+/// A column as `(values, mask)` for `to_numpy(masked=True)`: the **native-dtype**
+/// values with no NA collapse (int stays int, datetime stays `datetime64`), paired
+/// with a boolean array that is `True` exactly at the missing cells. This is the
+/// lossless, allocation-light alternative to the float64-with-NaN export — the caller
+/// reconstructs missingness from the mask instead of from an in-band sentinel.
+pub(crate) fn column_to_masked<'py>(
+    py: Python<'py>,
+    col: &Column,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+    let n = col.len();
+    let mask = (0..n).map(|i| !col.is_valid(i)).collect::<Vec<bool>>().into_pyarray(py).into_any();
+    let values = match col {
+        Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
+        Column::F32(v) => v.to_vec().into_pyarray(py).into_any(),
+        Column::I64(v, _) => v.to_vec().into_pyarray(py).into_any(),
+        Column::I32(v, _) => v.to_vec().into_pyarray(py).into_any(),
+        Column::Bool(v, _) => v.to_vec().into_pyarray(py).into_any(),
+        // str has no fixed-width NumPy form, so its values stay an object array
+        // (the string or `None`); the mask still carries the canonical NA positions.
+        Column::Str(..) => column_to_numpy(py, col),
+        Column::Datetime(v) => v
+            .to_vec()
+            .into_pyarray(py)
+            .call_method1("astype", ("datetime64[ns]",))?,
+    };
+    Ok((values, mask))
+}
+
+/// Cast an exported NumPy array to `dtype`, but **raise** (pandas-aligned) when the
+/// column holds missing values and `dtype` is an integer type — an NA has no integer
+/// representation, so NumPy would silently emit a `RuntimeWarning` and write garbage.
+pub(crate) fn astype_checked<'py>(
+    py: Python<'py>,
+    arr: Bound<'py, PyAny>,
+    col: &Column,
+    dtype: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    if col.null_count() > 0 && is_integer_dtype(py, dtype)? {
+        return Err(PyValueError::new_err(format!(
+            "cannot convert a column with missing values to integer NumPy dtype '{dtype}' \
+             (an NA has no integer representation) — fill the NA or use a float dtype"
+        )));
+    }
+    arr.call_method1("astype", (dtype,))
+}
+
+/// Whether `dtype` names a NumPy signed/unsigned integer type (`kind` `i` / `u`).
+pub(crate) fn is_integer_dtype(py: Python<'_>, dtype: &str) -> PyResult<bool> {
+    let kind = py
+        .import("numpy")?
+        .call_method1("dtype", (dtype,))?
+        .getattr("kind")?
+        .extract::<String>()?;
+    Ok(matches!(kind.as_str(), "i" | "u"))
+}
+
 /// The i-th element of a column as a Python scalar.
 pub(crate) fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> {
     match col {

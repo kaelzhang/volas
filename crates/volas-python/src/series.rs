@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySlice};
+use pyo3::types::{PyCapsule, PyDict, PyList, PySlice, PyTuple};
 use volas_core::{
     binary_supertype, stats, BinOp, BoolOp, CmpOp, Column, DType, Index, Series, Tz,
 };
@@ -132,12 +132,27 @@ impl PySeries {
         }
     }
 
-    /// The values as a typed NumPy array; `dtype` casts (e.g. `'float32'`).
-    #[pyo3(signature = (dtype = None))]
-    pub(crate) fn to_numpy<'py>(&self, py: Python<'py>, dtype: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
+    /// The values as a typed NumPy array; `dtype` casts (e.g. `'float32'`). With
+    /// `masked=True` returns a `(values, mask)` pair instead — the native-dtype values
+    /// (no NA collapse) and a bool array that is `True` at each missing cell — a
+    /// lossless NA export that never funnels ints through float64.
+    #[pyo3(signature = (dtype = None, masked = false))]
+    pub(crate) fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&str>,
+        masked: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if masked {
+            let (mut values, mask) = column_to_masked(py, &self.inner.data)?;
+            if let Some(dt) = dtype {
+                values = values.call_method1("astype", (dt,))?;
+            }
+            return Ok(PyTuple::new(py, [values, mask])?.into_any());
+        }
         let arr = column_to_numpy(py, &self.inner.data);
         match dtype {
-            Some(dt) => Ok(arr.call_method1("astype", (dt,))?),
+            Some(dt) => astype_checked(py, arr, &self.inner.data, dt),
             None => Ok(arr),
         }
     }
@@ -154,9 +169,47 @@ impl PySeries {
         let _ = copy;
         let arr = column_to_numpy(py, &self.inner.data);
         match dtype {
-            Some(dt) => Ok(arr.call_method1("astype", (dt,))?),
+            Some(dt) => {
+                let dt: String = dt.call_method0(py, "__str__")?.extract(py)?;
+                astype_checked(py, arr, &self.inner.data, &dt)
+            }
             None => Ok(arr),
         }
+    }
+
+    /// Arrow PyCapsule schema protocol: a lone `arrow_schema` capsule (the column's
+    /// dtype), so Arrow consumers can read the type without materialising the data.
+    pub(crate) fn __arrow_c_schema__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+        crate::arrow::column_c_schema(py, &self.inner.data)
+    }
+
+    /// Arrow PyCapsule array protocol — lets pyarrow / polars consume the series
+    /// zero-copy (`pa.array(s)`, `pl.Series(s)`). Returns the `(schema, array)` capsule
+    /// pair; `requested_schema` is accepted and ignored (we export the native dtype).
+    #[pyo3(signature = (requested_schema = None))]
+    pub(crate) fn __arrow_c_array__<'py>(
+        &self,
+        py: Python<'py>,
+        requested_schema: Option<PyObject>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let _ = requested_schema;
+        crate::arrow::column_c_array(py, &self.inner.data)
+    }
+
+    /// Build a Series from any object implementing the Arrow array protocol
+    /// (`__arrow_c_array__`) — a pyarrow `Array`, a polars `Series`, … — zero-copy where
+    /// the dtypes line up. The result carries a fresh `RangeIndex`; `name` labels it.
+    #[staticmethod]
+    #[pyo3(signature = (data, name = None))]
+    pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, name: Option<String>) -> PyResult<PySeries> {
+        let col = crate::arrow::column_from_arrow_obj(data)?;
+        let n = col.len();
+        Ok(PySeries { inner: Series::new(name, col, Arc::new(Index::range(n))) })
+    }
+
+    /// Export as a `pyarrow.Array` (zero-copy where dtypes match; requires pyarrow).
+    pub(crate) fn to_arrow<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("pyarrow")?.call_method1("array", (slf,))
     }
 
     // Reductions return numpy scalars (pandas' boundary representation). The

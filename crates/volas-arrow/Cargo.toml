@@ -10,7 +10,8 @@ repository.workspace = true
 
 [dependencies]
 volas-core = { workspace = true }
-arrow-array = "55"
+arrow-array = { version = "55", features = ["ffi"] }
 arrow-buffer = "55"
-arrow-schema = "55"
-arrow-data = "55"
+arrow-schema = { version = "55", features = ["ffi"] }
+arrow-data = { version = "55", features = ["ffi"] }
+arrow-select = "55"

@@ -29,6 +29,7 @@ volas-compute = { path = "crates/volas-compute", version = "1.1.0" }
 volas-directive = { path = "crates/volas-directive", version = "1.1.0" }
 volas-time = { path = "crates/volas-time", version = "1.1.0" }
 volas-io = { path = "crates/volas-io", version = "1.1.0" }
+volas-arrow = { path = "crates/volas-arrow", version = "1.1.0" }
 
 [profile.release]
 lto = true

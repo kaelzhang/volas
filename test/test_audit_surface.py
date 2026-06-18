@@ -85,5 +85,5 @@ def test_surface_drift_snapshot():
         "Series": _missing_hash(pd.Series(dtype="float64"), _S),
         "DataFrame": _missing_hash(pd.DataFrame(), _DF),
     }
-    assert snap == {"Series": "3cd8c4b87aca0eda", "DataFrame": "c4718f392b1c1266"}, \
+    assert snap == {"Series": "f483e371d48cbbac", "DataFrame": "cd6988c37f8c0494"}, \
         f"surface name-set drift (recompute differential to locate): {snap}"
