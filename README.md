@@ -384,6 +384,45 @@ df['Open']        # same data as df['open']
 df['ma:5@Open']   # the alias resolves inside directives too
 ```
 
+### df.to_numpy(dtype=None) -> np.ndarray
+
+The frame as a 2-D NumPy array (rows × columns). It tracks pandas except for one
+deliberate guard: an **integer** `dtype` over a frame that holds missing values
+**raises** instead of silently writing garbage (NumPy cannot store `NA` in an
+integer array).
+
+- **dtype** `str | None` — an optional export cast. `None` gives the honest
+  per-dtype representation; an explicit dtype converts on the way out (like pandas).
+
+```py
+df = DataFrame({'a': [1, 2, 3], 'b': [1.5, 2.5, 3.5]})
+
+df.to_numpy()                 # -> float64 2-D array
+df.to_numpy(dtype='int64')    # exact int64 cast (dense frame)
+df.to_numpy(dtype='object')   # typed cells — lossless (numbers / str / Timestamp / volas.NA)
+
+# divergence from pandas: an integer dtype over a missing value raises
+DataFrame({'a': [1, None]}).to_numpy(dtype='int64')
+# ValueError: cannot convert a frame with missing values to integer NumPy dtype 'int64' ...
+```
+
+Notes:
+- The default (no `dtype`) is the honest representation: an all-numeric/bool frame
+  is a `float64` matrix (a missing cell → `NaN`), a frame containing `str` or mixed
+  dtypes is an `object` matrix of typed cells, and a datetime frame is `datetime64[ns]`.
+- `dtype='object'` is always lossless — each cell keeps its own typed value (a
+  number, a `str`, a `Timestamp`, or `volas.NA`).
+- A `str` column has no numeric meaning, so any numeric/temporal `dtype` raises —
+  use `dtype='object'` to keep the strings.
+- A datetime column is **exempt** from the integer-NA raise: under `dtype='int64'`
+  a `NaT` exports as its exact epoch-ns sentinel (datetime never round-trips through
+  `float`).
+- `to_numpy()` is a bulk read; it does not auto-refresh stale indicator columns and
+  raises if any are stale — call [`df.fulfill()`](#dffulfill---none) first.
+
+For a zero-copy hand-off to Arrow / DLPack consumers, see
+[Arrow & DLPack interop](#arrow--dlpack-interop-zero-copy).
+
 ### Series
 
 `df[col]` and `df[directive]` return a `Series` — a named 1-D column whose API is
@@ -424,6 +463,43 @@ t.dt.hour                  # int64 Series, 0..23
 t.dt.dayofweek             # Monday=0 .. Sunday=6
 t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
 ```
+
+### s.to_numpy(dtype=None, masked=False) -> np.ndarray | tuple[np.ndarray, np.ndarray]
+
+The column values as a 1-D NumPy array. Two deliberate divergences from pandas:
+
+- **dtype** `str | None` — an optional export cast. An **integer** dtype over a
+  column that holds missing values **raises** (pandas writes garbage and only warns).
+- **masked** `bool` — when `True`, returns a `(values, mask)` pair instead of a
+  single array: the **native-dtype** values (no `NA → float` collapse) and a boolean
+  array that is `True` at each missing cell. This is the lossless way to keep exact
+  ints / datetimes alongside their missing positions, never funnelling through `float64`.
+
+```py
+s = DataFrame({'qty': [1, None, 3]})['qty']    # int64 with a missing value
+
+s.to_numpy()                  # -> array([ 1., nan,  3.])   (float64; a missing int -> NaN)
+
+# masked=True keeps the int dtype and reports NA separately (no float funnel)
+values, mask = s.to_numpy(masked=True)
+# values -> array([1, 0, 3])              (int64; the NA slot's value is unspecified)
+# mask   -> array([False, True, False])   (True where the cell is NA)
+
+# divergence from pandas: an integer dtype over a missing value raises
+s.to_numpy(dtype='int64')
+# ValueError: cannot convert a column with missing values to integer NumPy dtype 'int64' ...
+```
+
+Notes:
+- The default (no `dtype`, `masked=False`) is the dtype-specific export: a missing
+  int / bool / datetime cell collapses to `NaN` / `NaT` (NumPy has no `NA`), while a
+  dense column keeps its native dtype. A float `NaN` is in-band, so a float column
+  cast to an integer dtype likewise raises when any value is `NaN`.
+- With `masked=True`, read the values only through the mask — the value at a missing
+  slot is unspecified; for a `str` column the values are an `object` array with
+  `None` at the holes.
+- For a zero-copy NumPy / Arrow / DLPack / `torch` hand-off (no `NA` collapse), see
+  [Arrow & DLPack interop](#arrow--dlpack-interop-zero-copy).
 
 ### Row
 
@@ -608,7 +684,7 @@ df.drop([label, ...], axis=0)     # drop rows by label (axis=1 -> columns)
 df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
 df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)
 df.astype({col: 'datetime64[s]'})  # numeric epoch -> datetime (unit s|ms|us|ns; truncating)
-df.copy() / df.to_numpy(dtype=None) / df.equals(other) / df.to_csv(path=None, ...)
+df.copy() / df.equals(other) / df.to_csv(path=None, ...)   # to_numpy diverges -> its own section
 
 # --- DataFrame: writing ---------------------------------------------------
 df[col] = scalar | array | Series          # add / replace a column (positional)
@@ -616,7 +692,7 @@ df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
 
 # --- Series ---------------------------------------------------------------
 s.name / s.dtype / len(s) / s.tz / s.index
-s.to_numpy(dtype=None) / s.to_list()
+s.to_list()                       # s.to_numpy diverges (masked=, int-NA raise) -> its own section
 s.iloc[...] / s.loc[...]
 s + s, s - 1, -s, ...             # elementwise arithmetic
 s > 0, s == t, s != t, ...        # comparison -> bool Series
@@ -683,8 +759,11 @@ silent float upcast):
   a missing value compares `False` (and `!=` compares `True`), following IEEE /
   NumPy — not pandas-nullable's three-valued `NA`. This keeps masks free of `NA`
   so `df[mask]` and assignment stay total.
-- **`to_numpy()`** exports a missing cell as `NaN` (NumPy has no `NA`), so an
-  int / bool / datetime column materializes as `float64` / `NaT`. Storage and
+- **`to_numpy()`** exports a missing cell as `NaN` (NumPy has no `NA`), so by default
+  an int / bool / datetime column materializes as `float64` / `NaT`. Unlike pandas,
+  an **integer `dtype=` over missing values raises** (pandas writes garbage and only
+  warns), and `masked=True` returns a `(values, mask)` pair that keeps the native
+  dtype — see the dedicated `df.to_numpy` / `s.to_numpy` sections above. Storage and
   `to_list()` keep the dtype and `volas.NA`.
 
 For the full picture — why volas's type system is built this way, where pandas's

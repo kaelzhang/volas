@@ -366,6 +366,43 @@ df['Open']        # 与 df['open'] 同样的数据
 df['ma:5@Open']   # 别名在 directive 内部也会被解析
 ```
 
+### df.to_numpy(dtype=None) -> np.ndarray
+
+把 DataFrame 导出为二维 NumPy 数组（行 × 列）。行为与 pandas 基本一致，但有一处刻意
+的保护：对含缺失值的 frame 指定**整型** `dtype` 会**抛错**，而不是悄悄写入垃圾值
+（NumPy 无法在整型数组里存 `NA`）。
+
+- **dtype** `str | None`——可选的导出转换；`None` 给出按 dtype 的诚实表示，显式 dtype
+  则在导出时转换（与 pandas 一致）。
+
+```py
+df = DataFrame({'a': [1, 2, 3], 'b': [1.5, 2.5, 3.5]})
+
+df.to_numpy()                 # -> float64 二维数组
+df.to_numpy(dtype='int64')    # 精确 int64 转换（稠密 frame）
+df.to_numpy(dtype='object')   # 带类型的单元格——无损（数字 / str / Timestamp / volas.NA）
+
+# 与 pandas 的差异：整型 dtype 遇到缺失值会抛错
+DataFrame({'a': [1, None]}).to_numpy(dtype='int64')
+# ValueError: cannot convert a frame with missing values to integer NumPy dtype 'int64' ...
+```
+
+注意：
+
+- 默认（不传 `dtype`）是诚实表示：全数值/bool 的 frame 是 `float64` 矩阵（缺失 →
+  `NaN`），含 `str` 或混合 dtype 的 frame 是带类型单元格的 `object` 矩阵，datetime
+  frame 是 `datetime64[ns]`。
+- `dtype='object'` 始终无损——每个单元格保留各自的类型值（数字、`str`、`Timestamp`
+  或 `volas.NA`）。
+- `str` 列没有数值含义，因此任何数值/时间 dtype 都会抛错——用 `dtype='object'` 保留字符串。
+- datetime 列**豁免**整型缺失值的抛错规则：在 `dtype='int64'` 下，`NaT` 导出为其精确的
+  epoch-ns 哨兵值（datetime 永不经由 `float` 往返）。
+- `to_numpy()` 是一次批量读取；它不会自动刷新陈旧的指标列，若有陈旧列会抛错——先调用
+  [`df.fulfill()`](#dffulfill---none)。
+
+需要零拷贝交给 Arrow / DLPack 消费方时，参见
+[与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
+
 ### Series
 
 `df[col]` 和 `df[directive]` 返回一个 `Series`：一条具名的一维列，API 与
@@ -404,6 +441,41 @@ t.dt.hour                  # int64 Series，0..23
 t.dt.dayofweek             # 周一=0 .. 周日=6
 t.dt.floor('15min')        # 对齐到 15 分钟 bar
 ```
+
+### s.to_numpy(dtype=None, masked=False) -> np.ndarray | tuple[np.ndarray, np.ndarray]
+
+把列的值导出为一维 NumPy 数组。相对 pandas 有两处刻意的差异：
+
+- **dtype** `str | None`——可选的导出转换；对含缺失值的列指定**整型** dtype 会**抛错**
+  （pandas 只发警告并写入垃圾值）。
+- **masked** `bool`——为 `True` 时返回 `(values, mask)` 二元组，而非单个数组：**原生
+  dtype** 的值（不做 `NA → float` 折叠）+ 一个在每个缺失位为 `True` 的布尔数组。这是把
+  精确的 int / datetime 与其缺失位置一并、且永不经由 `float64` 漏斗导出的无损方式。
+
+```py
+s = DataFrame({'qty': [1, None, 3]})['qty']    # 带缺失值的 int64
+
+s.to_numpy()                  # -> array([ 1., nan,  3.])   （float64；缺失的 int -> NaN）
+
+# masked=True 保留 int dtype，并单独报告 NA（不走 float 漏斗）
+values, mask = s.to_numpy(masked=True)
+# values -> array([1, 0, 3])              （int64；缺失位的值未定义）
+# mask   -> array([False, True, False])   （单元格为 NA 处为 True）
+
+# 与 pandas 的差异：整型 dtype 遇到缺失值会抛错
+s.to_numpy(dtype='int64')
+# ValueError: cannot convert a column with missing values to integer NumPy dtype 'int64' ...
+```
+
+注意：
+
+- 默认（不传 `dtype`、`masked=False`）是按 dtype 的导出：缺失的 int / bool / datetime
+  单元格折叠为 `NaN` / `NaT`（NumPy 没有 `NA`），稠密列保留原生 dtype。float `NaN` 是
+  带内值，因此 float 列转整型 dtype 时只要存在 `NaN` 同样会抛错。
+- 用 `masked=True` 时，只应通过 mask 来读取值——缺失位的值是未定义的；对 `str` 列，
+  values 是一个在空洞处为 `None` 的 `object` 数组。
+- 需要零拷贝交给 NumPy / Arrow / DLPack / `torch`（不做 `NA` 折叠）时，参见
+  [与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
 
 ### Row
 
@@ -581,7 +653,7 @@ df.drop([label, ...], axis=0)     # 按标签删行（axis=1 -> 删列）
 df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
 df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)
 df.astype({col: 'datetime64[s]'})  # 数值 epoch -> datetime（单位 s|ms|us|ns；截断式）
-df.copy() / df.to_numpy(dtype=None) / df.equals(other) / df.to_csv(path=None, ...)
+df.copy() / df.equals(other) / df.to_csv(path=None, ...)   # to_numpy 已有差异 -> 见其专属小节
 
 # --- DataFrame：写入 ------------------------------------------------------
 df[col] = scalar | array | Series          # 增加 / 替换一列（按位置）
@@ -589,7 +661,7 @@ df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
 
 # --- Series ---------------------------------------------------------------
 s.name / s.dtype / len(s) / s.tz / s.index
-s.to_numpy(dtype=None) / s.to_list()
+s.to_list()                       # s.to_numpy 已有差异（masked=、整型 NA 抛错）-> 见其专属小节
 s.iloc[...] / s.loc[...]
 s + s, s - 1, -s, ...             # 逐元素算术
 s > 0, s == t, s != t, ...        # 比较 -> bool Series
@@ -647,9 +719,11 @@ s.ewm(com=|span=|halflife=|alpha=, min_periods=0, adjust=True, ignore_na=False)
 - **比较**（`==` `!=` `<` `<=` `>` `>=`）返回*非 nullable* 的 bool 掩码：缺失值
   比较为 `False`（而 `!=` 比较为 `True`），遵循 IEEE / NumPy——而非 pandas-nullable
   的三值 `NA`。这样掩码不含 `NA`，`df[mask]` 和赋值都保持全定义。
-- **`to_numpy()`** 把缺失单元格导出为 `NaN`（NumPy 没有 `NA`），所以
-  int / bool / datetime 列会物化为 `float64` / `NaT`。存储和 `to_list()` 保持
-  dtype 与 `volas.NA`。
+- **`to_numpy()`** 把缺失单元格导出为 `NaN`（NumPy 没有 `NA`），所以默认情况下
+  int / bool / datetime 列会物化为 `float64` / `NaT`。与 pandas 不同的是：**整型
+  `dtype=` 遇到缺失值会抛错**（pandas 只发警告并写入垃圾值），而 `masked=True` 返回
+  保留原生 dtype 的 `(values, mask)` 二元组——见上文 `df.to_numpy` / `s.to_numpy`
+  专属小节。存储和 `to_list()` 保持 dtype 与 `volas.NA`。
 
 完整背景——volas 的类型系统为何如此设计、pandas 的问题在哪里、迁移时有哪些坑——
 参见 [volas vs pandas —— 类型系统](PANDAS-DIFFERENCES.md)。
