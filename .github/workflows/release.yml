@@ -17,8 +17,8 @@ jobs:
     name: verify-tag-matches-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Verify the pushed tag matches the Cargo.toml version
@@ -77,10 +77,10 @@ jobs:
             target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -117,7 +117,7 @@ jobs:
           "$PY" -c "import importlib.util, pathlib; spec = importlib.util.find_spec('volas_rs'); root = pathlib.Path(spec.origin).parent; assert list(root.parent.rglob('volas_rs.pyi')), 'stub missing from the wheel'; print('stub present')"
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.platform.label }}-py${{ matrix.python-version }}
           path: dist/*.whl
@@ -129,10 +129,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -142,7 +142,7 @@ jobs:
           maturin sdist --out dist
 
       - name: Upload sdist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -160,7 +160,7 @@ jobs:
     needs: verify-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo build
@@ -184,14 +184,14 @@ jobs:
 
     steps:
       - name: Download wheel artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
 
       - name: Download sdist artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: sdist
           path: dist
