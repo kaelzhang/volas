@@ -4,8 +4,9 @@
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
-    Float32Type, Float64Type, Int32Type, Int64Type, TimestampMicrosecondType,
-    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
+    Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type,
+    Int64Type, Int8Type, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{ArrowError, DataType, TimeUnit};
@@ -18,6 +19,17 @@ use crate::{borrow_primitive, validity_of};
 /// timestamps coarser than nanoseconds.
 pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
     let len = src.len();
+    // A narrow / unsigned integer Arrow array widened to volas's i64 (a copy). The
+    // `as i64` cast wraps a `UInt64` past `i64::MAX` — the usable-not-lossless contract.
+    macro_rules! widen_int {
+        ($ty:ty) => {{
+            let a = src.as_primitive::<$ty>();
+            Column::I64(
+                Buffer::from_vec((0..len).map(|i| a.value(i) as i64).collect()),
+                validity_of(a.nulls(), len),
+            )
+        }};
+    }
     let col = match src.data_type() {
         // Floats: missing is in-band NaN. Dense → borrow; an external null bitmap
         // collapses to NaN (a copy, the only lossy-free way into volas's float model).
@@ -67,6 +79,55 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
             let data = borrow_primitive(a.value_data(), src);
             Column::Str(StrBuffer::from_buffers(offsets, data), validity_of(a.nulls(), len))
         }
+        // Narrow / unsigned integers widen to volas's i64 (a copy). A `UInt64` past
+        // `i64::MAX` wraps — acceptable for the usable-not-lossless contract.
+        DataType::Int8 => widen_int!(Int8Type),
+        DataType::Int16 => widen_int!(Int16Type),
+        DataType::UInt8 => widen_int!(UInt8Type),
+        DataType::UInt16 => widen_int!(UInt16Type),
+        DataType::UInt32 => widen_int!(UInt32Type),
+        DataType::UInt64 => widen_int!(UInt64Type),
+        // Exact decimals map to f64 — **lossy** past ~15 significant digits; for exact
+        // prices keep the column as a string upstream. `scale` divides the integer mantissa.
+        DataType::Decimal128(_, scale) => {
+            let a = src.as_primitive::<Decimal128Type>();
+            let div = 10f64.powi(*scale as i32);
+            Column::F64(Buffer::from_vec(
+                (0..len)
+                    .map(|i| if a.is_null(i) { f64::NAN } else { a.value(i) as f64 / div })
+                    .collect(),
+            ))
+        }
+        // Plain dates land on the ns datetime grid (start-of-day). Date32 = days,
+        // Date64 = milliseconds; out-of-range → NaT.
+        DataType::Date32 => {
+            let a = src.as_primitive::<Date32Type>();
+            Column::Datetime(Buffer::from_vec(
+                (0..len)
+                    .map(|i| {
+                        if a.is_null(i) {
+                            i64::MIN
+                        } else {
+                            (a.value(i) as i64).checked_mul(86_400_000_000_000).unwrap_or(i64::MIN)
+                        }
+                    })
+                    .collect(),
+            ))
+        }
+        DataType::Date64 => {
+            let a = src.as_primitive::<Date64Type>();
+            Column::Datetime(Buffer::from_vec(
+                (0..len)
+                    .map(|i| {
+                        if a.is_null(i) {
+                            i64::MIN
+                        } else {
+                            a.value(i).checked_mul(1_000_000).unwrap_or(i64::MIN)
+                        }
+                    })
+                    .collect(),
+            ))
+        }
         // Datetimes land on volas's nanosecond grid; `null` → the `i64::MIN` NaT
         // sentinel. The ns case is borrowed when dense; coarser units rescale (a copy).
         DataType::Timestamp(unit, _) => datetime_from_timestamp(src, *unit, len),
@@ -93,7 +154,16 @@ fn datetime_from_timestamp(src: &ArrayRef, unit: TimeUnit, len: usize) -> Column
             let a = src.as_primitive::<$ty>();
             Buffer::from_vec(
                 (0..len)
-                    .map(|i| if a.is_null(i) { i64::MIN } else { a.value(i) * scale })
+                    .map(|i| {
+                        // overflow (a coarse-unit instant outside the ns-representable
+                        // range) collapses to the NaT sentinel rather than panicking /
+                        // wrapping.
+                        if a.is_null(i) {
+                            i64::MIN
+                        } else {
+                            a.value(i).checked_mul(scale).unwrap_or(i64::MIN)
+                        }
+                    })
                     .collect(),
             )
         }};

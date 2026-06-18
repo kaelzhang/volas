@@ -16,9 +16,20 @@ use crate::{arrow_buffer_of, null_buffer_of};
 /// string / datetime); `bool` and any null bitmap are the only repacks.
 pub fn column_to_arrow(col: &Column) -> ArrayRef {
     match col {
-        // Floats carry missing as in-band `NaN` (no null bitmap), a lossless round-trip.
-        Column::F64(v) => Arc::new(PrimitiveArray::<Float64Type>::new(scalar(v), None)),
-        Column::F32(v) => Arc::new(PrimitiveArray::<Float32Type>::new(scalar(v), None)),
+        // A missing float is an in-band `NaN`; export it as a real Arrow null (built from
+        // the NaN positions) so int and float "missing" are consistent at the boundary.
+        // The data buffer is still shared zero-copy; only NaN-bearing columns pay the
+        // O(n) scan + the small bitmap (dense float stays null-free).
+        Column::F64(v) => {
+            let nulls = (v.iter().any(|x| x.is_nan()))
+                .then(|| NullBuffer::from_iter(v.iter().map(|x| !x.is_nan())));
+            Arc::new(PrimitiveArray::<Float64Type>::new(scalar(v), nulls))
+        }
+        Column::F32(v) => {
+            let nulls = (v.iter().any(|x| x.is_nan()))
+                .then(|| NullBuffer::from_iter(v.iter().map(|x| !x.is_nan())));
+            Arc::new(PrimitiveArray::<Float32Type>::new(scalar(v), nulls))
+        }
         Column::I64(v, val) => {
             Arc::new(PrimitiveArray::<Int64Type>::new(scalar(v), null_buffer_of(val, v.len())))
         }

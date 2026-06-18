@@ -99,19 +99,48 @@ mod tests {
     }
 
     #[test]
-    fn f64_roundtrip_is_zero_copy_both_ways() {
-        let col = Column::f64(vec![1.0, f64::NAN, 3.0]);
+    fn f64_dense_roundtrip_is_zero_copy_both_ways() {
+        // A NaN-free float column round-trips zero-copy in both directions (no null
+        // bitmap, so import borrows). A column WITH a missing value is covered by
+        // `float_missing_exports_as_arrow_null` (import materialises, by design).
+        let col = Column::f64(vec![1.0, 2.0, 3.0]);
         let src_ptr = col.as_f64().unwrap().as_ptr();
         let arr = column_to_arrow(&col);
-        // export shares the buffer (no copy)
-        assert_eq!(arr.as_primitive::<Float64Type>().values().as_ptr(), src_ptr);
+        assert_eq!(arr.null_count(), 0);
+        assert_eq!(arr.as_primitive::<Float64Type>().values().as_ptr(), src_ptr); // export shares
         let arrow_ptr = arr.as_primitive::<Float64Type>().values().as_ptr();
         let back = column_from_arrow(&arr).unwrap();
-        // import borrows the same Arrow buffer (no copy)
-        assert_eq!(back.as_f64().unwrap().as_ptr(), arrow_ptr);
-        // NaN-as-missing survives the round-trip bit-for-bit
+        assert_eq!(back.as_f64().unwrap().as_ptr(), arrow_ptr); // import borrows
+        assert_eq!(back.as_f64().unwrap(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn float_missing_exports_as_arrow_null() {
+        // A missing float (in-band NaN) must cross as a real Arrow null — visible to
+        // `is_null` / `null_count` — so int and float "missing" are consistent at the
+        // boundary (not a NaN value that looks present to a null-aware consumer).
+        let arr = column_to_arrow(&Column::f64(vec![1.0, f64::NAN, 3.0]));
+        assert_eq!(arr.null_count(), 1);
+        assert!(arr.is_null(1) && !arr.is_null(0));
+        // and it round-trips back to NaN-as-missing
+        let back = column_from_arrow(&arr).unwrap();
         assert!(back.as_f64().unwrap()[1].is_nan());
         assert_eq!(back.as_f64().unwrap()[0], 1.0);
+        // dense floats stay null-free
+        assert_eq!(column_to_arrow(&Column::f64(vec![1.0, 2.0])).null_count(), 0);
+        // same for f32 (export null + the f32-with-nulls import branch)
+        let f32 = column_to_arrow(&Column::f32(vec![1.5, f32::NAN]));
+        assert_eq!(f32.null_count(), 1);
+        match column_from_arrow(&f32).unwrap() {
+            Column::F32(b) => assert!(b[1].is_nan() && b[0] == 1.5),
+            _ => unreachable!(), // LCOV_EXCL_LINE
+        }
+        // a dense (null-free) f32 imports via the borrow branch
+        let dense_f32: ArrayRef = Arc::new(arrow_array::Float32Array::from(vec![1.0f32, 2.0]));
+        match column_from_arrow(&dense_f32).unwrap() {
+            Column::F32(b) => assert_eq!(&b[..], &[1.0, 2.0]),
+            _ => unreachable!(), // LCOV_EXCL_LINE
+        }
     }
 
     #[test]
@@ -190,8 +219,65 @@ mod tests {
 
     #[test]
     fn unsupported_type_is_an_error() {
-        let d: ArrayRef = Arc::new(Date32Array::from(vec![1, 2]));
+        // a Duration column has no volas column type (Date32 is now supported below)
+        let d: ArrayRef = Arc::new(arrow_array::DurationSecondArray::from(vec![1, 2]));
         assert!(column_from_arrow(&d).is_err());
+    }
+
+    #[test]
+    fn imports_decimal_as_f64() {
+        use arrow_array::Decimal128Array;
+        // decimal(18,2): 150 -> 1.50, NA, 250 -> 2.50 (lossy: maps to f64)
+        let arr: ArrayRef = Arc::new(
+            Decimal128Array::from(vec![Some(150), None, Some(250)])
+                .with_precision_and_scale(18, 2)
+                .unwrap(),
+        );
+        let col = column_from_arrow(&arr).unwrap();
+        let v = col.as_f64().unwrap();
+        assert_eq!(v[0], 1.5);
+        assert!(v[1].is_nan());
+        assert_eq!(v[2], 2.5);
+    }
+
+    #[test]
+    fn imports_narrow_and_unsigned_ints_as_i64() {
+        use arrow_array::{
+            Int16Array, Int8Array, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        };
+        let i16: ArrayRef = Arc::new(Int16Array::from(vec![Some(1), None, Some(-3)]));
+        assert_eq!(
+            column_from_arrow(&i16).unwrap(),
+            Column::i64_with(vec![1, 0, -3], na_at(3, &[1]))
+        );
+        // every narrow / unsigned width widens to i64
+        let i8: ArrayRef = Arc::new(Int8Array::from(vec![-5i8, 5]));
+        assert_eq!(column_from_arrow(&i8).unwrap().as_i64().unwrap(), &[-5, 5]);
+        let u8: ArrayRef = Arc::new(UInt8Array::from(vec![1u8, 255]));
+        assert_eq!(column_from_arrow(&u8).unwrap().as_i64().unwrap(), &[1, 255]);
+        let u16: ArrayRef = Arc::new(UInt16Array::from(vec![1u16, 60000]));
+        assert_eq!(column_from_arrow(&u16).unwrap().as_i64().unwrap(), &[1, 60000]);
+        let u32: ArrayRef = Arc::new(UInt32Array::from(vec![10u32, 20]));
+        assert_eq!(column_from_arrow(&u32).unwrap().as_i64().unwrap(), &[10, 20]);
+        let u64: ArrayRef = Arc::new(UInt64Array::from(vec![7u64, 8]));
+        assert_eq!(column_from_arrow(&u64).unwrap().as_i64().unwrap(), &[7, 8]);
+    }
+
+    #[test]
+    fn imports_date32_and_date64_as_ns_datetime() {
+        use arrow_array::{Date32Array, Date64Array};
+        // Date32 = days since epoch: day 1 -> 86_400 s -> 86_400_000_000_000 ns
+        let d32: ArrayRef = Arc::new(Date32Array::from(vec![Some(1), None]));
+        assert_eq!(
+            column_from_arrow(&d32).unwrap(),
+            Column::datetime(vec![86_400_000_000_000, i64::MIN])
+        );
+        // Date64 = ms since epoch: 2 ms -> 2_000_000 ns
+        let d64: ArrayRef = Arc::new(Date64Array::from(vec![Some(2), None]));
+        assert_eq!(
+            column_from_arrow(&d64).unwrap(),
+            Column::datetime(vec![2_000_000, i64::MIN])
+        );
     }
 
     #[test]
@@ -322,6 +408,18 @@ mod tests {
         assert_eq!(column_from_arrow(&ms).unwrap(), Column::datetime(vec![3_000_000, i64::MIN]));
         let s: ArrayRef = Arc::new(TimestampSecondArray::from(vec![Some(4), None]));
         assert_eq!(column_from_arrow(&s).unwrap(), Column::datetime(vec![4_000_000_000, i64::MIN]));
+    }
+
+    #[test]
+    fn coarse_timestamp_overflow_becomes_nat_not_panic() {
+        use arrow_array::TimestampSecondArray;
+        // 10^10 s · 10^9 (s→ns) overflows i64 — must land on the NaT sentinel, never
+        // panic in the overflow-checked gate build nor wrap to a wrong instant in release.
+        let arr: ArrayRef = Arc::new(TimestampSecondArray::from(vec![1_000_i64, 10_000_000_000_i64]));
+        let v = column_from_arrow(&arr).unwrap();
+        let got = v.as_datetime().unwrap();
+        assert_eq!(got[0], 1_000_000_000_000); // 1000 s -> ns, exact
+        assert_eq!(got[1], i64::MIN); // overflow -> NaT
     }
 
     #[test]
