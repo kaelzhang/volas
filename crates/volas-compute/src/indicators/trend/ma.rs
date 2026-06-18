@@ -223,6 +223,11 @@ pub fn hma(close: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period > n {
         return vec![f64::NAN; n];
     }
+    // period 1 is degenerate (half = 0 → `wma(close, 0)` is all-NaN); like the rest of
+    // the MA family at period 1, return the source unchanged.
+    if period == 1 {
+        return close.to_vec();
+    }
     let half = period / 2;
     let sq = (period as f64).sqrt().round() as usize;
     let wma_half = wma(close, half);
@@ -253,4 +258,17 @@ pub fn bbi(close: &[f64], a: usize, b: usize, c: usize, d: usize) -> Vec<f64> {
     let ma_c = kernels::sma(data, c);
     let ma_d = kernels::sma(data, d);
     ((&ma_a + &ma_b + &ma_c + &ma_d) / 4.0).to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `hma:1` is degenerate (`half = period / 2 = 0`); like every other MA at period 1
+    /// (`sma` / `ema` / `wma` / `vwma` / `alma`), it returns the source rather than the
+    /// all-NaN that `wma(close, 0)` used to produce.
+    #[test]
+    fn hma_period_one_returns_source() {
+        assert_eq!(hma(&[1.0, 2.0, 3.0], 1), vec![1.0, 2.0, 3.0]);
+    }
 }

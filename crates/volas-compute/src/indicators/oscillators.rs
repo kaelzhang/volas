@@ -640,6 +640,12 @@ pub fn rci(close: &[f64], period: usize) -> Vec<f64> {
     let mut prank = vec![0.0f64; period];
     for i in (period - 1)..n {
         let w = &close[i + 1 - period..=i];
+        // A missing value makes the rank order undefined — disqualify the window (NaN
+        // out), matching the other window indicators; never let the sort fallback turn
+        // a NaN window into a confident signal.
+        if w.iter().any(|x| x.is_nan()) {
+            continue;
+        }
         // average ranks of the window values (ascending)
         idx.clear();
         idx.extend(0..period);
@@ -705,6 +711,18 @@ mod tests {
     use super::*;
     use crate::indicators::stochrsi_fastk;
     use crate::indicators::test_support::*;
+
+    /// A window containing a missing value (`NaN`) must NOT yield a confident rank
+    /// correlation — it disqualifies the window (NaN out), like the other window
+    /// indicators (`dev` / `mode` / `pivot`). The sort fallback used to turn
+    /// `[1, NaN, 3]` into a perfect `100.0` signal.
+    #[test]
+    fn rci_nan_in_window_disqualifies() {
+        let out = rci(&[1.0, f64::NAN, 3.0, 4.0, 5.0], 3);
+        assert!(out[2].is_nan(), "window [1, NaN, 3] must be NaN, got {}", out[2]);
+        assert!(out[3].is_nan(), "window [NaN, 3, 4] must be NaN, got {}", out[3]);
+        assert!(out[4].is_finite(), "window [3, 4, 5] is clean -> finite, got {}", out[4]);
+    }
 
     /// StochRSI `.k` and `.d` resumes, fed the carried RSI Wilder pair + context tail of
     /// a full compute over the head, reproduce the tail of a full compute over the whole
