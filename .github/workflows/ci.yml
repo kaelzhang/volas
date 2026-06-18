@@ -198,3 +198,24 @@ jobs:
           mypy --strict test/typing/check_types.py test/typing/negative_types.py
           pyright test/typing/check_types.py test/typing/negative_types.py
           pyright --verifytypes volas --ignoreexternal
+
+  asm-diff:
+    # Instruction-level regression gate for the hot kernels. The baseline
+    # (scripts/asm_baseline.txt) is CPU-arch-specific, so this runs ONLY on an
+    # Apple-silicon runner (arm64, `uname -m` = `arm64`) — the script self-skips on
+    # any other arch. On a rustc/codegen bump that legitimately shifts a count,
+    # refresh the baseline with `make asm-diff-update` and commit it.
+    name: asm-diff (arm64)
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Instruction-level regression gate
+        run: make asm-diff

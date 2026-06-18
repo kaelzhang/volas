@@ -64,6 +64,10 @@ dev = [
   "pandas>=3.0,<3.1",
   "stock-pandas>=5.4,<5.5",
   "TA-Lib>=0.6,<0.7",
+  # pyarrow is a TEST-time consumer (not a runtime dependency): it exercises the
+  # Arrow / DLPack FFI glue (arrow.rs / dlpack.rs) so CI runs those unsafe paths
+  # instead of skipping them via `importorskip`.
+  "pyarrow>=15",
   # PEP 639 / Metadata 2.4 license fields require packaging >= 24.2 to publish
   "packaging>=24.2",
   "numpy>=2.0.0",

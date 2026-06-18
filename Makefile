@@ -225,7 +225,7 @@ cargo-test:
 # Run after `make bump` so the workspace + dep versions agree. DRY=1 for a dry run.
 cargo-publish:
 	@flags="--locked"; [ -n "$(DRY)" ] && flags="$$flags --dry-run"; \
-	for c in volas-core volas-compute volas-directive volas-time volas-io volas; do \
+	for c in volas-core volas-arrow volas-compute volas-directive volas-time volas-io volas; do \
 		echo "\033[1m>> cargo publish $$c $$flags <<\033[0m"; \
 		cargo publish -p $$c $$flags || exit 1; \
 	done

@@ -23,6 +23,20 @@ import pytest
 
 import volas
 
+
+def _import_pandas_ta():
+    """Import pandas-ta, skipping the test on ANY import-time failure — not just a
+    missing package. A present-but-broken install (e.g. numba's `cannot cache function`
+    RuntimeError) must skip the optional oracle, not turn the suite red on that machine.
+    """
+    try:
+        import pandas_ta  # noqa: F401
+
+        return pandas_ta
+    except Exception as exc:  # ImportError, numba RuntimeError, …
+        pytest.skip(f"pandas-ta unavailable ({type(exc).__name__}: {exc})")
+
+
 _CSV = pd.read_csv("test/data/tencent_full.csv")
 ARR = {c: _CSV[c].to_numpy(dtype=float) for c in ("open", "high", "low", "close", "volume")}
 DF = volas.DataFrame(ARR)
@@ -212,7 +226,7 @@ def test_kcw_is_volas_keltner_width(ema, atr, mult):
 
 
 def test_dev_matches_pandas_ta_mad():
-    pytest.importorskip("pandas_ta")
+    _import_pandas_ta()
     import warnings
     warnings.simplefilter("ignore")
     np.testing.assert_allclose(
@@ -307,7 +321,7 @@ def test_kcw_zero_basis_is_na():
 
 # --- cross-check the documented pandas-ta concordance (skip if not installed) -
 def test_vwma_hma_match_pandas_ta():
-    pta = pytest.importorskip("pandas_ta")  # noqa: F841
+    pta = _import_pandas_ta()  # noqa: F841
     import warnings
     warnings.simplefilter("ignore")
     np.testing.assert_allclose(
