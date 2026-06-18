@@ -547,7 +547,7 @@ t.dt.dayofweek             # Monday=0 .. Sunday=6
 t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
 ```
 
-### s.to_numpy(dtype=None, na_value=...) -> np.ndarray
+### series.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
 The column values as a 1-D NumPy array — `pandas.Series.to_numpy` semantics:
 
@@ -567,14 +567,14 @@ The column values as a 1-D NumPy array — `pandas.Series.to_numpy` semantics:
   through `float64`) and the holes become `na_value`.
 
 ```py
-s = DataFrame({'qty': [1, None, 3]})['qty']    # int64 with a missing value
+series = DataFrame({'qty': [1, None, 3]})['qty']    # int64 with a missing value
 
-s.to_numpy()                          # -> array([ 1., nan,  3.])   (float64; a missing int -> NaN)
-s.to_numpy(dtype='int64', na_value=0) # -> array([1, 0, 3])         (int64; NA filled, dtype kept)
-s.to_numpy(na_value=-1)               # -> array([ 1., -1.,  3.])   (default float export, NA -> -1)
+series.to_numpy()                          # -> array([ 1., nan,  3.])   (float64; a missing int -> NaN)
+series.to_numpy(dtype='int64', na_value=0) # -> array([1, 0, 3])         (int64; NA filled, dtype kept)
+series.to_numpy(na_value=-1)               # -> array([ 1., -1.,  3.])   (default float export, NA -> -1)
 
 # without na_value, an integer dtype over a missing value raises
-s.to_numpy(dtype='int64')
+series.to_numpy(dtype='int64')
 # ValueError: cannot convert a column with missing values to integer NumPy dtype 'int64' ...
 ```
 
@@ -587,11 +587,11 @@ Notes:
   an int column with NA still exports `float64` (the default), and `na_value` simply
   fills the `NaN` slots.
 - For a **lossless** NA round-trip that keeps the native dtype *and* the missing
-  positions (no fill, no float collapse), use the Arrow path (`s.to_arrow()` carries
-  the null bitmap) or `s.to_pandas(dtype_backend='numpy_nullable')`; the NA mask alone
-  is `s.isna().to_numpy()`.
+  positions (no fill, no float collapse), use the Arrow path (`series.to_arrow()` carries
+  the null bitmap) or `series.to_pandas(dtype_backend='numpy_nullable')`; the NA mask
+  alone is `series.isna().to_numpy()`.
 
-### s.to_arrow() -> pyarrow.Array
+### series.to_arrow() -> pyarrow.Array
 
 A **volas-specific** export of the column to a `pyarrow.Array`, **zero-copy** where
 the dtype matches (the numeric / string / datetime buffer is shared; `bool` and the
@@ -601,12 +601,12 @@ through the standard `__arrow_c_array__` PyCapsule protocol.
 
 ```py
 import pyarrow as pa
-arr = s.to_arrow()         # -> pyarrow.Array (shares the buffer)
-arr = pa.array(s)          # identical, via the __arrow_c_array__ protocol
+arr = series.to_arrow()    # -> pyarrow.Array (shares the buffer)
+arr = pa.array(series)     # identical, via the __arrow_c_array__ protocol
 ```
 
 Returns a `pyarrow.Array`. The column also exports zero-copy to NumPy / PyTorch / JAX
-via DLPack (`np.from_dlpack(s)`) — see
+via DLPack (`np.from_dlpack(series)`) — see
 [Arrow & DLPack interop](#arrow--dlpack-interop-zero-copy).
 
 ### Series.from_arrow(data, name=None) -> Series
@@ -824,7 +824,7 @@ df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
 
 # --- Series ---------------------------------------------------------------
 s.name / s.dtype / len(s) / s.tz / s.index
-s.to_list()                       # s.to_numpy has NA caveats -> see its own section (dtype, na_value)
+s.to_list()                       # to_numpy has NA caveats -> see its own section (dtype, na_value)
 s.iloc[...] / s.loc[...]
 s + s, s - 1, -s, ...             # elementwise arithmetic
 s > 0, s == t, s != t, ...        # comparison -> bool Series
@@ -896,7 +896,7 @@ silent float upcast):
   `volas.NA` — so `to_list()` returns exact ints and `volas.NA`. The numpy *export*
   (`to_numpy()`) still follows pandas 3.0 exactly: a missing cell becomes `NaN` / `NaT`
   by default, an integer `dtype=` over missing values raises, and `na_value=` fills —
-  see the dedicated `df.to_numpy` / `s.to_numpy` sections above.
+  see the dedicated `df.to_numpy` / `series.to_numpy` sections above.
 
 For the full picture — why volas's type system is built this way, where pandas's
 breaks, and the migration gotchas — see
@@ -1444,7 +1444,7 @@ np.from_dlpack(df['close'])        # zero-copy ndarray view
 
 The high-level entry points — [`df.to_arrow`](#dfto_arrow---pyarrowtable) /
 [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe),
-[`s.to_arrow`](#sto_arrow---pyarrowarray) /
+[`series.to_arrow`](#seriesto_arrow---pyarrowarray) /
 [`Series.from_arrow`](#seriesfrom_arrowdata-namenone---series) — are documented under
 Usage. They sit on these **standard protocol methods**, which Arrow / array consumers
 call automatically (so you rarely call them yourself):

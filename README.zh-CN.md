@@ -521,7 +521,7 @@ t.dt.dayofweek             # 周一=0 .. 周日=6
 t.dt.floor('15min')        # 对齐到 15 分钟 bar
 ```
 
-### s.to_numpy(dtype=None, na_value=...) -> np.ndarray
+### series.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
 把列的值导出为一维 NumPy 数组——`pandas.Series.to_numpy` 语义：
 
@@ -539,14 +539,14 @@ t.dt.floor('15min')        # 对齐到 15 分钟 bar
   漏斗），空洞变为 `na_value`。
 
 ```py
-s = DataFrame({'qty': [1, None, 3]})['qty']    # 带缺失值的 int64
+series = DataFrame({'qty': [1, None, 3]})['qty']    # 带缺失值的 int64
 
-s.to_numpy()                          # -> array([ 1., nan,  3.])   （float64；缺失的 int -> NaN）
-s.to_numpy(dtype='int64', na_value=0) # -> array([1, 0, 3])         （int64；填充 NA，保留 dtype）
-s.to_numpy(na_value=-1)               # -> array([ 1., -1.,  3.])   （默认 float 导出，NA -> -1）
+series.to_numpy()                          # -> array([ 1., nan,  3.])   （float64；缺失的 int -> NaN）
+series.to_numpy(dtype='int64', na_value=0) # -> array([1, 0, 3])         （int64；填充 NA，保留 dtype）
+series.to_numpy(na_value=-1)               # -> array([ 1., -1.,  3.])   （默认 float 导出，NA -> -1）
 
 # 不给 na_value 时，整型 dtype 遇缺失值会抛错
-s.to_numpy(dtype='int64')
+series.to_numpy(dtype='int64')
 # ValueError: cannot convert a column with missing values to integer NumPy dtype 'int64' ...
 ```
 
@@ -558,10 +558,10 @@ s.to_numpy(dtype='int64')
 - 与 pandas 一致，`na_value` 只改变缺失单元格——不给显式 `dtype` 时，带 NA 的 int 列仍
   导出为 `float64`（默认），`na_value` 只是填充那些 `NaN` 槽。
 - 若需要**无损**保留原生 dtype 与缺失位置（不填充、不折叠 float），用 Arrow 路径
-  （`s.to_arrow()` 携带空值位图）或 `s.to_pandas(dtype_backend='numpy_nullable')`；
-  单独取 NA 掩码用 `s.isna().to_numpy()`。
+  （`series.to_arrow()` 携带空值位图）或 `series.to_pandas(dtype_backend='numpy_nullable')`；
+  单独取 NA 掩码用 `series.isna().to_numpy()`。
 
-### s.to_arrow() -> pyarrow.Array
+### series.to_arrow() -> pyarrow.Array
 
 **volas 独有**——把列导出为 `pyarrow.Array`，在 dtype 匹配处**零拷贝**（数值 / 字符串
 / datetime 缓冲区与 Arrow 共享，`bool` 与空值位图按需重打包）。需要 `pyarrow`（惰性
@@ -570,12 +570,12 @@ import）。它是 volas Arrow **C-Data** 桥接的便捷写法：任何 Arrow �
 
 ```py
 import pyarrow as pa
-arr = s.to_arrow()         # -> pyarrow.Array（共享缓冲区）
-arr = pa.array(s)          # 等价，经 __arrow_c_array__ 协议
+arr = series.to_arrow()    # -> pyarrow.Array（共享缓冲区）
+arr = pa.array(series)     # 等价，经 __arrow_c_array__ 协议
 ```
 
 返回一个 `pyarrow.Array`。本列还可经 DLPack 零拷贝导出到 NumPy / PyTorch / JAX
-（`np.from_dlpack(s)`）——见 [与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
+（`np.from_dlpack(series)`）——见 [与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
 
 ### Series.from_arrow(data, name=None) -> Series
 
@@ -784,7 +784,7 @@ df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
 
 # --- Series ---------------------------------------------------------------
 s.name / s.dtype / len(s) / s.tz / s.index
-s.to_list()                       # s.to_numpy 有 NA 注意点 -> 见其专属小节（dtype、na_value）
+s.to_list()                       # to_numpy 有 NA 注意点 -> 见其专属小节（dtype、na_value）
 s.iloc[...] / s.loc[...]
 s + s, s - 1, -s, ...             # 逐元素算术
 s > 0, s == t, s != t, ...        # 比较 -> bool Series
@@ -846,7 +846,7 @@ s.ewm(com=|span=|halflife=|alpha=, min_periods=0, adjust=True, ignore_na=False)
   而 volas 把它保持为 `int64` / `boolean`、空洞为 `volas.NA`——因此 `to_list()` 返回
   精确的 int 与 `volas.NA`。numpy *导出*（`to_numpy()`）则完全遵循 pandas 3.0：缺失
   单元格默认变为 `NaN` / `NaT`，整型 `dtype=` 遇缺失值会抛错，`na_value=` 可填充——
-  见上文 `df.to_numpy` / `s.to_numpy` 专属小节。
+  见上文 `df.to_numpy` / `series.to_numpy` 专属小节。
 
 完整背景——volas 的类型系统为何如此设计、pandas 的问题在哪里、迁移时有哪些坑——
 参见 [volas vs pandas —— 类型系统](PANDAS-DIFFERENCES.md)。
@@ -1361,7 +1361,7 @@ np.from_dlpack(df['close'])        # 零拷贝 ndarray 视图
 
 高层入口——[`df.to_arrow`](#dfto_arrow---pyarrowtable) /
 [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe)、
-[`s.to_arrow`](#sto_arrow---pyarrowarray) /
+[`series.to_arrow`](#seriesto_arrow---pyarrowarray) /
 [`Series.from_arrow`](#seriesfrom_arrowdata-namenone---series)——在 Usage 下有说明。
 它们建立在以下**标准协议方法**之上，Arrow / 数组消费方会自动调用它们（所以你很少需要
 自己调用）：
