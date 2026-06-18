@@ -1,9 +1,13 @@
-"""Arrow C-Data / C-Stream interop, masked NumPy export, and the integer-NA guard.
+"""Arrow C-Data / C-Stream interop, DLPack export, NumPy export, and the NA guard.
 
 The zero-copy guarantees are proven at the Rust level (`volas-arrow`); here we check
-the Python surface: the PyCapsule protocols, `from_arrow` / `to_arrow`, the
-`to_numpy(masked=True)` pair, and the pandas-aligned raise on an integer cast of NA.
+the Python surface: the Arrow PyCapsule protocols, `from_arrow` / `to_arrow`, DLPack
+(`__dlpack__` versioned read-only / copy / device validation), `to_numpy(na_value=...)`,
+and the pandas-aligned raise on an integer cast of NA.
 """
+
+from datetime import date
+from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -211,9 +215,21 @@ def test_dlpack_rejects_unsupported(series, exc):
 # --- error paths --------------------------------------------------------------
 
 def test_from_arrow_rejects_unsupported_type():
-    # a date32 array has no volas column type
+    # a duration column has no volas column type (date32 / decimal / narrow ints ARE
+    # supported now)
     with pytest.raises(ValueError):
-        volas.Series.from_arrow(pa.array([1, 2], type=pa.date32()))
+        volas.Series.from_arrow(pa.array([1, 2], type=pa.duration("s")))
+
+
+def test_from_arrow_extended_types():
+    # decimal -> f64 (lossy), narrow/unsigned int -> int64, date32 -> ns datetime
+    assert volas.Series.from_arrow(
+        pa.array([Decimal("1.50"), None], type=pa.decimal128(18, 2))
+    ).to_list()[0] == 1.5
+    assert volas.Series.from_arrow(pa.array([1, 2], type=pa.uint32())).to_list() == [1, 2]
+    assert volas.Series.from_arrow(pa.array([1, 2], type=pa.int16())).to_list() == [1, 2]
+    d = volas.Series.from_arrow(pa.array([date(2020, 1, 2), None], type=pa.date32())).to_list()
+    assert d[1] is volas.NA
 
 
 def test_from_arrow_rejects_wrong_capsule():
@@ -225,3 +241,38 @@ def test_from_arrow_rejects_wrong_capsule():
 
     with pytest.raises((ValueError, TypeError)):
         volas.Series.from_arrow(Bogus())
+
+
+# --- __array__ copy semantics (numpy 2.0) + DLPack protocol (versioned/read-only) ---
+
+def test_array_protocol_copy_false_raises():
+    # numpy 2.0: copy=False means "must not copy"; to_numpy always copies, so raise.
+    s = volas.DataFrame({"a": [1.0, 2.0, 3.0]})["a"]
+    with pytest.raises(ValueError):
+        np.array(s, copy=False)
+    assert np.asarray(s).tolist() == [1.0, 2.0, 3.0]
+    assert np.array(s, copy=True).tolist() == [1.0, 2.0, 3.0]
+
+
+def test_dlpack_default_view_is_read_only():
+    # the borrowed view is exported read-only (versioned DLPack flag) so a consumer
+    # cannot write through it into volas's buffer and bypass copy-on-write.
+    s = volas.DataFrame({"a": [1.0, 2.0, 3.0]})["a"]
+    arr = np.from_dlpack(s)
+    assert not arr.flags.writeable
+
+
+def test_dlpack_copy_true_is_independent_and_writable():
+    s = volas.DataFrame({"a": [1.0, 2.0, 3.0]})["a"]
+    arr = np.from_dlpack(s, copy=True)
+    assert arr.flags.writeable
+    arr[0] = 999.0
+    assert s.to_list()[0] == 1.0  # the frame is untouched (copy was independent)
+
+
+def test_dlpack_rejects_non_cpu_device_and_stream():
+    s = volas.DataFrame({"a": [1.0, 2.0]})["a"]
+    with pytest.raises(BufferError):
+        s.__dlpack__(dl_device=(2, 0))  # a non-CPU device cannot be honored
+    with pytest.raises(BufferError):
+        s.__dlpack__(stream=5)  # a CPU export takes no stream

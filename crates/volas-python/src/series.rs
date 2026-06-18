@@ -153,9 +153,17 @@ impl PySeries {
         &self,
         py: Python<'py>,
         dtype: Option<PyObject>,
-        copy: Option<PyObject>,
+        copy: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let _ = copy;
+        // numpy 2.0: `copy=False` means "must not copy". `column_to_numpy` always
+        // materialises a fresh array, so an explicit `copy=False` cannot be honored —
+        // raise rather than silently return a copy (use __dlpack__ / to_arrow for a view).
+        if copy == Some(false) {
+            return Err(PyValueError::new_err(
+                "volas cannot return a zero-copy NumPy array (to_numpy copies); pass \
+                 copy=True/None, or use __dlpack__ / to_arrow for a borrowed view",
+            ));
+        }
         let arr = column_to_numpy(py, &self.inner.data);
         match dtype {
             Some(dt) => {
@@ -211,12 +219,18 @@ impl PySeries {
         &self,
         py: Python<'py>,
         stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
+        max_version: Option<(i32, i32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let _ = (stream, max_version, dl_device, copy);
-        crate::dlpack::column_to_dlpack(py, &self.inner.data)
+        crate::dlpack::column_to_dlpack(
+            py,
+            &self.inner.data,
+            max_version,
+            dl_device,
+            copy,
+            stream.is_some(),
+        )
     }
 
     /// DLPack device: always CPU (`kDLCPU`, device 0).
