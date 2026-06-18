@@ -3,6 +3,7 @@
 //! Storage primitives only (no pyo3, no numeric kernels, no directive engine) so
 //! it builds and unit-tests with plain `cargo test` and is reusable as a library.
 
+pub mod buffer;
 pub mod column;
 pub mod dataframe;
 pub mod datetime;
@@ -15,6 +16,7 @@ pub mod stats;
 pub mod tz;
 pub mod validity;
 
+pub use buffer::Buffer;
 pub use column::{BinOp, BoolOp, CmpOp, Column, Scalar};
 pub use numeric::{binary_supertype, fits, Numeric};
 pub use validity::{Bitmap, Validity};

@@ -12,6 +12,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::buffer::Buffer;
 use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};
@@ -51,24 +52,25 @@ macro_rules! numeric_dispatch {
     };
 }
 
-/// A typed, contiguous column of values. The buffer is `Arc`-shared (cheap clone)
-/// and mutated copy-on-write.
+/// A typed, contiguous column of values. The value buffer is a [`Buffer`] —
+/// owned (`Arc`-shared, cheap clone, copy-on-write mutation) or a zero-copy borrow
+/// of foreign (Arrow / NumPy) memory.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Column {
     /// 64-bit floats; `NaN` denotes missing.
-    F64(Arc<Vec<f64>>),
+    F64(Buffer<f64>),
     /// 32-bit floats (narrow storage); `NaN` denotes missing.
-    F32(Arc<Vec<f32>>),
+    F32(Buffer<f32>),
     /// Booleans (comparison / signal results); `Validity` marks missing cells.
-    Bool(Arc<Vec<bool>>, Validity),
+    Bool(Buffer<bool>, Validity),
     /// 64-bit signed integers; `Validity` marks missing cells.
-    I64(Arc<Vec<i64>>, Validity),
+    I64(Buffer<i64>, Validity),
     /// 32-bit signed integers (narrow storage); `Validity` marks missing cells.
-    I32(Arc<Vec<i32>>, Validity),
+    I32(Buffer<i32>, Validity),
     /// UTF-8 strings; `Validity` marks missing cells.
     Str(Arc<Vec<String>>, Validity),
     /// Datetimes as i64 nanoseconds since the Unix epoch (UTC-naive).
-    Datetime(Arc<Vec<i64>>),
+    Datetime(Buffer<i64>),
 }
 
 /// The result of a dtype-preserving scalar reduction ([`Column::sum`] etc.),
@@ -159,42 +161,42 @@ mod transform;
 impl Column {
     /// Build an `F64` column.
     pub fn f64(v: Vec<f64>) -> Column {
-        Column::F64(Arc::new(v))
+        Column::F64(Buffer::from_vec(v))
     }
 
     /// Build an `F32` column.
     pub fn f32(v: Vec<f32>) -> Column {
-        Column::F32(Arc::new(v))
+        Column::F32(Buffer::from_vec(v))
     }
 
     /// Build an `I32` column (all values present).
     pub fn i32(v: Vec<i32>) -> Column {
-        Column::I32(Arc::new(v), Validity::dense())
+        Column::I32(Buffer::from_vec(v), Validity::dense())
     }
 
     /// Build a `Bool` column (all values present).
     pub fn bool(v: Vec<bool>) -> Column {
-        Column::Bool(Arc::new(v), Validity::dense())
+        Column::Bool(Buffer::from_vec(v), Validity::dense())
     }
 
     /// Build an `I64` column (all values present).
     pub fn i64(v: Vec<i64>) -> Column {
-        Column::I64(Arc::new(v), Validity::dense())
+        Column::I64(Buffer::from_vec(v), Validity::dense())
     }
 
     /// Build an `I64` column with an explicit validity (missing-aware).
     pub fn i64_with(v: Vec<i64>, validity: Validity) -> Column {
-        Column::I64(Arc::new(v), validity)
+        Column::I64(Buffer::from_vec(v), validity)
     }
 
     /// Build an `I32` column with an explicit validity (missing-aware).
     pub fn i32_with(v: Vec<i32>, validity: Validity) -> Column {
-        Column::I32(Arc::new(v), validity)
+        Column::I32(Buffer::from_vec(v), validity)
     }
 
     /// Build a `Bool` column with an explicit validity (missing-aware).
     pub fn bool_with(v: Vec<bool>, validity: Validity) -> Column {
-        Column::Bool(Arc::new(v), validity)
+        Column::Bool(Buffer::from_vec(v), validity)
     }
 
     /// Build a `Str` column (all values present).
@@ -209,7 +211,7 @@ impl Column {
 
     /// Build a `Datetime` column (epoch nanoseconds).
     pub fn datetime(v: Vec<i64>) -> Column {
-        Column::Datetime(Arc::new(v))
+        Column::Datetime(Buffer::from_vec(v))
     }
 
     /// An all-missing column of `dtype` with `len` rows — the dtype-preserving
@@ -436,7 +438,7 @@ impl Column {
     /// Used by `select` so a str `where` / `mask` keeps its values dtype-preserving.
     fn as_str_vec(&self) -> Result<Vec<String>> {
         match self {
-            Column::Str(v, _) => Ok((**v).clone()),
+            Column::Str(v, _) => Ok(v.to_vec()),
             other => Err(VolasError::DType(format!(
                 "cannot select a {} column as str",
                 other.dtype()
@@ -447,7 +449,7 @@ impl Column {
     /// The column's epoch-ns values (a `Datetime` column directly); errors otherwise.
     fn as_datetime_vec(&self) -> Result<Vec<i64>> {
         match self {
-            Column::Datetime(v) => Ok((**v).clone()),
+            Column::Datetime(v) => Ok(v.to_vec()),
             other => Err(VolasError::DType(format!(
                 "cannot select a {} column as datetime",
                 other.dtype()

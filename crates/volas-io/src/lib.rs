@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn scientific_and_negative_are_f64() {
         match infer(&["-1.5", "1e3"]) {
-            Column::F64(v) => assert_eq!(**v, vec![-1.5, 1000.0]),
+            Column::F64(v) => assert_eq!(v.to_vec(), vec![-1.5, 1000.0]),
             other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
         }
     }

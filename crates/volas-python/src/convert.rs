@@ -16,21 +16,15 @@ use volas_core::{
 #[allow(unused_imports)]
 use crate::*;
 
-/// Move an `Arc<Vec<T>>` out to an owned `Vec<T>` without copying when it is
-/// uniquely owned; clone only if it is still shared.
-pub(crate) fn arc_into_vec<T: Clone>(arc: Arc<Vec<T>>) -> Vec<T> {
-    Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
-}
-
-/// Like [`column_to_numpy`] but **consumes** the column, moving its backing `Vec`
+/// Like [`column_to_numpy`] but **consumes** the column, moving its backing buffer
 /// straight into the NumPy array with no copy when the column is uniquely owned —
 /// the fresh-result path (`df.exec(directive)`). Falls back to a borrow + copy for
 /// the rarer `Str` / `Datetime` columns.
 pub(crate) fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> Bound<'py, PyAny> {
     match col {
-        Column::F64(a) => arc_into_vec(a).into_pyarray(py).into_any(),
-        Column::Bool(a, _) => arc_into_vec(a).into_pyarray(py).into_any(),
-        Column::I64(a, _) => arc_into_vec(a).into_pyarray(py).into_any(),
+        Column::F64(a) => a.into_vec().into_pyarray(py).into_any(),
+        Column::Bool(a, _) => a.into_vec().into_pyarray(py).into_any(),
+        Column::I64(a, _) => a.into_vec().into_pyarray(py).into_any(),
         other => column_to_numpy(py, &other),
     }
 }

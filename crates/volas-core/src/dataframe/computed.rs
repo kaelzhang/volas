@@ -79,7 +79,7 @@ impl DataFrame {
             .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
         match (&mut self.columns[pos], tail) {
             (Column::F64(arc), Column::F64(t)) => {
-                let buf = Arc::make_mut(arc);
+                let buf = arc.make_mut();
                 for (i, &v) in t.iter().enumerate() {
                     if from + i < buf.len() {
                         buf[from + i] = v;
@@ -87,7 +87,7 @@ impl DataFrame {
                 }
             }
             (Column::Bool(arc, _), Column::Bool(t, _)) => {
-                let buf = Arc::make_mut(arc);
+                let buf = arc.make_mut();
                 for (i, &v) in t.iter().enumerate() {
                     if from + i < buf.len() {
                         buf[from + i] = v;
@@ -118,7 +118,7 @@ impl DataFrame {
             .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
         match &mut self.columns[pos] {
             Column::F64(arc) => {
-                let buf = Arc::make_mut(arc);
+                let buf = arc.make_mut();
                 if row < buf.len() {
                     buf[row] = value;
                 }

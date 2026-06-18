@@ -233,26 +233,26 @@ impl Column {
     pub fn append(&mut self, other: &Column) -> Result<()> {
         match (self, other) {
             (Column::F64(a), Column::F64(b)) => {
-                Arc::make_mut(a).extend_from_slice(b);
+                a.make_mut().extend_from_slice(b);
                 Ok(())
             }
             (Column::F32(a), Column::F32(b)) => {
-                Arc::make_mut(a).extend_from_slice(b);
+                a.make_mut().extend_from_slice(b);
                 Ok(())
             }
             (Column::Bool(a, av), Column::Bool(b, bv)) => {
                 append_validity(av, a.len(), bv, b.len());
-                Arc::make_mut(a).extend_from_slice(b);
+                a.make_mut().extend_from_slice(b);
                 Ok(())
             }
             (Column::I64(a, av), Column::I64(b, bv)) => {
                 append_validity(av, a.len(), bv, b.len());
-                Arc::make_mut(a).extend_from_slice(b);
+                a.make_mut().extend_from_slice(b);
                 Ok(())
             }
             (Column::I32(a, av), Column::I32(b, bv)) => {
                 append_validity(av, a.len(), bv, b.len());
-                Arc::make_mut(a).extend_from_slice(b);
+                a.make_mut().extend_from_slice(b);
                 Ok(())
             }
             (Column::Str(a, av), Column::Str(b, bv)) => {
@@ -261,7 +261,7 @@ impl Column {
                 Ok(())
             }
             (Column::Datetime(a), Column::Datetime(b)) => {
-                Arc::make_mut(a).extend_from_slice(b);
+                a.make_mut().extend_from_slice(b);
                 Ok(())
             }
             (s, o) => Err(VolasError::DType(format!(
@@ -277,17 +277,17 @@ impl Column {
     pub fn append_missing(&mut self, len: usize) -> Result<()> {
         match self {
             Column::F64(v) => {
-                Arc::make_mut(v).extend(std::iter::repeat(f64::NAN).take(len));
+                v.make_mut().extend(std::iter::repeat(f64::NAN).take(len));
                 Ok(())
             }
             Column::F32(v) => {
-                Arc::make_mut(v).extend(std::iter::repeat(f32::NAN).take(len));
+                v.make_mut().extend(std::iter::repeat(f32::NAN).take(len));
                 Ok(())
             }
             // The refresh path overwrites these placeholder rows on recompute, so a
             // dense `false` keeps the validity simple (no lingering NA to clear).
             Column::Bool(v, _) => {
-                Arc::make_mut(v).extend(std::iter::repeat(false).take(len));
+                v.make_mut().extend(std::iter::repeat(false).take(len));
                 Ok(())
             }
             other => Err(VolasError::DType(format!(
@@ -312,20 +312,20 @@ impl Column {
             )
         };
         match self {
-            Column::F64(v) => Arc::make_mut(v).extend(std::iter::repeat(f64::NAN).take(len)),
-            Column::F32(v) => Arc::make_mut(v).extend(std::iter::repeat(f32::NAN).take(len)),
-            Column::Datetime(v) => Arc::make_mut(v).extend(std::iter::repeat(i64::MIN).take(len)),
+            Column::F64(v) => v.make_mut().extend(std::iter::repeat(f64::NAN).take(len)),
+            Column::F32(v) => v.make_mut().extend(std::iter::repeat(f32::NAN).take(len)),
+            Column::Datetime(v) => v.make_mut().extend(std::iter::repeat(i64::MIN).take(len)),
             Column::I64(v, val) => {
                 *val = na_validity(val);
-                Arc::make_mut(v).extend(std::iter::repeat(0).take(len));
+                v.make_mut().extend(std::iter::repeat(0).take(len));
             }
             Column::I32(v, val) => {
                 *val = na_validity(val);
-                Arc::make_mut(v).extend(std::iter::repeat(0).take(len));
+                v.make_mut().extend(std::iter::repeat(0).take(len));
             }
             Column::Bool(v, val) => {
                 *val = na_validity(val);
-                Arc::make_mut(v).extend(std::iter::repeat(false).take(len));
+                v.make_mut().extend(std::iter::repeat(false).take(len));
             }
             Column::Str(v, val) => {
                 *val = na_validity(val);
@@ -377,7 +377,7 @@ impl Column {
         match self {
             Column::F64(v) => {
                 let src = values.to_f64_vec(); // validity-aware: missing -> NaN
-                let mut nv = (**v).clone();
+                let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
@@ -385,7 +385,7 @@ impl Column {
             }
             Column::F32(v) => {
                 let src = values.to_f32_vec();
-                let mut nv = (**v).clone();
+                let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
@@ -396,7 +396,7 @@ impl Column {
             // and errors on a present non-integral value — exactly the Series rule.
             Column::I64(v, val) => {
                 let src = values.as_i64_vec()?;
-                let mut nv = (**v).clone();
+                let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
@@ -404,7 +404,7 @@ impl Column {
             }
             Column::I32(v, val) => {
                 let src = values.as_i32_vec()?;
-                let mut nv = (**v).clone();
+                let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
@@ -412,7 +412,7 @@ impl Column {
             }
             Column::Bool(v, val) => {
                 let src = values.as_bool_vec()?;
-                let mut nv = (**v).clone();
+                let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
@@ -420,7 +420,7 @@ impl Column {
             }
             Column::Str(v, val) => {
                 let src = values.as_str_vec()?;
-                let mut nv = (**v).clone();
+                let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)].clone();
                 }
@@ -428,7 +428,7 @@ impl Column {
             }
             Column::Datetime(v) => {
                 let src = values.as_datetime_vec()?; // `NaT` (i64::MIN) is in-band missing
-                let mut nv = (**v).clone();
+                let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
