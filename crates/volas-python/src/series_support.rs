@@ -39,7 +39,7 @@ pub(crate) fn series_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<C
         Ok(o.inner.data.clone())
     } else if other.is_none()
         || other.is(crate::scalar::na(other.py()).bind(other.py()))
-        || other.get_type().name().map(|n| n.to_string() == "NAType").unwrap_or(false)
+        || other.get_type().name().map(|n| n == "NAType").unwrap_or(false)
     {
         // F7: an NA scalar operand poisons the whole result (known op unknown =
         // unknown), dtype-preserved — consistent with column-NA propagation and

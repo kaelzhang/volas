@@ -108,7 +108,7 @@ impl WinSpec {
         let n = data.len();
         let fwd = self.window - self.window / 2 - 1;
         let mut padded = data.to_vec();
-        padded.extend(std::iter::repeat(f64::NAN).take(fwd));
+        padded.extend(std::iter::repeat_n(f64::NAN, fwd));
         let out = k(&padded);
         out[fwd..fwd + n].to_vec()
     }
@@ -215,7 +215,7 @@ impl WinSpec {
             // the same pad-and-relabel trick as `run` (padding is never valid,
             // so it is never selected as an edge position).
             let fwd = self.window - self.window / 2 - 1;
-            valid.extend(std::iter::repeat(false).take(fwd));
+            valid.extend(std::iter::repeat_n(false, fwd));
             w::edge_positions(&valid, self.window, self.min_periods, last)[fwd..fwd + n].to_vec()
         } else {
             w::edge_positions(&valid, self.window, self.min_periods, last)
@@ -228,7 +228,7 @@ impl WinSpec {
             ),
         }
     }
-    fn pair<'a>(&self, s: &Series, other: &'a PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    fn pair(&self, s: &Series, other: &PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
         if other.inner.len() != s.len() {
             return Err(PyValueError::new_err(format!(
                 "cannot align series of different lengths ({} vs {})",
@@ -258,8 +258,8 @@ impl WinSpec {
         let n = x.len();
         let fwd = self.window - self.window / 2 - 1;
         let (mut xp, mut yp) = (x.to_vec(), y.to_vec());
-        xp.extend(std::iter::repeat(f64::NAN).take(fwd));
-        yp.extend(std::iter::repeat(f64::NAN).take(fwd));
+        xp.extend(std::iter::repeat_n(f64::NAN, fwd));
+        yp.extend(std::iter::repeat_n(f64::NAN, fwd));
         k(&xp, &yp)[fwd..fwd + n].to_vec()
     }
 }

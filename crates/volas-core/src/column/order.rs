@@ -281,17 +281,17 @@ impl Column {
     pub fn append_missing(&mut self, len: usize) -> Result<()> {
         match self {
             Column::F64(v) => {
-                v.make_mut().extend(std::iter::repeat(f64::NAN).take(len));
+                v.make_mut().extend(std::iter::repeat_n(f64::NAN, len));
                 Ok(())
             }
             Column::F32(v) => {
-                v.make_mut().extend(std::iter::repeat(f32::NAN).take(len));
+                v.make_mut().extend(std::iter::repeat_n(f32::NAN, len));
                 Ok(())
             }
             // The refresh path overwrites these placeholder rows on recompute, so a
             // dense `false` keeps the validity simple (no lingering NA to clear).
             Column::Bool(v, _) => {
-                v.make_mut().extend(std::iter::repeat(false).take(len));
+                v.make_mut().extend(std::iter::repeat_n(false, len));
                 Ok(())
             }
             other => Err(VolasError::DType(format!(
@@ -316,20 +316,20 @@ impl Column {
             )
         };
         match self {
-            Column::F64(v) => v.make_mut().extend(std::iter::repeat(f64::NAN).take(len)),
-            Column::F32(v) => v.make_mut().extend(std::iter::repeat(f32::NAN).take(len)),
-            Column::Datetime(v) => v.make_mut().extend(std::iter::repeat(i64::MIN).take(len)),
+            Column::F64(v) => v.make_mut().extend(std::iter::repeat_n(f64::NAN, len)),
+            Column::F32(v) => v.make_mut().extend(std::iter::repeat_n(f32::NAN, len)),
+            Column::Datetime(v) => v.make_mut().extend(std::iter::repeat_n(i64::MIN, len)),
             Column::I64(v, val) => {
                 *val = na_validity(val);
-                v.make_mut().extend(std::iter::repeat(0).take(len));
+                v.make_mut().extend(std::iter::repeat_n(0, len));
             }
             Column::I32(v, val) => {
                 *val = na_validity(val);
-                v.make_mut().extend(std::iter::repeat(0).take(len));
+                v.make_mut().extend(std::iter::repeat_n(0, len));
             }
             Column::Bool(v, val) => {
                 *val = na_validity(val);
-                v.make_mut().extend(std::iter::repeat(false).take(len));
+                v.make_mut().extend(std::iter::repeat_n(false, len));
             }
             Column::Str(v, val) => {
                 *val = na_validity(val);

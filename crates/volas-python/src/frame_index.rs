@@ -14,8 +14,6 @@ use volas_core::{
 #[allow(unused_imports)]
 use crate::*;
 
-
-/// `df.iloc[...]` positional indexer.
 // --- indexer assignment helpers (PD-12) ------------------------------------
 
 /// Whether `v` is a missing-value scalar: Python `None`, a `NaN` float, or the
@@ -30,7 +28,7 @@ pub(crate) fn is_na_like_py(v: &Bound<'_, PyAny>) -> bool {
         || v.extract::<f64>().is_ok_and(|x| x.is_nan())
         // pd.NA (pandas's NAType) is a legitimate missing-value synonym at the
         // boundary (F42) — volas's own NAType is already covered by `is(na)`.
-        || v.get_type().name().map(|n| n.to_string() == "NAType").unwrap_or(false)
+        || v.get_type().name().map(|n| n == "NAType").unwrap_or(false)
 }
 
 /// Build a length-1 [`Column`] from a Python scalar, coerced toward the target

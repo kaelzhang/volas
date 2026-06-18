@@ -348,14 +348,12 @@ impl PyTimestamp {
         let unit = parse_freq_ns(freq)?;
         let f = self.wall_floor(unit);
         let rem = self.ns - f;
-        let ns = if rem * 2 > unit {
+        // round half to even: past the midpoint, or exactly on it with an odd
+        // floor multiple (so rounding up lands on the even one).
+        let ns = if rem * 2 > unit || (rem * 2 == unit && (f / unit) % 2 != 0) {
             f + unit
-        } else if rem * 2 < unit {
-            f
-        } else if (f / unit) % 2 == 0 {
-            f                                    // tie -> the even multiple
         } else {
-            f + unit
+            f
         };
         Ok(PyTimestamp { ns, tz: self.tz })
     }

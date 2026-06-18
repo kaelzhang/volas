@@ -84,6 +84,8 @@ impl PyRow {
 
     /// Render the row as text without the `Name` footer (pandas
     /// `Series.to_string`).
+    // Pandas-parity method name, exposed to Python; not a Rust `Display` impl.
+    #[allow(clippy::inherent_to_string)]
     pub(crate) fn to_string(&self) -> String {
         render_row(&self.inner, false)
     }
@@ -380,9 +382,7 @@ impl PyDataFrame {
                     let (oc, odt) = scalar_fill_col(other.unwrap(), kd, keep_col.len())?;
                     // a float column absorbs any fill; a same-dtype fill keeps that
                     // dtype; a mixed numeric fill promotes by the supertype.
-                    let target = if kd.is_float() {
-                        kd
-                    } else if kd == odt {
+                    let target = if kd.is_float() || kd == odt {
                         kd
                     } else {
                         binary_supertype(kd, odt)
@@ -479,7 +479,7 @@ impl PyDataFrame {
             .inner
             .columns()
             .iter()
-            .map(|c| Column::bool((0..c.len()).map(|i| (!c.is_valid(i)) == want_na).collect()))
+            .map(|c| Column::bool((0..c.len()).map(|i| c.is_valid(i) != want_na).collect()))
             .collect();
         self.with_columns(cols)
     }
@@ -540,8 +540,7 @@ impl PyDataFrame {
             }
             prev_ts = Some(ts);
         }
-        for i in 0..fine.height() {
-            let bar_ts = fine_ts[i];
+        for (i, &bar_ts) in fine_ts.iter().enumerate() {
             let key = frame.unify_tz(bar_ts, tz);
             let same_period = tfs
                 .open

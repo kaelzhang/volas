@@ -267,14 +267,12 @@ impl PyDt {
         Ok(self.map_ns(|t| {
             let f = t.wall_floor(unit);
             let rem = t.ns - f;
-            if rem * 2 > unit {
+            // round half to even: past the midpoint, or exactly on it with an odd
+            // floor multiple (so rounding up lands on the even one).
+            if rem * 2 > unit || (rem * 2 == unit && (f / unit) % 2 != 0) {
                 f + unit
-            } else if rem * 2 < unit {
-                f
-            } else if (f / unit) % 2 == 0 {
-                f // tie -> the even multiple
             } else {
-                f + unit
+                f
             }
         }))
     }

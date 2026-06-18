@@ -548,7 +548,8 @@ impl PySeries {
     #[pyo3(signature = (left, right, inclusive = "both"))]
     pub(crate) fn between(&self, left: f64, right: f64, inclusive: &str) -> PyResult<PySeries> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let (lo_ok, hi_ok): (fn(f64, f64) -> bool, fn(f64, f64) -> bool) = match inclusive {
+        type Cmp = fn(f64, f64) -> bool;
+        let (lo_ok, hi_ok): (Cmp, Cmp) = match inclusive {
             "both" => (|x, l| x >= l, |x, r| x <= r),
             "left" => (|x, l| x >= l, |x, r| x < r),
             "right" => (|x, l| x > l, |x, r| x <= r),
@@ -1535,9 +1536,7 @@ impl PySeries {
         // `other` (incl. the default NA, and bool/str/datetime) keeps that dtype so
         // it is not funneled to f64; a mixed int/float promotes by the supertype.
         let self_dt = self.inner.data.dtype();
-        let target = if self_dt.is_float() {
-            self_dt
-        } else if self_dt == other_dt {
+        let target = if self_dt.is_float() || self_dt == other_dt {
             self_dt
         } else {
             binary_supertype(self_dt, other_dt)

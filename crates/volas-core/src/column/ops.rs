@@ -200,7 +200,7 @@ impl Column {
                             None
                         }
                     }
-                    BoolOp::Xor => (ap && bp).then(|| a ^ b),
+                    BoolOp::Xor => (ap && bp).then_some(a ^ b),
                 }
             }),
         )
@@ -214,7 +214,7 @@ impl Column {
             n,
             (0..n).map(|i| {
                 let (a, ap) = self.bool_at(i);
-                ap.then(|| !a)
+                ap.then_some(!a)
             }),
         )
     }

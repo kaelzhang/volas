@@ -223,7 +223,7 @@ fn list_special_cases(list: &Bound<'_, PyList>) -> PyResult<Option<Column>> {
     let mut all_datetime = !list.is_empty();
     let mut any_present = false;
     for item in list.iter() {
-        if item.get_type().name()?.to_string() == "Decimal" {
+        if item.get_type().name()? == "Decimal" {
             return Err(PyTypeError::new_err(
                 "Decimal has no exact volas dtype (no object dtype); convert explicitly \
                  (e.g. float(x) for a float64 column) if lossy float is acceptable",

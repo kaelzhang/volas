@@ -89,7 +89,7 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::types::{Float64Type, Int64Type};
     use arrow_array::{
-        Array, BooleanArray, Date32Array, Float64Array, Int64Array, LargeStringArray, StringArray,
+        Array, BooleanArray, Float64Array, Int64Array, LargeStringArray, StringArray,
         TimestampNanosecondArray,
     };
     use volas_core::{Column, Validity};

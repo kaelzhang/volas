@@ -59,7 +59,7 @@ impl Cumulator {
         // it falls into its own period (silently splitting same-period bars and
         // emitting a NaT-labelled coarse row). A live ingest with a timeless bar is
         // a data-quality problem that must be handled explicitly, not aggregated.
-        if ts.iter().any(|&t| t == i64::MIN) {
+        if ts.contains(&i64::MIN) {
             return Err(VolasError::Value(
                 "cannot cumulate over a DatetimeIndex containing NaT; drop or fill \
                  the missing index timestamps first"
@@ -152,8 +152,8 @@ fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
     let mut start = 0;
     let mut key = tf.unify_tz(ts[0], tz);
-    for i in 1..ts.len() {
-        let k = tf.unify_tz(ts[i], tz);
+    for (i, &t) in ts.iter().enumerate().skip(1) {
+        let k = tf.unify_tz(t, tz);
         if k != key {
             runs.push((start, i));
             start = i;

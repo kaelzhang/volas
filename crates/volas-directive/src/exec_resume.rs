@@ -22,13 +22,16 @@ pub use resume::{execute_resume, execute_resume_default_series, execute_resume_d
 // volas auto-caches) are handled; an unusual `@`-operand override returns `None`
 // and stays on the fallback.
 
+/// The resolved parts of a command node: `(name, sub, args, series)`.
+type CommandParts<'a> = (String, Option<String>, Cow<'a, [ArgValue]>, &'a [Ast]);
+
 /// Resolve a command node to `(name, sub, args, series)` when it is a plain
 /// `Node::Command` (canonical name / sub and resolved arguments, borrowed) or a bare
 /// `Node::Name` no-argument command (e.g. `obv`/`ad`, or a default-only canonical form
 /// like `efi`). For a bare name the command is bound on the fly — the same single
 /// `bind` `exec` uses — so its defaults are resolved and the resume kernels read a
 /// complete argument list rather than an empty slice. `None` for anything else.
-fn as_command(node: &Ast) -> Option<(String, Option<String>, Cow<'_, [ArgValue]>, &[Ast])> {
+fn as_command(node: &Ast) -> Option<CommandParts<'_>> {
     match node {
         Node::Command(cmd) => Some((
             cmd.name.clone(),

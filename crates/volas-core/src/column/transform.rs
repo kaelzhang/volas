@@ -143,7 +143,7 @@ impl Column {
                 )))
             }
         }
-        let bound_fits = |b: Option<f64>| b.map_or(true, |x| fits(self.dtype(), x));
+        let bound_fits = |b: Option<f64>| b.is_none_or(|x| fits(self.dtype(), x));
         // Stay in dtype when every present bound fits it losslessly (a float dtype
         // always does); an int column with a non-integral bound promotes to float.
         let stay = self.dtype().is_float() || (bound_fits(lower) && bound_fits(upper));
@@ -318,7 +318,7 @@ impl Column {
                 validity,
             ),
             Column::Bool(v, _) => Column::bool_with(
-                src.iter().map(|s| s.map_or(false, |j| v[j])).collect(),
+                src.iter().map(|s| s.is_some_and(|j| v[j])).collect(),
                 validity,
             ),
             Column::Datetime(v) => {

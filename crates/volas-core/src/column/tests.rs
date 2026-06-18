@@ -781,7 +781,7 @@ fn take_optional_every_dtype() {
     let d = Column::datetime(vec![100, 200]).take_optional(&idx);
     assert!(d.is_valid(0) && !d.is_valid(1));
     // a Some(i) pointing at a missing source cell stays missing
-    let holey = Column::i64_with(vec![0, 7], crate::validity::Validity::from_valid_iter(2, [false, true].into_iter()));
+    let holey = Column::i64_with(vec![0, 7], crate::validity::Validity::from_valid_iter(2, [false, true]));
     let g = holey.take_optional(&[Some(0), Some(1)]);
     assert!(!g.is_valid(0) && g.is_valid(1));
 }

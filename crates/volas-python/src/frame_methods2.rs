@@ -286,6 +286,8 @@ impl PyDataFrame {
     /// Write the frame as CSV (pandas-subset). With no `path`, returns the CSV
     /// string. Datetime columns are written as formatted strings (round-trips
     /// with `read_csv`).
+    // One parameter per pandas `to_csv` keyword — a struct would break the API.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (path = None, sep = ",", index = true, header = true, na_rep = "", columns = None, float_format = None))]
     pub(crate) fn to_csv(
         &self,
@@ -909,6 +911,6 @@ impl PyDataFrame {
         kwargs.set_item("dtype", "object")?;
         let arr = py.import("numpy")?.call_method("array", (rows,), Some(&kwargs))?;
         // An empty or single-column frame can collapse to the wrong ndim; pin (h, w).
-        Ok(arr.call_method1("reshape", ((h, w),))?)
+        arr.call_method1("reshape", ((h, w),))
     }
 }

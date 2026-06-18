@@ -145,7 +145,7 @@ impl PyDataFrame {
                     // forming-period cursor, so the live-fold invariants must hold
                     // from the start: a present, non-decreasing timeline — symmetric
                     // with the append-fold and batch-cumulate guards.
-                    if v.iter().any(|&t| t == i64::MIN) {
+                    if v.contains(&i64::MIN) {
                         return Err(PyValueError::new_err(
                             "time_frame requires a DatetimeIndex without NaT; drop or \
                              fill the missing index timestamps first",
@@ -722,9 +722,9 @@ impl PyDataFrame {
                     (Column::na_of(kd, n), kd)
                 } else {
                     let (oc, odt) = scalar_fill_col(value, kd, n)?;
-                    let target = if kd.is_float() {
-                        kd
-                    } else if kd == odt {
+                    // a float column absorbs any fill; a same-dtype fill keeps that
+                    // dtype; a mixed numeric fill promotes by the supertype.
+                    let target = if kd.is_float() || kd == odt {
                         kd
                     } else {
                         binary_supertype(kd, odt)

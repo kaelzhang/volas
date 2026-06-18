@@ -221,9 +221,9 @@ pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
 fn subsec_suffix(nsub: u32) -> String {
     if nsub == 0 {
         String::new()
-    } else if nsub % 1_000_000 == 0 {
+    } else if nsub.is_multiple_of(1_000_000) {
         format!(".{:03}", nsub / 1_000_000)
-    } else if nsub % 1_000 == 0 {
+    } else if nsub.is_multiple_of(1_000) {
         format!(".{:06}", nsub / 1_000)
     } else {
         format!(".{nsub:09}")

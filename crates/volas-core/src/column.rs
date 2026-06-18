@@ -218,7 +218,7 @@ impl Column {
     /// default `other` for `where` / `mask` (so a kept value stays in its dtype
     /// and a replaced one becomes NA, never an f64-funnel NaN).
     pub fn na_of(dtype: DType, len: usize) -> Column {
-        let all_na = || Validity::from_valid_iter(len, std::iter::repeat(false).take(len));
+        let all_na = || Validity::from_valid_iter(len, std::iter::repeat_n(false, len));
         match dtype {
             DType::F64 => Column::f64(vec![f64::NAN; len]),
             DType::F32 => Column::f32(vec![f32::NAN; len]),
@@ -793,8 +793,8 @@ fn bool_running(v: &[bool], or: bool) -> Vec<bool> {
 /// `False` upper bound forces all false, otherwise unchanged (bool has only the
 /// two values, so the bounds decide the whole column).
 fn clip_bool(v: &[bool], lo: Option<f64>, hi: Option<f64>) -> Vec<bool> {
-    let force_true = lo.map_or(false, |x| x != 0.0);
-    let force_false = hi.map_or(false, |x| x == 0.0);
+    let force_true = lo.is_some_and(|x| x != 0.0);
+    let force_false = hi == Some(0.0);
     v.iter()
         .map(|&b| {
             if force_false {
