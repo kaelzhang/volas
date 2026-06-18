@@ -264,6 +264,51 @@ mod tests {
     }
 
     #[test]
+    fn uint64_overflow_is_an_error_not_a_silent_wrap() {
+        use arrow_array::UInt64Array;
+        // within i64 range → lossless import
+        let ok: ArrayRef = Arc::new(UInt64Array::from(vec![0u64, i64::MAX as u64]));
+        assert_eq!(column_from_arrow(&ok).unwrap().as_i64().unwrap(), &[0, i64::MAX]);
+        // past i64::MAX volas has no unsigned-64 dtype → fail loud, never wrap to negative
+        let over: ArrayRef = Arc::new(UInt64Array::from(vec![1u64, i64::MAX as u64 + 1]));
+        assert!(column_from_arrow(&over).is_err());
+        let umax: ArrayRef = Arc::new(UInt64Array::from(vec![u64::MAX]));
+        assert!(column_from_arrow(&umax).is_err());
+        // a null slot carries no value, so its physical bits are never range-checked
+        let with_null: ArrayRef = Arc::new(UInt64Array::from(vec![None, Some(9u64)]));
+        assert_eq!(
+            column_from_arrow(&with_null).unwrap(),
+            Column::i64_with(vec![0, 9], na_at(2, &[0]))
+        );
+    }
+
+    #[test]
+    fn imports_dictionary_and_decimal256() {
+        use arrow_array::types::Int32Type;
+        use arrow_array::{Decimal256Array, DictionaryArray};
+        use arrow_buffer::i256;
+        // dictionary<int32, utf8> (categorical) decodes to a dense Str column; a null key
+        // stays NA. This is how parquet / pandas `category` string columns arrive.
+        let dict: DictionaryArray<Int32Type> =
+            vec![Some("AAPL"), Some("MSFT"), Some("AAPL"), None].into_iter().collect();
+        assert_eq!(
+            column_from_arrow(&(Arc::new(dict) as ArrayRef)).unwrap(),
+            Column::str_with(
+                vec!["AAPL".into(), "MSFT".into(), "AAPL".into(), "".into()],
+                na_at(4, &[3]),
+            )
+        );
+        // decimal256(_, 2): 150 -> 1.50 (lossy → f64), NA stays NaN
+        let dec = Decimal256Array::from(vec![Some(i256::from_i128(150)), None])
+            .with_precision_and_scale(20, 2)
+            .unwrap();
+        let v = column_from_arrow(&(Arc::new(dec) as ArrayRef)).unwrap();
+        let f = v.as_f64().unwrap();
+        assert_eq!(f[0], 1.5);
+        assert!(f[1].is_nan());
+    }
+
+    #[test]
     fn imports_date32_and_date64_as_ns_datetime() {
         use arrow_array::{Date32Array, Date64Array};
         // Date32 = days since epoch: day 1 -> 86_400 s -> 86_400_000_000_000 ns
@@ -278,6 +323,27 @@ mod tests {
             column_from_arrow(&d64).unwrap(),
             Column::datetime(vec![2_000_000, i64::MIN])
         );
+    }
+
+    #[test]
+    fn sliced_utf8_import_rebases_offsets_and_appends_cleanly() {
+        use volas_core::StrBuffer;
+        // A sliced Arrow string array's offsets no longer start at 0 (and its data buffer
+        // keeps the sliced-away cells' bytes) — importing it verbatim breaks StrBuffer's
+        // `offsets[0]==0 && offsets[len]==data.len()` invariant, corrupting a later append.
+        let full = LargeStringArray::from(vec!["aa", "bbb", "cccc", "d"]);
+        let sliced: ArrayRef = Arc::new(full.slice(1, 2)); // ["bbb", "cccc"] — a middle slice
+        let col = column_from_arrow(&sliced).unwrap();
+        let mut sb: StrBuffer = match col {
+            Column::Str(sb, _) => sb,
+            _ => unreachable!(), // LCOV_EXCL_LINE
+        };
+        assert_eq!(sb.iter().collect::<Vec<_>>(), ["bbb", "cccc"]); // reads correct
+        let (offs, data) = sb.buffers();
+        assert_eq!(offs.as_slice()[0], 0); // invariant: offsets re-based to 0
+        assert_eq!(*offs.as_slice().last().unwrap() as usize, data.len()); // last == data.len()
+        sb.extend(["X"]); // an append must not absorb the sliced-away cells' dead bytes
+        assert_eq!(sb.iter().collect::<Vec<_>>(), ["bbb", "cccc", "X"]);
     }
 
     #[test]

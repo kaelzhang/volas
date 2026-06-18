@@ -67,26 +67,59 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
         }
         DataType::LargeUtf8 => {
             let a = src.as_string::<i64>();
-            let offsets = borrow_primitive(a.value_offsets(), src);
-            let data = borrow_primitive(a.value_data(), src);
+            let raw = a.value_offsets();
+            let (first, last) = (raw[0], raw[raw.len() - 1]);
+            // A canonical (un-sliced) array already satisfies StrBuffer's invariant, so its
+            // offsets borrow zero-copy. A sliced array's offsets start at `first != 0` (and
+            // its data keeps the sliced-away cells) — re-base the small offset array to 0 and
+            // borrow only the live `[first, last)` byte span, restoring the invariant.
+            let (offsets, data) = if first == 0 && last as usize == a.value_data().len() {
+                (borrow_primitive(raw, src), borrow_primitive(a.value_data(), src))
+            } else {
+                let offsets = Buffer::from_vec(raw.iter().map(|&o| o - first).collect());
+                let data = borrow_primitive(&a.value_data()[first as usize..last as usize], src);
+                (offsets, data)
+            };
             Column::Str(StrBuffer::from_buffers(offsets, data), validity_of(a.nulls(), len))
         }
         DataType::Utf8 => {
-            // 32-bit offsets must widen to volas's i64 (a copy of the small offset
-            // array); the UTF-8 bytes are still borrowed zero-copy.
+            // 32-bit offsets must widen to volas's i64 (a copy of the small offset array);
+            // re-base to 0 in the same pass (a no-op for an un-sliced array). The UTF-8 bytes
+            // stay borrowed zero-copy over the live `[first, last)` span.
             let a = src.as_string::<i32>();
-            let offsets = Buffer::from_vec(a.value_offsets().iter().map(|&o| o as i64).collect());
-            let data = borrow_primitive(a.value_data(), src);
+            let raw = a.value_offsets();
+            let (first, last) = (raw[0], raw[raw.len() - 1]);
+            let offsets = Buffer::from_vec(raw.iter().map(|&o| (o - first) as i64).collect());
+            let data = borrow_primitive(&a.value_data()[first as usize..last as usize], src);
             Column::Str(StrBuffer::from_buffers(offsets, data), validity_of(a.nulls(), len))
         }
-        // Narrow / unsigned integers widen to volas's i64 (a copy). A `UInt64` past
-        // `i64::MAX` wraps — acceptable for the usable-not-lossless contract.
+        // Narrow / unsigned integers widen to volas's i64 (a copy). `u8`/`u16`/`u32` and
+        // the signed widths always fit; only `UInt64` can exceed `i64::MAX` (handled below).
         DataType::Int8 => widen_int!(Int8Type),
         DataType::Int16 => widen_int!(Int16Type),
         DataType::UInt8 => widen_int!(UInt8Type),
         DataType::UInt16 => widen_int!(UInt16Type),
         DataType::UInt32 => widen_int!(UInt32Type),
-        DataType::UInt64 => widen_int!(UInt64Type),
+        // A `UInt64` past `i64::MAX` has no lossless i64 image — fail loud rather than
+        // wrap to a negative (a value-range corruption that still looks like a valid int).
+        // A null slot carries no value, so its physical bits are never range-checked.
+        DataType::UInt64 => {
+            let a = src.as_primitive::<UInt64Type>();
+            let widened: Result<Vec<i64>, ArrowError> = (0..len)
+                .map(|i| {
+                    let v = a.value(i);
+                    if a.is_valid(i) && v > i64::MAX as u64 {
+                        Err(ArrowError::InvalidArgumentError(format!(
+                            "Arrow UInt64 value {v} exceeds i64::MAX; volas has no unsigned \
+                             64-bit column dtype — narrow it upstream first"
+                        )))
+                    } else {
+                        Ok(v as i64)
+                    }
+                })
+                .collect();
+            Column::I64(Buffer::from_vec(widened?), validity_of(a.nulls(), len))
+        }
         // Exact decimals map to f64 — **lossy** past ~15 significant digits; for exact
         // prices keep the column as a string upstream. `scale` divides the integer mantissa.
         DataType::Decimal128(_, scale) => {
@@ -131,6 +164,18 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
         // Datetimes land on volas's nanosecond grid; `null` → the `i64::MIN` NaT
         // sentinel. The ns case is borrowed when dense; coarser units rescale (a copy).
         DataType::Timestamp(unit, _) => datetime_from_timestamp(src, *unit, len),
+        // Categorical (dictionary-encoded) data — common for parquet string columns
+        // (symbols, venues, sides). Decode to its dense value type and re-import (→ Str /
+        // I64 / …); a null key stays NA.
+        DataType::Dictionary(_, value_type) => {
+            let dense = arrow_cast::cast(src, value_type)?;
+            column_from_arrow(&dense)?
+        }
+        // 256-bit exact decimal → f64 (lossy past ~15 digits), like `Decimal128` above.
+        DataType::Decimal256(_, _) => {
+            let dense = arrow_cast::cast(src, &DataType::Float64)?;
+            column_from_arrow(&dense)?
+        }
         other => {
             return Err(ArrowError::NotYetImplemented(format!(
                 "volas cannot import an Arrow {other:?} column"
