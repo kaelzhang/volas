@@ -145,6 +145,56 @@ def test_frame_arrow_nullable_roundtrip():
     assert back["b"].to_list() == ["x", volas.NA, "z"]
 
 
+# --- DLPack zero-copy export --------------------------------------------------
+
+@pytest.mark.parametrize(
+    "values,dtype,want",
+    [
+        ([1.0, 2.0, 3.0], None, np.float64),
+        ([1, 2, 3], None, np.int64),
+        ([1, 2, 3], "float32", np.float32),
+        ([1, 2, 3], "int32", np.int32),
+        ([True, False, True], None, np.bool_),
+    ],
+)
+def test_dlpack_dense_numeric_roundtrips(values, dtype, want):
+    out = np.from_dlpack(s(values, dtype))
+    assert out.dtype == want
+    assert out.tolist() == values
+
+
+def test_dlpack_device_is_cpu():
+    assert s([1.0, 2.0]).__dlpack_device__() == (1, 0)
+
+
+def test_dlpack_is_zero_copy():
+    src = pa.array([5, 6, 7, 8], type=pa.int64())
+    arr = np.from_dlpack(volas.Series.from_arrow(src))
+    assert arr.ctypes.data == src.buffers()[1].address
+
+
+def test_dlpack_unconsumed_capsule_frees_cleanly():
+    # creating and dropping the capsule without a consumer must run the deleter
+    for _ in range(200):
+        cap = s([1.0, 2.0, 3.0]).__dlpack__()
+        del cap
+
+
+@pytest.mark.parametrize(
+    "series,exc",
+    [
+        (s([1, None, 3]), ValueError),                       # int + NA: no DLPack null mask
+        (s(["a", "b"]), ValueError),                         # str: no DLPack dtype
+        (volas.DataFrame({"t": pd.to_datetime(["2020-01-01", "NaT"])})["t"], ValueError),  # datetime
+    ],
+)
+def test_dlpack_rejects_unsupported(series, exc):
+    with pytest.raises(exc):
+        series.__dlpack__()
+    # float NaN, by contrast, is an in-band value and exports fine
+    np.from_dlpack(s([1.5, float("nan"), 2.5]))
+
+
 # --- error paths --------------------------------------------------------------
 
 def test_from_arrow_rejects_unsupported_type():

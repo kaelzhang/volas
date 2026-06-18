@@ -212,6 +212,29 @@ impl PySeries {
         py.import("pyarrow")?.call_method1("array", (slf,))
     }
 
+    /// DLPack export (`np.from_dlpack(s)`, `torch.from_dlpack(s)`): a zero-copy
+    /// `"dltensor"` capsule over the column's buffer. Dense numeric / bool only — a
+    /// missing value in an int/bool column (DLPack has no null mask), or a str /
+    /// datetime column, raises. The protocol kwargs are accepted and ignored (CPU,
+    /// native dtype, no copy).
+    #[pyo3(signature = (stream = None, max_version = None, dl_device = None, copy = None))]
+    pub(crate) fn __dlpack__<'py>(
+        &self,
+        py: Python<'py>,
+        stream: Option<PyObject>,
+        max_version: Option<PyObject>,
+        dl_device: Option<PyObject>,
+        copy: Option<PyObject>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = (stream, max_version, dl_device, copy);
+        crate::dlpack::column_to_dlpack(py, &self.inner.data)
+    }
+
+    /// DLPack device: always CPU (`kDLCPU`, device 0).
+    pub(crate) fn __dlpack_device__(&self) -> (i32, i32) {
+        crate::dlpack::DEVICE_CPU
+    }
+
     // Reductions return numpy scalars (pandas' boundary representation). The
     // dtype-preserving ones (sum/prod/min/max) carry the column's result dtype
     // (np.int64 for an int column, etc.); the always-float statistics box np.float64.

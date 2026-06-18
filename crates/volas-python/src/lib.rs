@@ -90,6 +90,7 @@ fn directive_uses_default_series(node: &volas_directive::types::Ast) -> bool {
 }
 
 mod arrow;
+mod dlpack;
 mod scalar;
 mod convert;
 mod coerce;

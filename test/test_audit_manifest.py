@@ -92,6 +92,7 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "to_numpy": "T8", "to_list": "T8", "astype": "T8",
         "to_arrow": "T8", "from_arrow": "T8",
         "__arrow_c_array__": "T8", "__arrow_c_schema__": "T8",
+        "__dlpack__": "T8", "__dlpack_device__": "T8",
         "name": "T0", "dtype": "T0", "index": "T0", "shape": "T0", "equals": "T0",
         "tz": "T13", "tz_localize": "T13", "tz_convert": "T13",
         "dt": "T15",
@@ -186,6 +187,8 @@ _DUNDER_KEEP = set(_COMPARE) | set(_ARITH) | set(_LOGIC) | {
     "__array__", "__hash__", "__repr__", "__str__", "__new__",
     # Arrow PyCapsule protocol — public interop surface, audited like __array__.
     "__arrow_c_array__", "__arrow_c_schema__", "__arrow_c_stream__",
+    # DLPack protocol — zero-copy numeric export, audited like __array__.
+    "__dlpack__", "__dlpack_device__",
 }
 
 
