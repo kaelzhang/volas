@@ -7,17 +7,18 @@
 //!   so a borrowed view cannot be written through into volas's buffer (which would
 //!   bypass copy-on-write and corrupt aliasing columns);
 //! - **unversioned** (`"dltensor"`) — the legacy fallback for a consumer that did not
-//!   negotiate ≥ 1.0 (no read-only flag; the doc warns against writing).
+//!   negotiate ≥ 1.0; it has no read-only flag, so a borrow is forced to a **copy** (a
+//!   pre-1.0 consumer never gets a writable alias into the frame's buffer).
 //!
-//! `copy=True` returns an **independent** owned copy (writable); a non-CPU `dl_device`
-//! or a `stream` is refused with `BufferError` (this is a CPU-only producer).
+//! `copy=True` returns an **independent** owned copy (writable, flagged `IS_COPIED`); a
+//! non-CPU `dl_device` or a `stream` is refused with `BufferError` (CPU-only producer).
 
 use std::any::Any;
 use std::ffi::{c_void, CStr};
 use std::ptr;
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyBufferError, PyValueError};
+use pyo3::exceptions::PyBufferError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use volas_core::{Buffer, Column};
@@ -30,6 +31,9 @@ const KDL_FLOAT: u8 = 2;
 const KDL_BOOL: u8 = 6;
 /// `DLPACK_FLAG_BITMASK_READ_ONLY` — set on a borrowed (non-copy) versioned export.
 const DLPACK_FLAG_READ_ONLY: u64 = 1;
+/// `DLPACK_FLAG_BITMASK_IS_COPIED` — set when the producer materialised an owned copy,
+/// the standard signal a consumer reads to tell a copy from a view.
+const DLPACK_FLAG_IS_COPIED: u64 = 1 << 1;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -151,16 +155,14 @@ fn dl_parts(
     macro_rules! parts {
         ($buf:expr, $code:expr, $bits:expr) => {{
             let b = if copy { Buffer::from_vec($buf.to_vec()) } else { $buf.clone() };
-            Ok((
-                b.as_ptr() as *mut c_void,
-                DLDataType { code: $code, bits: $bits, lanes: 1 },
-                b.len(),
-                b.keepalive(),
-            ))
+            // DLPack requires a size-0 tensor's data pointer to be NULL; a Rust empty
+            // slice's pointer is a non-null dangling address, so normalise it here.
+            let data = if b.len() == 0 { ptr::null_mut() } else { b.as_ptr() as *mut c_void };
+            Ok((data, DLDataType { code: $code, bits: $bits, lanes: 1 }, b.len(), b.keepalive()))
         }};
     }
     let na = || {
-        PyValueError::new_err(
+        PyBufferError::new_err(
             "cannot export a column with missing values via DLPack (DLPack has no null \
              mask) — fill the NA first",
         )
@@ -172,7 +174,7 @@ fn dl_parts(
         Column::I64(b, _) => parts!(b, KDL_INT, 64),
         Column::I32(b, _) => parts!(b, KDL_INT, 32),
         Column::Bool(b, _) => parts!(b, KDL_BOOL, 8),
-        Column::Str(..) | Column::Datetime(..) => Err(PyValueError::new_err(format!(
+        Column::Str(..) | Column::Datetime(..) => Err(PyBufferError::new_err(format!(
             "cannot export a {} column via DLPack (only numeric / bool dtypes are supported)",
             col.dtype()
         ))),
@@ -203,7 +205,17 @@ pub(crate) fn column_to_dlpack<'py>(
             "volas's CPU DLPack export takes no stream (pass stream=None)",
         ));
     }
-    let do_copy = copy == Some(true);
+    let versioned = matches!(max_version, Some((major, _)) if major >= 1);
+    // An unversioned (pre-1.0) tensor has no read-only flag, so a borrow would be a
+    // writable alias into volas's buffer (bypassing copy-on-write). Force a copy on that
+    // path; if the consumer explicitly forbade copying, we cannot serve it safely.
+    if !versioned && copy == Some(false) {
+        return Err(PyBufferError::new_err(
+            "cannot lend a zero-copy DLPack view to a pre-1.0 consumer (no read-only flag); \
+             negotiate max_version >= (1, 0), or drop copy=False",
+        ));
+    }
+    let do_copy = copy == Some(true) || !versioned;
     let (data, dtype, len, keepalive) = dl_parts(col, do_copy)?;
     let shape = Box::new([len as i64]);
     let shape_ptr = shape.as_ptr() as *mut i64;
@@ -219,8 +231,7 @@ pub(crate) fn column_to_dlpack<'py>(
         byte_offset: 0,
     };
     // A consumer that negotiated DLPack ≥ 1.0 gets the versioned tensor (read-only for a
-    // borrow); otherwise the legacy unversioned one. A copy is the consumer's own data.
-    let versioned = matches!(max_version, Some((major, _)) if major >= 1);
+    // borrow); otherwise the legacy unversioned one (always a copy, see above).
     // SAFETY: the boxed tensor carries a valid deleter; the capsule takes the pointer and
     // its destructor reclaims it (tensor + Manager) if the consumer never takes it.
     unsafe {
@@ -229,7 +240,7 @@ pub(crate) fn column_to_dlpack<'py>(
                 version: DLPackVersion { major: 1, minor: 0 },
                 manager_ctx,
                 deleter: Some(deleter_versioned),
-                flags: if do_copy { 0 } else { DLPACK_FLAG_READ_ONLY },
+                flags: if do_copy { DLPACK_FLAG_IS_COPIED } else { DLPACK_FLAG_READ_ONLY },
                 dl_tensor,
             });
             (Box::into_raw(t) as *mut c_void, c"dltensor_versioned", capsule_destructor_versioned)

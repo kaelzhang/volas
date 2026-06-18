@@ -198,15 +198,17 @@ def test_dlpack_unconsumed_capsule_frees_cleanly():
 
 
 @pytest.mark.parametrize(
-    "series,exc",
+    "series",
     [
-        (s([1, None, 3]), ValueError),                       # int + NA: no DLPack null mask
-        (s(["a", "b"]), ValueError),                         # str: no DLPack dtype
-        (volas.DataFrame({"t": pd.to_datetime(["2020-01-01", "NaT"])})["t"], ValueError),  # datetime
+        s([1, None, 3]),                       # int + NA: no DLPack null mask
+        s(["a", "b"]),                         # str: no DLPack dtype
+        volas.DataFrame({"t": pd.to_datetime(["2020-01-01", "NaT"])})["t"],  # datetime
     ],
 )
-def test_dlpack_rejects_unsupported(series, exc):
-    with pytest.raises(exc):
+def test_dlpack_rejects_unsupported(series):
+    # "cannot export to DLPack" is a BufferError per the Array API (matching the
+    # device/stream rejections), not a ValueError.
+    with pytest.raises(BufferError):
         series.__dlpack__()
     # float NaN, by contrast, is an in-band value and exports fine
     np.from_dlpack(s([1.5, float("nan"), 2.5]))
@@ -230,6 +232,15 @@ def test_from_arrow_extended_types():
     assert volas.Series.from_arrow(pa.array([1, 2], type=pa.int16())).to_list() == [1, 2]
     d = volas.Series.from_arrow(pa.array([date(2020, 1, 2), None], type=pa.date32())).to_list()
     assert d[1] is volas.NA
+
+
+def test_from_arrow_dictionary_and_decimal256():
+    # categorical (dictionary-encoded) strings — how parquet / pandas `category` arrive
+    d = pa.array(["AAPL", "MSFT", "AAPL"]).dictionary_encode()
+    assert volas.Series.from_arrow(d).to_list() == ["AAPL", "MSFT", "AAPL"]
+    # 256-bit decimal -> f64 (lossy), like decimal128
+    dec = pa.array([Decimal("1.50"), None], type=pa.decimal256(20, 2))
+    assert volas.Series.from_arrow(dec).to_list()[0] == 1.5
 
 
 def test_from_arrow_rejects_wrong_capsule():
@@ -276,3 +287,98 @@ def test_dlpack_rejects_non_cpu_device_and_stream():
         s.__dlpack__(dl_device=(2, 0))  # a non-CPU device cannot be honored
     with pytest.raises(BufferError):
         s.__dlpack__(stream=5)  # a CPU export takes no stream
+
+
+def test_dlpack_unversioned_borrow_is_copied_not_an_alias():
+    # A pre-1.0 (unversioned) DLPack consumer cannot be handed a read-only flag, so a
+    # zero-copy borrow would alias volas's buffer (and a writing consumer would bypass
+    # copy-on-write). The unversioned path must therefore hand back an independent copy —
+    # observable here as a *different data pointer* from the versioned zero-copy borrow.
+    sv = volas.DataFrame({"a": [1.0, 2.0, 3.0]})["a"]
+
+    class OldConsumer:  # ignores max_version → forces the legacy "dltensor" capsule
+        def __dlpack__(self, *, stream=None, max_version=None, dl_device=None, copy=None):
+            return sv.__dlpack__()
+
+        def __dlpack_device__(self):
+            return sv.__dlpack_device__()
+
+    borrowed = np.from_dlpack(sv)  # modern numpy → versioned, zero-copy view of the buffer
+    copied = np.from_dlpack(OldConsumer())  # unversioned → forced independent copy
+    assert copied.ctypes.data != borrowed.ctypes.data  # distinct memory: it was copied
+    assert copied.tolist() == [1.0, 2.0, 3.0]  # with the same values
+
+
+def test_dlpack_unversioned_copy_false_is_refused():
+    sv = volas.DataFrame({"a": [1.0, 2.0]})["a"]
+    with pytest.raises(BufferError):
+        sv.__dlpack__(copy=False)  # no max_version → cannot serve a safe zero-copy borrow
+
+
+# --- low-level versioned-capsule inspection (flags + empty data pointer) -------
+
+import ctypes  # noqa: E402
+
+
+class _DLDevice(ctypes.Structure):
+    _fields_ = [("device_type", ctypes.c_int32), ("device_id", ctypes.c_int32)]
+
+
+class _DLDataType(ctypes.Structure):
+    _fields_ = [("code", ctypes.c_uint8), ("bits", ctypes.c_uint8), ("lanes", ctypes.c_uint16)]
+
+
+class _DLTensor(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.c_void_p),
+        ("device", _DLDevice),
+        ("ndim", ctypes.c_int32),
+        ("dtype", _DLDataType),
+        ("shape", ctypes.POINTER(ctypes.c_int64)),
+        ("strides", ctypes.POINTER(ctypes.c_int64)),
+        ("byte_offset", ctypes.c_uint64),
+    ]
+
+
+class _DLVersion(ctypes.Structure):
+    _fields_ = [("major", ctypes.c_int32), ("minor", ctypes.c_int32)]
+
+
+class _DLManagedTensorVersioned(ctypes.Structure):
+    _fields_ = [
+        ("version", _DLVersion),
+        ("manager_ctx", ctypes.c_void_p),
+        ("deleter", ctypes.c_void_p),
+        ("flags", ctypes.c_uint64),
+        ("dl_tensor", _DLTensor),
+    ]
+
+
+_FLAG_READ_ONLY = 1 << 0
+_FLAG_IS_COPIED = 1 << 1
+
+
+def _versioned_tensor(capsule):
+    # read (without consuming) the versioned managed tensor the capsule wraps
+    get = ctypes.pythonapi.PyCapsule_GetPointer
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    ptr = get(capsule, b"dltensor_versioned")
+    return _DLManagedTensorVersioned.from_address(ptr)
+
+
+def test_dlpack_versioned_flags_distinguish_borrow_and_copy():
+    sv = volas.DataFrame({"a": [1.0, 2.0, 3.0]})["a"]
+    borrow = sv.__dlpack__(max_version=(1, 0))
+    t = _versioned_tensor(borrow)
+    assert t.flags & _FLAG_READ_ONLY and not (t.flags & _FLAG_IS_COPIED)
+    copied = sv.__dlpack__(max_version=(1, 0), copy=True)
+    t2 = _versioned_tensor(copied)
+    assert (t2.flags & _FLAG_IS_COPIED) and not (t2.flags & _FLAG_READ_ONLY)
+
+
+def test_dlpack_empty_column_has_null_data_pointer():
+    empty = volas.DataFrame({"a": [1.0]})["a"].iloc[1:1]  # a size-0 float column
+    cap = empty.__dlpack__(max_version=(1, 0))
+    t = _versioned_tensor(cap)
+    assert not t.dl_tensor.data  # size-0 → NULL data pointer (ctypes reads NULL as None/0)

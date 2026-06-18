@@ -209,11 +209,12 @@ impl PySeries {
         py.import("pyarrow")?.call_method1("array", (slf,))
     }
 
-    /// DLPack export (`np.from_dlpack(s)`, `torch.from_dlpack(s)`): a zero-copy
-    /// `"dltensor"` capsule over the column's buffer. Dense numeric / bool only — a
-    /// missing value in an int/bool column (DLPack has no null mask), or a str /
-    /// datetime column, raises. The protocol kwargs are accepted and ignored (CPU,
-    /// native dtype, no copy).
+    /// DLPack export (`np.from_dlpack(s)`, `torch.from_dlpack(s)`): borrow a dense numeric
+    /// / bool column. A consumer that negotiates DLPack ≥ 1.0 via `max_version` gets a
+    /// **read-only** view; an older consumer gets an independent **copy** (it has no
+    /// read-only flag, so a shared borrow could bypass copy-on-write). `copy=True` forces a
+    /// writable copy. A non-CPU `dl_device` or a `stream` is refused with `BufferError`, as
+    /// is a missing value in an int/bool column or a str / datetime column.
     #[pyo3(signature = (stream = None, max_version = None, dl_device = None, copy = None))]
     pub(crate) fn __dlpack__<'py>(
         &self,
