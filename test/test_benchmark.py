@@ -473,7 +473,7 @@ def _coverage_pairs(arr):
         # adaptive / extended overlap studies
         ('mama', lambda: talib.MAMA(c)[0]),
         ('mama.fama', lambda: talib.MAMA(c)[1]),
-        ('mavp@close,periods', lambda: talib.MAVP(c, periods, 2, 30, 0)),
+        ('mavp:2,30@close,periods', lambda: talib.MAVP(c, periods, 2, 30, 0)),
         ('sarext', lambda: talib.SAREXT(h, lo)),
         # extended math-operator index pair
         ('minmaxindex.min:30', lambda: talib.MINMAXINDEX(c, 30)[0]),
