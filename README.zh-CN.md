@@ -1373,19 +1373,22 @@ np.from_dlpack(df['close'])        # 零拷贝 ndarray 视图
   `RecordBatch`，让 `pa.table(df)` / `pl.from_dataframe(df)` 读取一个 frame。
 - **`Series.__dlpack__` / `Series.__dlpack_device__`**——DLPack 协议，让
   `np.from_dlpack(s)` / `torch.from_dlpack(s)` 借用一个稠密的数值 / bool 列。借来的视图
-  是**只读**的（带版本号 DLPack 的标志位，避免写穿绕过写时复制而改坏帧）；
+  是**只读**的（带版本号 DLPack 的标志位），写穿它无法绕过写时复制而改坏帧；无法接收该
+  标志位的 1.0 之前的旧消费方，则改为得到一份独立副本。
   `np.from_dlpack(s, copy=True)` 返回一份独立的**可写**副本。非 CPU 设备或 stream 会被
   拒绝（`BufferError`）；含缺失值的 int/bool 列（DLPack 无空值掩码）或 str/datetime 列会抛错。
 
-**零拷贝契约。** 在双向上，数值（`int*` / `uint*` / `float*`）、字符串、纳秒 datetime
-列的*数据*缓冲区被共享（无拷贝）。小的重打包有：
+**零拷贝契约。** 在双向上，volas 原生的数值（`int32` / `int64` / `float32` / `float64`）、
+字符串、纳秒 datetime 列的*数据*缓冲区被共享（无拷贝）。小的重打包有：
 
 - **`bool`**——volas 每个值存一个字节，Arrow 存一个*位*；
 - **空值位图**（≤ `n/8` 字节）——包括导出时把缺失 `float`（带内 `NaN`）扫描成真正的
   Arrow null 的那一遍；
 - 仅在**导入时**：32 位偏移的 `Utf8`（加宽到 64 位偏移）、粗于纳秒的时间戳（重新缩放）、
-  `Decimal128`（→ `f64`，超过约 15 位**有损**——精确价格请上游保持字符串）、窄/无符号
-  整数（→ `i64`）、`Date32` / `Date64`（→ 纳秒 datetime）。其余 Arrow 类型会抛清晰的错误。
+  `Decimal128` / `Decimal256`（→ `f64`，超过约 15 位**有损**——精确价格请上游保持字符串）、
+  窄/无符号整数（→ `i64`；超过 `i64::MAX` 的 `UInt64` 无法无损表示，会报错）、
+  字典 / 类别（categorical）列（解码为其取值）、`Date32` / `Date64`（→ 纳秒 datetime）。
+  其余 Arrow 类型会抛清晰的错误。
 
 **边界上的 NA。** 每一个缺失值——int、bool、**以及 float**——都跨越为真正的 Arrow null
 （缺失的 float 即带内 `NaN`，导出时扫描进空值位图），因此下游的 `is_null` / `null_count`

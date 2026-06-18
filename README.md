@@ -1456,23 +1456,26 @@ call automatically (so you rarely call them yourself):
   `RecordBatch`, so `pa.table(df)` / `pl.from_dataframe(df)` read a frame.
 - **`Series.__dlpack__` / `Series.__dlpack_device__`** — the DLPack protocol, so
   `np.from_dlpack(s)` / `torch.from_dlpack(s)` borrow a dense numeric / bool column. The
-  borrowed view is **read-only** (a versioned-DLPack flag, so writing through it can't
-  bypass copy-on-write and corrupt the frame); `np.from_dlpack(s, copy=True)` returns an
+  borrowed view is **read-only** (a versioned-DLPack flag) so writing through it can't
+  bypass copy-on-write and corrupt the frame; a pre-1.0 consumer that cannot receive the
+  flag is given an independent copy instead. `np.from_dlpack(s, copy=True)` returns an
   independent **writable** copy. A non-CPU device or a stream is refused (`BufferError`);
   an int/bool column with a missing value (DLPack has no null mask) or a str/datetime
   column raises.
 
 **Zero-copy contract.** The *data* buffer is shared (no copy) in both directions for
-numeric (`int*` / `uint*` / `float*`), string, and nanosecond-datetime columns. The
-small repacks are:
+volas's native numeric (`int32` / `int64` / `float32` / `float64`), string, and
+nanosecond-datetime columns. The small repacks are:
 
 - **`bool`** — volas stores one byte per value, Arrow one *bit*;
 - the **null bitmap** (≤ `n/8` bytes) — including, on export, a one-pass scan that turns
   a missing `float` (in-band `NaN`) into a real Arrow null;
 - on **import only**: a 32-bit-offset `Utf8` (widened to 64-bit offsets), a
-  coarser-than-ns timestamp (rescaled), a `Decimal128` (→ `f64`, **lossy** past ~15
-  digits — keep prices as strings for exactness), a narrow / unsigned integer (→ `i64`),
-  or a `Date32` / `Date64` (→ ns datetime). Other Arrow types raise a clear error.
+  coarser-than-ns timestamp (rescaled), a `Decimal128` / `Decimal256` (→ `f64`, **lossy**
+  past ~15 digits — keep prices as strings for exactness), a narrow / unsigned integer
+  (→ `i64`; a `UInt64` past `i64::MAX` has no lossless image and raises), a
+  dictionary / categorical column (decoded to its values), or a `Date32` / `Date64`
+  (→ ns datetime). Other Arrow types raise a clear error.
 
 **NA at the boundary.** Every missing value — int, bool, **and float** — crosses as a
 real Arrow null (a missing float is the in-band `NaN`, scanned into the null bitmap on
