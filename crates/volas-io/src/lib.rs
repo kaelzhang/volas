@@ -285,7 +285,7 @@ mod tests {
         });
         // "NA" is no longer missing -> the column is object/string, not float.
         match infer_column(vec!["1".into(), "NA".into()], &na) {
-            Column::Str(v, _) => assert_eq!(**v, vec!["1".to_string(), "NA".to_string()]),
+            Column::Str(v, _) => assert_eq!(v.to_vec(), vec!["1".to_string(), "NA".to_string()]),
             other => panic!("expected Str, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
@@ -320,10 +320,8 @@ mod tests {
         let b = df.column("b").unwrap().as_f64().unwrap();
         assert_eq!(b[0], 1.5);
         assert!(b[1].is_nan());
-        assert_eq!(
-            df.column("c").unwrap().as_str().unwrap(),
-            &["x".to_string(), "y".to_string()]
-        );
+        let c = df.column("c").unwrap();
+        assert_eq!((c.str_at(0).unwrap(), c.str_at(1).unwrap()), ("x", "y"));
         std::fs::remove_file(&path).ok();
     }
 

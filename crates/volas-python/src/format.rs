@@ -45,7 +45,7 @@ pub(crate) fn cell_to_csv(
         Column::Bool(v, _) => if v[i] { "True" } else { "False" }.to_string(),
         Column::I64(v, _) => v[i].to_string(),
         Column::I32(v, _) => v[i].to_string(),
-        Column::Str(v, _) => v[i].clone(),
+        Column::Str(v, _) => v.get(i).to_string(),
         Column::Datetime(v) => datetime::format_ns(v[i]),
     }
 }
@@ -308,7 +308,7 @@ fn data_cells(
             .collect(),
         Column::Str(v, val) => rows
             .iter()
-            .map(|&i| if val.is_valid(i) { format!(" {}", v[i]) } else { na_rep.to_string() })
+            .map(|&i| if val.is_valid(i) { format!(" {}", v.get(i)) } else { na_rep.to_string() })
             .collect(),
         Column::Datetime(v) => {
             // A `NaT` (i64::MIN) renders as `na_rep`; the date-vs-timestamp choice

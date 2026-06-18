@@ -1,7 +1,6 @@
 //! Boundary marshalling between volas columns and NumPy / pandas (export,
 //! scalar boxing, the numpy-type cache, and index/label rendering).
 
-use std::sync::Arc;
 
 use numpy::IntoPyArray;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyValueError};
@@ -63,7 +62,7 @@ pub(crate) fn column_to_pandas<'py>(
             let items: Vec<Bound<'_, PyAny>> = (0..v.len())
                 .map(|i| {
                     if val.is_valid(i) {
-                        v[i].clone().into_pyobject(py).unwrap().into_any()
+                        v.get(i).into_pyobject(py).unwrap().into_any()
                     } else {
                         py.None().into_bound(py)
                     }
@@ -121,7 +120,7 @@ pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, 
             let items: Vec<Bound<'_, PyAny>> = (0..v.len())
                 .map(|i| {
                     if val.is_valid(i) {
-                        v[i].clone().into_pyobject(py).unwrap().into_any()
+                        v.get(i).into_pyobject(py).unwrap().into_any()
                     } else {
                         py.None().into_bound(py)
                     }
@@ -157,7 +156,7 @@ pub(crate) fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> 
         Column::Bool(v, val) if val.is_valid(i) => {
             v[i].into_pyobject(py).unwrap().to_owned().into_any().unbind()
         }
-        Column::Str(v, val) if val.is_valid(i) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
+        Column::Str(v, val) if val.is_valid(i) => v.get(i).into_pyobject(py).unwrap().into_any().unbind(),
         Column::I64(..) | Column::I32(..) | Column::Bool(..) | Column::Str(..) => na(py),
         // O1 (-> B): a datetime cell is a volas.Timestamp (matching the index-label
         // scalar type and pandas); a NaT cell is volas.NA (the unified missing
@@ -286,7 +285,7 @@ pub(crate) fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> 
             .into_any(),
         IndexKind::Int64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
         IndexKind::Range(_) => (i as i64).into_pyobject(py).unwrap().into_any().unbind(),
-        IndexKind::Str(v) => v[i].clone().into_pyobject(py).unwrap().into_any().unbind(),
+        IndexKind::Str(v) => v.get(i).into_pyobject(py).unwrap().into_any().unbind(),
     }
 }
 

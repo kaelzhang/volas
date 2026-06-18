@@ -163,7 +163,7 @@ mod tests {
         assert!(!b.is_empty());
         assert_eq!(b.as_slice(), &[1.0, 2.0, 3.0]);
         assert_eq!(&*b, &[1.0, 2.0, 3.0]); // Deref
-        assert_eq!(Buffer::<f64>::from_vec(vec![]).is_empty(), true);
+        assert!(Buffer::<f64>::from_vec(vec![]).is_empty());
         assert_eq!(Buffer::from(vec![1.0]).into_vec(), vec![1.0]); // From + into_vec (no copy)
         assert_eq!(format!("{:?}", b), "[1.0, 2.0, 3.0]"); // Debug
         assert_eq!(b, b.clone()); // Clone + PartialEq (Owned)

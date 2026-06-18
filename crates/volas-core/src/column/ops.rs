@@ -143,7 +143,9 @@ impl Column {
         let numeric_like = |c: &Column| c.dtype().is_numeric() || matches!(c, Column::Bool(..));
         let out = match (self, other) {
             (Column::Str(a, av), Column::Str(b, bv)) => cmp_typed(n, op, |i| {
-                (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i]))
+                // SAFETY: `i < n` and both columns have length `n` (equal lengths assumed).
+                (av.is_valid(i) && bv.is_valid(i))
+                    .then(|| unsafe { a.get_unchecked(i).cmp(b.get_unchecked(i)) })
             }),
             (Column::Datetime(a), Column::Datetime(b)) => cmp_typed(n, op, |i| {
                 (a[i] != i64::MIN && b[i] != i64::MIN).then(|| a[i].cmp(&b[i]))

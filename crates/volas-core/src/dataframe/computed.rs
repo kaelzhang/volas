@@ -4,7 +4,6 @@
 //! a manual write. The cache (`DataFrame::computed`) is private frame state;
 //! these methods own its invariants.
 
-use std::sync::Arc;
 
 use crate::column::Column;
 use crate::error::{Result, VolasError};

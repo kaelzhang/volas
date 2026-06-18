@@ -1523,7 +1523,7 @@ pub(crate) fn cell_key(col: &Column, i: usize) -> Option<String> {
         Column::I64(v, _) => format!("i{}", v[i]),
         Column::I32(v, _) => format!("i{}", v[i]),
         Column::Bool(v, _) => format!("b{}", v[i]),
-        Column::Str(v, _) => format!("s{}", v[i]),
+        Column::Str(v, _) => format!("s{}", v.get(i)),
         Column::Datetime(v) => format!("d{}", v[i]),
     })
 }

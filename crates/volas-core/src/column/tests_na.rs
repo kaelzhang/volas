@@ -556,7 +556,7 @@ fn na_str_carries_validity() {
     let sh = s.shift(1);
     assert_eq!(sh.dtype(), DType::Utf8);
     assert!(!sh.is_valid(0) && sh.is_valid(1) && !sh.is_valid(2));
-    assert_eq!(sh.as_str().unwrap()[1], "a");
+    assert_eq!(sh.str_at(1).unwrap(), "a");
     // slice / take carry validity
     assert!(!s.slice(1, 3).is_valid(0) && s.slice(1, 3).is_valid(1));
     assert!(!s.take(&[1, 0]).is_valid(0) && s.take(&[1, 0]).is_valid(1));

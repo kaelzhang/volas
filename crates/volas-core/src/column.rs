@@ -10,9 +10,9 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::buffer::Buffer;
+use crate::strbuf::{StrBuffer, StrBufferBuilder};
 use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};
@@ -68,7 +68,7 @@ pub enum Column {
     /// 32-bit signed integers (narrow storage); `Validity` marks missing cells.
     I32(Buffer<i32>, Validity),
     /// UTF-8 strings; `Validity` marks missing cells.
-    Str(Arc<Vec<String>>, Validity),
+    Str(StrBuffer, Validity),
     /// Datetimes as i64 nanoseconds since the Unix epoch (UTC-naive).
     Datetime(Buffer<i64>),
 }
@@ -201,12 +201,12 @@ impl Column {
 
     /// Build a `Str` column (all values present).
     pub fn str(v: Vec<String>) -> Column {
-        Column::Str(Arc::new(v), Validity::dense())
+        Column::Str(StrBuffer::from_vec(v), Validity::dense())
     }
 
     /// Build a `Str` column with an explicit validity (missing-aware).
     pub fn str_with(v: Vec<String>, validity: Validity) -> Column {
-        Column::Str(Arc::new(v), validity)
+        Column::Str(StrBuffer::from_vec(v), validity)
     }
 
     /// Build a `Datetime` column (epoch nanoseconds).
@@ -342,10 +342,10 @@ impl Column {
         }
     }
 
-    /// Borrow the underlying `String` slice, if this is a `Str` column.
-    pub fn as_str(&self) -> Option<&[String]> {
+    /// The `i`-th string of a `Str` column as `&str`, if this is a `Str` column.
+    pub fn str_at(&self, i: usize) -> Option<&str> {
         if let Column::Str(v, _) = self {
-            Some(v.as_slice())
+            Some(v.get(i))
         } else {
             None
         }

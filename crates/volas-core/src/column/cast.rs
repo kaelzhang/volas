@@ -289,17 +289,17 @@ impl Column {
     /// raises; float target -> float literal), an empty / whitespace / missing
     /// cell becomes NA, and any other non-empty string raises with the offending
     /// value. Never a silent NaN (contract C4). `to` is numeric (caller guard).
-    fn cast_str_to_numeric(v: &[String], val: &Validity, to: DType) -> Result<Column> {
+    fn cast_str_to_numeric(v: &StrBuffer, val: &Validity, to: DType) -> Result<Column> {
         // The cells we parse: present AND not blank. Blank / missing cells are NA
         // in the result (an int target carries this in its validity; a float
         // target writes NaN).
         let parse_me: Vec<bool> = (0..v.len())
-            .map(|i| val.is_valid(i) && !v[i].trim().is_empty())
+            .map(|i| val.is_valid(i) && !v.get(i).trim().is_empty())
             .collect();
         let bad = |i: usize, target: &str| {
             VolasError::Value(format!(
                 "cannot convert string {:?} to {target} (astype)",
-                v[i]
+                v.get(i)
             ))
         };
         match to {
@@ -307,7 +307,7 @@ impl Column {
                 let mut out = vec![f64::NAN; v.len()];
                 for (i, slot) in out.iter_mut().enumerate() {
                     if parse_me[i] {
-                        *slot = v[i].trim().parse::<f64>().map_err(|_| bad(i, "float64"))?;
+                        *slot = v.get(i).trim().parse::<f64>().map_err(|_| bad(i, "float64"))?;
                     }
                 }
                 Ok(if to == DType::F32 {
@@ -323,7 +323,7 @@ impl Column {
                 let mut out = vec![0i64; v.len()];
                 for (i, slot) in out.iter_mut().enumerate() {
                     if parse_me[i] {
-                        *slot = v[i].trim().parse::<i64>().map_err(|_| bad(i, "int64"))?;
+                        *slot = v.get(i).trim().parse::<i64>().map_err(|_| bad(i, "int64"))?;
                     }
                 }
                 if to == DType::I32 {

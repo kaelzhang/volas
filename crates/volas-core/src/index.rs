@@ -165,8 +165,9 @@ impl Index {
             }
             Column::Str(v, _) => {
                 require_no_missing_labels(col, "str")?;
-                require_unique_labels(v, "str")?;
-                IndexKind::Str(v.to_vec())
+                let labels = v.to_vec();
+                require_unique_labels(&labels, "str")?;
+                IndexKind::Str(labels)
             }
             other => {
                 return Err(VolasError::DType(format!(

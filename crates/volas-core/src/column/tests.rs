@@ -177,7 +177,7 @@ fn typed_accessors_reject_wrong_variant() {
     let f = Column::f64(vec![1.0]);
     assert!(f.as_bool().is_none());
     assert!(f.as_i64().is_none());
-    assert!(f.as_str().is_none());
+    assert!(f.str_at(0).is_none());
     assert!(f.as_datetime().is_none());
     assert!(Column::bool(vec![true]).as_f64().is_none());
     assert!(Column::f64(vec![]).is_empty());

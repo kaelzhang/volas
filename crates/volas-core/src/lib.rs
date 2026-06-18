@@ -13,10 +13,12 @@ pub mod index;
 pub mod numeric;
 pub mod series;
 pub mod stats;
+pub mod strbuf;
 pub mod tz;
 pub mod validity;
 
 pub use buffer::Buffer;
+pub use strbuf::{StrBuffer, StrBufferBuilder};
 pub use column::{BinOp, BoolOp, CmpOp, Column, Scalar};
 pub use numeric::{binary_supertype, fits, Numeric};
 pub use validity::{Bitmap, Validity};

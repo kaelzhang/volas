@@ -14,7 +14,7 @@ impl Column {
             }
             Column::I64(v, val) => Column::i64_with(v[start..end].to_vec(), val.slice(start, end)),
             Column::I32(v, val) => Column::i32_with(v[start..end].to_vec(), val.slice(start, end)),
-            Column::Str(v, val) => Column::str_with(v[start..end].to_vec(), val.slice(start, end)),
+            Column::Str(v, val) => Column::Str(v.slice(start, end), val.slice(start, end)),
             Column::Datetime(v) => Column::datetime(v[start..end].to_vec()),
         }
     }
@@ -33,8 +33,10 @@ impl Column {
             Column::I32(v, val) => {
                 Column::i32_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
             }
+            // Gather straight into one contiguous `StrBuffer` (no intermediate
+            // `Vec<String>`, so no per-cell allocation).
             Column::Str(v, val) => {
-                Column::str_with(idx.iter().map(|&i| v[i].clone()).collect(), val.take(idx))
+                Column::Str(idx.iter().map(|&i| v.get(i)).collect(), val.take(idx))
             }
             Column::Datetime(v) => Column::datetime(idx.iter().map(|&i| v[i]).collect()),
         }
@@ -70,10 +72,10 @@ impl Column {
                 idx.iter().map(|p| p.map_or(0, |i| v[i])).collect(),
                 validity(),
             ),
-            Column::Str(v, _) => Column::str_with(
-                idx.iter()
-                    .map(|p| p.map_or_else(String::new, |i| v[i].clone()))
-                    .collect(),
+            // `None` → empty placeholder (the validity marks it NA); gather builds the
+            // `StrBuffer` in one pass.
+            Column::Str(v, _) => Column::Str(
+                idx.iter().map(|p| p.map_or("", |i| v.get(i))).collect(),
                 validity(),
             ),
             Column::Datetime(v) => Column::datetime(
@@ -115,7 +117,7 @@ impl Column {
             Column::I64(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i])),
             Column::I32(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i] as i64)),
             Column::Bool(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i] as i64)),
-            Column::Str(v, val) => group_by(len, |i| val.is_valid(i).then(|| v[i].clone())),
+            Column::Str(v, val) => group_by(len, |i| val.is_valid(i).then(|| v.get(i).to_string())),
             Column::Datetime(v) => group_by(len, |i| (v[i] != i64::MIN).then_some(v[i])),
         }
     }
@@ -150,7 +152,9 @@ impl Column {
             Column::I64(v, _) => v[a].cmp(&v[b]),
             Column::I32(v, _) => v[a].cmp(&v[b]),
             Column::Bool(v, _) => v[a].cmp(&v[b]),
-            Column::Str(v, _) => v[a].cmp(&v[b]),
+            // SAFETY: `a`/`b` are present-row indices from `argsort` / `arg_extreme`,
+            // always `< len`; the unchecked accessor avoids redundant offset/data checks.
+            Column::Str(v, _) => unsafe { v.get_unchecked(a).cmp(v.get_unchecked(b)) },
             Column::Datetime(v) => v[a].cmp(&v[b]),
         }
     }
@@ -257,7 +261,9 @@ impl Column {
             }
             (Column::Str(a, av), Column::Str(b, bv)) => {
                 append_validity(av, a.len(), bv, b.len());
-                Arc::make_mut(a).extend_from_slice(b);
+                let mut builder = StrBufferBuilder::with_capacity(a.len() + b.len());
+                a.iter().chain(b.iter()).for_each(|s| builder.push(s));
+                *a = builder.finish();
                 Ok(())
             }
             (Column::Datetime(a), Column::Datetime(b)) => {
@@ -329,7 +335,10 @@ impl Column {
             }
             Column::Str(v, val) => {
                 *val = na_validity(val);
-                Arc::make_mut(v).extend(std::iter::repeat(String::new()).take(len));
+                let mut builder = StrBufferBuilder::with_capacity(v.len() + len);
+                v.iter().for_each(|s| builder.push(s));
+                (0..len).for_each(|_| builder.push(""));
+                *v = builder.finish();
             }
         }
     }

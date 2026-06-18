@@ -183,17 +183,17 @@ impl Column {
             Column::Bool(v, _) => Column::bool_with(shift_fill(v, n, false), nulls()),
             Column::Datetime(v) => Column::datetime(shift_fill(v, n, i64::MIN)),
             Column::Str(v, _) => {
-                let vals = (0..len)
+                let shifted = (0..len)
                     .map(|i| {
                         let s = i as isize - n;
                         if s >= 0 && (s as usize) < len {
-                            v[s as usize].clone()
+                            v.get(s as usize)
                         } else {
-                            String::new() // placeholder, masked by the gap validity
+                            "" // placeholder, masked by the gap validity
                         }
                     })
                     .collect();
-                Column::str_with(vals, nulls())
+                Column::Str(shifted, nulls())
             }
         }
     }
@@ -326,10 +326,8 @@ impl Column {
             }
             // str carries missing too: gather the carried value (empty placeholder
             // for an unfilled cell, which `validity` then marks NA), like int/bool.
-            Column::Str(v, _) => Column::str_with(
-                src.iter()
-                    .map(|s| s.map_or_else(String::new, |j| v[j].clone()))
-                    .collect(),
+            Column::Str(v, _) => Column::Str(
+                src.iter().map(|s| s.map_or("", |j| v.get(j))).collect(),
                 validity,
             ),
         }
