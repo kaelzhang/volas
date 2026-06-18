@@ -244,8 +244,9 @@ publish:
 
 # Bump the workspace version, commit, tag (no `v` prefix), then push the commit and
 # the tag to origin. The pushed tag triggers the GitHub release workflow, which
-# verifies the tag matches the Cargo.toml version, then builds wheels and publishes
-# to PyPI via Trusted Publishing. Usage: make bump TYPE={major|minor|patch}
+# verifies the tag matches the Cargo.toml version, then publishes the crates to
+# crates.io and the wheels to PyPI — both via Trusted Publishing (OIDC, no stored
+# tokens). Usage: make bump TYPE={major|minor|patch}
 bump:
 	@test -n "$(TYPE)" || { echo "TYPE is required: make bump TYPE={major|minor|patch}"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "working tree is not clean -- commit or stash first"; exit 1; }
