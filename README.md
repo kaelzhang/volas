@@ -319,8 +319,14 @@ Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
 - **time_frame** `TimeFrame | str` the target bar interval, e.g. `TimeFrame.m5`
   or `'5m'`. See [TimeFrame](#timeframe).
 - **cumulators?** `dict[str, str] | None = None` per-column aggregator overrides
-  (e.g. `{'amount': 'sum'}`); defaults to OHLCV semantics (`open`=first,
-  `high`=max, `low`=min, `close`=last, `volume`=sum; any other column `last`).
+  (e.g. `{'amount': 'sum'}`). Defaults to OHLCV semantics (`open`=first, `high`=max,
+  `low`=min, `close`=last, `volume`=sum; any other column `last`). Each dict **value**
+  is one of:
+  - `'first'` — the first value in the bucket
+  - `'last'` — the last value in the bucket
+  - `'max'` — the maximum
+  - `'min'` — the minimum
+  - `'sum'` — the sum
 
 ```py
 # from 1-minute klines to 5-minute klines
@@ -391,8 +397,18 @@ deliberate guard: an **integer** `dtype` over a frame that holds missing values
 **raises** instead of silently writing garbage (NumPy cannot store `NA` in an
 integer array) — give `na_value` to fill instead.
 
-- **dtype** `str | None` — an optional export cast. `None` gives the honest per-dtype
-  representation; an explicit dtype converts on the way out (like pandas).
+- **dtype** `str | None` — an optional export cast. `None` (the default) gives the
+  honest per-dtype representation; otherwise:
+  - `'object'` (or `'O'`) — a lossless 2-D array of typed cells (number / `str` /
+    `Timestamp` / `volas.NA`); the only dtype that keeps a `str` or datetime column intact.
+  - `'int64'`, `'int32'`, `'int16'`, `'int8'` (and the unsigned `'uint*'`) — the **exact**
+    `i64` channel (a large int and a datetime's epoch-ns survive without a `float` round
+    trip). Over a frame with missing values this **raises** unless `na_value` is given.
+  - `'float64'`, `'float32'`, `'float16'` — the (lossy) `float` channel: a missing cell
+    is `NaN`, a datetime past 2⁵³ ns quantises.
+  - `'bool'` — boolean.
+  - `'datetime64[ns]'` — datetime nanoseconds; a `NaT` cell is preserved.
+  - A `str` column rejects every numeric / temporal dtype — use `'object'`.
 - **na_value** `Any` — the value substituted for each missing cell. Default: the
   NA-model representation (`NaN` / `NaT` / `volas.NA`).
 
@@ -470,9 +486,16 @@ t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
 
 The column values as a 1-D NumPy array — `pandas.Series.to_numpy` semantics:
 
-- **dtype** `str | None` — an optional export cast. An **integer** dtype over a column
-  that holds missing values **raises** (an NA has no integer representation), unless
-  `na_value` is given.
+- **dtype** `str | None` — an optional export cast. `None` (the default) gives the
+  column's native representation; otherwise any NumPy dtype string accepted by
+  `numpy.ndarray.astype`, the common values being:
+  - `'int64'`, `'int32'`, `'int16'`, `'int8'` (and the unsigned `'uint64'`, `'uint32'`,
+    `'uint16'`, `'uint8'`) — integer. Over a column with missing values this **raises**
+    unless `na_value` is given (an NA has no integer representation).
+  - `'float64'`, `'float32'`, `'float16'` — floating point; a missing cell is `NaN`.
+  - `'bool'` — boolean.
+  - `'datetime64[ns]'` — datetime nanoseconds; a missing cell is `NaT`.
+  - `'object'` (or `'O'`) — Python objects, each cell its own typed value (lossless).
 - **na_value** `Any` — the value to substitute for each missing cell. Default: the
   NA-model representation (`NaN` for the float export, `None` in an object array). With
   an explicit integer `dtype`, the values stay **exact** (a large int is not funnelled
@@ -566,12 +589,18 @@ dtypes — a fast, pandas-subset CSV reader.
   yields a `DatetimeIndex`.
 - **na_values?** `str | list[str] | None = None` extra missing-value tokens.
 - **keep_default_na?** `bool = True` also treat the default NA tokens as missing.
-- **tz?** `str | None = None` the timezone for the `index_col` datetime: a *naive*
-  date string is read in `tz` (stored UTC, the index tagged). Accepts a fixed offset
-  (`'+08:00'`) or an IANA name (`'America/New_York'`); pass the date column via
+- **tz?** `str | None = None` the timezone for the `index_col` datetime: a *naive* date
+  string is read in `tz` (stored UTC, the index tagged). Pass the date column via
   `index_col` and do *not* also list it in `parse_dates`. See [Timezones](#timezones).
+  Accepts either:
+  - a fixed UTC offset, e.g. `'+08:00'` / `'-05:00'`
+  - an IANA timezone name, e.g. `'America/New_York'` / `'Asia/Shanghai'` / `'UTC'`
 - **date_unit?** `str | None = None` read `index_col` as an epoch integer in this unit
-  (`'s'` / `'ms'` / `'us'` / `'ns'`, absolute UTC); `tz` then only sets the display zone.
+  (absolute UTC; `tz` then only sets the display zone). One of:
+  - `'s'` — seconds
+  - `'ms'` — milliseconds
+  - `'us'` — microseconds
+  - `'ns'` — nanoseconds
 
 ```py
 from volas import read_csv
@@ -598,11 +627,15 @@ int column) becomes `NaT`, like `pd.to_datetime`.
 
 - **obj** the values to convert — numeric epochs, datetime strings, or an
   already-datetime `Series` (returned unchanged).
-- **unit?** `str = 'ns'` the epoch unit for **numeric** input (`'s'` / `'ms'` /
-  `'us'` / `'ns'`); sub-unit fractions are preserved, like `pd.to_datetime`.
-- **format?** `str | None = None` an explicit datetime format for **string**
-  input (pandas `format=`, e.g. `'%Y-%m-%d %H:%M:%S'`) — faster and unambiguous;
-  ignored for numeric input.
+- **unit?** `str = 'ns'` the epoch unit for **numeric** input (sub-unit fractions are
+  preserved, like `pd.to_datetime`). One of:
+  - `'s'` — seconds
+  - `'ms'` — milliseconds
+  - `'us'` — microseconds
+  - `'ns'` — nanoseconds (the default)
+- **format?** `str | None = None` an explicit datetime format for **string** input
+  (pandas `format=`, e.g. `'%Y-%m-%d %H:%M:%S'`) — faster and unambiguous; ignored for
+  numeric input. Any `strftime`/`strptime` directive string; `None` auto-infers.
 
 Naive strings parse as UTC and offset-aware strings (`…+08:00`) are absolute. To
 *display* the resulting index in a zone, make it the index and tag the zone with
@@ -1284,6 +1317,14 @@ pdf = df.to_pandas()               # -> pandas.DataFrame ('numpy' backend: an in
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # faithful masked Int64 / boolean (a lossless NA round-trip)
 df.to_csv('out.csv', index=True)   # subset of pandas to_csv; returns a str if path=None
 ```
+
+`to_pandas`'s **dtype_backend** `str` selects how a missing value is carried into pandas:
+
+- `'numpy'` (the default) — the most ecosystem-compatible form: an int / bool column
+  with a missing value becomes `float64` / `object` with `NaN`, exactly like
+  `pandas.Int64.to_numpy()`.
+- `'numpy_nullable'` — a faithful, lossless masked round-trip: an int / bool / str
+  column stays `Int64` / `boolean` / `string` with the hole as `pandas.NA`.
 
 ## Arrow & DLPack interop (zero-copy)
 

@@ -303,8 +303,13 @@ df.get_column('close')
 - **time_frame** `TimeFrame | str` 目标 bar 间隔，例如 `TimeFrame.m5` 或 `'5m'`。
   参见 [TimeFrame](#timeframe)。
 - **cumulators?** `dict[str, str] | None = None` 逐列聚合器覆盖（例如
-  `{'amount': 'sum'}`）；默认采用 OHLCV 语义（`open`=first、`high`=max、
-  `low`=min、`close`=last、`volume`=sum；其他列默认 `last`）。
+  `{'amount': 'sum'}`）。默认采用 OHLCV 语义（`open`=first、`high`=max、`low`=min、
+  `close`=last、`volume`=sum；其他列默认 `last`）。字典的每个**值**为以下之一：
+  - `'first'`——桶内第一个值
+  - `'last'`——桶内最后一个值
+  - `'max'`——最大值
+  - `'min'`——最小值
+  - `'sum'`——求和
 
 ```py
 # 从 1 分钟 K 线到 5 分钟 K 线
@@ -372,8 +377,18 @@ df['ma:5@Open']   # 别名在 directive 内部也会被解析
 保护：对含缺失值的 frame 指定**整型** `dtype` 会**抛错**，而不是悄悄写入垃圾值
 （NumPy 无法在整型数组里存 `NA`）——传 `na_value` 可改为填充。
 
-- **dtype** `str | None`——可选的导出转换；`None` 给出按 dtype 的诚实表示，显式 dtype
-  则在导出时转换（与 pandas 一致）。
+- **dtype** `str | None`——可选的导出转换。`None`（默认）给出按 dtype 的诚实表示；
+  否则：
+  - `'object'`（或 `'O'`）——无损的二维「带类型单元格」数组（数字 / `str` /
+    `Timestamp` / `volas.NA`）；唯一能保留 `str` 或 datetime 列的 dtype。
+  - `'int64'`、`'int32'`、`'int16'`、`'int8'`（以及无符号 `'uint*'`）——**精确**的
+    `i64` 通道（大整数与 datetime 的 epoch-ns 不经 `float` 往返而存活）。对含缺失值的
+    frame，除非给了 `na_value`，否则**抛错**。
+  - `'float64'`、`'float32'`、`'float16'`——（有损的）`float` 通道：缺失单元格为
+    `NaN`，超过 2⁵³ ns 的 datetime 会量化。
+  - `'bool'`——布尔。
+  - `'datetime64[ns]'`——datetime 纳秒；`NaT` 单元格被保留。
+  - `str` 列拒绝一切数值/时间 dtype——请用 `'object'`。
 - **na_value** `Any`——替换每个缺失单元格的值；默认是 NA 模型表示（`NaN` / `NaT` /
   `volas.NA`）。
 
@@ -448,8 +463,15 @@ t.dt.floor('15min')        # 对齐到 15 分钟 bar
 
 把列的值导出为一维 NumPy 数组——`pandas.Series.to_numpy` 语义：
 
-- **dtype** `str | None`——可选的导出转换；对含缺失值的列指定**整型** dtype 会**抛错**
-  （NA 没有整型表示），除非给了 `na_value`。
+- **dtype** `str | None`——可选的导出转换。`None`（默认）给出列的原生表示；否则可为
+  任何 `numpy.ndarray.astype` 接受的 NumPy dtype 字符串，常用取值为：
+  - `'int64'`、`'int32'`、`'int16'`、`'int8'`（以及无符号 `'uint64'`、`'uint32'`、
+    `'uint16'`、`'uint8'`）——整型。对含缺失值的列，除非给了 `na_value`，否则**抛错**
+    （NA 没有整型表示）。
+  - `'float64'`、`'float32'`、`'float16'`——浮点；缺失单元格为 `NaN`。
+  - `'bool'`——布尔。
+  - `'datetime64[ns]'`——datetime 纳秒；缺失单元格为 `NaT`。
+  - `'object'`（或 `'O'`）——Python 对象，每个单元格保留各自的类型值（无损）。
 - **na_value** `Any`——替换每个缺失单元格的值。默认是 NA 模型表示（float 导出为 `NaN`，
   object 数组为 `None`）。给了显式整型 `dtype` 时，值保持**精确**（大整数不经 `float64`
   漏斗），空洞变为 `na_value`。
@@ -536,12 +558,17 @@ pandas 子集 CSV 读取器。
   `parse_dates` *之后*应用，所以指定一个已解析的日期列会产生一个 `DatetimeIndex`。
 - **na_values?** `str | list[str] | None = None` 额外的缺失值标记。
 - **keep_default_na?** `bool = True` 同时把默认的 NA 标记也当作缺失。
-- **tz?** `str | None = None` `index_col` datetime 的时区：一个*naive*日期字符串
-  按 `tz` 读入（存为 UTC，索引被打上标记）。接受固定偏移（`'+08:00'`）或一个 IANA
-  名称（`'America/New_York'`）；日期列应通过 `index_col` 传入，并且*不要*同时把它列在
-  `parse_dates` 里。参见 [时区](#时区)。
+- **tz?** `str | None = None` `index_col` datetime 的时区：一个*naive*日期字符串按
+  `tz` 读入（存为 UTC，索引被打上标记）。日期列应通过 `index_col` 传入，并且*不要*
+  同时把它列在 `parse_dates` 里。参见 [时区](#时区)。接受以下之一：
+  - 一个固定 UTC 偏移，例如 `'+08:00'` / `'-05:00'`
+  - 一个 IANA 时区名称，例如 `'America/New_York'` / `'Asia/Shanghai'` / `'UTC'`
 - **date_unit?** `str | None = None` 把 `index_col` 当作此单位下的 epoch 整数读取
-  （`'s'` / `'ms'` / `'us'` / `'ns'`，绝对 UTC）；此时 `tz` 只设置显示时区。
+  （绝对 UTC；此时 `tz` 只设置显示时区）。为以下之一：
+  - `'s'`——秒
+  - `'ms'`——毫秒
+  - `'us'`——微秒
+  - `'ns'`——纳秒
 
 ```py
 from volas import read_csv
@@ -568,10 +595,15 @@ df = read_csv('data.tsv', sep='\t', header=False,  # 无表头 -> '0'..'n-1'
 
 - **obj** 要转换的值：数值 epoch、datetime 字符串，或已经是 datetime 的
   `Series`（原样返回）。
-- **unit?** `str = 'ns'` 用于**数值**输入的 epoch 单位（`'s'` / `'ms'` / `'us'` /
-  `'ns'`）；亚单位的小数部分会被保留，和 `pd.to_datetime` 一样。
-- **format?** `str | None = None` 用于**字符串**输入的显式 datetime 格式（pandas
-  的 `format=`，例如 `'%Y-%m-%d %H:%M:%S'`）——更快且无歧义；对数值输入忽略。
+- **unit?** `str = 'ns'` 用于**数值**输入的 epoch 单位（亚单位的小数部分会被保留，和
+  `pd.to_datetime` 一样）。为以下之一：
+  - `'s'`——秒
+  - `'ms'`——毫秒
+  - `'us'`——微秒
+  - `'ns'`——纳秒（默认）
+- **format?** `str | None = None` 用于**字符串**输入的显式 datetime 格式（pandas 的
+  `format=`，例如 `'%Y-%m-%d %H:%M:%S'`）——更快且无歧义；对数值输入忽略。任何
+  `strftime`/`strptime` 指令字符串；`None` 时自动推断。
 
 Naive 字符串按 UTC 解析，带偏移（`…+08:00`）的字符串表示绝对瞬时。若要把结果索引
 *显示*在某个时区，请先设为索引，再用 `tz_localize` / `tz_convert` 打上时区标记（参见
@@ -1209,6 +1241,13 @@ pdf = df.to_pandas()               # -> pandas.DataFrame（'numpy' 后端：带 
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # 忠实的 masked Int64 / boolean（一次无损的 NA 往返）
 df.to_csv('out.csv', index=True)   # pandas to_csv 的一个子集；path=None 时返回一个 str
 ```
+
+`to_pandas` 的 **dtype_backend** `str` 决定缺失值如何带入 pandas：
+
+- `'numpy'`（默认）——生态兼容性最好的形式：带缺失值的 int / bool 列变成
+  `float64` / `object` + `NaN`，与 `pandas.Int64.to_numpy()` 一致。
+- `'numpy_nullable'`——忠实、无损的 masked 往返：int / bool / str 列保持
+  `Int64` / `boolean` / `string`，空洞为 `pandas.NA`。
 
 ## 与 Arrow、DLPack 互操作（零拷贝）
 
