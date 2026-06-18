@@ -1455,25 +1455,29 @@ call automatically (so you rarely call them yourself):
 - **`DataFrame.__arrow_c_stream__`** — the Arrow C-Stream protocol; the frame as one
   `RecordBatch`, so `pa.table(df)` / `pl.from_dataframe(df)` read a frame.
 - **`Series.__dlpack__` / `Series.__dlpack_device__`** — the DLPack protocol, so
-  `np.from_dlpack(s)` / `torch.from_dlpack(s)` borrow a dense numeric / bool column.
+  `np.from_dlpack(s)` / `torch.from_dlpack(s)` borrow a dense numeric / bool column. The
+  borrowed view is **read-only** (a versioned-DLPack flag, so writing through it can't
+  bypass copy-on-write and corrupt the frame); `np.from_dlpack(s, copy=True)` returns an
+  independent **writable** copy. A non-CPU device or a stream is refused (`BufferError`);
+  an int/bool column with a missing value (DLPack has no null mask) or a str/datetime
+  column raises.
 
-**Zero-copy contract.** The *data* buffer is shared (no copy) in both directions for:
-
-- numeric columns (`int*` / `uint*` / `float*`);
-- string columns (the Arrow-native UTF-8 + offset layout);
-- nanosecond datetime columns.
-
-These are repacked (a small copy) because the two representations are not
-bit-compatible:
+**Zero-copy contract.** The *data* buffer is shared (no copy) in both directions for
+numeric (`int*` / `uint*` / `float*`), string, and nanosecond-datetime columns. The
+small repacks are:
 
 - **`bool`** — volas stores one byte per value, Arrow one *bit*;
-- the **null bitmap** (≤ `n/8` bytes, negligible beside the data);
-- on import only, a 32-bit-offset Arrow `Utf8` column (widened to volas's 64-bit
-  offsets) and a coarser-than-nanosecond timestamp (rescaled).
+- the **null bitmap** (≤ `n/8` bytes) — including, on export, a one-pass scan that turns
+  a missing `float` (in-band `NaN`) into a real Arrow null;
+- on **import only**: a 32-bit-offset `Utf8` (widened to 64-bit offsets), a
+  coarser-than-ns timestamp (rescaled), a `Decimal128` (→ `f64`, **lossy** past ~15
+  digits — keep prices as strings for exactness), a narrow / unsigned integer (→ `i64`),
+  or a `Date32` / `Date64` (→ ns datetime). Other Arrow types raise a clear error.
 
-**NA at the boundary.** A float `NaN` is in-band and crosses freely. An int / bool
-**missing** value has no DLPack and no Arrow-null-free representation, so
-`to_numpy(dtype=<int>)` and `__dlpack__` raise rather than write garbage — pass
+**NA at the boundary.** Every missing value — int, bool, **and float** — crosses as a
+real Arrow null (a missing float is the in-band `NaN`, scanned into the null bitmap on
+export), so a downstream `is_null` / `null_count` sees them all consistently. DLPack and
+an integer `to_numpy` have no null channel, so they raise on a missing value — pass
 `na_value=`, or use the Arrow path, which carries the null bitmap losslessly:
 
 ```py
@@ -1481,6 +1485,11 @@ df['qty'].to_numpy(dtype='int64')                # raises if any value is NA (pa
 df['qty'].to_numpy(dtype='int64', na_value=0)    # or fill the holes with na_value
 pa.array(df['qty'])                              # lossless: keeps int64 + the null bitmap
 ```
+
+**Timezone.** Arrow tables have no *index*, so the frame's index — and its timezone — is
+not carried: a datetime column crosses as naive UTC nanoseconds (the absolute instant is
+exact; only the display-zone label is dropped), and `from_arrow` returns a fresh
+`RangeIndex`. Re-apply a zone after import with `tz_localize` / `tz_convert`.
 
 ## Error handling
 

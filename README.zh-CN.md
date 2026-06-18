@@ -1372,30 +1372,35 @@ np.from_dlpack(df['close'])        # 零拷贝 ndarray 视图
 - **`DataFrame.__arrow_c_stream__`**——Arrow C-Stream 协议；frame 作为单个
   `RecordBatch`，让 `pa.table(df)` / `pl.from_dataframe(df)` 读取一个 frame。
 - **`Series.__dlpack__` / `Series.__dlpack_device__`**——DLPack 协议，让
-  `np.from_dlpack(s)` / `torch.from_dlpack(s)` 借用一个稠密的数值 / bool 列。
+  `np.from_dlpack(s)` / `torch.from_dlpack(s)` 借用一个稠密的数值 / bool 列。借来的视图
+  是**只读**的（带版本号 DLPack 的标志位，避免写穿绕过写时复制而改坏帧）；
+  `np.from_dlpack(s, copy=True)` 返回一份独立的**可写**副本。非 CPU 设备或 stream 会被
+  拒绝（`BufferError`）；含缺失值的 int/bool 列（DLPack 无空值掩码）或 str/datetime 列会抛错。
 
-**零拷贝契约。** 在双向上，以下列的*数据*缓冲区被共享（无拷贝）：
-
-- 数值列（`int*` / `uint*` / `float*`）；
-- 字符串列（Arrow 原生的 UTF-8 + 偏移布局）；
-- 纳秒 datetime 列。
-
-以下因两种表示不是逐位兼容而被重打包（一次小拷贝）：
+**零拷贝契约。** 在双向上，数值（`int*` / `uint*` / `float*`）、字符串、纳秒 datetime
+列的*数据*缓冲区被共享（无拷贝）。小的重打包有：
 
 - **`bool`**——volas 每个值存一个字节，Arrow 存一个*位*；
-- **空值位图**（≤ `n/8` 字节，相对数据可忽略）；
-- 仅在导入时：32 位偏移的 Arrow `Utf8` 列（加宽到 volas 的 64 位偏移）与粗于纳秒的
-  时间戳（重新缩放）。
+- **空值位图**（≤ `n/8` 字节）——包括导出时把缺失 `float`（带内 `NaN`）扫描成真正的
+  Arrow null 的那一遍；
+- 仅在**导入时**：32 位偏移的 `Utf8`（加宽到 64 位偏移）、粗于纳秒的时间戳（重新缩放）、
+  `Decimal128`（→ `f64`，超过约 15 位**有损**——精确价格请上游保持字符串）、窄/无符号
+  整数（→ `i64`）、`Date32` / `Date64`（→ 纳秒 datetime）。其余 Arrow 类型会抛清晰的错误。
 
-**边界上的 NA。** float `NaN` 是带内值，可自由跨越；而 int / bool 的**缺失**值既无
-DLPack 表示、也无「无 Arrow-null」表示，因此 `to_numpy(dtype=<int>)` 与 `__dlpack__`
-会抛错而非写入垃圾值——请传 `na_value=`，或用 Arrow 路径（它无损携带空值位图）：
+**边界上的 NA。** 每一个缺失值——int、bool、**以及 float**——都跨越为真正的 Arrow null
+（缺失的 float 即带内 `NaN`，导出时扫描进空值位图），因此下游的 `is_null` / `null_count`
+能一致地看见它们。DLPack 与整型 `to_numpy` 没有空值通道，遇缺失值会抛错——请传
+`na_value=`，或用 Arrow 路径（它无损携带空值位图）：
 
 ```py
 df['qty'].to_numpy(dtype='int64')                # 任一值为 NA 时抛错（与 pandas 对齐）
 df['qty'].to_numpy(dtype='int64', na_value=0)    # 或用 na_value 填充空洞
 pa.array(df['qty'])                              # 无损：保留 int64 + 空值位图
 ```
+
+**时区。** Arrow 表没有*索引*，因此帧的索引（及其时区）不会被携带：datetime 列以裸 UTC
+纳秒跨越（绝对时刻精确，只丢「用哪个时区显示」的标签），`from_arrow` 返回全新
+`RangeIndex`。导入后用 `tz_localize` / `tz_convert` 重新打上时区。
 
 ## 错误处理
 
