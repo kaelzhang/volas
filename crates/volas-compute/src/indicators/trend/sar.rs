@@ -1,5 +1,10 @@
 //! Parabolic SAR and the extended SAREXT, with their state-carry resume.
 
+// `!(minus_dm1 > 0.0)` is exact TA-Lib parity: the initial trend is long unless −DM1
+// is strictly positive, so a zero *or NaN* −DM1 goes long. Rewriting to `<= 0.0` would
+// flip the NaN case to short. The negated form is deliberate, not a style slip.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 /// Parabolic SAR (TA-Lib SAR). Faithful port of TA-Lib's recurrence: initial trend is
 /// chosen from the first bar's −DM1; each step trails the stop by `af·(ep − sar)`,
 /// `af` ramping by `acceleration` (capped at `maximum`) on every new extreme, resetting

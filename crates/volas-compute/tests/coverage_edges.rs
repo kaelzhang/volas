@@ -152,5 +152,5 @@ fn stochastic_public_fallbacks_cover_none_and_flat_generic_paths() {
 
     let increasing = (0..80).map(|i| 100.0 + i as f64).collect::<Vec<_>>();
     let out = ind::stochrsi_d_default_sma(&increasing).unwrap();
-    assert!(out.iter().any(|v| *v == 0.0));
+    assert!(out.contains(&0.0));
 }

@@ -600,11 +600,11 @@ pub fn ultosc(
         let (a, b) = term(i);
         bp_ring[i % max_p] = a;
         tr_ring[i % max_p] = b;
-        if i >= start - p1 + 1 {
+        if i > start - p1 {
             a1 += a;
             b1 += b;
         }
-        if i >= start - p2 + 1 {
+        if i > start - p2 {
             a2 += a;
             b2 += b;
         }

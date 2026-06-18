@@ -153,6 +153,8 @@ pub fn ad_resume(
 /// on identical bits. `from > lookback` on every resume (the cached tail starts at
 /// `valid_rows == lookback + 1` at the earliest), so every emitted row is past the
 /// warm-up mask and finite. Returns the new-row values and the updated state.
+// One parameter per series/state the resume reads; a struct would only repackage them.
+#[allow(clippy::too_many_arguments)]
 pub fn adosc_resume(
     high: &[f64],
     low: &[f64],

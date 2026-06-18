@@ -49,7 +49,6 @@ fn linreg_fit(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
         sum_y += data[today] - leaving;
         emit(today, sum_y, sum_xy);
     }
-    drop(emit);
     (slope.finish(), intercept.finish())
 }
 

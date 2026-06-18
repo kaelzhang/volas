@@ -174,23 +174,23 @@ mod tests {
         let f = vec![100.0; N]; // perfectly flat OHLC: every range / variance is 0
         let vol = vec![1000.0; N];
         // willr flat range; bop no range; cci zero deviation; mfi zero/again-flat flow.
-        assert!(willr(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
+        assert!(willr(&f, &f, &f, 14).contains(&0.0));
         assert!(bop(&f, &f, &f, &f).iter().all(|x| *x == 0.0));
-        assert!(cci(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
-        assert!(mfi(&f, &f, &f, &vol, 14).iter().any(|x| *x == 0.0));
+        assert!(cci(&f, &f, &f, 14).contains(&0.0));
+        assert!(mfi(&f, &f, &f, &vol, 14).contains(&0.0));
         // directional: smoothed TR is 0, so +DI / −DI / DX are 0.
-        assert!(plus_di(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
-        assert!(minus_di(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
-        assert!(dx(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
+        assert!(plus_di(&f, &f, &f, 14).contains(&0.0));
+        assert!(minus_di(&f, &f, &f, 14).contains(&0.0));
+        assert!(dx(&f, &f, &f, 14).contains(&0.0));
         // statistics: zero variance / zero regression denominator.
-        assert!(stddev(&f, 5, 1.0).iter().any(|x| *x == 0.0));
-        assert!(correl(&f, &f, 30).iter().any(|x| *x == 0.0));
-        assert!(beta(&f, &f, 5).iter().any(|x| *x == 0.0));
+        assert!(stddev(&f, 5, 1.0).contains(&0.0));
+        assert!(correl(&f, &f, 30).contains(&0.0));
+        assert!(beta(&f, &f, 5).contains(&0.0));
         // oscillators: flat stochastic range; CMO's flat-window guard; volume: zero
         // money-flow multiplier.
-        assert!(stoch_fastk(&f, &f, &f, 14).iter().any(|x| *x == 0.0));
-        assert!(cmo(&f, 14).iter().any(|x| *x == 0.0));
-        assert!(ad(&f, &f, &f, &vol).iter().any(|x| *x == 0.0));
+        assert!(stoch_fastk(&f, &f, &f, 14).contains(&0.0));
+        assert!(cmo(&f, 14).contains(&0.0));
+        assert!(ad(&f, &f, &f, &vol).contains(&0.0));
         // kama efficiency ratio defaults to 1.0 when there is no net change.
         assert_eq!(kama(&f, 30).len(), N);
 
@@ -201,14 +201,12 @@ mod tests {
         // +DI + −DI == 0 while smoothed TR != 0.
         let hi: Vec<f64> = (0..N).map(|i| 110.0 - i as f64 * 0.3).collect();
         let lo: Vec<f64> = (0..N).map(|i| 90.0 + i as f64 * 0.3).collect();
-        assert!(dx(&hi, &lo, &f, 14).iter().any(|x| *x == 0.0));
+        assert!(dx(&hi, &lo, &f, 14).contains(&0.0));
 
         // roc / beta: a zero prior price yields a 0 result (the divide-by-zero guard).
         let z = [0.0, 0.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0];
         assert_eq!(roc(&z, 2)[2], 0.0);
-        assert!(beta(&z, &f[..z.len()].to_vec(), 5)
-            .iter()
-            .any(|x| *x == 0.0));
+        assert!(beta(&z, &f[..z.len()], 5).contains(&0.0));
 
         // accbands: high + low == 0 falls back to the bare high / low edge.
         let pos = vec![5.0; N];

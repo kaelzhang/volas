@@ -495,6 +495,8 @@ pub fn corr(x: &[f64], y: &[f64], window: usize, min_periods: usize) -> Vec<f64>
     pairwise(x, y, window, min_periods, |bx, by| {
         let sx = buf_var(bx, 1).sqrt();
         let sy = buf_var(by, 1).sqrt();
+        // A zero *or NaN* std has no correlation; the negated form catches both.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(sx > 0.0) || !(sy > 0.0) {
             return f64::NAN;
         }

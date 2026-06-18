@@ -247,7 +247,7 @@ impl HtCoreState {
         // loop for every Hilbert-derived indicator.
         let today_value = unsafe { *price.get_unchecked(today) };
         let smoothed = self.wma.push(price, today, today_value);
-        let even = today % 2 == 0;
+        let even = today.is_multiple_of(2);
 
         let (i1, q1, q2, i2);
         if even {
@@ -303,6 +303,9 @@ impl HtCoreState {
         if self.period < lo {
             self.period = lo;
         }
+        // Explicit bounds, not `clamp`, in this innermost Hilbert loop: keep the
+        // hot-path codegen stable and the NaN handling obvious.
+        #[allow(clippy::manual_clamp)]
         if self.period < 6.0 {
             self.period = 6.0;
         } else if self.period > 50.0 {

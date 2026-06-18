@@ -80,8 +80,8 @@ pub fn ht_dcphase(price: &[f64]) -> Vec<f64> {
     let core = ht_core(price);
     let phase = dcphase_all(&core);
     let mut out = vec![f64::NAN; price.len()];
-    for i in LB_PHASE..price.len() {
-        out[i] = phase[i];
+    if price.len() > LB_PHASE {
+        out[LB_PHASE..].copy_from_slice(&phase[LB_PHASE..price.len()]);
     }
     out
 }
@@ -560,8 +560,8 @@ pub fn ht_trendmode_state(price: &[f64]) -> Option<Vec<f64>> {
     ht_trendmode_final_state(price)
 }
 
-/// Resume `HT_TRENDMODE` over `[from, n)`. Steps the core, reconstructs the DC phase
-/// + trendline, runs the shared decision with the carried `days_in_trend`, and
+/// Resume `HT_TRENDMODE` over `[from, n)`. Steps the core, reconstructs the DC phase +
+/// trendline, runs the shared decision with the carried `days_in_trend`, and
 /// emits `0.0`/`1.0`. Guarded by `from >= SMOOTH_PRICE_SIZE` (trendline window).
 pub fn ht_trendmode_resume(
     price: &[f64],

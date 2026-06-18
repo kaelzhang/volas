@@ -13,6 +13,11 @@
 // fills its integer outputs with 0, which is indistinguishable from "no pattern").
 // Parity holds on the valid region.
 
+// Each pattern's warm-up is `max()` over the avg_periods of the settings it uses,
+// expressing "the longest required lookback". That one constant currently dominates
+// is incidental — keep the `max` so a future settings change stays correct.
+#![allow(clippy::unnecessary_min_or_max)]
+
 mod multi_bar;
 mod one_bar;
 mod three_bar;
@@ -22,14 +27,19 @@ pub use one_bar::*;
 pub use three_bar::*;
 pub use two_bar::*;
 
+/// An OHLC candle recogniser: `(open, high, low, close) -> signal`.
+type PlainFn = fn(&[f64], &[f64], &[f64], &[f64]) -> Vec<f64>;
+/// An OHLC recogniser that also takes TA-Lib's `penetration` ratio.
+type PenetrationFn = fn(&[f64], &[f64], &[f64], &[f64], f64) -> Vec<f64>;
+
 /// A candlestick-pattern recogniser. Most take only `(open, high, low, close)`; a few
 /// also take TA-Lib's `penetration` ratio (with a pattern-specific default).
 pub enum CandlePattern {
     /// `(open, high, low, close)`.
-    Plain(fn(&[f64], &[f64], &[f64], &[f64]) -> Vec<f64>),
+    Plain(PlainFn),
     /// `(open, high, low, close, penetration)`, plus the TA-Lib default penetration.
     Penetration {
-        f: fn(&[f64], &[f64], &[f64], &[f64], f64) -> Vec<f64>,
+        f: PenetrationFn,
         default: f64,
     },
 }

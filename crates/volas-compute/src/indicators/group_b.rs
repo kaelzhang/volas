@@ -455,6 +455,8 @@ pub fn keltner_band_final_state(
 
 /// Resume a Keltner band over `[from, n)` by composing the EMA and ATR resumes — bit-identical
 /// to a full recompute. `None` at `from == 0` (the ATR resume declines).
+// One parameter per series/state the resume reads; a struct would only repackage them.
+#[allow(clippy::too_many_arguments)]
 pub fn keltner_band_resume(
     close: &[f64],
     high: &[f64],
@@ -605,6 +607,8 @@ pub fn ttm_squeeze_on(
 /// One Supertrend recurrence step: tighten the bands against the prior bar, then flip the
 /// trend (`+1` up / `−1` down) on a close crossing the relevant band. Returns the new
 /// `(trend, final_upper, final_lower)`. Source: TradingView — Supertrend.
+// One parameter per band/state input the step folds; a struct would only repackage them.
+#[allow(clippy::too_many_arguments)]
 fn supertrend_step(
     hl2: f64,
     atr: f64,
@@ -706,6 +710,8 @@ pub fn supertrend_final_state(
 
 /// Resume [`supertrend`] over `[from, n)` by advancing the carried trend / bands with the ATR
 /// resume — bit-identical to a full recompute. `None` at `from == 0` (the ATR resume declines).
+// One parameter per series/state the resume reads; a struct would only repackage them.
+#[allow(clippy::too_many_arguments)]
 pub fn supertrend_resume(
     high: &[f64],
     low: &[f64],
