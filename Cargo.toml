@@ -6,6 +6,7 @@ members = [
   "crates/volas-directive",
   "crates/volas-io",
   "crates/volas-time",
+  "crates/volas-arrow",
   "crates/volas-python",
   "crates/volas",
 ]

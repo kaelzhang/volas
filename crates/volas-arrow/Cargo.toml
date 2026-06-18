@@ -1,0 +1,16 @@
+[package]
+name = "volas-arrow"
+description = "Zero-copy Arrow C-Data bridge for volas columns"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+volas-core = { workspace = true }
+arrow-array = "55"
+arrow-buffer = "55"
+arrow-schema = "55"
+arrow-data = "55"

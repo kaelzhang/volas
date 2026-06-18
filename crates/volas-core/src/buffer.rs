@@ -73,6 +73,26 @@ impl<T> Buffer<T> {
             },
         }
     }
+
+    /// Pointer to the first element (valid for [`len`](Self::len) reads).
+    #[inline]
+    pub fn as_ptr(&self) -> *const T {
+        self.as_slice().as_ptr()
+    }
+}
+
+impl<T: Send + Sync + 'static> Buffer<T> {
+    /// An owner handle that keeps this buffer's allocation alive — the keep-alive a
+    /// zero-copy foreign export (Arrow / DLPack) hands the consumer alongside the raw
+    /// [`as_ptr`](Self::as_ptr) pointer, so the bytes outlive this `Buffer`. Cloning is
+    /// `O(1)` (an `Arc` bump) and exposes no volas-internal type to the export crate.
+    #[inline]
+    pub fn keepalive(&self) -> Arc<dyn Any + Send + Sync> {
+        match self {
+            Buffer::Owned(a) => a.clone(),
+            Buffer::Borrowed { guard, .. } => guard.clone(),
+        }
+    }
 }
 
 impl<T: Clone> Buffer<T> {
