@@ -235,28 +235,19 @@ df['ma:2']
   - `'min'`——最小值
   - `'sum'`——求和
 
-### df.exec(directive: str, create_column: bool = False) -> np.ndarray
+### df.exec(directive: str) -> np.ndarray
 
-执行给定的 directive，并返回对应的 NumPy ndarray。
-
-```py
-df['ma:5']  # 返回一个 Series
-
-df.exec('ma:5', create_column=True)  # 返回一个 NumPy ndarray
-```
+求值给定的 directive，并返回其值的 NumPy ndarray。这是一次纯粹的**无状态**求值——绝不修改 frame（不创建列，也不读写任何缓存）。
 
 ```py
-# 只计算，不在 DataFrame 中创建新列
+# 只计算，不触碰 frame
 df.exec('ma:20')
 ```
 
 `df[directive]` 与 `df.exec(directive)` 的区别在于
-- 前者会把 `directive` 的结果创建为新列并缓存起来，供之后复用；而
-  `df.exec(directive)` 不会，除非将 `create_column` 设为 `True`
-- 前者还能接受其他 pandas 索引目标，而 `df.exec(directive)` 只接受合法的
-  **volas** directive 字符串
-- 前者返回 `Series` 或 `DataFrame` 对象，后者返回
-  [`np.ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html)
+- `df[directive]` 会把结果创建为列并缓存（append 之后增量刷新），而 `df.exec(directive)` 每次都重新计算且不改动 frame；需要缓存后的 ndarray 时，用 `df[directive].to_numpy()`
+- `df[directive]` 还能接受其他索引目标（列名、列表、布尔掩码、切片），而 `df.exec(directive)` 只接受合法的 **volas** directive 字符串
+- `df[directive]` 返回 `Series` 或 `DataFrame` 对象，而 `df.exec(directive)` 返回 [`np.ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html)
 
 ### df.get_column(key: str) -> Series
 

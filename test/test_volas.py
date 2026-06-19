@@ -178,7 +178,7 @@ def test_parity_with_stock_pandas(stock, spd, directive):
 
 def test_exec_returns_ndarray(stock):
     assert isinstance(stock.exec('ma:5'), np.ndarray)
-    assert isinstance(stock.exec('ma:5', create_column=True), np.ndarray)
+    assert 'ma:5' not in stock.columns  # exec is stateless — it never caches a column
 
 
 def test_ma_values():

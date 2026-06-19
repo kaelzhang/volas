@@ -275,30 +275,27 @@ Which gets the 2-period simple moving average on column `"close"`.
   - `'min'` — the minimum
   - `'sum'` — the sum
 
-### df.exec(directive: str, create_column: bool = False) -> np.ndarray
+### df.exec(directive: str) -> np.ndarray
 
-Executes the given directive and returns a numpy ndarray according to the
-directive.
-
-```py
-df['ma:5']  # returns a Series
-
-df.exec('ma:5', create_column=True)  # returns a numpy ndarray
-```
+Evaluates the given directive and returns its values as a numpy ndarray. It is a
+pure, **stateless** evaluation — the frame is never modified (no column is
+created, and no cache is read or written).
 
 ```py
-# This will only calculate without creating a new column in the dataframe
+# Compute the directive without touching the frame
 df.exec('ma:20')
 ```
 
 The difference between `df[directive]` and `df.exec(directive)` is that
-- the former will create a new column for the result of `directive` as a cache
-  for later use, while `df.exec(directive)` does not unless we pass the
-  parameter `create_column` as `True`
-- the former one accepts other pandas indexing targets, while
-  `df.exec(directive)` only accepts a valid **volas** directive string
-- the former one returns a `Series` or `DataFrame` object while the latter one
-  returns an [`np.ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html)
+- `df[directive]` creates a column for the result and caches it (incrementally
+  refreshed after an append), while `df.exec(directive)` computes fresh every
+  time and leaves the frame untouched — for a cached ndarray, use
+  `df[directive].to_numpy()`
+- `df[directive]` also accepts other indexing targets (a column name, a list, a
+  boolean mask, a slice), while `df.exec(directive)` only accepts a valid
+  **volas** directive string
+- `df[directive]` returns a `Series` or `DataFrame` object while
+  `df.exec(directive)` returns an [`np.ndarray`](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.html)
 
 ### df.get_column(key: str) -> Series
 

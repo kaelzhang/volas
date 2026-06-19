@@ -19,12 +19,12 @@ def test_strict_equals():                    # EX-5
     assert a.equals(DataFrame({'x': [1.0, 0.0]})['x'])
 
 
-def test_exec_create_column():               # EX-3
+def test_exec_is_stateless():                # EX-3
     df = DataFrame({'open': [1., 2., 3., 4., 5.], 'close': [2., 3., 4., 5., 6.]})
     df.exec('ma:2')
-    assert 'ma:2' not in df.columns          # not cached
-    df.exec('ma:2', create_column=True)
-    assert 'ma:2' in df.columns              # cached
+    assert 'ma:2' not in df.columns          # exec never caches — it is stateless
+    df['ma:2']                               # df[directive] is the caching path
+    assert 'ma:2' in df.columns
 
 
 def test_drop_columns_axis1():               # EX-4

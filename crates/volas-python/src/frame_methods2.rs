@@ -169,55 +169,25 @@ impl PyDataFrame {
 
     /// Evaluate an indicator directive and return its values as a NumPy array.
     ///
-    /// Unlike ``df['ma:5']`` (which returns a Series and caches the column),
-    /// ``exec`` returns the raw array; pass ``create_column=True`` to also cache
-    /// it on the frame under its canonical name.
+    /// A pure, stateless evaluation: it parses and computes the directive and leaves
+    /// the frame untouched — no column is created, and no cache is read or written.
+    /// For a cached, incrementally-refreshed result use ``df[directive]`` (a Series)
+    /// or ``df[directive].to_numpy()``.
     ///
     /// Args:
     ///     directive (str): the directive, e.g. ``'macd'``, ``'boll.upper:20'``,
     ///         ``'close > open'``.
-    ///     create_column (bool): if True, materialize and cache the result as a
-    ///         column (default False).
     ///
     /// Usage::
     ///
-    ///     df.exec('ma:5')               # ndarray of SMA(5)
-    ///     df.exec('kdj.j', create_column=True)  # also caches the column
+    ///     df.exec('ma:5')   # ndarray of SMA(5); the frame is not modified
     ///
     /// Returns:
     ///     numpy.ndarray
-    #[pyo3(signature = (directive, create_column = false))]
-    pub(crate) fn exec<'py>(
-        &mut self,
-        py: Python<'py>,
-        directive: &str,
-        create_column: bool,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        if self.inner.has_column(directive) {
-            let col = self.inner.column(directive).map_err(pyerr)?.clone();
-            return Ok(column_to_numpy(py, &col));
-        }
+    pub(crate) fn exec<'py>(&self, py: Python<'py>, directive: &str) -> PyResult<Bound<'py, PyAny>> {
         let node = parse(directive).map_err(directive_err)?;
-        if create_column {
-            // Materialize + cache under the canonical name, exactly like `df[directive]`.
-            let canonical = volas_directive::stringify(&node);
-            if self.inner.has_column(&canonical) {
-                self.refresh_computed(Some(&canonical))?;
-            } else {
-                let col = execute(&self.inner, &node).map_err(value_err)?;
-                let lookback = volas_directive::lookback::lookback(&node);
-                let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
-                self.inner.set_column(&canonical, col).map_err(pyerr)?;
-                self.inner
-                    .set_computed(&canonical, canonical.clone(), lookback);
-                self.inner.set_computed_state(&canonical, state);
-            }
-            let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
-            Ok(column_to_numpy(py, &col))
-        } else {
-            let col = execute(&self.inner, &node).map_err(value_err)?;
-            Ok(column_into_numpy(py, col))
-        }
+        let col = execute(&self.inner, &node).map_err(value_err)?;
+        Ok(column_into_numpy(py, col))
     }
 
     /// Gets a column from the frame by name (alias-aware), as a Series.

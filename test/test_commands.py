@@ -104,7 +104,7 @@ def test_cross(stock):
 
 def test_increase(stock):
     assert stock['increase:3,1@close']['2020-02-13']
-    assert type(stock.exec('increase:3@close', False)) is np.ndarray
+    assert type(stock.exec('increase:3@close')) is np.ndarray
     assert stock['increase:3@close']['2020-02-13']
     assert not stock['increase:4@close']['2020-02-13']
     assert stock['increase:3,-1@close']['2020-02-24']
