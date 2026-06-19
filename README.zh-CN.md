@@ -44,7 +44,7 @@ pip install volas
 
 ## 为什么选 volas
 
-- **pandas 风格 API。** `.loc` / `.iloc` / `.at`、`read_csv`、
+- **pandas 风格 API** `.loc` / `.iloc` / `.at`、`read_csv`、
   `to_numpy` 和重采样都按熟悉的方式使用——面向 OHLCV 工作流，换一个 import
   代码基本不动。它**不是**通用 pandas 替代品。（参见
   [哪些不在覆盖范围内](PANDAS-DIFFERENCES.md#index-limitations)）
@@ -52,8 +52,8 @@ pip install volas
   - 按当前已发布报告的默认口径，在 **139 / 157** 个覆盖指标上胜过 TA-Lib
     ——可通过 `make benchmark` 复现。
   - 在增量更新（每来一根新 bar）计算中，volas 在**所有**指标上都是**所有**类库中最快的——比 TA-Lib 快 **~5×**，比 pandas 最高快约 **~360×**。
-- **为实时 tick 而生。**新 bar 只触碰受影响的尾部（`O(lookback)`，不是 `O(n)`）；指标以微秒级刷新，不做整列重算。
-- **Rust 在内，NumPy / Torch 在外。**编译型内核，运行时零 pandas 依赖；
+- **为实时 tick 而生** 新 bar 只触碰受影响的尾部（`O(lookback)`，不是 `O(n)`）；指标以微秒级刷新，不做整列重算。
+- **Rust 在内，NumPy / Torch 在外** 编译型内核，运行时零 pandas 依赖；
   `to_numpy()` 直接喂给 NumPy 和 `torch.Tensor` 流水线。
 
 ![volas 如何在 append 后只刷新 stale tail](https://volas.ost.ai/animated_gif/after-append-indicator-zh-cn.gif)
