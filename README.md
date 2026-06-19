@@ -1470,12 +1470,13 @@ nanosecond-datetime columns. The small repacks are:
 - **`bool`** — volas stores one byte per value, Arrow one *bit*;
 - the **null bitmap** (≤ `n/8` bytes) — including, on export, a one-pass scan that turns
   a missing `float` (in-band `NaN`) into a real Arrow null;
-- on **import only**: a 32-bit-offset `Utf8` (widened to 64-bit offsets), a
-  coarser-than-ns timestamp (rescaled), a `Decimal128` / `Decimal256` (→ `f64`, **lossy**
-  past ~15 digits — keep prices as strings for exactness), a narrow / unsigned integer
-  (→ `i64`; a `UInt64` past `i64::MAX` has no lossless image and raises), a
-  dictionary / categorical column (decoded to its values), or a `Date32` / `Date64`
-  (→ ns datetime). Other Arrow types raise a clear error.
+- on **import only**: a 32-bit-offset `Utf8` (widened to 64-bit offsets) or a
+  `string_view` (materialised to contiguous bytes), a coarser-than-ns timestamp
+  (rescaled), a `Decimal128` / `Decimal256` (→ `f64`, **lossy** past ~15 digits — keep
+  prices as strings for exactness), a narrow / unsigned integer (→ `i64`; a `UInt64` past
+  `i64::MAX` has no lossless image and raises), a dictionary / categorical column (decoded
+  to its values), a typeless `Null` column (→ an all-NA `f64` column), or a
+  `Date32` / `Date64` (→ ns datetime). Other Arrow types raise a clear error.
 
 **NA at the boundary.** Every missing value — int, bool, **and float** — crosses as a
 real Arrow null (a missing float is the in-band `NaN`, scanned into the null bitmap on

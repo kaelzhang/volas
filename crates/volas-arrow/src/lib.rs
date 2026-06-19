@@ -309,6 +309,23 @@ mod tests {
     }
 
     #[test]
+    fn imports_utf8view_and_null() {
+        use arrow_array::{NullArray, StringViewArray};
+        // Arrow `string_view` (Utf8View) materialises to a dense Str column; a null stays NA.
+        let sv: ArrayRef = Arc::new(StringViewArray::from(vec![Some("AAPL"), None, Some("MSFT")]));
+        assert_eq!(
+            column_from_arrow(&sv).unwrap(),
+            Column::str_with(vec!["AAPL".into(), "".into(), "MSFT".into()], na_at(3, &[1])),
+        );
+        // a typeless `Null` column carries no dtype → an all-NA f64 column.
+        let nulls: ArrayRef = Arc::new(NullArray::new(3));
+        match column_from_arrow(&nulls).unwrap() {
+            Column::F64(b) => assert!(b.len() == 3 && b.iter().all(|x| x.is_nan())),
+            _ => unreachable!(), // LCOV_EXCL_LINE
+        }
+    }
+
+    #[test]
     fn imports_date32_and_date64_as_ns_datetime() {
         use arrow_array::{Date32Array, Date64Array};
         // Date32 = days since epoch: day 1 -> 86_400 s -> 86_400_000_000_000 ns

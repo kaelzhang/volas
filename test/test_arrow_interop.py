@@ -243,6 +243,16 @@ def test_from_arrow_dictionary_and_decimal256():
     assert volas.Series.from_arrow(dec).to_list()[0] == 1.5
 
 
+def test_from_arrow_string_view_and_null():
+    # canonical data defaults string columns to string_view — DataFrame.from_arrow must
+    # take it directly (no manual cast(pa.string()) workaround).
+    tbl = pa.table({"symbol": pa.array(["AAPL", None, "MSFT"], type=pa.string_view())})
+    assert volas.DataFrame.from_arrow(tbl)["symbol"].to_list() == ["AAPL", volas.NA, "MSFT"]
+    # a typeless all-null column imports as an all-NA column (length preserved)
+    n = volas.Series.from_arrow(pa.array([None, None, None], type=pa.null()))
+    assert len(n) == 3 and all(v is volas.NA or v != v for v in n.to_list())
+
+
 def test_from_arrow_rejects_wrong_capsule():
     class Bogus:
         def __arrow_c_array__(self, requested_schema=None):

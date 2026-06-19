@@ -176,6 +176,16 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
             let dense = arrow_cast::cast(src, &DataType::Float64)?;
             column_from_arrow(&dense)?
         }
+        // Arrow `string_view` (Utf8View) — a view layout volas cannot borrow into its
+        // contiguous StrBuffer; materialise it to LargeUtf8 (one copy — the same one the
+        // manual `cast(pa.string())` workaround pays) and re-import.
+        DataType::Utf8View => {
+            let dense = arrow_cast::cast(src, &DataType::LargeUtf8)?;
+            column_from_arrow(&dense)?
+        }
+        // A typeless all-null column (Arrow `Null`) carries no dtype; land it as an all-NA
+        // f64 column — volas's neutral missing-value carrier (in-band NaN).
+        DataType::Null => Column::f64(vec![f64::NAN; len]),
         other => {
             return Err(ArrowError::NotYetImplemented(format!(
                 "volas cannot import an Arrow {other:?} column"
