@@ -77,9 +77,9 @@ each new bar to the `DataFrame` and recomputing every indicator across the whole
 frame again, bar after bar, to mimic the OHLCV stream a live system actually sees.
 So much of that was pure waste — the same columns rebuilt from scratch on every
 step — and across a few years of 1-minute data that redundant work alone could
-drag a single backtest out by *hours*. Every idea I wanted to try, every parameter
-I wanted to sweep, paid that tax again. The tooling, not the thinking, was setting
-the pace of my research.
+drag a single backtest out by **hours**. Every idea I wanted to try, every parameter
+I wanted to sweep, paid that tax again. **The tooling, not the thinking, was setting
+the pace of my research.**
 
 So I stopped patching around it and rebuilt the whole data layer from the ground
 up, `pandas` thrown out entirely. The bet paid off: the data-processing pass that
