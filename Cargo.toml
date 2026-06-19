@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.2.2"
+version = "1.3.0"
 edition = "2021"
 authors = ["Kael Zhang <i+pypi@kael.me>"]
 license = "MIT"
@@ -24,12 +24,12 @@ repository = "https://github.com/kaelzhang/volas"
 # [workspace.package].version and are bumped together by scripts/bump_version.py.
 # Members reference these via `{ workspace = true }`.
 [workspace.dependencies]
-volas-core = { path = "crates/volas-core", version = "1.2.2" }
-volas-compute = { path = "crates/volas-compute", version = "1.2.2" }
-volas-directive = { path = "crates/volas-directive", version = "1.2.2" }
-volas-time = { path = "crates/volas-time", version = "1.2.2" }
-volas-io = { path = "crates/volas-io", version = "1.2.2" }
-volas-arrow = { path = "crates/volas-arrow", version = "1.2.2" }
+volas-core = { path = "crates/volas-core", version = "1.3.0" }
+volas-compute = { path = "crates/volas-compute", version = "1.3.0" }
+volas-directive = { path = "crates/volas-directive", version = "1.3.0" }
+volas-time = { path = "crates/volas-time", version = "1.3.0" }
+volas-io = { path = "crates/volas-io", version = "1.3.0" }
+volas-arrow = { path = "crates/volas-arrow", version = "1.3.0" }
 
 [profile.release]
 lto = true
