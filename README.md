@@ -304,12 +304,24 @@ df.get_column('close')
 # Name: close, dtype: int64
 ```
 
-### df.append(other: DataFrame | Row) -> DataFrame
+### df.append(other: DataFrame | Row | dict) -> DataFrame
 
-Appends rows of `other` (a `DataFrame` or a `Row`) to the end of the caller in
-place, returns the same `DataFrame`, and applies the `DatetimeIndex` to the
-newly-appended row(s) if possible. Use `copy()` first when the original frame
-must stay unchanged.
+Appends rows of `other` to the end of the caller in place, returns the same
+`DataFrame`, and applies the `DatetimeIndex` to the newly-appended row(s) if
+possible. Use `copy()` first when the original frame must stay unchanged.
+
+`other` is a `DataFrame`, a `Row`, or a **scalar bar dict** — one bar written as
+`{column: value}` with the bar's timestamp under the key equal to the index's name
+(a `RangeIndex` auto-increments). The dict form is the fast live path — it builds the
+bar straight into the frame with no per-bar 1-row `DataFrame`:
+
+```python
+df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v})
+```
+
+It is **strict**: every data column must be provided (a missing one raises — unlike a
+`DataFrame` / `Row`, where a missing column is NA-padded), and an unknown key raises.
+Cached directive columns are not supplied — they are padded and refreshed automatically.
 
 If the caller is a **tf-aware** DataFrame (one built with a `time_frame`, or
 the result of `cumulate`), `append` instead **folds** each finer bar into the

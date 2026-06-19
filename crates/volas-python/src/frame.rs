@@ -9,7 +9,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use volas_core::{
-    binary_supertype, CmpOp, Column, DataFrame, Index,
+    binary_supertype, CmpOp, Column, DataFrame, DType, Index,
     IndexKind, Series,
 };
 use volas_directive::parse;
@@ -482,6 +482,82 @@ impl PyDataFrame {
             .map(|c| Column::bool((0..c.len()).map(|i| c.is_valid(i) != want_na).collect()))
             .collect();
         self.with_columns(cols)
+    }
+
+    /// Build a one-row bar frame from a scalar `dict` for `append`. The timestamp lives
+    /// under the key equal to the index's name (a labeled index); a `RangeIndex` auto-
+    /// extends. Strict: every plain (non-directive) column must be supplied, the index key
+    /// must be present (labeled index), and an unknown or directive key is an error. The
+    /// frame's known column dtypes drive the coercion (no inference) — the fast bar path.
+    pub(crate) fn bar_from_dict(&self, dict: &Bound<'_, PyDict>) -> PyResult<DataFrame> {
+        let inner = &self.inner;
+        let labeled = !matches!(inner.index().kind(), IndexKind::Range(_));
+        let idx_name: Option<String> = if labeled {
+            Some(inner.index().name().map(str::to_string).ok_or_else(|| {
+                PyValueError::new_err(
+                    "append(dict): the frame's index is unnamed — name it (set_index) so a \
+                     bar's timestamp has a key, or append a Row / DataFrame instead",
+                )
+            })?)
+        } else {
+            None
+        };
+        // Validate every key: the index key, or a plain column. Reject unknown / directive.
+        for k in dict.keys() {
+            let ks: String = k.extract()?;
+            if idx_name.as_deref() == Some(ks.as_str()) {
+                continue;
+            }
+            if !inner.has_column(&ks) {
+                return Err(PyValueError::new_err(format!(
+                    "append(dict): unknown key {ks:?} — not a column of the frame nor its index"
+                )));
+            }
+            if inner.is_computed(&ks) {
+                return Err(PyValueError::new_err(format!(
+                    "append(dict): {ks:?} is a cached directive column — recomputed by \
+                     fulfill, not set per bar"
+                )));
+            }
+        }
+        // Every plain (non-directive) column must be supplied.
+        let mut names = Vec::new();
+        let mut cols = Vec::new();
+        for name in inner.names() {
+            if inner.is_computed(name) {
+                continue;
+            }
+            let v = dict.get_item(name)?.ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "append(dict): missing column {name:?} — every data column must be provided"
+                ))
+            })?;
+            let dt = inner.column(name).map_err(pyerr)?.dtype();
+            cols.push(crate::coerce::bar_scalar_to_column(&v, dt)?);
+            names.push(name.clone());
+        }
+        // The one-row index. A RangeIndex auto-extends (None → a fresh range of len 1).
+        let index = match idx_name {
+            None => None,
+            Some(key) => {
+                let ts = dict.get_item(&key)?.ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "append(dict): missing index key {key:?} (the bar's timestamp)"
+                    ))
+                })?;
+                let icol = match inner.index().kind() {
+                    IndexKind::Datetime(..) => crate::coerce::bar_scalar_to_column(&ts, DType::Datetime)?,
+                    IndexKind::Int64(_) => crate::coerce::bar_scalar_to_column(&ts, DType::I64)?,
+                    IndexKind::Str(_) => crate::coerce::bar_scalar_to_column(&ts, DType::Utf8)?,
+                    IndexKind::Range(_) => unreachable!("labeled excludes Range"), // LCOV_EXCL_LINE
+                };
+                Some(match inner.index().kind() {
+                    IndexKind::Datetime(_, tz) => Index::from_column_tz(&icol, *tz).map_err(pyerr)?,
+                    _ => Index::from_column(&icol).map_err(pyerr)?,
+                })
+            }
+        };
+        DataFrame::new(names, cols, index).map_err(pyerr)
     }
 
     /// Fold incoming fine bars into a tf-aware frame: each bar either extends the

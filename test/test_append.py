@@ -58,6 +58,69 @@ def test_append_row(stock):
 def test_append_invalid_type_raises(stock):
     with pytest.raises(TypeError):
         stock.append(1)
+
+
+# --- append a scalar bar dict (timestamp under the index-name key) ------------
+
+def _bar_dict(stock, i):
+    """The i-th row as a scalar bar dict: every column + the index-name timestamp key."""
+    row = stock.iloc[i]
+    bar = {c: row[c] for c in stock.columns}
+    bar['time_key'] = row.name              # the convention key == the index's name
+    return bar
+
+
+def test_append_dict_bar(stock):
+    head = stock.iloc[:10]
+    bar = _bar_dict(stock, 10)
+    out = head.append(bar)
+    assert out is head and len(out) == 11
+    assert out.iloc[-1].name == stock.iloc[10].name          # timestamp placed from the key
+    assert out['volume'].dtype == 'int64'                    # int column stays int (no f64 demotion)
+    assert out['close'].to_numpy()[-1] == stock['close'].to_numpy()[10]
+
+
+def test_append_dict_missing_index_key_raises(stock):
+    bar = _bar_dict(stock, 10)
+    del bar['time_key']                                      # drop the timestamp key
+    with pytest.raises(ValueError):
+        stock.iloc[:10].append(bar)
+
+
+def test_append_dict_missing_column_raises(stock):
+    bar = _bar_dict(stock, 10)
+    del bar['close']                                         # a data column is missing
+    with pytest.raises(ValueError):
+        stock.iloc[:10].append(bar)
+
+
+def test_append_dict_unknown_key_raises(stock):
+    bar = _bar_dict(stock, 10)
+    bar['not_a_column'] = 1.0
+    with pytest.raises(ValueError):
+        stock.iloc[:10].append(bar)
+
+
+def test_append_dict_skips_and_refreshes_cached_directive(stock):
+    # a bar dict carries only raw columns; a cached directive column is auto-skipped
+    # (not "missing") and refreshed by fulfill.
+    head = stock.iloc[:10]
+    _ = head['ma:3']                                 # cache a directive column
+    head.append(_bar_dict(stock, 10))                # the bar provides only raw columns
+    head.fulfill()
+    assert len(head) == 11 and 'ma:3' in head.columns
+    close = head['close'].to_numpy()
+    assert abs(head['ma:3'].to_numpy()[-1] - close[-3:].mean()) < 1e-9
+
+
+def test_append_dict_none_is_dtype_preserving_na(stock):
+    # a missing scalar becomes a dtype-preserving NA — an int column keeps int64
+    head = stock.iloc[:10]
+    bar = _bar_dict(stock, 10)
+    bar['volume'] = None
+    head.append(bar)
+    assert head['volume'].dtype == 'int64'           # not promoted to float
+    assert head['volume'].to_list()[-1] is volas.NA
     with pytest.raises(TypeError):
         stock.append('not-a-frame')
 

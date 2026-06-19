@@ -602,6 +602,31 @@ def test_append(benchmark, states, indicator, candidate):
     benchmark.pedantic(run, setup=setup, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
 
 
+# --- section 1b: bar input style — dict-direct vs construct-then-append ------
+
+@pytest.mark.parametrize('style', ['dict', 'construct'])
+def test_append_bar_input(benchmark, style):
+    """The live per-bar cost when a new bar arrives as scalars: append the dict
+    directly (``df.append(dict)``) vs wrap it in a 1-row DataFrame first. Both pay the
+    steady-state single-append cost; only ``construct`` also pays the per-bar frame
+    construction. A RangeIndex frame (auto-increment) isolates that difference."""
+    bar = {c: float(ARR[c][-1]) for c in COLUMNS}     # the incoming scalars
+    one_row = {c: [bar[c]] for c in COLUMNS}           # 1-element-list form for construct
+
+    def setup():
+        d = VolasDataFrame({c: ARR[c][:-1] for c in COLUMNS})  # RangeIndex
+        d.append(VolasDataFrame(one_row))                      # one-time capacity growth
+        return (d,), {}
+
+    if style == 'dict':
+        def run(d):
+            d.append(bar)
+    else:
+        def run(d):
+            d.append(VolasDataFrame(one_row))
+    benchmark.pedantic(run, setup=setup, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
+
+
 # --- section 2: batch indicator computation --------------------------------
 
 @pytest.mark.parametrize('candidate', CANDIDATES)

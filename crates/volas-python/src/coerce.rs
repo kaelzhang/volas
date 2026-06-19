@@ -203,6 +203,44 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     ))
 }
 
+/// Coerce one Python scalar to a 1-row [`Column`] of EXACTLY `dtype` — the bar-append
+/// path (`df.append(dict)`), where the frame's column dtype is already known so there is
+/// no inference. A missing scalar (`None` / `NaN` / `volas.NA`) becomes that dtype's NA;
+/// a present value the dtype cannot hold (a non-integer into an int column) errors — C4,
+/// never silently lossy. Distinct from [`scalar_fill_col`], which is fillna's value-based
+/// promotion (returns an f64 column plus a dtype hint).
+pub(crate) fn bar_scalar_to_column(v: &Bound<'_, PyAny>, dtype: DType) -> PyResult<Column> {
+    let na = crate::frame_index::is_na_like_py(v);
+    let na1 = || Validity::from_valid_iter(1, std::iter::once(false));
+    Ok(match dtype {
+        DType::F64 => Column::f64(vec![if na { f64::NAN } else { v.extract::<f64>()? }]),
+        DType::F32 => Column::f32(vec![if na { f32::NAN } else { v.extract::<f32>()? }]),
+        DType::I64 if na => Column::i64_with(vec![0], na1()),
+        DType::I64 => Column::i64_with(vec![bar_int(v)?], Validity::dense()),
+        DType::I32 if na => Column::i32_with(vec![0], na1()),
+        DType::I32 => {
+            let n = i32::try_from(bar_int(v)?)
+                .map_err(|_| PyOverflowError::new_err("value does not fit an int32 column"))?;
+            Column::i32_with(vec![n], Validity::dense())
+        }
+        DType::Bool if na => Column::bool_with(vec![false], na1()),
+        DType::Bool => Column::bool_with(vec![v.extract::<bool>()?], Validity::dense()),
+        DType::Utf8 if na => Column::str_with(vec![String::new()], na1()),
+        DType::Utf8 => Column::str_with(vec![v.extract::<String>()?], Validity::dense()),
+        DType::Datetime => {
+            Column::datetime(vec![if na { i64::MIN } else { crate::scalar::parse_ts(v)? }])
+        }
+    })
+}
+
+/// A Python integer for an int column — an int (incl. a numpy integer scalar), never a
+/// float (a fractional value into an int column is a lossy error, C4).
+fn bar_int(v: &Bound<'_, PyAny>) -> PyResult<i64> {
+    v.extract::<i64>()
+        .or_else(|_| v.call_method0("__index__")?.extract::<i64>())
+        .map_err(|_| PyTypeError::new_err("value for an int column must be an integer"))
+}
+
 /// Build a `Bool` column from `Option`s, marking `None` cells `volas.NA`.
 pub(crate) fn option_bool_column(vv: Vec<Option<bool>>) -> Column {
     let validity = Validity::from_valid_iter(vv.len(), vv.iter().map(Option::is_some));

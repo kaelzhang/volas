@@ -150,6 +150,19 @@ def test_tf_append_batch_matches_one_shot():
     assert df.equals(fine.cumulate('5m'))
 
 
+def test_tf_append_dict_bar_matches_one_shot():
+    # a tf-aware frame folds a scalar bar dict (timestamp under the index-name key)
+    # bit-identically to the one-shot cumulate.
+    fine = get_1m()
+    df = _seed(fine)
+    for i in range(1, len(fine)):
+        row = fine.iloc[i]
+        bar = {c: row[c] for c in COLUMNS}
+        bar['time_key'] = row.name
+        df.append(bar)
+    assert df.equals(fine.cumulate('5m'))
+
+
 def test_cumulate_keeps_index_name():
     # pandas resample keeps the source index name; volas matches
     fine = get_1m()  # index named 'time_key'

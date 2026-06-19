@@ -149,6 +149,13 @@ impl DataFrame {
         self.name_to_idx.contains_key(self.resolve(name))
     }
 
+    /// Whether `name` is a cached directive (computed) column rather than plain data.
+    /// Plain columns are supplied per bar; computed ones are derived and refreshed by
+    /// `fulfill`. A read-only metadata lookup — off every compute / append hot path.
+    pub fn is_computed(&self, name: &str) -> bool {
+        self.computed.contains_key(name)
+    }
+
     /// Define a column alias (`as_name -> src_name`), returning a new frame.
     /// Errors if `as_name` is already a real column, or `src_name` does not exist.
     pub fn with_alias(&self, as_name: &str, src_name: &str) -> Result<DataFrame> {

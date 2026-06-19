@@ -290,11 +290,21 @@ df.get_column('close')
 # Name: close, dtype: int64
 ```
 
-### df.append(other: DataFrame | Row) -> DataFrame
+### df.append(other: DataFrame | Row | dict) -> DataFrame
 
-把 `other`（`DataFrame` 或 `Row`）的行就地追加到调用者末尾，返回同一个
-`DataFrame`，并尽可能把 `DatetimeIndex` 应用到新追加的行上。如果原 `DataFrame` 必须保持
-不变，请先 `copy()`。
+把 `other` 的行就地追加到调用者末尾，返回同一个 `DataFrame`，并尽可能把 `DatetimeIndex`
+应用到新追加的行上。如果原 `DataFrame` 必须保持不变，请先 `copy()`。
+
+`other` 可以是 `DataFrame`、`Row`，或一个**标量 bar dict**——把一根 bar 写成
+`{列名: 值}`，并把该 bar 的时间戳放在 key == 索引名 的位置（`RangeIndex` 会自增）。
+dict 形态是更快的实时路径——它把 bar 直接组进帧，不构造每根 bar 的 1 行 `DataFrame`：
+
+```python
+df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v})
+```
+
+它是**严格**的:每一个数据列都必须提供(缺列会报错——这点与 `DataFrame` / `Row` 不同,
+后者会把缺失列 NA 补齐),出现未知 key 也报错。缓存的指标列无需提供——它们会自动补齐并刷新。
 
 如果调用者是一个**带 tf**的 DataFrame（用 `time_frame` 构建的，或者 `cumulate`
 的结果），`append` 会把每一根更细的 bar **折叠**进正在形成中的 bar，而不是

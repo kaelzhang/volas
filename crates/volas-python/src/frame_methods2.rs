@@ -420,12 +420,15 @@ impl PyDataFrame {
     /// (it pays one copy-on-write the next time *it* is appended to).
     ///
     /// Args:
-    ///     other (DataFrame | Row): the rows to append (fine bars if tf-aware).
+    ///     other (DataFrame | Row | dict): the rows to append (fine bars if tf-aware).
+    ///         A scalar dict is one bar — every data column plus the timestamp under the
+    ///         key equal to the index's name (a RangeIndex auto-extends).
     ///
     /// Usage::
     ///
-    ///     df.append(bar)           # append / fold one bar
-    ///     df.append(other_frame)   # append / fold many bars
+    ///     df.append(bar)                          # append / fold one bar (Row / 1-row frame)
+    ///     df.append({'time': ts, 'open': o, ...}) # append / fold one bar (scalar dict)
+    ///     df.append(other_frame)                  # append / fold many bars
     ///
     /// Returns:
     ///     DataFrame: ``self`` (enabling chaining).
@@ -464,7 +467,19 @@ impl PyDataFrame {
             }
             return Ok(slf);
         }
-        Err(PyTypeError::new_err("append expects a DataFrame or Row"))
+        // A scalar bar dict — the timestamp under the index-name key. Built straight into a
+        // one-row frame (no intermediate Python DataFrame), then folded / appended.
+        if let Ok(dict) = other.downcast::<pyo3::types::PyDict>() {
+            let mut me = slf.borrow_mut();
+            let bar = me.bar_from_dict(dict)?;
+            if me.tf.is_some() {
+                me.fold_append(&bar)?;
+            } else {
+                me.inner.append(&bar).map_err(pyerr)?;
+            }
+            return Ok(slf);
+        }
+        Err(PyTypeError::new_err("append expects a DataFrame, a Row, or a bar dict"))
     }
 
     /// Arrow PyCapsule stream protocol — exposes the whole frame to Arrow consumers
