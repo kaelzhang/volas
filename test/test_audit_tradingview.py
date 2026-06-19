@@ -193,6 +193,34 @@ def test_cog_matches_pine(n):
     _close()(f"cog:{n}", _ref_cog(C, n))
 
 
+def test_cog_dense_and_nan_paths_agree():
+    """cog has an O(n) dense slide and an O(n·period) NaN-fallback (a running sum
+    can't drop a NaN). Both must equal the per-window reference: a gappy / nested
+    input takes the fallback, a dense input the slide."""
+    # interior NaN -> fallback path, exact + correct NaN pattern
+    x = C.copy()
+    x[[50, 51, 800]] = np.nan
+    s = volas.DataFrame({"c": x})["cog:10@c"]
+    ref = _ref_cog(x, 10)
+    got = np.asarray(s.to_numpy(), float)
+    assert np.array_equal(np.isnan(got), np.isnan(ref))
+    m = ~np.isnan(ref)
+    np.testing.assert_allclose(got[m], ref[m], rtol=1e-9, atol=1e-9)
+    # nested directive (ma:5 warm-up NaN) also takes the fallback
+    assert len(DF["cog:10@(ma:5)"]) == len(C)
+
+
+def test_cog_zero_window_sum_is_na():
+    """A window whose values sum to exactly 0 has no center of gravity -> NA
+    (exercises the den==0 guard on both the dense-slide and fallback paths)."""
+    # dense, sums to 0 over the whole 4-window
+    dense = volas.DataFrame({"c": [1.0, -1.0, 1.0, -1.0]})["cog:4@c"]
+    assert dense.isna().to_list()[-1]
+    # with a NaN elsewhere -> fallback path, same zero-sum window -> NA
+    nanin = volas.DataFrame({"c": [1.0, -1.0, 1.0, -1.0, float("nan")]})["cog:4@c"]
+    assert nanin.isna().to_list()[3]
+
+
 @pytest.mark.parametrize("n", [10, 20, 30])
 def test_dev_matches_pine(n):
     _close()(f"dev:{n}", _ref_dev(C, n))

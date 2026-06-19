@@ -600,21 +600,49 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// Center of Gravity oscillator (TradingView `ta.cog`, John Ehlers):
 /// `-Σ((1+i)·close[i]) / Σ(close[i])` over the trailing `period`, where `close[i]`
 /// is `i` bars back (newest weighted 1, oldest weighted `period`). A zero window
-/// sum yields `NaN`. Lookback `period-1`. O(n·period).
+/// sum yields `NaN`. Lookback `period-1`.
+///
+/// Dense input takes an **O(n)** sliding recurrence; an input that carries `NaN`
+/// (a nested directive's warm-up, a gappy column) falls back to the exact
+/// O(n·period) per-window form — a running sum can never cleanly drop a `NaN`,
+/// so the slide is only sound when the data is `NaN`-free.
 pub fn cog(close: &[f64], period: usize) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
         return out;
     }
-    for i in (period - 1)..n {
-        let mut num = 0.0; // Σ (1+age)·price, age 0 = newest
-        let mut den = 0.0;
-        for age in 0..period {
-            let price = close[i - age];
-            num += (1 + age) as f64 * price;
-            den += price;
+    if close.iter().any(|x| x.is_nan()) {
+        for i in (period - 1)..n {
+            let mut num = 0.0; // Σ (1+age)·price, age 0 = newest
+            let mut den = 0.0;
+            for age in 0..period {
+                let price = close[i - age];
+                num += (1 + age) as f64 * price;
+                den += price;
+            }
+            out[i] = if den != 0.0 { -num / den } else { f64::NAN };
         }
+        return out;
+    }
+    // Dense O(n) slide. Seed the first window, then advance: dropping the oldest
+    // (weight `period`) lowers every retained weight, so
+    // `num[i] = num[i-1] + den[i-1] - (period+1)·leaving + close[i]` and
+    // `den[i] = den[i-1] - leaving + close[i]` (the WMA-slide trick, mirrored to
+    // cog's newest-weighted-1 orientation; drift ~1e-13, within parity tolerance).
+    let pf = period as f64;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for age in 0..period {
+        let price = close[period - 1 - age]; // age 0 = newest = close[period-1]
+        num += (1 + age) as f64 * price;
+        den += price;
+    }
+    out[period - 1] = if den != 0.0 { -num / den } else { f64::NAN };
+    for i in period..n {
+        let leaving = close[i - period];
+        num = num + den - (pf + 1.0) * leaving + close[i];
+        den = den - leaving + close[i];
         out[i] = if den != 0.0 { -num / den } else { f64::NAN };
     }
     out

@@ -15,7 +15,11 @@ use crate::buffer::Buffer;
 /// A contiguous UTF-8 string column buffer (Arrow `LargeUtf8`: i64 offsets).
 #[derive(Clone)]
 pub struct StrBuffer {
-    /// `len + 1` offsets into `data`; `offsets[0] == 0`, `offsets[len] == data.len()`.
+    /// `len + 1` monotonic byte offsets into `data`. A volas-built buffer is
+    /// normalized (`offsets[0] == 0`, `offsets[len] == data.len()`); an Arrow
+    /// import that *borrows* a sliced array keeps Arrow's **absolute** offsets, so
+    /// `offsets[0]` may be `> 0` and `offsets[len] < data.len()` — every accessor
+    /// reads `data[offsets[i]..offsets[i+1]]`, correct either way.
     offsets: Buffer<i64>,
     /// Concatenated UTF-8 bytes of every cell.
     data: Buffer<u8>,
