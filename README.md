@@ -81,9 +81,9 @@ tooling, not the thinking, was setting the pace of my research.
 
 So I stopped patching around it and rebuilt the whole data layer from the ground
 up, `pandas` thrown out entirely. The bet paid off: the same workloads that used to
-take 10–20 minutes now finish in seconds, and the bar-by-bar backtest that once
-ran for hours keeps up in real time. **volas** is that data layer — hundreds of
-times faster, and finally fast enough to get out of the way.
+take 10–20 minutes now finish in seconds, and a bar-by-bar backtest that once ran
+for hours comes back in minutes. **volas** is that data layer — hundreds of times
+faster, and finally fast enough to get out of the way.
 
 ### When to reach for volas
 
