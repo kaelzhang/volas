@@ -202,6 +202,25 @@ pub fn execute_resume_value(
             let low = series_f64(df, series, 1, "low").ok()?;
             ind::minus_dm_resume_one(&high, &low, arg_usize(&args, 0), row, prev_state)
         }
+        // No scalar twin — these fall back to the Vec `execute_resume`. They were each
+        // evaluated and left out for a concrete reason, NOT forgotten (the last two groups
+        // still diverge on the Vec path too, in warm-up / transient only):
+        //
+        //   maxindex / minindex / minmaxindex — the output is a POSITION (arg-max/min) and
+        //     the carried state is `[index, value]`; the scalar contract writes back a
+        //     single value as the next state, which cannot carry that pair, and an
+        //     off-window step needs an O(period) rescan plus the absolute `origin`.
+        //   stochrsi `.k` / `.d` — `.d` is a running-sum SMA that is not even bit-exact in
+        //     the Vec path (~1e-9), and the state is a variable-length RSI-context window
+        //     with two periods plus a sub-line selector that does not fit this signature.
+        //   adosc / asi — the indicator's OWN short-frame output differs from its masked
+        //     full-series value, so the carried warm-up rows can't be made bit-exact even
+        //     with the forming refresh's whole-column re-mask; kept on the Vec path (the
+        //     divergence is warm-up-only — post-warm-up values are exact).
+        //   ht_dcperiod / ht_phasor / ht_dcphase / ht_sine / ht_trendline / ht_trendmode /
+        //     mama — the documented ~90-bar Hilbert-transform warm-up transient: a resume
+        //     and a full recompute diverge inside that transient on EITHER path; only the
+        //     converged region is bit-exact, so they stay on the Vec path.
         _ => None,
     }
 }
