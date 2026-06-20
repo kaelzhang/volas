@@ -653,3 +653,33 @@ pub fn ultosc(
     }
     out.finish()
 }
+
+
+/// Scalar single-row twin of [`trix_resume`]: the value at `row` only, from
+/// `state = [e0, e1, e2]` (the 3-deep cascade as of `row-1`), zero-alloc and
+/// bit-identical to the `trix_resume` loop body at index `row`. Advances the
+/// 3-deep cascade one bar with `close[row]` using the same `mul_add` lattice
+/// step as [`kernels::ema_cascade_step`], then the 1-period ROC of the 3rd
+/// stage: `(e2_new / e2_prev - 1.0) * 100.0` with `e2_prev = state[2]`.
+pub fn trix_resume_one(
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if state.len() < 3 || row >= close.len() {
+        return None;
+    }
+    let k = 2.0 / (period as f64 + 1.0);
+    let mut e = [state[0], state[1], state[2]];
+    let prev = e[2]; // cascade output at row-1 (ROC's denominator)
+    // Same lattice step as `kernels::ema_cascade_step::<3>`: each stage consumes
+    // the previous stage's just-updated output, `*stage = (x - *stage).mul_add(k, *stage)`.
+    let mut x = close[row];
+    for stage in e.iter_mut() {
+        *stage = (x - *stage).mul_add(k, *stage);
+        x = *stage;
+    }
+    Some((e[2] / prev - 1.0) * 100.0)
+}
+

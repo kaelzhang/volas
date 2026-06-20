@@ -50,6 +50,37 @@ def test_forming_resume_bit_exact_vs_full_recompute(directive):
             _bit_exact(np.asarray(live[directive]), np.asarray(ref[directive]), f"{directive} i={i}")
 
 
+# Every recursive indicator with a zero-alloc scalar `*_resume_one` twin: the live
+# forming-row resume must stay bit-exact versus a from-scratch full recompute, exactly
+# like atr above. (The index family and stochrsi `.d` have no scalar twin and keep the
+# Vec resume; the HT family + a few length-dependent-warm-up indicators are excluded
+# from the scalar path because their resume already diverges in warm-up on either path.)
+_SCALAR_TWINS = [
+    "obv", "ad", "dema:20", "tema:20", "t3:20", "kama:20", "macd", "macdfix", "sar",
+    "sarext", "plus_di:14", "minus_di:14", "dx:14", "adx:14", "adxr:14", "pvt", "nvi",
+    "pvi", "efi:13", "tsi", "mass_index", "wad", "keltner:20", "supertrend", "trix:30",
+    # multi-output sub-lines (exercise the sub-selector dispatch arms + their twins):
+    "macd.signal", "macd.histogram", "macdfix.signal", "keltner.upper", "keltner.lower",
+    "supertrend.direction",
+]
+
+
+@pytest.mark.parametrize("directive", _SCALAR_TWINS)
+def test_scalar_twin_forming_bit_exact(directive):
+    n = 1800
+    cols, ts = _load(n)
+    live = volas.DataFrame({k: v[:1] for k, v in cols.items()}, index=ts[:1], time_frame="15m")
+    live[directive]
+    checkpoints = {600, n - 1}
+    for i in range(1, n):
+        live.append(volas.DataFrame({k: v[i : i + 1] for k, v in cols.items()}, index=ts[i : i + 1]))
+        live.fulfill()
+        if i in checkpoints:
+            ohlcv = {c: np.asarray(live[c]) for c in ("open", "high", "low", "close", "volume")}
+            ref = volas.DataFrame(ohlcv, index=np.asarray(live.index))
+            _bit_exact(np.asarray(live[directive]), np.asarray(ref[directive]), f"{directive} i={i}")
+
+
 def test_forming_resume_windowed_matches_unbounded():
     """A bounded window (forcing periodic compaction) yields the same visible atr
     tail as the unbounded live frame — the anchor survives the head-dropping slice."""

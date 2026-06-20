@@ -279,3 +279,58 @@ pub fn t3_resume(
     }
     (out, e.to_vec())
 }
+
+
+/// Scalar single-row twin of [`dema_resume`]: the value at `row` from `state = [e0, e1]`,
+/// zero-alloc and bit-identical to one Vec-kernel iteration (same `ema_cascade_step`
+/// lattice + `2·e0 − e1` combine). The carried `state` is as-of `row-1`.
+pub fn dema_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+    if state.len() < 2 || row >= data.len() {
+        return None;
+    }
+    let k = ema_k(period);
+    let mut e = [state[0], state[1]];
+    kernels::ema_cascade_step(&mut e, data[row], k);
+    Some(2.0 * e[0] - e[1])
+}
+
+/// Scalar single-row twin of [`tema_resume`]: the value at `row` from `state = [e0, e1, e2]`,
+/// zero-alloc and bit-identical to one Vec-kernel iteration (same `ema_cascade_step`
+/// lattice + `3·e0 − 3·e1 + e2` combine). The carried `state` is as-of `row-1`.
+pub fn tema_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+    if state.len() < 3 || row >= data.len() {
+        return None;
+    }
+    let k = ema_k(period);
+    let mut e = [state[0], state[1], state[2]];
+    kernels::ema_cascade_step(&mut e, data[row], k);
+    Some(3.0 * e[0] - 3.0 * e[1] + e[2])
+}
+
+/// Scalar single-row twin of [`t3_resume`]: the value at `row` from `state = [e0..e5]`,
+/// zero-alloc and bit-identical to one Vec-kernel iteration (same six-deep
+/// `ema_cascade_step` lattice + `c1·e5 + c2·e4 + c3·e3 + c4·e2` combine, with the
+/// `vfactor`-derived coefficients in TA-Lib's exact float order). State is as-of `row-1`.
+pub fn t3_resume_one(
+    data: &[f64],
+    period: usize,
+    vfactor: f64,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if state.len() < 6 || row >= data.len() {
+        return None;
+    }
+    let v2 = vfactor * vfactor;
+    let c1 = -(v2 * vfactor);
+    let c2 = 3.0 * (v2 - c1);
+    let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
+    let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
+    let k = ema_k(period);
+    let mut e = [
+        state[0], state[1], state[2], state[3], state[4], state[5],
+    ];
+    kernels::ema_cascade_step(&mut e, data[row], k);
+    Some(c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2])
+}
+

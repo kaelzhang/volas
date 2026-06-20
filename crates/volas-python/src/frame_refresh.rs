@@ -231,7 +231,19 @@ impl PyDataFrame {
         // stays at the last closed bar (`vr - 1`). The anchor state is borrowed straight
         // off `self.inner` (no snapshot copy) and dropped before each write.
         if vr + 1 == height {
-            // Single-state scalar resume (ema / smma / atr) — no tail/state allocation.
+            // Stateless finite-memory (avgprice / medprice / mom / roc / …): the forming
+            // row depends only on its own inputs, so a parse-free scalar recompute writes
+            // the value with no carried state and no allocation.
+            if let Some(value) =
+                volas_directive::exec::execute_resume_default_series_one(&self.inner, name, vr)
+            {
+                self.inner
+                    .update_computed_f64_value(name, vr, value)
+                    .map_err(pyerr)?;
+                return Ok(true);
+            }
+            // Single-state scalar resume (ema / smma / atr / natr / rsi / cmo …) — no
+            // tail/state allocation.
             let scalar = self.inner.computed_resume_state(name).and_then(|(state, _)| {
                 volas_directive::exec::execute_resume_one(&self.inner, name, state, vr)
             });
@@ -241,9 +253,20 @@ impl PyDataFrame {
                     .map_err(pyerr)?;
                 return Ok(true);
             }
-            // Every other recursive / stateful resume kernel (rsi, the Wilder family,
-            // macd, sar, …) plus the stateless finite-memory ones: continue the single
-            // forming row from the anchored state and DISCARD the returned state.
+            // Every other recursive resume kernel with a scalar twin (the Wilder /
+            // directional / cascade / volume / HT / … families): the single forming-row
+            // value, allocation-free, discarding the new state to keep the anchor.
+            let value = self.inner.computed_resume_state(name).and_then(|(state, origin)| {
+                volas_directive::exec::execute_resume_value(&self.inner, &node, state, vr, origin)
+            });
+            if let Some(value) = value {
+                self.inner
+                    .update_computed_f64_value(name, vr, value)
+                    .map_err(pyerr)?;
+                return Ok(true);
+            }
+            // Remaining kernels without a scalar twin (index family, stochrsi `.d`):
+            // the Vec-returning resume, discarding the new state.
             let resumed = self.inner.computed_resume_state(name).and_then(|(state, origin)| {
                 volas_directive::exec::execute_resume(&self.inner, &node, state, vr, origin)
             });

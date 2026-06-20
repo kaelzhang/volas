@@ -652,6 +652,121 @@ pub fn adxr_resume(
     }))
 }
 
+
+/// Scalar single-row twin of [`plus_di_resume`]: the +DI value at `row` from
+/// `state = [sp_{row-1}, st_{row-1}]`, no allocation. Advances the fused +DM/TR sums one
+/// bar then applies `di_val`, bit-identical to the Vec loop body.
+pub fn plus_di_resume_one(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 2 || row >= high.len() {
+        return None;
+    }
+    let a = 1.0 - 1.0 / period as f64;
+    // Mirror the Vec resume's `s = [sp, 0, st]`; −DM slot stays 0 (unused by +DI).
+    let mut s = [state[0], 0.0, state[1]];
+    dm_tr_step(high, low, close, row, a, &mut s);
+    Some(di_val(s[0], s[2]))
+}
+
+/// Scalar single-row twin of [`minus_di_resume`]: the −DI value at `row` from
+/// `state = [sm_{row-1}, st_{row-1}]`, no allocation. Bit-identical to the Vec loop body.
+pub fn minus_di_resume_one(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 2 || row >= high.len() {
+        return None;
+    }
+    let a = 1.0 - 1.0 / period as f64;
+    // Mirror the Vec resume's `s = [0, sm, st]`; +DM slot stays 0 (unused by −DI).
+    let mut s = [0.0, state[0], state[1]];
+    dm_tr_step(high, low, close, row, a, &mut s);
+    Some(di_val(s[1], s[2]))
+}
+
+/// Scalar single-row twin of [`dx_resume`]: the DX value at `row` from
+/// `state = [sp, sm, st]` (as of row-1), no allocation. Advances all three fused sums one
+/// bar then applies `dx_val`, bit-identical to the Vec loop body.
+pub fn dx_resume_one(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 3 || row >= high.len() {
+        return None;
+    }
+    let a = 1.0 - 1.0 / period as f64;
+    let mut s = [state[0], state[1], state[2]];
+    dm_tr_step(high, low, close, row, a, &mut s);
+    Some(dx_val(s[0], s[1], s[2]))
+}
+
+/// Scalar single-row twin of [`adx_resume`]: the ADX value at `row` from
+/// `state = [sp, sm, st, adx]` (as of row-1), no allocation. Advances the DX sums, forms
+/// `dx[row]`, then folds it into the Wilder ADX average — bit-identical to the Vec body.
+pub fn adx_resume_one(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 4 || row >= high.len() {
+        return None;
+    }
+    let pf = period as f64;
+    let a_sum = 1.0 - 1.0 / pf;
+    let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);
+    let mut s = [state[0], state[1], state[2]];
+    dm_tr_step(high, low, close, row, a_sum, &mut s);
+    let dxv = dx_val(s[0], s[1], s[2]);
+    Some(state[3].mul_add(a_avg, dxv * b_avg))
+}
+
+/// Scalar single-row twin of [`adxr_resume`]: the ADXR value at `row` from
+/// `state = [sp, sm, st, adx[row-period .. row-1]]`, no allocation. Advances the DX sums +
+/// ADX average one bar, then forms `(adx[row] + adx[row-(period-1)])/2`, bit-identical to
+/// the Vec loop body — without the Vec's `win.remove(0)`/`push` (O(1) index instead).
+pub fn adxr_resume_one(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || period == 0 || state.len() < 3 + period || row >= high.len() {
+        return None;
+    }
+    let pf = period as f64;
+    let a_sum = 1.0 - 1.0 / pf;
+    let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);
+    let mut s = [state[0], state[1], state[2]];
+    dm_tr_step(high, low, close, row, a_sum, &mut s);
+    let dxv = dx_val(s[0], s[1], s[2]);
+    // newest carried adx = adx[row-1] = state[3 + period - 1]; fold to get adx[row].
+    let adx = state[3 + period - 1].mul_add(a_avg, dxv * b_avg);
+    // After the conceptual window slide, win[0] = adx[row-(period-1)]:
+    //  period >= 2 -> old window's win[1] = state[4]; period == 1 -> the just-formed adx.
+    let oldest = if period >= 2 { state[4] } else { adx };
+    Some((adx + oldest) / 2.0)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

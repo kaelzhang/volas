@@ -150,3 +150,29 @@ pub fn kama_resume(
     }
     Some((out, vec![prev_kama, sum_roc1]))
 }
+
+
+/// Single new-row [`kama`] resume: the KAMA value at `row` from `state =
+/// [prev_kama_{row-1}, sum_roc1_{row-1}]`, with NO `Vec` allocation — bit-identical to
+/// one iteration of [`kama_resume`]'s loop at index `row` (same sliding-sum update, the
+/// shared [`kama_sc`], and the fused `(price-prev)*sc+prev` step). `None` on the same
+/// guard as [`kama_resume`] (`period == 0 || row <= period`, the trailing window would
+/// underflow) plus a short state / out-of-range `row`.
+pub fn kama_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+    let n = data.len();
+    if period == 0 || row <= period || row >= n || state.len() < 2 {
+        return None;
+    }
+    let prev_kama = state[0];
+    let mut sum_roc1 = state[1];
+    // trailing_value = data[row-period-1] (the oldest 1-bar change to drop);
+    // tr2 = data[row-period] (the new trailing value).
+    let trailing_value = data[row - period - 1];
+    let tr2 = data[row - period];
+    let period_roc = data[row] - tr2;
+    sum_roc1 -= (trailing_value - tr2).abs();
+    sum_roc1 += (data[row] - data[row - 1]).abs();
+    let sc = kama_sc(period_roc, sum_roc1);
+    Some((data[row] - prev_kama).mul_add(sc, prev_kama))
+}
+

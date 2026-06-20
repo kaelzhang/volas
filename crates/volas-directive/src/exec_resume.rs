@@ -7,12 +7,14 @@ use crate::types::{ArgValue, Ast, Node};
 
 mod initial_state;
 mod resume;
+mod scalar;
 
 pub use initial_state::initial_state;
 pub use resume::{
     execute_resume, execute_resume_default_series, execute_resume_default_series_one,
     execute_resume_one,
 };
+pub use scalar::execute_resume_value;
 
 // --- state-carry resume (additive; fallback path stays correct) -------------
 //

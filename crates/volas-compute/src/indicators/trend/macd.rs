@@ -128,3 +128,51 @@ pub fn macd_signal_resume(
     }
     (out, vec![pf, ps, sig])
 }
+
+
+/// Scalar single-row twin of [`macd_resume`]: the MACD line at `row` from `state =
+/// [pf, ps]` (fast/slow EMA as of `row-1`), zero-alloc, bit-identical to one Vec-kernel
+/// iteration. Reads only `close[row]`.
+pub fn macd_resume_one(
+    close: &[f64],
+    fast: usize,
+    slow: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 2 || row >= close.len() {
+        return None;
+    }
+    let (kf, ks) = (ema_k(fast), ema_k(slow));
+    let (pf, ps) = (state[0], state[1]);
+    let x = close[row];
+    let pf = (x - pf).mul_add(kf, pf);
+    let ps = (x - ps).mul_add(ks, ps);
+    Some(pf - ps)
+}
+
+/// Scalar single-row twin of [`macd_signal_resume`]: the MACD signal (`histogram ==
+/// false`) or histogram (`true`) at `row` from `state = [pf, ps, sig]` (as of `row-1`),
+/// zero-alloc, bit-identical to one Vec-kernel iteration. Reads only `close[row]`.
+pub fn macd_signal_resume_one(
+    close: &[f64],
+    fast: usize,
+    slow: usize,
+    signal: usize,
+    histogram: bool,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 3 || row >= close.len() {
+        return None;
+    }
+    let (kf, ks, ksig) = (ema_k(fast), ema_k(slow), ema_k(signal));
+    let (pf, ps, sig) = (state[0], state[1], state[2]);
+    let x = close[row];
+    let pf = (x - pf).mul_add(kf, pf);
+    let ps = (x - ps).mul_add(ks, ps);
+    let line = pf - ps;
+    let sig = (line - sig).mul_add(ksig, sig);
+    Some(if histogram { line - sig } else { sig })
+}
+

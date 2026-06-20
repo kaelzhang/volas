@@ -276,7 +276,7 @@ fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
 
 pub use crate::exec_resume::{
     execute_resume, execute_resume_default_series, execute_resume_default_series_one,
-    execute_resume_one, initial_state,
+    execute_resume_one, execute_resume_value, initial_state,
 };
 
 /// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.
@@ -784,5 +784,10 @@ mod tests {
         // execute_resume: a directive with no resume kernel hits the `_ => None` arm
         // (exec:1369). `llv` (lowest-low) has no incremental resume.
         assert!(execute_resume(&df, &p("llv:5"), &[0.0], 3, 0).is_none());
+
+        // execute_resume_value: a recursive directive without a SCALAR twin (`rsi` is
+        // served by the parse-free `execute_resume_one`, not the value dispatch) hits the
+        // scalar dispatch's `_ => None`, so the forming refresh falls back to the Vec path.
+        assert!(execute_resume_value(&df, &p("rsi:14"), &[1.0, 1.0], 5, 0).is_none());
     }
 }

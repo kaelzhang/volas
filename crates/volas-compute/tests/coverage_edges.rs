@@ -189,3 +189,52 @@ fn rsi_cmo_resume_one_guards_and_match_vec_resume() {
     assert_eq!(ind::rsi_resume_one(&[10.0, 11.0], 14, 1, &[1.0, 0.0]).unwrap(), 100.0);
     assert_eq!(ind::cmo_resume_one(&[10.0, 10.0], 14, 1, &[0.0, 0.0]).unwrap(), 0.0);
 }
+
+#[test]
+fn scalar_resume_one_guards_and_inline_branches() {
+    // Long-enough inputs so only the targeted guard predicate trips.
+    let d: Vec<f64> = (0..60).map(|i| 100.0 + i as f64).collect();
+    let h: Vec<f64> = (0..60).map(|i| 101.0 + i as f64).collect();
+    let l: Vec<f64> = (0..60).map(|i| 99.0 + i as f64).collect();
+    let c: Vec<f64> = (0..60).map(|i| 100.0 + i as f64).collect();
+    let v: Vec<f64> = (0..60).map(|i| 10.0 + i as f64).collect();
+    let s2 = [1.0, 1.0];
+    // --- guard (`return None`) for every scalar twin ---
+    assert!(ind::obv_resume_one(&c, &v, 0, &s2).is_none());
+    assert!(ind::ad_resume_one(&h, &l, &c, &v, 1, &[]).is_none());
+    assert!(ind::dema_resume_one(&d, 5, 1, &[1.0]).is_none());
+    assert!(ind::tema_resume_one(&d, 5, 1, &[1.0, 1.0]).is_none());
+    assert!(ind::t3_resume_one(&d, 5, 0.7, 1, &[1.0; 5]).is_none());
+    assert!(ind::kama_resume_one(&d, 5, 5, &s2).is_none()); // row <= period
+    assert!(ind::macd_resume_one(&c, 12, 26, 0, &s2).is_none());
+    assert!(ind::macd_signal_resume_one(&c, 12, 26, 9, false, 0, &[1.0; 3]).is_none());
+    assert!(ind::sar_resume_one(&h, &l, 1, &[1.0; 6]).is_none()); // row < 2
+    assert!(ind::sarext_resume_one(&h, &l, 0.0, 1, &[1.0; 7]).is_none());
+    assert!(ind::plus_di_resume_one(&h, &l, &c, 14, 0, &s2).is_none());
+    assert!(ind::minus_di_resume_one(&h, &l, &c, 14, 0, &s2).is_none());
+    assert!(ind::dx_resume_one(&h, &l, &c, 14, 0, &[1.0; 3]).is_none());
+    assert!(ind::adx_resume_one(&h, &l, &c, 14, 0, &[1.0; 4]).is_none());
+    assert!(ind::adxr_resume_one(&h, &l, &c, 14, 0, &[1.0; 17]).is_none());
+    assert!(ind::pvt_resume_one(&c, &v, 0, &s2).is_none());
+    assert!(ind::nvi_resume_one(&c, &v, 0, &[1.0; 3]).is_none());
+    assert!(ind::pvi_resume_one(&c, &v, 0, &[1.0; 3]).is_none());
+    assert!(ind::efi_resume_one(&c, &v, 13, 0, &s2).is_none());
+    assert!(ind::tsi_resume_one(&c, 25, 13, 0, &[1.0; 5]).is_none());
+    assert!(ind::mass_index_resume_one(&h, &l, 9, 0, &[1.0]).is_none()); // short state
+    assert!(ind::wad_resume_one(&h, &l, &c, 0, &s2).is_none());
+    assert!(ind::keltner_band_resume_one(&c, &h, &l, 20, 10, 2.0, true, 5, &[1.0]).is_none());
+    assert!(ind::supertrend_resume_one(&h, &l, &c, 10, 3.0, false, 5, &[1.0]).is_none());
+    assert!(ind::trix_resume_one(&c, 15, 1, &[1.0, 1.0]).is_none());
+    // --- inline twin branches not hit by trending real data ---
+    // obv flat direction: real[row] == carried prev -> obv unchanged.
+    assert_eq!(ind::obv_resume_one(&[10.0, 10.0], &[1.0, 5.0], 1, &[100.0, 10.0]).unwrap(), 100.0);
+    // adxr period == 1: trailing window length 1 -> oldest adx is the current row's.
+    assert!(ind::adxr_resume_one(&h, &l, &c, 1, 30, &[1.0; 4]).is_some());
+    // sarext offset-on-reverse nudge, both reversal arms (state[0]=is_long, [4]=sar):
+    let hh = [200.0, 200.0, 200.0];
+    let ll = [50.0, 50.0, 50.0];
+    // long -> short reversal (new_low <= sar) with a non-zero offset.
+    assert!(ind::sarext_resume_one(&hh, &ll, 0.1, 2, &[1.0, 0.0, 0.0, 10.0, 100.0, 50.0, 0.0]).is_some());
+    // short -> long reversal (new_high >= sar) with a non-zero offset.
+    assert!(ind::sarext_resume_one(&hh, &ll, 0.1, 2, &[0.0, 0.0, 0.0, 10.0, 100.0, 200.0, 50.0]).is_some());
+}

@@ -523,3 +523,90 @@ pub fn sarext_resume(
         ],
     ))
 }
+
+
+/// Scalar single-row twin of [`sar_resume`]: the SAR value at `row` from `state`
+/// `[is_long, af, ep, sar, prev_high, prev_low]` (as of `row - 1`), no allocation,
+/// bit-identical to the Vec kernel's loop body at `today == row` up to its `out.push`.
+/// The `af`/`ep` ramp updates that follow the push only mutate carried state (discarded
+/// here), so the emitted value depends only on `is_long`, `ep`, `sar`, and the prior/current
+/// extremes. Mirrors the `from < 2` bootstrap guard.
+pub fn sar_resume_one(
+    high: &[f64],
+    low: &[f64],
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row < 2 || state.len() < 6 || row >= high.len() || row >= low.len() {
+        return None;
+    }
+    let is_long = state[0] != 0.0;
+    let ep = state[2];
+    let sar = state[3];
+    let prev_high = state[4];
+    let prev_low = state[5];
+    let new_low = low[row];
+    let new_high = high[row];
+    let val = if is_long {
+        if new_low <= sar {
+            // Reverse to short: stop becomes the extreme point, clamped up.
+            ep.max(prev_high).max(new_high)
+        } else {
+            sar
+        }
+    } else if new_high >= sar {
+        // Reverse to long: stop becomes the extreme point, clamped down.
+        ep.min(prev_low).min(new_low)
+    } else {
+        sar
+    };
+    Some(val)
+}
+
+/// Scalar single-row twin of [`sarext_resume`]: the signed SAREXT value at `row` from `state`
+/// `[is_long, af_long, af_short, ep, sar, prev_high, prev_low]` (as of `row - 1`), no allocation,
+/// bit-identical to the Vec kernel's loop body at `today == row` up to its `out.push`. Negative
+/// while short, positive while long. Only `offset_on_reverse` is threaded (it nudges the stop on a
+/// reversal, BEFORE the push); the long/short accel step/cap params feed only the post-push af
+/// ramp (discarded state) and are omitted. Mirrors the `from < 2` bootstrap guard.
+pub fn sarext_resume_one(
+    high: &[f64],
+    low: &[f64],
+    offset_on_reverse: f64,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row < 2 || state.len() < 7 || row >= high.len() || row >= low.len() {
+        return None;
+    }
+    let is_long = state[0] != 0.0;
+    let ep = state[3];
+    let sar = state[4];
+    let prev_high = state[5];
+    let prev_low = state[6];
+    let new_low = low[row];
+    let new_high = high[row];
+    let val = if is_long {
+        if new_low <= sar {
+            // Reverse to short: extreme point clamped up, offset-nudged, output negated.
+            let mut sar = ep.max(prev_high).max(new_high);
+            if offset_on_reverse != 0.0 {
+                sar += sar * offset_on_reverse;
+            }
+            -sar
+        } else {
+            sar
+        }
+    } else if new_high >= sar {
+        // Reverse to long: extreme point clamped down, offset-nudged.
+        let mut sar = ep.min(prev_low).min(new_low);
+        if offset_on_reverse != 0.0 {
+            sar -= sar * offset_on_reverse;
+        }
+        sar
+    } else {
+        -sar
+    };
+    Some(val)
+}
+

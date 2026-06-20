@@ -268,6 +268,46 @@ pub fn iii(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64>
         .collect()
 }
 
+
+/// Single-row OBV resume: the value at `row` from `state = [running_obv,
+/// prev_real]` (as of `row - 1`), bit-identical to one [`obv_resume`] loop
+/// iteration, with NO allocation (the live tf-fold forming-row fast path).
+/// `from >= 1` on every resume, so `row == 0` declines; the carried `prev_real`
+/// is the direction reference (never `real[row - 1]`), matching the Vec kernel.
+pub fn obv_resume_one(
+    real: &[f64],
+    volume: &[f64],
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 2 || row >= real.len() {
+        return None;
+    }
+    let prev = state[1];
+    let dir = ((real[row] > prev) as i8 - (real[row] < prev) as i8) as f64;
+    Some(state[0] + dir * volume[row])
+}
+
+/// Single-row AD (Chaikin A/D line) resume: the value at `row` from
+/// `state = [running_ad]` (as of `row - 1`), bit-identical to one [`ad_resume`]
+/// loop iteration, with NO allocation. AD's per-bar money-flow term is
+/// independent of prior bars, so the running total plus this bar's money flow is
+/// the whole step.
+pub fn ad_resume_one(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if state.is_empty() || row >= close.len() {
+        return None;
+    }
+    Some(state[0] + money_flow_volume(high[row], low[row], close[row], volume[row]))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -473,6 +473,127 @@ pub fn mass_index_resume(
     (out, new_state)
 }
 
+
+/// Scalar single-row twin of [`pvt_resume`]: compute only PVT at `row` from
+/// `[acc_{row-1}, close_{row-1}]`, zero-alloc, bit-identical to one loop iteration.
+pub fn pvt_resume_one(
+    close: &[f64],
+    volume: &[f64],
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 2 || row >= close.len() {
+        return None;
+    }
+    let acc = state[0];
+    let prev = state[1];
+    Some(acc + (close[row] - prev) / prev * volume[row])
+}
+
+/// Scalar single-row twin of [`volume_index_resume`]; `on_down` selects NVI (true) vs
+/// PVI (false), matching the kernel. Reads close/volume at `row`, carries prev close/vol.
+fn volume_index_resume_one(
+    close: &[f64],
+    volume: &[f64],
+    row: usize,
+    state: &[f64],
+    on_down: bool,
+) -> Option<f64> {
+    if row == 0 || state.len() < 3 || row >= close.len() {
+        return None;
+    }
+    let val = state[0];
+    let prev_c = state[1];
+    let prev_v = state[2];
+    let triggered = if on_down { volume[row] < prev_v } else { volume[row] > prev_v };
+    Some(if triggered { val * (1.0 + (close[row] - prev_c) / prev_c) } else { val })
+}
+
+/// Scalar single-row twin of [`nvi_resume`].
+pub fn nvi_resume_one(close: &[f64], volume: &[f64], row: usize, state: &[f64]) -> Option<f64> {
+    volume_index_resume_one(close, volume, row, state, true)
+}
+
+/// Scalar single-row twin of [`pvi_resume`].
+pub fn pvi_resume_one(close: &[f64], volume: &[f64], row: usize, state: &[f64]) -> Option<f64> {
+    volume_index_resume_one(close, volume, row, state, false)
+}
+
+// See `pvi_resume_one` defined alongside `nvi_resume_one` in the nvi entry above
+// (both delegate to the shared `volume_index_resume_one(.., on_down)`):
+//
+// pub fn pvi_resume_one(close: &[f64], volume: &[f64], row: usize, state: &[f64]) -> Option<f64> {
+//     volume_index_resume_one(close, volume, row, state, false)
+// }
+
+/// Scalar single-row twin of [`efi_resume`]: rebuild the raw force term from the carried
+/// prev close, then one fused EMA step. Bit-identical to one loop iteration.
+pub fn efi_resume_one(
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 2 || row >= close.len() {
+        return None;
+    }
+    let k = 2.0 / (n as f64 + 1.0);
+    let e = state[0];
+    let prev = state[1];
+    let x = (close[row] - prev) * volume[row];
+    Some((x - e).mul_add(k, e))
+}
+
+/// Scalar single-row twin of [`tsi_resume`]: advance both nested EMA chains one step and
+/// emit `100*outer_m/outer_am`. Bit-identical to one loop iteration.
+pub fn tsi_resume_one(
+    close: &[f64],
+    long: usize,
+    short: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.len() < 5 || row >= close.len() {
+        return None;
+    }
+    let kl = 2.0 / (long as f64 + 1.0);
+    let ks = 2.0 / (short as f64 + 1.0);
+    let (mut im, mut om, mut ia, mut oa, prev) =
+        (state[0], state[1], state[2], state[3], state[4]);
+    let mi = close[row] - prev;
+    let ai = mi.abs();
+    im = (mi - im).mul_add(kl, im);
+    om = (im - om).mul_add(ks, om);
+    ia = (ai - ia).mul_add(kl, ia);
+    oa = (ia - oa).mul_add(ks, oa);
+    Some(100.0 * om / oa)
+}
+
+/// Scalar single-row twin of [`mass_index_resume`]: advance the EMA9 cascade, form the new
+/// ratio, slide the running sum (add new, drop `ratio[row-n]` = the oldest retained ratio at
+/// `state[3]`), and emit `(sum/n)*n`. Bit-identical to one loop iteration of the Vec kernel.
+pub fn mass_index_resume_one(
+    high: &[f64],
+    low: &[f64],
+    n: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row >= high.len() || state.len() < 3 + n {
+        return None;
+    }
+    let k = 2.0 / (9.0 + 1.0); // EMA9
+    let single = ((high[row] - low[row]) - state[0]).mul_add(k, state[0]);
+    let double = (single - state[1]).mul_add(k, state[1]);
+    let ratio_i = single / double;
+    let mut sum = state[2];
+    sum += ratio_i;
+    sum -= state[3]; // ratio[row - n], the oldest value in the carried window
+    Some((sum / n as f64) * n as f64)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
