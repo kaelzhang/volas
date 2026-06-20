@@ -51,10 +51,14 @@ fn build_window_state(
         }
         Some(LookbackBound::Count(l)) => l,
         Some(LookbackBound::Directives(inds)) => {
+            // Each entry must name an INDICATOR: `indicator_lookback` rejects a typo'd
+            // / bare-column directive (e.g. `ma5` for `ma:5`) instead of deriving a
+            // silent 0-row margin that would under-size the window and break the
+            // cached-indicator bit-exactness the feature exists to provide.
             let mut max = 0usize;
             for d in &inds {
                 let node = volas_directive::parse(d).map_err(pyerr)?;
-                max = max.max(volas_directive::lookback::lookback(&node));
+                max = max.max(volas_directive::lookback::indicator_lookback(&node).map_err(pyerr)?);
             }
             max
         }
@@ -96,7 +100,7 @@ impl PyDataFrame {
             }
         }
         // `data` is polymorphic over volas's own inputs: another volas DataFrame (copied —
-        // index, aliases and any tf-state carried, exactly like `df.copy()`), or a dict of
+        // index and any tf-state carried, exactly like `df.copy()`), or a dict of
         // columns (a fresh RangeIndex); with `columns` the frame is projected onto them. A
         // pandas DataFrame is deliberately NOT accepted here — use `DataFrame.from_pandas`, which keeps
         // volas pandas-free at import. To build a DatetimeIndex from a column, parse it with
@@ -408,7 +412,7 @@ impl PyDataFrame {
         self.logical_range().1
     }
 
-    /// `name in df` — whether a column exists (alias-aware).
+    /// `name in df` — whether a column exists.
     pub(crate) fn __contains__(&self, key: &str) -> bool {
         self.inner.has_column(key)
     }

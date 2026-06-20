@@ -89,6 +89,22 @@ def test_max_lookback_int_and_list_equivalent():
     assert by_int._physical_height == by_list._physical_height
 
 
+@pytest.mark.parametrize("bad", ["ma5", "atr14", "close", "kdj"])
+def test_max_lookback_rejects_non_indicator_directive(bad):
+    # A typo'd directive (missing colon: `ma5` for `ma:5`), a raw column name, or a
+    # bare sub-requiring command must RAISE at construction — never derive a silent
+    # 0-row margin that under-sizes the window and breaks cached-indicator
+    # bit-exactness. (Same rejection `df.exec`/`df[...]` give the directive.)
+    with pytest.raises((ValueError, Exception)):
+        DataFrame(_ohlcv(40), window=3, max_lookback=[bad])
+
+
+def test_max_lookback_accepts_bare_command_indicator():
+    # a bare no-arg command (e.g. `obv`) IS an indicator and is accepted.
+    wf = DataFrame(_ohlcv(40), window=5, max_lookback=['obv'])
+    assert wf._physical_height >= 5
+
+
 # --------------------------------------------------------------------------- #
 # Logical-M presentation                                                       #
 # --------------------------------------------------------------------------- #

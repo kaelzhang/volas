@@ -270,6 +270,29 @@ pub fn lookback(node: &Ast) -> usize {
     }
 }
 
+/// Like [`lookback`], but requires the directive to name an **indicator**. A
+/// top-level bare name that binds to no command — a raw column reference, or a
+/// typo'd directive such as `ma5` for `ma:5` — is rejected (the same
+/// `unknown command "…"` error `df.exec` raises) rather than silently treated as a
+/// 0-lookback column; a bare sub-requiring name (`kdj`) is rejected too. This is
+/// the form a windowed frame's `max_lookback` list takes, where a bare column
+/// reference is meaningless and would silently under-size the retention margin.
+///
+/// Dataframe-agnostic: it validates the directive's form only — it never consults
+/// a column — so it stays a pure function of the directive, exactly like
+/// [`lookback`].
+pub fn indicator_lookback(node: &Ast) -> volas_core::Result<usize> {
+    // Reject a bare sub-requiring name anywhere (e.g. `kdj`, or nested `ma:5@kdj`).
+    crate::bind::check_bare(node)?;
+    // A standalone bare name must bind to a real command; an unbindable one is a
+    // typo / column reference, not an indicator. (Nested bare names are data-source
+    // column references, validated at execution, and intentionally not rejected.)
+    if let Node::Name(name) = node {
+        crate::bind::bind_command(name, None, &[], &[])?;
+    }
+    Ok(lookback(node))
+}
+
 #[cfg(test)]
 mod tests {
     use super::lookback;
@@ -394,6 +417,26 @@ mod tests {
         ];
         for d in directives {
             let _ = lookback(&parse(d).unwrap());
+        }
+    }
+
+    #[test]
+    fn indicator_lookback_accepts_indicators_rejects_bare_non_commands() {
+        use super::indicator_lookback;
+        // command directives + a bare no-arg command derive their warm-up
+        assert_eq!(indicator_lookback(&parse("ma:5").unwrap()).unwrap(), 4);
+        assert_eq!(indicator_lookback(&parse("atr:14").unwrap()).unwrap(), 14);
+        assert_eq!(indicator_lookback(&parse("ma:5 + ema:10").unwrap()).unwrap(), 9);
+        indicator_lookback(&parse("obv").unwrap()).unwrap(); // bare command -> Ok
+        // a command may reference columns via @col — those nested bare names are
+        // data sources, not rejected (validated at execution).
+        indicator_lookback(&parse("ma:5@close").unwrap()).unwrap();
+        // a standalone bare name that binds to no command is a typo / column ref
+        for bad in ["ma5", "atr14", "close", "kdj"] {
+            assert!(
+                indicator_lookback(&parse(bad).unwrap()).is_err(),
+                "{bad:?} must be rejected as a non-indicator directive"
+            );
         }
     }
 }
