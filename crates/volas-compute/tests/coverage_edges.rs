@@ -154,3 +154,18 @@ fn stochastic_public_fallbacks_cover_none_and_flat_generic_paths() {
     let out = ind::stochrsi_d_default_sma(&increasing).unwrap();
     assert!(out.contains(&0.0));
 }
+
+#[test]
+fn atr_resume_one_guards_and_matches_vec_resume() {
+    let h = [10.0, 11.0, 12.0];
+    let l = [9.0, 9.5, 10.0];
+    let c = [9.5, 10.5, 11.5];
+    // None guards (row 0, empty state, row out of range) mirror `atr_resume`.
+    assert!(ind::atr_resume_one(&h, &l, &c, 14, 0, &[5.0]).is_none());
+    assert!(ind::atr_resume_one(&h, &l, &c, 14, 1, &[]).is_none());
+    assert!(ind::atr_resume_one(&h, &l, &c, 14, 3, &[5.0]).is_none());
+    // The scalar step is bit-identical to the two-`Vec` `atr_resume`'s single step.
+    let (tail, _) = ind::atr_resume(&h, &l, &c, 14, 2, &[5.0]).unwrap();
+    let one = ind::atr_resume_one(&h, &l, &c, 14, 2, &[5.0]).unwrap();
+    assert_eq!(one.to_bits(), tail[0].to_bits());
+}
