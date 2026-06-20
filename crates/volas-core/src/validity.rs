@@ -141,7 +141,21 @@ impl Validity {
                     self.0 = Some(Arc::new(bm));
                 }
             }
-            Some(arc) => Arc::make_mut(arc).set(i, valid),
+            Some(arc) => {
+                let bm = Arc::make_mut(arc);
+                // Only an actual 0->1 clear (filling the last hole) can empty the
+                // mask, so we re-collapse to dense ONLY then — preserving the
+                // "Some ⇒ has a missing value" invariant that `has_nulls` /
+                // `null_count` / `PartialEq` / the NA-aware export paths rely on.
+                // A no-op set-present or any set-missing skips the popcount, so the
+                // dense (`None`) hot path is untouched and the `Some` path pays the
+                // `null_count` scan only when a hole is genuinely filled.
+                let clearing_hole = valid && !bm.get(i);
+                bm.set(i, valid);
+                if clearing_hole && bm.null_count() == 0 {
+                    self.0 = None;
+                }
+            }
         }
     }
 
@@ -219,6 +233,23 @@ mod tests {
         assert!(!v.is_valid(1) && v.is_valid(0));
         v.set(1, 3, true); // Some(bitmap) branch -> back to present
         assert!(v.is_valid(1));
+        // Clearing the LAST hole re-collapses to dense (C1): the `Some ⇒ has a
+        // missing value` invariant holds, so has_nulls/null_count stay canonical.
+        assert!(!v.has_nulls() && v.bitmap().is_none() && v.null_count() == 0);
+    }
+
+    #[test]
+    fn validity_set_collapses_only_on_last_hole() {
+        // Two holes: filling one stays Some (still a hole); filling the second
+        // re-collapses to dense. A no-op set-present must not collapse spuriously.
+        let mut v = Validity::from_valid_iter(4, [true, false, true, false]);
+        assert_eq!(v.null_count(), 2);
+        v.set(3, 4, true); // fill one hole -> still Some (idx 1 missing)
+        assert!(v.has_nulls() && v.null_count() == 1);
+        v.set(0, 4, true); // no-op set-present (already valid) -> stays Some
+        assert!(v.has_nulls() && v.null_count() == 1);
+        v.set(1, 4, true); // fill the last hole -> collapse to dense
+        assert!(!v.has_nulls() && v.bitmap().is_none());
     }
 
     #[test]
