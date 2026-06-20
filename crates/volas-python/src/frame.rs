@@ -14,7 +14,7 @@ use volas_core::{
     IndexKind, Series,
 };
 use volas_directive::parse;
-use volas_time::{aggregate_period, AggSpec, TimeFrame};
+use volas_time::{AggSpec, TimeFrame};
 
 #[allow(unused_imports)]
 use crate::*;
@@ -96,6 +96,36 @@ pub(crate) struct TfState {
     /// folded append), kept so a re-sent forming bar updates (deduped) rather
     /// than double-counts.
     pub(crate) open: Option<DataFrame>,
+    /// Cached live-fold plan (`None` until the first fold), reused across appends.
+    pub(crate) fold_plan: Option<FoldPlan>,
+}
+
+/// The cached forming-row fold plan: the `(dst_col, src_col, combine_op)` triples,
+/// plus the inner column names/dtypes and bar column names they were built for. The
+/// hot append path reuses it so it never re-runs the per-bar `column_pos` / `agg_for`
+/// HashMap name lookups (whose SipHash dominated the per-bar cost); it is rebuilt
+/// only when a schema actually changes (names or dtypes, on either side), which the
+/// validation below detects with a few cheap slice comparisons (no hashing).
+#[derive(Clone)]
+pub(crate) struct FoldPlan {
+    pub(crate) inner_names: Vec<String>,
+    pub(crate) inner_dtypes: Vec<DType>,
+    pub(crate) bar_names: Vec<String>,
+    pub(crate) ops: Vec<(usize, usize, CombineOp)>,
+}
+
+impl FoldPlan {
+    /// Whether this plan still matches `inner` + `bar` (no schema change).
+    pub(crate) fn matches(&self, inner: &DataFrame, bar: &DataFrame) -> bool {
+        self.inner_names.as_slice() == inner.names()
+            && self.bar_names.as_slice() == bar.names()
+            && self.inner_dtypes.len() == inner.width()
+            && self
+                .inner_dtypes
+                .iter()
+                .zip(inner.columns())
+                .all(|(d, c)| *d == c.dtype())
+    }
 }
 
 /// Bounded rolling-window state when this is a windowed frame (`window=`); `None`
@@ -139,28 +169,6 @@ pub(crate) fn col_value(col: &Column, i: usize) -> f64 {
     }
 }
 
-/// Plan the in-place forming-row fold: for each of `inner`'s columns, the
-/// `(dst_col, src_col, combine_op)` triple pairing it with the matching bar column
-/// and its aggregator. Returns `None` (so the caller takes the batch-aggregate
-/// path) if any column is `Bool` / `Str`, which `Column::combine_at` cannot fold in
-/// place. The common OHLCV (all-numeric) frame is always foldable.
-fn build_fold_ops(
-    inner: &DataFrame,
-    bar: &DataFrame,
-    spec: &AggSpec,
-) -> Option<Vec<(usize, usize, CombineOp)>> {
-    let mut ops = Vec::with_capacity(inner.width());
-    for j in 0..inner.width() {
-        if matches!(inner.columns()[j].dtype(), DType::Bool | DType::Utf8) {
-            return None;
-        }
-        let name = &inner.names()[j];
-        if let Some(bj) = bar.column_pos(name) {
-            ops.push((j, bj, spec.agg_for(name).as_combine_op()));
-        }
-    }
-    Some(ops)
-}
 
 impl PyDataFrame {
     /// Wrap a core frame as a plain (non-cumulating) DataFrame — the default for
@@ -709,118 +717,6 @@ impl PyDataFrame {
         DataFrame::new(names, cols, index).map_err(pyerr)
     }
 
-    /// Fold incoming fine bars into a tf-aware frame: each bar either extends the
-    /// open period's forming bar (update `inner`'s last row in place + mark its
-    /// computed tail stale) or rolls over into a new period (append a fresh
-    /// forming row). Assumes `self.tf` is `Some`. A re-sent forming bar (same
-    /// timestamp) updates the period rather than double-counting it.
-    pub(crate) fn fold_append(&mut self, fine: &DataFrame) -> PyResult<()> {
-        let last_dt = |df: &DataFrame| -> i64 {
-            match df.index().kind() {
-                IndexKind::Datetime(v, _) => v[v.len() - 1],
-                _ => unreachable!("checked by caller"),
-            }
-        };
-        let PyDataFrame { inner, tf, window: _ } = self;
-        let tfs = tf.as_mut().expect("fold_append on a plain frame");
-        let frame = tfs.time_frame;
-        let (fine_ts, tz) = match fine.index().kind() {
-            IndexKind::Datetime(v, tz) => (v.clone(), *tz),
-            _ => {
-                return Err(PyValueError::new_err(
-                    "append to a time_frame DataFrame requires a DatetimeIndex",
-                ))
-            }
-        };
-        // R4-P1-01 / R4-P1-02: a live fold must see present, non-decreasing
-        // timestamps. Validate every bar BEFORE folding any (atomic — a bad bar
-        // mutates nothing): a NaT bar has no period (symmetric with the cumulate()
-        // entry's D2 rejection), and a bar earlier than the latest one already
-        // folded would roll over into a non-monotonic index / fold later bars into
-        // the wrong period. Late or disordered feed data must be handled explicitly
-        // by the caller, never silently corrupt the OHLCV.
-        let mut prev_ts: Option<i64> = match tfs.open.as_ref() {
-            Some(o) => Some(last_dt(o)),
-            None => match inner.index().kind() {
-                IndexKind::Datetime(v, _) if !v.is_empty() => Some(v[v.len() - 1]),
-                _ => None,
-            },
-        };
-        for &ts in &fine_ts {
-            if ts == i64::MIN {
-                return Err(PyValueError::new_err(
-                    "cannot append a NaT-timestamped bar to a time_frame DataFrame; a \
-                     missing instant has no period (drop it or supply a real timestamp)",
-                ));
-            }
-            if let Some(p) = prev_ts {
-                if ts < p {
-                    return Err(PyValueError::new_err(
-                        "cannot append an out-of-order bar to a time_frame DataFrame \
-                         (its timestamp precedes the forming period's latest bar); handle \
-                         late / re-ordered feed data before folding so the OHLCV stays \
-                         monotonic",
-                    ));
-                }
-            }
-            prev_ts = Some(ts);
-        }
-        for (i, &bar_ts) in fine_ts.iter().enumerate() {
-            let key = frame.unify_tz(bar_ts, tz);
-            let same_period = tfs
-                .open
-                .as_ref()
-                .is_some_and(|open| frame.unify_tz(last_dt(open), tz) == key);
-            if same_period {
-                // The forming-bar update only reads the bar, so borrow it directly
-                // for the common single-row append (no slice copy).
-                let bar = if fine.height() == 1 {
-                    std::borrow::Cow::Borrowed(fine)
-                } else {
-                    std::borrow::Cow::Owned(fine.slice(i, i + 1))
-                };
-                let bar = bar.as_ref();
-                let open = tfs.open.as_mut().unwrap();
-                // A re-sent forming bar (same ts) replaces the last open bar.
-                let resent = last_dt(open) == bar_ts;
-                if resent {
-                    *open = open.slice(0, open.height() - 1);
-                }
-                open.append(bar).map_err(pyerr)?;
-                let last = inner.height() - 1;
-                // Fast path: a new distinct fine bar whose columns are all foldable
-                // (numeric / datetime) updates the forming row IN PLACE — no period
-                // re-reduce, no column clone, no allocation. A re-sent bar (can't
-                // un-combine max/min) or a non-numeric column falls back to the batch
-                // aggregate. Both stale the cached directive tail identically, so the
-                // next `fulfill` refreshes the forming row's indicators the same way.
-                let ops = if resent {
-                    None
-                } else {
-                    build_fold_ops(inner, bar, &tfs.cumulators)
-                };
-                if let Some(ops) = ops {
-                    inner.fold_forming_row(last, bar, 0, &ops).map_err(pyerr)?;
-                } else {
-                    let agg =
-                        aggregate_period(open, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
-                    for (name, col) in agg.names().iter().zip(agg.columns()) {
-                        if let Some(j) = inner.column_pos(name) {
-                            inner.assign_positions(j, &[last], col).map_err(pyerr)?;
-                        }
-                    }
-                }
-            } else {
-                // Roll over: the previous forming bar (if any) is already final in
-                // `inner`; start a new open period and append its forming row.
-                let bar = fine.slice(i, i + 1);
-                let agg = aggregate_period(&bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
-                tfs.open = Some(bar);
-                inner.append(&agg).map_err(pyerr)?;
-            }
-        }
-        Ok(())
-    }
 
     pub(crate) fn wrap_series(&self, name: String, col: Column) -> PySeries {
         PySeries {

@@ -269,6 +269,7 @@ impl PyDataFrame {
                 time_frame: target,
                 cumulators: spec,
                 open: cum.open_clone(),
+                fold_plan: None,
             }),
             window: None,
         })

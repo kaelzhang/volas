@@ -114,6 +114,7 @@ mod frame_io;
 mod frame_reduce;
 mod frame_repr;
 mod frame_reshape;
+mod frame_tf;
 mod frame_transform;
 mod frame_window;
 

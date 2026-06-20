@@ -114,6 +114,8 @@ impl PyDataFrame {
                                 .map(|o| o.select(cols))
                                 .transpose()
                                 .map_err(pyerr)?,
+                            // projection changes the columns -> rebuild the plan lazily.
+                            fold_plan: None,
                         }),
                     };
                     (inner, tf)
@@ -222,6 +224,7 @@ impl PyDataFrame {
                     time_frame: frame,
                     cumulators: spec,
                     open: None,
+                    fold_plan: None,
                 }),
                 window: win,
             });
