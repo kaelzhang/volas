@@ -470,8 +470,7 @@ class DataFrame:
         cumulators: dict[str, Any] | None = ...,
         dtype: str | None = ...,
         window: int | None = ...,
-        max_lookback: int | None = ...,
-        indicators: list[str] | None = ...,
+        max_lookback: int | list[str] | None = ...,
     ) -> DataFrame: ...
     @staticmethod
     def from_pandas(pdf: Any) -> DataFrame: ...

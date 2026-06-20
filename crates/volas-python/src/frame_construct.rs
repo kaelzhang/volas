@@ -14,18 +14,27 @@ use crate::timeframe::{build_agg_spec_for, resolve_time_frame};
 #[allow(unused_imports)]
 use crate::*;
 
-/// Validate the windowing params and derive the retention capacity. `max_lookback` /
-/// `indicators` only apply with `window`; with `window`, exactly one of them supplies the
-/// lookback bound (`capacity = window + lookback`). See `designs/...-windowed-dataframe`.
+/// The windowed-frame lookback bound — how `max_lookback=` is supplied: either an
+/// explicit row count, or a list of indicator directives whose largest lookback it is
+/// derived from (so the caller never hand-computes a compound indicator's warm-up).
+#[derive(FromPyObject)]
+pub(crate) enum LookbackBound {
+    Count(usize),
+    Directives(Vec<String>),
+}
+
+/// Validate the windowing params and derive the retention capacity. `max_lookback` only
+/// applies with `window`; with `window` it is REQUIRED and supplies the lookback bound
+/// (`capacity = window + lookback`) — directly as an int, or as the largest lookback
+/// among a list of indicator directives. See `designs/...-windowed-dataframe`.
 fn build_window_state(
     window: Option<usize>,
-    max_lookback: Option<usize>,
-    indicators: Option<&[String]>,
+    max_lookback: Option<LookbackBound>,
 ) -> PyResult<Option<WindowState>> {
     let Some(w) = window else {
-        if max_lookback.is_some() || indicators.is_some() {
+        if max_lookback.is_some() {
             return Err(PyValueError::new_err(
-                "max_lookback / indicators only apply to a windowed frame — pass window=",
+                "max_lookback only applies to a windowed frame — pass window=",
             ));
         }
         return Ok(None);
@@ -33,23 +42,21 @@ fn build_window_state(
     if w == 0 {
         return Err(PyValueError::new_err("window must be a positive integer"));
     }
-    let lookback = match (max_lookback, indicators) {
-        (Some(_), Some(_)) => {
-            return Err(PyValueError::new_err("give either max_lookback or indicators, not both"))
+    let lookback = match max_lookback {
+        None => {
+            return Err(PyValueError::new_err(
+                "a windowed frame needs its lookback bound — pass max_lookback= \
+                 (an int, or a list of indicator directives to derive it from)",
+            ))
         }
-        (Some(l), None) => l,
-        (None, Some(inds)) => {
+        Some(LookbackBound::Count(l)) => l,
+        Some(LookbackBound::Directives(inds)) => {
             let mut max = 0usize;
-            for d in inds {
+            for d in &inds {
                 let node = volas_directive::parse(d).map_err(pyerr)?;
                 max = max.max(volas_directive::lookback::lookback(&node));
             }
             max
-        }
-        (None, None) => {
-            return Err(PyValueError::new_err(
-                "a windowed frame needs its lookback bound — pass max_lookback= or indicators=",
-            ))
         }
     };
     Ok(Some(WindowState { window: w, capacity: w + lookback }))
@@ -60,7 +67,7 @@ impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
     // docstring (pyo3 does not surface a `#[new]` doc comment to Python).
     #[new]
-    #[pyo3(signature = (data, columns = None, index = None, time_frame = None, cumulators = None, dtype = None, window = None, max_lookback = None, indicators = None))]
+    #[pyo3(signature = (data, columns = None, index = None, time_frame = None, cumulators = None, dtype = None, window = None, max_lookback = None))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         data: &Bound<'_, PyAny>,
@@ -70,8 +77,7 @@ impl PyDataFrame {
         cumulators: Option<&Bound<'_, PyDict>>,
         dtype: Option<&str>,
         window: Option<usize>,
-        max_lookback: Option<usize>,
-        indicators: Option<Vec<String>>,
+        max_lookback: Option<LookbackBound>,
     ) -> PyResult<Self> {
         // `columns`, when given, selects and orders the columns — a strict projection, like
         // `df[[...]]`: a name not present raises KeyError, and an empty list or a duplicate
@@ -181,7 +187,7 @@ impl PyDataFrame {
         };
         // `window=` makes this a bounded rolling-window frame (see designs): derive the
         // retention capacity (window + max_lookback) and bound the initial data to it.
-        let win = build_window_state(window, max_lookback, indicators.as_deref())?;
+        let win = build_window_state(window, max_lookback)?;
         let df = match &win {
             Some(w) if df.height() > w.capacity => df.slice(df.height() - w.capacity, df.height()),
             _ => df,

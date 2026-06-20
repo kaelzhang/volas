@@ -19,71 +19,8 @@ use volas_time::{AggSpec, TimeFrame};
 #[allow(unused_imports)]
 use crate::*;
 
-// --- DataFrame -------------------------------------------------------------
+// --- DataFrame state -------------------------------------------------------
 
-/// ``volas.DataFrame`` — an ordered, named, time-indexed OHLCV table with
-/// indicator-directive indexing and pandas-compatible positional / label access.
-///
-/// Construct from a dict of columns, or read a CSV::
-///
-///     df = volas.DataFrame({'close': [10.0, 11.0], 'volume': [100, 120]})
-///     df = volas.read_csv('ohlcv.csv', index_col='time')
-///
-/// The headline feature is string indexing: a plain column name returns that
-/// column, and an *indicator directive* is computed on demand, cached, and
-/// incrementally refreshed thereafter::
-///
-///     df['close']            # a column, as a Series
-///     df['ma:5']             # SMA(5) of close (directive) — computed & cached
-///     df['macd.signal']      # MACD signal line
-///     df['close > open']     # a boolean directive -> bool Series
-///     df[['open', 'close']]  # a sub-frame
-///     df[df['close'] > 100]  # boolean-mask row filter
-///
-/// Positional / label access mirrors pandas via ``.iloc`` / ``.loc`` (2-D get +
-/// set) and the scalar ``.iat`` / ``.at``; common transforms (``head``,
-/// ``tail``, ``dropna``, ``sort_index``, ``reset_index``, ``set_index``,
-/// ``rename``, ``astype``, ``to_numpy``, ``to_pandas``, ``to_csv``) follow the
-/// pandas spelling. ``cumulate`` resamples to a coarser timeframe; ``append``
-/// grows the frame in place for live streaming.
-///
-/// Passing ``window=`` makes a **bounded rolling-window** frame: only the last
-/// ``window`` rows are visible, while enough older rows are retained behind the
-/// scenes (``window + max_lookback``) to keep cached indicators bit-exact across
-/// the periodic, automatic front-drop — so memory stays bounded no matter how many
-/// bars you ``append`` (ideal as a fixed-size NN feature buffer). Every row-facing
-/// surface (indexing, ``to_numpy``, ``to_csv``, reductions, …) sees only the
-/// window; ``ready`` reports whether it has warmed up; ``fill_into`` writes the
-/// window straight into a preallocated array with no per-bar allocation::
-///
-///     wf = volas.DataFrame(seed, time_frame='15m', window=30, indicators=['atr:14'])
-///     wf.append(bar); wf.fulfill()        # fold a bar, refresh the cached atr:14
-///     x = wf[['close', 'atr:14']].to_numpy('float32')   # the 30×2 feature window
-///
-/// Args:
-///     data (dict[str, Sequence] | DataFrame): a dict of column name -> equal-length
-///         values, or another volas DataFrame to copy (its index, aliases and tf-state are
-///         carried — like ``df.copy()``). A pandas DataFrame is not accepted; use
-///         ``DataFrame.from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
-///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
-///     columns (list[str], optional): select and order the columns to keep (like
-///         ``df[[...]]``); a name not present raises ``KeyError``. An empty list or a
-///         duplicate name is rejected, and an absent column is never NaN-filled.
-///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
-///         this bar interval; the given rows are taken as already-final bars and later
-///         ``append``s fold finer bars into them. Requires a DatetimeIndex.
-///     cumulators (dict[str, str], optional): per-column aggregator overrides for folding
-///         (e.g. ``{'amount': 'sum'}``); only meaningful together with ``time_frame``.
-///     dtype (str, optional): cast every column to a single dtype at construction
-///         (e.g. ``'float32'``), like pandas ``DataFrame(data, dtype=...)``.
-///     window (int, optional): make this a bounded rolling-window frame showing only
-///         the last ``window`` rows (see above). Requires the lookback bound below.
-///     max_lookback (int, optional): with ``window``, the largest indicator lookback you
-///         will use — the retained margin (``window + max_lookback``). Give this or
-///         ``indicators`` (exactly one), and only with ``window``.
-///     indicators (list[str], optional): with ``window``, derive ``max_lookback`` from the
-///         largest lookback among these directives instead of stating it (e.g.
-///         ``['atr:14', 'ma:50']`` -> margin 50). Give this or ``max_lookback``.
 /// Live cumulation state carried by a tf-aware DataFrame (set via the
 /// `time_frame` constructor arg or `cumulate`): the target frame, the per-column
 /// aggregators, and the raw fine bars of the still-open (forming) period —
@@ -149,6 +86,70 @@ pub(crate) struct WindowState {
     pub(crate) capacity: usize,
 }
 
+/// ``volas.DataFrame`` — an ordered, named, time-indexed OHLCV table with
+/// indicator-directive indexing and pandas-compatible positional / label access.
+///
+/// Construct from a dict of columns, or read a CSV::
+///
+///     df = volas.DataFrame({'close': [10.0, 11.0], 'volume': [100, 120]})
+///     df = volas.read_csv('ohlcv.csv', index_col='time')
+///
+/// The headline feature is string indexing: a plain column name returns that
+/// column, and an *indicator directive* is computed on demand, cached, and
+/// incrementally refreshed thereafter::
+///
+///     df['close']            # a column, as a Series
+///     df['ma:5']             # SMA(5) of close (directive) — computed & cached
+///     df['macd.signal']      # MACD signal line
+///     df['close > open']     # a boolean directive -> bool Series
+///     df[['open', 'close']]  # a sub-frame
+///     df[df['close'] > 100]  # boolean-mask row filter
+///
+/// Positional / label access mirrors pandas via ``.iloc`` / ``.loc`` (2-D get +
+/// set) and the scalar ``.iat`` / ``.at``; common transforms (``head``,
+/// ``tail``, ``dropna``, ``sort_index``, ``reset_index``, ``set_index``,
+/// ``rename``, ``astype``, ``to_numpy``, ``to_pandas``, ``to_csv``) follow the
+/// pandas spelling. ``cumulate`` resamples to a coarser timeframe; ``append``
+/// grows the frame in place for live streaming.
+///
+/// Passing ``window=`` makes a **bounded rolling-window** frame: only the last
+/// ``window`` rows are visible, while enough older rows are retained behind the
+/// scenes (``window + max_lookback``) to keep cached indicators bit-exact across
+/// the periodic, automatic front-drop — so memory stays bounded no matter how many
+/// bars you ``append`` (ideal as a fixed-size NN feature buffer). Every row-facing
+/// surface (indexing, ``to_numpy``, ``to_csv``, reductions, …) sees only the
+/// window; ``ready`` reports whether it has warmed up; ``fill_into`` writes the
+/// window straight into a preallocated array with no per-bar allocation::
+///
+///     wf = volas.DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
+///     wf.append(bar); wf.fulfill()        # fold a bar, refresh the cached atr:14
+///     x = wf[['close', 'atr:14']].to_numpy('float32')   # the 30×2 feature window
+///
+/// Args:
+///     data (dict[str, Sequence] | DataFrame): a dict of column name -> equal-length
+///         values, or another volas DataFrame to copy (its index, aliases and tf-state are
+///         carried — like ``df.copy()``). A pandas DataFrame is not accepted; use
+///         ``DataFrame.from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
+///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
+///     columns (list[str], optional): select and order the columns to keep (like
+///         ``df[[...]]``); a name not present raises ``KeyError``. An empty list or a
+///         duplicate name is rejected, and an absent column is never NaN-filled.
+///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
+///         this bar interval; the given rows are taken as already-final bars and later
+///         ``append``s fold finer bars into them. Requires a DatetimeIndex.
+///     cumulators (dict[str, str], optional): per-column aggregator overrides for folding
+///         (e.g. ``{'amount': 'sum'}``); only meaningful together with ``time_frame``.
+///     dtype (str, optional): cast every column to a single dtype at construction
+///         (e.g. ``'float32'``), like pandas ``DataFrame(data, dtype=...)``.
+///     window (int, optional): make this a bounded rolling-window frame showing only
+///         the last ``window`` rows (see above). Requires ``max_lookback``.
+///     max_lookback (int | list[str], optional): REQUIRED with ``window`` (and valid only
+///         with it) — the margin of hidden history (``window + max_lookback``) that keeps
+///         cached indicators bit-exact across the automatic front-drop. Give an **int** to
+///         state the largest indicator lookback you will use, or a **list of indicator
+///         directives** to derive it from the largest of their lookbacks (e.g.
+///         ``['atr:14', 'ma:50']`` -> margin 50) — so you never hand-compute a compound
+///         indicator's warm-up. Too small a margin silently breaks the bit-exactness.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
     pub(crate) inner: DataFrame,

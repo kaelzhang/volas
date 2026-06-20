@@ -49,10 +49,10 @@ def _make(index_kind):
 
     if index_kind == 'datetime':
         wf = DataFrame({k: v[:SEED] for k, v in data.items()}, index=seed_idx,
-                       window=WINDOW, indicators=['atr:14'])
+                       window=WINDOW, max_lookback=['atr:14'])
     else:
         wf = DataFrame({k: v[:SEED] for k, v in data.items()},
-                       window=WINDOW, indicators=['atr:14'])
+                       window=WINDOW, max_lookback=['atr:14'])
     for k in range(SEED, N):
         if index_kind == 'datetime':
             one = DataFrame({c: [data[c][k]] for c in data}, index=np.array([bar_idx[k]]))

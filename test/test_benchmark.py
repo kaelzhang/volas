@@ -642,7 +642,7 @@ def _volas_windowed():
             index=_W_TS[:1],
             time_frame='15m',
             window=W_WINDOW,
-            indicators=['atr:14'],
+            max_lookback=['atr:14'],
         )
         return (wf,), {}
 

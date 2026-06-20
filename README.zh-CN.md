@@ -234,9 +234,8 @@ df['ma:2']
   - `'max'`——最大值
   - `'min'`——最小值
   - `'sum'`——求和
-- **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。必须同时给定 `max_lookback` / `indicators` 中的恰好一个。
-- **max_lookback** `Optional[int] = None` 与 `window` 配合，表示你打算使用的最大指标 lookback；frame 会额外保留 `window + max_lookback` 行 margin，使缓存指标在自动丢弃旧行时仍然正确。
-- **indicators** `Optional[list[str]] = None` 与 `window` 配合，从这些 directive 中的最大 lookback 推导 `max_lookback`，省去手填（例如 `['atr:14', 'ma:50']` 保留 50 行 margin）。
+- **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
+- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：隐藏历史的 margin（`window + max_lookback`），使缓存指标在自动丢弃旧行前后保持逐位一致。传一个 **int** 直接声明你会用到的最大指标 lookback，或传一个**指标 directive 列表**从它们中最大的 lookback 推导（例如 `['atr:14', 'ma:50']` → margin 50），省去手算复合指标的预热长度。margin 给得过小会**静默破坏**逐位一致性。
 
 ### 有界滚动窗口
 
@@ -244,7 +243,7 @@ df['ma:2']
 
 ```py
 # 一个有界的 30 行窗口；margin 大小由你声明的指标推导而来。
-wf = DataFrame(seed, time_frame='15m', window=30, indicators=['atr:14'])
+wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
 
 for bar in feed:            # 可以永远运行；内存不增长
     wf.append(bar)          # 把一根 1m bar 折叠进正在形成中的 15m bar
@@ -255,8 +254,54 @@ for bar in feed:            # 可以永远运行；内存不增长
 
 所有面向行的接口——`len`、`shape`、`index`、索引（`[]` / `.iloc` / `.loc` / `.iat` / `.at`）、`head` / `tail`、聚合、`to_numpy`、`to_csv`、`to_pandas`、`repr`——都**只**显示这 `window` 行；margin 永远不可见。
 
-- **`ready`** `bool` 窗口是否已预热（累积到 `window + max_lookback` 行，使每个可见行都有完整的指标历史）。无界 frame 恒为 `True`。
-- **`fill_into(out, columns=None)`** 把窗口的值就地写入调用方预分配的 C-contiguous `float32` / `float64` 数组，形状为 `(len(df), k)`——零分配的特征导出热路径（每根 bar 复用同一个 buffer）。缺失值写为 `NaN`；字符串列会被拒绝（没有浮点含义）。
+#### `ready`——窗口是否已预热？
+
+`ready`（一个 property）在 frame 累积到 `window + max_lookback` 行后变为 `True`——此时每一个可见的 `window` 行背后都有完整的指标历史，缓存指标端到端有效。预热阶段它为 `False`、可见行仍在填充；请用它来 gate 你的推理 / 训练。
+
+```py
+wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
+wf.ready          # False——目前还不足 30 + 14 行
+...               # append 直到预热完成
+wf.ready          # True ——每个可见行都已有有效的指标历史
+```
+
+**无界** frame（没传 `window=`）没有预热契约，**恒为 `True`**。
+
+#### `fill_into(out, columns=None)`——零分配特征导出
+
+`fill_into` 把窗口的值**就地**写进**你自己**持有的 NumPy 数组，每次调用零分配。它是实盘推理循环的「导出」一半：配上一块预分配 buffer，`append → fulfill → fill_into → 推理` 的循环每根 bar 零分配（不同于 `to_numpy` 每次都新建一整块矩阵）。
+
+契约：
+
+- **只导出已缓存的列**。directive 列必须**先 materialize**——在循环前访问它一次（例如 `wf['atr:14']`）；`max_lookback=['atr:14']` 只是给 margin 定大小，并**不会**创建该列，而 `fill_into` 导出的是已缓存的值、不会现场计算。
+- **`out`** 必须是 **C-contiguous** 的 `float32` **或** `float64` 二维数组，形状**严格等于** `(len(df), k)`，其中 `k` 是导出的列数。形状或 dtype 不符会报错。
+- **`columns`** 按顺序选择要导出的列（默认全部列）。**字符串列没有浮点含义、会被拒绝**——在 `columns=` 里只列出数值列以排除它。
+- **缺失 / NA 单元格写为 `NaN`**。
+- `append` 之后缓存指标是脏的，所以**先 `fulfill()` 再 `fill_into()`**——带着未刷新的 directive 列导出会报错。
+
+```py
+import numpy as np
+
+COLS = ['open', 'high', 'low', 'close', 'atr:14']    # k = 5 个特征
+wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
+wf['atr:14']                          # 先 materialize 这个 directive 一次——max_lookback
+                                      # 只给 margin 定大小，并不会创建该列
+
+# 整个运行期复用同一块 buffer——形状 (window, k)，即模型的输入张量。
+buf = np.empty((30, len(COLS)), dtype=np.float32)
+
+for bar in feed:
+    wf.append(bar)
+    wf.fulfill()                      # 导出前刷新 atr:14
+    if not wf.ready:
+        continue                      # 预热中：buf 还不是 (30, k)，指标也未生效
+    wf.fill_into(buf, columns=COLS)   # 把 30×5 窗口零分配写进 buf
+    prediction = model(buf)           # 每根 bar 都喂给模型同一块内存
+```
+
+> **形状提示。** 形状是按 `len(df)` 严格匹配的，而 `len(df)` 在**预热期会增长**（1、2、…… 直到 `window`），之后才稳定在 `window`。像上面那样用 `wf.ready` gate 即可绕开：当它为 `True` 时 `len(df) == window`，固定的 `(window, k)` buffer 必然适配。若要在预热期导出，就把 `out` 调成当前的 `len(df)`。
+
+`fill_into` 并不限于 windowed frame——在普通 frame 上它同样导出整个逻辑视图；只是有界窗口下「复用一块 buffer」最有价值。
 
 ### DataFrame.from_pandas(pdf) -> DataFrame
 

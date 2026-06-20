@@ -1,8 +1,9 @@
 """Windowed (bounded rolling-window) DataFrame tests.
 
-A windowed frame (``DataFrame(data, window=M, max_lookback=L)`` /
-``indicators=[...]``) keeps only the last ``M`` rows visible while physically
-retaining ``M + L`` rows of margin so cached indicators stay bit-exact across the
+A windowed frame (``DataFrame(data, window=M, max_lookback=L)``, where ``L`` is an
+int or a list of indicator directives to derive it from) keeps only the last ``M``
+rows visible while physically retaining ``M + L`` rows of margin so cached indicators
+stay bit-exact across the
 periodic front-drop. Every row-facing surface presents the logical ``M`` view; the
 hidden margin is never observable, and memory stays bounded under unbounded appends.
 """
@@ -65,13 +66,13 @@ def test_window_zero_rejected():
 
 
 def test_max_lookback_without_window_rejected():
-    with pytest.raises(ValueError, match="only apply to a windowed frame"):
+    with pytest.raises(ValueError, match="only applies to a windowed frame"):
         DataFrame({'a': [1.0, 2.0]}, max_lookback=3)
 
 
-def test_indicators_without_window_rejected():
-    with pytest.raises(ValueError, match="only apply to a windowed frame"):
-        DataFrame({'a': [1.0, 2.0]}, indicators=['ma:3'])
+def test_max_lookback_list_without_window_rejected():
+    with pytest.raises(ValueError, match="only applies to a windowed frame"):
+        DataFrame({'a': [1.0, 2.0]}, max_lookback=['ma:3'])
 
 
 def test_window_without_lookback_rejected():
@@ -79,9 +80,13 @@ def test_window_without_lookback_rejected():
         DataFrame({'a': [1.0, 2.0]}, window=5)
 
 
-def test_window_both_lookback_sources_rejected():
-    with pytest.raises(ValueError, match="either max_lookback or indicators"):
-        DataFrame({'a': [1.0, 2.0]}, window=5, max_lookback=3, indicators=['ma:3'])
+def test_max_lookback_int_and_list_equivalent():
+    # max_lookback=N and max_lookback=[directives whose largest lookback is N] size the
+    # retained margin (window + N) identically — the list form just derives the int.
+    data = _ohlcv(100)
+    by_int = _windowed(data, 100, window=30, max_lookback=14)
+    by_list = _windowed(data, 100, window=30, max_lookback=['atr:14'])
+    assert by_int._physical_height == by_list._physical_height
 
 
 # --------------------------------------------------------------------------- #
@@ -239,7 +244,7 @@ def test_fill_into_reuses_buffer_across_appends():
     # The live loop: one preallocated buffer, refilled each round (zero per-bar alloc).
     data = _ohlcv(200, seed=2)
     cols = ['close', 'high']
-    wf = _windowed(data, 30, window=30, indicators=['atr:14'])
+    wf = _windowed(data, 30, window=30, max_lookback=['atr:14'])
     out = np.empty((30, len(cols)), dtype=np.float32)
     for k in range(30, 200):
         one = DataFrame({c: [data[c][k]] for c in data}, index=np.array([_ts(1, start=k)[0]]))
@@ -298,7 +303,7 @@ def test_indicator_bit_exact_across_compactions(directive):
     # a one-shot batch recompute would fold in the append-resume's own ~1e-14 FP
     # path difference, which windowing does not introduce.)
     data = _ohlcv(300, seed=7)
-    wf = _windowed(data, 30, window=30, indicators=[directive])
+    wf = _windowed(data, 30, window=30, max_lookback=[directive])
     _feed(wf, data, 30, 300, refresh=directive)
     uf = _incremental(data, 30, 300, directive)
     got = wf[directive].to_numpy()
@@ -312,7 +317,7 @@ def test_margin_keeps_indicator_history():
     # The visible window's earliest indicator value must reflect the *margin* history,
     # not restart from the window's own first row (that is the whole point of margin).
     data = _ohlcv(300, seed=3)
-    wf = _windowed(data, 30, window=30, indicators=['ma:10'])
+    wf = _windowed(data, 30, window=30, max_lookback=['ma:10'])
     _feed(wf, data, 30, 300, refresh='ma:10')
     got = wf['ma:10'].to_numpy()
     # ma:10 needs 9 rows of history; with a 10-row margin every visible row is valid.
@@ -358,7 +363,7 @@ def test_tf_fold_fast_path_matches_batch_aggregate():
 def test_memory_bounded_under_unbounded_appends():
     data = _ohlcv(2000, seed=1)
     cap = 30 + 14  # window + atr lookback
-    wf = _windowed(data, 30, window=30, indicators=['atr:14'])
+    wf = _windowed(data, 30, window=30, max_lookback=['atr:14'])
     peak = wf._physical_height
     for k in range(30, 2000):
         one = DataFrame({c: [data[c][k]] for c in data}, index=np.array([_ts(1, start=k)[0]]))

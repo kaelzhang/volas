@@ -278,13 +278,14 @@ Which gets the 2-period simple moving average on column `"close"`.
   - `'sum'` — the sum
 - **window** `Optional[int] = None` Make this a **bounded rolling-window** frame
   showing only the last `window` rows (see [Bounded rolling window](#bounded-rolling-window)).
-  Requires exactly one of `max_lookback` / `indicators`.
-- **max_lookback** `Optional[int] = None` With `window`, the largest indicator
-  lookback you intend to use; the frame keeps `window + max_lookback` rows of margin
-  so cached indicators stay correct across the automatic front-drop.
-- **indicators** `Optional[list[str]] = None` With `window`, derive `max_lookback`
-  from the largest lookback among these directives instead of stating it
-  (e.g. `['atr:14', 'ma:50']` keeps a 50-row margin).
+  Requires `max_lookback`.
+- **max_lookback** `Optional[int | list[str]] = None` **Required with `window`** (and
+  valid only with it): the hidden-history margin (`window + max_lookback`) that keeps
+  cached indicators bit-exact across the automatic front-drop. Pass an **int** to state
+  the largest indicator lookback you will use, or a **list of indicator directives** to
+  derive it from the largest of their lookbacks (e.g. `['atr:14', 'ma:50']` → margin 50),
+  so you never hand-compute a compound indicator's warm-up. Sizing it too small silently
+  breaks the bit-exactness.
 
 ### Bounded rolling window
 
@@ -296,7 +297,7 @@ across each drop (the same values an unbounded frame would compute).
 
 ```py
 # A bounded 30-bar window; the margin is sized from the indicators you declare.
-wf = DataFrame(seed, time_frame='15m', window=30, indicators=['atr:14'])
+wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
 
 for bar in feed:            # runs forever; memory never grows
     wf.append(bar)          # fold a 1m bar into the forming 15m bar
@@ -309,13 +310,73 @@ Every row-facing surface — `len`, `shape`, `index`, indexing (`[]` / `.iloc` /
 `.loc` / `.iat` / `.at`), `head` / `tail`, reductions, `to_numpy`, `to_csv`,
 `to_pandas`, `repr` — shows **only** the `window` rows; the margin is never visible.
 
-- **`ready`** `bool` Whether the window has warmed up (`window + max_lookback` rows
-  accumulated, so every visible row has a full indicator history). Always `True` for
-  an unbounded frame.
-- **`fill_into(out, columns=None)`** Write the window's values into a caller-preallocated
-  C-contiguous `float32` / `float64` array of shape `(len(df), k)`, in place — the
-  zero-allocation feature-export hot path (reuse one buffer across every bar). A
-  missing cell becomes `NaN`; a string column is rejected (no float value).
+#### `ready` — has the window warmed up?
+
+`ready` (a property) is `True` once the frame holds `window + max_lookback` rows — so
+every one of the `window` visible rows has a full indicator history behind it and the
+cached indicators are valid end-to-end. During the initial warm-up it is `False` and
+the visible rows are still filling in; gate your inference / training on it.
+
+```py
+wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
+wf.ready          # False — fewer than 30 + 14 rows accumulated so far
+...               # append until warmed
+wf.ready          # True  — every visible row now has valid indicator history
+```
+
+An **unbounded** frame (no `window=`) has no warm-up contract and is **always `True`**.
+
+#### `fill_into(out, columns=None)` — zero-allocation feature export
+
+`fill_into` writes the window's values straight into a NumPy array **you** own, in
+place — nothing is allocated per call. It is the export half of a live inference loop:
+paired with one preallocated buffer, an `append → fulfill → fill_into → infer` loop
+allocates nothing per bar (unlike `to_numpy`, which mints a fresh matrix every call).
+
+Contract:
+
+- **Only already-cached columns** are exported. A directive column must be
+  **materialized first** — access it once (e.g. `wf['atr:14']`) before the loop;
+  `max_lookback=['atr:14']` sizes the margin but does **not** create the column, and
+  `fill_into` exports cached values rather than computing them.
+- **`out`** must be a **C-contiguous** `float32` **or** `float64` 2-D array whose shape
+  is **exactly** `(len(df), k)`, where `k` is the number of exported columns. A wrong
+  shape or dtype raises.
+- **`columns`** selects which columns to export, in order (default: every column). A
+  **string column has no float meaning and is rejected** — list the numeric ones in
+  `columns=` to exclude it.
+- A **missing / NA cell becomes `NaN`**.
+- An `append` leaves the cached indicators stale, so **call `fulfill()` before
+  `fill_into()`** — exporting with an unrefreshed directive column raises.
+
+```py
+import numpy as np
+
+COLS = ['open', 'high', 'low', 'close', 'atr:14']    # k = 5 features
+wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
+wf['atr:14']                          # materialize the directive once — max_lookback only
+                                      # sizes the margin; it does not create the column
+
+# One reusable buffer for the whole run — shape (window, k), the model's input tensor.
+buf = np.empty((30, len(COLS)), dtype=np.float32)
+
+for bar in feed:
+    wf.append(bar)
+    wf.fulfill()                      # refresh atr:14 before exporting
+    if not wf.ready:
+        continue                      # warming up: buf isn't (30, k) yet, indicators not valid
+    wf.fill_into(buf, columns=COLS)   # zero-alloc write of the 30×5 window into `buf`
+    prediction = model(buf)           # feed the model the same memory every bar
+```
+
+> **Shape note.** The shape match is exact against `len(df)`, which **grows during
+> warm-up** (1, 2, … up to `window`) and only then settles at `window`. Gating on
+> `wf.ready` (as above) sidesteps this: by the time it is `True`, `len(df) == window`,
+> so a fixed `(window, k)` buffer always fits. To export mid-warm-up, size `out` to the
+> current `len(df)` instead.
+
+`fill_into` is not windowed-only — on a plain frame it exports the whole logical view
+the same way; the bounded window is just where reusing one buffer matters most.
 
 ### DataFrame.from_pandas(pdf) -> DataFrame
 

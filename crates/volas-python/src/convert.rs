@@ -98,7 +98,7 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
     // A default RangeIndex carries no labels — a fresh volas RangeIndex (just the columns).
     let idx = pdf.getattr("index")?;
     if idx.is_instance(&pd.getattr("RangeIndex")?)? {
-        return PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None, None);
+        return PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None);
     }
 
     // A named index becomes a column, then `set_index` moves it into the row index.
@@ -122,7 +122,7 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
     for (k, v) in data.iter() {
         merged.set_item(k, v)?;
     }
-    let df = PyDataFrame::new(merged.as_any(), None, None, None, None, None, None, None, None)?
+    let df = PyDataFrame::new(merged.as_any(), None, None, None, None, None, None, None)?
         .set_index(&idx_name)?;
 
     // The imported instants are already true UTC; re-attach a tz-aware index's display
