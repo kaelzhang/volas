@@ -33,6 +33,13 @@ pub(crate) struct TfState {
     /// folded append), kept so a re-sent forming bar updates (deduped) rather
     /// than double-counts.
     pub(crate) open: Option<DataFrame>,
+    /// The current open period's `unify_tz` key, **lazily memoized** (`None` until
+    /// recomputed). The period key is invariant while a period is forming — only a
+    /// rollover changes it — so caching it lets `fold_append` skip a second
+    /// `unify_tz` (a civil-parts / chrono bucketing chain) on every same-period bar.
+    /// `Option` (not a bare `i64`) so a construction path that resets `open` without
+    /// touching this can't leave a stale key: `None` just recomputes on next use.
+    pub(crate) open_key: Option<i64>,
     /// Cached live-fold plan (`None` until the first fold), reused across appends.
     pub(crate) fold_plan: Option<FoldPlan>,
 }

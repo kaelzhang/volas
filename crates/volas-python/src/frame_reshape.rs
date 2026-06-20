@@ -275,6 +275,7 @@ impl PyDataFrame {
                 time_frame: target,
                 cumulators: spec,
                 open: cum.open_clone(),
+                open_key: None,
                 fold_plan: None,
             }),
             window: None,

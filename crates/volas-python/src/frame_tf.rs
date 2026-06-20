@@ -48,8 +48,9 @@ impl PyDataFrame {
         let PyDataFrame { inner, tf, window: _ } = self;
         let tfs = tf.as_mut().expect("fold_append on a plain frame");
         let frame = tfs.time_frame;
-        let (fine_ts, tz) = match fine.index().kind() {
-            IndexKind::Datetime(v, tz) => (v.clone(), *tz),
+        // Borrow the fine bar's timestamps (it outlives this fn) — no per-bar Vec clone.
+        let (fine_ts, tz): (&[i64], _) = match fine.index().kind() {
+            IndexKind::Datetime(v, tz) => (v.as_slice(), *tz),
             _ => {
                 return Err(PyValueError::new_err(
                     "append to a time_frame DataFrame requires a DatetimeIndex",
@@ -70,7 +71,7 @@ impl PyDataFrame {
                 _ => None,
             },
         };
-        for &ts in &fine_ts {
+        for &ts in fine_ts {
             if ts == i64::MIN {
                 return Err(PyValueError::new_err(
                     "cannot append a NaT-timestamped bar to a time_frame DataFrame; a \
@@ -91,10 +92,23 @@ impl PyDataFrame {
         }
         for (i, &bar_ts) in fine_ts.iter().enumerate() {
             let key = frame.unify_tz(bar_ts, tz);
-            let same_period = tfs
-                .open
-                .as_ref()
-                .is_some_and(|open| frame.unify_tz(last_dt(open), tz) == key);
+            // The open period's key is invariant while it forms, so memoize it (lazily,
+            // also covering construction paths that set `open` without a key) and skip
+            // the second per-bar `unify_tz` of the forming bar's timestamp.
+            let same_period = match tfs.open.as_ref() {
+                None => false,
+                Some(open) => {
+                    let open_key = match tfs.open_key {
+                        Some(k) => k,
+                        None => {
+                            let k = frame.unify_tz(last_dt(open), tz);
+                            tfs.open_key = Some(k);
+                            k
+                        }
+                    };
+                    open_key == key
+                }
+            };
             if same_period {
                 // The forming-bar update only reads the bar, so borrow it directly
                 // for the common single-row append (no slice copy).
@@ -148,6 +162,7 @@ impl PyDataFrame {
                 let bar = fine.slice(i, i + 1);
                 let agg = aggregate_period(&bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                 tfs.open = Some(bar);
+                tfs.open_key = Some(key); // the new open period's key (no recompute next bar)
                 inner.append(&agg).map_err(pyerr)?;
             }
         }

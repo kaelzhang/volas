@@ -17,7 +17,7 @@ use super::as_command;
 pub fn initial_state(df: &DataFrame, node: &Ast, _computed: &Column) -> Option<Vec<f64>> {
     let (name, sub, args, series) = as_command(node)?;
     let sub = sub.as_deref();
-    match (name.as_str(), sub) {
+    match (name.as_ref(), sub) {
         // Stateless finite-memory indicators need no carried values, but marking
         // them resumable lets append refresh compute only `[valid_rows, height)`.
         ("avgprice" | "medprice" | "typprice" | "wclprice" | "tr" | "bop", _)

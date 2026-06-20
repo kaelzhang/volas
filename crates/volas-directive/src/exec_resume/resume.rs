@@ -270,7 +270,7 @@ pub fn execute_resume(
     let (name, sub, args, series) = as_command(node)?;
     let sub = sub.as_deref();
     let close = || series_f64(df, series, 0, "close");
-    match (name.as_str(), sub) {
+    match (name.as_ref(), sub) {
         // Stateless finite-memory resume. These kernels depend only on the row
         // being refreshed plus a fixed prior row, so append can produce exactly the
         // stale tail without probing a window or recomputing the full column.
@@ -355,7 +355,7 @@ pub fn execute_resume(
                     continue;
                 }
                 let prior = data[i - period];
-                let value = match name.as_str() {
+                let value = match name.as_ref() {
                     "mom" => data[i] - prior,
                     _ if prior == 0.0 => 0.0,
                     "roc" => (data[i] / prior - 1.0) * 100.0,

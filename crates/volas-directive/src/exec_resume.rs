@@ -25,8 +25,11 @@ pub use resume::{
 // volas auto-caches) are handled; an unusual `@`-operand override returns `None`
 // and stays on the fallback.
 
-/// The resolved parts of a command node: `(name, sub, args, series)`.
-type CommandParts<'a> = (String, Option<String>, Cow<'a, [ArgValue]>, &'a [Ast]);
+/// The resolved parts of a command node: `(name, sub, args, series)`. The name and
+/// sub are `Cow` so a plain `Node::Command` (the common cached-directive resume, e.g.
+/// `atr:14`) borrows them from the memoized AST — no per-bar `String` clone — while the
+/// bare `Node::Name` path, which binds a fresh owned command, owns them.
+type CommandParts<'a> = (Cow<'a, str>, Option<Cow<'a, str>>, Cow<'a, [ArgValue]>, &'a [Ast]);
 
 /// Resolve a command node to `(name, sub, args, series)` when it is a plain
 /// `Node::Command` (canonical name / sub and resolved arguments, borrowed) or a bare
@@ -37,14 +40,14 @@ type CommandParts<'a> = (String, Option<String>, Cow<'a, [ArgValue]>, &'a [Ast])
 fn as_command(node: &Ast) -> Option<CommandParts<'_>> {
     match node {
         Node::Command(cmd) => Some((
-            cmd.name.clone(),
-            cmd.sub.clone(),
+            Cow::Borrowed(cmd.name.as_str()),
+            cmd.sub.as_deref().map(Cow::Borrowed),
             Cow::Borrowed(&cmd.args[..]),
             &cmd.series,
         )),
         Node::Name(name) if !name.is_empty() => {
             let cmd = bind_command(name, None, &[], &[]).ok()?;
-            Some((cmd.name, cmd.sub, Cow::Owned(cmd.args.into_vec()), &[]))
+            Some((Cow::Owned(cmd.name), cmd.sub.map(Cow::Owned), Cow::Owned(cmd.args.into_vec()), &[]))
         }
         _ => None,
     }
