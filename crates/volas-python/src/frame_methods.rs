@@ -16,12 +16,54 @@ use crate::timeframe::{build_agg_spec_for, resolve_time_frame};
 #[allow(unused_imports)]
 use crate::*;
 
+/// Validate the windowing params and derive the retention capacity. `max_lookback` /
+/// `indicators` only apply with `window`; with `window`, exactly one of them supplies the
+/// lookback bound (`capacity = window + lookback`). See `designs/...-windowed-dataframe`.
+fn build_window_state(
+    window: Option<usize>,
+    max_lookback: Option<usize>,
+    indicators: Option<&[String]>,
+) -> PyResult<Option<WindowState>> {
+    let Some(w) = window else {
+        if max_lookback.is_some() || indicators.is_some() {
+            return Err(PyValueError::new_err(
+                "max_lookback / indicators only apply to a windowed frame — pass window=",
+            ));
+        }
+        return Ok(None);
+    };
+    if w == 0 {
+        return Err(PyValueError::new_err("window must be a positive integer"));
+    }
+    let lookback = match (max_lookback, indicators) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err("give either max_lookback or indicators, not both"))
+        }
+        (Some(l), None) => l,
+        (None, Some(inds)) => {
+            let mut max = 0usize;
+            for d in inds {
+                let node = volas_directive::parse(d).map_err(pyerr)?;
+                max = max.max(volas_directive::lookback::lookback(&node));
+            }
+            max
+        }
+        (None, None) => {
+            return Err(PyValueError::new_err(
+                "a windowed frame needs its lookback bound — pass max_lookback= or indicators=",
+            ))
+        }
+    };
+    Ok(Some(WindowState { window: w, capacity: w + lookback }))
+}
+
 #[pymethods]
 impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
     // docstring (pyo3 does not surface a `#[new]` doc comment to Python).
     #[new]
-    #[pyo3(signature = (data, columns = None, index = None, time_frame = None, cumulators = None, dtype = None))]
+    #[pyo3(signature = (data, columns = None, index = None, time_frame = None, cumulators = None, dtype = None, window = None, max_lookback = None, indicators = None))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         data: &Bound<'_, PyAny>,
         columns: Option<Vec<String>>,
@@ -29,6 +71,9 @@ impl PyDataFrame {
         time_frame: Option<&Bound<'_, PyAny>>,
         cumulators: Option<&Bound<'_, PyDict>>,
         dtype: Option<&str>,
+        window: Option<usize>,
+        max_lookback: Option<usize>,
+        indicators: Option<Vec<String>>,
     ) -> PyResult<Self> {
         // `columns`, when given, selects and orders the columns — a strict projection, like
         // `df[[...]]`: a name not present raises KeyError, and an empty list or a duplicate
@@ -49,7 +94,7 @@ impl PyDataFrame {
         // `data` is polymorphic over volas's own inputs: another volas DataFrame (copied —
         // index, aliases and any tf-state carried, exactly like `df.copy()`), or a dict of
         // columns (a fresh RangeIndex); with `columns` the frame is projected onto them. A
-        // pandas DataFrame is deliberately NOT accepted here — use `from_pandas`, which keeps
+        // pandas DataFrame is deliberately NOT accepted here — use `DataFrame.from_pandas`, which keeps
         // volas pandas-free at import. To build a DatetimeIndex from a column, parse it with
         // `to_datetime` then `set_index` (or use `read_csv`).
         let (df, tf) = if let Ok(other) = data.extract::<PyRef<PyDataFrame>>() {
@@ -103,7 +148,7 @@ impl PyDataFrame {
         } else {
             return Err(PyTypeError::new_err(
                 "DataFrame(data): data must be a dict of columns or a volas DataFrame \
-                 (for a pandas DataFrame use from_pandas)",
+                 (for a pandas DataFrame use DataFrame.from_pandas)",
             ));
         };
         // F45: an explicit `index=` attaches row labels at construction (pandas
@@ -133,6 +178,13 @@ impl PyDataFrame {
                 DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
                     .map_err(pyerr)?
             }
+        };
+        // `window=` makes this a bounded rolling-window frame (see designs): derive the
+        // retention capacity (window + max_lookback) and bound the initial data to it.
+        let win = build_window_state(window, max_lookback, indicators.as_deref())?;
+        let df = match &win {
+            Some(w) if df.height() > w.capacity => df.slice(df.height() - w.capacity, df.height()),
+            _ => df,
         };
         // A `time_frame` makes this a cumulating frame: the given rows are taken as
         // already-final bars at that frame (not re-aggregated), and later `append`s fold
@@ -173,12 +225,13 @@ impl PyDataFrame {
                     cumulators: spec,
                     open: None,
                 }),
+                window: win,
             });
         }
         if cumulators.is_some() {
             return Err(PyValueError::new_err("cumulators requires time_frame"));
         }
-        Ok(PyDataFrame { inner: df, tf })
+        Ok(PyDataFrame { inner: df, tf, window: win })
     }
 
     /// The DatetimeIndex timezone name (`"UTC"` / `"+08:00"` /
@@ -235,7 +288,31 @@ impl PyDataFrame {
     ///     tuple[int, int]
     #[getter]
     pub(crate) fn shape(&self) -> (usize, usize) {
-        (self.inner.height(), self.inner.width())
+        (self.logical_range().1, self.inner.width())
+    }
+
+    /// Whether a windowed frame has warmed up — at least `window + max_lookback`
+    /// rows accumulated, so every one of the `window` visible rows has a fully
+    /// valid indicator history. Always ``True`` for an unbounded frame (no
+    /// warm-up contract). See the ``window=`` constructor argument.
+    ///
+    /// Returns:
+    ///     bool
+    #[getter]
+    pub(crate) fn ready(&self) -> bool {
+        match &self.window {
+            Some(w) => self.inner.height() >= w.capacity,
+            None => true,
+        }
+    }
+
+    /// The physical row count actually retained (window M + margin, bounded by
+    /// `2*(window + max_lookback)`). Internal — equals ``len(df)`` for an unbounded
+    /// frame; exposed so the test suite can assert a windowed frame's memory stays
+    /// bounded across unbounded appends.
+    #[getter]
+    pub(crate) fn _physical_height(&self) -> usize {
+        self.inner.height()
     }
 
     /// The row index as a NumPy array (``datetime64[ns]`` for a DatetimeIndex,
@@ -245,7 +322,7 @@ impl PyDataFrame {
     ///     numpy.ndarray
     #[getter]
     pub(crate) fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        index_to_numpy(py, self.inner.index())
+        index_to_numpy(py, self.logical().index())
     }
 
     // The indexers hold a live reference to this frame (`Py<PyDataFrame>`), not a
@@ -321,7 +398,7 @@ impl PyDataFrame {
     }
 
     pub(crate) fn __len__(&self) -> usize {
-        self.inner.height()
+        self.logical_range().1
     }
 
     /// `name in df` — whether a column exists (alias-aware).
@@ -359,8 +436,9 @@ impl PyDataFrame {
     #[pyo3(signature = (n = 5))]
     pub(crate) fn head(&self, n: isize) -> PyResult<PyDataFrame> {
         ensure_fresh(&self.inner)?;
-        let (a, b) = head_tail_window(n, self.inner.height(), true);
-        Ok(PyDataFrame::plain(self.inner.slice(a, b)))
+        let (start, len) = self.logical_range();
+        let (a, b) = head_tail_window(n, len, true);
+        Ok(PyDataFrame::plain(self.inner.slice(start + a, start + b)))
     }
 
     /// Last `n` rows (pandas `tail` = `iloc[-n:]`, so a negative `n` drops the
@@ -368,16 +446,19 @@ impl PyDataFrame {
     #[pyo3(signature = (n = 5))]
     pub(crate) fn tail(&self, n: isize) -> PyResult<PyDataFrame> {
         ensure_fresh(&self.inner)?;
-        let (a, b) = head_tail_window(n, self.inner.height(), false);
-        Ok(PyDataFrame::plain(self.inner.slice(a, b)))
+        let (start, len) = self.logical_range();
+        let (a, b) = head_tail_window(n, len, false);
+        Ok(PyDataFrame::plain(self.inner.slice(start + a, start + b)))
     }
 
     /// Per-column count of non-missing values (pandas `count`) -> a Series indexed
     /// by column name (`int64`), reading each column's validity.
     pub(crate) fn count(&self) -> PyResult<PySeries> {
         ensure_fresh(&self.inner)?;
-        let names: Vec<String> = self.inner.names().to_vec();
-        let counts: Vec<i64> = self.inner.columns().iter().map(|c| c.count() as i64).collect();
+        let view = self.logical();
+        let df = view.as_ref();
+        let names: Vec<String> = df.names().to_vec();
+        let counts: Vec<i64> = df.columns().iter().map(|c| c.count() as i64).collect();
         Ok(PySeries {
             inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
         })
@@ -444,9 +525,10 @@ impl PyDataFrame {
     /// Per-column count of distinct present values (pandas `df.nunique()`).
     pub(crate) fn nunique(&self) -> PyResult<PySeries> {
         ensure_fresh(&self.inner)?;
-        let names: Vec<String> = self.inner.names().to_vec();
-        let counts: Vec<i64> = self
-            .inner
+        let view = self.logical();
+        let df = view.as_ref();
+        let names: Vec<String> = df.names().to_vec();
+        let counts: Vec<i64> = df
             .columns()
             .iter()
             .map(|c| {
@@ -520,15 +602,17 @@ impl PyDataFrame {
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn drop_duplicates(&self, keep: &str) -> PyResult<PyDataFrame> {
         let dup = self.row_duplicated(keep)?;
-        let positions: Vec<usize> = (0..self.inner.height()).filter(|&i| !dup[i]).collect();
-        Ok(PyDataFrame::plain(take_frame(&self.inner, &positions)))
+        let view = self.logical();
+        let df = view.as_ref();
+        let positions: Vec<usize> = (0..df.height()).filter(|&i| !dup[i]).collect();
+        Ok(PyDataFrame::plain(take_frame(df, &positions)))
     }
     /// True per row for a later duplicate of an earlier row (pandas `duplicated`).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn duplicated(&self, keep: &str) -> PyResult<PySeries> {
         let dup = self.row_duplicated(keep)?;
         Ok(PySeries {
-            inner: Series::new(None, Column::bool(dup), Arc::clone(self.inner.index())),
+            inner: Series::new(None, Column::bool(dup), Arc::clone(self.logical().index())),
         })
     }
     /// The first (smallest-position) mode of each column, as a 1-row frame.
@@ -536,33 +620,38 @@ impl PyDataFrame {
     /// deterministic first mode per column — documented divergence.)
     pub(crate) fn mode(&self) -> PyResult<PyDataFrame> {
         ensure_fresh(&self.inner)?;
-        let mut cols = Vec::with_capacity(self.inner.width());
-        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+        let view = self.logical();
+        let df = view.as_ref();
+        let idx = df.index();
+        let mut cols = Vec::with_capacity(df.width());
+        for (name, col) in df.names().iter().zip(df.columns()) {
             let s = PySeries {
-                inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(self.inner.index())),
+                inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
             };
             let m = s.mode();
             let take: Vec<usize> = if m.inner.is_empty() { vec![] } else { vec![0] };
             cols.push(m.inner.data.take(&take));
         }
         Ok(PyDataFrame::plain(
-            DataFrame::new(self.inner.names().to_vec(), cols, None).map_err(pyerr)?,
+            DataFrame::new(df.names().to_vec(), cols, None).map_err(pyerr)?,
         ))
     }
     /// Counts of unique values (pandas `df.value_counts()`); volas has no
     /// MultiIndex, so only a single-column frame is supported — call it on the
     /// column (`df[col].value_counts()`) otherwise.
     pub(crate) fn value_counts(&self) -> PyResult<PySeries> {
-        if self.inner.width() != 1 {
+        let view = self.logical();
+        let df = view.as_ref();
+        if df.width() != 1 {
             return Err(PyTypeError::new_err(
                 "DataFrame.value_counts needs a single column (volas has no MultiIndex); \
                  use df[col].value_counts()",
             ));
         }
-        let name = self.inner.names()[0].clone();
-        let col = self.inner.columns()[0].clone();
+        let name = df.names()[0].clone();
+        let col = df.columns()[0].clone();
         let s = PySeries {
-            inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
+            inner: Series::new(Some(name), col, Arc::clone(df.index())),
         };
         s.value_counts(false, true, false, true)
     }
@@ -590,7 +679,7 @@ impl PyDataFrame {
             return Err(PyValueError::new_err("min_periods must be <= window"));
         }
         Ok(PyRollingFrame {
-            frame: self.inner.clone(),
+            frame: self.logical().into_owned(),
             window: window as usize,
             min_periods: min_periods.unwrap_or(window) as usize,
             center,
@@ -603,7 +692,7 @@ impl PyDataFrame {
             return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
         Ok(PyExpandingFrame {
-            frame: self.inner.clone(),
+            frame: self.logical().into_owned(),
             min_periods: min_periods as usize,
         })
     }
@@ -625,7 +714,7 @@ impl PyDataFrame {
             return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
         Ok(PyEwmFrame {
-            frame: self.inner.clone(),
+            frame: self.logical().into_owned(),
             alpha: crate::window::resolve_alpha(com, span, halflife, alpha)?,
             adjust,
             ignore_na,
@@ -655,9 +744,11 @@ impl PyDataFrame {
                 "dropna: invalid `how` {how:?} (expected 'any' or 'all')"
             )));
         }
-        let cols = self.inner.columns();
+        let view = self.logical();
+        let df = view.as_ref();
+        let cols = df.columns();
         let total = cols.len();
-        let keep: Vec<usize> = (0..self.inner.height())
+        let keep: Vec<usize> = (0..df.height())
             .filter(|&i| {
                 let nan = cols.iter().filter(|c| !c.is_valid(i)).count();
                 match how {
@@ -666,7 +757,7 @@ impl PyDataFrame {
                 }
             })
             .collect();
-        Ok(PyDataFrame::plain(take_frame(&self.inner, &keep)))
+        Ok(PyDataFrame::plain(take_frame(df, &keep)))
     }
 
     /// Replace missing values with `value` in every column (pandas `fillna`),
@@ -693,8 +784,9 @@ impl PyDataFrame {
             return Err(PyValueError::new_err("limit must be >= 0"));
         }
         let na_like = is_na_like_py(value);
-        let cols = self
-            .inner
+        let view = self.logical();
+        let cols = view
+            .as_ref()
             .columns()
             .iter()
             .map(|c| -> PyResult<Column> {
@@ -754,20 +846,13 @@ impl PyDataFrame {
         ensure_fresh(&self.inner)?;
         // Round numeric columns dtype-preservingly (banker's f64, integer-exact
         // i64); leave bool / str / datetime untouched, like pandas df.round.
-        let cols: Vec<Column> = self
-            .inner
-            .columns()
-            .iter()
-            .map(|c| {
-                if c.dtype().is_numeric() {
-                    c.round(decimals)
-                } else {
-                    Ok(c.clone())
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(pyerr)?;
-        self.with_columns(cols)
+        self.map_columns(|c| {
+            if c.dtype().is_numeric() {
+                c.round(decimals).map_err(pyerr)
+            } else {
+                Ok(c.clone())
+            }
+        })
     }
 
     // --- column-wise numeric transforms (-> a new frame, dtype-preserving per
@@ -845,12 +930,15 @@ impl PyDataFrame {
     /// a frame indexed by `count / mean / std / min / 25% / 50% / 75% / max`.
     pub(crate) fn describe(&self) -> PyResult<PyDataFrame> {
         ensure_fresh(&self.inner)?;
+        let view = self.logical();
+        let df = view.as_ref();
+        let idx = df.index();
         let mut names = Vec::new();
         let mut cols = Vec::new();
-        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+        for (name, col) in df.names().iter().zip(df.columns()) {
             if col.dtype().is_numeric() {
                 let s = PySeries {
-                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(self.inner.index())),
+                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
                 };
                 names.push(name.clone());
                 cols.push(s.describe()?.inner.data);
@@ -919,37 +1007,36 @@ impl PyDataFrame {
     /// Sort rows by index label (pandas `sort_index`).
     #[pyo3(signature = (ascending = true))]
     pub(crate) fn sort_index(&self, ascending: bool) -> PyDataFrame {
-        let perm = self.inner.index().argsort(ascending);
-        PyDataFrame::plain(take_frame(&self.inner, &perm))
+        let view = self.logical();
+        let df = view.as_ref();
+        let perm = df.index().argsort(ascending);
+        PyDataFrame::plain(take_frame(df, &perm))
     }
 
     /// Move the row index into an `'index'` column and restore a RangeIndex
     /// (pandas `reset_index`); `drop=True` discards the old index.
     #[pyo3(signature = (drop = false))]
     pub(crate) fn reset_index(&self, drop: bool) -> PyResult<PyDataFrame> {
-        let h = self.inner.height();
+        let view = self.logical();
+        let df = view.as_ref();
+        let h = df.height();
         let (names, columns): (Vec<String>, Vec<Column>) = if drop {
-            (self.inner.names().to_vec(), self.inner.columns().to_vec())
+            (df.names().to_vec(), df.columns().to_vec())
         } else {
             // Restore the index's name as the new column label (pandas parity);
             // an unnamed index falls back to "index".
-            let label = self
-                .inner
-                .index()
-                .name()
-                .unwrap_or("index")
-                .to_string();
+            let label = df.index().name().unwrap_or("index").to_string();
             // F39: the restored index label must not collide with an existing
             // column — a duplicate column name violates the unique-name contract.
-            if self.inner.names().iter().any(|n| n == &label) {
+            if df.names().iter().any(|n| n == &label) {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "reset_index: column name {label:?} already exists (would duplicate)"
                 )));
             }
             let mut names = vec![label];
-            names.extend(self.inner.names().iter().cloned());
-            let mut cols = vec![self.inner.index().to_column()];
-            cols.extend(self.inner.columns().iter().cloned());
+            names.extend(df.names().iter().cloned());
+            let mut cols = vec![df.index().to_column()];
+            cols.extend(df.columns().iter().cloned());
             (names, cols)
         };
         Ok(PyDataFrame::plain(
@@ -963,16 +1050,15 @@ impl PyDataFrame {
     /// by column name (non-numeric columns are skipped, like `reduce_cols`).
     fn reduce_with(&self, op: impl Fn(&PySeries) -> f64) -> PyResult<PySeries> {
         ensure_fresh(&self.inner)?;
+        let view = self.logical();
+        let df = view.as_ref();
+        let idx = df.index();
         let mut names = Vec::new();
         let mut vals = Vec::new();
-        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+        for (name, col) in df.names().iter().zip(df.columns()) {
             if col.require_numeric().is_ok() {
                 let s = PySeries {
-                    inner: Series::new(
-                        Some(name.clone()),
-                        col.clone(),
-                        Arc::clone(self.inner.index()),
-                    ),
+                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
                 };
                 names.push(name.clone());
                 vals.push(op(&s));
@@ -986,16 +1072,15 @@ impl PyDataFrame {
     /// Like [`Self::reduce_with`] for fallible helpers (quantile).
     fn try_reduce_with(&self, op: impl Fn(&PySeries) -> PyResult<f64>) -> PyResult<PySeries> {
         ensure_fresh(&self.inner)?;
+        let view = self.logical();
+        let df = view.as_ref();
+        let idx = df.index();
         let mut names = Vec::new();
         let mut vals = Vec::new();
-        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+        for (name, col) in df.names().iter().zip(df.columns()) {
             if col.require_numeric().is_ok() {
                 let s = PySeries {
-                    inner: Series::new(
-                        Some(name.clone()),
-                        col.clone(),
-                        Arc::clone(self.inner.index()),
-                    ),
+                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
                 };
                 names.push(name.clone());
                 vals.push(op(&s)?);
@@ -1008,9 +1093,10 @@ impl PyDataFrame {
 
     /// Per-column truthiness any/all (NA-skipping) -> bool Series by name.
     fn bool_reduce(&self, want_any: bool) -> PySeries {
-        let names: Vec<String> = self.inner.names().to_vec();
-        let vals: Vec<bool> = self
-            .inner
+        let view = self.logical();
+        let df = view.as_ref();
+        let names: Vec<String> = df.names().to_vec();
+        let vals: Vec<bool> = df
             .columns()
             .iter()
             .map(|c| {
@@ -1031,12 +1117,14 @@ impl PyDataFrame {
     /// Per-column index label of the extreme -> a Series of labels keyed by
     /// column name (the label dtype follows the index kind).
     fn idx_extreme(&self, py: Python<'_>, want_max: bool) -> PyResult<Py<PyAny>> {
-        let names: Vec<String> = self.inner.names().to_vec();
+        let view = self.logical();
+        let df = view.as_ref();
+        let names: Vec<String> = df.names().to_vec();
         let mut positions = Vec::with_capacity(names.len());
-        for col in self.inner.columns() {
+        for col in df.columns() {
             positions.push(argext(col, want_max)?);
         }
-        let index = self.inner.index();
+        let index = df.index();
         let labels = index.take(&positions).to_column();
         let s = PySeries {
             inner: Series::new(None, labels, Arc::new(Index::str(names))),
@@ -1046,7 +1134,9 @@ impl PyDataFrame {
 
     /// The `n` extreme rows by `column` (ascending for nsmallest).
     fn extreme_rows(&self, n: usize, column: &str, ascending: bool) -> PyResult<PyDataFrame> {
-        let col = self.inner.column(column).map_err(pyerr)?;
+        let view = self.logical();
+        let df = view.as_ref();
+        let col = df.column(column).map_err(pyerr)?;
         col.require_numeric().map_err(pyerr)?;
         let v = col.to_f64_vec();
         let mut order: Vec<usize> = (0..v.len()).filter(|&i| col.is_valid(i) && !v[i].is_nan()).collect();
@@ -1055,15 +1145,16 @@ impl PyDataFrame {
             if ascending { o } else { o.reverse() }
         });
         order.truncate(n);
-        Ok(PyDataFrame::plain(take_frame(&self.inner, &order)))
+        Ok(PyDataFrame::plain(take_frame(df, &order)))
     }
 
     /// Row-level duplicate mask over all columns, honoring `keep` ('first'|'last').
     fn row_duplicated(&self, keep: &str) -> PyResult<Vec<bool>> {
-        let h = self.inner.height();
+        let view = self.logical();
+        let df = view.as_ref();
+        let h = df.height();
         let key_of = |i: usize| -> Vec<Option<String>> {
-            self.inner
-                .columns()
+            df.columns()
                 .iter()
                 .map(|c| crate::series::cell_key(c, i))
                 .collect()

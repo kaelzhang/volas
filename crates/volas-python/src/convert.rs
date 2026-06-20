@@ -6,7 +6,7 @@ use numpy::IntoPyArray;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use volas_core::{
     datetime, Column, DType, DataFrame, Index,
     IndexKind, Scalar, Tz, Validity,
@@ -76,6 +76,126 @@ pub(crate) fn column_to_pandas<'py>(
         // float (NaN in-band) / datetime have no nullable masked form here.
         _ => Ok(column_to_numpy(py, col)),
     }
+}
+
+/// `DataFrame.from_pandas`: build a volas frame from a `pandas.DataFrame` — the faithful
+/// inverse of [`column_to_pandas`] / `to_pandas`. Each column is lowered to a value the
+/// frame constructor already ingests (a numpy array, a list, or the typed masked
+/// `(values, mask, dtype)` channel), then the index is carried natively. pandas is
+/// imported lazily here, so volas stays pandas-free at import.
+pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    let pd = py.import("pandas")?;
+    let types = pd.getattr("api")?.getattr("types")?;
+
+    // Each column -> a constructor-ingestible value, keyed by its (stringified) name.
+    let data = PyDict::new(py);
+    for c in pdf.getattr("columns")?.try_iter()? {
+        let c = c?;
+        let series = pdf.get_item(&c)?;
+        data.set_item(c.str()?.to_string(), pandas_series_to_values(py, &types, &series)?)?;
+    }
+
+    // A default RangeIndex carries no labels — a fresh volas RangeIndex (just the columns).
+    let idx = pdf.getattr("index")?;
+    if idx.is_instance(&pd.getattr("RangeIndex")?)? {
+        return PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None, None);
+    }
+
+    // A named index becomes a column, then `set_index` moves it into the row index.
+    let idx_name = {
+        let n = idx.getattr("name")?;
+        if n.is_none() { "index".to_string() } else { n.str()?.to_string() }
+    };
+    let merged = PyDict::new(py);
+    let datetime_index = types
+        .call_method1("is_datetime64_any_dtype", (idx.getattr("dtype")?,))?
+        .extract::<bool>()?;
+    let instants = if datetime_index {
+        // Carry the absolute instants natively as datetime64[ns] (no strftime round-trip).
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "datetime64[ns]")?;
+        idx.call_method("to_numpy", (), Some(&kwargs))?
+    } else {
+        idx.call_method0("to_numpy")?
+    };
+    merged.set_item(&idx_name, instants)?;
+    for (k, v) in data.iter() {
+        merged.set_item(k, v)?;
+    }
+    let df = PyDataFrame::new(merged.as_any(), None, None, None, None, None, None, None, None)?
+        .set_index(&idx_name)?;
+
+    // The imported instants are already true UTC; re-attach a tz-aware index's display
+    // zone directly (tz_convert would hit the naive-axis guard; localize would shift).
+    if datetime_index {
+        if let Some(tz) = idx.getattr("tz").ok().filter(|t| !t.is_none()) {
+            // pandas renders a fixed offset as 'UTC+08:00'; volas's tz name for that is '+08:00'.
+            let mut tzname = tz.str()?.to_string();
+            if tzname.starts_with("UTC+") || tzname.starts_with("UTC-") {
+                tzname = tzname[3..].to_string();
+            }
+            return df._set_index_tz(&tzname);
+        }
+    }
+    Ok(df)
+}
+
+/// One pandas column -> a value the volas frame constructor ingests: a `datetime64[ns]`
+/// numpy array for datetimes; the typed masked `(values, mask, dtype)` tuple for a
+/// nullable `Int64` / `Int32` / `boolean` / `string` column (keeping its declared dtype
+/// plus `volas.NA`, even all-NA / empty); a plain list for an `object` column; otherwise
+/// the numpy array.
+fn pandas_series_to_values<'py>(
+    py: Python<'py>,
+    types: &Bound<'py, PyAny>,
+    s: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let dtype = s.getattr("dtype")?;
+    // datetime (naive or tz-aware) -> native UTC datetime64[ns].
+    if types.call_method1("is_datetime64_any_dtype", (&dtype,))?.extract::<bool>()? {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "datetime64[ns]")?;
+        return s.call_method("to_numpy", (), Some(&kwargs));
+    }
+    // A nullable masked int / boolean / string column -> the typed masked channel, so
+    // volas keeps the DECLARED dtype + volas.NA (an Int32 stays int32; an all-NA / empty
+    // column keeps its dtype). The inverse of `to_pandas(dtype_backend='numpy_nullable')`.
+    if types.call_method1("is_extension_array_dtype", (&dtype,))?.extract::<bool>()? {
+        let is_int = types.call_method1("is_integer_dtype", (&dtype,))?.extract::<bool>()?;
+        let is_bool = types.call_method1("is_bool_dtype", (&dtype,))?.extract::<bool>()?;
+        let is_str = types.call_method1("is_string_dtype", (&dtype,))?.extract::<bool>()?;
+        if is_int || is_bool || is_str {
+            let mask = s.call_method0("isna")?.call_method0("tolist")?;
+            let masked = mask.extract::<Vec<bool>>()?;
+            let (volas_dtype, filler): (&str, Bound<'py, PyAny>) = if is_int {
+                let dt = if dtype.str()?.to_str()? == "Int32" { "int32" } else { "int64" };
+                (dt, 0i64.into_pyobject(py)?.into_any())
+            } else if is_bool {
+                ("bool", false.into_pyobject(py)?.to_owned().into_any())
+            } else {
+                ("str", "".into_pyobject(py)?.into_any())
+            };
+            // values: present cells verbatim, missing cells the dtype's filler — so the
+            // tuple's value list extracts cleanly as a typed `Vec<dtype>`.
+            let values = PyList::empty(py);
+            for (cell, &m) in s.call_method0("tolist")?.try_iter()?.zip(masked.iter()) {
+                if m {
+                    values.append(&filler)?;
+                } else {
+                    values.append(cell?)?;
+                }
+            }
+            let tuple = PyTuple::new(py, [values.into_any(), mask, volas_dtype.into_pyobject(py)?.into_any()])?;
+            return Ok(tuple.into_any());
+        }
+    }
+    // A pandas `object` column of plain strings -> a `str` column (the constructor rejects
+    // an object column mixing strings with other values; volas has no `object` dtype).
+    if dtype.getattr("kind")?.extract::<String>()? == "O" {
+        return s.call_method0("tolist");
+    }
+    // numeric / bool / other native -> a numpy array.
+    s.call_method0("to_numpy")
 }
 
 pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {

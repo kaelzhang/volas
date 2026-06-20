@@ -13,7 +13,7 @@ from volas import DataFrame
 
 def test_equals_rangeindex_vs_materialized_int():
     df = DataFrame({'a': [1, 2, 3]})
-    rt = volas.from_pandas(df.to_pandas())   # round-trip materializes RangeIndex -> Int64
+    rt = volas.DataFrame.from_pandas(df.to_pandas())   # round-trip materializes RangeIndex -> Int64
     assert df.equals(rt)
 
 
@@ -73,5 +73,5 @@ def test_tz_aware_nat_renders_nat():
     # not a 1677 civil date
     ps = pd.DataFrame({'v': [1, 2]},
                       index=pd.to_datetime(['2021-01-01', 'NaT']).tz_localize('America/New_York'))
-    vf = volas.from_pandas(ps)
+    vf = volas.DataFrame.from_pandas(ps)
     assert 'NaT' in repr(vf)

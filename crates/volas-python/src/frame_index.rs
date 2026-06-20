@@ -378,26 +378,30 @@ impl DataFrameILoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
         ensure_fresh(&pf.inner)?;
+        // Position the read against the logical M view (zero-cost borrow when
+        // unbounded), so `iloc[i]` indexes the visible window, never the margin.
+        let view = pf.logical();
+        let df = view.as_ref();
         // 2-D positional get: df.iloc[rows, cols], symmetric with __setitem__.
         if let Ok(tup) = key.downcast::<PyTuple>() {
             if tup.len() == 2 {
-                let rows = iloc_row_axis(&tup.get_item(0)?, pf.inner.height())?;
-                let cols = iloc_col_axis(&tup.get_item(1)?, pf.inner.width())?;
-                return select_2d(py, &pf.inner, rows, cols);
+                let rows = iloc_row_axis(&tup.get_item(0)?, df.height())?;
+                let cols = iloc_col_axis(&tup.get_item(1)?, df.width())?;
+                return select_2d(py, df, rows, cols);
             }
         }
         if let Ok(i) = key.extract::<isize>() {
-            let i = norm_idx(i, pf.inner.height())?;
-            return Ok(Py::new(py, row_at(&pf.inner, i))?.into_any());
+            let i = norm_idx(i, df.height())?;
+            return Ok(Py::new(py, row_at(df, i))?.into_any());
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let info = slice.indices(pf.inner.height() as isize)?;
-            let sub = positional_slice(&pf.inner, &info);
+            let info = slice.indices(df.height() as isize)?;
+            let sub = positional_slice(df, &info);
             return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // int-list / boolean-mask row selection -> sub-frame.
-        let positions = iloc_positions(key, pf.inner.height())?;
-        Ok(Py::new(py, PyDataFrame::plain(take_frame(&pf.inner, &positions)))?.into_any())
+        let positions = iloc_positions(key, df.height())?;
+        Ok(Py::new(py, PyDataFrame::plain(take_frame(df, &positions)))?.into_any())
     }
 
     /// `df.iloc[i, j] = scalar` or `df.iloc[rows, j] = scalar | array` (positional;
@@ -412,9 +416,11 @@ impl DataFrameILoc {
         let mut pf = self.parent.borrow_mut(py);
         ensure_fresh(&pf.inner)?;
         let (rows, col) = split_row_col(key, "iloc")?;
-        let height = pf.inner.height();
+        // Resolve positions against the logical M view, then map them back onto the
+        // physical rows by adding the window offset (identity when unbounded).
+        let (start, len) = pf.logical_range();
         let j = norm_idx(col.extract::<isize>()?, pf.inner.width())?;
-        let positions = iloc_positions(&rows, height)?;
+        let positions: Vec<usize> = iloc_positions(&rows, len)?.into_iter().map(|p| p + start).collect();
         let target = pf.inner.columns()[j].dtype();
         let val = resolve_assignment(value, target, positions.len())?;
         pf.inner
@@ -502,25 +508,29 @@ impl DataFrameLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
         ensure_fresh(&pf.inner)?;
-        let index = pf.inner.index();
+        // Resolve labels against the logical M view (zero-cost borrow when
+        // unbounded), so a margin label is never addressable through `loc`.
+        let view = pf.logical();
+        let df = view.as_ref();
+        let index = df.index();
         // 2-D label get: df.loc[rows, col], symmetric with __setitem__.
         if let Ok(tup) = key.downcast::<PyTuple>() {
             if tup.len() == 2 {
-                let rows = loc_row_axis(&tup.get_item(0)?, index, pf.inner.height())?;
-                let cols = loc_col_axis(&tup.get_item(1)?, &pf.inner)?;
-                return select_2d(py, &pf.inner, rows, cols);
+                let rows = loc_row_axis(&tup.get_item(0)?, index, df.height())?;
+                let cols = loc_col_axis(&tup.get_item(1)?, df)?;
+                return select_2d(py, df, rows, cols);
             }
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, index)?;
             let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
-            return Ok(Py::new(py, PyDataFrame::plain(pf.inner.slice(a, b)))?.into_any());
+            return Ok(Py::new(py, PyDataFrame::plain(df.slice(a, b)))?.into_any());
         }
         // boolean-mask / label-list row selection -> sub-frame.
-        if as_bool_mask(key, pf.inner.height())?.is_some() || key.downcast::<PyList>().is_ok() {
-            let positions = loc_positions(key, index, pf.inner.height())?;
+        if as_bool_mask(key, df.height())?.is_some() || key.downcast::<PyList>().is_ok() {
+            let positions = loc_positions(key, index, df.height())?;
             return Ok(
-                Py::new(py, PyDataFrame::plain(take_frame(&pf.inner, &positions)))?.into_any(),
+                Py::new(py, PyDataFrame::plain(take_frame(df, &positions)))?.into_any(),
             );
         }
         // F28: partial-string datetime indexing — a year ("2021") or month
@@ -528,7 +538,7 @@ impl DataFrameLoc {
         if let volas_core::IndexKind::Datetime(_, tz) = index.kind() {
             if let Ok(sk) = key.extract::<String>() {
                 if let Some((lo, hi)) = partial_period_bounds(&sk, *tz) {
-                    let positions: Vec<usize> = (0..pf.inner.height())
+                    let positions: Vec<usize> = (0..df.height())
                         .filter(|&i| {
                             index
                                 .label_at(i)
@@ -541,7 +551,7 @@ impl DataFrameLoc {
                     }
                     return Ok(Py::new(
                         py,
-                        PyDataFrame::plain(take_frame(&pf.inner, &positions)),
+                        PyDataFrame::plain(take_frame(df, &positions)),
                     )?
                     .into_any());
                 }
@@ -551,7 +561,7 @@ impl DataFrameLoc {
         let pos = index
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-        Ok(Py::new(py, row_at(&pf.inner, pos))?.into_any())
+        Ok(Py::new(py, row_at(df, pos))?.into_any())
     }
 
     /// `df.loc[rows, col] = scalar | array` (label-based; copy-on-write). `rows` is
@@ -569,11 +579,15 @@ impl DataFrameLoc {
         let colname: String = col.extract().map_err(|_| {
             PyTypeError::new_err("loc assignment column must be a single column name")
         })?;
-        let height = pf.inner.height();
-        let positions = {
-            let index = pf.inner.index();
-            loc_positions(&rows, index, height)?
-        };
+        // Resolve labels against the logical M view, then offset onto physical rows.
+        let (start, len) = pf.logical_range();
+        let positions: Vec<usize> = {
+            let lidx = pf.logical_index();
+            loc_positions(&rows, &lidx, len)?
+        }
+        .into_iter()
+        .map(|p| p + start)
+        .collect();
         let j = pf
             .inner
             .column_pos(&colname)
@@ -597,7 +611,8 @@ impl DataFrameIat {
     fn __getitem__(&self, py: Python<'_>, key: (isize, isize)) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
         ensure_fresh(&pf.inner)?;
-        let i = norm_idx(key.0, pf.inner.height())?;
+        let (start, len) = pf.logical_range();
+        let i = norm_idx(key.0, len)? + start;
         let j = norm_idx(key.1, pf.inner.width())?;
         Ok(np_scalar_to_py(py, &pf.inner.columns()[j], i))
     }
@@ -611,7 +626,8 @@ impl DataFrameIat {
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
         ensure_fresh(&pf.inner)?;
-        let i = norm_idx(key.0, pf.inner.height())?;
+        let (start, len) = pf.logical_range();
+        let i = norm_idx(key.0, len)? + start;
         let j = norm_idx(key.1, pf.inner.width())?;
         let target = pf.inner.columns()[j].dtype();
         let val = scalar_to_column(value, target)?;
@@ -630,11 +646,13 @@ impl DataFrameAt {
     fn __getitem__(&self, py: Python<'_>, key: (Py<PyAny>, String)) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
         ensure_fresh(&pf.inner)?;
-        let index = pf.inner.index();
-        let label = parse_label(key.0.bind(py), index)?;
-        let i = index
+        let (start, _len) = pf.logical_range();
+        let lidx = pf.logical_index();
+        let label = parse_label(key.0.bind(py), &lidx)?;
+        let i = lidx
             .position_of(&label)
-            .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+            .ok_or_else(|| PyKeyError::new_err("label not found"))?
+            + start;
         let col = pf.inner.column(&key.1).map_err(pyerr)?;
         Ok(np_scalar_to_py(py, col, i))
     }
@@ -650,11 +668,12 @@ impl DataFrameAt {
         let mut pf = self.parent.borrow_mut(py);
         ensure_fresh(&pf.inner)?;
         let i = {
-            let index = pf.inner.index();
-            let label = parse_label(key.0.bind(py), index)?;
-            index
-                .position_of(&label)
+            let (start, _len) = pf.logical_range();
+            let lidx = pf.logical_index();
+            let label = parse_label(key.0.bind(py), &lidx)?;
+            lidx.position_of(&label)
                 .ok_or_else(|| PyKeyError::new_err("label not found"))?
+                + start
         };
         let j = pf
             .inner

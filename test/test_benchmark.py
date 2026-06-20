@@ -533,6 +533,175 @@ def states():
     return st
 
 
+# --- section 0: windowed live stream (1m bars -> 15m, bounded window) -------
+#
+# The flagship live-loop benchmark: a bounded rolling-window, tf-aware frame that
+# folds 1-minute bars into 15-minute bars and refreshes ``atr:14`` over the visible
+# window every bar, for 20 000 bars. volas does this natively (the windowed frame
+# auto-compacts, so memory is O(window + lookback)); the other libraries have no
+# such primitive, so each one is given a hand-written equivalent: a bounded ring of
+# the last ``window + max_lookback`` 15-minute bars, folded the same way and re-run
+# through that library's ATR each bar. The manual impls are deliberately NOT lazy —
+# they keep a trimmed buffer (never an O(n) recompute over all history) so the
+# comparison is fair: every candidate pays only the bounded-window cost per bar.
+#
+# Indicator values need not match across libraries here (each uses its own ATR
+# spelling) — the section measures the per-bar *flow* cost, not parity.
+
+BTC1M = pd.read_csv(Path(__file__).parent / 'data' / 'btcusdt_1m_20k.csv')
+STREAM_BARS = len(BTC1M)                 # 20 000 real 1-minute bars
+W_WINDOW = 30                            # output window M (15m bars)
+W_TF_MS = 15 * 60 * 1000                 # 15-minute period in ms
+W_ATR = 14                               # atr:14 lookback
+W_CAP = W_WINDOW + W_ATR                 # bounded retention (M + max_lookback)
+
+_W_OT = BTC1M['open_time'].to_numpy()
+_W_O = BTC1M['open'].to_numpy(dtype=float)
+_W_H = BTC1M['high'].to_numpy(dtype=float)
+_W_L = BTC1M['low'].to_numpy(dtype=float)
+_W_C = BTC1M['close'].to_numpy(dtype=float)
+_W_V = BTC1M['volume'].to_numpy(dtype=float)
+_W_TS = (_W_OT * 1_000_000).astype('datetime64[ns]')   # ms epoch -> ns datetime
+WINDOWED_CANDIDATES = ['pandas', 'polars', 'talib', 'volas']
+
+
+class _Fold15m:
+    """A bounded 1m→15m OHLC aggregator: a ring of the last ``cap`` completed
+    15-minute bars plus the forming one. ``append`` is O(1) (deque eviction); the
+    buffer never grows past ``cap`` — the manual non-lazy equivalent of the windowed
+    frame's retention. ``arrays()`` returns ``(high, low, close)`` over the ring +
+    forming bar for an ATR refresh."""
+
+    __slots__ = ('cap', 'h', 'l', 'c', 'cur_p', 'fh', 'fl', 'fc')
+
+    def __init__(self, cap):
+        from collections import deque
+        self.cap = cap
+        self.h = deque(maxlen=cap)
+        self.l = deque(maxlen=cap)
+        self.c = deque(maxlen=cap)
+        self.cur_p = None
+        self.fh = self.fl = self.fc = 0.0
+
+    def add(self, p, h, l, c):
+        if self.cur_p is None or p == self.cur_p:
+            if self.cur_p is None:
+                self.cur_p, self.fh, self.fl, self.fc = p, h, l, c
+            else:
+                if h > self.fh:
+                    self.fh = h
+                if l < self.fl:
+                    self.fl = l
+                self.fc = c
+        else:
+            self.h.append(self.fh)
+            self.l.append(self.fl)
+            self.c.append(self.fc)
+            self.cur_p, self.fh, self.fl, self.fc = p, h, l, c
+
+    def arrays(self):
+        n = len(self.h)
+        H = np.empty(n + 1); L = np.empty(n + 1); C = np.empty(n + 1)
+        H[:n] = self.h; L[:n] = self.l; C[:n] = self.c
+        H[n], L[n], C[n] = self.fh, self.fl, self.fc
+        return H, L, C
+
+
+def _np_atr(H, L, C, period):
+    """A vectorised Wilder-style ATR over a (small, bounded) buffer — the shared
+    numpy core for the pandas / polars manual flows (each wraps it in its own
+    smoother below; here the TR is the shared, honest, non-lazy compute)."""
+    prev_c = C[:-1]
+    tr = np.empty(len(C))
+    tr[0] = H[0] - L[0]
+    tr[1:] = np.maximum.reduce([
+        H[1:] - L[1:],
+        np.abs(H[1:] - prev_c),
+        np.abs(L[1:] - prev_c),
+    ])
+    return tr
+
+
+def _volas_windowed():
+    # Pre-build the 1-row bar frames (bar arrival is not the cost under test); the
+    # windowed, tf-aware frame folds + refreshes + auto-compacts on each append.
+    bars = [
+        VolasDataFrame(
+            {'open': _W_O[i:i + 1], 'high': _W_H[i:i + 1], 'low': _W_L[i:i + 1],
+             'close': _W_C[i:i + 1], 'volume': _W_V[i:i + 1]},
+            index=_W_TS[i:i + 1],
+        )
+        for i in range(1, STREAM_BARS)
+    ]
+
+    def setup():
+        wf = VolasDataFrame(
+            {'open': _W_O[:1], 'high': _W_H[:1], 'low': _W_L[:1],
+             'close': _W_C[:1], 'volume': _W_V[:1]},
+            index=_W_TS[:1],
+            time_frame='15m',
+            window=W_WINDOW,
+            indicators=['atr:14'],
+        )
+        return (wf,), {}
+
+    def run(wf):
+        for bar in bars:
+            wf.append(bar)
+            wf.fulfill()           # refresh the cached atr:14 tail (O(lookback))
+    return run, setup
+
+
+def _manual_windowed(atr_fn):
+    """A manual bounded-buffer replay parameterised by the per-round ATR compute."""
+    periods = (_W_OT // W_TF_MS)
+
+    def setup():
+        return (_Fold15m(W_CAP),), {}
+
+    def run(fold):
+        for i in range(STREAM_BARS):
+            fold.add(periods[i], _W_H[i], _W_L[i], _W_C[i])
+            H, L, C = fold.arrays()
+            atr_fn(H, L, C)
+    return run, setup
+
+
+def _talib_atr(H, L, C):
+    talib.ATR(H, L, C, timeperiod=W_ATR)
+
+
+def _pandas_atr(H, L, C):
+    tr = _np_atr(H, L, C, W_ATR)
+    # Wilder smoothing via pandas' ewm (the idiomatic pandas ATR).
+    pd.Series(tr).ewm(alpha=1.0 / W_ATR, adjust=False).mean().to_numpy()
+
+
+def _polars_atr(H, L, C):
+    tr = _np_atr(H, L, C, W_ATR)
+    pl.Series(tr).ewm_mean(alpha=1.0 / W_ATR, adjust=False).to_numpy()
+
+
+@pytest.mark.parametrize('candidate', WINDOWED_CANDIDATES)
+@pytest.mark.parametrize('indicator', ['atr:14'])
+def test_windowed_stream(benchmark, indicator, candidate):
+    if not HAVE[candidate]:
+        pytest.skip(f'{candidate} not installed')
+    if candidate == 'volas':
+        run, setup = _volas_windowed()
+    elif candidate == 'talib':
+        run, setup = _manual_windowed(_talib_atr)
+    elif candidate == 'pandas':
+        run, setup = _manual_windowed(_pandas_atr)
+    elif candidate == 'polars':
+        run, setup = _manual_windowed(_polars_atr)
+    # Each measured call replays the whole 20 000-bar stream; the report divides by
+    # `stream_bars` to show the amortized per-bar cost (which, for volas, folds in
+    # the periodic compaction).
+    benchmark.extra_info['stream_bars'] = STREAM_BARS
+    benchmark.pedantic(run, setup=setup, rounds=3, iterations=1, warmup_rounds=1)
+
+
 # --- section 1: append one new bar -> updated indicator --------------------
 
 def _volas_append(indicator):

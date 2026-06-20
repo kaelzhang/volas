@@ -36,15 +36,26 @@ COLORS = {
     'talib': '#F6BD16',
     'volas': '#6F5EF9',
 }
-# Section order in the report: keep the existing chart sections first, then coverage.
-CATEGORY_ORDER = ['append', 'api', 'calc', 'coverage']
+# Section order in the report: the windowed live-stream flagship first, then the
+# existing chart sections, then coverage.
+CATEGORY_ORDER = ['windowed', 'append', 'api', 'calc', 'coverage']
 CATEGORY_TITLES = {
+    'windowed': 'Windowed live stream — 1m bars → 15m, bounded window (per-bar)',
     'calc': 'Batch indicator computation',
     'append': 'Append one new bar → updated indicator',
     'api': 'Core DataFrame API (construct / slice / mask / assign / copy)',
     'coverage': 'Full coverage — volas vs TA-Lib',
 }
 CATEGORY_BLURB = {
+    'windowed': ('The live loop: fold a new 1-minute bar into a 15-minute series and refresh '
+                 '<code>atr:14</code> over a bounded 30-bar window, every bar, for 20&nbsp;000 bars. '
+                 '<code>volas</code> does this natively (a windowed, tf-aware frame that auto-compacts, '
+                 'so memory stays <code>O(window + lookback)</code>); the other libraries have no such '
+                 'primitive, so each is given a hand-written, <em>non-lazy</em> equivalent — a trimmed '
+                 'ring of the last <code>window + max_lookback</code> 15-minute bars, folded the same way '
+                 'and re-run through that library\'s ATR (never an O(n) recompute over all history). Times '
+                 'are <strong>per bar</strong>, amortized over the 20&nbsp;000-bar stream (so volas\'s '
+                 'periodic compaction is included).'),
     'calc': 'Compute the indicator over the whole series, across every library.',
     'append': ('A new bar arrives. <code>volas</code> / <code>stock_pandas</code> refresh their '
                'cached column incrementally (O(lookback)); the libraries with no indicator cache '
@@ -80,7 +91,9 @@ def parse(data: dict) -> dict:
     groups: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
     for b in data['benchmarks']:
         name = b['name']
-        if name.startswith('test_calc'):
+        if name.startswith('test_windowed_stream'):
+            category = 'windowed'
+        elif name.startswith('test_calc'):
             category = 'calc'
         elif name.startswith('test_coverage_extended'):
             category = 'coverage_extended'
@@ -97,8 +110,27 @@ def parse(data: dict) -> dict:
         if category == 'coverage_extended':
             indicator = (indicator, params.get('length'))
         candidate = params.get('candidate', name)
-        groups[category][indicator].append((candidate, b['stats']))
+        stats = b['stats']
+        # The windowed section measures a full N-bar stream per call; rescale to the
+        # amortized per-bar cost so the table reads in per-bar units.
+        if category == 'windowed':
+            n = (b.get('extra_info') or {}).get('stream_bars')
+            if n:
+                stats = _per_bar(stats, n)
+        groups[category][indicator].append((candidate, stats))
     return groups
+
+
+def _per_bar(stats: dict, n: int) -> dict:
+    """Rescale a full-stream benchmark's stats to a per-bar basis (times ÷ n,
+    throughput × n); other keys (rounds, …) pass through."""
+    scaled = dict(stats)
+    for k in ('min', 'max', 'mean', 'median', 'stddev', 'q1', 'q3', 'iqr'):
+        if isinstance(scaled.get(k), (int, float)):
+            scaled[k] = scaled[k] / n
+    if isinstance(scaled.get('ops'), (int, float)):
+        scaled['ops'] = scaled['ops'] * n
+    return scaled
 
 
 def _bar_chart(entries: list[tuple[str, dict]]) -> str:

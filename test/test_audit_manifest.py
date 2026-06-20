@@ -56,13 +56,16 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "sort_index": "T6", "rank": "T6", "drop": "T6", "reset_index": "T6", "set_index": "T6",
         "iloc": "T7", "loc": "T7", "at": "T7", "iat": "T7",
         "to_numpy": "T8", "to_pandas": "T8", "to_csv": "T8", "astype": "T8",
-        "to_arrow": "T8", "from_arrow": "T8", "__arrow_c_stream__": "T8",
+        "fill_into": "T8",
+        "to_arrow": "T8", "from_arrow": "T8", "from_pandas": "T8", "__arrow_c_stream__": "T8",
         "exec": "T11",
         "cumulate": "T10", "append": "T10", "fulfill": "T10",
         "tz": "T13", "tz_localize": "T13", "tz_convert": "T13",
         "_set_index_tz": "ignore:interop-internal (from_pandas tz tagging)",
         "alias": "T0", "copy": "T0", "equals": "T0", "rename": "T0",
         "columns": "T0", "shape": "T0", "index": "T0", "dtypes": "T0",
+        "ready": "T0",
+        "_physical_height": "ignore:windowed-internal (memory-bound test hook)",
         "head": "T6", "tail": "T6",
         # decision 1 (2026-06-11) REVERSED the §6.6 removal: get_column is the
         # compute-free safe accessor — df[name] EXECUTES a directive when the
@@ -176,7 +179,7 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
 }
 
 TOPLEVEL = {
-    "read_csv": "T8", "to_datetime": "T8", "from_pandas": "T8",
+    "read_csv": "T8", "to_datetime": "T8",
     "directive_stringify": "T11", "directive_lookback": "T11",
     "__version__": "ignore:package metadata",
     "NA": "ignore:singleton instance — NAType audited as a class",

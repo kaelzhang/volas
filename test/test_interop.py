@@ -16,7 +16,7 @@ def test_to_pandas():
 
 def test_from_pandas_roundtrip():
     pdf = pd.DataFrame({'a': [1., 2.], 'b': [3., 4.]})
-    df = volas.from_pandas(pdf)
+    df = volas.DataFrame.from_pandas(pdf)
     assert df.columns == ['a', 'b']
     assert df['a'].to_list() == [1., 2.]
 
@@ -24,7 +24,7 @@ def test_from_pandas_roundtrip():
 def test_from_pandas_datetime_index():
     pdf = pd.DataFrame({'close': [1., 2.]},
                        index=pd.to_datetime(['2020-01-01', '2020-01-02']))
-    df = volas.from_pandas(pdf)
+    df = volas.DataFrame.from_pandas(pdf)
     assert str(df.index.dtype) == 'datetime64[ns]'
     assert df['close'].to_list() == [1., 2.]
 
@@ -32,7 +32,7 @@ def test_from_pandas_datetime_index():
 def test_from_pandas_datetime_column_native():
     # a datetime *column* (not the index) is carried natively as datetime64 (no string round-trip)
     pdf = pd.DataFrame({'when': pd.to_datetime(['2020-01-01 00:00']), 'c': [1.0]})
-    df = volas.from_pandas(pdf)
+    df = volas.DataFrame.from_pandas(pdf)
     assert str(df['when'].dtype) == 'datetime64[ns]'
     assert df['when'].to_numpy()[0] == np.datetime64('2020-01-01 00:00:00')
 
@@ -59,7 +59,7 @@ def test_to_pandas_tz_aware_index():
 
 def test_from_pandas_tz_aware_named():
     idx = pd.to_datetime(['2021-01-04 09:30']).tz_localize('America/New_York')
-    df = volas.from_pandas(pd.DataFrame({'c': [1.0]}, index=idx))
+    df = volas.DataFrame.from_pandas(pd.DataFrame({'c': [1.0]}, index=idx))
     assert df.tz == 'America/New_York'
     assert df.index.astype('datetime64[ns]')[0] == np.datetime64('2021-01-04 14:30:00')
 
@@ -67,7 +67,7 @@ def test_from_pandas_tz_aware_named():
 def test_from_pandas_tz_aware_fixed_offset():
     # pandas renders a fixed offset as 'UTC+08:00'; from_pandas normalises it back to '+08:00'
     idx = pd.to_datetime(['2021-01-04 09:30']).tz_localize('+08:00')
-    df = volas.from_pandas(pd.DataFrame({'c': [1.0]}, index=idx))
+    df = volas.DataFrame.from_pandas(pd.DataFrame({'c': [1.0]}, index=idx))
     assert df.tz == '+08:00'
     assert df.index.astype('datetime64[ns]')[0] == np.datetime64('2021-01-04 01:30:00')
 
@@ -76,7 +76,7 @@ def test_tz_roundtrip_volas_pandas_volas():
     df = DataFrame({'t': ['2021-01-04 09:30:00', '2021-01-04 09:31:00'], 'c': [1.0, 2.0]})
     df['t'] = to_datetime(df['t'])
     df = df.set_index('t').tz_localize('+08:00')
-    back = volas.from_pandas(df.to_pandas())
+    back = volas.DataFrame.from_pandas(df.to_pandas())
     assert back.tz == '+08:00'
     assert (back.index.astype('datetime64[ns]') == df.index.astype('datetime64[ns]')).all()
     assert back['c'].to_list() == [1.0, 2.0]

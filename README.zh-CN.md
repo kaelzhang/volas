@@ -85,6 +85,7 @@ polars。它是一个窄而快的 DataFrame，专门服务于这一类场景：
 - [安装](#安装)
 - [快速上手](#快速上手)
 - [用法](#用法)
+- [有界滚动窗口](#有界滚动窗口)
 - [累积与 DatetimeIndex](#累积与-datetimeindex)
 - [TimeFrame](#timeframe)
 - [directive 的语法](#directive-的语法)
@@ -218,7 +219,7 @@ df['ma:2']
   - 另一个 volas **`DataFrame`**，此时会被拷贝（如同 `pandas.DataFrame(df)`）。
 
   构造函数**不接受** `pandas.DataFrame` 或 Arrow 对象——请改用专门的
-  [`from_pandas`](#from_pandaspdf---dataframe) /
+  [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
   [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe) 桥接。如果要附加
   [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)，用 `to_datetime` 解析某一列，用 `set_index` 把它提升为索引，再用 `tz_localize` /
   `tz_convert` 打上时区标记。参见[时区](#时区)。
@@ -234,6 +235,50 @@ df['ma:2']
   - `'max'`——最大值
   - `'min'`——最小值
   - `'sum'`——求和
+- **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。必须同时给定 `max_lookback` / `indicators` 中的恰好一个。
+- **max_lookback** `Optional[int] = None` 与 `window` 配合，表示你打算使用的最大指标 lookback；frame 会额外保留 `window + max_lookback` 行 margin，使缓存指标在自动丢弃旧行时仍然正确。
+- **indicators** `Optional[list[str]] = None` 与 `window` 配合，从这些 directive 中的最大 lookback 推导 `max_lookback`，省去手填（例如 `['atr:14', 'ma:50']` 保留 50 行 margin）。
+
+### 有界滚动窗口
+
+传入 `window=` 可把 frame 限制为最后 `window` 行。这正是实盘 / 神经网络输入所需的形态：你可以永远地 `append` bar，但内存始终**有界**——frame 在累积到足够行数后会透明地丢弃旧行，同时保留一段隐藏的 `max_lookback` 行 margin，使缓存指标在每次丢弃前后都保持**逐位一致**（与无界 frame 计算出的值完全相同）。
+
+```py
+# 一个有界的 30 行窗口；margin 大小由你声明的指标推导而来。
+wf = DataFrame(seed, time_frame='15m', window=30, indicators=['atr:14'])
+
+for bar in feed:            # 可以永远运行；内存不增长
+    wf.append(bar)          # 把一根 1m bar 折叠进正在形成中的 15m bar
+    wf.fulfill()            # 刷新缓存的 atr:14 尾部（O(lookback)）
+    if wf.ready:            # 已预热：30 行都有完整的历史
+        x = wf[['close', 'atr:14']].to_numpy('float32')   # 30×2 的特征窗口
+```
+
+所有面向行的接口——`len`、`shape`、`index`、索引（`[]` / `.iloc` / `.loc` / `.iat` / `.at`）、`head` / `tail`、聚合、`to_numpy`、`to_csv`、`to_pandas`、`repr`——都**只**显示这 `window` 行；margin 永远不可见。
+
+- **`ready`** `bool` 窗口是否已预热（累积到 `window + max_lookback` 行，使每个可见行都有完整的指标历史）。无界 frame 恒为 `True`。
+- **`fill_into(out, columns=None)`** 把窗口的值就地写入调用方预分配的 C-contiguous `float32` / `float64` 数组，形状为 `(len(df), k)`——零分配的特征导出热路径（每根 bar 复用同一个 buffer）。缺失值写为 `NaN`；字符串列会被拒绝（没有浮点含义）。
+
+### DataFrame.from_pandas(pdf) -> DataFrame
+
+**volas 独有的静态方法**——从 `pandas.DataFrame`（`pdf`）构造 volas `DataFrame`，是 `df.to_pandas()` 的逆操作。pandas 仅在此处惰性 import（所以 `import volas` 保持 pandas-free）。nullable 列保留其 dtype + `volas.NA`，`DatetimeIndex`（含带时区）可往返。参见[与 pandas 互操作](#与-pandas-互操作)。
+
+```py
+df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
+```
+
+### DataFrame.from_arrow(data) -> DataFrame
+
+**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars `DataFrame` 等。dtype 匹配处借用数据缓冲区（否则拷贝该列），多 chunk 来源会被拼接，结果带一个全新的 `RangeIndex`。
+
+- **data** Arrow 来源——任何实现 `__arrow_c_stream__` 的对象。
+
+```py
+df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame
+df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
+```
+
+> `DataFrame(data=...)` **构造函数**不接受 Arrow（它只接受 `dict` 或另一个 `DataFrame`）；从 Arrow 对象构造请用 `from_arrow`。
 
 ### df.exec(directive: str) -> np.ndarray
 
@@ -428,25 +473,10 @@ pdf = pl.from_dataframe(df)  # polars 经同一协议读取
 返回一个 `pyarrow.Table`。完整零拷贝契约与 DLPack 导出见
 [与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
 
-### DataFrame.from_arrow(data) -> DataFrame
-
-**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars
-`DataFrame` 等。dtype 匹配处借用数据缓冲区（否则拷贝该列），多 chunk 来源会被拼接，结果带一个全新的 `RangeIndex`。
-
-- **data** Arrow 来源——任何实现 `__arrow_c_stream__` 的对象。
-
-```py
-df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame
-df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
-```
-
-> `DataFrame(data=...)` **构造函数**不接受 Arrow（它只接受 `dict` 或另一个
-> `DataFrame`）；从 Arrow 对象构造请用 `from_arrow`。
-
 ### df.to_pandas(dtype_backend='numpy') -> pandas.DataFrame
 
 导出为 `pandas.DataFrame`（pandas 仅在此处惰性 import——它不是运行时依赖）。
-`DatetimeIndex` 可往返；反向桥接是顶层的 [`from_pandas`](#from_pandaspdf---dataframe)。
+`DatetimeIndex` 可往返；反向桥接是 [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe)。
 
 - **dtype_backend?** `str = 'numpy'` 缺失值如何带入 pandas：
   - `'numpy'`——生态兼容性最好的形式：带缺失值的 int / bool 列变成 `float64` /
@@ -495,6 +525,17 @@ t = volas.to_datetime(df['time'])
 t.dt.hour                  # int64 Series，0..23
 t.dt.dayofweek             # 周一=0 .. 周日=6
 t.dt.floor('15min')        # 对齐到 15 分钟 bar
+```
+
+### Series.from_arrow(data, name=None) -> Series
+
+**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。dtype 匹配处借用数据缓冲区（否则拷贝），结果带一个全新的 `RangeIndex`。
+
+- **data** Arrow 来源——任何实现 `__arrow_c_array__` 的对象。
+- **name?** `str | None = None` 结果 `Series` 的名字。
+
+```py
+s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
 ```
 
 ### series.to_numpy(dtype=None, na_value=...) -> np.ndarray
@@ -547,18 +588,6 @@ arr = pa.array(series)     # 等价，经 __arrow_c_array__ 协议
 
 返回一个 `pyarrow.Array`。本列还可经 DLPack 零拷贝导出到 NumPy / PyTorch / JAX
 （`np.from_dlpack(series)`）——见[与 Arrow、DLPack 互操作](#与-arrowdlpack-互操作零拷贝)。
-
-### Series.from_arrow(data, name=None) -> Series
-
-**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。dtype
-匹配处借用数据缓冲区（否则拷贝），结果带一个全新的 `RangeIndex`。
-
-- **data** Arrow 来源——任何实现 `__arrow_c_array__` 的对象。
-- **name?** `str | None = None` 结果 `Series` 的名字。
-
-```py
-s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
-```
 
 ### Row
 
@@ -634,11 +663,6 @@ df = read_csv('klines.csv',
 df = read_csv('data.tsv', sep='\t', header=False,  # 无表头 -> '0'..'n-1'
               na_values=['NA', 'null'])
 ```
-
-### from_pandas(pdf) -> DataFrame
-
-顶层函数，把 `pandas.DataFrame`（`pdf`）桥接进 volas（而
-`df.to_pandas()` 桥接回去）。参见[与 pandas 互操作](#与-pandas-互操作)。
 
 ### to_datetime(obj, unit='ns', format=None) -> Series
 
@@ -1239,9 +1263,9 @@ pandas **不是**运行时依赖；这些桥接只在被调用时才惰性 impor
 `import volas` 仍然不需要 pandas。
 
 ```py
-from volas import from_pandas
+from volas import DataFrame
 
-df = from_pandas(pandas_df)        # numeric / bool / str / datetime 原生；带时区 DatetimeIndex 可无损往返；
+df = DataFrame.from_pandas(pandas_df)  # numeric / bool / str / datetime 原生；带时区 DatetimeIndex 可无损往返；
                                    # nullable Int64 / boolean / string 列会读回为 int / bool / str + volas.NA
 pdf = df.to_pandas()               # -> pandas.DataFrame（'numpy' 后端：带 NA 的 int/bool 列变成 float64 + NaN）
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # 忠实的 masked Int64 / boolean（一次无损的 NA 往返）

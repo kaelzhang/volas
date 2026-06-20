@@ -182,7 +182,7 @@ def test_e7_default_backend_is_legacy_lossy():
 @pytest.mark.parametrize("d", A.DTYPES)
 def test_e7_pandas_roundtrip(d, n):
     df = A.frame(d, n)
-    back = volas.from_pandas(df.to_pandas(dtype_backend="numpy_nullable"))
+    back = volas.DataFrame.from_pandas(df.to_pandas(dtype_backend="numpy_nullable"))
     _equiv(back["x"], df["x"], f"E7/{d}/{n}")
 
 
@@ -252,7 +252,7 @@ def test_e7_tz_aware_roundtrip(zone):
     df = volas.DataFrame({"v": [1.0, 2.0]})
     df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01", "2021-07-01"]})["t"])
     aware = df.set_index("t").tz_localize(zone)
-    back = volas.from_pandas(aware.to_pandas())
+    back = volas.DataFrame.from_pandas(aware.to_pandas())
     assert back.tz == aware.tz, f"zone lost in round-trip: {back.tz} != {aware.tz}"
     assert back.equals(aware)
 
@@ -261,4 +261,4 @@ def test_e7_naive_roundtrip_stays_naive():
     df = volas.DataFrame({"v": [1.0]})
     df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01"]})["t"])
     naive = df.set_index("t")
-    assert volas.from_pandas(naive.to_pandas()).tz is None
+    assert volas.DataFrame.from_pandas(naive.to_pandas()).tz is None

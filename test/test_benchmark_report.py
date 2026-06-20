@@ -62,3 +62,34 @@ def test_coverage_headline_counts_only_default_ratio_column():
 
     assert html.count('<td class="ind-name">') == 2
     assert 'volas beats TA-Lib on <strong>1 / 2</strong> covered indicators' in html
+
+
+def test_windowed_section_rescales_to_per_bar_and_sorts_first():
+    # A full-stream windowed benchmark is rescaled to per-bar via extra_info.
+    def wentry(candidate, total_seconds):
+        return {
+            'name': f'test_windowed_stream[atr:14-{candidate}]',
+            'params': {'indicator': 'atr:14', 'candidate': candidate},
+            'extra_info': {'stream_bars': 1000},
+            'stats': {
+                'min': total_seconds, 'mean': total_seconds, 'median': total_seconds,
+                'max': total_seconds, 'stddev': 0.0, 'ops': 1.0 / total_seconds, 'rounds': 3,
+            },
+        }
+
+    html = benchmark_report.render({
+        'datetime': '2026-06-20',
+        'machine_info': {'python_version': '3.12'},
+        'benchmarks': [
+            wentry('volas', 0.020),   # 20us/bar over 1000 bars
+            wentry('talib', 0.006),   # 6us/bar
+            _entry('test_calc[ma:20-volas]', 'ma:20', 'volas', 1.0),
+        ],
+    })
+
+    assert 'Windowed live stream' in html
+    # 0.020 s / 1000 bars -> 20 µs per bar (NOT 20 ms).
+    assert '20.00 µs' in html
+    assert '6.00 µs' in html
+    # the windowed section renders before the batch (calc) section.
+    assert html.index('Windowed live stream') < html.index('Batch indicator computation')

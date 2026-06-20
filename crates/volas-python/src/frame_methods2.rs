@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use numpy::{IntoPyArray, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadwriteArray2};
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyDict, PyList, PySlice};
@@ -53,6 +53,16 @@ fn frame_na_mask<'py>(py: Python<'py>, df: &DataFrame) -> PyResult<Bound<'py, Py
         .into_any())
 }
 
+/// Guard a `fill_into` destination's shape against the expected `(h, w)`.
+fn check_fill_shape(shape: &[usize], h: usize, w: usize) -> PyResult<()> {
+    if shape != [h, w] {
+        return Err(PyValueError::new_err(format!(
+            "fill_into: `out` shape {shape:?} does not match the frame's ({h}, {w})"
+        )));
+    }
+    Ok(())
+}
+
 /// Substitute `na_value` into the missing cells (`mask`) of an exported array, in place;
 /// a no-op when either the mask or the value is absent.
 fn fill_na_2d<'py>(
@@ -87,14 +97,32 @@ impl PyDataFrame {
             PyTypeError::new_err("DataFrame key must be a column name or a boolean mask")
         })?;
         let h = self.inner.height();
+        // A windowed frame's column spans the full physical buffer, but the user
+        // supplies a value for the logical window M. A scalar broadcasts across the
+        // whole buffer (the visible rows see it); an array-like is logical-length and
+        // NA-pads the hidden margin (front). Identity when unbounded (start == 0).
+        let (start, logical_h) = self.logical_range();
+        let pad = |c: Column| -> PyResult<Column> {
+            if start == 0 {
+                return Ok(c);
+            }
+            if c.len() != logical_h {
+                return Err(PyValueError::new_err(format!(
+                    "length of values ({}) does not match the window length ({logical_h})",
+                    c.len()
+                )));
+            }
+            let positions: Vec<usize> = (start..h).collect();
+            Column::na_of(c.dtype(), h).scatter(&positions, &c).map_err(pyerr)
+        };
         let col = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
-            s.inner.data.clone()
+            pad(s.inner.data.clone())?
         } else if let Ok(b) = value.extract::<bool>() {
             Column::bool(vec![b; h])
         } else if let Ok(scalar) = value.extract::<f64>() {
             Column::f64(vec![scalar; h])
         } else {
-            pyany_to_column(value)?
+            pad(pyany_to_column(value)?)?
         };
         // Overwriting an EXISTING column may invalidate any cached indicator derived
         // from it (e.g. `df['close'] = …` stales `ma:20`); mark those for recompute on
@@ -111,44 +139,49 @@ impl PyDataFrame {
     // slice. The user-facing usage lives in the class docstring (pyo3 implements
     // `__getitem__` as a type slot and does not surface its doc comment).
     pub(crate) fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // Row-selecting reads (mask / slice) operate on the logical M view, so a
+        // windowed frame's hidden margin is never selectable (a zero-cost borrow
+        // when unbounded).
         // boolean mask (Series or numpy)
         if let Ok(s) = key.extract::<PyRef<PySeries>>() {
             if let Column::Bool(..) = &s.inner.data {
                 // O5: reject an NA-carrying mask (an unknown signal is not False).
                 let mask = bool_mask_vec(&s.inner.data)?;
-                let sub = self.inner.filter_mask(&mask).map_err(pyerr)?;
+                let sub = self.logical().filter_mask(&mask).map_err(pyerr)?;
                 return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
             }
         }
         if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
-            let sub = self.inner.filter_mask(arr.as_slice()?).map_err(pyerr)?;
+            let sub = self.logical().filter_mask(arr.as_slice()?).map_err(pyerr)?;
             return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // boolean mask as a plain Python list (df[[True, False, ...]]). An empty
         // list is an empty column projection, not a mask, so it falls through.
         if let Ok(mask) = key.extract::<Vec<bool>>() {
             if !mask.is_empty() {
-                if mask.len() != self.inner.height() {
+                let height = self.logical_range().1;
+                if mask.len() != height {
                     return Err(PyIndexError::new_err(format!(
                         "boolean index has wrong length: {} instead of {}",
                         mask.len(),
-                        self.inner.height()
+                        height
                     )));
                 }
-                let sub = self.inner.filter_mask(&mask).map_err(pyerr)?;
+                let sub = self.logical().filter_mask(&mask).map_err(pyerr)?;
                 return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
             }
         }
         // label / positional slice: df[:'date'], df[1:5]
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let sub = slice_frame(&self.inner, slice)?;
+            let sub = slice_frame(self.logical().as_ref(), slice)?;
             return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // column name or directive — materialize + auto-refresh a stale cached
-        // directive (O(lookback), not O(n)) so the Series is always fresh.
+        // directive (O(lookback), not O(n)) on the physical frame, then present the
+        // result sliced to the logical M view.
         if let Ok(name) = key.extract::<String>() {
             let (resolved, col) = self.materialize_refresh(&name)?;
-            return Ok(Py::new(py, self.wrap_series(resolved, col))?.into_any());
+            return Ok(Py::new(py, self.present_series(resolved, col))?.into_any());
         }
         // list of names / directives — each entry auto-refreshes exactly like the
         // single-name form, so `df[['ma:3']]` and `df['ma:3']` stay consistent.
@@ -160,6 +193,8 @@ impl PyDataFrame {
             }
             let idx = (*self.inner.index().as_ref()).clone();
             let df = DataFrame::new(list, cols, Some(idx)).map_err(pyerr)?;
+            let (start, len) = self.logical_range();
+            let df = if self.window.is_some() { df.slice(start, start + len) } else { df };
             return Ok(Py::new(py, PyDataFrame::plain(df))?.into_any());
         }
         Err(PyKeyError::new_err(
@@ -199,7 +234,7 @@ impl PyDataFrame {
     ///     Series
     pub(crate) fn get_column(&self, key: &str) -> PyResult<PySeries> {
         let col = self.inner.column(key).map_err(pyerr)?.clone();
-        Ok(self.wrap_series(key.to_string(), col))
+        Ok(self.present_series(key.to_string(), col))
     }
 
     /// A copy of the frame — preserving the cached directive columns / cursor and
@@ -208,6 +243,7 @@ impl PyDataFrame {
         PyDataFrame {
             inner: self.inner.clone(),
             tf: self.tf.clone(),
+            window: self.window.clone(),
         }
     }
 
@@ -216,6 +252,8 @@ impl PyDataFrame {
     #[pyo3(signature = (dtype_backend = "numpy"))]
     pub(crate) fn to_pandas<'py>(&self, py: Python<'py>, dtype_backend: &str) -> PyResult<Bound<'py, PyAny>> {
         ensure_fresh(&self.inner)?;
+        let view = self.logical();
+        let df = view.as_ref();
         // 'numpy' (default): an int/bool column with NA exports as float64+NaN, the
         // most ecosystem-compatible form. 'numpy_nullable': a faithful, lossless
         // masked Int64 / boolean. Mirrors pandas' own `dtype_backend`.
@@ -230,11 +268,11 @@ impl PyDataFrame {
         };
         let pd = py.import("pandas")?;
         let data = PyDict::new(py);
-        for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
+        for (name, col) in df.names().iter().zip(df.columns()) {
             data.set_item(name, column_to_pandas(py, &pd, col, nullable)?)?;
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("index", index_to_numpy(py, self.inner.index())?)?;
+        kwargs.set_item("index", index_to_numpy(py, df.index())?)?;
         let pdf = pd.call_method("DataFrame", (data,), Some(&kwargs))?;
         // A tz-aware frame exports a UTC-naive datetime64 index (index_to_numpy); restore the
         // display zone so the pandas index is tz-aware — a faithful round-trip with from_pandas.
@@ -246,7 +284,7 @@ impl PyDataFrame {
             pdf.setattr("index", aware)?;
         }
         // Carry the index name onto the pandas index (pandas parity).
-        if let Some(name) = self.inner.index().name() {
+        if let Some(name) = df.index().name() {
             let renamed = pdf.getattr("index")?.call_method1("rename", (name,))?;
             pdf.setattr("index", renamed)?;
         }
@@ -270,24 +308,27 @@ impl PyDataFrame {
         float_format: Option<&str>,
     ) -> PyResult<Option<String>> {
         ensure_fresh(&self.inner)?;
+        // Windowed: emit only the logical M rows (a zero-cost borrow when unbounded)
+        // — the CSV never carries the hidden margin.
+        let view = self.logical();
+        let df = view.as_ref();
         let ff = parse_ff(float_format)?;
-        let names = self.inner.names();
+        let names = df.names();
         let positions: Vec<usize> = match &columns {
             Some(cols) => cols
                 .iter()
                 .map(|n| {
-                    self.inner
-                        .column_pos(n)
+                    df.column_pos(n)
                         .ok_or_else(|| PyKeyError::new_err(format!("column \"{n}\" not found")))
                 })
                 .collect::<PyResult<_>>()?,
-            None => (0..self.inner.width()).collect(),
+            None => (0..df.width()).collect(),
         };
         let mut out = String::new();
         if header {
             if index {
                 // pandas writes the index name, or an empty field for an unnamed index.
-                out.push_str(self.inner.index().name().unwrap_or(""));
+                out.push_str(df.index().name().unwrap_or(""));
                 out.push_str(sep);
             }
             let hdr: Vec<String> = positions
@@ -297,14 +338,14 @@ impl PyDataFrame {
             out.push_str(&hdr.join(sep));
             out.push('\n');
         }
-        for i in 0..self.inner.height() {
+        for i in 0..df.height() {
             if index {
-                out.push_str(&index_label_csv(self.inner.index(), i));
+                out.push_str(&index_label_csv(df.index(), i));
                 out.push_str(sep);
             }
             let cells: Vec<String> = positions
                 .iter()
-                .map(|&j| csv_escape(cell_to_csv(&self.inner.columns()[j], i, na_rep, ff), sep))
+                .map(|&j| csv_escape(cell_to_csv(&df.columns()[j], i, na_rep, ff), sep))
                 .collect();
             out.push_str(&cells.join(sep));
             out.push('\n');
@@ -323,6 +364,8 @@ impl PyDataFrame {
     #[pyo3(signature = (labels, axis = 0, errors = "raise"))]
     pub(crate) fn drop(&self, py: Python<'_>, labels: Vec<Py<PyAny>>, axis: i64, errors: &str) -> PyResult<PyDataFrame> {
         ensure_fresh(&self.inner)?;
+        let view = self.logical();
+        let df = view.as_ref();
         let ignore_missing = match errors {
             "raise" => false,
             "ignore" => true,
@@ -339,7 +382,7 @@ impl PyDataFrame {
                 .collect::<PyResult<_>>()?;
             // F37: a missing label is an error (pandas KeyError), not a silent
             // no-op — unless explicitly opted out with errors='ignore' (F44).
-            let names = self.inner.names();
+            let names = df.names();
             if !ignore_missing {
                 for n in &drop_names {
                     if !names.iter().any(|m| m == n) {
@@ -352,9 +395,9 @@ impl PyDataFrame {
                 .filter(|n| !drop_names.contains(n))
                 .cloned()
                 .collect();
-            return Ok(PyDataFrame::plain(self.inner.select(&keep).map_err(pyerr)?));
+            return Ok(PyDataFrame::plain(df.select(&keep).map_err(pyerr)?));
         }
-        let index = self.inner.index();
+        let index = df.index();
         let targets: Vec<Label> = labels
             .iter()
             .map(|l| parse_label(l.bind(py), index))
@@ -362,17 +405,17 @@ impl PyDataFrame {
         // F37 (row axis): every label must exist in the index, else KeyError —
         // unless errors='ignore' (F44).
         if !ignore_missing {
-            let present: Vec<Label> = (0..self.inner.height()).map(|i| index.label_at(i)).collect();
+            let present: Vec<Label> = (0..df.height()).map(|i| index.label_at(i)).collect();
             for t in &targets {
                 if !present.contains(t) {
                     return Err(PyKeyError::new_err("label not found in axis"));
                 }
             }
         }
-        let positions: Vec<usize> = (0..self.inner.height())
+        let positions: Vec<usize> = (0..df.height())
             .filter(|&i| !targets.contains(&index.label_at(i)))
             .collect();
-        Ok(PyDataFrame::plain(take_frame(&self.inner, &positions)))
+        Ok(PyDataFrame::plain(take_frame(df, &positions)))
     }
 
     /// Append the rows of another DataFrame or a single Row **in place** and
@@ -415,6 +458,7 @@ impl PyDataFrame {
                 } else {
                     me.inner.append(&other_inner).map_err(pyerr)?;
                 }
+                me.maybe_compact()?;
                 return Ok(slf);
             }
             // Normal live path: append a distinct one-row frame without cloning it.
@@ -425,6 +469,7 @@ impl PyDataFrame {
             } else {
                 me.inner.append(&df.inner).map_err(pyerr)?;
             }
+            me.maybe_compact()?;
             return Ok(slf);
         }
         if let Ok(row) = other.extract::<PyRef<PyRow>>() {
@@ -435,6 +480,7 @@ impl PyDataFrame {
             } else {
                 me.inner.append(&row.inner).map_err(pyerr)?;
             }
+            me.maybe_compact()?;
             return Ok(slf);
         }
         // A scalar bar dict — the timestamp under the index-name key. Built straight into a
@@ -447,6 +493,7 @@ impl PyDataFrame {
             } else {
                 me.inner.append(&bar).map_err(pyerr)?;
             }
+            me.maybe_compact()?;
             return Ok(slf);
         }
         Err(PyTypeError::new_err("append expects a DataFrame, a Row, or a bar dict"))
@@ -463,7 +510,22 @@ impl PyDataFrame {
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let _ = requested_schema;
         ensure_fresh(&self.inner)?;
-        crate::arrow::frame_c_stream(py, self.inner.names(), self.inner.columns())
+        let view = self.logical();
+        let df = view.as_ref();
+        crate::arrow::frame_c_stream(py, df.names(), df.columns())
+    }
+
+    /// Build a volas `DataFrame` from a `pandas.DataFrame` (the inverse of
+    /// `df.to_pandas()`). Numeric / bool columns are carried natively; a pandas
+    /// **nullable** column (`Int64` / `boolean` / `string`) keeps its dtype + `volas.NA`;
+    /// a plain-string `object` column becomes a `str` column (a mixed `object` column is
+    /// rejected — volas has no `object` dtype). Datetime columns and a datetime *index*
+    /// are carried as native `datetime64[ns]` instants (no string round-trip), and a
+    /// tz-aware index keeps its zone for display. pandas is imported lazily, so volas
+    /// stays pandas-free at import.
+    #[staticmethod]
+    pub(crate) fn from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        crate::convert::frame_from_pandas(py, pdf)
     }
 
     /// Build a DataFrame from any object exposing the Arrow stream protocol
@@ -505,14 +567,18 @@ impl PyDataFrame {
         na_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         ensure_fresh(&self.inner)?;
-        let cols = self.inner.columns();
+        // Windowed: export only the logical M rows (a zero-cost borrow when
+        // unbounded) — the NN feature matrix is exactly the visible window.
+        let view = self.logical();
+        let df = view.as_ref();
+        let cols = df.columns();
         let has_str = cols.iter().any(|c| matches!(c, Column::Str(..)));
 
         // `na_value` fill plumbing: with a value AND any missing cell, build the 2-D NA
         // mask once and substitute `na_value` into the holes of whichever array is built.
         let nv = na_value.as_ref();
         let mask = (nv.is_some() && cols.iter().any(|c| c.null_count() > 0))
-            .then(|| frame_na_mask(py, &self.inner))
+            .then(|| frame_na_mask(py, df))
             .transpose()?;
         let mask = mask.as_ref();
 
@@ -520,7 +586,7 @@ impl PyDataFrame {
             // `object`: a lossless typed-cell array (never the f64 channel) — the
             // inspection / interop export that keeps datetime, str and NA intact.
             if dt == "object" || dt == "O" {
-                return fill_na_2d(self.object_array(py)?, mask, nv);
+                return fill_na_2d(object_array(py, df)?, mask, nv);
             }
             // Any numeric / temporal target: a str column has no numeric value
             // (pandas raises here too), so reject it and point at the object route.
@@ -542,7 +608,7 @@ impl PyDataFrame {
             // The two channels carry different Vec element types, so each builds its
             // own (type-erased) NumPy matrix; the fill + cast is then shared.
             let arr = if floaty {
-                let (data, h, w) = self.inner.to_row_major_f64();
+                let (data, h, w) = df.to_row_major_f64();
                 ndarray::Array2::from_shape_vec((h, w), data)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?
                     .into_pyarray(py)
@@ -565,7 +631,7 @@ impl PyDataFrame {
                          a float dtype"
                     )));
                 }
-                let (data, h, w) = self.inner.to_row_major_i64();
+                let (data, h, w) = df.to_row_major_i64();
                 ndarray::Array2::from_shape_vec((h, w), data)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?
                     .into_pyarray(py)
@@ -588,7 +654,7 @@ impl PyDataFrame {
             )
         });
         if all_numeric {
-            let (data, h, w) = self.inner.to_row_major_f64();
+            let (data, h, w) = df.to_row_major_f64();
             let arr = ndarray::Array2::from_shape_vec((h, w), data)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?
                 .into_pyarray(py)
@@ -600,7 +666,7 @@ impl PyDataFrame {
         // each cell into a Python `Timestamp` then let NumPy re-coerce it, which
         // truncated ns and failed outright on a NaT cell (P1-01 / D1 / D2).
         if cols.iter().all(|c| matches!(c, Column::Datetime(_))) {
-            let (data, h, w) = self.inner.to_row_major_i64();
+            let (data, h, w) = df.to_row_major_i64();
             let arr = ndarray::Array2::from_shape_vec((h, w), data)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?
                 .into_pyarray(py)
@@ -608,14 +674,80 @@ impl PyDataFrame {
             return fill_na_2d(arr, mask, nv);
         }
         // Any other mix -> a lossless object array, each cell its own typed value.
-        fill_na_2d(self.object_array(py)?, mask, nv)
+        fill_na_2d(object_array(py, df)?, mask, nv)
+    }
+
+    /// Write the frame's values into a caller-preallocated 2-D NumPy array, in place
+    /// — the zero-allocation feature-export hot path for a windowed (NN-input) frame.
+    ///
+    /// ``out`` must be a C-contiguous ``float32`` or ``float64`` array of shape
+    /// ``(len(df), k)`` where ``k`` is the number of selected columns (all numeric /
+    /// bool columns by default, or those named in ``columns=``). Each cell is the
+    /// column value cast to the array dtype; a missing cell becomes ``NaN``. Unlike
+    /// ``to_numpy`` (which allocates a fresh matrix every call), ``fill_into`` reuses
+    /// the same buffer across rounds — so a live ``append`` → ``fill_into`` inference
+    /// loop allocates nothing per bar.
+    ///
+    /// Args:
+    ///     out (numpy.ndarray): the destination, shape ``(len(df), k)``, dtype
+    ///         ``float32`` or ``float64``.
+    ///     columns (list[str], optional): the columns to export, in order. Defaults
+    ///         to every column (a string column raises — there is no float meaning).
+    #[pyo3(signature = (out, columns = None))]
+    pub(crate) fn fill_into(&self, out: &Bound<'_, PyAny>, columns: Option<Vec<String>>) -> PyResult<()> {
+        ensure_fresh(&self.inner)?;
+        let view = self.logical();
+        let df = view.as_ref();
+        let positions: Vec<usize> = match &columns {
+            Some(cols) => cols
+                .iter()
+                .map(|n| {
+                    df.column_pos(n)
+                        .ok_or_else(|| PyKeyError::new_err(format!("column \"{n}\" not found")))
+                })
+                .collect::<PyResult<_>>()?,
+            None => (0..df.width()).collect(),
+        };
+        if let Some(c) = positions.iter().find(|&&j| matches!(df.columns()[j], Column::Str(..))) {
+            return Err(PyValueError::new_err(format!(
+                "fill_into: column \"{}\" is a string column (no float value) — exclude it via columns=",
+                df.names()[*c]
+            )));
+        }
+        let (h, w) = (df.height(), positions.len());
+        // f32 first (the common NN dtype), then f64; anything else is rejected.
+        if let Ok(mut arr) = out.extract::<PyReadwriteArray2<f32>>() {
+            let mut a = arr.as_array_mut();
+            check_fill_shape(a.shape(), h, w)?;
+            for (jj, &j) in positions.iter().enumerate() {
+                let v = df.columns()[j].to_f64_vec();
+                for i in 0..h {
+                    a[[i, jj]] = v[i] as f32;
+                }
+            }
+            return Ok(());
+        }
+        if let Ok(mut arr) = out.extract::<PyReadwriteArray2<f64>>() {
+            let mut a = arr.as_array_mut();
+            check_fill_shape(a.shape(), h, w)?;
+            for (jj, &j) in positions.iter().enumerate() {
+                let v = df.columns()[j].to_f64_vec();
+                for i in 0..h {
+                    a[[i, jj]] = v[i];
+                }
+            }
+            return Ok(());
+        }
+        Err(PyTypeError::new_err(
+            "fill_into: `out` must be a float32 or float64 2-D NumPy array",
+        ))
     }
 
     /// Value equality (same columns + index + values, `NaN == NaN`).
     pub(crate) fn equals(&self, other: &PyDataFrame) -> PyResult<bool> {
         ensure_fresh(&self.inner)?;
         ensure_fresh(&other.inner)?;
-        Ok(self.inner.equals(&other.inner))
+        Ok(self.logical().as_ref().equals(other.logical().as_ref()))
     }
 
     /// Resample to a coarser timeframe (OHLCV cumulation / down-sampling),
@@ -662,9 +794,11 @@ impl PyDataFrame {
                 )));
             }
         }
-        let spec = build_agg_spec_for(cumulators, Some(self.inner.names()))?;
+        let view = self.logical();
+        let base = view.as_ref();
+        let spec = build_agg_spec_for(cumulators, Some(base.names()))?;
         let mut cum = Cumulator::new(target, spec.clone());
-        cum.append(&self.inner).map_err(pyerr)?;
+        cum.append(base).map_err(pyerr)?;
         let frame = cum.frame().map_err(pyerr)?;
         // The result is a fresh frame (no cached directive columns -> cursor 0)
         // that carries the open period's fine bars so further appends fold in.
@@ -675,6 +809,7 @@ impl PyDataFrame {
                 cumulators: spec,
                 open: cum.open_clone(),
             }),
+            window: None,
         })
     }
 
@@ -683,14 +818,15 @@ impl PyDataFrame {
     #[pyo3(signature = (columns))]
     pub(crate) fn rename(&self, columns: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
         ensure_fresh(&self.inner)?;
+        let view = self.logical();
+        let df = view.as_ref();
         let mut mapping = HashMap::new();
         for (k, v) in columns.iter() {
             mapping.insert(k.extract::<String>()?, v.extract::<String>()?);
         }
         // F39: a rename must not collide two columns onto one name (duplicate
         // column names violate the unique-name contract) — fail-loud (C4).
-        let result: Vec<String> = self
-            .inner
+        let result: Vec<String> = df
             .names()
             .iter()
             .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
@@ -703,9 +839,7 @@ impl PyDataFrame {
                 )));
             }
         }
-        Ok(PyDataFrame::plain(
-            self.inner.rename(&mapping).map_err(pyerr)?,
-        ))
+        Ok(PyDataFrame::plain(df.rename(&mapping).map_err(pyerr)?))
     }
 
     /// Move a column into the row index (pandas `set_index(col)`), returning a
@@ -713,14 +847,14 @@ impl PyDataFrame {
     #[pyo3(signature = (keys))]
     pub(crate) fn set_index(&self, keys: &str) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::plain(
-            self.inner.set_index(keys).map_err(pyerr)?,
+            self.logical().set_index(keys).map_err(pyerr)?,
         ))
     }
 
     /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
     /// new frame.
     pub(crate) fn astype(&self, dtypes: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
-        let mut df = self.inner.clone();
+        let mut df = self.logical().into_owned();
         let mut mapping = HashMap::new();
         for (k, v) in dtypes.iter() {
             let name = k.extract::<String>()?;
@@ -768,7 +902,9 @@ impl PyDataFrame {
     /// `str` and `repr` are identical.
     pub(crate) fn __repr__(&self) -> PyResult<String> {
         ensure_fresh(&self.inner)?;
-        let truncate = if self.inner.height() > 60 { Some(5) } else { None };
+        let view = self.logical();
+        let df = view.as_ref();
+        let truncate = if df.height() > 60 { Some(5) } else { None };
         let opts = DisplayOpts {
             header: true,
             index: true,
@@ -777,8 +913,8 @@ impl PyDataFrame {
             dimensions: Dimensions::OnTruncate,
             truncate,
         };
-        let cols: Vec<usize> = (0..self.inner.width()).collect();
-        Ok(render_frame(&self.inner, &cols, &opts))
+        let cols: Vec<usize> = (0..df.width()).collect();
+        Ok(render_frame(df, &cols, &opts))
     }
 
     pub(crate) fn __str__(&self) -> PyResult<String> {
@@ -804,20 +940,21 @@ impl PyDataFrame {
         show_dimensions: bool,
     ) -> PyResult<String> {
         ensure_fresh(&self.inner)?;
+        let view = self.logical();
+        let df = view.as_ref();
         let ff = parse_ff(float_format)?;
         let col_pos: Vec<usize> = match &columns {
             Some(cols) => cols
                 .iter()
                 .map(|n| {
-                    self.inner
-                        .column_pos(n)
+                    df.column_pos(n)
                         .ok_or_else(|| PyKeyError::new_err(format!("column \"{n}\" not found")))
                 })
                 .collect::<PyResult<_>>()?,
-            None => (0..self.inner.width()).collect(),
+            None => (0..df.width()).collect(),
         };
         let truncate = match max_rows {
-            Some(m) if self.inner.height() > m => Some((min_rows.unwrap_or(m) / 2).max(1)),
+            Some(m) if df.height() > m => Some((min_rows.unwrap_or(m) / 2).max(1)),
             _ => None,
         };
         let opts = DisplayOpts {
@@ -832,7 +969,7 @@ impl PyDataFrame {
             },
             truncate,
         };
-        Ok(render_frame(&self.inner, &col_pos, &opts))
+        Ok(render_frame(df, &col_pos, &opts))
     }
 
     /// Rich HTML table for Jupyter (`_repr_html_`). pandas defines this only on
@@ -840,7 +977,7 @@ impl PyDataFrame {
     /// exposes it on DataFrame alone.
     pub(crate) fn _repr_html_(&self) -> PyResult<String> {
         ensure_fresh(&self.inner)?;
-        Ok(render_frame_html(&self.inner))
+        Ok(render_frame_html(self.logical().as_ref()))
     }
 }
 
@@ -878,24 +1015,26 @@ impl PyDataFrame {
         Ok((canonical, col))
     }
 
-    /// A lossless 2-D `object` NumPy array: each cell its own typed Python value
-    /// (`volas.Timestamp` / `volas.NA` / str / number) via `scalar_to_py`. Backs
-    /// the default mixed-frame export and `to_numpy(dtype="object")`.
-    fn object_array<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let cols = self.inner.columns();
-        let (h, w) = (self.inner.height(), self.inner.width());
-        let rows = PyList::empty(py);
-        for i in 0..h {
-            let row = PyList::empty(py);
-            for col in cols {
-                row.append(scalar_to_py(py, col, i))?;
-            }
-            rows.append(row)?;
+}
+
+/// A lossless 2-D `object` NumPy array of `df`: each cell its own typed Python value
+/// (`volas.Timestamp` / `volas.NA` / str / number) via `scalar_to_py`. Backs the
+/// default mixed-frame export and `to_numpy(dtype="object")` — taking a `&DataFrame`
+/// so a windowed frame passes its logical M view.
+fn object_array<'py>(py: Python<'py>, df: &DataFrame) -> PyResult<Bound<'py, PyAny>> {
+    let cols = df.columns();
+    let (h, w) = (df.height(), df.width());
+    let rows = PyList::empty(py);
+    for i in 0..h {
+        let row = PyList::empty(py);
+        for col in cols {
+            row.append(scalar_to_py(py, col, i))?;
         }
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "object")?;
-        let arr = py.import("numpy")?.call_method("array", (rows,), Some(&kwargs))?;
-        // An empty or single-column frame can collapse to the wrong ndim; pin (h, w).
-        arr.call_method1("reshape", ((h, w),))
+        rows.append(row)?;
     }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    let arr = py.import("numpy")?.call_method("array", (rows,), Some(&kwargs))?;
+    // An empty or single-column frame can collapse to the wrong ndim; pin (h, w).
+    arr.call_method1("reshape", ((h, w),))
 }

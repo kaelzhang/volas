@@ -108,6 +108,7 @@ where a **new OHLCV bar arrives and indicators must refresh now**:
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Usage](#usage)
+- [Bounded rolling window](#bounded-rolling-window)
 - [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex)
 - [TimeFrame](#timeframe)
 - [Syntax of directive](#syntax-of-directive)
@@ -252,7 +253,7 @@ Which gets the 2-period simple moving average on column `"close"`.
   - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`).
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
-  those with the dedicated [`from_pandas`](#from_pandaspdf---dataframe) /
+  those with the dedicated [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
   [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe) instead. To attach a
   [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html),
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
@@ -274,6 +275,75 @@ Which gets the 2-period simple moving average on column `"close"`.
   - `'max'` — the maximum
   - `'min'` — the minimum
   - `'sum'` — the sum
+- **window** `Optional[int] = None` Make this a **bounded rolling-window** frame
+  showing only the last `window` rows (see [Bounded rolling window](#bounded-rolling-window)).
+  Requires exactly one of `max_lookback` / `indicators`.
+- **max_lookback** `Optional[int] = None` With `window`, the largest indicator
+  lookback you intend to use; the frame keeps `window + max_lookback` rows of margin
+  so cached indicators stay correct across the automatic front-drop.
+- **indicators** `Optional[list[str]] = None` With `window`, derive `max_lookback`
+  from the largest lookback among these directives instead of stating it
+  (e.g. `['atr:14', 'ma:50']` keeps a 50-row margin).
+
+### Bounded rolling window
+
+Pass `window=` to cap the frame at the last `window` rows. This is the live-trading
+/ NN-input shape: you keep `append`-ing bars forever, but memory stays **bounded** —
+the frame transparently drops old rows once it has accumulated enough, while
+retaining a hidden `max_lookback`-row margin so cached indicators remain **bit-exact**
+across each drop (the same values an unbounded frame would compute).
+
+```py
+# A bounded 30-bar window; the margin is sized from the indicators you declare.
+wf = DataFrame(seed, time_frame='15m', window=30, indicators=['atr:14'])
+
+for bar in feed:            # runs forever; memory never grows
+    wf.append(bar)          # fold a 1m bar into the forming 15m bar
+    wf.fulfill()            # refresh the cached atr:14 tail (O(lookback))
+    if wf.ready:            # warmed up: all 30 rows have valid history
+        x = wf[['close', 'atr:14']].to_numpy('float32')   # the 30×2 feature window
+```
+
+Every row-facing surface — `len`, `shape`, `index`, indexing (`[]` / `.iloc` /
+`.loc` / `.iat` / `.at`), `head` / `tail`, reductions, `to_numpy`, `to_csv`,
+`to_pandas`, `repr` — shows **only** the `window` rows; the margin is never visible.
+
+- **`ready`** `bool` Whether the window has warmed up (`window + max_lookback` rows
+  accumulated, so every visible row has a full indicator history). Always `True` for
+  an unbounded frame.
+- **`fill_into(out, columns=None)`** Write the window's values into a caller-preallocated
+  C-contiguous `float32` / `float64` array of shape `(len(df), k)`, in place — the
+  zero-allocation feature-export hot path (reuse one buffer across every bar). A
+  missing cell becomes `NaN`; a string column is rejected (no float value).
+
+### DataFrame.from_pandas(pdf) -> DataFrame
+
+A **volas-specific static method** that builds a `DataFrame` from a `pandas.DataFrame`
+(`pdf`) — the inverse of `df.to_pandas()`. pandas is imported lazily (only here, so volas
+stays pandas-free at import). A nullable column keeps its dtype + `volas.NA`, and a
+`DatetimeIndex` (tz-aware too) round-trips. See [pandas interop](#pandas-interop).
+
+```py
+df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
+```
+
+### DataFrame.from_arrow(data) -> DataFrame
+
+A **volas-specific static method** that builds a `DataFrame` from any object exposing
+the Arrow **C-Stream** protocol (`__arrow_c_stream__`) — a `pyarrow.Table` /
+`RecordBatch` / `RecordBatchReader`, a polars `DataFrame`, etc. The data buffers are
+borrowed where the dtypes match (otherwise a column is copied), a multi-chunk source
+is concatenated, and the result carries a fresh `RangeIndex`.
+
+- **data** the Arrow source — any object implementing `__arrow_c_stream__`.
+
+```py
+df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame
+df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
+```
+
+> Arrow is **not** accepted by the `DataFrame(data=...)` constructor (which takes a
+> `dict` or another `DataFrame`); build from an Arrow object through `from_arrow`.
 
 ### df.exec(directive: str) -> np.ndarray
 
@@ -504,29 +574,11 @@ pdf = pl.from_dataframe(df)  # polars reads it through the same protocol
 Returns a `pyarrow.Table`. See [Arrow & DLPack interop](#arrow--dlpack-interop-zero-copy)
 for the full zero-copy contract and the DLPack export.
 
-### DataFrame.from_arrow(data) -> DataFrame
-
-A **volas-specific static method** that builds a `DataFrame` from any object exposing
-the Arrow **C-Stream** protocol (`__arrow_c_stream__`) — a `pyarrow.Table` /
-`RecordBatch` / `RecordBatchReader`, a polars `DataFrame`, etc. The data buffers are
-borrowed where the dtypes match (otherwise a column is copied), a multi-chunk source
-is concatenated, and the result carries a fresh `RangeIndex`.
-
-- **data** the Arrow source — any object implementing `__arrow_c_stream__`.
-
-```py
-df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame
-df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
-```
-
-> Arrow is **not** accepted by the `DataFrame(data=...)` constructor (which takes a
-> `dict` or another `DataFrame`); build from an Arrow object through `from_arrow`.
-
 ### df.to_pandas(dtype_backend='numpy') -> pandas.DataFrame
 
 Export to a `pandas.DataFrame` (pandas is imported lazily, only here — it is not a
-runtime dependency). A `DatetimeIndex` round-trips, and the reverse bridge is the
-top-level [`from_pandas`](#from_pandaspdf---dataframe).
+runtime dependency). A `DatetimeIndex` round-trips, and the reverse bridge is
+[`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe).
 
 - **dtype_backend?** `str = 'numpy'` how a missing value is carried into pandas:
   - `'numpy'` — the most ecosystem-compatible form: an int / bool column with a missing
@@ -580,6 +632,20 @@ t = volas.to_datetime(df['time'])
 t.dt.hour                  # int64 Series, 0..23
 t.dt.dayofweek             # Monday=0 .. Sunday=6
 t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
+```
+
+### Series.from_arrow(data, name=None) -> Series
+
+A **volas-specific static method** that builds a `Series` from any object exposing the
+Arrow **C-Data** array protocol (`__arrow_c_array__`) — a `pyarrow.Array`, a polars
+`Series`, etc. The data buffer is borrowed where the dtype matches (otherwise copied);
+the result carries a fresh `RangeIndex`.
+
+- **data** the Arrow source — any object implementing `__arrow_c_array__`.
+- **name?** `str | None = None` the name for the resulting `Series`.
+
+```py
+s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
 ```
 
 ### series.to_numpy(dtype=None, na_value=...) -> np.ndarray
@@ -643,20 +709,6 @@ arr = pa.array(series)     # identical, via the __arrow_c_array__ protocol
 Returns a `pyarrow.Array`. The column also exports zero-copy to NumPy / PyTorch / JAX
 via DLPack (`np.from_dlpack(series)`) — see
 [Arrow & DLPack interop](#arrow--dlpack-interop-zero-copy).
-
-### Series.from_arrow(data, name=None) -> Series
-
-A **volas-specific static method** that builds a `Series` from any object exposing the
-Arrow **C-Data** array protocol (`__arrow_c_array__`) — a `pyarrow.Array`, a polars
-`Series`, etc. The data buffer is borrowed where the dtype matches (otherwise copied);
-the result carries a fresh `RangeIndex`.
-
-- **data** the Arrow source — any object implementing `__arrow_c_array__`.
-- **name?** `str | None = None` the name for the resulting `Series`.
-
-```py
-s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
-```
 
 ### Row
 
@@ -744,11 +796,6 @@ df = read_csv('klines.csv',
 df = read_csv('data.tsv', sep='\t', header=False,  # no header -> '0'..'n-1'
               na_values=['NA', 'null'])
 ```
-
-### from_pandas(pdf) -> DataFrame
-
-A top-level function that bridges a `pandas.DataFrame` (`pdf`) into volas (and
-`df.to_pandas()` bridges back). See [pandas interop](#pandas-interop).
 
 ### to_datetime(obj, unit='ns', format=None) -> Series
 
@@ -1441,9 +1488,9 @@ pandas is **not** a runtime dependency; these bridges import it lazily, only whe
 called, so `import volas` stays pandas-free.
 
 ```py
-from volas import from_pandas
+from volas import DataFrame
 
-df = from_pandas(pandas_df)        # numeric / bool / str / datetime native; a (tz-aware) DatetimeIndex round-trips;
+df = DataFrame.from_pandas(pandas_df)  # numeric / bool / str / datetime native; a (tz-aware) DatetimeIndex round-trips;
                                    # a nullable Int64 / boolean / string column reads back as int / bool / str + volas.NA
 pdf = df.to_pandas()               # -> pandas.DataFrame ('numpy' backend: an int/bool column with NA becomes float64 + NaN)
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # faithful masked Int64 / boolean (a lossless NA round-trip)

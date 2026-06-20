@@ -9,8 +9,6 @@ from volas_rs import (
     NA,
 )
 
-from ._interop import from_pandas
-
 from importlib.metadata import version as _get_version
 
 __version__ = _get_version('volas')
@@ -18,7 +16,7 @@ __version__ = _get_version('volas')
 __all__ = [
     'DataFrame', 'Series', 'Row', 'Timestamp', 'read_csv', 'to_datetime', 'TimeFrame',
     'directive_stringify', 'directive_lookback',
-    'from_pandas', 'NA',
+    'NA',
     'DirectiveError', 'DirectiveSyntaxError', 'DirectiveValueError',
     '__version__',
 ]

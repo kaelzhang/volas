@@ -125,12 +125,12 @@ def test_na_from_pandas_nullable_round_trip():
             "b": pd.array([True, None, False], dtype="boolean"),
         }
     )
-    v = volas.from_pandas(pdf)
+    v = volas.DataFrame.from_pandas(pdf)
     assert v["i"].dtype == "int64" and v["i"][1] is volas.NA
     assert v["b"].dtype == "bool" and v["b"][1] is volas.NA
     # lossless round-trip: volas int+NA -> pandas nullable -> volas int+NA
     orig = volas.DataFrame({"i": [1, None, 3]})
-    rt = volas.from_pandas(orig.to_pandas(dtype_backend="numpy_nullable"))
+    rt = volas.DataFrame.from_pandas(orig.to_pandas(dtype_backend="numpy_nullable"))
     assert rt["i"].dtype == "int64"
     lst = rt["i"].to_list()
     assert lst[0] == 1 and lst[1] is volas.NA and lst[2] == 3
@@ -185,7 +185,7 @@ def test_na_str_column():
     import pandas as pd
 
     pdf = pd.DataFrame({"a": pd.array(["x", None, "z"], dtype="string")})
-    v = volas.from_pandas(pdf)
+    v = volas.DataFrame.from_pandas(pdf)
     assert v["a"].dtype == "str" and v["a"][1] is NA
 
 
