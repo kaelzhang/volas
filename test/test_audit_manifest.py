@@ -62,9 +62,9 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
         "cumulate": "T10", "append": "T10", "fulfill": "T10",
         "tz": "T13", "tz_localize": "T13", "tz_convert": "T13",
         "_set_index_tz": "ignore:interop-internal (from_pandas tz tagging)",
-        "alias": "T0", "copy": "T0", "equals": "T0", "rename": "T0",
+        "copy": "T0", "equals": "T0", "rename": "T0",
         "columns": "T0", "shape": "T0", "index": "T0", "dtypes": "T0",
-        "ready": "T0",
+        "is_computed": "T0", "ready": "T0",
         "_physical_height": "ignore:windowed-internal (memory-bound test hook)",
         "head": "T6", "tail": "T6",
         # decision 1 (2026-06-11) REVERSED the §6.6 removal: get_column is the

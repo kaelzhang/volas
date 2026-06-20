@@ -1,9 +1,9 @@
 """Systematic audit — T0 (meta) + Row: identity / shape / copy / equals / repr.
 
 These are the metadata and presentation surface: shape/columns/dtype, the
-copy & equals identity laws (E5/equals), rename, and the Row accessor. repr is
-checked as a non-crashing, content-bearing snapshot across D×N (P7: never a
-panic).
+copy & equals identity laws (E5/equals), rename, is_computed (directive vs plain
+column classification), and the Row accessor. repr is checked as a non-crashing,
+content-bearing snapshot across D×N (P7: never a panic).
 
 Cell IDs:  T0.<attr> · T0.repr/D=<d>/N=<n> · Row.<accessor>
 """
@@ -41,6 +41,19 @@ def test_rename():
     df = volas.DataFrame({"a": [1.0], "b": [2.0]})
     assert list(df.rename({"a": "A"}).columns) == ["A", "b"]
     assert list(df.columns) == ["a", "b"]                # original untouched
+
+
+# --- is_computed: directive (computed) vs plain column ----------------------
+def test_is_computed():
+    df = volas.DataFrame({"close": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    assert df.is_computed("close") is False              # plain, supplied per bar
+    _ = df["ma:3"]                                        # materialize a directive column
+    assert df.is_computed("ma:3") is True                 # cached directive (computed)
+    assert df.is_computed("close") is False
+    with pytest.raises(KeyError):
+        df.is_computed("nope")                            # not a column at all
+    with pytest.raises(KeyError):
+        df.is_computed("ma:99")                           # valid directive, but not materialized
 
 
 # --- repr: content-bearing, never panics (D×N) -----------------------------

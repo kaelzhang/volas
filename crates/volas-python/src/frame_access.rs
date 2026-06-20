@@ -1,5 +1,5 @@
 //! `DataFrame` element access and the live-stream lifecycle
-//! (`__getitem__`/`__setitem__`, `append`, `fulfill`, `alias`).
+//! (`__getitem__`/`__setitem__`, `append`, `fulfill`).
 
 
 use numpy::PyReadonlyArray1;
@@ -236,11 +236,20 @@ impl PyDataFrame {
         Err(PyTypeError::new_err("append expects a DataFrame, a Row, or a bar dict"))
     }
 
-    /// Define a column / directive alias: `as_name` resolves to `src_name`
-    /// everywhere a column is looked up (mutates in place, pandas-like).
-    pub(crate) fn alias(&mut self, as_name: &str, src_name: &str) -> PyResult<()> {
-        self.inner = self.inner.with_alias(as_name, src_name).map_err(pyerr)?;
-        Ok(())
+    /// Whether the column ``name`` is a cached **directive (computed)** column —
+    /// one derived from a directive (e.g. ``df['rsi:14']``) and refreshed by
+    /// ``fulfill`` — rather than a plain data column supplied per bar.
+    ///
+    /// Raises:
+    ///     KeyError: if ``name`` is not a column of the frame.
+    ///
+    /// Returns:
+    ///     bool
+    pub(crate) fn is_computed(&self, name: &str) -> PyResult<bool> {
+        if !self.inner.has_column(name) {
+            return Err(PyKeyError::new_err(format!("column {name:?} not found")));
+        }
+        Ok(self.inner.is_computed(name))
     }
 
     /// Refresh the stale tail of every materialized (auto-cached) directive

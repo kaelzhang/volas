@@ -1,5 +1,5 @@
 //! A fast, non-cryptographic hasher for the library's INTERNAL string maps — the
-//! column-name index, the column aliases, and the directive cache. Their keys are
+//! column-name index and the directive cache. Their keys are
 //! internal column / directive names, never adversarial input, so the standard
 //! library's SipHash (which trades speed for DoS resistance) is pure overhead. These
 //! maps are hit on the live-append hot path — every `column_pos` / `column` lookup

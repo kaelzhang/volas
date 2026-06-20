@@ -12,8 +12,6 @@ def test_contains_and_iter():
     df = make()
     assert 'a' in df and 'z' not in df
     assert list(df) == ['a', 'b']            # iteration yields column names (pandas)
-    df.alias('A', 'a')
-    assert 'A' in df                         # alias-aware
 
 
 def test_head_tail():

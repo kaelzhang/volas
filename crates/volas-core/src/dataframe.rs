@@ -53,9 +53,6 @@ pub struct DataFrame {
     name_to_idx: Arc<FxHashMap<String, usize>>,
     index: Arc<Index>,
     height: usize,
-    /// Column-name aliases (`alias -> source name`), resolved on lookup. Shared
-    /// via `Arc` (cheap clone) and carried through derived frames.
-    aliases: Arc<FxHashMap<String, String>>,
     /// Materialized directive columns (name -> meta). Tracked so `fulfill` can
     /// incrementally recompute their tail after an append. Carried through
     /// `clone` / `append`; dropped by shape-changing ops (slice/select/…), where
@@ -107,7 +104,6 @@ impl DataFrame {
             name_to_idx: Arc::new(name_to_idx),
             index: Arc::new(index),
             height,
-            aliases: Arc::new(FxHashMap::default()),
             computed: FxHashMap::default(),
         })
     }
@@ -144,19 +140,14 @@ impl DataFrame {
         &self.columns
     }
 
-    /// Resolve a name through the alias map (`alias -> source`, else itself).
-    fn resolve<'a>(&'a self, name: &'a str) -> &'a str {
-        self.aliases.get(name).map(String::as_str).unwrap_or(name)
-    }
-
-    /// Position of a column by name (alias-aware).
+    /// Position of a column by name.
     pub fn column_pos(&self, name: &str) -> Option<usize> {
-        self.name_to_idx.get(self.resolve(name)).copied()
+        self.name_to_idx.get(name).copied()
     }
 
-    /// Whether a column exists (alias-aware).
+    /// Whether a column exists.
     pub fn has_column(&self, name: &str) -> bool {
-        self.name_to_idx.contains_key(self.resolve(name))
+        self.name_to_idx.contains_key(name)
     }
 
     /// Whether `name` is a cached directive (computed) column rather than plain data.
@@ -166,31 +157,11 @@ impl DataFrame {
         self.computed.contains_key(name)
     }
 
-    /// Define a column alias (`as_name -> src_name`), returning a new frame.
-    /// Errors if `as_name` is already a real column, or `src_name` does not exist.
-    pub fn with_alias(&self, as_name: &str, src_name: &str) -> Result<DataFrame> {
-        if self.name_to_idx.contains_key(as_name) {
-            return Err(VolasError::Value(format!(
-                "column \"{as_name}\" already exists"
-            )));
-        }
-        if self.column_pos(src_name).is_none() {
-            return Err(VolasError::Value(format!(
-                "column \"{src_name}\" not exists"
-            )));
-        }
-        let mut aliases = (*self.aliases).clone();
-        aliases.insert(as_name.to_string(), src_name.to_string());
-        let mut df = self.clone();
-        df.aliases = Arc::new(aliases);
-        Ok(df)
-    }
-
-    /// Build a frame that **shares this frame's schema** (names + lookup +
-    /// aliases, all `Arc`-cloned) over freshly derived `columns` / `index` — for
-    /// the same-shape derivations (slice / take / mask / astype), with no
-    /// name-string or hash-map rebuild. Computed-column status is dropped; the
-    /// caller re-attaches it where the derivation preserves it (a contiguous slice).
+    /// Build a frame that **shares this frame's schema** (names + lookup, both
+    /// `Arc`-cloned) over freshly derived `columns` / `index` — for the same-shape
+    /// derivations (slice / take / mask / astype), with no name-string or hash-map
+    /// rebuild. Computed-column status is dropped; the caller re-attaches it where
+    /// the derivation preserves it (a contiguous slice).
     fn same_schema(&self, columns: Vec<Column>, index: Index) -> DataFrame {
         let height = columns.first().map_or(0, |c| c.len());
         DataFrame {
@@ -199,12 +170,11 @@ impl DataFrame {
             columns,
             index: Arc::new(index),
             height,
-            aliases: Arc::clone(&self.aliases),
             computed: FxHashMap::default(),
         }
     }
 
-    /// Gather rows by position into a new frame (carries aliases).
+    /// Gather rows by position into a new frame.
     pub fn take(&self, positions: &[usize]) -> DataFrame {
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(positions)).collect();
         self.same_schema(columns, self.index.take(positions))
@@ -268,9 +238,7 @@ impl DataFrame {
         let mut columns = self.columns.clone();
         names.remove(pos);
         columns.remove(pos);
-        let mut df = DataFrame::new(names, columns, Some(index))?;
-        df.aliases = Arc::clone(&self.aliases);
-        Ok(df)
+        DataFrame::new(names, columns, Some(index))
     }
 
     /// Change the DatetimeIndex's **display / matching** timezone without moving
@@ -373,7 +341,6 @@ impl DataFrame {
             name_to_idx: Arc::new(name_to_idx),
             index: Arc::clone(&self.index),
             height: self.height,
-            aliases: Arc::clone(&self.aliases),
             computed: FxHashMap::default(),
         })
     }
@@ -464,8 +431,8 @@ impl DataFrame {
         let oh = other.height;
         // Identical schema (same names, same order) — the live-streaming / tf-fold
         // case: append positionally, skipping the per-column name lookup entirely.
-        // Aliases can never shadow a real column name (`with_alias` forbids it), so
-        // matching names guarantee `other`'s column `pos` is this frame's column `pos`.
+        // Matching name vectors guarantee `other`'s column `pos` is this frame's
+        // column `pos`.
         if self.names == other.names {
             for (dst, src) in self.columns.iter_mut().zip(&other.columns) {
                 dst.append(src)?;
@@ -579,9 +546,7 @@ impl DataFrame {
             .iter()
             .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
             .collect();
-        let mut df = DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))?;
-        df.aliases = Arc::clone(&self.aliases);
-        Ok(df)
+        DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))
     }
 
     /// Cast the named columns to new dtypes (pandas `astype`), returning a new
