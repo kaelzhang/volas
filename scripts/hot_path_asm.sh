@@ -96,6 +96,7 @@ if [ "$MODE" = check ]; then
     exit 0
   fi
   emit_asm
+  mkdir -p "$OUT"; rm -f "$OUT/.hot_fail"   # the per-regression flag is written here under set -e
   fail=0
   printf '%-20s %8s %8s %8s  %s\n' FUNCTION CURRENT BASELINE DELTA VERDICT
   printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4 && $3=="max"' | while IFS='|' read -r crate fn gate why; do

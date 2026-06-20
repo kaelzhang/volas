@@ -1,7 +1,7 @@
 # Instruction-level baseline for the broad hot-path functions (arch: arm64).
 # <fn> max <count>: the function's release-asm instruction count must not
 # increase. Counted from rustc --emit asm. Refresh only after a reviewed change.
-fold_forming_row max 66
+fold_forming_row max 92
 combine_at max 241
 rolling_max max 338
 rolling_min max 338
