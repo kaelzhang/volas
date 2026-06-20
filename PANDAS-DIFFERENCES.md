@@ -168,6 +168,121 @@ having to know, per call, which type system you are in.
 volas does not retrofit nullability onto a non-nullable core — **it is nullable from
 the ground up**, with one consistent set of return types.
 
+### 2.5 The same column changes dtype between loads (financial-data scenario)
+
+A live pipeline ingests OHLCV one file per session and concatenates the history.
+`volume` is a whole-share integer — until one session's feed has a gap. pandas
+infers each file's dtype **independently**, so the *same logical column* is `int64`
+on clean days and `float64` on the day with a hole:
+
+```py
+>>> import io, pandas as pd
+>>> clean = "ts,volume\n1,100\n2,200\n3,300\n"
+>>> gappy = "ts,volume\n1,100\n2,\n3,300\n"          # one session missing volume
+>>> pd.read_csv(io.StringIO(clean)).volume.dtype
+dtype('int64')
+>>> pd.read_csv(io.StringIO(gappy)).volume.dtype
+dtype('float64')                                      # SAME column, different dtype
+```
+
+The dtype now depends on *which day you happened to load*, not on what the data
+means. Every downstream step inherits that instability: a `groupby` / `merge` key
+silently mismatches `int` vs `float`, an `==` check that held yesterday fails today,
+and large volumes lose precision on the float days (§2.1).
+
+volas decides a column's dtype from the **values**, and a gap is `volas.NA` without
+changing it — the column is the same dtype on every load:
+
+```py
+>>> import volas
+>>> volas.read_csv('clean.csv')['volume'].dtype
+'int64'
+>>> col = volas.read_csv('gappy.csv')['volume']        # the day with a hole
+>>> col.dtype, col.to_list()
+('int64', [100, <NA>, 300])                            # still int64; the hole is NA
+```
+
+*Why the type system is built this way:* **C2** makes missingness orthogonal to
+dtype, so identical data always types identically — reproducibility a backtest
+depends on.
+
+### 2.6 A join silently rewrites values that were never missing
+
+The upcast is not confined to the rows that go missing. **Any** pandas operation
+that *introduces* a hole — `merge`, `reindex`, `align`, `concat`, `unstack` —
+upcasts the **whole** column to `float64`, rewriting the present, correct values
+along with it:
+
+```py
+>>> import pandas as pd
+>>> fills  = pd.DataFrame({'sym': ['AAA', 'BBB'], 'qty': [1, 2]})
+>>> master = pd.DataFrame({'sym': ['AAA'],
+...                        'shares_out': [9007199254740993]})   # 64-bit, int64
+>>> m = fills.merge(master, on='sym', how='left')   # BBB has no match -> NaN row
+>>> m['shares_out'].dtype
+dtype('float64')                                    # the column got upcast...
+>>> m['shares_out'].iloc[0]                          # ...so AAA's MATCHED value:
+9007199254740992.0                                  # the exact int lost its last bit
+```
+
+AAA matched perfectly and was never missing, yet its share count is now wrong —
+purely because a *different* row (BBB) was unmatched. A number you can see and have
+already validated is corrupted by a hole elsewhere in the column.
+
+volas has no path that does this: introducing a missing value keeps the `int` dtype
+and touches only the hole, so every present value stays bit-exact (shown here with
+`where`, which masks the unkept rows to NA):
+
+```py
+>>> import volas
+>>> s = volas.DataFrame({'shares_out': [9007199254740993, 9007199254740995]})['shares_out']
+>>> keep = volas.DataFrame({'keep': [True, False]})['keep']
+>>> s.where(keep).to_list()
+[9007199254740993, <NA>]                            # present value exact; only the hole is NA
+```
+
+*Why the type system is built this way:* **C2** keeps NA out of the dtype, so an
+NA-introducing operation can never silently rewrite a value that was already there.
+
+### 2.7 A missing trade signal silently becomes a trade
+
+A boolean signal column that picks up a missing value — a `reindex`, an `np.nan`
+flowing in from an upstream gap, a hand-assembled column — is no longer `bool`; it
+is `object`. The moment anything coerces it back into a usable mask, the unknown
+bar resolves to a hard `True`, because `bool(np.nan)` is `True`:
+
+```py
+>>> import numpy as np, pandas as pd
+>>> sig = pd.Series([True, np.nan, False])   # "go long", with one UNKNOWN bar
+>>> sig.dtype
+dtype('O')                                   # object — no longer a bool column
+>>> sig.astype(bool).to_list()               # forced back into a boolean mask...
+[True, True, False]                          # the UNKNOWN bar now fires a trade
+```
+
+"I don't know" silently became "yes, enter" — the most expensive direction for the
+error to take, and invisible until it has already placed orders.
+
+volas keeps a bool column `bool` with the gap as `volas.NA`, and **refuses** to act
+on an NA-carrying mask rather than guess its truth value:
+
+```py
+>>> import volas
+>>> df = volas.DataFrame({'sig': [True, None, False], 'px': [1.0, 2.0, 3.0]})
+>>> df['sig'].dtype, df['sig'].to_list()
+('bool', [True, <NA>, False])                # stays bool; the gap is volas.NA
+>>> df[df['sig']]                            # using the gap as a row mask:
+ValueError: boolean mask/condition contains volas.NA; an unknown signal is not
+            treated as False — fill or drop the NA before masking
+```
+
+An unknown signal can never fire a trade by accident: you must resolve it
+explicitly (`df['sig'].fillna(False)`) before it is allowed to act.
+
+*Why the type system is built this way:* **C3** (no `object`) means a bool column
+cannot decay into a bag of Python truth-values, and the NA-aware mask check turns
+"did a gap just place an order?" from a silent loss into a loud, fixable error.
+
 ---
 
 ## 3. The differences in practice
