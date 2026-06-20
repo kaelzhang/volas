@@ -15,9 +15,9 @@ use crate::series::Series;
 /// `height` until `fulfill` recomputes the tail.
 #[derive(Clone, Debug)]
 pub struct ComputedMeta {
-    /// The (canonical) directive string. `Arc<str>` so the per-bar refresh snapshot
-    /// (`stale_computed_columns`) clones it with a refcount bump, not a heap copy.
-    pub directive: Arc<str>,
+    // NB: the directive string is NOT stored here — a computed column's canonical
+    // directive is *identical* to its column name (the `computed` map key), so callers
+    // use the name directly. Storing it would be a redundant per-bar / per-slice clone.
     /// The directive's lookback (warm-up rows).
     pub lookback: usize,
     /// Rows `[0, valid_rows)` currently hold valid values.
@@ -391,7 +391,6 @@ impl DataFrame {
                 df.computed.insert(
                     name.clone(),
                     ComputedMeta {
-                        directive: meta.directive.clone(),
                         lookback: meta.lookback,
                         valid_rows: valid,
                         state: carried,

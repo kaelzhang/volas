@@ -752,7 +752,7 @@ impl PyDataFrame {
                 if height == vr + 1 {
                     if let Some(value) = volas_directive::exec::execute_resume_default_series_one(
                         &self.inner,
-                        &meta.directive,
+                        &name,
                         vr,
                     ) {
                         self.inner
@@ -766,7 +766,7 @@ impl PyDataFrame {
                     // the `Vec` resume below (same shared `*_step` kernel).
                     if let Some(state) = meta.state.as_deref() {
                         if let Some(value) =
-                            volas_directive::exec::execute_resume_one(&self.inner, &meta.directive, state, vr)
+                            volas_directive::exec::execute_resume_one(&self.inner, &name, state, vr)
                         {
                             self.inner
                                 .update_computed_f64_value(&name, vr, value)
@@ -779,7 +779,7 @@ impl PyDataFrame {
                 if let Some((tail, new_state)) =
                     volas_directive::exec::execute_resume_default_series(
                         &self.inner,
-                        &meta.directive,
+                        &name,
                         vr,
                     )
                 {
@@ -790,7 +790,7 @@ impl PyDataFrame {
                     continue;
                 }
             }
-            let node = parse(&meta.directive).map_err(directive_err)?;
+            let node = parse(&name).map_err(directive_err)?;
             // State-carry fast-path (additive): if this column carries a recursive
             // state, continue the recursion over only the new rows `[vr, height)` —
             // O(new rows), bit-identical to a full recompute — then refresh the carried

@@ -287,8 +287,7 @@ impl PyDataFrame {
             // so a later append can continue in O(new rows) instead of recomputing.
             let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
             self.inner.set_column(&canonical, col).map_err(pyerr)?;
-            self.inner
-                .set_computed(&canonical, canonical.clone(), lookback);
+            self.inner.set_computed(&canonical, lookback);
             self.inner.set_computed_state(&canonical, state);
         }
         let col = self.inner.column(&canonical).map_err(pyerr)?.clone();

@@ -7,7 +7,7 @@ fn frame_with_computed_f64() -> DataFrame {
         None,
     )
     .unwrap();
-    df.set_computed("value", "ma:2".into(), 1);
+    df.set_computed("value", 1);
     df
 }
 
@@ -35,7 +35,7 @@ fn computed_scalar_update_refreshes_valid_rows_and_reports_errors() {
         None,
     )
     .unwrap();
-    bool_df.set_computed("flag", "value > 0".into(), 0);
+    bool_df.set_computed("flag", 0);
     assert!(bool_df.update_computed_f64_value("flag", 0, 1.0).is_err());
 }
 

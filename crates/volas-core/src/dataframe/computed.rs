@@ -13,11 +13,10 @@ use super::{ComputedMeta, DataFrame};
 impl DataFrame {
     /// Record that column `name` is a materialized directive result (valid for
     /// all current rows).
-    pub fn set_computed(&mut self, name: &str, directive: String, lookback: usize) {
+    pub fn set_computed(&mut self, name: &str, lookback: usize) {
         self.computed.insert(
             name.to_string(),
             ComputedMeta {
-                directive: directive.into(),
                 lookback,
                 valid_rows: self.height,
                 state: None,
