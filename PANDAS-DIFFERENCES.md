@@ -121,6 +121,16 @@ It is not just cosmetic. `float64` cannot represent every `int64`, so the upcast
 A trade id, an order id, a nanosecond timestamp, a sequence number — any large
 integer that shares a column with one missing value is quietly corrupted.
 
+volas keeps the integer and marks only the hole — the value survives exactly:
+
+```py
+>>> import volas
+>>> volas.DataFrame({'qty': [1, None, 3]})['qty'].to_list()
+[1, <NA>, 3]                              # int64 stays int64; the hole is volas.NA
+>>> volas.DataFrame({'qty': [2**53 + 1, None]})['qty'].to_list()[0]
+9007199254740993                          # exact — no float upcast, no lost bit
+```
+
 ### 2.2 `object` dtype — type safety and performance, both gone
 
 When pandas cannot find a single numpy dtype, it falls back to `object`: a column of
@@ -139,6 +149,16 @@ dtype('float64')          # qty (an int) silently became a float...
 row into a single `Series`, which forces `object` (or a lossy upcast), which is both
 type-unsafe and an order of magnitude slower than column-wise work.
 
+volas has no `object` dtype and never squeezes a row into one shared type — a `Row`
+is a typed record that keeps each column's own dtype:
+
+```py
+>>> import volas
+>>> row = volas.DataFrame({'price': [100.0], 'qty': [5]}).iloc[0]
+>>> row.to_dict()                         # each cell keeps its column's dtype
+{'price': 100.0, 'qty': 5}                # no boxed objects, no int -> float upcast
+```
+
 ### 2.3 Silent, inconsistent coercion
 
 Because reductions funnel through numpy, applying them to the "wrong" type produces
@@ -156,6 +176,18 @@ TypeError
 and `mean` disagree about whether a string column is even a valid input makes it
 worse.
 
+volas refuses a numeric reduction on a non-numeric column — the same way for *every*
+reduction, so there is no per-op surprise:
+
+```py
+>>> import volas
+>>> s = volas.DataFrame({'s': ['a', 'b', 'c']})['s']
+>>> s.sum()
+TypeError: a numeric operation is not supported on a str column
+>>> s.mean()
+TypeError: a numeric operation is not supported on a str column   # identical to sum()
+```
+
 ### 2.4 The nullable retrofit is opt-in, incomplete, and splits return types
 
 pandas does have a newer, better answer — the nullable `Int64` / `boolean` /
@@ -166,7 +198,18 @@ across the API, and it **splits return types**: the same `unique()` returns a nu
 having to know, per call, which type system you are in.
 
 volas does not retrofit nullability onto a non-nullable core — **it is nullable from
-the ground up**, with one consistent set of return types.
+the ground up**, with one consistent set of return types. The same call returns the
+same type whether or not the column has a hole:
+
+```py
+>>> import volas
+>>> type(volas.DataFrame({'x': [3, 3, 1]})['x'].unique()).__name__      # dense column
+'Series'
+>>> type(volas.DataFrame({'x': [3, None, 1]})['x'].unique()).__name__   # column with a hole
+'Series'                                                                # same return type
+>>> volas.DataFrame({'x': [3, None, 1]})['x'].unique().to_list()
+[3, <NA>, 1]                                                            # int64 + volas.NA, kept
+```
 
 ### 2.5 The same column changes dtype between loads (financial-data scenario)
 
