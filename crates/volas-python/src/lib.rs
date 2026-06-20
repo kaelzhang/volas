@@ -107,6 +107,7 @@ mod window;
 mod series_support;
 mod frame;
 mod frame_access;
+mod frame_row;
 mod frame_construct;
 mod frame_index;
 mod frame_io;
@@ -122,6 +123,7 @@ pub(crate) use coerce::*;
 pub(crate) use series::*;
 pub(crate) use series_support::*;
 pub(crate) use frame::*;
+pub(crate) use frame_row::*;
 pub(crate) use frame_index::*;
 pub(crate) use frame_window::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
 

@@ -180,6 +180,8 @@ anime: anime-fonts
 
 # Run linters
 lint:
+	@echo "\033[1m>> Checking source-file line counts... <<\033[0m"
+	@$(PYTHON) scripts/check_line_count.py
 	@echo "\033[1m>> Running ruff... <<\033[0m"
 	@ruff check $(files)
 	@echo "\033[1m>> Running mypy (package)... <<\033[0m"
