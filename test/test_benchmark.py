@@ -653,7 +653,8 @@ def _volas_windowed():
             window=W_WINDOW,
             max_lookback=['atr:14'],
         )
-        return (wf,), {}
+        wf['atr:14']               # materialize the cached column so each fulfill
+        return (wf,), {}           # actually refreshes it (the work under test)
 
     def run(wf):
         for bar in bars:
