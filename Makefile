@@ -12,7 +12,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX = $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV = VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab asm-diff asm-diff-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -173,6 +173,24 @@ asm-diff:
 
 asm-diff-update:
 	@ASM_UPDATE=1 bash scripts/asm_diff.sh
+
+# Hot-path assembly for the BROAD hot-path functions (per-bar fold, window kernels) that
+# are too large to inline into an asm-diff wrapper probe. `hot-asm` DUMPS each function's
+# disassembly + instruction count for review; `hot-asm-check` GATES the counts (a `max`
+# gate: a hot path must not grow silently); `hot-asm-update` refreshes the baseline.
+# Counted directly from `rustc --emit asm`. Complements the byte-exact `asm-diff` kernels.
+#
+#   make hot-asm               # dump the inventory (FN=combine_at for one function)
+#   make hot-asm-check          # gate the gated functions against scripts/hot_asm_baseline.txt
+#   make hot-asm-update         # refresh the baseline after a reviewed change
+hot-asm:
+	@bash scripts/hot_path_asm.sh dump
+
+hot-asm-check:
+	@bash scripts/hot_path_asm.sh check
+
+hot-asm-update:
+	@bash scripts/hot_path_asm.sh update
 
 # Download/check the fonts used by the README / GitHub Pages animated GIFs.
 anime-fonts:

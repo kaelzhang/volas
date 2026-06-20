@@ -103,3 +103,49 @@ batch sections as charts, then summarizes full coverage as one row per
 TA-Lib indicator. Extra length fixtures and cached append-refresh
 comparisons appear as additional `volas vs TA-Lib` columns instead of
 duplicate indicator rows.
+
+### Instruction-level review of the hot paths
+
+`make perf-ab` answers *"did this change move wall-clock?"*; the **assembly
+gates** answer the finer *"did a hot function's generated code get heavier?"* —
+the regression a 5µs-floored benchmark cannot see. They make a by-hand
+instruction-level review a permanent, reproducible gate.
+
+Two complementary gates, both arm64-specific (each self-skips on another arch,
+and runs in CI on an Apple-silicon runner):
+
+- **`make asm-diff`** — the tiny, stable numeric/string kernels (`ma`, `ema`, the
+  string compare scan). Each is wrapped by a `#[no_mangle] #[inline(never)]` probe
+  in `crates/*/examples/asm_probe_*.rs` so it inlines into a standalone symbol;
+  `scripts/asm_diff.sh` disassembles and holds the count **byte-exact** (`ma`/`ema`)
+  or non-increasing (string) against `scripts/asm_baseline.txt`.
+- **`make hot-asm-check`** — the **broad hot-path functions** that are too large to
+  inline into a wrapper. `scripts/hot_path_asm.sh` reads each function's *own* symbol
+  straight from `rustc --emit asm` and gates its instruction count as `max`
+  (must-not-increase) against `scripts/hot_asm_baseline.txt`.
+
+Refresh a baseline only after a *reviewed, justified* change:
+`make asm-diff-update` / `make hot-asm-update`, then commit the baseline.
+
+The hot-path inventory (the single source of truth, in `scripts/hot_path_asm.sh`):
+
+| function | crate | hot path |
+| --- | --- | --- |
+| `fold_forming_row` | volas-core | per-bar: tf-fold combines the forming row in place |
+| `combine_at` | volas-core | per-bar: the fold cell-combine (per column, per bar) |
+| `rolling_max` / `rolling_min` | volas-compute | van-Herk window extrema kernels |
+| `execute` / `dispatch` | volas-directive | per-eval directive evaluation (dump only — `dispatch` grows with the command set) |
+
+To **discover** (not just gate), `make hot-asm` dumps every inventory function's
+disassembly to `target/hot-asm/<fn>.s` with a count and a `VS-BASE` delta
+(`make hot-asm FN=combine_at` for one). Read those to spot what the optimizer
+actually emitted on the hot path: per-bar heap allocations (`bl _..._alloc`),
+un-elided bounds-check panics (`b.hs …; bl …panic`), broken inlining, register
+spills, or missed SIMD.
+
+The optimization loop, end to end: **`make hot-asm`** (read the hot path) →
+hypothesize → implement → **`make perf-ab`** (prove wall-clock) +
+**`make asm-diff` / `make hot-asm-check`** (prove no instruction regression
+elsewhere) → `*-update` the baseline once the win is reviewed. A periodic broad
+sweep across every hot path (an adversarially-verified, assembly-level review)
+seeds new inventory entries and optimization candidates.

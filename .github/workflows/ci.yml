@@ -222,3 +222,9 @@ jobs:
 
       - name: Instruction-level regression gate
         run: make asm-diff
+
+      # The broad hot-path functions (per-bar fold, window kernels) that are too large
+      # to inline into a wrapper probe — gated on their own release-asm instruction
+      # count (scripts/hot_asm_baseline.txt; refresh with `make hot-asm-update`).
+      - name: Hot-path instruction gate
+        run: make hot-asm-check
