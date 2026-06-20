@@ -99,9 +99,15 @@ mod dt;
 mod window;
 mod series_support;
 mod frame;
-mod frame_methods;
-mod frame_methods2;
+mod frame_access;
+mod frame_construct;
 mod frame_index;
+mod frame_io;
+mod frame_reduce;
+mod frame_repr;
+mod frame_reshape;
+mod frame_transform;
+mod frame_window;
 
 pub(crate) use scalar::*;
 pub(crate) use convert::*;
@@ -109,8 +115,8 @@ pub(crate) use coerce::*;
 pub(crate) use series::*;
 pub(crate) use series_support::*;
 pub(crate) use frame::*;
-pub(crate) use frame_methods::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
 pub(crate) use frame_index::*;
+pub(crate) use frame_window::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
 
 /// Raise if the frame has stale computed columns after an `append`. Column
 /// projection (`df[directive]` / `df[[...]]`) auto-refreshes its columns; every

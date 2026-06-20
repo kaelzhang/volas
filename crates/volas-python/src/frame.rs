@@ -1,5 +1,7 @@
 //! The `volas.DataFrame` pyclass: its fields, the non-`#[pymethods]` helpers,
-//! and `PyRow`. The method surface lives in frame_methods / frame_methods2.
+//! and `PyRow`. The Python method surface is split by concern across
+//! `frame_construct` / `frame_reduce` / `frame_transform` / `frame_reshape` /
+//! `frame_io` / `frame_repr` / `frame_access` / `frame_index` / `frame_window`.
 
 use std::collections::HashSet;
 use std::sync::Arc;

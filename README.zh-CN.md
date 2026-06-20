@@ -53,8 +53,7 @@ pip install volas
     ——可通过 `make benchmark` 复现。
   - 在增量更新（每来一根新 bar）计算中，volas 在**所有**指标上都是**所有**类库中最快的——比 TA-Lib 快 **~5×**，比 pandas 最高快约 **~360×**。
 - **为实时 tick 而生** 新 bar 只触碰受影响的尾部（`O(lookback)`，不是 `O(n)`）；指标以微秒级刷新，不做整列重算。
-- **Rust 在内，NumPy / Torch 在外** 编译型内核，运行时零 pandas 依赖；
-  `to_numpy()` 直接喂给 NumPy 和 `torch.Tensor` 流水线。
+- **Rust 在内，NumPy / Torch 在外** 编译型内核，热路径经过**汇编指令级**的性能优化，运行时零 pandas 依赖；`to_numpy()` 直接喂给 NumPy 和 `torch.Tensor` 流水线。
 
 ![volas 如何在 append 后只刷新 stale tail](https://volas.ost.ai/animated_gif/after-append-indicator-zh-cn.gif)
 
