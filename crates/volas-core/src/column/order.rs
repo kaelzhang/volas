@@ -3,6 +3,40 @@
 
 use super::*;
 
+// The per-dtype combine kernels behind `Column::combine_at`. `Max` / `Min` / `Sum`
+// match the batch reduce: `f*::max`/`min` drop a `NaN` operand (so a missing fine
+// bar is skipped, exactly like the fold), and the integer sum is overflow-checked in
+// debug (like `Iterator::sum`). `Keep` never reaches here (combine_at returns early).
+fn combine_f64(op: CombineOp, acc: f64, x: f64) -> f64 {
+    match op {
+        CombineOp::Replace => x,
+        CombineOp::Max => acc.max(x),
+        CombineOp::Min => acc.min(x),
+        CombineOp::Sum => acc + x,
+        CombineOp::Keep => unreachable!(), // LCOV_EXCL_LINE (combine_at returns early on Keep)
+    }
+}
+
+fn combine_f32(op: CombineOp, acc: f32, x: f32) -> f32 {
+    match op {
+        CombineOp::Replace => x,
+        CombineOp::Max => acc.max(x),
+        CombineOp::Min => acc.min(x),
+        CombineOp::Sum => acc + x,
+        CombineOp::Keep => unreachable!(), // LCOV_EXCL_LINE (combine_at returns early on Keep)
+    }
+}
+
+fn combine_i64(op: CombineOp, acc: i64, x: i64) -> i64 {
+    match op {
+        CombineOp::Replace => x,
+        CombineOp::Max => acc.max(x),
+        CombineOp::Min => acc.min(x),
+        CombineOp::Sum => acc + x,
+        CombineOp::Keep => unreachable!(), // LCOV_EXCL_LINE (combine_at returns early on Keep)
+    }
+}
+
 impl Column {
     /// A contiguous `[start, end)` slice (a fresh buffer).
     pub fn slice(&self, start: usize, end: usize) -> Column {
@@ -439,6 +473,70 @@ impl Column {
                 Ok(Column::datetime(nv))
             }
         }
+    }
+
+    /// Fold `src[src_row]` into cell `row` in place, per `op` — the allocation-free
+    /// core of the live tf-fold's forming-bar update (the incremental dual of
+    /// [`crate::Agg::reduce`] over the period). Writes through `Buffer::make_mut`, so
+    /// it is O(1) on a uniquely-owned buffer (one copy-on-write after a slice). Only
+    /// numeric / datetime columns are supported — `Bool` / `Str` return a `DType`
+    /// error, and the caller (`fold_append`) falls back to the batch reduce for those.
+    ///
+    /// `Max` / `Min` / `Sum` keep the destination's validity (a forming aggregate is
+    /// always present, matching the batch reduce's all-valid result); `Replace`
+    /// (period `last`) copies the source cell's value AND validity.
+    pub fn combine_at(
+        &mut self,
+        row: usize,
+        op: CombineOp,
+        src: &Column,
+        src_row: usize,
+    ) -> Result<()> {
+        use CombineOp::*;
+        if matches!(op, Keep) {
+            return Ok(());
+        }
+        match self {
+            Column::F64(buf) => {
+                let s = src.get_f64(src_row);
+                let b = buf.make_mut();
+                b[row] = combine_f64(op, b[row], s);
+            }
+            Column::F32(buf) => {
+                let s = src.get_f64(src_row) as f32;
+                let b = buf.make_mut();
+                b[row] = combine_f32(op, b[row], s);
+            }
+            Column::I64(buf, val) => {
+                let s = src.get_i64(src_row);
+                let b = buf.make_mut();
+                let n = b.len();
+                b[row] = combine_i64(op, b[row], s);
+                if matches!(op, Replace) {
+                    val.set(row, n, src.is_valid(src_row));
+                }
+            }
+            Column::I32(buf, val) => {
+                let s = src.get_i64(src_row);
+                let b = buf.make_mut();
+                let n = b.len();
+                b[row] = combine_i64(op, b[row] as i64, s) as i32;
+                if matches!(op, Replace) {
+                    val.set(row, n, src.is_valid(src_row));
+                }
+            }
+            Column::Datetime(buf) => {
+                let s = src.get_i64(src_row);
+                let b = buf.make_mut();
+                b[row] = combine_i64(op, b[row], s);
+            }
+            Column::Bool(_, _) | Column::Str(_, _) => {
+                return Err(VolasError::DType(
+                    "combine_at: only numeric / datetime columns can be folded in place".into(),
+                ))
+            }
+        }
+        Ok(())
     }
 
     // --- dtype-preserving numeric transforms (pandas 3.0) ---------------------

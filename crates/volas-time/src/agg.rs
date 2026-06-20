@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use volas_core::{Column, Result, VolasError};
+use volas_core::{Column, CombineOp, Result, VolasError};
 
 /// A column aggregator over a period's rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +39,19 @@ impl Agg {
             Agg::Min => "min",
             Agg::Last => "last",
             Agg::Sum => "sum",
+        }
+    }
+
+    /// The in-place single-cell combine op equivalent to this aggregator — the
+    /// incremental dual of [`Self::reduce`], used by the live tf-fold to update the
+    /// forming bar without re-reducing the whole period.
+    pub fn as_combine_op(&self) -> CombineOp {
+        match self {
+            Agg::First => CombineOp::Keep,
+            Agg::Last => CombineOp::Replace,
+            Agg::Max => CombineOp::Max,
+            Agg::Min => CombineOp::Min,
+            Agg::Sum => CombineOp::Sum,
         }
     }
 
@@ -169,6 +182,15 @@ mod tests {
             Agg::Sum.reduce(&col, &kept).unwrap(),
             Column::f64(vec![9.0])
         );
+    }
+
+    #[test]
+    fn as_combine_op_maps_each_aggregator() {
+        assert_eq!(Agg::First.as_combine_op(), CombineOp::Keep);
+        assert_eq!(Agg::Last.as_combine_op(), CombineOp::Replace);
+        assert_eq!(Agg::Max.as_combine_op(), CombineOp::Max);
+        assert_eq!(Agg::Min.as_combine_op(), CombineOp::Min);
+        assert_eq!(Agg::Sum.as_combine_op(), CombineOp::Sum);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::column::Column;
+use crate::column::{Column, CombineOp};
 use crate::error::{Result, VolasError};
 use crate::index::{Index, IndexKind};
 use crate::series::Series;
@@ -522,6 +522,30 @@ impl DataFrame {
         }
         self.columns[col] = self.columns[col].scatter(positions, values)?;
         self.invalidate_computed_on_write_at(col);
+        Ok(())
+    }
+
+    /// Fold `src[src_row]` into the forming aggregate at `row`, in place, per the
+    /// `(dst_col, src_col, op)` plan — the allocation-free live tf-fold. Unlike
+    /// `assign_positions` it neither re-reduces the period nor clones a column
+    /// buffer: each cell is combined through [`Column::combine_at`]. A single
+    /// conservative cache invalidation follows (the forming row changed, so every
+    /// cached directive recomputes on the next read), exactly like a positional
+    /// write. The caller guarantees every `op`'s column dtype is fold-eligible
+    /// (numeric / datetime); a `Bool` / `Str` column makes `combine_at` error.
+    pub fn fold_forming_row(
+        &mut self,
+        row: usize,
+        src: &DataFrame,
+        src_row: usize,
+        ops: &[(usize, usize, CombineOp)],
+    ) -> Result<()> {
+        for &(dst_col, src_col, op) in ops {
+            self.columns[dst_col].combine_at(row, op, &src.columns[src_col], src_row)?;
+        }
+        if let Some(&(dst_col, _, _)) = ops.first() {
+            self.invalidate_computed_on_write_at(dst_col);
+        }
         Ok(())
     }
 

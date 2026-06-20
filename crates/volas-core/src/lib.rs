@@ -19,7 +19,7 @@ pub mod validity;
 
 pub use buffer::Buffer;
 pub use strbuf::{StrBuffer, StrBufferBuilder};
-pub use column::{BinOp, BoolOp, CmpOp, Column, Scalar};
+pub use column::{BinOp, BoolOp, CmpOp, Column, CombineOp, Scalar};
 pub use numeric::{binary_supertype, fits, Numeric};
 pub use validity::{Bitmap, Validity};
 pub use dataframe::DataFrame;

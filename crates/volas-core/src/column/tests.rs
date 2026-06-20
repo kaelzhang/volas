@@ -816,3 +816,91 @@ fn str_append_is_amortised_not_quadratic() {
     assert_eq!(a.len(), 101);
     assert_eq!(a.str_at(100).unwrap(), "row99");
 }
+
+#[test]
+fn get_i64_reads_every_dtype() {
+    assert_eq!(Column::i64(vec![7]).get_i64(0), 7);
+    assert_eq!(Column::i32(vec![7]).get_i64(0), 7);
+    assert_eq!(Column::datetime(vec![7]).get_i64(0), 7);
+    assert_eq!(Column::f64(vec![7.9]).get_i64(0), 7);
+    assert_eq!(Column::f32(vec![7.9]).get_i64(0), 7);
+    assert_eq!(Column::bool(vec![true]).get_i64(0), 1);
+    assert_eq!(Column::str(vec!["x".into()]).get_i64(0), 0);
+}
+
+#[test]
+fn combine_at_numeric_ops_in_place() {
+    // F64: Max / Min / Sum / Replace / Keep, against src = 5.0
+    let src = Column::f64(vec![5.0]);
+    for (op, want) in [
+        (CombineOp::Max, 5.0),
+        (CombineOp::Min, 3.0),
+        (CombineOp::Sum, 8.0),
+        (CombineOp::Replace, 5.0),
+        (CombineOp::Keep, 3.0),
+    ] {
+        let mut c = Column::f64(vec![3.0]);
+        c.combine_at(0, op, &src, 0).unwrap();
+        assert_eq!(c.get_f64(0), want, "f64 {op:?}");
+    }
+    // a NaN source is dropped by Max (matches the batch reduce's f64::max fold).
+    let mut c = Column::f64(vec![3.0]);
+    c.combine_at(0, CombineOp::Max, &Column::f64(vec![f64::NAN]), 0).unwrap();
+    assert_eq!(c.get_f64(0), 3.0);
+
+    // F32: every op (covers the combine_f32 kernel arms).
+    for (op, want) in [
+        (CombineOp::Max, 5.0),
+        (CombineOp::Min, 3.0),
+        (CombineOp::Sum, 8.0),
+        (CombineOp::Replace, 5.0),
+    ] {
+        let mut c = Column::f32(vec![3.0]);
+        c.combine_at(0, op, &Column::f32(vec![5.0]), 0).unwrap();
+        assert_eq!(c.get_f64(0), want, "f32 {op:?}");
+    }
+
+    // Datetime + I32: every op (covers the combine_i64 kernel arms across dtypes).
+    for (op, want) in [
+        (CombineOp::Max, 5),
+        (CombineOp::Min, 3),
+        (CombineOp::Sum, 8),
+        (CombineOp::Replace, 5),
+    ] {
+        let mut c = Column::datetime(vec![3]);
+        c.combine_at(0, op, &Column::datetime(vec![5]), 0).unwrap();
+        assert_eq!(c.get_i64(0), want, "datetime {op:?}");
+        let mut c = Column::i32(vec![3]);
+        c.combine_at(0, op, &Column::i32(vec![5]), 0).unwrap();
+        assert_eq!(c.get_i64(0), want, "i32 {op:?}");
+    }
+}
+
+#[test]
+fn combine_at_i64_replace_copies_validity() {
+    // Replace from a present source keeps the cell present...
+    let mut c = Column::i64(vec![1, 2]);
+    c.combine_at(1, CombineOp::Replace, &Column::i64(vec![9]), 0).unwrap();
+    assert_eq!(c.get_i64(1), 9);
+    assert!(c.is_valid(1));
+    // ...and from an NA source marks it missing (validity materialized).
+    let na = Column::i64_with(vec![0], Validity::from_valid_iter(1, [false]));
+    let mut c = Column::i64(vec![1, 2]);
+    c.combine_at(1, CombineOp::Replace, &na, 0).unwrap();
+    assert!(!c.is_valid(1));
+    // Sum keeps the destination present (all-valid result, like the batch reduce).
+    let mut c = Column::i64(vec![1, 2]);
+    c.combine_at(1, CombineOp::Sum, &Column::i64(vec![5]), 0).unwrap();
+    assert_eq!(c.get_i64(1), 7);
+    assert!(c.is_valid(1));
+}
+
+#[test]
+fn combine_at_rejects_non_numeric() {
+    assert!(Column::bool(vec![false])
+        .combine_at(0, CombineOp::Replace, &Column::bool(vec![true]), 0)
+        .is_err());
+    assert!(Column::str(vec!["a".into()])
+        .combine_at(0, CombineOp::Replace, &Column::str(vec!["b".into()]), 0)
+        .is_err());
+}

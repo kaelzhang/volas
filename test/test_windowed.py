@@ -319,6 +319,38 @@ def test_margin_keeps_indicator_history():
     assert not np.isnan(got).any()
 
 
+def test_tf_fold_fast_path_matches_batch_aggregate():
+    # The in-place incremental tf-fold (numeric columns) must be bit-exact with the
+    # batch-aggregate path. We build the SAME tf frame two ways: all-numeric (the
+    # fast path) vs. with an extra string column that opts the bar out of the fast
+    # path into the batch aggregate. The shared OHLCV must match exactly.
+    def _mins(k):
+        base = np.datetime64('2020-01-01T00:00:00')
+        return (base + np.arange(k) * np.timedelta64(1, 'm')).astype('datetime64[ns]')
+
+    n = 400
+    data = _ohlcv(n, seed=9)
+    ts = _mins(n)
+
+    def build(with_str):
+        seed = {k: v[:1] for k, v in data.items()}
+        if with_str:
+            seed['sym'] = ['X']
+        f = DataFrame(seed, index=ts[:1], time_frame='15m')
+        for k in range(1, n):
+            bar = {c: [data[c][k]] for c in data}
+            if with_str:
+                bar['sym'] = ['X']
+            f.append(DataFrame(bar, index=np.array([ts[k]])))
+        return f
+
+    fast = build(False)   # all numeric -> in-place fast fold
+    slow = build(True)    # a str column -> batch-aggregate fallback
+    cols = ['open', 'high', 'low', 'close', 'volume']
+    assert np.array_equal(fast[cols].to_numpy(), slow[cols].to_numpy())
+    assert np.array_equal(np.asarray(fast.index), np.asarray(slow.index))
+
+
 # --------------------------------------------------------------------------- #
 # Memory bound                                                                 #
 # --------------------------------------------------------------------------- #

@@ -456,3 +456,26 @@
             .tz_localize(Tz::parse("America/New_York").unwrap())
             .is_err());
     }
+
+    #[test]
+    fn fold_forming_row_combines_in_place() {
+        let mut df = DataFrame::new(
+            vec!["high".into(), "vol".into()],
+            vec![Column::f64(vec![1.0, 2.0]), Column::f64(vec![10.0, 20.0])],
+            None,
+        )
+        .unwrap();
+        let bar = DataFrame::new(
+            vec!["high".into(), "vol".into()],
+            vec![Column::f64(vec![5.0]), Column::f64(vec![3.0])],
+            None,
+        )
+        .unwrap();
+        df.fold_forming_row(1, &bar, 0, &[(0, 0, CombineOp::Max), (1, 1, CombineOp::Sum)])
+            .unwrap();
+        assert_eq!(df.columns()[0].get_f64(1), 5.0); // max(2, 5)
+        assert_eq!(df.columns()[1].get_f64(1), 23.0); // 20 + 3
+        // an empty plan is a no-op (and skips the invalidation).
+        df.fold_forming_row(1, &bar, 0, &[]).unwrap();
+        assert_eq!(df.columns()[0].get_f64(1), 5.0);
+    }

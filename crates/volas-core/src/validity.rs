@@ -128,6 +128,23 @@ impl Validity {
         }
     }
 
+    /// Set element `i`'s presence in place (one cell). Dense stays dense when
+    /// marking present; a bitmap is materialized only when a first missing value is
+    /// introduced. `len` is the column length, needed to size that fresh bitmap.
+    /// Backs the single-cell write in [`crate::Column::combine_at`].
+    pub fn set(&mut self, i: usize, len: usize, valid: bool) {
+        match &mut self.0 {
+            None => {
+                if !valid {
+                    let mut bm = Bitmap::all_valid(len);
+                    bm.set(i, false);
+                    self.0 = Some(Arc::new(bm));
+                }
+            }
+            Some(arc) => Arc::make_mut(arc).set(i, valid),
+        }
+    }
+
     /// Whether any value is missing (cheap: dense ⇒ false).
     pub fn has_nulls(&self) -> bool {
         self.0.is_some()
@@ -191,6 +208,18 @@ impl PartialEq for Validity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validity_set_cell_in_place() {
+        let mut v = Validity::dense();
+        v.set(1, 3, true); // dense + still present -> stays dense (no allocation)
+        assert!(!v.has_nulls());
+        v.set(1, 3, false); // first missing value -> materialize a bitmap
+        assert!(v.has_nulls());
+        assert!(!v.is_valid(1) && v.is_valid(0));
+        v.set(1, 3, true); // Some(bitmap) branch -> back to present
+        assert!(v.is_valid(1));
+    }
 
     #[test]
     fn bitmap_get_set_and_null_count() {

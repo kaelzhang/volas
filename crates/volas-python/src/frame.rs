@@ -10,7 +10,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use volas_core::{
-    binary_supertype, CmpOp, Column, DataFrame, DType, Index,
+    binary_supertype, CmpOp, Column, CombineOp, DataFrame, DType, Index,
     IndexKind, Series,
 };
 use volas_directive::parse;
@@ -137,6 +137,29 @@ pub(crate) fn col_value(col: &Column, i: usize) -> f64 {
         Column::I64(v, _) => v[i] as f64,
         _ => f64::NAN,
     }
+}
+
+/// Plan the in-place forming-row fold: for each of `inner`'s columns, the
+/// `(dst_col, src_col, combine_op)` triple pairing it with the matching bar column
+/// and its aggregator. Returns `None` (so the caller takes the batch-aggregate
+/// path) if any column is `Bool` / `Str`, which `Column::combine_at` cannot fold in
+/// place. The common OHLCV (all-numeric) frame is always foldable.
+fn build_fold_ops(
+    inner: &DataFrame,
+    bar: &DataFrame,
+    spec: &AggSpec,
+) -> Option<Vec<(usize, usize, CombineOp)>> {
+    let mut ops = Vec::with_capacity(inner.width());
+    for j in 0..inner.width() {
+        if matches!(inner.columns()[j].dtype(), DType::Bool | DType::Utf8) {
+            return None;
+        }
+        let name = &inner.names()[j];
+        if let Some(bj) = bar.column_pos(name) {
+            ops.push((j, bj, spec.agg_for(name).as_combine_op()));
+        }
+    }
+    Some(ops)
 }
 
 impl PyDataFrame {
@@ -748,27 +771,49 @@ impl PyDataFrame {
                 .open
                 .as_ref()
                 .is_some_and(|open| frame.unify_tz(last_dt(open), tz) == key);
-            let bar = fine.slice(i, i + 1);
             if same_period {
+                // The forming-bar update only reads the bar, so borrow it directly
+                // for the common single-row append (no slice copy).
+                let bar = if fine.height() == 1 {
+                    std::borrow::Cow::Borrowed(fine)
+                } else {
+                    std::borrow::Cow::Owned(fine.slice(i, i + 1))
+                };
+                let bar = bar.as_ref();
                 let open = tfs.open.as_mut().unwrap();
                 // A re-sent forming bar (same ts) replaces the last open bar.
-                if last_dt(open) == bar_ts {
+                let resent = last_dt(open) == bar_ts;
+                if resent {
                     *open = open.slice(0, open.height() - 1);
                 }
-                open.append(&bar).map_err(pyerr)?;
-                let agg = aggregate_period(open, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
+                open.append(bar).map_err(pyerr)?;
                 let last = inner.height() - 1;
-                // `assign_positions` invalidates each written column's dependent
-                // directive columns, so the forming row's indicators recompute
-                // correctly on the next read — no explicit invalidate needed.
-                for (name, col) in agg.names().iter().zip(agg.columns()) {
-                    if let Some(j) = inner.column_pos(name) {
-                        inner.assign_positions(j, &[last], col).map_err(pyerr)?;
+                // Fast path: a new distinct fine bar whose columns are all foldable
+                // (numeric / datetime) updates the forming row IN PLACE — no period
+                // re-reduce, no column clone, no allocation. A re-sent bar (can't
+                // un-combine max/min) or a non-numeric column falls back to the batch
+                // aggregate. Both stale the cached directive tail identically, so the
+                // next `fulfill` refreshes the forming row's indicators the same way.
+                let ops = if resent {
+                    None
+                } else {
+                    build_fold_ops(inner, bar, &tfs.cumulators)
+                };
+                if let Some(ops) = ops {
+                    inner.fold_forming_row(last, bar, 0, &ops).map_err(pyerr)?;
+                } else {
+                    let agg =
+                        aggregate_period(open, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
+                    for (name, col) in agg.names().iter().zip(agg.columns()) {
+                        if let Some(j) = inner.column_pos(name) {
+                            inner.assign_positions(j, &[last], col).map_err(pyerr)?;
+                        }
                     }
                 }
             } else {
                 // Roll over: the previous forming bar (if any) is already final in
                 // `inner`; start a new open period and append its forming row.
+                let bar = fine.slice(i, i + 1);
                 let agg = aggregate_period(&bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                 tfs.open = Some(bar);
                 inner.append(&agg).map_err(pyerr)?;

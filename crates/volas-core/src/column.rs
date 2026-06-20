@@ -73,6 +73,24 @@ pub enum Column {
     Datetime(Buffer<i64>),
 }
 
+/// An in-place single-cell reduction op for the live tf-fold ([`Column::combine_at`]):
+/// fold one incoming value into a forming aggregate without re-reducing the period
+/// or allocating. The dual of [`crate::Agg`]'s reduce — `first` keeps, `last`
+/// replaces, the rest combine associatively.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CombineOp {
+    /// Keep the destination unchanged (the period's `first`).
+    Keep,
+    /// Overwrite with the source value (the period's `last`).
+    Replace,
+    /// Running maximum.
+    Max,
+    /// Running minimum.
+    Min,
+    /// Running sum.
+    Sum,
+}
+
 /// The result of a dtype-preserving scalar reduction ([`Column::sum`] etc.),
 /// carrying the value in its pandas result dtype so the binding can box it as the
 /// matching numpy scalar (`np.int64` / `np.float64` / `np.bool_`).
@@ -273,6 +291,21 @@ impl Column {
             | Column::I32(_, val)
             | Column::Str(_, val) => val.is_valid(i),
             Column::Datetime(v) => v[i] != i64::MIN,
+        }
+    }
+
+    /// Read cell `i` as `i64` (any integer / datetime / bool dtype; truncates a
+    /// float, `0` for `Str`). The integer counterpart of [`Self::get_f64`], for the
+    /// in-place tf-fold's combine on integer / datetime columns.
+    pub fn get_i64(&self, i: usize) -> i64 {
+        match self {
+            Column::I64(v, _) => v[i],
+            Column::I32(v, _) => v[i] as i64,
+            Column::Datetime(v) => v[i],
+            Column::F64(v) => v[i] as i64,
+            Column::F32(v) => v[i] as i64,
+            Column::Bool(v, _) => v[i] as i64,
+            Column::Str(_, _) => 0,
         }
     }
 
