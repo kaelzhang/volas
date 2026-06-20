@@ -101,14 +101,14 @@ pub(crate) struct TfState {
 }
 
 /// The cached forming-row fold plan: the `(dst_col, src_col, combine_op)` triples,
-/// plus the inner column names/dtypes and bar column names they were built for. The
-/// hot append path reuses it so it never re-runs the per-bar `column_pos` / `agg_for`
-/// HashMap name lookups (whose SipHash dominated the per-bar cost); it is rebuilt
-/// only when a schema actually changes (names or dtypes, on either side), which the
-/// validation below detects with a few cheap slice comparisons (no hashing).
+/// plus the inner schema (name `Arc` + dtypes) and bar column names they were built
+/// for. The hot append path reuses it so it never re-runs the per-bar `column_pos` /
+/// `agg_for` HashMap name lookups (whose SipHash dominated the per-bar cost); it is
+/// rebuilt only when a schema actually changes, which `matches` detects without
+/// hashing — and, on the inner side, in O(1).
 #[derive(Clone)]
 pub(crate) struct FoldPlan {
-    pub(crate) inner_names: Vec<String>,
+    pub(crate) inner_names: Arc<Vec<String>>,
     pub(crate) inner_dtypes: Vec<DType>,
     pub(crate) bar_names: Vec<String>,
     pub(crate) ops: Vec<(usize, usize, CombineOp)>,
@@ -117,7 +117,13 @@ pub(crate) struct FoldPlan {
 impl FoldPlan {
     /// Whether this plan still matches `inner` + `bar` (no schema change).
     pub(crate) fn matches(&self, inner: &DataFrame, bar: &DataFrame) -> bool {
-        self.inner_names.as_slice() == inner.names()
+        // The inner frame is pointer-stable across the fold's row-only mutations
+        // (append / forming-row update), so an O(1) `Arc::ptr_eq` replaces the
+        // inner-name comparison; the bar is a fresh frame each append, so its (short)
+        // names are compared by value. Dtypes are still checked — a cell can be
+        // replaced in place, changing dtype without touching the name `Arc` — but
+        // that is a cheap enum compare, never a hash.
+        Arc::ptr_eq(&self.inner_names, inner.names_arc())
             && self.bar_names.as_slice() == bar.names()
             && self.inner_dtypes.len() == inner.width()
             && self

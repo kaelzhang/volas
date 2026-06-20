@@ -127,6 +127,13 @@ impl DataFrame {
         &self.names
     }
 
+    /// The `Arc`-shared name vector. Pointer-stable across row-only mutations
+    /// (`append` / forming-row folds), so a caller can validate "schema unchanged"
+    /// with an O(1) [`Arc::ptr_eq`] instead of an element-wise name comparison.
+    pub fn names_arc(&self) -> &Arc<Vec<String>> {
+        &self.names
+    }
+
     /// The shared row index.
     pub fn index(&self) -> &Arc<Index> {
         &self.index
@@ -455,6 +462,18 @@ impl DataFrame {
     /// Computed-column metadata is retained, leaving the new rows stale.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
         let oh = other.height;
+        // Identical schema (same names, same order) — the live-streaming / tf-fold
+        // case: append positionally, skipping the per-column name lookup entirely.
+        // Aliases can never shadow a real column name (`with_alias` forbids it), so
+        // matching names guarantee `other`'s column `pos` is this frame's column `pos`.
+        if self.names == other.names {
+            for (dst, src) in self.columns.iter_mut().zip(&other.columns) {
+                dst.append(src)?;
+            }
+            Arc::make_mut(&mut self.index).extend(&other.index)?;
+            self.height += oh;
+            return Ok(());
+        }
         // Iterate by position to avoid cloning every column name and then
         // re-hashing it back into this same frame on the live append path.
         for pos in 0..self.names.len() {

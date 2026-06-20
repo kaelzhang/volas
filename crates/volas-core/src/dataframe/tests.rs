@@ -57,6 +57,17 @@
     }
 
     #[test]
+    fn names_arc_is_pointer_stable_across_row_appends() {
+        let mut df = sample();
+        let before = std::sync::Arc::as_ptr(df.names_arc());
+        assert_eq!(df.names_arc().as_slice(), df.names());
+        // A row-only append never rebuilds the name vector, so a caller can validate
+        // "schema unchanged" with an O(1) pointer check (the live-fold fast path).
+        df.append(&sample()).unwrap();
+        assert!(std::ptr::eq(before, std::sync::Arc::as_ptr(df.names_arc())));
+    }
+
+    #[test]
     fn set_index_moves_column_out() {
         let df = DataFrame::new(
             vec!["t".into(), "v".into()],

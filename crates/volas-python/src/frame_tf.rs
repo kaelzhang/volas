@@ -124,7 +124,7 @@ impl PyDataFrame {
                     && tfs.fold_plan.as_ref().is_some_and(|fp| fp.matches(inner, bar));
                 if !resent && !plan_ok {
                     tfs.fold_plan = build_fold_ops(inner, bar, &tfs.cumulators).map(|ops| FoldPlan {
-                        inner_names: inner.names().to_vec(),
+                        inner_names: inner.names_arc().clone(),
                         inner_dtypes: inner.columns().iter().map(|c| c.dtype()).collect(),
                         bar_names: bar.names().to_vec(),
                         ops,
