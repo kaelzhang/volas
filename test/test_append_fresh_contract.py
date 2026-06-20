@@ -113,12 +113,20 @@ FAIL_LOUD = {
     "rename": lambda b: b.rename(columns={"open": "o2"}),
     "drop": lambda b: b.drop(["open"], axis=1),
     "nlargest": lambda b: b.nlargest(3, "ma:3"),
+    "nsmallest": lambda b: b.nsmallest(3, "ma:3"),
     "mode": lambda b: b.mode(),
     "replace": lambda b: b.replace(0.0, 1.0),
     "interpolate": lambda b: b.interpolate(),
     "isin": lambda b: b.isin([0.0]),
     "equals": lambda b: b.equals(b.copy()),
     "eq": lambda b: b == b.copy(),
+    "drop_duplicates": lambda b: b.drop_duplicates(),
+    "duplicated": lambda b: b.duplicated(),
+    "value_counts": lambda b: b.value_counts(),
+    "sort_index": lambda b: b.sort_index(),
+    "reset_index": lambda b: b.reset_index(),
+    "set_index": lambda b: b.set_index("open"),
+    "astype": lambda b: b.astype({"open": "float32"}),
 }
 
 

@@ -48,6 +48,7 @@ impl PyDataFrame {
     }
     /// The `n` rows with the smallest values in `column` (pandas `nsmallest`).
     pub(crate) fn nsmallest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
@@ -57,6 +58,7 @@ impl PyDataFrame {
     /// `drop_duplicates(keep='first')`, over all columns).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn drop_duplicates(&self, keep: &str) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let dup = self.row_duplicated(keep)?;
         let view = self.logical();
         let df = view.as_ref();
@@ -66,6 +68,7 @@ impl PyDataFrame {
     /// True per row for a later duplicate of an earlier row (pandas `duplicated`).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn duplicated(&self, keep: &str) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
         let dup = self.row_duplicated(keep)?;
         Ok(PySeries {
             inner: Series::new(None, Column::bool(dup), Arc::clone(self.logical().index())),
@@ -96,6 +99,7 @@ impl PyDataFrame {
     /// MultiIndex, so only a single-column frame is supported — call it on the
     /// column (`df[col].value_counts()`) otherwise.
     pub(crate) fn value_counts(&self) -> PyResult<PySeries> {
+        ensure_fresh(&self.inner)?;
         let view = self.logical();
         let df = view.as_ref();
         if df.width() != 1 {
@@ -114,17 +118,19 @@ impl PyDataFrame {
 
     /// Sort rows by index label (pandas `sort_index`).
     #[pyo3(signature = (ascending = true))]
-    pub(crate) fn sort_index(&self, ascending: bool) -> PyDataFrame {
+    pub(crate) fn sort_index(&self, ascending: bool) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let view = self.logical();
         let df = view.as_ref();
         let perm = df.index().argsort(ascending);
-        PyDataFrame::plain(take_frame(df, &perm))
+        Ok(PyDataFrame::plain(take_frame(df, &perm)))
     }
 
     /// Move the row index into an `'index'` column and restore a RangeIndex
     /// (pandas `reset_index`); `drop=True` discards the old index.
     #[pyo3(signature = (drop = false))]
     pub(crate) fn reset_index(&self, drop: bool) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let view = self.logical();
         let df = view.as_ref();
         let h = df.height();
@@ -308,6 +314,7 @@ impl PyDataFrame {
     /// new frame. A datetime / int / string column becomes the matching index.
     #[pyo3(signature = (keys))]
     pub(crate) fn set_index(&self, keys: &str) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         Ok(PyDataFrame::plain(
             self.logical().set_index(keys).map_err(pyerr)?,
         ))
@@ -316,6 +323,7 @@ impl PyDataFrame {
     /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
     /// new frame.
     pub(crate) fn astype(&self, dtypes: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
+        ensure_fresh(&self.inner)?;
         let mut df = self.logical().into_owned();
         let mut mapping = HashMap::new();
         for (k, v) in dtypes.iter() {
