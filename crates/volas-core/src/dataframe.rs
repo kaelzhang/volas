@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::column::{Column, CombineOp};
+use crate::fxhash::FxHashMap;
 use crate::error::{Result, VolasError};
 use crate::index::{Index, IndexKind};
 use crate::series::Series;
@@ -47,17 +48,19 @@ pub struct DataFrame {
     // rebuild of the name strings + hash map (copy-on-write on mutation).
     names: Arc<Vec<String>>,
     columns: Vec<Column>,
-    name_to_idx: Arc<HashMap<String, usize>>,
+    // These internal name maps use FxHash (not the default SipHash): their keys are
+    // internal column / directive names, and they are hit on the live-append hot path.
+    name_to_idx: Arc<FxHashMap<String, usize>>,
     index: Arc<Index>,
     height: usize,
     /// Column-name aliases (`alias -> source name`), resolved on lookup. Shared
     /// via `Arc` (cheap clone) and carried through derived frames.
-    aliases: Arc<HashMap<String, String>>,
+    aliases: Arc<FxHashMap<String, String>>,
     /// Materialized directive columns (name -> meta). Tracked so `fulfill` can
     /// incrementally recompute their tail after an append. Carried through
     /// `clone` / `append`; dropped by shape-changing ops (slice/select/…), where
     /// the columns become plain data.
-    computed: HashMap<String, ComputedMeta>,
+    computed: FxHashMap<String, ComputedMeta>,
 }
 
 impl DataFrame {
@@ -94,7 +97,7 @@ impl DataFrame {
             }
             None => Index::range(height),
         };
-        let mut name_to_idx = HashMap::with_capacity(names.len());
+        let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
         for (i, n) in names.iter().enumerate() {
             name_to_idx.insert(n.clone(), i);
         }
@@ -104,8 +107,8 @@ impl DataFrame {
             name_to_idx: Arc::new(name_to_idx),
             index: Arc::new(index),
             height,
-            aliases: Arc::new(HashMap::new()),
-            computed: HashMap::new(),
+            aliases: Arc::new(FxHashMap::default()),
+            computed: FxHashMap::default(),
         })
     }
 
@@ -190,7 +193,7 @@ impl DataFrame {
             index: Arc::new(index),
             height,
             aliases: Arc::clone(&self.aliases),
-            computed: HashMap::new(),
+            computed: FxHashMap::default(),
         }
     }
 
@@ -353,7 +356,7 @@ impl DataFrame {
         for n in names {
             columns.push(self.column(n)?.clone());
         }
-        let mut name_to_idx = HashMap::with_capacity(names.len());
+        let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
         for (i, n) in names.iter().enumerate() {
             name_to_idx.insert(n.clone(), i);
         }
@@ -364,7 +367,7 @@ impl DataFrame {
             index: Arc::clone(&self.index),
             height: self.height,
             aliases: Arc::clone(&self.aliases),
-            computed: HashMap::new(),
+            computed: FxHashMap::default(),
         })
     }
 
