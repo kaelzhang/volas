@@ -33,7 +33,7 @@ def _bit_exact(live, ref, ctx):
         )
 
 
-@pytest.mark.parametrize("directive", ["atr:14", "ema:20", "rsi:14"])
+@pytest.mark.parametrize("directive", ["atr:14", "ema:20", "rsi:14", "natr:14", "cmo:14"])
 def test_forming_resume_bit_exact_vs_full_recompute(directive):
     n = 3000
     cols, ts = _load(n)

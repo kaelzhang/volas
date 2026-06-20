@@ -26,7 +26,7 @@ pub fn execute_resume_one(
     // path can't serve (rsi / macd / …), so a non-resumable recursive column does not
     // pay a wasted parse here on top of the parse the general path already does.
     let name = directive.split([':', '@']).next().unwrap_or(directive);
-    if !matches!(name, "ema" | "smma" | "atr") {
+    if !matches!(name, "ema" | "smma" | "atr" | "natr" | "rsi" | "cmo") {
         return None;
     }
     if directive.contains('@') {
@@ -35,20 +35,26 @@ pub fn execute_resume_one(
     let node = parse(directive).ok()?;
     let (_cmd, _sub, args, series) = as_command(&node)?;
     let period = arg_usize(&args, 0);
-    if name == "atr" {
-        // Wilder ATR reads high/low/close; one fused step replaces the two-`Vec` resume.
+    if name == "atr" || name == "natr" {
+        // Wilder ATR (and NATR = ATR/close·100) read high/low/close; one fused step
+        // replaces the two-`Vec` resume.
         let high = series_f64(df, series, 0, "high").ok()?;
         let low = series_f64(df, series, 1, "low").ok()?;
         let close = series_f64(df, series, 2, "close").ok()?;
-        return ind::atr_resume_one(&high, &low, &close, period, row, prev_state);
+        let atr = ind::atr_resume_one(&high, &low, &close, period, row, prev_state)?;
+        return Some(if name == "natr" { atr / close[row] * 100.0 } else { atr });
     }
     let close = series_f64(df, series, 0, "close").ok()?; // borrowed for an F64 close
-    // `name` is `ema` or `smma` (the gate above), so dispatch on it directly — no dead
-    // catch-all arm.
+    // `name` is one of the gated close-series families above — dispatch directly, the
+    // final arm (`cmo`) is the gate's remainder so there is no dead catch-all.
     if name == "ema" {
         ind::ema_resume_one(&close, period, row, prev_state)
-    } else {
+    } else if name == "smma" {
         ind::smma_resume_one(&close, period, row, prev_state)
+    } else if name == "rsi" {
+        ind::rsi_resume_one(&close, period, row, prev_state)
+    } else {
+        ind::cmo_resume_one(&close, period, row, prev_state)
     }
 }
 

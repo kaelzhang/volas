@@ -169,3 +169,23 @@ fn atr_resume_one_guards_and_matches_vec_resume() {
     let one = ind::atr_resume_one(&h, &l, &c, 14, 2, &[5.0]).unwrap();
     assert_eq!(one.to_bits(), tail[0].to_bits());
 }
+
+#[test]
+fn rsi_cmo_resume_one_guards_and_match_vec_resume() {
+    let c = [10.0, 11.0, 10.5, 12.0];
+    // None guards (row 0, short state, row out of range).
+    assert!(ind::rsi_resume_one(&c, 14, 0, &[1.0, 1.0]).is_none());
+    assert!(ind::rsi_resume_one(&c, 14, 1, &[1.0]).is_none());
+    assert!(ind::rsi_resume_one(&c, 14, 4, &[1.0, 1.0]).is_none());
+    assert!(ind::cmo_resume_one(&c, 14, 0, &[1.0, 1.0]).is_none());
+    assert!(ind::cmo_resume_one(&c, 14, 1, &[1.0]).is_none());
+    assert!(ind::cmo_resume_one(&c, 14, 4, &[1.0, 1.0]).is_none());
+    // The scalar step is bit-identical to the two-`Vec` resume's single step.
+    let (rt, _) = ind::rsi_resume(&c, 14, 2, &[0.8, 0.5]).unwrap();
+    assert_eq!(ind::rsi_resume_one(&c, 14, 2, &[0.8, 0.5]).unwrap().to_bits(), rt[0].to_bits());
+    let (ct, _) = ind::cmo_resume(&c, 14, 2, &[0.8, 0.5]).unwrap();
+    assert_eq!(ind::cmo_resume_one(&c, 14, 2, &[0.8, 0.5]).unwrap().to_bits(), ct[0].to_bits());
+    // Degenerate windows: RSI flat-loss → 100, CMO flat-window → 0.
+    assert_eq!(ind::rsi_resume_one(&[10.0, 11.0], 14, 1, &[1.0, 0.0]).unwrap(), 100.0);
+    assert_eq!(ind::cmo_resume_one(&[10.0, 10.0], 14, 1, &[0.0, 0.0]).unwrap(), 0.0);
+}
