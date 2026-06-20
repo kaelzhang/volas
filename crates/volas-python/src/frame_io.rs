@@ -104,7 +104,7 @@ impl PyDataFrame {
         Ok(column_into_numpy(py, col))
     }
 
-    /// Gets a column from the frame by name (alias-aware), as a Series.
+    /// Gets a column from the frame by name, as a Series.
     ///
     /// Args:
     ///     key (str): the column name.

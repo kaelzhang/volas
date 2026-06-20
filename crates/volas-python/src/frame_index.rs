@@ -438,7 +438,6 @@ pub(crate) fn row_at(df: &DataFrame, i: usize) -> PyRow {
 }
 
 pub(crate) fn take_frame(df: &DataFrame, positions: &[usize]) -> DataFrame {
-    // Delegates to core `take`, which carries column aliases onto the new frame.
     df.take(positions)
 }
 

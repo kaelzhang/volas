@@ -156,7 +156,7 @@ df[bullish]                      # close > open 的那些行组成的 DataFrame
 # 一次性多个 directive -> DataFrame
 df[['ma:2', 'ma:3', 'close > open']]
 
-# 以近乎零拷贝的方式导出到 NumPy
+# 导出到 NumPy（以及零拷贝地导出到 Arrow / DLPack——见互操作小节）
 df['close'].to_numpy()           # 1 维 ndarray
 df.to_numpy()                    # 2 维 ndarray（行 x 列）
 ```
@@ -235,11 +235,11 @@ df['ma:2']
   - `'min'`——最小值
   - `'sum'`——求和
 - **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
-- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：隐藏历史的 margin（`window + max_lookback`），使缓存指标在自动丢弃旧行前后保持逐位一致。传一个 **int** 直接声明你会用到的最大指标 lookback，或传一个**指标 directive 列表**从它们中最大的 lookback 推导（例如 `['atr:14', 'ma:50']` → margin 50），省去手算复合指标的预热长度。margin 给得过小会**静默破坏**逐位一致性。
+- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：隐藏历史的 margin（`window + max_lookback`），使缓存指标在自动丢弃旧行前后保持正确——递归类指标（EMA/Wilder/ATR/RSI/MACD）**逐位一致（bit-exact）**，有限窗口类（ma/wma/trima/stddev/…）与无界 frame 在浮点容差内一致（~1e-13）。传一个 **int** 直接声明你会用到的最大指标 lookback，或传一个**指标 directive 列表**从它们中最大的 lookback 推导（例如 `['atr:14', 'ma:50']` → margin 49），省去手算复合指标的预热长度。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）会被拒绝。margin 给得过小会**静默破坏**该保证。
 
 ### 有界滚动窗口
 
-传入 `window=` 可把 frame 限制为最后 `window` 行。这正是实盘 / 神经网络输入所需的形态：你可以永远地 `append` bar，但内存始终**有界**——frame 在累积到足够行数后会透明地丢弃旧行，同时保留一段隐藏的 `max_lookback` 行 margin，使缓存指标在每次丢弃前后都保持**逐位一致**（与无界 frame 计算出的值完全相同）。
+传入 `window=` 可把 frame 限制为最后 `window` 行。这正是实盘 / 神经网络输入所需的形态：你可以永远地 `append` bar，但内存始终**有界**——frame 在累积到足够行数后会透明地丢弃旧行，同时保留一段隐藏的 `max_lookback` 行 margin，使缓存指标在每次丢弃前后保持**一致**——递归类指标（EMA/ATR/RSI/…）与无界 frame 逐位一致，有限窗口类（ma/wma/…）在浮点容差内一致（~1e-13）。
 
 ```py
 # 一个有界的 30 行窗口；margin 大小由你声明的指标推导而来。
@@ -274,7 +274,7 @@ wf.ready          # True ——每个可见行都已有有效的指标历史
 契约：
 
 - **只导出已缓存的列，且按其规范化（canonical）的 directive 名匹配**。directive 列必须**先 materialize**——访问它一次并把列名读回来（`name = wf['atr:14'].name`），因为缓存的 directive 是以规范化形式存储的（例如 `'MA: 5'` → `'ma:5'`），**不一定等于你传入的字符串**，而 `columns=` 按存储的确切列名匹配。（`max_lookback=['atr:14']` 只是给 margin 定大小、并不会创建该列，且 `fill_into` 导出已缓存的值、从不现场计算。）
-- **`out`** 必须是 **C-contiguous** 的 `float32` **或** `float64` 二维数组，形状**严格等于** `(len(df), k)`，其中 `k` 是导出的列数。形状或 dtype 不符会报错。
+- **`out`** 必须是 `float32` **或** `float64` 二维数组，形状**严格等于** `(len(df), k)`，其中 `k` 是导出的列数（尊重 strides，非连续或 Fortran-order 视图也可）。形状或 dtype 不符会报错。
 - **`columns`** 按顺序选择要导出的列（默认全部列）。**字符串列没有浮点含义、会被拒绝**——在 `columns=` 里只列出数值列以排除它。
 - **缺失 / NA 单元格写为 `NaN`**。
 - `append` 之后缓存指标是脏的，所以**先 `fulfill()` 再 `fill_into()`**——带着未刷新的 directive 列导出会报错。
@@ -376,8 +376,7 @@ dict 形态是更快的实时路径——它把 bar 直接组进帧，不构造�
 df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v})
 ```
 
-它是**严格**的:每一个数据列都必须提供(缺列会报错——这点与 `DataFrame` / `Row` 不同,
-后者会把缺失列 NA 补齐),出现未知 key 也报错。缓存的指标列无需提供——它们会自动补齐并刷新。
+它是**严格**的：每一个数据列都必须提供（缺列会报错——这点与 `DataFrame` / `Row` 不同，后者会把缺失列 NA 补齐），出现未知 key 也报错。缓存的指标列无需提供——它们会自动补齐并刷新。
 
 如果调用者是一个**带 tf**的 DataFrame（用 `time_frame` 构建的，或者 `cumulate`
 的结果），`append` 会把每一根更细的 bar **折叠**进正在形成中的 bar，而不是新增一行——参见

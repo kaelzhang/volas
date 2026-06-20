@@ -1,15 +1,24 @@
 """Multi-library performance comparison for OHLCV technical-indicator computation.
 
-Three report sections:
+Five report sections (the order they render in, ``CATEGORY_ORDER``):
 
-  1. ``append`` — a new bar arrives → produce the updated indicator. ``volas`` and
+  1. ``windowed`` — the flagship live loop: fold a new 1-minute bar into a 15-minute
+     series and refresh ``atr:14`` over a bounded 30-bar window, per bar, for 20 000
+     bars. ``volas`` does this natively (a windowed, tf-aware frame that auto-compacts,
+     so memory stays ``O(window + lookback)``); the other libraries get a hand-written
+     non-lazy ring equivalent. Times are **per bar**, amortized over the stream (so
+     volas's periodic compaction is included).
+  2. ``append`` — a new bar arrives → produce the updated indicator. ``volas`` and
      ``stock_pandas`` refresh their cached column incrementally (``O(lookback)``);
      pandas / polars / talib have no indicator cache, so a new bar means
      recomputing the series (``O(n)`` — the honest cost for them). Every candidate
      is measured through ``pedantic`` with the **same** round count, so the
      ``rounds`` column is comparable (see ``APPEND_ROUNDS``).
-  2. ``calc`` — compute the indicator over the whole series (batch), all libraries.
-  3. ``coverage`` — every indicator **both volas and TA-Lib implement** (the set the
+  3. ``api`` — the core DataFrame plumbing a live system runs around every indicator
+     call (construct / column access / row slice / boolean mask / assign / copy),
+     timed against pandas / polars. Not indicator math; the surrounding APIs.
+  4. ``calc`` — compute the indicator over the whole series (batch), all libraries.
+  5. ``coverage`` — every indicator **both volas and TA-Lib implement** (the set the
      parity suite aligns), timed **volas vs TA-Lib only**. An indicator only one of
      them has is omitted.
 

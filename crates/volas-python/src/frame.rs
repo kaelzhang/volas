@@ -114,7 +114,7 @@ pub(crate) struct WindowState {
 ///
 /// Passing ``window=`` makes a **bounded rolling-window** frame: only the last
 /// ``window`` rows are visible, while enough older rows are retained behind the
-/// scenes (``window + max_lookback``) to keep cached indicators bit-exact across
+/// scenes (``window + max_lookback``) to keep cached indicators consistent across
 /// the periodic, automatic front-drop — so memory stays bounded no matter how many
 /// bars you ``append`` (ideal as a fixed-size NN feature buffer). Every row-facing
 /// surface (indexing, ``to_numpy``, ``to_csv``, reductions, …) sees only the
@@ -127,7 +127,7 @@ pub(crate) struct WindowState {
 ///
 /// Args:
 ///     data (dict[str, Sequence] | DataFrame): a dict of column name -> equal-length
-///         values, or another volas DataFrame to copy (its index, aliases and tf-state are
+///         values, or another volas DataFrame to copy (its index and tf-state are
 ///         carried — like ``df.copy()``). A pandas DataFrame is not accepted; use
 ///         ``DataFrame.from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
 ///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
@@ -144,12 +144,16 @@ pub(crate) struct WindowState {
 ///     window (int, optional): make this a bounded rolling-window frame showing only
 ///         the last ``window`` rows (see above). Requires ``max_lookback``.
 ///     max_lookback (int | list[str], optional): REQUIRED with ``window`` (and valid only
-///         with it) — the margin of hidden history (``window + max_lookback``) that keeps
-///         cached indicators bit-exact across the automatic front-drop. Give an **int** to
-///         state the largest indicator lookback you will use, or a **list of indicator
-///         directives** to derive it from the largest of their lookbacks (e.g.
-///         ``['atr:14', 'ma:50']`` -> margin 50) — so you never hand-compute a compound
-///         indicator's warm-up. Too small a margin silently breaks the bit-exactness.
+///         with it) — the margin of hidden history (``window + max_lookback``) the frame
+///         keeps so cached indicators survive the automatic front-drop. Recursive
+///         indicators (EMA/Wilder/ATR/RSI/MACD) stay **bit-exact**; finite-window
+///         indicators (ma/wma/trima/stddev/…) match an unbounded frame to floating-point
+///         tolerance (~1e-13). Give an **int** to state the largest indicator lookback you
+///         will use, or a **list of indicator directives** to derive it from the largest of
+///         their lookbacks (e.g. ``['atr:14', 'ma:50']`` -> margin 49) — so you never
+///         hand-compute a compound indicator's warm-up. Too small a margin silently breaks
+///         this guarantee. A list entry must be an indicator directive (e.g. ``'ma:50'``);
+///         a bare/typo'd name (``'ma50'``) is rejected.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
     pub(crate) inner: DataFrame,

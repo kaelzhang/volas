@@ -15,11 +15,13 @@ use crate::buffer::Buffer;
 /// A contiguous UTF-8 string column buffer (Arrow `LargeUtf8`: i64 offsets).
 #[derive(Clone)]
 pub struct StrBuffer {
-    /// `len + 1` monotonic byte offsets into `data`. A volas-built buffer is
-    /// normalized (`offsets[0] == 0`, `offsets[len] == data.len()`); an Arrow
-    /// import that *borrows* a sliced array keeps Arrow's **absolute** offsets, so
-    /// `offsets[0]` may be `> 0` and `offsets[len] < data.len()` — every accessor
-    /// reads `data[offsets[i]..offsets[i+1]]`, correct either way.
+    /// `len + 1` monotonic byte offsets into `data`, always **zero-based**:
+    /// `offsets[0] == 0` and `offsets[len] == data.len()`. A volas-built buffer is
+    /// normalized by construction; an Arrow import of a *sliced* array (whose
+    /// offsets are absolute, with a non-zero first offset) is re-based to 0 on the
+    /// way in (`from_buffers` callers trim `data` to the live span and subtract the
+    /// base), so this invariant holds for every `StrBuffer` — the unchecked
+    /// accessors (`get_unchecked` / `iter`) and `extend` rely on it.
     offsets: Buffer<i64>,
     /// Concatenated UTF-8 bytes of every cell.
     data: Buffer<u8>,

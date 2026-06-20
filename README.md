@@ -281,19 +281,23 @@ Which gets the 2-period simple moving average on column `"close"`.
   Requires `max_lookback`.
 - **max_lookback** `Optional[int | list[str]] = None` **Required with `window`** (and
   valid only with it): the hidden-history margin (`window + max_lookback`) that keeps
-  cached indicators bit-exact across the automatic front-drop. Pass an **int** to state
+  cached indicators correct across the automatic front-drop. Recursive indicators
+  (EMA/Wilder/ATR/RSI/MACD) stay **bit-exact**; finite-window ones (ma/wma/trima/stddev/…)
+  match an unbounded frame to floating-point tolerance (~1e-13). Pass an **int** to state
   the largest indicator lookback you will use, or a **list of indicator directives** to
-  derive it from the largest of their lookbacks (e.g. `['atr:14', 'ma:50']` → margin 50),
-  so you never hand-compute a compound indicator's warm-up. Sizing it too small silently
-  breaks the bit-exactness.
+  derive it from the largest of their lookbacks (e.g. `['atr:14', 'ma:50']` → margin 49),
+  so you never hand-compute a compound indicator's warm-up. Each list entry must be an
+  indicator directive (`'ma:50'`); a bare/typo'd name (`'ma50'`) is rejected. Sizing the
+  margin too small silently breaks the guarantee.
 
 ### Bounded rolling window
 
 Pass `window=` to cap the frame at the last `window` rows. This is the live-trading
 / NN-input shape: you keep `append`-ing bars forever, but memory stays **bounded** —
 the frame transparently drops old rows once it has accumulated enough, while
-retaining a hidden `max_lookback`-row margin so cached indicators remain **bit-exact**
-across each drop (the same values an unbounded frame would compute).
+retaining a hidden `max_lookback`-row margin so cached indicators stay **consistent**
+across each drop — recursive indicators (EMA/ATR/RSI/…) are bit-exact with an unbounded
+frame, finite-window ones (ma/wma/…) match it to floating-point tolerance (~1e-13).
 
 ```py
 # A bounded 30-bar window; the margin is sized from the indicators you declare.
@@ -341,9 +345,9 @@ Contract:
   canonical form (e.g. `'MA: 5'` → `'ma:5'`), *not* the string you passed, and `columns=`
   matches on the exact stored name. (`max_lookback=['atr:14']` only sizes the margin; it
   does not create the column, and `fill_into` exports cached values, never computes them.)
-- **`out`** must be a **C-contiguous** `float32` **or** `float64` 2-D array whose shape
-  is **exactly** `(len(df), k)`, where `k` is the number of exported columns. A wrong
-  shape or dtype raises.
+- **`out`** must be a `float32` **or** `float64` 2-D array whose shape is **exactly**
+  `(len(df), k)`, where `k` is the number of exported columns (strides are respected, so a
+  non-contiguous or Fortran-order view works too). A wrong shape or dtype raises.
 - **`columns`** selects which columns to export, in order (default: every column). A
   **string column has no float meaning and is rejected** — list the numeric ones in
   `columns=` to exclude it.
