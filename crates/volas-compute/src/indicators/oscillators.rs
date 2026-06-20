@@ -613,15 +613,14 @@ pub fn cog(close: &[f64], period: usize) -> Vec<f64> {
         return out;
     }
     if close.iter().any(|x| x.is_nan()) {
+        // `i` is the window's newest-bar position, used as a VALUE (passed to
+        // `cog_window_exact`), not merely to index `out` — so `needless_range_loop`
+        // misfires here, and the indexed form is a few instructions tighter than
+        // `iter_mut().enumerate()` (which threads a pointer alongside the index;
+        // verified in release asm). The write is always in bounds: `i < n == out.len()`.
+        #[allow(clippy::needless_range_loop)]
         for i in (period - 1)..n {
-            let mut num = 0.0; // Σ (1+age)·price, age 0 = newest
-            let mut den = 0.0;
-            for age in 0..period {
-                let price = close[i - age];
-                num += (1 + age) as f64 * price;
-                den += price;
-            }
-            out[i] = if den != 0.0 { -num / den } else { f64::NAN };
+            out[i] = cog_window_exact(close, i, period);
         }
         return out;
     }
@@ -630,22 +629,58 @@ pub fn cog(close: &[f64], period: usize) -> Vec<f64> {
     // `num[i] = num[i-1] + den[i-1] - (period+1)·leaving + close[i]` and
     // `den[i] = den[i-1] - leaving + close[i]` (the WMA-slide trick, mirrored to
     // cog's newest-weighted-1 orientation; drift ~1e-13, within parity tolerance).
+    // `aden` (Σ|price|) is the cancellation scale: when the running `den` is
+    // negligible against it the window sum has cancelled to ~0, but a running sum
+    // lands on float drift (~1e-15) instead of an exact 0.0, so the `den != 0.0`
+    // guard would wrongly emit a huge garbage value. There we recompute that one
+    // window exactly (O(period), only on near-cancellation) so a true zero sum
+    // yields `NaN`, matching the per-window reference bit-for-bit.
     let pf = period as f64;
     let mut num = 0.0;
     let mut den = 0.0;
+    let mut aden = 0.0;
     for age in 0..period {
         let price = close[period - 1 - age]; // age 0 = newest = close[period-1]
         num += (1 + age) as f64 * price;
         den += price;
+        aden += price.abs();
     }
-    out[period - 1] = if den != 0.0 { -num / den } else { f64::NAN };
+    out[period - 1] = if den.abs() <= 1e-9 * aden {
+        cog_window_exact(close, period - 1, period)
+    } else {
+        -num / den
+    };
     for i in period..n {
         let leaving = close[i - period];
         num = num + den - (pf + 1.0) * leaving + close[i];
         den = den - leaving + close[i];
-        out[i] = if den != 0.0 { -num / den } else { f64::NAN };
+        aden = aden - leaving.abs() + close[i].abs();
+        out[i] = if den.abs() <= 1e-9 * aden {
+            cog_window_exact(close, i, period)
+        } else {
+            -num / den
+        };
     }
     out
+}
+
+/// One cog window computed exactly (the O(period) per-window form): the slide's
+/// `NaN`-input fallback and its near-zero-denominator recovery. `i` is the newest
+/// bar, weighting newest 1 … oldest `period`; an exact zero window sum ⇒ `NaN`.
+#[inline]
+fn cog_window_exact(close: &[f64], i: usize, period: usize) -> f64 {
+    let mut num = 0.0; // Σ (1+age)·price, age 0 = newest
+    let mut den = 0.0;
+    for age in 0..period {
+        let price = close[i - age];
+        num += (1 + age) as f64 * price;
+        den += price;
+    }
+    if den != 0.0 {
+        -num / den
+    } else {
+        f64::NAN
+    }
 }
 
 /// Rank Correlation Index (TradingView `ta.rci`): Spearman's rank correlation

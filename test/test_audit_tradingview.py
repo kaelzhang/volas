@@ -221,6 +221,26 @@ def test_cog_zero_window_sum_is_na():
     assert nanin.isna().to_list()[3]
 
 
+def test_cog_zero_window_sum_in_recurrence_is_na():
+    """Regression: a zero-sum window reached in the dense slide's RECURRENCE region
+    (index >= period, after non-cancelling earlier bars). The sliding denominator
+    drifts off exact 0.0, so the old `den != 0.0` guard let through a huge garbage
+    finite value instead of NaN; the near-zero-den exact recompute must restore NaN."""
+    # window [-5.639, 5.639] at index 3 sums to exactly 0 -> NaN (period=2 => index 3 >= period)
+    c = [-31.983, 4.743, -5.639, 5.639, -11.0]
+    got = np.asarray(volas.DataFrame({"c": c})["cog:2@c"].to_numpy(), float)
+    assert np.isnan(got[3]), f"recurrence zero-sum window must be NaN, got {got[3]!r}"
+    # the dense slide must match the per-window reference bit-for-bit on the NaN pattern
+    # across a detrended signal whose trailing windows repeatedly cancel.
+    sig = (np.sin(np.linspace(0, 40, 600)) * 7.0).round(3)
+    sig = np.concatenate([sig, -sig[::-1]])              # exact +x / -x cancellation pairs
+    got = np.asarray(volas.DataFrame({"c": sig})["cog:2@c"].to_numpy(), float)
+    ref = _ref_cog(sig, 2)
+    assert np.array_equal(np.isnan(got), np.isnan(ref))  # no garbage-finite where ref is NaN
+    m = ~np.isnan(ref)
+    np.testing.assert_allclose(got[m], ref[m], rtol=1e-9, atol=1e-9)
+
+
 @pytest.mark.parametrize("n", [10, 20, 30])
 def test_dev_matches_pine(n):
     _close()(f"dev:{n}", _ref_dev(C, n))
