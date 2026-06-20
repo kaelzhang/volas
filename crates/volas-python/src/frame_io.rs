@@ -459,9 +459,22 @@ impl PyDataFrame {
             let mut a = arr.as_array_mut();
             check_fill_shape(a.shape(), h, w)?;
             for (jj, &j) in positions.iter().enumerate() {
-                let v = df.columns()[j].to_f64_vec();
-                for i in 0..h {
-                    a[[i, jj]] = v[i] as f32;
+                // F64 (the common float feature matrix) reads its slice directly — no
+                // per-column `to_f64_vec` heap allocation. Other dtypes keep the
+                // validity-aware conversion (NA -> NaN), unchanged.
+                match &df.columns()[j] {
+                    Column::F64(buf) => {
+                        let s = buf.as_slice();
+                        for i in 0..h {
+                            a[[i, jj]] = s[i] as f32;
+                        }
+                    }
+                    col => {
+                        let v = col.to_f64_vec();
+                        for i in 0..h {
+                            a[[i, jj]] = v[i] as f32;
+                        }
+                    }
                 }
             }
             return Ok(());
@@ -470,9 +483,21 @@ impl PyDataFrame {
             let mut a = arr.as_array_mut();
             check_fill_shape(a.shape(), h, w)?;
             for (jj, &j) in positions.iter().enumerate() {
-                let v = df.columns()[j].to_f64_vec();
-                for i in 0..h {
-                    a[[i, jj]] = v[i];
+                // F64 reads its slice directly (no `to_f64_vec` allocation); other
+                // dtypes keep the validity-aware NA -> NaN conversion, unchanged.
+                match &df.columns()[j] {
+                    Column::F64(buf) => {
+                        let s = buf.as_slice();
+                        for i in 0..h {
+                            a[[i, jj]] = s[i];
+                        }
+                    }
+                    col => {
+                        let v = col.to_f64_vec();
+                        for i in 0..h {
+                            a[[i, jj]] = v[i];
+                        }
+                    }
                 }
             }
             return Ok(());
