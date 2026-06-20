@@ -443,9 +443,6 @@ external data (CSV headers, user input, configuration), so a name that happens
 to look like a directive (e.g. `"ma:5"`) can never silently trigger a
 computation.
 
-If the given `key` is an alias name, it returns the value of the corresponding
-original column. If the column is not found, a `KeyError` is raised.
-
 ```py
 df = DataFrame({
     'open' : ...,
@@ -549,25 +546,19 @@ df.fulfill()             # batch-refresh every cached column's tail
 df.to_numpy()            # now fresh (a bulk read would have raised while stale)
 ```
 
-### df.alias(as_name: str, src_name: str) -> None
+### df.is_computed(name: str) -> bool
 
-Defines a column alias.
+Whether the column `name` is a **directive (computed)** column — one derived from
+a directive (e.g. `df['rsi:14']`) and refreshed by `fulfill` — rather than a plain
+data column you supply per bar. Raises `KeyError` if `name` is not a column.
 
-- **as_name** `str` the alias name
-- **src_name** `str` the name of an existing column
-
-```py
-# Some plot libraries such as `mplfinance` require a column named capitalized
-# `Open`, but it is ok, we could create an alias.
-df.alias('Open', 'open')
-```
-
-The alias resolves everywhere a column is looked up, **including inside
-directives**, and survives `drop` / `copy` / slicing.
+Use it to tell the two kinds of column apart, e.g. to export only the raw columns:
 
 ```py
-df['Open']        # same data as df['open']
-df['ma:5@Open']   # the alias resolves inside directives too
+df['ma:5']                                              # materialize a directive column
+df.is_computed('ma:5')                                  # True
+df.is_computed('close')                                 # False
+raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low', 'close', 'volume']
 ```
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
@@ -657,7 +648,51 @@ pdf = df.to_pandas()                                # 'numpy' backend (NaN-based
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # lossless masked Int64 / boolean / string
 ```
 
-See [pandas interop](#pandas-interop) for the round-trip details and `to_csv`.
+See [pandas interop](#pandas-interop) for the round-trip details.
+
+### df.to_csv(path=None, ...) -> str | None
+
+Write the frame as CSV — a subset of pandas `to_csv`. With a `path` it writes the
+file and returns `None`; with `path=None` it returns the CSV as a `str`.
+
+- **path?** `str | os.PathLike | None = None` the output file; `None` returns a string.
+- **sep?** `str = ','` the field delimiter.
+- **index?** `bool = True` write the row index as the first column.
+- **header?** `bool = True` write the column-name header row.
+- **na_rep?** `str = ''` the token written for a missing value.
+- **columns?** `list[str] | None = None` the columns to write, in order; `None`
+  (the default) writes **every** column.
+- **float_format?** `str | None = None` a printf-style float format, e.g. `'%.2f'`.
+
+By default `to_csv` writes **every column the frame holds — directive (computed)
+columns included**. A directive column like `ma:3` is a real column once
+materialized (it counts in `df.columns`), so it is exported alongside the raw
+OHLCV columns; its warm-up rows render as the empty `na_rep`. Pass `columns=` to
+choose exactly what to write — e.g. the raw columns only. Like every bulk read,
+`to_csv` first requires the frame to be fresh: call `fulfill()` after an `append`,
+or it raises while a cached column is stale.
+
+```py
+from volas import DataFrame
+
+df = DataFrame({
+    'open':   [1.0, 2, 3, 4, 5],
+    'high':   [2.0, 3, 4, 5, 6],
+    'low':    [0.5, 1, 2, 3, 4],
+    'close':  [1.5, 2.5, 3.5, 4.5, 5.5],
+    'volume': [10, 20, 30, 40, 50.0],
+})
+df['ma:3']                                # materialize a directive (computed) column
+df.fulfill()                              # refresh the cache before a bulk export
+
+# Default: EVERY column is written — the ma:3 directive column included:
+df.to_csv(index=False)
+# 'open,high,low,close,volume,ma:3\n1.0,2.0,0.5,1.5,10.0,\n...,2.5\n...'
+#                            ^^^^ directive column present; warm-up rows blank
+
+# Pass columns= to write exactly what you want — here the raw columns only:
+df.to_csv(index=False, columns=['open', 'high', 'low', 'close', 'volume'])
+```
 
 ### Series
 

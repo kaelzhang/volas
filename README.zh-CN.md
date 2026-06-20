@@ -346,8 +346,6 @@ df.exec('ma:20')
 key 当作指标 directive 解析并执行；`get_column` 只读取已经存在的列，不存在就抛
 `KeyError`。当列名来自外部数据（CSV 表头、用户输入、配置）时，请优先使用它，避免像 `"ma:5"` 这样恰好长得像 directive 的列名悄悄触发计算。
 
-如果 `key` 是别名（alias），会返回对应原始列的值；找不到列时抛 `KeyError`。
-
 ```py
 df = DataFrame({
     'open' : ...,
@@ -435,25 +433,17 @@ df.fulfill()             # 批量刷新每个已缓存列的尾部
 df.to_numpy()            # 现在已刷新（过期时批量读取会直接报错）
 ```
 
-### df.alias(as_name: str, src_name: str) -> None
+### df.is_computed(name: str) -> bool
 
-定义一个列别名。
+判断列 `name` 是不是 **directive（计算）列**——即由 directive 派生、由 `fulfill` 刷新的列（例如 `df['rsi:14']`），而不是你每根 bar 自己提供的原始数据列。`name` 不是列时抛 `KeyError`。
 
-- **as_name** `str` 别名
-- **src_name** `str` 一个已存在列的名字
-
-```py
-# 有些绘图库（例如 `mplfinance`）要求列名是首字母大写的 `Open`，
-# 这时可以直接建一个别名。
-df.alias('Open', 'open')
-```
-
-凡是需要查找列的地方都会解析别名，**包括 directive 内部**；经过 `drop` / `copy` /
-切片后，别名依然有效。
+用它来区分这两类列，例如只导出原始列：
 
 ```py
-df['Open']        # 与 df['open'] 同样的数据
-df['ma:5@Open']   # 别名在 directive 内部也会被解析
+df['ma:5']                                              # 物化一个 directive 列
+df.is_computed('ma:5')                                  # True
+df.is_computed('close')                                 # False
+raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low', 'close', 'volume']
 ```
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
@@ -535,7 +525,43 @@ pdf = df.to_pandas()                                # 'numpy' 后端（基于 Na
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # 无损 masked Int64 / boolean / string
 ```
 
-往返细节与 `to_csv` 见[与 pandas 互操作](#与-pandas-互操作)。
+往返细节见[与 pandas 互操作](#与-pandas-互操作)。
+
+### df.to_csv(path=None, ...) -> str | None
+
+把 frame 写成 CSV——pandas `to_csv` 的一个子集。给了 `path` 就写文件并返回 `None`；`path=None` 则把 CSV 作为 `str` 返回。
+
+- **path?** `str | os.PathLike | None = None` 输出文件；`None` 时返回字符串。
+- **sep?** `str = ','` 字段分隔符。
+- **index?** `bool = True` 是否把行索引写成第一列。
+- **header?** `bool = True` 是否写列名表头行。
+- **na_rep?** `str = ''` 缺失值写成的占位符。
+- **columns?** `list[str] | None = None` 要写出的列及其顺序；`None`（默认）写出**所有**列。
+- **float_format?** `str | None = None` printf 风格的浮点格式，例如 `'%.2f'`。
+
+默认情况下，`to_csv` 会写出 **frame 持有的每一列——包括 directive（计算）列**。像 `ma:3` 这样的 directive 列一旦物化就是一个真实的列（计入 `df.columns`），因此会和原始 OHLCV 列一起被导出；它的预热期（warm-up）行渲染成空的 `na_rep`。想精确控制写哪些列，传 `columns=`——比如只导出原始列。和所有批量读取一样，`to_csv` 也要求 frame 处于刷新态：`append` 之后请先调用 `fulfill()`，否则在缓存列过期时会直接报错。
+
+```py
+from volas import DataFrame
+
+df = DataFrame({
+    'open':   [1.0, 2, 3, 4, 5],
+    'high':   [2.0, 3, 4, 5, 6],
+    'low':    [0.5, 1, 2, 3, 4],
+    'close':  [1.5, 2.5, 3.5, 4.5, 5.5],
+    'volume': [10, 20, 30, 40, 50.0],
+})
+df['ma:3']                                # 物化一个 directive（计算）列
+df.fulfill()                              # 批量导出前先刷新缓存
+
+# 默认：每一列都会写出——包含 ma:3 这个 directive 列：
+df.to_csv(index=False)
+# 'open,high,low,close,volume,ma:3\n1.0,2.0,0.5,1.5,10.0,\n...,2.5\n...'
+#                            ^^^^ directive 列在内；预热期行为空
+
+# 传 columns= 精确选择写哪些列——这里只写原始列：
+df.to_csv(index=False, columns=['open', 'high', 'low', 'close', 'volume'])
+```
 
 ### Series
 
