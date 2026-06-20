@@ -273,7 +273,7 @@ wf.ready          # True ——每个可见行都已有有效的指标历史
 
 契约：
 
-- **只导出已缓存的列**。directive 列必须**先 materialize**——在循环前访问它一次（例如 `wf['atr:14']`）；`max_lookback=['atr:14']` 只是给 margin 定大小，并**不会**创建该列，而 `fill_into` 导出的是已缓存的值、不会现场计算。
+- **只导出已缓存的列，且按其规范化（canonical）的 directive 名匹配**。directive 列必须**先 materialize**——访问它一次并把列名读回来（`name = wf['atr:14'].name`），因为缓存的 directive 是以规范化形式存储的（例如 `'MA: 5'` → `'ma:5'`），**不一定等于你传入的字符串**，而 `columns=` 按存储的确切列名匹配。（`max_lookback=['atr:14']` 只是给 margin 定大小、并不会创建该列，且 `fill_into` 导出已缓存的值、从不现场计算。）
 - **`out`** 必须是 **C-contiguous** 的 `float32` **或** `float64` 二维数组，形状**严格等于** `(len(df), k)`，其中 `k` 是导出的列数。形状或 dtype 不符会报错。
 - **`columns`** 按顺序选择要导出的列（默认全部列）。**字符串列没有浮点含义、会被拒绝**——在 `columns=` 里只列出数值列以排除它。
 - **缺失 / NA 单元格写为 `NaN`**。
@@ -282,17 +282,19 @@ wf.ready          # True ——每个可见行都已有有效的指标历史
 ```py
 import numpy as np
 
-COLS = ['open', 'high', 'low', 'close', 'atr:14']    # k = 5 个特征
 wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
-wf['atr:14']                          # 先 materialize 这个 directive 一次——max_lookback
-                                      # 只给 margin 定大小，并不会创建该列
+atr = wf['atr:14'].name               # 先 materialize 这个 directive 一次，并把列名读回来：缓存的
+                                      # directive 以规范化形式存储（这里是 'atr:14'，但例如 'MA: 5'
+                                      # → 'ma:5'），不一定等于你传入的字符串；max_lookback 也只是
+                                      # 给 margin 定大小，并不会创建该列
+COLS = ['open', 'high', 'low', 'close', atr]    # k = 5 个特征
 
 # 整个运行期复用同一块 buffer——形状 (window, k)，即模型的输入张量。
 buf = np.empty((30, len(COLS)), dtype=np.float32)
 
 for bar in feed:
     wf.append(bar)
-    wf.fulfill()                      # 导出前刷新 atr:14
+    wf.fulfill()                      # 导出前刷新 atr 的脏尾部
     if not wf.ready:
         continue                      # 预热中：buf 还不是 (30, k)，指标也未生效
     wf.fill_into(buf, columns=COLS)   # 把 30×5 窗口零分配写进 buf

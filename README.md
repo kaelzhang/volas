@@ -335,10 +335,12 @@ allocates nothing per bar (unlike `to_numpy`, which mints a fresh matrix every c
 
 Contract:
 
-- **Only already-cached columns** are exported. A directive column must be
-  **materialized first** — access it once (e.g. `wf['atr:14']`) before the loop;
-  `max_lookback=['atr:14']` sizes the margin but does **not** create the column, and
-  `fill_into` exports cached values rather than computing them.
+- **Only already-cached columns**, named by their **canonical directive string**. A
+  directive column must be **materialized first** — access it once and read the name
+  back (`name = wf['atr:14'].name`), because a cached directive is stored under its
+  canonical form (e.g. `'MA: 5'` → `'ma:5'`), *not* the string you passed, and `columns=`
+  matches on the exact stored name. (`max_lookback=['atr:14']` only sizes the margin; it
+  does not create the column, and `fill_into` exports cached values, never computes them.)
 - **`out`** must be a **C-contiguous** `float32` **or** `float64` 2-D array whose shape
   is **exactly** `(len(df), k)`, where `k` is the number of exported columns. A wrong
   shape or dtype raises.
@@ -352,17 +354,19 @@ Contract:
 ```py
 import numpy as np
 
-COLS = ['open', 'high', 'low', 'close', 'atr:14']    # k = 5 features
 wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
-wf['atr:14']                          # materialize the directive once — max_lookback only
-                                      # sizes the margin; it does not create the column
+atr = wf['atr:14'].name               # materialize the directive once, and read its column
+                                      # name back: a cached directive lands under its CANONICAL
+                                      # form (here 'atr:14', but e.g. 'MA: 5' -> 'ma:5'), not the
+                                      # string you passed — and max_lookback only sized the margin
+COLS = ['open', 'high', 'low', 'close', atr]    # k = 5 features
 
 # One reusable buffer for the whole run — shape (window, k), the model's input tensor.
 buf = np.empty((30, len(COLS)), dtype=np.float32)
 
 for bar in feed:
     wf.append(bar)
-    wf.fulfill()                      # refresh atr:14 before exporting
+    wf.fulfill()                      # refresh atr's stale tail before exporting
     if not wf.ready:
         continue                      # warming up: buf isn't (30, k) yet, indicators not valid
     wf.fill_into(buf, columns=COLS)   # zero-alloc write of the 30×5 window into `buf`
