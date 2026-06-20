@@ -44,15 +44,17 @@ fn finalize_forming_computed(inner: &mut DataFrame) -> PyResult<()> {
         return Ok(());
     }
     let close_row = height - 1;
-    for (name, meta) in inner.computed_columns() {
-        let Some(state) = meta.state else { continue };
+    // Iterate the (short) directive names only — no per-column `state` Vec clone — and
+    // borrow each column's state straight off `inner` just before resuming it.
+    for name in inner.computed_names() {
         let Ok(node) = parse(&name) else { continue };
         if !directive_uses_default_series(&node) {
             continue;
         }
-        if let Some((tail, new_state)) =
-            volas_directive::exec::execute_resume(inner, &node, &state, close_row, meta.origin)
-        {
+        let resumed = inner.computed_resume_state(&name).and_then(|(state, origin)| {
+            volas_directive::exec::execute_resume(inner, &node, state, close_row, origin)
+        });
+        if let Some((tail, new_state)) = resumed {
             inner.update_computed_tail(&name, close_row, &tail).map_err(pyerr)?;
             inner.set_computed_state(&name, Some(new_state));
         }

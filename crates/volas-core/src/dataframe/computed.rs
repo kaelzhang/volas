@@ -55,6 +55,16 @@ impl DataFrame {
         self.computed.values().any(|m| m.valid_rows < self.height)
     }
 
+    /// Borrow a cached column's carried resume state and its origin offset — the
+    /// `(&[f64], usize)` the resume kernels read — **without cloning** the state
+    /// `Vec`. Lets the live refresh / rollover-finalize loops continue the recursion
+    /// straight off the stored state instead of snapshotting a per-column copy.
+    /// `None` if `name` is untracked or carries no state.
+    pub fn computed_resume_state(&self, name: &str) -> Option<(&[f64], usize)> {
+        let meta = self.computed.get(name)?;
+        Some((meta.state.as_deref()?, meta.origin))
+    }
+
     /// Snapshot of the materialized-directive columns (`name`, meta).
     pub fn computed_columns(&self) -> Vec<(String, ComputedMeta)> {
         self.computed
@@ -63,15 +73,19 @@ impl DataFrame {
             .collect()
     }
 
-    /// Snapshot only stale materialized-directive columns. This keeps the live
-    /// append/fulfill path from cloning unrelated computed metadata.
-    pub fn stale_computed_columns(&self, only: Option<&str>) -> Vec<(String, ComputedMeta)> {
+    /// Stale materialized-directive columns as `(name, lookback, valid_rows)` — the
+    /// small `Copy` cursor fields only, **never the carried `state` Vec**. The live
+    /// fulfill loop drives off this owned name list (so it can take `&mut self` to
+    /// write the refreshed tail) and borrows each column's state (and origin) on
+    /// demand via [`computed_resume_state`](Self::computed_resume_state) just before
+    /// resuming it, so no per-column `Vec<f64>` is deep-copied per fulfill.
+    pub fn stale_computed_columns(&self, only: Option<&str>) -> Vec<(String, usize, usize)> {
         self.computed
             .iter()
             .filter(|(name, meta)| {
                 meta.valid_rows < self.height && only.is_none_or(|target| target == name.as_str())
             })
-            .map(|(name, meta)| (name.clone(), meta.clone()))
+            .map(|(name, meta)| (name.clone(), meta.lookback, meta.valid_rows))
             .collect()
     }
 

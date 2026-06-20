@@ -112,6 +112,7 @@ mod frame_construct;
 mod frame_index;
 mod frame_io;
 mod frame_reduce;
+mod frame_refresh;
 mod frame_repr;
 mod frame_reshape;
 mod frame_tf;
