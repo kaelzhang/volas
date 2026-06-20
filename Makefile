@@ -97,7 +97,12 @@ coverage-html:
 # library that is absent is skipped by the harness.
 #
 #   make benchmark                    # full run, archived under .benchmarks/<stamp>/
+#   make benchmark SECTION=windowed   # one report section only (console, not archived)
 #   make benchmark INDICATOR=roc:10   # one coverage row only, not archived
+#
+# SECTION runs just one report section's tests for a fast iteration loop (the full
+# run is ~850 tests); valid sections are the report's: windowed / append / api /
+# calc / coverage. Like INDICATOR it prints the console table and does NOT archive.
 #
 # Every full run is persisted to .benchmarks/<date>-<time>-<short-commit>[-dirty]/ (the
 # whole dir is gitignored), each holding benchmark.json + report.html + meta.txt,
@@ -109,10 +114,21 @@ BENCH_OPTS := --benchmark-only --benchmark-group-by=func,param:indicator \
               --benchmark-columns=mean,median,ops,rounds --benchmark-sort=name
 BENCH_STAMP := $(shell date +%Y-%m-%d-%H%M%S)-$(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
 BENCH_DIR := .benchmarks/$(BENCH_STAMP)
+# The report's sections (each = one test function in test_benchmark.py); `SECTION=`
+# filters `make benchmark` / `make perf-ab` to one via `-k test_<section>`.
+BENCH_SECTIONS := windowed append api calc coverage
+ifdef SECTION
+ifeq ($(filter $(SECTION),$(BENCH_SECTIONS)),)
+$(error SECTION must be one of: $(BENCH_SECTIONS))
+endif
+endif
 benchmark: build
 	@echo "\033[1m>> Installing dev + benchmark comparison libraries... <<\033[0m"
 	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(PIP) install -q -r /dev/stdin
-ifdef INDICATOR
+ifdef SECTION
+	@echo "\033[1m>> Benchmarking the '$(SECTION)' section only (console, not archived) <<\033[0m"
+	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) -k "test_$(SECTION)"
+else ifdef INDICATOR
 	@$(eval _IND_JSON := $(shell mktemp -t volas-ind-bench).json)
 	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) --volas-benchmark-indicator="$(INDICATOR)" \
 	    --benchmark-json=$(_IND_JSON)
@@ -140,9 +156,10 @@ endif
 #
 #   make perf-ab BASE=HEAD~1                       # full suite
 #   make perf-ab BASE=HEAD~1 INDICATOR=bop         # one indicator
+#   make perf-ab BASE=HEAD~1 SECTION=windowed      # one report section
 BASE ?= HEAD~1
 perf-ab:
-	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)"
+	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)" "$(SECTION)"
 
 # Instruction-level regression gate: disassemble the hot-kernel probes and compare
 # each instruction count to scripts/asm_baseline.txt (numeric kernels must stay

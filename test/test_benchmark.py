@@ -21,8 +21,9 @@ simply shows no bar for it.
 
 Run::
 
-    make benchmark                 # console table + benchmark-report.html (installs .[dev,benchmark])
-    make benchmark INDICATOR=roc:10 # one coverage row, stdout only (not archived)
+    make benchmark                   # console table + benchmark-report.html (installs .[dev,benchmark])
+    make benchmark SECTION=windowed  # one report section only, stdout only (fast iteration)
+    make benchmark INDICATOR=roc:10  # one coverage row, stdout only (not archived)
 
 pandas / stock_pandas / talib live in the ``dev`` extra (the parity tests use them
 as oracles); polars and pandas-ta live in the ``benchmark`` extra.

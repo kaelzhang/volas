@@ -3,16 +3,18 @@
 # change move performance?" questions. Never ad-hoc timing scripts: this runs
 # the same harness, same machine, back-to-back, exactly like the CI perf gate.
 #
-#   scripts/perf_ab.sh <base-ref>                 # full suite, perf_gate verdict
-#   scripts/perf_ab.sh <base-ref> <indicator>     # one indicator, compact report
+#   scripts/perf_ab.sh <base-ref>                     # full suite, perf_gate verdict
+#   scripts/perf_ab.sh <base-ref> <indicator>         # one indicator, compact report
+#   scripts/perf_ab.sh <base-ref> '' <section>        # one report section, perf_gate verdict
 #
 # The base ref is built in a TEMPORARY GIT WORKTREE (the working tree is never
 # touched — no stashing), benchmarked, then HEAD (the current tree, including
 # uncommitted changes) is rebuilt and benchmarked. Nothing is archived.
 set -euo pipefail
 
-BASE_REF="${1:?usage: perf_ab.sh <base-ref> [indicator]}"
+BASE_REF="${1:?usage: perf_ab.sh <base-ref> [indicator] [section]}"
 INDICATOR="${2:-}"
+SECTION="${3:-}"
 PYTHON="${VOLAS_PYTHON:-python}"
 # maturin needs VIRTUAL_ENV / CONDA_PREFIX to find the interpreter — set them from
 # the resolved python so this runs from a bare shell (mirrors the Makefile).
@@ -24,7 +26,8 @@ trap 'git -C "$ROOT" worktree remove --force "$TMP/base" 2>/dev/null || true; rm
 
 BENCH_OPTS=(--benchmark-only --benchmark-group-by=func,param:indicator --benchmark-sort=name -q)
 FILTER=()
-[ -n "$INDICATOR" ] && FILTER=(--volas-benchmark-indicator="$INDICATOR")
+[ -n "$INDICATOR" ] && FILTER+=(--volas-benchmark-indicator="$INDICATOR")
+[ -n "$SECTION" ] && FILTER+=(-k "test_$SECTION")
 
 echo ">> building + benchmarking BASE ($BASE_REF) in a temp worktree..."
 git -C "$ROOT" worktree add --detach "$TMP/base" "$BASE_REF" >/dev/null
