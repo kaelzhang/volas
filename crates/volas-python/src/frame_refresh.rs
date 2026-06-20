@@ -29,7 +29,7 @@ impl PyDataFrame {
         let forming = self.tf.as_ref().and_then(|t| t.open.as_ref()).is_some();
         let mut base: Option<DataFrame> = None;
         for (name, lb, vr) in stale {
-            if forming && self.refresh_forming_column(&name, vr, height)? {
+            if forming && self.refresh_forming_column(&name, lb, vr, height)? {
                 continue;
             }
             if self.inner.computed_resume_state(&name).is_some() {
@@ -216,6 +216,7 @@ impl PyDataFrame {
     fn refresh_forming_column(
         &mut self,
         name: &str,
+        lb: usize,
         vr: usize,
         height: usize,
     ) -> PyResult<bool> {
@@ -226,11 +227,15 @@ impl PyDataFrame {
             self.inner.set_computed_state(name, None);
             return Ok(false);
         }
-        // Fast path: only the open forming row is stale and we hold an anchor — resume
-        // that single row and write its value, DISCARDING the new state so the anchor
-        // stays at the last closed bar (`vr - 1`). The anchor state is borrowed straight
-        // off `self.inner` (no snapshot copy) and dropped before each write.
-        if vr + 1 == height {
+        // Fast path: only the open forming row is stale, it is PAST warm-up (`vr >= lb`),
+        // and we hold an anchor — resume that single row and write its value, DISCARDING
+        // the new state so the anchor stays at the last closed bar (`vr - 1`). The
+        // `vr >= lb` gate keeps the whole warm-up region on the cold full-recompute below:
+        // an indicator whose warm-up mask is length-dependent (its short-frame output
+        // differs from the masked full-series value) would otherwise freeze the
+        // incrementally-carried early rows and diverge from a full recompute. The anchor
+        // state is borrowed straight off `self.inner` and dropped before each write.
+        if vr + 1 == height && vr >= lb {
             // Stateless finite-memory (avgprice / medprice / mom / roc / …): the forming
             // row depends only on its own inputs, so a parse-free scalar recompute writes
             // the value with no carried state and no allocation.
@@ -277,14 +282,17 @@ impl PyDataFrame {
                 return Ok(true);
             }
         }
-        // Cold / multi-row-stale: recompute the stale tail against the live frame (a
-        // default-series command reads only raw OHLCV, never its own stale cache), then
-        // re-anchor the state at the last CLOSED bar (`[0, height - 1)`).
+        // Cold / warm-up / multi-row-stale: recompute against the live frame (a
+        // default-series command reads only raw OHLCV, never its own stale cache) and
+        // rewrite the WHOLE column `[0, height)`, not just the stale tail. Rewriting from
+        // row 0 re-applies the full-series warm-up mask to the early rows every cold run,
+        // so the masked values are frozen correctly when the fast path takes over at the
+        // warm boundary (`vr >= lb`) — the carried early rows can no longer be a stale
+        // short-frame (unmasked) output. Then re-anchor the state at the last CLOSED bar.
         let recomputed =
             volas_directive::exec::execute_refresh(&self.inner, &node).map_err(value_err)?;
-        let tail = recomputed.slice(vr, recomputed.len());
         self.inner
-            .update_computed_tail(name, vr, &tail)
+            .update_computed_tail(name, 0, &recomputed)
             .map_err(pyerr)?;
         if height >= 1 {
             let anchor = self.inner.slice_data(0, height - 1);

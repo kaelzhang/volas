@@ -210,6 +210,8 @@ fn scalar_resume_one_guards_and_inline_branches() {
     assert!(ind::macd_signal_resume_one(&c, 12, 26, 9, false, 0, &[1.0; 3]).is_none());
     assert!(ind::sar_resume_one(&h, &l, 1, &[1.0; 6]).is_none()); // row < 2
     assert!(ind::sarext_resume_one(&h, &l, 0.0, 1, &[1.0; 7]).is_none());
+    assert!(ind::plus_dm_resume_one(&h, &l, 14, 0, &s2).is_none());
+    assert!(ind::minus_dm_resume_one(&h, &l, 14, 0, &s2).is_none());
     assert!(ind::plus_di_resume_one(&h, &l, &c, 14, 0, &s2).is_none());
     assert!(ind::minus_di_resume_one(&h, &l, &c, 14, 0, &s2).is_none());
     assert!(ind::dx_resume_one(&h, &l, &c, 14, 0, &[1.0; 3]).is_none());

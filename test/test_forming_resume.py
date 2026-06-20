@@ -57,7 +57,7 @@ def test_forming_resume_bit_exact_vs_full_recompute(directive):
 # from the scalar path because their resume already diverges in warm-up on either path.)
 _SCALAR_TWINS = [
     "obv", "ad", "dema:20", "tema:20", "t3:20", "kama:20", "macd", "macdfix", "sar",
-    "sarext", "plus_di:14", "minus_di:14", "dx:14", "adx:14", "adxr:14", "pvt", "nvi",
+    "sarext", "plus_dm:14", "minus_dm:14", "plus_di:14", "minus_di:14", "dx:14", "adx:14", "adxr:14", "pvt", "nvi",
     "pvi", "efi:13", "tsi", "mass_index", "wad", "keltner:20", "supertrend", "trix:30",
     # multi-output sub-lines (exercise the sub-selector dispatch arms + their twins):
     "macd.signal", "macd.histogram", "macdfix.signal", "keltner.upper", "keltner.lower",

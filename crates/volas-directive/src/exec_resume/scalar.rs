@@ -192,6 +192,16 @@ pub fn execute_resume_value(
             let close = series_f64(df, series, 0, "close").ok()?;
             ind::trix_resume_one(&close, arg_usize(&args, 0), row, prev_state)
         }
+        ("plus_dm", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            ind::plus_dm_resume_one(&high, &low, arg_usize(&args, 0), row, prev_state)
+        }
+        ("minus_dm", _) => {
+            let high = series_f64(df, series, 0, "high").ok()?;
+            let low = series_f64(df, series, 1, "low").ok()?;
+            ind::minus_dm_resume_one(&high, &low, arg_usize(&args, 0), row, prev_state)
+        }
         _ => None,
     }
 }

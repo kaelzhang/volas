@@ -767,6 +767,40 @@ pub fn adxr_resume_one(
 }
 
 
+
+/// Scalar single-row twin of [`plus_dm_resume`]: the running Wilder-sum at `row` from
+/// `state = [s_{row-1}]`, no allocation. Bit-identical to one `wilder_sum` steady step.
+pub fn plus_dm_resume_one(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.is_empty() || row >= high.len() {
+        return None;
+    }
+    let a = 1.0 - 1.0 / period as f64;
+    Some(state[0].mul_add(a, dm1(high, low, row).0))
+}
+
+/// Scalar single-row twin of [`minus_dm_resume`]: running Wilder-sum at `row` from
+/// `state = [s_{row-1}]`, no allocation. Bit-identical to one `wilder_sum` step.
+pub fn minus_dm_resume_one(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.is_empty() || row >= high.len() {
+        return None;
+    }
+    let a = 1.0 - 1.0 / period as f64;
+    Some(state[0].mul_add(a, dm1(high, low, row).1))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
