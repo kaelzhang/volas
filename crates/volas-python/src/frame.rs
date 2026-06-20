@@ -760,6 +760,21 @@ impl PyDataFrame {
                             .map_err(pyerr)?;
                         continue;
                     }
+                    // Recursive single-state single-row fast path (ema/smma): the new
+                    // value IS the new state `[value]`, so write the value and update the
+                    // state IN PLACE — no tail/state `Vec` allocation. Bit-identical to
+                    // the `Vec` resume below (same shared `*_step` kernel).
+                    if let Some(state) = meta.state.as_deref() {
+                        if let Some(value) =
+                            volas_directive::exec::execute_resume_one(&self.inner, &meta.directive, state, vr)
+                        {
+                            self.inner
+                                .update_computed_f64_value(&name, vr, value)
+                                .map_err(pyerr)?;
+                            self.inner.update_computed_state_at(&name, 0, value);
+                            continue;
+                        }
+                    }
                 }
                 if let Some((tail, new_state)) =
                     volas_directive::exec::execute_resume_default_series(

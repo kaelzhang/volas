@@ -66,6 +66,30 @@ def test_fulfill_matches_full_recompute():
     np.testing.assert_allclose(df['ma:20'].to_numpy(), expected, equal_nan=True)
 
 
+def test_fulfill_single_bar_resume_ema_smma_explicit_series():
+    # The single-bar resume fast path: ema / smma compute one value with no Vec and
+    # update state in place; an EXPLICIT @-series directive (ema:14@high) declines the
+    # scalar path and resumes via the general route. All bit-identical to the unbounded
+    # full recompute, bar by bar.
+    n = 80
+    s = (100 + 5 * np.sin(np.arange(n) * 0.2))
+    data = {'open': s, 'high': s + 1.0, 'low': s - 1.0, 'close': s, 'volume': np.full(n, 1e3)}
+    directives = ('ema:14', 'smma:20', 'ema:14@high')
+    df = volas.DataFrame({k: v[:40].tolist() for k, v in data.items()})
+    for d in directives:
+        df[d]
+    df.fulfill()
+    for i in range(40, n):  # one bar at a time -> the height == valid_rows + 1 fast path
+        df = df.append(volas.DataFrame({k: [v[i]] for k, v in data.items()}))
+        df.fulfill()
+    ref = volas.DataFrame({k: v.tolist() for k, v in data.items()})
+    for d in directives:
+        exp = np.asarray(ref[d].to_numpy(), float)
+        got = np.asarray(df[d].to_numpy(), float)
+        m = ~np.isnan(exp)
+        np.testing.assert_array_equal(got[m], exp[m])  # strict bit-exactness
+
+
 def test_fulfill_no_computed_columns_is_noop():
     df = volas.read_csv(TENCENT)
     df.fulfill()  # nothing cached -> harmless

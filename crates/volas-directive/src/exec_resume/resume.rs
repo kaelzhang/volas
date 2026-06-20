@@ -2,11 +2,48 @@
 //! full recompute (the per-directive `execute_resume*` dispatch).
 
 use crate::exec::{arg_f64, arg_usize, series_f64};
+use crate::parse;
 use crate::types::Ast;
 use volas_compute::indicators as ind;
 use volas_core::{Column, DataFrame};
 
 use super::as_command;
+
+/// Single new-row resume for a recursive indicator whose carried state is a single
+/// element equal to its output (`ema` / `smma`): returns the value at `row` — which is
+/// also the new state `[value]` — with NO `Vec` allocation, the live single-bar fast
+/// path. The caller writes the value with `update_computed_f64_value` and the state in
+/// place with `update_computed_state_at`. `None` for any other directive (the caller
+/// then takes the `Vec`-returning resume path). Bit-identical to the full resume: both
+/// go through the same shared `*_step` kernel.
+pub fn execute_resume_one(
+    df: &DataFrame,
+    directive: &str,
+    prev_state: &[f64],
+    row: usize,
+) -> Option<f64> {
+    // Cheap name gate FIRST: skip the parse entirely for every directive this scalar
+    // path can't serve (rsi / atr / macd / …), so a non-ema/smma recursive column does
+    // not pay a wasted parse here on top of the parse the general path already does.
+    let name = directive.split([':', '@']).next().unwrap_or(directive);
+    if name != "ema" && name != "smma" {
+        return None;
+    }
+    if directive.contains('@') {
+        return None; // explicit @series -> general path (avoids the whole-column materialize)
+    }
+    let node = parse(directive).ok()?;
+    let (_cmd, _sub, args, series) = as_command(&node)?;
+    let close = series_f64(df, series, 0, "close").ok()?; // borrowed for an F64 close
+    let period = arg_usize(&args, 0);
+    // `name` is `ema` or `smma` (the gate above), so dispatch on it directly — no dead
+    // catch-all arm.
+    if name == "ema" {
+        ind::ema_resume_one(&close, period, row, prev_state)
+    } else {
+        ind::smma_resume_one(&close, period, row, prev_state)
+    }
+}
 
 /// Extract the period from a `name:<period>` directive for the momentum / ROC
 /// family. These commands are required (no default), so the form is always explicit.

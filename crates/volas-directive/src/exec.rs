@@ -275,7 +275,8 @@ fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
 }
 
 pub use crate::exec_resume::{
-    execute_resume, execute_resume_default_series, execute_resume_default_series_one, initial_state,
+    execute_resume, execute_resume_default_series, execute_resume_default_series_one,
+    execute_resume_one, initial_state,
 };
 
 /// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.

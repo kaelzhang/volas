@@ -83,10 +83,27 @@ pub fn ema_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (V
     let mut e = state[0];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &data[from..n] {
-        e = (x - e).mul_add(k, e);
+        e = ema_step(x, e, k);
         out.push(e);
     }
     (out, vec![e])
+}
+
+/// One EMA recurrence step, shared by [`ema_resume`] and [`ema_resume_one`] so the
+/// full and single-row paths cannot drift: `e' = (x - e)·k + e`.
+#[inline]
+pub(super) fn ema_step(x: f64, e: f64, k: f64) -> f64 {
+    (x - e).mul_add(k, e)
+}
+
+/// Single new-row EMA resume: the value at `row` — which is also the new carried
+/// state `[e]` — with NO `Vec` allocation (the live single-bar fast path,
+/// bit-identical to [`ema_resume`] from the same state). `None` if the state is empty
+/// or `row` is out of range.
+pub fn ema_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+    let e = *state.first()?;
+    let x = *data.get(row)?;
+    Some(ema_step(x, e, ema_k(period)))
 }
 
 /// Final Wilder/SMMA state `[rma]` after a full [`smma`] compute, or `None` if `data`
@@ -116,10 +133,27 @@ pub fn smma_resume(
     let mut w = state[0];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &data[from..n] {
-        w = w.mul_add(a, x * b);
+        w = smma_step(x, w, a, b);
         out.push(w);
     }
     (out, vec![w])
+}
+
+/// One SMMA/Wilder recurrence step, shared by [`smma_resume`] and [`smma_resume_one`]
+/// so they cannot drift: `w' = w·a + x·b`.
+#[inline]
+pub(super) fn smma_step(x: f64, w: f64, a: f64, b: f64) -> f64 {
+    w.mul_add(a, x * b)
+}
+
+/// Single new-row SMMA resume: the value at `row` (== the new state `[w]`), no `Vec`
+/// (the live single-bar fast path, bit-identical to [`smma_resume`]). `None` if the
+/// state is empty or `row` is out of range.
+pub fn smma_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+    let w = *state.first()?;
+    let x = *data.get(row)?;
+    let pf = period as f64;
+    Some(smma_step(x, w, (pf - 1.0) / pf, 1.0 / pf))
 }
 
 /// Weighted moving average — linearly increasing weights `1..=period`, the newest

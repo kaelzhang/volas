@@ -35,6 +35,21 @@ impl DataFrame {
         }
     }
 
+    /// Overwrite element `idx` of a cached column's carried state **in place** (no
+    /// allocation) — the single-row resume fast path, where the new state reuses the
+    /// existing fixed-size buffer. No-op if `name` is not computed, has no state, or
+    /// `idx` is out of range.
+    pub fn update_computed_state_at(&mut self, name: &str, idx: usize, val: f64) {
+        if let Some(slot) = self
+            .computed
+            .get_mut(name)
+            .and_then(|m| m.state.as_mut())
+            .and_then(|s| s.get_mut(idx))
+        {
+            *slot = val;
+        }
+    }
+
     /// Whether any materialized directive column is stale (its `valid_rows` lags
     /// `height` after an `append`), i.e. a bulk read would see NaN until `fulfill`.
     pub fn has_stale_computed(&self) -> bool {
