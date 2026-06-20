@@ -13,6 +13,7 @@ use volas_core::{
     binary_supertype, CmpOp, Column, CombineOp, DataFrame, DType, Index,
     IndexKind, Series,
 };
+use volas_core::dataframe::ComputedMeta;
 use volas_directive::parse;
 use volas_time::{AggSpec, TimeFrame};
 
@@ -752,9 +753,18 @@ impl PyDataFrame {
         if stale.is_empty() {
             return Ok(());
         }
+        // A tf-fold frame's last row is the OPEN forming bar (its raw OHLCV keeps
+        // changing as fine bars fold in). For such a frame a recursive column's
+        // carried state must stay anchored at the last CLOSED bar, never advance onto
+        // the volatile forming row — so its refresh is routed through a dedicated,
+        // anchor-preserving path rather than the standard append resume below.
+        let forming = self.tf.as_ref().and_then(|t| t.open.as_ref()).is_some();
         let mut base: Option<DataFrame> = None;
         for (name, meta) in stale {
             let (lb, vr) = (meta.lookback, meta.valid_rows);
+            if forming && self.refresh_forming_column(&name, &meta, height)? {
+                continue;
+            }
             if meta.state.is_some() {
                 if height == vr + 1 {
                     if let Some(value) = volas_directive::exec::execute_resume_default_series_one(
@@ -927,5 +937,80 @@ impl PyDataFrame {
             }
         }
         Ok(())
+    }
+
+    /// Anchor-preserving refresh of one cached column on a tf-fold (forming) frame.
+    /// Returns `true` when it fully handled the column.
+    ///
+    /// Only **default-series** recursive columns (the live-trading norm — `atr`,
+    /// `ema`, `rsi`, …) are anchored here: their carried state describes the last
+    /// CLOSED bar (`height - 2`), never the volatile forming row. The common case —
+    /// only the forming row (`height - 1`) is stale — resumes that single row from the
+    /// anchor and writes its value WITHOUT advancing the state (the next fold re-forms
+    /// the row; the period rollover finalises the anchor). A cold / multi-row-stale
+    /// column recomputes its tail and re-derives the anchor as of the last closed bar.
+    /// An explicit-`@series` column can't be cleanly anchored, so it drops any state
+    /// and falls through (`false`) to the unchanged full path.
+    fn refresh_forming_column(
+        &mut self,
+        name: &str,
+        meta: &ComputedMeta,
+        height: usize,
+    ) -> PyResult<bool> {
+        let node = parse(name).map_err(directive_err)?;
+        if !directive_uses_default_series(&node) {
+            // Can't anchor an explicit-series resume at the closed bar; keep the
+            // pre-fold behaviour (full recompute, no carried state).
+            self.inner.set_computed_state(name, None);
+            return Ok(false);
+        }
+        let vr = meta.valid_rows;
+        // Fast path: only the open forming row is stale and we hold an anchor — resume
+        // that single row and write its value, DISCARDING the new state so the anchor
+        // stays at the last closed bar (`vr - 1`).
+        if vr + 1 == height {
+            if let Some(state) = meta.state.as_deref() {
+                // Single-state scalar resume (ema / smma) — no tail/state allocation.
+                if let Some(value) =
+                    volas_directive::exec::execute_resume_one(&self.inner, name, state, vr)
+                {
+                    self.inner
+                        .update_computed_f64_value(name, vr, value)
+                        .map_err(pyerr)?;
+                    return Ok(true);
+                }
+                // Every other recursive / stateful resume kernel (atr, rsi, the Wilder
+                // family, macd, sar, …) plus the stateless finite-memory ones: continue
+                // the single forming row from the anchored state and DISCARD the returned
+                // state so the anchor stays at the last closed bar (`vr - 1`).
+                if let Some((tail, _new_state)) = volas_directive::exec::execute_resume(
+                    &self.inner,
+                    &node,
+                    state,
+                    vr,
+                    meta.origin,
+                ) {
+                    self.inner
+                        .update_computed_tail(name, vr, &tail)
+                        .map_err(pyerr)?;
+                    return Ok(true);
+                }
+            }
+        }
+        // Cold / multi-row-stale: recompute the stale tail against the live frame (a
+        // default-series command reads only raw OHLCV, never its own stale cache), then
+        // re-anchor the state at the last CLOSED bar (`[0, height - 1)`).
+        let recomputed =
+            volas_directive::exec::execute_refresh(&self.inner, &node).map_err(value_err)?;
+        let tail = recomputed.slice(vr, recomputed.len());
+        self.inner
+            .update_computed_tail(name, vr, &tail)
+            .map_err(pyerr)?;
+        if height >= 1 {
+            let anchor = self.inner.slice_data(0, height - 1);
+            let st = volas_directive::exec::initial_state(&anchor, &node, &recomputed);
+            self.inner.set_computed_state(name, st);
+        }
+        Ok(true)
     }
 }

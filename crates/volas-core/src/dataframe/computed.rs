@@ -156,6 +156,22 @@ impl DataFrame {
         }
     }
 
+    /// Live tf-fold invalidation: only the **forming row** (the last, still-open
+    /// period bar at `forming_row`) changed, so mark each cached column stale from
+    /// `forming_row` on but **keep** its carried recursive state. The state stays
+    /// anchored at the last CLOSED bar (`forming_row - 1`); `refresh_computed`
+    /// resumes just the forming row from it (O(lookback)) without advancing the
+    /// anchor, and the period rollover advances the anchor over the now-closed bar.
+    /// Unlike [`invalidate_computed_on_write_at`] this neither drops the state nor
+    /// zeroes `valid_rows`, so the live fold never forces a full O(buffer) recompute.
+    pub(super) fn invalidate_computed_forming_row(&mut self, forming_row: usize) {
+        for meta in self.computed.values_mut() {
+            if meta.valid_rows > forming_row {
+                meta.valid_rows = forming_row;
+            }
+        }
+    }
+
     /// A user write to column `col` invalidates the directive cache: `col` loses any
     /// computed status, and every OTHER cached directive column is marked fully stale —
     /// it may have been derived from `col`, so it is recomputed on next access (a bulk

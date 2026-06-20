@@ -32,6 +32,34 @@ fn build_fold_ops(
     Some(ops)
 }
 
+/// At a period rollover the previous forming row becomes final: advance each
+/// default-series recursive column's carried state over that now-closed bar (and
+/// write its final value) so the next period's forming row resumes from the correct
+/// anchor. Columns without a resume kernel, or explicit-`@series` ones, carry no
+/// anchored state and are left to the post-append refresh. Runs once per rollover
+/// (not per fine bar), so the per-column snapshot/parse is off the hot path.
+fn finalize_forming_computed(inner: &mut DataFrame) -> PyResult<()> {
+    let height = inner.height();
+    if height == 0 {
+        return Ok(());
+    }
+    let close_row = height - 1;
+    for (name, meta) in inner.computed_columns() {
+        let Some(state) = meta.state else { continue };
+        let Ok(node) = parse(&name) else { continue };
+        if !directive_uses_default_series(&node) {
+            continue;
+        }
+        if let Some((tail, new_state)) =
+            volas_directive::exec::execute_resume(inner, &node, &state, close_row, meta.origin)
+        {
+            inner.update_computed_tail(&name, close_row, &tail).map_err(pyerr)?;
+            inner.set_computed_state(&name, Some(new_state));
+        }
+    }
+    Ok(())
+}
+
 impl PyDataFrame {
     /// Fold incoming fine bars into a tf-aware frame: each bar either extends the
     /// open period's forming bar (update `inner`'s last row in place + mark its
@@ -158,7 +186,10 @@ impl PyDataFrame {
                 }
             } else {
                 // Roll over: the previous forming bar (if any) is already final in
-                // `inner`; start a new open period and append its forming row.
+                // `inner`. Advance each cached recursive column's anchor over that
+                // now-closed bar BEFORE opening the next period, so the new forming
+                // row resumes from the correct closed-bar state.
+                finalize_forming_computed(inner)?;
                 let bar = fine.slice(i, i + 1);
                 let agg = aggregate_period(&bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                 tfs.open = Some(bar);

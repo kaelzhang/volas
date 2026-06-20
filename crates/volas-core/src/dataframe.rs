@@ -548,9 +548,10 @@ impl DataFrame {
         for &(dst_col, src_col, op) in ops {
             self.columns[dst_col].combine_at(row, op, &src.columns[src_col], src_row)?;
         }
-        if let Some(&(dst_col, _, _)) = ops.first() {
-            self.invalidate_computed_on_write_at(dst_col);
-        }
+        // Only the forming row changed: mark it stale but KEEP each cached column's
+        // anchored resume state, so `refresh` continues the recursion over just this
+        // row (O(lookback)) instead of recomputing the whole buffer from scratch.
+        self.invalidate_computed_forming_row(row);
         Ok(())
     }
 
