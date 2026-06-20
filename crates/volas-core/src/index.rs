@@ -356,6 +356,18 @@ impl Index {
                     "cannot append a string index to a non-string index".into(),
                 ))
             }
+            // An implicit positional (Range) index appended to explicit Int64 labels
+            // continues the sequence (last + 1, ...), mirroring Range+Range's auto-
+            // increment — so a sliced / compacted frame (whose Range collapsed to
+            // absolute Int64 labels) keeps assigning monotonic labels to appended bars
+            // instead of restarting at the bar's own 0. The bare-RangeIndex bar is the
+            // "no explicit label, take the next row position" signal; honoring it keeps
+            // a windowed (rolling-compacted) RangeIndex frame's labels absolute and
+            // gap-free, matching pandas' last-M view of a RangeIndex.
+            (Int64(a), Range(bn)) => {
+                let next = a.last().map(|l| l + 1).unwrap_or(0);
+                a.extend((0..*bn as i64).map(|k| next + k));
+            }
             // numeric-kind mix (Range / Int64 / Datetime) -> Int64 labels
             (slot, b) => {
                 let mut labels = slot.to_i64_labels();
@@ -564,6 +576,17 @@ mod tests {
         let mut m = Index::range(2);
         m.extend(&Index::int64(vec![5, 6])).unwrap();
         assert_eq!(m, Index::int64(vec![0, 1, 5, 6]));
+
+        // an implicit Range appended to explicit Int64 labels CONTINUES the sequence
+        // (last + 1, ...) rather than restarting at the Range's own 0 — the
+        // sliced/compacted-frame + bare-bar append path (windowed rolling buffers).
+        let mut c = Index::int64(vec![44, 45, 46]);
+        c.extend(&Index::range(2)).unwrap();
+        assert_eq!(c, Index::int64(vec![44, 45, 46, 47, 48]));
+        // continuing from an empty Int64 starts at 0.
+        let mut e = Index::int64(vec![]);
+        e.extend(&Index::range(2)).unwrap();
+        assert_eq!(e, Index::int64(vec![0, 1]));
 
         // mixing string with numeric is an error, either way
         assert!(str_index(&["x"]).extend(&Index::range(1)).is_err());
