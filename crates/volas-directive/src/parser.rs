@@ -5,11 +5,11 @@
 //! unary (`~ -`) < primary (command, scalar, parenthesised expression).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::bind::bind_node;
 use super::types::{Ast, Command, Cst, Node, Op, UnaryOp};
+use volas_core::fxhash::FxHashMap;
 use volas_core::{Result, VolasError};
 
 thread_local! {
@@ -17,7 +17,9 @@ thread_local! {
     /// the bound [`Ast`] is bit-identical — and `df.exec` re-parses on every call, so a
     /// repeated directive in a hot loop skips both tokenizing **and** binding/validation
     /// (the whole per-exec validation cost) and shares one `Rc<Ast>` with no deep clone.
-    static PARSE_CACHE: RefCell<HashMap<String, Rc<Ast>>> = RefCell::new(HashMap::new());
+    /// FxHash (not SipHash): the keys are internal, non-adversarial directive strings —
+    /// the same trust level as `name_to_idx` — and the per-bar refresh hits this memo.
+    static PARSE_CACHE: RefCell<FxHashMap<String, Rc<Ast>>> = RefCell::new(FxHashMap::default());
 }
 
 /// Parse a directive string into a bound, validated [`Ast`] (memoized per thread).
