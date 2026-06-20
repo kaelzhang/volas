@@ -23,10 +23,10 @@ pub fn execute_resume_one(
     row: usize,
 ) -> Option<f64> {
     // Cheap name gate FIRST: skip the parse entirely for every directive this scalar
-    // path can't serve (rsi / atr / macd / …), so a non-ema/smma recursive column does
-    // not pay a wasted parse here on top of the parse the general path already does.
+    // path can't serve (rsi / macd / …), so a non-resumable recursive column does not
+    // pay a wasted parse here on top of the parse the general path already does.
     let name = directive.split([':', '@']).next().unwrap_or(directive);
-    if name != "ema" && name != "smma" {
+    if !matches!(name, "ema" | "smma" | "atr") {
         return None;
     }
     if directive.contains('@') {
@@ -34,8 +34,15 @@ pub fn execute_resume_one(
     }
     let node = parse(directive).ok()?;
     let (_cmd, _sub, args, series) = as_command(&node)?;
-    let close = series_f64(df, series, 0, "close").ok()?; // borrowed for an F64 close
     let period = arg_usize(&args, 0);
+    if name == "atr" {
+        // Wilder ATR reads high/low/close; one fused step replaces the two-`Vec` resume.
+        let high = series_f64(df, series, 0, "high").ok()?;
+        let low = series_f64(df, series, 1, "low").ok()?;
+        let close = series_f64(df, series, 2, "close").ok()?;
+        return ind::atr_resume_one(&high, &low, &close, period, row, prev_state);
+    }
+    let close = series_f64(df, series, 0, "close").ok()?; // borrowed for an F64 close
     // `name` is `ema` or `smma` (the gate above), so dispatch on it directly — no dead
     // catch-all arm.
     if name == "ema" {

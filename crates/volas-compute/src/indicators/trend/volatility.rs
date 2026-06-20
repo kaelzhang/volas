@@ -108,6 +108,27 @@ pub fn atr_resume(
     Some((out, vec![atr]))
 }
 
+/// Scalar single-row twin of [`atr_resume`]: the Wilder ATR at `row` continued from
+/// `state = [atr_{row-1}]`, returning just the value — no `out` / new-state `Vec`. Used
+/// by the single-bar append / live forming-row refresh, where one allocation-free step
+/// replaces the two-`Vec` resume. Bit-identical to `atr_resume` (the same fused step).
+/// `None` at `row == 0`, empty `state`, or `row` out of range.
+pub fn atr_resume_one(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<f64> {
+    if row == 0 || state.is_empty() || row >= high.len() {
+        return None;
+    }
+    let pf = period as f64;
+    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
+    Some(state[0].mul_add(a, tr1(high, low, close, row) * b))
+}
+
 /// Resume [`natr`] from `state = [atr_{from-1}]` over rows `[from, n)`: the ATR resume,
 /// rescaled per row by `atr/close·100`. `None` at `from == 0`. Reads only
 /// `high/low/close[from-1..]`.
