@@ -236,21 +236,12 @@ impl PyDataFrame {
         // incrementally-carried early rows and diverge from a full recompute. The anchor
         // state is borrowed straight off `self.inner` and dropped before each write.
         if vr + 1 == height && vr >= lb {
-            // Stateless finite-memory (avgprice / medprice / mom / roc / …): the forming
-            // row depends only on its own inputs, so a parse-free scalar recompute writes
-            // the value with no carried state and no allocation.
-            if let Some(value) =
-                volas_directive::exec::execute_resume_default_series_one(&self.inner, name, vr)
-            {
-                self.inner
-                    .update_computed_f64_value(name, vr, value)
-                    .map_err(pyerr)?;
-                return Ok(true);
-            }
-            // Single-state scalar resume (ema / smma / atr / natr / rsi / cmo …) — no
-            // tail/state allocation.
+            // Recursive scalars FIRST (the live-trading norm — atr / ema / rsi / the
+            // directional / cascade / volume families): a single anchored step, no
+            // tail/state allocation. Ordered ahead of the stateless dispatch below so a
+            // recursive column never pays that dispatch's ~12-arm name-match miss.
             let scalar = self.inner.computed_resume_state(name).and_then(|(state, _)| {
-                volas_directive::exec::execute_resume_one(&self.inner, name, state, vr)
+                volas_directive::exec::execute_resume_one_node(&self.inner, &node, state, vr)
             });
             if let Some(value) = scalar {
                 self.inner
@@ -259,12 +250,22 @@ impl PyDataFrame {
                 return Ok(true);
             }
             // Every other recursive resume kernel with a scalar twin (the Wilder /
-            // directional / cascade / volume / HT / … families): the single forming-row
-            // value, allocation-free, discarding the new state to keep the anchor.
+            // directional / cascade / volume / … families): the single forming-row value,
+            // allocation-free, discarding the new state to keep the anchor.
             let value = self.inner.computed_resume_state(name).and_then(|(state, origin)| {
                 volas_directive::exec::execute_resume_value(&self.inner, &node, state, vr, origin)
             });
             if let Some(value) = value {
+                self.inner
+                    .update_computed_f64_value(name, vr, value)
+                    .map_err(pyerr)?;
+                return Ok(true);
+            }
+            // Stateless finite-memory (avgprice / medprice / mom / roc / …): the forming
+            // row depends only on its own inputs — a parse-free scalar recompute, no state.
+            if let Some(value) =
+                volas_directive::exec::execute_resume_default_series_one(&self.inner, name, vr)
+            {
                 self.inner
                     .update_computed_f64_value(name, vr, value)
                     .map_err(pyerr)?;

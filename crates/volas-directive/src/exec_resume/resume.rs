@@ -33,7 +33,24 @@ pub fn execute_resume_one(
         return None; // explicit @series -> general path (avoids the whole-column materialize)
     }
     let node = parse(directive).ok()?;
-    let (_cmd, _sub, args, series) = as_command(&node)?;
+    execute_resume_one_node(df, &node, prev_state, row)
+}
+
+/// Node form of [`execute_resume_one`] — the single-bar scalar resume for the
+/// `ema`/`smma`/`atr`/`natr`/`rsi`/`cmo` family from an already-parsed `node`, so the
+/// live forming-row refresh (which parses the directive once to gate it) does NOT parse
+/// it a second time here. Caller guarantees a default-series command node.
+pub fn execute_resume_one_node(
+    df: &DataFrame,
+    node: &Ast,
+    prev_state: &[f64],
+    row: usize,
+) -> Option<f64> {
+    let (name, _sub, args, series) = as_command(node)?;
+    let name = name.as_ref();
+    if !matches!(name, "ema" | "smma" | "atr" | "natr" | "rsi" | "cmo") {
+        return None;
+    }
     let period = arg_usize(&args, 0);
     if name == "atr" || name == "natr" {
         // Wilder ATR (and NATR = ATR/close·100) read high/low/close; one fused step
