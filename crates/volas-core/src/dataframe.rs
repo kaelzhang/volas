@@ -15,8 +15,9 @@ use crate::series::Series;
 /// `height` until `fulfill` recomputes the tail.
 #[derive(Clone, Debug)]
 pub struct ComputedMeta {
-    /// The (canonical) directive string.
-    pub directive: String,
+    /// The (canonical) directive string. `Arc<str>` so the per-bar refresh snapshot
+    /// (`stale_computed_columns`) clones it with a refcount bump, not a heap copy.
+    pub directive: Arc<str>,
     /// The directive's lookback (warm-up rows).
     pub lookback: usize,
     /// Rows `[0, valid_rows)` currently hold valid values.
@@ -403,6 +404,22 @@ impl DataFrame {
             }
         }
         df
+    }
+
+    /// A `[start, end)` row slice that does **not** carry the cached-directive
+    /// (computed) metadata — for a READ-ONLY derivation that is never appended to
+    /// (a refresh probe, a row-select feeding `DataFrame::new`). [`slice`] clones a
+    /// `ComputedMeta` per cached column to keep the SP-9 incremental resume across
+    /// the slice; a read-only consumer reads only the raw columns and discards the
+    /// frame, so that per-column clone (`O(K)` per slice, `O(K²)` per fulfill over a
+    /// K-indicator windowed frame) is pure waste. The result's computed columns
+    /// become plain data — correct values, but it MUST NOT be appended to (use
+    /// [`slice`] for anything that continues live, e.g. window compaction).
+    pub fn slice_data(&self, start: usize, end: usize) -> DataFrame {
+        let start = start.min(self.height);
+        let end = end.max(start).min(self.height);
+        let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
+        self.same_schema(columns, self.index.slice(start, end))
     }
 
     /// Filter rows by a boolean mask.

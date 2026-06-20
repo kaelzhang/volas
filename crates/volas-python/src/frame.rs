@@ -867,7 +867,12 @@ impl PyDataFrame {
             let win = (2 * lb).max(1);
             let (recomputed, off) = if vr > win {
                 let start = vr - win;
-                let windowed = volas_directive::exec::execute_refresh(&frame.slice(start, height), &node)
+                // Read-only probe: `slice_data` skips the per-cached-column ComputedMeta
+                // clone (O(K) per probe, O(K²) per fulfill over a K-indicator windowed
+                // frame). The probe reads only raw columns and is discarded — never
+                // appended — so dropping the resume carry here is sound. (Window
+                // compaction at `maybe_compact` keeps `slice`, which carries it.)
+                let windowed = volas_directive::exec::execute_refresh(&frame.slice_data(start, height), &node)
                     .map_err(value_err)?;
                 let cached_val = col_value(self.inner.column(&name).map_err(pyerr)?, vr - 1);
                 let probe = col_value(&windowed, vr - 1 - start);

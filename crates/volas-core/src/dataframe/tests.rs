@@ -285,6 +285,30 @@
     }
 
     #[test]
+    fn slice_data_drops_computed_carry() {
+        // `slice` carries the cached-directive metadata (continuable resume); `slice_data`
+        // is the read-only twin that drops it — the boundary the refresh probe relies on.
+        // A `slice_data` frame must NOT be appended to (its resume is gone); `slice` is for
+        // anything that continues live (window compaction).
+        let mut df = DataFrame::new(
+            vec!["close".into()],
+            vec![Column::f64((0..60).map(|i| i as f64).collect())],
+            None,
+        )
+        .unwrap();
+        df.set_computed("close", "ema:12".into(), 11);
+        df.set_computed_state("close", Some(vec![42.0]));
+        // slice() carries it (continuable, with the recursive state) ...
+        assert_eq!(df.slice(40, 60).computed_columns().len(), 1);
+        // ... slice_data() drops it (same row data, no resume carry) — and the underlying
+        // raw values are identical, so a read-only probe sees exactly the same columns.
+        let data = df.slice_data(40, 60);
+        assert!(data.computed_columns().is_empty());
+        assert_eq!(data.height(), 20);
+        assert_eq!(data.column("close").unwrap().get_f64(0), 40.0);
+    }
+
+    #[test]
     fn assign_positions_scalar_and_array() {
         let mut df = sample();
         // broadcast a scalar into two rows of the F64 column "a"

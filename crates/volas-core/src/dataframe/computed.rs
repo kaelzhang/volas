@@ -17,7 +17,7 @@ impl DataFrame {
         self.computed.insert(
             name.to_string(),
             ComputedMeta {
-                directive,
+                directive: directive.into(),
                 lookback,
                 valid_rows: self.height,
                 state: None,
