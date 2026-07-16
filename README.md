@@ -138,7 +138,7 @@ Verify the install in 30 seconds, then see the [`examples/`](examples/) — each
 is self-contained and prints an `OK:` line:
 
 [![Try the quickstart in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kaelzhang/volas/blob/main/examples/notebooks/volas_quickstart.ipynb)
-[Open a developer Codespace with the notebook pre-opened](https://codespaces.new/kaelzhang/volas)
+[![Open notebook in GitHub Codespaces](https://img.shields.io/badge/Codespaces-Open%20notebook-181717?logo=githubcodespaces&logoColor=white)](https://codespaces.new/kaelzhang/volas)
 
 ```sh
 pip install volas
