@@ -12,6 +12,22 @@ authors = [
 ]
 license = 'MIT'
 license-files = ['LICENSE']
+keywords = [
+  'technical-analysis',
+  'technical-indicators',
+  'algorithmic-trading',
+  'quantitative-finance',
+  'ohlcv',
+  'candlestick',
+  'ta-lib',
+  'pandas',
+  'rust',
+  'python-extension',
+  'stock-indicators',
+  'backtesting',
+  'numpy',
+  'pytorch'
+]
 requires-python = '>=3.11'
 dependencies = [
   "numpy>=2.0.0"
