@@ -8,6 +8,11 @@
   },
   "postCreateCommand": "python -m pip install -U pip maturin pytest numpy && python -m pip install -e . && python examples/00_install_check.py",
   "customizations": {
+    "codespaces": {
+      "openFiles": [
+        "examples/notebooks/volas_quickstart.ipynb"
+      ]
+    },
     "vscode": {
       "extensions": [
         "ms-python.python",
