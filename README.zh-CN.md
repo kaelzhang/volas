@@ -110,6 +110,9 @@ pip install volas
 
 30 秒内验证安装，然后查看 [`examples/`](examples/)——每个脚本都自包含、运行成功会打印一行 `OK:`：
 
+[![在 Colab 中打开 quickstart](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kaelzhang/volas/blob/main/examples/notebooks/volas_quickstart.ipynb)
+[打开开发用 Codespace](https://codespaces.new/kaelzhang/volas)
+
 ```sh
 pip install volas
 python examples/00_install_check.py

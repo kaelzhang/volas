@@ -137,6 +137,9 @@ macOS (x86_64 / arm64) and Windows (x86_64). For a local build from source, see
 Verify the install in 30 seconds, then see the [`examples/`](examples/) — each
 is self-contained and prints an `OK:` line:
 
+[![Open the quickstart in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kaelzhang/volas/blob/main/examples/notebooks/volas_quickstart.ipynb)
+[Open a developer Codespace](https://codespaces.new/kaelzhang/volas)
+
 ```sh
 pip install volas
 python examples/00_install_check.py

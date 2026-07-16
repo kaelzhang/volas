@@ -8,6 +8,11 @@ pip install volas
 python examples/00_install_check.py
 ```
 
+Try the browser quickstart:
+
+[![Open the quickstart in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kaelzhang/volas/blob/main/examples/notebooks/volas_quickstart.ipynb)
+[Open a developer Codespace](https://codespaces.new/kaelzhang/volas)
+
 | Script | Shows |
 | --- | --- |
 | [`00_install_check.py`](00_install_check.py) | Verify the install; compute one indicator. |
