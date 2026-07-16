@@ -837,7 +837,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "volas"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "volas-compute",
  "volas-core",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "volas-arrow"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -861,14 +861,14 @@ dependencies = [
 
 [[package]]
 name = "volas-compute"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "ndarray",
 ]
 
 [[package]]
 name = "volas-core"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "volas-directive"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "volas-compute",
  "volas-core",
@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "volas-io"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "csv",
  "volas-core",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "volas-python"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "ndarray",
  "numpy",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "volas-time"
-version = "3.0.1"
+version = "3.0.2"
 dependencies = [
  "volas-core",
 ]
