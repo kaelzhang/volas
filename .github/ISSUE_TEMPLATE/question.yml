@@ -1,0 +1,21 @@
+name: Question / migration help
+description: Usage questions and migration help from pandas, TA-Lib, or stock-pandas
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do with volas?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context (optional)
+      description: If relevant, include the pandas / TA-Lib / stock-pandas code you are migrating from.
+      render: python
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried? (optional)

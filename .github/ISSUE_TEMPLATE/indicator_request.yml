@@ -12,17 +12,13 @@ body:
   - type: textarea
     id: formula
     attributes:
-      label: Formula and reference
-      description: The definition plus an authoritative source (paper, vendor docs, Investopedia).
-    validations:
-      required: true
+      label: Formula and reference (optional)
+      description: The definition plus an authoritative source, if you have one.
   - type: input
     id: inputs
     attributes:
-      label: Input columns and defaults
+      label: Input columns and defaults (optional)
       placeholder: "e.g. close; period default 14"
-    validations:
-      required: true
   - type: textarea
     id: behavior
     attributes:

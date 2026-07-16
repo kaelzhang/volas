@@ -10,34 +10,33 @@ body:
         it — are welcome. Benchmarks must be reproducible and compared within the
         same run.
   - type: textarea
-    id: fixture
+    id: summary
     attributes:
-      label: Input shape and fixture
-      description: Number of rows/columns, how the data is generated or sourced.
+      label: Case summary
+      description: What workload should the benchmark cover, and why is it realistic?
     validations:
       required: true
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Input shape and fixture (optional)
+      description: Number of rows/columns, how the data is generated or sourced.
   - type: input
     id: indicators
     attributes:
-      label: Indicators computed
+      label: Indicators computed (optional)
       placeholder: "e.g. rsi:14, macd, atr:14"
-    validations:
-      required: true
   - type: dropdown
     id: scenario
     attributes:
-      label: Scenario
+      label: Scenario (optional)
       options:
         - Batch (compute over full history)
         - Append-one-bar (incremental refresh)
         - Both
-    validations:
-      required: true
   - type: textarea
     id: script
     attributes:
-      label: Reproducible script + versions + hardware
+      label: Reproducible script + versions + hardware (optional)
       description: The script, library versions, and the machine/OS it ran on.
       render: shell
-    validations:
-      required: true

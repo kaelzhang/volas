@@ -5,10 +5,8 @@ body:
   - type: input
     id: where
     attributes:
-      label: Where
+      label: Where (optional)
       placeholder: "e.g. README Quick start, INDICATORS.md → rsi, examples/03_..."
-    validations:
-      required: true
   - type: textarea
     id: problem
     attributes:

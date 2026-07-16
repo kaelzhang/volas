@@ -4,7 +4,7 @@ labels: ["bug"]
 body:
   - type: markdown
     attributes:
-      value: Thanks for the report. A minimal reproduction is the single most useful thing you can include.
+      value: Thanks for the report. A minimal reproduction helps most, but a clear description is enough to start.
   - type: textarea
     id: what-happened
     attributes:
@@ -15,22 +15,20 @@ body:
   - type: textarea
     id: repro
     attributes:
-      label: Minimal reproduction
-      description: A self-contained snippet (input frame + directive) that reproduces it.
+      label: Minimal reproduction (optional)
+      description: A self-contained snippet, input frame, or directive that reproduces it.
       render: python
-    validations:
-      required: true
   - type: input
     id: version
     attributes:
-      label: volas version
+      label: volas version (optional)
       placeholder: "e.g. 1.0.2 (pip show volas)"
-    validations:
-      required: true
   - type: input
     id: env
     attributes:
-      label: Python / OS
+      label: Python / OS (optional)
       placeholder: "e.g. Python 3.12 on macOS 14 arm64"
-    validations:
-      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context (optional)

@@ -1429,8 +1429,7 @@ except DirectiveSyntaxError as e:
 # 参与与反馈
 
 欢迎提 issue、指标请求、benchmark 挑战和 PR——参见
-[CONTRIBUTING.md](CONTRIBUTING.md)，或在
-[Discussions](https://github.com/kaelzhang/volas/discussions) 开一个话题。最有价值的反馈是关于 API 设计和 [benchmark 方法论](docs/benchmark-faq.md)的。
+[CONTRIBUTING.md](CONTRIBUTING.md)，并通过 [issue](https://github.com/kaelzhang/volas/issues/new/choose) 选择合适的模板提交。最有价值的反馈是关于 API 设计和 [benchmark 方法论](docs/benchmark-faq.md)的。
 
 如果你在 Python 里搭建实时 OHLCV / 技术指标流水线，欢迎 star 本仓库，关注新增指标、benchmark 结果与发布。
 
