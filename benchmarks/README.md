@@ -55,7 +55,10 @@ make perf-ab BASE=HEAD~1 INDICATOR=bop   # one indicator
 
 ## Add a benchmark case
 
-Open a PR (or a [benchmark-case issue](https://github.com/kaelzhang/volas/issues/new?template=benchmark_case.yml))
+Comment on the standing
+[benchmark challenge thread](https://github.com/kaelzhang/volas/issues/13), open
+a PR, or open a
+[benchmark-case issue](https://github.com/kaelzhang/volas/issues/new?template=benchmark_case.yml)
 that includes:
 
 - the fixture (input shape and how it is generated);

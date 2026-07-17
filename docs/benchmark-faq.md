@@ -44,6 +44,8 @@ for live OHLCV indicator pipelines.
 
 ## How do I challenge or extend the benchmark?
 
-Open a [benchmark-case issue](https://github.com/kaelzhang/volas/issues/new?template=benchmark_case.yml)
-or a PR with a reproducible script (fixture, indicators, scenario, library
+Comment on the standing
+[benchmark challenge thread](https://github.com/kaelzhang/volas/issues/13), open a
+[benchmark-case issue](https://github.com/kaelzhang/volas/issues/new?template=benchmark_case.yml),
+or send a PR with a reproducible script (fixture, indicators, scenario, library
 versions, hardware). Realistic cases where volas loses are explicitly welcome.
