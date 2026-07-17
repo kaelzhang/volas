@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/volas.svg)](https://pypi.org/project/volas/)
 [![Python versions](https://img.shields.io/pypi/pyversions/volas.svg)](https://pypi.org/project/volas/)
 
-# [volas](https://github.com/kaelzhang/volas)
+# [![volas](docs/social.png)](https://github.com/kaelzhang/volas)
 
 English | [简体中文](README.zh-CN.md)
 
