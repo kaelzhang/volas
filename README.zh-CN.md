@@ -119,6 +119,8 @@ python examples/00_install_check.py
 python examples/03_live_ohlcv_append.py   # append 一根 bar，只刷新受影响的尾部
 ```
 
+更多文档：[TA-Lib 迁移](docs/migration-talib.md)、[pandas 迁移](docs/migration-pandas.md)、[directive 速查](docs/directive-cheatsheet.md)、[什么时候不该用 volas](docs/when-not-to-use.md)。
+
 ## 快速上手
 
 ```py

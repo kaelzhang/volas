@@ -146,6 +146,11 @@ python examples/00_install_check.py
 python examples/03_live_ohlcv_append.py   # append a bar, refresh only the stale tail
 ```
 
+More docs: [TA-Lib migration](docs/migration-talib.md),
+[pandas migration](docs/migration-pandas.md),
+[directive cheat sheet](docs/directive-cheatsheet.md), and
+[when not to use volas](docs/when-not-to-use.md).
+
 ## Quick start
 
 ```py
