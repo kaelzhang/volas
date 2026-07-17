@@ -202,6 +202,41 @@ def _coverage_ratio(entries: list[tuple[str, dict]]) -> tuple[float, float, floa
     return v, t, (t / v) if v > 0 else 0.0
 
 
+def _coverage_verdict(score: float) -> str:
+    if score > 1.0:
+        return 'win'
+    if score < 1.0:
+        return 'loss'
+    return 'tie'
+
+
+def _coverage_counts(groups: dict) -> tuple[int, int, int, int] | None:
+    """Default coverage headline counts from only the Tencent fixture ratio."""
+    scores = []
+    for entries in groups.get('coverage', {}).values():
+        metric = _coverage_ratio(entries)
+        if metric is not None:
+            scores.append(metric[2])
+    if not scores:
+        return None
+    wins = sum(1 for score in scores if _coverage_verdict(score) == 'win')
+    ties = sum(1 for score in scores if _coverage_verdict(score) == 'tie')
+    losses = len(scores) - wins - ties
+    return wins, len(scores), ties, losses
+
+
+def _coverage_headline(groups: dict) -> str:
+    counts = _coverage_counts(groups)
+    if counts is None:
+        return ''
+    wins, total, _, _ = counts
+    return (
+        f'<span class="headline">On this run, volas beats TA-Lib on '
+        f'<strong>{wins} / {total}</strong> covered indicators by the default '
+        f'ratio, using the full coverage table below.</span>'
+    )
+
+
 def _coverage_section(groups: dict) -> str:
     """A single volas-vs-TA-Lib table over the whole coverage set, ordered by the
     ``volas vs TA-Lib`` speedup from largest to smallest; a win/loss summary on top."""
@@ -220,25 +255,17 @@ def _coverage_section(groups: dict) -> str:
         }
         rows.append((ind, *base, ext, _coverage_ratio(after_append.get(ind, []))))
     rows.sort(key=lambda r: r[3], reverse=True)  # descending: largest speedup first
-    def verdict(s: float) -> str:
-        if s > 1.0:
-            return 'win'
-        if s < 1.0:
-            return 'loss'
-        return 'tie'
 
     def perf_cell(metric: tuple[float, float, float] | None) -> str:
         if metric is None:
             return '<td class="perf missing">n/a</td>'
         score = metric[2]
-        return f'<td class="perf {verdict(score)}">{score:.2f}×</td>'
+        return f'<td class="perf {_coverage_verdict(score)}">{score:.2f}×</td>'
 
     # The headline is deliberately based only on the default Tencent fixture
     # ratio (`volas vs TA-Lib`). Generated lengths and cached append refresh
     # columns are diagnostics and must not change the top-line coverage count.
-    wins = sum(1 for _, _, _, s, _, _ in rows if verdict(s) == 'win')
-    ties = sum(1 for _, _, _, s, _, _ in rows if verdict(s) == 'tie')
-    losses = len(rows) - wins - ties
+    wins, total, ties, losses = _coverage_counts(groups) or (0, 0, 0, 0)
     extra_heads = ''.join(
         f'<th>volas vs TA-Lib ({html.escape(str(length))})</th>'
         for length in lengths
@@ -250,10 +277,10 @@ def _coverage_section(groups: dict) -> str:
             f'<tr><td class="ind-name">{html.escape(ind)}</td>'
             f'<td>{_fmt_time(v)}</td><td>{_fmt_time(t)}</td>'
             f'{perf_cell(append_metric)}'
-            f'<td class="perf {verdict(s)}">{s:.2f}×</td>'
+            f'<td class="perf {_coverage_verdict(s)}">{s:.2f}×</td>'
             f'{extra_cells}</tr>'
         )
-    summary = (f'<p class="blurb">volas beats TA-Lib on <strong>{wins} / {len(rows)}</strong> '
+    summary = (f'<p class="blurb">volas beats TA-Lib on <strong>{wins} / {total}</strong> '
                f'covered indicators by the default ratio '
                f'({ties} exactly even, {losses} slower).</p>')
     return (f'{summary}<table class="stats cov"><thead><tr>'
@@ -277,6 +304,7 @@ def render(data: dict) -> str:
     when = data.get('datetime', '')
     cpu = machine.get('cpu', {}).get('brand_raw') or machine.get('processor', '')
     pyver = machine.get('python_version', '')
+    coverage_headline = _coverage_headline(groups)
 
     sections = []
     for category in CATEGORY_ORDER:
@@ -320,6 +348,7 @@ def render(data: dict) -> str:
   .intro code {{ background: #eef0f4; padding: 1px 5px; border-radius: 4px; }}
   .intro a {{ color: #4845c9; text-decoration: none; }}
   .intro a:hover {{ text-decoration: underline; }}
+  .headline {{ display: block; margin-top: 7px; color: #2d3440; }}
   h2.rpt {{ font-size: 18px; margin: 0 0 4px; border-top: none; padding-top: 0; }}
   .meta {{ color: #6a7280; font-size: 13px; margin-bottom: 18px; }}
   .meta code {{ background: #eef0f4; padding: 1px 5px; border-radius: 4px; }}
@@ -362,12 +391,12 @@ def render(data: dict) -> str:
       </a>
     </div>
     <p class="intro">A Rust-backed, pandas-shaped <code>DataFrame</code> for live
-      OHLCV pipelines: 242 trading indicators, incremental <code>O(lookback)</code>
+      OHLCV pipelines: a broad trading-indicator set, incremental <code>O(lookback)</code>
       refresh on each new bar, and NumPy/Torch-ready output. This page is the
       project's reproducible benchmark report — regenerated from
       <code>make benchmark</code> on each release. See the
       <a href="https://github.com/kaelzhang/volas">repository</a> for docs and
-      installation.</p>
+      installation.{coverage_headline}</p>
   </header>
   <h2 class="rpt">Benchmark report</h2>
   <div class="meta">

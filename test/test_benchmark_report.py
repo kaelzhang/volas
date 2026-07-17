@@ -61,7 +61,11 @@ def test_coverage_headline_counts_only_default_ratio_column():
     })
 
     assert html.count('<td class="ind-name">') == 2
-    assert 'volas beats TA-Lib on <strong>1 / 2</strong> covered indicators' in html
+    assert (
+        'On this run, volas beats TA-Lib on <strong>1 / 2</strong> covered '
+        'indicators by the default ratio, using the full coverage table below.'
+    ) in html
+    assert '242 trading indicators' not in html
 
 
 def test_windowed_section_rescales_to_per_bar_and_sorts_first():
