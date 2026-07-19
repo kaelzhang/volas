@@ -13,7 +13,7 @@ import volas
 
 
 def _load(n):
-    csv = pd.read_csv("test/data/btcusdt_1m_20k.csv")
+    csv = pd.read_csv("test/data/sample_1m_20k.csv")
     cols = {c: csv[c].to_numpy(float)[:n] for c in ("open", "high", "low", "close", "volume")}
     ts = (csv["open_time"].to_numpy()[:n] * 1_000_000).astype("datetime64[ns]")
     return cols, ts

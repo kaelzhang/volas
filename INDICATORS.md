@@ -232,13 +232,13 @@ for a security or index over a period of time.
 
 - **period** `int` (required)
 - **time_frame?** `str='1d'` Time frame such as `1m`, `15m`, `1h`, or `1d`.
-- **trading_days?** `int=254` Trading days in a year; crypto workflows often use
-  `365`.
+- **trading_days?** `int=254` Trading days in a year; pass an exchange-specific
+  yearly session count when your stock universe uses a different calendar.
 - **on?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
-# 10-period historical volatility for 15-minute data based on 365 yearly days
-df['hv:10,15m,365']
+# 10-period historical volatility for 15-minute data based on 252 US equity sessions
+df['hv:10,15m,252']
 
 # Uses default time_frame and trading_days
 df['hv:10']

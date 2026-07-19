@@ -1,13 +1,14 @@
 //! Per-frame timezone for a `DatetimeIndex`.
 //!
 //! Storage stays **UTC epoch-ns** for every frame (the universal axis that lets
-//! crypto / US / HK / A-share frames coexist and align on the absolute instant).
+//! US / HK / A-share equity frames coexist and align on the absolute instant).
 //! A `Tz` only governs **wall-clock <-> instant** conversion — rendering, label
 //! matching, and day-bucket alignment in cumulation. Two forms:
 //!
-//! - [`Tz::Offset`] — a fixed offset east of UTC (DST-free: crypto / A-share /
-//!   HK). The hot path is an integer add, so a fixed-offset frame costs ~nothing.
-//! - [`Tz::Named`] — a named IANA zone (DST-aware, via `chrono-tz`: US / EU). A
+//! - [`Tz::Offset`] — a fixed offset east of UTC (DST-free: A-share / HK
+//!   equities). The hot path is an integer add, so a fixed-offset frame costs ~nothing.
+//! - [`Tz::Named`] — a named IANA zone (DST-aware, via `chrono-tz`: US / EU
+//!   equities). A
 //!   fixed offset would misalign daily buckets across a DST transition, so a real
 //!   named zone is required there; the per-bar DST lookup is bounded and isolated
 //!   to those frames.

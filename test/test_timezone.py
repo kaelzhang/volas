@@ -4,7 +4,7 @@ Timezone handling is pandas-aligned: parse a column to UTC instants with
 :func:`volas.to_datetime`, promote it to the index with ``set_index``, then tag the display
 zone with ``tz_localize`` (reinterpret naive wall-clock as that zone) or ``tz_convert`` (keep
 the instant, restate the zone). ``_ingest`` below is exactly that idiom; the tests exercise
-it across the A-share / HK / US / crypto cases.
+it across the A-share / HK / US equity cases.
 """
 
 import numpy as np
@@ -76,10 +76,10 @@ def test_bare_string_loc_matches_in_index_tz():
 
 
 def test_cross_market_align_on_utc_axis():
-    # crypto (UTC) and US (NY) bars at the same instant align on the UTC index
-    crypto = _ingest({'t': ['2021-01-04 14:30:00'], 'p': [100.0]})
+    # UTC-indexed and US (NY) bars at the same instant align on the UTC index
+    utc_frame = _ingest({'t': ['2021-01-04 14:30:00'], 'p': [100.0]})
     us = _ingest({'t': ['2021-01-04 09:30:00'], 'p': [200.0]}, tz='America/New_York')
-    assert (crypto.index.astype('datetime64[ns]')[0]
+    assert (utc_frame.index.astype('datetime64[ns]')[0]
             == us.index.astype('datetime64[ns]')[0])
 
 

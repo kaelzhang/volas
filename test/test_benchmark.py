@@ -558,19 +558,19 @@ def states():
 # Indicator values need not match across libraries here (each uses its own ATR
 # spelling) — the section measures the per-bar *flow* cost, not parity.
 
-BTC1M = pd.read_csv(Path(__file__).parent / 'data' / 'btcusdt_1m_20k.csv')
-STREAM_BARS = len(BTC1M)                 # 20 000 real 1-minute bars
+SAMPLE1M = pd.read_csv(Path(__file__).parent / 'data' / 'sample_1m_20k.csv')
+STREAM_BARS = len(SAMPLE1M)              # 20 000 real 1-minute OHLCV bars
 W_WINDOW = 30                            # output window M (15m bars)
 W_TF_MS = 15 * 60 * 1000                 # 15-minute period in ms
 W_ATR = 14                               # atr:14 lookback
 W_CAP = W_WINDOW + W_ATR                 # bounded retention (M + max_lookback)
 
-_W_OT = BTC1M['open_time'].to_numpy()
-_W_O = BTC1M['open'].to_numpy(dtype=float)
-_W_H = BTC1M['high'].to_numpy(dtype=float)
-_W_L = BTC1M['low'].to_numpy(dtype=float)
-_W_C = BTC1M['close'].to_numpy(dtype=float)
-_W_V = BTC1M['volume'].to_numpy(dtype=float)
+_W_OT = SAMPLE1M['open_time'].to_numpy()
+_W_O = SAMPLE1M['open'].to_numpy(dtype=float)
+_W_H = SAMPLE1M['high'].to_numpy(dtype=float)
+_W_L = SAMPLE1M['low'].to_numpy(dtype=float)
+_W_C = SAMPLE1M['close'].to_numpy(dtype=float)
+_W_V = SAMPLE1M['volume'].to_numpy(dtype=float)
 _W_TS = (_W_OT * 1_000_000).astype('datetime64[ns]')   # ms epoch -> ns datetime
 WINDOWED_CANDIDATES = ['pandas', 'polars', 'talib', 'volas']
 
