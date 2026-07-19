@@ -18,7 +18,7 @@
 ```python
 from volas import read_csv
 
-df = read_csv("btc_1m.csv")
+df = read_csv("aapl_1m.csv")
 
 # 把指标 directive 作为 DataFrame 列缓存。
 df["rsi:14"]
@@ -1232,9 +1232,7 @@ float（见[与 pandas 的差异](PANDAS-DIFFERENCES.md)；写入 `volas.NA` / `
 
 ## 时区
 
-底层存储始终是 **UTC 纪元纳秒**——这是 crypto、美股、港股和 A 股等市场共存时，用来按绝对瞬时对齐的统一轴。`DatetimeIndex` 还会携带一个**frame 级时区**，决定这些瞬时如何显示、裸字符串标签如何匹配，以及 `cumulate` 如何对齐日线及更粗周期。时区可以是
-**固定偏移**（如 `'+08:00'`，成本低，适合 crypto / A 股 / 港股），也可以是**具名
-IANA 时区**（如 `'America/New_York'`，通过 `chrono-tz` 支持 DST，适合美股 / 欧洲）。默认是 UTC。
+底层存储始终是 **UTC 纪元纳秒**——这是美股、港股和 A 股等股票市场共存时，用来按绝对瞬时对齐的统一轴。`DatetimeIndex` 还会携带一个**frame 级时区**，决定这些瞬时如何显示、裸字符串标签如何匹配，以及 `cumulate` 如何对齐日线及更粗周期。时区可以是**固定偏移**（如 `'+08:00'`，成本低，适合 A 股 / 港股），也可以是**具名 IANA 时区**（如 `'America/New_York'`，通过 `chrono-tz` 支持 DST，适合美股 / 欧洲）。默认是 UTC。
 
 完整流程如下：先用 `to_datetime` 解析一列，构建 `DatetimeIndex`；再用 `set_index`
 提升为索引；最后用 `tz_localize`（把 naive 挂钟*重新解释为*某个时区，瞬时会移动）或

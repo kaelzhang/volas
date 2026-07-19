@@ -18,7 +18,7 @@ It is **not** a general-purpose pandas replacement. It is a narrow, fast DataFra
 ```python
 from volas import read_csv
 
-df = read_csv("btc_1m.csv")
+df = read_csv("aapl_1m.csv")
 
 # Cache indicator directives as DataFrame columns.
 df["rsi:14"]
@@ -1476,12 +1476,12 @@ overwrite your edit.
 
 ## Timezones
 
-Storage is always **UTC epoch-nanoseconds** — the universal axis on which crypto,
-US, HK and A-share frames coexist and align on the absolute instant. A
+Storage is always **UTC epoch-nanoseconds** — the universal axis on which US,
+HK and A-share equity frames coexist and align on the absolute instant. A
 `DatetimeIndex` additionally carries a **per-frame timezone** that governs how
 those instants render, how bare-string labels match, and how `cumulate` aligns
 day-and-coarser buckets. A timezone is either a **fixed offset** (`'+08:00'`,
-cheap; crypto / A-share / HK) or a **named IANA zone** (`'America/New_York'`,
+cheap; A-share / HK equities) or a **named IANA zone** (`'America/New_York'`,
 DST-aware via `chrono-tz`; US / EU). The default is UTC.
 
 Here is the whole picture. Build a `DatetimeIndex` by parsing a column with
