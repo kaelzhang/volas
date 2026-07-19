@@ -10,7 +10,7 @@ import numpy as np
 
 from volas import DataFrame
 
-# A small synthetic OHLCV frame (replace with volas.read_csv("btc_1m.csv")).
+# A small synthetic OHLCV frame (replace with volas.read_csv("aapl_1m.csv")).
 n = 64
 t = np.arange(n, dtype=float)
 close = 100.0 + 5.0 * np.sin(t / 5.0) + t * 0.1
