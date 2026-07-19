@@ -4,6 +4,17 @@ This page is the complete directive reference for `volas` — **254** indicators
 (each main command, every multi-output sub-command line, and each candlestick
 pattern; counted by `scripts/count_indicators.py` from the Rust source).
 
+## Indicator index
+
+Directive names are case-insensitive. Alias notes list extra command or sub-command spellings accepted by the parser; multi-output indicators list each selectable output line.
+
+- **Volas-exclusive indicators:** [`smma`](#user-content-indicator-smma), [`bbi`](#user-content-indicator-bbi), [`bbw`](#user-content-indicator-bbw), [`rsv`](#user-content-indicator-rsv), [KDJ](#user-content-indicator-kdj) (sub-commands: [`kdj.k`](#user-content-indicator-kdj), [`kdj.d`](#user-content-indicator-kdj), [`kdj.j`](#user-content-indicator-kdj); sub-commands only), [`llv`](#user-content-indicator-llv), [`hhv`](#user-content-indicator-hhv), [`donchian`](#user-content-indicator-donchian) (sub-commands: [`donchian.upper`](#user-content-indicator-donchian), [`donchian.lower`](#user-content-indicator-donchian); aliases: `.middle`/`.m`, `.u`, `.l`), [`hv`](#user-content-indicator-hv), [`psy`](#user-content-indicator-psy), [`dpo`](#user-content-indicator-dpo), [`tsi`](#user-content-indicator-tsi), [`kst`](#user-content-indicator-kst), [`crsi`](#user-content-indicator-crsi), [`chop`](#user-content-indicator-chop), [`cmf`](#user-content-indicator-cmf), [`emv`](#user-content-indicator-emv), [`efi`](#user-content-indicator-efi), [`pvt`](#user-content-indicator-pvt), [`nvi`](#user-content-indicator-nvi), [`pvi`](#user-content-indicator-pvi), [`mass_index`](#user-content-indicator-mass_index), [`bias`](#user-content-indicator-bias), [`dma`](#user-content-indicator-dma) (sub-commands: [`dma.ama`](#user-content-indicator-dma); aliases: `dma.ddd`), [Vortex](#user-content-indicator-vortex) (sub-commands: [`vortex.plus`](#user-content-indicator-vortex), [`vortex.minus`](#user-content-indicator-vortex); aliases: `.p`, `.m`; sub-commands only), [BRAR](#user-content-indicator-brar) (sub-commands: [`brar.ar`](#user-content-indicator-brar), [`brar.br`](#user-content-indicator-brar); sub-commands only), [`vr`](#user-content-indicator-vr), [`coppock`](#user-content-indicator-coppock), [`relative_vigor`](#user-content-indicator-relative_vigor) (sub-commands: [`relative_vigor.signal`](#user-content-indicator-relative_vigor)), [`dkx`](#user-content-indicator-dkx) (sub-commands: [`dkx.ma`](#user-content-indicator-dkx)), [`wvad`](#user-content-indicator-wvad), [`cdp`](#user-content-indicator-cdp) (sub-commands: [`cdp.ah`](#user-content-indicator-cdp), [`cdp.nh`](#user-content-indicator-cdp), [`cdp.nl`](#user-content-indicator-cdp), [`cdp.al`](#user-content-indicator-cdp)), [MIKE](#user-content-indicator-mike) (sub-commands: [`mike.weakr`](#user-content-indicator-mike), [`mike.midr`](#user-content-indicator-mike), [`mike.strongr`](#user-content-indicator-mike), [`mike.weaks`](#user-content-indicator-mike), [`mike.mids`](#user-content-indicator-mike), [`mike.strongs`](#user-content-indicator-mike); sub-commands only), [`keltner`](#user-content-indicator-keltner) (sub-commands: [`keltner.upper`](#user-content-indicator-keltner), [`keltner.lower`](#user-content-indicator-keltner); aliases: `.middle`/`.m`, `.u`, `.l`), [`stoch_momentum`](#user-content-indicator-stoch_momentum) (sub-commands: [`stoch_momentum.signal`](#user-content-indicator-stoch_momentum)), [`ttm_squeeze`](#user-content-indicator-ttm_squeeze) (sub-commands: [`ttm_squeeze.on`](#user-content-indicator-ttm_squeeze)), [`pivot_points`](#user-content-indicator-pivot_points) (sub-commands: [`pivot_points.r1`](#user-content-indicator-pivot_points), [`pivot_points.r2`](#user-content-indicator-pivot_points), [`pivot_points.r3`](#user-content-indicator-pivot_points), [`pivot_points.s1`](#user-content-indicator-pivot_points), [`pivot_points.s2`](#user-content-indicator-pivot_points), [`pivot_points.s3`](#user-content-indicator-pivot_points); aliases: `.p`/`.pp`), [Ichimoku](#user-content-indicator-ichimoku) (sub-commands: [`ichimoku.tenkan`](#user-content-indicator-ichimoku), [`ichimoku.kijun`](#user-content-indicator-ichimoku), [`ichimoku.senkou_a`](#user-content-indicator-ichimoku), [`ichimoku.senkou_b`](#user-content-indicator-ichimoku), [`ichimoku.chikou`](#user-content-indicator-ichimoku); aliases: `.conversion`, `.base`, `.span_a`, `.span_b`, `.lagging`; sub-commands only), [`wad`](#user-content-indicator-wad), [`asi`](#user-content-indicator-asi), [`supertrend`](#user-content-indicator-supertrend) (sub-commands: [`supertrend.direction`](#user-content-indicator-supertrend); aliases: `.line`, `.trend`, `.d`).
+- **Built-in Commands for Statistics:** [`change`](#user-content-indicator-change), [`increase`](#user-content-indicator-increase), [Candle color](#user-content-indicator-style) (sub-commands: [`style.bullish`](#user-content-indicator-style), [`style.bearish`](#user-content-indicator-style); sub-commands only), [`repeat`](#user-content-indicator-repeat), [`median`](#user-content-indicator-median), [`quantile`](#user-content-indicator-quantile), [`rank`](#user-content-indicator-rank), [`skew`](#user-content-indicator-skew), [`kurt`](#user-content-indicator-kurt), [`sem`](#user-content-indicator-sem).
+- **TradingView-compatible directives:** [`vwma`](#user-content-indicator-vwma), [`alma`](#user-content-indicator-alma), [`hma`](#user-content-indicator-hma), [`swma`](#user-content-indicator-swma), [`cog`](#user-content-indicator-cog), [`dev`](#user-content-indicator-dev), [`rci`](#user-content-indicator-rci), [`iii`](#user-content-indicator-iii), [`kcw`](#user-content-indicator-kcw), [`mode`](#user-content-indicator-mode), [`pivothigh`](#user-content-indicator-pivothigh), [`pivotlow`](#user-content-indicator-pivotlow).
+- **TA-Lib-compatible directives:** [`ma`](#user-content-indicator-ma), [`ema`](#user-content-indicator-ema), [`wma`](#user-content-indicator-wma), [`dema`](#user-content-indicator-dema), [`tema`](#user-content-indicator-tema), [`trima`](#user-content-indicator-trima), [`kama`](#user-content-indicator-kama), [`t3`](#user-content-indicator-t3), [`mama`](#user-content-indicator-mama) (sub-commands: [`mama.fama`](#user-content-indicator-mama-fama); aliases: `.mama`), [`mavp`](#user-content-indicator-mavp), [`sar`](#user-content-indicator-sar), [`sarext`](#user-content-indicator-sarext), [`boll`](#user-content-indicator-boll) (sub-commands: [`boll.upper`](#user-content-indicator-boll-upper), [`boll.lower`](#user-content-indicator-boll-lower); aliases: `.middle`/`.m`, `.u`, `.l`), [`accbands`](#user-content-indicator-accbands) (sub-commands: [`accbands.upper`](#user-content-indicator-accbands-upper), [`accbands.lower`](#user-content-indicator-accbands-lower); aliases: `.middle`/`.m`, `.u`, `.l`), [`midpoint`](#user-content-indicator-midpoint), [`midprice`](#user-content-indicator-midprice), [`ht_trendline`](#user-content-indicator-ht_trendline), [`macd`](#user-content-indicator-macd) (sub-commands: [`macd.signal`](#user-content-indicator-macd-signal), [`macd.histogram`](#user-content-indicator-macd-histogram); aliases: `.dif`, `.s`/`.dea`, `.h`/`.macd`), [`macdext`](#user-content-indicator-macdext) (sub-commands: [`macdext.signal`](#user-content-indicator-macdext-signal), [`macdext.histogram`](#user-content-indicator-macdext-histogram); aliases: `.dif`, `.s`/`.dea`, `.h`/`.macd`), [`macdfix`](#user-content-indicator-macdfix) (sub-commands: [`macdfix.signal`](#user-content-indicator-macdfix-signal), [`macdfix.histogram`](#user-content-indicator-macdfix-histogram); aliases: `.dif`, `.s`/`.dea`, `.h`/`.macd`), [`apo`](#user-content-indicator-apo), [`ppo`](#user-content-indicator-ppo), [`rsi`](#user-content-indicator-rsi), [`cmo`](#user-content-indicator-cmo), [`cci`](#user-content-indicator-cci), [`imi`](#user-content-indicator-imi), [`mfi`](#user-content-indicator-mfi), [`bop`](#user-content-indicator-bop), [`willr`](#user-content-indicator-willr), [`mom`](#user-content-indicator-mom), [`roc`](#user-content-indicator-roc), [`rocp`](#user-content-indicator-rocp).
+- **TA-Lib-compatible directives, continued:** [`rocr`](#user-content-indicator-rocr), [`rocr100`](#user-content-indicator-rocr100), [STOCH](#user-content-indicator-stoch-k) (sub-commands: [`stoch.k`](#user-content-indicator-stoch-k), [`stoch.d`](#user-content-indicator-stoch-d); aliases: `.slowk`, `.slowd`; sub-commands only), [STOCHF](#user-content-indicator-stochf-k) (sub-commands: [`stochf.k`](#user-content-indicator-stochf-k), [`stochf.d`](#user-content-indicator-stochf-d); aliases: `.fastk`, `.fastd`; sub-commands only), [STOCHRSI](#user-content-indicator-stochrsi-k) (sub-commands: [`stochrsi.k`](#user-content-indicator-stochrsi-k), [`stochrsi.d`](#user-content-indicator-stochrsi-d); aliases: `.fastk`, `.fastd`; sub-commands only), [`trix`](#user-content-indicator-trix), [`ultosc`](#user-content-indicator-ultosc), [AROON](#user-content-indicator-aroon-up) (sub-commands: [`aroon.up`](#user-content-indicator-aroon-up), [`aroon.down`](#user-content-indicator-aroon-down); aliases: `.u`, `.d`; sub-commands only), [`aroonosc`](#user-content-indicator-aroonosc), [`plus_dm`](#user-content-indicator-plus_dm), [`minus_dm`](#user-content-indicator-minus_dm), [`plus_di`](#user-content-indicator-plus_di), [`minus_di`](#user-content-indicator-minus_di), [`dx`](#user-content-indicator-dx), [`adx`](#user-content-indicator-adx), [`adxr`](#user-content-indicator-adxr), [`obv`](#user-content-indicator-obv), [`ad`](#user-content-indicator-ad), [`adosc`](#user-content-indicator-adosc), [`tr`](#user-content-indicator-tr), [`atr`](#user-content-indicator-atr), [`natr`](#user-content-indicator-natr), [`avgprice`](#user-content-indicator-avgprice), [`medprice`](#user-content-indicator-medprice), [`typprice`](#user-content-indicator-typprice), [`wclprice`](#user-content-indicator-wclprice), [`ht_dcperiod`](#user-content-indicator-ht_dcperiod), [`ht_dcphase`](#user-content-indicator-ht_dcphase), [`ht_phasor`](#user-content-indicator-ht_phasor) (sub-commands: [`ht_phasor.quadrature`](#user-content-indicator-ht_phasor-quadrature); aliases: `.i`/`.inphase`, `.q`/`.quad`), [`ht_sine`](#user-content-indicator-ht_sine) (sub-commands: [`ht_sine.leadsine`](#user-content-indicator-ht_sine-leadsine); aliases: `.sine`, `.lead`), [`ht_trendmode`](#user-content-indicator-ht_trendmode), [`linearreg`](#user-content-indicator-linearreg), [`linearreg_slope`](#user-content-indicator-linearreg_slope), [`linearreg_intercept`](#user-content-indicator-linearreg_intercept), [`linearreg_angle`](#user-content-indicator-linearreg_angle), [`tsf`](#user-content-indicator-tsf), [`var`](#user-content-indicator-var), [`stddev`](#user-content-indicator-stddev), [`correl`](#user-content-indicator-correl), [`beta`](#user-content-indicator-beta), [`sum`](#user-content-indicator-sum), [`maxindex`](#user-content-indicator-maxindex), [`minindex`](#user-content-indicator-minindex), [MINMAX](#user-content-indicator-minmax-min) (sub-commands: [`minmax.min`](#user-content-indicator-minmax-min), [`minmax.max`](#user-content-indicator-minmax-max); sub-commands only), [MINMAXINDEX](#user-content-indicator-minmaxindex-min) (sub-commands: [`minmaxindex.min`](#user-content-indicator-minmaxindex-min), [`minmaxindex.max`](#user-content-indicator-minmaxindex-max); sub-commands only).
+- **Candlestick pattern directives:** every `cdl.<pattern>` entry also accepts `style.<pattern>` as an alias: [`cdl.2crows`](#user-content-indicator-cdl-2crows), [`cdl.3blackcrows`](#user-content-indicator-cdl-3blackcrows), [`cdl.3inside`](#user-content-indicator-cdl-3inside), [`cdl.3linestrike`](#user-content-indicator-cdl-3linestrike), [`cdl.3outside`](#user-content-indicator-cdl-3outside), [`cdl.3starsinsouth`](#user-content-indicator-cdl-3starsinsouth), [`cdl.3whitesoldiers`](#user-content-indicator-cdl-3whitesoldiers), [`cdl.abandonedbaby`](#user-content-indicator-cdl-abandonedbaby), [`cdl.advanceblock`](#user-content-indicator-cdl-advanceblock), [`cdl.belthold`](#user-content-indicator-cdl-belthold), [`cdl.breakaway`](#user-content-indicator-cdl-breakaway), [`cdl.closingmarubozu`](#user-content-indicator-cdl-closingmarubozu), [`cdl.concealbabyswall`](#user-content-indicator-cdl-concealbabyswall), [`cdl.counterattack`](#user-content-indicator-cdl-counterattack), [`cdl.darkcloudcover`](#user-content-indicator-cdl-darkcloudcover), [`cdl.doji`](#user-content-indicator-cdl-doji), [`cdl.dojistar`](#user-content-indicator-cdl-dojistar), [`cdl.dragonflydoji`](#user-content-indicator-cdl-dragonflydoji), [`cdl.engulfing`](#user-content-indicator-cdl-engulfing), [`cdl.eveningdojistar`](#user-content-indicator-cdl-eveningdojistar), [`cdl.eveningstar`](#user-content-indicator-cdl-eveningstar), [`cdl.gapsidesidewhite`](#user-content-indicator-cdl-gapsidesidewhite), [`cdl.gravestonedoji`](#user-content-indicator-cdl-gravestonedoji), [`cdl.hammer`](#user-content-indicator-cdl-hammer), [`cdl.hangingman`](#user-content-indicator-cdl-hangingman), [`cdl.harami`](#user-content-indicator-cdl-harami), [`cdl.haramicross`](#user-content-indicator-cdl-haramicross), [`cdl.highwave`](#user-content-indicator-cdl-highwave), [`cdl.hikkake`](#user-content-indicator-cdl-hikkake), [`cdl.hikkakemod`](#user-content-indicator-cdl-hikkakemod), [`cdl.homingpigeon`](#user-content-indicator-cdl-homingpigeon), [`cdl.identical3crows`](#user-content-indicator-cdl-identical3crows), [`cdl.inneck`](#user-content-indicator-cdl-inneck), [`cdl.invertedhammer`](#user-content-indicator-cdl-invertedhammer), [`cdl.kicking`](#user-content-indicator-cdl-kicking), [`cdl.kickingbylength`](#user-content-indicator-cdl-kickingbylength), [`cdl.ladderbottom`](#user-content-indicator-cdl-ladderbottom), [`cdl.longleggeddoji`](#user-content-indicator-cdl-longleggeddoji), [`cdl.longline`](#user-content-indicator-cdl-longline), [`cdl.marubozu`](#user-content-indicator-cdl-marubozu), [`cdl.matchinglow`](#user-content-indicator-cdl-matchinglow), [`cdl.mathold`](#user-content-indicator-cdl-mathold), [`cdl.morningdojistar`](#user-content-indicator-cdl-morningdojistar), [`cdl.morningstar`](#user-content-indicator-cdl-morningstar), [`cdl.onneck`](#user-content-indicator-cdl-onneck), [`cdl.piercing`](#user-content-indicator-cdl-piercing), [`cdl.rickshawman`](#user-content-indicator-cdl-rickshawman), [`cdl.risefall3methods`](#user-content-indicator-cdl-risefall3methods), [`cdl.separatinglines`](#user-content-indicator-cdl-separatinglines), [`cdl.shootingstar`](#user-content-indicator-cdl-shootingstar), [`cdl.shortline`](#user-content-indicator-cdl-shortline), [`cdl.spinningtop`](#user-content-indicator-cdl-spinningtop), [`cdl.stalledpattern`](#user-content-indicator-cdl-stalledpattern), [`cdl.sticksandwich`](#user-content-indicator-cdl-sticksandwich), [`cdl.takuri`](#user-content-indicator-cdl-takuri), [`cdl.tasukigap`](#user-content-indicator-cdl-tasukigap), [`cdl.thrusting`](#user-content-indicator-cdl-thrusting), [`cdl.tristar`](#user-content-indicator-cdl-tristar), [`cdl.unique3river`](#user-content-indicator-cdl-unique3river), [`cdl.upsidegap2crows`](#user-content-indicator-cdl-upsidegap2crows), [`cdl.xsidegap3methods`](#user-content-indicator-cdl-xsidegap3methods).
+
 Volas supports indicators in two groups. The first group is native to Volas or
 inherits stock-pandas directive names; TA-Lib either has no equivalent or no
 first-class function with the same directive name and OHLCV defaults. The second
@@ -26,7 +37,7 @@ no standard at all. (`df[d]` has always required these; only `directive_stringif
 These directives are implemented by Volas itself. Many of them follow the
 stock-pandas directive vocabulary, with the examples adapted to `volas.DataFrame`.
 
-### `smma`, Smoothed Moving Average
+### <a id="indicator-smma"></a>`smma`, Smoothed Moving Average
 
 ```
 smma:<period>@<on>
@@ -47,7 +58,7 @@ df['smma:5']
 df['smma:10@open']
 ```
 
-### `bbi`, Bull and Bear Index (多空指标)
+### <a id="indicator-bbi"></a>`bbi`, Bull and Bear Index (多空指标)
 
 ```
 bbi:<a>,<b>,<c>,<d>@<on>
@@ -70,7 +81,7 @@ df['bbi']
 df['bbi:5,10,20,30@close']
 ```
 
-### `bbw`, Bollinger Band Width
+### <a id="indicator-bbw"></a>`bbw`, Bollinger Band Width
 
 ```
 bbw:<period>@<on>
@@ -92,7 +103,7 @@ df['bbw']
 df['(boll.upper - boll.lower) / boll']
 ```
 
-### `rsv`, Raw Stochastic Value (未成熟随机值)
+### <a id="indicator-rsv"></a>`rsv`, Raw Stochastic Value (未成熟随机值)
 
 ```
 rsv:<period>@<high>,<low>,<close>
@@ -113,7 +124,7 @@ df['rsv:9']
 df['rsv:9@high,low,close']
 ```
 
-### `kdj`, A Variety of Stochastic Oscillator (随机指标)
+### <a id="indicator-kdj"></a>`kdj`, A Variety of Stochastic Oscillator (随机指标)
 
 KDJ is a variety of the [Stochastic Oscillator](https://en.wikipedia.org/wiki/Stochastic_oscillator)
 indicator created by [Dr. George Lane](https://en.wikipedia.org/wiki/George_Lane_(technical_analyst)),
@@ -155,7 +166,7 @@ df['kdj.d:9,3,3,50@high,low,close']
 df[['kdj.k:9,9,50', 'kdj.d:9,9,9,50', 'kdj.j:9,9,9,50']]
 ```
 
-### `llv`, Lowest of Low Values
+### <a id="indicator-llv"></a>`llv`, Lowest of Low Values
 
 ```
 llv:<period>@<on>
@@ -174,7 +185,7 @@ df['llv:10']
 df['llv:10@close']
 ```
 
-### `hhv`, Highest of High Values
+### <a id="indicator-hhv"></a>`hhv`, Highest of High Values
 
 ```
 hhv:<period>@<on>
@@ -193,7 +204,7 @@ df['hhv:10']
 df['hhv:10@close']
 ```
 
-### `donchian`, Donchian Channels
+### <a id="indicator-donchian"></a>`donchian`, Donchian Channels
 
 ```
 donchian:<period>@<high>,<low>
@@ -221,7 +232,7 @@ df['donchian.u:20']
 df['donchian.l:20']
 ```
 
-### `hv`, Historical Volatility
+### <a id="indicator-hv"></a>`hv`, Historical Volatility
 
 ```
 hv:<period>,<time_frame>,<trading_days>@<on>
@@ -244,7 +255,7 @@ df['hv:10,15m,252']
 df['hv:10']
 ```
 
-### `psy`, Psychological Line (心理线)
+### <a id="indicator-psy"></a>`psy`, Psychological Line (心理线)
 
 ```
 psy:<period>@<on>
@@ -261,7 +272,7 @@ df['psy']
 df['psy:6']
 ```
 
-### `dpo`, Detrended Price Oscillator
+### <a id="indicator-dpo"></a>`dpo`, Detrended Price Oscillator
 
 ```
 dpo:<period>@<on>
@@ -278,7 +289,7 @@ df['dpo']
 df['dpo:10']
 ```
 
-### `tsi`, True Strength Index
+### <a id="indicator-tsi"></a>`tsi`, True Strength Index
 
 ```
 tsi:<long>,<short>@<on>
@@ -296,7 +307,7 @@ df['tsi']
 df['tsi:25,13']
 ```
 
-### `kst`, Know Sure Thing
+### <a id="indicator-kst"></a>`kst`, Know Sure Thing
 
 ```
 kst@<on>
@@ -311,7 +322,7 @@ terms (ROC 10/15/20/30, smoothed by SMA 10/10/10/15, weighted 1/2/3/4).
 df['kst']
 ```
 
-### `crsi`, Connors RSI
+### <a id="indicator-crsi"></a>`crsi`, Connors RSI
 
 ```
 crsi:<rsi>,<streak>,<rank>@<on>
@@ -331,7 +342,7 @@ df['crsi']
 df['crsi:3,2,100']
 ```
 
-### `chop`, Choppiness Index
+### <a id="indicator-chop"></a>`chop`, Choppiness Index
 
 ```
 chop:<period>@<high>,<low>,<close>
@@ -348,7 +359,7 @@ df['chop']
 df['chop:14']
 ```
 
-### `cmf`, Chaikin Money Flow
+### <a id="indicator-cmf"></a>`cmf`, Chaikin Money Flow
 
 ```
 cmf:<period>@<high>,<low>,<close>,<volume>
@@ -365,7 +376,7 @@ df['cmf']
 df['cmf:20']
 ```
 
-### `emv`, Ease of Movement
+### <a id="indicator-emv"></a>`emv`, Ease of Movement
 
 ```
 emv:<period>@<high>,<low>,<volume>
@@ -382,7 +393,7 @@ df['emv']
 df['emv:14']
 ```
 
-### `efi`, Elder Force Index
+### <a id="indicator-efi"></a>`efi`, Elder Force Index
 
 ```
 efi:<period>@<close>,<volume>
@@ -399,7 +410,7 @@ df['efi']
 df['efi:13']
 ```
 
-### `pvt`, Price Volume Trend
+### <a id="indicator-pvt"></a>`pvt`, Price Volume Trend
 
 ```
 pvt@<close>,<volume>
@@ -414,7 +425,7 @@ A cumulative volume line weighted by each bar's return:
 df['pvt']
 ```
 
-### `nvi`, Negative Volume Index
+### <a id="indicator-nvi"></a>`nvi`, Negative Volume Index
 
 ```
 nvi@<close>,<volume>
@@ -429,7 +440,7 @@ fell — tracking the "smart money" days.
 df['nvi']
 ```
 
-### `pvi`, Positive Volume Index
+### <a id="indicator-pvi"></a>`pvi`, Positive Volume Index
 
 ```
 pvi@<close>,<volume>
@@ -444,7 +455,7 @@ rose — tracking the "crowd" days.
 df['pvi']
 ```
 
-### `mass_index`, Mass Index
+### <a id="indicator-mass_index"></a>`mass_index`, Mass Index
 
 ```
 mass_index:<period>@<high>,<low>
@@ -461,7 +472,7 @@ df['mass_index']
 df['mass_index:25']
 ```
 
-### `bias`, Bias Ratio (乖离率)
+### <a id="indicator-bias"></a>`bias`, Bias Ratio (乖离率)
 
 ```
 bias:<period>@<on>
@@ -479,7 +490,7 @@ df['bias']
 df['bias:24']
 ```
 
-### `dma`, Difference of Moving Average (平行线差)
+### <a id="indicator-dma"></a>`dma`, Difference of Moving Average (平行线差)
 
 ```
 dma:<fast>,<slow>@<on>
@@ -505,7 +516,7 @@ df['dma.ddd']
 df['dma.ama']
 ```
 
-### `vortex`, Vortex Indicator
+### <a id="indicator-vortex"></a>`vortex`, Vortex Indicator
 
 ```
 vortex.plus:<period>@<high>,<low>,<close>
@@ -525,7 +536,7 @@ df['vortex.plus']
 df['vortex.minus']
 ```
 
-### `brar`, BRAR Sentiment (人气意愿指标)
+### <a id="indicator-brar"></a>`brar`, BRAR Sentiment (人气意愿指标)
 
 ```
 brar.ar:<period>@<open>,<high>,<low>
@@ -544,7 +555,7 @@ df['brar.ar']
 df['brar.br']
 ```
 
-### `vr`, Volume Ratio (成交量比率)
+### <a id="indicator-vr"></a>`vr`, Volume Ratio (成交量比率)
 
 ```
 vr:<period>@<close>,<volume>
@@ -561,7 +572,7 @@ df['vr']
 df['vr:26']
 ```
 
-### `coppock`, Coppock Curve
+### <a id="indicator-coppock"></a>`coppock`, Coppock Curve
 
 ```
 coppock:<wma>,<roc_long>,<roc_short>@<on>
@@ -581,7 +592,7 @@ df['coppock']
 df['coppock:10,14,11']
 ```
 
-### `relative_vigor`, Relative Vigor Index
+### <a id="indicator-relative_vigor"></a>`relative_vigor`, Relative Vigor Index
 
 ```
 relative_vigor:<period>@<open>,<high>,<low>,<close>
@@ -601,7 +612,7 @@ df['relative_vigor']
 df['relative_vigor.signal']
 ```
 
-### `dkx`, Bull-Bear Line (多空线)
+### <a id="indicator-dkx"></a>`dkx`, Bull-Bear Line (多空线)
 
 ```
 dkx@<open>,<high>,<low>,<close>
@@ -620,7 +631,7 @@ df['dkx']
 df['dkx.ma']
 ```
 
-### `wvad`, Williams Variable Accumulation/Distribution (威廉变异离散量)
+### <a id="indicator-wvad"></a>`wvad`, Williams Variable Accumulation/Distribution (威廉变异离散量)
 
 ```
 wvad:<period>@<open>,<high>,<low>,<close>,<volume>
@@ -638,7 +649,7 @@ df['wvad']
 df['wvad:24']
 ```
 
-### `cdp`, Counter-Trend Operation (逆势操作)
+### <a id="indicator-cdp"></a>`cdp`, Counter-Trend Operation (逆势操作)
 
 ```
 cdp@<high>,<low>,<close>
@@ -661,7 +672,7 @@ df['cdp.ah']     # AH (highest)
 df['cdp.al']     # AL (lowest)
 ```
 
-### `mike`, MIKE Support/Resistance (麦克指标)
+### <a id="indicator-mike"></a>`mike`, MIKE Support/Resistance (麦克指标)
 
 ```
 mike.weakr:<period>@<high>,<low>,<close>
@@ -685,7 +696,7 @@ df['mike.strongr']   # strong resistance
 df['mike.weaks']     # weak support
 ```
 
-### `keltner`, Keltner Channels
+### <a id="indicator-keltner"></a>`keltner`, Keltner Channels
 
 ```
 keltner:<ema_period>@<close>
@@ -708,7 +719,7 @@ df['keltner.upper']
 df['keltner.lower']
 ```
 
-### `stoch_momentum`, Stochastic Momentum Index
+### <a id="indicator-stoch_momentum"></a>`stoch_momentum`, Stochastic Momentum Index
 
 ```
 stoch_momentum:<k>,<d>,<signal>@<high>,<low>,<close>
@@ -730,7 +741,7 @@ df['stoch_momentum']
 df['stoch_momentum.signal']
 ```
 
-### `ttm_squeeze`, TTM Squeeze
+### <a id="indicator-ttm_squeeze"></a>`ttm_squeeze`, TTM Squeeze
 
 ```
 ttm_squeeze:<period>,<bb_mult>,<kc_mult>@<high>,<low>,<close>
@@ -752,7 +763,7 @@ df['ttm_squeeze']       # momentum histogram
 df['ttm_squeeze.on']    # 1.0 = squeeze on
 ```
 
-### `pivot_points`, Pivot Points
+### <a id="indicator-pivot_points"></a>`pivot_points`, Pivot Points
 
 ```
 pivot_points@<high>,<low>,<close>
@@ -772,7 +783,7 @@ df['pivot_points.r1']   # first resistance
 df['pivot_points.s1']   # first support
 ```
 
-### `ichimoku`, Ichimoku Cloud
+### <a id="indicator-ichimoku"></a>`ichimoku`, Ichimoku Cloud
 
 ```
 ichimoku.tenkan:<t>,<k>,<sb>@<high>,<low>,<close>
@@ -801,7 +812,7 @@ df['ichimoku.kijun']
 df['ichimoku.senkou_a']   # the cloud's leading edge, displaced to each bar
 ```
 
-### `wad`, Williams Accumulation/Distribution (威廉多空力度线)
+### <a id="indicator-wad"></a>`wad`, Williams Accumulation/Distribution (威廉多空力度线)
 
 ```
 wad@<high>,<low>,<close>
@@ -817,7 +828,7 @@ flat otherwise.
 df['wad']
 ```
 
-### `asi`, Accumulative Swing Index (振动升降指标)
+### <a id="indicator-asi"></a>`asi`, Accumulative Swing Index (振动升降指标)
 
 ```
 asi:<limit_move>@<open>,<high>,<low>,<close>
@@ -835,7 +846,7 @@ df['asi']
 df['asi:3']
 ```
 
-### `supertrend`, Supertrend
+### <a id="indicator-supertrend"></a>`supertrend`, Supertrend
 
 ```
 supertrend:<period>,<mult>@<high>,<low>,<close>
@@ -858,7 +869,7 @@ df['supertrend.direction']  # +1 up / -1 down
 
 ## Built-in Commands for Statistics
 
-### `change`, Percentage Change
+### <a id="indicator-change"></a>`change`, Percentage Change
 
 ```
 change:<period>@<on>
@@ -884,7 +895,7 @@ df['change:5@close']
 df['change@(ma:20)']
 ```
 
-### `increase`, Consecutive Increase or Decrease
+### <a id="indicator-increase"></a>`increase`, Consecutive Increase or Decrease
 
 ```
 increase:<repeat>,<direction>@<on>
@@ -905,7 +916,7 @@ df['increase:3@(ma:20@close)']
 df['increase:5,-1@close']
 ```
 
-### `style`, Candle Color
+### <a id="indicator-style"></a>`style`, Candle Color
 
 ```
 style.<style>@<open>,<close>
@@ -928,7 +939,7 @@ df['style.bearish']
 df['style.bearish@open,close']
 ```
 
-### `repeat`, Consecutive Boolean Condition
+### <a id="indicator-repeat"></a>`repeat`, Consecutive Boolean Condition
 
 ```
 repeat:<repeat>@<bool_directive>
@@ -949,7 +960,7 @@ df['repeat:3@(style.bullish)']
 df['repeat:5@(close > ma:20)']
 ```
 
-### `median`, Rolling Median
+### <a id="indicator-median"></a>`median`, Rolling Median
 
 ```
 median:<period>@<series>
@@ -966,7 +977,7 @@ df['median:20']            # 20-bar rolling median of close
 df['median:50@volume']     # on another column
 ```
 
-### `quantile`, Rolling Quantile
+### <a id="indicator-quantile"></a>`quantile`, Rolling Quantile
 
 ```
 quantile:<period>,<q>@<series>
@@ -984,7 +995,7 @@ df['quantile:20,0.9']      # the 90th percentile of the last 20 closes
 df['quantile:20,0.1']      # the 10th percentile (lower channel edge)
 ```
 
-### `rank`, Rolling Percent Rank
+### <a id="indicator-rank"></a>`rank`, Rolling Percent Rank
 
 ```
 rank:<period>@<series>
@@ -1002,7 +1013,7 @@ df['rank:254']             # percentile of today's close within the last year
 df['rank:20 > 0.95']       # near the top of its 20-bar range (bool signal)
 ```
 
-### `skew`, Rolling Skewness
+### <a id="indicator-skew"></a>`skew`, Rolling Skewness
 
 ```
 skew:<period>@<series>
@@ -1017,7 +1028,7 @@ The bias-corrected sample skewness of the trailing `period` values.
 df['skew:60@(change)']     # skew of returns over the last 60 bars
 ```
 
-### `kurt`, Rolling Kurtosis
+### <a id="indicator-kurt"></a>`kurt`, Rolling Kurtosis
 
 ```
 kurt:<period>@<series>
@@ -1034,7 +1045,7 @@ window mean dwarfs its spread).
 df['kurt:60@(change)']     # tail-heaviness of recent returns
 ```
 
-### `sem`, Rolling Standard Error of the Mean
+### <a id="indicator-sem"></a>`sem`, Rolling Standard Error of the Mean
 
 ```
 sem:<period>@<series>
@@ -1059,7 +1070,7 @@ the same as the [TA-Lib-compatible](#ta-lib-compatible-directives) table:
 `<name=value>` is an optional argument with its default; a `<name>` **without
 an equals sign is required**.
 
-### `vwma`, Volume-Weighted Moving Average
+### <a id="indicator-vwma"></a>`vwma`, Volume-Weighted Moving Average
 
 ```
 vwma:<period>@<series=close>,<series_volume=volume>
@@ -1078,7 +1089,7 @@ df['vwma:20']              # 20-bar volume-weighted MA of close
 df['vwma:10@(ma:5),volume'] # price = a nested directive, explicit volume
 ```
 
-### `alma`, Arnaud Legoux Moving Average
+### <a id="indicator-alma"></a>`alma`, Arnaud Legoux Moving Average
 
 ```
 alma:<period>,<offset=0.85>,<sigma=6>@<series=close>
@@ -1098,7 +1109,7 @@ df['alma:20']              # default ALMA (offset 0.85, sigma 6)
 df['alma:9,0.5,3']         # centered, narrower
 ```
 
-### `hma`, Hull Moving Average
+### <a id="indicator-hma"></a>`hma`, Hull Moving Average
 
 ```
 hma:<period>@<series=close>
@@ -1114,7 +1125,7 @@ low-lag moving average. Lookback is `period + round(√period) − 2`.
 df['hma:20']
 ```
 
-### `swma`, Symmetrically-Weighted Moving Average
+### <a id="indicator-swma"></a>`swma`, Symmetrically-Weighted Moving Average
 
 ```
 swma@<series=close>
@@ -1130,7 +1141,7 @@ df['swma']
 df['swma@(ema:5)']         # on a nested directive
 ```
 
-### `cog`, Center of Gravity
+### <a id="indicator-cog"></a>`cog`, Center of Gravity
 
 ```
 cog:<period>@<series=close>
@@ -1147,7 +1158,7 @@ recent bar weighted 1, the oldest weighted `period`).
 df['cog:10']
 ```
 
-### `dev`, Mean Absolute Deviation
+### <a id="indicator-dev"></a>`dev`, Mean Absolute Deviation
 
 ```
 dev:<period>@<series=close>
@@ -1163,7 +1174,7 @@ The average absolute deviation about the window mean,
 df['dev:20']
 ```
 
-### `rci`, Rank Correlation Index
+### <a id="indicator-rci"></a>`rci`, Rank Correlation Index
 
 ```
 rci:<period>@<series=close>
@@ -1182,7 +1193,7 @@ df['rci:9']
 df['rci:9 > 80']           # strong up-trend signal
 ```
 
-### `iii`, Intraday Intensity Index
+### <a id="indicator-iii"></a>`iii`, Intraday Intensity Index
 
 ```
 iii@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>
@@ -1198,7 +1209,7 @@ David Bostian's Intraday Intensity Index, a per-bar volume-pressure measure:
 df['iii']
 ```
 
-### `kcw`, Keltner Channel Width
+### <a id="indicator-kcw"></a>`kcw`, Keltner Channel Width
 
 ```
 kcw:<ema_period=20>,<atr_period=10>,<mult=2>@<series_high=high>,<series_low=low>,<series_close=close>
@@ -1219,7 +1230,7 @@ df['kcw']
 df['kcw:20,10,2']
 ```
 
-### `mode`, Rolling Mode
+### <a id="indicator-mode"></a>`mode`, Rolling Mode
 
 ```
 mode:<period>@<series=close>
@@ -1236,7 +1247,7 @@ floating-point prices rarely repeat exactly).
 df['mode:20']
 ```
 
-### `pivothigh` / `pivotlow`, Fractal Pivots
+### <a id="indicator-pivothigh"></a><a id="indicator-pivotlow"></a>`pivothigh` / `pivotlow`, Fractal Pivots
 
 ```
 pivothigh:<leftbars>,<rightbars>@<series=high>
@@ -1317,160 +1328,160 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 
 | Volas directive | TA-Lib original | Meaning | Parameters |
 | --- | --- | --- | --- |
-| `ma` | `MA` | Generic moving average selected by MA type. | `:<period>,<matype=0>@<series=close>` |
-| `ema` | `EMA` | Exponential moving average. | `:<period>@<series=close>` |
-| `wma` | `WMA` | Weighted moving average. | `:<period>@<series=close>` |
-| `dema` | `DEMA` | Double exponential moving average. | `:<period>@<series=close>` |
-| `tema` | `TEMA` | Triple exponential moving average. | `:<period>@<series=close>` |
-| `trima` | `TRIMA` | Triangular moving average. | `:<period>@<series=close>` |
-| `kama` | `KAMA` | Kaufman adaptive moving average. | `:<period>@<series=close>` |
-| `t3` | `T3` | T3 moving average. | `:<period>,<vfactor=0.7>@<series=close>` |
-| `mama` | `MAMA` | MESA adaptive moving average main line. | `:<fast_limit=0.5>,<slow_limit=0.05>@<series=close>` |
-| `mama.fama` | `MAMA` | Following adaptive moving average line. | `:<fast_limit=0.5>,<slow_limit=0.05>@<series=close>` |
-| `mavp` | `MAVP` | Moving average with per-row variable periods; the REQUIRED second input series supplies each row's period (clamped to `[min, max]`). | `:<min>,<max>,<matype=0>@<series_close=close>,<series_periods>` |
-| `sar` | `SAR` | Parabolic SAR. | `:<acceleration=0.02>,<maximum=0.2>@<series_high=high>,<series_low=low>` |
-| `sarext` | `SAREXT` | Extended Parabolic SAR. | `:<start=0>,<offset=0>,<long_init=0.02>,<long_step=0.02>,<long_max=0.2>,<short_init=0.02>,<short_step=0.02>,<short_max=0.2>@<series_high=high>,<series_low=low>` |
-| `boll` | `BBANDS` | Bollinger middle band. | `:<period=20>@<series=close>` |
-| `boll.upper` | `BBANDS` | Bollinger upper band. | `:<period=20>,<times=2>@<series=close>` |
-| `boll.lower` | `BBANDS` | Bollinger lower band. | `:<period=20>,<times=2>@<series=close>` |
-| `accbands` | `ACCBANDS` | Acceleration Bands middle line. | `:<period=20>@<series=close>` |
-| `accbands.upper` | `ACCBANDS` | Acceleration Bands upper line. | `:<period=20>@<series_high=high>,<series_low=low>` |
-| `accbands.lower` | `ACCBANDS` | Acceleration Bands lower line. | `:<period=20>@<series_high=high>,<series_low=low>` |
-| `midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `:<period>@<series=close>` |
-| `midprice` | `MIDPRICE` | Midpoint price over high and low. | `:<period>@<series_high=high>,<series_low=low>` |
-| `ht_trendline` | `HT_TRENDLINE` | Hilbert Transform instantaneous trendline. | `@<series=close>` |
-| `macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. | `:<fast=12>,<slow=26>@<series=close>` |
-| `macd.signal` | `MACD` | Signal line of the Volas MACD line. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
-| `macd.histogram` | `MACD` | MACD histogram: line minus signal. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
-| `macdext` | `MACDEXT` | MACD line with independent MA types. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>@<series=close>` |
-| `macdext.signal` | `MACDEXT` | MACDEXT signal line. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>,<signal=9>,<signal_matype=0>@<series=close>` |
-| `macdext.histogram` | `MACDEXT` | MACDEXT histogram. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>,<signal=9>,<signal_matype=0>@<series=close>` |
-| `macdfix` | `MACDFIX` | Fixed 12/26 MACD line; Volas uses standalone EMA fast minus EMA slow. | `@<series=close>` |
-| `macdfix.signal` | `MACDFIX` | Signal line of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
-| `macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
-| `apo` | `APO` | Absolute price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
-| `ppo` | `PPO` | Percentage price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
-| `rsi` | `RSI` | Relative Strength Index. | `:<period>@<series=close>` |
-| `cmo` | `CMO` | Chande Momentum Oscillator. | `:<period>@<series=close>` |
-| `cci` | `CCI` | Commodity Channel Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `imi` | `IMI` | Intraday Momentum Index. | `:<period>@<series_open=open>,<series_close=close>` |
-| `mfi` | `MFI` | Money Flow Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
-| `bop` | `BOP` | Balance of Power. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `willr` | `WILLR` | Williams Percent Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `mom` | `MOM` | Momentum. | `:<period>@<series=close>` |
-| `roc` | `ROC` | Rate of change. | `:<period>@<series=close>` |
-| `rocp` | `ROCP` | Rate of change percentage. | `:<period>@<series=close>` |
-| `rocr` | `ROCR` | Rate of change ratio. | `:<period>@<series=close>` |
-| `rocr100` | `ROCR100` | Rate of change ratio multiplied by 100. | `:<period>@<series=close>` |
-| `stoch.k` | `STOCH` | Slow stochastic percent K. | `:<fastk=5>,<slowk=3>,<slowk_matype=0>,<slowd=3>,<slowd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `stoch.d` | `STOCH` | Slow stochastic percent D. | `:<fastk=5>,<slowk=3>,<slowk_matype=0>,<slowd=3>,<slowd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `stochf.k` | `STOCHF` | Fast stochastic percent K. | `:<fastk=5>,<fastd=3>,<fastd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `stochf.d` | `STOCHF` | Fast stochastic percent D. | `:<fastk=5>,<fastd=3>,<fastd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `stochrsi.k` | `STOCHRSI` | Fast stochastic RSI percent K. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
-| `stochrsi.d` | `STOCHRSI` | Fast stochastic RSI percent D. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
-| `trix` | `TRIX` | One-period ROC of a triple EMA. | `:<period>@<series=close>` |
-| `ultosc` | `ULTOSC` | Ultimate Oscillator. | `:<short=7>,<medium=14>,<long=28>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `aroon.up` | `AROON` | Aroon up line. | `:<period>@<series_high=high>,<series_low=low>` |
-| `aroon.down` | `AROON` | Aroon down line. | `:<period>@<series_high=high>,<series_low=low>` |
-| `aroonosc` | `AROONOSC` | Aroon oscillator. | `:<period>@<series_high=high>,<series_low=low>` |
-| `plus_dm` | `PLUS_DM` | Plus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
-| `minus_dm` | `MINUS_DM` | Minus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
-| `plus_di` | `PLUS_DI` | Plus directional indicator. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `minus_di` | `MINUS_DI` | Minus directional indicator. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `dx` | `DX` | Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `adx` | `ADX` | Average Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `adxr` | `ADXR` | Average Directional Movement Index Rating. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `obv` | `OBV` | On-Balance Volume. | `@<series_close=close>,<series_volume=volume>` |
-| `ad` | `AD` | Chaikin Accumulation Distribution line. | `@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
-| `adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `:<fast=3>,<slow=10>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
-| `tr` | `TRANGE` | True Range. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `atr` | `ATR` | Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `natr` | `NATR` | Normalized Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `avgprice` | `AVGPRICE` | Average price. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `medprice` | `MEDPRICE` | Median price. | `@<series_high=high>,<series_low=low>` |
-| `typprice` | `TYPPRICE` | Typical price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `wclprice` | `WCLPRICE` | Weighted close price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
-| `ht_dcperiod` | `HT_DCPERIOD` | Hilbert Transform dominant cycle period. | `@<series=close>` |
-| `ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. | `@<series=close>` |
-| `ht_phasor` | `HT_PHASOR` | Hilbert Transform phasor in-phase line. | `@<series=close>` |
-| `ht_phasor.quadrature` | `HT_PHASOR` | Hilbert Transform phasor quadrature line. | `@<series=close>` |
-| `ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@<series=close>` |
-| `ht_sine.leadsine` | `HT_SINE` | Hilbert Transform lead sine wave. | `@<series=close>` |
-| `ht_trendmode` | `HT_TRENDMODE` | Hilbert Transform trend versus cycle mode. | `@<series=close>` |
-| `linearreg` | `LINEARREG` | Linear regression value. | `:<period>@<series=close>` |
-| `linearreg_slope` | `LINEARREG_SLOPE` | Linear regression slope. | `:<period>@<series=close>` |
-| `linearreg_intercept` | `LINEARREG_INTERCEPT` | Linear regression intercept. | `:<period>@<series=close>` |
-| `linearreg_angle` | `LINEARREG_ANGLE` | Linear regression angle. | `:<period>@<series=close>` |
-| `tsf` | `TSF` | Time Series Forecast. | `:<period>@<series=close>` |
-| `var` | `VAR` | Variance. | `:<period>@<series=close>` |
-| `stddev` | `STDDEV` | Standard deviation. | `:<period>,<nbdev>@<series=close>` |
-| `correl` | `CORREL` | Pearson correlation coefficient. | `:<period>@<series=close>,<series_other>` |
-| `beta` | `BETA` | Beta. | `:<period>@<series=close>,<series_other>` |
-| `sum` | `SUM` | Rolling sum. | `:<period>@<series=close>` |
-| `maxindex` | `MAXINDEX` | Index of the rolling maximum. | `:<period>@<series=close>` |
-| `minindex` | `MININDEX` | Index of the rolling minimum. | `:<period>@<series=close>` |
-| `minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `:<period>@<series=close>` |
-| `minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `:<period>@<series=close>` |
-| `minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `:<period>@<series=close>` |
-| `minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `:<period>@<series=close>` |
-| `cdl.2crows` | `CDL2CROWS` | Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.3blackcrows` | `CDL3BLACKCROWS` | Three Black Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.3inside` | `CDL3INSIDE` | Three Inside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.3linestrike` | `CDL3LINESTRIKE` | Three-Line Strike  | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.3outside` | `CDL3OUTSIDE` | Three Outside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.3starsinsouth` | `CDL3STARSINSOUTH` | Three Stars In The South | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.3whitesoldiers` | `CDL3WHITESOLDIERS` | Three Advancing White Soldiers | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.abandonedbaby` | `CDLABANDONEDBABY` | Abandoned Baby | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.advanceblock` | `CDLADVANCEBLOCK` | Advance Block | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.belthold` | `CDLBELTHOLD` | Belt-hold | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.breakaway` | `CDLBREAKAWAY` | Breakaway | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.closingmarubozu` | `CDLCLOSINGMARUBOZU` | Closing Marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.concealbabyswall` | `CDLCONCEALBABYSWALL` | Concealing Baby Swallow | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.counterattack` | `CDLCOUNTERATTACK` | Counterattack | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.darkcloudcover` | `CDLDARKCLOUDCOVER` | Dark Cloud Cover | `:<penetration=0.5>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.doji` | `CDLDOJI` | Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.dojistar` | `CDLDOJISTAR` | Doji Star | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.dragonflydoji` | `CDLDRAGONFLYDOJI` | Dragonfly Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.engulfing` | `CDLENGULFING` | Engulfing Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.eveningdojistar` | `CDLEVENINGDOJISTAR` | Evening Doji Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.eveningstar` | `CDLEVENINGSTAR` | Evening Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.gapsidesidewhite` | `CDLGAPSIDESIDEWHITE` | Up/Down-gap side-by-side white lines | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.gravestonedoji` | `CDLGRAVESTONEDOJI` | Gravestone Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.hammer` | `CDLHAMMER` | Hammer | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.hangingman` | `CDLHANGINGMAN` | Hanging Man | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.harami` | `CDLHARAMI` | Harami Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.haramicross` | `CDLHARAMICROSS` | Harami Cross Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.highwave` | `CDLHIGHWAVE` | High-Wave Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.hikkake` | `CDLHIKKAKE` | Hikkake Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.hikkakemod` | `CDLHIKKAKEMOD` | Modified Hikkake Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.homingpigeon` | `CDLHOMINGPIGEON` | Homing Pigeon | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.identical3crows` | `CDLIDENTICAL3CROWS` | Identical Three Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.inneck` | `CDLINNECK` | In-Neck Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.invertedhammer` | `CDLINVERTEDHAMMER` | Inverted Hammer | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.kicking` | `CDLKICKING` | Kicking | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.kickingbylength` | `CDLKICKINGBYLENGTH` | Kicking - bull/bear determined by the longer marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.ladderbottom` | `CDLLADDERBOTTOM` | Ladder Bottom | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.longleggeddoji` | `CDLLONGLEGGEDDOJI` | Long Legged Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.longline` | `CDLLONGLINE` | Long Line Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.marubozu` | `CDLMARUBOZU` | Marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.matchinglow` | `CDLMATCHINGLOW` | Matching Low | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.mathold` | `CDLMATHOLD` | Mat Hold | `:<penetration=0.5>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.morningdojistar` | `CDLMORNINGDOJISTAR` | Morning Doji Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.morningstar` | `CDLMORNINGSTAR` | Morning Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.onneck` | `CDLONNECK` | On-Neck Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.piercing` | `CDLPIERCING` | Piercing Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.rickshawman` | `CDLRICKSHAWMAN` | Rickshaw Man | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.risefall3methods` | `CDLRISEFALL3METHODS` | Rising/Falling Three Methods | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.separatinglines` | `CDLSEPARATINGLINES` | Separating Lines | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.shootingstar` | `CDLSHOOTINGSTAR` | Shooting Star | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.shortline` | `CDLSHORTLINE` | Short Line Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.spinningtop` | `CDLSPINNINGTOP` | Spinning Top | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.stalledpattern` | `CDLSTALLEDPATTERN` | Stalled Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.sticksandwich` | `CDLSTICKSANDWICH` | Stick Sandwich | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.takuri` | `CDLTAKURI` | Takuri (Dragonfly Doji with very long lower shadow) | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.tasukigap` | `CDLTASUKIGAP` | Tasuki Gap | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.thrusting` | `CDLTHRUSTING` | Thrusting Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.tristar` | `CDLTRISTAR` | Tristar Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.unique3river` | `CDLUNIQUE3RIVER` | Unique 3 River | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.upsidegap2crows` | `CDLUPSIDEGAP2CROWS` | Upside Gap Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
-| `cdl.xsidegap3methods` | `CDLXSIDEGAP3METHODS` | Upside/Downside Gap Three Methods | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-ma"></a>`ma` | `MA` | Generic moving average selected by MA type. | `:<period>,<matype=0>@<series=close>` |
+| <a id="indicator-ema"></a>`ema` | `EMA` | Exponential moving average. | `:<period>@<series=close>` |
+| <a id="indicator-wma"></a>`wma` | `WMA` | Weighted moving average. | `:<period>@<series=close>` |
+| <a id="indicator-dema"></a>`dema` | `DEMA` | Double exponential moving average. | `:<period>@<series=close>` |
+| <a id="indicator-tema"></a>`tema` | `TEMA` | Triple exponential moving average. | `:<period>@<series=close>` |
+| <a id="indicator-trima"></a>`trima` | `TRIMA` | Triangular moving average. | `:<period>@<series=close>` |
+| <a id="indicator-kama"></a>`kama` | `KAMA` | Kaufman adaptive moving average. | `:<period>@<series=close>` |
+| <a id="indicator-t3"></a>`t3` | `T3` | T3 moving average. | `:<period>,<vfactor=0.7>@<series=close>` |
+| <a id="indicator-mama"></a>`mama` | `MAMA` | MESA adaptive moving average main line. | `:<fast_limit=0.5>,<slow_limit=0.05>@<series=close>` |
+| <a id="indicator-mama-fama"></a>`mama.fama` | `MAMA` | Following adaptive moving average line. | `:<fast_limit=0.5>,<slow_limit=0.05>@<series=close>` |
+| <a id="indicator-mavp"></a>`mavp` | `MAVP` | Moving average with per-row variable periods; the REQUIRED second input series supplies each row's period (clamped to `[min, max]`). | `:<min>,<max>,<matype=0>@<series_close=close>,<series_periods>` |
+| <a id="indicator-sar"></a>`sar` | `SAR` | Parabolic SAR. | `:<acceleration=0.02>,<maximum=0.2>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-sarext"></a>`sarext` | `SAREXT` | Extended Parabolic SAR. | `:<start=0>,<offset=0>,<long_init=0.02>,<long_step=0.02>,<long_max=0.2>,<short_init=0.02>,<short_step=0.02>,<short_max=0.2>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-boll"></a>`boll` | `BBANDS` | Bollinger middle band. | `:<period=20>@<series=close>` |
+| <a id="indicator-boll-upper"></a>`boll.upper` | `BBANDS` | Bollinger upper band. | `:<period=20>,<times=2>@<series=close>` |
+| <a id="indicator-boll-lower"></a>`boll.lower` | `BBANDS` | Bollinger lower band. | `:<period=20>,<times=2>@<series=close>` |
+| <a id="indicator-accbands"></a>`accbands` | `ACCBANDS` | Acceleration Bands middle line. | `:<period=20>@<series=close>` |
+| <a id="indicator-accbands-upper"></a>`accbands.upper` | `ACCBANDS` | Acceleration Bands upper line. | `:<period=20>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-accbands-lower"></a>`accbands.lower` | `ACCBANDS` | Acceleration Bands lower line. | `:<period=20>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-midpoint"></a>`midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `:<period>@<series=close>` |
+| <a id="indicator-midprice"></a>`midprice` | `MIDPRICE` | Midpoint price over high and low. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-ht_trendline"></a>`ht_trendline` | `HT_TRENDLINE` | Hilbert Transform instantaneous trendline. | `@<series=close>` |
+| <a id="indicator-macd"></a>`macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. | `:<fast=12>,<slow=26>@<series=close>` |
+| <a id="indicator-macd-signal"></a>`macd.signal` | `MACD` | Signal line of the Volas MACD line. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
+| <a id="indicator-macd-histogram"></a>`macd.histogram` | `MACD` | MACD histogram: line minus signal. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
+| <a id="indicator-macdext"></a>`macdext` | `MACDEXT` | MACD line with independent MA types. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>@<series=close>` |
+| <a id="indicator-macdext-signal"></a>`macdext.signal` | `MACDEXT` | MACDEXT signal line. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>,<signal=9>,<signal_matype=0>@<series=close>` |
+| <a id="indicator-macdext-histogram"></a>`macdext.histogram` | `MACDEXT` | MACDEXT histogram. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>,<signal=9>,<signal_matype=0>@<series=close>` |
+| <a id="indicator-macdfix"></a>`macdfix` | `MACDFIX` | Fixed 12/26 MACD line; Volas uses standalone EMA fast minus EMA slow. | `@<series=close>` |
+| <a id="indicator-macdfix-signal"></a>`macdfix.signal` | `MACDFIX` | Signal line of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
+| <a id="indicator-macdfix-histogram"></a>`macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
+| <a id="indicator-apo"></a>`apo` | `APO` | Absolute price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
+| <a id="indicator-ppo"></a>`ppo` | `PPO` | Percentage price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
+| <a id="indicator-rsi"></a>`rsi` | `RSI` | Relative Strength Index. | `:<period>@<series=close>` |
+| <a id="indicator-cmo"></a>`cmo` | `CMO` | Chande Momentum Oscillator. | `:<period>@<series=close>` |
+| <a id="indicator-cci"></a>`cci` | `CCI` | Commodity Channel Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-imi"></a>`imi` | `IMI` | Intraday Momentum Index. | `:<period>@<series_open=open>,<series_close=close>` |
+| <a id="indicator-mfi"></a>`mfi` | `MFI` | Money Flow Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
+| <a id="indicator-bop"></a>`bop` | `BOP` | Balance of Power. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-willr"></a>`willr` | `WILLR` | Williams Percent Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-mom"></a>`mom` | `MOM` | Momentum. | `:<period>@<series=close>` |
+| <a id="indicator-roc"></a>`roc` | `ROC` | Rate of change. | `:<period>@<series=close>` |
+| <a id="indicator-rocp"></a>`rocp` | `ROCP` | Rate of change percentage. | `:<period>@<series=close>` |
+| <a id="indicator-rocr"></a>`rocr` | `ROCR` | Rate of change ratio. | `:<period>@<series=close>` |
+| <a id="indicator-rocr100"></a>`rocr100` | `ROCR100` | Rate of change ratio multiplied by 100. | `:<period>@<series=close>` |
+| <a id="indicator-stoch-k"></a>`stoch.k` | `STOCH` | Slow stochastic percent K. | `:<fastk=5>,<slowk=3>,<slowk_matype=0>,<slowd=3>,<slowd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-stoch-d"></a>`stoch.d` | `STOCH` | Slow stochastic percent D. | `:<fastk=5>,<slowk=3>,<slowk_matype=0>,<slowd=3>,<slowd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-stochf-k"></a>`stochf.k` | `STOCHF` | Fast stochastic percent K. | `:<fastk=5>,<fastd=3>,<fastd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-stochf-d"></a>`stochf.d` | `STOCHF` | Fast stochastic percent D. | `:<fastk=5>,<fastd=3>,<fastd_matype=0>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-stochrsi-k"></a>`stochrsi.k` | `STOCHRSI` | Fast stochastic RSI percent K. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
+| <a id="indicator-stochrsi-d"></a>`stochrsi.d` | `STOCHRSI` | Fast stochastic RSI percent D. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
+| <a id="indicator-trix"></a>`trix` | `TRIX` | One-period ROC of a triple EMA. | `:<period>@<series=close>` |
+| <a id="indicator-ultosc"></a>`ultosc` | `ULTOSC` | Ultimate Oscillator. | `:<short=7>,<medium=14>,<long=28>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-aroon-up"></a>`aroon.up` | `AROON` | Aroon up line. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-aroon-down"></a>`aroon.down` | `AROON` | Aroon down line. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-aroonosc"></a>`aroonosc` | `AROONOSC` | Aroon oscillator. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-plus_dm"></a>`plus_dm` | `PLUS_DM` | Plus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-minus_dm"></a>`minus_dm` | `MINUS_DM` | Minus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-plus_di"></a>`plus_di` | `PLUS_DI` | Plus directional indicator. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-minus_di"></a>`minus_di` | `MINUS_DI` | Minus directional indicator. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-dx"></a>`dx` | `DX` | Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-adx"></a>`adx` | `ADX` | Average Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-adxr"></a>`adxr` | `ADXR` | Average Directional Movement Index Rating. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-obv"></a>`obv` | `OBV` | On-Balance Volume. | `@<series_close=close>,<series_volume=volume>` |
+| <a id="indicator-ad"></a>`ad` | `AD` | Chaikin Accumulation Distribution line. | `@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
+| <a id="indicator-adosc"></a>`adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `:<fast=3>,<slow=10>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
+| <a id="indicator-tr"></a>`tr` | `TRANGE` | True Range. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-atr"></a>`atr` | `ATR` | Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-natr"></a>`natr` | `NATR` | Normalized Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-avgprice"></a>`avgprice` | `AVGPRICE` | Average price. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-medprice"></a>`medprice` | `MEDPRICE` | Median price. | `@<series_high=high>,<series_low=low>` |
+| <a id="indicator-typprice"></a>`typprice` | `TYPPRICE` | Typical price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-wclprice"></a>`wclprice` | `WCLPRICE` | Weighted close price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-ht_dcperiod"></a>`ht_dcperiod` | `HT_DCPERIOD` | Hilbert Transform dominant cycle period. | `@<series=close>` |
+| <a id="indicator-ht_dcphase"></a>`ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. | `@<series=close>` |
+| <a id="indicator-ht_phasor"></a>`ht_phasor` | `HT_PHASOR` | Hilbert Transform phasor in-phase line. | `@<series=close>` |
+| <a id="indicator-ht_phasor-quadrature"></a>`ht_phasor.quadrature` | `HT_PHASOR` | Hilbert Transform phasor quadrature line. | `@<series=close>` |
+| <a id="indicator-ht_sine"></a>`ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@<series=close>` |
+| <a id="indicator-ht_sine-leadsine"></a>`ht_sine.leadsine` | `HT_SINE` | Hilbert Transform lead sine wave. | `@<series=close>` |
+| <a id="indicator-ht_trendmode"></a>`ht_trendmode` | `HT_TRENDMODE` | Hilbert Transform trend versus cycle mode. | `@<series=close>` |
+| <a id="indicator-linearreg"></a>`linearreg` | `LINEARREG` | Linear regression value. | `:<period>@<series=close>` |
+| <a id="indicator-linearreg_slope"></a>`linearreg_slope` | `LINEARREG_SLOPE` | Linear regression slope. | `:<period>@<series=close>` |
+| <a id="indicator-linearreg_intercept"></a>`linearreg_intercept` | `LINEARREG_INTERCEPT` | Linear regression intercept. | `:<period>@<series=close>` |
+| <a id="indicator-linearreg_angle"></a>`linearreg_angle` | `LINEARREG_ANGLE` | Linear regression angle. | `:<period>@<series=close>` |
+| <a id="indicator-tsf"></a>`tsf` | `TSF` | Time Series Forecast. | `:<period>@<series=close>` |
+| <a id="indicator-var"></a>`var` | `VAR` | Variance. | `:<period>@<series=close>` |
+| <a id="indicator-stddev"></a>`stddev` | `STDDEV` | Standard deviation. | `:<period>,<nbdev>@<series=close>` |
+| <a id="indicator-correl"></a>`correl` | `CORREL` | Pearson correlation coefficient. | `:<period>@<series=close>,<series_other>` |
+| <a id="indicator-beta"></a>`beta` | `BETA` | Beta. | `:<period>@<series=close>,<series_other>` |
+| <a id="indicator-sum"></a>`sum` | `SUM` | Rolling sum. | `:<period>@<series=close>` |
+| <a id="indicator-maxindex"></a>`maxindex` | `MAXINDEX` | Index of the rolling maximum. | `:<period>@<series=close>` |
+| <a id="indicator-minindex"></a>`minindex` | `MININDEX` | Index of the rolling minimum. | `:<period>@<series=close>` |
+| <a id="indicator-minmax-min"></a>`minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `:<period>@<series=close>` |
+| <a id="indicator-minmax-max"></a>`minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `:<period>@<series=close>` |
+| <a id="indicator-minmaxindex-min"></a>`minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `:<period>@<series=close>` |
+| <a id="indicator-minmaxindex-max"></a>`minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `:<period>@<series=close>` |
+| <a id="indicator-cdl-2crows"></a>`cdl.2crows` | `CDL2CROWS` | Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-3blackcrows"></a>`cdl.3blackcrows` | `CDL3BLACKCROWS` | Three Black Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-3inside"></a>`cdl.3inside` | `CDL3INSIDE` | Three Inside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-3linestrike"></a>`cdl.3linestrike` | `CDL3LINESTRIKE` | Three-Line Strike  | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-3outside"></a>`cdl.3outside` | `CDL3OUTSIDE` | Three Outside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-3starsinsouth"></a>`cdl.3starsinsouth` | `CDL3STARSINSOUTH` | Three Stars In The South | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-3whitesoldiers"></a>`cdl.3whitesoldiers` | `CDL3WHITESOLDIERS` | Three Advancing White Soldiers | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-abandonedbaby"></a>`cdl.abandonedbaby` | `CDLABANDONEDBABY` | Abandoned Baby | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-advanceblock"></a>`cdl.advanceblock` | `CDLADVANCEBLOCK` | Advance Block | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-belthold"></a>`cdl.belthold` | `CDLBELTHOLD` | Belt-hold | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-breakaway"></a>`cdl.breakaway` | `CDLBREAKAWAY` | Breakaway | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-closingmarubozu"></a>`cdl.closingmarubozu` | `CDLCLOSINGMARUBOZU` | Closing Marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-concealbabyswall"></a>`cdl.concealbabyswall` | `CDLCONCEALBABYSWALL` | Concealing Baby Swallow | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-counterattack"></a>`cdl.counterattack` | `CDLCOUNTERATTACK` | Counterattack | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-darkcloudcover"></a>`cdl.darkcloudcover` | `CDLDARKCLOUDCOVER` | Dark Cloud Cover | `:<penetration=0.5>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-doji"></a>`cdl.doji` | `CDLDOJI` | Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-dojistar"></a>`cdl.dojistar` | `CDLDOJISTAR` | Doji Star | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-dragonflydoji"></a>`cdl.dragonflydoji` | `CDLDRAGONFLYDOJI` | Dragonfly Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-engulfing"></a>`cdl.engulfing` | `CDLENGULFING` | Engulfing Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-eveningdojistar"></a>`cdl.eveningdojistar` | `CDLEVENINGDOJISTAR` | Evening Doji Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-eveningstar"></a>`cdl.eveningstar` | `CDLEVENINGSTAR` | Evening Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-gapsidesidewhite"></a>`cdl.gapsidesidewhite` | `CDLGAPSIDESIDEWHITE` | Up/Down-gap side-by-side white lines | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-gravestonedoji"></a>`cdl.gravestonedoji` | `CDLGRAVESTONEDOJI` | Gravestone Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-hammer"></a>`cdl.hammer` | `CDLHAMMER` | Hammer | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-hangingman"></a>`cdl.hangingman` | `CDLHANGINGMAN` | Hanging Man | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-harami"></a>`cdl.harami` | `CDLHARAMI` | Harami Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-haramicross"></a>`cdl.haramicross` | `CDLHARAMICROSS` | Harami Cross Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-highwave"></a>`cdl.highwave` | `CDLHIGHWAVE` | High-Wave Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-hikkake"></a>`cdl.hikkake` | `CDLHIKKAKE` | Hikkake Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-hikkakemod"></a>`cdl.hikkakemod` | `CDLHIKKAKEMOD` | Modified Hikkake Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-homingpigeon"></a>`cdl.homingpigeon` | `CDLHOMINGPIGEON` | Homing Pigeon | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-identical3crows"></a>`cdl.identical3crows` | `CDLIDENTICAL3CROWS` | Identical Three Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-inneck"></a>`cdl.inneck` | `CDLINNECK` | In-Neck Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-invertedhammer"></a>`cdl.invertedhammer` | `CDLINVERTEDHAMMER` | Inverted Hammer | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-kicking"></a>`cdl.kicking` | `CDLKICKING` | Kicking | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-kickingbylength"></a>`cdl.kickingbylength` | `CDLKICKINGBYLENGTH` | Kicking - bull/bear determined by the longer marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-ladderbottom"></a>`cdl.ladderbottom` | `CDLLADDERBOTTOM` | Ladder Bottom | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-longleggeddoji"></a>`cdl.longleggeddoji` | `CDLLONGLEGGEDDOJI` | Long Legged Doji | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-longline"></a>`cdl.longline` | `CDLLONGLINE` | Long Line Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-marubozu"></a>`cdl.marubozu` | `CDLMARUBOZU` | Marubozu | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-matchinglow"></a>`cdl.matchinglow` | `CDLMATCHINGLOW` | Matching Low | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-mathold"></a>`cdl.mathold` | `CDLMATHOLD` | Mat Hold | `:<penetration=0.5>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-morningdojistar"></a>`cdl.morningdojistar` | `CDLMORNINGDOJISTAR` | Morning Doji Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-morningstar"></a>`cdl.morningstar` | `CDLMORNINGSTAR` | Morning Star | `:<penetration=0.3>@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-onneck"></a>`cdl.onneck` | `CDLONNECK` | On-Neck Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-piercing"></a>`cdl.piercing` | `CDLPIERCING` | Piercing Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-rickshawman"></a>`cdl.rickshawman` | `CDLRICKSHAWMAN` | Rickshaw Man | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-risefall3methods"></a>`cdl.risefall3methods` | `CDLRISEFALL3METHODS` | Rising/Falling Three Methods | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-separatinglines"></a>`cdl.separatinglines` | `CDLSEPARATINGLINES` | Separating Lines | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-shootingstar"></a>`cdl.shootingstar` | `CDLSHOOTINGSTAR` | Shooting Star | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-shortline"></a>`cdl.shortline` | `CDLSHORTLINE` | Short Line Candle | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-spinningtop"></a>`cdl.spinningtop` | `CDLSPINNINGTOP` | Spinning Top | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-stalledpattern"></a>`cdl.stalledpattern` | `CDLSTALLEDPATTERN` | Stalled Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-sticksandwich"></a>`cdl.sticksandwich` | `CDLSTICKSANDWICH` | Stick Sandwich | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-takuri"></a>`cdl.takuri` | `CDLTAKURI` | Takuri (Dragonfly Doji with very long lower shadow) | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-tasukigap"></a>`cdl.tasukigap` | `CDLTASUKIGAP` | Tasuki Gap | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-thrusting"></a>`cdl.thrusting` | `CDLTHRUSTING` | Thrusting Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-tristar"></a>`cdl.tristar` | `CDLTRISTAR` | Tristar Pattern | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-unique3river"></a>`cdl.unique3river` | `CDLUNIQUE3RIVER` | Unique 3 River | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-upsidegap2crows"></a>`cdl.upsidegap2crows` | `CDLUPSIDEGAP2CROWS` | Upside Gap Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-cdl-xsidegap3methods"></a>`cdl.xsidegap3methods` | `CDLXSIDEGAP3METHODS` | Upside/Downside Gap Three Methods | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
