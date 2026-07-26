@@ -1,0 +1,55 @@
+name: docs
+
+# Read the Docs publishes `latest` through its native GitHub integration.
+# This workflow runs the same strict build first so broken documentation
+# cannot reach main unnoticed. No Read the Docs token is required here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/docs.yml"
+      - ".readthedocs.yaml"
+      - "docs/**"
+      - "Makefile"
+  pull_request:
+    paths:
+      - ".github/workflows/docs.yml"
+      - ".readthedocs.yaml"
+      - "docs/**"
+      - "Makefile"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: docs/requirements.txt
+
+      - name: Install documentation dependencies
+        run: python -m pip install --requirement docs/requirements.txt
+
+      - name: Build documentation
+        run: make docs
+
+      - name: Upload rendered documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: volas-docs
+          path: docs/_build/html
+          if-no-files-found: error
+          retention-days: 7

@@ -35,4 +35,6 @@ implicit conversions. If your workflow depends on pandas accepting mixed Python
 objects in a column, use pandas for that stage and cross into volas only for the
 OHLCV indicator segment.
 
-See [PANDAS-DIFFERENCES.md](../PANDAS-DIFFERENCES.md) for the detailed contract.
+See
+[PANDAS-DIFFERENCES.md](https://github.com/kaelzhang/volas/blob/main/PANDAS-DIFFERENCES.md)
+for the detailed contract.

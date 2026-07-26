@@ -65,6 +65,6 @@ part of the frame.
 
 See also:
 
-- [TA-Lib example script](../examples/04_talib_migration.py)
+- [TA-Lib example script](https://github.com/kaelzhang/volas/blob/main/examples/04_talib_migration.py)
 - [Directive cheat sheet](directive-cheatsheet.md)
 - [Benchmark FAQ](benchmark-faq.md)

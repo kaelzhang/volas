@@ -1,7 +1,8 @@
 # Benchmark FAQ
 
 The published report is at **https://volas.ost.ai/**. For what it measures and
-how to reproduce it, see [benchmarks/README.md](../benchmarks/README.md).
+how to reproduce it, see
+[benchmarks/README.md](https://github.com/kaelzhang/volas/blob/main/benchmarks/README.md).
 
 ## Is the benchmark fair to TA-Lib?
 

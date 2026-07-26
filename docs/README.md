@@ -1,12 +1,19 @@
-# volas docs
+# volas docs source
 
-Start with the main [README](../README.md) if you are new to volas. This
-directory holds short guides for common decisions after the quickstart.
+The rendered documentation starts at [index.md](index.md). The remaining
+Markdown files are focused guides included in that page's Sphinx navigation.
 
-| Goal | Read |
-| --- | --- |
-| Check benchmark claims and methodology | [Benchmark FAQ](benchmark-faq.md) |
-| Move TA-Lib calls into volas directives | [TA-Lib migration](migration-talib.md) |
-| Move a pandas OHLCV pipeline into volas | [pandas migration](migration-pandas.md) |
-| Find output names for multi-output indicators | [Directive cheat sheet](directive-cheatsheet.md) |
-| Decide whether volas is the wrong tool | [When not to use volas](when-not-to-use.md) |
+Build the site from the repository root:
+
+```sh
+python -m pip install --requirement docs/requirements.txt
+make docs
+```
+
+## Read the Docs publication
+
+`.readthedocs.yaml` is the production build contract. After the repository is
+imported through the Read the Docs GitHub integration, a push to `main`
+automatically rebuilds the `latest` version. The `docs` GitHub workflow runs
+the same warning-as-error build on pull requests and pushes; it does not store
+publication credentials or upload a second copy of the site.

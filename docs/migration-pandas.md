@@ -61,12 +61,14 @@ Keep pandas or polars for general dataframe analytics: joins, pivots,
 group-bys, arbitrary reshaping, mixed `object` columns, and non-OHLCV tables.
 Those are not the target of volas.
 
-Read [PANDAS-DIFFERENCES.md](../PANDAS-DIFFERENCES.md) before depending on edge
+Read
+[PANDAS-DIFFERENCES.md](https://github.com/kaelzhang/volas/blob/main/PANDAS-DIFFERENCES.md)
+before depending on edge
 cases. The type system is deliberately stricter: volas preserves dtype and raises
 on lossy implicit conversions instead of silently widening to `object` or
 `float64`.
 
 See also:
 
-- [pandas migration example](../examples/02_pandas_migration.py)
+- [pandas migration example](https://github.com/kaelzhang/volas/blob/main/examples/02_pandas_migration.py)
 - [When not to use volas](when-not-to-use.md)

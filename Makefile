@@ -12,7 +12,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX = $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV = VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -87,6 +87,11 @@ coverage:
 # Same, rendered to a browsable HTML report under target/volas-cov/html/.
 coverage-html:
 	@VOLAS_PYTHON="$(PYTHON)" bash scripts/coverage.sh --html
+
+# Build the same strict Sphinx site that Read the Docs publishes. Install the
+# pinned toolchain first with `$(PIP) install -r docs/requirements.txt`.
+docs:
+	@$(PYTHON) -m sphinx -W --keep-going -b html docs docs/_build/html
 
 # Run the multi-library performance benchmark (pandas / stock-pandas / polars /
 # TA-Lib / DuckDB / volas), for both batch indicator computation and the

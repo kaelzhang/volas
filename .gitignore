@@ -21,6 +21,7 @@ __pycache__/
 .coverage.*
 htmlcov/
 .benchmarks
+docs/_build/
 docs/animated_gif/.fonts/
 docs/animated_gif/*.gif
 # llvm-cov coverage artifacts (cargo test doctests scatter these into crate dirs)

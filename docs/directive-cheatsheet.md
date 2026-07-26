@@ -41,4 +41,5 @@ Short aliases such as `macd.s` and `boll.u` are accepted for compatibility, but
 public examples should prefer the stable full names: `macd.signal`,
 `boll.upper`, `aroon.down`, and so on.
 
-The complete reference is [INDICATORS.md](../INDICATORS.md).
+The complete reference is
+[INDICATORS.md](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md).
