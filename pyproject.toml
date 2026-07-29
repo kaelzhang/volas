@@ -119,6 +119,12 @@ ignore_missing_imports = true
 no_implicit_optional = true
 strict_optional = true
 
+[tool.ruff.lint]
+# The gated rule set, stated explicitly (pycodestyle errors + pyflakes). Ruff's
+# built-in default changed in 0.16 to a much broader curated set; relying on the
+# implicit default lets an unpinned ruff upgrade silently change what CI gates on.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.ruff.lint.per-file-ignores]
 # Test-only style exemptions (the volas package itself is fully strict):
 # E741 — `l` is the industry-standard OHLC low alongside o/h/c in fixtures
