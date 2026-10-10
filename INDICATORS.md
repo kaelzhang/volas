@@ -29,8 +29,9 @@ Bollinger's `20`, MACD's `12,26,9`). A parameter written `<name>` (no `=value`) 
 supply the value your strategy uses. Common choices are indicator-specific — RSI is
 most often `14` but `9` / `21` / `25` are all used; ATR / ADX usually `14`; Donchian
 `20`, also `10` / `55`; a moving-average period or a rolling `sum` / `var` window has
-no standard at all. (`df[d]` has always required these; only `directive_stringify` /
-`directive_lookback` now reject a bare required form.)
+no standard at all. `df[d]` and `directive_lookback` reject a directive that omits a
+required argument; `directive_stringify` accepts it, because it only names the
+indicator. A trailing colon with nothing after it (`obv:`) means no arguments.
 
 ## Volas-exclusive indicators
 

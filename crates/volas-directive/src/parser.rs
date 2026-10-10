@@ -313,6 +313,10 @@ impl<'a> Parser<'a> {
             self.bump();
             has_args = true;
             args = self.read_args();
+            // `cmd:` — a colon with nothing after it names no arguments, not one empty one.
+            if args == [None] {
+                args.clear();
+            }
         }
         self.skip_ws();
         let mut series = Vec::new();

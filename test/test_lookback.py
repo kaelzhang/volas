@@ -7,6 +7,7 @@ the top-level ``directive_lookback(directive)``.
 
 import pytest
 
+import volas
 from volas import directive_lookback
 
 # (directive, expected_lookback) — identical to the stock-pandas suite.
@@ -49,3 +50,40 @@ CASES = [
 @pytest.mark.parametrize('directive,expected', CASES)
 def test_directive_lookback(directive, expected):
     assert directive_lookback(directive) == expected
+
+
+# --- frame-blind validation of a bare command / an empty argument list ----------
+
+@pytest.mark.parametrize("directive,why", [
+    ("ma", "argument #0 is required"),      # a known command missing a required argument
+    ("ma:5@ma", "argument #0 is required"),  # ... nested as a series operand too
+    ("kdj", "requires a sub-command"),
+])
+def test_bare_known_command_must_bind_as_written(directive, why):
+    with pytest.raises(volas.DirectiveValueError, match=why):
+        volas.directive_lookback(directive)
+
+
+@pytest.mark.parametrize("directive", ["close", "vwap", "my_feature"])
+def test_bare_unknown_name_is_a_column_reference(directive):
+    assert volas.directive_lookback(directive) == 0
+
+
+def test_stringify_stays_lenient_on_a_missing_required_argument():
+    assert volas.directive_stringify("ma") == "ma"
+
+
+@pytest.mark.parametrize("directive,lookback", [("obv:", 0), ("tr:", 1), ("ad:", 0), ("bbi:", 24)])
+def test_an_empty_argument_list_means_no_arguments(directive, lookback):
+    assert volas.directive_lookback(directive) == lookback
+    assert volas.directive_stringify(directive) == directive[:-1]
+
+
+def test_an_empty_argument_list_executes():
+    df = volas.DataFrame({"close": [1.0, 2.0, 3.0], "volume": [10.0, 20.0, 30.0]})
+    assert df.exec("obv:").tolist() == df.exec("obv").tolist()
+
+
+def test_an_empty_argument_list_still_requires_a_required_argument():
+    with pytest.raises(volas.DirectiveValueError, match="argument #0 is required"):
+        volas.directive_lookback("ma:")

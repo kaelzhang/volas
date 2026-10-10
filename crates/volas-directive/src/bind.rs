@@ -114,11 +114,23 @@ fn check_bare_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The bare-name rule for `directive_lookback`: without a frame a bare name is taken
+/// as a command, so a known command must bind exactly as written — one with no sub-less
+/// form (`kdj`) or a missing required argument (`ma`) is rejected, as `df[d]` rejects it
+/// at execute, instead of passing as a 0-lookback column. An unknown bare name is an
+/// unverifiable column reference and passes.
+fn check_bare_command(name: &str) -> Result<()> {
+    if is_command(&normalize(name)) {
+        bind_command(name, None, &[], &[])?;
+    }
+    Ok(())
+}
+
 /// Walk a bound [`Ast`] applying only the bare-name rule — every `Command` was
 /// already validated when `bind` produced the tree. Used by `directive_lookback`.
 pub fn check_bare<A>(node: &Node<A>) -> Result<()> {
     match node {
-        Node::Name(name) => check_bare_name(name),
+        Node::Name(name) => check_bare_command(name),
         Node::Scalar(_) => Ok(()),
         Node::Command(c) => c.series.iter().try_for_each(check_bare),
         Node::Unary { operand, .. } => check_bare(operand),
