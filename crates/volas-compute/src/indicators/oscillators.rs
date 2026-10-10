@@ -420,10 +420,16 @@ pub fn cmo_resume(
 }
 
 /// Scalar single-row twin of [`rsi_resume`]: the RSI at `row` continued from
-/// `state = [avg_gain, avg_loss]`, returning just the value — no tail/state `Vec`.
-/// Mirrors `rsi_resume`'s Wilder step + `100 - 100/(1+g/l)` (flat-loss → 100) output
-/// bit-for-bit. `None` at `row == 0`, short `state`, or `row` out of range.
-pub fn rsi_resume_one(close: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+/// `state = [avg_gain, avg_loss]` (as of `row - 1`), with the advanced state as of `row`
+/// — no tail/state `Vec`. Mirrors `rsi_resume`'s Wilder step + `100 - 100/(1+g/l)`
+/// (flat-loss → 100) bit-for-bit. `None` at `row == 0`, short `state`, or `row` out of
+/// range.
+pub fn rsi_resume_one(
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<(f64, [f64; 2])> {
     if row == 0 || state.len() < 2 || row >= close.len() {
         return None;
     }
@@ -433,18 +439,25 @@ pub fn rsi_resume_one(close: &[f64], period: usize, row: usize, state: &[f64]) -
     let (gain, loss) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
     let avg_gain = (state[0] * p1 + gain) / pf;
     let avg_loss = (state[1] * p1 + loss) / pf;
-    Some(if avg_loss.abs() < 1e-10 {
+    let value = if avg_loss.abs() < 1e-10 {
         100.0
     } else {
         100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
-    })
+    };
+    Some((value, [avg_gain, avg_loss]))
 }
 
 /// Scalar single-row twin of [`cmo_resume`]: the CMO at `row` continued from
-/// `state = [avg_gain, avg_loss]`, value only — no tail/state `Vec`. Mirrors
-/// `cmo_resume`'s fused Wilder step + `100·(g-l)/(g+l)` (flat-window → 0) output
-/// bit-for-bit. `None` at `row == 0`, short `state`, or `row` out of range.
-pub fn cmo_resume_one(close: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+/// `state = [avg_gain, avg_loss]` (as of `row - 1`), with the advanced state as of `row`
+/// — no tail/state `Vec`. Mirrors `cmo_resume`'s fused Wilder step + `100·(g-l)/(g+l)`
+/// (flat-window → 0) bit-for-bit. `None` at `row == 0`, short `state`, or `row` out of
+/// range.
+pub fn cmo_resume_one(
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+) -> Option<(f64, [f64; 2])> {
     if row == 0 || state.len() < 2 || row >= close.len() {
         return None;
     }
@@ -454,11 +467,12 @@ pub fn cmo_resume_one(close: &[f64], period: usize, row: usize, state: &[f64]) -
     let avg_gain = state[0].mul_add(a, d.max(0.0) * b);
     let avg_loss = state[1].mul_add(a, (-d).max(0.0) * b);
     let denom = avg_gain + avg_loss;
-    Some(if denom < 1e-14 {
+    let value = if denom < 1e-14 {
         0.0
     } else {
         100.0 * (avg_gain - avg_loss) / denom
-    })
+    };
+    Some((value, [avg_gain, avg_loss]))
 }
 
 /// Donchian middle channel (`(hhv + llv) / 2`).

@@ -50,6 +50,25 @@ def test_forming_resume_bit_exact_vs_full_recompute(directive):
             _bit_exact(np.asarray(live[directive]), np.asarray(ref[directive]), f"{directive} i={i}")
 
 
+# A plain (non-tf) append advances the carried state every bar, so the scalar step
+# must write back the state it advanced to — which is not the row's value for the
+# two-state Wilder pair (rsi / cmo carry the average gain and loss) or for natr (it
+# carries the ATR it scales).
+@pytest.mark.parametrize(
+    "directive", ["atr:14", "ema:20", "smma:14", "rsi:14", "natr:14", "cmo:14"]
+)
+def test_plain_append_scalar_resume_bit_exact_vs_full_recompute(directive):
+    n, seed = 600, 100
+    cols, ts = _load(n)
+    live = volas.DataFrame({k: v[:seed] for k, v in cols.items()}, index=ts[:seed])
+    live[directive]
+    for i in range(seed, n):
+        live.append(volas.DataFrame({k: v[i : i + 1] for k, v in cols.items()}, index=ts[i : i + 1]))
+        live.fulfill()
+    ref = volas.DataFrame(cols, index=ts)
+    _bit_exact(np.asarray(live[directive]), np.asarray(ref[directive]), directive)
+
+
 # Every recursive indicator with a zero-alloc scalar `*_resume_one` twin: the live
 # forming-row resume must stay bit-exact versus a from-scratch full recompute, exactly
 # like atr above. (The index family and stochrsi `.d` have no scalar twin and keep the

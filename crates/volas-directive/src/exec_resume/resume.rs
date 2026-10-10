@@ -9,6 +9,34 @@ use volas_core::{Column, DataFrame};
 
 use super::as_command;
 
+/// One row advanced by the scalar single-row resume: the row's value and the carried
+/// state as of that row. A plain append writes the state back so the next row continues
+/// from it; the tf forming-row refresh keeps only the value, leaving its state anchored at
+/// the last closed bar. (The state is not always the value: RSI / CMO carry the average
+/// gain and loss, NATR carries the ATR it scales.)
+#[derive(Clone, Copy, Debug)]
+pub struct ResumeStep {
+    /// The value at the resumed row.
+    pub value: f64,
+    state: [f64; 2],
+    len: usize,
+}
+
+impl ResumeStep {
+    fn single(value: f64, state: f64) -> Self {
+        ResumeStep { value, state: [state, 0.0], len: 1 }
+    }
+
+    fn pair(value: f64, state: [f64; 2]) -> Self {
+        ResumeStep { value, state, len: 2 }
+    }
+
+    /// The carried state as of the resumed row.
+    pub fn state(&self) -> &[f64] {
+        &self.state[..self.len]
+    }
+}
+
 /// Single new-row resume for a recursive indicator whose carried state is a single
 /// element equal to its output (`ema` / `smma`): returns the value at `row` — which is
 /// also the new state `[value]` — with NO `Vec` allocation, the live single-bar fast
@@ -21,7 +49,7 @@ pub fn execute_resume_one(
     directive: &str,
     prev_state: &[f64],
     row: usize,
-) -> Option<f64> {
+) -> Option<ResumeStep> {
     // Cheap name gate FIRST: skip the parse entirely for every directive this scalar
     // path can't serve (rsi / macd / …), so a non-resumable recursive column does not
     // pay a wasted parse here on top of the parse the general path already does.
@@ -45,7 +73,7 @@ pub fn execute_resume_one_node(
     node: &Ast,
     prev_state: &[f64],
     row: usize,
-) -> Option<f64> {
+) -> Option<ResumeStep> {
     let (name, _sub, args, series) = as_command(node)?;
     let name = name.as_ref();
     if !matches!(name, "ema" | "smma" | "atr" | "natr" | "rsi" | "cmo") {
@@ -59,19 +87,20 @@ pub fn execute_resume_one_node(
         let low = series_f64(df, series, 1, "low").ok()?;
         let close = series_f64(df, series, 2, "close").ok()?;
         let atr = ind::atr_resume_one(&high, &low, &close, period, row, prev_state)?;
-        return Some(if name == "natr" { atr / close[row] * 100.0 } else { atr });
+        let value = if name == "natr" { atr / close[row] * 100.0 } else { atr };
+        return Some(ResumeStep::single(value, atr));
     }
     let close = series_f64(df, series, 0, "close").ok()?; // borrowed for an F64 close
     // `name` is one of the gated close-series families above — dispatch directly, the
     // final arm (`cmo`) is the gate's remainder so there is no dead catch-all.
     if name == "ema" {
-        ind::ema_resume_one(&close, period, row, prev_state)
+        ind::ema_resume_one(&close, period, row, prev_state).map(|v| ResumeStep::single(v, v))
     } else if name == "smma" {
-        ind::smma_resume_one(&close, period, row, prev_state)
+        ind::smma_resume_one(&close, period, row, prev_state).map(|v| ResumeStep::single(v, v))
     } else if name == "rsi" {
-        ind::rsi_resume_one(&close, period, row, prev_state)
+        ind::rsi_resume_one(&close, period, row, prev_state).map(|(v, s)| ResumeStep::pair(v, s))
     } else {
-        ind::cmo_resume_one(&close, period, row, prev_state)
+        ind::cmo_resume_one(&close, period, row, prev_state).map(|(v, s)| ResumeStep::pair(v, s))
     }
 }
 

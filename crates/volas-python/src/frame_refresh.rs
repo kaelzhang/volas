@@ -44,19 +44,21 @@ impl PyDataFrame {
                             .map_err(pyerr)?;
                         continue;
                     }
-                    // Recursive single-state single-row fast path (ema/smma): the new
-                    // value IS the new state `[value]`, so write the value and update the
-                    // state IN PLACE — no tail/state `Vec` allocation. Bit-identical to
+                    // Recursive single-row fast path (ema / smma / atr / natr / rsi / cmo):
+                    // one step yields the row's value AND the advanced carried state, both
+                    // written IN PLACE — no tail/state `Vec` allocation. Bit-identical to
                     // the `Vec` resume below (same shared `*_step` kernel). The state is
                     // borrowed straight off `self.inner` and dropped before the write.
                     let scalar = self.inner.computed_resume_state(&name).and_then(|(state, _)| {
                         volas_directive::exec::execute_resume_one(&self.inner, &name, state, vr)
                     });
-                    if let Some(value) = scalar {
+                    if let Some(step) = scalar {
                         self.inner
-                            .update_computed_f64_value(&name, vr, value)
+                            .update_computed_f64_value(&name, vr, step.value)
                             .map_err(pyerr)?;
-                        self.inner.update_computed_state_at(&name, 0, value);
+                        for (i, &s) in step.state().iter().enumerate() {
+                            self.inner.update_computed_state_at(&name, i, s);
+                        }
                         continue;
                     }
                 }
@@ -240,12 +242,13 @@ impl PyDataFrame {
             // directional / cascade / volume families): a single anchored step, no
             // tail/state allocation. Ordered ahead of the stateless dispatch below so a
             // recursive column never pays that dispatch's ~12-arm name-match miss.
+            // Only the value: the advanced state is discarded to keep the anchor.
             let scalar = self.inner.computed_resume_state(name).and_then(|(state, _)| {
                 volas_directive::exec::execute_resume_one_node(&self.inner, &node, state, vr)
             });
-            if let Some(value) = scalar {
+            if let Some(step) = scalar {
                 self.inner
-                    .update_computed_f64_value(name, vr, value)
+                    .update_computed_f64_value(name, vr, step.value)
                     .map_err(pyerr)?;
                 return Ok(true);
             }
