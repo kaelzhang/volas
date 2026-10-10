@@ -1,28 +1,54 @@
+use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
+
 // ---------------------------------------------------------------------------
 // Math operators — rolling reductions over a fixed window
 // ---------------------------------------------------------------------------
 
 /// Rolling sum over `period` (TA-Lib SUM), O(n) via a sliding total (TA-Lib's exact
-/// order: add current, emit, drop trailing). Lookback `period-1`.
+/// order: add current, emit, drop trailing). Lookback `period-1`. Window-local: a
+/// non-finite row affects only the windows holding it (see [`crate::guard`]).
 pub fn sum(data: &[f64], period: usize) -> Vec<f64> {
+    let (out, total) = sum_with::<Unguarded>(data, period);
+    if total.is_finite() {
+        out
+    } else {
+        sum_with::<NonFiniteRows>(data, period).0
+    }
+}
+
+/// The sliding sum under a row guard; also returns the final running total.
+fn sum_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, f64) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
-        return out;
+        return (out, 0.0);
     }
+    let mut guard = G::default();
     let mut total = 0.0;
     for &x in &data[..period - 1] {
-        total += x;
+        if guard.enter(x.is_finite()) {
+            total += x;
+        }
     }
     let mut trailing = 0;
     #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for i in (period - 1)..n {
-        total += data[i];
-        out[i] = total;
-        total -= data[trailing];
+        let x = data[i];
+        if guard.enter(x.is_finite()) {
+            total += x;
+        }
+        out[i] = if guard.clean() {
+            total
+        } else {
+            data[i + 1 - period..=i].iter().sum()
+        };
+        let old = data[trailing];
+        if guard.leave(old.is_finite()) {
+            total -= old;
+        }
         trailing += 1;
     }
-    out
+    (out, total)
 }
 
 /// Absolute index (as a float) of the highest value in each trailing `period`-bar

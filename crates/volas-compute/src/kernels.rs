@@ -10,6 +10,7 @@
 //! the available ILP, so a measured `f64x2` SIMD variant came out 1.00x — explicit
 //! SIMD buys nothing here.
 
+use crate::guard::{NonFiniteRows, RowGuard};
 use ndarray::{Array1, ArrayView1};
 use std::collections::VecDeque;
 
@@ -50,31 +51,33 @@ pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
                 out.push(sum / period as f64);
             }
         }
-        if !sum.is_nan() {
+        if sum.is_finite() {
             return Array1::from_vec(out);
         }
     }
-    // Slow path — NaN-aware: a window containing any NaN yields NaN.
+    // Careful path — window-local (see [`crate::guard`]): the running sum holds only
+    // finite rows; a window holding a non-finite row takes its own mean directly
+    // (NaN for a NaN, ±inf for an infinity), so a bad row never outlives its window.
     let mut result = Array1::from_elem(n, f64::NAN);
+    let mut guard = NonFiniteRows::default();
     let mut sum = 0.0;
-    let mut nan_count = 0usize;
     for i in 0..n {
         let x = data[i];
-        if x.is_nan() {
-            nan_count += 1;
-        } else {
+        if guard.enter(x.is_finite()) {
             sum += x;
         }
         if i >= period {
             let leaving = data[i - period];
-            if leaving.is_nan() {
-                nan_count -= 1;
-            } else {
+            if guard.leave(leaving.is_finite()) {
                 sum -= leaving;
             }
         }
-        if i + 1 >= period && nan_count == 0 {
-            result[i] = sum / period as f64;
+        if i + 1 >= period {
+            result[i] = if guard.clean() {
+                sum / period as f64
+            } else {
+                (i + 1 - period..=i).map(|j| data[j]).sum::<f64>() / period as f64
+            };
         }
     }
     result
@@ -527,159 +530,8 @@ pub fn rolling_max(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     result
 }
 
-/// Rolling standard deviation with `ddof` degrees of freedom.
-///
-/// O(n) sliding sums of `x` and `x²`: `var = (Σx² - (Σx)²/period) / (period -
-/// ddof)`, emitted only for fully-populated windows. The variance is clamped at
-/// zero before the square root to absorb floating-point cancellation; for the
-/// magnitudes seen in OHLCV data this stays well within the parity tolerance of
-/// the two-pass form it replaces.
-#[inline]
-pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize) -> Array1<f64> {
-    let n = data.len();
-    let mut result = Array1::from_elem(n, f64::NAN);
-    if period == 0 || period > n || period <= ddof {
-        return result;
-    }
-    let p = period as f64;
-    let denom = (period - ddof) as f64;
-    // Fast path — contiguous data with no NaN: clean sliding sums of x and x²
-    // with no per-element NaN bookkeeping. Same accumulation order, so it is
-    // bit-identical to the slow path for NaN-free data while running faster — the
-    // common case for real OHLCV.
-    if let Some(src) = data.as_slice() {
-        if !src.iter().any(|x| x.is_nan()) {
-            {
-                let dst = result.as_slice_mut().expect("from_elem is contiguous");
-                let mut sum = 0.0;
-                let mut sum_sq = 0.0;
-                for i in 0..n {
-                    let x = src[i];
-                    sum += x;
-                    sum_sq += x * x;
-                    if i >= period {
-                        let leaving = src[i - period];
-                        sum -= leaving;
-                        sum_sq -= leaving * leaving;
-                    }
-                    if i + 1 >= period {
-                        let variance = (sum_sq - sum * sum / p) / denom;
-                        dst[i] = variance.max(0.0).sqrt();
-                    }
-                }
-            }
-            return result;
-        }
-    }
-    // Slow path — NaN-aware: a window containing any NaN yields NaN.
-    let mut sum = 0.0;
-    let mut sum_sq = 0.0;
-    let mut nan_count = 0usize;
-    for i in 0..n {
-        let x = data[i];
-        if x.is_nan() {
-            nan_count += 1;
-        } else {
-            sum += x;
-            sum_sq += x * x;
-        }
-        if i >= period {
-            let leaving = data[i - period];
-            if leaving.is_nan() {
-                nan_count -= 1;
-            } else {
-                sum -= leaving;
-                sum_sq -= leaving * leaving;
-            }
-        }
-        if i + 1 >= period && nan_count == 0 {
-            let variance = (sum_sq - sum * sum / p) / denom;
-            result[i] = variance.max(0.0).sqrt();
-        }
-    }
-    result
-}
-
-/// Fused rolling **mean and std** in a single pass — one NaN scan, one sliding
-/// accumulation of Σx and Σx². Bit-identical to calling [`sma`] and
-/// [`rolling_std`] separately (same accumulation order), but Bollinger
-/// bands / bandwidth need both, so this halves the rolling work (one buffer
-/// init, one scan, one loop instead of two).
-#[inline]
-pub fn rolling_mean_std(
-    data: ArrayView1<f64>,
-    period: usize,
-    ddof: usize,
-) -> (Array1<f64>, Array1<f64>) {
-    let n = data.len();
-    let mut mean = Array1::from_elem(n, f64::NAN);
-    let mut std = Array1::from_elem(n, f64::NAN);
-    if period == 0 || period > n || period <= ddof {
-        return (mean, std);
-    }
-    let p = period as f64;
-    let denom = (period - ddof) as f64;
-    // Fast path — one clean sliding pass emitting both outputs, no per-element NaN
-    // bookkeeping. A NaN permanently poisons the running sum, so a single
-    // `sum.is_nan()` check after the pass replaces a separate upfront scan; reset
-    // and fall through on the rare NaN case.
-    if let Some(src) = data.as_slice() {
-        let mut sum = 0.0;
-        let mut sum_sq = 0.0;
-        {
-            let md = mean.as_slice_mut().expect("from_elem is contiguous");
-            let sd = std.as_slice_mut().expect("from_elem is contiguous");
-            for i in 0..n {
-                let x = src[i];
-                sum += x;
-                sum_sq += x * x;
-                if i >= period {
-                    let leaving = src[i - period];
-                    sum -= leaving;
-                    sum_sq -= leaving * leaving;
-                }
-                if i + 1 >= period {
-                    md[i] = sum / p;
-                    let variance = (sum_sq - sum * sum / p) / denom;
-                    sd[i] = variance.max(0.0).sqrt();
-                }
-            }
-        }
-        if !sum.is_nan() {
-            return (mean, std);
-        }
-        mean.fill(f64::NAN);
-        std.fill(f64::NAN);
-    }
-    // Slow path — NaN-aware: a window with any NaN yields NaN in both outputs.
-    let mut sum = 0.0;
-    let mut sum_sq = 0.0;
-    let mut nan_count = 0usize;
-    for i in 0..n {
-        let x = data[i];
-        if x.is_nan() {
-            nan_count += 1;
-        } else {
-            sum += x;
-            sum_sq += x * x;
-        }
-        if i >= period {
-            let leaving = data[i - period];
-            if leaving.is_nan() {
-                nan_count -= 1;
-            } else {
-                sum -= leaving;
-                sum_sq -= leaving * leaving;
-            }
-        }
-        if i + 1 >= period && nan_count == 0 {
-            mean[i] = sum / p;
-            let variance = (sum_sq - sum * sum / p) / denom;
-            std[i] = variance.max(0.0).sqrt();
-        }
-    }
-    (mean, std)
-}
+mod dispersion;
+pub use dispersion::*;
 
 /// First difference (`data[i] - data[i-1]`).
 #[inline]
@@ -988,5 +840,20 @@ mod tests {
         assert!(naive_sma(&[1.0], 0).iter().all(|x| x.is_nan()));
         assert!(naive_std(&[1.0], 0, 1).iter().all(|x| x.is_nan()));
         assert!(naive_minmax(&[1.0], 5, true).iter().all(|x| x.is_nan()));
+    }
+
+    #[test]
+    fn rolling_std_recovers_after_an_infinity_leaves() {
+        // Finite but for one +inf: the fast path must not trust a NaN-free input.
+        let mut d: Vec<f64> = (0..12).map(|i| (i as f64 * 0.7).sin()).collect();
+        let clean = rolling_std(av(&d), 3, 1).to_vec();
+        d[4] = f64::INFINITY;
+        let got = rolling_std(av(&d), 3, 1).to_vec();
+        assert!(got[4..7].iter().all(|v| v.is_nan()));
+        for i in 7..12 {
+            assert!((got[i] - clean[i]).abs() < 1e-12, "row {i}: {} vs {}", got[i], clean[i]);
+        }
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&got[..4]), bits(&clean[..4]));
     }
 }

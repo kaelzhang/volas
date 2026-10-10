@@ -2,6 +2,8 @@
 //! state-carry helpers (`ema_k` / `ema_seed_idx` shared with the cascade and
 //! MACD families).
 
+use crate::guard::window_sums;
+use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 use crate::indicators::av;
 use crate::kernels;
 
@@ -173,24 +175,61 @@ pub fn wma(data: &[f64], period: usize) -> Vec<f64> {
         out[start..].copy_from_slice(&sub);
         return out;
     }
+    let (out, finite) = wma_with::<Unguarded>(data, period);
+    if finite {
+        out
+    } else {
+        wma_with::<NonFiniteRows>(data, period).0
+    }
+}
+
+/// The sliding WMA under a row guard (`period <= data.len()`); also returns whether
+/// both running sums ended finite. A window holding a non-finite row is weighted
+/// directly on its own rows.
+fn wma_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, bool) {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
     let denom = (period * (period + 1) / 2) as f64; // sum of weights 1..=period
     let pf = period as f64;
+    let window = |end: usize| {
+        data[end + 1 - period..=end]
+            .iter()
+            .enumerate()
+            .fold(0.0, |acc, (j, &x)| acc + x * (j + 1) as f64)
+            / denom
+    };
+    let mut guard = G::default();
     // Seed the first full window directly.
     let mut sum = 0.0; // plain window sum
     let mut wsum = 0.0; // weighted sum: newest bar * period ... oldest * 1
     #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for j in 0..period {
-        sum += data[j];
-        wsum += data[j] * (j + 1) as f64;
+        if guard.enter(data[j].is_finite()) {
+            sum += data[j];
+            wsum += data[j] * (j + 1) as f64;
+        }
     }
-    out[period - 1] = wsum / denom;
+    out[period - 1] = if guard.clean() { wsum / denom } else { window(period - 1) };
     // Slide: dropping the oldest (weight 1) raises every retained weight by one.
     for i in period..n {
-        wsum += pf * data[i] - sum;
-        sum += data[i] - data[i - period];
-        out[i] = wsum / denom;
+        let entering = data[i];
+        let leaving = data[i - period];
+        let came_in = guard.enter(entering.is_finite());
+        let went_out = guard.leave(leaving.is_finite());
+        if came_in {
+            wsum += pf * entering - sum;
+        } else {
+            wsum -= sum;
+        }
+        match (came_in, went_out) {
+            (true, true) => sum += entering - leaving,
+            (true, false) => sum += entering,
+            (false, true) => sum -= leaving,
+            (false, false) => {}
+        }
+        out[i] = if guard.clean() { wsum / denom } else { window(i) };
     }
-    out
+    (out, sum.is_finite() && wsum.is_finite())
 }
 
 /// Volume-Weighted Moving Average (TradingView `ta.vwma`): `Σ(close·volume, n) /
@@ -215,6 +254,13 @@ pub fn vwma(close: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
             out[i] = if vv != 0.0 { pv / vv } else { f64::NAN };
         }
     }
+    if pv.is_finite() && vv.is_finite() {
+        return out;
+    }
+    // A non-finite bar entered: window-local careful path (see `crate::guard`).
+    window_sums(n, period, |i| [close[i] * volume[i], volume[i]], |i, [pv, vv]| {
+        out[i] = if vv != 0.0 { pv / vv } else { f64::NAN };
+    });
     out
 }
 

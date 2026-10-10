@@ -1,3 +1,4 @@
+use crate::guard::window_sums;
 use crate::kernels;
 
 // ---------------------------------------------------------------------------
@@ -222,6 +223,15 @@ pub fn imi(open: &[f64], close: &[f64], period: usize) -> Vec<f64> {
         up_sum -= lu;
         down_sum -= ld;
     }
+    if up_sum.is_finite() && down_sum.is_finite() {
+        return out.finish();
+    }
+    // A non-finite bar entered: window-local careful path (see `crate::guard`).
+    let mut out = crate::buf::OutBuf::warmup(n, lookback);
+    window_sums(n, period, |i| {
+        let (u, d) = updown(i);
+        [u, d]
+    }, |i, [u, d]| out.set(i, 100.0 * (u / (u + d))));
     out.finish()
 }
 
@@ -243,21 +253,31 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     // window (each `|x - avg|` depends on the just-computed mean, so it cannot slide). The
     // sliding sum drifts ~1e-13 relative, well inside the 1e-9 TA-Lib parity tolerance, as the
     // var / linear-regression slides already rely on.
-    let mut sum: f64 = tp[..period - 1].iter().sum();
-    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
-    for i in (period - 1)..n {
-        sum += tp[i];
+    // The value at row `i` from its window sum of `tp`.
+    let value = |i: usize, sum: f64| {
         let avg = sum / p;
         let window = &tp[i + 1 - period..=i];
         let sum_dev: f64 = window.iter().map(|x| (x - avg).abs()).sum();
         let num = tp[i] - avg;
-        out.set(i, if num != 0.0 && sum_dev != 0.0 {
+        if num != 0.0 && sum_dev != 0.0 {
             num / (0.015 * (sum_dev / p))
         } else {
             0.0
-        });
+        }
+    };
+    let mut sum: f64 = tp[..period - 1].iter().sum();
+    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
+    for i in (period - 1)..n {
+        sum += tp[i];
+        out.set(i, value(i, sum));
         sum -= tp[i + 1 - period];
     }
+    if sum.is_finite() {
+        return out.finish();
+    }
+    // A non-finite bar entered: window-local careful path (see `crate::guard`).
+    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
+    window_sums(n, period, |i| [tp[i]], |i, [sum]| out.set(i, value(i, sum)));
     out.finish()
 }
 
@@ -266,6 +286,11 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 /// pass via [`kernels::ema_cascade`] (one traversal, one allocation), then the verified
 /// `roc` finishes it. Bit-identical to chaining three `ema_seeded` calls.
 pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[close]);
+    if start > 0 {
+        return crate::start::pad_front(start, trix(&close[start..], period));
+    }
     let e3 = kernels::ema_cascade::<3>(close, period);
     roc(&e3, 1)
 }
@@ -275,6 +300,11 @@ pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
 /// cascade never seeds (`3·(period−1) >= n` → all-NaN, keep the fallback). Pairs with
 /// [`trix_resume`].
 pub fn trix_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[close]);
+    if start > 0 {
+        return trix_final_state(&close[start..], period);
+    }
     let e = kernels::ema_cascade_final::<3>(close, period)?;
     Some(e.to_vec())
 }
@@ -558,6 +588,28 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         }
         i += 1;
     }
+    if pos_sum.is_finite() && neg_sum.is_finite() {
+        return out.finish();
+    }
+    // A non-finite flow entered: window-local careful path (see `crate::guard`). Flows
+    // exist for bars `1..n`; flow `j` is bar `j + 1`'s.
+    let tp = |i: usize| (high[i] + low[i] + close[i]) / 3.0;
+    let flow = |j: usize| {
+        let (now, prev) = (tp(j + 1), tp(j));
+        let f = now * volume[j + 1];
+        if now > prev {
+            [f, 0.0]
+        } else if now < prev {
+            [0.0, f]
+        } else {
+            [0.0, 0.0]
+        }
+    };
+    let mut out = crate::buf::OutBuf::warmup(n, period);
+    window_sums(n - 1, period, flow, |j, [pos, neg]| {
+        let total = pos + neg;
+        out.set(j + 1, if total < 1.0 { 0.0 } else { 100.0 * pos / total });
+    });
     out.finish()
 }
 
@@ -624,16 +676,7 @@ pub fn ultosc(
         b1 += b;
         b2 += b;
         b3 += b;
-        let mut output = 0.0;
-        if b1.abs() >= 1e-14 {
-            output += 4.0 * (a1 / b1);
-        }
-        if b2.abs() >= 1e-14 {
-            output += 2.0 * (a2 / b2);
-        }
-        if b3.abs() >= 1e-14 {
-            output += a3 / b3;
-        }
+        let output = ultosc_value([a1, b1, a2, b2, a3, b3]);
         let at = bp_ring[t1 % max_p];
         let bt = tr_ring[t1 % max_p];
         a1 -= at;
@@ -649,9 +692,47 @@ pub fn ultosc(
         a3 -= at;
         b3 -= bt;
         t3 += 1;
-        out.set(today, 100.0 * (output / 7.0));
+        out.set(today, output);
+    }
+    if [a1, b1, a2, b2, a3, b3].iter().all(|v| v.is_finite()) {
+        return out.finish();
+    }
+    // A non-finite bar entered: window-local careful path (see `crate::guard`). Terms
+    // exist for bars `1..n`; term `j` is bar `j + 1`'s, and each period gets its own
+    // window sums.
+    let window = |p: usize| {
+        let mut sums = vec![[0.0; 2]; n];
+        window_sums(n - 1, p, |j| {
+            let (a, b) = term(j + 1);
+            [a, b]
+        }, |j, s| sums[j + 1] = s);
+        sums
+    };
+    let (w1, w2, w3) = (window(p1), window(p2), window(p3));
+    let mut out = crate::buf::OutBuf::warmup(n, start);
+    for today in start..n {
+        let ([a1, b1], [a2, b2], [a3, b3]) = (w1[today], w2[today], w3[today]);
+        out.set(today, ultosc_value([a1, b1, a2, b2, a3, b3]));
     }
     out.finish()
+}
+
+/// ULTOSC from its three window sums `[a1, b1, a2, b2, a3, b3]`: `100·(4·a₁/b₁ +
+/// 2·a₂/b₂ + a₃/b₃)/7`, dropping a term whose TR-sum is ~0. A NaN sum is kept (it is
+/// not "~0"), so a window holding a bad bar is NaN rather than silently losing a term.
+#[inline]
+fn ultosc_value([a1, b1, a2, b2, a3, b3]: [f64; 6]) -> f64 {
+    let mut output = 0.0;
+    if b1.abs() >= 1e-14 || b1.is_nan() {
+        output += 4.0 * (a1 / b1);
+    }
+    if b2.abs() >= 1e-14 || b2.is_nan() {
+        output += 2.0 * (a2 / b2);
+    }
+    if b3.abs() >= 1e-14 || b3.is_nan() {
+        output += a3 / b3;
+    }
+    100.0 * (output / 7.0)
 }
 
 

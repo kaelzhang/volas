@@ -6,6 +6,11 @@
 /// `real` rises vs the prior bar, subtracts it when `real` falls, and is unchanged
 /// when flat. Seeded with `volume[0]`; lookback 0 (no warm-up).
 pub fn obv(real: &[f64], volume: &[f64]) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[real, volume]);
+    if start > 0 {
+        return crate::start::pad_front(start, obv(&real[start..], &volume[start..]));
+    }
     let n = real.len();
     if n == 0 {
         return Vec::new();
@@ -33,6 +38,11 @@ pub fn obv(real: &[f64], volume: &[f64]) -> Vec<f64> {
 /// Mirrors [`obv`]'s recurrence exactly (seed `obv = volume[0]`, `prev = real[0]`).
 /// `None` for an empty series (no state to carry).
 pub fn obv_final_state(real: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[real, volume]);
+    if start > 0 {
+        return obv_final_state(&real[start..], &volume[start..]);
+    }
     let n = real.len();
     if n == 0 {
         return None;

@@ -576,10 +576,10 @@ numpy scalars, and numpy int has no missing representation) — pandas's
 numpy-backed behaviour. pandas's *nullable* backend returns `pd.NA` instead;
 volas deliberately keeps the numpy-scalar boundary (C1).
 
-## Window aggregations (`rolling` / `expanding`): three deliberate divergences
+## Window aggregations (`rolling` / `expanding`): four deliberate divergences
 
 The window API is pandas-aligned and differential-tested method by method
-(`test_audit_t14_window.py`), with three deliberate departures:
+(`test_audit_t14_window.py`), with four deliberate departures:
 
 - **`count()` / `nunique()` return `int64`** with native NA in the warm-up
   region. pandas returns `float64` (NaN-padded) because numpy ints cannot hold
@@ -594,3 +594,7 @@ The window API is pandas-aligned and differential-tested method by method
   sliding skew kernel goes permanently NaN for every window after an interior
   NA gap in that configuration (kernel-state bug); volas emits the correct
   per-window value.
+- **`sum()` / `mean()` over a window holding an infinity give the infinity.** A
+  window holding `+inf` sums to `+inf` (`-inf` likewise, and both signs to NaN), and
+  the next window without it is exact again. pandas returns NaN for every window
+  holding an infinity, an artefact of its compensated summation, not a definition.

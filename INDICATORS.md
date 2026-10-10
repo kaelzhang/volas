@@ -33,6 +33,23 @@ no standard at all. `df[d]` and `directive_lookback` reject a directive that omi
 required argument; `directive_stringify` accepts it, because it only names the
 indicator. A trailing colon with nothing after it (`obv:`) means no arguments.
 
+**Missing and non-finite inputs.** A missing row (NaN) or an infinite one affects only
+the outputs whose definition reads it:
+
+- An indicator over a **finite window** (a moving average, a rolling sum / variance /
+  regression, an oscillator built from windowed sums, …) gives, for a window holding
+  a bad row, the value its formula takes on that window — NaN when the window holds a
+  NaN, the mathematical result when it holds an infinity (`±inf` for a sum or mean,
+  NaN for a variance). Once that row has left the window, every output is exactly
+  what clean data gives.
+- A **leading run of missing rows** is not data: every indicator treats the series as
+  starting after it, so a series with a missing head matches the same series started
+  later.
+- A **recursive** indicator (the EMA family, Wilder smoothing — RSI / ATR / ADX —,
+  cumulative lines such as OBV, the Hilbert transform, SAR) carries its state across
+  the whole series, so a missing row in the middle carries forward into every later
+  row.
+
 ## Volas-exclusive indicators
 
 These directives are implemented by Volas itself. Many of them follow the

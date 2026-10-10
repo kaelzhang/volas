@@ -29,6 +29,11 @@ pub fn kdj_k(
     period_k: usize,
     init: f64,
 ) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low, close]);
+    if start > 0 {
+        return crate::start::pad_front(start, kdj_k(&high[start..], &low[start..], &close[start..], period_rsv, period_k, init));
+    }
     let rsv = kdj_rsv(high, low, close, period_rsv);
     kernels::ewma_with_init(rsv.view(), period_k, init).to_vec()
 }
@@ -43,6 +48,11 @@ pub fn kdj_d(
     period_d: usize,
     init: f64,
 ) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low, close]);
+    if start > 0 {
+        return crate::start::pad_front(start, kdj_d(&high[start..], &low[start..], &close[start..], period_rsv, period_k, period_d, init));
+    }
     let rsv = kdj_rsv(high, low, close, period_rsv);
     let k = kernels::ewma_with_init(rsv.view(), period_k, init);
     kernels::ewma_with_init(k.view(), period_d, init).to_vec()
@@ -58,6 +68,11 @@ pub fn kdj_j(
     period_d: usize,
     init: f64,
 ) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low, close]);
+    if start > 0 {
+        return crate::start::pad_front(start, kdj_j(&high[start..], &low[start..], &close[start..], period_rsv, period_k, period_d, init));
+    }
     let rsv = kdj_rsv(high, low, close, period_rsv);
     let k = kernels::ewma_with_init(rsv.view(), period_k, init);
     let d = kernels::ewma_with_init(k.view(), period_d, init);
@@ -88,6 +103,11 @@ pub fn kdj_final_state(
     init: f64,
     want_d: bool,
 ) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low, close]);
+    if start > 0 {
+        return kdj_final_state(&high[start..], &low[start..], &close[start..], period_rsv, period_k, period_d, init, want_d);
+    }
     let n = close.len();
     if n == 0 {
         return None;

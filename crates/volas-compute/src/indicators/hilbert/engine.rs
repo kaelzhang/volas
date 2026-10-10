@@ -164,14 +164,18 @@ pub(super) struct HtBar {
 /// [`HtCoreState::step`]).
 ///
 /// Layout for [`HtCoreState::serialize`] / [`HtCoreState::deserialize`]
-/// (`CORE_STATE_LEN` words): `sub sum trailing | hilbert_idx | detrender(10)
+/// (`CORE_STATE_LEN` words): `sub sum trailing | hilbert_idx even | detrender(10)
 /// q1v(10) ji(10) jq(10) | period smooth_period prev_i2 prev_q2 re im |
 /// i1_odd_prev3 i1_even_prev3 i1_odd_prev2 i1_even_prev2`. The WMA's price index is
 /// reconstructed from `today` (`price[today-3]`), never stored, so it stays correct
-/// after a head-dropping slice rebases the price array.
+/// after a head-dropping slice rebases the price array. The even/odd alternation is
+/// carried (`even`), not read off `today`: it counts the series' own bars, so the
+/// recursion is the same wherever the series starts in the array.
 pub(super) struct HtCoreState {
     wma: PriceWma,
     hilbert_idx: usize,
+    /// Whether the next bar to [`step`](Self::step) is an even bar of the series.
+    even: bool,
     detrender: HilbertVar,
     q1v: HilbertVar,
     ji: HilbertVar,
@@ -188,9 +192,9 @@ pub(super) struct HtCoreState {
     i1_even_prev2: f64,
 }
 
-/// Number of `f64` words in a serialised [`HtCoreState`] (3 WMA + 1 idx + 4·10
-/// channels + 6 discriminator + 4 I1-delay).
-pub(super) const CORE_STATE_LEN: usize = 3 + 1 + 40 + 6 + 4;
+/// Number of `f64` words in a serialised [`HtCoreState`] (3 WMA + 1 idx + 1 parity +
+/// 4·10 channels + 6 discriminator + 4 I1-delay).
+pub(super) const CORE_STATE_LEN: usize = 3 + 1 + 1 + 40 + 6 + 4;
 
 impl HtCoreState {
     /// Seed the core from the first `CORE_START` bars (the WMA unrolled warm-up),
@@ -217,6 +221,7 @@ impl HtCoreState {
         HtCoreState {
             wma,
             hilbert_idx: 0,
+            even: CORE_START.is_multiple_of(2),
             detrender: HilbertVar::default(),
             q1v: HilbertVar::default(),
             ji: HilbertVar::default(),
@@ -247,7 +252,8 @@ impl HtCoreState {
         // loop for every Hilbert-derived indicator.
         let today_value = unsafe { *price.get_unchecked(today) };
         let smoothed = self.wma.push(price, today, today_value);
-        let even = today.is_multiple_of(2);
+        let even = self.even;
+        self.even = !even;
 
         let (i1, q1, q2, i2);
         if even {
@@ -329,6 +335,7 @@ impl HtCoreState {
         v.push(self.wma.sum);
         v.push(self.wma.trailing);
         v.push(self.hilbert_idx as f64);
+        v.push(if self.even { 1.0 } else { 0.0 });
         self.detrender.push_state(&mut v);
         self.q1v.push_state(&mut v);
         self.ji.push_state(&mut v);
@@ -359,7 +366,8 @@ impl HtCoreState {
             trailing: s[2],
         };
         let hilbert_idx = s[3] as usize;
-        let mut off = 4usize;
+        let even = s[4] != 0.0;
+        let mut off = 5usize;
         let detrender = HilbertVar::from_state(s, &mut off);
         let q1v = HilbertVar::from_state(s, &mut off);
         let ji = HilbertVar::from_state(s, &mut off);
@@ -367,6 +375,7 @@ impl HtCoreState {
         Some(HtCoreState {
             wma,
             hilbert_idx,
+            even,
             detrender,
             q1v,
             ji,

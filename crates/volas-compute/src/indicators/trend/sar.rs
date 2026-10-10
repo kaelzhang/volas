@@ -11,6 +11,11 @@
 /// on a reversal; the SAR is clamped within the prior two bars' range. Default
 /// acceleration 0.02, maximum 0.2; lookback 1. (TA-Lib applies no rounding.)
 pub fn sar(high: &[f64], low: &[f64], acceleration: f64, maximum: f64) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low]);
+    if start > 0 {
+        return crate::start::pad_front(start, sar(&high[start..], &low[start..], acceleration, maximum));
+    }
     let n = high.len();
     let mut out = vec![f64::NAN; n];
     if n < 2 {
@@ -96,6 +101,11 @@ pub fn sar_final_state(
     acceleration: f64,
     maximum: f64,
 ) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low]);
+    if start > 0 {
+        return sar_final_state(&high[start..], &low[start..], acceleration, maximum);
+    }
     let n = high.len();
     if n < 2 {
         return None;
@@ -238,6 +248,11 @@ pub fn sarext(
     accel_short: f64,
     accel_max_short: f64,
 ) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low]);
+    if start > 0 {
+        return crate::start::pad_front(start, sarext(&high[start..], &low[start..], start_value, offset_on_reverse, accel_init_long, accel_long, accel_max_long, accel_init_short, accel_short, accel_max_short));
+    }
     let n = high.len();
     let mut out = vec![f64::NAN; n];
     if n < 2 {
@@ -349,6 +364,11 @@ pub fn sarext_final_state(
     accel_short: f64,
     accel_max_short: f64,
 ) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low]);
+    if start > 0 {
+        return sarext_final_state(&high[start..], &low[start..], start_value, offset_on_reverse, accel_init_long, accel_long, accel_max_long, accel_init_short, accel_short, accel_max_short);
+    }
     let n = high.len();
     if n < 2 {
         return None;

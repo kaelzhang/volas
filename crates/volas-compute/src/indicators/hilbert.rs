@@ -17,6 +17,11 @@ use engine::*;
 
 /// `HT_DCPERIOD`: the smoothed dominant-cycle period.
 pub fn ht_dcperiod(price: &[f64]) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return crate::start::pad_front(start, ht_dcperiod(&price[start..]));
+    }
     let n = price.len();
     if n <= LB_PERIOD {
         return vec![f64::NAN; n];
@@ -37,6 +42,14 @@ pub fn ht_dcperiod(price: &[f64]) -> Vec<f64> {
 
 /// `HT_PHASOR`: the in-phase and quadrature components `(inPhase, quadrature)`.
 pub fn ht_phasor(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return {
+            let (a, b) = ht_phasor(&price[start..]);
+            (crate::start::pad_front(start, a), crate::start::pad_front(start, b))
+        };
+    }
     let n = price.len();
     let mut inphase = vec![f64::NAN; n];
     let mut quad = vec![f64::NAN; n];
@@ -60,6 +73,11 @@ pub fn ht_phasor(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
 /// arrays, but a directive requests one line at a time; avoid allocating and
 /// writing the sibling line on that hot path.
 pub fn ht_phasor_line(price: &[f64], quadrature: bool) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return crate::start::pad_front(start, ht_phasor_line(&price[start..], quadrature));
+    }
     let n = price.len();
     let mut out = vec![f64::NAN; n];
     if n <= CORE_START {
@@ -78,6 +96,11 @@ pub fn ht_phasor_line(price: &[f64], quadrature: bool) -> Vec<f64> {
 
 /// `HT_DCPHASE`: the dominant-cycle phase in degrees.
 pub fn ht_dcphase(price: &[f64]) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return crate::start::pad_front(start, ht_dcphase(&price[start..]));
+    }
     let core = ht_core(price);
     let phase = dcphase_all(&core);
     let mut out = vec![f64::NAN; price.len()];
@@ -90,6 +113,14 @@ pub fn ht_dcphase(price: &[f64]) -> Vec<f64> {
 /// `HT_SINE`: `(sine, leadSine)` where `sine = sin(DCPhase)` and
 /// `leadSine = sin(DCPhase + 45°)`.
 pub fn ht_sine(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return {
+            let (a, b) = ht_sine(&price[start..]);
+            (crate::start::pad_front(start, a), crate::start::pad_front(start, b))
+        };
+    }
     let core = ht_core(price);
     let phase = dcphase_all(&core);
     let n = price.len();
@@ -104,6 +135,11 @@ pub fn ht_sine(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
 
 /// `HT_TRENDLINE`: the instantaneous trendline (a dominant-cycle-window average).
 pub fn ht_trendline(price: &[f64]) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return crate::start::pad_front(start, ht_trendline(&price[start..]));
+    }
     let n = price.len();
     let mut out = vec![f64::NAN; n];
     if n <= CORE_START {
@@ -135,6 +171,11 @@ pub fn ht_trendline(price: &[f64]) -> Vec<f64> {
 
 /// `HT_TRENDMODE`: `1.0` when the market is trending, `0.0` when cycling.
 pub fn ht_trendmode(price: &[f64]) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return crate::start::pad_front(start, ht_trendmode(&price[start..]));
+    }
     let core = ht_core(price);
     let phase = dcphase_all(&core);
     let trend_line = trendline_all(&core, price);
@@ -165,6 +206,14 @@ pub fn ht_trendmode(price: &[f64]) -> Vec<f64> {
 /// returned as `(mama, fama)`. `fast_limit`/`slow_limit` bound the adaptive alpha
 /// (TA-Lib defaults 0.5 / 0.05).
 pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f64>) {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return {
+            let (a, b) = mama(&price[start..], fast_limit, slow_limit);
+            (crate::start::pad_front(start, a), crate::start::pad_front(start, b))
+        };
+    }
     let n = price.len();
     let mut mama_out = vec![f64::NAN; n];
     let mut fama_out = vec![f64::NAN; n];
@@ -201,6 +250,11 @@ pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f
 /// updates both MAMA accumulators exactly like TA-Lib; it only skips the sibling
 /// output vector that the caller will discard.
 pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: bool) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return crate::start::pad_front(start, mama_line(&price[start..], fast_limit, slow_limit, want_fama));
+    }
     let n = price.len();
     let mut out = vec![f64::NAN; n];
     if n <= CORE_START {
@@ -269,6 +323,11 @@ fn ht_core_resume_setup(state: &[f64], from: usize) -> Option<HtCoreState> {
 /// Final state for `HT_DCPERIOD` / `HT_PHASOR` (both read only the core's per-bar
 /// outputs): exactly [`HtCoreState`].
 pub fn ht_core_state(price: &[f64]) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return ht_core_state(&price[start..]);
+    }
     ht_core_final_state(price)
 }
 
@@ -327,6 +386,11 @@ fn ht_dcphase_final_state(price: &[f64]) -> Option<Vec<f64>> {
 
 /// Final state for `HT_DCPHASE` (alias used by the dispatch table).
 pub fn ht_dcphase_state(price: &[f64]) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return ht_dcphase_state(&price[start..]);
+    }
     ht_dcphase_final_state(price)
 }
 
@@ -357,6 +421,11 @@ pub fn ht_dcphase_resume(
 /// Final state for `HT_SINE` — identical to [`ht_dcphase_state`] (sine/leadSine are
 /// pure functions of the DC phase, carrying no extra state).
 pub fn ht_sine_state(price: &[f64]) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return ht_sine_state(&price[start..]);
+    }
     ht_dcphase_final_state(price)
 }
 
@@ -417,6 +486,11 @@ fn ht_trendline_final_state(price: &[f64]) -> Option<Vec<f64>> {
 
 /// Final state for `HT_TRENDLINE` (alias used by the dispatch table).
 pub fn ht_trendline_state(price: &[f64]) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return ht_trendline_state(&price[start..]);
+    }
     ht_trendline_final_state(price)
 }
 
@@ -558,6 +632,11 @@ fn ht_trendmode_final_state(price: &[f64]) -> Option<Vec<f64>> {
 
 /// Final state for `HT_TRENDMODE` (alias used by the dispatch table).
 pub fn ht_trendmode_state(price: &[f64]) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return ht_trendmode_state(&price[start..]);
+    }
     ht_trendmode_final_state(price)
 }
 
@@ -644,6 +723,11 @@ fn mama_final_state(price: &[f64], fast_limit: f64, slow_limit: f64) -> Option<V
 
 /// Final state for `MAMA`/`FAMA` (alias used by the dispatch table).
 pub fn mama_state(price: &[f64], fast_limit: f64, slow_limit: f64) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[price]);
+    if start > 0 {
+        return mama_state(&price[start..], fast_limit, slow_limit);
+    }
     mama_final_state(price, fast_limit, slow_limit)
 }
 

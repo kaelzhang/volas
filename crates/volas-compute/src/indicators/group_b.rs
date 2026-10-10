@@ -275,6 +275,11 @@ fn asi_si(o: f64, h: f64, l: f64, c: f64, op: f64, cp: f64, t: f64) -> f64 {
 /// Swing Index per [`asi_si`]. `t` is Wilder's limit-move parameter. Source: J. Welles Wilder,
 /// *New Concepts in Technical Trading Systems*.
 pub fn asi(open: &[f64], high: &[f64], low: &[f64], close: &[f64], t: f64) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[open, high, low, close]);
+    if start > 0 {
+        return crate::start::pad_front(start, asi(&open[start..], &high[start..], &low[start..], &close[start..], t));
+    }
     let mut out = vec![0.0; close.len()];
     let mut acc = 0.0;
     for i in 1..close.len() {
@@ -292,6 +297,11 @@ pub fn asi_final_state(
     close: &[f64],
     t: f64,
 ) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[open, high, low, close]);
+    if start > 0 {
+        return asi_final_state(&open[start..], &high[start..], &low[start..], &close[start..], t);
+    }
     let n = close.len();
     if n == 0 {
         return None;
@@ -426,6 +436,11 @@ pub fn kcw(
     atr_period: usize,
     mult: f64,
 ) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[close, high, low]);
+    if start > 0 {
+        return crate::start::pad_front(start, kcw(&close[start..], &high[start..], &low[start..], ema_period, atr_period, mult));
+    }
     let ema = super::ema(close, ema_period);
     let atr = super::atr(high, low, close, atr_period);
     (0..close.len())
@@ -479,6 +494,11 @@ pub fn keltner_band_resume(
 /// `Ds = EMA_d(EMA_d(D))`, `Dhl = EMA_d(EMA_d(HH−LL))`; `SMI = Ds / (Dhl/2) × 100`. The short
 /// double-EMA smoothing keeps it effectively finite-memory. Source: William Blau / LazyBear — SMI.
 pub fn stoch_momentum(high: &[f64], low: &[f64], close: &[f64], k: usize, d: usize) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low, close]);
+    if start > 0 {
+        return crate::start::pad_front(start, stoch_momentum(&high[start..], &low[start..], &close[start..], k, d));
+    }
     let len = high.len();
     let hh = super::hhv(high, k);
     let ll = super::llv(low, k);
@@ -655,6 +675,11 @@ pub fn supertrend(
     mult: f64,
     want_direction: bool,
 ) -> Vec<f64> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low, close]);
+    if start > 0 {
+        return crate::start::pad_front(start, supertrend(&high[start..], &low[start..], &close[start..], period, mult, want_direction));
+    }
     let len = close.len();
     let mut out = vec![f64::NAN; len];
     let atr = super::atr(high, low, close, period);
@@ -688,6 +713,11 @@ pub fn supertrend_final_state(
     period: usize,
     mult: f64,
 ) -> Option<Vec<f64>> {
+    // A leading run of missing rows: the series starts after it (see `crate::start`).
+    let start = crate::start::first_complete_row(&[high, low, close]);
+    if start > 0 {
+        return supertrend_final_state(&high[start..], &low[start..], &close[start..], period, mult);
+    }
     let len = close.len();
     // `atr_final_state` already declines (returns None) when `period >= len`, so reaching here
     // guarantees `period < len` — the seed index is in range.

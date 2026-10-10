@@ -88,52 +88,67 @@ fn sliding<T: Copy>(
         .collect()
 }
 
-/// Rolling / expanding sum of the present values (pandas `sum`).
-pub fn sum(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
+/// Per-row `(sum, present count)` of the present values in each window — NaN is
+/// missing and skipped, ±inf is a value. Window-local: the running sum holds finite
+/// values only and the window's infinities are counted apart, so an infinity never
+/// outlives its window. A window holding infinities sums to `+inf`, `-inf`, or NaN
+/// (both signs) — the IEEE value of that window.
+fn present_sums(data: &[f64], window: usize) -> Vec<(f64, usize)> {
     let mut s = 0.0f64;
     let mut nobs = 0usize;
+    let (mut pos_inf, mut neg_inf) = (0usize, 0usize);
     sliding(data, window, |x, entering| {
         if !x.is_nan() {
+            if x.is_finite() {
+                if entering {
+                    s += x;
+                } else {
+                    s -= x;
+                }
+            } else {
+                let count = if x > 0.0 { &mut pos_inf } else { &mut neg_inf };
+                if entering {
+                    *count += 1;
+                } else {
+                    *count -= 1;
+                }
+            }
             if entering {
-                s += x;
                 nobs += 1;
             } else {
-                s -= x;
                 nobs -= 1;
             }
         }
-        (s, nobs)
+        let total = match (pos_inf > 0, neg_inf > 0) {
+            (false, false) => s,
+            (true, false) => f64::INFINITY,
+            (false, true) => f64::NEG_INFINITY,
+            (true, true) => f64::NAN,
+        };
+        (total, nobs)
     })
-    .into_iter()
-    .map(|(s, c)| if c >= min_periods.max(1) { s } else { f64::NAN })
-    .collect()
+}
+
+/// Rolling / expanding sum of the present values (pandas `sum`).
+pub fn sum(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
+    present_sums(data, window)
+        .into_iter()
+        .map(|(s, c)| if c >= min_periods.max(1) { s } else { f64::NAN })
+        .collect()
 }
 
 /// Rolling / expanding mean of the present values (pandas `mean`).
 pub fn mean(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    let mut s = 0.0f64;
-    let mut nobs = 0usize;
-    sliding(data, window, |x, entering| {
-        if !x.is_nan() {
-            if entering {
-                s += x;
-                nobs += 1;
+    present_sums(data, window)
+        .into_iter()
+        .map(|(s, c)| {
+            if c >= min_periods.max(1) {
+                s / c as f64
             } else {
-                s -= x;
-                nobs -= 1;
+                f64::NAN
             }
-        }
-        (s, nobs)
-    })
-    .into_iter()
-    .map(|(s, c)| {
-        if c >= min_periods.max(1) {
-            s / c as f64
-        } else {
-            f64::NAN
-        }
-    })
-    .collect()
+        })
+        .collect()
 }
 
 // --- min / max (monotonic deque, O(n)) ---------------------------------------

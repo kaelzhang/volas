@@ -5,6 +5,8 @@
 //! DataFrame data model.
 
 mod buf;
+mod guard;
+mod start;
 pub mod indicators;
 pub mod kernels;
 pub mod window;

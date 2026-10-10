@@ -156,7 +156,13 @@ pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
             }
         }
     }
-    out
+    if sum1.is_finite() && sum2.is_finite() {
+        return out;
+    }
+    // A non-finite row entered: fall back to the reference composition this fused pass
+    // is bit-identical to. Both SMAs are window-local (see `crate::guard`), so a bad
+    // row reaches only the windows holding it.
+    crate::indicators::trend::ma::ma(&crate::indicators::trend::ma::ma(data, a), b)
 }
 
 /// Tillson T3 (TA-Lib T3): `c1·e6 + c2·e5 + c3·e4 + c4·e3` over six cascaded

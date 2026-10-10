@@ -1,3 +1,6 @@
+use crate::guard::window_sums;
+use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
+
 // ---------------------------------------------------------------------------
 // Statistic — rolling regression & dispersion
 // ---------------------------------------------------------------------------
@@ -9,9 +12,21 @@
 /// O(n·period), matching TA-Lib's own inner loop (the constants close-form the
 /// `Σx` / `Σx²` of `0..period`, so only `Σy` and `Σxy` are summed per window).
 fn linreg_fit(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
+    let (m, b, finite) = linreg_fit_with::<Unguarded>(data, period);
+    if finite {
+        (m, b)
+    } else {
+        let (m, b, _) = linreg_fit_with::<NonFiniteRows>(data, period);
+        (m, b)
+    }
+}
+
+/// The sliding fit under a row guard; also returns whether both running sums ended
+/// finite. A window holding a non-finite row is fitted directly on its own rows.
+fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>, bool) {
     let n = data.len();
     if period == 0 || period > n {
-        return (vec![f64::NAN; n], vec![f64::NAN; n]);
+        return (vec![f64::NAN; n], vec![f64::NAN; n], true);
     }
     let p = period as f64;
     let sum_x = p * (period - 1) as f64 * 0.5;
@@ -26,6 +41,13 @@ fn linreg_fit(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
         slope.set(today, m);
         intercept.set(today, (sum_y - m * sum_x) / p);
     };
+    // A window's own `(Σy, Σ age·y)` — the direct fit for a window holding a bad row.
+    let window_sums = |today: usize| {
+        data[today + 1 - period..=today]
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(sy, sxy), (k, &y)| (sy + y, sxy + (period - 1 - k) as f64 * y))
+    };
     // Seed the first window with TA-Lib's per-bar accumulation order (`i` = age, the
     // newest bar weighted 0, the oldest `period-1`), then slide in O(1): when the
     // window advances one bar every retained point's age rises by one, so `Σ i·y`
@@ -35,21 +57,47 @@ fn linreg_fit(data: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
     // drift ~1e-13 relative (well within the 1e-9 TA-Lib parity tolerance), exactly as
     // the WMA slide already relies on. Shared by linearreg / slope / intercept / angle
     // / tsf.
+    let mut guard = G::default();
     let mut sum_y = 0.0;
     let mut sum_xy = 0.0;
     for i in (0..period).rev() {
         let y = data[period - 1 - i];
-        sum_y += y;
-        sum_xy += i as f64 * y;
+        if guard.enter(y.is_finite()) {
+            sum_y += y;
+            sum_xy += i as f64 * y;
+        }
     }
-    emit(period - 1, sum_y, sum_xy);
+    if guard.clean() {
+        emit(period - 1, sum_y, sum_xy);
+    } else {
+        let (sy, sxy) = window_sums(period - 1);
+        emit(period - 1, sy, sxy);
+    }
     for today in period..n {
         let leaving = data[today - period];
-        sum_xy += sum_y - p * leaving;
-        sum_y += data[today] - leaving;
-        emit(today, sum_y, sum_xy);
+        let entering = data[today];
+        let came_in = guard.enter(entering.is_finite());
+        let went_out = guard.leave(leaving.is_finite());
+        if went_out {
+            sum_xy += sum_y - p * leaving;
+        } else {
+            sum_xy += sum_y;
+        }
+        match (came_in, went_out) {
+            (true, true) => sum_y += entering - leaving,
+            (true, false) => sum_y += entering,
+            (false, true) => sum_y -= leaving,
+            (false, false) => {}
+        }
+        if guard.clean() {
+            emit(today, sum_y, sum_xy);
+        } else {
+            let (sy, sxy) = window_sums(today);
+            emit(today, sy, sxy);
+        }
     }
-    (slope.finish(), intercept.finish())
+    let finite = sum_y.is_finite() && sum_xy.is_finite();
+    (slope.finish(), intercept.finish(), finite)
 }
 
 /// Linear regression value at the current bar: `b + m·(period-1)` (TA-Lib LINEARREG).
@@ -91,34 +139,63 @@ pub fn tsf(data: &[f64], period: usize) -> Vec<f64> {
 /// (add current, take means, drop trailing). NaN during warm-up. Shared by `var`
 /// and `stddev`. Floating-point cancellation can yield a tiny negative result; the
 /// `stddev` caller clamps such (and an exact-zero, flat window) to 0, as TA-Lib does.
+/// Window-local: a non-finite row affects only the windows holding it (a window
+/// holding one is NaN — see [`crate::guard`]).
 fn rolling_var(data: &[f64], period: usize) -> Vec<f64> {
+    let (out, finite) = rolling_var_with::<Unguarded>(data, period);
+    if finite {
+        out
+    } else {
+        rolling_var_with::<NonFiniteRows>(data, period).0
+    }
+}
+
+/// The sliding variance under a row guard; also returns whether both running sums
+/// ended finite.
+fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, bool) {
     let n = data.len();
     if period == 0 || period > n {
-        return vec![f64::NAN; n];
+        return (vec![f64::NAN; n], true);
     }
     let p = period as f64;
+    let mut guard = G::default();
     let mut total1 = 0.0; // Σx over the window
     let mut total2 = 0.0; // Σx² over the window
     for &x in &data[..period - 1] {
-        total1 += x;
-        total2 += x * x;
+        if guard.enter(x.is_finite()) {
+            total1 += x;
+            total2 += x * x;
+        }
     }
     let mut trailing = 0;
     let mut out = crate::buf::OutBuf::warmup(n, period - 1);
     #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for i in (period - 1)..n {
         let x = data[i];
-        total1 += x;
-        total2 += x * x;
-        let mean1 = total1 / p;
-        let mean2 = total2 / p;
+        if guard.enter(x.is_finite()) {
+            total1 += x;
+            total2 += x * x;
+        }
+        let value = if guard.clean() {
+            let mean1 = total1 / p;
+            let mean2 = total2 / p;
+            mean2 - mean1 * mean1
+        } else {
+            let (s1, s2) = data[i + 1 - period..=i]
+                .iter()
+                .fold((0.0, 0.0), |(s1, s2), &x| (s1 + x, s2 + x * x));
+            let mean1 = s1 / p;
+            s2 / p - mean1 * mean1
+        };
         let old = data[trailing];
         trailing += 1;
-        total1 -= old;
-        total2 -= old * old;
-        out.set(i, mean2 - mean1 * mean1);
+        if guard.leave(old.is_finite()) {
+            total1 -= old;
+            total2 -= old * old;
+        }
+        out.set(i, value);
     }
-    out.finish()
+    (out.finish(), total1.is_finite() && total2.is_finite())
 }
 
 /// Rolling population variance over `period` (TA-Lib VAR). Lookback period-1.
@@ -211,6 +288,15 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
             *out_ptr.add(i) = value(sx, sy, sx2, sy2, sxy);
         }
     }
+    if [sx, sy, sx2, sy2, sxy].iter().all(|v| v.is_finite()) {
+        return out.finish();
+    }
+    // A non-finite row entered: window-local careful path (see `crate::guard`).
+    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
+    window_sums(n, period, |i| {
+        let (xi, yi) = (x[i], y[i]);
+        [xi, yi, xi * xi, yi * yi, xi * yi]
+    }, |i, [sx, sy, sx2, sy2, sxy]| out.set(i, value(sx, sy, sx2, sy2, sxy)));
     out.finish()
 }
 
@@ -271,5 +357,18 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
         sxx -= tx * tx;
         sxy -= tx * ty;
     }
+    if [sx, sy, sxx, sxy].iter().all(|v| v.is_finite()) {
+        return out.finish();
+    }
+    // A non-finite return entered: window-local careful path (see `crate::guard`).
+    // Returns exist for bars `1..n`; term `j` is bar `j + 1`'s.
+    let mut out = crate::buf::OutBuf::warmup(n, period);
+    window_sums(n - 1, period, |j| {
+        let (rx, ry) = (ret(x, j + 1), ret(y, j + 1));
+        [rx, ry, rx * rx, rx * ry]
+    }, |j, [sx, sy, sxx, sxy]| {
+        let denom = pf * sxx - sx * sx;
+        out.set(j + 1, if denom.abs() < 1e-14 { 0.0 } else { (pf * sxy - sx * sy) / denom });
+    });
     out.finish()
 }
