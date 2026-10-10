@@ -343,6 +343,17 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether the `+` / `-` at the cursor is a sign inside the argument that began at
+    /// `start`: it opens the argument, or follows the `e` / `E` of a numeric exponent.
+    fn is_sign_in_number(&self, start: usize) -> bool {
+        let i = self.i;
+        matches!(self.s[i], b'+' | b'-')
+            && (i == start
+                || (i >= start + 2
+                    && matches!(self.s[i - 1], b'e' | b'E')
+                    && self.s[i - 2].is_ascii_digit()))
+    }
+
     fn read_args(&mut self) -> Vec<Option<String>> {
         let mut args = Vec::new();
         loop {
@@ -350,6 +361,13 @@ impl<'a> Parser<'a> {
             let start = self.i;
             while let Some(c) = self.peek() {
                 if matches!(c, b',' | b'@' | b')' | b' ' | b'\t' | b'\n' | b'\r') {
+                    break;
+                }
+                // A binary operator ends the argument, so a canonical name — which drops
+                // the spaces around operators (`rsi:14>50`) — re-parses as written. A
+                // sign is kept where it belongs to the number: opening the argument
+                // (`-1`) or following an exponent (`1e-5`).
+                if is_operator_char(c) && !self.is_sign_in_number(start) {
                     break;
                 }
                 self.bump();
@@ -391,6 +409,11 @@ impl<'a> Parser<'a> {
         }
         Ok(series)
     }
+}
+
+/// A character that starts a binary operator (`+ - * / \ < > = ! & |`).
+fn is_operator_char(c: u8) -> bool {
+    matches!(c, b'+' | b'-' | b'*' | b'/' | b'\\' | b'<' | b'>' | b'=' | b'!' | b'&' | b'|')
 }
 
 fn is_ident_start(c: u8) -> bool {
