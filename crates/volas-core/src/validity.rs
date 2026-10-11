@@ -79,8 +79,8 @@ impl Bitmap {
 
     /// Count of missing values (clear bits among the first `len`).
     pub fn null_count(&self) -> usize {
-        let present: u32 = self.words.iter().map(|w| w.count_ones()).sum();
-        self.len - present as usize
+        let present: usize = self.words.iter().map(|w| w.count_ones() as usize).sum();
+        self.len - present
     }
 }
 
@@ -265,6 +265,17 @@ mod tests {
         assert_eq!(bm.null_count(), 2);
         bm.set(3, true);
         assert!(bm.get(3));
+        assert_eq!(bm.null_count(), 1);
+    }
+
+    #[test]
+    fn bitmap_null_count_past_u32() {
+        // 2^32 present bits (512 MiB): the popcount must not wrap a 32-bit
+        // accumulator (release reported 2^32 nulls, debug panicked).
+        let n = 1usize << 32;
+        let mut bm = Bitmap::all_valid(n + 1);
+        assert_eq!(bm.null_count(), 0);
+        bm.set(n, false);
         assert_eq!(bm.null_count(), 1);
     }
 
