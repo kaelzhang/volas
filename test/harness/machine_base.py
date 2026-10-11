@@ -27,7 +27,7 @@ from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, 
 
 import volas
 
-from . import contracts, observe
+from . import contracts, inventory, observe
 from .data import EXTREME_SCALES
 from .directives import Directive, directives
 from .ledger import Ledger, reference
@@ -74,11 +74,14 @@ BULK_SURFACES = {
 }
 
 
-_MACD_ARGS = re.compile(r'\bmacd(?:\.\w+)?:(\d*)(?:,(\d*))?')
+# The (fast, slow) leading arguments of the two-EMA lines, with their defaults.
+_FAST_SLOW = re.compile(r'\b(macd|apo|ppo|dma)(?:\.\w+)?:(\d*)(?:,(\d*))?')
+_FAST_SLOW_DEFAULTS = {'macd': (12, 26), 'apo': (12, 26), 'ppo': (12, 26), 'dma': (10, 50)}
+_ULTOSC = re.compile(r'\bultosc:(\d*)(?:,(\d*))?(?:,(\d*))?')
 # A parenthesized single primary as a series (`@(rsi:5)`, `@(0)`): its parentheses
 # are dropped from the cached name.
 _PAREN_PRIMARY_SERIES = re.compile(
-    r'@\(\s*(?:-?[\d.]+|[a-z_][\w.]*(?::[^()@+*/<>=!&|^~\\-]*)?(?:@[\w.,]+)?)\s*\)')
+    r'@\(\s*(?:-?[\d.]+|[a-z_][\w.]*(?::[\w.,\-]*)?(?:@[\w.,]+)?)\s*\)')
 
 
 def triggers_ok(d: Directive) -> bool:
@@ -86,9 +89,15 @@ def triggers_ok(d: Directive) -> bool:
     text = d.text.lower()
     if contracts.avoids('nested-series-name') and _PAREN_PRIMARY_SERIES.search(text):
         return False
-    if contracts.avoids('macd-fast-above-slow-panic'):
-        for fast, slow in _MACD_ARGS.findall(text):
-            if int(fast or 12) > int(slow or 26):
+    if contracts.avoids('fast-above-slow'):
+        for name, fast, slow in _FAST_SLOW.findall(text):
+            default_fast, default_slow = _FAST_SLOW_DEFAULTS[name]
+            if int(fast or default_fast) > int(slow or default_slow):
+                return False
+    if contracts.avoids('ultosc-period-order'):
+        for a, b, c in _ULTOSC.findall(text):
+            periods = [int(a or 7), int(b or 14), int(c or 28)]
+            if periods != sorted(periods):
                 return False
     families = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text)}
     return not (families & contracts.DIVERGENT_FAMILIES)
@@ -228,6 +237,12 @@ class FrameMachine(RuleBasedStateMachine):
                     return False  # the documented margin must cover the directive
             except Exception:
                 return False
+            if contracts.avoids('windowed-drift'):
+                # recursive / cumulative lines restart on the retained rows (the
+                # forming refresh's cold path, a write, an undersized history)
+                names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', d.text.lower())}
+                if names & inventory.unbounded_memory():
+                    return False
         return True
 
     @rule(data=st.data())
@@ -253,6 +268,9 @@ class FrameMachine(RuleBasedStateMachine):
             if dropped and contracts.avoids('windowed-drift'):
                 return
             entry = replace(entry, start=0)
+        if column not in self.cached and contracts.avoids('resume-missing-warmup') \
+                and self._missing_in_warmup(d.text, entry.start):
+            return
         want, expect = self.oracle(entry)
         before = set(self.df.columns)
 
@@ -277,6 +295,18 @@ class FrameMachine(RuleBasedStateMachine):
             self.stale.discard(col)
 
         self.attempt(lambda: self.df[d.text], expect_error=expect, commit=commit, label=f'df[{d.text!r}]')
+
+    def _missing_in_warmup(self, text: str, start: int) -> bool:
+        """Whether an input cell is missing inside the directive's warm-up (the first
+        lookback + 2 rows of its history) — or anywhere when the history is no longer
+        than that yet."""
+        try:
+            span = volas.directive_lookback(text) + 2
+        except Exception:
+            return False
+        rows = self.coarse().rows[start:start + span]
+        return any(r.get(c) is None or (isinstance(r.get(c), float) and not np.isfinite(r[c]))
+                   for r in rows for c in ('open', 'high', 'low', 'close', 'volume'))
 
     def plain_numeric(self) -> list[str]:
         coarse = self.coarse()
@@ -367,7 +397,7 @@ class FrameMachine(RuleBasedStateMachine):
             return  # rolling is numeric-only
         stale = bool(self.stale) and contracts.BULK_READ_STALE_RAISES
         if stale and self.window is not None and contracts.avoids('windowed-stale-logical-read') and any(
-                volas.directive_lookback(n) > self.window for n in self.stale):
+                volas.directive_lookback(n) > len(self.df) for n in self.stale):
             return
         self.attempt(lambda: ops[surface](self.df), expect_error=ValueError if stale else None,
                      label=f'{surface}{" (stale)" if stale else ""}')

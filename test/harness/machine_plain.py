@@ -11,7 +11,7 @@ from hypothesis.stateful import initialize, precondition, rule
 
 import volas
 
-from . import build, contracts, observe
+from . import build, contracts, inventory, observe
 from .data import EPOCHS, NS, make_rows, next_timestamps, regimes, schemas, steps
 from .ledger import Ledger, last_close
 from .machine_base import Entry, FrameMachine
@@ -209,9 +209,12 @@ class PlainMachine(FrameMachine):
             return
         pos = data.draw(st.integers(0, len(self.df) - 1))
         j = self.df.columns.index(name)
+        # The column keeps the cells it holds (already checked against the reference,
+        # within the documented tolerance) as plain data.
+        held = self.df.get_column(name).to_numpy()
 
         def commit(_):
-            values = [None] * self.visible_start() + [None if np.isnan(v) else float(v) for v in want]
+            values = [None] * self.visible_start() + [None if np.isnan(v) else float(v) for v in held]
             values[self.visible_start() + pos] = -3.25
             del self.cached[name]
             self.store.add_column(name, values)
@@ -268,23 +271,31 @@ class PlainMachine(FrameMachine):
         """``df = df.iloc[a:]`` and keep going on the slice (I11)."""
         if self.window is not None:
             return
+        if contracts.avoids('slice-recursive-rewarm') and any(
+                _names(e.name) & inventory.unbounded_memory() for e in self.cached.values()):
+            return  # a recursive cached column re-warms on the slice instead of continuing
         a = data.draw(st.integers(1, len(self.df) - 1))
         if self.stale:
             self.attempt(lambda: self.df.iloc[a:], expect_error=ValueError, label='slice while stale')
             return
+        # A column the slice is too short to keep computed stays as the plain data it
+        # holds (fresh here: a slice of a stale frame raises).
+        held = {n: observe.column_values_series(self.df.get_column(n)) for n in self.cached}
+        start = self.visible_start()
 
         def commit(result):
             self.df = result
             self.offset += a
             self.store.range_kind = False
             new_len = len(self.df)
-            for name, entry in list(self.cached.items()):
+            for name in list(self.cached):
                 if contracts.SLICE_CACHED_COLUMNS_CONTINUE and volas.directive_lookback(name) <= new_len:
                     continue
-                want, _ = reference_full(self, entry)
+                values = held[name]
                 del self.cached[name]
-                kinds = {type(v) for v in want if v is not None}
-                self.store.add_column(name, want, 'bool' if kinds <= {bool} and kinds else 'float64')
+                cells = [None] * start + [None if (isinstance(v, float) and np.isnan(v)) else v
+                                          for v in values.tolist()]
+                self.store.add_column(name, cells, 'bool' if values.dtype == np.bool_ else 'float64')
 
         self.attempt(lambda: self.df.iloc[a:], commit=commit, label=f'iloc[{a}:]')
 
@@ -325,10 +336,11 @@ class PlainMachine(FrameMachine):
     @rule(data=st.data())
     def compare_snapshot(self, data):
         """``df == other`` reads both frames: it raises while either is stale."""
-        other, _, _, other_stale, _ = self.snapshots[data.draw(st.integers(0, len(self.snapshots) - 1))]
+        other, other_store, _, other_stale, _ = self.snapshots[data.draw(st.integers(0, len(self.snapshots) - 1))]
         if other.columns != self.df.columns or len(other) != len(self.df) or \
+                other_store.range_kind != self.store.range_kind or \
                 not np.array_equal(np.asarray(other.index), np.asarray(self.df.index)):
-            return  # differently-labelled operands are rejected by design
+            return  # differently-labelled (or differently-kinded) operands are rejected by design
         if other_stale and not self.stale and contracts.avoids('stale-compare-rhs'):
             return
         stale = bool(self.stale or other_stale) and contracts.COMPARE_STALE_RHS_RAISES
@@ -342,14 +354,9 @@ class PlainMachine(FrameMachine):
                      label='df == snapshot')
 
 
-def reference_full(machine: FrameMachine, entry: Entry) -> tuple[list, object]:
-    """``entry``'s reference over every ledger row (NA as ``None``), aligned to the ledger."""
-    from .ledger import reference
-    values, error = reference(machine.coarse(), entry.name, entry.env, entry.start)
-    lead = [None] * entry.start
-    if values is None:
-        return lead + [None] * (len(machine.coarse().rows) - entry.start), error
-    return lead + [None if (isinstance(v, float) and np.isnan(v)) else v for v in values.tolist()], None
+def _names(text: str) -> set[str]:
+    """The command names a directive mentions (lower-cased, sub-commands dropped)."""
+    return {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
 
 
 def _nat_index(df: volas.DataFrame, schema) -> volas.DataFrame:

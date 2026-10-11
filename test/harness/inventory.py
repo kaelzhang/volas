@@ -175,7 +175,9 @@ def sample_value(domain: ArgDomain, hint: int) -> str:
 def _fixture() -> volas.DataFrame:
     rng = np.random.default_rng(7)
     c = 100 + np.cumsum(rng.standard_normal(80))
-    return volas.DataFrame({'open': c + 0.2, 'high': c + 1, 'low': c - 1, 'close': c,
+    o = c + 0.4 * rng.standard_normal(80)
+    return volas.DataFrame({'open': o, 'high': np.maximum(o, c) + rng.uniform(0.1, 1.5, 80),
+                            'low': np.minimum(o, c) - rng.uniform(0.1, 1.5, 80), 'close': c,
                             'volume': rng.uniform(1, 100, 80)})
 
 
@@ -223,6 +225,34 @@ def lines() -> tuple[Line, ...]:
 
 def executable_lines() -> tuple[Line, ...]:
     return tuple(line for line in lines() if line.executes)
+
+
+@functools.cache
+def unbounded_memory() -> frozenset[str]:
+    """Commands with a line whose output still depends on a row more than its
+    lookback behind (recursive / cumulative / positional): a large jump early in the
+    fixture changes their output after the warm-up of a cut at that row."""
+    base = _fixture()
+    cols = {c: np.asarray(base[c], float).copy() for c in BASE}
+    for c in ('open', 'high', 'low', 'close'):
+        cols[c][3] *= 1.5
+    cols['volume'][3] *= 7
+    jumped = volas.DataFrame(cols)
+    out = set()
+    for line in executable_lines():
+        form = line.form + line.series_suffix
+        try:
+            start = 4 + 2 * volas.directive_lookback(form) + 2
+            a = np.asarray(base.exec(form), float)[start:]
+            b = np.asarray(jumped.exec(form), float)[start:]
+        except Exception:
+            continue
+        # A relative 1e-9 slack: running-sum kernels keep a rounding residue of a row
+        # that left their window (the open last-ULP drift), which is not memory.
+        scale = np.nanmax(np.abs(a), initial=1.0) if np.isfinite(a).any() else 1.0
+        if start >= len(base) or not np.allclose(a, b, rtol=0, atol=1e-9 * scale, equal_nan=True):
+            out.add(line.head.split('.')[0])
+    return frozenset(out)
 
 
 @functools.cache

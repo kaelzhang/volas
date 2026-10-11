@@ -51,11 +51,22 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # append reads a source frame without a freshness check (stale placeholders are
     # appended as data).
     'stale-append-source',
-    # `macd` with fast > slow panics (a Rust slice-index panic) instead of erroring.
-    'macd-fast-above-slow-panic',
+    # fast > slow is accepted for the two-EMA lines: `macd` panics (a Rust
+    # slice-index panic), `apo` / `ppo` / `dma` resume differently from the full
+    # compute.
+    'fast-above-slow',
     # A windowed frame checks freshness on its visible slice, where a cached column
     # longer than the window is no longer computed: a stale read then succeeds.
     'windowed-stale-logical-read',
+    # A missing input inside a recursive line's warm-up: the full compute shifts past
+    # it, the state captured over the head carries it (NaN for ever, or a wrong value).
+    'resume-missing-warmup',
+    # ultosc with periods out of order (e.g. `ultosc:29`) refreshes differently
+    # from its full compute.
+    'ultosc-period-order',
+    # A recursive cached column without a carried state (a composite / explicit
+    # series) re-warms on a slice's retained rows instead of continuing its history.
+    'slice-recursive-rewarm',
     # An all-NaN period folds high / low to -inf / +inf instead of NaN (already
     # tracked); the tf reference reproduces that result while this is open.
     'all-nan-fold-extreme',
@@ -83,6 +94,9 @@ DIVERGENT_FAMILIES: frozenset[str] = frozenset({
     # cancellation in the running co-moment sums: a window recompute and the full
     # kernel differ by more than 1e-9 relative, and |correl| exceeds 1
     'correl', 'beta',
+    # cancellation in the running sum-of-squares variance, amplified by the square
+    # root: boll.lower:1 (a one-sample band, i.e. the value itself) is off by ~1e-5
+    'boll', 'bbw', 'stddev', 'var',
     # cancellation in vr's running up / down volume sums: a window with no down
     # volume yields a huge ratio of either sign (the full kernel and a window
     # recompute disagree by orders of magnitude)

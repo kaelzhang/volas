@@ -232,10 +232,22 @@ def test_resume_honours_the_missing_row_shift(directive, missing):
     assert _same(df[directive], _frame(cols, 0, 90)[directive])
 
 
-@_xfail('H5 macd-fast-above-slow-panic', 'macd with fast > slow panics instead of raising')
+@_xfail('H5 fast-above-slow', 'macd with fast > slow panics instead of raising')
 def test_macd_with_fast_above_slow_raises_a_directive_error():
     with pytest.raises(volas.DirectiveError):
         _frame(_walk(80), 0, 80)['macd:30,5']
+
+
+@_xfail('H5 fast-above-slow', 'apo / ppo / dma with fast > slow resume differently from the full compute')
+@pytest.mark.parametrize('directive', ['apo:10,2', 'ppo:10,2', 'dma:10,1'])
+def test_fast_above_slow_resumes_like_the_full_compute(directive):
+    cols = _walk(60, 2)
+    df = _frame(cols, 0, 5)
+    df[directive]
+    for i in range(5, 60):
+        df.append(_frame(cols, i, i + 1))
+    df.fulfill()
+    assert _same(df[directive], _frame(cols, 0, 60)[directive])
 
 
 @_xfail('H6 sliding-sum-magnitude', 'a 1e300 input outside the window still skews the full kernel')
@@ -338,3 +350,52 @@ def test_trix_resume_matches_on_zero_prices():
         df.append(volas.DataFrame({'close': vals[i:i + 1]}))
         df.fulfill()
     assert _same(df['trix:1'], volas.DataFrame({'close': vals})['trix:1'])
+
+
+@_xfail('H19 slice-recursive-rewarm', 'a recursive composite re-warms on a slice instead of continuing')
+def test_a_recursive_composite_continues_across_a_slice():
+    cols = _walk(40, 3)
+    df = _frame(cols, 0, 30)
+    df['(close)+(kama:3@open)']
+    df = df.iloc[1:]
+    df.append(_frame(cols, 30, 31))
+    df.fulfill()
+    assert np.array_equal(np.asarray(df['close+kama:3@open'])[-1:],
+                          np.asarray(_frame(cols, 0, 31)['close+kama:3@open'])[-1:])
+
+
+@_xfail('H20 variance-cancellation', 'running sum-of-squares variance drifts; sqrt amplifies it')
+def test_a_one_sample_bollinger_band_is_the_value_itself():
+    rng = np.random.default_rng(0)
+    c = 100 + np.cumsum(rng.standard_normal(500))
+    band = np.asarray(volas.DataFrame({'close': c})['boll.lower:1'], float)
+    assert np.nanmax(np.abs(band - c)) <= 1e-9 * np.max(np.abs(c))
+
+
+@_xfail('H21 resume-missing-warmup', 'a missing bar inside the warm-up leaves the resumed column NaN for ever')
+@pytest.mark.parametrize('directive', ['atr:3', 'ema:3', 'natr:3', 'atr:3@volume'])
+def test_a_missing_bar_in_the_warm_up_does_not_poison_the_resume(directive):
+    nan = np.nan
+    rows = [(100, 101, 99, 100.5, 500), (100.2, 101.5, 99.5, 100.8, 600), (nan, nan, nan, nan, nan),
+            (100.9, 102, 100, 101.2, 450), (101.0, 102.2, 100.4, 101.6, 700),
+            (101.5, 102.5, 101, 102, 650), (101.8, 103, 101.2, 102.5, 640)]
+    cols = {k: np.array([r[i] for r in rows], float)
+            for i, k in enumerate(['open', 'high', 'low', 'close', 'volume'])}
+    df = _frame(cols, 0, 3)
+    df[directive]
+    for i in range(3, 7):
+        df.append(_frame(cols, i, i + 1))
+        df.fulfill()
+    assert _same(df[directive], _frame(cols, 0, 7)[directive])
+
+
+@_xfail('H22 ultosc-period-order', 'ultosc with periods out of order refreshes differently from its full compute')
+@pytest.mark.parametrize('directive', ['ultosc:29', 'ultosc:7,30,10', 'ultosc:20,5,3'])
+def test_ultosc_with_unordered_periods_refreshes_like_the_full_compute(directive):
+    cols = _walk(80, 0)
+    df = _frame(cols, 0, 40)
+    df[directive]
+    for i in range(40, 80):
+        df.append(_frame(cols, i, i + 1))
+        df.fulfill()
+    assert _same(df[directive], _frame(cols, 0, 80)[directive])
