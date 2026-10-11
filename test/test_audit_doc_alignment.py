@@ -31,7 +31,11 @@ import pytest
 import volas  # noqa: F401 - in scope for exec'd doc examples
 
 _REPO = Path(__file__).resolve().parent.parent
-_DOCS = ["README.md", "PANDAS-DIFFERENCES.md", "INDICATORS.md", "DEVELOPMENT.md"]
+_DOCS = [
+    "README.md", "PANDAS-DIFFERENCES.md", "INDICATORS.md", "DEVELOPMENT.md",
+    "docs/dataframe-api.md", "docs/cumulation.md", "docs/directives.md",
+    "docs/pandas-compatibility.md", "docs/interop.md",
+]
 _BLOCK = re.compile(r"```py\n(.*?)```", re.S)
 
 # a plain block is runnable on its own only if it imports volas, builds its own

@@ -1,0 +1,100 @@
+# pandas, Arrow and DLPack interop
+
+## pandas interop
+
+pandas is **not** a runtime dependency; these bridges import it lazily, only when
+called, so `import volas` stays pandas-free.
+
+```py
+from volas import DataFrame
+
+df = DataFrame.from_pandas(pandas_df)  # numeric / bool / str / datetime native; a (tz-aware) DatetimeIndex round-trips;
+                                   # a nullable Int64 / boolean / string column reads back as int / bool / str + volas.NA
+pdf = df.to_pandas()               # -> pandas.DataFrame ('numpy' backend: an int/bool column with NA becomes float64 + NaN)
+pdf = df.to_pandas(dtype_backend='numpy_nullable')  # faithful masked Int64 / boolean (a lossless NA round-trip)
+df.to_csv('out.csv', index=True)   # subset of pandas to_csv; returns a str if path=None
+```
+
+`to_pandas`'s **dtype_backend** (`'numpy'` vs the lossless `'numpy_nullable'`) governs
+how a missing value crosses into pandas — see
+[`df.to_pandas`](dataframe-api.md#dfto_pandasdtype_backendnumpy---pandasdataframe) for the per-value
+breakdown.
+
+## Arrow & DLPack interop (zero-copy)
+
+A volas column owns one contiguous buffer per dtype (Arrow-native string layout
+included), so it crosses to Arrow and DLPack consumers **without a copy** — the
+consumer borrows the same bytes, kept alive by volas.
+
+```py
+import pyarrow as pa, numpy as np
+
+# Arrow C-Data / C-Stream — pyarrow, polars, … read volas directly via the
+# standard PyCapsule protocols (__arrow_c_array__ / __arrow_c_stream__).
+pa.array(df['close'])              # Series  -> pyarrow.Array  (shares the buffer)
+pa.table(df)                       # DataFrame -> pyarrow.Table (one RecordBatch)
+df['close'].to_arrow()             # convenience for pa.array(...)
+
+Series.from_arrow(pa_array, name='close')   # Arrow array  -> Series (borrowed where dtypes match)
+DataFrame.from_arrow(pa_table)              # Arrow table  -> DataFrame
+
+# DLPack — NumPy / PyTorch / JAX borrow a dense numeric (or bool) column.
+np.from_dlpack(df['close'])        # zero-copy ndarray view
+```
+
+The high-level entry points — [`df.to_arrow`](dataframe-api.md#dfto_arrow---pyarrowtable) /
+[`DataFrame.from_arrow`](dataframe-api.md#dataframefrom_arrowdata---dataframe),
+[`series.to_arrow`](dataframe-api.md#seriesto_arrow---pyarrowarray) /
+[`Series.from_arrow`](dataframe-api.md#seriesfrom_arrowdata-namenone---series) — are documented under
+Usage. They sit on these **standard protocol methods**, which Arrow / array consumers
+call automatically (so you rarely call them yourself):
+
+- **`Series.__arrow_c_array__`** — the Arrow C-Data array protocol; returns the
+  `(schema, array)` PyCapsule pair, so `pa.array(s)` / `pl.Series(s)` read a column.
+- **`Series.__arrow_c_schema__`** — the schema-only half (the column's Arrow dtype).
+- **`DataFrame.__arrow_c_stream__`** — the Arrow C-Stream protocol; the frame as one
+  `RecordBatch`, so `pa.table(df)` / `pl.from_dataframe(df)` read a frame.
+- **`Series.__dlpack__` / `Series.__dlpack_device__`** — the DLPack protocol, so
+  `np.from_dlpack(s)` / `torch.from_dlpack(s)` borrow a dense numeric / bool column. The
+  borrowed view is **read-only** (a versioned-DLPack flag) so writing through it can't
+  bypass copy-on-write and corrupt the frame; a pre-1.0 consumer that cannot receive the
+  flag is given an independent copy instead. `np.from_dlpack(s, copy=True)` returns an
+  independent **writable** copy. A non-CPU device or a stream is refused (`BufferError`);
+  an int/bool column with a missing value (DLPack has no null mask) or a str/datetime
+  column raises.
+
+**Zero-copy contract.** The *data* buffer is shared (no copy) in both directions for
+volas's native numeric (`int32` / `int64` / `float32` / `float64`) and
+nanosecond-datetime columns; a string column exports zero-copy too. The repacks are:
+
+- on **import**, every string column (`string` / `large_string`, sliced or not) — it is
+  copied into volas-owned buffers and validated there (in-range monotonic offsets, valid
+  UTF-8 for each present value; a null slot's unspecified bytes are dropped), so a
+  producer rewriting its buffers after the import cannot reach the volas column;
+
+- **`bool`** — volas stores one byte per value, Arrow one *bit*;
+- the **null bitmap** (≤ `n/8` bytes) — including, on export, a one-pass scan that turns
+  a missing `float` (in-band `NaN`) into a real Arrow null;
+- on **import only**: a `string_view` (materialised to contiguous bytes), a coarser-than-ns timestamp
+  (rescaled), a `Decimal128` / `Decimal256` (→ `f64`, **lossy** past ~15 digits — keep
+  prices as strings for exactness), a narrow / unsigned integer (→ `i64`; a `UInt64` past
+  `i64::MAX` has no lossless image and raises), a dictionary / categorical column (decoded
+  to its values), a typeless `Null` column (→ an all-NA `f64` column), or a
+  `Date32` / `Date64` (→ ns datetime). Other Arrow types raise a clear error.
+
+**NA at the boundary.** Every missing value — int, bool, **and float** — crosses as a
+real Arrow null (a missing float is the in-band `NaN`, scanned into the null bitmap on
+export), so a downstream `is_null` / `null_count` sees them all consistently. DLPack and
+an integer `to_numpy` have no null channel, so they raise on a missing value — pass
+`na_value=`, or use the Arrow path, which carries the null bitmap losslessly:
+
+```py
+df['qty'].to_numpy(dtype='int64')                # raises if any value is NA (pandas-aligned)
+df['qty'].to_numpy(dtype='int64', na_value=0)    # or fill the holes with na_value
+pa.array(df['qty'])                              # lossless: keeps int64 + the null bitmap
+```
+
+**Timezone.** Arrow tables have no *index*, so the frame's index — and its timezone — is
+not carried: a datetime column crosses as naive UTC nanoseconds (the absolute instant is
+exact; only the display-zone label is dropped), and `from_arrow` returns a fresh
+`RangeIndex`. Re-apply a zone after import with `tz_localize` / `tz_convert`.
