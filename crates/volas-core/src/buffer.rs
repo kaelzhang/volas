@@ -299,10 +299,29 @@ impl<T: Float> Buffer<T> {
         }
     }
 
+    /// Copy foreign bytes in before a tracked write, learning their NaN fact from the
+    /// copy: it is volas's own memory now, so the fact holds until the next write.
+    #[inline]
+    fn own(&mut self) {
+        if self.is_borrowed() {
+            self.copy_in();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn copy_in(&mut self) {
+        let owned = self.as_slice().to_vec();
+        let state = if scan_nan(&owned) { SOME_NAN } else { NO_NAN };
+        self.data = Data::Owned(Arc::new(owned));
+        self.set_nan_state(state);
+    }
+
     /// Append `other`'s values (copy-on-write), keeping the NaN fact in O(`other`): it
     /// holds a NaN once either part does, and is otherwise what it was. (The states are
     /// ordered `UNKNOWN < NO_NAN < SOME_NAN`, so that is one `max`.)
     pub fn append(&mut self, other: &[T]) {
+        self.own();
         let added = if scan_nan(other) { SOME_NAN } else { UNKNOWN };
         let state = self.nan_state().max(added);
         self.make_mut().extend_from_slice(other);
@@ -311,6 +330,7 @@ impl<T: Float> Buffer<T> {
 
     /// Append `len` copies of `value` (copy-on-write), keeping the NaN fact.
     pub fn append_repeated(&mut self, value: T, len: usize) {
+        self.own();
         let added = if len > 0 && value.is_nan_value() {
             SOME_NAN
         } else {
@@ -326,6 +346,7 @@ impl<T: Float> Buffer<T> {
     /// NaN-free buffer keeps it NaN-free; a number written over a buffer holding a NaN
     /// may have removed the last one, so the fact is forgotten.
     pub fn set(&mut self, i: usize, value: T) {
+        self.own();
         let state = match (self.nan_state(), value.is_nan_value()) {
             (_, true) => SOME_NAN,
             (NO_NAN, false) => NO_NAN,
@@ -480,10 +501,32 @@ mod tests {
         assert_eq!(b.clone().known_has_nan(), None);
         assert_eq!(b.slice(1, 2).known_has_nan(), None);
         let mut owned = b.clone();
-        owned.append(&[3.0]); // copied in: owned now, but the copy was never scanned
-        assert_eq!(owned.known_has_nan(), None);
-        assert!(owned.has_nan());
+        owned.append(&[3.0]); // copied in: owned now, its fact taken from the copy
+        assert!(!owned.is_borrowed());
         assert_eq!(owned.known_has_nan(), Some(true));
+    }
+
+    /// A tracked write copies foreign bytes in and learns their fact from the copy —
+    /// volas's own memory now — so an imported column appended live gets the clean
+    /// fast path.
+    #[test]
+    fn a_tracked_write_learns_the_fact_of_the_foreign_bytes_it_copies() {
+        let mut a = borrowed(vec![1.0, 2.0]);
+        a.append(&[3.0]);
+        assert_eq!(a.known_has_nan(), Some(false));
+        let mut r = borrowed(vec![1.0]);
+        r.append_repeated(2.0, 2);
+        assert_eq!(r.known_has_nan(), Some(false));
+        let mut s = borrowed(vec![1.0, 2.0]);
+        s.set(0, 5.0);
+        assert_eq!(s.known_has_nan(), Some(false));
+        let mut n = borrowed(vec![NAN, 2.0]);
+        n.set(0, 5.0); // the copy held the NaN being overwritten: forget it
+        assert_eq!(n.known_has_nan(), None);
+        assert!(!n.has_nan());
+        let mut m = borrowed(vec![NAN]);
+        m.append(&[1.0]);
+        assert_eq!(m.known_has_nan(), Some(true));
     }
 
     #[test]
