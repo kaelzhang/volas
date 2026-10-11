@@ -357,11 +357,6 @@ fn stoch_fastk_same_series_small_window(data: &[f64], period: usize) -> Option<V
 /// %K is masked to NaN until a full `fastk_period` window of finite RSI is available
 /// (index `rsi_period + fastk_period - 1`). The `fastd` line is then `ma_typed` of this.
 pub fn stochrsi_fastk(close: &[f64], rsi_period: usize, fastk_period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return crate::start::pad_front(start, stochrsi_fastk(&close[start..], rsi_period, fastk_period));
-    }
     let rsi = rsi(close, rsi_period);
     let n = rsi.len();
     let mut fk = vec![f64::NAN; n];
@@ -393,11 +388,6 @@ pub fn stochrsi_fastk(close: &[f64], rsi_period: usize, fastk_period: usize) -> 
 /// and D-smoothing stages fused over the finite RSI tail. RSI itself remains the
 /// single recursive source of truth; this only removes the intermediate fastK Vec.
 pub fn stochrsi_d_default_sma(close: &[f64]) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return stochrsi_d_default_sma(&close[start..]).map(|v| crate::start::pad_front(start, v));
-    }
     let rsi = rsi(close, 14);
     let n = rsi.len();
     let start = rsi.iter().position(|x| !x.is_nan()).unwrap_or(n);

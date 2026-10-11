@@ -286,11 +286,6 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 /// pass via [`kernels::ema_cascade`] (one traversal, one allocation), then the verified
 /// `roc` finishes it. Bit-identical to chaining three `ema_seeded` calls.
 pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return crate::start::pad_front(start, trix(&close[start..], period));
-    }
     let e3 = kernels::ema_cascade::<3>(close, period);
     roc(&e3, 1)
 }
@@ -300,11 +295,6 @@ pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
 /// cascade never seeds (`3·(period−1) >= n` → all-NaN, keep the fallback). Pairs with
 /// [`trix_resume`].
 pub fn trix_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return trix_final_state(&close[start..], period);
-    }
     let e = kernels::ema_cascade_final::<3>(close, period)?;
     Some(e.to_vec())
 }

@@ -3,7 +3,7 @@
 
 use crate::exec::{arg_f64, arg_usize, series_f64};
 use crate::parse;
-use crate::types::Ast;
+use crate::types::{ArgValue, Ast};
 use volas_compute::indicators as ind;
 use volas_core::{Column, DataFrame};
 
@@ -29,6 +29,15 @@ impl ResumeStep {
 
     fn pair(value: f64, state: [f64; 2]) -> Self {
         ResumeStep { value, state, len: 2 }
+    }
+
+    /// A missing row: no value, and the carried state `prev` unchanged.
+    fn missing(prev: &[f64]) -> Option<Self> {
+        match *prev {
+            [s] => Some(ResumeStep::single(f64::NAN, s)),
+            [a, b] => Some(ResumeStep::pair(f64::NAN, [a, b])),
+            _ => None, // LCOV_EXCL_LINE — the gated families carry one or two values
+        }
     }
 
     /// The carried state as of the resumed row.
@@ -74,12 +83,34 @@ pub fn execute_resume_one_node(
     prev_state: &[f64],
     row: usize,
 ) -> Option<ResumeStep> {
-    let (name, _sub, args, series) = as_command(node)?;
+    let (name, sub, args, series) = as_command(node)?;
     let name = name.as_ref();
     if !matches!(name, "ema" | "smma" | "atr" | "natr" | "rsi" | "cmo") {
         return None;
     }
-    let period = arg_usize(&args, 0);
+    // Over the complete rows: a missing row is NaN, its state untouched.
+    crate::complete::resume_one(
+        df,
+        name,
+        sub.as_deref(),
+        &args,
+        series,
+        row,
+        ResumeStep::missing(prev_state),
+        |df, series, row| step_of(df, name, &args, series, prev_state, row),
+    )
+}
+
+/// One scalar resume step of the gated command `name` at `row` over `df`.
+fn step_of(
+    df: &DataFrame,
+    name: &str,
+    args: &[ArgValue],
+    series: &[Ast],
+    prev_state: &[f64],
+    row: usize,
+) -> Option<ResumeStep> {
+    let period = arg_usize(args, 0);
     if name == "atr" || name == "natr" {
         // Wilder ATR (and NATR = ATR/close·100) read high/low/close; one fused step
         // replaces the two-`Vec` resume.
@@ -104,211 +135,6 @@ pub fn execute_resume_one_node(
     }
 }
 
-/// Extract the period from a `name:<period>` directive for the momentum / ROC
-/// family. These commands are required (no default), so the form is always explicit.
-fn period_of(directive: &str, name: &str) -> Option<usize> {
-    directive
-        .strip_prefix(name)?
-        .strip_prefix(':')?
-        .parse()
-        .ok()
-}
-
-/// Parse-free scalar twin of [`execute_resume_default_series`] for the dominant
-/// single-bar append case.
-pub fn execute_resume_default_series_one(
-    df: &DataFrame,
-    directive: &str,
-    row: usize,
-) -> Option<f64> {
-    if directive.contains('@') || row >= df.height() {
-        return None;
-    }
-    match directive {
-        "avgprice" => {
-            let open = series_f64(df, &[], 0, "open").ok()?;
-            let high = series_f64(df, &[], 1, "high").ok()?;
-            let low = series_f64(df, &[], 2, "low").ok()?;
-            let close = series_f64(df, &[], 3, "close").ok()?;
-            Some((open[row] + high[row] + low[row] + close[row]) / 4.0)
-        }
-        "medprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            Some((high[row] + low[row]) / 2.0)
-        }
-        "bop" => {
-            let open = series_f64(df, &[], 0, "open").ok()?;
-            let high = series_f64(df, &[], 1, "high").ok()?;
-            let low = series_f64(df, &[], 2, "low").ok()?;
-            let close = series_f64(df, &[], 3, "close").ok()?;
-            let range = high[row] - low[row];
-            Some(if range < 1e-14 { 0.0 } else { (close[row] - open[row]) / range })
-        }
-        "typprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
-            Some((high[row] + low[row] + close[row]) / 3.0)
-        }
-        "wclprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
-            Some((high[row] + low[row] + 2.0 * close[row]) / 4.0)
-        }
-        "tr" => {
-            if row == 0 {
-                return Some(f64::NAN);
-            }
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
-            let prev_close = close[row - 1];
-            Some(
-                (high[row] - low[row])
-                    .max((high[row] - prev_close).abs())
-                    .max((low[row] - prev_close).abs()),
-            )
-        }
-        _ => {
-            let (kind, period) = ["mom", "roc", "rocp", "rocr", "rocr100"]
-                .into_iter()
-                .find_map(|kind| {
-                    period_of(directive, kind).map(|period| (kind, period))
-                })?;
-            if row < period {
-                return Some(f64::NAN);
-            }
-            let data = series_f64(df, &[], 0, "close").ok()?;
-            let prior = data[row - period];
-            Some(match kind {
-                "mom" => data[row] - prior,
-                _ if prior == 0.0 => 0.0,
-                "roc" => (data[row] / prior - 1.0) * 100.0,
-                "rocp" => data[row] / prior - 1.0,
-                "rocr" => data[row] / prior,
-                "rocr100" => data[row] / prior * 100.0,
-                _ => unreachable!(), // LCOV_EXCL_LINE
-            })
-        }
-    }
-}
-
-/// Parse-free resume for canonical default-series finite-memory directives.
-/// This exists for the single-bar append hot path: the formula is cheaper than
-/// reparsing the directive AST. Directives with explicit series (`@...`) or
-/// expressions intentionally fall back to [`execute_resume`].
-pub fn execute_resume_default_series(
-    df: &DataFrame,
-    directive: &str,
-    from_row: usize,
-) -> Option<(Column, Vec<f64>)> {
-    if directive.contains('@') {
-        return None;
-    }
-    match directive {
-        "avgprice" => {
-            let open = series_f64(df, &[], 0, "open").ok()?;
-            let high = series_f64(df, &[], 1, "high").ok()?;
-            let low = series_f64(df, &[], 2, "low").ok()?;
-            let close = series_f64(df, &[], 3, "close").ok()?;
-            let mut out = Vec::with_capacity(open.len().saturating_sub(from_row));
-            for i in from_row..open.len() {
-                out.push((open[i] + high[i] + low[i] + close[i]) / 4.0);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        "medprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
-            for i in from_row..high.len() {
-                out.push((high[i] + low[i]) / 2.0);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        "bop" => {
-            let open = series_f64(df, &[], 0, "open").ok()?;
-            let high = series_f64(df, &[], 1, "high").ok()?;
-            let low = series_f64(df, &[], 2, "low").ok()?;
-            let close = series_f64(df, &[], 3, "close").ok()?;
-            let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
-            for i in from_row..close.len() {
-                let range = high[i] - low[i];
-                out.push(if range < 1e-14 { 0.0 } else { (close[i] - open[i]) / range });
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        "typprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
-            let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
-            for i in from_row..close.len() {
-                out.push((high[i] + low[i] + close[i]) / 3.0);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        "wclprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
-            let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
-            for i in from_row..close.len() {
-                out.push((high[i] + low[i] + 2.0 * close[i]) / 4.0);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        "tr" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
-            let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
-            for i in from_row..high.len() {
-                if i == 0 {
-                    out.push(f64::NAN);
-                } else {
-                    let prev_close = close[i - 1];
-                    out.push(
-                        (high[i] - low[i])
-                            .max((high[i] - prev_close).abs())
-                            .max((low[i] - prev_close).abs()),
-                    );
-                }
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        _ => {
-            let (kind, period) = ["mom", "roc", "rocp", "rocr", "rocr100"]
-                .into_iter()
-                .find_map(|kind| {
-                    period_of(directive, kind).map(|period| (kind, period))
-                })?;
-            let data = series_f64(df, &[], 0, "close").ok()?;
-            let mut out = Vec::with_capacity(data.len().saturating_sub(from_row));
-            for i in from_row..data.len() {
-                if i < period {
-                    out.push(f64::NAN);
-                    continue;
-                }
-                let prior = data[i - period];
-                let value = match kind {
-                    "mom" => data[i] - prior,
-                    _ if prior == 0.0 => 0.0,
-                    "roc" => (data[i] / prior - 1.0) * 100.0,
-                    "rocp" => data[i] / prior - 1.0,
-                    "rocr" => data[i] / prior,
-                    "rocr100" => data[i] / prior * 100.0,
-                    _ => unreachable!(), // LCOV_EXCL_LINE
-                };
-                out.push(value);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-    }
-}
-
 /// Resume `node` from `prev_state` over rows `[from_row, height)`, returning the
 /// new-row [`Column`] and the updated state. `None` when `node` has no resume
 /// kernel (caller falls back to a full recompute). The values are bit-identical to
@@ -327,9 +153,30 @@ pub fn execute_resume(
     origin: usize,
 ) -> Option<(Column, Vec<f64>)> {
     let (name, sub, args, series) = as_command(node)?;
-    let sub = sub.as_deref();
+    let (name, sub) = (name.as_ref(), sub.as_deref());
+    if crate::spec::is_recursive(name, &args) {
+        // Over the complete rows: a missing new row is NaN, the state untouched.
+        return crate::complete::resume(df, name, sub, &args, series, prev_state, from_row, |df, series, from| {
+            resume_of(df, name, sub, &args, series, prev_state, from, origin)
+        });
+    }
+    resume_of(df, name, sub, &args, series, prev_state, from_row, origin)
+}
+
+/// [`execute_resume`] of the bound command `name`/`sub` over every row of `df`.
+#[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
+fn resume_of(
+    df: &DataFrame,
+    name: &str,
+    sub: Option<&str>,
+    args: &[ArgValue],
+    series: &[Ast],
+    prev_state: &[f64],
+    from_row: usize,
+    origin: usize,
+) -> Option<(Column, Vec<f64>)> {
     let close = || series_f64(df, series, 0, "close");
-    match (name.as_ref(), sub) {
+    match (name, sub) {
         // Stateless finite-memory resume. These kernels depend only on the row
         // being refreshed plus a fixed prior row, so append can produce exactly the
         // stale tail without probing a window or recomputing the full column.
@@ -406,7 +253,7 @@ pub fn execute_resume(
         }
         ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => {
             let data = close().ok()?;
-            let period = arg_usize(&args, 0);
+            let period = arg_usize(args, 0);
             let mut out = Vec::with_capacity(data.len().saturating_sub(from_row));
             for i in from_row..data.len() {
                 if i < period {
@@ -414,7 +261,7 @@ pub fn execute_resume(
                     continue;
                 }
                 let prior = data[i - period];
-                let value = match name.as_ref() {
+                let value = match name {
                     "mom" => data[i] - prior,
                     _ if prior == 0.0 => 0.0,
                     "roc" => (data[i] / prior - 1.0) * 100.0,
@@ -447,8 +294,8 @@ pub fn execute_resume(
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
             let volume = series_f64(df, series, 3, "volume").ok()?;
-            let fast = arg_usize(&args, 0);
-            let slow = arg_usize(&args, 1);
+            let fast = arg_usize(args, 0);
+            let slow = arg_usize(args, 1);
             let (vals, st) = ind::adosc_resume(
                 &high, &low, &close, &volume, fast, slow, from_row, prev_state,
             );
@@ -478,14 +325,14 @@ pub fn execute_resume(
             let close = series_f64(df, series, 0, "close").ok()?;
             let volume = series_f64(df, series, 1, "volume").ok()?;
             let (vals, st) =
-                ind::efi_resume(&close, &volume, arg_usize(&args, 0), from_row, prev_state);
+                ind::efi_resume(&close, &volume, arg_usize(args, 0), from_row, prev_state);
             Some((Column::f64(vals), st))
         }
         ("tsi", _) => {
             let (vals, st) = ind::tsi_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
-                arg_usize(&args, 1),
+                arg_usize(args, 0),
+                arg_usize(args, 1),
                 from_row,
                 prev_state,
             );
@@ -495,7 +342,7 @@ pub fn execute_resume(
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let (vals, st) =
-                ind::mass_index_resume(&high, &low, arg_usize(&args, 0), from_row, prev_state);
+                ind::mass_index_resume(&high, &low, arg_usize(args, 0), from_row, prev_state);
             Some((Column::f64(vals), st))
         }
 
@@ -503,7 +350,7 @@ pub fn execute_resume(
         ("keltner", None) => {
             let (vals, st) = ind::ema_resume(
                 &series_f64(df, series, 0, "close").ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             );
@@ -517,9 +364,9 @@ pub fn execute_resume(
                 &close,
                 &high,
                 &low,
-                arg_usize(&args, 0),
-                arg_usize(&args, 1),
-                arg_f64(&args, 2),
+                arg_usize(args, 0),
+                arg_usize(args, 1),
+                arg_f64(args, 2),
                 sub == "upper",
                 from_row,
                 prev_state,
@@ -545,7 +392,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_f64(&args, 0),
+                arg_f64(args, 0),
                 from_row,
                 prev_state,
             );
@@ -559,8 +406,8 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(&args, 0),
-                arg_f64(&args, 1),
+                arg_usize(args, 0),
+                arg_f64(args, 1),
                 sub == Some("direction"),
                 from_row,
                 prev_state,
@@ -576,8 +423,8 @@ pub fn execute_resume(
             let (vals, st) = ind::sar_resume(
                 &high,
                 &low,
-                arg_f64(&args, 0),
-                arg_f64(&args, 1),
+                arg_f64(args, 0),
+                arg_f64(args, 1),
                 from_row,
                 prev_state,
             )?;
@@ -590,13 +437,13 @@ pub fn execute_resume(
             let (vals, st) = ind::sarext_resume(
                 &high,
                 &low,
-                arg_f64(&args, 1),
-                arg_f64(&args, 2),
-                arg_f64(&args, 3),
-                arg_f64(&args, 4),
-                arg_f64(&args, 5),
-                arg_f64(&args, 6),
-                arg_f64(&args, 7),
+                arg_f64(args, 1),
+                arg_f64(args, 2),
+                arg_f64(args, 3),
+                arg_f64(args, 4),
+                arg_f64(args, 5),
+                arg_f64(args, 6),
+                arg_f64(args, 7),
                 from_row,
                 prev_state,
             )?;
@@ -608,7 +455,7 @@ pub fn execute_resume(
         ("ema", _) => {
             let (vals, st) = ind::ema_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             );
@@ -617,7 +464,7 @@ pub fn execute_resume(
         ("smma", _) => {
             let (vals, st) = ind::smma_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             );
@@ -626,7 +473,7 @@ pub fn execute_resume(
         ("dema", _) => {
             let (vals, st) = ind::dema_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             );
@@ -635,7 +482,7 @@ pub fn execute_resume(
         ("tema", _) => {
             let (vals, st) = ind::tema_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             );
@@ -644,8 +491,8 @@ pub fn execute_resume(
         ("t3", _) => {
             let (vals, st) = ind::t3_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
-                arg_f64(&args, 1),
+                arg_usize(args, 0),
+                arg_f64(args, 1),
                 from_row,
                 prev_state,
             );
@@ -654,7 +501,7 @@ pub fn execute_resume(
         ("trix", _) => {
             let (vals, st) = ind::trix_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             );
@@ -664,7 +511,7 @@ pub fn execute_resume(
         ("kama", _) => {
             let (vals, st) = ind::kama_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -674,8 +521,8 @@ pub fn execute_resume(
         ("macd", None) => {
             let (vals, st) = ind::macd_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
-                arg_usize(&args, 1),
+                arg_usize(args, 0),
+                arg_usize(args, 1),
                 from_row,
                 prev_state,
             );
@@ -684,9 +531,9 @@ pub fn execute_resume(
         ("macd", Some(line @ ("signal" | "histogram"))) => {
             let (vals, st) = ind::macd_signal_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
-                arg_usize(&args, 1),
-                arg_usize(&args, 2),
+                arg_usize(args, 0),
+                arg_usize(args, 1),
+                arg_usize(args, 2),
                 line == "histogram",
                 from_row,
                 prev_state,
@@ -702,7 +549,7 @@ pub fn execute_resume(
                 &close().ok()?,
                 12,
                 26,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 line == "histogram",
                 from_row,
                 prev_state,
@@ -717,7 +564,7 @@ pub fn execute_resume(
         ("rsi", _) => {
             let (vals, st) = ind::rsi_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -726,7 +573,7 @@ pub fn execute_resume(
         ("cmo", _) => {
             let (vals, st) = ind::cmo_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -740,7 +587,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -754,7 +601,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -766,7 +613,7 @@ pub fn execute_resume(
             let (vals, st) = ind::plus_dm_resume(
                 &high,
                 &low,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -778,7 +625,7 @@ pub fn execute_resume(
             let (vals, st) = ind::minus_dm_resume(
                 &high,
                 &low,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -792,7 +639,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -806,7 +653,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -820,7 +667,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -834,7 +681,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -848,7 +695,7 @@ pub fn execute_resume(
                 &high,
                 &low,
                 &close,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 prev_state,
             )?;
@@ -896,8 +743,8 @@ pub fn execute_resume(
         ("mama", sub) => {
             let (vals, st) = ind::mama_resume(
                 &close().ok()?,
-                arg_f64(&args, 0),
-                arg_f64(&args, 1),
+                arg_f64(args, 0),
+                arg_f64(args, 1),
                 sub == Some("fama"),
                 from_row,
                 prev_state,
@@ -912,7 +759,7 @@ pub fn execute_resume(
         ("maxindex", _) | ("minmaxindex", Some("max")) => {
             let (vals, st) = ind::maxindex_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 origin,
                 prev_state,
@@ -922,7 +769,7 @@ pub fn execute_resume(
         ("minindex", _) | ("minmaxindex", Some("min")) => {
             let (vals, st) = ind::minindex_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 from_row,
                 origin,
                 prev_state,
@@ -935,15 +782,15 @@ pub fn execute_resume(
         // the canonical SMA `.d` (matype 0) resumes; a recursive-MA `.d` declines.
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
-            if is_d && arg_usize(&args, 3) != 0 {
+            if is_d && arg_usize(args, 3) != 0 {
                 return None; // non-SMA `.d` smoothing is recursive — fall back.
             }
             let (vals, st) = ind::stochrsi_resume(
                 &close().ok()?,
-                arg_usize(&args, 0),
-                arg_usize(&args, 1),
+                arg_usize(args, 0),
+                arg_usize(args, 1),
                 is_d,
-                arg_usize(&args, 2),
+                arg_usize(args, 2),
                 from_row,
                 prev_state,
             )?;
@@ -956,8 +803,8 @@ pub fn execute_resume(
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
-            let period_rsv = arg_usize(&args, 0);
-            let period_k = arg_usize(&args, 1);
+            let period_rsv = arg_usize(args, 0);
+            let period_k = arg_usize(args, 1);
             let kline = match line {
                 "k" => ind::KdjLine::K,
                 "d" => ind::KdjLine::D,
@@ -966,7 +813,7 @@ pub fn execute_resume(
             let period_d = if line == "k" {
                 3
             } else {
-                arg_usize(&args, 2)
+                arg_usize(args, 2)
             };
             let (vals, st) = ind::kdj_resume(
                 &high, &low, &close, period_rsv, period_k, period_d, kline, from_row, prev_state,

@@ -198,26 +198,3 @@ fn ht_resume_declines_on_short_state() {
     // MAMA / FAMA need CORE_STATE_LEN + 3 (line 998).
     assert!(mama_resume(&price, 0.5, 0.05, false, 20, &core_only).is_none());
 }
-
-/// A leading run of missing prices is a series that starts later — for the two-line
-/// entry points too, which the directive layer reaches through `*_line`.
-#[test]
-fn two_line_entry_points_treat_a_missing_head_as_a_later_start() {
-    let price: Vec<f64> = (0..120).map(|i| 100.0 + (i as f64 * 0.3).sin() * 5.0).collect();
-    let mut gapped = price.clone();
-    gapped[..3].iter_mut().for_each(|v| *v = f64::NAN);
-    let same = |got: &[f64], later: &[f64]| {
-        assert!(got[..3].iter().all(|v| v.is_nan()));
-        for (a, b) in got[3..].iter().zip(later) {
-            assert!(a.to_bits() == b.to_bits(), "{a} vs {b}");
-        }
-    };
-    let (gi, gq) = ht_phasor(&gapped);
-    let (li, lq) = ht_phasor(&price[3..]);
-    same(&gi, &li);
-    same(&gq, &lq);
-    let (gm, gf) = mama(&gapped, 0.5, 0.05);
-    let (lm, lf) = mama(&price[3..], 0.5, 0.05);
-    same(&gm, &lm);
-    same(&gf, &lf);
-}

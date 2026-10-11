@@ -6,7 +6,7 @@
 //! twin (index family, stochrsi `.d`) — the caller then falls back to `execute_resume`.
 
 use crate::exec::{arg_f64, arg_usize, series_f64};
-use crate::types::Ast;
+use crate::types::{ArgValue, Ast};
 use volas_compute::indicators as ind;
 use volas_core::DataFrame;
 
@@ -22,8 +22,34 @@ pub fn execute_resume_value(
     _origin: usize,
 ) -> Option<f64> {
     let (name, sub, args, series) = as_command(node)?;
-    let sub = sub.as_deref();
-    match (name.as_ref(), sub) {
+    let (name, sub) = (name.as_ref(), sub.as_deref());
+    if crate::spec::is_recursive(name, &args) {
+        // A missing row is NaN, its state untouched (see `crate::complete`).
+        return crate::complete::resume_one(
+            df,
+            name,
+            sub,
+            &args,
+            series,
+            row,
+            Some(f64::NAN),
+            |df, series, row| value_of(df, name, sub, &args, series, prev_state, row),
+        );
+    }
+    value_of(df, name, sub, &args, series, prev_state, row)
+}
+
+/// The value at `row` of the bound command `name`/`sub` over `df`.
+fn value_of(
+    df: &DataFrame,
+    name: &str,
+    sub: Option<&str>,
+    args: &[ArgValue],
+    series: &[Ast],
+    prev_state: &[f64],
+    row: usize,
+) -> Option<f64> {
+    match (name, sub) {
         ("obv", _) => {
             let real = series_f64(df, series, 0, "close").ok()?;
             let volume = series_f64(df, series, 1, "volume").ok()?;
@@ -38,23 +64,23 @@ pub fn execute_resume_value(
         }
         ("dema", _) => {
             let close = series_f64(df, series, 0, "close").ok()?;
-            ind::dema_resume_one(&close, arg_usize(&args, 0), row, prev_state)
+            ind::dema_resume_one(&close, arg_usize(args, 0), row, prev_state)
         }
         ("tema", _) => {
             let close = series_f64(df, series, 0, "close").ok()?;
-            ind::tema_resume_one(&close, arg_usize(&args, 0), row, prev_state)
+            ind::tema_resume_one(&close, arg_usize(args, 0), row, prev_state)
         }
         ("t3", _) => {
             let close = series_f64(df, series, 0, "close").ok()?;
-            ind::t3_resume_one(&close, arg_usize(&args, 0), arg_f64(&args, 1), row, prev_state)
+            ind::t3_resume_one(&close, arg_usize(args, 0), arg_f64(args, 1), row, prev_state)
         }
         ("kama", _) => {
             let close = series_f64(df, series, 0, "close").ok()?;
-            ind::kama_resume_one(&close, arg_usize(&args, 0), row, prev_state)
+            ind::kama_resume_one(&close, arg_usize(args, 0), row, prev_state)
         }
         ("macd", None) => {
             let close = series_f64(df, series, 0, "close").ok()?;
-            ind::macd_resume_one(&close, arg_usize(&args, 0), arg_usize(&args, 1), row, prev_state)
+            ind::macd_resume_one(&close, arg_usize(args, 0), arg_usize(args, 1), row, prev_state)
         }
         // macdfix (fixed 12/26):
         ("macdfix", None) => {
@@ -65,9 +91,9 @@ pub fn execute_resume_value(
             let close = series_f64(df, series, 0, "close").ok()?;
             ind::macd_signal_resume_one(
                 &close,
-                arg_usize(&args, 0),
-                arg_usize(&args, 1),
-                arg_usize(&args, 2),
+                arg_usize(args, 0),
+                arg_usize(args, 1),
+                arg_usize(args, 2),
                 line == "histogram",
                 row,
                 prev_state,
@@ -80,7 +106,7 @@ pub fn execute_resume_value(
                 &close,
                 12,
                 26,
-                arg_usize(&args, 0),
+                arg_usize(args, 0),
                 line == "histogram",
                 row,
                 prev_state,
@@ -94,7 +120,7 @@ pub fn execute_resume_value(
         ("sarext", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
-            ind::sarext_resume_one(&high, &low, arg_f64(&args, 1), row, prev_state)
+            ind::sarext_resume_one(&high, &low, arg_f64(args, 1), row, prev_state)
         }
 
         // Notes: same two series reads (IDX 0 "high", 1 "low") as the Vec arm. Of the SAREXT params,
@@ -102,31 +128,31 @@ pub fn execute_resume_value(
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
-            ind::plus_di_resume_one(&high, &low, &close, arg_usize(&args, 0), row, prev_state)
+            ind::plus_di_resume_one(&high, &low, &close, arg_usize(args, 0), row, prev_state)
         }
         ("minus_di", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
-            ind::minus_di_resume_one(&high, &low, &close, arg_usize(&args, 0), row, prev_state)
+            ind::minus_di_resume_one(&high, &low, &close, arg_usize(args, 0), row, prev_state)
         }
         ("dx", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
-            ind::dx_resume_one(&high, &low, &close, arg_usize(&args, 0), row, prev_state)
+            ind::dx_resume_one(&high, &low, &close, arg_usize(args, 0), row, prev_state)
         }
         ("adx", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
-            ind::adx_resume_one(&high, &low, &close, arg_usize(&args, 0), row, prev_state)
+            ind::adx_resume_one(&high, &low, &close, arg_usize(args, 0), row, prev_state)
         }
         ("adxr", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
             let close = series_f64(df, series, 2, "close").ok()?;
-            ind::adxr_resume_one(&high, &low, &close, arg_usize(&args, 0), row, prev_state)
+            ind::adxr_resume_one(&high, &low, &close, arg_usize(args, 0), row, prev_state)
         }
         ("pvt", _) => {
             let close = series_f64(df, series, 0, "close").ok()?;
@@ -146,16 +172,16 @@ pub fn execute_resume_value(
         ("efi", _) => {
             let close = series_f64(df, series, 0, "close").ok()?;
             let volume = series_f64(df, series, 1, "volume").ok()?;
-            ind::efi_resume_one(&close, &volume, arg_usize(&args, 0), row, prev_state)
+            ind::efi_resume_one(&close, &volume, arg_usize(args, 0), row, prev_state)
         }
         ("tsi", _) => {
             let close = series_f64(df, series, 0, "close").ok()?;
-            ind::tsi_resume_one(&close, arg_usize(&args, 0), arg_usize(&args, 1), row, prev_state)
+            ind::tsi_resume_one(&close, arg_usize(args, 0), arg_usize(args, 1), row, prev_state)
         }
         ("mass_index", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
-            ind::mass_index_resume_one(&high, &low, arg_usize(&args, 0), row, prev_state)
+            ind::mass_index_resume_one(&high, &low, arg_usize(args, 0), row, prev_state)
         }
         ("wad", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
@@ -166,7 +192,7 @@ pub fn execute_resume_value(
         ("keltner", None) => {
             // middle line = EMA; resumes through the ema scalar twin directly
             let close = series_f64(df, series, 0, "close").ok()?;
-            ind::ema_resume_one(&close, arg_usize(&args, 0), row, prev_state)
+            ind::ema_resume_one(&close, arg_usize(args, 0), row, prev_state)
         }
         ("keltner", Some(sub)) => {
             let high = series_f64(df, series, 0, "high").ok()?;
@@ -174,7 +200,7 @@ pub fn execute_resume_value(
             let close = series_f64(df, series, 2, "close").ok()?;
             ind::keltner_band_resume_one(
                 &close, &high, &low,
-                arg_usize(&args, 0), arg_usize(&args, 1), arg_f64(&args, 2),
+                arg_usize(args, 0), arg_usize(args, 1), arg_f64(args, 2),
                 sub == "upper", row, prev_state,
             )
         }
@@ -184,23 +210,23 @@ pub fn execute_resume_value(
             let close = series_f64(df, series, 2, "close").ok()?;
             ind::supertrend_resume_one(
                 &high, &low, &close,
-                arg_usize(&args, 0), arg_f64(&args, 1),
+                arg_usize(args, 0), arg_f64(args, 1),
                 sub == Some("direction"), row, prev_state,
             )
         }
         ("trix", _) => {
             let close = series_f64(df, series, 0, "close").ok()?;
-            ind::trix_resume_one(&close, arg_usize(&args, 0), row, prev_state)
+            ind::trix_resume_one(&close, arg_usize(args, 0), row, prev_state)
         }
         ("plus_dm", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
-            ind::plus_dm_resume_one(&high, &low, arg_usize(&args, 0), row, prev_state)
+            ind::plus_dm_resume_one(&high, &low, arg_usize(args, 0), row, prev_state)
         }
         ("minus_dm", _) => {
             let high = series_f64(df, series, 0, "high").ok()?;
             let low = series_f64(df, series, 1, "low").ok()?;
-            ind::minus_dm_resume_one(&high, &low, arg_usize(&args, 0), row, prev_state)
+            ind::minus_dm_resume_one(&high, &low, arg_usize(args, 0), row, prev_state)
         }
         // No scalar twin — these fall back to the Vec `execute_resume`. They were each
         // evaluated and left out for a concrete reason, NOT forgotten (the last two groups

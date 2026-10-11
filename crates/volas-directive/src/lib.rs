@@ -2,6 +2,7 @@
 //! them against a `volas_core::DataFrame`.
 
 mod bind;
+mod complete;
 pub mod exec;
 mod exec_resume;
 pub mod lookback;

@@ -63,6 +63,15 @@ TA-Lib itself has no frame-owned indicator cache, so a live loop usually
 recomputes from arrays unless you build caching around it. volas makes the cache
 part of the frame.
 
+## Missing rows
+
+A NaN in the middle of the input is where the two libraries part ways for a
+recursive indicator (EMA, MACD, RSI, ATR, ADX, OBV, SAR, the Hilbert transform, …).
+TA-Lib carries the NaN into every later output. volas skips the row: it outputs NaN
+there and continues the recursion from the last complete row, exactly as if the row
+had been deleted. See [Missing and non-finite inputs](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md)
+for the full rule.
+
 See also:
 
 - [TA-Lib example script](https://github.com/kaelzhang/volas/blob/main/examples/04_talib_migration.py)

@@ -148,80 +148,80 @@ pub struct Arg {
 // `mult(2.0)` a sign-free band multiplier; `frange/fmin/fgt` constrained floats.
 
 /// Window / period / count argument with a default; >= 1.
-fn p(n: usize) -> Arg {
+const fn p(n: usize) -> Arg {
     Arg { default: ArgDefault::Int(n), bound: ArgBound::IntMin(1) }
 }
 
 /// Required window / period argument; >= 1.
-fn p_req() -> Arg {
+const fn p_req() -> Arg {
     Arg { default: ArgDefault::Required, bound: ArgBound::IntMin(1) }
 }
 
 /// Second-moment / regression window with a default; >= 2 (variance, slope,
 /// correlation and friends are undefined or identically constant on 1 sample).
-fn p2(n: usize) -> Arg {
+const fn p2(n: usize) -> Arg {
     Arg { default: ArgDefault::Int(n), bound: ArgBound::IntMin(2) }
 }
 
 /// Required second-moment window; >= 2.
-fn p2_req() -> Arg {
+const fn p2_req() -> Arg {
     Arg { default: ArgDefault::Required, bound: ArgBound::IntMin(2) }
 }
 
 /// TA-Lib MA-type selector: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
 /// 6 KAMA, 7 MAMA, 8 T3.
-fn matype() -> Arg {
+const fn matype() -> Arg {
     Arg { default: ArgDefault::Int(0), bound: ArgBound::IntRange(0, 8) }
 }
 
 /// Required `mavp` period limit: >= 1 and <= TA-Lib's documented 100000 period
 /// ceiling (the kernel's per-period cache allocates `max_period` slots, so an
 /// unbounded value is a memory hazard). No dominant default — the caller supplies it.
-fn prange_req() -> Arg {
+const fn prange_req() -> Arg {
     Arg { default: ArgDefault::Required, bound: ArgBound::IntRange(1, 100_000) }
 }
 
 /// Sign-free finite multiplier (band / deviation multiples).
-fn mult(x: f64) -> Arg {
+const fn mult(x: f64) -> Arg {
     Arg { default: ArgDefault::Float(x), bound: ArgBound::Finite }
 }
 
 /// Finite float bounded below (inclusive).
-fn fmin(x: f64, lo: f64) -> Arg {
+const fn fmin(x: f64, lo: f64) -> Arg {
     Arg { default: ArgDefault::Float(x), bound: ArgBound::FloatMin(lo) }
 }
 
 /// Finite float bounded below (exclusive).
-fn fgt(x: f64, lo: f64) -> Arg {
+const fn fgt(x: f64, lo: f64) -> Arg {
     Arg { default: ArgDefault::Float(x), bound: ArgBound::FloatGt(lo) }
 }
 
 /// Finite float within `[lo, hi]`.
-fn frange(x: f64, lo: f64, hi: f64) -> Arg {
+const fn frange(x: f64, lo: f64, hi: f64) -> Arg {
     Arg { default: ArgDefault::Float(x), bound: ArgBound::FloatRange(lo, hi) }
 }
 
 /// i64 bounded below.
-fn i64min(x: i64, lo: i64) -> Arg {
+const fn i64min(x: i64, lo: i64) -> Arg {
     Arg { default: ArgDefault::I64(x), bound: ArgBound::I64Min(lo) }
 }
 
 /// i64 restricted to an explicit value set.
-fn one_of(x: i64, allowed: &'static [i64]) -> Arg {
+const fn one_of(x: i64, allowed: &'static [i64]) -> Arg {
     Arg { default: ArgDefault::I64(x), bound: ArgBound::OneOfI64(allowed) }
 }
 
 /// Free string argument (validated downstream).
-fn tf_str(s: &'static str) -> Arg {
+const fn tf_str(s: &'static str) -> Arg {
     Arg { default: ArgDefault::Str(s), bound: ArgBound::AnyStr }
 }
 
 /// The metadata for one command (after sub-command canonicalization).
 pub struct CommandSpec {
     /// Per-position argument defaults + validation bounds.
-    pub args: Vec<Arg>,
+    pub args: Cow<'static, [Arg]>,
     /// Default series column for each `@` slot.
-    pub series: Vec<&'static str>,
+    pub series: &'static [&'static str],
 }
 
 /// Canonicalize a sub-command alias (e.g. `macd.dif` -> main, `boll.u` ->
@@ -329,40 +329,40 @@ pub fn normalize(name: &str) -> Cow<'_, str> {
 /// Each arm names its parameters in order; the [`Arg`] constructor used for a
 /// slot documents that parameter's domain (see the constructor docs above).
 pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
-    let (args, series): (Vec<Arg>, Vec<&'static str>) = match (name, sub) {
+    let (args, series): (&'static [Arg], &'static [&'static str]) = match (name, sub) {
         // ma: period, matype.
-        ("ma", None) => (vec![p_req(), matype()], vec!["close"]),
-        ("ema" | "smma", None) => (vec![p_req()], vec!["close"]),
+        ("ma", None) => (const { &[p_req(), matype()] }, &["close"]),
+        ("ema" | "smma", None) => (const { &[p_req()] }, &["close"]),
         // apo / ppo: fast period, slow period, matype.
-        ("apo" | "ppo", None) => (vec![p(12), p(26), matype()], vec!["close"]),
+        ("apo" | "ppo", None) => (const { &[p(12), p(26), matype()] }, &["close"]),
         // macdext: fast, fastmatype, slow, slowmatype[, signal, signalmatype]. Matypes
         // default to SMA (0), unlike macd's fixed EMA.
-        ("macdext", None) => (vec![p(12), matype(), p(26), matype()], vec!["close"]),
+        ("macdext", None) => (const { &[p(12), matype(), p(26), matype()] }, &["close"]),
         ("macdext", Some("signal" | "histogram")) => (
-            vec![p(12), matype(), p(26), matype(), p(9), matype()],
-            vec!["close"],
+            const { &[p(12), matype(), p(26), matype(), p(9), matype()] },
+            &["close"],
         ),
-        ("wma" | "dema" | "tema" | "trima", None) => (vec![p_req()], vec!["close"]),
+        ("wma" | "dema" | "tema" | "trima", None) => (const { &[p_req()] }, &["close"]),
         // TradingView moving averages.
-        ("vwma", None) => (vec![p_req()], vec!["close", "volume"]),
+        ("vwma", None) => (const { &[p_req()] }, &["close", "volume"]),
         // alma: period, offset (Gaussian peak position, [0,1]), sigma (>0, width).
-        ("alma", None) => (vec![p_req(), frange(0.85, 0.0, 1.0), fgt(6.0, 0.0)], vec!["close"]),
-        ("hma", None) => (vec![p_req()], vec!["close"]),
-        ("swma", None) => (vec![], vec!["close"]),
+        ("alma", None) => (const { &[p_req(), frange(0.85, 0.0, 1.0), fgt(6.0, 0.0)] }, &["close"]),
+        ("hma", None) => (const { &[p_req()] }, &["close"]),
+        ("swma", None) => (&[], &["close"]),
         // t3: period, vfactor (volume factor, TA-Lib domain [0, 1]).
-        ("t3", None) => (vec![p_req(), frange(0.7, 0.0, 1.0)], vec!["close"]),
-        ("kama", None) => (vec![p_req()], vec!["close"]),
+        ("t3", None) => (const { &[p_req(), frange(0.7, 0.0, 1.0)] }, &["close"]),
+        ("kama", None) => (const { &[p_req()] }, &["close"]),
         // mavp: min_period, max_period (each period value is clamped into this
         // range), matype; real defaults to close, periods is the required second
         // series. min <= max is cross-checked in the exec arm.
-        ("mavp", None) => (vec![prange_req(), prange_req(), matype()], vec!["close"]),
+        ("mavp", None) => (const { &[prange_req(), prange_req(), matype()] }, &["close"]),
         // sar: acceleration factor, maximum factor — both non-negative (a
         // negative factor walks the stop away from price, producing garbage).
-        ("sar", None) => (vec![fmin(0.02, 0.0), fmin(0.2, 0.0)], vec!["high", "low"]),
+        ("sar", None) => (const { &[fmin(0.02, 0.0), fmin(0.2, 0.0)] }, &["high", "low"]),
         // sarext: start (signed — negative means start short), offset_on_reverse
         // (>= 0), then long (init/step/max) + short (init/step/max), all >= 0.
         ("sarext", None) => (
-            vec![
+            const { &[
                 mult(0.0),
                 fmin(0.0, 0.0),
                 fmin(0.02, 0.0),
@@ -371,118 +371,118 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
                 fmin(0.02, 0.0),
                 fmin(0.02, 0.0),
                 fmin(0.2, 0.0),
-            ],
-            vec!["high", "low"],
+            ] },
+            &["high", "low"],
         ),
         // macd: fast period, slow period[, signal period].
-        ("macd", None) => (vec![p(12), p(26)], vec!["close"]),
-        ("macd", Some("signal" | "histogram")) => (vec![p(12), p(26), p(9)], vec!["close"]),
+        ("macd", None) => (const { &[p(12), p(26)] }, &["close"]),
+        ("macd", Some("signal" | "histogram")) => (const { &[p(12), p(26), p(9)] }, &["close"]),
         // macdfix: fast/slow fixed at 12/26; the line takes no args, the signal/histogram
         // take only the signal period.
-        ("macdfix", None) => (vec![], vec!["close"]),
-        ("macdfix", Some("signal" | "histogram")) => (vec![p(9)], vec!["close"]),
+        ("macdfix", None) => (&[], &["close"]),
+        ("macdfix", Some("signal" | "histogram")) => (const { &[p(9)] }, &["close"]),
         // boll: period[, deviation multiplier (sign-free, TA-Lib nbdev)].
-        ("boll", None) => (vec![p(20)], vec!["close"]),
-        ("boll", Some("upper" | "lower")) => (vec![p(20), mult(2.0)], vec!["close"]),
-        ("bbw", None) => (vec![p(20)], vec!["close"]),
-        ("accbands", None) => (vec![p(20)], vec!["close"]),
-        ("accbands", Some("upper" | "lower")) => (vec![p(20)], vec!["high", "low"]),
-        ("rsv", None) => (vec![p_req()], vec!["high", "low", "close"]),
+        ("boll", None) => (const { &[p(20)] }, &["close"]),
+        ("boll", Some("upper" | "lower")) => (const { &[p(20), mult(2.0)] }, &["close"]),
+        ("bbw", None) => (const { &[p(20)] }, &["close"]),
+        ("accbands", None) => (const { &[p(20)] }, &["close"]),
+        ("accbands", Some("upper" | "lower")) => (const { &[p(20)] }, &["high", "low"]),
+        ("rsv", None) => (const { &[p_req()] }, &["high", "low", "close"]),
         // kdj: rsv period, K smoothing[, D smoothing], seed (a %K/%D percentage,
         // so its domain is [0, 100]).
         ("kdj", Some("k")) => (
-            vec![p(9), p(3), frange(50.0, 0.0, 100.0)],
-            vec!["high", "low", "close"],
+            const { &[p(9), p(3), frange(50.0, 0.0, 100.0)] },
+            &["high", "low", "close"],
         ),
         ("kdj", Some("d" | "j")) => (
-            vec![p(9), p(3), p(3), frange(50.0, 0.0, 100.0)],
-            vec!["high", "low", "close"],
+            const { &[p(9), p(3), p(3), frange(50.0, 0.0, 100.0)] },
+            &["high", "low", "close"],
         ),
         // rsi: required period — 14 is Wilder's original, but 2 / 9 / 21 / 25 are all
         // common, so there is no single dominant default.
-        ("rsi", None) => (vec![p_req()], vec!["close"]),
-        ("bbi", None) => (vec![p(3), p(6), p(12), p(24)], vec!["close"]),
-        ("tr", None) => (vec![], vec!["high", "low", "close"]),
-        ("atr", None) => (vec![p_req()], vec!["high", "low", "close"]),
-        ("llv", None) => (vec![p_req()], vec!["low"]),
-        ("hhv", None) => (vec![p_req()], vec!["high"]),
+        ("rsi", None) => (const { &[p_req()] }, &["close"]),
+        ("bbi", None) => (const { &[p(3), p(6), p(12), p(24)] }, &["close"]),
+        ("tr", None) => (&[], &["high", "low", "close"]),
+        ("atr", None) => (const { &[p_req()] }, &["high", "low", "close"]),
+        ("llv", None) => (const { &[p_req()] }, &["low"]),
+        ("hhv", None) => (const { &[p_req()] }, &["high"]),
         // donchian: required period — 20 (Turtle) is common, but so are 10 / 55, so no
         // single dominant default.
-        ("donchian", None) => (vec![p_req()], vec!["high", "low"]),
-        ("donchian", Some("upper")) => (vec![p_req()], vec!["high"]),
-        ("donchian", Some("lower")) => (vec![p_req()], vec!["low"]),
+        ("donchian", None) => (const { &[p_req()] }, &["high", "low"]),
+        ("donchian", Some("upper")) => (const { &[p_req()] }, &["high"]),
+        ("donchian", Some("lower")) => (const { &[p_req()] }, &["low"]),
         // hv: window (stddev of log returns — needs >= 2), bar time-frame,
         // annualization trading-days (>= 1: 0/negative puts 0/NaN under sqrt).
-        ("hv", None) => (vec![p2_req(), tf_str("1d"), i64min(252, 1)], vec!["close"]),
+        ("hv", None) => (const { &[p2_req(), tf_str("1d"), i64min(252, 1)] }, &["close"]),
         // increase: run length (>= 1), direction (+1 rising / -1 falling).
-        ("increase", None) => (vec![p(1), one_of(1, &[-1, 1])], vec!["close"]),
+        ("increase", None) => (const { &[p(1), one_of(1, &[-1, 1])] }, &["close"]),
         // Group A non-TA-Lib indicators (gap report 2026-06-07).
-        ("psy", None) => (vec![p(12)], vec!["close"]),
-        ("pvt" | "nvi" | "pvi", None) => (vec![], vec!["close", "volume"]),
-        ("dpo", None) => (vec![p_req()], vec!["close"]),
-        ("cmf", None) => (vec![p(20)], vec!["high", "low", "close", "volume"]),
-        ("chop", None) => (vec![p_req()], vec!["high", "low", "close"]),
-        ("kst", None) => (vec![], vec!["close"]),
-        ("emv", None) => (vec![p_req()], vec!["high", "low", "volume"]),
-        ("mass_index", None) => (vec![p(25)], vec!["high", "low"]),
-        ("efi", None) => (vec![p(13)], vec!["close", "volume"]),
-        ("tsi", None) => (vec![p(25), p(13)], vec!["close"]),
-        ("crsi", None) => (vec![p(3), p(2), p(100)], vec!["close"]),
+        ("psy", None) => (const { &[p(12)] }, &["close"]),
+        ("pvt" | "nvi" | "pvi", None) => (&[], &["close", "volume"]),
+        ("dpo", None) => (const { &[p_req()] }, &["close"]),
+        ("cmf", None) => (const { &[p(20)] }, &["high", "low", "close", "volume"]),
+        ("chop", None) => (const { &[p_req()] }, &["high", "low", "close"]),
+        ("kst", None) => (&[], &["close"]),
+        ("emv", None) => (const { &[p_req()] }, &["high", "low", "volume"]),
+        ("mass_index", None) => (const { &[p(25)] }, &["high", "low"]),
+        ("efi", None) => (const { &[p(13)] }, &["close", "volume"]),
+        ("tsi", None) => (const { &[p(25), p(13)] }, &["close"]),
+        ("crsi", None) => (const { &[p(3), p(2), p(100)] }, &["close"]),
         // Group E formula-equivalent wrappers (China-market names): bias ≡ ppo:1,N,0;
         // dma's DDD line ≡ apo:fast,slow,0, with AMA = the M-period SMA of that line.
-        ("bias", None) => (vec![p(6)], vec!["close"]),
-        ("dma", None) => (vec![p(10), p(50)], vec!["close"]),
-        ("dma", Some("ama")) => (vec![p(10), p(50), p(10)], vec!["close"]),
+        ("bias", None) => (const { &[p(6)] }, &["close"]),
+        ("dma", None) => (const { &[p(10), p(50)] }, &["close"]),
+        ("dma", Some("ama")) => (const { &[p(10), p(50), p(10)] }, &["close"]),
         // Group B convention-sensitive indicators (gap report §9).
-        ("vortex", Some("plus" | "minus")) => (vec![p(14)], vec!["high", "low", "close"]),
-        ("brar", Some("ar")) => (vec![p(26)], vec!["open", "high", "low"]),
-        ("brar", Some("br")) => (vec![p(26)], vec!["high", "low", "close"]),
-        ("vr", None) => (vec![p(26)], vec!["close", "volume"]),
+        ("vortex", Some("plus" | "minus")) => (const { &[p(14)] }, &["high", "low", "close"]),
+        ("brar", Some("ar")) => (const { &[p(26)] }, &["open", "high", "low"]),
+        ("brar", Some("br")) => (const { &[p(26)] }, &["high", "low", "close"]),
+        ("vr", None) => (const { &[p(26)] }, &["close", "volume"]),
         // coppock: wma_period, roc_long, roc_short.
-        ("coppock", None) => (vec![p(10), p(14), p(11)], vec!["close"]),
+        ("coppock", None) => (const { &[p(10), p(14), p(11)] }, &["close"]),
         ("relative_vigor", None | Some("signal")) => {
-            (vec![p(10)], vec!["open", "high", "low", "close"])
+            (const { &[p(10)] }, &["open", "high", "low", "close"])
         }
         // dkx's DKX line is a fixed 20-period weighted MA (no args); the MADKX signal adds m.
-        ("dkx", None) => (vec![], vec!["open", "high", "low", "close"]),
-        ("dkx", Some("ma")) => (vec![p(10)], vec!["open", "high", "low", "close"]),
-        ("wvad", None) => (vec![p(24)], vec!["open", "high", "low", "close", "volume"]),
+        ("dkx", None) => (&[], &["open", "high", "low", "close"]),
+        ("dkx", Some("ma")) => (const { &[p(10)] }, &["open", "high", "low", "close"]),
+        ("wvad", None) => (const { &[p(24)] }, &["open", "high", "low", "close", "volume"]),
         // cdp: five intraday levels from the prior bar (no window parameter).
-        ("cdp", None | Some("ah" | "nh" | "nl" | "al")) => (vec![], vec!["high", "low", "close"]),
+        ("cdp", None | Some("ah" | "nh" | "nl" | "al")) => (&[], &["high", "low", "close"]),
         // mike: six support/resistance lines — all required sub-commands, no primary line.
         ("mike", Some("weakr" | "midr" | "strongr" | "weaks" | "mids" | "strongs")) => {
-            (vec![p_req()], vec!["high", "low", "close"])
+            (const { &[p_req()] }, &["high", "low", "close"])
         }
         // keltner: middle = EMA(close) (ema_period only); bands add atr_period + multiplier.
-        ("keltner", None) => (vec![p(20)], vec!["close"]),
+        ("keltner", None) => (const { &[p(20)] }, &["close"]),
         ("keltner", Some("upper" | "lower")) => {
-            (vec![p(20), p(10), mult(2.0)], vec!["high", "low", "close"])
+            (const { &[p(20), p(10), mult(2.0)] }, &["high", "low", "close"])
         }
         // stoch_momentum: k (HH/LL), d (double-EMA smoothing), signal (EMA of SMI).
         ("stoch_momentum", None | Some("signal")) => {
-            (vec![p(10), p(3), p(3)], vec!["high", "low", "close"])
+            (const { &[p(10), p(3), p(3)] }, &["high", "low", "close"])
         }
         // ttm_squeeze: period, Bollinger σ-multiplier, Keltner range-multiplier.
         ("ttm_squeeze", None | Some("on")) => {
-            (vec![p(20), mult(2.0), mult(1.5)], vec!["high", "low", "close"])
+            (const { &[p(20), mult(2.0), mult(1.5)] }, &["high", "low", "close"])
         }
         // pivot_points: PP plus the R1/R2/R3 / S1/S2/S3 levels, all from the prior bar.
         ("pivot_points", None | Some("r1" | "r2" | "r3" | "s1" | "s2" | "s3")) => {
-            (vec![], vec!["high", "low", "close"])
+            (&[], &["high", "low", "close"])
         }
         // ichimoku: tenkan / kijun / senkou_b periods (the displacement is the kijun period).
         ("ichimoku", Some("tenkan" | "kijun" | "senkou_a" | "senkou_b" | "chikou")) => {
-            (vec![p(9), p(26), p(52)], vec!["high", "low", "close"])
+            (const { &[p(9), p(26), p(52)] }, &["high", "low", "close"])
         }
         // wad: cumulative, no parameters. asi: Wilder's limit-move scaling `t` —
         // the formula divides by it, so it must be strictly positive.
-        ("wad", None) => (vec![], vec!["high", "low", "close"]),
-        ("asi", None) => (vec![fgt(3.0, 0.0)], vec!["open", "high", "low", "close"]),
+        ("wad", None) => (&[], &["high", "low", "close"]),
+        ("asi", None) => (const { &[fgt(3.0, 0.0)] }, &["open", "high", "low", "close"]),
         // supertrend: ATR period + band multiplier (shared by the line and direction).
         ("supertrend", None | Some("direction")) => {
-            (vec![p(10), mult(3.0)], vec!["high", "low", "close"])
+            (const { &[p(10), mult(3.0)] }, &["high", "low", "close"])
         }
-        ("style", Some("bullish" | "bearish")) => (vec![], vec!["open", "close"]),
+        ("style", Some("bullish" | "bearish")) => (&[], &["open", "close"]),
         // Candlestick patterns (style.<pattern> / cdl.<pattern>) — validated against the
         // compute layer's pattern registry, so new patterns need no change here. Patterns
         // taking a `penetration` ratio accept one optional Float arg (default 0.5,
@@ -499,125 +499,205 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
                 }
                 volas_compute::indicators::CandlePattern::Plain(_) => vec![],
             };
-            (args, vec!["open", "high", "low", "close"])
+            return Some(CommandSpec {
+                args: Cow::Owned(args),
+                series: &["open", "high", "low", "close"],
+            });
         }
         // repeat: consecutive-True run length (>= 1; 0 underflowed the kernel).
-        ("repeat", None) => (vec![p(1)], vec![]),
+        ("repeat", None) => (const { &[p(1)] }, &[]),
         // change: % change over a window spanning `period` bars — `period` 2
         // compares with the previous bar; 1 compares a bar with itself
         // (identically 0), 0 underflowed the kernel, so the domain is >= 2.
-        ("change", None) => (vec![p2(2)], vec!["close"]),
-        ("mom" | "roc" | "rocp" | "rocr" | "rocr100", None) => (vec![p_req()], vec!["close"]),
-        ("midpoint", None) => (vec![p_req()], vec!["close"]),
-        ("midprice", None) => (vec![p_req()], vec!["high", "low"]),
-        ("willr", None) => (vec![p_req()], vec!["high", "low", "close"]),
-        ("cmo", None) => (vec![p_req()], vec!["close"]),
+        ("change", None) => (const { &[p2(2)] }, &["close"]),
+        ("mom" | "roc" | "rocp" | "rocr" | "rocr100", None) => (const { &[p_req()] }, &["close"]),
+        ("midpoint", None) => (const { &[p_req()] }, &["close"]),
+        ("midprice", None) => (const { &[p_req()] }, &["high", "low"]),
+        ("willr", None) => (const { &[p_req()] }, &["high", "low", "close"]),
+        ("cmo", None) => (const { &[p_req()] }, &["close"]),
         // cci: window >= 2 — at 1 the numerator (TP - SMA(TP,1)) is identically
         // zero, a constant no-signal column.
-        ("cci", None) => (vec![p2_req()], vec!["high", "low", "close"]),
-        ("imi", None) => (vec![p_req()], vec!["open", "close"]),
-        ("trix", None) => (vec![p_req()], vec!["close"]),
-        ("mfi", None) => (vec![p_req()], vec!["high", "low", "close", "volume"]),
-        ("ultosc", None) => (vec![p(7), p(14), p(28)], vec!["high", "low", "close"]),
+        ("cci", None) => (const { &[p2_req()] }, &["high", "low", "close"]),
+        ("imi", None) => (const { &[p_req()] }, &["open", "close"]),
+        ("trix", None) => (const { &[p_req()] }, &["close"]),
+        ("mfi", None) => (const { &[p_req()] }, &["high", "low", "close", "volume"]),
+        ("ultosc", None) => (const { &[p(7), p(14), p(28)] }, &["high", "low", "close"]),
         // stoch: fastk_period, slowk_period, slowk_matype, slowd_period, slowd_matype.
         ("stoch", Some("k" | "d")) => (
-            vec![p(5), p(3), matype(), p(3), matype()],
-            vec!["high", "low", "close"],
+            const { &[p(5), p(3), matype(), p(3), matype()] },
+            &["high", "low", "close"],
         ),
         // stochf: fastk_period, fastd_period, fastd_matype.
-        ("stochf", Some("k" | "d")) => (vec![p(5), p(3), matype()], vec!["high", "low", "close"]),
+        ("stochf", Some("k" | "d")) => (const { &[p(5), p(3), matype()] }, &["high", "low", "close"]),
         // stochrsi: rsi_period, fastk_period, fastd_period, fastd_matype.
-        ("stochrsi", Some("k" | "d")) => (vec![p(14), p(5), p(3), matype()], vec!["close"]),
-        ("plus_dm" | "minus_dm", None) => (vec![p_req()], vec!["high", "low"]),
+        ("stochrsi", Some("k" | "d")) => (const { &[p(14), p(5), p(3), matype()] }, &["close"]),
+        ("plus_dm" | "minus_dm", None) => (const { &[p_req()] }, &["high", "low"]),
         ("plus_di" | "minus_di" | "dx" | "adx" | "adxr", None) => {
-            (vec![p_req()], vec!["high", "low", "close"])
+            (const { &[p_req()] }, &["high", "low", "close"])
         }
         // aroon / aroonosc: window >= 2 — at 1 the lines are identically 100
         // (the extreme is always "this bar"), a constant no-signal column.
-        ("aroon", Some("up" | "down")) => (vec![p2_req()], vec!["high", "low"]),
-        ("aroonosc", None) => (vec![p2_req()], vec!["high", "low"]),
-        ("sum" | "maxindex" | "minindex", None) => (vec![p_req()], vec!["close"]),
-        ("minmax" | "minmaxindex", Some("min" | "max")) => (vec![p_req()], vec!["close"]),
-        ("natr", None) => (vec![p_req()], vec!["high", "low", "close"]),
-        ("bop", None) => (vec![], vec!["open", "high", "low", "close"]),
+        ("aroon", Some("up" | "down")) => (const { &[p2_req()] }, &["high", "low"]),
+        ("aroonosc", None) => (const { &[p2_req()] }, &["high", "low"]),
+        ("sum" | "maxindex" | "minindex", None) => (const { &[p_req()] }, &["close"]),
+        ("minmax" | "minmaxindex", Some("min" | "max")) => (const { &[p_req()] }, &["close"]),
+        ("natr", None) => (const { &[p_req()] }, &["high", "low", "close"]),
+        ("bop", None) => (&[], &["open", "high", "low", "close"]),
         // Linear-regression family: window >= 2 (the slope denominator
         // Σ(x - x̄)² is zero on a single sample — all-NaN by construction).
         (
             "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf",
             None,
-        ) => (vec![p2_req()], vec!["close"]),
+        ) => (const { &[p2_req()] }, &["close"]),
         // correl / beta: correlation / regression over >= 2 samples (the
         // single-sample variance is zero, so the statistic is 0/0).
         // First series defaults to close; the second is required (no spec default).
-        ("correl", None) => (vec![p2_req()], vec!["close"]),
-        ("beta", None) => (vec![p2_req()], vec!["close"]),
+        ("correl", None) => (const { &[p2_req()] }, &["close"]),
+        ("beta", None) => (const { &[p2_req()] }, &["close"]),
         // var / stddev: window >= 2 — the (population) variance of one sample is
         // identically zero, a constant no-signal column. (TA-Lib allows var:1;
         // volas rejects it on the V17 no-signal principle.) stddev's second arg
         // is the sign-free deviation multiplier.
-        ("var", None) => (vec![p2_req()], vec!["close"]),
+        ("var", None) => (const { &[p2_req()] }, &["close"]),
         // pandas-window statistics promoted to directives (single kernel source
         // with the rolling API; full-window semantics — an NA in the window
         // yields NA, like the TA family's warm-up discipline).
-        ("median", None) => (vec![p2_req()], vec!["close"]),
+        ("median", None) => (const { &[p2_req()] }, &["close"]),
         // quantile: window, then the quantile level in [0, 1].
-        ("quantile", None) => (vec![p2_req(), frange(0.5, 0.0, 1.0)], vec!["close"]),
-        ("rank", None) => (vec![p2_req()], vec!["close"]),
+        ("quantile", None) => (const { &[p2_req(), frange(0.5, 0.0, 1.0)] }, &["close"]),
+        ("rank", None) => (const { &[p2_req()] }, &["close"]),
         // skew / kurt are undefined below 3 / 4 samples (V17: no all-NA columns).
         ("skew", None) => (
-            vec![Arg { default: ArgDefault::Required, bound: ArgBound::IntMin(3) }],
-            vec!["close"],
+            const { &[Arg { default: ArgDefault::Required, bound: ArgBound::IntMin(3) }] },
+            &["close"],
         ),
         ("kurt", None) => (
-            vec![Arg { default: ArgDefault::Required, bound: ArgBound::IntMin(4) }],
-            vec!["close"],
+            const { &[Arg { default: ArgDefault::Required, bound: ArgBound::IntMin(4) }] },
+            &["close"],
         ),
-        ("sem", None) => (vec![p2_req()], vec!["close"]),
+        ("sem", None) => (const { &[p2_req()] }, &["close"]),
         // TradingView oscillators / dispersion. cog / rci / dev / mode follow the
         // windowed-stat family (period required, >= 2). iii is pointwise (no arg);
         // kcw mirrors the keltner band parameters.
-        ("cog", None) => (vec![p2_req()], vec!["close"]),
-        ("rci", None) => (vec![p2_req()], vec!["close"]),
-        ("dev", None) => (vec![p2_req()], vec!["close"]),
-        ("mode", None) => (vec![p2_req()], vec!["close"]),
-        ("iii", None) => (vec![], vec!["high", "low", "close", "volume"]),
-        ("kcw", None) => (vec![p(20), p(10), mult(2.0)], vec!["high", "low", "close"]),
+        ("cog", None) => (const { &[p2_req()] }, &["close"]),
+        ("rci", None) => (const { &[p2_req()] }, &["close"]),
+        ("dev", None) => (const { &[p2_req()] }, &["close"]),
+        ("mode", None) => (const { &[p2_req()] }, &["close"]),
+        ("iii", None) => (&[], &["high", "low", "close", "volume"]),
+        ("kcw", None) => (const { &[p(20), p(10), mult(2.0)] }, &["high", "low", "close"]),
         // fractal pivots: leftbars, rightbars (both required, >= 1).
-        ("pivothigh", None) => (vec![p_req(), p_req()], vec!["high"]),
-        ("pivotlow", None) => (vec![p_req(), p_req()], vec!["low"]),
-        ("stddev", None) => (vec![p2_req(), mult(1.0)], vec!["close"]),
-        ("obv", None) => (vec![], vec!["close", "volume"]),
-        ("ad", None) => (vec![], vec!["high", "low", "close", "volume"]),
+        ("pivothigh", None) => (const { &[p_req(), p_req()] }, &["high"]),
+        ("pivotlow", None) => (const { &[p_req(), p_req()] }, &["low"]),
+        ("stddev", None) => (const { &[p2_req(), mult(1.0)] }, &["close"]),
+        ("obv", None) => (&[], &["close", "volume"]),
+        ("ad", None) => (&[], &["high", "low", "close", "volume"]),
         // adosc: fast EMA period, slow EMA period.
         ("adosc", None) => (
-            vec![p(3), p(10)],
-            vec!["high", "low", "close", "volume"],
+            const { &[p(3), p(10)] },
+            &["high", "low", "close", "volume"],
         ),
-        ("avgprice", None) => (vec![], vec!["open", "high", "low", "close"]),
-        ("medprice", None) => (vec![], vec!["high", "low"]),
-        ("typprice", None) => (vec![], vec!["high", "low", "close"]),
-        ("wclprice", None) => (vec![], vec!["high", "low", "close"]),
+        ("avgprice", None) => (&[], &["open", "high", "low", "close"]),
+        ("medprice", None) => (&[], &["high", "low"]),
+        ("typprice", None) => (&[], &["high", "low", "close"]),
+        ("wclprice", None) => (&[], &["high", "low", "close"]),
         // Hilbert-transform cycle suite: a single price series, no numeric args
         // (MAMA takes fast/slow limits). Multi-output lines share the base spec.
         ("ht_dcperiod" | "ht_dcphase" | "ht_trendline" | "ht_trendmode", None) => {
-            (vec![], vec!["close"])
+            (&[], &["close"])
         }
-        ("ht_phasor", None | Some("quadrature")) => (vec![], vec!["close"]),
-        ("ht_sine", None | Some("leadsine")) => (vec![], vec!["close"]),
+        ("ht_phasor", None | Some("quadrature")) => (&[], &["close"]),
+        ("ht_sine", None | Some("leadsine")) => (&[], &["close"]),
         // mama: fast limit, slow limit — TA-Lib's domain [0.01, 0.99]; outside
         // it the adaptive alpha degenerates and the output is all-NaN.
         ("mama", None | Some("fama")) => (
-            vec![frange(0.5, 0.01, 0.99), frange(0.05, 0.01, 0.99)],
-            vec!["close"],
+            const { &[frange(0.5, 0.01, 0.99), frange(0.05, 0.01, 0.99)] },
+            &["close"],
         ),
         _ => return None,
     };
-    Some(CommandSpec { args, series })
+    Some(CommandSpec { args: Cow::Borrowed(args), series })
+}
+
+/// Commands whose value at a row depends on every row before it — EMA / Wilder
+/// smoothing, cumulative lines, the Hilbert transform, SAR, … — rather than on a fixed
+/// trailing window. (A command with a TA-Lib MA-type argument is recursive when that
+/// argument selects a recursive average; see [`is_recursive`].)
+const RECURSIVE: &[&str] = &[
+    "ema", "smma", "dema", "tema", "t3", "kama", "macd", "macdfix", "kdj", "rsi", "crsi",
+    "stochrsi", "cmo", "trix", "pvt", "nvi", "pvi", "obv", "ad", "adosc", "mass_index",
+    "efi", "tsi", "keltner", "kcw", "stoch_momentum", "ttm_squeeze", "wad", "asi",
+    "supertrend", "atr", "natr", "plus_dm", "minus_dm", "plus_di", "minus_di", "dx", "adx",
+    "adxr", "sar", "sarext", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
+    "ht_trendline", "ht_trendmode", "mama",
+];
+
+/// Commands whose output is an absolute row position, so it changes with where the
+/// series starts.
+const ABSOLUTE_POSITION: &[&str] = &["maxindex", "minindex", "minmaxindex"];
+
+/// Whether a TA-Lib MA-type code selects a recursive moving average (EMA, DEMA, TEMA,
+/// KAMA, MAMA, T3 — not SMA, WMA or TRIMA).
+pub fn is_recursive_matype(matype: usize) -> bool {
+    matches!(matype, 1 | 3 | 4 | 6 | 7 | 8)
+}
+
+/// Whether a bound command is recursive: its value at a row depends on every row
+/// before it. A missing row of a recursive command's inputs does not exist for it —
+/// it runs on the complete rows only (see `volas_compute::missing`).
+pub fn is_recursive(name: &str, args: &[ArgValue]) -> bool {
+    let matypes: &[usize] = match name {
+        "ma" => &[1],
+        "apo" | "ppo" | "mavp" | "stochf" => &[2],
+        "macdext" => &[1, 3, 5],
+        "stoch" => &[2, 4],
+        _ => return RECURSIVE.contains(&name),
+    };
+    matypes
+        .iter()
+        .filter_map(|&i| args.get(i))
+        .any(|a| is_recursive_matype(a.as_usize()))
+}
+
+/// Whether a command's output is an absolute row position.
+pub fn emits_position(name: &str) -> bool {
+    ABSOLUTE_POSITION.contains(&name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recursive command never emits a row position: the missing-row rule maps its
+    /// outputs back by row, which a position-valued output would not survive.
+    #[test]
+    fn no_recursive_command_emits_a_position() {
+        assert!(RECURSIVE.iter().all(|c| !emits_position(c)));
+        for name in ["ma", "apo", "ppo", "mavp", "stochf", "macdext", "stoch"] {
+            assert!(!emits_position(name));
+        }
+    }
+
+    /// Each argument constructor pairs its default with its kind's bound. (The table
+    /// evaluates them at compile time; this checks the pairing itself.)
+    #[test]
+    fn argument_constructors_pair_default_and_bound() {
+        use ArgBound as B;
+        use ArgDefault as D;
+        let arg = |default, bound| Arg { default, bound };
+        assert_eq!(p(3), arg(D::Int(3), B::IntMin(1)));
+        assert_eq!(p_req(), arg(D::Required, B::IntMin(1)));
+        assert_eq!(p2(4), arg(D::Int(4), B::IntMin(2)));
+        assert_eq!(p2_req(), arg(D::Required, B::IntMin(2)));
+        assert_eq!(matype(), arg(D::Int(0), B::IntRange(0, 8)));
+        assert_eq!(prange_req(), arg(D::Required, B::IntRange(1, 100_000)));
+        assert_eq!(mult(2.0), arg(D::Float(2.0), B::Finite));
+        assert_eq!(fmin(0.5, 0.0), arg(D::Float(0.5), B::FloatMin(0.0)));
+        assert_eq!(fgt(3.0, 0.0), arg(D::Float(3.0), B::FloatGt(0.0)));
+        assert_eq!(frange(0.7, 0.0, 1.0), arg(D::Float(0.7), B::FloatRange(0.0, 1.0)));
+        assert_eq!(i64min(252, 1), arg(D::I64(252), B::I64Min(1)));
+        assert_eq!(one_of(1, &[-1, 1]), arg(D::I64(1), B::OneOfI64(&[-1, 1])));
+        assert_eq!(tf_str("1d"), arg(D::Str("1d"), B::AnyStr));
+    }
 
     #[test]
     fn arg_default_value_per_kind() {

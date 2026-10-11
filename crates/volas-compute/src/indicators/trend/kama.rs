@@ -12,13 +12,7 @@ pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period + 1 > n {
         return out;
     }
-    // Skip a leading-NaN warm-up prefix (see `wma`).
-    let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
-    if start > 0 {
-        let sub = kama(&data[start..], period);
-        out[start..].copy_from_slice(&sub);
-        return out;
-    }
+    // KAMA runs on the complete rows of its input (see `crate::missing`).
     // sumROC1 = Σ_{j=0}^{period-1} |price[j] − price[j+1]| (the first window).
     let mut sum_roc1 = 0.0;
     for j in 0..period {

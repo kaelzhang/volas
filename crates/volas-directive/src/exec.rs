@@ -167,7 +167,7 @@ pub(crate) fn series_f64<'a>(
 /// would silently become all-`NaN` (or, for datetime, f64-quantized epoch), so
 /// reject it (API contract C4 — a lossy implicit conversion errors, never a silent
 /// all-NaN feature column).
-fn require_numeric(col: &Column) -> Result<()> {
+pub(crate) fn require_numeric(col: &Column) -> Result<()> {
     match col {
         Column::Str(..) | Column::Datetime(..) => Err(VolasError::Value(format!(
             "directive operand must be a numeric column, got {}",
@@ -230,6 +230,16 @@ fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
 /// argument (`ArgBound::IntRange(0, 8)` at the exec boundary), so a value past
 /// 8 cannot reach here.
 fn ma_typed(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
+    // A recursive average runs on the complete rows of its input — the input may be a
+    // derived line that warms up with NaN (see `volas_compute::missing`).
+    if crate::spec::is_recursive_matype(matype) {
+        return volas_compute::missing::on_complete_rows(&[data], |x| ma_kernel(x[0], period, matype));
+    }
+    ma_kernel(data, period, matype)
+}
+
+/// The moving average of `matype` over `data`.
+fn ma_kernel(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
     match matype {
         0 => ind::ma(data, period),
         1 => ind::ema(data, period),
@@ -254,7 +264,8 @@ mod overlap;
 /// The dispatch entry point: a bound command (canonical name / sub, typed args,
 /// bound series) routed to its kernel. Validation / defaulting / normalization
 /// already happened at `bind`, so this is pure dispatch — the `overlap` ->
-/// `momentum` -> `cycle` chain is an internal split of the one command table.
+/// `momentum` -> `cycle` chain is an internal split of the one command table. A
+/// recursive command runs on the complete rows of its inputs (see `crate::complete`).
 fn dispatch(
     df: &DataFrame,
     name: &str,
@@ -262,6 +273,11 @@ fn dispatch(
     args: &[ArgValue],
     series: &[Ast],
 ) -> Result<Column> {
+    if crate::spec::is_recursive(name, args) {
+        return crate::complete::compute(df, name, sub, series, |df, series| {
+            overlap::dispatch(df, name, sub, args, series)
+        });
+    }
     overlap::dispatch(df, name, sub, args, series)
 }
 
@@ -789,5 +805,7 @@ mod tests {
         // served by the parse-free `execute_resume_one`, not the value dispatch) hits the
         // scalar dispatch's `_ => None`, so the forming refresh falls back to the Vec path.
         assert!(execute_resume_value(&df, &p("rsi:14"), &[1.0, 1.0], 5, 0).is_none());
+        // ... and so does a finite-memory one, which skips the missing-row layer.
+        assert!(execute_resume_value(&df, &p("llv:5"), &[1.0], 5, 0).is_none());
     }
 }

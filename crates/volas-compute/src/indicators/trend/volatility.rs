@@ -23,11 +23,6 @@ pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 /// first ATR, at index `period`, is the SMA of the first `period` TRs; thereafter
 /// `ATR[i] = (ATR[i-1]*(period-1) + TR[i]) / period`).
 pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, atr(&high[start..], &low[start..], &close[start..], period));
-    }
     let tr = tr(high, low, close);
     kernels::wilder(av(&tr), period).to_vec()
 }
@@ -35,11 +30,6 @@ pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 /// Normalized Average True Range — `ATR/close · 100` (TA-Lib NATR), expressing ATR
 /// as a percentage of price. Lookback = period (same as ATR).
 pub fn natr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, natr(&high[start..], &low[start..], &close[start..], period));
-    }
     let atr = atr(high, low, close, period);
     (0..close.len())
         .map(|i| atr[i] / close[i] * 100.0)
@@ -75,11 +65,6 @@ pub fn atr_final_state(
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return atr_final_state(&high[start..], &low[start..], &close[start..], period);
-    }
     let n = high.len();
     if period == 0 || period >= n {
         return None;
