@@ -1,7 +1,8 @@
 //! Resume directive execution over only the new tail rows, bit-identical to a
 //! full recompute (the per-directive `execute_resume*` dispatch).
 
-use crate::exec::{arg_f64, arg_usize, series_f64};
+use crate::complete::Operands;
+use crate::exec::{arg_f64, arg_usize};
 use crate::parse;
 use crate::types::{ArgValue, Ast};
 use volas_compute::indicators as ind;
@@ -97,16 +98,15 @@ pub fn execute_resume_one_node(
         series,
         row,
         ResumeStep::missing(prev_state),
-        |df, series, row| step_of(df, name, &args, series, prev_state, row),
+        |ops, row| step_of(ops, name, &args, prev_state, row),
     )
 }
 
-/// One scalar resume step of the gated command `name` at `row` over `df`.
+/// One scalar resume step of the gated command `name` at `row` over `ops`.
 fn step_of(
-    df: &DataFrame,
+    ops: &Operands,
     name: &str,
     args: &[ArgValue],
-    series: &[Ast],
     prev_state: &[f64],
     row: usize,
 ) -> Option<ResumeStep> {
@@ -114,14 +114,14 @@ fn step_of(
     if name == "atr" || name == "natr" {
         // Wilder ATR (and NATR = ATR/close·100) read high/low/close; one fused step
         // replaces the two-`Vec` resume.
-        let high = series_f64(df, series, 0, "high").ok()?;
-        let low = series_f64(df, series, 1, "low").ok()?;
-        let close = series_f64(df, series, 2, "close").ok()?;
+        let high = ops.f64(0, "high").ok()?;
+        let low = ops.f64(1, "low").ok()?;
+        let close = ops.f64(2, "close").ok()?;
         let atr = ind::atr_resume_one(&high, &low, &close, period, row, prev_state)?;
         let value = if name == "natr" { atr / close[row] * 100.0 } else { atr };
         return Some(ResumeStep::single(value, atr));
     }
-    let close = series_f64(df, series, 0, "close").ok()?; // borrowed for an F64 close
+    let close = ops.f64(0, "close").ok()?; // borrowed for an F64 close
     // `name` is one of the gated close-series families above — dispatch directly, the
     // final arm (`cmo`) is the gate's remainder so there is no dead catch-all.
     if name == "ema" {
@@ -156,35 +156,34 @@ pub fn execute_resume(
     let (name, sub) = (name.as_ref(), sub.as_deref());
     if crate::spec::is_recursive(name, &args) {
         // Over the complete rows: a missing new row is NaN, the state untouched.
-        return crate::complete::resume(df, name, sub, &args, series, prev_state, from_row, |df, series, from| {
-            resume_of(df, name, sub, &args, series, prev_state, from, origin)
+        return crate::complete::resume(df, name, sub, &args, series, prev_state, from_row, |ops, from| {
+            resume_of(ops, name, sub, &args, prev_state, from, origin)
         });
     }
-    resume_of(df, name, sub, &args, series, prev_state, from_row, origin)
+    resume_of(&Operands::new(df, series), name, sub, &args, prev_state, from_row, origin)
 }
 
-/// [`execute_resume`] of the bound command `name`/`sub` over every row of `df`.
+/// [`execute_resume`] of the bound command `name`/`sub` over every row of `ops`.
 #[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
 fn resume_of(
-    df: &DataFrame,
+    ops: &Operands,
     name: &str,
     sub: Option<&str>,
     args: &[ArgValue],
-    series: &[Ast],
     prev_state: &[f64],
     from_row: usize,
     origin: usize,
 ) -> Option<(Column, Vec<f64>)> {
-    let close = || series_f64(df, series, 0, "close");
+    let close = || ops.f64(0, "close");
     match (name, sub) {
         // Stateless finite-memory resume. These kernels depend only on the row
         // being refreshed plus a fixed prior row, so append can produce exactly the
         // stale tail without probing a window or recomputing the full column.
         ("avgprice", _) => {
-            let open = series_f64(df, series, 0, "open").ok()?;
-            let high = series_f64(df, series, 1, "high").ok()?;
-            let low = series_f64(df, series, 2, "low").ok()?;
-            let close = series_f64(df, series, 3, "close").ok()?;
+            let open = ops.f64(0, "open").ok()?;
+            let high = ops.f64(1, "high").ok()?;
+            let low = ops.f64(2, "low").ok()?;
+            let close = ops.f64(3, "close").ok()?;
             let mut out = Vec::with_capacity(open.len().saturating_sub(from_row));
             for i in from_row..open.len() {
                 out.push((open[i] + high[i] + low[i] + close[i]) / 4.0);
@@ -192,8 +191,8 @@ fn resume_of(
             Some((Column::f64(out), Vec::new()))
         }
         ("medprice", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
             let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
             for i in from_row..high.len() {
                 out.push((high[i] + low[i]) / 2.0);
@@ -201,10 +200,10 @@ fn resume_of(
             Some((Column::f64(out), Vec::new()))
         }
         ("bop", _) => {
-            let open = series_f64(df, series, 0, "open").ok()?;
-            let high = series_f64(df, series, 1, "high").ok()?;
-            let low = series_f64(df, series, 2, "low").ok()?;
-            let close = series_f64(df, series, 3, "close").ok()?;
+            let open = ops.f64(0, "open").ok()?;
+            let high = ops.f64(1, "high").ok()?;
+            let low = ops.f64(2, "low").ok()?;
+            let close = ops.f64(3, "close").ok()?;
             let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
             for i in from_row..close.len() {
                 let range = high[i] - low[i];
@@ -213,9 +212,9 @@ fn resume_of(
             Some((Column::f64(out), Vec::new()))
         }
         ("typprice", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
             for i in from_row..close.len() {
                 out.push((high[i] + low[i] + close[i]) / 3.0);
@@ -223,9 +222,9 @@ fn resume_of(
             Some((Column::f64(out), Vec::new()))
         }
         ("wclprice", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
             for i in from_row..close.len() {
                 out.push((high[i] + low[i] + 2.0 * close[i]) / 4.0);
@@ -233,9 +232,9 @@ fn resume_of(
             Some((Column::f64(out), Vec::new()))
         }
         ("tr", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
             for i in from_row..high.len() {
                 if i == 0 {
@@ -276,24 +275,24 @@ fn resume_of(
         }
 
         ("obv", _) => {
-            let real = series_f64(df, series, 0, "close").ok()?;
-            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let real = ops.f64(0, "close").ok()?;
+            let volume = ops.f64(1, "volume").ok()?;
             let (vals, st) = ind::obv_resume(&real, &volume, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
         ("ad", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let volume = series_f64(df, series, 3, "volume").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
+            let volume = ops.f64(3, "volume").ok()?;
             let (vals, st) = ind::ad_resume(&high, &low, &close, &volume, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
         ("adosc", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
-            let volume = series_f64(df, series, 3, "volume").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
+            let volume = ops.f64(3, "volume").ok()?;
             let fast = arg_usize(args, 0);
             let slow = arg_usize(args, 1);
             let (vals, st) = ind::adosc_resume(
@@ -304,26 +303,26 @@ fn resume_of(
 
         // Group A cumulative / EMA-recursion family (volas-exclusive).
         ("pvt", _) => {
-            let close = series_f64(df, series, 0, "close").ok()?;
-            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let close = ops.f64(0, "close").ok()?;
+            let volume = ops.f64(1, "volume").ok()?;
             let (vals, st) = ind::pvt_resume(&close, &volume, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
         ("nvi", _) => {
-            let close = series_f64(df, series, 0, "close").ok()?;
-            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let close = ops.f64(0, "close").ok()?;
+            let volume = ops.f64(1, "volume").ok()?;
             let (vals, st) = ind::nvi_resume(&close, &volume, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
         ("pvi", _) => {
-            let close = series_f64(df, series, 0, "close").ok()?;
-            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let close = ops.f64(0, "close").ok()?;
+            let volume = ops.f64(1, "volume").ok()?;
             let (vals, st) = ind::pvi_resume(&close, &volume, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
         ("efi", _) => {
-            let close = series_f64(df, series, 0, "close").ok()?;
-            let volume = series_f64(df, series, 1, "volume").ok()?;
+            let close = ops.f64(0, "close").ok()?;
+            let volume = ops.f64(1, "volume").ok()?;
             let (vals, st) =
                 ind::efi_resume(&close, &volume, arg_usize(args, 0), from_row, prev_state);
             Some((Column::f64(vals), st))
@@ -339,8 +338,8 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("mass_index", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
             let (vals, st) =
                 ind::mass_index_resume(&high, &low, arg_usize(args, 0), from_row, prev_state);
             Some((Column::f64(vals), st))
@@ -349,7 +348,7 @@ fn resume_of(
         // Keltner Channels (Group B): middle resumes the EMA; bands resume the EMA + ATR pair.
         ("keltner", None) => {
             let (vals, st) = ind::ema_resume(
-                &series_f64(df, series, 0, "close").ok()?,
+                &ops.f64(0, "close").ok()?,
                 arg_usize(args, 0),
                 from_row,
                 prev_state,
@@ -357,9 +356,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("keltner", Some(sub)) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::keltner_band_resume(
                 &close,
                 &high,
@@ -376,17 +375,17 @@ fn resume_of(
 
         // Group B cumulative family (volas-exclusive): resume the running line.
         ("wad", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::wad_resume(&high, &low, &close, from_row, prev_state);
             Some((Column::f64(vals), st))
         }
         ("asi", _) => {
-            let open = series_f64(df, series, 0, "open").ok()?;
-            let high = series_f64(df, series, 1, "high").ok()?;
-            let low = series_f64(df, series, 2, "low").ok()?;
-            let close = series_f64(df, series, 3, "close").ok()?;
+            let open = ops.f64(0, "open").ok()?;
+            let high = ops.f64(1, "high").ok()?;
+            let low = ops.f64(2, "low").ok()?;
+            let close = ops.f64(3, "close").ok()?;
             let (vals, st) = ind::asi_resume(
                 &open,
                 &high,
@@ -399,9 +398,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("supertrend", sub) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::supertrend_resume(
                 &high,
                 &low,
@@ -418,8 +417,8 @@ fn resume_of(
         // SAR family — resume the state machine from the carried tuple. A resume at
         // `from_row < 2` (the SAR bootstrap needs bars 0 and 1) returns `None` and falls back.
         ("sar", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
             let (vals, st) = ind::sar_resume(
                 &high,
                 &low,
@@ -431,8 +430,8 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("sarext", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
             // `start_value` (arg 0) only steers the bar-1 bootstrap, never re-run on resume.
             let (vals, st) = ind::sarext_resume(
                 &high,
@@ -580,9 +579,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("atr", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::atr_resume(
                 &high,
                 &low,
@@ -594,9 +593,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("natr", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::natr_resume(
                 &high,
                 &low,
@@ -608,8 +607,8 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("plus_dm", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
             let (vals, st) = ind::plus_dm_resume(
                 &high,
                 &low,
@@ -620,8 +619,8 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("minus_dm", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
             let (vals, st) = ind::minus_dm_resume(
                 &high,
                 &low,
@@ -632,9 +631,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("plus_di", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::plus_di_resume(
                 &high,
                 &low,
@@ -646,9 +645,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("minus_di", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::minus_di_resume(
                 &high,
                 &low,
@@ -660,9 +659,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("dx", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::dx_resume(
                 &high,
                 &low,
@@ -674,9 +673,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("adx", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::adx_resume(
                 &high,
                 &low,
@@ -688,9 +687,9 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
         ("adxr", _) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let (vals, st) = ind::adxr_resume(
                 &high,
                 &low,
@@ -800,9 +799,9 @@ fn resume_of(
         // KDJ — resume the recursive %K (+ %D for `.d`/`.j`) from the carried state; RSV is
         // finite-memory, recomputed over the windowed high/low/close tail.
         ("kdj", Some(line @ ("k" | "d" | "j"))) => {
-            let high = series_f64(df, series, 0, "high").ok()?;
-            let low = series_f64(df, series, 1, "low").ok()?;
-            let close = series_f64(df, series, 2, "close").ok()?;
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
             let period_rsv = arg_usize(args, 0);
             let period_k = arg_usize(args, 1);
             let kline = match line {

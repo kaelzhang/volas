@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use volas_compute::missing::{CompleteRows, Input, ResumeRows};
 use volas_core::{Column, DataFrame, Result};
 
-use crate::exec::{execute, require_numeric};
+use crate::exec::{execute, require_numeric, series_f64};
 use crate::lookback::own_lookback;
 use crate::spec::command_spec;
 use crate::types::{ArgValue, Ast, Node};
@@ -81,31 +81,67 @@ fn input<'a>(
     }
 }
 
-/// Whether a resume of the command from `from` reads its inputs' rows `[.., end)` in
-/// place (see [`ResumeRows::in_place`]) — the allocation-free check of the live path,
-/// free outright for a column that already knows it holds no NaN.
+/// The operands a resume arm reads: the frame and its `@` series, plus the frame
+/// columns the missing-row check already resolved — handed over so the arm never looks
+/// one up a second time on the live path.
+pub(crate) struct Operands<'a> {
+    df: &'a DataFrame,
+    series: &'a [Ast],
+    resolved: [Option<&'a [f64]>; RESOLVED],
+}
+
+/// How many leading input slots a resume hands over resolved (every recursive command
+/// reads at most four series).
+const RESOLVED: usize = 4;
+
+impl<'a> Operands<'a> {
+    pub(crate) fn new(df: &'a DataFrame, series: &'a [Ast]) -> Self {
+        Operands {
+            df,
+            series,
+            resolved: [None; RESOLVED],
+        }
+    }
+
+    /// Input `slot` as `f64` (`default` names its column when no operand fills it).
+    pub(crate) fn f64(&self, slot: usize, default: &str) -> Result<Cow<'a, [f64]>> {
+        match self.resolved.get(slot) {
+            Some(Some(x)) => Ok(Cow::Borrowed(x)),
+            _ => series_f64(self.df, self.series, slot, default),
+        }
+    }
+}
+
+/// The operands of a resume from `from` over rows `[.., end)` when it reads every input
+/// in place (see [`ResumeRows::in_place`]), else `None` — the allocation-free check of
+/// the live path, free outright for a column that already knows it holds no NaN.
 #[allow(clippy::too_many_arguments)] // the command's parts plus the resumed rows
-fn resumes_in_place(
-    df: &DataFrame,
+fn in_place<'a>(
+    df: &'a DataFrame,
     name: &str,
     sub: Option<&str>,
     args: &[ArgValue],
-    series: &[Ast],
+    series: &'a [Ast],
     from: usize,
     end: usize,
-) -> Result<bool> {
+) -> Result<Option<Operands<'a>>> {
+    let mut ops = Operands::new(df, series);
     let mut reach = None; // only needed for an input that must be scanned
     for (slot, default, _) in slots(name, sub, series) {
         let (x, known) = input(df, series, slot, default, Column::known_has_nan)?;
         if known == Some(false) {
+            // a frame column known complete: hand its slice over, nothing to scan
+            if let (Some(cell), Cow::Borrowed(x)) = (ops.resolved.get_mut(slot), x) {
+                *cell = Some(x);
+            }
             continue;
         }
         let reach = *reach.get_or_insert_with(|| self::reach(name, sub, args));
         if !ResumeRows::in_place(Input::new(&x[..end]), from, reach) {
-            return Ok(false);
+            return Ok(None);
         }
     }
-    Ok(true)
+    Ok(Some(ops))
 }
 
 /// Whether every input of a default-series command is a frame column that holds no
@@ -253,7 +289,7 @@ fn reach(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
 
 /// Resume a recursive command over the new rows `[from, height)` from `prev_state`, on
 /// the complete rows only: a missing new row is NaN and leaves the state where the last
-/// complete row put it. `run(frame, operands, from)` is its resume arm.
+/// complete row put it. `run(operands, from)` is its resume arm.
 #[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
 pub(crate) fn resume(
     df: &DataFrame,
@@ -263,11 +299,13 @@ pub(crate) fn resume(
     series: &[Ast],
     prev_state: &[f64],
     from: usize,
-    run: impl FnOnce(&DataFrame, &[Ast], usize) -> Option<(Column, Vec<f64>)>,
+    run: impl FnOnce(&Operands, usize) -> Option<(Column, Vec<f64>)>,
 ) -> Option<(Column, Vec<f64>)> {
     let n = df.height();
-    if default_series(series) && resumes_in_place(df, name, sub, args, series, from, n).ok()? {
-        return run(df, series, from);
+    if default_series(series) {
+        if let Some(ops) = in_place(df, name, sub, args, series, from, n).ok()? {
+            return run(&ops, from);
+        }
     }
     let inputs = Inputs::resolve(df, name, sub, series).ok()?;
     let reach = reach(name, sub, args);
@@ -279,20 +317,19 @@ pub(crate) fn resume(
     {
         // explicit operands, every row they read present: resume on them as they are
         let (frame, operands) = inputs.frame(|v| v.to_vec());
-        return run(&frame, &operands, from);
+        return run(&Operands::new(&frame, &operands), from);
     }
     let rows = ResumeRows::of(&refs, from, reach);
     if !rows.has_new() {
         return Some((Column::f64(vec![f64::NAN; n - from]), prev_state.to_vec()));
     }
     let (frame, operands) = inputs.gathered(&rows.rows);
-    let (col, st) = run(&frame, &operands, rows.from)?;
+    let (col, st) = run(&Operands::new(&frame, &operands), rows.from)?;
     Some((Column::f64(rows.scatter(n, from, col.to_f64_vec())), st))
 }
 
 /// Resume a recursive command at the single row `row` (the scalar twin of [`resume`]):
-/// `missing` when that row is missing, else `run(frame, operands, row)` on the complete
-/// rows.
+/// `missing` when that row is missing, else `run(operands, row)` on the complete rows.
 #[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
 pub(crate) fn resume_one<T>(
     df: &DataFrame,
@@ -302,13 +339,13 @@ pub(crate) fn resume_one<T>(
     series: &[Ast],
     row: usize,
     missing: Option<T>,
-    run: impl FnOnce(&DataFrame, &[Ast], usize) -> Option<T>,
+    run: impl FnOnce(&Operands, usize) -> Option<T>,
 ) -> Option<T> {
     // The rows up to and including `row` (an out-of-range `row` resumes in place, where
     // the arm declines it).
     let end = (row + 1).min(df.height());
-    if resumes_in_place(df, name, sub, args, series, row, end).ok()? {
-        return run(df, series, row);
+    if let Some(ops) = in_place(df, name, sub, args, series, row, end).ok()? {
+        return run(&ops, row);
     }
     let inputs = Inputs::resolve(df, name, sub, series).ok()?;
     let upto: Vec<&[f64]> = inputs.views.iter().map(|v| &v[..end]).collect();
@@ -317,5 +354,5 @@ pub(crate) fn resume_one<T>(
         return missing;
     }
     let (frame, operands) = inputs.gathered(&rows.rows);
-    run(&frame, &operands, rows.from)
+    run(&Operands::new(&frame, &operands), rows.from)
 }
