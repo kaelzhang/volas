@@ -106,6 +106,11 @@ PATTERNS = {
         "close": [0, 1, 2, 100, 150, 151, 152, 230],
     },
     "last_rows": {c: [N - 2, N - 1] for c in OHLCV},
+    "lead": {c: list(range(6)) for c in OHLCV},
+    "lead_staggered": {
+        "close": list(range(5)), "high": [0, 1], "low": [0, 1, 2, 3, 4, 5, 6],
+        "open": [0], "volume": list(range(3)),
+    },
 }
 
 
@@ -242,24 +247,16 @@ def _plain_frame(data, rows):
     return DataFrame({k: v[rows] for k, v in data.items()})
 
 
-@pytest.mark.parametrize("directive", _LIVE)
-def test_plain_append_matches_a_full_recompute(directive):
+def _append_matches(directive, missing, seed):
+    """Append `BASE` with the rows of `missing` NaN from row `seed` on, single-bar
+    (scalar resume) and multi-bar (Vec resume), checking the column after each append."""
     data = {k: v.copy() for k, v in BASE.items()}
-    # missing rows around the cache seed, back to back, and at the newest row
-    for col, rows in {
-        "close": [99, 120, 121, 170, 171, 172, 205, 230, 259],
-        "high": [100, 182, 240],
-        "low": [190],
-        "volume": [150, 211],
-        "open": [215],
-    }.items():
+    for col, rows in missing.items():
         data[col][rows] = np.nan
-    seed = 100
     live = _plain_frame(data, slice(0, seed))
     live[directive]
-    i = seed
-    steps = [1, 1, 3, 1, 2]  # single-bar (scalar resume) and multi-bar (Vec resume)
-    k = 0
+    i, k = seed, 0
+    steps = [1, 1, 3, 1, 2]
     while i < N:
         j = min(N, i + steps[k % len(steps)])
         live.append(_plain_frame(data, slice(i, j)))
@@ -267,6 +264,49 @@ def test_plain_append_matches_a_full_recompute(directive):
         ref = _plain_frame(data, slice(0, j))
         _live_matches(live[directive], ref.exec(directive), directive, f"{directive} @{j}")
         i, k = j, k + 1
+
+
+# A nested command operand's cached column is named without its parentheses
+# (`ema:5@rsi:5`), which does not parse back when the frame refreshes it — a naming
+# defect independent of missing rows (clean data shows it too).
+_UNNAMEABLE = pytest.mark.xfail(raises=volas.DirectiveSyntaxError, strict=True,
+                                reason="a nested operand's column name drops its parentheses")
+
+
+@pytest.mark.parametrize("directive", _LIVE + [
+    d if d != "ema:5@(rsi:5)" else pytest.param(d, marks=_UNNAMEABLE)
+    for d in sorted(set(OPERANDS) - set(_LIVE))
+])
+def test_plain_append_matches_a_full_recompute(directive):
+    # missing rows around the cache seed, back to back, and at the newest row
+    _append_matches(directive, {
+        "close": [99, 120, 121, 170, 171, 172, 205, 230, 259],
+        "high": [100, 182, 240],
+        "low": [190],
+        "volume": [150, 211],
+        "open": [215],
+    }, seed=100)
+
+
+_HT = sorted(d for d in _LIVE if d.startswith(("ht_", "mama")))
+
+
+@pytest.mark.parametrize("directive", _HT)
+def test_plain_append_resumes_past_missing_rows_into_a_clean_tail(directive):
+    """A Hilbert resume reads a long window back: once the missing rows are well behind
+    (a clean tail of 64+ rows), it still agrees with a full recompute."""
+    assert len(_HT) == 10
+    _append_matches(directive, {c: [104, 105, 106, 130] for c in OHLCV}, seed=100)
+    assert N - 130 > 64
+
+
+@pytest.mark.parametrize("directive", sorted(CASES))
+def test_a_frame_whose_columns_are_known_to_miss_rows(directive):
+    """Once a frame column remembers it holds a NaN, the command skips its in-place run
+    and goes to the complete rows straight away — with the same result."""
+    df = DataFrame(_mutated("lead_and_interior"))
+    first = np.asarray(df.exec(directive), float)  # the columns' NaN facts are now known
+    _bit_exact(np.asarray(df.exec(directive), float), first, directive)
 
 
 def _fine(n_bars, missing_periods, missing_fine):
