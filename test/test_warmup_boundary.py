@@ -49,3 +49,22 @@ def test_a_frame_grown_row_by_row_reads_as_one_computed_at_once(directive):
         live.fulfill()
         ref = volas.DataFrame({k: v[:i + 1] for k, v in cols.items()})
         _bit_exact(live[directive], ref[directive], f"{directive} rows={i + 1}")
+
+
+@pytest.mark.parametrize("directive", [
+    "ht_trendline", "ht_trendmode", "ht_dcphase", "ht_sine", "ht_sine.leadsine", "ht_dcperiod",
+    "ht_phasor", "mama", "cmo:14", "rsi:14", "ema:20", "adosc",
+])
+def test_an_interior_missing_row_shifts_the_warm_up_on_every_path(directive):
+    """A missing row does not exist for a recursive indicator, so it pushes the warm-up
+    one row later: a resume past it must keep the rows a full recompute leaves NaN."""
+    n = 110
+    cols = _cols(n)
+    cols["close"][30] = np.nan
+    live = volas.DataFrame({k: v[:40] for k, v in cols.items()})
+    live[directive]
+    for i in range(40, n):
+        live.append(volas.DataFrame({k: v[i:i + 1] for k, v in cols.items()}))
+        live.fulfill()
+        ref = volas.DataFrame({k: v[:i + 1] for k, v in cols.items()})
+        _bit_exact(live[directive], ref[directive], f"{directive} rows={i + 1}")

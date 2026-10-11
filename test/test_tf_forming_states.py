@@ -151,12 +151,7 @@ def test_reporter_seeded_5m_frame_folds_1m_bars_bit_exact():
 # --- every recursive class, across the ways a forming row is produced ---------
 
 _RECURSIVE_SUBS = sorted(k for k in SUBCOMMANDS if k.split(".", 1)[0] in RECURSIVE)
-# Their resume kernel differs from a full recompute by an ulp on a plain frame as well
-# (a kernel property, not a tf-fold one), so they cannot be held bit-exact here.
-_RESUME_NOT_BIT_EXACT = {"ht_trendline", "stochrsi.d"}
-_ALL_RECURSIVE = sorted(
-    (set(RECURSIVE.values()) | {SUBCOMMANDS[k] for k in _RECURSIVE_SUBS}) - _RESUME_NOT_BIT_EXACT
-)
+_ALL_RECURSIVE = sorted(set(RECURSIVE.values()) | {SUBCOMMANDS[k] for k in _RECURSIVE_SUBS})
 # A bounded window does not keep these equal to an unbounded frame on a plain frame
 # either (the cumulative family and a few compound ones restart inside the retained
 # margin), so the windowed comparison covers the rest.

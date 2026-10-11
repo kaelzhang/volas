@@ -19,12 +19,9 @@ OHLCV = ("open", "high", "low", "close", "volume")
 T0 = np.datetime64("2026-01-01T00:00", "ns")
 MINUTE = np.timedelta64(1, "m")
 
-# Kernels whose resume differs from a full recompute by an ulp on any path (tracked
-# separately); every other recursive command is held bit-exact here.
-_RESUME_NOT_BIT_EXACT = {"ht_trendline", "stochrsi.d"}
+# Every recursive command is held bit-exact here.
 _RECURSIVE = sorted(
-    (set(RECURSIVE.values()) | {SUBCOMMANDS[k] for k in SUBCOMMANDS if k.split(".")[0] in RECURSIVE})
-    - _RESUME_NOT_BIT_EXACT
+    set(RECURSIVE.values()) | {SUBCOMMANDS[k] for k in SUBCOMMANDS if k.split(".")[0] in RECURSIVE}
 )
 _FINITE = ["ma:5", "wma:5", "boll.upper", "stddev:5", "llv:5", "rsv:5", "cci:5", "maxindex:5",
            "linearreg:5", "mfi:5", "willr:5", "kst", "ichimoku.kijun", "pivothigh:5,3"]

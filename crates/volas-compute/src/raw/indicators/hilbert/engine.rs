@@ -528,28 +528,33 @@ pub(super) fn dcphase_all(core: &[HtBar]) -> Vec<f64> {
     out
 }
 
+/// One trendline bar's dominant-cycle-window raw-price average: TA-Lib's backward
+/// rescan `price[today] + price[today-1] + …` over `DCPeriod` bars, divided by the
+/// period. The single definition the full compute, `*_final_state` and the resume
+/// share — so a resumed bar is bit-identical to the full one (a prefix-sum
+/// difference would reassociate the sum, drift with the history length, and differ
+/// from the rescan in the last bits). `DCPeriod <= SMOOTH_PRICE_SIZE`, so the rescan
+/// is bounded.
+#[inline]
+pub(super) fn trendline_avg(price: &[f64], today: usize, smooth_period: f64) -> f64 {
+    let dc_period_int = (smooth_period + 0.5) as usize;
+    if dc_period_int == 0 {
+        return 0.0;
+    }
+    // Newest to oldest, one add at a time: TA-Lib's order (rows before 0 add nothing).
+    let lo = (today + 1).saturating_sub(dc_period_int);
+    let sum = price[lo..=today].iter().rev().fold(0.0f64, |s, &x| s + x);
+    sum / dc_period_int as f64
+}
+
 /// Trendline per bar: a `DCPeriod`-window average of *raw* price smoothed by the
 /// 4/3/2/1-weighted `iTrend` recurrence. Index `< CORE_START` holds `0.0`.
 pub(super) fn trendline_all(core: &[HtBar], price: &[f64]) -> Vec<f64> {
     let n = core.len();
     let mut out = vec![0.0f64; n];
-    // Prefix sums of price (`prefix[k] = Σ price[0..k]`) turn each bar's
-    // variable-width DC-period window mean into an O(1) difference instead of the
-    // O(period) rescan of [`trendline_avg`] — the whole pass becomes O(n), not
-    // O(n·period) (the dominant cost of HT_TRENDLINE). The reassociated summation
-    // drifts ~1e-12 relative: far inside ht_trendline's 1e-7 TA-Lib parity and the
-    // 1e-9 resume-vs-batch tolerance (the per-bar resume keeps the exact rescan).
-    let mut prefix = vec![0.0f64; n + 1];
-    for i in 0..n {
-        prefix[i + 1] = prefix[i] + price[i];
-    }
     let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
     for today in CORE_START..n {
-        // `smooth_period` is the homodyne period (clamped to [6, 50]) blended 0.33
-        // up from 0, so `dc >= 2` from the very first bar — never zero, no guard.
-        let dc = (core[today].smooth_period + 0.5) as usize;
-        let lo = (today + 1).saturating_sub(dc);
-        let avg = (prefix[today + 1] - prefix[lo]) / dc as f64;
+        let avg = trendline_avg(price, today, core[today].smooth_period);
         out[today] = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
         it3 = it2;
         it2 = it1;

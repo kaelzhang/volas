@@ -1,7 +1,8 @@
 use ndarray::Array1;
 
 use super::av;
-use super::stochastic::stoch_fastk;
+use super::stochastic::{stoch_fastk, stochrsi_fastk};
+use crate::guard::Slide;
 use crate::raw::kernels;
 
 // ---------------------------------------------------------------------------
@@ -101,15 +102,18 @@ pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 // (position-independent windowed min/max / mean over a NaN-free RSI buffer), so the ONLY
 // recursive part is the underlying RSI. We continue it bit-exactly in O(new rows) by
 // carrying the RSI Wilder pair `[avg_gain, avg_loss]` as of `from-1` PLUS the recent RSI
-// VALUES needed to fill the stochastic (and SMA) windows over the new rows:
-//   state = [avg_gain, avg_loss, rsi_{from-C}, …, rsi_{from-1}]
+// VALUES needed to fill the stochastic windows over the new rows:
+//   `.k` -> state = [avg_gain, avg_loss, rsi_{from-C}, …, rsi_{from-1}]
+//   `.d` -> state = [avg_gain, avg_loss, sma_sum, sma_bad, rsi_{from-C}, …, rsi_{from-1}]
 // where the RSI-context depth `C` is the stage lookback before `from`:
-//   `.k` -> C = fastk_period - 1                       (the %K window)
-//   `.d` -> C = (fastd_period - 1) + (fastk_period - 1) (the SMA-of-%K reach)
-// On resume we `rsi_resume` the new RSI tail, concatenate the carried context, run the
-// (NaN-free) windowed %K — and, for `.d`, the windowed SMA — then slice out `[from, n)`.
-// Bit-identical to a fresh `stochrsi_fastk` (+ `ma`), since every windowed reduction over
-// a finite window is order/position-independent. A resume that cannot see a full context
+//   `.k` -> C = fastk_period - 1                   (the %K window)
+//   `.d` -> C = (fastk_period - 1) + fastd_period  (%K back to the row the SMA drops)
+// On resume we `rsi_resume` the new RSI tail, concatenate the carried context and run the
+// (NaN-free) windowed %K — bit-identical to a fresh `stochrsi_fastk`, since a min/max
+// over a finite window is order/position-independent. The `.d` SMA is a running sum,
+// whose value depends on every row it has slid over: it is carried (the [`Slide`] state
+// of the full SMA as of `from-1`) and continued add-then-drop like the full SMA, so `.d`
+// is bit-identical too. A resume that cannot see a full context
 // of FINITE RSI (`from - C < rsi_period`, i.e. the tracker is not yet warm) returns `None`
 // and falls back; a carried slice keeps `>= lookback` rows, so it is always warm enough.
 // Only the canonical SMA `.d` (matype 0) is resumed; a recursive-MA `.d` declines.
@@ -119,13 +123,30 @@ pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 fn stochrsi_ctx_depth(fastk_period: usize, is_d: bool, fastd_period: usize) -> usize {
     let k = fastk_period.saturating_sub(1);
     if is_d {
-        k + fastd_period.saturating_sub(1)
+        k + fastd_period
     } else {
         k
     }
 }
 
-/// Final StochRSI state `[avg_gain, avg_loss, rsi_tail…]` after a full compute, or `None`
+/// Words of a StochRSI state before the RSI tail: the Wilder pair, then for `.d` the
+/// SMA's [`Slide`] state.
+fn stochrsi_head_len(is_d: bool) -> usize {
+    if is_d {
+        2 + Slide::<1>::STATE
+    } else {
+        2
+    }
+}
+
+/// The `.d` SMA (`fastd_period`) slid over `%K` row `i` — the full SMA's own
+/// add-then-drop order (`kernels::sma`, `stochrsi_d_default_sma`), so the value and the
+/// running sum match it bit for bit.
+fn stochrsi_d_row(slide: &mut Slide<1>, fastd_period: usize, i: usize, k: impl Fn(usize) -> f64) -> f64 {
+    kernels::sma_row(slide, fastd_period, i, k)
+}
+
+/// Final StochRSI state (see the module note) after a full compute, or `None`
 /// if RSI never warms up (`rsi_period == 0 || n <= rsi_period`) or there are not yet `C+1`
 /// finite RSI rows to anchor a resume. `is_d` / `fastd_period` only size the carried RSI
 /// tail (the deeper SMA reach). The Wilder pair matches [`rsi_final_state`] exactly.
@@ -143,13 +164,26 @@ pub fn stochrsi_final_state(
     if n < c || n - c < rsi_period {
         return None;
     }
+    if fastk_period == 0 || (is_d && fastd_period == 0) {
+        return None;
+    }
     let rsi = rsi(close, rsi_period);
     let mut state = wilder;
+    if is_d {
+        let k = stochrsi_fastk(close, rsi_period, fastk_period);
+        let mut slide = Slide::<1>::default();
+        for i in 0..n {
+            stochrsi_d_row(&mut slide, fastd_period, i, |j| k[j]);
+        }
+        let mut words = [0.0; Slide::<1>::STATE];
+        slide.write_state(&mut words);
+        state.extend_from_slice(&words);
+    }
     state.extend_from_slice(&rsi[n - c..n]);
     Some(state)
 }
 
-/// Resume StochRSI `.k` / `.d` from `state = [avg_gain, avg_loss, rsi_tail…]` over rows
+/// Resume StochRSI `.k` / `.d` from its state (see the module note) over rows
 /// `[from, n)`, returning the new-row values and the updated state. `None` when RSI cannot
 /// be resumed (`from == 0`) or the carried context is too short / not warm. Bit-identical
 /// to a fresh `stochrsi_fastk` (+ SMA for `.d`).
@@ -164,14 +198,15 @@ pub fn stochrsi_resume(
 ) -> Option<(Vec<f64>, Vec<f64>)> {
     let n = close.len();
     let c = stochrsi_ctx_depth(fastk_period, is_d, fastd_period);
-    if state.len() != c + 2 || from == 0 || from > n || from < c {
+    let head = stochrsi_head_len(is_d);
+    if state.len() != c + head || from == 0 || from > n || from < c || fastk_period == 0 {
         return None;
     }
     // Continue RSI over the new rows from the carried Wilder pair (as of `from-1`).
     let (new_rsi, new_wilder) = rsi_resume(close, rsi_period, from, &state[..2])?;
     // RSI buffer covering `[from - c, n)`: the carried context tail ++ the new RSI rows.
     let mut buf = Vec::with_capacity(c + new_rsi.len());
-    buf.extend_from_slice(&state[2..]); // rsi[from-c .. from)
+    buf.extend_from_slice(&state[head..]); // rsi[from-c .. from)
     buf.extend_from_slice(&new_rsi); // rsi[from .. n)
                                      // Every buffered RSI must be finite for the van-Herk %K (the warm guard above ensures
                                      // `from - c >= rsi_period`, so it is) — bail out defensively otherwise.
@@ -181,17 +216,27 @@ pub fn stochrsi_resume(
     // Windowed stochastic %K of the RSI buffer (RSI as high=low=close, matching
     // `stochrsi_fastk`). Buffer index `p` is original row `from - c + p`.
     let fk = stoch_fastk(&buf, &buf, &buf, fastk_period);
-    let line = if is_d {
-        // `.d` is the SMA of %K; only matype 0 (SMA) is resumed (the caller gates this).
-        super::ma(&fk, fastd_period)
-    } else {
-        fk
-    };
-    // New rows `[from, n)` are buffer indices `[c, c + (n-from))`.
-    let out: Vec<f64> = line[c..].to_vec();
-    debug_assert_eq!(out.len(), n - from);
-    // Refresh the state: Wilder pair as of n-1, then the trailing `c` RSI values.
     let mut new_state = new_wilder;
+    // New rows `[from, n)` are buffer indices `[c, c + (n-from))`.
+    let out: Vec<f64> = if is_d {
+        // `.d` is the SMA of %K; only matype 0 (SMA) is resumed (the caller gates this).
+        // Buffer index `p` is row `from - c + p`, so the SMA's row `i` reads `fk[i + c -
+        // from]` — present for every row it drops (`>= from - fastd_period`).
+        let mut slide = Slide::<1>::from_state(&state[2..head])?;
+        let base = from - c;
+        let k = |j: usize| fk[j - base];
+        let out = (from..n)
+            .map(|i| stochrsi_d_row(&mut slide, fastd_period, i, &k))
+            .collect();
+        let mut words = [0.0; Slide::<1>::STATE];
+        slide.write_state(&mut words);
+        new_state.extend_from_slice(&words);
+        out
+    } else {
+        fk[c..].to_vec()
+    };
+    debug_assert_eq!(out.len(), n - from);
+    // Refresh the state: Wilder pair as of n-1, [the `.d` slide,] the trailing `c` RSI.
     let full_rsi_len = c + new_rsi.len(); // == buf.len()
     new_state.extend_from_slice(&buf[full_rsi_len - c..]);
     Some((out, new_state))
@@ -746,19 +791,23 @@ mod tests {
             let (tail, _) = stochrsi_resume(&close, rp, fk, false, fd, from, &st).unwrap();
             assert_bits(&tail, &k_full[from..], "stochrsi.k");
 
-            // `.d` line (is_d = true). The `.d` SMA-of-%K rolls a running sum whose start
-            // point differs between the windowed resume buffer and the full frame, so the
-            // two agree to the production parity tolerance (~1e-9) rather than bit-for-bit.
+            // `.d` line (is_d = true): the carried running sum of the `.d` SMA continues
+            // the full frame's own, so the two agree bit for bit — also when the resume
+            // is chained one row at a time from each returned state.
             let st = stochrsi_final_state(head, rp, fk, true, fd).unwrap();
             let (tail, _) = stochrsi_resume(&close, rp, fk, true, fd, from, &st).unwrap();
-            let want = &d_full[from..];
-            assert_eq!(tail.len(), want.len(), "stochrsi.d length");
-            for (i, (x, y)) in tail.iter().zip(want).enumerate() {
-                assert!(
-                    (x - y).abs() <= 1e-9 || (x.is_nan() && y.is_nan()),
-                    "stochrsi.d bar {i}: resume {x} != full {y}",
-                );
+            assert_bits(&tail, &d_full[from..], "stochrsi.d");
+            let mut st = st;
+            for row in from..close.len() {
+                let (one, next) = stochrsi_resume(&close[..=row], rp, fk, true, fd, row, &st).unwrap();
+                assert_bits(&one, &d_full[row..=row], "stochrsi.d chained");
+                st = next;
             }
+            // the default fused `.d` kernel is the same SMA
+            let d_default = crate::raw::indicators::stochrsi_d_default_sma(&close).unwrap();
+            let st = stochrsi_final_state(head, 14, 5, true, 3).unwrap();
+            let (tail, _) = stochrsi_resume(&close, 14, 5, true, 3, from, &st).unwrap();
+            assert_bits(&tail, &d_default[from..], "stochrsi.d default");
         }
     }
 

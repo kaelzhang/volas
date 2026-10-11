@@ -109,20 +109,12 @@ pub fn ht_trendline(price: &[f64]) -> Vec<f64> {
     if n <= CORE_START {
         return out;
     }
-    let mut prefix = Vec::with_capacity(n + 1);
-    prefix.push(0.0);
-    for &p in price {
-        prefix.push(prefix[prefix.len() - 1] + p);
-    }
     let mut core = HtCoreState::seed(price);
     let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
     for today in CORE_START..n {
         let b = core.step(price, today);
-        // Keep the full-compute prefix-sum average while streaming the Hilbert core:
         // TA-Lib's iTrend recurrence is per-bar, but only bars >= LB_PHASE are visible.
-        let dc = (b.smooth_period + 0.5) as usize;
-        let lo = (today + 1).saturating_sub(dc);
-        let avg = (prefix[today + 1] - prefix[lo]) / dc as f64;
+        let avg = trendline_avg(price, today, b.smooth_period);
         if today >= LB_PHASE {
             out[today] = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
         }
@@ -256,6 +248,18 @@ fn ht_core_final_state(price: &[f64]) -> Option<Vec<f64>> {
     Some(core.serialize())
 }
 
+/// A resumed bar's output under its full-compute mask: `NaN` below `mask`, else `v`.
+/// The bar index is that of the complete (gathered) rows, so missing rows can shift
+/// a resumed bar under the mask that a gap-free history would have passed.
+#[inline]
+fn masked(today: usize, mask: usize, v: f64) -> f64 {
+    if today >= mask {
+        v
+    } else {
+        f64::NAN
+    }
+}
+
 /// Reconstruct [`HtCoreState`] for a resume at `from` (state as of bar `from-1`),
 /// stepping no bars. `None` when `from <= CORE_START` (the carried state would
 /// predate the warm-up) or the state buffer is too short.
@@ -272,8 +276,9 @@ pub fn ht_core_state(price: &[f64]) -> Option<Vec<f64>> {
     ht_core_final_state(price)
 }
 
-/// Resume `HT_DCPERIOD` over `[from, n)`: step the core, emit `smooth_period`.
-/// Every emitted bar is past the `LB_PERIOD` mask (`from >= valid_rows > LB_PERIOD`).
+/// Resume `HT_DCPERIOD` over `[from, n)`: step the core, emit `smooth_period`,
+/// masked under `LB_PERIOD` like the full compute (a bar index there is reachable
+/// once missing rows shift the warm-up).
 pub fn ht_dcperiod_resume(
     price: &[f64],
     from: usize,
@@ -283,7 +288,8 @@ pub fn ht_dcperiod_resume(
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
-        out.push(core.step(price, today).smooth_period);
+        let p = core.step(price, today).smooth_period;
+        out.push(masked(today, LB_PERIOD, p));
     }
     Some((out, core.serialize()))
 }
@@ -301,7 +307,7 @@ pub fn ht_phasor_resume(
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
-        out.push(if quad { b.q1 } else { b.i1 });
+        out.push(masked(today, LB_PERIOD, if quad { b.q1 } else { b.i1 }));
     }
     Some((out, core.serialize()))
 }
@@ -331,7 +337,7 @@ pub fn ht_dcphase_state(price: &[f64]) -> Option<Vec<f64>> {
 }
 
 /// Resume `HT_DCPHASE` over `[from, n)`: step the core, push each smoothed bar
-/// through the carried [`DcPhase`], emit the phase (all past the `LB_PHASE` mask).
+/// through the carried [`DcPhase`], emit the phase (masked under `LB_PHASE`).
 pub fn ht_dcphase_resume(
     price: &[f64],
     from: usize,
@@ -347,7 +353,7 @@ pub fn ht_dcphase_resume(
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
-        out.push(dc.push(b.smoothed, b.smooth_period));
+        out.push(masked(today, LB_PHASE, dc.push(b.smoothed, b.smooth_period)));
     }
     let mut v = core.serialize();
     dc.push_state(&mut v);
@@ -379,11 +385,12 @@ pub fn ht_sine_resume(
     for today in from..n {
         let b = core.step(price, today);
         let phase = dc.push(b.smoothed, b.smooth_period);
-        out.push(if lead {
+        let v = if lead {
             ((phase + 45.0) * DEG2RAD).sin()
         } else {
             (phase * DEG2RAD).sin()
-        });
+        };
+        out.push(masked(today, LB_PHASE, v));
     }
     let mut v = core.serialize();
     dc.push_state(&mut v);
@@ -420,25 +427,6 @@ pub fn ht_trendline_state(price: &[f64]) -> Option<Vec<f64>> {
     ht_trendline_final_state(price)
 }
 
-/// One trendline bar's dominant-cycle-window raw-price average (the inner sum of
-/// [`trendline_all`], factored out so the full compute, `*_final_state`, and resume
-/// share one definition).
-#[inline]
-fn trendline_avg(price: &[f64], today: usize, smooth_period: f64) -> f64 {
-    let dc_period_int = (smooth_period + 0.5) as usize;
-    let mut sum = 0.0f64;
-    for j in 0..dc_period_int {
-        if today >= j {
-            sum += price[today - j];
-        }
-    }
-    if dc_period_int > 0 {
-        sum / dc_period_int as f64
-    } else {
-        0.0
-    }
-}
-
 /// Resume `HT_TRENDLINE` over `[from, n)`: step the core, form the windowed average,
 /// advance the `iTrend` recurrence, emit `(4·avg + 3·it1 + 2·it2 + it3)/10`. Guarded
 /// by `from >= SMOOTH_PRICE_SIZE` so the raw-price window is fully in range (and the
@@ -465,7 +453,7 @@ pub fn ht_trendline_resume(
     for today in from..n {
         let b = core.step(price, today);
         let avg = trendline_avg(price, today, b.smooth_period);
-        out.push((4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0);
+        out.push(masked(today, LB_PHASE, (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0));
         it3 = it2;
         it2 = it1;
         it1 = avg;
@@ -597,7 +585,7 @@ pub fn ht_trendmode_resume(
             trend_line,
             &mut days_in_trend,
         );
-        out.push(trend as f64);
+        out.push(masked(today, LB_PHASE, trend as f64));
         it3 = it2;
         it2 = it1;
         it1 = avg;
@@ -681,7 +669,7 @@ fn mama_step(
 }
 
 /// Resume `MAMA`/`FAMA` over `[from, n)`, emitting `mama` (`want_fama == false`) or
-/// `fama` (`want_fama == true`); both are past the `LB_PERIOD` mask.
+/// `fama` (`want_fama == true`), masked under `LB_PERIOD` like the full compute.
 pub fn mama_resume(
     price: &[f64],
     fast_limit: f64,
@@ -712,7 +700,7 @@ pub fn mama_resume(
             &mut fama,
             &mut prev_phase,
         );
-        out.push(if want_fama { fama } else { mama });
+        out.push(masked(today, LB_PERIOD, if want_fama { fama } else { mama }));
     }
     let mut v = core.serialize();
     v.push(mama);
