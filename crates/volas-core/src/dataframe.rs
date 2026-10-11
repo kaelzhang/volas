@@ -644,3 +644,5 @@ mod computed;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_nan_fact;

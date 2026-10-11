@@ -11,7 +11,9 @@
 //! [`CompleteRows`] owns this for a full computation and its carried-state capture
 //! (which therefore describes the last complete row); [`ResumeRows`] owns it for a
 //! resume over new rows, which reads only a bounded reach of history. When no row is
-//! missing both hand the inputs through untouched, so the common case costs one scan.
+//! missing both hand the inputs through untouched. An [`Input`] whose column already
+//! knows it holds no missing value (the frame remembers that fact per column) is never
+//! scanned, so the common case costs nothing; otherwise it costs one scan.
 //! Finite-window kernels need none of this: window locality (see [`crate::guard`])
 //! already confines a bad row to the windows holding it.
 
@@ -41,6 +43,46 @@ fn any_missing(x: &[f64]) -> bool {
     chunks.remainder().iter().any(|&v| is_missing(v))
 }
 
+/// One input of a recursive computation: its values and, when its column already
+/// knows it, whether any of them is missing. A known `false` skips every scan.
+#[derive(Clone, Copy, Debug)]
+pub struct Input<'a> {
+    values: &'a [f64],
+    has_missing: Option<bool>,
+}
+
+impl<'a> Input<'a> {
+    /// Values with nothing known about them: scanned when it matters.
+    pub fn new(values: &'a [f64]) -> Self {
+        Input {
+            values,
+            has_missing: None,
+        }
+    }
+
+    /// Values whose column knows whether any of them is missing.
+    pub fn known(values: &'a [f64], has_missing: bool) -> Self {
+        Input {
+            values,
+            has_missing: Some(has_missing),
+        }
+    }
+
+    /// The values.
+    pub fn values(&self) -> &'a [f64] {
+        self.values
+    }
+
+    /// Whether any value in `[start..]` is missing: no scan for a known-complete input.
+    fn any_missing_from(&self, start: usize) -> bool {
+        self.has_missing != Some(false) && any_missing(&self.values[start..])
+    }
+}
+
+fn values<'a>(inputs: &[Input<'a>]) -> Vec<&'a [f64]> {
+    inputs.iter().map(|x| x.values).collect()
+}
+
 /// The common length of `inputs` (`0` for none).
 fn height(inputs: &[&[f64]]) -> usize {
     inputs.first().map_or(0, |x| x.len())
@@ -59,18 +101,23 @@ pub enum CompleteRows {
 }
 
 impl CompleteRows {
-    /// Classify the rows of `inputs`. One pass over each input when nothing is missing.
-    pub fn of(inputs: &[&[f64]]) -> CompleteRows {
-        let n = height(inputs);
-        let start = (0..n).find(|&i| complete(inputs, i)).unwrap_or(n);
-        if !inputs.iter().any(|x| any_missing(&x[start..])) {
+    /// Classify the rows of `inputs`: no scan at all when every input is known to be
+    /// complete, else one pass over each input not known to be.
+    pub fn of(inputs: &[Input]) -> CompleteRows {
+        if inputs.iter().all(|x| x.has_missing == Some(false)) {
+            return CompleteRows::All;
+        }
+        let vals = values(inputs);
+        let n = height(&vals);
+        let start = (0..n).find(|&i| complete(&vals, i)).unwrap_or(n);
+        if !inputs.iter().any(|x| x.any_missing_from(start)) {
             return if start == 0 {
                 CompleteRows::All
             } else {
                 CompleteRows::After(start)
             };
         }
-        CompleteRows::Kept((start..n).filter(|&i| complete(inputs, i)).collect())
+        CompleteRows::Kept((start..n).filter(|&i| complete(&vals, i)).collect())
     }
 
     /// `x` restricted to the complete rows (borrowed unless interior rows are dropped).
@@ -107,7 +154,8 @@ impl CompleteRows {
 /// Run `kernel` on the complete rows of `inputs` and scatter its output back: the
 /// whole rule for one full computation.
 pub fn on_complete_rows(inputs: &[&[f64]], kernel: impl FnOnce(&[&[f64]]) -> Vec<f64>) -> Vec<f64> {
-    let rows = CompleteRows::of(inputs);
+    let known: Vec<Input> = inputs.iter().map(|x| Input::new(x)).collect();
+    let rows = CompleteRows::of(&known);
     if rows == CompleteRows::All {
         return kernel(inputs);
     }
@@ -133,10 +181,10 @@ pub struct ResumeRows {
 
 impl ResumeRows {
     /// Whether a resume from `from` can read the input `x` in place: its new rows and
-    /// the `reach` rows before them are present. Allocation-free, for the live
-    /// single-bar path.
-    pub fn in_place(x: &[f64], from: usize, reach: usize) -> bool {
-        from >= x.len() || !any_missing(&x[from.saturating_sub(reach)..])
+    /// the `reach` rows before them are present. Allocation-free, and free outright for
+    /// an input known to be complete — the live single-bar path.
+    pub fn in_place(x: Input, from: usize, reach: usize) -> bool {
+        from >= x.values.len() || !x.any_missing_from(from.saturating_sub(reach))
     }
 
     /// The rows a resume of `inputs` from `from` runs on.
@@ -175,6 +223,35 @@ mod tests {
 
     const NAN: f64 = f64::NAN;
 
+    fn ins<'a>(x: &[&'a [f64]]) -> Vec<Input<'a>> {
+        x.iter().map(|v| Input::new(v)).collect()
+    }
+
+    /// A column that knows it holds no missing value is taken at its word — no scan
+    /// (that is the whole point; the frame keeps the fact honest); one that knows it
+    /// does, or does not know, is scanned.
+    #[test]
+    fn a_known_complete_input_is_not_scanned() {
+        let x = [1.0, NAN, 3.0];
+        assert_eq!(
+            CompleteRows::of(&[Input::known(&x, false)]),
+            CompleteRows::All
+        );
+        assert!(ResumeRows::in_place(Input::known(&x, false), 2, 2));
+        assert_eq!(
+            CompleteRows::of(&[Input::known(&x, true)]),
+            CompleteRows::Kept(vec![0, 2])
+        );
+        assert!(!ResumeRows::in_place(Input::known(&x, true), 2, 2));
+        let y = [1.0, 2.0, 3.0];
+        // mixed: only the unknown / missing one is scanned
+        assert_eq!(
+            CompleteRows::of(&[Input::known(&y, false), Input::new(&x)]),
+            CompleteRows::Kept(vec![0, 2])
+        );
+        assert_eq!(Input::known(&y, false).values(), &y);
+    }
+
     fn bits(v: &[f64]) -> Vec<u64> {
         v.iter().map(|x| x.to_bits()).collect()
     }
@@ -182,30 +259,42 @@ mod tests {
     #[test]
     fn rows_are_classified_by_every_input() {
         let a = [1.0, 2.0, 3.0, 4.0];
-        assert_eq!(CompleteRows::of(&[&a[..]]), CompleteRows::All);
+        assert_eq!(CompleteRows::of(&ins(&[&a[..]])), CompleteRows::All);
         let b = [NAN, NAN, 3.0, 4.0];
-        assert_eq!(CompleteRows::of(&[&a[..], &b[..]]), CompleteRows::After(2));
+        assert_eq!(
+            CompleteRows::of(&ins(&[&a[..], &b[..]])),
+            CompleteRows::After(2)
+        );
         let c = [1.0, NAN, 3.0, 4.0];
         assert_eq!(
-            CompleteRows::of(&[&a[..], &c[..]]),
+            CompleteRows::of(&ins(&[&a[..], &c[..]])),
             CompleteRows::Kept(vec![0, 2, 3])
         );
-        assert_eq!(CompleteRows::of(&[&b[..], &c[..]]), CompleteRows::After(2));
-        assert_eq!(CompleteRows::of(&[&[NAN, NAN][..]]), CompleteRows::After(2));
-        assert_eq!(CompleteRows::of(&[]), CompleteRows::All);
+        assert_eq!(
+            CompleteRows::of(&ins(&[&b[..], &c[..]])),
+            CompleteRows::After(2)
+        );
+        assert_eq!(
+            CompleteRows::of(&ins(&[&[NAN, NAN][..]])),
+            CompleteRows::After(2)
+        );
+        assert_eq!(CompleteRows::of(&ins(&[])), CompleteRows::All);
         // a long input exercises the chunked scan on both sides of a chunk boundary
         let mut long = [1.0; 21];
-        assert_eq!(CompleteRows::of(&[&long[..]]), CompleteRows::All);
+        assert_eq!(CompleteRows::of(&ins(&[&long[..]])), CompleteRows::All);
         long[3] = NAN;
         long[19] = NAN;
         let kept: Vec<usize> = (0..21).filter(|&i| i != 3 && i != 19).collect();
-        assert_eq!(CompleteRows::of(&[&long[..]]), CompleteRows::Kept(kept));
+        assert_eq!(
+            CompleteRows::of(&ins(&[&long[..]])),
+            CompleteRows::Kept(kept)
+        );
     }
 
     #[test]
     fn an_infinity_is_a_value_not_a_missing_row() {
         let x = [f64::INFINITY, 1.0, f64::NEG_INFINITY];
-        assert_eq!(CompleteRows::of(&[&x[..]]), CompleteRows::All);
+        assert_eq!(CompleteRows::of(&ins(&[&x[..]])), CompleteRows::All);
         assert!(!is_missing(f64::INFINITY));
         assert!(is_missing(NAN));
     }
@@ -253,18 +342,18 @@ mod tests {
     fn a_resume_gathers_its_reach_and_the_complete_new_rows() {
         let rows = |rows: Vec<usize>, from: usize| ResumeRows { rows, from };
         let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        assert!(ResumeRows::in_place(&x, 4, 2));
-        assert!(ResumeRows::in_place(&[NAN], 1, 2)); // no new row
-                                                     // a missing row before the reach is never read
+        assert!(ResumeRows::in_place(Input::new(&x), 4, 2));
+        assert!(ResumeRows::in_place(Input::new(&[NAN]), 1, 2)); // no new row
+                                                                 // a missing row before the reach is never read
         let y = [NAN, 2.0, 3.0, 4.0, 5.0, 6.0];
-        assert!(ResumeRows::in_place(&y, 4, 2));
+        assert!(ResumeRows::in_place(Input::new(&y), 4, 2));
         // a missing row inside the reach: take the reach from complete rows only
         let z = [1.0, 2.0, NAN, 4.0, 5.0, 6.0];
-        assert!(!ResumeRows::in_place(&z, 4, 2));
+        assert!(!ResumeRows::in_place(Input::new(&z), 4, 2));
         assert_eq!(ResumeRows::of(&[&z[..]], 4, 2), rows(vec![1, 3, 4, 5], 2));
         // a missing new row
         let w = [1.0, 2.0, 3.0, 4.0, NAN, 6.0];
-        assert!(!ResumeRows::in_place(&w, 4, 2));
+        assert!(!ResumeRows::in_place(Input::new(&w), 4, 2));
         let gathered = ResumeRows::of(&[&w[..]], 4, 2);
         assert_eq!(gathered, rows(vec![2, 3, 5], 2));
         assert!(gathered.has_new());

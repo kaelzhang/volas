@@ -144,10 +144,9 @@ impl DataFrame {
             .copied()
             .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
         match &mut self.columns[pos] {
-            Column::F64(arc) => {
-                let buf = arc.make_mut();
+            Column::F64(buf) => {
                 if row < buf.len() {
-                    buf[row] = value;
+                    buf.set(row, value);
                 }
             }
             col => {

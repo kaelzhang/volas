@@ -41,8 +41,8 @@ impl Column {
     /// A contiguous `[start, end)` slice (a fresh buffer).
     pub fn slice(&self, start: usize, end: usize) -> Column {
         match self {
-            Column::F64(v) => Column::f64(v[start..end].to_vec()),
-            Column::F32(v) => Column::f32(v[start..end].to_vec()),
+            Column::F64(v) => Column::F64(v.slice(start, end)),
+            Column::F32(v) => Column::F32(v.slice(start, end)),
             Column::Bool(v, val) => {
                 Column::bool_with(v[start..end].to_vec(), val.slice(start, end))
             }
@@ -271,11 +271,11 @@ impl Column {
     pub fn append(&mut self, other: &Column) -> Result<()> {
         match (self, other) {
             (Column::F64(a), Column::F64(b)) => {
-                a.make_mut().extend_from_slice(b);
+                a.append(b);
                 Ok(())
             }
             (Column::F32(a), Column::F32(b)) => {
-                a.make_mut().extend_from_slice(b);
+                a.append(b);
                 Ok(())
             }
             (Column::Bool(a, av), Column::Bool(b, bv)) => {
@@ -315,11 +315,11 @@ impl Column {
     pub fn append_missing(&mut self, len: usize) -> Result<()> {
         match self {
             Column::F64(v) => {
-                v.make_mut().extend(std::iter::repeat_n(f64::NAN, len));
+                v.append_repeated(f64::NAN, len);
                 Ok(())
             }
             Column::F32(v) => {
-                v.make_mut().extend(std::iter::repeat_n(f32::NAN, len));
+                v.append_repeated(f32::NAN, len);
                 Ok(())
             }
             // The refresh path overwrites these placeholder rows on recompute, so a
@@ -350,8 +350,8 @@ impl Column {
             )
         };
         match self {
-            Column::F64(v) => v.make_mut().extend(std::iter::repeat_n(f64::NAN, len)),
-            Column::F32(v) => v.make_mut().extend(std::iter::repeat_n(f32::NAN, len)),
+            Column::F64(v) => v.append_repeated(f64::NAN, len),
+            Column::F32(v) => v.append_repeated(f32::NAN, len),
             Column::Datetime(v) => v.make_mut().extend(std::iter::repeat_n(i64::MIN, len)),
             Column::I64(v, val) => {
                 *val = na_validity(val);
@@ -497,6 +497,8 @@ impl Column {
             return Ok(());
         }
         match self {
+            // `make_mut` forgets the column's NaN fact; a resume then checks its few
+            // rows directly (tracking it here would grow this per-bar hot path).
             Column::F64(buf) => {
                 let s = src.get_f64(src_row);
                 let b = buf.make_mut();
