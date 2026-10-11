@@ -37,4 +37,5 @@ docs/animated_gif/*.gif
 ._*
 .idea/
 .vscode/
+.claude/
 *.swp
