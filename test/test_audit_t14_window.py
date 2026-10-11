@@ -466,6 +466,18 @@ def test_nunique_counts_signed_zeros_as_one_value():
     assert _v(x).expanding().nunique().to_list() == [1, 1, 1, 1]
 
 
+def test_median_and_quantile_of_extreme_finite_values_do_not_overflow():
+    x = [-1e308, 1e308, 1e308]
+    v = _v(x)
+    assert v.rolling(2).median().to_list()[1] == 0.0
+    assert v.rolling(2).quantile(0.5).to_list()[1] == 0.0
+    assert v.rolling(2).quantile(0.5, interpolation="midpoint").to_list()[1:] == [0.0, 1e308]
+    assert v.rolling(2).quantile(0.25).to_list()[1] == -5e307
+    assert v.expanding().median().to_list() == [-1e308, 0.0, 1e308]
+    # the median:N directive shares the kernel
+    assert volas.DataFrame({"close": x})["median:2"].to_list()[1:] == [0.0, 1e308]
+
+
 def _labelled(values, labels, name="x"):
     return volas.DataFrame({name: values}, index=labels)[name]
 

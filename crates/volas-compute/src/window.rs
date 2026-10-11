@@ -334,9 +334,36 @@ fn sorted_quantile(sorted: &[f64], q: f64, interpolation: &str) -> f64 {
         "higher" => sorted[hi],
         // a .5 tie rounds to the EVEN index (pandas/numpy 'nearest')
         "nearest" => sorted[if frac > 0.5 || (frac == 0.5 && lo % 2 == 1) { hi } else { lo }],
-        "midpoint" => (sorted[lo] + sorted[hi]) / 2.0,
+        "midpoint" => midpoint(sorted[lo], sorted[hi]),
         // "linear" (validated by the caller)
-        _ => sorted[lo] + frac * (sorted[hi] - sorted[lo]),
+        _ => lerp(sorted[lo], sorted[hi], frac),
+    }
+}
+
+/// `(a + b) / 2` (pandas's arithmetic) unless the sum alone overflows for finite
+/// `a`, `b`, then `a/2 + b/2` (`[1e308, 1e308]` has midpoint `1e308`).
+#[inline]
+fn midpoint(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    if sum.is_finite() || !(a.is_finite() && b.is_finite()) {
+        sum / 2.0
+    } else {
+        a / 2.0 + b / 2.0
+    }
+}
+
+/// `a + t·(b − a)` for sorted `a <= b`, `t ∈ [0, 1]` — without overflowing when
+/// the span `b − a` of two finite values exceeds `f64::MAX` although the result is
+/// representable (`[-1e308, 1e308]` has median `0`). The plain form (pandas's
+/// arithmetic) is kept whenever the span is finite; the weighted form
+/// `(1−t)·a + t·b` takes over only past it.
+#[inline]
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    let span = b - a;
+    if span.is_finite() || !(a.is_finite() && b.is_finite()) {
+        a + t * span
+    } else {
+        (1.0 - t) * a + t * b
     }
 }
 
