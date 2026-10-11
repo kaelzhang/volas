@@ -174,6 +174,17 @@ impl Validity {
         self.0.as_deref()
     }
 
+    /// Debug-build layout check (compiled out of release builds): a bitmap covers
+    /// exactly the `len` values it masks, and `Some` holds at least one missing value
+    /// (the canonical form `has_nulls` / equality / the exports rely on).
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_check(&self, len: usize, column: &str) {
+        if let Some(bm) = &self.0 {
+            assert_eq!(bm.len(), len, "validity of {column:?} covers the wrong length");
+            assert!(bm.null_count() > 0, "validity of {column:?} is a bitmap without a hole");
+        }
+    }
+
     /// Combined validity of two equal-length columns: present only where **both**
     /// are present — the missing-value rule for a binary op (`x ∘ NA = NA`).
     pub fn and(&self, other: &Validity) -> Validity {
