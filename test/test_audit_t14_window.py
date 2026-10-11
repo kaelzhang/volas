@@ -295,11 +295,12 @@ def test_first_last_all_dtypes():
 
 
 def test_flat_window_guard_branches():
-    """A perfectly flat window: skew/kurt have no scale (NaN), corr against a
-    constant has no variance (NaN); cov with ddof == count is NaN."""
+    """A perfectly flat window: skew/kurt take pandas 3's degenerate values (0 /
+    -3), corr against a constant has no variance (NaN); cov with ddof == count is
+    NaN."""
     flat = volas.DataFrame({"x": [2.0] * 6, "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]})
-    assert np.isnan(flat["x"].rolling(4).skew().to_numpy()[-1])
-    assert np.isnan(flat["x"].rolling(5).kurt().to_numpy()[-1])
+    assert flat["x"].rolling(4).skew().to_numpy()[-1] == 0.0
+    assert flat["x"].rolling(5).kurt().to_numpy()[-1] == -3.0
     assert np.isnan(flat["y"].rolling(4).corr(flat["x"]).to_numpy()[-1])
     assert np.isnan(flat["y"].rolling(3, min_periods=2).cov(flat["x"], ddof=2).to_numpy()[1])
 
@@ -400,6 +401,69 @@ def test_frame_window_stale_guard_and_e6():
         np.testing.assert_allclose(
             np.asarray(fr["b"].to_numpy(), float), np.asarray(se.to_numpy(), float),
             rtol=1e-12, equal_nan=True, err_msg=m)
+
+
+def _v(values):
+    return volas.DataFrame({"x": np.asarray(values, dtype=float)})["x"]
+
+
+def _exact(a, b):
+    np.testing.assert_array_equal(np.asarray(a.to_numpy(), float), b.to_numpy(float))
+
+
+@pytest.mark.parametrize("entry", ["rolling", "expanding"])
+def test_constant_window_moments_match_pandas_exactly(entry):
+    # 101.37 is not exactly representable, so a sum/n mean leaves a residue that
+    # the deviations must not see: a constant window has zero dispersion exactly.
+    x = [101.37] * 20 + [101.0, 102.5, 101.37]
+    v, p = _v(x), pd.Series(x)
+    vw = v.rolling(20) if entry == "rolling" else v.expanding()
+    pw = p.rolling(20) if entry == "rolling" else p.expanding()
+    for m in ("var", "std", "sem", "skew", "kurt"):
+        got, want = getattr(vw, m)(), getattr(pw, m)()
+        _exact(got.iloc[:20], want.iloc[:20])
+        _cmp(got, want, 1e-6)
+    _exact(vw.corr(v).iloc[:20], pw.corr(p).iloc[:20])
+    _exact(vw.cov(v).iloc[:20], pw.cov(p).iloc[:20])
+
+
+def test_centered_window_memory_is_bounded_by_the_data():
+    # a centered window far longer than the data covers the whole series for every
+    # label: identical to the smallest such window, and no window-sized padding.
+    v, huge = _v([3.0, 1.0, 2.0]), 2 ** 62
+    for m in ("count", "nunique", "sum", "mean", "median", "min", "max", "var",
+              "std", "sem", "skew", "kurt", "first", "last", "rank"):
+        got = getattr(v.rolling(huge, min_periods=1, center=True), m)()
+        want = getattr(v.rolling(7, min_periods=1, center=True), m)()
+        _cmp(got, want)
+    _cmp(v.rolling(huge, min_periods=1, center=True).quantile(0.3),
+         v.rolling(7, min_periods=1, center=True).quantile(0.3))
+    _cmp(v.rolling(huge, min_periods=1, center=True).corr(v),
+         v.rolling(7, min_periods=1, center=True).corr(v))
+
+
+@pytest.mark.parametrize("window", [2, 3, 4, 5, 9])
+def test_centered_rank_ranks_each_window_last_value(window):
+    # pandas ranks a window's LAST value. Reference: the clipped centered window of
+    # label i is rows [i - window//2, i + window - window//2 - 1] ∩ [0, n).
+    back, fwd = window // 2, window - window // 2 - 1
+    for x in ([1.0, 2.0, 3.0, 4.0], [5.0, 1.0, 4.0, 2.0, 3.0], [4.0, 3.0, 2.0, 1.0]):
+        n = len(x)
+        got = _v(x).rolling(window, min_periods=1, center=True).rank().to_list()
+        ref = [pd.Series(x[max(0, i - back):min(n, i + fwd + 1)]).rank().iloc[-1]
+               for i in range(n)]
+        assert got == ref
+        # pandas 3.0.3 agrees wherever the window's end is not clipped; at a clipped
+        # end it keeps rows that left the window (a rank above the window's count).
+        want = pd.Series(x).rolling(window, min_periods=1, center=True).rank().to_list()
+        assert got[:n - fwd] == want[:n - fwd]
+
+
+def test_nunique_counts_signed_zeros_as_one_value():
+    x = [0.0, -0.0, 0.0, -0.0]
+    got = _v(x).rolling(2).nunique().to_list()
+    assert got == [volas.NA, 1, 1, 1]
+    assert _v(x).expanding().nunique().to_list() == [1, 1, 1, 1]
 
 
 def test_window_result_carries_name_and_index():

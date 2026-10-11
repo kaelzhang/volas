@@ -600,6 +600,10 @@ The window API is pandas-aligned and differential-tested method by method
   sliding skew kernel goes permanently NaN for every window after an interior
   NA gap in that configuration (kernel-state bug); volas emits the correct
   per-window value.
+- **`rank()` with `center=True` at the trailing edge.** Both rank each window's
+  last value. Where the centered window is clipped at the end of the data, pandas
+  3.0.3 still counts rows that have left the window (it can emit a rank above the
+  window's own `count()`); volas ranks within the clipped window.
 - **`sum()` / `mean()` over a window holding an infinity give the infinity.** A
   window holding `+inf` sums to `+inf` (`-inf` likewise, and both signs to NaN), and
   the next window without it is exact again. pandas returns NaN for every window
