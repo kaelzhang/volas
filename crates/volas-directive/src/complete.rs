@@ -11,6 +11,7 @@
 //! never scanned here.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use volas_compute::missing::{CompleteRows, Input, ResumeRows};
 use volas_core::{Column, DataFrame, Result};
@@ -81,67 +82,76 @@ fn input<'a>(
     }
 }
 
-/// The operands a resume arm reads: the frame and its `@` series, plus the frame
-/// columns the missing-row check already resolved — handed over so the arm never looks
-/// one up a second time on the live path.
+/// The operands a resume arm reads: the frame and its `@` series. Each input is looked
+/// up once, by the arm; while it does, the operands note whether every input it read is
+/// a frame column already known to hold no NaN ([`clean`](Self::clean)) — then the
+/// resume it just computed in place stands, with no second lookup and no scan.
 pub(crate) struct Operands<'a> {
     df: &'a DataFrame,
     series: &'a [Ast],
-    resolved: [Option<&'a [f64]>; RESOLVED],
+    clean: Cell<bool>,
 }
-
-/// How many leading input slots a resume hands over resolved (every recursive command
-/// reads at most four series).
-const RESOLVED: usize = 4;
 
 impl<'a> Operands<'a> {
     pub(crate) fn new(df: &'a DataFrame, series: &'a [Ast]) -> Self {
         Operands {
             df,
             series,
-            resolved: [None; RESOLVED],
+            clean: Cell::new(true),
         }
     }
 
     /// Input `slot` as `f64` (`default` names its column when no operand fills it).
     pub(crate) fn f64(&self, slot: usize, default: &str) -> Result<Cow<'a, [f64]>> {
-        match self.resolved.get(slot) {
-            Some(Some(x)) => Ok(Cow::Borrowed(x)),
-            _ => series_f64(self.df, self.series, slot, default),
+        let operand = self
+            .series
+            .get(slot)
+            .is_some_and(|n| !matches!(n, Node::Name(s) if s.is_empty()));
+        if operand {
+            self.clean.set(false); // an evaluated operand carries no remembered fact
+            return series_f64(self.df, self.series, slot, default);
         }
+        let column = self.df.column(default)?;
+        require_numeric(column)?;
+        if column.known_has_nan() != Some(false) {
+            self.clean.set(false);
+        }
+        Ok(column
+            .as_f64()
+            .map_or_else(|| Cow::Owned(column.to_f64_vec()), Cow::Borrowed))
+    }
+
+    /// Whether every input read so far is a frame column known to hold no NaN.
+    fn clean(&self) -> bool {
+        self.clean.get()
     }
 }
 
-/// The operands of a resume from `from` over rows `[.., end)` when it reads every input
-/// in place (see [`ResumeRows::in_place`]), else `None` — the allocation-free check of
-/// the live path, free outright for a column that already knows it holds no NaN.
+/// Whether a resume from `from` reads every input's rows `[.., end)` in place (see
+/// [`ResumeRows::in_place`]) — free for a column that already knows it holds no NaN, a
+/// scan of the reach and the new rows otherwise.
 #[allow(clippy::too_many_arguments)] // the command's parts plus the resumed rows
-fn in_place<'a>(
-    df: &'a DataFrame,
+fn in_place(
+    df: &DataFrame,
     name: &str,
     sub: Option<&str>,
     args: &[ArgValue],
-    series: &'a [Ast],
+    series: &[Ast],
     from: usize,
     end: usize,
-) -> Result<Option<Operands<'a>>> {
-    let mut ops = Operands::new(df, series);
+) -> Result<bool> {
     let mut reach = None; // only needed for an input that must be scanned
     for (slot, default, _) in slots(name, sub, series) {
         let (x, known) = input(df, series, slot, default, Column::known_has_nan)?;
         if known == Some(false) {
-            // a frame column known complete: hand its slice over, nothing to scan
-            if let (Some(cell), Cow::Borrowed(x)) = (ops.resolved.get_mut(slot), x) {
-                *cell = Some(x);
-            }
             continue;
         }
         let reach = *reach.get_or_insert_with(|| self::reach(name, sub, args));
         if !ResumeRows::in_place(Input::new(&x[..end]), from, reach) {
-            return Ok(None);
+            return Ok(false);
         }
     }
-    Ok(Some(ops))
+    Ok(true)
 }
 
 /// Whether every input of a default-series command is a frame column that holds no
@@ -290,6 +300,10 @@ fn reach(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
 /// Resume a recursive command over the new rows `[from, height)` from `prev_state`, on
 /// the complete rows only: a missing new row is NaN and leaves the state where the last
 /// complete row put it. `run(operands, from)` is its resume arm.
+///
+/// The arm runs in place first: when every input it read is known complete, or the
+/// rows it read turn out complete, that is the answer. Otherwise it runs again on the
+/// complete rows.
 #[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
 pub(crate) fn resume(
     df: &DataFrame,
@@ -299,12 +313,14 @@ pub(crate) fn resume(
     series: &[Ast],
     prev_state: &[f64],
     from: usize,
-    run: impl FnOnce(&Operands, usize) -> Option<(Column, Vec<f64>)>,
+    run: impl Fn(&Operands, usize) -> Option<(Column, Vec<f64>)>,
 ) -> Option<(Column, Vec<f64>)> {
     let n = df.height();
     if default_series(series) {
-        if let Some(ops) = in_place(df, name, sub, args, series, from, n).ok()? {
-            return run(&ops, from);
+        let ops = Operands::new(df, series);
+        let out = run(&ops, from);
+        if ops.clean() || in_place(df, name, sub, args, series, from, n).ok()? {
+            return out;
         }
     }
     let inputs = Inputs::resolve(df, name, sub, series).ok()?;
@@ -330,6 +346,8 @@ pub(crate) fn resume(
 
 /// Resume a recursive command at the single row `row` (the scalar twin of [`resume`]):
 /// `missing` when that row is missing, else `run(operands, row)` on the complete rows.
+/// As there, the arm runs in place first and its answer stands when the rows it read
+/// are complete.
 #[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
 pub(crate) fn resume_one<T>(
     df: &DataFrame,
@@ -338,21 +356,61 @@ pub(crate) fn resume_one<T>(
     args: &[ArgValue],
     series: &[Ast],
     row: usize,
-    missing: Option<T>,
-    run: impl FnOnce(&Operands, usize) -> Option<T>,
+    missing: impl FnOnce() -> Option<T>,
+    run: impl Fn(&Operands, usize) -> Option<T>,
 ) -> Option<T> {
+    let ops = Operands::new(df, series);
+    let out = run(&ops, row);
     // The rows up to and including `row` (an out-of-range `row` resumes in place, where
     // the arm declines it).
     let end = (row + 1).min(df.height());
-    if let Some(ops) = in_place(df, name, sub, args, series, row, end).ok()? {
-        return run(&ops, row);
+    if ops.clean() || in_place(df, name, sub, args, series, row, end).ok()? {
+        return out;
     }
     let inputs = Inputs::resolve(df, name, sub, series).ok()?;
     let upto: Vec<&[f64]> = inputs.views.iter().map(|v| &v[..end]).collect();
     let rows = ResumeRows::of(&upto, row, reach(name, sub, args));
     if !rows.has_new() {
-        return missing;
+        return missing();
     }
     let (frame, operands) = inputs.gathered(&rows.rows);
     run(&Operands::new(&frame, &operands), rows.from)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::exec::{execute, execute_resume_one_node, initial_state};
+    use crate::parse;
+    use volas_core::{Column, DataFrame};
+
+    fn frame(open: Vec<f64>) -> DataFrame {
+        let close: Vec<f64> = (0..open.len()).map(|i| 50.0 + (i as f64 * 0.7).sin()).collect();
+        DataFrame::new(
+            vec!["open".into(), "close".into()],
+            vec![Column::f64(open), Column::f64(close)],
+            None,
+        )
+        .unwrap()
+    }
+
+    /// A single-row resume over an explicit operand evaluates it like any other read —
+    /// an operand carries no remembered fact, so the rows it read are checked — and
+    /// agrees with a full compute; a missing operand row is NaN.
+    #[test]
+    fn a_scalar_resume_over_an_explicit_operand_checks_its_rows() {
+        let n = 30;
+        let open: Vec<f64> = (0..n).map(|i| 40.0 + (i as f64 * 0.3).cos()).collect();
+        let node = parse("rsi:3@open").unwrap();
+        let head = frame(open[..n - 1].to_vec());
+        let st = initial_state(&head, &node, &Column::f64(vec![])).unwrap();
+        let full = frame(open.clone());
+        let step = execute_resume_one_node(&full, &node, &st, n - 1).unwrap();
+        let want = execute(&full, &node).unwrap().to_f64_vec()[n - 1];
+        assert_eq!(step.value.to_bits(), want.to_bits());
+        let mut gap = open;
+        gap[n - 1] = f64::NAN;
+        let step = execute_resume_one_node(&frame(gap), &node, &st, n - 1).unwrap();
+        assert!(step.value.is_nan());
+        assert_eq!(step.state(), &st[..]);
+    }
 }

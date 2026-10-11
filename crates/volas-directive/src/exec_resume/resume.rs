@@ -97,7 +97,7 @@ pub fn execute_resume_one_node(
         &args,
         series,
         row,
-        ResumeStep::missing(prev_state),
+        || ResumeStep::missing(prev_state),
         |ops, row| step_of(ops, name, &args, prev_state, row),
     )
 }

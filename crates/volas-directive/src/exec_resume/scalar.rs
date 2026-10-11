@@ -33,7 +33,7 @@ pub fn execute_resume_value(
             &args,
             series,
             row,
-            Some(f64::NAN),
+            || Some(f64::NAN),
             |ops, row| value_of(ops, name, sub, &args, prev_state, row),
         );
     }
