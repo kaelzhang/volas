@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use crate::bind::bind_command;
 use crate::operands::Operands;
 use crate::types::{ArgValue, Ast, Node, Op, UnaryOp};
-use volas_compute::indicators as ind;
+use volas_compute::raw::indicators as ind;
 use volas_compute::missing::{on_complete_rows, Input};
 use volas_core::Column;
 use volas_core::DataFrame;

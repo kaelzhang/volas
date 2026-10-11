@@ -1,7 +1,7 @@
 use ndarray::Array1;
 
 use super::av;
-use crate::kernels;
+use crate::raw::kernels;
 
 // ---------------------------------------------------------------------------
 // Support / resistance

@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use volas_compute::indicators as ind;
+use volas_compute::raw::indicators as ind;
 use volas_core::{Column, DataFrame};
 use volas_directive::{execute, parse};
 

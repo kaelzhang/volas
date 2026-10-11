@@ -492,12 +492,12 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             // body — two 61-arm pattern matches on every candle validate; `?` makes an
             // unknown pattern a `None` spec (a "no such sub-command" error), exactly as
             // the guard did. `bullish`/`bearish` are handled by the arm above.
-            let (pattern, _) = volas_compute::indicators::candle_pattern(pat)?;
+            let (pattern, _) = volas_compute::raw::indicators::candle_pattern(pat)?;
             let args = match pattern {
-                volas_compute::indicators::CandlePattern::Penetration { default, .. } => {
+                volas_compute::raw::indicators::CandlePattern::Penetration { default, .. } => {
                     vec![fmin(default, 0.0)]
                 }
-                volas_compute::indicators::CandlePattern::Plain(_) => vec![],
+                volas_compute::raw::indicators::CandlePattern::Plain(_) => vec![],
             };
             return Some(CommandSpec {
                 args: Cow::Owned(args),

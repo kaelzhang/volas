@@ -1,7 +1,7 @@
 //! Stochastic oscillator batch fast paths.
 
 use super::oscillators::rsi;
-use crate::kernels;
+use crate::raw::kernels;
 
 /// TA-Lib stochastic raw %K: `100·(close − LL) / (HH − LL)` over `period` (HH/LL the
 /// highest high / lowest low). A flat range yields 0, but — unlike [`rsv`] — the

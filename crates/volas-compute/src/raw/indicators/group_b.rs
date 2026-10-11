@@ -4,8 +4,8 @@
 //! members refresh on `append` through the engine's windowed fast-path (no state-carry);
 //! recursive members carry a `*_final_state` / `*_resume` pair like Group A.
 
-use crate::indicators::av;
-use crate::kernels;
+use crate::raw::indicators::av;
+use crate::raw::kernels;
 
 /// Rolling `n`-window sum that skips a leading-NaN prefix — so a series with an undefined
 /// first bar (`tr`, prev-close diffs) sums from its first finite value — via `sma * n`.
@@ -812,7 +812,7 @@ pub fn supertrend_resume_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::test_support::*;
 
     /// The cumulative `*_final_state` guards decline on an empty series (no first bar to seed).
     #[test]

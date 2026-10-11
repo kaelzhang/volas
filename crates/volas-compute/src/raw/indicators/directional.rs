@@ -219,7 +219,7 @@ pub use resume::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::test_support::*;
 
     /// Every directional resume, fed the carried Wilder accumulator(s) of a full compute
     /// over the head, reproduces the tail of a full compute over the whole input —

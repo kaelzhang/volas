@@ -24,7 +24,7 @@ import volas
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC_RS = ROOT / "crates/volas-directive/src/spec.rs"
-CANDLES_RS = ROOT / "crates/volas-compute/src/indicators/candles/mod.rs"
+CANDLES_RS = ROOT / "crates/volas-compute/src/raw/indicators/candles/mod.rs"
 README = ROOT / "README.md"
 README_ZH = ROOT / "README.zh-CN.md"
 INDICATORS = ROOT / "INDICATORS.md"

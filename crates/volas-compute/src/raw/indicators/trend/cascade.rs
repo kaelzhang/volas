@@ -1,8 +1,8 @@
 //! Cascaded EMA trend MAs: DEMA / TEMA / TRIMA / T3, sharing the staggered
 //! `cascade_warmup` and the EMA lattice resume.
 
-use crate::indicators::trend::ma::ema_k;
-use crate::kernels;
+use crate::raw::indicators::trend::ma::ema_k;
+use crate::raw::kernels;
 
 /// Staggered warm-up for a cascade of `S` SMA-seeded EMAs (`k = 2/(period+1)`): each
 /// stage SMA-seeds over the first `period` finite values of its predecessor, so stage
@@ -162,7 +162,7 @@ pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
     // A non-finite row entered: fall back to the reference composition this fused pass
     // is bit-identical to. Both SMAs are window-local (see `crate::guard`), so a bad
     // row reaches only the windows holding it.
-    crate::indicators::trend::ma::ma(&crate::indicators::trend::ma::ma(data, a), b)
+    crate::raw::indicators::trend::ma::ma(&crate::raw::indicators::trend::ma::ma(data, a), b)
 }
 
 /// Tillson T3 (TA-Lib T3): `c1·e6 + c2·e5 + c3·e4 + c4·e3` over six cascaded

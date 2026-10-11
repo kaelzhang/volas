@@ -126,7 +126,7 @@ def _candle_patterns():
     from pathlib import Path
 
     src = (Path(__file__).resolve().parent.parent
-           / "crates/volas-compute/src/indicators/candles/mod.rs").read_text()
+           / "crates/volas-compute/src/raw/indicators/candles/mod.rs").read_text()
     body = re.search(r"pub const CANDLE_PATTERNS[^=]*=\s*&\[(.*?)\];", src, re.S).group(1)
     return re.findall(r'"([a-z0-9]+)"', body)
 

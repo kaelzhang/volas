@@ -6,8 +6,8 @@
 //! directive engine refreshes them on `append` in O(new rows) and continues them
 //! bit-exactly past a head-dropping slice (verified by `test/test_group_a_mutation.py`).
 
-use crate::indicators::av;
-use crate::kernels;
+use crate::raw::indicators::av;
+use crate::raw::kernels;
 
 /// PSY (心理线): `100 * mean(up, n)`, where `up[i] = 1` when `close[i] > close[i-1]` (the
 /// first bar is not rising). NaN until `n` bars are available.
@@ -597,7 +597,7 @@ pub fn mass_index_resume_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::test_support::*;
 
     /// The recursive `*_final_state` guards decline before the indicator can seed — the
     /// cumulative pair on an empty series, mass_index on a frame too short for its EMA9

@@ -1,4 +1,5 @@
-//! Technical indicators as pure-Rust functions over `f64` / `bool` slices.
+//! Technical indicators as pure-Rust functions over `f64` / `bool` slices, over rows
+//! taken to be complete (see [`crate::raw`]).
 //!
 //! Ported from stock-pandas's Rust core (the pyo3 wrappers are stripped; the math
 //! is unchanged). All float results use `NaN` for warm-up / undefined values.
@@ -51,7 +52,7 @@ pub use trend::*;
 pub use volume::*;
 
 /// Shared deterministic test fixtures + the bit-exact state-carry oracle, reused by
-/// every submodule's `#[cfg(test)] mod tests` (via `use crate::indicators::test_support::*;`).
+/// every submodule's `#[cfg(test)] mod tests` (via `use crate::raw::indicators::test_support::*;`).
 /// Kept in the parent so the generators and the `assert_bits` comparator are not
 /// duplicated across files.
 #[cfg(test)]

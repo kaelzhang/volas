@@ -1,5 +1,5 @@
 use crate::guard::window_sums;
-use crate::kernels;
+use crate::raw::kernels;
 
 // ---------------------------------------------------------------------------
 // Momentum — change relative to the price `period` bars earlier

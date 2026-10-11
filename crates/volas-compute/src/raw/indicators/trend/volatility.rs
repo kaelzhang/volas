@@ -1,7 +1,7 @@
 //! True-range volatility: TR / ATR / NATR and the ATR state-carry resume.
 
-use crate::indicators::av;
-use crate::kernels;
+use crate::raw::indicators::av;
+use crate::raw::kernels;
 
 /// True Range.
 pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {

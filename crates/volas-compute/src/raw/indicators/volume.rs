@@ -311,7 +311,7 @@ pub fn ad_resume_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::test_support::*;
 
     /// Empty-series guards: every `*_final_state` declines to carry state for `n == 0`
     /// (the `return None` arms — no first bar to seed from).

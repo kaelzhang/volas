@@ -4,7 +4,7 @@
 use super::*;
 use volas_core::Result;
 use crate::types::ArgValue;
-use volas_compute::indicators as ind;
+use volas_compute::raw::indicators as ind;
 use volas_core::Column;
 
 pub(super) fn dispatch(

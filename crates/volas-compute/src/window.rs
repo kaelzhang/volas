@@ -1,7 +1,7 @@
 //! pandas-semantics windowed aggregations — the single kernel source for the
 //! python `rolling` / `expanding` / `ewm` API surface.
 //!
-//! Distinct from [`crate::indicators`] (TA-Lib semantics: a NaN poisons its
+//! Distinct from [`crate::raw::indicators`] (TA-Lib semantics: a NaN poisons its
 //! window): here `NaN` means *missing* and is skipped, and a row emits a value
 //! once the window holds at least `min_periods` present values — exactly
 //! pandas's window model. `window == usize::MAX` is an expanding window.

@@ -316,7 +316,7 @@ pub fn minindex_resume(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::test_support::*;
 
     /// MAXINDEX/MININDEX resume (origin 0), fed the carried tracker state of a full
     /// compute over the head, reproduces the tail of a full compute over the whole

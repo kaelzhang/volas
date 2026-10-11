@@ -2,7 +2,7 @@ use ndarray::Array1;
 
 use super::av;
 use super::stochastic::stoch_fastk;
-use crate::kernels;
+use crate::raw::kernels;
 
 // ---------------------------------------------------------------------------
 // Overbought / oversold
@@ -674,8 +674,8 @@ pub fn pivot(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::stochrsi_fastk;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::stochrsi_fastk;
+    use crate::raw::indicators::test_support::*;
 
     /// A window containing a missing value (`NaN`) must NOT yield a confident rank
     /// correlation — it disqualifies the window (NaN out), like the other window
@@ -697,7 +697,7 @@ mod tests {
         let close = series(200);
         let (rp, fk, fd) = (14usize, 14usize, 3usize);
         let k_full = stochrsi_fastk(&close, rp, fk);
-        let d_full = crate::indicators::ma(&k_full, fd);
+        let d_full = crate::raw::indicators::ma(&k_full, fd);
 
         // `from` past the deepest context (`.d` reach = rp + (fk-1) + (fd-1)) so the head
         // always carries a full finite-RSI context.

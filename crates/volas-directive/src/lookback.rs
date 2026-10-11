@@ -172,7 +172,7 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         // style.<x>: candlestick patterns warm up over their candle-settings avg period
         // (from the compute registry); bullish/bearish need none. (`cdl` resolves here too.)
         "style" => sub
-            .and_then(|p| volas_compute::indicators::candle_pattern(p).map(|(_, lb)| lb))
+            .and_then(|p| volas_compute::raw::indicators::candle_pattern(p).map(|(_, lb)| lb))
             .unwrap_or(0),
         "change" => arg(args, 0).saturating_sub(1),
         "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0),

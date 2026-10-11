@@ -4,7 +4,7 @@
 use ndarray::Array1;
 
 use super::av;
-use crate::kernels;
+use crate::raw::kernels;
 
 fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Array1<f64> {
     let llv = kernels::rolling_min(av(low), period_rsv);
@@ -164,7 +164,7 @@ pub fn kdj_resume(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::test_support::*;
 
     /// KDJ `.k` / `.d` / `.j` resumes, fed the carried %K (and %D) of a full compute over the
     /// head, reproduce the tail of a full compute over the whole input — bit-for-bit. RSV is

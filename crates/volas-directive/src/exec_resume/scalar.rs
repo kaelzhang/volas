@@ -9,7 +9,7 @@ use crate::complete::BoundCommand;
 use crate::exec::{arg_f64, arg_usize};
 use crate::operands::Operands;
 use crate::types::{ArgValue, Ast};
-use volas_compute::indicators as ind;
+use volas_compute::raw::indicators as ind;
 use volas_core::DataFrame;
 
 use super::as_command;

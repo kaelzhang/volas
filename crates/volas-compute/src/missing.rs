@@ -129,6 +129,24 @@ impl CompleteRows {
         }
     }
 
+    /// How many complete rows come before `row`.
+    pub fn before(&self, row: usize) -> usize {
+        match self {
+            CompleteRows::All => row,
+            CompleteRows::After(start) => row.saturating_sub(*start),
+            CompleteRows::Kept(rows) => rows.partition_point(|&i| i < row),
+        }
+    }
+
+    /// The original position of the `i`-th complete row.
+    pub fn position(&self, i: usize) -> usize {
+        match self {
+            CompleteRows::All => i,
+            CompleteRows::After(start) => start + i,
+            CompleteRows::Kept(rows) => rows[i],
+        }
+    }
+
     /// Place `out`, computed over the complete rows, back at their original positions
     /// in a series of `n` rows; every missing row is NaN.
     pub fn scatter(&self, n: usize, out: Vec<f64>) -> Vec<f64> {
@@ -151,14 +169,113 @@ impl CompleteRows {
     }
 }
 
+/// An output computed over the complete rows, placed back on every row (each missing
+/// row NaN) — a series, a pair of series, or one that may be absent.
+pub trait Scatter {
+    /// `self`, computed over `rows` of a series of `n` rows, at their positions.
+    fn scatter(self, rows: &CompleteRows, n: usize) -> Self;
+}
+
+impl Scatter for Vec<f64> {
+    fn scatter(self, rows: &CompleteRows, n: usize) -> Self {
+        rows.scatter(n, self)
+    }
+}
+
+impl Scatter for (Vec<f64>, Vec<f64>) {
+    fn scatter(self, rows: &CompleteRows, n: usize) -> Self {
+        (rows.scatter(n, self.0), rows.scatter(n, self.1))
+    }
+}
+
+impl<T: Scatter> Scatter for Option<T> {
+    fn scatter(self, rows: &CompleteRows, n: usize) -> Self {
+        self.map(|x| x.scatter(rows, n))
+    }
+}
+
+/// `inputs` restricted to `rows`, borrowed unless interior rows are dropped.
+fn gather<'a>(rows: &CompleteRows, inputs: &[&'a [f64]]) -> Vec<Cow<'a, [f64]>> {
+    inputs.iter().map(|x| rows.gather(x)).collect()
+}
+
+fn views<'a>(gathered: &'a [Cow<[f64]>]) -> Vec<&'a [f64]> {
+    gathered.iter().map(|x| x.as_ref()).collect()
+}
+
 /// Run `kernel` on the complete rows of `inputs` and scatter its output back: the
-/// whole rule for one full computation. An input known complete is not scanned.
-pub fn on_complete_rows(inputs: &[Input], kernel: impl FnOnce(&[&[f64]]) -> Vec<f64>) -> Vec<f64> {
+/// whole rule for one full computation. An input known complete is not scanned, and
+/// with every row complete the inputs and the output pass through uncopied.
+pub fn on_complete_rows<T: Scatter>(inputs: &[Input], kernel: impl FnOnce(&[&[f64]]) -> T) -> T {
     let rows = CompleteRows::of(inputs);
-    let n = inputs.first().map_or(0, |x| x.values.len());
-    let gathered: Vec<Cow<[f64]>> = inputs.iter().map(|x| rows.gather(x.values)).collect();
-    let views: Vec<&[f64]> = gathered.iter().map(|x| x.as_ref()).collect();
-    rows.scatter(n, kernel(&views))
+    let gathered = gather(&rows, &values(inputs));
+    kernel(&views(&gathered)).scatter(&rows, height(&values(inputs)))
+}
+
+/// Run `capture` — a carried-state capture — on the complete rows of `inputs`, so the
+/// state it returns describes the last complete row.
+pub fn state_on_complete_rows<T>(inputs: &[&[f64]], capture: impl FnOnce(&[&[f64]]) -> T) -> T {
+    let rows = CompleteRows::of(&unknown(inputs));
+    capture(&views(&gather(&rows, inputs)))
+}
+
+/// Run `resume` — a resume over the new rows `[from, n)` from `state`, the state as of
+/// the last complete row before `from` — on the complete rows of `inputs`: its history
+/// is every complete row before `from`, a missing new row is NaN, and with no complete
+/// new row the state stays `state`. `resume(inputs, from)` returns the new rows' values
+/// and the state after them. Scans the whole history once (a resume reads a bounded
+/// reach of it, which this layer does not know).
+pub fn resume_on_complete_rows(
+    inputs: &[&[f64]],
+    from: usize,
+    state: &[f64],
+    resume: impl FnOnce(&[&[f64]], usize) -> Option<(Vec<f64>, Vec<f64>)>,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let n = height(inputs);
+    let rows = CompleteRows::of(&unknown(inputs));
+    if rows == CompleteRows::All || from >= n {
+        return resume(inputs, from);
+    }
+    let gathered = gather(&rows, inputs);
+    let views = views(&gathered);
+    let start = rows.before(from);
+    if start == height(&views) {
+        return Some((vec![f64::NAN; n - from], state.to_vec()));
+    }
+    let (out, next) = resume(&views, start)?;
+    let mut full = vec![f64::NAN; n - from];
+    for (i, v) in out.into_iter().enumerate() {
+        full[rows.position(start + i) - from] = v;
+    }
+    Some((full, next))
+}
+
+/// Run `step` — a single-row resume at `row` from the state as of the last complete
+/// row before it — on the complete rows of `inputs` up to `row`. A missing `row` is
+/// `missing()` (its value NaN, the state not advanced); a `row` past the end is left
+/// to `step`, which declines it.
+pub fn step_on_complete_rows<T>(
+    inputs: &[&[f64]],
+    row: usize,
+    missing: impl FnOnce() -> Option<T>,
+    step: impl FnOnce(&[&[f64]], usize) -> Option<T>,
+) -> Option<T> {
+    if row >= height(inputs) {
+        return step(inputs, row);
+    }
+    if !complete(inputs, row) {
+        return missing();
+    }
+    let upto: Vec<&[f64]> = inputs.iter().map(|x| &x[..=row]).collect();
+    let rows = CompleteRows::of(&unknown(&upto));
+    if rows == CompleteRows::All {
+        return step(inputs, row);
+    }
+    step(&views(&gather(&rows, &upto)), rows.before(row))
+}
+
+fn unknown<'a>(inputs: &[&'a [f64]]) -> Vec<Input<'a>> {
+    inputs.iter().map(|x| Input::new(x)).collect()
 }
 
 /// The rows a resume over the new rows `[from, n)` runs on, for a recursion whose
@@ -324,7 +441,7 @@ mod tests {
                     *s += v;
                     Some(*s)
                 })
-                .collect()
+                .collect::<Vec<f64>>()
         };
         let x = [1.0, 2.0, NAN, 3.0];
         assert_eq!(
@@ -335,6 +452,60 @@ mod tests {
         assert_eq!(on_complete_rows(&[Input::new(&clean)], running_sum), vec![1.0, 3.0]);
         // known complete: taken at its word, never scanned
         assert_eq!(on_complete_rows(&[Input::known(&x, false)], running_sum).len(), 4);
+    }
+
+    /// A running sum carried as `[sum]`: the resume of [`a_kernel_runs_on_the_complete_rows_only`]'s kernel.
+    fn running_resume(x: &[&[f64]], from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+        let mut s = *state.first()?;
+        let out: Vec<f64> = x[0][from..].iter().map(|v| {
+            s += v;
+            s
+        })
+        .collect();
+        Some((out, vec![s]))
+    }
+
+    #[test]
+    fn a_resume_runs_on_the_complete_rows_of_its_history_and_new_rows() {
+        let x = [1.0, NAN, 2.0, 3.0, NAN, 4.0];
+        let run = |x: &[&[f64]], from: usize| running_resume(x, from, &[10.0]);
+        let (out, next) = resume_on_complete_rows(&[&x], 3, &[10.0], run).unwrap();
+        assert_eq!(bits(&out), bits(&[13.0, NAN, 17.0]));
+        assert_eq!(next, vec![17.0]);
+        // no complete new row: NaN, the state where it was
+        let (out, next) = resume_on_complete_rows(&[&x[..5]], 4, &[10.0], run).unwrap();
+        assert_eq!(bits(&out), bits(&[NAN]));
+        assert_eq!(next, vec![10.0]);
+        // complete rows, or nothing new: the resume runs as it is
+        let clean = [1.0, 2.0];
+        assert_eq!(resume_on_complete_rows(&[&clean], 1, &[0.0], run).unwrap().0, vec![12.0]);
+        assert_eq!(resume_on_complete_rows(&[&x], 6, &[0.0], run).unwrap().0, Vec::<f64>::new());
+        // a resume that declines is declined
+        assert!(resume_on_complete_rows(&[&x], 3, &[], |x, f| running_resume(x, f, &[])).is_none());
+    }
+
+    #[test]
+    fn a_single_row_resume_skips_a_missing_row() {
+        let x = [1.0, NAN, 2.0];
+        let step = |x: &[&[f64]], row: usize| x[0].get(row).map(|v| (row, *v));
+        assert_eq!(step_on_complete_rows(&[&x], 2, || None, step), Some((1, 2.0)));
+        assert_eq!(step_on_complete_rows(&[&x], 1, || Some((9, 9.0)), step), Some((9, 9.0)));
+        assert_eq!(step_on_complete_rows(&[&x], 0, || None, step), Some((0, 1.0)));
+        assert_eq!(step_on_complete_rows(&[&x], 3, || Some((9, 9.0)), step), None);
+    }
+
+    #[test]
+    fn a_state_capture_and_every_output_shape_follow_the_complete_rows() {
+        let x = [1.0, NAN, 2.0];
+        assert_eq!(state_on_complete_rows(&[&x], |x| x[0].to_vec()), vec![1.0, 2.0]);
+        let pair = on_complete_rows(&[Input::new(&x)], |x| (x[0].to_vec(), x[0].to_vec()));
+        assert_eq!(bits(&pair.1), bits(&[1.0, NAN, 2.0]));
+        let some = on_complete_rows(&[Input::new(&x)], |x| Some(x[0].to_vec()));
+        assert_eq!(bits(&some.unwrap()), bits(&[1.0, NAN, 2.0]));
+        assert!(on_complete_rows(&[Input::new(&x)], |_| None::<Vec<f64>>).is_none());
+        let rows = CompleteRows::After(2);
+        assert_eq!((rows.before(1), rows.before(3), rows.position(1)), (0, 1, 3));
+        assert_eq!((CompleteRows::All.before(2), CompleteRows::All.position(2)), (2, 2));
     }
 
     #[test]

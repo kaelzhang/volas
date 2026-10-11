@@ -12,7 +12,7 @@ pub fn kama(data: &[f64], period: usize) -> Vec<f64> {
     if period == 0 || period + 1 > n {
         return out;
     }
-    // KAMA runs on the complete rows of its input (see `crate::missing`).
+    // The caller runs KAMA on the complete rows of its input (see `crate::missing`).
     // sumROC1 = Σ_{j=0}^{period-1} |price[j] − price[j+1]| (the first window).
     let mut sum_roc1 = 0.0;
     for j in 0..period {
