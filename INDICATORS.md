@@ -33,7 +33,7 @@ no standard at all. `df[d]` and `directive_lookback` reject a directive that omi
 required argument; `directive_stringify` accepts it, because it only names the
 indicator. A trailing colon with nothing after it (`obv:`) means no arguments.
 
-**Missing and non-finite inputs.** A missing row (NaN) or an infinite one affects only
+<a id="missing-and-non-finite-inputs"></a>**Missing and non-finite inputs.** A missing row (NaN) or an infinite one affects only
 the outputs whose definition reads it:
 
 - An indicator over a **finite window** (a moving average, a rolling sum / variance /

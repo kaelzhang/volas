@@ -69,7 +69,7 @@ A NaN in the middle of the input is where the two libraries part ways for a
 recursive indicator (EMA, MACD, RSI, ATR, ADX, OBV, SAR, the Hilbert transform, …).
 TA-Lib carries the NaN into every later output. volas skips the row: it outputs NaN
 there and continues the recursion from the last complete row, exactly as if the row
-had been deleted. See [Missing and non-finite inputs](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md)
+had been deleted. See [Missing and non-finite inputs](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md#missing-and-non-finite-inputs)
 for the full rule.
 
 See also:
