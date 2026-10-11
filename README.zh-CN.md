@@ -452,9 +452,9 @@ raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low'
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
-把 DataFrame 导出为二维 NumPy 数组（行 × 列）。行为与 pandas 一致，但有一处刻意的保护：对含缺失值的 frame 指定**整型** `dtype` 会**抛错**，而不是悄悄写入垃圾值（NumPy 无法在整型数组里存 `NA`）——传 `na_value` 可改为填充。
+把 DataFrame 导出为二维 NumPy 数组（行 × 列）。行为与 pandas 一致，但有一处刻意的保护：对含缺失值的 frame 指定**整型**或**布尔** `dtype` 会**抛错**，而不是悄悄写入垃圾值（NumPy 无法在整型或布尔数组里存 `NA`）——传 `na_value` 可改为填充。
 
-- **dtype** `str | None`——可选的导出转换。`None`（默认）给出按 dtype 的诚实表示；否则：
+- **dtype** `str | None`——可选的导出转换。`None`（默认）给出按 dtype 的诚实表示；否则目标取 NumPy 对该写法的解析结果（`'f8'`、`'d'`、`'<f8'` 都是 `float64`，`'|O'` 是 `object`）：
   - `'object'`（或 `'O'`）——无损的二维「带类型单元格」数组（数字 / `str` /
     `Timestamp` / `volas.NA`）；唯一能保留 `str` 或 datetime 列的 dtype。
   - `'int64'`、`'int32'`、`'int16'`、`'int8'`（以及无符号 `'uint*'`）——**精确**的
@@ -462,8 +462,10 @@ raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low'
     frame，除非给了 `na_value`，否则**抛错**。
   - `'float64'`、`'float32'`、`'float16'`——（有损的）`float` 通道：缺失单元格为
     `NaN`，超过 2⁵³ ns 的 datetime 会量化。
-  - `'bool'`——布尔。
+  - `'bool'`——布尔：取每个值的真值（`0.5` → `True`）。对含缺失值的 frame，除非给了
+    `na_value`，否则**抛错**。
   - `'datetime64[ns]'`——datetime 纳秒；`NaT` 单元格被保留。
+  - 文本 dtype（`'U'` / `'S'`）——格式化每个带类型单元格（`1.5` → `'1.5'`）。
   - `str` 列拒绝一切数值/时间 dtype——请用 `'object'`。
 - **na_value** `Any`——替换每个缺失单元格的值；默认是 NA 模型表示（`NaN` / `NaT` /
   `volas.NA`）。
@@ -623,7 +625,7 @@ s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
     `'uint16'`、`'uint8'`）——整型。对含缺失值的列，除非给了 `na_value`，否则**抛错**
     （NA 没有整型表示）。
   - `'float64'`、`'float32'`、`'float16'`——浮点；缺失单元格为 `NaN`。
-  - `'bool'`——布尔。
+  - `'bool'`——布尔。对含缺失值的列，除非给了 `na_value`，否则**抛错**（NA 没有布尔表示）。
   - `'datetime64[ns]'`——datetime 纳秒；缺失单元格为 `NaT`。
   - `'object'`（或 `'O'`）——Python 对象，每个单元格保留各自的类型值（无损）。
 - **na_value** `Any`——替换每个缺失单元格的值。默认是 NA 模型表示（float 导出为 `NaN`，

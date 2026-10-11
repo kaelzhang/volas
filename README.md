@@ -579,12 +579,13 @@ raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low'
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
 The frame as a 2-D NumPy array (rows × columns). It tracks pandas except for one
-deliberate guard: an **integer** `dtype` over a frame that holds missing values
-**raises** instead of silently writing garbage (NumPy cannot store `NA` in an
-integer array) — give `na_value` to fill instead.
+deliberate guard: an **integer** or **bool** `dtype` over a frame that holds missing
+values **raises** instead of silently writing garbage (NumPy cannot store `NA` in an
+integer or bool array) — give `na_value` to fill instead.
 
 - **dtype** `str | None` — an optional export cast. `None` (the default) gives the
-  honest per-dtype representation; otherwise:
+  honest per-dtype representation; otherwise the target is whatever NumPy resolves the
+  spelling to (`'f8'`, `'d'` and `'<f8'` are `float64`, `'|O'` is `object`):
   - `'object'` (or `'O'`) — a lossless 2-D array of typed cells (number / `str` /
     `Timestamp` / `volas.NA`); the only dtype that keeps a `str` or datetime column intact.
   - `'int64'`, `'int32'`, `'int16'`, `'int8'` (and the unsigned `'uint*'`) — the **exact**
@@ -592,8 +593,10 @@ integer array) — give `na_value` to fill instead.
     trip). Over a frame with missing values this **raises** unless `na_value` is given.
   - `'float64'`, `'float32'`, `'float16'` — the (lossy) `float` channel: a missing cell
     is `NaN`, a datetime past 2⁵³ ns quantises.
-  - `'bool'` — boolean.
+  - `'bool'` — boolean: each value's truth (`0.5` → `True`). Over a frame with missing
+    values this **raises** unless `na_value` is given.
   - `'datetime64[ns]'` — datetime nanoseconds; a `NaT` cell is preserved.
+  - a text dtype (`'U'` / `'S'`) — each typed cell formatted (`1.5` → `'1.5'`).
   - A `str` column rejects every numeric / temporal dtype — use `'object'`.
 - **na_value** `Any` — the value substituted for each missing cell. Default: the
   NA-model representation (`NaN` / `NaT` / `volas.NA`).
@@ -776,7 +779,8 @@ The column values as a 1-D NumPy array — `pandas.Series.to_numpy` semantics:
     `'uint16'`, `'uint8'`) — integer. Over a column with missing values this **raises**
     unless `na_value` is given (an NA has no integer representation).
   - `'float64'`, `'float32'`, `'float16'` — floating point; a missing cell is `NaN`.
-  - `'bool'` — boolean.
+  - `'bool'` — boolean. Over a column with missing values this **raises** unless
+    `na_value` is given (an NA has no boolean representation).
   - `'datetime64[ns]'` — datetime nanoseconds; a missing cell is `NaT`.
   - `'object'` (or `'O'`) — Python objects, each cell its own typed value (lossless).
 - **na_value** `Any` — the value to substitute for each missing cell. Default: the
