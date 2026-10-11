@@ -47,6 +47,8 @@ import pytest
 from stock_pandas import StockDataFrame
 from volas import DataFrame as VolasDataFrame
 
+from .bench_tf_live import TF_LIVE_INDICATORS, TF_LIVE_PHASES, build as build_tf_live
+
 try:
     import polars as pl
 except ImportError:  # pragma: no cover
@@ -779,6 +781,17 @@ def test_append(benchmark, states, indicator, candidate):
 
         def setup():
             return (), {}
+    benchmark.pedantic(run, setup=setup, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
+
+
+# --- the live tf path: one 1m bar into a cached 15m frame, by phase ---------
+# volas only (no other candidate folds a forming bar); not a report section — the
+# perf gate and the single-indicator report read these rows.
+
+@pytest.mark.parametrize('phase', TF_LIVE_PHASES)
+@pytest.mark.parametrize('indicator', TF_LIVE_INDICATORS)
+def test_tf_live(benchmark, indicator, phase):
+    run, setup = build_tf_live(ARR, COLUMNS, indicator, phase)
     benchmark.pedantic(run, setup=setup, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
 
 

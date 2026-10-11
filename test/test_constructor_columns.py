@@ -82,8 +82,9 @@ def _fine(times, close, volume):
 def test_columns_on_tf_aware_keeps_tf_and_folds():
     sub = DataFrame(_five_min(), columns=['close', 'volume'])
     assert sub.columns == ['close', 'volume']
-    # two finer bars in the same 5m period fold with the kept per-column aggregators:
-    # close -> last, volume -> sum.
+    # two finer bars in the last seed row's 5m period fold into that row with the kept
+    # per-column aggregators: close -> last, volume -> sum.
     sub.append(_fine(['2020-01-01 00:06:00', '2020-01-01 00:07:00'], [5., 6.], [7., 8.]))
+    assert len(sub) == 2
     assert sub.iloc[-1]['close'] == 6.0
-    assert sub.iloc[-1]['volume'] == 15.0
+    assert sub.iloc[-1]['volume'] == 35.0

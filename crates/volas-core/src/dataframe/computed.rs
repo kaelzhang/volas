@@ -20,6 +20,7 @@ impl DataFrame {
                 lookback,
                 valid_rows: self.height,
                 state: None,
+                state_before_last: None,
                 origin: 0,
             },
         );
@@ -33,6 +34,60 @@ impl DataFrame {
     pub fn set_computed_state(&mut self, name: &str, state: Option<Vec<f64>>) {
         if let Some(meta) = self.computed.get_mut(name) {
             meta.state = state;
+        }
+    }
+
+    /// Attach (or replace) the carried [`ComputedMeta::state_before_last`] — the state
+    /// before the last row, kept by a time-frame frame. No-op if `name` is not a
+    /// tracked computed column.
+    pub fn set_computed_state_before_last(&mut self, name: &str, state: Option<Vec<f64>>) {
+        if let Some(meta) = self.computed.get_mut(name) {
+            meta.state_before_last = state;
+        }
+    }
+
+    /// Overwrite a cached column's carried state with `state`, reusing its buffer when
+    /// it already holds one of the same length (the per-bar forming refresh allocates
+    /// nothing). No-op if `name` is not a tracked computed column.
+    pub fn store_computed_state(&mut self, name: &str, state: &[f64]) {
+        if let Some(meta) = self.computed.get_mut(name) {
+            match meta.state.as_mut() {
+                Some(buf) if buf.len() == state.len() => buf.copy_from_slice(state),
+                _ => meta.state = Some(state.to_vec()),
+            }
+        }
+    }
+
+    /// Borrow a cached column's [`ComputedMeta::state_before_last`] and its origin
+    /// offset — what the time-frame forming refresh resumes the last row from —
+    /// without cloning. `None` if `name` is untracked or carries no such state.
+    pub fn computed_state_before_last(&self, name: &str) -> Option<(&[f64], usize)> {
+        let meta = self.computed.get(name)?;
+        Some((meta.state_before_last.as_deref()?, meta.origin))
+    }
+
+    /// A time-frame rollover is about to append a new period row: the current last row
+    /// becomes the row before the last, so each cached column's state after it moves
+    /// into [`ComputedMeta::state_before_last`] (no re-step over the closed bar). A
+    /// column whose last row is stale has no current state after it, so its
+    /// before-last state becomes unknown (`None`) and the next refresh recomputes it.
+    pub fn roll_computed_states(&mut self) {
+        let height = self.height;
+        for meta in self.computed.values_mut() {
+            let after = if meta.valid_rows == height { meta.state.as_deref() } else { None };
+            match (after, meta.state_before_last.as_mut()) {
+                (Some(a), Some(buf)) if buf.len() == a.len() => buf.copy_from_slice(a),
+                (Some(a), _) => meta.state_before_last = Some(a.to_vec()),
+                (None, _) => meta.state_before_last = None,
+            }
+        }
+    }
+
+    /// Drop every cached column's [`ComputedMeta::state_before_last`]: a frame that is
+    /// not (or no longer) time-frame aware keeps a single state.
+    pub fn clear_computed_states_before_last(&mut self) {
+        for meta in self.computed.values_mut() {
+            meta.state_before_last = None;
         }
     }
 
@@ -177,12 +232,12 @@ impl DataFrame {
 
     /// Live tf-fold invalidation: only the **forming row** (the last, still-open
     /// period bar at `forming_row`) changed, so mark each cached column stale from
-    /// `forming_row` on but **keep** its carried recursive state. The state stays
-    /// anchored at the last CLOSED bar (`forming_row - 1`); `refresh_computed`
-    /// resumes just the forming row from it (O(lookback)) without advancing the
-    /// anchor, and the period rollover advances the anchor over the now-closed bar.
-    /// Unlike [`invalidate_computed_on_write_at`] this neither drops the state nor
-    /// zeroes `valid_rows`, so the live fold never forces a full O(buffer) recompute.
+    /// `forming_row` on but **keep** its carried states. The state before that row
+    /// ([`ComputedMeta::state_before_last`]) is untouched by the change, so the
+    /// refresh recomputes just the forming row from it (O(1) for a recursive kernel)
+    /// and overwrites the state after it. Unlike [`invalidate_computed_on_write_at`]
+    /// this neither drops a state nor zeroes `valid_rows`, so the live fold never
+    /// forces a full O(buffer) recompute.
     pub(super) fn invalidate_computed_forming_row(&mut self, forming_row: usize) {
         for meta in self.computed.values_mut() {
             if meta.valid_rows > forming_row {
@@ -204,6 +259,7 @@ impl DataFrame {
             // `valid_rows` to 0 breaks that correspondence, so drop it. A later refresh
             // recomputes from scratch (correct) and repopulates the state.
             meta.state = None;
+            meta.state_before_last = None;
         }
     }
 
@@ -213,6 +269,7 @@ impl DataFrame {
         for meta in self.computed.values_mut() {
             meta.valid_rows = 0;
             meta.state = None;
+            meta.state_before_last = None;
         }
     }
 }

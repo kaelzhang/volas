@@ -229,9 +229,8 @@ df['ma:2']
   `tz_convert` 打上时区标记。参见[时区](#时区)。
 - **columns** `Optional[list[str]] = None` 选择并排列要保留的列，等价于
   `df[[...]]` 的投影。名字不存在会抛 `KeyError`；空 list 或重复名字会被拒绝，缺失列绝不会被静默填充。
-- **time_frame** `Optional[str | TimeFrame] = None` 若设置，则把它变成一个在该
-  bar 间隔上**支持 tf 累积**的 DataFrame：给定的各行会被视作该 frame 下已经定型的 bar，后续的 `append` 会把更细的 bar 折叠进正在形成中的 bar。需要一个
-  `DatetimeIndex`。参见[累积与 DatetimeIndex](#累积与-datetimeindex)。
+- **time_frame** `Optional[str | TimeFrame] = None` 若设置，则把它变成一个在该 bar 间隔上**支持 tf 累积**的 DataFrame：给定的各行是该 frame 下的 bar，每行以所在周期的**起点**为标签，最后一行是**正在形成**的 bar——之后 `append` 进来、落在它所在周期内的更细 bar 会折叠进这一行（这一行不能已经包含那根 bar）。
+  需要一个 `DatetimeIndex`。参见[实时累积](#实时累积--一个-tf-aware-dataframe)。
 - **cumulators** `Optional[dict[str, str]] = None` 折叠时使用的逐列聚合器覆盖（例如 `{'amount': 'sum'}`），仅在与 `time_frame` 同时使用时才有意义。默认采用
   OHLCV 语义（`open`=first、`high`=max、`low`=min、`close`=last、`volume`=sum；其他列默认 `last`）。字典的每个**值**为以下之一：
   - `'first'`——桶内第一个值
@@ -383,9 +382,8 @@ df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume':
 
 它是**严格**的：每一个数据列都必须提供（缺列会报错——这点与 `DataFrame` / `Row` 不同，后者会把缺失列 NA 补齐），出现未知 key 也报错。缓存的指标列无需提供——它们会自动补齐并刷新。
 
-如果调用者是一个**带 tf**的 DataFrame（用 `time_frame` 构建的，或者 `cumulate`
-的结果），`append` 会把每一根更细的 bar **折叠**进正在形成中的 bar，而不是新增一行——参见
-[实时累积](#实时累积--一个-tf-aware-dataframe)。
+如果调用者是一个**带 tf**的 DataFrame（用 `time_frame` 构建的，或者 `cumulate` 的结果），`append` 会把每一根 bar **折叠**进当前未收口的周期：该周期的 bar 保存在一个小 DataFrame 中，与其中某根 bar 时间戳相同的 bar 会替换它，周期的累积结果会**替换最后一行**；落在之后周期的 bar 则开启新的一行。
+参见[实时累积](#实时累积--一个-tf-aware-dataframe)。
 
 `append` 是惰性的：它不会重算新行上的指标列。这些列会保持过期（stale），直到对指标**列**的读取刷新它们，或调用 `df.fulfill()`（见下文）。
 
@@ -681,15 +679,14 @@ row.to_numpy()         # 数值单元格组成的 1 维 ndarray
 
 ### 实时累积——一个 tf-aware DataFrame
 
-在**实时**流式场景中，给 DataFrame 指定一个 `time_frame`，再把更细的 bar
-`append` 进去，而不是每个 tick 都重新累积整段历史。`df.cumulate(tf)` 会返回这样的
-frame（正在形成的周期保持 live）；也可以用 `DataFrame(data, time_frame=...,
-cumulators=...)` 直接构建（给定的各行会被视作该 frame 下已经定型的 bar；需要
-DatetimeIndex）。
+在**实时**流式场景中，给 DataFrame 指定一个 `time_frame`，再把更细的 bar `append` 进去，而不是每个 tick 都重新累积整段历史。
+`df.cumulate(tf)` 会返回这样的 frame（正在形成的周期保持 live）；也可以用 `DataFrame(data, time_frame=..., cumulators=...)` 直接构建（需要 DatetimeIndex）。
 
-在一个带 tf 的 frame 上：
+frame 会把**未收口周期**的各根 bar 单独保存在一个小 DataFrame 中，它的最后一行就是这些 bar 的累积结果。在一个带 tf 的 frame 上：
 
-- **df.append(bar)** 把 bar 折叠进去：落在当前未收口周期内的 bar 会**更新正在形成的最后一行**（`df.iloc[-1]`）；落在新周期内的 bar 会滚动成新行；同一时间戳的形成中 bar 再次到来时，会更新原 bar，而不是重复计入。
+- **df.append(bar)** 把 bar 加入未收口周期，并用该周期的累积结果**替换正在形成的最后一行**（`df.iloc[-1]`）。与周期内已有 bar **时间戳相同**的 bar 会替换它，因此重发的 bar 绝不会重复计入。落在之后周期的 bar 会开启新的一行。
+- 因此，一根与 frame **自身**时间框相同、以周期起点为时间戳的 bar（例如交易所在 `15m` K 线形成期间反复推送的快照）会**整行替换最后一行**。
+- **构造时的最后一行就是正在形成的 bar。** `DataFrame(data, time_frame=...)` 把它作为未收口周期的第一根 bar，所以落在它所在周期内的更细 bar 会折叠进这一行，而不会再开一行同标签的新行。
 - **df.iloc[-1]** 是当前（仍未收口的）周期——live bar。
 - **df[directive]** / **df.exec(directive)** 在包含形成中那一行的累积 frame 上计算指标——惰性、读时计算：一次 `append` 只把它们标记为过期，下一次读取只重算尾部。
 - **df.cumulate(target)** 必须是源 frame 的整数倍（例如 `5m→15m`，而非
@@ -702,6 +699,11 @@ for bar in stream:            # 每个 `bar` 是一个更细的 DataFrame
     df.iloc[-1]               # live 的、仍在形成中的 bar
     df['macd']               # 在累积 frame 上计算的指标
 ```
+
+volas 无法得知你的各行数据是怎样产生的，因此依赖下面两条约定，并且**不做**校验：
+
+- **bar 以周期起点为标签**：`17:00`–`17:14:59` 的 `15m` bar 标为 `17:00`，绝不是周期终点。以终点时间标注的数据需要先自行平移。
+- **构造时的最后一行不能已经包含之后要 append 进来的更细 bar。** 在 `17:09:30` 取到的 `15m` 快照，再 append `17:05` 的 1m bar，这一分钟就会被计入两次。如果要用更细的 bar 继续一根尚未收口的 bar，请用 `cumulate` 从更细的历史数据构建 frame——这样它的未收口周期恰好保存着这些更细的 bar。
 
 详见[累积与 DatetimeIndex](#累积与-datetimeindex)。
 
@@ -996,6 +998,8 @@ df.cumulate('1h', cumulators={'amount': 'sum'})
 各时间框的网格原点如下：日内时间框锚定在该索引所属（带时区的）交易日**午夜**——
 `15m` bar 起于 `:00`/`:15`/`:30`/`:45`，`4h` bar 起于 `00:00`/`04:00`/…；`1d` 起于午夜；`1w` 起于**周一**；`3d` 使用从 Unix 纪元开始的连续网格；`1M` / `1y` 起于日历月 / 年。如果夏令时切换移除或重复了某个周期边界，标签会解析到该周期最早的真实瞬时。
 
+传给 `DataFrame(data, time_frame=...)` 的各行遵循同一规则：volas 会把每行的标签当作周期起点（它无法校验这一点），因此以周期**终点**标注的数据必须先向前平移一个周期。
+
 在**实时**流式场景中，不应该每个 tick 都重新累积整段历史。更自然的做法是让当前
 5 分钟 bar 保持*正在形成*的状态，并随着更细 bar 到来而更新。**带 tf 的 DataFrame**
 正是为此设计：它仍然是普通 DataFrame（读列、跑 directive、切片都一样），只是
@@ -1011,7 +1015,7 @@ df.cumulate('1h', cumulators={'amount': 'sum'})
 
 #### 看着正在形成的 bar 长大
 
-从上面的 1 分钟 `df` 出发，一根一根构建 5 分钟 frame。先用 `00:00` bar 播种，再折叠进 `00:01`。两者都落在同一个 `00:00`–`00:05` 窗口内，所以 frame 仍然只有**一**
+从上面的 1 分钟 `df` 出发，一根一根构建 5 分钟 frame。先用 `00:00` bar 播种（`DataFrame(df.iloc[0:1], time_frame='5m')` 也以同样方式播种：它的最后一行就是正在形成的 bar），再折叠进 `00:01`。两者都落在同一个 `00:00`–`00:05` 窗口内，所以 frame 仍然只有**一**
 行，也就是那根正在形成的 bar；它已经被更新（`high` 涨到 `332.0`，`close` 到
 `331.0`，`volume` 已求和）：
 
@@ -1063,9 +1067,7 @@ print(cum)
   directive 列标记为过期（它们的有效行游标落后于 frame 高度）。真正的重算发生在你
   **读取** `cum['ema:9']`（或任何 directive）时：只刷新过期尾部，即
   `O(lookback)`，不是整列重算；计算对象包含正在形成的那一行，结果与一次性「先累积再计算」逐位相同。（`to_numpy()` 这类批量读取不会自动刷新；请先调用 `cum.fulfill()`，或者直接读取一次 directive。）
-- **重发的 bar 不会重复计入。**如果折叠一根时间戳已经出现过的 bar，volas 会**更新**
-  对应周期，而不是继续累加——这就是本节开头展示的同一条去重规则，适合会修订最近一根
-  bar 的交易所。
+- **重发的 bar 不会重复计入。**正在形成的周期保存着它的各根 bar，折叠一根时间戳已在其中的 bar 会**替换**那根 bar，而不是继续累加——这就是本节开头展示的同一条去重规则，适合会修订最近一根 bar 的交易所。重发一根与 frame 自身时间框相同的 bar（这里是 `5m`，时间戳为 `00:05`）会替换整行正在形成的 bar。
 
 API 概览见[实时累积](#实时累积--一个-tf-aware-dataframe)。
 

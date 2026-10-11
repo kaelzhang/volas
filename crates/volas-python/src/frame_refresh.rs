@@ -1,7 +1,8 @@
 //! The cached-directive refresh: recomputing the stale tail of materialized
-//! directive columns after an append. Includes the anchor-preserving tf
-//! forming-row resume (`refresh_forming_column`) — kept in its own module so the
-//! refresh policy lives apart from the frame's construction / access surface.
+//! directive columns after an append. Includes the time-frame forming-row refresh
+//! (`refresh_tf_column`), which recomputes the forming last row from the state
+//! before it — kept in its own module so the refresh policy lives apart from the
+//! frame's construction / access surface.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -11,27 +12,35 @@ use volas_core::DataFrame;
 use crate::*;
 
 impl PyDataFrame {
-    /// The carried resume state for a recursive column freshly computed over `frame`
-    /// (`col` is that computation). On a tf-fold frame with an open forming bar the
-    /// state is anchored at the last CLOSED bar (`height - 2`), never the volatile
-    /// forming row: the forming refresh resumes that row from the anchor without
-    /// advancing it. An explicit-`@series` column there carries no state (it cannot be
-    /// anchored). Anywhere else the state describes `frame`'s last row.
-    pub(crate) fn capture_resume_state(
+    /// The carried resume states `(state, state_before_last)` for a recursive column
+    /// freshly computed over `frame` (`col` is that computation). `state` describes
+    /// `frame`'s last row. A time-frame frame also keeps the state before its last
+    /// (forming) row, which the forming refresh recomputes that row from; there an
+    /// explicit-`@series` column carries no state at all (it always recomputes). A
+    /// plain frame keeps a single state.
+    pub(crate) fn capture_resume_states(
         &self,
         frame: &DataFrame,
         node: &volas_directive::types::Ast,
         col: &volas_core::Column,
-    ) -> Option<Vec<f64>> {
-        let forming = self.tf.as_ref().and_then(|t| t.open.as_ref()).is_some();
-        if !forming {
-            return volas_directive::exec::initial_state(frame, node, col);
+    ) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
+        if self.tf.is_none() {
+            return (volas_directive::exec::initial_state(frame, node, col), None);
         }
-        if !directive_uses_default_series(node) || frame.height() == 0 {
-            return None;
+        if !directive_uses_default_series(node) {
+            return (None, None);
         }
-        let anchor = frame.slice_data(0, frame.height() - 1);
-        volas_directive::exec::initial_state(&anchor, node, col)
+        let after = volas_directive::exec::initial_state(frame, node, col);
+        let h = frame.height();
+        if after.is_none() || h == 0 {
+            return (after, None);
+        }
+        let before = volas_directive::exec::initial_state(
+            &frame.slice_data(0, h - 1),
+            node,
+            &col.slice(0, h - 1),
+        );
+        (after, before)
     }
 
     /// Recompute the stale tail of cached directive columns in place — all of
@@ -44,15 +53,13 @@ impl PyDataFrame {
         if stale.is_empty() {
             return Ok(());
         }
-        // A tf-fold frame's last row is the OPEN forming bar (its raw OHLCV keeps
-        // changing as fine bars fold in). For such a frame a recursive column's
-        // carried state must stay anchored at the last CLOSED bar, never advance onto
-        // the volatile forming row — so its refresh is routed through a dedicated,
-        // anchor-preserving path rather than the standard append resume below.
-        let forming = self.tf.as_ref().and_then(|t| t.open.as_ref()).is_some();
+        // A tf-fold frame's last row is the forming bar (its raw OHLCV is replaced as
+        // bars of its period arrive), so its cached columns refresh through the
+        // two-state path (`refresh_tf_column`) rather than the plain append resume.
+        let tf = self.tf.is_some();
         let mut base: Option<DataFrame> = None;
         for (name, lb, vr) in stale {
-            if forming && self.refresh_forming_column(&name, lb, vr, height)? {
+            if tf && self.refresh_tf_column(&name, lb, vr, height)? {
                 continue;
             }
             if self.inner.computed_resume_state(&name).is_some() {
@@ -201,7 +208,7 @@ impl PyDataFrame {
             // `initial_state` derives the cumulative family's state from the raw
             // inputs, so either is fine. Computed BEFORE the tail write so `frame`'s
             // borrow of the live frame ends before the mutation.)
-            let new_state = self.capture_resume_state(frame, &node, &recomputed);
+            let (new_state, _) = self.capture_resume_states(frame, &node, &recomputed);
             // Write the stale tail back into the column at its original dtype.
             let tail = recomputed.slice(off, recomputed.len());
             self.inner
@@ -214,19 +221,19 @@ impl PyDataFrame {
         Ok(())
     }
 
-    /// Anchor-preserving refresh of one cached column on a tf-fold (forming) frame.
-    /// Returns `true` when it fully handled the column.
+    /// Refresh one cached column on a time-frame frame. Returns `true` when it fully
+    /// handled the column.
     ///
-    /// Only **default-series** recursive columns (the live-trading norm — `atr`,
-    /// `ema`, `rsi`, …) are anchored here: their carried state describes the last
-    /// CLOSED bar (`height - 2`), never the volatile forming row. The common case —
-    /// only the forming row (`height - 1`) is stale — resumes that single row from the
-    /// anchor and writes its value WITHOUT advancing the state (the next fold re-forms
-    /// the row; the period rollover finalises the anchor). A cold / multi-row-stale
-    /// column recomputes its tail and re-derives the anchor as of the last closed bar.
-    /// An explicit-`@series` column can't be cleanly anchored, so it drops any state
-    /// and falls through (`false`) to the unchanged full path.
-    fn refresh_forming_column(
+    /// Only **default-series** columns (the live-trading norm — `atr`, `ema`, `rsi`,
+    /// …) are handled here; each carries two states, the state after the last row and
+    /// the state before it. The common case — only the forming last row is stale —
+    /// recomputes that row from the state before it and stores the advanced state as
+    /// the state after it (a period rollover has already moved the previous state
+    /// after into the state before, so the closed bar is never stepped twice). A cold /
+    /// warm-up / multi-row-stale column recomputes the whole column and captures both
+    /// states again. An explicit-`@series` column carries no state on a time-frame
+    /// frame and falls through (`false`) to the full-recompute path.
+    fn refresh_tf_column(
         &mut self,
         name: &str,
         lb: usize,
@@ -235,65 +242,52 @@ impl PyDataFrame {
     ) -> PyResult<bool> {
         let node = parse(name).map_err(directive_err)?;
         if !directive_uses_default_series(&node) {
-            // Can't anchor an explicit-series resume at the closed bar; keep the
-            // pre-fold behaviour (full recompute, no carried state).
             self.inner.set_computed_state(name, None);
+            self.inner.set_computed_state_before_last(name, None);
             return Ok(false);
         }
-        // Fast path: only the open forming row is stale, it is PAST warm-up (`vr >= lb`),
-        // and we hold an anchor — resume that single row and write its value, DISCARDING
-        // the new state so the anchor stays at the last closed bar (`vr - 1`). The
-        // `vr >= lb` gate keeps the whole warm-up region on the cold full-recompute below:
-        // an indicator whose warm-up mask is length-dependent (its short-frame output
-        // differs from the masked full-series value) would otherwise freeze the
-        // incrementally-carried early rows and diverge from a full recompute. The anchor
-        // state is borrowed straight off `self.inner` and dropped before each write.
+        // Fast path: only the forming row is stale, it is PAST warm-up (`vr >= lb`), and
+        // the state before it is known. The `vr >= lb` gate keeps the whole warm-up
+        // region on the cold full recompute below: an indicator whose warm-up mask is
+        // length-dependent (its short-frame output differs from the masked full-series
+        // value) would otherwise freeze the incrementally-carried early rows and diverge
+        // from a full recompute. The state is borrowed straight off `self.inner` and
+        // dropped before each write.
         if vr + 1 == height && vr >= lb {
-            // Recursive scalars FIRST (the live-trading norm — atr / ema / rsi / the
-            // directional / cascade / volume families): a single anchored step, no
-            // tail/state allocation. Ordered ahead of the stateless dispatch below so a
-            // recursive column never pays that dispatch's ~12-arm name-match miss.
-            // Only the value: the advanced state is discarded to keep the anchor.
-            let scalar = self.inner.computed_resume_state(name).and_then(|(state, _)| {
+            // Recursive scalars FIRST (ema / smma / atr / natr / rsi / cmo): one step from
+            // the state before the row yields its value and the state after it, both
+            // written in place — no allocation.
+            let scalar = self.inner.computed_state_before_last(name).and_then(|(state, _)| {
                 volas_directive::exec::execute_resume_one_node(&self.inner, &node, state, vr)
             });
             if let Some(step) = scalar {
                 self.inner
                     .update_computed_f64_value(name, vr, step.value)
                     .map_err(pyerr)?;
-                return Ok(true);
-            }
-            // Every other recursive resume kernel with a scalar twin (the Wilder /
-            // directional / cascade / volume / … families): the single forming-row value,
-            // allocation-free, discarding the new state to keep the anchor.
-            let value = self.inner.computed_resume_state(name).and_then(|(state, origin)| {
-                volas_directive::exec::execute_resume_value(&self.inner, &node, state, vr, origin)
-            });
-            if let Some(value) = value {
-                self.inner
-                    .update_computed_f64_value(name, vr, value)
-                    .map_err(pyerr)?;
+                self.inner.store_computed_state(name, step.state());
                 return Ok(true);
             }
             // Stateless finite-memory (avgprice / medprice / mom / roc / …): the forming
-            // row depends only on its own inputs — a parse-free scalar recompute, no state.
+            // row depends only on raw inputs — a parse-free scalar recompute; its carried
+            // state is empty.
             if let Some(value) =
                 volas_directive::exec::execute_resume_default_series_one(&self.inner, name, vr)
             {
                 self.inner
                     .update_computed_f64_value(name, vr, value)
                     .map_err(pyerr)?;
+                self.inner.store_computed_state(name, &[]);
                 return Ok(true);
             }
-            // Remaining kernels without a scalar twin (index family, stochrsi `.d`):
-            // the Vec-returning resume, discarding the new state.
-            let resumed = self.inner.computed_resume_state(name).and_then(|(state, origin)| {
+            // Every other resume kernel: the forming row and the state after it.
+            let resumed = self.inner.computed_state_before_last(name).and_then(|(state, origin)| {
                 volas_directive::exec::execute_resume(&self.inner, &node, state, vr, origin)
             });
-            if let Some((tail, _new_state)) = resumed {
+            if let Some((tail, new_state)) = resumed {
                 self.inner
                     .update_computed_tail(name, vr, &tail)
                     .map_err(pyerr)?;
+                self.inner.set_computed_state(name, Some(new_state));
                 return Ok(true);
             }
         }
@@ -302,15 +296,15 @@ impl PyDataFrame {
         // rewrite the WHOLE column `[0, height)`, not just the stale tail. Rewriting from
         // row 0 re-applies the full-series warm-up mask to the early rows every cold run,
         // so the masked values are frozen correctly when the fast path takes over at the
-        // warm boundary (`vr >= lb`) — the carried early rows can no longer be a stale
-        // short-frame (unmasked) output. Then re-anchor the state at the last CLOSED bar.
+        // warm boundary (`vr >= lb`). Then capture both states again.
         let recomputed =
             volas_directive::exec::execute_refresh(&self.inner, &node).map_err(value_err)?;
         self.inner
             .update_computed_tail(name, 0, &recomputed)
             .map_err(pyerr)?;
-        let st = self.capture_resume_state(&self.inner, &node, &recomputed);
-        self.inner.set_computed_state(name, st);
+        let (after, before) = self.capture_resume_states(&self.inner, &node, &recomputed);
+        self.inner.set_computed_state(name, after);
+        self.inner.set_computed_state_before_last(name, before);
         Ok(true)
     }
 }

@@ -17,6 +17,8 @@ import json
 import pathlib
 import sys
 
+TF_PHASES = ("forming", "rollover")
+
 
 def _means(path: str) -> dict[str, float]:
     data = json.loads(pathlib.Path(path).read_text())
@@ -42,6 +44,9 @@ def report(means: dict[str, float], ind: str) -> dict[str, float | None]:
         out[f"{label}_ratio"] = (v / t) if v and t else None
     bv, av = out["batch_volas_us"], out["after_append_volas_us"]
     out["append_overhead"] = (av / bv) if av and bv else None
+    for phase in TF_PHASES:  # the live tf path (volas only)
+        v = means.get(f"test_tf_live[{ind}-{phase}]")
+        out[f"tf_{phase}_volas_us"] = v * 1e6 if v else None
     return out
 
 
@@ -56,6 +61,8 @@ def _fmt(r: dict, ind: str, tag: str = "") -> str:
             f"volas/talib {f(r[f'{label}_ratio'], 'x')}"
         )
     lines.append(f"  append/batch overhead (volas): {f(r['append_overhead'], 'x')}")
+    for phase in TF_PHASES:
+        lines.append(f"  tf {phase:10} volas {f(r[f'tf_{phase}_volas_us'], 'us')}")
     return "\n".join(lines)
 
 
@@ -68,7 +75,7 @@ def main(argv: list[str]) -> int:
         print()
         print(_fmt(base, ind, "  [BASE]"))
         print()
-        for label in ("batch", "after_append"):
+        for label in ("batch", "after_append", *(f"tf_{p}" for p in TF_PHASES)):
             n, b = new[f"{label}_volas_us"], base[f"{label}_volas_us"]
             if n and b:
                 print(f"  {label:13} HEAD/base = x{n / b:.3f}  "

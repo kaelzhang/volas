@@ -34,10 +34,16 @@ import sys
 
 
 def _volas_medians(data: dict) -> dict:
-    """``{(section, item): volas median seconds}`` over the coverage + api sections."""
+    """``{(section, item): volas median seconds}`` over the coverage + api sections
+    and the volas-only live tf rows (item ``<indicator>/<phase>``)."""
     out: dict[tuple[str, str], float] = {}
     for b in data['benchmarks']:
         name = b['name']
+        if name.startswith('test_tf_live'):
+            params = b.get('params') or {}
+            item = f"{params.get('indicator')}/{params.get('phase')}"
+            out[('tf_live', item)] = b['stats']['median']
+            continue
         if name.startswith('test_coverage'):
             section = 'coverage'
         elif name.startswith('test_api'):

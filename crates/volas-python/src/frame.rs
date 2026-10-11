@@ -27,9 +27,10 @@ use crate::*;
 pub(crate) struct TfState {
     pub(crate) time_frame: TimeFrame,
     pub(crate) cumulators: AggSpec,
-    /// Raw fine bars of the current open period (`None` until the first
-    /// folded append), kept so a re-sent forming bar updates (deduped) rather
-    /// than double-counts.
+    /// The bars of the current open period — the small frame whose cumulation is the
+    /// forming last row (`None` only while the frame is empty). It starts as the last
+    /// constructed row, or the first bar of a new period; a bar with the same timestamp
+    /// as one in it replaces that bar rather than double-counting.
     pub(crate) open: Option<DataFrame>,
     /// The current open period's `unify_tz` key, **lazily memoized** (`None` until
     /// recomputed). The period key is invariant while a period is forming — only a
@@ -140,8 +141,9 @@ pub(crate) struct WindowState {
 ///         ``df[[...]]``); a name not present raises ``KeyError``. An empty list or a
 ///         duplicate name is rejected, and an absent column is never NaN-filled.
 ///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
-///         this bar interval; the given rows are taken as already-final bars and later
-///         ``append``s fold finer bars into them. Requires a DatetimeIndex.
+///         this bar interval. The given rows are bars at that frame, each labelled with its
+///         period start; the last one is the forming bar, so a later ``append`` of a finer
+///         bar in its period folds into it. Requires a DatetimeIndex.
 ///     cumulators (dict[str, str], optional): per-column aggregator overrides for folding
 ///         (e.g. ``{'amount': 'sum'}``); only meaningful together with ``time_frame``.
 ///     dtype (str, optional): cast every column to a single dtype at construction
@@ -170,8 +172,11 @@ pub struct PyDataFrame {
 
 impl PyDataFrame {
     /// Wrap a core frame as a plain (non-cumulating) DataFrame — the default for
-    /// every derived frame (slices, projections, head/tail, ...).
-    pub(crate) fn plain(inner: DataFrame) -> Self {
+    /// every derived frame (slices, projections, head/tail, ...). A plain frame keeps
+    /// a single carried state per cached column, so a state-before-last inherited from
+    /// a time-frame parent is dropped.
+    pub(crate) fn plain(mut inner: DataFrame) -> Self {
+        inner.clear_computed_states_before_last();
         PyDataFrame { inner, tf: None, window: None }
     }
 

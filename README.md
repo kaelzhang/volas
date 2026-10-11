@@ -272,10 +272,11 @@ Which gets the 2-period simple moving average on column `"close"`.
   the same projection as `df[[...]]`. A name not present raises `KeyError`; an empty
   list or a duplicate name is rejected, and an absent column is never silently filled.
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
-  **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are
-  taken as already-final bars at that frame, and later `append`s fold finer
-  bars into the forming bar. Requires a `DatetimeIndex`. See
-  [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex).
+  **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are bars
+  at that frame, each labelled with its **period start**, and the last one is the
+  **forming** bar — a later `append` of a finer bar in its period folds into it
+  (the last row must not already contain that bar). Requires a `DatetimeIndex`. See
+  [Live cumulation](#live-cumulation--a-tf-aware-dataframe).
 - **cumulators** `Optional[dict[str, str]] = None` Per-column aggregator overrides
   used when folding (e.g. `{'amount': 'sum'}`), only meaningful together with
   `time_frame`. Defaults to OHLCV semantics (`open`=first, `high`=max, `low`=min,
@@ -498,8 +499,10 @@ It is **strict**: every data column must be provided (a missing one raises — u
 Cached directive columns are not supplied — they are padded and refreshed automatically.
 
 If the caller is a **tf-aware** DataFrame (one built with a `time_frame`, or
-the result of `cumulate`), `append` instead **folds** each finer bar into the
-forming bar rather than adding a row — see
+the result of `cumulate`), `append` instead **folds** each bar into the open
+period: the period's bars are kept in a small frame, a bar with the same timestamp
+as one already there replaces it, and the period's cumulation **replaces the last
+row**; a bar of a later period starts a new row — see
 [Live cumulation](#live-cumulation--a-tf-aware-dataframe).
 
 `append` is lazy: it does not recompute the indicator columns of the new rows.
@@ -854,14 +857,21 @@ row.to_numpy()         # the numeric cells as a 1-D ndarray
 For **live** streaming, give a DataFrame a `time_frame` and `append` finer bars
 into it, instead of re-cumulating the whole frame each tick. `df.cumulate(tf)`
 returns such a frame (the forming period kept live), or build one directly with
-`DataFrame(data, time_frame=..., cumulators=...)` (the given rows are taken as
-already-final bars at that frame; requires a DatetimeIndex).
+`DataFrame(data, time_frame=..., cumulators=...)` (requires a DatetimeIndex).
 
-On a tf-aware frame:
+The frame keeps the bars of the **open period** in a small DataFrame of their own;
+its last row is their cumulation. On a tf-aware frame:
 
-- **df.append(bar)** folds the bar in: one in the open period **updates the
-  forming last row** (`df.iloc[-1]`); one in a new period rolls over into a fresh
-  row; a re-sent forming bar (same timestamp) updates rather than double-counts.
+- **df.append(bar)** adds the bar to the open period and **replaces the forming
+  last row** (`df.iloc[-1]`) with the period's cumulation. A bar with the **same
+  timestamp** as one already in the period replaces it, so a re-sent bar never
+  double-counts. A bar of a later period starts a new row.
+- A bar of the frame's **own** time frame stamped at the period start — e.g. an
+  exchange `15m` kline pushed again and again while it forms — therefore
+  **replaces the last row whole**.
+- **The last constructed row is the forming bar.** `DataFrame(data,
+  time_frame=...)` makes it the first bar of the open period, so a finer bar in
+  its period folds into it rather than opening a second row with the same label.
 - **df.iloc[-1]** is the current (still-open) period — the live bar.
 - **df[directive]** / **df.exec(directive)** computes indicators over the
   cumulated frame including the forming row — lazily, on read: an `append` only
@@ -877,6 +887,17 @@ for bar in stream:            # each `bar` is a finer DataFrame
     df.iloc[-1]               # the live, still-forming bar
     df['macd']               # indicators over the cumulated frame
 ```
+
+volas cannot tell how your rows were produced, so it relies on two conventions and
+does **not** check them:
+
+- **A bar is labelled with its period start** — `17:00` for the `17:00`–`17:14:59`
+  `15m` bar, never the period end. Shift data labelled by its end time first.
+- **The last constructed row must not already contain the finer bars appended
+  after it.** A `15m` snapshot fetched at `17:09:30` followed by the `17:05` 1m
+  bar counts that minute twice. To continue an unclosed bar with finer bars,
+  build the frame with `cumulate` from the finer history — its open period then
+  holds exactly those finer bars.
 
 See [Cumulation and DatetimeIndex](#cumulation-and-datetimeindex) for details.
 
@@ -1214,6 +1235,10 @@ index's (timezone-aware) trading day — a `15m` bar starts at `:00`/`:15`/`:30`
 calendar month / year. If a daylight-saving transition removes or repeats a
 period's boundary, the label resolves to the period's earliest real instant.
 
+The rows given to `DataFrame(data, time_frame=...)` follow the same rule: volas
+reads each row's label as its period start (it cannot check this), so data
+labelled by its period **end** must be shifted back one period first.
+
 For **live** streaming you do not re-cumulate the whole history on every tick —
 you keep the current 5-minute bar *forming* and update it as each finer bar
 arrives. A **tf-aware DataFrame** does exactly that: it stays an ordinary
@@ -1232,7 +1257,8 @@ loop is then just:
 #### Watch the forming bar grow
 
 Build the 5-minute frame from the 1-minute `df` above one bar at a time. Seed it
-with the `00:00` bar, then fold in `00:01`. Both fall in the same `00:00`–`00:05`
+with the `00:00` bar (`DataFrame(df.iloc[0:1], time_frame='5m')` seeds it the same
+way: its last row is the forming bar), then fold in `00:01`. Both fall in the same `00:00`–`00:05`
 window, so the frame still holds **one** row — the forming bar — now updated
 (`high` rose to `332.0`, `close` to `331.0`, `volume` summed):
 
@@ -1290,10 +1316,11 @@ Two properties make this safe for a live feed:
   row, bit-identical to a one-shot cumulate-then-compute. (A bulk read such as
   `to_numpy()` does not auto-refresh; call `cum.fulfill()` first, or just read
   the directive.)
-- **Re-sent bars do not double-count.** Folding a bar whose timestamp you have
-  already seen **updates** that period instead of adding to it — the same dedup
-  rule shown at the top of this section — matching exchanges that revise their
-  most recent bar.
+- **Re-sent bars do not double-count.** The forming period keeps its bars, and
+  folding a bar whose timestamp is already among them **replaces** that bar — the
+  same dedup rule shown at the top of this section — matching exchanges that
+  revise their most recent bar. Re-sending a bar of the frame's own time frame
+  (`5m` here, stamped `00:05`) replaces the whole forming row.
 
 See [Live cumulation](#live-cumulation--a-tf-aware-dataframe) for the API summary.
 

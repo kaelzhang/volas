@@ -29,7 +29,20 @@ pub struct ComputedMeta {
     /// full recompute. `None` when the directive has no resume implementation (it
     /// then falls back to the correct full recompute) or the state is unknown
     /// (e.g. after a slice that did not reach the parent's `valid_rows`).
+    ///
+    /// On a time-frame (cumulating) frame this is the state AFTER the last row, and it
+    /// is current only while that row is valid: a change to the forming last row leaves
+    /// it for the next refresh to overwrite (recomputed from
+    /// [`state_before_last`](Self::state_before_last)).
     pub state: Option<Vec<f64>>,
+    /// The carried recursive state BEFORE the frame's last row — as of row
+    /// `height - 2` — kept only on a time-frame (cumulating) frame, whose last row is
+    /// the forming bar that later appends replace. The forming-row refresh recomputes
+    /// the last row from it (leaving it unchanged), and a period rollover moves
+    /// [`state`](Self::state) into it ([`DataFrame::roll_computed_states`]), so the
+    /// closed bar is never stepped twice. `None` on a plain frame, or when unknown
+    /// (the refresh then recomputes the column and captures both states again).
+    pub state_before_last: Option<Vec<f64>>,
     /// The original-frame row that THIS (possibly sliced) frame's row 0 maps to.
     /// `0` for a freshly-computed column; a contiguous slice from `start` bumps it
     /// by `start`. It lets an absolute-position indicator (the index family —
@@ -408,8 +421,12 @@ impl DataFrame {
                 // `valid_rows`) would leave the state attached to a row the sub-frame
                 // no longer ends on, so we drop it (the column stays correct via the
                 // full-recompute fallback, just not O(new-rows) continuable).
-                let carried = if end >= meta.valid_rows {
-                    meta.state.clone()
+                // Both states are positioned against the parent's END (its last valid
+                // row / the row before its last row), so they carry together.
+                let reaches_end = end >= meta.valid_rows;
+                let carried = if reaches_end { meta.state.clone() } else { None };
+                let carried_before = if reaches_end && end == self.height {
+                    meta.state_before_last.clone()
                 } else {
                     None
                 };
@@ -419,6 +436,7 @@ impl DataFrame {
                         lookback: meta.lookback,
                         valid_rows: valid,
                         state: carried,
+                        state_before_last: carried_before,
                         // This sub-frame's row 0 is the parent's row `start`, so its
                         // origin shifts by `start` (an absolute-index resume adds it
                         // back to stay original-absolute, matching the carried head).
@@ -580,8 +598,8 @@ impl DataFrame {
             self.columns[dst_col].combine_at(row, op, &src.columns[src_col], src_row)?;
         }
         // Only the forming row changed: mark it stale but KEEP each cached column's
-        // anchored resume state, so `refresh` continues the recursion over just this
-        // row (O(lookback)) instead of recomputing the whole buffer from scratch.
+        // carried states, so `refresh` recomputes just this row from the state before
+        // it instead of recomputing the whole buffer from scratch.
         self.invalidate_computed_forming_row(row);
         #[cfg(debug_assertions)]
         self.debug_check();
