@@ -1,33 +1,38 @@
+use crate::accum::{Anchors, Csum};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 
 // ---------------------------------------------------------------------------
 // Math operators — rolling reductions over a fixed window
 // ---------------------------------------------------------------------------
 
-/// Rolling sum over `period` (TA-Lib SUM), O(n) via a sliding total (TA-Lib's exact
-/// order: add current, emit, drop trailing). Lookback `period-1`. Window-local: a
-/// non-finite row affects only the windows holding it (see [`crate::guard`]).
-pub fn sum(data: &[f64], period: usize) -> Vec<f64> {
-    let (out, total) = sum_with::<Unguarded>(data, period);
-    if total.is_finite() {
+/// Rolling sum over `period` (TA-Lib SUM), O(n) via a sliding total (TA-Lib's
+/// order: add current, emit, drop trailing), exact ([`Csum`], re-anchored at absolute
+/// positions — row 0 is at `origin`) so each window's sum is its own however long the
+/// slide. Lookback `period-1`. Window-local: a non-finite row affects only the windows
+/// holding it (see [`crate::guard`]).
+pub fn sum(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    let (out, finite) = sum_with::<Unguarded>(data, period, origin);
+    if finite {
         out
     } else {
-        sum_with::<NonFiniteRows>(data, period).0
+        sum_with::<NonFiniteRows>(data, period, origin).0
     }
 }
 
-/// The sliding sum under a row guard; also returns the final running total.
-fn sum_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, f64) {
+/// The sliding sum under a row guard; also returns whether the total stayed finite.
+fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, bool) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
-        return (out, 0.0);
+        return (out, true);
     }
     let mut guard = G::default();
-    let mut total = 0.0;
+    let mut anchors = Anchors::from(origin + period - 1, period);
+    let mut finite = true;
+    let mut total = Csum::default();
     for &x in &data[..period - 1] {
         if guard.enter(x.is_finite()) {
-            total += x;
+            total.add(x);
         }
     }
     let mut trailing = 0;
@@ -35,20 +40,25 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, f64) {
     for i in (period - 1)..n {
         let x = data[i];
         if guard.enter(x.is_finite()) {
-            total += x;
+            total.add(x);
+        }
+        if anchors.tick() {
+            finite &= total.value().is_finite();
+            let window = data[i + 1 - period..=i].iter().copied();
+            total = Csum::of(window.filter(|x| guard.counts(x.is_finite())));
         }
         out[i] = if guard.clean() {
-            total
+            total.value()
         } else {
             data[i + 1 - period..=i].iter().sum()
         };
         let old = data[trailing];
         if guard.leave(old.is_finite()) {
-            total -= old;
+            total.sub(old);
         }
         trailing += 1;
     }
-    (out, total)
+    (out, finite && total.value().is_finite())
 }
 
 /// Absolute index (as a float) of the highest value in each trailing `period`-bar
@@ -314,7 +324,8 @@ pub fn minindex_resume(
 }
 
 
-/// [`sum`]'s resumable state after the rows of `term`: `[total, non-finite rows]`.
+/// The length of [`sum`]'s resumable state: the [`Slide`](crate::guard::Slide) of the
+/// total.
 pub(crate) const SUM_STATE: usize = crate::guard::Slide::<1>::STATE;
 
 /// One row of [`sum`] over the series `term` at `row` — the careful [`sum_with`] loop's
@@ -336,16 +347,17 @@ pub(crate) fn sum_row(
         ([x], x.is_finite())
     }) {
         Window::Partial => f64::NAN,
-        Window::Sums([total]) => total,
+        Window::Sums([total]) => total.value(),
         Window::Bad => (row + 1 - period..=row).map(&term).sum(),
     };
     slide.write_state(next);
     Some(value)
 }
 
-/// [`sum`]'s state after the rows of `data`.
-pub fn sum_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
-    crate::guard::state_after(vec![0.0; SUM_STATE], data.len(), |row, prev, next| {
+/// [`sum`]'s state after the rows of `data` (row 0 at absolute position `origin`).
+pub fn sum_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
+    let init = crate::guard::Slide::<1>::initial(origin);
+    crate::guard::state_after(init, data.len(), |row, prev, next| {
         sum_step(data, period, row, prev, next)
     })
 }

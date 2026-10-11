@@ -76,14 +76,14 @@ pub(super) fn dispatch(
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
-            f64col(ind::cci(&high, &low, &close, arg_usize(args, 0)))
+            f64col(ind::cci(&high, &low, &close, arg_usize(args, 0), ops.origin()))
         }
         ("imi", _) => {
             let open = ops.f64(0, "open")?;
             let close = ops.f64(1, "close")?;
-            f64col(ind::imi(&open, &close, arg_usize(args, 0)))
+            f64col(ind::imi(&open, &close, arg_usize(args, 0), ops.origin()))
         }
-        ("psy", _) => f64col(ind::psy(&close(0)?, arg_usize(args, 0))),
+        ("psy", _) => f64col(ind::psy(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("pvt", _) => {
             let close = ops.f64(0, "close")?;
             let volume = ops.f64(1, "volume")?;
@@ -99,31 +99,31 @@ pub(super) fn dispatch(
             let volume = ops.f64(1, "volume")?;
             f64col(ind::pvi(&close, &volume))
         }
-        ("dpo", _) => f64col(ind::dpo(&close(0)?, arg_usize(args, 0))),
+        ("dpo", _) => f64col(ind::dpo(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("cmf", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
             let volume = ops.f64(3, "volume")?;
-            f64col(ind::cmf(&high, &low, &close, &volume, arg_usize(args, 0)))
+            f64col(ind::cmf(&high, &low, &close, &volume, arg_usize(args, 0), ops.origin()))
         }
         ("chop", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
-            f64col(ind::chop(&high, &low, &close, arg_usize(args, 0)))
+            f64col(ind::chop(&high, &low, &close, arg_usize(args, 0), ops.origin()))
         }
-        ("kst", _) => f64col(ind::kst(&close(0)?)),
+        ("kst", _) => f64col(ind::kst(&close(0)?, ops.origin())),
         ("emv", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let volume = ops.f64(2, "volume")?;
-            f64col(ind::emv(&high, &low, &volume, arg_usize(args, 0)))
+            f64col(ind::emv(&high, &low, &volume, arg_usize(args, 0), ops.origin()))
         }
         ("mass_index", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
-            f64col(ind::mass_index(&high, &low, arg_usize(args, 0)))
+            f64col(ind::mass_index(&high, &low, arg_usize(args, 0), ops.origin()))
         }
         ("efi", _) => {
             let close = ops.f64(0, "close")?;
@@ -159,7 +159,7 @@ pub(super) fn dispatch(
             f64col(ind::aroonosc(&high, &low, arg_usize(args, 0)))
         }
 
-        ("sum", _) => f64col(ind::sum(&close(0)?, arg_usize(args, 0))),
+        ("sum", _) => f64col(ind::sum(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("maxindex", _) => f64col(ind::maxindex(&close(0)?, arg_usize(args, 0))),
         ("minindex", _) => f64col(ind::minindex(&close(0)?, arg_usize(args, 0))),
         // minmax / minmaxindex are the (min, max) value / index pair over the window;
@@ -191,33 +191,36 @@ pub(super) fn dispatch(
             f64col(ind::bop(&open, &high, &low, &close))
         }
 
-        ("linearreg", _) => f64col(ind::linearreg(&close(0)?, arg_usize(args, 0))),
+        ("linearreg", _) => f64col(ind::linearreg(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("linearreg_slope", _) => f64col(ind::linearreg_slope(
             &close(0)?,
             arg_usize(args, 0),
+            ops.origin(),
         )),
         ("linearreg_intercept", _) => f64col(ind::linearreg_intercept(
             &close(0)?,
             arg_usize(args, 0),
+            ops.origin(),
         )),
         ("linearreg_angle", _) => f64col(ind::linearreg_angle(
             &close(0)?,
             arg_usize(args, 0),
+            ops.origin(),
         )),
-        ("tsf", _) => f64col(ind::tsf(&close(0)?, arg_usize(args, 0))),
+        ("tsf", _) => f64col(ind::tsf(&close(0)?, arg_usize(args, 0), ops.origin())),
         // beta/correl relate two series: the first defaults to close, the second is required.
         ("correl", _) => {
             let x = close(0)?;
             let y = ops.f64_required(1)?;
-            f64col(ind::correl(&x, &y, arg_usize(args, 0)))
+            f64col(ind::correl(&x, &y, arg_usize(args, 0), ops.origin()))
         }
         ("beta", _) => {
             let x = close(0)?;
             let y = ops.f64_required(1)?;
-            f64col(ind::beta(&x, &y, arg_usize(args, 0)))
+            f64col(ind::beta(&x, &y, arg_usize(args, 0), ops.origin()))
         }
 
-        ("var", _) => f64col(ind::var(&close(0)?, arg_usize(args, 0))),
+        ("var", _) => f64col(ind::var(&close(0)?, arg_usize(args, 0), ops.origin())),
 
         // pandas-window statistics as directives: one kernel source with the
         // rolling API (volas_compute::window), full-window semantics
@@ -258,7 +261,7 @@ pub(super) fn dispatch(
             f64col(volas_compute::window::mode(&close(0)?, p, p))
         }
         // TradingView oscillators (cog / rci) and the per-bar volume study iii.
-        ("cog", _) => f64col(ind::cog(&close(0)?, arg_usize(args, 0))),
+        ("cog", _) => f64col(ind::cog(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("rci", _) => f64col(ind::rci(&close(0)?, arg_usize(args, 0))),
         ("iii", _) => {
             let high = ops.f64(0, "high")?;
@@ -296,6 +299,7 @@ pub(super) fn dispatch(
             &close(0)?,
             arg_usize(args, 0),
             arg_f64(args, 1),
+            ops.origin(),
         )),
 
         ("obv", _) => {

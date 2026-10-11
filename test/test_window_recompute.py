@@ -3,10 +3,11 @@
 A finite-window command whose full computation does not carry anything from row to
 row (each output a function of its own window alone) gives the same value over any
 window that holds its lookback — so a refresh may recompute just the last window. One
-whose full computation carries a running accumulator across the whole series
-(a rolling sum, a rolling sum of squares, …) does not: its rounding depends on every
-row before, so it resumes from a carried state instead. This test pins which is which,
-for every finite-window command in the registry.
+whose full computation carries a running accumulator (a rolling sum, a rolling sum of
+squares, …) depends on the rows since its sums were last re-anchored, not only on the
+window, so it resumes from a carried state instead. This test pins that every command
+the engine recomputes over a window is exact there, and that the accumulating ones are
+the ones the engine resumes.
 """
 
 import re
@@ -31,6 +32,12 @@ DATA = dict(
     volume=_rng.uniform(100, 900, N) * np.sqrt(2.0), periods=np.full(N, 5.0),
 )
 
+# Runs of huge and tiny values: a running sum cannot hold every bit of a tiny window
+# right after a huge run, so an accumulating command's value shows where its sums were
+# last re-anchored — a last-window recompute of it is not exact here.
+_RUNS = np.where((np.arange(N) // 13) % 2 == 0, 1e12, 1e-8)
+WIDE = {k: (v if k == "periods" else v * _RUNS) for k, v in DATA.items()}
+
 # A copy with a few missing and infinite rows: the careful (window-local) path.
 GAPPY = {k: v.copy() for k, v in DATA.items()}
 for _col, _rows in (("close", [120, 121, 250]), ("high", [180]), ("volume", [300]), ("low", [181])):
@@ -46,10 +53,10 @@ _KEYS = sorted(k for k in FINITE if k not in ABSOLUTE_POSITION) + sorted(
 # a last-window recompute only matches it to rounding: these resume from a state.
 ACCUMULATING = {
     "accbands", "apo", "bbi", "bbw", "beta", "bias", "boll", "cci", "cmf", "cog", "coppock",
-    "correl", "dkx", "dma", "dpo", "emv", "hma", "hv", "kst", "linearreg", "linearreg_angle",
-    "linearreg_intercept", "linearreg_slope", "ma", "macdext", "mavp", "mfi", "ppo",
-    "relative_vigor", "stddev", "stoch", "stochf", "sum", "trima", "tsf", "var", "vr", "vwma",
-    "wma", "wvad",
+    "correl", "dkx", "dma", "dpo", "emv", "hma", "hv", "imi", "kst", "linearreg",
+    "linearreg_angle", "linearreg_intercept", "linearreg_slope", "ma", "macdext", "mavp", "mfi",
+    "ppo", "relative_vigor", "stddev", "stoch", "stochf", "sum", "trima", "tsf", "ultosc", "var",
+    "vr", "vwma", "wma", "wvad",
     "accbands.lower", "accbands.upper", "boll.lower", "boll.u", "boll.upper", "dkx.ma",
     "dma.ama", "dma.ddd", "macdext.histogram", "macdext.signal", "relative_vigor.signal",
     "stoch.d", "stoch.k", "stochf.d",
@@ -81,11 +88,17 @@ def test_the_accumulating_commands_are_the_ones_the_engine_resumes():
     assert named == {k.split(".")[0] for k in ACCUMULATING}
 
 
-@pytest.mark.parametrize("key", _KEYS)
+@pytest.mark.parametrize("key", [k for k in _KEYS if k not in ACCUMULATING])
 def test_a_last_window_recompute_is_exact_unless_the_kernel_accumulates(key):
     directive = _directive(key)
-    exact = _window_matches(directive, DATA) and _window_matches(directive, GAPPY)
-    assert exact == (key not in ACCUMULATING), directive
+    for data in (DATA, GAPPY, WIDE):
+        assert _window_matches(directive, data), directive
+
+
+@pytest.mark.parametrize("key", ["ma", "sum", "var", "linearreg", "wma", "cci", "mfi", "ultosc"])
+def test_an_accumulating_command_is_not_its_last_window(key):
+    """The data does tell an accumulating command from a per-window one."""
+    assert not _window_matches(_directive(key), WIDE), key
 
 
 # --- the accumulating commands resume bit-exactly on every live path ----------------
@@ -105,12 +118,12 @@ def _rows(data, lo, hi, labels):
 _LABELS = (np.datetime64("2026-01-01T00:00", "ns") + np.arange(N) * np.timedelta64(1, "m"))
 
 
-@pytest.mark.parametrize("data_name", ["clean", "gappy"])
+@pytest.mark.parametrize("data_name", ["clean", "gappy", "wide"])
 @pytest.mark.parametrize("key", sorted(ACCUMULATING))
 def test_an_accumulating_command_resumes_bit_exactly(key, data_name):
     """Appends one row at a time, replaces the newest row (with a value, with a NaN),
     then a windowed twin: every refresh equals a full recompute bit for bit."""
-    data = DATA if data_name == "clean" else GAPPY
+    data = {"clean": DATA, "gappy": GAPPY, "wide": WIDE}[data_name]
     directive = _directive(key)
     seed = 100
     live = _rows(data, 0, seed, _LABELS)

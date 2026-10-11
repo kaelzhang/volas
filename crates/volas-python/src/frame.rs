@@ -315,7 +315,7 @@ impl PyDataFrame {
         let view = self.logical();
         let df = view.as_ref();
         DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-            .map(PyDataFrame::plain)
+            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
             .map_err(pyerr)
     }
 
@@ -328,7 +328,7 @@ impl PyDataFrame {
         let df = view.as_ref();
         let cols = df.columns().iter().map(&op).collect::<PyResult<Vec<_>>>()?;
         DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-            .map(PyDataFrame::plain)
+            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
             .map_err(pyerr)
     }
 
@@ -354,7 +354,7 @@ impl PyDataFrame {
             })
             .collect::<PyResult<Vec<_>>>()?;
         DataFrame::new(df.names().to_vec(), cols, Some((**idx).clone()))
-            .map(PyDataFrame::plain)
+            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
             .map_err(pyerr)
     }
 
@@ -519,7 +519,8 @@ impl PyDataFrame {
             cols,
             Some((**self.inner.index()).clone()),
         )
-        .map_err(pyerr)?;
+        .map_err(pyerr)?
+        .with_origin(self.inner.origin());
         Ok(())
     }
 

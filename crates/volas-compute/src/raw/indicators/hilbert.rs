@@ -111,6 +111,7 @@ pub fn ht_trendline(price: &[f64]) -> Vec<f64> {
     }
     let mut core = HtCoreState::seed(price);
     let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
+    #[allow(clippy::needless_range_loop)] // numeric kernel: `today` indexes `price` too
     for today in CORE_START..n {
         let b = core.step(price, today);
         // TA-Lib's iTrend recurrence is per-bar, but only bars >= LB_PHASE are visible.

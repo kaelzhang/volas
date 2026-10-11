@@ -221,7 +221,7 @@ fn a_full_computation_is_the_raw_one_over_the_complete_rows() {
         raw::ht_trendline(x[0]).flat());
     series("ht_trendmode", &[&d.close[..]], &|x| ind::ht_trendmode(x[0]).flat(), &|x|
         raw::ht_trendmode(x[0]).flat());
-    series("kama", &[&d.close[..]], &|x| ind::kama(x[0], 5).flat(), &|x| raw::kama(x[0], 5).flat());
+    series("kama", &[&d.close[..]], &|x| ind::kama(x[0], 5, 0).flat(), &|x| raw::kama(x[0], 5, 0).flat());
     series("kcw", &[&d.close[..], &d.high[..], &d.low[..]], &|x| ind::kcw(x[0], x[1], x[2],
         5, 5, 2.0).flat(), &|x| raw::kcw(x[0], x[1], x[2], 5, 5, 2.0).flat());
     series("kdj_d", &[&d.high[..], &d.low[..], &d.close[..]], &|x| ind::kdj_d(x[0], x[1],
@@ -245,8 +245,7 @@ fn a_full_computation_is_the_raw_one_over_the_complete_rows() {
         raw::mama(x[0], 0.5, 0.05).flat());
     series("mama_line", &[&d.close[..]], &|x| ind::mama_line(x[0], 0.5, 0.05, true).flat(),
         &|x| raw::mama_line(x[0], 0.5, 0.05, true).flat());
-    series("mass_index", &[&d.high[..], &d.low[..]], &|x| ind::mass_index(x[0], x[1],
-        5).flat(), &|x| raw::mass_index(x[0], x[1], 5).flat());
+    series("mass_index", &[&d.high[..], &d.low[..]], &|x| ind::mass_index(x[0], x[1], 5, 0).flat(), &|x| raw::mass_index(x[0], x[1], 5, 0).flat());
     series("minus_di", &[&d.high[..], &d.low[..], &d.close[..]], &|x| ind::minus_di(x[0],
         x[1], x[2], 5).flat(), &|x| raw::minus_di(x[0], x[1], x[2], 5).flat());
     series("minus_dm", &[&d.high[..], &d.low[..]], &|x| ind::minus_dm(x[0], x[1], 5).flat(),
@@ -279,8 +278,8 @@ fn a_full_computation_is_the_raw_one_over_the_complete_rows() {
         ind::stoch_momentum_signal(x[0], x[1], x[2], 5, 3, 4).flat(), &|x|
         raw::stoch_momentum_signal(x[0], x[1], x[2], 5, 3, 4).flat());
     series("stochrsi_d_default_sma", &[&d.close[..]], &|x|
-        ind::stochrsi_d_default_sma(x[0]).flat(), &|x|
-        raw::stochrsi_d_default_sma(x[0]).flat());
+        ind::stochrsi_d_default_sma(x[0], 0).flat(), &|x|
+        raw::stochrsi_d_default_sma(x[0], 0).flat());
     series("stochrsi_fastk", &[&d.close[..]], &|x| ind::stochrsi_fastk(x[0], 5, 3).flat(),
         &|x| raw::stochrsi_fastk(x[0], 5, 3).flat());
     series("supertrend", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
@@ -293,11 +292,11 @@ fn a_full_computation_is_the_raw_one_over_the_complete_rows() {
     series("tsi", &[&d.close[..]], &|x| ind::tsi(x[0], 6, 3).flat(), &|x| raw::tsi(x[0], 6,
         3).flat());
     series("ttm_squeeze_momentum", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        ind::ttm_squeeze_momentum(x[0], x[1], x[2], 5).flat(), &|x|
-        raw::ttm_squeeze_momentum(x[0], x[1], x[2], 5).flat());
+        ind::ttm_squeeze_momentum(x[0], x[1], x[2], 5, 0).flat(), &|x|
+        raw::ttm_squeeze_momentum(x[0], x[1], x[2], 5, 0).flat());
     series("ttm_squeeze_on", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        ind::ttm_squeeze_on(x[0], x[1], x[2], 5, 2.0, 1.5).flat(), &|x|
-        raw::ttm_squeeze_on(x[0], x[1], x[2], 5, 2.0, 1.5).flat());
+        ind::ttm_squeeze_on(x[0], x[1], x[2], 5, 2.0, 1.5, 0).flat(), &|x|
+        raw::ttm_squeeze_on(x[0], x[1], x[2], 5, 2.0, 1.5, 0).flat());
     series("wad", &[&d.high[..], &d.low[..], &d.close[..]], &|x| ind::wad(x[0], x[1],
         x[2]).flat(), &|x| raw::wad(x[0], x[1], x[2]).flat());
 }
@@ -351,8 +350,11 @@ fn a_state_describes_the_last_complete_row() {
         ind::ht_trendmode_state(x[0])), &|x| format!("{:?}",
         raw::ht_trendmode_state(x[0])));
     state("kama_final_state", &[&d.close[..]], &|x| format!("{:?}",
-        ind::kama_final_state(x[0], 5)), &|x| format!("{:?}", raw::kama_final_state(x[0],
-        5)));
+        ind::kama_final_state(x[0], 5, 0)), &|x| format!("{:?}", raw::kama_final_state(
+        x[0],
+        5,
+        0,
+        )));
     state("kdj_final_state", &[&d.high[..], &d.low[..], &d.close[..]], &|x| format!("{:?}",
         ind::kdj_final_state(x[0], x[1], x[2], 5, 3, 3, 50.0, true)), &|x| format!("{:?}",
         raw::kdj_final_state(x[0], x[1], x[2], 5, 3, 3, 50.0, true)));
@@ -368,8 +370,8 @@ fn a_state_describes_the_last_complete_row() {
     state("mama_state", &[&d.close[..]], &|x| format!("{:?}", ind::mama_state(x[0], 0.5,
         0.05)), &|x| format!("{:?}", raw::mama_state(x[0], 0.5, 0.05)));
     state("mass_index_final_state", &[&d.high[..], &d.low[..]], &|x| format!("{:?}",
-        ind::mass_index_final_state(x[0], x[1], 5)), &|x| format!("{:?}",
-        raw::mass_index_final_state(x[0], x[1], 5)));
+        ind::mass_index_final_state(x[0], x[1], 5, 0)), &|x| format!("{:?}",
+        raw::mass_index_final_state(x[0], x[1], 5, 0)));
     state("minus_di_final_state", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         format!("{:?}", ind::minus_di_final_state(x[0], x[1], x[2], 5)), &|x|
         format!("{:?}", raw::minus_di_final_state(x[0], x[1], x[2], 5)));
@@ -408,8 +410,8 @@ fn a_state_describes_the_last_complete_row() {
         ind::smma_final_state(x[0], 5)), &|x| format!("{:?}", raw::smma_final_state(x[0],
         5)));
     state("stochrsi_final_state", &[&d.close[..]], &|x| format!("{:?}",
-        ind::stochrsi_final_state(x[0], 5, 3, true, 3)), &|x| format!("{:?}",
-        raw::stochrsi_final_state(x[0], 5, 3, true, 3)));
+        ind::stochrsi_final_state(x[0], 5, 3, true, 3, 0)), &|x| format!("{:?}",
+        raw::stochrsi_final_state(x[0], 5, 3, true, 3, 0)));
     state("supertrend_final_state", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         format!("{:?}", ind::supertrend_final_state(x[0], x[1], x[2], 5, 2.0)), &|x|
         format!("{:?}", raw::supertrend_final_state(x[0], x[1], x[2], 5, 2.0)));
@@ -490,7 +492,7 @@ fn a_resume_continues_over_the_complete_rows() {
     resume("ht_trendmode_resume", &[&d.close[..]], &|x| raw::ht_trendmode_state(x[0]), &|x,
         from, st| ind::ht_trendmode_resume(x[0], from, st).into_option(), &|x, from, st|
         raw::ht_trendmode_resume(x[0], from, st).into_option());
-    resume("kama_resume", &[&d.close[..]], &|x| raw::kama_final_state(x[0], 5), &|x, from,
+    resume("kama_resume", &[&d.close[..]], &|x| raw::kama_final_state(x[0], 5, 0), &|x, from,
         st| ind::kama_resume(x[0], 5, from, st).into_option(), &|x, from, st|
         raw::kama_resume(x[0], 5, from, st).into_option());
     resume("kdj_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
@@ -514,7 +516,7 @@ fn a_resume_continues_over_the_complete_rows() {
         st| ind::mama_resume(x[0], 0.5, 0.05, true, from, st).into_option(), &|x, from, st|
         raw::mama_resume(x[0], 0.5, 0.05, true, from, st).into_option());
     resume("mass_index_resume", &[&d.high[..], &d.low[..]], &|x|
-        raw::mass_index_final_state(x[0], x[1], 5), &|x, from, st|
+        raw::mass_index_final_state(x[0], x[1], 5, 0), &|x, from, st|
         ind::mass_index_resume(x[0], x[1], 5, from, st).into_option(), &|x, from, st|
         raw::mass_index_resume(x[0], x[1], 5, from, st).into_option());
     resume("minus_di_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
@@ -563,8 +565,7 @@ fn a_resume_continues_over_the_complete_rows() {
     resume("smma_resume", &[&d.close[..]], &|x| raw::smma_final_state(x[0], 5), &|x, from,
         st| ind::smma_resume(x[0], 5, from, st).into_option(), &|x, from, st|
         raw::smma_resume(x[0], 5, from, st).into_option());
-    resume("stochrsi_resume", &[&d.close[..]], &|x| raw::stochrsi_final_state(x[0], 5, 3,
-        true, 3), &|x, from, st| ind::stochrsi_resume(x[0], 5, 3, true, 3, from,
+    resume("stochrsi_resume", &[&d.close[..]], &|x| raw::stochrsi_final_state(x[0], 5, 3, true, 3, 0), &|x, from, st| ind::stochrsi_resume(x[0], 5, 3, true, 3, from,
         st).into_option(), &|x, from, st| raw::stochrsi_resume(x[0], 5, 3, true, 3, from,
         st).into_option());
     resume("supertrend_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
@@ -627,7 +628,7 @@ fn a_single_row_resume_skips_a_missing_row() {
     step("ema_resume_one", &[&d.close[..]], &|x| raw::ema_final_state(x[0], 5), &|x, row,
         st| format!("{:?}", one(st, |n| ind::ema_resume_one(x[0], 5, row, st, n))), &|x, row, st|
         format!("{:?}", one(st, |n| raw::ema_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
-    step("kama_resume_one", &[&d.close[..]], &|x| raw::kama_final_state(x[0], 5), &|x, row,
+    step("kama_resume_one", &[&d.close[..]], &|x| raw::kama_final_state(x[0], 5, 0), &|x, row,
         st| format!("{:?}", one(st, |n| ind::kama_resume_one(x[0], 5, row, st, n))), &|x, row, st|
         format!("{:?}", one(st, |n| raw::kama_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("keltner_band_resume_one", &[&d.close[..], &d.high[..], &d.low[..]], &|x|
@@ -643,7 +644,7 @@ fn a_single_row_resume_skips_a_missing_row() {
         true, row, st, n))), &|x, row, st| format!("{:?}", one(st, |n| raw::macd_signal_resume_one(x[0], 3,
         6, 4, true, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("mass_index_resume_one", &[&d.high[..], &d.low[..]], &|x|
-        raw::mass_index_final_state(x[0], x[1], 5), &|x, row, st| format!("{:?}",
+        raw::mass_index_final_state(x[0], x[1], 5, 0), &|x, row, st| format!("{:?}",
         one(st, |n| ind::mass_index_resume_one(x[0], x[1], 5, row, st, n))), &|x, row, st| format!("{:?}",
         one(st, |n| raw::mass_index_resume_one(x[0], x[1], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("minus_di_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|

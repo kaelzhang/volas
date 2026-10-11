@@ -21,14 +21,16 @@ pub(super) fn dispatch(
             arg_usize(args, 0),
             arg_usize(args, 1),
             true,
+            ops.origin(),
         )),
         ("ema", _) => f64col(ind::ema(&close(0)?, arg_usize(args, 0))),
         ("smma", _) => f64col(ind::smma(&close(0)?, arg_usize(args, 0))),
-        ("wma", _) => f64col(ind::wma(&close(0)?, arg_usize(args, 0))),
+        ("wma", _) => f64col(ind::wma(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("vwma", _) => f64col(ind::vwma(
             &close(0)?,
             &ops.f64(1, "volume")?,
             arg_usize(args, 0),
+            ops.origin(),
         )),
         ("alma", _) => f64col(ind::alma(
             &close(0)?,
@@ -36,17 +38,17 @@ pub(super) fn dispatch(
             arg_f64(args, 1),
             arg_f64(args, 2),
         )),
-        ("hma", _) => f64col(ind::hma(&close(0)?, arg_usize(args, 0))),
+        ("hma", _) => f64col(ind::hma(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("swma", _) => f64col(ind::swma(&close(0)?)),
         ("dema", _) => f64col(ind::dema(&close(0)?, arg_usize(args, 0))),
         ("tema", _) => f64col(ind::tema(&close(0)?, arg_usize(args, 0))),
-        ("trima", _) => f64col(ind::trima(&close(0)?, arg_usize(args, 0))),
+        ("trima", _) => f64col(ind::trima(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("t3", _) => f64col(ind::t3(
             &close(0)?,
             arg_usize(args, 0),
             arg_f64(args, 1),
         )),
-        ("kama", _) => f64col(ind::kama(&close(0)?, arg_usize(args, 0))),
+        ("kama", _) => f64col(ind::kama(&close(0)?, arg_usize(args, 0), ops.origin())),
         // MA with a per-row variable period: the period for row i is the (truncated,
         // clamped) value of the required second `periods` series. Each distinct period's
         // MA is computed once and cached.
@@ -73,7 +75,7 @@ pub(super) fn dispatch(
                 let p = (periods[i] as i64).clamp(min_p as i64, max_p as i64) as usize;
                 if cache[p].is_none() {
                     let start = lb - crate::lookback::ma_lookback(p, matype);
-                    let sub = ma_typed(&real[start..], p, matype, true);
+                    let sub = ma_typed(&real[start..], p, matype, true, ops.origin() + start);
                     cache[p] = Some((start, sub));
                 }
                 let (start, sub) = cache[p].as_ref().unwrap();
@@ -111,8 +113,8 @@ pub(super) fn dispatch(
         ("apo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2);
-            let f = ma_typed(&data, arg_usize(args, 0), mt, true);
-            let s = ma_typed(&data, arg_usize(args, 1), mt, true);
+            let f = ma_typed(&data, arg_usize(args, 0), mt, true, ops.origin());
+            let s = ma_typed(&data, arg_usize(args, 1), mt, true, ops.origin());
             f64col((0..data.len()).map(|i| f[i] - s[i]).collect())
         }
         // MACDEXT: a MACD whose fast/slow/signal MAs each take a configurable type
@@ -120,14 +122,14 @@ pub(super) fn dispatch(
         // natural start (best practice, like macd); signal/histogram follow.
         ("macdext", sub) => {
             let data = close(0)?;
-            let f = ma_typed(&data, arg_usize(args, 0), arg_usize(args, 1), true);
-            let s = ma_typed(&data, arg_usize(args, 2), arg_usize(args, 3), true);
+            let f = ma_typed(&data, arg_usize(args, 0), arg_usize(args, 1), true, ops.origin());
+            let s = ma_typed(&data, arg_usize(args, 2), arg_usize(args, 3), true, ops.origin());
             let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
             match sub {
                 None => f64col(line),
                 _ => {
                     // the MACD line warms up with NaN: not known complete
-                    let signal = ma_typed(&line, arg_usize(args, 4), arg_usize(args, 5), false);
+                    let signal = ma_typed(&line, arg_usize(args, 4), arg_usize(args, 5), false, ops.origin());
                     if sub == Some("signal") {
                         f64col(signal)
                     } else {
@@ -139,8 +141,8 @@ pub(super) fn dispatch(
         ("ppo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2);
-            let f = ma_typed(&data, arg_usize(args, 0), mt, true);
-            let s = ma_typed(&data, arg_usize(args, 1), mt, true);
+            let f = ma_typed(&data, arg_usize(args, 0), mt, true, ops.origin());
+            let s = ma_typed(&data, arg_usize(args, 1), mt, true, ops.origin());
             f64col((0..data.len()).map(|i| percent_oscillator(f[i], s[i])).collect())
         }
 
@@ -148,19 +150,19 @@ pub(super) fn dispatch(
         // bias:N ≡ ppo:1,N,0 — the percentage deviation of close from its N-period SMA.
         ("bias", _) => {
             let data = close(0)?;
-            let f = ma_typed(&data, 1, 0, true);
-            let s = ma_typed(&data, arg_usize(args, 0), 0, true);
+            let f = ma_typed(&data, 1, 0, true, ops.origin());
+            let s = ma_typed(&data, arg_usize(args, 0), 0, true, ops.origin());
             f64col((0..data.len()).map(|i| percent_oscillator(f[i], s[i])).collect())
         }
         // dma's DDD line ≡ apo:fast,slow,0; dma.ama is the M-period SMA of that line.
         ("dma", sub) => {
             let data = close(0)?;
-            let f = ma_typed(&data, arg_usize(args, 0), 0, true);
-            let s = ma_typed(&data, arg_usize(args, 1), 0, true);
+            let f = ma_typed(&data, arg_usize(args, 0), 0, true, ops.origin());
+            let s = ma_typed(&data, arg_usize(args, 1), 0, true, ops.origin());
             let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
             match sub {
                 None => f64col(line),
-                _ => f64col(ma_typed(&line, arg_usize(args, 2), 0, false)),
+                _ => f64col(ma_typed(&line, arg_usize(args, 2), 0, false, ops.origin())),
             }
         }
 
@@ -175,30 +177,32 @@ pub(super) fn dispatch(
                 &close,
                 arg_usize(args, 0),
                 sub == Some("plus"),
+                ops.origin(),
             ))
         }
         ("brar", Some("br")) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
-            f64col(ind::brar_br(&high, &low, &close, arg_usize(args, 0)))
+            f64col(ind::brar_br(&high, &low, &close, arg_usize(args, 0), ops.origin()))
         }
         ("brar", _) => {
             let open = ops.f64(0, "open")?;
             let high = ops.f64(1, "high")?;
             let low = ops.f64(2, "low")?;
-            f64col(ind::brar_ar(&open, &high, &low, arg_usize(args, 0)))
+            f64col(ind::brar_ar(&open, &high, &low, arg_usize(args, 0), ops.origin()))
         }
         ("vr", _) => {
             let close = ops.f64(0, "close")?;
             let volume = ops.f64(1, "volume")?;
-            f64col(ind::vr(&close, &volume, arg_usize(args, 0)))
+            f64col(ind::vr(&close, &volume, arg_usize(args, 0), ops.origin()))
         }
         ("coppock", _) => f64col(ind::coppock(
             &close(0)?,
             arg_usize(args, 0),
             arg_usize(args, 1),
             arg_usize(args, 2),
+            ops.origin(),
         )),
         ("relative_vigor", sub) => {
             let open = ops.f64(0, "open")?;
@@ -207,9 +211,9 @@ pub(super) fn dispatch(
             let close = ops.f64(3, "close")?;
             let n = arg_usize(args, 0);
             if sub == Some("signal") {
-                f64col(ind::relative_vigor_signal(&open, &high, &low, &close, n))
+                f64col(ind::relative_vigor_signal(&open, &high, &low, &close, n, ops.origin()))
             } else {
-                f64col(ind::relative_vigor(&open, &high, &low, &close, n))
+                f64col(ind::relative_vigor(&open, &high, &low, &close, n, ops.origin()))
             }
         }
         ("dkx", sub) => {
@@ -218,9 +222,9 @@ pub(super) fn dispatch(
             let low = ops.f64(2, "low")?;
             let close = ops.f64(3, "close")?;
             if sub == Some("ma") {
-                f64col(ind::dkx_ma(&open, &high, &low, &close, arg_usize(args, 0)))
+                f64col(ind::dkx_ma(&open, &high, &low, &close, arg_usize(args, 0), ops.origin()))
             } else {
-                f64col(ind::dkx(&open, &high, &low, &close))
+                f64col(ind::dkx(&open, &high, &low, &close, ops.origin()))
             }
         }
         ("wvad", _) => {
@@ -229,7 +233,7 @@ pub(super) fn dispatch(
             let low = ops.f64(2, "low")?;
             let close = ops.f64(3, "close")?;
             let volume = ops.f64(4, "volume")?;
-            f64col(ind::wvad(&open, &high, &low, &close, &volume, arg_usize(args, 0)))
+            f64col(ind::wvad(&open, &high, &low, &close, &volume, arg_usize(args, 0), ops.origin()))
         }
         ("cdp", sub) => {
             let high = ops.f64(0, "high")?;
@@ -310,9 +314,10 @@ pub(super) fn dispatch(
                     n,
                     arg_f64(args, 1),
                     arg_f64(args, 2),
+                    ops.origin(),
                 ))
             } else {
-                f64col(ind::ttm_squeeze_momentum(&high, &low, &close, n))
+                f64col(ind::ttm_squeeze_momentum(&high, &low, &close, n, ops.origin()))
             }
         }
         ("pivot_points", sub) => {
@@ -385,7 +390,7 @@ pub(super) fn dispatch(
 /// TA-Lib `TA_INT_PO` (PPO, and `bias` ≡ `ppo:1,N,0`): `(fast - slow) / slow * 100`,
 /// and 0 where the slow MA is exactly zero (TA-Lib's `TA_IS_ZERO` is an absolute
 /// epsilon; volas tests exact zero). A fast MA still warming up stays NaN.
-fn percent_oscillator(fast: f64, slow: f64) -> f64 {
+pub(crate) fn percent_oscillator(fast: f64, slow: f64) -> f64 {
     if slow == 0.0 && !fast.is_nan() {
         0.0
     } else {

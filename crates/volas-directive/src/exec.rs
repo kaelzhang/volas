@@ -200,28 +200,28 @@ pub(crate) fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Ve
 /// Infallible: every caller's matype is either a literal or a spec-validated
 /// argument (`ArgBound::IntRange(0, 8)` at the exec boundary), so a value past
 /// 8 cannot reach here.
-fn ma_typed(data: &[f64], period: usize, matype: usize, complete: bool) -> Vec<f64> {
+fn ma_typed(data: &[f64], period: usize, matype: usize, complete: bool, origin: usize) -> Vec<f64> {
     // A recursive average runs on the complete rows of its input — the input may be a
     // derived line that warms up with NaN (see `volas_compute::missing`). A recursive
     // command's own input is complete wherever its result is kept (`complete`), so it
     // is not scanned.
     if crate::spec::is_recursive_matype(matype) {
         let input = if complete { Input::known(data, false) } else { Input::new(data) };
-        return on_complete_rows(&[input], |x| ma_kernel(x[0], period, matype));
+        return on_complete_rows(&[input], |x| ma_kernel(x[0], period, matype, origin));
     }
-    ma_kernel(data, period, matype)
+    ma_kernel(data, period, matype, origin)
 }
 
 /// The moving average of `matype` over `data`.
-fn ma_kernel(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
+fn ma_kernel(data: &[f64], period: usize, matype: usize, origin: usize) -> Vec<f64> {
     match matype {
-        0 => ind::ma(data, period),
+        0 => ind::ma(data, period, origin),
         1 => ind::ema(data, period),
-        2 => ind::wma(data, period),
+        2 => ind::wma(data, period, origin),
         3 => ind::dema(data, period),
         4 => ind::tema(data, period),
-        5 => ind::trima(data, period),
-        6 => ind::kama(data, period),
+        5 => ind::trima(data, period, origin),
+        6 => ind::kama(data, period, origin),
         7 => ind::mama(data, 0.5, 0.05).0,
         8 => ind::t3(data, period, 0.7),
         other => unreachable!("matype {other} is rejected by the spec bound"), // LCOV_EXCL_LINE
@@ -234,6 +234,7 @@ fn ma_kernel(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
 mod cycle;
 mod momentum;
 mod overlap;
+pub(crate) use overlap::percent_oscillator;
 
 /// The dispatch entry point: a bound command (canonical name / sub, typed args,
 /// bound series) routed to its kernel. Validation / defaulting / normalization

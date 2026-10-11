@@ -112,6 +112,12 @@ impl<'a> Operands<'a> {
         }
     }
 
+    /// The absolute position of the frame's row 0 (`DataFrame::origin`): where a
+    /// sliding-window kernel re-anchors its running sums.
+    pub(crate) fn origin(&self) -> usize {
+        self.df.origin()
+    }
+
     /// The input at `slot`, resolved on its first read (`default` names its column
     /// when no operand fills the slot).
     fn read(&self, slot: usize, default: &str) -> Result<&Read<'a>> {

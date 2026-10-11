@@ -112,7 +112,7 @@ on_complete_rows! { series:
     ht_sine(price) -> (Vec<f64>, Vec<f64>);
     ht_trendline(price) -> Vec<f64>;
     ht_trendmode(price) -> Vec<f64>;
-    kama(data; period: usize) -> Vec<f64>;
+    kama(data; period: usize, origin: usize) -> Vec<f64>;
     kcw(close, high, low; ema_period: usize, atr_period: usize, mult: f64) -> Vec<f64>;
     kdj_d(high, low, close; period_rsv: usize, period_k: usize, period_d: usize, init: f64) ->
         Vec<f64>;
@@ -126,7 +126,7 @@ on_complete_rows! { series:
     macd_signal(close; fast: usize, slow: usize, signal: usize) -> Vec<f64>;
     mama(price; fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f64>);
     mama_line(price; fast_limit: f64, slow_limit: f64, want_fama: bool) -> Vec<f64>;
-    mass_index(high, low; n: usize) -> Vec<f64>;
+    mass_index(high, low; n: usize, origin: usize) -> Vec<f64>;
     minus_di(high, low, close; period: usize) -> Vec<f64>;
     minus_dm(high, low; period: usize) -> Vec<f64>;
     natr(high, low, close; period: usize) -> Vec<f64>;
@@ -144,15 +144,18 @@ on_complete_rows! { series:
     smma(close; period: usize) -> Vec<f64>;
     stoch_momentum(high, low, close; k: usize, d: usize) -> Vec<f64>;
     stoch_momentum_signal(high, low, close; k: usize, d: usize, signal: usize) -> Vec<f64>;
-    stochrsi_d_default_sma(close) -> Option<Vec<f64>>;
+    stochrsi_d_default_sma(close; origin: usize) -> Option<Vec<f64>>;
+    stochrsi_d_sma(close; rsi_period: usize, fastk_period: usize, fastd_period: usize, origin:
+        usize) -> Vec<f64>;
     stochrsi_fastk(close; rsi_period: usize, fastk_period: usize) -> Vec<f64>;
     supertrend(high, low, close; period: usize, mult: f64, want_direction: bool) -> Vec<f64>;
     t3(data; period: usize, vfactor: f64) -> Vec<f64>;
     tema(data; period: usize) -> Vec<f64>;
     trix(close; period: usize) -> Vec<f64>;
     tsi(close; long: usize, short: usize) -> Vec<f64>;
-    ttm_squeeze_momentum(high, low, close; n: usize) -> Vec<f64>;
-    ttm_squeeze_on(high, low, close; n: usize, bb_mult: f64, kc_mult: f64) -> Vec<f64>;
+    ttm_squeeze_momentum(high, low, close; n: usize, origin: usize) -> Vec<f64>;
+    ttm_squeeze_on(high, low, close; n: usize, bb_mult: f64, kc_mult: f64, origin: usize) ->
+        Vec<f64>;
     wad(high, low, close) -> Vec<f64>;
 }
 
@@ -173,7 +176,7 @@ on_complete_rows! { state:
     ht_sine_state(price) -> Option<Vec<f64>>;
     ht_trendline_state(price) -> Option<Vec<f64>>;
     ht_trendmode_state(price) -> Option<Vec<f64>>;
-    kama_final_state(data; period: usize) -> Option<Vec<f64>>;
+    kama_final_state(data; period: usize, origin: usize) -> Option<Vec<f64>>;
     kdj_final_state(high, low, close; period_rsv: usize, period_k: usize, period_d: usize, init:
         f64, want_d: bool) -> Option<Vec<f64>>;
     keltner_band_final_state(close, high, low; ema_period: usize, atr_period: usize) ->
@@ -181,7 +184,7 @@ on_complete_rows! { state:
     macd_final_state(close; fast: usize, slow: usize) -> Option<Vec<f64>>;
     macd_signal_final_state(close; fast: usize, slow: usize, signal: usize) -> Option<Vec<f64>>;
     mama_state(price; fast_limit: f64, slow_limit: f64) -> Option<Vec<f64>>;
-    mass_index_final_state(high, low; n: usize) -> Option<Vec<f64>>;
+    mass_index_final_state(high, low; n: usize, origin: usize) -> Option<Vec<f64>>;
     minus_di_final_state(high, low, close; period: usize) -> Option<Vec<f64>>;
     minus_dm_final_state(high, low; period: usize) -> Option<Vec<f64>>;
     nvi_final_state(close, volume) -> Option<Vec<f64>>;
@@ -197,7 +200,7 @@ on_complete_rows! { state:
         accel_max_short: f64) -> Option<Vec<f64>>;
     smma_final_state(data; period: usize) -> Option<Vec<f64>>;
     stochrsi_final_state(close; rsi_period: usize, fastk_period: usize, is_d: bool,
-        fastd_period: usize) -> Option<Vec<f64>>;
+        fastd_period: usize, origin: usize) -> Option<Vec<f64>>;
     supertrend_final_state(high, low, close; period: usize, mult: f64) -> Option<Vec<f64>>;
     t3_final_state(data; period: usize) -> Option<Vec<f64>>;
     tema_final_state(data; period: usize) -> Option<Vec<f64>>;

@@ -87,7 +87,7 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
         ("mass_index", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
-            ind::mass_index_final_state(&high, &low, arg_usize(args, 0))
+            ind::mass_index_final_state(&high, &low, arg_usize(args, 0), ops.origin())
         }
 
         // Keltner Channels (Group B): the middle line reuses the EMA state; the bands carry
@@ -195,6 +195,7 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
         ("kama", _) => ind::kama_final_state(
             &ops.f64(0, "close").ok()?,
             arg_usize(args, 0),
+            ops.origin(),
         ),
 
         ("macd", None) => ind::macd_final_state(
@@ -325,6 +326,7 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
                 arg_usize(args, 1),
                 is_d,
                 arg_usize(args, 2),
+                ops.origin(),
             )
         }
 

@@ -2,7 +2,8 @@
 //! `cascade_warmup` and the EMA lattice resume.
 
 use crate::raw::indicators::trend::ma::ema_k;
-use crate::guard::ring_push;
+use crate::accum::{Anchors, Csum};
+use crate::guard::{ring_push, Slide};
 use crate::raw::kernels;
 
 /// Staggered warm-up for a cascade of `S` SMA-seeded EMAs (`k = 2/(period+1)`): each
@@ -101,8 +102,8 @@ pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
 /// Triangular moving average (TA-Lib TRIMA): a double SMA whose net weights rise to
 /// the window centre then fall. Since convolution commutes, the two SMA windows are
 /// `((n+1)/2, (n+1)/2)` for odd `n` and `(n/2, n/2+1)` for even `n` (either order).
-/// Lookback `period-1`.
-pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
+/// Row 0 is at absolute position `origin`. Lookback `period-1`.
+pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -111,40 +112,41 @@ pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
     // Skip a leading-NaN warm-up prefix (see `wma`).
     let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
     if start > 0 {
-        let sub = trima(&data[start..], period);
+        let sub = trima(&data[start..], period, origin + start);
         out[start..].copy_from_slice(&sub);
         return out;
     }
-    let (a, b) = if period % 2 == 1 {
-        let m = period.div_ceil(2);
-        (m, m)
-    } else {
-        let m = period / 2;
-        (m, m + 1)
-    };
+    let (a, b) = trima_windows(period);
     // Fuse the two SMA convolutions into one pass (no intermediate `inner` array): a
     // running `sum1` slides the inner a-window, each inner mean feeds `sum2` — the
-    // outer b-window sum over a ring of the last `b` inner means. Both windows use SMA's
-    // exact add-then-subtract order, and the outer slide begins at the first finite
-    // inner mean (index a-1, mirroring the leading-NaN skip), so this is bit-identical
-    // to `sma(sma(data, a), b)`.
+    // outer b-window sum over a ring of the last `b` inner means. Both follow `sma`'s
+    // fast path exactly — add then subtract, re-anchored at absolute positions — and
+    // the outer slide begins at the first finite inner mean (index a-1, `sma`'s
+    // leading-NaN skip), so this is bit-identical to `sma(sma(data, a), b)`.
     let af = a as f64;
     let bf = b as f64;
-    let mut sum1 = 0.0;
-    let mut sum2 = 0.0;
+    let mut sum1 = Csum::default();
+    let mut sum2 = Csum::default();
+    let (mut anchors_a, mut anchors_b) = (Anchors::from(origin, a), Anchors::from(origin, b));
+    let mut clean = true;
     let mut ring = vec![0.0; b];
     let mut slot = 0usize;
     let mut inner_cnt = 0usize;
     for i in 0..n {
-        sum1 += data[i];
+        sum1.add(data[i]);
         if i >= a {
-            sum1 -= data[i - a];
+            sum1.sub(data[i - a]);
         }
+        if anchors_a.tick() && i + 1 >= a {
+            clean &= sum1.value().is_finite();
+            sum1 = Csum::of(data[i + 1 - a..=i].iter().copied());
+        }
+        let anchor_b = anchors_b.tick();
         if i + 1 >= a {
-            let inner = sum1 / af;
-            sum2 += inner;
+            let inner = sum1.mean(af);
+            sum2.add(inner);
             if inner_cnt >= b {
-                sum2 -= ring[slot]; // the inner mean leaving the outer window
+                sum2.sub(ring[slot]); // the inner mean leaving the outer window
             }
             ring[slot] = inner;
             slot += 1;
@@ -152,18 +154,25 @@ pub fn trima(data: &[f64], period: usize) -> Vec<f64> {
                 slot = 0;
             }
             inner_cnt += 1;
+            if anchor_b && i + 1 >= b {
+                clean &= sum2.value().is_finite();
+                // the window's inner means, oldest first (fewer than `b` at the start)
+                let m = inner_cnt.min(b);
+                sum2 = Csum::of((0..m).map(|k| ring[(slot + b - m + k) % b]));
+            }
             if inner_cnt >= b {
-                out[i] = sum2 / bf;
+                out[i] = sum2.mean(bf);
             }
         }
     }
-    if sum1.is_finite() && sum2.is_finite() {
+    if clean && sum1.value().is_finite() && sum2.value().is_finite() {
         return out;
     }
     // A non-finite row entered: fall back to the reference composition this fused pass
     // is bit-identical to. Both SMAs are window-local (see `crate::guard`), so a bad
     // row reaches only the windows holding it.
-    crate::raw::indicators::trend::ma::ma(&crate::raw::indicators::trend::ma::ma(data, a), b)
+    let ma = crate::raw::indicators::trend::ma::ma;
+    ma(&ma(data, a, origin), b, origin)
 }
 
 /// Tillson T3 (TA-Lib T3): `c1·e6 + c2·e5 + c3·e4 + c4·e3` over six cascaded
@@ -378,6 +387,13 @@ pub(crate) fn trima_state_len(period: usize) -> usize {
     2 * kernels::SMA_STATE + trima_windows(period).1
 }
 
+/// [`trima`]'s state before its first row, at absolute position `origin`.
+pub(crate) fn trima_initial(period: usize, origin: usize) -> Vec<f64> {
+    let mut v = Slide::<1>::initial(origin).repeat(2);
+    v.resize(trima_state_len(period), 0.0);
+    v
+}
+
 /// One row of [`trima`] over the series `term` at `row` — `sma(sma(term, a), b)`, which
 /// the fused pass is bit-identical to — from `state` into `next`.
 pub(crate) fn trima_row(
@@ -404,9 +420,9 @@ pub(crate) fn trima_row(
     Some(value)
 }
 
-/// [`trima`]'s state after the rows of `data`.
-pub fn trima_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
-    super::FiniteMa::new(period, 5)?.state(data.len(), |j| data[j])
+/// [`trima`]'s state after the rows of `data` (row 0 at absolute position `origin`).
+pub fn trima_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
+    super::FiniteMa::new(period, 5)?.state(data.len(), origin, |j| data[j])
 }
 
 /// One row of [`trima`] at `row`, from `state` into `next`.

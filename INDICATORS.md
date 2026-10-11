@@ -58,6 +58,22 @@ the outputs whose definition reads it:
   value, not a missing row. This diverges from TA-Lib, which carries a NaN into every
   later output of a recursive indicator.
 
+<a id="exact-window-sums"></a>**Exact window sums.** An indicator built on a sliding sum
+(a moving average, a rolling sum, variance, regression, correlation, the sums of CCI /
+MFI / IMI / ULTOSC / VWMA / CMF / …, KAMA's sum of changes) slides it by adding the
+entering row and subtracting the leaving one. volas keeps that sum exact: it carries
+the rounding error of every step (compensated summation), and it recomputes the sum from
+the window's own rows at every row whose absolute position in the series is a multiple
+of the window length. So a window's value is that of its own rows, however long the
+history: after `close = [1e20, 1, 2, 3, 4, 5]`, `ma:2` is `[nan, 5e19, 1.5, 2.5, 3.5,
+4.5]`; a flat window's `stddev` is exactly `0` and its `ma` exactly its value, after any
+history; and once a bad row has left the window and the next anchor has passed, every
+output is bit-identical to clean data's. TA-Lib's plain running sums give `[nan, 5e19,
+1, 2, 3, 4]` for the example above (every window after the spike stays wrong) and drift
+over a long history; volas follows the exact values instead, so on such data the two
+differ. A row's absolute position is kept by a contiguous slice and by a bounded
+(`window=`) frame dropping its head, so they compute exactly what the full series does.
+
 ## Volas-exclusive indicators
 
 These directives are implemented by Volas itself. Many of them follow the

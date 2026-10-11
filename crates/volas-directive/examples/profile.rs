@@ -96,12 +96,12 @@ fn main() {
     let low = df.column("low").unwrap().as_f64().unwrap().to_vec();
     let kernel = |d: &str| -> Option<f64> {
         Some(match d {
-            "ma:20" => median_us(iters, || ind::ma(&close, 20)),
+            "ma:20" => median_us(iters, || ind::ma(&close, 20, 0)),
             "ema:12" => median_us(iters, || ind::ema(&close, 12)),
             "macd" => median_us(iters, || ind::macd(&close, 12, 26)),
             "macd.signal" => median_us(iters, || ind::macd_signal(&close, 12, 26, 9)),
-            "boll.upper" => median_us(iters, || ind::boll_upper(&close, 20, 2.0)),
-            "bbw" => median_us(iters, || ind::bbw(&close, 20)),
+            "boll.upper" => median_us(iters, || ind::boll_upper(&close, 20, 2.0, 0)),
+            "bbw" => median_us(iters, || ind::bbw(&close, 20, 0)),
             "rsi:14" => median_us(iters, || ind::rsi(&close, 14)),
             "atr:14" => median_us(iters, || ind::atr(&high, &low, &close, 14)),
             "llv:10" => median_us(iters, || ind::llv(&low, 10)),

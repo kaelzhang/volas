@@ -70,6 +70,15 @@ pub struct DataFrame {
     /// `clone` / `append`; dropped by shape-changing ops (slice/select/…), where
     /// the columns become plain data.
     computed: FxHashMap<String, ComputedMeta>,
+    /// The absolute position of row 0 in the series this frame continues: `0` for a
+    /// new frame; a contiguous slice (a bounded frame dropping its head included) adds
+    /// its start, so every row keeps the position it has in the full series. A
+    /// derivation over the same rows (columns, names, dtypes, index) keeps it; one
+    /// that selects rows otherwise (`take`, a mask) starts a new series at `0`.
+    /// Sliding-window computations re-anchor their running sums at absolute positions
+    /// (see `volas_compute`), so a value depends only on the rows near it, the same in
+    /// the frame and in the full series.
+    origin: usize,
 }
 
 impl DataFrame {
@@ -117,6 +126,7 @@ impl DataFrame {
             index: Arc::new(index),
             height,
             computed: FxHashMap::default(),
+            origin: 0,
         };
         #[cfg(debug_assertions)]
         df.debug_check();
@@ -141,6 +151,19 @@ impl DataFrame {
             assert!(self.name_to_idx.contains_key(name), "computed {name:?} is not a column");
             assert!(meta.valid_rows <= self.height, "computed {name:?} cursor past the height");
         }
+    }
+
+    /// The absolute position of row 0 in the series this frame continues (see the
+    /// field).
+    pub fn origin(&self) -> usize {
+        self.origin
+    }
+
+    /// This frame, its row 0 at absolute position `origin` — for a derivation that
+    /// keeps the rows of a frame through [`DataFrame::new`].
+    pub fn with_origin(mut self, origin: usize) -> Self {
+        self.origin = origin;
+        self
     }
 
     /// Number of rows.
@@ -197,7 +220,8 @@ impl DataFrame {
     /// derivations (slice / take / mask / astype), with no name-string or hash-map
     /// rebuild. Computed-column status is dropped; the caller re-attaches it where
     /// the derivation preserves it (a contiguous slice).
-    fn same_schema(&self, columns: Vec<Column>, index: Index) -> DataFrame {
+    /// Row 0 of the result is at absolute position `origin`.
+    fn same_schema(&self, columns: Vec<Column>, index: Index, origin: usize) -> DataFrame {
         let height = columns.first().map_or(0, |c| c.len());
         DataFrame {
             names: Arc::clone(&self.names),
@@ -206,13 +230,14 @@ impl DataFrame {
             index: Arc::new(index),
             height,
             computed: FxHashMap::default(),
+            origin,
         }
     }
 
-    /// Gather rows by position into a new frame.
+    /// Gather rows by position into a new frame (a new series: origin 0).
     pub fn take(&self, positions: &[usize]) -> DataFrame {
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(positions)).collect();
-        self.same_schema(columns, self.index.take(positions))
+        self.same_schema(columns, self.index.take(positions), 0)
     }
 
     /// Borrow a column by name.
@@ -275,7 +300,7 @@ impl DataFrame {
         let mut columns = self.columns.clone();
         names.remove(pos);
         columns.remove(pos);
-        DataFrame::new(names, columns, Some(index))
+        Ok(DataFrame::new(names, columns, Some(index))?.with_origin(self.origin))
     }
 
     /// Change the DatetimeIndex's **display / matching** timezone without moving
@@ -379,6 +404,7 @@ impl DataFrame {
             index: Arc::clone(&self.index),
             height: self.height,
             computed: FxHashMap::default(),
+            origin: self.origin,
         })
     }
 
@@ -394,7 +420,7 @@ impl DataFrame {
         let end = end.max(start).min(self.height);
         let len = end - start;
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
-        let mut df = self.same_schema(columns, self.index.slice(start, end));
+        let mut df = self.same_schema(columns, self.index.slice(start, end), self.origin + start);
         // SP-9: carry cached-directive columns *as continuable computed columns*
         // through a contiguous slice. The cached values are already correct (they
         // were computed with full history) and are carried verbatim; we re-tag the
@@ -460,7 +486,7 @@ impl DataFrame {
         let start = start.min(self.height);
         let end = end.max(start).min(self.height);
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
-        self.same_schema(columns, self.index.slice(start, end))
+        self.same_schema(columns, self.index.slice(start, end), self.origin + start)
     }
 
     /// Filter rows by a boolean mask.
@@ -478,7 +504,7 @@ impl DataFrame {
             .filter_map(|(i, &b)| if b { Some(i) } else { None })
             .collect();
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(&idx)).collect();
-        Ok(self.same_schema(columns, self.index.take(&idx)))
+        Ok(self.same_schema(columns, self.index.take(&idx), 0))
     }
 
     /// Append the rows of `other` (matched by column name) in place. Columns of
@@ -746,7 +772,7 @@ impl DataFrame {
             .iter()
             .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
             .collect();
-        DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))
+        Ok(DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))?.with_origin(self.origin))
     }
 
     /// Cast the named columns to new dtypes (pandas `astype`), returning a new
@@ -759,7 +785,7 @@ impl DataFrame {
                 .ok_or_else(|| VolasError::ColumnNotFound(name.clone()))?;
             columns[pos] = self.columns[pos].cast(*dtype)?;
         }
-        Ok(self.same_schema(columns, (*self.index).clone()))
+        Ok(self.same_schema(columns, (*self.index).clone(), self.origin))
     }
 
     /// Value equality (pandas `DataFrame.equals`): same column names + order,

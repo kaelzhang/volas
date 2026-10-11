@@ -680,10 +680,10 @@ pub fn accumulates(name: &str, sub: Option<&str>) -> bool {
             name,
             "accbands" | "apo" | "bbi" | "bbw" | "beta" | "bias" | "boll" | "cci" | "cmf"
                 | "cog" | "coppock" | "correl" | "dkx" | "dma" | "dpo" | "emv" | "hma" | "hv"
-                | "kst" | "linearreg" | "linearreg_angle" | "linearreg_intercept"
+                | "imi" | "kst" | "linearreg" | "linearreg_angle" | "linearreg_intercept"
                 | "linearreg_slope" | "ma" | "macdext" | "mavp" | "mfi" | "ppo"
-                | "relative_vigor" | "stddev" | "stoch" | "sum" | "trima" | "tsf" | "var"
-                | "vr" | "vwma" | "wma" | "wvad"
+                | "relative_vigor" | "stddev" | "stoch" | "sum" | "trima" | "tsf" | "ultosc"
+                | "var" | "vr" | "vwma" | "wma" | "wvad"
         ),
     }
 }

@@ -9,7 +9,7 @@
 //! averages here (`apo`, `ppo`, `bias`, `dma`, `macdext`, `mavp`, `ma`) compose
 //! [`FiniteMa`] stages, as their dispatch arms compose `ma_typed`.
 
-use crate::exec::{arg_f64, arg_i64, arg_str, arg_usize, tf_to_minutes};
+use crate::exec::{arg_f64, arg_i64, arg_str, arg_usize, percent_oscillator, tf_to_minutes};
 use crate::lookback::ma_lookback;
 use crate::operands::Operands;
 use crate::types::ArgValue;
@@ -32,68 +32,73 @@ pub(crate) fn state(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgVa
         ))
     };
     match (name, sub) {
-        ("ma", _) => ind::ma_state(&close()?, p(0), p(1)),
-        ("wma", _) => ind::ma_state(&close()?, p(0), 2),
-        ("trima", _) => ind::trima_state(&close()?, p(0)),
-        ("boll", None) => ind::ma_state(&close()?, p(0), 0),
-        ("boll", Some(_)) | ("bbw", _) => ind::boll_band_state(&close()?, p(0)),
-        ("accbands", None) => ind::ma_state(&close()?, p(0), 0),
+        ("ma", _) => ind::ma_state(&close()?, p(0), p(1), ops.origin()),
+        ("wma", _) => ind::ma_state(&close()?, p(0), 2, ops.origin()),
+        ("trima", _) => ind::trima_state(&close()?, p(0), ops.origin()),
+        ("boll", None) => ind::ma_state(&close()?, p(0), 0, ops.origin()),
+        ("boll", Some(_)) | ("bbw", _) => ind::boll_band_state(&close()?, p(0), ops.origin()),
+        ("accbands", None) => ind::ma_state(&close()?, p(0), 0, ops.origin()),
         ("accbands", Some(band)) => {
             let (h, l) = hl()?;
-            ind::accbands_band_state(&h, &l, p(0), band == "upper")
+            ind::accbands_band_state(&h, &l, p(0), band == "upper", ops.origin())
         }
-        ("bbi", _) => ind::bbi_state(&close()?, p(0), p(1), p(2), p(3)),
-        ("hma", _) => ind::hma_state(&close()?, p(0)),
-        ("vwma", _) => ind::vwma_state(&close()?, &ops.f64(1, "volume").ok()?, p(0)),
-        ("hv", _) => ind::hv_state(&close()?, p(0)),
-        ("var" | "stddev", _) => ind::var_state(&close()?, p(0)),
-        ("sum", _) => ind::sum_state(&close()?, p(0)),
+        ("bbi", _) => ind::bbi_state(&close()?, p(0), p(1), p(2), p(3), ops.origin()),
+        ("hma", _) => ind::hma_state(&close()?, p(0), ops.origin()),
+        ("vwma", _) => ind::vwma_state(&close()?, &ops.f64(1, "volume").ok()?, p(0), ops.origin()),
+        ("hv", _) => ind::hv_state(&close()?, p(0), ops.origin()),
+        ("var" | "stddev", _) => ind::var_state(&close()?, p(0), ops.origin()),
+        ("sum", _) => ind::sum_state(&close()?, p(0), ops.origin()),
         (
             "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf",
             _,
-        ) => ind::linreg_state(&close()?, p(0)),
-        ("correl", _) => ind::correl_state(&close()?, &ops.f64_required(1).ok()?, p(0)),
-        ("beta", _) => ind::beta_state(&close()?, &ops.f64_required(1).ok()?, p(0)),
+        ) => ind::linreg_state(&close()?, p(0), ops.origin()),
+        ("correl", _) => ind::correl_state(&close()?, &ops.f64_required(1).ok()?, p(0), ops.origin()),
+        ("beta", _) => ind::beta_state(&close()?, &ops.f64_required(1).ok()?, p(0), ops.origin()),
         ("cci", _) => {
             let (h, l, c) = hlc()?;
-            ind::cci_state(&h, &l, &c, p(0))
+            ind::cci_state(&h, &l, &c, p(0), ops.origin())
         }
         ("mfi", _) => {
             let (h, l, c) = hlc()?;
-            ind::mfi_state(&h, &l, &c, &ops.f64(3, "volume").ok()?, p(0))
+            ind::mfi_state(&h, &l, &c, &ops.f64(3, "volume").ok()?, p(0), ops.origin())
         }
-        ("cog", _) => ind::cog_state(&close()?, p(0)),
+        ("cog", _) => ind::cog_state(&close()?, p(0), ops.origin()),
+        ("imi", _) => ind::imi_state(&ops.f64(0, "open").ok()?, &ops.f64(1, "close").ok()?, p(0), ops.origin()),
+        ("ultosc", _) => {
+            let (h, l, c) = hlc()?;
+            ind::ultosc_state(&h, &l, &c, p(0), p(1), p(2), ops.origin())
+        }
         ("cmf", _) => {
             let (h, l, c) = hlc()?;
-            ind::cmf_state(&h, &l, &c, &ops.f64(3, "volume").ok()?, p(0))
+            ind::cmf_state(&h, &l, &c, &ops.f64(3, "volume").ok()?, p(0), ops.origin())
         }
-        ("dpo", _) => ind::dpo_state(&close()?, p(0)),
+        ("dpo", _) => ind::dpo_state(&close()?, p(0), ops.origin()),
         ("emv", _) => {
             let (h, l) = hl()?;
-            ind::emv_state(&h, &l, &ops.f64(2, "volume").ok()?, p(0))
+            ind::emv_state(&h, &l, &ops.f64(2, "volume").ok()?, p(0), ops.origin())
         }
-        ("kst", _) => ind::kst_state(&close()?),
-        ("coppock", _) => ind::coppock_state(&close()?, p(0), p(1), p(2)),
+        ("kst", _) => ind::kst_state(&close()?, ops.origin()),
+        ("coppock", _) => ind::coppock_state(&close()?, p(0), p(1), p(2), ops.origin()),
         ("relative_vigor", sub) => {
             let (o, h, l, c) = ohlc()?;
-            ind::relative_vigor_state(&o, &h, &l, &c, p(0), sub == Some("signal"))
+            ind::relative_vigor_state(&o, &h, &l, &c, p(0), sub == Some("signal"), ops.origin())
         }
         ("dkx", sub) => {
             let (o, h, l, c) = ohlc()?;
-            ind::dkx_state(&o, &h, &l, &c, (sub == Some("ma")).then(|| p(0)))
+            ind::dkx_state(&o, &h, &l, &c, (sub == Some("ma")).then(|| p(0)), ops.origin())
         }
         ("wvad", _) => {
             let (o, h, l, c) = ohlc()?;
-            ind::wvad_state(&o, &h, &l, &c, &ops.f64(4, "volume").ok()?, p(0))
+            ind::wvad_state(&o, &h, &l, &c, &ops.f64(4, "volume").ok()?, p(0), ops.origin())
         }
-        ("vr", _) => ind::vr_state(&close()?, &ops.f64(1, "volume").ok()?, p(0)),
+        ("vr", _) => ind::vr_state(&close()?, &ops.f64(1, "volume").ok()?, p(0), ops.origin()),
         ("stoch", Some("k" | "d")) | ("stochf", Some("d")) => {
             let (h, l, c) = hlc()?;
             let (stages, k) = stoch_stages(name, sub, args);
-            ind::stoch_state(&h, &l, &c, p(0), &stages[..k])
+            ind::stoch_state(&h, &l, &c, p(0), &stages[..k], ops.origin())
         }
         ("apo" | "ppo" | "bias" | "dma" | "macdext" | "mavp", _) => {
-            let mut prev = vec![0.0; composite_len(name, sub, args)?];
+            let mut prev = composite_initial(name, sub, args, ops.origin())?;
             let mut next = prev.clone();
             for row in 0..close()?.len() {
                 composite_step(ops, name, sub, args, &prev, row, &mut next)?;
@@ -173,6 +178,11 @@ pub(crate) fn step(
             ind::mfi_step(&h, &l, &c, &ops.f64(3, "volume").ok()?, p(0), row, prev, next)
         }
         ("cog", _) => ind::cog_step(&close()?, p(0), row, prev, next),
+        ("imi", _) => ind::imi_step(&ops.f64(0, "open").ok()?, &ops.f64(1, "close").ok()?, p(0), row, prev, next),
+        ("ultosc", _) => {
+            let (h, l, c) = hlc()?;
+            ind::ultosc_step(&h, &l, &c, p(0), p(1), p(2), row, prev, next)
+        }
         ("cmf", _) => {
             let (h, l, c) = hlc()?;
             ind::cmf_step(&h, &l, &c, &ops.f64(3, "volume").ok()?, p(0), row, prev, next)
@@ -259,6 +269,28 @@ fn composite_len(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<usi
     Some(a.fast.state_len() + a.slow.state_len() + smooth)
 }
 
+/// A composite command's state before its first row, at absolute position `origin`:
+/// each average's own (a `mavp` average starts at its own first row, see
+/// [`mavp_step`]).
+fn composite_initial(name: &str, sub: Option<&str>, args: &[ArgValue], origin: usize) -> Option<Vec<f64>> {
+    if name == "mavp" {
+        let (lo, hi, mt) = (arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2));
+        let lb = ma_lookback(hi, mt);
+        let mut v = vec![0.0];
+        for q in lo..=hi {
+            v.extend(FiniteMa::new(q, mt)?.initial(origin + lb - ma_lookback(q, mt)));
+        }
+        return Some(v);
+    }
+    let a = averages(name, sub, args)?;
+    let mut v = a.fast.initial(origin);
+    v.extend(a.slow.initial(origin));
+    if let Some(smooth) = a.smooth {
+        v.extend(smooth.chained_initial(origin));
+    }
+    Some(v)
+}
+
 /// One row of a composite command at `row`, from `prev` into `next`.
 fn composite_step(
     ops: &Operands,
@@ -287,7 +319,7 @@ fn composite_step(
     let f = a.fast.step(row, term, &prev[..lf], n_fast)?;
     let s = a.slow.step(row, term, &prev[lf..lf + ls], n_slow)?;
     Some(match (name, a.smooth) {
-        ("ppo" | "bias", _) => (f - s) / s * 100.0,
+        ("ppo" | "bias", _) => percent_oscillator(f, s),
         (_, None) => f - s,
         (_, Some(smooth)) => {
             let line = f - s;

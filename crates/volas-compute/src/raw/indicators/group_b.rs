@@ -13,14 +13,14 @@ use resume::{dkx_mid, roc_at, swma4_at, vr_volumes, wvad_term};
 
 /// Rolling `n`-window sum that skips a leading-NaN prefix — so a series with an undefined
 /// first bar (`tr`, prev-close diffs) sums from its first finite value — via `sma * n`.
-fn rolling_sum(x: &[f64], n: usize) -> Vec<f64> {
-    (kernels::sma(av(x), n) * n as f64).to_vec()
+fn rolling_sum(x: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    (kernels::sma(av(x), n, origin) * n as f64).to_vec()
 }
 
 /// Vortex Indicator (+VI / −VI): `+VM = |high − prev low|`, `−VM = |low − prev high|`;
 /// `+VI = Σₙ(+VM) / Σₙ(TR)`, `−VI = Σₙ(−VM) / Σₙ(TR)`. `plus` selects the +VI line.
 /// Source: StockCharts ChartSchool / Wikipedia — Vortex Indicator.
-pub fn vortex(high: &[f64], low: &[f64], close: &[f64], n: usize, plus: bool) -> Vec<f64> {
+pub fn vortex(high: &[f64], low: &[f64], close: &[f64], n: usize, plus: bool, origin: usize) -> Vec<f64> {
     let len = high.len();
     let tr = super::tr(high, low, close); // NaN at bar 0
     let vm: Vec<f64> = (0..len)
@@ -34,25 +34,25 @@ pub fn vortex(high: &[f64], low: &[f64], close: &[f64], n: usize, plus: bool) ->
             }
         })
         .collect();
-    let sum_vm = rolling_sum(&vm, n);
-    let sum_tr = rolling_sum(&tr, n);
+    let sum_vm = rolling_sum(&vm, n, origin);
+    let sum_tr = rolling_sum(&tr, n, origin);
     (0..len).map(|i| sum_vm[i] / sum_tr[i]).collect()
 }
 
 /// BRAR — AR (人气指标) = `Σₙ(H − O) / Σₙ(O − L) × 100`. `H − O` and `O − L` are always ≥ 0.
 /// Source: 通达信 / MBA智库 — 人气意愿指标 (BRAR).
-pub fn brar_ar(open: &[f64], high: &[f64], low: &[f64], n: usize) -> Vec<f64> {
+pub fn brar_ar(open: &[f64], high: &[f64], low: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let len = high.len();
     let ho: Vec<f64> = (0..len).map(|i| high[i] - open[i]).collect();
     let ol: Vec<f64> = (0..len).map(|i| open[i] - low[i]).collect();
-    let (s_ho, s_ol) = (rolling_sum(&ho, n), rolling_sum(&ol, n));
+    let (s_ho, s_ol) = (rolling_sum(&ho, n, origin), rolling_sum(&ol, n, origin));
     (0..len).map(|i| s_ho[i] / s_ol[i] * 100.0).collect()
 }
 
 /// BRAR — BR (意愿指标) = `Σₙ max(0, H − Cᵧ) / Σₙ max(0, Cᵧ − L) × 100`, `Cᵧ` = prior close.
 /// The `max(0, …)` clamp is the 通达信 convention (a high below — or low above — the prior
 /// close contributes nothing). Source: 通达信 / MBA智库 — 人气意愿指标 (BRAR).
-pub fn brar_br(high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
+pub fn brar_br(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let len = high.len();
     let up: Vec<f64> = (0..len)
         .map(|i| if i == 0 { f64::NAN } else { (high[i] - close[i - 1]).max(0.0) })
@@ -60,20 +60,20 @@ pub fn brar_br(high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
     let dn: Vec<f64> = (0..len)
         .map(|i| if i == 0 { f64::NAN } else { (close[i - 1] - low[i]).max(0.0) })
         .collect();
-    let (s_up, s_dn) = (rolling_sum(&up, n), rolling_sum(&dn, n));
+    let (s_up, s_dn) = (rolling_sum(&up, n, origin), rolling_sum(&dn, n, origin));
     (0..len).map(|i| s_up[i] / s_dn[i] * 100.0).collect()
 }
 
 /// VR 成交量比率 = `(UVS + ½·PVS) / (DVS + ½·PVS) × 100` over `n` bars, where UVS / DVS / PVS
 /// are the summed volumes of up- / down- / flat-close days (vs the prior close).
 /// Source: MBA智库 — 成交量比率 (VR).
-pub fn vr(close: &[f64], volume: &[f64], n: usize) -> Vec<f64> {
+pub fn vr(close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let len = close.len();
     let (mut uv, mut dv, mut pv) = (vec![f64::NAN; len], vec![f64::NAN; len], vec![f64::NAN; len]);
     for i in 1..len {
         [uv[i], dv[i], pv[i]] = vr_volumes(close, volume, i);
     }
-    let (suv, sdv, spv) = (rolling_sum(&uv, n), rolling_sum(&dv, n), rolling_sum(&pv, n));
+    let (suv, sdv, spv) = (rolling_sum(&uv, n, origin), rolling_sum(&dv, n, origin), rolling_sum(&pv, n, origin));
     (0..len)
         .map(|i| (suv[i] + 0.5 * spv[i]) / (sdv[i] + 0.5 * spv[i]) * 100.0)
         .collect()
@@ -81,11 +81,11 @@ pub fn vr(close: &[f64], volume: &[f64], n: usize) -> Vec<f64> {
 
 /// Coppock Curve = `WMA_w(ROC_long + ROC_short)`, `ROC_p = (C / C₋ₚ − 1) × 100`.
 /// Source: StockCharts ChartSchool / Wikipedia — Coppock Curve.
-pub fn coppock(close: &[f64], w: usize, roc_long: usize, roc_short: usize) -> Vec<f64> {
+pub fn coppock(close: &[f64], w: usize, roc_long: usize, roc_short: usize, origin: usize) -> Vec<f64> {
     let len = close.len();
     let sum: Vec<f64> =
         (0..len).map(|i| roc_at(close, roc_long, i) + roc_at(close, roc_short, i)).collect();
-    super::wma(&sum, w)
+    super::wma(&sum, w, origin)
 }
 
 /// 4-bar symmetric weighted MA, weights `[1, 2, 2, 1] / 6` (newest first); NaN until 3 prior
@@ -96,12 +96,19 @@ fn swma4(x: &[f64]) -> Vec<f64> {
 
 /// Relative Vigor Index = `SMAₙ(swma4(C − O)) / SMAₙ(swma4(H − L))`.
 /// Source: Fidelity / MetaTrader — Relative Vigor Index.
-pub fn relative_vigor(open: &[f64], high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
+pub fn relative_vigor(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    n: usize,
+    origin: usize,
+) -> Vec<f64> {
     let len = close.len();
     let co: Vec<f64> = (0..len).map(|i| close[i] - open[i]).collect();
     let hl: Vec<f64> = (0..len).map(|i| high[i] - low[i]).collect();
-    let num = kernels::sma(av(&swma4(&co)), n);
-    let den = kernels::sma(av(&swma4(&hl)), n);
+    let num = kernels::sma(av(&swma4(&co)), n, origin);
+    let den = kernels::sma(av(&swma4(&hl)), n, origin);
     (0..len).map(|i| num[i] / den[i]).collect()
 }
 
@@ -112,20 +119,21 @@ pub fn relative_vigor_signal(
     low: &[f64],
     close: &[f64],
     n: usize,
+    origin: usize,
 ) -> Vec<f64> {
-    swma4(&relative_vigor(open, high, low, close, n))
+    swma4(&relative_vigor(open, high, low, close, n, origin))
 }
 
 /// DKX 多空线 = `WMA(MID, 20)`, `MID = (3·C + L + O + H) / 6`. The fixed 20-period linear
 /// weights 20…1 are exactly TA-Lib WMA's. Source: 百度百科 / 东方财富 — 多空线 (DKX).
-pub fn dkx(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
+pub fn dkx(open: &[f64], high: &[f64], low: &[f64], close: &[f64], origin: usize) -> Vec<f64> {
     let mid: Vec<f64> = (0..close.len()).map(|i| dkx_mid(open, high, low, close, i)).collect();
-    super::wma(&mid, 20)
+    super::wma(&mid, 20, origin)
 }
 
 /// MADKX = `SMA_m(DKX)`, the DKX signal line. Source: 百度百科 / 东方财富 — 多空线 (DKX).
-pub fn dkx_ma(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize) -> Vec<f64> {
-    super::ma(&dkx(open, high, low, close), m)
+pub fn dkx_ma(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, origin: usize) -> Vec<f64> {
+    super::ma(&dkx(open, high, low, close, origin), m, origin)
 }
 
 /// WVAD 威廉变异离散量 = `Σₙ( (C − O) / (H − L) · V )`. Source: 通达信 / MBA智库 — WVAD.
@@ -136,9 +144,10 @@ pub fn wvad(
     close: &[f64],
     volume: &[f64],
     n: usize,
+    origin: usize,
 ) -> Vec<f64> {
     let w: Vec<f64> = (0..close.len()).map(|i| wvad_term(open, high, low, close, volume, i)).collect();
-    rolling_sum(&w, n)
+    rolling_sum(&w, n, origin)
 }
 
 /// Which CDP support/resistance line to emit.
@@ -529,11 +538,11 @@ pub fn ichimoku(
 
 /// TTM Squeeze momentum = `linregₙ( C − ((HHₙ + LLₙ)/2 + SMAₙ(C)) / 2 )` (John Carter /
 /// thinkorswim). Source: John Carter / StockCharts — TTM Squeeze.
-pub fn ttm_squeeze_momentum(high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
+pub fn ttm_squeeze_momentum(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let len = high.len();
     let hh = super::hhv(high, n);
     let ll = super::llv(low, n);
-    let sma = super::ma(close, n);
+    let sma = super::ma(close, n, origin);
     let delta: Vec<f64> = (0..len)
         .map(|i| close[i] - ((hh[i] + ll[i]) / 2.0 + sma[i]) / 2.0)
         .collect();
@@ -542,7 +551,7 @@ pub fn ttm_squeeze_momentum(high: &[f64], low: &[f64], close: &[f64], n: usize) 
     let start = delta.iter().position(|x| !x.is_nan()).unwrap_or(len);
     let mut out = vec![f64::NAN; len];
     if start < len {
-        let sub = super::linearreg(&delta[start..], n);
+        let sub = super::linearreg(&delta[start..], n, origin + start);
         out[start..].copy_from_slice(&sub);
     }
     out
@@ -558,12 +567,13 @@ pub fn ttm_squeeze_on(
     n: usize,
     bb_mult: f64,
     kc_mult: f64,
+    origin: usize,
 ) -> Vec<f64> {
     let len = high.len();
-    let sma = super::ma(close, n);
-    let sd = super::stddev(close, n, 1.0);
+    let sma = super::ma(close, n, origin);
+    let sd = super::stddev(close, n, 1.0, origin);
     let tr = super::tr(high, low, close);
-    let atr = kernels::sma(av(&tr), n).to_vec(); // SMA of TR (skips the leading-NaN tr[0])
+    let atr = kernels::sma(av(&tr), n, origin).to_vec(); // SMA of TR (skips the leading-NaN tr[0])
     (0..len)
         .map(|i| {
             let bb_u = sma[i] + bb_mult * sd[i];

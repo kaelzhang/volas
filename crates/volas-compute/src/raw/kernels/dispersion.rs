@@ -1,90 +1,33 @@
 //! Rolling dispersion: sliding standard deviation, alone and fused with the mean
 //! (Bollinger bands / bandwidth need both).
 
-use crate::guard::{NonFiniteRows, RowGuard};
+use super::mean_std_row;
+use crate::accum::{Anchors, Csum};
+use crate::guard::Slide;
 use ndarray::{Array1, ArrayView1};
 
-/// Rolling standard deviation with `ddof` degrees of freedom.
+/// Rolling standard deviation with `ddof` degrees of freedom; row 0 is at absolute
+/// position `origin` (see [`crate::accum`]).
 ///
-/// O(n) sliding sums of `x` and `x²`: `var = (Σx² - (Σx)²/period) / (period -
-/// ddof)`, emitted only for fully-populated windows. The variance is clamped at
-/// zero before the square root to absorb floating-point cancellation; for the
-/// magnitudes seen in OHLCV data this stays well within the parity tolerance of
-/// the two-pass form it replaces.
+/// O(n) sliding exact sums of `x` and `x²` ([`Csum`]): `var = (mean(x²) − mean(x)²) ·
+/// period / (period − ddof)`, emitted only for fully-populated windows, clamped at zero
+/// before the square root. A flat window's deviation is exactly zero.
 #[inline]
-pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize) -> Array1<f64> {
-    let n = data.len();
-    let mut result = Array1::from_elem(n, f64::NAN);
-    if period == 0 || period > n || period <= ddof {
-        return result;
-    }
-    let p = period as f64;
-    let denom = (period - ddof) as f64;
-    // Fast path — contiguous data with no NaN: clean sliding sums of x and x²
-    // with no per-element NaN bookkeeping. Same accumulation order, so it is
-    // bit-identical to the slow path for NaN-free data while running faster — the
-    // common case for real OHLCV.
-    if let Some(src) = data.as_slice() {
-        if src.iter().all(|x| x.is_finite()) {
-            {
-                let dst = result.as_slice_mut().expect("from_elem is contiguous");
-                let mut sum = 0.0;
-                let mut sum_sq = 0.0;
-                for i in 0..n {
-                    let x = src[i];
-                    sum += x;
-                    sum_sq += x * x;
-                    if i >= period {
-                        let leaving = src[i - period];
-                        sum -= leaving;
-                        sum_sq -= leaving * leaving;
-                    }
-                    if i + 1 >= period {
-                        let variance = (sum_sq - sum * sum / p) / denom;
-                        dst[i] = variance.max(0.0).sqrt();
-                    }
-                }
-            }
-            return result;
-        }
-    }
-    // Careful path — window-local (see [`crate::guard`]).
-    let mut guard = NonFiniteRows::default();
-    let mut sum = 0.0;
-    let mut sum_sq = 0.0;
-    for i in 0..n {
-        let x = data[i];
-        if guard.enter(x.is_finite()) {
-            sum += x;
-            sum_sq += x * x;
-        }
-        if i >= period {
-            let leaving = data[i - period];
-            if guard.leave(leaving.is_finite()) {
-                sum -= leaving;
-                sum_sq -= leaving * leaving;
-            }
-        }
-        if i + 1 >= period {
-            result[i] = if guard.clean() {
-                let variance = (sum_sq - sum * sum / p) / denom;
-                variance.max(0.0).sqrt()
-            } else {
-                window_mean_std(data, i + 1 - period, i, p, denom).1
-            };
-        }
-    }
-    result
+pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize, origin: usize) -> Array1<f64> {
+    rolling_mean_std(data, period, ddof, origin).1
+}
+
+/// The mean and standard deviation of a window from its exact sums `Σx` / `Σx²`.
+#[inline(always)]
+pub(crate) fn mean_std_of_sums(sum: &Csum, sum_sq: &Csum, p: f64, denom: f64) -> (f64, f64) {
+    let mean = sum.mean(p);
+    let variance = (sum_sq.mean(p) - mean * mean) * (p / denom);
+    (mean, variance.max(0.0).sqrt())
 }
 
 /// Mean and std of the window `data[start..=end]` evaluated directly on its rows —
 /// the value of a window holding a non-finite row. The variance is checked for NaN
 /// before the cancellation clamp, which would otherwise turn NaN into 0.
-fn window_mean_std(data: ArrayView1<f64>, start: usize, end: usize, p: f64, denom: f64) -> (f64, f64) {
-    window_mean_std_of(start..=end, |j| data[j], p, denom)
-}
-
-/// [`window_mean_std`] over the rows `rows` of the series `term`.
 pub(crate) fn window_mean_std_of(
     rows: std::ops::RangeInclusive<usize>,
     term: impl Fn(usize) -> f64,
@@ -100,16 +43,15 @@ pub(crate) fn window_mean_std_of(
     (sum / p, std)
 }
 
-/// Fused rolling **mean and std** in a single pass — one NaN scan, one sliding
-/// accumulation of Σx and Σx². Bit-identical to calling [`sma`] and
-/// [`rolling_std`] separately (same accumulation order), but Bollinger
-/// bands / bandwidth need both, so this halves the rolling work (one buffer
-/// init, one scan, one loop instead of two).
+/// Fused rolling **mean and std** in a single pass — one sliding accumulation of Σx
+/// and Σx² (row 0 at absolute position `origin`). Bollinger bands / bandwidth need
+/// both, so this halves the rolling work.
 #[inline]
 pub fn rolling_mean_std(
     data: ArrayView1<f64>,
     period: usize,
     ddof: usize,
+    origin: usize,
 ) -> (Array1<f64>, Array1<f64>) {
     let n = data.len();
     let mut mean = Array1::from_elem(n, f64::NAN);
@@ -120,63 +62,45 @@ pub fn rolling_mean_std(
     let p = period as f64;
     let denom = (period - ddof) as f64;
     // Fast path — one clean sliding pass emitting both outputs, no per-element NaN
-    // bookkeeping. A NaN permanently poisons the running sum, so a single
-    // `sum.is_nan()` check after the pass replaces a separate upfront scan; reset
-    // and fall through on the rare NaN case.
+    // bookkeeping: the careful slide's arithmetic ([`mean_std_row`]) on clean data. A
+    // non-finite value poisons the sums until the next anchor; that is checked at every
+    // anchor and at the end, and then the careful path takes over.
     if let Some(src) = data.as_slice() {
-        let mut sum = 0.0;
-        let mut sum_sq = 0.0;
+        let mut sum = Csum::default();
+        let mut sum_sq = Csum::default();
+        let mut anchors = Anchors::from(origin, period);
+        let mut clean = true;
         {
             let md = mean.as_slice_mut().expect("from_elem is contiguous");
             let sd = std.as_slice_mut().expect("from_elem is contiguous");
             for i in 0..n {
                 let x = src[i];
-                sum += x;
-                sum_sq += x * x;
+                sum.add(x);
+                sum_sq.add(x * x);
                 if i >= period {
                     let leaving = src[i - period];
-                    sum -= leaving;
-                    sum_sq -= leaving * leaving;
+                    sum.sub(leaving);
+                    sum_sq.sub(leaving * leaving);
+                }
+                if anchors.tick() && i + 1 >= period {
+                    clean &= sum.value().is_finite() && sum_sq.value().is_finite();
+                    let w = &src[i + 1 - period..=i];
+                    sum = Csum::of(w.iter().copied());
+                    sum_sq = Csum::of(w.iter().map(|x| x * x));
                 }
                 if i + 1 >= period {
-                    md[i] = sum / p;
-                    let variance = (sum_sq - sum * sum / p) / denom;
-                    sd[i] = variance.max(0.0).sqrt();
+                    (md[i], sd[i]) = mean_std_of_sums(&sum, &sum_sq, p, denom);
                 }
             }
         }
-        if sum.is_finite() && sum_sq.is_finite() {
+        if clean && sum.value().is_finite() && sum_sq.value().is_finite() {
             return (mean, std);
         }
-        mean.fill(f64::NAN);
-        std.fill(f64::NAN);
     }
     // Careful path — window-local (see [`crate::guard`]).
-    let mut guard = NonFiniteRows::default();
-    let mut sum = 0.0;
-    let mut sum_sq = 0.0;
+    let mut slide = Slide::<2>::at(origin);
     for i in 0..n {
-        let x = data[i];
-        if guard.enter(x.is_finite()) {
-            sum += x;
-            sum_sq += x * x;
-        }
-        if i >= period {
-            let leaving = data[i - period];
-            if guard.leave(leaving.is_finite()) {
-                sum -= leaving;
-                sum_sq -= leaving * leaving;
-            }
-        }
-        if i + 1 >= period {
-            if guard.clean() {
-                mean[i] = sum / p;
-                let variance = (sum_sq - sum * sum / p) / denom;
-                std[i] = variance.max(0.0).sqrt();
-            } else {
-                (mean[i], std[i]) = window_mean_std(data, i + 1 - period, i, p, denom);
-            }
-        }
+        (mean[i], std[i]) = mean_std_row(&mut slide, period, ddof, i, |j| data[j]);
     }
     (mean, std)
 }

@@ -2,6 +2,7 @@ use ndarray::Array1;
 
 use super::av;
 use super::stochastic::{stoch_fastk, stochrsi_fastk};
+use crate::accum::{anchors_at, Csum};
 use crate::guard::Slide;
 use crate::raw::kernels;
 
@@ -104,16 +105,17 @@ pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 // carrying the RSI Wilder pair `[avg_gain, avg_loss]` as of `from-1` PLUS the recent RSI
 // VALUES needed to fill the stochastic windows over the new rows:
 //   `.k` -> state = [avg_gain, avg_loss, rsi_{from-C}, …, rsi_{from-1}]
-//   `.d` -> state = [avg_gain, avg_loss, sma_sum, sma_bad, rsi_{from-C}, …, rsi_{from-1}]
+//   `.d` -> state = [avg_gain, avg_loss, <the SMA's Slide>, rsi_{from-C}, …, rsi_{from-1}]
 // where the RSI-context depth `C` is the stage lookback before `from`:
 //   `.k` -> C = fastk_period - 1                   (the %K window)
 //   `.d` -> C = (fastk_period - 1) + fastd_period  (%K back to the row the SMA drops)
 // On resume we `rsi_resume` the new RSI tail, concatenate the carried context and run the
 // (NaN-free) windowed %K — bit-identical to a fresh `stochrsi_fastk`, since a min/max
 // over a finite window is order/position-independent. The `.d` SMA is a running sum,
-// whose value depends on every row it has slid over: it is carried (the [`Slide`] state
-// of the full SMA as of `from-1`) and continued add-then-drop like the full SMA, so `.d`
-// is bit-identical too. A resume that cannot see a full context
+// whose value depends on the rows since its last anchor: it is carried (the [`Slide`]
+// state of the full SMA as of `from-1`) and continued like the full SMA, so `.d` is
+// bit-identical too. Its rows are StochRSI's complete rows, the first at absolute position
+// `origin`. A resume that cannot see a full context
 // of FINITE RSI (`from - C < rsi_period`, i.e. the tracker is not yet warm) returns `None`
 // and falls back; a carried slice keeps `>= lookback` rows, so it is always warm enough.
 // Only the canonical SMA `.d` (matype 0) is resumed; a recursive-MA `.d` declines.
@@ -139,11 +141,24 @@ fn stochrsi_head_len(is_d: bool) -> usize {
     }
 }
 
-/// The `.d` SMA (`fastd_period`) slid over `%K` row `i` — the full SMA's own
-/// add-then-drop order (`kernels::sma`, `stochrsi_d_default_sma`), so the value and the
-/// running sum match it bit for bit.
+/// The `.d` SMA (`fastd_period`) slid over `%K` row `i` — the full SMA's own slide
+/// ([`stochrsi_d_sma`], `stochrsi_d_default_sma`), so the value and the running sum
+/// match it bit for bit.
 fn stochrsi_d_row(slide: &mut Slide<1>, fastd_period: usize, i: usize, k: impl Fn(usize) -> f64) -> f64 {
     kernels::sma_row(slide, fastd_period, i, k)
+}
+
+/// StochRSI `.d` with an SMA `fastd_period` smoothing: `sma(stochrsi_fastk(..))`, row 0
+/// at absolute position `origin`.
+pub fn stochrsi_d_sma(
+    close: &[f64],
+    rsi_period: usize,
+    fastk_period: usize,
+    fastd_period: usize,
+    origin: usize,
+) -> Vec<f64> {
+    let k = stochrsi_fastk(close, rsi_period, fastk_period);
+    kernels::sma(super::av(&k), fastd_period, origin).into_raw_vec_and_offset().0
 }
 
 /// Final StochRSI state (see the module note) after a full compute, or `None`
@@ -156,6 +171,7 @@ pub fn stochrsi_final_state(
     fastk_period: usize,
     is_d: bool,
     fastd_period: usize,
+    origin: usize,
 ) -> Option<Vec<f64>> {
     let n = close.len();
     let wilder = rsi_final_state(close, rsi_period)?; // [avg_gain, avg_loss] as of n-1
@@ -171,7 +187,7 @@ pub fn stochrsi_final_state(
     let mut state = wilder;
     if is_d {
         let k = stochrsi_fastk(close, rsi_period, fastk_period);
-        let mut slide = Slide::<1>::default();
+        let mut slide = Slide::<1>::at(origin);
         for i in 0..n {
             stochrsi_d_row(&mut slide, fastd_period, i, |j| k[j]);
         }
@@ -226,7 +242,7 @@ pub fn stochrsi_resume(
         let base = from - c;
         let k = |j: usize| fk[j - base];
         let out = (from..n)
-            .map(|i| stochrsi_d_row(&mut slide, fastd_period, i, &k))
+            .map(|i| stochrsi_d_row(&mut slide, fastd_period, i, k))
             .collect();
         let mut words = [0.0; Slide::<1>::STATE];
         slide.write_state(&mut words);
@@ -556,22 +572,30 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// computed exactly on its own rows (O(period)), and the slide is re-seeded from the
 /// first clean window after it — a bad bar reaches only the windows holding it, and a
 /// value never depends on the rows after it.
-pub fn cog(close: &[f64], period: usize) -> Vec<f64> {
+pub fn cog(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
         return out;
     }
-    let mut state = [0.0; COG_STATE];
+    let mut state = cog_initial(origin);
     for (i, o) in out.iter_mut().enumerate() {
         *o = cog_row(close, period, i, &mut state);
     }
     out
 }
 
-/// The length of [`cog`]'s state: `[Σ(1+age)·price, Σprice, Σ|price|, non-finite bars in
-/// window, bars seen (capped), whether the sums describe the window]`.
-const COG_STATE: usize = 6;
+/// The length of [`cog`]'s state: `[Σ(1+age)·price, Σprice, Σ|price|]` (each a
+/// [`Csum`]), the non-finite bars in the window, the bars seen (capped), whether the
+/// sums describe the window, the absolute position of the next bar (for re-anchoring).
+const COG_STATE: usize = 3 * Csum::STATE + 4;
+
+/// [`cog`]'s state before its first bar, at absolute position `origin`.
+fn cog_initial(origin: usize) -> [f64; COG_STATE] {
+    let mut st = [0.0; COG_STATE];
+    st[9] = origin as f64;
+    st
+}
 
 /// One row of [`cog`] at `i`, advancing `st` (bars `0..i` already seen).
 ///
@@ -579,6 +603,8 @@ const COG_STATE: usize = 6;
 /// oldest (weight `period`) lowers every retained weight, so `num[i] = num[i-1] +
 /// den[i-1] - (period+1)·leaving + close[i]` and `den[i] = den[i-1] - leaving +
 /// close[i]` (the WMA-slide trick, mirrored to cog's newest-weighted-1 orientation).
+/// The sums are compensated and the weighted terms exact, so a bar leaves `num` exactly
+/// as it entered it.
 /// `aden` (Σ|price|) is the cancellation scale: when the running `den` is negligible
 /// against it the window sum has cancelled to ~0, but a running sum lands on float drift
 /// (~1e-15) instead of an exact 0.0, so the `den != 0.0` guard would wrongly emit a huge
@@ -586,7 +612,9 @@ const COG_STATE: usize = 6;
 /// near-cancellation) so a true zero sum yields `NaN`, matching the per-window form.
 #[inline]
 fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) -> f64 {
-    let [mut num, mut den, mut aden, bad, seen, valid] = *st;
+    let sum_at = |k: usize| Csum::from_state(&st[2 * k..2 * k + 2]).unwrap_or_default();
+    let (mut num, mut den, mut aden) = (sum_at(0), sum_at(1), sum_at(2));
+    let (bad, seen, valid, pos) = (st[6], st[7], st[8], st[9] as usize);
     let (mut bad, seen) = (bad as usize, seen as usize);
     let pf = period as f64;
     if !close[i].is_finite() {
@@ -603,34 +631,47 @@ fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) ->
         valid = false;
         cog_window_exact(close, i, period)
     } else {
-        if valid {
+        // Re-anchoring at an absolute position is re-seeding the window (see
+        // `crate::accum`).
+        if valid && !anchors_at(pos, period) {
             let leaving = close[i - period];
-            num = num + den - (pf + 1.0) * leaving + close[i];
-            den = den - leaving + close[i];
-            aden = aden - leaving.abs() + close[i].abs();
+            num.add_sum(&den);
+            num.sub_prod(pf + 1.0, leaving);
+            num.add(close[i]);
+            den.sub(leaving);
+            den.add(close[i]);
+            aden.sub(leaving.abs());
+            aden.add(close[i].abs());
         } else {
-            (num, den, aden) = (0.0, 0.0, 0.0);
+            (num, den, aden) = (Csum::default(), Csum::default(), Csum::default());
             for age in 0..period {
                 let price = close[i - age]; // age 0 = newest
-                num += (1 + age) as f64 * price;
-                den += price;
-                aden += price.abs();
+                num.add_prod((1 + age) as f64, price);
+                den.add(price);
+                aden.add(price.abs());
             }
             valid = true;
         }
-        if den.abs() <= 1e-9 * aden {
+        let d = den.value();
+        if d.abs() <= 1e-9 * aden.value() {
             cog_window_exact(close, i, period)
         } else {
-            -num / den
+            -num.value() / d
         }
     };
-    *st = [num, den, aden, bad as f64, (seen + 1).min(period + 1) as f64, f64::from(u8::from(valid))];
+    num.write_state(&mut st[0..2]);
+    den.write_state(&mut st[2..4]);
+    aden.write_state(&mut st[4..6]);
+    st[6] = bad as f64;
+    st[7] = (seen + 1).min(period + 1) as f64;
+    st[8] = f64::from(u8::from(valid));
+    st[9] = (pos + 1) as f64;
     value
 }
 
 /// [`cog`]'s state after the rows of `close`.
-pub fn cog_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
-    crate::guard::state_after(vec![0.0; COG_STATE], close.len(), |row, prev, next| {
+pub fn cog_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
+    crate::guard::state_after(cog_initial(origin).to_vec(), close.len(), |row, prev, next| {
         cog_step(close, period, row, prev, next)
     })
 }
@@ -779,7 +820,7 @@ mod tests {
         let close = series(200);
         let (rp, fk, fd) = (14usize, 14usize, 3usize);
         let k_full = stochrsi_fastk(&close, rp, fk);
-        let d_full = crate::raw::indicators::ma(&k_full, fd);
+        let d_full = crate::raw::indicators::ma(&k_full, fd, 0);
 
         // `from` past the deepest context (`.d` reach = rp + (fk-1) + (fd-1)) so the head
         // always carries a full finite-RSI context.
@@ -787,14 +828,14 @@ mod tests {
             let head = &close[..from];
 
             // `.k` line (is_d = false).
-            let st = stochrsi_final_state(head, rp, fk, false, fd).unwrap();
+            let st = stochrsi_final_state(head, rp, fk, false, fd, 0).unwrap();
             let (tail, _) = stochrsi_resume(&close, rp, fk, false, fd, from, &st).unwrap();
             assert_bits(&tail, &k_full[from..], "stochrsi.k");
 
             // `.d` line (is_d = true): the carried running sum of the `.d` SMA continues
             // the full frame's own, so the two agree bit for bit — also when the resume
             // is chained one row at a time from each returned state.
-            let st = stochrsi_final_state(head, rp, fk, true, fd).unwrap();
+            let st = stochrsi_final_state(head, rp, fk, true, fd, 0).unwrap();
             let (tail, _) = stochrsi_resume(&close, rp, fk, true, fd, from, &st).unwrap();
             assert_bits(&tail, &d_full[from..], "stochrsi.d");
             let mut st = st;
@@ -804,8 +845,8 @@ mod tests {
                 st = next;
             }
             // the default fused `.d` kernel is the same SMA
-            let d_default = crate::raw::indicators::stochrsi_d_default_sma(&close).unwrap();
-            let st = stochrsi_final_state(head, 14, 5, true, 3).unwrap();
+            let d_default = crate::raw::indicators::stochrsi_d_default_sma(&close, 0).unwrap();
+            let st = stochrsi_final_state(head, 14, 5, true, 3, 0).unwrap();
             let (tail, _) = stochrsi_resume(&close, 14, 5, true, 3, from, &st).unwrap();
             assert_bits(&tail, &d_default[from..], "stochrsi.d default");
         }
@@ -820,11 +861,11 @@ mod tests {
 
         // n < c || n - c < rsi_period -> final state declines (oscillators.rs:135).
         let short = series(20);
-        assert!(stochrsi_final_state(&short, rp, fk, false, fd).is_none());
+        assert!(stochrsi_final_state(&short, rp, fk, false, fd, 0).is_none());
 
         // Bad state length / from -> resume declines (oscillators.rs:159).
         let close = series(200);
-        let st = stochrsi_final_state(&close[..120], rp, fk, false, fd).unwrap();
+        let st = stochrsi_final_state(&close[..120], rp, fk, false, fd, 0).unwrap();
         let bad = vec![0.0; 1]; // wrong length (!= c + 2)
         assert!(stochrsi_resume(&close, rp, fk, false, fd, 120, &bad).is_none());
         assert!(stochrsi_resume(&close, rp, fk, false, fd, 0, &st).is_none()); // from == 0
@@ -834,7 +875,7 @@ mod tests {
         // length/warm guards pass) but the freshly-resumed RSI tail carries the NaN.
         let mut nanclose = series(200);
         nanclose[150] = f64::NAN; // poisons RSI from row 150 onward
-        let st = stochrsi_final_state(&nanclose[..140], rp, fk, false, fd).unwrap();
+        let st = stochrsi_final_state(&nanclose[..140], rp, fk, false, fd, 0).unwrap();
         assert!(stochrsi_resume(&nanclose, rp, fk, false, fd, 140, &st).is_none());
     }
 

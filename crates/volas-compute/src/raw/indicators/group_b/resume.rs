@@ -3,8 +3,8 @@
 //! bit-identical to recomputing the column. The per-bar terms are shared with the full
 //! computations in the parent module.
 
-use crate::guard::{ring_push, state_after};
-use crate::raw::indicators::{wma_row, FiniteMa, WMA_STATE};
+use crate::guard::{ring_push, state_after, Slide};
+use crate::raw::indicators::{wma_initial, wma_row, FiniteMa, WMA_STATE};
 use crate::raw::kernels::{self, SMA_STATE};
 
 /// The `p`-bar rate of change of `close` at `i` (NaN before `p` bars exist).
@@ -56,8 +56,14 @@ fn rolling_sum_row(n: usize, row: usize, term: impl Fn(usize) -> f64, state: &[f
 }
 
 /// [`super::coppock`]'s state after the rows of `close`: its WMA's.
-pub fn coppock_state(close: &[f64], w: usize, roc_long: usize, roc_short: usize) -> Option<Vec<f64>> {
-    state_after(vec![0.0; WMA_STATE], close.len(), |row, prev, next| {
+pub fn coppock_state(
+    close: &[f64],
+    w: usize,
+    roc_long: usize,
+    roc_short: usize,
+    origin: usize,
+) -> Option<Vec<f64>> {
+    state_after(wma_initial(origin), close.len(), |row, prev, next| {
         coppock_step(close, w, roc_long, roc_short, row, prev, next)
     })
 }
@@ -93,8 +99,11 @@ pub fn relative_vigor_state(
     close: &[f64],
     n: usize,
     signal: bool,
+    origin: usize,
 ) -> Option<Vec<f64>> {
-    state_after(vec![0.0; rvi_state_len(signal)], close.len(), |row, prev, next| {
+    let mut init = Slide::<1>::initial(origin).repeat(2);
+    init.resize(rvi_state_len(signal), 0.0);
+    state_after(init, close.len(), |row, prev, next| {
         relative_vigor_step(open, high, low, close, n, signal, row, prev, next)
     })
 }
@@ -142,8 +151,19 @@ fn dkx_state_len(ma: Option<usize>) -> usize {
 }
 
 /// [`super::dkx`] (or with `ma`, [`super::dkx_ma`])'s state after the rows.
-pub fn dkx_state(open: &[f64], high: &[f64], low: &[f64], close: &[f64], ma: Option<usize>) -> Option<Vec<f64>> {
-    state_after(vec![0.0; dkx_state_len(ma)], close.len(), |row, prev, next| {
+pub fn dkx_state(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    ma: Option<usize>,
+    origin: usize,
+) -> Option<Vec<f64>> {
+    let mut init = wma_initial(origin);
+    if let Some(m) = ma {
+        init.extend(FiniteMa::new(m, 0)?.chained_initial(origin));
+    }
+    state_after(init, close.len(), |row, prev, next| {
         dkx_step(open, high, low, close, ma, row, prev, next)
     })
 }
@@ -173,8 +193,16 @@ pub fn dkx_step(
 }
 
 /// [`super::wvad`]'s state after the rows: its rolling sum's.
-pub fn wvad_state(open: &[f64], high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize) -> Option<Vec<f64>> {
-    state_after(vec![0.0; SMA_STATE], close.len(), |row, prev, next| {
+pub fn wvad_state(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+    origin: usize,
+) -> Option<Vec<f64>> {
+    state_after(Slide::<1>::initial(origin), close.len(), |row, prev, next| {
         wvad_step(open, high, low, close, volume, n, row, prev, next)
     })
 }
@@ -199,8 +227,8 @@ pub fn wvad_step(
 }
 
 /// [`super::vr`]'s state after the rows: its three rolling sums'.
-pub fn vr_state(close: &[f64], volume: &[f64], n: usize) -> Option<Vec<f64>> {
-    state_after(vec![0.0; 3 * SMA_STATE], close.len(), |row, prev, next| {
+pub fn vr_state(close: &[f64], volume: &[f64], n: usize, origin: usize) -> Option<Vec<f64>> {
+    state_after(Slide::<1>::initial(origin).repeat(3), close.len(), |row, prev, next| {
         vr_step(close, volume, n, row, prev, next)
     })
 }

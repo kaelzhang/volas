@@ -65,11 +65,11 @@ fn stochastic_public_fast_paths_match_generic_components() {
     assert_nan_prefix(&generic, 19);
     assert!(generic[20].is_finite());
 
-    let slow_d = ind::stoch_d_default_sma(&high, &low, &close).unwrap();
+    let slow_d = ind::stoch_d_default_sma(&high, &low, &close, 0).unwrap();
     assert_nan_prefix(&slow_d, 8);
     assert!(slow_d[8].is_finite());
 
-    let fast_d = ind::stochf_d_default_sma(&high, &low, &close).unwrap();
+    let fast_d = ind::stochf_d_default_sma(&high, &low, &close, 0).unwrap();
     assert_nan_prefix(&fast_d, 6);
     assert!(fast_d[6].is_finite());
 }
@@ -151,7 +151,7 @@ fn stochastic_public_fallbacks_cover_none_and_flat_generic_paths() {
     assert!(short_fk.iter().all(|v| v.is_nan()));
 
     let increasing = (0..80).map(|i| 100.0 + i as f64).collect::<Vec<_>>();
-    let out = ind::stochrsi_d_default_sma(&increasing).unwrap();
+    let out = ind::stochrsi_d_default_sma(&increasing, 0).unwrap();
     assert!(out.contains(&0.0));
 }
 

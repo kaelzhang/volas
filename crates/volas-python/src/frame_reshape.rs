@@ -154,7 +154,7 @@ impl PyDataFrame {
             (names, cols)
         };
         Ok(PyDataFrame::plain(
-            DataFrame::new(names, columns, Some(Index::range(h))).map_err(pyerr)?,
+            DataFrame::new(names, columns, Some(Index::range(h))).map_err(pyerr)?.with_origin(df.origin()),
         ))
     }
 

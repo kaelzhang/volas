@@ -145,7 +145,7 @@ impl PyDataFrame {
                 cols.push(col);
             }
             let idx = (*self.inner.index().as_ref()).clone();
-            let df = DataFrame::new(list, cols, Some(idx)).map_err(pyerr)?;
+            let df = DataFrame::new(list, cols, Some(idx)).map_err(pyerr)?.with_origin(self.inner.origin());
             let (start, len) = self.logical_range();
             let df = if self.window.is_some() { df.slice(start, start + len) } else { df };
             return Ok(Py::new(py, PyDataFrame::plain(df))?.into_any());
