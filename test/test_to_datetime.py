@@ -24,7 +24,7 @@ def ns(obj):
 
 
 def pd_ns(values, **kw):
-    return pd.to_datetime(np.asarray(values), **kw).to_numpy().astype('datetime64[ns]').astype('int64')
+    return pd.to_datetime(np.asarray(values), **kw).as_unit('ns').asi8
 
 
 # --- to_datetime: numeric epochs -------------------------------------------
