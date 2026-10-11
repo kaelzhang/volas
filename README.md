@@ -399,7 +399,9 @@ the same way; the bounded window is just where reusing one buffer matters most.
 A **volas-specific static method** that builds a `DataFrame` from a `pandas.DataFrame`
 (`pdf`) — the inverse of `df.to_pandas()`. pandas is imported lazily (only here, so volas
 stays pandas-free at import). A nullable column keeps its dtype + `volas.NA`, and a
-`DatetimeIndex` (tz-aware too) round-trips. See [pandas interop](#pandas-interop).
+`DatetimeIndex` (tz-aware too) round-trips. The index stays the index under its own
+name (an unnamed index stays unnamed), independent of the columns — a column that
+shares the index's name is kept as a column. See [pandas interop](#pandas-interop).
 
 ```py
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame

@@ -101,12 +101,13 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
         return PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None);
     }
 
-    // A named index becomes a column, then `set_index` moves it into the row index.
+    // The index is built as an index directly — never routed through the column
+    // namespace, where it would collide with (and replace) a same-named column. An
+    // unnamed pandas index stays unnamed.
     let idx_name = {
         let n = idx.getattr("name")?;
-        if n.is_none() { "index".to_string() } else { n.str()?.to_string() }
+        if n.is_none() { None } else { Some(n.str()?.to_string()) }
     };
-    let merged = PyDict::new(py);
     let datetime_index = types
         .call_method1("is_datetime64_any_dtype", (idx.getattr("dtype")?,))?
         .extract::<bool>()?;
@@ -118,12 +119,12 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
     } else {
         idx.call_method0("to_numpy")?
     };
-    merged.set_item(&idx_name, instants)?;
-    for (k, v) in data.iter() {
-        merged.set_item(k, v)?;
-    }
-    let df = PyDataFrame::new(merged.as_any(), None, None, None, None, None, None, None)?
-        .set_index(&idx_name)?;
+    let index = Index::from_column(&pyany_to_column(&instants)?).map_err(pyerr)?.with_name(idx_name);
+    let cols = PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None)?.inner;
+    let df = PyDataFrame::plain(
+        DataFrame::new(cols.names().to_vec(), cols.columns().to_vec(), Some(index))
+            .map_err(pyerr)?,
+    );
 
     // The imported instants are already true UTC; re-attach a tz-aware index's display
     // zone directly (tz_convert would hit the naive-axis guard; localize would shift).
