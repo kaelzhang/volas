@@ -392,3 +392,170 @@ def test_dlpack_empty_column_has_null_data_pointer():
     cap = empty.__dlpack__(max_version=(1, 0))
     t = _versioned_tensor(cap)
     assert not t.dl_tensor.data  # size-0 → NULL data pointer (ctypes reads NULL as None/0)
+
+
+# --- malformed / null-garbage string buffers are rejected or normalized at import ---
+
+def _large_str(offsets, data, validity=None):
+    """A LargeUtf8 array straight from raw buffers (pyarrow's basic validation only)."""
+    return pa.Array.from_buffers(
+        pa.large_string(),
+        len(offsets) - 1,
+        [validity, pa.py_buffer(np.array(offsets, dtype=np.int64).tobytes()), pa.py_buffer(data)],
+    )
+
+
+def _utf8(offsets, data):
+    return pa.Array.from_buffers(
+        pa.string(),
+        len(offsets) - 1,
+        [None, pa.py_buffer(np.array(offsets, dtype=np.int32).tobytes()), pa.py_buffer(data)],
+    )
+
+
+@pytest.mark.parametrize(
+    "arr",
+    [
+        _large_str([0, 3, 1, 3], b"abc"),  # non-monotonic offsets (a reversed span)
+        _large_str([0, 2], b"\xff\xfe"),  # invalid UTF-8 in a valid slot
+        _large_str([0, 1, 2], b"\xc3\xa9"),  # an offset splitting a UTF-8 character
+        _utf8([0, 1 << 30, 3], b"abc"),  # an offset far past the data buffer
+    ],
+    ids=["non-monotonic", "bad-utf8", "split-char", "out-of-range"],
+)
+def test_malformed_arrow_strings_raise_value_error_on_every_import_path(arr):
+    with pytest.raises(ValueError, match="Arrow"):
+        volas.Series.from_arrow(arr)
+    with pytest.raises(ValueError, match="Arrow"):
+        volas.DataFrame.from_arrow(pa.table({"a": arr}))
+
+
+class _Capsules:
+    """Replays one fixed `__arrow_c_array__` capsule pair."""
+
+    def __init__(self, pair):
+        self.pair = pair
+
+    def __arrow_c_array__(self, requested_schema=None):
+        return self.pair
+
+
+@pytest.mark.parametrize("first_consumer", ["pyarrow", "volas"])
+def test_an_already_consumed_capsule_pair_raises(first_consumer):
+    pair = volas.DataFrame({"x": [11, 22]})["x"].__arrow_c_array__()
+    if first_consumer == "pyarrow":
+        pa.Array._import_from_c_capsule(*pair)  # moves the array, releases the schema
+    else:
+        assert volas.Series.from_arrow(_Capsules(pair)).to_list() == [11, 22]
+    with pytest.raises(ValueError, match="released"):
+        volas.Series.from_arrow(_Capsules(pair))
+
+
+def test_an_already_consumed_stream_capsule_raises():
+    capsule = pa.table({"x": [1, 2]}).__arrow_c_stream__()
+
+    class Stream:
+        def __arrow_c_stream__(self, requested_schema=None):
+            return capsule
+
+    assert volas.DataFrame.from_arrow(Stream())["x"].to_list() == [1, 2]
+    with pytest.raises(ValueError, match="released"):
+        volas.DataFrame.from_arrow(Stream())
+
+
+@pytest.mark.parametrize("t", [pa.string(), pa.large_string()], ids=["utf8", "large_utf8"])
+def test_a_zero_length_string_slice_imports_empty(t):
+    # valid Arrow: a zero-length slice keeps its parent's offset position
+    arr = pa.array(["aa", "bbb"], t).slice(1, 0)
+    assert volas.Series.from_arrow(arr).to_list() == []
+    assert volas.DataFrame.from_arrow(pa.table({"a": arr})).shape == (0, 1)
+    table = pa.Table.from_batches([
+        pa.record_batch({"a": arr}), pa.record_batch({"a": pa.array(["c"], t)})])
+    assert volas.DataFrame.from_arrow(table)["a"].to_list() == ["c"]
+
+
+def test_a_column_name_with_nul_raises_at_export():
+    df = volas.DataFrame({"a\x00b": [1]})
+    with pytest.raises(ValueError, match="NUL"):
+        df.to_arrow()
+    with pytest.raises(ValueError, match="NUL"):
+        df.__arrow_c_stream__()
+
+
+def test_a_failing_stream_without_an_error_message_raises():
+    import ctypes as C
+
+    class S(C.Structure):
+        pass
+
+    GS = C.CFUNCTYPE(C.c_int, C.POINTER(S), C.c_void_p)
+    GE = C.CFUNCTYPE(C.c_void_p, C.POINTER(S))
+    RL = C.CFUNCTYPE(None, C.POINTER(S))
+    S._fields_ = [("get_schema", GS), ("get_next", GS), ("get_last_error", GE),
+                  ("release", RL), ("private_data", C.c_void_p)]
+    batch = pa.record_batch({"x": pa.array([1, 2], pa.int64())})
+    calls = []
+
+    @GS
+    def get_schema(s, out):
+        batch.schema._export_to_c(out)
+        return 0
+
+    @GS
+    def get_next(s, out):
+        calls.append(1)
+        if len(calls) == 1:
+            batch._export_to_c(out)
+            return 0
+        return 5  # EIO, with no error message
+
+    @GE
+    def get_last_error(s):
+        return None
+
+    @RL
+    def release(s):
+        s.contents.release = RL()
+
+    stream = S(get_schema, get_next, get_last_error, release, None)
+    new = C.pythonapi.PyCapsule_New
+    new.restype, new.argtypes = C.py_object, [C.c_void_p, C.c_char_p, C.c_void_p]
+
+    class Producer:
+        def __arrow_c_stream__(self, requested_schema=None):
+            return new(C.addressof(stream), b"arrow_array_stream", None)
+
+    with pytest.raises(ValueError, match="code 5"):
+        volas.DataFrame.from_arrow(Producer())
+
+
+@pytest.mark.parametrize("target", ["offsets", "data"])
+def test_imported_strings_do_not_see_later_producer_writes(target):
+    # A string column is copied at import: the producer rewriting its buffers
+    # afterwards (here past the data end / into invalid UTF-8) cannot reach it.
+    import struct
+    data, offsets = bytearray(b"ab"), bytearray(struct.pack("<qqq", 0, 1, 2))
+    arr = pa.Array.from_buffers(
+        pa.large_string(), 2, [None, pa.py_buffer(offsets), pa.py_buffer(data)])
+    arr.validate(full=True)
+    s = volas.Series.from_arrow(arr)
+    if target == "offsets":
+        offsets[16:24] = struct.pack("<q", 1 << 40)
+    else:
+        data[0] = 0xFF
+    assert s.to_list() == ["a", "b"]
+    assert s.max() == "b"
+
+
+def test_valid_arrow_null_slot_with_non_utf8_payload_imports_as_na():
+    # Arrow leaves a null slot's bytes unspecified: this array passes pyarrow's FULL
+    # validation, so it must import — the null's payload is never decoded as text.
+    arr = _large_str([0, 2, 3], b"\xff\xfea", validity=pa.py_buffer(bytes([0b10])))
+    arr.validate(full=True)
+    s = volas.Series.from_arrow(arr)
+    assert s.to_list() == [volas.NA, "a"]
+    assert s.head(1).to_list() == [volas.NA]
+    assert s.tail(1).to_list() == ["a"]
+    df = volas.DataFrame.from_arrow(pa.table({"a": arr}))
+    assert df["a"].to_list() == [volas.NA, "a"]
+    assert df.equals(df.copy())

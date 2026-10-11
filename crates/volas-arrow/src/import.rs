@@ -1,6 +1,6 @@
-//! Arrow `ArrayRef` → `Column`. Numeric / string / ns-datetime data is borrowed
-//! zero-copy ([`Buffer::Borrowed`](volas_core::Buffer)); `bool`, narrow `Utf8` offsets,
-//! and non-ns timestamps are the only repacks.
+//! Arrow `ArrayRef` → `Column`. Numeric / ns-datetime data is borrowed zero-copy
+//! ([`Buffer::Borrowed`](volas_core::Buffer)); `bool`, strings (copied and validated,
+//! see `copy_strings`) and non-ns timestamps are repacked.
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
@@ -10,13 +10,13 @@ use arrow_array::types::{
 };
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{ArrowError, DataType, TimeUnit};
-use volas_core::{Buffer, Column, StrBuffer};
+use volas_core::{Buffer, Column, StrBuffer, Validity};
 
 use crate::{borrow_primitive, validity_of};
 
-/// Import an Arrow array as a volas `Column`. Borrows the data buffer where the
-/// physical layouts match; copies only `bool`, `Utf8` (i32 → i64 offsets), and
-/// timestamps coarser than nanoseconds.
+/// Import an Arrow array as a volas `Column`. Borrows a numeric / datetime data
+/// buffer where the physical layouts match; copies `bool`, strings, and timestamps
+/// coarser than nanoseconds.
 pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
     let len = src.len();
     // A narrow / unsigned integer Arrow array widened to volas's i64 (a copy). The
@@ -67,31 +67,14 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
         }
         DataType::LargeUtf8 => {
             let a = src.as_string::<i64>();
-            let raw = a.value_offsets();
-            let (first, last) = (raw[0], raw[raw.len() - 1]);
-            // A canonical (un-sliced) array already satisfies StrBuffer's invariant, so its
-            // offsets borrow zero-copy. A sliced array's offsets start at `first != 0` (and
-            // its data keeps the sliced-away cells) — re-base the small offset array to 0 and
-            // borrow only the live `[first, last)` byte span, restoring the invariant.
-            let (offsets, data) = if first == 0 && last as usize == a.value_data().len() {
-                (borrow_primitive(raw, src), borrow_primitive(a.value_data(), src))
-            } else {
-                let offsets = Buffer::from_vec(raw.iter().map(|&o| o - first).collect());
-                let data = borrow_primitive(&a.value_data()[first as usize..last as usize], src);
-                (offsets, data)
-            };
-            Column::Str(StrBuffer::from_buffers(offsets, data), validity_of(a.nulls(), len))
+            let offsets = a.value_offsets().to_vec();
+            copy_strings(offsets, a.value_data(), validity_of(a.nulls(), len))?
         }
         DataType::Utf8 => {
-            // 32-bit offsets must widen to volas's i64 (a copy of the small offset array);
-            // re-base to 0 in the same pass (a no-op for an un-sliced array). The UTF-8 bytes
-            // stay borrowed zero-copy over the live `[first, last)` span.
+            // 32-bit offsets widen to volas's i64 in the same copying pass.
             let a = src.as_string::<i32>();
-            let raw = a.value_offsets();
-            let (first, last) = (raw[0], raw[raw.len() - 1]);
-            let offsets = Buffer::from_vec(raw.iter().map(|&o| (o - first) as i64).collect());
-            let data = borrow_primitive(&a.value_data()[first as usize..last as usize], src);
-            Column::Str(StrBuffer::from_buffers(offsets, data), validity_of(a.nulls(), len))
+            let offsets = a.value_offsets().iter().map(|&o| o as i64).collect();
+            copy_strings(offsets, a.value_data(), validity_of(a.nulls(), len))?
         }
         // Narrow / unsigned integers widen to volas's i64 (a copy). `u8`/`u16`/`u32` and
         // the signed widths always fit; only `UInt64` can exceed `i64::MAX` (handled below).
@@ -193,6 +176,47 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
         }
     };
     Ok(col)
+}
+
+/// The live byte span `[first, last)` a string array's end offsets name, checked to
+/// lie inside its `data_len`-byte value buffer before anything is sliced by it.
+fn live_span(first: i64, last: i64, data_len: usize) -> Result<(usize, usize), ArrowError> {
+    match (usize::try_from(first), usize::try_from(last)) {
+        (Ok(f), Ok(l)) if f <= l && l <= data_len => Ok((f, l)),
+        _ => Err(ArrowError::InvalidArgumentError(format!(
+            "invalid string buffer: offsets span {first}..{last} lies outside the \
+             {data_len}-byte data buffer"
+        ))),
+    }
+}
+
+/// A `Str` column **copied** out of an Arrow string array: its (widened) `offsets`
+/// and the live `[first, last)` span of `bytes`, re-based to 0 into volas-owned
+/// buffers, then validated by the string buffer's owner
+/// (`StrBuffer::try_from_buffers`) — malformed offsets or a non-UTF-8 present cell
+/// are an import error, a non-UTF-8 null slot becomes an empty span. Strings are
+/// never borrowed: the unchecked string readers rely on the checked invariant,
+/// which a producer rewriting its buffers after import would otherwise break.
+fn copy_strings(
+    mut offsets: Vec<i64>,
+    bytes: &[u8],
+    validity: Validity,
+) -> Result<Column, ArrowError> {
+    if offsets.len() <= 1 {
+        // zero cells: nothing to read (a zero-length slice's one offset may point
+        // anywhere in its parent)
+        return Ok(Column::Str(StrBuffer::from_vec(Vec::new()), validity));
+    }
+    let (first, last) = live_span(offsets[0], offsets[offsets.len() - 1], bytes.len())?;
+    let base = first as i64;
+    offsets.iter_mut().for_each(|o| *o = o.wrapping_sub(base));
+    let sb = StrBuffer::try_from_buffers(
+        Buffer::from_vec(offsets),
+        Buffer::from_vec(bytes[first..last].to_vec()),
+        &validity,
+    )
+    .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?;
+    Ok(Column::Str(sb, validity))
 }
 
 /// Timestamp → `Datetime` (ns). Borrows the buffer for a dense nanosecond array;

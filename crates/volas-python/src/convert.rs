@@ -101,12 +101,13 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
         return PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None);
     }
 
-    // A named index becomes a column, then `set_index` moves it into the row index.
+    // The index is built as an index directly — never routed through the column
+    // namespace, where it would collide with (and replace) a same-named column. An
+    // unnamed pandas index stays unnamed.
     let idx_name = {
         let n = idx.getattr("name")?;
-        if n.is_none() { "index".to_string() } else { n.str()?.to_string() }
+        if n.is_none() { None } else { Some(n.str()?.to_string()) }
     };
-    let merged = PyDict::new(py);
     let datetime_index = types
         .call_method1("is_datetime64_any_dtype", (idx.getattr("dtype")?,))?
         .extract::<bool>()?;
@@ -118,12 +119,12 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
     } else {
         idx.call_method0("to_numpy")?
     };
-    merged.set_item(&idx_name, instants)?;
-    for (k, v) in data.iter() {
-        merged.set_item(k, v)?;
-    }
-    let df = PyDataFrame::new(merged.as_any(), None, None, None, None, None, None, None)?
-        .set_index(&idx_name)?;
+    let index = Index::from_column(&pyany_to_column(&instants)?).map_err(pyerr)?.with_name(idx_name);
+    let cols = PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None)?.inner;
+    let df = PyDataFrame::plain(
+        DataFrame::new(cols.names().to_vec(), cols.columns().to_vec(), Some(index))
+            .map_err(pyerr)?,
+    );
 
     // The imported instants are already true UTC; re-attach a tz-aware index's display
     // zone directly (tz_convert would hit the naive-axis guard; localize would shift).
@@ -335,31 +336,68 @@ fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'p
 }
 
 /// Cast an exported NumPy array to `dtype`, but **raise** (pandas-aligned) when the
-/// column holds missing values and `dtype` is an integer type — an NA has no integer
-/// representation, so NumPy would silently emit a `RuntimeWarning` and write garbage.
+/// column holds missing values and `dtype` cannot represent one (integer / bool) —
+/// NumPy would silently write garbage (or `True` for a NaN) instead.
 pub(crate) fn astype_checked<'py>(
     py: Python<'py>,
     arr: Bound<'py, PyAny>,
     col: &Column,
     dtype: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if col.null_count() > 0 && is_integer_dtype(py, dtype)? {
-        return Err(PyValueError::new_err(format!(
-            "cannot convert a column with missing values to integer NumPy dtype '{dtype}' \
-             (an NA has no integer representation) — pass na_value=, or use a float dtype"
-        )));
+    if col.null_count() > 0 && ExportTarget::of(py, dtype)?.has_no_na() {
+        return Err(no_na_target_err("a column", dtype));
     }
     arr.call_method1("astype", (dtype,))
 }
 
-/// Whether `dtype` names a NumPy signed/unsigned integer type (`kind` `i` / `u`).
-pub(crate) fn is_integer_dtype(py: Python<'_>, dtype: &str) -> PyResult<bool> {
-    let kind = py
-        .import("numpy")?
-        .call_method1("dtype", (dtype,))?
-        .getattr("kind")?
-        .extract::<String>()?;
-    Ok(matches!(kind.as_str(), "i" | "u"))
+/// The error for an NA-holding export into a dtype that cannot represent NA.
+pub(crate) fn no_na_target_err(what: &str, dtype: &str) -> PyErr {
+    PyValueError::new_err(format!(
+        "cannot convert {what} with missing values to NumPy dtype '{dtype}' (an NA has \
+         no integer or boolean representation) — pass na_value=, or use a float dtype"
+    ))
+}
+
+/// The family of a NumPy export `dtype`, decided by NumPy's own resolution of the
+/// spelling (`numpy.dtype(dtype).kind`) — so `'f8'`, `'d'`, `'<f8'` and `'float64'`
+/// all land in one family, never by matching the spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExportTarget {
+    /// `kind` `f` / `c`: floating or complex.
+    Float,
+    /// `kind` `i` / `u`: signed / unsigned integer.
+    Integer,
+    /// `kind` `b`.
+    Bool,
+    /// `kind` `M` / `m`: datetime64 / timedelta64.
+    Temporal,
+    /// `kind` `O`.
+    Object,
+    /// Any other kind (`U` / `S` text, `V` void).
+    Other,
+}
+
+impl ExportTarget {
+    pub(crate) fn of(py: Python<'_>, dtype: &str) -> PyResult<ExportTarget> {
+        let kind = py
+            .import("numpy")?
+            .call_method1("dtype", (dtype,))?
+            .getattr("kind")?
+            .extract::<String>()?;
+        Ok(match kind.as_str() {
+            "f" | "c" => ExportTarget::Float,
+            "i" | "u" => ExportTarget::Integer,
+            "b" => ExportTarget::Bool,
+            "M" | "m" => ExportTarget::Temporal,
+            "O" => ExportTarget::Object,
+            _ => ExportTarget::Other,
+        })
+    }
+
+    /// Whether the target has no representation for a missing value.
+    pub(crate) fn has_no_na(self) -> bool {
+        matches!(self, ExportTarget::Integer | ExportTarget::Bool)
+    }
 }
 
 /// The i-th element of a column as a Python scalar.

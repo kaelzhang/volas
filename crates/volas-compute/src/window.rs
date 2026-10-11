@@ -200,11 +200,28 @@ pub fn max(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
 
 // --- dispersion / moments -----------------------------------------------------
 
+/// Whether every value in a (non-empty) window is the same — a constant window.
+/// `0.0 == -0.0`, so signed zeros are one value.
+fn is_constant(b: &[f64]) -> bool {
+    b.iter().all(|&x| x == b[0])
+}
+
+/// The window mean as the center of every deviation-based statistic. A constant
+/// window's mean is its value EXACTLY — `sum / n` would leave a rounding residue
+/// (`101.37 × 20 / 20 ≠ 101.37`) that the deviations then mistake for dispersion.
+fn window_mean(b: &[f64]) -> f64 {
+    if is_constant(b) {
+        b[0]
+    } else {
+        b.iter().sum::<f64>() / b.len() as f64
+    }
+}
+
 fn buf_var(b: &[f64], ddof: usize) -> f64 {
     if b.len() <= ddof {
         return f64::NAN;
     }
-    let m = b.iter().sum::<f64>() / b.len() as f64;
+    let m = window_mean(b);
     b.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (b.len() - ddof) as f64
 }
 
@@ -231,7 +248,7 @@ pub fn sem(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<
 /// is built on, and the one statistic missing from var/std/sem.
 pub fn dev(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     per_window(data, window, min_periods, |b| {
-        let m = b.iter().sum::<f64>() / b.len() as f64;
+        let m = window_mean(b);
         b.iter().map(|x| (x - m).abs()).sum::<f64>() / b.len() as f64
     })
 }
@@ -261,14 +278,18 @@ pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     })
 }
 
-/// Bias-corrected sample skewness (pandas `skew`; needs >= 3 present values).
+/// Bias-corrected sample skewness (pandas `skew`; needs >= 3 present values). A
+/// constant window is exactly `0` (pandas 3's degenerate-window rule).
 pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     per_window(data, window, min_periods, |b| {
         let n = b.len() as f64;
         if b.len() < 3 {
             return f64::NAN;
         }
-        let m = b.iter().sum::<f64>() / n;
+        if is_constant(b) {
+            return 0.0;
+        }
+        let m = window_mean(b);
         let m2 = b.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n;
         let m3 = b.iter().map(|x| (x - m).powi(3)).sum::<f64>() / n;
         if m2 <= 0.0 {
@@ -278,14 +299,18 @@ pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     })
 }
 
-/// Bias-corrected excess kurtosis (pandas `kurt`; needs >= 4 present values).
+/// Bias-corrected excess kurtosis (pandas `kurt`; needs >= 4 present values). A
+/// constant window is exactly `-3` (pandas 3's degenerate-window rule).
 pub fn kurt(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     per_window(data, window, min_periods, |b| {
         let n = b.len() as f64;
         if b.len() < 4 {
             return f64::NAN;
         }
-        let m = b.iter().sum::<f64>() / n;
+        if is_constant(b) {
+            return -3.0;
+        }
+        let m = window_mean(b);
         let m2 = b.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n;
         let m4 = b.iter().map(|x| (x - m).powi(4)).sum::<f64>() / n;
         if m2 <= 0.0 {
@@ -309,9 +334,36 @@ fn sorted_quantile(sorted: &[f64], q: f64, interpolation: &str) -> f64 {
         "higher" => sorted[hi],
         // a .5 tie rounds to the EVEN index (pandas/numpy 'nearest')
         "nearest" => sorted[if frac > 0.5 || (frac == 0.5 && lo % 2 == 1) { hi } else { lo }],
-        "midpoint" => (sorted[lo] + sorted[hi]) / 2.0,
+        "midpoint" => midpoint(sorted[lo], sorted[hi]),
         // "linear" (validated by the caller)
-        _ => sorted[lo] + frac * (sorted[hi] - sorted[lo]),
+        _ => lerp(sorted[lo], sorted[hi], frac),
+    }
+}
+
+/// `(a + b) / 2` (pandas's arithmetic) unless the sum alone overflows for finite
+/// `a`, `b`, then `a/2 + b/2` (`[1e308, 1e308]` has midpoint `1e308`).
+#[inline]
+fn midpoint(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    if sum.is_finite() || !(a.is_finite() && b.is_finite()) {
+        sum / 2.0
+    } else {
+        a / 2.0 + b / 2.0
+    }
+}
+
+/// `a + t·(b − a)` for sorted `a <= b`, `t ∈ [0, 1]` — without overflowing when
+/// the span `b − a` of two finite values exceeds `f64::MAX` although the result is
+/// representable (`[-1e308, 1e308]` has median `0`). The plain form (pandas's
+/// arithmetic) is kept whenever the span is finite; the weighted form
+/// `(1−t)·a + t·b` takes over only past it.
+#[inline]
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    let span = b - a;
+    if span.is_finite() || !(a.is_finite() && b.is_finite()) {
+        a + t * span
+    } else {
+        (1.0 - t) * a + t * b
     }
 }
 
@@ -319,7 +371,7 @@ fn per_sorted_window(
     data: &[f64],
     window: usize,
     min_periods: usize,
-    mut f: impl FnMut(&[f64], f64) -> f64,
+    mut f: impl FnMut(&[f64], usize) -> f64,
 ) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
@@ -339,7 +391,7 @@ fn per_sorted_window(
             sorted.insert(pos, x);
         }
         if sorted.len() >= min_periods.max(1) {
-            out[i] = f(&sorted, x);
+            out[i] = f(&sorted, i);
         }
     }
     out
@@ -365,7 +417,7 @@ pub fn quantile(
     })
 }
 
-/// Rank of the CURRENT row's value within its window (pandas `rank`):
+/// Rank of the CURRENT row's value within its trailing window (pandas `rank`):
 /// `method` is `average` / `min` / `max`, ties handled accordingly; `pct`
 /// scales by the present count; a missing current value stays NaN.
 pub fn rank(
@@ -376,7 +428,26 @@ pub fn rank(
     ascending: bool,
     pct: bool,
 ) -> Vec<f64> {
-    per_sorted_window(data, window, min_periods, |s, x| {
+    rank_padded(data, window, min_periods, method, ascending, pct, data.len())
+}
+
+/// [`rank`] over data whose rows from `data_len` on are trailing padding (a
+/// centered window's forward reach): every window ranks its LAST DATA row — the
+/// window's own last value, pandas's rank target — so a window ending in padding
+/// ranks row `data_len - 1`, never a padding cell. `data_len = data.len()` is
+/// [`rank`].
+#[allow(clippy::too_many_arguments)]
+pub fn rank_padded(
+    data: &[f64],
+    window: usize,
+    min_periods: usize,
+    method: &str,
+    ascending: bool,
+    pct: bool,
+    data_len: usize,
+) -> Vec<f64> {
+    per_sorted_window(data, window, min_periods, |s, i| {
+        let x = data[i.min(data_len.saturating_sub(1))];
         if x.is_nan() {
             return f64::NAN;
         }
@@ -400,6 +471,17 @@ pub fn rank(
     })
 }
 
+/// The hash key of a present value under NUMERIC equality: `0.0` and `-0.0` are
+/// one value (their bit patterns differ). NaN never reaches a key (it is missing).
+#[inline]
+fn value_key(x: f64) -> u64 {
+    if x == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        x.to_bits()
+    }
+}
+
 /// Count of distinct present values per window (pandas `nunique`).
 pub fn nunique(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     let n = data.len();
@@ -411,7 +493,7 @@ pub fn nunique(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
             let leaving = data[i - window];
             if !leaving.is_nan() {
                 nobs -= 1;
-                let k = leaving.to_bits();
+                let k = value_key(leaving);
                 let c = counts.get_mut(&k).expect("leaving value was inserted");
                 *c -= 1;
                 if *c == 0 {
@@ -422,7 +504,7 @@ pub fn nunique(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
         let x = data[i];
         if !x.is_nan() {
             nobs += 1;
-            *counts.entry(x.to_bits()).or_insert(0) += 1;
+            *counts.entry(value_key(x)).or_insert(0) += 1;
         }
         if nobs >= min_periods.max(1) {
             out[i] = counts.len() as f64;
@@ -495,8 +577,8 @@ pub fn cov(x: &[f64], y: &[f64], window: usize, min_periods: usize, ddof: usize)
         }
         let n = bx.len() as f64;
         let (mx, my) = (
-            bx.iter().sum::<f64>() / n,
-            by.iter().sum::<f64>() / n,
+            window_mean(bx),
+            window_mean(by),
         );
         bx.iter()
             .zip(by)
@@ -518,8 +600,8 @@ pub fn corr(x: &[f64], y: &[f64], window: usize, min_periods: usize) -> Vec<f64>
         }
         let n = bx.len() as f64;
         let (mx, my) = (
-            bx.iter().sum::<f64>() / n,
-            by.iter().sum::<f64>() / n,
+            window_mean(bx),
+            window_mean(by),
         );
         let c = bx
             .iter()

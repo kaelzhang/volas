@@ -322,10 +322,19 @@ impl PyDataFrame {
         let mask = mask.as_ref();
 
         if let Some(dt) = dtype {
+            // The target family comes from NumPy's resolution of `dt`, never its
+            // spelling ('f8' / 'd' / '<f8' are float64 too).
+            let target = ExportTarget::of(py, dt)?;
             // `object`: a lossless typed-cell array (never the f64 channel) — the
-            // inspection / interop export that keeps datetime, str and NA intact.
-            if dt == "object" || dt == "O" {
-                return fill_na_2d(object_array(py, df)?, mask, nv);
+            // inspection / interop export that keeps datetime, str and NA intact. A
+            // text / other target formats those same typed cells.
+            match target {
+                ExportTarget::Object => return fill_na_2d(object_array(py, df)?, mask, nv),
+                ExportTarget::Other => {
+                    return fill_na_2d(object_array(py, df)?, mask, nv)?
+                        .call_method1("astype", (dt,))
+                }
+                _ => {}
             }
             // Any numeric / temporal target: a str column has no numeric value
             // (pandas raises here too), so reject it and point at the object route.
@@ -334,42 +343,34 @@ impl PyDataFrame {
                     "cannot convert a string column to {dt}; use dtype='object' to keep strings"
                 )));
             }
-            // A float target rides the (lossy) f64 channel — the caller opted into
-            // float, so a datetime epoch-ns past 2⁵³ quantises and a NaT becomes
-            // NaN. A non-float (integer / bool / datetime) target takes the EXACT
-            // i64 channel so a datetime exports its true epoch-ns (NaT→i64::MIN)
-            // and a large i64 column survives, instead of an f64 round-trip.
-            let floaty = dt.contains("float")
-                || dt == "f32"
-                || dt == "f64"
-                || dt == "double"
-                || dt == "single";
+            // An integer / bool target cannot hold an NA: raise (pandas-aligned) unless
+            // `na_value` gives an explicit fill, exempting datetime columns' NaT sentinel.
+            if nv.is_none()
+                && target.has_no_na()
+                && cols
+                    .iter()
+                    .any(|c| !matches!(c, Column::Datetime(..)) && c.null_count() > 0)
+            {
+                return Err(no_na_target_err("a frame", dt));
+            }
+            // A float / bool target rides the f64 channel — the caller opted into
+            // float (a datetime epoch-ns past 2⁵³ quantises, a NaT becomes NaN), and a
+            // bool tests the true value (0.5 is True), never a truncated integer. An
+            // integer / datetime target takes the EXACT i64 channel so a datetime
+            // exports its true epoch-ns (NaT→i64::MIN) and a large i64 column
+            // survives, instead of an f64 round-trip.
+            let via_f64 = matches!(target, ExportTarget::Float | ExportTarget::Bool);
             // The two channels carry different Vec element types, so each builds its
             // own (type-erased) NumPy matrix; the fill + cast is then shared.
-            let arr = if floaty {
+            let arr = if via_f64 {
                 let (data, h, w) = df.to_row_major_f64();
                 ndarray::Array2::from_shape_vec((h, w), data)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?
                     .into_pyarray(py)
                     .into_any()
             } else {
-                // The i64 channel serves both integer and `datetime64` targets. A
-                // datetime NaT → `i64::MIN` is its documented exact export, but a plain
-                // int/float NA has no integer representation — raise for a true integer
-                // target (pandas-aligned) UNLESS `na_value` gives an explicit fill,
-                // exempting datetime columns' sentinel.
-                if nv.is_none()
-                    && is_integer_dtype(py, dt)?
-                    && cols
-                        .iter()
-                        .any(|c| !matches!(c, Column::Datetime(..)) && c.null_count() > 0)
-                {
-                    return Err(PyValueError::new_err(format!(
-                        "cannot convert a frame with missing values to integer NumPy dtype \
-                         '{dt}' (an NA has no integer representation) — pass na_value=, or use \
-                         a float dtype"
-                    )));
-                }
+                // The i64 channel serves both integer and `datetime64` targets (a
+                // datetime NaT → `i64::MIN` is its documented exact export).
                 let (data, h, w) = df.to_row_major_i64();
                 ndarray::Array2::from_shape_vec((h, w), data)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?

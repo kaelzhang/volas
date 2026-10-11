@@ -190,11 +190,7 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
                         if !val.is_valid(i) || s.trim().is_empty() {
                             return Ok(i64::MIN);
                         }
-                        datetime::parse_ns_format(s, fmt).ok_or_else(|| {
-                            PyValueError::new_err(format!(
-                                "\"{s}\" does not match format \"{fmt}\""
-                            ))
-                        })
+                        datetime::parse_ns_format(s, fmt).map_err(pyerr)
                     })
                     .collect::<PyResult<Vec<i64>>>()?;
                 Column::datetime(ns)

@@ -3,6 +3,7 @@
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Timelike};
 
+use crate::error::{Result, VolasError};
 use crate::tz::Tz;
 
 /// Parse a timestamp string to **UTC** epoch nanoseconds. An **offset-aware**
@@ -297,18 +298,42 @@ pub fn strftime(ns: i64, tz: Tz, fmt: &str) -> Option<String> {
     Some(dt.format_with_items(items.iter()).to_string())
 }
 
-/// Parse `s` with an explicit `strptime`-style `fmt` to **UTC** epoch ns (naive,
-/// like [`parse_ns`]). Tries a full datetime, then a date-only format (→ midnight).
-/// Returns `None` when `s` does not match `fmt`.
-pub fn parse_ns_format(s: &str, fmt: &str) -> Option<i64> {
-    if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
-        return dt.and_utc().timestamp_nanos_opt();
+/// Parse `s` with an explicit `strptime`-style `fmt` to **UTC** epoch ns, honoring
+/// every field the format parses: an offset (`%z` / `%:z` / …) makes the text an
+/// absolute instant, exactly like an offset-aware string on the unformatted path
+/// ([`parse_ns`]); without one the wall-clock is read as UTC. Time fields the format
+/// omits default to zero (`strptime` semantics: a date-only format is midnight, an
+/// hour-only one is on the hour). `%Z` (a zone *name*) is rejected rather than
+/// silently skipped — chrono cannot resolve one. A `Value` error when `s` does not
+/// match `fmt`.
+pub fn parse_ns_format(s: &str, fmt: &str) -> Result<i64> {
+    use chrono::format::{parse, Fixed, Item, Parsed, StrftimeItems};
+    let items: Vec<Item> = StrftimeItems::new(fmt).collect();
+    if items.iter().any(|it| matches!(it, Item::Fixed(Fixed::TimezoneName))) {
+        return Err(VolasError::Value(format!(
+            "format \"{fmt}\": %Z (a time-zone name) is not supported — use a numeric \
+             offset (%z / %:z), or parse without format= and localize"
+        )));
     }
-    NaiveDate::parse_from_str(s, fmt)
-        .ok()?
-        .and_hms_opt(0, 0, 0)?
+    let mismatch = || VolasError::Value(format!("\"{s}\" does not match format \"{fmt}\""));
+    let mut p = Parsed::new();
+    parse(&mut p, s, items.iter()).map_err(|_| mismatch())?;
+    if p.timestamp().is_none() {
+        let has_hour = p.hour_div_12().is_some() || p.hour_mod_12().is_some();
+        if !has_hour {
+            p.set_hour(0).map_err(|_| mismatch())?;
+        }
+        if p.minute().is_none() {
+            p.set_minute(0).map_err(|_| mismatch())?;
+        }
+    }
+    let offset = p.offset().unwrap_or(0);
+    let local = p.to_naive_datetime_with_offset(offset).map_err(|_| mismatch())?;
+    local
         .and_utc()
         .timestamp_nanos_opt()
+        .and_then(|ns| ns.checked_sub(offset as i64 * 1_000_000_000))
+        .ok_or_else(|| VolasError::Value(format!("\"{s}\" is outside the datetime64[ns] range")))
 }
 
 #[cfg(test)]
@@ -356,6 +381,22 @@ mod tests {
             format_ns(parse_ns_in_tz("2020-01-01T00:00:00Z", tz).unwrap()),
             "2020-01-01 00:00:00"
         );
+    }
+
+    #[test]
+    fn parse_ns_format_honors_every_field_or_errors() {
+        let utc = |s: &str| parse_ns(&format!("2024-01-01 {s}")).unwrap();
+        let fmt = |s, f| parse_ns_format(s, f);
+        assert_eq!(fmt("2024-01-01 08:00+0800", "%Y-%m-%d %H:%M%z").unwrap(), utc("00:00"));
+        assert_eq!(fmt("2024-01-01 08:00+08:00", "%Y-%m-%d %H:%M%:z").unwrap(), utc("00:00"));
+        assert_eq!(fmt("2024-01-01 09", "%Y-%m-%d %H").unwrap(), utc("09:00"));
+        assert_eq!(fmt("2024-01-01", "%Y-%m-%d").unwrap(), utc("00:00"));
+        assert_eq!(fmt("1704067200", "%s").unwrap(), utc("00:00"));
+        let err = |s, f| parse_ns_format(s, f).unwrap_err().to_string();
+        assert!(err("2024-01-01 EST", "%Y-%m-%d %Z").contains("%Z"));
+        assert!(err("nope", "%Y-%m-%d").contains("does not match"));
+        assert_eq!(fmt("2024-01-01 30", "%Y-%m-%d %M").unwrap(), utc("00:30"));
+        assert!(err("2300-01-01", "%Y-%m-%d").contains("outside"));
     }
 
     #[test]

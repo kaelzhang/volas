@@ -86,9 +86,19 @@ impl PySeries {
             if valid[i] {
                 if let Some(l) = last {
                     if i > l + 1 {
-                        let step = (v[i] - v[l]) / (i - l) as f64;
+                        let (a, b, gap) = (v[l], v[i], (i - l) as f64);
+                        let span = b - a;
+                        // the span of two finite values can overflow although every
+                        // interpolated value is representable: then weight the ends.
+                        let wide = !span.is_finite() && a.is_finite() && b.is_finite();
+                        let step = span / gap;
                         for (k, slot) in out.iter_mut().enumerate().take(i).skip(l + 1) {
-                            *slot = v[l] + step * (k - l) as f64;
+                            let t = (k - l) as f64;
+                            *slot = if wide {
+                                (1.0 - t / gap) * a + (t / gap) * b
+                            } else {
+                                a + step * t
+                            };
                         }
                     }
                 }

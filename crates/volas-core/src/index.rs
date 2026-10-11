@@ -278,6 +278,33 @@ impl Index {
         }
     }
 
+    /// The alignment rule for a positional binary operation between two labelled
+    /// operands (arithmetic, comparison, `where` / `mask`, pairwise windows): the
+    /// labels must be equal ([`label_eq`](Self::label_eq): the same instants, the
+    /// index name and display zone ignored), and a tz-naive datetime index never
+    /// aligns with a tz-aware one (a wall clock is not an instant). volas pairs by
+    /// position and never re-aligns by label, so anything else is an error.
+    pub fn require_aligned(&self, other: &Index) -> Result<()> {
+        if let (IndexKind::Datetime(_, a), IndexKind::Datetime(_, b)) = (&self.kind, &other.kind) {
+            if a.is_aware() != b.is_aware() {
+                return Err(VolasError::Value(
+                    "cannot align a tz-naive index with a tz-aware index; tz_localize the \
+                     naive one first"
+                        .into(),
+                ));
+            }
+        }
+        if self.label_eq(other) {
+            Ok(())
+        } else {
+            Err(VolasError::Value(
+                "operands have different indexes; volas aligns by position, not by label — \
+                 reindex or slice them to a common index first"
+                    .into(),
+            ))
+        }
+    }
+
     /// The positions that sort the index by label (`sort_index`). Numeric kinds
     /// sort numerically, a string index lexicographically.
     pub fn argsort(&self, ascending: bool) -> Vec<usize> {
@@ -591,6 +618,22 @@ mod tests {
         // mixing string with numeric is an error, either way
         assert!(str_index(&["x"]).extend(&Index::range(1)).is_err());
         assert!(Index::range(1).extend(&str_index(&["x"])).is_err());
+    }
+
+    #[test]
+    fn alignment_is_equal_labels_with_matching_awareness() {
+        let ny = Tz::parse("America/New_York").unwrap();
+        let named = Index::datetime(vec![1, 2], Tz::Utc).with_name(Some("t".into()));
+        // same instants: the name and the display zone do not matter
+        assert!(named.require_aligned(&Index::datetime(vec![1, 2], ny)).is_ok());
+        assert!(Index::range(2).require_aligned(&Index::int64(vec![0, 1])).is_ok());
+        // naive vs aware never aligns, even over the same stored values
+        let err = Index::datetime(vec![1, 2], Tz::Naive)
+            .require_aligned(&named)
+            .unwrap_err();
+        assert!(err.to_string().contains("tz-naive"), "{err}");
+        let err = Index::str(vec!["a".into()]).require_aligned(&Index::str(vec!["b".into()]));
+        assert!(err.unwrap_err().to_string().contains("different indexes"));
     }
 
     #[test]

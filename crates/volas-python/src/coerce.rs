@@ -47,6 +47,29 @@ pub(crate) fn datetime_unit_of(s: &str) -> Option<&'static str> {
     }
 }
 
+/// A NumPy masked array (`numpy.ma.MaskedArray`): its mask marks missing cells,
+/// so they become volas NA in the column built from the underlying data — the mask
+/// is never dropped (the masked slots' data values are unspecified). `None` for
+/// anything that is not a masked array.
+fn masked_array_column(v: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    if !v.hasattr("mask")? {
+        return Ok(None);
+    }
+    let ma = v.py().import("numpy.ma")?;
+    if !v.is_instance(&ma.getattr("MaskedArray")?)? {
+        return Ok(None);
+    }
+    let col = pyany_to_column(&v.getattr("data")?)?;
+    let mask = ma.call_method1("getmaskarray", (v,))?.call_method0("tolist")?;
+    let keep: Vec<bool> = mask.extract::<Vec<bool>>()?.into_iter().map(|m| !m).collect();
+    if keep.iter().all(|&k| k) {
+        return Ok(Some(col));
+    }
+    let dt = col.dtype();
+    let na = Column::na_of(dt, col.len());
+    Ok(Some(col.select(&keep, &na, dt).map_err(pyerr)?))
+}
+
 /// The interop-private masked construction channel: a 3-tuple
 /// `(values, missing_mask, dtype)` builds a TYPED column with a validity bitmap
 /// in one step — `from_pandas`'s faithful inverse of `to_pandas`'s
@@ -100,6 +123,9 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     // the lossy float64 export — contract C1/C2 (parity with `df['x'] = series`).
     if let Ok(s) = v.extract::<PyRef<PySeries>>() {
         return Ok(s.inner.data.clone());
+    }
+    if let Some(col) = masked_array_column(v)? {
+        return Ok(col);
     }
     // A numpy datetime64 array -> a Datetime column (carried as epoch-ns). This is the
     // pandas-aligned ingestion (`pd.DataFrame` accepts datetime64 arrays) and the no-copy

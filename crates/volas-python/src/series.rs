@@ -6,7 +6,7 @@ use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySlice;
 use volas_core::{
-    binary_supertype, Column, DType, Series,
+    binary_supertype, stats, Column, DType, Series,
 };
 
 #[allow(unused_imports)]
@@ -81,26 +81,12 @@ impl PySeries {
         }
     }
     pub(crate) fn var_f64(&self) -> f64 {
-        let v = non_nan(&self.inner.data);
-        let n = v.len();
-        if n < 2 {
-            return f64::NAN;
-        }
-        let mean = v.iter().sum::<f64>() / n as f64;
-        v.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1) as f64
+        stats::var(&self.inner.data.to_f64_vec())
     }
     pub(crate) fn median_f64(&self) -> f64 {
         let mut v = non_nan(&self.inner.data);
-        let n = v.len();
-        if n == 0 {
-            return f64::NAN;
-        }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        if n % 2 == 1 {
-            v[n / 2]
-        } else {
-            (v[n / 2 - 1] + v[n / 2]) / 2.0
-        }
+        stats::sorted_median(&v)
     }
     /// The `q`-quantile as a raw f64 (linear interpolation, NaN-skipping).
     pub(crate) fn quantile_f64(&self, q: f64) -> PyResult<f64> {
@@ -112,9 +98,7 @@ impl PySeries {
             return Ok(f64::NAN);
         }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let pos = q * (v.len() - 1) as f64;
-        let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
-        Ok(v[lo] + (v[hi] - v[lo]) * (pos - lo as f64))
+        Ok(stats::sorted_quantile(&v, q))
     }
 
     /// The boolean mask for a `where` / `mask` condition, validating it matches
@@ -134,6 +118,8 @@ impl PySeries {
                 self.inner.len()
             )));
         }
+        // the condition pairs with `self` by position, so its labels must align
+        require_aligned(&self.inner.index, &cond.inner.index)?;
         Ok(c)
     }
 
@@ -224,14 +210,16 @@ impl SeriesILoc {
 
 /// A dtype-exact, hash-able key for a cell: `None` for a missing cell, else a
 /// string discriminated by dtype (float by bit pattern, so distinct values never
-/// collide). Backs value_counts / mode / isin / duplicated / replace.
+/// collide — with `-0.0` canonicalized to `0.0`, numerically one value). Backs
+/// value_counts / mode / isin / duplicated / replace.
 pub(crate) fn cell_key(col: &Column, i: usize) -> Option<String> {
     if !col.is_valid(i) {
         return None;
     }
+    let float = |x: f64| format!("f{:x}", if x == 0.0 { 0.0f64 } else { x }.to_bits());
     Some(match col {
-        Column::F64(v) => format!("f{:x}", v[i].to_bits()),
-        Column::F32(v) => format!("f{:x}", (v[i] as f64).to_bits()),
+        Column::F64(v) => float(v[i]),
+        Column::F32(v) => float(v[i] as f64),
         Column::I64(v, _) => format!("i{}", v[i]),
         Column::I32(v, _) => format!("i{}", v[i]),
         Column::Bool(v, _) => format!("b{}", v[i]),

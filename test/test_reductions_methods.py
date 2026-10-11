@@ -149,3 +149,30 @@ def test_nunique_unique_canonicalize_zero():
     assert s.nunique() == 2                         # {0.0, 1.0}
     u = s.unique().to_list()
     assert u[0] == 0.0 and u[1] == 1.0 and len(u) == 2
+
+
+def test_constant_sample_has_exactly_zero_dispersion():
+    # 101.37 is not exactly representable: a sum/n mean leaves a residue that the
+    # deviations must not see. pandas' exact-constant results (2.0 * 20) are the oracle.
+    want = pd.Series([2.0] * 20)
+    for x in ([101.37] * 20, [2.0] * 20):
+        s = _s(x)
+        df = DataFrame({'a': x, 'b': x})
+        for m in ('var', 'std', 'sem', 'skew', 'kurt'):
+            assert getattr(s, m)() == getattr(want, m)() == 0.0, m
+            assert getattr(df, m)().to_list() == [0.0, 0.0], m
+        assert s.cov(s) == 0.0
+        assert np.isnan(s.corr(s))
+
+
+def test_median_and_quantile_of_extreme_finite_values_do_not_overflow():
+    s = _s([-1e308, 1e308])
+    assert s.median() == 0.0 and s.quantile(0.5) == 0.0 and s.quantile(0.25) == -5e307
+    assert DataFrame({'a': [-1e308, 1e308]}).median().to_list() == [0.0]
+    assert DataFrame({'a': [-1e308, 1e308]}).quantile(0.5).to_list() == [0.0]
+    assert _s([1e308, 1e308]).median() == 1e308
+
+
+def test_interpolation_between_extreme_finite_values_does_not_overflow():
+    got = _s([-1e308, None, None, None, 1e308]).interpolate().to_list()
+    assert got == [-1e308, -5e307, 0.0, 5e307, 1e308]

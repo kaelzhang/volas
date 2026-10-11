@@ -79,9 +79,14 @@ impl Bitmap {
 
     /// Count of missing values (clear bits among the first `len`).
     pub fn null_count(&self) -> usize {
-        let present: usize = self.words.iter().map(|w| w.count_ones() as usize).sum();
-        self.len - present
+        self.len - present_bits(&self.words)
     }
+}
+
+/// Set bits across `words`, accumulated in `usize` — a bitmap may hold more than
+/// `u32::MAX` rows, so a narrower accumulator would overflow.
+fn present_bits<'a>(words: impl IntoIterator<Item = &'a u64>) -> usize {
+    words.into_iter().map(|w| w.count_ones() as usize).sum()
 }
 
 impl PartialEq for Bitmap {
@@ -233,6 +238,14 @@ impl PartialEq for Validity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn present_bit_count_holds_past_u32_max() {
+        // 2^26 full words = 2^32 present bits (a 2^32-row all-valid bitmap), without
+        // allocating the 512 MiB bitmap itself.
+        let words = std::iter::repeat_n(&u64::MAX, 1 << 26);
+        assert_eq!(present_bits(words), 1usize << 32);
+    }
 
     #[test]
     fn validity_set_cell_in_place() {

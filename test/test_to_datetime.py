@@ -167,3 +167,33 @@ def test_astype_datetime_on_bool_raises():
 def test_astype_unknown_dtype_raises():
     with pytest.raises(ValueError):
         DataFrame({'a': [1.0]}).astype({'a': 'complex128'})
+
+
+# --- to_datetime(format=...): every parsed field is honored -----------------
+
+
+@pytest.mark.parametrize(
+    'text, fmt, utc',
+    [
+        ('2024-01-01 08:00+0800', '%Y-%m-%d %H:%M%z', '2024-01-01T00:00'),
+        ('2024-01-01 08:00+08:00', '%Y-%m-%d %H:%M%:z', '2024-01-01T00:00'),
+        ('2024-01-01T03:30:00-0430', '%Y-%m-%dT%H:%M:%S%z', '2024-01-01T08:00'),
+        ('2024-01-01+0800', '%Y-%m-%d%z', '2023-12-31T16:00'),
+    ],
+)
+def test_format_offset_is_an_absolute_instant(text, fmt, utc):
+    got = ns(to_datetime([text], format=fmt))
+    want = np.array([np.datetime64(utc, 'ns').astype('int64')])
+    np.testing.assert_array_equal(got, want)
+    if '%:z' not in fmt:  # the pandas oracle has no %:z directive
+        np.testing.assert_array_equal(got, pd_ns([text], format=fmt, utc=True))
+
+
+def test_format_hour_without_minutes_is_honored():
+    got = ns(to_datetime(['2024-01-01 09'], format='%Y-%m-%d %H'))
+    np.testing.assert_array_equal(got, pd_ns(['2024-01-01 09'], format='%Y-%m-%d %H'))
+
+
+def test_format_with_zone_name_raises_rather_than_dropping_it():
+    with pytest.raises(ValueError, match='%Z'):
+        to_datetime(['2024-01-01 08:00 EST'], format='%Y-%m-%d %H:%M %Z')

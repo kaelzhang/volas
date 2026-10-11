@@ -100,17 +100,33 @@ impl WinSpec {
     /// both edges (a clipped window still emits once `min_periods` present
     /// values remain). Implemented by padding `fwd` trailing NaNs — padding is
     /// "missing", so the trailing kernels produce exactly the clipped
-    /// centered semantics — then re-slicing the labels.
-    fn run(&self, data: &[f64], k: impl FnOnce(&[f64]) -> Vec<f64>) -> Vec<f64> {
-        if !self.center {
-            return k(data);
-        }
+    /// centered semantics — then re-slicing the labels. The kernel receives the
+    /// trailing window length to use (see [`geometry`](Self::geometry)).
+    fn run(&self, data: &[f64], k: impl FnOnce(&[f64], usize) -> Vec<f64>) -> Vec<f64> {
         let n = data.len();
-        let fwd = self.window - self.window / 2 - 1;
+        let (window, fwd) = self.geometry(n);
+        if fwd == 0 {
+            return k(data, window);
+        }
         let mut padded = data.to_vec();
         padded.extend(std::iter::repeat_n(f64::NAN, fwd));
-        let out = k(&padded);
+        let out = k(&padded, window);
         out[fwd..fwd + n].to_vec()
+    }
+
+    /// The trailing `(window, fwd)` that realizes this spec over `n` rows: the
+    /// window as given and no forward reach when trailing; when centered, the
+    /// backward reach `window / 2` and forward reach `window - window / 2 - 1`,
+    /// each **bounded by `n`** — the window is clipped at both edges, so reaching
+    /// past the data is the same as reaching exactly to it. The padding (and every
+    /// kernel buffer) is therefore bounded by the data, never by the window.
+    fn geometry(&self, n: usize) -> (usize, usize) {
+        if !self.center {
+            return (self.window, 0);
+        }
+        let fwd = self.window - self.window / 2 - 1;
+        let (back, fwd) = ((self.window / 2).min(n), fwd.min(n));
+        (back + fwd + 1, fwd)
     }
 
     /// A float64 aggregation result carrying the source's name + index.
@@ -147,47 +163,47 @@ impl WinSpec {
         self.i64_series(s, out)
     }
     pub(crate) fn nunique(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d| w::nunique(d, self.window, self.min_periods));
+        let out = self.run(&self.data(s), |d, win| w::nunique(d, win, self.min_periods));
         self.i64_series(s, out)
     }
     pub(crate) fn sum(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d| w::sum(d, self.window, self.min_periods));
+        let out = self.run(&self.data(s), |d, win| w::sum(d, win, self.min_periods));
         self.f64_series(s, out)
     }
     pub(crate) fn mean(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d| w::mean(d, self.window, self.min_periods));
+        let out = self.run(&self.data(s), |d, win| w::mean(d, win, self.min_periods));
         self.f64_series(s, out)
     }
     pub(crate) fn median(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d| w::median(d, self.window, self.min_periods));
+        let out = self.run(&self.data(s), |d, win| w::median(d, win, self.min_periods));
         self.f64_series(s, out)
     }
     pub(crate) fn min(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d| w::min(d, self.window, self.min_periods));
+        let out = self.run(&self.data(s), |d, win| w::min(d, win, self.min_periods));
         self.f64_series(s, out)
     }
     pub(crate) fn max(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d| w::max(d, self.window, self.min_periods));
+        let out = self.run(&self.data(s), |d, win| w::max(d, win, self.min_periods));
         self.f64_series(s, out)
     }
     pub(crate) fn var(&self, s: &Series, ddof: usize) -> PySeries {
-        let out = self.run(&self.data(s), |d_| w::var(d_, self.window, self.min_periods, ddof));
+        let out = self.run(&self.data(s), |d_, win| w::var(d_, win, self.min_periods, ddof));
         self.f64_series(s, out)
     }
     pub(crate) fn std(&self, s: &Series, ddof: usize) -> PySeries {
-        let out = self.run(&self.data(s), |d_| w::std(d_, self.window, self.min_periods, ddof));
+        let out = self.run(&self.data(s), |d_, win| w::std(d_, win, self.min_periods, ddof));
         self.f64_series(s, out)
     }
     pub(crate) fn sem(&self, s: &Series, ddof: usize) -> PySeries {
-        let out = self.run(&self.data(s), |d_| w::sem(d_, self.window, self.min_periods, ddof));
+        let out = self.run(&self.data(s), |d_, win| w::sem(d_, win, self.min_periods, ddof));
         self.f64_series(s, out)
     }
     pub(crate) fn skew(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d| w::skew(d, self.window, self.min_periods));
+        let out = self.run(&self.data(s), |d, win| w::skew(d, win, self.min_periods));
         self.f64_series(s, out)
     }
     pub(crate) fn kurt(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d| w::kurt(d, self.window, self.min_periods));
+        let out = self.run(&self.data(s), |d, win| w::kurt(d, win, self.min_periods));
         self.f64_series(s, out)
     }
     pub(crate) fn quantile(&self, s: &Series, q: f64, interpolation: &str) -> PyResult<PySeries> {
@@ -195,15 +211,17 @@ impl WinSpec {
         if !(0.0..=1.0).contains(&q) {
             return Err(PyValueError::new_err("quantile q must be in [0, 1]"));
         }
-        let out = self.run(&self.data(s), |d| {
-            w::quantile(d, self.window, self.min_periods, q, interpolation)
+        let out = self.run(&self.data(s), |d, win| {
+            w::quantile(d, win, self.min_periods, q, interpolation)
         });
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn rank(&self, s: &Series, method: &str, ascending: bool, pct: bool) -> PyResult<PySeries> {
         validate_rank_method(method)?;
-        let out = self.run(&self.data(s), |d| {
-            w::rank(d, self.window, self.min_periods, method, ascending, pct)
+        // a centered window ending in the padding ranks its last DATA row
+        let n = s.len();
+        let out = self.run(&self.data(s), |d, win| {
+            w::rank_padded(d, win, self.min_periods, method, ascending, pct, n)
         });
         Ok(self.f64_series(s, out))
     }
@@ -211,15 +229,11 @@ impl WinSpec {
     pub(crate) fn edge(&self, s: &Series, last: bool) -> PySeries {
         let n = s.len();
         let mut valid: Vec<bool> = (0..n).map(|i| s.data.is_valid(i)).collect();
-        let pos = if self.center {
-            // the same pad-and-relabel trick as `run` (padding is never valid,
-            // so it is never selected as an edge position).
-            let fwd = self.window - self.window / 2 - 1;
-            valid.extend(std::iter::repeat_n(false, fwd));
-            w::edge_positions(&valid, self.window, self.min_periods, last)[fwd..fwd + n].to_vec()
-        } else {
-            w::edge_positions(&valid, self.window, self.min_periods, last)
-        };
+        // the same pad-and-relabel trick as `run` (padding is never valid, so it
+        // is never selected as an edge position).
+        let (window, fwd) = self.geometry(n);
+        valid.extend(std::iter::repeat_n(false, fwd));
+        let pos = w::edge_positions(&valid, window, self.min_periods, last)[fwd..fwd + n].to_vec();
         PySeries {
             inner: Series::new(
                 s.name.clone(),
@@ -228,39 +242,33 @@ impl WinSpec {
             ),
         }
     }
-    fn pair(&self, s: &Series, other: &PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        if other.inner.len() != s.len() {
-            return Err(PyValueError::new_err(format!(
-                "cannot align series of different lengths ({} vs {})",
-                s.len(),
-                other.inner.len()
-            )));
-        }
-        other.inner.data.require_numeric().map_err(crate::pyerr)?;
-        Ok((s.data.to_f64_vec(), other.inner.data.to_f64_vec()))
-    }
     pub(crate) fn corr(&self, s: &Series, other: &PySeries) -> PyResult<PySeries> {
-        let (x, y) = self.pair(s, other)?;
-        let out = self.run2(&x, &y, |a, b| w::corr(a, b, self.window, self.min_periods));
+        let (x, y) = pair(s, other)?;
+        let out = self.run2(&x, &y, |a, b, win| w::corr(a, b, win, self.min_periods));
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn cov(&self, s: &Series, other: &PySeries, ddof: usize) -> PyResult<PySeries> {
-        let (x, y) = self.pair(s, other)?;
-        let out = self.run2(&x, &y, |a, b| w::cov(a, b, self.window, self.min_periods, ddof));
+        let (x, y) = pair(s, other)?;
+        let out = self.run2(&x, &y, |a, b, win| w::cov(a, b, win, self.min_periods, ddof));
         Ok(self.f64_series(s, out))
     }
 
     /// Two-series variant of `run` (corr / cov under `center=True`).
-    fn run2(&self, x: &[f64], y: &[f64], k: impl FnOnce(&[f64], &[f64]) -> Vec<f64>) -> Vec<f64> {
-        if !self.center {
-            return k(x, y);
-        }
+    fn run2(
+        &self,
+        x: &[f64],
+        y: &[f64],
+        k: impl FnOnce(&[f64], &[f64], usize) -> Vec<f64>,
+    ) -> Vec<f64> {
         let n = x.len();
-        let fwd = self.window - self.window / 2 - 1;
+        let (window, fwd) = self.geometry(n);
+        if fwd == 0 {
+            return k(x, y, window);
+        }
         let (mut xp, mut yp) = (x.to_vec(), y.to_vec());
         xp.extend(std::iter::repeat_n(f64::NAN, fwd));
         yp.extend(std::iter::repeat_n(f64::NAN, fwd));
-        k(&xp, &yp)[fwd..fwd + n].to_vec()
+        k(&xp, &yp, window)[fwd..fwd + n].to_vec()
     }
 }
 
@@ -466,17 +474,15 @@ impl PyEwm {
             ),
         }
     }
-    fn pair(&self, other: &PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        if other.inner.len() != self.series.len() {
-            return Err(PyValueError::new_err(format!(
-                "cannot align series of different lengths ({} vs {})",
-                self.series.len(),
-                other.inner.len()
-            )));
-        }
-        other.inner.data.require_numeric().map_err(crate::pyerr)?;
-        Ok((self.series.data.to_f64_vec(), other.inner.data.to_f64_vec()))
-    }
+}
+
+/// The two operands of a pairwise window statistic (`corr` / `cov`), paired by
+/// position under the shared alignment rule ([`crate::require_aligned`]): equal
+/// labels or an error, never a silent positional pairing of different labels.
+fn pair(s: &Series, other: &PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    crate::require_aligned(&s.index, &other.inner.index)?;
+    other.inner.data.require_numeric().map_err(crate::pyerr)?;
+    Ok((s.data.to_f64_vec(), other.inner.data.to_f64_vec()))
 }
 
 #[pymethods]
@@ -534,7 +540,7 @@ impl PyEwm {
     /// Exponentially-weighted covariance against another series.
     #[pyo3(signature = (other, bias = false))]
     fn cov(&self, other: &PySeries, bias: bool) -> PyResult<PySeries> {
-        let (x, y) = self.pair(other)?;
+        let (x, y) = pair(&self.series, other)?;
         Ok(self.wrap(w::ewm_cov(
             &x,
             &y,
@@ -547,7 +553,7 @@ impl PyEwm {
     }
     /// Exponentially-weighted correlation against another series.
     fn corr(&self, other: &PySeries) -> PyResult<PySeries> {
-        let (x, y) = self.pair(other)?;
+        let (x, y) = pair(&self.series, other)?;
         Ok(self.wrap(w::ewm_corr(
             &x,
             &y,

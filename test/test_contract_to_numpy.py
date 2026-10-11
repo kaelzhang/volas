@@ -8,6 +8,7 @@ An EXPLICIT dtype='float64' over datetime is an allowed lossy export (Q3 'a'),
 documented as such; over a str column it still raises."""
 
 import numpy as np
+import pytest
 import volas
 from volas import DataFrame
 
@@ -127,3 +128,41 @@ def test_int64_column_exact_past_2_53():
     big = np.array([2 ** 60, 2 ** 60 + 1], dtype=np.int64)
     arr = DataFrame({"a": big}).to_numpy(dtype="int64")
     assert arr.reshape(-1).tolist() == [2 ** 60, 2 ** 60 + 1]
+
+
+# --- the export target is NumPy's resolved dtype, never its spelling ------------
+
+@pytest.mark.parametrize(
+    "spelling", ["f8", "d", "<f8", "double", "f4", "e", "complex128", "longdouble"]
+)
+def test_every_float_spelling_keeps_fractions_and_nan(spelling):
+    arr = DataFrame({"a": [1.5, 2.25, None]}).to_numpy(dtype=spelling)
+    expected = np.array([[1.5], [2.25], [np.nan]]).astype(spelling)
+    assert arr.dtype == np.dtype(spelling)
+    np.testing.assert_array_equal(arr, expected)
+
+
+@pytest.mark.parametrize("spelling", ["object_", "|O"])
+def test_every_object_spelling_keeps_typed_cells(spelling):
+    arr = DataFrame({"a": [1.5, 2.25]}).to_numpy(dtype=spelling)
+    assert arr.dtype == object
+    assert arr.ravel().tolist() == [1.5, 2.25]
+
+
+def test_bool_target_tests_the_float_value_not_a_truncated_int():
+    arr = DataFrame({"a": [0.5, -0.5, 0.0]}).to_numpy(dtype="bool")
+    assert arr.ravel().tolist() == [True, True, False]
+
+
+def test_bool_target_over_missing_raises_like_an_integer_target():
+    with pytest.raises(ValueError, match="missing"):
+        DataFrame({"a": [1, None]}).to_numpy(dtype="bool")
+    with pytest.raises(ValueError, match="missing"):
+        DataFrame({"a": [1, None]})["a"].to_numpy(dtype="bool")
+    filled = DataFrame({"a": [1, None]}).to_numpy(dtype="bool", na_value=0)
+    assert filled.ravel().tolist() == [True, False]
+
+
+def test_text_target_formats_the_float_values():
+    arr = DataFrame({"a": [1.5, 2.25]}).to_numpy(dtype="U")
+    assert arr.ravel().tolist() == ["1.5", "2.25"]

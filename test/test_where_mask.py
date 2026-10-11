@@ -20,6 +20,21 @@ def _s(values):
     return volas.DataFrame({"a": list(values)})["a"]
 
 
+def _labelled(values, labels, name="x"):
+    return volas.DataFrame({name: values}, index=labels)[name]
+
+
+@pytest.mark.parametrize("method", ["where", "mask"])
+def test_series_condition_with_other_labels_raises(method):
+    a = _labelled([1.0, 2.0, 3.0], ["a", "b", "c"])
+    cond = _labelled([3.0, 2.0, 1.0], ["c", "b", "a"]) > 1.5
+    with pytest.raises(ValueError, match="different indexes"):
+        getattr(a, method)(cond)
+    # the same labels (the index name aside) pair up position by position
+    same = _labelled([3.0, 2.0, 1.0], ["a", "b", "c"], name="y") > 1.5
+    assert a.where(same).isna().to_list() == [False, False, True]
+
+
 # --- Series.where / mask ----------------------------------------------------
 
 def test_series_where_keeps_true_else_nan():

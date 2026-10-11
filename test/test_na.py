@@ -16,6 +16,25 @@ def _int_na():
     return volas.DataFrame({"a": np.array([1, 2, 3], dtype=np.int64)})["a"].shift(1)
 
 
+@pytest.mark.parametrize(
+    "values, dtype",
+    [([11, 22, 33], "int64"), ([1.5, 2.5, 3.5], "float64"), ([True, False, True], "bool"),
+     (["2024-01-01", "2024-01-02", "2024-01-03"], "datetime64[ns]")],
+)
+def test_numpy_masked_array_mask_becomes_na(values, dtype):
+    arr = np.ma.array(np.array(values, dtype=dtype), mask=[False, True, False])
+    s = volas.DataFrame({"x": arr})["x"]
+    assert s.isna().to_list() == [False, True, False]
+    assert len(s) == 3 and str(s.dtype) == dtype
+    if dtype.startswith("datetime"):
+        assert volas.to_datetime(arr).isna().to_list() == [False, True, False]
+
+
+def test_numpy_masked_array_without_masked_cells_is_dense():
+    s = volas.DataFrame({"x": np.ma.array([1, 2], mask=False)})["x"]
+    assert s.to_list() == [1, 2]
+
+
 def test_na_singleton_repr_and_bool():
     assert repr(volas.NA) == "<NA>"
     assert volas.NA is volas.NA

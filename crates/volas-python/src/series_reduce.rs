@@ -79,17 +79,19 @@ impl PySeries {
         Ok(self.box_float(py, stats::kurt(&self.inner.data.to_f64_vec())))
     }
 
-    /// Pairwise Pearson correlation with `other` (pandas `corr`); positional
-    /// alignment (volas does not reindex), dropping NaN pairs.
+    /// Pairwise Pearson correlation with `other` (pandas `corr`), dropping NaN
+    /// pairs. The labels must align ([`require_aligned`]; volas does not reindex).
     pub(crate) fn corr(&self, other: &PySeries) -> PyResult<f64> {
+        require_aligned(&self.inner.index, &other.inner.index)?;
         self.inner.data.require_numeric().map_err(pyerr)?;
         other.inner.data.require_numeric().map_err(pyerr)?;
         Ok(stats::corr(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec()))
     }
 
-    /// Pairwise sample covariance with `other`, ddof=1 (pandas `cov`); positional
-    /// alignment, dropping NaN pairs.
+    /// Pairwise sample covariance with `other`, ddof=1 (pandas `cov`), dropping NaN
+    /// pairs. The labels must align ([`require_aligned`]; volas does not reindex).
     pub(crate) fn cov(&self, other: &PySeries) -> PyResult<f64> {
+        require_aligned(&self.inner.index, &other.inner.index)?;
         self.inner.data.require_numeric().map_err(pyerr)?;
         other.inner.data.require_numeric().map_err(pyerr)?;
         Ok(stats::cov(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec()))

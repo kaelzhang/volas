@@ -37,6 +37,29 @@ def test_from_pandas_datetime_column_native():
     assert df['when'].to_numpy()[0] == np.datetime64('2020-01-01 00:00:00')
 
 
+def test_from_pandas_keeps_index_and_a_column_named_index():
+    # an unnamed index and a column called "index" are two different things
+    pdf = pd.DataFrame({'index': [7, 8, 9], 'c': [1.0, 2.0, 3.0]}, index=[100, 200, 300])
+    df = volas.DataFrame.from_pandas(pdf)
+    assert df.columns == ['index', 'c']
+    assert df['index'].to_list() == [7, 8, 9]
+    back = df.to_pandas()
+    assert back.index.tolist() == [100, 200, 300]
+    assert back.index.name is None
+
+
+def test_from_pandas_keeps_a_named_index_beside_a_same_named_column():
+    when = pd.to_datetime(['2024-01-01', '2024-01-02'])
+    other = pd.to_datetime(['1999-01-01', '1999-01-02'])
+    pdf = pd.DataFrame({'date': other, 'c': [1.0, 2.0]}, index=pd.Index(when, name='date'))
+    df = volas.DataFrame.from_pandas(pdf)
+    assert df.columns == ['date', 'c']
+    back = df.to_pandas()
+    assert back.index.name == 'date'
+    assert back.index.tolist() == when.tolist()
+    assert back['date'].tolist() == other.tolist()
+
+
 def test_datetime64_array_column_ingested():
     # pandas-aligned: a dict value that is a datetime64 array becomes a datetime column.
     # A non-ns unit ([s]) exercises the normalise-to-ns path.

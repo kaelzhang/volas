@@ -58,19 +58,16 @@ pub(crate) fn series_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<C
     }
 }
 
-/// Guard a positional Series binary op: the two operands must share an index.
-/// Same-frame columns share the index handle (`Arc::ptr_eq`, O(1)); otherwise the
-/// indexes are compared by value. A mismatch is an error rather than a silently
-/// misaligned (positional) result — volas does not auto-align by label.
+/// Guard a positional binary op between two labelled operands — the single
+/// alignment rule, owned by [`Index::require_aligned`]. Same-frame columns share
+/// the index handle (`Arc::ptr_eq`, O(1)); otherwise the labels are compared. A
+/// mismatch is an error rather than a silently misaligned (positional) result —
+/// volas does not auto-align by label.
 pub(crate) fn require_aligned(a: &Arc<Index>, b: &Arc<Index>) -> PyResult<()> {
-    if Arc::ptr_eq(a, b) || **a == **b {
-        Ok(())
-    } else {
-        Err(PyValueError::new_err(
-            "operands have different indexes; volas aligns by position, not by \
-             label — reindex or slice them to a common index first",
-        ))
+    if Arc::ptr_eq(a, b) {
+        return Ok(());
     }
+    a.require_aligned(b).map_err(pyerr)
 }
 
 /// A new F64 `Series` carrying `s`'s name and index.

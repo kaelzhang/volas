@@ -219,7 +219,7 @@ df['ma:2']
 
 - **data** `dict[str, list | np.ndarray] | DataFrame` 列数据，为以下之一：
   - 一个 **dict**，把每个列名映射到等长的 list 或 NumPy 数组（`float`、`int`、
-    `bool`、`datetime64` 或 `string`）；
+    `bool`、`datetime64` 或 `string`）；NumPy **masked array** 中被屏蔽的单元格成为 `volas.NA`；
   - 另一个 volas **`DataFrame`**，此时会被拷贝（如同 `pandas.DataFrame(df)`）。
 
   构造函数**不接受** `pandas.DataFrame` 或 Arrow 对象——请改用专门的
@@ -312,7 +312,7 @@ for bar in feed:
 
 ### DataFrame.from_pandas(pdf) -> DataFrame
 
-**volas 独有的静态方法**——从 `pandas.DataFrame`（`pdf`）构造 volas `DataFrame`，是 `df.to_pandas()` 的逆操作。pandas 仅在此处惰性 import（所以 `import volas` 保持 pandas-free）。nullable 列保留其 dtype + `volas.NA`，`DatetimeIndex`（含带时区）可往返。参见[与 pandas 互操作](#与-pandas-互操作)。
+**volas 独有的静态方法**——从 `pandas.DataFrame`（`pdf`）构造 volas `DataFrame`，是 `df.to_pandas()` 的逆操作。pandas 仅在此处惰性 import（所以 `import volas` 保持 pandas-free）。nullable 列保留其 dtype + `volas.NA`，`DatetimeIndex`（含带时区）可往返。索引始终作为索引、保留自己的名字（无名索引保持无名），与列相互独立——与索引同名的列照样作为列保留。参见[与 pandas 互操作](#与-pandas-互操作)。
 
 ```py
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
@@ -320,7 +320,7 @@ df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
 
 ### DataFrame.from_arrow(data) -> DataFrame
 
-**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars `DataFrame` 等。dtype 匹配处借用数据缓冲区（否则拷贝该列），多 chunk 来源会被拼接，结果带一个全新的 `RangeIndex`。
+**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars `DataFrame` 等。dtype 匹配处借用数据缓冲区（否则拷贝该列），多 chunk 来源会被拼接，结果带一个全新的 `RangeIndex`。生产方的缓冲区在读取前先校验：格式错误的数组（缓冲区大小不符、offsets 越界或非单调、非空字符串不是合法 UTF-8）抛出 `ValueError`。Arrow 中 null 字符串槽位的字节未作规定，volas 从不读取它们。
 
 - **data** Arrow 来源——任何实现 `__arrow_c_stream__` 的对象。
 
@@ -452,9 +452,9 @@ raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low'
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
-把 DataFrame 导出为二维 NumPy 数组（行 × 列）。行为与 pandas 一致，但有一处刻意的保护：对含缺失值的 frame 指定**整型** `dtype` 会**抛错**，而不是悄悄写入垃圾值（NumPy 无法在整型数组里存 `NA`）——传 `na_value` 可改为填充。
+把 DataFrame 导出为二维 NumPy 数组（行 × 列）。行为与 pandas 一致，但有一处刻意的保护：对含缺失值的 frame 指定**整型**或**布尔** `dtype` 会**抛错**，而不是悄悄写入垃圾值（NumPy 无法在整型或布尔数组里存 `NA`）——传 `na_value` 可改为填充。
 
-- **dtype** `str | None`——可选的导出转换。`None`（默认）给出按 dtype 的诚实表示；否则：
+- **dtype** `str | None`——可选的导出转换。`None`（默认）给出按 dtype 的诚实表示；否则目标取 NumPy 对该写法的解析结果（`'f8'`、`'d'`、`'<f8'` 都是 `float64`，`'|O'` 是 `object`）：
   - `'object'`（或 `'O'`）——无损的二维「带类型单元格」数组（数字 / `str` /
     `Timestamp` / `volas.NA`）；唯一能保留 `str` 或 datetime 列的 dtype。
   - `'int64'`、`'int32'`、`'int16'`、`'int8'`（以及无符号 `'uint*'`）——**精确**的
@@ -462,8 +462,10 @@ raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low'
     frame，除非给了 `na_value`，否则**抛错**。
   - `'float64'`、`'float32'`、`'float16'`——（有损的）`float` 通道：缺失单元格为
     `NaN`，超过 2⁵³ ns 的 datetime 会量化。
-  - `'bool'`——布尔。
+  - `'bool'`——布尔：取每个值的真值（`0.5` → `True`）。对含缺失值的 frame，除非给了
+    `na_value`，否则**抛错**。
   - `'datetime64[ns]'`——datetime 纳秒；`NaT` 单元格被保留。
+  - 文本 dtype（`'U'` / `'S'`）——格式化每个带类型单元格（`1.5` → `'1.5'`）。
   - `str` 列拒绝一切数值/时间 dtype——请用 `'object'`。
 - **na_value** `Any`——替换每个缺失单元格的值；默认是 NA 模型表示（`NaN` / `NaT` /
   `volas.NA`）。
@@ -501,7 +503,7 @@ DataFrame({'a': [1, None]}).to_numpy(dtype='int64', na_value=0)   # -> [[1], [0]
 **volas 独有**——把 DataFrame 导出为 `pyarrow.Table`，在 dtype 匹配处**零拷贝**：数值 / 字符串 / datetime 列缓冲区与 Arrow 共享，`bool` 与空值位图按需重打包。需要
 `pyarrow`（仅在此处惰性 import）。它是 volas Arrow **C-Stream** 桥接的便捷写法：任何
 Arrow 消费方都能经标准 `__arrow_c_stream__` PyCapsule 协议直接读取本 frame，无需调用
-`to_arrow()`，也无需让 volas 依赖 pyarrow。
+`to_arrow()`，也无需让 volas 依赖 pyarrow。含 NUL 字节的列名无法跨越 Arrow C 接口，会抛出 `ValueError`。
 
 ```py
 import pyarrow as pa
@@ -605,7 +607,7 @@ t.dt.floor('15min')        # 对齐到 15 分钟 bar
 
 ### Series.from_arrow(data, name=None) -> Series
 
-**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。dtype 匹配处借用数据缓冲区（否则拷贝），结果带一个全新的 `RangeIndex`。
+**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。dtype 匹配处借用数据缓冲区（否则拷贝），结果带一个全新的 `RangeIndex`。格式错误的数组抛出 `ValueError`，与 [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe) 相同。
 
 - **data** Arrow 来源——任何实现 `__arrow_c_array__` 的对象。
 - **name?** `str | None = None` 结果 `Series` 的名字。
@@ -623,7 +625,7 @@ s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
     `'uint16'`、`'uint8'`）——整型。对含缺失值的列，除非给了 `na_value`，否则**抛错**
     （NA 没有整型表示）。
   - `'float64'`、`'float32'`、`'float16'`——浮点；缺失单元格为 `NaN`。
-  - `'bool'`——布尔。
+  - `'bool'`——布尔。对含缺失值的列，除非给了 `na_value`，否则**抛错**（NA 没有布尔表示）。
   - `'datetime64[ns]'`——datetime 纳秒；缺失单元格为 `NaT`。
   - `'object'`（或 `'O'`）——Python 对象，每个单元格保留各自的类型值（无损）。
 - **na_value** `Any`——替换每个缺失单元格的值。默认是 NA 模型表示（float 导出为 `NaN`，
@@ -756,7 +758,9 @@ df = read_csv('data.tsv', sep='\t', header=False,  # 无表头 -> '0'..'n-1'
   - `'ns'`——纳秒（默认）
 - **format?** `str | None = None` 用于**字符串**输入的显式 datetime 格式（pandas 的
   `format=`，例如 `'%Y-%m-%d %H:%M:%S'`）——更快且无歧义；对数值输入忽略。任何
-  `strftime`/`strptime` 指令字符串；`None` 时自动推断。
+  `strftime`/`strptime` 指令字符串；`None` 时自动推断。解析出的每个字段都会生效：偏移量
+  （`%z` / `%:z`）使值成为绝对时刻，与不带 `format` 的带偏移字符串完全一致；格式未给出的
+  时间字段取零。`%Z`（时区*名字*）抛出 `ValueError`——请改用数字偏移量。
 
 Naive 字符串按 UTC 解析，带偏移（`…+08:00`）的字符串表示绝对瞬时。若要把结果索引
 *显示*在某个时区，请先设为索引，再用 `tz_localize` / `tz_convert` 打上时区标记（参见
@@ -1383,12 +1387,13 @@ np.from_dlpack(df['close'])        # 零拷贝 ndarray 视图
   `np.from_dlpack(s)` / `torch.from_dlpack(s)` 借用一个稠密的数值 / bool 列。借来的视图是**只读**的（带版本号 DLPack 的标志位），写穿它无法绕过写时复制而改坏帧；无法接收该标志位的 1.0 之前的旧消费方，则改为得到一份独立副本。
   `np.from_dlpack(s, copy=True)` 返回一份独立的**可写**副本。非 CPU 设备或 stream 会被拒绝（`BufferError`）；含缺失值的 int/bool 列（DLPack 无空值掩码）或 str/datetime 列会抛错。
 
-**零拷贝契约。**在双向上，volas 原生的数值（`int32` / `int64` / `float32` / `float64`）、字符串、纳秒 datetime 列的*数据*缓冲区被共享（无拷贝）。小的重打包有：
+**零拷贝契约。**在双向上，volas 原生的数值（`int32` / `int64` / `float32` / `float64`）与纳秒 datetime 列的*数据*缓冲区被共享（无拷贝）；字符串列的导出同样零拷贝。重打包有：
 
+- **导入时**的每个字符串列（`string` / `large_string`，无论是否切片）——拷贝进 volas 自有缓冲区并在拷贝上校验（offsets 在范围内且单调、每个非空值是合法 UTF-8；null 槽位未作规定的字节被丢弃），因此生产方在导入之后改写自己的缓冲区不会影响 volas 列；
 - **`bool`**——volas 每个值存一个字节，Arrow 存一个*位*；
 - **空值位图**（≤ `n/8` 字节）——包括导出时把缺失 `float`（带内 `NaN`）扫描成真正的
   Arrow null 的那一遍；
-- 仅在**导入时**：32 位偏移的 `Utf8`（加宽到 64 位偏移）或 `string_view`（物化为连续字节）、粗于纳秒的时间戳（重新缩放）、`Decimal128` / `Decimal256`（→ `f64`，超过约 15 位**有损**
+- 仅在**导入时**：`string_view`（物化为连续字节）、粗于纳秒的时间戳（重新缩放）、`Decimal128` / `Decimal256`（→ `f64`，超过约 15 位**有损**
   ——精确价格请上游保持字符串）、窄/无符号整数（→ `i64`；超过 `i64::MAX` 的 `UInt64` 无法无损表示，会报错）、字典 / 类别（categorical）列（解码为其取值）、无类型的 `Null` 列（→ 全 NA 的 `f64` 列）、`Date32` / `Date64`（→ 纳秒 datetime）。其余 Arrow 类型会抛清晰的错误。
 
 **边界上的 NA。**每一个缺失值——int、bool、**以及 float**——都跨越为真正的 Arrow null

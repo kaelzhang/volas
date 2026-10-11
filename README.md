@@ -258,7 +258,8 @@ Which gets the 2-period simple moving average on column `"close"`.
 
 - **data** `dict[str, list | np.ndarray] | DataFrame` the column data, one of:
   - a **dict** mapping each column name to an equal-length list or NumPy array
-    (`float`, `int`, `bool`, `datetime64`, or `string`);
+    (`float`, `int`, `bool`, `datetime64`, or `string`); a NumPy **masked array**'s
+    masked cells become `volas.NA`;
   - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`).
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
@@ -399,7 +400,9 @@ the same way; the bounded window is just where reusing one buffer matters most.
 A **volas-specific static method** that builds a `DataFrame` from a `pandas.DataFrame`
 (`pdf`) — the inverse of `df.to_pandas()`. pandas is imported lazily (only here, so volas
 stays pandas-free at import). A nullable column keeps its dtype + `volas.NA`, and a
-`DatetimeIndex` (tz-aware too) round-trips. See [pandas interop](#pandas-interop).
+`DatetimeIndex` (tz-aware too) round-trips. The index stays the index under its own
+name (an unnamed index stays unnamed), independent of the columns — a column that
+shares the index's name is kept as a column. See [pandas interop](#pandas-interop).
 
 ```py
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
@@ -411,7 +414,10 @@ A **volas-specific static method** that builds a `DataFrame` from any object exp
 the Arrow **C-Stream** protocol (`__arrow_c_stream__`) — a `pyarrow.Table` /
 `RecordBatch` / `RecordBatchReader`, a polars `DataFrame`, etc. The data buffers are
 borrowed where the dtypes match (otherwise a column is copied), a multi-chunk source
-is concatenated, and the result carries a fresh `RangeIndex`.
+is concatenated, and the result carries a fresh `RangeIndex`. The producer's buffers
+are validated before they are read: a malformed array (buffer sizes, offsets out of
+range or not monotonic, a present string that is not valid UTF-8) raises `ValueError`.
+A null string slot's bytes are unspecified in Arrow and are never read.
 
 - **data** the Arrow source — any object implementing `__arrow_c_stream__`.
 
@@ -576,12 +582,13 @@ raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low'
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
 The frame as a 2-D NumPy array (rows × columns). It tracks pandas except for one
-deliberate guard: an **integer** `dtype` over a frame that holds missing values
-**raises** instead of silently writing garbage (NumPy cannot store `NA` in an
-integer array) — give `na_value` to fill instead.
+deliberate guard: an **integer** or **bool** `dtype` over a frame that holds missing
+values **raises** instead of silently writing garbage (NumPy cannot store `NA` in an
+integer or bool array) — give `na_value` to fill instead.
 
 - **dtype** `str | None` — an optional export cast. `None` (the default) gives the
-  honest per-dtype representation; otherwise:
+  honest per-dtype representation; otherwise the target is whatever NumPy resolves the
+  spelling to (`'f8'`, `'d'` and `'<f8'` are `float64`, `'|O'` is `object`):
   - `'object'` (or `'O'`) — a lossless 2-D array of typed cells (number / `str` /
     `Timestamp` / `volas.NA`); the only dtype that keeps a `str` or datetime column intact.
   - `'int64'`, `'int32'`, `'int16'`, `'int8'` (and the unsigned `'uint*'`) — the **exact**
@@ -589,8 +596,10 @@ integer array) — give `na_value` to fill instead.
     trip). Over a frame with missing values this **raises** unless `na_value` is given.
   - `'float64'`, `'float32'`, `'float16'` — the (lossy) `float` channel: a missing cell
     is `NaN`, a datetime past 2⁵³ ns quantises.
-  - `'bool'` — boolean.
+  - `'bool'` — boolean: each value's truth (`0.5` → `True`). Over a frame with missing
+    values this **raises** unless `na_value` is given.
   - `'datetime64[ns]'` — datetime nanoseconds; a `NaT` cell is preserved.
+  - a text dtype (`'U'` / `'S'`) — each typed cell formatted (`1.5` → `'1.5'`).
   - A `str` column rejects every numeric / temporal dtype — use `'object'`.
 - **na_value** `Any` — the value substituted for each missing cell. Default: the
   NA-model representation (`NaN` / `NaT` / `volas.NA`).
@@ -631,7 +640,8 @@ match — the numeric / string / datetime column buffers are shared with Arrow, 
 `bool` and the null bitmap are repacked. Requires `pyarrow` (imported lazily, only
 here). It is a convenience over volas's Arrow **C-Stream** bridge: any Arrow consumer
 can read the frame directly through the standard `__arrow_c_stream__` PyCapsule
-protocol, with no `to_arrow()` call and without volas depending on pyarrow.
+protocol, with no `to_arrow()` call and without volas depending on pyarrow. A column
+name containing a NUL byte cannot cross the Arrow C interface and raises `ValueError`.
 
 ```py
 import pyarrow as pa
@@ -752,7 +762,8 @@ t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
 A **volas-specific static method** that builds a `Series` from any object exposing the
 Arrow **C-Data** array protocol (`__arrow_c_array__`) — a `pyarrow.Array`, a polars
 `Series`, etc. The data buffer is borrowed where the dtype matches (otherwise copied);
-the result carries a fresh `RangeIndex`.
+the result carries a fresh `RangeIndex`. A malformed array raises `ValueError`, exactly
+as in [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe).
 
 - **data** the Arrow source — any object implementing `__arrow_c_array__`.
 - **name?** `str | None = None` the name for the resulting `Series`.
@@ -772,7 +783,8 @@ The column values as a 1-D NumPy array — `pandas.Series.to_numpy` semantics:
     `'uint16'`, `'uint8'`) — integer. Over a column with missing values this **raises**
     unless `na_value` is given (an NA has no integer representation).
   - `'float64'`, `'float32'`, `'float16'` — floating point; a missing cell is `NaN`.
-  - `'bool'` — boolean.
+  - `'bool'` — boolean. Over a column with missing values this **raises** unless
+    `na_value` is given (an NA has no boolean representation).
   - `'datetime64[ns]'` — datetime nanoseconds; a missing cell is `NaT`.
   - `'object'` (or `'O'`) — Python objects, each cell its own typed value (lossless).
 - **na_value** `Any` — the value to substitute for each missing cell. Default: the
@@ -927,7 +939,10 @@ int column) becomes `NaT`, like `pd.to_datetime`.
   - `'ns'` — nanoseconds (the default)
 - **format?** `str | None = None` an explicit datetime format for **string** input
   (pandas `format=`, e.g. `'%Y-%m-%d %H:%M:%S'`) — faster and unambiguous; ignored for
-  numeric input. Any `strftime`/`strptime` directive string; `None` auto-infers.
+  numeric input. Any `strftime`/`strptime` directive string; `None` auto-infers. Every
+  parsed field is honored: an offset (`%z` / `%:z`) makes the value an absolute instant,
+  exactly like an offset-aware string without `format`; time fields the format omits
+  are zero. `%Z` (a zone *name*) raises `ValueError` — use a numeric offset.
 
 Naive strings parse as UTC and offset-aware strings (`…+08:00`) are absolute. To
 *display* the resulting index in a zone, make it the index and tag the zone with
@@ -1659,14 +1674,18 @@ call automatically (so you rarely call them yourself):
   column raises.
 
 **Zero-copy contract.** The *data* buffer is shared (no copy) in both directions for
-volas's native numeric (`int32` / `int64` / `float32` / `float64`), string, and
-nanosecond-datetime columns. The small repacks are:
+volas's native numeric (`int32` / `int64` / `float32` / `float64`) and
+nanosecond-datetime columns; a string column exports zero-copy too. The repacks are:
+
+- on **import**, every string column (`string` / `large_string`, sliced or not) — it is
+  copied into volas-owned buffers and validated there (in-range monotonic offsets, valid
+  UTF-8 for each present value; a null slot's unspecified bytes are dropped), so a
+  producer rewriting its buffers after the import cannot reach the volas column;
 
 - **`bool`** — volas stores one byte per value, Arrow one *bit*;
 - the **null bitmap** (≤ `n/8` bytes) — including, on export, a one-pass scan that turns
   a missing `float` (in-band `NaN`) into a real Arrow null;
-- on **import only**: a 32-bit-offset `Utf8` (widened to 64-bit offsets) or a
-  `string_view` (materialised to contiguous bytes), a coarser-than-ns timestamp
+- on **import only**: a `string_view` (materialised to contiguous bytes), a coarser-than-ns timestamp
   (rescaled), a `Decimal128` / `Decimal256` (→ `f64`, **lossy** past ~15 digits — keep
   prices as strings for exactness), a narrow / unsigned integer (→ `i64`; a `UInt64` past
   `i64::MAX` has no lossless image and raises), a dictionary / categorical column (decoded

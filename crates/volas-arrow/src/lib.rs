@@ -7,10 +7,13 @@
 //! The **data** buffers move without a copy in both directions: a volas
 //! [`Buffer<T>`](volas_core::Buffer) is published to Arrow as a borrowed allocation
 //! (its `Arc` is the keep-alive), and an Arrow buffer is imported as a
-//! [`Buffer::Borrowed`](volas_core::Buffer) whose guard is the source array. Two
-//! representations are not bit-compatible and are repacked (a copy):
+//! [`Buffer::Borrowed`](volas_core::Buffer) whose guard is the source array. These
+//! are repacked (a copy):
 //! - **bool** — volas stores one byte per value, Arrow one *bit*;
-//! - **validity** — the null bitmap (≤ `n/8` bytes, negligible beside the data).
+//! - **validity** — the null bitmap (≤ `n/8` bytes, negligible beside the data);
+//! - **imported strings** — copied into volas-owned buffers and validated there: the
+//!   unchecked string readers rely on that invariant, which a producer rewriting a
+//!   borrowed buffer after import could break (export stays zero-copy).
 
 use std::any::Any;
 use std::panic::RefUnwindSafe;
@@ -200,7 +203,7 @@ mod tests {
             column_from_arrow(&arr).unwrap(),
             Column::str_with(vec!["a".into(), "bc".into()], Validity::dense())
         );
-        // large_string is the zero-copy path
+        // large_string offsets need no widening
         let large: ArrayRef = Arc::new(LargeStringArray::from(vec!["a", "bc"]));
         assert_eq!(column_from_arrow(&large).unwrap().dtype(), col_str_dtype());
     }
@@ -404,6 +407,15 @@ mod tests {
     }
 
     #[test]
+    fn c_stream_export_rejects_names_it_cannot_carry() {
+        let cols = vec![Column::f64(vec![1.0])];
+        let err = columns_to_c_stream(&["a\0b".to_string()], &cols).err().unwrap();
+        assert!(err.to_string().contains("NUL"), "{err}");
+        let err = columns_to_c_stream(&[], &cols).err().unwrap();
+        assert!(err.to_string().contains("0 names for 1 columns"), "{err}");
+    }
+
+    #[test]
     fn c_data_schema_matches_the_column_dtype() {
         let col = Column::i64_with(vec![1, 2], Validity::dense());
         let schema = column_to_c_schema(&col).unwrap();
@@ -518,5 +530,93 @@ mod tests {
         // an externally-built empty array (whose data pointer may be null) imports cleanly
         let empty: ArrayRef = Arc::new(Float64Array::from(Vec::<f64>::new()));
         assert!(column_from_arrow(&empty).unwrap().as_f64().unwrap().is_empty());
+    }
+
+    #[test]
+    fn null_slot_with_non_utf8_payload_imports_as_an_empty_span() {
+        // Arrow leaves a null slot's bytes unspecified, so this is a VALID array whose
+        // null slot holds non-UTF-8 bytes. Every span of the imported string buffer must
+        // still be valid UTF-8 (its accessors decode spans unchecked).
+        use arrow_buffer::{Buffer as AB, OffsetBuffer};
+        // SAFETY: offsets are monotonic and in range; the only non-UTF-8 bytes sit in
+        // the null slot, which the Arrow format leaves unspecified.
+        let arr = unsafe {
+            LargeStringArray::new_unchecked(
+                OffsetBuffer::new(vec![0i64, 2, 3].into()),
+                AB::from(b"\xff\xfea".to_vec()),
+                Some(NullBuffer::from(vec![false, true])),
+            )
+        };
+        let col = column_from_arrow(&(Arc::new(arr) as ArrayRef)).unwrap();
+        let Column::Str(sb, validity) = &col else { unreachable!() }; // LCOV_EXCL_LINE
+        let (offsets, data) = sb.buffers();
+        for w in offsets.as_slice().windows(2) {
+            let span = &data.as_slice()[w[0] as usize..w[1] as usize];
+            assert!(std::str::from_utf8(span).is_ok(), "span {w:?} is not UTF-8");
+        }
+        assert!(!validity.is_valid(0) && validity.is_valid(1));
+        assert_eq!(sb.get(1), "a");
+    }
+
+    #[test]
+    fn malformed_string_offsets_are_an_import_error() {
+        use arrow_buffer::{Buffer as AB, OffsetBuffer, ScalarBuffer};
+        // SAFETY (of the construction only): the deliberately non-monotonic offsets are
+        // the malformed input under test; the import must reject them, never read them.
+        let reversed = unsafe {
+            LargeStringArray::new_unchecked(
+                OffsetBuffer::new_unchecked(ScalarBuffer::from(vec![0i64, 3, 1, 3])),
+                AB::from(b"abc".to_vec()),
+                None,
+            )
+        };
+        let err = column_from_arrow(&(Arc::new(reversed) as ArrayRef)).unwrap_err();
+        assert!(err.to_string().contains("offsets"), "{err}");
+        // a valid slot holding invalid UTF-8
+        let bad = unsafe {
+            LargeStringArray::new_unchecked(
+                OffsetBuffer::new(vec![0i64, 2].into()),
+                AB::from(b"\xff\xfe".to_vec()),
+                None,
+            )
+        };
+        let err = column_from_arrow(&(Arc::new(bad) as ArrayRef)).unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+        // end offsets naming a span outside the data buffer (checked before slicing)
+        for offsets in [vec![0i32, 9], vec![2, 1]] {
+            let outside = unsafe {
+                StringArray::new_unchecked(
+                    OffsetBuffer::new_unchecked(ScalarBuffer::from(offsets)),
+                    AB::from(b"abc".to_vec()),
+                    None,
+                )
+            };
+            let err = column_from_arrow(&(Arc::new(outside) as ArrayRef)).unwrap_err();
+            assert!(err.to_string().contains("outside"), "{err}");
+        }
+    }
+
+    #[test]
+    fn c_stream_whose_schema_call_fails_is_an_error() {
+        use arrow_array::ffi::FFI_ArrowSchema;
+        use std::ffi::c_int;
+        unsafe extern "C" fn fail(_: *mut FFI_ArrowArrayStream, _: *mut FFI_ArrowSchema) -> c_int {
+            22
+        }
+        unsafe extern "C" fn release(s: *mut FFI_ArrowArrayStream) {
+            (*s).release = None;
+        }
+        let mut stream = FFI_ArrowArrayStream::empty();
+        stream.get_schema = Some(fail);
+        stream.get_next = Some(no_next);
+        stream.release = Some(release);
+        unsafe extern "C" fn no_next(_: *mut FFI_ArrowArrayStream, _: *mut FFI_ArrowArray) -> c_int {
+            23 // never called by the import: the schema call fails first
+        }
+        // SAFETY: `no_next` ignores its arguments.
+        assert_eq!(unsafe { no_next(std::ptr::null_mut(), std::ptr::null_mut()) }, 23);
+        // SAFETY: a live C-Stream struct whose callbacks are defined above.
+        let err = unsafe { columns_from_c_stream(&mut stream as *mut _ as *mut std::ffi::c_void) };
+        assert!(err.unwrap_err().to_string().contains("stream error code 22"));
     }
 }
