@@ -411,15 +411,19 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// A character that starts a binary operator (`+ - * / \ < > = ! & |`).
+/// A character that starts a binary operator (`+ - * / \ < > = ! & | ^`) — every first
+/// byte [`Parser::peek_binop`] recognizes.
 fn is_operator_char(c: u8) -> bool {
-    matches!(c, b'+' | b'-' | b'*' | b'/' | b'\\' | b'<' | b'>' | b'=' | b'!' | b'&' | b'|')
+    matches!(
+        c,
+        b'+' | b'-' | b'*' | b'/' | b'\\' | b'<' | b'>' | b'=' | b'!' | b'&' | b'|' | b'^'
+    )
 }
 
-fn is_ident_start(c: u8) -> bool {
+pub(crate) fn is_ident_start(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_'
 }
-fn is_ident_char(c: u8) -> bool {
+pub(crate) fn is_ident_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
 }
 fn is_number_start(c: u8, next: Option<u8>) -> bool {

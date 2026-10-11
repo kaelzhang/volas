@@ -69,6 +69,6 @@ fn nulls_from_validity(valid: impl Iterator<Item = bool>) -> Option<NullBuffer> 
 }
 
 /// A volas numeric [`Buffer<T>`] as a zero-copy Arrow [`ScalarBuffer`].
-fn scalar<T: arrow_buffer::ArrowNativeType>(v: &Buffer<T>) -> ScalarBuffer<T> {
+fn scalar<T: arrow_buffer::ArrowNativeType + volas_core::Element>(v: &Buffer<T>) -> ScalarBuffer<T> {
     ScalarBuffer::new(arrow_buffer_of(v), 0, v.len())
 }

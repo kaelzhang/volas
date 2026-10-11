@@ -1,7 +1,7 @@
 //! True-range volatility: TR / ATR / NATR and the ATR state-carry resume.
 
-use crate::indicators::av;
-use crate::kernels;
+use crate::raw::indicators::av;
+use crate::raw::kernels;
 
 /// True Range.
 pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
@@ -21,13 +21,10 @@ pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 
 /// Average True Range — TA-Lib semantics: SMA-seeded Wilder smoothing of TR (the
 /// first ATR, at index `period`, is the SMA of the first `period` TRs; thereafter
-/// `ATR[i] = (ATR[i-1]*(period-1) + TR[i]) / period`).
+/// `ATR[i] = (ATR[i-1]*(period-1) + TR[i]) / period`). Kept out of line: inlined into
+/// the directive's dispatch arm it compiles to a slower loop.
+#[inline(never)]
 pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, atr(&high[start..], &low[start..], &close[start..], period));
-    }
     let tr = tr(high, low, close);
     kernels::wilder(av(&tr), period).to_vec()
 }
@@ -35,11 +32,6 @@ pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 /// Normalized Average True Range — `ATR/close · 100` (TA-Lib NATR), expressing ATR
 /// as a percentage of price. Lookback = period (same as ATR).
 pub fn natr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, natr(&high[start..], &low[start..], &close[start..], period));
-    }
     let atr = atr(high, low, close, period);
     (0..close.len())
         .map(|i| atr[i] / close[i] * 100.0)
@@ -75,11 +67,6 @@ pub fn atr_final_state(
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return atr_final_state(&high[start..], &low[start..], &close[start..], period);
-    }
     let n = high.len();
     if period == 0 || period >= n {
         return None;

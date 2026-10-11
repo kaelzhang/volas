@@ -3,8 +3,10 @@
 use std::borrow::Cow;
 
 use crate::bind::bind_command;
+use crate::operands::Operands;
 use crate::types::{ArgValue, Ast, Node, Op, UnaryOp};
-use volas_compute::indicators as ind;
+use volas_compute::raw::indicators as ind;
+use volas_compute::missing::{on_complete_rows, Input};
 use volas_core::Column;
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
@@ -141,25 +143,12 @@ pub(crate) fn arg_str(args: &[ArgValue], i: usize) -> &str {
 
 // --- series resolution ------------------------------------------------------
 
-/// Resolve a series operand to `&[f64]`. A plain `F64` column is **borrowed**
-/// (`Cow::Borrowed`, no copy — the common case, e.g. `close`/`high`/`low`); a
-/// computed sub-expression or a non-`F64` column is materialised (`Cow::Owned`).
-/// Callers pass `&resolved` to the kernels, which deref-coerces to `&[f64]`.
-pub(crate) fn series_f64<'a>(
-    df: &'a DataFrame,
-    series: &[Ast],
-    i: usize,
-    default_col: &str,
-) -> Result<Cow<'a, [f64]>> {
-    match series.get(i) {
-        Some(Node::Name(s)) if s.is_empty() => col_f64(df, default_col),
-        Some(node) => {
-            let c = execute(df, node)?;
-            require_numeric(&c)?;
-            Ok(Cow::Owned(c.to_f64_vec()))
-        }
-        None => col_f64(df, default_col),
-    }
+/// The `@` operand filling series slot `i`, if any: an absent slot or an empty name
+/// leaves it to the command's default series.
+pub(crate) fn operand(series: &[Ast], i: usize) -> Option<&Ast> {
+    series
+        .get(i)
+        .filter(|n| !matches!(n, Node::Name(s) if s.is_empty()))
 }
 
 /// A directive numeric operand must be a numeric column (float / int / bool —
@@ -167,7 +156,7 @@ pub(crate) fn series_f64<'a>(
 /// would silently become all-`NaN` (or, for datetime, f64-quantized epoch), so
 /// reject it (API contract C4 — a lossy implicit conversion errors, never a silent
 /// all-NaN feature column).
-fn require_numeric(col: &Column) -> Result<()> {
+pub(crate) fn require_numeric(col: &Column) -> Result<()> {
     match col {
         Column::Str(..) | Column::Datetime(..) => Err(VolasError::Value(format!(
             "directive operand must be a numeric column, got {}",
@@ -178,8 +167,9 @@ fn require_numeric(col: &Column) -> Result<()> {
 }
 
 /// Borrow a frame column as `&[f64]` without copying when it is already `F64`;
-/// otherwise convert (e.g. an `I64` volume column).
-fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
+/// otherwise convert (e.g. an `I64` volume column). A command's arm reads its inputs
+/// through [`Operands`](crate::operands::Operands) instead.
+pub(crate) fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
     let col = df.column(name)?;
     require_numeric(col)?;
     Ok(match col.as_f64() {
@@ -188,26 +178,7 @@ fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
     })
 }
 
-/// Resolve a **required** numeric series operand at slot `i`: unlike [`series_f64`],
-/// an absent or empty operand is an error rather than a column default. Used where a
-/// command genuinely needs a second series the caller must name (e.g. `beta`/`correl`).
-fn series_f64_required<'a>(df: &'a DataFrame, series: &[Ast], i: usize) -> Result<Cow<'a, [f64]>> {
-    match series.get(i) {
-        Some(Node::Name(s)) if s.is_empty() => Err(VolasError::Value(format!(
-            "series argument #{i} is required"
-        ))),
-        Some(node) => {
-            let c = execute(df, node)?;
-            require_numeric(&c)?;
-            Ok(Cow::Owned(c.to_f64_vec()))
-        }
-        None => Err(VolasError::Value(format!(
-            "series argument #{i} is required"
-        ))),
-    }
-}
-
-fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
+pub(crate) fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
     let node = series
         .get(i)
         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
@@ -229,7 +200,20 @@ fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
 /// Infallible: every caller's matype is either a literal or a spec-validated
 /// argument (`ArgBound::IntRange(0, 8)` at the exec boundary), so a value past
 /// 8 cannot reach here.
-fn ma_typed(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
+fn ma_typed(data: &[f64], period: usize, matype: usize, complete: bool) -> Vec<f64> {
+    // A recursive average runs on the complete rows of its input — the input may be a
+    // derived line that warms up with NaN (see `volas_compute::missing`). A recursive
+    // command's own input is complete wherever its result is kept (`complete`), so it
+    // is not scanned.
+    if crate::spec::is_recursive_matype(matype) {
+        let input = if complete { Input::known(data, false) } else { Input::new(data) };
+        return on_complete_rows(&[input], |x| ma_kernel(x[0], period, matype));
+    }
+    ma_kernel(data, period, matype)
+}
+
+/// The moving average of `matype` over `data`.
+fn ma_kernel(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
     match matype {
         0 => ind::ma(data, period),
         1 => ind::ema(data, period),
@@ -254,7 +238,8 @@ mod overlap;
 /// The dispatch entry point: a bound command (canonical name / sub, typed args,
 /// bound series) routed to its kernel. Validation / defaulting / normalization
 /// already happened at `bind`, so this is pure dispatch — the `overlap` ->
-/// `momentum` -> `cycle` chain is an internal split of the one command table.
+/// `momentum` -> `cycle` chain is an internal split of the one command table. A
+/// recursive command runs on the complete rows of its inputs (see `crate::complete`).
 fn dispatch(
     df: &DataFrame,
     name: &str,
@@ -262,7 +247,10 @@ fn dispatch(
     args: &[ArgValue],
     series: &[Ast],
 ) -> Result<Column> {
-    overlap::dispatch(df, name, sub, args, series)
+    if crate::spec::is_recursive(name, args) {
+        return crate::complete::compute(df, series, |ops| overlap::dispatch(ops, name, sub, args));
+    }
+    overlap::dispatch(&Operands::new(df, series), name, sub, args)
 }
 
 /// Execute a bare `Name` that is not a frame column: bind it as a no-argument
@@ -579,7 +567,7 @@ mod tests {
         let df = ohlcv();
         let is_err = |d: &str| parse(d).and_then(|n| execute(&df, &n)).is_err();
         // correl needs a second series operand; absent or empty -> error at execute
-        // (series_f64_required's None and empty-Name arms).
+        // (`Operands::f64_required`'s None and empty-Name arms).
         assert!(is_err("correl:30"));
         assert!(is_err("correl:30@close,"));
         // a matype past 8 is rejected when binding (IntRange bound); ma_typed itself is
@@ -789,5 +777,7 @@ mod tests {
         // served by the parse-free `execute_resume_one`, not the value dispatch) hits the
         // scalar dispatch's `_ => None`, so the forming refresh falls back to the Vec path.
         assert!(execute_resume_value(&df, &p("rsi:14"), &[1.0, 1.0], 5, 0).is_none());
+        // ... and so does a finite-memory one, which skips the missing-row layer.
+        assert!(execute_resume_value(&df, &p("llv:5"), &[1.0], 5, 0).is_none());
     }
 }

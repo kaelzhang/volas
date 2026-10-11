@@ -3,31 +3,31 @@
 
 use super::*;
 use volas_core::Result;
-use crate::types::{ArgValue, Ast};
-use volas_compute::indicators as ind;
-use volas_core::{Column, DataFrame};
+use crate::types::ArgValue;
+use volas_compute::raw::indicators as ind;
+use volas_core::Column;
 
 pub(super) fn dispatch(
-    df: &DataFrame,
+    ops: &Operands,
     name: &str,
     sub: Option<&str>,
     args: &[ArgValue],
-    series: &[Ast],
 ) -> Result<Column> {
-    let close = |i| series_f64(df, series, i, "close");
+    let close = |i| ops.f64(i, "close");
     let f64col = |v: Vec<f64>| Ok(Column::f64(v));
     match (name, sub) {
         ("ma", _) => f64col(ma_typed(
             &close(0)?,
             arg_usize(args, 0),
             arg_usize(args, 1),
+            true,
         )),
         ("ema", _) => f64col(ind::ema(&close(0)?, arg_usize(args, 0))),
         ("smma", _) => f64col(ind::smma(&close(0)?, arg_usize(args, 0))),
         ("wma", _) => f64col(ind::wma(&close(0)?, arg_usize(args, 0))),
         ("vwma", _) => f64col(ind::vwma(
             &close(0)?,
-            &series_f64(df, series, 1, "volume")?,
+            &ops.f64(1, "volume")?,
             arg_usize(args, 0),
         )),
         ("alma", _) => f64col(ind::alma(
@@ -52,7 +52,7 @@ pub(super) fn dispatch(
         // MA is computed once and cached.
         ("mavp", _) => {
             let real = close(0)?;
-            let periods = series_f64_required(df, series, 1)?;
+            let periods = ops.f64_required(1)?;
             // min_p <= max_p is guaranteed by validate_cross_args (which runs
             // before dispatch), so the i64::clamp below cannot panic.
             let min_p = arg_usize(args, 0);
@@ -73,7 +73,7 @@ pub(super) fn dispatch(
                 let p = (periods[i] as i64).clamp(min_p as i64, max_p as i64) as usize;
                 if cache[p].is_none() {
                     let start = lb - crate::lookback::ma_lookback(p, matype);
-                    let sub = ma_typed(&real[start..], p, matype);
+                    let sub = ma_typed(&real[start..], p, matype, true);
                     cache[p] = Some((start, sub));
                 }
                 let (start, sub) = cache[p].as_ref().unwrap();
@@ -82,8 +82,8 @@ pub(super) fn dispatch(
             f64col(out)
         }
         ("sar", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::sar(
                 &high,
                 &low,
@@ -92,8 +92,8 @@ pub(super) fn dispatch(
             ))
         }
         ("sarext", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::sarext(
                 &high,
                 &low,
@@ -111,8 +111,8 @@ pub(super) fn dispatch(
         ("apo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2);
-            let f = ma_typed(&data, arg_usize(args, 0), mt);
-            let s = ma_typed(&data, arg_usize(args, 1), mt);
+            let f = ma_typed(&data, arg_usize(args, 0), mt, true);
+            let s = ma_typed(&data, arg_usize(args, 1), mt, true);
             f64col((0..data.len()).map(|i| f[i] - s[i]).collect())
         }
         // MACDEXT: a MACD whose fast/slow/signal MAs each take a configurable type
@@ -120,25 +120,14 @@ pub(super) fn dispatch(
         // natural start (best practice, like macd); signal/histogram follow.
         ("macdext", sub) => {
             let data = close(0)?;
-            let f = ma_typed(
-                &data,
-                arg_usize(args, 0),
-                arg_usize(args, 1),
-            );
-            let s = ma_typed(
-                &data,
-                arg_usize(args, 2),
-                arg_usize(args, 3),
-            );
+            let f = ma_typed(&data, arg_usize(args, 0), arg_usize(args, 1), true);
+            let s = ma_typed(&data, arg_usize(args, 2), arg_usize(args, 3), true);
             let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
             match sub {
                 None => f64col(line),
                 _ => {
-                    let signal = ma_typed(
-                        &line,
-                        arg_usize(args, 4),
-                        arg_usize(args, 5),
-                    );
+                    // the MACD line warms up with NaN: not known complete
+                    let signal = ma_typed(&line, arg_usize(args, 4), arg_usize(args, 5), false);
                     if sub == Some("signal") {
                         f64col(signal)
                     } else {
@@ -150,8 +139,8 @@ pub(super) fn dispatch(
         ("ppo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2);
-            let f = ma_typed(&data, arg_usize(args, 0), mt);
-            let s = ma_typed(&data, arg_usize(args, 1), mt);
+            let f = ma_typed(&data, arg_usize(args, 0), mt, true);
+            let s = ma_typed(&data, arg_usize(args, 1), mt, true);
             f64col(
                 (0..data.len())
                     .map(|i| (f[i] - s[i]) / s[i] * 100.0)
@@ -163,27 +152,27 @@ pub(super) fn dispatch(
         // bias:N ≡ ppo:1,N,0 — the percentage deviation of close from its N-period SMA.
         ("bias", _) => {
             let data = close(0)?;
-            let f = ma_typed(&data, 1, 0);
-            let s = ma_typed(&data, arg_usize(args, 0), 0);
+            let f = ma_typed(&data, 1, 0, true);
+            let s = ma_typed(&data, arg_usize(args, 0), 0, true);
             f64col((0..data.len()).map(|i| (f[i] - s[i]) / s[i] * 100.0).collect())
         }
         // dma's DDD line ≡ apo:fast,slow,0; dma.ama is the M-period SMA of that line.
         ("dma", sub) => {
             let data = close(0)?;
-            let f = ma_typed(&data, arg_usize(args, 0), 0);
-            let s = ma_typed(&data, arg_usize(args, 1), 0);
+            let f = ma_typed(&data, arg_usize(args, 0), 0, true);
+            let s = ma_typed(&data, arg_usize(args, 1), 0, true);
             let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
             match sub {
                 None => f64col(line),
-                _ => f64col(ma_typed(&line, arg_usize(args, 2), 0)),
+                _ => f64col(ma_typed(&line, arg_usize(args, 2), 0, false)),
             }
         }
 
         // Group B convention-sensitive indicators (gap report §9).
         ("vortex", sub) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::vortex(
                 &high,
                 &low,
@@ -193,20 +182,20 @@ pub(super) fn dispatch(
             ))
         }
         ("brar", Some("br")) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::brar_br(&high, &low, &close, arg_usize(args, 0)))
         }
         ("brar", _) => {
-            let open = series_f64(df, series, 0, "open")?;
-            let high = series_f64(df, series, 1, "high")?;
-            let low = series_f64(df, series, 2, "low")?;
+            let open = ops.f64(0, "open")?;
+            let high = ops.f64(1, "high")?;
+            let low = ops.f64(2, "low")?;
             f64col(ind::brar_ar(&open, &high, &low, arg_usize(args, 0)))
         }
         ("vr", _) => {
-            let close = series_f64(df, series, 0, "close")?;
-            let volume = series_f64(df, series, 1, "volume")?;
+            let close = ops.f64(0, "close")?;
+            let volume = ops.f64(1, "volume")?;
             f64col(ind::vr(&close, &volume, arg_usize(args, 0)))
         }
         ("coppock", _) => f64col(ind::coppock(
@@ -216,10 +205,10 @@ pub(super) fn dispatch(
             arg_usize(args, 2),
         )),
         ("relative_vigor", sub) => {
-            let open = series_f64(df, series, 0, "open")?;
-            let high = series_f64(df, series, 1, "high")?;
-            let low = series_f64(df, series, 2, "low")?;
-            let close = series_f64(df, series, 3, "close")?;
+            let open = ops.f64(0, "open")?;
+            let high = ops.f64(1, "high")?;
+            let low = ops.f64(2, "low")?;
+            let close = ops.f64(3, "close")?;
             let n = arg_usize(args, 0);
             if sub == Some("signal") {
                 f64col(ind::relative_vigor_signal(&open, &high, &low, &close, n))
@@ -228,10 +217,10 @@ pub(super) fn dispatch(
             }
         }
         ("dkx", sub) => {
-            let open = series_f64(df, series, 0, "open")?;
-            let high = series_f64(df, series, 1, "high")?;
-            let low = series_f64(df, series, 2, "low")?;
-            let close = series_f64(df, series, 3, "close")?;
+            let open = ops.f64(0, "open")?;
+            let high = ops.f64(1, "high")?;
+            let low = ops.f64(2, "low")?;
+            let close = ops.f64(3, "close")?;
             if sub == Some("ma") {
                 f64col(ind::dkx_ma(&open, &high, &low, &close, arg_usize(args, 0)))
             } else {
@@ -239,17 +228,17 @@ pub(super) fn dispatch(
             }
         }
         ("wvad", _) => {
-            let open = series_f64(df, series, 0, "open")?;
-            let high = series_f64(df, series, 1, "high")?;
-            let low = series_f64(df, series, 2, "low")?;
-            let close = series_f64(df, series, 3, "close")?;
-            let volume = series_f64(df, series, 4, "volume")?;
+            let open = ops.f64(0, "open")?;
+            let high = ops.f64(1, "high")?;
+            let low = ops.f64(2, "low")?;
+            let close = ops.f64(3, "close")?;
+            let volume = ops.f64(4, "volume")?;
             f64col(ind::wvad(&open, &high, &low, &close, &volume, arg_usize(args, 0)))
         }
         ("cdp", sub) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let line = match sub {
                 Some("ah") => ind::CdpLine::Ah,
                 Some("nh") => ind::CdpLine::Nh,
@@ -260,9 +249,9 @@ pub(super) fn dispatch(
             f64col(ind::cdp(&high, &low, &close, line))
         }
         ("mike", sub) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let line = match sub {
                 Some("midr") => ind::MikeLine::MidR,
                 Some("strongr") => ind::MikeLine::StrongR,
@@ -276,11 +265,11 @@ pub(super) fn dispatch(
         ("keltner", sub) => {
             let ema_period = arg_usize(args, 0);
             match sub {
-                None => f64col(ind::ema(&series_f64(df, series, 0, "close")?, ema_period)),
+                None => f64col(ind::ema(&ops.f64(0, "close")?, ema_period)),
                 _ => {
-                    let high = series_f64(df, series, 0, "high")?;
-                    let low = series_f64(df, series, 1, "low")?;
-                    let close = series_f64(df, series, 2, "close")?;
+                    let high = ops.f64(0, "high")?;
+                    let low = ops.f64(1, "low")?;
+                    let close = ops.f64(2, "close")?;
                     f64col(ind::keltner_band(
                         &close,
                         &high,
@@ -294,9 +283,9 @@ pub(super) fn dispatch(
             }
         }
         ("stoch_momentum", sub) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let k = arg_usize(args, 0);
             let d = arg_usize(args, 1);
             if sub == Some("signal") {
@@ -313,9 +302,9 @@ pub(super) fn dispatch(
             }
         }
         ("ttm_squeeze", sub) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let n = arg_usize(args, 0);
             if sub == Some("on") {
                 f64col(ind::ttm_squeeze_on(
@@ -331,9 +320,9 @@ pub(super) fn dispatch(
             }
         }
         ("pivot_points", sub) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let line = match sub {
                 Some("r1") => ind::PivotLine::R1,
                 Some("s1") => ind::PivotLine::S1,
@@ -346,9 +335,9 @@ pub(super) fn dispatch(
             f64col(ind::pivot_points(&high, &low, &close, line))
         }
         ("ichimoku", sub) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let line = match sub {
                 Some("kijun") => ind::IchimokuLine::Kijun,
                 Some("senkou_a") => ind::IchimokuLine::SenkouA,
@@ -367,22 +356,22 @@ pub(super) fn dispatch(
             ))
         }
         ("wad", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::wad(&high, &low, &close))
         }
         ("asi", _) => {
-            let open = series_f64(df, series, 0, "open")?;
-            let high = series_f64(df, series, 1, "high")?;
-            let low = series_f64(df, series, 2, "low")?;
-            let close = series_f64(df, series, 3, "close")?;
+            let open = ops.f64(0, "open")?;
+            let high = ops.f64(1, "high")?;
+            let low = ops.f64(2, "low")?;
+            let close = ops.f64(3, "close")?;
             f64col(ind::asi(&open, &high, &low, &close, arg_f64(args, 0)))
         }
         ("supertrend", sub) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::supertrend(
                 &high,
                 &low,
@@ -393,6 +382,6 @@ pub(super) fn dispatch(
             ))
         }
 
-        _ => super::momentum::dispatch(df, name, sub, args, series),
+        _ => super::momentum::dispatch(ops, name, sub, args),
     }
 }

@@ -3,18 +3,17 @@
 
 use super::*;
 use volas_core::Result;
-use crate::types::{ArgValue, Ast};
-use volas_compute::indicators as ind;
-use volas_core::{Column, DataFrame};
+use crate::types::ArgValue;
+use volas_compute::raw::indicators as ind;
+use volas_core::Column;
 
 pub(super) fn dispatch(
-    df: &DataFrame,
+    ops: &Operands,
     name: &str,
     sub: Option<&str>,
     args: &[ArgValue],
-    series: &[Ast],
 ) -> Result<Column> {
-    let close = |i| series_f64(df, series, i, "close");
+    let close = |i| ops.f64(i, "close");
     let f64col = |v: Vec<f64>| Ok(Column::f64(v));
     let boolcol = |v: Vec<bool>| Ok(Column::bool(v));
     match (name, sub) {
@@ -70,8 +69,8 @@ pub(super) fn dispatch(
             arg_usize(args, 0),
         )),
         ("accbands", Some("upper")) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::accbands_upper(
                 &high,
                 &low,
@@ -79,8 +78,8 @@ pub(super) fn dispatch(
             ))
         }
         ("accbands", Some("lower")) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::accbands_lower(
                 &high,
                 &low,
@@ -89,15 +88,15 @@ pub(super) fn dispatch(
         }
 
         ("rsv", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::rsv(&high, &low, &close, arg_usize(args, 0)))
         }
         ("kdj", Some(line @ ("k" | "d" | "j"))) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let period_rsv = arg_usize(args, 0);
             let period_k = arg_usize(args, 1);
             match line {
@@ -128,50 +127,50 @@ pub(super) fn dispatch(
         )),
 
         ("tr", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::tr(&high, &low, &close))
         }
         ("atr", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::atr(&high, &low, &close, arg_usize(args, 0)))
         }
 
         ("llv", _) => f64col(ind::llv(
-            &series_f64(df, series, 0, "low")?,
+            &ops.f64(0, "low")?,
             arg_usize(args, 0),
         )),
         ("hhv", _) => f64col(ind::hhv(
-            &series_f64(df, series, 0, "high")?,
+            &ops.f64(0, "high")?,
             arg_usize(args, 0),
         )),
 
         ("donchian", None) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::donchian(&high, &low, arg_usize(args, 0)))
         }
         ("donchian", Some("upper")) => f64col(ind::hhv(
-            &series_f64(df, series, 0, "high")?,
+            &ops.f64(0, "high")?,
             arg_usize(args, 0),
         )),
         ("donchian", Some("lower")) => f64col(ind::llv(
-            &series_f64(df, series, 0, "low")?,
+            &ops.f64(0, "low")?,
             arg_usize(args, 0),
         )),
 
         ("midpoint", _) => f64col(ind::midpoint(&close(0)?, arg_usize(args, 0))),
         ("midprice", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::midprice(&high, &low, arg_usize(args, 0)))
         }
 
         ("hv", _) => {
-            let close = series_f64(df, series, 0, "close")?;
+            let close = ops.f64(0, "close")?;
             let period = arg_usize(args, 0);
             let minutes = tf_to_minutes(arg_str(args, 1))?;
             let trading_days = arg_i64(args, 2);
@@ -189,8 +188,8 @@ pub(super) fn dispatch(
                 "bearish" => ind::Style::Bearish,
                 _ => unreachable!("style color sub-command is validated by command_spec"), // LCOV_EXCL_LINE
             };
-            let open = series_f64(df, series, 0, "open")?;
-            let close = series_f64(df, series, 1, "close")?;
+            let open = ops.f64(0, "open")?;
+            let close = ops.f64(1, "close")?;
             boolcol(ind::style(style, &open, &close))
         }
         // Candlestick patterns: style.<pattern> / cdl.<pattern>. Output f64 -100/0/100
@@ -203,10 +202,10 @@ pub(super) fn dispatch(
                 Some(p) => p,
                 None => unreachable!("candle pattern validated by command_spec"), // LCOV_EXCL_LINE
             };
-            let open = series_f64(df, series, 0, "open")?;
-            let high = series_f64(df, series, 1, "high")?;
-            let low = series_f64(df, series, 2, "low")?;
-            let close = series_f64(df, series, 3, "close")?;
+            let open = ops.f64(0, "open")?;
+            let high = ops.f64(1, "high")?;
+            let low = ops.f64(2, "low")?;
+            let close = ops.f64(3, "close")?;
             let v = match pattern {
                 ind::CandlePattern::Plain(f) => f(&open, &high, &low, &close),
                 ind::CandlePattern::Penetration { f, .. } => {
@@ -216,7 +215,7 @@ pub(super) fn dispatch(
             f64col(v)
         }
         ("repeat", _) => boolcol(ind::repeat(
-            &series_bool(df, series, 0)?,
+            &ops.bool(0)?,
             arg_usize(args, 0),
         )),
         ("change", _) => f64col(ind::change(&close(0)?, arg_usize(args, 0))),
@@ -228,9 +227,9 @@ pub(super) fn dispatch(
         ("rocr100", _) => f64col(ind::rocr100(&close(0)?, arg_usize(args, 0))),
 
         ("willr", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::willr(
                 &high,
                 &low,
@@ -240,10 +239,10 @@ pub(super) fn dispatch(
         }
         ("cmo", _) => f64col(ind::cmo(&close(0)?, arg_usize(args, 0))),
         ("mfi", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
-            let volume = series_f64(df, series, 3, "volume")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
+            let volume = ops.f64(3, "volume")?;
             f64col(ind::mfi(
                 &high,
                 &low,
@@ -253,9 +252,9 @@ pub(super) fn dispatch(
             ))
         }
         ("ultosc", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::ultosc(
                 &high,
                 &low,
@@ -267,9 +266,9 @@ pub(super) fn dispatch(
         }
         // Stochastic family: raw %K (NaN warm-up) then matype-MA smoothing stages.
         ("stoch", Some(line @ ("k" | "d"))) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let fastk_period = arg_usize(args, 0);
             let slowk_period = arg_usize(args, 1);
             let slowk_matype = arg_usize(args, 2);
@@ -287,17 +286,17 @@ pub(super) fn dispatch(
                 }
             }
             let fastk = ind::stoch_fastk(&high, &low, &close, fastk_period);
-            let slowk = ma_typed(&fastk, slowk_period, slowk_matype);
+            let slowk = ma_typed(&fastk, slowk_period, slowk_matype, false);
             if line == "k" {
                 f64col(slowk)
             } else {
-                f64col(ma_typed(&slowk, slowd_period, slowd_matype))
+                f64col(ma_typed(&slowk, slowd_period, slowd_matype, false))
             }
         }
         ("stochf", Some(line @ ("k" | "d"))) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             let fastk_period = arg_usize(args, 0);
             let fastd_period = arg_usize(args, 1);
             let fastd_matype = arg_usize(args, 2);
@@ -310,7 +309,7 @@ pub(super) fn dispatch(
             if line == "k" {
                 f64col(fastk)
             } else {
-                f64col(ma_typed(&fastk, fastd_period, fastd_matype))
+                f64col(ma_typed(&fastk, fastd_period, fastd_matype, false))
             }
         }
         ("stochrsi", Some(line @ ("k" | "d"))) => {
@@ -333,10 +332,10 @@ pub(super) fn dispatch(
             if line == "k" {
                 f64col(fastk)
             } else {
-                f64col(ma_typed(&fastk, fastd_period, fastd_matype))
+                f64col(ma_typed(&fastk, fastd_period, fastd_matype, false))
             }
         }
 
-        _ => super::cycle::dispatch(df, name, sub, args, series),
+        _ => super::cycle::dispatch(ops, name, sub, args),
     }
 }

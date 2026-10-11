@@ -2,9 +2,9 @@
 
 use ndarray::Array1;
 
-use crate::indicators::av;
-use crate::indicators::trend::ma::{ema_k, ema_seed_idx};
-use crate::kernels;
+use crate::raw::indicators::av;
+use crate::raw::indicators::trend::ma::{ema_k, ema_seed_idx};
+use crate::raw::kernels;
 
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the

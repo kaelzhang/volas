@@ -4,8 +4,9 @@
 //! `boll`). The canonical form is volas-native — numeric arguments are not
 //! coerced to a typed display (e.g. `100` stays `100`, not `100.0`).
 
+use crate::parser::{is_ident_char, is_ident_start};
 use crate::spec::{canon_sub, command_spec, normalize};
-use crate::types::{ArgTokens, Command, Node, UnaryOp};
+use crate::types::{number_token, ArgTokens, Command, Node, UnaryOp};
 
 /// Canonical string form of a directive tree. Generic over the argument payload so
 /// it canonicalizes both a bound [`Ast`](crate::types::Ast) (the frame-cache key)
@@ -14,7 +15,7 @@ use crate::types::{ArgTokens, Command, Node, UnaryOp};
 pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
     match node {
         Node::Name(s) => s.clone(),
-        Node::Scalar(v) => format_num(*v),
+        Node::Scalar(v) => number_token(*v),
         Node::Command(cmd) => stringify_command(cmd),
         Node::Unary { op, operand } => {
             let op_s = match op {
@@ -45,14 +46,6 @@ pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
             };
             format!("{l}{}{r}", op.token())
         }
-    }
-}
-
-fn format_num(v: f64) -> String {
-    if v.fract() == 0.0 {
-        format!("{}", v as i64)
-    } else {
-        format!("{v}")
     }
 }
 
@@ -105,14 +98,22 @@ fn stringify_command<A: ArgTokens>(cmd: &Command<A>) -> String {
     out
 }
 
+/// A series operand. The parser reads a bare identifier in a series slot and nothing
+/// else bare, so any other operand — a command with a sub / arguments / series, a
+/// scalar, an expression — is grouped; one that renders as a bare identifier (a
+/// command whose arguments are all defaults) is not, so the form is a fixed point.
 fn stringify_series<A: ArgTokens>(node: &Node<A>) -> String {
-    match node {
-        Node::Name(s) => s.clone(),
-        Node::Scalar(v) => format_num(*v),
-        Node::Command(c) => stringify_command(c),
-        // An expression as a series operand stays grouped so it re-parses.
-        _ => format!("({})", stringify(node)),
+    let text = stringify(node);
+    if is_identifier(&text) {
+        text
+    } else {
+        format!("({text})")
     }
+}
+
+fn is_identifier(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(is_ident_start) && bytes.all(is_ident_char)
 }
 
 /// Join `tokens` with `,` under `prefix` (`:` or `@`), dropping trailing empties.
@@ -175,6 +176,47 @@ mod tests {
         assert_eq!(s("close > 2.5"), "close>2.5");
         // an expression as a series operand stays grouped so it re-parses
         assert_eq!(s("ma:5@(close + 1)"), "ma:5@(close+1)");
+    }
+
+    /// A series slot reads a bare identifier only, so every other operand — a command
+    /// with a sub, arguments or series of its own, a scalar — keeps its parentheses
+    /// and the canonical name re-parses to the same tree.
+    #[test]
+    fn a_non_name_series_operand_stays_grouped() {
+        for (input, canonical) in [
+            ("ema:5@(rsi:5)", "ema:5@(rsi:5)"),
+            ("ema:5@(macd.signal)", "ema:5@(macd.signal)"),
+            ("ema:5@(boll.upper:30)", "ema:5@(boll.upper:30)"),
+            ("ema:5@(ema:3@(rsi:4))", "ema:5@(ema:3@(rsi:4))"),
+            ("correl:5@,(3)", "correl:5@,(3)"),
+        ] {
+            assert_eq!(s(input), canonical, "{input}");
+            assert_eq!(parse(canonical).unwrap(), parse(input).unwrap(), "{input}");
+        }
+    }
+
+    /// A canonical name drops the spaces around an operator, so an argument must end
+    /// at every binary operator for `ma:5 OP ma:3` to re-parse as written.
+    #[test]
+    fn an_argument_ends_at_every_binary_operator() {
+        for op in [
+            "+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!=", "&", "|", "^", "//", "\\\\",
+            "><",
+        ] {
+            let input = format!("ma:5 {op} ma:3");
+            let canonical = s(&input);
+            assert_eq!(canonical, format!("ma:5{op}ma:3"));
+            assert_eq!(parse(&canonical).unwrap(), parse(&input).unwrap(), "{input}");
+        }
+    }
+
+    /// A whole number past `i64`'s range renders as itself, not saturated.
+    #[test]
+    fn a_large_whole_number_keeps_its_value() {
+        assert_eq!(s("close > 100000000000000000000"), "close>100000000000000000000");
+        assert_eq!(s("boll.upper:20,100000000000000000000"), "boll.upper:,100000000000000000000");
+        assert_eq!(s("close > 2"), "close>2");
+        assert_eq!(s("close > 0.000001"), "close>0.000001");
     }
 
     #[test]

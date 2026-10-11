@@ -3,35 +3,34 @@
 
 use super::*;
 use volas_core::{Result, VolasError};
-use crate::types::{ArgValue, Ast};
-use volas_compute::indicators as ind;
-use volas_core::{Column, DataFrame};
+use crate::types::ArgValue;
+use volas_compute::raw::indicators as ind;
+use volas_core::Column;
 
 pub(super) fn dispatch(
-    df: &DataFrame,
+    ops: &Operands,
     name: &str,
     sub: Option<&str>,
     args: &[ArgValue],
-    series: &[Ast],
 ) -> Result<Column> {
-    let close = |i| series_f64(df, series, i, "close");
+    let close = |i| ops.f64(i, "close");
     let f64col = |v: Vec<f64>| Ok(Column::f64(v));
     match (name, sub) {
         // Directional movement family (+DM/-DM need only high/low; the rest add close).
         ("plus_dm", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::plus_dm(&high, &low, arg_usize(args, 0)))
         }
         ("minus_dm", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::minus_dm(&high, &low, arg_usize(args, 0)))
         }
         ("plus_di", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::plus_di(
                 &high,
                 &low,
@@ -40,9 +39,9 @@ pub(super) fn dispatch(
             ))
         }
         ("minus_di", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::minus_di(
                 &high,
                 &low,
@@ -51,21 +50,21 @@ pub(super) fn dispatch(
             ))
         }
         ("dx", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::dx(&high, &low, &close, arg_usize(args, 0)))
         }
         ("adx", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::adx(&high, &low, &close, arg_usize(args, 0)))
         }
         ("adxr", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::adxr(
                 &high,
                 &low,
@@ -74,61 +73,61 @@ pub(super) fn dispatch(
             ))
         }
         ("cci", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::cci(&high, &low, &close, arg_usize(args, 0)))
         }
         ("imi", _) => {
-            let open = series_f64(df, series, 0, "open")?;
-            let close = series_f64(df, series, 1, "close")?;
+            let open = ops.f64(0, "open")?;
+            let close = ops.f64(1, "close")?;
             f64col(ind::imi(&open, &close, arg_usize(args, 0)))
         }
         ("psy", _) => f64col(ind::psy(&close(0)?, arg_usize(args, 0))),
         ("pvt", _) => {
-            let close = series_f64(df, series, 0, "close")?;
-            let volume = series_f64(df, series, 1, "volume")?;
+            let close = ops.f64(0, "close")?;
+            let volume = ops.f64(1, "volume")?;
             f64col(ind::pvt(&close, &volume))
         }
         ("nvi", _) => {
-            let close = series_f64(df, series, 0, "close")?;
-            let volume = series_f64(df, series, 1, "volume")?;
+            let close = ops.f64(0, "close")?;
+            let volume = ops.f64(1, "volume")?;
             f64col(ind::nvi(&close, &volume))
         }
         ("pvi", _) => {
-            let close = series_f64(df, series, 0, "close")?;
-            let volume = series_f64(df, series, 1, "volume")?;
+            let close = ops.f64(0, "close")?;
+            let volume = ops.f64(1, "volume")?;
             f64col(ind::pvi(&close, &volume))
         }
         ("dpo", _) => f64col(ind::dpo(&close(0)?, arg_usize(args, 0))),
         ("cmf", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
-            let volume = series_f64(df, series, 3, "volume")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
+            let volume = ops.f64(3, "volume")?;
             f64col(ind::cmf(&high, &low, &close, &volume, arg_usize(args, 0)))
         }
         ("chop", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::chop(&high, &low, &close, arg_usize(args, 0)))
         }
         ("kst", _) => f64col(ind::kst(&close(0)?)),
         ("emv", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let volume = series_f64(df, series, 2, "volume")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let volume = ops.f64(2, "volume")?;
             f64col(ind::emv(&high, &low, &volume, arg_usize(args, 0)))
         }
         ("mass_index", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::mass_index(&high, &low, arg_usize(args, 0)))
         }
         ("efi", _) => {
-            let close = series_f64(df, series, 0, "close")?;
-            let volume = series_f64(df, series, 1, "volume")?;
+            let close = ops.f64(0, "close")?;
+            let volume = ops.f64(1, "volume")?;
             f64col(ind::efi(&close, &volume, arg_usize(args, 0)))
         }
         ("tsi", _) => f64col(ind::tsi(
@@ -144,8 +143,8 @@ pub(super) fn dispatch(
         )),
         ("trix", _) => f64col(ind::trix(&close(0)?, arg_usize(args, 0))),
         ("aroon", Some(dir @ ("up" | "down"))) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             let period = arg_usize(args, 0);
             let v = if dir == "up" {
                 ind::aroon_up(&high, &low, period)
@@ -155,8 +154,8 @@ pub(super) fn dispatch(
             f64col(v)
         }
         ("aroonosc", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::aroonosc(&high, &low, arg_usize(args, 0)))
         }
 
@@ -174,9 +173,9 @@ pub(super) fn dispatch(
             f64col(ind::maxindex(&close(0)?, arg_usize(args, 0)))
         }
         ("natr", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::natr(
                 &high,
                 &low,
@@ -185,10 +184,10 @@ pub(super) fn dispatch(
             ))
         }
         ("bop", _) => {
-            let open = series_f64(df, series, 0, "open")?;
-            let high = series_f64(df, series, 1, "high")?;
-            let low = series_f64(df, series, 2, "low")?;
-            let close = series_f64(df, series, 3, "close")?;
+            let open = ops.f64(0, "open")?;
+            let high = ops.f64(1, "high")?;
+            let low = ops.f64(2, "low")?;
+            let close = ops.f64(3, "close")?;
             f64col(ind::bop(&open, &high, &low, &close))
         }
 
@@ -209,12 +208,12 @@ pub(super) fn dispatch(
         // beta/correl relate two series: the first defaults to close, the second is required.
         ("correl", _) => {
             let x = close(0)?;
-            let y = series_f64_required(df, series, 1)?;
+            let y = ops.f64_required(1)?;
             f64col(ind::correl(&x, &y, arg_usize(args, 0)))
         }
         ("beta", _) => {
             let x = close(0)?;
-            let y = series_f64_required(df, series, 1)?;
+            let y = ops.f64_required(1)?;
             f64col(ind::beta(&x, &y, arg_usize(args, 0)))
         }
 
@@ -262,16 +261,16 @@ pub(super) fn dispatch(
         ("cog", _) => f64col(ind::cog(&close(0)?, arg_usize(args, 0))),
         ("rci", _) => f64col(ind::rci(&close(0)?, arg_usize(args, 0))),
         ("iii", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
-            let volume = series_f64(df, series, 3, "volume")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
+            let volume = ops.f64(3, "volume")?;
             f64col(ind::iii(&high, &low, &close, &volume))
         }
         ("kcw", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::kcw(
                 &close,
                 &high,
@@ -282,13 +281,13 @@ pub(super) fn dispatch(
             ))
         }
         ("pivothigh", _) => f64col(ind::pivot(
-            &series_f64(df, series, 0, "high")?,
+            &ops.f64(0, "high")?,
             arg_usize(args, 0),
             arg_usize(args, 1),
             true,
         )),
         ("pivotlow", _) => f64col(ind::pivot(
-            &series_f64(df, series, 0, "low")?,
+            &ops.f64(0, "low")?,
             arg_usize(args, 0),
             arg_usize(args, 1),
             false,
@@ -300,22 +299,22 @@ pub(super) fn dispatch(
         )),
 
         ("obv", _) => {
-            let real = series_f64(df, series, 0, "close")?;
-            let volume = series_f64(df, series, 1, "volume")?;
+            let real = ops.f64(0, "close")?;
+            let volume = ops.f64(1, "volume")?;
             f64col(ind::obv(&real, &volume))
         }
         ("ad", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
-            let volume = series_f64(df, series, 3, "volume")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
+            let volume = ops.f64(3, "volume")?;
             f64col(ind::ad(&high, &low, &close, &volume))
         }
         ("adosc", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
-            let volume = series_f64(df, series, 3, "volume")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
+            let volume = ops.f64(3, "volume")?;
             f64col(ind::adosc(
                 &high,
                 &low,
@@ -327,27 +326,27 @@ pub(super) fn dispatch(
         }
 
         ("avgprice", _) => {
-            let open = series_f64(df, series, 0, "open")?;
-            let high = series_f64(df, series, 1, "high")?;
-            let low = series_f64(df, series, 2, "low")?;
-            let close = series_f64(df, series, 3, "close")?;
+            let open = ops.f64(0, "open")?;
+            let high = ops.f64(1, "high")?;
+            let low = ops.f64(2, "low")?;
+            let close = ops.f64(3, "close")?;
             f64col(ind::avgprice(&open, &high, &low, &close))
         }
         ("medprice", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
             f64col(ind::medprice(&high, &low))
         }
         ("typprice", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::typprice(&high, &low, &close))
         }
         ("wclprice", _) => {
-            let high = series_f64(df, series, 0, "high")?;
-            let low = series_f64(df, series, 1, "low")?;
-            let close = series_f64(df, series, 2, "close")?;
+            let high = ops.f64(0, "high")?;
+            let low = ops.f64(1, "low")?;
+            let close = ops.f64(2, "close")?;
             f64col(ind::wclprice(&high, &low, &close))
         }
 

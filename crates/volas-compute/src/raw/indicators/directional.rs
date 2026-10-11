@@ -64,21 +64,11 @@ fn wilder_sum(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Vec<f64> 
 
 /// Wilder-smoothed +DM (TA-Lib PLUS_DM). Lookback `period-1`.
 pub fn plus_dm(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low]);
-    if start > 0 {
-        return crate::start::pad_front(start, plus_dm(&high[start..], &low[start..], period));
-    }
     wilder_sum(high.len(), period, |i| dm1(high, low, i).0)
 }
 
 /// Wilder-smoothed -DM (TA-Lib MINUS_DM). Lookback `period-1`.
 pub fn minus_dm(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low]);
-    if start > 0 {
-        return crate::start::pad_front(start, minus_dm(&high[start..], &low[start..], period));
-    }
     wilder_sum(high.len(), period, |i| dm1(high, low, i).1)
 }
 
@@ -100,11 +90,6 @@ fn di(dm_sm: &[f64], tr_sm: &[f64], period: usize) -> Vec<f64> {
 
 /// +DI (TA-Lib PLUS_DI). Lookback `period`.
 pub fn plus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, plus_di(&high[start..], &low[start..], &close[start..], period));
-    }
     let sp = wilder_sum(high.len(), period, |i| dm1(high, low, i).0);
     let st = wilder_sum(high.len(), period, |i| tr1(high, low, close, i));
     di(&sp, &st, period)
@@ -112,11 +97,6 @@ pub fn plus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f
 
 /// -DI (TA-Lib MINUS_DI). Lookback `period`.
 pub fn minus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, minus_di(&high[start..], &low[start..], &close[start..], period));
-    }
     let sm = wilder_sum(high.len(), period, |i| dm1(high, low, i).1);
     let st = wilder_sum(high.len(), period, |i| tr1(high, low, close, i));
     di(&sm, &st, period)
@@ -163,11 +143,6 @@ fn dm_tr_sums(
 /// Directional Movement Index `DX = 100·|+DI − −DI| / (+DI + −DI)` (TA-Lib DX); a ~0
 /// TR or ~0 DI-sum yields 0. Lookback `period`.
 pub fn dx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, dx(&high[start..], &low[start..], &close[start..], period));
-    }
     let (sp, sm, st) = dm_tr_sums(high, low, close, period);
     let n = sp.len();
     let mut out = vec![f64::NAN; n];
@@ -193,11 +168,6 @@ pub fn dx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
 /// (`ADX[2p-1] = mean(DX[p..2p-1])`, then `ADX = (ADX_prev·(p-1) + DX)/p`).
 /// Lookback `2·period-1`.
 pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, adx(&high[start..], &low[start..], &close[start..], period));
-    }
     let dxv = dx(high, low, close, period);
     let n = dxv.len();
     let mut out = vec![f64::NAN; n];
@@ -230,11 +200,6 @@ pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 /// Average Directional Movement Index Rating: `(ADX[i] + ADX[i−(period−1)]) / 2`
 /// (TA-Lib ADXR). Lookback `3·period-2`.
 pub fn adxr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return crate::start::pad_front(start, adxr(&high[start..], &low[start..], &close[start..], period));
-    }
     let a = adx(high, low, close, period);
     let n = a.len();
     let mut out = vec![f64::NAN; n];
@@ -254,7 +219,7 @@ pub use resume::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::test_support::*;
 
     /// Every directional resume, fed the carried Wilder accumulator(s) of a full compute
     /// over the head, reproduces the tail of a full compute over the whole input —

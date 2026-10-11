@@ -49,7 +49,7 @@ struct Hold(#[allow(dead_code)] ArrayRef);
 
 /// Publish a volas [`Buffer<T>`] to Arrow as a borrowed allocation — no copy; the
 /// buffer's `Arc` keep-alive backs the returned Arrow buffer.
-fn arrow_buffer_of<T: Send + Sync + 'static>(buf: &Buffer<T>) -> ArrowBuffer {
+fn arrow_buffer_of<T: volas_core::Element + Send + Sync + 'static>(buf: &Buffer<T>) -> ArrowBuffer {
     let bytes = std::mem::size_of_val(buf.as_slice());
     let ptr = NonNull::new(buf.as_ptr() as *mut u8).unwrap_or(NonNull::dangling());
     // SAFETY: `ptr` covers `bytes` initialised bytes kept alive by `owner` (the
@@ -76,7 +76,7 @@ fn validity_of(nulls: Option<&NullBuffer>, len: usize) -> Validity {
 
 /// View an imported Arrow primitive slice as a zero-copy [`Buffer::Borrowed`], guarded
 /// by `src` (the source array, kept alive for the buffer's lifetime).
-fn borrow_primitive<T: Send + Sync + 'static>(values: &[T], src: &ArrayRef) -> Buffer<T> {
+fn borrow_primitive<T: volas_core::Element + Send + Sync + 'static>(values: &[T], src: &ArrayRef) -> Buffer<T> {
     let ptr = NonNull::new(values.as_ptr() as *mut T).unwrap_or(NonNull::dangling());
     // SAFETY: `values` points into `src`'s buffer; `Hold(src)` keeps it alive for as
     // long as the returned `Buffer` (and Arrow guarantees the bytes are immutable).

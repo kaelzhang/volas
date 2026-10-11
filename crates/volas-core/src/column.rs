@@ -393,6 +393,33 @@ impl Column {
         }
     }
 
+    /// Whether the values read as `f64` ([`to_f64_vec`](Self::to_f64_vec)) hold a NaN:
+    /// a float NaN, or a missing int / bool / datetime cell. For a float column this is
+    /// the buffer's remembered fact ([`Buffer::has_nan`]) — one scan, then free until
+    /// the values change.
+    pub fn has_nan(&self) -> bool {
+        match self {
+            Column::F64(v) => v.has_nan(),
+            Column::F32(v) => v.has_nan(),
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => val.has_nulls(),
+            Column::Str(v, _) => !v.is_empty(),
+            Column::Datetime(v) => v.contains(&i64::MIN),
+        }
+    }
+
+    /// [`has_nan`](Self::has_nan) when it is known without a scan: always for an int /
+    /// bool column (its validity says), for a float column once its buffer remembers.
+    pub fn known_has_nan(&self) -> Option<bool> {
+        match self {
+            Column::F64(v) => v.known_has_nan(),
+            Column::F32(v) => v.known_has_nan(),
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => {
+                Some(val.has_nulls())
+            }
+            Column::Str(..) | Column::Datetime(_) => None,
+        }
+    }
+
     /// Materialize the values as `f64` (`bool` -> 0.0/1.0, `i64` / `datetime` ->
     /// as f64, `str` -> NaN). Used to feed indicator kernels, which operate on
     /// `f64`.

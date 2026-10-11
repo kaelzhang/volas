@@ -20,7 +20,10 @@ pub mod directive {
 }
 
 /// Numeric kernels and technical indicators — pure functions over slices, usable
-/// without a [`DataFrame`].
+/// without a [`DataFrame`]. They follow the same missing-row rule as the directive
+/// engine: a row where any input of a recursive function is NaN outputs NaN, and the
+/// recursion continues from the last complete row as if that row did not exist — for
+/// full computations, carried states and resumes alike.
 pub mod compute {
     pub use volas_compute::{indicators, kernels, window};
 }

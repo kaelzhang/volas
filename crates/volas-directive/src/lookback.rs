@@ -27,7 +27,7 @@ pub(crate) fn ma_lookback(period: usize, matype: usize) -> usize {
 /// The command's own lookback (ignoring its series operands). Only ever called
 /// with a bound command name (every caller binds first), so every command has an
 /// arm and an unrecognized name is unreachable.
-fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
+pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
     match name {
         "ema" | "smma" => arg(args, 0).saturating_sub(1),
         "ma" => ma_lookback(arg(args, 0), arg(args, 1)),
@@ -172,7 +172,7 @@ fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
         // style.<x>: candlestick patterns warm up over their candle-settings avg period
         // (from the compute registry); bullish/bearish need none. (`cdl` resolves here too.)
         "style" => sub
-            .and_then(|p| volas_compute::indicators::candle_pattern(p).map(|(_, lb)| lb))
+            .and_then(|p| volas_compute::raw::indicators::candle_pattern(p).map(|(_, lb)| lb))
             .unwrap_or(0),
         "change" => arg(args, 0).saturating_sub(1),
         "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0),
@@ -270,43 +270,8 @@ pub fn lookback(node: &Ast) -> usize {
     }
 }
 
-/// Commands whose value at a row depends on the whole prefix up to it — EMA / Wilder
-/// smoothing, cumulative lines, the Hilbert transform, SAR, … — rather than on a fixed
-/// trailing window. (A command with a TA-Lib MA-type argument is listed by
-/// [`selects_recursive_ma`] instead, since its memory depends on that argument.)
-const RECURSIVE: &[&str] = &[
-    "ema", "smma", "dema", "tema", "t3", "kama", "macd", "macdfix", "kdj", "rsi", "crsi",
-    "stochrsi", "cmo", "trix", "pvt", "nvi", "pvi", "obv", "ad", "adosc", "mass_index",
-    "efi", "tsi", "keltner", "kcw", "stoch_momentum", "ttm_squeeze", "wad", "asi",
-    "supertrend", "atr", "natr", "plus_dm", "minus_dm", "plus_di", "minus_di", "dx", "adx",
-    "adxr", "sar", "sarext", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
-    "ht_trendline", "ht_trendmode", "mama",
-];
-
-/// Commands whose output is an absolute row position, so it changes with where the
-/// series starts.
-const ABSOLUTE_POSITION: &[&str] = &["maxindex", "minindex", "minmaxindex"];
-
-/// Whether one of the command's TA-Lib MA-type arguments selects a recursive moving
-/// average (EMA, DEMA, TEMA, KAMA, MAMA, T3 — not SMA, WMA or TRIMA).
-fn selects_recursive_ma(name: &str, args: &[ArgValue]) -> bool {
-    let positions: &[usize] = match name {
-        "ma" => &[1],
-        "apo" | "ppo" | "mavp" | "stochf" => &[2],
-        "macdext" => &[1, 3, 5],
-        "stoch" => &[2, 4],
-        _ => &[],
-    };
-    positions
-        .iter()
-        .filter_map(|&i| args.get(i))
-        .any(|a| matches!(a.as_usize(), 1 | 3 | 4 | 6 | 7 | 8))
-}
-
 fn command_recomputes_on_a_window(name: &str, args: &[ArgValue]) -> bool {
-    !RECURSIVE.contains(&name)
-        && !ABSOLUTE_POSITION.contains(&name)
-        && !selects_recursive_ma(name, args)
+    !crate::spec::is_recursive(name, args) && !crate::spec::emits_position(name)
 }
 
 /// Whether every value of a directive can be recomputed exactly from a trailing window

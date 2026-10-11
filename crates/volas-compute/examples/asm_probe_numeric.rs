@@ -4,7 +4,7 @@
 //! standalone symbol so `scripts/asm_diff.sh` can disassemble and count its
 //! instructions, holding the count byte-stable against `scripts/asm_baseline.txt`.
 use std::hint::black_box;
-use volas_compute::indicators::{ema, ma};
+use volas_compute::raw::indicators::{ema, ma};
 
 #[inline(never)]
 #[no_mangle]

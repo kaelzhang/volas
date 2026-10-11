@@ -60,11 +60,6 @@ fn wilder_sum_resume(
 
 /// Final +DM state `[s]` (running Wilder sum) — pairs with [`plus_dm_resume`].
 pub fn plus_dm_final_state(high: &[f64], low: &[f64], period: usize) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low]);
-    if start > 0 {
-        return plus_dm_final_state(&high[start..], &low[start..], period);
-    }
     wilder_sum_final(high.len(), period, |i| dm1(high, low, i).0).map(|s| vec![s])
 }
 
@@ -86,11 +81,6 @@ pub fn plus_dm_resume(
 
 /// Final −DM state `[s]` — pairs with [`minus_dm_resume`].
 pub fn minus_dm_final_state(high: &[f64], low: &[f64], period: usize) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low]);
-    if start > 0 {
-        return minus_dm_final_state(&high[start..], &low[start..], period);
-    }
     wilder_sum_final(high.len(), period, |i| dm1(high, low, i).1).map(|s| vec![s])
 }
 
@@ -167,11 +157,6 @@ pub fn plus_di_final_state(
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return plus_di_final_state(&high[start..], &low[start..], &close[start..], period);
-    }
     let (sp, _sm, st) = dm_tr_sums_final(high, low, close, period)?;
     Some(vec![sp, st])
 }
@@ -208,11 +193,6 @@ pub fn minus_di_final_state(
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return minus_di_final_state(&high[start..], &low[start..], &close[start..], period);
-    }
     let (_sp, sm, st) = dm_tr_sums_final(high, low, close, period)?;
     Some(vec![sm, st])
 }
@@ -261,11 +241,6 @@ fn dx_val(sp: f64, sm: f64, st: f64) -> f64 {
 
 /// Final DX state `[sp, sm, st]` (all three running sums) — pairs with [`dx_resume`].
 pub fn dx_final_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return dx_final_state(&high[start..], &low[start..], &close[start..], period);
-    }
     let (sp, sm, st) = dm_tr_sums_final(high, low, close, period)?;
     Some(vec![sp, sm, st])
 }
@@ -303,11 +278,6 @@ pub fn adx_final_state(
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return adx_final_state(&high[start..], &low[start..], &close[start..], period);
-    }
     let n = high.len();
     if period == 0 {
         return None;
@@ -387,11 +357,6 @@ pub fn adxr_final_state(
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[high, low, close]);
-    if start > 0 {
-        return adxr_final_state(&high[start..], &low[start..], &close[start..], period);
-    }
     let n = high.len();
     if period == 0 {
         return None;

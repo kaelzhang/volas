@@ -32,6 +32,12 @@ COMPOUND = [
     "increase:3,-1 & close > open",
     "hv:10,15m > 0",
     "ma:5@(close>open) > 0",
+    "ma:5 ^ ma:10",
+    # a series operand other than a bare column keeps its parentheses
+    "ema:5@(rsi:5)",
+    "ema:5@(macd.signal:5,10,3@(close*2))",
+    "atr:5@high,(low-1),(ema:3@open)",
+    "correl:5@close,(3)",
 ]
 
 
@@ -120,7 +126,7 @@ def _candle_patterns():
     from pathlib import Path
 
     src = (Path(__file__).resolve().parent.parent
-           / "crates/volas-compute/src/indicators/candles/mod.rs").read_text()
+           / "crates/volas-compute/src/raw/indicators/candles/mod.rs").read_text()
     body = re.search(r"pub const CANDLE_PATTERNS[^=]*=\s*&\[(.*?)\];", src, re.S).group(1)
     return re.findall(r'"([a-z0-9]+)"', body)
 

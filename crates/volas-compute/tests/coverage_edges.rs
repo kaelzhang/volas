@@ -1,4 +1,4 @@
-use volas_compute::{indicators as ind, kernels};
+use volas_compute::raw::{indicators as ind, kernels};
 
 fn assert_nan_prefix(values: &[f64], len: usize) {
     assert!(values[..len].iter().all(|v| v.is_nan()));

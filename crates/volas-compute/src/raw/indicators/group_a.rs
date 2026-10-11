@@ -6,8 +6,8 @@
 //! directive engine refreshes them on `append` in O(new rows) and continues them
 //! bit-exactly past a head-dropping slice (verified by `test/test_group_a_mutation.py`).
 
-use crate::indicators::av;
-use crate::kernels;
+use crate::raw::indicators::av;
+use crate::raw::kernels;
 
 /// PSY (心理线): `100 * mean(up, n)`, where `up[i] = 1` when `close[i] > close[i-1]` (the
 /// first bar is not rising). NaN until `n` bars are available.
@@ -23,11 +23,6 @@ pub fn psy(close: &[f64], n: usize) -> Vec<f64> {
 /// with `PVT_0 = 0`.
 /// Source: StockCharts / Investopedia — Price Volume Trend.
 pub fn pvt(close: &[f64], volume: &[f64]) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close, volume]);
-    if start > 0 {
-        return crate::start::pad_front(start, pvt(&close[start..], &volume[start..]));
-    }
     let mut out = vec![0.0; close.len()];
     let mut acc = 0.0;
     for i in 1..close.len() {
@@ -173,11 +168,6 @@ pub fn mass_index(high: &[f64], low: &[f64], n: usize) -> Vec<f64> {
 /// consecutive up / down closes and PercentRank is the share of the prior `rank_len` ROC
 /// values strictly below the current one. Source: Connors Research / TradingView.
 pub fn crsi(close: &[f64], rsi_len: usize, streak_len: usize, rank_len: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return crate::start::pad_front(start, crsi(&close[start..], rsi_len, streak_len, rank_len));
-    }
     let len = close.len();
     let mut streak = vec![0.0; len];
     for i in 1..len {
@@ -238,11 +228,6 @@ fn mass_index_range(high: &[f64], low: &[f64]) -> Vec<f64> {
 /// `[pvt, prev_close]` after a full [`pvt`] — the seed a [`pvt_resume`] needs. `None` for
 /// an empty series.
 pub fn pvt_final_state(close: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close, volume]);
-    if start > 0 {
-        return pvt_final_state(&close[start..], &volume[start..]);
-    }
     let n = close.len();
     if n == 0 {
         return None;
@@ -612,7 +597,7 @@ pub fn mass_index_resume_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::test_support::*;
 
     /// The recursive `*_final_state` guards decline before the indicator can seed — the
     /// cumulative pair on an empty series, mass_index on a frame too short for its EMA9

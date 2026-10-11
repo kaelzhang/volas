@@ -4,8 +4,8 @@
 
 use crate::guard::window_sums;
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
-use crate::indicators::av;
-use crate::kernels;
+use crate::raw::indicators::av;
+use crate::raw::kernels;
 
 /// Simple moving average.
 pub fn ma(close: &[f64], period: usize) -> Vec<f64> {

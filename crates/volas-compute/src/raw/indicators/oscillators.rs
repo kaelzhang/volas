@@ -2,7 +2,7 @@ use ndarray::Array1;
 
 use super::av;
 use super::stochastic::stoch_fastk;
-use crate::kernels;
+use crate::raw::kernels;
 
 // ---------------------------------------------------------------------------
 // Overbought / oversold
@@ -136,11 +136,6 @@ pub fn stochrsi_final_state(
     is_d: bool,
     fastd_period: usize,
 ) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return stochrsi_final_state(&close[start..], rsi_period, fastk_period, is_d, fastd_period);
-    }
     let n = close.len();
     let wilder = rsi_final_state(close, rsi_period)?; // [avg_gain, avg_loss] as of n-1
     let c = stochrsi_ctx_depth(fastk_period, is_d, fastd_period);
@@ -232,11 +227,6 @@ fn wilder_gain_loss(data: &[f64], period: usize) -> (Array1<f64>, Array1<f64>) {
 /// combine (same seed sum, same recursion, same flat-window guard) but ~one sixth
 /// the memory traffic — no `diff` / `gains` / `losses` / two smoothed arrays.
 pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return crate::start::pad_front(start, rsi(&close[start..], period));
-    }
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || n <= period {
@@ -311,11 +301,6 @@ pub fn cmo(close: &[f64], period: usize) -> Vec<f64> {
 /// never seeds (`period == 0 || n <= period`). Reproduces `rsi`'s exact seed (SMA of the
 /// first `period` gains/losses, deltas `1..=period`) and `(avg·(p-1)+x)/p` recurrence.
 pub fn rsi_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return rsi_final_state(&close[start..], period);
-    }
     let n = close.len();
     if period == 0 || n <= period {
         return None;
@@ -381,11 +366,6 @@ pub fn rsi_resume(
 /// SMA of the first `period` gains/losses — the same seed index as RSI but a different
 /// recurrence, reproduced here exactly.
 pub fn cmo_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
-    // A leading run of missing rows: the series starts after it (see `crate::start`).
-    let start = crate::start::first_complete_row(&[close]);
-    if start > 0 {
-        return cmo_final_state(&close[start..], period);
-    }
     let n = close.len();
     if period == 0 || n <= period {
         return None;
@@ -694,8 +674,8 @@ pub fn pivot(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::stochrsi_fastk;
-    use crate::indicators::test_support::*;
+    use crate::raw::indicators::stochrsi_fastk;
+    use crate::raw::indicators::test_support::*;
 
     /// A window containing a missing value (`NaN`) must NOT yield a confident rank
     /// correlation — it disqualifies the window (NaN out), like the other window
@@ -717,7 +697,7 @@ mod tests {
         let close = series(200);
         let (rp, fk, fd) = (14usize, 14usize, 3usize);
         let k_full = stochrsi_fastk(&close, rp, fk);
-        let d_full = crate::indicators::ma(&k_full, fd);
+        let d_full = crate::raw::indicators::ma(&k_full, fd);
 
         // `from` past the deepest context (`.d` reach = rp + (fk-1) + (fd-1)) so the head
         // always carries a full finite-RSI context.

@@ -3,8 +3,8 @@
 A non-finite input (NaN / +inf / -inf) must not outlive the window that holds it. A
 **finite-window** indicator, once the bad row has left its window, must give exactly
 what it gives on clean data. A **recursive** indicator (infinite memory: EMA / Wilder /
-cumulative / Hilbert families) must at least treat a leading run of missing rows as a
-series that simply starts later.
+cumulative / Hilbert families) skips a missing row altogether (`test_missing_rows.py`);
+here, a leading run of missing rows is a series that simply starts later.
 
 Every command in the Rust registry (spec.rs COMMANDS) must be classified here, so a
 new indicator cannot skip this contract.
