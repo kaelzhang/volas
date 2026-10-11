@@ -270,12 +270,15 @@ pub fn lookback(node: &Ast) -> usize {
     }
 }
 
-fn command_recomputes_on_a_window(name: &str, args: &[ArgValue]) -> bool {
-    !crate::spec::is_recursive(name, args) && !crate::spec::emits_position(name)
+fn command_recomputes_on_a_window(name: &str, sub: Option<&str>, args: &[ArgValue]) -> bool {
+    !crate::spec::is_recursive(name, args)
+        && !crate::spec::emits_position(name)
+        && !crate::spec::accumulates(name, sub)
 }
 
 /// Whether every value of a directive can be recomputed exactly from a trailing window
-/// of its inputs: each command in it has finite memory and a position-free output. A
+/// of its inputs: each command in it has finite memory, a position-free output, and no
+/// running accumulator ([`crate::spec::accumulates`] — those resume from a state). A
 /// refresh after an append then recomputes only a window (its lookback plus a margin)
 /// instead of the whole column; anything else recomputes from row 0. A bare name is
 /// taken as the command it names (conservative); an unbindable one is a column.
@@ -283,11 +286,11 @@ pub fn recomputes_on_a_window(node: &Ast) -> bool {
     match node {
         Node::Scalar(_) => true,
         Node::Name(name) => match crate::bind::bind_command(name, None, &[], &[]) {
-            Ok(cmd) => command_recomputes_on_a_window(&cmd.name, &cmd.args),
+            Ok(cmd) => command_recomputes_on_a_window(&cmd.name, cmd.sub.as_deref(), &cmd.args),
             Err(_) => true,
         },
         Node::Command(c) => {
-            command_recomputes_on_a_window(&c.name, &c.args)
+            command_recomputes_on_a_window(&c.name, c.sub.as_deref(), &c.args)
                 && c.series.iter().all(recomputes_on_a_window)
         }
         Node::Unary { operand, .. } => recomputes_on_a_window(operand),

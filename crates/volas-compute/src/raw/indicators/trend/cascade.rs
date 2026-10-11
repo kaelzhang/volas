@@ -2,6 +2,7 @@
 //! `cascade_warmup` and the EMA lattice resume.
 
 use crate::raw::indicators::trend::ma::ema_k;
+use crate::guard::ring_push;
 use crate::raw::kernels;
 
 /// Staggered warm-up for a cascade of `S` SMA-seeded EMAs (`k = 2/(period+1)`): each
@@ -354,3 +355,64 @@ pub fn t3_resume_one(
     Some(c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2])
 }
 
+
+/// TRIMA's two SMA windows `(a, b)` for `period` (see [`trima`]).
+fn trima_windows(period: usize) -> (usize, usize) {
+    if period % 2 == 1 {
+        let m = period.div_ceil(2);
+        (m, m)
+    } else {
+        let m = period / 2;
+        (m, m + 1)
+    }
+}
+
+/// How many input rows before the current one a [`trima`] step reads (the inner SMA's).
+pub(crate) fn trima_reach(period: usize) -> usize {
+    trima_windows(period).0
+}
+
+/// The length of [`trima`]'s resumable state: the inner and outer SMAs' slides, then the
+/// last `b` inner means the outer one reads.
+pub(crate) fn trima_state_len(period: usize) -> usize {
+    2 * kernels::SMA_STATE + trima_windows(period).1
+}
+
+/// One row of [`trima`] over the series `term` at `row` — `sma(sma(term, a), b)`, which
+/// the fused pass is bit-identical to — from `state` into `next`.
+pub(crate) fn trima_row(
+    period: usize,
+    row: usize,
+    term: &impl Fn(usize) -> f64,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    const S: usize = kernels::SMA_STATE;
+    let (a, b) = trima_windows(period);
+    if period == 0 || state.len() != 2 * S + b || next.len() != state.len() {
+        return None;
+    }
+    let (s_in, rest) = state.split_at(S);
+    let (s_out, ring) = rest.split_at(S);
+    let (n_in, nrest) = next.split_at_mut(S);
+    let (n_out, n_ring) = nrest.split_at_mut(S);
+    let inner = kernels::sma_step(a, row, term, s_in, n_in)?;
+    // the inner mean at row j: `ring` holds rows `row-b .. row-1`, oldest first
+    let means = |j: usize| if j == row { inner } else { ring[b - (row - j)] };
+    let value = kernels::sma_step(b, row, means, s_out, n_out)?;
+    ring_push(ring, inner, n_ring);
+    Some(value)
+}
+
+/// [`trima`]'s state after the rows of `data`.
+pub fn trima_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    super::FiniteMa::new(period, 5)?.state(data.len(), |j| data[j])
+}
+
+/// One row of [`trima`] at `row`, from `state` into `next`.
+pub fn trima_step(data: &[f64], period: usize, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    if row >= data.len() {
+        return None;
+    }
+    super::FiniteMa::new(period, 5)?.step(row, |j| data[j], state, next)
+}

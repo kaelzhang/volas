@@ -1,4 +1,4 @@
-use crate::guard::window_sums;
+use crate::guard::{all_finite, own_sums, state_after, window_sums, Order, Slide, Window};
 use crate::raw::kernels;
 
 // ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ pub fn imi(open: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     }
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
     let mut out = crate::buf::OutBuf::warmup(n, lookback);
-    window_sums(n, period, |i| {
+    window_sums(n, period, Order::AddReadDrop, |i| {
         let (u, d) = updown(i);
         [u, d]
     }, |i, [u, d]| out.set(i, 100.0 * (u / (u + d))));
@@ -244,9 +244,8 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     if period == 0 || period > n {
         return vec![f64::NAN; n];
     }
-    let p = period as f64;
     let tp: Vec<f64> = (0..n)
-        .map(|i| (high[i] + low[i] + close[i]) / 3.0)
+        .map(|i| typical(high, low, close, i))
         .collect();
     // The window mean is a sliding sum (add the entering bar, drop the leaving one) — O(1)
     // per bar instead of re-summing the window. The mean-absolute-deviation still scans the
@@ -254,17 +253,7 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     // sliding sum drifts ~1e-13 relative, well inside the 1e-9 TA-Lib parity tolerance, as the
     // var / linear-regression slides already rely on.
     // The value at row `i` from its window sum of `tp`.
-    let value = |i: usize, sum: f64| {
-        let avg = sum / p;
-        let window = &tp[i + 1 - period..=i];
-        let sum_dev: f64 = window.iter().map(|x| (x - avg).abs()).sum();
-        let num = tp[i] - avg;
-        if num != 0.0 && sum_dev != 0.0 {
-            num / (0.015 * (sum_dev / p))
-        } else {
-            0.0
-        }
-    };
+    let value = |i: usize, sum: f64| cci_value(|j| tp[j], period, i, sum);
     let mut sum: f64 = tp[..period - 1].iter().sum();
     let mut out = crate::buf::OutBuf::warmup(n, period - 1);
     for i in (period - 1)..n {
@@ -277,7 +266,7 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
     }
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
     let mut out = crate::buf::OutBuf::warmup(n, period - 1);
-    window_sums(n, period, |i| [tp[i]], |i, [sum]| out.set(i, value(i, sum)));
+    window_sums(n, period, Order::AddReadDrop, |i| [tp[i]], |i, [sum]| out.set(i, value(i, sum)));
     out.finish()
 }
 
@@ -583,20 +572,9 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     }
     // A non-finite flow entered: window-local careful path (see `crate::guard`). Flows
     // exist for bars `1..n`; flow `j` is bar `j + 1`'s.
-    let tp = |i: usize| (high[i] + low[i] + close[i]) / 3.0;
-    let flow = |j: usize| {
-        let (now, prev) = (tp(j + 1), tp(j));
-        let f = now * volume[j + 1];
-        if now > prev {
-            [f, 0.0]
-        } else if now < prev {
-            [0.0, f]
-        } else {
-            [0.0, 0.0]
-        }
-    };
+    let flow = |j: usize| mfi_flow(high, low, close, volume, j);
     let mut out = crate::buf::OutBuf::warmup(n, period);
-    window_sums(n - 1, period, flow, |j, [pos, neg]| {
+    window_sums(n - 1, period, Order::DropAdd, flow, |j, [pos, neg]| {
         let total = pos + neg;
         out.set(j + 1, if total < 1.0 { 0.0 } else { 100.0 * pos / total });
     });
@@ -692,7 +670,7 @@ pub fn ultosc(
     // window sums.
     let window = |p: usize| {
         let mut sums = vec![[0.0; 2]; n];
-        window_sums(n - 1, p, |j| {
+        window_sums(n - 1, p, Order::AddReadDrop, |j| {
             let (a, b) = term(j + 1);
             [a, b]
         }, |j, s| sums[j + 1] = s);
@@ -757,3 +735,116 @@ pub fn trix_resume_one(
     Some((e[2] / prev - 1.0) * 100.0)
 }
 
+
+// ---------------------------------------------------------------------------
+// Resumable forms: the running sums of each full computation, in its exact operation
+// order, so a resume of one row at a time is bit-identical to recomputing the column.
+// ---------------------------------------------------------------------------
+
+/// The typical price `(high + low + close) / 3` at `i`.
+#[inline]
+fn typical(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
+    (high[i] + low[i] + close[i]) / 3.0
+}
+
+/// CCI's value at row `i` from its window's sum of typical prices.
+#[inline]
+fn cci_value(tp: impl Fn(usize) -> f64, period: usize, i: usize, sum: f64) -> f64 {
+    let p = period as f64;
+    let avg = sum / p;
+    let sum_dev: f64 = (i + 1 - period..=i).map(|j| (tp(j) - avg).abs()).sum();
+    let num = tp(i) - avg;
+    if num != 0.0 && sum_dev != 0.0 {
+        num / (0.015 * (sum_dev / p))
+    } else {
+        0.0
+    }
+}
+
+/// [`cci`]'s state after the rows: the typical-price sum's `[sum, non-finite rows]`.
+pub fn cci_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; Slide::<1>::STATE], close.len(), |row, prev, next| {
+        cci_step(high, low, close, period, row, prev, next)
+    })
+}
+
+/// One row of [`cci`] at `row` (add, read, drop), from `state` into `next`.
+pub fn cci_step(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || row >= close.len() || next.len() != Slide::<1>::STATE {
+        return None;
+    }
+    let tp = |j: usize| typical(high, low, close, j);
+    let mut slide = Slide::<1>::from_state(state)?;
+    let value = match slide.row(Order::AddReadDrop, period, row, |j| all_finite([tp(j)])) {
+        Window::Partial => f64::NAN,
+        Window::Sums([sum]) => cci_value(tp, period, row, sum),
+        Window::Bad => cci_value(tp, period, row, own_sums(row + 1 - period..=row, |j| [tp(j)])[0]),
+    };
+    slide.write_state(next);
+    Some(value)
+}
+
+/// MFI's signed money flow of bar `j + 1` (term `j`): `[positive, negative]`.
+#[inline]
+fn mfi_flow(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], j: usize) -> [f64; 2] {
+    let (now, prev) = (typical(high, low, close, j + 1), typical(high, low, close, j));
+    let f = now * volume[j + 1];
+    if now > prev {
+        [f, 0.0]
+    } else if now < prev {
+        [0.0, f]
+    } else {
+        [0.0, 0.0]
+    }
+}
+
+/// [`mfi`]'s state after the rows: the flow sums' `[Σpos, Σneg, non-finite rows]`.
+pub fn mfi_state(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; Slide::<2>::STATE], close.len(), |row, prev, next| {
+        mfi_step(high, low, close, volume, period, row, prev, next)
+    })
+}
+
+/// One row of [`mfi`] at `row` (its flow is term `row - 1`; drop, then add), from
+/// `state` into `next`.
+#[allow(clippy::too_many_arguments)]
+pub fn mfi_step(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || row >= close.len() || next.len() != Slide::<2>::STATE {
+        return None;
+    }
+    if row == 0 {
+        next.copy_from_slice(state);
+        return Some(f64::NAN);
+    }
+    let flow = |j: usize| mfi_flow(high, low, close, volume, j);
+    let value = |[pos, neg]: [f64; 2]| {
+        let total = pos + neg;
+        if total < 1.0 { 0.0 } else { 100.0 * pos / total }
+    };
+    let mut slide = Slide::<2>::from_state(state)?;
+    let j = row - 1;
+    let out = match slide.row(Order::DropAdd, period, j, |k| all_finite(flow(k))) {
+        Window::Partial => f64::NAN,
+        Window::Sums(s) => value(s),
+        Window::Bad => value(own_sums(j + 1 - period..=j, flow)),
+    };
+    slide.write_state(next);
+    Some(out)
+}

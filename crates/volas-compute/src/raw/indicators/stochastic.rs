@@ -1,6 +1,7 @@
 //! Stochastic oscillator batch fast paths.
 
 use super::oscillators::rsi;
+use crate::raw::indicators::FiniteMa;
 use crate::raw::kernels;
 
 /// TA-Lib stochastic raw %K: `100·(close − LL) / (HH − LL)` over `period` (HH/LL the
@@ -479,6 +480,87 @@ pub fn stochrsi_d_default_sma(close: &[f64]) -> Option<Vec<f64>> {
         today += 1;
     }
     Some(out)
+}
+
+
+/// Raw %K at row `i` alone (see [`stoch_fastk`]): the extremes of the window's present
+/// values — exactly what the rolling kernels reduce — so it equals `stoch_fastk(..)[i]`.
+pub fn stoch_fastk_at(high: &[f64], low: &[f64], close: &[f64], period: usize, i: usize) -> f64 {
+    if period == 0 || i + 1 < period {
+        return f64::NAN;
+    }
+    let present = |x: &&f64| !x.is_nan();
+    let window = i + 1 - period..=i;
+    let hh = high[window.clone()].iter().filter(present).copied().reduce(f64::max);
+    let ll = low[window].iter().filter(present).copied().reduce(f64::min);
+    match (hh, ll) {
+        (Some(hh), Some(ll)) => {
+            let diff = hh - ll;
+            if diff != 0.0 { 100.0 * (close[i] - ll) / diff } else { 0.0 }
+        }
+        _ => f64::NAN,
+    }
+}
+
+/// The smoothing stages of a stochastic line over raw %K: `[slowK]` / `[fastD]`, or
+/// `[slowK, slowD]` — each a finite-window average `(period, matype)`.
+fn stoch_stages(stages: &[(usize, usize)]) -> Option<(FiniteMa, Option<FiniteMa>)> {
+    match *stages {
+        [(p, mt)] => Some((FiniteMa::new(p, mt)?, None)),
+        [(p1, mt1), (p2, mt2)] => Some((FiniteMa::new(p1, mt1)?, Some(FiniteMa::new(p2, mt2)?))),
+        _ => None,
+    }
+}
+
+/// The length of a smoothed stochastic line's state: each stage's, plus for a second
+/// stage the last values of the first it reads.
+fn stoch_state_len((first, second): (FiniteMa, Option<FiniteMa>)) -> usize {
+    first.state_len() + second.map_or(0, |s| s.chained_len())
+}
+
+/// A smoothed stochastic line's state after the rows (`stages` as in [`stoch_step`]).
+pub fn stoch_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    fastk_period: usize,
+    stages: &[(usize, usize)],
+) -> Option<Vec<f64>> {
+    let len = stoch_state_len(stoch_stages(stages)?);
+    crate::guard::state_after(vec![0.0; len], close.len(), |row, prev, next| {
+        stoch_step(high, low, close, fastk_period, stages, row, prev, next)
+    })
+}
+
+/// One row of a smoothed stochastic line at `row`: raw %K over `fastk_period`, then one
+/// or two finite-window averages `stages` (`(period, matype)`: `[slowK]` for `stoch.k`,
+/// `[slowK, slowD]` for `stoch.d`, `[fastD]` for `stochf.d`), from `state` into `next`.
+#[allow(clippy::too_many_arguments)]
+pub fn stoch_step(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    fastk_period: usize,
+    stages: &[(usize, usize)],
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    let ma = stoch_stages(stages)?;
+    if row >= close.len() {
+        return None;
+    }
+    let len = stoch_state_len(ma);
+    if state.len() != len || next.len() != len {
+        return None;
+    }
+    let fastk = |j: usize| stoch_fastk_at(high, low, close, fastk_period, j);
+    let l1 = ma.0.state_len();
+    let (n1, n_rest) = next.split_at_mut(l1);
+    let first = ma.0.step(row, fastk, &state[..l1], n1)?;
+    let Some(second) = ma.1 else { return Some(first) };
+    let value = second.step_chained(row, first, &state[l1..], n_rest)?;
+    Some(value)
 }
 
 #[cfg(test)]

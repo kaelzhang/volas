@@ -268,7 +268,7 @@ pub use crate::exec_resume::{
 };
 
 /// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.
-fn tf_to_minutes(s: &str) -> Result<i64> {
+pub(crate) fn tf_to_minutes(s: &str) -> Result<i64> {
     let s = s.trim();
     let (num, unit) = s.split_at(s.len().saturating_sub(1));
     let n: i64 = num
@@ -781,5 +781,10 @@ mod tests {
             .is_none());
         assert!(execute_resume_step(&df, &p("llv:5"), &[1.0], 5, &mut next[..1]).is_none());
         assert!(execute_resume_step(&df, &p("rsi:14"), &[1.0, 1.0], 5, &mut next[..1]).is_none());
+        // a composite average declines a state of the wrong length, and a row past the end
+        assert!(execute_resume_step(&df, &p("apo"), &[1.0, 1.0], 5, &mut next[..2]).is_none());
+        let apo = initial_state(&df, &p("apo"), &Column::f64(vec![])).unwrap();
+        let mut n = apo.clone();
+        assert!(execute_resume_step(&df, &p("apo"), &apo, df.height(), &mut n).is_none());
     }
 }

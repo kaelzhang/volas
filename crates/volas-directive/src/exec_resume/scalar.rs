@@ -31,7 +31,15 @@ pub fn execute_resume_step(
 ) -> Option<f64> {
     let (name, sub, args, series) = as_command(node)?;
     let (name, sub) = (name.as_ref(), sub.as_deref());
-    if !has_step(name, sub) || next.len() != prev_state.len() {
+    if next.len() != prev_state.len() {
+        return None;
+    }
+    if !crate::spec::is_recursive(name, &args) {
+        // a finite-window command resumes from its kernel's running sums
+        let ops = Operands::new(df, series);
+        return super::window::step(&ops, name, sub, &args, prev_state, row, next);
+    }
+    if !has_step(name, sub) {
         return None;
     }
     // Over the complete rows (every command with a step is recursive): a missing row is

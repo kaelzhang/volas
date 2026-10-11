@@ -507,67 +507,100 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// is `i` bars back (newest weighted 1, oldest weighted `period`). A zero window
 /// sum yields `NaN`. Lookback `period-1`.
 ///
-/// Dense input takes an **O(n)** sliding recurrence; an input that carries `NaN`
-/// (a nested directive's warm-up, a gappy column) falls back to the exact
-/// O(n·period) per-window form — a running sum can never cleanly drop a `NaN`,
-/// so the slide is only sound when the data is `NaN`-free.
+/// An **O(n)** sliding recurrence ([`cog_row`]). A window holding a non-finite bar is
+/// computed exactly on its own rows (O(period)), and the slide is re-seeded from the
+/// first clean window after it — a bad bar reaches only the windows holding it, and a
+/// value never depends on the rows after it.
 pub fn cog(close: &[f64], period: usize) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
         return out;
     }
-    if close.iter().any(|x| !x.is_finite()) {
-        // `i` is the window's newest-bar position, used as a VALUE (passed to
-        // `cog_window_exact`), not merely to index `out` — so `needless_range_loop`
-        // misfires here, and the indexed form is a few instructions tighter than
-        // `iter_mut().enumerate()` (which threads a pointer alongside the index;
-        // verified in release asm). The write is always in bounds: `i < n == out.len()`.
-        #[allow(clippy::needless_range_loop)]
-        for i in (period - 1)..n {
-            out[i] = cog_window_exact(close, i, period);
-        }
-        return out;
-    }
-    // Dense O(n) slide. Seed the first window, then advance: dropping the oldest
-    // (weight `period`) lowers every retained weight, so
-    // `num[i] = num[i-1] + den[i-1] - (period+1)·leaving + close[i]` and
-    // `den[i] = den[i-1] - leaving + close[i]` (the WMA-slide trick, mirrored to
-    // cog's newest-weighted-1 orientation; drift ~1e-13, within parity tolerance).
-    // `aden` (Σ|price|) is the cancellation scale: when the running `den` is
-    // negligible against it the window sum has cancelled to ~0, but a running sum
-    // lands on float drift (~1e-15) instead of an exact 0.0, so the `den != 0.0`
-    // guard would wrongly emit a huge garbage value. There we recompute that one
-    // window exactly (O(period), only on near-cancellation) so a true zero sum
-    // yields `NaN`, matching the per-window reference bit-for-bit.
-    let pf = period as f64;
-    let mut num = 0.0;
-    let mut den = 0.0;
-    let mut aden = 0.0;
-    for age in 0..period {
-        let price = close[period - 1 - age]; // age 0 = newest = close[period-1]
-        num += (1 + age) as f64 * price;
-        den += price;
-        aden += price.abs();
-    }
-    out[period - 1] = if den.abs() <= 1e-9 * aden {
-        cog_window_exact(close, period - 1, period)
-    } else {
-        -num / den
-    };
-    for i in period..n {
-        let leaving = close[i - period];
-        num = num + den - (pf + 1.0) * leaving + close[i];
-        den = den - leaving + close[i];
-        aden = aden - leaving.abs() + close[i].abs();
-        out[i] = if den.abs() <= 1e-9 * aden {
-            cog_window_exact(close, i, period)
-        } else {
-            -num / den
-        };
+    let mut state = [0.0; COG_STATE];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = cog_row(close, period, i, &mut state);
     }
     out
 }
+
+/// The length of [`cog`]'s state: `[Σ(1+age)·price, Σprice, Σ|price|, non-finite bars in
+/// window, bars seen (capped), whether the sums describe the window]`.
+const COG_STATE: usize = 6;
+
+/// One row of [`cog`] at `i`, advancing `st` (bars `0..i` already seen).
+///
+/// The first full window is seeded newest-first, then each bar slides it: dropping the
+/// oldest (weight `period`) lowers every retained weight, so `num[i] = num[i-1] +
+/// den[i-1] - (period+1)·leaving + close[i]` and `den[i] = den[i-1] - leaving +
+/// close[i]` (the WMA-slide trick, mirrored to cog's newest-weighted-1 orientation).
+/// `aden` (Σ|price|) is the cancellation scale: when the running `den` is negligible
+/// against it the window sum has cancelled to ~0, but a running sum lands on float drift
+/// (~1e-15) instead of an exact 0.0, so the `den != 0.0` guard would wrongly emit a huge
+/// garbage value. There the window is recomputed exactly (O(period), only on
+/// near-cancellation) so a true zero sum yields `NaN`, matching the per-window form.
+#[inline]
+fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) -> f64 {
+    let [mut num, mut den, mut aden, bad, seen, valid] = *st;
+    let (mut bad, seen) = (bad as usize, seen as usize);
+    let pf = period as f64;
+    if !close[i].is_finite() {
+        bad += 1;
+    }
+    let full = seen + 1 >= period;
+    if full && seen + 1 > period && !close[i - period].is_finite() {
+        bad -= 1;
+    }
+    let mut valid = valid != 0.0;
+    let value = if !full {
+        f64::NAN
+    } else if bad > 0 {
+        valid = false;
+        cog_window_exact(close, i, period)
+    } else {
+        if valid {
+            let leaving = close[i - period];
+            num = num + den - (pf + 1.0) * leaving + close[i];
+            den = den - leaving + close[i];
+            aden = aden - leaving.abs() + close[i].abs();
+        } else {
+            (num, den, aden) = (0.0, 0.0, 0.0);
+            for age in 0..period {
+                let price = close[i - age]; // age 0 = newest
+                num += (1 + age) as f64 * price;
+                den += price;
+                aden += price.abs();
+            }
+            valid = true;
+        }
+        if den.abs() <= 1e-9 * aden {
+            cog_window_exact(close, i, period)
+        } else {
+            -num / den
+        }
+    };
+    *st = [num, den, aden, bad as f64, (seen + 1).min(period + 1) as f64, f64::from(u8::from(valid))];
+    value
+}
+
+/// [`cog`]'s state after the rows of `close`.
+pub fn cog_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
+    crate::guard::state_after(vec![0.0; COG_STATE], close.len(), |row, prev, next| {
+        cog_step(close, period, row, prev, next)
+    })
+}
+
+/// One row of [`cog`] at `row`, from `state` into `next`.
+pub fn cog_step(close: &[f64], period: usize, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    if period == 0 || row >= close.len() || next.len() != COG_STATE {
+        return None;
+    }
+    let mut st = <[f64; COG_STATE]>::try_from(state).ok()?;
+    let value = cog_row(close, period, row, &mut st);
+    next.copy_from_slice(&st);
+    Some(value)
+}
+
 
 /// One cog window computed exactly (the O(period) per-window form): the slide's
 /// `NaN`-input fallback and its near-zero-denominator recovery. `i` is the newest

@@ -24,7 +24,8 @@ pub fn initial_state(df: &DataFrame, node: &Ast, _computed: &Column) -> Option<V
     if crate::spec::is_recursive(name, &args) {
         return crate::complete::state(df, series, |ops| state_of(ops, name, sub, &args));
     }
-    state_of(&Operands::new(df, series), name, sub, &args)
+    let ops = Operands::new(df, series);
+    super::window::state(&ops, name, sub, &args).or_else(|| state_of(&ops, name, sub, &args))
 }
 
 /// The final state of the bound command `name`/`sub` over every row `ops` reads.

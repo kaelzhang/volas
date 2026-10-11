@@ -81,7 +81,20 @@ pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize) -> Array1<
 /// the value of a window holding a non-finite row. The variance is checked for NaN
 /// before the cancellation clamp, which would otherwise turn NaN into 0.
 fn window_mean_std(data: ArrayView1<f64>, start: usize, end: usize, p: f64, denom: f64) -> (f64, f64) {
-    let (sum, sum_sq) = (start..=end).fold((0.0, 0.0), |(s, q), j| (s + data[j], q + data[j] * data[j]));
+    window_mean_std_of(start..=end, |j| data[j], p, denom)
+}
+
+/// [`window_mean_std`] over the rows `rows` of the series `term`.
+pub(crate) fn window_mean_std_of(
+    rows: std::ops::RangeInclusive<usize>,
+    term: impl Fn(usize) -> f64,
+    p: f64,
+    denom: f64,
+) -> (f64, f64) {
+    let (sum, sum_sq) = rows.fold((0.0, 0.0), |(s, q), j| {
+        let x = term(j);
+        (s + x, q + x * x)
+    });
     let variance = (sum_sq - sum * sum / p) / denom;
     let std = if variance.is_nan() { f64::NAN } else { variance.max(0.0).sqrt() };
     (sum / p, std)

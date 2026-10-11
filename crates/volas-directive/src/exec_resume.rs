@@ -9,6 +9,7 @@ mod initial_state;
 mod resume;
 mod scalar;
 mod stateless;
+mod window;
 
 pub use initial_state::initial_state;
 pub use resume::execute_resume;

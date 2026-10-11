@@ -7,6 +7,7 @@
 //! bit-exactly past a head-dropping slice (verified by `test/test_group_a_mutation.py`).
 
 use crate::raw::indicators::av;
+use crate::guard::state_after;
 use crate::raw::kernels;
 
 /// PSY (心理线): `100 * mean(up, n)`, where `up[i] = 1` when `close[i] > close[i-1]` (the
@@ -76,9 +77,7 @@ pub fn dpo(close: &[f64], n: usize) -> Vec<f64> {
 /// CMF Chaikin Money Flow: `sum_n(MFV) / sum_n(volume)`, `MFV = ((C-L)-(H-C))/(H-L) * V`.
 /// Source: StockCharts / Fidelity — Chaikin Money Flow.
 pub fn cmf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize) -> Vec<f64> {
-    let mfv: Vec<f64> = (0..close.len())
-        .map(|i| ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i]) * volume[i])
-        .collect();
+    let mfv: Vec<f64> = (0..close.len()).map(|i| mfv(high, low, close, volume, i)).collect();
     let sum_mfv = super::sum(&mfv, n);
     let sum_vol = super::sum(volume, n);
     (0..close.len()).map(|i| sum_mfv[i] / sum_vol[i]).collect()
@@ -102,16 +101,11 @@ pub fn chop(high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
 /// `RCMA1=SMA10(ROC10)`, `RCMA2=SMA10(ROC15)`, `RCMA3=SMA10(ROC20)`, `RCMA4=SMA15(ROC30)`.
 /// Source: StockCharts — Know Sure Thing.
 pub fn kst(close: &[f64]) -> Vec<f64> {
-    let roc = |p: usize| -> Vec<f64> {
-        (0..close.len())
-            .map(|i| if i >= p { (close[i] / close[i - p] - 1.0) * 100.0 } else { f64::NAN })
-            .collect()
+    let leg = |(p, n): (usize, usize)| {
+        let roc: Vec<f64> = (0..close.len()).map(|i| kst_roc(close, p, i)).collect();
+        kernels::sma(av(&roc), n)
     };
-    let (roc10, roc15, roc20, roc30) = (roc(10), roc(15), roc(20), roc(30));
-    let r1 = kernels::sma(av(&roc10), 10);
-    let r2 = kernels::sma(av(&roc15), 10);
-    let r3 = kernels::sma(av(&roc20), 10);
-    let r4 = kernels::sma(av(&roc30), 15);
+    let [r1, r2, r3, r4] = KST_LEGS.map(leg);
     (0..close.len())
         .map(|i| r1[i] + 2.0 * r2[i] + 3.0 * r3[i] + 4.0 * r4[i])
         .collect()
@@ -121,17 +115,7 @@ pub fn kst(close: &[f64]) -> Vec<f64> {
 /// `box = (volume / 1e8) / (high - low)`, `mid = (high + low) / 2`. The 1e8 volume scale is
 /// StockCharts' presentation convention. Source: StockCharts — Ease of Movement.
 pub fn emv(high: &[f64], low: &[f64], volume: &[f64], n: usize) -> Vec<f64> {
-    const SCALE: f64 = 100_000_000.0;
-    let mid: Vec<f64> = (0..high.len()).map(|i| (high[i] + low[i]) / 2.0).collect();
-    let emv1: Vec<f64> = (0..high.len())
-        .map(|i| {
-            if i == 0 {
-                f64::NAN
-            } else {
-                (mid[i] - mid[i - 1]) / ((volume[i] / SCALE) / (high[i] - low[i]))
-            }
-        })
-        .collect();
+    let emv1: Vec<f64> = (0..high.len()).map(|i| emv_term(high, low, volume, i)).collect();
     kernels::sma(av(&emv1), n).to_vec()
 }
 
@@ -622,6 +606,123 @@ pub fn mass_index_resume_one(
     next[3..3 + n - 1].copy_from_slice(&state[4..3 + n]);
     next[3 + n - 1] = ratio_i;
     Some((sum / n as f64) * n as f64)
+}
+
+
+// ---------------------------------------------------------------------------
+// Resumable forms: the running sums of each full computation, in its exact operation
+// order, so a resume of one row at a time is bit-identical to recomputing the column.
+// ---------------------------------------------------------------------------
+
+/// One bar's money-flow volume, as [`cmf`] sums it.
+#[inline]
+fn mfv(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize) -> f64 {
+    ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i]) * volume[i]
+}
+
+/// [`cmf`]'s state after the rows: its two sums' states.
+pub fn cmf_state(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; 2 * super::SUM_STATE], close.len(), |row, prev, next| {
+        cmf_step(high, low, close, volume, n, row, prev, next)
+    })
+}
+
+/// One row of [`cmf`] at `row`, from `state` into `next`.
+#[allow(clippy::too_many_arguments)]
+pub fn cmf_step(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    const S: usize = super::SUM_STATE;
+    if row >= close.len() || state.len() != 2 * S || next.len() != 2 * S {
+        return None;
+    }
+    let (n_mfv, n_vol) = next.split_at_mut(S);
+    let flow = super::sum_row(n, row, |j| mfv(high, low, close, volume, j), &state[..S], n_mfv)?;
+    let vol = super::sum_row(n, row, |j| volume[j], &state[S..], n_vol)?;
+    Some(flow / vol)
+}
+
+/// [`dpo`]'s state after the rows of `close`: its SMA's.
+pub fn dpo_state(close: &[f64], n: usize) -> Option<Vec<f64>> {
+    super::ma_state(close, n, 0)
+}
+
+/// One row of [`dpo`] at `row`, from `state` into `next`.
+pub fn dpo_step(close: &[f64], n: usize, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    let sma = super::ma_step(close, n, 0, row, state, next)?;
+    let shift = n / 2 + 1;
+    Some(if row >= shift { close[row - shift] - sma } else { f64::NAN })
+}
+
+/// One bar's ease of movement, as [`emv`] averages it.
+#[inline]
+fn emv_term(high: &[f64], low: &[f64], volume: &[f64], i: usize) -> f64 {
+    const SCALE: f64 = 100_000_000.0;
+    if i == 0 {
+        return f64::NAN;
+    }
+    let mid = |k: usize| (high[k] + low[k]) / 2.0;
+    (mid(i) - mid(i - 1)) / ((volume[i] / SCALE) / (high[i] - low[i]))
+}
+
+/// [`emv`]'s state after the rows: its SMA's.
+pub fn emv_state(high: &[f64], low: &[f64], volume: &[f64], n: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; kernels::SMA_STATE], high.len(), |row, prev, next| {
+        emv_step(high, low, volume, n, row, prev, next)
+    })
+}
+
+/// One row of [`emv`] at `row`, from `state` into `next`.
+pub fn emv_step(
+    high: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    n: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if row >= high.len() {
+        return None;
+    }
+    kernels::sma_step(n, row, |j| emv_term(high, low, volume, j), state, next)
+}
+
+/// KST's four `(rate-of-change period, SMA period)` pairs.
+const KST_LEGS: [(usize, usize); 4] = [(10, 10), (15, 10), (20, 10), (30, 15)];
+
+/// The `p`-bar rate of change of `close` at `i`, as [`kst`] averages it.
+#[inline]
+fn kst_roc(close: &[f64], p: usize, i: usize) -> f64 {
+    if i >= p { (close[i] / close[i - p] - 1.0) * 100.0 } else { f64::NAN }
+}
+
+/// [`kst`]'s state after the rows of `close`: its four SMAs'.
+pub fn kst_state(close: &[f64]) -> Option<Vec<f64>> {
+    state_after(vec![0.0; 4 * kernels::SMA_STATE], close.len(), |row, prev, next| {
+        kst_step(close, row, prev, next)
+    })
+}
+
+/// One row of [`kst`] at `row`, from `state` into `next`.
+pub fn kst_step(close: &[f64], row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    const S: usize = kernels::SMA_STATE;
+    if row >= close.len() || state.len() != 4 * S || next.len() != 4 * S {
+        return None;
+    }
+    let mut r = [0.0; 4];
+    for (k, (roc, sma)) in KST_LEGS.into_iter().enumerate() {
+        let (s, n) = (&state[k * S..(k + 1) * S], &mut next[k * S..(k + 1) * S]);
+        r[k] = kernels::sma_step(sma, row, |j| kst_roc(close, roc, j), s, n)?;
+    }
+    Some(r[0] + 2.0 * r[1] + 3.0 * r[2] + 4.0 * r[3])
 }
 
 

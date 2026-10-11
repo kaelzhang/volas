@@ -668,6 +668,26 @@ pub fn emits_position(name: &str) -> bool {
     ABSOLUTE_POSITION.contains(&name)
 }
 
+/// Whether a finite-window command's full computation carries a running accumulator
+/// across the series (a sliding sum, sum of squares, weighted sum, …): its rounding
+/// depends on every row before, so a refresh resumes it from the kernel's state rather
+/// than recomputing its last window. `sub` is the canonical sub-command (`stochf.k` is a
+/// pure window; `stochf.d` averages it).
+pub fn accumulates(name: &str, sub: Option<&str>) -> bool {
+    match name {
+        "stochf" => sub == Some("d"),
+        _ => matches!(
+            name,
+            "accbands" | "apo" | "bbi" | "bbw" | "beta" | "bias" | "boll" | "cci" | "cmf"
+                | "cog" | "coppock" | "correl" | "dkx" | "dma" | "dpo" | "emv" | "hma" | "hv"
+                | "kst" | "linearreg" | "linearreg_angle" | "linearreg_intercept"
+                | "linearreg_slope" | "ma" | "macdext" | "mavp" | "mfi" | "ppo"
+                | "relative_vigor" | "stddev" | "stoch" | "sum" | "trima" | "tsf" | "var"
+                | "vr" | "vwma" | "wma" | "wvad"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

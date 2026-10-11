@@ -32,13 +32,7 @@ _STATELESS = ["avgprice", "medprice", "tr", "mom:5", "roc:5", "bop"]
 _OPERANDS = ["rsi:5@open", "ema:5@(close + open)", "ema:5@(rsi:5)", "atr:5@high,low,open",
              "ma:5@(close - open)"]
 _BOOLEAN = ["close > ma:5", "close > open", "(ema:5 > ma:10) & (close > open)"]
-# A running-sum finite-window kernel's full computation carries its sum's rounding
-# through the whole series, so a refresh that recomputes only the last window agrees
-# with it to ~1e-13, not bit for bit.
-_RUNNING_SUM = {"ma:5", "wma:5", "boll.upper", "stddev:5", "cci:5", "linearreg:5", "mfi:5",
-                "kst", "ma:5@(close - open)", "(ema:5 > ma:10) & (close > open)",
-                "close > ma:5"}
-SHAPES = sorted(set(_RECURSIVE + _FINITE + _STATELESS + _OPERANDS + _BOOLEAN) - _RUNNING_SUM)
+SHAPES = sorted(set(_RECURSIVE + _FINITE + _STATELESS + _OPERANDS + _BOOLEAN))
 # A recursive `@` operand nested in a windowed frame is recomputed over the retained rows.
 _NESTED_RECURSIVE = {"ema:5@(rsi:5)"}
 
@@ -244,7 +238,7 @@ def test_windowed_tf_frame_resends_match_the_unbounded_frame(directive):
     _run_tf(directive, window=4)
 
 
-@pytest.mark.parametrize("directive", ["ema:10", "rsi:14", "macd"])
+@pytest.mark.parametrize("directive", ["ema:10", "rsi:14", "ma:5", "macd", "mfi:4 > 0"])
 def test_a_cached_boolean_column_keeps_the_fold_exact(directive):
     """A cached boolean directive (a Bool column) must not turn every fold into a
     whole-frame invalidation: the other columns stay exact, windowed or not."""

@@ -313,6 +313,51 @@ pub fn minindex_resume(
     Some((out, vec![(lo_idx + origin) as f64, lo]))
 }
 
+
+/// [`sum`]'s resumable state after the rows of `term`: `[total, non-finite rows]`.
+pub(crate) const SUM_STATE: usize = crate::guard::Slide::<1>::STATE;
+
+/// One row of [`sum`] over the series `term` at `row` — the careful [`sum_with`] loop's
+/// row (add, read, drop) — from `state` into `next`.
+pub(crate) fn sum_row(
+    period: usize,
+    row: usize,
+    term: impl Fn(usize) -> f64,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    use crate::guard::{Order, Slide, Window};
+    if period == 0 || next.len() != SUM_STATE {
+        return None;
+    }
+    let mut slide = Slide::<1>::from_state(state)?;
+    let value = match slide.row(Order::AddReadDrop, period, row, |j| {
+        let x = term(j);
+        ([x], x.is_finite())
+    }) {
+        Window::Partial => f64::NAN,
+        Window::Sums([total]) => total,
+        Window::Bad => (row + 1 - period..=row).map(&term).sum(),
+    };
+    slide.write_state(next);
+    Some(value)
+}
+
+/// [`sum`]'s state after the rows of `data`.
+pub fn sum_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    crate::guard::state_after(vec![0.0; SUM_STATE], data.len(), |row, prev, next| {
+        sum_step(data, period, row, prev, next)
+    })
+}
+
+/// One row of [`sum`] at `row`, from `state` into `next`.
+pub fn sum_step(data: &[f64], period: usize, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    if row >= data.len() {
+        return None;
+    }
+    sum_row(period, row, |j| data[j], state, next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

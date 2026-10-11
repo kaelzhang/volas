@@ -1,4 +1,4 @@
-use crate::guard::window_sums;
+use crate::guard::{all_finite, own_sums, state_after, window_sums, Order, Slide, Window};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 
 // ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ pub fn correl(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     }
     // A non-finite row entered: window-local careful path (see `crate::guard`).
     let mut out = crate::buf::OutBuf::warmup(n, period - 1);
-    window_sums(n, period, |i| {
+    window_sums(n, period, Order::DropAdd, |i| {
         let (xi, yi) = (x[i], y[i]);
         [xi, yi, xi * xi, yi * yi, xi * yi]
     }, |i, [sx, sy, sx2, sy2, sxy]| out.set(i, value(sx, sy, sx2, sy2, sxy)));
@@ -363,7 +363,7 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
     // A non-finite return entered: window-local careful path (see `crate::guard`).
     // Returns exist for bars `1..n`; term `j` is bar `j + 1`'s.
     let mut out = crate::buf::OutBuf::warmup(n, period);
-    window_sums(n - 1, period, |j| {
+    window_sums(n - 1, period, Order::AddReadDrop, |j| {
         let (rx, ry) = (ret(x, j + 1), ret(y, j + 1));
         [rx, ry, rx * rx, rx * ry]
     }, |j, [sx, sy, sxx, sxy]| {
@@ -371,4 +371,259 @@ pub fn beta(x: &[f64], y: &[f64], period: usize) -> Vec<f64> {
         out.set(j + 1, if denom.abs() < 1e-14 { 0.0 } else { (pf * sxy - sx * sy) / denom });
     });
     out.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Resumable forms: the running sums of each full computation, in its exact operation
+// order, so a resume of one row at a time is bit-identical to recomputing the column.
+// ---------------------------------------------------------------------------
+
+/// Which value of the least-squares fit a linear-regression command emits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LinregLine {
+    /// `b + m·(period-1)` ([`linearreg`]).
+    Value,
+    /// `m` ([`linearreg_slope`]).
+    Slope,
+    /// `b` ([`linearreg_intercept`]).
+    Intercept,
+    /// `atan(m)` in degrees ([`linearreg_angle`]).
+    Angle,
+    /// `b + m·period` ([`tsf`]).
+    Forecast,
+}
+
+/// The length of [`linreg_fit`]'s resumable state: `[Σy, Σage·y, non-finite rows in
+/// window, rows of the first window seen]`.
+const LINREG_STATE: usize = 4;
+
+/// [`linreg_fit`]'s state after the rows of `data` (shared by the whole family).
+pub fn linreg_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; LINREG_STATE], data.len(), |row, prev, next| {
+        linreg_step(data, period, LinregLine::Slope, row, prev, next)
+    })
+}
+
+/// One row of the linear-regression `line` at `row` — the careful [`linreg_fit_with`]
+/// loop's row — from `state` into `next`.
+pub fn linreg_step(
+    data: &[f64],
+    period: usize,
+    line: LinregLine,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || row >= data.len() || next.len() != LINREG_STATE {
+        return None;
+    }
+    let [mut sum_y, mut sum_xy, bad, seen] = <[f64; LINREG_STATE]>::try_from(state).ok()?;
+    let (mut bad, seen) = (bad as usize, seen as usize);
+    let p = period as f64;
+    let sum_x = p * (period - 1) as f64 * 0.5;
+    let sum_x_sqr = (period * (period - 1) * (2 * period - 1) / 6) as f64;
+    let divisor = sum_x * sum_x - p * sum_x_sqr;
+    let emit = |sum_y: f64, sum_xy: f64| {
+        let m = (p * sum_xy - sum_x * sum_y) / divisor;
+        let b = (sum_y - m * sum_x) / p;
+        match line {
+            LinregLine::Value => b + m * period.saturating_sub(1) as f64,
+            LinregLine::Slope => m,
+            LinregLine::Intercept => b,
+            LinregLine::Angle => m.atan() * (180.0 / std::f64::consts::PI),
+            LinregLine::Forecast => b + m * period as f64,
+        }
+    };
+    let own = || {
+        data[row + 1 - period..=row]
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(sy, sxy), (k, &y)| (sy + y, sxy + (period - 1 - k) as f64 * y))
+    };
+    let y = data[row];
+    let value = if seen < period {
+        // the first window, accumulated in TA-Lib's per-bar order
+        if y.is_finite() {
+            sum_y += y;
+            sum_xy += (period - 1 - seen) as f64 * y;
+        } else {
+            bad += 1;
+        }
+        if seen + 1 < period {
+            f64::NAN
+        } else if bad == 0 {
+            emit(sum_y, sum_xy)
+        } else {
+            let (sy, sxy) = own();
+            emit(sy, sxy)
+        }
+    } else {
+        let leaving = data[row - period];
+        let came_in = y.is_finite();
+        let went_out = leaving.is_finite();
+        if !came_in {
+            bad += 1;
+        }
+        if !went_out {
+            bad -= 1;
+        }
+        if went_out {
+            sum_xy += sum_y - p * leaving;
+        } else {
+            sum_xy += sum_y;
+        }
+        match (came_in, went_out) {
+            (true, true) => sum_y += y - leaving,
+            (true, false) => sum_y += y,
+            (false, true) => sum_y -= leaving,
+            (false, false) => {}
+        }
+        if bad == 0 {
+            emit(sum_y, sum_xy)
+        } else {
+            let (sy, sxy) = own();
+            emit(sy, sxy)
+        }
+    };
+    next.copy_from_slice(&[sum_y, sum_xy, bad as f64, (seen + 1).min(period) as f64]);
+    Some(value)
+}
+
+/// [`rolling_var`]'s state after the rows of `data`: `[Σx, Σx², non-finite rows]`.
+pub fn var_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; Slide::<2>::STATE], data.len(), |row, prev, next| {
+        var_step(data, period, None, row, prev, next)
+    })
+}
+
+/// One row of [`var`] (or, with `Some(nbdev)`, [`stddev`]) at `row`, from `state` into
+/// `next` — the careful [`rolling_var_with`] loop's row.
+pub fn var_step(
+    data: &[f64],
+    period: usize,
+    stddev_nbdev: Option<f64>,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || row >= data.len() || next.len() != Slide::<2>::STATE {
+        return None;
+    }
+    let p = period as f64;
+    let mut slide = Slide::<2>::from_state(state)?;
+    let variance = match slide.row(Order::AddReadDrop, period, row, |j| {
+        let x = data[j];
+        ([x, x * x], x.is_finite())
+    }) {
+        Window::Partial => f64::NAN,
+        Window::Sums([total1, total2]) => {
+            let mean1 = total1 / p;
+            let mean2 = total2 / p;
+            mean2 - mean1 * mean1
+        }
+        Window::Bad => {
+            let (s1, s2) = data[row + 1 - period..=row]
+                .iter()
+                .fold((0.0, 0.0), |(s1, s2), &x| (s1 + x, s2 + x * x));
+            let mean1 = s1 / p;
+            s2 / p - mean1 * mean1
+        }
+    };
+    slide.write_state(next);
+    Some(match stddev_nbdev {
+        None => variance,
+        Some(_) if variance.is_nan() => f64::NAN,
+        Some(nbdev) if variance > 0.0 => variance.sqrt() * nbdev,
+        Some(_) => 0.0,
+    })
+}
+
+/// [`correl`]'s state after the rows of `x` / `y`: `[Σx, Σy, Σx², Σy², Σxy, non-finite rows]`.
+pub fn correl_state(x: &[f64], y: &[f64], period: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; Slide::<5>::STATE], x.len(), |row, prev, next| {
+        correl_step(x, y, period, row, prev, next)
+    })
+}
+
+/// One row of [`correl`] at `row`, from `state` into `next` (drop the trailing row, then
+/// add the new one — TA-Lib's order, on every path).
+pub fn correl_step(
+    x: &[f64],
+    y: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || row >= x.len() || next.len() != Slide::<5>::STATE {
+        return None;
+    }
+    let inv_pf = 1.0 / period as f64;
+    let value = |[sx, sy, sx2, sy2, sxy]: [f64; 5]| {
+        let denom = (sx2 - sx * sx * inv_pf) * (sy2 - sy * sy * inv_pf);
+        if denom < 1e-14 {
+            0.0
+        } else {
+            (sxy - sx * sy * inv_pf) / denom.sqrt()
+        }
+    };
+    let term = |i: usize| {
+        let (xi, yi) = (x[i], y[i]);
+        [xi, yi, xi * xi, yi * yi, xi * yi]
+    };
+    let mut slide = Slide::<5>::from_state(state)?;
+    let out = match slide.row(Order::DropAdd, period, row, |j| all_finite(term(j))) {
+        Window::Partial => f64::NAN,
+        Window::Sums(s) => value(s),
+        Window::Bad => value(own_sums(row + 1 - period..=row, term)),
+    };
+    slide.write_state(next);
+    Some(out)
+}
+
+/// [`beta`]'s state after the rows of `x` / `y`: the sums of the one-bar returns.
+pub fn beta_state(x: &[f64], y: &[f64], period: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; Slide::<4>::STATE], x.len(), |row, prev, next| {
+        beta_step(x, y, period, row, prev, next)
+    })
+}
+
+/// One row of [`beta`] at `row` (its return is term `row - 1`), from `state` into `next`.
+pub fn beta_step(
+    x: &[f64],
+    y: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || row >= x.len() || next.len() != Slide::<4>::STATE {
+        return None;
+    }
+    if row == 0 {
+        next.copy_from_slice(state);
+        return Some(f64::NAN);
+    }
+    let ret = |arr: &[f64], i: usize| {
+        let prev = arr[i - 1];
+        if prev.abs() < 1e-14 { 0.0 } else { (arr[i] - prev) / prev }
+    };
+    let pf = period as f64;
+    let term = |j: usize| {
+        let (rx, ry) = (ret(x, j + 1), ret(y, j + 1));
+        [rx, ry, rx * rx, rx * ry]
+    };
+    let value = |[sx, sy, sxx, sxy]: [f64; 4]| {
+        let denom = pf * sxx - sx * sx;
+        if denom.abs() < 1e-14 { 0.0 } else { (pf * sxy - sx * sy) / denom }
+    };
+    let mut slide = Slide::<4>::from_state(state)?;
+    let j = row - 1;
+    let out = match slide.row(Order::AddReadDrop, period, j, |k| all_finite(term(k))) {
+        Window::Partial => f64::NAN,
+        Window::Sums(s) => value(s),
+        Window::Bad => value(own_sums(j + 1 - period..=j, term)),
+    };
+    slide.write_state(next);
+    Some(out)
 }

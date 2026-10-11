@@ -2,7 +2,7 @@
 //! state-carry helpers (`ema_k` / `ema_seed_idx` shared with the cascade and
 //! MACD families).
 
-use crate::guard::window_sums;
+use crate::guard::{all_finite, own_sums, ring_push, state_after, window_sums, Order, Slide, Window};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 use crate::raw::indicators::av;
 use crate::raw::kernels;
@@ -275,7 +275,7 @@ pub fn vwma(close: &[f64], volume: &[f64], period: usize) -> Vec<f64> {
         return out;
     }
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
-    window_sums(n, period, |i| [close[i] * volume[i], volume[i]], |i, [pv, vv]| {
+    window_sums(n, period, Order::AddDrop, |i| [close[i] * volume[i], volume[i]], |i, [pv, vv]| {
         out[i] = if vv != 0.0 { pv / vv } else { f64::NAN };
     });
     out
@@ -356,6 +356,294 @@ pub fn bbi(close: &[f64], a: usize, b: usize, c: usize, d: usize) -> Vec<f64> {
     let ma_c = kernels::sma(data, c);
     let ma_d = kernels::sma(data, d);
     ((&ma_a + &ma_b + &ma_c + &ma_d) / 4.0).to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// Resumable forms: each finite-window average carries the running sums of its full
+// computation (in its exact operation order), so a resume of one row at a time is
+// bit-identical to recomputing the whole column — and replacing the newest row costs
+// one step.
+// ---------------------------------------------------------------------------
+
+/// The resumable state of [`wma`]: `[Σx, Σw·x, non-finite rows in window, rows since
+/// the first non-NaN value]` — the seed of the first window, then the slide.
+pub(crate) const WMA_STATE: usize = 4;
+
+/// One row of [`wma`] over the series `term` (the careful [`wma_with`] loop, its
+/// leading-NaN skip included), from `state` into `next`.
+pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    let [mut sum, mut wsum, bad, seen] = <[f64; WMA_STATE]>::try_from(state).ok()?;
+    let (mut bad, seen) = (bad as usize, seen as usize);
+    let x = term(row);
+    if period == 0 || (seen == 0 && x.is_nan()) {
+        // the leading-NaN warm-up: skipped (not a row of the average yet)
+        next.copy_from_slice(state);
+        return Some(f64::NAN);
+    }
+    let denom = (period * (period + 1) / 2) as f64;
+    let pf = period as f64;
+    let window = || {
+        (row + 1 - period..=row)
+            .enumerate()
+            .fold(0.0, |acc, (j, k)| acc + term(k) * (j + 1) as f64)
+            / denom
+    };
+    let value = if seen < period {
+        // seed the first full window directly
+        if x.is_finite() {
+            sum += x;
+            wsum += x * (seen + 1) as f64;
+        } else {
+            bad += 1;
+        }
+        if seen + 1 == period {
+            if bad == 0 { wsum / denom } else { window() }
+        } else {
+            f64::NAN
+        }
+    } else {
+        let leaving = term(row - period);
+        let came_in = x.is_finite();
+        let went_out = leaving.is_finite();
+        if !came_in {
+            bad += 1;
+        }
+        if !went_out {
+            bad -= 1;
+        }
+        if came_in {
+            wsum += pf * x - sum;
+        } else {
+            wsum -= sum;
+        }
+        match (came_in, went_out) {
+            (true, true) => sum += x - leaving,
+            (true, false) => sum += x,
+            (false, true) => sum -= leaving,
+            (false, false) => {}
+        }
+        if bad == 0 { wsum / denom } else { window() }
+    };
+    next.copy_from_slice(&[sum, wsum, bad as f64, (seen + 1).min(period) as f64]);
+    Some(value)
+}
+
+/// A finite-window moving average of a TA-Lib MA type — SMA (`0`), WMA (`2`) or TRIMA
+/// (`5`) — as a resumable stage over any series, for the commands composed of them
+/// (`ma`, `apo`, `ppo`, `macdext`, `bias`, `dma`, `mavp`, the stochastics). Its step is
+/// the kernel's own row ([`kernels::sma_row`], [`wma_row`], [`trima_row`]).
+#[derive(Clone, Copy, Debug)]
+pub struct FiniteMa {
+    period: usize,
+    matype: usize,
+}
+
+impl FiniteMa {
+    /// The stage of `matype` over `period`, or `None` for a type that is not
+    /// finite-window (a recursive average carries its own state).
+    pub fn new(period: usize, matype: usize) -> Option<Self> {
+        matches!(matype, 0 | 2 | 5).then_some(FiniteMa { period, matype })
+    }
+
+    /// The length of its state.
+    pub fn state_len(&self) -> usize {
+        match self.matype {
+            0 => kernels::SMA_STATE,
+            2 => WMA_STATE,
+            _ => super::trima_state_len(self.period),
+        }
+    }
+
+    /// How many rows before the current one its step reads (a stage over another
+    /// stage's output keeps that many of them).
+    pub fn reach(&self) -> usize {
+        match self.matype {
+            5 => super::trima_reach(self.period),
+            _ => self.period,
+        }
+    }
+
+    /// One row of the average of `term` at `row`, from `state` into `next`.
+    pub fn step(
+        &self,
+        row: usize,
+        term: impl Fn(usize) -> f64,
+        state: &[f64],
+        next: &mut [f64],
+    ) -> Option<f64> {
+        if next.len() != self.state_len() || state.len() != next.len() {
+            return None;
+        }
+        match self.matype {
+            0 => kernels::sma_step(self.period, row, term, state, next),
+            2 => wma_row(self.period, row, &term, state, next),
+            _ => super::trima_row(self.period, row, &term, state, next),
+        }
+    }
+
+    /// The length of its state as a stage over a series produced one row at a time:
+    /// its own state, then the last [`reach`](Self::reach) values of that series.
+    pub fn chained_len(&self) -> usize {
+        self.state_len() + self.reach()
+    }
+
+    /// One row of the average of a series produced one row at a time — `newest` is its
+    /// value at `row` — from `state` into `next` (both [`chained_len`](Self::chained_len)
+    /// long: the stage's state, then the series' previous values, oldest first).
+    pub fn step_chained(&self, row: usize, newest: f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
+        let (len, reach) = (self.state_len(), self.reach());
+        if state.len() != len + reach || next.len() != state.len() {
+            return None;
+        }
+        let (own, ring) = state.split_at(len);
+        let (n_own, n_ring) = next.split_at_mut(len);
+        // the series at row j: `ring` holds rows `row-reach .. row-1`, oldest first
+        let at = |j: usize| if j == row { newest } else { ring[reach - (row - j)] };
+        let value = self.step(row, at, own, n_own)?;
+        ring_push(ring, newest, n_ring);
+        Some(value)
+    }
+
+    /// The state after the rows `0..n` of `term`.
+    pub fn state(&self, n: usize, term: impl Fn(usize) -> f64) -> Option<Vec<f64>> {
+        state_after(vec![0.0; self.state_len()], n, |row, prev, next| {
+            self.step(row, &term, prev, next)
+        })
+    }
+}
+
+/// [`ma`]'s state after the rows of `close` — see [`FiniteMa`].
+pub fn ma_state(close: &[f64], period: usize, matype: usize) -> Option<Vec<f64>> {
+    FiniteMa::new(period, matype)?.state(close.len(), |j| close[j])
+}
+
+/// One row of [`ma`] (of `matype`) at `row`, from `state` into `next`.
+pub fn ma_step(
+    close: &[f64],
+    period: usize,
+    matype: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if row >= close.len() {
+        return None;
+    }
+    FiniteMa::new(period, matype)?.step(row, |j| close[j], state, next)
+}
+
+/// [`vwma`]'s state: `[Σc·v, Σv, non-finite rows in window]`.
+pub fn vwma_state(close: &[f64], volume: &[f64], period: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; Slide::<2>::STATE], close.len(), |row, prev, next| {
+        vwma_step(close, volume, period, row, prev, next)
+    })
+}
+
+/// One row of [`vwma`] at `row`, from `state` into `next`.
+pub fn vwma_step(
+    close: &[f64],
+    volume: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || row >= close.len() || next.len() != Slide::<2>::STATE {
+        return None;
+    }
+    let term = |i: usize| [close[i] * volume[i], volume[i]];
+    let mut slide = Slide::<2>::from_state(state)?;
+    let value = match slide.row(Order::AddDrop, period, row, |j| all_finite(term(j))) {
+        Window::Partial => f64::NAN,
+        Window::Sums([pv, vv]) => if vv != 0.0 { pv / vv } else { f64::NAN },
+        Window::Bad => {
+            let [pv, vv] = own_sums(row + 1 - period..=row, term);
+            if vv != 0.0 { pv / vv } else { f64::NAN }
+        }
+    };
+    slide.write_state(next);
+    Some(value)
+}
+
+/// [`hma`]'s state: its two WMAs of close, its WMA of their blend, and the last
+/// `round(√period)` blended values that last WMA reads.
+fn hma_parts(period: usize) -> (usize, usize) {
+    (period / 2, (period as f64).sqrt().round() as usize)
+}
+
+/// The length of [`hma`]'s state.
+fn hma_state_len(period: usize) -> usize {
+    3 * WMA_STATE + hma_parts(period).1
+}
+
+/// [`hma`]'s state after the rows of `close`.
+pub fn hma_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
+    if period < 2 {
+        return None;
+    }
+    state_after(vec![0.0; hma_state_len(period)], close.len(), |row, prev, next| {
+        hma_step(close, period, row, prev, next)
+    })
+}
+
+/// One row of [`hma`] at `row`, from `state` into `next`.
+pub fn hma_step(
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period < 2 || row >= close.len() || state.len() != hma_state_len(period) || next.len() != state.len() {
+        return None;
+    }
+    let (half, sq) = hma_parts(period);
+    let c = |j: usize| close[j];
+    let (s_half, rest) = state.split_at(WMA_STATE);
+    let (s_full, rest) = rest.split_at(WMA_STATE);
+    let (s_out, ring) = rest.split_at(WMA_STATE);
+    let (n_half, nrest) = next.split_at_mut(WMA_STATE);
+    let (n_full, nrest) = nrest.split_at_mut(WMA_STATE);
+    let (n_out, n_ring) = nrest.split_at_mut(WMA_STATE);
+    let wh = wma_row(half, row, &c, s_half, n_half)?;
+    let wf = wma_row(period, row, &c, s_full, n_full)?;
+    let raw = 2.0 * wh - wf;
+    // the blend at row j: `ring` holds rows `row-sq .. row-1`, oldest first
+    let blend = |j: usize| if j == row { raw } else { ring[sq - (row - j)] };
+    let value = wma_row(sq, row, &blend, s_out, n_out)?;
+    ring_push(ring, raw, n_ring);
+    Some(value)
+}
+
+/// [`bbi`]'s state: the four SMAs of close.
+pub fn bbi_state(close: &[f64], a: usize, b: usize, c: usize, d: usize) -> Option<Vec<f64>> {
+    state_after(vec![0.0; 4 * kernels::SMA_STATE], close.len(), |row, prev, next| {
+        bbi_step(close, a, b, c, d, row, prev, next)
+    })
+}
+
+/// One row of [`bbi`] at `row`, from `state` into `next`.
+#[allow(clippy::too_many_arguments)]
+pub fn bbi_step(
+    close: &[f64],
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    const S: usize = kernels::SMA_STATE;
+    if row >= close.len() || state.len() != 4 * S || next.len() != 4 * S {
+        return None;
+    }
+    let term = |j: usize| close[j];
+    let mut m = [0.0; 4];
+    for (k, p) in [a, b, c, d].into_iter().enumerate() {
+        m[k] = kernels::sma_step(p, row, term, &state[k * S..(k + 1) * S], &mut next[k * S..(k + 1) * S])?;
+    }
+    Some((m[0] + m[1] + m[2] + m[3]) / 4.0)
 }
 
 #[cfg(test)]

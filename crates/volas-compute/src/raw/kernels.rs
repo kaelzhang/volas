@@ -10,7 +10,7 @@
 //! the available ILP, so a measured `f64x2` SIMD variant came out 1.00x — explicit
 //! SIMD buys nothing here.
 
-use crate::guard::{NonFiniteRows, RowGuard};
+use crate::guard::{NonFiniteRows, Order, RowGuard, Slide, Window};
 use ndarray::{Array1, ArrayView1};
 use std::collections::VecDeque;
 
@@ -529,6 +529,73 @@ pub fn rolling_max(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     }
     result
 }
+
+/// One row of [`sma`] over the series `term`, resumed from `slide` (rows `0..i` slid):
+/// the careful slide, whose clean windows add in the fast loop's order — so a full
+/// [`sma`] and a resume of this one row at a time agree bit for bit.
+#[inline]
+pub(crate) fn sma_row(
+    slide: &mut Slide<1>,
+    period: usize,
+    i: usize,
+    term: impl Fn(usize) -> f64,
+) -> f64 {
+    match slide.row(Order::AddDrop, period, i, |j| {
+        let x = term(j);
+        ([x], x.is_finite())
+    }) {
+        Window::Partial => f64::NAN,
+        Window::Sums([sum]) => sum / period as f64,
+        Window::Bad => (i + 1 - period..=i).map(&term).sum::<f64>() / period as f64,
+    }
+}
+
+/// The resumable state of [`sma`] after rows `0..n` of `term`: `[sum, count]`.
+pub(crate) const SMA_STATE: usize = Slide::<1>::STATE;
+
+/// One row of [`sma`] over `term` from `state`, writing the state as of `row` into `next`.
+#[inline]
+pub(crate) fn sma_step(
+    period: usize,
+    row: usize,
+    term: impl Fn(usize) -> f64,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || next.len() != SMA_STATE {
+        return None;
+    }
+    let mut slide = Slide::<1>::from_state(state)?;
+    let value = sma_row(&mut slide, period, row, term);
+    slide.write_state(next);
+    Some(value)
+}
+
+/// The window statistics of [`rolling_mean_std`] at row `i` of `data`, resumed from
+/// `slide` (`[Σx, Σx²]` over the window's finite rows): `(mean, std)`.
+#[inline]
+pub(crate) fn mean_std_row(
+    slide: &mut Slide<2>,
+    period: usize,
+    ddof: usize,
+    i: usize,
+    term: impl Fn(usize) -> f64,
+) -> (f64, f64) {
+    let p = period as f64;
+    let denom = (period - ddof) as f64;
+    match slide.row(Order::AddDrop, period, i, |j| {
+        let x = term(j);
+        ([x, x * x], x.is_finite())
+    }) {
+        Window::Partial => (f64::NAN, f64::NAN),
+        Window::Sums([sum, sum_sq]) => {
+            let variance = (sum_sq - sum * sum / p) / denom;
+            (sum / p, variance.max(0.0).sqrt())
+        }
+        Window::Bad => dispersion::window_mean_std_of(i + 1 - period..=i, &term, p, denom),
+    }
+}
+
 
 mod dispersion;
 pub use dispersion::*;
