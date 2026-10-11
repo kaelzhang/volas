@@ -27,6 +27,85 @@ pub const MAX_NESTING: usize = 128;
 /// memory any walk over the tree can spend on a single directive.
 pub const MAX_NODES: usize = 4096;
 
+/// The most directives one thread's parse memo holds.
+pub const MEMO_MAX_ENTRIES: usize = 512;
+
+/// The longest directive the parse memo keeps, in bytes. A realistic directive is
+/// well under 200 bytes; a longer input is parsed on every call instead of pinning
+/// its text and tree in memory.
+pub const MEMO_MAX_INPUT_BYTES: usize = 4096;
+
+/// The most bytes one thread's parse memo holds, estimated per entry as
+/// [`memo_cost`]. Realistic directives fill [`MEMO_MAX_ENTRIES`] first.
+pub const MEMO_MAX_BYTES: usize = 1 << 20;
+
+/// Estimated resident bytes of one memo entry: the key, the tree's strings (no
+/// longer than the input) and one tree node per parsed node.
+fn memo_cost(input: &str, nodes: usize) -> usize {
+    2 * input.len() + nodes * std::mem::size_of::<Ast>()
+}
+
+// Any single memoizable entry fits the byte budget on its own, so eviction always
+// makes room.
+const _: () =
+    assert!(2 * MEMO_MAX_INPUT_BYTES + MAX_NODES * std::mem::size_of::<Ast>() <= MEMO_MAX_BYTES);
+
+/// One thread's parse memo, bounded by [`MEMO_MAX_ENTRIES`] and [`MEMO_MAX_BYTES`].
+/// When full it evicts uniformly random entries, one at a time, until the new entry
+/// fits. Random replacement degrades smoothly when the working set outgrows the
+/// memo; LRU, FIFO and clock all miss on every call once a cyclic access pattern
+/// (a refresh walking every cached column, each bar) holds one entry too many.
+#[derive(Default)]
+struct Memo {
+    entries: Vec<MemoEntry>,
+    /// Slot of each key in `entries`.
+    slots: FxHashMap<Rc<str>, usize>,
+    bytes: usize,
+    /// xorshift64 state picking the next victim; deterministic per thread.
+    rng: u64,
+}
+
+struct MemoEntry {
+    key: Rc<str>,
+    ast: Rc<Ast>,
+    cost: usize,
+}
+
+impl Memo {
+    fn get(&self, input: &str) -> Option<Rc<Ast>> {
+        self.slots
+            .get(input)
+            .map(|&i| Rc::clone(&self.entries[i].ast))
+    }
+
+    fn insert(&mut self, input: &str, ast: &Rc<Ast>, cost: usize) {
+        while self.entries.len() >= MEMO_MAX_ENTRIES || self.bytes + cost > MEMO_MAX_BYTES {
+            self.evict_one();
+        }
+        let key: Rc<str> = Rc::from(input);
+        self.slots.insert(Rc::clone(&key), self.entries.len());
+        self.entries.push(MemoEntry {
+            key,
+            ast: Rc::clone(ast),
+            cost,
+        });
+        self.bytes += cost;
+    }
+
+    fn evict_one(&mut self) {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        let victim = (self.rng % self.entries.len() as u64) as usize;
+        let gone = self.entries.swap_remove(victim);
+        self.slots.remove(&gone.key);
+        self.bytes -= gone.cost;
+        if let Some(moved) = self.entries.get(victim) {
+            self.slots.insert(Rc::clone(&moved.key), victim);
+        }
+    }
+}
+
 thread_local! {
     /// Per-thread directive memo. `parse` is a pure function of its input, so caching
     /// the bound [`Ast`] is bit-identical — and `df.exec` re-parses on every call, so a
@@ -34,30 +113,38 @@ thread_local! {
     /// (the whole per-exec validation cost) and shares one `Rc<Ast>` with no deep clone.
     /// FxHash (not SipHash): the keys are internal, non-adversarial directive strings —
     /// the same trust level as `name_to_idx` — and the per-bar refresh hits this memo.
-    static PARSE_CACHE: RefCell<FxHashMap<String, Rc<Ast>>> = RefCell::new(FxHashMap::default());
+    static PARSE_CACHE: RefCell<Memo> = RefCell::new(Memo {
+        rng: 0x9E37_79B9_7F4A_7C15,
+        ..Memo::default()
+    });
 }
 
 /// Parse a directive string into a bound, validated [`Ast`] (memoized per thread).
 /// Binding happens here, once: an invalid argument / unknown command errors at parse
-/// time, and the returned tree is ready to execute with no further validation.
+/// time, and the returned tree is ready to execute with no further validation. Only
+/// successful parses of inputs up to [`MEMO_MAX_INPUT_BYTES`] are memoized.
 pub fn parse(input: &str) -> Result<Rc<Ast>> {
-    if let Some(ast) = PARSE_CACHE.with(|c| c.borrow().get(input).cloned()) {
-        return Ok(ast);
-    }
-    let ast = Rc::new(bind_node(&parse_cst(input)?)?);
-    PARSE_CACHE.with(|c| {
-        let mut m = c.borrow_mut();
-        // Bound the memo (clear wholesale — cheap and correct) so generated / adversarial
-        // directive churn can't grow it without limit. Only successful parses are cached.
-        if m.len() >= 512 {
-            m.clear();
+    let memoize = input.len() <= MEMO_MAX_INPUT_BYTES;
+    if memoize {
+        if let Some(ast) = PARSE_CACHE.with(|c| c.borrow().get(input)) {
+            return Ok(ast);
         }
-        m.insert(input.to_string(), Rc::clone(&ast));
-    });
+    }
+    let (cst, nodes) = parse_tree(input)?;
+    let ast = Rc::new(bind_node(&cst)?);
+    if memoize {
+        let cost = memo_cost(input, nodes);
+        PARSE_CACHE.with(|c| c.borrow_mut().insert(input, &ast, cost));
+    }
     Ok(ast)
 }
 
 pub fn parse_cst(input: &str) -> Result<Cst> {
+    parse_tree(input).map(|(cst, _)| cst)
+}
+
+/// Parse a directive into its tree and the number of nodes it holds.
+fn parse_tree(input: &str) -> Result<(Cst, usize)> {
     let mut p = Parser::new(input);
     p.skip_ws();
     if p.eof() {
@@ -68,7 +155,7 @@ pub fn parse_cst(input: &str) -> Result<Cst> {
     if !p.eof() {
         return Err(p.err("expected end of directive"));
     }
-    Ok(node)
+    Ok((node, p.nodes))
 }
 
 /// A parsed sub-tree and its height (a leaf is 1).
@@ -587,7 +674,11 @@ mod tests {
     fn a_literal_overflowing_f64_is_a_syntax_error() {
         // It would round to `inf`, which renders as `inf` and re-parses as a Name.
         let big = format!("1{}", "0".repeat(400));
-        for d in [format!("close < {big}"), format!("-{big}"), format!("{big}.5")] {
+        for d in [
+            format!("close < {big}"),
+            format!("-{big}"),
+            format!("{big}.5"),
+        ] {
             match parse_cst(&d) {
                 Err(VolasError::Parse(m)) => assert!(m.contains("out of range"), "{m}"),
                 other => panic!("{d}: {other:?}"), // LCOV_EXCL_LINE
@@ -619,12 +710,71 @@ mod tests {
     fn parse_memo_hit_and_eviction() {
         // Each test runs on its own thread, so the thread-local memo starts empty. A
         // repeated parse returns the cached bound `Rc<Ast>` (the cache-hit branch), and
-        // parsing past the 512-entry bound clears the memo wholesale (the eviction
-        // branch) — both invisible to the rest of the suite.
+        // parsing past the 512-entry bound evicts entries (the eviction branch) — both
+        // invisible to the rest of the suite.
         assert_eq!(parse("ma:5").unwrap(), parse("ma:5").unwrap()); // 2nd hits the cache
         for i in 0..600 {
-            let _ = parse(&format!("ma:{}", i + 1)).unwrap(); // crosses 512 -> wholesale clear
+            let _ = parse(&format!("ma:{}", i + 1)).unwrap(); // crosses 512 -> evicts
         }
         assert_eq!(parse("ma:5").unwrap(), parse("ma:5").unwrap()); // correct post-eviction
+    }
+
+    // The memo tests below observe residency without touching the memo: a bound tree
+    // the memo still holds has a strong count of 2 (the memo's and the test's).
+    const ENTRIES: usize = MEMO_MAX_ENTRIES;
+    const INPUT: usize = MEMO_MAX_INPUT_BYTES;
+    const BYTES: usize = MEMO_MAX_BYTES;
+
+    fn resident(held: &[Rc<Ast>]) -> usize {
+        held.iter().filter(|a| Rc::strong_count(a) == 2).count()
+    }
+
+    #[test]
+    fn memo_skips_an_input_above_the_size_threshold() {
+        let big = format!("ma:2{}", " ".repeat(INPUT));
+        assert!(!Rc::ptr_eq(&parse(&big).unwrap(), &parse(&big).unwrap()));
+        let at = format!("ma:2{}", " ".repeat(INPUT - 4));
+        assert!(Rc::ptr_eq(&parse(&at).unwrap(), &parse(&at).unwrap()));
+    }
+
+    #[test]
+    fn memo_evicts_one_entry_at_a_time() {
+        let held: Vec<_> = (0..ENTRIES)
+            .map(|i| parse(&format!("ma:{}", i + 1)).unwrap())
+            .collect();
+        assert_eq!(resident(&held), ENTRIES);
+        parse("ma:100000").unwrap(); // one past the entry bound
+        assert_eq!(resident(&held), ENTRIES - 1);
+    }
+
+    #[test]
+    fn memo_is_bounded_by_bytes() {
+        // Inputs just under the size threshold: the entry bound alone keeps them all.
+        let held: Vec<_> = (0..ENTRIES)
+            .map(|i| parse(&format!("ma:{}{}", i + 1, " ".repeat(INPUT - 10))).unwrap())
+            .collect();
+        let kept = resident(&held);
+        assert!(kept > 0);
+        assert!(
+            kept * INPUT <= BYTES,
+            "{kept} inputs of {INPUT} bytes resident"
+        );
+    }
+
+    #[test]
+    fn memo_bookkeeping_stays_consistent_under_churn() {
+        for i in 0..3 * ENTRIES {
+            let pad = " ".repeat(i * 7 % INPUT);
+            parse(&format!("ma:{}{pad}", i + 1)).unwrap();
+        }
+        PARSE_CACHE.with(|c| {
+            let m = c.borrow();
+            assert!(m.entries.len() <= ENTRIES && m.bytes <= BYTES);
+            assert_eq!(m.bytes, m.entries.iter().map(|e| e.cost).sum::<usize>());
+            assert_eq!(m.slots.len(), m.entries.len());
+            for (i, e) in m.entries.iter().enumerate() {
+                assert_eq!(m.slots[&e.key], i);
+            }
+        });
     }
 }
