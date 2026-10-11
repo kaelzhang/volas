@@ -189,7 +189,7 @@ def test_a_required_operand_left_out_is_still_an_error():
 def test_every_recursive_command_is_covered():
     """The Rust classification of recursive commands is exactly the one exercised here."""
     src = "".join(p.read_text() for p in (ROOT / "crates/volas-directive/src").rglob("*.rs"))
-    body = re.search(r"const RECURSIVE: &\[&str\] = &\[(.*?)\];", src, re.S).group(1)
+    body = re.search(r"fn is_recursive_name\(name: &str\) -> bool \{\s*matches!\((.*?)\)", src, re.S).group(1)
     assert set(re.findall(r'"([a-z0-9_]+)"', body)) == set(RECURSIVE)
 
 

@@ -621,15 +621,20 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
 /// Commands whose value at a row depends on every row before it — EMA / Wilder
 /// smoothing, cumulative lines, the Hilbert transform, SAR, … — rather than on a fixed
 /// trailing window. (A command with a TA-Lib MA-type argument is recursive when that
-/// argument selects a recursive average; see [`is_recursive`].)
-const RECURSIVE: &[&str] = &[
-    "ema", "smma", "dema", "tema", "t3", "kama", "macd", "macdfix", "kdj", "rsi", "crsi",
-    "stochrsi", "cmo", "trix", "pvt", "nvi", "pvi", "obv", "ad", "adosc", "mass_index",
-    "efi", "tsi", "keltner", "kcw", "stoch_momentum", "ttm_squeeze", "wad", "asi",
-    "supertrend", "atr", "natr", "plus_dm", "minus_dm", "plus_di", "minus_di", "dx", "adx",
-    "adxr", "sar", "sarext", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
-    "ht_trendline", "ht_trendmode", "mama",
-];
+/// argument selects a recursive average; see [`is_recursive`].) A `match`, not a list
+/// scan: every live resume asks.
+fn is_recursive_name(name: &str) -> bool {
+    matches!(
+        name,
+        "ema" | "smma" | "dema" | "tema" | "t3" | "kama" | "macd" | "macdfix" | "kdj"
+            | "rsi" | "crsi" | "stochrsi" | "cmo" | "trix" | "pvt" | "nvi" | "pvi" | "obv"
+            | "ad" | "adosc" | "mass_index" | "efi" | "tsi" | "keltner" | "kcw"
+            | "stoch_momentum" | "ttm_squeeze" | "wad" | "asi" | "supertrend" | "atr"
+            | "natr" | "plus_dm" | "minus_dm" | "plus_di" | "minus_di" | "dx" | "adx"
+            | "adxr" | "sar" | "sarext" | "ht_dcperiod" | "ht_dcphase" | "ht_phasor"
+            | "ht_sine" | "ht_trendline" | "ht_trendmode" | "mama"
+    )
+}
 
 /// Commands whose output is an absolute row position, so it changes with where the
 /// series starts.
@@ -650,7 +655,7 @@ pub fn is_recursive(name: &str, args: &[ArgValue]) -> bool {
         "apo" | "ppo" | "mavp" | "stochf" => &[2],
         "macdext" => &[1, 3, 5],
         "stoch" => &[2, 4],
-        _ => return RECURSIVE.contains(&name),
+        _ => return is_recursive_name(name),
     };
     matypes
         .iter()
@@ -671,7 +676,9 @@ mod tests {
     /// outputs back by row, which a position-valued output would not survive.
     #[test]
     fn no_recursive_command_emits_a_position() {
-        assert!(RECURSIVE.iter().all(|c| !emits_position(c)));
+        let recursive = COMMANDS.iter().filter(|c| is_recursive_name(c));
+        assert_eq!(recursive.clone().count(), 48);
+        assert!(recursive.into_iter().all(|c| !emits_position(c)));
         for name in ["ma", "apo", "ppo", "mavp", "stochf", "macdext", "stoch"] {
             assert!(!emits_position(name));
         }
