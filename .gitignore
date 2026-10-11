@@ -39,3 +39,6 @@ docs/animated_gif/*.gif
 .vscode/
 .claude/
 *.swp
+
+# local agent workbench
+.omnipowers/
