@@ -808,3 +808,5 @@ mod computed;
 mod tests;
 #[cfg(test)]
 mod tests_nan_fact;
+#[cfg(test)]
+mod tests_replace;

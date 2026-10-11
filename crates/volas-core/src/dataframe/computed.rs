@@ -130,11 +130,6 @@ impl DataFrame {
             .collect()
     }
 
-    /// Names of all materialized-directive columns.
-    pub fn computed_names(&self) -> Vec<String> {
-        self.computed.keys().cloned().collect()
-    }
-
     /// Overwrite a computed column's rows `[from, from + tail.len())` in place
     /// (copy-on-write) with the recomputed `tail`, and mark it valid up to the
     /// full height. Directive results are F64 or Bool, so both are handled.
