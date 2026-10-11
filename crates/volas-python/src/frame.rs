@@ -41,6 +41,8 @@ pub(crate) struct TfState {
     pub(crate) open_key: Option<i64>,
     /// Cached live-fold plan (`None` until the first fold), reused across appends.
     pub(crate) fold_plan: Option<FoldPlan>,
+    /// Cached plan re-cumulating the open period into the forming row (a re-sent bar).
+    pub(crate) refold_plan: Option<FoldPlan>,
 }
 
 /// The cached forming-row fold plan: the `(dst_col, src_col, combine_op)` triples,
@@ -58,6 +60,17 @@ pub(crate) struct FoldPlan {
 }
 
 impl FoldPlan {
+    /// The plan folding `src`'s rows into `inner`'s forming row, or `None` when a column
+    /// cannot fold in place (see [`build_fold_ops`]).
+    pub(crate) fn build(inner: &DataFrame, src: &DataFrame, spec: &AggSpec) -> Option<FoldPlan> {
+        crate::frame_tf::build_fold_ops(inner, src, spec).map(|ops| FoldPlan {
+            inner_names: inner.names_arc().clone(),
+            inner_dtypes: inner.columns().iter().map(|c| c.dtype()).collect(),
+            bar_names: src.names().to_vec(),
+            ops,
+        })
+    }
+
     /// Whether this plan still matches `inner` + `bar` (no schema change).
     pub(crate) fn matches(&self, inner: &DataFrame, bar: &DataFrame) -> bool {
         // The inner frame is pointer-stable across the fold's row-only mutations

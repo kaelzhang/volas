@@ -595,6 +595,58 @@ impl Column {
         Ok(())
     }
 
+    /// Set cell `row` to the aggregate of the single value `src[src_row]` under `op`, in
+    /// place — the period's first bar, as the batch reduce
+    /// ([`crate::Agg`]-style `fold`) leaves it after one element: `Max` / `Min` fold it
+    /// into `−∞` / `+∞` (so a NaN first bar is skipped), `Sum` sums the one value, and
+    /// `Keep` / `Replace` (first / last) take it. [`combine_at`](Self::combine_at) then
+    /// folds each later bar, so the pair re-cumulates a period exactly, with no
+    /// allocation. Numeric / datetime only, as `combine_at`.
+    pub fn init_at(&mut self, row: usize, op: CombineOp, src: &Column, src_row: usize) -> Result<()> {
+        use CombineOp::*;
+        let take = matches!(op, Keep | Replace);
+        match self {
+            Column::F64(buf) => {
+                let s = src.get_f64(src_row);
+                let v = match op {
+                    Max => f64::NEG_INFINITY.max(s),
+                    Min => f64::INFINITY.min(s),
+                    Sum => std::iter::once(s).sum::<f64>(),
+                    Keep | Replace => s,
+                };
+                buf.set(row, v);
+            }
+            Column::F32(buf) => {
+                let s = src.get_f64(src_row) as f32;
+                let v = match op {
+                    Max => f32::NEG_INFINITY.max(s),
+                    Min => f32::INFINITY.min(s),
+                    Sum => std::iter::once(s).sum::<f32>(),
+                    Keep | Replace => s,
+                };
+                buf.set(row, v);
+            }
+            Column::I64(buf, val) => {
+                let n = buf.len();
+                buf.make_mut()[row] = src.get_i64(src_row);
+                val.set(row, n, !take || src.is_valid(src_row));
+            }
+            Column::I32(buf, val) => {
+                let n = buf.len();
+                buf.make_mut()[row] = src.get_i64(src_row) as i32;
+                val.set(row, n, !take || src.is_valid(src_row));
+            }
+            Column::Datetime(buf) => buf.make_mut()[row] = src.get_i64(src_row),
+            Column::Bool(_, _) | Column::Str(_, _) => {
+                return Err(VolasError::DType(
+                    "init_at: only numeric / datetime columns can be folded in place".into(),
+                ))
+            }
+        }
+        Ok(())
+    }
+
+
     // --- dtype-preserving numeric transforms (pandas 3.0) ---------------------
     // Each dispatches the kernel over the column's element type so an int column
     // stays int and computes natively (no f64 round-trip). A non-numeric column

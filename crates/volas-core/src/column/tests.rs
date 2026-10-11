@@ -937,3 +937,42 @@ fn binary_ops_reject_unequal_lengths() {
     // equal lengths still pass the check
     assert_eq!(i2.binary(&i2, BinOp::Add).unwrap(), Column::i64(vec![2, 4]));
 }
+
+#[test]
+fn init_at_is_the_aggregate_of_one_value() {
+    use CombineOp::*;
+    // f64: max / min fold the value into -inf / +inf (a NaN first bar is skipped)
+    for (op, x, want) in [
+        (Max, 5.0, 5.0),
+        (Max, f64::NAN, f64::NEG_INFINITY),
+        (Min, f64::NAN, f64::INFINITY),
+        (Sum, 2.5, 2.5),
+        (Keep, 7.0, 7.0),
+        (Replace, f64::NAN, f64::NAN),
+    ] {
+        let mut c = Column::f64(vec![0.0, 0.0]);
+        c.init_at(1, op, &Column::f64(vec![x]), 0).unwrap();
+        let got = c.get_f64(1);
+        assert!(got == want || (got.is_nan() && want.is_nan()), "{op:?} {x}");
+    }
+    for (op, want) in [(Max, 5.0), (Min, 5.0), (Sum, 5.0), (Keep, 5.0)] {
+        let mut c = Column::f32(vec![0.0]);
+        c.init_at(0, op, &Column::f32(vec![5.0]), 0).unwrap();
+        assert_eq!(c.get_f64(0), want, "f32 {op:?}");
+    }
+    // ints: the value; a first / last takes its validity, a max / min / sum is present
+    let na = Column::i64_with(vec![3], Validity::from_valid_iter(1, [false]));
+    for (op, valid) in [(Keep, false), (Replace, false), (Max, true), (Sum, true)] {
+        let mut c = Column::i64(vec![1]);
+        c.init_at(0, op, &na, 0).unwrap();
+        assert_eq!((c.get_i64(0), c.is_valid(0)), (3, valid), "i64 {op:?}");
+        let mut c = Column::i32(vec![1]);
+        c.init_at(0, op, &na, 0).unwrap();
+        assert_eq!((c.get_i64(0), c.is_valid(0)), (3, valid), "i32 {op:?}");
+    }
+    let mut c = Column::datetime(vec![1]);
+    c.init_at(0, Min, &Column::datetime(vec![9]), 0).unwrap();
+    assert_eq!(c.get_i64(0), 9);
+    assert!(Column::bool(vec![false]).init_at(0, Keep, &Column::bool(vec![true]), 0).is_err());
+    assert!(Column::str(vec!["a".into()]).init_at(0, Keep, &Column::str(vec!["b".into()]), 0).is_err());
+}

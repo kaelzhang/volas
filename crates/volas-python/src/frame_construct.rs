@@ -127,6 +127,7 @@ impl PyDataFrame {
                             open_key: None, // lazily recomputed by fold_append
                             // projection changes the columns -> rebuild the plan lazily.
                             fold_plan: None,
+                refold_plan: None,
                         }),
                     };
                     (inner, tf)
@@ -247,6 +248,7 @@ impl PyDataFrame {
                     open,
                     open_key: None,
                     fold_plan: None,
+                refold_plan: None,
                 }),
                 window: win,
             });

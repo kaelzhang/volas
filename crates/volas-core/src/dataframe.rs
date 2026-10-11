@@ -605,6 +605,31 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Re-cumulate the forming aggregate at `row` from all of `src`'s rows, in place, per
+    /// the fold plan `ops` (as [`fold_forming_row`](Self::fold_forming_row)): the first
+    /// row initializes each cell ([`Column::init_at`]), every later one folds in
+    /// ([`Column::combine_at`]) — exactly the batch reduce of the period, with no
+    /// allocation. Used when a bar already folded in is re-sent with new values (a
+    /// max / min cannot be un-combined). Only that row changed, so each cached column
+    /// keeps what it carries and goes stale from it.
+    pub fn refold_forming_row(
+        &mut self,
+        row: usize,
+        src: &DataFrame,
+        ops: &[(usize, usize, CombineOp)],
+    ) -> Result<()> {
+        for &(dst_col, src_col, op) in ops {
+            let (dst, from) = (&mut self.columns[dst_col], &src.columns[src_col]);
+            dst.init_at(row, op, from, 0)?;
+            for r in 1..src.height {
+                dst.combine_at(row, op, from, r)?;
+            }
+        }
+        self.invalidate_computed_forming_row(row);
+        Ok(())
+    }
+
+
     /// Replace the last row whole with `src`'s row `src_row`, in place: each column takes
     /// `src`'s value of the same name, or a missing value when `src` lacks it; a cached
     /// directive column is left to its refresh. The label is unchanged. Only the last

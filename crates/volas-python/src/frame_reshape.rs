@@ -277,6 +277,7 @@ impl PyDataFrame {
                 open: cum.open_clone(),
                 open_key: None,
                 fold_plan: None,
+                refold_plan: None,
             }),
             window: None,
         })

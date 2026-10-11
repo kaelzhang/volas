@@ -15,7 +15,7 @@ use crate::*;
 /// Returns `None` (so the caller re-cumulates the period) if a carried column is
 /// `Bool` / `Str`, which `Column::combine_at` cannot fold in place. The common OHLCV
 /// (all-numeric) frame is always foldable.
-fn build_fold_ops(
+pub(crate) fn build_fold_ops(
     inner: &DataFrame,
     bar: &DataFrame,
     spec: &AggSpec,
@@ -120,12 +120,13 @@ impl PyDataFrame {
                 };
                 let bar = bar.as_ref();
                 let open = tfs.open.as_mut().unwrap();
-                // A re-sent forming bar (same ts) replaces the last open bar.
+                // A re-sent forming bar (same ts) replaces the last open bar, in place.
                 let resent = last_dt(open) == bar_ts;
                 if resent {
-                    *open = open.slice(0, open.height() - 1);
+                    open.replace_last_row(bar, 0).map_err(pyerr)?;
+                } else {
+                    open.append(bar).map_err(pyerr)?;
                 }
-                open.append(bar).map_err(pyerr)?;
                 let last = inner.height() - 1;
                 // Fast path: a new distinct fine bar whose columns are all foldable
                 // (numeric / datetime) updates the forming row IN PLACE — no period
@@ -135,23 +136,26 @@ impl PyDataFrame {
                 // lookups (whose SipHash dominated the per-bar cost). A re-sent bar
                 // (can't un-combine max/min) or a non-numeric bar column re-cumulates
                 // the period instead; both stale only the forming row.
-                let plan_ok = !resent
-                    && tfs.fold_plan.as_ref().is_some_and(|fp| fp.matches(inner, bar));
-                if !resent && !plan_ok {
-                    tfs.fold_plan = build_fold_ops(inner, bar, &tfs.cumulators).map(|ops| FoldPlan {
-                        inner_names: inner.names_arc().clone(),
-                        inner_dtypes: inner.columns().iter().map(|c| c.dtype()).collect(),
-                        bar_names: bar.names().to_vec(),
-                        ops,
-                    });
-                }
-                let plan = if resent { None } else { tfs.fold_plan.as_ref() };
-                if let Some(fp) = plan {
-                    inner.fold_forming_row(last, bar, 0, &fp.ops).map_err(pyerr)?;
+                // A re-sent bar re-cumulates the whole open period instead (a max / min
+                // cannot be un-combined) — also in place, from its own cached plan.
+                let (src, cached) = if resent {
+                    (&*open, &mut tfs.refold_plan)
                 } else {
-                    // Re-cumulate the open period and REPLACE the forming row with it —
-                    // in place, for every column dtype. Only that row changed, so the
-                    // cached columns keep their states and only that row goes stale.
+                    (bar, &mut tfs.fold_plan)
+                };
+                if !cached.as_ref().is_some_and(|fp| fp.matches(inner, src)) {
+                    *cached = FoldPlan::build(inner, src, &tfs.cumulators);
+                }
+                if let Some(fp) = cached.as_ref() {
+                    if resent {
+                        inner.refold_forming_row(last, src, &fp.ops).map_err(pyerr)?;
+                    } else {
+                        inner.fold_forming_row(last, src, 0, &fp.ops).map_err(pyerr)?;
+                    }
+                } else {
+                    // A bool / str bar column: re-cumulate the open period and REPLACE
+                    // the forming row with it — in place, for every column dtype. Only
+                    // that row changed, so the cached columns keep their states.
                     let agg =
                         aggregate_period(open, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                     inner.replace_last_row(&agg, 0).map_err(pyerr)?;

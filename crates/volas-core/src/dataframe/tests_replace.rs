@@ -136,3 +136,35 @@ fn integer_batches_replace_and_raise_atomically() {
     assert_eq!(empty.height(), 1);
     assert!(!label_precedes(&Label::I64(1), &Label::Str("a".into())));
 }
+
+#[test]
+fn refolding_the_forming_row_is_the_period_reduce() {
+    let ops = [(0, 0, CombineOp::Keep), (1, 1, CombineOp::Max), (2, 2, CombineOp::Sum)];
+    let mut df = DataFrame::new(
+        vec!["first".into(), "max".into(), "sum".into()],
+        vec![Column::f64(vec![0.0, 0.0]), Column::f64(vec![0.0, 9.0]), Column::f64(vec![0.0, 9.0])],
+        None,
+    )
+    .unwrap();
+    df.set_computed("sum", 0);
+    df.set_computed_states("sum", Some(vec![1.0]), Some(vec![0.5]));
+    let period = DataFrame::new(
+        vec!["first".into(), "max".into(), "sum".into()],
+        vec![
+            Column::f64(vec![4.0, 2.0, 3.0]),
+            Column::f64(vec![f64::NAN, 2.0, 1.0]),
+            Column::f64(vec![0.5, 0.25, 0.125]),
+        ],
+        None,
+    )
+    .unwrap();
+    df.refold_forming_row(1, &period, &ops).unwrap();
+    assert_eq!(df.column("first").unwrap().get_f64(1), 4.0);
+    assert_eq!(df.column("max").unwrap().get_f64(1), 2.0);
+    assert_eq!(df.column("sum").unwrap().get_f64(1), 0.875);
+    // only the forming row went stale; the state before it is the column's state again
+    assert_eq!(df.computed_resume_state("sum"), Some((&[0.5][..], 0)));
+    let bad = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["x".into()])], None).unwrap();
+    let mut s = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["a".into()])], None).unwrap();
+    assert!(s.refold_forming_row(0, &bad, &[(0, 0, CombineOp::Keep)]).is_err());
+}
