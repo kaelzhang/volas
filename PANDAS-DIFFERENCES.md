@@ -518,6 +518,12 @@ is labelled `3` (pandas `concat` keeps the row's own `0`, giving `0, 1, 2, 0`). 
 keeps a sliced or windowed frame's labels absolute and gap-free. Rows appended with
 explicit integer labels keep them.
 
+A row appended with an explicit label equal to the **last** row's label **replaces**
+that row, and one equal to an **earlier** row's label raises (the frame is left
+unchanged). pandas keeps both rows — `concat` happily builds a duplicate label —
+while volas treats a repeated label as the same bar sent again, which is what a live
+feed means by it.
+
 On a `time_frame` frame the appended bars are *folded* into the forming period, so
 the live feed must be well-ordered: a `NaT`-timestamped bar (no period — symmetric
 with `cumulate`, which also rejects `NaT`) and an **out-of-order** bar (a timestamp

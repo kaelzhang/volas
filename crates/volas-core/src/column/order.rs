@@ -310,6 +310,60 @@ impl Column {
         }
     }
 
+    /// Overwrite the last cell with `src[src_row]` — value and validity — in place: the
+    /// row appended under the last row's label replaces it. The dtypes must match, as
+    /// for [`append`](Self::append). A float write keeps the column's NaN fact.
+    pub fn set_last_from(&mut self, src: &Column, src_row: usize) -> Result<()> {
+        let n = self.len();
+        let Some(last) = n.checked_sub(1) else {
+            return Err(VolasError::Shape("no last row to replace".into()));
+        };
+        match (self, src) {
+            (Column::F64(a), Column::F64(b)) => a.set(last, b[src_row]),
+            (Column::F32(a), Column::F32(b)) => a.set(last, b[src_row]),
+            (Column::Datetime(a), Column::Datetime(b)) => a.make_mut()[last] = b[src_row],
+            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+                a.make_mut()[last] = b[src_row];
+                av.set(last, n, bv.is_valid(src_row));
+            }
+            (Column::I64(a, av), Column::I64(b, bv)) => {
+                a.make_mut()[last] = b[src_row];
+                av.set(last, n, bv.is_valid(src_row));
+            }
+            (Column::I32(a, av), Column::I32(b, bv)) => {
+                a.make_mut()[last] = b[src_row];
+                av.set(last, n, bv.is_valid(src_row));
+            }
+            (Column::Str(a, av), Column::Str(b, bv)) => {
+                a.set_last(b.get(src_row));
+                av.set(last, n, bv.is_valid(src_row));
+            }
+            (s, o) => {
+                return Err(VolasError::DType(format!(
+                    "cannot replace a {} cell with a {} value",
+                    s.dtype(),
+                    o.dtype()
+                )))
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark the last cell missing in place, dtype-preserving (`NaN` / `NaT`, or an
+    /// invalid validity bit) — a replacing row that lacks this column. No-op when empty.
+    pub fn set_last_na(&mut self) {
+        let n = self.len();
+        let Some(last) = n.checked_sub(1) else { return };
+        match self {
+            Column::F64(a) => a.set(last, f64::NAN),
+            Column::F32(a) => a.set(last, f32::NAN),
+            Column::Datetime(a) => a.make_mut()[last] = i64::MIN,
+            Column::Bool(_, v) | Column::I64(_, v) | Column::I32(_, v) | Column::Str(_, v) => {
+                v.set(last, n, false)
+            }
+        }
+    }
+
     /// Extend a stale computed column with placeholder missing values, avoiding a
     /// temporary one-row [`Column`] allocation on the live append path.
     pub fn append_missing(&mut self, len: usize) -> Result<()> {

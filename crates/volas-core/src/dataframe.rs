@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::column::{Column, CombineOp};
 use crate::fxhash::FxHashMap;
 use crate::error::{Result, VolasError};
-use crate::index::{Index, IndexKind};
+use crate::index::{Index, IndexKind, Label};
 use crate::series::Series;
 
 /// Metadata for a materialized (cached) directive column: the directive that
@@ -605,6 +605,101 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Replace the last row whole with `src`'s row `src_row`, in place: each column takes
+    /// `src`'s value of the same name, or a missing value when `src` lacks it; a cached
+    /// directive column is left to its refresh. The label is unchanged. Only the last
+    /// row changed, so each cached column keeps what it carries and is stale from that
+    /// row on (see `invalidate_computed_forming_row`).
+    pub fn replace_last_row(&mut self, src: &DataFrame, src_row: usize) -> Result<()> {
+        let Some(last) = self.height.checked_sub(1) else {
+            return Err(VolasError::Shape("no last row to replace".into()));
+        };
+        if src_row >= src.height {
+            return Err(VolasError::Shape(format!(
+                "row position {src_row} is out of range (height {})",
+                src.height
+            )));
+        }
+        let same = self.names == src.names;
+        for pos in 0..self.columns.len() {
+            if !self.computed.is_empty() && self.computed.contains_key(&self.names[pos]) {
+                continue;
+            }
+            let from = if same { Some(pos) } else { src.column_pos(&self.names[pos]) };
+            match from {
+                Some(j) if src.columns[j].dtype() == self.columns[pos].dtype() => {
+                    self.columns[pos].set_last_from(&src.columns[j], src_row)?
+                }
+                Some(j) => {
+                    // a differently typed value takes the column's dtype first
+                    let cell = src.columns[j].slice(src_row, src_row + 1);
+                    let cell = cell.cast(self.columns[pos].dtype())?;
+                    self.columns[pos].set_last_from(&cell, 0)?
+                }
+                None => self.columns[pos].set_last_na(),
+            }
+        }
+        self.invalidate_computed_forming_row(last);
+        Ok(())
+    }
+
+    /// Append `other`'s rows, keyed by their labels: a row labelled like the current
+    /// last row replaces it whole ([`replace_last_row`](Self::replace_last_row)); a row
+    /// labelled like an earlier row is an error, and the frame is left unchanged; any
+    /// other row is appended. Rows without explicit labels (a `RangeIndex`) take the
+    /// next labels, as [`append`](Self::append). Deciding a row is O(1) when its label
+    /// follows the last one — a lookup only when it precedes it.
+    pub fn append_labelled(&mut self, other: &DataFrame) -> Result<()> {
+        if matches!(other.index.kind(), IndexKind::Range(_)) || other.height == 0 {
+            return self.append(other);
+        }
+        if other.height == 1 && self.height > 0 {
+            // The live single-bar path: one comparison with the last label.
+            let label = other.index.label_at(0);
+            let last = self.index.label_at(self.height - 1);
+            if label == last {
+                return self.replace_last_row(other, 0);
+            }
+            if !label_precedes(&label, &last) || self.index.position_of(&label).is_none() {
+                return self.append(other);
+            }
+        }
+        // Decide every row first, so an error leaves the frame unchanged.
+        let mut replaces = Vec::new();
+        for k in 0..other.height {
+            let label = other.index.label_at(k);
+            let prev = if k > 0 {
+                Some(other.index.label_at(k - 1))
+            } else {
+                self.height.checked_sub(1).map(|i| self.index.label_at(i))
+            };
+            let replace = prev.as_ref() == Some(&label);
+            if !replace && prev.as_ref().is_some_and(|p| label_precedes(&label, p)) {
+                let earlier = self.index.position_of(&label).is_some()
+                    || (0..k).any(|j| other.index.label_at(j) == label);
+                if earlier {
+                    return Err(VolasError::Value(format!(
+                        "cannot append a row labelled {}: an earlier row has that label \
+                         (only the last row can be replaced)",
+                        label_text(&label)
+                    )));
+                }
+            }
+            replaces.push(replace);
+        }
+        if !replaces.contains(&true) {
+            return self.append(other);
+        }
+        for (k, replace) in replaces.into_iter().enumerate() {
+            if replace {
+                self.replace_last_row(other, k)?;
+            } else {
+                self.append(&other.slice_data(k, k + 1))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Rename columns (pandas `rename(columns=...)`), returning a new frame.
     /// Names not in `mapping` are kept; columns and index are shared (cheap).
     pub fn rename(&self, mapping: &HashMap<String, String>) -> Result<DataFrame> {
@@ -687,6 +782,23 @@ impl DataFrame {
             }
         }
         (out, h, w)
+    }
+}
+
+/// Whether `a` orders before `b` (both integer / datetime, or both string).
+fn label_precedes(a: &Label, b: &Label) -> bool {
+    match (a, b) {
+        (Label::I64(x), Label::I64(y)) => x < y,
+        (Label::Str(x), Label::Str(y)) => x < y,
+        _ => false,
+    }
+}
+
+/// A label as written in a message.
+fn label_text(label: &Label) -> String {
+    match label {
+        Label::I64(v) => v.to_string(),
+        Label::Str(s) => format!("{s:?}"),
     }
 }
 

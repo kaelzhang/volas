@@ -9,11 +9,12 @@ use volas_time::{aggregate_period, AggSpec};
 #[allow(unused_imports)]
 use crate::*;
 
-/// Plan the in-place forming-row fold: for each of `inner`'s columns, the
-/// `(dst_col, src_col, combine_op)` triple pairing it with the matching bar column
-/// and its aggregator. Returns `None` (so the caller takes the batch-aggregate
-/// path) if any column is `Bool` / `Str`, which `Column::combine_at` cannot fold in
-/// place. The common OHLCV (all-numeric) frame is always foldable.
+/// Plan the in-place forming-row fold: for each of `inner`'s columns the bar carries,
+/// the `(dst_col, src_col, combine_op)` triple pairing it with the bar column and its
+/// aggregator. A column the bar does not carry (a cached directive) is not folded.
+/// Returns `None` (so the caller re-cumulates the period) if a carried column is
+/// `Bool` / `Str`, which `Column::combine_at` cannot fold in place. The common OHLCV
+/// (all-numeric) frame is always foldable.
 fn build_fold_ops(
     inner: &DataFrame,
     bar: &DataFrame,
@@ -21,30 +22,12 @@ fn build_fold_ops(
 ) -> Option<Vec<(usize, usize, CombineOp)>> {
     let mut ops = Vec::with_capacity(inner.width());
     for j in 0..inner.width() {
+        let name = &inner.names()[j];
+        let Some(bj) = bar.column_pos(name) else { continue };
         if matches!(inner.columns()[j].dtype(), DType::Bool | DType::Utf8) {
             return None;
         }
-        let name = &inner.names()[j];
-        if let Some(bj) = bar.column_pos(name) {
-            ops.push((j, bj, spec.agg_for(name).as_combine_op()));
-        }
-    }
-    Some(ops)
-}
-
-/// Plan the forming-row REPLACE: write each aggregate column of the re-cumulated
-/// open period over `inner`'s forming row in place (`CombineOp::Replace`). Returns
-/// `None` (so the caller takes the positional write) unless every aggregate column
-/// maps to a same-dtype, foldable `inner` column.
-fn build_replace_ops(inner: &DataFrame, agg: &DataFrame) -> Option<Vec<(usize, usize, CombineOp)>> {
-    let mut ops = Vec::with_capacity(agg.width());
-    for (k, (name, col)) in agg.names().iter().zip(agg.columns()).enumerate() {
-        let Some(j) = inner.column_pos(name) else { continue };
-        let dtype = inner.columns()[j].dtype();
-        if dtype != col.dtype() || matches!(dtype, DType::Bool | DType::Utf8) {
-            return None;
-        }
-        ops.push((j, k, CombineOp::Replace));
+        ops.push((j, bj, spec.agg_for(name).as_combine_op()));
     }
     Some(ops)
 }
@@ -150,8 +133,8 @@ impl PyDataFrame {
                 // `tfs.fold_plan` and reused while the schema is unchanged, so the hot
                 // path never re-runs the per-bar `column_pos` / `agg_for` HashMap name
                 // lookups (whose SipHash dominated the per-bar cost). A re-sent bar
-                // (can't un-combine max/min) or a non-numeric column falls back to the
-                // batch aggregate; both stale the cached directive tail identically.
+                // (can't un-combine max/min) or a non-numeric bar column re-cumulates
+                // the period instead; both stale only the forming row.
                 let plan_ok = !resent
                     && tfs.fold_plan.as_ref().is_some_and(|fp| fp.matches(inner, bar));
                 if !resent && !plan_ok {
@@ -166,22 +149,12 @@ impl PyDataFrame {
                 if let Some(fp) = plan {
                     inner.fold_forming_row(last, bar, 0, &fp.ops).map_err(pyerr)?;
                 } else {
-                    // Re-cumulate the open period and REPLACE the forming row with it.
-                    // Only that row changed, so the cached columns keep their states
-                    // (`fold_forming_row` with `Replace` ops); a column the in-place
-                    // write cannot hold takes the positional write, which recomputes
-                    // the cached columns from scratch.
+                    // Re-cumulate the open period and REPLACE the forming row with it —
+                    // in place, for every column dtype. Only that row changed, so the
+                    // cached columns keep their states and only that row goes stale.
                     let agg =
                         aggregate_period(open, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
-                    if let Some(ops) = build_replace_ops(inner, &agg) {
-                        inner.fold_forming_row(last, &agg, 0, &ops).map_err(pyerr)?;
-                    } else {
-                        for (name, col) in agg.names().iter().zip(agg.columns()) {
-                            if let Some(j) = inner.column_pos(name) {
-                                inner.assign_positions(j, &[last], col).map_err(pyerr)?;
-                            }
-                        }
-                    }
+                    inner.replace_last_row(&agg, 0).map_err(pyerr)?;
                 }
             } else {
                 // Roll over: the previous forming bar is final in `inner`; the new row is

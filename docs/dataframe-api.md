@@ -302,6 +302,28 @@ It is **strict**: every data column must be provided (a missing one raises — u
 `DataFrame` / `Row`, where a missing column is NA-padded), and an unknown key raises.
 Cached directive columns are not supplied — they are padded and refreshed automatically.
 
+Rows are keyed by their index label:
+
+- a row labelled like the frame's **last** row **replaces** it whole (a column the
+  row lacks becomes missing) — so an exchange re-sending the bar it is still building
+  updates that bar instead of adding a second one;
+- a row labelled like an **earlier** row raises `ValueError`, and the frame is left
+  unchanged;
+- rows without labels of their own (a `RangeIndex`) take the next labels.
+
+```python
+times = ['2026-01-01 17:00', '2026-01-01 17:01', '2026-01-01 17:02']
+df = DataFrame({'time': to_datetime(times), 'close': [10.0, 11.0, 12.0]}).set_index('time')
+df['ma:2']
+df.append({'time': Timestamp('2026-01-01 17:02'), 'close': 12.5})  # re-sent 17:02
+len(df)                 # 3
+df['ma:2'].iloc[-1]     # 11.75
+```
+
+Cached indicators stay exact after a replacement, and refreshing one costs what a
+newly appended row does — one step per recursive indicator, one window per
+finite-window one.
+
 If the caller is a **tf-aware** DataFrame (one built with a `time_frame`, or
 the result of `cumulate`), `append` instead **folds** each bar into the open
 period: the period's bars are kept in a small frame, a bar with the same timestamp

@@ -169,6 +169,11 @@ impl PyDataFrame {
     /// constructed row is the open period's first bar, so it must not already hold
     /// the finer bars appended after it.
     ///
+    /// On any other frame each row is keyed by its index label: a row labelled like
+    /// the last row replaces it whole, one labelled like an earlier row raises
+    /// ``ValueError`` (the frame unchanged), and unlabelled rows (a ``RangeIndex``) take
+    /// the next labels.
+    ///
     /// Missing columns are NaN-padded; cached directive columns go stale until
     /// ``fulfill()``. A snapshot taken via ``copy()`` / ``iloc`` is unaffected
     /// (it pays one copy-on-write the next time *it* is appended to).
@@ -197,7 +202,7 @@ impl PyDataFrame {
                 if me.tf.is_some() {
                     me.fold_append(&other_inner)?;
                 } else {
-                    me.inner.append(&other_inner).map_err(pyerr)?;
+                    me.inner.append_labelled(&other_inner).map_err(pyerr)?;
                 }
                 me.maybe_compact()?;
                 return Ok(slf);
@@ -208,7 +213,7 @@ impl PyDataFrame {
             if me.tf.is_some() {
                 me.fold_append(&df.inner)?;
             } else {
-                me.inner.append(&df.inner).map_err(pyerr)?;
+                me.inner.append_labelled(&df.inner).map_err(pyerr)?;
             }
             me.maybe_compact()?;
             return Ok(slf);
@@ -219,7 +224,7 @@ impl PyDataFrame {
             if me.tf.is_some() {
                 me.fold_append(&row.inner)?;
             } else {
-                me.inner.append(&row.inner).map_err(pyerr)?;
+                me.inner.append_labelled(&row.inner).map_err(pyerr)?;
             }
             me.maybe_compact()?;
             return Ok(slf);
@@ -232,7 +237,7 @@ impl PyDataFrame {
             if me.tf.is_some() {
                 me.fold_append(&bar)?;
             } else {
-                me.inner.append(&bar).map_err(pyerr)?;
+                me.inner.append_labelled(&bar).map_err(pyerr)?;
             }
             me.maybe_compact()?;
             return Ok(slf);

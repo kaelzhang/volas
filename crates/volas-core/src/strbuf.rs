@@ -191,6 +191,24 @@ impl StrBuffer {
     }
 }
 
+impl StrBuffer {
+    /// Overwrite the last cell with `s` in place (its bytes are the tail of the data
+    /// buffer, so only they are rewritten; the offsets stay zero-based and end at the
+    /// data's length). No-op on an empty buffer.
+    pub fn set_last(&mut self, s: &str) {
+        let n = self.len();
+        if n == 0 {
+            return;
+        }
+        let start = self.offsets.as_slice()[n - 1] as usize;
+        let data = self.data.make_mut();
+        data.truncate(start);
+        data.extend_from_slice(s.as_bytes());
+        let end = data.len() as i64;
+        self.offsets.make_mut()[n] = end;
+    }
+}
+
 /// Incremental builder (append / scatter paths). Every constructor seeds the
 /// leading `0` offset, so each `push` records exactly one cell.
 pub struct StrBufferBuilder {
