@@ -141,11 +141,7 @@ pub(super) fn dispatch(
             let mt = arg_usize(args, 2);
             let f = ma_typed(&data, arg_usize(args, 0), mt, true);
             let s = ma_typed(&data, arg_usize(args, 1), mt, true);
-            f64col(
-                (0..data.len())
-                    .map(|i| (f[i] - s[i]) / s[i] * 100.0)
-                    .collect(),
-            )
+            f64col((0..data.len()).map(|i| percent_oscillator(f[i], s[i])).collect())
         }
 
         // Group E China-market wrappers (formula-equivalent to apo/ppo, fixed to SMA).
@@ -154,7 +150,7 @@ pub(super) fn dispatch(
             let data = close(0)?;
             let f = ma_typed(&data, 1, 0, true);
             let s = ma_typed(&data, arg_usize(args, 0), 0, true);
-            f64col((0..data.len()).map(|i| (f[i] - s[i]) / s[i] * 100.0).collect())
+            f64col((0..data.len()).map(|i| percent_oscillator(f[i], s[i])).collect())
         }
         // dma's DDD line ≡ apo:fast,slow,0; dma.ama is the M-period SMA of that line.
         ("dma", sub) => {
@@ -383,5 +379,53 @@ pub(super) fn dispatch(
         }
 
         _ => super::momentum::dispatch(ops, name, sub, args),
+    }
+}
+
+/// TA-Lib `TA_INT_PO` (PPO, and `bias` ≡ `ppo:1,N,0`): `(fast - slow) / slow * 100`,
+/// and 0 where the slow MA is exactly zero (TA-Lib's `TA_IS_ZERO` is an absolute
+/// epsilon; volas tests exact zero). A fast MA still warming up stays NaN.
+fn percent_oscillator(fast: f64, slow: f64) -> f64 {
+    if slow == 0.0 && !fast.is_nan() {
+        0.0
+    } else {
+        (fast - slow) / slow * 100.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{exec::execute, parse};
+    use volas_core::{Column, DataFrame};
+
+    fn run(close: Vec<f64>, d: &str) -> Vec<f64> {
+        let df = DataFrame::new(vec!["close".into()], vec![Column::f64(close)], None).unwrap();
+        execute(&df, &parse(d).unwrap()).unwrap().to_f64_vec()
+    }
+
+    /// TA-Lib `TA_INT_PO`: a slow MA of exactly zero gives 0, not ±inf.
+    #[test]
+    fn ppo_zero_slow_ma_gives_zero() {
+        let r = run(vec![1.0, 2.0, -3.0, 4.0], "ppo:2,3,0");
+        assert!(r[0].is_nan() && r[1].is_nan());
+        assert_eq!(r[2], 0.0); // SMA3 = 0, SMA2 = -0.5
+        assert!((r[3] - -50.0).abs() < 1e-12); // (0.5 - 1) / 1 * 100
+    }
+
+    /// The zero guard does not invent a value where the fast MA is still warming up.
+    #[test]
+    fn ppo_zero_slow_ma_keeps_fast_warm_up_nan() {
+        let r = run(vec![1.0, -1.0, 5.0], "ppo:3,2,0");
+        assert!(r[1].is_nan()); // SMA2 = 0, SMA3 not yet defined
+        assert!((r[2] - (5.0 / 3.0 - 2.0) / 2.0 * 100.0).abs() < 1e-12);
+    }
+
+    /// `bias:N` ≡ `ppo:1,N,0`, so a zero SMA base gives 0 the same way.
+    #[test]
+    fn bias_zero_base_gives_zero() {
+        let r = run(vec![1.0, -1.0, 3.0], "bias:2");
+        assert!(r[0].is_nan());
+        assert_eq!(r[1], 0.0); // SMA2 = 0
+        assert!((r[2] - 200.0).abs() < 1e-12); // (3 - 1) / 1 * 100
     }
 }
