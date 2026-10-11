@@ -430,6 +430,39 @@ def test_malformed_arrow_strings_raise_value_error_on_every_import_path(arr):
         volas.DataFrame.from_arrow(pa.table({"a": arr}))
 
 
+class _Capsules:
+    """Replays one fixed `__arrow_c_array__` capsule pair."""
+
+    def __init__(self, pair):
+        self.pair = pair
+
+    def __arrow_c_array__(self, requested_schema=None):
+        return self.pair
+
+
+@pytest.mark.parametrize("first_consumer", ["pyarrow", "volas"])
+def test_an_already_consumed_capsule_pair_raises(first_consumer):
+    pair = volas.DataFrame({"x": [11, 22]})["x"].__arrow_c_array__()
+    if first_consumer == "pyarrow":
+        pa.Array._import_from_c_capsule(*pair)  # moves the array, releases the schema
+    else:
+        assert volas.Series.from_arrow(_Capsules(pair)).to_list() == [11, 22]
+    with pytest.raises(ValueError, match="released"):
+        volas.Series.from_arrow(_Capsules(pair))
+
+
+def test_an_already_consumed_stream_capsule_raises():
+    capsule = pa.table({"x": [1, 2]}).__arrow_c_stream__()
+
+    class Stream:
+        def __arrow_c_stream__(self, requested_schema=None):
+            return capsule
+
+    assert volas.DataFrame.from_arrow(Stream())["x"].to_list() == [1, 2]
+    with pytest.raises(ValueError, match="released"):
+        volas.DataFrame.from_arrow(Stream())
+
+
 @pytest.mark.parametrize("target", ["offsets", "data"])
 def test_imported_strings_do_not_see_later_producer_writes(target):
     # A string column is copied at import: the producer rewriting its buffers

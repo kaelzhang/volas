@@ -2,7 +2,7 @@
 //! structs the PyCapsule protocol (`__arrow_c_array__`) moves across the boundary.
 //! All arrow-rs use stays here — the Python layer only wraps these structs in capsules.
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void, CStr};
 
 use arrow_array::ffi::{from_ffi, to_ffi, FFI_ArrowArray, FFI_ArrowSchema};
 use arrow_array::{make_array, Array, OffsetSizeTrait};
@@ -88,6 +88,136 @@ pub unsafe fn column_from_c_capsules(
     array: *mut c_void,
     schema: *const c_void,
 ) -> Result<Column, ArrowError> {
+    // A capsule pair may already have been consumed (by volas or another library):
+    // a released struct's pointers dangle, so check `release` before reading either.
+    if array.is_null() || (*(array as *const FFI_ArrowArray)).is_released() {
+        return Err(released("array"));
+    }
+    check_schema(schema)?;
     let array = std::ptr::replace(array as *mut FFI_ArrowArray, FFI_ArrowArray::empty());
     column_from_c_data(array, &*(schema as *const FFI_ArrowSchema))
+}
+
+fn released(what: &str) -> ArrowError {
+    ArrowError::CDataInterface(format!(
+        "the Arrow {what} was already released (a capsule can be consumed only once)"
+    ))
+}
+
+/// The head of the C ABI `ArrowSchema` struct (the Arrow C Data Interface spec's
+/// stable layout): what must be checked before arrow-rs reads a foreign schema.
+#[repr(C)]
+struct RawSchema {
+    format: *const c_char,
+    name: *const c_char,
+    metadata: *const c_char,
+    flags: i64,
+    n_children: i64,
+    children: *mut *mut RawSchema,
+    dictionary: *mut RawSchema,
+    release: Option<unsafe extern "C" fn(*mut RawSchema)>,
+    private_data: *mut c_void,
+}
+
+/// A foreign `ArrowSchema` is live (not released) and well-formed where arrow-rs
+/// would otherwise panic: a non-null UTF-8 `format`, UTF-8 `name`s, and the same
+/// for every child and dictionary schema (the depth is bounded by the producer's
+/// nesting; a cycle would be a malformed producer).
+///
+/// # Safety
+/// `schema` is null or points to an `ArrowSchema` struct.
+pub(crate) unsafe fn check_schema(schema: *const c_void) -> Result<(), ArrowError> {
+    let s = schema as *const RawSchema;
+    if s.is_null() || (*s).release.is_none() {
+        return Err(released("schema"));
+    }
+    check_schema_fields(s)
+}
+
+unsafe fn check_schema_fields(s: *const RawSchema) -> Result<(), ArrowError> {
+    let malformed = |what: &str| ArrowError::CDataInterface(format!("malformed Arrow schema: {what}"));
+    let s = &*s;
+    if s.format.is_null() || CStr::from_ptr(s.format).to_str().is_err() {
+        return Err(malformed("the format is missing or not UTF-8"));
+    }
+    if !s.name.is_null() && CStr::from_ptr(s.name).to_str().is_err() {
+        return Err(malformed("a field name is not UTF-8"));
+    }
+    if s.n_children < 0 || (s.n_children > 0 && s.children.is_null()) {
+        return Err(malformed("the children are inconsistent"));
+    }
+    for i in 0..s.n_children as usize {
+        let child = *s.children.add(i);
+        if child.is_null() {
+            return Err(malformed("a child schema is null"));
+        }
+        check_schema_fields(child)?;
+    }
+    if !s.dictionary.is_null() {
+        check_schema_fields(s.dictionary)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ptr::null_mut;
+
+    unsafe extern "C" fn noop(_: *mut RawSchema) {}
+
+    fn raw(format: *const c_char, name: *const c_char) -> RawSchema {
+        RawSchema {
+            format,
+            name,
+            metadata: std::ptr::null(),
+            flags: 0,
+            n_children: 0,
+            children: null_mut(),
+            dictionary: null_mut(),
+            release: Some(noop),
+            private_data: null_mut(),
+        }
+    }
+
+    fn check(s: &RawSchema) -> String {
+        // SAFETY: `s` is a live, fully initialised RawSchema.
+        match unsafe { check_schema(s as *const RawSchema as *const c_void) } {
+            Ok(()) => "ok".into(),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn foreign_schemas_are_checked_before_arrow_reads_them() {
+        let (fmt, bad) = (c"l".as_ptr(), c"\xff".as_ptr());
+        assert_eq!(check(&raw(fmt, c"x".as_ptr())), "ok");
+        // SAFETY: a null pointer is rejected before any read.
+        assert!(unsafe { check_schema(std::ptr::null()) }.unwrap_err().to_string().contains("released"));
+        let mut released = raw(fmt, std::ptr::null());
+        released.release = None;
+        assert!(check(&released).contains("released"));
+        assert!(check(&raw(std::ptr::null(), std::ptr::null())).contains("format"));
+        assert!(check(&raw(bad, std::ptr::null())).contains("format"));
+        assert!(check(&raw(fmt, bad)).contains("name"));
+        let mut negative = raw(fmt, std::ptr::null());
+        negative.n_children = -1;
+        assert!(check(&negative).contains("children"));
+        let mut missing = raw(fmt, std::ptr::null());
+        missing.n_children = 1;
+        assert!(check(&missing).contains("children"));
+        let mut slots: [*mut RawSchema; 1] = [null_mut()];
+        let mut null_child = raw(fmt, std::ptr::null());
+        null_child.n_children = 1;
+        null_child.children = slots.as_mut_ptr();
+        assert!(check(&null_child).contains("child schema is null"));
+        let mut child = raw(bad, std::ptr::null());
+        // SAFETY: `children` points at the live one-slot array above.
+        unsafe { *null_child.children = &mut child };
+        assert!(check(&null_child).contains("format"));
+        let mut dict_value = raw(bad, std::ptr::null());
+        let mut with_dict = raw(fmt, std::ptr::null());
+        with_dict.dictionary = &mut dict_value;
+        assert!(check(&with_dict).contains("format"));
+    }
 }

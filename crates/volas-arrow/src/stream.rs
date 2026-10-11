@@ -12,7 +12,7 @@ use arrow_schema::{ArrowError, DataType, Field, Schema};
 use arrow_select::concat::concat_batches;
 use volas_core::Column;
 
-use crate::ffi::validate_imported;
+use crate::ffi::{check_schema, validate_imported};
 use crate::{column_from_arrow, column_to_arrow};
 
 /// Named columns as a one-batch Arrow C-Stream (the DataFrame export). Every column's
@@ -57,6 +57,7 @@ pub unsafe fn columns_from_c_stream(
     if rc != 0 {
         return Err(stream_error(&mut stream, rc));
     }
+    check_schema(&ffi_schema as *const FFI_ArrowSchema as *const c_void)?;
     let schema = Arc::new(Schema::try_from(&ffi_schema)?);
     let row_type = DataType::Struct(schema.fields().clone());
     let mut batches = Vec::new();
