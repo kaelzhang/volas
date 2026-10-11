@@ -1672,14 +1672,18 @@ call automatically (so you rarely call them yourself):
   column raises.
 
 **Zero-copy contract.** The *data* buffer is shared (no copy) in both directions for
-volas's native numeric (`int32` / `int64` / `float32` / `float64`), string, and
-nanosecond-datetime columns. The small repacks are:
+volas's native numeric (`int32` / `int64` / `float32` / `float64`) and
+nanosecond-datetime columns; a string column exports zero-copy too. The repacks are:
+
+- on **import**, every string column (`string` / `large_string`, sliced or not) — it is
+  copied into volas-owned buffers and validated there (in-range monotonic offsets, valid
+  UTF-8 for each present value; a null slot's unspecified bytes are dropped), so a
+  producer rewriting its buffers after the import cannot reach the volas column;
 
 - **`bool`** — volas stores one byte per value, Arrow one *bit*;
 - the **null bitmap** (≤ `n/8` bytes) — including, on export, a one-pass scan that turns
   a missing `float` (in-band `NaN`) into a real Arrow null;
-- on **import only**: a 32-bit-offset `Utf8` (widened to 64-bit offsets) or a
-  `string_view` (materialised to contiguous bytes), a coarser-than-ns timestamp
+- on **import only**: a `string_view` (materialised to contiguous bytes), a coarser-than-ns timestamp
   (rescaled), a `Decimal128` / `Decimal256` (→ `f64`, **lossy** past ~15 digits — keep
   prices as strings for exactness), a narrow / unsigned integer (→ `i64`; a `UInt64` past
   `i64::MAX` has no lossless image and raises), a dictionary / categorical column (decoded

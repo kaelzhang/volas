@@ -430,6 +430,24 @@ def test_malformed_arrow_strings_raise_value_error_on_every_import_path(arr):
         volas.DataFrame.from_arrow(pa.table({"a": arr}))
 
 
+@pytest.mark.parametrize("target", ["offsets", "data"])
+def test_imported_strings_do_not_see_later_producer_writes(target):
+    # A string column is copied at import: the producer rewriting its buffers
+    # afterwards (here past the data end / into invalid UTF-8) cannot reach it.
+    import struct
+    data, offsets = bytearray(b"ab"), bytearray(struct.pack("<qqq", 0, 1, 2))
+    arr = pa.Array.from_buffers(
+        pa.large_string(), 2, [None, pa.py_buffer(offsets), pa.py_buffer(data)])
+    arr.validate(full=True)
+    s = volas.Series.from_arrow(arr)
+    if target == "offsets":
+        offsets[16:24] = struct.pack("<q", 1 << 40)
+    else:
+        data[0] = 0xFF
+    assert s.to_list() == ["a", "b"]
+    assert s.max() == "b"
+
+
 def test_valid_arrow_null_slot_with_non_utf8_payload_imports_as_na():
     # Arrow leaves a null slot's bytes unspecified: this array passes pyarrow's FULL
     # validation, so it must import — the null's payload is never decoded as text.

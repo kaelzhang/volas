@@ -7,10 +7,13 @@
 //! The **data** buffers move without a copy in both directions: a volas
 //! [`Buffer<T>`](volas_core::Buffer) is published to Arrow as a borrowed allocation
 //! (its `Arc` is the keep-alive), and an Arrow buffer is imported as a
-//! [`Buffer::Borrowed`](volas_core::Buffer) whose guard is the source array. Two
-//! representations are not bit-compatible and are repacked (a copy):
+//! [`Buffer::Borrowed`](volas_core::Buffer) whose guard is the source array. These
+//! are repacked (a copy):
 //! - **bool** — volas stores one byte per value, Arrow one *bit*;
-//! - **validity** — the null bitmap (≤ `n/8` bytes, negligible beside the data).
+//! - **validity** — the null bitmap (≤ `n/8` bytes, negligible beside the data);
+//! - **imported strings** — copied into volas-owned buffers and validated there: the
+//!   unchecked string readers rely on that invariant, which a producer rewriting a
+//!   borrowed buffer after import could break (export stays zero-copy).
 
 use std::any::Any;
 use std::panic::RefUnwindSafe;
@@ -200,7 +203,7 @@ mod tests {
             column_from_arrow(&arr).unwrap(),
             Column::str_with(vec!["a".into(), "bc".into()], Validity::dense())
         );
-        // large_string is the zero-copy path
+        // large_string offsets need no widening
         let large: ArrayRef = Arc::new(LargeStringArray::from(vec!["a", "bc"]));
         assert_eq!(column_from_arrow(&large).unwrap().dtype(), col_str_dtype());
     }
