@@ -171,3 +171,8 @@ def test_median_and_quantile_of_extreme_finite_values_do_not_overflow():
     assert DataFrame({'a': [-1e308, 1e308]}).median().to_list() == [0.0]
     assert DataFrame({'a': [-1e308, 1e308]}).quantile(0.5).to_list() == [0.0]
     assert _s([1e308, 1e308]).median() == 1e308
+
+
+def test_interpolation_between_extreme_finite_values_does_not_overflow():
+    got = _s([-1e308, None, None, None, 1e308]).interpolate().to_list()
+    assert got == [-1e308, -5e307, 0.0, 5e307, 1e308]
