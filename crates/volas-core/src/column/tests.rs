@@ -904,3 +904,39 @@ fn combine_at_rejects_non_numeric() {
         .combine_at(0, CombineOp::Replace, &Column::str(vec!["b".into()]), 0)
         .is_err());
 }
+
+#[test]
+fn binary_ops_reject_unequal_lengths() {
+    // Every two-column operation owns one equal-length check: a mismatch is a
+    // `Shape` error — never a truncated result, a panic, or an unchecked read.
+    let shape = |r: Result<Column>| matches!(r, Err(VolasError::Shape(_)));
+    let (i2, i1) = (Column::i64(vec![1, 2]), Column::i64(vec![10]));
+    let (f2, f1) = (Column::f64(vec![1.0, 2.0]), Column::f64(vec![10.0]));
+    for op in [BinOp::Add, BinOp::Sub, BinOp::Mul] {
+        assert!(shape(i2.binary(&i1, op)));
+        assert!(shape(f2.binary(&f1, op)));
+        assert!(shape(i1.binary(&i2, op)));
+    }
+    let (b2, b1) = (Column::bool(vec![true, false]), Column::bool(vec![true]));
+    assert!(shape(b2.binary(&b1, BinOp::Add)));
+    assert!(shape(i2.div(&i1)));
+    assert!(shape(i2.floordiv(&i1)));
+    assert!(shape(f2.floordiv(&f1)));
+    let s3 = Column::str(vec!["a".into(), "b".into(), "c".into()]);
+    let s0 = Column::str(vec![]);
+    let (d2, d1) = (Column::datetime(vec![1, 2]), Column::datetime(vec![1]));
+    for op in [CmpOp::Eq, CmpOp::Ne, CmpOp::Lt] {
+        assert!(shape(s3.compare(&s0, op)));
+        assert!(shape(s0.compare(&s3, op)));
+        assert!(shape(i2.compare(&i1, op)));
+        assert!(shape(f1.compare(&f2, op)));
+        assert!(shape(d2.compare(&d1, op)));
+        assert!(shape(b2.compare(&b1, op)));
+    }
+    for op in [BoolOp::And, BoolOp::Or, BoolOp::Xor] {
+        assert!(shape(b2.logical(&b1, op)));
+        assert!(shape(b1.logical(&b2, op)));
+    }
+    // equal lengths still pass the check
+    assert_eq!(i2.binary(&i2, BinOp::Add).unwrap(), Column::i64(vec![2, 4]));
+}

@@ -3,6 +3,21 @@
 use super::*;
 
 impl Column {
+    /// The single equal-length check every two-column operation calls before any
+    /// element access: returns the shared length, or a [`VolasError::Shape`] when
+    /// the operands differ — never a truncated result, a panic, or an
+    /// out-of-bounds read.
+    pub(crate) fn require_same_len(&self, other: &Column) -> Result<usize> {
+        let (n, m) = (self.len(), other.len());
+        if n == m {
+            Ok(n)
+        } else {
+            Err(VolasError::Shape(format!(
+                "operands have unequal lengths: {n} vs {m}"
+            )))
+        }
+    }
+
     /// Combined validity of `self` and `other` (present only where both are) —
     /// the missing-value rule for a dtype-preserving binary op.
     fn combined_nulls(&self, other: &Column) -> Validity {
@@ -31,8 +46,9 @@ impl Column {
     /// (`int ∘ int → i64`, else f64). `bool ∘ bool` is logical, matching pandas:
     /// `+` is OR, `*` is AND, `-` is an error (numpy disallows bool subtraction);
     /// `bool ∘ number` promotes (bool acts as 0/1). Wrapping int ops match pandas
-    /// overflow. Equal lengths assumed.
+    /// overflow. Unequal lengths are a [`VolasError::Shape`] error.
     pub fn binary(&self, other: &Column, op: BinOp) -> Result<Column> {
+        self.require_same_len(other)?;
         self.require_numeric()?;
         other.require_numeric()?;
         if let (Column::Bool(a, av), Column::Bool(b, bv)) = (self, other) {
@@ -76,6 +92,7 @@ impl Column {
     /// True division `self / other` (pandas `/`): always float. `bool / bool` is
     /// an error, matching pandas (division is not defined on bool).
     pub fn div(&self, other: &Column) -> Result<Column> {
+        self.require_same_len(other)?;
         self.require_numeric()?;
         other.require_numeric()?;
         if matches!((self, other), (Column::Bool(_, _), Column::Bool(_, _))) {
@@ -96,6 +113,7 @@ impl Column {
     /// is float64. NA in either operand propagates. `bool // bool` is an error, like
     /// true division.
     pub fn floordiv(&self, other: &Column) -> Result<Column> {
+        let n = self.require_same_len(other)?;
         self.require_numeric()?;
         other.require_numeric()?;
         if matches!((self, other), (Column::Bool(_, _), Column::Bool(_, _))) {
@@ -103,7 +121,6 @@ impl Column {
                 "floor division is not supported between two bool columns".into(),
             ));
         }
-        let n = self.len();
         let st = binary_supertype(self.dtype(), other.dtype());
         // A present divisor of 0 forces pandas' float path (`inf` / `-inf` / `nan`).
         let int_path = matches!(st, DType::I64 | DType::I32)
@@ -137,13 +154,14 @@ impl Column {
     /// loses `datetime` precision), numeric kinds compare as `f64`. A missing slot
     /// (either side NA) follows IEEE — `!=` is `true`, every other op `false`,
     /// matching the existing numeric comparison. Comparing two incompatible kinds
-    /// (e.g. `str` vs a number) is a [`VolasError::DType`]. Equal lengths assumed.
+    /// (e.g. `str` vs a number) is a [`VolasError::DType`]; unequal lengths are a
+    /// [`VolasError::Shape`].
     pub fn compare(&self, other: &Column, op: CmpOp) -> Result<Column> {
-        let n = self.len();
+        let n = self.require_same_len(other)?;
         let numeric_like = |c: &Column| c.dtype().is_numeric() || matches!(c, Column::Bool(..));
         let out = match (self, other) {
             (Column::Str(a, av), Column::Str(b, bv)) => cmp_typed(n, op, |i| {
-                // SAFETY: `i < n` and both columns have length `n` (equal lengths assumed).
+                // SAFETY: `i < n` and `require_same_len` proved both columns have length `n`.
                 (av.is_valid(i) && bv.is_valid(i))
                     .then(|| unsafe { a.get_unchecked(i).cmp(b.get_unchecked(i)) })
             }),
@@ -173,10 +191,11 @@ impl Column {
     /// Three-valued logical `and` / `or` / `xor` (pandas `&` / `|` / `^`), Kleene
     /// semantics: a present `false` makes `and` false and a present `true` makes
     /// `or` true even when the other side is missing; otherwise a missing operand
-    /// yields NA. A non-bool operand is read as `x != 0` (present). Equal lengths.
-    pub fn logical(&self, other: &Column, op: BoolOp) -> Column {
-        let n = self.len();
-        from_option_bools(
+    /// yields NA. A non-bool operand is read as `x != 0` (present). Unequal lengths
+    /// are a [`VolasError::Shape`] error.
+    pub fn logical(&self, other: &Column, op: BoolOp) -> Result<Column> {
+        let n = self.require_same_len(other)?;
+        Ok(from_option_bools(
             n,
             (0..n).map(|i| {
                 let (a, ap) = self.bool_at(i);
@@ -203,7 +222,7 @@ impl Column {
                     BoolOp::Xor => (ap && bp).then_some(a ^ b),
                 }
             }),
-        )
+        ))
     }
 
     /// Logical NOT (pandas `~`), propagating missing (NA in -> NA out). A non-bool
