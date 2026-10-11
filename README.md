@@ -258,7 +258,8 @@ Which gets the 2-period simple moving average on column `"close"`.
 
 - **data** `dict[str, list | np.ndarray] | DataFrame` the column data, one of:
   - a **dict** mapping each column name to an equal-length list or NumPy array
-    (`float`, `int`, `bool`, `datetime64`, or `string`);
+    (`float`, `int`, `bool`, `datetime64`, or `string`); a NumPy **masked array**'s
+    masked cells become `volas.NA`;
   - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`).
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge

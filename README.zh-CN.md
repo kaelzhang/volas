@@ -219,7 +219,7 @@ df['ma:2']
 
 - **data** `dict[str, list | np.ndarray] | DataFrame` 列数据，为以下之一：
   - 一个 **dict**，把每个列名映射到等长的 list 或 NumPy 数组（`float`、`int`、
-    `bool`、`datetime64` 或 `string`）；
+    `bool`、`datetime64` 或 `string`）；NumPy **masked array** 中被屏蔽的单元格成为 `volas.NA`；
   - 另一个 volas **`DataFrame`**，此时会被拷贝（如同 `pandas.DataFrame(df)`）。
 
   构造函数**不接受** `pandas.DataFrame` 或 Arrow 对象——请改用专门的
