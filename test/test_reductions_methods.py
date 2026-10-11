@@ -149,3 +149,17 @@ def test_nunique_unique_canonicalize_zero():
     assert s.nunique() == 2                         # {0.0, 1.0}
     u = s.unique().to_list()
     assert u[0] == 0.0 and u[1] == 1.0 and len(u) == 2
+
+
+def test_constant_sample_has_exactly_zero_dispersion():
+    # 101.37 is not exactly representable: a sum/n mean leaves a residue that the
+    # deviations must not see. pandas' exact-constant results (2.0 * 20) are the oracle.
+    want = pd.Series([2.0] * 20)
+    for x in ([101.37] * 20, [2.0] * 20):
+        s = _s(x)
+        df = DataFrame({'a': x, 'b': x})
+        for m in ('var', 'std', 'sem', 'skew', 'kurt'):
+            assert getattr(s, m)() == getattr(want, m)() == 0.0, m
+            assert getattr(df, m)().to_list() == [0.0, 0.0], m
+        assert s.cov(s) == 0.0
+        assert np.isnan(s.corr(s))

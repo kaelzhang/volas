@@ -6,7 +6,7 @@ use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySlice;
 use volas_core::{
-    binary_supertype, Column, DType, Series,
+    binary_supertype, stats, Column, DType, Series,
 };
 
 #[allow(unused_imports)]
@@ -81,13 +81,7 @@ impl PySeries {
         }
     }
     pub(crate) fn var_f64(&self) -> f64 {
-        let v = non_nan(&self.inner.data);
-        let n = v.len();
-        if n < 2 {
-            return f64::NAN;
-        }
-        let mean = v.iter().sum::<f64>() / n as f64;
-        v.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1) as f64
+        stats::var(&self.inner.data.to_f64_vec())
     }
     pub(crate) fn median_f64(&self) -> f64 {
         let mut v = non_nan(&self.inner.data);

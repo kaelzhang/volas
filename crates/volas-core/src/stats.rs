@@ -126,18 +126,40 @@ fn non_nan(v: &[f64]) -> Vec<f64> {
     v.iter().copied().filter(|x| !x.is_nan()).collect()
 }
 
-/// Standard error of the mean (pandas `sem`, ddof=1): `sample_std / sqrt(n)`.
-/// NaN with fewer than two finite values.
-pub fn sem(v: &[f64]) -> f64 {
+/// The center every deviation-based statistic (variance, moments, covariance)
+/// measures from: the sample mean — except that a constant sample's center is its
+/// value EXACTLY. `sum / n` leaves a rounding residue for a constant that is not
+/// exactly representable (`101.37 × 20 / 20 ≠ 101.37`), which the deviations would
+/// then report as dispersion. `0.0 == -0.0`, so signed zeros are one value.
+pub fn deviation_center(xs: impl Iterator<Item = f64> + Clone) -> f64 {
+    let mut it = xs.clone();
+    let Some(first) = it.next() else {
+        return f64::NAN;
+    };
+    if it.all(|x| x == first) {
+        return first;
+    }
+    let (sum, n) = xs.fold((0.0, 0usize), |(s, n), x| (s + x, n + 1));
+    sum / n as f64
+}
+
+/// Sample variance (pandas `var`, ddof=1) of the finite values; NaN with fewer
+/// than two. A constant sample is exactly `0`.
+pub fn var(v: &[f64]) -> f64 {
     let xs = non_nan(v);
     let n = xs.len();
     if n < 2 {
         return f64::NAN;
     }
-    let nf = n as f64;
-    let mean = xs.iter().sum::<f64>() / nf;
-    let var = xs.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / (nf - 1.0);
-    (var / nf).sqrt()
+    let mean = deviation_center(xs.iter().copied());
+    xs.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / (n - 1) as f64
+}
+
+/// Standard error of the mean (pandas `sem`, ddof=1): `sample_std / sqrt(n)`.
+/// NaN with fewer than two finite values.
+pub fn sem(v: &[f64]) -> f64 {
+    let n = v.iter().filter(|x| !x.is_nan()).count();
+    (var(v) / n as f64).sqrt()
 }
 
 /// Adjusted Fisher-Pearson sample skewness (pandas `skew`). NaN with fewer than
@@ -149,7 +171,7 @@ pub fn skew(v: &[f64]) -> f64 {
         return f64::NAN;
     }
     let nf = n as f64;
-    let mean = xs.iter().sum::<f64>() / nf;
+    let mean = deviation_center(xs.iter().copied());
     let m2: f64 = xs.iter().map(|&x| (x - mean).powi(2)).sum();
     let m3: f64 = xs.iter().map(|&x| (x - mean).powi(3)).sum();
     if m2 == 0.0 {
@@ -167,7 +189,7 @@ pub fn kurt(v: &[f64]) -> f64 {
         return f64::NAN;
     }
     let nf = n as f64;
-    let mean = xs.iter().sum::<f64>() / nf;
+    let mean = deviation_center(xs.iter().copied());
     let m2: f64 = xs.iter().map(|&x| (x - mean).powi(2)).sum();
     let m4: f64 = xs.iter().map(|&x| (x - mean).powi(4)).sum();
     if m2 == 0.0 {
@@ -206,8 +228,8 @@ pub fn cov(x: &[f64], y: &[f64]) -> f64 {
         return f64::NAN;
     }
     let nf = n as f64;
-    let mx = p.iter().map(|t| t.0).sum::<f64>() / nf;
-    let my = p.iter().map(|t| t.1).sum::<f64>() / nf;
+    let mx = deviation_center(p.iter().map(|t| t.0));
+    let my = deviation_center(p.iter().map(|t| t.1));
     p.iter().map(|(a, b)| (a - mx) * (b - my)).sum::<f64>() / (nf - 1.0)
 }
 
@@ -219,9 +241,8 @@ pub fn corr(x: &[f64], y: &[f64]) -> f64 {
     if n < 2 {
         return f64::NAN;
     }
-    let nf = n as f64;
-    let mx = p.iter().map(|t| t.0).sum::<f64>() / nf;
-    let my = p.iter().map(|t| t.1).sum::<f64>() / nf;
+    let mx = deviation_center(p.iter().map(|t| t.0));
+    let my = deviation_center(p.iter().map(|t| t.1));
     let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
     for (a, b) in &p {
         let (dx, dy) = (a - mx, b - my);
@@ -334,6 +355,18 @@ mod tests {
 
     fn nan() -> f64 {
         f64::NAN
+    }
+
+    #[test]
+    fn constant_samples_are_centered_exactly() {
+        assert!(deviation_center(std::iter::empty()).is_nan());
+        assert_eq!(deviation_center([101.37; 20].into_iter()), 101.37);
+        assert_eq!(deviation_center([1.0, 2.0].into_iter()), 1.5);
+        let flat = [101.37; 20];
+        assert_eq!((var(&flat), sem(&flat), skew(&flat), kurt(&flat)), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(cov(&flat, &flat), 0.0);
+        assert!(corr(&flat, &flat).is_nan());
+        assert!(var(&[1.0]).is_nan());
     }
 
     fn eq(a: &[f64], b: &[f64]) -> bool {
