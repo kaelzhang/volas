@@ -128,6 +128,8 @@ impl PySeries {
                 self.inner.len()
             )));
         }
+        // the condition pairs with `self` by position, so its labels must align
+        require_aligned(&self.inner.index, &cond.inner.index)?;
         Ok(c)
     }
 
