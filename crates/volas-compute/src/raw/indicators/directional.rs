@@ -78,14 +78,38 @@ fn di(dm_sm: &[f64], tr_sm: &[f64], period: usize) -> Vec<f64> {
     let n = dm_sm.len();
     let mut out = vec![f64::NAN; n];
     for i in period..n {
-        let t = tr_sm[i];
-        out[i] = if t.abs() < 1e-14 {
-            0.0
-        } else {
-            100.0 * dm_sm[i] / t
-        };
+        out[i] = di_val(dm_sm[i], tr_sm[i]);
     }
     out
+}
+
+/// `100·dm_sm/tr_sm` with TA-Lib's ~0-TR guard — one row's ±DI, the one owner of that
+/// rule for the full computation and the resumes.
+#[inline]
+pub(super) fn di_val(dm_sm: f64, tr_sm: f64) -> f64 {
+    if tr_sm.abs() < 1e-14 {
+        0.0
+    } else {
+        100.0 * dm_sm / tr_sm
+    }
+}
+
+/// One row's DX from the +DM / −DM / TR sums, with TA-Lib's ~0-TR and ~0-DI-sum guards —
+/// the one owner of that rule for the full computation and the resumes.
+#[inline]
+pub(super) fn dx_val(sp: f64, sm: f64, st: f64) -> f64 {
+    if st.abs() < 1e-14 {
+        0.0
+    } else {
+        let plus_di = 100.0 * sp / st;
+        let minus_di = 100.0 * sm / st;
+        let sum = plus_di + minus_di;
+        if sum.abs() < 1e-14 {
+            0.0
+        } else {
+            100.0 * (minus_di - plus_di).abs() / sum
+        }
+    }
 }
 
 /// +DI (TA-Lib PLUS_DI). Lookback `period`.
@@ -147,19 +171,7 @@ pub fn dx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let n = sp.len();
     let mut out = vec![f64::NAN; n];
     for i in period..n {
-        let t = st[i];
-        out[i] = if t.abs() < 1e-14 {
-            0.0
-        } else {
-            let plus_di = 100.0 * sp[i] / t;
-            let minus_di = 100.0 * sm[i] / t;
-            let sum = plus_di + minus_di;
-            if sum.abs() < 1e-14 {
-                0.0
-            } else {
-                100.0 * (minus_di - plus_di).abs() / sum
-            }
-        };
+        out[i] = dx_val(sp[i], sm[i], st[i]);
     }
     out
 }

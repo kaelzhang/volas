@@ -140,16 +140,6 @@ fn dm_tr_step(high: &[f64], low: &[f64], close: &[f64], i: usize, a: f64, s: &mu
     s[2] = s[2].mul_add(a, tr1(high, low, close, i));
 }
 
-/// `100·dm_sm/tr_sm` with TA-Lib's ~0-TR guard — the per-row `di` value.
-#[inline]
-fn di_val(dm_sm: f64, tr_sm: f64) -> f64 {
-    if tr_sm.abs() < 1e-14 {
-        0.0
-    } else {
-        100.0 * dm_sm / tr_sm
-    }
-}
-
 /// Final +DI state `[sp, st]` (+DM and TR running sums) — pairs with [`plus_di_resume`].
 pub fn plus_di_final_state(
     high: &[f64],
@@ -220,23 +210,6 @@ pub fn minus_di_resume(
         out.push(di_val(s[1], s[2]));
     }
     Some((out, vec![s[1], s[2]]))
-}
-
-/// The per-row DX value from the +DM/−DM/TR sums — the exact arithmetic of [`dx`].
-#[inline]
-fn dx_val(sp: f64, sm: f64, st: f64) -> f64 {
-    if st.abs() < 1e-14 {
-        0.0
-    } else {
-        let plus_di = 100.0 * sp / st;
-        let minus_di = 100.0 * sm / st;
-        let sum = plus_di + minus_di;
-        if sum.abs() < 1e-14 {
-            0.0
-        } else {
-            100.0 * (minus_di - plus_di).abs() / sum
-        }
-    }
 }
 
 /// Final DX state `[sp, sm, st]` (all three running sums) — pairs with [`dx_resume`].

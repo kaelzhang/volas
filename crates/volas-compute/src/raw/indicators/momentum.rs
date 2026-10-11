@@ -49,6 +49,14 @@ fn roc_ratio(data: &[f64], period: usize, f: impl Fn(f64, f64) -> f64) -> Vec<f6
     out
 }
 
+/// One rate of change `100·(current/prior − 1)`; a prior of exactly zero gives `0.0`
+/// (TA-Lib's divide-by-zero guard). The one owner of the ROC rule: [`roc`] and TRIX's
+/// full computation and resumes all evaluate it here.
+#[inline(always)]
+fn roc_value(current: f64, prior: f64) -> f64 {
+    if prior == 0.0 { 0.0 } else { (current / prior - 1.0) * 100.0 }
+}
+
 /// Rate of change: `100 * (data/data[period ago] - 1)` (TA-Lib ROC).
 pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
@@ -70,12 +78,7 @@ pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
         // The three pointers advance together over `[period, n)`, `[0, n-period)`,
         // and the valid output region. This keeps the hot loop in TA-Lib's
         // trailing-index shape without recomputing `i` and `i-period` addresses.
-        let prior = unsafe { *prior_ptr };
-        let value = if prior == 0.0 {
-            0.0
-        } else {
-            (unsafe { *cur_ptr } / prior - 1.0) * 100.0
-        };
+        let value = roc_value(unsafe { *cur_ptr }, unsafe { *prior_ptr });
         unsafe {
             *out_write = value;
             cur_ptr = cur_ptr.add(1);
@@ -316,7 +319,7 @@ pub fn trix_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`trix`] from `state = [e0, e1, e2]` over rows `[from, n)`, bit-identical to a
 /// full recompute: advance the 3-deep cascade per bar, then the 1-period ROC of the 3rd
-/// stage, `(e2_new / e2_prev − 1)·100` — the exact `roc(., 1)` arithmetic, with `e2_prev`
+/// stage — [`roc`]'s own rule (`roc_value`, its zero-base guard included), with `e2_prev`
 /// the carried 3rd-stage value (= the cascade output at `from−1`). Reads only
 /// `close[from..]`.
 pub fn trix_resume(
@@ -332,7 +335,7 @@ pub fn trix_resume(
     for &x in &close[from..n] {
         let prev = e[2]; // the cascade output at the previous row (ROC's denominator)
         kernels::ema_cascade_step(&mut e, x, k);
-        out.push((e[2] / prev - 1.0) * 100.0);
+        out.push(roc_value(e[2], prev));
     }
     (out, e.to_vec())
 }
@@ -776,9 +779,9 @@ fn ultosc_value([a1, b1, a2, b2, a3, b3]: [f64; 6]) -> f64 {
 /// Scalar single-row twin of [`trix_resume`]: the value at `row` only, from
 /// `state = [e0, e1, e2]` (the 3-deep cascade as of `row-1`), zero-alloc and
 /// bit-identical to the `trix_resume` loop body at index `row`. Advances the
-/// 3-deep cascade one bar with `close[row]` using the same `mul_add` lattice
-/// step as [`kernels::ema_cascade_step`], then the 1-period ROC of the 3rd
-/// stage: `(e2_new / e2_prev - 1.0) * 100.0` with `e2_prev = state[2]`. The advanced
+/// 3-deep cascade one bar with `close[row]` by [`kernels::ema_cascade_step`], then the
+/// 1-period ROC of the 3rd stage by [`roc`]'s own rule (`roc_value`), with
+/// `e2_prev = state[2]`. The advanced
 /// cascade (the state as of `row`) is written into `next`.
 pub fn trix_resume_one(
     close: &[f64],
@@ -793,15 +796,9 @@ pub fn trix_resume_one(
     let k = 2.0 / (period as f64 + 1.0);
     let mut e = [state[0], state[1], state[2]];
     let prev = e[2]; // cascade output at row-1 (ROC's denominator)
-    // Same lattice step as `kernels::ema_cascade_step::<3>`: each stage consumes
-    // the previous stage's just-updated output, `*stage = (x - *stage).mul_add(k, *stage)`.
-    let mut x = close[row];
-    for stage in e.iter_mut() {
-        *stage = (x - *stage).mul_add(k, *stage);
-        x = *stage;
-    }
+    kernels::ema_cascade_step(&mut e, close[row], k);
     next.copy_from_slice(&e);
-    Some((e[2] / prev - 1.0) * 100.0)
+    Some(roc_value(e[2], prev))
 }
 
 

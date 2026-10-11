@@ -17,64 +17,9 @@ pub fn sar(high: &[f64], low: &[f64], acceleration: f64, maximum: f64) -> Vec<f6
         return out;
     }
     let af_init = acceleration.min(maximum); // TA-Lib clamps the step to the cap
-                                             // Initial direction from the one-period −DM at bar 1: a positive −DM ⇒ short.
-    let diff_p = high[1] - high[0];
-    let diff_m = low[0] - low[1];
-    let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m {
-        diff_m
-    } else {
-        0.0
-    };
-    let mut is_long = !(minus_dm1 > 0.0);
-
-    let mut af = af_init;
-    let (mut ep, mut sar) = if is_long {
-        (high[1], low[0])
-    } else {
-        (low[1], high[0])
-    };
-    // "Cheat" the first iteration: prime new high/low with bar 1 (as TA-Lib does).
-    let mut new_low = low[1];
-    let mut new_high = high[1];
-
+    let mut st = sar_seed(high, low, af_init);
     for today in 1..n {
-        let prev_low = new_low;
-        let prev_high = new_high;
-        new_low = low[today];
-        new_high = high[today];
-        if is_long {
-            if new_low <= sar {
-                // Reverse to short: stop becomes the extreme point, clamped up.
-                is_long = false;
-                sar = ep.max(prev_high).max(new_high);
-                out[today] = sar;
-                af = af_init;
-                ep = new_low;
-                sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
-            } else {
-                out[today] = sar;
-                if new_high > ep {
-                    ep = new_high;
-                    af = (af + af_init).min(maximum);
-                }
-                sar = (sar + af * (ep - sar)).min(prev_low).min(new_low);
-            }
-        } else if new_high >= sar {
-            // Reverse to long: stop becomes the extreme point, clamped down.
-            is_long = true;
-            sar = ep.min(prev_low).min(new_low);
-            out[today] = sar;
-            af = af_init;
-            ep = new_high;
-            sar = (sar + af * (ep - sar)).min(prev_low).min(new_low);
-        } else {
-            out[today] = sar;
-            if new_low < ep {
-                ep = new_low;
-                af = (af + af_init).min(maximum);
-            }
-            sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
-        }
+        out[today] = sar_step(&mut st, high[today], low[today], af_init, maximum);
     }
     out
 }
@@ -101,56 +46,11 @@ pub fn sar_final_state(
         return None;
     }
     let af_init = acceleration.min(maximum);
-    let diff_p = high[1] - high[0];
-    let diff_m = low[0] - low[1];
-    let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m {
-        diff_m
-    } else {
-        0.0
-    };
-    let mut is_long = !(minus_dm1 > 0.0);
-    let mut af = af_init;
-    let (mut ep, mut sar) = if is_long {
-        (high[1], low[0])
-    } else {
-        (low[1], high[0])
-    };
-    let mut new_low = low[1];
-    let mut new_high = high[1];
+    let mut st = sar_seed(high, low, af_init);
     for today in 1..n {
-        let prev_low = new_low;
-        let prev_high = new_high;
-        new_low = low[today];
-        new_high = high[today];
-        if is_long {
-            if new_low <= sar {
-                is_long = false;
-                sar = ep.max(prev_high).max(new_high);
-                af = af_init;
-                ep = new_low;
-                sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
-            } else {
-                if new_high > ep {
-                    ep = new_high;
-                    af = (af + af_init).min(maximum);
-                }
-                sar = (sar + af * (ep - sar)).min(prev_low).min(new_low);
-            }
-        } else if new_high >= sar {
-            is_long = true;
-            sar = ep.min(prev_low).min(new_low);
-            af = af_init;
-            ep = new_high;
-            sar = (sar + af * (ep - sar)).min(prev_low).min(new_low);
-        } else {
-            if new_low < ep {
-                ep = new_low;
-                af = (af + af_init).min(maximum);
-            }
-            sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
-        }
+        sar_step(&mut st, high[today], low[today], af_init, maximum);
     }
-    Some(vec![is_long as u8 as f64, af, ep, sar, new_high, new_low])
+    Some(st.to_vec())
 }
 
 /// Resume [`sar`] from `state = [is_long, af, ep, sar, prev_high, prev_low]` (as of row
@@ -178,7 +78,25 @@ pub fn sar_resume(
     Some((out, st.to_vec()))
 }
 
-/// One SAR bar, shared by [`sar_resume`] and [`sar_resume_one`] so they cannot drift:
+/// SAR's bootstrap direction from the one-period −DM at bar 1: a positive −DM ⇒ short.
+#[inline]
+fn sar_starts_long(high: &[f64], low: &[f64]) -> bool {
+    let diff_p = high[1] - high[0];
+    let diff_m = low[0] - low[1];
+    let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m { diff_m } else { 0.0 };
+    !(minus_dm1 > 0.0)
+}
+
+/// SAR's state entering bar 1 (`n >= 2`): the bootstrap direction, its stop and extreme
+/// point, and bar 1 "cheated" in as the prior bar (as TA-Lib does).
+fn sar_seed(high: &[f64], low: &[f64], af_init: f64) -> [f64; 6] {
+    let is_long = sar_starts_long(high, low);
+    let (ep, sar) = if is_long { (high[1], low[0]) } else { (low[1], high[0]) };
+    [is_long as u8 as f64, af_init, ep, sar, high[1], low[1]]
+}
+
+/// One SAR bar — the full computation, [`sar_final_state`], [`sar_resume`] and
+/// [`sar_resume_one`] all advance by it, so they cannot drift:
 /// advances `st = [is_long, af, ep, sar, prev_high, prev_low]` over the bar
 /// `(new_high, new_low)` and returns the bar's stop.
 #[inline]
@@ -245,83 +163,13 @@ pub fn sarext(
         return out;
     }
     // TA-Lib clamps the init/step factors to their caps.
-    let af_long_init = accel_init_long.min(accel_max_long);
-    let af_short_init = accel_init_short.min(accel_max_short);
-    let accel_long = accel_long.min(accel_max_long);
-    let accel_short = accel_short.min(accel_max_short);
-
-    // Initial direction: forced by a non-zero start value, else SAR's -DM1 bootstrap.
-    let mut is_long = if start_value == 0.0 {
-        let diff_p = high[1] - high[0];
-        let diff_m = low[0] - low[1];
-        let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m {
-            diff_m
-        } else {
-            0.0
-        };
-        !(minus_dm1 > 0.0)
-    } else {
-        start_value > 0.0
-    };
-
-    let (mut ep, mut sar) = if start_value == 0.0 {
-        if is_long {
-            (high[1], low[0])
-        } else {
-            (low[1], high[0])
-        }
-    } else if start_value > 0.0 {
-        (high[1], start_value)
-    } else {
-        (low[1], start_value.abs())
-    };
-
-    let (mut af_long, mut af_short) = (af_long_init, af_short_init);
-    let mut new_low = low[1];
-    let mut new_high = high[1];
-
+    let p = SarextParams::new(
+        offset_on_reverse, accel_init_long, accel_long, accel_max_long, accel_init_short,
+        accel_short, accel_max_short,
+    );
+    let mut st = sarext_seed(high, low, start_value, &p);
     for today in 1..n {
-        let prev_low = new_low;
-        let prev_high = new_high;
-        new_low = low[today];
-        new_high = high[today];
-        if is_long {
-            if new_low <= sar {
-                is_long = false;
-                sar = ep.max(prev_high).max(new_high);
-                if offset_on_reverse != 0.0 {
-                    sar += sar * offset_on_reverse;
-                }
-                out[today] = -sar;
-                af_short = af_short_init;
-                ep = new_low;
-                sar = (sar + af_short * (ep - sar)).max(prev_high).max(new_high);
-            } else {
-                out[today] = sar;
-                if new_high > ep {
-                    ep = new_high;
-                    af_long = (af_long + accel_long).min(accel_max_long);
-                }
-                sar = (sar + af_long * (ep - sar)).min(prev_low).min(new_low);
-            }
-        } else if new_high >= sar {
-            is_long = true;
-            sar = ep.min(prev_low).min(new_low);
-            if offset_on_reverse != 0.0 {
-                sar -= sar * offset_on_reverse;
-            }
-            out[today] = sar;
-            af_long = af_long_init;
-            ep = new_high;
-            sar = (sar + af_long * (ep - sar)).min(prev_low).min(new_low);
-        } else {
-            out[today] = -sar;
-            if new_low < ep {
-                ep = new_low;
-                af_short = (af_short + accel_short).min(accel_max_short);
-            }
-            sar = (sar + af_short * (ep - sar)).max(prev_high).max(new_high);
-        }
+        out[today] = sarext_step(&mut st, high[today], low[today], &p);
     }
     out
 }
@@ -354,84 +202,15 @@ pub fn sarext_final_state(
     if n < 2 {
         return None;
     }
-    let af_long_init = accel_init_long.min(accel_max_long);
-    let af_short_init = accel_init_short.min(accel_max_short);
-    let accel_long = accel_long.min(accel_max_long);
-    let accel_short = accel_short.min(accel_max_short);
-    let mut is_long = if start_value == 0.0 {
-        let diff_p = high[1] - high[0];
-        let diff_m = low[0] - low[1];
-        let minus_dm1 = if diff_m > 0.0 && diff_p < diff_m {
-            diff_m
-        } else {
-            0.0
-        };
-        !(minus_dm1 > 0.0)
-    } else {
-        start_value > 0.0
-    };
-    let (mut ep, mut sar) = if start_value == 0.0 {
-        if is_long {
-            (high[1], low[0])
-        } else {
-            (low[1], high[0])
-        }
-    } else if start_value > 0.0 {
-        (high[1], start_value)
-    } else {
-        (low[1], start_value.abs())
-    };
-    let (mut af_long, mut af_short) = (af_long_init, af_short_init);
-    let mut new_low = low[1];
-    let mut new_high = high[1];
+    let p = SarextParams::new(
+        offset_on_reverse, accel_init_long, accel_long, accel_max_long, accel_init_short,
+        accel_short, accel_max_short,
+    );
+    let mut st = sarext_seed(high, low, start_value, &p);
     for today in 1..n {
-        let prev_low = new_low;
-        let prev_high = new_high;
-        new_low = low[today];
-        new_high = high[today];
-        if is_long {
-            if new_low <= sar {
-                is_long = false;
-                sar = ep.max(prev_high).max(new_high);
-                if offset_on_reverse != 0.0 {
-                    sar += sar * offset_on_reverse;
-                }
-                af_short = af_short_init;
-                ep = new_low;
-                sar = (sar + af_short * (ep - sar)).max(prev_high).max(new_high);
-            } else {
-                if new_high > ep {
-                    ep = new_high;
-                    af_long = (af_long + accel_long).min(accel_max_long);
-                }
-                sar = (sar + af_long * (ep - sar)).min(prev_low).min(new_low);
-            }
-        } else if new_high >= sar {
-            is_long = true;
-            sar = ep.min(prev_low).min(new_low);
-            if offset_on_reverse != 0.0 {
-                sar -= sar * offset_on_reverse;
-            }
-            af_long = af_long_init;
-            ep = new_high;
-            sar = (sar + af_long * (ep - sar)).min(prev_low).min(new_low);
-        } else {
-            if new_low < ep {
-                ep = new_low;
-                af_short = (af_short + accel_short).min(accel_max_short);
-            }
-            sar = (sar + af_short * (ep - sar)).max(prev_high).max(new_high);
-        }
+        sarext_step(&mut st, high[today], low[today], &p);
     }
-    Some(vec![
-        is_long as u8 as f64,
-        af_long,
-        af_short,
-        ep,
-        sar,
-        new_high,
-        new_low,
-    ])
+    Some(st.to_vec())
 }
 
 /// Resume [`sarext`] from `state = [is_long, af_long, af_short, ep, sar, prev_high, prev_low]`
@@ -502,8 +281,23 @@ impl SarextParams {
     }
 }
 
-/// One SAREXT bar, shared by [`sarext_resume`] and [`sarext_resume_one`] so they cannot
-/// drift: advances `st = [is_long, af_long, af_short, ep, sar, prev_high, prev_low]` over
+/// SAREXT's state entering bar 1 (`n >= 2`): a non-zero `start_value` forces the initial
+/// direction (and, its magnitude, the stop), else SAR's bootstrap; bar 1 is "cheated" in
+/// as the prior bar.
+fn sarext_seed(high: &[f64], low: &[f64], start_value: f64, p: &SarextParams) -> [f64; 7] {
+    let is_long = if start_value == 0.0 { sar_starts_long(high, low) } else { start_value > 0.0 };
+    let (ep, sar) = if start_value == 0.0 {
+        if is_long { (high[1], low[0]) } else { (low[1], high[0]) }
+    } else if start_value > 0.0 {
+        (high[1], start_value)
+    } else {
+        (low[1], start_value.abs())
+    };
+    [is_long as u8 as f64, p.af_long_init, p.af_short_init, ep, sar, high[1], low[1]]
+}
+
+/// One SAREXT bar — the full computation, [`sarext_final_state`], [`sarext_resume`] and
+/// [`sarext_resume_one`] all advance by it, so they cannot drift: advances `st = [is_long, af_long, af_short, ep, sar, prev_high, prev_low]` over
 /// the bar `(new_high, new_low)` and returns the bar's signed stop.
 #[inline]
 fn sarext_step(st: &mut [f64; 7], new_high: f64, new_low: f64, p: &SarextParams) -> f64 {
