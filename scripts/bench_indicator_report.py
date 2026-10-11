@@ -17,7 +17,7 @@ import json
 import pathlib
 import sys
 
-TF_PHASES = ("forming", "rollover")
+TF_PHASES = ("forming", "rollover", "resend", "resend_20k", "plain_append", "plain_replace", "plain_replace_20k")
 
 
 def _means(path: str) -> dict[str, float]:
