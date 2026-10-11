@@ -33,6 +33,7 @@ impl PyDataFrame {
         let anchor = frame.slice_data(0, frame.height() - 1);
         volas_directive::exec::initial_state(&anchor, node, col)
     }
+
     /// Recompute the stale tail of cached directive columns in place — all of
     /// them if `only` is `None`, else just the named one. O(lookback + new rows)
     /// per column. Done against the real (non-computed) columns so a bare-name
@@ -168,42 +169,30 @@ impl PyDataFrame {
                 self.inner.set_computed_state(&name, Some(new_state));
                 continue;
             }
-            // A finite-memory indicator (SMA, ROC, price transforms, CDL, …) depends
-            // only on a fixed trailing window, so a windowed recompute is exact and
-            // O(lookback). A recursive / stateful one (EMA / Wilder / MACD / SAR /
-            // cumulative OBV / HT / index) depends on the WHOLE prefix `[0, i]`, so a
-            // window re-warms-up and silently diverges (the bug). Probe with a
-            // `2*lookback` window that overlaps the last KNOWN row (`vr-1`): if it
-            // reproduces that cached value the window is exact, else recompute the full
-            // column from row 0 — O(n) but exact for every indicator. (A slice that
-            // dropped its head only has the visible rows, so a stateful indicator there
-            // cannot be continued past the missing history.)
-            // A lookback-0 indicator still gets the windowed path with a one-row
-            // overlap probe (start = vr-1): elementwise/CDL outputs reproduce the
-            // known row and splice in O(new rows); a cumulative lb-0 one (OBV)
-            // fails the probe and correctly falls back to the full recompute.
-            let win = (2 * lb).max(1);
-            let (recomputed, off) = if vr > win {
-                let start = vr - win;
-                // Read-only probe: `slice_data` skips the per-cached-column ComputedMeta
-                // clone (O(K) per probe, O(K²) per fulfill over a K-indicator windowed
-                // frame). The probe reads only raw columns and is discarded — never
-                // appended — so dropping the resume carry here is sound. (Window
-                // compaction at `maybe_compact` keeps `slice`, which carries it.)
-                let windowed = volas_directive::exec::execute_refresh(&frame.slice_data(start, height), &node)
-                    .map_err(value_err)?;
-                let cached_val = col_value(self.inner.column(&name).map_err(pyerr)?, vr - 1);
-                let probe = col_value(&windowed, vr - 1 - start);
-                if probe.is_finite()
-                    && (probe - cached_val).abs() <= 1e-9 * cached_val.abs().max(1.0)
-                {
+            // A directive whose every command has finite memory and a position-free
+            // output (SMA, ROC, price transforms, CDL, …) depends only on a fixed
+            // trailing window, so recomputing a window is exact and O(lookback): the
+            // window reaches `lb + 1` rows behind the first stale row (one more than the
+            // lookback covers indicators that emit from a partial first difference) and
+            // doubles that as margin. Anything recursive (EMA / Wilder / MACD / SAR /
+            // cumulative OBV / HT) or position-valued (the index family) depends on the
+            // whole prefix, so it recomputes from row 0 — O(n) but exact. The decision
+            // is structural (`recomputes_on_a_window`), never inferred from the values.
+            // (A slice that dropped its head only has the visible rows, so a stateful
+            // indicator there cannot be continued past the missing history.)
+            let win = 2 * (lb + 1);
+            let (recomputed, off) =
+                if vr > win && volas_directive::lookback::recomputes_on_a_window(&node) {
+                    let start = vr - win;
+                    // `slice_data` skips the per-cached-column ComputedMeta clone; the
+                    // window is read-only and discarded, so no resume carry is needed.
+                    let windowed =
+                        volas_directive::exec::execute_refresh(&frame.slice_data(start, height), &node)
+                            .map_err(value_err)?;
                     (windowed, vr - start)
                 } else {
                     (volas_directive::exec::execute_refresh(frame, &node).map_err(value_err)?, vr)
-                }
-            } else {
-                (volas_directive::exec::execute_refresh(frame, &node).map_err(value_err)?, vr)
-            };
+                };
             // If this directive supports a resume, (re)capture its recursive state
             // so the NEXT append takes the O(new-rows) fast-path. This repopulates
             // state dropped by an invalidating base-column write or a head-dropping

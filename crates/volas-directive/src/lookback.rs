@@ -270,6 +270,68 @@ pub fn lookback(node: &Ast) -> usize {
     }
 }
 
+/// Commands whose value at a row depends on the whole prefix up to it — EMA / Wilder
+/// smoothing, cumulative lines, the Hilbert transform, SAR, … — rather than on a fixed
+/// trailing window. (A command with a TA-Lib MA-type argument is listed by
+/// [`selects_recursive_ma`] instead, since its memory depends on that argument.)
+const RECURSIVE: &[&str] = &[
+    "ema", "smma", "dema", "tema", "t3", "kama", "macd", "macdfix", "kdj", "rsi", "crsi",
+    "stochrsi", "cmo", "trix", "pvt", "nvi", "pvi", "obv", "ad", "adosc", "mass_index",
+    "efi", "tsi", "keltner", "kcw", "stoch_momentum", "ttm_squeeze", "wad", "asi",
+    "supertrend", "atr", "natr", "plus_dm", "minus_dm", "plus_di", "minus_di", "dx", "adx",
+    "adxr", "sar", "sarext", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_sine",
+    "ht_trendline", "ht_trendmode", "mama",
+];
+
+/// Commands whose output is an absolute row position, so it changes with where the
+/// series starts.
+const ABSOLUTE_POSITION: &[&str] = &["maxindex", "minindex", "minmaxindex"];
+
+/// Whether one of the command's TA-Lib MA-type arguments selects a recursive moving
+/// average (EMA, DEMA, TEMA, KAMA, MAMA, T3 — not SMA, WMA or TRIMA).
+fn selects_recursive_ma(name: &str, args: &[ArgValue]) -> bool {
+    let positions: &[usize] = match name {
+        "ma" => &[1],
+        "apo" | "ppo" | "mavp" | "stochf" => &[2],
+        "macdext" => &[1, 3, 5],
+        "stoch" => &[2, 4],
+        _ => &[],
+    };
+    positions
+        .iter()
+        .filter_map(|&i| args.get(i))
+        .any(|a| matches!(a.as_usize(), 1 | 3 | 4 | 6 | 7 | 8))
+}
+
+fn command_recomputes_on_a_window(name: &str, args: &[ArgValue]) -> bool {
+    !RECURSIVE.contains(&name)
+        && !ABSOLUTE_POSITION.contains(&name)
+        && !selects_recursive_ma(name, args)
+}
+
+/// Whether every value of a directive can be recomputed exactly from a trailing window
+/// of its inputs: each command in it has finite memory and a position-free output. A
+/// refresh after an append then recomputes only a window (its lookback plus a margin)
+/// instead of the whole column; anything else recomputes from row 0. A bare name is
+/// taken as the command it names (conservative); an unbindable one is a column.
+pub fn recomputes_on_a_window(node: &Ast) -> bool {
+    match node {
+        Node::Scalar(_) => true,
+        Node::Name(name) => match crate::bind::bind_command(name, None, &[], &[]) {
+            Ok(cmd) => command_recomputes_on_a_window(&cmd.name, &cmd.args),
+            Err(_) => true,
+        },
+        Node::Command(c) => {
+            command_recomputes_on_a_window(&c.name, &c.args)
+                && c.series.iter().all(recomputes_on_a_window)
+        }
+        Node::Unary { operand, .. } => recomputes_on_a_window(operand),
+        Node::Binary { left, right, .. } => {
+            recomputes_on_a_window(left) && recomputes_on_a_window(right)
+        }
+    }
+}
+
 /// Like [`lookback`], but requires the directive to name an **indicator**. A
 /// top-level bare name that binds to no command — a raw column reference, or a
 /// typo'd directive such as `ma5` for `ma:5` — is rejected (the same

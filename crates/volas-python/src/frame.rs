@@ -168,24 +168,6 @@ pub struct PyDataFrame {
     pub(crate) window: Option<WindowState>,
 }
 
-/// Read cell `i` of a directive-result column as f64 (`Bool` -> 0/1, `I64` -> as f64),
-/// for the finite-memory-vs-recursive refresh probe. NaN for other dtypes.
-pub(crate) fn col_value(col: &Column, i: usize) -> f64 {
-    match col {
-        Column::F64(v) => v[i],
-        Column::Bool(v, _) => {
-            if v[i] {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        Column::I64(v, _) => v[i] as f64,
-        _ => f64::NAN,
-    }
-}
-
-
 impl PyDataFrame {
     /// Wrap a core frame as a plain (non-cumulating) DataFrame — the default for
     /// every derived frame (slices, projections, head/tail, ...).
