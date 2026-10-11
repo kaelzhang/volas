@@ -32,6 +32,12 @@ COMPOUND = [
     "increase:3,-1 & close > open",
     "hv:10,15m > 0",
     "ma:5@(close>open) > 0",
+    "ma:5 ^ ma:10",
+    # a series operand other than a bare column keeps its parentheses
+    "ema:5@(rsi:5)",
+    "ema:5@(macd.signal:5,10,3@(close*2))",
+    "atr:5@high,(low-1),(ema:3@open)",
+    "correl:5@close,(3)",
 ]
 
 

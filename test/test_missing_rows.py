@@ -266,17 +266,7 @@ def _append_matches(directive, missing, seed):
         i, k = j, k + 1
 
 
-# A nested command operand's cached column is named without its parentheses
-# (`ema:5@rsi:5`), which does not parse back when the frame refreshes it — a naming
-# defect independent of missing rows (clean data shows it too).
-_UNNAMEABLE = pytest.mark.xfail(raises=volas.DirectiveSyntaxError, strict=True,
-                                reason="a nested operand's column name drops its parentheses")
-
-
-@pytest.mark.parametrize("directive", _LIVE + [
-    d if d != "ema:5@(rsi:5)" else pytest.param(d, marks=_UNNAMEABLE)
-    for d in sorted(set(OPERANDS) - set(_LIVE))
-])
+@pytest.mark.parametrize("directive", _LIVE + sorted(set(OPERANDS) - set(_LIVE)))
 def test_plain_append_matches_a_full_recompute(directive):
     # missing rows around the cache seed, back to back, and at the newest row
     _append_matches(directive, {
