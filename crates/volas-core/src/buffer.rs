@@ -14,8 +14,12 @@
 //! change while shared, and every write goes through `&mut self` — so a clone carries
 //! the fact, and [`Buffer::make_mut`] (the one way to write) forgets it. The tracked
 //! writes ([`Buffer::append`], [`Buffer::set`]) keep it current in O(1) instead.
-//! (Like every read of a zero-copy buffer, the fact assumes foreign memory is not
-//! written behind the frame's back.)
+//!
+//! The fact is only ever remembered for bytes volas owns. A zero-copy view of foreign
+//! memory (an Arrow import) belongs to a producer that may still write it, so it is
+//! scanned on every query and never remembered; its first write copies it into an
+//! owned buffer, which may then remember. What volas lends out zero-copy (DLPack,
+//! Arrow) is read-only to the consumer, so owned bytes cannot change behind it.
 
 use std::any::Any;
 use std::fmt;
@@ -269,14 +273,18 @@ fn scan_nan<T: Float>(x: &[T]) -> bool {
 }
 
 impl<T: Float> Buffer<T> {
-    /// Whether any value is NaN. Scans once, then remembers until the values change.
+    /// Whether any value is NaN. Scans once, then remembers until the values change —
+    /// except for a zero-copy view of foreign memory, which its owner may write behind
+    /// volas's back: that is scanned on every query, never remembered.
     pub fn has_nan(&self) -> bool {
         match self.nan_state() {
             NO_NAN => false,
             SOME_NAN => true,
             _ => {
                 let found = scan_nan(self.as_slice());
-                self.set_nan_state(if found { SOME_NAN } else { NO_NAN });
+                if !self.is_borrowed() {
+                    self.set_nan_state(if found { SOME_NAN } else { NO_NAN });
+                }
                 found
             }
         }
@@ -291,29 +299,26 @@ impl<T: Float> Buffer<T> {
         }
     }
 
-    /// Append `other`'s values (copy-on-write), keeping the NaN fact: it holds a NaN
-    /// once either part does, and none while both are known to hold none.
+    /// Append `other`'s values (copy-on-write), keeping the NaN fact in O(`other`): it
+    /// holds a NaN once either part does, and is otherwise what it was. (The states are
+    /// ordered `UNKNOWN < NO_NAN < SOME_NAN`, so that is one `max`.)
     pub fn append(&mut self, other: &[T]) {
-        let before = self.nan_state();
+        let added = if scan_nan(other) { SOME_NAN } else { UNKNOWN };
+        let state = self.nan_state().max(added);
         self.make_mut().extend_from_slice(other);
-        let added = scan_nan(other);
-        self.set_nan_state(match (before, added) {
-            (_, true) | (SOME_NAN, _) => SOME_NAN,
-            (NO_NAN, false) => NO_NAN,
-            _ => UNKNOWN,
-        });
+        self.set_nan_state(state);
     }
 
     /// Append `len` copies of `value` (copy-on-write), keeping the NaN fact.
     pub fn append_repeated(&mut self, value: T, len: usize) {
-        let before = self.nan_state();
+        let added = if len > 0 && value.is_nan_value() {
+            SOME_NAN
+        } else {
+            UNKNOWN
+        };
+        let state = self.nan_state().max(added);
         self.make_mut().extend(std::iter::repeat_n(value, len));
-        let added = len > 0 && value.is_nan_value();
-        self.set_nan_state(match (before, added) {
-            (_, true) | (SOME_NAN, _) => SOME_NAN,
-            (NO_NAN, false) => NO_NAN,
-            _ => UNKNOWN,
-        });
+        self.set_nan_state(state);
     }
 
     /// Overwrite the value at `i` (copy-on-write), keeping the NaN fact where one
@@ -321,13 +326,13 @@ impl<T: Float> Buffer<T> {
     /// NaN-free buffer keeps it NaN-free; a number written over a buffer holding a NaN
     /// may have removed the last one, so the fact is forgotten.
     pub fn set(&mut self, i: usize, value: T) {
-        let before = self.nan_state();
-        self.make_mut()[i] = value;
-        self.set_nan_state(match (before, value.is_nan_value()) {
+        let state = match (self.nan_state(), value.is_nan_value()) {
             (_, true) => SOME_NAN,
             (NO_NAN, false) => NO_NAN,
             _ => UNKNOWN,
-        });
+        };
+        self.make_mut()[i] = value;
+        self.set_nan_state(state);
     }
 }
 
@@ -456,6 +461,29 @@ mod tests {
         assert!(borrowed(vec![1.0, NAN]).has_nan());
         assert!(!Buffer::from_vec(vec![f32::INFINITY]).has_nan()); // an infinity is a value
         assert!(Buffer::from_vec(vec![f32::NAN]).has_nan());
+    }
+
+    /// Foreign bytes can change behind the buffer, so their fact is never remembered —
+    /// and once copied in by a write, the owned copy may remember again.
+    #[test]
+    fn a_borrowed_buffer_never_remembers() {
+        let arc = Arc::new(vec![1.0, 2.0]);
+        let ptr = NonNull::new(arc.as_ptr() as *mut f64).unwrap();
+        // SAFETY: `arc` owns the 2 f64 and is the guard.
+        let b = unsafe { Buffer::from_foreign(ptr, 2, arc.clone()) };
+        assert!(!b.has_nan());
+        assert_eq!(b.known_has_nan(), None);
+        // the producer writes its bytes: the next query sees it
+        // SAFETY: test-only stand-in for a producer writing the shared allocation.
+        unsafe { *ptr.as_ptr() = NAN };
+        assert!(b.has_nan());
+        assert_eq!(b.clone().known_has_nan(), None);
+        assert_eq!(b.slice(1, 2).known_has_nan(), None);
+        let mut owned = b.clone();
+        owned.append(&[3.0]); // copied in: owned now, but the copy was never scanned
+        assert_eq!(owned.known_has_nan(), None);
+        assert!(owned.has_nan());
+        assert_eq!(owned.known_has_nan(), Some(true));
     }
 
     #[test]
