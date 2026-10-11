@@ -105,7 +105,7 @@ fn every_accumulating_kernel_resumes_bit_exactly() {
         ("gappy", bars(true)),
         ("wide", wide()),
     ] {
-        for origin in [0usize, 7] {
+        for origin in [0usize, 1, 7] {
             let (o, h, l, c, v) = (
                 &b.open[..],
                 &b.high[..],
@@ -373,6 +373,15 @@ fn a_malformed_state_or_argument_declines() {
     let short = [0.0; 1];
     let mut n1 = [0.0; 1];
     let mut big = [0.0; 64];
+    // a state or `next` of the wrong length, a zero period: no step
+    assert!(ind::ultosc_step(h, l, c, 4, 7, 11, 5, &[0.0; 3], &mut big[..3]).is_none());
+    assert!(ind::ultosc_step(h, l, c, 0, 7, 11, 5, &[0.0; 3], &mut big[..3]).is_none());
+    assert!(ind::imi_step(o, c, 9, 5, &[0.0; 6], &mut big[..2]).is_none());
+    assert!(ind::imi_step(o, c, 0, 5, &[0.0; 6], &mut big[..6]).is_none());
+    assert!(ind::linreg_step(c, 9, LinregLine::Slope, 5, &[0.0; 3], &mut big[..7]).is_none());
+    assert!(ind::stochrsi_final_state(c, 14, 0, false, 3, 0).is_none());
+    assert!(ind::stochrsi_final_state(c, 14, 5, true, 0, 0).is_none());
+    assert!(ind::ma_step(c, 0, 0, 1, &[0.0; 4], &mut big[..4]).is_none());
     // a recursive moving-average type is no finite-window stage
     assert!(FiniteMa::new(5, 1).is_none());
     assert!(ind::ma_state(c, 5, 1, 0).is_none());

@@ -445,9 +445,8 @@ pub(crate) fn wma_initial(origin: usize) -> Vec<f64> {
 /// One row of [`wma`] over the series `term` (the careful [`wma_with`] loop, its
 /// leading-NaN skip included), from `state` into `next`.
 pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
-    if state.len() != WMA_STATE || next.len() != WMA_STATE {
-        return None;
-    }
+    // Every caller (`FiniteMa::step`, the HMA / DKX / Coppock steps) checks both lengths.
+    debug_assert!(state.len() == WMA_STATE && next.len() == WMA_STATE);
     let mut sum = Csum::from_state(&state[..2])?;
     let mut wsum = Csum::from_state(&state[2..4])?;
     let (mut bad, seen, pos) = (state[4] as usize, state[5] as usize, state[6] as usize);
