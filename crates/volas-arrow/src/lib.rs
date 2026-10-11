@@ -582,5 +582,41 @@ mod tests {
         };
         let err = column_from_arrow(&(Arc::new(bad) as ArrayRef)).unwrap_err();
         assert!(err.to_string().contains("UTF-8"), "{err}");
+        // end offsets naming a span outside the data buffer (checked before slicing)
+        for offsets in [vec![0i32, 9], vec![2, 1]] {
+            let outside = unsafe {
+                StringArray::new_unchecked(
+                    OffsetBuffer::new_unchecked(ScalarBuffer::from(offsets)),
+                    AB::from(b"abc".to_vec()),
+                    None,
+                )
+            };
+            let err = column_from_arrow(&(Arc::new(outside) as ArrayRef)).unwrap_err();
+            assert!(err.to_string().contains("outside"), "{err}");
+        }
+    }
+
+    #[test]
+    fn c_stream_whose_schema_call_fails_is_an_error() {
+        use arrow_array::ffi::FFI_ArrowSchema;
+        use std::ffi::c_int;
+        unsafe extern "C" fn fail(_: *mut FFI_ArrowArrayStream, _: *mut FFI_ArrowSchema) -> c_int {
+            22
+        }
+        unsafe extern "C" fn release(s: *mut FFI_ArrowArrayStream) {
+            (*s).release = None;
+        }
+        let mut stream = FFI_ArrowArrayStream::empty();
+        stream.get_schema = Some(fail);
+        stream.get_next = Some(no_next);
+        stream.release = Some(release);
+        unsafe extern "C" fn no_next(_: *mut FFI_ArrowArrayStream, _: *mut FFI_ArrowArray) -> c_int {
+            23 // never called by the import: the schema call fails first
+        }
+        // SAFETY: `no_next` ignores its arguments.
+        assert_eq!(unsafe { no_next(std::ptr::null_mut(), std::ptr::null_mut()) }, 23);
+        // SAFETY: a live C-Stream struct whose callbacks are defined above.
+        let err = unsafe { columns_from_c_stream(&mut stream as *mut _ as *mut std::ffi::c_void) };
+        assert!(err.unwrap_err().to_string().contains("stream error code 22"));
     }
 }

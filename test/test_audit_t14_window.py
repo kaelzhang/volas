@@ -427,6 +427,13 @@ def test_constant_window_moments_match_pandas_exactly(entry):
     _exact(vw.cov(v).iloc[:20], pw.cov(p).iloc[:20])
 
 
+def test_varying_window_whose_dispersion_underflows_has_no_moments():
+    # not constant, but every squared deviation underflows to 0: no scale (pandas NaN)
+    x = [1e-200, 2e-200, 3e-200, 4e-200]
+    for m in ("skew", "kurt"):
+        _exact(getattr(_v(x).rolling(4), m)(), getattr(pd.Series(x).rolling(4), m)())
+
+
 def test_centered_window_memory_is_bounded_by_the_data():
     # a centered window far longer than the data covers the whole series for every
     # label: identical to the smallest such window, and no window-sized padding.

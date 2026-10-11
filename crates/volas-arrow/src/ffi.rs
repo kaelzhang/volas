@@ -197,6 +197,8 @@ mod tests {
     fn foreign_schemas_are_checked_before_arrow_reads_them() {
         let (fmt, bad) = (c"l".as_ptr(), c"\xff".as_ptr());
         assert_eq!(check(&raw(fmt, c"x".as_ptr())), "ok");
+        // SAFETY: `noop` ignores its argument (it only stands in for a live release).
+        unsafe { noop(null_mut()) };
         // SAFETY: a null pointer is rejected before any read.
         assert!(unsafe { check_schema(std::ptr::null()) }.unwrap_err().to_string().contains("released"));
         let mut released = raw(fmt, std::ptr::null());
