@@ -1,8 +1,7 @@
 //! Resume directive execution over only the new tail rows, bit-identical to a
 //! full recompute (the per-directive `execute_resume*` dispatch).
 
-use crate::complete::Operands;
-use crate::exec::{arg_f64, arg_usize};
+use crate::exec::{arg_f64, arg_usize, Operands};
 use crate::parse;
 use crate::types::{ArgValue, Ast};
 use volas_compute::indicators as ind;

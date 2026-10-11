@@ -21,7 +21,9 @@ pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 
 /// Average True Range — TA-Lib semantics: SMA-seeded Wilder smoothing of TR (the
 /// first ATR, at index `period`, is the SMA of the first `period` TRs; thereafter
-/// `ATR[i] = (ATR[i-1]*(period-1) + TR[i]) / period`).
+/// `ATR[i] = (ATR[i-1]*(period-1) + TR[i]) / period`). Kept out of line: inlined into
+/// the directive's dispatch arm it compiles to a slower loop.
+#[inline(never)]
 pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let tr = tr(high, low, close);
     kernels::wilder(av(&tr), period).to_vec()

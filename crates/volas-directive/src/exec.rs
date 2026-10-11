@@ -1,6 +1,7 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use crate::bind::bind_command;
 use crate::types::{ArgValue, Ast, Node, Op, UnaryOp};
@@ -220,6 +221,64 @@ fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
     }
 }
 
+/// The operands a command's arm reads: the frame and its `@` series. Each input is
+/// looked up once, by the arm; while it does, the operands note whether every input it
+/// read is a frame column already known to hold no NaN ([`clean`](Self::clean)) — the
+/// missing-row rule then takes what the arm computed in place as it stands (see
+/// `crate::complete`), with no second lookup and no scan.
+pub(crate) struct Operands<'a> {
+    df: &'a DataFrame,
+    series: &'a [Ast],
+    clean: Cell<bool>,
+}
+
+impl<'a> Operands<'a> {
+    pub(crate) fn new(df: &'a DataFrame, series: &'a [Ast]) -> Self {
+        Operands {
+            df,
+            series,
+            clean: Cell::new(true),
+        }
+    }
+
+    /// Input `slot` as `f64` (`default` names its column when no operand fills it).
+    pub(crate) fn f64(&self, slot: usize, default: &str) -> Result<Cow<'a, [f64]>> {
+        let operand = self
+            .series
+            .get(slot)
+            .is_some_and(|n| !matches!(n, Node::Name(s) if s.is_empty()));
+        if operand {
+            self.clean.set(false); // an evaluated operand carries no remembered fact
+            return series_f64(self.df, self.series, slot, default);
+        }
+        let column = self.df.column(default)?;
+        require_numeric(column)?;
+        if column.known_has_nan() != Some(false) {
+            self.clean.set(false);
+        }
+        Ok(column
+            .as_f64()
+            .map_or_else(|| Cow::Owned(column.to_f64_vec()), Cow::Borrowed))
+    }
+
+    /// A required operand at `slot` as `f64` (see [`series_f64_required`]).
+    pub(crate) fn f64_required(&self, slot: usize) -> Result<Cow<'a, [f64]>> {
+        self.clean.set(false);
+        series_f64_required(self.df, self.series, slot)
+    }
+
+    /// A boolean operand at `slot` (see [`series_bool`]).
+    pub(crate) fn bool(&self, slot: usize) -> Result<Vec<bool>> {
+        self.clean.set(false);
+        series_bool(self.df, self.series, slot)
+    }
+
+    /// Whether every input read so far is a frame column known to hold no NaN.
+    pub(crate) fn clean(&self) -> bool {
+        self.clean.get()
+    }
+}
+
 /// Dispatch a TA-Lib MA-type code to the matching moving average over `data`.
 /// Codes follow TA-Lib's `TA_MAType`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
 /// 6 KAMA, 7 MAMA, 8 T3 (with vfactor 0.7, as TA-Lib's MA dispatch fixes it). MAMA
@@ -274,11 +333,11 @@ fn dispatch(
     series: &[Ast],
 ) -> Result<Column> {
     if crate::spec::is_recursive(name, args) {
-        return crate::complete::compute(df, name, sub, series, |df, series| {
-            overlap::dispatch(df, name, sub, args, series)
+        return crate::complete::compute(df, name, sub, series, |ops| {
+            overlap::dispatch(ops, name, sub, args)
         });
     }
-    overlap::dispatch(df, name, sub, args, series)
+    overlap::dispatch(&Operands::new(df, series), name, sub, args)
 }
 
 /// Execute a bare `Name` that is not a frame column: bind it as a no-argument

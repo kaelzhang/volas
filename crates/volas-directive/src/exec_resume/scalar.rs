@@ -5,8 +5,7 @@
 //! `execute_resume` arm's single loop iteration. `None` for a directive without a scalar
 //! twin (index family, stochrsi `.d`) — the caller then falls back to `execute_resume`.
 
-use crate::complete::Operands;
-use crate::exec::{arg_f64, arg_usize};
+use crate::exec::{arg_f64, arg_usize, Operands};
 use crate::types::{ArgValue, Ast};
 use volas_compute::indicators as ind;
 use volas_core::DataFrame;
