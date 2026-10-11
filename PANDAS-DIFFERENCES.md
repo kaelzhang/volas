@@ -512,6 +512,12 @@ ValueError: append: column 'z' is not in the target frame — appended rows must
 pandas (`concat`, outer) would instead grow the frame with the new column. volas
 rejects it so an exchange adding a field can never quietly lose data.
 
+Rows appended with a default `RangeIndex` carry no labels of their own, so they take
+the next row labels: appended to a frame with integer labels `0, 1, 2`, one such row
+is labelled `3` (pandas `concat` keeps the row's own `0`, giving `0, 1, 2, 0`). This
+keeps a sliced or windowed frame's labels absolute and gap-free. Rows appended with
+explicit integer labels keep them.
+
 On a `time_frame` frame the appended bars are *folded* into the forming period, so
 the live feed must be well-ordered: a `NaT`-timestamped bar (no period — symmetric
 with `cumulate`, which also rejects `NaT`) and an **out-of-order** bar (a timestamp
