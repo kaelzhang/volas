@@ -5,8 +5,9 @@
 use std::ffi::c_void;
 
 use arrow_array::ffi::{from_ffi, to_ffi, FFI_ArrowArray, FFI_ArrowSchema};
-use arrow_array::{make_array, Array};
-use arrow_schema::ArrowError;
+use arrow_array::{make_array, Array, OffsetSizeTrait};
+use arrow_data::ArrayData;
+use arrow_schema::{ArrowError, DataType};
 use volas_core::Column;
 
 use crate::{column_from_arrow, column_to_arrow};
@@ -32,7 +33,46 @@ pub unsafe fn column_from_c_data(
     array: FFI_ArrowArray,
     schema: &FFI_ArrowSchema,
 ) -> Result<Column, ArrowError> {
-    column_from_arrow(&make_array(from_ffi(array, schema)?))
+    let data = from_ffi(array, schema)?;
+    validate_imported(&data)?;
+    column_from_arrow(&make_array(data))
+}
+
+/// Check foreign C-Data before any of it is read: arrow-rs imports it unchecked, but a
+/// producer's buffers are untrusted. Layout, buffer sizes and the null count are
+/// checked for every array (children included), and values in full — except a string
+/// array's UTF-8, which the volas string buffer checks itself on import: Arrow leaves a
+/// null slot's bytes unspecified, while arrow-rs's full check would reject them. Its
+/// offsets are still checked here (in range, monotonic), so nothing — concatenation
+/// included — slices by a malformed offset.
+pub(crate) fn validate_imported(data: &ArrayData) -> Result<(), ArrowError> {
+    data.validate()?;
+    data.validate_nulls()?;
+    match data.data_type() {
+        DataType::Utf8 => string_offsets_in_range::<i32>(data)?,
+        DataType::LargeUtf8 => string_offsets_in_range::<i64>(data)?,
+        _ => data.validate_values()?,
+    }
+    data.child_data().iter().try_for_each(validate_imported)
+}
+
+/// A string array's offsets (its `len + 1` window) are monotonic and inside the value
+/// buffer. Assumes `validate()` passed (the offset buffer holds the window).
+fn string_offsets_in_range<O: OffsetSizeTrait>(data: &ArrayData) -> Result<(), ArrowError> {
+    let window = &data.buffers()[0].typed_data::<O>()[data.offset()..=data.offset() + data.len()];
+    let limit = data.buffers()[1].len();
+    let mut prev = 0usize;
+    for (i, o) in window.iter().enumerate() {
+        match o.to_usize() {
+            Some(o) if o <= limit && (i == 0 || prev <= o) => prev = o,
+            _ => {
+                return Err(ArrowError::InvalidArgumentError(format!(
+                    "invalid string buffer: offset {i} ({o:?}) is out of range or not monotonic"
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A column from the two PyCapsule payload pointers of the `__arrow_c_array__`

@@ -11,17 +11,19 @@
 use std::fmt;
 
 use crate::buffer::Buffer;
+use crate::error::{Result, VolasError};
+use crate::validity::Validity;
 
 /// A contiguous UTF-8 string column buffer (Arrow `LargeUtf8`: i64 offsets).
 #[derive(Clone)]
 pub struct StrBuffer {
     /// `len + 1` monotonic byte offsets into `data`, always **zero-based**:
-    /// `offsets[0] == 0` and `offsets[len] == data.len()`. A volas-built buffer is
-    /// normalized by construction; an Arrow import of a *sliced* array (whose
-    /// offsets are absolute, with a non-zero first offset) is re-based to 0 on the
-    /// way in (`from_buffers` callers trim `data` to the live span and subtract the
-    /// base), so this invariant holds for every `StrBuffer` — the unchecked
-    /// accessors (`get_unchecked` / `iter`) and `extend` rely on it.
+    /// `offsets[0] == 0` and `offsets[len] == data.len()`, and every span
+    /// `offsets[i]..offsets[i + 1]` is valid UTF-8. A volas-built buffer holds this
+    /// by construction; foreign buffers enter only through
+    /// [`try_from_buffers`](StrBuffer::try_from_buffers), which checks it (an Arrow
+    /// import of a *sliced* array is re-based to 0 by the caller first). The
+    /// unchecked accessors (`get` / `get_unchecked` / `iter`) and `extend` rely on it.
     offsets: Buffer<i64>,
     /// Concatenated UTF-8 bytes of every cell.
     data: Buffer<u8>,
@@ -34,10 +36,73 @@ impl StrBuffer {
         v.into_iter().collect()
     }
 
-    /// Zero-copy from foreign Arrow `LargeUtf8` buffers (offsets + data + their guard).
-    #[inline]
-    pub fn from_buffers(offsets: Buffer<i64>, data: Buffer<u8>) -> Self {
-        StrBuffer { offsets, data }
+    /// Zero-copy from foreign Arrow `LargeUtf8`-layout buffers, **validated**: the
+    /// offsets must be zero-based, monotonic and end at `data.len()`, and every
+    /// **present** cell (per `validity`, which must cover the same length) must be
+    /// valid UTF-8 on its own span — otherwise a `Value` error, never a buffer the
+    /// unchecked accessors would misread. A **missing** cell's bytes are unspecified
+    /// (the Arrow format allows anything there), so when one is not valid UTF-8 the
+    /// buffer is repacked with every missing cell as an empty span; a buffer that is
+    /// already sound stays a zero-copy borrow.
+    pub fn try_from_buffers(
+        offsets: Buffer<i64>,
+        data: Buffer<u8>,
+        validity: &Validity,
+    ) -> Result<Self> {
+        let invalid = |what: String| VolasError::Value(format!("invalid string buffer: {what}"));
+        let off = offsets.as_slice();
+        let bytes = data.as_slice();
+        let Some(&first) = off.first() else {
+            return Err(invalid("offsets must hold len + 1 entries (got none)".into()));
+        };
+        let len = off.len() - 1;
+        if let Some(bm) = validity.bitmap() {
+            if bm.len() != len {
+                return Err(invalid(format!(
+                    "validity covers {} cells but the offsets describe {len}",
+                    bm.len()
+                )));
+            }
+        }
+        if first != 0 {
+            return Err(invalid(format!("offsets must start at 0 (got {first})")));
+        }
+        if let Some(i) = off.windows(2).position(|w| w[0] > w[1]) {
+            return Err(invalid(format!(
+                "offsets must be monotonic (offset {i} = {} > offset {} = {})",
+                off[i],
+                i + 1,
+                off[i + 1]
+            )));
+        }
+        if off[len] as u64 != bytes.len() as u64 {
+            return Err(invalid(format!(
+                "offsets must end at the data length {} (got {})",
+                bytes.len(),
+                off[len]
+            )));
+        }
+        // Fast path: the whole buffer is UTF-8 and every offset sits on a char
+        // boundary, so every span is UTF-8 (the arrow-rs check).
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            if off.iter().all(|&o| text.is_char_boundary(o as usize)) {
+                return Ok(StrBuffer { offsets, data });
+            }
+        }
+        // Slow path — some span is not UTF-8 (were all of them, their concatenation
+        // would have passed above). A present cell's must be; a missing cell's bytes
+        // are dropped: repack with every missing cell as an empty span.
+        let mut b = StrBufferBuilder::with_capacity(len);
+        for i in 0..len {
+            if validity.is_valid(i) {
+                let cell = std::str::from_utf8(&bytes[off[i] as usize..off[i + 1] as usize])
+                    .map_err(|_| invalid(format!("cell {i} is not valid UTF-8")))?;
+                b.push(cell);
+            } else {
+                b.push("");
+            }
+        }
+        Ok(b.finish())
     }
 
     /// The raw offset / data buffers (for a zero-copy Arrow export).
@@ -61,8 +126,8 @@ impl StrBuffer {
     pub fn get(&self, i: usize) -> &str {
         let off = self.offsets.as_slice();
         let (s, e) = (off[i] as usize, off[i + 1] as usize);
-        // SAFETY: the data is built from valid UTF-8 (`from_iter`) or imported from
-        // an Arrow Utf8 array (UTF-8 by spec), and offsets are on char boundaries.
+        // SAFETY: every span is valid UTF-8 — the structural invariant every
+        // constructor establishes (`try_from_buffers` checks foreign buffers).
         unsafe { std::str::from_utf8_unchecked(&self.data.as_slice()[s..e]) }
     }
 
@@ -91,7 +156,8 @@ impl StrBuffer {
         let data = self.data.as_slice();
         (0..self.len()).map(move |i| {
             // SAFETY: `i < len` ⟹ `i + 1 <= len < off.len()`, and offsets are monotonic
-            // with `off[len] == data.len()`, so `off[i]..off[i + 1]` is in bounds of `data`.
+            // with `off[len] == data.len()`, so `off[i]..off[i + 1]` is in bounds of `data`
+            // and valid UTF-8 (the invariant every constructor establishes).
             unsafe {
                 let s = *off.get_unchecked(i) as usize;
                 let e = *off.get_unchecked(i + 1) as usize;
@@ -125,11 +191,17 @@ impl StrBuffer {
     }
 }
 
-/// Incremental builder (append / scatter paths).
-#[derive(Default)]
+/// Incremental builder (append / scatter paths). Every constructor seeds the
+/// leading `0` offset, so each `push` records exactly one cell.
 pub struct StrBufferBuilder {
     offsets: Vec<i64>,
     data: Vec<u8>,
+}
+
+impl Default for StrBufferBuilder {
+    fn default() -> Self {
+        StrBufferBuilder::with_capacity(0)
+    }
 }
 
 impl StrBufferBuilder {
@@ -143,10 +215,7 @@ impl StrBufferBuilder {
         self.data.extend_from_slice(s.as_bytes());
         self.offsets.push(self.data.len() as i64);
     }
-    pub fn finish(mut self) -> StrBuffer {
-        if self.offsets.is_empty() {
-            self.offsets.push(0);
-        }
+    pub fn finish(self) -> StrBuffer {
         StrBuffer {
             offsets: Buffer::from_vec(self.offsets),
             data: Buffer::from_vec(self.data),
@@ -205,7 +274,8 @@ mod tests {
         // The Arrow bridge path: take the raw offset/data buffers out and rebuild.
         let sb = StrBuffer::from_vec(vec!["xy".into(), "z".into()]);
         let (offsets, data) = sb.buffers();
-        let rebuilt = StrBuffer::from_buffers(offsets.clone(), data.clone());
+        let rebuilt =
+            StrBuffer::try_from_buffers(offsets.clone(), data.clone(), &Validity::dense()).unwrap();
         assert_eq!(rebuilt, sb);
         assert_eq!(rebuilt.slice(1, 2), StrBuffer::from_vec(vec!["z".into()]));
     }
@@ -219,6 +289,62 @@ mod tests {
         b.push("p");
         b.push("qr");
         assert_eq!(b.finish(), StrBuffer::from_vec(vec!["p".into(), "qr".into()]));
+    }
+
+    fn parts(offsets: Vec<i64>, data: &[u8]) -> (Buffer<i64>, Buffer<u8>) {
+        (Buffer::from_vec(offsets), Buffer::from_vec(data.to_vec()))
+    }
+
+    #[test]
+    fn try_from_buffers_rejects_every_broken_invariant() {
+        let dense = Validity::dense();
+        let cases: [(Vec<i64>, &[u8], &str); 6] = [
+            (vec![], b"", "len + 1"),
+            (vec![1, 2], b"ab", "start at 0"),
+            (vec![0, 3, 1, 3], b"abc", "monotonic"),
+            (vec![0, 2], b"abc", "end at the data length"),
+            (vec![0, 2], b"\xff\xfe", "cell 0 is not valid UTF-8"),
+            (vec![0, 1, 2], "é".as_bytes(), "cell 0 is not valid UTF-8"), // split char
+        ];
+        for (off, data, msg) in cases {
+            let (o, d) = parts(off, data);
+            let err = StrBuffer::try_from_buffers(o, d, &dense).unwrap_err();
+            assert!(err.to_string().contains(msg), "{err}");
+        }
+        // a validity mask of the wrong length is rejected too
+        let (o, d) = parts(vec![0, 1], b"a");
+        let short = Validity::from_valid_iter(2, [true, false]);
+        let err = StrBuffer::try_from_buffers(o, d, &short).unwrap_err();
+        assert!(err.to_string().contains("validity covers 2 cells"), "{err}");
+    }
+
+    #[test]
+    fn try_from_buffers_normalizes_non_utf8_missing_cells() {
+        // a missing cell's bytes are unspecified: repacked as an empty span
+        let validity = Validity::from_valid_iter(3, [false, true, false]);
+        let (o, d) = parts(vec![0, 2, 3, 3], b"\xff\xfea");
+        let sb = StrBuffer::try_from_buffers(o, d, &validity).unwrap();
+        assert_eq!(sb.to_vec(), vec![String::new(), "a".into(), String::new()]);
+        // a sound buffer with a (UTF-8) missing payload keeps its bytes zero-copy
+        let validity = Validity::from_valid_iter(2, [false, true]);
+        let (o, d) = parts(vec![0, 1, 3], "xé".as_bytes());
+        let ptr = d.as_ptr();
+        let sb = StrBuffer::try_from_buffers(o, d, &validity).unwrap();
+        assert_eq!(sb.buffers().1.as_ptr(), ptr);
+        assert_eq!(sb.get(1), "é");
+        // a missing-cell span that splits a char is not UTF-8 alone: normalized
+        let validity = Validity::from_valid_iter(2, [false, true]);
+        let (o, d) = parts(vec![0, 1, 2], "é".as_bytes());
+        let sb = StrBuffer::try_from_buffers(o, d, &validity);
+        assert!(sb.is_err(), "the present cell 1 holds half a char");
+    }
+
+    #[test]
+    fn default_builder_keeps_every_pushed_value() {
+        let mut b = StrBufferBuilder::default();
+        b.push("p");
+        b.push("qr");
+        assert_eq!(b.finish().to_vec(), vec!["p".to_string(), "qr".into()]);
     }
 
     #[test]

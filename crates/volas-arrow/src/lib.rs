@@ -519,4 +519,56 @@ mod tests {
         let empty: ArrayRef = Arc::new(Float64Array::from(Vec::<f64>::new()));
         assert!(column_from_arrow(&empty).unwrap().as_f64().unwrap().is_empty());
     }
+
+    #[test]
+    fn null_slot_with_non_utf8_payload_imports_as_an_empty_span() {
+        // Arrow leaves a null slot's bytes unspecified, so this is a VALID array whose
+        // null slot holds non-UTF-8 bytes. Every span of the imported string buffer must
+        // still be valid UTF-8 (its accessors decode spans unchecked).
+        use arrow_buffer::{Buffer as AB, OffsetBuffer};
+        // SAFETY: offsets are monotonic and in range; the only non-UTF-8 bytes sit in
+        // the null slot, which the Arrow format leaves unspecified.
+        let arr = unsafe {
+            LargeStringArray::new_unchecked(
+                OffsetBuffer::new(vec![0i64, 2, 3].into()),
+                AB::from(b"\xff\xfea".to_vec()),
+                Some(NullBuffer::from(vec![false, true])),
+            )
+        };
+        let col = column_from_arrow(&(Arc::new(arr) as ArrayRef)).unwrap();
+        let Column::Str(sb, validity) = &col else { unreachable!() }; // LCOV_EXCL_LINE
+        let (offsets, data) = sb.buffers();
+        for w in offsets.as_slice().windows(2) {
+            let span = &data.as_slice()[w[0] as usize..w[1] as usize];
+            assert!(std::str::from_utf8(span).is_ok(), "span {w:?} is not UTF-8");
+        }
+        assert!(!validity.is_valid(0) && validity.is_valid(1));
+        assert_eq!(sb.get(1), "a");
+    }
+
+    #[test]
+    fn malformed_string_offsets_are_an_import_error() {
+        use arrow_buffer::{Buffer as AB, OffsetBuffer, ScalarBuffer};
+        // SAFETY (of the construction only): the deliberately non-monotonic offsets are
+        // the malformed input under test; the import must reject them, never read them.
+        let reversed = unsafe {
+            LargeStringArray::new_unchecked(
+                OffsetBuffer::new_unchecked(ScalarBuffer::from(vec![0i64, 3, 1, 3])),
+                AB::from(b"abc".to_vec()),
+                None,
+            )
+        };
+        let err = column_from_arrow(&(Arc::new(reversed) as ArrayRef)).unwrap_err();
+        assert!(err.to_string().contains("offsets"), "{err}");
+        // a valid slot holding invalid UTF-8
+        let bad = unsafe {
+            LargeStringArray::new_unchecked(
+                OffsetBuffer::new(vec![0i64, 2].into()),
+                AB::from(b"\xff\xfe".to_vec()),
+                None,
+            )
+        };
+        let err = column_from_arrow(&(Arc::new(bad) as ArrayRef)).unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
 }

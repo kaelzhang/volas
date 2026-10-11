@@ -320,7 +320,7 @@ df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
 
 ### DataFrame.from_arrow(data) -> DataFrame
 
-**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars `DataFrame` 等。dtype 匹配处借用数据缓冲区（否则拷贝该列），多 chunk 来源会被拼接，结果带一个全新的 `RangeIndex`。
+**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars `DataFrame` 等。dtype 匹配处借用数据缓冲区（否则拷贝该列），多 chunk 来源会被拼接，结果带一个全新的 `RangeIndex`。生产方的缓冲区在读取前先校验：格式错误的数组（缓冲区大小不符、offsets 越界或非单调、非空字符串不是合法 UTF-8）抛出 `ValueError`。Arrow 中 null 字符串槽位的字节未作规定，volas 从不读取它们。
 
 - **data** Arrow 来源——任何实现 `__arrow_c_stream__` 的对象。
 
@@ -605,7 +605,7 @@ t.dt.floor('15min')        # 对齐到 15 分钟 bar
 
 ### Series.from_arrow(data, name=None) -> Series
 
-**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。dtype 匹配处借用数据缓冲区（否则拷贝），结果带一个全新的 `RangeIndex`。
+**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。dtype 匹配处借用数据缓冲区（否则拷贝），结果带一个全新的 `RangeIndex`。格式错误的数组抛出 `ValueError`，与 [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe) 相同。
 
 - **data** Arrow 来源——任何实现 `__arrow_c_array__` 的对象。
 - **name?** `str | None = None` 结果 `Series` 的名字。

@@ -2,15 +2,17 @@
 //! `FFI_ArrowArrayStream` (one `RecordBatch`), backing the `__arrow_c_stream__`
 //! protocol so a whole DataFrame crosses the boundary in one handshake.
 
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void, CStr};
 use std::sync::Arc;
 
-use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
-use arrow_array::{ArrayRef, RecordBatch, RecordBatchIterator, RecordBatchReader};
-use arrow_schema::{ArrowError, Field, Schema};
+use arrow_array::ffi::{from_ffi_and_data_type, FFI_ArrowArray, FFI_ArrowSchema};
+use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+use arrow_array::{ArrayRef, RecordBatch, RecordBatchIterator, StructArray};
+use arrow_schema::{ArrowError, DataType, Field, Schema};
 use arrow_select::concat::concat_batches;
 use volas_core::Column;
 
+use crate::ffi::validate_imported;
 use crate::{column_from_arrow, column_to_arrow};
 
 /// Named columns as a one-batch Arrow C-Stream (the DataFrame export). Every column's
@@ -40,11 +42,38 @@ pub fn columns_to_c_stream(
 pub unsafe fn columns_from_c_stream(
     stream: *mut c_void,
 ) -> Result<(Vec<String>, Vec<Column>), ArrowError> {
-    let stream = std::ptr::replace(stream as *mut FFI_ArrowArrayStream, FFI_ArrowArrayStream::empty());
-    let reader = ArrowArrayStreamReader::try_new(stream)?;
-    let schema = reader.schema();
+    let mut stream =
+        std::ptr::replace(stream as *mut FFI_ArrowArrayStream, FFI_ArrowArrayStream::empty());
+    // Drive the stream by hand rather than through arrow-rs's reader, which builds each
+    // batch from the producer's buffers unchecked: every batch is validated
+    // (`validate_imported`) before any of its buffers is read.
+    let (Some(get_schema), Some(get_next), Some(_)) =
+        (stream.get_schema, stream.get_next, stream.release)
+    else {
+        return Err(ArrowError::CDataInterface("input stream is already released".into()));
+    };
+    let mut ffi_schema = FFI_ArrowSchema::empty();
+    let rc = get_schema(&mut stream, &mut ffi_schema);
+    if rc != 0 {
+        return Err(stream_error(&mut stream, rc));
+    }
+    let schema = Arc::new(Schema::try_from(&ffi_schema)?);
+    let row_type = DataType::Struct(schema.fields().clone());
+    let mut batches = Vec::new();
+    loop {
+        let mut array = FFI_ArrowArray::empty();
+        let rc = get_next(&mut stream, &mut array);
+        if rc != 0 {
+            return Err(stream_error(&mut stream, rc));
+        }
+        if array.is_released() {
+            break; // end of stream
+        }
+        let data = from_ffi_and_data_type(array, row_type.clone())?;
+        validate_imported(&data)?;
+        batches.push(RecordBatch::from(StructArray::from(data)));
+    }
     let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
-    let batches = reader.collect::<Result<Vec<RecordBatch>, ArrowError>>()?;
     let batch = concat_batches(&schema, &batches)?;
     let cols = batch
         .columns()
@@ -52,4 +81,14 @@ pub unsafe fn columns_from_c_stream(
         .map(column_from_arrow)
         .collect::<Result<Vec<Column>, ArrowError>>()?;
     Ok((names, cols))
+}
+
+/// The producer's error for a failed stream call (`get_last_error`, else the code).
+unsafe fn stream_error(stream: &mut FFI_ArrowArrayStream, rc: c_int) -> ArrowError {
+    let msg = stream
+        .get_last_error
+        .map(|f| f(stream))
+        .filter(|p| !p.is_null())
+        .map(|p| CStr::from_ptr(p).to_string_lossy().into_owned());
+    ArrowError::CDataInterface(msg.unwrap_or_else(|| format!("stream error code {rc}")))
 }

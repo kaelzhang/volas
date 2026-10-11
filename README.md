@@ -411,7 +411,10 @@ A **volas-specific static method** that builds a `DataFrame` from any object exp
 the Arrow **C-Stream** protocol (`__arrow_c_stream__`) — a `pyarrow.Table` /
 `RecordBatch` / `RecordBatchReader`, a polars `DataFrame`, etc. The data buffers are
 borrowed where the dtypes match (otherwise a column is copied), a multi-chunk source
-is concatenated, and the result carries a fresh `RangeIndex`.
+is concatenated, and the result carries a fresh `RangeIndex`. The producer's buffers
+are validated before they are read: a malformed array (buffer sizes, offsets out of
+range or not monotonic, a present string that is not valid UTF-8) raises `ValueError`.
+A null string slot's bytes are unspecified in Arrow and are never read.
 
 - **data** the Arrow source — any object implementing `__arrow_c_stream__`.
 
@@ -752,7 +755,8 @@ t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
 A **volas-specific static method** that builds a `Series` from any object exposing the
 Arrow **C-Data** array protocol (`__arrow_c_array__`) — a `pyarrow.Array`, a polars
 `Series`, etc. The data buffer is borrowed where the dtype matches (otherwise copied);
-the result carries a fresh `RangeIndex`.
+the result carries a fresh `RangeIndex`. A malformed array raises `ValueError`, exactly
+as in [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe).
 
 - **data** the Arrow source — any object implementing `__arrow_c_array__`.
 - **name?** `str | None = None` the name for the resulting `Series`.
