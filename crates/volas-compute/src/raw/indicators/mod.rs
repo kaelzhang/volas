@@ -17,6 +17,13 @@ pub(crate) fn av(s: &[f64]) -> ArrayView1<'_, f64> {
     ArrayView1::from(s)
 }
 
+/// Whether every input has the same length — the shape a multi-input kernel that reads
+/// its inputs unchecked requires; such a kernel gives an empty result otherwise.
+#[inline]
+pub(crate) fn same_len(inputs: &[&[f64]]) -> bool {
+    inputs.windows(2).all(|w| w[0].len() == w[1].len())
+}
+
 mod bands;
 mod candles;
 mod directional;

@@ -31,10 +31,7 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
         return (vec![f64::NAN; n], vec![f64::NAN; n], true);
     }
     let p = period as f64;
-    let sum_x = p * (period - 1) as f64 * 0.5;
-    // (period-1)·period·(2·period-1)/6 = Σ_{k=0}^{period-1} k², always integral.
-    let sum_x_sqr = (period * (period - 1) * (2 * period - 1) / 6) as f64;
-    let divisor = sum_x * sum_x - p * sum_x_sqr;
+    let (sum_x, divisor) = linreg_x_sums(period);
     // Single-write (D2): NaN warm-up `[0, period-1)`, each valid row written once.
     let mut slope = crate::buf::OutBuf::warmup(n, period - 1);
     let mut intercept = crate::buf::OutBuf::warmup(n, period - 1);
@@ -117,6 +114,18 @@ fn linreg_sums(rows: impl Iterator<Item = f64>, period: usize, admit: impl Fn(f6
         }
     }
     (sum_y, sum_xy)
+}
+
+/// The fit's closed-form `x` sums over ages `0..period`: `(Σx, Σx·Σx − period·Σx²)`.
+/// `Σx² = (period−1)·period·(2·period−1)/6` is formed in `u128` — exact for every
+/// `period` — and rounded to `f64` once (in `usize` it overflows from period
+/// 2,097,153).
+fn linreg_x_sums(period: usize) -> (f64, f64) {
+    let p = period as f64;
+    let sum_x = p * (period - 1) as f64 * 0.5;
+    let q = period as u128;
+    let sum_x_sqr = (q * (q - 1) * (2 * q - 1) / 6) as f64;
+    (sum_x, sum_x * sum_x - p * sum_x_sqr)
 }
 
 /// Admit a point of age `age` into the first window's `(Σy, Σ age·y)`.
@@ -288,6 +297,11 @@ pub fn stddev(data: &[f64], period: usize, nbdev: f64, origin: usize) -> Vec<f64
 /// yields 0 (TA-Lib's guard). Row 0 is at absolute position `origin`. Lookback
 /// `period-1`.
 pub fn correl(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    // The sliding loop reads both series unchecked: series of unequal length line up no
+    // row.
+    if !super::same_len(&[x, y]) {
+        return Vec::new();
+    }
     let n = x.len();
     if period == 0 || period > n {
         return vec![f64::NAN; n];
@@ -511,9 +525,7 @@ pub fn linreg_step(
     let mut sum_xy = Csum::from_state(&state[2..4])?;
     let (mut bad, seen, pos) = (state[4] as usize, state[5] as usize, state[6] as usize);
     let p = period as f64;
-    let sum_x = p * (period - 1) as f64 * 0.5;
-    let sum_x_sqr = (period * (period - 1) * (2 * period - 1) / 6) as f64;
-    let divisor = sum_x * sum_x - p * sum_x_sqr;
+    let (sum_x, divisor) = linreg_x_sums(period);
     let emit = |sum_y: f64, sum_xy: f64| {
         let m = (p * sum_xy - sum_x * sum_y) / divisor;
         let b = (sum_y - m * sum_x) / p;

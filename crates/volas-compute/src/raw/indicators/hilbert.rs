@@ -349,7 +349,7 @@ pub fn ht_dcphase_resume(
     if state.len() < CORE_STATE_LEN + DCPHASE_STATE_LEN {
         return None;
     }
-    let mut dc = DcPhase::from_state(state, &mut off);
+    let mut dc = DcPhase::from_state(state, &mut off)?;
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
@@ -380,7 +380,7 @@ pub fn ht_sine_resume(
     if state.len() < CORE_STATE_LEN + DCPHASE_STATE_LEN {
         return None;
     }
-    let mut dc = DcPhase::from_state(state, &mut off);
+    let mut dc = DcPhase::from_state(state, &mut off)?;
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
@@ -567,7 +567,7 @@ pub fn ht_trendmode_resume(
         return None;
     }
     let mut off = CORE_STATE_LEN;
-    let mut dc = DcPhase::from_state(state, &mut off);
+    let mut dc = DcPhase::from_state(state, &mut off)?;
     let (mut it1, mut it2, mut it3) = (state[tail], state[tail + 1], state[tail + 2]);
     let mut days_in_trend = state[tail + 3] as i32;
     let mut prev_phase = state[tail + 4];

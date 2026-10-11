@@ -109,6 +109,10 @@ pub fn rocr100(data: &[f64], period: usize) -> Vec<f64> {
 /// the highest high / lowest low (TA-Lib WILLR). A flat range (HH == LL) yields 0.
 /// Lookback `period-1`; the tracker preserves TA-Lib's window and tie semantics.
 pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    // The tracker reads its inputs unchecked: inputs of unequal length line up no row.
+    if !super::same_len(&[high, low, close]) {
+        return Vec::new();
+    }
     let n = close.len();
     if period == 0 || period > n {
         return vec![f64::NAN; n];
@@ -416,6 +420,10 @@ pub fn aroon_down(_high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// of `aroonUp − aroonDown` that TA-Lib evaluates directly, so it materialises neither
 /// line nor a subtraction pass. Lookback `period`.
 pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    // The tracker reads its inputs unchecked: inputs of unequal length line up no row.
+    if !super::same_len(&[high, low]) {
+        return Vec::new();
+    }
     let n = high.len();
     if period == 0 || period >= n {
         return vec![f64::NAN; n];
@@ -511,6 +519,10 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// `period` (lookback = period). The sliding sums recompute the leaving bar's flow,
 /// which is bit-identical to TA-Lib's stored value.
 pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    // The flow loop reads its inputs unchecked: inputs of unequal length line up no row.
+    if !super::same_len(&[high, low, close, volume]) {
+        return Vec::new();
+    }
     let n = close.len();
     if period == 0 || period + 1 > n {
         return vec![f64::NAN; n];

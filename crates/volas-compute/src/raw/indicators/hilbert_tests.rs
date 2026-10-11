@@ -208,3 +208,36 @@ fn ht_resume_declines_on_short_state() {
     // MAMA / FAMA need CORE_STATE_LEN + 3 (line 998).
     assert!(mama_resume(&price, 0.5, 0.05, false, 20, &core_only).is_none());
 }
+
+/// A carried state no computation wrote — a ring cursor or DC-phase index out of its
+/// ring, a parity not 0 / 1 — is refused by every resume, never used to index.
+#[test]
+fn a_forged_state_is_refused() {
+    let price = series(120);
+    let head = &price[..80];
+    let forge = |mut st: Vec<f64>, at: usize, v: f64| {
+        st[at] = v;
+        st
+    };
+    let core = ht_core_state(head).unwrap();
+    for (at, v) in [(3, 3.0), (3, 1e9), (3, -1.0), (3, 0.5), (3, f64::NAN), (4, 0.5), (4, 2.0)] {
+        let st = forge(core.clone(), at, v);
+        assert!(ht_dcperiod_resume(&price, 80, &st).is_none(), "cursor {at}={v}");
+        assert!(ht_phasor_resume(&price, true, 80, &st).is_none());
+    }
+    let mama_st = forge(mama_state(head, 0.5, 0.05).unwrap(), 3, 7.0);
+    assert!(mama_resume(&price, 0.5, 0.05, false, 80, &mama_st).is_none());
+    let tl = forge(ht_trendline_state(head).unwrap(), 3, 4.0);
+    assert!(ht_trendline_resume(&price, 80, &tl).is_none());
+    // the DC-phase ring index sits right after the core and the phase
+    let dc = ht_dcphase_state(head).unwrap();
+    for v in [50.0, 1e12, -2.0, 1.5] {
+        let st = forge(dc.clone(), CORE_STATE_LEN + 1, v);
+        assert!(ht_dcphase_resume(&price, 80, &st).is_none(), "dc idx {v}");
+        assert!(ht_sine_resume(&price, false, 80, &st).is_none());
+    }
+    let tm = forge(ht_trendmode_state(head).unwrap(), CORE_STATE_LEN + 1, 99.0);
+    assert!(ht_trendmode_resume(&price, 80, &tm).is_none());
+    // a well-formed state still resumes
+    assert!(ht_dcphase_resume(&price, 80, &dc).is_some());
+}

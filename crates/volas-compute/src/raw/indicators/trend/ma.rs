@@ -210,7 +210,7 @@ pub fn wma(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 fn wma_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, bool) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
-    let denom = (period * (period + 1) / 2) as f64; // sum of weights 1..=period
+    let denom = wma_weight_sum(period);
     let pf = period as f64;
     let window = |end: usize| {
         data[end + 1 - period..=end]
@@ -264,6 +264,13 @@ fn wma_sums(rows: impl Iterator<Item = f64>, admit: impl Fn(f64) -> bool) -> (Cs
         }
     }
     (sum, wsum)
+}
+
+/// The sum of the WMA weights `1..=period`, `period·(period+1)/2`, formed in `u128` —
+/// exact for every `period` — and rounded to `f64` once.
+fn wma_weight_sum(period: usize) -> f64 {
+    let q = period as u128;
+    (q * (q + 1) / 2) as f64
 }
 
 /// Seed the first WMA window with its `j`-th row (weight `j + 1`), the weighted term
@@ -451,7 +458,7 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
         next[6] = (pos + 1) as f64;
         return Some(f64::NAN);
     }
-    let denom = (period * (period + 1) / 2) as f64;
+    let denom = wma_weight_sum(period);
     let pf = period as f64;
     let window = || {
         (row + 1 - period..=row)

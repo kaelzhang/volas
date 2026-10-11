@@ -355,7 +355,9 @@ impl HtCoreState {
     }
 
     /// Reconstruct from the first `CORE_STATE_LEN` words of `s` (inverse of
-    /// [`serialize`](Self::serialize)); `None` if `s` is too short.
+    /// [`serialize`](Self::serialize)); `None` if `s` is too short or is no state a
+    /// computation wrote — the ring cursor not one of `0..3` or the parity not `0` / `1`
+    /// (the cursor indexes the channels' rings unchecked, so it is validated here).
     pub(super) fn deserialize(s: &[f64]) -> Option<Self> {
         if s.len() < CORE_STATE_LEN {
             return None;
@@ -365,8 +367,12 @@ impl HtCoreState {
             sum: s[1],
             trailing: s[2],
         };
-        let hilbert_idx = s[3] as usize;
-        let even = s[4] != 0.0;
+        let hilbert_idx = ring_index(s[3], 3)?;
+        let even = match s[4] {
+            0.0 => false,
+            1.0 => true,
+            _ => return None,
+        };
         let mut off = 5usize;
         let detrender = HilbertVar::from_state(s, &mut off);
         let q1v = HilbertVar::from_state(s, &mut off);
@@ -499,18 +505,23 @@ impl DcPhase {
     }
 
     /// Reconstruct from `DCPHASE_STATE_LEN` words at `s[off..]`, advancing `off`.
-    /// Inverse of [`DcPhase::push_state`].
-    pub(super) fn from_state(s: &[f64], off: &mut usize) -> Self {
+    /// Inverse of [`DcPhase::push_state`]; `None` if `s` is too short or the ring index
+    /// is not one of `0..SMOOTH_PRICE_SIZE`.
+    pub(super) fn from_state(s: &[f64], off: &mut usize) -> Option<Self> {
         let o = *off;
+        let words = s.get(o..o + DCPHASE_STATE_LEN)?;
         let mut smooth_price = [0.0f64; SMOOTH_PRICE_SIZE];
-        smooth_price.copy_from_slice(&s[o + 2..o + 2 + SMOOTH_PRICE_SIZE]);
+        smooth_price.copy_from_slice(&words[2..]);
+        let idx = ring_index(words[1], SMOOTH_PRICE_SIZE)?;
         *off += DCPHASE_STATE_LEN;
-        DcPhase {
-            smooth_price,
-            idx: s[o + 1] as usize,
-            phase: s[o],
-        }
+        Some(DcPhase { smooth_price, idx, phase: words[0] })
     }
+}
+
+/// A ring cursor read from a carried state word: a whole number in `0..len`, else
+/// `None` (a forged or corrupt state).
+fn ring_index(word: f64, len: usize) -> Option<usize> {
+    (word.fract() == 0.0 && word >= 0.0 && word < len as f64).then_some(word as usize)
 }
 
 /// Words in a serialised [`DcPhase`] (`phase` + `idx` + the 50-slot ring).
