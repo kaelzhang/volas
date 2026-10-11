@@ -57,6 +57,24 @@ const KNOWN_DIVERGENT: &[(&str, &str)] = &[
     ("stochrsi.d", "*"),
     // The resume divides by a zero prior where the full kernel yields 0.
     ("trix", "zero"),
+    // A missing value inside the warm-up: the full compute shifts past it, the state
+    // captured over the head carries it (NaN for ever, or a wrong value).
+    ("atr", "early-missing-bar"),
+    ("natr", "early-missing-bar"),
+    ("ema", "early-missing-*"),
+    ("smma", "early-missing-*"),
+    ("cmo", "early-missing-*"),
+    ("efi", "early-missing-*"),
+    ("trix", "early-missing-*"),
+    ("keltner", "early-missing-*"),
+    ("keltner.lower", "early-missing-*"),
+    ("keltner.upper", "early-missing-*"),
+    ("macd", "early-missing-*"),
+    ("macd.signal", "early-missing-*"),
+    ("macd.histogram", "early-missing-*"),
+    ("macdfix", "early-missing-*"),
+    ("macdfix.signal", "early-missing-*"),
+    ("macdfix.histogram", "early-missing-*"),
 ];
 
 fn values(col: &Column) -> Vec<f64> {
@@ -195,13 +213,16 @@ fn resume_equals_full_recompute_for_every_line_class_and_point() {
     }
     eprintln!("{} lines, {resumable} resumable (directive, class) pairs", lines.len());
     assert!(resumable > 50, "only {resumable} resumable (line, class) pairs — the matrix lost its reach");
-    let known = |head: &str, class: &str| {
-        KNOWN_DIVERGENT.iter().any(|&(h, c)| h == head && (c == "*" || c == class))
+    // A class pattern is exact, `*` (any class), or a `prefix*`.
+    let matches = |pattern: &str, class: &str| match pattern.strip_suffix('*') {
+        Some(prefix) => class.starts_with(prefix),
+        None => pattern == class,
     };
+    let known = |head: &str, class: &str| KNOWN_DIVERGENT.iter().any(|&(h, c)| h == head && matches(c, class));
     let unexpected: Vec<_> = divergent.iter().filter(|((h, c), _)| !known(h, c)).collect();
     let fixed: Vec<_> = KNOWN_DIVERGENT
         .iter()
-        .filter(|&&(h, c)| !divergent.keys().any(|(dh, dc)| dh == h && (c == "*" || *dc == c)))
+        .filter(|&&(h, c)| !divergent.keys().any(|(dh, dc)| dh == h && matches(c, dc)))
         .collect();
     for ((h, c), why) in &divergent {
         eprintln!("divergent {h} [{c}]: {why}");

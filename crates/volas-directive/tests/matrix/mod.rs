@@ -167,6 +167,10 @@ pub fn classes(n: usize) -> Vec<Data> {
     out.push(Data { name: "nan-high-volume", frame: frame(o.clone(), hh, l.clone(), c.clone(), vv) });
     let lead = |x: &Vec<f64>| -> Vec<f64> { x.iter().enumerate().map(|(i, &y)| if i < 7 { f64::NAN } else { y }).collect() };
     out.push(Data { name: "leading-nan", frame: frame(lead(&o), lead(&h), lead(&l), lead(&c), lead(&v)) });
+    // One whole bar missing early on (inside the warm-up of most lines).
+    let gap = |x: &Vec<f64>| -> Vec<f64> { x.iter().enumerate().map(|(i, &y)| if i == 2 { f64::NAN } else { y }).collect() };
+    out.push(Data { name: "early-missing-bar", frame: frame(gap(&o), gap(&h), gap(&l), gap(&c), gap(&v)) });
+    out.push(Data { name: "early-missing-close", frame: frame(o.clone(), h.clone(), l.clone(), gap(&c), v.clone()) });
     let (mut ci, mut li) = (c.clone(), l.clone());
     ci[n / 3] = f64::INFINITY;
     li[n / 2] = f64::NEG_INFINITY;
