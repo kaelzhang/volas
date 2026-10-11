@@ -21,10 +21,10 @@ use super::*;
 
 /// The Wilder-`sum` running accumulator after seeding at `period-1` and folding every
 /// later term — i.e. the value of `s` once `wilder_sum` has consumed all `n` rows. `None`
-/// before the seed exists (`period == 0 || period >= n`). `term(i)` is the per-bar
+/// before the seed exists (`period == 0 || period > n`). `term(i)` is the per-bar
 /// one-period quantity (`dm1.0` / `dm1.1` / `tr1`).
 fn wilder_sum_final(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Option<f64> {
-    if period == 0 || period >= n {
+    if period == 0 || period > n {
         return None;
     }
     let mut s = 0.0;

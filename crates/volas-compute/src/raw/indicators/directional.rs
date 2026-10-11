@@ -38,10 +38,10 @@ fn tr1(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
 
 /// Wilder "sum" smoothing of a one-period `term`: seed `= Σ term(i)` over bars
 /// `[1, period-1]`, placed at index `period-1`; then `s = s - s/period + term(i)`.
-/// NaN before index `period-1`.
+/// NaN before index `period-1` — present from `period` rows on, like TA-Lib.
 fn wilder_sum(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Vec<f64> {
     let mut out = vec![f64::NAN; n];
-    if period == 0 || period >= n {
+    if period == 0 || period > n {
         return out;
     }
     let mut s = 0.0;
