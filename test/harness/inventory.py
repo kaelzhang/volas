@@ -28,7 +28,7 @@ import volas_rs
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_RS = ROOT / 'crates/volas-directive/src/spec.rs'
 PARSER_RS = ROOT / 'crates/volas-directive/src/parser.rs'
-CANDLES_RS = ROOT / 'crates/volas-compute/src/indicators/candles/mod.rs'
+COMPUTE_SRC = ROOT / 'crates/volas-compute/src'
 
 BASE = ('open', 'high', 'low', 'close', 'volume')
 
@@ -185,7 +185,9 @@ def _fixture() -> volas.DataFrame:
 def lines() -> tuple[Line, ...]:
     """Every output line of the directive language, with its argument domains."""
     tokens = _sub_tokens()
-    patterns = _const_names(CANDLES_RS, 'CANDLE_PATTERNS')
+    # The candlestick registry, wherever the compute crate keeps it.
+    patterns = next((names for path in sorted(COMPUTE_SRC.rglob('*.rs'))
+                     if (names := _const_names(path, 'CANDLE_PATTERNS'))), [])
     heads: dict[str, list[str]] = {}
     for cmd in commands():
         candidates = [cmd] + [f'{cmd}.{t}' for t in tokens]

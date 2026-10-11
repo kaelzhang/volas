@@ -41,13 +41,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
     # while df[d] names the column from the bound values ('ma:5', 'sar').
     'stringify-column-name',
-    # An integral literal beyond i64 saturates in the cached name, so a refresh
-    # re-parsing the name computes with a different constant.
-    'literal-saturation',
-    # The cached name of a command whose series is a parenthesized single primary
-    # drops the parentheses (`ema:5@(rsi:5)` -> `ema:5@rsi:5`, `bbi@(0)` -> `bbi@0`)
-    # and does not re-parse.
-    'nested-series-name',
     # append reads a source frame without a freshness check (stale placeholders are
     # appended as data).
     'stale-append-source',
@@ -58,9 +51,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # A windowed frame checks freshness on its visible slice, where a cached column
     # longer than the window is no longer computed: a stale read then succeeds.
     'windowed-stale-logical-read',
-    # A missing input inside a recursive line's warm-up: the full compute shifts past
-    # it, the state captured over the head carries it (NaN for ever, or a wrong value).
-    'resume-missing-warmup',
     # ultosc with periods out of order (e.g. `ultosc:29`) refreshes differently
     # from its full compute.
     'ultosc-period-order',
@@ -85,8 +75,6 @@ DIVERGENT_FAMILIES: frozenset[str] = frozenset({
     # compute is still NaN
     'adosc', 'ht_dcperiod', 'ht_dcphase', 'ht_phasor', 'ht_sine', 'ht_trendline', 'ht_trendmode',
     'mama',
-    # the resume warm-up gate ignores a leading / interior missing-row shift
-    'dema', 'tema', 't3', 'kdj', 'cmo',
     # the resume divides by a zero prior where the full kernel yields 0
     'trix',
     # last-ULP drift between the resume and the full kernel (already tracked)

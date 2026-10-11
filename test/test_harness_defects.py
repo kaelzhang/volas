@@ -67,14 +67,6 @@ def test_a_composite_never_reads_a_stale_cached_column():
     assert _same(df['close - obv'], _frame(cols, 0, 30)['close - obv'])
 
 
-@_xfail('S1 nested-series-name', "the cached name of 'ema:5@(rsi:5)' drops the parentheses")
-def test_a_nested_series_name_reparses():
-    df = _frame(_walk(30), 0, 30)
-    df['ema:5@(rsi:5)']
-    df.append(_frame(_walk(31), 30, 31))
-    df.fulfill()
-
-
 @_xfail('H1 stringify-column-name', 'directive_stringify keeps argument spellings the column name normalizes')
 @pytest.mark.parametrize('directive', ['ma:05', 'sar:0.020', 'stddev:2,1.50', 'boll.upper:20,2.0'])
 def test_stringify_is_the_cached_column_name(directive):
@@ -82,16 +74,6 @@ def test_stringify_is_the_cached_column_name(directive):
     before = set(df.columns)
     df[directive]
     assert set(df.columns) - before == {volas.directive_stringify(directive)}
-
-
-@_xfail('C3 literal-saturation', 'an integral literal beyond i64 saturates in the cached name')
-def test_a_huge_literal_keeps_its_value_through_a_refresh():
-    cols = _walk(10)
-    df = _frame(cols, 0, 9)
-    df['close+100000000000000000000']
-    df.append(_frame(cols, 9, 10))
-    df.fulfill()
-    assert _same(df['close+100000000000000000000'], cols['close'] + 1e20)
 
 
 # --- freshness of read surfaces (I10) ----------------------------------------------------
@@ -207,26 +189,6 @@ def test_a_column_cached_inside_its_warm_up_continues_exactly(directive, rows):
     df = _frame(cols, 0, rows)
     df[directive]
     for i in range(rows, 90):
-        df.append(_frame(cols, i, i + 1))
-        df.fulfill()
-    assert _same(df[directive], _frame(cols, 0, 90)[directive])
-
-
-@_xfail('M4 resume-missing-row', 'the resume warm-up gate ignores a leading / interior missing row')
-@pytest.mark.parametrize('directive,missing', [('dema:5', 'leading'), ('tema:5', 'leading'),
-                                               ('kdj.k', 'leading'), ('cmo:5', 'interior')])
-def test_resume_honours_the_missing_row_shift(directive, missing):
-    cols = _walk(90)
-    if missing == 'leading':
-        for k in cols:
-            cols[k] = cols[k].copy()
-            cols[k][:7] = np.nan
-    else:
-        cols['close'] = cols['close'].copy()
-        cols['close'][45] = np.nan
-    df = _frame(cols, 0, 12)
-    df[directive]
-    for i in range(12, 90):
         df.append(_frame(cols, i, i + 1))
         df.fulfill()
     assert _same(df[directive], _frame(cols, 0, 90)[directive])
@@ -370,23 +332,6 @@ def test_a_one_sample_bollinger_band_is_the_value_itself():
     c = 100 + np.cumsum(rng.standard_normal(500))
     band = np.asarray(volas.DataFrame({'close': c})['boll.lower:1'], float)
     assert np.nanmax(np.abs(band - c)) <= 1e-9 * np.max(np.abs(c))
-
-
-@_xfail('H21 resume-missing-warmup', 'a missing bar inside the warm-up leaves the resumed column NaN for ever')
-@pytest.mark.parametrize('directive', ['atr:3', 'ema:3', 'natr:3', 'atr:3@volume'])
-def test_a_missing_bar_in_the_warm_up_does_not_poison_the_resume(directive):
-    nan = np.nan
-    rows = [(100, 101, 99, 100.5, 500), (100.2, 101.5, 99.5, 100.8, 600), (nan, nan, nan, nan, nan),
-            (100.9, 102, 100, 101.2, 450), (101.0, 102.2, 100.4, 101.6, 700),
-            (101.5, 102.5, 101, 102, 650), (101.8, 103, 101.2, 102.5, 640)]
-    cols = {k: np.array([r[i] for r in rows], float)
-            for i, k in enumerate(['open', 'high', 'low', 'close', 'volume'])}
-    df = _frame(cols, 0, 3)
-    df[directive]
-    for i in range(3, 7):
-        df.append(_frame(cols, i, i + 1))
-        df.fulfill()
-    assert _same(df[directive], _frame(cols, 0, 7)[directive])
 
 
 @_xfail('H22 ultosc-period-order', 'ultosc with periods out of order refreshes differently from its full compute')
