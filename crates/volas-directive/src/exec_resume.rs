@@ -11,8 +11,8 @@ mod scalar;
 mod stateless;
 
 pub use initial_state::initial_state;
-pub use resume::{execute_resume, execute_resume_one, execute_resume_one_node, ResumeStep};
-pub use scalar::execute_resume_value;
+pub use resume::execute_resume;
+pub use scalar::execute_resume_step;
 pub use stateless::{execute_resume_default_series, execute_resume_default_series_one};
 
 // --- state-carry resume (additive; fallback path stays correct) -------------

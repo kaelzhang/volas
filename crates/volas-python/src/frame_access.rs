@@ -287,15 +287,13 @@ impl PyDataFrame {
         } else {
             let col = execute(&self.inner, &node).map_err(value_err)?;
             let lookback = volas_directive::lookback::lookback(&node);
-            // Capture the recursive resume states (if any) BEFORE moving the column in,
-            // so a later append can continue in O(new rows) instead of recomputing — on
-            // a time-frame frame both the state after the forming last row and the
-            // state before it.
-            let (state, before) = self.capture_resume_states(&self.inner, &node, &col);
+            // Capture the recursive resume states (if any) BEFORE moving the column in —
+            // as of the last row and the row before — so a later append continues in
+            // O(new rows) and a replaced last row recomputes in one step.
+            let (state, before) = Self::capture_resume_states(&self.inner, &node, &col);
             self.inner.set_column(&canonical, col).map_err(pyerr)?;
             self.inner.set_computed(&canonical, lookback);
-            self.inner.set_computed_state(&canonical, state);
-            self.inner.set_computed_state_before_last(&canonical, before);
+            self.inner.set_computed_states(&canonical, state, before);
         }
         let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
         Ok((canonical, col))

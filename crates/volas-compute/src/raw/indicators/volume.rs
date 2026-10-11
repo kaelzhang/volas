@@ -273,26 +273,30 @@ pub fn iii(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64>
 /// prev_real]` (as of `row - 1`), bit-identical to one [`obv_resume`] loop
 /// iteration, with NO allocation (the live tf-fold forming-row fast path).
 /// `from >= 1` on every resume, so `row == 0` declines; the carried `prev_real`
-/// is the direction reference (never `real[row - 1]`), matching the Vec kernel.
+/// is the direction reference (never `real[row - 1]`), matching the Vec kernel. The
+/// state as of `row` (`[running_obv, real[row]]`) is written into `next`.
 pub fn obv_resume_one(
     real: &[f64],
     volume: &[f64],
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 2 || row >= real.len() {
+    if row == 0 || state.len() != 2 || next.len() != 2 || row >= real.len() {
         return None;
     }
     let prev = state[1];
     let dir = ((real[row] > prev) as i8 - (real[row] < prev) as i8) as f64;
-    Some(state[0] + dir * volume[row])
+    let obv = state[0] + dir * volume[row];
+    next.copy_from_slice(&[obv, real[row]]);
+    Some(obv)
 }
 
 /// Single-row AD (Chaikin A/D line) resume: the value at `row` from
 /// `state = [running_ad]` (as of `row - 1`), bit-identical to one [`ad_resume`]
 /// loop iteration, with NO allocation. AD's per-bar money-flow term is
 /// independent of prior bars, so the running total plus this bar's money flow is
-/// the whole step.
+/// the whole step. The state as of `row` (`[running_ad]`) is written into `next`.
 pub fn ad_resume_one(
     high: &[f64],
     low: &[f64],
@@ -300,11 +304,13 @@ pub fn ad_resume_one(
     volume: &[f64],
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if state.is_empty() || row >= close.len() {
+    if state.len() != 1 || next.len() != 1 || row >= close.len() {
         return None;
     }
-    Some(state[0] + money_flow_volume(high[row], low[row], close[row], volume[row]))
+    next[0] = state[0] + money_flow_volume(high[row], low[row], close[row], volume[row]);
+    Some(next[0])
 }
 
 

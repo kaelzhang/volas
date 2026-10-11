@@ -147,14 +147,21 @@ pub fn kama_resume(
 
 
 /// Single new-row [`kama`] resume: the KAMA value at `row` from `state =
-/// [prev_kama_{row-1}, sum_roc1_{row-1}]`, with NO `Vec` allocation — bit-identical to
-/// one iteration of [`kama_resume`]'s loop at index `row` (same sliding-sum update, the
-/// shared [`kama_sc`], and the fused `(price-prev)*sc+prev` step). `None` on the same
-/// guard as [`kama_resume`] (`period == 0 || row <= period`, the trailing window would
-/// underflow) plus a short state / out-of-range `row`.
-pub fn kama_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+/// [prev_kama_{row-1}, sum_roc1_{row-1}]`, the state as of `row` written into `next`,
+/// with NO allocation — bit-identical to one iteration of [`kama_resume`]'s loop at index
+/// `row` (same sliding-sum update, the shared [`kama_sc`], and the fused
+/// `(price-prev)*sc+prev` step). `None` on the same guard as [`kama_resume`]
+/// (`period == 0 || row <= period`, the trailing window would underflow) plus a `state` /
+/// `next` that is not two values / an out-of-range `row`.
+pub fn kama_resume_one(
+    data: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
     let n = data.len();
-    if period == 0 || row <= period || row >= n || state.len() < 2 {
+    if period == 0 || row <= period || row >= n || state.len() != 2 || next.len() != 2 {
         return None;
     }
     let prev_kama = state[0];
@@ -167,6 +174,8 @@ pub fn kama_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -
     sum_roc1 -= (trailing_value - tr2).abs();
     sum_roc1 += (data[row] - data[row - 1]).abs();
     let sc = kama_sc(period_roc, sum_roc1);
-    Some((data[row] - prev_kama).mul_add(sc, prev_kama))
+    let kama = (data[row] - prev_kama).mul_add(sc, prev_kama);
+    next.copy_from_slice(&[kama, sum_roc1]);
+    Some(kama)
 }
 

@@ -172,11 +172,8 @@ pub struct PyDataFrame {
 
 impl PyDataFrame {
     /// Wrap a core frame as a plain (non-cumulating) DataFrame — the default for
-    /// every derived frame (slices, projections, head/tail, ...). A plain frame keeps
-    /// a single carried state per cached column, so a state-before-last inherited from
-    /// a time-frame parent is dropped.
-    pub(crate) fn plain(mut inner: DataFrame) -> Self {
-        inner.clear_computed_states_before_last();
+    /// every derived frame (slices, projections, head/tail, ...).
+    pub(crate) fn plain(inner: DataFrame) -> Self {
         PyDataFrame { inner, tf: None, window: None }
     }
 

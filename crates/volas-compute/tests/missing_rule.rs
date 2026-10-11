@@ -595,146 +595,127 @@ fn a_single_row_resume_skips_a_missing_row() {
     let d = data();
     step("ad_resume_one", &[&d.high[..], &d.low[..], &d.close[..], &d.volume[..]], &|x|
         raw::ad_final_state(x[0], x[1], x[2], x[3]), &|x, row, st| format!("{:?}",
-        ind::ad_resume_one(x[0], x[1], x[2], x[3], row, st)), &|x, row, st| format!("{:?}",
-        raw::ad_resume_one(x[0], x[1], x[2], x[3], row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::ad_resume_one(x[0], x[1], x[2], x[3], row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::ad_resume_one(x[0], x[1], x[2], x[3], row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("adx_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::adx_final_state(x[0], x[1], x[2], 5), &|x, row, st| format!("{:?}",
-        ind::adx_resume_one(x[0], x[1], x[2], 5, row, st)), &|x, row, st| format!("{:?}",
-        raw::adx_resume_one(x[0], x[1], x[2], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::adx_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::adx_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("adxr_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::adxr_final_state(x[0], x[1], x[2], 5), &|x, row, st| format!("{:?}",
-        ind::adxr_resume_one(x[0], x[1], x[2], 5, row, st)), &|x, row, st| format!("{:?}",
-        raw::adxr_resume_one(x[0], x[1], x[2], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::adxr_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::adxr_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("atr_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::atr_final_state(x[0], x[1], x[2], 5), &|x, row, st| format!("{:?}",
-        ind::atr_resume_one(x[0], x[1], x[2], 5, row, st)), &|x, row, st| format!("{:?}",
-        raw::atr_resume_one(x[0], x[1], x[2], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::atr_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::atr_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("cmo_resume_one", &[&d.close[..]], &|x| raw::cmo_final_state(x[0], 5), &|x, row,
-        st| format!("{:?}", ind::cmo_resume_one(x[0], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::cmo_resume_one(x[0], 5, row, st)), &|st| format!("{:?}",
-        Some((f64::NAN, [st[0], st[1]]))));
+        st| format!("{:?}", one(st, |n| ind::cmo_resume_one(x[0], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::cmo_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}",
+        (Some(f64::NAN), st.to_vec())));
     step("dema_resume_one", &[&d.close[..]], &|x| raw::dema_final_state(x[0], 5), &|x, row,
-        st| format!("{:?}", ind::dema_resume_one(x[0], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::dema_resume_one(x[0], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        st| format!("{:?}", one(st, |n| ind::dema_resume_one(x[0], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::dema_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("dx_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::dx_final_state(x[0], x[1], x[2], 5), &|x, row, st| format!("{:?}",
-        ind::dx_resume_one(x[0], x[1], x[2], 5, row, st)), &|x, row, st| format!("{:?}",
-        raw::dx_resume_one(x[0], x[1], x[2], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::dx_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::dx_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("efi_resume_one", &[&d.close[..], &d.volume[..]], &|x| raw::efi_final_state(x[0],
-        x[1], 5), &|x, row, st| format!("{:?}", ind::efi_resume_one(x[0], x[1], 5, row,
-        st)), &|x, row, st| format!("{:?}", raw::efi_resume_one(x[0], x[1], 5, row, st)),
-        &|_st| format!("{:?}", Some(f64::NAN)));
+        x[1], 5), &|x, row, st| format!("{:?}", one(st, |n| ind::efi_resume_one(x[0], x[1], 5, row,
+        st, n))), &|x, row, st| format!("{:?}", one(st, |n| raw::efi_resume_one(x[0], x[1], 5, row, st, n))),
+        &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("ema_resume_one", &[&d.close[..]], &|x| raw::ema_final_state(x[0], 5), &|x, row,
-        st| format!("{:?}", ind::ema_resume_one(x[0], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::ema_resume_one(x[0], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        st| format!("{:?}", one(st, |n| ind::ema_resume_one(x[0], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::ema_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("kama_resume_one", &[&d.close[..]], &|x| raw::kama_final_state(x[0], 5), &|x, row,
-        st| format!("{:?}", ind::kama_resume_one(x[0], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::kama_resume_one(x[0], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        st| format!("{:?}", one(st, |n| ind::kama_resume_one(x[0], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::kama_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("keltner_band_resume_one", &[&d.close[..], &d.high[..], &d.low[..]], &|x|
         raw::keltner_band_final_state(x[0], x[1], x[2], 5, 5), &|x, row, st| format!("{:?}",
-        ind::keltner_band_resume_one(x[0], x[1], x[2], 5, 5, 2.0, true, row, st)), &|x, row,
-        st| format!("{:?}", raw::keltner_band_resume_one(x[0], x[1], x[2], 5, 5, 2.0, true,
-        row, st)), &|_st| format!("{:?}", Some(f64::NAN)));
+        one(st, |n| ind::keltner_band_resume_one(x[0], x[1], x[2], 5, 5, 2.0, true, row, st, n))), &|x, row,
+        st| format!("{:?}", one(st, |n| raw::keltner_band_resume_one(x[0], x[1], x[2], 5, 5, 2.0, true,
+        row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("macd_resume_one", &[&d.close[..]], &|x| raw::macd_final_state(x[0], 3, 6), &|x,
-        row, st| format!("{:?}", ind::macd_resume_one(x[0], 3, 6, row, st)), &|x, row, st|
-        format!("{:?}", raw::macd_resume_one(x[0], 3, 6, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        row, st| format!("{:?}", one(st, |n| ind::macd_resume_one(x[0], 3, 6, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::macd_resume_one(x[0], 3, 6, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("macd_signal_resume_one", &[&d.close[..]], &|x| raw::macd_signal_final_state(x[0],
-        3, 6, 4), &|x, row, st| format!("{:?}", ind::macd_signal_resume_one(x[0], 3, 6, 4,
-        true, row, st)), &|x, row, st| format!("{:?}", raw::macd_signal_resume_one(x[0], 3,
-        6, 4, true, row, st)), &|_st| format!("{:?}", Some(f64::NAN)));
+        3, 6, 4), &|x, row, st| format!("{:?}", one(st, |n| ind::macd_signal_resume_one(x[0], 3, 6, 4,
+        true, row, st, n))), &|x, row, st| format!("{:?}", one(st, |n| raw::macd_signal_resume_one(x[0], 3,
+        6, 4, true, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("mass_index_resume_one", &[&d.high[..], &d.low[..]], &|x|
         raw::mass_index_final_state(x[0], x[1], 5), &|x, row, st| format!("{:?}",
-        ind::mass_index_resume_one(x[0], x[1], 5, row, st)), &|x, row, st| format!("{:?}",
-        raw::mass_index_resume_one(x[0], x[1], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::mass_index_resume_one(x[0], x[1], 5, row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::mass_index_resume_one(x[0], x[1], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("minus_di_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::minus_di_final_state(x[0], x[1], x[2], 5), &|x, row, st| format!("{:?}",
-        ind::minus_di_resume_one(x[0], x[1], x[2], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::minus_di_resume_one(x[0], x[1], x[2], 5, row, st)), &|_st|
-        format!("{:?}", Some(f64::NAN)));
+        one(st, |n| ind::minus_di_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::minus_di_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("minus_dm_resume_one", &[&d.high[..], &d.low[..]], &|x|
         raw::minus_dm_final_state(x[0], x[1], 5), &|x, row, st| format!("{:?}",
-        ind::minus_dm_resume_one(x[0], x[1], 5, row, st)), &|x, row, st| format!("{:?}",
-        raw::minus_dm_resume_one(x[0], x[1], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::minus_dm_resume_one(x[0], x[1], 5, row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::minus_dm_resume_one(x[0], x[1], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("nvi_resume_one", &[&d.close[..], &d.volume[..]], &|x| raw::nvi_final_state(x[0],
-        x[1]), &|x, row, st| format!("{:?}", ind::nvi_resume_one(x[0], x[1], row, st)), &|x,
-        row, st| format!("{:?}", raw::nvi_resume_one(x[0], x[1], row, st)), &|_st|
-        format!("{:?}", Some(f64::NAN)));
+        x[1]), &|x, row, st| format!("{:?}", one(st, |n| ind::nvi_resume_one(x[0], x[1], row, st, n))), &|x,
+        row, st| format!("{:?}", one(st, |n| raw::nvi_resume_one(x[0], x[1], row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("obv_resume_one", &[&d.close[..], &d.volume[..]], &|x| raw::obv_final_state(x[0],
-        x[1]), &|x, row, st| format!("{:?}", ind::obv_resume_one(x[0], x[1], row, st)), &|x,
-        row, st| format!("{:?}", raw::obv_resume_one(x[0], x[1], row, st)), &|_st|
-        format!("{:?}", Some(f64::NAN)));
+        x[1]), &|x, row, st| format!("{:?}", one(st, |n| ind::obv_resume_one(x[0], x[1], row, st, n))), &|x,
+        row, st| format!("{:?}", one(st, |n| raw::obv_resume_one(x[0], x[1], row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("plus_di_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::plus_di_final_state(x[0], x[1], x[2], 5), &|x, row, st| format!("{:?}",
-        ind::plus_di_resume_one(x[0], x[1], x[2], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::plus_di_resume_one(x[0], x[1], x[2], 5, row, st)), &|_st|
-        format!("{:?}", Some(f64::NAN)));
+        one(st, |n| ind::plus_di_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::plus_di_resume_one(x[0], x[1], x[2], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("plus_dm_resume_one", &[&d.high[..], &d.low[..]], &|x|
         raw::plus_dm_final_state(x[0], x[1], 5), &|x, row, st| format!("{:?}",
-        ind::plus_dm_resume_one(x[0], x[1], 5, row, st)), &|x, row, st| format!("{:?}",
-        raw::plus_dm_resume_one(x[0], x[1], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::plus_dm_resume_one(x[0], x[1], 5, row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::plus_dm_resume_one(x[0], x[1], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("pvi_resume_one", &[&d.close[..], &d.volume[..]], &|x| raw::pvi_final_state(x[0],
-        x[1]), &|x, row, st| format!("{:?}", ind::pvi_resume_one(x[0], x[1], row, st)), &|x,
-        row, st| format!("{:?}", raw::pvi_resume_one(x[0], x[1], row, st)), &|_st|
-        format!("{:?}", Some(f64::NAN)));
+        x[1]), &|x, row, st| format!("{:?}", one(st, |n| ind::pvi_resume_one(x[0], x[1], row, st, n))), &|x,
+        row, st| format!("{:?}", one(st, |n| raw::pvi_resume_one(x[0], x[1], row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("pvt_resume_one", &[&d.close[..], &d.volume[..]], &|x| raw::pvt_final_state(x[0],
-        x[1]), &|x, row, st| format!("{:?}", ind::pvt_resume_one(x[0], x[1], row, st)), &|x,
-        row, st| format!("{:?}", raw::pvt_resume_one(x[0], x[1], row, st)), &|_st|
-        format!("{:?}", Some(f64::NAN)));
+        x[1]), &|x, row, st| format!("{:?}", one(st, |n| ind::pvt_resume_one(x[0], x[1], row, st, n))), &|x,
+        row, st| format!("{:?}", one(st, |n| raw::pvt_resume_one(x[0], x[1], row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("rsi_resume_one", &[&d.close[..]], &|x| raw::rsi_final_state(x[0], 5), &|x, row,
-        st| format!("{:?}", ind::rsi_resume_one(x[0], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::rsi_resume_one(x[0], 5, row, st)), &|st| format!("{:?}",
-        Some((f64::NAN, [st[0], st[1]]))));
+        st| format!("{:?}", one(st, |n| ind::rsi_resume_one(x[0], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::rsi_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}",
+        (Some(f64::NAN), st.to_vec())));
     step("sar_resume_one", &[&d.high[..], &d.low[..]], &|x| raw::sar_final_state(x[0], x[1],
-        0.02, 0.2), &|x, row, st| format!("{:?}", ind::sar_resume_one(x[0], x[1], row, st)),
-        &|x, row, st| format!("{:?}", raw::sar_resume_one(x[0], x[1], row, st)), &|_st|
-        format!("{:?}", Some(f64::NAN)));
+        0.02, 0.2), &|x, row, st| format!("{:?}", one(st, |n| ind::sar_resume_one(x[0], x[1], 0.02, 0.2, row, st, n))),
+        &|x, row, st| format!("{:?}", one(st, |n| raw::sar_resume_one(x[0], x[1], 0.02, 0.2, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("sarext_resume_one", &[&d.high[..], &d.low[..]], &|x| raw::sarext_final_state(x[0],
         x[1], 0.0, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2), &|x, row, st| format!("{:?}",
-        ind::sarext_resume_one(x[0], x[1], 0.0, row, st)), &|x, row, st| format!("{:?}",
-        raw::sarext_resume_one(x[0], x[1], 0.0, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::sarext_resume_one(x[0], x[1], 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2, row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::sarext_resume_one(x[0], x[1], 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("smma_resume_one", &[&d.close[..]], &|x| raw::smma_final_state(x[0], 5), &|x, row,
-        st| format!("{:?}", ind::smma_resume_one(x[0], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::smma_resume_one(x[0], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        st| format!("{:?}", one(st, |n| ind::smma_resume_one(x[0], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::smma_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("supertrend_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::supertrend_final_state(x[0], x[1], x[2], 5, 2.0), &|x, row, st| format!("{:?}",
-        ind::supertrend_resume_one(x[0], x[1], x[2], 5, 2.0, false, row, st)), &|x, row, st|
-        format!("{:?}", raw::supertrend_resume_one(x[0], x[1], x[2], 5, 2.0, false, row,
-        st)), &|_st| format!("{:?}", Some(f64::NAN)));
+        one(st, |n| ind::supertrend_resume_one(x[0], x[1], x[2], 5, 2.0, false, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::supertrend_resume_one(x[0], x[1], x[2], 5, 2.0, false, row,
+        st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("t3_resume_one", &[&d.close[..]], &|x| raw::t3_final_state(x[0], 5), &|x, row, st|
-        format!("{:?}", ind::t3_resume_one(x[0], 5, 0.7, row, st)), &|x, row, st|
-        format!("{:?}", raw::t3_resume_one(x[0], 5, 0.7, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        format!("{:?}", one(st, |n| ind::t3_resume_one(x[0], 5, 0.7, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::t3_resume_one(x[0], 5, 0.7, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("tema_resume_one", &[&d.close[..]], &|x| raw::tema_final_state(x[0], 5), &|x, row,
-        st| format!("{:?}", ind::tema_resume_one(x[0], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::tema_resume_one(x[0], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        st| format!("{:?}", one(st, |n| ind::tema_resume_one(x[0], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::tema_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("trix_resume_one", &[&d.close[..]], &|x| raw::trix_final_state(x[0], 5), &|x, row,
-        st| format!("{:?}", ind::trix_resume_one(x[0], 5, row, st)), &|x, row, st|
-        format!("{:?}", raw::trix_resume_one(x[0], 5, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        st| format!("{:?}", one(st, |n| ind::trix_resume_one(x[0], 5, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::trix_resume_one(x[0], 5, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("tsi_resume_one", &[&d.close[..]], &|x| raw::tsi_final_state(x[0], 6, 3), &|x, row,
-        st| format!("{:?}", ind::tsi_resume_one(x[0], 6, 3, row, st)), &|x, row, st|
-        format!("{:?}", raw::tsi_resume_one(x[0], 6, 3, row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        st| format!("{:?}", one(st, |n| ind::tsi_resume_one(x[0], 6, 3, row, st, n))), &|x, row, st|
+        format!("{:?}", one(st, |n| raw::tsi_resume_one(x[0], 6, 3, row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
     step("wad_resume_one", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::wad_final_state(x[0], x[1], x[2]), &|x, row, st| format!("{:?}",
-        ind::wad_resume_one(x[0], x[1], x[2], row, st)), &|x, row, st| format!("{:?}",
-        raw::wad_resume_one(x[0], x[1], x[2], row, st)), &|_st| format!("{:?}",
-        Some(f64::NAN)));
+        one(st, |n| ind::wad_resume_one(x[0], x[1], x[2], row, st, n))), &|x, row, st| format!("{:?}",
+        one(st, |n| raw::wad_resume_one(x[0], x[1], x[2], row, st, n))), &|st| format!("{:?}", (Some(f64::NAN), st.to_vec())));
+}
+
+/// A single-row resume's value and the state it wrote, from a fresh `next` buffer.
+fn one(st: &[f64], f: impl FnOnce(&mut [f64]) -> Option<f64>) -> (Option<f64>, Vec<f64>) {
+    let mut next = vec![0.0; st.len()];
+    let v = f(&mut next);
+    (v, next)
 }
 
 fn av<'a>(x: &[&'a [f64]]) -> ArrayView1<'a, f64> {

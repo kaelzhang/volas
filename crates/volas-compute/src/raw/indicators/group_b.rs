@@ -737,29 +737,33 @@ pub fn supertrend_resume(
 
 
 /// Scalar single-row twin of [`wad_resume`]: the cumulative Williams A/D at `row`
-/// continued from `state = [wad_{row-1}, close_{row-1}]`, value only — no tail/state
-/// `Vec`. Mirrors `wad_resume`'s single step `acc += wad_step(high[i], low[i], close[i],
-/// prev)` bit-for-bit (the same shared `wad_step`). `None` at `row == 0`, short `state`,
-/// or `row` out of range.
+/// continued from `state = [wad_{row-1}, close_{row-1}]`, the state as of `row` written
+/// into `next` — no allocation. Mirrors `wad_resume`'s single step `acc += wad_step(high[i],
+/// low[i], close[i], prev)` bit-for-bit (the same shared `wad_step`). `None` at `row == 0`,
+/// a `state` / `next` that is not two values, or `row` out of range.
 pub fn wad_resume_one(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 2 || row >= close.len() {
+    if row == 0 || state.len() != 2 || next.len() != 2 || row >= close.len() {
         return None;
     }
-    Some(state[0] + wad_step(high[row], low[row], close[row], state[1]))
+    let acc = state[0] + wad_step(high[row], low[row], close[row], state[1]);
+    next.copy_from_slice(&[acc, close[row]]);
+    Some(acc)
 }
 
 /// Scalar single-row twin of [`keltner_band_resume`]: the Keltner band at `row` =
 /// `EMA(close)_{row} + sign·mult·ATR_{row}`, composed from the EMA and ATR scalar
-/// twins — value only, no `Vec`. `upper` selects the `+` band, `!upper` the `−` band.
-/// State is `[ema_{row-1}, atr_{row-1}]`. Bit-identical to `keltner_band_resume` (the
-/// same `ema_resume_one` / `atr_resume_one` steps and the same `ema + sign·mult·atr`
-/// combine). `None` at `row == 0` (the ATR twin declines), short `state`, or out of range.
+/// twins — no allocation. `upper` selects the `+` band, `!upper` the `−` band. State is
+/// `[ema_{row-1}, atr_{row-1}]`; the state as of `row` is written into `next`.
+/// Bit-identical to `keltner_band_resume` (the same `ema_resume_one` / `atr_resume_one`
+/// steps and the same `ema + sign·mult·atr` combine). `None` at `row == 0` (the ATR twin
+/// declines), a `state` / `next` that is not two values, or out of range.
 #[allow(clippy::too_many_arguments)]
 pub fn keltner_band_resume_one(
     close: &[f64],
@@ -771,22 +775,25 @@ pub fn keltner_band_resume_one(
     upper: bool,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if state.len() < 2 {
+    if state.len() != 2 || next.len() != 2 {
         return None;
     }
-    let e = super::ema_resume_one(close, ema_period, row, &state[0..1])?;
-    let a = super::atr_resume_one(high, low, close, atr_period, row, &state[1..2])?;
+    let (ne, na) = next.split_at_mut(1);
+    let a = super::atr_resume_one(high, low, close, atr_period, row, &state[1..2], na)?;
+    let e = super::ema_resume_one(close, ema_period, row, &state[0..1], ne)?;
     let sign = if upper { 1.0 } else { -1.0 };
     Some(e + sign * mult * a)
 }
 
 /// Scalar single-row twin of [`supertrend_resume`]: the Supertrend output at `row`
 /// (the trailing line, or the `+1`/`−1` trend when `want_direction`) continued from
-/// `state = [trend, final_upper, final_lower, prev_close, atr]_{row-1}`, value only —
-/// no tail/state `Vec`. Advances the ATR via `atr_resume_one`, runs ONE `supertrend_step`,
-/// then emits via `supertrend_out` — bit-identical to `supertrend_resume`'s single
-/// iteration. `None` at `row == 0` (the ATR twin declines), short `state`, or out of range.
+/// `state = [trend, final_upper, final_lower, prev_close, atr]_{row-1}`, the state as of
+/// `row` written into `next` — no allocation. Advances the ATR via `atr_resume_one`, runs
+/// ONE `supertrend_step`, then emits via `supertrend_out` — bit-identical to
+/// `supertrend_resume`'s single iteration. `None` at `row == 0` (the ATR twin declines), a
+/// `state` / `next` that is not five values, or out of range.
 #[allow(clippy::too_many_arguments)]
 pub fn supertrend_resume_one(
     high: &[f64],
@@ -797,14 +804,16 @@ pub fn supertrend_resume_one(
     want_direction: bool,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if state.len() < 5 {
+    if state.len() != 5 || next.len() != 5 {
         return None;
     }
     let (trend, fu, fl, pc) = (state[0], state[1], state[2], state[3]);
-    let atr = super::atr_resume_one(high, low, close, period, row, &state[4..5])?;
+    let atr = super::atr_resume_one(high, low, close, period, row, &state[4..5], &mut next[4..5])?;
     let hl2 = (high[row] + low[row]) / 2.0;
     let (trend, fu, fl) = supertrend_step(hl2, atr, close[row], mult, trend, fu, fl, pc);
+    next[..4].copy_from_slice(&[trend, fu, fl, close[row]]);
     Some(supertrend_out(trend, fu, fl, want_direction))
 }
 

@@ -288,8 +288,7 @@
         df.computed_columns()[0].1.clone()
     }
 
-    #[test]
-    fn two_states_lifecycle_of_a_time_frame_column() {
+    fn ten_rows() -> DataFrame {
         let mut df = DataFrame::new(
             vec!["close".into()],
             vec![Column::f64((0..10).map(|i| i as f64).collect())],
@@ -297,62 +296,69 @@
         )
         .unwrap();
         df.set_computed("close", 2);
-        df.set_computed_state("close", Some(vec![9.0]));
-        df.set_computed_state_before_last("close", Some(vec![8.0]));
-        assert_eq!(df.computed_state_before_last("close"), Some((&[8.0][..], 0)));
-        assert_eq!(df.computed_state_before_last("missing"), None);
-        // `store_computed_state` writes in place when the length matches, else replaces.
-        df.store_computed_state("close", &[9.5]);
-        assert_eq!(meta(&df).state, Some(vec![9.5]));
-        df.store_computed_state("close", &[1.0, 2.0]);
-        assert_eq!(meta(&df).state, Some(vec![1.0, 2.0]));
-        df.store_computed_state("missing", &[0.0]); // untracked: no-op
-        // A rollover from a valid last row moves the state after it into the state before
-        // the new row — replacing a mismatched-length buffer, then copying in place.
-        df.roll_computed_states();
-        assert_eq!(meta(&df).state_before_last, Some(vec![1.0, 2.0]));
-        df.store_computed_state("close", &[3.0, 4.0]);
-        df.roll_computed_states();
-        assert_eq!(meta(&df).state_before_last, Some(vec![3.0, 4.0]));
-        // A slice ending at the frame's end carries both states.
-        assert_eq!(meta(&df.slice(5, 10)).state_before_last, Some(vec![3.0, 4.0]));
-        assert_eq!(meta(&df.slice(0, 10)).state_before_last, Some(vec![3.0, 4.0]));
-        df.set_computed_state("close", None);
-        df.roll_computed_states(); // no state after the last row -> before-last unknown
-        assert_eq!(meta(&df).state_before_last, None);
-        // A stale last row has no current state after it, so the rollover drops it too.
-        df.set_computed_state("close", Some(vec![5.0]));
-        df.set_computed_state_before_last("close", Some(vec![4.0]));
-        df.invalidate_computed_forming_row(9);
-        assert_eq!(meta(&df).state_before_last, Some(vec![4.0])); // the fold keeps it
-        df.roll_computed_states();
-        assert_eq!(meta(&df).state_before_last, None);
-        // A plain frame drops the before-last state; a write drops both.
-        df.set_computed_state_before_last("close", Some(vec![4.0]));
-        df.clear_computed_states_before_last();
-        assert_eq!(meta(&df).state_before_last, None);
-        df.set_computed_state_before_last("missing", Some(vec![1.0])); // no-op
-        df.set_computed("x", 0);
-        df.set_computed_state_before_last("x", Some(vec![1.0]));
-        df.invalidate_computed_on_write("close");
-        assert_eq!(meta(&df).state_before_last, None);
+        df
     }
 
+    /// A one-row step advances both states, recycling the buffers; a declined step and
+    /// an untracked / stateless column leave them alone.
     #[test]
-    fn slice_short_of_the_end_drops_the_before_last_state() {
-        let mut df = DataFrame::new(
-            vec!["close".into()],
-            vec![Column::f64((0..10).map(|i| i as f64).collect())],
-            None,
-        )
-        .unwrap();
-        df.set_computed("close", 2);
-        df.set_computed_state("close", Some(vec![9.0]));
-        df.set_computed_state_before_last("close", Some(vec![8.0]));
-        df.invalidate_computed_forming_row(9); // valid_rows 9: a slice to 9 reaches it
+    fn a_step_advances_the_two_states() {
+        let mut df = ten_rows();
+        assert_eq!(df.step_computed_state("close", |_, _, _, _| Some(1.0)), None); // no state
+        assert_eq!(df.step_computed_state("missing", |_, _, _, _| Some(1.0)), None);
+        df.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0]));
+        let got = df.step_computed_state("close", |frame, prev, origin, next| {
+            assert_eq!((frame.height(), prev, origin, next.len()), (10, &[9.0][..], 0, 1));
+            next[0] = 10.0;
+            Some(10.0)
+        });
+        assert_eq!(got, Some(10.0));
+        assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![10.0]), Some(vec![9.0])));
+        // declined: untouched
+        assert_eq!(df.step_computed_state("close", |_, _, _, _| None), None);
+        assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![10.0]), Some(vec![9.0])));
+        // a Vec resume of one row advances the same way
+        df.advance_computed_state("close", vec![11.0]);
+        assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![11.0]), Some(vec![10.0])));
+        df.advance_computed_state("missing", vec![1.0]); // no-op
+        df.set_computed_state("close", Some(vec![1.0]));
+        assert_eq!(meta(&df).state_before_last, None);
+        df.set_computed_states("missing", None, None); // no-op
+    }
+
+    /// Replacing the last row drops a column valid through it back by one row: the state
+    /// before it becomes its state. A column already stale there keeps both; a write
+    /// drops both.
+    #[test]
+    fn a_replaced_last_row_restores_the_state_before_it() {
+        let mut df = ten_rows();
+        df.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0]));
+        df.invalidate_computed_forming_row(9);
+        assert_eq!(meta(&df).valid_rows, 9);
+        assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![8.0]), None));
+        df.invalidate_computed_forming_row(9); // already stale there: unchanged
+        assert_eq!(meta(&df).state, Some(vec![8.0]));
+        // the step after the replacement recycles the dropped buffer
+        df.step_computed_state("close", |_, _, _, next| {
+            next[0] = 9.5;
+            Some(9.5)
+        });
+        assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![9.5]), Some(vec![8.0])));
+        df.set_computed("x", 0);
+        df.invalidate_computed_on_write("x");
+        assert_eq!((meta(&df).state, meta(&df).state_before_last), (None, None));
+    }
+
+    /// Both states describe rows relative to the last valid one, so a slice reaching it
+    /// carries both, and one ending before it carries neither.
+    #[test]
+    fn a_slice_carries_both_states_together() {
+        let mut df = ten_rows();
+        df.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0]));
+        let tail = df.slice(5, 10);
+        assert_eq!((meta(&tail).state, meta(&tail).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
         let head = df.slice(0, 9);
-        assert_eq!(meta(&head).state, Some(vec![9.0]));
-        assert_eq!(meta(&head).state_before_last, None);
+        assert_eq!((meta(&head).state, meta(&head).state_before_last), (None, None));
     }
 
     #[test]

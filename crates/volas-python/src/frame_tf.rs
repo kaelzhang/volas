@@ -184,10 +184,9 @@ impl PyDataFrame {
                     }
                 }
             } else {
-                // Roll over: the previous forming bar is final in `inner`. Each cached
-                // column's state after it becomes the state before the new forming row
-                // (a shift — the closed bar is never stepped again).
-                inner.roll_computed_states();
+                // Roll over: the previous forming bar is final in `inner`; the new row is
+                // a stale row like any appended one, resumed from the state as of the
+                // closed bar (never stepping the closed bar again).
                 let bar = fine.slice(i, i + 1);
                 let agg = aggregate_period(&bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                 tfs.open = Some(bar);

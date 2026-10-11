@@ -421,16 +421,17 @@ pub fn cmo_resume(
 
 /// Scalar single-row twin of [`rsi_resume`]: the RSI at `row` continued from
 /// `state = [avg_gain, avg_loss]` (as of `row - 1`), with the advanced state as of `row`
-/// — no tail/state `Vec`. Mirrors `rsi_resume`'s Wilder step + `100 - 100/(1+g/l)`
-/// (flat-loss → 100) bit-for-bit. `None` at `row == 0`, short `state`, or `row` out of
-/// range.
+/// written into `next` — no allocation. Mirrors `rsi_resume`'s Wilder step +
+/// `100 - 100/(1+g/l)` (flat-loss → 100) bit-for-bit. `None` at `row == 0`, a `state` /
+/// `next` that is not two values, or `row` out of range.
 pub fn rsi_resume_one(
     close: &[f64],
     period: usize,
     row: usize,
     state: &[f64],
-) -> Option<(f64, [f64; 2])> {
-    if row == 0 || state.len() < 2 || row >= close.len() {
+    next: &mut [f64],
+) -> Option<f64> {
+    if row == 0 || state.len() != 2 || next.len() != 2 || row >= close.len() {
         return None;
     }
     let pf = period as f64;
@@ -444,21 +445,23 @@ pub fn rsi_resume_one(
     } else {
         100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
     };
-    Some((value, [avg_gain, avg_loss]))
+    next.copy_from_slice(&[avg_gain, avg_loss]);
+    Some(value)
 }
 
 /// Scalar single-row twin of [`cmo_resume`]: the CMO at `row` continued from
 /// `state = [avg_gain, avg_loss]` (as of `row - 1`), with the advanced state as of `row`
-/// — no tail/state `Vec`. Mirrors `cmo_resume`'s fused Wilder step + `100·(g-l)/(g+l)`
-/// (flat-window → 0) bit-for-bit. `None` at `row == 0`, short `state`, or `row` out of
-/// range.
+/// written into `next` — no allocation. Mirrors `cmo_resume`'s fused Wilder step +
+/// `100·(g-l)/(g+l)` (flat-window → 0) bit-for-bit. `None` at `row == 0`, a `state` /
+/// `next` that is not two values, or `row` out of range.
 pub fn cmo_resume_one(
     close: &[f64],
     period: usize,
     row: usize,
     state: &[f64],
-) -> Option<(f64, [f64; 2])> {
-    if row == 0 || state.len() < 2 || row >= close.len() {
+    next: &mut [f64],
+) -> Option<f64> {
+    if row == 0 || state.len() != 2 || next.len() != 2 || row >= close.len() {
         return None;
     }
     let pf = period as f64;
@@ -472,7 +475,8 @@ pub fn cmo_resume_one(
     } else {
         100.0 * (avg_gain - avg_loss) / denom
     };
-    Some((value, [avg_gain, avg_loss]))
+    next.copy_from_slice(&[avg_gain, avg_loss]);
+    Some(value)
 }
 
 /// Donchian middle channel (`(hhv + llv) / 2`).

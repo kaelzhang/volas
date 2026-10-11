@@ -239,12 +239,6 @@ impl PyDataFrame {
                     df.names().iter().filter(|n| !df.is_computed(n)).cloned().collect();
                 Some(df.slice_data(h - 1, h).select(&data).map_err(pyerr)?)
             };
-            // A cached column carried in from a source frame holds a single state; its
-            // state before the last row is captured by its next refresh.
-            let mut df = df;
-            for name in df.computed_names() {
-                df.set_computed_state(&name, None);
-            }
             return Ok(PyDataFrame {
                 inner: df,
                 tf: Some(TfState {

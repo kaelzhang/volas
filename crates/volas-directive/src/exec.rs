@@ -264,7 +264,7 @@ fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
 
 pub use crate::exec_resume::{
     execute_resume, execute_resume_default_series, execute_resume_default_series_one,
-    execute_resume_one, execute_resume_one_node, execute_resume_value, initial_state, ResumeStep,
+    execute_resume_step, initial_state,
 };
 
 /// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.
@@ -773,11 +773,13 @@ mod tests {
         // (exec:1369). `llv` (lowest-low) has no incremental resume.
         assert!(execute_resume(&df, &p("llv:5"), &[0.0], 3, 0).is_none());
 
-        // execute_resume_value: a recursive directive without a SCALAR twin (`rsi` is
-        // served by the parse-free `execute_resume_one`, not the value dispatch) hits the
-        // scalar dispatch's `_ => None`, so the forming refresh falls back to the Vec path.
-        assert!(execute_resume_value(&df, &p("rsi:14"), &[1.0, 1.0], 5, 0).is_none());
-        // ... and so does a finite-memory one, which skips the missing-row layer.
-        assert!(execute_resume_value(&df, &p("llv:5"), &[1.0], 5, 0).is_none());
+        // execute_resume_step: a recursive directive without a single-row step
+        // (`stochrsi`), a finite-memory one (`llv`), a `macd` sub-line that is no step's,
+        // and a `next` of the wrong length all decline, so the refresh takes the Vec path.
+        let mut next = [0.0; 2];
+        assert!(execute_resume_step(&df, &p("stochrsi.k:14,14,3"), &[1.0], 5, &mut next[..1])
+            .is_none());
+        assert!(execute_resume_step(&df, &p("llv:5"), &[1.0], 5, &mut next[..1]).is_none());
+        assert!(execute_resume_step(&df, &p("rsi:14"), &[1.0, 1.0], 5, &mut next[..1]).is_none());
     }
 }

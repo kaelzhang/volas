@@ -98,14 +98,22 @@ pub(super) fn ema_step(x: f64, e: f64, k: f64) -> f64 {
     (x - e).mul_add(k, e)
 }
 
-/// Single new-row EMA resume: the value at `row` — which is also the new carried
-/// state `[e]` — with NO `Vec` allocation (the live single-bar fast path,
-/// bit-identical to [`ema_resume`] from the same state). `None` if the state is empty
-/// or `row` is out of range.
-pub fn ema_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+/// Single new-row EMA resume: the value at `row`, with the carried state as of `row`
+/// (`[e]`, the value itself) written into `next` — no allocation (the live single-bar
+/// fast path, bit-identical to [`ema_resume`] from the same state). `None` if the state
+/// is empty, `next` is not the state's length, or `row` is out of range.
+pub fn ema_resume_one(
+    data: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
     let e = *state.first()?;
     let x = *data.get(row)?;
-    Some(ema_step(x, e, ema_k(period)))
+    let [slot] = next else { return None };
+    *slot = ema_step(x, e, ema_k(period));
+    Some(*slot)
 }
 
 /// Final Wilder/SMMA state `[rma]` after a full [`smma`] compute, or `None` if `data`
@@ -148,14 +156,23 @@ pub(super) fn smma_step(x: f64, w: f64, a: f64, b: f64) -> f64 {
     w.mul_add(a, x * b)
 }
 
-/// Single new-row SMMA resume: the value at `row` (== the new state `[w]`), no `Vec`
-/// (the live single-bar fast path, bit-identical to [`smma_resume`]). `None` if the
-/// state is empty or `row` is out of range.
-pub fn smma_resume_one(data: &[f64], period: usize, row: usize, state: &[f64]) -> Option<f64> {
+/// Single new-row SMMA resume: the value at `row`, with the state as of `row` (`[w]`,
+/// the value itself) written into `next` — no allocation (bit-identical to
+/// [`smma_resume`]). `None` if the state is empty, `next` is not the state's length, or
+/// `row` is out of range.
+pub fn smma_resume_one(
+    data: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
     let w = *state.first()?;
     let x = *data.get(row)?;
+    let [slot] = next else { return None };
     let pf = period as f64;
-    Some(smma_step(x, w, (pf - 1.0) / pf, 1.0 / pf))
+    *slot = smma_step(x, w, (pf - 1.0) / pf, 1.0 / pf);
+    Some(*slot)
 }
 
 /// Weighted moving average — linearly increasing weights `1..=period`, the newest

@@ -29,20 +29,18 @@ pub struct ComputedMeta {
     /// full recompute. `None` when the directive has no resume implementation (it
     /// then falls back to the correct full recompute) or the state is unknown
     /// (e.g. after a slice that did not reach the parent's `valid_rows`).
-    ///
-    /// On a time-frame (cumulating) frame this is the state AFTER the last row, and it
-    /// is current only while that row is valid: a change to the forming last row leaves
-    /// it for the next refresh to overwrite (recomputed from
-    /// [`state_before_last`](Self::state_before_last)).
     pub state: Option<Vec<f64>>,
-    /// The carried recursive state BEFORE the frame's last row — as of row
-    /// `height - 2` — kept only on a time-frame (cumulating) frame, whose last row is
-    /// the forming bar that later appends replace. The forming-row refresh recomputes
-    /// the last row from it (leaving it unchanged), and a period rollover moves
-    /// [`state`](Self::state) into it ([`DataFrame::roll_computed_states`]), so the
-    /// closed bar is never stepped twice. `None` on a plain frame, or when unknown
-    /// (the refresh then recomputes the column and captures both states again).
+    /// The carried state as of the row before the last valid one (`valid_rows - 2`):
+    /// the state that row was resumed from. When the last row is replaced in place (a
+    /// row appended with the last row's label, a time-frame forming bar), it becomes
+    /// [`state`](Self::state) again, so the replacement is recomputed in one step from
+    /// it — never re-stepping or recomputing the rows before. A resume of one new row
+    /// moves the old `state` here. `None` when unknown (a replaced row then recomputes
+    /// the column, capturing both states again).
     pub state_before_last: Option<Vec<f64>>,
+    /// A spare buffer the one-row resume writes the next state into, recycled between
+    /// the two states so a live column steps with no allocation.
+    scratch: Vec<f64>,
     /// The original-frame row that THIS (possibly sliced) frame's row 0 maps to.
     /// `0` for a freshly-computed column; a contiguous slice from `start` bumps it
     /// by `start`. It lets an absolute-position indicator (the index family —
@@ -421,11 +419,11 @@ impl DataFrame {
                 // `valid_rows`) would leave the state attached to a row the sub-frame
                 // no longer ends on, so we drop it (the column stays correct via the
                 // full-recompute fallback, just not O(new-rows) continuable).
-                // Both states are positioned against the parent's END (its last valid
-                // row / the row before its last row), so they carry together.
+                // Both states describe rows relative to the parent's last valid row, so
+                // they carry together.
                 let reaches_end = end >= meta.valid_rows;
                 let carried = if reaches_end { meta.state.clone() } else { None };
-                let carried_before = if reaches_end && end == self.height {
+                let carried_before = if reaches_end {
                     meta.state_before_last.clone()
                 } else {
                     None
@@ -437,6 +435,7 @@ impl DataFrame {
                         valid_rows: valid,
                         state: carried,
                         state_before_last: carried_before,
+                        scratch: Vec::new(),
                         // This sub-frame's row 0 is the parent's row `start`, so its
                         // origin shifts by `start` (an absolute-index resume adds it
                         // back to stay original-absolute, matching the carried head).

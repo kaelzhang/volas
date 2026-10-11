@@ -63,16 +63,27 @@ macro_rules! on_complete_rows {
             on_complete_rows!(@unwrap $($total)? out)
         }
     )*};
-    (step: $($name:ident($($s:ident),+; $($p:ident: $t:ty),*; $row:ident, $state:ident)
-        -> $ret:ty = $missing:expr;)*) => {$(
+    (step: $($name:ident($($s:ident),+; $($p:ident: $t:ty),*))*) => {$(
         #[doc = concat!("[`raw::", stringify!($name), "`] over the complete rows of its inputs: ")]
-        #[doc = "`state` is the state as of the last complete row before `row`; a missing"]
-        #[doc = "`row` is NaN and does not advance the state."]
+        #[doc = "`state` is the state as of the last complete row before `row`, and `next`"]
+        #[doc = "receives the state as of `row`; a missing `row` is NaN and does not advance"]
+        #[doc = "the state (`next` is `state`)."]
         #[allow(clippy::too_many_arguments)] // the raw function's own signature
-        pub fn $name($($s: &[f64],)+ $($p: $t,)* $row: usize, $state: &[f64]) -> $ret {
-            step_on_complete_rows(&[$($s),+], $row, || $missing, |rows, $row| {
-                call_raw!(rows, $name($($s),+; $($p,)* $row, $state))
-            })
+        pub fn $name(
+            $($s: &[f64],)+ $($p: $t,)* row: usize, state: &[f64], next: &mut [f64],
+        ) -> Option<f64> {
+            let mut missing = false;
+            let out = step_on_complete_rows(&[$($s),+], row, || {
+                missing = true;
+                Some(f64::NAN)
+            }, |rows, row| call_raw!(rows, $name($($s),+; $($p,)* row, state, next)));
+            if missing {
+                if next.len() != state.len() {
+                    return None;
+                }
+                next.copy_from_slice(state);
+            }
+            out
         }
     )*};
     (@wrap total $e:expr) => { Some($e) };
@@ -253,43 +264,38 @@ on_complete_rows! { resume:
 }
 
 on_complete_rows! { step:
-    ad_resume_one(high, low, close, volume; ; row, state) -> Option<f64> = Some(f64::NAN);
-    adx_resume_one(high, low, close; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    adxr_resume_one(high, low, close; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    atr_resume_one(high, low, close; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    cmo_resume_one(close; period: usize; row, state) -> Option<(f64, [f64; 2])> =
-        state.try_into().ok().map(|s| (f64::NAN, s));
-    dema_resume_one(data; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    dx_resume_one(high, low, close; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    efi_resume_one(close, volume; n: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    ema_resume_one(data; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    kama_resume_one(data; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
+    ad_resume_one(high, low, close, volume;)
+    adx_resume_one(high, low, close; period: usize)
+    adxr_resume_one(high, low, close; period: usize)
+    atr_resume_one(high, low, close; period: usize)
+    cmo_resume_one(close; period: usize)
+    dema_resume_one(data; period: usize)
+    dx_resume_one(high, low, close; period: usize)
+    efi_resume_one(close, volume; n: usize)
+    ema_resume_one(data; period: usize)
+    kama_resume_one(data; period: usize)
     keltner_band_resume_one(close, high, low; ema_period: usize, atr_period: usize, mult: f64,
-        upper: bool; row, state) -> Option<f64> = Some(f64::NAN);
-    macd_resume_one(close; fast: usize, slow: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    macd_signal_resume_one(close; fast: usize, slow: usize, signal: usize, histogram: bool; row,
-        state) -> Option<f64> = Some(f64::NAN);
-    mass_index_resume_one(high, low; n: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    minus_di_resume_one(high, low, close; period: usize; row, state) -> Option<f64> =
-        Some(f64::NAN);
-    minus_dm_resume_one(high, low; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    nvi_resume_one(close, volume; ; row, state) -> Option<f64> = Some(f64::NAN);
-    obv_resume_one(real, volume; ; row, state) -> Option<f64> = Some(f64::NAN);
-    plus_di_resume_one(high, low, close; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    plus_dm_resume_one(high, low; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    pvi_resume_one(close, volume; ; row, state) -> Option<f64> = Some(f64::NAN);
-    pvt_resume_one(close, volume; ; row, state) -> Option<f64> = Some(f64::NAN);
-    rsi_resume_one(close; period: usize; row, state) -> Option<(f64, [f64; 2])> =
-        state.try_into().ok().map(|s| (f64::NAN, s));
-    sar_resume_one(high, low; ; row, state) -> Option<f64> = Some(f64::NAN);
-    sarext_resume_one(high, low; offset_on_reverse: f64; row, state) -> Option<f64> =
-        Some(f64::NAN);
-    smma_resume_one(data; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    supertrend_resume_one(high, low, close; period: usize, mult: f64, want_direction: bool; row,
-        state) -> Option<f64> = Some(f64::NAN);
-    t3_resume_one(data; period: usize, vfactor: f64; row, state) -> Option<f64> = Some(f64::NAN);
-    tema_resume_one(data; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    trix_resume_one(close; period: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    tsi_resume_one(close; long: usize, short: usize; row, state) -> Option<f64> = Some(f64::NAN);
-    wad_resume_one(high, low, close; ; row, state) -> Option<f64> = Some(f64::NAN);
+        upper: bool)
+    macd_resume_one(close; fast: usize, slow: usize)
+    macd_signal_resume_one(close; fast: usize, slow: usize, signal: usize, histogram: bool)
+    mass_index_resume_one(high, low; n: usize)
+    minus_di_resume_one(high, low, close; period: usize)
+    minus_dm_resume_one(high, low; period: usize)
+    nvi_resume_one(close, volume;)
+    obv_resume_one(real, volume;)
+    plus_di_resume_one(high, low, close; period: usize)
+    plus_dm_resume_one(high, low; period: usize)
+    pvi_resume_one(close, volume;)
+    pvt_resume_one(close, volume;)
+    rsi_resume_one(close; period: usize)
+    sar_resume_one(high, low; acceleration: f64, maximum: f64)
+    sarext_resume_one(high, low; offset_on_reverse: f64, accel_init_long: f64, accel_long: f64,
+        accel_max_long: f64, accel_init_short: f64, accel_short: f64, accel_max_short: f64)
+    smma_resume_one(data; period: usize)
+    supertrend_resume_one(high, low, close; period: usize, mult: f64, want_direction: bool)
+    t3_resume_one(data; period: usize, vfactor: f64)
+    tema_resume_one(data; period: usize)
+    trix_resume_one(close; period: usize)
+    tsi_resume_one(close; long: usize, short: usize)
+    wad_resume_one(high, low, close;)
 }

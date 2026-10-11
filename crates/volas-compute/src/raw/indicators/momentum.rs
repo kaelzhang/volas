@@ -731,14 +731,16 @@ fn ultosc_value([a1, b1, a2, b2, a3, b3]: [f64; 6]) -> f64 {
 /// bit-identical to the `trix_resume` loop body at index `row`. Advances the
 /// 3-deep cascade one bar with `close[row]` using the same `mul_add` lattice
 /// step as [`kernels::ema_cascade_step`], then the 1-period ROC of the 3rd
-/// stage: `(e2_new / e2_prev - 1.0) * 100.0` with `e2_prev = state[2]`.
+/// stage: `(e2_new / e2_prev - 1.0) * 100.0` with `e2_prev = state[2]`. The advanced
+/// cascade (the state as of `row`) is written into `next`.
 pub fn trix_resume_one(
     close: &[f64],
     period: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if state.len() < 3 || row >= close.len() {
+    if state.len() != 3 || next.len() != 3 || row >= close.len() {
         return None;
     }
     let k = 2.0 / (period as f64 + 1.0);
@@ -751,6 +753,7 @@ pub fn trix_resume_one(
         *stage = (x - *stage).mul_add(k, *stage);
         x = *stage;
     }
+    next.copy_from_slice(&e);
     Some((e[2] / prev - 1.0) * 100.0)
 }
 
