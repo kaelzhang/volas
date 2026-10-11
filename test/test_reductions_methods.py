@@ -163,3 +163,11 @@ def test_constant_sample_has_exactly_zero_dispersion():
             assert getattr(df, m)().to_list() == [0.0, 0.0], m
         assert s.cov(s) == 0.0
         assert np.isnan(s.corr(s))
+
+
+def test_median_and_quantile_of_extreme_finite_values_do_not_overflow():
+    s = _s([-1e308, 1e308])
+    assert s.median() == 0.0 and s.quantile(0.5) == 0.0 and s.quantile(0.25) == -5e307
+    assert DataFrame({'a': [-1e308, 1e308]}).median().to_list() == [0.0]
+    assert DataFrame({'a': [-1e308, 1e308]}).quantile(0.5).to_list() == [0.0]
+    assert _s([1e308, 1e308]).median() == 1e308

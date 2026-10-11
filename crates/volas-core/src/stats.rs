@@ -143,6 +143,44 @@ pub fn deviation_center(xs: impl Iterator<Item = f64> + Clone) -> f64 {
     sum / n as f64
 }
 
+/// The linear-interpolated `q`-quantile of an ascending, NaN-free, non-empty
+/// `sorted` sample (pandas / NumPy `linear`): `lo + frac·(hi − lo)`, except that
+/// when the span of two finite values overflows (`[-1e308, 1e308]`) the weighted
+/// form `(1 − frac)·lo + frac·hi` is used — the result is representable, so it
+/// must not come out infinite.
+pub fn sorted_quantile(sorted: &[f64], q: f64) -> f64 {
+    let pos = q * (sorted.len() - 1) as f64;
+    let (lo, hi) = (sorted[pos.floor() as usize], sorted[pos.ceil() as usize]);
+    let frac = pos - pos.floor();
+    let span = hi - lo;
+    if span.is_finite() || !(lo.is_finite() && hi.is_finite()) {
+        lo + span * frac
+    } else {
+        (1.0 - frac) * lo + frac * hi
+    }
+}
+
+/// The median of an ascending, NaN-free `sorted` sample (NaN when empty): the
+/// middle value, or the mean of the two middle values as `(a + b) / 2` (NumPy's
+/// arithmetic) — `a/2 + b/2` only when that sum of two finite values overflows
+/// (`[1e308, 1e308]` has median `1e308`).
+pub fn sorted_median(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    if n % 2 == 1 {
+        return sorted[n / 2];
+    }
+    let (a, b) = (sorted[n / 2 - 1], sorted[n / 2]);
+    let sum = a + b;
+    if sum.is_finite() || !(a.is_finite() && b.is_finite()) {
+        sum / 2.0
+    } else {
+        a / 2.0 + b / 2.0
+    }
+}
+
 /// Sample variance (pandas `var`, ddof=1) of the finite values; NaN with fewer
 /// than two. A constant sample is exactly `0`.
 pub fn var(v: &[f64]) -> f64 {
@@ -355,6 +393,17 @@ mod tests {
 
     fn nan() -> f64 {
         f64::NAN
+    }
+
+    #[test]
+    fn order_statistics_of_extreme_finite_values_stay_finite() {
+        assert!(sorted_median(&[]).is_nan());
+        assert_eq!(sorted_median(&[1.0, 2.0, 3.0]), 2.0);
+        assert_eq!(sorted_median(&[-1e308, 1e308]), 0.0);
+        assert_eq!(sorted_median(&[1e308, 1e308]), 1e308);
+        assert_eq!(sorted_quantile(&[-1e308, 1e308], 0.25), -5e307);
+        assert_eq!(sorted_quantile(&[1.0, 3.0], 0.25), 1.5);
+        assert!(sorted_quantile(&[1.0, f64::INFINITY], 0.5).is_infinite());
     }
 
     #[test]

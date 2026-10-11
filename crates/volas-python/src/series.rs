@@ -85,16 +85,8 @@ impl PySeries {
     }
     pub(crate) fn median_f64(&self) -> f64 {
         let mut v = non_nan(&self.inner.data);
-        let n = v.len();
-        if n == 0 {
-            return f64::NAN;
-        }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        if n % 2 == 1 {
-            v[n / 2]
-        } else {
-            (v[n / 2 - 1] + v[n / 2]) / 2.0
-        }
+        stats::sorted_median(&v)
     }
     /// The `q`-quantile as a raw f64 (linear interpolation, NaN-skipping).
     pub(crate) fn quantile_f64(&self, q: f64) -> PyResult<f64> {
@@ -106,9 +98,7 @@ impl PySeries {
             return Ok(f64::NAN);
         }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let pos = q * (v.len() - 1) as f64;
-        let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
-        Ok(v[lo] + (v[hi] - v[lo]) * (pos - lo as f64))
+        Ok(stats::sorted_quantile(&v, q))
     }
 
     /// The boolean mask for a `where` / `mask` condition, validating it matches
