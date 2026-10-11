@@ -44,37 +44,10 @@ const KNOWN_DIVERGENT: &[(&str, &str)] = &[
     ("ht_trendmode", "*"),
     ("mama", "*"),
     ("mama.fama", "*"),
-    // The resume warm-up gate ignores a leading-missing shift of the first valid row.
-    ("dema", "leading-nan"),
-    ("tema", "leading-nan"),
-    ("t3", "leading-nan"),
-    ("kdj.k", "leading-nan"),
-    ("kdj.d", "leading-nan"),
-    ("kdj.j", "leading-nan"),
-    // ... or an interior missing row.
-    ("cmo", "nan-close"),
     // Last-ULP drift between the resume and the full kernel.
     ("stochrsi.d", "*"),
     // The resume divides by a zero prior where the full kernel yields 0.
     ("trix", "zero"),
-    // A missing value inside the warm-up: the full compute shifts past it, the state
-    // captured over the head carries it (NaN for ever, or a wrong value).
-    ("atr", "early-missing-bar"),
-    ("natr", "early-missing-bar"),
-    ("ema", "early-missing-*"),
-    ("smma", "early-missing-*"),
-    ("cmo", "early-missing-*"),
-    ("efi", "early-missing-*"),
-    ("trix", "early-missing-*"),
-    ("keltner", "early-missing-*"),
-    ("keltner.lower", "early-missing-*"),
-    ("keltner.upper", "early-missing-*"),
-    ("macd", "early-missing-*"),
-    ("macd.signal", "early-missing-*"),
-    ("macd.histogram", "early-missing-*"),
-    ("macdfix", "early-missing-*"),
-    ("macdfix.signal", "early-missing-*"),
-    ("macdfix.histogram", "early-missing-*"),
 ];
 
 fn values(col: &Column) -> Vec<f64> {
