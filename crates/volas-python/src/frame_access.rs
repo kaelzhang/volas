@@ -170,9 +170,10 @@ impl PyDataFrame {
     /// the finer bars appended after it.
     ///
     /// On any other frame each row is keyed by its index label: a row labelled like
-    /// the last row replaces it whole, one labelled like an earlier row raises
-    /// ``ValueError`` (the frame unchanged), and unlabelled rows (a ``RangeIndex``) take
-    /// the next labels.
+    /// the last row replaces it whole; a ``DatetimeIndex`` only increases (a row
+    /// labelled before the last raises ``ValueError``) and an integer / string index
+    /// stays unique (a row labelled like an earlier row raises), the frame unchanged on
+    /// an error; unlabelled rows (a ``RangeIndex``) take the next labels.
     ///
     /// Missing columns are NaN-padded; cached directive columns go stale until
     /// ``fulfill()``. A snapshot taken via ``copy()`` / ``iloc`` is unaffected

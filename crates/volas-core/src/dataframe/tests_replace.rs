@@ -106,9 +106,23 @@ fn string_labels_follow_the_same_rule() {
 }
 
 #[test]
-fn integer_and_datetime_batches_replace_and_raise_atomically() {
+fn a_datetime_index_only_increases() {
     let mut df = labelled(Index::datetime(vec![10, 20], Tz::Naive), 1.0);
-    let batch = labelled(Index::datetime(vec![20, 30, 30, 25], Tz::Naive), 2.0);
+    let batch = labelled(Index::datetime(vec![20, 30, 30, 40], Tz::Naive), 2.0);
+    df.append_labelled(&batch).unwrap();
+    assert_eq!(df.height(), 4); // 20 replaced, 30 appended then replaced, 40 appended
+    // earlier than the last: an error, a new label or not, single or in a batch
+    for labels in [vec![15], vec![20], vec![50, 45]] {
+        let err = df.append_labelled(&labelled(Index::datetime(labels, Tz::Naive), 3.0)).unwrap_err();
+        assert!(err.to_string().contains("only increases"), "{err}");
+        assert_eq!(df.height(), 4);
+    }
+}
+
+#[test]
+fn integer_batches_replace_and_raise_atomically() {
+    let mut df = labelled(Index::int64(vec![10, 20]), 1.0);
+    let batch = labelled(Index::int64(vec![20, 30, 30, 25]), 2.0);
     df.append_labelled(&batch).unwrap();
     assert_eq!(df.height(), 4); // 20 replaced, 30 appended then replaced, 25 appended
     let before = df.height();

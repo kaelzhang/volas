@@ -307,9 +307,13 @@ Rows are keyed by their index label:
 - a row labelled like the frame's **last** row **replaces** it whole (a column the
   row lacks becomes missing) — so an exchange re-sending the bar it is still building
   updates that bar instead of adding a second one;
-- a row labelled like an **earlier** row raises `ValueError`, and the frame is left
-  unchanged;
+- a `DatetimeIndex` only ever increases: a row labelled **before** the last row raises
+  `ValueError`;
+- an integer or string index stays unique: a row labelled like an **earlier** row
+  raises `ValueError` (a new label before the last is appended);
 - rows without labels of their own (a `RangeIndex`) take the next labels.
+
+On an error the frame is left unchanged.
 
 ```python
 times = ['2026-01-01 17:00', '2026-01-01 17:01', '2026-01-01 17:02']

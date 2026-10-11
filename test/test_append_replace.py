@@ -78,19 +78,33 @@ def test_a_resent_bar_replaces_the_last_row():
     assert df['ma:2'].iloc[-1] == 11.75
 
 
-def test_an_earlier_label_raises_and_leaves_the_frame_unchanged():
+@pytest.mark.parametrize("minute", [2, 3.5])
+def test_a_datetime_label_before_the_last_raises_and_leaves_the_frame_unchanged(minute):
     df = _frame_of([_bar(i) for i in range(5)], T0 + np.arange(5) * MINUTE)
     df['ema:3']
     before = df['close'].to_numpy().copy()
-    with pytest.raises(ValueError, match="earlier row"):
-        df.append(_frame_of([_bar(9)], T0 + np.array([2]) * MINUTE))
-    # in a batch, a later row repeating an earlier batch label raises too, atomically
+    at = T0 + np.timedelta64(int(minute * 60), "s")
+    with pytest.raises(ValueError, match="only increases"):
+        df.append(_frame_of([_bar(9)], np.array([at])))
+    # in a batch, a later row going back raises too, atomically
     batch = _frame_of([_bar(5), _bar(6), _bar(7)], T0 + np.array([5, 6, 5]) * MINUTE)
-    with pytest.raises(ValueError, match="earlier row"):
+    with pytest.raises(ValueError, match="only increases"):
         df.append(batch)
     assert len(df) == 5
     _same(df['close'], before, "unchanged")
     _same(df['ema:3'], _full(df)['ema:3'], "ema unchanged")
+
+
+def test_an_integer_index_stays_unique():
+    df = _frame_of([_bar(i) for i in range(5)], np.arange(0, 50, 10))
+    df['ema:3']
+    with pytest.raises(ValueError, match="earlier row"):
+        df.append(_frame_of([_bar(9)], np.array([20])))
+    assert len(df) == 5
+    # a new label before the last is appended
+    df.append(_frame_of([_bar(9)], np.array([25])))
+    assert len(df) == 6
+    _same(df['ema:3'], _full(df)['ema:3'], "ema")
 
 
 def test_a_batch_replaces_and_appends_in_order():
@@ -102,9 +116,6 @@ def test_a_batch_replaces_and_appends_in_order():
     assert len(df) == 7
     assert df['close'].iloc[-2] == _bar(5, 0.3)["close"]
     _same(df['ema:3'], _full(df)['ema:3'], "batch")
-    # a label between existing ones that no row has is appended
-    df.append(_frame_of([_bar(8)], np.array([T0 + 3 * MINUTE + np.timedelta64(30, "s")])))
-    assert len(df) == 8
 
 
 def test_unlabelled_rows_take_the_next_labels():
