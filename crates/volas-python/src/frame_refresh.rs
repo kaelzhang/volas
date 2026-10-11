@@ -11,6 +11,28 @@ use volas_core::DataFrame;
 use crate::*;
 
 impl PyDataFrame {
+    /// The carried resume state for a recursive column freshly computed over `frame`
+    /// (`col` is that computation). On a tf-fold frame with an open forming bar the
+    /// state is anchored at the last CLOSED bar (`height - 2`), never the volatile
+    /// forming row: the forming refresh resumes that row from the anchor without
+    /// advancing it. An explicit-`@series` column there carries no state (it cannot be
+    /// anchored). Anywhere else the state describes `frame`'s last row.
+    pub(crate) fn capture_resume_state(
+        &self,
+        frame: &DataFrame,
+        node: &volas_directive::types::Ast,
+        col: &volas_core::Column,
+    ) -> Option<Vec<f64>> {
+        let forming = self.tf.as_ref().and_then(|t| t.open.as_ref()).is_some();
+        if !forming {
+            return volas_directive::exec::initial_state(frame, node, col);
+        }
+        if !directive_uses_default_series(node) || frame.height() == 0 {
+            return None;
+        }
+        let anchor = frame.slice_data(0, frame.height() - 1);
+        volas_directive::exec::initial_state(&anchor, node, col)
+    }
     /// Recompute the stale tail of cached directive columns in place — all of
     /// them if `only` is `None`, else just the named one. O(lookback + new rows)
     /// per column. Done against the real (non-computed) columns so a bare-name
@@ -190,7 +212,7 @@ impl PyDataFrame {
             // `initial_state` derives the cumulative family's state from the raw
             // inputs, so either is fine. Computed BEFORE the tail write so `frame`'s
             // borrow of the live frame ends before the mutation.)
-            let new_state = volas_directive::exec::initial_state(frame, &node, &recomputed);
+            let new_state = self.capture_resume_state(frame, &node, &recomputed);
             // Write the stale tail back into the column at its original dtype.
             let tail = recomputed.slice(off, recomputed.len());
             self.inner
@@ -298,11 +320,8 @@ impl PyDataFrame {
         self.inner
             .update_computed_tail(name, 0, &recomputed)
             .map_err(pyerr)?;
-        if height >= 1 {
-            let anchor = self.inner.slice_data(0, height - 1);
-            let st = volas_directive::exec::initial_state(&anchor, &node, &recomputed);
-            self.inner.set_computed_state(name, st);
-        }
+        let st = self.capture_resume_state(&self.inner, &node, &recomputed);
+        self.inner.set_computed_state(name, st);
         Ok(true)
     }
 }

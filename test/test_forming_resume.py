@@ -124,3 +124,32 @@ def test_forming_resume_windowed_matches_unbounded():
     w = np.asarray(win["atr:14"])
     full = np.asarray(unb["atr:14"])
     _bit_exact(w, full[len(full) - len(w) :], "windowed vs unbounded tail")
+
+
+# A column cached while the last row is already a FORMING bar (the frame was grown
+# period by period, so the newest row is open) must anchor its carried state at the
+# last CLOSED bar — the first fold into that row resumes it from the anchor.
+_CACHED_ON_FORMING = [
+    "ema:14", "smma:14", "atr:14", "natr:14", "rsi:14", "cmo:14", "obv", "adx:14",
+    "macd", "rsi:14@close", "cmo:14@close",
+]
+
+
+@pytest.mark.parametrize("directive", _CACHED_ON_FORMING)
+def test_cached_while_forming_then_folded_bit_exact(directive):
+    n_closed, n_fine = 40, 24
+    x = np.arange(n_closed + n_fine, dtype=float)
+    close = 100.0 + 0.2 * x + 3.0 * np.sin(1.1 * x)
+    cols = dict(open=close - 0.3, high=close + 1.0, low=close - 1.0, close=close, volume=1000.0 + x)
+    minutes = np.r_[np.arange(n_closed) * 5, 196 + np.arange(n_fine)]
+    ts = (np.datetime64("2026-01-01") + minutes.astype("timedelta64[m]")).astype("datetime64[ns]")
+    live = volas.DataFrame({k: v[:1] for k, v in cols.items()}, index=ts[:1], time_frame="5m")
+    live.append(volas.DataFrame({k: v[1:n_closed] for k, v in cols.items()}, index=ts[1:n_closed]))
+    live[directive]  # cached while row n_closed-1 is the open forming bar
+    for i in range(n_closed, n_closed + n_fine):
+        live.append(volas.DataFrame({k: v[i : i + 1] for k, v in cols.items()}, index=ts[i : i + 1]))
+        live.fulfill()
+        ohlcv = {c: np.asarray(live[c]) for c in ("open", "high", "low", "close", "volume")}
+        ref = volas.DataFrame(ohlcv, index=np.asarray(live.index))
+        _bit_exact(np.asarray(live[directive]), np.asarray(ref[directive]), f"{directive} i={i}")
+

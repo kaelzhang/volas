@@ -284,8 +284,9 @@ impl PyDataFrame {
             let col = execute(&self.inner, &node).map_err(value_err)?;
             let lookback = volas_directive::lookback::lookback(&node);
             // Capture the recursive resume state (if any) BEFORE moving the column in,
-            // so a later append can continue in O(new rows) instead of recomputing.
-            let state = volas_directive::exec::initial_state(&self.inner, &node, &col);
+            // so a later append can continue in O(new rows) instead of recomputing —
+            // anchored at the last closed bar when the frame has a forming bar.
+            let state = self.capture_resume_state(&self.inner, &node, &col);
             self.inner.set_column(&canonical, col).map_err(pyerr)?;
             self.inner.set_computed(&canonical, lookback);
             self.inner.set_computed_state(&canonical, state);
