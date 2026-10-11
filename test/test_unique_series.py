@@ -42,3 +42,14 @@ def test_unique_float_keeps_nan_as_na():
     u = _s([2.0, float('nan'), 2.0, 1.0]).unique()
     assert u.dtype == 'float64' and u.to_list()[0] == 2.0
     assert u.isna().to_list() == [False, True, False]
+
+
+def test_signed_zeros_are_one_value_in_every_value_matching_method():
+    # 0.0 == -0.0 numerically (pandas parity), whatever their bit patterns
+    s = _s([0.0, -0.0, 1.0])
+    assert s.duplicated().to_list() == [False, True, False]
+    assert s.drop_duplicates().to_list() == [0.0, 1.0]
+    assert s.mode().to_list() == [0.0]
+    assert s.isin([-0.0]).to_list() == [True, True, False]
+    assert s.replace(0.0, 9.0).to_list() == [9.0, 9.0, 1.0]
+    assert s.nunique() == 2

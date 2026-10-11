@@ -224,14 +224,16 @@ impl SeriesILoc {
 
 /// A dtype-exact, hash-able key for a cell: `None` for a missing cell, else a
 /// string discriminated by dtype (float by bit pattern, so distinct values never
-/// collide). Backs value_counts / mode / isin / duplicated / replace.
+/// collide — with `-0.0` canonicalized to `0.0`, numerically one value). Backs
+/// value_counts / mode / isin / duplicated / replace.
 pub(crate) fn cell_key(col: &Column, i: usize) -> Option<String> {
     if !col.is_valid(i) {
         return None;
     }
+    let float = |x: f64| format!("f{:x}", if x == 0.0 { 0.0f64 } else { x }.to_bits());
     Some(match col {
-        Column::F64(v) => format!("f{:x}", v[i].to_bits()),
-        Column::F32(v) => format!("f{:x}", (v[i] as f64).to_bits()),
+        Column::F64(v) => float(v[i]),
+        Column::F32(v) => float(v[i] as f64),
         Column::I64(v, _) => format!("i{}", v[i]),
         Column::I32(v, _) => format!("i{}", v[i]),
         Column::Bool(v, _) => format!("b{}", v[i]),
