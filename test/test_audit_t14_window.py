@@ -466,6 +466,26 @@ def test_nunique_counts_signed_zeros_as_one_value():
     assert _v(x).expanding().nunique().to_list() == [1, 1, 1, 1]
 
 
+def _labelled(values, labels, name="x"):
+    return volas.DataFrame({name: values}, index=labels)[name]
+
+
+@pytest.mark.parametrize("op", [
+    lambda s, o: s.rolling(3).corr(o), lambda s, o: s.rolling(3).cov(o),
+    lambda s, o: s.expanding().corr(o), lambda s, o: s.expanding().cov(o),
+    lambda s, o: s.ewm(alpha=0.5).corr(o), lambda s, o: s.ewm(alpha=0.5).cov(o),
+    lambda s, o: s.corr(o), lambda s, o: s.cov(o),
+])
+def test_pairwise_window_ops_require_the_same_labels(op):
+    a = _labelled([1.0, 2.0, 3.0], ["a", "b", "c"])
+    b = _labelled([3.0, 2.0, 1.0], ["c", "b", "a"])
+    with pytest.raises(ValueError, match="different indexes"):
+        op(a, b)
+    # the same labels pair up — the index name is not part of the labels
+    same = _labelled([3.0, 2.0, 1.0], ["a", "b", "c"], name="y")
+    op(a, same)
+
+
 def test_window_result_carries_name_and_index():
     """C1: a window result keeps the source's name and row correspondence."""
     df = volas.DataFrame({"t": ["2021-01-01", "2021-01-02"], "v": [1.0, 2.0]})

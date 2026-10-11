@@ -538,7 +538,11 @@ to pandas, volas does **not** support:
   period, timedelta, or mixed-type `object` index.
 - **Index algebra** — reindexing, index set operations (union / intersection), and
   automatic alignment-on-index when combining frames (volas aligns by **position**,
-  and raises on a mismatch rather than silently reindexing).
+  and raises on a mismatch rather than silently reindexing). One rule decides every
+  pairing of two labelled operands — arithmetic, comparisons, `where` / `mask`
+  conditions, `corr` / `cov` and the pairwise window statistics: the labels must be
+  equal (the same instants; the index name and display zone are ignored), and a
+  tz-naive index never pairs with a tz-aware one.
 - **Duplicate-label** lookups (label access assumes unique labels).
 
 ---

@@ -242,24 +242,13 @@ impl WinSpec {
             ),
         }
     }
-    fn pair(&self, s: &Series, other: &PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        if other.inner.len() != s.len() {
-            return Err(PyValueError::new_err(format!(
-                "cannot align series of different lengths ({} vs {})",
-                s.len(),
-                other.inner.len()
-            )));
-        }
-        other.inner.data.require_numeric().map_err(crate::pyerr)?;
-        Ok((s.data.to_f64_vec(), other.inner.data.to_f64_vec()))
-    }
     pub(crate) fn corr(&self, s: &Series, other: &PySeries) -> PyResult<PySeries> {
-        let (x, y) = self.pair(s, other)?;
+        let (x, y) = pair(s, other)?;
         let out = self.run2(&x, &y, |a, b, win| w::corr(a, b, win, self.min_periods));
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn cov(&self, s: &Series, other: &PySeries, ddof: usize) -> PyResult<PySeries> {
-        let (x, y) = self.pair(s, other)?;
+        let (x, y) = pair(s, other)?;
         let out = self.run2(&x, &y, |a, b, win| w::cov(a, b, win, self.min_periods, ddof));
         Ok(self.f64_series(s, out))
     }
@@ -485,17 +474,15 @@ impl PyEwm {
             ),
         }
     }
-    fn pair(&self, other: &PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        if other.inner.len() != self.series.len() {
-            return Err(PyValueError::new_err(format!(
-                "cannot align series of different lengths ({} vs {})",
-                self.series.len(),
-                other.inner.len()
-            )));
-        }
-        other.inner.data.require_numeric().map_err(crate::pyerr)?;
-        Ok((self.series.data.to_f64_vec(), other.inner.data.to_f64_vec()))
-    }
+}
+
+/// The two operands of a pairwise window statistic (`corr` / `cov`), paired by
+/// position under the shared alignment rule ([`crate::require_aligned`]): equal
+/// labels or an error, never a silent positional pairing of different labels.
+fn pair(s: &Series, other: &PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    crate::require_aligned(&s.index, &other.inner.index)?;
+    other.inner.data.require_numeric().map_err(crate::pyerr)?;
+    Ok((s.data.to_f64_vec(), other.inner.data.to_f64_vec()))
 }
 
 #[pymethods]
@@ -553,7 +540,7 @@ impl PyEwm {
     /// Exponentially-weighted covariance against another series.
     #[pyo3(signature = (other, bias = false))]
     fn cov(&self, other: &PySeries, bias: bool) -> PyResult<PySeries> {
-        let (x, y) = self.pair(other)?;
+        let (x, y) = pair(&self.series, other)?;
         Ok(self.wrap(w::ewm_cov(
             &x,
             &y,
@@ -566,7 +553,7 @@ impl PyEwm {
     }
     /// Exponentially-weighted correlation against another series.
     fn corr(&self, other: &PySeries) -> PyResult<PySeries> {
-        let (x, y) = self.pair(other)?;
+        let (x, y) = pair(&self.series, other)?;
         Ok(self.wrap(w::ewm_corr(
             &x,
             &y,
