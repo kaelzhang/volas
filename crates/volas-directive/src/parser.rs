@@ -335,8 +335,11 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         let text = String::from_utf8_lossy(&self.s[start..self.i]).into_owned();
+        // Digits and dots never parse to NaN, but too many digits round to ±inf, which
+        // has no literal form: it would render as `inf`, a name, and rebind on re-parse.
         match text.parse::<f64>() {
-            Ok(v) => self.node(Node::Scalar(v), 1),
+            Ok(v) if v.is_finite() => self.node(Node::Scalar(v), 1),
+            Ok(_) => Err(self.err("number literal is out of range of a 64-bit float")),
             Err(_) => Err(self.err(format!("invalid number '{text}'"))),
         }
     }
@@ -578,6 +581,21 @@ mod tests {
     fn malformed_number_is_a_syntax_error() {
         // parse_number scans digits/'.' greedily, so "1.2.3" fails f64 parsing
         assert!(parse_cst("1.2.3").is_err());
+    }
+
+    #[test]
+    fn a_literal_overflowing_f64_is_a_syntax_error() {
+        // It would round to `inf`, which renders as `inf` and re-parses as a Name.
+        let big = format!("1{}", "0".repeat(400));
+        for d in [format!("close < {big}"), format!("-{big}"), format!("{big}.5")] {
+            match parse_cst(&d) {
+                Err(VolasError::Parse(m)) => assert!(m.contains("out of range"), "{m}"),
+                other => panic!("{d}: {other:?}"), // LCOV_EXCL_LINE
+            }
+        }
+        // The largest finite literal is still a number.
+        let max = format!("{}", f64::MAX);
+        assert_eq!(parse_cst(&max).unwrap(), Node::Scalar(f64::MAX));
     }
 
     /// A ~40 KB hostile directive must be a syntax error, never a stack overflow in
