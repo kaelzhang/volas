@@ -23,6 +23,8 @@ impl DataFrame {
                 origin: 0,
             },
         );
+        #[cfg(debug_assertions)]
+        self.debug_check();
     }
 
     /// Attach (or replace) the carried recursive [`ComputedMeta::state`] for a
@@ -132,6 +134,8 @@ impl DataFrame {
         if let Some(meta) = self.computed.get_mut(name) {
             meta.valid_rows = self.height;
         }
+        #[cfg(debug_assertions)]
+        self.debug_check();
         Ok(())
     }
 
@@ -159,6 +163,8 @@ impl DataFrame {
         if let Some(meta) = self.computed.get_mut(name) {
             meta.valid_rows = self.height;
         }
+        #[cfg(debug_assertions)]
+        self.debug_check();
         Ok(())
     }
 

@@ -12,7 +12,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX = $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV = VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html audit-harness audit-harness-release audit-harness-checked docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -83,6 +83,24 @@ count-indicators:
 # both suites and prints the combined per-file + total report.
 coverage:
 	@VOLAS_PYTHON="$(PYTHON)" bash scripts/coverage.sh
+
+# Differential test harness: random op sequences and whole-inventory schedules on
+# plain / tf / windowed frames checked against an independent event-ledger oracle,
+# open-defect reproductions, and the Rust resume-vs-full matrix — run against the
+# release extension and against a `-C debug-assertions -C overflow-checks` build in
+# its own target dir (the normal extension is restored afterwards). A short budget
+# also runs inside `make test`; raise it here:
+#
+#   make audit-harness                                   # both modes, short budget
+#   make audit-harness VOLAS_HARNESS_PROFILE=long        # the long budget
+#   make audit-harness-checked VOLAS_HARNESS_SECONDS=600 # 10 CPU-min per property test
+audit-harness: audit-harness-release audit-harness-checked
+
+audit-harness-release:
+	@VOLAS_PYTHON="$(PYTHON)" bash scripts/audit_harness.sh release
+
+audit-harness-checked:
+	@VOLAS_PYTHON="$(PYTHON)" bash scripts/audit_harness.sh checked
 
 # Same, rendered to a browsable HTML report under target/volas-cov/html/.
 coverage-html:

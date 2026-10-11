@@ -86,6 +86,11 @@ dev = [
   # Arrow / DLPack FFI glue (arrow.rs / dlpack.rs) so CI runs those unsafe paths
   # instead of skipping them via `importorskip`.
   "pyarrow>=15",
+  # Stateful property testing for the differential harness (test/harness/): random
+  # op sequences checked against an independent event-ledger oracle. Pinned exactly
+  # like the oracles: a newer Hypothesis changes the generated example stream (the
+  # short derandomized profile `make test` runs), so an upgrade is an explicit commit.
+  "hypothesis==6.169.0",
   # PEP 639 / Metadata 2.4 license fields require packaging >= 24.2 to publish
   "packaging>=24.2",
   "numpy>=2.0.0",

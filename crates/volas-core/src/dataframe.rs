@@ -99,14 +99,37 @@ impl DataFrame {
         for (i, n) in names.iter().enumerate() {
             name_to_idx.insert(n.clone(), i);
         }
-        Ok(DataFrame {
+        let df = DataFrame {
             names: Arc::new(names),
             columns,
             name_to_idx: Arc::new(name_to_idx),
             index: Arc::new(index),
             height,
             computed: FxHashMap::default(),
-        })
+        };
+        #[cfg(debug_assertions)]
+        df.debug_check();
+        Ok(df)
+    }
+
+    /// Debug-build structural self-check, run at the end of every mutation (compiled
+    /// out of release builds): names, columns and the name map agree; every column,
+    /// its validity and the index span the frame's height; every computed column
+    /// exists and its valid-row cursor stays within the height.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_check(&self) {
+        assert_eq!(self.names.len(), self.columns.len(), "names and columns differ in count");
+        assert_eq!(self.name_to_idx.len(), self.names.len(), "the name map has stale entries");
+        for (i, (name, col)) in self.names.iter().zip(&self.columns).enumerate() {
+            assert_eq!(self.name_to_idx.get(name), Some(&i), "name map entry of {name:?}");
+            assert_eq!(col.len(), self.height, "column {name:?} length differs from the height");
+            col.debug_check(name);
+        }
+        assert_eq!(self.index.len(), self.height, "index length differs from the height");
+        for (name, meta) in &self.computed {
+            assert!(self.name_to_idx.contains_key(name), "computed {name:?} is not a column");
+            assert!(meta.valid_rows <= self.height, "computed {name:?} cursor past the height");
+        }
     }
 
     /// Number of rows.
@@ -222,6 +245,8 @@ impl DataFrame {
                 self.columns.push(col);
             }
         }
+        #[cfg(debug_assertions)]
+        self.debug_check();
         Ok(())
     }
 
@@ -455,6 +480,8 @@ impl DataFrame {
             }
             Arc::make_mut(&mut self.index).extend(&other.index)?;
             self.height += oh;
+            #[cfg(debug_assertions)]
+            self.debug_check();
             return Ok(());
         }
         // Iterate by position to avoid cloning every column name and then
@@ -480,6 +507,8 @@ impl DataFrame {
         }
         Arc::make_mut(&mut self.index).extend(&other.index)?;
         self.height += oh;
+        #[cfg(debug_assertions)]
+        self.debug_check();
         Ok(())
     }
 
@@ -527,6 +556,8 @@ impl DataFrame {
         }
         self.columns[col] = self.columns[col].scatter(positions, values)?;
         self.invalidate_computed_on_write_at(col);
+        #[cfg(debug_assertions)]
+        self.debug_check();
         Ok(())
     }
 
@@ -552,6 +583,8 @@ impl DataFrame {
         // anchored resume state, so `refresh` continues the recursion over just this
         // row (O(lookback)) instead of recomputing the whole buffer from scratch.
         self.invalidate_computed_forming_row(row);
+        #[cfg(debug_assertions)]
+        self.debug_check();
         Ok(())
     }
 

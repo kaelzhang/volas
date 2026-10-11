@@ -309,6 +309,19 @@ impl Column {
         }
     }
 
+    /// Debug-build layout check of a nullable column's validity against its values
+    /// (compiled out of release builds; see [`Validity::debug_check`]).
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_check(&self, name: &str) {
+        match self {
+            Column::Bool(v, val) => val.debug_check(v.len(), name),
+            Column::I64(v, val) => val.debug_check(v.len(), name),
+            Column::I32(v, val) => val.debug_check(v.len(), name),
+            Column::Str(v, val) => val.debug_check(v.len(), name),
+            Column::F64(_) | Column::F32(_) | Column::Datetime(_) => {}
+        }
+    }
+
     /// Count of missing (`volas.NA`) values.
     pub fn null_count(&self) -> usize {
         match self {
