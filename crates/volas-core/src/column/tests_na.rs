@@ -506,19 +506,19 @@ fn na_logical_kleene_and_not() {
     let t = Column::bool(vec![true, true, true]);
     let f = Column::bool(vec![false, false, false]);
     // Kleene AND: NA & True = NA, NA & False = False
-    assert_na(&b.logical(&t, BoolOp::And), &[1.0, 0.0, f64::NAN]);
-    assert_na(&b.logical(&f, BoolOp::And), &[0.0, 0.0, 0.0]);
+    assert_na(&b.logical(&t, BoolOp::And).unwrap(), &[1.0, 0.0, f64::NAN]);
+    assert_na(&b.logical(&f, BoolOp::And).unwrap(), &[0.0, 0.0, 0.0]);
     // Kleene OR: NA | True = True, NA | False = NA
-    assert_na(&b.logical(&t, BoolOp::Or), &[1.0, 1.0, 1.0]);
-    assert_na(&b.logical(&f, BoolOp::Or), &[1.0, 0.0, f64::NAN]);
+    assert_na(&b.logical(&t, BoolOp::Or).unwrap(), &[1.0, 1.0, 1.0]);
+    assert_na(&b.logical(&f, BoolOp::Or).unwrap(), &[1.0, 0.0, f64::NAN]);
     // XOR: missing if either is missing
-    assert_na(&b.logical(&t, BoolOp::Xor), &[0.0, 1.0, f64::NAN]);
+    assert_na(&b.logical(&t, BoolOp::Xor).unwrap(), &[0.0, 1.0, f64::NAN]);
     // NOT propagates NA
     assert_na(&b.not(), &[0.0, 1.0, f64::NAN]);
     // a non-bool operand reads as x != 0 (present), so it never injects NA
     let i = Column::i64(vec![1, 0, 5]);
     assert_na(&i.not(), &[0.0, 1.0, 0.0]);
-    assert_na(&b.logical(&i, BoolOp::And), &[1.0, 0.0, f64::NAN]);
+    assert_na(&b.logical(&i, BoolOp::And).unwrap(), &[1.0, 0.0, f64::NAN]);
 }
 
 #[test]

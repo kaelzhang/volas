@@ -364,7 +364,7 @@ pub(crate) fn series_logical(s: &Series, other: &Bound<'_, PyAny>, op: BoolOp) -
         ));
     };
     // Kleene three-valued logic, propagating volas.NA.
-    Ok(col_to_series(s, s.data.logical(&rhs, op)))
+    Ok(col_to_series(s, s.data.logical(&rhs, op).map_err(pyerr)?))
 }
 
 pub(crate) fn strided(start: isize, stop: isize, step: isize) -> Vec<usize> {
