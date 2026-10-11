@@ -20,6 +20,7 @@ pub(super) fn dispatch(
             &close(0)?,
             arg_usize(args, 0),
             arg_usize(args, 1),
+            true,
         )),
         ("ema", _) => f64col(ind::ema(&close(0)?, arg_usize(args, 0))),
         ("smma", _) => f64col(ind::smma(&close(0)?, arg_usize(args, 0))),
@@ -72,7 +73,7 @@ pub(super) fn dispatch(
                 let p = (periods[i] as i64).clamp(min_p as i64, max_p as i64) as usize;
                 if cache[p].is_none() {
                     let start = lb - crate::lookback::ma_lookback(p, matype);
-                    let sub = ma_typed(&real[start..], p, matype);
+                    let sub = ma_typed(&real[start..], p, matype, true);
                     cache[p] = Some((start, sub));
                 }
                 let (start, sub) = cache[p].as_ref().unwrap();
@@ -110,8 +111,8 @@ pub(super) fn dispatch(
         ("apo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2);
-            let f = ma_typed(&data, arg_usize(args, 0), mt);
-            let s = ma_typed(&data, arg_usize(args, 1), mt);
+            let f = ma_typed(&data, arg_usize(args, 0), mt, true);
+            let s = ma_typed(&data, arg_usize(args, 1), mt, true);
             f64col((0..data.len()).map(|i| f[i] - s[i]).collect())
         }
         // MACDEXT: a MACD whose fast/slow/signal MAs each take a configurable type
@@ -119,25 +120,14 @@ pub(super) fn dispatch(
         // natural start (best practice, like macd); signal/histogram follow.
         ("macdext", sub) => {
             let data = close(0)?;
-            let f = ma_typed(
-                &data,
-                arg_usize(args, 0),
-                arg_usize(args, 1),
-            );
-            let s = ma_typed(
-                &data,
-                arg_usize(args, 2),
-                arg_usize(args, 3),
-            );
+            let f = ma_typed(&data, arg_usize(args, 0), arg_usize(args, 1), true);
+            let s = ma_typed(&data, arg_usize(args, 2), arg_usize(args, 3), true);
             let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
             match sub {
                 None => f64col(line),
                 _ => {
-                    let signal = ma_typed(
-                        &line,
-                        arg_usize(args, 4),
-                        arg_usize(args, 5),
-                    );
+                    // the MACD line warms up with NaN: not known complete
+                    let signal = ma_typed(&line, arg_usize(args, 4), arg_usize(args, 5), false);
                     if sub == Some("signal") {
                         f64col(signal)
                     } else {
@@ -149,8 +139,8 @@ pub(super) fn dispatch(
         ("ppo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2);
-            let f = ma_typed(&data, arg_usize(args, 0), mt);
-            let s = ma_typed(&data, arg_usize(args, 1), mt);
+            let f = ma_typed(&data, arg_usize(args, 0), mt, true);
+            let s = ma_typed(&data, arg_usize(args, 1), mt, true);
             f64col(
                 (0..data.len())
                     .map(|i| (f[i] - s[i]) / s[i] * 100.0)
@@ -162,19 +152,19 @@ pub(super) fn dispatch(
         // bias:N ≡ ppo:1,N,0 — the percentage deviation of close from its N-period SMA.
         ("bias", _) => {
             let data = close(0)?;
-            let f = ma_typed(&data, 1, 0);
-            let s = ma_typed(&data, arg_usize(args, 0), 0);
+            let f = ma_typed(&data, 1, 0, true);
+            let s = ma_typed(&data, arg_usize(args, 0), 0, true);
             f64col((0..data.len()).map(|i| (f[i] - s[i]) / s[i] * 100.0).collect())
         }
         // dma's DDD line ≡ apo:fast,slow,0; dma.ama is the M-period SMA of that line.
         ("dma", sub) => {
             let data = close(0)?;
-            let f = ma_typed(&data, arg_usize(args, 0), 0);
-            let s = ma_typed(&data, arg_usize(args, 1), 0);
+            let f = ma_typed(&data, arg_usize(args, 0), 0, true);
+            let s = ma_typed(&data, arg_usize(args, 1), 0, true);
             let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
             match sub {
                 None => f64col(line),
-                _ => f64col(ma_typed(&line, arg_usize(args, 2), 0)),
+                _ => f64col(ma_typed(&line, arg_usize(args, 2), 0, false)),
             }
         }
 

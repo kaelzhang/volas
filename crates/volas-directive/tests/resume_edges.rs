@@ -135,6 +135,17 @@ fn default_series_tail_resume_covers_transform_and_ratio_arms() {
 }
 
 #[test]
+fn default_series_resume_reads_an_integer_column_as_f64() {
+    let df = DataFrame::new(
+        vec!["close".into()],
+        vec![Column::i64(vec![10, 11, 13, 12])],
+        None,
+    )
+    .unwrap();
+    assert_eq!(execute_resume_default_series_one(&df, "mom:2", 3).unwrap(), 1.0);
+}
+
+#[test]
 fn node_resume_dispatch_covers_stateless_and_recursive_indicators() {
     let df = ohlcv(180);
     for directive in [

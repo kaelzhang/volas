@@ -2,252 +2,132 @@
 //!
 //! The rule — what a missing row is, and which rows a full computation, its
 //! carried-state capture and a resume run on — is owned by [`volas_compute::missing`].
-//! This module applies it to a bound recursive command: it resolves the command's input
-//! series once against the frame, asks the rule for the rows, and runs the command's
-//! ordinary dispatch / state / resume arm on a frame of just those rows, scattering the
-//! outputs back. The arms and kernels are unchanged. When no row is missing the arm runs
-//! on the caller's frame as it is. Whether a frame column holds a missing value is the
-//! column's own remembered fact (`Column::has_nan`), so a frame known to be complete is
-//! never scanned here.
+//! This module applies it to a bound recursive command. The command's arm runs in
+//! place first, reading its inputs through [`Operands`], which records exactly what it
+//! read: when every column read is known complete (the column's own remembered fact,
+//! `Column::has_nan`) that result stands with no scan at all; otherwise the record says
+//! which rows are complete, and the arm runs again over just those rows of the same
+//! inputs, its outputs scattered back. The arms and kernels are unchanged.
 
 use std::borrow::Cow;
 
 use volas_compute::missing::{CompleteRows, Input, ResumeRows};
 use volas_core::{Column, DataFrame, Result};
 
-use crate::exec::{execute, require_numeric, Operands};
 use crate::lookback::own_lookback;
-use crate::spec::command_spec;
-use crate::types::{ArgValue, Ast, Node};
+use crate::operands::Operands;
+use crate::types::{ArgValue, Ast};
 
-/// A recursive command's input series, resolved once against a frame: each a column —
-/// a frame column shared (an `Arc` clone, its NaN fact with it), an evaluated operand
-/// owned — never a copy of the values.
-struct Inputs {
-    /// The column each input is read from in an inputs frame: the command's default
-    /// series name, so its arm reads it with no operand, or `#<slot>` for a slot without
-    /// a distinct default.
-    names: Vec<Cow<'static, str>>,
-    columns: Vec<Column>,
-    /// Each input column's NaN fact (`Column::has_nan`).
-    has_nan: Vec<bool>,
+/// A bound command: canonical name / sub, typed arguments, `@` series.
+#[derive(Clone, Copy)]
+pub(crate) struct BoundCommand<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) sub: Option<&'a str>,
+    pub(crate) args: &'a [ArgValue],
+    pub(crate) series: &'a [Ast],
 }
 
-/// The input slots of a command: each slot's default series (`None` for a slot only an
-/// operand fills) and whether an explicit operand fills it. Stops at a required operand
-/// left out — the arm reports it.
-fn slots<'s>(
-    name: &str,
-    sub: Option<&str>,
-    series: &'s [Ast],
-) -> impl Iterator<Item = (usize, Option<&'static str>, bool)> + 's {
-    let defaults = command_spec(name, sub).map_or(&[][..], |s| s.series);
-    (0..defaults.len().max(series.len()))
-        .map(move |slot| {
-            let operand = series
-                .get(slot)
-                .is_some_and(|n| !matches!(n, Node::Name(s) if s.is_empty()));
-            (slot, defaults.get(slot).copied(), operand)
-        })
-        .take_while(|&(_, default, operand)| operand || default.is_some())
+impl BoundCommand<'_> {
+    /// How many rows before its first new row a resume of the command reads, at most.
+    fn reach(&self) -> usize {
+        own_lookback(self.name, self.sub, self.args) + 1
+    }
 }
 
-/// One input slot read as `f64` (a frame column borrowed), with what `know` says about
-/// its column's NaN fact.
-fn input<'a>(
-    df: &'a DataFrame,
-    series: &[Ast],
+/// One input an arm read, as the rule sees it.
+struct Recorded<'v> {
     slot: usize,
-    default: Option<&str>,
-    know: impl Fn(&Column) -> Option<bool>,
-) -> Result<(Cow<'a, [f64]>, Option<bool>)> {
-    let operand = series
-        .get(slot)
-        .filter(|n| !matches!(n, Node::Name(s) if s.is_empty()));
-    match operand {
-        Some(node) => {
-            let column = execute(df, node)?;
-            require_numeric(&column)?;
-            let known = know(&column);
-            Ok((Cow::Owned(column.to_f64_vec()), known))
-        }
-        None => {
-            let column = df.column(default.unwrap_or_default())?;
-            require_numeric(column)?;
-            let view = column
-                .as_f64()
-                .map_or_else(|| Cow::Owned(column.to_f64_vec()), Cow::Borrowed);
-            Ok((view, know(column)))
-        }
+    values: Cow<'v, [f64]>,
+    /// Whether the values hold a NaN, if known.
+    has_nan: Option<bool>,
+}
+
+impl Recorded<'_> {
+    /// The rows `[..end)`, with the NaN fact (which a complete whole implies for them).
+    fn input(&self, end: usize) -> Input<'_> {
+        let v = &self.values[..end.min(self.values.len())];
+        self.has_nan.map_or_else(|| Input::new(v), |k| Input::known(v, k))
     }
 }
 
-/// Whether a resume from `from` reads every input's rows `[.., end)` in place (see
-/// [`ResumeRows::in_place`]) — free for a column that already knows it holds no NaN, a
-/// scan of the reach and the new rows otherwise.
-#[allow(clippy::too_many_arguments)] // the command's parts plus the resumed rows
-fn in_place(
+/// The inputs `ops` recorded, by slot (`remember`: a frame column's NaN fact is
+/// computed and remembered; otherwise only what is already known).
+fn recorded<'o>(ops: &'o Operands, remember: bool) -> Vec<Recorded<'o>> {
+    ops.reads()
+        .map(|(slot, read)| Recorded {
+            slot,
+            values: read.view(),
+            has_nan: if remember { Some(read.has_nan()) } else { read.known_has_nan() },
+        })
+        .collect()
+}
+
+fn inputs<'v>(recorded: &'v [Recorded], end: usize) -> Vec<Input<'v>> {
+    recorded.iter().map(|r| r.input(end)).collect()
+}
+
+/// Operands that read, for each recorded slot, `gather(values)`.
+fn over<'v>(
+    df: &'v DataFrame,
+    series: &'v [Ast],
+    recorded: &'v [Recorded<'v>],
+    gather: impl Fn(&'v [f64]) -> Cow<'v, [f64]>,
+) -> Operands<'v> {
+    let slots = recorded.iter().map(|r| r.slot + 1).max().unwrap_or(0);
+    let mut views: Vec<Option<Cow<[f64]>>> = vec![None; slots];
+    for r in recorded {
+        views[r.slot] = Some(gather(&r.values));
+    }
+    Operands::over(df, series, views)
+}
+
+/// A result column's values as `f64`, taken over without a copy when they are.
+fn into_f64(column: Column) -> Vec<f64> {
+    match column {
+        Column::F64(values) => values.into_vec(),
+        other => other.to_f64_vec(),
+    }
+}
+
+/// Run a full computation (or a state capture) of a recursive command over the
+/// complete rows of its inputs: `run` is its arm, `finish` places the result of a run
+/// over the complete rows back on the frame's rows.
+fn on_complete_rows<T>(
     df: &DataFrame,
-    name: &str,
-    sub: Option<&str>,
-    args: &[ArgValue],
     series: &[Ast],
-    from: usize,
-    end: usize,
-) -> Result<bool> {
-    let mut reach = None; // only needed for an input that must be scanned
-    for (slot, default, _) in slots(name, sub, series) {
-        let (x, known) = input(df, series, slot, default, Column::known_has_nan)?;
-        if known == Some(false) {
-            continue;
-        }
-        let reach = *reach.get_or_insert_with(|| self::reach(name, sub, args));
-        if !ResumeRows::in_place(Input::new(&x[..end]), from, reach) {
-            return Ok(false);
-        }
+    run: impl Fn(&Operands) -> T,
+    finish: impl FnOnce(T, &CompleteRows, usize) -> T,
+) -> T {
+    let ops = Operands::stopping(df, series);
+    let first = run(&ops);
+    if !ops.missing() && ops.clean() {
+        return first;
     }
-    Ok(true)
-}
-
-/// Whether every input of a default-series command is a frame column that holds no
-/// NaN — the column's remembered fact, so a known-complete frame costs no scan and no
-/// allocation.
-fn complete_in_place(df: &DataFrame, name: &str, sub: Option<&str>) -> Result<bool> {
-    for (_, default, _) in slots(name, sub, &[]) {
-        let column = df.column(default.unwrap_or_default())?;
-        require_numeric(column)?;
-        if column.has_nan() {
-            return Ok(false);
-        }
+    if ops.missing() {
+        // A column read is known to hold a NaN: the in-place result is thrown away
+        // unseen — complete the record without computing, then run on the complete rows.
+        ops.probe();
+        let _ = run(&ops);
     }
-    Ok(true)
-}
-
-impl Inputs {
-    fn resolve(df: &DataFrame, name: &str, sub: Option<&str>, series: &[Ast]) -> Result<Inputs> {
-        let mut inputs = Inputs {
-            names: Vec::new(),
-            columns: Vec::new(),
-            has_nan: Vec::new(),
-        };
-        for (slot, default, _) in slots(name, sub, series) {
-            let column = match series
-                .get(slot)
-                .filter(|n| !matches!(n, Node::Name(s) if s.is_empty()))
-            {
-                Some(node) => execute(df, node)?,
-                None => df.column(default.unwrap_or_default())?.clone(),
-            };
-            require_numeric(&column)?;
-            inputs.has_nan.push(column.has_nan());
-            inputs.columns.push(column);
-            inputs.names.push(match default {
-                Some(d) if !inputs.names.iter().any(|n| n == d) => Cow::Borrowed(d),
-                _ => Cow::Owned(format!("#{slot}")),
-            });
-        }
-        Ok(inputs)
+    let recorded = recorded(&ops, true);
+    let rows = CompleteRows::of(&inputs(&recorded, usize::MAX));
+    if rows == CompleteRows::All {
+        return first; // the inputs turned out complete: the in-place run stands
     }
-
-    /// Each input as `f64` (borrowed for an `f64` column).
-    fn views(&self) -> Vec<Cow<'_, [f64]>> {
-        self.columns
-            .iter()
-            .map(|c| {
-                c.as_f64()
-                    .map_or_else(|| Cow::Owned(c.to_f64_vec()), Cow::Borrowed)
-            })
-            .collect()
-    }
-
-    /// The inputs for the rule, each with its column's NaN fact.
-    fn known<'v>(&self, views: &'v [Cow<[f64]>]) -> Vec<Input<'v>> {
-        views
-            .iter()
-            .zip(&self.has_nan)
-            .map(|(v, &has_nan)| Input::known(v, has_nan))
-            .collect()
-    }
-
-    /// The operands that read every input from an inputs frame.
-    fn series(&self) -> Vec<Ast> {
-        self.names
-            .iter()
-            .map(|n| {
-                Node::Name(if n.starts_with('#') {
-                    n.to_string()
-                } else {
-                    String::new()
-                })
-            })
-            .collect()
-    }
-
-    fn frame_of(&self, columns: Vec<Column>) -> (DataFrame, Vec<Ast>) {
-        let names = self.names.iter().map(|n| n.to_string()).collect();
-        let frame = DataFrame::new(names, columns, None).expect("inputs share one height");
-        (frame, self.series())
-    }
-
-    /// A frame of the inputs as they are (the columns shared, not copied).
-    fn whole(&self) -> (DataFrame, Vec<Ast>) {
-        self.frame_of(self.columns.clone())
-    }
-
-    /// A frame of the inputs at `rows` only.
-    fn gathered(&self, views: &[Cow<[f64]>], rows: &[usize]) -> (DataFrame, Vec<Ast>) {
-        let columns = views
-            .iter()
-            .map(|v| Column::f64(rows.iter().map(|&i| v[i]).collect()))
-            .collect();
-        self.frame_of(columns)
-    }
-}
-
-/// The frame a full computation (or a state capture) runs on when an input is
-/// explicit or a row is missing: the inputs as they are, or their complete rows.
-fn over_complete_rows(
-    inputs: &Inputs,
-    views: &[Cow<[f64]>],
-    rows: &CompleteRows,
-) -> (DataFrame, Vec<Ast>) {
-    match rows {
-        CompleteRows::All => inputs.whole(),
-        CompleteRows::After(start) => {
-            let (frame, operands) = inputs.whole();
-            (frame.slice_data(*start, frame.height()), operands)
-        }
-        CompleteRows::Kept(kept) => inputs.gathered(views, kept),
-    }
+    let out = run(&over(df, series, &recorded, |v| rows.gather(v)));
+    finish(out, &rows, df.height())
 }
 
 /// Compute a recursive command over the complete rows of its inputs: `run` is its
 /// dispatch arm.
 pub(crate) fn compute(
     df: &DataFrame,
-    name: &str,
-    sub: Option<&str>,
     series: &[Ast],
     run: impl Fn(&Operands) -> Result<Column>,
 ) -> Result<Column> {
-    if default_series(series) {
-        // In place first: the arm's own lookups say whether every column it read is
-        // known complete; only a column not yet known is scanned (and then remembered).
-        let ops = Operands::new(df, series);
-        let out = run(&ops)?;
-        if ops.clean() || complete_in_place(df, name, sub)? {
-            return Ok(out);
-        }
-    }
-    let inputs = Inputs::resolve(df, name, sub, series)?;
-    let views = inputs.views();
-    let rows = CompleteRows::of(&inputs.known(&views));
-    let (frame, operands) = over_complete_rows(&inputs, &views, &rows);
-    let out = run(&Operands::new(&frame, &operands))?;
-    if rows == CompleteRows::All {
-        return Ok(out);
-    }
-    Ok(Column::f64(rows.scatter(df.height(), out.to_f64_vec())))
+    on_complete_rows(df, series, run, |out, rows, n| {
+        Ok(Column::f64(rows.scatter(n, into_f64(out?))))
+    })
 }
 
 /// The carried state of a recursive command after a full computation over the
@@ -255,32 +135,20 @@ pub(crate) fn compute(
 /// state-capture arm.
 pub(crate) fn state(
     df: &DataFrame,
-    name: &str,
-    sub: Option<&str>,
     series: &[Ast],
-    run: impl FnOnce(&DataFrame, &[Ast]) -> Option<Vec<f64>>,
+    run: impl Fn(&Operands) -> Option<Vec<f64>>,
 ) -> Option<Vec<f64>> {
-    if default_series(series) && complete_in_place(df, name, sub).ok()? {
-        return run(df, series);
-    }
-    let inputs = Inputs::resolve(df, name, sub, series).ok()?;
-    let views = inputs.views();
-    let rows = CompleteRows::of(&inputs.known(&views));
-    let (frame, operands) = over_complete_rows(&inputs, &views, &rows);
-    run(&frame, &operands)
+    on_complete_rows(df, series, run, |out, _, _| out)
 }
 
-/// Whether every operand is left to its default series (the arm then reads the
-/// caller's frame directly, with nothing to evaluate twice).
-fn default_series(series: &[Ast]) -> bool {
-    series
-        .iter()
-        .all(|n| matches!(n, Node::Name(s) if s.is_empty()))
-}
-
-/// How many rows before its first new row a resume of a command reads, at most.
-fn reach(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
-    own_lookback(name, sub, args) + 1
+/// Whether the resume `ops` just ran read every input's rows `[from - reach, end)`
+/// complete (see [`ResumeRows::in_place`]) — free for a column known complete.
+fn read_in_place(ops: &Operands, cmd: &BoundCommand, from: usize, end: usize) -> bool {
+    let mut reach = None; // only needed for an input that must be scanned
+    recorded(ops, false).iter().all(|r| {
+        r.has_nan == Some(false)
+            || ResumeRows::in_place(r.input(end), from, *reach.get_or_insert_with(|| cmd.reach()))
+    })
 }
 
 /// Resume a recursive command over the new rows `[from, height)` from `prev_state`, on
@@ -288,81 +156,63 @@ fn reach(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
 /// complete row put it. `run(operands, from)` is its resume arm.
 ///
 /// The arm runs in place first: when every input it read is known complete, or the
-/// rows it read turn out complete, that is the answer. Otherwise it runs again on the
-/// complete rows.
-#[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
+/// rows it read turn out complete, that is the answer. Otherwise it runs again over the
+/// complete rows of the same inputs.
 pub(crate) fn resume(
     df: &DataFrame,
-    name: &str,
-    sub: Option<&str>,
-    args: &[ArgValue],
-    series: &[Ast],
+    cmd: &BoundCommand,
     prev_state: &[f64],
     from: usize,
     run: impl Fn(&Operands, usize) -> Option<(Column, Vec<f64>)>,
 ) -> Option<(Column, Vec<f64>)> {
     let n = df.height();
-    if default_series(series) {
-        let ops = Operands::new(df, series);
-        let out = run(&ops, from);
-        if ops.clean() || in_place(df, name, sub, args, series, from, n).ok()? {
-            return out;
-        }
+    let ops = Operands::new(df, cmd.series);
+    let out = run(&ops, from);
+    if ops.clean() || read_in_place(&ops, cmd, from, n) {
+        return out;
     }
-    let inputs = Inputs::resolve(df, name, sub, series).ok()?;
-    let views = inputs.views();
-    let reach = reach(name, sub, args);
-    if inputs
-        .known(&views)
-        .into_iter()
-        .all(|x| ResumeRows::in_place(x, from, reach))
-    {
-        // explicit operands, every row they read present: resume on them as they are
-        let (frame, operands) = inputs.whole();
-        return run(&Operands::new(&frame, &operands), from);
-    }
-    let refs: Vec<&[f64]> = views.iter().map(|v| v.as_ref()).collect();
-    let rows = ResumeRows::of(&refs, from, reach);
+    let recorded = recorded(&ops, false);
+    let refs: Vec<&[f64]> = recorded.iter().map(|r| r.values.as_ref()).collect();
+    let rows = ResumeRows::of(&refs, from, cmd.reach());
     if !rows.has_new() {
         return Some((Column::f64(vec![f64::NAN; n - from]), prev_state.to_vec()));
     }
-    let (frame, operands) = inputs.gathered(&views, &rows.rows);
-    let (col, st) = run(&Operands::new(&frame, &operands), rows.from)?;
-    Some((Column::f64(rows.scatter(n, from, col.to_f64_vec())), st))
+    let gathered = over(df, cmd.series, &recorded, |v| {
+        Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
+    });
+    let (col, st) = run(&gathered, rows.from)?;
+    Some((Column::f64(rows.scatter(n, from, into_f64(col))), st))
 }
 
 /// Resume a recursive command at the single row `row` (the scalar twin of [`resume`]):
 /// `missing` when that row is missing, else `run(operands, row)` on the complete rows.
 /// As there, the arm runs in place first and its answer stands when the rows it read
-/// are complete.
-#[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
+/// are complete; an `@` operand is evaluated once.
 pub(crate) fn resume_one<T>(
     df: &DataFrame,
-    name: &str,
-    sub: Option<&str>,
-    args: &[ArgValue],
-    series: &[Ast],
+    cmd: &BoundCommand,
     row: usize,
     missing: impl FnOnce() -> Option<T>,
     run: impl Fn(&Operands, usize) -> Option<T>,
 ) -> Option<T> {
-    let ops = Operands::new(df, series);
+    let ops = Operands::new(df, cmd.series);
     let out = run(&ops, row);
     // The rows up to and including `row` (an out-of-range `row` resumes in place, where
     // the arm declines it).
     let end = (row + 1).min(df.height());
-    if ops.clean() || in_place(df, name, sub, args, series, row, end).ok()? {
+    if ops.clean() || read_in_place(&ops, cmd, row, end) {
         return out;
     }
-    let inputs = Inputs::resolve(df, name, sub, series).ok()?;
-    let views = inputs.views();
-    let upto: Vec<&[f64]> = views.iter().map(|v| &v[..end]).collect();
-    let rows = ResumeRows::of(&upto, row, reach(name, sub, args));
+    let recorded = recorded(&ops, false);
+    let upto: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..end]).collect();
+    let rows = ResumeRows::of(&upto, row, cmd.reach());
     if !rows.has_new() {
         return missing();
     }
-    let (frame, operands) = inputs.gathered(&views, &rows.rows);
-    run(&Operands::new(&frame, &operands), rows.from)
+    let gathered = over(df, cmd.series, &recorded, |v| {
+        Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
+    });
+    run(&gathered, rows.from)
 }
 
 #[cfg(test)]
@@ -381,6 +231,44 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    /// The kernel runs once per compute, on the rows it is given: in place over a
+    /// frame whose columns' NaN facts are unknown, and — once a read column is known
+    /// to hold a NaN — straight over the complete rows, with no in-place run first.
+    #[test]
+    fn a_column_known_to_miss_rows_skips_the_in_place_run() {
+        use std::cell::RefCell;
+        let mut open: Vec<f64> = (0..12).map(|i| 40.0 + i as f64).collect();
+        open[0] = f64::NAN;
+        open[5] = f64::NAN;
+        let df = frame(open);
+        let runs = RefCell::new(Vec::new()); // the length of each kernel run's input
+        let run = |ops: &crate::operands::Operands| {
+            let x = ops.f64(0, "open")?;
+            if !x.is_empty() {
+                runs.borrow_mut().push(x.len());
+            }
+            Ok(Column::f64(x.to_vec()))
+        };
+        let first = super::compute(&df, &[], run).unwrap().to_f64_vec();
+        assert_eq!(*runs.borrow(), vec![12, 10]); // unknown: in place, then gathered
+        runs.borrow_mut().clear();
+        let again = super::compute(&df, &[], run).unwrap().to_f64_vec();
+        assert_eq!(*runs.borrow(), vec![10]); // known: gathered only
+        assert_eq!(format!("{first:?}"), format!("{again:?}"));
+        // a clean frame column, once known clean, is read in place with no scan
+        let clean = frame((0..12).map(|i| 40.0 + i as f64).collect());
+        assert!(!clean.column("open").unwrap().has_nan());
+        runs.borrow_mut().clear();
+        super::compute(&clean, &[], run).unwrap();
+        assert_eq!(*runs.borrow(), vec![12]);
+    }
+
+    #[test]
+    fn a_result_column_is_taken_over_as_f64() {
+        assert_eq!(super::into_f64(Column::f64(vec![1.5])), vec![1.5]);
+        assert_eq!(super::into_f64(Column::i64(vec![2])), vec![2.0]);
     }
 
     /// A single-row resume over an explicit operand evaluates it like any other read —

@@ -1,11 +1,12 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
 use std::borrow::Cow;
-use std::cell::Cell;
 
 use crate::bind::bind_command;
+use crate::operands::Operands;
 use crate::types::{ArgValue, Ast, Node, Op, UnaryOp};
 use volas_compute::indicators as ind;
+use volas_compute::missing::{on_complete_rows, Input};
 use volas_core::Column;
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
@@ -142,25 +143,12 @@ pub(crate) fn arg_str(args: &[ArgValue], i: usize) -> &str {
 
 // --- series resolution ------------------------------------------------------
 
-/// Resolve a series operand to `&[f64]`. A plain `F64` column is **borrowed**
-/// (`Cow::Borrowed`, no copy — the common case, e.g. `close`/`high`/`low`); a
-/// computed sub-expression or a non-`F64` column is materialised (`Cow::Owned`).
-/// Callers pass `&resolved` to the kernels, which deref-coerces to `&[f64]`.
-pub(crate) fn series_f64<'a>(
-    df: &'a DataFrame,
-    series: &[Ast],
-    i: usize,
-    default_col: &str,
-) -> Result<Cow<'a, [f64]>> {
-    match series.get(i) {
-        Some(Node::Name(s)) if s.is_empty() => col_f64(df, default_col),
-        Some(node) => {
-            let c = execute(df, node)?;
-            require_numeric(&c)?;
-            Ok(Cow::Owned(c.to_f64_vec()))
-        }
-        None => col_f64(df, default_col),
-    }
+/// The `@` operand filling series slot `i`, if any: an absent slot or an empty name
+/// leaves it to the command's default series.
+pub(crate) fn operand(series: &[Ast], i: usize) -> Option<&Ast> {
+    series
+        .get(i)
+        .filter(|n| !matches!(n, Node::Name(s) if s.is_empty()))
 }
 
 /// A directive numeric operand must be a numeric column (float / int / bool —
@@ -179,8 +167,9 @@ pub(crate) fn require_numeric(col: &Column) -> Result<()> {
 }
 
 /// Borrow a frame column as `&[f64]` without copying when it is already `F64`;
-/// otherwise convert (e.g. an `I64` volume column).
-fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
+/// otherwise convert (e.g. an `I64` volume column). A command's arm reads its inputs
+/// through [`Operands`](crate::operands::Operands) instead.
+pub(crate) fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
     let col = df.column(name)?;
     require_numeric(col)?;
     Ok(match col.as_f64() {
@@ -189,26 +178,7 @@ fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
     })
 }
 
-/// Resolve a **required** numeric series operand at slot `i`: unlike [`series_f64`],
-/// an absent or empty operand is an error rather than a column default. Used where a
-/// command genuinely needs a second series the caller must name (e.g. `beta`/`correl`).
-fn series_f64_required<'a>(df: &'a DataFrame, series: &[Ast], i: usize) -> Result<Cow<'a, [f64]>> {
-    match series.get(i) {
-        Some(Node::Name(s)) if s.is_empty() => Err(VolasError::Value(format!(
-            "series argument #{i} is required"
-        ))),
-        Some(node) => {
-            let c = execute(df, node)?;
-            require_numeric(&c)?;
-            Ok(Cow::Owned(c.to_f64_vec()))
-        }
-        None => Err(VolasError::Value(format!(
-            "series argument #{i} is required"
-        ))),
-    }
-}
-
-fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
+pub(crate) fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
     let node = series
         .get(i)
         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
@@ -221,64 +191,6 @@ fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
     }
 }
 
-/// The operands a command's arm reads: the frame and its `@` series. Each input is
-/// looked up once, by the arm; while it does, the operands note whether every input it
-/// read is a frame column already known to hold no NaN ([`clean`](Self::clean)) — the
-/// missing-row rule then takes what the arm computed in place as it stands (see
-/// `crate::complete`), with no second lookup and no scan.
-pub(crate) struct Operands<'a> {
-    df: &'a DataFrame,
-    series: &'a [Ast],
-    clean: Cell<bool>,
-}
-
-impl<'a> Operands<'a> {
-    pub(crate) fn new(df: &'a DataFrame, series: &'a [Ast]) -> Self {
-        Operands {
-            df,
-            series,
-            clean: Cell::new(true),
-        }
-    }
-
-    /// Input `slot` as `f64` (`default` names its column when no operand fills it).
-    pub(crate) fn f64(&self, slot: usize, default: &str) -> Result<Cow<'a, [f64]>> {
-        let operand = self
-            .series
-            .get(slot)
-            .is_some_and(|n| !matches!(n, Node::Name(s) if s.is_empty()));
-        if operand {
-            self.clean.set(false); // an evaluated operand carries no remembered fact
-            return series_f64(self.df, self.series, slot, default);
-        }
-        let column = self.df.column(default)?;
-        require_numeric(column)?;
-        if column.known_has_nan() != Some(false) {
-            self.clean.set(false);
-        }
-        Ok(column
-            .as_f64()
-            .map_or_else(|| Cow::Owned(column.to_f64_vec()), Cow::Borrowed))
-    }
-
-    /// A required operand at `slot` as `f64` (see [`series_f64_required`]).
-    pub(crate) fn f64_required(&self, slot: usize) -> Result<Cow<'a, [f64]>> {
-        self.clean.set(false);
-        series_f64_required(self.df, self.series, slot)
-    }
-
-    /// A boolean operand at `slot` (see [`series_bool`]).
-    pub(crate) fn bool(&self, slot: usize) -> Result<Vec<bool>> {
-        self.clean.set(false);
-        series_bool(self.df, self.series, slot)
-    }
-
-    /// Whether every input read so far is a frame column known to hold no NaN.
-    pub(crate) fn clean(&self) -> bool {
-        self.clean.get()
-    }
-}
-
 /// Dispatch a TA-Lib MA-type code to the matching moving average over `data`.
 /// Codes follow TA-Lib's `TA_MAType`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
 /// 6 KAMA, 7 MAMA, 8 T3 (with vfactor 0.7, as TA-Lib's MA dispatch fixes it). MAMA
@@ -288,11 +200,14 @@ impl<'a> Operands<'a> {
 /// Infallible: every caller's matype is either a literal or a spec-validated
 /// argument (`ArgBound::IntRange(0, 8)` at the exec boundary), so a value past
 /// 8 cannot reach here.
-fn ma_typed(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
+fn ma_typed(data: &[f64], period: usize, matype: usize, complete: bool) -> Vec<f64> {
     // A recursive average runs on the complete rows of its input — the input may be a
-    // derived line that warms up with NaN (see `volas_compute::missing`).
+    // derived line that warms up with NaN (see `volas_compute::missing`). A recursive
+    // command's own input is complete wherever its result is kept (`complete`), so it
+    // is not scanned.
     if crate::spec::is_recursive_matype(matype) {
-        return volas_compute::missing::on_complete_rows(&[data], |x| ma_kernel(x[0], period, matype));
+        let input = if complete { Input::known(data, false) } else { Input::new(data) };
+        return on_complete_rows(&[input], |x| ma_kernel(x[0], period, matype));
     }
     ma_kernel(data, period, matype)
 }
@@ -333,9 +248,7 @@ fn dispatch(
     series: &[Ast],
 ) -> Result<Column> {
     if crate::spec::is_recursive(name, args) {
-        return crate::complete::compute(df, name, sub, series, |ops| {
-            overlap::dispatch(ops, name, sub, args)
-        });
+        return crate::complete::compute(df, series, |ops| overlap::dispatch(ops, name, sub, args));
     }
     overlap::dispatch(&Operands::new(df, series), name, sub, args)
 }
@@ -654,7 +567,7 @@ mod tests {
         let df = ohlcv();
         let is_err = |d: &str| parse(d).and_then(|n| execute(&df, &n)).is_err();
         // correl needs a second series operand; absent or empty -> error at execute
-        // (series_f64_required's None and empty-Name arms).
+        // (`Operands::f64_required`'s None and empty-Name arms).
         assert!(is_err("correl:30"));
         assert!(is_err("correl:30@close,"));
         // a matype past 8 is rejected when binding (IntRange bound); ma_typed itself is

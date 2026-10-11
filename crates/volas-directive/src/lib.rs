@@ -3,6 +3,7 @@
 
 mod bind;
 mod complete;
+mod operands;
 pub mod exec;
 mod exec_resume;
 pub mod lookback;

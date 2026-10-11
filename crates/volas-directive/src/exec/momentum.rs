@@ -286,11 +286,11 @@ pub(super) fn dispatch(
                 }
             }
             let fastk = ind::stoch_fastk(&high, &low, &close, fastk_period);
-            let slowk = ma_typed(&fastk, slowk_period, slowk_matype);
+            let slowk = ma_typed(&fastk, slowk_period, slowk_matype, false);
             if line == "k" {
                 f64col(slowk)
             } else {
-                f64col(ma_typed(&slowk, slowd_period, slowd_matype))
+                f64col(ma_typed(&slowk, slowd_period, slowd_matype, false))
             }
         }
         ("stochf", Some(line @ ("k" | "d"))) => {
@@ -309,7 +309,7 @@ pub(super) fn dispatch(
             if line == "k" {
                 f64col(fastk)
             } else {
-                f64col(ma_typed(&fastk, fastd_period, fastd_matype))
+                f64col(ma_typed(&fastk, fastd_period, fastd_matype, false))
             }
         }
         ("stochrsi", Some(line @ ("k" | "d"))) => {
@@ -332,7 +332,7 @@ pub(super) fn dispatch(
             if line == "k" {
                 f64col(fastk)
             } else {
-                f64col(ma_typed(&fastk, fastd_period, fastd_matype))
+                f64col(ma_typed(&fastk, fastd_period, fastd_matype, false))
             }
         }
 

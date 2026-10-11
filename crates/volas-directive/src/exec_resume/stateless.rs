@@ -2,7 +2,7 @@
 //! transforms, TR, the momentum / ROC family): the stale tail is a formula of each row
 //! and a fixed prior row, so an append computes exactly the new rows.
 
-use crate::exec::series_f64;
+use crate::exec::col_f64;
 use volas_core::{Column, DataFrame};
 
 /// Extract the period from a `name:<period>` directive for the momentum / ROC
@@ -27,44 +27,44 @@ pub fn execute_resume_default_series_one(
     }
     match directive {
         "avgprice" => {
-            let open = series_f64(df, &[], 0, "open").ok()?;
-            let high = series_f64(df, &[], 1, "high").ok()?;
-            let low = series_f64(df, &[], 2, "low").ok()?;
-            let close = series_f64(df, &[], 3, "close").ok()?;
+            let open = col_f64(df, "open").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             Some((open[row] + high[row] + low[row] + close[row]) / 4.0)
         }
         "medprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
             Some((high[row] + low[row]) / 2.0)
         }
         "bop" => {
-            let open = series_f64(df, &[], 0, "open").ok()?;
-            let high = series_f64(df, &[], 1, "high").ok()?;
-            let low = series_f64(df, &[], 2, "low").ok()?;
-            let close = series_f64(df, &[], 3, "close").ok()?;
+            let open = col_f64(df, "open").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             let range = high[row] - low[row];
             Some(if range < 1e-14 { 0.0 } else { (close[row] - open[row]) / range })
         }
         "typprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             Some((high[row] + low[row] + close[row]) / 3.0)
         }
         "wclprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             Some((high[row] + low[row] + 2.0 * close[row]) / 4.0)
         }
         "tr" => {
             if row == 0 {
                 return Some(f64::NAN);
             }
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             let prev_close = close[row - 1];
             Some(
                 (high[row] - low[row])
@@ -81,7 +81,7 @@ pub fn execute_resume_default_series_one(
             if row < period {
                 return Some(f64::NAN);
             }
-            let data = series_f64(df, &[], 0, "close").ok()?;
+            let data = col_f64(df, "close").ok()?;
             let prior = data[row - period];
             Some(match kind {
                 "mom" => data[row] - prior,
@@ -110,10 +110,10 @@ pub fn execute_resume_default_series(
     }
     match directive {
         "avgprice" => {
-            let open = series_f64(df, &[], 0, "open").ok()?;
-            let high = series_f64(df, &[], 1, "high").ok()?;
-            let low = series_f64(df, &[], 2, "low").ok()?;
-            let close = series_f64(df, &[], 3, "close").ok()?;
+            let open = col_f64(df, "open").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             let mut out = Vec::with_capacity(open.len().saturating_sub(from_row));
             for i in from_row..open.len() {
                 out.push((open[i] + high[i] + low[i] + close[i]) / 4.0);
@@ -121,8 +121,8 @@ pub fn execute_resume_default_series(
             Some((Column::f64(out), Vec::new()))
         }
         "medprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
             let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
             for i in from_row..high.len() {
                 out.push((high[i] + low[i]) / 2.0);
@@ -130,10 +130,10 @@ pub fn execute_resume_default_series(
             Some((Column::f64(out), Vec::new()))
         }
         "bop" => {
-            let open = series_f64(df, &[], 0, "open").ok()?;
-            let high = series_f64(df, &[], 1, "high").ok()?;
-            let low = series_f64(df, &[], 2, "low").ok()?;
-            let close = series_f64(df, &[], 3, "close").ok()?;
+            let open = col_f64(df, "open").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
             for i in from_row..close.len() {
                 let range = high[i] - low[i];
@@ -142,9 +142,9 @@ pub fn execute_resume_default_series(
             Some((Column::f64(out), Vec::new()))
         }
         "typprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
             for i in from_row..close.len() {
                 out.push((high[i] + low[i] + close[i]) / 3.0);
@@ -152,9 +152,9 @@ pub fn execute_resume_default_series(
             Some((Column::f64(out), Vec::new()))
         }
         "wclprice" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
             for i in from_row..close.len() {
                 out.push((high[i] + low[i] + 2.0 * close[i]) / 4.0);
@@ -162,9 +162,9 @@ pub fn execute_resume_default_series(
             Some((Column::f64(out), Vec::new()))
         }
         "tr" => {
-            let high = series_f64(df, &[], 0, "high").ok()?;
-            let low = series_f64(df, &[], 1, "low").ok()?;
-            let close = series_f64(df, &[], 2, "close").ok()?;
+            let high = col_f64(df, "high").ok()?;
+            let low = col_f64(df, "low").ok()?;
+            let close = col_f64(df, "close").ok()?;
             let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
             for i in from_row..high.len() {
                 if i == 0 {
@@ -186,7 +186,7 @@ pub fn execute_resume_default_series(
                 .find_map(|kind| {
                     period_of(directive, kind).map(|period| (kind, period))
                 })?;
-            let data = series_f64(df, &[], 0, "close").ok()?;
+            let data = col_f64(df, "close").ok()?;
             let mut out = Vec::with_capacity(data.len().saturating_sub(from_row));
             for i in from_row..data.len() {
                 if i < period {

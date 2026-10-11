@@ -1,7 +1,9 @@
 //! Resume directive execution over only the new tail rows, bit-identical to a
 //! full recompute (the per-directive `execute_resume*` dispatch).
 
-use crate::exec::{arg_f64, arg_usize, Operands};
+use crate::complete::BoundCommand;
+use crate::exec::{arg_f64, arg_usize};
+use crate::operands::Operands;
 use crate::parse;
 use crate::types::{ArgValue, Ast};
 use volas_compute::indicators as ind;
@@ -89,12 +91,10 @@ pub fn execute_resume_one_node(
         return None;
     }
     // Over the complete rows: a missing row is NaN, its state untouched.
+    let cmd = BoundCommand { name, sub: sub.as_deref(), args: &args, series };
     crate::complete::resume_one(
         df,
-        name,
-        sub.as_deref(),
-        &args,
-        series,
+        &cmd,
         row,
         || ResumeStep::missing(prev_state),
         |ops, row| step_of(ops, name, &args, prev_state, row),
@@ -153,26 +153,25 @@ pub fn execute_resume(
 ) -> Option<(Column, Vec<f64>)> {
     let (name, sub, args, series) = as_command(node)?;
     let (name, sub) = (name.as_ref(), sub.as_deref());
+    let cmd = BoundCommand { name, sub, args: &args, series };
     if crate::spec::is_recursive(name, &args) {
         // Over the complete rows: a missing new row is NaN, the state untouched.
-        return crate::complete::resume(df, name, sub, &args, series, prev_state, from_row, |ops, from| {
-            resume_of(ops, name, sub, &args, prev_state, from, origin)
+        return crate::complete::resume(df, &cmd, prev_state, from_row, |ops, from| {
+            resume_of(ops, &cmd, prev_state, from, origin)
         });
     }
-    resume_of(&Operands::new(df, series), name, sub, &args, prev_state, from_row, origin)
+    resume_of(&Operands::new(df, series), &cmd, prev_state, from_row, origin)
 }
 
-/// [`execute_resume`] of the bound command `name`/`sub` over every row of `ops`.
-#[allow(clippy::too_many_arguments)] // the command's parts plus the resume position
+/// [`execute_resume`] of the bound command `cmd` over every row of `ops`.
 fn resume_of(
     ops: &Operands,
-    name: &str,
-    sub: Option<&str>,
-    args: &[ArgValue],
+    cmd: &BoundCommand,
     prev_state: &[f64],
     from_row: usize,
     origin: usize,
 ) -> Option<(Column, Vec<f64>)> {
+    let (name, sub, args) = (cmd.name, cmd.sub, cmd.args);
     let close = || ops.f64(0, "close");
     match (name, sub) {
         // Stateless finite-memory resume. These kernels depend only on the row

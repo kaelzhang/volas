@@ -5,7 +5,9 @@
 //! `execute_resume` arm's single loop iteration. `None` for a directive without a scalar
 //! twin (index family, stochrsi `.d`) — the caller then falls back to `execute_resume`.
 
-use crate::exec::{arg_f64, arg_usize, Operands};
+use crate::complete::BoundCommand;
+use crate::exec::{arg_f64, arg_usize};
+use crate::operands::Operands;
 use crate::types::{ArgValue, Ast};
 use volas_compute::indicators as ind;
 use volas_core::DataFrame;
@@ -25,12 +27,10 @@ pub fn execute_resume_value(
     let (name, sub) = (name.as_ref(), sub.as_deref());
     if crate::spec::is_recursive(name, &args) {
         // A missing row is NaN, its state untouched (see `crate::complete`).
+        let cmd = BoundCommand { name, sub, args: &args, series };
         return crate::complete::resume_one(
             df,
-            name,
-            sub,
-            &args,
-            series,
+            &cmd,
             row,
             || Some(f64::NAN),
             |ops, row| value_of(ops, name, sub, &args, prev_state, row),

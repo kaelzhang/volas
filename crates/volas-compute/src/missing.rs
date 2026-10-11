@@ -152,16 +152,13 @@ impl CompleteRows {
 }
 
 /// Run `kernel` on the complete rows of `inputs` and scatter its output back: the
-/// whole rule for one full computation.
-pub fn on_complete_rows(inputs: &[&[f64]], kernel: impl FnOnce(&[&[f64]]) -> Vec<f64>) -> Vec<f64> {
-    let known: Vec<Input> = inputs.iter().map(|x| Input::new(x)).collect();
-    let rows = CompleteRows::of(&known);
-    if rows == CompleteRows::All {
-        return kernel(inputs);
-    }
-    let gathered: Vec<Cow<[f64]>> = inputs.iter().map(|x| rows.gather(x)).collect();
+/// whole rule for one full computation. An input known complete is not scanned.
+pub fn on_complete_rows(inputs: &[Input], kernel: impl FnOnce(&[&[f64]]) -> Vec<f64>) -> Vec<f64> {
+    let rows = CompleteRows::of(inputs);
+    let n = inputs.first().map_or(0, |x| x.values.len());
+    let gathered: Vec<Cow<[f64]>> = inputs.iter().map(|x| rows.gather(x.values)).collect();
     let views: Vec<&[f64]> = gathered.iter().map(|x| x.as_ref()).collect();
-    rows.scatter(height(inputs), kernel(&views))
+    rows.scatter(n, kernel(&views))
 }
 
 /// The rows a resume over the new rows `[from, n)` runs on, for a recursion whose
@@ -331,11 +328,13 @@ mod tests {
         };
         let x = [1.0, 2.0, NAN, 3.0];
         assert_eq!(
-            bits(&on_complete_rows(&[&x[..]], running_sum)),
+            bits(&on_complete_rows(&[Input::new(&x)], running_sum)),
             bits(&[1.0, 3.0, NAN, 6.0])
         );
         let clean = [1.0, 2.0];
-        assert_eq!(on_complete_rows(&[&clean[..]], running_sum), vec![1.0, 3.0]);
+        assert_eq!(on_complete_rows(&[Input::new(&clean)], running_sum), vec![1.0, 3.0]);
+        // known complete: taken at its word, never scanned
+        assert_eq!(on_complete_rows(&[Input::known(&x, false)], running_sum).len(), 4);
     }
 
     #[test]
