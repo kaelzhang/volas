@@ -41,21 +41,33 @@ def _sma(x, n: int) -> pd.Series:
     return _s(x).rolling(n, min_periods=n).mean()
 
 
-def _ema(x, n: int) -> pd.Series:
-    """EMA with TA-Lib seeding (first value = SMA of the first ``n`` valid samples, which
-    volas's ``ema`` uses). Leading NaNs are skipped so chained EMAs (TSI, Mass Index) seed
-    from the first real value instead of an all-NaN window."""
-    vals = _s(x).to_numpy()
-    out = np.full(len(vals), np.nan)
-    valid = np.flatnonzero(~np.isnan(vals))
-    if len(valid) >= n:
-        fv = int(valid[0])
-        start = fv + n - 1
-        out[start] = vals[fv:fv + n].mean()
-        alpha = 2.0 / (n + 1.0)
-        for i in range(start + 1, len(vals)):
-            out[i] = alpha * vals[i] + (1.0 - alpha) * out[i - 1]
+def _row_deleted(fn, *cols) -> pd.Series:
+    """The recursive missing-row rule (INDICATORS.md "Missing and non-finite inputs"),
+    applied at the input boundary: delete every row where any input is NaN, run ``fn`` on
+    the complete rows, and put NaN back at the deleted positions."""
+    arrs = [_s(x).to_numpy() for x in cols]
+    keep = np.logical_and.reduce([~np.isnan(a) for a in arrs])
+    out = np.full(len(keep), np.nan)
+    out[keep] = np.asarray(fn(*(a[keep] for a in arrs)), dtype=float)
     return pd.Series(out)
+
+
+def _ema(x, n: int) -> pd.Series:
+    """EMA with TA-Lib seeding (first value = SMA of the first ``n`` samples, which volas's
+    ``ema`` uses). Missing rows are deleted first (the recursive missing-row rule), so a
+    leading NaN run (chained EMAs: TSI, Mass Index) or an inner gap never enters the seed
+    or the recursion."""
+
+    def complete(vals):
+        out = np.full(len(vals), np.nan)
+        if len(vals) >= n:
+            out[n - 1] = vals[:n].mean()
+            alpha = 2.0 / (n + 1.0)
+            for i in range(n, len(vals)):
+                out[i] = alpha * vals[i] + (1.0 - alpha) * out[i - 1]
+        return out
+
+    return _row_deleted(complete, x)
 
 
 def _wma(x, n: int) -> pd.Series:
@@ -228,8 +240,9 @@ def mass_index(o, h, lo, c, v, n=25, ema_n=9):
 def efi(o, h, lo, c, v, n=13):
     """Elder Force Index = EMA_n( (C - prev C) * volume ).
     Source: StockCharts / Investopedia — Force Index."""
-    raw = (_s(c).diff() * _s(v))
-    return _ema(raw, n)
+    # Recursive: delete incomplete rows BEFORE differencing, so the change is taken
+    # against the last complete close.
+    return _row_deleted(lambda cc, vv: _ema(_s(cc).diff() * _s(vv), n), c, v)
 
 
 def tsi(o, h, lo, c, v, long=25, short=13):
