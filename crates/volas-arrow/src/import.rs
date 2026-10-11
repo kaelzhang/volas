@@ -202,6 +202,11 @@ fn copy_strings(
     bytes: &[u8],
     validity: Validity,
 ) -> Result<Column, ArrowError> {
+    if offsets.len() <= 1 {
+        // zero cells: nothing to read (a zero-length slice's one offset may point
+        // anywhere in its parent)
+        return Ok(Column::Str(StrBuffer::from_vec(Vec::new()), validity));
+    }
     let (first, last) = live_span(offsets[0], offsets[offsets.len() - 1], bytes.len())?;
     let base = first as i64;
     offsets.iter_mut().for_each(|o| *o = o.wrapping_sub(base));

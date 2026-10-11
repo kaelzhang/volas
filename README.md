@@ -639,7 +639,8 @@ match — the numeric / string / datetime column buffers are shared with Arrow, 
 `bool` and the null bitmap are repacked. Requires `pyarrow` (imported lazily, only
 here). It is a convenience over volas's Arrow **C-Stream** bridge: any Arrow consumer
 can read the frame directly through the standard `__arrow_c_stream__` PyCapsule
-protocol, with no `to_arrow()` call and without volas depending on pyarrow.
+protocol, with no `to_arrow()` call and without volas depending on pyarrow. A column
+name containing a NUL byte cannot cross the Arrow C interface and raises `ValueError`.
 
 ```py
 import pyarrow as pa

@@ -407,6 +407,15 @@ mod tests {
     }
 
     #[test]
+    fn c_stream_export_rejects_names_it_cannot_carry() {
+        let cols = vec![Column::f64(vec![1.0])];
+        let err = columns_to_c_stream(&["a\0b".to_string()], &cols).err().unwrap();
+        assert!(err.to_string().contains("NUL"), "{err}");
+        let err = columns_to_c_stream(&[], &cols).err().unwrap();
+        assert!(err.to_string().contains("0 names for 1 columns"), "{err}");
+    }
+
+    #[test]
     fn c_data_schema_matches_the_column_dtype() {
         let col = Column::i64_with(vec![1, 2], Validity::dense());
         let schema = column_to_c_schema(&col).unwrap();

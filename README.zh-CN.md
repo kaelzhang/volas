@@ -503,7 +503,7 @@ DataFrame({'a': [1, None]}).to_numpy(dtype='int64', na_value=0)   # -> [[1], [0]
 **volas 独有**——把 DataFrame 导出为 `pyarrow.Table`，在 dtype 匹配处**零拷贝**：数值 / 字符串 / datetime 列缓冲区与 Arrow 共享，`bool` 与空值位图按需重打包。需要
 `pyarrow`（仅在此处惰性 import）。它是 volas Arrow **C-Stream** 桥接的便捷写法：任何
 Arrow 消费方都能经标准 `__arrow_c_stream__` PyCapsule 协议直接读取本 frame，无需调用
-`to_arrow()`，也无需让 volas 依赖 pyarrow。
+`to_arrow()`，也无需让 volas 依赖 pyarrow。含 NUL 字节的列名无法跨越 Arrow C 接口，会抛出 `ValueError`。
 
 ```py
 import pyarrow as pa

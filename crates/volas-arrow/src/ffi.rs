@@ -46,6 +46,11 @@ pub unsafe fn column_from_c_data(
 /// offsets are still checked here (in range, monotonic), so nothing — concatenation
 /// included — slices by a malformed offset.
 pub(crate) fn validate_imported(data: &ArrayData) -> Result<(), ArrowError> {
+    if data.is_empty() && matches!(data.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+        // Valid Arrow, and never read: a zero-length slice keeps its parent's offset,
+        // which arrow-rs's C-Data import pairs with an empty value buffer.
+        return Ok(());
+    }
     data.validate()?;
     data.validate_nulls()?;
     match data.data_type() {

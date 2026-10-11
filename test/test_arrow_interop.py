@@ -463,6 +463,72 @@ def test_an_already_consumed_stream_capsule_raises():
         volas.DataFrame.from_arrow(Stream())
 
 
+@pytest.mark.parametrize("t", [pa.string(), pa.large_string()], ids=["utf8", "large_utf8"])
+def test_a_zero_length_string_slice_imports_empty(t):
+    # valid Arrow: a zero-length slice keeps its parent's offset position
+    arr = pa.array(["aa", "bbb"], t).slice(1, 0)
+    assert volas.Series.from_arrow(arr).to_list() == []
+    assert volas.DataFrame.from_arrow(pa.table({"a": arr})).shape == (0, 1)
+    table = pa.Table.from_batches([
+        pa.record_batch({"a": arr}), pa.record_batch({"a": pa.array(["c"], t)})])
+    assert volas.DataFrame.from_arrow(table)["a"].to_list() == ["c"]
+
+
+def test_a_column_name_with_nul_raises_at_export():
+    df = volas.DataFrame({"a\x00b": [1]})
+    with pytest.raises(ValueError, match="NUL"):
+        df.to_arrow()
+    with pytest.raises(ValueError, match="NUL"):
+        df.__arrow_c_stream__()
+
+
+def test_a_failing_stream_without_an_error_message_raises():
+    import ctypes as C
+
+    class S(C.Structure):
+        pass
+
+    GS = C.CFUNCTYPE(C.c_int, C.POINTER(S), C.c_void_p)
+    GE = C.CFUNCTYPE(C.c_void_p, C.POINTER(S))
+    RL = C.CFUNCTYPE(None, C.POINTER(S))
+    S._fields_ = [("get_schema", GS), ("get_next", GS), ("get_last_error", GE),
+                  ("release", RL), ("private_data", C.c_void_p)]
+    batch = pa.record_batch({"x": pa.array([1, 2], pa.int64())})
+    calls = []
+
+    @GS
+    def get_schema(s, out):
+        batch.schema._export_to_c(out)
+        return 0
+
+    @GS
+    def get_next(s, out):
+        calls.append(1)
+        if len(calls) == 1:
+            batch._export_to_c(out)
+            return 0
+        return 5  # EIO, with no error message
+
+    @GE
+    def get_last_error(s):
+        return None
+
+    @RL
+    def release(s):
+        s.contents.release = RL()
+
+    stream = S(get_schema, get_next, get_last_error, release, None)
+    new = C.pythonapi.PyCapsule_New
+    new.restype, new.argtypes = C.py_object, [C.c_void_p, C.c_char_p, C.c_void_p]
+
+    class Producer:
+        def __arrow_c_stream__(self, requested_schema=None):
+            return new(C.addressof(stream), b"arrow_array_stream", None)
+
+    with pytest.raises(ValueError, match="code 5"):
+        volas.DataFrame.from_arrow(Producer())
+
+
 @pytest.mark.parametrize("target", ["offsets", "data"])
 def test_imported_strings_do_not_see_later_producer_writes(target):
     # A string column is copied at import: the producer rewriting its buffers

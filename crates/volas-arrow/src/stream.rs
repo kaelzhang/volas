@@ -21,6 +21,21 @@ pub fn columns_to_c_stream(
     names: &[String],
     cols: &[Column],
 ) -> Result<FFI_ArrowArrayStream, ArrowError> {
+    // Checked here, never inside the stream's `extern "C"` callbacks (a panic there
+    // aborts the process): one name per column, none holding a NUL byte (the C
+    // interface carries names as NUL-terminated strings).
+    if names.len() != cols.len() {
+        return Err(ArrowError::InvalidArgumentError(format!(
+            "{} names for {} columns",
+            names.len(),
+            cols.len()
+        )));
+    }
+    if let Some(bad) = names.iter().find(|n| n.contains('\0')) {
+        return Err(ArrowError::InvalidArgumentError(format!(
+            "column name {bad:?} contains a NUL byte, which the Arrow C interface cannot carry"
+        )));
+    }
     let arrays: Vec<ArrayRef> = cols.iter().map(column_to_arrow).collect();
     let fields: Vec<Field> = names
         .iter()
@@ -71,6 +86,12 @@ pub unsafe fn columns_from_c_stream(
             break; // end of stream
         }
         let data = from_ffi_and_data_type(array, row_type.clone())?;
+        if data.is_empty() {
+            // A zero-row batch contributes nothing and is never read (a zero-length
+            // string slice may carry its parent's offset, which arrow-rs's import
+            // pairs with an empty value buffer).
+            continue;
+        }
         validate_imported(&data)?;
         batches.push(RecordBatch::from(StructArray::from(data)));
     }
