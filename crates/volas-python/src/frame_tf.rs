@@ -190,8 +190,12 @@ impl PyDataFrame {
                 // Roll over: the previous forming bar (if any) is already final in
                 // `inner`. Advance each cached recursive column's anchor over that
                 // now-closed bar BEFORE opening the next period, so the new forming
-                // row resumes from the correct closed-bar state.
-                finalize_forming_computed(inner)?;
+                // row resumes from the correct closed-bar state. With no forming bar
+                // (a frame built from closed bars) the last row is closed and its
+                // state already covers it — advancing again would count it twice.
+                if tfs.open.is_some() {
+                    finalize_forming_computed(inner)?;
+                }
                 let bar = fine.slice(i, i + 1);
                 let agg = aggregate_period(&bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                 tfs.open = Some(bar);

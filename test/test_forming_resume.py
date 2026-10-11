@@ -153,3 +153,24 @@ def test_cached_while_forming_then_folded_bit_exact(directive):
         ref = volas.DataFrame(ohlcv, index=np.asarray(live.index))
         _bit_exact(np.asarray(live[directive]), np.asarray(ref[directive]), f"{directive} i={i}")
 
+
+
+# A tf frame built straight from closed bars has no forming row: its last row is
+# closed and a column cached on it carries state THROUGH that row. The first rollover
+# must not re-finalize that row as if it were a forming bar.
+@pytest.mark.parametrize("directive", _CACHED_ON_FORMING)
+def test_cached_on_constructed_tf_frame_then_rolled_over_bit_exact(directive):
+    n_closed, n_fine = 40, 24
+    x = np.arange(n_closed + n_fine, dtype=float)
+    close = 100.0 + 0.2 * x + 3.0 * np.sin(1.1 * x)
+    cols = dict(open=close - 0.3, high=close + 1.0, low=close - 1.0, close=close, volume=1000.0 + x)
+    minutes = np.r_[np.arange(n_closed) * 5, 200 + np.arange(n_fine)]
+    ts = (np.datetime64("2026-01-01") + minutes.astype("timedelta64[m]")).astype("datetime64[ns]")
+    live = volas.DataFrame({k: v[:n_closed] for k, v in cols.items()}, index=ts[:n_closed], time_frame="5m")
+    live[directive]  # cached while every row is closed
+    for i in range(n_closed, n_closed + n_fine):
+        live.append(volas.DataFrame({k: v[i : i + 1] for k, v in cols.items()}, index=ts[i : i + 1]))
+        live.fulfill()
+        ohlcv = {c: np.asarray(live[c]) for c in ("open", "high", "low", "close", "volume")}
+        ref = volas.DataFrame(ohlcv, index=np.asarray(live.index))
+        _bit_exact(np.asarray(live[directive]), np.asarray(ref[directive]), f"{directive} i={i}")
