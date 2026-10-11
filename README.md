@@ -937,7 +937,10 @@ int column) becomes `NaT`, like `pd.to_datetime`.
   - `'ns'` — nanoseconds (the default)
 - **format?** `str | None = None` an explicit datetime format for **string** input
   (pandas `format=`, e.g. `'%Y-%m-%d %H:%M:%S'`) — faster and unambiguous; ignored for
-  numeric input. Any `strftime`/`strptime` directive string; `None` auto-infers.
+  numeric input. Any `strftime`/`strptime` directive string; `None` auto-infers. Every
+  parsed field is honored: an offset (`%z` / `%:z`) makes the value an absolute instant,
+  exactly like an offset-aware string without `format`; time fields the format omits
+  are zero. `%Z` (a zone *name*) raises `ValueError` — use a numeric offset.
 
 Naive strings parse as UTC and offset-aware strings (`…+08:00`) are absolute. To
 *display* the resulting index in a zone, make it the index and tag the zone with

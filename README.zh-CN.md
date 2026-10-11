@@ -758,7 +758,9 @@ df = read_csv('data.tsv', sep='\t', header=False,  # 无表头 -> '0'..'n-1'
   - `'ns'`——纳秒（默认）
 - **format?** `str | None = None` 用于**字符串**输入的显式 datetime 格式（pandas 的
   `format=`，例如 `'%Y-%m-%d %H:%M:%S'`）——更快且无歧义；对数值输入忽略。任何
-  `strftime`/`strptime` 指令字符串；`None` 时自动推断。
+  `strftime`/`strptime` 指令字符串；`None` 时自动推断。解析出的每个字段都会生效：偏移量
+  （`%z` / `%:z`）使值成为绝对时刻，与不带 `format` 的带偏移字符串完全一致；格式未给出的
+  时间字段取零。`%Z`（时区*名字*）抛出 `ValueError`——请改用数字偏移量。
 
 Naive 字符串按 UTC 解析，带偏移（`…+08:00`）的字符串表示绝对瞬时。若要把结果索引
 *显示*在某个时区，请先设为索引，再用 `tz_localize` / `tz_convert` 打上时区标记（参见
