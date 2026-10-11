@@ -6,7 +6,7 @@
 
 use crate::parser::{is_ident_char, is_ident_start};
 use crate::spec::{canon_sub, command_spec, normalize};
-use crate::types::{ArgTokens, Command, Node, UnaryOp};
+use crate::types::{number_token, ArgTokens, Command, Node, UnaryOp};
 
 /// Canonical string form of a directive tree. Generic over the argument payload so
 /// it canonicalizes both a bound [`Ast`](crate::types::Ast) (the frame-cache key)
@@ -15,7 +15,7 @@ use crate::types::{ArgTokens, Command, Node, UnaryOp};
 pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
     match node {
         Node::Name(s) => s.clone(),
-        Node::Scalar(v) => format_num(*v),
+        Node::Scalar(v) => number_token(*v),
         Node::Command(cmd) => stringify_command(cmd),
         Node::Unary { op, operand } => {
             let op_s = match op {
@@ -46,14 +46,6 @@ pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
             };
             format!("{l}{}{r}", op.token())
         }
-    }
-}
-
-fn format_num(v: f64) -> String {
-    if v.fract() == 0.0 {
-        format!("{}", v as i64)
-    } else {
-        format!("{v}")
     }
 }
 
@@ -216,6 +208,15 @@ mod tests {
             assert_eq!(canonical, format!("ma:5{op}ma:3"));
             assert_eq!(parse(&canonical).unwrap(), parse(&input).unwrap(), "{input}");
         }
+    }
+
+    /// A whole number past `i64`'s range renders as itself, not saturated.
+    #[test]
+    fn a_large_whole_number_keeps_its_value() {
+        assert_eq!(s("close > 100000000000000000000"), "close>100000000000000000000");
+        assert_eq!(s("boll.upper:20,100000000000000000000"), "boll.upper:,100000000000000000000");
+        assert_eq!(s("close > 2"), "close>2");
+        assert_eq!(s("close > 0.000001"), "close>0.000001");
     }
 
     #[test]

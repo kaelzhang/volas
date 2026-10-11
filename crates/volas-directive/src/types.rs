@@ -154,13 +154,7 @@ impl ArgValue {
         match self {
             ArgValue::Usize(v) => v.to_string(),
             ArgValue::I64(v) => v.to_string(),
-            ArgValue::F64(v) => {
-                if v.fract() == 0.0 {
-                    format!("{}", *v as i64)
-                } else {
-                    format!("{v}")
-                }
-            }
+            ArgValue::F64(v) => number_token(*v),
             ArgValue::Str(v) => v.clone(),
         }
     }
@@ -245,6 +239,13 @@ pub type Cst = Node<Vec<Option<String>>>;
 /// The bound AST: arguments parsed, defaulted, and type-checked once. Executed,
 /// measured (lookback), and rendered (stringify) without per-call re-parsing.
 pub type Ast = Node<Box<[ArgValue]>>;
+
+/// The canonical source token of a number: its shortest decimal form that reads back
+/// as the same `f64` — a whole number without a decimal point (`2`), whatever its
+/// magnitude (`100000000000000000000`, never a saturated integer cast).
+pub(crate) fn number_token(v: f64) -> String {
+    format!("{v}")
+}
 
 #[cfg(test)]
 mod tests {

@@ -56,7 +56,7 @@ impl Rng {
 }
 
 const COLUMNS: &[&str] = &["open", "high", "low", "close", "volume"];
-const SCALARS: &[&str] = &["3", "2.5", "0.25", "-1.5", "-4", "100", "0.000001"];
+const SCALARS: &[&str] = &["3", "2.5", "0.25", "-1.5", "-4", "100", "0.000001", "100000000000000000000"];
 const BINARY: &[&str] = &[
     "+", "-", "*", "/", "<", "<=", ">", ">=", "==", "!=", "&", "|", "^", "//", "\\\\", "><",
 ];
@@ -166,6 +166,7 @@ fn a_directive_without_defaults_reparses_to_the_same_tree() {
         "~(ma:3@(close+1)>ma:5@(open))",
         "-(ma:3@(-close))",
         "rsi:14>50&(macd:5,10@(high/low)<0)",
+        "boll.upper:30,100000000000000000000>close",
     ] {
         let node = parse(d).unwrap();
         let name = stringify(&*node);
