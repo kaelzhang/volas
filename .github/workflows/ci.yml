@@ -86,8 +86,9 @@ jobs:
           # `.[dev]` only -- the benchmark comparison libraries (polars / TA-Lib /
           # DuckDB, in the `benchmark` extra) are NOT needed to run the tests;
           # they are installed only by `make benchmark`.
+          # The oracles (pandas, TA-Lib) are exact `==` pins in the `dev` extra.
           pip install -e .[dev]
-          python -c "import sys, numpy as np; print(sys.version); print('numpy', np.__version__)"
+          python -c "import sys, numpy as np, pandas as pd, talib; print(sys.version); print('numpy', np.__version__); print('oracles: pandas', pd.__version__, 'TA-Lib', talib.__version__)"
 
       - name: Rust unit tests
         run: cargo test --workspace --exclude volas-python
