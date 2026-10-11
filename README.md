@@ -1709,6 +1709,11 @@ except DirectiveSyntaxError as e:
     ...                          # message carries the line / column of the error
 ```
 
+A directive may nest at most 128 levels (each parenthesised group, `@(...)` series
+group, unary operator and binary operator adds one) and hold at most 4096 nodes.
+Real directives stay far below both; anything beyond them raises
+`DirectiveSyntaxError` rather than exhausting the stack.
+
 ## Built-in Indicators
 
 The complete directive reference lives in [INDICATORS.md](INDICATORS.md). It

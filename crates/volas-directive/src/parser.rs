@@ -12,6 +12,21 @@ use super::types::{Ast, Command, Cst, Node, Op, UnaryOp};
 use volas_core::fxhash::FxHashMap;
 use volas_core::{Result, VolasError};
 
+/// The deepest a directive may nest. Every parenthesised group, `@(...)` series
+/// group, unary operator and binary operator adds a level to the parse tree, and the
+/// bound holds both for the tree's height and for the parser's own recursion. A
+/// realistic directive nests fewer than ten levels; the bound only stops input that
+/// would otherwise overflow the stack of the parser or of a later walk over the tree
+/// (bind, stringify, lookback, exec, drop), which recurse once per level. Measured in
+/// a release build, the costliest shape at this bound (nested `@(...)` series groups,
+/// executed) needs under 0.6 MiB of stack, so it fits a 2 MiB thread.
+pub const MAX_NESTING: usize = 128;
+
+/// The most nodes (names, numbers, commands, operators, series slots) one directive
+/// may hold. A realistic directive holds a few dozen; the bound caps the work and
+/// memory any walk over the tree can spend on a single directive.
+pub const MAX_NODES: usize = 4096;
+
 thread_local! {
     /// Per-thread directive memo. `parse` is a pure function of its input, so caching
     /// the bound [`Ast`] is bit-identical — and `df.exec` re-parses on every call, so a
@@ -48,7 +63,7 @@ pub fn parse_cst(input: &str) -> Result<Cst> {
     if p.eof() {
         return Err(p.err("empty directive"));
     }
-    let node = p.parse_expr()?;
+    let (node, _) = p.parse_expr()?;
     p.skip_ws();
     if !p.eof() {
         return Err(p.err("expected end of directive"));
@@ -56,13 +71,8 @@ pub fn parse_cst(input: &str) -> Result<Cst> {
     Ok(node)
 }
 
-fn bin(left: Cst, op: Op, right: Cst) -> Cst {
-    Node::Binary {
-        left: Box::new(left),
-        op,
-        right: Box::new(right),
-    }
-}
+/// A parsed sub-tree and its height (a leaf is 1).
+type Sub = (Cst, usize);
 
 fn is_cmp(op: Op) -> bool {
     matches!(
@@ -82,6 +92,10 @@ fn is_cmp(op: Op) -> bool {
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    /// Current recursion depth of the precedence productions.
+    depth: usize,
+    /// Nodes built so far.
+    nodes: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -89,6 +103,8 @@ impl<'a> Parser<'a> {
         Parser {
             s: s.as_bytes(),
             i: 0,
+            depth: 0,
+            nodes: 0,
         }
     }
 
@@ -127,13 +143,52 @@ impl<'a> Parser<'a> {
         VolasError::Parse(format!("{} (line {line}, column {column})", message.into()))
     }
 
-    // --- precedence levels ---
+    // --- budget (see [`MAX_NESTING`] / [`MAX_NODES`]) ---
 
-    fn parse_expr(&mut self) -> Result<Cst> {
-        self.parse_logical()
+    fn too_deep(&self) -> VolasError {
+        self.err(format!("directive nests deeper than {MAX_NESTING} levels"))
     }
 
-    fn parse_logical(&mut self) -> Result<Cst> {
+    /// Run a recursive production one level deeper, refusing before the recursion
+    /// when the directive already nests [`MAX_NESTING`] levels.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth >= MAX_NESTING {
+            return Err(self.too_deep());
+        }
+        self.depth += 1;
+        let out = f(self);
+        self.depth -= 1;
+        out
+    }
+
+    /// Account one built node whose children are `height - 1` deep.
+    fn node(&mut self, node: Cst, height: usize) -> Result<Sub> {
+        if height > MAX_NESTING {
+            return Err(self.too_deep());
+        }
+        self.nodes += 1;
+        if self.nodes > MAX_NODES {
+            return Err(self.err(format!("directive holds more than {MAX_NODES} nodes")));
+        }
+        Ok((node, height))
+    }
+
+    fn bin(&mut self, (left, lh): Sub, op: Op, (right, rh): Sub) -> Result<Sub> {
+        let node = Node::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        self.node(node, 1 + lh.max(rh))
+    }
+
+    // --- precedence levels ---
+
+    fn parse_expr(&mut self) -> Result<Sub> {
+        self.nested(Self::parse_logical)
+    }
+
+    fn parse_logical(&mut self) -> Result<Sub> {
         let mut left = self.parse_cmp()?;
         loop {
             self.skip_ws();
@@ -141,7 +196,8 @@ impl<'a> Parser<'a> {
                 Some((op @ (Op::And | Op::Or | Op::Xor), len)) => {
                     self.i += len;
                     self.skip_ws();
-                    left = bin(left, op, self.parse_cmp()?);
+                    let right = self.parse_cmp()?;
+                    left = self.bin(left, op, right)?;
                 }
                 _ => break,
             }
@@ -149,7 +205,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_cmp(&mut self) -> Result<Cst> {
+    fn parse_cmp(&mut self) -> Result<Sub> {
         let mut left = self.parse_add()?;
         loop {
             self.skip_ws();
@@ -157,7 +213,8 @@ impl<'a> Parser<'a> {
                 Some((op, len)) if is_cmp(op) => {
                     self.i += len;
                     self.skip_ws();
-                    left = bin(left, op, self.parse_add()?);
+                    let right = self.parse_add()?;
+                    left = self.bin(left, op, right)?;
                 }
                 _ => break,
             }
@@ -165,7 +222,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_add(&mut self) -> Result<Cst> {
+    fn parse_add(&mut self) -> Result<Sub> {
         let mut left = self.parse_mul()?;
         loop {
             self.skip_ws();
@@ -173,7 +230,8 @@ impl<'a> Parser<'a> {
                 Some((op @ (Op::Add | Op::Sub), len)) => {
                     self.i += len;
                     self.skip_ws();
-                    left = bin(left, op, self.parse_mul()?);
+                    let right = self.parse_mul()?;
+                    left = self.bin(left, op, right)?;
                 }
                 _ => break,
             }
@@ -181,7 +239,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_mul(&mut self) -> Result<Cst> {
+    fn parse_mul(&mut self) -> Result<Sub> {
         let mut left = self.parse_unary()?;
         loop {
             self.skip_ws();
@@ -189,7 +247,8 @@ impl<'a> Parser<'a> {
                 Some((op @ (Op::Mul | Op::Div), len)) => {
                     self.i += len;
                     self.skip_ws();
-                    left = bin(left, op, self.parse_unary()?);
+                    let right = self.parse_unary()?;
+                    left = self.bin(left, op, right)?;
                 }
                 _ => break,
             }
@@ -197,30 +256,23 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    fn parse_unary(&mut self) -> Result<Cst> {
+    fn parse_unary(&mut self) -> Result<Sub> {
         self.skip_ws();
-        match self.peek() {
-            Some(b'~') => {
-                self.bump();
-                let operand = self.parse_unary()?;
-                Ok(Node::Unary {
-                    op: UnaryOp::Not,
-                    operand: Box::new(operand),
-                })
-            }
-            Some(b'-') if !is_number_start(b'-', self.peek2()) => {
-                self.bump();
-                let operand = self.parse_unary()?;
-                Ok(Node::Unary {
-                    op: UnaryOp::Neg,
-                    operand: Box::new(operand),
-                })
-            }
-            _ => self.parse_primary(),
-        }
+        let op = match self.peek() {
+            Some(b'~') => UnaryOp::Not,
+            Some(b'-') if !is_number_start(b'-', self.peek2()) => UnaryOp::Neg,
+            _ => return self.parse_primary(),
+        };
+        self.bump();
+        let (operand, height) = self.nested(Self::parse_unary)?;
+        let node = Node::Unary {
+            op,
+            operand: Box::new(operand),
+        };
+        self.node(node, height + 1)
     }
 
-    fn parse_primary(&mut self) -> Result<Cst> {
+    fn parse_primary(&mut self) -> Result<Sub> {
         self.skip_ws();
         match self.peek() {
             Some(b'(') => {
@@ -274,7 +326,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_number(&mut self) -> Result<Cst> {
+    fn parse_number(&mut self) -> Result<Sub> {
         let start = self.i;
         if self.peek() == Some(b'-') {
             self.bump();
@@ -284,7 +336,7 @@ impl<'a> Parser<'a> {
         }
         let text = String::from_utf8_lossy(&self.s[start..self.i]).into_owned();
         match text.parse::<f64>() {
-            Ok(v) => Ok(Node::Scalar(v)),
+            Ok(v) => self.node(Node::Scalar(v), 1),
             Err(_) => Err(self.err(format!("invalid number '{text}'"))),
         }
     }
@@ -297,7 +349,7 @@ impl<'a> Parser<'a> {
         String::from_utf8_lossy(&self.s[start..self.i]).into_owned()
     }
 
-    fn parse_command(&mut self) -> Result<Cst> {
+    fn parse_command(&mut self) -> Result<Sub> {
         let name = self.read_ident();
         let mut sub = None;
         self.skip_ws();
@@ -320,26 +372,28 @@ impl<'a> Parser<'a> {
         }
         self.skip_ws();
         let mut series = Vec::new();
+        let mut height = 0;
         let mut has_series = false;
         if self.peek() == Some(b'@') {
             self.bump();
             has_series = true;
-            series = self.read_series()?;
+            (series, height) = self.read_series()?;
         }
         if sub.is_none() && !has_args && !has_series {
             // A bare identifier may be a column (case-sensitive) or a no-arg command;
             // leave its case to the executor, which resolves columns first.
-            Ok(Node::Name(name))
+            self.node(Node::Name(name), 1)
         } else {
             // A sub-command / args / series makes this unambiguously a command, so the
             // command name is case-insensitive (P6): lower-case it into the AST, which
             // also flows through to stringify.
-            Ok(Node::Command(Command {
+            let command = Node::Command(Command {
                 name: name.to_ascii_lowercase(),
                 sub,
                 args,
                 series,
-            }))
+            });
+            self.node(command, height + 1)
         }
     }
 
@@ -384,21 +438,25 @@ impl<'a> Parser<'a> {
         args
     }
 
-    fn read_series(&mut self) -> Result<Vec<Cst>> {
+    /// The `@` series operands and the height of the tallest one.
+    fn read_series(&mut self) -> Result<(Vec<Cst>, usize)> {
         let mut series = Vec::new();
+        let mut height = 0;
         loop {
             self.skip_ws();
-            let node = if self.peek() == Some(b'(') {
+            let (node, h) = if self.peek() == Some(b'(') {
                 self.bump();
                 let e = self.parse_expr()?;
                 self.skip_ws();
                 self.expect(b')')?;
                 e
             } else if matches!(self.peek(), Some(c) if is_ident_start(c)) {
-                Node::Name(self.read_ident())
+                let name = self.read_ident();
+                self.node(Node::Name(name), 1)?
             } else {
-                Node::Name(String::new())
+                self.node(Node::Name(String::new()), 1)?
             };
+            height = height.max(h);
             series.push(node);
             self.skip_ws();
             if self.peek() == Some(b',') {
@@ -407,7 +465,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(series)
+        Ok((series, height))
     }
 }
 
@@ -520,6 +578,23 @@ mod tests {
     fn malformed_number_is_a_syntax_error() {
         // parse_number scans digits/'.' greedily, so "1.2.3" fails f64 parsing
         assert!(parse_cst("1.2.3").is_err());
+    }
+
+    /// A ~40 KB hostile directive must be a syntax error, never a stack overflow in
+    /// the parser or in a downstream walk (bind / stringify / exec / lookback / drop).
+    #[test]
+    fn nesting_past_the_budget_is_a_syntax_error() {
+        let paren = format!("{}close{}", "(".repeat(20_000), ")".repeat(20_000));
+        let not = format!("{}close", "~".repeat(30_000));
+        let neg = format!("{}close", "-".repeat(30_000));
+        let chain = vec!["close"; 30_000].join("+");
+        let series = format!("{}close{}", "ema:2@(".repeat(5_000), ")".repeat(5_000));
+        for d in [paren, not, neg, chain, series] {
+            match parse_cst(&d) {
+                Err(VolasError::Parse(m)) => assert!(m.contains("nests deeper than"), "{m}"),
+                other => panic!("{:?}", other.map(|_| ())), // LCOV_EXCL_LINE
+            }
+        }
     }
 
     #[test]

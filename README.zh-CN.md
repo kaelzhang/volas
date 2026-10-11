@@ -1425,6 +1425,8 @@ except DirectiveSyntaxError as e:
     ...                          # 消息里带有错误的行 / 列
 ```
 
+一个 directive 最多嵌套 128 层（每个括号组、`@(...)` series 组、一元运算符和二元运算符各算一层），最多包含 4096 个节点。真实的 directive 远低于这两个上限；超出时抛出 `DirectiveSyntaxError`，而不会耗尽栈。
+
 ## 内置指标
 
 完整 directive 参考见 [INDICATORS.md](INDICATORS.md)，其中覆盖 Volas 独有指标、内置统计命令，以及与 TA-Lib 兼容的 directive。
