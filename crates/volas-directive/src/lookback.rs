@@ -300,14 +300,16 @@ pub fn recomputes_on_a_window(node: &Ast) -> bool {
     }
 }
 
-/// The command a directive's resumable state belongs to: a top-level command, or a
-/// bare name binding to one (a composite carries no state).
-fn top_command(node: &Ast) -> Option<(String, Option<String>)> {
+/// The command a directive's resumable state belongs to — its name, sub-command and
+/// whether it is recursive: a top-level command, or a bare name binding to one (a
+/// composite carries no state).
+fn top_command(node: &Ast) -> Option<(String, Option<String>, bool)> {
+    let fact = |c: &crate::types::Command<Box<[ArgValue]>>| {
+        (c.name.clone(), c.sub.clone(), crate::spec::is_recursive(&c.name, &c.args))
+    };
     match node {
-        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[])
-            .ok()
-            .map(|c| (c.name, c.sub)),
-        Node::Command(c) => Some((c.name.clone(), c.sub.clone())),
+        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[]).ok().map(|c| fact(&c)),
+        Node::Command(c) => Some(fact(c)),
         _ => None,
     }
 }
@@ -319,23 +321,27 @@ fn top_command(node: &Ast) -> Option<(String, Option<String>)> {
 /// resume it.
 pub fn resume_reach(node: &Ast) -> usize {
     match top_command(node) {
-        Some((n, s)) if crate::spec::reads_past_lookback(&n, s.as_deref()) => lookback(node) + 1,
+        Some((n, s, _)) if crate::spec::reads_past_lookback(&n, s.as_deref()) => lookback(node) + 1,
         _ => 0,
     }
 }
 
 /// The rows a cached directive column needs to be continued exactly at all — what a
-/// contiguous slice must keep for the column to stay cached: its lookback, or
-/// [`resume_reach`] when that is more, except
-/// that a sliding sum recomputes its window exactly from `lookback` rows (its running
-/// sums re-anchor at absolute positions) when the state cannot resume.
+/// contiguous slice must keep for the column to stay cached: its lookback, from which a
+/// sliding sum or an extremum-position window recomputes exactly over the slice's own
+/// rows when its state cannot resume; any other command reading past its lookback (a
+/// recursion — SAR, KAMA — or PSY's first partial window) continues exactly only with
+/// its [`resume_reach`] rows.
 pub fn continuation_reach(node: &Ast) -> usize {
     match top_command(node) {
-        Some((n, s)) if crate::spec::accumulates(&n, s.as_deref()) => lookback(node),
-        _ => resume_reach(node).max(lookback(node)),
+        Some((n, s, _))
+            if !crate::spec::accumulates(&n, s.as_deref()) && !crate::spec::emits_position(&n) =>
+        {
+            resume_reach(node).max(lookback(node))
+        }
+        _ => lookback(node),
     }
 }
-
 /// Like [`lookback`], but requires the directive to name an **indicator**. A
 /// top-level bare name that binds to no command — a raw column reference, or a
 /// typo'd directive such as `ma5` for `ma:5` — is rejected (the same

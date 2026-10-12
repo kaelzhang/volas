@@ -286,3 +286,27 @@ fn label_eq_value_semantics() {
     assert!(!Index::range(2).label_eq(&Index::datetime(vec![0, 1], Tz::Utc)));
     assert!(!Index::str(vec!["a".into()]).label_eq(&Index::int64(vec![0])));
 }
+
+#[test]
+fn a_sliced_range_keeps_its_start_and_its_labels() {
+    // a slice of positions stays positional, from its start (pandas RangeIndex)
+    let tail = Index::range(10).slice(7, 10);
+    assert!(matches!(tail.kind(), IndexKind::Range { start: 7, len: 3 }));
+    assert_eq!(tail.label_at(0), Label::I64(7));
+    assert_eq!(tail.position_of(&Label::I64(9)), Some(2));
+    assert_eq!(tail.position_of(&Label::I64(6)), None);
+    assert_eq!(tail.to_i64_labels(), vec![7, 8, 9]);
+    // as a frame it continues with fresh (unlabelled) rows
+    let mut grown = tail.clone();
+    grown.extend(&Index::range(2)).unwrap();
+    assert!(matches!(grown.kind(), IndexKind::Range { start: 7, len: 5 }));
+    // as rows it carries its labels: explicit integer labels, never a continuation
+    assert!(!tail.is_unlabelled() && Index::range(2).is_unlabelled());
+    let mut ints = Index::range(3);
+    ints.extend(&tail).unwrap();
+    assert_eq!(ints, Index::int64(vec![0, 1, 2, 7, 8, 9]));
+    let err = Index::datetime(vec![1], Tz::Utc).check_append(&tail).unwrap_err();
+    assert!(err.to_string().contains("integer index"), "{err}");
+    // a label slice reads the labels, not the positions
+    assert_eq!(tail.label_slice(Some(&SliceBound::exact(Label::I64(8))), None).unwrap(), (1, 3));
+}

@@ -200,7 +200,7 @@ impl DataFrame {
     /// (see [`append`](Self::append)), or reject the row set. Writes nothing.
     fn route(&self, rows: &DataFrame, retained: Retained) -> Result<Route> {
         let held = |label: &Label| self.index.position_in(label, retained.from..self.height);
-        if matches!(rows.index.kind(), IndexKind::Range { .. }) || rows.height == 0 {
+        if rows.index.is_unlabelled() || rows.height == 0 {
             return Ok(Route::Append); // unlabelled rows: `check_append` vetted their labels
         }
         let datetime = matches!(rows.index.kind(), IndexKind::Datetime(..));

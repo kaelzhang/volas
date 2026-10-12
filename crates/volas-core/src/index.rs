@@ -453,6 +453,9 @@ impl Index {
     /// string one stays unique) is the frame's append rule, decided per row there.
     pub fn check_append(&self, other: &Index) -> Result<()> {
         use IndexKind::*;
+        if !other.is_unlabelled() && matches!(other.kind, Range { .. }) {
+            return self.check_append(&other.labelled());
+        }
         if let Datetime(b, _) = &other.kind {
             if b.contains(&i64::MIN) {
                 return Err(VolasError::Value(
@@ -484,6 +487,18 @@ impl Index {
         }
     }
 
+    /// Whether these are rows without labels of their own: a `RangeIndex` from 0 (a
+    /// fresh frame's positions), which an append continues from the frame's last label.
+    /// A `RangeIndex` starting later (a slice) carries its labels.
+    pub fn is_unlabelled(&self) -> bool {
+        matches!(self.kind, IndexKind::Range { start: 0, .. })
+    }
+
+    /// These labels as explicit integer labels (a sliced `RangeIndex` appended).
+    fn labelled(&self) -> Index {
+        Index::new(self.name.clone(), IndexKind::Int64(self.to_i64_labels()))
+    }
+
     /// How the index kind reads in a message.
     fn kind_text(&self) -> &'static str {
         match &self.kind {
@@ -502,6 +517,9 @@ impl Index {
     /// the index is unchanged.
     pub fn extend(&mut self, other: &Index) -> Result<()> {
         use IndexKind::*;
+        if !other.is_unlabelled() && matches!(other.kind, Range { .. }) {
+            return self.extend(&other.labelled());
+        }
         self.check_append(other)?;
         let order = self.order;
         match (&mut self.kind, &other.kind) {
