@@ -67,10 +67,12 @@ impl Wilder {
         Wilder { period: period as f64, prior: period as f64 - 1.0 }
     }
 
-    /// One step `((prev·(period − 1)) + x) / period`.
+    /// One step `((prev·(period − 1)) + x) / period`. At period 1 the average is
+    /// the input itself, before any arithmetic with `prev` (TA-Lib ATR's no-smoothing
+    /// branch): `inf·0` must not turn later finite inputs into NaN.
     #[inline(always)]
     pub(crate) fn step(self, prev: f64, x: f64) -> f64 {
-        (prev * self.prior + x) / self.period
+        if self.period == 1.0 { x } else { (prev * self.prior + x) / self.period }
     }
 
     /// One step of RSI / CMO's average gain and loss over the change `d` (`ta_RSI.c`,

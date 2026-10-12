@@ -51,6 +51,31 @@ it:
   value, not a missing row. This diverges from TA-Lib, which carries a NaN into every
   later output of a recursive indicator.
 
+## True range and period-one smoothing
+
+True range follows [TA-Lib's comparison order](https://github.com/TA-Lib/ta-lib/blob/v0.6.4/src/ta_func/ta_TRANGE.c):
+start with `high − low`, compare `abs(previous_close − high)`, then compare
+`abs(previous_close − low)`, replacing the range only on a strictly greater value.
+In particular, `high == low == +inf` (or both `−inf`) produces NaN; a later comparison
+cannot replace it with an infinity. A NaN produced by a later gap does not replace
+the initial range, and ties keep its zero sign. A missing input still makes its
+whole term missing under the input rule above.
+
+ATR seeds from the first `period` true ranges after the first complete price bar.
+A NaN **computed** from infinite prices counts in this seed and propagates through
+the smoothing; it does not postpone the seed. At period 1 there is no smoothing:
+`atr:1` is the current true range and `smma:1` is the current input, including after
+an infinity or an arithmetic NaN. NATR uses this same ATR; its documented period-1
+normalization remains `TR/close·100`. The period-1 directional sums likewise use
+the current movement; a direction with no movement has DI zero without dividing by
+TR, including when that TR is NaN (volas keeps its documented ×100 DI scale).
+
+All true-range consumers share that definition: CHOP, Vortex and ULTOSC sum TR over
+their finite windows; `ttm_squeeze.on` uses its SMA; Keltner bands, `kcw` and
+Supertrend use ATR. Mass Index uses `high − low`, not true range. SAR and SAREXT
+limit their stops with TA-Lib's ordered comparisons too: an arithmetic NaN stop
+stays NaN rather than becoming an ordinary high or low again.
+
 ## Exact window sums
 
 An indicator built on a sliding sum

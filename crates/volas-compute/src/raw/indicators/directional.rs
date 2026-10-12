@@ -96,10 +96,12 @@ pub fn minus_dm(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 }
 
 /// `100·(dm_sm/tr_sm)` (TA-Lib's order) with its ~0-TR guard — one row's ±DI, the one owner of that
-/// rule for the full computation and the resumes.
+/// rule for the full computation and the resumes. At period 1, TA-Lib publishes zero
+/// without reading TR when there is no directional movement. Keep that branch before
+/// division too: an arithmetic NaN TR must not turn an absent movement into NaN.
 #[inline]
-pub(super) fn di_val(dm_sm: f64, tr_sm: f64) -> f64 {
-    if tr_sm.abs() < 1e-14 {
+pub(super) fn di_val(dm_sm: f64, tr_sm: f64, period: usize) -> f64 {
+    if (period == 1 && dm_sm == 0.0) || tr_sm.abs() < 1e-14 {
         0.0
     } else {
         100.0 * (dm_sm / tr_sm)
@@ -156,6 +158,10 @@ fn dm_tr_fold(
     if period == 0 || period >= n {
         return;
     }
+    // Establish the common traversal bounds once. Each row reads low[i] and
+    // close[i - 1]; repeating their length checks in this hot loop buys nothing.
+    let low = &low[..n];
+    let close = &close[..n - 1];
     let (mut p, mut m, mut t) = (0.0, 0.0, 0.0);
     for i in 1..period {
         let (dp, dm) = dm1(high, low, i);
@@ -177,14 +183,14 @@ fn dm_tr_fold(
 /// +DI (TA-Lib PLUS_DI). Lookback `period`.
 pub fn plus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; high.len()];
-    dm_tr_fold(high, low, close, period, |i, sp, _, st| out[i] = di_val(sp, st));
+    dm_tr_fold(high, low, close, period, |i, sp, _, st| out[i] = di_val(sp, st, period));
     out
 }
 
 /// -DI (TA-Lib MINUS_DI). Lookback `period`.
 pub fn minus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; high.len()];
-    dm_tr_fold(high, low, close, period, |i, _, sm, st| out[i] = di_val(sm, st));
+    dm_tr_fold(high, low, close, period, |i, _, sm, st| out[i] = di_val(sm, st, period));
     out
 }
 

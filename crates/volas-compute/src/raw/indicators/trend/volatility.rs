@@ -1,8 +1,6 @@
 //! True-range volatility: TR / ATR / NATR and the ATR state-carry resume.
 
 use crate::missing;
-use crate::raw::indicators::av;
-use crate::raw::kernels;
 use crate::raw::smoothing;
 
 /// True Range (TA-Lib TRANGE): [`tr_at`] at every row; row 0 has no prior close, so
@@ -19,13 +17,59 @@ pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 /// The true range of bar `i >= 1`: `max(high − low, |high − prev close|, |low − prev
 /// close|)`. The one owner of the TR term — TR, ATR / NATR, CHOP, Vortex, ULTOSC and
 /// the live resumes all read it here. It reads `high[i]`, `low[i]` and `close[i - 1]`,
-/// and is missing when one of them is (see [`crate::missing::term`]): `f64::max` would
-/// otherwise step over a missing value into an ordinary range.
+/// and is missing when one of them is (see [`crate::missing::term`]). Otherwise follow
+/// `ta_TRANGE.c`: start with high − low, then replace it only when either distance
+/// from the prior close is greater. Unlike `f64::max`, this preserves an arithmetic
+/// NaN from `inf − inf`, and the initial range's signed zero on a tie.
 #[inline]
 pub fn tr_at(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
     let (h, l, prev_close) = (high[i], low[i], close[i - 1]);
-    let range = (h - l).max((h - prev_close).abs()).max((l - prev_close).abs());
+    let mut range = h - l;
+    let high_gap = (prev_close - h).abs();
+    if high_gap > range {
+        range = high_gap;
+    }
+    let low_gap = (prev_close - l).abs();
+    if low_gap > range {
+        range = low_gap;
+    }
     missing::term(&[h, l, prev_close], range)
+}
+
+/// ATR's fixed seed and recurrence, shared by the full output and state capture.
+/// Input missing rows are removed by the public wrapper; a NaN *computed* by TR is
+/// part of the seed, not a missing price bar. Period 1 is TR itself (`ta_ATR.c`).
+fn atr_fold(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mut row: impl FnMut(usize, f64),
+) -> Option<f64> {
+    let n = high.len();
+    if period == 0 || period >= n {
+        return None;
+    }
+    if period == 1 {
+        let mut value = f64::NAN;
+        for i in 1..n {
+            value = tr_at(high, low, close, i);
+            row(i, value);
+        }
+        return Some(value);
+    }
+    let mut value = 0.0;
+    for i in 1..=period {
+        value += tr_at(high, low, close, i);
+    }
+    value /= period as f64;
+    row(period, value);
+    let average = smoothing::Wilder::new(period);
+    for i in period + 1..n {
+        value = average.step(value, tr_at(high, low, close, i));
+        row(i, value);
+    }
+    Some(value)
 }
 
 /// Average True Range — TA-Lib semantics: SMA-seeded Wilder smoothing of TR (the
@@ -34,8 +78,9 @@ pub fn tr_at(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
 /// the directive's dispatch arm it compiles to a slower loop.
 #[inline(never)]
 pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let tr = tr(high, low, close);
-    kernels::wilder(av(&tr), period).to_vec()
+    let mut out = vec![f64::NAN; high.len()];
+    atr_fold(high, low, close, period, |i, value| out[i] = value);
+    out
 }
 
 /// Normalized Average True Range — `ATR/close · 100` (TA-Lib NATR), expressing ATR
@@ -63,22 +108,20 @@ pub fn natr_value(atr: f64, close: f64) -> f64 {
 // ATR is the SMA-seeded Wilder *average* of True Range, and NATR rescales it by price.
 // The carried state is the running ATR `[atr_{from-1}]`. `tr` at bar `i` reads the prior
 // close, so a resume reads only `high/low/close[from-1..]`; the steady-state step is the
-// exact Wilder step of `kernels::wilder` ([`smoothing::Wilder`]). A resume at `from == 0` (no prior bar)
+// exact Wilder step of [`smoothing::Wilder`]. A resume at `from == 0` (no prior bar)
 // returns `None` and falls back. `*_final_state` returns `None` before ATR seeds (the
 // column is all-NaN), so the caller keeps the correct fallback.
 
 /// Final ATR state `[atr]` after a full [`atr`] compute, or `None` if ATR never seeds:
-/// the Wilder smoothing of the true ranges captured by [`kernels::sma_seeded_last`] —
-/// the full kernel's own seed rule (the first `period` present TRs; `tr[0]` and a true
-/// range of infinite prices are not present) and its own step.
+/// the full kernel's own fixed seed and recurrence ([`atr_fold`]). An arithmetic NaN
+/// is still a seeded state, and period 1 carries the last TR even when it is NaN.
 pub fn atr_final_state(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    let tr = tr(high, low, close);
-    Some(vec![kernels::sma_seeded_last(&tr, period, kernels::wilder_step(period))?])
+    Some(vec![atr_fold(high, low, close, period, |_, _| {})?])
 }
 
 /// Resume [`atr`] from `state = [atr_{from-1}]` over rows `[from, n)`. `None` at
