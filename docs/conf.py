@@ -10,7 +10,7 @@ source_suffix = {
     ".md": "markdown",
 }
 root_doc = "index"
-exclude_patterns = ["README.md", "_build", "animated_gif"]
+exclude_patterns = ["README.md", "_build", "animated_gif", "zh-CN"]
 
 html_theme = "sphinx_rtd_theme"
 html_title = "volas documentation"

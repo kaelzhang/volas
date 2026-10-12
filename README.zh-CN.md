@@ -85,8 +85,8 @@ polars。它是一个窄而快的 DataFrame，专门服务于这一类场景：
 - [快速上手](#快速上手)
 - [用法](#用法)
 - [有界滚动窗口](#有界滚动窗口)
-- [累积与 DatetimeIndex](#累积与-datetimeindex)
-- [TimeFrame](#timeframe)
+- [累积与 DatetimeIndex](docs/zh-CN/cumulation.md#累积与-datetimeindex)
+- [TimeFrame](docs/zh-CN/cumulation.md#timeframe)
 - [directive 的语法](#directive-的语法)
 - [索引与选择](#索引与选择)
 - [写入与赋值](#写入与赋值)
@@ -242,7 +242,7 @@ df['ma:2']
 
   缺失值从不被跳过：只要桶内任一值缺失，该列的聚合结果（`'first'` / `'last'` / `'max'` / `'min'` / `'sum'` 皆然）即为缺失（全缺失的桶也是缺失，从不得到 `±inf`），实时折叠与批量 `cumulate` 结果一致。`datetime` 列不支持 `'sum'`，`bool` / `str` 列只支持 `'first'` / `'last'`；不支持的组合在构造 frame 时即被拒绝。
 - **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
-- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：可见行之前保留的隐藏 margin 行数，以及该 frame 能精确计算的 directive（参见[有界窗口能计算什么](#有界窗口能计算什么)）。传一个**指标 directive 列表**即为**声明**它们：margin 取它们 lookback 的最大值（例如 `['atr:14', 'ma:50']` → margin 49），每个声明的 directive 在构造时基于全部给定行计算并缓存——递归类指标（EMA、Wilder 平滑、累积线等）只能以这种方式计算。传一个 **int** 则只给出 margin，不声明任何 directive。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）和空列表会被拒绝。
+- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：可见行之前保留的隐藏 margin 行数，以及该 frame 能精确计算的 directive（参见[有界窗口能计算什么](#有界窗口能计算什么)）。传一个**指标 directive 列表**即为**声明**它们：margin 取它们 lookback 的最大值（例如 `['atr:14', 'ma:50']` → margin 49），每个声明的 directive 在构造时基于全部给定行计算并缓存——滑动累加类或递归类指标（`ma`、EMA、Wilder 平滑、累积线等）只能以这种方式计算。传一个 **int** 则只给出 margin，不声明任何 directive。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）和空列表会被拒绝。
 
 ### 有界滚动窗口
 
@@ -263,23 +263,23 @@ for bar in feed:            # 可以永远运行；内存不增长
 
 #### `ready`——窗口是否已预热？
 
-`ready`（一个 property）在 frame 累积到 `window + max_lookback` 行后变为 `True`——此时每一个可见的 `window` 行背后都有完整的指标历史，缓存指标端到端有效。预热阶段它为 `False`、可见行仍在填充；请用它来 gate 你的推理 / 训练。
+`ready`（一个 property）只有在每个声明的 directive 在每个可见行上都已度过预热期时才为 `True`，预热按它读取的完整（非缺失）行计数：每个声明列的第一个值位于第一个可见行或之前。它在每次 append 时以 O(1) 维护；读取新鲜值仍是读取方的职责（先 `fulfill()`）。不声明任何 directive 的 frame（int 形式的 `max_lookback`）恒为 `True`。请用它来 gate 你的推理 / 训练。
 
 ```py
 wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
-wf.ready          # False——目前还不足 30 + 14 行
+wf.ready          # False——第一个可见行上还没有 atr:14 的值
 ...               # append 直到预热完成
-wf.ready          # True ——每个可见行都已有有效的指标历史
+wf.ready          # True ——每个可见行都已有 atr:14 的值
 ```
 
 **无界** frame（没传 `window=`）没有预热契约，**恒为 `True`**。
 
 #### 有界窗口能计算什么
 
-有界窗口只持有最近的行，因此只在能精确计算的地方计算指标：
+有界窗口只持有最近的行，因此只在能精确计算的地方计算指标。每个 directive 属于三种**历史类别**之一（由命令表统一定义）：**第 1 类**只依赖一个尾部窗口、没有滑动累加器（`roc`、`llv`、`maxindex`、`willr`、`psy`、`close > open` 等）；**第 2 类**依赖尾部窗口上的滑动累加器（`ma`、`wma`、`boll`、`stddev`、`cci`、`mfi`、`linearreg` 等）；**第 3 类**依赖之前的每一行——递归、累积线或无界计数（EMA、Wilder 平滑、`obv`、`increase` 等）。一个 directive 取其各组成部分中最高的类别。
 
 - **声明的 directive**（`max_lookback=[...]`）在构造时基于全部给定行——也就是完整历史——计算并缓存。递归类 directive 会保留其历史的**检查点（checkpoint）**：它在保留行之前某一行处的携带状态，以及续算时在首行之前需要读取的输入。检查点随每次丢弃头部而前移；每当该列需要重算（写入之后、状态无法跟随的重发行、一段缺失值），frame 都从检查点重放——绝不会在它持有的行上重新开始递归。没有携带状态能覆盖的递归——位于 `@` 操作数内部（`'ema:5@(rsi:5)'`）、与其它值组合（`'ema:3 - ema:5'`、`'close > ema:20'`），或本身就是整列重算的命令（`kcw`、`crsi`、`stoch_momentum`、均线类型参数 `ma:5,1`）——无法被保持，构造时即报错：请声明它所组合的递归 directive，再组合它们的列。
-- **构造之后才请求的 directive**（`wf[d]`、`wf[[...]]`、`wf.exec(d)`）只有在其值只依赖不超过 `max_lookback` 行的尾部窗口——任何位置都没有递归——时才会计算。滑动求和类（`ma`、`boll`、`cci`、`mfi` 等）满足这一条件：它们的和是精确的，因此每个值只取决于自己的窗口。其它请求一律报错，并给出两条正确的路径：
+- **构造之后才请求的 directive**（`wf[d]`、`wf[[...]]`、`wf.exec(d)`）只有在它属于第 1 类、且每行之前读取的行数不超过 `max_lookback` 时才会计算。第 2 类和第 3 类必须声明；构造之后再请求会报错，并给出两条正确的路径（对已经声明的 directive，`exec` 会提示读取它的列）：
 
 ```text
 ValueError: cannot compute 'ema:10' on this windowed frame: each of its values depends on every row before it, and the frame keeps only its last 50 rows. Declare it when constructing the frame — DataFrame(data, window=30, max_lookback=[..., 'ema:10']) — and read its column df['ema:10'], or compute it on an unbounded frame.
@@ -287,7 +287,9 @@ ValueError: cannot compute 'ema:10' on this windowed frame: each of its values d
 
 把一个 frame 复制进窗口（`DataFrame(df, window=..., max_lookback=...)`）时，它携带的缓存列只有在窗口能精确保持时才会保留（在 margin 之内，且不是没有携带状态能覆盖的递归）；否则构造报错。
 
-整列赋值（`wf['x'] = values`，标量、数组或与可见行对齐的 Series）只写入可见行：隐藏 margin 保留它持有的历史——即该列自己的值，精确转换为新值的 dtype（无法精确容纳的值会抛出 `TypeError`），新列则为缺失值。
+整列赋值（`wf['x'] = values`，标量、数组或与可见行对齐的 Series）只写入可见行：隐藏 margin 保留它持有的历史——即该列自己的值，精确转换为新值的 dtype（无法精确容纳的值，包括 `float32` 舍入，会抛出 `TypeError`），新列则为缺失值。
+
+由另一个 frame 的尾部构造的窗口（`DataFrame(df.iloc[-50:], window=..., ...)`）会从该尾部携带的状态继续其中的递归列：append 时精确。它不持有尾部之前的历史，因此一旦写入可见行，就无法重算该列，读取时报错。
 
 #### `fill_into(out, columns=None)`——零分配特征导出
 
@@ -316,13 +318,13 @@ buf = np.empty((30, len(COLS)), dtype=np.float32)
 for bar in feed:
     wf.append(bar)
     wf.fulfill()                      # 导出前刷新 atr 的脏尾部
-    if not wf.ready:
-        continue                      # 预热中：buf 还不是 (30, k)，指标也未生效
+    if not wf.ready or len(wf) < 30:
+        continue                      # 预热中：指标未生效 / buf 还不是 (30, k)
     wf.fill_into(buf, columns=COLS)   # 把 30×5 窗口零分配写进 buf
     prediction = model(buf)           # 每根 bar 都喂给模型同一块内存
 ```
 
-> **形状提示。**形状是按 `len(df)` 严格匹配的，而 `len(df)` 在**预热期会增长**（1、2、……直到 `window`），之后才稳定在 `window`。像上面那样用 `wf.ready` gate 即可绕开：当它为 `True` 时 `len(df) == window`，固定的 `(window, k)` buffer 必然适配。若要在预热期导出，就把 `out` 调成当前的 `len(df)`。
+> **形状提示。**形状是按 `len(df)` 严格匹配的，而 `len(df)` 在**预热期会增长**（1、2、……直到 `window`），之后才稳定在 `window`。`ready` 只说明指标，因此上面的循环同时等待 `len(wf) == window`，此后固定的 `(window, k)` buffer 必然适配。若要在预热期导出，就把 `out` 调成当前的 `len(df)`。
 
 `fill_into` 并不限于 windowed frame——在普通 frame 上它同样导出整个逻辑视图；只是有界窗口下「复用一块 buffer」最有价值。
 
@@ -408,7 +410,7 @@ df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume':
 
 把 `DataFrame` 累积（重采样）到更粗的 `time_frame`，返回一个新的 `DataFrame`。需要一个 `DatetimeIndex`。
 
-- **time_frame** `TimeFrame | str` 目标 bar 间隔，例如 `TimeFrame.m5` 或 `'5m'`。参见 [TimeFrame](#timeframe)。
+- **time_frame** `TimeFrame | str` 目标 bar 间隔，例如 `TimeFrame.m5` 或 `'5m'`。参见 [TimeFrame](docs/zh-CN/cumulation.md#timeframe)。
 - **cumulators?** `dict[str, str] | None = None` 逐列聚合器覆盖（例如
   `{'amount': 'sum'}`）。默认采用 OHLCV 语义（`open`=first、`high`=max、`low`=min、
   `close`=last、`volume`=sum；其他列默认 `last`）。字典的每个**值**为以下之一：
@@ -430,7 +432,7 @@ fifteen_minute.append(new_candle_1m)
 # 这样我们可以很方便地用 1 分钟数据，来生成 5 分钟和 15 分钟的测试数据集
 ```
 
-详见[累积与 DatetimeIndex](#累积与-datetimeindex)。
+详见[累积与 DatetimeIndex](docs/zh-CN/cumulation.md#累积与-datetimeindex)。
 
 ### df.fulfill() -> None
 
@@ -720,7 +722,7 @@ volas 无法得知你的各行数据是怎样产生的，因此依赖下面两�
 - **bar 以周期起点为标签**：`17:00`–`17:14:59` 的 `15m` bar 标为 `17:00`，绝不是周期终点。以终点时间标注的数据需要先自行平移。
 - **构造时的最后一行不能已经包含之后要 append 进来的更细 bar。** 在 `17:09:30` 取到的 `15m` 快照，再 append `17:05` 的 1m bar，这一分钟就会被计入两次。如果要用更细的 bar 继续一根尚未收口的 bar，请用 `cumulate` 从更细的历史数据构建 frame——这样它的未收口周期恰好保存着这些更细的 bar。
 
-详见[累积与 DatetimeIndex](#累积与-datetimeindex)。
+详见[累积与 DatetimeIndex](docs/zh-CN/cumulation.md#累积与-datetimeindex)。
 
 ### read_csv(path, sep=',', header=True, parse_dates=None, index_col=None, na_values=None, keep_default_na=True, tz=None, date_unit=None) -> DataFrame
 
@@ -899,7 +901,7 @@ s.ewm(com=|span=|halflife=|alpha=, min_periods=0, adjust=True, ignore_na=False)
 `center=True` 会把每个窗口标在中心位置，因此会读取相对于标签而言的**未来** bar。这正是标注流程（labeling pass）需要的，也正是实盘信号绝不能做的；volas 在这里只为前者提供支持。
 
 基于时间的窗口（`rolling('5min')` / `timedelta`）是刻意不支持的。多时间框计算请维护
-**两个带 tf 的 DataFrame**（见[累积](#累积与-datetimeindex)），并把每根 bar 都
+**两个带 tf 的 DataFrame**（见[累积](docs/zh-CN/cumulation.md#累积与-datetimeindex)），并把每根 bar 都
 `append` 到两者上；这才是受支持的逐 bar `O(lookback)` 设计。用窗口算术模拟更粗时间框，会在每根 bar 上重算全部内容。
 
 未提供的 pandas 成员（因为与 volas 模型冲突）：`apply` / `agg` / `pipe`
@@ -922,203 +924,6 @@ s.ewm(com=|span=|halflife=|alpha=, min_periods=0, adjust=True, ignore_na=False)
 pandas 风格的索引和写入细节分别见：
 [索引与选择](#索引与选择)和
 [写入与赋值](#写入与赋值)。
-
-## 累积与 DatetimeIndex
-
-假设有一个 csv 文件，里面是某只股票的 1 分钟 K 线数据：
-
-```py
-csv = read_csv(csv_path)
-
-print(csv)
-```
-
-```
-                   date   open   high    low  close    volume
-0   2020-01-01 00:00:00  329.4  331.6  327.6  328.8  14202519
-1   2020-01-01 00:01:00  330.0  332.0  328.0  331.0  13953191
-2   2020-01-01 00:02:00  332.8  332.8  328.4  331.0  10339120
-3   2020-01-01 00:03:00  332.0  334.2  330.2  331.0   9904468
-4   2020-01-01 00:04:00  329.6  330.2  324.9  324.9  13947162
-5   2020-01-01 00:04:00  329.6  330.2  324.8  324.8  13947163    <- an update of
-                                                                    2020-01-01 00:04:00
-...
-19  2020-01-01 00:19:00  327.0  327.2  322.0  323.0  15086985
-```
-
-> 注意：同一时间戳的重复记录不会重复累积。除最新一条外，其余都会被丢弃。
-
-读取同一个 csv，并把 `date` 列解析为 `DatetimeIndex`：
-
-```py
-df = read_csv(
-    csv_path,
-    parse_dates=['date'],
-    index_col='date'
-)
-
-print(df)
-```
-
-```
-                      open   high    low  close    volume
-2020-01-01 00:00:00  329.4  331.6  327.6  328.8  14202519
-2020-01-01 00:01:00  330.0  332.0  328.0  331.0  13953191
-...
-2020-01-01 00:19:00  327.0  327.2  322.0  323.0  15086985
-```
-
-此时，这个 data frame 已经带上了
-[`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)。
-
-但它还不是 5 分钟 K 线；需要显式累积：
-
-```py
-df_5m = df.cumulate('5m')
-
-print(df_5m)
-```
-
-现在得到的是 5 分钟 K 线：
-
-```
-                      open   high    low  close      volume
-2020-01-01 00:00:00  329.4  334.2  324.8  324.8  62346461.0
-2020-01-01 00:05:00  325.0  327.8  316.2  322.0  82176419.0
-2020-01-01 00:10:00  323.0  327.8  314.6  327.6  74409815.0
-2020-01-01 00:15:00  330.0  335.2  322.0  323.0  82452902.0
-```
-
-`cumulate` 默认采用 OHLCV 语义：`open`=first、`high`=max、`low`=min、
-`close`=last、`volume`=sum；**其他列默认回退为 `last`**。可以用 `cumulators=`
-覆盖某列的聚合器。最常见的场景是非 OHLCV 列本应求和，却会默认成 `last`，例如成交额（`amount`）列：
-
-```py
-df.cumulate('1h', cumulators={'amount': 'sum'})
-```
-
-支持的聚合器包括 `first`、`max`、`min`、`last` 和 `sum`。
-
-`time_frame` 可以是字符串标签，也可以是 `TimeFrame` 常量；完整列表见
-[TimeFrame](#timeframe)。
-
-#### bar 标签是周期起点
-
-每个时间框都落在一个**固定网格**上。被累积出来的 bar 会以所在周期的网格**起点**
-作为标签，即使第一根原始 bar 是在周期中途才到。一根 `15m` bar 如果第一笔 tick 在
-`09:07`，它的标签仍然是 `09:00`，绝不会是 `09:07`；因此 volas 的 bar 会与交易所 K 线以及 pandas `resample`（`label='left'`）完全对齐。
-
-各时间框的网格原点如下：日内时间框锚定在该索引所属（带时区的）交易日**午夜**——`15m` bar 起于 `:00`/`:15`/`:30`/`:45`，`4h` bar 起于 `00:00`/`04:00`/…；`1d` 起于午夜；`1w` 起于**周一**；`3d` 使用从 Unix 纪元开始的连续网格；`1M` / `1y` 起于日历月 / 年。
-
-跨越夏令时切换时，**日内**时间框在这张本地网格上按真实瞬时分桶：回拨（fall-back）重复出现的挂钟小时会成为两根 bar，标签是两个不同的瞬时（2026-11-01 的 `America/New_York` 中，`1h` 时间框有一根 `01:00-04:00` bar 和一根 `01:00-05:00` bar，与 pandas `resample('1h')` 完全一致）；被拨快（spring-forward）跳过的网格点，其 bar 从跳空结束的瞬时开始。没有重复任何网格点的回拨留在同一根 bar 内（那天 `00:00` 的 `2h` bar 跨越三个真实小时）。**日及更粗**的时间框保持本地民用日历：25 小时的回拨日是一根 `1d` bar，标签为当地午夜（午夜本身被跳过时，取当天第一个真实瞬时）。实时折叠与 `cumulate` 的分桶完全一致。
-
-传给 `DataFrame(data, time_frame=...)` 的各行遵循同一规则：volas 会把每行的标签当作周期起点（它无法校验这一点），因此以周期**终点**标注的数据必须先向前平移一个周期。
-
-在**实时**流式场景中，不应该每个 tick 都重新累积整段历史。更自然的做法是让当前
-5 分钟 bar 保持*正在形成*的状态，并随着更细 bar 到来而更新。**带 tf 的 DataFrame**
-正是为此设计：它仍然是普通 DataFrame（读列、跑 directive、切片都一样），只是
-`append` 会把更细 bar **折叠**进正在形成的 bar，而不是新增一行。用
-`df.cumulate('5m')` 或 `DataFrame(data, time_frame='5m')` 构造后，实时循环只剩下：
-
-| 步骤                           | 调用                      |
-| ------------------------------ | ------------------------- |
-| 创建一个 `5m` frame            | `cum = df.cumulate('5m')` |
-| 喂入下一根更细的 bar           | `cum.append(bar)`         |
-| 读取当前正在形成的 bar         | `cum.iloc[-1]`            |
-| 在该 frame 上读取指标          | `cum['macd']`             |
-
-#### 看着正在形成的 bar 长大
-
-从上面的 1 分钟 `df` 出发，一根一根构建 5 分钟 frame。先用 `00:00` bar 播种（`DataFrame(df.iloc[0:1], time_frame='5m')` 也以同样方式播种：它的最后一行就是正在形成的 bar），再折叠进 `00:01`。两者都落在同一个 `00:00`–`00:05` 窗口内，所以 frame 仍然只有**一**
-行，也就是那根正在形成的 bar；它已经被更新（`high` 涨到 `332.0`，`close` 到
-`331.0`，`volume` 已求和）：
-
-```py
-cum = df.iloc[0:1].cumulate('5m')   # 用 00:00 bar 播种 5m frame
-cum.append(df.iloc[1:2])            # 折叠进 00:01（同一个 5m 窗口）
-
-print(cum)
-```
-
-```
-                      open   high    low  close      volume
-2020-01-01 00:00:00  329.4  332.0  327.6  331.0  28155710.0
-```
-
-再折叠进 `00:02`、`00:03` 和 `00:04`，这个窗口就填满了。那一行正在形成的 bar 此时就是
-**已完成**的第一根 5 分钟 bar，和之前一次性 `df.cumulate('5m')` 打印出来的第一行完全一致：
-
-```py
-for i in range(2, 5):
-    cum.append(df.iloc[i:i + 1])
-
-print(cum)
-```
-
-```
-                      open   high    low  close      volume
-2020-01-01 00:00:00  329.4  334.2  324.8  324.8  62346461.0
-```
-
-现在折叠进 `00:05`。它会开启**下一个**窗口，于是 `00:00` bar 定型，一根新的、正在形成的 bar 开始；frame 增长到两行，`cum.iloc[-1]` 就是那根新的、仍在形成的
-`00:05` bar：
-
-```py
-cum.append(df.iloc[5:6])
-
-print(cum)
-```
-
-```
-                      open   high    low  close      volume
-2020-01-01 00:00:00  329.4  334.2  324.8  324.8  62346461.0   <- finalized
-2020-01-01 00:05:00  325.0  327.8  324.8  327.6  10448427.0   <- still forming
-```
-
-下面两个性质让它适合实时数据流：
-
-- **指标是惰性的，并且读取时保持最新。** `append` 不做任何重算，只把依赖的
-  directive 列标记为过期（它们的有效行游标落后于 frame 高度）。真正的重算发生在你
-  **读取** `cum['ema:9']`（或任何 directive）时：只刷新过期尾部，即
-  `O(lookback)`，不是整列重算；计算对象包含正在形成的那一行，结果与一次性「先累积再计算」逐位相同。（`to_numpy()` 这类批量读取不会自动刷新；请先调用 `cum.fulfill()`，或者直接读取一次 directive。）
-- **重发的 bar 不会重复计入。**正在形成的周期保存着它的各根 bar，折叠一根时间戳已在其中的 bar 会**替换**那根 bar，而不是继续累加——这就是本节开头展示的同一条去重规则，适合会修订最近一根 bar 的交易所。重发一根与 frame 自身时间框相同的 bar（这里是 `5m`，时间戳为 `00:05`）会替换整行正在形成的 bar。
-
-API 概览见[实时累积](#实时累积--一个-tf-aware-dataframe)。
-
-## TimeFrame
-
-`TimeFrame` 表示一个 bar 间隔。凡是 volas 需要重采样的地方都接受它：`df.cumulate` 和 `DataFrame` 的 `time_frame` 参数。它既可以写成 `TimeFrame` 常量，也可以写成等价的**字符串标签**。没有 `TimeFrame(...)` 构造函数；请使用下面的常量或标签字符串。`hv` 指标在 directive 中使用标签；各时间框如何年化，见它的[参考条目](INDICATORS.md#user-content-indicator-hv)。
-
-```py
-TimeFrame.m5            # 5 分钟 frame
-'5m'                    # 等价的标签字符串，各处都接受
-
-df.cumulate(TimeFrame.m5)     # 与 df.cumulate('5m') 相同
-```
-
-支持的时间框（常量 ⇄ 标签）：
-
-| 常量 | 标签 | 对齐 |
-| --- | --- | --- |
-| `TimeFrame.s1` | `'1s'` | 民用秒。 |
-| `TimeFrame.m1` | `'1m'` | 民用分钟。 |
-| `TimeFrame.m3` | `'3m'` | 小时内分钟桶，起于 `00`、`03`、`06`、... |
-| `TimeFrame.m5` | `'5m'` | 小时内分钟桶，起于 `00`、`05`、`10`、... |
-| `TimeFrame.m15` | `'15m'` | 小时内分钟桶，起于 `00`、`15`、`30`、`45`。 |
-| `TimeFrame.m30` | `'30m'` | 小时内分钟桶，起于 `00` 和 `30`。 |
-| `TimeFrame.H1` | `'1h'` | 民用小时。 |
-| `TimeFrame.H2` | `'2h'` | 日内小时桶，起于 `00`、`02`、`04`、... |
-| `TimeFrame.H4` | `'4h'` | 日内小时桶，起于 `00`、`04`、`08`、... |
-| `TimeFrame.H6` | `'6h'` | 日内小时桶，起于 `00`、`06`、`12`、`18`。 |
-| `TimeFrame.H8` | `'8h'` | 日内小时桶，起于 `00`、`08`、`16`。 |
-| `TimeFrame.H12` | `'12h'` | 日内小时桶，起于 `00` 和 `12`。 |
-| `TimeFrame.D1` | `'1d'` | frame 所在时区下的民用日。 |
-| `TimeFrame.D3` | `'3d'` | 锚定 Unix 纪元的连续 3 天桶；不在月边界重置。 |
-| `TimeFrame.W1` | `'1w'` | 周一起始的连续周，可跨越月边界。 |
-| `TimeFrame.M1` | `'1M'` | frame 所在时区下的民用日历月。 |
-| `TimeFrame.Y1` | `'1y'` | frame 所在时区下的民用日历年。 |
-
-每个桶都按 **frame 所在时区的本地挂钟时间**对齐，但存储仍保持 UTC：日内小时桶（`2h`/`4h`/`6h`/`8h`/`12h`）从本地 `00` 开始，按本地小时步进；`3d` 从该时区下的 Unix 纪元日开始，计算连续 3 个本地民用日的桶（不在月边界重置）；`1w` 按本地民用时间从周一开始。因此日 / 周 bar 会跟随本地交易日，而具名时区会让小时桶具备 DST 意识（重复与被跳过的小时见 [bar 标签是周期起点](#bar-标签是周期起点)）。网格始终属于 **frame 自身**的时区：append 到 tf 感知 frame 的 bar 按其瞬时落到这张网格上，与该 bar 自身索引携带的时区无关。
 
 ## `directive` 的语法
 
