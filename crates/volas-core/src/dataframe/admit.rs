@@ -432,7 +432,8 @@ impl DataFrame {
     /// Check, writing nothing, that re-cumulating the forming row `row` from `src`'s rows
     /// with `last`'s row 0 in place of `src`'s last row (a re-sent bar: a column `last`
     /// lacks keeps `src`'s value) succeeds — so the caller can check the fold before
-    /// it replaces that row in `src`.
+    /// it replaces that row in `src`. `last` is admitted ([`admit`](Self::admit)): its
+    /// columns have this frame's dtypes.
     pub fn check_refold(
         &self,
         row: usize,
@@ -445,13 +446,13 @@ impl DataFrame {
         };
         for &(dst_col, src_col, op) in ops {
             let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
+            if cannot_fail(dst, from) {
+                continue; // `last`'s value has the column's dtype too (no name lookup)
+            }
             let tail = match last.column_pos(&src.names[src_col]) {
                 Some(j) => (&last.columns[j], 0),
                 None => (from, h),
             };
-            if cannot_fail(dst, from) && cannot_fail(dst, tail.0) {
-                continue;
-            }
             dst.check_fold(row, op, true, (0..h).map(|r| (from, r)).chain([tail]))?;
         }
         Ok(())
