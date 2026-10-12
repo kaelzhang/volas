@@ -33,8 +33,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     'stale-compare-rhs',
     # Integer folds read the NA placeholder as a value.
     'int-fold-na',
-    # tz_localize drops the sub-second part of every timestamp.
-    'localize-subsecond',
     # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
     # while df[d] names the column from the bound values ('ma:5', 'sar').
     'stringify-column-name',

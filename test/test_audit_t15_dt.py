@@ -9,7 +9,8 @@ ints, False for predicates, NaT-as-False truthiness).
 Deliberately absent members (contract waivers, pinned below):
   date / time / timetz / to_pydatetime — object-returning (# C3)
   to_period / freq                     — period dtype out-of-scope
-  tz_localize / tz_convert             — a tz lives on the index/scalar (# D3)
+  tz_localize / tz_convert             — a column holds UTC instants; a display
+                                         zone lives on the index/scalar
 
 Cell IDs:  T15.<member> · T15.guard · T15.waiver
 """
@@ -124,7 +125,7 @@ def test_dt_isocalendar():
 
 def test_dt_tz_and_unit():
     v, _ = _pair()
-    assert v.dt.tz is None          # a tz lives on the index/scalar (# D3)
+    assert v.dt.tz == "UTC"         # a column holds UTC instants
     assert v.dt.unit == "ns"        # the single storage unit (# D1)
 
 

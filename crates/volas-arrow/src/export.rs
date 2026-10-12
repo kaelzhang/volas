@@ -8,7 +8,7 @@ use arrow_array::types::{
 };
 use arrow_array::{ArrayRef, BooleanArray, LargeStringArray, PrimitiveArray};
 use arrow_buffer::{BooleanBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
-use volas_core::{Buffer, Column};
+use volas_core::{Buffer, Column, Tz};
 
 use crate::{arrow_buffer_of, null_buffer_of};
 
@@ -52,9 +52,13 @@ pub fn column_to_arrow(col: &Column) -> ArrayRef {
             Arc::new(array)
         }
         // `i64::MIN` is the NaT sentinel → an Arrow null; the in-band value is masked.
+        // The instants are UTC, so the type states it: `timestamp[ns, tz=UTC]`.
         Column::Datetime(v) => {
             let nulls = nulls_from_validity(v.iter().map(|&x| x != i64::MIN));
-            Arc::new(PrimitiveArray::<TimestampNanosecondType>::new(scalar(v), nulls))
+            Arc::new(
+                PrimitiveArray::<TimestampNanosecondType>::new(scalar(v), nulls)
+                    .with_timezone(Tz::DATETIME_COLUMN.name()),
+            )
         }
     }
 }

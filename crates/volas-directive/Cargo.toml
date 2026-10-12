@@ -11,3 +11,4 @@ repository.workspace = true
 [dependencies]
 volas-core = { workspace = true }
 volas-compute = { workspace = true }
+volas-time = { workspace = true }

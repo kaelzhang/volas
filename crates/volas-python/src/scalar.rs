@@ -528,11 +528,19 @@ impl PyTimestamp {
         datetime::format_ns_tz(self.ns, self.tz)
     }
 
-    /// Compare with another instant (a Timestamp, a `datetime` / `pd.Timestamp`, an
-    /// `np.datetime64`, a datetime string — aware when it carries an offset — or
-    /// an epoch-ns integer). A naive and an aware instant are never equal and
-    /// cannot be ordered (`TypeError`), as in pandas; a non-instant (`None`, a
-    /// plain `date`, `NaT`, …) is unequal and cannot be ordered.
+    /// Compare with another instant (a Timestamp, a `datetime` / `pd.Timestamp` or
+    /// an `np.datetime64`). A naive and an aware instant are never equal and cannot
+    /// be ordered (`TypeError`), as in pandas. Anything else — a string, an integer
+    /// (an epoch included), `None`, a plain `date`, `NaT`, … — is not an instant:
+    /// `==` is False, `!=` True and ordering raises `TypeError` (pandas' rule; it
+    /// keeps `a == b` implying `hash(a) == hash(b)`). Parse text with `Timestamp(s)`.
+    /// NumPy defers a comparison with a `datetime64` / array to this class
+    /// instead of first turning its operand into an integer (pandas' value).
+    #[classattr]
+    fn __array_priority__() -> f64 {
+        100.0
+    }
+
     fn __richcmp__(
         &self,
         py: Python<'_>,
@@ -540,6 +548,10 @@ impl PyTimestamp {
         op: pyo3::basic::CompareOp,
     ) -> PyResult<Py<PyAny>> {
         use pyo3::basic::CompareOp::{Eq, Ne};
+        let np = py.import("numpy")?;
+        if other.is_instance(&np.getattr("ndarray")?)? {
+            return self.compare_array(py, &np, other, op);
+        }
         let Some((ns, aware)) = comparable_instant(other)? else {
             return Ok(py.NotImplemented());
         };
@@ -561,7 +573,8 @@ impl PyTimestamp {
 
     /// Consistent with `==`: a whole-microsecond instant hashes like the equal
     /// `datetime` (so `datetime in {Timestamp}` works); a sub-microsecond one by
-    /// its nanosecond value — pandas' rule.
+    /// its nanosecond value — pandas' rule (an equal sub-microsecond
+    /// `np.datetime64` hashes by NumPy's own rule, as it does against pandas).
     fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
         if self.ns.rem_euclid(1_000) != 0 {
             return self.ns.into_pyobject(py)?.hash();
@@ -571,22 +584,19 @@ impl PyTimestamp {
 }
 
 /// The `(instant, is_aware)` of a comparison operand that is an instant — a
-/// Timestamp, a `datetime.datetime` (incl. `pd.Timestamp`), an `np.datetime64`, a
-/// datetime string (aware iff it carries an offset) or an epoch-ns integer — or
-/// `None` for anything else (`None`, a plain `date`, `NaT`, …).
+/// Timestamp, a `datetime.datetime` (incl. `pd.Timestamp`) or an `np.datetime64` —
+/// or `None` for anything else (a string, an integer, `None`, a plain `date`,
+/// `NaT`, …), which is not comparable with a Timestamp.
 fn comparable_instant(other: &Bound<'_, PyAny>) -> PyResult<Option<(i64, bool)>> {
     if let Ok(t) = other.extract::<PyRef<PyTimestamp>>() {
         return Ok(Some((t.ns, t.tz.is_aware())));
     }
-    if let Ok(s) = other.extract::<String>() {
-        let aware = datetime::offset_suffix_secs(&s).is_some();
-        return Ok(Some((parse_ts_in_tz(other, Tz::Naive)?, aware)));
-    }
-    if let Ok(i) = other.extract::<i64>() {
-        return Ok(Some((i, false)));
-    }
     if other.is_instance_of::<pyo3::types::PyDateTime>() {
-        let aware = !other.call_method0("utcoffset")?.is_none();
+        // `pd.NaT` is a datetime with no offset or components: not an instant
+        let Ok(offset) = other.call_method0("utcoffset") else {
+            return Ok(None);
+        };
+        let aware = !offset.is_none();
         return Ok(datetime_instant(other, Tz::Naive).ok().map(|ns| (ns, aware)));
     }
     match crate::coerce::numpy_time_value(other, "M") {
@@ -745,6 +755,59 @@ pub(crate) fn parse_freq_ns(freq: &str) -> PyResult<i64> {
 }
 
 impl PyTimestamp {
+    /// `self <op> array`, element-wise — pandas' `Timestamp` rule for an ndarray
+    /// operand, never the scalar path: a `datetime64` array compares against this
+    /// instant as `datetime64[ns]` (an aware Timestamp against that naive array is
+    /// all-unequal, and ordering raises `TypeError`); an `object` array compares
+    /// each element with this Timestamp; any other array is all-unequal, and its
+    /// ordering is left to NumPy.
+    fn compare_array(
+        &self,
+        py: Python<'_>,
+        np: &Bound<'_, PyModule>,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::basic::CompareOp,
+    ) -> PyResult<Py<PyAny>> {
+        use pyo3::basic::CompareOp::*;
+        let name = match op {
+            Lt => "lt",
+            Le => "le",
+            Eq => "eq",
+            Ne => "ne",
+            Gt => "gt",
+            Ge => "ge",
+        };
+        let shape = other.getattr("shape")?;
+        let fill = |value: bool| -> PyResult<Py<PyAny>> {
+            let fun = if value { "ones" } else { "zeros" };
+            Ok(np.call_method1(fun, (&shape, np.getattr("bool_")?))?.unbind())
+        };
+        let kind: String = other.getattr("dtype")?.getattr("kind")?.extract()?;
+        let operator = py.import("operator")?;
+        match kind.as_str() {
+            "M" if self.tz.is_aware() => match op {
+                Eq => fill(false),
+                Ne => fill(true),
+                _ => Err(PyTypeError::new_err("Cannot compare tz-naive and tz-aware timestamps")),
+            },
+            "M" => Ok(operator.call_method1(name, (self.to_numpy(py)?, other))?.unbind()),
+            "O" => {
+                let me = Py::new(py, PyTimestamp { ns: self.ns, tz: self.tz })?;
+                let flat = other.call_method0("ravel")?;
+                let cells = flat
+                    .try_iter()?
+                    .map(|x| operator.call_method1(name, (&me, x?))?.is_truthy())
+                    .collect::<PyResult<Vec<bool>>>()?;
+                Ok(numpy::IntoPyArray::into_pyarray(cells, py).call_method1("reshape", (&shape,))?.unbind())
+            }
+            _ => match op {
+                Eq => fill(false),
+                Ne => fill(true),
+                _ => Ok(py.NotImplemented()),
+            },
+        }
+    }
+
     /// Round the instant to a `unit_ns` grid of the WALL clock at its offset (so
     /// a daily floor lands on the local midnight for an anchored zone) — the one
     /// kernel behind scalar and `.dt` `floor` / `ceil` / `round` / `normalize`;
