@@ -23,7 +23,8 @@ pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize, origin: us
 /// squares' sum split as [`square_terms`] splits each square).
 #[inline(always)]
 pub(crate) fn mean_std_of_sums([sum, sq_hi, sq_lo]: &[Csum; 3], p: f64, denom: f64) -> (f64, f64) {
-    let variance = comoment(p, sum, sum, &[*sq_hi, *sq_lo]) / (p * denom);
+    let s = sum.words();
+    let variance = comoment(p, s, s, &[*sq_hi, *sq_lo]) / (p * denom);
     (sum.mean(p), variance.max(0.0).sqrt())
 }
 

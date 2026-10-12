@@ -128,14 +128,8 @@ impl Csum {
                 s.add(x);
             }
         }
-        for (k, s) in sums.iter_mut().enumerate() {
-            if !s.exact {
-                let mut e = Exact::default();
-                for t in rows.clone() {
-                    e.add(t[k]);
-                }
-                *s = e.to_csum();
-            }
+        if !sums.iter().all(Csum::is_exact) {
+            resum_exactly(&mut sums, rows);
         }
         sums
     }
@@ -250,6 +244,21 @@ impl Csum {
     }
 }
 
+/// [`Csum::of_rows`]'s slow path: re-sum each inexact sum as an [`Exact`] expansion.
+#[cold]
+#[inline(never)]
+fn resum_exactly<const K: usize>(sums: &mut [Csum; K], rows: impl Iterator<Item = [f64; K]> + Clone) {
+    for (k, s) in sums.iter_mut().enumerate() {
+        if !s.exact {
+            let mut e = Exact::default();
+            for t in rows.clone() {
+                e.add(t[k]);
+            }
+            *s = e.to_csum();
+        }
+    }
+}
+
 /// `a + b` as its rounded value and its exact rounding error (Knuth's TwoSum).
 #[inline(always)]
 pub(crate) fn two_sum(a: f64, b: f64) -> (f64, f64) {
@@ -280,33 +289,43 @@ const COMOMENT_FILTER: f64 = 1.0 / 1_099_511_627_776.0;
 
 /// `n·Σab − Σa·Σb` over a window of `n` rows — `n²` times its co-moment `Σ(a − ā)(b −
 /// b̄)` (with `a = b`, `n²` times its sum of squared deviations) — from the window's
-/// exact sums: `sa = Σa`, `sb = Σb`, and `Σab` as the total of `sab` (the products' sums
+/// exact sums: `a` and `b` the canonical words of `Σa` and `Σb` ([`Csum::words`]; an
+/// exact constant `c` is `(c, 0)`), and `Σab` as the total of `sab` (the products' sums
 /// split as [`two_prod`] splits each product, or one exact sum).
 ///
 /// The raw moments cancel: at a price level of `12345` a variance of `1e-12` is lost
 /// in rounding entirely. So the difference is formed from the sums' canonical words
-/// ([`Csum::words`]) in double-double arithmetic — accurate to `~2⁻¹⁰⁰` of the terms'
-/// magnitude — and returned when it clears that magnitude by `2⁴⁰` (then it is within
-/// an ulp or two of the exact value, and its sign is exact). Closer to cancellation it
+/// ([`Csum::words`]): the high words' difference rounded once by FMA, plus the
+/// low-order terms — within an ulp of itself plus `~2⁻¹⁰⁴` of the terms' magnitude —
+/// and returned when it clears that magnitude by `2⁴⁰` (then it is within an ulp or
+/// two of the exact value, and its sign is exact). Closer to cancellation it
 /// is computed exactly, as an [`Exact`] sum of every partial product: a window whose
 /// `a` or `b` is constant gives exactly `0`, never rounding noise. A function of the
 /// exact sums only, so every path that reaches a window reads the same bits.
-pub(crate) fn comoment(n: f64, sa: &Csum, sb: &Csum, sab: &[Csum]) -> f64 {
-    let (ah, al) = sa.words();
-    let (bh, bl) = sb.words();
+#[inline(always)]
+pub(crate) fn comoment(n: f64, a: (f64, f64), b: (f64, f64), sab: &[Csum]) -> f64 {
+    let (ah, al) = a;
+    let (bh, bl) = b;
     let (ph, mut pl) = sab[0].words();
     for s in &sab[1..] {
-        let (h, l) = s.words();
-        pl += h + l;
+        pl += s.value(); // the products' rounding errors: low-order already
     }
-    let (p1, e1) = two_prod(n, ph);
+    // `n·ph − ah·bh` rounded once (FMA: `n·ph` exact inside it; `ah·bh` split exactly),
+    // then the low-order terms, each a `2⁻⁵²` fraction of the magnitude, rounded apart.
     let (p2, e2) = two_prod(ah, bh);
-    let (s, t) = two_sum(p1, -p2);
-    let rest = (e1 - e2) + (n * pl - ah.mul_add(bl, al * bh));
-    let est = s + (t + rest);
-    if est.abs() > (p1.abs() + p2.abs()) * COMOMENT_FILTER {
+    let head = n.mul_add(ph, -p2);
+    let est = head + ((n * pl - e2) - ah.mul_add(bl, al * bh));
+    if est.abs() > (n * ph).abs().max(p2.abs()) * COMOMENT_FILTER {
         return est;
     }
+    comoment_exact(n, a, b, sab)
+}
+
+/// [`comoment`] near cancellation: every partial product of the canonical words,
+/// summed exactly.
+#[cold]
+#[inline(never)]
+fn comoment_exact(n: f64, (ah, al): (f64, f64), (bh, bl): (f64, f64), sab: &[Csum]) -> f64 {
     let mut exact = Exact::default();
     for (h, l) in sab.iter().map(Csum::words) {
         for w in [h, l] {

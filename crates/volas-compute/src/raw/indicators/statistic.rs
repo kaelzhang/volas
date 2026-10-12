@@ -132,7 +132,7 @@ fn linreg_sums_in<A: Accumulator>(rows: impl Iterator<Item = f64>, period: usize
 /// for a flat window.
 #[inline]
 fn linreg_fit_of(p: f64, sum_x: f64, divisor: f64, sum_y: &Csum, sum_xy: &Csum) -> (f64, f64) {
-    let m = comoment(p, &Csum::of([sum_x]), sum_y, std::slice::from_ref(sum_xy)) / divisor;
+    let m = comoment(p, (sum_x, 0.0), sum_y.words(), std::slice::from_ref(sum_xy)) / divisor;
     (m, (sum_y.value() - m * sum_x) / p)
 }
 
@@ -232,14 +232,14 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> 
     let p = period as f64;
     let mut guard = G::default();
     let mut sums = [Csum::default(); 3]; // [Σx, Σx²] over the window (see `square_terms`)
-    let slide = |sums: &mut [Csum; 3], x: f64, sign: f64| {
+    let enter = |sums: &mut [Csum; 3], x: f64| {
         for (s, t) in sums.iter_mut().zip(square_terms(x)) {
-            s.add(sign * t);
+            s.add(t);
         }
     };
     for &x in &data[..period - 1] {
         if guard.enter(x.is_finite()) {
-            slide(&mut sums, x, 1.0);
+            enter(&mut sums, x);
         }
     }
     let mut trailing = 0;
@@ -250,7 +250,7 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> 
     for i in (period - 1)..n {
         let x = data[i];
         if guard.enter(x.is_finite()) {
-            slide(&mut sums, x, 1.0);
+            enter(&mut sums, x);
         }
         let anchor = anchors.tick();
         if anchor || !sums.iter().all(Csum::is_exact) {
@@ -265,7 +265,9 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> 
         let old = data[trailing];
         trailing += 1;
         if guard.leave(old.is_finite()) {
-            slide(&mut sums, old, -1.0);
+            for (s, t) in sums.iter_mut().zip(square_terms(old)) {
+                s.sub(t);
+            }
         }
         out.set(i, value);
     }
@@ -277,7 +279,8 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> 
 /// moments cancel, exactly zero for a flat window.
 #[inline(always)]
 fn var_of_sums(sums: &[Csum; 3], p: f64) -> f64 {
-    comoment(p, &sums[0], &sums[0], &sums[1..]) / (p * p)
+    let s = sums[0].words();
+    comoment(p, s, s, &sums[1..]) / (p * p)
 }
 
 /// The population variance of a window holding a non-finite row, on its own rows (the
@@ -384,12 +387,13 @@ fn correl_terms(x: f64, y: f64) -> [f64; 8] {
 /// overshot by that rounding.
 #[inline]
 fn correl_of_sums(s: &[Csum; 8], p: f64) -> f64 {
-    let dx = comoment(p, &s[0], &s[0], &s[2..4]);
-    let dy = comoment(p, &s[1], &s[1], &s[4..6]);
+    let (x, y) = (s[0].words(), s[1].words());
+    let dx = comoment(p, x, x, &s[2..4]);
+    let dy = comoment(p, y, y, &s[4..6]);
     if dx <= 0.0 || dy <= 0.0 {
         return 0.0;
     }
-    let dxy = comoment(p, &s[0], &s[1], &s[6..8]);
+    let dxy = comoment(p, x, y, &s[6..8]);
     (dxy / (dx.sqrt() * dy.sqrt())).clamp(-1.0, 1.0)
 }
 
@@ -483,11 +487,12 @@ fn beta_terms(x: &[f64], y: &[f64], j: usize) -> [f64; 6] {
 /// `x` returns' variance is exactly zero.
 #[inline]
 fn beta_of_sums(s: &[Csum; 6], p: f64) -> f64 {
-    let dx = comoment(p, &s[0], &s[0], &s[2..4]);
+    let x = s[0].words();
+    let dx = comoment(p, x, x, &s[2..4]);
     if dx <= 0.0 {
         return 0.0;
     }
-    comoment(p, &s[0], &s[1], &s[4..6]) / dx
+    comoment(p, x, s[1].words(), &s[4..6]) / dx
 }
 
 /// One row of [`beta`] over return `j`, resumed from `slide` (add, read, drop).

@@ -241,6 +241,13 @@ fn an_overflowing_window_is_summed_at_a_scale() {
     let c = e.to_csum();
     assert!(!c.is_exact());
     assert_eq!(c.value(), big / 2.0);
+    // words already held are scaled with it (a subnormal one drops out: below the
+    // scaled grid, the documented residue)
+    let mut e = Exact::default();
+    for x in [5e-324, 1.0, big, -big] {
+        e.add(x);
+    }
+    assert_eq!(e.to_csum().value(), 1.0);
     // a scaled expansion whose sum is past the threshold
     let mut e = Exact::default();
     for x in [big, big, 1.0] {

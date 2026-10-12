@@ -121,3 +121,23 @@ def test_a_perfect_correlation_stays_within_one(level):
     neg = _check_paths(cols, "correl:20@close,high")
     assert (np.abs(pos[1:]) <= 1.0).all() and (np.abs(pos[1:] - 1.0) <= 1e-12).all()
     assert (np.abs(neg[19:]) <= 1.0).all() and (np.abs(neg[19:] + 1.0) <= 1e-12).all()
+
+
+@pytest.mark.parametrize("level,sigma", [(12345.67, 1e-6), (100.0, 1e-9)])
+def test_the_pandas_window_variance_is_exact(level, sigma):
+    rng = np.random.default_rng(3)
+    x = level + rng.normal(0, sigma, 80)
+    x[[10, 40]] = np.nan
+    x[60:75] = level  # a constant run
+    s = DataFrame({"close": x})["close"]
+    var = np.asarray(s.rolling(7, min_periods=2).var(), dtype=float)
+    std = np.asarray(s.rolling(7, min_periods=2).std(), dtype=float)
+    for i in range(len(x)):
+        w = [Fraction(v) for v in x[max(0, i - 6):i + 1] if not np.isnan(v)]
+        if len(w) < 2:
+            continue
+        m = sum(w) / len(w)
+        exact = sum((v - m) ** 2 for v in w) / (len(w) - 1)
+        assert abs(Fraction(var[i]) - exact) <= exact * Fraction(1, 2**50), (i, var[i], float(exact))
+        assert abs(std[i] - float(exact) ** 0.5) <= 1e-15 * float(exact) ** 0.5, i
+    assert (var[66:75] == 0.0).all() and (std[66:75] == 0.0).all()
