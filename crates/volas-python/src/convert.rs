@@ -17,15 +17,16 @@ use crate::*;
 
 /// Like [`column_to_numpy`] but **consumes** the column, moving its backing buffer
 /// straight into the NumPy array with no copy when the column is uniquely owned —
-/// the fresh-result path (`df.exec(directive)`). Falls back to a borrow + copy for
-/// the rarer `Str` / `Datetime` columns.
-pub(crate) fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> Bound<'py, PyAny> {
-    match col {
+/// the fresh-result path (`df.exec(directive)`). A bool / int column holding a
+/// missing cell, and the rarer `Str` / `Datetime` columns, take the borrowing export
+/// instead, so a missing cell is exported as missing — never as its payload.
+pub(crate) fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match col {
         Column::F64(a) => a.into_vec().into_pyarray(py).into_any(),
-        Column::Bool(a, _) => a.into_vec().into_pyarray(py).into_any(),
-        Column::I64(a, _) => a.into_vec().into_pyarray(py).into_any(),
-        other => column_to_numpy(py, &other),
-    }
+        Column::Bool(a, val) if !val.has_nulls() => a.into_vec().into_pyarray(py).into_any(),
+        Column::I64(a, val) if !val.has_nulls() => a.into_vec().into_pyarray(py).into_any(),
+        other => return column_to_numpy(py, &other),
+    })
 }
 
 /// A column as a pandas array for `to_pandas`. With `nullable`, an int/bool
@@ -42,11 +43,15 @@ pub(crate) fn column_to_pandas<'py>(
     // NumPy export has no zone slot), under either backend.
     if let Column::Datetime(_) = col {
         return pd
-            .call_method1("array", (column_to_numpy(py, col),))?
+            .call_method1("array", (column_to_numpy(py, col)?,))?
             .call_method1("tz_localize", (Tz::DATETIME_COLUMN.name(),));
     }
-    if !nullable {
-        return Ok(column_to_numpy(py, col));
+    // A bool column holding a missing cell has no NumPy form (see
+    // `column_to_numpy`), so it is pandas' masked `boolean` under either backend —
+    // `pd.NA`, never a truthy `nan`.
+    let bool_na = matches!(col, Column::Bool(_, val) if val.has_nulls());
+    if !nullable && !bool_na {
+        return column_to_numpy(py, col);
     }
     let arrays = pd.getattr("arrays")?;
     let mask = |val: &Validity, n: usize| {
@@ -81,7 +86,7 @@ pub(crate) fn column_to_pandas<'py>(
             pd.call_method("array", (list,), Some(&kwargs))
         }
         // float (NaN in-band) has no nullable masked form here.
-        _ => Ok(column_to_numpy(py, col)),
+        _ => column_to_numpy(py, col),
     }
 }
 
@@ -205,37 +210,21 @@ fn pandas_series_to_values<'py>(
     s.call_method0("to_numpy")
 }
 
-pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
-    match col {
+pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match col {
         Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
         Column::F32(v) => v.to_vec().into_pyarray(py).into_any(),
-        // numpy int/bool cannot hold a missing value, so a column with any NA
+        // numpy int/bool cannot hold a missing value, so an int column with any NA
         // exports as float64 with NaN (pandas `Int64.to_numpy()` semantics); a
         // dense column keeps its native dtype.
         Column::Bool(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
         Column::I64(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
         Column::I32(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
-        // F17 (NA-model interop ruling): a bool column with missing exports as an
-        // OBJECT array (True / nan / False) — float64 would destroy the bool
-        // identity (1.0/0.0). Matches pandas nullable boolean .to_numpy().
-        Column::Bool(v, val) => {
-            let items: Vec<Bound<'_, PyAny>> = (0..v.len())
-                .map(|i| {
-                    if val.is_valid(i) {
-                        pyo3::types::PyBool::new(py, v[i]).to_owned().into_any()
-                    } else {
-                        f64::NAN.into_pyobject(py).unwrap().into_any()
-                    }
-                })
-                .collect();
-            let list = PyList::new(py, items).expect("build bool list");
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "object").expect("set dtype=object");
-            py.import("numpy")
-                .expect("import numpy")
-                .call_method("array", (list,), Some(&kwargs))
-                .expect("np.array(object)")
-        }
+        // A bool column with a missing cell has no NumPy form: any placeholder would
+        // be read as a truth value (a `nan` is truthy, `None` falsy) — an unknown
+        // signal must not act like a decided one (the rule that rejects NA masks).
+        // The caller states what a missing cell means instead.
+        Column::Bool(..) => return Err(bool_na_err()),
         // numpy int cannot hold a missing value -> float64 with NaN (pandas
         // Int64.to_numpy() semantics); a dense column keeps its native dtype.
         Column::I64(..) | Column::I32(..) => {
@@ -264,12 +253,34 @@ pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> Bound<'py, 
                 .expect("np.array(object)")
         }
         // Datetime columns become NumPy datetime64[ns] arrays.
-        Column::Datetime(v) => {
-            let arr = v.to_vec().into_pyarray(py);
-            arr.call_method1("astype", ("datetime64[ns]",))
-                .expect("astype datetime64[ns]")
+        Column::Datetime(v) => v.to_vec().into_pyarray(py).call_method1("astype", ("datetime64[ns]",))?,
+    })
+}
+
+/// The error of exporting a bool column holding a missing value without saying what
+/// that cell means.
+pub(crate) fn bool_na_err() -> PyErr {
+    PyValueError::new_err(
+        "cannot export a bool column with missing values to NumPy: NumPy has no missing \
+         bool, and any placeholder would be read as True or False — pass na_value= \
+         (e.g. na_value=False), dtype='float64' (missing -> NaN), or dtype='object' \
+         (missing -> volas.NA)",
+    )
+}
+
+/// A bool column's cells as an object array, `fill` at each missing cell.
+fn bool_cells<'py>(py: Python<'py>, v: &[bool], val: &Validity, fill: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let items = (0..v.len()).map(|i| {
+        if val.is_valid(i) {
+            pyo3::types::PyBool::new(py, v[i]).to_owned().into_any()
+        } else {
+            fill.clone()
         }
-    }
+    });
+    let list = PyList::new(py, items)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    py.import("numpy")?.call_method("array", (list,), Some(&kwargs))
 }
 
 /// A column as a NumPy array, honoring an optional export `dtype` and `na_value`
@@ -302,18 +313,29 @@ pub(crate) fn column_to_numpy_with<'py>(
         }
     }
     let Some(nv) = na_value else {
-        let arr = column_to_numpy(py, col);
         return match dtype {
-            Some(dt) => astype_checked(py, arr, col, dt),
-            None => Ok(arr),
+            None => column_to_numpy(py, col),
+            Some(dt) => astype_checked(py, col, dt),
         };
     };
     if col.null_count() == 0 {
         // `na_value` is irrelevant with no missing cell — a plain typed export.
-        let arr = column_to_numpy(py, col);
+        let arr = column_to_numpy(py, col)?;
         return match dtype {
             Some(dt) => arr.call_method1("astype", (dt,)),
             None => Ok(arr),
+        };
+    }
+    // a bool column's cells, the fill at each hole: an object array the cast (or a
+    // bool fill) turns into the target — never a NaN coerced into a bool slot
+    if let Column::Bool(v, val) = col {
+        let cells = bool_cells(py, v, val, nv)?;
+        return match dtype {
+            Some(dt) => cells.call_method1("astype", (dt,)),
+            None if nv.is_instance_of::<pyo3::types::PyBool>() || type_is_numpy_bool(nv) => {
+                cells.call_method1("astype", ("bool",))
+            }
+            None => Ok(cells),
         };
     }
     let mask = na_mask(py, col);
@@ -326,11 +348,16 @@ pub(crate) fn column_to_numpy_with<'py>(
         }
         // the NA-model array keeps its default dtype; only the holes change.
         None => {
-            let base = column_to_numpy(py, col);
+            let base = column_to_numpy(py, col)?;
             base.set_item(mask, nv)?;
             Ok(base)
         }
     }
+}
+
+/// Whether `v` is a NumPy bool scalar (`numpy.bool_`).
+fn type_is_numpy_bool(v: &Bound<'_, PyAny>) -> bool {
+    v.get_type().name().is_ok_and(|n| n.to_str().is_ok_and(|n| n == "bool" || n == "bool_"))
 }
 
 /// The boolean NA mask of a column (`True` exactly at the missing cells).
@@ -349,7 +376,7 @@ fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'p
         Column::I32(v, _) => v.to_vec().into_pyarray(py).into_any(),
         Column::Bool(v, _) => v.to_vec().into_pyarray(py).into_any(),
         // str has no fixed-width NumPy form — an object array (string or `None`).
-        Column::Str(..) => column_to_numpy(py, col),
+        Column::Str(..) => column_to_numpy(py, col)?,
         Column::Datetime(v) => {
             v.to_vec().into_pyarray(py).call_method1("astype", ("datetime64[ns]",))?
         }
@@ -359,16 +386,20 @@ fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'p
 /// Cast an exported NumPy array to `dtype`, but **raise** (pandas-aligned) when the
 /// column holds missing values and `dtype` cannot represent one (integer / bool) —
 /// NumPy would silently write garbage (or `True` for a NaN) instead.
-pub(crate) fn astype_checked<'py>(
-    py: Python<'py>,
-    arr: Bound<'py, PyAny>,
-    col: &Column,
-    dtype: &str,
-) -> PyResult<Bound<'py, PyAny>> {
-    if col.null_count() > 0 && ExportTarget::of(py, dtype)?.has_no_na() {
+/// A float target reads a bool column's missing cell as `NaN` (the float channel);
+/// any other target of a bool column holding NA has no form for it.
+pub(crate) fn astype_checked<'py>(py: Python<'py>, col: &Column, dtype: &str) -> PyResult<Bound<'py, PyAny>> {
+    let target = ExportTarget::of(py, dtype)?;
+    if col.null_count() > 0 && target.has_no_na() {
         return Err(no_na_target_err("a column", dtype));
     }
-    arr.call_method1("astype", (dtype,))
+    match col {
+        Column::Bool(_, val) if val.has_nulls() => match target {
+            ExportTarget::Float => col.to_f64_vec().into_pyarray(py).call_method1("astype", (dtype,)),
+            _ => Err(bool_na_err()),
+        },
+        _ => column_to_numpy(py, col)?.call_method1("astype", (dtype,)),
+    }
 }
 
 /// The error for an NA-holding export into a dtype that cannot represent NA.

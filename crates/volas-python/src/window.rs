@@ -138,17 +138,10 @@ impl WinSpec {
 
     /// An int64 count-like result (`count` / `nunique`): NaN cells become NA.
     fn i64_series(&self, s: &Series, out: Vec<f64>) -> PySeries {
-        let validity = volas_core::Validity::from_valid_iter(
-            out.len(),
-            out.iter().map(|x| !x.is_nan()),
-        );
-        let vals = out.iter().map(|&x| if x.is_nan() { 0 } else { x as i64 }).collect();
+        // a count is a small non-negative integer, exact in float64
+        let cells = out.iter().map(|&x| (!x.is_nan()).then_some(x as i64));
         PySeries {
-            inner: Series::new(
-                s.name.clone(),
-                Column::i64_with(vals, validity),
-                Arc::clone(&s.index),
-            ),
+            inner: Series::new(s.name.clone(), Column::i64_from_options(cells), Arc::clone(&s.index)),
         }
     }
 

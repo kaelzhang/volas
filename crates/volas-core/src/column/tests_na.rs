@@ -6,7 +6,7 @@ use super::*;
 // --- NA (validity) behaviour ---------------------------------------------
 
 fn na_i64(vals: &[i64], present: &[bool]) -> Column {
-    Column::i64_with(
+    Column::i64_masked(
         vals.to_vec(),
         Validity::from_valid_iter(present.len(), present.iter().copied()),
     )
@@ -53,13 +53,13 @@ fn na_reductions_skip_missing() {
     // all-NA int -> NaN
     assert!(matches!(na_i64(&[0, 0], &[false, false]).extreme(true), Scalar::F64(x) if x.is_nan()));
     // i32 / bool skip NA, promote to i64
-    let i = Column::i32_with(
+    let i = Column::i32_masked(
         vec![5, 0, 7],
         Validity::from_valid_iter(3, [true, false, true]),
     );
     assert_eq!(i.sum().unwrap(), Scalar::I64(12));
     assert_eq!(i.extreme(false), Scalar::I32(5));
-    let b = Column::bool_with(
+    let b = Column::bool_masked(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, true]),
     );
@@ -67,7 +67,7 @@ fn na_reductions_skip_missing() {
     assert_eq!(b.extreme(true), Scalar::Bool(true)); // any present
     assert_eq!(b.extreme(false), Scalar::Bool(false)); // all present (true && false)
     assert!(matches!(
-        Column::bool_with(vec![false], Validity::from_valid_iter(1, [false])).extreme(true),
+        Column::bool_masked(vec![false], Validity::from_valid_iter(1, [false])).extreme(true),
         Scalar::F64(x) if x.is_nan()
     ));
     // the f64-funnel (mean / std / …) skips NA because to_f64_vec maps it to
@@ -95,7 +95,7 @@ fn na_cumulatives_propagate() {
         &[3.0, f64::NAN, 1.0],
     );
     // i32
-    let i = Column::i32_with(
+    let i = Column::i32_masked(
         vec![1, 0, 3],
         Validity::from_valid_iter(3, [true, false, true]),
     );
@@ -104,7 +104,7 @@ fn na_cumulatives_propagate() {
     assert_na(&i.cummin().unwrap(), &[1.0, f64::NAN, 1.0]);
     assert_na(&i.cumprod().unwrap(), &[1.0, f64::NAN, 3.0]);
     // bool: cumsum/cumprod -> i64; cummax = running OR, cummin = running AND
-    let b = Column::bool_with(
+    let b = Column::bool_masked(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, true]),
     );
@@ -140,7 +140,7 @@ fn na_elementwise_propagate() {
     assert_eq!(promoted.dtype(), DType::F64);
     assert_na(&promoted, &[2.5, f64::NAN, 9.0]);
     // i32 round keeps i32 + validity
-    let r = Column::i32_with(
+    let r = Column::i32_masked(
         vec![28, 0, 12],
         Validity::from_valid_iter(3, [true, false, true]),
     )
@@ -160,11 +160,11 @@ fn na_binary_and_select_propagate() {
         &[11.0, f64::NAN, f64::NAN],
     );
     // bool ∘ bool keeps bool, combined validity
-    let bt = Column::bool_with(
+    let bt = Column::bool_masked(
         vec![true, false, true],
         Validity::from_valid_iter(3, [true, false, true]),
     );
-    let bf = Column::bool_with(
+    let bf = Column::bool_masked(
         vec![false, true, true],
         Validity::from_valid_iter(3, [true, true, false]),
     );
@@ -292,11 +292,17 @@ fn na_take_slice_append_preserve_validity() {
     let mut d = Column::i64(vec![1, 2]);
     d.append(&Column::i64(vec![3])).unwrap();
     assert_eq!(d.null_count(), 0);
-    // append_missing keeps the new bool rows dense `false` (refresh placeholder)
+    // append_na grows bool placeholder rows MISSING (never a present `false`),
+    // from a dense mask and from one that already has holes
     let mut b = Column::bool(vec![true, false]);
-    b.append_missing(2).unwrap();
-    assert_eq!(b.null_count(), 0);
-    assert_na(&b, &[1.0, 0.0, 0.0, 0.0]);
+    b.append_na(2);
+    assert_eq!(b.null_count(), 2);
+    assert_na(&b, &[1.0, 0.0, f64::NAN, f64::NAN]);
+    b.append_na(65); // crosses a bitmap word
+    assert_eq!((b.len(), b.null_count()), (69, 67));
+    b.check_layout().unwrap();
+    b.append_na(0);
+    assert_eq!(b.len(), 69);
 }
 
 #[test]
@@ -307,7 +313,7 @@ fn na_fillna() {
     assert_na(&c.fillna(9.0).unwrap(), &[1.0, 9.0, 3.0]);
     assert_eq!(c.fillna(2.5).unwrap().dtype(), DType::F64);
     assert_na(&c.fillna(2.5).unwrap(), &[1.0, 2.5, 3.0]);
-    let i32c = Column::i32_with(
+    let i32c = Column::i32_masked(
         vec![1, 0, 3],
         Validity::from_valid_iter(3, [true, false, true]),
     );
@@ -315,7 +321,7 @@ fn na_fillna() {
     assert_na(&i32c.fillna(9.0).unwrap(), &[1.0, 9.0, 3.0]);
     assert_eq!(i32c.fillna(2.5).unwrap().dtype(), DType::F64);
     // bool: a 0/1 fill keeps bool, else promote to float
-    let bc = Column::bool_with(
+    let bc = Column::bool_masked(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, true]),
     );
@@ -338,7 +344,7 @@ fn na_fillna() {
     // a numeric fill on a non-numeric column (str / datetime) is rejected, not
     // silently funneled through f64 (which corrupted strings / lost the dtype)
     assert!(Column::datetime(vec![i64::MIN, 20]).fillna(9.0).is_err());
-    assert!(Column::str_with(
+    assert!(Column::str_masked(
         vec!["a".into(), String::new()],
         Validity::from_valid_iter(2, [true, false])
     )
@@ -359,7 +365,7 @@ fn scatter_preserves_validity() {
     assert_eq!(r2.dtype(), DType::I64);
     assert!(r2.is_valid(0) && !r2.is_valid(1) && !r2.is_valid(2));
     // bool keeps its validity too
-    let b = Column::bool_with(
+    let b = Column::bool_masked(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, true]),
     );
@@ -407,12 +413,12 @@ fn na_fill_dir() {
     let c = na_i64(&[0, 2, 0, 0, 5], &[false, true, false, false, true]); // NA,2,NA,NA,5
     assert_na(&c.fill_dir(true), &[f64::NAN, 2.0, 2.0, 2.0, 5.0]); // ffill: leading NA stays
     assert_na(&c.fill_dir(false), &[2.0, 2.0, 5.0, 5.0, 5.0]); // bfill: trailing filled
-    let i32c = Column::i32_with(
+    let i32c = Column::i32_masked(
         vec![7, 0, 0],
         Validity::from_valid_iter(3, [true, false, false]),
     );
     assert_na(&i32c.fill_dir(true), &[7.0, 7.0, 7.0]);
-    let bc = Column::bool_with(
+    let bc = Column::bool_masked(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, false]),
     );
@@ -439,7 +445,7 @@ fn na_fill_dir() {
     );
     // str + NA carries values directionally like every other dtype (regression:
     // the Str arm used to `unreachable!()` and panic on a missing cell).
-    let sc = Column::str_with(
+    let sc = Column::str_masked(
         vec!["x".into(), String::new(), String::new(), "z".into()],
         Validity::from_valid_iter(4, [true, false, false, true]),
     ); // "x", NA, NA, "z"
@@ -452,14 +458,14 @@ fn na_fill_dir() {
         Column::str(vec!["x".into(), "z".into(), "z".into(), "z".into()])
     );
     // a leading gap stays NA on ffill (nothing to carry in)
-    let ff = Column::str_with(
+    let ff = Column::str_masked(
         vec![String::new(), "a".into()],
         Validity::from_valid_iter(2, [false, true]),
     )
     .fill_dir(true);
     assert!(!ff.is_valid(0) && ff.is_valid(1)); // NA, "a"
                                                 // a fully-missing str column ffills to itself (all still NA)
-    let allna = Column::str_with(
+    let allna = Column::str_masked(
         vec![String::new(), String::new()],
         Validity::from_valid_iter(2, [false, false]),
     );
@@ -492,14 +498,14 @@ fn append_na_pads_dtype_preserving() {
     f32c.append_na(1);
     assert!(f32c.is_valid(0) && !f32c.is_valid(1)); // f32 NaN in-band
                                                     // an existing hole is preserved, the appended rows are added as NA
-    let mut i2 = Column::i64_with(vec![1, 0], Validity::from_valid_iter(2, [true, false]));
+    let mut i2 = Column::i64_masked(vec![1, 0], Validity::from_valid_iter(2, [true, false]));
     i2.append_na(1);
     assert!(i2.is_valid(0) && !i2.is_valid(1) && !i2.is_valid(2) && i2.null_count() == 2);
 }
 
 #[test]
 fn na_logical_kleene_and_not() {
-    let b = Column::bool_with(
+    let b = Column::bool_masked(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, true, false]),
     ); // T,F,NA
@@ -528,14 +534,14 @@ fn na_cast_int_bool_carries_validity() {
     assert_na(&i.cast(DType::I32).unwrap(), &[1.0, f64::NAN, 3.0]);
     assert_na(&i.cast(DType::Bool).unwrap(), &[1.0, f64::NAN, 1.0]);
     assert_na(&i.cast(DType::F64).unwrap(), &[1.0, f64::NAN, 3.0]); // int+NA -> float (NaN)
-    let i32c = Column::i32_with(
+    let i32c = Column::i32_masked(
         vec![1, 0, 5],
         Validity::from_valid_iter(3, [true, false, true]),
     );
     assert_eq!(i32c.cast(DType::I64).unwrap().dtype(), DType::I64);
     assert_na(&i32c.cast(DType::I64).unwrap(), &[1.0, f64::NAN, 5.0]);
     assert_na(&i32c.cast(DType::Bool).unwrap(), &[1.0, f64::NAN, 1.0]);
-    let b = Column::bool_with(
+    let b = Column::bool_masked(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, true]),
     );
@@ -547,7 +553,7 @@ fn na_cast_int_bool_carries_validity() {
 
 #[test]
 fn na_str_carries_validity() {
-    let s = Column::str_with(
+    let s = Column::str_masked(
         vec!["a".into(), String::new(), "c".into()],
         Validity::from_valid_iter(3, [true, false, true]),
     ); // a, NA, c
@@ -561,7 +567,7 @@ fn na_str_carries_validity() {
     assert!(!s.slice(1, 3).is_valid(0) && s.slice(1, 3).is_valid(1));
     assert!(!s.take(&[1, 0]).is_valid(0) && s.take(&[1, 0]).is_valid(1));
     // append concatenates validity
-    let mut a = Column::str_with(
+    let mut a = Column::str_masked(
         vec!["x".into(), String::new()],
         Validity::from_valid_iter(2, [true, false]),
     );
@@ -580,8 +586,8 @@ fn truth_values_carry_validity() {
     // contract #27: a NaN / NA is never a present truth value, whatever its payload
     let f = Column::f64(vec![f64::NAN, 0.0, 2.0]);
     assert_eq!((0..3).map(|i| f.truth_at(i)).collect::<Vec<_>>(), [None, Some(false), Some(true)]);
-    let i = Column::i64_with(vec![7, 0], Validity::from_valid_iter(2, [false, true]));
-    assert_eq!(i.not(), Column::bool_with(vec![false, true], Validity::from_valid_iter(2, [false, true])));
+    let i = Column::i64_masked(vec![7, 0], Validity::from_valid_iter(2, [false, true]));
+    assert_eq!(i.not(), Column::bool_masked(vec![false, true], Validity::from_valid_iter(2, [false, true])));
     let s = Column::str(vec![String::new(), "x".into()]);
     assert_eq!((s.truth_at(0), s.truth_at(1)), (Some(false), Some(true)));
     assert_eq!(Column::datetime(vec![i64::MIN, 5]).truth_at(0), None);

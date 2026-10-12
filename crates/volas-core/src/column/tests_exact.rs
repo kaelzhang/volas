@@ -21,7 +21,7 @@ fn numeric_compare_is_exact() {
     assert_eq!(bools(b.compare(&Column::f64(vec![T as f64, f64::NAN]), CmpOp::Ne).unwrap()), [true, true]);
     assert_eq!(bools(Column::f64(vec![T as f64, 0.5]).compare(&b, CmpOp::Lt).unwrap()), [true, true]);
     // a missing int side: only `!=` holds
-    let na = Column::i64_with(vec![0, 1], Validity::from_valid_iter(2, [false, true]));
+    let na = Column::i64_masked(vec![0, 1], Validity::from_valid_iter(2, [false, true]));
     assert_eq!(bools(na.compare(&Column::f64(vec![0.0, 1.0]), CmpOp::Eq).unwrap()), [false, true]);
     assert_eq!(bools(Column::f64(vec![0.0, 1.0]).compare(&na, CmpOp::Ne).unwrap()), [true, false]);
     assert_eq!(bools(Column::i32(vec![1]).compare(&Column::bool(vec![true]), CmpOp::Eq).unwrap()), [true]);
@@ -58,7 +58,7 @@ fn from_scalars_takes_the_supertype_losslessly() {
 fn float64_math_guard() {
     let big = Column::i64(vec![B, 1]);
     assert!(overflow_err(big.to_f64_domain("mean")));
-    let hidden = Column::i64_with(vec![B, 1], Validity::from_valid_iter(2, [false, true]));
+    let hidden = Column::i64_masked(vec![B, 1], Validity::from_valid_iter(2, [false, true]));
     assert!(hidden.to_f64_domain("mean").is_ok()); // a missing payload is not a value
     assert_eq!(Column::i64(vec![T, -T]).to_f64_domain("mean").unwrap(), vec![T as f64, -T as f64]);
     assert!(overflow_err(big.div(&Column::i64(vec![1, 1]))));
@@ -82,6 +82,6 @@ fn float_select_converts_only_the_picked_cells() {
     let st = Column::str(vec!["a".into()]);
     assert!(st.select(&[true], &Column::f64(vec![0.5]), DType::F64).is_err());
     // fillna promoting an int column to float is lossless too
-    let holes = Column::i64_with(vec![B, 0], Validity::from_valid_iter(2, [true, false]));
+    let holes = Column::i64_masked(vec![B, 0], Validity::from_valid_iter(2, [true, false]));
     assert!(holes.fillna(0.5).is_err());
 }

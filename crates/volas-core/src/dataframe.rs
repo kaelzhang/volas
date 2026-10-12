@@ -124,6 +124,16 @@ const STALE_BY_APPEND: &str = "an append";
 /// The cause a write to a column leaves.
 const STALE_BY_WRITE: &str = "a column write";
 
+/// The layout every column a frame admits must hold (its validity covers its values,
+/// [`Column::check_layout`]) — a column assembled from its public parts may carry a
+/// mask of another length, and no frame entry point takes one.
+fn admit_layout(name: &str, col: &Column) -> Result<()> {
+    match col.check_layout() {
+        Err(VolasError::Shape(why)) => Err(VolasError::Shape(format!("column \"{name}\": {why}"))),
+        other => other,
+    }
+}
+
 impl DataFrame {
     /// Construct a frame from parallel `names` / `columns`, validating shape.
     pub fn new(names: Vec<String>, columns: Vec<Column>, index: Option<Index>) -> Result<Self> {
@@ -145,6 +155,7 @@ impl DataFrame {
                     height
                 )));
             }
+            admit_layout(n, c)?;
         }
         let index = match index {
             Some(ix) => {
@@ -319,6 +330,7 @@ impl DataFrame {
     /// the frame currently has no columns). Replacing a column invalidates the
     /// directive cache (see `invalidate_computed_on_write`); adding one leaves it.
     pub fn set_column(&mut self, name: &str, col: Column) -> Result<()> {
+        admit_layout(name, &col)?;
         if self.columns.is_empty() {
             self.height = col.len();
             if self.index.len() != self.height {

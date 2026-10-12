@@ -263,23 +263,25 @@ def test_stochrsi_d_resume_is_bit_exact():
 # --- tf fold (I13) --------------------------------------------------------------------------
 
 
-@_xfail('M7 int-fold-na', 'an int fold reads the NA placeholder (0) as a value')
-def test_an_int_max_fold_skips_na():
+def test_an_int_max_fold_with_a_missing_bar_is_missing():
+    # a missing input makes the period's max missing, whatever its placeholder holds
     schema = Schema('float64', 'float64', (('n', 'int64'),), 'datetime', None)
     t0 = EPOCHS[1]
     a = {'open': 1.0, 'high': 1.0, 'low': 1.0, 'close': 1.0, 'volume': 1.0, 'n': -5}
     b = dict(a, n=None)
     df = build.frame(schema, [a], [t0]).cumulate('5m', cumulators={'n': 'max'})
     df.append(build.frame(schema, [b], [t0 + 60 * NS]))
-    assert df.get_column('n').to_numpy(dtype='object').tolist() == [-5]
+    assert df.get_column('n').to_list() == [volas.NA]
+    batch = build.frame(schema, [a, b], [t0, t0 + 60 * NS]).cumulate('5m', cumulators={'n': 'max'})
+    assert batch.get_column('n').to_list() == [volas.NA]
 
 
-@_xfail('known all-nan-fold-extreme', 'an all-NaN period folds high / low to -inf / +inf')
 def test_an_all_nan_period_folds_to_nan():
     schema = Schema('float64', 'float64', (), 'datetime', None)
     row = {'open': None, 'high': None, 'low': None, 'close': None, 'volume': None}
     df = build.frame(schema, [row], [EPOCHS[1]]).cumulate('5m')
     assert np.isnan(df.get_column('high').to_numpy()[0])
+    assert np.isnan(df.get_column('low').to_numpy()[0])
 
 
 @_xfail('M5 windowed-drift', 'a windowed recursive column is not bit-exact with the unbounded frame')

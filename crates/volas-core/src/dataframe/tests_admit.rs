@@ -80,8 +80,8 @@ fn a_missing_column_becomes_missing_and_a_mistyped_one_is_rejected_whole() {
         assert!(!df.column(name).unwrap().is_valid(1), "{name}");
         assert!(df.column(name).unwrap().is_valid(0), "{name}");
     }
-    // a value of another dtype is never cast here (`admit` converts losslessly first):
-    // the replacement raises before its first write, even when a column before it fits
+    // a value of another dtype converts losslessly (as an append does); a lossy one
+    // raises before the first write, even when a column before it fits
     let before = snapshot(&df);
     let bad = DataFrame::new(
         vec!["f64".into(), "i64".into()],
@@ -90,11 +90,7 @@ fn a_missing_column_becomes_missing_and_a_mistyped_one_is_rejected_whole() {
     )
     .unwrap();
     let err = df.replace_last_row(&bad, 0).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("cannot replace a int64 cell with a float64 value"),
-        "{err}"
-    );
+    assert!(matches!(err, VolasError::DType(_)), "{err}");
     assert_eq!(snapshot(&df), before);
 }
 
@@ -109,9 +105,14 @@ fn replacing_needs_a_last_row_and_a_source_row() {
     let mut col = Column::f64(vec![]);
     assert!(col.set_last_from(&Column::f64(vec![1.0]), 0).is_err());
     col.set_last_na(); // no-op
-    assert!(Column::f64(vec![1.0])
-        .set_last_from(&Column::i64(vec![1]), 0)
-        .is_err());
+    // another dtype converts losslessly (as an append does); a lossy value raises
+    let mut f = Column::f64(vec![1.0]);
+    f.set_last_from(&Column::i64(vec![7]), 0).unwrap();
+    assert_eq!(f, Column::f64(vec![7.0]));
+    let mut i = Column::i64(vec![1]);
+    let err = i.set_last_from(&Column::f64(vec![1.5]), 0).unwrap_err();
+    assert!(matches!(err, VolasError::DType(_)), "{err}");
+    assert_eq!(i, Column::i64(vec![1]), "unchanged");
     let mut s = crate::strbuf::StrBuffer::from_vec(vec![]);
     s.set_last("x"); // no-op
     assert_eq!(s.len(), 0);
@@ -438,29 +439,6 @@ fn a_fold_that_overflows_changes_nothing() {
 }
 
 #[test]
-fn check_fold_follows_combine_at_for_every_dtype() {
-    use CombineOp::*;
-    let src = Column::i64(vec![i64::MAX, 1, (i32::MAX as i64) + 1]);
-    let cell = |c: &Column, ops: CombineOp, restart, rows: &[usize]| {
-        c.check_fold(0, ops, restart, rows.iter().map(|&r| (&src, r)))
-    };
-    assert!(cell(&Column::f64(vec![0.0]), Sum, false, &[0]).is_ok());
-    assert!(cell(&Column::f32(vec![0.0]), Sum, false, &[0]).is_ok());
-    assert!(cell(&Column::i64(vec![1]), Sum, false, &[0]).is_err());
-    assert!(cell(&Column::i64(vec![1]), Max, false, &[0]).is_ok());
-    assert!(cell(&Column::i64(vec![1]), Keep, false, &[0, 0]).is_ok());
-    assert!(cell(&Column::i64(vec![0]), Sum, true, &[0, 1]).is_err());
-    assert!(cell(&Column::i64(vec![0]), Keep, true, &[0, 1]).is_ok());
-    assert!(cell(&Column::i64(vec![0]), Sum, true, &[]).is_ok());
-    assert!(cell(&Column::i32(vec![0]), Replace, false, &[2]).is_err());
-    assert!(cell(&Column::i32(vec![0]), Max, true, &[2]).is_err());
-    assert!(cell(&Column::i32(vec![0]), Sum, false, &[1]).is_ok());
-    assert!(cell(&Column::datetime(vec![1]), Sum, false, &[0]).is_err());
-    assert!(cell(&Column::bool(vec![true]), Max, false, &[0]).is_err());
-    assert!(cell(&Column::str(vec!["a".into()]), Max, false, &[0]).is_err());
-}
-
-#[test]
 fn refolding_the_forming_row_is_the_period_reduce() {
     let ops = [
         (0, 0, CombineOp::Keep),
@@ -491,16 +469,17 @@ fn refolding_the_forming_row_is_the_period_reduce() {
     .unwrap();
     df.refold_forming_row(1, &period, &ops).unwrap();
     assert_eq!(df.column("first").unwrap().get_f64(1), 4.0);
-    assert_eq!(df.column("max").unwrap().get_f64(1), 2.0);
+    // a missing input makes the period's max missing (no skipped value)
+    assert!(df.column("max").unwrap().get_f64(1).is_nan());
     assert_eq!(df.column("sum").unwrap().get_f64(1), 0.875);
     // only the forming row went stale; the state before it is the column's state again
     assert_eq!(df.computed_resume_state("sum"), Some((&[0.5][..], 0)));
-    let bad = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["x".into()])], None).unwrap();
-    let mut s =
-        DataFrame::new(vec!["s".into()], vec![Column::str(vec!["a".into()])], None).unwrap();
-    assert!(s
-        .refold_forming_row(0, &bad, &[(0, 0, CombineOp::Keep)])
-        .is_err());
+    // a str column folds its first / last in place at the forming (last) row
+    let bars = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["x".into(), "y".into()])], None).unwrap();
+    let mut s = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["a".into()])], None).unwrap();
+    s.refold_forming_row(0, &bars, &[(0, 0, CombineOp::Replace)]).unwrap();
+    assert_eq!(s.column("s").unwrap().str_at(0), Some("y"));
+    assert!(s.refold_forming_row(0, &bars, &[(0, 0, CombineOp::Max)]).is_err()); // unsupported
 }
 
 #[test]

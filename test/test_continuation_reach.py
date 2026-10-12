@@ -20,6 +20,13 @@ COLS = {'open': _c + rng.normal(0, .3, N + 3), 'high': _c + 1 + rng.random(N + 3
 LINES = executable_lines()
 
 
+def _same(got, want):
+    """Equal cells, a missing cell (volas.NA / NaN) equal to a missing one."""
+    def cell(v):
+        return None if v is volas.NA or (isinstance(v, float) and v != v) else v
+    return [cell(v) for v in got] == [cell(v) for v in want]
+
+
 def frame(a, b):
     return volas.DataFrame({k: v[a:b] for k, v in COLS.items()}, index=list(range(a, b)))
 
@@ -32,14 +39,14 @@ def test_a_tail_slice_continues_exactly_or_not_at_all(line):
         pytest.skip('lookback beyond the fixture')
     base = frame(0, N)
     base[d]
-    want = frame(0, N + 2).exec(d)[-2:]
+    want = frame(0, N + 2).exec(d, dtype='object')[-2:]  # a bool line may be missing
     for keep in sorted({max(lb - 1, 1), max(lb, 1), lb + 1, lb + 2, N}):
         tail = base.iloc[N - keep:]
         cached = tail.is_computed(volas.directive_stringify(d))
         tail.append(frame(N, N + 2))
         if cached:
-            got = tail[d].to_numpy()[-2:]
-            assert np.array_equal(got, want, equal_nan=True), (d, keep, got, want)
+            got = tail[d].to_numpy(dtype='object')[-2:]
+            assert _same(got, want), (d, keep, got, want)
 
 
 @pytest.mark.parametrize('d', ['kcw:5', 'stoch_momentum:5', 'close+ema:3@open'])
@@ -52,5 +59,5 @@ def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
     whole = base.iloc[0:]
     assert whole.is_computed(name)
     whole.append(frame(N, N + 2))
-    assert np.array_equal(whole[d].to_numpy()[-2:], frame(0, N + 2).exec(d)[-2:], equal_nan=True)
+    assert _same(whole[d].to_numpy(dtype='object')[-2:], frame(0, N + 2).exec(d, dtype='object')[-2:])
     assert not base.iloc[1:].is_computed(name)

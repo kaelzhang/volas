@@ -25,6 +25,8 @@ import numpy as np
 import volas
 import volas_rs
 
+from . import observe
+
 ROOT = Path(__file__).resolve().parents[2]
 SPEC_RS = ROOT / 'crates/volas-directive/src/spec.rs'
 PARSER_RS = ROOT / 'crates/volas-directive/src/parser.rs'
@@ -214,11 +216,11 @@ def lines() -> tuple[Line, ...]:
         for spelling, suffix in [(f, s) for f in dict.fromkeys((form, explicit))
                                  for s in ('', '@close,open', '@close,volume')]:
             try:
-                values = fixture.exec(spelling + suffix)
+                values = observe.exec_values(fixture, spelling + suffix)
             except Exception:
                 continue
             line.form, line.series_suffix = spelling, suffix
-            line.kind = 'bool' if values.dtype == np.bool_ else 'num'
+            line.kind = 'bool' if values.dtype in (np.bool_, object) else 'num'
             break
         else:
             line.executes = False
@@ -246,8 +248,8 @@ def unbounded_memory() -> frozenset[str]:
         form = line.form + line.series_suffix
         try:
             start = 4 + 2 * volas.directive_lookback(form) + 2
-            a = np.asarray(base.exec(form), float)[start:]
-            b = np.asarray(jumped.exec(form), float)[start:]
+            a = base.exec(form, dtype='float64')[start:]
+            b = jumped.exec(form, dtype='float64')[start:]
         except Exception:
             continue
         # A relative 1e-9 slack: running-sum kernels keep a rounding residue of a row
@@ -268,8 +270,8 @@ def position_valued() -> frozenset[str]:
     for line in executable_lines():
         form = line.form + line.series_suffix
         try:
-            full = np.asarray(fixture.exec(form), float)[40:]
-            cut = np.asarray(tail.exec(form), float)[20:]
+            full = fixture.exec(form, dtype='float64')[40:]
+            cut = tail.exec(form, dtype='float64')[20:]
         except Exception:
             continue
         ok = np.isfinite(full) & np.isfinite(cut)

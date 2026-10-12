@@ -68,11 +68,11 @@ impl Column {
         if let (Column::Bool(a, av), Column::Bool(b, bv)) = (self, other) {
             let nulls = av.and(bv);
             return match op {
-                BinOp::Add => Ok(Column::bool_with(
+                BinOp::Add => Ok(Column::bool_masked(
                     a.iter().zip(b.iter()).map(|(&x, &y)| x || y).collect(),
                     nulls,
                 )),
-                BinOp::Mul => Ok(Column::bool_with(
+                BinOp::Mul => Ok(Column::bool_masked(
                     a.iter().zip(b.iter()).map(|(&x, &y)| x && y).collect(),
                     nulls,
                 )),
@@ -85,12 +85,12 @@ impl Column {
             DType::I64 => {
                 let nulls = self.combined_nulls(other);
                 let out = binary_kernel(&self.as_i64_vec()?, &other.as_i64_vec()?, op, &nulls)?;
-                Ok(Column::i64_with(out, nulls))
+                Ok(Column::i64_masked(out, nulls))
             }
             DType::I32 => {
                 let nulls = self.combined_nulls(other);
                 let out = binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op, &nulls)?;
-                Ok(Column::i32_with(out, nulls))
+                Ok(Column::i32_masked(out, nulls))
             }
             DType::F32 => Ok(Column::f32(float_kernel(&self.to_f32_vec(), &other.to_f32_vec(), op))),
             _ => Ok(Column::f64(float_kernel(
@@ -151,9 +151,9 @@ impl Column {
             // i32 // i32 stays i32; any i64 operand widens to i64.
             Ok(if st == DType::I32 {
                 let narrow = out.iter().map(|&x| i32::try_from(x).map_err(|_| fail()));
-                Column::i32_with(narrow.collect::<Result<_>>()?, val)
+                Column::i32_masked(narrow.collect::<Result<_>>()?, val)
             } else {
-                Column::i64_with(out, val)
+                Column::i64_masked(out, val)
             })
         } else {
             let (a, b) = (self.to_f64_domain("`//`")?, other.to_f64_domain("`//`")?);
@@ -172,36 +172,55 @@ impl Column {
     /// (e.g. `str` vs a number) is a [`VolasError::DType`]; unequal lengths are a
     /// [`VolasError::Shape`].
     pub fn compare(&self, other: &Column, op: CmpOp) -> Result<Column> {
+        let order = self.order_rows(other)?;
+        Ok(Column::bool(
+            order
+                .iter()
+                .map(|o| match o {
+                    Some(o) => op.matches(*o),
+                    None => op == CmpOp::Ne, // IEEE: only `!=` holds against a missing side
+                })
+                .collect(),
+        ))
+    }
+
+    /// The exact order of `self[i]` against `other[i]` for every row, `None` where
+    /// either side is missing — the one comparison owner: `str` lexically,
+    /// `datetime` by instant, `bool` with `false < true`, and numeric (or bool vs
+    /// numeric) pairs EXACTLY (contract #26): two integer-like sides as `i64`, an
+    /// integer against a float by exact order (no float64 round trip, so
+    /// `2^53 + 1 > 2^53`), float against float by value. [`compare`](Self::compare)
+    /// maps it to IEEE booleans; a directive comparison keeps `None` as a missing
+    /// truth (contract #27). Two incompatible kinds are a [`VolasError::DType`];
+    /// unequal lengths a [`VolasError::Shape`].
+    pub fn order_rows(&self, other: &Column) -> Result<Vec<Option<Ordering>>> {
         let n = self.require_same_len(other)?;
         let numeric_like = |c: &Column| c.dtype().is_numeric() || matches!(c, Column::Bool(..));
-        let out = match (self, other) {
-            (Column::Str(a, av), Column::Str(b, bv)) => cmp_typed(n, op, |i| {
+        let rows = |key: &dyn Fn(usize) -> Option<Ordering>| (0..n).map(key).collect();
+        Ok(match (self, other) {
+            (Column::Str(a, av), Column::Str(b, bv)) => rows(&|i| {
                 // SAFETY: `i < n` and `require_same_len` proved both columns have length `n`.
                 (av.is_valid(i) && bv.is_valid(i))
                     .then(|| unsafe { a.get_unchecked(i).cmp(b.get_unchecked(i)) })
             }),
-            (Column::Datetime(a), Column::Datetime(b)) => cmp_typed(n, op, |i| {
-                (a[i] != i64::MIN && b[i] != i64::MIN).then(|| a[i].cmp(&b[i]))
-            }),
-            (Column::Bool(a, av), Column::Bool(b, bv)) => cmp_typed(n, op, |i| {
-                (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i]))
-            }),
-            // numeric (and bool-vs-numeric) compare EXACTLY (contract #26): two
-            // integer-like sides as i64, an integer against a float by exact order
-            // (no float64 round trip, so 2^53 + 1 > 2^53); only float vs float is
-            // IEEE. A missing side follows IEEE (`!=` true, else false).
+            (Column::Datetime(a), Column::Datetime(b)) => {
+                rows(&|i| (a[i] != i64::MIN && b[i] != i64::MIN).then(|| a[i].cmp(&b[i])))
+            }
+            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+                rows(&|i| (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i])))
+            }
             (a, b) if numeric_like(a) && numeric_like(b) => match (a.is_float_like(), b.is_float_like()) {
                 (true, true) => {
                     let (x, y) = (a.to_f64_vec(), b.to_f64_vec());
-                    (0..n).map(|i| op.matches_f64(x[i], y[i])).collect()
+                    rows(&|i| x[i].partial_cmp(&y[i]))
                 }
-                (false, false) => cmp_typed(n, op, |i| {
+                (false, false) => rows(&|i| {
                     (a.is_valid(i) && b.is_valid(i)).then(|| a.get_i64(i).cmp(&b.get_i64(i)))
                 }),
-                (false, true) => cmp_typed(n, op, |i| {
-                    a.is_valid(i).then(|| cmp_i64_f64(a.get_i64(i), b.get_f64(i))).flatten()
-                }),
-                (true, false) => cmp_typed(n, op, |i| {
+                (false, true) => {
+                    rows(&|i| a.is_valid(i).then(|| cmp_i64_f64(a.get_i64(i), b.get_f64(i))).flatten())
+                }
+                (true, false) => rows(&|i| {
                     b.is_valid(i)
                         .then(|| cmp_i64_f64(b.get_i64(i), a.get_f64(i)).map(Ordering::reverse))
                         .flatten()
@@ -214,21 +233,25 @@ impl Column {
                     other.dtype()
                 )))
             }
-        };
-        Ok(Column::bool(out))
+        })
     }
 
     /// A column of per-column reduction results (a DataFrame `sum` / `min` / …),
     /// each part `(dtype it contributes, value)`. The column's dtype is the
-    /// supertype of the parts (all int64 → int64, int32 → int32, any float →
+    /// supertype of the parts (all int64 → int64, int32 → int32, all bool → bool, any float →
     /// float), and every value converts to it losslessly (contract #20 / #26): an
     /// integer past the float's exact range raises rather than rounding. A `NaN`
     /// value (an all-missing reduction) becomes the target's missing cell.
     pub fn from_scalars(parts: &[(DType, Scalar)]) -> Result<Column> {
-        let target = parts.iter().map(|p| p.0).reduce(binary_supertype).unwrap_or(DType::F64);
+        let target = if !parts.is_empty() && parts.iter().all(|p| p.0 == DType::Bool) {
+            DType::Bool // bool min / max stay bool (pandas)
+        } else {
+            parts.iter().map(|p| p.0).reduce(binary_supertype).unwrap_or(DType::F64)
+        };
         let mut out = Column::na_of(target, 0);
         for &(_, s) in parts {
             let cell = match s {
+                Scalar::F64(x) if x.is_nan() => Column::na_of(target, 1),
                 Scalar::F64(x) => Column::f64(vec![x]),
                 Scalar::F32(x) => Column::f32(vec![x]),
                 Scalar::I64(x) => Column::i64(vec![x]),
@@ -270,8 +293,7 @@ impl Column {
     /// [`VolasError::Shape`] error.
     pub fn logical(&self, other: &Column, op: BoolOp) -> Result<Column> {
         let n = self.require_same_len(other)?;
-        Ok(from_option_bools(
-            n,
+        Ok(Column::bool_from_options(
             (0..n).map(|i| match (op, self.truth_at(i), other.truth_at(i)) {
                 (BoolOp::And, Some(false), _) | (BoolOp::And, _, Some(false)) => Some(false),
                 (BoolOp::Or, Some(true), _) | (BoolOp::Or, _, Some(true)) => Some(true),
@@ -286,7 +308,7 @@ impl Column {
     /// Logical NOT (pandas `~`) over [`truth_at`](Self::truth_at): NA in -> NA out.
     pub fn not(&self) -> Column {
         let n = self.len();
-        from_option_bools(n, (0..n).map(|i| self.truth_at(i).map(|a| !a)))
+        Column::bool_from_options((0..n).map(|i| self.truth_at(i).map(|a| !a)))
     }
 
     /// The truth value of element `i`, or `None` when it is missing — the one

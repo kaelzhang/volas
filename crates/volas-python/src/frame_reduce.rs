@@ -25,7 +25,7 @@ impl PyDataFrame {
         })
     }
 
-    /// Per-column sum (pandas `df.sum()`; non-numeric skipped), in the columns'
+    /// Per-column sum (pandas `df.sum()`; str / datetime skipped, bool counts), in the columns'
     /// own dtype: an all-int frame sums in int64, exactly (contract #26), and an
     /// int64 overflow raises (#25).
     pub(crate) fn sum(&self) -> PyResult<PySeries> {
@@ -103,23 +103,20 @@ impl PyDataFrame {
         Self::idx_extreme(py, &self.read()?, false)
     }
 
-    // --- column-wise reductions (-> a Series indexed by column name; numeric
-    // columns only, pandas df.sem() etc.). -------------------------------------
+    // --- column-wise reductions (-> a Series indexed by column name; numeric and
+    // bool columns, pandas df.sem() etc.). -------------------------------------
 
     /// Per-column standard error of the mean (pandas `sem`).
     pub(crate) fn sem(&self) -> PyResult<PySeries> {
-        Self::guard_f64_domain(&self.read()?, "sem")?;
-        self.reduce_cols(|c| stats::sem(&c.to_f64_vec()))
+        self.reduce_cols("sem", stats::sem)
     }
     /// Per-column unbiased skewness (pandas `skew`).
     pub(crate) fn skew(&self) -> PyResult<PySeries> {
-        Self::guard_f64_domain(&self.read()?, "skew")?;
-        self.reduce_cols(|c| stats::skew(&c.to_f64_vec()))
+        self.reduce_cols("skew", stats::skew)
     }
     /// Per-column unbiased excess kurtosis (pandas `kurt`).
     pub(crate) fn kurt(&self) -> PyResult<PySeries> {
-        Self::guard_f64_domain(&self.read()?, "kurt")?;
-        self.reduce_cols(|c| stats::kurt(&c.to_f64_vec()))
+        self.reduce_cols("kurt", stats::kurt)
     }
 
     /// Per-column summary statistics over the numeric columns (pandas `describe`):
@@ -156,17 +153,17 @@ impl PyDataFrame {
     /// Pairwise Pearson correlation matrix over the numeric columns (pandas
     /// `corr`): a square frame indexed and labelled by those column names.
     pub(crate) fn corr(&self) -> PyResult<PyDataFrame> {
-        self.corr_cov(stats::corr)
+        self.corr_cov("corr", stats::corr)
     }
 
     /// Pairwise sample covariance matrix over the numeric columns (pandas `cov`).
     pub(crate) fn cov(&self) -> PyResult<PyDataFrame> {
-        self.corr_cov(stats::cov)
+        self.corr_cov("cov", stats::cov)
     }
 }
 
 impl PyDataFrame {
-    /// Per-numeric-column (`DType::is_numeric`, like `reduce_cols`) typed reduce:
+    /// Per-reducible-column (`frame::reduces`, like `reduce_cols`) typed reduce:
     /// `op` gives each column's `(contributed dtype, value)` and the result Series
     /// is assembled by the core [`Column::from_scalars`] — the supertype of the
     /// parts, each value converted losslessly (no float64 round trip).
@@ -176,7 +173,7 @@ impl PyDataFrame {
         let mut names = Vec::new();
         let mut parts = Vec::new();
         for (name, col) in df.names().iter().zip(df.columns()) {
-            if col.dtype().is_numeric() {
+            if crate::frame::reduces(col) {
                 names.push(name.clone());
                 parts.push(op(col).map_err(pyerr)?);
             }
@@ -185,14 +182,6 @@ impl PyDataFrame {
         Ok(PySeries { inner: Series::new(None, data, Arc::new(Index::str(names))) })
     }
 
-    /// Raise when a numeric column holds an int64 past 2^53 (contract #26) — the
-    /// float64-domain check ahead of a `reduce_cols` float64 statistic.
-    fn guard_f64_domain(view: &Fresh<'_>, op: &str) -> PyResult<()> {
-        for col in view.columns().iter().filter(|c| c.dtype().is_numeric()) {
-            col.to_f64_domain(op).map_err(pyerr)?;
-        }
-        Ok(())
-    }
 
     /// Per-numeric-column reduce via a fallible Series-level float64 helper ->
     /// f64 Series keyed by column name (non-numeric columns are skipped).
@@ -203,7 +192,7 @@ impl PyDataFrame {
         let mut names = Vec::new();
         let mut vals = Vec::new();
         for (name, col) in df.names().iter().zip(df.columns()) {
-            if col.require_numeric().is_ok() {
+            if crate::frame::reduces(col) {
                 let s = PySeries {
                     inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
                 };
@@ -222,7 +211,7 @@ impl PyDataFrame {
     fn bool_reduce(df: &Fresh<'_>, want_any: bool) -> PySeries {
         let (mut names, mut vals) = (Vec::new(), Vec::new());
         for (name, c) in df.names().iter().zip(df.columns()) {
-            if c.require_numeric().is_ok() {
+            if crate::frame::reduces(c) {
                 let mut truth = (0..c.len()).filter_map(|i| c.truth_at(i));
                 names.push(name.clone());
                 vals.push(if want_any { truth.any(|t| t) } else { truth.all(|t| t) });

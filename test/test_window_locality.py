@@ -275,7 +275,7 @@ def _frame(mutate=None, start=0):
 
 
 def _exec(directive, mutate=None, start=0):
-    return np.asarray(_frame(mutate, start).exec(directive), dtype=float)
+    return np.asarray(_frame(mutate, start).exec(directive, dtype='float64'), dtype=float)
 
 
 def test_registry_fully_classified():
@@ -329,8 +329,6 @@ READS = {
     "ichimoku.senkou_a": list(range(26, 52)),
     "ichimoku.senkou_b": list(range(26, 78)),
 }
-# Boolean lines carry no missing value yet: a missing row reads as false.
-_BOOLEAN = {"increase", "repeat", "style", "style.bearish", "style.bullish"}
 
 
 def _reads(key):
@@ -338,12 +336,6 @@ def _reads(key):
         return READS[key]
     span = volas.directive_lookback(_directive(key)) + 1 + EXTRA_REACH.get(_command(key), 0)
     return list(range(span))
-
-
-def _boolean_xfail(keys):
-    why = "M12 boolean-validity: a boolean line has no missing value to carry"
-    return [pytest.param(k, marks=pytest.mark.xfail(strict=True, reason=why)) if k in _BOOLEAN else k
-            for k in keys]
 
 
 def _base_for(key):
@@ -357,10 +349,10 @@ def _exec_missing(directive, columns, rows=(K,), base=None):
     data = {k: v.copy() for k, v in (BASE if base is None else base).items()}
     for k in columns:
         data[k][list(rows)] = np.nan
-    return np.asarray(DataFrame(data).exec(directive), dtype=float)
+    return np.asarray(DataFrame(data).exec(directive, dtype='float64'), dtype=float)
 
 
-@pytest.mark.parametrize("key", _boolean_xfail(_FINITE_KEYS))
+@pytest.mark.parametrize("key", _FINITE_KEYS)
 def test_a_window_holding_a_missing_row_is_missing(key):
     """Every output whose definition reads the missing row is NaN — an extremum, a
     position, a count or a per-row term never steps over it."""
@@ -369,22 +361,12 @@ def test_a_window_holding_a_missing_row_is_missing(key):
     assert np.isnan(got[rows]).all(), f"finite at {[r for r in rows if not np.isnan(got[r])]}"
 
 
-_BOOLEAN_READS = {("increase", "close"), ("repeat", "close"), ("style", "open"), ("style", "close"),
-                  ("style.bearish", "open"), ("style.bearish", "close"), ("style.bullish", "open"),
-                  ("style.bullish", "close")}
-
-
-@pytest.mark.parametrize("key,column", [
-    pytest.param(k, c, marks=pytest.mark.xfail(
-        strict=True, reason="M12 boolean-validity: a missing input reads as false")) if (k, c) in _BOOLEAN_READS
-    else (k, c)
-    for k in _FINITE_KEYS for c in PRICE_VOLUME
-])
+@pytest.mark.parametrize("key,column", [(k, c) for k in _FINITE_KEYS for c in PRICE_VOLUME])
 def test_a_missing_input_is_never_laundered_into_a_value(key, column):
     """With one input missing at one row, every output is either NaN or exactly what
     clean data gives: a missing value never turns into a different finite one."""
     directive, base = _directive(key), _base_for(key)
-    clean = np.asarray(DataFrame(base).exec(directive), dtype=float)
+    clean = np.asarray(DataFrame(base).exec(directive, dtype='float64'), dtype=float)
     # a candle-colour line: one white and one black bar missing, so either colour shows
     rows = (K, K + 1) if _command(key) == "style" else (K,)
     got = _exec_missing(directive, [column], rows, base=base)
@@ -445,7 +427,7 @@ def test_window_holding_inf_takes_the_formula_value(directive, want):
 
 @pytest.mark.parametrize("directive", ["sum:3", "ma:3", "var:3", "stddev:3", "wma:3", "linearreg:3"])
 def test_window_holding_nan_is_nan_then_recovers(directive):
-    got = np.asarray(_closes([1, 2, np.nan, 4, 5, 6]).exec(directive), float)
+    got = np.asarray(_closes([1, 2, np.nan, 4, 5, 6]).exec(directive, dtype='float64'), float)
     assert np.isnan(got[2:5]).all()
     assert np.isfinite(got[5])
 
@@ -493,10 +475,10 @@ def test_mfi_flat_bars_next_to_an_infinity():
     n = 30
     tp = np.r_[np.full(10, 100.0), np.linspace(100, 110, n - 10)]
     data = dict(high=tp + 1, low=tp - 1, close=tp.copy(), volume=np.full(n, 50.0))
-    clean = np.asarray(DataFrame(data).exec("mfi:5"), float)
+    clean = np.asarray(DataFrame(data).exec("mfi:5", dtype='float64'), float)
     data["close"] = data["close"].copy()
     data["close"][2] = np.inf
-    got = np.asarray(DataFrame(data).exec("mfi:5"), float)
+    got = np.asarray(DataFrame(data).exec("mfi:5", dtype='float64'), float)
     # Only bar 2's flow is non-finite (bar 3's typical price is below +inf, a finite
     # negative flow); the 5-flow windows holding it end at rows 5 and 6 (row 5 is the
     # first output), and the flat bars around it take the zero-flow branch.
@@ -522,7 +504,7 @@ def test_incremental_refresh_after_a_leading_gap_matches_a_full_recompute(key):
         df.append(DataFrame({k: v[i:i + 1] for k, v in data.items()}))
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
-    full = np.asarray(DataFrame(data).exec(directive), dtype=float)
+    full = np.asarray(DataFrame(data).exec(directive, dtype='float64'), dtype=float)
     np.testing.assert_allclose(got, full, rtol=1e-9, atol=1e-9)
 
 
@@ -541,7 +523,7 @@ def _cdl(directive, column=None, bad=None):
     data = {k: v.copy() for k, v in CDL_BASE.items()}
     if column is not None:
         data[column][K] = bad
-    return np.asarray(DataFrame(data).exec(directive), dtype=float)
+    return np.asarray(DataFrame(data).exec(directive, dtype='float64'), dtype=float)
 
 
 def test_every_candle_pattern_is_covered():

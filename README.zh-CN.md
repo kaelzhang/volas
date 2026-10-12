@@ -239,6 +239,8 @@ df['ma:2']
   - `'max'`——最大值
   - `'min'`——最小值
   - `'sum'`——求和
+
+  缺失值从不被跳过：只要桶内任一值缺失，该列的聚合结果（`'first'` / `'last'` / `'max'` / `'min'` / `'sum'` 皆然）即为缺失（全缺失的桶也是缺失，从不得到 `±inf`），实时折叠与批量 `cumulate` 结果一致。`datetime` 列不支持 `'sum'`，`bool` / `str` 列只支持 `'first'` / `'last'`；不支持的组合在构造 frame 时即被拒绝。
 - **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
 - **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：隐藏历史的 margin（`window + max_lookback`），使缓存指标在自动丢弃旧行前后保持正确——递归类指标（EMA/Wilder/ATR/RSI/MACD）**逐位一致（bit-exact）**，有限窗口类（ma/wma/trima/stddev/…）与无界 frame 在浮点容差内一致（~1e-13）。传一个 **int** 直接声明你会用到的最大指标 lookback，或传一个**指标 directive 列表**从它们中最大的 lookback 推导（例如 `['atr:14', 'ma:50']` → margin 49），省去手算复合指标的预热长度。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）会被拒绝。margin 给得过小会**静默破坏**该保证。
 
@@ -520,8 +522,7 @@ pdf = pl.from_dataframe(df)  # polars 经同一协议读取
 `DatetimeIndex` 可往返；反向桥接是 [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe)。
 
 - **dtype_backend?** `str = 'numpy'` 缺失值如何带入 pandas：
-  - `'numpy'`——生态兼容性最好的形式：带缺失值的 int / bool 列变成 `float64` /
-    `object` + `NaN`（与 `pandas.Int64.to_numpy()` 一致）。
+  - `'numpy'`——生态兼容性最好的形式：带缺失值的 int 列变成 `float64` + `NaN`（与 `pandas.Int64.to_numpy()` 一致）；带缺失值的 bool 列变成 masked `boolean`（`pd.NA`），绝不会是会被当作真值的 `NaN`。
   - `'numpy_nullable'`——忠实、无损的 masked 往返：int / bool / str 列保持
     `Int64` / `boolean` / `string`，空洞为 `pandas.NA`。
 
@@ -645,8 +646,7 @@ series.to_numpy(dtype='int64')
 
 注意：
 
-- 默认（不传 `dtype`、不传 `na_value`）是按 dtype 的导出：缺失的 int / bool / datetime
-  单元格折叠为 `NaN` / `NaT`（NumPy 没有 `NA`），稠密列保留原生 dtype。float `NaN` 是带内值，因此 float 列转整型 dtype 时只要存在 `NaN` 同样会抛错（请传 `na_value`）。
+- 默认（不传 `dtype`、不传 `na_value`）是按 dtype 的导出：缺失的 int / datetime 单元格折叠为 `NaN` / `NaT`（NumPy 没有 `NA`），稠密列保留原生 dtype。float `NaN` 是带内值，因此 float 列转整型 dtype 时只要存在 `NaN` 同样会抛错（请传 `na_value`）。带缺失值的 **bool** 列没有默认导出，会**抛错**——`nan` / `None` 占位会被 `np.where` 或布尔索引当作 `True` / `False`；请传 `na_value=`（例如 `False`，得到 bool 数组）、`dtype='float64'`（`NaN`）或 `dtype='object'`（`volas.NA`）。`np.asarray(series)` 与 `df.exec(directive, dtype=..., na_value=...)` 遵循同一规则。
 - 与 pandas 一致，`na_value` 只改变缺失单元格——不给显式 `dtype` 时，带 NA 的 int 列仍导出为 `float64`（默认），`na_value` 只是填充那些 `NaN` 槽。
 - 若需要**无损**保留原生 dtype 与缺失位置（不填充、不折叠 float），用 Arrow 路径（`series.to_arrow()` 携带空值位图）或 `series.to_pandas(dtype_backend='numpy_nullable')`；单独取 NA 掩码用 `series.isna().to_numpy()`。
 

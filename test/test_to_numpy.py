@@ -47,7 +47,7 @@ def test_dataframe_to_numpy_int_bool_na_is_nan():
     assert np.isnan(arr[1]).all()                       # NA row -> [nan, nan], not [0, 0]
     assert arr[2, 0] == 3.0 and arr[2, 1] == 0.0        # b[2] is False -> a real 0.0, not NA
     # parity with the (already-correct) 1-D Series export
-    assert np.isnan(df['i'].to_numpy()[1]) and np.isnan(df['b'].to_numpy()[1])
+    assert np.isnan(df['i'].to_numpy()[1]) and np.isnan(df['b'].to_numpy(dtype='float64')[1])
 
 
 def test_dataframe_to_numpy_dtype_arg_keeps_na_as_nan():

@@ -94,6 +94,12 @@ Which gets the 2-period simple moving average on column `"close"`.
   - `'max'` — the maximum
   - `'min'` — the minimum
   - `'sum'` — the sum
+
+  A missing value is never skipped: every aggregate is missing as soon as any value
+  in the bucket is (an all-missing bucket too — never `±inf`); the live fold and the
+  batch `cumulate` agree. A `datetime` column has no `'sum'`, and a `bool` / `str`
+  column only `'first'` / `'last'`; an unsupported pair is rejected when the frame
+  is built (see [Cumulation](cumulation.md)).
 - **window** `Optional[int] = None` Make this a **bounded rolling-window** frame
   showing only the last `window` rows (see [Bounded rolling window](#bounded-rolling-window)).
   Requires `max_lookback`.
@@ -413,6 +419,10 @@ Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
   - `'min'` — the minimum
   - `'sum'` — the sum
 
+  Every aggregate of a bucket holding a missing value is missing, and an aggregator
+  the column's dtype does not support raises up front (see
+  [Cumulation](cumulation.md)).
+
 ```py
 # from 1-minute klines to 5-minute klines
 five_minute = one_minute.cumulate('5m')
@@ -557,8 +567,8 @@ zone — see [Datetime columns are UTC instants](interop.md#datetime-columns-are
 The reverse bridge is [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe).
 
 - **dtype_backend?** `str = 'numpy'` how a missing value is carried into pandas:
-  - `'numpy'` — the most ecosystem-compatible form: an int / bool column with a missing
-    value becomes `float64` / `object` with `NaN` (like `pandas.Int64.to_numpy()`).
+  - `'numpy'` — the most ecosystem-compatible form: an int column with a missing
+    value becomes `float64` with `NaN` (like `pandas.Int64.to_numpy()`); a bool column with a missing value becomes the masked `boolean` dtype (`pd.NA`), never a truthy `NaN`.
   - `'numpy_nullable'` — a faithful, lossless masked round-trip: an int / bool / str
     column stays `Int64` / `boolean` / `string` with the hole as `pandas.NA`.
 
@@ -703,8 +713,12 @@ series.to_numpy(dtype='int64')
 
 Notes:
 - The default (no `dtype`, no `na_value`) is the dtype-specific export: a missing
-  int / bool / datetime cell collapses to `NaN` / `NaT` (NumPy has no `NA`), while a
-  dense column keeps its native dtype. A float `NaN` is in-band, so a float column
+  int / datetime cell collapses to `NaN` / `NaT` (NumPy has no `NA`), while a dense
+  column keeps its native dtype. A **bool** column with a missing cell has no default
+  export and **raises** — a `nan` / `None` placeholder would be read as `True` /
+  `False` by `np.where` or boolean indexing; pass `na_value=` (e.g. `False`, a bool
+  array), `dtype='float64'` (`NaN`) or `dtype='object'` (`volas.NA`). The same rule
+  covers `np.asarray(series)` and `df.exec(directive, dtype=..., na_value=...)`. A float `NaN` is in-band, so a float column
   cast to an integer dtype likewise raises when any value is `NaN` (pass `na_value`).
 - Like pandas, `na_value` only changes the missing cells — without an explicit `dtype`
   an int column with NA still exports `float64` (the default), and `na_value` simply

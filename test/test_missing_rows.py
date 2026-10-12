@@ -140,7 +140,7 @@ def _deleted(directive, data, inputs):
         missing |= np.isnan(data[col])
     kept = ~missing
     out = np.full(N, np.nan)
-    out[kept] = np.asarray(DataFrame({k: v[kept] for k, v in data.items()}).exec(directive), float)
+    out[kept] = np.asarray(DataFrame({k: v[kept] for k, v in data.items()}).exec(directive, dtype='float64'), float)
     return out
 
 
@@ -148,14 +148,14 @@ def _deleted(directive, data, inputs):
 @pytest.mark.parametrize("directive", sorted(CASES))
 def test_missing_rows_are_deleted_rows(directive, pattern):
     data = _mutated(pattern)
-    got = np.asarray(DataFrame(data).exec(directive), float)
+    got = np.asarray(DataFrame(data).exec(directive, dtype='float64'), float)
     _bit_exact(got, _deleted(directive, data, CASES[directive]), f"{directive} [{pattern}]")
 
 
 def test_recursion_continues_from_the_last_complete_row():
     close = np.arange(10.0, 30.0)
     close[8] = np.nan
-    got = np.asarray(DataFrame({"close": close}).exec("ema:3"), float)
+    got = np.asarray(DataFrame({"close": close}).exec("ema:3", dtype='float64'), float)
     assert np.isnan(got[8])
     # the row-7 state (16.0) stepped over close[9] = 19 with k = 0.5
     assert got[9] == 17.5
@@ -165,12 +165,12 @@ def test_recursion_continues_from_the_last_complete_row():
 def test_an_infinity_is_a_value_not_a_missing_row():
     close = np.arange(10.0, 30.0)
     close[8] = np.inf
-    got = np.asarray(DataFrame({"close": close}).exec("ema:3"), float)
+    got = np.asarray(DataFrame({"close": close}).exec("ema:3", dtype='float64'), float)
     assert got[8] == np.inf
     # it is kept, not skipped: an RSI over it is NaN from there on, on every path
     close = BASE["close"].copy()
     close[100] = np.inf
-    got = np.asarray(DataFrame({"close": close}).exec("stochrsi.d"), float)
+    got = np.asarray(DataFrame({"close": close}).exec("stochrsi.d", dtype='float64'), float)
     assert np.isfinite(got[50:100]).all() and np.isnan(got[101:]).all()
 
 
@@ -201,12 +201,12 @@ def test_every_recursive_command_is_covered():
 @pytest.mark.parametrize("directive", sorted(CASES))
 def test_inputs_are_what_the_command_reads(directive):
     """`INPUTS` is right: a NaN in an input column is a missing row, elsewhere it is not."""
-    clean = np.asarray(DataFrame(BASE).exec(directive), float)
+    clean = np.asarray(DataFrame(BASE).exec(directive, dtype='float64'), float)
     row = 150
     for col in OHLCV:
         data = {k: v.copy() for k, v in BASE.items()}
         data[col][row] = np.nan
-        got = np.asarray(DataFrame(data).exec(directive), float)
+        got = np.asarray(DataFrame(data).exec(directive, dtype='float64'), float)
         if col in CASES[directive]:
             assert np.isnan(got[row]), f"{directive}: NaN {col} must be a missing row"
         else:
@@ -278,8 +278,8 @@ def test_a_frame_whose_columns_are_known_to_miss_rows(directive):
     """Once a frame column remembers it holds a NaN, the command skips its in-place run
     and goes to the complete rows straight away — with the same result."""
     df = DataFrame(_mutated("lead_and_interior"))
-    first = np.asarray(df.exec(directive), float)  # the columns' NaN facts are now known
-    _bit_exact(np.asarray(df.exec(directive), float), first, directive)
+    first = np.asarray(df.exec(directive, dtype='float64'), float)  # the columns' NaN facts are now known
+    _bit_exact(np.asarray(df.exec(directive, dtype='float64'), float), first, directive)
 
 
 def _fine(n_bars, missing_periods, missing_fine):

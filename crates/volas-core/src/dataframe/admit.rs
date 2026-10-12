@@ -13,7 +13,6 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-#[cfg(doc)]
 use crate::column::Column;
 use crate::column::CombineOp;
 use crate::error::{Result, VolasError};
@@ -338,12 +337,8 @@ impl DataFrame {
     /// directive (F64 indicator / Bool mask) by a cheap stale placeholder its refresh
     /// overwrites, a data column by a dtype-preserving missing value.
     fn pad_rows(&mut self, pos: usize, n: usize) -> Result<()> {
-        if self.computed.contains_key(&self.names[pos]) {
-            self.columns[pos].append_missing(n)
-        } else {
-            self.columns[pos].append_na(n);
-            Ok(())
-        }
+        self.columns[pos].append_na(n);
+        Ok(())
     }
 
     /// Replace the last row whole with `src`'s row `src_row`, in place: each data column
@@ -366,11 +361,10 @@ impl DataFrame {
         let leads = self.leads_with(src);
         for pos in 0..self.columns.len() {
             if let Some(j) = Self::source_of(&self.names[pos], pos, src, leads) {
-                let (to, from) = (self.columns[pos].dtype(), src.columns[j].dtype());
-                if to != from && !self.computed.contains_key(&self.names[pos]) {
-                    return Err(VolasError::DType(format!(
-                        "cannot replace a {to} cell with a {from} value"
-                    )));
+                let to = self.columns[pos].dtype();
+                if src.columns[j].dtype() != to && !self.computed.contains_key(&self.names[pos]) {
+                    // a differently typed value converts losslessly (as an append does)
+                    src.columns[j].slice(src_row, src_row + 1).convert_lossless(to)?;
                 }
             }
         }
@@ -409,10 +403,10 @@ impl DataFrame {
     /// Fold `src[src_row]` into the forming aggregate at `row`, in place, per the
     /// `(dst_col, src_col, op)` plan — the allocation-free live tf-fold. Each cell is
     /// combined through [`Column::combine_at`], after every column's fold has been
-    /// checked ([`Column::check_fold`]), so a fold that overflows changes nothing. Only
-    /// the forming row changed: it goes stale while each cached column keeps its carried
-    /// states. The caller guarantees every `op`'s column is fold-eligible (numeric /
-    /// datetime) and that `src` has this frame's dtypes.
+    /// checked ([`Column::check_fold`]), so a fold that fails changes nothing. Only the
+    /// forming row changed: it goes stale while each cached column keeps its carried
+    /// states. The caller guarantees each `op` is supported for its column's dtype
+    /// ([`CombineOp::supports`]); an unsupported pair is the fold's error.
     pub fn fold_forming_row(
         &mut self,
         row: usize,
@@ -421,9 +415,9 @@ impl DataFrame {
         ops: &[(usize, usize, CombineOp)],
     ) -> Result<()> {
         for &(dst_col, src_col, op) in ops {
-            let dst = &self.columns[dst_col];
-            if !dst.dtype().is_float() {
-                dst.check_fold(row, op, false, [(&src.columns[src_col], src_row)])?;
+            let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
+            if !cannot_fail(dst, from) {
+                dst.check_fold(row, op, false, [(from, src_row)])?;
             }
         }
         for &(dst_col, src_col, op) in ops {
@@ -437,8 +431,8 @@ impl DataFrame {
 
     /// Check, writing nothing, that re-cumulating the forming row `row` from `src`'s rows
     /// with `last`'s row 0 in place of `src`'s last row (a re-sent bar: a column `last`
-    /// lacks keeps `src`'s value) stays in range — so the caller can check the fold
-    /// before it replaces that row in `src`. Float columns are not looked at.
+    /// lacks keeps `src`'s value) succeeds — so the caller can check the fold before
+    /// it replaces that row in `src`.
     pub fn check_refold(
         &self,
         row: usize,
@@ -450,27 +444,25 @@ impl DataFrame {
             return Ok(());
         };
         for &(dst_col, src_col, op) in ops {
-            let dst = &self.columns[dst_col];
-            if dst.dtype().is_float() {
-                continue;
-            }
-            let from = &src.columns[src_col];
+            let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
             let tail = match last.column_pos(&src.names[src_col]) {
                 Some(j) => (&last.columns[j], 0),
                 None => (from, h),
             };
+            if cannot_fail(dst, from) && cannot_fail(dst, tail.0) {
+                continue;
+            }
             dst.check_fold(row, op, true, (0..h).map(|r| (from, r)).chain([tail]))?;
         }
         Ok(())
     }
 
     /// Re-cumulate the forming aggregate at `row` from all of `src`'s rows, in place, per
-    /// the fold plan `ops` (as [`fold_forming_row`](Self::fold_forming_row)): the first
-    /// row initializes each cell ([`Column::init_at`]), every later one folds in
-    /// ([`Column::combine_at`]) — exactly the batch reduce of the period, with no
-    /// allocation. Used when a bar already folded in is re-sent with new values (a
-    /// max / min cannot be un-combined). Every column's fold is checked first, so a
-    /// fold that overflows changes nothing. Only that row changed, so each cached column
+    /// the fold plan `ops` (as [`fold_forming_row`](Self::fold_forming_row)), one pass
+    /// per column ([`Column::reduce_into`]) — exactly the batch reduce of the period,
+    /// with no allocation. Used when a bar already folded in is re-sent with new values
+    /// (a max / min cannot be un-combined). Every column's fold is checked first, so a
+    /// fold that fails changes nothing. Only that row changed, so each cached column
     /// keeps what it carries and goes stale from it.
     pub fn refold_forming_row(
         &mut self,
@@ -480,16 +472,12 @@ impl DataFrame {
     ) -> Result<()> {
         for &(dst_col, src_col, op) in ops {
             let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
-            if !dst.dtype().is_float() {
+            if !cannot_fail(dst, from) {
                 dst.check_fold(row, op, true, (0..src.height).map(|r| (from, r)))?;
             }
         }
         for &(dst_col, src_col, op) in ops {
-            let (dst, from) = (&mut self.columns[dst_col], &src.columns[src_col]);
-            dst.init_at(row, op, from, 0)?;
-            for r in 1..src.height {
-                dst.combine_at(row, op, from, r)?;
-            }
+            self.columns[dst_col].reduce_into(row, op, &src.columns[src_col], 0..src.height)?;
         }
         self.invalidate_computed_forming_row(row);
         #[cfg(debug_assertions)]
@@ -555,6 +543,13 @@ fn label_text(label: &Label) -> String {
         Label::I64(v) => v.to_string(),
         Label::Str(s) => format!("{s:?}"),
     }
+}
+
+/// Whether folding `src` into `dst` cannot fail, so its check is skipped (the live
+/// float bar): a float column of the source's own dtype takes every aggregation.
+#[inline]
+fn cannot_fail(dst: &Column, src: &Column) -> bool {
+    dst.dtype().is_float() && src.dtype() == dst.dtype()
 }
 
 #[cfg(test)]

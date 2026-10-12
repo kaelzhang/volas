@@ -247,26 +247,18 @@ impl DataFrame {
 
     /// Overwrite a computed column's rows `[from, from + tail.len())` in place
     /// (copy-on-write) with the recomputed `tail`, and mark it valid through the last
-    /// written row, under the rule of `write_computed`. Directive results are F64 or
-    /// Bool, so both are handled. O(tail.len()).
+    /// written row, under the rule of `write_computed`. A directive result of any dtype
+    /// is handled ([`Column::write_rows`]), each row taking the tail's value and
+    /// presence (a missing truth stays missing). O(tail.len()).
     pub fn update_computed_tail(&mut self, name: &str, from: usize, tail: &Column) -> Result<()> {
         self.write_computed(name, from, tail.len(), |col| {
-            match (col, tail) {
-                (Column::F64(arc), Column::F64(t)) => {
-                    arc.make_mut()[from..from + t.len()].copy_from_slice(t);
-                }
-                (Column::Bool(arc, _), Column::Bool(t, _)) => {
-                    arc.make_mut()[from..from + t.len()].copy_from_slice(t);
-                }
-                (col, t) => {
-                    return Err(VolasError::DType(format!(
-                        "computed tail dtype {} does not match column \"{name}\" dtype {}",
-                        t.dtype(),
-                        col.dtype()
-                    )))
-                }
-            }
-            Ok(())
+            let dtype = col.dtype();
+            col.write_rows(from, tail).map_err(|_| {
+                VolasError::DType(format!(
+                    "computed tail dtype {} does not match column \"{name}\" dtype {dtype}",
+                    tail.dtype()
+                ))
+            })
         })
     }
 

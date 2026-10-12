@@ -251,6 +251,7 @@ impl PyDataFrame {
                 }
             }
             let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
+            spec.check(&df).map_err(pyerr)?; // dtype x aggregator, before the state exists
             // The open period's fine bars start as the last seed row (its data columns
             // only — a cached directive column is never folded).
             let h = df.height();
