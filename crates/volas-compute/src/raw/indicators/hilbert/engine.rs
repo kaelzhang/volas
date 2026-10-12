@@ -444,11 +444,38 @@ fn build_dft_twiddle() -> Box<DftTwiddle> {
     let deg2rad_by_360 = 1f64.atan() * 8.0;
     for (p, row) in t.iter_mut().enumerate().skip(1) {
         for (i, slot) in row.iter_mut().enumerate().take(p) {
-            let t = (i as f64 * deg2rad_by_360) / p as f64;
-            *slot = (t.sin(), t.cos());
+            *slot = fused_sin_cos((i as f64 * deg2rad_by_360) / p as f64);
         }
     }
     t
+}
+
+/// `(sin t, cos t)` from the platform's fused sine-cosine routine — what an optimising
+/// compiler turns TA-Lib's `sin(t)` / `cos(t)` pair of one argument into, so the values
+/// the oracle sums. Called directly, every build profile gets them, not only an
+/// optimised one: Apple's `__sincos_stret` can differ from separate `sin` / `cos` in the
+/// last bit, and on flat input the DFT's phase is made of exactly such bits.
+#[cfg(target_vendor = "apple")]
+fn fused_sin_cos(t: f64) -> (f64, f64) {
+    #[repr(C)]
+    struct SinCos {
+        sin: f64,
+        cos: f64,
+    }
+    extern "C" {
+        fn __sincos_stret(x: f64) -> SinCos;
+    }
+    // SAFETY: a pure libm function of one finite or non-finite double.
+    let r = unsafe { __sincos_stret(t) };
+    (r.sin, r.cos)
+}
+
+/// `(sin t, cos t)` (see the Apple variant): elsewhere the standard pair. A platform whose
+/// fused routine differs from it in the last bit needs its own variant — the bit-exact
+/// Hilbert parity tests show it.
+#[cfg(not(target_vendor = "apple"))]
+fn fused_sin_cos(t: f64) -> (f64, f64) {
+    t.sin_cos()
 }
 
 pub(super) struct DcPhase {
