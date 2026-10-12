@@ -8,7 +8,7 @@ use pyo3::types::{PyCapsule, PyDict, PyList};
 use volas_core::{
     Column, DataFrame,
 };
-use volas_directive::{execute, parse};
+use volas_directive::parse;
 
 use crate::format::{
     cell_to_csv, csv_escape, index_label_csv,
@@ -84,7 +84,10 @@ impl PyDataFrame {
     /// Evaluate an indicator directive and return its values as a NumPy array.
     ///
     /// A pure, stateless evaluation: it parses and computes the directive and leaves
-    /// the frame untouched — no column is created, and no cache is read or written.
+    /// the frame untouched — no column is created, and no cache is read or written. A
+    /// name reads a data column (never a cached directive column, which may be stale) or
+    /// a built-in command; a name that is both is ambiguous and raises. A bounded-window
+    /// frame returns its visible rows.
     /// For a cached, incrementally-refreshed result use ``df[directive]`` (a Series)
     /// or ``df[directive].to_numpy()``.
     ///
@@ -100,7 +103,14 @@ impl PyDataFrame {
     ///     numpy.ndarray
     pub(crate) fn exec<'py>(&self, py: Python<'py>, directive: &str) -> PyResult<Bound<'py, PyAny>> {
         let node = parse(directive).map_err(directive_err)?;
-        let col = execute(&self.inner, &node).map_err(value_err)?;
+        let col = self.evaluate(&*self.binding_frame()?, &node, directive)?;
+        let col = match &self.window {
+            Some(_) => {
+                let (start, len) = self.logical_range();
+                col.slice(start, start + len)
+            }
+            None => col,
+        };
         Ok(column_into_numpy(py, col))
     }
 

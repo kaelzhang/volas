@@ -16,9 +16,6 @@ from __future__ import annotations
 # --- defects the machines step around (each has a strict-xfail reproduction) -----
 
 OPEN_DEFECTS: frozenset[str] = frozenset({
-    # A composite cached while a bare-named cached column is stale reads the stale
-    # placeholder; a plain column named like a command rebinds cached composites.
-    'stale-name-binding',
     # `exec` of a bare cached name and `get_column` of a stale computed column
     # return the stale placeholder instead of raising / recomputing.
     'unguarded-stale-read',
@@ -69,6 +66,12 @@ def avoids(defect: str) -> bool:
 
 
 # --- naming (README "directive_stringify") -------------------------------------------
+
+# A bare name that is both a data column and a built-in command usable bare raises at
+# bind time (REQUIREMENTS R17); a data column named like a bare command that a cached
+# directive reads cannot be added (R17). A new directive binds data columns only.
+AMBIGUOUS_BARE_NAME_RAISES = True
+COLUMN_UNDER_A_CACHED_COMMAND_RAISES = True
 
 # `directive_stringify(d)` is "the actual column name volas caches it under".
 COLUMN_NAME_IS_STRINGIFY = True

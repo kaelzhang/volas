@@ -9,6 +9,8 @@
 //! second (`DataFrame::invalidate_computed_forming_row`) and resumes from it — so a
 //! refresh never re-steps or recomputes the rows before the stale ones.
 
+use std::borrow::Cow;
+
 use pyo3::prelude::*;
 use volas_core::DataFrame;
 use volas_directive::types::Ast;
@@ -48,19 +50,33 @@ impl PyDataFrame {
         (after, before)
     }
 
-    /// The frame a cached directive is computed over: the live frame for a
-    /// default-series directive (it reads only the canonical input columns, never a
-    /// cached one), else the frame stripped of cached columns, so a column-name lookup
-    /// can never read a STALE cached column. Built once per refresh and shared.
-    fn base_frame(&self) -> PyResult<DataFrame> {
-        let real_names: Vec<String> = self
-            .inner
-            .names()
-            .iter()
-            .filter(|n| !self.inner.is_computed(n))
-            .cloned()
-            .collect();
-        self.inner.select(&real_names).map_err(pyerr)
+    /// The frame a NEW directive binds and computes over (`df[d]`, `exec`): the data
+    /// columns only, so a name never reads a cached column — whose rows may be a stale
+    /// placeholder — and is never resolved differently from a later refresh. Borrowed
+    /// when the frame caches nothing.
+    pub(crate) fn binding_frame(&self) -> PyResult<Cow<'_, DataFrame>> {
+        self.frame_without(|n| self.inner.is_computed(n))
+    }
+
+    /// The frame a CACHED directive refreshes over: the data columns, less those named
+    /// like a built-in command usable bare. In a cached directive such a bare name is
+    /// always the command: a data column of that name present at bind time made the name
+    /// ambiguous (an error), and one added later is refused while a cached directive
+    /// reads it (`check_new_data_column`) — and the canonical form renders `change:` as
+    /// `change`, so the refresh must not read it as the column.
+    fn refresh_frame(&self) -> PyResult<DataFrame> {
+        Ok(self
+            .frame_without(|n| self.inner.is_computed(n) || volas_directive::is_bare_command(n))?
+            .into_owned())
+    }
+
+    /// This frame without the columns `drop` names (borrowed when it names none).
+    fn frame_without(&self, drop: impl Fn(&str) -> bool) -> PyResult<Cow<'_, DataFrame>> {
+        if !self.inner.names().iter().any(|n| drop(n)) {
+            return Ok(Cow::Borrowed(&self.inner));
+        }
+        let kept: Vec<String> = self.inner.names().iter().filter(|n| !drop(n)).cloned().collect();
+        Ok(Cow::Owned(self.inner.select(&kept).map_err(pyerr)?))
     }
 
     /// Recompute the stale tail of cached directive columns in place — all of
@@ -88,7 +104,7 @@ impl PyDataFrame {
             }
             let node = parse(&name).map_err(directive_err)?;
             if !directive_uses_default_series(&node) && base.is_none() {
-                base = Some(self.base_frame()?);
+                base = Some(self.refresh_frame()?);
             }
             let frame = if directive_uses_default_series(&node) { None } else { base.as_ref() };
             self.refresh_column(&name, &node, frame, Stale { lb, vr, warm }, height)?;

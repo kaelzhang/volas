@@ -223,11 +223,17 @@ class FrameMachine(RuleBasedStateMachine):
 
     # --- shared ops -----------------------------------------------------------------------
 
+    def command_columns(self) -> set[str]:
+        """The frame's data columns named like a built-in command usable bare."""
+        from .inventory import executable_lines
+        bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
+        return {c for c in self.df.columns if c in bare and c not in self.cached}
+
     def _directive_ok(self, d: Directive) -> bool:
         if not triggers_ok(d):
             return False
-        if contracts.avoids('stale-name-binding') and d.bare_names & self.stale:
-            return False  # a composite reading a stale cached column by bare name
+        if contracts.AMBIGUOUS_BARE_NAME_RAISES and d.bare_names & self.command_columns():
+            return False  # ambiguous (a data column named like a command): raises, tested apart
         if contracts.avoids('window-recompute-ulp') and d.kind == 'bool' and d.operands is None \
                 and any(op in d.text for op in '&|^~'):
             return False  # a logical combination cannot be excused a tie flip

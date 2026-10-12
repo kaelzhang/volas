@@ -66,6 +66,9 @@ impl PyDataFrame {
         // from it (e.g. `df['close'] = …` stales `ma:20`); mark those for recompute on
         // next access. Adding a brand-new column cannot affect existing caches.
         let existed = self.inner.has_column(&name);
+        if !existed || self.inner.is_computed(&name) {
+            self.check_new_data_column(&name)?;
+        }
         self.inner.set_column(&name, col).map_err(pyerr)?;
         if existed {
             self.inner.invalidate_computed_on_write(&name);
@@ -269,20 +272,71 @@ impl PyDataFrame {
         }
         let node = parse(name).map_err(directive_err)?;
         let canonical = volas_directive::stringify(&node);
-        if self.inner.has_column(&canonical) {
+        if self.inner.is_computed(&canonical) {
             self.refresh_computed(Some(&canonical))?;
-        } else {
-            let col = execute(&self.inner, &node).map_err(value_err)?;
-            let lookback = volas_directive::lookback::lookback(&node);
+            let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
+            return Ok((canonical, col));
+        }
+        let (col, lookback, state, before) = {
+            let frame = self.binding_frame()?;
+            let col = self.evaluate(&frame, &node, name)?;
             // Capture the recursive resume states (if any) BEFORE moving the column in —
             // as of the last row and the row before — so a later append continues in
             // O(new rows) and a replaced last row recomputes in one step.
-            let (state, before) = Self::capture_resume_states(&self.inner, &node, &col);
-            self.inner.set_column(&canonical, col).map_err(pyerr)?;
-            self.inner.set_computed(&canonical, lookback);
-            self.inner.set_computed_states(&canonical, state, before);
+            let (state, before) = Self::capture_resume_states(&frame, &node, &col);
+            (col, volas_directive::lookback::lookback(&node), state, before)
+        };
+        if self.inner.has_column(&canonical) {
+            // A data column holds the canonical name (`change:` renders as `change`): the
+            // command's values are returned, not cached over the data.
+            return Ok((canonical, col));
         }
+        self.inner.set_column(&canonical, col).map_err(pyerr)?;
+        self.inner.set_computed(&canonical, lookback);
+        self.inner.set_computed_states(&canonical, state, before);
         let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
         Ok((canonical, col))
+    }
+
+    /// Bind and compute a new directive (`directive` as written, parsed to `node`) over
+    /// `frame` — the binding frame: a bare name that is both a data column and a
+    /// built-in command is rejected first.
+    pub(crate) fn evaluate(
+        &self,
+        frame: &DataFrame,
+        node: &volas_directive::Ast,
+        directive: &str,
+    ) -> PyResult<Column> {
+        volas_directive::check_ambiguous_names(node, |n| frame.has_column(n), directive)
+            .map_err(value_err)?;
+        execute(frame, node).map_err(value_err)
+    }
+
+    /// Refuse a data column `name` that a cached directive reads as the built-in
+    /// command of that name (a bare name in it): the column would change what the cached
+    /// directive refreshes. Off the hot path (a column add / overwrite).
+    fn check_new_data_column(&self, name: &str) -> PyResult<()> {
+        let mut users = Vec::new();
+        for cached in self.inner.names().iter().filter(|n| n.as_str() != name && self.inner.is_computed(n)) {
+            let node = parse(cached).map_err(directive_err)?;
+            if volas_directive::uses_bare_command(&node, name) {
+                users.push(format!("'{cached}'"));
+            }
+        }
+        if users.is_empty() {
+            return Ok(());
+        }
+        let (which, verb) = if users.len() == 1 {
+            (format!("the cached directive {}", users[0]), "uses")
+        } else {
+            (format!("the cached directives {}", users.join(", ")), "use")
+        };
+        Err(PyValueError::new_err(format!(
+            "cannot add column '{name}': {which} {verb} the built-in command '{command}' under \
+             that name. Rename the new column, or drop the cached directive first — \
+             df.drop([{list}], axis=1).",
+            command = volas_directive::spec::normalize(name),
+            list = users.join(", ")
+        )))
     }
 }

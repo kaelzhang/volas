@@ -238,7 +238,11 @@ df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
 
 Evaluates the given directive and returns its values as a numpy ndarray. It is a
 pure, **stateless** evaluation — the frame is never modified (no column is
-created, and no cache is read or written).
+created, and no cache is read or written). A name in the directive reads a data
+column or runs a built-in command, never a cached directive column, so the result is
+fresh even while the frame is stale (see
+[Names](directives.md#names-a-data-column-or-a-built-in-command)). A bounded-window
+frame returns its visible rows.
 
 ```py
 # Compute the directive without touching the frame

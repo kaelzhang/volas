@@ -126,6 +126,52 @@ fn check_bare_command(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `name` written bare (no colon, no arguments) is a built-in command: it binds
+/// with every argument at its default.
+pub fn is_bare_command(name: &str) -> bool {
+    is_command(&normalize(name)) && bind_command(name, None, &[], &[]).is_ok()
+}
+
+/// Every bare name of a directive — the top-level one and those inside `@` operands.
+fn bare_names<'a, A>(node: &'a Node<A>, out: &mut Vec<&'a str>) {
+    match node {
+        Node::Name(name) => out.push(name),
+        Node::Scalar(_) => {}
+        Node::Command(c) => c.series.iter().for_each(|s| bare_names(s, out)),
+        Node::Unary { operand, .. } => bare_names(operand, out),
+        Node::Binary { left, right, .. } => {
+            bare_names(left, out);
+            bare_names(right, out);
+        }
+    }
+}
+
+/// The bind-time rule for a bare name that a frame could read either way: a name that
+/// is both a data column (`is_column`) and a built-in command usable bare is ambiguous,
+/// and `directive` (as written) is rejected, naming both ways out.
+pub fn check_ambiguous_names(node: &Ast, is_column: impl Fn(&str) -> bool, directive: &str) -> Result<()> {
+    let mut names = Vec::new();
+    bare_names(node, &mut names);
+    match names.into_iter().find(|n| is_column(n) && is_bare_command(n)) {
+        None => Ok(()),
+        Some(name) => Err(VolasError::Value(format!(
+            "ambiguous name '{name}' in '{directive}': it is both a column of this DataFrame \
+             and the built-in command '{command}'. Write '{name}:' to use the command, or \
+             rename the column — df.rename(columns={{'{name}': '{name}_pct'}}) — to use the \
+             data.",
+            command = normalize(name)
+        ))),
+    }
+}
+
+/// Whether `node` reads the built-in command `name` through a bare name spelled exactly
+/// `name` — so a data column added under that name would change what it reads.
+pub fn uses_bare_command(node: &Ast, name: &str) -> bool {
+    let mut names = Vec::new();
+    bare_names(node, &mut names);
+    names.contains(&name) && is_bare_command(name)
+}
+
 /// Walk a bound [`Ast`] applying only the bare-name rule — every `Command` was
 /// already validated when `bind` produced the tree. Used by `directive_lookback`.
 pub fn check_bare<A>(node: &Node<A>) -> Result<()> {

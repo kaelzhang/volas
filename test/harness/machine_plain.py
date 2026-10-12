@@ -247,9 +247,13 @@ class PlainMachine(FrameMachine):
             name = data.draw(st.sampled_from([ln.canonical for ln in executable_lines()][:40]))
         else:
             name = data.draw(st.sampled_from(list(self.df.columns)))
-        if contracts.avoids('stale-name-binding') and any(
-                name in e.directive.bare_names for e in self.cached.values() if e.directive):
-            return  # rebinding a cached composite's bare name
+        bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
+        if name in bare and any(name in e.directive.bare_names for key, e in self.cached.items()
+                                if e.directive and key != name):
+            if contracts.COLUMN_UNDER_A_CACHED_COMMAND_RAISES:
+                self.attempt(lambda: self.df.__setitem__(name, np.zeros(len(self.df))),
+                             expect_error=ValueError, label=f'df[{name!r}] = ... under a cached command')
+            return
         if name in self.coarse().schema.columns and self.coarse().dtype(name) not in ('float64',):
             return
         values = np.round(np.linspace(-1, 1, len(self.df)) * data.draw(st.integers(1, 9)), 3)

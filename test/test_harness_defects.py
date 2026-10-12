@@ -55,7 +55,6 @@ def test_a_rejected_append_leaves_the_frame_unchanged():
 # --- name binding (I9) ---------------------------------------------------------------
 
 
-@_xfail('M2 stale-name-binding', 'a composite cached over a stale bare-named cached column keeps its NaN')
 def test_a_composite_never_reads_a_stale_cached_column():
     cols = _walk(30)
     df = _frame(cols, 0, 28)
@@ -79,7 +78,6 @@ def test_stringify_is_the_cached_column_name(directive):
 # --- freshness of read surfaces (I10) ----------------------------------------------------
 
 
-@_xfail('M3 unguarded-stale-read', "exec of a bare cached name returns the stale placeholder")
 def test_exec_is_fresh_on_a_stale_frame():
     cols = _walk(30)
     df = _frame(cols, 0, 29)
