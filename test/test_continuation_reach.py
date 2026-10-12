@@ -1,7 +1,7 @@
 """Every command's continuation reach (`spec::reads_past_lookback`, the one per-command
-fact behind `lookback::resume_reach` / `continuation_reach`): a tail slice of any length
-either keeps a cached column it can continue exactly or no longer caches it — an
-append never produces a number the full history does not."""
+fact behind `lookback::reach`, and a recursion anywhere in a command): a tail slice of
+any length either keeps a cached column it can continue exactly or no longer caches it
+— an append never produces a number the full history does not."""
 
 import numpy as np
 import pytest
@@ -17,11 +17,7 @@ COLS = {'open': _c + rng.normal(0, .3, N + 3), 'high': _c + 1 + rng.random(N + 3
         'low': _c - 1 - rng.random(N + 3), 'close': _c,
         'volume': rng.integers(1, 1000, N + 3).astype(float)}
 
-# Composites without a carried state re-warm on a slice's own rows (the open H19
-# defect, pinned in test_harness_defects); they are not a continuation-reach question.
-REWARM = {'kcw', 'stoch_momentum'}
-
-LINES = [ln for ln in executable_lines() if ln.head.split('.')[0] not in REWARM]
+LINES = executable_lines()
 
 
 def frame(a, b):
@@ -37,10 +33,24 @@ def test_a_tail_slice_continues_exactly_or_not_at_all(line):
     base = frame(0, N)
     base[d]
     want = frame(0, N + 2).exec(d)[-2:]
-    for keep in sorted({max(lb - 1, 1), max(lb, 1), lb + 1, lb + 2}):
+    for keep in sorted({max(lb - 1, 1), max(lb, 1), lb + 1, lb + 2, N}):
         tail = base.iloc[N - keep:]
         cached = tail.is_computed(volas.directive_stringify(d))
         tail.append(frame(N, N + 2))
         if cached:
             got = tail[d].to_numpy()[-2:]
             assert np.array_equal(got, want, equal_nan=True), (d, keep, got, want)
+
+
+@pytest.mark.parametrize('d', ['kcw:5', 'stoch_momentum:5', 'close+ema:3@open'])
+def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
+    # no carried state: a slice from the column's first row recomputes it all (kept,
+    # exact); a later start would restart the recursion, so the column is plain data
+    base = frame(0, N)
+    base[d]
+    name = volas.directive_stringify(d)
+    whole = base.iloc[0:]
+    assert whole.is_computed(name)
+    whole.append(frame(N, N + 2))
+    assert np.array_equal(whole[d].to_numpy()[-2:], frame(0, N + 2).exec(d)[-2:], equal_nan=True)
+    assert not base.iloc[1:].is_computed(name)

@@ -317,6 +317,23 @@ pub fn reach(node: &Ast) -> volas_core::Reach {
         lookback: lookback(node),
         resume: resume_reach(node),
         continuation: continuation_reach(node),
+        recursive: recursive_anywhere(node),
+    }
+}
+
+/// Whether a recursion appears anywhere in a directive — a recursive command at the
+/// top, inside an `@` series, an operand, or bound from a bare name — so each value
+/// depends on every row before it, not on a trailing window.
+fn recursive_anywhere(node: &Ast) -> bool {
+    match node {
+        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[])
+            .is_ok_and(|c| crate::spec::is_recursive(&c.name, &c.args)),
+        Node::Scalar(_) => false,
+        Node::Command(c) => {
+            crate::spec::is_recursive(&c.name, &c.args) || c.series.iter().any(recursive_anywhere)
+        }
+        Node::Unary { operand, .. } => recursive_anywhere(operand),
+        Node::Binary { left, right, .. } => recursive_anywhere(left) || recursive_anywhere(right),
     }
 }
 

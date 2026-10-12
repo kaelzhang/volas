@@ -20,6 +20,9 @@ pub struct Reach {
     /// The rows a contiguous slice must keep for the column to stay cached (at least
     /// `lookback`): fewer cannot continue it exactly.
     pub continuation: usize,
+    /// A recursion anywhere in the directive: each value depends on every row before,
+    /// so a slice continues the column exactly only from its carried state.
+    pub recursive: bool,
 }
 
 /// Metadata for a materialized (cached) directive column: the directive that
@@ -131,7 +134,8 @@ impl DataFrame {
                 columns.len()
             )));
         }
-        let height = columns.first().map(|c| c.len()).unwrap_or(0);
+        // a frame of no columns is as tall as its index (pandas `df[[]]`)
+        let height = columns.first().map(|c| c.len()).or(index.as_ref().map(Index::len)).unwrap_or(0);
         for (n, c) in names.iter().zip(&columns) {
             if c.len() != height {
                 return Err(VolasError::Shape(format!(
@@ -274,7 +278,7 @@ impl DataFrame {
     /// the derivation preserves it (a contiguous slice).
     /// Row 0 of the result is at absolute position `origin`.
     fn same_schema(&self, columns: Vec<Column>, index: Index, origin: usize) -> DataFrame {
-        let height = columns.first().map_or(0, |c| c.len());
+        let height = columns.first().map_or(index.len(), |c| c.len()); // no columns: the index
         DataFrame {
             names: Arc::clone(&self.names),
             name_to_idx: Arc::clone(&self.name_to_idx),
@@ -487,12 +491,12 @@ impl DataFrame {
         // `ComputedMeta` cursor so a later `append` refreshes the tail incrementally
         // — re-deriving it from the retained raw columns over a `lookback` window,
         // exactly as a non-sliced frame would (the engine re-warms from raw data,
-        // never from cached output, so composite recursive indicators continue
-        // correctly too). This is only sound when the slice keeps at least
-        // `lookback` warm-up rows; a shorter slice would re-warm from its own start
-        // (a seed that is *not* `lookback` rows back) and silently diverge, so there
-        // we drop the computed status and the column stays plain data (honest:
-        // values correct, but not continuable). Non-contiguous derivations
+        // never from cached output). This is only sound when the slice keeps the
+        // column's continuation reach, and — for a recursion anywhere in it — its
+        // carried state; otherwise a recompute would restart from the slice's own
+        // start and silently diverge, so there we drop the computed status and the
+        // column stays plain data (honest: values correct, but not continuable).
+        // Non-contiguous derivations
         // (`take` / `filter_mask`) go through `DataFrame::new` and already drop it.
         for (name, meta) in &self.computed {
             if len >= meta.reach.continuation {
@@ -513,6 +517,12 @@ impl DataFrame {
                 let carried_before = (inside(meta.state_at) && meta.state_at > first)
                     .then(|| meta.state_before_last.clone())
                     .flatten();
+                if meta.reach.recursive && carried.is_none() && first > meta.since {
+                    // a recursion recomputed over the slice's own rows would restart
+                    // its history after its start: without the state the column stays
+                    // plain data (a slice from its history's start recomputes it all)
+                    continue;
+                }
                 df.computed.insert(
                     name.clone(),
                     ComputedMeta {
