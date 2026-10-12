@@ -23,63 +23,58 @@ impl PyDataFrame {
     /// last `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
     pub(crate) fn head(&self, n: isize) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let (start, len) = self.logical_range();
-        let (a, b) = head_tail_window(n, len, true);
-        Ok(PyDataFrame::plain(self.inner.slice(start + a, start + b)))
+        let view = self.read()?;
+        let (a, b) = head_tail_window(n, view.height(), true);
+        Ok(PyDataFrame::plain(view.slice(a, b)))
     }
 
     /// Last `n` rows (pandas `tail` = `iloc[-n:]`, so a negative `n` drops the
     /// first `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
     pub(crate) fn tail(&self, n: isize) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let (start, len) = self.logical_range();
-        let (a, b) = head_tail_window(n, len, false);
-        Ok(PyDataFrame::plain(self.inner.slice(start + a, start + b)))
+        let view = self.read()?;
+        let (a, b) = head_tail_window(n, view.height(), false);
+        Ok(PyDataFrame::plain(view.slice(a, b)))
     }
     /// The `n` rows with the largest values in `column` (pandas `nlargest`).
     pub(crate) fn nlargest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
+        let view = self.read()?;
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
-        self.extreme_rows(n as usize, column, false)
+        Self::extreme_rows(&view, n as usize, column, false)
     }
     /// The `n` rows with the smallest values in `column` (pandas `nsmallest`).
     pub(crate) fn nsmallest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
+        let view = self.read()?;
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
-        self.extreme_rows(n as usize, column, true)
+        Self::extreme_rows(&view, n as usize, column, true)
     }
     /// Drop later duplicate ROWS, keeping the first (pandas
     /// `drop_duplicates(keep='first')`, over all columns).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn drop_duplicates(&self, keep: &str) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let dup = self.row_duplicated(keep)?;
-        let view = self.logical();
-        let df = view.as_ref();
+        let df = self.read()?;
+        let dup = Self::row_duplicated(&df, keep)?;
         let positions: Vec<usize> = (0..df.height()).filter(|&i| !dup[i]).collect();
-        Ok(PyDataFrame::plain(take_frame(df, &positions)))
+        Ok(PyDataFrame::plain(take_frame(&df, &positions)))
     }
     /// True per row for a later duplicate of an earlier row (pandas `duplicated`).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn duplicated(&self, keep: &str) -> PyResult<PySeries> {
-        self.require_fresh()?;
-        let dup = self.row_duplicated(keep)?;
+        let df = self.read()?;
+        let dup = Self::row_duplicated(&df, keep)?;
         Ok(PySeries {
-            inner: Series::new(None, Column::bool(dup), Arc::clone(self.logical().index())),
+            inner: Series::new(None, Column::bool(dup), Arc::clone(df.index())),
         })
     }
     /// The first (smallest-position) mode of each column, as a 1-row frame.
     /// (pandas pads multi-modal columns into extra rows; volas keeps the single
     /// deterministic first mode per column — documented divergence.)
     pub(crate) fn mode(&self) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let idx = df.index();
         let mut cols = Vec::with_capacity(df.width());
@@ -99,8 +94,7 @@ impl PyDataFrame {
     /// MultiIndex, so only a single-column frame is supported — call it on the
     /// column (`df[col].value_counts()`) otherwise.
     pub(crate) fn value_counts(&self) -> PyResult<PySeries> {
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         if df.width() != 1 {
             return Err(PyTypeError::new_err(
@@ -119,8 +113,7 @@ impl PyDataFrame {
     /// Sort rows by index label (pandas `sort_index`).
     #[pyo3(signature = (ascending = true))]
     pub(crate) fn sort_index(&self, ascending: bool) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let perm = df.index().argsort(ascending);
         Ok(PyDataFrame::plain(take_frame(df, &perm)))
@@ -130,8 +123,7 @@ impl PyDataFrame {
     /// (pandas `reset_index`); `drop=True` discards the old index.
     #[pyo3(signature = (drop = false))]
     pub(crate) fn reset_index(&self, drop: bool) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let h = df.height();
         let (names, columns): (Vec<String>, Vec<Column>) = if drop {
@@ -162,8 +154,7 @@ impl PyDataFrame {
     /// returns a new DataFrame. Row labels are parsed against the index kind.
     #[pyo3(signature = (labels, axis = 0, errors = "raise"))]
     pub(crate) fn drop(&self, py: Python<'_>, labels: Vec<Py<PyAny>>, axis: i64, errors: &str) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let ignore_missing = match errors {
             "raise" => false,
@@ -175,9 +166,13 @@ impl PyDataFrame {
             }
         };
         if axis == 1 {
+            // a cached directive may be named by any spelling of it
             let drop_names: Vec<String> = labels
                 .iter()
-                .map(|l| l.bind(py).extract::<String>())
+                .map(|l| {
+                    let n = l.bind(py).extract::<String>()?;
+                    Ok(self.column_name(&n).unwrap_or(n))
+                })
                 .collect::<PyResult<_>>()?;
             // F37: a missing label is an error (pandas KeyError), not a silent
             // no-op — unless explicitly opted out with errors='ignore' (F44).
@@ -246,7 +241,7 @@ impl PyDataFrame {
         time_frame: &Bound<'_, PyAny>,
         cumulators: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
+        let view = self.read()?;
         let target = resolve_time_frame(time_frame)?;
         if let Some(tfs) = &self.tf {
             // Same frame is a no-op resample == copy() (keeps the cursor & state).
@@ -261,7 +256,6 @@ impl PyDataFrame {
                 )));
             }
         }
-        let view = self.logical();
         let base = view.as_ref();
         let spec = build_agg_spec_for(cumulators, Some(base.names()))?;
         let mut cum = Cumulator::new(target, spec.clone());
@@ -287,8 +281,7 @@ impl PyDataFrame {
     /// frame.
     #[pyo3(signature = (columns))]
     pub(crate) fn rename(&self, columns: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let mut mapping = HashMap::new();
         for (k, v) in columns.iter() {
@@ -316,17 +309,16 @@ impl PyDataFrame {
     /// new frame. A datetime / int / string column becomes the matching index.
     #[pyo3(signature = (keys))]
     pub(crate) fn set_index(&self, keys: &str) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        Ok(PyDataFrame::plain(
-            self.logical().set_index(keys).map_err(pyerr)?,
-        ))
+        Ok(PyDataFrame::plain(self.read()?.set_index(keys).map_err(pyerr)?))
     }
 
     /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
-    /// new frame.
+    /// new frame — a new series (R15): its data columns only, a cached directive being
+    /// recomputed from the cast columns when it is asked for again.
     pub(crate) fn astype(&self, dtypes: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
-        self.require_fresh()?;
-        let mut df = self.logical().into_owned();
+        let view = self.read()?;
+        let data: Vec<String> = view.names().iter().filter(|n| !view.is_computed(n)).cloned().collect();
+        let mut df = view.select(&data).map_err(pyerr)?;
         let mut mapping = HashMap::new();
         for (k, v) in dtypes.iter() {
             let name = k.extract::<String>()?;
@@ -355,9 +347,7 @@ impl PyDataFrame {
 impl PyDataFrame {
 
     /// The `n` extreme rows by `column` (ascending for nsmallest).
-    fn extreme_rows(&self, n: usize, column: &str, ascending: bool) -> PyResult<PyDataFrame> {
-        let view = self.logical();
-        let df = view.as_ref();
+    fn extreme_rows(df: &Fresh<'_>, n: usize, column: &str, ascending: bool) -> PyResult<PyDataFrame> {
         let col = df.column(column).map_err(pyerr)?;
         col.require_numeric().map_err(pyerr)?;
         // the column's own typed, stable order (exact for int64, contract #26);
@@ -368,9 +358,7 @@ impl PyDataFrame {
     }
 
     /// Row-level duplicate mask over all columns, honoring `keep` ('first'|'last').
-    fn row_duplicated(&self, keep: &str) -> PyResult<Vec<bool>> {
-        let view = self.logical();
-        let df = view.as_ref();
+    fn row_duplicated(df: &Fresh<'_>, keep: &str) -> PyResult<Vec<bool>> {
         let h = df.height();
         let key_of = |i: usize| -> Vec<Option<String>> {
             df.columns()

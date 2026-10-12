@@ -546,7 +546,13 @@ raises. pandas `concat` instead upcasts the result column (`int64` + `2.5` →
 `float64`, number + text → `object`). The index kind must match too: a `DatetimeIndex`
 frame takes timestamps of the same tz awareness only, where pandas `concat` would mix
 the labels into an `object` index. A column the target caches (an indicator directive
-it computes) is rejected in the rows of every append form — it is not data.
+it computes) is rejected in the rows of every append form — it is not data, and
+pandas has no such column: select the data columns first.
+
+A scalar assigned to a whole column keeps its own dtype — a Python `int` is `int64`,
+`np.int32` is `int32`, `np.float32` is `float32` — and a one-element array is one value
+per row, not a scalar: on a frame of another height it is a length error (pandas
+broadcasts a length-1 array).
 
 A row appended with an explicit label equal to the **last** row's label **replaces**
 that row. A `DatetimeIndex` only increases — a row labelled before the last raises —

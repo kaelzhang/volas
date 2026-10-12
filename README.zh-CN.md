@@ -349,7 +349,7 @@ df.exec('ma:20')
 
 按 `key` 直接取列，返回一个 `Series`，并且**绝不触发计算**。`df[key]` 会把未知
 key 当作指标 directive 解析并执行；`get_column` 只读取已经存在的列，不存在就抛
-`KeyError`。当列名来自外部数据（CSV 表头、用户输入、配置）时，请优先使用它，避免像 `"ma:5"` 这样恰好长得像 directive 的列名悄悄触发计算。
+`KeyError`。当列名来自外部数据（CSV 表头、用户输入、配置）时，请优先使用它，避免像 `"ma:5"` 这样恰好长得像 directive 的列名悄悄触发计算。它属于列读取：`append` 之后变为过期（stale）的缓存指标列会先被刷新再返回，与 `df[key]` 一致。
 
 ```py
 df = DataFrame({

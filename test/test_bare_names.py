@@ -109,3 +109,37 @@ def test_exec_reads_data_columns_only_and_the_visible_rows():
     win = volas.DataFrame({'close': CLOSE, 'volume': VOLUME}, window=5, max_lookback=3)
     assert len(win.exec('ma:3')) == 5
     assert np.array_equal(win.exec('ma:3'), frame(change=False).exec('ma:3')[-5:])
+
+
+
+def test_the_suggested_drop_works_with_the_directive_as_written():
+    df = frame(change=False)
+    df['close * change']
+    with pytest.raises(ValueError) as err:
+        df['change'] = CHANGE
+    assert str(err.value) == CANNOT_ADD
+    for spelling in ('close * change', 'close*change'):  # the owner's and the message's
+        assert 'close*change' not in df.drop([spelling], axis=1).columns
+    assert df.is_computed('close * change')
+    assert np.array_equal(df.get_column('close * change').to_numpy(), df['close*change'].to_numpy(),
+                          equal_nan=True)
+    dropped = df.drop(['close * change'], axis=1)
+    assert 'close*change' not in dropped.columns
+    dropped['change'] = CHANGE
+    assert df.is_computed('close * change')
+
+
+def test_several_cached_directives_are_named_together():
+    df = frame(change=False)
+    df['close * change']
+    df['change + 1']
+    with pytest.raises(ValueError) as err:
+        df['change'] = CHANGE
+    assert "the cached directives 'change+1', 'close*change' use" in str(err.value) or \
+        "the cached directives 'close*change', 'change+1' use" in str(err.value)
+    assert 'drop the cached directives first' in str(err.value)
+
+
+def test_a_command_with_a_required_series_is_not_a_bare_command():
+    df = volas.DataFrame({'close': CLOSE, 'repeat': CHANGE})
+    assert np.array_equal(df.exec('close + repeat'), CLOSE + CHANGE)

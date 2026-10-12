@@ -14,7 +14,7 @@
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
-use super::{ComputedMeta, DataFrame};
+use super::{ComputedMeta, DataFrame, STALE_BY_APPEND, STALE_BY_WRITE};
 
 /// A stale cached column as the refresh reads it: its name, lookback, valid-row
 /// cursor, and whether its processed history is past the warm-up
@@ -32,6 +32,11 @@ pub struct StaleComputed {
 }
 
 impl DataFrame {
+    /// Re-derive `first_computed` after the set of cached columns changed.
+    pub(super) fn note_computed(&mut self) {
+        self.first_computed = self.computed.keys().filter_map(|k| self.name_to_idx.get(k).copied()).min();
+    }
+
     /// Record that column `name` is a materialized directive result (valid for
     /// all current rows), its history starting at this frame's row 0; `reach` is the
     /// rows it needs to be continued exactly (at least `lookback`).
@@ -49,6 +54,7 @@ impl DataFrame {
                 scratch: Vec::new(),
             },
         );
+        self.note_computed();
         #[cfg(debug_assertions)]
         self.debug_check();
     }
@@ -143,6 +149,12 @@ impl DataFrame {
     /// `height` after an `append`), i.e. a bulk read would see NaN until `fulfill`.
     pub fn has_stale_computed(&self) -> bool {
         self.computed.values().any(|m| m.valid_rows < self.height)
+    }
+
+    /// What left a cached column stale — "an append" or "a column write" — or `None`
+    /// while every cached column is fresh.
+    pub fn stale_cause(&self) -> Option<&'static str> {
+        self.has_stale_computed().then_some(self.stale_by)
     }
 
     /// Borrow a cached column's carried resume state and the frame's origin — the
@@ -279,6 +291,7 @@ impl DataFrame {
     fn drop_computed_at(&mut self, col: usize) {
         if let Some(name) = self.names.get(col) {
             self.computed.remove(name);
+            self.note_computed();
         }
     }
 
@@ -291,6 +304,7 @@ impl DataFrame {
     /// [`invalidate_computed_on_write_at`] this never zeroes `valid_rows`, so the live
     /// path never forces a full O(buffer) recompute.
     pub(super) fn invalidate_computed_forming_row(&mut self, last_row: usize) {
+        self.stale_by = STALE_BY_APPEND;
         for meta in self.computed.values_mut() {
             if meta.valid_rows > last_row {
                 meta.valid_rows = last_row;
@@ -316,11 +330,13 @@ impl DataFrame {
     /// Name-based variant for the `df[name] = value` whole-column replace path.
     pub fn invalidate_computed_on_write(&mut self, written_name: &str) {
         self.computed.remove(written_name);
+        self.note_computed();
         self.stale_every_computed();
     }
 
     /// Every cached column is stale from row 0, carrying nothing.
     fn stale_every_computed(&mut self) {
+        self.stale_by = STALE_BY_WRITE;
         for meta in self.computed.values_mut() {
             meta.valid_rows = 0;
             // The carried recursive state described row `valid_rows - 1`; resetting

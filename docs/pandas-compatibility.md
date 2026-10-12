@@ -24,7 +24,7 @@ df.head(n=5) / df.tail(n=5)
 # --- DataFrame: reshaping & dtypes ----------------------------------------
 df.drop([label, ...], axis=0)     # drop rows by label (axis=1 -> columns)
 df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
-df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)
+df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)  # astype: data columns only
 df.astype({col: 'datetime64[s]'})  # numeric epoch -> datetime (unit s|ms|us|ns; truncating)
 df.copy() / df.equals(other) / df.to_csv(path=None, ...)   # to_numpy: see its own section (dtype, na_value)
 
@@ -197,9 +197,16 @@ single-level, OHLCV-shaped index that candlestick data uses.
 Assign a whole column, or write into a positional / label / boolean selection
 (copy-on-write under the hood). A Series value must carry the frame's index (the same
 labels; the alignment rule of every operand) and is then paired by position — volas
-never re-aligns by label, so a differently-labelled Series raises. A scalar keeps its
-exact type (an int is an `int64` column, never a float). A boolean-frame mask
+never re-aligns by label, so a differently-labelled Series raises. A scalar — a Python
+`int` / `float` / `bool` / `str`, a NumPy scalar or a 0-d array — fills the column and
+keeps its exact type: an int is an `int64` column (never a float), `np.int32(7)` an
+`int32` one, `np.float32(0.5)` a `float32` one, `np.array(True)` a `bool` one. An array
+of any other shape, a list or a tuple is values, one per row (a one-element array on a
+two-row frame is a length error, never a broadcast). A boolean-frame mask
 (`df[mask] = v`) pairs with the columns by **name** and must carry the frame's index.
+Every cell write (`iloc` / `loc` / `iat` / `at`, `df[mask] = v`) lands in place and,
+like a bulk read, raises while a cached directive column is stale; a mask that selects
+no row changes nothing.
 
 ```py
 df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)

@@ -1,0 +1,288 @@
+//! Index behaviour: construction, lookup, slicing, alignment and the append rule.
+
+use super::*;
+
+#[test]
+fn from_datetime_and_int_columns() {
+    assert_eq!(
+        Index::from_column(&Column::datetime(vec![5, 6])).unwrap(),
+        Index::datetime(vec![5, 6], Tz::Naive)
+    );
+    assert_eq!(
+        Index::from_column(&Column::i64(vec![1, 2])).unwrap(),
+        Index::int64(vec![1, 2])
+    );
+}
+
+#[test]
+fn from_unsupported_column_errors() {
+    // float / bool columns are not valid labels (string is — see below)
+    assert!(Index::from_column(&Column::f64(vec![1.0])).is_err());
+    assert!(Index::from_column(&Column::bool(vec![true])).is_err());
+}
+
+#[test]
+fn is_empty_labels_and_position_of() {
+    assert!(Index::range(0).is_empty());
+    assert!(!Index::range(3).is_empty());
+
+    assert_eq!(Index::range(3).to_i64_labels(), vec![0, 1, 2]);
+    assert_eq!(Index::int64(vec![5, 6]).to_i64_labels(), vec![5, 6]);
+    assert_eq!(
+        Index::datetime(vec![10, 20], Tz::Utc).to_i64_labels(),
+        vec![10, 20]
+    );
+
+    let i64 = Label::I64;
+    assert_eq!(Index::range(5).position_of(&i64(3)), Some(3));
+    assert_eq!(Index::range(5).position_of(&i64(9)), None);
+    assert_eq!(Index::range(5).position_of(&i64(-1)), None);
+    assert_eq!(Index::int64(vec![10, 20, 30]).position_of(&i64(20)), Some(1));
+    assert_eq!(Index::int64(vec![10, 20]).position_of(&i64(99)), None);
+    assert_eq!(
+        Index::datetime(vec![100, 200], Tz::Utc).position_of(&i64(200)),
+        Some(1)
+    );
+
+    // take() on an Int64 index gathers the labels at those positions
+    assert_eq!(
+        Index::int64(vec![10, 20, 30]).take(&[2, 0]),
+        Index::int64(vec![30, 10])
+    );
+}
+
+fn str_index(labels: &[&str]) -> Index {
+    Index::str(labels.iter().map(|s| s.to_string()).collect())
+}
+
+#[test]
+fn string_index_construction_and_ops() {
+    // a string column becomes a string index
+    let ix = Index::from_column(&Column::str(vec!["a".into(), "b".into()])).unwrap();
+    assert_eq!(ix, str_index(&["a", "b"]));
+
+    let ix = str_index(&["a", "b", "c", "d"]);
+    assert_eq!(ix.len(), 4);
+    assert!(!ix.is_empty());
+    assert_eq!(ix.label_at(2), Label::Str("c".into()));
+    assert_eq!(ix.slice(1, 3), str_index(&["b", "c"]));
+    assert_eq!(ix.take(&[3, 0]), str_index(&["d", "a"]));
+}
+
+#[test]
+fn string_index_lookup_and_slice() {
+    let ix = str_index(&["aa", "bb", "cc", "dd"]);
+    // exact lookup, kind-matched
+    assert_eq!(ix.position_of(&Label::Str("cc".into())), Some(2));
+    assert_eq!(ix.position_of(&Label::Str("zz".into())), None);
+    // a numeric label against a string index never matches
+    assert_eq!(ix.position_of(&Label::I64(1)), None);
+    // lexicographic slice [bb, cc]
+    let lo = Label::Str("bb".into());
+    let hi = Label::Str("cc".into());
+    let (lo, hi) = (SliceBound::text(lo), SliceBound::text(hi));
+    assert_eq!(ix.label_slice(Some(&lo), Some(&hi)).unwrap(), (1, 3));
+    // open-ended upper bound: [cc, end)
+    assert_eq!(ix.label_slice(Some(&lo), None).unwrap(), (1, 4));
+}
+
+#[test]
+fn append_rule_per_kind() {
+    let ny = Tz::parse("America/New_York").unwrap();
+    let aware = Index::datetime(vec![1, 2], Tz::Utc);
+    let naive = Index::datetime(vec![1, 2], Tz::Naive);
+    let msg = |a: &Index, b: &Index| a.check_append(b).unwrap_err().to_string();
+    // the same instants in another zone are fine; awareness must match
+    assert!(aware.check_append(&Index::datetime(vec![3], ny)).is_ok());
+    assert!(msg(&aware, &Index::datetime(vec![3], Tz::Naive)).contains("tz_localize the rows"));
+    assert!(msg(&naive, &Index::datetime(vec![3], Tz::Utc)).contains("tz_localize the frame"));
+    // NaT has no place in the order, on every kind of target
+    assert!(msg(&aware, &Index::datetime(vec![i64::MIN], Tz::Utc)).contains("NaT"));
+    assert!(msg(&Index::range(0), &Index::datetime(vec![i64::MIN], Tz::Utc)).contains("NaT"));
+    // an empty RangeIndex is still a RangeIndex
+    assert!(msg(&Index::range(0), &aware).contains("RangeIndex"));
+    // a datetime index takes datetime rows only, and the reverse
+    assert!(msg(&aware, &Index::range(1)).contains("label the rows with their timestamps"));
+    assert!(msg(&aware, &Index::int64(vec![3])).contains("integer index"));
+    assert!(msg(&Index::int64(vec![1]), &aware).contains("tz-aware DatetimeIndex"));
+    assert!(msg(&Index::range(1), &naive).contains("tz-naive DatetimeIndex"));
+    // a string index takes string rows only, and the reverse
+    assert!(msg(&str_index(&["x"]), &Index::range(1)).contains("string index"));
+    assert!(msg(&Index::range(1), &str_index(&["x"])).contains("RangeIndex"));
+    assert!(str_index(&["x"]).check_append(&str_index(&["y"])).is_ok());
+    assert!(Index::range(0).check_append(&Index::int64(vec![4])).is_ok());
+}
+
+#[test]
+fn unlabelled_rows_continue_unique_checked_integer_labels() {
+    // continuing onto a label already present (the labels need not be sorted)
+    let err = Index::int64(vec![1, 0]).check_append(&Index::range(1)).unwrap_err();
+    assert!(err.to_string().contains("next label 1 is already in the index"), "{err}");
+    // continuing past i64::MAX overflows instead of wrapping
+    let mut ix = Index::int64(vec![i64::MAX]);
+    let err = ix.extend(&Index::range(1)).unwrap_err();
+    assert!(matches!(err, VolasError::Overflow(_)), "{err}");
+    assert_eq!(ix, Index::int64(vec![i64::MAX]));
+    let err = Index::int64(vec![i64::MAX - 1]).check_append(&Index::range(2)).unwrap_err();
+    assert!(matches!(err, VolasError::Overflow(_)), "{err}");
+    // the last continued label may be i64::MAX itself; no rows continue nothing
+    let mut top = Index::int64(vec![i64::MAX - 1]);
+    top.extend(&Index::range(1)).unwrap();
+    assert_eq!(top, Index::int64(vec![i64::MAX - 1, i64::MAX]));
+    top.extend(&Index::range(0)).unwrap();
+    assert_eq!(top.len(), 2);
+    // an empty Int64 index continues from 0
+    assert!(Index::int64(vec![]).check_append(&Index::range(3)).is_ok());
+    // the largest label follows every extension, so a repeat is still found after
+    // the labels stop increasing
+    let mut ix = Index::range(2);
+    ix.extend(&Index::int64(vec![9, 5])).unwrap(); // [0, 1, 9, 5]: 9 is the largest
+    assert!(ix.check_append(&Index::range(4)).unwrap_err().to_string().contains("9"));
+    ix.extend(&Index::range(3)).unwrap(); // continues 6, 7, 8
+    assert_eq!(ix, Index::int64(vec![0, 1, 9, 5, 6, 7, 8]));
+    assert!(ix.check_append(&Index::range(1)).is_err()); // 9 again
+    ix.extend(&Index::int64(vec![20])).unwrap();
+    ix.extend(&Index::range(1)).unwrap(); // 21: past the largest, no scan needed
+    assert_eq!(ix.to_i64_labels().last(), Some(&21));
+    // derived indexes keep their own largest label
+    assert!(ix.slice(0, 4).check_append(&Index::range(4)).unwrap_err().to_string().contains("9"));
+    assert!(ix.take(&[0, 1]).check_append(&Index::range(1)).is_ok());
+}
+
+#[test]
+fn extend_grows_in_place_per_kind() {
+    // same-kind grows the buffer in place (the live append hot path)
+    let mut r = Index::range(3);
+    r.extend(&Index::range(2)).unwrap();
+    assert_eq!(r, Index::range(5));
+
+    let mut d = Index::datetime(vec![1, 2], Tz::Utc);
+    d.extend(&Index::datetime(vec![3], Tz::Utc)).unwrap();
+    assert_eq!(d, Index::datetime(vec![1, 2, 3], Tz::Utc));
+
+    let mut s = str_index(&["a", "b"]);
+    s.extend(&str_index(&["c"])).unwrap();
+    assert_eq!(s, str_index(&["a", "b", "c"]));
+
+    // a rejected extension leaves the index unchanged
+    let mut keep = Index::datetime(vec![1], Tz::Utc);
+    assert!(keep.extend(&Index::range(1)).is_err());
+    assert_eq!(keep, Index::datetime(vec![1], Tz::Utc));
+
+    // explicit integer labels after implicit positions: the positions become labels
+    let mut m = Index::range(2);
+    m.extend(&Index::int64(vec![5, 6])).unwrap();
+    assert_eq!(m, Index::int64(vec![0, 1, 5, 6]));
+
+    // an implicit Range appended to explicit Int64 labels CONTINUES the sequence
+    // (last + 1, ...) rather than restarting at the Range's own 0 — the
+    // sliced/compacted-frame + bare-bar append path (windowed rolling buffers).
+    let mut c = Index::int64(vec![44, 45, 46]);
+    c.extend(&Index::range(2)).unwrap();
+    assert_eq!(c, Index::int64(vec![44, 45, 46, 47, 48]));
+    // continuing from an empty Int64 starts at 0.
+    let mut e = Index::int64(vec![]);
+    e.extend(&Index::range(2)).unwrap();
+    assert_eq!(e, Index::int64(vec![0, 1]));
+
+    // mixing string with numeric is an error, either way
+    assert!(str_index(&["x"]).extend(&Index::range(1)).is_err());
+    assert!(Index::range(1).extend(&str_index(&["x"])).is_err());
+}
+
+#[test]
+fn alignment_is_equal_labels_with_matching_awareness() {
+    let ny = Tz::parse("America/New_York").unwrap();
+    let named = Index::datetime(vec![1, 2], Tz::Utc).with_name(Some("t".into()));
+    // same instants: the name and the display zone do not matter
+    assert!(named.require_aligned(&Index::datetime(vec![1, 2], ny)).is_ok());
+    assert!(Index::range(2).require_aligned(&Index::int64(vec![0, 1])).is_ok());
+    // naive vs aware never aligns, even over the same stored values
+    let err = Index::datetime(vec![1, 2], Tz::Naive)
+        .require_aligned(&named)
+        .unwrap_err();
+    assert!(err.to_string().contains("tz-naive"), "{err}");
+    let err = Index::str(vec!["a".into()]).require_aligned(&Index::str(vec!["b".into()]));
+    assert!(err.unwrap_err().to_string().contains("different indexes"));
+}
+
+#[test]
+fn name_set_and_propagates_through_ops() {
+    let ix = Index::datetime(vec![1, 2, 3], Tz::Utc).with_name(Some("date".into()));
+    assert_eq!(ix.name(), Some("date"));
+    // an unnamed index reports None
+    assert_eq!(Index::range(3).name(), None);
+    // the name rides through identity-preserving ops
+    assert_eq!(ix.slice(0, 2).name(), Some("date"));
+    assert_eq!(ix.take(&[2, 0]).name(), Some("date"));
+    assert_eq!(ix.clone().with_tz(Tz::Offset(28800)).name(), Some("date"));
+    // extend keeps the growing index's name
+    let mut g = ix.clone();
+    g.extend(&Index::datetime(vec![4], Tz::Utc)).unwrap();
+    assert_eq!(g.name(), Some("date"));
+    // with_name(None) clears it
+    assert_eq!(ix.with_name(None).name(), None);
+}
+
+#[test]
+fn label_accessors_and_numeric_label_at() {
+    // accessors return None on the other variant
+    assert_eq!(Label::I64(5).as_i64(), Some(5));
+    assert_eq!(Label::I64(5).as_str(), None);
+    assert_eq!(Label::Str("x".into()).as_str(), Some("x"));
+    assert_eq!(Label::Str("x".into()).as_i64(), None);
+    // label_at over the numeric index kinds
+    assert_eq!(Index::range(3).label_at(2), Label::I64(2));
+    assert_eq!(Index::int64(vec![10, 20]).label_at(1), Label::I64(20));
+    assert_eq!(
+        Index::datetime(vec![100, 200], Tz::Utc).label_at(0),
+        Label::I64(100)
+    );
+}
+
+#[test]
+fn index_kind_branch_coverage() {
+    // tz() / with_tz() are no-ops on a non-datetime index.
+    assert_eq!(Index::range(3).tz(), Tz::Naive);
+    assert!(matches!(
+        Index::range(3).with_tz(Tz::Utc).kind,
+        IndexKind::Range { start: 0, len: 3 }
+    ));
+    // slice over the non-range kinds.
+    assert_eq!(
+        Index::int64(vec![1, 2, 3]).slice(0, 2),
+        Index::int64(vec![1, 2])
+    );
+    assert!(matches!(
+        Index::datetime(vec![1, 2], Tz::Utc).slice(0, 1).kind,
+        IndexKind::Datetime(_, _)
+    ));
+    assert_eq!(
+        Index::str(vec!["a".into(), "b".into()]).slice(1, 2),
+        Index::str(vec!["b".into()])
+    );
+    // argsort lexicographically over a string index.
+    assert_eq!(
+        Index::str(vec!["b".into(), "a".into()]).argsort(true),
+        vec![1, 0]
+    );
+    // to_column over every kind.
+    assert_eq!(Index::range(2).to_column().len(), 2);
+    assert_eq!(Index::datetime(vec![5], Tz::Utc).to_column().len(), 1);
+    assert_eq!(Index::str(vec!["x".into()]).to_column().len(), 1);
+}
+
+#[test]
+fn label_eq_value_semantics() {
+    // a RangeIndex equals the same integer labels materialized as Int64
+    assert!(Index::range(3).label_eq(&Index::int64(vec![0, 1, 2])));
+    assert!(!Index::range(3).label_eq(&Index::int64(vec![0, 1, 9])));
+    // datetime and string indexes compare by value
+    assert!(Index::datetime(vec![1, 2], Tz::Utc).label_eq(&Index::datetime(vec![1, 2], Tz::Utc)));
+    assert!(!Index::datetime(vec![1, 2], Tz::Utc).label_eq(&Index::datetime(vec![1, 9], Tz::Utc)));
+    assert!(Index::str(vec!["a".into()]).label_eq(&Index::str(vec!["a".into()])));
+    assert!(!Index::str(vec!["a".into()]).label_eq(&Index::str(vec!["b".into()])));
+    // different label kinds are never equal
+    assert!(!Index::range(2).label_eq(&Index::datetime(vec![0, 1], Tz::Utc)));
+    assert!(!Index::str(vec!["a".into()]).label_eq(&Index::int64(vec![0])));
+}

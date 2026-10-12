@@ -560,9 +560,44 @@ pub(crate) fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> 
             .unwrap()
             .into_any(),
         IndexKind::Int64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
-        IndexKind::Range(_) => (i as i64).into_pyobject(py).unwrap().into_any().unbind(),
+        IndexKind::Range { start, .. } => (start + i as i64).into_pyobject(py).unwrap().into_any().unbind(),
         IndexKind::Str(v) => v.get(i).into_pyobject(py).unwrap().into_any().unbind(),
     }
+}
+
+/// The zone a Python timestamp is written in.
+pub(crate) enum Zone {
+    /// An instant: an aware `Timestamp` / `datetime`, an offset-carrying string.
+    Aware(Tz),
+    /// A wall clock with no zone: a naive `Timestamp` / `datetime` / string, a
+    /// `datetime64`.
+    Naive,
+    /// No zone either way: an epoch-ns integer.
+    Unzoned,
+}
+
+/// The zone `key` (a timestamp as `parse_ts_in_tz` accepts it) is written in.
+pub(crate) fn timestamp_zone(key: &Bound<'_, PyAny>) -> PyResult<Zone> {
+    if let Ok(ts) = key.extract::<PyRef<PyTimestamp>>() {
+        return Ok(if ts.tz.is_aware() { Zone::Aware(ts.tz) } else { Zone::Naive });
+    }
+    if let Ok(s) = key.extract::<String>() {
+        return match datetime::offset_suffix_secs(&s) {
+            Some(offset) => Ok(Zone::Aware(Tz::fixed(offset).map_err(pyerr)?)),
+            None => Ok(Zone::Naive),
+        };
+    }
+    if key.is_instance_of::<pyo3::types::PyDateTime>() {
+        let off = key.call_method0("utcoffset")?;
+        if !off.is_none() {
+            return Ok(Zone::Aware(Tz::fixed(crate::scalar::offset_secs(&off)?).map_err(pyerr)?));
+        }
+        return Ok(Zone::Naive);
+    }
+    if key.extract::<i64>().is_ok() {
+        return Ok(Zone::Unzoned);
+    }
+    Ok(Zone::Naive)
 }
 
 /// Parse a Python timestamp to UTC epoch-ns, interpreting a **naive** string in
@@ -640,7 +675,7 @@ pub(crate) fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bo
             Ok(arr.call_method1("astype", ("datetime64[ns]",))?)
         }
         IndexKind::Int64(v) => Ok(v.clone().into_pyarray(py).into_any()),
-        IndexKind::Range(n) => Ok((0..*n as i64)
+        IndexKind::Range { start, len } => Ok((*start..*start + *len as i64)
             .collect::<Vec<_>>()
             .into_pyarray(py)
             .into_any()),

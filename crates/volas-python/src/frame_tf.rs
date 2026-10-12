@@ -76,13 +76,16 @@ impl PyDataFrame {
                 _ => None,
             },
         };
+        if fine_ts.contains(&i64::MIN) {
+            return Err(PyValueError::new_err(
+                "cannot append a NaT-timestamped bar to a time_frame DataFrame; a \
+                 missing instant has no period (drop it or supply a real timestamp)",
+            ));
+        }
+        // Admitted before the order is judged: an instant and a wall clock do not compare.
+        let bars = self.inner.admit(fine).map_err(pyerr)?;
+        let bars = bars.as_ref();
         for &ts in fine_ts {
-            if ts == i64::MIN {
-                return Err(PyValueError::new_err(
-                    "cannot append a NaT-timestamped bar to a time_frame DataFrame; a \
-                     missing instant has no period (drop it or supply a real timestamp)",
-                ));
-            }
             if let Some(p) = prev_ts {
                 if ts < p {
                     return Err(PyValueError::new_err(
@@ -95,8 +98,6 @@ impl PyDataFrame {
             }
             prev_ts = Some(ts);
         }
-        let bars = self.inner.admit(fine).map_err(pyerr)?;
-        let bars = bars.as_ref();
         if bars.height() > 1 {
             let h = self.inner.height();
             let mut probe = PyDataFrame {
@@ -167,7 +168,7 @@ impl PyDataFrame {
                 // once the row is in.
                 let agg =
                     aggregate_period(bar, &tfs.cumulators, tfs.time_frame, tz).map_err(pyerr)?;
-                inner.append(&agg).map_err(pyerr)?;
+                inner.append_new(&agg).map_err(pyerr)?;
                 tfs.open = Some(bar.clone());
                 tfs.open_key = Some(key); // the new open period's key (no recompute next bar)
                 continue;
@@ -199,8 +200,8 @@ impl PyDataFrame {
                 }
                 Some(fp) => {
                     inner.fold_forming_row(last, bar, 0, &fp.ops).map_err(pyerr)?;
-                    let rows = onto(open, bar)?;
-                    open.append(&rows).map_err(pyerr)?;
+                    // the bar was admitted against `inner`, whose data columns `open` holds
+                    open.append_admitted(bar).map_err(pyerr)?;
                 }
                 None => {
                     // A bool / str bar column: re-cumulate the open period and REPLACE the
@@ -210,8 +211,7 @@ impl PyDataFrame {
                     if resent {
                         next.replace_last_row(bar, 0).map_err(pyerr)?;
                     } else {
-                        let rows = onto(&next, bar)?;
-                        next.append(&rows).map_err(pyerr)?;
+                        next.append_admitted(bar).map_err(pyerr)?;
                     }
                     let agg =
                         aggregate_period(&next, &tfs.cumulators, tfs.time_frame, tz)
@@ -224,15 +224,4 @@ impl PyDataFrame {
         }
         Ok(())
     }
-}
-
-/// `bar` restricted to the columns of the open period's small frame: a column the
-/// period's first bar did not carry is not tracked in it (the fold plan reads the bar
-/// itself), so it is left out rather than rejected.
-fn onto<'a>(open: &DataFrame, bar: &'a DataFrame) -> PyResult<std::borrow::Cow<'a, DataFrame>> {
-    if open.names() == bar.names() || bar.names().iter().all(|n| open.has_column(n)) {
-        return Ok(std::borrow::Cow::Borrowed(bar));
-    }
-    let kept: Vec<String> = bar.names().iter().filter(|n| open.has_column(n)).cloned().collect();
-    Ok(std::borrow::Cow::Owned(bar.select(&kept).map_err(pyerr)?))
 }

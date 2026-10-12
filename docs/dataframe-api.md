@@ -134,9 +134,10 @@ Every row-facing surface — `len`, `shape`, `index`, indexing (`[]` / `.iloc` /
 frame used as an `append` source or a constructor source — shows **only** the `window`
 rows; the margin is never visible.
 
-Row labels stay unique over every row the frame **retains** — the visible rows and the
-hidden margin. An integer or string label that an earlier row in the margin still
-holds raises, and says so:
+Row labels stay unique over the rows the frame **retains** — the last
+`window + max_lookback` rows: the visible ones and the hidden margin, whatever older rows
+the buffer still holds before its next compaction. An integer or string label that an
+earlier row in the margin still holds raises, and says so:
 
 ```text
 ValueError: cannot append label 20: an earlier row with that label is still retained in the window's hidden margin (max_lookback)
@@ -320,7 +321,11 @@ df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume':
 ```
 
 It is **strict**: every data column must be provided (a missing one raises — unlike a
-`DataFrame` / `Row`, where a missing column is NA-padded), and an unknown key raises.
+`DataFrame` / `Row`, where a missing column is NA-padded), and an unknown key raises. The
+timestamp is read in its own zone: an aware `Timestamp` / `datetime` / offset string is
+an instant, a naive one a wall clock — judged against the frame's index like any other
+row (a naive bar onto a tz-aware frame raises), an epoch-ns integer taken in the frame's
+zone. A positional (`RangeIndex`) frame continues its labels, a bounded window's too.
 Cached directive columns are not supplied — they are padded and refreshed automatically.
 
 Rows are keyed by their index label:

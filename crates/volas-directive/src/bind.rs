@@ -130,10 +130,24 @@ fn check_bare_command(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether `name` written bare (no colon, no arguments) is a built-in command: it binds
-/// with every argument at its default.
+/// Whether `name` written bare (no colon, no arguments) is a built-in command it can
+/// run as: it binds with every argument at its default, and reads a default column for
+/// its input (`repeat`, whose input is a required `@` operand, cannot run bare).
+/// The fact is a property of the command alone, so it is decided once per command (on
+/// first use) and looked up after — off the refresh path's per-column cost.
 pub fn is_bare_command(name: &str) -> bool {
-    is_command(&normalize(name)) && bind_command(name, None, &[], &[]).is_ok()
+    static BARE: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
+    let bare = BARE.get_or_init(|| {
+        crate::spec::COMMANDS
+            .iter()
+            .copied()
+            .filter(|c| {
+                bind_command(c, None, &[], &[]).is_ok()
+                    && command_spec(c, None).is_some_and(|spec| !spec.series.is_empty())
+            })
+            .collect()
+    });
+    bare.contains(normalize(name).as_ref())
 }
 
 /// Every bare name of a directive — the top-level one and those inside `@` operands.

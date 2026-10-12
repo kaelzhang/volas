@@ -32,12 +32,30 @@ struct Computed {
     before: Option<Vec<f64>>,
 }
 
-/// Whether a value assigned to a whole column is one scalar (broadcast) rather than
-/// a sequence of values: a number (Python or NumPy), a bool or a string.
-fn is_scalar(value: &Bound<'_, PyAny>) -> bool {
-    value.downcast::<pyo3::types::PyString>().is_ok()
-        || value.extract::<bool>().is_ok()
-        || value.extract::<f64>().is_ok()
+/// A value assigned to a whole column as the one cell it names, when it is a scalar —
+/// classified by its Python type, never by whether it converts to a number: a Python
+/// `int` / `float` / `bool` / `str` (an int an exact int64), a NumPy scalar
+/// (`np.generic`, keeping its width: `np.int32` an int32 column) or a 0-d array (its
+/// one element, likewise). An array (any dimension but 0), a list or a tuple is a
+/// sequence of values: `None`.
+fn scalar_cell(value: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
+    let py = value.py();
+    if value.is_instance_of::<PyBool>()
+        || value.is_instance_of::<PyInt>()
+        || value.is_instance_of::<PyFloat>()
+        || value.is_instance_of::<PyString>()
+    {
+        return pyany_to_column(&PyList::new(py, [value])?.into_any()).map(Some);
+    }
+    let np = py.import("numpy")?;
+    let zero_d = value.is_instance(&np.getattr("ndarray")?)? && value.getattr("ndim")?.extract::<usize>()? == 0;
+    if zero_d || value.is_instance(&np.getattr("generic")?)? {
+        // one element of the value's own dtype
+        return pyany_to_column(&np.call_method1("asarray", (value,))?.call_method1("reshape", (1,))?)
+            .map(Some);
+    }
+    Ok(None)
 }
 
 #[pymethods]
@@ -83,13 +101,11 @@ impl PyDataFrame {
         let col = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
             match &self.window {
                 None => require_aligned(self.inner.index(), &s.inner.index)?,
-                Some(_) => self.logical_index().require_aligned(&s.inner.index).map_err(pyerr)?,
+                Some(_) => self.meta().labels().require_aligned(&s.inner.index).map_err(pyerr)?,
             }
             pad(s.inner.data.clone())?
-        } else if is_scalar(value) {
-            // One cell typed by the same inference as a list of values (an int stays an
-            // exact int64, a bool a bool, …), then broadcast over every row.
-            let one = pyany_to_column(&pyo3::types::PyList::new(value.py(), [value])?.into_any())?;
+        } else if let Some(one) = scalar_cell(value)? {
+            // one cell, broadcast over every row
             one.take(&vec![0; h])
         } else {
             pad(pyany_to_column(value)?)?
@@ -115,12 +131,12 @@ impl PyDataFrame {
             if let Column::Bool(..) = &s.inner.data {
                 // O5: reject an NA-carrying mask (an unknown signal is not False).
                 let mask = bool_mask_vec(&s.inner.data)?;
-                let sub = self.readable()?.filter_mask(&mask).map_err(pyerr)?;
+                let sub = self.read()?.filter_mask(&mask).map_err(pyerr)?;
                 return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
             }
         }
         if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
-            let sub = self.readable()?.filter_mask(arr.as_slice()?).map_err(pyerr)?;
+            let sub = self.read()?.filter_mask(arr.as_slice()?).map_err(pyerr)?;
             return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // boolean mask as a plain Python list (df[[True, False, ...]]). An empty
@@ -135,13 +151,13 @@ impl PyDataFrame {
                         height
                     )));
                 }
-                let sub = self.readable()?.filter_mask(&mask).map_err(pyerr)?;
+                let sub = self.read()?.filter_mask(&mask).map_err(pyerr)?;
                 return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
             }
         }
         // label / positional slice: df[:'date'], df[1:5]
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let sub = slice_frame(self.readable()?.as_ref(), slice)?;
+            let sub = slice_frame(self.read()?.as_ref(), slice)?;
             return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // column name or directive — materialize + auto-refresh a stale cached
@@ -208,16 +224,15 @@ impl PyDataFrame {
         if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
             // A source frame is read like any bulk read: its visible rows only, and never
             // while a cached column of it is stale (its placeholders are not data).
-            df.require_fresh()?;
             if slf.as_ptr() == other.as_ptr() {
                 // `df.append(df)` needs an owned snapshot before taking `self` mutably.
-                let rows = df.logical().into_owned();
+                let rows = df.read()?.into_owned();
                 drop(df);
                 slf.borrow_mut().append_rows(&rows)?;
                 return Ok(slf);
             }
             // Normal live path: append a distinct frame without cloning it.
-            let rows = df.logical();
+            let rows = df.read()?;
             slf.borrow_mut().append_rows(&rows)?;
             return Ok(slf);
         }
@@ -246,10 +261,10 @@ impl PyDataFrame {
     /// Returns:
     ///     bool
     pub(crate) fn is_computed(&self, name: &str) -> PyResult<bool> {
-        if !self.inner.has_column(name) {
-            return Err(PyKeyError::new_err(format!("column {name:?} not found")));
-        }
-        Ok(self.inner.is_computed(name))
+        let column = self
+            .column_name(name)
+            .ok_or_else(|| PyKeyError::new_err(format!("column {name:?} not found")))?;
+        Ok(self.inner.is_computed(&column))
     }
 
     /// Refresh the stale tail of every materialized (auto-cached) directive
@@ -264,6 +279,17 @@ impl PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// The column `name` names: a column of that exact name, or the cached directive a
+    /// directive spelled `name` is cached under (`'close * change'` names the column
+    /// `close*change`). Never computes; `None` when there is none.
+    pub(crate) fn column_name(&self, name: &str) -> Option<String> {
+        if self.inner.has_column(name) {
+            return Some(name.to_string());
+        }
+        let canonical = volas_directive::stringify(&*parse(name).ok()?);
+        self.inner.is_computed(&canonical).then_some(canonical)
+    }
+
     /// The one path every append form takes once its rows are built: a time-frame frame
     /// folds them, any other frame appends them keyed by label; then a windowed frame
     /// compacts. The rows are checked whole before the first write, so on an error the
@@ -272,9 +298,15 @@ impl PyDataFrame {
         if self.tf.is_some() {
             self.fold_append(rows)?;
         } else {
-            // a windowed frame keeps its labels unique over every retained row
-            let hidden = self.logical_range().0;
-            self.inner.append_retaining(rows, hidden).map_err(pyerr)?;
+            // a windowed frame keeps its labels unique over the rows it retains (the last
+            // window + max_lookback), whatever the physical buffer still holds
+            let shown = self.logical_range().0;
+            let from = match &self.window {
+                Some(w) => self.inner.height().saturating_sub(w.capacity),
+                None => 0,
+            };
+            let retained = volas_core::Retained { from, shown };
+            self.inner.append_retaining(rows, retained).map_err(pyerr)?;
         }
         self.maybe_compact()
     }
@@ -414,14 +446,14 @@ impl PyDataFrame {
         if users.is_empty() {
             return Ok(());
         }
-        let (which, verb) = if users.len() == 1 {
-            (format!("the cached directive {}", users[0]), "uses")
+        let (which, verb, them) = if users.len() == 1 {
+            (format!("the cached directive {}", users[0]), "uses", "the cached directive")
         } else {
-            (format!("the cached directives {}", users.join(", ")), "use")
+            (format!("the cached directives {}", users.join(", ")), "use", "the cached directives")
         };
         Err(PyValueError::new_err(format!(
             "cannot add column '{name}': {which} {verb} the built-in command '{command}' under \
-             that name. Rename the new column, or drop the cached directive first — \
+             that name. Rename the new column, or drop {them} first — \
              df.drop([{list}], axis=1).",
             command = volas_directive::spec::normalize(name),
             list = users.join(", ")

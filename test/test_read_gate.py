@@ -31,6 +31,7 @@ def full(directive):
 
 
 STALE = 'stale computed'
+T0 = np.datetime64('2026-01-01T00:00', 'ns')
 
 
 def test_get_column_refreshes_a_stale_cached_column():
@@ -134,9 +135,49 @@ def test_a_scalar_column_keeps_its_exact_type():
     df['f'] = 2.5
     df['t'] = True
     df['s'] = 'x'
+    df['i32'] = np.int32(7)
+    df['f32'] = np.float32(0.5)
+    df['b0'] = np.array(True)
+    df['n0'] = np.array(2**60 + 1)
     assert df.dtypes == {'a': 'float64', 'n': 'int64', 'm': 'int64', 'f': 'float64',
-                         't': 'bool', 's': 'str'}
+                         't': 'bool', 's': 'str', 'i32': 'int32', 'f32': 'float32',
+                         'b0': 'bool', 'n0': 'int64'}
     assert df.get_column('n').to_numpy().tolist() == [2**53 + 1] * 2
+    assert df.get_column('n0').to_numpy().tolist() == [2**60 + 1] * 2
+
+
+def test_a_one_element_array_is_an_array_not_a_scalar():
+    one = volas.DataFrame({'a': [1.0]})
+    one['m'] = np.array([2**60 + 1])
+    assert one.dtypes['m'] == 'int64'
+    assert one.get_column('m').to_numpy().tolist() == [2**60 + 1]
+    two = volas.DataFrame({'a': [1.0, 2.0]})
+    with pytest.raises(ValueError):
+        two['m'] = np.array([7])  # one value for two rows: a length error, not a broadcast
+    with pytest.raises(ValueError):
+        two['m'] = [7]
+
+
+def test_a_mask_write_is_in_place_and_keeps_the_cache():
+    df = volas.DataFrame({'close': [1.0, 2.0, 3.0, 4.0, 5.0]})
+    df['ema:2']
+    df.append(volas.DataFrame({'close': [6.0]}, index=[5]))
+    for write in (lambda: df.__setitem__(df['close'] > 100, 0.0),
+                  lambda: df.__setitem__(volas.DataFrame({'close': [False] * 6, 'ema:2': [False] * 6}), 0.0)):
+        with pytest.raises(ValueError, match=STALE):
+            write()
+    assert df.is_computed('ema:2')
+    df.fulfill()
+    df[df['close'] > 100] = 0.0  # selects nothing: changes nothing
+    assert df.is_computed('ema:2')
+    assert np.array_equal(df['ema:2'].to_numpy(),
+                          volas.DataFrame({'close': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}).exec('ema:2'),
+                          equal_nan=True)
+    df[df['close'] > 5] = 0.0  # every column of the row, the cached one too: now data
+    assert not df.is_computed('ema:2')
+    assert df.get_column('ema:2').to_numpy()[-1] == 0.0
+    assert df['ema:4'].to_numpy()[-1] == volas.DataFrame(
+        {'close': [1.0, 2.0, 3.0, 4.0, 5.0, 0.0]}).exec('ema:4')[-1]
 
 
 def test_a_list_projection_validates_every_entry_before_caching_any():
@@ -146,13 +187,17 @@ def test_a_list_projection_validates_every_entry_before_caching_any():
     assert 'ma:2' not in df.columns
 
 
-def test_replacing_a_column_invalidates_the_caches_that_read_it():
-    # a datetime-only astype replaces the column in place: the cache over it goes stale
+@pytest.mark.parametrize('target', ['datetime64[s]', 'float64'])
+def test_astype_is_a_new_series_without_cached_columns(target):
+    # one rule for every astype (R15): the cached columns are not carried
     df = volas.DataFrame({'close': [1.0, 2.0, 3.0, 4.0], 'ts': np.array([10, 20, 30, 40], 'int64')})
     df['ma:2@ts']
-    a = df.astype({'ts': 'datetime64[s]'})
-    with pytest.raises(ValueError, match=STALE):
-        a.to_numpy()
+    df['ema:2']
+    a = df.astype({'ts': target})
+    assert a.columns == ['close', 'ts']
+    a.fulfill()
+    a.to_numpy()
+    assert np.array_equal(a['ema:2'].to_numpy(), df['ema:2'].to_numpy(), equal_nan=True)
 
 
 # --- labels on a windowed frame (REQUIREMENTS R26) -----------------------------------------
@@ -164,7 +209,7 @@ def _labelled(labels, values):
 
 def test_a_label_retained_in_the_hidden_margin_is_still_unique():
     w = volas.DataFrame(_labelled([10, 20, 30], [1.0, 2.0, 3.0]), window=2, max_lookback=1)
-    w.append(_labelled([40], [4.0]))  # retained: 10 (dropped later), 20 (margin), 30, 40
+    w.append(_labelled([40], [4.0]))  # retained: 20 (margin), 30, 40; 10 is past retention
     assert w.index.tolist() == [30, 40]
     with pytest.raises(ValueError) as err:
         w.append(_labelled([20], [9.0]))
@@ -174,6 +219,16 @@ def test_a_label_retained_in_the_hidden_margin_is_still_unique():
         w.append(_labelled([30], [9.0]))
 
 
+def test_retention_is_the_last_window_plus_margin_rows_not_the_buffer():
+    # the physical buffer still holds 10 (compaction has not run), but it is past the
+    # retained window + max_lookback rows: accepted, whenever compaction happens
+    w = volas.DataFrame(_labelled([10, 20, 30], [1.0, 2.0, 3.0]), window=2, max_lookback=1)
+    w.append(_labelled([40], [4.0]))
+    assert w._physical_height == 4
+    w.append(_labelled([10], [9.0]))
+    assert w.index.tolist() == [40, 10]
+
+
 def test_a_label_no_longer_retained_is_accepted():
     w = volas.DataFrame(_labelled([10, 20, 30], [1.0, 2.0, 3.0]), window=2, max_lookback=1)
     for label in (40, 50, 60):
@@ -181,3 +236,22 @@ def test_a_label_no_longer_retained_is_accepted():
     assert w._physical_height <= 6
     w.append(_labelled([10], [99.0]))  # 10 left the retained rows
     assert w.index.tolist()[-1] == 10
+
+
+def test_the_gate_says_what_left_the_frame_stale():
+    df = stale()
+    with pytest.raises(ValueError, match='after an append'):
+        df.to_numpy()
+    df.fulfill()
+    df['close'] = df['close'] * 2  # a column write: every cache is recomputed
+    with pytest.raises(ValueError, match='after a column write'):
+        df.to_numpy()
+
+
+def test_a_time_frame_built_from_a_stale_frame_reads_it_through_the_gate():
+    df = volas.DataFrame({'t': T0 + np.arange(N) * np.timedelta64(1, 'm'), 'close': CLOSE[:N]})
+    df = df.set_index('t')
+    df['ema:3']
+    df.append(volas.DataFrame({'t': [T0 + np.timedelta64(N, 'm')], 'close': [1.0]}).set_index('t'))
+    with pytest.raises(ValueError, match=STALE):
+        volas.DataFrame(df, time_frame='5m')

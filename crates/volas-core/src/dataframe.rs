@@ -88,6 +88,10 @@ pub struct DataFrame {
     /// `clone` / `append`; dropped by shape-changing ops (slice/select/…), where
     /// the columns become plain data.
     computed: FxHashMap<String, ComputedMeta>,
+    /// The position of the first cached directive column (`None` without one) — derived
+    /// from `computed` (`note_computed` keeps it), so whether the leading columns hold a
+    /// cached one is O(1) on the per-bar append path.
+    first_computed: Option<usize>,
     /// The absolute position of row 0 in the series this frame continues: `0` for a
     /// new frame; a contiguous slice (a bounded frame dropping its head included) adds
     /// its start, so every row keeps the position it has in the full series. A
@@ -98,7 +102,15 @@ pub struct DataFrame {
     /// the frame and in the full series; the index family (maxindex / minindex /
     /// minmaxindex) emits absolute positions.
     origin: usize,
+    /// What last left cached columns stale ("an append", "a column write"), for the
+    /// read gate's message; meaningful only while one is stale.
+    stale_by: &'static str,
 }
+
+/// The cause an append (new rows, a replaced last row, a folded forming bar) leaves.
+const STALE_BY_APPEND: &str = "an append";
+/// The cause a write to a column leaves.
+const STALE_BY_WRITE: &str = "a column write";
 
 impl DataFrame {
     /// Construct a frame from parallel `names` / `columns`, validating shape.
@@ -145,7 +157,9 @@ impl DataFrame {
             index: Arc::new(index),
             height,
             computed: FxHashMap::default(),
+            first_computed: None,
             origin: 0,
+            stale_by: STALE_BY_APPEND,
         };
         #[cfg(debug_assertions)]
         df.debug_check();
@@ -166,6 +180,8 @@ impl DataFrame {
             col.debug_check(name);
         }
         assert_eq!(self.index.len(), self.height, "index length differs from the height");
+        let first = self.computed.keys().filter_map(|k| self.name_to_idx.get(k).copied()).min();
+        assert_eq!(self.first_computed, first, "first cached column position is stale");
         for (name, meta) in &self.computed {
             assert!(self.name_to_idx.contains_key(name), "computed {name:?} is not a column");
             assert!(meta.valid_rows <= self.height, "computed {name:?} cursor past the height");
@@ -257,7 +273,9 @@ impl DataFrame {
             index: Arc::new(index),
             height,
             computed: FxHashMap::default(),
+            first_computed: None,
             origin,
+            stale_by: STALE_BY_APPEND,
         }
     }
 
@@ -434,7 +452,9 @@ impl DataFrame {
             index: Arc::clone(&self.index),
             height: self.height,
             computed: FxHashMap::default(),
+            first_computed: None,
             origin: self.origin,
+            stale_by: STALE_BY_APPEND,
         })
     }
 
@@ -451,6 +471,7 @@ impl DataFrame {
         let len = end - start;
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
         let mut df = self.same_schema(columns, self.index.slice(start, end), self.origin + start);
+        df.stale_by = self.stale_by;
         // SP-9: carry cached-directive columns *as continuable computed columns*
         // through a contiguous slice. The cached values are already correct (they
         // were computed with full history) and are carried verbatim; we re-tag the
@@ -498,6 +519,7 @@ impl DataFrame {
                 );
             }
         }
+        df.note_computed();
         df
     }
 
@@ -670,6 +692,7 @@ impl DataFrame {
 }
 
 mod admit;
+pub use admit::Retained;
 mod computed;
 pub use computed::StaleComputed;
 

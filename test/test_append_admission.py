@@ -272,3 +272,50 @@ def test_a_time_frame_bar_must_match_the_frame_awareness():
         df.append(bars(['2024-01-01 02:00'], high=[1.0], close=[1.0],
                        volume=np.array([1], 'int64')).tz_localize('UTC'))
     assert state(df) == before
+
+
+# --- the dict form takes its own index (review: tz awareness, positional windows) ----------
+
+
+def _dated(tz=None):
+    df = bars(['2024-01-01', '2024-01-02'], close=[1.0, 2.0])
+    return df.tz_localize(tz) if tz else df
+
+
+@pytest.mark.parametrize('frame_tz, bar_ts', [
+    ('Asia/Tokyo', lambda: volas.Timestamp('2024-01-05')),
+    (None, lambda: volas.Timestamp('2024-01-05 09:00').tz_localize('Asia/Tokyo')),
+])
+def test_a_dict_bar_must_match_the_frame_awareness(frame_tz, bar_ts):
+    df = _dated(frame_tz)
+    before = state(df)
+    with pytest.raises(ValueError, match='tz-'):
+        df.append({'t': bar_ts(), 'close': 3.0})
+    assert state(df) == before
+
+
+def test_an_aware_dict_bar_in_another_zone_is_the_same_instant():
+    df = _dated('Asia/Tokyo')
+    ts = volas.Timestamp('2024-01-05 09:00').tz_localize('America/New_York')
+    df.append({'t': ts, 'close': 3.0})
+    assert df.tz == 'Asia/Tokyo'
+    assert np.datetime64(df.index[-1], 'ns').astype('int64') == ts.value
+
+
+def test_a_time_frame_dict_bar_must_match_the_frame_awareness():
+    df = _tf()
+    before = state(df)
+    with pytest.raises(ValueError, match='tz-'):
+        df.append({'t': volas.Timestamp('2024-01-01 02:00').tz_localize('Asia/Tokyo'),
+                   'high': 3.0, 'close': 3.0, 'volume': 1})
+    assert state(df) == before
+
+
+def test_a_windowed_positional_frame_takes_dict_bars_after_compaction():
+    d = volas.DataFrame({'close': [float(i) for i in range(4)]}, window=3, max_lookback=2)
+    for k in range(30):
+        d.append({'close': 10.0 + k})
+    assert d.index.tolist() == [31, 32, 33]
+    seeded = volas.DataFrame({'close': [float(i) for i in range(8)]}, window=3, max_lookback=2)
+    seeded.append({'close': 1.0})
+    assert seeded.index.tolist() == [6, 7, 8]

@@ -21,6 +21,16 @@ use crate::index::{IndexKind, Label};
 
 use super::DataFrame;
 
+/// The rows a frame keeps (see [`DataFrame::append_retaining`]): those from `from` on
+/// are retained, those from `shown` on are visible.
+#[derive(Clone, Copy, Debug)]
+pub struct Retained {
+    /// The first retained row (the rows before count as dropped).
+    pub from: usize,
+    /// The first visible row.
+    pub shown: usize,
+}
+
 /// What [`DataFrame::append`] does with each admitted row.
 enum Route {
     /// Every row is appended (no label repeats the last).
@@ -81,7 +91,7 @@ impl DataFrame {
         // Whether the rows carry a cached column, looked up from the smaller side (a live
         // frame caches a few directives over a few data columns).
         let has_cached = if prefix {
-            self.computed.keys().any(|k| self.name_to_idx[k] < rows.width())
+            self.first_computed.is_some_and(|p| p < rows.width())
         } else if self.computed.len() <= rows.width() {
             self.computed.keys().any(|k| rows.name_to_idx.contains_key(k))
         } else {
@@ -123,16 +133,30 @@ impl DataFrame {
     /// decided before the first write, so on an error the frame is unchanged. Deciding
     /// a datetime row is O(1); an integer / string row looks its label up.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
-        self.append_retaining(other, 0)
+        self.append_retaining(other, Retained { from: 0, shown: 0 })
     }
 
-    /// [`append`](Self::append) to a frame whose first `hidden` rows are retained but not
-    /// shown (a bounded window's margin): the labels stay unique over every retained row,
-    /// and a clash with a hidden row says so.
-    pub fn append_retaining(&mut self, other: &DataFrame, hidden: usize) -> Result<()> {
+    /// [`append`](Self::append) to a frame that retains only its rows from
+    /// `retained.from` on (a bounded window: the last `window + max_lookback` rows; the
+    /// rows before count as dropped, whenever they are physically compacted) and shows
+    /// them from `retained.shown` on: an integer / string label stays unique over the
+    /// retained rows only, and a clash with a retained but hidden row says so.
+    pub fn append_retaining(&mut self, other: &DataFrame, retained: Retained) -> Result<()> {
         let rows = self.admit(other)?;
-        let rows = rows.as_ref();
-        match self.route(rows, hidden)? {
+        self.commit_rows(rows.as_ref(), retained)
+    }
+
+    /// [`append`](Self::append) of rows already admitted against a frame with this
+    /// frame's columns and index (a time-frame frame's open period takes the bars the
+    /// frame admitted): only the label routing and the commit. Columns the rows carry
+    /// that this frame lacks are not kept.
+    pub fn append_admitted(&mut self, rows: &DataFrame) -> Result<()> {
+        self.commit_rows(rows, Retained { from: 0, shown: 0 })
+    }
+
+    /// Route admitted rows by label and write them.
+    fn commit_rows(&mut self, rows: &DataFrame, retained: Retained) -> Result<()> {
+        match self.route(rows, retained)? {
             Route::Append => self.push_rows(rows),
             Route::Rows(replaces) => {
                 for (k, replace) in replaces.into_iter().enumerate() {
@@ -147,10 +171,36 @@ impl DataFrame {
         }
     }
 
+    /// Append rows that each start a new row — a time-frame rollover's period row: every
+    /// label must follow the one before it (the last row's first), so it can never fall
+    /// into a same-label replacement and merge into a closed row. Admitted like any row
+    /// set; on an error the frame is unchanged.
+    pub fn append_new(&mut self, other: &DataFrame) -> Result<()> {
+        let rows = self.admit(other)?;
+        let rows = rows.as_ref();
+        let mut prev = self.height.checked_sub(1).map(|i| self.index.label_at(i));
+        for k in 0..rows.height {
+            let label = rows.index.label_at(k);
+            if let Some(p) = &prev {
+                if !label_precedes(p, &label) {
+                    return Err(VolasError::Value(format!(
+                        "cannot start a new row labelled {}: it does not follow the last row \
+                         (labelled {})",
+                        label_text(&label),
+                        label_text(p)
+                    )));
+                }
+            }
+            prev = Some(label);
+        }
+        self.push_rows(rows)
+    }
+
     /// Decide, for each admitted row, whether it replaces the last row or is appended
     /// (see [`append`](Self::append)), or reject the row set. Writes nothing.
-    fn route(&self, rows: &DataFrame, hidden: usize) -> Result<Route> {
-        if matches!(rows.index.kind(), IndexKind::Range(_)) || rows.height == 0 {
+    fn route(&self, rows: &DataFrame, retained: Retained) -> Result<Route> {
+        let held = |label: &Label| self.index.position_in(label, retained.from..self.height);
+        if matches!(rows.index.kind(), IndexKind::Range { .. }) || rows.height == 0 {
             return Ok(Route::Append); // unlabelled rows: `check_append` vetted their labels
         }
         let datetime = matches!(rows.index.kind(), IndexKind::Datetime(..));
@@ -164,7 +214,7 @@ impl DataFrame {
             let fresh = if datetime {
                 !label_precedes(&label, &last)
             } else {
-                self.index.position_of(&label).is_none()
+                held(&label).is_none()
             };
             if fresh {
                 return Ok(Route::Append);
@@ -187,8 +237,8 @@ impl DataFrame {
                 )));
             }
             if !replace && !datetime {
-                let held = self.index.position_of(&label);
-                if held.is_some_and(|p| p < hidden) {
+                let held = held(&label);
+                if held.is_some_and(|p| p < retained.shown) {
                     return Err(VolasError::Value(format!(
                         "cannot append label {}: an earlier row with that label is still \
                          retained in the window's hidden margin (max_lookback)",
@@ -236,6 +286,7 @@ impl DataFrame {
             }
         }
         self.height += oh;
+        self.stale_by = super::STALE_BY_APPEND;
         #[cfg(debug_assertions)]
         self.debug_check();
         Ok(())

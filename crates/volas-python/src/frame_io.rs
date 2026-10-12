@@ -123,11 +123,12 @@ impl PyDataFrame {
     /// Returns:
     ///     Series
     pub(crate) fn get_column(&mut self, key: &str) -> PyResult<PySeries> {
-        if self.inner.is_computed(key) {
-            self.refresh_computed(Some(key))?;
+        let name = self.column_name(key).ok_or_else(|| pyerr(VolasError::ColumnNotFound(key.to_string())))?;
+        if self.inner.is_computed(&name) {
+            self.refresh_computed(Some(&name))?;
         }
-        let col = self.inner.column(key).map_err(pyerr)?.clone();
-        Ok(self.present_series(key.to_string(), col))
+        let col = self.inner.column(&name).map_err(pyerr)?.clone();
+        Ok(self.present_series(name, col))
     }
 
     /// A copy of the frame — preserving the cached directive columns / cursor and
@@ -145,8 +146,7 @@ impl PyDataFrame {
     /// exports as `datetime64[ns, UTC]`; the index keeps its own zone.
     #[pyo3(signature = (dtype_backend = "numpy"))]
     pub(crate) fn to_pandas<'py>(&self, py: Python<'py>, dtype_backend: &str) -> PyResult<Bound<'py, PyAny>> {
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         // 'numpy' (default): an int/bool column with NA exports as float64+NaN, the
         // most ecosystem-compatible form. 'numpy_nullable': a faithful, lossless
@@ -201,10 +201,9 @@ impl PyDataFrame {
         columns: Option<Vec<String>>,
         float_format: Option<&str>,
     ) -> PyResult<Option<String>> {
-        self.require_fresh()?;
         // Windowed: emit only the logical M rows (a zero-cost borrow when unbounded)
         // — the CSV never carries the hidden margin.
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let ff = parse_ff(float_format)?;
         let names = df.names();
@@ -263,8 +262,7 @@ impl PyDataFrame {
         requested_schema: Option<PyObject>,
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let _ = requested_schema;
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         crate::arrow::frame_c_stream(py, df.names(), df.columns())
     }
@@ -320,10 +318,9 @@ impl PyDataFrame {
         dtype: Option<&str>,
         na_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.require_fresh()?;
         // Windowed: export only the logical M rows (a zero-cost borrow when
         // unbounded) — the NN feature matrix is exactly the visible window.
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let cols = df.columns();
         let has_str = cols.iter().any(|c| matches!(c, Column::Str(..)));
@@ -450,8 +447,7 @@ impl PyDataFrame {
     ///         to every column (a string column raises — there is no float meaning).
     #[pyo3(signature = (out, columns = None))]
     pub(crate) fn fill_into(&self, out: &Bound<'_, PyAny>, columns: Option<Vec<String>>) -> PyResult<()> {
-        self.require_fresh()?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let positions: Vec<usize> = match &columns {
             Some(cols) => cols
@@ -525,8 +521,6 @@ impl PyDataFrame {
 
     /// Value equality (same columns + index + values, `NaN == NaN`).
     pub(crate) fn equals(&self, other: &PyDataFrame) -> PyResult<bool> {
-        self.require_fresh()?;
-        other.require_fresh()?;
-        Ok(self.logical().as_ref().equals(other.logical().as_ref()))
+        Ok(self.read()?.equals(&*other.read()?))
     }
 }

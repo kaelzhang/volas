@@ -357,3 +357,20 @@ fn refolding_the_forming_row_is_the_period_reduce() {
     let mut s = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["a".into()])], None).unwrap();
     assert!(s.refold_forming_row(0, &bad, &[(0, 0, CombineOp::Keep)]).is_err());
 }
+
+#[test]
+fn a_new_row_never_replaces_or_precedes_the_last() {
+    let mut df = labelled(Index::datetime(vec![10, 20], Tz::Utc), 1.0);
+    let before = snapshot(&df);
+    for label in [20, 15] {
+        let err = df.append_new(&labelled(Index::datetime(vec![label], Tz::Utc), 9.0)).unwrap_err();
+        assert!(err.to_string().contains("does not follow the last row"), "{err}");
+        assert_eq!(snapshot(&df), before);
+    }
+    assert!(df.append_new(&labelled(Index::datetime(vec![30, 30], Tz::Utc), 9.0)).is_err());
+    df.append_new(&labelled(Index::datetime(vec![30, 40], Tz::Utc), 9.0)).unwrap();
+    assert_eq!(df.height(), 4);
+    let mut empty = labelled(Index::datetime(vec![], Tz::Utc), 0.0);
+    empty.append_new(&labelled(Index::datetime(vec![5], Tz::Utc), 1.0)).unwrap();
+    assert_eq!(empty.height(), 1);
+}

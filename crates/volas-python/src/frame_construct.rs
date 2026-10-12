@@ -106,9 +106,9 @@ impl PyDataFrame {
         // volas pandas-free at import. To build a DatetimeIndex from a column, parse it with
         // `to_datetime` then `set_index` (or use `read_csv`).
         let (df, tf) = if let Ok(mut other) = data.extract::<PyRefMut<PyDataFrame>>() {
-            if index.is_some() || dtype.is_some() || window.is_some() {
-                // a derivation that re-labels, re-types or re-windows the rows reads them
-                other.require_fresh()?;
+            if index.is_some() || dtype.is_some() || window.is_some() || time_frame.is_some() {
+                // a derivation that re-labels, re-types, re-windows or re-frames the rows reads them
+                other.read()?;
             }
             match &columns {
                 None => (other.inner.clone(), other.tf.clone()),
@@ -293,7 +293,7 @@ impl PyDataFrame {
     pub(crate) fn tz_localize(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
         Ok(PyDataFrame::plain(
-            self.readable()?.tz_localize(tzv).map_err(pyerr)?,
+            self.read()?.tz_localize(tzv).map_err(pyerr)?,
         ))
     }
 
@@ -304,13 +304,13 @@ impl PyDataFrame {
     /// attached without the naive-guard that protects user-facing `tz_convert`.
     pub(crate) fn _set_index_tz(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
-        Ok(PyDataFrame::plain(self.readable()?.set_index_tz(tzv).map_err(pyerr)?))
+        Ok(PyDataFrame::plain(self.read()?.set_index_tz(tzv).map_err(pyerr)?))
     }
 
     pub(crate) fn tz_convert(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
         Ok(PyDataFrame::plain(
-            self.readable()?.tz_convert(tzv).map_err(pyerr)?,
+            self.read()?.tz_convert(tzv).map_err(pyerr)?,
         ))
     }
 
@@ -363,7 +363,7 @@ impl PyDataFrame {
     ///     numpy.ndarray
     #[getter]
     pub(crate) fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        index_to_numpy(py, self.logical().index())
+        index_to_numpy(py, &self.meta().labels())
     }
 
     // The indexers hold a live reference to this frame (`Py<PyDataFrame>`), not a
