@@ -139,8 +139,8 @@ iii@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volu
 ```
 
 David Bostian's Intraday Intensity Index, a per-bar volume-pressure measure:
-`((2·close − high − low) / (high − low)) · volume`. A zero-range bar
-(`high == low`) yields `0`. No window parameter.
+`((2·close − high − low) / (high − low)) · volume` — AD's money-flow volume of the bar.
+A bar without range (`high == low`) yields `0`, as in AD. No window parameter.
 
 - **series_high? / series_low? / series_close? / series_volume?** the OHLCV columns.
 

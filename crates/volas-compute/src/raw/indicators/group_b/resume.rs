@@ -27,10 +27,11 @@ pub(super) fn dkx_mid(open: &[f64], high: &[f64], low: &[f64], close: &[f64], i:
     (3.0 * close[i] + low[i] + open[i] + high[i]) / 6.0
 }
 
-/// WVAD's per-bar term `(C − O) / (H − L) · V` at `i`.
+/// WVAD's per-bar term `(C − O) / (H − L) · V` at `i`: a range flow like AD's
+/// ([`super::super::volume::range_flow`]), so a bar without range carries no flow.
 #[inline]
 pub(super) fn wvad_term(open: &[f64], high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize) -> f64 {
-    (close[i] - open[i]) / (high[i] - low[i]) * volume[i]
+    super::super::volume::range_flow(close[i] - open[i], high[i], low[i], volume[i])
 }
 
 /// VR's per-bar `(up, down, flat)` volumes at `i` (NaN at the first bar). They read the

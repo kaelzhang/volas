@@ -103,8 +103,8 @@ fn step_of(
         ("atr" | "natr", _) => {
             let (h, l, c) = hlc()?;
             let atr = ind::atr_resume_one(&h, &l, &c, p(0), row, prev, next)?;
-            // NATR = ATR / close · 100; it carries the ATR it scales.
-            Some(if name == "natr" { atr / c[row] * 100.0 } else { atr })
+            // NATR scales the ATR it carries by the row's close.
+            Some(if name == "natr" { ind::natr_value(atr, c[row]) } else { atr })
         }
         ("obv", _) => {
             let (c, v) = cv()?;

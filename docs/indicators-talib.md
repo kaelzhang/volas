@@ -52,7 +52,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 
 | Volas directive | TA-Lib original | Meaning | Parameters |
 | --- | --- | --- | --- |
-| <a id="indicator-ma"></a>`ma` | `MA` | Generic moving average selected by MA type. | `:<period>,<matype=0>@<series=close>` |
+| <a id="indicator-ma"></a>`ma` | `MA` | Generic moving average selected by MA type. A `period` of 1 is the input itself for every type (TA-Lib `TA_MA`), with no warm-up; the commands that smooth with a generic MA (`apo`, `ppo`, `macdext`, `mavp`, `stoch`, `stochf`, `stochrsi`) inherit it. | `:<period>,<matype=0>@<series=close>` |
 | <a id="indicator-ema"></a>`ema` | `EMA` | Exponential moving average. | `:<period>@<series=close>` |
 | <a id="indicator-wma"></a>`wma` | `WMA` | Weighted moving average. | `:<period>@<series=close>` |
 | <a id="indicator-dema"></a>`dema` | `DEMA` | Double exponential moving average. | `:<period>@<series=close>` |
@@ -74,7 +74,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-midpoint"></a>`midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `:<period>@<series=close>` |
 | <a id="indicator-midprice"></a>`midprice` | `MIDPRICE` | Midpoint price over high and low. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-ht_trendline"></a>`ht_trendline` | `HT_TRENDLINE` | Hilbert Transform instantaneous trendline. | `@<series=close>` |
-| <a id="indicator-macd"></a>`macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. | `:<fast=12>,<slow=26>@<series=close>` |
+| <a id="indicator-macd"></a>`macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. As in TA-Lib, a `slow` shorter than `fast` swaps the two (`macd:26,12` is `macd:12,26`); the same holds for `apo`, `ppo` and `macdext` (with the MA types). | `:<fast=12>,<slow=26>@<series=close>` |
 | <a id="indicator-macd-signal"></a>`macd.signal` | `MACD` | Signal line of the Volas MACD line. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
 | <a id="indicator-macd-histogram"></a>`macd.histogram` | `MACD` | MACD histogram: line minus signal. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
 | <a id="indicator-macdext"></a>`macdext` | `MACDEXT` | MACD line with independent MA types. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>@<series=close>` |
@@ -85,8 +85,8 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-macdfix-histogram"></a>`macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
 | <a id="indicator-apo"></a>`apo` | `APO` | Absolute price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
 | <a id="indicator-ppo"></a>`ppo` | `PPO` | Percentage price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
-| <a id="indicator-rsi"></a>`rsi` | `RSI` | Relative Strength Index. | `:<period>@<series=close>` |
-| <a id="indicator-cmo"></a>`cmo` | `CMO` | Chande Momentum Oscillator. | `:<period>@<series=close>` |
+| <a id="indicator-rsi"></a>`rsi` | `RSI` | Relative Strength Index, TA-Lib's `100·avgGain/(avgGain+avgLoss)`. A flat window (`avgGain + avgLoss` exactly 0, a constant or all-falling series) gives 0 as in TA-Lib; TA-Lib's absolute `1e-14` zero test is not used, so a tiny-priced series keeps the value it has at any other scale (a deliberate divergence). | `:<period>@<series=close>` |
+| <a id="indicator-cmo"></a>`cmo` | `CMO` | Chande Momentum Oscillator. A flat window gives 0, with RSI's exact zero test. | `:<period>@<series=close>` |
 | <a id="indicator-cci"></a>`cci` | `CCI` | Commodity Channel Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-imi"></a>`imi` | `IMI` | Intraday Momentum Index. | `:<period>@<series_open=open>,<series_close=close>` |
 | <a id="indicator-mfi"></a>`mfi` | `MFI` | Money Flow Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
@@ -104,29 +104,29 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-stochrsi-k"></a>`stochrsi.k` | `STOCHRSI` | Fast stochastic RSI percent K. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
 | <a id="indicator-stochrsi-d"></a>`stochrsi.d` | `STOCHRSI` | Fast stochastic RSI percent D. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
 | <a id="indicator-trix"></a>`trix` | `TRIX` | One-period ROC of a triple EMA. | `:<period>@<series=close>` |
-| <a id="indicator-ultosc"></a>`ultosc` | `ULTOSC` | Ultimate Oscillator. | `:<short=7>,<medium=14>,<long=28>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-ultosc"></a>`ultosc` | `ULTOSC` | Ultimate Oscillator. The 4/2/1 weights follow argument position (short, medium, long); TA-Lib sorts the three periods ascending first, so the two agree for in-order arguments and differ by design otherwise. | `:<short=7>,<medium=14>,<long=28>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-aroon-up"></a>`aroon.up` | `AROON` | Aroon up line. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-aroon-down"></a>`aroon.down` | `AROON` | Aroon down line. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-aroonosc"></a>`aroonosc` | `AROONOSC` | Aroon oscillator. | `:<period>@<series_high=high>,<series_low=low>` |
-| <a id="indicator-plus_dm"></a>`plus_dm` | `PLUS_DM` | Plus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
-| <a id="indicator-minus_dm"></a>`minus_dm` | `MINUS_DM` | Minus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-plus_dm"></a>`plus_dm` | `PLUS_DM` | Plus directional movement. At `period=1`, the raw one-bar movement from bar 1 (lookback 1), as in TA-Lib. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-minus_dm"></a>`minus_dm` | `MINUS_DM` | Minus directional movement. At `period=1`, the raw one-bar movement from bar 1 (lookback 1), as in TA-Lib. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-plus_di"></a>`plus_di` | `PLUS_DI` | Plus directional indicator, Wilder's `100·+DM/TR`. At `period=1` volas keeps the ×100 on the one-bar ratio; TA-Lib's period-1 branch omits it (`+DM/TR`), a deliberate divergence that keeps period 1 on the same scale as every other period. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-minus_di"></a>`minus_di` | `MINUS_DI` | Minus directional indicator, Wilder's `100·−DM/TR`. At `period=1` volas keeps the ×100 on the one-bar ratio; TA-Lib's period-1 branch omits it (`−DM/TR`), a deliberate divergence that keeps period 1 on the same scale as every other period. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-dx"></a>`dx` | `DX` | Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-adx"></a>`adx` | `ADX` | Average Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-adxr"></a>`adxr` | `ADXR` | Average Directional Movement Index Rating. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| <a id="indicator-obv"></a>`obv` | `OBV` | On-Balance Volume. | `@<series_close=close>,<series_volume=volume>` |
+| <a id="indicator-obv"></a>`obv` | `OBV` | On-Balance Volume: adds the bar's volume on an up close, subtracts it on a down close, and leaves the total unchanged on a flat one (even for an infinite volume). | `@<series_close=close>,<series_volume=volume>` |
 | <a id="indicator-ad"></a>`ad` | `AD` | Chaikin Accumulation Distribution line. | `@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
 | <a id="indicator-adosc"></a>`adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `:<fast=3>,<slow=10>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
 | <a id="indicator-tr"></a>`tr` | `TRANGE` | True Range. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-atr"></a>`atr` | `ATR` | Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| <a id="indicator-natr"></a>`natr` | `NATR` | Normalized Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-natr"></a>`natr` | `NATR` | Normalized Average True Range, `ATR/close·100`; a close of exactly 0 gives 0 at its own row (TA-Lib's guard, with an exact zero test). At `period=1` volas normalises as at every other period, where TA-Lib returns the raw true range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-avgprice"></a>`avgprice` | `AVGPRICE` | Average price. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-medprice"></a>`medprice` | `MEDPRICE` | Median price. | `@<series_high=high>,<series_low=low>` |
 | <a id="indicator-typprice"></a>`typprice` | `TYPPRICE` | Typical price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-wclprice"></a>`wclprice` | `WCLPRICE` | Weighted close price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-ht_dcperiod"></a>`ht_dcperiod` | `HT_DCPERIOD` | Hilbert Transform dominant cycle period. | `@<series=close>` |
-| <a id="indicator-ht_dcphase"></a>`ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. | `@<series=close>` |
+| <a id="indicator-ht_dcphase"></a>`ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. Every Hilbert-transform output (`ht_*`, `mama`) evaluates TA-Lib's C recurrences in source order without fused multiply-add, so it is the same on every platform and bit-identical, from its first published row, to a TA-Lib build that does not fuse (x86-64 without FMA); against a fused build (clang on arm64) it agrees to rounding. On flat or step input the phase is rounding noise and may differ between TA-Lib builds and platforms. | `@<series=close>` |
 | <a id="indicator-ht_phasor"></a>`ht_phasor` | `HT_PHASOR` | Hilbert Transform phasor in-phase line. | `@<series=close>` |
 | <a id="indicator-ht_phasor-quadrature"></a>`ht_phasor.quadrature` | `HT_PHASOR` | Hilbert Transform phasor quadrature line. | `@<series=close>` |
 | <a id="indicator-ht_sine"></a>`ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@<series=close>` |

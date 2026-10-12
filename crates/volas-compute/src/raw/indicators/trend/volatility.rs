@@ -41,9 +41,20 @@ pub fn atr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 /// as a percentage of price. Lookback = period (same as ATR).
 pub fn natr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let atr = atr(high, low, close, period);
-    (0..close.len())
-        .map(|i| atr[i] / close[i] * 100.0)
-        .collect()
+    (0..close.len()).map(|i| natr_value(atr[i], close[i])).collect()
+}
+
+/// One row's NATR from its ATR and close: `ATR/close · 100`, and 0 where the close is
+/// exactly zero (TA-Lib's guard, applied at the current row; TA-Lib's `TA_IS_ZERO` is an
+/// absolute epsilon, volas tests exact zero as for PPO). An ATR still warming up stays
+/// NaN. The one owner of the rule for the full computation and every resume.
+#[inline]
+pub fn natr_value(atr: f64, close: f64) -> f64 {
+    if close == 0.0 && !atr.is_nan() {
+        0.0
+    } else {
+        atr / close * 100.0
+    }
 }
 
 // --- ATR / NATR state-carry (additive; the full-recompute fallback stays correct) ---
@@ -131,7 +142,7 @@ pub fn natr_resume(
 ) -> Option<(Vec<f64>, Vec<f64>)> {
     let (atr_tail, new_state) = atr_resume(high, low, close, period, from, state)?;
     let vals = (from..high.len())
-        .map(|i| atr_tail[i - from] / close[i] * 100.0)
+        .map(|i| natr_value(atr_tail[i - from], close[i]))
         .collect();
     Some((vals, new_state))
 }

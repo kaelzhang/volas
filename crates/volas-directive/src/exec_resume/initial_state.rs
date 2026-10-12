@@ -319,7 +319,7 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
         // A recursive-MA `.d` (matype != 0) keeps the fallback (no resume).
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
-            if is_d && arg_usize(args, 3) != 0 {
+            if is_d && ind::generic_ma_type(arg_usize(args, 2), arg_usize(args, 3)) != 0 {
                 return None;
             }
             ind::stochrsi_final_state(

@@ -161,10 +161,12 @@ pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
 /// loop lets the out-of-order core overlap the two FMA dependency chains (ILP) —
 /// roughly the cost of one EMA, not two — and emits the difference directly (no
 /// intermediate `fast` / `slow` arrays, no separate subtraction pass).
-/// Bit-identical to two [`ema_seeded`] calls minus each other. Requires
-/// `fast <= slow` (so the fast EMA seeds no later than the slow one).
+/// Bit-identical to two [`ema_seeded`] calls minus each other. Requires `fast <= slow`
+/// (the fast EMA seeds no later than the slow one): its callers order the periods by
+/// TA-Lib's rule first (`indicators::oscillator_order`).
 #[inline]
 pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array1<f64> {
+    debug_assert!(fast <= slow, "ema_diff_seeded needs fast <= slow, got {fast} > {slow}");
     let n = data.len();
     let mut out = Array1::from_elem(n, f64::NAN);
     if fast == 0 || slow == 0 || n == 0 {
@@ -900,5 +902,14 @@ mod tests {
         }
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&got[..4]), bits(&clean[..4]));
+    }
+
+    /// The periods out of order break `ema_diff_seeded`'s precondition (its callers order
+    /// them first), caught in a debug build.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "fast <= slow")]
+    fn ema_diff_seeded_rejects_a_fast_period_longer_than_the_slow() {
+        let _ = ema_diff_seeded(av(&[3.0, 1.5, 4.25, 2.0, 5.5]), 5, 2);
     }
 }

@@ -19,21 +19,19 @@ use super::*;
 // returns `None`, falling back to the full recompute — the plumbing only captures state
 // on a seeded column, so `from >= 1` always holds in practice.
 
-/// The Wilder-`sum` running accumulator after seeding at `period-1` and folding every
-/// later term — i.e. the value of `s` once `wilder_sum` has consumed all `n` rows. `None`
-/// before the seed exists (`period == 0 || period > n`). `term(i)` is the per-bar
-/// one-period quantity (`dm1.0` / `dm1.1` / `tr_at`).
+/// The Wilder-`sum` running accumulator after seeding at [`wilder_seed_bar`] and folding
+/// every later term — i.e. the value of `s` once `wilder_sum` has consumed all `n` rows.
+/// `None` before the seed exists. `term(i)` is the per-bar one-period quantity
+/// (`dm1.0` / `dm1.1`).
 fn wilder_sum_final(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Option<f64> {
-    if period == 0 || period > n {
-        return None;
-    }
+    let seed = wilder_seed_bar(period).filter(|&s| s < n)?;
     let mut s = 0.0;
-    for i in 1..period {
+    for i in 1..=seed {
         s += term(i);
     }
     let a = 1.0 - 1.0 / period as f64;
-    for i in period..n {
-        s = s.mul_add(a, term(i));
+    for i in seed + 1..n {
+        s = wilder_sum_step(s, a, term(i));
     }
     Some(s)
 }
@@ -52,7 +50,7 @@ fn wilder_sum_resume(
     let mut s = state;
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        s = s.mul_add(a, term(i));
+        s = wilder_sum_step(s, a, term(i));
         out.push(s);
     }
     (out, s)
@@ -123,9 +121,9 @@ fn dm_tr_sums_final(
     let a = 1.0 - 1.0 / period as f64;
     for i in period..n {
         let (dp, dm) = dm1(high, low, i);
-        p = p.mul_add(a, dp);
-        m = m.mul_add(a, dm);
-        t = t.mul_add(a, tr_at(high, low, close, i));
+        p = wilder_sum_step(p, a, dp);
+        m = wilder_sum_step(m, a, dm);
+        t = wilder_sum_step(t, a, tr_at(high, low, close, i));
     }
     Some((p, m, t))
 }
@@ -135,9 +133,9 @@ fn dm_tr_sums_final(
 #[inline]
 fn dm_tr_step(high: &[f64], low: &[f64], close: &[f64], i: usize, a: f64, s: &mut [f64; 3]) {
     let (dp, dm) = dm1(high, low, i);
-    s[0] = s[0].mul_add(a, dp);
-    s[1] = s[1].mul_add(a, dm);
-    s[2] = s[2].mul_add(a, tr_at(high, low, close, i));
+    s[0] = wilder_sum_step(s[0], a, dp);
+    s[1] = wilder_sum_step(s[1], a, dm);
+    s[2] = wilder_sum_step(s[2], a, tr_at(high, low, close, i));
 }
 
 /// Final +DI state `[sp, st]` (+DM and TR running sums) — pairs with [`plus_di_resume`].
@@ -565,7 +563,7 @@ pub fn plus_dm_resume_one(
         return None;
     }
     let a = 1.0 - 1.0 / period as f64;
-    next[0] = state[0].mul_add(a, dm1(high, low, row).0);
+    next[0] = wilder_sum_step(state[0], a, dm1(high, low, row).0);
     Some(next[0])
 }
 
@@ -584,6 +582,6 @@ pub fn minus_dm_resume_one(
         return None;
     }
     let a = 1.0 - 1.0 / period as f64;
-    next[0] = state[0].mul_add(a, dm1(high, low, row).1);
+    next[0] = wilder_sum_step(state[0], a, dm1(high, low, row).1);
     Some(next[0])
 }
