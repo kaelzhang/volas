@@ -131,7 +131,8 @@ impl DataFrame {
 
     /// Overwrite a computed column's rows `[from, from + tail.len())` in place
     /// (copy-on-write) with the recomputed `tail`, and mark it valid up to the
-    /// full height. Directive results are F64 or Bool, so both are handled.
+    /// full height. Directive results are F64 or Bool, so both are handled; a Bool
+    /// row takes the tail's presence too (a missing truth stays missing).
     /// O(tail.len()).
     pub fn update_computed_tail(&mut self, name: &str, from: usize, tail: &Column) -> Result<()> {
         let pos = self
@@ -148,11 +149,13 @@ impl DataFrame {
                     }
                 }
             }
-            (Column::Bool(arc, _), Column::Bool(t, _)) => {
+            (Column::Bool(arc, val), Column::Bool(t, tval)) => {
                 let buf = arc.make_mut();
+                let n = buf.len();
                 for (i, &v) in t.iter().enumerate() {
-                    if from + i < buf.len() {
+                    if from + i < n {
                         buf[from + i] = v;
+                        val.set(from + i, n, tval.is_valid(i));
                     }
                 }
             }

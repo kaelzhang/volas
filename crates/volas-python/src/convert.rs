@@ -17,13 +17,14 @@ use crate::*;
 
 /// Like [`column_to_numpy`] but **consumes** the column, moving its backing buffer
 /// straight into the NumPy array with no copy when the column is uniquely owned —
-/// the fresh-result path (`df.exec(directive)`). Falls back to a borrow + copy for
-/// the rarer `Str` / `Datetime` columns.
+/// the fresh-result path (`df.exec(directive)`). A bool / int column holding a
+/// missing cell, and the rarer `Str` / `Datetime` columns, take the borrowing export
+/// instead, so a missing cell is exported as missing — never as its payload.
 pub(crate) fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> Bound<'py, PyAny> {
     match col {
         Column::F64(a) => a.into_vec().into_pyarray(py).into_any(),
-        Column::Bool(a, _) => a.into_vec().into_pyarray(py).into_any(),
-        Column::I64(a, _) => a.into_vec().into_pyarray(py).into_any(),
+        Column::Bool(a, val) if !val.has_nulls() => a.into_vec().into_pyarray(py).into_any(),
+        Column::I64(a, val) if !val.has_nulls() => a.into_vec().into_pyarray(py).into_any(),
         other => column_to_numpy(py, &other),
     }
 }

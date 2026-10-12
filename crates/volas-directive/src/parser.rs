@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::bind::bind_node;
-use super::types::{Ast, Command, Cst, Node, Op, UnaryOp};
+use super::types::{Ast, Command, Cst, Node, Number, Op, UnaryOp};
 use volas_core::fxhash::FxHashMap;
 use volas_core::{Result, VolasError};
 
@@ -422,12 +422,15 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         let text = String::from_utf8_lossy(&self.s[start..self.i]).into_owned();
-        // Digits and dots never parse to NaN, but too many digits round to ±inf, which
-        // has no literal form: it would render as `inf`, a name, and rebind on re-parse.
-        match text.parse::<f64>() {
-            Ok(v) if v.is_finite() => self.node(Node::Scalar(v), 1),
-            Ok(_) => Err(self.err("number literal is out of range of a 64-bit float")),
-            Err(_) => Err(self.err(format!("invalid number '{text}'"))),
+        // An integer literal is held exactly ([`Number`]). Digits and dots never parse
+        // to NaN, but too many digits round to ±inf, which has no literal form: it
+        // would render as `inf`, a name, and rebind on re-parse.
+        match Number::parse(&text) {
+            Some(v) => self.node(Node::Scalar(v), 1),
+            None if text.parse::<f64>().is_ok() => {
+                Err(self.err("number literal is out of range of a 64-bit float"))
+            }
+            None => Err(self.err(format!("invalid number '{text}'"))),
         }
     }
 
@@ -603,7 +606,7 @@ mod tests {
         match parse_cst("kdj.j < 0").unwrap() {
             Node::Binary { op, right, .. } => {
                 assert_eq!(op, Op::Lt);
-                assert_eq!(*right, Node::Scalar(0.0));
+                assert_eq!(*right, Node::Scalar(Number::Int(0)));
             }
             _ => panic!(), // LCOV_EXCL_LINE
         }
@@ -686,7 +689,7 @@ mod tests {
         }
         // The largest finite literal is still a number.
         let max = format!("{}", f64::MAX);
-        assert_eq!(parse_cst(&max).unwrap(), Node::Scalar(f64::MAX));
+        assert_eq!(parse_cst(&max).unwrap(), Node::Scalar(Number::Float(f64::MAX)));
     }
 
     /// A ~40 KB hostile directive must be a syntax error, never a stack overflow in

@@ -211,7 +211,7 @@ pub enum Node<A> {
     /// A bare identifier: a column name, or a no-argument command.
     Name(String),
     /// A numeric literal.
-    Scalar(f64),
+    Scalar(Number),
     /// An indicator command.
     Command(Command<A>),
     /// A unary operation.
@@ -239,6 +239,43 @@ pub type Cst = Node<Vec<Option<String>>>;
 /// The bound AST: arguments parsed, defaulted, and type-checked once. Executed,
 /// measured (lookback), and rendered (stringify) without per-call re-parsing.
 pub type Ast = Node<Box<[ArgValue]>>;
+
+/// A numeric literal, held exactly: an integral value inside the int64 range is an
+/// `Int` — so `volume > 9007199254740993` compares against that integer, never its
+/// float64 neighbour (contract #26) — and any other value is a float64. The form is
+/// canonical (`2.0` is `Int(2)`), so a literal re-parses from its token unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Number {
+    /// An integer literal.
+    Int(i64),
+    /// A float literal (non-integral, or past the int64 range).
+    Float(f64),
+}
+
+impl Number {
+    /// The literal written as `text` (an optional `-`, digits, an optional `.`):
+    /// an integer token is read exactly — never through a float64 — and any other
+    /// is a float64 in canonical form. `None` when `text` is no number or rounds
+    /// to `±inf` (which has no literal form).
+    pub(crate) fn parse(text: &str) -> Option<Number> {
+        if let Ok(i) = text.parse::<i64>() {
+            return Some(Number::Int(i));
+        }
+        let v = text.parse::<f64>().ok().filter(|v| v.is_finite())?;
+        Some(match <i64 as volas_core::numeric::Numeric>::try_from_f64(v) {
+            Some(i) => Number::Int(i),
+            None => Number::Float(v),
+        })
+    }
+
+    /// The literal's canonical source token.
+    pub(crate) fn token(self) -> String {
+        match self {
+            Number::Int(i) => i.to_string(),
+            Number::Float(v) => number_token(v),
+        }
+    }
+}
 
 /// The canonical source token of a number: its shortest decimal form that reads back
 /// as the same `f64` — a whole number without a decimal point (`2`), whatever its
@@ -297,7 +334,7 @@ mod tests {
         assert_eq!(cmd.clone().name, "ma");
         let nodes: [Cst; 6] = [
             Node::Name("a".into()),
-            Node::Scalar(1.5),
+            Node::Scalar(Number::Float(1.5)),
             Node::Command(cmd),
             Node::Unary {
                 op: UnaryOp::Not,
@@ -305,12 +342,12 @@ mod tests {
             },
             Node::Unary {
                 op: UnaryOp::Neg,
-                operand: Box::new(Node::Scalar(2.0)),
+                operand: Box::new(Node::Scalar(Number::Int(2))),
             },
             Node::Binary {
                 left: Box::new(Node::Name("c".into())),
                 op: Op::Gt,
-                right: Box::new(Node::Scalar(0.0)),
+                right: Box::new(Node::Scalar(Number::Int(0))),
             },
         ];
         for n in &nodes {

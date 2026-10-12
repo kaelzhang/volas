@@ -32,8 +32,11 @@ def test_compound_two_command_directive():
     got = np.asarray(df.exec('ma:10 > boll.upper:20'), dtype=float)
     ma10 = np.asarray(df.exec('ma:10'), dtype=float)
     upper = np.asarray(df.exec('boll.upper:20'), dtype=float)
-    # NaN > x is False (0.0), matching numpy — so a plain elementwise compare suffices.
-    np.testing.assert_array_equal(got, (ma10 > upper).astype(float))
+    # a row with a missing operand is a missing truth (NaN here), never a made-up
+    # False (stock-pandas / numpy give False); every other row is the plain compare
+    unknown = np.isnan(ma10) | np.isnan(upper)
+    np.testing.assert_array_equal(np.isnan(got), unknown)
+    np.testing.assert_array_equal(got[~unknown], (ma10 > upper)[~unknown].astype(float))
 
 
 def test_iloc_slice_with_step_and_negative_bounds():

@@ -400,6 +400,12 @@ An unknown signal must not silently act like a deliberate negative — in a live
 system that would turn a data gap into a trade decision. Fill or drop the NA
 (`m.fillna(False)` / `m.dropna()`) to state your intent explicitly.
 
+A **directive** boolean is such a signal, so it does carry `volas.NA`: a comparison
+or cross with a missing operand (the warm-up rows of `df['close > ma:20']`) is
+missing, and `~ & | ^` in a directive use Kleene logic (see
+[Directives](docs/directives.md#operators)). Filtering by it therefore needs the
+explicit `fillna(False)` too.
+
 ### Numeric operations on non-numeric columns raise
 
 A `str` or `datetime` column has no numeric meaning, so arithmetic and numeric
@@ -601,6 +607,19 @@ numpy scalars, and numpy int has no missing representation) — pandas's
 numpy-backed behaviour. pandas's *nullable* backend returns `pd.NA` instead;
 volas deliberately keeps the numpy-scalar boundary (C1).
 
+## Cumulation never skips a missing value
+
+pandas `resample` skips missing values: one `NaN` high inside an hour gives the
+hour the maximum of the other highs, and an all-missing hour sums to `0`. volas's
+`cumulate` and the live `time_frame` fold instead make a period's `first` / `last` /
+`max` / `min` / `sum` **missing as soon as one of its values is**, for every dtype
+(an int / bool / str `volas.NA` or a datetime `NaT` as much as a float `NaN`,
+whatever value the missing cell carries). An understated range or volume with no
+sign that data was missing is the failure this avoids; the indicators then treat the
+bar as a missing row. The supported aggregations per dtype are tabled in
+[Cumulation](docs/cumulation.md) (a datetime has no `sum`; `bool` / `str` only
+`first` / `last`), and an unsupported pair is rejected when the frame is built.
+
 ## Window aggregations (`rolling` / `expanding`): four deliberate divergences
 
 The window API is pandas-aligned and differential-tested method by method
@@ -658,18 +677,20 @@ value. volas decides per operation by the kind of result it produces:
 
 | operation | integer input |
 |---|---|
-| `== != < <= > >=` (int vs int, int vs float, Series or scalar), `between`, `is_monotonic_*`, `nlargest` / `nsmallest`, `sort_values`, `rank`, `idxmin` / `idxmax`, `cummin` / `cummax` | **exact** — compared in the integers' own order (an int against a float by exact value, so `2**53 + 1 > 2**53`) |
+| `== != < <= > >=` (int vs int, int vs float, Series or scalar, and in a directive — whose integer literals are exact int64), `between`, `is_monotonic_*`, `nlargest` / `nsmallest`, `sort_values`, `rank`, `idxmin` / `idxmax`, `cummin` / `cummax` | **exact** — compared in the integers' own order (an int against a float by exact value, so `2**53 + 1 > 2**53`) |
 | `sum` / `prod` / `min` / `max` (Series and DataFrame), `cumsum` / `cumprod`, `+ - *`, `//` (int // int), `abs`, `round`, `diff`, `fillna` / `where` / `mask` with an integer fill | **exact** — computed in int64 (int32 where pandas keeps it), checked for overflow |
 | a DataFrame `sum` / `min` / … over int **and** float columns | float64 result; each integer converts exactly or raises `TypeError` |
-| `mean`, `var`, `std`, `median`, `quantile`, `sem`, `skew`, `kurt`, `describe`, `corr` / `cov`, the math transforms (`sqrt`, `floor`, `exp`, …), `/`, `//` by zero, `+ - *` with a float operand, `clip` with a fractional bound, `interpolate`, every `rolling` / `expanding` / `ewm` aggregation except `count` / `first` / `last` | **float64 math** — a present int64 with `|x| > 2⁵³` raises `OverflowError` (its float64 image is not the value); within `±2⁵³` every integer and its neighbours are exact, so the result is the float64 result of the true input |
+| `mean`, `var`, `std`, `median`, `quantile`, `sem`, `skew`, `kurt`, `describe`, `corr` / `cov`, the math transforms (`sqrt`, `floor`, `exp`, …), `/`, `//` by zero, `+ - *` with a float operand, `clip` with a fractional bound, `interpolate`, every `rolling` / `expanding` / `ewm` aggregation except `count` / `first` / `last`, directive arithmetic (`+ - * /`, unary `-`) and every indicator input | **float64 math** — a present int64 with `|x| > 2⁵³` raises `OverflowError` (its float64 image is not the value); within `±2⁵³` every integer and its neighbours are exact, so the result is the float64 result of the true input |
 
 pandas returns a float computed from the rounded input in the last row.
 
 ### Conversions are lossless or raise
 
-One conversion rule serves every target-typed write (`iat` / `iloc` / `at` / `loc`,
-Series and mask assignment, dict / `Row` `append`), column ingress (lists, tuples,
-NumPy arrays of any kind), and `astype` between numeric dtypes:
+One conversion rule serves every target-typed write (`iat` / `iloc` / `at` / `loc`
+with a scalar or an array, Series and mask assignment, dict / `Row` / DataFrame
+`append` and the row replacement of a repeated label, the live time-frame fold),
+column ingress (lists, tuples, NumPy arrays of any kind), and `astype` between
+numeric dtypes:
 
 | source → target | converts | raises |
 |---|---|---|

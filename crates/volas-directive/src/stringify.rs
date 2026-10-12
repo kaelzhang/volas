@@ -6,7 +6,7 @@
 
 use crate::parser::{is_ident_char, is_ident_start};
 use crate::spec::{canon_sub, command_spec, normalize};
-use crate::types::{number_token, ArgTokens, Command, Node, UnaryOp};
+use crate::types::{ArgTokens, Command, Node, UnaryOp};
 
 /// Canonical string form of a directive tree. Generic over the argument payload so
 /// it canonicalizes both a bound [`Ast`](crate::types::Ast) (the frame-cache key)
@@ -15,7 +15,7 @@ use crate::types::{number_token, ArgTokens, Command, Node, UnaryOp};
 pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
     match node {
         Node::Name(s) => s.clone(),
-        Node::Scalar(v) => number_token(*v),
+        Node::Scalar(v) => v.token(),
         Node::Command(cmd) => stringify_command(cmd),
         Node::Unary { op, operand } => {
             let op_s = match op {
@@ -227,7 +227,7 @@ mod tests {
             name: "correl".into(),
             sub: None,
             args: vec![ArgValue::Usize(5)].into_boxed_slice(),
-            series: vec![Node::Name("close".into()), Node::Scalar(3.0)],
+            series: vec![Node::Name("close".into()), Node::Scalar(crate::types::Number::Int(3))],
         });
         assert!(stringify(&node).contains('3'));
     }

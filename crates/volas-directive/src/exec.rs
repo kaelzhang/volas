@@ -4,10 +4,10 @@ use std::borrow::Cow;
 
 use crate::bind::bind_command;
 use crate::operands::Operands;
-use crate::types::{ArgValue, Ast, Node, Op, UnaryOp};
+use crate::types::{ArgValue, Ast, Node, Number, Op, UnaryOp};
 use volas_compute::raw::indicators as ind;
 use volas_compute::missing::{on_complete_rows, Input};
-use volas_core::Column;
+use volas_core::{BoolOp, CmpOp, Column};
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
 
@@ -26,9 +26,16 @@ pub fn execute_refresh(df: &DataFrame, node: &Ast) -> Result<Column> {
 }
 
 /// Execute a directive node against `df`.
+///
+/// Numbers keep their exactness: an integer literal is an int64 column, a
+/// comparison orders integers exactly ([`Column::order_rows`]), and float64 math
+/// (`+ - * /`, unary `-`, every indicator input) raises for an int64 past 2^53
+/// (contract #26). Booleans carry presence (contract #27): a comparison with a
+/// missing operand is missing, and `~ & | ^` use Kleene logic.
 pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
     match node {
-        Node::Scalar(v) => Ok(Column::f64(vec![*v; df.height()])),
+        Node::Scalar(Number::Int(v)) => Ok(Column::i64(vec![*v; df.height()])),
+        Node::Scalar(Number::Float(v)) => Ok(Column::f64(vec![*v; df.height()])),
         Node::Name(name) => {
             if name.is_empty() {
                 return Err(VolasError::Value("empty column / command name".into()));
@@ -43,81 +50,82 @@ pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
         Node::Unary { op, operand } => {
             let c = execute(df, operand)?;
             require_numeric(&c)?; // a str/datetime operand can't go through the f64 funnel (C4)
-            Ok(match op {
-                UnaryOp::Not => Column::bool(c.to_f64_vec().iter().map(|&x| x == 0.0).collect()),
-                UnaryOp::Neg => Column::f64(c.to_f64_vec().iter().map(|&x| -x).collect()),
-            })
+            match op {
+                UnaryOp::Not => Ok(c.not()),
+                UnaryOp::Neg => Ok(Column::f64(c.to_f64_domain(ARITHMETIC)?.iter().map(|&x| -x).collect())),
+            }
         }
         Node::Binary { left, op, right } => {
             let l = execute(df, left)?;
             let r = execute(df, right)?;
             require_numeric(&l)?; // both operands must be numeric (or bool) — C4, no
             require_numeric(&r)?; // silent str -> NaN arithmetic / comparison
-            Ok(apply_binary(*op, &l, &r))
+            apply_binary(*op, &l, &r)
         }
     }
 }
 
-fn as_bool(col: &Column) -> Vec<bool> {
-    match col {
-        Column::Bool(v, _) => v.to_vec(),
-        other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
-    }
-}
+/// How directive float64 arithmetic names itself in a past-2^53 error.
+const ARITHMETIC: &str = "directive arithmetic";
 
-fn apply_binary(op: Op, l: &Column, r: &Column) -> Column {
+fn apply_binary(op: Op, l: &Column, r: &Column) -> Result<Column> {
+    let arith = |f: fn(f64, f64) -> f64| -> Result<Column> {
+        let (lf, rf) = (l.to_f64_domain(ARITHMETIC)?, r.to_f64_domain(ARITHMETIC)?);
+        Ok(Column::f64(lf.iter().zip(&rf).map(|(&a, &b)| f(a, b)).collect()))
+    };
     match op {
-        Op::Add | Op::Sub | Op::Mul | Op::Div => {
-            let (lf, rf) = (l.to_f64_vec(), r.to_f64_vec());
-            let n = lf.len().min(rf.len());
-            let mut out = vec![f64::NAN; lf.len()];
-            for i in 0..n {
-                out[i] = match op {
-                    Op::Add => lf[i] + rf[i],
-                    Op::Sub => lf[i] - rf[i],
-                    Op::Mul => lf[i] * rf[i],
-                    Op::Div => lf[i] / rf[i],
-                    _ => unreachable!(), // LCOV_EXCL_LINE
-                };
-            }
-            Column::f64(out)
-        }
-        Op::And | Op::Or | Op::Xor => {
-            let (lb, rb) = (as_bool(l), as_bool(r));
-            let n = lb.len().min(rb.len());
-            let mut out = vec![false; lb.len()];
-            for i in 0..n {
-                out[i] = match op {
-                    Op::And => lb[i] && rb[i],
-                    Op::Or => lb[i] || rb[i],
-                    Op::Xor => lb[i] ^ rb[i],
-                    _ => unreachable!(), // LCOV_EXCL_LINE
-                };
-            }
-            Column::bool(out)
-        }
-        _ => Column::bool(apply_cmp(op, &l.to_f64_vec(), &r.to_f64_vec())),
+        Op::Add => arith(|a, b| a + b),
+        Op::Sub => arith(|a, b| a - b),
+        Op::Mul => arith(|a, b| a * b),
+        Op::Div => arith(|a, b| a / b),
+        Op::And => l.logical(r, BoolOp::And),
+        Op::Or => l.logical(r, BoolOp::Or),
+        Op::Xor => l.logical(r, BoolOp::Xor),
+        _ => compare(op, l, r),
     }
 }
 
-fn apply_cmp(op: Op, l: &[f64], r: &[f64]) -> Vec<bool> {
-    let n = l.len().min(r.len());
-    let mut out = vec![false; l.len()];
-    match op {
-        Op::Lt => (0..n).for_each(|i| out[i] = l[i] < r[i]),
-        Op::Le => (0..n).for_each(|i| out[i] = l[i] <= r[i]),
-        Op::Eq => (0..n).for_each(|i| out[i] = l[i] == r[i]),
-        Op::Ne => (0..n).for_each(|i| out[i] = l[i] != r[i]),
-        Op::Ge => (0..n).for_each(|i| out[i] = l[i] >= r[i]),
-        Op::Gt => (0..n).for_each(|i| out[i] = l[i] > r[i]),
-        Op::CrossUp => (1..n).for_each(|i| out[i] = l[i - 1] <= r[i - 1] && l[i] > r[i]),
-        Op::CrossDown => (1..n).for_each(|i| out[i] = l[i - 1] >= r[i - 1] && l[i] < r[i]),
-        Op::Cross => (1..n).for_each(|i| {
-            out[i] = (l[i - 1] <= r[i - 1] && l[i] > r[i]) || (l[i - 1] >= r[i - 1] && l[i] < r[i])
-        }),
-        _ => unreachable!("non-comparison op in apply_cmp"), // LCOV_EXCL_LINE
+/// A comparison or cross of `l` against `r`, row by row, by exact order
+/// ([`Column::order_rows`]); a row with a missing side is a missing truth. A cross
+/// is the Kleene AND of the previous row's order and this row's (the row before the
+/// first is missing): `//` is `prev <= && now >`, `\\` is `prev >= && now <`, and
+/// `><` either of them.
+fn compare(op: Op, l: &Column, r: &Column) -> Result<Column> {
+    let order = l.order_rows(r)?;
+    let at = |i: usize, cmp: CmpOp| order[i].map(|o| cmp.matches(o));
+    let crossed = |i: usize, before: CmpOp, now: CmpOp| {
+        kleene_and(i.checked_sub(1).and_then(|p| at(p, before)), at(i, now))
+    };
+    let rows = 0..order.len();
+    let simple = |cmp: CmpOp| Column::bool_from_options(rows.clone().map(|i| at(i, cmp)));
+    Ok(match op {
+        Op::Lt => simple(CmpOp::Lt),
+        Op::Le => simple(CmpOp::Le),
+        Op::Eq => simple(CmpOp::Eq),
+        Op::Ne => simple(CmpOp::Ne),
+        Op::Ge => simple(CmpOp::Ge),
+        Op::Gt => simple(CmpOp::Gt),
+        Op::CrossUp => Column::bool_from_options(rows.map(|i| crossed(i, CmpOp::Le, CmpOp::Gt))),
+        Op::CrossDown => Column::bool_from_options(rows.map(|i| crossed(i, CmpOp::Ge, CmpOp::Lt))),
+        Op::Cross => Column::bool_from_options(rows.map(|i| {
+            kleene_or(crossed(i, CmpOp::Le, CmpOp::Gt), crossed(i, CmpOp::Ge, CmpOp::Lt))
+        })),
+        _ => unreachable!("arithmetic / logical ops are applied above"), // LCOV_EXCL_LINE
+    })
+}
+
+/// Kleene AND: a present `false` decides; otherwise a missing side is missing.
+fn kleene_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
     }
-    out
+}
+
+/// Kleene OR: a present `true` decides; otherwise a missing side is missing.
+fn kleene_or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    kleene_and(a.map(|x| !x), b.map(|x| !x)).map(|x| !x)
 }
 
 // --- argument accessors -----------------------------------------------------
@@ -166,29 +174,34 @@ pub(crate) fn require_numeric(col: &Column) -> Result<()> {
     }
 }
 
+/// An indicator input: a numeric column whose values are what float64 math reads —
+/// an int64 past 2^53 raises (contract #26) instead of feeding a rounded value.
+pub(crate) fn require_f64_input(col: &Column) -> Result<()> {
+    require_numeric(col)?;
+    col.check_f64_domain("an indicator input")
+}
+
 /// Borrow a frame column as `&[f64]` without copying when it is already `F64`;
 /// otherwise convert (e.g. an `I64` volume column). A command's arm reads its inputs
 /// through [`Operands`](crate::operands::Operands) instead.
 pub(crate) fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
     let col = df.column(name)?;
-    require_numeric(col)?;
+    require_f64_input(col)?;
     Ok(match col.as_f64() {
         Some(s) => Cow::Borrowed(s),
         None => Cow::Owned(col.to_f64_vec()),
     })
 }
 
-pub(crate) fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<bool>> {
+/// A boolean operand's truths, row by row: a bool reads its value, a number
+/// `x != 0`, and a missing cell is a missing truth (contract #27).
+pub(crate) fn series_truths(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<Option<bool>>> {
     let node = series
         .get(i)
         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
-    match execute(df, node)? {
-        Column::Bool(v, _) => Ok(v.to_vec()),
-        other => {
-            require_numeric(&other)?;
-            Ok(other.to_f64_vec().iter().map(|&x| x != 0.0).collect())
-        }
-    }
+    let col = execute(df, node)?;
+    require_numeric(&col)?;
+    Ok((0..col.len()).map(|i| col.truth_at(i)).collect())
 }
 
 /// Dispatch a TA-Lib MA-type code to the matching moving average over `data`.
@@ -455,8 +468,8 @@ mod tests {
         // directly: the underflow-prone tools, the ADX/ADXR pair, and the
         // EMA-cascade warm-up (via DEMA / TEMA / T3).
         assert!(ind::change(&[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
-        assert!(ind::repeat(&[true, true], 0).iter().all(|&b| !b));
-        assert!(ind::increase(&[1.0, 2.0], 0, 1).iter().any(|&b| b)); // repeat 0 -> period 1, no underflow
+        assert!(ind::repeat(&[Some(true), Some(true)], 0).iter().all(Option::is_none));
+        assert!(ind::increase(&[1.0, 2.0], 0, 1).iter().all(Option::is_none)); // no window, no underflow
         let (h, l, c) = (vec![2.0; 5], vec![1.0; 5], vec![1.5; 5]);
         assert!(ind::adx(&h, &l, &c, 0).iter().all(|x| x.is_nan()));
         assert!(ind::adxr(&h, &l, &c, 0).iter().all(|x| x.is_nan()));
