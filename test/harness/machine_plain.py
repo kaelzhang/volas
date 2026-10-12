@@ -101,11 +101,11 @@ class PlainMachine(FrameMachine):
             # only the first column may (it fails before any column grows).
             numeric = [c for c in schema.columns if schema.dtype(c) in ('float64', 'float32', 'int64', 'int32')]
             col = numeric[0] if contracts.avoids('append-atomicity') else numeric[regime[1] % len(numeric)]
-            n = len(rows)
-            lossy = (np.full(n, 2**53 + 1, dtype='int64') if schema.dtype(col) in ('float64', 'float32')
-                     else np.full(n, 0.5))
-            bar = build.frame(schema, rows, index)
-            bar[col] = lossy
+            # built with the lossy dtype directly, so no assignment can round it first
+            lossy, lossy_dtype = ((2**53 + 1, 'int64') if schema.dtype(col) in ('float64', 'float32')
+                                  else (0.5, 'float64'))
+            rows = [{**r, col: lossy} for r in rows]
+            bar = build.frame(schema, rows, index, dtypes={col: lossy_dtype})
             self.attempt(lambda: self.df.append(bar), expect_error=TypeError, label=f'append dtype {col}')
             return
         if kind == 'extra_column':
@@ -292,7 +292,8 @@ class PlainMachine(FrameMachine):
             return
         # A column the slice is too short to keep computed stays as the plain data it
         # holds (fresh here: a slice of a stale frame raises).
-        held = {n: observe.column_values_series(self.df.get_column(n)) for n in self.cached}
+        held = {n: (observe.column_values_series(s), s.dtype)
+                for n, s in ((n, self.df.get_column(n)) for n in self.cached)}
         start = self.visible_start()
 
         def commit(result):
@@ -303,11 +304,11 @@ class PlainMachine(FrameMachine):
             for name in list(self.cached):
                 if contracts.SLICE_CACHED_COLUMNS_CONTINUE and volas.directive_lookback(name) <= new_len:
                     continue
-                values = held[name]
+                values, dtype = held[name]
                 del self.cached[name]
                 cells = [None] * start + [None if (isinstance(v, float) and np.isnan(v)) else v
                                           for v in values.tolist()]
-                self.store.add_column(name, cells, 'bool' if values.dtype == np.bool_ else 'float64')
+                self.store.add_column(name, cells, 'bool' if dtype == 'bool' else 'float64')
 
         self.attempt(lambda: self.df.iloc[a:], commit=commit, label=f'iloc[{a}:]')
 
