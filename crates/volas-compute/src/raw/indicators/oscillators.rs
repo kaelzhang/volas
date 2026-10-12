@@ -5,7 +5,7 @@ use super::stochastic::{stoch_fastk, stochrsi_fastk};
 use crate::accum::{anchors_at, Csum};
 use crate::guard::Slide;
 use crate::missing;
-use crate::raw::kernels::{self, total_ge, total_gt};
+use crate::raw::kernels::{self, canonical_zero};
 
 // ---------------------------------------------------------------------------
 // Overbought / oversold
@@ -45,13 +45,13 @@ fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
     let mut highest = unsafe { *src };
     for i in 1..10 {
         let value = unsafe { *src.add(i) };
-        if total_gt(value, highest) {
+        if value > highest {
             highest_idx = i;
             highest = value;
         }
     }
     unsafe {
-        *dst.add(9) = highest;
+        *dst.add(9) = canonical_zero(highest);
     }
 
     for today in 10..n {
@@ -63,18 +63,18 @@ fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
             let mut idx = trailing + 1;
             while idx <= today {
                 let value = unsafe { *src.add(idx) };
-                if total_gt(value, highest) {
+                if value > highest {
                     highest_idx = idx;
                     highest = value;
                 }
                 idx += 1;
             }
-        } else if total_ge(x, highest) {
+        } else if x >= highest {
             highest_idx = today;
             highest = x;
         }
         unsafe {
-            *dst.add(today) = highest;
+            *dst.add(today) = canonical_zero(highest);
         }
     }
     out

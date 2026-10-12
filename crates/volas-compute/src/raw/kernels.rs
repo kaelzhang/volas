@@ -362,44 +362,14 @@ pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1
     result
 }
 
-/// The tie rule of every extremum path: IEEE 754 total order (`f64::total_cmp`), so
-/// `+0 > −0` and two equal values are the same bits. Every path that reduces a window
-/// to its highest / lowest value — the van Herk sweep, the fused pair, the trackers of
-/// `hhv` and the stochastics, a per-row window — then gives the same bits, and which
-/// path runs (a missing value elsewhere in the series may change it) changes nothing.
+/// An extremum's zero is `+0`. Two equal values with different bits are only `+0` and
+/// `−0`, and which of them a path keeps depends on the path (the van Herk sweep, the fused
+/// pair, the trackers of `hhv` and the stochastics, a per-row window — and a missing value
+/// elsewhere in the series may change which one runs). Every path settles the tie here, so
+/// they all give the same bits. `x + 0.0` is `x` for every other value.
 #[inline(always)]
-pub(crate) fn total_gt(a: f64, b: f64) -> bool {
-    a.total_cmp(&b).is_gt()
-}
-
-/// `a >= b` in total order (see [`total_gt`]).
-#[inline(always)]
-pub(crate) fn total_ge(a: f64, b: f64) -> bool {
-    a.total_cmp(&b).is_ge()
-}
-
-/// `a < b` in total order (see [`total_gt`]).
-#[inline(always)]
-pub(crate) fn total_lt(a: f64, b: f64) -> bool {
-    a.total_cmp(&b).is_lt()
-}
-
-/// `a <= b` in total order (see [`total_gt`]).
-#[inline(always)]
-pub(crate) fn total_le(a: f64, b: f64) -> bool {
-    a.total_cmp(&b).is_le()
-}
-
-/// The larger of `a` and `b` in total order (see [`total_gt`]).
-#[inline(always)]
-pub(crate) fn max_total(a: f64, b: f64) -> f64 {
-    if total_gt(b, a) { b } else { a }
-}
-
-/// The smaller of `a` and `b` in total order (see [`total_gt`]).
-#[inline(always)]
-pub(crate) fn min_total(a: f64, b: f64) -> f64 {
-    if total_lt(b, a) { b } else { a }
+pub(crate) fn canonical_zero(x: f64) -> f64 {
+    x + 0.0
 }
 
 /// van Herk / Gil-Werman sliding window reduction (min or max) in O(n) for
@@ -462,33 +432,35 @@ pub fn rolling_max_min(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, V
         let e = (s + period).min(n);
         let (mut mx, mut mn) = (f64::NEG_INFINITY, f64::INFINITY);
         for i in s..e {
-            mx = max_total(mx, high[i]);
+            mx = mx.max(high[i]);
             pmax[i] = mx;
-            mn = min_total(mn, low[i]);
+            mn = mn.min(low[i]);
             pmin[i] = mn;
         }
         let (mut mx, mut mn) = (f64::NEG_INFINITY, f64::INFINITY);
         for i in (s..e).rev() {
-            mx = max_total(mx, high[i]);
+            mx = mx.max(high[i]);
             smax[i] = mx;
-            mn = min_total(mn, low[i]);
+            mn = mn.min(low[i]);
             smin[i] = mn;
         }
         s = e;
     }
     for i in (period - 1)..n {
-        hh[i] = max_total(smax[i + 1 - period], pmax[i]);
-        ll[i] = min_total(smin[i + 1 - period], pmin[i]);
+        hh[i] = canonical_zero(smax[i + 1 - period].max(pmax[i]));
+        ll[i] = canonical_zero(smin[i + 1 - period].min(pmin[i]));
     }
     missing::blank_windows(&mut hh, high, period);
     missing::blank_windows(&mut ll, low, period);
     (hh, ll)
 }
 
-/// A rolling extremum (`reduce` / its identity `ident`, in total order — see
-/// [`total_gt`]) over `period`: the O(n) van Herk sweep, then every window holding a
-/// missing value blanked (each window's prefix / suffix reads only its own rows, so a
-/// missing value reaches only those windows). A strided view is gathered first.
+/// A rolling extremum (`reduce` / its identity `ident`) over `period`: the O(n) van Herk
+/// sweep, its zero made `+0` ([`canonical_zero`]), then every window holding a missing
+/// value blanked (each window's prefix / suffix reads only its own rows, so a missing
+/// value reaches only those windows). A strided view is gathered first. Inlined into
+/// [`rolling_min`] / [`rolling_max`] (the hot-path gate counts their bodies).
+#[inline(always)]
 fn rolling_extremum(
     data: ArrayView1<f64>,
     period: usize,
@@ -506,6 +478,9 @@ fn rolling_extremum(
     };
     let dst = result.as_slice_mut().expect("from_elem is contiguous");
     van_herk(&src, period, dst, reduce, ident);
+    for v in dst.iter_mut() {
+        *v = canonical_zero(*v);
+    }
     missing::blank_windows(dst, &src, period);
     result
 }
@@ -514,16 +489,14 @@ fn rolling_extremum(
 ///
 /// O(n) van Herk sliding extremum — no deque, no indirect reads, and unlike a
 /// track-and-rescan it never degrades to O(n·period).
-#[inline]
 pub fn rolling_min(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    rolling_extremum(data, period, min_total, f64::INFINITY)
+    rolling_extremum(data, period, f64::min, f64::INFINITY)
 }
 
 /// Rolling maximum over `period` (NaN while the window holds a missing value) — the
 /// mirror of [`rolling_min`].
-#[inline]
 pub fn rolling_max(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    rolling_extremum(data, period, max_total, f64::NEG_INFINITY)
+    rolling_extremum(data, period, f64::max, f64::NEG_INFINITY)
 }
 
 /// One row of [`sma`] over the series `term`, resumed from `slide` (rows `0..i` slid):

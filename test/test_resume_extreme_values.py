@@ -60,8 +60,9 @@ def test_atr_capture_seeds_where_the_full_compute_does(directive):
 @pytest.mark.parametrize("x", [[1.0, -0.0, 0.0], [-1.0, 0.0, -0.0], [0.0, -0.0, 0.0], [-0.0, 0.0, -0.0],
                                [0.0, 0.0, -0.0], [-0.0, -0.0, 0.0]])
 def test_a_later_missing_value_never_flips_an_earlier_zero_extremum(directive, x):
-    """Every extremum path resolves a signed-zero tie by total order (`+0 > −0`), so a
-    missing value appended later — which once switched the algorithm — changes nothing."""
+    """Every extremum path settles a signed-zero tie the same way (a zero extremum is
+    `+0`), so a missing value appended later — which once switched the algorithm —
+    changes nothing."""
     clean = volas.DataFrame({"close": x}).exec(directive)
     later = volas.DataFrame({"close": x + [np.nan]}).exec(directive)[:3]
     assert _bits(clean, later)

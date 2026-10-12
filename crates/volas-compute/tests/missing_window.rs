@@ -52,7 +52,7 @@ fn a_position_window_holding_a_missing_row_is_missing_on_every_path() {
     }
 }
 
-/// Every extremum path resolves a signed-zero tie the same way (total order: `+0 > −0`),
+/// Every extremum path settles a signed-zero tie the same way (a zero extremum is `+0`),
 /// so a missing value later in the series — which may select another path — never
 /// changes an earlier extremum's bits.
 #[test]
@@ -72,8 +72,9 @@ fn a_future_missing_value_never_changes_an_earlier_extremum() {
         assert_eq!(bits(&hh[..3]), bits(&kernels::rolling_max(ArrayView1::from(&x), 3).to_vec()));
         assert_eq!(bits(&ll[..3]), bits(&kernels::rolling_min(ArrayView1::from(&x), 3).to_vec()));
     }
-    assert_eq!(kernels::rolling_min(ArrayView1::from(&[1.0, -0.0, 0.0]), 3)[2].to_bits(), (-0.0f64).to_bits());
-    assert_eq!(kernels::rolling_max(ArrayView1::from(&[-1.0, -0.0, 0.0]), 3)[2].to_bits(), 0.0f64.to_bits());
+    // a zero extremum is +0, whichever signed zero the window holds
+    assert_eq!(kernels::rolling_min(ArrayView1::from(&[1.0, -0.0, -0.0]), 3)[2].to_bits(), 0.0f64.to_bits());
+    assert_eq!(kernels::rolling_max(ArrayView1::from(&[-1.0, -0.0, -0.0]), 3)[2].to_bits(), 0.0f64.to_bits());
     // the hhv:10 tracker and the stochastic trackers agree with the sweep
     let mut z = vec![0.0; 12];
     z[3] = -0.0;

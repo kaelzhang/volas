@@ -4,7 +4,7 @@ use super::oscillators::rsi;
 use crate::accum::{Anchors, StreamMean};
 use crate::missing;
 use crate::raw::indicators::FiniteMa;
-use crate::raw::kernels::{self, max_total, min_total, total_ge, total_gt, total_le, total_lt};
+use crate::raw::kernels::{self, canonical_zero};
 
 /// TA-Lib stochastic raw %K: `100·(close − LL) / (HH − LL)` over `period` (HH/LL the
 /// highest high / lowest low). A flat range yields 0, but — unlike [`rsv`] — the
@@ -25,14 +25,22 @@ pub fn stoch_fastk(high: &[f64], low: &[f64], close: &[f64], period: usize) -> V
     (0..close.len()).map(|i| fastk_value(close[i], hh[i], ll[i])).collect()
 }
 
-/// Raw %K from a close and its window's extremes `hh` / `ll`: `100·(close − ll)/(hh − ll)`,
-/// `0` for a flat range. Missing when any of the three is (the per-row term rule,
-/// [`missing::term`]): a flat range would otherwise read no close at all.
+/// Raw %K from a close and its window's extremes `hh` / `ll`: [`fastk`], missing when any
+/// of the three is (the per-row term rule, [`missing::term`]): a flat range would
+/// otherwise read no close at all.
 #[inline(always)]
 fn fastk_value(close: f64, hh: f64, ll: f64) -> f64 {
+    missing::term(&[close, hh, ll], fastk(close, hh, ll))
+}
+
+/// The raw %K formula `100·(close − ll)/(hh − ll)`, `0` for a flat range — the one owner
+/// of it for every stochastic path. The extremes' zeros are made `+0` first
+/// ([`canonical_zero`]), so a path that kept the other signed zero gives the same bits.
+#[inline(always)]
+fn fastk(close: f64, hh: f64, ll: f64) -> f64 {
+    let (hh, ll) = (canonical_zero(hh), canonical_zero(ll));
     let diff = hh - ll;
-    let k = if diff != 0.0 { 100.0 * (close - ll) / diff } else { 0.0 };
-    missing::term(&[close, hh, ll], k)
+    if diff != 0.0 { 100.0 * (close - ll) / diff } else { 0.0 }
 }
 
 fn stoch_fastk_small_window(
@@ -83,13 +91,13 @@ fn stoch_fastk_small_window(
                 if value.is_nan() {
                     return None;
                 }
-                if total_lt(value, lowest) {
+                if value < lowest {
                     lowest_idx = idx;
                     lowest = value;
                 }
                 idx += 1;
             }
-        } else if total_le(low_today, lowest) {
+        } else if low_today <= lowest {
             lowest_idx = today;
             lowest = low_today;
         }
@@ -110,13 +118,13 @@ fn stoch_fastk_small_window(
                 if value.is_nan() {
                     return None;
                 }
-                if total_gt(value, highest) {
+                if value > highest {
                     highest_idx = idx;
                     highest = value;
                 }
                 idx += 1;
             }
-        } else if total_ge(high_today, highest) {
+        } else if high_today >= highest {
             highest_idx = today;
             highest = high_today;
         }
@@ -125,13 +133,8 @@ fn stoch_fastk_small_window(
         if c.is_nan() {
             return None;
         }
-        let diff = highest - lowest;
         unsafe {
-            *out_ptr.add(today) = if diff != 0.0 {
-                100.0 * (c - lowest) / diff
-            } else {
-                0.0
-            };
+            *out_ptr.add(today) = fastk(c, highest, lowest);
         }
         trailing += 1;
         today += 1;
@@ -203,13 +206,13 @@ fn stoch_d_sma_fused<const STAGES: usize>(
                 if value.is_nan() {
                     return None;
                 }
-                if total_lt(value, lowest) {
+                if value < lowest {
                     lowest_idx = idx;
                     lowest = value;
                 }
                 idx += 1;
             }
-        } else if total_le(low_today, lowest) {
+        } else if low_today <= lowest {
             lowest_idx = today;
             lowest = low_today;
         }
@@ -230,13 +233,13 @@ fn stoch_d_sma_fused<const STAGES: usize>(
                 if value.is_nan() {
                     return None;
                 }
-                if total_gt(value, highest) {
+                if value > highest {
                     highest_idx = idx;
                     highest = value;
                 }
                 idx += 1;
             }
-        } else if total_ge(high_today, highest) {
+        } else if high_today >= highest {
             highest_idx = today;
             highest = high_today;
         }
@@ -245,12 +248,7 @@ fn stoch_d_sma_fused<const STAGES: usize>(
         if c.is_nan() {
             return None;
         }
-        let diff = highest - lowest;
-        let fastk = if diff != 0.0 {
-            100.0 * (c - lowest) / diff
-        } else {
-            0.0
-        };
+        let fastk = fastk(c, highest, lowest);
 
         if let Some(slowk) = k_mean.push(fastk, k_anchors.tick()) {
             if STAGES == 1 {
@@ -305,32 +303,27 @@ fn stoch_fastk_same_series_small_window(data: &[f64], period: usize) -> Option<V
                     return None;
                 }
                 let idx = trailing + 1 + off;
-                if total_le(value, lowest) {
+                if value <= lowest {
                     lowest_idx = idx;
                     lowest = value;
                 }
-                if total_ge(value, highest) {
+                if value >= highest {
                     highest_idx = idx;
                     highest = value;
                 }
             }
         } else {
-            if total_le(x, lowest) {
+            if x <= lowest {
                 lowest_idx = today;
                 lowest = x;
             }
-            if total_ge(x, highest) {
+            if x >= highest {
                 highest_idx = today;
                 highest = x;
             }
         }
 
-        let diff = highest - lowest;
-        out[today] = if diff != 0.0 {
-            100.0 * (x - lowest) / diff
-        } else {
-            0.0
-        };
+        out[today] = fastk(x, highest, lowest);
         trailing += 1;
         today += 1;
     }
@@ -420,33 +413,28 @@ pub fn stochrsi_d_default_sma(close: &[f64], origin: usize) -> Option<Vec<f64>> 
                 if value.is_nan() {
                     return None; // LCOV_EXCL_LINE
                 }
-                if total_le(value, lowest) {
+                if value <= lowest {
                     lowest_idx = idx;
                     lowest = value;
                 }
-                if total_ge(value, highest) {
+                if value >= highest {
                     highest_idx = idx;
                     highest = value;
                 }
                 idx += 1;
             }
         } else {
-            if total_le(x, lowest) {
+            if x <= lowest {
                 lowest_idx = today;
                 lowest = x;
             }
-            if total_ge(x, highest) {
+            if x >= highest {
                 highest_idx = today;
                 highest = x;
             }
         }
 
-        let diff = highest - lowest;
-        let fastk = if diff != 0.0 {
-            100.0 * (x - lowest) / diff
-        } else {
-            0.0
-        };
+        let fastk = fastk(x, highest, lowest);
         if let Some(d) = k_mean.push(fastk, k_anchors.tick()) {
             unsafe {
                 *out_ptr.add(start + today) = d;
@@ -472,8 +460,8 @@ pub fn stoch_fastk_at(high: &[f64], low: &[f64], close: &[f64], period: usize, i
     if missing::holds_missing(hw) || missing::holds_missing(lw) {
         return f64::NAN;
     }
-    let hh = hw.iter().copied().fold(f64::NEG_INFINITY, max_total);
-    let ll = lw.iter().copied().fold(f64::INFINITY, min_total);
+    let hh = hw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let ll = lw.iter().copied().fold(f64::INFINITY, f64::min);
     fastk_value(close[i], hh, ll)
 }
 

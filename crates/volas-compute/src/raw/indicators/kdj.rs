@@ -6,7 +6,7 @@ use ndarray::Array1;
 use super::av;
 use super::oscillators::rsv_value;
 use crate::missing;
-use crate::raw::kernels::{self, max_total, min_total};
+use crate::raw::kernels::{self, canonical_zero};
 
 /// KDJ's RSV: [`rsv_value`] over each `period_rsv`-bar window, and — before the first
 /// full window — over the bars available so far (the 通达信 convention for KDJ, a
@@ -21,9 +21,9 @@ fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Array
     for i in 0..n {
         rsv[i] = if i + 1 < period_rsv {
             // a partial window: the bars `[0, i]` (once one is missing, it stays missing)
-            hh = if missing::any_of(&[hh, high[i]]) { f64::NAN } else { max_total(hh, high[i]) };
-            ll = if missing::any_of(&[ll, low[i]]) { f64::NAN } else { min_total(ll, low[i]) };
-            rsv_value(close[i], hh, ll)
+            hh = if missing::any_of(&[hh, high[i]]) { f64::NAN } else { hh.max(high[i]) };
+            ll = if missing::any_of(&[ll, low[i]]) { f64::NAN } else { ll.min(low[i]) };
+            rsv_value(close[i], canonical_zero(hh), canonical_zero(ll))
         } else {
             rsv_value(close[i], hhv[i], llv[i])
         };

@@ -23,8 +23,8 @@ it:
   (`mfi`), an up / down split (`vr`, `psy`), a clamped difference (`brar.br`), a rate
   of change over a zero base (`roc`, `rocp`, `rocr`, `rocr100` give `0` over a zero
   base only for a present value), and a missing `mavp` period. A highest / lowest value
-  breaks a tie between `-0.0` and `+0.0` by IEEE total order (`+0.0` is the higher), so
-  a later missing value never changes an earlier extremum, not even the sign of a zero.
+  that is zero is `+0.0`, whichever signed zero the window holds, so a later missing
+  value never changes an earlier extremum, not even the sign of a zero.
 - A **candlestick pattern** (`cdl.<pattern>`) reads whole candles: a bar whose open,
   high, low or close is missing or infinite is a missing candle, and every pattern is
   NaN on the bars whose lookback holds it — its own bars and the bars its body / range
