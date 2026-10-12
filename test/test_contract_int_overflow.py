@@ -34,6 +34,11 @@ def _s(values, dtype=np.int64):
         lambda: _s([I64_MIN, 1]).diff(),
         lambda: _s([I64_MIN]).abs(),
         lambda: _s([I64_MAX]).round(-1),
+        # 10^19 itself is past int64: |x| > 5e18 rounds to +-1e19
+        lambda: _s([6 * 10**18]).round(-19),
+        lambda: _s([-6 * 10**18]).round(-19),
+        lambda: _s([5 * 10**18 + 1]).round(-19),
+        lambda: volas.DataFrame({"a": np.array([6 * 10**18])}).round(-19),
         lambda: _s([I64_MIN]) // -1,
         lambda: _s([2**31 - 1], np.int32) + _s([1], np.int32),
         lambda: _s([2**31 - 1, 1], np.int32).cumsum(),
@@ -52,6 +57,16 @@ def test_in_range_results_are_exact():
     assert _s([I64_MAX - 1, 1]).sum() == I64_MAX
     assert _s([2**31 - 1, 1], np.int32).sum() == 2**31  # int32 sums accumulate in int64
     assert _s([-5, 3]).abs().to_list() == [5, 3]
+
+
+def test_round_at_the_int64_decimal_edge():
+    # exact half-to-even at the 10^19 grid: the tie and everything inside it go to 0
+    edge = [5 * 10**18, -5 * 10**18, 5 * 10**18 - 1, I64_MIN + 5 * 10**18, 0]
+    assert _s(edge).round(-19).to_list() == [0, 0, 0, 0, 0]
+    assert _s([I64_MAX, I64_MIN]).round(-20).to_list() == [0, 0]
+    assert _s([I64_MAX, I64_MIN]).round(-(2**31 - 1)).to_list() == [0, 0]
+    assert _s([6 * 10**18, -6 * 10**18]).round(-18).to_list() == [6 * 10**18, -6 * 10**18]
+    assert _s([2**31 - 1], np.int32).round(-10).to_list() == [0]
 
 
 def test_missing_cells_do_not_overflow():
