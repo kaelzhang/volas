@@ -33,6 +33,7 @@ naive) is read as its instants, and every export that can state a zone states **
 | `s.to_list()` / `to_dict()` / `items()`, cells, `to_numpy(dtype='object')` | `Timestamp(..., tz='UTC')` (`volas.NA` for `NaT`) |
 | `s.dt.tz` | `'UTC'` (`.dt` fields read the UTC wall clock) |
 | `to_numpy()` / `__array__` | `datetime64[ns]` of the same UTC instants (NumPy has no zone) |
+| `s.dtype` / `df.dtypes`, `repr`, `to_csv` | unchanged: the dtype is still `datetime64[ns]` (no tz in the dtype name), and repr / CSV text show the UTC wall clock without an offset |
 
 So the instant is never ambiguous, but the **source column's zone is not stored**: a
 pandas `datetime64[ns, Asia/Shanghai]` column comes back `datetime64[ns, UTC]` (the

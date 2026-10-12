@@ -1362,6 +1362,7 @@ datetime **列**存储的是绝对瞬时（UTC 纪元纳秒），本身不带时
 | `s.to_list()` / `to_dict()` / `items()`、单元格、`to_numpy(dtype='object')` | `Timestamp(..., tz='UTC')`（`NaT` 为 `volas.NA`） |
 | `s.dt.tz` | `'UTC'`（`.dt` 字段读取 UTC 挂钟时间） |
 | `to_numpy()` / `__array__` | 相同 UTC 瞬时的 `datetime64[ns]`（NumPy 没有时区） |
+| `s.dtype` / `df.dtypes`、`repr`、`to_csv` | 不变：dtype 仍为 `datetime64[ns]`（dtype 名中不含时区），repr / CSV 文本显示不带偏移的 UTC 挂钟时间 |
 
 因此瞬时永远没有歧义，但**源列的时区不会被保存**：pandas 的 `datetime64[ns, Asia/Shanghai]` 列会以 `datetime64[ns, UTC]`（相同瞬时）返回。通过转换恢复时区——在 pandas 中，或在 volas 中经由索引：
 

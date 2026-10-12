@@ -610,14 +610,20 @@ a different period or column, see the directive syntax in `docs/directives.md`.
 ## `cumulate` across a DST transition: one local grid for every bar
 
 Sub-day time frames bucket by real instants on the frame's **local** grid (anchored
-at local midnight), and day-and-coarser frames by the local civil calendar. For `1h`
-and finer this is exactly pandas `resample`: on a fall-back day the repeated `01:00`
-hour is two bars. For a multi-hour frame pandas instead lays absolute-length bins from
-the first day's local midnight, so after the transition its bins leave the local grid
-(on 2026-11-01 in `America/New_York`, pandas `resample('2h')` labels `00:00`, `01:00`,
-`03:00`, …). volas keeps every bar on the local grid (`00:00`, `02:00`, `04:00`, …) —
-the `00:00` bar spans three real hours that day — so a bar's period never depends on
-where the data happens to start, and live folding can place each bar on its own.
+at local midnight), and day-and-coarser frames by the local civil calendar. pandas
+instead lays absolute-length bins from the first day's local midnight. The two agree
+whenever the offset change is a whole multiple of the step — e.g. New York's one-hour
+DST under `1h` and finer: on a fall-back day the repeated `01:00` hour is two bars in
+both. They differ otherwise: after the transition pandas' bins leave the local grid,
+while volas keeps every bar on it —
+- a multi-hour frame across a one-hour change (on 2026-11-01 in `America/New_York`,
+  pandas `resample('2h')` labels `00:00`, `01:00`, `03:00`, …; volas `00:00`, `02:00`,
+  `04:00`, …, the `00:00` bar spanning three real hours that day);
+- a half-hour DST (`Australia/Lord_Howe`) under `1h` or coarser, and historical LMT
+  offsets that are not whole minutes, under any step.
+
+So a bar's period never depends on where the data happens to start, and live folding
+can place each bar on its own.
 
 ## int `min` / `max` over an all-NA column
 
