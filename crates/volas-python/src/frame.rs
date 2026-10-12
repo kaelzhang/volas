@@ -26,6 +26,14 @@ pub(crate) fn reduces(col: &Column) -> bool {
     col.require_numeric().is_ok()
 }
 
+/// The new series of the transformed `cols` of `df` (a [`PyDataFrame::data_view`]): its
+/// names and index, its row 0 at position 0.
+pub(crate) fn cells(df: &DataFrame, cols: Vec<Column>) -> PyResult<PyDataFrame> {
+    DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
+        .map(PyDataFrame::plain)
+        .map_err(pyerr)
+}
+
 /// A frame's values as a reader may see them: fresh (no cached directive column waits
 /// for a refresh) and only the visible rows. Only the read gate
 /// ([`PyDataFrame::read`]) makes one, so every helper that takes a `&Fresh` reads
@@ -250,24 +258,13 @@ impl PyDataFrame {
         Meta(self)
     }
 
-    /// The logical view a windowed frame presents — the last `window` rows, as an
-    /// owned sub-frame via `slice` (which carries the directive resume state, SP-9).
-    /// An unbounded frame borrows `inner`. Private: values leave through [`read`].
-    fn logical(&self) -> std::borrow::Cow<'_, DataFrame> {
-        match &self.window {
-            Some(_) => {
-                let (start, len) = self.logical_range();
-                std::borrow::Cow::Owned(self.inner.rows(start, start + len, &Replayer))
-            }
-            None => std::borrow::Cow::Borrowed(&self.inner),
-        }
-    }
-
     /// Present a full-length column as a Series sliced to the logical M view (with
     /// the matching sliced index) — identity (a plain `wrap_series`) when unbounded.
     /// Backs windowed `df[name]` so a column read never exposes the hidden margin.
+    /// A cached directive column is marked as one ([`PySeries::cached`]).
     pub(crate) fn present_series(&self, name: String, col: Column) -> PySeries {
-        match &self.window {
+        let cached = self.inner.is_computed(&name);
+        let mut series = match &self.window {
             Some(_) => {
                 let (start, len) = self.logical_range();
                 PySeries {
@@ -276,10 +273,13 @@ impl PyDataFrame {
                         col.slice(start, start + len),
                         Arc::new(self.inner.index().slice(start, start + len)),
                     ),
+                    cached: false,
                 }
             }
             None => self.wrap_series(name, col),
-        }
+        };
+        series.cached = cached;
+        series
     }
 
     /// Element-wise comparison backing `__eq__` / `__ne__`: against another
@@ -288,11 +288,9 @@ impl PyDataFrame {
     pub(crate) fn compare(&self, other: &Bound<'_, PyAny>, op: CmpOp) -> PyResult<PyDataFrame> {
         // Compare the logical M views (zero-cost borrow when unbounded) so the
         // result and the operand both span only the visible window.
-        let view = self.read()?;
-        let df = view.as_ref();
+        let df = &self.data_view()?;
         let cols: Vec<Column> = if let Ok(o) = other.extract::<PyRef<PyDataFrame>>() {
-            let oview = o.read()?;
-            let odf = oview.as_ref();
+            let odf = &o.data_view()?;
             if df.names() != odf.names() {
                 return Err(PyValueError::new_err(
                     "cannot compare DataFrames with different columns",
@@ -313,43 +311,34 @@ impl PyDataFrame {
                 .map(|c| c.compare(&cmp_scalar_col(other, c.dtype(), c.len())?, op).map_err(pyerr))
                 .collect::<PyResult<_>>()?
         };
-        self.with_columns(cols)
+        cells(df, cols)
     }
 
-    /// Rebuild a plain frame from `cols`, reusing this frame's names and index (the
-    /// columns must be height-aligned). Backs `compare` / `fillna` / `mask_na`.
-    pub(crate) fn with_columns(&self, cols: Vec<Column>) -> PyResult<PyDataFrame> {
-        // Build over the logical M view's names + index (a zero-cost borrow when
-        // unbounded). Callers pass logical-length columns (iterating `logical()`),
-        // so a windowed frame's hidden margin never reaches a derived frame.
-        let view = self.logical();
-        let df = view.as_ref();
-        DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
-            .map_err(pyerr)
-    }
-
-    /// Column-wise transform chokepoint: map every column of the logical M view
-    /// through `op` and rebuild over that view's index. The single windowed-safe
-    /// path behind `ffill`/`bfill`/`isna`/`round`/`clip`/… — one logical slice,
-    /// margin never leaks.
-    pub(crate) fn map_columns(&self, op: impl Fn(&Column) -> PyResult<Column>) -> PyResult<PyDataFrame> {
+    /// The cells every value transform reads (`compare`, `fillna`, `where` / `mask`, the
+    /// column-wise transforms): the visible rows' data columns. A value transform is a
+    /// new series, as `astype` is (R15): a cached directive column is not carried — its
+    /// transformed cells are not its directive's values, and are never handed out as a
+    /// plain data column under its name. Read through the gate; the hidden margin of a
+    /// windowed frame never reaches it.
+    pub(crate) fn data_view(&self) -> PyResult<DataFrame> {
         let view = self.read()?;
-        let df = view.as_ref();
+        view.select(&view.data_names()).map_err(pyerr)
+    }
+
+    /// Column-wise transform chokepoint: map every data column of the visible rows
+    /// ([`data_view`](Self::data_view)) through `op` — a new series. Behind
+    /// `ffill`/`bfill`/`isna`/`round`/`clip`/….
+    pub(crate) fn map_columns(&self, op: impl Fn(&Column) -> PyResult<Column>) -> PyResult<PyDataFrame> {
+        let df = &self.data_view()?;
         let cols = df.columns().iter().map(&op).collect::<PyResult<Vec<_>>>()?;
-        DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
-            .map_err(pyerr)
+        cells(df, cols)
     }
 
     /// Apply a Series transform to every column -> a new frame (pandas column-wise
     /// `df.cumsum()` etc.). Each column's own dtype rule applies; a column the op
     /// rejects (e.g. a string column under a numeric transform) propagates its error.
     pub(crate) fn map_cols(&self, op: impl Fn(&PySeries) -> PyResult<PySeries>) -> PyResult<PyDataFrame> {
-        // Windowed: derive from the logical M view (zero-cost borrow when unbounded),
-        // so the hidden margin never leaks into a column-wise transform.
-        let view = self.read()?;
-        let df = view.as_ref();
+        let df = &self.data_view()?;
         let idx = df.index();
         let cols = df
             .names()
@@ -358,13 +347,12 @@ impl PyDataFrame {
             .map(|(name, col)| {
                 let s = PySeries {
                     inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
+                    cached: false,
                 };
                 Ok(op(&s)?.inner.data)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        DataFrame::new(df.names().to_vec(), cols, Some((**idx).clone()))
-            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
-            .map_err(pyerr)
+        cells(df, cols)
     }
 
     /// Reduce each reducible column ([`reduces`]) to a float64 statistic -> a Series
@@ -382,6 +370,7 @@ impl PyDataFrame {
         }
         Ok(PySeries {
             inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
+            cached: false,
         })
     }
 
@@ -430,10 +419,8 @@ impl PyDataFrame {
         // Operate on the logical M view (zero-cost borrow when unbounded) so a
         // windowed frame's `cond` is matched against — and the result built from —
         // the visible rows, never the hidden margin.
-        let view = self.read()?;
-        let base = view.as_ref();
-        let cview = cond.read()?;
-        let cond_df = cview.as_ref();
+        let base = &self.data_view()?;
+        let cond_df = &cond.data_view()?;
         if cond_df.width() != base.width() || cond_df.height() != base.height() {
             return Err(PyValueError::new_err(
                 "where/mask: `cond` must have the same shape as the frame",
@@ -509,7 +496,7 @@ impl PyDataFrame {
                 keep_col.select(&c, &other_col, target).map_err(pyerr)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        self.with_columns(cols)
+        cells(base, cols)
     }
 
     /// THE cell write path — every positional, label and mask write (`iloc` / `loc` /
@@ -700,6 +687,7 @@ impl PyDataFrame {
     pub(crate) fn wrap_series(&self, name: String, col: Column) -> PySeries {
         PySeries {
             inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
+            cached: false,
         }
     }
 }

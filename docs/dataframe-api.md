@@ -582,8 +582,15 @@ A frame derived from another either **continues its series** or **starts a new o
 - **Every other derivation is a new series**: a selection of rows that are not consecutive
   or not in order (a mask with gaps, `iloc[[0, 2, 5]]`, `sort_index(ascending=False)`,
   `nlargest`), `astype`, `rename`, `set_index` / `reset_index`, a new `index=` or `dtype=`,
-  `tz_localize` / `tz_convert`. It holds the source's data columns only: a cached column
-  is dropped, and requested again it is computed from the new frame's own rows. A 2-D
+  `tz_localize` / `tz_convert`, and every **value transform** that builds a frame from
+  the cells (`fillna`, `ffill` / `bfill`, `isna` / `notna`, `round`, `abs`, `clip`,
+  `cumsum` / `cummax` / `cummin` / `cumprod`, `diff`, `shift`, `rank`, `isin`, `replace`,
+  `interpolate`, `where` / `mask`, `df == x` / `df != x`, the `rolling` / `expanding` /
+  `ewm` aggregations). It holds the source's data columns only: a cached column is
+  dropped — its transformed cells are not its directive's values, so they never become a
+  plain column under its name — and requested again it is computed from the new frame's
+  own rows. Likewise a cached column read as a Series (`df['ma:5']`) does not become a
+  column of a frame: `to_frame()` holds its labels only and `reset_index()` its index. A 2-D
   selection of rows that are not consecutive (`df.loc[mask, cols]`) naming a cached column
   raises `KeyError` — read its values as a Series, `df.loc[mask, 'ma:5']`.
 - `copy()` / `DataFrame(df)` copy everything.

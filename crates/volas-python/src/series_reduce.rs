@@ -123,6 +123,7 @@ impl PySeries {
                 Column::f64(vals),
                 Arc::new(Index::str(labels)),
             ),
+            cached: false,
         })
     }
 

@@ -46,6 +46,7 @@ impl PyDt {
     fn wrap(&self, data: Column) -> PySeries {
         PySeries {
             inner: Series::new(self.series.name.clone(), data, Arc::clone(&self.series.index)),
+            cached: false,
         }
     }
 

@@ -22,6 +22,7 @@ impl PyDataFrame {
         let counts: Vec<i64> = df.columns().iter().map(|c| c.count() as i64).collect();
         Ok(PySeries {
             inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
+            cached: false,
         })
     }
 
@@ -83,6 +84,7 @@ impl PyDataFrame {
             .collect();
         Ok(PySeries {
             inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
+            cached: false,
         })
     }
     /// Per-column truthiness `any` (pandas `df.any()`): a present, non-zero /
@@ -131,6 +133,7 @@ impl PyDataFrame {
             if col.dtype().is_numeric() {
                 let s = PySeries {
                     inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
+                    cached: false,
                 };
                 names.push(name.clone());
                 cols.push(s.describe()?.inner.data);
@@ -179,7 +182,7 @@ impl PyDataFrame {
             }
         }
         let data = Column::from_scalars(&parts).map_err(pyerr)?;
-        Ok(PySeries { inner: Series::new(None, data, Arc::new(Index::str(names))) })
+        Ok(PySeries { inner: Series::new(None, data, Arc::new(Index::str(names))), cached: false })
     }
 
 
@@ -195,6 +198,7 @@ impl PyDataFrame {
             if crate::frame::reduces(col) {
                 let s = PySeries {
                     inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
+                    cached: false,
                 };
                 names.push(name.clone());
                 vals.push(op(&s)?);
@@ -202,6 +206,7 @@ impl PyDataFrame {
         }
         Ok(PySeries {
             inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
+            cached: false,
         })
     }
 
@@ -219,6 +224,7 @@ impl PyDataFrame {
         }
         PySeries {
             inner: Series::new(None, Column::bool(vals), Arc::new(Index::str(names))),
+            cached: false,
         }
     }
 
@@ -234,6 +240,7 @@ impl PyDataFrame {
         let labels = index.take(&positions).to_column();
         let s = PySeries {
             inner: Series::new(None, labels, Arc::new(Index::str(names))),
+            cached: false,
         };
         Ok(Py::new(py, s)?.into_any())
     }

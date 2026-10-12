@@ -209,6 +209,36 @@ def test_every_other_derivation_is_a_new_series_without_the_cached_columns(form)
         assert same(new[d].to_numpy(dtype='object'), own.exec(d, dtype='object')), (form, d)
 
 
+VALUE_TRANSFORMS = {
+    'fillna': lambda df: df.fillna(0.0), 'ffill': lambda df: df.ffill(), 'bfill': lambda df: df.bfill(),
+    'isna': lambda df: df.isna(), 'notna': lambda df: df.notna(), 'round': lambda df: df.round(2),
+    'abs': lambda df: df.abs(), 'clip': lambda df: df.clip(0.0, 1e9), 'cumsum': lambda df: df.cumsum(),
+    'cummax': lambda df: df.cummax(), 'cummin': lambda df: df.cummin(), 'cumprod': lambda df: df.cumprod(),
+    'diff': lambda df: df.diff(), 'shift': lambda df: df.shift(1), 'isin': lambda df: df.isin([1.0]),
+    'replace': lambda df: df.replace(1.0, 2.0), 'interpolate': lambda df: df.interpolate(),
+    'rank': lambda df: df.rank(), 'eq': lambda df: df == 0.0, 'ne': lambda df: df != 0.0,
+    'where': lambda df: df.where(df.notna()), 'mask': lambda df: df.mask(df.isna()),
+    'rolling': lambda df: df.rolling(3).mean(), 'expanding': lambda df: df.expanding().sum(),
+    'ewm': lambda df: df.ewm(span=3).mean(),
+}
+
+
+@pytest.mark.parametrize('form', VALUE_TRANSFORMS)
+def test_a_value_transform_is_a_new_series_without_the_cached_columns(form):
+    # its cells are not a cached directive's values: never carried out as plain data
+    df = cached(['ma:5', 'ema:12'])
+    new = VALUE_TRANSFORMS[form](df)
+    assert new.columns == DATA, form
+    assert not any(new.is_computed(c) for c in new.columns)
+
+
+def test_a_cached_column_read_as_a_series_never_becomes_a_frame_column():
+    df = cached(['ma:5'])
+    assert df['ma:5'].to_frame().columns == []
+    assert df['ma:5'].reset_index().columns == ['index']
+    assert df['close'].to_frame().columns == ['close']  # data stays data
+
+
 def test_a_new_series_of_a_stale_frame_raises():
     df = cached(['ema:12'])
     df.append(frame(N, N + 1))

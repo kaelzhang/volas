@@ -68,6 +68,7 @@ impl PyDataFrame {
         let dup = Self::row_duplicated(&df, keep)?;
         Ok(PySeries {
             inner: Series::new(None, Column::bool(dup), Arc::clone(df.index())),
+            cached: false,
         })
     }
     /// The first (smallest-position) mode of each column, as a 1-row frame.
@@ -81,6 +82,7 @@ impl PyDataFrame {
         for (name, col) in df.names().iter().zip(df.columns()) {
             let s = PySeries {
                 inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
+                cached: false,
             };
             let m = s.mode();
             let take: Vec<usize> = if m.inner.is_empty() { vec![] } else { vec![0] };
@@ -106,6 +108,7 @@ impl PyDataFrame {
         let col = df.columns()[0].clone();
         let s = PySeries {
             inner: Series::new(Some(name), col, Arc::clone(df.index())),
+            cached: false,
         };
         s.value_counts(false, true, false, true)
     }

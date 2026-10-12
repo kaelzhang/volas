@@ -33,6 +33,11 @@ use crate::*;
 #[pyclass(name = "Series")]
 pub struct PySeries {
     pub(crate) inner: Series,
+    /// Whether these are a cached directive column's values as a frame read them
+    /// (`df['ma:5']`): such a Series never becomes a column of a new frame (`to_frame`,
+    /// `reset_index`), where its cells would turn into plain data under the directive's
+    /// name (R15: a derivation carries a cached column or drops it, never as data).
+    pub(crate) cached: bool,
 }
 
 impl PySeries {
@@ -45,6 +50,7 @@ impl PySeries {
                 self.inner.data.take(idx),
                 Arc::new(self.inner.index.take(idx)),
             ),
+            cached: false,
         }
     }
 
@@ -57,6 +63,7 @@ impl PySeries {
                 self.inner.data.slice(start, end),
                 Arc::new(self.inner.index.slice(start, end)),
             ),
+            cached: false,
         }
     }
 
@@ -154,7 +161,7 @@ impl PySeries {
         // an all-keep where/mask (and a dense-column fillna) from type-checking a
         // fill it never uses, matching the per-column DataFrame surface.
         if keep.iter().all(|&b| b) {
-            return Ok(PySeries { inner: self.inner.clone() });
+            return Ok(PySeries { inner: self.inner.clone(), cached: false });
         }
         let (other_col, other_dt) = where_other_resolve(other, &self.inner)?;
         // A float column keeps its float dtype (it absorbs any fill); a same-dtype
@@ -181,6 +188,7 @@ impl PySeries {
         let data = Column::f64(self.f64_domain("a math transform")?.iter().map(|&x| f(x)).collect());
         Ok(PySeries {
             inner: Series::new(self.inner.name.clone(), data, Arc::clone(&self.inner.index)),
+            cached: false,
         })
     }
 
@@ -259,6 +267,7 @@ pub(crate) fn slice_head(s: &Series, n: usize) -> PySeries {
     let take: Vec<usize> = (0..n.min(s.len())).collect();
     PySeries {
         inner: Series::new(s.name.clone(), s.data.take(&take), Arc::new(s.index.take(&take))),
+        cached: false,
     }
 }
 

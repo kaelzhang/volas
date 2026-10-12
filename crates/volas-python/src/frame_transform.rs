@@ -28,7 +28,7 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         self.map_cols(|s| match s.replace(to_replace, value) {
             Ok(r) => Ok(r),
-            Err(_) => Ok(PySeries { inner: s.inner.clone() }),   // dtype can't match -> untouched
+            Err(_) => Ok(PySeries { inner: s.inner.clone(), cached: false }),   // dtype can't match -> untouched
         })
     }
     /// Linear interpolation per numeric column (pandas `interpolate`).
@@ -136,7 +136,7 @@ impl PyDataFrame {
     /// `fillna(method=)`).
     #[pyo3(signature = (value, limit = None))]
     pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>, limit: Option<i64>) -> PyResult<PyDataFrame> {
-        let view = self.read()?;
+        let view = self.data_view()?;
         // Per column, fill the missing cells with the typed scalar (str into str,
         // Timestamp / datetime string into datetime, number / bool into a numeric-
         // family column), mirroring the Series surface. A `volas.NA` fill is a
@@ -150,7 +150,6 @@ impl PyDataFrame {
         }
         let na_like = is_na_like_py(value);
         let cols = view
-            .as_ref()
             .columns()
             .iter()
             .map(|c| -> PyResult<Column> {
@@ -190,7 +189,7 @@ impl PyDataFrame {
                 c.select(&keep, &other_col, target).map_err(pyerr)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        self.with_columns(cols)
+        cells(&view, cols)
     }
 
     /// Forward-fill missing cells in every column (pandas `ffill`), dtype-aware.

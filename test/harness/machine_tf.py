@@ -131,6 +131,7 @@ class TfMachine(FrameMachine):
         last = self._last_ts()
         after_seed = not self.store.fine
         ts = [self._next(last, 'same', after_seed), self._next(last, 'next', after_seed) + 60 * NS]
+        ts[1] = max(ts[1], ts[0] + 60 * NS)  # a frame never repeats a label
         if kind == 'out_of_order':
             if not self.store.fine:
                 return
