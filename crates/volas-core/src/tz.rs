@@ -467,6 +467,8 @@ mod tests {
     fn tz_edge_branches() {
         let ny = Tz::parse("America/New_York").unwrap();
         assert_eq!(ny.fixed_offset_secs(), None); // a named zone has no fixed offset
+        assert_eq!(Tz::Naive.fixed_offset_secs(), Some(0));
+        assert_eq!(Tz::parse("-05:00").unwrap().fixed_offset_secs(), Some(-18_000));
         assert_eq!(Tz::Utc.name(), "UTC");
         // DST fall-back (01:30 on 2020-11-01) is ambiguous -> rejected (F33,
         // symmetric with the gap); the spring-forward gap (02:30 on 2020-03-08)
