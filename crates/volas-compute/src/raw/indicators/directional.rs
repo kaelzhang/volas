@@ -107,17 +107,6 @@ pub fn minus_dm(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     wilder_sum(high.len(), period, |i| dm1(high, low, i).1)
 }
 
-/// `100 · smoothedDM / smoothedTR`, emitted from index `period` (one bar after the DM
-/// seed), with a ~0 TR yielding 0. Shared by ±DI.
-fn di(dm_sm: &[f64], tr_sm: &[f64], period: usize) -> Vec<f64> {
-    let n = dm_sm.len();
-    let mut out = vec![f64::NAN; n];
-    for i in period..n {
-        out[i] = di_val(dm_sm[i], tr_sm[i]);
-    }
-    out
-}
-
 /// `100·(dm_sm/tr_sm)` (TA-Lib's order) with its ~0-TR guard — one row's ±DI, the one owner of that
 /// rule for the full computation and the resumes.
 #[inline]
@@ -148,34 +137,21 @@ pub(super) fn dx_val(sp: f64, sm: f64, st: f64) -> f64 {
     }
 }
 
-/// +DI (TA-Lib PLUS_DI). Lookback `period`.
-pub fn plus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let sp = wilder_sum(high.len(), period, |i| dm1(high, low, i).0);
-    let st = wilder_sum(high.len(), period, |i| tr_at(high, low, close, i));
-    di(&sp, &st, period)
-}
-
-/// -DI (TA-Lib MINUS_DI). Lookback `period`.
-pub fn minus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let sm = wilder_sum(high.len(), period, |i| dm1(high, low, i).1);
-    let st = wilder_sum(high.len(), period, |i| tr_at(high, low, close, i));
-    di(&sm, &st, period)
-}
-
-/// Fused Wilder sums of +DM, −DM and TR in a single pass — `dm1` (which yields both
-/// directional moves) is evaluated once per bar instead of twice, and the three
-/// recurrences share one traversal. Bit-identical to three
-/// [`wilder_sum`] calls.
-fn dm_tr_sums(
+/// The +DM / −DM / TR Wilder sums in one traversal, handed to `row(i, sp, sm, st)` for
+/// every bar `i >= period` (the first after the seed) — `dm1` evaluated once per bar, and
+/// the three independent division chains (plus any chain `row` carries, ADX's average)
+/// overlapping instead of running one after another. Bit-identical to separate
+/// [`wilder_sum`]s. Nothing before the seed exists (`period == 0` or `period >= n`).
+fn dm_tr_fold(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     period: usize,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    mut row: impl FnMut(usize, f64, f64, f64),
+) {
     let n = high.len();
-    let (mut sp, mut sm, mut st) = (vec![f64::NAN; n], vec![f64::NAN; n], vec![f64::NAN; n]);
     if period == 0 || period >= n {
-        return (sp, sm, st);
+        return;
     }
     let (mut p, mut m, mut t) = (0.0, 0.0, 0.0);
     for i in 1..period {
@@ -184,60 +160,59 @@ fn dm_tr_sums(
         m += dm;
         t += tr_at(high, low, close, i);
     }
-    sp[period - 1] = p;
-    sm[period - 1] = m;
-    st[period - 1] = t;
     with_wilder_step!(period, |step| {
         for i in period..n {
             let (dp, dm) = dm1(high, low, i);
             p = step(p, dp);
             m = step(m, dm);
             t = step(t, tr_at(high, low, close, i));
-            sp[i] = p;
-            sm[i] = m;
-            st[i] = t;
+            row(i, p, m, t);
         }
     });
-    (sp, sm, st)
+}
+
+/// +DI (TA-Lib PLUS_DI). Lookback `period`.
+pub fn plus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let mut out = vec![f64::NAN; high.len()];
+    dm_tr_fold(high, low, close, period, |i, sp, _, st| out[i] = di_val(sp, st));
+    out
+}
+
+/// -DI (TA-Lib MINUS_DI). Lookback `period`.
+pub fn minus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
+    let mut out = vec![f64::NAN; high.len()];
+    dm_tr_fold(high, low, close, period, |i, _, sm, st| out[i] = di_val(sm, st));
+    out
 }
 
 /// Directional Movement Index `DX = 100·|+DI − −DI| / (+DI + −DI)` (TA-Lib DX); a ~0
 /// TR or ~0 DI-sum yields 0. Lookback `period`.
 pub fn dx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let (sp, sm, st) = dm_tr_sums(high, low, close, period);
-    let n = sp.len();
-    let mut out = vec![f64::NAN; n];
-    for i in period..n {
-        out[i] = dx_val(sp[i], sm[i], st[i]);
-    }
+    let mut out = vec![f64::NAN; high.len()];
+    dm_tr_fold(high, low, close, period, |i, sp, sm, st| out[i] = dx_val(sp, sm, st));
     out
 }
 
 /// Average Directional Movement Index (TA-Lib ADX): SMA-seeded Wilder *average* of DX
-/// (`ADX[2p-1] = mean(DX[p..2p-1])`, then [`adx_avg_step`]).
-/// Lookback `2·period-1`.
+/// (`ADX[2p-1] = mean(DX[p..2p-1])`, then [`adx_avg_step`]), folded in the same
+/// traversal as the sums. Lookback `2·period-1`.
 pub fn adx(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let dxv = dx(high, low, close, period);
-    let n = dxv.len();
-    let mut out = vec![f64::NAN; n];
-    if period == 0 {
-        return out;
-    }
-    let first = 2 * period - 1;
-    if first >= n {
-        return out;
-    }
-    let pf = period as f64;
-    let mut sum = 0.0;
-    for v in dxv.iter().take(2 * period).skip(period) {
-        sum += v;
-    }
-    let mut prev = sum / pf;
-    out[first] = prev;
-    for i in (2 * period)..n {
-        prev = adx_avg_step(prev, pf, dxv[i]);
-        out[i] = prev;
-    }
+    let mut out = vec![f64::NAN; high.len()];
+    let (pf, first) = (period as f64, (2 * period).saturating_sub(1));
+    let (mut sum, mut avg) = (0.0, 0.0);
+    dm_tr_fold(high, low, close, period, |i, sp, sm, st| {
+        let dxv = dx_val(sp, sm, st);
+        if i > first {
+            avg = adx_avg_step(avg, pf, dxv);
+            out[i] = avg;
+        } else {
+            sum += dxv;
+            if i == first {
+                avg = sum / pf;
+                out[i] = avg;
+            }
+        }
+    });
     out
 }
 
