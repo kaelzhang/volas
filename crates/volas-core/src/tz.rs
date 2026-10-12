@@ -213,37 +213,109 @@ impl Tz {
         self.localize(naive).ok()
     }
 
-    /// UTC epoch-ns of a naive wall-clock interpreted in this timezone, resolved
-    /// to the **earliest** real instant — the period-start variant of
-    /// [`Tz::wall_to_utc_ns`]. Where that method rejects DST anomalies (correct
-    /// for user-entered times, F33), a derived bucket start must always resolve:
-    /// a fall-back **fold** takes the first of the two occurrences, and a
-    /// spring-forward **gap** (the wall clock does not exist) resolves to the
-    /// zone's transition instant ending the gap (from its transition data, to the
-    /// second) — the true first moment of the bucket. Returns `None` for an
-    /// invalid civil date or an instant outside the range.
-    pub fn wall_to_utc_ns_earliest(
-        &self,
-        y: i32,
-        mo: u32,
-        d: u32,
-        h: u32,
-        mi: u32,
-        s: u32,
-    ) -> Option<i64> {
-        match self {
-            Tz::Naive | Tz::Utc | Tz::Offset(_) => self.wall_to_utc_ns(y, mo, d, h, mi, s),
-            Tz::Named(tz) => {
-                let naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
-                let first = match tz.from_local_datetime(&naive) {
-                    chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt,
-                    // inside a gap: the first instant after it, from the zone's
-                    // transition table (`None` past the last known transition)
-                    chrono::LocalResult::None => chrono_tz::GapInfo::new(&naive, tz)?.end?,
-                };
-                crate::datetime::instant_of(&first).ok()
+    /// The first real instant of the local civil day `year-month-day` in this
+    /// zone — its midnight, resolved as [`Tz::localize_earliest`] (a midnight a
+    /// DST gap skips starts the day where the gap ends). An invalid date is a
+    /// `Value` error; a start outside the datetime64[ns] range an `Overflow` error.
+    pub fn day_start(&self, year: i64, month: i64, day: i64) -> Result<i64> {
+        let midnight = i32::try_from(year)
+            .ok()
+            .zip(u32::try_from(month).ok().zip(u32::try_from(day).ok()))
+            .and_then(|(y, (m, d))| NaiveDate::from_ymd_opt(y, m, d))
+            .ok_or_else(|| {
+                VolasError::Value(format!("{year:04}-{month:02}-{day:02} is not a valid date"))
+            })?
+            .and_time(chrono::NaiveTime::MIN);
+        self.localize_earliest(midnight)
+    }
+
+    /// The **earliest** real instant of the wall clock `wall` in this zone — the
+    /// calendar-period-start variant of [`Tz::localize`]. Where that method rejects
+    /// DST anomalies (correct for user-entered times, F33), a derived period start
+    /// must always resolve: a fall-back **fold** takes the first of the two
+    /// occurrences, and a spring-forward **gap** (the wall clock does not exist)
+    /// resolves to the zone's transition instant ending the gap (from its
+    /// transition data, to the second) — the true first moment of the period. An
+    /// instant outside the datetime64[ns] range is an `Overflow` error.
+    fn localize_earliest(&self, wall: NaiveDateTime) -> Result<i64> {
+        let Tz::Named(tz) = self else {
+            return self.localize(wall);
+        };
+        let first = match tz.from_local_datetime(&wall) {
+            chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt,
+            // inside a gap: the first instant after it, from the zone's transition
+            // table (a gap only exists between two known transitions, so it has an end)
+            chrono::LocalResult::None => chrono_tz::GapInfo::new(&wall, tz)
+                .and_then(|gap| gap.end)
+                // LCOV_EXCL_START — unreachable: past the last transition no gap exists
+                .ok_or_else(|| {
+                    VolasError::Value(format!(
+                        "wall clock {wall} lies in a DST gap of {} with no known end",
+                        tz.name()
+                    ))
+                })?,
+            // LCOV_EXCL_STOP
+        };
+        crate::datetime::instant_of(&first)
+    }
+
+    /// The start of the **sub-day** period holding the instant `ns` on this zone's
+    /// local grid of `step_ns` (a whole divisor of a day, anchored at local
+    /// midnight): the latest boundary instant at or before `ns`, where every real
+    /// instant whose wall clock is a grid point is a boundary. Periods therefore
+    /// follow real instants: a grid wall clock that a fall-back repeats starts a
+    /// period at each occurrence (two `01:00` hours, distinct instants), and one
+    /// that a spring-forward gap skips is replaced by the instant ending the gap. A
+    /// fixed zone is plain arithmetic. A start outside the datetime64[ns] range is
+    /// an `Overflow` error.
+    pub fn floor_local_grid(&self, ns: i64, step_ns: i64) -> Result<i64> {
+        const NS: i128 = 1_000_000_000;
+        let step = step_ns as i128;
+        // the grid point at or before `at`'s wall clock, read back at offset `off`
+        let floor_at = |at: i64, off: i32| -> i128 {
+            let off = off as i128 * NS;
+            (at as i128 + off).div_euclid(step) * step - off
+        };
+        let mut at = ns;
+        loop {
+            let off = self.offset_secs_at(at);
+            let start = floor_at(at, off);
+            let Tz::Named(_) = self else {
+                return crate::datetime::instant_wide(start);
+            };
+            let start = crate::datetime::instant_wide(start)?;
+            // `start` keeps `at`'s offset: it is the real instant of that grid point
+            if self.offset_secs_at(start) == off {
+                return Ok(start);
+            }
+            // A transition lies in (start, at]: no grid point is passed after it, so
+            // the boundary is the instant ending a gap that skipped the grid point,
+            // or else the last boundary before the transition.
+            let t = self.transition_into(start, at, off);
+            let prev = self.offset_secs_at(t - 1);
+            if (start as i128 + off as i128 * NS) >= t as i128 + prev as i128 * NS {
+                return Ok(t);
+            }
+            at = t - 1;
+        }
+    }
+
+    /// The instant at which this zone's offset becomes `off`, given an instant
+    /// `before` under another offset and a later instant `after` under `off`, with
+    /// one transition between them (zone transitions fall on whole seconds and are
+    /// far more than a day apart).
+    fn transition_into(&self, before: i64, after: i64, off: i32) -> i64 {
+        const NS: i64 = 1_000_000_000;
+        let (mut lo, mut hi) = (before.div_euclid(NS), after.div_euclid(NS));
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if self.offset_secs_at(mid * NS) == off {
+                hi = mid;
+            } else {
+                lo = mid;
             }
         }
+        hi * NS
     }
 
     /// A display name: `"naive"` (unanchored), `"UTC"`, a `"+08:00"`-style
@@ -413,14 +485,67 @@ mod tests {
     #[test]
     fn period_start_in_a_gap_is_the_transition_instant() {
         let at = |s: &str| crate::datetime::parse_ns(s).unwrap();
+        let wall = |s: &str| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap();
         // Monrovia: -00:44:30 -> UTC at 1972-01-07 00:00 local (a 44:30 gap)
         let monrovia = Tz::parse("Africa/Monrovia").unwrap();
-        assert_eq!(monrovia.wall_to_utc_ns_earliest(1972, 1, 7, 0, 0, 0), Some(at("1972-01-07 00:44:30")));
+        assert_eq!(monrovia.localize_earliest(wall("1972-01-07 00:00:00")).unwrap(), at("1972-01-07 00:44:30"));
         let ny = Tz::parse("America/New_York").unwrap();
-        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 3, 10, 2, 30, 0), Some(at("2024-03-10 07:00:00")));
-        // a fold takes the first occurrence; an invalid date resolves to nothing
-        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 11, 3, 1, 30, 0), Some(at("2024-11-03 05:30:00")));
-        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 2, 30, 0, 0, 0), None);
+        assert_eq!(ny.localize_earliest(wall("2024-03-10 02:30:00")).unwrap(), at("2024-03-10 07:00:00"));
+        // a fold takes the first occurrence; a fixed zone is plain localization
+        assert_eq!(ny.localize_earliest(wall("2024-11-03 01:30:00")).unwrap(), at("2024-11-03 05:30:00"));
+        assert_eq!(Tz::Utc.localize_earliest(wall("2024-11-03 01:30:00")).unwrap(), at("2024-11-03 01:30:00"));
+        // a start before the instant range is an Overflow error, not a panic
+        assert!(matches!(Tz::Utc.day_start(1677, 9, 21), Err(VolasError::Overflow(_))));
+        // the day start of a gap midnight (São Paulo 2018-11-04 sprang 00:00 -> 01:00)
+        let sp = Tz::parse("America/Sao_Paulo").unwrap();
+        assert_eq!(sp.day_start(2018, 11, 4).unwrap(), at("2018-11-04 03:00:00"));
+        for (y, m, d) in [(2024, 2, 30), (2024, 13, 1), (2024, -1, 1), (1 << 40, 1, 1)] {
+            assert!(matches!(Tz::Utc.day_start(y, m, d), Err(VolasError::Value(_))), "{y}-{m}-{d}");
+        }
+    }
+
+    /// Sub-day periods follow real instants on the local grid: a fall-back
+    /// repeated hour starts two periods, a skipped grid point is replaced by the
+    /// gap's end, and a fold that is not on the grid stays inside one period.
+    #[test]
+    fn floor_local_grid_follows_real_instants() {
+        let at = |s: &str| crate::datetime::parse_ns(s).unwrap();
+        const MIN: i64 = 60_000_000_000;
+        let ny = Tz::parse("America/New_York").unwrap();
+        // 2026-11-01: 01:00-02:00 repeats (EDT 05:00Z-06:00Z, then EST 06:00Z-07:00Z)
+        let h = |s: &str| ny.floor_local_grid(at(s), 60 * MIN).unwrap();
+        assert_eq!(h("2026-11-01 04:59:59"), at("2026-11-01 04:00:00")); // 00:00 EDT
+        assert_eq!(h("2026-11-01 05:30:00"), at("2026-11-01 05:00:00")); // first 01:00
+        assert_eq!(h("2026-11-01 06:30:00"), at("2026-11-01 06:00:00")); // second 01:00
+        assert_eq!(h("2026-11-01 07:00:00"), at("2026-11-01 07:00:00")); // 02:00 EST
+        // a 2h grid has no point inside the fold: 00:00-02:00 is one 3-hour period
+        let h2 = |s: &str| ny.floor_local_grid(at(s), 120 * MIN).unwrap();
+        assert_eq!(h2("2026-11-01 06:30:00"), at("2026-11-01 04:00:00"));
+        // 2026-03-08: 02:00 EST springs to 03:00 EDT at 07:00Z
+        assert_eq!(h("2026-03-08 06:59:59"), at("2026-03-08 06:00:00")); // 01:00 EST
+        assert_eq!(h("2026-03-08 07:30:00"), at("2026-03-08 07:00:00")); // 03:00 EDT
+        // the 2h grid point 02:00 is skipped: its period starts where the gap ends
+        assert_eq!(h2("2026-03-08 07:30:00"), at("2026-03-08 07:00:00"));
+        // Lord Howe (30-minute DST). 2025-10-05: 02:00 +10:30 springs to 02:30 +11
+        // (15:30Z): the 1h period of 02:00 starts at the gap's end
+        let lh = Tz::parse("Australia/Lord_Howe").unwrap();
+        let lh1 = |s: &str| lh.floor_local_grid(at(s), 60 * MIN).unwrap();
+        assert_eq!(lh1("2025-10-04 15:40:00"), at("2025-10-04 15:30:00"));
+        // 2025-04-06: 02:00 +11 falls back to 01:30 +10:30 (15:00Z): 01:00 is not
+        // repeated, so the repeated half hour stays in the period of 01:00 +11
+        assert_eq!(lh1("2025-04-05 15:10:00"), at("2025-04-05 14:00:00"));
+        assert_eq!(lh1("2025-04-05 15:30:00"), at("2025-04-05 15:30:00")); // 02:00 +10:30
+        // fixed zones are arithmetic; a start before the range is an Overflow error
+        let sh = Tz::parse("+08:00").unwrap();
+        assert_eq!(sh.floor_local_grid(at("2024-05-22 03:47:00"), 15 * MIN).unwrap(), at("2024-05-22 03:45:00"));
+        assert!(matches!(
+            Tz::Utc.floor_local_grid(i64::MIN + 1, 1_000_000_000),
+            Err(VolasError::Overflow(_))
+        ));
+        assert!(matches!(
+            ny.floor_local_grid(i64::MIN + 1, 60 * MIN),
+            Err(VolasError::Overflow(_))
+        ));
     }
 
     #[test]
