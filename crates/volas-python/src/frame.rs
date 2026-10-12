@@ -551,47 +551,26 @@ impl PyDataFrame {
     /// written cached column becomes plain data, every other one goes stale
     /// (`DataFrame::assign_positions`). A write selecting no row changes nothing.
     ///
-    /// On a time-frame frame the open period follows what was written
-    /// ([`TfState::follow`]); a write the open period cannot follow exactly — a new
-    /// forming value of a column its several fine bars carry — and a cached column whose
-    /// aggregator cannot fold its dtype are refused before any write.
+    /// On a time-frame frame the writes go through its one write entry
+    /// ([`TfState::write`]): all or nothing, and the open period follows the forming
+    /// cells they leave — or the writes are refused, the frame unchanged.
     pub(crate) fn write_cells(&mut self, writes: Vec<(usize, Vec<usize>, Column)>) -> PyResult<()> {
         self.require_fresh()?;
         let start = self.logical_range().0;
-        let last = self.inner.height().wrapping_sub(1);
-        let mut rewritten: Vec<String> = Vec::new();
-        if let Some(tfs) = &self.tf {
-            for (col, rows, values) in &writes {
-                let name = &self.inner.names()[*col];
-                if !rows.is_empty() && self.inner.is_computed(name) {
-                    tfs.check_data_column(name, self.inner.columns()[*col].dtype())?;
+        let apply = |inner: &mut DataFrame| -> PyResult<()> {
+            for (col, rows, values) in writes {
+                if rows.is_empty() {
+                    continue;
                 }
-                if let Some(k) = rows.iter().position(|&r| r + start == last) {
-                    let k = if values.len() == 1 { 0 } else { k };
-                    if tfs.check_forming_write(&self.inner, name, &values.slice(k, k + 1))? {
-                        rewritten.push(name.clone());
-                    }
-                }
+                let phys: Vec<usize> = rows.into_iter().map(|r| r + start).collect();
+                inner.assign_positions(col, &phys, &values).map_err(pyerr)?;
             }
+            Ok(())
+        };
+        match self.tf.as_mut() {
+            Some(tfs) => tfs.write(&mut self.inner, apply),
+            None => apply(&mut self.inner),
         }
-        let mut landed = false;
-        let mut written = Ok(());
-        for (col, rows, values) in writes {
-            if rows.is_empty() {
-                continue;
-            }
-            let phys: Vec<usize> = rows.into_iter().map(|r| r + start).collect();
-            written = self.inner.assign_positions(col, &phys, &values).map_err(pyerr);
-            if written.is_err() {
-                break;
-            }
-            landed = true;
-        }
-        // the open period follows what was written, the writes before a failed one too
-        if let (true, Some(tfs)) = (landed, self.tf.as_mut()) {
-            tfs.follow(&self.inner, &rewritten)?;
-        }
-        written
     }
 
     /// `df[row_mask] = v`: set every column's True rows to the scalar, keeping each

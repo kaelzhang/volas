@@ -250,8 +250,11 @@ silently drop:
   and a re-send of it replaces it whole. A forming bar folded from several fine bars
   has no single bar to rewrite, so the write raises `ValueError` and the frame is
   unchanged — write to closed rows only, or append a corrected fine bar (a bar with
-  the same timestamp replaces the one it repeats). Writing a forming cell its
-  current value is always allowed.
+  the same timestamp replaces the one it repeats). A write is judged by the value it
+  leaves in the forming cell — `df.iloc[[-1, -1], j] = [a, b]` leaves `b` — and writing
+  a forming cell its current value is always allowed. A column replaced by the same
+  values in another dtype (an integer `volume` by floats) keeps its bars, converted
+  losslessly; bars that cannot take the new dtype exactly count as a new value.
 - A column added or replaced must be one its aggregator folds: with
   `cumulators={'tag': 'max'}`, `df['tag'] = ['a']` raises `TypeError` and the frame is
   unchanged.

@@ -310,3 +310,47 @@ def test_cumulate_does_not_carry_a_cached_column_as_data():
     coarse = fine.cumulate("5m")
     assert coarse.columns == ["close"]
     assert coarse["ma:2"].to_list()[1] == 5.0 and np.isnan(coarse["ma:2"].to_list()[0])
+
+
+# --- review: every write judged by the forming cell it leaves ----------------------------
+
+
+@pytest.mark.parametrize("via", ["iloc", "loc"])
+def test_a_duplicate_position_write_is_judged_by_the_value_it_leaves(via):
+    df = _live()
+    before = rows(df)
+    with pytest.raises(ValueError, match="cumulation of the 3 fine bars"):
+        if via == "iloc":
+            df.iloc[[1, 1], 1] = [6.0, 50.0]  # the last write wins: 50, not 6
+        else:
+            df.loc[[T0 + 5 * MINUTE, T0 + 5 * MINUTE], "volume"] = [6.0, 50.0]
+    assert rows(df) == before
+    df.iloc[[1, 1], 1] = [50.0, 6.0]  # leaves the forming volume as it was
+    df.append(frame([8], close=[5.0], volume=[4.0]))
+    assert rows(df) == [[1.0, 10.0], [5.0, 10.0]]
+
+
+def test_a_duplicate_position_write_over_one_bar_rewrites_it_with_the_last_value():
+    df = DataFrame(frame([0], close=[1.0], volume=[1.0]), time_frame="5m")
+    df.iloc[[-1, 0], 1] = [3.0, 50.0]
+    df.append(frame([1], close=[2.0], volume=[3.0]))
+    assert rows(df) == [[2.0, 53.0]]
+
+
+def test_a_column_retyped_with_the_same_values_keeps_the_fine_bars():
+    df = DataFrame(frame([0], close=[1.0], volume=np.array([10], dtype=np.int64)), time_frame="5m")
+    df.append(frame([1], close=[2.0], volume=np.array([5], dtype=np.int64)))
+    df.append(frame([2], close=[3.0], volume=np.array([7], dtype=np.int64)))
+    df["volume"] = np.array([22.0])  # float64, the same value
+    df.append(frame([2], close=[3.0], volume=[8.0]))  # a re-send of 09:02 refolds every bar
+    assert rows(df) == [[3.0, 23.0]]
+
+
+def test_a_relabelled_copy_is_checked_like_a_time_frame_seed():
+    base = DataFrame(frame([0, 5], close=[1.0, 2.0]), time_frame="5m")
+    with pytest.raises(ValueError, match="monotonic"):
+        DataFrame(base, index=np.array(["2024-01-01T10:00", "2024-01-01T09:00"], dtype="datetime64[ns]"))
+    with pytest.raises(ValueError, match="without NaT"):
+        DataFrame(base, index=np.array(["2024-01-01T10:00", "NaT"], dtype="datetime64[ns]"))
+    with pytest.raises(ValueError, match="requires a DatetimeIndex"):
+        DataFrame(base, index=[1, 2])

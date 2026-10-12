@@ -156,9 +156,11 @@ class TfMachine(FrameMachine):
             self.stale |= set(self.cached)
 
     @precondition(lambda self: len(self.df) > 0)
-    @rule(data=st.data(), via=st.sampled_from(['iloc', 'iat', 'at', 'loc']), forming=st.booleans())
+    @rule(data=st.data(), via=st.sampled_from(['iloc', 'iat', 'at', 'loc', 'iloc_twice', 'loc_twice']),
+          forming=st.booleans())
     def write_cell(self, data, via, forming):
-        """A cell write into a data column of a closed row or of the forming row."""
+        """A cell write into a data column of a closed row or of the forming row — also
+        twice to the same cell in one write, where the last value is the one left."""
         if not self._writable():
             return
         coarse = self.coarse()
@@ -172,7 +174,10 @@ class TfMachine(FrameMachine):
         label = self.df.index[pos]
         if self.df.tz is not None:
             label = volas.Timestamp(int(np.datetime64(label, 'ns').astype('int64')), tz='UTC').tz_convert(self.df.tz)
-        target = {'iloc': lambda: self.df.iloc.__setitem__((pos, j), value),
+        first = data.draw(st.sampled_from([7.0, 2.5] if coarse.dtype(col) == 'float64' else [3, 9]))
+        target = {'iloc_twice': lambda: self.df.iloc.__setitem__(([pos, pos], j), [first, value]),
+                  'loc_twice': lambda: self.df.loc.__setitem__(([label, label], col), [first, value]),
+                  'iloc': lambda: self.df.iloc.__setitem__((pos, j), value),
                   'iat': lambda: self.df.iat.__setitem__((pos, j), value),
                   'at': lambda: self.df.at.__setitem__((label, col), value),
                   'loc': lambda: self.df.loc.__setitem__((label, col), value)}[via]

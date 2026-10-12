@@ -116,21 +116,11 @@ impl PyDataFrame {
         if !self.inner.has_column(&name) || self.inner.is_computed(&name) {
             self.check_new_data_column(&name)?;
         }
-        // On a time-frame frame the column must fold, and its forming cell is written:
-        // a new value of a column the open period's bars carry rewrites its one bar (a
-        // forming bar of several fine bars refuses it), a new column enters the bars as
-        // missing — both decided before the write.
-        let mut rewritten = Vec::new();
-        if let Some(tfs) = &self.tf {
-            tfs.check_data_column(&name, col.dtype())?;
-            let h = self.inner.height();
-            if h > 0 && tfs.check_forming_write(&self.inner, &name, &col.slice(h - 1, h))? {
-                rewritten.push(name.clone());
-            }
-        }
-        self.inner.set_column(&name, col).map_err(pyerr)?;
-        if let Some(tfs) = self.tf.as_mut() {
-            tfs.follow(&self.inner, &rewritten)?;
+        // A time-frame frame takes the column through its one write entry: the open
+        // period follows the forming cell it leaves, or the write is refused unchanged.
+        match self.tf.as_mut() {
+            Some(tfs) => tfs.write(&mut self.inner, |inner| inner.set_column(&name, col).map_err(pyerr))?,
+            None => self.inner.set_column(&name, col).map_err(pyerr)?,
         }
         Ok(())
     }

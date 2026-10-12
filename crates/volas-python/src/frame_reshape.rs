@@ -246,13 +246,13 @@ impl PyDataFrame {
         let target = resolve_time_frame(time_frame)?;
         if let Some(tfs) = &self.tf {
             // Same frame is a no-op resample == copy() (keeps the cursor & state).
-            if target == tfs.time_frame {
+            if target == tfs.time_frame() {
                 return Ok(self.copy());
             }
-            if !tfs.time_frame.can_coarsen(target) {
+            if !tfs.time_frame().can_coarsen(target) {
                 return Err(PyValueError::new_err(format!(
                     "cannot cumulate {} -> {}: the target is not a whole multiple of the source frame",
-                    tfs.time_frame.label(),
+                    tfs.time_frame().label(),
                     target.label()
                 )));
             }
@@ -270,14 +270,7 @@ impl PyDataFrame {
         // that carries the open period's fine bars so further appends fold in.
         Ok(PyDataFrame {
             inner: frame,
-            tf: Some(TfState {
-                time_frame: target,
-                cumulators: spec,
-                open: cum.open_period().cloned(),
-                open_key: None,
-                fold_plan: None,
-                refold_next: false,
-            }),
+            tf: Some(TfState::from_cumulator(target, spec, &cum)),
             window: None,
         })
     }
