@@ -82,3 +82,13 @@ def test_a_sorted_window_evicts_the_very_value_that_leaves(directive):
     assert _bits(df[directive], full)
     # the last window [+0, +0, 1] is the same whatever came before it
     assert _bits(full[-1:], volas.DataFrame({"close": x[-3:]}).exec(directive)[-1:])
+
+
+@pytest.mark.parametrize("x,want", [
+    ([-0.0, -0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 0.0),  # four zeros outnumber three ones (pandas)
+    ([-0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 0.0),  # a tie: the smaller value
+    ([-0.0, -0.0, 2.0, 1.0], 0.0),
+])
+def test_mode_counts_signed_zeros_as_one_value(x, want):
+    got = volas.DataFrame({"close": x}).exec(f"mode:{len(x)}")[-1]
+    assert _bits([got], [want])  # +0: a zero mode is canonical

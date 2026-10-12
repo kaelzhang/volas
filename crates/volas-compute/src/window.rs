@@ -254,18 +254,19 @@ pub fn dev(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
 }
 
 /// Rolling mode (TradingView `ta.mode`): the most frequent present value; ties
-/// resolve to the SMALLEST value. NA cells are ignored (matching Pine). Values are told
-/// apart and ordered by IEEE total order, the window's own order (`-0.0` and `+0.0` are
-/// two values, `-0.0` the smaller).
+/// resolve to the SMALLEST value; NA cells are ignored. Values are counted by numeric
+/// equality, so `-0.0` and `+0.0` are one value (as pandas counts them), and a zero mode
+/// is `+0.0` whichever signed zeros the window holds.
 pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     per_sorted_window(data, window, min_periods, |sorted, _| {
-        // `sorted` is ascending, so equal values are contiguous: scan runs and
-        // keep the value with the longest run; on a tie the earlier (smaller)
-        // value is already held, giving "ties -> smallest" for free.
+        // `sorted` is ascending (total order: the signed zeros sit side by side), so
+        // numerically equal values are contiguous: scan runs and keep the value with
+        // the longest run; on a tie the earlier (smaller) value is already held,
+        // giving "ties -> smallest" for free.
         let (mut best_val, mut best_len) = (sorted[0], 1usize);
         let (mut cur_val, mut cur_len) = (sorted[0], 1usize);
         for &x in &sorted[1..] {
-            if x.total_cmp(&cur_val).is_eq() {
+            if x == cur_val {
                 cur_len += 1;
             } else {
                 cur_val = x;
@@ -276,7 +277,7 @@ pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
                 best_val = cur_val;
             }
         }
-        best_val
+        best_val + 0.0 // a zero mode is +0
     })
 }
 
