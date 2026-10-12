@@ -100,6 +100,13 @@ def test_an_index_of_another_kind_grows_no_column():
     assert df.get_column('close').to_numpy().tolist() == [1.0, 2.0, 4.0]
 
 
+def test_an_empty_positional_frame_takes_no_timestamps():
+    df = volas.DataFrame({'close': []})
+    with pytest.raises(ValueError, match='RangeIndex'):
+        df.append(bars(['2024-01-01'], close=[1.0]))
+    assert len(df) == 0
+
+
 def test_an_empty_range_append_keeps_the_zone():
     df = bars(['2024-01-01', '2024-01-02'], close=[1.0, 2.0]).tz_localize('Asia/Shanghai')
     with pytest.raises(ValueError):

@@ -218,10 +218,10 @@ fn a_rejected_index_leaves_the_columns_unchanged() {
     let err = unsorted.append(&labelled(Index::range(1), 2.0)).unwrap_err();
     assert!(err.to_string().contains("already in the index"), "{err}");
     assert_eq!(unsorted.height(), 2);
-    // an empty positional frame takes the rows' labels
+    // an empty positional frame is still positional: timestamps are another index kind
     let mut empty = labelled(Index::range(0), 0.0);
-    empty.append(&labelled(Index::datetime(vec![5], Tz::Utc), 1.0)).unwrap();
-    assert_eq!(**empty.index(), Index::datetime(vec![5], Tz::Utc));
+    assert!(empty.append(&labelled(Index::datetime(vec![5], Tz::Utc), 1.0)).is_err());
+    assert_eq!(empty.height(), 0);
 }
 
 #[test]

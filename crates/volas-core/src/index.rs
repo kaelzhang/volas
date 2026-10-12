@@ -351,8 +351,7 @@ impl Index {
     /// - an integer index takes integer rows, or unlabelled (`RangeIndex`) rows, which
     ///   continue the labels from the last one (`last + 1`, ...) — checked, and never
     ///   onto a label the index already holds;
-    /// - a `RangeIndex` takes unlabelled or integer rows; a string index string rows;
-    /// - an empty `RangeIndex` (a frame with no rows yet) takes the rows' labels.
+    /// - a `RangeIndex` takes unlabelled or integer rows; a string index string rows.
     ///
     /// The order of explicit labels (a datetime index only increases, an integer or
     /// string one stays unique) is the frame's append rule, decided per row there.
@@ -368,8 +367,7 @@ impl Index {
             }
         }
         match (&self.kind, &other.kind) {
-            (Range(0), _)
-            | (Range(_), Range(_) | Int64(_))
+            (Range(_), Range(_) | Int64(_))
             | (Int64(_), Int64(_))
             | (Str(_), Str(_)) => Ok(()),
             (Datetime(_, a), Datetime(_, b)) if a.is_aware() == b.is_aware() => Ok(()),
@@ -410,7 +408,6 @@ impl Index {
         use IndexKind::*;
         self.check_append(other)?;
         match (&mut self.kind, &other.kind) {
-            (slot @ Range(0), kind) => *slot = kind.clone(),
             (Range(a), Range(b)) => *a += b,
             (Datetime(a, _), Datetime(b, _)) => a.extend_from_slice(b),
             (Int64(a), Int64(b)) => a.extend_from_slice(b),
@@ -644,6 +641,8 @@ mod tests {
         // NaT has no place in the order, on every kind of target
         assert!(msg(&aware, &Index::datetime(vec![i64::MIN], Tz::Utc)).contains("NaT"));
         assert!(msg(&Index::range(0), &Index::datetime(vec![i64::MIN], Tz::Utc)).contains("NaT"));
+        // an empty RangeIndex is still a RangeIndex
+        assert!(msg(&Index::range(0), &aware).contains("RangeIndex"));
         // a datetime index takes datetime rows only, and the reverse
         assert!(msg(&aware, &Index::range(1)).contains("label the rows with their timestamps"));
         assert!(msg(&aware, &Index::int64(vec![3])).contains("integer index"));
@@ -653,9 +652,7 @@ mod tests {
         assert!(msg(&str_index(&["x"]), &Index::range(1)).contains("string index"));
         assert!(msg(&Index::range(1), &str_index(&["x"])).contains("RangeIndex"));
         assert!(str_index(&["x"]).check_append(&str_index(&["y"])).is_ok());
-        // an empty RangeIndex takes any labels
-        assert!(Index::range(0).check_append(&aware).is_ok());
-        assert!(Index::range(0).check_append(&str_index(&["x"])).is_ok());
+        assert!(Index::range(0).check_append(&Index::int64(vec![4])).is_ok());
     }
 
     #[test]
@@ -688,11 +685,6 @@ mod tests {
         let mut s = str_index(&["a", "b"]);
         s.extend(&str_index(&["c"])).unwrap();
         assert_eq!(s, str_index(&["a", "b", "c"]));
-
-        // an empty RangeIndex takes the rows' labels (and keeps its own name)
-        let mut z = Index::range(0).with_name(Some("t".into()));
-        z.extend(&Index::datetime(vec![7], Tz::Utc)).unwrap();
-        assert_eq!(z, Index::datetime(vec![7], Tz::Utc).with_name(Some("t".into())));
 
         // a rejected extension leaves the index unchanged
         let mut keep = Index::datetime(vec![1], Tz::Utc);
