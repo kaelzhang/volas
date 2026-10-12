@@ -161,14 +161,12 @@ pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
 /// loop lets the out-of-order core overlap the two FMA dependency chains (ILP) —
 /// roughly the cost of one EMA, not two — and emits the difference directly (no
 /// intermediate `fast` / `slow` arrays, no separate subtraction pass).
-/// Bit-identical to two [`ema_seeded`] calls minus each other, for either order of the
-/// periods (`fast > slow` is the negated difference of the swapped pair — exact, as
-/// `a − b == −(b − a)` in IEEE arithmetic).
+/// Bit-identical to two [`ema_seeded`] calls minus each other. Requires `fast <= slow`
+/// (the fast EMA seeds no later than the slow one): its callers order the periods by
+/// TA-Lib's rule first (`indicators::oscillator_order`).
 #[inline]
 pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array1<f64> {
-    if fast > slow {
-        return -ema_diff_seeded(data, slow, fast);
-    }
+    debug_assert!(fast <= slow, "ema_diff_seeded needs fast <= slow, got {fast} > {slow}");
     let n = data.len();
     let mut out = Array1::from_elem(n, f64::NAN);
     if fast == 0 || slow == 0 || n == 0 {
@@ -844,12 +842,6 @@ mod tests {
         assert!(ema_diff_seeded(av(&[1.0, 2.0]), 2, 5)
             .iter()
             .all(|x| x.is_nan()));
-        // ...and a fast period longer than the slow one: the negated swapped difference,
-        // bit for bit (no panic on the out-of-order seeds).
-        let x = [3.0, 1.5, 4.25, 2.0, 5.5, 4.0, 6.75, 5.0];
-        let (ab, ba) = (ema_diff_seeded(av(&x), 5, 2), ema_diff_seeded(av(&x), 2, 5));
-        assert!(ab.iter().zip(&ba).all(|(p, q)| p.to_bits() == (-q).to_bits()));
-        assert!(ab[4].is_finite());
 
         // ema_cascade: zero period, and lookback exceeding the input length.
         assert!(ema_cascade::<3>(&[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
@@ -910,5 +902,14 @@ mod tests {
         }
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&got[..4]), bits(&clean[..4]));
+    }
+
+    /// The periods out of order break `ema_diff_seeded`'s precondition (its callers order
+    /// them first), caught in a debug build.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "fast <= slow")]
+    fn ema_diff_seeded_rejects_a_fast_period_longer_than_the_slow() {
+        let _ = ema_diff_seeded(av(&[3.0, 1.5, 4.25, 2.0, 5.5]), 5, 2);
     }
 }
