@@ -1,7 +1,7 @@
 //! Single-bar candlestick patterns.
 
 use super::{
-    candle_average_series, color, each_bar, each_bar_avg, lowershadow, realbody,
+    candle_average_series, color, each_bar_avg, lowershadow, realbody,
     realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI, BODY_LONG, BODY_SHORT, NEAR,
     SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_LONG, SHADOW_VERY_SHORT,
 };
@@ -262,22 +262,22 @@ pub fn cdl_hangingman(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize)
         .max(SHADOW_VERY_SHORT.avg_period)
         .max(NEAR.avg_period)
         + 1;
-    // ShadowLong has avg_period 0, so its threshold is just the current real body.
-    let body_short = candle_average_series(BODY_SHORT, o, h, l, c, origin);
-    let very_short = candle_average_series(SHADOW_VERY_SHORT, o, h, l, c, origin);
     let near = candle_average_series(NEAR, o, h, l, c, origin); // read at i-1
-    each_bar(lb, o, h, l, c, |i| {
-        let body = realbody(o, c, i);
-        if body < body_short[i]
-            && lowershadow(o, l, c, i) > body
-            && uppershadow(o, h, c, i) < very_short[i]
-            && o[i].min(c[i]) >= h[i - 1] - near[i - 1]
-        {
-            -100.0
-        } else {
-            0.0
-        }
-    })
+    each_bar_avg(
+        [SHADOW_LONG, SHADOW_VERY_SHORT, BODY_SHORT],
+        lb,
+        o,
+        h,
+        l,
+        c, origin,
+        |i, a| {
+            if hammer_shape(o, h, l, c, i, true, a) && o[i].min(c[i]) >= h[i - 1] - near[i - 1] {
+                -100.0
+            } else {
+                0.0
+            }
+        },
+    )
 }
 
 /// Inverted Hammer (TA-Lib CDLINVERTEDHAMMER): inverted hammer-shape gapping down from

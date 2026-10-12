@@ -150,10 +150,8 @@ pub const CANDLE_PATTERNS: &[&str] = &[
     "hikkake", "hikkakemod",
 ];
 
-/// The range a candle-setting measures. The full set mirrors TA-Lib's settings table;
-/// a variant is only *constructed* once a pattern needing it lands, so allow the lint.
+/// The range a candle-setting measures (TA-Lib's `TA_RangeType`).
 #[derive(Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 enum RangeType {
     RealBody,
     HighLow,
@@ -175,11 +173,6 @@ const BODY_LONG: Setting = Setting {
     range: RealBody,
     avg_period: 10,
     factor: 1.0,
-};
-const BODY_VERY_LONG: Setting = Setting {
-    range: RealBody,
-    avg_period: 10,
-    factor: 3.0,
 };
 const BODY_SHORT: Setting = Setting {
     range: RealBody,
@@ -226,10 +219,6 @@ const EQUAL: Setting = Setting {
     avg_period: 5,
     factor: 0.05,
 };
-
-// Settings not yet consumed by a landed pattern (shrinks to nothing as patterns arrive).
-#[allow(dead_code)]
-const _UNUSED_SETTINGS: [Setting; 1] = [BODY_VERY_LONG];
 
 #[inline]
 fn realbody(o: &[f64], c: &[f64], i: usize) -> f64 {
@@ -527,7 +516,7 @@ mod tests {
     fn the_average_series_is_the_window_mean_and_a_tail_recompute_matches_it() {
         for n in [3, 10, 11, 14, 60] {
             let [o, h, l, c] = ohlc(n);
-            for s in [BODY_LONG, BODY_DOJI, SHADOW_SHORT, SHADOW_LONG, NEAR, BODY_VERY_LONG] {
+            for s in [BODY_LONG, BODY_DOJI, SHADOW_SHORT, SHADOW_LONG, NEAR] {
                 let r: Vec<f64> = (0..n).map(|i| range_at(s.range, &o, &h, &l, &c, i)).collect();
                 let series = candle_average_series(s, &o, &h, &l, &c, 0);
                 for (i, v) in series.iter().enumerate() {
