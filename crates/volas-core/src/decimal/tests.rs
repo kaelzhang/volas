@@ -109,3 +109,62 @@ fn integer_rounding_never_overflows_inside() {
     increment(&mut d);
     assert_eq!(d, b"100");
 }
+
+/// The column form gives every value [`round`]'s result, bit for bit: around each
+/// `whole_from` threshold, at ties, and on random values of every magnitude, for both
+/// float types and every k shape (the fast loops and the per-value path).
+#[test]
+fn the_column_form_is_the_scalar_form() {
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut xs: Vec<f64> = vec![
+        0.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 2.675, 0.125, 85062.45,
+        511821.65, 1.7e308, -1.7e308, 5e-324, 4503599627370495.5, 4503599627370497.0,
+        9007199254740993.0, 1e22, 1e23, 2f64.powi(-24),
+    ];
+    for k in 0..=22 {
+        for t in [whole_from::<f64>(k), whole_from::<f32>(k)] {
+            for m in [0.5, 1.0, 1.5, 2.0] {
+                let b = t * m;
+                xs.extend([b, -b, f64::from_bits(b.to_bits() + 1), f64::from_bits(b.to_bits() - 1)]);
+            }
+        }
+    }
+    for _ in 0..2_000 {
+        let bits = next();
+        let x = f64::from_bits(bits);
+        if x.is_finite() {
+            xs.push(x);
+        }
+        // decimal-looking values near ties
+        let m = (next() % 10_000_000) as f64 + 0.5;
+        xs.push(m / 10f64.powi((next() % 9) as i32));
+    }
+    let ks = (-40..=40).chain([-400, -309, -308, -300, -100, 100, 300, 309, 323, 324, 400, i32::MIN, i32::MAX]);
+    for k in ks {
+        let want: Vec<Option<f64>> = xs.iter().map(|&x| round(x, k)).collect();
+        match round_slice(&xs, k) {
+            Some(got) => {
+                for ((x, g), w) in xs.iter().zip(&got).zip(&want) {
+                    assert_eq!(Some(g.to_bits()), w.map(f64::to_bits), "round({x:e}, {k})");
+                }
+            }
+            None => assert!(want.contains(&None), "k {k}"),
+        }
+        let xs32: Vec<f32> = xs.iter().map(|&x| x as f32).filter(|x| x.is_finite()).collect();
+        let want: Vec<Option<f32>> = xs32.iter().map(|&x| round(x, k)).collect();
+        match round_slice(&xs32, k) {
+            Some(got) => {
+                for ((x, g), w) in xs32.iter().zip(&got).zip(&want) {
+                    assert_eq!(Some(g.to_bits()), w.map(f32::to_bits), "round({x:e}f32, {k})");
+                }
+            }
+            None => assert!(want.contains(&None), "f32 k {k}"),
+        }
+    }
+}

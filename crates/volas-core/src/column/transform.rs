@@ -439,7 +439,5 @@ impl Column {
 /// Each float rounded to `decimals` places ([`decimal::round`]); a result past the
 /// dtype's range is an overflow.
 fn round_floats<F: decimal::RoundFloat + Numeric>(v: &[F], decimals: i32) -> Result<Vec<F>> {
-    v.iter()
-        .map(|&x| decimal::round(x, decimals).ok_or_else(|| overflow(F::DTYPE, "round")))
-        .collect()
+    decimal::round_slice(v, decimals).ok_or_else(|| overflow(F::DTYPE, "round"))
 }

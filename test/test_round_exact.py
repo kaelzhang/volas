@@ -128,3 +128,22 @@ def test_arrow_decimals_import_as_the_nearest_float(kind, precision):
             want = [float(v) for v in arr.to_pylist()]
             for v, g, w in zip(arr.to_pylist(), got, want):
                 assert _bits_equal(g, w), f'{kind}({precision}, {scale}) {v}: {g!r} != {w!r}'
+
+
+@pytest.mark.parametrize('k', [2**31, 10**30, -(2**31) - 1, -(10**30)])
+def test_any_integer_count_of_places(k):
+    # Python accepts any int: past every float's precision a value comes back as it is,
+    # and to a multiple past every float a signed 0
+    xs = [2.675, -1e300, 5e-324, -0.5, 7.0]
+    got = _series(xs).round(k).to_list()
+    for x, g in zip(xs, got):
+        assert _bits_equal(g, round(x, k)), (x, k, g)
+    ints = volas.DataFrame({'i': np.array([7, -15, 2**62], dtype=np.int64)})['i'].round(k).to_list()
+    assert ints == ([7, -15, 2**62] if k > 0 else [0, 0, 0])
+    frame = volas.DataFrame({'x': np.array(xs)}).round(k)['x'].to_list()
+    assert all(_bits_equal(g, round(x, k)) for x, g in zip(xs, frame))
+
+
+def test_round_places_must_be_an_integer():
+    with pytest.raises(TypeError):
+        _series([1.5]).round(1.5)

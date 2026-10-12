@@ -203,12 +203,13 @@ impl PyDataFrame {
         self.fill_dir(false)
     }
 
-    /// Round each float column to `decimals` places (pandas `round`), banker's
-    /// rounding; non-float columns are unchanged.
-    #[pyo3(signature = (decimals = 0))]
-    pub(crate) fn round(&self, decimals: i32) -> PyResult<PyDataFrame> {
-        // Round numeric columns dtype-preservingly (banker's f64, integer-exact
-        // i64); leave bool / str / datetime untouched, like pandas df.round.
+    /// Round each numeric column to `decimals` places (any int): floats to the correctly
+    /// rounded decimal (Python's `round`), ints integer-exact; other columns unchanged.
+    #[pyo3(signature = (decimals = DecimalPlaces(0)))]
+    pub(crate) fn round(&self, decimals: DecimalPlaces) -> PyResult<PyDataFrame> {
+        let decimals = decimals.0;
+        // Round numeric columns dtype-preservingly; leave bool / str / datetime
+        // untouched, like pandas df.round.
         self.map_columns(|c| {
             if c.dtype().is_numeric() {
                 c.round(decimals).map_err(pyerr)

@@ -80,6 +80,106 @@ pub fn round<F: RoundFloat>(x: F, k: i32) -> Option<F> {
     if k >= 0 { round_places(x, k) } else { round_tens(x, k.unsigned_abs()) }
 }
 
+/// [`round`] of every value of a column at `k` places, with a result past the float
+/// range reported once (`None`). The shapes that matter run as one branch-free loop over
+/// per-call constants — every result exact, as [`round`]'s:
+///
+/// - `0 <= k <= F::EXACT_POW10`: values above [`whole_from`] are returned as they are;
+///   below it `|v|·10^k < 2^DIGITS`, the error-free product rounds exactly, and the
+///   quotient by the exact `10^k` is the correctly rounded result;
+/// - `-15 <= k < 0`: `n = rint(v / 10^-k)` is the nearest multiple or its neighbour, and the
+///   remainder `v − n·10^-k` — exact in one fused multiply-add for `|v| < 2^52` —
+///   settles which, and the multiple (under `2^53`) is exact before its one rounding to
+///   `F`; other values (past `2^52`, NaN, ±inf) take [`round`] afterwards.
+///
+/// Every other `k` takes [`round`] value by value.
+pub fn round_slice<F: RoundFloat>(v: &[F], k: i32) -> Option<Vec<F>> {
+    if (0..=F::EXACT_POW10).contains(&k) {
+        return Some(round_places_slice(v, k));
+    }
+    let (mut out, rest) = if (-15..0).contains(&k) {
+        round_tens_slice(v, k.unsigned_abs())
+    } else {
+        (v.to_vec(), true)
+    };
+    if !rest {
+        return Some(out);
+    }
+    // the values the loops above leave: NaN, ±inf, magnitudes past them, other k — past
+    // EXACT_POW10 places only values up to `whole_from` change (the rest are whole there)
+    let fast = (-15..0).contains(&k);
+    let whole = if k > F::EXACT_POW10 { whole_from::<F>(k.min(MAX_PLACES)) } else { f64::INFINITY };
+    let mut overflow = false;
+    for (o, &x) in out.iter_mut().zip(v) {
+        let a = x.to_f64().abs();
+        if (fast && a < TENS_FAST_BELOW) || a > whole {
+            continue;
+        }
+        match round(x, k) {
+            Some(r) => *o = r,
+            None => overflow = true,
+        }
+    }
+    (!overflow).then_some(out)
+}
+
+/// The magnitude below which [`round_tens_slice`] is exact: `2^52`.
+const TENS_FAST_BELOW: f64 = 4_503_599_627_370_496.0;
+
+/// The least power of two from which every `F` above it is whole at `k >= 0` places:
+/// `2^E` with `E` the least exponent whose binade's step `2^(E−DIGITS+1)` exceeds
+/// `10^-k` (`k·log2 10` is never an integer for `k >= 1`). Floats above it lie in a binade
+/// with that step; floats up to it keep `|v|·10^k <= 2^DIGITS`.
+fn whole_from<F: RoundFloat>(k: i32) -> f64 {
+    let e = (F::DIGITS as f64 - 1.0 - k as f64 * std::f64::consts::LOG2_10).floor() as i32 + 1;
+    2f64.powi(e)
+}
+
+/// [`round_slice`] at `0 <= k <= F::EXACT_POW10`.
+fn round_places_slice<F: RoundFloat>(v: &[F], k: i32) -> Vec<F> {
+    let (scale, whole) = (POW10[k as usize], whole_from::<F>(k));
+    // one straight select-only loop: the compiler vectorizes it
+    v.iter()
+        .map(|&x| {
+            let v = x.to_f64();
+            let p = v * scale;
+            let e = v.mul_add(scale, -p);
+            let n = p.round_ties_even();
+            let d = p - n;
+            // p sits on a half the exact value lies past (see `round_places`): d = ±1/2
+            // with e on its side (d·e is ±e/2, never underflowing to 0 there)
+            let past = d.abs() == 0.5 && d * e > 0.0;
+            let n = if past { n + (d + d) } else { n };
+            let rounded = F::from_f64(n / scale);
+            // NaN and ±inf fail the comparison and stay, with the whole values
+            if v.abs() <= whole { rounded } else { x }
+        })
+        .collect()
+}
+
+/// [`round_slice`] at `-15 <= -j < 0` for `|v| <` [`TENS_FAST_BELOW`], and whether any
+/// other value (past it, NaN, ±inf) is left for the caller to fill in.
+fn round_tens_slice<F: RoundFloat>(v: &[F], j: u32) -> (Vec<F>, bool) {
+    let tens = POW10[j as usize];
+    let half = tens / 2.0;
+    let mut rest = false;
+    let out = v
+        .iter()
+        .map(|&x| {
+            let v = x.to_f64();
+            rest |= v.abs() >= TENS_FAST_BELOW || v.is_nan();
+            let n = (v / tens).round_ties_even();
+            // exact: |r| <= |v| on v's own grid
+            let r = (-n).mul_add(tens, v);
+            let a = r.abs();
+            let odd = (n * 0.5).round_ties_even() != n * 0.5;
+            let n = if a > half || (a == half && odd) { n + 1f64.copysign(r) } else { n };
+            F::from_f64(n * tens)
+        })
+        .collect();
+    (out, rest)
+}
+
 /// [`round`] at `k >= 0` places.
 fn round_places<F: RoundFloat>(x: F, k: i32) -> Option<F> {
     let v = x.to_f64();
