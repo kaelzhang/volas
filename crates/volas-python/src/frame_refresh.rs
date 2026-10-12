@@ -23,6 +23,7 @@ use crate::*;
 #[derive(Clone, Copy)]
 struct Stale {
     lb: usize,
+    resume: usize,
     vr: usize,
     warm: bool,
 }
@@ -89,7 +90,8 @@ impl PyDataFrame {
             return Ok(());
         }
         let mut base: Option<DataFrame> = None;
-        for volas_core::StaleComputed { name, lookback: lb, valid_rows: vr, warm } in stale {
+        for volas_core::StaleComputed { name, reach, valid_rows: vr, warm } in stale {
+            let (lb, resume) = (reach.lookback, reach.resume);
             // Parse-free single-row fast path for the stateless finite-memory directives
             // (price transforms, TR, the momentum / ROC family): the newest row is a
             // formula of its own inputs; the (empty) state still advances one row.
@@ -107,7 +109,7 @@ impl PyDataFrame {
                 base = Some(self.refresh_frame()?);
             }
             let frame = if directive_uses_default_series(&node) { None } else { base.as_ref() };
-            self.refresh_column(&name, &node, frame, Stale { lb, vr, warm }, height)?;
+            self.refresh_column(&name, &node, frame, Stale { lb, resume, vr, warm }, height)?;
         }
         Ok(())
     }
@@ -119,7 +121,7 @@ impl PyDataFrame {
         name: &str,
         node: &Ast,
         frame: Option<&DataFrame>,
-        Stale { lb, vr, warm }: Stale,
+        Stale { lb, resume, vr, warm }: Stale,
         height: usize,
     ) -> PyResult<()> {
         // Past warm-up with a carried state, a column resumes. Warm-up is counted on the
@@ -130,7 +132,7 @@ impl PyDataFrame {
         // masks. A resume reads `resume_reach` rows before the new one (its lookback,
         // plus the row its window drops or SAR's earlier bar): a frame holding fewer (a
         // tail slice) recomputes over its own rows instead.
-        let reach = vr >= volas_directive::lookback::resume_reach(node);
+        let reach = vr >= resume;
         if warm && reach && self.inner.computed_resume_state(name).is_some() {
             // One row at a time through the allocation-free step: each row's value and
             // the state as of it; the last two states are kept.

@@ -1,4 +1,4 @@
-use volas_core::{Column, DataFrame};
+use volas_core::{Column, DataFrame, Reach};
 
 fn frame_with_computed_f64() -> DataFrame {
     let mut df = DataFrame::new(
@@ -7,7 +7,7 @@ fn frame_with_computed_f64() -> DataFrame {
         None,
     )
     .unwrap();
-    df.set_computed("value", 1, 1);
+    df.set_computed("value", Reach { lookback: 1, resume: 0, continuation: 1 });
     df
 }
 
@@ -36,7 +36,7 @@ fn computed_scalar_update_refreshes_valid_rows_and_reports_errors() {
         None,
     )
     .unwrap();
-    bool_df.set_computed("flag", 0, 0);
+    bool_df.set_computed("flag", Reach { lookback: 0, resume: 0, continuation: 0 });
     assert!(bool_df.update_computed_f64_value("flag", 0, 1.0).is_err());
 }
 

@@ -9,6 +9,19 @@ use crate::error::{Result, VolasError};
 use crate::index::{Index, IndexKind};
 use crate::series::Series;
 
+/// The rows a cached directive column reads around its own, fixed per directive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reach {
+    /// The directive's lookback (warm-up rows).
+    pub lookback: usize,
+    /// The valid rows before a new one that resuming the column's carried state reads
+    /// (0 for a state that is all it needs): a frame holding fewer recomputes instead.
+    pub resume: usize,
+    /// The rows a contiguous slice must keep for the column to stay cached (at least
+    /// `lookback`): fewer cannot continue it exactly.
+    pub continuation: usize,
+}
+
 /// Metadata for a materialized (cached) directive column: the directive that
 /// produced it, its lookback, and how many leading rows currently hold valid
 /// values. After an `append`, the new rows are stale (NaN) and `valid_rows` lags
@@ -18,12 +31,8 @@ pub struct ComputedMeta {
     // NB: the directive string is NOT stored here — a computed column's canonical
     // directive is *identical* to its column name (the `computed` map key), so callers
     // use the name directly. Storing it would be a redundant per-bar / per-slice clone.
-    /// The directive's lookback (warm-up rows).
-    pub lookback: usize,
-    /// The rows the column needs to be continued exactly (`lookback`, or one more when
-    /// continuing it reads the row its window drops): a contiguous slice keeping fewer
-    /// rows does not keep it cached.
-    pub reach: usize,
+    /// The rows the column reads around its own: lookback, resume and continuation.
+    pub reach: Reach,
     /// Rows `[0, valid_rows)` currently hold valid values.
     pub valid_rows: usize,
     /// Carried recursive state for an O(new-rows) append resume: a small,
@@ -65,7 +74,7 @@ impl ComputedMeta {
     /// Whether the column is past its warm-up: more than `lookback` rows of its
     /// history are processed.
     pub fn warm(&self, origin: usize) -> bool {
-        origin + self.valid_rows >= self.since + self.lookback
+        origin + self.valid_rows >= self.since + self.reach.lookback
     }
 }
 
@@ -486,7 +495,7 @@ impl DataFrame {
         // values correct, but not continuable). Non-contiguous derivations
         // (`take` / `filter_mask`) go through `DataFrame::new` and already drop it.
         for (name, meta) in &self.computed {
-            if len >= meta.reach {
+            if len >= meta.reach.continuation {
                 let valid = meta.valid_rows.saturating_sub(start).min(len);
                 // Carry a state only when the row it describes is one of this slice's
                 // valid rows: the state is the internal state as of the parent row
@@ -507,7 +516,6 @@ impl DataFrame {
                 df.computed.insert(
                     name.clone(),
                     ComputedMeta {
-                        lookback: meta.lookback,
                         reach: meta.reach,
                         valid_rows: valid,
                         state: carried,

@@ -14,17 +14,17 @@
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
-use super::{ComputedMeta, DataFrame, STALE_BY_APPEND, STALE_BY_WRITE};
+use super::{ComputedMeta, DataFrame, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
 
-/// A stale cached column as the refresh reads it: its name, lookback, valid-row
+/// A stale cached column as the refresh reads it: its name, reach, valid-row
 /// cursor, and whether its processed history is past the warm-up
 /// ([`ComputedMeta::warm`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaleComputed {
     /// The column (= its canonical directive).
     pub name: String,
-    /// The directive's lookback.
-    pub lookback: usize,
+    /// The rows the column reads around its own.
+    pub reach: Reach,
     /// Rows `[0, valid_rows)` hold valid values.
     pub valid_rows: usize,
     /// More than `lookback` rows of the column's history are processed.
@@ -38,14 +38,13 @@ impl DataFrame {
     }
 
     /// Record that column `name` is a materialized directive result (valid for
-    /// all current rows), its history starting at this frame's row 0; `reach` is the
-    /// rows it needs to be continued exactly (at least `lookback`).
-    pub fn set_computed(&mut self, name: &str, lookback: usize, reach: usize) {
+    /// all current rows), its history starting at this frame's row 0, reading `reach`
+    /// rows around its own.
+    pub fn set_computed(&mut self, name: &str, reach: Reach) {
         self.computed.insert(
             name.to_string(),
             ComputedMeta {
-                lookback,
-                reach: reach.max(lookback),
+                reach,
                 valid_rows: self.height,
                 state: None,
                 state_before_last: None,
@@ -192,7 +191,7 @@ impl DataFrame {
             })
             .map(|(name, meta)| StaleComputed {
                 name: name.clone(),
-                lookback: meta.lookback,
+                reach: meta.reach,
                 valid_rows: meta.valid_rows,
                 warm: meta.warm(self.origin),
             })
