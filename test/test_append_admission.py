@@ -299,7 +299,7 @@ def test_an_aware_dict_bar_in_another_zone_is_the_same_instant():
     ts = volas.Timestamp('2024-01-05 09:00').tz_localize('America/New_York')
     df.append({'t': ts, 'close': 3.0})
     assert df.tz == 'Asia/Tokyo'
-    assert np.datetime64(df.index[-1], 'ns').astype('int64') == ts.value
+    assert df.index[-1].value == ts.value
 
 
 def test_a_time_frame_dict_bar_must_match_the_frame_awareness():

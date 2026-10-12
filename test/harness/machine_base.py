@@ -472,7 +472,12 @@ class FrameMachine(RuleBasedStateMachine):
         start = self.visible_start()
         labels = np.asarray(view.index)
         want_labels = np.asarray(coarse.index[start:], dtype='int64')
-        got_labels = labels.astype('datetime64[ns]').astype('int64') if labels.dtype.kind == 'M' else labels
+        if coarse.schema.tz is not None and len(labels):
+            # an aware index gives aware Timestamps in the frame's zone
+            assert all(t.tz == coarse.schema.tz for t in labels), 'aware labels carry the frame zone'
+            got_labels = [t.value for t in labels]
+        else:
+            got_labels = labels.astype('datetime64[ns]').astype('int64') if labels.dtype.kind == 'M' else labels
         observe.same_data(np.asarray(got_labels, dtype='int64'), want_labels, 'index labels')
         assert view.tz == coarse.schema.tz, f'tz {view.tz!r} != {coarse.schema.tz!r}'
         for c in coarse.columns:

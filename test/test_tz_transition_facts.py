@@ -32,5 +32,5 @@ def test_period_start_inside_a_gap_is_the_transition_instant():
     ns = np.datetime64("1972-01-07T00:44:40", "ns").astype("int64")
     df = volas.DataFrame({"close": [1.0]}, index=np.array([ns], dtype="datetime64[ns]"))
     df = df.tz_localize("UTC").tz_convert("Africa/Monrovia")
-    label = df.cumulate("1d").index.view("i8")[0]
+    label = df.cumulate("1d").index[0].value
     assert label == pd.Timestamp("1972-01-07 00:44:30", tz="UTC").value

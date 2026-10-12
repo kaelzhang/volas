@@ -166,9 +166,9 @@ impl PyDataFrame {
             data.set_item(name, column_to_pandas(py, &pd, col, nullable)?)?;
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("index", index_to_numpy(py, df.index())?)?;
+        kwargs.set_item("index", index_values(py, df.index())?)?;
         let pdf = pd.call_method("DataFrame", (data,), Some(&kwargs))?;
-        // A tz-aware frame exports a UTC-naive datetime64 index (index_to_numpy); restore the
+        // A tz-aware frame exports a UTC-naive datetime64 index (index_values); restore the
         // display zone so the pandas index is tz-aware — a faithful round-trip with from_pandas.
         if let Some(tz) = self.tz() {
             let aware = pdf

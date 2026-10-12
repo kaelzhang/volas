@@ -187,6 +187,11 @@ impl PyDataFrame {
             Some(ix) => {
                 let col = pyany_to_column(ix)?;
                 let new_index = Index::from_column(&col).map_err(pyerr)?;
+                // aware labels (a frame's own `.index`) keep their zone
+                let new_index = match (crate::convert::labels_zone(ix)?, new_index.kind()) {
+                    (Some(tz), IndexKind::Datetime(v, _)) => Index::datetime(v.clone(), tz),
+                    _ => new_index,
+                };
                 DataFrame::new(df.names().to_vec(), df.columns().to_vec(), Some(new_index))
                     .map_err(pyerr)?
             }
@@ -363,7 +368,7 @@ impl PyDataFrame {
     ///     numpy.ndarray
     #[getter]
     pub(crate) fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        index_to_numpy(py, &self.meta().labels())
+        index_labels(py, &self.meta().labels())
     }
 
     // The indexers hold a live reference to this frame (`Py<PyDataFrame>`), not a

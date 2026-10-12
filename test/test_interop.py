@@ -6,6 +6,13 @@ import volas
 from volas import DataFrame, to_datetime
 
 
+def utc(labels):
+    """The UTC instants of index labels: an aware index gives aware Timestamps."""
+    if labels.dtype == object:
+        return np.array([t.value for t in labels], 'int64').astype('datetime64[ns]')
+    return labels.astype('datetime64[ns]')
+
+
 def test_to_pandas():
     df = DataFrame({'a': [1., 2., 3.], 'b': np.array([10, 20, 30], dtype=np.int64)})
     pdf = df.to_pandas()
@@ -66,7 +73,7 @@ def test_datetime64_array_column_ingested():
     arr = np.array(['2021-01-04 09:30', '2021-01-04 09:31'], dtype='datetime64[s]')
     df = DataFrame({'t': arr, 'c': [1.0, 2.0]})
     assert str(df['t'].dtype) == 'datetime64[ns]'
-    assert (df.set_index('t').index.astype('datetime64[ns]')[0]
+    assert (utc(df.set_index('t').index)[0]
             == np.datetime64('2021-01-04 09:30:00'))
 
 
@@ -84,7 +91,7 @@ def test_from_pandas_tz_aware_named():
     idx = pd.to_datetime(['2021-01-04 09:30']).tz_localize('America/New_York')
     df = volas.DataFrame.from_pandas(pd.DataFrame({'c': [1.0]}, index=idx))
     assert df.tz == 'America/New_York'
-    assert df.index.astype('datetime64[ns]')[0] == np.datetime64('2021-01-04 14:30:00')
+    assert utc(df.index)[0] == np.datetime64('2021-01-04 14:30:00')
 
 
 def test_from_pandas_tz_aware_fixed_offset():
@@ -92,7 +99,7 @@ def test_from_pandas_tz_aware_fixed_offset():
     idx = pd.to_datetime(['2021-01-04 09:30']).tz_localize('+08:00')
     df = volas.DataFrame.from_pandas(pd.DataFrame({'c': [1.0]}, index=idx))
     assert df.tz == '+08:00'
-    assert df.index.astype('datetime64[ns]')[0] == np.datetime64('2021-01-04 01:30:00')
+    assert utc(df.index)[0] == np.datetime64('2021-01-04 01:30:00')
 
 
 def test_tz_roundtrip_volas_pandas_volas():
@@ -101,7 +108,7 @@ def test_tz_roundtrip_volas_pandas_volas():
     df = df.set_index('t').tz_localize('+08:00')
     back = volas.DataFrame.from_pandas(df.to_pandas())
     assert back.tz == '+08:00'
-    assert (back.index.astype('datetime64[ns]') == df.index.astype('datetime64[ns]')).all()
+    assert (utc(back.index) == utc(df.index)).all()
     assert back['c'].to_list() == [1.0, 2.0]
 
 

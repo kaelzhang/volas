@@ -569,10 +569,10 @@ pub(crate) fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> 
 pub(crate) enum Zone {
     /// An instant: an aware `Timestamp` / `datetime`, an offset-carrying string.
     Aware(Tz),
-    /// A wall clock with no zone: a naive `Timestamp` / `datetime` / string, a
-    /// `datetime64`.
+    /// A wall clock with no zone: a naive `Timestamp` / `datetime` / string.
     Naive,
-    /// No zone either way: an epoch-ns integer.
+    /// No zone either way — a raw epoch-ns count: an integer or a NumPy `datetime64`
+    /// (the form a frame exports its instants in), read in the frame's own zone.
     Unzoned,
 }
 
@@ -594,10 +594,58 @@ pub(crate) fn timestamp_zone(key: &Bound<'_, PyAny>) -> PyResult<Zone> {
         }
         return Ok(Zone::Naive);
     }
-    if key.extract::<i64>().is_ok() {
+    if key.extract::<i64>().is_ok() || crate::coerce::numpy_time_value(key, "M").is_some() {
         return Ok(Zone::Unzoned);
     }
     Ok(Zone::Naive)
+}
+
+/// The zone row labels given as `index=` are written in: the zone of a pandas
+/// `DatetimeIndex`, or the one zone every aware `Timestamp` / `datetime` among them
+/// carries (a frame's own aware `.index`); `None` for wall clocks and raw values.
+/// Aware and naive timestamps, or two zones, in one index raise.
+pub(crate) fn labels_zone(labels: &Bound<'_, PyAny>) -> PyResult<Option<Tz>> {
+    if let Ok(tz) = labels.getattr("tz") {
+        if !tz.is_none() {
+            return Ok(Some(crate::scalar::tz_from_py(&tz)?));
+        }
+        return Ok(None);
+    }
+    let raw = labels.getattr("dtype").and_then(|d| d.getattr("kind")).is_ok_and(|k| !k.eq("O").unwrap_or(false));
+    let Ok(items) = labels.try_iter() else { return Ok(None) };
+    if raw || labels.is_instance_of::<pyo3::types::PyString>() {
+        return Ok(None);
+    }
+    let mut seen: Option<Option<Tz>> = None;
+    for item in items {
+        let item = item?;
+        let timestamp = item.extract::<PyRef<PyTimestamp>>().is_ok() || item.is_instance_of::<pyo3::types::PyDateTime>();
+        if !timestamp {
+            continue;
+        }
+        let zone = match timestamp_zone(&item)? {
+            Zone::Aware(tz) => Some(tz),
+            _ => None,
+        };
+        match seen {
+            None => seen = Some(zone),
+            Some(first) if first == zone => {}
+            Some(first) => {
+                return Err(PyValueError::new_err(match (first, zone) {
+                    (Some(a), Some(b)) => format!(
+                        "cannot use timestamps in two zones ({} and {}) as one index — \
+                         tz_convert them to one zone first",
+                        a.name(),
+                        b.name()
+                    ),
+                    _ => "cannot use tz-aware and tz-naive timestamps as one index — \
+                          tz_localize the naive ones first"
+                        .to_string(),
+                }))
+            }
+        }
+    }
+    Ok(seen.flatten())
 }
 
 /// Parse a Python timestamp to UTC epoch-ns, interpreting a **naive** string in
@@ -664,11 +712,27 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
     ))
 }
 
-/// Build the `.index` as a NumPy array. A DatetimeIndex exports its **UTC**
-/// instants as `datetime64[ns]` (matching pandas `.values`; the frame tz governs
-/// string rendering / matching, not the numeric export); a string index becomes
-/// an object array.
-pub(crate) fn index_to_numpy<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
+/// The `.index` labels as a NumPy array: what each label is, so a label read back
+/// is admitted as the same label. A tz-aware DatetimeIndex gives its labels as
+/// aware [`Timestamp`](PyTimestamp)s in an object array (pandas `DatetimeIndex.
+/// to_numpy()` of an aware index); every other index its [`index_values`].
+pub(crate) fn index_labels<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
+    match index.kind() {
+        IndexKind::Datetime(v, tz) if tz.is_aware() => {
+            let labels = (0..v.len()).map(|i| label_to_py(py, index, i)).collect::<Vec<_>>();
+            let list = PyList::new(py, labels)?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "object")?;
+            py.import("numpy")?.call_method("array", (list,), Some(&kwargs))
+        }
+        _ => index_values(py, index),
+    }
+}
+
+/// The index as plain NumPy values: a DatetimeIndex its **UTC** instants as
+/// `datetime64[ns]` (pandas `.values`; an export restores the zone itself), a
+/// string index an object array.
+pub(crate) fn index_values<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
     match index.kind() {
         IndexKind::Datetime(v, _) => {
             let arr = v.clone().into_pyarray(py);

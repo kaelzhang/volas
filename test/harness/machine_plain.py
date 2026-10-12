@@ -378,7 +378,9 @@ def _names(text: str) -> set[str]:
 
 
 def _nat_index(df: volas.DataFrame, schema) -> volas.DataFrame:
-    labels = np.asarray(df.index).astype('datetime64[ns]').copy()
+    index = df.index  # an aware index gives aware Timestamps: take their UTC instants
+    labels = (np.array([t.value for t in index], 'int64').astype('datetime64[ns]') if index.dtype == object
+              else np.asarray(index).astype('datetime64[ns]').copy())
     labels[-1] = np.datetime64('NaT')
     out = volas.DataFrame({c: df.get_column(c) for c in df.columns}, index=labels)
     return out._set_index_tz(schema.tz) if schema.tz else out
