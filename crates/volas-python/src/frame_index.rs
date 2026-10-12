@@ -31,6 +31,27 @@ pub(crate) fn is_na_like_py(v: &Bound<'_, PyAny>) -> bool {
         || v.get_type().name().map(|n| n == "NAType").unwrap_or(false)
 }
 
+/// Whether an assigned value is an array of values rather than one value — the one
+/// classification every assignment surface shares: a list, a tuple, a `Series`, or
+/// anything with one or more dimensions (an `ndarray`, a pandas object) is an array;
+/// a Python / NumPy scalar and a 0-d array are one value. Never decided by whether
+/// the value converts to a number (NumPy converts a one-element array, deprecated).
+pub(crate) fn is_array(v: &Bound<'_, PyAny>) -> bool {
+    use pyo3::types::{PyBool, PyFloat, PyInt};
+    if v.is_exact_instance_of::<PyFloat>()
+        || v.is_exact_instance_of::<PyInt>()
+        || v.is_exact_instance_of::<PyBool>()
+        || v.is_instance_of::<PyString>()
+        || v.is_none()
+    {
+        return false; // the live bar cells: no attribute lookup
+    }
+    if v.is_instance_of::<PyList>() || v.is_instance_of::<PyTuple>() || v.extract::<PyRef<PySeries>>().is_ok() {
+        return true;
+    }
+    v.getattr("ndim").ok().and_then(|n| n.extract::<usize>().ok()).is_some_and(|n| n >= 1)
+}
+
 /// Build a length-1 [`Column`] of EXACTLY the `target` dtype from a Python scalar
 /// — the one scalar-write conversion behind every target-typed write (`iat` /
 /// `iloc` / `at` / `loc` / Series setitem / mask assignment / dict `append`). A
@@ -45,6 +66,12 @@ pub(crate) fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<
     // uniform across every dtype and every assignment surface.
     if is_na_like_py(v) {
         return Ok(Column::na_of(target, 1));
+    }
+    if is_array(v) {
+        return Err(PyTypeError::new_err(format!(
+            "a cell takes one value, not an array ({}) — pass the element itself",
+            v.get_type().name()?
+        )));
     }
     match target {
         DType::F64 | DType::F32 | DType::I64 | DType::I32 => {
@@ -140,11 +167,7 @@ pub(crate) fn value_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
 /// Resolve a `df[...] = value` right-hand side for `n` selected rows: a scalar is
 /// broadcast (length-1 column), an array-like must match `n`.
 pub(crate) fn resolve_assignment(v: &Bound<'_, PyAny>, target: DType, n: usize) -> PyResult<Column> {
-    // A Python str has `__len__` but is a scalar here; everything else with
-    // `__len__` (list / ndarray / Series) is array-like.
-    let is_str = v.extract::<String>().is_ok();
-    let arraylike = !is_str && v.hasattr("__len__").unwrap_or(false);
-    if arraylike {
+    if is_array(v) {
         let col = value_to_column(v)?;
         if col.len() != n {
             return Err(PyValueError::new_err(format!(

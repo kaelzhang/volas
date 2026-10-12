@@ -48,8 +48,10 @@ fn scalar_cell(value: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
         return pyany_to_column(&PyList::new(py, [value])?.into_any()).map(Some);
     }
     let np = py.import("numpy")?;
-    let zero_d = value.is_instance(&np.getattr("ndarray")?)? && value.getattr("ndim")?.extract::<usize>()? == 0;
-    if zero_d || value.is_instance(&np.getattr("generic")?)? {
+    if crate::frame_index::is_array(value) {
+        return Ok(None);
+    }
+    if value.is_instance(&np.getattr("ndarray")?)? || value.is_instance(&np.getattr("generic")?)? {
         // one element of the value's own dtype
         return pyany_to_column(&np.call_method1("asarray", (value,))?.call_method1("reshape", (1,))?)
             .map(Some);
