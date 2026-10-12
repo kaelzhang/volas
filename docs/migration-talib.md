@@ -132,7 +132,9 @@ it, the departure is deliberate and listed here.
   to a TA-Lib build that does not fuse, within rounding of one that does. The rest of the
   directional family — the Wilder sums `s − s/p + term` of ±DM and the true range, ±DI
   and DX — has no multiply-add to fuse and is bit-identical to every TA-Lib build,
-  including after an infinite movement, which turns every later sum into NaN.
+  including after an infinite movement, which turns every later sum into NaN, and on
+  TA-Lib's zero guards: where the true-range sum or the DI sum is ~0 (a long flat or
+  halted stretch), ±DI is 0, DX repeats its previous value and ADX keeps its average.
 
 Where TA-Lib's arguments are out of order, volas follows it: a `slow` period shorter
 than `fast` swaps the two averages in `macd`, `apo`, `ppo` and `macdext`.

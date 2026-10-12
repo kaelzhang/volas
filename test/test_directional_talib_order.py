@@ -3,7 +3,10 @@
 Wilder's sums are `s − s/p + term` (`ta_PLUS_DM.c`, `ta_DX.c`, `ta_ADX.c`), ±DI is
 `100·(dm/tr)`, DX is `100·(|−DI − +DI| / (−DI + +DI))` and the ADX average
 `((adx·(p−1)) + dx) / p` — so an infinite movement poisons every later sum into NaN
-exactly as TA-Lib does, and finite values agree to the last bit. ±DM / ±DI / DX contain no
+exactly as TA-Lib does, and finite values agree to the last bit. TA-Lib's zero guards
+(`TA_IS_ZERO`, |x| < 1e-14) hold too: ±DI is 0 on a ~0 true-range sum; DX keeps its
+previous value on a ~0 true-range sum or a ~0 DI sum (0 on its first row), and ADX leaves
+its average untouched there (adding nothing to its seed sum). ±DM / ±DI / DX contain no
 `x*y + z` a compiler could fuse, so TA-Lib itself is their oracle; the ADX average does,
 and a contracting TA-Lib build (clang on arm64) fuses it, so ADX / ADXR are checked
 against `_adx_reference` — the C source transcribed in Python, which never fuses — unless
@@ -42,6 +45,10 @@ def _true_range(h, l, prev_close):
     return out
 
 
+def _is_zero(x):
+    return -1e-14 < x < 1e-14
+
+
 def _adx_reference(high, low, close, p, rating=False):
     """TA-Lib 0.6.4 `TA_ADX` (and `TA_ADXR` over it), statement for statement."""
     n = len(high)
@@ -65,16 +72,20 @@ def _adx_reference(high, low, close, p, rating=False):
         elif dp > 0 and dp > dm:
             pp += dp
         ptr = ptr - (ptr / p) + _true_range(high[t], low[t], close[t - 1])
-        mdi = 100.0 * (pm / ptr)
-        pdi = 100.0 * (pp / ptr)
-        dx = 100.0 * (abs(mdi - pdi) / (mdi + pdi))
+        dx = None  # TA_IS_ZERO on the TR sum or the DI sum: no DX this bar
+        if not _is_zero(ptr):
+            mdi = 100.0 * (pm / ptr)
+            pdi = 100.0 * (pp / ptr)
+            if not _is_zero(mdi + pdi):
+                dx = 100.0 * (abs(mdi - pdi) / (mdi + pdi))
         if t < 2 * p:
-            sum_dx += dx
+            sum_dx += 0.0 if dx is None else dx
             if t == 2 * p - 1:
                 adx = sum_dx / p
                 out[t] = adx
         else:
-            adx = ((adx * (p - 1)) + dx) / p
+            if dx is not None:
+                adx = ((adx * (p - 1)) + dx) / p
             out[t] = adx
     if not rating:
         return out
@@ -98,6 +109,49 @@ FAMILY = ['plus_dm', 'minus_dm', 'plus_di', 'minus_di', 'dx', 'adx', 'adxr']
 
 def _frame(h, l, c):
     return volas.DataFrame({'open': c, 'high': h, 'low': l, 'close': c})
+
+
+def _guarded(kind, seed=5):
+    """Data on which TA-Lib's zero guards fire: a long flat stretch (the true-range sum
+    decays under 1e-14) or a long run of inside bars (no directional movement: the DM
+    sums, and so the DI sum, decay under 1e-14 while the true range stays positive),
+    between ordinary bars."""
+    h, l, c = _ohlc(1200, seed)
+    if kind == 'flat':
+        h[250:1050] = l[250:1050] = c[250:1050] = c[249]
+    else:
+        mid, half = (h[249] + l[249]) / 2, (h[249] - l[249]) / 2
+        shrink = 0.999 ** np.arange(1, 801)
+        h[250:1050], l[250:1050] = mid + half * shrink, mid - half * shrink
+        c[250:1050] = mid
+    return h, l, c
+
+
+def _di_sum_vanishes(h, l, c, p):
+    pdi, mdi = talib.PLUS_DI(h, l, c, p), talib.MINUS_DI(h, l, c, p)
+    return bool(((pdi + mdi)[300:1050] < 1e-14).any())
+
+
+@pytest.mark.parametrize('kind', ['flat', 'inside'])
+@pytest.mark.parametrize('name', FAMILY)
+def test_zero_guards_are_talibs(name, kind):
+    p = 14
+    h, l, c = _guarded(kind)
+    if kind == 'inside':
+        assert (np.diff(h[250:1050]) < 0).all() and (np.diff(l[250:1050]) > 0).all()
+        assert _di_sum_vanishes(h, l, c, p)
+    want = _oracle(name, h, l, c, p)
+    _assert_bits(_frame(h, l, c).exec(f'{name}:{p}'), want, f'{name}:{p} {kind} full')
+    live = _frame(h[:200], l[:200], c[:200])
+    live[f'{name}:{p}']
+    for i in range(200, 1200, 50):  # resumes across, into and out of the guarded stretch
+        live.append(_frame(h[i:i + 50], l[i:i + 50], c[i:i + 50]))
+    _assert_bits(live[f'{name}:{p}'], want, f'{name}:{p} {kind} resume')
+    live = _frame(h[:1000], l[:1000], c[:1000])
+    live[f'{name}:{p}']
+    for i in range(1000, 1200):
+        live.append(_frame(h[i:i + 1], l[i:i + 1], c[i:i + 1]))
+    _assert_bits(live[f'{name}:{p}'], want, f'{name}:{p} {kind} row by row')
 
 
 def _assert_bits(got, want, what):
@@ -124,13 +178,13 @@ def test_resume_paths_are_talib_bit_for_bit(name):
     want = _oracle(name, h, l, c, p)
     # multi-row appends: the Vec resume
     live = _frame(h[:head], l[:head], c[:head])
-    live.exec(f'{name}:{p}')
+    live[f'{name}:{p}']  # cached: every append resumes it
     for i, j in ((head, head + 40), (head + 40, head + 90)):
         live.append(_frame(h[i:j], l[i:j], c[i:j]))
     # row-by-row appends: the single-row resume
     for i in range(head + 90, n):
         live.append(_frame(h[i:i + 1], l[i:i + 1], c[i:i + 1]))
-    _assert_bits(live.exec(f'{name}:{p}'), want, f'{name}:{p} live')
+    _assert_bits(live[f'{name}:{p}'], want, f'{name}:{p} live')
 
 
 @pytest.mark.parametrize('name', FAMILY)
@@ -145,7 +199,7 @@ def test_an_infinite_movement_poisons_the_sums_like_talib(name):
     assert np.isnan(want[80:]).all()
     _assert_bits(_frame(h, l, c).exec(f'{name}:{p}'), want, f'{name}:{p} full')
     live = _frame(h[:30], l[:30], c[:30])
-    live.exec(f'{name}:{p}')
+    live[f'{name}:{p}']
     for i in range(30, n):
         live.append(_frame(h[i:i + 1], l[i:i + 1], c[i:i + 1]))
-    _assert_bits(live.exec(f'{name}:{p}'), want, f'{name}:{p} live')
+    _assert_bits(live[f'{name}:{p}'], want, f'{name}:{p} live')
