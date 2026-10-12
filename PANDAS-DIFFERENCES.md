@@ -635,6 +635,21 @@ OverflowError: int64 overflow in `+`; integer results never wrap — cast to
                float64 first if an approximate result is acceptable
 ```
 
+### Integer results are exact; float64 math past 2⁵³ raises
+
+NumPy compares and reduces int64 through float64 in many places, so `2**53 + 1`
+and `2**53` compare equal and `nlargest` / `df.max()` can return the wrong row or
+value. volas decides per operation by the kind of result it produces:
+
+| operation | integer input |
+|---|---|
+| `== != < <= > >=` (int vs int, int vs float, Series or scalar), `between`, `is_monotonic_*`, `nlargest` / `nsmallest`, `sort_values`, `rank`, `idxmin` / `idxmax`, `cummin` / `cummax` | **exact** — compared in the integers' own order (an int against a float by exact value, so `2**53 + 1 > 2**53`) |
+| `sum` / `prod` / `min` / `max` (Series and DataFrame), `cumsum` / `cumprod`, `+ - *`, `//` (int // int), `abs`, `round`, `diff`, `fillna` / `where` / `mask` with an integer fill | **exact** — computed in int64 (int32 where pandas keeps it), checked for overflow |
+| a DataFrame `sum` / `min` / … over int **and** float columns | float64 result; each integer converts exactly or raises `TypeError` |
+| `mean`, `var`, `std`, `median`, `quantile`, `sem`, `skew`, `kurt`, `describe`, `corr` / `cov`, the math transforms (`sqrt`, `floor`, `exp`, …), `/`, `//` by zero, `+ - *` with a float operand, `clip` with a fractional bound, `interpolate`, every `rolling` / `expanding` / `ewm` aggregation except `count` / `first` / `last` | **float64 math** — a present int64 with `|x| > 2⁵³` raises `OverflowError` (its float64 image is not the value); within `±2⁵³` every integer and its neighbours are exact, so the result is the float64 result of the true input |
+
+pandas returns a float computed from the rounded input in the last row.
+
 ### Conversions are lossless or raise
 
 One conversion rule serves every target-typed write (`iat` / `iloc` / `at` / `loc`,

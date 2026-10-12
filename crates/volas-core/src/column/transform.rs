@@ -149,7 +149,7 @@ impl Column {
                 .map(|c| c.with_validity(validity))
         } else {
             // int -> f64 promotion: to_f64_vec already maps a missing value to NaN
-            Ok(Column::f64(clip_vec(&self.to_f64_vec(), lower, upper)))
+            Ok(Column::f64(clip_vec(&self.to_f64_domain("clip")?, lower, upper)))
         }
     }
 
@@ -234,11 +234,9 @@ impl Column {
                         .map(|i| if val.is_valid(i) { v[i] } else { iv })
                         .collect(),
                 ),
-                None => Column::f64(
-                    (0..len)
-                        .map(|i| if val.is_valid(i) { v[i] as f64 } else { value })
-                        .collect(),
-                ),
+                // a fractional fill promotes to float64 losslessly: an int past
+                // 2^53 raises rather than rounding (contract #20)
+                None => return self.convert_lossless(DType::F64)?.fillna(value),
             },
             Column::I32(v, val) => match i32::try_from_f64(value) {
                 Some(iv) => Column::i32(
@@ -343,11 +341,14 @@ impl Column {
                 stats::select(cond, &self.as_i32_vec()?, &other.as_i32_vec()?),
                 self.select_nulls(cond, other),
             )),
-            DType::F32 => Ok(Column::f32(stats::select(
-                cond,
-                &self.to_f32_vec(),
-                &other.to_f32_vec(),
-            ))),
+            // float targets: each PICKED cell converts losslessly (contract #20) —
+            // an int past the float's exact range raises, never rounds; a cell
+            // the condition does not pick is never converted.
+            DType::F32 => {
+                let (a, b) = self.picked_as(cond, other, target)?;
+                let (a, b) = (a.to_f32_vec(), b.to_f32_vec());
+                Ok(Column::f32(stats::select(cond, &a, &b)))
+            }
             // bool ∘ bool stays bool (pandas keeps a bool result when the fill is
             // also bool); `bool` isn't `Numeric`, so the pick is inlined.
             DType::Bool => {
@@ -379,11 +380,35 @@ impl Column {
                         .collect(),
                 ))
             }
-            _ => Ok(Column::f64(stats::select(
-                cond,
-                &self.to_f64_vec(),
-                &other.to_f64_vec(),
-            ))),
+            _ => {
+                let (a, b) = self.picked_as(cond, other, DType::F64)?;
+                Ok(Column::f64(stats::select(cond, &a.to_f64_vec(), &b.to_f64_vec())))
+            }
+        }
+    }
+
+    /// `self`'s cells where `cond` holds and `other`'s where it does not, each
+    /// side converted losslessly to the float `target` with its unpicked cells
+    /// masked missing first (so only a value that lands in the result can raise).
+    fn picked_as(&self, cond: &[bool], other: &Column, target: DType) -> Result<(Column, Column)> {
+        Ok((
+            self.missing_unless(|i| cond[i]).convert_lossless(target)?,
+            other.missing_unless(|i| !cond[i]).convert_lossless(target)?,
+        ))
+    }
+
+    /// The numeric column with every cell where `keep(i)` is false made missing
+    /// (`NaN` for a float, NA for an int / bool); other dtypes are returned as-is.
+    fn missing_unless(&self, keep: impl Fn(usize) -> bool) -> Column {
+        let n = self.len();
+        let and = |val: &Validity| Validity::from_valid_iter(n, (0..n).map(|i| keep(i) && val.is_valid(i)));
+        match self {
+            Column::F64(v) => Column::f64((0..n).map(|i| if keep(i) { v[i] } else { f64::NAN }).collect()),
+            Column::F32(v) => Column::f32((0..n).map(|i| if keep(i) { v[i] } else { f32::NAN }).collect()),
+            Column::I64(v, val) => Column::I64(v.clone(), and(val)),
+            Column::I32(v, val) => Column::I32(v.clone(), and(val)),
+            Column::Bool(v, val) => Column::Bool(v.clone(), and(val)),
+            other => other.clone(),
         }
     }
 

@@ -2,6 +2,19 @@
 
 use super::*;
 
+impl Scalar {
+    /// The dtype the value is carried in.
+    pub fn dtype(&self) -> DType {
+        match self {
+            Scalar::F64(_) => DType::F64,
+            Scalar::F32(_) => DType::F32,
+            Scalar::I64(_) => DType::I64,
+            Scalar::I32(_) => DType::I32,
+            Scalar::Bool(_) => DType::Bool,
+        }
+    }
+}
+
 impl Column {
     /// The single equal-length check every two-column operation calls before any
     /// element access: returns the shared length, or a [`VolasError::Shape`] when
@@ -87,8 +100,8 @@ impl Column {
                 &dense,
             )?)),
             _ => Ok(Column::f64(binary_kernel(
-                &self.to_f64_vec(),
-                &other.to_f64_vec(),
+                &self.to_f64_domain("arithmetic")?,
+                &other.to_f64_domain("arithmetic")?,
                 op,
                 &dense,
             )?)),
@@ -106,7 +119,7 @@ impl Column {
                 "division is not supported between two bool columns".into(),
             ));
         }
-        let (a, b) = (self.to_f64_vec(), other.to_f64_vec());
+        let (a, b) = (self.to_f64_domain("`/`")?, other.to_f64_domain("`/`")?);
         Ok(Column::f64(
             a.iter().zip(&b).map(|(&x, &y)| x / y).collect(),
         ))
@@ -150,7 +163,7 @@ impl Column {
                 Column::i64_with(out, val)
             })
         } else {
-            let (a, b) = (self.to_f64_vec(), other.to_f64_vec());
+            let (a, b) = (self.to_f64_domain("`//`")?, other.to_f64_domain("`//`")?);
             Ok(Column::f64(
                 a.iter().zip(&b).map(|(&x, &y)| (x / y).floor()).collect(),
             ))
@@ -160,7 +173,7 @@ impl Column {
     /// Element-wise comparison (pandas `== != < <= > >=`) producing a **non-nullable
     /// bool** mask (decision ②): `str` / `datetime` / `bool` compare by their native
     /// value (NOT through the `to_f64_vec` funnel, which maps `str` to `NaN` and
-    /// loses `datetime` precision), numeric kinds compare as `f64`. A missing slot
+    /// loses `datetime` precision), numeric kinds compare exactly (#26). A missing slot
     /// (either side NA) follows IEEE — `!=` is `true`, every other op `false`,
     /// matching the existing numeric comparison. Comparing two incompatible kinds
     /// (e.g. `str` vs a number) is a [`VolasError::DType`]; unequal lengths are a
@@ -180,12 +193,27 @@ impl Column {
             (Column::Bool(a, av), Column::Bool(b, bv)) => cmp_typed(n, op, |i| {
                 (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i]))
             }),
-            // numeric (and bool-vs-numeric) compare as f64 — NaN follows IEEE here
-            // (`==` false, `!=` true), the established mask policy.
-            (a, b) if numeric_like(a) && numeric_like(b) => {
-                let (x, y) = (a.to_f64_vec(), b.to_f64_vec());
-                (0..n).map(|i| op.matches_f64(x[i], y[i])).collect()
-            }
+            // numeric (and bool-vs-numeric) compare EXACTLY (contract #26): two
+            // integer-like sides as i64, an integer against a float by exact order
+            // (no float64 round trip, so 2^53 + 1 > 2^53); only float vs float is
+            // IEEE. A missing side follows IEEE (`!=` true, else false).
+            (a, b) if numeric_like(a) && numeric_like(b) => match (a.is_float_like(), b.is_float_like()) {
+                (true, true) => {
+                    let (x, y) = (a.to_f64_vec(), b.to_f64_vec());
+                    (0..n).map(|i| op.matches_f64(x[i], y[i])).collect()
+                }
+                (false, false) => cmp_typed(n, op, |i| {
+                    (a.is_valid(i) && b.is_valid(i)).then(|| a.get_i64(i).cmp(&b.get_i64(i)))
+                }),
+                (false, true) => cmp_typed(n, op, |i| {
+                    a.is_valid(i).then(|| cmp_i64_f64(a.get_i64(i), b.get_f64(i))).flatten()
+                }),
+                (true, false) => cmp_typed(n, op, |i| {
+                    b.is_valid(i)
+                        .then(|| cmp_i64_f64(b.get_i64(i), a.get_f64(i)).map(Ordering::reverse))
+                        .flatten()
+                }),
+            },
             _ => {
                 return Err(VolasError::DType(format!(
                     "cannot compare a {} column with a {} column",
@@ -195,6 +223,50 @@ impl Column {
             }
         };
         Ok(Column::bool(out))
+    }
+
+    /// A column of per-column reduction results (a DataFrame `sum` / `min` / …),
+    /// each part `(dtype it contributes, value)`. The column's dtype is the
+    /// supertype of the parts (all int64 → int64, int32 → int32, any float →
+    /// float), and every value converts to it losslessly (contract #20 / #26): an
+    /// integer past the float's exact range raises rather than rounding. A `NaN`
+    /// value (an all-missing reduction) becomes the target's missing cell.
+    pub fn from_scalars(parts: &[(DType, Scalar)]) -> Result<Column> {
+        let target = parts.iter().map(|p| p.0).reduce(binary_supertype).unwrap_or(DType::F64);
+        let mut out = Column::na_of(target, 0);
+        for &(_, s) in parts {
+            let cell = match s {
+                Scalar::F64(x) => Column::f64(vec![x]),
+                Scalar::F32(x) => Column::f32(vec![x]),
+                Scalar::I64(x) => Column::i64(vec![x]),
+                Scalar::I32(x) => Column::i32(vec![x]),
+                Scalar::Bool(b) => Column::bool(vec![b]),
+            };
+            out.append(&cell.convert_lossless(target)?)?;
+        }
+        Ok(out)
+    }
+
+    /// Whether the values are floats (`F64` / `F32`) rather than integer-like.
+    fn is_float_like(&self) -> bool {
+        self.dtype().is_float()
+    }
+
+    /// Whether the values are monotonically non-decreasing (`increasing`) or
+    /// non-increasing (pandas `is_monotonic_*`), by each dtype's own order through
+    /// [`compare`](Self::compare) — exact for int64, lexical for str, by instant for
+    /// datetime. Any missing cell makes it false (pandas).
+    pub fn is_monotonic(&self, increasing: bool) -> bool {
+        let n = self.len();
+        if self.null_count() > 0 {
+            return false;
+        }
+        if n < 2 {
+            return true;
+        }
+        let op = if increasing { CmpOp::Ge } else { CmpOp::Le };
+        let ok = self.slice(1, n).compare(&self.slice(0, n - 1), op).expect("a column compares with itself");
+        ok.as_bool().expect("compare yields bool").iter().all(|&b| b)
     }
 
     /// Three-valued logical `and` / `or` / `xor` (pandas `&` / `|` / `^`), Kleene

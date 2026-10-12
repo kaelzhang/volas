@@ -24,7 +24,7 @@ impl PySeries {
     /// NaN-skipping mean (pandas `mean`) -> `np.float64`.
     pub(crate) fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, self.mean_f64()))
+        Ok(self.box_float(py, self.mean_f64()?))
     }
     /// Sum (pandas `sum`), dtype-preserving: float -> `np.float64`, int / bool ->
     /// `np.int64` (computed natively).
@@ -51,32 +51,32 @@ impl PySeries {
     /// Sample variance (`ddof=1`, pandas `var`) -> `np.float64`.
     pub(crate) fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, self.var_f64()))
+        Ok(self.box_float(py, self.var_f64()?))
     }
     /// Sample standard deviation (`ddof=1`, pandas `std`) -> `np.float64`.
     pub(crate) fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, self.var_f64().sqrt()))
+        Ok(self.box_float(py, self.var_f64()?.sqrt()))
     }
     /// Median (pandas `median`) -> `np.float64`.
     pub(crate) fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, self.median_f64()))
+        Ok(self.box_float(py, self.median_f64()?))
     }
     /// Standard error of the mean (`ddof=1`, pandas `sem`) -> `np.float64`.
     pub(crate) fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, stats::sem(&self.inner.data.to_f64_vec())))
+        Ok(self.box_float(py, stats::sem(&self.f64_domain("sem")?)))
     }
     /// Adjusted Fisher-Pearson skewness (pandas `skew`) -> `np.float64`.
     pub(crate) fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, stats::skew(&self.inner.data.to_f64_vec())))
+        Ok(self.box_float(py, stats::skew(&self.f64_domain("skew")?)))
     }
     /// Excess kurtosis, Fisher's definition (pandas `kurt`) -> `np.float64`.
     pub(crate) fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, stats::kurt(&self.inner.data.to_f64_vec())))
+        Ok(self.box_float(py, stats::kurt(&self.f64_domain("kurt")?)))
     }
 
     /// Pairwise Pearson correlation with `other` (pandas `corr`), dropping NaN
@@ -85,7 +85,7 @@ impl PySeries {
         require_aligned(&self.inner.index, &other.inner.index)?;
         self.inner.data.require_numeric().map_err(pyerr)?;
         other.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(stats::corr(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec()))
+        Ok(stats::corr(&self.f64_domain("corr")?, &other.f64_domain("corr")?))
     }
 
     /// Pairwise sample covariance with `other`, ddof=1 (pandas `cov`), dropping NaN
@@ -94,7 +94,7 @@ impl PySeries {
         require_aligned(&self.inner.index, &other.inner.index)?;
         self.inner.data.require_numeric().map_err(pyerr)?;
         other.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(stats::cov(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec()))
+        Ok(stats::cov(&self.f64_domain("cov")?, &other.f64_domain("cov")?))
     }
 
     /// Summary statistics (pandas `describe`): a Series indexed by
@@ -104,12 +104,12 @@ impl PySeries {
         // would funnel through to_f64_vec to nonsense, so it raises (C4) until a
         // dtype-aware categorical/datetime describe is designed.
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let v = self.inner.data.to_f64_vec();
-        let count = non_nan(&self.inner.data).len() as f64;
+        let v = self.f64_domain("describe")?;
+        let count = v.iter().filter(|x| !x.is_nan()).count() as f64;
         let vals = vec![
             count,
-            self.mean_f64(),
-            self.var_f64().sqrt(),
+            self.mean_f64()?,
+            self.var_f64()?.sqrt(),
             stats::extreme(&v, false).unwrap_or(f64::NAN),
             self.quantile_f64(0.25)?,
             self.quantile_f64(0.5)?,

@@ -17,8 +17,8 @@ use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};
 use crate::numeric::{
-    binary_supertype, f64_to_f32_in_range, fits, i64_to_f32_exact, i64_to_f64_exact, overflow,
-    Numeric,
+    binary_supertype, cmp_i64_f64, f64_to_f32_in_range, fits, i64_to_f32_exact, i64_to_f64_exact,
+    in_f64_domain, outside_f64_domain, overflow, Numeric,
 };
 use crate::stats;
 use crate::validity::Validity;
@@ -452,6 +452,21 @@ impl Column {
                 .map(|&i| if i == i64::MIN { f64::NAN } else { i as f64 })
                 .collect(),
         }
+    }
+
+    /// The values as `f64` for an operation computed in float64 (`op` names it in
+    /// the error): mean / var / std / quantiles / moments / corr / cov / the math
+    /// transforms / true division / the window aggregations. A present int64 with
+    /// `|x| > 2^53` raises ([`outside_f64_domain`], contract #26) — its float64
+    /// image is not the value, so the result would not be a function of the input.
+    /// int32 / bool / float inputs always fit; missing cells read as `NaN`.
+    pub fn to_f64_domain(&self, op: &str) -> Result<Vec<f64>> {
+        if let Column::I64(v, val) = self {
+            if let Some(x) = present(v, val).find(|&x| !in_f64_domain(x)) {
+                return Err(outside_f64_domain(x, op));
+            }
+        }
+        Ok(self.to_f64_vec())
     }
 
     /// Value at position `i` coerced to `f64`, **ignoring validity** (a missing
@@ -950,3 +965,5 @@ mod tests_na;
 mod tests_overflow;
 #[cfg(test)]
 mod tests_convert;
+#[cfg(test)]
+mod tests_exact;

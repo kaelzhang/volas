@@ -152,66 +152,68 @@ impl WinSpec {
         }
     }
 
-    fn data(&self, s: &Series) -> Vec<f64> {
-        s.data.to_f64_vec()
+    /// The window input for the float64 aggregation `op`: an int64 past 2^53
+    /// raises (contract #26) instead of aggregating rounded values.
+    fn data(&self, s: &Series, op: &str) -> PyResult<Vec<f64>> {
+        s.data.to_f64_domain(op).map_err(crate::pyerr)
     }
 
     pub(crate) fn count(&self, s: &Series) -> PySeries {
         // count gates on window COVERAGE (see the kernel), so it handles
         // `center` itself instead of going through the NaN-padding `run`.
-        let out = w::count(&self.data(s), self.window, self.min_periods, self.center);
+        let out = w::count(&s.data.to_f64_vec(), self.window, self.min_periods, self.center);
         self.i64_series(s, out)
     }
-    pub(crate) fn nunique(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d, win| w::nunique(d, win, self.min_periods));
-        self.i64_series(s, out)
+    pub(crate) fn nunique(&self, s: &Series) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "nunique")?, |d, win| w::nunique(d, win, self.min_periods));
+        Ok(self.i64_series(s, out))
     }
-    pub(crate) fn sum(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d, win| w::sum(d, win, self.min_periods));
-        self.f64_series(s, out)
+    pub(crate) fn sum(&self, s: &Series) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "sum")?, |d, win| w::sum(d, win, self.min_periods));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn mean(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d, win| w::mean(d, win, self.min_periods));
-        self.f64_series(s, out)
+    pub(crate) fn mean(&self, s: &Series) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "mean")?, |d, win| w::mean(d, win, self.min_periods));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn median(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d, win| w::median(d, win, self.min_periods));
-        self.f64_series(s, out)
+    pub(crate) fn median(&self, s: &Series) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "median")?, |d, win| w::median(d, win, self.min_periods));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn min(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d, win| w::min(d, win, self.min_periods));
-        self.f64_series(s, out)
+    pub(crate) fn min(&self, s: &Series) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "min")?, |d, win| w::min(d, win, self.min_periods));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn max(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d, win| w::max(d, win, self.min_periods));
-        self.f64_series(s, out)
+    pub(crate) fn max(&self, s: &Series) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "max")?, |d, win| w::max(d, win, self.min_periods));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn var(&self, s: &Series, ddof: usize) -> PySeries {
-        let out = self.run(&self.data(s), |d_, win| w::var(d_, win, self.min_periods, ddof));
-        self.f64_series(s, out)
+    pub(crate) fn var(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "var")?, |d_, win| w::var(d_, win, self.min_periods, ddof));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn std(&self, s: &Series, ddof: usize) -> PySeries {
-        let out = self.run(&self.data(s), |d_, win| w::std(d_, win, self.min_periods, ddof));
-        self.f64_series(s, out)
+    pub(crate) fn std(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "std")?, |d_, win| w::std(d_, win, self.min_periods, ddof));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn sem(&self, s: &Series, ddof: usize) -> PySeries {
-        let out = self.run(&self.data(s), |d_, win| w::sem(d_, win, self.min_periods, ddof));
-        self.f64_series(s, out)
+    pub(crate) fn sem(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "sem")?, |d_, win| w::sem(d_, win, self.min_periods, ddof));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn skew(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d, win| w::skew(d, win, self.min_periods));
-        self.f64_series(s, out)
+    pub(crate) fn skew(&self, s: &Series) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "skew")?, |d, win| w::skew(d, win, self.min_periods));
+        Ok(self.f64_series(s, out))
     }
-    pub(crate) fn kurt(&self, s: &Series) -> PySeries {
-        let out = self.run(&self.data(s), |d, win| w::kurt(d, win, self.min_periods));
-        self.f64_series(s, out)
+    pub(crate) fn kurt(&self, s: &Series) -> PyResult<PySeries> {
+        let out = self.run(&self.data(s, "kurt")?, |d, win| w::kurt(d, win, self.min_periods));
+        Ok(self.f64_series(s, out))
     }
     pub(crate) fn quantile(&self, s: &Series, q: f64, interpolation: &str) -> PyResult<PySeries> {
         validate_interpolation(interpolation)?;
         if !(0.0..=1.0).contains(&q) {
             return Err(PyValueError::new_err("quantile q must be in [0, 1]"));
         }
-        let out = self.run(&self.data(s), |d, win| {
+        let out = self.run(&self.data(s, "quantile")?, |d, win| {
             w::quantile(d, win, self.min_periods, q, interpolation)
         });
         Ok(self.f64_series(s, out))
@@ -220,7 +222,7 @@ impl WinSpec {
         validate_rank_method(method)?;
         // a centered window ending in the padding ranks its last DATA row
         let n = s.len();
-        let out = self.run(&self.data(s), |d, win| {
+        let out = self.run(&self.data(s, "rank")?, |d, win| {
             w::rank_padded(d, win, self.min_periods, method, ascending, pct, n)
         });
         Ok(self.f64_series(s, out))
@@ -307,50 +309,50 @@ impl PyRolling {
         self.spec.count(&self.series)
     }
     /// Distinct present values per window (pandas `nunique`); int64.
-    fn nunique(&self) -> PySeries {
+    fn nunique(&self) -> PyResult<PySeries> {
         self.spec.nunique(&self.series)
     }
     /// Rolling sum (pandas `sum`).
-    fn sum(&self) -> PySeries {
+    fn sum(&self) -> PyResult<PySeries> {
         self.spec.sum(&self.series)
     }
     /// Rolling mean (pandas `mean`).
-    fn mean(&self) -> PySeries {
+    fn mean(&self) -> PyResult<PySeries> {
         self.spec.mean(&self.series)
     }
     /// Rolling median (pandas `median`).
-    fn median(&self) -> PySeries {
+    fn median(&self) -> PyResult<PySeries> {
         self.spec.median(&self.series)
     }
     /// Rolling minimum (pandas `min`).
-    fn min(&self) -> PySeries {
+    fn min(&self) -> PyResult<PySeries> {
         self.spec.min(&self.series)
     }
     /// Rolling maximum (pandas `max`).
-    fn max(&self) -> PySeries {
+    fn max(&self) -> PyResult<PySeries> {
         self.spec.max(&self.series)
     }
     /// Rolling sample variance (pandas `var(ddof=1)`).
     #[pyo3(signature = (ddof = 1))]
     fn var(&self, ddof: i64) -> PyResult<PySeries> {
-        Ok(self.spec.var(&self.series, validate_ddof(ddof)?))
+        self.spec.var(&self.series, validate_ddof(ddof)?)
     }
     /// Rolling sample standard deviation (pandas `std(ddof=1)`).
     #[pyo3(signature = (ddof = 1))]
     fn std(&self, ddof: i64) -> PyResult<PySeries> {
-        Ok(self.spec.std(&self.series, validate_ddof(ddof)?))
+        self.spec.std(&self.series, validate_ddof(ddof)?)
     }
     /// Standard error of the mean (pandas `sem`).
     #[pyo3(signature = (ddof = 1))]
     fn sem(&self, ddof: i64) -> PyResult<PySeries> {
-        Ok(self.spec.sem(&self.series, validate_ddof(ddof)?))
+        self.spec.sem(&self.series, validate_ddof(ddof)?)
     }
     /// Bias-corrected sample skewness (pandas `skew`; >= 3 present values).
-    fn skew(&self) -> PySeries {
+    fn skew(&self) -> PyResult<PySeries> {
         self.spec.skew(&self.series)
     }
     /// Bias-corrected excess kurtosis (pandas `kurt`; >= 4 present values).
-    fn kurt(&self) -> PySeries {
+    fn kurt(&self) -> PyResult<PySeries> {
         self.spec.kurt(&self.series)
     }
     /// Rolling quantile (pandas `quantile(q, interpolation='linear')`).
@@ -389,50 +391,50 @@ impl PyExpanding {
         self.spec.count(&self.series)
     }
     /// Expanding distinct present values; int64.
-    fn nunique(&self) -> PySeries {
+    fn nunique(&self) -> PyResult<PySeries> {
         self.spec.nunique(&self.series)
     }
     /// Expanding sum.
-    fn sum(&self) -> PySeries {
+    fn sum(&self) -> PyResult<PySeries> {
         self.spec.sum(&self.series)
     }
     /// Expanding mean.
-    fn mean(&self) -> PySeries {
+    fn mean(&self) -> PyResult<PySeries> {
         self.spec.mean(&self.series)
     }
     /// Expanding median.
-    fn median(&self) -> PySeries {
+    fn median(&self) -> PyResult<PySeries> {
         self.spec.median(&self.series)
     }
     /// Expanding minimum.
-    fn min(&self) -> PySeries {
+    fn min(&self) -> PyResult<PySeries> {
         self.spec.min(&self.series)
     }
     /// Expanding maximum.
-    fn max(&self) -> PySeries {
+    fn max(&self) -> PyResult<PySeries> {
         self.spec.max(&self.series)
     }
     /// Expanding sample variance (`ddof=1`).
     #[pyo3(signature = (ddof = 1))]
     fn var(&self, ddof: i64) -> PyResult<PySeries> {
-        Ok(self.spec.var(&self.series, validate_ddof(ddof)?))
+        self.spec.var(&self.series, validate_ddof(ddof)?)
     }
     /// Expanding sample standard deviation (`ddof=1`).
     #[pyo3(signature = (ddof = 1))]
     fn std(&self, ddof: i64) -> PyResult<PySeries> {
-        Ok(self.spec.std(&self.series, validate_ddof(ddof)?))
+        self.spec.std(&self.series, validate_ddof(ddof)?)
     }
     /// Expanding standard error of the mean.
     #[pyo3(signature = (ddof = 1))]
     fn sem(&self, ddof: i64) -> PyResult<PySeries> {
-        Ok(self.spec.sem(&self.series, validate_ddof(ddof)?))
+        self.spec.sem(&self.series, validate_ddof(ddof)?)
     }
     /// Expanding skewness.
-    fn skew(&self) -> PySeries {
+    fn skew(&self) -> PyResult<PySeries> {
         self.spec.skew(&self.series)
     }
     /// Expanding excess kurtosis.
-    fn kurt(&self) -> PySeries {
+    fn kurt(&self) -> PyResult<PySeries> {
         self.spec.kurt(&self.series)
     }
     /// Expanding quantile.
@@ -465,6 +467,11 @@ impl PyExpanding {
 }
 
 impl PyEwm {
+    /// The ewm input: float64 math, so an int64 past 2^53 raises (contract #26).
+    fn data(&self) -> PyResult<Vec<f64>> {
+        self.series.data.to_f64_domain("ewm").map_err(crate::pyerr)
+    }
+
     fn wrap(&self, out: Vec<f64>) -> PySeries {
         PySeries {
             inner: Series::new(
@@ -482,20 +489,21 @@ impl PyEwm {
 fn pair(s: &Series, other: &PySeries) -> PyResult<(Vec<f64>, Vec<f64>)> {
     crate::require_aligned(&s.index, &other.inner.index)?;
     other.inner.data.require_numeric().map_err(crate::pyerr)?;
-    Ok((s.data.to_f64_vec(), other.inner.data.to_f64_vec()))
+    let f = |c: &volas_core::Column| c.to_f64_domain("a pairwise window statistic").map_err(crate::pyerr);
+    Ok((f(&s.data)?, f(&other.inner.data)?))
 }
 
 #[pymethods]
 impl PyEwm {
     /// Exponentially-weighted mean (pandas `ewm(...).mean()`).
-    pub(crate) fn mean(&self) -> PySeries {
-        self.wrap(w::ewm_mean(
-            &self.series.data.to_f64_vec(),
+    pub(crate) fn mean(&self) -> PyResult<PySeries> {
+        Ok(self.wrap(w::ewm_mean(
+            &self.data()?,
             self.alpha,
             self.adjust,
             self.ignore_na,
             self.min_periods,
-        ))
+        )))
     }
     /// Exponentially-weighted (un-normalized) sum; like pandas, only defined
     /// for `adjust=True`.
@@ -506,7 +514,7 @@ impl PyEwm {
             ));
         }
         Ok(self.wrap(w::ewm_sum(
-            &self.series.data.to_f64_vec(),
+            &self.data()?,
             self.alpha,
             self.ignore_na,
             self.min_periods,
@@ -514,28 +522,28 @@ impl PyEwm {
     }
     /// Exponentially-weighted variance (pandas `var(bias=False)`).
     #[pyo3(signature = (bias = false))]
-    pub(crate) fn var(&self, bias: bool) -> PySeries {
-        self.wrap(w::ewm_var(
-            &self.series.data.to_f64_vec(),
+    pub(crate) fn var(&self, bias: bool) -> PyResult<PySeries> {
+        Ok(self.wrap(w::ewm_var(
+            &self.data()?,
             self.alpha,
             self.adjust,
             self.ignore_na,
             bias,
             self.min_periods.max(1),
-        ))
+        )))
     }
     /// Exponentially-weighted standard deviation.
     #[pyo3(signature = (bias = false))]
-    pub(crate) fn std(&self, bias: bool) -> PySeries {
+    pub(crate) fn std(&self, bias: bool) -> PyResult<PySeries> {
         let v = w::ewm_var(
-            &self.series.data.to_f64_vec(),
+            &self.data()?,
             self.alpha,
             self.adjust,
             self.ignore_na,
             bias,
             self.min_periods.max(1),
         );
-        self.wrap(v.into_iter().map(f64::sqrt).collect())
+        Ok(self.wrap(v.into_iter().map(f64::sqrt).collect()))
     }
     /// Exponentially-weighted covariance against another series.
     #[pyo3(signature = (other, bias = false))]

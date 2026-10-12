@@ -359,12 +359,9 @@ impl PyDataFrame {
         let df = view.as_ref();
         let col = df.column(column).map_err(pyerr)?;
         col.require_numeric().map_err(pyerr)?;
-        let v = col.to_f64_vec();
-        let mut order: Vec<usize> = (0..v.len()).filter(|&i| col.is_valid(i) && !v[i].is_nan()).collect();
-        order.sort_by(|&a, &b| {
-            let o = v[a].partial_cmp(&v[b]).unwrap_or(std::cmp::Ordering::Equal);
-            if ascending { o } else { o.reverse() }
-        });
+        // the column's own typed, stable order (exact for int64, contract #26);
+        // missing cells sort last and are dropped
+        let mut order: Vec<usize> = col.argsort(ascending).into_iter().filter(|&i| col.is_valid(i)).collect();
         order.truncate(n);
         Ok(PyDataFrame::plain(take_frame(df, &order)))
     }

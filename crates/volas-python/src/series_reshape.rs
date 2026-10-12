@@ -201,13 +201,13 @@ impl PySeries {
     /// Whether the values are monotonically non-decreasing, NA-free (pandas).
     #[getter]
     pub(crate) fn is_monotonic_increasing(&self) -> bool {
-        monotonic(&self.inner.data, true)
+        self.inner.data.is_monotonic(true)
     }
 
     /// Whether the values are monotonically non-increasing, NA-free (pandas).
     #[getter]
     pub(crate) fn is_monotonic_decreasing(&self) -> bool {
-        monotonic(&self.inner.data, false)
+        self.inner.data.is_monotonic(false)
     }
 
     /// Whether every value is distinct (pandas `is_unique`); NA cells count as

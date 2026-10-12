@@ -87,53 +87,53 @@ impl PyRollingFrame {
     }
     /// Per-column rolling distinct-count (int64).
     fn nunique(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.nunique(s)))
+        self.agg(|w, s| w.nunique(s))
     }
     /// Per-column rolling sum.
     fn sum(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.sum(s)))
+        self.agg(|w, s| w.sum(s))
     }
     /// Per-column rolling mean.
     fn mean(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.mean(s)))
+        self.agg(|w, s| w.mean(s))
     }
     /// Per-column rolling median.
     fn median(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.median(s)))
+        self.agg(|w, s| w.median(s))
     }
     /// Per-column rolling minimum.
     fn min(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.min(s)))
+        self.agg(|w, s| w.min(s))
     }
     /// Per-column rolling maximum.
     fn max(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.max(s)))
+        self.agg(|w, s| w.max(s))
     }
     /// Per-column rolling sample variance.
     #[pyo3(signature = (ddof = 1))]
     fn var(&self, ddof: i64) -> PyResult<PyDataFrame> {
         let ddof = crate::window::validate_ddof(ddof)?;
-        self.agg(|w, s| Ok(w.var(s, ddof)))
+        self.agg(|w, s| w.var(s, ddof))
     }
     /// Per-column rolling sample standard deviation.
     #[pyo3(signature = (ddof = 1))]
     fn std(&self, ddof: i64) -> PyResult<PyDataFrame> {
         let ddof = crate::window::validate_ddof(ddof)?;
-        self.agg(|w, s| Ok(w.std(s, ddof)))
+        self.agg(|w, s| w.std(s, ddof))
     }
     /// Per-column standard error of the mean.
     #[pyo3(signature = (ddof = 1))]
     fn sem(&self, ddof: i64) -> PyResult<PyDataFrame> {
         let ddof = crate::window::validate_ddof(ddof)?;
-        self.agg(|w, s| Ok(w.sem(s, ddof)))
+        self.agg(|w, s| w.sem(s, ddof))
     }
     /// Per-column rolling skewness.
     fn skew(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.skew(s)))
+        self.agg(|w, s| w.skew(s))
     }
     /// Per-column rolling excess kurtosis.
     fn kurt(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.kurt(s)))
+        self.agg(|w, s| w.kurt(s))
     }
     /// Per-column rolling quantile.
     #[pyo3(signature = (q, interpolation = "linear"))]
@@ -163,53 +163,53 @@ impl PyExpandingFrame {
     }
     /// Per-column expanding distinct-count (int64).
     fn nunique(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.nunique(s)))
+        self.agg(|w, s| w.nunique(s))
     }
     /// Per-column expanding sum.
     fn sum(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.sum(s)))
+        self.agg(|w, s| w.sum(s))
     }
     /// Per-column expanding mean.
     fn mean(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.mean(s)))
+        self.agg(|w, s| w.mean(s))
     }
     /// Per-column expanding median.
     fn median(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.median(s)))
+        self.agg(|w, s| w.median(s))
     }
     /// Per-column expanding minimum.
     fn min(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.min(s)))
+        self.agg(|w, s| w.min(s))
     }
     /// Per-column expanding maximum.
     fn max(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.max(s)))
+        self.agg(|w, s| w.max(s))
     }
     /// Per-column expanding sample variance.
     #[pyo3(signature = (ddof = 1))]
     fn var(&self, ddof: i64) -> PyResult<PyDataFrame> {
         let ddof = crate::window::validate_ddof(ddof)?;
-        self.agg(|w, s| Ok(w.var(s, ddof)))
+        self.agg(|w, s| w.var(s, ddof))
     }
     /// Per-column expanding sample standard deviation.
     #[pyo3(signature = (ddof = 1))]
     fn std(&self, ddof: i64) -> PyResult<PyDataFrame> {
         let ddof = crate::window::validate_ddof(ddof)?;
-        self.agg(|w, s| Ok(w.std(s, ddof)))
+        self.agg(|w, s| w.std(s, ddof))
     }
     /// Per-column expanding standard error of the mean.
     #[pyo3(signature = (ddof = 1))]
     fn sem(&self, ddof: i64) -> PyResult<PyDataFrame> {
         let ddof = crate::window::validate_ddof(ddof)?;
-        self.agg(|w, s| Ok(w.sem(s, ddof)))
+        self.agg(|w, s| w.sem(s, ddof))
     }
     /// Per-column expanding skewness.
     fn skew(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.skew(s)))
+        self.agg(|w, s| w.skew(s))
     }
     /// Per-column expanding excess kurtosis.
     fn kurt(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.kurt(s)))
+        self.agg(|w, s| w.kurt(s))
     }
     /// Per-column expanding quantile.
     #[pyo3(signature = (q, interpolation = "linear"))]
@@ -236,14 +236,14 @@ impl PyEwmFrame {
     /// Per-column exponentially-weighted mean -> DataFrame.
     fn mean(&self) -> PyResult<PyDataFrame> {
         frame_window(&self.frame, |s| {
-            Ok(crate::window::PyEwm {
+            crate::window::PyEwm {
                 series: s.inner.clone(),
                 alpha: self.alpha,
                 adjust: self.adjust,
                 ignore_na: self.ignore_na,
                 min_periods: self.min_periods,
             }
-            .mean())
+            .mean()
         })
     }
     /// Per-column exponentially-weighted sum (`adjust=True` only).
@@ -263,28 +263,28 @@ impl PyEwmFrame {
     #[pyo3(signature = (bias = false))]
     fn var(&self, bias: bool) -> PyResult<PyDataFrame> {
         frame_window(&self.frame, |s| {
-            Ok(crate::window::PyEwm {
+            crate::window::PyEwm {
                 series: s.inner.clone(),
                 alpha: self.alpha,
                 adjust: self.adjust,
                 ignore_na: self.ignore_na,
                 min_periods: self.min_periods,
             }
-            .var(bias))
+            .var(bias)
         })
     }
     /// Per-column exponentially-weighted standard deviation.
     #[pyo3(signature = (bias = false))]
     fn std(&self, bias: bool) -> PyResult<PyDataFrame> {
         frame_window(&self.frame, |s| {
-            Ok(crate::window::PyEwm {
+            crate::window::PyEwm {
                 series: s.inner.clone(),
                 alpha: self.alpha,
                 adjust: self.adjust,
                 ignore_na: self.ignore_na,
                 min_periods: self.min_periods,
             }
-            .std(bias))
+            .std(bias)
         })
     }
 }

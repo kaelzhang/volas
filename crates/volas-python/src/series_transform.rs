@@ -6,7 +6,7 @@ use std::sync::Arc;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use volas_core::{
-    stats, Column, Series,
+    stats, CmpOp, Column, Series,
 };
 
 #[allow(unused_imports)]
@@ -31,25 +31,30 @@ impl PySeries {
     /// which bounds are closed (`'both'` | `'left'` | `'right'` | `'neither'`).
     /// A missing cell is False.
     #[pyo3(signature = (left, right, inclusive = "both"))]
-    pub(crate) fn between(&self, left: f64, right: f64, inclusive: &str) -> PyResult<PySeries> {
+    pub(crate) fn between(
+        &self,
+        left: &Bound<'_, PyAny>,
+        right: &Bound<'_, PyAny>,
+        inclusive: &str,
+    ) -> PyResult<PySeries> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        type Cmp = fn(f64, f64) -> bool;
-        let (lo_ok, hi_ok): (Cmp, Cmp) = match inclusive {
-            "both" => (|x, l| x >= l, |x, r| x <= r),
-            "left" => (|x, l| x >= l, |x, r| x < r),
-            "right" => (|x, l| x > l, |x, r| x <= r),
-            "neither" => (|x, l| x > l, |x, r| x < r),
+        let (lo, hi) = match inclusive {
+            "both" => (CmpOp::Ge, CmpOp::Le),
+            "left" => (CmpOp::Ge, CmpOp::Lt),
+            "right" => (CmpOp::Gt, CmpOp::Le),
+            "neither" => (CmpOp::Gt, CmpOp::Lt),
             other => {
                 return Err(PyValueError::new_err(format!(
                     "between: inclusive must be 'both', 'left', 'right' or 'neither', got {other:?}"
                 )))
             }
         };
-        let v = self.inner.data.to_f64_vec();
-        let out: Vec<bool> = (0..v.len())
-            .map(|i| self.inner.data.is_valid(i) && lo_ok(v[i], left) && hi_ok(v[i], right))
-            .collect();
-        Ok(bool_series(&self.inner, out))
+        // the comparison owner, so the bounds compare exactly (contract #26); a
+        // missing cell compares false on both sides
+        let above = series_cmp(&self.inner, left, lo)?;
+        let below = series_cmp(&self.inner, right, hi)?;
+        let (a, b) = (above.inner.data.as_bool().expect("bool"), below.inner.data.as_bool().expect("bool"));
+        Ok(bool_series(&self.inner, a.iter().zip(b).map(|(&x, &y)| x && y).collect()))
     }
 
     /// Replace every cell equal to `to_replace` with `value`, dtype-preserving
@@ -77,7 +82,7 @@ impl PySeries {
     /// `interpolate(method='linear')`); leading/trailing gaps stay missing.
     pub(crate) fn interpolate(&self) -> PyResult<PySeries> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let v = self.inner.data.to_f64_vec();
+        let v = self.f64_domain("interpolate")?;
         let n = v.len();
         let valid: Vec<bool> = (0..n).map(|i| self.inner.data.is_valid(i)).collect();
         let mut out = v.clone();

@@ -71,29 +71,34 @@ impl PySeries {
     }
 
     // Raw f64 reduction values (the public methods box these as numpy scalars;
-    // `describe` reuses them, so they stay unboxed here).
-    pub(crate) fn mean_f64(&self) -> f64 {
-        let v = non_nan(&self.inner.data);
-        if v.is_empty() {
+    // `describe` reuses them, so they stay unboxed here). Each is float64 math, so
+    // an int64 past 2^53 raises (contract #26) through `to_f64_domain`.
+    pub(crate) fn mean_f64(&self) -> PyResult<f64> {
+        let v = non_nan(&self.inner.data, "mean")?;
+        Ok(if v.is_empty() {
             f64::NAN
         } else {
             v.iter().sum::<f64>() / v.len() as f64
-        }
+        })
     }
-    pub(crate) fn var_f64(&self) -> f64 {
-        stats::var(&self.inner.data.to_f64_vec())
+    pub(crate) fn var_f64(&self) -> PyResult<f64> {
+        Ok(stats::var(&self.f64_domain("var")?))
     }
-    pub(crate) fn median_f64(&self) -> f64 {
-        let mut v = non_nan(&self.inner.data);
+    pub(crate) fn median_f64(&self) -> PyResult<f64> {
+        let mut v = non_nan(&self.inner.data, "median")?;
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        stats::sorted_median(&v)
+        Ok(stats::sorted_median(&v))
+    }
+    /// The values as `f64` for the float64 operation `op` (raises past 2^53).
+    pub(crate) fn f64_domain(&self, op: &str) -> PyResult<Vec<f64>> {
+        self.inner.data.to_f64_domain(op).map_err(pyerr)
     }
     /// The `q`-quantile as a raw f64 (linear interpolation, NaN-skipping).
     pub(crate) fn quantile_f64(&self, q: f64) -> PyResult<f64> {
         if !(0.0..=1.0).contains(&q) {
             return Err(PyValueError::new_err("quantile: q must be in [0, 1]"));
         }
-        let mut v = non_nan(&self.inner.data);
+        let mut v = non_nan(&self.inner.data, "quantile")?;
         if v.is_empty() {
             return Ok(f64::NAN);
         }
@@ -173,7 +178,7 @@ impl PySeries {
     /// (datetime), which the contract (C4) forbids, so it raises here.
     pub(crate) fn map_f64(&self, f: impl Fn(f64) -> f64) -> PyResult<PySeries> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let data = Column::f64(self.inner.data.to_f64_vec().iter().map(|&x| f(x)).collect());
+        let data = Column::f64(self.f64_domain("a math transform")?.iter().map(|&x| f(x)).collect());
         Ok(PySeries {
             inner: Series::new(self.inner.name.clone(), data, Arc::clone(&self.inner.index)),
         })
@@ -248,16 +253,6 @@ pub(crate) fn duplicated_mask_keep(col: &Column, keep: &str) -> PyResult<Vec<boo
     }
 }
 
-/// Monotone non-decreasing (`asc`) / non-increasing check over present values;
-/// any missing cell makes it false (pandas).
-pub(crate) fn monotonic(col: &Column, asc: bool) -> bool {
-    let n = col.len();
-    if (0..n).any(|i| !col.is_valid(i)) {
-        return false;
-    }
-    let v = col.to_f64_vec();
-    v.windows(2).all(|w| if asc { w[0] <= w[1] } else { w[0] >= w[1] })
-}
 
 /// The first `n` rows of a series (saturating).
 pub(crate) fn slice_head(s: &Series, n: usize) -> PySeries {
