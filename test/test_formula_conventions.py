@@ -118,3 +118,15 @@ def test_natr_zero_close_is_zero_at_the_current_row():
     assert np.isnan(got[0])
     d = {'high': h, 'low': l, 'close': c}
     _same(_appended(d, 'natr:1', 2), got, exact=True)
+
+
+# --- ±DM at period 1: the raw one-bar movement from bar 1 -------------------------------
+
+@pytest.mark.parametrize('name,fn', [('plus_dm', talib.PLUS_DM), ('minus_dm', talib.MINUS_DM)])
+def test_dm_period_one_starts_at_bar_one(name, fn):
+    d = _ohlcv(80)
+    want = fn(d['high'], d['low'], 1)
+    _same(_exec(d, f'{name}:1'), want, exact=True)
+    assert np.isnan(_exec(d, f'{name}:1')[0])
+    assert volas.directive_lookback(f'{name}:1') == 1
+    _same(_appended(d, f'{name}:1', 3), want, exact=True)

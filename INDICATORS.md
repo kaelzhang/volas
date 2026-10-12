@@ -1463,8 +1463,8 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-aroon-up"></a>`aroon.up` | `AROON` | Aroon up line. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-aroon-down"></a>`aroon.down` | `AROON` | Aroon down line. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-aroonosc"></a>`aroonosc` | `AROONOSC` | Aroon oscillator. | `:<period>@<series_high=high>,<series_low=low>` |
-| <a id="indicator-plus_dm"></a>`plus_dm` | `PLUS_DM` | Plus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
-| <a id="indicator-minus_dm"></a>`minus_dm` | `MINUS_DM` | Minus directional movement. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-plus_dm"></a>`plus_dm` | `PLUS_DM` | Plus directional movement. At `period=1`, the raw one-bar movement from bar 1 (lookback 1), as in TA-Lib. | `:<period>@<series_high=high>,<series_low=low>` |
+| <a id="indicator-minus_dm"></a>`minus_dm` | `MINUS_DM` | Minus directional movement. At `period=1`, the raw one-bar movement from bar 1 (lookback 1), as in TA-Lib. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-plus_di"></a>`plus_di` | `PLUS_DI` | Plus directional indicator, Wilder's `100·+DM/TR`. At `period=1` volas keeps the ×100 on the one-bar ratio; TA-Lib's period-1 branch omits it (`+DM/TR`), a deliberate divergence that keeps period 1 on the same scale as every other period. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-minus_di"></a>`minus_di` | `MINUS_DI` | Minus directional indicator, Wilder's `100·−DM/TR`. At `period=1` volas keeps the ×100 on the one-bar ratio; TA-Lib's period-1 branch omits it (`−DM/TR`), a deliberate divergence that keeps period 1 on the same scale as every other period. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-dx"></a>`dx` | `DX` | Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |

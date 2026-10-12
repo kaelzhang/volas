@@ -205,7 +205,8 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
                 _ => base,
             }
         }
-        "plus_dm" | "minus_dm" => arg(args, 0).saturating_sub(1),
+        // ±DM seed at bar `period - 1`, but never bar 0 (period 1 seeds at bar 1).
+        "plus_dm" | "minus_dm" => volas_compute::raw::indicators::wilder_seed_bar(arg(args, 0)).unwrap_or(0),
         "plus_di" | "minus_di" | "dx" => arg(args, 0),
         "adx" => 2 * arg(args, 0) - 1,
         "adxr" => 3 * arg(args, 0) - 2,
