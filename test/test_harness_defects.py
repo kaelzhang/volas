@@ -182,10 +182,9 @@ def test_a_column_cached_inside_its_warm_up_continues_exactly(directive, rows):
     assert _same(df[directive], _frame(cols, 0, 90)[directive])
 
 
-@_xfail('H5 fast-above-slow', 'macd with fast > slow panics instead of raising')
-def test_macd_with_fast_above_slow_raises_a_directive_error():
-    with pytest.raises(volas.DirectiveError):
-        _frame(_walk(80), 0, 80)['macd:30,5']
+def test_macd_with_fast_above_slow_swaps_the_periods_as_ta_lib_does():
+    df = _frame(_walk(80), 0, 80)
+    assert _same(df['macd:30,5'], df['macd:5,30'])
 
 
 @pytest.mark.parametrize('directive', ['apo:10,2', 'ppo:10,2', 'dma:10,1'])
@@ -199,7 +198,6 @@ def test_fast_above_slow_resumes_like_the_full_compute(directive):
     assert _same(df[directive], _frame(cols, 0, 60)[directive])
 
 
-@_xfail('ichimoku-tenkan-lookback', 'senkou_a lookback ignores a tenkan period above the kijun')
 def test_senkou_a_cached_before_its_first_value_continues_on_append():
     cols = _walk(12)
     df = _frame(cols, 0, 9)
