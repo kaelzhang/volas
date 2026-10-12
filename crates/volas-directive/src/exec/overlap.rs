@@ -60,7 +60,7 @@ pub(super) fn dispatch(
             let min_p = arg_usize(args, 0);
             let max_p = arg_usize(args, 1);
             let matype = arg_usize(args, 2);
-            let lb = crate::lookback::ma_lookback(max_p, matype);
+            let lb = ind::generic_ma_lookback(max_p, matype);
             let n = real.len();
             let mut out = vec![f64::NAN; n];
             // Each distinct period's MA is computed once, over the sub-slice that makes its
@@ -76,7 +76,7 @@ pub(super) fn dispatch(
                     continue; // a missing period: the row is missing
                 };
                 if cache[p].is_none() {
-                    let start = lb - crate::lookback::ma_lookback(p, matype);
+                    let start = lb - ind::generic_ma_lookback(p, matype);
                     let sub = ma_typed(&real[start..], p, matype, true, ops.origin() + start);
                     cache[p] = Some((start, sub));
                 }

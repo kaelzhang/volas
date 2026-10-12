@@ -323,7 +323,7 @@ pub(super) fn dispatch(
             let fastk_period = arg_usize(args, 1);
             let fastd_period = arg_usize(args, 2);
             // the type the generic MA runs (the identity at period 1 runs as the SMA)
-            let fastd_matype = crate::spec::ma_type(fastd_period, arg_usize(args, 3));
+            let fastd_matype = ind::generic_ma_type(fastd_period, arg_usize(args, 3));
             if line == "d"
                 && rsi_period == 14
                 && fastk_period == 5

@@ -628,7 +628,7 @@ fn resume_of(
         // the canonical SMA `.d` (matype 0) resumes; a recursive-MA `.d` declines.
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
-            if is_d && crate::spec::ma_type(arg_usize(args, 2), arg_usize(args, 3)) != 0 {
+            if is_d && ind::generic_ma_type(arg_usize(args, 2), arg_usize(args, 3)) != 0 {
                 return None; // non-SMA `.d` smoothing is recursive — fall back.
             }
             let (vals, st) = ind::stochrsi_resume(

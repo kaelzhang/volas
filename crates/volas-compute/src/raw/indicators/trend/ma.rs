@@ -506,9 +506,11 @@ pub struct FiniteMa {
 }
 
 impl FiniteMa {
-    /// The stage of `matype` over `period`, or `None` for a type that is not
-    /// finite-window (a recursive average carries its own state).
+    /// The stage of `matype` over `period` — the type `TA_MA` runs there
+    /// ([`super::generic_ma_type`]: any type at period 1 is the identity) — or `None` for
+    /// a type that is not finite-window (a recursive average carries its own state).
     pub fn new(period: usize, matype: usize) -> Option<Self> {
+        let matype = super::generic_ma_type(period, matype);
         matches!(matype, 0 | 2 | 5).then_some(FiniteMa { period, matype })
     }
 

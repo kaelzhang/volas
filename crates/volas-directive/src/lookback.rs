@@ -2,6 +2,7 @@
 //! rows needed before an indicator produces a valid value.
 
 use crate::types::{ArgValue, Ast, Command, Node};
+use volas_compute::raw::indicators::generic_ma_lookback;
 
 /// A bound period / count / matype argument. Arguments are resolved + type-checked
 /// by `bind`, so every position is present — there is no default to re-apply here
@@ -10,38 +11,23 @@ fn arg(args: &[ArgValue], i: usize) -> usize {
     args[i].as_usize()
 }
 
-/// Lookback of a TA-Lib MA-type over `period` (mirrors `exec::ma_typed`): DEMA is
-/// `2·(period-1)`, TEMA `3·(period-1)`, KAMA `period`, T3 `6·(period-1)`, MAMA a
-/// fixed `32` (period-independent), and the rest (SMA/EMA/WMA/TRIMA) `period-1` — and 0
-/// for any type at period 1 (the identity, [`crate::spec::ma_type`]).
-pub(crate) fn ma_lookback(period: usize, matype: usize) -> usize {
-    match crate::spec::ma_type(period, matype) {
-        3 => 2 * period.saturating_sub(1),
-        4 => 3 * period.saturating_sub(1),
-        6 => period,
-        7 => 32,
-        8 => 6 * period.saturating_sub(1),
-        _ => period.saturating_sub(1),
-    }
-}
-
 /// The command's own lookback (ignoring its series operands). Only ever called
 /// with a bound command name (every caller binds first), so every command has an
 /// arm and an unrecognized name is unreachable.
 pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
     match name {
         "ema" | "smma" => arg(args, 0).saturating_sub(1),
-        "ma" => ma_lookback(arg(args, 0), arg(args, 1)),
+        "ma" => generic_ma_lookback(arg(args, 0), arg(args, 1)),
         // apo/ppo need both MAs: the later of the two warm-ups (either may be the longer).
-        "apo" | "ppo" => ma_lookback(arg(args, 0), arg(args, 2)).max(ma_lookback(arg(args, 1), arg(args, 2))),
+        "apo" | "ppo" => generic_ma_lookback(arg(args, 0), arg(args, 2)).max(generic_ma_lookback(arg(args, 1), arg(args, 2))),
         // mavp warms up over the maximum period's MA (args: min, max, matype).
-        "mavp" => ma_lookback(arg(args, 1), arg(args, 2)),
+        "mavp" => generic_ma_lookback(arg(args, 1), arg(args, 2)),
         "macdext" => {
-            let line = ma_lookback(arg(args, 0), arg(args, 1))
-                .max(ma_lookback(arg(args, 2), arg(args, 3)));
+            let line = generic_ma_lookback(arg(args, 0), arg(args, 1))
+                .max(generic_ma_lookback(arg(args, 2), arg(args, 3)));
             match sub {
                 None => line,
-                _ => line + ma_lookback(arg(args, 4), arg(args, 5)),
+                _ => line + generic_ma_lookback(arg(args, 4), arg(args, 5)),
             }
         }
         "wma" | "trima" => arg(args, 0).saturating_sub(1),
@@ -194,16 +180,16 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         // %K (lookback fastk-1) then matype-MA smoothing stage(s).
         "stoch" => {
             let base =
-                arg(args, 0).saturating_sub(1) + ma_lookback(arg(args, 1), arg(args, 2));
+                arg(args, 0).saturating_sub(1) + generic_ma_lookback(arg(args, 1), arg(args, 2));
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 3), arg(args, 4)),
+                Some("d") => base + generic_ma_lookback(arg(args, 3), arg(args, 4)),
                 _ => base,
             }
         }
         "stochf" => {
             let base = arg(args, 0).saturating_sub(1);
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 1), arg(args, 2)),
+                Some("d") => base + generic_ma_lookback(arg(args, 1), arg(args, 2)),
                 _ => base,
             }
         }
@@ -211,7 +197,7 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             // RSI lookback (period) + the %K window (fastk_period-1), then the d-line MA.
             let base = arg(args, 0) + arg(args, 1).saturating_sub(1);
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 2), arg(args, 3)),
+                Some("d") => base + generic_ma_lookback(arg(args, 2), arg(args, 3)),
                 _ => base,
             }
         }
@@ -340,13 +326,13 @@ mod tests {
     use super::lookback;
     use crate::parser::parse;
 
-    /// Every `own_lookback` arm (and every `ma_lookback` MA-type) must compute without
+    /// Every `own_lookback` arm (and every generic-MA type) must compute without
     /// panicking. `lookback` is only reached on column caching, so `df.exec`-based
     /// parity tests never touch it — this is its coverage.
     #[test]
     fn lookback_covers_every_arm() {
         let directives = [
-            // ma_lookback: every MA type (3 DEMA, 4 TEMA, 6 KAMA, 7 MAMA, 8 T3, _ rest)
+            // generic_ma_lookback: every MA type (3 DEMA, 4 TEMA, 6 KAMA, 7 MAMA, 8 T3, _ rest)
             "ma:5",
             "ma:5,1",
             "ma:5,3",

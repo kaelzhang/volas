@@ -10,9 +10,7 @@
 //! [`FiniteMa`] stages, as their dispatch arms compose `ma_typed`.
 
 use crate::exec::{arg_f64, arg_usize, hv_annualization, percent_oscillator};
-use crate::lookback::ma_lookback;
 use crate::operands::Operands;
-use crate::spec::ma_type;
 use crate::types::ArgValue;
 use volas_compute::raw::indicators::{self as ind, BollLine, FiniteMa, LinregLine};
 
@@ -33,7 +31,7 @@ pub(crate) fn state(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgVa
         ))
     };
     match (name, sub) {
-        ("ma", _) => ind::ma_state(&close()?, p(0), ma_type(p(0), p(1)), ops.origin()),
+        ("ma", _) => ind::ma_state(&close()?, p(0), p(1), ops.origin()),
         ("wma", _) => ind::ma_state(&close()?, p(0), 2, ops.origin()),
         ("trima", _) => ind::trima_state(&close()?, p(0), ops.origin()),
         ("boll", None) => ind::ma_state(&close()?, p(0), 0, ops.origin()),
@@ -135,7 +133,7 @@ pub(crate) fn step(
         ))
     };
     match (name, sub) {
-        ("ma", _) => ind::ma_step(&close()?, p(0), ma_type(p(0), p(1)), row, prev, next),
+        ("ma", _) => ind::ma_step(&close()?, p(0), p(1), row, prev, next),
         ("wma", _) => ind::ma_step(&close()?, p(0), 2, row, prev, next),
         ("trima", _) => ind::trima_step(&close()?, p(0), row, prev, next),
         ("boll", None) => ind::ma_step(&close()?, p(0), 0, row, prev, next),
@@ -217,19 +215,13 @@ pub(crate) fn step(
     }
 }
 
-/// The resumable stage of the generic moving average of `period` and MA-type code
-/// `matype` (the type `TA_MA` runs, [`ma_type`]); `None` for a recursive type.
-fn generic_ma(period: usize, matype: usize) -> Option<FiniteMa> {
-    FiniteMa::new(period, ma_type(period, matype))
-}
-
 /// A stochastic line's smoothing stages `(period, matype)` (see `ind::stoch_step`) and
 /// how many of them there are.
 fn stoch_stages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> ([(usize, usize); 2], usize) {
     let p = |i| arg_usize(args, i);
     match (name, sub) {
-        ("stoch", Some("d")) => ([(p(1), ma_type(p(1), p(2))), (p(3), ma_type(p(3), p(4)))], 2),
-        _ => ([(p(1), ma_type(p(1), p(2))), (0, 0)], 1),
+        ("stoch", Some("d")) => ([(p(1), p(2)), (p(3), p(4))], 2),
+        _ => ([(p(1), p(2)), (0, 0)], 1),
     }
 }
 
@@ -243,7 +235,7 @@ struct Averages {
 
 fn averages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Averages> {
     let p = |i| arg_usize(args, i);
-    let ma = generic_ma;
+    let ma = FiniteMa::new;
     Some(match (name, sub) {
         ("bias", _) => Averages { fast: ma(1, 0)?, slow: ma(p(0), 0)?, smooth: None },
         ("dma", sub) => Averages {
@@ -271,7 +263,7 @@ fn averages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Averages
 fn composite_len(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<usize> {
     if name == "mavp" {
         let (lo, hi, mt) = (arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2));
-        let stages: Option<usize> = (lo..=hi).map(|q| Some(generic_ma(q, mt)?.state_len())).sum();
+        let stages: Option<usize> = (lo..=hi).map(|q| Some(FiniteMa::new(q, mt)?.state_len())).sum();
         return Some(1 + stages?);
     }
     let a = averages(name, sub, args)?;
@@ -285,10 +277,10 @@ fn composite_len(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<usi
 fn composite_initial(name: &str, sub: Option<&str>, args: &[ArgValue], origin: usize) -> Option<Vec<f64>> {
     if name == "mavp" {
         let (lo, hi, mt) = (arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2));
-        let lb = ma_lookback(hi, mt);
+        let lb = ind::generic_ma_lookback(hi, mt);
         let mut v = vec![0.0];
         for q in lo..=hi {
-            v.extend(generic_ma(q, mt)?.initial(origin + lb - ma_lookback(q, mt)));
+            v.extend(FiniteMa::new(q, mt)?.initial(origin + lb - ind::generic_ma_lookback(q, mt)));
         }
         return Some(v);
     }
@@ -355,18 +347,18 @@ fn mavp_step(
     next: &mut [f64],
 ) -> Option<f64> {
     let (lo, hi, mt) = (arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2));
-    let lb = ma_lookback(hi, mt);
+    let lb = ind::generic_ma_lookback(hi, mt);
     let seen = prev[0] as usize;
     next[0] = (seen + 1) as f64;
     let mut at = 1;
     let mut value = f64::NAN;
     let want = ind::mavp_period(periods[row], lo, hi);
     for q in lo..=hi {
-        let stage = generic_ma(q, mt)?;
+        let stage = FiniteMa::new(q, mt)?;
         let len = stage.state_len();
         let (s, n) = (&prev[at..at + len], &mut next[at..at + len]);
         at += len;
-        let start = lb - ma_lookback(q, mt);
+        let start = lb - ind::generic_ma_lookback(q, mt);
         if seen < start {
             n.copy_from_slice(s);
             continue;
