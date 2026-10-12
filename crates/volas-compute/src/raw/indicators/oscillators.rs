@@ -90,14 +90,16 @@ pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> 
 }
 
 /// The raw stochastic value of `close` in a window whose highest high is `hh` and
-/// lowest low `ll`: `100·(close − ll)/(hh − ll)`, `0` for a (near-)flat range. The one
+/// lowest low `ll`: `100·(close − ll)/(hh − ll)`, `0` for a flat range (`hh − ll == 0`,
+/// exactly, as TA-Lib's STOCHF tests it — an absolute threshold would zero the real
+/// ranges of a tiny-priced series). The one
 /// owner of the RSV formula — [`rsv`] and KDJ both evaluate it. Missing when any of the
 /// three is (the per-row term rule, [`missing::term`]): a missing range would otherwise
 /// fall to the flat-range `0`.
 #[inline]
 pub(super) fn rsv_value(close: f64, hh: f64, ll: f64) -> f64 {
     let denom = hh - ll;
-    let v = if denom.abs() > 1e-10 { (close - ll) / denom * 100.0 } else { 0.0 };
+    let v = if denom != 0.0 { (close - ll) / denom * 100.0 } else { 0.0 };
     missing::term(&[close, hh, ll], v)
 }
 
@@ -377,13 +379,17 @@ impl Wilder {
         self.loss = (self.loss * p1 + loss) / pf;
     }
 
-    /// RSI `100 − 100/(1 + g/l)`, a flat loss (`|l| < 1e-10`) giving 100.
+    /// RSI `100·g/(g+l)` (TA-Lib's form), a flat window (`g + l == 0`, exactly) giving 0.
+    /// TA-Lib tests `TA_IS_ZERO` (an absolute `1e-14`), which zeroes real movements of
+    /// tiny-priced series; the exact test agrees with it on every flat window and keeps
+    /// the scale-free value everywhere else (a deliberate, documented divergence).
     #[inline(always)]
     fn rsi(self) -> f64 {
-        if self.loss.abs() < 1e-10 {
-            100.0
+        let denom = self.gain + self.loss;
+        if denom == 0.0 {
+            0.0
         } else {
-            100.0 - 100.0 / (1.0 + self.gain / self.loss)
+            100.0 * (self.gain / denom)
         }
     }
 
@@ -408,11 +414,12 @@ impl Wilder {
         self.loss = self.loss.mul_add(a, (-d).max(0.0) * b);
     }
 
-    /// CMO `100·(g−l)/(g+l)`, a flat window (`g+l < 1e-14`) giving 0.
+    /// CMO `100·(g−l)/(g+l)`, a flat window (`g + l == 0`, exactly) giving 0 — RSI's
+    /// zero test on the same denominator (see [`Wilder::rsi`]).
     #[inline(always)]
     fn cmo(self) -> f64 {
         let denom = self.gain + self.loss;
-        if denom < 1e-14 {
+        if denom == 0.0 {
             0.0
         } else {
             100.0 * (self.gain - self.loss) / denom

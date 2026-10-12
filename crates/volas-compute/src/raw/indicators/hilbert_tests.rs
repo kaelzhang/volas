@@ -4,9 +4,9 @@ use super::*;
 fn ht_core_short_input_returns_warmup_only() {
     // Inputs at or below the WMA warm-up never enter the main loop (covers the
     // early return); every bar stays at the HtBar default.
-    for n in [0usize, 1, CORE_START, CORE_START - 1] {
+    for (n, start) in [(0usize, PERIOD_START), (1, PERIOD_START), (PERIOD_START, PERIOD_START), (PHASE_START, PHASE_START)] {
         let price: Vec<f64> = (0..n).map(|i| 100.0 + i as f64).collect();
-        let bars = ht_core(&price);
+        let bars = ht_core(&price, start);
         assert_eq!(bars.len(), n);
         assert!(bars.iter().all(|b| b.smooth_period == 0.0 && b.q1 == 0.0));
     }
@@ -21,7 +21,7 @@ fn dcphase_zero_imaginary_carry_branch() {
     // sin(0)+sin(π) = sin(π) ≈ 1.2e-16 ≠ 0, so `real_part` keeps the sign of the
     // (positive / negative) prices and the ±90 nudge is exercised.
     assert_eq!(
-        (TWO_PI / 2.0).cos(),
+        ((1.0 * 1f64.atan() * 8.0) / 2.0).cos(),
         -1.0,
         "cos(π) must be exactly -1 for the cancellation"
     );
@@ -70,16 +70,17 @@ fn assert_bits(a: &[f64], b: &[f64], what: &str) {
 #[test]
 fn ht_resume_under_the_mask_is_nan_like_the_full_compute() {
     let price = series(120);
-    let from = 20; // past CORE_START, under LB_PERIOD and LB_PHASE
+    let from = 20; // past PERIOD_START, under LB_PERIOD
     let head = &price[..from];
     let st = ht_core_state(head).unwrap();
     assert_bits(&ht_dcperiod_resume(&price, from, &st).unwrap().0, &ht_dcperiod(&price)[from..], "dcperiod");
     assert_bits(&ht_phasor_resume(&price, true, from, &st).unwrap().0, &ht_phasor(&price).1[from..], "phasor");
-    let st = ht_dcphase_state(head).unwrap();
-    assert_bits(&ht_dcphase_resume(&price, from, &st).unwrap().0, &ht_dcphase(&price)[from..], "dcphase");
-    assert_bits(&ht_sine_resume(&price, true, from, &st).unwrap().0, &ht_sine(&price).1[from..], "sine");
     let st = mama_state(head, 0.5, 0.05).unwrap();
     assert_bits(&mama_resume(&price, 0.5, 0.05, false, from, &st).unwrap().0, &mama(&price, 0.5, 0.05).0[from..], "mama");
+    let from = 40; // past PHASE_START, under LB_PHASE
+    let st = ht_dcphase_state(&price[..from]).unwrap();
+    assert_bits(&ht_dcphase_resume(&price, from, &st).unwrap().0, &ht_dcphase(&price)[from..], "dcphase");
+    assert_bits(&ht_sine_resume(&price, true, from, &st).unwrap().0, &ht_sine(&price).1[from..], "sine");
     // the trendline family's raw-price window needs `from >= SMOOTH_PRICE_SIZE`
     let from = 55; // under LB_PHASE
     let st = ht_trendline_state(&price[..from]).unwrap();
@@ -162,23 +163,25 @@ fn ht_resume_chains_bit_identical() {
 fn ht_resume_declines_below_warmup() {
     let price = series(120);
     let st = ht_core_state(&price).unwrap();
-    assert!(ht_dcperiod_resume(&price, CORE_START, &st).is_none());
-    assert!(ht_phasor_resume(&price, false, CORE_START, &st).is_none());
+    assert!(ht_dcperiod_resume(&price, PERIOD_START, &st).is_none());
+    assert!(ht_phasor_resume(&price, false, PERIOD_START, &st).is_none());
     let st = ht_dcphase_state(&price).unwrap();
-    assert!(ht_dcphase_resume(&price, CORE_START, &st).is_none());
-    assert!(ht_sine_resume(&price, true, CORE_START, &st).is_none());
+    assert!(ht_dcphase_resume(&price, PHASE_START, &st).is_none());
+    assert!(ht_sine_resume(&price, true, PHASE_START, &st).is_none());
     // Trendline / trendmode need `from >= SMOOTH_PRICE_SIZE` for the raw-price window.
     let st = ht_trendline_state(&price).unwrap();
     assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE - 1, &st).is_none());
     let st = ht_trendmode_state(&price).unwrap();
     assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE - 1, &st).is_none());
     // Under-warm-up series carry no state at all.
-    let tiny = series(CORE_START);
+    let tiny = series(PERIOD_START);
     assert!(ht_core_state(&tiny).is_none());
+    assert!(mama_state(&tiny, 0.5, 0.05).is_none());
+    // The phase family's recurrence starts later, at PHASE_START.
+    let tiny = series(PHASE_START);
     assert!(ht_dcphase_state(&tiny).is_none());
     assert!(ht_trendline_state(&tiny).is_none());
     assert!(ht_trendmode_state(&tiny).is_none());
-    assert!(mama_state(&tiny, 0.5, 0.05).is_none());
 }
 
 /// Defensive state-length guards: every HT resume bails (`None`) when handed a state
@@ -189,23 +192,23 @@ fn ht_resume_declines_below_warmup() {
 fn ht_resume_declines_on_short_state() {
     let price = series(120);
 
-    // Too short for even `HtCore::deserialize` (< CORE_STATE_LEN) -> setup `?` (line 318)
-    // propagates None. `from > CORE_START` so the from-guard passes first.
+    // Too short for even `HtCore::deserialize` (< CORE_STATE_LEN) -> setup `?`
+    // propagates None. `from > PERIOD_START` so the from-guard passes first.
     let stub = vec![0.0; CORE_STATE_LEN - 1];
     assert!(ht_dcperiod_resume(&price, 20, &stub).is_none());
 
     // A bare core (exactly CORE_STATE_LEN) deserializes, but the per-output tail is
     // missing, so each family's length check declines.
     let core_only = vec![0.0; CORE_STATE_LEN];
-    // DCPHASE / SINE need CORE_STATE_LEN + DCPHASE_STATE_LEN (lines 679 / 710).
-    assert!(ht_dcphase_resume(&price, 20, &core_only).is_none());
-    assert!(ht_sine_resume(&price, false, 20, &core_only).is_none());
-    // TRENDLINE needs CORE_STATE_LEN + 3 (line 788); `from >= SMOOTH_PRICE_SIZE` so the
+    // DCPHASE / SINE need CORE_STATE_LEN + DCPHASE_STATE_LEN.
+    assert!(ht_dcphase_resume(&price, 40, &core_only).is_none());
+    assert!(ht_sine_resume(&price, false, 40, &core_only).is_none());
+    // TRENDLINE needs CORE_STATE_LEN + 3; `from >= SMOOTH_PRICE_SIZE` so the
     // warm-up guard passes and the length guard is what fires.
     assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
-    // TRENDMODE needs CORE_STATE_LEN + DCPHASE_STATE_LEN + 5 (line 898).
+    // TRENDMODE needs exactly CORE_STATE_LEN + DCPHASE_STATE_LEN + 3 + 4.
     assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
-    // MAMA / FAMA need CORE_STATE_LEN + 3 (line 998).
+    // MAMA / FAMA need CORE_STATE_LEN + 3.
     assert!(mama_resume(&price, 0.5, 0.05, false, 20, &core_only).is_none());
 }
 

@@ -21,10 +21,6 @@ Excluded (still covered by the strict layer above + ``test_talib_parity``):
     ``EMA(fast) - EMA(slow)`` difference; ``talib.MACD`` / ``talib.MACDFIX`` are internally
     inconsistent with their own EMA (a documented TA-Lib quirk), so no *equal* TA-Lib
     reference exists. ``test_talib_parity`` verifies volas against the clean difference.
-  * ``ht_dcphase`` / ``ht_sine.*`` / ``ht_trendline`` / ``ht_trendmode``: the installed
-    ``ta_lib`` build has a ~90-bar warm-up transient, so a faithful comparison needs the
-    >300-row converged region — but these mutation frames are 250 rows. ``test_talib_parity``
-    verifies them on the converged region of the full series.
 """
 
 import numpy as np
@@ -40,7 +36,6 @@ pytest.importorskip('talib')  # the oracle; skip this module wholesale when TA-L
 _EXCLUDE = frozenset({
     'macd', 'macd.signal', 'macd.histogram',
     'macdfix', 'macdfix.signal', 'macdfix.histogram',
-    'ht_dcphase', 'ht_sine.sine', 'ht_sine.leadsine', 'ht_trendline', 'ht_trendmode',
 })
 DIRECTIVES = [d for d in COVERAGE_IDS if d not in _EXCLUDE]
 

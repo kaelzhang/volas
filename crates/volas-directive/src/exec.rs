@@ -201,41 +201,17 @@ pub(crate) fn series_truths(df: &DataFrame, series: &[Ast], i: usize) -> Result<
     Ok((0..col.len()).map(|i| col.truth_at(i)).collect())
 }
 
-/// Dispatch a TA-Lib MA-type code to the matching moving average over `data`.
-/// Codes follow TA-Lib's `TA_MAType`: 0 SMA, 1 EMA, 2 WMA, 3 DEMA, 4 TEMA, 5 TRIMA,
-/// 6 KAMA, 7 MAMA, 8 T3 (with vfactor 0.7, as TA-Lib's MA dispatch fixes it). MAMA
-/// ignores `period` and returns its primary (`mama`) line with the default
-/// 0.5/0.05 limits, exactly as `TA_MA`. Shared by `ma`, `apo`, `ppo`, and `mavp`.
-///
-/// Infallible: every caller's matype is either a literal or a spec-validated
-/// argument (`ArgBound::IntRange(0, 8)` at the exec boundary), so a value past
-/// 8 cannot reach here.
+/// The generic moving average (TA-Lib `TA_MA`, [`ind::generic_ma`]) of `period` and
+/// `matype` over `data`. A recursive average runs on the complete rows of its input — the
+/// input may be a derived line that warms up with NaN (see `volas_compute::missing`). A
+/// recursive command's own input is complete wherever its result is kept (`complete`), so
+/// it is not scanned. Shared by `ma`, `apo`, `ppo`, `macdext`, `mavp` and the stochastics.
 fn ma_typed(data: &[f64], period: usize, matype: usize, complete: bool, origin: usize) -> Vec<f64> {
-    // A recursive average runs on the complete rows of its input — the input may be a
-    // derived line that warms up with NaN (see `volas_compute::missing`). A recursive
-    // command's own input is complete wherever its result is kept (`complete`), so it
-    // is not scanned.
-    if crate::spec::is_recursive_matype(matype) {
+    if ind::is_recursive_generic_ma(period, matype) {
         let input = if complete { Input::known(data, false) } else { Input::new(data) };
-        return on_complete_rows(&[input], |x| ma_kernel(x[0], period, matype, origin));
+        return on_complete_rows(&[input], |x| ind::generic_ma(x[0], period, matype, origin));
     }
-    ma_kernel(data, period, matype, origin)
-}
-
-/// The moving average of `matype` over `data`.
-fn ma_kernel(data: &[f64], period: usize, matype: usize, origin: usize) -> Vec<f64> {
-    match matype {
-        0 => ind::ma(data, period, origin),
-        1 => ind::ema(data, period),
-        2 => ind::wma(data, period, origin),
-        3 => ind::dema(data, period),
-        4 => ind::tema(data, period),
-        5 => ind::trima(data, period, origin),
-        6 => ind::kama(data, period, origin),
-        7 => ind::mama(data, 0.5, 0.05).0,
-        8 => ind::t3(data, period, 0.7),
-        other => unreachable!("matype {other} is rejected by the spec bound"), // LCOV_EXCL_LINE
-    }
+    ind::generic_ma(data, period, matype, origin)
 }
 
 // --- command dispatch -------------------------------------------------------

@@ -9,8 +9,9 @@
 //! (lookback 32 vs 63) and (b) the per-bar value they emit.
 //!
 //! We run the shared core once ([`ht_core`]) and each public function derives its
-//! output from it, porting the recurrences verbatim from `ta_HT_*.c` / `ta_MAMA.c`
-//! so results are bit-identical to TA-Lib 0.6.4. Warm-up entries are `NaN`.
+//! output from it, porting the recurrences verbatim from `ta_HT_*.c` / `ta_MAMA.c` in
+//! plain (unfused) arithmetic, so results are bit-identical to a TA-Lib 0.6.4 build that
+//! does not contract `x*y + z` into FMA, on every platform. Warm-up entries are `NaN`.
 
 mod engine;
 use engine::*;
@@ -23,8 +24,8 @@ pub fn ht_dcperiod(price: &[f64]) -> Vec<f64> {
     }
     let mut out = Vec::with_capacity(n);
     out.resize(LB_PERIOD, f64::NAN);
-    let mut core = HtCoreState::seed(price);
-    for i in CORE_START..LB_PERIOD {
+    let mut core = HtCoreState::seed(price, PERIOD_START);
+    for i in PERIOD_START..LB_PERIOD {
         let _ = core.step(price, i);
     }
     for i in LB_PERIOD..n {
@@ -40,11 +41,11 @@ pub fn ht_phasor(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n = price.len();
     let mut inphase = vec![f64::NAN; n];
     let mut quad = vec![f64::NAN; n];
-    if n <= CORE_START {
+    if n <= PERIOD_START {
         return (inphase, quad);
     }
-    let mut core = HtCoreState::seed(price);
-    for i in CORE_START..n {
+    let mut core = HtCoreState::seed(price, PERIOD_START);
+    for i in PERIOD_START..n {
         // PHASOR is also a direct TA-Lib Hilbert-loop output; keep both lines in
         // the same pass but skip the full-history HtBar scratch vector.
         let b = core.step(price, i);
@@ -62,12 +63,12 @@ pub fn ht_phasor(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
 pub fn ht_phasor_line(price: &[f64], quadrature: bool) -> Vec<f64> {
     let n = price.len();
     let mut out = vec![f64::NAN; n];
-    if n <= CORE_START {
+    if n <= PERIOD_START {
         return out;
     }
-    let mut core = HtCoreState::seed(price);
+    let mut core = HtCoreState::seed(price, PERIOD_START);
     #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
-    for i in CORE_START..n {
+    for i in PERIOD_START..n {
         let b = core.step(price, i);
         if i >= LB_PERIOD {
             out[i] = if quadrature { b.q1 } else { b.i1 };
@@ -78,7 +79,7 @@ pub fn ht_phasor_line(price: &[f64], quadrature: bool) -> Vec<f64> {
 
 /// `HT_DCPHASE`: the dominant-cycle phase in degrees.
 pub fn ht_dcphase(price: &[f64]) -> Vec<f64> {
-    let core = ht_core(price);
+    let core = ht_core(price, PHASE_START);
     let phase = dcphase_all(&core);
     let mut out = vec![f64::NAN; price.len()];
     if price.len() > LB_PHASE {
@@ -90,7 +91,7 @@ pub fn ht_dcphase(price: &[f64]) -> Vec<f64> {
 /// `HT_SINE`: `(sine, leadSine)` where `sine = sin(DCPhase)` and
 /// `leadSine = sin(DCPhase + 45°)`.
 pub fn ht_sine(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let core = ht_core(price);
+    let core = ht_core(price, PHASE_START);
     let phase = dcphase_all(&core);
     let n = price.len();
     let mut sine = vec![f64::NAN; n];
@@ -106,49 +107,35 @@ pub fn ht_sine(price: &[f64]) -> (Vec<f64>, Vec<f64>) {
 pub fn ht_trendline(price: &[f64]) -> Vec<f64> {
     let n = price.len();
     let mut out = vec![f64::NAN; n];
-    if n <= CORE_START {
+    if n <= PHASE_START {
         return out;
     }
-    let mut core = HtCoreState::seed(price);
-    let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
+    let mut core = HtCoreState::seed(price, PHASE_START);
+    let mut itrend = ITrend::default();
     #[allow(clippy::needless_range_loop)] // numeric kernel: `today` indexes `price` too
-    for today in CORE_START..n {
+    for today in PHASE_START..n {
         let b = core.step(price, today);
         // TA-Lib's iTrend recurrence is per-bar, but only bars >= LB_PHASE are visible.
-        let avg = trendline_avg(price, today, b.smooth_period);
+        let v = itrend.push(price, today, b.smooth_period);
         if today >= LB_PHASE {
-            out[today] = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
+            out[today] = v;
         }
-        it3 = it2;
-        it2 = it1;
-        it1 = avg;
     }
     out
 }
 
 /// `HT_TRENDMODE`: `1.0` when the market is trending, `0.0` when cycling.
 pub fn ht_trendmode(price: &[f64]) -> Vec<f64> {
-    let core = ht_core(price);
-    let phase = dcphase_all(&core);
-    let trend_line = trendline_all(&core, price);
     let n = price.len();
     let mut out = vec![f64::NAN; n];
-    let mut days_in_trend: i32 = 0;
-    // Assume trend; demote to cycle on a fresh SineWave crossing, when too few days
-    // have elapsed since the last crossing, or when the phase advances at roughly the
-    // dominant-cycle rate; a strong price/trendline divergence forces trend mode. The
-    // per-bar decision lives in `trendmode_decide` (shared with the resume).
-    for i in CORE_START..n {
-        let trend = trendmode_decide(
-            phase[i],
-            phase[i - 1],
-            core[i].smooth_period,
-            core[i].smoothed,
-            trend_line[i],
-            &mut days_in_trend,
-        );
-        if i >= LB_PHASE {
-            out[i] = trend as f64;
+    if n <= PHASE_START {
+        return out;
+    }
+    let mut run = TrendModeRun::seed(price);
+    for (today, slot) in out.iter_mut().enumerate().skip(PHASE_START) {
+        let trend = run.step(price, today);
+        if today >= LB_PHASE {
+            *slot = trend;
         }
     }
     out
@@ -161,14 +148,14 @@ pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f
     let n = price.len();
     let mut mama_out = vec![f64::NAN; n];
     let mut fama_out = vec![f64::NAN; n];
-    if n <= CORE_START {
+    if n <= PERIOD_START {
         return (mama_out, fama_out);
     }
     let mut mama = 0.0f64;
     let mut fama = 0.0f64;
     let mut prev_phase = 0.0f64;
-    let mut core = HtCoreState::seed(price);
-    for i in CORE_START..n {
+    let mut core = HtCoreState::seed(price, PERIOD_START);
+    for i in PERIOD_START..n {
         // TA-Lib advances the Hilbert core and MAMA recurrence in one pass; keeping
         // that order avoids the temporary `HtBar` vector without changing the
         // per-bar state transition used by parity and resume.
@@ -196,14 +183,14 @@ pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f
 pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: bool) -> Vec<f64> {
     let n = price.len();
     let mut out = vec![f64::NAN; n];
-    if n <= CORE_START {
+    if n <= PERIOD_START {
         return out;
     }
     let mut mama = 0.0f64;
     let mut fama = 0.0f64;
     let mut prev_phase = 0.0f64;
-    let mut core = HtCoreState::seed(price);
-    for i in CORE_START..n {
+    let mut core = HtCoreState::seed(price, PERIOD_START);
+    for i in PERIOD_START..n {
         let b = core.step(price, i);
         mama_step(
             &b,
@@ -230,7 +217,7 @@ pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: boo
 // recurrence over only the new bars `[from, n)`, emitting values bit-identical to a
 // fresh full recompute (the per-bar math is the single shared [`HtCoreState::step`]
 // and the same post-pass body). A resume at or before the core warm-up
-// (`from <= CORE_START`) — or, for the price-windowed trendline / trendmode, before
+// (`from <=` the family's first recurrence bar) — or, for the price-windowed trendline / trendmode, before
 // a full dominant-cycle window is visible (`from < SMOOTH_PRICE_SIZE`) — returns
 // `None`, so the caller transparently keeps the correct full-recompute fallback.
 
@@ -239,11 +226,11 @@ pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: boo
 /// the core-only outputs (DCPERIOD / PHASOR) whose state is exactly the core.
 fn ht_core_final_state(price: &[f64]) -> Option<Vec<f64>> {
     let n = price.len();
-    if n <= CORE_START {
+    if n <= PERIOD_START {
         return None;
     }
-    let mut core = HtCoreState::seed(price);
-    for today in CORE_START..n {
+    let mut core = HtCoreState::seed(price, PERIOD_START);
+    for today in PERIOD_START..n {
         let _ = core.step(price, today);
     }
     Some(core.serialize())
@@ -262,10 +249,10 @@ fn masked(today: usize, mask: usize, v: f64) -> f64 {
 }
 
 /// Reconstruct [`HtCoreState`] for a resume at `from` (state as of bar `from-1`),
-/// stepping no bars. `None` when `from <= CORE_START` (the carried state would
-/// predate the warm-up) or the state buffer is too short.
-fn ht_core_resume_setup(state: &[f64], from: usize) -> Option<HtCoreState> {
-    if from <= CORE_START {
+/// stepping no bars. `None` when `from <= start` (the family's first recurrence bar:
+/// the carried state would predate the warm-up) or the state buffer is too short.
+fn ht_core_resume_setup(state: &[f64], from: usize, start: usize) -> Option<HtCoreState> {
+    if from <= start {
         return None;
     }
     HtCoreState::deserialize(state)
@@ -285,7 +272,7 @@ pub fn ht_dcperiod_resume(
     from: usize,
     state: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    let mut core = ht_core_resume_setup(state, from)?;
+    let mut core = ht_core_resume_setup(state, from, PERIOD_START)?;
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
@@ -303,7 +290,7 @@ pub fn ht_phasor_resume(
     from: usize,
     state: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    let mut core = ht_core_resume_setup(state, from)?;
+    let mut core = ht_core_resume_setup(state, from, PERIOD_START)?;
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
@@ -317,13 +304,13 @@ pub fn ht_phasor_resume(
 /// accumulator (`DCPHASE_STATE_LEN` words). `None` under the warm-up.
 fn ht_dcphase_final_state(price: &[f64]) -> Option<Vec<f64>> {
     let n = price.len();
-    if n <= CORE_START {
+    if n <= PHASE_START {
         return None;
     }
-    let mut core = HtCoreState::seed(price);
+    let mut core = HtCoreState::seed(price, PHASE_START);
     let mut dc = DcPhase::new();
     let mut v = Vec::with_capacity(CORE_STATE_LEN + DCPHASE_STATE_LEN);
-    for today in CORE_START..n {
+    for today in PHASE_START..n {
         let b = core.step(price, today);
         let _ = dc.push(b.smoothed, b.smooth_period);
     }
@@ -344,7 +331,7 @@ pub fn ht_dcphase_resume(
     from: usize,
     state: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    let mut core = ht_core_resume_setup(state, from)?;
+    let mut core = ht_core_resume_setup(state, from, PHASE_START)?;
     let mut off = CORE_STATE_LEN;
     if state.len() < CORE_STATE_LEN + DCPHASE_STATE_LEN {
         return None;
@@ -375,7 +362,7 @@ pub fn ht_sine_resume(
     from: usize,
     state: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    let mut core = ht_core_resume_setup(state, from)?;
+    let mut core = ht_core_resume_setup(state, from, PHASE_START)?;
     let mut off = CORE_STATE_LEN;
     if state.len() < CORE_STATE_LEN + DCPHASE_STATE_LEN {
         return None;
@@ -398,28 +385,22 @@ pub fn ht_sine_resume(
     Some((out, v))
 }
 
-/// Final state for `HT_TRENDLINE`: the core followed by the `iTrend` triple
-/// `[it1, it2, it3]`. The price-window average reads raw `price[today-j]`
-/// (`j < dcPeriod <= SMOOTH_PRICE_SIZE`), in range on a resume guarded by
-/// `from >= SMOOTH_PRICE_SIZE`. `None` under the warm-up.
+/// Final state for `HT_TRENDLINE`: the core followed by the [`ITrend`] triple. The
+/// price-window average reads raw `price[today-j]` (`j < dcPeriod <= SMOOTH_PRICE_SIZE`),
+/// in range on a resume guarded by `from >= SMOOTH_PRICE_SIZE`. `None` under the warm-up.
 fn ht_trendline_final_state(price: &[f64]) -> Option<Vec<f64>> {
     let n = price.len();
-    if n <= CORE_START {
+    if n <= PHASE_START {
         return None;
     }
-    let mut core = HtCoreState::seed(price);
-    let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
-    for today in CORE_START..n {
+    let mut core = HtCoreState::seed(price, PHASE_START);
+    let mut itrend = ITrend::default();
+    for today in PHASE_START..n {
         let b = core.step(price, today);
-        let avg = trendline_avg(price, today, b.smooth_period);
-        it3 = it2;
-        it2 = it1;
-        it1 = avg;
+        let _ = itrend.push(price, today, b.smooth_period);
     }
     let mut v = core.serialize();
-    v.push(it1);
-    v.push(it2);
-    v.push(it3);
+    itrend.push_state(&mut v);
     Some(v)
 }
 
@@ -428,10 +409,9 @@ pub fn ht_trendline_state(price: &[f64]) -> Option<Vec<f64>> {
     ht_trendline_final_state(price)
 }
 
-/// Resume `HT_TRENDLINE` over `[from, n)`: step the core, form the windowed average,
-/// advance the `iTrend` recurrence, emit `(4·avg + 3·it1 + 2·it2 + it3)/10`. Guarded
-/// by `from >= SMOOTH_PRICE_SIZE` so the raw-price window is fully in range (and the
-/// dominant-cycle window is complete) on a head-dropping slice.
+/// Resume `HT_TRENDLINE` over `[from, n)`: step the core and the carried [`ITrend`].
+/// Guarded by `from >= SMOOTH_PRICE_SIZE` so the raw-price window is fully in range
+/// (and the dominant-cycle window is complete) on a head-dropping slice.
 pub fn ht_trendline_resume(
     price: &[f64],
     from: usize,
@@ -440,119 +420,140 @@ pub fn ht_trendline_resume(
     if from < SMOOTH_PRICE_SIZE {
         return None;
     }
-    let mut core = ht_core_resume_setup(state, from)?;
-    if state.len() < CORE_STATE_LEN + 3 {
-        return None;
-    }
-    let (mut it1, mut it2, mut it3) = (
-        state[CORE_STATE_LEN],
-        state[CORE_STATE_LEN + 1],
-        state[CORE_STATE_LEN + 2],
-    );
+    let mut core = ht_core_resume_setup(state, from, PHASE_START)?;
+    let mut off = CORE_STATE_LEN;
+    let mut itrend = ITrend::from_state(state, &mut off)?;
     let n = price.len();
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
-        let avg = trendline_avg(price, today, b.smooth_period);
-        out.push(masked(today, LB_PHASE, (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0));
-        it3 = it2;
-        it2 = it1;
-        it1 = avg;
+        out.push(masked(today, LB_PHASE, itrend.push(price, today, b.smooth_period)));
     }
     let mut v = core.serialize();
-    v.push(it1);
-    v.push(it2);
-    v.push(it3);
+    itrend.push_state(&mut v);
     Some((out, v))
 }
 
-/// One `HT_TRENDMODE` bar's trend/cycle decision, given this bar's DC phase / the
-/// previous bar's DC phase, the smoothed price + period, the trendline value, and
-/// the running `days_in_trend` (mutated). Factored from [`ht_trendmode`]'s loop so
-/// the full compute and resume share one definition.
-#[inline]
-fn trendmode_decide(
-    dc: f64,
-    prev_dc: f64,
-    smooth_period: f64,
-    smoothed: f64,
-    trend_line: f64,
-    days_in_trend: &mut i32,
-) -> i32 {
-    let sine = (dc * DEG2RAD).sin();
-    let lead = ((dc + 45.0) * DEG2RAD).sin();
-    let prev_sine = (prev_dc * DEG2RAD).sin();
-    let prev_lead = ((prev_dc + 45.0) * DEG2RAD).sin();
-    let sp = smooth_period;
-    let mut trend = 1i32;
-    if (sine > lead && prev_sine <= prev_lead) || (sine < lead && prev_sine >= prev_lead) {
-        *days_in_trend = 0;
-        trend = 0;
-    }
-    *days_in_trend += 1;
-    if (*days_in_trend as f64) < 0.5 * sp {
-        trend = 0;
-    }
-    let dphase = dc - prev_dc;
-    if sp != 0.0 && dphase > 0.67 * 360.0 / sp && dphase < 1.5 * 360.0 / sp {
-        trend = 0;
-    }
-    if trend_line != 0.0 && ((smoothed - trend_line) / trend_line).abs() >= 0.015 {
-        trend = 1;
-    }
-    trend
+/// `HT_TRENDMODE`'s trend / cycle decision state: the days since the last SineWave
+/// crossing, the previous bar's DC phase, and the previous bar's sine / lead sine —
+/// carried as values, as TA-Lib carries them (both start at `0`, so the first
+/// recurrence bar compares against `0 / 0`, not against `sin(0°) / sin(45°)`).
+#[derive(Clone, Copy, Default)]
+struct TrendMode {
+    days_in_trend: i32,
+    prev_phase: f64,
+    sine: f64,
+    lead: f64,
 }
 
-/// Final state for `HT_TRENDMODE`: core ‖ [`DcPhase`] ‖ `iTrend` triple ‖
-/// `[days_in_trend, prev_dc_phase]`. The carried `DcPhase.phase` already equals
-/// `phase[n-1]`, but the explicit `prev_dc_phase` keeps the resume's first-bar
-/// `phase[from-1]` read self-contained. `None` under the warm-up.
-fn ht_trendmode_final_state(price: &[f64]) -> Option<Vec<f64>> {
+impl TrendMode {
+    const STATE_LEN: usize = 4;
+
+    /// One bar's decision from its DC phase, smoothed period, smoothed price and
+    /// trendline (TA-Lib `HT_TRENDMODE`). Assume trend; demote to cycle on a fresh
+    /// SineWave crossing, when too few days have elapsed since the last crossing, or
+    /// when the phase advances at roughly the dominant-cycle rate; a strong
+    /// price / trendline divergence forces trend mode.
+    #[inline]
+    fn decide(&mut self, phase: f64, smooth_period: f64, smoothed: f64, trend_line: f64) -> i32 {
+        let (prev_sine, prev_lead) = (self.sine, self.lead);
+        self.sine = (phase * DEG2RAD).sin();
+        self.lead = ((phase + 45.0) * DEG2RAD).sin();
+        let (sine, lead, sp) = (self.sine, self.lead, smooth_period);
+        let mut trend = 1i32;
+        if (sine > lead && prev_sine <= prev_lead) || (sine < lead && prev_sine >= prev_lead) {
+            self.days_in_trend = 0;
+            trend = 0;
+        }
+        self.days_in_trend += 1;
+        if (self.days_in_trend as f64) < 0.5 * sp {
+            trend = 0;
+        }
+        let dphase = phase - self.prev_phase;
+        self.prev_phase = phase;
+        if sp != 0.0 && dphase > 0.67 * 360.0 / sp && dphase < 1.5 * 360.0 / sp {
+            trend = 0;
+        }
+        if trend_line != 0.0 && ((smoothed - trend_line) / trend_line).abs() >= 0.015 {
+            trend = 1;
+        }
+        trend
+    }
+}
+
+/// The whole `HT_TRENDMODE` recurrence — core, [`DcPhase`], [`ITrend`] and
+/// [`TrendMode`] — stepped one bar at a time by the full compute, the final state and
+/// the resume alike. Serialised as core ‖ `DcPhase` ‖ `ITrend` ‖
+/// `[days_in_trend, prev_phase, sine, lead]`.
+struct TrendModeRun {
+    core: HtCoreState,
+    dc: DcPhase,
+    itrend: ITrend,
+    mode: TrendMode,
+}
+
+impl TrendModeRun {
+    const STATE_LEN: usize = CORE_STATE_LEN + DCPHASE_STATE_LEN + ITrend::STATE_LEN + TrendMode::STATE_LEN;
+
+    /// The recurrence positioned at bar [`PHASE_START`]; requires `price.len() > PHASE_START`.
+    fn seed(price: &[f64]) -> Self {
+        TrendModeRun {
+            core: HtCoreState::seed(price, PHASE_START),
+            dc: DcPhase::new(),
+            itrend: ITrend::default(),
+            mode: TrendMode::default(),
+        }
+    }
+
+    /// Bar `today`'s trend mode (`1.0` / `0.0`), advancing every part.
+    #[inline]
+    fn step(&mut self, price: &[f64], today: usize) -> f64 {
+        let b = self.core.step(price, today);
+        let phase = self.dc.push(b.smoothed, b.smooth_period);
+        let trend_line = self.itrend.push(price, today, b.smooth_period);
+        self.mode.decide(phase, b.smooth_period, b.smoothed, trend_line) as f64
+    }
+
+    fn serialize(&self) -> Vec<f64> {
+        let mut v = self.core.serialize();
+        self.dc.push_state(&mut v);
+        self.itrend.push_state(&mut v);
+        let m = &self.mode;
+        v.extend_from_slice(&[m.days_in_trend as f64, m.prev_phase, m.sine, m.lead]);
+        v
+    }
+
+    /// Inverse of [`serialize`](Self::serialize) for a resume at `from`; `None` at or
+    /// before the warm-up, or for a state of the wrong length or a forged cursor.
+    fn deserialize(state: &[f64], from: usize) -> Option<Self> {
+        if state.len() != Self::STATE_LEN {
+            return None;
+        }
+        let core = ht_core_resume_setup(state, from, PHASE_START)?;
+        let mut off = CORE_STATE_LEN;
+        let dc = DcPhase::from_state(state, &mut off)?;
+        let itrend = ITrend::from_state(state, &mut off)?;
+        let &[days, prev_phase, sine, lead] = &state[off..] else { return None };
+        let mode = TrendMode { days_in_trend: days as i32, prev_phase, sine, lead };
+        Some(TrendModeRun { core, dc, itrend, mode })
+    }
+}
+
+/// Final state for `HT_TRENDMODE` ([`TrendModeRun`]'s). `None` under the warm-up.
+pub fn ht_trendmode_state(price: &[f64]) -> Option<Vec<f64>> {
     let n = price.len();
-    if n <= CORE_START {
+    if n <= PHASE_START {
         return None;
     }
-    let mut core = HtCoreState::seed(price);
-    let mut dc = DcPhase::new();
-    let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
-    let mut days_in_trend: i32 = 0;
-    let mut prev_phase = 0.0f64;
-    for today in CORE_START..n {
-        let b = core.step(price, today);
-        let phase = dc.push(b.smoothed, b.smooth_period);
-        let avg = trendline_avg(price, today, b.smooth_period);
-        let trend_line = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
-        let _ = trendmode_decide(
-            phase,
-            prev_phase,
-            b.smooth_period,
-            b.smoothed,
-            trend_line,
-            &mut days_in_trend,
-        );
-        it3 = it2;
-        it2 = it1;
-        it1 = avg;
-        prev_phase = phase;
+    let mut run = TrendModeRun::seed(price);
+    for today in PHASE_START..n {
+        let _ = run.step(price, today);
     }
-    let mut v = core.serialize();
-    dc.push_state(&mut v);
-    v.push(it1);
-    v.push(it2);
-    v.push(it3);
-    v.push(days_in_trend as f64);
-    v.push(prev_phase);
-    Some(v)
+    Some(run.serialize())
 }
 
-/// Final state for `HT_TRENDMODE` (alias used by the dispatch table).
-pub fn ht_trendmode_state(price: &[f64]) -> Option<Vec<f64>> {
-    ht_trendmode_final_state(price)
-}
-
-/// Resume `HT_TRENDMODE` over `[from, n)`. Steps the core, reconstructs the DC phase +
-/// trendline, runs the shared decision with the carried `days_in_trend`, and
-/// emits `0.0`/`1.0`. Guarded by `from >= SMOOTH_PRICE_SIZE` (trendline window).
+/// Resume `HT_TRENDMODE` over `[from, n)` from the carried [`TrendModeRun`], emitting
+/// `0.0` / `1.0`. Guarded by `from >= SMOOTH_PRICE_SIZE` (trendline window).
 pub fn ht_trendmode_resume(
     price: &[f64],
     from: usize,
@@ -561,45 +562,10 @@ pub fn ht_trendmode_resume(
     if from < SMOOTH_PRICE_SIZE {
         return None;
     }
-    let mut core = ht_core_resume_setup(state, from)?;
-    let tail = CORE_STATE_LEN + DCPHASE_STATE_LEN;
-    if state.len() < tail + 5 {
-        return None;
-    }
-    let mut off = CORE_STATE_LEN;
-    let mut dc = DcPhase::from_state(state, &mut off)?;
-    let (mut it1, mut it2, mut it3) = (state[tail], state[tail + 1], state[tail + 2]);
-    let mut days_in_trend = state[tail + 3] as i32;
-    let mut prev_phase = state[tail + 4];
+    let mut run = TrendModeRun::deserialize(state, from)?;
     let n = price.len();
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
-    for today in from..n {
-        let b = core.step(price, today);
-        let phase = dc.push(b.smoothed, b.smooth_period);
-        let avg = trendline_avg(price, today, b.smooth_period);
-        let trend_line = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
-        let trend = trendmode_decide(
-            phase,
-            prev_phase,
-            b.smooth_period,
-            b.smoothed,
-            trend_line,
-            &mut days_in_trend,
-        );
-        out.push(masked(today, LB_PHASE, trend as f64));
-        it3 = it2;
-        it2 = it1;
-        it1 = avg;
-        prev_phase = phase;
-    }
-    let mut v = core.serialize();
-    dc.push_state(&mut v);
-    v.push(it1);
-    v.push(it2);
-    v.push(it3);
-    v.push(days_in_trend as f64);
-    v.push(prev_phase);
-    Some((out, v))
+    let out = (from..n).map(|today| masked(today, LB_PHASE, run.step(price, today))).collect();
+    Some((out, run.serialize()))
 }
 
 /// Final state for `MAMA`/`FAMA`: core ‖ `[mama, fama, prev_phase]`. The adaptive
@@ -607,12 +573,12 @@ pub fn ht_trendmode_resume(
 /// running averages and the previous phase are carried. `None` under the warm-up.
 fn mama_final_state(price: &[f64], fast_limit: f64, slow_limit: f64) -> Option<Vec<f64>> {
     let n = price.len();
-    if n <= CORE_START {
+    if n <= PERIOD_START {
         return None;
     }
-    let mut core = HtCoreState::seed(price);
+    let mut core = HtCoreState::seed(price, PERIOD_START);
     let (mut mama, mut fama, mut prev_phase) = (0.0f64, 0.0f64, 0.0f64);
-    for today in CORE_START..n {
+    for today in PERIOD_START..n {
         let b = core.step(price, today);
         mama_step(
             &b,
@@ -664,9 +630,9 @@ fn mama_step(
     } else {
         fast_limit
     };
-    *mama = alpha * price_today + (1.0 - alpha) * *mama;
+    *mama = (alpha * price_today) + ((1.0 - alpha) * *mama);
     let half = 0.5 * alpha;
-    *fama = half * *mama + (1.0 - half) * *fama;
+    *fama = (half * *mama) + ((1.0 - half) * *fama);
 }
 
 /// Resume `MAMA`/`FAMA` over `[from, n)`, emitting `mama` (`want_fama == false`) or
@@ -679,7 +645,7 @@ pub fn mama_resume(
     from: usize,
     state: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    let mut core = ht_core_resume_setup(state, from)?;
+    let mut core = ht_core_resume_setup(state, from, PERIOD_START)?;
     if state.len() < CORE_STATE_LEN + 3 {
         return None;
     }

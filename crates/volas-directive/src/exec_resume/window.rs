@@ -10,7 +10,6 @@
 //! [`FiniteMa`] stages, as their dispatch arms compose `ma_typed`.
 
 use crate::exec::{arg_f64, arg_usize, hv_annualization, percent_oscillator};
-use crate::lookback::ma_lookback;
 use crate::operands::Operands;
 use crate::types::ArgValue;
 use volas_compute::raw::indicators::{self as ind, BollLine, FiniteMa, LinregLine};
@@ -244,13 +243,19 @@ fn averages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Averages
             slow: ma(p(1), 0)?,
             smooth: if sub.is_some() { Some(ma(p(2), 0)?) } else { None },
         },
-        ("macdext", sub) => Averages {
-            fast: ma(p(0), p(1))?,
-            slow: ma(p(2), p(3))?,
-            smooth: if sub.is_some() { Some(ma(p(4), p(5))?) } else { None },
-        },
-        // apo / ppo
-        _ => Averages { fast: ma(p(0), p(2))?, slow: ma(p(1), p(2))?, smooth: None },
+        ("macdext", sub) => {
+            let ((fp, fm), (sp, sm)) = ind::oscillator_order((p(0), p(1)), (p(2), p(3)));
+            Averages {
+                fast: ma(fp, fm)?,
+                slow: ma(sp, sm)?,
+                smooth: if sub.is_some() { Some(ma(p(4), p(5))?) } else { None },
+            }
+        }
+        // apo / ppo, in TA-Lib's order
+        _ => {
+            let ((fp, fm), (sp, sm)) = ind::oscillator_order((p(0), p(2)), (p(1), p(2)));
+            Averages { fast: ma(fp, fm)?, slow: ma(sp, sm)?, smooth: None }
+        }
     })
 }
 
@@ -272,10 +277,10 @@ fn composite_len(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<usi
 fn composite_initial(name: &str, sub: Option<&str>, args: &[ArgValue], origin: usize) -> Option<Vec<f64>> {
     if name == "mavp" {
         let (lo, hi, mt) = (arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2));
-        let lb = ma_lookback(hi, mt);
+        let lb = ind::generic_ma_lookback(hi, mt);
         let mut v = vec![0.0];
         for q in lo..=hi {
-            v.extend(FiniteMa::new(q, mt)?.initial(origin + lb - ma_lookback(q, mt)));
+            v.extend(FiniteMa::new(q, mt)?.initial(origin + lb - ind::generic_ma_lookback(q, mt)));
         }
         return Some(v);
     }
@@ -342,7 +347,7 @@ fn mavp_step(
     next: &mut [f64],
 ) -> Option<f64> {
     let (lo, hi, mt) = (arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2));
-    let lb = ma_lookback(hi, mt);
+    let lb = ind::generic_ma_lookback(hi, mt);
     let seen = prev[0] as usize;
     next[0] = (seen + 1) as f64;
     let mut at = 1;
@@ -353,7 +358,7 @@ fn mavp_step(
         let len = stage.state_len();
         let (s, n) = (&prev[at..at + len], &mut next[at..at + len]);
         at += len;
-        let start = lb - ma_lookback(q, mt);
+        let start = lb - ind::generic_ma_lookback(q, mt);
         if seen < start {
             n.copy_from_slice(s);
             continue;

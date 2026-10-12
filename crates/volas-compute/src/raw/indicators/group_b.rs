@@ -131,7 +131,8 @@ pub fn dkx_ma(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, 
     super::ma(&dkx(open, high, low, close, origin), m, origin)
 }
 
-/// WVAD 威廉变异离散量 = `Σₙ( (C − O) / (H − L) · V )`. Source: 通达信 / MBA智库 — WVAD.
+/// WVAD 威廉变异离散量 = `Σₙ( (C − O) / (H − L) · V )`, a bar without range adding 0 (AD's
+/// convention, not 0/0). Source: 通达信 / MBA智库 — WVAD.
 pub fn wvad(
     open: &[f64],
     high: &[f64],

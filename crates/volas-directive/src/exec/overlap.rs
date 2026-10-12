@@ -60,7 +60,7 @@ pub(super) fn dispatch(
             let min_p = arg_usize(args, 0);
             let max_p = arg_usize(args, 1);
             let matype = arg_usize(args, 2);
-            let lb = crate::lookback::ma_lookback(max_p, matype);
+            let lb = ind::generic_ma_lookback(max_p, matype);
             let n = real.len();
             let mut out = vec![f64::NAN; n];
             // Each distinct period's MA is computed once, over the sub-slice that makes its
@@ -76,7 +76,7 @@ pub(super) fn dispatch(
                     continue; // a missing period: the row is missing
                 };
                 if cache[p].is_none() {
-                    let start = lb - crate::lookback::ma_lookback(p, matype);
+                    let start = lb - ind::generic_ma_lookback(p, matype);
                     let sub = ma_typed(&real[start..], p, matype, true, ops.origin() + start);
                     cache[p] = Some((start, sub));
                 }
@@ -115,8 +115,7 @@ pub(super) fn dispatch(
         ("apo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2);
-            let f = ma_typed(&data, arg_usize(args, 0), mt, true, ops.origin());
-            let s = ma_typed(&data, arg_usize(args, 1), mt, true, ops.origin());
+            let (f, s) = oscillator_mas(&data, (arg_usize(args, 0), mt), (arg_usize(args, 1), mt), ops.origin());
             f64col((0..data.len()).map(|i| f[i] - s[i]).collect())
         }
         // MACDEXT: a MACD whose fast/slow/signal MAs each take a configurable type
@@ -124,8 +123,8 @@ pub(super) fn dispatch(
         // natural start (best practice, like macd); signal/histogram follow.
         ("macdext", sub) => {
             let data = close(0)?;
-            let f = ma_typed(&data, arg_usize(args, 0), arg_usize(args, 1), true, ops.origin());
-            let s = ma_typed(&data, arg_usize(args, 2), arg_usize(args, 3), true, ops.origin());
+            let fast = (arg_usize(args, 0), arg_usize(args, 1));
+            let (f, s) = oscillator_mas(&data, fast, (arg_usize(args, 2), arg_usize(args, 3)), ops.origin());
             let line: Vec<f64> = (0..data.len()).map(|i| f[i] - s[i]).collect();
             match sub {
                 None => f64col(line),
@@ -143,8 +142,7 @@ pub(super) fn dispatch(
         ("ppo", _) => {
             let data = close(0)?;
             let mt = arg_usize(args, 2);
-            let f = ma_typed(&data, arg_usize(args, 0), mt, true, ops.origin());
-            let s = ma_typed(&data, arg_usize(args, 1), mt, true, ops.origin());
+            let (f, s) = oscillator_mas(&data, (arg_usize(args, 0), mt), (arg_usize(args, 1), mt), ops.origin());
             f64col((0..data.len()).map(|i| percent_oscillator(f[i], s[i])).collect())
         }
 
@@ -156,7 +154,8 @@ pub(super) fn dispatch(
             let s = ma_typed(&data, arg_usize(args, 0), 0, true, ops.origin());
             f64col((0..data.len()).map(|i| percent_oscillator(f[i], s[i])).collect())
         }
-        // dma's DDD line ≡ apo:fast,slow,0; dma.ama is the M-period SMA of that line.
+        // dma's DDD line = SMA(fast) − SMA(slow), positional as 通达信 (≡ apo:fast,slow,0 for
+        // fast ≤ slow; apo orders its averages as TA-Lib); dma.ama is the M-period SMA of that line.
         ("dma", sub) => {
             let data = close(0)?;
             let f = ma_typed(&data, arg_usize(args, 0), 0, true, ops.origin());
@@ -389,6 +388,14 @@ pub(super) fn dispatch(
     }
 }
 
+/// The fast and slow `(period, matype)` generic averages of a TA-Lib price oscillator
+/// (`apo`, `ppo`, `macdext`) over `data`, in TA-Lib's order
+/// ([`ind::oscillator_order`]: the longer period is the slow average).
+fn oscillator_mas(data: &[f64], fast: (usize, usize), slow: (usize, usize), origin: usize) -> (Vec<f64>, Vec<f64>) {
+    let ((fp, fm), (sp, sm)) = ind::oscillator_order(fast, slow);
+    (ma_typed(data, fp, fm, true, origin), ma_typed(data, sp, sm, true, origin))
+}
+
 /// TA-Lib `TA_INT_PO` (PPO, and `bias` ≡ `ppo:1,N,0`): `(fast - slow) / slow * 100`,
 /// and 0 where the slow MA is exactly zero (TA-Lib's `TA_IS_ZERO` is an absolute
 /// epsilon; volas tests exact zero). A fast MA still warming up stays NaN.
@@ -422,9 +429,22 @@ mod tests {
     /// The zero guard does not invent a value where the fast MA is still warming up.
     #[test]
     fn ppo_zero_slow_ma_keeps_fast_warm_up_nan() {
+        assert!(super::percent_oscillator(f64::NAN, 0.0).is_nan());
+        assert_eq!(super::percent_oscillator(1.0, 0.0), 0.0);
+    }
+
+    /// TA-Lib's oscillator order: the longer period is the slow average whichever
+    /// position it is given in, so `ppo:3,2` is `ppo:2,3` (and `apo` / `macdext` alike).
+    #[test]
+    fn a_slow_period_given_first_is_still_the_slow_average() {
+        let close = vec![1.0, -1.0, 5.0, 2.0, 7.0, 3.0];
+        for (a, b) in [("ppo:3,2,0", "ppo:2,3,0"), ("apo:5,2,1", "apo:2,5,1"), ("macdext:4,1,2,0", "macdext:2,0,4,1")] {
+            let (x, y) = (run(close.clone(), a), run(close.clone(), b));
+            assert!(x.iter().zip(&y).all(|(p, q)| p.to_bits() == q.to_bits()), "{a} vs {b}");
+        }
         let r = run(vec![1.0, -1.0, 5.0], "ppo:3,2,0");
-        assert!(r[1].is_nan()); // SMA2 = 0, SMA3 not yet defined
-        assert!((r[2] - (5.0 / 3.0 - 2.0) / 2.0 * 100.0).abs() < 1e-12);
+        assert!(r[1].is_nan()); // SMA3 not yet defined
+        assert!((r[2] - (2.0 - 5.0 / 3.0) / (5.0 / 3.0) * 100.0).abs() < 1e-12);
     }
 
     /// `bias:N` ≡ `ppo:1,N,0`, so a zero SMA base gives 0 the same way.
