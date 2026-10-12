@@ -548,6 +548,10 @@ impl PyTimestamp {
         op: pyo3::basic::CompareOp,
     ) -> PyResult<Py<PyAny>> {
         use pyo3::basic::CompareOp::{Eq, Ne};
+        let np = py.import("numpy")?;
+        if other.is_instance(&np.getattr("ndarray")?)? {
+            return self.compare_array(py, &np, other, op);
+        }
         let Some((ns, aware)) = comparable_instant(other)? else {
             return Ok(py.NotImplemented());
         };
@@ -751,6 +755,59 @@ pub(crate) fn parse_freq_ns(freq: &str) -> PyResult<i64> {
 }
 
 impl PyTimestamp {
+    /// `self <op> array`, element-wise — pandas' `Timestamp` rule for an ndarray
+    /// operand, never the scalar path: a `datetime64` array compares against this
+    /// instant as `datetime64[ns]` (an aware Timestamp against that naive array is
+    /// all-unequal, and ordering raises `TypeError`); an `object` array compares
+    /// each element with this Timestamp; any other array is all-unequal, and its
+    /// ordering is left to NumPy.
+    fn compare_array(
+        &self,
+        py: Python<'_>,
+        np: &Bound<'_, PyModule>,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::basic::CompareOp,
+    ) -> PyResult<Py<PyAny>> {
+        use pyo3::basic::CompareOp::*;
+        let name = match op {
+            Lt => "lt",
+            Le => "le",
+            Eq => "eq",
+            Ne => "ne",
+            Gt => "gt",
+            Ge => "ge",
+        };
+        let shape = other.getattr("shape")?;
+        let fill = |value: bool| -> PyResult<Py<PyAny>> {
+            let fun = if value { "ones" } else { "zeros" };
+            Ok(np.call_method1(fun, (&shape, np.getattr("bool_")?))?.unbind())
+        };
+        let kind: String = other.getattr("dtype")?.getattr("kind")?.extract()?;
+        let operator = py.import("operator")?;
+        match kind.as_str() {
+            "M" if self.tz.is_aware() => match op {
+                Eq => fill(false),
+                Ne => fill(true),
+                _ => Err(PyTypeError::new_err("Cannot compare tz-naive and tz-aware timestamps")),
+            },
+            "M" => Ok(operator.call_method1(name, (self.to_numpy(py)?, other))?.unbind()),
+            "O" => {
+                let me = Py::new(py, PyTimestamp { ns: self.ns, tz: self.tz })?;
+                let flat = other.call_method0("ravel")?;
+                let cells = flat
+                    .try_iter()?
+                    .map(|x| operator.call_method1(name, (&me, x?))?.is_truthy())
+                    .collect::<PyResult<Vec<bool>>>()?;
+                Ok(numpy::IntoPyArray::into_pyarray(cells, py).call_method1("reshape", (&shape,))?.unbind())
+            }
+            _ => match op {
+                Eq => fill(false),
+                Ne => fill(true),
+                _ => Ok(py.NotImplemented()),
+            },
+        }
+    }
+
     /// Round the instant to a `unit_ns` grid of the WALL clock at its offset (so
     /// a daily floor lands on the local midnight for an anchored zone) — the one
     /// kernel behind scalar and `.dt` `floor` / `ceil` / `round` / `normalize`;
