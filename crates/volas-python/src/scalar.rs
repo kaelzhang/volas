@@ -5,7 +5,7 @@ use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
 use pyo3::types::PyDict;
-use volas_core::datetime::Rounding;
+use volas_core::datetime::{Civil, Rounding};
 use volas_core::{
     datetime, Index,
     IndexKind, Label, Tz,
@@ -131,41 +131,38 @@ impl PyTimestamp {
 
     /// Calendar year in the timestamp's timezone (pandas `Timestamp.year`).
     #[getter]
-    pub(crate) fn year(&self) -> i64 {
-        datetime::civil_parts_tz(self.ns, self.tz).0
+    fn year(&self) -> i64 {
+        self.civil().year()
     }
     /// Calendar month, 1..=12 (pandas `Timestamp.month`).
     #[getter]
-    pub(crate) fn month(&self) -> i64 {
-        datetime::civil_parts_tz(self.ns, self.tz).1
+    fn month(&self) -> i64 {
+        self.civil().month()
     }
     /// Day of month, 1..=31 (pandas `Timestamp.day`).
     #[getter]
-    pub(crate) fn day(&self) -> i64 {
-        datetime::civil_parts_tz(self.ns, self.tz).2
+    fn day(&self) -> i64 {
+        self.civil().day()
     }
     /// Hour, 0..=23 (pandas `Timestamp.hour`).
     #[getter]
-    pub(crate) fn hour(&self) -> i64 {
-        datetime::civil_parts_tz(self.ns, self.tz).3
+    fn hour(&self) -> i64 {
+        self.civil().hour()
     }
     /// Minute, 0..=59 (pandas `Timestamp.minute`).
     #[getter]
-    pub(crate) fn minute(&self) -> i64 {
-        datetime::civil_parts_tz(self.ns, self.tz).4
+    fn minute(&self) -> i64 {
+        self.civil().minute()
     }
     /// Second, 0..=59 (pandas `Timestamp.second`).
     #[getter]
-    pub(crate) fn second(&self) -> i64 {
-        datetime::civil_parts_tz(self.ns, self.tz).5
+    fn second(&self) -> i64 {
+        self.civil().second()
     }
-
     /// Day of week with Monday=0 .. Sunday=6 (pandas `Timestamp.weekday()`).
-    pub(crate) fn weekday(&self) -> i64 {
-        let (y, mo, d, ..) = datetime::civil_parts_tz(self.ns, self.tz);
-        (datetime::days_from_civil(y, mo, d) + 3).rem_euclid(7)
+    fn weekday(&self) -> i64 {
+        self.civil().weekday()
     }
-
     /// Microsecond component, 0..=999_999 (pandas `Timestamp.microsecond`).
     #[getter]
     pub(crate) fn microsecond(&self) -> i64 {
@@ -178,11 +175,10 @@ impl PyTimestamp {
     }
     /// Quarter of the year, 1..=4 (pandas `Timestamp.quarter`).
     #[getter]
-    pub(crate) fn quarter(&self) -> i64 {
-        (self.month() - 1) / 3 + 1
+    fn quarter(&self) -> i64 {
+        self.civil().quarter()
     }
-    /// Day of week, Monday=0 (pandas `Timestamp.dayofweek` — property form of
-    /// `weekday()`).
+    /// Day of week, Monday=0 (pandas `Timestamp.dayofweek`).
     #[getter]
     fn dayofweek(&self) -> i64 {
         self.weekday()
@@ -198,9 +194,8 @@ impl PyTimestamp {
     }
     /// Ordinal day of the year, 1..=366 (pandas `Timestamp.dayofyear`).
     #[getter]
-    pub(crate) fn dayofyear(&self) -> i64 {
-        let (y, mo, d, ..) = datetime::civil_parts_tz(self.ns, self.tz);
-        datetime::days_from_civil(y, mo, d) - datetime::days_from_civil(y, 1, 1) + 1
+    fn dayofyear(&self) -> i64 {
+        self.civil().day_of_year()
     }
     /// Alias of `dayofyear`.
     #[getter]
@@ -210,23 +205,21 @@ impl PyTimestamp {
     /// ISO week number, 1..=53 (pandas `Timestamp.week`).
     #[getter]
     fn week(&self) -> i64 {
-        self.iso_calendar().1
+        self.civil().iso_calendar().1
     }
     /// Alias of `week`.
     #[getter]
     fn weekofyear(&self) -> i64 {
-        self.iso_calendar().1
+        self.week()
     }
-    /// The ISO calendar triple `(iso_year, iso_week, iso_weekday)` (stdlib /
-    /// pandas `isocalendar()`).
+    /// The ISO calendar triple `(iso_year, iso_week, iso_weekday)` (stdlib / pandas `isocalendar()`).
     fn isocalendar(&self) -> (i64, i64, i64) {
-        self.iso_calendar()
+        self.civil().iso_calendar()
     }
     /// Days in the timestamp's month, 28..=31 (pandas `Timestamp.days_in_month`).
     #[getter]
-    pub(crate) fn days_in_month(&self) -> i64 {
-        let (y, mo, ..) = datetime::civil_parts_tz(self.ns, self.tz);
-        days_in_month_of(y, mo)
+    fn days_in_month(&self) -> i64 {
+        self.civil().days_in_month()
     }
     /// Alias of `days_in_month`.
     #[getter]
@@ -235,62 +228,58 @@ impl PyTimestamp {
     }
     /// Whether this is the first day of its month (pandas `is_month_start`).
     #[getter]
-    pub(crate) fn is_month_start(&self) -> bool {
-        self.day() == 1
+    fn is_month_start(&self) -> bool {
+        self.civil().is_month_start()
     }
     /// Whether this is the last day of its month (pandas `is_month_end`).
     #[getter]
-    pub(crate) fn is_month_end(&self) -> bool {
-        self.day() == self.days_in_month()
+    fn is_month_end(&self) -> bool {
+        self.civil().is_month_end()
     }
     /// Whether this is the first day of its quarter (pandas `is_quarter_start`).
     #[getter]
-    pub(crate) fn is_quarter_start(&self) -> bool {
-        self.day() == 1 && (self.month() - 1) % 3 == 0
+    fn is_quarter_start(&self) -> bool {
+        self.civil().is_quarter_start()
     }
     /// Whether this is the last day of its quarter (pandas `is_quarter_end`).
     #[getter]
-    pub(crate) fn is_quarter_end(&self) -> bool {
-        self.month() % 3 == 0 && self.day() == self.days_in_month()
+    fn is_quarter_end(&self) -> bool {
+        self.civil().is_quarter_end()
     }
     /// Whether this is January 1st (pandas `is_year_start`).
     #[getter]
-    pub(crate) fn is_year_start(&self) -> bool {
-        self.month() == 1 && self.day() == 1
+    fn is_year_start(&self) -> bool {
+        self.civil().is_year_start()
     }
     /// Whether this is December 31st (pandas `is_year_end`).
     #[getter]
-    pub(crate) fn is_year_end(&self) -> bool {
-        self.month() == 12 && self.day() == 31
+    fn is_year_end(&self) -> bool {
+        self.civil().is_year_end()
     }
     /// Whether the timestamp's year is a leap year (pandas `is_leap_year`).
     #[getter]
-    pub(crate) fn is_leap_year(&self) -> bool {
-        let y = self.year();
-        (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    fn is_leap_year(&self) -> bool {
+        self.civil().is_leap_year()
     }
     /// The English day name, e.g. `"Monday"` (pandas `day_name()`).
-    pub(crate) fn day_name(&self) -> &'static str {
-        ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-            [self.weekday() as usize]
+    fn day_name(&self) -> &'static str {
+        day_name(&self.civil())
     }
     /// The English month name, e.g. `"June"` (pandas `month_name()`).
-    pub(crate) fn month_name(&self) -> &'static str {
-        ["January", "February", "March", "April", "May", "June", "July",
-         "August", "September", "October", "November", "December"]
-            [(self.month() - 1) as usize]
+    fn month_name(&self) -> &'static str {
+        month_name(&self.civil())
     }
 
     /// The wall-clock calendar date as a python `datetime.date` (pandas `date()`).
     fn date<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (y, mo, d, ..) = datetime::civil_parts_tz(self.ns, self.tz);
-        py.import("datetime")?.getattr("date")?.call1((y, mo, d))
+        let c = self.civil();
+        py.import("datetime")?.getattr("date")?.call1((c.year(), c.month(), c.day()))
     }
     /// The wall-clock time-of-day as a python `datetime.time` (pandas `time()`).
     fn time<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (_, _, _, h, mi, se) = datetime::civil_parts_tz(self.ns, self.tz);
-        let micros = self.microsecond();
-        py.import("datetime")?.getattr("time")?.call1((h, mi, se, micros))
+        let c = self.civil();
+        let fields = (c.hour(), c.minute(), c.second(), self.microsecond());
+        py.import("datetime")?.getattr("time")?.call1(fields)
     }
     /// A new Timestamp with the given wall-clock components replaced (pandas
     /// `replace`); unspecified components are kept. The zone is unchanged.
@@ -410,9 +399,12 @@ impl PyTimestamp {
     /// The ISO-8601 wall-clock string, with the offset suffix when aware
     /// (stdlib / pandas `isoformat()`).
     fn isoformat(&self) -> String {
-        let (y, mo, d, h, mi, se) = datetime::civil_parts_tz(self.ns, self.tz);
+        let c = self.civil();
         let subsec = self.ns.rem_euclid(1_000_000_000);
-        let mut out = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}");
+        let mut out = format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            c.year(), c.month(), c.day(), c.hour(), c.minute(), c.second()
+        );
         if subsec != 0 {
             if subsec % 1_000 == 0 {
                 out.push_str(&format!(".{:06}", subsec / 1_000));
@@ -710,19 +702,17 @@ pub(crate) fn parse_label(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Lab
     }
 }
 
-/// Days in (year, month) of the proleptic Gregorian calendar.
-fn days_in_month_of(y: i64, mo: i64) -> i64 {
-    match mo {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        _ => {
-            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
-                29
-            } else {
-                28
-            }
-        }
-    }
+/// The English day name of a civil day, e.g. `"Monday"` (pandas `day_name()`).
+pub(crate) fn day_name(c: &Civil) -> &'static str {
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        [c.weekday() as usize]
+}
+
+/// The English month name of a civil day, e.g. `"June"` (pandas `month_name()`).
+pub(crate) fn month_name(c: &Civil) -> &'static str {
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"]
+        [(c.month() - 1) as usize]
 }
 
 /// Parse a pandas-style frequency spec (`'15min'`, `'D'`, `'h'`, `'s'`, …) to a
@@ -767,9 +757,9 @@ impl PyTimestamp {
         Ok(PyTimestamp { ns: self.rounded_ns(unit_ns, mode)?, tz: self.tz })
     }
 
-    /// The ISO calendar triple (iso_year, iso_week, iso_weekday).
-    pub(crate) fn iso_calendar(&self) -> (i64, i64, i64) {
-        let (y, mo, d, ..) = datetime::civil_parts_tz(self.ns, self.tz);
-        datetime::iso_calendar(y, mo, d)
+    /// The wall-clock calendar view of this instant in its zone — decomposed once
+    /// per read; every calendar getter projects it.
+    pub(crate) fn civil(&self) -> Civil {
+        self.tz.civil(self.ns)
     }
 }

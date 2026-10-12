@@ -96,7 +96,8 @@ impl Tz {
     /// Wall-clock civil parts `(year, month, day, hour, minute, second)` of a UTC
     /// instant `ns` as seen in this timezone.
     pub fn civil_parts(&self, ns: i64) -> (i64, i64, i64, i64, i64, i64) {
-        parts(self.wall(ns))
+        let c = self.civil(ns);
+        (c.year(), c.month(), c.day(), c.hour(), c.minute(), c.second())
     }
 
     /// The wall clock of the UTC instant `ns` in this timezone. The offset is
@@ -275,10 +276,8 @@ impl Tz {
             Tz::Offset(s) => *s,
             Tz::Named(tz) => {
                 use chrono::Offset;
-                let secs = ns.div_euclid(1_000_000_000);
-                let nsub = ns.rem_euclid(1_000_000_000) as u32;
-                let utc = DateTime::from_timestamp(secs, nsub).unwrap_or_default();
-                tz.offset_from_utc_datetime(&utc.naive_utc()).fix().local_minus_utc()
+                let utc = DateTime::from_timestamp_nanos(ns).naive_utc();
+                tz.offset_from_utc_datetime(&utc).fix().local_minus_utc()
             }
         }
     }
@@ -297,17 +296,6 @@ impl Tz {
             _ => 0,
         }
     }
-}
-
-fn parts(dt: NaiveDateTime) -> (i64, i64, i64, i64, i64, i64) {
-    (
-        dt.year() as i64,
-        dt.month() as i64,
-        dt.day() as i64,
-        dt.hour() as i64,
-        dt.minute() as i64,
-        dt.second() as i64,
-    )
 }
 
 /// The one UTC-offset grammar (zone specs and the suffix of an offset-aware

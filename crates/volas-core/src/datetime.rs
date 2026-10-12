@@ -116,10 +116,7 @@ pub fn parse_ns_in_tz(s: &str, tz: Tz) -> Result<i64> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos() as i64);
-            let (y, mo, d, _, _, _) = tz.civil_parts(now);
-            let today = NaiveDate::from_ymd_opt(y as i32, mo as u32, d as u32)
-                .expect("a decomposed civil date is valid");
-            return tz.localize(today.and_time(t));
+            return tz.localize(tz.wall(now).date().and_time(t));
         }
     }
     Err(VolasError::Value(format!("could not parse datetime {s:?}")))
@@ -273,8 +270,16 @@ pub fn timedelta64_to_ns(value: i64, unit: &str, count: i64) -> Result<i64> {
 
 /// The epoch units [`epoch_to_ns`] / [`epoch_to_ns_f64`] accept.
 fn epoch_unit(unit: &str) -> Result<&str> {
+    epoch_scale(unit).map(|_| unit)
+}
+
+/// The nanoseconds in one epoch `unit` (`"s"` / `"ms"` / `"us"` / `"ns"`).
+fn epoch_scale(unit: &str) -> Result<i128> {
     match unit {
-        "s" | "ms" | "us" | "ns" => Ok(unit),
+        "s" => Ok(NS_PER_SEC as i128),
+        "ms" => Ok(1_000_000),
+        "us" => Ok(1_000),
+        "ns" => Ok(1),
         _ => Err(VolasError::Value(format!(
             "unknown epoch unit {unit:?} (use \"s\" / \"ms\" / \"us\" / \"ns\")"
         ))),
@@ -304,7 +309,7 @@ fn epoch_out_of_range(value: impl std::fmt::Display, unit: &str) -> VolasError {
 /// pandas). An unknown unit or a non-finite value is a `Value` error; an
 /// out-of-range result an `Overflow` error.
 pub fn epoch_to_ns_f64(value: f64, unit: &str) -> Result<i64> {
-    let (scale, _) = unit_ns(epoch_unit(unit)?).expect("an epoch unit is a fixed unit");
+    let scale = epoch_scale(unit)?;
     if !value.is_finite() {
         return Err(VolasError::Value(format!("{value} is not a finite epoch")));
     }
@@ -332,7 +337,7 @@ pub fn epoch_to_ns_f64(value: f64, unit: &str) -> Result<i64> {
 /// rounding). Text that is not a finite decimal number (`inf`, `nan`, a date) is a
 /// `Value` error; an instant outside the range an `Overflow` error.
 pub fn epoch_text_to_ns(text: &str, unit: &str) -> Result<i64> {
-    let (scale, _) = unit_ns(epoch_unit(unit)?).expect("an epoch unit is a fixed unit");
+    let scale = epoch_scale(unit)?;
     let t = text.trim();
     let bad = || VolasError::Value(format!("could not parse epoch {t:?} (a decimal number)"));
     let (neg, body) = match t.as_bytes().first() {
@@ -359,7 +364,7 @@ pub fn epoch_text_to_ns(text: &str, unit: &str) -> Result<i64> {
         pow += (sig.len() - 36) as i64;
         sig = &sig[..36];
     }
-    let d: i128 = if sig.is_empty() { 0 } else { sig.parse().expect("≤ 36 ASCII digits") };
+    let d = sig.bytes().fold(0i128, |acc, b| acc * 10 + (b - b'0') as i128); // ≤ 36 digits
     let magnitude = if d == 0 {
         Some(0)
     } else if pow >= 0 {
@@ -389,52 +394,38 @@ fn shr_half_even(p: i128, k: i32) -> i128 {
     if rem > half || (rem == half && q & 1 == 1) { q + 1 } else { q }
 }
 
-/// Decompose epoch nanoseconds into civil UTC parts
-/// `(year, month, day, hour, minute, second)` — used by time-frame unification.
-/// Wall-clock civil parts of `ns`. Callers that produce user-visible output MUST
-/// pre-filter `NaT` (`i64::MIN`) — the string layer renders it as `"NaT"` (see
-/// [`format_ns`] / [`strftime`]) since a missing instant has no civil date to put
-/// in this `i64` tuple.
+/// Civil UTC parts `(year, month, day, hour, minute, second)` of the instant `ns`
+/// (see [`Tz::civil_parts`]). `NaT` has no civil date: callers that produce
+/// user-visible output keep it out — the string layer renders it as `"NaT"` (see
+/// [`format_ns`] / [`strftime`]).
 pub fn civil_parts(ns: i64) -> (i64, i64, i64, i64, i64, i64) {
-    let secs = ns.div_euclid(1_000_000_000);
-    let nsub = ns.rem_euclid(1_000_000_000) as u32;
-    // An i64 ns count spans ~1677..=2262, well inside chrono's range, so this is
-    // always `Some` — the previous `unwrap_or_default()` would have silently
-    // returned the 1970 epoch for an out-of-range value instead of failing loud.
-    // `NaT` (`i64::MIN`) decodes to a real 1677 civil date here, so callers MUST
-    // pre-filter it (the binding now rejects raw NaT at the Timestamp / unify
-    // boundary), per the doc above.
-    let dt = DateTime::from_timestamp(secs, nsub)
-        .expect("an i64-ns timestamp is within chrono's representable range")
-        .naive_utc();
-    (
-        dt.year() as i64,
-        dt.month() as i64,
-        dt.day() as i64,
-        dt.hour() as i64,
-        dt.minute() as i64,
-        dt.second() as i64,
-    )
+    Tz::Utc.civil_parts(ns)
 }
 
-/// Continuous count of days from the Unix epoch (`1970-01-01` = 0) for a civil
-/// date — the basis for continuous, month-independent week / multi-day buckets.
-/// `1970-01-01` is a Thursday, so a Monday-anchored week index is
-/// `(days_from_civil(y, mo, d) + 3).div_euclid(7)`.
+/// Continuous count of days from the Unix epoch (`1970-01-01` = 0) for a VALID
+/// civil date — the basis for continuous, month-independent week / multi-day
+/// buckets. `1970-01-01` is a Thursday, so a Monday-anchored week index is
+/// `(days_from_civil(y, mo, d) + 3).div_euclid(7)`. Callers pass the parts of a
+/// decomposed instant; an invalid date is a broken invariant and panics, never a
+/// silent epoch day.
 pub fn days_from_civil(y: i64, mo: i64, d: i64) -> i64 {
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
-    let date = NaiveDate::from_ymd_opt(y as i32, mo as u32, d as u32).unwrap_or(epoch);
-    date.signed_duration_since(epoch).num_days()
+    let date = i32::try_from(y)
+        .ok()
+        .zip(u32::try_from(mo).ok().zip(u32::try_from(d).ok()))
+        .and_then(|(y, (mo, d))| NaiveDate::from_ymd_opt(y, mo, d))
+        .expect("days_from_civil takes the parts of a valid civil date");
+    date.signed_duration_since(NaiveDate::default()).num_days()
 }
 
 /// The civil date for a continuous epoch-day count — the inverse of
 /// [`days_from_civil`], used to map a multi-day bucket index back to the bucket's
 /// first calendar day (the period-start label of Day3 / Week1 bars).
 pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
-    // An i64-ns timestamp spans ~1677..=2262 (see `civil_parts`), so any day count
-    // derived from one is far inside chrono's range.
-    let date = epoch + chrono::Duration::days(days);
+    // a day count derived from an instant (~±106 752 days, a bucket floor a few
+    // days past either end) is far inside chrono's ±262 000-year range
+    let date = chrono::TimeDelta::try_days(days)
+        .and_then(|span| NaiveDate::default().checked_add_signed(span))
+        .expect("an epoch-day count derived from an instant is a civil date");
     (date.year() as i64, date.month() as i64, date.day() as i64)
 }
 
@@ -461,17 +452,8 @@ pub fn format_ns(ns: i64) -> String {
     if ns == i64::MIN {
         return "NaT".to_string(); // missing instant — not a real 1677 civil date
     }
-    let secs = ns.div_euclid(1_000_000_000);
-    let nsub = ns.rem_euclid(1_000_000_000) as u32;
-    DateTime::from_timestamp(secs, 0)
-        .map(|dt| {
-            format!(
-                "{}{}",
-                dt.naive_utc().format("%Y-%m-%d %H:%M:%S"),
-                subsec_suffix(nsub)
-            )
-        })
-        .unwrap_or_default()
+    let wall = DateTime::from_timestamp_nanos(ns).naive_utc();
+    format!("{}{}", wall.format("%Y-%m-%d %H:%M:%S"), subsec_suffix(wall.nanosecond()))
 }
 
 /// Format epoch nanoseconds as the wall-clock
@@ -493,13 +475,9 @@ pub fn format_ns_tz(ns: i64, tz: Tz) -> String {
 }
 
 /// The wall-clock civil parts `(year, month, day, hour, minute, second)` of the
-/// instant `ns` in `tz` (UTC parts when `tz` is UTC).
+/// instant `ns` in `tz` ([`Tz::civil_parts`]).
 pub fn civil_parts_tz(ns: i64, tz: Tz) -> (i64, i64, i64, i64, i64, i64) {
-    if tz.is_utc() {
-        civil_parts(ns)
-    } else {
-        tz.civil_parts(ns)
-    }
+    tz.civil_parts(ns)
 }
 
 /// The wall clock of `ns` in `tz` as `YYYY-MM-DD HH:MM:SS[.f]`, followed by the
@@ -551,7 +529,7 @@ pub fn strftime(ns: i64, tz: Tz, fmt: &str) -> Result<String> {
     if items.iter().any(|it| matches!(it, Item::Error)) {
         return Err(invalid());
     }
-    let offset = chrono::FixedOffset::east_opt(off).expect("a zone offset is under a day");
+    let offset = chrono::FixedOffset::east_opt(off).ok_or_else(invalid)?; // not under a day
     let dt = DateTime::from_timestamp_nanos(ns).with_timezone(&offset);
     let mut out = String::new();
     write!(out, "{}", dt.format_with_items(items.iter())).map_err(|_| invalid())?;
@@ -721,16 +699,11 @@ mod tests {
     }
 }
 
-/// The ISO calendar triple `(iso_year, iso_week, iso_weekday)` of a civil date.
-pub fn iso_calendar(y: i64, mo: i64, d: i64) -> (i64, i64, i64) {
-    let date = NaiveDate::from_ymd_opt(y as i32, mo as u32, d as u32).unwrap_or_default();
-    let iw = date.iso_week();
-    (
-        iw.year() as i64,
-        iw.week() as i64,
-        date.weekday().number_from_monday() as i64,
-    )
-}
+mod civil;
+pub use civil::Civil;
+
+#[cfg(test)]
+mod tests_civil;
 
 #[cfg(test)]
 mod tests_gate;
