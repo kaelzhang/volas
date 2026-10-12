@@ -11,7 +11,7 @@ use ndarray::{Array1, ArrayView1};
 ///
 /// O(n) sliding exact sums of `x` and of the squared deviations `(x − K)²` from the
 /// window's shift `K` (the value at its anchor row, see [`crate::accum`]'s second
-/// moments): `var = (Σd² − (Σd)²/n) / (n − ddof)` — within `(24n + 2)·2⁻⁵³` of the exact
+/// moments): `var = (Σd² − (Σd)²/n) / (n − ddof)` — within `(36n + 2)·2⁻⁵³` of the exact
 /// variance however the window's level dwarfs its spread, exactly zero for a flat
 /// window — emitted only for fully-populated windows.
 #[inline]

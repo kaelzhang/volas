@@ -1,4 +1,4 @@
-use crate::accum::{anchors_at, centred, shift_row, spread, Accumulator, Anchors, Csum};
+use crate::accum::{centred, deviation, shift_row, spread, Accumulator, Anchors, Csum};
 use crate::raw::kernels::shifted_terms;
 use crate::guard::{state_after, Order, Slide, Window};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
@@ -27,16 +27,15 @@ fn linreg_fit(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, Vec<f64>
 /// whether both running sums stayed finite. A window holding a non-finite row is fitted
 /// directly on its own rows.
 ///
-/// The sums are `Σd` and `Σ age·d` of the data shifted by the window's anchor-row value
-/// (`d = y − K`, see [`crate::accum`]'s second moments; the newest bar has age 0), so
-/// the slope's numerator `p·Σ age·d − Σage·Σd` carries no cancellation between the
-/// level and the trend, and a flat window's slope is exactly 0. They slide in O(1):
-/// when the window advances one bar every retained point's age rises by one, so `Σ
-/// age·d` gains `Σd` and loses the departing point's full `period·d` —
-/// `sum_ad += sum_d − period·leaving` (old `sum_d`), then `sum_d += entering −
-/// leaving` — the weighted products entering and leaving exactly ([`Csum::add_prod`]).
-/// The sums are rebuilt at every anchor (where `K` changes) and whenever one went
-/// inexact. Shared by linearreg / slope / intercept / angle / tsf.
+/// The sums are `Σy` and `Σ age·y` (the newest bar has age 0), both exact — the weighted
+/// terms are exact products ([`Csum::add_prod`]) — so they are first-moment slides,
+/// re-summed only where one went inexact. They slide in O(1): when the window advances
+/// one bar every retained point's age rises by one, so `Σ age·y` gains `Σy` and loses
+/// the departing point's full `period·y` — `sum_xy += sum_y − period·leaving` (old
+/// `sum_y`), then `sum_y += entering − leaving`. The fit reads them shifted by the
+/// window's anchor-row value `K` ([`linreg_fit_of`]), so the slope's numerator carries
+/// no cancellation between the level and the trend. Shared by linearreg / slope /
+/// intercept / angle / tsf.
 fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, Vec<f64>, bool) {
     let n = data.len();
     if period == 0 || period > n {
@@ -53,23 +52,22 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
     let mut finite = true;
     let (mut sum_d, mut sum_ad) = (Csum::default(), Csum::default());
     for i in 0..n {
-        let anchor = anchors.tick();
-        if anchor {
+        if anchors.tick() {
             k = data[i];
         }
         let entering = data[i];
         let came_in = guard.enter(entering.is_finite());
         let leaving = (i >= period).then(|| data[i - period]);
         let went_out = leaving.is_some_and(|l| guard.leave(l.is_finite()));
-        linreg_slide(&mut sum_d, &mut sum_ad, p, came_in.then_some(entering - k), leaving.filter(|_| went_out).map(|l| l - k));
+        linreg_slide(&mut sum_d, &mut sum_ad, p, came_in.then_some(entering), leaving.filter(|_| went_out));
         let full = i + 1 >= period;
         let rows = &data[(i + 1).saturating_sub(period)..=i];
-        if anchor || (full && !(sum_d.is_exact() && sum_ad.is_exact())) {
+        if full && !(sum_d.is_exact() && sum_ad.is_exact()) {
             // The fast pass stops once a non-finite row has poisoned it (the careful
             // pass recomputes every row); the careful pass always re-sums.
             finite &= sum_d.value().is_finite() && sum_ad.value().is_finite();
             if finite || !guard.counts(false) {
-                (sum_d, sum_ad) = linreg_sums(rows, k, |y| guard.counts(y.is_finite()));
+                (sum_d, sum_ad) = linreg_sums(rows, |y| guard.counts(y.is_finite()));
             }
         }
         if !full {
@@ -78,7 +76,7 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
         let (m, b) = if guard.clean() {
             linreg_fit_of(p, sum_x, divisor, k, &sum_d, &sum_ad)
         } else {
-            let (sd, sad) = linreg_sums(rows, k, |_| true);
+            let (sd, sad) = linreg_sums(rows, |_| true);
             linreg_fit_of(p, sum_x, divisor, k, &sd, &sad)
         };
         slope.set(i, m);
@@ -88,36 +86,44 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
     (slope.finish(), intercept.finish(), finite)
 }
 
-/// The fit sums `(Σd, Σ age·d)` of one window's `rows` (oldest first, the newest at age
-/// 0) shifted by `k`, of the rows `admit` keeps — every re-anchoring, and a window
-/// holding a bad row.
-fn linreg_sums(rows: &[f64], k: f64, admit: impl Fn(f64) -> bool) -> (Csum, Csum) {
-    let [sum_d, sum_ad] = Csum::settle(linreg_sums_in(rows, k, &admit), || linreg_sums_in(rows, k, &admit));
-    (sum_d, sum_ad)
+/// The fit sums `(Σy, Σ age·y)` of one window's `rows` (oldest first, the newest at age
+/// 0), of the rows `admit` keeps — every re-sum, and a window holding a bad row (out of
+/// the slide's loop).
+#[cold]
+#[inline(never)]
+fn linreg_sums(rows: &[f64], admit: impl Fn(f64) -> bool) -> (Csum, Csum) {
+    let [sum_y, sum_xy] = Csum::settle(linreg_sums_in(rows, &admit), || linreg_sums_in(rows, &admit));
+    (sum_y, sum_xy)
 }
 
 /// [`linreg_sums`] over an [`Accumulator`].
-fn linreg_sums_in<A: Accumulator>(rows: &[f64], k: f64, admit: &impl Fn(f64) -> bool) -> [A; 2] {
-    let (mut sum_d, mut sum_ad) = (A::default(), A::default());
+fn linreg_sums_in<A: Accumulator>(rows: &[f64], admit: &impl Fn(f64) -> bool) -> [A; 2] {
+    let (mut sum_y, mut sum_xy) = (A::default(), A::default());
     for (j, &y) in rows.iter().enumerate() {
         if admit(y) {
-            let d = y - k;
-            sum_d.add(d);
-            sum_ad.add_prod((rows.len() - 1 - j) as f64, d);
+            sum_y.add(y);
+            sum_xy.add_prod((rows.len() - 1 - j) as f64, y);
         }
     }
-    [sum_d, sum_ad]
+    [sum_y, sum_xy]
 }
 
-/// The fit `(m, b)` of a window of `p` rows from its exact shifted sums `Σd`, `Σ age·d`
-/// (`d = y − k`; `sum_x`, `divisor` from [`linreg_x_sums`]): `m = (p·Σ age·d − Σage·Σd)
-/// / divisor`, `b = k + (Σd − m·Σage) / p` — within `24·2⁻⁵³·R/p` of the exact slope
-/// for a window of range `R`, exactly 0 for a flat window.
+/// The fit `(m, b)` of a window of `p` rows from its exact sums `Σy`, `Σ age·y`
+/// (`sum_x`, `divisor` from [`linreg_x_sums`]), read on the data shifted by `k`, the
+/// window's anchor-row value ([`deviation`]): `m = (p·Σ age·(y − k) − Σage·Σ(y − k)) /
+/// divisor`, `b = k + (Σ(y − k) − m·Σage) / p` — within `90·2⁻⁵³·R/(p + 1) + 2⁻⁵³·|m|`
+/// of the exact slope for a window of range `R`, exactly 0 for a flat window. A window
+/// holding a non-finite value reads its IEEE value.
 #[inline(always)]
-fn linreg_fit_of(p: f64, sum_x: f64, divisor: f64, k: f64, sum_d: &Csum, sum_ad: &Csum) -> (f64, f64) {
-    let sd = sum_d.value();
-    let m = (p * sum_ad.value() - sum_x * sd) / divisor;
-    (m, k + (sd - m * sum_x) / p)
+fn linreg_fit_of(p: f64, sum_x: f64, divisor: f64, k: f64, sum_y: &Csum, sum_xy: &Csum) -> (f64, f64) {
+    let total = sum_y.value();
+    if !total.is_finite() {
+        let m = (p * sum_xy.value() - sum_x * total) / divisor;
+        return (m, (total - m * sum_x) / p);
+    }
+    let dy = deviation(sum_y, p, k);
+    let m = (p * deviation(sum_xy, sum_x, k) - sum_x * dy) / divisor;
+    (m, k + (dy - m * sum_x) / p)
 }
 
 /// The fit's closed-form `x` sums over ages `0..period`: `(Σx, Σx·Σx − period·Σx²)`.
@@ -132,9 +138,9 @@ fn linreg_x_sums(period: usize) -> (f64, f64) {
     (sum_x, sum_x * sum_x - p * sum_x_sqr)
 }
 
-/// Slide `(Σd, Σ age·d)` one bar: every retained point ages by one (`Σ age·d` gains
-/// the old `Σd`), the leaving point (if it was in the sums) drops its `period·d`, then
-/// `Σd` takes the entering point and drops the leaving one.
+/// Slide `(Σy, Σ age·y)` one bar: every retained point ages by one (`Σ age·y` gains
+/// the old `Σy`), the leaving point (if it was in the sums) drops its `period·y`, then
+/// `Σy` takes the entering point and drops the leaving one.
 #[inline(always)]
 fn linreg_slide(sum_y: &mut Csum, sum_xy: &mut Csum, p: f64, entering: Option<f64>, leaving: Option<f64>) {
     sum_xy.add_sum(sum_y);
@@ -186,7 +192,7 @@ pub fn tsf(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 /// Rolling population variance over `period`: `(Σd² − (Σd)²/p) / p` on the data shifted
 /// by the window's anchor-row value (`d = x − K`, see [`crate::accum`]'s second moments),
 /// O(n) via sliding exact sums of `x` and `d²` in TA-Lib's operation order (add the
-/// current row, read, drop the trailing one) — within `(24p + 2)·2⁻⁵³` of the exact
+/// current row, read, drop the trailing one) — within `(36p + 2)·2⁻⁵³` of the exact
 /// variance however the window's level dwarfs its spread, never negative, exactly zero
 /// for a flat window (TA-Lib's one-pass `Σx²/p − (Σx/p)²` instead cancels to rounding
 /// noise, which can be negative). NaN during warm-up. Shared by `var` and
@@ -363,7 +369,7 @@ fn correl_terms(x: f64, y: f64, (kx, ky): (f64, f64)) -> [f64; 5] {
 
 /// Pearson's r of a window of `p` rows from its exact sums ([`correl_terms`]); 0 when
 /// either variance is exactly zero. Clamped to `[-1, 1]` as a last resort: each centred
-/// moment is within `(24p + 2)·2⁻⁵³` of exact relative to `sqrt(Σdx²·Σdy²)`, so
+/// moment is within `(36p + 2)·2⁻⁵³` of exact relative to `sqrt(Cxx·Cyy)`, so
 /// Cauchy–Schwarz can only be overshot by that rounding.
 #[inline]
 fn correl_of_sums(s: &[Csum; 5], (kx, ky): (f64, f64), p: f64) -> f64 {
@@ -383,7 +389,7 @@ fn correl_row(slide: &mut Slide<5>, x: &[f64], y: &[f64], period: usize, i: usiz
     let a = shift_row(i, slide.pos(), period);
     let k = (x[a], y[a]);
     let term = |j: usize| correl_terms(x[j], y[j], k);
-    match slide.row(Order::DropAdd, period, i, |j| (term(j), x[j].is_finite() && y[j].is_finite())) {
+    match slide.row_shifted(Order::DropAdd, period, i, |j| (term(j), x[j].is_finite() && y[j].is_finite())) {
         Window::Partial => f64::NAN,
         Window::Sums(s) => correl_of_sums(&s, k, period as f64),
         Window::Bad => correl_of_sums(&Csum::of_rows((i + 1 - period..=i).map(term)), k, period as f64),
@@ -494,7 +500,7 @@ fn beta_row(slide: &mut Slide<4>, x: &[f64], y: &[f64], period: usize, j: usize)
         let (rx, ry) = beta_returns(x, y, t);
         rx.is_finite() && ry.is_finite()
     };
-    match slide.row(Order::AddReadDrop, period, j, |t| (term(t), finite(t))) {
+    match slide.row_shifted(Order::AddReadDrop, period, j, |t| (term(t), finite(t))) {
         Window::Partial => f64::NAN,
         Window::Sums(s) => beta_of_sums(&s, k, period as f64),
         Window::Bad => beta_of_sums(&Csum::of_rows((j + 1 - period..=j).map(term)), k, period as f64),
@@ -521,7 +527,7 @@ pub enum LinregLine {
     Forecast,
 }
 
-/// The length of [`linreg_fit`]'s resumable state: `[Σd, Σage·d]` (each a [`Csum`]),
+/// The length of [`linreg_fit`]'s resumable state: `[Σy, Σage·y]` (each a [`Csum`]),
 /// the non-finite rows in the window, the rows of the first window seen, the absolute
 /// position of the next row (for re-anchoring).
 const LINREG_STATE: usize = 2 * Csum::STATE + 3;
@@ -565,12 +571,11 @@ pub fn linreg_step(
     if leaving.is_some_and(|l| !l.is_finite()) {
         bad -= 1;
     }
-    let entering = y.is_finite().then_some(y - k);
-    linreg_slide(&mut sum_d, &mut sum_ad, p, entering, leaving.filter(|l| l.is_finite()).map(|l| l - k));
+    linreg_slide(&mut sum_d, &mut sum_ad, p, y.is_finite().then_some(y), leaving.filter(|l| l.is_finite()));
     let full = seen + 1 >= period;
     let rows = &data[(row + 1).saturating_sub(period)..=row];
-    if anchors_at(pos, period) || (full && !(sum_d.is_exact() && sum_ad.is_exact())) {
-        (sum_d, sum_ad) = linreg_sums(rows, k, f64::is_finite);
+    if full && !(sum_d.is_exact() && sum_ad.is_exact()) {
+        (sum_d, sum_ad) = linreg_sums(rows, f64::is_finite);
     }
     let value = if !full {
         f64::NAN
@@ -578,7 +583,7 @@ pub fn linreg_step(
         let (m, b) = if bad == 0 {
             linreg_fit_of(p, sum_x, divisor, k, &sum_d, &sum_ad)
         } else {
-            let (sd, sad) = linreg_sums(rows, k, |_| true);
+            let (sd, sad) = linreg_sums(rows, |_| true);
             linreg_fit_of(p, sum_x, divisor, k, &sd, &sad)
         };
         match line {
@@ -621,7 +626,7 @@ pub fn var_step(
     let p = period as f64;
     let mut slide = Slide::<2>::from_state(state)?;
     let k = data[shift_row(row, slide.pos(), period)];
-    let variance = match slide.row(Order::AddReadDrop, period, row, |j| {
+    let variance = match slide.row_shifted(Order::AddReadDrop, period, row, |j| {
         let x = data[j];
         (shifted_terms(x, k), x.is_finite())
     }) {

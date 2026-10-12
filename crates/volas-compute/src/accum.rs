@@ -121,8 +121,11 @@ impl Csum {
     }
 
     /// [`of`](Self::of) for `K` sums at once, from rows of `K` terms each — one pass
-    /// over the rows in the common case.
-    #[inline]
+    /// over the rows in the common case. Out of line and cold: a kernel's slide calls it
+    /// once per `W` rows at most (a second moment's anchor) or where a sum went inexact,
+    /// so its loop stays small.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn of_rows<const K: usize, I>(rows: I) -> [Self; K]
     where
         I: IntoIterator<Item = [f64; K]>,
@@ -292,12 +295,15 @@ pub(crate) fn two_prod(a: f64, b: f64) -> (f64, f64) {
 // linear deviation `Σd = Σx − n·K` is taken from its exact words ([`deviation`]).
 //
 // Accuracy (`u = 2⁻⁵³`, `n` rows, `R` the window's range, `C` its exact centred sum of
-// squares `Σ(x − x̄)²`): each `d` is rounded once (`|δ| ≤ u·R`, as `|x − K| ≤ R`), each
-// `d²` once, their sum is exact (then rounded once), and `Σd` is within `3u|Σd| +
-// 2u²n|K|` of exact — so the computed `C` is within `≈ 12·n·u·R²` of exact, and since a
-// window spanning `R` has `C ≥ R²/2`, within `(24n + 2)·u` **relative** (`R ≥ 2u|K|`
-// for any two distinct values). A flat window has `d = 0` and `Σd = 0` exactly: `C` is
-// exactly `0`. A covariance is bounded the same way against `sqrt(Cxx·Cyy)`.
+// squares `Σ(x − x̄)²`, no deviation / square / product underflowing): each `d` and `d²`
+// is rounded once (`≤ 3u·d²` together, as `|x − K| ≤ R`), their sum is exact (then
+// rounded once), and `Σd` is within `2u|Σd| + 4u²n|K|` of exact — so the computed `C` is
+// within `10·u·n·R² + 8u²·n·|K|·R + u|C|` of exact. Distinct doubles near `K` differ by
+// at least `u·|K|` (a double's spacing exceeds `u` times its magnitude), so `u|K| ≤ R`,
+// and a window spanning `R` has `C ≥ R²/2`: within `(36n + 2)·u` **relative**. A flat
+// window has `d = 0` and `Σd = 0` exactly: `C` is exactly `0`. A covariance is bounded
+// the same way against `sqrt(Cxx·Cyy)`. The full statement is docs/indicator-inputs.md
+// "Centred moments".
 
 /// The row (index into the rows of the series, row `i` at absolute position `pos`) whose
 /// value shifts a `period`-row window ending at row `i`: its anchor row, the one whose
@@ -533,10 +539,9 @@ impl Anchors {
 
 /// `kernels::sma`'s fast path over a series that arrives one value at a time from its
 /// first finite value on — for fused kernels that smooth a line they produce
-/// themselves. A `W`-row window: add the new value, drop the one `W` back, re-anchor
-/// when told to (the caller's [`Anchors`] tick on a full window, `i + 1 >= W`) or when
-/// the sum went inexact, and read the mean once `W` values are in. Bit-identical to
-/// `sma` over the same series.
+/// themselves. A `W`-row window: add the new value, drop the one `W` back, re-sum the
+/// window where the sum went inexact, and read the mean once `W` values are in.
+/// Bit-identical to `sma` over the same series.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StreamMean<const W: usize> {
     ring: [f64; W],
@@ -551,10 +556,9 @@ impl<const W: usize> StreamMean<W> {
         StreamMean { ring: [0.0; W], count: 0, sum: Csum::default(), clean: true }
     }
 
-    /// Take the next value; `anchor` re-sums the window from its own values. The mean
-    /// once the window is full.
+    /// Take the next value. The mean once the window is full.
     #[inline(always)]
-    pub(crate) fn push(&mut self, x: f64, anchor: bool) -> Option<f64> {
+    pub(crate) fn push(&mut self, x: f64) -> Option<f64> {
         let slot = self.count % W;
         self.sum.add(x);
         if self.count >= W {
@@ -562,7 +566,7 @@ impl<const W: usize> StreamMean<W> {
         }
         self.ring[slot] = x;
         self.count += 1;
-        if anchor || !self.sum.is_exact() {
+        if !self.sum.is_exact() {
             self.clean &= self.sum.value().is_finite();
             let m = self.count.min(W);
             self.sum = Csum::of((0..m).map(|k| self.ring[(self.count - m + k) % W]));

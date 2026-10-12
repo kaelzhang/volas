@@ -5,7 +5,7 @@ cancel catastrophically: at a price level of `12345.67` a window's variance of `
 is lost in rounding, a flat window's correlation comes out as `-1`, and a variance can
 go negative. volas shifts the data by a value inside the window (the value at its
 anchor row) before squaring, so the deviations carry no cancellation: a flat window is
-exactly flat, a variance is within the documented `(24n + 2)·2⁻⁵³` relative bound
+exactly flat, a variance is within the documented `(36n + 2)·2⁻⁵³` relative bound
 (docs/indicator-inputs.md "Centred moments"), a correlation stays in `[-1, 1]`, and a
 zero variance is tested exactly.
 """
@@ -23,7 +23,7 @@ U = Fraction(1, 2**53)
 def _var_bound(n):
     """The documented relative bound of a shifted variance over `n` rows
     (docs/indicator-inputs.md "Centred moments")."""
-    return (24 * n + 2) * U
+    return (36 * n + 2) * U
 
 LEVELS = (0.1, 100.0, 1234.5, 12345.67, 98765.4321)
 
@@ -119,7 +119,7 @@ def test_a_near_flat_slope_is_exact():
         sxy = sum(a * b for a, b in zip(ages, w))
         exact = -(20 * sxy - sx * sy) / (20 * sxx - sx * sx)  # per bar forward in time
         span = Fraction(max(close[i - 19:i + 1])) - Fraction(min(close[i - 19:i + 1]))
-        assert abs(Fraction(slope[i]) - exact) <= 24 * U * span / 20, (i, slope[i], float(exact))
+        assert abs(Fraction(slope[i]) - exact) <= 90 * U * span / 21 + U * abs(exact), (i, slope[i], float(exact))
 
 
 @pytest.mark.parametrize("level", LEVELS)
@@ -168,3 +168,40 @@ def test_mfi_does_not_depend_on_the_volume_unit():
     flat = np.full(40, 7.0)
     zero = _check_paths({"high": flat, "low": flat, "close": flat, "volume": np.full(40, 1e6)}, "mfi:14")
     assert (zero[14:] == 0.0).all()
+
+
+def _exact_present_var(window, ddof=1):
+    w = [Fraction(float(v)) for v in window if not np.isnan(v)]
+    m = sum(w) / len(w)
+    return sum((v - m) ** 2 for v in w) / (len(w) - ddof)
+
+
+def _check_present_var(x, w, min_periods=2):
+    var = np.asarray(DataFrame({"close": x})["close"].rolling(w, min_periods=min_periods).var(), dtype=float)
+    for i in range(len(x)):
+        win = x[max(0, i - w + 1):i + 1]
+        present = win[~np.isnan(win)]
+        if len(present) < max(min_periods, 2):
+            assert np.isnan(var[i]), i
+            continue
+        exact = _exact_present_var(win)
+        assert abs(Fraction(var[i]) - exact) <= exact * _var_bound(len(present)), (i, var[i], float(exact))
+
+
+def test_the_window_shift_stays_inside_the_window_across_missing_rows():
+    """An anchor segment whose rows are all missing shifts by the nearest present value
+    before the anchor inside the window, never by a value that has left it."""
+    x = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1e9, 1.0 + 1e-7, 1.0 + 2e-7, 1.0 + 3e-7, 1.0 + 4e-7,
+                  np.nan, np.nan, 2.0, 3.0, 4.0, 5.0])
+    _check_present_var(x, 5)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_the_window_variance_is_within_its_bound_with_missing_runs(seed):
+    rng = np.random.default_rng(seed)
+    x = 12345.67 + rng.normal(0, 1e-6, 300)
+    x[rng.random(300) < 0.08] = 1e9  # outliers that leave
+    for start in rng.integers(0, 290, 25):
+        x[start:start + rng.integers(1, 9)] = np.nan  # missing runs, some covering anchors
+    for w in (3, 5, 8):
+        _check_present_var(x, w)

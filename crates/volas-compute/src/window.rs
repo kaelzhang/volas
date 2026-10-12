@@ -110,9 +110,11 @@ impl Infinities {
 /// (`math.fsum`), however long the slide. A `shifted` slide (a second moment) also
 /// re-sums at every row whose absolute position (row 0 at `origin`) is a multiple of the
 /// window length (an anchor): its `shift` is the first finite value at or after the
-/// latest anchor (for an expanding window, the first finite value) — always inside the
-/// window, the shift of [`crate::accum`]'s second moments; the sums are rebuilt when it
-/// is set. An expanding window never drops a value: its sums are kept exactly by
+/// latest anchor (for an expanding window, the first finite value) or, until one has
+/// arrived, the nearest finite value before the anchor inside the window — always a
+/// value of the window (a window with no finite value reads no shift), a function of its
+/// contents and its rows' absolute positions alone, the shift of [`crate::accum`]'s
+/// second moments; the sums are rebuilt whenever it changes. An expanding window never drops a value: its sums are kept exactly by
 /// [`Exact`] expansions once the compensated form can no longer hold them — after an
 /// extreme value (its magnitude far from the rest's), every later row is added to the
 /// expansion and rounded from it, an `O(expansion words)` step with an allocation per
@@ -152,7 +154,13 @@ fn present_sums<const K: usize>(
         }
         let anchor = shifted && rolling && anchors.tick();
         if anchor {
+            // A new segment: until its first present value arrives, the shift is the
+            // nearest present value before the anchor inside the window (if any).
             settled = false;
+            let earlier = &data[win_start(i, window)..i];
+            if let Some(&v) = earlier.iter().rev().find(|v| v.is_finite()) {
+                k = v;
+            }
         }
         let x = data[i];
         let resettle = shifted && !settled && x.is_finite();
@@ -282,7 +290,7 @@ fn buf_var(b: &[f64], ddof: usize) -> f64 {
 
 /// The variance with `ddof` degrees of freedom of each window's present values, from
 /// their exact sums `[Σx, Σ(x − K)²]` with the window's shift `K` ([`present_sums`]):
-/// `(Σd² − (Σd)²/n) / (n − ddof)` ([`centred`]) — within `(24n + 2)·2⁻⁵³` of the exact
+/// `(Σd² − (Σd)²/n) / (n − ddof)` ([`centred`]) — within `(36n + 2)·2⁻⁵³` of the exact
 /// variance however the window's level dwarfs its spread, exactly zero for a constant
 /// window, NaN when the window holds an infinity or no more than `ddof` values. O(n):
 /// one exact sliding pass, no per-window rescan.

@@ -1,58 +1,57 @@
 //! Kaufman Adaptive Moving Average (KAMA) and its adaptive smoothing constant.
 
-use crate::accum::{anchors_at, Csum};
+use crate::accum::Csum;
 
 /// Kaufman Adaptive Moving Average (TA-Lib KAMA). The smoothing constant adapts each
 /// bar via the efficiency ratio `ER = |price[i]-price[i-period]| / Σ|1-bar changes|`:
 /// `SC = (ER·(fast−slow) + slow)²` with fast `=2/3`, slow `=2/31`; then
 /// `KAMA[i] = KAMA[i-1] + SC·(price[i] − KAMA[i-1])`, seeded `KAMA[period-1] =
 /// price[period-1]`. First value at index `period` (lookback = period). TA-Lib's
-/// sliding-sum recurrence, the sum of 1-bar changes exact ([`Csum`], re-anchored at
-/// absolute positions — row 0 is at `origin`) so a window's efficiency ratio is its own
-/// however long the slide. Every path — this, [`kama_final_state`], [`kama_resume`],
+/// sliding-sum recurrence, the sum of 1-bar changes exact ([`Csum`], re-summed where it
+/// could not hold its sum) so a window's efficiency ratio is its own however long the
+/// slide — which is also why it does not depend on `_origin`, the frame's position
+/// every kernel takes. Every path — this, [`kama_final_state`], [`kama_resume`],
 /// [`kama_resume_one`] — advances by the one [`kama_bar`].
-pub fn kama(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
+pub fn kama(data: &[f64], period: usize, _origin: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period + 1 > n {
         return out;
     }
     // The caller runs KAMA on the complete rows of its input (see `crate::missing`).
-    let mut k = KamaState::seed(data, period, origin);
+    let mut k = KamaState::seed(data, period);
     for (today, o) in out.iter_mut().enumerate().skip(period) {
         *o = kama_bar(data, period, today, &mut k);
     }
     out
 }
 
-/// KAMA's running state as of a bar: the KAMA value, the sum of the window's 1-bar
-/// changes, and the absolute position of the next bar.
+/// KAMA's running state as of a bar: the KAMA value and the sum of the window's 1-bar
+/// changes.
 #[derive(Clone, Copy, Debug)]
 struct KamaState {
     kama: f64,
     sum_roc1: Csum,
-    pos: usize,
 }
 
-/// The length of a KAMA state: `[kama, sum, comp, position]`.
-const KAMA_STATE: usize = 2 + Csum::STATE;
+/// The length of a KAMA state: `[kama, sum, comp]`.
+const KAMA_STATE: usize = 1 + Csum::STATE;
 
 impl KamaState {
     /// The state before bar `period` (the first KAMA): the prior KAMA seeded with
     /// yesterday's price, the sum not yet formed (the first bar forms it).
-    fn seed(data: &[f64], period: usize, origin: usize) -> Self {
-        KamaState { kama: data[period - 1], sum_roc1: Csum::default(), pos: origin + period }
+    fn seed(data: &[f64], period: usize) -> Self {
+        KamaState { kama: data[period - 1], sum_roc1: Csum::default() }
     }
 
     fn from_state(state: &[f64]) -> Option<Self> {
-        let [kama, sum, comp, pos] = *state else { return None };
-        Some(KamaState { kama, sum_roc1: Csum::from_state(&[sum, comp])?, pos: pos as usize })
+        let [kama, sum, comp] = *state else { return None };
+        Some(KamaState { kama, sum_roc1: Csum::from_state(&[sum, comp])? })
     }
 
     fn write_state(&self, out: &mut [f64]) {
         out[0] = self.kama;
         self.sum_roc1.write_state(&mut out[1..3]);
-        out[3] = self.pos as f64;
     }
 
     fn to_vec(self) -> Vec<f64> {
@@ -69,15 +68,16 @@ fn change(data: &[f64], j: usize) -> f64 {
 }
 
 /// Advance KAMA over bar `today` (`>= period`): slide the sum of 1-bar changes (drop
-/// the oldest, add the newest — or form it from the window at the first bar and at an
-/// anchor position), then step the recurrence. Returns the KAMA at `today`.
+/// the oldest, add the newest — or form it from the window at the first bar and where
+/// the sum could not hold itself exactly), then step the recurrence. Returns the KAMA at
+/// `today`.
 #[inline]
 fn kama_bar(data: &[f64], period: usize, today: usize, k: &mut KamaState) -> f64 {
-    if today != period && !anchors_at(k.pos, period) {
+    if today != period {
         k.sum_roc1.sub(change(data, today - period)); // drop the oldest 1-bar change
         k.sum_roc1.add(change(data, today)); // add the newest
     }
-    if today == period || anchors_at(k.pos, period) || !k.sum_roc1.is_exact() {
+    if today == period || !k.sum_roc1.is_exact() {
         k.sum_roc1 = Csum::of((today + 1 - period..=today).map(|j| change(data, j)));
     }
     let period_roc = data[today] - data[today - period];
@@ -86,7 +86,6 @@ fn kama_bar(data: &[f64], period: usize, today: usize, k: &mut KamaState) -> f64
     // path. KAMA is contractive (sc ≤ (2/3)² < 1), so the ~1e-16 divergence decays —
     // within the 1e-9 TA-Lib parity tolerance.
     k.kama = (data[today] - k.kama).mul_add(sc, k.kama);
-    k.pos += 1;
     k.kama
 }
 
@@ -106,12 +105,12 @@ fn kama_sc(period_roc: f64, sum_roc1: f64) -> f64 {
     sc * sc
 }
 
-/// Final KAMA state `[kama, sum_roc1, comp, position]` as of the last row (row 0 at
-/// absolute position `origin`): the KAMA value at `n−1`, the exact sum of 1-bar changes
-/// for that row's window, and the absolute position of the next row. `None` if KAMA
+/// Final KAMA state `[kama, sum_roc1, comp]` as of the last row: the KAMA value at
+/// `n−1` and the exact sum of 1-bar changes for that row's window (`_origin`, the
+/// frame's position, does not enter it). `None` if KAMA
 /// never seeds (`period+1 > n`, or a leading-NaN prefix leaves too few finite values →
 /// all-NaN, keep the fallback).
-pub fn kama_final_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
+pub fn kama_final_state(data: &[f64], period: usize, _origin: usize) -> Option<Vec<f64>> {
     let n = data.len();
     if period == 0 || period + 1 > n {
         return None;
@@ -119,9 +118,9 @@ pub fn kama_final_state(data: &[f64], period: usize, origin: usize) -> Option<Ve
     // Mirror `kama`'s leading-NaN skip: seed over the first finite values.
     let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
     if start > 0 {
-        return kama_final_state(&data[start..], period, origin + start);
+        return kama_final_state(&data[start..], period, 0);
     }
-    let mut k = KamaState::seed(data, period, origin);
+    let mut k = KamaState::seed(data, period);
     for today in period..n {
         kama_bar(data, period, today, &mut k);
     }

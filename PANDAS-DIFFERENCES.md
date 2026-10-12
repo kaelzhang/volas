@@ -647,7 +647,7 @@ The window API is pandas-aligned and differential-tested method by method
   per-row cost of the compensated add. pandas's Kahan-compensated running sum keeps one
   compensation word and can lose a window to such outliers. `var()` / `std()` /
   `sem()` are the window's centred variance from exact sums of the values shifted by
-  a value inside the window (within `(24n + 2)·2⁻⁵³` relative of exact, exactly 0 for
+  a value inside the window (within `(36n + 2)·2⁻⁵³` relative of exact, exactly 0 for
   a constant window — see [centred moments](docs/indicator-inputs.md#centred-moments)),
   where pandas's running moments lose digits when a window's mean dwarfs its spread.
 

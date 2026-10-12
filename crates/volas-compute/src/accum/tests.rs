@@ -266,7 +266,7 @@ fn a_stream_mean_re_sums_an_inexact_window() {
     let mut m = StreamMean::<2>::new();
     let mut got = Vec::new();
     for x in [1e35, 1e20, 1.5, 2.5, 3.5] {
-        got.push(m.push(x, false));
+        got.push(m.push(x));
     }
     assert_eq!(got[3], Some(2.0));
     assert_eq!(got[4], Some(3.0));

@@ -221,10 +221,10 @@ impl<const K: usize> Slide<K> {
 
     /// Advance over row `i` (rows `0..i` already slid): the window of `period` rows
     /// ending at `i`. `term(j)` is row `j`'s terms and whether they belong in the
-    /// running sums (the kernel's own finiteness test, of the row itself). A window at
-    /// an anchor position (full or still filling — a shifted kernel's shift changes
-    /// there, see [`crate::accum::shift_row`]), or a full one whose sums went inexact, is
-    /// re-summed from its own rows before it is read.
+    /// running sums (the kernel's own finiteness test, of the row itself). A full window
+    /// whose sums went inexact is re-summed from its own rows before it is read — the one
+    /// re-sum a first-moment slide needs (its values are exact sums, see
+    /// [`crate::accum`]).
     #[inline]
     pub(crate) fn row(
         &mut self,
@@ -233,8 +233,34 @@ impl<const K: usize> Slide<K> {
         i: usize,
         term: impl Fn(usize) -> ([f64; K], bool),
     ) -> Window<K> {
+        self.slide(order, period, i, false, term)
+    }
+
+    /// [`row`](Self::row) for a shifted second moment: its window is also re-summed at
+    /// every anchor position (full or still filling), where its shift changes (see
+    /// [`crate::accum::shift_row`]).
+    #[inline]
+    pub(crate) fn row_shifted(
+        &mut self,
+        order: Order,
+        period: usize,
+        i: usize,
+        term: impl Fn(usize) -> ([f64; K], bool),
+    ) -> Window<K> {
+        self.slide(order, period, i, true, term)
+    }
+
+    #[inline(always)]
+    fn slide(
+        &mut self,
+        order: Order,
+        period: usize,
+        i: usize,
+        shifted: bool,
+        term: impl Fn(usize) -> ([f64; K], bool),
+    ) -> Window<K> {
         let full = i + 1 >= period;
-        let anchor = anchors_at(self.pos, period);
+        let anchor = shifted && anchors_at(self.pos, period);
         self.pos += 1;
         let rows = (i + 1).saturating_sub(period)..=i;
         match order {

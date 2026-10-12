@@ -63,18 +63,25 @@ ACCUMULATING = {
 }
 
 
+# Second-moment commands: their windows shift by the value at a row of absolute
+# position (docs/indicator-inputs.md "Centred moments"), so a window recompute keeps the
+# rows' positions (a slice) to read the full computation's bits — as the engine's does.
+SHIFTED = {"var", "stddev", "boll", "bbw", "hv", "correl", "beta", "linearreg", "linearreg_angle",
+           "linearreg_intercept", "linearreg_slope", "tsf", "sem"}
+
+
 def _window_matches(directive, data):
     """Whether computing over a window of rows that ends at the last row reproduces the
-    full computation, the window a slice keeping its rows' absolute positions (as the
-    engine's window recompute does — second moments shift by the value at a row of
-    absolute position, see docs/indicator-inputs.md)."""
+    full computation: a fresh frame of those rows (so a dependence on the series' start
+    shows), or a slice keeping their positions for the shift-dependent second moments."""
     frame = DataFrame(data)
     full = np.asarray(frame.exec(directive), dtype=float)
     lb = volas.directive_lookback(directive)
     win = 2 * (lb + 1)
+    shifted = re.split(r"[.:@]", directive)[0] in SHIFTED
     for vr in range(win + 1, N):
         start = vr - win
-        part = frame.iloc[start:]
+        part = frame.iloc[start:] if shifted else DataFrame({k: v[start:] for k, v in data.items()})
         tail = np.asarray(part.exec(directive), dtype=float)[vr - start:]
         want = full[vr:]
         same = (tail == want) | (np.isnan(tail) & np.isnan(want))

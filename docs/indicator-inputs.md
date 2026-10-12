@@ -93,29 +93,38 @@ squaring: `d = x − K`, and the centred sum of squares is `C = Σd² − (Σd)�
 value at the window's anchor row — the row whose absolute position is a multiple of the
 window length (any `W` consecutive rows hold exactly one; where a new anchor enters, the
 sums are rebuilt from the window's own rows with its value — `O(W)` once per `W` rows).
-It is a function of
-the absolute position alone, so the full computation, a resume, a live append, a slice
-and a bounded frame all shift by the same value and agree bit for bit. `Σx` stays an
-exact sum (so `boll`'s middle band is `ma`'s exact mean), `Σd²` is the exact sum of the
-rounded squares, and `Σd` is taken from `Σx`'s exact value less the exact product
-`n·K`. The regression slope needs no extra sums: `Σ age·y` is already exact (its terms
-are exact products), so its numerator `n·Σ age·y − Σage·Σy` is formed on the data
-shifted by the window's exact mean. The window API's `var()` / `std()` / `sem()` shift
-by the first present value of each anchor segment.
+It is a function of the absolute position alone, so the full computation, a resume, a
+live append, a slice and a bounded frame all shift by the same value and agree bit for
+bit. `Σx` stays an exact sum (so `boll`'s middle band is `ma`'s exact mean), `Σd²` is
+the exact sum of the rounded squares, and `Σd` is taken from `Σx`'s exact value less
+the exact product `n·K`. The regression slides the exact sums `Σy` and `Σ age·y` (the
+weighted terms are exact products, so no shift is needed to keep them exact) and reads
+them on the data shifted by the same anchor value `K`: `Σd = Σy − n·K` and `Σ age·d =
+Σ age·y − K·Σage` from their exact words, then `m = (n·Σ age·d − Σage·Σd) / divisor`
+and the intercept `K + (Σd − m·Σage) / n`. The window API's
+`var()` / `std()` / `sem()` skip missing values: there `K` is the first present value
+at or after the anchor or, until one arrives, the nearest present value before it in
+the window.
 
-**Accuracy.** Let `u = 2⁻⁵³`, `n` the window's rows, `R` its range (max − min) and `C*`
-its exact centred sum of squares. Every `|x − K| ≤ R`, so rounding each deviation
-costs at most `u·R`, each square `u·d²`, and the sum of the squares is exact before its
-one rounding; `Σd` is within `3u·|Σd| + 2u²·n·|K|` of exact. Collecting the terms, the
-computed `C` is within `12·n·u·R²` of `C*`; a window spanning `R` has `C* ≥ R²/2`, and two
-distinct doubles differ by at least `2u·|K|`, so
+**Accuracy.** Let `u = 2⁻⁵³`, `n` the window's rows, `R` its range (max − min), `C*` its
+exact centred sum of squares, and assume no deviation, square or product underflows
+(every nonzero one is at least `2⁻¹⁰²²` in magnitude; deviations of normal-range prices
+are far from that). Every `|x − K| ≤ R` and `|Σd| ≤ n·R`. Rounding each deviation and
+each square costs at most `3u·d²`, the exact sum of the squares is rounded once (`u`),
+and `Σd` is within `2u·|Σd| + 4u²·n·|K|` of exact; squaring and dividing it adds `2u`.
+So the computed `C` is within `10·u·n·R² + 8u²·n·|K|·R + u·|C|` of `C*`. Two distinct
+doubles near `K` differ by at least `u·|K|` (a double's spacing exceeds `u` times its
+magnitude), so `u·|K| ≤ R`, and a window spanning `R` has `C* ≥ R²/2`; hence
 
-- a variance is within **`(24·n + 2)·2⁻⁵³` relative** of the exact one (a standard
-  deviation within half that, plus its square root's rounding) — `≈ 5.4e-14` for `n =
+- a variance is within **`(36·n + 2)·2⁻⁵³` relative** of the exact one (a standard
+  deviation within half that, plus its square root's rounding) — `≈ 8e-14` for `n =
   20`, whatever the level;
-- a correlation is within `~(50·n)·2⁻⁵³` absolute of the exact one, and is clamped to
-  `[-1, 1]` (Cauchy–Schwarz can only be overshot by that rounding);
-- a regression slope is within `24·2⁻⁵³·R / n` absolute of the exact one;
+- a correlation is within `(72·n + 6)·2⁻⁵³` absolute of the exact one (its covariance
+  is bounded the same way against `sqrt(Cxx·Cyy)`), and is clamped to `[-1, 1]`
+  (Cauchy–Schwarz can only be overshot by that rounding);
+- a regression slope `m` is within `90·2⁻⁵³·R/(n + 1) + 2⁻⁵³·|m|` absolute of the exact
+  one (each shifted sum within `6u` of its bound — `n·R`, `Σage·R` — the numerator
+  within `15u·n·Σage·R`, the divisor `n²(n² − 1)/12`);
 - a **flat window** has every `d = 0` and `Σd = 0` exactly: its variance, deviation and
   slope are exactly `0`.
 

@@ -2,7 +2,7 @@ use ndarray::Array1;
 
 use super::av;
 use super::stochastic::{stoch_fastk, stochrsi_fastk};
-use crate::accum::{anchors_at, Accumulator, Csum};
+use crate::accum::{Accumulator, Csum};
 use crate::guard::Slide;
 use crate::missing;
 use crate::raw::kernels::{self, canonical_zero};
@@ -562,13 +562,13 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// computed on its own rows (O(period)), and the slide is re-seeded from the
 /// first clean window after it — a bad bar reaches only the windows holding it, and a
 /// value never depends on the rows after it.
-pub fn cog(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
+pub fn cog(close: &[f64], period: usize, _origin: usize) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
         return out;
     }
-    let mut state = cog_initial(origin);
+    let mut state = [0.0; COG_STATE];
     for (i, o) in out.iter_mut().enumerate() {
         *o = cog_row(close, period, i, &mut state);
     }
@@ -577,15 +577,8 @@ pub fn cog(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
 
 /// The length of [`cog`]'s state: `[Σ(1+age)·price, Σprice]` (each a [`Csum`]), the
 /// non-finite bars in the window, the bars seen (capped), whether the sums describe the
-/// window, the absolute position of the next bar (for re-anchoring).
-const COG_STATE: usize = 2 * Csum::STATE + 4;
-
-/// [`cog`]'s state before its first bar, at absolute position `origin`.
-fn cog_initial(origin: usize) -> [f64; COG_STATE] {
-    let mut st = [0.0; COG_STATE];
-    st[7] = origin as f64;
-    st
-}
+/// window.
+const COG_STATE: usize = 2 * Csum::STATE + 3;
 
 /// One row of [`cog`] at `i`, advancing `st` (bars `0..i` already seen).
 ///
@@ -599,7 +592,7 @@ fn cog_initial(origin: usize) -> [f64; COG_STATE] {
 fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) -> f64 {
     let sum_at = |k: usize| Csum::from_state(&st[2 * k..2 * k + 2]).unwrap_or_default();
     let (mut num, mut den) = (sum_at(0), sum_at(1));
-    let (bad, seen, valid, pos) = (st[4], st[5], st[6], st[7] as usize);
+    let (bad, seen, valid) = (st[4], st[5], st[6]);
     let (mut bad, seen) = (bad as usize, seen as usize);
     let pf = period as f64;
     if !close[i].is_finite() {
@@ -619,7 +612,7 @@ fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) ->
     } else {
         // Re-anchoring at an absolute position, or when a slid sum went inexact, is
         // re-seeding the window (see `crate::accum`).
-        let slid = valid && !anchors_at(pos, period);
+        let slid = valid;
         if slid {
             let leaving = close[i - period];
             num.add_sum(&den);
@@ -639,7 +632,6 @@ fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) ->
     st[4] = bad as f64;
     st[5] = (seen + 1).min(period + 1) as f64;
     st[6] = f64::from(u8::from(valid));
-    st[7] = (pos + 1) as f64;
     value
 }
 
@@ -655,7 +647,10 @@ fn cog_value(num: Csum, den: Csum) -> f64 {
 }
 
 /// [`cog`]'s window sums `[Σ(1+age)·price, Σprice]` at `i`, seeded newest first —
-/// exact (a window holding a non-finite bar takes their IEEE value).
+/// exact (a window holding a non-finite bar takes their IEEE value). Out of the
+/// slide's loop.
+#[cold]
+#[inline(never)]
 fn cog_sums(close: &[f64], i: usize, period: usize) -> [Csum; 2] {
     Csum::settle(cog_seed(close, i, period), || cog_seed(close, i, period))
 }
@@ -672,8 +667,8 @@ fn cog_seed<A: Accumulator>(close: &[f64], i: usize, period: usize) -> [A; 2] {
 }
 
 /// [`cog`]'s state after the rows of `close`.
-pub fn cog_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    crate::guard::state_after(cog_initial(origin).to_vec(), close.len(), |row, prev, next| {
+pub fn cog_state(close: &[f64], period: usize, _origin: usize) -> Option<Vec<f64>> {
+    crate::guard::state_after(vec![0.0; COG_STATE], close.len(), |row, prev, next| {
         cog_step(close, period, row, prev, next)
     })
 }

@@ -559,7 +559,7 @@ pub(crate) fn mean_std_row(
     let p = period as f64;
     let denom = (period - ddof) as f64;
     let k = term(shift_row(i, slide.pos(), period));
-    match slide.row(Order::AddDrop, period, i, |j| {
+    match slide.row_shifted(Order::AddDrop, period, i, |j| {
         let x = term(j);
         (dispersion::shifted_terms(x, k), x.is_finite())
     }) {
