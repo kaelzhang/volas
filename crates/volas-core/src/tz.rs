@@ -228,10 +228,12 @@ impl Tz {
     /// periods: a year (`2024`), a month (`2024-01`), a day (`2024-01-02`), an hour
     /// (`2024-01-02 10`), a minute (`2024-01-02 10:30`) or a second
     /// (`2024-01-02 10:30:15`), with `T` or a space between the date and the time — as
-    /// `[start, end)` instants (each period start resolved like a calendar period start,
-    /// [`Tz::day_start`]) and how many fields the text gives (1 for a year … 6 for a
-    /// second). `None` for any other text (an exact label, a fraction of a second, an
-    /// offset) and for a period outside the datetime64[ns] range.
+    /// `[start, end)` instants and how many fields the text gives (1 for a year … 6 for a
+    /// second). A day or longer starts like a calendar period ([`Tz::day_start`]); an
+    /// hour, a minute or a second names a wall clock, which must be one real instant —
+    /// a DST gap or fold is no period. `None` for any other text (an exact label, a
+    /// fraction of a second, an offset, a gap / fold wall clock) and for a period outside
+    /// the datetime64[ns] range.
     pub fn period_of_text(&self, text: &str) -> Option<(i64, i64, usize)> {
         let text = text.trim();
         let (date, time) = match text.split_once(['T', ' ']) {
@@ -268,7 +270,11 @@ impl Tz {
             5 => start + chrono::Duration::minutes(1),
             _ => start + chrono::Duration::seconds(1),
         };
-        Some((self.localize_earliest(start).ok()?, self.localize_earliest(end).ok()?, given))
+        let first = match given {
+            1..=3 => self.localize_earliest(start).ok()?,
+            _ => self.localize(start).ok()?,
+        };
+        Some((first, self.localize_earliest(end).ok()?, given))
     }
 
     /// The first real instant of the local civil day `year-month-day` in this
@@ -613,6 +619,11 @@ mod tests {
         for t in ["2024-02 10", "2024-01-02 10:00:00:00", "2024-13", "24-01", "2024-01-02 10:00:00.5", "x"] {
             assert_eq!(period(t), None, "{t}");
         }
+        // a wall clock in a DST gap or fold names no instant, so no period; a day does
+        let ny = Tz::parse("America/New_York").unwrap();
+        assert_eq!(ny.period_of_text("2024-03-10 02:30"), None);
+        assert_eq!(ny.period_of_text("2024-11-03 01:30"), None);
+        assert!(ny.period_of_text("2024-03-10").is_some());
     }
 
     #[test]
