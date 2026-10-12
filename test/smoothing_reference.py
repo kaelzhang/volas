@@ -1,10 +1,11 @@
 """TA-Lib's smoothing recurrences transcribed from the C source (TA-Lib 0.6.4 `ta_EMA.c`,
 `ta_RSI.c`, `ta_CMO.c`, `ta_ATR.c`, `ta_NATR.c`, `ta_DEMA.c`, `ta_TEMA.c`, `ta_TRIX.c`,
-`ta_T3.c`, `ta_KAMA.c`, `ta_ADOSC.c`) statement by statement, in plain IEEE double
-arithmetic: NumPy never fuses a multiply and an add, so this is TA-Lib as an unfused (no
-FMA contraction) build computes it — the reference volas reproduces bit for bit on every
-platform. The volas commands built on the same steps (SMMA, the MACD line, EFI, TSI) are
-written here on those steps too.
+`ta_T3.c`, `ta_KAMA.c`, `ta_ADOSC.c`, `ta_ADX.c`, `ta_STOCHF.c`, `ta_STOCH.c`,
+`ta_STOCHRSI.c`) statement by statement, in plain IEEE double arithmetic: NumPy never
+fuses a multiply and an add, so this is TA-Lib as an unfused (no FMA contraction) build
+computes it — the reference volas reproduces bit for bit on every platform. The volas
+commands built on the same steps (SMMA, the MACD line, EFI, TSI, Mass Index) are written
+here on those steps too.
 
 volas's documented conventions where it departs from TA-Lib are kept: a recursive command
 runs on the complete rows of its inputs (a row missing an input is deleted and gets NaN);
@@ -17,6 +18,7 @@ Outputs are full-length arrays, NaN over the warm-up.
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 import numpy as np
 
@@ -322,3 +324,121 @@ def tsi(close, long, short):
         den = _ema_list(_ema_list(am, long), short)
         return [(F(100.0) * a) / b for a, b in zip(num, den)]
     return _complete(run, close)
+
+
+def _fast_k_rows(h, l, c, period):
+    """`ta_STOCHF.c`'s raw %K over each full window: `diff = (hh − ll) / 100.0`, then
+    `(close − ll) / diff`, 0 on a flat range. A window holding a missing value is missing
+    (volas's finite-window rule)."""
+    n = len(c)
+    out = [NAN] * n
+    for i in range(period - 1, n):
+        hs, ls = h[i + 1 - period:i + 1], l[i + 1 - period:i + 1]
+        if any(math.isnan(v) for v in (*hs, *ls, c[i])):
+            continue
+        hh, ll = F(max(hs)) + F(0.0), F(min(ls)) + F(0.0)
+        diff = (hh - ll) / F(100.0)
+        out[i] = (c[i] - ll) / diff if diff != 0.0 else F(0.0)
+    return out
+
+
+def stochf_k(high, low, close, period):
+    with np.errstate(all='ignore'):
+        h, l, c = ([F(v) for v in np.asarray(a, dtype=float)] for a in (high, low, close))
+        return np.asarray(_fast_k_rows(h, l, c, period), dtype=float)
+
+
+def _exact_mean(window):
+    """The correctly rounded mean of a finite window (volas's exact window sums); a
+    window with a non-finite value takes its own plain mean."""
+    if all(math.isfinite(v) for v in window):
+        return F(float(sum(Fraction(float(v)) for v in window) / len(window)))
+    return F(sum(window, F(0.0)) / F(len(window)))
+
+
+def _sma_rows(x, period):
+    """The SMA of a series that warms up with NaN: from the first present value, a
+    window holding a missing value is missing."""
+    n = len(x)
+    out = [NAN] * n
+    start = next((i for i, v in enumerate(x) if not math.isnan(v)), n)
+    for i in range(start + period - 1, n):
+        w = x[i + 1 - period:i + 1]
+        if not any(math.isnan(v) for v in w):
+            out[i] = _exact_mean(w)
+    return out
+
+
+def stoch_k(high, low, close, fastk, slowk):
+    """STOCH's slow %K with an SMA: the SMA of the raw %K."""
+    with np.errstate(all='ignore'):
+        h, l, c = ([F(v) for v in np.asarray(a, dtype=float)] for a in (high, low, close))
+        return np.asarray(_sma_rows(_fast_k_rows(h, l, c, fastk), slowk), dtype=float)
+
+
+def stochrsi_k(close, rsi_period, fastk):
+    """STOCHRSI's %K: the raw %K over RSI (high = low = close = RSI) — a recursive
+    command, so on the complete rows (its %K window spans a deleted row)."""
+    def run(c):
+        def value(g, l):
+            s = g + l
+            return F(0.0) if s == 0.0 else F(100.0) * (g / s)
+        r = _gain_loss(c, rsi_period, value)
+        return _fast_k_rows(r, r, r, fastk)
+    return _complete(run, close)
+
+
+def adx(high, low, close, period):
+    """`ta_ADX.c` over volas's TR: Wilder's sums `s − s/p + term` of ±DM and TR seeded
+    over bars `[1, p)`, ±DI `100·(dm/tr)` and DX `100·(|−DI − +DI| / (−DI + +DI))` with
+    TA-Lib's ~0 guards, the ADX seed the mean of the DX of bars `[p, 2p)`, then
+    `((adx·(p − 1)) + dx) / p`."""
+    def zero(x):
+        return -1e-14 < x < 1e-14
+
+    def run(h, l, c):
+        n = len(c)
+        out = [NAN] * n
+        tr = _true_ranges(h, l, c)
+        pm = pp = ptr = F(0.0)
+
+        def dm(t):
+            dp, dmn = h[t] - h[t - 1], l[t - 1] - l[t]
+            return (dp if (dp > 0 and dp > dmn) else F(0.0)), (dmn if (dmn > 0 and dp < dmn) else F(0.0))
+
+        for t in range(1, period):
+            a, b = dm(t)
+            pp, pm, ptr = pp + a, pm + b, ptr + tr[t]
+        sum_dx, avg, pf = F(0.0), NAN, F(period)
+        for t in range(period, n):
+            a, b = dm(t)
+            pp = pp - pp / pf + a
+            pm = pm - pm / pf + b
+            ptr = ptr - ptr / pf + tr[t]
+            dx = None
+            if not zero(ptr):
+                pdi, mdi = F(100.0) * (pp / ptr), F(100.0) * (pm / ptr)
+                if not zero(mdi + pdi):
+                    dx = F(100.0) * (abs(mdi - pdi) / (mdi + pdi))
+            if t < 2 * period:
+                sum_dx += F(0.0) if dx is None else dx
+                if t == 2 * period - 1:
+                    avg = sum_dx / pf
+                    out[t] = avg
+            else:
+                if dx is not None:
+                    avg = wilder_step(avg, dx, period)
+                out[t] = avg
+        return out
+    return _complete(run, high, low, close)
+
+
+def mass_index(high, low, period):
+    """Mass Index: the `period`-row sum (`mean·period`, the exact mean) of `EMA9(H − L) /
+    EMA9(EMA9(H − L))`."""
+    def run(h, l):
+        single = _ema_list([a - b for a, b in zip(h, l)], 9)
+        double = _ema_list(single, 9)
+        ratio = [a / b for a, b in zip(single, double)]
+        return [m * F(period) for m in _sma_rows(ratio, period)]
+    return _complete(run, high, low)

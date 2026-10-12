@@ -80,6 +80,11 @@ CASES = {
     'adosc:3,10': lambda d: R.adosc(d['high'], d['low'], d['close'], d['volume'], 3, 10),
     'efi:13': lambda d: R.efi(d['close'], d['volume'], 13),
     'tsi:25,13': lambda d: R.tsi(d['close'], 25, 13),
+    'stochf.k:5': lambda d: R.stochf_k(d['high'], d['low'], d['close'], 5),
+    'stoch.k:5,3': lambda d: R.stoch_k(d['high'], d['low'], d['close'], 5, 3),
+    'stochrsi.k:14,5': lambda d: R.stochrsi_k(d['close'], 14, 5),
+    'adx:14': lambda d: R.adx(d['high'], d['low'], d['close'], 14),
+    'mass_index:25': lambda d: R.mass_index(d['high'], d['low'], 25),
 }
 
 
