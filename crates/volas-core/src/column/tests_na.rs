@@ -292,16 +292,16 @@ fn na_take_slice_append_preserve_validity() {
     let mut d = Column::i64(vec![1, 2]);
     d.append(&Column::i64(vec![3])).unwrap();
     assert_eq!(d.null_count(), 0);
-    // append_missing grows bool placeholder rows MISSING (never a present `false`),
+    // append_na grows bool placeholder rows MISSING (never a present `false`),
     // from a dense mask and from one that already has holes
     let mut b = Column::bool(vec![true, false]);
-    b.append_missing(2).unwrap();
+    b.append_na(2);
     assert_eq!(b.null_count(), 2);
     assert_na(&b, &[1.0, 0.0, f64::NAN, f64::NAN]);
-    b.append_missing(65).unwrap(); // crosses a bitmap word
+    b.append_na(65); // crosses a bitmap word
     assert_eq!((b.len(), b.null_count()), (69, 67));
     b.check_layout().unwrap();
-    b.append_missing(0).unwrap();
+    b.append_na(0);
     assert_eq!(b.len(), 69);
 }
 

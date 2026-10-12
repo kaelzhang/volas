@@ -74,6 +74,16 @@ pub struct DataFrame {
     origin: usize,
 }
 
+/// The layout every column a frame admits must hold (its validity covers its values,
+/// [`Column::check_layout`]) — a column assembled from its public parts may carry a
+/// mask of another length, and no frame entry point takes one.
+fn admit_layout(name: &str, col: &Column) -> Result<()> {
+    match col.check_layout() {
+        Err(VolasError::Shape(why)) => Err(VolasError::Shape(format!("column \"{name}\": {why}"))),
+        other => other,
+    }
+}
+
 impl DataFrame {
     /// Construct a frame from parallel `names` / `columns`, validating shape.
     pub fn new(names: Vec<String>, columns: Vec<Column>, index: Option<Index>) -> Result<Self> {
@@ -94,11 +104,7 @@ impl DataFrame {
                     height
                 )));
             }
-            // a column assembled from its public parts may carry a mask of another
-            // length; the frame never admits one
-            if let Err(VolasError::Shape(why)) = c.check_layout() {
-                return Err(VolasError::Shape(format!("column \"{n}\": {why}")));
-            }
+            admit_layout(n, c)?;
         }
         let index = match index {
             Some(ix) => {
@@ -258,6 +264,7 @@ impl DataFrame {
     /// Add a new column or replace an existing one (must match `height`, unless
     /// the frame currently has no columns).
     pub fn set_column(&mut self, name: &str, col: Column) -> Result<()> {
+        admit_layout(name, &col)?;
         if self.columns.is_empty() {
             self.height = col.len();
             if self.index.len() != self.height {
@@ -524,18 +531,10 @@ impl DataFrame {
             if let Some(other_pos) = other.column_pos(n) {
                 self.columns[pos].append(&other.columns[other_pos])?;
             } else {
-                // column `n` is missing from `other` — pad the new rows.
-                if self.computed.contains_key(n) {
-                    // A cached directive (F64 indicator / Bool mask): a cheap stale
-                    // placeholder (NaN / `false`); `fulfill` recomputes and overwrites
-                    // the appended tail, so a dense placeholder keeps validity simple.
-                    self.columns[pos].append_missing(oh)?;
-                } else {
-                    // A plain column keeps its data semantics: pad with dtype-preserving
-                    // NA (int / bool / str grow the validity bitmap; datetime -> NaT;
-                    // float -> NaN), never upcasting the dtype or erroring.
-                    self.columns[pos].append_na(oh);
-                }
+                // column `n` is missing from `other` — pad the new rows with
+                // dtype-preserving NA (a cached directive's refresh then writes over
+                // its stale placeholder rows), never upcasting the dtype or erroring.
+                self.columns[pos].append_na(oh);
             }
         }
         Arc::make_mut(&mut self.index).extend(&other.index)?;
@@ -622,10 +621,9 @@ impl DataFrame {
     }
 
     /// Re-cumulate the forming aggregate at `row` from all of `src`'s rows, in place, per
-    /// the fold plan `ops` (as [`fold_forming_row`](Self::fold_forming_row)): the first
-    /// row initializes each cell ([`Column::init_at`]), every later one folds in
-    /// ([`Column::combine_at`]) — exactly the batch reduce of the period, with no
-    /// allocation. Used when a bar already folded in is re-sent with new values (a
+    /// the fold plan `ops` (as [`fold_forming_row`](Self::fold_forming_row)), one pass
+    /// per column ([`Column::reduce_into`]) — exactly the batch reduce of the period,
+    /// with no allocation. Used when a bar already folded in is re-sent with new values (a
     /// max / min cannot be un-combined). Only that row changed, so each cached column
     /// keeps what it carries and goes stale from it.
     pub fn refold_forming_row(
@@ -635,11 +633,7 @@ impl DataFrame {
         ops: &[(usize, usize, CombineOp)],
     ) -> Result<()> {
         for &(dst_col, src_col, op) in ops {
-            let (dst, from) = (&mut self.columns[dst_col], &src.columns[src_col]);
-            dst.init_at(row, op, from, 0)?;
-            for r in 1..src.height {
-                dst.combine_at(row, op, from, r)?;
-            }
+            self.columns[dst_col].reduce_into(row, op, &src.columns[src_col], 0..src.height)?;
         }
         self.invalidate_computed_forming_row(row);
         Ok(())

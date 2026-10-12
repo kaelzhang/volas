@@ -14,9 +14,11 @@ use crate::*;
 /// aggregator. A column the bar does not carry (a cached directive) is not folded.
 /// Returns `None` (so the caller re-cumulates the period, which validates and
 /// converts every column before it writes) if a carried column arrives in another
-/// dtype than the frame's, or has an aggregation the support table rejects — so an
-/// in-place fold never fails half-way. Every dtype folds in place otherwise
-/// (`bool` / `str` columns by their `first` / `last`).
+/// dtype than the frame's, or has an aggregation the support table rejects, so a
+/// conversion or support error never surfaces part-way through the in-place fold
+/// (an integer `sum` overflow still can — atomicity of a failed append is owned by
+/// the append itself). Every dtype folds in place otherwise (`bool` / `str`
+/// columns by their `first` / `last`).
 pub(crate) fn build_fold_ops(
     inner: &DataFrame,
     bar: &DataFrame,

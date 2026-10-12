@@ -179,7 +179,10 @@ impl Validity {
             return;
         }
         match &mut self.0 {
-            Some(arc) => Arc::make_mut(arc).grow_missing(count),
+            Some(arc) => {
+                debug_assert_eq!(arc.len(), len, "the mask covers the column");
+                Arc::make_mut(arc).grow_missing(count)
+            }
             None => {
                 let mut bm = Bitmap::all_valid(len);
                 bm.grow_missing(count);

@@ -347,67 +347,80 @@ impl Column {
         }
     }
 
-    /// Extend a stale computed column with placeholder missing values, avoiding a
-    /// temporary one-row [`Column`] allocation on the live append path.
-    pub fn append_missing(&mut self, len: usize) -> Result<()> {
-        match self {
-            Column::F64(v) => {
-                v.append_repeated(f64::NAN, len);
-                Ok(())
-            }
-            Column::F32(v) => {
-                v.append_repeated(f32::NAN, len);
-                Ok(())
-            }
-            // A placeholder is missing, never a present `false`; the refresh writes
-            // each row's value and presence over it.
-            Column::Bool(v, val) => {
-                val.extend_missing(v.len(), len);
-                v.make_mut().extend(std::iter::repeat_n(false, len));
-                Ok(())
-            }
-            other => Err(VolasError::DType(format!(
-                "column type {} has no missing-value placeholder",
-                other.dtype()
-            ))),
-        }
-    }
-
-    /// Extend a **plain** (non-computed) column with `len` genuine missing values,
-    /// dtype-preserving: float / datetime use their in-band sentinel (`NaN` /
-    /// `NaT`), while int / bool / str grow the validity bitmap with `len` invalid
-    /// bits. Used when a column is absent from an appended frame; a cached
-    /// directive instead uses the cheaper [`append_missing`] placeholder, which
-    /// `fulfill` overwrites.
+    /// Extend the column with `len` missing values, in place and dtype-preserving
+    /// — every dtype: float / datetime use their in-band sentinel (`NaN` / `NaT`),
+    /// int / bool / str grow the validity with `len` holes (amortized O(len) on a
+    /// uniquely-owned buffer). One rule for a plain column absent from an appended
+    /// frame and for a cached directive's stale rows (its refresh writes each row's
+    /// value and presence over the placeholder, whatever dtype the directive has).
     pub fn append_na(&mut self, len: usize) {
         let old = self.len();
-        let na_validity = |val: &Validity| {
-            Validity::from_valid_iter(
-                old + len,
-                (0..old + len).map(|i| i < old && val.is_valid(i)),
-            )
-        };
         match self {
             Column::F64(v) => v.append_repeated(f64::NAN, len),
             Column::F32(v) => v.append_repeated(f32::NAN, len),
             Column::Datetime(v) => v.make_mut().extend(std::iter::repeat_n(i64::MIN, len)),
             Column::I64(v, val) => {
-                *val = na_validity(val);
+                val.extend_missing(old, len);
                 v.make_mut().extend(std::iter::repeat_n(0, len));
             }
             Column::I32(v, val) => {
-                *val = na_validity(val);
+                val.extend_missing(old, len);
                 v.make_mut().extend(std::iter::repeat_n(0, len));
             }
             Column::Bool(v, val) => {
-                *val = na_validity(val);
+                val.extend_missing(old, len);
                 v.make_mut().extend(std::iter::repeat_n(false, len));
             }
             Column::Str(v, val) => {
-                *val = na_validity(val);
+                val.extend_missing(old, len);
                 v.extend((0..len).map(|_| ""));
             }
         }
+    }
+
+    /// Overwrite rows `[from, from + src.len())` (those inside the column) with
+    /// `src`'s values and presence, in place — every dtype, `src` of this column's
+    /// dtype (else a [`VolasError::DType`] error). Backs a cached directive's tail
+    /// write after a refresh. A `str` tail is rewritten by rebuilding from `from`.
+    pub fn write_rows(&mut self, from: usize, src: &Column) -> Result<()> {
+        let n = self.len();
+        let k = src.len().min(n.saturating_sub(from));
+        let presence = |val: &mut Validity, sv: &Validity| {
+            for i in 0..k {
+                val.set(from + i, n, sv.is_valid(i));
+            }
+        };
+        match (self, src) {
+            (Column::F64(a), Column::F64(b)) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
+            (Column::F32(a), Column::F32(b)) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
+            (Column::Datetime(a), Column::Datetime(b)) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
+            (Column::I64(a, av), Column::I64(b, bv)) => {
+                a.make_mut()[from..from + k].copy_from_slice(&b[..k]);
+                presence(av, bv);
+            }
+            (Column::I32(a, av), Column::I32(b, bv)) => {
+                a.make_mut()[from..from + k].copy_from_slice(&b[..k]);
+                presence(av, bv);
+            }
+            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+                a.make_mut()[from..from + k].copy_from_slice(&b[..k]);
+                presence(av, bv);
+            }
+            (Column::Str(a, av), Column::Str(b, bv)) => {
+                let mut rebuilt = a.slice(0, from);
+                rebuilt.extend(b.iter().take(k).chain(a.iter().skip(from + k)));
+                *a = rebuilt;
+                presence(av, bv);
+            }
+            (dst, src) => {
+                return Err(VolasError::DType(format!(
+                    "cannot write {} rows into a {} column",
+                    src.dtype(),
+                    dst.dtype()
+                )))
+            }
+        }
+        Ok(())
     }
 
     /// Scatter `values` into `self` at `positions` — **the single assignment

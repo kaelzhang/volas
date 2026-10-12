@@ -33,6 +33,11 @@ fn a_frame_rejects_a_column_whose_mask_does_not_cover_it() {
         VolasError::Shape("column \"x\": validity mask covers 97 values but the column has 3".into())
     );
     assert!(Column::f64(vec![1.0]).check_layout().is_ok());
+    // nor through set_column, which leaves the frame unchanged
+    let mut df = crate::DataFrame::new(vec!["a".into()], vec![Column::f64(vec![1.0, 2.0, 3.0])], None).unwrap();
+    let forged = Column::I64(Buffer::from_vec(vec![1, 2, 3]), na(2, &[1]));
+    assert!(matches!(df.set_column("x", forged), Err(VolasError::Shape(_))));
+    assert_eq!(df.width(), 1);
 }
 
 #[test]

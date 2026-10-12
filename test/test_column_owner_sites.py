@@ -4,8 +4,10 @@
 - equality reads presence, never the payload under a missing cell;
 - a value of another dtype is stored only when it converts losslessly (assignment,
   frame append, row replacement, the time-frame fold);
-- aggregation: ``first`` / ``last`` are literal endpoints, ``max`` / ``min`` / ``sum``
-  are missing as soon as an input is — fold and batch alike, every numeric dtype;
+- aggregation: ``first`` / ``last`` / ``max`` / ``min`` / ``sum`` are missing as soon
+  as an input is — fold and batch alike, every dtype the support table admits;
+- a cached directive of any result dtype keeps working through appends, refreshes
+  and window compaction (placeholders and tail writes cover every dtype);
 - column-wise reductions keep bool columns, and float64 statistics raise past 2^53;
 - directive numbers stay exact (integer literals, comparisons) and float64 math
   raises past 2^53; directive booleans carry presence (Kleene logic) through the
@@ -253,3 +255,53 @@ def test_a_cached_boolean_keeps_missing_through_appends_and_refreshes():
     for d in BOOLS:
         assert _cells(live[d]) == _cells(full[d]), d
         assert _cells(live[d])[:2] == [NA] * 2, d  # warm-up truths are missing
+
+
+# --- cached directives of every result dtype -------------------------------------------
+
+
+@pytest.mark.parametrize('d', ['5', '-5', '(5)', '2.5', 'close > ma:3', 'ma:3'])
+def test_a_cached_directive_of_any_dtype_survives_appends(d):
+    cols = _ohlcv(20)
+    live = volas.DataFrame({k: v[:4] for k, v in cols.items()})
+    want_dtype = live[d].dtype
+    for i in range(4, 20):
+        live.append(volas.DataFrame({k: v[i:i + 1] for k, v in cols.items()}))
+        if i % 3 == 0:
+            head = volas.DataFrame({k: v[:i + 1] for k, v in cols.items()})
+            assert _cells(live[d]) == _cells(head[d]), (d, i)
+    full = volas.DataFrame(cols)
+    assert live[d].dtype == want_dtype == full[d].dtype
+    assert _cells(live[d]) == _cells(full[d]), d
+
+
+@pytest.mark.parametrize('d', ['5', 'close > ma:3', '~(close > ma:3)'])
+def test_a_cached_int_or_bool_directive_through_window_compaction(d):
+    cols = _ohlcv(60)
+    full = volas.DataFrame(cols)
+    w = volas.DataFrame({k: v[:6] for k, v in cols.items()}, window=4, max_lookback=['ma:3'])
+    w[d]
+    for i in range(6, 60):
+        w.append(volas.DataFrame({k: v[i:i + 1] for k, v in cols.items()}))
+        if i % 5 == 0:
+            w.fulfill()
+    assert _cells(w[d]) == _cells(full[d])[-4:], d
+
+
+def test_setting_a_column_checks_its_layout():
+    # a column whose validity mask does not cover it never enters a frame
+    df = volas.DataFrame({'x': [1.0, 2.0, 3.0]})
+    with pytest.raises(ValueError, match='missing mask has'):
+        df['y'] = ([1, 2, 3], [False, True], 'int64')
+
+
+@pytest.mark.parametrize('text', ['9007199254740993.0', '9007199254740993.000', '18446744073709551617.0'])
+def test_an_integral_decimal_literal_is_exact_or_raises(text):
+    df = volas.DataFrame({'n': np.array([2**53 + 1, 2**53], dtype='int64')})
+    try:
+        got = df.exec(f'n == {text}').tolist()
+    except volas.DirectiveError:
+        return  # rejected loudly
+    whole = int(text.split('.')[0])
+    assert got == [whole == 2**53 + 1, whole == 2**53]
+    assert volas.directive_stringify(f'n=={text}') != 'n==9007199254740992'

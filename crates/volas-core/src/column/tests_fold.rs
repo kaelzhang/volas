@@ -162,6 +162,50 @@ fn bool_and_str_fold_their_first_and_last_in_place() {
 }
 
 #[test]
+fn a_one_pass_reduce_equals_init_then_combine() {
+    use CombineOp::*;
+    let na = |n: usize, at: usize| Validity::from_valid_iter(n, (0..n).map(|i| i != at));
+    let srcs = [
+        Column::f64(vec![3.0, 9.0, 1.0, 4.0]),
+        Column::f64(vec![3.0, f64::NAN, 1.0, 4.0]),
+        Column::f32(vec![3.0, 9.0, 1.0, 4.0]),
+        Column::i64(vec![3, 9, 1, 4]),
+        Column::i64_masked(vec![0, 9, 1, 4], na(4, 0)),
+        Column::i32_masked(vec![3, 9, 0, 4], na(4, 2)),
+        Column::datetime(vec![3, 9, 1, 4]),
+        Column::datetime(vec![3, 9, i64::MIN, 4]),
+        Column::bool_masked(vec![true, false, true, true], na(4, 3)),
+        Column::bool(vec![true, false, true, false]),
+        Column::str(vec!["a".into(), "b".into(), "c".into(), "d".into()]),
+    ];
+    for src in &srcs {
+        for op in [Keep, Replace, Max, Min, Sum] {
+            if !op.supports(src.dtype()) {
+                continue;
+            }
+            for rows in [vec![0, 1, 2, 3], vec![1, 3], vec![2]] {
+                let mut one = src.take(&[0]);
+                one.reduce_into(0, op, src, rows.iter().copied()).unwrap();
+                let mut step = src.take(&[0]);
+                step.init_at(0, op, src, rows[0]).unwrap();
+                for &r in &rows[1..] {
+                    step.combine_at(0, op, src, r).unwrap();
+                }
+                assert!(one.equals(&step), "{} {op:?} {rows:?}", src.dtype());
+            }
+        }
+    }
+    // another source dtype folds row by row through the lossless conversion
+    let mut c = Column::i64(vec![0]);
+    c.reduce_into(0, Sum, &Column::f64(vec![2.0, 3.0]), [0, 1]).unwrap();
+    assert_eq!(c, Column::i64(vec![5]));
+    // no rows: unchanged
+    c.reduce_into(0, Sum, &Column::i64(vec![]), []).unwrap();
+    assert_eq!(c.get_i64(0), 5);
+    assert!(c.reduce_into(0, Sum, &Column::f64(vec![2.0, 3.5]), [0, 1]).is_err()); // lossy
+}
+
+#[test]
 fn first_and_last_are_missing_when_any_input_is() {
     use CombineOp::*;
     for op in [Keep, Replace] {

@@ -1,7 +1,8 @@
 //! The aggregation fold: a period's values reduced into one cell, in place. The live
-//! time-frame fold (the forming bar's update) and the batch reduce (`cumulate`) both
-//! run these kernels — [`Column::init_at`] with the period's first value, then
-//! [`Column::combine_at`] with each later one — so a fold equals the batch
+//! time-frame fold folds each new bar in ([`Column::combine_at`], after
+//! [`Column::init_at`] for the period's first value); a whole period — the batch
+//! `cumulate` and a re-sent bar's re-aggregation — reduces in one pass per column
+//! ([`Column::reduce_into`]). Both apply the same steps, so a fold equals the batch
 //! aggregation exactly, for every dtype.
 //!
 //! The rules, held here once:
@@ -62,6 +63,11 @@ impl CombineOp {
     pub fn unsupported(self, dtype: DType) -> VolasError {
         VolasError::DType(format!("cannot {} a {dtype} column", self.name()))
     }
+
+    /// Whether this is an endpoint (`first` / `last`) rather than a combination.
+    fn is_endpoint(self) -> bool {
+        matches!(self, CombineOp::Keep | CombineOp::Replace)
+    }
 }
 
 impl Column {
@@ -85,7 +91,9 @@ impl Column {
     /// a missing source makes it missing, and otherwise `Keep` (period `first`)
     /// leaves the cell, `Replace` (period `last`) takes the value, and `Max` / `Min`
     /// / `Sum` combine. Writes through `Buffer::make_mut`, so it is O(1) on a
-    /// uniquely-owned buffer. A `Str` cell folds in place only as the last row.
+    /// uniquely-owned buffer. One dtype dispatch per call; another source dtype or
+    /// an unsupported `op` takes the cold path. A `Str` cell folds in place only as
+    /// the last row.
     pub fn combine_at(
         &mut self,
         row: usize,
@@ -93,34 +101,107 @@ impl Column {
         src: &Column,
         src_row: usize,
     ) -> Result<()> {
-        if src.dtype() != self.dtype() || !op.supports(self.dtype()) {
-            return self.fold_converted(row, op, src, src_row, false);
-        }
-        if !self.is_valid(row) {
-            return Ok(()); // a missing aggregate stays missing
-        }
-        if !src.is_valid(src_row) {
-            return self.set_missing_at(row);
-        }
         let r = src_row;
-        match (op, self, src) {
-            (CombineOp::Keep, ..) => {}
-            (CombineOp::Replace, dst, src) => dst.write_present(row, src, r)?,
+        match (&mut *self, src) {
             // `make_mut` forgets the column's NaN fact; a resume then checks its few
             // rows directly (tracking it here would grow this per-bar hot path).
-            (op, Column::F64(buf), Column::F64(s)) => {
-                let b = buf.make_mut();
-                b[row] = fold_float(op, b[row], s[r]);
+            (Column::F64(buf), Column::F64(s)) => {
+                if let Some(v) = float_step(op, buf[row], s[r]) {
+                    buf.make_mut()[row] = v;
+                }
             }
-            (op, Column::F32(buf), Column::F32(s)) => {
-                let b = buf.make_mut();
-                b[row] = fold_float(op, b[row], s[r]);
+            (Column::F32(buf), Column::F32(s)) => {
+                if let Some(v) = float_step(op, buf[row], s[r]) {
+                    buf.make_mut()[row] = v;
+                }
             }
-            (op, Column::I64(buf, _), Column::I64(s, _)) => fold_int(buf, row, op, s[r], DType::I64)?,
-            (op, Column::I32(buf, _), Column::I32(s, _)) => fold_int(buf, row, op, s[r], DType::I32)?,
-            (op, Column::Datetime(buf), Column::Datetime(s)) => {
-                let b = buf.make_mut();
-                b[row] = if op == CombineOp::Max { b[row].max(s[r]) } else { b[row].min(s[r]) };
+            (Column::I64(buf, val), Column::I64(s, sv)) => {
+                int_step(buf, val, row, op, s[r], sv.is_valid(r), DType::I64)?
+            }
+            (Column::I32(buf, val), Column::I32(s, sv)) => {
+                int_step(buf, val, row, op, s[r], sv.is_valid(r), DType::I32)?
+            }
+            (Column::Datetime(buf), Column::Datetime(s)) if op != CombineOp::Sum => {
+                if let Some(v) = instant_step(op, buf[row], s[r]) {
+                    buf.make_mut()[row] = v;
+                }
+            }
+            (Column::Bool(..), Column::Bool(..)) | (Column::Str(..), Column::Str(..)) if op.is_endpoint() => {
+                if !self.is_valid(row) {
+                    return Ok(()); // a missing aggregate stays missing
+                }
+                if !src.is_valid(r) {
+                    return self.set_missing_at(row);
+                }
+                if op == CombineOp::Replace {
+                    self.write_present(row, src, r)?;
+                }
+            }
+            _ => return self.fold_converted(row, op, src, src_row, false),
+        }
+        Ok(())
+    }
+
+    /// Reduce `src`'s `rows` (a whole period, in order) into cell `row` under `op`
+    /// in one pass — the batch reduce and a re-sent bar's re-aggregation. The dtype
+    /// is dispatched once for the column; the result is exactly
+    /// [`init_at`](Self::init_at) with the first row and
+    /// [`combine_at`](Self::combine_at) with each later one. An empty `rows` leaves
+    /// the cell unchanged.
+    pub fn reduce_into(
+        &mut self,
+        row: usize,
+        op: CombineOp,
+        src: &Column,
+        rows: impl IntoIterator<Item = usize>,
+    ) -> Result<()> {
+        let mut rows = rows.into_iter();
+        let Some(first) = rows.next() else { return Ok(()) };
+        if src.dtype() != self.dtype() || !op.supports(self.dtype()) {
+            self.init_at(row, op, src, first)?;
+            return rows.try_for_each(|r| self.combine_at(row, op, src, r));
+        }
+        if op.is_endpoint() {
+            // first / last: the endpoint cell, missing unless every row is present
+            // (presence read once per dtype, not dispatched per row)
+            let (present, last) = match src {
+                Column::F64(s) => endpoint_scan(first, rows, |r| !s[r].is_nan()),
+                Column::F32(s) => endpoint_scan(first, rows, |r| !s[r].is_nan()),
+                Column::Datetime(s) => endpoint_scan(first, rows, |r| s[r] != i64::MIN),
+                Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v)
+                    if !v.has_nulls() =>
+                {
+                    endpoint_scan(first, rows, |_| true)
+                }
+                Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v) => {
+                    endpoint_scan(first, rows, |r| v.is_valid(r))
+                }
+            };
+            if !present {
+                return self.set_missing_at(row);
+            }
+            return self.write_present(row, src, if op == CombineOp::Keep { first } else { last });
+        }
+        match (&mut *self, src) {
+            (Column::F64(buf), Column::F64(s)) => buf.set(row, float_reduce(op, s, first, rows)),
+            (Column::F32(buf), Column::F32(s)) => buf.set(row, float_reduce(op, s, first, rows)),
+            (Column::I64(buf, val), Column::I64(s, sv)) => {
+                let v = int_reduce(op, s, sv, first, rows, DType::I64)?;
+                write_int(buf, val, row, v)
+            }
+            (Column::I32(buf, val), Column::I32(s, sv)) => {
+                let v = int_reduce(op, s, sv, first, rows, DType::I32)?;
+                write_int(buf, val, row, v)
+            }
+            (Column::Datetime(buf), Column::Datetime(s)) => {
+                let mut acc = s[first];
+                for x in std::iter::once(first).chain(rows).map(|r| s[r]) {
+                    if x == i64::MIN {
+                        return self.set_missing_at(row);
+                    }
+                    acc = if op == CombineOp::Max { acc.max(x) } else { acc.min(x) };
+                }
+                buf.make_mut()[row] = acc;
             }
             _ => unreachable!("the support table admits no other pair"), // LCOV_EXCL_LINE
         }
@@ -128,21 +209,14 @@ impl Column {
     }
 
     /// Write the present value `src[r]` (same dtype) into cell `row`, present.
-    #[inline]
     fn write_present(&mut self, row: usize, src: &Column, r: usize) -> Result<()> {
         let n = self.len();
         match (self, src) {
             (Column::F64(buf), Column::F64(s)) => buf.set(row, s[r]),
             (Column::F32(buf), Column::F32(s)) => buf.set(row, s[r]),
             (Column::Datetime(buf), Column::Datetime(s)) => buf.make_mut()[row] = s[r],
-            (Column::I64(buf, val), Column::I64(s, _)) => {
-                buf.make_mut()[row] = s[r];
-                val.set(row, n, true);
-            }
-            (Column::I32(buf, val), Column::I32(s, _)) => {
-                buf.make_mut()[row] = s[r];
-                val.set(row, n, true);
-            }
+            (Column::I64(buf, val), Column::I64(s, _)) => write_int(buf, val, row, Some(s[r])),
+            (Column::I32(buf, val), Column::I32(s, _)) => write_int(buf, val, row, Some(s[r])),
             (Column::Bool(buf, val), Column::Bool(s, _)) => {
                 buf.make_mut()[row] = s[r];
                 val.set(row, n, true);
@@ -206,37 +280,159 @@ fn str_not_last(row: usize, n: usize) -> VolasError {
     VolasError::Shape(format!("a str cell folds in place only at the last row ({row} of {n})"))
 }
 
+/// Whether every row (`first` then `rest`) is present, and the last row.
+#[inline]
+fn endpoint_scan(first: usize, rest: impl Iterator<Item = usize>, valid: impl Fn(usize) -> bool) -> (bool, usize) {
+    let mut present = valid(first);
+    let mut last = first;
+    for r in rest {
+        present &= valid(r);
+        last = r;
+    }
+    (present, last)
+}
+
+/// One float fold step: the new aggregate, or `None` when it stays as it is. A
+/// missing (`NaN`) aggregate stays missing; a missing value makes it missing.
+#[inline]
+fn float_step<T: Numeric + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> Option<T> {
+    if acc.is_missing() {
+        return None;
+    }
+    if x.is_missing() {
+        return Some(x);
+    }
+    match op {
+        CombineOp::Keep => None,
+        CombineOp::Replace => Some(x),
+        _ => Some(float_combine(op, acc, x)),
+    }
+}
+
 /// `Max` / `Min` / `Sum` of two present floats.
 #[inline]
-fn fold_float<T: Numeric + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> T {
+fn float_combine<T: Numeric + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> T {
     match op {
         CombineOp::Max => if x > acc { x } else { acc },
         CombineOp::Min => if x < acc { x } else { acc },
-        _ => acc + x, // Sum (Keep / Replace never reach here)
+        _ => acc + x, // Sum (endpoints never reach here)
+    }
+}
+
+/// `Max` / `Min` / `Sum` of `s` over `first` then `rest` — `NaN` at the first
+/// missing value.
+#[inline]
+fn float_reduce<T: Numeric + std::ops::Add<Output = T>>(
+    op: CombineOp,
+    s: &[T],
+    first: usize,
+    rest: impl Iterator<Item = usize>,
+) -> T {
+    let mut acc = s[first];
+    if acc.is_missing() {
+        return acc;
+    }
+    for x in rest.map(|r| s[r]) {
+        if x.is_missing() {
+            return x;
+        }
+        acc = float_combine(op, acc, x);
+    }
+    acc
+}
+
+/// One instant fold step (`Keep` / `Replace` / `Max` / `Min`), `NaT` missing.
+#[inline]
+fn instant_step(op: CombineOp, acc: i64, x: i64) -> Option<i64> {
+    if acc == i64::MIN {
+        return None;
+    }
+    if x == i64::MIN {
+        return Some(x);
+    }
+    match op {
+        CombineOp::Keep => None,
+        CombineOp::Replace => Some(x),
+        CombineOp::Max => Some(acc.max(x)),
+        _ => Some(acc.min(x)), // Min (a datetime has no Sum)
     }
 }
 
 /// `Max` / `Min` / `Sum` of two present integers in `i64`, checked: a result past
 /// `dtype` is its overflow error.
 #[inline]
-fn fold_int<T: crate::buffer::Element + Copy + Into<i64> + TryFrom<i64>>(
+fn int_combine<T: Copy + Into<i64> + TryFrom<i64>>(op: CombineOp, acc: T, x: T, dtype: DType) -> Result<T> {
+    let (a, b): (i64, i64) = (acc.into(), x.into());
+    let v = match op {
+        CombineOp::Max => Some(a.max(b)),
+        CombineOp::Min => Some(a.min(b)),
+        _ => a.checked_add(b), // Sum (endpoints never reach here)
+    };
+    v.and_then(|v| T::try_from(v).ok()).ok_or_else(|| fold_overflow(dtype))
+}
+
+/// One integer fold step into cell `row` (`x` present when `x_valid`).
+#[inline]
+fn int_step<T: crate::buffer::Element + Copy + Into<i64> + TryFrom<i64>>(
     buf: &mut Buffer<T>,
+    val: &mut Validity,
     row: usize,
     op: CombineOp,
     x: T,
+    x_valid: bool,
     dtype: DType,
 ) -> Result<()> {
-    let (acc, x): (i64, i64) = (buf[row].into(), x.into());
-    let v = match op {
-        CombineOp::Max => Some(acc.max(x)),
-        CombineOp::Min => Some(acc.min(x)),
-        _ => acc.checked_add(x), // Sum (Keep / Replace never reach here)
-    };
-    match v.and_then(|v| T::try_from(v).ok()) {
-        Some(v) => buf.make_mut()[row] = v,
-        None => return Err(fold_overflow(dtype)),
+    if !val.is_valid(row) {
+        return Ok(()); // a missing aggregate stays missing
+    }
+    if !x_valid {
+        write_int(buf, val, row, None);
+        return Ok(());
+    }
+    match op {
+        CombineOp::Keep => {}
+        CombineOp::Replace => buf.make_mut()[row] = x,
+        _ => buf.make_mut()[row] = int_combine(op, buf[row], x, dtype)?,
     }
     Ok(())
+}
+
+/// `Max` / `Min` / `Sum` of `s` over `first` then `rest`, `None` at the first
+/// missing value.
+#[inline]
+fn int_reduce<T: crate::buffer::Element + Copy + Into<i64> + TryFrom<i64>>(
+    op: CombineOp,
+    s: &[T],
+    sv: &Validity,
+    first: usize,
+    rest: impl Iterator<Item = usize>,
+    dtype: DType,
+) -> Result<Option<T>> {
+    let dense = !sv.has_nulls();
+    if !(dense || sv.is_valid(first)) {
+        return Ok(None);
+    }
+    let mut acc = s[first];
+    for r in rest {
+        if !(dense || sv.is_valid(r)) {
+            return Ok(None);
+        }
+        acc = int_combine(op, acc, s[r], dtype)?;
+    }
+    Ok(Some(acc))
+}
+
+/// Write an integer aggregate into cell `row`: its value, or a validity hole.
+#[inline]
+fn write_int<T: crate::buffer::Element + Copy>(buf: &mut Buffer<T>, val: &mut Validity, row: usize, v: Option<T>) {
+    let n = buf.len();
+    match v {
+        Some(v) => {
+            buf.make_mut()[row] = v;
+            val.set(row, n, true);
+        }
+        None => val.set(row, n, false),
+    }
 }
 
 /// The overflow error of an integer fold — off the per-bar hot path.

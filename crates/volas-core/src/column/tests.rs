@@ -660,7 +660,7 @@ fn f32_i32_columns() {
         Column::f32(vec![0.0, 2.5, 3.5])
     );
     // remaining f32/i32 arms (both directions of slice/take, the other reductions,
-    // sub/mul kernels through the trait, bool->i32, append/append_missing)
+    // sub/mul kernels through the trait, bool->i32, append/append_na)
     assert_eq!(f.get_f64(0), 1.5);
     assert_eq!(i.slice(1, 3), Column::i32(vec![1, 4]));
     assert_eq!(f.take(&[2, 0]), Column::f32(vec![3.5, 1.5]));
@@ -712,7 +712,7 @@ fn f32_i32_columns() {
     assert!(fa.append(&Column::i32(vec![16_777_217])).is_err()); // not a float32
     assert_eq!(fa.len(), 2, "unchanged");
     let mut fm = Column::f32(vec![1.0]);
-    fm.append_missing(2).unwrap();
+    fm.append_na(2);
     assert!(matches!(&fm, Column::F32(v) if v.len() == 3 && v[1].is_nan()));
 }
 

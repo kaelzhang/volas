@@ -46,9 +46,9 @@ impl Agg {
     }
 
     /// Reduce the values at `kept` positions of `col` to a 1-element column of
-    /// `col`'s dtype: the first value, with every later one folded in by the very
-    /// kernel the live time-frame fold runs ([`Column::combine_at`]), so the batch
-    /// and the incremental aggregate agree exactly — the support table is
+    /// `col`'s dtype in one pass ([`Column::reduce_into`]: the steps the live
+    /// time-frame fold runs, dispatched once per column), so the batch and the
+    /// incremental aggregate agree exactly — the support table is
     /// [`CombineOp::supports`], a missing input makes any aggregate missing, an
     /// integer sum is checked.
     pub fn reduce(&self, col: &Column, kept: &[usize]) -> Result<Column> {
@@ -57,9 +57,7 @@ impl Agg {
             return Err(op.unsupported(col.dtype()));
         }
         let mut out = col.take(&[kept[0]]);
-        for &i in &kept[1..] {
-            out.combine_at(0, op, col, i)?;
-        }
+        out.reduce_into(0, op, col, kept.iter().copied())?;
         Ok(out)
     }
 }
