@@ -135,21 +135,28 @@ def _rsi(x, n: int) -> pd.Series:
 def _true_range(h, lo, c) -> pd.Series:
     h, lo, c = _s(h), _s(lo), _s(c)
     pc = c.shift(1)
-    # A bar missing its high, low or prior close has no TR (and the first bar has no
-    # prior close — TA-Lib TRANGE / TradingView `ta.tr`): `skipna=False`, as pandas'
-    # default `.max(axis=1)` would step over the missing value.
-    return pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1, skipna=False)
+    # TA-Lib TRANGE's ordered comparisons: keep an arithmetic NaN in high-low,
+    # but a NaN gap cannot replace the initial range. Missing input terms are NA.
+    out = h - lo
+    for gap in ((pc - h).abs(), (pc - lo).abs()):
+        out = out.where(~(gap > out), gap)
+    return out.mask(h.isna() | lo.isna() | pc.isna())
 
 
 def _atr(h, lo, c, n: int) -> pd.Series:
     """Wilder ATR (TA-Lib seeding): SMA of the first ``n`` true ranges (tr[0] is NaN), then
     Wilder smoothing. Matches volas's ``atr``."""
     tr = _true_range(h, lo, c).to_numpy()
+    if n == 1:
+        return pd.Series(tr)
     out = np.full(len(tr), np.nan)
     if len(tr) > n:
-        out[n] = float(np.nanmean(tr[1:n + 1]))
+        total = 0.0
+        for value in tr[1:n + 1]:
+            total += value
+        out[n] = total / n
         for i in range(n + 1, len(tr)):
-            out[i] = out[i - 1] * (n - 1) / n + tr[i] / n
+            out[i] = (out[i - 1] * (n - 1) + tr[i]) / n
     return pd.Series(out)
 
 

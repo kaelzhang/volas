@@ -357,11 +357,11 @@ fn scatter_preserves_validity() {
     // a scatter keeps every other row's NA (regression: a scalar write used to
     // return a dense column and silently turn pre-existing NA into 0 / false)
     let c = na_i64(&[1, 0, 3], &[true, false, true]); // 1, NA, 3
-    let r = c.scatter(&[0], &Column::f64(vec![9.0])).unwrap();
+    let r = c.scattered(&[0], &Column::f64(vec![9.0])).unwrap();
     assert_eq!(r.dtype(), DType::I64);
     assert!(r.is_valid(0) && !r.is_valid(1) && r.is_valid(2)); // 9, NA, 3
                                                                // writing NaN marks the position NA and keeps int (no f64 upcast)
-    let r2 = c.scatter(&[2], &Column::f64(vec![f64::NAN])).unwrap();
+    let r2 = c.scattered(&[2], &Column::f64(vec![f64::NAN])).unwrap();
     assert_eq!(r2.dtype(), DType::I64);
     assert!(r2.is_valid(0) && !r2.is_valid(1) && !r2.is_valid(2));
     // bool keeps its validity too
@@ -369,23 +369,23 @@ fn scatter_preserves_validity() {
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, true]),
     );
-    let rb = b.scatter(&[0], &Column::bool(vec![false])).unwrap();
+    let rb = b.scattered(&[0], &Column::bool(vec![false])).unwrap();
     assert!(rb.dtype() == DType::Bool && rb.is_valid(0) && !rb.is_valid(1) && rb.is_valid(2));
     // a present write introduces no NA (null_count stays 0)
     assert_eq!(
         Column::i64(vec![1, 2, 3])
-            .scatter(&[0], &Column::f64(vec![9.0]))
+            .scattered(&[0], &Column::f64(vec![9.0]))
             .unwrap()
             .null_count(),
         0
     );
     // a bool source into an int column converts (pandas), keeping validity
-    let rib = c.scatter(&[1], &Column::bool(vec![true])).unwrap();
+    let rib = c.scattered(&[1], &Column::bool(vec![true])).unwrap();
     assert!(rib.dtype() == DType::I64 && rib.is_valid(1));
     // a typed-NA source (what the binding builds for None / NaN into bool) marks
     // the cell NA, keeping bool
     let bn = Column::bool(vec![true, false])
-        .scatter(&[0], &Column::na_of(DType::Bool, 1))
+        .scattered(&[0], &Column::na_of(DType::Bool, 1))
         .unwrap();
     assert!(bn.dtype() == DType::Bool && !bn.is_valid(0) && bn.is_valid(1));
 }

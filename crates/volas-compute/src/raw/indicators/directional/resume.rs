@@ -153,7 +153,7 @@ pub fn plus_di_resume(
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
         dm_tr_step(high, low, close, i, pf, &mut s);
-        out.push(di_val(s[0], s[2]));
+        out.push(di_val(s[0], s[2], period));
     }
     Some((out, vec![s[0], s[2]]))
 }
@@ -189,7 +189,7 @@ pub fn minus_di_resume(
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
         dm_tr_step(high, low, close, i, pf, &mut s);
-        out.push(di_val(s[1], s[2]));
+        out.push(di_val(s[1], s[2], period));
     }
     Some((out, vec![s[1], s[2]]))
 }
@@ -360,7 +360,7 @@ pub fn plus_di_resume_one(
     let mut s = [state[0], 0.0, state[1]];
     dm_tr_step(high, low, close, row, pf, &mut s);
     next.copy_from_slice(&[s[0], s[2]]);
-    Some(di_val(s[0], s[2]))
+    Some(di_val(s[0], s[2], period))
 }
 
 /// Scalar single-row twin of [`minus_di_resume`]: the −DI value at `row` from
@@ -383,7 +383,7 @@ pub fn minus_di_resume_one(
     let mut s = [0.0, state[0], state[1]];
     dm_tr_step(high, low, close, row, pf, &mut s);
     next.copy_from_slice(&[s[1], s[2]]);
-    Some(di_val(s[1], s[2]))
+    Some(di_val(s[1], s[2], period))
 }
 
 /// Scalar single-row twin of [`dx_resume`]: the DX value at `row` from

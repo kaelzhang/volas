@@ -74,7 +74,8 @@ impl PySeries {
         if positions.is_empty() {
             return Ok(col_to_series(&self.inner, self.inner.data.clone()));
         }
-        let data = self.inner.data.scatter(&positions, &newc).map_err(pyerr)?;
+        let mut data = self.inner.data.clone();
+        data.scatter(&positions, &newc).map_err(pyerr)?;
         Ok(col_to_series(&self.inner, data))
     }
 

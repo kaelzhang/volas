@@ -490,36 +490,36 @@
     }
 
     #[test]
-    fn assign_positions_scalar_and_array() {
+    fn write_cells_scalar_and_array() {
         let mut df = sample();
         // broadcast a scalar into two rows of the F64 column "a"
-        df.assign_positions(0, &[0, 2], &Column::f64(vec![9.0]))
+        df.write_one(0, &[0, 2], &Column::f64(vec![9.0]))
             .unwrap();
         assert_eq!(df.column("a").unwrap().as_f64().unwrap(), &[9.0, 2.0, 9.0]);
         // element-wise array into the I64 column "b" (integral -> stays i64)
-        df.assign_positions(1, &[1, 2], &Column::f64(vec![40.0, 50.0]))
+        df.write_one(1, &[1, 2], &Column::f64(vec![40.0, 50.0]))
             .unwrap();
         assert_eq!(df.column("b").unwrap().as_i64().unwrap(), &[10, 40, 50]);
     }
 
     #[test]
-    fn assign_positions_fractional_into_int_errors() {
+    fn write_cells_fractional_into_int_errors() {
         let mut df = sample();
         // a fractional write into the I64 column is lossy and errors (no float
         // widening) — the column stays unchanged, matching the Series scalar path
         assert!(df
-            .assign_positions(1, &[0], &Column::f64(vec![1.5]))
+            .write_one(1, &[0], &Column::f64(vec![1.5]))
             .is_err());
         assert_eq!(df.column("b").unwrap().dtype(), DType::I64);
         assert_eq!(df.column("b").unwrap().as_i64().unwrap(), &[10, 20, 30]);
     }
 
     #[test]
-    fn assign_positions_nan_into_int_keeps_int_na() {
+    fn write_cells_nan_into_int_keeps_int_na() {
         let mut df = sample();
         // a NaN write into the I64 column keeps int64 and marks the cell NA
         // (Decision 1: no float widening, the native-NA model)
-        df.assign_positions(1, &[0], &Column::f64(vec![f64::NAN]))
+        df.write_one(1, &[0], &Column::f64(vec![f64::NAN]))
             .unwrap();
         let b = df.column("b").unwrap();
         assert_eq!(b.dtype(), DType::I64);
@@ -528,12 +528,12 @@
     }
 
     #[test]
-    fn assign_positions_drops_computed_status() {
+    fn write_cells_drops_computed_status() {
         let mut df = sample();
         df.set_computed("a", std::sync::Arc::new(()), Reach { lookback: 1, resume: 0, continuation: 1, history: History::Window });
         assert_eq!(df.computed_columns().len(), 1);
         // a manual write into the cached column drops its computed status
-        df.assign_positions(0, &[0], &Column::f64(vec![7.0]))
+        df.write_one(0, &[0], &Column::f64(vec![7.0]))
             .unwrap();
         assert!(df.computed_columns().is_empty());
     }
@@ -604,33 +604,33 @@
     }
 
     #[test]
-    fn assign_positions_length_and_dtype_guards() {
+    fn write_cells_length_and_dtype_guards() {
         let mut df = sample();
         // wrong-length array
         assert!(df
-            .assign_positions(0, &[0, 1], &Column::f64(vec![1.0, 2.0, 3.0]))
+            .write_one(0, &[0, 1], &Column::f64(vec![1.0, 2.0, 3.0]))
             .is_err());
         // out-of-range row
         assert!(df
-            .assign_positions(0, &[9], &Column::f64(vec![1.0]))
+            .write_one(0, &[9], &Column::f64(vec![1.0]))
             .is_err());
         // a bool into a numeric column COERCES (true -> 1.0), matching the Series
         // `set_float_at` path (Python `bool` is an int subclass)
-        df.assign_positions(0, &[0], &Column::bool(vec![true]))
+        df.write_one(0, &[0], &Column::bool(vec![true]))
             .unwrap();
         assert_eq!(df.column("a").unwrap().as_f64().unwrap()[0], 1.0);
         // a str / datetime into a numeric column is a hard dtype error (no silent
         // funnel through `to_f64_vec`)
         assert!(df
-            .assign_positions(0, &[0], &Column::str(vec!["x".into()]))
+            .write_one(0, &[0], &Column::str(vec!["x".into()]))
             .is_err());
         assert!(df
-            .assign_positions(1, &[0], &Column::datetime(vec![123]))
+            .write_one(1, &[0], &Column::datetime(vec![123]))
             .is_err());
     }
 
     #[test]
-    fn assign_positions_type_combinations_and_col_out_of_range() {
+    fn write_cells_type_combinations_and_col_out_of_range() {
         let mut df = DataFrame::new(
             vec!["f".into(), "b".into(), "s".into(), "d".into()],
             vec![
@@ -644,14 +644,14 @@
         .unwrap();
         // column position out of range
         assert!(df
-            .assign_positions(99, &[0], &Column::f64(vec![1.0]))
+            .write_one(99, &[0], &Column::f64(vec![1.0]))
             .is_err());
-        df.assign_positions(0, &[1], &Column::i64(vec![7])).unwrap(); // F64 <- I64
-        df.assign_positions(1, &[0], &Column::bool(vec![false]))
+        df.write_one(0, &[1], &Column::i64(vec![7])).unwrap(); // F64 <- I64
+        df.write_one(1, &[0], &Column::bool(vec![false]))
             .unwrap(); // Bool <- Bool
-        df.assign_positions(2, &[0], &Column::str(vec!["z".into()]))
+        df.write_one(2, &[0], &Column::str(vec!["z".into()]))
             .unwrap(); // Str <- Str
-        df.assign_positions(3, &[2], &Column::datetime(vec![99]))
+        df.write_one(3, &[2], &Column::datetime(vec![99]))
             .unwrap(); // Datetime <- Datetime
         assert_eq!(df.columns()[0].as_f64().unwrap()[1], 7.0);
         assert_eq!(df.columns()[3].as_datetime().unwrap()[2], 99);

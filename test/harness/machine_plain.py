@@ -172,9 +172,9 @@ class PlainMachine(FrameMachine):
         if dtype in ('float64', 'float32'):
             huge = [] if contracts.avoids('sliding-sum-magnitude') else [1e300]
             value = data.draw(st.sampled_from([np.nan, 0.0, -1.5, 101.25] + huge))
-            stored = None if np.isnan(value) else float(np.float32(value)) if dtype == 'float32' else value
             if dtype == 'float32' and value == 1e300:
                 return  # out of float32 range: a lossy-write contract of its own
+            stored = None if np.isnan(value) else float(np.float32(value)) if dtype == 'float32' else value
         else:
             value = data.draw(st.sampled_from([0, -7, 12345]))
             stored = value

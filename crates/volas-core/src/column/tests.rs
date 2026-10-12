@@ -298,39 +298,39 @@ fn scatter_follows_dtype_rules() {
     // F64 stays F64 for a number or a bool source.
     let f = Column::f64(vec![1.0, 2.0, 3.0]);
     assert_eq!(
-        f.scatter(&[1], &Column::f64(vec![9.0])).unwrap(),
+        f.scattered(&[1], &Column::f64(vec![9.0])).unwrap(),
         Column::f64(vec![1.0, 9.0, 3.0])
     );
     assert_eq!(
-        f.scatter(&[0], &Column::bool(vec![false])).unwrap(),
+        f.scattered(&[0], &Column::bool(vec![false])).unwrap(),
         Column::f64(vec![0.0, 2.0, 3.0])
     );
     // I64 keeps int for an integral number or a bool source.
     let i = Column::i64(vec![1, 2, 3]);
     assert_eq!(
-        i.scatter(&[2], &Column::f64(vec![0.0])).unwrap(),
+        i.scattered(&[2], &Column::f64(vec![0.0])).unwrap(),
         Column::i64(vec![1, 2, 0])
     );
     assert_eq!(
-        i.scatter(&[0], &Column::bool(vec![false])).unwrap(),
+        i.scattered(&[0], &Column::bool(vec![false])).unwrap(),
         Column::i64(vec![0, 2, 3])
     );
     // I64 + NaN keeps int64, marking that cell NA (the NA model; no float upcast).
-    let na = i.scatter(&[1], &Column::f64(vec![f64::NAN])).unwrap();
+    let na = i.scattered(&[1], &Column::f64(vec![f64::NAN])).unwrap();
     assert_eq!(na.dtype(), DType::I64);
     assert!(na.is_valid(0) && !na.is_valid(1) && na.is_valid(2));
     // I64 + a non-integral number is lossy -> error.
-    assert!(i.scatter(&[0], &Column::f64(vec![2.5])).is_err());
+    assert!(i.scattered(&[0], &Column::f64(vec![2.5])).is_err());
     // Bool keeps bool for a bool source; a number into bool is lossy -> error.
     let b = Column::bool(vec![true, false]);
     assert_eq!(
-        b.scatter(&[1], &Column::bool(vec![true])).unwrap(),
+        b.scattered(&[1], &Column::bool(vec![true])).unwrap(),
         Column::bool(vec![true, true])
     );
-    assert!(b.scatter(&[0], &Column::f64(vec![0.0])).is_err());
+    assert!(b.scattered(&[0], &Column::f64(vec![0.0])).is_err());
     // A number / datetime into a str column is unsupported -> error.
     assert!(Column::str(vec!["a".into()])
-        .scatter(&[0], &Column::f64(vec![1.0]))
+        .scattered(&[0], &Column::f64(vec![1.0]))
         .is_err());
 }
 
@@ -641,22 +641,22 @@ fn f32_i32_columns() {
     // assignment (scatter, 1-elem source): f32 writes; i32 keeps the dtype (a
     // NaN write marks the cell NA, no float upcast), rejects a lossy value
     assert_eq!(
-        f.scatter(&[1], &Column::f32(vec![9.0])).unwrap(),
+        f.scattered(&[1], &Column::f32(vec![9.0])).unwrap(),
         Column::f32(vec![1.5, 9.0, 3.5])
     );
     assert_eq!(
-        i.scatter(&[1], &Column::bool(vec![true])).unwrap(),
+        i.scattered(&[1], &Column::bool(vec![true])).unwrap(),
         Column::i32(vec![3, 1, 4])
     );
     assert_eq!(
-        i.scatter(&[1], &Column::f64(vec![9.0])).unwrap(),
+        i.scattered(&[1], &Column::f64(vec![9.0])).unwrap(),
         Column::i32(vec![3, 9, 4])
     );
-    let i_na = i.scatter(&[0], &Column::f64(vec![f64::NAN])).unwrap();
+    let i_na = i.scattered(&[0], &Column::f64(vec![f64::NAN])).unwrap();
     assert!(i_na.dtype() == DType::I32 && !i_na.is_valid(0) && i_na.is_valid(1));
-    assert!(i.scatter(&[0], &Column::f64(vec![2.5])).is_err());
+    assert!(i.scattered(&[0], &Column::f64(vec![2.5])).is_err());
     assert_eq!(
-        f.scatter(&[0], &Column::bool(vec![false])).unwrap(),
+        f.scattered(&[0], &Column::bool(vec![false])).unwrap(),
         Column::f32(vec![0.0, 2.5, 3.5])
     );
     // remaining f32/i32 arms (both directions of slice/take, the other reductions,
@@ -699,7 +699,7 @@ fn f32_i32_columns() {
         .select(&cond, &Column::f64(vec![2.5, 0.0, 0.0]), DType::I32)
         .is_err());
     assert_eq!(
-        f.scatter(&[0], &Column::bool(vec![true])).unwrap(),
+        f.scattered(&[0], &Column::bool(vec![true])).unwrap(),
         Column::f32(vec![1.0, 2.5, 3.5])
     );
     let mut ii = Column::i32(vec![1]);

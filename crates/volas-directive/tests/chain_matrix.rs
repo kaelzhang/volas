@@ -54,7 +54,9 @@ fn a_chain_continues_bit_for_bit() {
         let df = &data.frame;
         for &text in CHAINED {
             let node = parse(text).unwrap();
-            let whole = values(&execute(df, &node).unwrap());
+            let full = execute(df, &node).unwrap();
+            let truth = full.as_bool().is_some();
+            let whole = values(&full);
             let (col, after, before) = execute_with_states(df, &node).unwrap();
             if !values(&col).iter().zip(&whole).all(|(a, b)| same(*a, *b)) {
                 fails.push(format!("{text} [{}]: values with states differ", data.name));
@@ -69,8 +71,16 @@ fn a_chain_continues_bit_for_bit() {
             }
             for from in [40, 75, 119] {
                 let Some(mut chain) = initial_state(df, &node, from) else { continue };
+                if truth {
+                    // a step yields a float: a comparison's truth declines it (the
+                    // `Vec` resume below continues it)
+                    let mut next = chain.clone();
+                    if execute_resume_step(df, &node, &chain, (from, 0), &mut next).is_some() {
+                        fails.push(format!("{text} [{}] step at {from}: a truth stepped", data.name));
+                    }
+                }
                 // one row at a time
-                for (row, &want) in whole.iter().enumerate().skip(from) {
+                for (row, &want) in whole.iter().enumerate().skip(from).take_while(|_| !truth) {
                     let mut next = chain.clone();
                     match execute_resume_step(df, &node, &chain, (row, 0), &mut next) {
                         Some(v) if same(v, want) => chain = next,
@@ -80,7 +90,7 @@ fn a_chain_continues_bit_for_bit() {
                         }
                     }
                 }
-                if !same_chain(Some(&chain), initial_state(df, &node, n).as_ref()) {
+                if !truth && !same_chain(Some(&chain), initial_state(df, &node, n).as_ref()) {
                     fails.push(format!("{text} [{}] from {from}: stepped chain != fresh", data.name));
                 }
                 // several rows at once

@@ -53,8 +53,8 @@ def weighted_step(prev, x, k):
 
 
 def wilder_step(prev, x, period):
-    """`ta_ATR.c` / `ta_RSI.c`: `prev *= period - 1; prev += x; prev /= period`."""
-    return ((prev * F(period - 1)) + x) / F(period)
+    """`ta_ATR.c`: no smoothing at period 1; otherwise multiply, add, then divide."""
+    return x if period == 1 else ((prev * F(period - 1)) + x) / F(period)
 
 
 def _seeded(x, period, step):
@@ -84,6 +84,8 @@ def ema(close, period):
 
 
 def smma(close, period):
+    if period == 1:
+        return np.asarray(close, float).copy()
     return _complete(lambda c: _seeded(c, period, lambda prev, v: wilder_step(prev, v, period)), close)
 
 
@@ -256,24 +258,40 @@ def cmo(close, period):
 
 
 def _true_ranges(h, l, c):
-    """volas's TR (`tr_at`): `max(h − l, |h − pc|, |l − pc|)`, a NaN operand skipped
-    like `f64::max`; none on the first bar."""
+    """`ta_TRANGE.c`: high − low, then the two prior-close gaps in comparison order."""
     tr = [NAN]
     for i in range(1, len(c)):
-        tr.append(F(np.fmax(np.fmax(h[i] - l[i], abs(h[i] - c[i - 1])), abs(l[i] - c[i - 1]))))
+        value = h[i] - l[i]
+        for gap in (abs(c[i - 1] - h[i]), abs(c[i - 1] - l[i])):
+            if gap > value:
+                value = gap
+        tr.append(value)
     return tr
 
 
+def _atr_list(h, l, c, period):
+    tr = _true_ranges(h, l, c)
+    if period == 1:
+        return tr
+    out = [NAN] * len(c)
+    if len(c) > period:
+        total = F(0.)
+        for value in tr[1:period + 1]:
+            total += value
+        out[period] = total / F(period)
+        for i in range(period + 1, len(c)):
+            out[i] = wilder_step(out[i - 1], tr[i], period)
+    return out
+
+
 def atr(high, low, close, period):
-    def run(h, l, c):
-        return _seeded(_true_ranges(h, l, c), period, lambda prev, v: wilder_step(prev, v, period))
-    return _complete(run, high, low, close)
+    return _complete(lambda h, l, c: _atr_list(h, l, c, period), high, low, close)
 
 
 def natr(high, low, close, period):
     """`ta_NATR.c`: `(atr / close) * 100.0`, 0 on a zero close (exact)."""
     def run(h, l, c):
-        a = _seeded(_true_ranges(h, l, c), period, lambda prev, v: wilder_step(prev, v, period))
+        a = _atr_list(h, l, c, period)
         return [F(0.0) if (x == 0.0 and not math.isnan(v)) else (v / x) * F(100.0) for v, x in zip(a, c)]
     return _complete(run, high, low, close)
 

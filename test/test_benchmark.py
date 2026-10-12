@@ -48,6 +48,7 @@ from stock_pandas import StockDataFrame
 from volas import DataFrame as VolasDataFrame
 
 from .bench_first_cache import FIRST_CACHE_IDS, FIRST_CACHE_ROUNDS, build as build_first_cache
+from .bench_pandas import PANDAS_CALC
 from .bench_tf_live import TF_LIVE_INDICATORS, TF_LIVE_PHASES, build as build_tf_live
 
 try:
@@ -153,67 +154,6 @@ APPEND_ROUNDS = 500
 #       performs one warm-up append, so the one-time Vec capacity-doubling
 #       memcpy of a fresh frame is no longer charged to every measured round).
 METHODOLOGY = "append-steady-state-v2"
-
-
-# --- pandas (idiomatic, per indicator) -------------------------------------
-
-def _pd_ma(csv):
-    return csv['close'].rolling(20).mean()
-
-
-def _pd_ema(csv):
-    return csv['close'].ewm(span=12, adjust=True, min_periods=12).mean()
-
-
-def _pd_macd(csv):
-    c = csv['close']
-    return (c.ewm(span=12, adjust=True, min_periods=12).mean()
-            - c.ewm(span=26, adjust=True, min_periods=26).mean())
-
-
-def _pd_macd_signal(csv):
-    return _pd_macd(csv).ewm(span=9, adjust=True, min_periods=9).mean()
-
-
-def _pd_boll_upper(csv):
-    c = csv['close']
-    return c.rolling(20).mean() + 2.0 * c.rolling(20).std(ddof=0)
-
-
-def _pd_willr(csv):
-    h, lo, c = csv['high'], csv['low'], csv['close']
-    hh, ll = h.rolling(14).max(), lo.rolling(14).min()
-    return -100.0 * (hh - c) / (hh - ll)
-
-
-def _pd_rsi(csv):
-    c = csv['close']
-    delta = c.diff()
-    ag = delta.clip(lower=0.0).ewm(alpha=1.0 / 14, adjust=True, min_periods=14).mean()
-    al = (-delta).clip(lower=0.0).ewm(alpha=1.0 / 14, adjust=True, min_periods=14).mean()
-    return 100.0 - 100.0 / (1.0 + ag / al)
-
-
-def _pd_atr(csv):
-    h, lo, c = csv['high'], csv['low'], csv['close']
-    pc = c.shift(1)
-    tr = pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
-    return tr.rolling(14).mean()
-
-
-def _pd_llv(csv):
-    return csv['low'].rolling(10).min()
-
-
-def _pd_hhv(csv):
-    return csv['high'].rolling(10).max()
-
-
-PANDAS_CALC = {
-    'ma:20': _pd_ma, 'ema:12': _pd_ema, 'macd': _pd_macd,
-    'macd.signal': _pd_macd_signal, 'boll.upper': _pd_boll_upper, 'willr:14': _pd_willr,
-    'rsi:14': _pd_rsi, 'atr:14': _pd_atr, 'llv:10': _pd_llv, 'hhv:10': _pd_hhv,
-}
 
 
 # --- pandas-ta (the `.ta` DataFrame accessor) ------------------------------
@@ -934,17 +874,18 @@ def test_coverage_after_append(benchmark, indicator, candidate):
 # --- section 4: core DataFrame API (the data-handling flows, not indicators) -
 #
 # The plumbing a live system runs around every indicator call — frame
-# construction, column access, row slicing, boolean masking, column assignment,
-# copy — timed volas vs pandas / polars. These are the core APIs whose overhead
+# construction, column access, row slicing, boolean masking, column assignment, a
+# single-cell write, copy — timed volas vs pandas / polars. These are the core APIs whose overhead
 # the user wants tracked alongside the kernels.
 
 _API_THRESH = float(_CSV['close'].median())
+_API_CELL = (len(_CSV) // 2, COLUMNS.index('volume'))  # a middle cell: `setcell` writes it
 
 
 def _api_registry():
     """candidate -> {op: thunk}. `construct` rebuilds each call; the rest run over
-    a prebuilt per-candidate frame; `setitem` overwrites a scratch column (so it
-    stays idempotent under repeated timing)."""
+    a prebuilt per-candidate frame; `setitem` overwrites a scratch column and
+    `setcell` one cell (so both stay idempotent under repeated timing)."""
 
     def cols():
         return {c: ARR[c] for c in COLUMNS}
@@ -956,6 +897,7 @@ def _api_registry():
             'slice': lambda: pdf[100:1900],
             'mask': lambda: pdf[pdf['close'] > _API_THRESH],
             'setitem': lambda: pdf.__setitem__('scratch', ARR['close']),
+            'setcell': lambda: pdf.iat.__setitem__(_API_CELL, 1.5),
             'copy': lambda: pdf.copy(),
         })(pd.DataFrame(cols())),
         'volas': (lambda vdf: {
@@ -964,6 +906,7 @@ def _api_registry():
             'slice': lambda: vdf[100:1900],
             'mask': lambda: vdf[vdf['close'] > _API_THRESH],
             'setitem': lambda: vdf.__setitem__('scratch', ARR['close']),
+            'setcell': lambda: vdf.iat.__setitem__(_API_CELL, 1.5),
             'copy': lambda: vdf.copy(),
         })(VolasDataFrame(cols())),
     }
@@ -974,7 +917,8 @@ def _api_registry():
             'getcol': lambda: ldf['close'],
             'slice': lambda: ldf[100:1900],
             'mask': lambda: ldf.filter(pl.col('close') > _API_THRESH),
-            # polars frames are immutable; the idiomatic "add a column" is with_columns.
+            # polars frames are immutable; the idiomatic "add a column" is with_columns
+            # (and there is no in-place cell write: no `setcell`).
             'setitem': lambda: ldf.with_columns(pl.Series('scratch', ARR['close'])),
             'copy': lambda: ldf.clone(),
         }
@@ -982,7 +926,7 @@ def _api_registry():
 
 
 API_REG = _api_registry()
-API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'copy']
+API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'setcell', 'copy']
 API_CANDIDATES = ['pandas', 'polars', 'volas']
 
 
