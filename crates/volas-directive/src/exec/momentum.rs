@@ -15,7 +15,7 @@ pub(super) fn dispatch(
 ) -> Result<Column> {
     let close = |i| ops.f64(i, "close");
     let f64col = |v: Vec<f64>| Ok(Column::f64(v));
-    let boolcol = |v: Vec<bool>| Ok(Column::bool(v));
+    let boolcol = |v: Vec<Option<bool>>| Ok(Column::bool_from_options(v));
     match (name, sub) {
         ("macd", None) => f64col(ind::macd(
             &close(0)?,

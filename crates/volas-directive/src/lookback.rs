@@ -176,7 +176,9 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         "kdj" => arg(args, 0) * 3,
         "rsi" => arg(args, 0),
         "hv" => arg(args, 0),
-        "increase" | "repeat" => arg(args, 0).saturating_sub(1),
+        // increase:k ANDs k steps, each reading a value and its predecessor: k + 1 values.
+        "increase" => arg(args, 0),
+        "repeat" => arg(args, 0).saturating_sub(1),
         // style.<x>: candlestick patterns warm up over their candle-settings avg period
         // (from the compute registry); bullish/bearish need none. (`cdl` resolves here too.)
         "style" => sub

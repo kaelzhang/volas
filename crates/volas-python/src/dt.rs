@@ -17,7 +17,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 
 use volas_core::datetime::{Civil, Rounding};
-use volas_core::{datetime, Column, DataFrame, Series, Tz, Validity};
+use volas_core::{datetime, Column, DataFrame, Series, Tz};
 
 use crate::frame::PyDataFrame;
 use crate::scalar::{day_name, month_name, PyTimestamp};
@@ -52,40 +52,33 @@ impl PyDt {
     /// A column of one value per element, computed from the element's wall-clock
     /// [`Civil`] view — decomposed ONCE per element, however many fields the value
     /// reads; a NaT cell stays missing (`# C2`).
-    fn map_civil<T: Default>(&self, f: impl Fn(&Civil) -> T) -> (Vec<T>, Validity) {
+    fn map_civil<T>(&self, f: impl Fn(&Civil) -> T) -> Vec<Option<T>> {
         self.map_ns(|ns| f(&Tz::DATETIME_COLUMN.civil(ns))) // the UTC wall clock
     }
 
     /// As [`Self::map_civil`] for a value read from the raw instant itself.
-    fn map_ns<T: Default>(&self, f: impl Fn(i64) -> T) -> (Vec<T>, Validity) {
-        let v = self.ns();
-        let validity = Validity::from_valid_iter(v.len(), v.iter().map(|&ns| ns != datetime::NAT));
-        let out = v.iter().map(|&ns| if ns == datetime::NAT { T::default() } else { f(ns) }).collect();
-        (out, validity)
+    fn map_ns<T>(&self, f: impl Fn(i64) -> T) -> Vec<Option<T>> {
+        self.ns().iter().map(|&ns| (ns != datetime::NAT).then(|| f(ns))).collect()
     }
 
     /// An int64 calendar-component column.
     fn map_i64(&self, f: impl Fn(&Civil) -> i64) -> PySeries {
-        let (out, validity) = self.map_civil(f);
-        self.wrap(Column::i64_with(out, validity))
+        self.wrap(Column::i64_from_options(self.map_civil(f)))
     }
 
     /// A bool calendar-predicate column.
     fn map_bool(&self, f: impl Fn(&Civil) -> bool) -> PySeries {
-        let (out, validity) = self.map_civil(f);
-        self.wrap(Column::bool_with(out, validity))
+        self.wrap(Column::bool_from_options(self.map_civil(f)))
     }
 
     /// A str calendar-name column.
     fn map_str(&self, f: impl Fn(&Civil) -> &'static str) -> PySeries {
-        let (out, validity) = self.map_civil(|c| f(c).to_string());
-        self.wrap(Column::str_with(out, validity))
+        self.wrap(Column::str_from_options(self.map_civil(|c| f(c).to_string())))
     }
 
     /// An int64 sub-second component column, read from the instant itself.
     fn sub_second(&self, f: impl Fn(i64) -> i64) -> PySeries {
-        let (out, validity) = self.map_ns(f);
-        self.wrap(Column::i64_with(out, validity))
+        self.wrap(Column::i64_from_options(self.map_ns(f)))
     }
 
     /// A datetime column rounded on the `unit_ns` grid (the scalar kernel); a NaT
@@ -234,17 +227,13 @@ impl PyDt {
     /// Format each element with a ``strftime`` pattern (pandas
     /// ``.dt.strftime``); str, NaT -> NA.
     fn strftime(&self, fmt: &str) -> PyResult<PySeries> {
-        let v = self.ns();
-        let validity = Validity::from_valid_iter(v.len(), v.iter().map(|&ns| ns != i64::MIN));
-        let mut out = Vec::with_capacity(v.len());
-        for &ns in v {
-            if ns == i64::MIN {
-                out.push(String::new());
-                continue;
-            }
-            out.push(datetime::strftime(ns, Tz::DATETIME_COLUMN, fmt).map_err(pyerr)?);
-        }
-        Ok(self.wrap(Column::str_with(out, validity)))
+        let out = self
+            .map_ns(|ns| datetime::strftime(ns, Tz::DATETIME_COLUMN, fmt))
+            .into_iter()
+            .map(Option::transpose)
+            .collect::<volas_core::Result<Vec<_>>>()
+            .map_err(pyerr)?;
+        Ok(self.wrap(Column::str_from_options(out)))
     }
 
     /// Midnight of each element's day (pandas ``.dt.normalize()``); datetime,
@@ -271,26 +260,10 @@ impl PyDt {
     /// columns (pandas ``.dt.isocalendar()``); int64 columns, a NaT row is NA
     /// across all three.
     fn isocalendar(&self) -> PyResult<PyDataFrame> {
-        let v = self.ns();
-        let validity = Validity::from_valid_iter(v.len(), v.iter().map(|&ns| ns != i64::MIN));
-        let mut years = Vec::with_capacity(v.len());
-        let mut weeks = Vec::with_capacity(v.len());
-        let mut days = Vec::with_capacity(v.len());
-        for &ns in v {
-            let (y, w, d) = if ns == datetime::NAT {
-                (0, 0, 0)
-            } else {
-                Tz::DATETIME_COLUMN.civil(ns).iso_calendar()
-            };
-            years.push(y);
-            weeks.push(w);
-            days.push(d);
-        }
-        let cols = vec![
-            Column::i64_with(years, validity.clone()),
-            Column::i64_with(weeks, validity.clone()),
-            Column::i64_with(days, validity),
-        ];
+        // one civil decomposition per element, read three times
+        let iso = self.map_civil(Civil::iso_calendar);
+        let part = |k: fn((i64, i64, i64)) -> i64| Column::i64_from_options(iso.iter().map(|c| c.map(k)));
+        let cols = vec![part(|c| c.0), part(|c| c.1), part(|c| c.2)];
         let names = vec!["year".to_string(), "week".to_string(), "day".to_string()];
         let df = DataFrame::new(names, cols, Some((*self.series.index).clone()))
             .map_err(pyerr)?;

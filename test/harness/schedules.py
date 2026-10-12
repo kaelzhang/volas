@@ -80,7 +80,7 @@ def compare_all(df: volas.DataFrame, ledger: Ledger, names: dict[str, str]) -> l
         if '>' in directive and tolerance():
             lhs, rhs = directive.split('>', 1)
             ref = ledger.frame(env)
-            excused = observe.tie_rows(ref.exec(lhs), ref.exec(rhs))
+            excused = observe.tie_rows(ref.exec(lhs, dtype='float64'), ref.exec(rhs, dtype='float64'))
         try:
             observe.same_indicator(got, np.asarray(want), directive, tolerance(), excused)
         except AssertionError as e:

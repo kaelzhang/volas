@@ -4,10 +4,11 @@ A finite-window command whose full computation does not carry anything from row 
 row (each output a function of its own window alone) gives the same value over any
 window that holds its lookback — so a refresh may recompute just the last window. One
 whose full computation carries a running accumulator (a rolling sum, a rolling sum of
-squares, …) depends on the rows since its sums were last re-anchored, not only on the
-window, so it resumes from a carried state instead. This test pins that every command
-the engine recomputes over a window is exact there, and that the accumulating ones are
-the ones the engine resumes.
+squares, …) resumes from a carried state instead, which is cheaper than re-summing a
+window. Its sums are exact (each the correctly rounded sum of its window), so it too
+equals its last window bit for bit. This test pins that every command the engine
+recomputes over a window is exact there, and that the accumulating ones are the ones
+the engine resumes.
 """
 
 import re
@@ -32,9 +33,8 @@ DATA = dict(
     volume=_rng.uniform(100, 900, N) * np.sqrt(2.0), periods=np.full(N, 5.0),
 )
 
-# Runs of huge and tiny values: a running sum cannot hold every bit of a tiny window
-# right after a huge run, so an accumulating command's value shows where its sums were
-# last re-anchored — a last-window recompute of it is not exact here.
+# Runs of huge and tiny values: a compensated pair cannot hold every bit of a tiny window
+# right after a huge run, so the running sums must notice and re-sum exactly.
 _RUNS = np.where((np.arange(N) // 13) % 2 == 0, 1e12, 1e-8)
 WIDE = {k: (v if k == "periods" else v * _RUNS) for k, v in DATA.items()}
 
@@ -49,8 +49,8 @@ _KEYS = sorted(k for k in FINITE if k not in ABSOLUTE_POSITION) + sorted(
     k for k in SUBCOMMANDS if _command(k) in FINITE and _command(k) not in ABSOLUTE_POSITION
 )
 
-# The finite-window commands whose full computation carries a running accumulator, so
-# a last-window recompute only matches it to rounding: these resume from a state.
+# The finite-window commands whose full computation carries a running accumulator: these
+# resume from a state.
 ACCUMULATING = {
     "accbands", "apo", "bbi", "bbw", "beta", "bias", "boll", "cci", "cmf", "cog", "coppock",
     "correl", "dkx", "dma", "dpo", "emv", "hma", "hv", "imi", "kst", "linearreg",
@@ -63,14 +63,26 @@ ACCUMULATING = {
 }
 
 
+# Second-moment commands: their windows shift by the value at a row of absolute
+# position (docs/indicator-inputs.md "Centred moments"), so a window recompute keeps the
+# rows' positions (a slice) to read the full computation's bits — as the engine's does.
+SHIFTED = {"var", "stddev", "boll", "bbw", "hv", "correl", "beta", "linearreg", "linearreg_angle",
+           "linearreg_intercept", "linearreg_slope", "tsf"}
+
+
 def _window_matches(directive, data):
-    full = np.asarray(DataFrame(data).exec(directive), dtype=float)
+    """Whether computing over a window of rows that ends at the last row reproduces the
+    full computation: a fresh frame of those rows (so a dependence on the series' start
+    shows), or a slice keeping their positions for the shift-dependent second moments."""
+    frame = DataFrame(data)
+    full = np.asarray(frame.exec(directive, dtype='float64'), dtype=float)
     lb = volas.directive_lookback(directive)
     win = 2 * (lb + 1)
+    shifted = re.split(r"[.:@]", directive)[0] in SHIFTED
     for vr in range(win + 1, N):
         start = vr - win
-        part = DataFrame({k: v[start:] for k, v in data.items()})
-        tail = np.asarray(part.exec(directive), dtype=float)[vr - start:]
+        part = frame.iloc[start:] if shifted else DataFrame({k: v[start:] for k, v in data.items()})
+        tail = np.asarray(part.exec(directive, dtype='float64'), dtype=float)[vr - start:]
         want = full[vr:]
         same = (tail == want) | (np.isnan(tail) & np.isnan(want))
         if not same.all():
@@ -96,9 +108,14 @@ def test_a_last_window_recompute_is_exact_unless_the_kernel_accumulates(key):
 
 
 @pytest.mark.parametrize("key", ["ma", "sum", "var", "linearreg", "wma", "cci", "mfi", "ultosc"])
-def test_an_accumulating_command_is_not_its_last_window(key):
-    """The data does tell an accumulating command from a per-window one."""
-    assert not _window_matches(_directive(key), WIDE), key
+def test_an_accumulating_command_is_its_last_window_because_its_sums_are_exact(key):
+    """Even on runs of huge and tiny values, a running sum's value is the exact sum of
+    its window (re-summed whenever it could not hold it), and a second moment's shift is
+    the value at a row of absolute position, so an accumulating command computed over
+    its last window alone (a slice, keeping positions) gives the full computation's
+    bits."""
+    for data in (DATA, GAPPY, WIDE):
+        assert _window_matches(_directive(key), data), key
 
 
 # --- the accumulating commands resume bit-exactly on every live path ----------------

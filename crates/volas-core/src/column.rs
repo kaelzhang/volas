@@ -76,24 +76,6 @@ pub enum Column {
     Datetime(Buffer<i64>),
 }
 
-/// An in-place single-cell reduction op for the live tf-fold ([`Column::combine_at`]):
-/// fold one incoming value into a forming aggregate without re-reducing the period
-/// or allocating. The dual of [`crate::Agg`]'s reduce — `first` keeps, `last`
-/// replaces, the rest combine associatively.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CombineOp {
-    /// Keep the destination unchanged (the period's `first`).
-    Keep,
-    /// Overwrite with the source value (the period's `last`).
-    Replace,
-    /// Running maximum.
-    Max,
-    /// Running minimum.
-    Min,
-    /// Running sum.
-    Sum,
-}
-
 /// The result of a dtype-preserving scalar reduction ([`Column::sum`] etc.),
 /// carrying the value in its pandas result dtype so the binding can box it as the
 /// matching numpy scalar (`np.int64` / `np.float64` / `np.bool_`).
@@ -149,7 +131,7 @@ pub enum CmpOp {
 impl CmpOp {
     /// Whether `ordering` (the result of comparing two **present** values)
     /// satisfies this op.
-    fn matches(self, o: Ordering) -> bool {
+    pub fn matches(self, o: Ordering) -> bool {
         match self {
             CmpOp::Eq => o == Ordering::Equal,
             CmpOp::Ne => o != Ordering::Equal,
@@ -159,98 +141,17 @@ impl CmpOp {
             CmpOp::Ge => o != Ordering::Less,
         }
     }
-
-    /// The op applied to two `f64`s (the numeric path); `NaN` follows IEEE — `!=`
-    /// is `true`, every other op `false`.
-    fn matches_f64(self, a: f64, b: f64) -> bool {
-        match self {
-            CmpOp::Eq => a == b,
-            CmpOp::Ne => a != b,
-            CmpOp::Lt => a < b,
-            CmpOp::Le => a <= b,
-            CmpOp::Gt => a > b,
-            CmpOp::Ge => a >= b,
-        }
-    }
 }
 
+mod build;
 mod cast;
+mod fold;
+pub use fold::CombineOp;
 mod ops;
 mod order;
 mod transform;
 
 impl Column {
-    /// Build an `F64` column.
-    pub fn f64(v: Vec<f64>) -> Column {
-        Column::F64(Buffer::from_vec(v))
-    }
-
-    /// Build an `F32` column.
-    pub fn f32(v: Vec<f32>) -> Column {
-        Column::F32(Buffer::from_vec(v))
-    }
-
-    /// Build an `I32` column (all values present).
-    pub fn i32(v: Vec<i32>) -> Column {
-        Column::I32(Buffer::from_vec(v), Validity::dense())
-    }
-
-    /// Build a `Bool` column (all values present).
-    pub fn bool(v: Vec<bool>) -> Column {
-        Column::Bool(Buffer::from_vec(v), Validity::dense())
-    }
-
-    /// Build an `I64` column (all values present).
-    pub fn i64(v: Vec<i64>) -> Column {
-        Column::I64(Buffer::from_vec(v), Validity::dense())
-    }
-
-    /// Build an `I64` column with an explicit validity (missing-aware).
-    pub fn i64_with(v: Vec<i64>, validity: Validity) -> Column {
-        Column::I64(Buffer::from_vec(v), validity)
-    }
-
-    /// Build an `I32` column with an explicit validity (missing-aware).
-    pub fn i32_with(v: Vec<i32>, validity: Validity) -> Column {
-        Column::I32(Buffer::from_vec(v), validity)
-    }
-
-    /// Build a `Bool` column with an explicit validity (missing-aware).
-    pub fn bool_with(v: Vec<bool>, validity: Validity) -> Column {
-        Column::Bool(Buffer::from_vec(v), validity)
-    }
-
-    /// Build a `Str` column (all values present).
-    pub fn str(v: Vec<String>) -> Column {
-        Column::Str(StrBuffer::from_vec(v), Validity::dense())
-    }
-
-    /// Build a `Str` column with an explicit validity (missing-aware).
-    pub fn str_with(v: Vec<String>, validity: Validity) -> Column {
-        Column::Str(StrBuffer::from_vec(v), validity)
-    }
-
-    /// Build a `Datetime` column (epoch nanoseconds).
-    pub fn datetime(v: Vec<i64>) -> Column {
-        Column::Datetime(Buffer::from_vec(v))
-    }
-
-    /// An all-missing column of `dtype` with `len` rows — the dtype-preserving
-    /// default `other` for `where` / `mask` (so a kept value stays in its dtype
-    /// and a replaced one becomes NA, never an f64-funnel NaN).
-    pub fn na_of(dtype: DType, len: usize) -> Column {
-        let all_na = || Validity::from_valid_iter(len, std::iter::repeat_n(false, len));
-        match dtype {
-            DType::F64 => Column::f64(vec![f64::NAN; len]),
-            DType::F32 => Column::f32(vec![f32::NAN; len]),
-            DType::I64 => Column::i64_with(vec![0; len], all_na()),
-            DType::I32 => Column::i32_with(vec![0; len], all_na()),
-            DType::Bool => Column::bool_with(vec![false; len], all_na()),
-            DType::Utf8 => Column::str_with(vec![String::new(); len], all_na()),
-            DType::Datetime => Column::datetime(vec![i64::MIN; len]),
-        }
-    }
-
     /// Number of elements.
     pub fn len(&self) -> usize {
         match self {
@@ -297,18 +198,20 @@ impl Column {
         }
     }
 
-    /// Read cell `i` as `i64` (any integer / datetime / bool dtype; truncates a
-    /// float, `0` for `Str`). The integer counterpart of [`Self::get_f64`], for the
-    /// in-place tf-fold's combine on integer / datetime columns.
-    pub fn get_i64(&self, i: usize) -> i64 {
+    /// Read cell `i` of an integer-like column (int / bool / datetime) as its exact
+    /// `i64`, ignoring validity (callers check presence first). A float has no
+    /// exact integer reading — it converts through
+    /// [`convert_lossless`](Self::convert_lossless) — and a str none at all, so
+    /// callers only reach this for integer-like columns.
+    pub(crate) fn get_i64(&self, i: usize) -> i64 {
         match self {
             Column::I64(v, _) => v[i],
             Column::I32(v, _) => v[i] as i64,
             Column::Datetime(v) => v[i],
-            Column::F64(v) => v[i] as i64,
-            Column::F32(v) => v[i] as i64,
             Column::Bool(v, _) => v[i] as i64,
-            Column::Str(_, _) => 0,
+            Column::F64(_) | Column::F32(_) | Column::Str(..) => {
+                unreachable!("an integer reading of a {} cell", self.dtype()) // LCOV_EXCL_LINE
+            }
         }
     }
 
@@ -461,12 +364,19 @@ impl Column {
     /// image is not the value, so the result would not be a function of the input.
     /// int32 / bool / float inputs always fit; missing cells read as `NaN`.
     pub fn to_f64_domain(&self, op: &str) -> Result<Vec<f64>> {
+        self.check_f64_domain(op)?;
+        Ok(self.to_f64_vec())
+    }
+
+    /// The check of [`to_f64_domain`](Self::to_f64_domain) alone, for a reader that
+    /// converts later (or never, for an `F64` column it borrows).
+    pub fn check_f64_domain(&self, op: &str) -> Result<()> {
         if let Column::I64(v, val) = self {
             if let Some(x) = present(v, val).find(|&x| !in_f64_domain(x)) {
                 return Err(outside_f64_domain(x, op));
             }
         }
-        Ok(self.to_f64_vec())
+        Ok(())
     }
 
     /// Value at position `i` coerced to `f64`, **ignoring validity** (a missing
@@ -613,16 +523,6 @@ fn mask_f64(vals: impl Iterator<Item = f64>, validity: &Validity) -> Vec<f64> {
 /// A bool / i32 column widened to `i64` (for the i64-accumulator reductions).
 fn widen_i64<T: Copy + Into<i64>>(v: &[T]) -> Vec<i64> {
     v.iter().map(|&x| x.into()).collect()
-}
-
-/// Collect `Option<bool>`s into a `Bool` column: `None` -> `volas.NA`.
-fn from_option_bools(n: usize, it: impl Iterator<Item = Option<bool>>) -> Column {
-    let (mut values, mut valid) = (Vec::with_capacity(n), Vec::with_capacity(n));
-    for o in it {
-        values.push(o.unwrap_or(false));
-        valid.push(o.is_some());
-    }
-    Column::bool_with(values, Validity::from_valid_iter(n, valid))
 }
 
 /// Shift `v` by `n` (pandas `shift`), filling vacated cells with `fill`; the kept
@@ -842,19 +742,6 @@ fn clip_vec<T: Numeric>(v: &[T], lo: Option<f64>, hi: Option<f64>) -> Vec<T> {
         .collect()
 }
 
-/// Build a non-nullable bool mask from a per-index ordering of present pairs: a
-/// present pair (`Some(ord)`) applies `op`; a missing slot (`None`) follows IEEE,
-/// so only `!=` is `true`. Backs the typed (`str` / `datetime` / `bool`) arms of
-/// [`Column::compare`].
-fn cmp_typed(n: usize, op: CmpOp, key: impl Fn(usize) -> Option<Ordering>) -> Vec<bool> {
-    (0..n)
-        .map(|i| match key(i) {
-            Some(ord) => op.matches(ord),
-            None => op == CmpOp::Ne,
-        })
-        .collect()
-}
-
 /// Integer floor division (toward negative infinity, unlike Rust's truncating
 /// `/`); `None` for the one overflowing quotient, `i64::MIN // -1` (contract #25;
 /// NumPy wraps it). The divisor is non-zero (callers route a zero divisor through
@@ -979,3 +866,7 @@ mod tests_overflow;
 mod tests_convert;
 #[cfg(test)]
 mod tests_exact;
+#[cfg(test)]
+mod tests_fold;
+#[cfg(test)]
+mod tests_layout;

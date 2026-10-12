@@ -62,17 +62,22 @@ def structure(df: volas.DataFrame) -> None:
 def representation(s: volas.Series, c: str) -> None:
     """The NA model at the NumPy boundary (README "series.to_numpy"): a dense int
     column exports exactly as int64 (its validity holds no stale "has nulls" mark), and
-    a bool column with a missing cell exports as an object array of its cells."""
+    a bool column with a missing cell refuses a bare export (no placeholder would keep
+    the cell unknown) while its float export carries NaN exactly there."""
     missing = s.isna().to_numpy()
     if s.dtype in ('int64', 'int32') and not missing.any():
         exported = s.to_numpy()
         assert exported.dtype == np.dtype(s.dtype), \
             f'dense int column {c!r} exported as {exported.dtype} (a stale "has nulls" mark)'
     if s.dtype == 'bool' and missing.any():
-        out = s.to_numpy()
-        assert out.dtype == object, f'bool column {c!r} with NA exported as {out.dtype}'
-        assert all(isinstance(v, float) and math.isnan(v) for v in out[missing].tolist()), \
-            f'bool column {c!r}: a missing cell did not export as NaN'
+        try:
+            s.to_numpy()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f'bool column {c!r} with NA exported without a stated fill')
+        out = s.to_numpy(dtype='float64')
+        assert (np.isnan(out) == missing).all(), f'bool column {c!r}: NaN not exactly at the NA cells'
 
 
 def raw_state(df: volas.DataFrame) -> dict:
@@ -90,7 +95,7 @@ def raw_state(df: volas.DataFrame) -> dict:
     }
     for c in df.columns:
         s = df.get_column(c)
-        state[c] = (_bytes(s.to_numpy(dtype='object') if s.dtype == 'str' else s.to_numpy()),
+        state[c] = (_bytes(s.to_numpy(dtype='object') if s.dtype in ('str', 'bool') else s.to_numpy()),
                     _bytes(s.isna().to_numpy()))
     return state
 
@@ -136,8 +141,20 @@ def column_values(df: volas.DataFrame, c: str) -> np.ndarray:
     s = df.get_column(c)
     if s.dtype in ('float64', 'float32'):
         return s.to_numpy()
+    # the exact typed cells (an int past 2^53 stays exact, a missing cell is NA)
     return np.array([None if (v is volas.NA or v is None) else _scalar(v)
-                     for v in s.to_numpy(dtype='object').tolist()], dtype=object)
+                     for v in s.to_list()], dtype=object)
+
+
+def exec_values(df: volas.DataFrame, d: str) -> np.ndarray:
+    """``df.exec(d)`` in :func:`column_values_series`' representation: the NumPy
+    export, or — for a boolean result holding a missing truth, which has no bare
+    NumPy form — its typed cells (``None`` at a missing one)."""
+    try:
+        return np.asarray(df.exec(d))
+    except ValueError:
+        return np.array([None if v is volas.NA else v for v in df.exec(d, dtype='object').tolist()],
+                        dtype=object)
 
 
 def column_values_series(s: volas.Series) -> np.ndarray:

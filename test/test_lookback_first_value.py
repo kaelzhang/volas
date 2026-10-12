@@ -55,15 +55,12 @@ def _tuples(line, count=8):
 # * a pivot is an event — its first value is the first confirmed pivot, at or after
 #   the lookback (the earliest row one can be confirmed);
 # * KDJ smooths an RSV taken over the bars available so far (the 通达信 convention), so
-#   it publishes from bar 0; its lookback is the smoothing's warm-up, after that.
+#   it publishes from bar 0; its lookback is the smoothing's warm-up, after that;
+# * `increase` / `repeat` are Kleene ANDs over their window: one False step already
+#   decides a False before the window is complete, so a value may come before the lookback.
 EVENT = {'pivothigh', 'pivotlow'}
-EARLY = {'kdj.k', 'kdj.d', 'kdj.j'}
-# Open defects of other classes this sweep surfaces (not lookback metadata):
-OPEN = {
-    # boolean tools publish False, not NA, before their window is complete (contract #27)
-    'increase': 'boolean warm-up rows are False instead of NA',
-    'repeat': 'boolean warm-up rows are False instead of NA',
-}
+EARLY = {'kdj.k', 'kdj.d', 'kdj.j', 'increase', 'repeat'}
+# Open defects of another class this sweep surfaces (not lookback metadata):
 OPEN_FORMS = {
     # a period of 1 is accepted but degenerate: log10(1) = 0 divides CHOP, and a one-bar
     # standard deviation leaves the squeeze undefined
@@ -73,9 +70,7 @@ OPEN_FORMS = {
 
 
 def _case(line, form):
-    # the boolean tools' window is their first argument; a window of 1 has no warm-up
-    windowed = line.head in OPEN and form.split(':')[1].split(',')[0] != '1'
-    reason = (OPEN[line.head] if windowed else None) or OPEN_FORMS.get(form)
+    reason = OPEN_FORMS.get(form)
     marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
     return pytest.param(line, form, id=form, marks=marks)
 
@@ -87,13 +82,10 @@ CASES = [_case(line, form) for line in executable_lines() if line.args for form 
 def test_lookback_is_the_first_published_row(line, form):
     directive = form + line.series_suffix
     try:
-        values = FRAME.exec(directive)
+        values = FRAME.exec(directive, dtype='float64')  # NA -> NaN, booleans -> 0 / 1
     except volas.DirectiveError:
         pytest.skip(f'{directive}: not executable with these arguments')
-    if values.dtype == object:  # a boolean line carrying NA
-        missing = np.array([v is None or (isinstance(v, float) and np.isnan(v)) for v in values])
-    else:
-        missing = np.isnan(np.asarray(values, dtype=float))
+    missing = np.isnan(values)
     first = int(np.argmin(missing)) if not missing.all() else N
     lookback = volas.directive_lookback(directive)
     if line.head in EVENT:

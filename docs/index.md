@@ -19,7 +19,9 @@ methodology, and supported pandas behavior.
 | Move TA-Lib calls into volas directives | [TA-Lib migration](migration-talib.md) |
 | Move a pandas OHLCV pipeline into volas | [pandas migration](migration-pandas.md) |
 | Find output names for multi-output indicators | [Directive cheat sheet](directive-cheatsheet.md) |
-| See how indicators treat missing and infinite inputs and keep window sums exact | [Missing values and exact window sums](indicator-inputs.md) |
+| See how indicators treat missing and infinite inputs, keep window sums exact and take variances | [Missing values and exact window sums](indicator-inputs.md) |
+| Look up a TradingView Pine `ta.*` directive | [TradingView-compatible directives](indicators-tradingview.md) |
+| Look up a directive that corresponds to a TA-Lib function | [TA-Lib-compatible directives](indicators-talib.md) |
 | Decide whether volas is the wrong tool | [When not to use volas](when-not-to-use.md) |
 
 The complete indicator index and pandas-subset contract remain in
@@ -40,5 +42,7 @@ migration-talib
 migration-pandas
 directive-cheatsheet
 indicator-inputs
+indicators-tradingview
+indicators-talib
 when-not-to-use
 ```

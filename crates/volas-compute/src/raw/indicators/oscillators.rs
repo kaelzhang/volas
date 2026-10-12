@@ -2,7 +2,7 @@ use ndarray::Array1;
 
 use super::av;
 use super::stochastic::{stoch_fastk, stochrsi_fastk};
-use crate::accum::{anchors_at, Csum};
+use crate::accum::{Accumulator, Csum};
 use crate::guard::Slide;
 use crate::missing;
 use crate::raw::kernels::{self, canonical_zero};
@@ -566,33 +566,26 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// sum yields `NaN`. Lookback `period-1`.
 ///
 /// An **O(n)** sliding recurrence ([`cog_row`]). A window holding a non-finite bar is
-/// computed exactly on its own rows (O(period)), and the slide is re-seeded from the
+/// computed on its own rows (O(period)), and the slide is re-seeded from the
 /// first clean window after it — a bad bar reaches only the windows holding it, and a
 /// value never depends on the rows after it.
-pub fn cog(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
+pub fn cog(close: &[f64], period: usize, _origin: usize) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
         return out;
     }
-    let mut state = cog_initial(origin);
+    let mut state = [0.0; COG_STATE];
     for (i, o) in out.iter_mut().enumerate() {
         *o = cog_row(close, period, i, &mut state);
     }
     out
 }
 
-/// The length of [`cog`]'s state: `[Σ(1+age)·price, Σprice, Σ|price|]` (each a
-/// [`Csum`]), the non-finite bars in the window, the bars seen (capped), whether the
-/// sums describe the window, the absolute position of the next bar (for re-anchoring).
-const COG_STATE: usize = 3 * Csum::STATE + 4;
-
-/// [`cog`]'s state before its first bar, at absolute position `origin`.
-fn cog_initial(origin: usize) -> [f64; COG_STATE] {
-    let mut st = [0.0; COG_STATE];
-    st[9] = origin as f64;
-    st
-}
+/// The length of [`cog`]'s state: `[Σ(1+age)·price, Σprice]` (each a [`Csum`]), the
+/// non-finite bars in the window, the bars seen (capped), whether the sums describe the
+/// window.
+const COG_STATE: usize = 2 * Csum::STATE + 3;
 
 /// One row of [`cog`] at `i`, advancing `st` (bars `0..i` already seen).
 ///
@@ -600,18 +593,13 @@ fn cog_initial(origin: usize) -> [f64; COG_STATE] {
 /// oldest (weight `period`) lowers every retained weight, so `num[i] = num[i-1] +
 /// den[i-1] - (period+1)·leaving + close[i]` and `den[i] = den[i-1] - leaving +
 /// close[i]` (the WMA-slide trick, mirrored to cog's newest-weighted-1 orientation).
-/// The sums are compensated and the weighted terms exact, so a bar leaves `num` exactly
-/// as it entered it.
-/// `aden` (Σ|price|) is the cancellation scale: when the running `den` is negligible
-/// against it the window sum has cancelled to ~0, but a running sum lands on float drift
-/// (~1e-15) instead of an exact 0.0, so the `den != 0.0` guard would wrongly emit a huge
-/// garbage value. There the window is recomputed exactly (O(period), only on
-/// near-cancellation) so a true zero sum yields `NaN`, matching the per-window form.
+/// The sums are exact and the weighted terms enter and leave exactly (see
+/// [`crate::accum`]), so a window whose prices sum to zero reads exactly zero (`NaN`).
 #[inline]
 fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) -> f64 {
     let sum_at = |k: usize| Csum::from_state(&st[2 * k..2 * k + 2]).unwrap_or_default();
-    let (mut num, mut den, mut aden) = (sum_at(0), sum_at(1), sum_at(2));
-    let (bad, seen, valid, pos) = (st[6], st[7], st[8], st[9] as usize);
+    let (mut num, mut den) = (sum_at(0), sum_at(1));
+    let (bad, seen, valid) = (st[4], st[5], st[6]);
     let (mut bad, seen) = (bad as usize, seen as usize);
     let pf = period as f64;
     if !close[i].is_finite() {
@@ -626,49 +614,68 @@ fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) ->
         f64::NAN
     } else if bad > 0 {
         valid = false;
-        cog_window_exact(close, i, period)
+        let [num, den] = cog_sums(close, i, period);
+        cog_value(num, den)
     } else {
-        // Re-anchoring at an absolute position is re-seeding the window (see
-        // `crate::accum`).
-        if valid && !anchors_at(pos, period) {
+        // Re-anchoring at an absolute position, or when a slid sum went inexact, is
+        // re-seeding the window (see `crate::accum`).
+        let slid = valid;
+        if slid {
             let leaving = close[i - period];
             num.add_sum(&den);
             num.sub_prod(pf + 1.0, leaving);
             num.add(close[i]);
             den.sub(leaving);
             den.add(close[i]);
-            aden.sub(leaving.abs());
-            aden.add(close[i].abs());
-        } else {
-            (num, den, aden) = (Csum::default(), Csum::default(), Csum::default());
-            for age in 0..period {
-                let price = close[i - age]; // age 0 = newest
-                num.add_prod((1 + age) as f64, price);
-                den.add(price);
-                aden.add(price.abs());
-            }
+        }
+        if !(slid && num.is_exact() && den.is_exact()) {
+            [num, den] = cog_sums(close, i, period);
             valid = true;
         }
-        let d = den.value();
-        if d.abs() <= 1e-9 * aden.value() {
-            cog_window_exact(close, i, period)
-        } else {
-            -num.value() / d
-        }
+        cog_value(num, den)
     };
     num.write_state(&mut st[0..2]);
     den.write_state(&mut st[2..4]);
-    aden.write_state(&mut st[4..6]);
-    st[6] = bad as f64;
-    st[7] = (seen + 1).min(period + 1) as f64;
-    st[8] = f64::from(u8::from(valid));
-    st[9] = (pos + 1) as f64;
+    st[4] = bad as f64;
+    st[5] = (seen + 1).min(period + 1) as f64;
+    st[6] = f64::from(u8::from(valid));
     value
 }
 
+/// `-num / den`, `NaN` for a window whose prices sum to zero.
+#[inline]
+fn cog_value(num: Csum, den: Csum) -> f64 {
+    let d = den.value();
+    if d != 0.0 {
+        -num.value() / d
+    } else {
+        f64::NAN
+    }
+}
+
+/// [`cog`]'s window sums `[Σ(1+age)·price, Σprice]` at `i`, seeded newest first —
+/// exact (a window holding a non-finite bar takes their IEEE value). Out of the
+/// slide's loop.
+#[cold]
+#[inline(never)]
+fn cog_sums(close: &[f64], i: usize, period: usize) -> [Csum; 2] {
+    Csum::settle(cog_seed(close, i, period), || cog_seed(close, i, period))
+}
+
+/// [`cog_sums`] over an [`Accumulator`].
+fn cog_seed<A: Accumulator>(close: &[f64], i: usize, period: usize) -> [A; 2] {
+    let (mut num, mut den) = (A::default(), A::default());
+    for age in 0..period {
+        let price = close[i - age]; // age 0 = newest
+        num.add_prod((1 + age) as f64, price);
+        den.add(price);
+    }
+    [num, den]
+}
+
 /// [`cog`]'s state after the rows of `close`.
-pub fn cog_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    crate::guard::state_after(cog_initial(origin).to_vec(), close.len(), |row, prev, next| {
+pub fn cog_state(close: &[f64], period: usize, _origin: usize) -> Option<Vec<f64>> {
+    crate::guard::state_after(vec![0.0; COG_STATE], close.len(), |row, prev, next| {
         cog_step(close, period, row, prev, next)
     })
 }
@@ -684,25 +691,6 @@ pub fn cog_step(close: &[f64], period: usize, row: usize, state: &[f64], next: &
     Some(value)
 }
 
-
-/// One cog window computed exactly (the O(period) per-window form): the slide's
-/// `NaN`-input fallback and its near-zero-denominator recovery. `i` is the newest
-/// bar, weighting newest 1 … oldest `period`; an exact zero window sum ⇒ `NaN`.
-#[inline]
-fn cog_window_exact(close: &[f64], i: usize, period: usize) -> f64 {
-    let mut num = 0.0; // Σ (1+age)·price, age 0 = newest
-    let mut den = 0.0;
-    for age in 0..period {
-        let price = close[i - age];
-        num += (1 + age) as f64 * price;
-        den += price;
-    }
-    if den != 0.0 {
-        -num / den
-    } else {
-        f64::NAN
-    }
-}
 
 /// Rank Correlation Index (TradingView `ta.rci`): Spearman's rank correlation
 /// between `close` and the bar index over `period` bars, scaled to `[-100, 100]`.

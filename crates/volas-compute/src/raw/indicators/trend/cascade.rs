@@ -2,7 +2,7 @@
 //! `cascade_warmup` and the EMA lattice resume.
 
 use crate::raw::indicators::trend::ma::ema_k;
-use crate::accum::{Anchors, Csum};
+use crate::accum::Csum;
 use crate::guard::{ring_push, Slide};
 use crate::raw::kernels;
 
@@ -120,14 +120,13 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     // Fuse the two SMA convolutions into one pass (no intermediate `inner` array): a
     // running `sum1` slides the inner a-window, each inner mean feeds `sum2` — the
     // outer b-window sum over a ring of the last `b` inner means. Both follow `sma`'s
-    // fast path exactly — add then subtract, re-anchored at absolute positions — and
+    // fast path exactly — add then subtract, re-summed where inexact — and
     // the outer slide begins at the first finite inner mean (index a-1, `sma`'s
     // leading-NaN skip), so this is bit-identical to `sma(sma(data, a), b)`.
     let af = a as f64;
     let bf = b as f64;
     let mut sum1 = Csum::default();
     let mut sum2 = Csum::default();
-    let (mut anchors_a, mut anchors_b) = (Anchors::from(origin, a), Anchors::from(origin, b));
     let mut clean = true;
     let mut ring = vec![0.0; b];
     let mut slot = 0usize;
@@ -137,11 +136,12 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
         if i >= a {
             sum1.sub(data[i - a]);
         }
-        if anchors_a.tick() && i + 1 >= a {
+        if !sum1.is_exact() && i + 1 >= a {
             clean &= sum1.value().is_finite();
-            sum1 = Csum::of(data[i + 1 - a..=i].iter().copied());
+            if clean {
+                sum1 = Csum::of(data[i + 1 - a..=i].iter().copied());
+            }
         }
-        let anchor_b = anchors_b.tick();
         if i + 1 >= a {
             let inner = sum1.mean(af);
             sum2.add(inner);
@@ -154,11 +154,13 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
                 slot = 0;
             }
             inner_cnt += 1;
-            if anchor_b && i + 1 >= b {
+            if !sum2.is_exact() && i + 1 >= b {
                 clean &= sum2.value().is_finite();
-                // the window's inner means, oldest first (fewer than `b` at the start)
-                let m = inner_cnt.min(b);
-                sum2 = Csum::of((0..m).map(|k| ring[(slot + b - m + k) % b]));
+                if clean {
+                    // the window's inner means, oldest first (fewer than `b` at the start)
+                    let m = inner_cnt.min(b);
+                    sum2 = Csum::of((0..m).map(|k| ring[(slot + b - m + k) % b]));
+                }
             }
             if inner_cnt >= b {
                 out[i] = sum2.mean(bf);

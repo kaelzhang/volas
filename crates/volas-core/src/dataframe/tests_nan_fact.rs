@@ -82,8 +82,12 @@ fn fold_forming_row_over_the_only_nan() {
     let mut df = DataFrame::new(vec!["x".into()], vec![Column::f64(vec![1.0, NAN])], None).unwrap();
     assert!(x(&df).has_nan());
     let src = DataFrame::new(vec!["x".into()], vec![Column::f64(vec![5.0])], None).unwrap();
+    // a missing aggregate stays missing through a fold; re-cumulating the period
+    // (its re-sent bar) writes the value and clears the fact
     df.fold_forming_row(1, &src, 0, &[(0, 0, CombineOp::Replace)])
         .unwrap();
+    assert!(x(&df).has_nan());
+    df.refold_forming_row(1, &src, &[(0, 0, CombineOp::Replace)]).unwrap();
     assert!(!x(&df).has_nan());
 }
 
@@ -157,7 +161,7 @@ fn a_write_to_a_shared_copy_leaves_the_other_untouched() {
 
 #[test]
 fn an_int_column_reads_its_validity() {
-    let ints = Column::i64_with(
+    let ints = Column::i64_masked(
         vec![1, 0],
         crate::Validity::from_valid_iter(2, [true, false]),
     );

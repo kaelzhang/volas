@@ -12,7 +12,7 @@ import volas
 
 from .harness import budget, build, observe
 from .harness.data import EPOCHS, NS, Schema, make_rows
-from .harness.ledger import Ledger
+from .harness.ledger import Ledger, reference
 from .harness.schedules import OHLCV, locality_failures, plain_schedule, sweep_directives, tf_schedule
 
 
@@ -130,28 +130,55 @@ def test_windowed_range_index_labels_continue_across_compaction():
         assert list(np.asarray(df.index)) == list(range(max(0, i + 1 - 4), i + 1)), f'after bar {i}'
 
 
-def test_a_fold_that_fills_the_last_missing_int_keeps_an_int_export():
-    """Validity stays canonical: once a forming bar's only missing int cell is filled
-    (a 'last' fold replaces it), the column is dense again — it exports as int64 and
-    equals the dense reference."""
+def test_a_refold_that_fills_the_last_missing_int_keeps_an_int_export():
+    """Validity stays canonical: a later bar never fills a missing aggregate (any
+    missing input makes it missing), but once the bar that held the only missing int
+    cell is re-sent with a value, the period re-aggregates dense — it exports as
+    int64 and equals the dense reference."""
     schema = Schema('float64', 'float64', (('n', 'int64'),), 'datetime', None)
     t0 = EPOCHS[1]
     first = {'open': 1.0, 'high': 2.0, 'low': 0.5, 'close': 1.5, 'volume': 1.0, 'n': None}
     second = {'open': 1.2, 'high': 2.5, 'low': 1.0, 'close': 2.0, 'volume': 1.0, 'n': 7}
     df = build.frame(schema, [first], [t0]).cumulate('5m')
     df.append(build.frame(schema, [second], [t0 + 60 * NS]))
+    assert df.get_column('n').to_list() == [volas.NA]  # stays missing
+    df = build.frame(schema, [first], [t0]).cumulate('5m')
+    df.append(build.frame(schema, [dict(first, n=3)], [t0]))  # the bar re-sent with a value
+    df.append(build.frame(schema, [second], [t0 + 60 * NS]))
     n = df.get_column('n')
     assert n.equals(volas.DataFrame({'n': np.array([7])})['n'])
     observe.structure(df)
 
 
-def test_a_bool_column_with_na_exports_its_cells():
-    """The NA model at the NumPy boundary: a bool column with a missing cell exports
-    as an object array of True / False / NaN (not a lossy float64)."""
+def test_a_bool_column_with_na_exports_only_with_a_stated_fill():
+    """The NA model at the NumPy boundary: a bool column with a missing cell has no
+    bare NumPy form (a placeholder would read True or False); its object export
+    carries volas.NA, its float export NaN."""
     df = volas.DataFrame({'close': [1.0, 2.0, 3.0], 'flag': [True, None, False]})
     assert df.dtypes['flag'] == 'bool'
-    out = df.get_column('flag').to_numpy()
-    assert out.dtype == object
-    assert out[0] == True and out[2] == False  # noqa: E712 - numpy or Python bool
-    assert isinstance(out[1], float) and np.isnan(out[1])
+    with pytest.raises(ValueError, match='bool column with missing values'):
+        df.get_column('flag').to_numpy()
+    out = df.get_column('flag').to_numpy(dtype='object')
+    assert out[0] == True and out[2] == False and out[1] is volas.NA  # noqa: E712
+    assert np.isnan(df.get_column('flag').to_numpy(dtype='float64')[1])
     observe.structure(df)
+
+
+def test_a_lossy_coarse_volume_beside_a_missing_price_is_an_error():
+    """A long-budget counterexample: on an Asia/Shanghai ledger with an int64 volume past
+    2^53 (exact in int64, no exact float64) and a missing price, the from-scratch
+    reference of a composite over `ad@open` crashed — the missing-row rerun read an
+    empty volume. It is the error the same frame raises without the missing price."""
+    schema = Schema('float64', 'int64', (('x', 'float64'),), 'datetime', 'Asia/Shanghai')
+    index = [1772953200000000000, 1772954100000000000, 1772954400000000000, 1772954700000000000]
+    rows = [dict(open=10.0 + i, high=11.0 + i, low=9.0 + i, close=10.5 + i, volume=100 + i, x=0.5)
+            for i in range(4)]
+    rows[2]['volume'] = 2**53 + 1
+    directive = '-((ad@open)+(ACCBANDS@high))'
+    clean = Ledger(schema)
+    clean.append([dict(r) for r in rows], index)
+    rows[1]['open'] = None
+    ledger = Ledger(schema)
+    ledger.append(rows, index)
+    assert reference(clean, directive, schema.columns) == (None, OverflowError)
+    assert reference(ledger, directive, schema.columns) == (None, OverflowError)

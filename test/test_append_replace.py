@@ -47,8 +47,16 @@ def _frame_of(rows, labels):
     return DataFrame({k: np.array([r[k] for r in rows]) for k in OHLCV}, index=labels)
 
 
+def _np(x):
+    """Values to compare: a bool Series as float64 (a missing truth -> NaN, so its
+    position is compared too), anything else as it exports."""
+    if getattr(x, "dtype", None) == "bool" and not isinstance(x, np.ndarray):
+        return x.to_numpy(dtype="float64")
+    return np.asarray(x)
+
+
 def _same(got, want, ctx):
-    got, want = np.asarray(got), np.asarray(want)
+    got, want = _np(got), _np(want)
     if got.dtype == bool or want.dtype == bool:
         assert np.array_equal(got.astype(bool), want.astype(bool)), ctx
         return
@@ -171,8 +179,8 @@ def _run_plain(directive, labels_of, window=None):
         if window is None:
             _same(live[directive], _full(live)[directive], ctx)
         elif step % 9 == 8:
-            w = np.asarray(live[directive])
-            _same(w, np.asarray(twin[directive])[-len(w):], ctx + " windowed")
+            w = _np(live[directive])
+            _same(w, _np(twin[directive])[-len(w):], ctx + " windowed")
     _same(twin[directive], _full(twin)[directive], f"{directive} unbounded end")
 
 
@@ -232,8 +240,8 @@ def _run_tf(directive, window=None):
             if window is None:
                 _same(live[directive], _full(live)[directive], ctx)
             else:
-                w = np.asarray(live[directive])
-                _same(w, np.asarray(twin[directive])[-len(w):], ctx + " windowed")
+                w = _np(live[directive])
+                _same(w, _np(twin[directive])[-len(w):], ctx + " windowed")
     _same(twin[directive], _full(twin)[directive], f"{directive} unbounded end")
 
 
@@ -270,8 +278,8 @@ def test_a_cached_boolean_column_keeps_the_fold_exact(directive):
                 live.fulfill()
                 twin.fulfill()
         for d in (directive, "close > open"):
-            w = np.asarray(live[d])
-            _same(w, np.asarray(twin[d])[-len(w):], f"{d} window={window}")
+            w = _np(live[d])
+            _same(w, _np(twin[d])[-len(w):], f"{d} window={window}")
             _same(twin[d], _full(twin)[d], f"{d} full")
 
 

@@ -213,7 +213,7 @@ pub enum Node<A> {
     /// A bare identifier: a column name, or a no-argument command.
     Name(String),
     /// A numeric literal.
-    Scalar(f64),
+    Scalar(Number),
     /// An indicator command.
     Command(Command<A>),
     /// A unary operation.
@@ -242,11 +242,82 @@ pub type Cst = Node<Vec<Option<String>>>;
 /// measured (lookback), and rendered (stringify) without per-call re-parsing.
 pub type Ast = Node<Box<[ArgValue]>>;
 
-/// The canonical source token of a number: its shortest decimal form that reads back
-/// as the same `f64` — a whole number without a decimal point (`2`), whatever its
-/// magnitude (`100000000000000000000`, never a saturated integer cast).
+/// A numeric literal, held exactly: an integral value inside the int64 range is an
+/// `Int` — so `volume > 9007199254740993` compares against that integer, never its
+/// float64 neighbour (contract #26) — and any other value is a float64. The form is
+/// canonical (`2.0` is `Int(2)`), so a literal re-parses from its token unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Number {
+    /// An integer literal.
+    Int(i64),
+    /// A float literal (non-integral, or past the int64 range).
+    Float(f64),
+}
+
+impl Number {
+    /// The literal written as `text` (an optional `-`, digits, an optional `.`). An
+    /// integral value (`5`, `5.0`, `9007199254740993.000`) is read exactly, never
+    /// through a float64: inside int64 it is an `Int`; past it, a float64 that holds
+    /// it exactly, else [`LiteralError::Inexact`] — a written integer is never
+    /// rounded silently. Any other value is a float64 in canonical form.
+    pub(crate) fn parse(text: &str) -> Result<Number, LiteralError> {
+        let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+        let integral = frac.bytes().all(|b| b == b'0');
+        if integral {
+            if let Ok(i) = whole.parse::<i64>() {
+                return Ok(Number::Int(i));
+            }
+        }
+        let v = text.parse::<f64>().map_err(|_| LiteralError::Invalid)?;
+        if !v.is_finite() {
+            return Err(LiteralError::OutOfRange);
+        }
+        if integral {
+            // past int64: only a float64 that is exactly the written integer
+            let (sign, digits) = whole.strip_prefix('-').map_or(("", whole), |d| ("-", d));
+            let digits = digits.trim_start_matches('0');
+            return if format!("{v:.0}") == format!("{sign}{digits}") {
+                Ok(Number::Float(v))
+            } else {
+                Err(LiteralError::Inexact)
+            };
+        }
+        Ok(match <i64 as volas_core::numeric::Numeric>::try_from_f64(v) {
+            Some(i) => Number::Int(i),
+            None => Number::Float(v),
+        })
+    }
+
+    /// The literal's canonical source token.
+    pub(crate) fn token(self) -> String {
+        match self {
+            Number::Int(i) => i.to_string(),
+            Number::Float(v) => number_token(v),
+        }
+    }
+}
+
+/// Why a number token is not a literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiteralError {
+    /// Not a number at all (e.g. `1.2.3`).
+    Invalid,
+    /// Rounds to `±inf`, which has no literal form.
+    OutOfRange,
+    /// An integral value past int64 that no float64 holds exactly.
+    Inexact,
+}
+
+/// The canonical source token of a number that reads back as the same `f64`: a
+/// whole number is its exact integer digits without a decimal point (`2`,
+/// `100000000000000000000`, never a saturated integer cast nor a shortened form the
+/// exact integer reading would reject), any other value its shortest decimal form.
 pub(crate) fn number_token(v: f64) -> String {
-    format!("{v}")
+    if v.fract() == 0.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v}")
+    }
 }
 
 #[cfg(test)]
@@ -299,7 +370,7 @@ mod tests {
         assert_eq!(cmd.clone().name, "ma");
         let nodes: [Cst; 6] = [
             Node::Name("a".into()),
-            Node::Scalar(1.5),
+            Node::Scalar(Number::Float(1.5)),
             Node::Command(cmd),
             Node::Unary {
                 op: UnaryOp::Not,
@@ -307,12 +378,12 @@ mod tests {
             },
             Node::Unary {
                 op: UnaryOp::Neg,
-                operand: Box::new(Node::Scalar(2.0)),
+                operand: Box::new(Node::Scalar(Number::Int(2))),
             },
             Node::Binary {
                 left: Box::new(Node::Name("c".into())),
                 op: Op::Gt,
-                right: Box::new(Node::Scalar(0.0)),
+                right: Box::new(Node::Scalar(Number::Int(0))),
             },
         ];
         for n in &nodes {

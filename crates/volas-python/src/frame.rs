@@ -91,6 +91,14 @@ impl FoldPlan {
     }
 }
 
+/// Whether a column takes part in a column-wise reduction (`sum` / `prod` / `min` /
+/// `max` / `mean` / `var` / `std` / `median` / `sem` / `skew` / `kurt` / `corr` /
+/// `cov` / `any` / `all`): the numeric columns and bool (counted as 0 / 1, pandas)
+/// — one predicate, so no reduction drops a column another one keeps.
+pub(crate) fn reduces(col: &Column) -> bool {
+    col.require_numeric().is_ok()
+}
+
 /// Bounded rolling-window state when this is a windowed frame (`window=`); `None`
 /// for an unbounded frame. The frame physically retains `[capacity, 2*capacity]`
 /// rows (`capacity = window + max_lookback`); the user-facing surface shows only the
@@ -359,19 +367,19 @@ impl PyDataFrame {
             .map_err(pyerr)
     }
 
-    /// Reduce each numeric column to a scalar -> a Series indexed by column name
-    /// (pandas column-wise `df.sem()` etc.; non-numeric columns are skipped).
-    pub(crate) fn reduce_cols(&self, op: impl Fn(&Column) -> f64) -> PyResult<PySeries> {
+    /// Reduce each reducible column ([`reduces`]) to a float64 statistic -> a Series
+    /// indexed by column name (pandas column-wise `df.sem()` etc.). `op` reads the
+    /// column's float64 domain values (`op_name` names it): an int64 past 2^53
+    /// raises (contract #26).
+    pub(crate) fn reduce_cols(&self, op_name: &str, op: impl Fn(&[f64]) -> f64) -> PyResult<PySeries> {
         ensure_fresh(&self.inner)?;
         let view = self.logical();
         let df = view.as_ref();
         let mut names = Vec::new();
         let mut vals = Vec::new();
-        for (name, col) in df.names().iter().zip(df.columns()) {
-            if col.dtype().is_numeric() {
-                names.push(name.clone());
-                vals.push(op(col));
-            }
+        for (name, col) in df.names().iter().zip(df.columns()).filter(|(_, c)| reduces(c)) {
+            names.push(name.clone());
+            vals.push(op(&col.to_f64_domain(op_name).map_err(pyerr)?));
         }
         Ok(PySeries {
             inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
@@ -387,20 +395,21 @@ impl PyDataFrame {
         self.map_columns(|c| Ok(c.fill_dir(forward)))
     }
 
-    /// Pairwise matrix (corr / cov) over the numeric columns; result column `j`
+    /// Pairwise matrix (corr / cov) over the reducible columns ([`reduces`]); result column `j`
     /// is `[op(col_i, col_j) for i]`, indexed and labelled by the column names.
     /// Backs `corr` / `cov`.
-    pub(crate) fn corr_cov(&self, op: fn(&[f64], &[f64]) -> f64) -> PyResult<PyDataFrame> {
+    pub(crate) fn corr_cov(&self, op_name: &str, op: fn(&[f64], &[f64]) -> f64) -> PyResult<PyDataFrame> {
         ensure_fresh(&self.inner)?;
         let view = self.logical();
         let df = view.as_ref();
+        // float64 math: an int64 past 2^53 raises (contract #26)
         let numeric: Vec<(String, Vec<f64>)> = df
             .names()
             .iter()
             .zip(df.columns())
-            .filter(|(_, c)| c.dtype().is_numeric())
-            .map(|(n, c)| (n.clone(), c.to_f64_vec()))
-            .collect();
+            .filter(|(_, c)| reduces(c))
+            .map(|(n, c)| Ok((n.clone(), c.to_f64_domain(op_name).map_err(pyerr)?)))
+            .collect::<PyResult<_>>()?;
         let names: Vec<String> = numeric.iter().map(|(n, _)| n.clone()).collect();
         let cols: Vec<Column> = numeric
             .iter()

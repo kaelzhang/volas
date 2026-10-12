@@ -1,4 +1,4 @@
-use crate::accum::{Anchors, Csum};
+use crate::accum::Csum;
 use crate::guard::{all_finite, own_sums, state_after, window_sums, Order, Slide, Window};
 use crate::missing;
 use crate::raw::kernels;
@@ -259,17 +259,19 @@ pub fn imi(open: &[f64], close: &[f64], period: usize, origin: usize) -> Vec<f64
         down_sum.add(d);
     }
     let mut out = crate::buf::OutBuf::warmup(n, lookback);
-    let mut anchors = Anchors::from(origin + lookback, period);
     let mut clean = true;
     for today in lookback..n {
         let (u, d) = updown(today);
         up_sum.add(u);
         down_sum.add(d);
-        if anchors.tick() {
+        if !(up_sum.is_exact() && down_sum.is_exact()) {
             clean &= up_sum.value().is_finite() && down_sum.value().is_finite();
-            let window = || (today - lookback..=today).map(updown);
-            up_sum = Csum::of(window().map(|t| t.0));
-            down_sum = Csum::of(window().map(|t| t.1));
+            if clean {
+                [up_sum, down_sum] = Csum::of_rows((today - lookback..=today).map(|j| {
+                    let (u, d) = updown(j);
+                    [u, d]
+                }));
+            }
         }
         out.set(today, imi_value(up_sum.value(), down_sum.value()));
         let (lu, ld) = updown(today - lookback);
@@ -304,7 +306,7 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize, origin: usiz
     // The window mean is a sliding sum (add the entering bar, drop the leaving one) — O(1)
     // per bar instead of re-summing the window. The mean-absolute-deviation still scans the
     // window (each `|x - avg|` depends on the just-computed mean, so it cannot slide). The
-    // sliding sum is exact ([`Csum`], re-anchored at absolute positions), so a window's
+    // sliding sum is exact ([`Csum`], re-summed where it could not hold its sum), so a window's
     // mean is its own however long the slide. The value at row `i` from its window mean.
     let p = period as f64;
     let value = |i: usize, avg: f64| cci_value(|j| tp[j], period, i, avg);
@@ -313,13 +315,14 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize, origin: usiz
         sum.add(x);
     }
     let mut out = crate::buf::OutBuf::warmup(n, period - 1);
-    let mut anchors = Anchors::from(origin + period - 1, period);
     let mut clean = true;
     for i in (period - 1)..n {
         sum.add(tp[i]);
-        if anchors.tick() {
+        if !sum.is_exact() {
             clean &= sum.value().is_finite();
-            sum = Csum::of(tp[i + 1 - period..=i].iter().copied());
+            if clean {
+                sum = Csum::of(tp[i + 1 - period..=i].iter().copied());
+            }
         }
         out.set(i, value(i, sum.mean(p)));
         sum.sub(tp[i + 1 - period]);
@@ -563,7 +566,10 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 
 /// Money Flow Index (TA-Lib MFI): `100·posMF/(posMF+negMF)` over `period`, where each
 /// bar's money flow `tp·volume` (tp = (h+l+c)/3) is signed by `tp`'s direction vs the
-/// prior bar. A total flow below 1.0 yields 0 (TA-Lib's guard). Row 0 is at absolute
+/// prior bar. A window whose flows sum to exactly 0 yields 0 — TA-Lib's result there,
+/// which TA-Lib reaches through an absolute `total < 1.0` threshold instead (a
+/// deliberate divergence: that threshold makes TA-Lib's MFI depend on the volume's
+/// unit; the exact sums make the zero test exact). Row 0 is at absolute
 /// position `origin` (flow `j`, of bar `j + 1`, at `origin + j`). First value at index
 /// `period` (lookback = period). The sliding sums recompute the leaving bar's flow,
 /// which is bit-identical to TA-Lib's stored value.
@@ -612,15 +618,16 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         i += 1;
     }
     // Re-anchor from the ring: the window's flows, oldest (slot `oldest`) first.
-    let mut anchors = Anchors::from(origin + period - 1, period);
     let mut clean = true;
     let mut reanchor = |pos_sum: &mut Csum, neg_sum: &mut Csum, ring_pos: &[f64], ring_neg: &[f64], oldest: usize| {
         clean &= pos_sum.value().is_finite() && neg_sum.value().is_finite();
-        let window = (0..period).map(|k| (oldest + k) % period);
-        *pos_sum = Csum::of(window.clone().map(|k| ring_pos[k]));
-        *neg_sum = Csum::of(window.map(|k| ring_neg[k]));
+        if clean {
+            let window = (0..period).map(|k| (oldest + k) % period);
+            [*pos_sum, *neg_sum] = Csum::of_rows(window.map(|k| [ring_pos[k], ring_neg[k]]));
+        }
     };
-    if anchors.tick() {
+    let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
+    if !exact(&pos_sum, &neg_sum) {
         reanchor(&mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, 0);
     }
     out.set(period, mfi_value([pos_sum.value(), neg_sum.value()]));
@@ -638,7 +645,7 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         ring_neg[slot] = ng;
         pos_sum.add(p);
         neg_sum.add(ng);
-        if anchors.tick() {
+        if !exact(&pos_sum, &neg_sum) {
             reanchor(&mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, (slot + 1) % period);
         }
         out.set(i, mfi_value([pos_sum.value(), neg_sum.value()]));
@@ -924,11 +931,12 @@ fn signed_flow(tp: f64, prev_tp: f64, volume: f64) -> [f64; 2] {
     missing::terms(&[tp, prev_tp, volume], signed)
 }
 
-/// MFI from its window's flow sums: `100·pos/(pos+neg)`, 0 for a total below 1.0.
+/// MFI from its window's flow sums: `100·pos/(pos+neg)`, 0 when no money flowed (both
+/// sums are non-negative and exact, so their total is zero exactly when they are).
 #[inline]
 fn mfi_value([pos, neg]: [f64; 2]) -> f64 {
     let total = pos + neg;
-    if total < 1.0 { 0.0 } else { 100.0 * pos / total }
+    if total == 0.0 { 0.0 } else { 100.0 * pos / total }
 }
 
 /// [`mfi`]'s state after the rows: the [`Slide`] of the flow sums `[Σpos, Σneg]`.
