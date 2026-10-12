@@ -4,13 +4,18 @@
 //! construction / access surface.
 //!
 //! Every frame (plain or time-frame) keeps, per recursive cached column, the state as
-//! of its last valid row and the state as of the row before (`ComputedMeta`). A new
-//! row resumes from the first in one step; a replaced last row first drops back to the
-//! second (`DataFrame::invalidate_computed_forming_row`) and resumes from it — so a
-//! refresh never re-steps or recomputes the rows before the stale ones.
+//! of its last valid row and the state as of the row before (`ComputedMeta`); every
+//! successful resume leaves both. A new row resumes from the first in one step; a
+//! replaced last row first drops back to the second
+//! (`DataFrame::invalidate_computed_forming_row`) and resumes from it — so a refresh
+//! never re-steps or recomputes the rows before the stale ones. A recursion whose
+//! history starts before the frame's row 0 (a bounded window dropped its head) is
+//! recomputed only by replaying its checkpoint (`volas_core::Checkpoint`); without one
+//! a recompute raises rather than restart the recursion on the rows the frame holds.
 
 use std::borrow::Cow;
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use volas_core::DataFrame;
 use volas_directive::types::Ast;
@@ -18,13 +23,13 @@ use volas_directive::types::Ast;
 #[allow(unused_imports)]
 use crate::*;
 
-/// A stale cached column's cursor as the refresh decides on it: its lookback, valid
-/// rows and whether its processed history is past the warm-up.
+/// A stale cached column's cursor as the refresh decides on it: its reach, valid rows,
+/// where its history starts and whether its processed history is past the warm-up.
 #[derive(Clone, Copy)]
 struct Stale {
-    lb: usize,
-    resume: usize,
+    reach: volas_core::Reach,
     vr: usize,
+    since: usize,
     warm: bool,
 }
 
@@ -65,7 +70,7 @@ impl PyDataFrame {
     /// ambiguous (an error), and one added later is refused while a cached directive
     /// reads it (`check_new_data_column`) — and the canonical form renders `change:` as
     /// `change`, so the refresh must not read it as the column.
-    fn refresh_frame(&self) -> PyResult<DataFrame> {
+    pub(crate) fn refresh_frame(&self) -> PyResult<DataFrame> {
         Ok(self
             .frame_without(|n| self.inner.is_computed(n) || volas_directive::is_bare_command(n))?
             .into_owned())
@@ -90,8 +95,7 @@ impl PyDataFrame {
             return Ok(());
         }
         let mut base: Option<DataFrame> = None;
-        for volas_core::StaleComputed { name, reach, valid_rows: vr, warm } in stale {
-            let (lb, resume) = (reach.lookback, reach.resume);
+        for volas_core::StaleComputed { name, reach, valid_rows: vr, since, warm } in stale {
             // Parse-free single-row fast path for the stateless finite-memory directives
             // (price transforms, TR, the momentum / ROC family): the newest row is a
             // formula of its own inputs; the (empty) state still advances one row.
@@ -109,7 +113,7 @@ impl PyDataFrame {
                 base = Some(self.refresh_frame()?);
             }
             let frame = if directive_uses_default_series(&node) { None } else { base.as_ref() };
-            self.refresh_column(&name, &node, frame, Stale { lb, resume, vr, warm }, height)?;
+            self.refresh_column(&name, &node, frame, Stale { reach, vr, since, warm }, height)?;
         }
         Ok(())
     }
@@ -121,25 +125,28 @@ impl PyDataFrame {
         name: &str,
         node: &Ast,
         frame: Option<&DataFrame>,
-        Stale { lb, resume, vr, warm }: Stale,
+        Stale { reach, vr, since, warm }: Stale,
         height: usize,
     ) -> PyResult<()> {
+        let lb = reach.lookback;
+        // The frame holds the column's whole history (it starts at or after row 0).
+        let held = since >= self.inner.origin();
         // Past warm-up with a carried state, a column resumes. Warm-up is counted on the
         // column's processed history, not on this frame's row numbers (a tail slice's
         // replaced last row is still past it). The gate keeps the warm-up region on the
         // full recompute: an indicator whose warm-up mask is length-dependent would
         // otherwise freeze an incrementally carried early row that a full recompute
-        // masks. A resume reads `resume_reach` rows before the new one (its lookback,
-        // plus the row its window drops or SAR's earlier bar): a frame holding fewer (a
-        // tail slice) recomputes over its own rows instead.
-        let reach = vr >= resume;
-        if warm && reach && self.inner.computed_resume_state(name).is_some() {
+        // masks. A resume reads `resume` rows before the new one (its lookback, plus the
+        // row its window drops or SAR's earlier bar): a frame holding fewer (a tail
+        // slice) recomputes over its own rows instead (or replays, see below). A resume
+        // that would read complete rows the frame dropped declines (`since`).
+        if warm && vr >= reach.resume && self.inner.computed_resume_state(name).is_some() {
             // One row at a time through the allocation-free step: each row's value and
             // the state as of it; the last two states are kept.
             let mut row = vr;
             while row < height {
                 let value = self.inner.step_computed_state(name, |live, prev, _, next| {
-                    volas_directive::exec::execute_resume_step(frame.unwrap_or(live), node, prev, row, next)
+                    volas_directive::exec::execute_resume_step(frame.unwrap_or(live), node, prev, (row, since), next)
                 });
                 let Some(value) = value else { break };
                 self.inner.update_computed_f64_value(name, row, value).map_err(pyerr)?;
@@ -148,27 +155,9 @@ impl PyDataFrame {
             if row == height {
                 return Ok(());
             }
-            if row > vr {
-                // a step declined part-way: the states no longer match `valid_rows`
-                self.inner.set_computed_states(name, None, None);
-            }
-            // No single-row step (or it declined at the first row): the `Vec` resume
-            // over the stale rows.
-            if row == vr {
-                let resumed = self.inner.computed_resume_state(name).and_then(|(state, origin)| {
-                    let df = frame.unwrap_or(&self.inner);
-                    volas_directive::exec::execute_resume(df, node, state, vr, origin)
-                });
-                if let Some((tail, new_state)) = resumed {
-                    self.inner.update_computed_tail(name, vr, &tail).map_err(pyerr)?;
-                    if vr + 1 == height {
-                        self.inner.advance_computed_state(name, new_state);
-                    } else {
-                        // the state before the last of several new rows is not produced
-                        self.inner.set_computed_state(name, Some(new_state));
-                    }
-                    return Ok(());
-                }
+            // No single-row step (or it declined): the `Vec` resume over the rows left.
+            if self.resume_rows(name, node, frame, (row, height, since))? {
+                return Ok(());
             }
         }
         let df = frame.unwrap_or(&self.inner);
@@ -191,6 +180,10 @@ impl PyDataFrame {
             self.inner.update_computed_tail(name, vr, &tail).map_err(pyerr)?;
             return Ok(());
         }
+        if reach.history.recursive() && !held {
+            // The rows the recursion started on are gone: replay its checkpoint.
+            return self.replay_column(name, node, frame, height);
+        }
         // Cold / warm-up / no resume: recompute the column and capture both states.
         // Inside warm-up (`vr < lb`) the whole column is rewritten, re-applying the
         // full-series warm-up mask to the early rows, so they are frozen correctly when
@@ -204,5 +197,65 @@ impl PyDataFrame {
         self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;
         self.inner.set_computed_states(name, state, before);
         Ok(())
+    }
+
+    /// Resume cached column `name` from its carried state over its stale rows `[from,
+    /// height)` (the `Vec` resume), leaving both states: several rows resume up to the
+    /// last, then the last from the state before it. `false` (nothing written) when the
+    /// column carries no state of row `from - 1` or a resume declines.
+    fn resume_rows(
+        &mut self,
+        name: &str,
+        node: &Ast,
+        frame: Option<&DataFrame>,
+        (from, height, since): (usize, usize, usize),
+    ) -> PyResult<bool> {
+        let df = frame.unwrap_or(&self.inner);
+        let resumed = self.inner.computed_resume_state(name).and_then(|(state, _)| {
+            if from + 1 == height {
+                return volas_directive::exec::execute_resume(df, node, state, from, height, since)
+                    .map(|(tail, last)| (tail, last, None));
+            }
+            let (mut tail, before) =
+                volas_directive::exec::execute_resume(df, node, state, from, height - 1, since)?;
+            let (one, last) =
+                volas_directive::exec::execute_resume(df, node, &before, height - 1, height, since)?;
+            tail.append(&one).ok()?;
+            Some((tail, last, Some(before)))
+        });
+        let Some((tail, last, before)) = resumed else { return Ok(false) };
+        self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;
+        match before {
+            None => self.inner.advance_computed_state(name, last),
+            Some(before) => self.inner.set_computed_states(name, Some(last), Some(before)),
+        }
+        Ok(true)
+    }
+
+    /// Recompute recursive column `name`, whose history starts before the frame's row 0,
+    /// by replaying its checkpoint over the rows after it — up to the row before the last,
+    /// then the last — leaving both states. Without a checkpoint (a slice carries none;
+    /// a bounded window keeps one for each declared recursion) the frame does not hold
+    /// the history the values depend on, and the recompute raises.
+    fn replay_column(&mut self, name: &str, node: &Ast, frame: Option<&DataFrame>, height: usize) -> PyResult<()> {
+        let lost = || {
+            PyValueError::new_err(format!(
+                "cannot recompute '{name}' exactly: each of its values depends on every row \
+                 before it, and this frame no longer holds the rows its history started on (a \
+                 slice continues a recursive column only from its carried state, which a write \
+                 discards; a windowed frame keeps the history of the directives declared in \
+                 max_lookback). Recompute it on the frame that holds its whole history."
+            ))
+        };
+        let df = frame.unwrap_or(&self.inner);
+        let checkpoint = self.inner.computed_checkpoint(name).ok_or_else(lost)?;
+        let from = (checkpoint.at + 1).checked_sub(df.origin()).ok_or_else(lost)?;
+        let (mut tail, before) =
+            volas_directive::exec::replay(df, node, checkpoint, height - 1).ok_or_else(lost)?;
+        let (one, last) = volas_directive::exec::replay(df, node, &before, height).ok_or_else(lost)?;
+        tail.append(&one).map_err(pyerr)?;
+        self.inner
+            .continue_computed(name, from, &tail, last.state, before.state)
+            .map_err(pyerr)
     }
 }

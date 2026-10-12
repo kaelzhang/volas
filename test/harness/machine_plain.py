@@ -160,8 +160,6 @@ class PlainMachine(FrameMachine):
         """A positional / label write into a data column (invalidates every cache)."""
         if self.stale or self._positions_carried():
             return  # a stale write is covered by append_rejected('stale_write')
-        if self.window is not None and contracts.avoids('windowed-drift'):
-            return  # a write restarts every carried state on the retained rows only
         coarse = self.coarse()
         col = data.draw(st.sampled_from([c for c in coarse.columns
                                          if coarse.dtype(c) in ('float64', 'float32', 'int64', 'int32')]))
@@ -215,8 +213,9 @@ class PlainMachine(FrameMachine):
     @rule(data=st.data())
     def write_computed(self, data):
         """A cell write into a cached float column: it becomes plain data."""
-        if self.stale or not self.cached or self._positions_carried() or (
-                self.window is not None and contracts.avoids('windowed-drift')):
+        if self.stale or not self.cached or self._positions_carried() or self.window is not None:
+            # (a windowed frame keeps the column's hidden cells, which the model does
+            # not hold as data)
             return
         name = data.draw(st.sampled_from(sorted(self.cached)))
         want, error = self.oracle(self.cached[name])
@@ -242,7 +241,7 @@ class PlainMachine(FrameMachine):
     def set_column(self, data, kind):
         """``df[name] = values``: a new plain column, one named like a bare command or
         a canonical directive, or a replacement of an existing column."""
-        if self.stale or self.window is not None or self._positions_carried():
+        if self.stale or self._positions_carried():
             return
         from .inventory import executable_lines
         if kind == 'new':
@@ -262,6 +261,8 @@ class PlainMachine(FrameMachine):
             return
         if name in self.coarse().schema.columns and self.coarse().dtype(name) not in ('float64',):
             return
+        if self.window is not None and name in self.cached:
+            return  # its hidden cells stay as data, which the model does not hold
         values = np.round(np.linspace(-1, 1, len(self.df)) * data.draw(st.integers(1, 9)), 3)
 
         existing = name in self.df.columns

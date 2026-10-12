@@ -66,13 +66,25 @@ def _make(index_kind):
     else:
         uf = DataFrame(data)
     _ = uf['atr:14']
-    oracle = uf.iloc[-WINDOW:]                  # plain frame: the last M rows + labels
-    return wf, oracle
+    return wf, uf
 
 
 @pytest.fixture(params=['datetime', 'range'])
 def pair(request):
+    wf, uf = _make(request.param)
+    return wf, uf.iloc[-WINDOW:]                # plain frame: the last M rows + labels
+
+
+@pytest.fixture(params=['datetime', 'range'])
+def twin(request):
+    """The windowed frame and its unbounded twin (the whole history), for writes: a
+    write lands on the same row of both, and the cached atr:14 of both recomputes from
+    the whole history (a slice of the twin keeps no history to recompute it from)."""
     return _make(request.param)
+
+
+def _tail(uf):
+    return uf.iloc[-WINDOW:]
 
 
 # --------------------------------------------------------------------------- #
@@ -305,41 +317,45 @@ def test_to_pandas_index(pair):
 # existing ensure_fresh-after-write contract, windowed or not), so the set tests
 # fulfill() before the positional read — exactly what a caller does.
 
-def test_iloc_setitem_scalar_and_array(pair):
-    wf, oracle = pair
+def test_iloc_setitem_scalar_and_array(twin):
+    wf, uf = twin
+    off = len(uf) - WINDOW
     wf.iloc[2, 3] = -1.0
-    oracle.iloc[2, 3] = -1.0
-    wf.fulfill(); oracle.fulfill()
+    uf.iloc[off + 2, 3] = -1.0
+    wf.fulfill(); uf.fulfill()
     wf.iloc[5:8, 0] = [7.0, 8.0, 9.0]
-    oracle.iloc[5:8, 0] = [7.0, 8.0, 9.0]
-    wf.fulfill(); oracle.fulfill()
-    _eq_frame(wf[['open', 'close']], oracle[['open', 'close']])
+    uf.iloc[off + 5:off + 8, 0] = [7.0, 8.0, 9.0]
+    wf.fulfill(); uf.fulfill()
+    _eq_frame(wf[['open', 'close', 'atr:14']], _tail(uf)[['open', 'close', 'atr:14']])
 
 
-def test_iat_setitem(pair):
-    wf, oracle = pair
+def test_iat_setitem(twin):
+    wf, uf = twin
     wf.iat[-1, 3] = 42.0
-    oracle.iat[-1, 3] = 42.0
-    wf.fulfill(); oracle.fulfill()
-    assert wf.iat[-1, 3] == oracle.iat[-1, 3] == 42.0
+    uf.iat[-1, 3] = 42.0
+    wf.fulfill(); uf.fulfill()
+    assert wf.iat[-1, 3] == _tail(uf).iat[-1, 3] == 42.0
+    _eq_series(wf['atr:14'], _tail(uf)['atr:14'])
 
 
-def test_loc_setitem(pair):
-    wf, oracle = pair
+def test_loc_setitem(twin):
+    wf, uf = twin
     labels = list(wf.index)
     wf.loc[labels[4], 'close'] = -5.0
-    oracle.loc[labels[4], 'close'] = -5.0
-    wf.fulfill(); oracle.fulfill()
-    _eq_series(wf['close'], oracle['close'])
+    uf.loc[labels[4], 'close'] = -5.0
+    wf.fulfill(); uf.fulfill()
+    _eq_series(wf['close'], _tail(uf)['close'])
+    _eq_series(wf['atr:14'], _tail(uf)['atr:14'])
 
 
-def test_at_setitem(pair):
-    wf, oracle = pair
+def test_at_setitem(twin):
+    wf, uf = twin
     labels = list(wf.index)
     wf.at[labels[6], 'high'] = -7.0
-    oracle.at[labels[6], 'high'] = -7.0
-    wf.fulfill(); oracle.fulfill()
-    assert wf.at[labels[6], 'high'] == oracle.at[labels[6], 'high'] == -7.0
+    uf.at[labels[6], 'high'] = -7.0
+    wf.fulfill(); uf.fulfill()
+    assert wf.at[labels[6], 'high'] == _tail(uf).at[labels[6], 'high'] == -7.0
+    _eq_series(wf['atr:14'], _tail(uf)['atr:14'])
 
 
 # --------------------------------------------------------------------------- #

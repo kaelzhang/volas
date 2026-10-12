@@ -16,9 +16,6 @@ from __future__ import annotations
 # --- defects the machines step around (each has a strict-xfail reproduction) -----
 
 OPEN_DEFECTS: frozenset[str] = frozenset({
-    # Windowed frames: recursive columns are not bit-exact with the unbounded
-    # history, and a base write restarts carried state on the retained rows only.
-    'windowed-drift',
     # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
     # while df[d] names the column from the bound values ('ma:5', 'sar').
     'stringify-column-name',
@@ -116,6 +113,12 @@ NUMERIC_EXCEPTIONS: dict[str, float] = {}
 # While 'window-recompute-ulp' is open, finite-window results are compared to this
 # relative tolerance and a comparison whose operands tie within it is not judged.
 ULP_DRIFT_TOLERANCE = 1e-9
-# Windowed frames (README "Bounded rolling window"): finite-window indicators match
-# the unbounded history to ~1e-13 relative; recursive ones are bit-exact.
-WINDOWED_FINITE_TOLERANCE = 1e-12
+
+# --- bounded windows (docs "Bounded rolling window") -------------------------------------
+
+# A windowed frame computes a directive requested after construction only when its
+# values depend on a trailing window the margin holds (no recursion anywhere, lookback
+# <= max_lookback); a recursion must be declared in max_lookback, so a later request
+# raises ValueError — as does one reading more rows than the margin. A declared or
+# admitted column equals the unbounded history bit for bit, writes included.
+WINDOWED_LATE_RECURSION_RAISES = True

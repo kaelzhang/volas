@@ -689,6 +689,14 @@ pub fn is_recursive(name: &str, args: &[ArgValue]) -> bool {
         .any(|a| is_recursive_matype(a.as_usize()))
 }
 
+/// Whether a recursive command carries its history in a state a resume continues from
+/// (its `initial_state` / `execute_resume` arms): every recursive command but `crsi`,
+/// `kcw` and `stoch_momentum`, and none of the moving-average-type forms (`ma:5,1`, …)
+/// — those recompute. Guarded over every recursive command by the carried-state test.
+pub fn carries_state(name: &str) -> bool {
+    is_recursive_name(name) && !matches!(name, "crsi" | "kcw" | "stoch_momentum")
+}
+
 /// Whether a command's output is an absolute row position.
 pub fn emits_position(name: &str) -> bool {
     ABSOLUTE_POSITION.contains(&name)

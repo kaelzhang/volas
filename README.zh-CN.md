@@ -242,11 +242,11 @@ df['ma:2']
 
   缺失值从不被跳过：只要桶内任一值缺失，该列的聚合结果（`'first'` / `'last'` / `'max'` / `'min'` / `'sum'` 皆然）即为缺失（全缺失的桶也是缺失，从不得到 `±inf`），实时折叠与批量 `cumulate` 结果一致。`datetime` 列不支持 `'sum'`，`bool` / `str` 列只支持 `'first'` / `'last'`；不支持的组合在构造 frame 时即被拒绝。
 - **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
-- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：隐藏历史的 margin（`window + max_lookback`），使缓存指标在自动丢弃旧行前后保持正确——递归类指标（EMA/Wilder/ATR/RSI/MACD）**逐位一致（bit-exact）**，有限窗口类（ma/wma/trima/stddev/…）与无界 frame 在浮点容差内一致（~1e-13）。传一个 **int** 直接声明你会用到的最大指标 lookback，或传一个**指标 directive 列表**从它们中最大的 lookback 推导（例如 `['atr:14', 'ma:50']` → margin 49），省去手算复合指标的预热长度。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）会被拒绝。margin 给得过小会**静默破坏**该保证。
+- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：可见行之前保留的隐藏 margin 行数，以及该 frame 能精确计算的 directive（参见[有界窗口能计算什么](#有界窗口能计算什么)）。传一个**指标 directive 列表**即为**声明**它们：margin 取它们 lookback 的最大值（例如 `['atr:14', 'ma:50']` → margin 49），每个声明的 directive 在构造时基于全部给定行计算并缓存——递归类指标（EMA、Wilder 平滑、累积线等）只能以这种方式计算。传一个 **int** 则只给出 margin，不声明任何 directive。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）和空列表会被拒绝。
 
 ### 有界滚动窗口
 
-传入 `window=` 可把 frame 限制为最后 `window` 行。这正是实盘 / 神经网络输入所需的形态：你可以永远地 `append` bar，但内存始终**有界**——frame 在累积到足够行数后会透明地丢弃旧行，同时保留一段隐藏的 `max_lookback` 行 margin，使缓存指标在每次丢弃前后保持**一致**——递归类指标（EMA/ATR/RSI/…）与无界 frame 逐位一致，有限窗口类（ma/wma/…）在浮点容差内一致（~1e-13）。
+传入 `window=` 可把 frame 限制为最后 `window` 行。这正是实盘 / 神经网络输入所需的形态：你可以永远地 `append` bar，但内存始终**有界**——frame 保留最后 `window + max_lookback` 行（且至少 `max_lookback + 2` 行，使重发的最后一行能从它前一行的状态续算）；当保留行数达到其两倍时，把头部丢回到这个数量，摊还每根 bar O(1)。它计算的每个指标都与喂入相同行的无界 frame **逐位一致**，不论经历多少次丢弃、重发、缺失值或写入。
 
 ```py
 # 一个有界的 30 行窗口；margin 大小由你声明的指标推导而来。
@@ -274,13 +274,28 @@ wf.ready          # True ——每个可见行都已有有效的指标历史
 
 **无界** frame（没传 `window=`）没有预热契约，**恒为 `True`**。
 
+#### 有界窗口能计算什么
+
+有界窗口只持有最近的行，因此只在能精确计算的地方计算指标：
+
+- **声明的 directive**（`max_lookback=[...]`）在构造时基于全部给定行——也就是完整历史——计算并缓存。递归类 directive 会保留其历史的**检查点（checkpoint）**：它在保留行之前某一行处的携带状态，以及续算时在首行之前需要读取的输入。检查点随每次丢弃头部而前移；每当该列需要重算（写入之后、状态无法跟随的重发行、一段缺失值），frame 都从检查点重放——绝不会在它持有的行上重新开始递归。没有携带状态能覆盖的递归——位于 `@` 操作数内部（`'ema:5@(rsi:5)'`）、与其它值组合（`'ema:3 - ema:5'`、`'close > ema:20'`），或本身就是整列重算的命令（`kcw`、`crsi`、`stoch_momentum`、均线类型参数 `ma:5,1`）——无法被保持，构造时即报错：请声明它所组合的递归 directive，再组合它们的列。
+- **构造之后才请求的 directive**（`wf[d]`、`wf[[...]]`、`wf.exec(d)`）只有在其值只依赖不超过 `max_lookback` 行的尾部窗口——任何位置都没有递归——时才会计算。滑动求和类（`ma`、`boll`、`cci`、`mfi` 等）满足这一条件：它们的和是精确的，因此每个值只取决于自己的窗口。其它请求一律报错，并给出两条正确的路径：
+
+```text
+ValueError: cannot compute 'ema:10' on this windowed frame: each of its values depends on every row before it, and the frame keeps only its last 50 rows. Declare it when constructing the frame — DataFrame(data, window=30, max_lookback=[..., 'ema:10']) — and read its column df['ema:10'], or compute it on an unbounded frame.
+```
+
+把一个 frame 复制进窗口（`DataFrame(df, window=..., max_lookback=...)`）时，它携带的缓存列只有在窗口能精确保持时才会保留（在 margin 之内，且不是没有携带状态能覆盖的递归）；否则构造报错。
+
+整列赋值（`wf['x'] = values`，标量、数组或与可见行对齐的 Series）只写入可见行：隐藏 margin 保留它持有的历史——即该列自己的值，精确转换为新值的 dtype（无法精确容纳的值会抛出 `TypeError`），新列则为缺失值。
+
 #### `fill_into(out, columns=None)`——零分配特征导出
 
 `fill_into` 把窗口的值**就地**写进**你自己**持有的 NumPy 数组，每次调用零分配。它是实盘推理循环的「导出」一半：配上一块预分配 buffer，`append → fulfill → fill_into → 推理` 的循环每根 bar 零分配（不同于 `to_numpy` 每次都新建一整块矩阵）。
 
 契约：
 
-- **只导出已缓存的列，且按其规范化（canonical）的 directive 名匹配**。directive 列必须**先 materialize**——访问它一次并把列名读回来（`name = wf['atr:14'].name`），因为缓存的 directive 是以规范化形式存储的（例如 `'MA: 5'` → `'ma:5'`），**不一定等于你传入的字符串**，而 `columns=` 按存储的确切列名匹配。（`max_lookback=['atr:14']` 只是给 margin 定大小、并不会创建该列，且 `fill_into` 导出已缓存的值、从不现场计算。）
+- **只导出已缓存的列，且按其规范化（canonical）的 directive 名匹配**。directive 列必须**先 materialize**——访问它一次并把列名读回来（`name = wf['atr:14'].name`），因为缓存的 directive 是以规范化形式存储的（例如 `'MA: 5'` → `'ma:5'`），**不一定等于你传入的字符串**，而 `columns=` 按存储的确切列名匹配。（在 `max_lookback=['atr:14']` 中声明的 directive 会在构造时缓存；`fill_into` 导出已缓存的值、从不现场计算。）
 - **`out`** 必须是 `float32` **或** `float64` 二维数组，形状**严格等于** `(len(df), k)`，其中 `k` 是导出的列数（尊重 strides，非连续或 Fortran-order 视图也可）。形状或 dtype 不符会报错。
 - **`columns`** 按顺序选择要导出的列（默认全部列）。**字符串列没有浮点含义、会被拒绝**——在 `columns=` 里只列出数值列以排除它。
 - **缺失 / NA 单元格写为 `NaN`**。
@@ -290,10 +305,9 @@ wf.ready          # True ——每个可见行都已有有效的指标历史
 import numpy as np
 
 wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
-atr = wf['atr:14'].name               # 先 materialize 这个 directive 一次，并把列名读回来：缓存的
-                                      # directive 以规范化形式存储（这里是 'atr:14'，但例如 'MA: 5'
-                                      # → 'ma:5'），不一定等于你传入的字符串；max_lookback 也只是
-                                      # 给 margin 定大小，并不会创建该列
+atr = wf['atr:14'].name               # 把声明的 directive 的列名读回来：缓存的 directive 以
+                                      # 规范化形式存储（这里是 'atr:14'，但例如 'MA: 5' → 'ma:5'），
+                                      # 不一定等于你传入的字符串
 COLS = ['open', 'high', 'low', 'close', atr]    # k = 5 个特征
 
 # 整个运行期复用同一块 buffer——形状 (window, k)，即模型的输入张量。

@@ -99,21 +99,6 @@ pub(crate) fn reduces(col: &Column) -> bool {
     col.require_numeric().is_ok()
 }
 
-/// Bounded rolling-window state when this is a windowed frame (`window=`); `None`
-/// for an unbounded frame. The frame physically retains `[capacity, 2*capacity]`
-/// rows (`capacity = window + max_lookback`); the user-facing surface shows only the
-/// last `window` rows — the margin is hidden history that keeps cached indicators
-/// correct across the periodic front-drop. The drop reuses `DataFrame::slice`, which
-/// carries the directive resume state (SP-9), so no core change is needed.
-#[derive(Clone)]
-pub(crate) struct WindowState {
-    /// The output window M — the logical row count once warmed.
-    pub(crate) window: usize,
-    /// Rows kept for correctness: `window + max_lookback`. Physical retention is
-    /// bounded by `2*capacity` (compact down to `capacity` when reached).
-    pub(crate) capacity: usize,
-}
-
 /// A frame's values as a reader may see them: fresh (no cached directive column waits
 /// for a refresh) and only the visible rows. Only the read gate
 /// ([`PyDataFrame::read`]) makes one, so every helper that takes a `&Fresh` reads
@@ -210,13 +195,16 @@ impl Meta<'_> {
 /// grows the frame in place for live streaming.
 ///
 /// Passing ``window=`` makes a **bounded rolling-window** frame: only the last
-/// ``window`` rows are visible, while enough older rows are retained behind the
-/// scenes (``window + max_lookback``) to keep cached indicators consistent across
-/// the periodic, automatic front-drop — so memory stays bounded no matter how many
-/// bars you ``append`` (ideal as a fixed-size NN feature buffer). Every row-facing
-/// surface (indexing, ``to_numpy``, ``to_csv``, reductions, …) sees only the
-/// window; ``ready`` reports whether it has warmed up; ``fill_into`` writes the
-/// window straight into a preallocated array with no per-bar allocation::
+/// ``window`` rows are visible, while a hidden margin of older rows
+/// (``max_lookback``) is retained behind them, and memory stays bounded no matter how
+/// many bars you ``append`` (ideal as a fixed-size NN feature buffer). Every indicator
+/// it computes equals an unbounded frame's bit for bit: the directives declared in
+/// ``max_lookback`` (computed over all the given rows; a recursion keeps a checkpoint of
+/// its history across the periodic front-drop), and any other directive whose values
+/// depend on a trailing window the margin holds — anything else raises. Every
+/// row-facing surface (indexing, ``to_numpy``, ``to_csv``, reductions, …) sees only the
+/// window; ``ready`` reports whether it has warmed up; ``fill_into`` writes the window
+/// straight into a preallocated array with no per-bar allocation::
 ///
 ///     wf = volas.DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
 ///     wf.append(bar); wf.fulfill()        # fold a bar, refresh the cached atr:14
@@ -243,16 +231,16 @@ impl Meta<'_> {
 ///     window (int, optional): make this a bounded rolling-window frame showing only
 ///         the last ``window`` rows (see above). Requires ``max_lookback``.
 ///     max_lookback (int | list[str], optional): REQUIRED with ``window`` (and valid only
-///         with it) — the margin of hidden history (``window + max_lookback``) the frame
-///         keeps so cached indicators survive the automatic front-drop. Recursive
-///         indicators (EMA/Wilder/ATR/RSI/MACD) stay **bit-exact**; finite-window
-///         indicators (ma/wma/trima/stddev/…) match an unbounded frame to floating-point
-///         tolerance (~1e-13). Give an **int** to state the largest indicator lookback you
-///         will use, or a **list of indicator directives** to derive it from the largest of
-///         their lookbacks (e.g. ``['atr:14', 'ma:50']`` -> margin 49) — so you never
-///         hand-compute a compound indicator's warm-up. Too small a margin silently breaks
-///         this guarantee. A list entry must be an indicator directive (e.g. ``'ma:50'``);
-///         a bare/typo'd name (``'ma50'``) is rejected.
+///         with it). A **list of indicator directives** declares them: the hidden margin
+///         is the largest of their lookbacks (e.g. ``['atr:14', 'ma:50']`` -> margin 49),
+///         and each is computed at construction over all the given rows and cached — a
+///         recursion (EMA, Wilder smoothing, a cumulative line, …) can only be computed
+///         this way; one no carried state covers (inside an ``@`` operand, combined with
+///         other values, or a command that recomputes) raises. An **int** is the margin
+///         alone. A directive requested later is computed only when it depends on a
+///         trailing window of at most the margin's rows, else it raises. A list entry must
+///         be an indicator directive (e.g. ``'ma:50'``); a bare/typo'd name (``'ma50'``)
+///         and an empty list are rejected.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
     pub(crate) inner: DataFrame,
@@ -356,32 +344,6 @@ impl PyDataFrame {
             }
             None => self.wrap_series(name, col),
         }
-    }
-
-    /// After an append, drop the front history once physical retention reaches
-    /// `2*capacity`, keeping the last `capacity` rows. The drop is `DataFrame::retain_tail`,
-    /// which carries the directive resume state (SP-9) ONLY when the kept window still
-    /// holds the last valid row + its `lookback` warm-up. So we first refresh the stale
-    /// directive tail (bringing `valid_rows` up to `height`, anchoring the resume state
-    /// inside the kept window) — otherwise an append-many-without-read run would drop the
-    /// valid region and the recursion would diverge. Refreshing only at the compaction
-    /// boundary (every ~`capacity` appends) keeps the per-bar cost amortized O(lookback),
-    /// the same as the lazy read-time refresh. Each column is refreshed on its own: one
-    /// whose compute raises (contract #26 — an int64 input past 2^53 in float64 math)
-    /// stays stale for its reader to raise, and the window still compacts — the append
-    /// that led here has happened and stands, and a row that cannot be computed leaves
-    /// the window like any other. No-op when unbounded.
-    pub(crate) fn maybe_compact(&mut self) {
-        let Some(cap) = self.window.as_ref().map(|w| w.capacity) else { return };
-        if self.inner.height() < 2 * cap {
-            return;
-        }
-        for stale in self.inner.stale_computed_columns(None) {
-            // the reader raises it: a refresh error is the column's, never the append's
-            let _ = self.refresh_computed(Some(&stale.name));
-        }
-        let h = self.inner.height();
-        self.inner = self.inner.retain_tail(cap.min(h));
     }
 
     /// Element-wise comparison backing `__eq__` / `__ne__`: against another

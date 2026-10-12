@@ -5,12 +5,14 @@ use std::borrow::Cow;
 use crate::bind::bind_command;
 use crate::types::{ArgValue, Ast, Node};
 
+mod history;
 mod initial_state;
 mod resume;
 mod scalar;
 mod stateless;
 mod window;
 
+pub use history::{capture, replay};
 pub use initial_state::initial_state;
 pub use resume::execute_resume;
 pub use scalar::execute_resume_step;

@@ -17,8 +17,8 @@ use crate::error::{Result, VolasError};
 use super::{ComputedMeta, DataFrame, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
 
 /// A stale cached column as the refresh reads it: its name, reach, valid-row
-/// cursor, and whether its processed history is past the warm-up
-/// ([`ComputedMeta::warm`]).
+/// cursor, where its history starts, and whether its processed history is past the
+/// warm-up ([`ComputedMeta::warm`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaleComputed {
     /// The column (= its canonical directive).
@@ -27,6 +27,9 @@ pub struct StaleComputed {
     pub reach: Reach,
     /// Rows `[0, valid_rows)` hold valid values.
     pub valid_rows: usize,
+    /// The absolute position of the row the column's history starts at
+    /// ([`ComputedMeta::since`]): before this frame's row 0 when the frame dropped it.
+    pub since: usize,
     /// More than `lookback` rows of the column's history are processed.
     pub warm: bool,
 }
@@ -51,19 +54,12 @@ impl DataFrame {
                 since: self.origin,
                 state_at: 0,
                 scratch: Vec::new(),
+                checkpoint: None,
             },
         );
         self.note_computed();
         #[cfg(debug_assertions)]
         self.debug_check();
-    }
-
-    /// Attach (or replace) the carried recursive [`ComputedMeta::state`] for a
-    /// cached column — the state as of its last valid row — enabling an O(new-rows)
-    /// append resume. The state before it is unknown afterwards. No-op if `name` is
-    /// not a tracked computed column.
-    pub fn set_computed_state(&mut self, name: &str, state: Option<Vec<f64>>) {
-        self.set_computed_states(name, state, None);
     }
 
     /// Attach (or replace) both carried states of a cached column: `state` as of its
@@ -193,6 +189,7 @@ impl DataFrame {
                 name: name.clone(),
                 reach: meta.reach,
                 valid_rows: meta.valid_rows,
+                since: meta.since,
                 warm: meta.warm(self.origin),
             })
             .collect()

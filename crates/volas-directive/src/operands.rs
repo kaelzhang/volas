@@ -71,8 +71,8 @@ pub(crate) struct Operands<'a> {
     df: &'a DataFrame,
     series: &'a [Ast],
     reads: [OnceCell<Read<'a>>; SLOTS],
-    /// The length of every input handed to the arm: the frame's height, or the number
-    /// of complete rows a rerun reads.
+    /// The length of every input handed to the arm: the frame's height (or the rows
+    /// before [`upto`](Self::upto)'s end), or the number of complete rows a rerun reads.
     len: usize,
     /// Rows to read instead of the frame: each slot's complete rows (the rerun).
     over: Option<Vec<Option<Cow<'a, [f64]>>>>,
@@ -104,6 +104,18 @@ impl<'a> Operands<'a> {
             missing: Cell::new(false),
             failed: Cell::new(false),
         }
+    }
+
+    /// As [`new`](Self::new), handing the arm each input's rows `[0, end)` only (`end`
+    /// at most the frame's height) — borrowed, so a resume of rows before the last reads
+    /// no copy of the frame.
+    pub(crate) fn upto(df: &'a DataFrame, series: &'a [Ast], end: usize) -> Self {
+        Operands { len: end.min(df.height()), ..Operands::new(df, series) }
+    }
+
+    /// The length of every input handed to the arm.
+    pub(crate) fn len(&self) -> usize {
+        self.len
     }
 
     /// As [`new`](Self::new), stopping the arm at the first frame column known to hold a
@@ -163,7 +175,10 @@ impl<'a> Operands<'a> {
             None => Read::Frame(self.df.column(default)?),
         };
         require_f64_input(read.column())?;
-        self.fit(slot, read.column().len())?;
+        // an input spans the frame; the arm reads its first `len` rows
+        if read.column().len() != self.df.height() {
+            self.fit(slot, read.column().len())?;
+        }
         Ok(read)
     }
 
@@ -189,7 +204,13 @@ impl<'a> Operands<'a> {
             }
             _ => self.clean.set(false),
         }
-        Ok(read.view())
+        Ok(match read.view() {
+            Cow::Borrowed(v) => Cow::Borrowed(&v[..self.len]),
+            Cow::Owned(mut v) => {
+                v.truncate(self.len);
+                Cow::Owned(v)
+            }
+        })
     }
 
     /// A required operand at `slot` as `f64`: an absent or empty operand is an error
@@ -206,7 +227,10 @@ impl<'a> Operands<'a> {
     /// A boolean operand at `slot`.
     pub(crate) fn bool(&self, slot: usize) -> Result<Vec<Option<bool>>> {
         self.clean.set(false);
-        let truths = series_truths(self.df, self.series, slot)?;
+        let mut truths = series_truths(self.df, self.series, slot)?;
+        if self.over.is_none() && truths.len() == self.df.height() {
+            truths.truncate(self.len);
+        }
         self.fit(slot, truths.len())?;
         Ok(truths)
     }
@@ -275,6 +299,25 @@ mod tests {
         let ops = Operands::over(&df, &[], vec![None]);
         assert!(matches!(ops.f64(0, "close"), Err(VolasError::Value(m)) if m.contains("not read before")));
         assert!(Operands::over(&df, &[], vec![]).f64(3, "close").is_err());
+    }
+
+    /// Up to an end row, every input is handed over as its leading rows — a frame column
+    /// borrowed, an operand and a boolean read cut to them — and an input of another
+    /// length is still an error.
+    #[test]
+    fn up_to_an_end_row_the_inputs_are_their_leading_rows() {
+        let df = frame();
+        let series = [crate::parse("close + 1").unwrap().as_ref().clone(), crate::parse("close > 1").unwrap().as_ref().clone()];
+        let ops = Operands::upto(&df, &series, 2);
+        assert_eq!(ops.len(), 2);
+        assert!(matches!(ops.f64(2, "close").unwrap(), Cow::Borrowed(v) if v == [1.0, 2.0]));
+        assert_eq!(ops.f64(0, "close").unwrap().as_ref(), &[2.0, 3.0]);
+        assert_eq!(ops.bool(1).unwrap(), vec![Some(false), Some(true)]);
+        assert_eq!(Operands::upto(&df, &[], 9).len(), 3);
+        // an integer column is converted, then cut
+        let ints = DataFrame::new(vec!["v".into()], vec![Column::i64(vec![4, 5, 6])], None).unwrap();
+        let ops = Operands::upto(&ints, &[], 1);
+        assert!(matches!(ops.f64(0, "v").unwrap(), Cow::Owned(v) if v == [4.0]));
     }
 
     /// A read that fails is remembered — the record lacks that input — and a later

@@ -283,7 +283,6 @@ def test_an_all_nan_period_folds_to_nan():
     assert np.isnan(df.get_column('low').to_numpy()[0])
 
 
-@_xfail('M5 windowed-drift', 'a windowed recursive column is not bit-exact with the unbounded frame')
 def test_a_windowed_recursive_column_is_bit_exact():
     rng = np.random.default_rng(1)
     c = 100 + np.cumsum(rng.standard_normal(200))

@@ -104,24 +104,25 @@ Which gets the 2-period simple moving average on column `"close"`.
   showing only the last `window` rows (see [Bounded rolling window](#bounded-rolling-window)).
   Requires `max_lookback`.
 - **max_lookback** `Optional[int | list[str]] = None` **Required with `window`** (and
-  valid only with it): the hidden-history margin (`window + max_lookback`) that keeps
-  cached indicators correct across the automatic front-drop. Recursive indicators
-  (EMA/Wilder/ATR/RSI/MACD) stay **bit-exact**; finite-window ones (ma/wma/trima/stddev/…)
-  match an unbounded frame to floating-point tolerance (~1e-13). Pass an **int** to state
-  the largest indicator lookback you will use, or a **list of indicator directives** to
-  derive it from the largest of their lookbacks (e.g. `['atr:14', 'ma:50']` → margin 49),
-  so you never hand-compute a compound indicator's warm-up. Each list entry must be an
-  indicator directive (`'ma:50'`); a bare/typo'd name (`'ma50'`) is rejected. Sizing the
-  margin too small silently breaks the guarantee.
+  valid only with it): the hidden margin of rows kept behind the visible ones, and the
+  directives the frame computes exactly (see
+  [What a bounded window computes](#what-a-bounded-window-computes)). Pass a **list of
+  indicator directives** to **declare** them: the margin is the largest of their
+  lookbacks (e.g. `['atr:14', 'ma:50']` → margin 49), and each is computed at
+  construction over all the given rows and cached — a recursive one (EMA, Wilder
+  smoothing, a cumulative line, …) can only be computed this way. Or pass an **int**: the
+  margin alone, declaring nothing. Each list entry must be an indicator directive
+  (`'ma:50'`); a bare/typo'd name (`'ma50'`) and an empty list are rejected.
 
 ### Bounded rolling window
 
 Pass `window=` to cap the frame at the last `window` rows. This is the live-trading
 / NN-input shape: you keep `append`-ing bars forever, but memory stays **bounded** —
-the frame transparently drops old rows once it has accumulated enough, while
-retaining a hidden `max_lookback`-row margin so cached indicators stay **consistent**
-across each drop — recursive indicators (EMA/ATR/RSI/…) are bit-exact with an unbounded
-frame, finite-window ones (ma/wma/…) match it to floating-point tolerance (~1e-13).
+the frame retains its last `window + max_lookback` rows (and at least
+`max_lookback + 2`, so a re-sent last row can resume from the row before it); once it
+holds twice that it drops its head back to it, amortized O(1) per bar. Every indicator
+it computes equals what an unbounded frame fed the same rows computes, **bit for bit**,
+across every drop, re-sent row, missing value and write.
 
 ```py
 # A bounded 30-bar window; the margin is sized from the indicators you declare.
@@ -150,6 +151,41 @@ ValueError: cannot append label 20: an earlier row with that label is still reta
 ```
 
 A label whose row has already been dropped from the retained rows is accepted again.
+
+#### What a bounded window computes
+
+A bounded window holds only its recent rows, so it computes an indicator only where it
+can do so exactly:
+
+- **Declared directives** (`max_lookback=[...]`) are computed at construction over every
+  row given — the whole history — and cached. A recursive one keeps a **checkpoint** of
+  its history: its carried state as of a row before the retained rows, plus the inputs a
+  resume reads before its first row. It moves with each drop of the head, and whenever
+  the column has to be recomputed (after a write, a re-sent row the state cannot follow,
+  a run of missing values) the frame replays from it — never restarting the recursion on
+  the rows it holds. A recursion no carried state covers — one inside an `@` operand
+  (`'ema:5@(rsi:5)'`) or combined with other values (`'ema:3 - ema:5'`,
+  `'close > ema:20'`), or a command that recomputes it (`kcw`, `crsi`, `stoch_momentum`,
+  a moving-average type `ma:5,1`) — cannot be kept and is rejected at construction:
+  declare the recursions it combines and combine their columns.
+- **A directive requested later** (`wf[d]`, `wf[[...]]`, `wf.exec(d)`) is computed only
+  when its values depend on a trailing window of at most `max_lookback` rows — no
+  recursion anywhere. A running sum (`ma`, `boll`, `cci`, `mfi`, …) qualifies: its sums
+  are exact, so a value depends on its window alone. Anything else raises, naming the
+  two correct paths:
+
+```text
+ValueError: cannot compute 'ema:10' on this windowed frame: each of its values depends on every row before it, and the frame keeps only its last 50 rows. Declare it when constructing the frame — DataFrame(data, window=30, max_lookback=[..., 'ema:10']) — and read its column df['ema:10'], or compute it on an unbounded frame.
+```
+
+A frame copied into a window (`DataFrame(df, window=..., max_lookback=...)`) keeps the
+cached columns it carries only when the window keeps them exactly (within the margin, and
+not a recursion no carried state covers); otherwise the construction raises.
+
+Assigning a whole column (`wf['x'] = values`, a scalar, an array or a Series of the
+visible rows) writes the visible rows only: the hidden margin keeps the history it
+holds — the column's own values, converted exactly to the new values' dtype (a value it
+cannot hold raises `TypeError`), or missing values for a new column.
 
 #### `ready` — has the window warmed up?
 
@@ -180,8 +216,8 @@ Contract:
   directive column must be **materialized first** — access it once and read the name
   back (`name = wf['atr:14'].name`), because a cached directive is stored under its
   canonical form (e.g. `'MA: 5'` → `'ma:5'`), *not* the string you passed, and `columns=`
-  matches on the exact stored name. (`max_lookback=['atr:14']` only sizes the margin; it
-  does not create the column, and `fill_into` exports cached values, never computes them.)
+  matches on the exact stored name. (A directive declared in `max_lookback=['atr:14']`
+  is cached at construction; `fill_into` exports cached values, never computes them.)
 - **`out`** must be a `float32` **or** `float64` 2-D array whose shape is **exactly**
   `(len(df), k)`, where `k` is the number of exported columns (strides are respected, so a
   non-contiguous or Fortran-order view works too). A wrong shape or dtype raises.
@@ -196,10 +232,10 @@ Contract:
 import numpy as np
 
 wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
-atr = wf['atr:14'].name               # materialize the directive once, and read its column
-                                      # name back: a cached directive lands under its CANONICAL
-                                      # form (here 'atr:14', but e.g. 'MA: 5' -> 'ma:5'), not the
-                                      # string you passed — and max_lookback only sized the margin
+atr = wf['atr:14'].name               # read the declared directive's column name back: a
+                                      # cached directive lands under its CANONICAL form (here
+                                      # 'atr:14', but e.g. 'MA: 5' -> 'ma:5'), not the string
+                                      # you passed
 COLS = ['open', 'high', 'low', 'close', atr]    # k = 5 features
 
 # One reusable buffer for the whole run — shape (window, k), the model's input tensor.
@@ -492,8 +528,12 @@ Wilder smoothing, SAR, a cumulative line, …) either carries its resume state i
 slice or the slice starts at the column's first row. Otherwise the slice keeps the
 column's values as plain data (`is_computed` is `False`), never a re-warmed recursion.
 This is the current behaviour; continuing such a column across a middle slice by
-replaying its history is planned. A bounded window's own compaction is not a slice: its
-cached columns stay cached and recompute over the rows it retains (`max_lookback`).
+replaying its history is planned. A slice that carried a recursion's state continues it
+on append, but cannot recompute it once a write discards that state (it does not hold
+the rows the history started on): its next refresh raises. A bounded window's own drop
+of its head is not a slice: its cached columns stay cached, a recursion with the
+checkpoint of its history (see
+[What a bounded window computes](#what-a-bounded-window-computes)).
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 

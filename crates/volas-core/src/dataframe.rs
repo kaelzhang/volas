@@ -20,9 +20,11 @@ pub struct Reach {
     /// The rows a contiguous slice must keep for the column to stay cached (at least
     /// `lookback`): fewer cannot continue it exactly.
     pub continuation: usize,
-    /// A recursion anywhere in the directive: each value depends on every row before,
-    /// so a slice continues the column exactly only from its carried state.
-    pub recursive: bool,
+    /// How a value depends on the rows before it ([`History`]): a recursion anywhere
+    /// makes it depend on every row before, so a slice continues the column exactly only
+    /// from its carried state, and a frame that dropped its history's head recomputes it
+    /// only from a [`Checkpoint`].
+    pub history: History,
 }
 
 /// Metadata for a materialized (cached) directive column: the directive that
@@ -66,6 +68,9 @@ pub struct ComputedMeta {
     /// A spare buffer the one-row resume writes the next state into, recycled between
     /// the two states so a live column steps with no allocation.
     scratch: Vec<f64>,
+    /// The history of a recursion before the frame's row 0, once the frame dropped the
+    /// rows it started on ([`Checkpoint`]): a recompute replays from it.
+    checkpoint: Option<Checkpoint>,
 }
 
 impl ComputedMeta {
@@ -544,7 +549,7 @@ impl DataFrame {
                 let carried_before = (inside(meta.state_at) && meta.state_at > first)
                     .then(|| meta.state_before_last.clone())
                     .flatten();
-                if exact && meta.reach.recursive && carried.is_none() && first > meta.since {
+                if exact && meta.reach.history.recursive() && carried.is_none() && first > meta.since {
                     // a recursion recomputed over the slice's own rows would restart
                     // its history after its start: without the state the column stays
                     // plain data (a slice from its history's start recomputes it all)
@@ -560,6 +565,9 @@ impl DataFrame {
                         since: meta.since,
                         state_at: meta.state_at,
                         scratch: Vec::new(),
+                        // a bounded window's own drop keeps the history's checkpoint; a
+                        // slice is a frame of its own, whose rows do not follow it
+                        checkpoint: if exact { None } else { meta.checkpoint.clone() },
                     },
                 );
             }
@@ -740,9 +748,13 @@ mod admit;
 pub use admit::Retained;
 mod computed;
 pub use computed::StaleComputed;
+mod history;
+pub use history::{Checkpoint, History};
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_nan_fact;
+#[cfg(test)]
+mod tests_history;
 

@@ -235,8 +235,9 @@ def executable_lines() -> tuple[Line, ...]:
 # The recursions by kind (spec::is_recursive): the commands whose value depends on
 # every row before, and the TA-Lib MA-type argument slots (a command given one may be
 # a recursion whatever its default arguments compute). While 'slice-recursive-rewarm'
-# or 'windowed-drift' is open the machines step around them; an early jump in the
-# fixture (`unbounded_memory`) does not reveal every one.
+# is open the machines step around them, and a windowed frame refuses them when
+# requested after construction; an early jump in the fixture (`unbounded_memory`)
+# does not reveal every one.
 _RECURSIVE = frozenset({
     'ema', 'smma', 'dema', 'tema', 't3', 'kama', 'macd', 'macdfix', 'kdj', 'rsi', 'crsi',
     'stochrsi', 'cmo', 'trix', 'pvt', 'nvi', 'pvi', 'obv', 'ad', 'adosc', 'mass_index',
@@ -255,6 +256,27 @@ def recursive(text: str) -> bool:
     return bool(names & _RECURSIVE) or any(
         head in _MATYPE_SLOTS and len(args.split(',')) > _MATYPE_SLOTS[head]
         for head, args in _ARGS.findall(text.lower()))
+
+
+# The MA-type argument slots of each command taking them, and the codes selecting a
+# recursive average (spec::is_recursive_matype); an omitted one is SMA (0).
+_MATYPES = {'ma': (1,), 'apo': (2,), 'ppo': (2,), 'mavp': (2,), 'stochf': (2,),
+            'macdext': (1, 3, 5), 'stoch': (2, 4)}
+_RECURSIVE_MATYPES = {'1', '3', '4', '6', '7', '8'}
+
+
+def recursion(text: str) -> bool:
+    """Whether a recursion appears anywhere in ``text`` exactly as the engine decides it
+    (spec::is_recursive per command): a recursive command, or an MA-type argument that
+    selects a recursive average."""
+    names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
+    if names & _RECURSIVE:
+        return True
+    for head, args in _ARGS.findall(text.lower()):
+        values = args.split(',')
+        if any(i < len(values) and values[i].strip() in _RECURSIVE_MATYPES for i in _MATYPES.get(head, ())):
+            return True
+    return False
 
 
 @functools.cache

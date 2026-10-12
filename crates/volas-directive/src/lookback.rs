@@ -317,7 +317,34 @@ pub fn reach(node: &Ast) -> volas_core::Reach {
         lookback: lookback(node),
         resume: resume_reach(node),
         continuation: continuation_reach(node),
-        recursive: recursive_anywhere(node),
+        history: history(node),
+    }
+}
+
+/// How a directive's values depend on the rows before them ([`volas_core::History`]):
+/// on a trailing window when no recursion appears anywhere in it; through the carried
+/// state of its top command when that command is a recursion carrying a state
+/// ([`crate::spec::carries_state`]) and its `@` operands hold no recursion; otherwise in
+/// a form no carried state covers.
+pub fn history(node: &Ast) -> volas_core::History {
+    use volas_core::History;
+    if !recursive_anywhere(node) {
+        return History::Window;
+    }
+    let carried = |name: &str, args: &[ArgValue], series: &[Ast]| {
+        crate::spec::is_recursive(name, args)
+            && crate::spec::carries_state(name)
+            && !series.iter().any(recursive_anywhere)
+    };
+    match node {
+        Node::Command(c) if carried(&c.name, &c.args, &c.series) => {
+            History::Carried { operands: c.series.iter().map(lookback).max().unwrap_or(0) }
+        }
+        Node::Name(name) => match crate::bind::bind_command(name, None, &[], &[]) {
+            Ok(c) if carried(&c.name, &c.args, &[]) => History::Carried { operands: 0 },
+            _ => History::Unkept,
+        },
+        _ => History::Unkept,
     }
 }
 

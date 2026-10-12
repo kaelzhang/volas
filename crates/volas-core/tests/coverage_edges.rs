@@ -1,4 +1,4 @@
-use volas_core::{Column, DataFrame, Reach};
+use volas_core::{Column, DataFrame, History, Reach};
 
 fn frame_with_computed_f64() -> DataFrame {
     let mut df = DataFrame::new(
@@ -7,7 +7,7 @@ fn frame_with_computed_f64() -> DataFrame {
         None,
     )
     .unwrap();
-    df.set_computed("value", Reach { lookback: 1, resume: 0, continuation: 1, recursive: false });
+    df.set_computed("value", Reach { lookback: 1, resume: 0, continuation: 1, history: History::Window });
     df
 }
 
@@ -36,7 +36,7 @@ fn computed_scalar_update_refreshes_valid_rows_and_reports_errors() {
         None,
     )
     .unwrap();
-    bool_df.set_computed("flag", Reach { lookback: 0, resume: 0, continuation: 0, recursive: false });
+    bool_df.set_computed("flag", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     assert!(bool_df.update_computed_f64_value("flag", 0, 1.0).is_err());
 }
 
@@ -75,7 +75,7 @@ fn a_cached_int_directive_appends_and_refreshes() {
         None,
     )
     .unwrap();
-    df.set_computed("5", Reach { lookback: 0, resume: 0, continuation: 0, recursive: false });
+    df.set_computed("5", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     let bar = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![3.0])], None).unwrap();
     df.append(&bar).unwrap();
     assert!(!df.column("5").unwrap().is_valid(2), "a stale placeholder is missing");

@@ -67,7 +67,8 @@ impl PyDataFrame {
     /// the alignment rule of every operand; pairing is by position). With a boolean mask and
     /// a scalar fill, assign by mask: a boolean Series / array sets whole rows
     /// (`df[df['a'] > 0] = 0`), a boolean frame sets cells (`df[df.isna()] = 0`).
-    /// Copy-on-write: a prior `copy()` is unaffected.
+    /// On a bounded (`window=`) frame a column assignment writes the visible rows only:
+    /// the hidden margin keeps its history. Copy-on-write: a prior `copy()` is unaffected.
     pub(crate) fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         // Boolean-mask assignment with a scalar fill: df[mask] = v
         if let Some(mask) = bool_mask_key(key)? {
@@ -80,37 +81,21 @@ impl PyDataFrame {
         let name: String = key.extract().map_err(|_| {
             PyTypeError::new_err("DataFrame key must be a column name or a boolean mask")
         })?;
-        let h = self.inner.height();
-        // A windowed frame's column spans the full physical buffer, but the user
-        // supplies a value for the logical window M. A scalar broadcasts across the
-        // whole buffer (the visible rows see it); an array-like is logical-length and
-        // NA-pads the hidden margin (front). Identity when unbounded (start == 0).
-        let (start, logical_h) = self.logical_range();
-        let pad = |c: Column| -> PyResult<Column> {
-            if start == 0 {
-                return Ok(c);
-            }
-            if c.len() != logical_h {
-                return Err(PyValueError::new_err(format!(
-                    "length of values ({}) does not match the window length ({logical_h})",
-                    c.len()
-                )));
-            }
-            let positions: Vec<usize> = (start..h).collect();
-            Column::na_of(c.dtype(), h).scatter(&positions, &c).map_err(pyerr)
-        };
-        let col = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
+        // The values of the visible rows: a Series (aligned with them), one cell broadcast
+        // over them, or an array-like of their length.
+        let rows = self.logical_range().1;
+        let values = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
             match &self.window {
                 None => require_aligned(self.inner.index(), &s.inner.index)?,
                 Some(_) => self.meta().labels().require_aligned(&s.inner.index).map_err(pyerr)?,
             }
-            pad(s.inner.data.clone())?
+            s.inner.data.clone()
         } else if let Some(one) = scalar_cell(value)? {
-            // one cell, broadcast over every row
-            one.take(&vec![0; h])
+            one.take(&vec![0; rows])
         } else {
-            pad(pyany_to_column(value)?)?
+            pyany_to_column(value)?
         };
+        let col = self.whole_column(&name, values)?;
         // A data column under a name a cached directive reads as a command is refused;
         // replacing a column stales the caches that may read it (inside `set_column`).
         if !self.inner.has_column(&name) || self.inner.is_computed(&name) {
@@ -291,6 +276,36 @@ impl PyDataFrame {
         self.inner.is_computed(&canonical).then_some(canonical)
     }
 
+    /// The column `df[name] = values` stores, `values` being the visible rows' values —
+    /// THE one write of a whole column. An unbounded frame stores `values` as they are. A
+    /// windowed frame writes its visible rows only: its hidden margin keeps the history it
+    /// holds — an existing column's own values, in the new values' dtype, which must hold
+    /// them exactly — or, for a new column, missing values.
+    fn whole_column(&self, name: &str, values: Column) -> PyResult<Column> {
+        let (start, rows) = self.logical_range();
+        if start == 0 {
+            return Ok(values);
+        }
+        if values.len() != rows {
+            return Err(PyValueError::new_err(format!(
+                "length of values ({}) does not match the window length ({rows})",
+                values.len()
+            )));
+        }
+        let dtype = values.dtype();
+        let mut col = match self.inner.column(name) {
+            Ok(old) => old.slice(0, start).convert_lossless(dtype).map_err(|_| {
+                PyTypeError::new_err(format!(
+                    "cannot assign {dtype} values to column '{name}' of a windowed frame: its \
+                     hidden rows (the max_lookback margin) hold values {dtype} cannot hold exactly"
+                ))
+            })?,
+            Err(_) => Column::na_of(dtype, start),
+        };
+        col.append(&values).map_err(pyerr)?;
+        Ok(col)
+    }
+
     /// The one path every append form takes once its rows are built: a time-frame frame
     /// folds them, any other frame appends them keyed by label; then a windowed frame
     /// compacts. The rows are checked whole before the first write, so on an error the
@@ -303,7 +318,7 @@ impl PyDataFrame {
             // window + max_lookback), whatever the physical buffer still holds
             let shown = self.logical_range().0;
             let from = match &self.window {
-                Some(w) => self.inner.height().saturating_sub(w.capacity),
+                Some(w) => self.inner.height().saturating_sub(w.window_and_margin()),
                 None => 0,
             };
             let retained = volas_core::Retained { from, shown };
@@ -327,11 +342,18 @@ impl PyDataFrame {
                 Ok((name, col))
             }
             Resolved::New(text, node) => {
-                let new = self.compute_new(&*self.binding_frame()?, &node, &text)?;
-                let canonical = new.canonical.clone();
-                Ok((canonical, self.cache(new)?))
+                self.admit_new(&node, &text)?;
+                self.cache_new(&text, &node)
             }
         }
+    }
+
+    /// Compute the new directive `node` (spelled `text`) over the binding frame and cache
+    /// it: its canonical name and values.
+    pub(crate) fn cache_new(&mut self, text: &str, node: &volas_directive::Ast) -> PyResult<(String, Column)> {
+        let new = self.compute_new(&*self.binding_frame()?, node, text)?;
+        let canonical = new.canonical.clone();
+        Ok((canonical, self.cache(new)?))
     }
 
     /// What a requested name reads: an existing column (data, or a cached directive under
@@ -383,6 +405,11 @@ impl PyDataFrame {
     /// entries are refreshed like single-column reads.
     pub(crate) fn project(&mut self, list: &[String]) -> PyResult<DataFrame> {
         let resolved = list.iter().map(|n| self.resolve(n)).collect::<PyResult<Vec<_>>>()?;
+        for r in &resolved {
+            if let Resolved::New(text, node) = r {
+                self.admit_new(node, text)?;
+            }
+        }
         let mut computed: Vec<Computed> = Vec::new();
         {
             let frame = self.binding_frame()?;
