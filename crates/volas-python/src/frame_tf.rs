@@ -151,6 +151,18 @@ impl TfWrite {
         }
     }
 
+    /// Whether this change surely leaves the forming row of `inner` and its data
+    /// columns as they are — cell writes that reach neither the forming row nor a cached
+    /// column. Then the open period, which follows only those, stands unjudged.
+    fn leaves_forming_row(&self, inner: &DataFrame) -> bool {
+        match self {
+            TfWrite::Cells(w) => {
+                inner.height().checked_sub(1).is_some_and(|last| !w.may_change_data_row(inner, last))
+            }
+            TfWrite::Frame(_) => false,
+        }
+    }
+
     /// Land the change on `inner`.
     fn land(self, inner: &mut DataFrame) {
         match self {
@@ -235,8 +247,14 @@ impl TfState {
     /// replaced) is checked already, and the open period follows what it LEAVES in the
     /// forming row, however many writes reached it (see [`follow`](Self::follow)) — judged
     /// on the forming row alone, before anything lands. Only then does the change land,
-    /// so a refused write leaves the frame unchanged.
+    /// so a refused write leaves the frame unchanged. A change that surely leaves the
+    /// forming row and the data columns as they are (cells of closed rows only, no cached
+    /// column) leaves the open period as it is: it lands at once, at a plain write's cost.
     pub(crate) fn write(&mut self, inner: &mut DataFrame, change: TfWrite) -> PyResult<()> {
+        if change.leaves_forming_row(inner) {
+            change.land(inner);
+            return Ok(());
+        }
         let mut state = self.clone();
         state.follow(forming_row(inner).as_ref(), change.forming(inner).as_ref())?;
         change.land(inner);

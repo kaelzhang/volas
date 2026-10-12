@@ -39,6 +39,15 @@ pub struct CellWrites {
 }
 
 impl CellWrites {
+    /// Whether these writes may change row `row` of `frame` (the frame they were
+    /// checked against) as a bar of its data columns: they write a cell of that row, or
+    /// a cached column — which they turn into data. When they cannot, the row's data
+    /// cells and the frame's data columns stay as they are. O(cells written).
+    pub fn may_change_data_row(&self, frame: &DataFrame, row: usize) -> bool {
+        debug_assert_eq!(self.shape, (frame.height, frame.columns.len()), "checked on another frame");
+        self.writes.iter().any(|w| frame.is_computed(&frame.names[w.col]) || w.rows.contains(&row))
+    }
+
     /// Row `row` of `frame` (the frame these writes were checked against) as the
     /// writes leave it: a one-row frame of the columns that are data after them — a
     /// written cached column becomes data — at the row's label. O(columns + cells

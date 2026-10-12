@@ -83,3 +83,13 @@ def test_cell_write_does_not_scale_with_rows(kind, how, row):
     small = _per_write_us(kind, how, row, 2_000)
     large = _per_write_us(kind, how, row, 200_000)
     assert large < small * 5, (small, large)     # O(cells written), not ~100x
+
+
+@pytest.mark.parametrize('how', ['iat', 'at', 'iloc', 'loc'])
+@pytest.mark.parametrize('kind', ['tf', 'windowed'])
+def test_a_closed_row_tf_write_costs_about_a_plain_one(kind, how):
+    # a write that reaches neither the forming row nor a cached column cannot move the
+    # open period: it costs what the same write costs on a plain frame
+    plain = _per_write_us('plain', how, 'middle', 200_000)
+    tf = _per_write_us(kind, how, 'middle', 200_000)
+    assert tf < plain * 2, (plain, tf)

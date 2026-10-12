@@ -124,3 +124,13 @@ fn a_data_row_holds_the_data_columns_at_the_row_label() {
     assert_eq!(row.index().label_at(0), Label::I64(2));
     assert_eq!(f64s(&row, "x"), [3.0]);
 }
+
+#[test]
+fn a_batch_may_change_a_data_row_only_through_its_cells_or_a_cached_column() {
+    let df = frame();
+    let check = |writes| df.check_writes(writes).unwrap();
+    assert!(!check(vec![w(0, &[0, 1], Column::f64(vec![9.0]))]).may_change_data_row(&df, 3));
+    assert!(check(vec![w(0, &[1, 3], Column::f64(vec![9.0]))]).may_change_data_row(&df, 3));
+    // a cached column written anywhere becomes data: the row's data columns change
+    assert!(check(vec![w(2, &[0], Column::f64(vec![9.0]))]).may_change_data_row(&df, 3));
+}
