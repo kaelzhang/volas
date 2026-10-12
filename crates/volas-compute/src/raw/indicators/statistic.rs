@@ -206,13 +206,14 @@ pub fn tsf(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     b.iter().zip(&m).map(|(b, m)| b + m * x).collect()
 }
 
-/// Rolling population variance over `period`: `Σx²/p − (Σx/p)²`, O(n) via a sliding
-/// sum and sum-of-squares — TA-Lib's own approach, with its exact operation order
-/// (add current, take means, drop trailing). NaN during warm-up. Shared by `var`
-/// and `stddev`. Floating-point cancellation can yield a tiny negative result; the
-/// `stddev` caller clamps such (and an exact-zero, flat window) to 0, as TA-Lib does.
-/// Window-local: a non-finite row affects only the windows holding it (a window
-/// holding one is NaN — see [`crate::guard`]).
+/// Rolling population variance over `period`: `(p·Σx² − (Σx)²) / p²`, O(n) via sliding
+/// exact sums of `x` and `x²` ([`square_terms`]) in TA-Lib's operation order (add the
+/// current row, read, drop the trailing one), the numerator by [`comoment`] — within an
+/// ulp or two of the exact variance however the raw moments cancel, never negative,
+/// exactly zero for a flat window (TA-Lib's one-pass `Σx²/p − (Σx/p)²` instead cancels
+/// to rounding noise, which can be negative). NaN during warm-up. Shared by `var` and
+/// `stddev`. Window-local: a non-finite row affects only the windows holding it (a
+/// window holding one is NaN — see [`crate::guard`]).
 fn rolling_var(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let (out, finite) = rolling_var_with::<Unguarded>(data, period, origin);
     if finite {
@@ -283,12 +284,10 @@ fn var_of_sums(sums: &[Csum; 3], p: f64) -> f64 {
     comoment(p, s, s, &sums[1..]) / (p * p)
 }
 
-/// The population variance of a window holding a non-finite row, on its own rows (the
-/// IEEE value of that window: NaN).
+/// The population variance of a window holding a non-finite row, on its own rows: its
+/// exact sums, then [`var_of_sums`] (the IEEE value of that window: NaN).
 fn var_of_window(rows: &[f64], p: f64) -> f64 {
-    let (s1, s2) = rows.iter().fold((0.0, 0.0), |(s1, s2), &x| (s1 + x, s2 + x * x));
-    let mean1 = s1 / p;
-    s2 / p - mean1 * mean1
+    var_of_sums(&Csum::of_rows(rows.iter().map(|&x| square_terms(x))), p)
 }
 
 /// Rolling population variance over `period` (TA-Lib VAR). Lookback period-1.
@@ -297,9 +296,9 @@ pub fn var(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     rolling_var(data, period, origin)
 }
 
-/// Rolling standard deviation: `nbdev · sqrt(variance)` over `period` (TA-Lib STDDEV).
-/// A non-positive variance (fp cancellation, or a perfectly flat window) yields 0,
-/// matching TA-Lib. Lookback period-1.
+/// Rolling standard deviation: `nbdev · sqrt(variance)` over `period` (TA-Lib STDDEV),
+/// the variance of [`rolling_var`]; a flat window (zero variance) yields 0. Lookback
+/// period-1.
 pub fn stddev(data: &[f64], period: usize, nbdev: f64, origin: usize) -> Vec<f64> {
     rolling_var(data, period, origin)
         .into_iter()

@@ -52,16 +52,23 @@ is that of its own rows, however long the history and whatever has left it: afte
 window's `stddev` is exactly `0` and its `ma` exactly its value, after any history.
 TA-Lib's plain running sums give `[nan, 5e19, 1, 2, 3, 4]` for the first example (every
 window after the spike stays wrong) and drift over a long history; volas follows the
-exact values instead, so on such data the two differ. (A window whose own terms reach
-the `f64` overflow threshold, where `math.fsum` raises, is summed at a reduced scale:
-exact unless its sum then cancels below about `1e-288`.)
+exact values instead, so on such data the two differ. (Where `math.fsum` itself fails —
+an intermediate sum of the window's terms, oldest first, overflows `f64` — volas sums
+the window at a scale of `2⁻⁶⁴` instead of raising; that is exact unless the same window
+also holds a nonzero term smaller than `2⁻⁹⁵⁷` (about `1e-288`), whose lowest bits can
+then be lost. A window whose sums never overflow is exact whatever its magnitudes.)
+A row's absolute position is kept by a contiguous slice and by a bounded
+(`window=`) frame dropping its head, so they compute exactly what the full series does —
+the position indicators (`maxindex`, `minindex`, `minmaxindex`) included: they report
+the series' own positions, on a slice as on the full frame.
 
 ## Centred moments
 
 `var`, `stddev`, `boll`, `correl`, `beta` and the `linearreg` family take each
 window's spread as `n·Σab − Σa·Σb` (`n²` times its centred co-moment) from the window's
-exact sums — squares and products summed exactly — formed in double-double arithmetic
-and, near cancellation, exactly. TA-Lib's one-pass raw moments `Σx²/n − (Σx/n)²` cancel
+exact sums — squares and products summed exactly — formed to within an ulp or two (the
+high words' difference rounded once by FMA, then the low-order terms) and, near
+cancellation, exactly. TA-Lib's one-pass raw moments `Σx²/n − (Σx/n)²` cancel
 catastrophically when a window's mean dwarfs its spread: at a price of `12345.67` a
 variance of `1e-12` reads `0`, a variance can go negative, a regression slope of `1e-9`
 per bar is off by `6e-4`, a correlation exceeds `1`, and a flat window's correlation can
@@ -70,7 +77,11 @@ slope, a correlation stays in `[-1, 1]`, and a window with a constant series (ze
 variance, tested exactly) has `correl` and `beta` `0` — TA-Lib's result there, which
 TA-Lib reaches through an absolute `1e-14` threshold on the raw-moment denominator, so
 it also returns `0` for a small but genuine variance (e.g. FX-scale returns); volas does
-not. A row's absolute position is kept by a contiguous slice and by a bounded
-(`window=`) frame dropping its head, so they compute exactly what the full series does —
-the position indicators (`maxindex`, `minindex`, `minmaxindex`) included: they report
-the series' own positions, on a slice as on the full frame.
+not.
+
+`mfi` likewise gives `0` only for a window whose money flow sums to exactly `0`. TA-Lib's
+MFI returns `0` whenever the window's total flow is below `1.0`, an absolute threshold in
+price × volume units, so its result changes with the volume's unit (a feed quoting
+volume in thousands, or a low-priced instrument, reads `0`); volas's MFI is the same
+for the same prices whatever the volume's scale.
+

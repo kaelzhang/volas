@@ -108,7 +108,10 @@ impl Infinities {
 /// multiple of the window length and whenever one went inexact, so each window's sums
 /// are the correctly rounded sums of its own terms (`math.fsum`), however long the
 /// slide. An expanding window never drops a value: its sums are kept exactly by
-/// [`Exact`] expansions once the compensated form can no longer hold them.
+/// [`Exact`] expansions once the compensated form can no longer hold them — after an
+/// extreme value (its magnitude far from the rest's), every later row is added to the
+/// expansion and rounded from it, an `O(expansion words)` step with an allocation per
+/// row instead of the compensated add, for the rest of that series.
 /// `read(sums, infinities, count)`.
 fn present_sums<const K: usize>(
     data: &[f64],

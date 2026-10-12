@@ -641,7 +641,10 @@ The window API is pandas-aligned and differential-tested method by method
   sum of its present values (`math.fsum`), however the window was reached: an
   outlier that has left the window leaves no trace, even two of different magnitudes
   (`[1.1, 1e35, 1e20, 1.3, 2.7, 3.1, 4.9]`, `rolling(4).sum()` ends at `12.0`). A mean
-  is that exact sum over the count. pandas's Kahan-compensated running sum keeps one
+  is that exact sum over the count. An expanding window keeps every value, so once
+  its exact sum needs more than two words (an extreme value far from the rest's
+  magnitude) each later row is summed exactly the slow way, at several times the
+  per-row cost of the compensated add. pandas's Kahan-compensated running sum keeps one
   compensation word and can lose a window to such outliers. `var()` / `std()` /
   `sem()` are the window's centred variance from its exact sums of values and
   squares (within an ulp or two of exact, exactly 0 for a constant window), where

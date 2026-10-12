@@ -20,30 +20,26 @@ pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize, origin: us
 }
 
 /// The mean and standard deviation of a window from its exact sums `[Σx, Σx²]` (the
-/// squares' sum split as [`square_terms`] splits each square).
+/// squares' sum split as [`square_terms`] splits each square). A window holding a
+/// non-finite value takes its IEEE values: the sum's infinity (or NaN) over `p` as mean,
+/// NaN as deviation.
 #[inline(always)]
 pub(crate) fn mean_std_of_sums([sum, sq_hi, sq_lo]: &[Csum; 3], p: f64, denom: f64) -> (f64, f64) {
     let s = sum.words();
     let variance = comoment(p, s, s, &[*sq_hi, *sq_lo]) / (p * denom);
-    (sum.mean(p), variance.max(0.0).sqrt())
+    let mean = if s.0.is_finite() { sum.mean(p) } else { s.0 / p };
+    (mean, if variance.is_nan() { f64::NAN } else { variance.max(0.0).sqrt() })
 }
 
-/// Mean and std of the window `data[start..=end]` evaluated directly on its rows —
-/// the value of a window holding a non-finite row. The variance is checked for NaN
-/// before the cancellation clamp, which would otherwise turn NaN into 0.
+/// Mean and std of the window `rows` evaluated on its own rows — the value of a window
+/// holding a non-finite row: its exact sums, then [`mean_std_of_sums`].
 pub(crate) fn window_mean_std_of(
     rows: std::ops::RangeInclusive<usize>,
     term: impl Fn(usize) -> f64,
     p: f64,
     denom: f64,
 ) -> (f64, f64) {
-    let (sum, sum_sq) = rows.fold((0.0, 0.0), |(s, q), j| {
-        let x = term(j);
-        (s + x, q + x * x)
-    });
-    let variance = (sum_sq - sum * sum / p) / denom;
-    let std = if variance.is_nan() { f64::NAN } else { variance.max(0.0).sqrt() };
-    (sum / p, std)
+    mean_std_of_sums(&Csum::of_rows(rows.map(|j| square_terms(term(j)))), p, denom)
 }
 
 /// Fused rolling **mean and std** in a single pass — one sliding accumulation of Σx
