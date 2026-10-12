@@ -236,11 +236,7 @@ impl PyDt {
                 out.push(String::new());
                 continue;
             }
-            out.push(datetime::strftime(ns, Tz::Naive, fmt).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "invalid strftime format {fmt:?}"
-                ))
-            })?);
+            out.push(datetime::strftime(ns, Tz::Naive, fmt).map_err(pyerr)?);
         }
         Ok(self.wrap(Column::str_with(out, validity)))
     }

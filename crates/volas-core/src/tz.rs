@@ -57,12 +57,30 @@ impl Tz {
         if s.eq_ignore_ascii_case("utc") || s == "Z" {
             return Ok(Tz::Utc);
         }
-        if let Some(off) = parse_offset_seconds(s) {
-            return Ok(if off == 0 { Tz::Utc } else { Tz::Offset(off) });
+        if s.starts_with(['+', '-']) {
+            let off = parse_offset_seconds(s).ok_or_else(|| {
+                VolasError::Value(format!(
+                    "invalid UTC offset {s:?} (use ±HH, ±HHMM[SS] or ±HH:MM[:SS], hours < 24)"
+                ))
+            })?;
+            return Tz::fixed(off);
         }
         s.parse::<chrono_tz::Tz>()
             .map(Tz::Named)
             .map_err(|_| VolasError::Value(format!("unknown timezone {s:?}")))
+    }
+
+    /// The fixed zone `secs` east of UTC — the one constructor of [`Tz::Offset`]:
+    /// a zero offset is [`Tz::Utc`], and an offset of a day or more is a `Value`
+    /// error (no real zone has one).
+    pub fn fixed(secs: i32) -> Result<Tz> {
+        match secs {
+            0 => Ok(Tz::Utc),
+            s if s.abs() < 86_400 => Ok(Tz::Offset(s)),
+            s => Err(VolasError::Value(format!(
+                "a UTC offset of {s} s is not under a day"
+            ))),
+        }
     }
 
     /// Seconds east of UTC for a fixed zone; `None` for a named (DST) zone, whose
@@ -84,7 +102,7 @@ impl Tz {
     /// The wall clock of the UTC instant `ns` in this timezone. The offset is
     /// applied in chrono's civil range (far wider than the instant axis), so an
     /// instant at either end of the axis never wraps on its way to the wall clock.
-    fn wall(&self, ns: i64) -> NaiveDateTime {
+    pub(crate) fn wall(&self, ns: i64) -> NaiveDateTime {
         let utc = DateTime::from_timestamp_nanos(ns);
         match self {
             Tz::Naive | Tz::Utc => utc.naive_utc(),
@@ -140,20 +158,50 @@ impl Tz {
             wall.minute() as i64,
             wall.second() as i64,
         ];
-        let mut f = [0u32; 6];
-        for (i, (new, old)) in fields.iter().zip(keep).enumerate() {
-            let v = new.unwrap_or(old);
-            // the year is signed (i32); the other fields are unsigned
-            let fits = if i == 0 { i32::try_from(v).is_ok() } else { u32::try_from(v).is_ok() };
-            if !fits {
-                return Err(VolasError::Value(format!("replace: {v} is out of range")));
-            }
-            f[i] = v as u32;
+        let merged: [i64; 6] = std::array::from_fn(|i| fields[i].unwrap_or(keep[i]));
+        self.localize_fields(merged, wall.nanosecond())
+    }
+
+    /// The instant of the wall clock given field by field — `[year, month, day,
+    /// hour, minute, second]` plus the nanosecond of the second (a Python
+    /// `datetime`'s components) — in this zone. A field that does not fit or an
+    /// invalid date is a `Value` error; then as [`Tz::localize`].
+    pub fn localize_fields(&self, fields: [i64; 6], nanosecond: u32) -> Result<i64> {
+        let bad = |v: i64| VolasError::Value(format!("civil field {v} is out of range"));
+        let year = i32::try_from(fields[0]).map_err(|_| bad(fields[0]))?;
+        let mut f = [0u32; 5];
+        for (slot, &v) in f.iter_mut().zip(&fields[1..]) {
+            *slot = u32::try_from(v).map_err(|_| bad(v))?;
         }
-        let new = NaiveDate::from_ymd_opt(f[0] as i32, f[1], f[2])
-            .and_then(|d| d.and_hms_nano_opt(f[3], f[4], f[5], wall.nanosecond()))
-            .ok_or_else(|| VolasError::Value("replace produced an invalid wall-clock".into()))?;
-        self.localize(new)
+        let wall = NaiveDate::from_ymd_opt(year, f[0], f[1])
+            .and_then(|d| d.and_hms_nano_opt(f[2], f[3], f[4], nanosecond))
+            .ok_or_else(|| VolasError::Value(format!("{fields:?} is not a valid wall clock")))?;
+        self.localize(wall)
+    }
+
+    /// The zone's name for the instant `ns`, as `strftime('%Z')` prints it:
+    /// `"UTC"`, `"UTC±HH:MM[:SS]"` for a fixed offset, the tzdata abbreviation of a
+    /// named zone at that instant (`"EST"` / `"EDT"`; a numeric one such as `"-03"`
+    /// when tzdata has no letters), and `""` for a naive axis.
+    pub fn zone_name_at(&self, ns: i64) -> String {
+        match self {
+            Tz::Naive => String::new(),
+            Tz::Utc => "UTC".to_string(),
+            Tz::Offset(s) => format!("UTC{}", format_offset(*s, ":")),
+            Tz::Named(tz) => {
+                use chrono_tz::OffsetName;
+                let utc = DateTime::from_timestamp_nanos(ns);
+                match tz.offset_from_utc_datetime(&utc.naive_utc()).abbreviation() {
+                    Some(name) => name.to_string(),
+                    None => {
+                        let off = self.offset_secs_at(ns);
+                        let text = format_offset(off, "");
+                        // tzdata's numeric names drop a zero minute field (`-03`)
+                        if off % 3600 == 0 { text[..3].to_string() } else { text }
+                    }
+                }
+            }
+        }
     }
 
     /// UTC epoch-ns of a naive wall-clock time interpreted in this timezone
@@ -205,7 +253,7 @@ impl Tz {
         match self {
             Tz::Naive => "naive".to_string(),
             Tz::Utc => "UTC".to_string(),
-            Tz::Offset(s) => format_offset(*s),
+            Tz::Offset(s) => format_offset(*s, ":"),
             Tz::Named(tz) => tz.name().to_string(),
         }
     }
@@ -268,37 +316,49 @@ fn parts(dt: NaiveDateTime) -> (i64, i64, i64, i64, i64, i64) {
     )
 }
 
-/// Parse a fixed-offset spec (`+HH:MM`, `+HHMM`, `+HH`, `+H`, sign required) to
-/// seconds east of UTC; `None` if it is not an offset.
-fn parse_offset_seconds(s: &str) -> Option<i32> {
-    let sign = match s.as_bytes().first()? {
-        b'+' => 1,
-        b'-' => -1,
+/// The one UTC-offset grammar (zone specs and the suffix of an offset-aware
+/// string): a required sign, then `H`, `HH`, `HHMM`, `HHMMSS`, `HH:MM` or
+/// `HH:MM:SS` in ASCII digits, hours < 24, minutes / seconds < 60. Seconds east of
+/// UTC, or `None` for anything else (no inner signs, no other digits).
+pub(crate) fn parse_offset_seconds(s: &str) -> Option<i32> {
+    let (sign, rest) = match s.as_bytes().first()? {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
         _ => return None,
     };
-    let rest = &s[1..];
-    let (hh, mm) = if let Some((h, m)) = rest.split_once(':') {
-        (h.parse::<i32>().ok()?, m.parse::<i32>().ok()?)
-    } else if rest.len() <= 2 {
-        (rest.parse::<i32>().ok()?, 0)
-    } else if rest.len() == 4 {
-        (
-            rest[..2].parse::<i32>().ok()?,
-            rest[2..].parse::<i32>().ok()?,
-        )
+    let digits = |f: &str, n: usize| -> Option<i32> {
+        (f.len() == n && f.bytes().all(|b| b.is_ascii_digit())).then(|| f.parse().ok())?
+    };
+    let fields: Vec<&str> = if rest.contains(':') {
+        rest.split(':').collect()
+    } else if rest.len() == 1 {
+        vec![rest]
+    } else if rest.is_ascii() && matches!(rest.len(), 2 | 4 | 6) {
+        (0..rest.len()).step_by(2).map(|i| &rest[i..i + 2]).collect()
     } else {
         return None;
     };
-    if hh > 23 || mm > 59 {
-        return None;
+    let mut parts = [0i32; 3];
+    for (i, f) in fields.iter().enumerate() {
+        // the hour may be one digit (`+8`, `+8:30`); every other field is two
+        let v = if i == 0 && f.len() == 1 { digits(f, 1) } else { digits(f, 2) };
+        *parts.get_mut(i)? = v?;
     }
-    Some(sign * (hh * 3600 + mm * 60))
+    let [h, m, sec] = parts;
+    (h < 24 && m < 60 && sec < 60).then_some(sign * (h * 3600 + m * 60 + sec))
 }
 
-fn format_offset(secs: i32) -> String {
+/// Render `secs` east of UTC as `±HH<sep>MM`, plus `<sep>SS` when the offset is not
+/// a whole minute (a historical LMT offset such as Kolkata's `+05:21:10`) — never
+/// truncated, so the text parses back to the same offset.
+pub fn format_offset(secs: i32, sep: &str) -> String {
     let sign = if secs < 0 { '-' } else { '+' };
-    let a = secs.abs();
-    format!("{}{:02}:{:02}", sign, a / 3600, (a % 3600) / 60)
+    let a = secs.unsigned_abs();
+    let mut out = format!("{sign}{:02}{sep}{:02}", a / 3600, a % 3600 / 60);
+    if !a.is_multiple_of(60) {
+        out.push_str(&format!("{sep}{:02}", a % 60));
+    }
+    out
 }
 
 #[cfg(test)]

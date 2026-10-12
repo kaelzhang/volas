@@ -94,13 +94,10 @@ impl PyTimestamp {
     fn new(value: &Bound<'_, PyAny>, tz: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let tzv = match tz {
             Some(obj) => tz_from_py(obj)?,
-            // An offset-aware value string carries its own zone — keep it (F25),
-            // so '... 09:00:00+08:00' stays a +08:00 instant, not a naive UTC one.
-            None => match value.extract::<String>().ok().and_then(|s| datetime::offset_suffix_secs(&s)) {
-                Some(0) => Tz::Utc,
-                Some(off) => Tz::Offset(off),
-                None => Tz::Naive,
-            },
+            // A value that carries a zone keeps it: a Timestamp its own tz, an
+            // aware datetime / pd.Timestamp its tzinfo, an offset-aware string its
+            // offset (F25) — '... 09:00:00+08:00' stays a +08:00 instant.
+            None => zone_of(value)?,
         };
         Ok(PyTimestamp {
             ns: parse_ts_in_tz(value, tzv)?,
@@ -424,10 +421,8 @@ impl PyTimestamp {
             }
         }
         if self.tz.is_aware() {
-            let off = self.tz.offset_secs_at(self.ns);
-            let sign = if off < 0 { '-' } else { '+' };
-            let a = off.abs();
-            out.push_str(&format!("{}{:02}:{:02}", sign, a / 3600, (a % 3600) / 60));
+            // second precision when the offset has seconds (LMT `+05:21:10`)
+            out.push_str(&volas_core::tz::format_offset(self.tz.offset_secs_at(self.ns), ":"));
         }
         out
     }
@@ -472,18 +467,27 @@ impl PyTimestamp {
     /// Format the wall-clock time with a `strftime` format string (pandas
     /// `Timestamp.strftime`). Raises `ValueError` on an invalid format.
     fn strftime(&self, fmt: &str) -> PyResult<String> {
-        datetime::strftime(self.ns, self.tz, fmt)
-            .ok_or_else(|| PyValueError::new_err("invalid strftime format string"))
+        datetime::strftime(self.ns, self.tz, fmt).map_err(pyerr)
     }
 
-    /// As a Python `datetime.datetime` (wall-clock in this Timestamp's tz, at
-    /// microsecond precision — `datetime`'s maximum; sub-µs ns are truncated).
+    /// As a Python `datetime.datetime` at microsecond precision (`datetime`'s
+    /// maximum; sub-µs ns are truncated): naive for a naive Timestamp, else aware
+    /// with this Timestamp's `tzinfo` — the same instant, `fold` set on a
+    /// DST-repeated wall clock.
     fn to_pydatetime<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (y, mo, d, h, mi, s) = datetime::civil_parts_tz(self.ns, self.tz);
-        let micros = self.ns.rem_euclid(1_000_000_000) / 1_000;
-        py.import("datetime")?
-            .getattr("datetime")?
-            .call1((y, mo, d, h, mi, s, micros))
+        let dt = py.import("datetime")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("microseconds", self.ns.div_euclid(1_000))?;
+        let delta = dt.getattr("timedelta")?.call((), Some(&kwargs))?;
+        let epoch = dt.getattr("datetime")?;
+        match self.tzinfo(py)? {
+            None => epoch.call1((1970, 1, 1))?.call_method1("__add__", (delta,)),
+            Some(zone) => {
+                let utc = dt.getattr("timezone")?.getattr("utc")?;
+                let epoch = epoch.call1((1970, 1, 1, 0, 0, 0, 0, utc))?;
+                epoch.call_method1("__add__", (delta,))?.call_method1("astimezone", (zone,))
+            }
+        }
     }
 
     /// `ts + delta` where `delta` is an `np.timedelta64` or an integer count of
@@ -532,14 +536,134 @@ impl PyTimestamp {
         datetime::format_ns_tz(self.ns, self.tz)
     }
 
-    fn __richcmp__(&self, other: &Bound<'_, PyAny>, op: pyo3::basic::CompareOp) -> PyResult<bool> {
-        let rhs = parse_ts_in_tz(other, Tz::Naive)?;
-        Ok(op.matches(self.ns.cmp(&rhs)))
+    /// Compare with another instant (a Timestamp, a `datetime` / `pd.Timestamp`, an
+    /// `np.datetime64`, a datetime string — aware when it carries an offset — or
+    /// an epoch-ns integer). A naive and an aware instant are never equal and
+    /// cannot be ordered (`TypeError`), as in pandas; a non-instant (`None`, a
+    /// plain `date`, `NaT`, …) is unequal and cannot be ordered.
+    fn __richcmp__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::basic::CompareOp,
+    ) -> PyResult<Py<PyAny>> {
+        use pyo3::basic::CompareOp::{Eq, Ne};
+        let Some((ns, aware)) = comparable_instant(other)? else {
+            return Ok(py.NotImplemented());
+        };
+        let answer = if aware == self.tz.is_aware() {
+            op.matches(self.ns.cmp(&ns))
+        } else {
+            match op {
+                Eq => false,
+                Ne => true,
+                _ => {
+                    return Err(PyTypeError::new_err(
+                        "Cannot compare tz-naive and tz-aware timestamps",
+                    ))
+                }
+            }
+        };
+        Ok(answer.into_pyobject(py)?.to_owned().into_any().unbind())
     }
 
-    fn __hash__(&self) -> i64 {
-        self.ns
+    /// Consistent with `==`: a whole-microsecond instant hashes like the equal
+    /// `datetime` (so `datetime in {Timestamp}` works); a sub-microsecond one by
+    /// its nanosecond value — pandas' rule.
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        if self.ns.rem_euclid(1_000) != 0 {
+            return self.ns.into_pyobject(py)?.hash();
+        }
+        self.to_pydatetime(py)?.hash()
     }
+}
+
+/// The `(instant, is_aware)` of a comparison operand that is an instant — a
+/// Timestamp, a `datetime.datetime` (incl. `pd.Timestamp`), an `np.datetime64`, a
+/// datetime string (aware iff it carries an offset) or an epoch-ns integer — or
+/// `None` for anything else (`None`, a plain `date`, `NaT`, …).
+fn comparable_instant(other: &Bound<'_, PyAny>) -> PyResult<Option<(i64, bool)>> {
+    if let Ok(t) = other.extract::<PyRef<PyTimestamp>>() {
+        return Ok(Some((t.ns, t.tz.is_aware())));
+    }
+    if let Ok(s) = other.extract::<String>() {
+        let aware = datetime::offset_suffix_secs(&s).is_some();
+        return Ok(Some((parse_ts_in_tz(other, Tz::Naive)?, aware)));
+    }
+    if let Ok(i) = other.extract::<i64>() {
+        return Ok(Some((i, false)));
+    }
+    if other.is_instance_of::<pyo3::types::PyDateTime>() {
+        let aware = !other.call_method0("utcoffset")?.is_none();
+        return Ok(datetime_instant(other, Tz::Naive).ok().map(|ns| (ns, aware)));
+    }
+    match crate::coerce::numpy_time_value(other, "M") {
+        Some(value) => {
+            let (unit, count, raw) = value?;
+            if raw == datetime::NAT {
+                return Ok(None);
+            }
+            Ok(Some((datetime::datetime64_to_ns(raw, &unit, count).map_err(pyerr)?, false)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The zone a constructor value carries: a Timestamp's tz, an aware `datetime`'s
+/// tzinfo (its fixed offset when the tzinfo has no name volas resolves), an
+/// offset-aware string's offset; [`Tz::Naive`] otherwise.
+fn zone_of(value: &Bound<'_, PyAny>) -> PyResult<Tz> {
+    if let Ok(t) = value.extract::<PyRef<PyTimestamp>>() {
+        return Ok(t.tz);
+    }
+    if value.is_instance_of::<pyo3::types::PyDateTime>() {
+        // `pd.NaT` (a datetime without components) has no zone; the instant
+        // parse then rejects it
+        let offset = value.call_method0("utcoffset")?;
+        if offset.is_none() || value.getattr("year")?.extract::<i64>().is_err() {
+            return Ok(Tz::Naive);
+        }
+        let tzinfo = value.getattr("tzinfo")?;
+        return tz_from_py(&tzinfo).or_else(|_| Tz::fixed(offset_secs(&offset)?).map_err(pyerr));
+    }
+    Ok(match value.extract::<String>().ok().and_then(|s| datetime::offset_suffix_secs(&s)) {
+        Some(off) => Tz::fixed(off).map_err(pyerr)?,
+        None => Tz::Naive,
+    })
+}
+
+/// A `datetime.timedelta` UTC offset as whole seconds; a sub-second offset raises
+/// (volas offsets have second precision — truncating would shift the instant).
+pub(crate) fn offset_secs(delta: &Bound<'_, PyAny>) -> PyResult<i32> {
+    let micros: i64 = delta.getattr("microseconds")?.extract()?;
+    if micros != 0 {
+        return Err(PyValueError::new_err(
+            "a UTC offset with a sub-second part is not supported (volas offsets have second precision)",
+        ));
+    }
+    let days: i64 = delta.getattr("days")?.extract()?;
+    let secs: i64 = delta.getattr("seconds")?.extract()?;
+    i32::try_from(days * 86_400 + secs)
+        .map_err(|_| PyValueError::new_err("a UTC offset must be under a day"))
+}
+
+/// A `datetime.datetime` / `datetime.date` (incl. `pd.Timestamp`) as an instant,
+/// from its components — exact to the nanosecond (`pd.Timestamp.nanosecond`),
+/// never through text. An aware value is read at its own UTC offset; a naive one
+/// is a wall clock in `tz`. `pd.NaT` (no components) is a `ValueError`.
+pub(crate) fn datetime_instant(value: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
+    let missing = || PyValueError::new_err("NaT is not a valid timestamp; a missing instant is volas.NA");
+    let field = |name: &str| -> PyResult<i64> { value.getattr(name)?.extract().map_err(|_| missing()) };
+    let is_dt = value.is_instance_of::<pyo3::types::PyDateTime>();
+    let time = |name: &str| if is_dt { field(name) } else { Ok(0) };
+    let fields = [field("year")?, field("month")?, field("day")?, time("hour")?, time("minute")?, time("second")?];
+    let nanos = time("microsecond")? * 1_000
+        + if value.hasattr("nanosecond")? { field("nanosecond")? } else { 0 };
+    let zone = match is_dt.then(|| value.call_method0("utcoffset")).transpose()? {
+        Some(off) if !off.is_none() => Tz::fixed(offset_secs(&off)?).map_err(pyerr)?,
+        _ => tz,
+    };
+    zone.localize_fields(fields, nanos as u32).map_err(pyerr)
 }
 
 /// Parse a Python timestamp (datetime string or epoch-ns integer) to UTC ns,
@@ -555,18 +679,17 @@ pub(crate) fn tz_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Tz> {
     if let Ok(s) = obj.extract::<String>() {
         return Tz::parse(&s).map_err(pyerr);
     }
-    // zoneinfo.ZoneInfo carries its IANA name in `.key`.
-    if let Ok(key) = obj.getattr("key").and_then(|k| k.extract::<String>()) {
-        return Tz::parse(&key).map_err(pyerr);
+    // zoneinfo.ZoneInfo carries its IANA name in `.key` (pytz in `.zone`).
+    for attr in ["key", "zone"] {
+        if let Ok(key) = obj.getattr(attr).and_then(|k| k.extract::<String>()) {
+            return Tz::parse(&key).map_err(pyerr);
+        }
     }
-    // any datetime.tzinfo: take its UTC offset (fixed-offset zones).
-    if let Ok(off) = obj
-        .call_method1("utcoffset", (obj.py().None(),))
-        .and_then(|d| d.call_method0("total_seconds"))
-        .and_then(|s| s.extract::<f64>())
-    {
-        let secs = off as i32;
-        return Ok(if secs == 0 { Tz::Utc } else { Tz::Offset(secs) });
+    // any datetime.tzinfo: take its UTC offset (fixed-offset zones), exactly.
+    if let Ok(off) = obj.call_method1("utcoffset", (obj.py().None(),)) {
+        if !off.is_none() {
+            return Tz::fixed(offset_secs(&off)?).map_err(pyerr);
+        }
     }
     Err(PyTypeError::new_err(
         "tz must be a timezone string (IANA name, '+08:00', 'UTC'), a zoneinfo.ZoneInfo, or a tzinfo",

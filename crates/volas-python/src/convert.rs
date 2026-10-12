@@ -568,20 +568,12 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
         });
     }
     // A stdlib `datetime.datetime` / `datetime.date` — and their subclasses,
-    // notably `pd.Timestamp` and `pd.NaT` (F15/F23): round-trip through
-    // `isoformat()`, which the string parser understands for both naive (then
-    // interpreted in `tz`) and offset-aware (absolute) forms. `pd.NaT`
-    // isoformat()s to "NaT", failing the parse -> a clean ValueError
-    // (decision 2), not a label KeyError.
-    if key.is_instance_of::<pyo3::types::PyDate>() || key.is_instance_of::<pyo3::types::PyDateTime>()
-    {
-        let s = key.call_method0("isoformat")?.extract::<String>()?;
-        return datetime::parse_ns_in_tz(&s, tz).map_err(|e| match e {
-            VolasError::Overflow(_) => pyerr(e),
-            _ => PyValueError::new_err(format!(
-                "{s:?} is not a valid timestamp; a missing instant is volas.NA"
-            )),
-        });
+    // notably `pd.Timestamp` and `pd.NaT` (F15/F23): read from its components
+    // (exact to the nanosecond, any second-precision offset) — an aware value at
+    // its own offset, a naive one as a wall clock in `tz`. `pd.NaT` has no
+    // components -> a clean ValueError (decision 2), not a label KeyError.
+    if key.is_instance_of::<pyo3::types::PyDate>() {
+        return crate::scalar::datetime_instant(key, tz);
     }
     if let Ok(i) = key.extract::<i64>() {
         // i64::MIN is the NaT sentinel (D2): a missing instant is volas.NA, not a
@@ -670,8 +662,10 @@ pub(crate) fn norm_idx(i: isize, len: usize) -> PyResult<usize> {
 
 /// Parse column `dc` to a UTC `Datetime` column, move it into the index, and tag
 /// the index with `tz` (PD-20 ingestion). A **naive** string column is
-/// interpreted in `tz`; with `date_unit` the column is read as an epoch integer
-/// (`"s"`/`"ms"`/`"us"`/`"ns"`, absolute) and `tz` only sets the display zone.
+/// interpreted in `tz`; with `date_unit` the column is read as an epoch number
+/// (`"s"`/`"ms"`/`"us"`/`"ns"`, absolute — a fractional epoch by the one
+/// float-epoch rule) and `tz` only sets the display zone. Any `tz`, UTC
+/// included, tags the index as aware.
 pub(crate) fn build_datetime_index(
     mut df: DataFrame,
     dc: &str,
@@ -686,7 +680,7 @@ pub(crate) fn build_datetime_index(
         Some(unit) => df
             .column(dc)
             .map_err(pyerr)?
-            .epoch_to_datetime(unit)
+            .epoch_to_datetime_rounded(unit)
             .map_err(pyerr)?,
         None => df
             .column(dc)
@@ -695,10 +689,10 @@ pub(crate) fn build_datetime_index(
             .map_err(pyerr)?,
     };
     df.set_column(dc, parsed).map_err(pyerr)?;
-    let mut df = df.set_index(dc).map_err(pyerr)?;
+    let df = df.set_index(dc).map_err(pyerr)?;
     // The instants are already correct UTC; tag the display / matching tz.
-    if !tzv.is_utc() {
-        df = df.tz_convert(tzv).map_err(pyerr)?;
+    if tz.is_some() {
+        return df.set_index_tz(tzv).map_err(pyerr);
     }
     Ok(df)
 }

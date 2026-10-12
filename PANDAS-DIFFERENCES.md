@@ -497,6 +497,14 @@ so the display zone is dropped (the column shows naive-UTC wall clocks). The abs
 instants are lossless — `set_index` + `tz_convert` restores the original display —
 but the zone itself does not ride along through a reset/set round-trip.
 
+Text and numbers cross the instant boundary by one rule each. A float epoch is the
+float's exact binary value times the unit, rounded to the nearest nanosecond (ties to
+even) — pandas' result for `s` / `ms` / `us`, while pandas truncates a fractional
+`unit='ns'` input. `Timestamp.strftime('%s')` is the instant's real epoch second
+(pandas reads the wall clock in the host's local zone), and `%z` / `isoformat()` keep
+a second-precision offset (`+05:21:10`); a `tzinfo` offset with a sub-second part
+raises rather than being truncated.
+
 ### `append` aligns by name; the live fold demands ordered, present timestamps
 
 `df.append(rows)` aligns columns **by name**, not position. A column the appended

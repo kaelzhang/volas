@@ -25,13 +25,15 @@ use crate::{build_datetime_index, norm_idx, pyerr, PyDataFrame};
 ///     keep_default_na (bool): also treat the default tokens as missing
 ///         (default True).
 ///     tz (str, optional): timezone for the ``index_col`` datetime — a *naive*
-///         date string is interpreted in ``tz`` (stored UTC, the index tagged);
+///         date string is interpreted in ``tz`` (stored UTC, the index tagged
+///         with ``tz``, ``'UTC'`` included);
 ///         accepts a fixed offset (``'+08:00'``) or IANA name
 ///         (``'America/New_York'``). For tz ingestion pass the date column via
 ///         ``index_col`` and do *not* also list it in ``parse_dates``.
-///     date_unit (str, optional): read ``index_col`` as an epoch integer in this
-///         unit (``'s'`` / ``'ms'`` / ``'us'`` / ``'ns'``, absolute UTC); ``tz``
-///         then only sets the display zone.
+///     date_unit (str, optional): read ``index_col`` as an epoch number in this
+///         unit (``'s'`` / ``'ms'`` / ``'us'`` / ``'ns'``, absolute UTC; a
+///         fractional epoch is kept to the nearest nanosecond); ``tz`` then only
+///         sets the display zone.
 ///
 /// Usage::
 ///

@@ -899,13 +899,15 @@ dtypes — a fast, pandas-subset CSV reader.
 - **na_values?** `str | list[str] | None = None` extra missing-value tokens.
 - **keep_default_na?** `bool = True` also treat the default NA tokens as missing.
 - **tz?** `str | None = None` the timezone for the `index_col` datetime: a *naive* date
-  string is read in `tz` (stored UTC, the index tagged). Pass the date column via
+  string is read in `tz` (stored UTC, the index tagged with `tz` — `'UTC'` included,
+  so the index is tz-aware). Pass the date column via
   `index_col` and do *not* also list it in `parse_dates`. See [Timezones](#timezones).
   Accepts either:
   - a fixed UTC offset, e.g. `'+08:00'` / `'-05:00'`
   - an IANA timezone name, e.g. `'America/New_York'` / `'Asia/Shanghai'` / `'UTC'`
-- **date_unit?** `str | None = None` read `index_col` as an epoch integer in this unit
-  (absolute UTC; `tz` then only sets the display zone). One of:
+- **date_unit?** `str | None = None` read `index_col` as an epoch number in this unit
+  (absolute UTC, a fractional epoch kept to the nearest nanosecond; `tz` then only
+  sets the display zone). One of:
   - `'s'` — seconds
   - `'ms'` — milliseconds
   - `'us'` — microseconds

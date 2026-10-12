@@ -62,12 +62,14 @@ pub(crate) fn csv_escape(field: String, sep: &str) -> String {
     }
 }
 
-/// Format the `i`-th index label as a CSV field.
+/// Format the `i`-th index label as a CSV field. An aware datetime label carries
+/// its UTC offset, so every row names its instant (a DST-repeated wall clock stays
+/// two distinct labels) and the file parses back to the same instants.
 pub(crate) fn index_label_csv(index: &Index, i: usize) -> String {
     match index.kind() {
         IndexKind::Range(_) => i.to_string(),
         IndexKind::Int64(v) => v[i].to_string(),
-        IndexKind::Datetime(v, tz) => datetime::format_ns_tz(v[i], *tz),
+        IndexKind::Datetime(v, tz) => datetime::format_ns_offset(v[i], *tz),
         IndexKind::Str(v) => v[i].clone(),
     }
 }
