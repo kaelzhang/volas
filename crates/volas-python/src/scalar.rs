@@ -73,6 +73,14 @@ fn delta_ns(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
 ///     tz (str, optional): the zone the value is given in, e.g.
 ///         ``'America/New_York'`` or ``'+08:00'`` (default UTC).
 ///
+/// Raises:
+///     ValueError: text that is not a datetime, or a wall clock ``tz`` skips (a
+///         DST gap) or repeats (a DST fold) — the message names which, and the zone
+///         (as pandas). The same text used as a row label is a missing label
+///         (``KeyError``, carrying that reason).
+///     TypeError: a value of no timestamp type.
+///     OverflowError: an instant outside the ``datetime64[ns]`` range.
+///
 /// Usage::
 ///
 ///     ts = volas.Timestamp('2021-01-04 09:30', tz='America/New_York')
