@@ -244,3 +244,10 @@ def test_a_projection_keeps_the_fine_bars_of_its_data_columns():
     q.append(frame([7], close=[6.0], **{"ma:2": [8.0]}))
     assert rows(q)[1] == [6.0, 8.0]
 
+
+def test_cumulate_does_not_carry_a_cached_column_as_data():
+    fine = frame([0, 1, 5, 6], close=[1.0, 3.0, 5.0, 7.0])
+    fine["ma:2"]
+    coarse = fine.cumulate("5m")
+    assert coarse.columns == ["close"]
+    assert coarse["ma:2"].to_list()[1] == 5.0 and np.isnan(coarse["ma:2"].to_list()[0])

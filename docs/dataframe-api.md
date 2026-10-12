@@ -427,6 +427,10 @@ Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
   the column's dtype does not support raises up front (see
   [Cumulation](cumulation.md)).
 
+Only the data columns are cumulated: a cached directive column of the caller (say
+`ma:20` over 1-minute closes) is not carried into the coarse frame — requested there,
+it is computed over the coarse bars.
+
 ```py
 # from 1-minute klines to 5-minute klines
 five_minute = one_minute.cumulate('5m')
