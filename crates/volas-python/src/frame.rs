@@ -9,7 +9,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use volas_core::{
-    binary_supertype, CmpOp, Column, DataFrame, DType, Index,
+    binary_supertype, CellWrite, CmpOp, Column, DataFrame, DType, Index,
     IndexKind, Series,
 };
 
@@ -83,15 +83,16 @@ impl Fresh<'_> {
 /// without the read gate — names, dtypes, the visible row range and labels.
 pub(crate) struct Meta<'a>(&'a PyDataFrame);
 
-impl Meta<'_> {
+impl<'a> Meta<'a> {
     /// The visible rows: `(start, len)` in the physical frame.
     pub(crate) fn range(&self) -> (usize, usize) {
         self.0.logical_range()
     }
 
-    /// The visible rows' labels.
-    pub(crate) fn labels(&self) -> std::borrow::Cow<'_, Index> {
-        self.0.logical_index()
+    /// The visible rows' labels, where they lie in the frame's index.
+    pub(crate) fn labels(&self) -> Labels<'a> {
+        let (start, len) = self.range();
+        Labels::of(self.0.inner.index(), start..start + len)
     }
 }
 
@@ -245,17 +246,6 @@ impl PyDataFrame {
         }
     }
 
-    /// The logical M view's index (the last `window` labels), as a borrow when
-    /// unbounded and an owned slice when windowed — labels, no values (see [`Meta`]).
-    fn logical_index(&self) -> std::borrow::Cow<'_, Index> {
-        match &self.window {
-            Some(_) => {
-                let (start, len) = self.logical_range();
-                std::borrow::Cow::Owned(self.inner.index().slice(start, start + len))
-            }
-            None => std::borrow::Cow::Borrowed(self.inner.index()),
-        }
-    }
     /// Present a full-length column as a Series sliced to the logical M view (with
     /// the matching sliced index) — identity (a plain `wrap_series`) when unbounded.
     /// Backs windowed `df[name]` so a column read never exposes the hidden margin.
@@ -507,31 +497,30 @@ impl PyDataFrame {
 
     /// THE cell write path — every positional, label and mask write (`iloc` / `loc` /
     /// `iat` / `at` assignment, `df[mask] = v`): each `(column, visible rows, values)`
-    /// write lands in place (copy-on-write), the values already of the column's dtype
-    /// (or one value, broadcast). A stale frame accepts no write — the rule of the read
-    /// gate, decided here once. Writing in place keeps every cached column's identity: a
-    /// written cached column becomes plain data, every other one goes stale
-    /// (`DataFrame::assign_positions`). A write selecting no row changes nothing.
+    /// write lands in place, the values of the column's dtype (or one value,
+    /// broadcast). A stale frame accepts no write — the rule of the read gate, decided
+    /// here once. All or nothing: the whole batch is checked before the first write
+    /// ([`DataFrame::check_writes`]), then lands in O(cells written)
+    /// ([`DataFrame::write_cells`]: a written cached column becomes plain data, every
+    /// other one goes stale). A write selecting no row changes nothing.
     ///
     /// On a time-frame frame the writes go through its one write entry
-    /// ([`TfState::write`]): all or nothing, and the open period follows the forming
-    /// cells they leave — or the writes are refused, the frame unchanged.
+    /// ([`TfState::write`]): the open period follows the forming cells they leave — or
+    /// the writes are refused, the frame unchanged.
     pub(crate) fn write_cells(&mut self, writes: Vec<(usize, Vec<usize>, Column)>) -> PyResult<()> {
         self.require_fresh()?;
         let start = self.logical_range().0;
-        let apply = |inner: &mut DataFrame| -> PyResult<()> {
-            for (col, rows, values) in writes {
-                if rows.is_empty() {
-                    continue;
-                }
-                let phys: Vec<usize> = rows.into_iter().map(|r| r + start).collect();
-                inner.assign_positions(col, &phys, &values).map_err(pyerr)?;
-            }
-            Ok(())
-        };
+        let writes = writes
+            .into_iter()
+            .map(|(col, rows, values)| CellWrite { col, rows: rows.into_iter().map(|r| r + start).collect(), values })
+            .collect();
+        let writes = self.inner.check_writes(writes).map_err(pyerr)?;
         match self.tf.as_mut() {
-            Some(tfs) => tfs.write(&mut self.inner, apply),
-            None => apply(&mut self.inner),
+            Some(tfs) => tfs.write(TfWrite::Cells(writes)),
+            None => {
+                writes.land();
+                Ok(())
+            }
         }
     }
 
@@ -589,7 +578,7 @@ impl PyDataFrame {
             }
             cview.select(self.inner.names()).map_err(pyerr)?
         };
-        self.logical_index().require_aligned(cond_df.index()).map_err(pyerr)?;
+        self.meta().labels().index().require_aligned(cond_df.index()).map_err(pyerr)?;
         if let Some(cc) = cond_df.columns().iter().find(|c| !matches!(c, Column::Bool(..))) {
             return Err(PyTypeError::new_err(format!(
                 "df[mask] = v: `mask` must be a boolean frame, got a {} column",
