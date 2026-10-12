@@ -10,7 +10,7 @@ the listing.
 ```py
 # --- DataFrame: metadata --------------------------------------------------
 df.columns / df.shape / len(df) / df.dtypes      # dtypes -> dict
-df.index                          # row labels, as a NumPy array
+df.index                          # row labels, as a NumPy array (aware Timestamps on a tz-aware index)
 col in df ; for col in df         # membership / iterate column names
 df.tz / df.tz_localize(tz) / df.tz_convert(tz)   # DatetimeIndex tz; see Timezones
 
@@ -25,6 +25,7 @@ df.head(n=5) / df.tail(n=5)
 df.drop([label, ...], axis=0)     # drop rows by label (axis=1 -> columns)
 df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
 df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)  # astype: data columns only
+df[[]]                                  # no columns over the same rows (pandas)
 df.astype({col: 'datetime64[s]'})  # numeric epoch -> datetime (unit s|ms|us|ns; truncating)
 df.copy() / df.equals(other) / df.to_csv(path=None, ...)   # to_numpy: see its own section (dtype, na_value)
 
@@ -128,7 +129,7 @@ df.loc[label]       # a Row by index label
 df.loc[lo:hi]       # inclusive label slice (lexicographic for string indexes)
 df.at[label, col]   # a scalar by label + column
 df.iat[i, j]        # a scalar by position
-df.index            # the row labels, as a NumPy array
+df.index            # the row labels, as a NumPy array (aware Timestamps on a tz-aware index)
 ```
 
 String (symbol) index — `set_index` on a string column, then look up by symbol:
@@ -210,7 +211,7 @@ no row changes nothing.
 
 ```py
 df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)
-df.iat[3, 0] = 99.0                     # one cell by position
+df.iat[3, 0] = 99.0                     # one cell by position (one value: an array raises)
 df.at[label, 'close'] = 99.0            # one cell by label + column
 df.iloc[10:20, 0] = 0.0                 # a column slice
 df.loc[df['close'] > df['open'], 'signal'] = 1.0   # masked column assignment

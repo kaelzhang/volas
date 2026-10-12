@@ -324,8 +324,11 @@ It is **strict**: every data column must be provided (a missing one raises — u
 `DataFrame` / `Row`, where a missing column is NA-padded), and an unknown key raises. The
 timestamp is read in its own zone: an aware `Timestamp` / `datetime` / offset string is
 an instant, a naive one a wall clock — judged against the frame's index like any other
-row (a naive bar onto a tz-aware frame raises), an epoch-ns integer taken in the frame's
-zone. A positional (`RangeIndex`) frame continues its labels, a bounded window's too.
+row (a naive bar onto a tz-aware frame raises), a raw epoch-ns count — an integer or a
+NumPy `datetime64`, the form instants are exported in — read in the frame's zone. A label
+read back from the frame (`df.index[-1]`, an aware `Timestamp` on a tz-aware frame) is
+the same label, so it replaces that row. Each value is one cell: an array (even of one
+element) raises. A positional (`RangeIndex`) frame continues its labels, a bounded window's too.
 Cached directive columns are not supplied — they are padded and refreshed automatically.
 
 Rows are keyed by their index label:
