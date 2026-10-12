@@ -262,12 +262,13 @@ pub fn adx_resume(
     }
     let n = high.len();
     let pf = period as f64;
+    let average = smoothing::Wilder::new(period);
     let mut s = [state[0], state[1], state[2]];
     let mut adx = state[3];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
         dm_tr_step(high, low, close, i, pf, &mut s);
-        adx = adx_next(adx, smoothing::Wilder::new(period), dx_val(s[0], s[1], s[2]));
+        adx = adx_next(adx, average, dx_val(s[0], s[1], s[2]));
         out.push(adx);
     }
     Some((out, vec![s[0], s[1], s[2], adx]))
@@ -315,6 +316,7 @@ pub fn adxr_resume(
     }
     let n = high.len();
     let pf = period as f64;
+    let average = smoothing::Wilder::new(period);
     let mut s = [state[0], state[1], state[2]];
     // `win` carries the last `period` ADX values, adx[from-period .. from-1] (oldest
     // first), so adx[from-1] (the newest) is `win[period-1]`.
@@ -323,7 +325,7 @@ pub fn adxr_resume(
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
         dm_tr_step(high, low, close, i, pf, &mut s);
-        adx = adx_next(adx, smoothing::Wilder::new(period), dx_val(s[0], s[1], s[2]));
+        adx = adx_next(adx, average, dx_val(s[0], s[1], s[2]));
         // Slide the window forward to include adx[i], then `win[0]` is adx[i-(period-1)].
         win.remove(0);
         win.push(adx);
@@ -425,9 +427,10 @@ pub fn adx_resume_one(
         return None;
     }
     let pf = period as f64;
+    let average = smoothing::Wilder::new(period);
     let mut s = [state[0], state[1], state[2]];
     dm_tr_step(high, low, close, row, pf, &mut s);
-    let adx = adx_next(state[3], smoothing::Wilder::new(period), dx_val(s[0], s[1], s[2]));
+    let adx = adx_next(state[3], average, dx_val(s[0], s[1], s[2]));
     next.copy_from_slice(&[s[0], s[1], s[2], adx]);
     Some(adx)
 }
@@ -454,10 +457,11 @@ pub fn adxr_resume_one(
         return None;
     }
     let pf = period as f64;
+    let average = smoothing::Wilder::new(period);
     let mut s = [state[0], state[1], state[2]];
     dm_tr_step(high, low, close, row, pf, &mut s);
     // newest carried adx = adx[row-1] = state[3 + period - 1]; fold to get adx[row].
-    let adx = adx_next(state[3 + period - 1], smoothing::Wilder::new(period), dx_val(s[0], s[1], s[2]));
+    let adx = adx_next(state[3 + period - 1], average, dx_val(s[0], s[1], s[2]));
     // Slide the window: next = [s, adx[row-(period-1)] .. adx[row]].
     next[..3].copy_from_slice(&s);
     next[3..3 + period - 1].copy_from_slice(&state[4..3 + period]);

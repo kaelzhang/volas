@@ -10,7 +10,12 @@
 // the last bit and an infinite movement poisons the sums into NaN exactly as TA-Lib's.
 // TA-Lib's zero guards (`TA_IS_ZERO`, |x| < 1e-14) hold too: ±DI is 0 on a ~0 TR sum;
 // DX keeps its previous value on a ~0 TR sum or a ~0 DI sum, and ADX leaves its average
-// untouched there.
+// untouched there. Every sum steps with Wilder's running sum ([`smoothing::wilder_sum`]);
+// ADX averages DX with Wilder's average ([`smoothing::Wilder`]) — TA-Lib's arithmetic,
+// owned there.
+
+use super::tr_at; // the one true-range term (missing when an input it reads is)
+use crate::raw::smoothing;
 
 /// One-period +DM / -DM at bar `i` (needs the prior bar). Per Wilder: the larger of
 /// the up-move (`high-prevHigh`) and down-move (`prevLow-low`) wins, the other is 0;
@@ -32,8 +37,6 @@ fn dm1(high: &[f64], low: &[f64], i: usize) -> (f64, f64) {
     (plus, minus)
 }
 
-use super::tr_at; // the one true-range term (missing when an input it reads is)
-
 /// The bar a Wilder sum over `period` seeds at: `period - 1`, but never bar 0 — the
 /// one-period term reads the prior bar, so bar 0 has none. Period 1 therefore seeds
 /// at bar 1 with that bar's own term (TA-Lib `PLUS_DM` / `MINUS_DM`: lookback 1, the
@@ -42,11 +45,6 @@ use super::tr_at; // the one true-range term (missing when an input it reads is)
 pub fn wilder_seed_bar(period: usize) -> Option<usize> {
     (period > 0).then(|| (period - 1).max(1))
 }
-
-// Every directional sum and its resumes step with Wilder's running sum
-// ([`smoothing::wilder_sum`]); ADX averages DX with Wilder's average
-// ([`smoothing::Wilder`]) — TA-Lib's arithmetic, owned there.
-use crate::raw::smoothing;
 
 /// Run `$body` with `$step` bound to [`smoothing::wilder_sum`] for `$period`, the choice made
 /// once: each arm is its own monomorphic fold, so a full computation's hot loop carries
@@ -215,11 +213,12 @@ fn adx_fold(
     mut row: impl FnMut(usize, [f64; 3], f64),
 ) {
     let (pf, first) = (period as f64, (2 * period).saturating_sub(1));
+    let average = smoothing::Wilder::new(period);
     let (mut sum, mut avg) = (0.0, 0.0);
     dm_tr_fold(high, low, close, period, |i, sp, sm, st| {
         let dx = dx_val(sp, sm, st);
         if i > first {
-            avg = adx_next(avg, smoothing::Wilder::new(period), dx);
+            avg = adx_next(avg, average, dx);
         } else {
             sum += dx.unwrap_or(0.0);
             if i < first {

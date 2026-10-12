@@ -1,4 +1,3 @@
-
 use super::av;
 use super::stochastic::{stoch_fastk, stochrsi_fastk};
 use crate::accum::{Accumulator, Csum};
