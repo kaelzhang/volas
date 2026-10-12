@@ -25,7 +25,7 @@ pub fn ema(close: &[f64], period: usize) -> Vec<f64> {
 
 /// Smoothed moving average (Wilder's RMA: SMA-seeded, `alpha = 1/period`).
 pub fn smma(close: &[f64], period: usize) -> Vec<f64> {
-    kernels::wilder(av(close), period).to_vec()
+    kernels::wilder(av(close), period).into_raw_vec_and_offset().0
 }
 
 // --- EMA-family state-carry (additive; the full-recompute fallback stays correct) ---
@@ -84,7 +84,7 @@ pub fn ema_resume_one(
 /// Final Wilder/SMMA state `[rma]` after a full [`smma`] compute, or `None` if `data`
 /// never seeded.
 pub fn smma_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
-    Some(vec![kernels::sma_seeded_last(data, period, kernels::wilder_step(period))?])
+    Some(vec![kernels::wilder_last(data, period)?])
 }
 
 /// Resume [`smma`] from `state = [rma_{from-1}]` over rows `[from, n)`. Reads only

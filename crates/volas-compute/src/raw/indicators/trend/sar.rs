@@ -95,6 +95,20 @@ fn sar_seed(high: &[f64], low: &[f64], af_init: f64) -> [f64; 6] {
     [is_long as u8 as f64, af_init, ep, sar, high[1], low[1]]
 }
 
+/// Limit a stop to the prior and current bar's range, in TA-Lib's comparison order.
+/// A computed NaN stop stays NaN; `f64::min` / `max` would replace it with a price.
+/// Shared by SAR and SAREXT, for reversals and ordinary steps alike.
+#[inline]
+fn sar_limit(mut stop: f64, previous: f64, current: f64, long: bool) -> f64 {
+    if if long { stop > previous } else { stop < previous } {
+        stop = previous;
+    }
+    if if long { stop > current } else { stop < current } {
+        stop = current;
+    }
+    stop
+}
+
 /// One SAR bar — the full computation, [`sar_final_state`], [`sar_resume`] and
 /// [`sar_resume_one`] all advance by it, so they cannot drift:
 /// advances `st = [is_long, af, ep, sar, prev_high, prev_low]` over the bar
@@ -107,33 +121,33 @@ fn sar_step(st: &mut [f64; 6], new_high: f64, new_low: f64, af_init: f64, maximu
     if is_long {
         if new_low <= sar {
             is_long = false;
-            sar = ep.max(prev_high).max(new_high);
+            sar = sar_limit(ep, prev_high, new_high, false);
             out = sar;
             af = af_init;
             ep = new_low;
-            sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
+            sar = sar_limit(sar + af * (ep - sar), prev_high, new_high, false);
         } else {
             out = sar;
             if new_high > ep {
                 ep = new_high;
                 af = (af + af_init).min(maximum);
             }
-            sar = (sar + af * (ep - sar)).min(prev_low).min(new_low);
+            sar = sar_limit(sar + af * (ep - sar), prev_low, new_low, true);
         }
     } else if new_high >= sar {
         is_long = true;
-        sar = ep.min(prev_low).min(new_low);
+        sar = sar_limit(ep, prev_low, new_low, true);
         out = sar;
         af = af_init;
         ep = new_high;
-        sar = (sar + af * (ep - sar)).min(prev_low).min(new_low);
+        sar = sar_limit(sar + af * (ep - sar), prev_low, new_low, true);
     } else {
         out = sar;
         if new_low < ep {
             ep = new_low;
             af = (af + af_init).min(maximum);
         }
-        sar = (sar + af * (ep - sar)).max(prev_high).max(new_high);
+        sar = sar_limit(sar + af * (ep - sar), prev_high, new_high, false);
     }
     *st = [is_long as u8 as f64, af, ep, sar, new_high, new_low];
     out
@@ -307,39 +321,39 @@ fn sarext_step(st: &mut [f64; 7], new_high: f64, new_low: f64, p: &SarextParams)
     if is_long {
         if new_low <= sar {
             is_long = false;
-            sar = ep.max(prev_high).max(new_high);
+            sar = sar_limit(ep, prev_high, new_high, false);
             if p.offset_on_reverse != 0.0 {
                 sar += sar * p.offset_on_reverse;
             }
             out = -sar;
             af_short = p.af_short_init;
             ep = new_low;
-            sar = (sar + af_short * (ep - sar)).max(prev_high).max(new_high);
+            sar = sar_limit(sar + af_short * (ep - sar), prev_high, new_high, false);
         } else {
             out = sar;
             if new_high > ep {
                 ep = new_high;
                 af_long = (af_long + p.accel_long).min(p.accel_max_long);
             }
-            sar = (sar + af_long * (ep - sar)).min(prev_low).min(new_low);
+            sar = sar_limit(sar + af_long * (ep - sar), prev_low, new_low, true);
         }
     } else if new_high >= sar {
         is_long = true;
-        sar = ep.min(prev_low).min(new_low);
+        sar = sar_limit(ep, prev_low, new_low, true);
         if p.offset_on_reverse != 0.0 {
             sar -= sar * p.offset_on_reverse;
         }
         out = sar;
         af_long = p.af_long_init;
         ep = new_high;
-        sar = (sar + af_long * (ep - sar)).min(prev_low).min(new_low);
+        sar = sar_limit(sar + af_long * (ep - sar), prev_low, new_low, true);
     } else {
         out = -sar;
         if new_low < ep {
             ep = new_low;
             af_short = (af_short + p.accel_short).min(p.accel_max_short);
         }
-        sar = (sar + af_short * (ep - sar)).max(prev_high).max(new_high);
+        sar = sar_limit(sar + af_short * (ep - sar), prev_high, new_high, false);
     }
     *st = [is_long as u8 as f64, af_long, af_short, ep, sar, new_high, new_low];
     out
