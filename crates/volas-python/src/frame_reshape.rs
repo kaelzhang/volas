@@ -268,7 +268,7 @@ impl PyDataFrame {
             tf: Some(TfState {
                 time_frame: target,
                 cumulators: spec,
-                open: cum.open_clone(),
+                open: cum.open_period().map(|o| o.bars().clone()),
                 open_key: None,
                 fold_plan: None,
                 refold_plan: None,
