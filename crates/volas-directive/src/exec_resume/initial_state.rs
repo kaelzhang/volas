@@ -302,15 +302,17 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
         ),
 
         // Index family — carry the incremental tracker's final running extreme
-        // `[idx_abs, value]`. Captured at first compute, where `origin == 0`, so the
-        // stored index is original-absolute (stable across a later slice).
+        // `[idx_abs, value]`, its index absolute (the frame's origin added), so stable
+        // across a later slice.
         ("maxindex", _) | ("minmaxindex", Some("max")) => ind::maxindex_final_state(
             &ops.f64(0, "close").ok()?,
             arg_usize(args, 0),
+            ops.origin(),
         ),
         ("minindex", _) | ("minmaxindex", Some("min")) => ind::minindex_final_state(
             &ops.f64(0, "close").ok()?,
             arg_usize(args, 0),
+            ops.origin(),
         ),
 
         // StochRSI — carry the RSI Wilder pair + the recent RSI tail feeding the windows.

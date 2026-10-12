@@ -72,7 +72,9 @@ output is bit-identical to clean data's. TA-Lib's plain running sums give `[nan,
 1, 2, 3, 4]` for the example above (every window after the spike stays wrong) and drift
 over a long history; volas follows the exact values instead, so on such data the two
 differ. A row's absolute position is kept by a contiguous slice and by a bounded
-(`window=`) frame dropping its head, so they compute exactly what the full series does.
+(`window=`) frame dropping its head, so they compute exactly what the full series does —
+the position indicators (`maxindex`, `minindex`, `minmaxindex`) included: they report
+the series' own positions, on a slice as on the full frame.
 
 ## Volas-exclusive indicators
 

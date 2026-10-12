@@ -41,14 +41,6 @@ pub struct ComputedMeta {
     /// A spare buffer the one-row resume writes the next state into, recycled between
     /// the two states so a live column steps with no allocation.
     scratch: Vec<f64>,
-    /// The original-frame row that THIS (possibly sliced) frame's row 0 maps to.
-    /// `0` for a freshly-computed column; a contiguous slice from `start` bumps it
-    /// by `start`. It lets an absolute-position indicator (the index family —
-    /// maxindex/minindex/minmaxindex) keep emitting ABSOLUTE positions after a
-    /// head-dropping slice: a sub-frame position `p` is original row `p + origin`,
-    /// matching the verbatim-carried (original-absolute) head. Recursive *value*
-    /// indicators ignore it (their state is offset-free).
-    pub origin: usize,
 }
 
 /// A 2-D, column-oriented, time-indexed table. All columns share one index and
@@ -77,7 +69,8 @@ pub struct DataFrame {
     /// that selects rows otherwise (`take`, a mask) starts a new series at `0`.
     /// Sliding-window computations re-anchor their running sums at absolute positions
     /// (see `volas_compute`), so a value depends only on the rows near it, the same in
-    /// the frame and in the full series.
+    /// the frame and in the full series; the index family (maxindex / minindex /
+    /// minmaxindex) emits absolute positions.
     origin: usize,
 }
 
@@ -462,10 +455,6 @@ impl DataFrame {
                         state: carried,
                         state_before_last: carried_before,
                         scratch: Vec::new(),
-                        // This sub-frame's row 0 is the parent's row `start`, so its
-                        // origin shifts by `start` (an absolute-index resume adds it
-                        // back to stay original-absolute, matching the carried head).
-                        origin: meta.origin + start,
                     },
                 );
             }

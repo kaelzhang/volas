@@ -22,7 +22,6 @@ impl DataFrame {
                 state: None,
                 state_before_last: None,
                 scratch: Vec::new(),
-                origin: 0,
             },
         );
         #[cfg(debug_assertions)]
@@ -52,7 +51,7 @@ impl DataFrame {
     }
 
     /// Resume a cached column by ONE row — the row after its last valid one: `step` gets
-    /// this frame, the carried state (as of the last valid row), the column's origin and
+    /// this frame, the carried state (as of the last valid row), the frame's origin and
     /// a buffer of the state's length, and returns the new row's value having written the
     /// state as of that row into the buffer. On `Some`, the states advance (the old state
     /// becomes [`ComputedMeta::state_before_last`]); on `None` they are untouched. The
@@ -63,12 +62,12 @@ impl DataFrame {
         name: &str,
         step: impl FnOnce(&DataFrame, &[f64], usize, &mut [f64]) -> Option<f64>,
     ) -> Option<f64> {
+        let origin = self.origin;
         let meta = self.computed.get_mut(name)?;
         let prev = meta.state.take()?;
         let mut next = std::mem::take(&mut meta.scratch);
         next.clear();
         next.resize(prev.len(), 0.0);
-        let origin = meta.origin;
         let out = step(self, &prev, origin, &mut next);
         let meta = self.computed.get_mut(name)?;
         if out.is_some() {
@@ -96,14 +95,14 @@ impl DataFrame {
         self.computed.values().any(|m| m.valid_rows < self.height)
     }
 
-    /// Borrow a cached column's carried resume state and its origin offset — the
+    /// Borrow a cached column's carried resume state and the frame's origin — the
     /// `(&[f64], usize)` the resume kernels read — **without cloning** the state
     /// `Vec`. Lets the live refresh / rollover-finalize loops continue the recursion
     /// straight off the stored state instead of snapshotting a per-column copy.
     /// `None` if `name` is untracked or carries no state.
     pub fn computed_resume_state(&self, name: &str) -> Option<(&[f64], usize)> {
         let meta = self.computed.get(name)?;
-        Some((meta.state.as_deref()?, meta.origin))
+        Some((meta.state.as_deref()?, self.origin))
     }
 
     /// Snapshot of the materialized-directive columns (`name`, meta).

@@ -131,3 +131,18 @@ def test_a_slice_keeps_its_rows_absolute_positions(key):
     part = np.asarray(sub.exec(directive), dtype=float)
     skip = _settled(directive, 0)
     _bits(part[skip:], full[123 + skip:], directive)
+
+
+@pytest.mark.parametrize("directive", ["minindex:5", "maxindex:5", "minmaxindex.max:5", "close + minindex:3"])
+def test_positions_are_the_series_own_on_a_slice_and_a_bounded_frame(directive):
+    """The index family emits absolute positions: computed fresh on a slice, carried
+    across one, or refreshed on a bounded frame after its head was dropped."""
+    df = DataFrame(WIDE)
+    full = np.asarray(df.exec(directive), dtype=float)
+    _bits(np.asarray(df.iloc[300:].exec(directive), dtype=float)[5:], full[305:], f"{directive} fresh")
+    live = DataFrame({k: v[:40] for k, v in WIDE.items()}, window=30, max_lookback=[directive])
+    live[directive]
+    for i in range(40, 200):
+        live.append(DataFrame({k: v[i:i + 1] for k, v in WIDE.items()}))
+        live.fulfill()
+    _bits(live[directive], full[170:200], f"{directive} bounded")

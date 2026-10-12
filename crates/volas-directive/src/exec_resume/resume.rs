@@ -16,10 +16,9 @@ use super::as_command;
 /// a fresh full recompute, so writing them into the stale tail keeps the cached
 /// column exact.
 ///
-/// `origin` is the original-frame row this (possibly sliced) frame's row 0 maps to
-/// (`ComputedMeta::origin`). Recursive *value* indicators ignore it; the
-/// absolute-position index family adds it back so emitted positions stay
-/// original-absolute across a head-dropping slice.
+/// `origin` is the absolute position of the frame's row 0 (`DataFrame::origin`).
+/// Recursive *value* indicators ignore it; the absolute-position index family adds it,
+/// so emitted positions are the series' own on every path.
 pub fn execute_resume(
     df: &DataFrame,
     node: &Ast,

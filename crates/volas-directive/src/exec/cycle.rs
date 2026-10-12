@@ -160,17 +160,17 @@ pub(super) fn dispatch(
         }
 
         ("sum", _) => f64col(ind::sum(&close(0)?, arg_usize(args, 0), ops.origin())),
-        ("maxindex", _) => f64col(ind::maxindex(&close(0)?, arg_usize(args, 0))),
-        ("minindex", _) => f64col(ind::minindex(&close(0)?, arg_usize(args, 0))),
+        ("maxindex", _) => f64col(ind::maxindex(&close(0)?, arg_usize(args, 0), ops.origin())),
+        ("minindex", _) => f64col(ind::minindex(&close(0)?, arg_usize(args, 0), ops.origin())),
         // minmax / minmaxindex are the (min, max) value / index pair over the window;
         // their outputs are exactly llv/hhv (values) and minindex/maxindex (indices).
         ("minmax", Some("min")) => f64col(ind::llv(&close(0)?, arg_usize(args, 0))),
         ("minmax", Some("max")) => f64col(ind::hhv(&close(0)?, arg_usize(args, 0))),
         ("minmaxindex", Some("min")) => {
-            f64col(ind::minindex(&close(0)?, arg_usize(args, 0)))
+            f64col(ind::minindex(&close(0)?, arg_usize(args, 0), ops.origin()))
         }
         ("minmaxindex", Some("max")) => {
-            f64col(ind::maxindex(&close(0)?, arg_usize(args, 0)))
+            f64col(ind::maxindex(&close(0)?, arg_usize(args, 0), ops.origin()))
         }
         ("natr", _) => {
             let high = ops.f64(0, "high")?;
