@@ -39,9 +39,19 @@ fn combine_i64(op: CombineOp, acc: i64, x: i64) -> Option<i64> {
 }
 
 /// An integer fold's value in `dtype`'s range, or its overflow error.
+#[inline]
 fn fold_in_range<T: TryFrom<i64>>(v: Option<i64>, dtype: DType) -> Result<T> {
-    v.and_then(|v| T::try_from(v).ok())
-        .ok_or_else(|| crate::numeric::overflow(dtype, "a time-frame fold"))
+    match v.and_then(|v| T::try_from(v).ok()) {
+        Some(v) => Ok(v),
+        None => Err(fold_overflow(dtype)),
+    }
+}
+
+/// The overflow error of an integer fold — off the per-bar hot path.
+#[cold]
+#[inline(never)]
+fn fold_overflow(dtype: DType) -> VolasError {
+    crate::numeric::overflow(dtype, "a time-frame fold")
 }
 
 impl Column {
