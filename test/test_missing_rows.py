@@ -351,3 +351,60 @@ def test_constructed_tf_frame_rolls_over_a_missing_closed_bar(directive):
         live.fulfill()
         ref, _ = _fold_ref(live)
         _live_matches(live[directive], ref[directive], f"{directive} i={i}")
+
+
+# --- an input that cannot be read is an error, never a rerun without it ------------------
+
+BIG = 2**53 + 1  # an int64 with no exact float64: reading it as an indicator input raises
+# Every command reading two or more columns, each of its inputs in turn unreadable.
+_UNREADABLE = sorted((d, bad) for d, inputs in CASES.items() for bad in inputs if len(set(inputs)) > 1)
+
+
+def _with_unreadable(bad, missing=(), big=()):
+    """`BASE` with `bad` an int64 column holding `BIG` at the rows `big`, and every
+    other column NaN at the rows `missing`."""
+    data = {k: v.copy() for k, v in BASE.items()}
+    for col in data:
+        if col != bad:
+            data[col][list(missing)] = np.nan
+    data[bad] = np.round(data[bad] * 100).astype("int64")
+    data[bad][list(big)] = BIG
+    return data
+
+
+def _error(fn):
+    with pytest.raises(Exception) as info:  # noqa: PT011 - the error is compared, not judged
+        fn()
+    return info.type, str(info.value)
+
+
+@pytest.mark.parametrize("directive,bad", _UNREADABLE)
+def test_an_unreadable_input_beside_missing_rows_is_the_same_error(directive, bad):
+    """Other inputs missing rows change nothing: the command raises the error it raises
+    on complete rows — whether their NaN facts are still unknown (the in-place run) or
+    already known (the record-completing probe)."""
+    want = _error(lambda: DataFrame(_with_unreadable(bad, big=[7])).exec(directive))
+    assert want[0] is OverflowError, want
+    for missing in ([0], [100], [N - 1]):
+        df = DataFrame(_with_unreadable(bad, missing, big=[7]))
+        assert _error(lambda: df.exec(directive)) == want, missing
+        assert _error(lambda: df.exec(directive)) == want, f"{missing}, NaN facts known"
+
+
+@pytest.mark.parametrize("bars", [1, 3])
+@pytest.mark.parametrize("directive,bad", [(d, b) for d, b in _UNREADABLE if d in _LIVE])
+def test_a_refresh_over_an_unreadable_new_row_is_the_same_error(directive, bad, bars):
+    """A cached column refreshed over appended rows (the single-row step, the `Vec`
+    resume, the full recompute it falls back to) raises the full compute's error."""
+    seed = 200
+    data = _with_unreadable(bad, missing=[100, seed + 1], big=[seed])
+    live = _plain_frame(data, slice(0, seed))
+    live[directive]
+    want = _error(lambda: _plain_frame(data, slice(0, seed + bars)).exec(directive))
+    assert want[0] is OverflowError, want
+
+    def refresh():
+        live.append(_plain_frame(data, slice(seed, seed + bars)))
+        live[directive]
+
+    assert _error(refresh) == want

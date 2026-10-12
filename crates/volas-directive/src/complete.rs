@@ -7,7 +7,9 @@
 //! read: when every column read is known complete (the column's own remembered fact,
 //! `Column::has_nan`) that result stands with no scan at all; otherwise the record says
 //! which rows are complete, and the arm runs again over just those rows of the same
-//! inputs, its outputs scattered back. The arms and kernels are unchanged.
+//! inputs, its outputs scattered back. The arms and kernels are unchanged. A read that
+//! failed leaves the record without that input, so the arm's own result — the error —
+//! stands and nothing reruns (see [`Operands::failed`]).
 
 use std::borrow::Cow;
 
@@ -100,7 +102,6 @@ fn on_complete_rows<T>(
 ) -> T {
     let ops = Operands::stopping(df, series);
     let first = run(&ops);
-    // an input that cannot be read is the arm's own error, never a rerun
     if ops.failed() || (!ops.missing() && ops.clean()) {
         return first;
     }
@@ -110,7 +111,7 @@ fn on_complete_rows<T>(
         ops.probe();
         let probed = run(&ops);
         if ops.failed() {
-            return probed; // likewise for an input the probe could not read
+            return probed;
         }
     }
     let recorded = recorded(&ops, true);
