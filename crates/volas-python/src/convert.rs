@@ -795,3 +795,25 @@ pub(crate) fn norm_idx(i: isize, len: usize) -> PyResult<usize> {
         Ok(i as usize)
     }
 }
+
+/// A `round` place count: any Python `int`, as Python's `round` takes one. Past ±400
+/// places every float result has saturated (the value itself, or a signed 0), so a count
+/// beyond `i32` is clamped to it; a non-integer is a `TypeError`.
+#[derive(Clone, Copy)]
+pub(crate) struct DecimalPlaces(pub(crate) i32);
+
+impl<'py> FromPyObject<'py> for DecimalPlaces {
+    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
+        if !ob.is_instance_of::<pyo3::types::PyInt>() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "decimals must be an integer, got {}",
+                ob.get_type().name()?
+            )));
+        }
+        Ok(DecimalPlaces(match ob.extract::<i64>() {
+            Ok(k) => k.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            Err(_) if ob.gt(0)? => i32::MAX,
+            Err(_) => i32::MIN,
+        }))
+    }
+}

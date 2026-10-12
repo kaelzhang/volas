@@ -38,6 +38,24 @@ benchmark-only dependencies are installed.
   `.[dev,benchmark]`; a library that is only needed to benchmark, never
   to test, belongs here so CI test runs stay lean.
 
+### Timezone data
+
+Named zones read the tzdb release that `chrono-tz` bundles. Its compiled tables hold
+explicit transitions through 2099; from 2100 a zone follows its TZif footer rule (a
+POSIX TZ string, as Python's `zoneinfo` does), which
+`crates/volas-core/src/tz/footers.rs` records for every zone. After upgrading
+`chrono-tz`, regenerate that file from the new release (needs `zic`):
+
+```sh
+python scripts/gen_tz_footers.py
+```
+
+The file's header records the tzdb release and the `zic` that compiled it (the current
+file: tzdb 2025b, `zic (tzcode) 2022g`, the one macOS ships). Any `zic` that compiles the
+release will do: the `footers_*` tests in `volas-core` check that the file comes from the
+bundled release and that each footer continues the table exactly, so they fail until the
+file is regenerated after an upgrade.
+
 ### Releasing
 
 Two artifacts ship from one version: the Python wheels (PyPI) and the Rust
