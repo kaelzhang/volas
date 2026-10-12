@@ -127,10 +127,12 @@ it, the departure is deliberate and listed here.
   build that does not fuse (the x86-64 wheels). A build that fuses (clang on arm64) agrees
   to rounding; on flat or step input, where the dominant-cycle phase is rounding noise,
   its phase may differ — between TA-Lib builds and platforms as well.
-- **±DM after an infinite move (period ≥ 2).** volas's Wilder sum folds
-  `s·(1 − 1/period) + term`, TA-Lib `s − s/period + term`: once an infinite movement has
-  entered, volas's sum stays infinite and TA-Lib's turns NaN — both lose the line. Tracked
-  to align with TA-Lib's order.
+- **The ADX average** (`adx`, `adxr`) follows TA-Lib's C source
+  `((adx·(p − 1)) + dx) / p` in plain arithmetic, like the Hilbert transform: bit-identical
+  to a TA-Lib build that does not fuse, within rounding of one that does. The rest of the
+  directional family — the Wilder sums `s − s/p + term` of ±DM and the true range, ±DI
+  and DX — has no multiply-add to fuse and is bit-identical to every TA-Lib build,
+  including after an infinite movement, which turns every later sum into NaN.
 
 Where TA-Lib's arguments are out of order, volas follows it: a `slow` period shorter
 than `fast` swaps the two averages in `macd`, `apo`, `ppo` and `macdext`.
