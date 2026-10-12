@@ -228,7 +228,6 @@ def test_a_nan_input_leaves_a_candle_pattern_after_its_lookback(pattern):
     assert _same(full, after)
 
 
-@_xfail('H8 comoment-cancellation', 'correl:2 of two points leaves [-1, 1]')
 def test_correl_stays_within_unit_range():
     cols = _walk(200, seed=7)
     values = np.asarray(_frame(cols, 0, 200)['correl:2@close,open'])

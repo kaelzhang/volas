@@ -77,9 +77,9 @@ pub fn coppock_state(
     w: usize,
     roc_long: usize,
     roc_short: usize,
-    origin: usize,
+    _origin: usize,
 ) -> Option<Vec<f64>> {
-    state_after(wma_initial(origin), close.len(), |row, prev, next| {
+    state_after(wma_initial(), close.len(), |row, prev, next| {
         coppock_step(close, w, roc_long, roc_short, row, prev, next)
     })
 }
@@ -175,7 +175,7 @@ pub fn dkx_state(
     ma: Option<usize>,
     origin: usize,
 ) -> Option<Vec<f64>> {
-    let mut init = wma_initial(origin);
+    let mut init = wma_initial();
     if let Some(m) = ma {
         init.extend(FiniteMa::new(m, 0)?.chained_initial(origin));
     }

@@ -16,19 +16,19 @@ pub fn boll(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
 /// Bollinger upper band (`ma + times * std`, population std).
 pub fn boll_upper(close: &[f64], period: usize, times: f64, origin: usize) -> Vec<f64> {
     let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    (&ma + times * &std).to_vec()
+    ma.iter().zip(&std).map(|(m, s)| m + times * s).collect()
 }
 
 /// Bollinger lower band (`ma - times * std`, population std).
 pub fn boll_lower(close: &[f64], period: usize, times: f64, origin: usize) -> Vec<f64> {
     let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    (&ma - times * &std).to_vec()
+    ma.iter().zip(&std).map(|(m, s)| m - times * s).collect()
 }
 
 /// Bollinger Band Width (`4 * std / ma`).
 pub fn bbw(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    (4.0 * &std / &ma).to_vec()
+    ma.iter().zip(&std).map(|(m, s)| 4.0 * s / m).collect()
 }
 
 /// Historical Volatility: the sample (ddof = 1) standard deviation of the one-bar log
@@ -126,7 +126,7 @@ pub fn boll_band_step(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if period == 0 || row >= close.len() || next.len() != Slide::<2>::STATE {
+    if period == 0 || row >= close.len() || next.len() != kernels::MEAN_STD_STATE {
         return None;
     }
     let mut slide = Slide::<2>::from_state(state)?;
@@ -148,7 +148,8 @@ fn log_return(close: &[f64], i: usize) -> f64 {
     }
 }
 
-/// [`hv`]'s state after the rows of `close`: the deviation's [`Slide`] of `[Σr, Σr²]`.
+/// [`hv`]'s state after the rows of `close`: the deviation's [`Slide`] of `[Σr, Σr²]`
+/// (shifted, see [`kernels::mean_std_row`]).
 pub fn hv_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
     state_after(Slide::<2>::initial(origin), close.len(), |row, prev, next| {
         hv_step(close, period, 1.0, row, prev, next)
@@ -164,7 +165,7 @@ pub fn hv_step(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if period <= 1 || row >= close.len() || next.len() != Slide::<2>::STATE {
+    if period <= 1 || row >= close.len() || next.len() != kernels::MEAN_STD_STATE {
         return None;
     }
     let mut slide = Slide::<2>::from_state(state)?;
