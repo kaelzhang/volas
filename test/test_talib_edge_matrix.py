@@ -54,6 +54,7 @@ def _datasets():
     missing['close'][50] = missing['high'][120] = missing['low'][121] = missing['volume'][130] = np.nan
     infinite = {k: v.copy() for k, v in b.items()}
     infinite['high'][60], infinite['low'][61], infinite['volume'][70] = np.inf, -np.inf, np.inf
+    infinite['close'][150], infinite['close'][180] = np.inf, -np.inf
     return {
         'constant': {**flat, 'volume': np.full(N, 1e3)},
         'step': {'open': step_c, 'high': step_c + 0.5, 'low': step_c - 0.5, 'close': step_c,
