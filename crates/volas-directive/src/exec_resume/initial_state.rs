@@ -6,29 +6,33 @@ use crate::operands::Operands;
 use crate::spec::Resume;
 use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
-use volas_core::{Column, DataFrame};
+use volas_core::DataFrame;
 
 use super::{as_command, recursive, resume_of};
 
-/// The final carried state after a full compute of `node` against `df`, matching
-/// the just-computed `computed` column. `None` when `node` has no resume (its spec's
+/// The carried state of `node` as of `df`'s row `end - 1` (`end` at most the frame's
+/// height): what a full computation over the rows `[0, end)` ends with, read in place
+/// (no copy of the frame). `None` when `node` has no resume (its spec's
 /// [`Resume::Recompute`], or a composite expression): the caller then recomputes.
-/// `computed` is accepted for kernels that could read their state off the output
-/// column; every kernel recomputes its (small) state from the raw inputs, bit-exact
-/// with the full kernel.
 ///
 /// A recursive command's state is captured over the complete rows of its inputs, so it
-/// describes the last complete row (see `crate::complete`).
-pub fn initial_state(df: &DataFrame, node: &Ast, _computed: &Column) -> Option<Vec<f64>> {
+/// describes the last complete row (see `crate::complete`). A finite-window command's
+/// running sums are stepped from row 0, so the state is the one a continuation of the
+/// whole history carries, representation and all.
+pub fn initial_state(df: &DataFrame, node: &Ast, end: usize) -> Option<Vec<f64>> {
+    if super::chain::chained(node) {
+        return super::chain::capture(df, node, end);
+    }
     let cmd = as_command(node)?;
     if resume_of(&cmd) == Resume::Recompute {
         return None;
     }
+    let end = end.min(df.height());
     let (name, sub, args) = (cmd.name.as_str(), cmd.sub.as_deref(), &cmd.args.values[..]);
     if recursive(&cmd) {
-        return crate::complete::state(df, &cmd.series, |ops| state_of(ops, name, sub, args));
+        return crate::complete::state(df, &cmd.series, end, |ops| state_of(ops, name, sub, args));
     }
-    let ops = Operands::new(df, &cmd.series);
+    let ops = Operands::rows(df, &cmd.series, 0, end);
     super::window::state(&ops, name, sub, args).or_else(|| state_of(&ops, name, sub, args))
 }
 

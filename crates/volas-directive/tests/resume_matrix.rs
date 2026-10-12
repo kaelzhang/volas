@@ -70,8 +70,10 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
     }
     for from in froms {
         let head = df.slice(0, from);
-        let Ok(head_col) = execute(&head, node) else { continue };
-        let Some(mut state) = initial_state(&head, node, &head_col) else { continue };
+        if execute(&head, node).is_err() {
+            continue;
+        }
+        let Some(mut state) = initial_state(&head, node, usize::MAX) else { continue };
         let mut at = from;
         for end in [from + 1, (from + 4).min(n), n] {
             if end <= at {
@@ -89,7 +91,7 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
             at = end;
         }
         if at == n {
-            if let Some(fresh) = initial_state(df, node, &Column::f64(whole.clone())) {
+            if let Some(fresh) = initial_state(df, node, usize::MAX) {
                 if first_diff(&state, &fresh).is_some() {
                     fails.push(format!("from {from}: carried state {state:?} != fresh {fresh:?}"));
                 }
@@ -105,8 +107,10 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
 fn forming(df: &DataFrame, node: &Ast, from: usize) -> Vec<String> {
     let mut fails = Vec::new();
     let head = df.slice(0, from);
-    let Ok(head_col) = execute(&head, node) else { return fails };
-    let Some(anchor) = initial_state(&head, node, &head_col) else { return fails };
+    if execute(&head, node).is_err() {
+        return fails;
+    }
+    let Some(anchor) = initial_state(&head, node, usize::MAX) else { return fails };
     for bump in [1.01, 0.97] {
         let frame = with_last_row_scaled(&df.slice(0, from + 1), bump);
         let Some(want) = full(&frame, node) else { continue };
@@ -155,10 +159,8 @@ fn resume_equals_full_recompute_for_every_line_class_and_point() {
             let Ok(node) = parse(&text) else { panic!("{text} does not parse") };
             for data in &classes {
                 let probe = data.frame.slice(0, ROWS / 2);
-                if let Ok(col) = execute(&probe, &node) {
-                    if initial_state(&probe, &node, &col).is_some() {
-                        resumable += 1;
-                    }
+                if execute(&probe, &node).is_ok() && initial_state(&probe, &node, usize::MAX).is_some() {
+                    resumable += 1;
                 }
                 let fails = check(&data.frame, &node);
                 if let Some(first) = fails.first() {
@@ -188,6 +190,47 @@ fn resume_equals_full_recompute_for_every_line_class_and_point() {
     assert!(fixed.is_empty(), "KNOWN_DIVERGENT entries no longer diverge (remove them): {fixed:?}");
 }
 
+/// The computation together with its carried states (one pass for a recursion that
+/// resumes) gives the full computation's values bit for bit, and the states a capture
+/// after it gives — on every line, data class and a range of heights.
+#[test]
+fn a_computation_with_its_states_is_the_full_computation() {
+    use volas_directive::exec::execute_with_states;
+    let mut fails = Vec::new();
+    let mut one_pass = 0usize;
+    for rows in [7, 40, 160] {
+        for data in &matrix::classes(rows) {
+            let df = &data.frame;
+            let extra = ["ma:5,1", "ma:5,3", "ma:5,4", "ma:5,6", "ma:5,7", "ma:5,8", "kcw:7,4,1.5", "rsi:5@(ma:3)",
+                "ema:4@(close+open)", "obv@(wma:3),volume", "ema:3@(ema:4)", "stochrsi.d:5,3,3,0"];
+            let lines = matrix::lines();
+            let texts = lines.iter().flat_map(matrix::variants).chain(extra.iter().map(|t| t.to_string()));
+            for text in texts {
+                {
+                    let node = parse(&text).unwrap();
+                    let Some(whole) = full(df, &node) else { continue };
+                    let (col, state, before) = execute_with_states(df, &node).unwrap();
+                    if let Some(d) = first_diff(&values(&col), &whole) {
+                        fails.push(format!("{text} [{} {rows}]: values {d}", data.name));
+                    }
+                    let want = (initial_state(df, &node, rows), initial_state(df, &node, rows - 1));
+                    let same_state = |a: &Option<Vec<f64>>, b: &Option<Vec<f64>>| match (a, b) {
+                        (Some(a), Some(b)) => first_diff(a, b).is_none(),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if !same_state(&state, &want.0) || (state.is_some() && !same_state(&before, &want.1)) {
+                        fails.push(format!("{text} [{} {rows}]: states {state:?} / {before:?} != {want:?}", data.name));
+                    }
+                    one_pass += usize::from(state.is_some());
+                }
+            }
+        }
+    }
+    assert!(one_pass > 1000, "only {one_pass} computations carried states");
+    assert!(fails.is_empty(), "{} failure(s):\n{}", fails.len(), fails[..fails.len().min(30)].join("\n"));
+}
+
 /// Far into a long series a continuation reads only a trailing window of the frame: for
 /// every line, the `Vec` resume and the single-row step from a carried state equal the
 /// full recompute — and a line whose spec declares a resume never declines there, also
@@ -213,8 +256,10 @@ fn a_continuation_far_into_the_series_reads_a_window_exactly() {
                 let Some(whole) = full(df, &node) else { continue };
                 for from in [LONG - 40, LONG - 1] {
                     let head = df.slice(0, from);
-                    let Ok(head_col) = execute(&head, &node) else { continue };
-                    let Some(state) = initial_state(&head, &node, &head_col) else {
+                    if execute(&head, &node).is_err() {
+                        continue;
+                    }
+                    let Some(state) = initial_state(&head, &node, usize::MAX) else {
                         if declared != Resume::Recompute {
                             fails.push(format!("{text} [{}] from {from}: no state", data.name));
                         }
@@ -258,7 +303,7 @@ fn a_continuation_far_into_the_series_reads_a_window_exactly() {
             let whole = full(df, &node).unwrap();
             for from in [LONG - 40, LONG - 1] {
                 let head = df.slice(0, from);
-                let state = initial_state(&head, &node, &execute(&head, &node).unwrap()).unwrap();
+                let state = initial_state(&head, &node, usize::MAX).unwrap();
                 let (tail, _) = execute_resume(df, &node, &state, from, usize::MAX, 0).unwrap();
                 if let Some(d) = first_diff(&values(&tail), &whole[from..]) {
                     fails.push(format!("{text} [{}] from {from}: vec {d}", data.name));

@@ -114,13 +114,15 @@ directive's lookback twice over — whatever the frame's height: a recursive ind
 continues its carried state over the new row, a running window sum continues its
 sums, and any other finite window is recomputed over its last window. An int64 or
 float32 input is converted over that window only, and an `@` expression operand
-(`ema:14@(close + open)`, `rsi:14@(ma:5)`) is evaluated over it alone. A few
+(`ema:14@(close + open)`, `rsi:14@(ma:5)`) is evaluated over it alone. A recursion or
+a row position anywhere in a directive — inside an `@` operand (`rsi:14@(ema:5)`,
+`ema:3@(maxindex:5)`) or combined with other values (`close - ma:5 + obv`,
+`ema:5 > ma:10`) — carries a state of its own and its last few values, so the
+directive continues over that window too, and a slice keeps it cached. A few
 directives still cost O(n) per refresh (exact): `crsi`, `stoch_momentum`,
 `ttm_squeeze`, and `apo` / `ppo` / `macdext` / `mavp` / `stoch` / `stochf.d` at a
-recursive MA type recompute their column; a directive whose `@` operand holds a
-recursion or a row position (`rsi:14@(ema:5)`, `ema:3@(maxindex:5)`) evaluates that
-operand over the whole frame. `ma` at a recursive MA type continues as that average
-does.
+recursive MA type recompute their column, and so does any directive holding one of
+them. `ma` at a recursive MA type continues as that average does.
 
 ### Names: a data column or a built-in command
 

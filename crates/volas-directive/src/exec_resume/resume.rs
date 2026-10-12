@@ -35,6 +35,9 @@ pub fn execute_resume(
     end: usize,
     since: usize,
 ) -> Option<(Column, Vec<f64>)> {
+    if super::chain::chained(node) {
+        return super::chain::resume(df, node, prev_state, from_row, end, since);
+    }
     let cmd = as_command(node)?;
     let resume = resume_of(&cmd);
     let end = end.min(df.height());

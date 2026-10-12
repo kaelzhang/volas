@@ -49,7 +49,7 @@ def test_a_tail_slice_continues_exactly_or_not_at_all(line):
             assert _same(got, want), (d, keep, got, want)
 
 
-@pytest.mark.parametrize('d', ['crsi:3,2,5', 'stoch_momentum:5', 'close+ema:3@open'])
+@pytest.mark.parametrize('d', ['crsi:3,2,5', 'stoch_momentum:5', 'close+crsi:3,2,5'])
 def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
     # no carried state: a slice from the column's first row recomputes it all (kept,
     # exact); a later start would restart the recursion, so the column is plain data
@@ -61,6 +61,18 @@ def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
     whole.append(frame(N, N + 2))
     assert _same(whole[d].to_numpy(dtype='object')[-2:], frame(0, N + 2).exec(d, dtype='object')[-2:])
     assert not base.iloc[1:].is_computed(name)
+
+
+@pytest.mark.parametrize('d', ['close+ema:3@open', 'ema:5@(ema:3)', 'close-ma:5+obv'])
+def test_a_composite_carries_its_recursions_states_across_a_slice(d):
+    # each recursion in it carries its own state (a state chain): a slice past the
+    # column's first row keeps it and continues exactly
+    base = frame(0, N)
+    base[d]
+    tail = base.iloc[5:]
+    assert tail.is_computed(volas.directive_stringify(d))
+    tail.append(frame(N, N + 2))
+    assert _same(tail[d].to_numpy(dtype='object')[-2:], frame(0, N + 2).exec(d, dtype='object')[-2:])
 
 
 def test_a_window_refuses_a_recursion_without_a_carried_state():

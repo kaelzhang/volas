@@ -4,6 +4,7 @@
 //! (zero-padded, signed, as a float), defaults left empty or given — renders to one
 //! canonical name, and that name binds back to the same command.
 
+#[allow(dead_code)] // the shared matrix module: this test reads its lines only
 mod matrix;
 
 use std::collections::BTreeMap;
@@ -62,9 +63,12 @@ fn identity(text: &str) -> Option<(String, Option<String>, Vec<String>)> {
     Some((cmd.name, cmd.sub, args))
 }
 
+/// A bound command's identity: its name, sub-line and argument and operand tokens.
+type Identity = (String, Option<String>, Vec<String>);
+
 #[test]
 fn every_spelling_of_a_bound_command_has_one_name() {
-    let mut names: BTreeMap<(String, Option<String>, Vec<String>), BTreeMap<String, String>> = BTreeMap::new();
+    let mut names: BTreeMap<Identity, BTreeMap<String, String>> = BTreeMap::new();
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     let mut spellings = 0usize;
     for line in matrix::lines() {

@@ -302,12 +302,13 @@ def test_trix_resume_matches_on_zero_prices():
     assert _same(df['trix:1'], volas.DataFrame({'close': vals})['trix:1'])
 
 
-@_xfail('H19 slice-recursive-rewarm', 'a recursive composite is not continued across a slice (it stays data)')
 def test_a_recursive_composite_continues_across_a_slice():
+    # H19: each recursion in it carries its own state, so the slice keeps the column
     cols = _walk(40, 3)
     df = _frame(cols, 0, 30)
     df['(close)+(kama:3@open)']
     df = df.iloc[1:]
+    assert df.is_computed('close+kama:3@open')
     df.append(_frame(cols, 30, 31))
     df.fulfill()
     assert np.array_equal(np.asarray(df['close+kama:3@open'])[-1:],

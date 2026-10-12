@@ -149,12 +149,12 @@ impl<'a> Operands<'a> {
         }
     }
 
-    /// As [`new`](Self::new), stopping the arm at the first frame column known to hold a
-    /// NaN (see [`missing`](Self::missing)).
-    pub(crate) fn stopping(df: &'a DataFrame, series: &'a [Ast]) -> Self {
+    /// As [`rows`](Self::rows) over the rows `[0, end)`, stopping the arm at the first
+    /// frame column known to hold a NaN (see [`missing`](Self::missing)).
+    pub(crate) fn stopping(df: &'a DataFrame, series: &'a [Ast], end: usize) -> Self {
         Operands {
             stop_on_missing: true,
-            ..Operands::new(df, series)
+            ..Operands::rows(df, series, 0, end)
         }
     }
 

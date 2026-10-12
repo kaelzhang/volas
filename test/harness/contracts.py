@@ -16,10 +16,6 @@ from __future__ import annotations
 # --- defects the machines step around (each has a strict-xfail reproduction) -----
 
 OPEN_DEFECTS: frozenset[str] = frozenset({
-    # A recursive cached column without a carried state (a composite / explicit
-    # series) is not continued across a slice that drops its history's start: it
-    # stays as data (it cannot be continued exactly, so it is never re-warmed).
-    'slice-recursive-rewarm',
     # A slice holding just a column's lookback keeps it cached, but a re-sent last row
     # reads the lookback rows before it, which the slice does not hold: the recompute
     # gives a missing value where the full history has one.

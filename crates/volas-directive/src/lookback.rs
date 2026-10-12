@@ -37,30 +37,15 @@ pub fn lookback(node: &Ast) -> usize {
     }
 }
 
-/// Whether every value of a directive can be recomputed exactly from a trailing window
-/// of its inputs: each command in it is a pure window ([`History::Window`]) with a
-/// position-free output. A refresh after an append then recomputes only a window (its
-/// lookback plus a margin) instead of the whole column; anything else resumes or
-/// recomputes from row 0. A bare name is taken as the command it names (conservative);
-/// an unbindable one is a column.
-pub fn recomputes_on_a_window(node: &Ast) -> bool {
-    let own = |node: &Ast| {
-        command_of(node).is_none_or(|(spec, args)| spec.history(&args) == History::Window && !spec.emits_position())
-    };
-    match node {
-        Node::Scalar(_) | Node::Name(_) => own(node),
-        Node::Command(c) => own(node) && c.series.iter().all(recomputes_on_a_window),
-        Node::Unary { operand, .. } => recomputes_on_a_window(operand),
-        Node::Binary { left, right, .. } => recomputes_on_a_window(left) && recomputes_on_a_window(right),
-    }
-}
-
 /// Whether a directive evaluated over a trailing window of the frame's rows (keeping
 /// their absolute positions) gives, on the window's rows past its lookback, exactly its
 /// values over the whole frame: no recursion and no row-position output anywhere in it
 /// — each command a pure window, or a running accumulator whose sums are exact and
 /// whose anchors are absolute positions. A continuation evaluates such an `@` operand
-/// over the window it reads instead of the frame.
+/// over the window it reads instead of the frame, and a refresh recomputes such a
+/// directive with no carried state over a trailing window (its lookback plus a margin)
+/// instead of the whole column. A bare name is taken as the command it names; an
+/// unbindable one is a column.
 pub fn evaluates_on_a_window(node: &Ast) -> bool {
     let own = |node: &Ast| {
         command_of(node).is_none_or(|(spec, args)| spec.history(&args) != History::Recursive && !spec.emits_position())
@@ -337,7 +322,7 @@ mod tests {
 
 #[cfg(test)]
 mod reach_tests {
-    use super::{lookback, recomputes_on_a_window};
+    use super::{evaluates_on_a_window, lookback};
     use crate::parser::parse;
 
     /// A cross reads the row before, so it warms up one row after its operands — and a
@@ -352,11 +337,10 @@ mod reach_tests {
     }
 
     #[test]
-    fn a_window_recompute_needs_pure_windows() {
-        let w = |d: &str| recomputes_on_a_window(&parse(d).unwrap());
-        assert!(w("llv:5 + 1") && w("close") && w("-(roc:3)") && w("stochf.k:5,3,1"));
-        assert!(!w("ma:5") && !w("ema:5") && !w("maxindex:5") && !w("llv:5@(ema:3)") && !w("obv"));
-        let e = |d: &str| super::evaluates_on_a_window(&parse(d).unwrap());
+    fn a_window_evaluation_needs_no_recursion_and_no_position() {
+        let e = |d: &str| evaluates_on_a_window(&parse(d).unwrap());
+        assert!(e("llv:5 + 1") && e("-(roc:3)") && e("stochf.k:5,3,1") && e("close > ma:20"));
+        assert!(!e("ema:5") && !e("maxindex:5") && !e("llv:5@(ema:3)"));
         assert!(e("ma:5") && e("sum:3@(close-open)") && e("-(var:4)") && e("close") && e("llv:5"));
         assert!(!e("ema:3") && !e("ma:5@(rsi:3)") && !e("minindex:4") && !e("obv") && !e("1+ma:3,1"));
     }

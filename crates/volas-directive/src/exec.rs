@@ -212,7 +212,10 @@ fn dispatch(df: &DataFrame, cmd: &Command<Bound>) -> Result<Column> {
     overlap::dispatch(&Operands::new(df, &cmd.series), name, sub, args)
 }
 
-pub use crate::exec_resume::{capture, checkpoint, execute_resume, execute_resume_step, initial_state, replay};
+pub use crate::exec_resume::{
+    capture, capture_states, checkpoint, execute_resume, execute_resume_step, execute_with_states, initial_state, replay,
+    WithStates,
+};
 
 /// `hv`'s annualization factor √(bars per year), from its bound arguments
 /// `[period, time_frame, trading_days, session_minutes]` — the one owner of the rule,
@@ -698,11 +701,10 @@ mod tests {
     #[test]
     fn state_carry_none_propagation() {
         let df = ohlcv_n(80);
-        let col = Column::f64(vec![0.0; 80]); // `initial_state`'s computed arg is unused
         let p = |d: &str| parse(d).unwrap();
 
         // initial_state: stochrsi `.d` with a non-SMA matype (arg 3 != 0) -> None (exec:1021).
-        assert!(initial_state(&df, &p("stochrsi.d:14,14,3,1"), &col).is_none());
+        assert!(initial_state(&df, &p("stochrsi.d:14,14,3,1"), usize::MAX).is_none());
 
         // execute_resume: SAR / SAREXT at from_row < 2 -> the inner `*_resume` is None, the
         // `?` propagates (exec:1095 / 1114). State contents are unread on the None path.
@@ -756,7 +758,7 @@ mod tests {
         assert!(execute_resume_step(&df, &p("rsi:14"), &[1.0, 1.0], (5, 0), &mut next[..1]).is_none());
         // a composite average declines a state of the wrong length, and a row past the end
         assert!(execute_resume_step(&df, &p("apo"), &[1.0, 1.0], (5, 0), &mut next[..2]).is_none());
-        let apo = initial_state(&df, &p("apo"), &Column::f64(vec![])).unwrap();
+        let apo = initial_state(&df, &p("apo"), usize::MAX).unwrap();
         let mut n = apo.clone();
         assert!(execute_resume_step(&df, &p("apo"), &apo, (df.height(), 0), &mut n).is_none());
     }

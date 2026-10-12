@@ -36,11 +36,12 @@ def _data(n, kind):
 
 
 def _append_cost(directive, kind, n, k=24):
-    """The cheapest of `k` single-row append + refresh rounds of a cached `directive`
-    at height `n`, and the refreshed column's last value against a full recompute."""
+    """The cheapest of `k` single-row append + refresh rounds of the cached `directive`
+    (a list caches each) at height `n`, and the frame."""
     data = _data(n, kind)
     df = volas.DataFrame({c: v[:n] for c, v in data.items()})
-    df[directive]
+    for d in directive if isinstance(directive, list) else [directive]:
+        df[d]
     bars = [volas.DataFrame({c: v[i:i + 1] for c, v in data.items()}) for i in range(n, n + k + 1)]
     df.append(bars[0])
     df.fulfill()
@@ -57,6 +58,11 @@ CASES = [
     ('obv', 'int64'), ('mfi:14', 'int64'), ('vwma:20', 'int64'),
     ('ema:20', 'float32'), ('atr:14', 'float32'), ('ma:20', 'float32'),
     ('ema:14@(close+open)', 'float64'), ('rsi:14@(ma:5)', 'float64'), ('ma:5@(close*volume)', 'float64'),
+    # a composite over a running accumulator: recomputed over a trailing window
+    ('close>ma:20', 'float64'), ('close-ma:5+obv', 'int64'),
+    # a recursive operand of a recursive / window command: each operand carries its state
+    ('ema:5@(ema:3)', 'float64'), ('rsi:5@(ema:4@(close+open))', 'float64'), ('ma:5@(ema:3)', 'float64'),
+    ('ema:5@(kama:4)', 'float32'),
 ]
 
 
@@ -85,3 +91,18 @@ def test_a_composite_captures_its_state_from_one_conversion():
         return best
     # linear: ~5x; quadratic: ~25x
     assert first(100_000) < 12 * first(20_000)
+
+
+MULTI = ['ema:20', 'ma:20', 'macd', 'kdj.k', 'sar', 'close-open', 'close>ma:20', 'obv', 'mfi:14', 'vwma:20',
+         'atr:14', 'boll.upper', 'rsi:14', 'macd.signal', 'ema:14@(close+open)', 'rsi:14@(ma:5)', 'ma:20,1',
+         'kcw', 'ad', 'adosc']
+
+
+def test_twenty_cached_directives_refresh_at_a_cost_independent_of_height():
+    small, _ = _append_cost(MULTI, 'int64', SMALL)
+    large, df = _append_cost(MULTI, 'int64', LARGE)
+    assert large < 8 * small + 100e-6, (small, large)
+    for d in MULTI:
+        full = df.exec(d, dtype='float64')[-3:]
+        got = np.asarray(df[d], dtype=float)[-3:]
+        assert ((got == full) | (np.isnan(got) & np.isnan(full))).all(), d

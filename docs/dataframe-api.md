@@ -175,8 +175,8 @@ highest class among its parts.
   a run of missing values) the frame replays from it — never restarting the recursion on
   the rows it holds. A recursion no carried state covers — one inside an `@` operand
   (`'ema:5@(rsi:5)'`) or combined with other values (`'ema:3 - ema:5'`,
-  `'close > ema:20'`), or a command that recomputes it (`kcw`, `crsi`, `stoch_momentum`,
-  a moving-average type `ma:5,1`) — cannot be kept and is rejected at construction:
+  `'close > ema:20'`), or a command that recomputes it (`crsi`,
+  `stoch_momentum`) — cannot be kept and is rejected at construction:
   declare the recursions it combines and combine their columns.
 - **A directive requested later** (`wf[d]`, `wf[[...]]`, `wf.exec(d)`) is computed only
   when it is of class 1 and reads at most `max_lookback` rows before each row. Classes 2

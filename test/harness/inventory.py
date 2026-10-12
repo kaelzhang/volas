@@ -234,10 +234,10 @@ def executable_lines() -> tuple[Line, ...]:
 
 # The recursions by kind (spec::is_recursive): the commands whose value depends on
 # every row before, and the TA-Lib MA-type argument slots (a command given one may be
-# a recursion whatever its default arguments compute). While 'slice-recursive-rewarm'
-# is open the machines step around them, and a windowed frame refuses them when
-# requested after construction; an early jump in the fixture (`unbounded_memory`)
-# does not reveal every one.
+# a recursion whatever its default arguments compute). A slice keeps such a column
+# only by its carried states, and a windowed frame refuses them when requested after
+# construction; an early jump in the fixture (`unbounded_memory`) does not reveal
+# every one.
 _RECURSIVE = frozenset({
     'ema', 'smma', 'dema', 'tema', 't3', 'kama', 'macd', 'macdfix', 'kdj', 'rsi', 'crsi',
     'stochrsi', 'cmo', 'trix', 'pvt', 'nvi', 'pvi', 'obv', 'ad', 'adosc', 'mass_index',

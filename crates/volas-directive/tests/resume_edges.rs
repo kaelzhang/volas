@@ -46,8 +46,8 @@ fn assert_f64_same(actual: &[f64], expected: &[f64]) {
 fn resume_matches_full(df: &DataFrame, directive: &str, from: usize) {
     let node = parse(directive).unwrap();
     let head = df.slice(0, from);
-    let computed = execute(&head, &node).unwrap();
-    let state = initial_state(&head, &node, &computed)
+    execute(&head, &node).unwrap();
+    let state = initial_state(&head, &node, usize::MAX)
         .unwrap_or_else(|| panic!("no initial state for {directive}"));
     let (tail, _) = execute_resume(df, &node, &state, from, df.height(), 0)
         .unwrap_or_else(|| panic!("no resume for {directive}"));
@@ -59,7 +59,7 @@ fn resume_matches_full(df: &DataFrame, directive: &str, from: usize) {
 fn step(df: &DataFrame, directive: &str, row: usize) -> Option<f64> {
     let node = parse(directive).unwrap();
     let head = df.slice(0, row);
-    let state = initial_state(&head, &node, &execute(&head, &node).unwrap())?;
+    let state = initial_state(&head, &node, usize::MAX)?;
     let mut next = state.clone();
     execute_resume_step(df, &node, &state, (row, 0), &mut next)
 }
@@ -257,7 +257,7 @@ fn recursive_moving_averages_and_kcw_continue_from_a_state() {
             let exact = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
             for from in [100, 121, 159] {
                 let head = df.slice(0, from);
-                let state = initial_state(&head, &node, &execute(&head, &node).unwrap()).unwrap();
+                let state = initial_state(&head, &node, usize::MAX).unwrap();
                 let (tail, _) = execute_resume(&df, &node, &state, from, usize::MAX, 0).unwrap();
                 let tail = tail.to_f64_vec();
                 assert!(tail.iter().zip(&full[from..]).all(|(&a, &b)| exact(a, b)), "{directive} from {from}");
@@ -273,7 +273,7 @@ fn recursive_moving_averages_and_kcw_continue_from_a_state() {
     // a period of 1 is the identity for every type: no recursion, the SMA's own state
     let node = parse("ma:1,1").unwrap();
     let head = df.slice(0, 50);
-    assert!(initial_state(&head, &node, &execute(&head, &node).unwrap()).is_some());
+    assert!(initial_state(&head, &node, usize::MAX).is_some());
 }
 
 #[test]

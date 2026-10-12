@@ -401,8 +401,8 @@ impl PyDataFrame {
     /// the resume states as of its last row and the row before, so a later append
     /// continues in O(new rows) and a replaced last row recomputes in one step.
     fn compute_new(&self, frame: &DataFrame, node: &volas_directive::Ast, text: &str) -> PyResult<Computed> {
-        let (bound, col) = self.evaluate(frame, node, text)?;
-        let (state, before) = Self::capture_resume_states(frame, &bound, &col);
+        let bound = Self::bind(frame, node, text)?;
+        let (col, state, before) = volas_directive::exec::execute_with_states(frame, &bound).map_err(value_err)?;
         Ok(Computed {
             canonical: volas_directive::stringify(&bound),
             reach: volas_directive::lookback::reach(&bound),
@@ -475,17 +475,21 @@ impl PyDataFrame {
     }
 
     /// Bind a new directive (`directive` as written, parsed to `node`) against `frame` —
-    /// the binding frame: each bare name reads the data column or the built-in command
-    /// it names, and one that is both is rejected — and compute it over that frame.
+    /// the binding frame (see [`bind`](Self::bind)) — and compute it over that frame.
     pub(crate) fn evaluate(
         &self,
         frame: &DataFrame,
         node: &volas_directive::Ast,
         directive: &str,
-    ) -> PyResult<(volas_directive::Ast, Column)> {
-        let bound = volas_directive::bind_frame(node, &|n| frame.has_column(n), directive).map_err(value_err)?;
-        let col = execute(frame, &bound).map_err(value_err)?;
-        Ok((bound, col))
+    ) -> PyResult<Column> {
+        execute(frame, &Self::bind(frame, node, directive)?).map_err(value_err)
+    }
+
+    /// Bind a new directive (`directive` as written, parsed to `node`) against `frame`:
+    /// each bare name reads the data column or the built-in command it names, and one
+    /// that is both is rejected.
+    fn bind(frame: &DataFrame, node: &volas_directive::Ast, directive: &str) -> PyResult<volas_directive::Ast> {
+        volas_directive::bind_frame(node, &|n| frame.has_column(n), directive).map_err(value_err)
     }
 
     /// Refuse a data column `name` that a cached directive reads as the built-in

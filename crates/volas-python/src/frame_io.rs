@@ -122,7 +122,7 @@ impl PyDataFrame {
     ) -> PyResult<Bound<'py, PyAny>> {
         let node = parse(directive).map_err(directive_err)?;
         self.admit_new(&node, directive)?;
-        let (_, col) = self.evaluate(&*self.binding_frame()?, &node, directive)?;
+        let col = self.evaluate(&*self.binding_frame()?, &node, directive)?;
         let col = match &self.window {
             Some(_) => {
                 let (start, len) = self.logical_range();

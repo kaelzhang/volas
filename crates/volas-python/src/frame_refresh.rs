@@ -39,28 +39,6 @@ struct Stale {
 }
 
 impl PyDataFrame {
-    /// The carried resume states `(state, state_before_last)` of a recursive column
-    /// freshly computed over `frame` (`col` is that computation): the state as of
-    /// `frame`'s last row and as of the row before it. `(None, None)` for a directive
-    /// with no resume kernel.
-    pub(crate) fn capture_resume_states(
-        frame: &DataFrame,
-        node: &Ast,
-        col: &volas_core::Column,
-    ) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
-        let after = volas_directive::exec::initial_state(frame, node, col);
-        let h = frame.height();
-        if after.is_none() || h == 0 {
-            return (after, None);
-        }
-        let before = volas_directive::exec::initial_state(
-            &frame.slice_data(0, h - 1),
-            node,
-            &col.slice(0, h - 1),
-        );
-        (after, before)
-    }
-
     /// The frame a NEW directive binds and computes over (`df[d]`, `exec`): the data
     /// columns only, so a name never reads a cached column — whose rows may be a stale
     /// placeholder — and is never resolved differently from a later refresh. Borrowed
@@ -137,15 +115,15 @@ impl PyDataFrame {
             }
         }
         let df = &self.inner;
-        // A directive whose every command has finite memory and a position-free
-        // output (SMA, ROC, price transforms, CDL, …) depends only on a fixed
-        // trailing window, so recomputing a window is exact and O(lookback): the
-        // window reaches `lb + 1` rows behind the first stale row (one more than the
-        // lookback covers indicators that emit from a partial first difference) and
-        // doubles that as margin. The decision is structural (`recomputes_on_a_window`),
-        // never inferred from the values. It carries no state.
+        // A directive with no recursion and no position output anywhere (SMA, ROC,
+        // `close > ma:20`, price transforms, CDL, …) depends only on a fixed trailing
+        // window, so recomputing a window is exact and O(lookback): the window reaches
+        // `lb + 1` rows behind the first stale row (one more than the lookback covers
+        // indicators that emit from a partial first difference) and doubles that as
+        // margin. The decision is structural (`evaluates_on_a_window`, the rule a resume
+        // reads its operands by), never inferred from the values. It carries no state.
         let win = 2 * (lb + 1);
-        if vr > win && volas_directive::lookback::recomputes_on_a_window(node) {
+        if vr > win && volas_directive::lookback::evaluates_on_a_window(node) {
             let start = vr - win;
             // `slice_data` skips the per-cached-column ComputedMeta clone; the window is
             // read-only and discarded.
@@ -167,8 +145,7 @@ impl PyDataFrame {
         // the resume takes over at the warm boundary; past it only the stale tail is
         // (the rows before are exact — and a head-dropped slice's carried head is not
         // reproducible from its own rows).
-        let recomputed = volas_directive::execute(df, node).map_err(value_err)?;
-        let (state, before) = Self::capture_resume_states(df, node, &recomputed);
+        let (recomputed, state, before) = volas_directive::exec::execute_with_states(df, node).map_err(value_err)?;
         let from = if warm { vr } else { 0 };
         let tail = recomputed.slice(from, recomputed.len());
         self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;

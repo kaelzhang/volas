@@ -13,7 +13,7 @@ use crate::operands::Operands;
 use crate::spec::Resume;
 use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
-use volas_core::DataFrame;
+use volas_core::{Column, DataFrame};
 
 use super::{as_command, bound, recursive, resume_of, window_start};
 
@@ -33,6 +33,16 @@ pub fn execute_resume_step(
     (row, since): (usize, usize),
     next: &mut [f64],
 ) -> Option<f64> {
+    if super::chain::chained(node) {
+        // a step yields a float: a chain whose top is not one (a comparison's truth)
+        // declines, and the caller continues it through the `Vec` resume
+        let (value, chain) = super::chain::resume(df, node, prev_state, row, row + 1, since)?;
+        if !matches!(value, Column::F64(_)) || chain.len() != next.len() {
+            return None;
+        }
+        next.copy_from_slice(&chain);
+        return value.to_f64_vec().first().copied();
+    }
     let cmd = as_command(node)?;
     if resume_of(&cmd) != Resume::Step || next.len() != prev_state.len() || row >= df.height() {
         return None;
