@@ -1,20 +1,23 @@
 //! Cumulation: group fine bars into coarser periods and aggregate.
 
+use std::borrow::Cow;
+
 use volas_core::{DataFrame, Index, IndexKind, Result, Tz, VolasError};
 
 use crate::agg::AggSpec;
+use crate::open_period::{dedup_keep_last, OpenPeriod};
 use crate::time_frame::TimeFrame;
 
 /// A stateful, incremental OHLCV cumulator (the live `cum_append` engine). The
-/// currently-open period's raw bars are held explicitly in `open` — there is no
-/// hidden frame metadata.
+/// currently-open period's bars are held explicitly as an [`OpenPeriod`] — there is
+/// no hidden frame metadata.
 pub struct Cumulator {
     tf: TimeFrame,
     spec: AggSpec,
     /// Finalized coarse rows (closed periods).
     closed: Option<DataFrame>,
-    /// Raw bars of the still-open (last) period.
-    open: Option<DataFrame>,
+    /// The fine bars of the still-open (last) period.
+    open: Option<OpenPeriod>,
 }
 
 impl Cumulator {
@@ -29,26 +32,29 @@ impl Cumulator {
     }
 
     /// Feed fine bars (must have a `DatetimeIndex`). Periods that close are
-    /// finalized; the trailing period stays open for the next call.
+    /// finalized; the trailing period stays open for the next call. All or nothing:
+    /// the closed rows and the next open period are built aside, and the cumulator
+    /// takes them only once every step has succeeded, so on an error it is unchanged.
     pub fn append(&mut self, fine: &DataFrame) -> Result<()> {
         if fine.height() == 0 {
             return Err(VolasError::Value(
                 "the data frame to be appended is empty".into(),
             ));
         }
-        self.spec.check(fine)?; // before any state is taken
+        self.spec.check(fine)?;
 
         // raw = the still-open period's bars + the incoming bars.
-        let raw = match self.open.take() {
-            Some(mut open) => {
-                open.append(fine)?;
-                open
+        let raw = match &self.open {
+            Some(open) => {
+                let mut raw = open.bars().clone();
+                raw.append(fine)?;
+                Cow::Owned(raw)
             }
-            None => fine.clone(),
+            None => Cow::Borrowed(fine),
         };
 
-        let (ts, tz): (Vec<i64>, _) = match raw.index().kind() {
-            IndexKind::Datetime(v, tz) => (v.clone(), *tz),
+        let (ts, tz): (&[i64], Tz) = match raw.index().kind() {
+            IndexKind::Datetime(v, tz) => (v, *tz),
             _ => {
                 return Err(VolasError::Value(
                     "cumulation target must have a DatetimeIndex".into(),
@@ -83,24 +89,30 @@ impl Cumulator {
             ));
         }
 
-        let runs = group_runs(&ts, self.tf, tz)?;
+        let runs = group_runs(ts, self.tf, tz)?;
         let last = runs.len() - 1;
 
-        // Finalize every run except the last.
+        // Every run except the last closes: its coarse rows, gathered aside.
+        let mut closing: Option<DataFrame> = None;
         for &(a, b) in &runs[..last] {
-            let coarse = aggregate_period(&raw.slice(a, b), &self.spec, self.tf, tz)?;
-            self.closed = Some(match self.closed.take() {
-                Some(mut closed) => {
-                    closed.append(&coarse)?;
-                    closed
-                }
-                None => coarse,
-            });
+            let coarse = aggregate_period(&raw.slice_data(a, b), &self.spec, self.tf, tz)?;
+            match &mut closing {
+                Some(rows) => rows.append(&coarse)?,
+                None => closing = Some(coarse),
+            }
         }
-
-        // The last run remains open.
+        // The last run remains open (re-sent bars collapsed to the last one).
         let (a, b) = runs[last];
-        self.open = Some(raw.slice(a, b));
+        let open = OpenPeriod::new(raw.slice_data(a, b))?;
+
+        // Commit: one atomic append of the closed rows, then the open period.
+        if let Some(rows) = closing {
+            match &mut self.closed {
+                Some(closed) => closed.append(&rows)?,
+                None => self.closed = Some(rows),
+            }
+        }
+        self.open = Some(open);
         Ok(())
     }
 
@@ -108,7 +120,7 @@ impl Cumulator {
     /// aggregated as the (live) last row.
     pub fn frame(&self) -> Result<DataFrame> {
         let open_coarse = match &self.open {
-            Some(open) => Some(aggregate_period(open, &self.spec, self.tf, grid_tz(open))?),
+            Some(open) => Some(aggregate_open(open, &self.spec, self.tf)?),
             None => None,
         };
         match (&self.closed, open_coarse) {
@@ -127,16 +139,16 @@ impl Cumulator {
     /// `None` if nothing is open. O(open period) — for live tick reads.
     pub fn last(&self) -> Result<Option<DataFrame>> {
         match &self.open {
-            Some(open) => Ok(Some(aggregate_period(open, &self.spec, self.tf, grid_tz(open))?)),
+            Some(open) => Ok(Some(aggregate_open(open, &self.spec, self.tf)?)),
             None => Ok(None),
         }
     }
 
-    /// A clone of the still-open period's raw fine bars (`None` if nothing is
-    /// open) — lets a caller carry the folding state forward after a one-shot
-    /// `cumulate`, so further fine bars fold into the same forming period.
-    pub fn open_clone(&self) -> Option<DataFrame> {
-        self.open.clone()
+    /// The still-open period's fine bars (`None` if nothing is open) — lets a caller
+    /// carry the folding state forward after a one-shot `cumulate`, so further fine
+    /// bars fold into the same forming period.
+    pub fn open_period(&self) -> Option<&OpenPeriod> {
+        self.open.as_ref()
     }
 }
 
@@ -147,13 +159,10 @@ pub fn cumulate(df: &DataFrame, tf: TimeFrame, spec: &AggSpec) -> Result<DataFra
     cumulator.frame()
 }
 
-/// The zone owning the period grid of the cumulator's own bars: their index zone
-/// (every bar it holds went through the datetime-index check of `append`).
-fn grid_tz(bars: &DataFrame) -> Tz {
-    match bars.index().kind() {
-        IndexKind::Datetime(_, tz) => *tz,
-        _ => unreachable!("cumulator bars carry a DatetimeIndex"), // LCOV_EXCL_LINE
-    }
+/// The open period aggregated on the grid of its own bars' zone (every bar the
+/// cumulator holds went through the datetime-index check of `append`).
+fn aggregate_open(open: &OpenPeriod, spec: &AggSpec, tf: TimeFrame) -> Result<DataFrame> {
+    aggregate_period(open.bars(), spec, tf, open.bars().index().tz())
 }
 
 /// Split a sorted timestamp slice into `[start, end)` runs of the same period
@@ -172,15 +181,6 @@ fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Result<Vec<(usize, usize)>> 
     }
     runs.push((start, ts.len()));
     Ok(runs)
-}
-
-/// Positions to keep when consecutive same-timestamp rows are deduped (keep the
-/// last of each run — a re-sent / corrected tick updates rather than accumulates).
-fn dedup_keep_last(ts: &[i64]) -> Vec<usize> {
-    let n = ts.len();
-    (0..n)
-        .filter(|&i| i + 1 == n || ts[i + 1] != ts[i])
-        .collect()
 }
 
 /// Aggregate one period's raw bars into a single coarse row (1-row frame) on the
@@ -348,6 +348,72 @@ mod tests {
         assert_eq!(out.column("volume").unwrap().as_f64().unwrap()[0], 107.0);
         // open = first kept = the second 00:00 bar's open (99)
         assert_eq!(out.column("open").unwrap().as_f64().unwrap()[0], 99.0);
+    }
+
+    /// The open period a cumulation hands over holds one bar per timestamp: a re-sent
+    /// bar inside the fed bars (its first copy superseded) is not kept, so the open
+    /// period reduces to the batch aggregate of the same feed.
+    #[test]
+    fn the_open_period_keeps_no_superseded_bar() {
+        let df = frame(
+            &["2020-01-01 00:00:00", "2020-01-01 00:01:00", "2020-01-01 00:01:00"],
+            &[10.0, 11.0, 12.0],
+            &[12.0, 30.0, 13.0],
+            &[9.0, 9.5, 9.5],
+            &[11.0, 12.0, 12.5],
+            &[10.0, 5.0, 7.0],
+        );
+        let mut cum = Cumulator::new(TimeFrame::Min5, AggSpec::ohlcv());
+        cum.append(&df).unwrap();
+        let open = cum.open_period().unwrap();
+        assert_eq!(open.bars().height(), 2);
+        assert_eq!(open.bars().column("high").unwrap().as_f64().unwrap(), &[12.0, 13.0][..]);
+        let batch = cumulate(&df, TimeFrame::Min5, &AggSpec::ohlcv()).unwrap();
+        assert!(cum.frame().unwrap().equals(&batch));
+        // the next call re-sends 00:01 again: the result is the batch of the last-wins feed
+        let resend = frame(&["2020-01-01 00:01:00"], &[12.0], &[13.5], &[9.5], &[12.9], &[8.0]);
+        cum.append(&resend).unwrap();
+        let out = cum.frame().unwrap();
+        assert_eq!(out.column("high").unwrap().as_f64().unwrap(), &[13.5][..]);
+        assert_eq!(out.column("volume").unwrap().as_f64().unwrap(), &[18.0][..]);
+    }
+
+    /// Periods closing over several calls are kept in order: each call's closed rows
+    /// join the earlier ones in one append.
+    #[test]
+    fn closed_periods_accumulate_across_calls() {
+        let df = sample();
+        let mut cum = Cumulator::new(TimeFrame::Min1, AggSpec::ohlcv());
+        cum.append(&df.slice(0, 3)).unwrap();
+        cum.append(&df.slice(3, 6)).unwrap();
+        assert!(cum.frame().unwrap().equals(&cumulate(&df, TimeFrame::Min1, &AggSpec::ohlcv()).unwrap()));
+    }
+
+    /// A rejected append leaves the cumulator exactly as it was — its open period
+    /// included — whichever step rejects it, so the next append continues the period.
+    #[test]
+    fn a_rejected_append_changes_nothing() {
+        let at = |s: &str| datetime::parse_ns(s).unwrap();
+        let vol = |ts: &[i64], v: &[i64]| {
+            DataFrame::new(
+                vec!["volume".into()],
+                vec![Column::i64(v.to_vec())],
+                Some(Index::datetime(ts.to_vec(), Tz::Utc)),
+            )
+            .unwrap()
+        };
+        let mut cum = Cumulator::new(TimeFrame::Min5, AggSpec::ohlcv());
+        cum.append(&vol(&[at("2020-01-01 00:00:00")], &[i64::MAX])).unwrap();
+        let before = cum.frame().unwrap();
+        // the closing period's sum overflows, after the open period was extended
+        let overflow = vol(&[at("2020-01-01 00:01:00"), at("2020-01-01 00:05:00")], &[1, 1]);
+        assert!(matches!(cum.append(&overflow).unwrap_err(), VolasError::Overflow(_)));
+        // a NaT bar, judged after the open period is extended
+        assert!(cum.append(&vol(&[i64::MIN], &[1])).is_err());
+        assert!(cum.frame().unwrap().equals(&before));
+        cum.append(&vol(&[at("2020-01-01 00:06:00")], &[2])).unwrap();
+        let out = cum.frame().unwrap();
+        assert_eq!(out.column("volume").unwrap().as_i64().unwrap(), &[i64::MAX, 2][..]);
     }
 
     #[test]

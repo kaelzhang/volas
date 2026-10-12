@@ -65,6 +65,9 @@ Which gets the 2-period simple moving average on column `"close"`.
     (`float`, `int`, `bool`, `datetime64`, or `string`); a NumPy **masked array**'s
     masked cells become `volas.NA`;
   - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`).
+    A tf-aware source re-labelled (`index=`) or re-typed (`dtype=`) gives the tf-aware
+    frame of its new rows, the last one the forming bar (see
+    [Writing to a time-frame frame](cumulation.md#writing-to-a-time-frame-frame)).
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
   those with the dedicated [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
@@ -326,8 +329,8 @@ bar straight into the frame with no per-bar 1-row `DataFrame`:
 df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v})
 ```
 
-It is **strict**: every data column must be provided (a missing one raises — unlike a
-`DataFrame` / `Row`, where a missing column is NA-padded), and an unknown key raises. The
+A data column the dict leaves out is a missing value of the bar, exactly as in a
+`DataFrame` / `Row` bar, and an unknown key raises. The
 timestamp is read in its own zone: an aware `Timestamp` / `datetime` / offset string is
 an instant, a naive one a wall clock — judged against the frame's index like any other
 row (a naive bar onto a tz-aware frame raises), a raw epoch-ns count — an integer or a
@@ -423,6 +426,10 @@ Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
   Every aggregate of a bucket holding a missing value is missing, and an aggregator
   the column's dtype does not support raises up front (see
   [Cumulation](cumulation.md)).
+
+Only the data columns are cumulated: a cached directive column of the caller (say
+`ma:20` over 1-minute closes) is not carried into the coarse frame — requested there,
+it is computed over the coarse bars.
 
 ```py
 # from 1-minute klines to 5-minute klines
@@ -788,6 +795,14 @@ its last row is their cumulation. On a tf-aware frame:
 - A bar of the frame's **own** time frame stamped at the period start — e.g. an
   exchange `15m` kline pushed again and again while it forms — therefore
   **replaces the last row whole**.
+- **Every bar is a complete bar of the frame's data columns.** A data column a bar
+  leaves out — in any append form — is a missing value of that bar, so the period's
+  aggregate of that column is missing, exactly as a batch `cumulate` of the same bars
+  gives; a later bar re-sent with the value replaces it.
+- **A write is taken only where the open period follows it exactly**: a new column
+  enters the fine bars as missing (the next fold makes its forming cell missing), and
+  a new forming value over several folded fine bars raises `ValueError` — see
+  [Writing to a time-frame frame](cumulation.md#writing-to-a-time-frame-frame).
 - **The last constructed row is the forming bar.** `DataFrame(data,
   time_frame=...)` makes it the first bar of the open period, so a finer bar in
   its period folds into it rather than opening a second row with the same label.

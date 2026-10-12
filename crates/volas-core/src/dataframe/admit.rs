@@ -2,7 +2,7 @@
 //! against this frame", and the mutations that take admitted rows — appending them,
 //! replacing the last row with one, and folding one into a time-frame forming row.
 //!
-//! Every such mutation runs in two phases. [`DataFrame::admit`] checks the whole row
+//! Every such mutation runs in two phases. `admit_rows` checks the whole row
 //! set first — no cached directive column, no unknown column, an index the frame's
 //! index can take ([`crate::Index::check_append`]), every value converted losslessly
 //! to the frame's dtype ([`Column::convert_lossless`]) — and [`DataFrame::append`] then
@@ -40,7 +40,7 @@ enum Route {
     Rows(Vec<bool>),
 }
 
-/// Rows admitted for a frame ([`DataFrame::admit`]), with whether they carry its
+/// Rows admitted for a frame (`DataFrame::admit_rows`), with whether they carry its
 /// leading columns in order — decided once, so the commit maps their columns
 /// positionally without comparing the names again.
 struct Admitted<'a> {
@@ -71,6 +71,33 @@ impl DataFrame {
         ))
     }
 
+    /// Admit `rows` (`admit_rows`) and give them exactly this frame's data columns —
+    /// every column but the cached directive ones, in this frame's order and dtypes:
+    /// a data column the rows lack becomes a missing cell of its dtype, the value an
+    /// append pads it with. The one coercion of a time-frame frame's incoming bars, so
+    /// its open period, its fold and its refold all read the same complete bar
+    /// whatever the append form left out. Borrowed when the rows already are exactly
+    /// the data columns in order (the live bar), so the per-bar path allocates nothing.
+    pub fn admit_data_rows<'a>(&self, rows: &'a DataFrame) -> Result<Cow<'a, DataFrame>> {
+        let admitted = self.admit_rows(rows)?;
+        if admitted.leads && admitted.rows.width() == self.width() - self.computed.len() {
+            return Ok(admitted.rows); // the leading columns, none cached: all the data columns
+        }
+        let rows = admitted.rows.as_ref();
+        let (mut names, mut columns) = (Vec::new(), Vec::new());
+        for (name, col) in self.names.iter().zip(&self.columns) {
+            if self.computed.contains_key(name) {
+                continue;
+            }
+            columns.push(match rows.column_pos(name) {
+                Some(j) => rows.columns[j].clone(),
+                None => Column::na_of(col.dtype(), rows.height),
+            });
+            names.push(name.clone());
+        }
+        DataFrame::new(names, columns, Some((*rows.index).clone())).map(Cow::Owned)
+    }
+
     /// Admit `rows` for appending to (or replacing the last row of) this frame — the
     /// one validation of an incoming row set. `rows` must carry no cached directive
     /// column ([`cached_columns_error`](Self::cached_columns_error)) and no column this frame
@@ -78,12 +105,8 @@ impl DataFrame {
     /// frame's index can take ([`crate::Index::check_append`]); and each column is
     /// converted to this frame's dtype without changing a value ([`Column::convert_lossless`],
     /// contract #20 — a lossy value raises). Returns the rows with this frame's dtypes,
-    /// borrowed when nothing needed converting (the live single-bar path).
-    pub fn admit<'a>(&self, rows: &'a DataFrame) -> Result<Cow<'a, DataFrame>> {
-        self.admit_rows(rows).map(|a| a.rows)
-    }
-
-    /// [`admit`](Self::admit), keeping whether the rows lead with this frame's columns.
+    /// borrowed when nothing needed converting (the live single-bar path), and whether
+    /// they lead with this frame's columns.
     fn admit_rows<'a>(&self, rows: &'a DataFrame) -> Result<Admitted<'a>> {
         // One pass over the rows' columns: each is looked up once — positionally when the
         // rows carry the frame's leading columns in order (the live bar of a frame whose
@@ -151,7 +174,7 @@ impl DataFrame {
     /// labels (a `RangeIndex`) take the next labels. Columns `other` lacks are padded
     /// (a cached directive column with a stale placeholder its refresh overwrites, a
     /// data column with a missing value); cached columns are left stale from the first
-    /// changed row. The rows are admitted ([`admit`](Self::admit)) and every label
+    /// changed row. The rows are admitted (`admit_rows`) and every label
     /// decided before the first write, so on an error the frame is unchanged. Deciding
     /// a datetime row is O(1); an integer / string row looks its label up.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
@@ -295,7 +318,7 @@ impl DataFrame {
         })
     }
 
-    /// Append admitted rows (see [`admit`](Self::admit)) at the end — the commit step:
+    /// Append admitted rows (see `admit_rows`) at the end — the commit step:
     /// the index is extended first (the one step that checks anything), then every
     /// column grows. Columns `rows` lacks are padded; computed metadata is retained,
     /// leaving the new rows stale.
@@ -344,7 +367,7 @@ impl DataFrame {
     /// Replace the last row whole with `src`'s row `src_row`, in place: each data column
     /// takes `src`'s value of the same name, or a missing value when `src` lacks it; a
     /// cached directive column is left to its refresh. The label is unchanged. `src`'s
-    /// columns must already have this frame's dtypes ([`admit`](Self::admit) converts
+    /// columns must already have this frame's dtypes (`admit_rows` converts
     /// them); every column is checked before the first write, so on an error nothing
     /// changes. Only the last row changed, so each cached column keeps what it carries
     /// and is stale from that row on (see `invalidate_computed_forming_row`).
@@ -432,7 +455,7 @@ impl DataFrame {
     /// Check, writing nothing, that re-cumulating the forming row `row` from `src`'s rows
     /// with `last`'s row 0 in place of `src`'s last row (a re-sent bar: a column `last`
     /// lacks keeps `src`'s value) succeeds — so the caller can check the fold before
-    /// it replaces that row in `src`. `last` is admitted ([`admit`](Self::admit)): its
+    /// it replaces that row in `src`. `last` is admitted (`admit_rows`): its
     /// columns have this frame's dtypes.
     pub fn check_refold(
         &self,
