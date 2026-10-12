@@ -2,17 +2,38 @@
 //! [`DataFrame`]: recording a cached directive result, tracking staleness
 //! after an append, incrementally refreshing its tail, and invalidating it on
 //! a manual write. The cache (`DataFrame::computed`) is private frame state;
-//! these methods own its invariants.
-
+//! these methods own its invariants:
+//! - rows `[0, valid_rows)` hold valid values, and only a contiguous extension of
+//!   them (a write starting at or before `valid_rows`, ending inside the frame) moves
+//!   the cursor;
+//! - a carried state is resumed only from the row it describes (`state_at`), which is
+//!   the last valid row;
+//! - warm-up is counted on the column's processed history (`since` to the last valid
+//!   row, absolute positions), never on a slice's local row numbers.
 
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
 use super::{ComputedMeta, DataFrame};
 
+/// A stale cached column as the refresh reads it: its name, lookback, valid-row
+/// cursor, and whether its processed history is past the warm-up
+/// ([`ComputedMeta::warm`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaleComputed {
+    /// The column (= its canonical directive).
+    pub name: String,
+    /// The directive's lookback.
+    pub lookback: usize,
+    /// Rows `[0, valid_rows)` hold valid values.
+    pub valid_rows: usize,
+    /// More than `lookback` rows of the column's history are processed.
+    pub warm: bool,
+}
+
 impl DataFrame {
     /// Record that column `name` is a materialized directive result (valid for
-    /// all current rows).
+    /// all current rows), its history starting at this frame's row 0.
     pub fn set_computed(&mut self, name: &str, lookback: usize) {
         self.computed.insert(
             name.to_string(),
@@ -21,6 +42,8 @@ impl DataFrame {
                 valid_rows: self.height,
                 state: None,
                 state_before_last: None,
+                since: self.origin,
+                state_at: 0,
                 scratch: Vec::new(),
             },
         );
@@ -29,24 +52,36 @@ impl DataFrame {
     }
 
     /// Attach (or replace) the carried recursive [`ComputedMeta::state`] for a
-    /// cached column, enabling an O(new-rows) append resume. The state before it is
-    /// unknown afterwards. No-op if `name` is not a tracked computed column.
+    /// cached column — the state as of its last valid row — enabling an O(new-rows)
+    /// append resume. The state before it is unknown afterwards. No-op if `name` is
+    /// not a tracked computed column.
     pub fn set_computed_state(&mut self, name: &str, state: Option<Vec<f64>>) {
         self.set_computed_states(name, state, None);
     }
 
     /// Attach (or replace) both carried states of a cached column: `state` as of its
     /// last valid row and `before_last` as of the row before it (see [`ComputedMeta`]).
-    /// No-op if `name` is not a tracked computed column.
+    /// A column with no valid row carries none; one with a single valid row no state
+    /// before it. No-op if `name` is not a tracked computed column.
     pub fn set_computed_states(
         &mut self,
         name: &str,
         state: Option<Vec<f64>>,
         before_last: Option<Vec<f64>>,
     ) {
+        let origin = self.origin;
         if let Some(meta) = self.computed.get_mut(name) {
-            meta.state = state;
-            meta.state_before_last = before_last;
+            match meta.last_valid(origin) {
+                Some(at) => {
+                    meta.state_at = at;
+                    meta.state_before_last = before_last.filter(|_| at > origin && state.is_some());
+                    meta.state = state;
+                }
+                None => {
+                    meta.state = None;
+                    meta.state_before_last = None;
+                }
+            }
         }
     }
 
@@ -56,7 +91,7 @@ impl DataFrame {
     /// state as of that row into the buffer. On `Some`, the states advance (the old state
     /// becomes [`ComputedMeta::state_before_last`]); on `None` they are untouched. The
     /// caller writes the value. The buffers are recycled, so a live column steps with no
-    /// allocation. `None` if `name` is untracked or carries no state.
+    /// allocation. `None` if `name` is untracked or carries no state of its last valid row.
     pub fn step_computed_state(
         &mut self,
         name: &str,
@@ -64,6 +99,9 @@ impl DataFrame {
     ) -> Option<f64> {
         let origin = self.origin;
         let meta = self.computed.get_mut(name)?;
+        if meta.last_valid(origin) != Some(meta.state_at) {
+            return None;
+        }
         let prev = meta.state.take()?;
         let mut next = std::mem::take(&mut meta.scratch);
         next.clear();
@@ -74,6 +112,7 @@ impl DataFrame {
             meta.scratch = meta.state_before_last.take().unwrap_or_default();
             meta.state_before_last = Some(prev);
             meta.state = Some(next);
+            meta.state_at += 1;
         } else {
             meta.state = Some(prev);
             meta.scratch = next;
@@ -82,10 +121,19 @@ impl DataFrame {
     }
 
     /// The states after a resume of ONE new row produced `state` (the state as of that
-    /// row): the old state becomes the state before it. No-op if `name` is untracked.
+    /// row, now the last valid one): the old state becomes the state before it. No-op
+    /// if `name` is untracked.
     pub fn advance_computed_state(&mut self, name: &str, state: Vec<f64>) {
+        let origin = self.origin;
         if let Some(meta) = self.computed.get_mut(name) {
-            meta.state_before_last = meta.state.replace(state);
+            let at = meta.last_valid(origin);
+            // the old state is the one before only if it described the row before
+            let before = meta.state.replace(state);
+            meta.state_before_last = before.filter(|_| at == Some(meta.state_at + 1));
+            match at {
+                Some(at) => meta.state_at = at,
+                None => meta.state = None, // LCOV_EXCL_LINE (called after a written row)
+            }
         }
     }
 
@@ -99,9 +147,12 @@ impl DataFrame {
     /// `(&[f64], usize)` the resume kernels read — **without cloning** the state
     /// `Vec`. Lets the live refresh / rollover-finalize loops continue the recursion
     /// straight off the stored state instead of snapshotting a per-column copy.
-    /// `None` if `name` is untracked or carries no state.
+    /// `None` if `name` is untracked or carries no state of its last valid row.
     pub fn computed_resume_state(&self, name: &str) -> Option<(&[f64], usize)> {
         let meta = self.computed.get(name)?;
+        if meta.last_valid(self.origin) != Some(meta.state_at) {
+            return None;
+        }
         Some((meta.state.as_deref()?, self.origin))
     }
 
@@ -113,48 +164,81 @@ impl DataFrame {
             .collect()
     }
 
-    /// Stale materialized-directive columns as `(name, lookback, valid_rows)` — the
-    /// small `Copy` cursor fields only, **never the carried `state` Vec**. The live
-    /// fulfill loop drives off this owned name list (so it can take `&mut self` to
-    /// write the refreshed tail) and borrows each column's state (and origin) on
-    /// demand via [`computed_resume_state`](Self::computed_resume_state) just before
-    /// resuming it, so no per-column `Vec<f64>` is deep-copied per fulfill.
-    pub fn stale_computed_columns(&self, only: Option<&str>) -> Vec<(String, usize, usize)> {
+    /// The stale materialized-directive columns ([`StaleComputed`]: the small cursor
+    /// fields only, **never the carried `state` Vec**) — all of them, or just `only`.
+    /// The live fulfill loop drives off this owned list (so it can take `&mut self` to
+    /// write the refreshed tail) and borrows each column's state (and origin) on demand
+    /// via [`computed_resume_state`](Self::computed_resume_state) just before resuming
+    /// it, so no per-column `Vec<f64>` is deep-copied per fulfill.
+    pub fn stale_computed_columns(&self, only: Option<&str>) -> Vec<StaleComputed> {
         self.computed
             .iter()
             .filter(|(name, meta)| {
                 meta.valid_rows < self.height && only.is_none_or(|target| target == name.as_str())
             })
-            .map(|(name, meta)| (name.clone(), meta.lookback, meta.valid_rows))
+            .map(|(name, meta)| StaleComputed {
+                name: name.clone(),
+                lookback: meta.lookback,
+                valid_rows: meta.valid_rows,
+                warm: meta.warm(self.origin),
+            })
             .collect()
     }
 
-    /// Overwrite a computed column's rows `[from, from + tail.len())` in place
-    /// (copy-on-write) with the recomputed `tail`, and mark it valid up to the
-    /// full height. Directive results are F64 or Bool, so both are handled.
-    /// O(tail.len()).
-    pub fn update_computed_tail(&mut self, name: &str, from: usize, tail: &Column) -> Result<()> {
+    /// Check a computed-column write of rows `[from, from + len)`: inside the frame, and
+    /// for a tracked column starting at or before its valid rows (a write past them would
+    /// leave a gap of stale rows marked valid). Returns the column's position.
+    fn computed_write_at(&self, name: &str, from: usize, len: usize) -> Result<usize> {
         let pos = self
             .name_to_idx
             .get(name)
             .copied()
             .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
+        if from.checked_add(len).is_none_or(|end| end > self.height) {
+            return Err(VolasError::Shape(format!(
+                "cannot write {len} computed rows of \"{name}\" from row {from}: the frame \
+                 has {} rows",
+                self.height
+            )));
+        }
+        if let Some(meta) = self.computed.get(name) {
+            if from > meta.valid_rows {
+                return Err(VolasError::Shape(format!(
+                    "cannot write computed rows of \"{name}\" from row {from}: rows {} to \
+                     {from} are not valid yet",
+                    meta.valid_rows
+                )));
+            }
+        }
+        Ok(pos)
+    }
+
+    /// The rows `[0, end)` of a tracked column are valid after a contiguous write of
+    /// rows `[from, end)`; a write from row 0 recomputed the column from this frame's
+    /// own rows, so its history starts here.
+    fn extend_valid(&mut self, name: &str, from: usize, end: usize) {
+        let origin = self.origin;
+        if let Some(meta) = self.computed.get_mut(name) {
+            meta.valid_rows = meta.valid_rows.max(end);
+            if from == 0 {
+                meta.since = origin;
+            }
+        }
+    }
+
+    /// Overwrite a computed column's rows `[from, from + tail.len())` in place
+    /// (copy-on-write) with the recomputed `tail`, and mark it valid through the last
+    /// written row. The rows must lie inside the frame and start at or before the
+    /// column's valid rows — anything else is an error and nothing is written.
+    /// Directive results are F64 or Bool, so both are handled. O(tail.len()).
+    pub fn update_computed_tail(&mut self, name: &str, from: usize, tail: &Column) -> Result<()> {
+        let pos = self.computed_write_at(name, from, tail.len())?;
         match (&mut self.columns[pos], tail) {
             (Column::F64(arc), Column::F64(t)) => {
-                let buf = arc.make_mut();
-                for (i, &v) in t.iter().enumerate() {
-                    if from + i < buf.len() {
-                        buf[from + i] = v;
-                    }
-                }
+                arc.make_mut()[from..from + t.len()].copy_from_slice(t);
             }
             (Column::Bool(arc, _), Column::Bool(t, _)) => {
-                let buf = arc.make_mut();
-                for (i, &v) in t.iter().enumerate() {
-                    if from + i < buf.len() {
-                        buf[from + i] = v;
-                    }
-                }
+                arc.make_mut()[from..from + t.len()].copy_from_slice(t);
             }
             (col, t) => {
                 return Err(VolasError::DType(format!(
@@ -164,28 +248,19 @@ impl DataFrame {
                 )))
             }
         }
-        if let Some(meta) = self.computed.get_mut(name) {
-            meta.valid_rows = self.height;
-        }
+        self.extend_valid(name, from, from + tail.len());
         #[cfg(debug_assertions)]
         self.debug_check();
         Ok(())
     }
 
-    /// Overwrite one F64 computed value and mark the computed column current.
+    /// Overwrite one F64 computed value and mark the column valid through that row,
+    /// under the same rule as [`update_computed_tail`](Self::update_computed_tail).
     /// This avoids allocating a one-value tail column on the single-bar append path.
     pub fn update_computed_f64_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
-        let pos = self
-            .name_to_idx
-            .get(name)
-            .copied()
-            .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
+        let pos = self.computed_write_at(name, row, 1)?;
         match &mut self.columns[pos] {
-            Column::F64(buf) => {
-                if row < buf.len() {
-                    buf.set(row, value);
-                }
-            }
+            Column::F64(buf) => buf.set(row, value),
             col => {
                 return Err(VolasError::DType(format!(
                     "computed scalar dtype F64 does not match column \"{name}\" dtype {}",
@@ -193,9 +268,7 @@ impl DataFrame {
                 )))
             }
         }
-        if let Some(meta) = self.computed.get_mut(name) {
-            meta.valid_rows = self.height;
-        }
+        self.extend_valid(name, row, row + 1);
         #[cfg(debug_assertions)]
         self.debug_check();
         Ok(())
@@ -223,6 +296,7 @@ impl DataFrame {
                 let replaced = std::mem::replace(&mut meta.state, meta.state_before_last.take());
                 if let Some(buf) = replaced {
                     meta.scratch = buf;
+                    meta.state_at = meta.state_at.saturating_sub(1);
                 }
             }
         }
@@ -235,21 +309,22 @@ impl DataFrame {
     /// dependency tracking), but writes are rare relative to reads.
     pub(super) fn invalidate_computed_on_write_at(&mut self, col: usize) {
         self.drop_computed_at(col);
-        for meta in self.computed.values_mut() {
-            meta.valid_rows = 0;
-            // The carried recursive state described row `valid_rows - 1`; resetting
-            // `valid_rows` to 0 breaks that correspondence, so drop it. A later refresh
-            // recomputes from scratch (correct) and repopulates the state.
-            meta.state = None;
-            meta.state_before_last = None;
-        }
+        self.stale_every_computed();
     }
 
     /// Name-based variant for the `df[name] = value` whole-column replace path.
     pub fn invalidate_computed_on_write(&mut self, written_name: &str) {
         self.computed.remove(written_name);
+        self.stale_every_computed();
+    }
+
+    /// Every cached column is stale from row 0, carrying nothing.
+    fn stale_every_computed(&mut self) {
         for meta in self.computed.values_mut() {
             meta.valid_rows = 0;
+            // The carried recursive state described row `valid_rows - 1`; resetting
+            // `valid_rows` to 0 breaks that correspondence, so drop it. A later refresh
+            // recomputes from scratch (correct) and repopulates the state.
             meta.state = None;
             meta.state_before_last = None;
         }

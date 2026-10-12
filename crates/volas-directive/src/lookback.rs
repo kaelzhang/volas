@@ -300,6 +300,20 @@ pub fn recomputes_on_a_window(node: &Ast) -> bool {
     }
 }
 
+/// Whether a directive's resumable state is a sliding accumulator (a running sum the
+/// window's oldest row leaves — [`crate::spec::accumulates`]): resuming it at a row
+/// drops the row `lookback + 1` rows back, so the frame must still hold that row. A
+/// recursive state needs no row before the new one. Only a top-level command (or a bare
+/// name binding to one) carries a resume state.
+pub fn slides(node: &Ast) -> bool {
+    match node {
+        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[])
+            .is_ok_and(|cmd| crate::spec::accumulates(&cmd.name, cmd.sub.as_deref())),
+        Node::Command(c) => crate::spec::accumulates(&c.name, c.sub.as_deref()),
+        _ => false,
+    }
+}
+
 /// Like [`lookback`], but requires the directive to name an **indicator**. A
 /// top-level bare name that binds to no command — a raw column reference, or a
 /// typo'd directive such as `ma5` for `ma:5` — is rejected (the same

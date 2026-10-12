@@ -16,6 +16,15 @@ use volas_directive::types::Ast;
 #[allow(unused_imports)]
 use crate::*;
 
+/// A stale cached column's cursor as the refresh decides on it: its lookback, valid
+/// rows and whether its processed history is past the warm-up.
+#[derive(Clone, Copy)]
+struct Stale {
+    lb: usize,
+    vr: usize,
+    warm: bool,
+}
+
 impl PyDataFrame {
     /// The carried resume states `(state, state_before_last)` of a recursive column
     /// freshly computed over `frame` (`col` is that computation): the state as of
@@ -64,7 +73,7 @@ impl PyDataFrame {
             return Ok(());
         }
         let mut base: Option<DataFrame> = None;
-        for (name, lb, vr) in stale {
+        for volas_core::StaleComputed { name, lookback: lb, valid_rows: vr, warm } in stale {
             // Parse-free single-row fast path for the stateless finite-memory directives
             // (price transforms, TR, the momentum / ROC family): the newest row is a
             // formula of its own inputs; the (empty) state still advances one row.
@@ -82,7 +91,7 @@ impl PyDataFrame {
                 base = Some(self.base_frame()?);
             }
             let frame = if directive_uses_default_series(&node) { None } else { base.as_ref() };
-            self.refresh_column(&name, &node, frame, lb, vr, height)?;
+            self.refresh_column(&name, &node, frame, Stale { lb, vr, warm }, height)?;
         }
         Ok(())
     }
@@ -94,15 +103,19 @@ impl PyDataFrame {
         name: &str,
         node: &Ast,
         frame: Option<&DataFrame>,
-        lb: usize,
-        vr: usize,
+        Stale { lb, vr, warm }: Stale,
         height: usize,
     ) -> PyResult<()> {
-        // Past warm-up (`vr >= lb`) with a carried state, a recursive column resumes.
-        // The gate keeps the warm-up region on the full recompute: an indicator whose
-        // warm-up mask is length-dependent would otherwise freeze an incrementally
-        // carried early row that a full recompute masks.
-        if vr >= lb && self.inner.computed_resume_state(name).is_some() {
+        // Past warm-up with a carried state, a column resumes. Warm-up is counted on the
+        // column's processed history, not on this frame's row numbers (a tail slice's
+        // replaced last row is still past it). The gate keeps the warm-up region on the
+        // full recompute: an indicator whose warm-up mask is length-dependent would
+        // otherwise freeze an incrementally carried early row that a full recompute
+        // masks. A sliding accumulator also needs the row its window drops, `lb + 1`
+        // rows back, in this frame (a tail slice of `lb` rows lacks it): without it the
+        // column recomputes over the frame's rows instead.
+        let reach = vr > lb || !volas_directive::lookback::slides(node);
+        if warm && reach && self.inner.computed_resume_state(name).is_some() {
             // One row at a time through the allocation-free step: each row's value and
             // the state as of it; the last two states are kept.
             let mut row = vr;
@@ -168,7 +181,7 @@ impl PyDataFrame {
         // reproducible from its own rows).
         let recomputed = volas_directive::exec::execute_refresh(df, node).map_err(value_err)?;
         let (state, before) = Self::capture_resume_states(df, node, &recomputed);
-        let from = if vr < lb { 0 } else { vr };
+        let from = if warm { vr } else { 0 };
         let tail = recomputed.slice(from, recomputed.len());
         self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;
         self.inner.set_computed_states(name, state, before);

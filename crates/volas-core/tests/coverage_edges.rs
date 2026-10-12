@@ -21,7 +21,8 @@ fn computed_scalar_update_refreshes_valid_rows_and_reports_errors() {
     );
     assert_eq!(df.computed_columns()[0].1.valid_rows, 3);
 
-    df.update_computed_f64_value("value", 99, 9.0).unwrap();
+    // a row past the frame is an error, never a silently dropped write
+    assert!(df.update_computed_f64_value("value", 99, 9.0).is_err());
     assert_eq!(
         df.column("value").unwrap().as_f64().unwrap(),
         &[1.0, 8.0, 3.0]

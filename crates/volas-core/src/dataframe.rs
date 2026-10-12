@@ -38,9 +38,31 @@ pub struct ComputedMeta {
     /// moves the old `state` here. `None` when unknown (a replaced row then recomputes
     /// the column, capturing both states again).
     pub state_before_last: Option<Vec<f64>>,
+    /// The absolute position (see [`DataFrame::origin`]) of the first row the column's
+    /// history starts at — the row its warm-up counts from. Its rows `[since, origin +
+    /// valid_rows)` have been processed, so warm-up is judged on that count, never on
+    /// a slice's local row number.
+    pub since: usize,
+    /// The absolute position of the row [`state`](Self::state) describes (the one
+    /// before it for `state_before_last`). A state is only ever resumed from that
+    /// row: one whose recorded row is not the last valid row is refused.
+    state_at: usize,
     /// A spare buffer the one-row resume writes the next state into, recycled between
     /// the two states so a live column steps with no allocation.
     scratch: Vec<f64>,
+}
+
+impl ComputedMeta {
+    /// The absolute position of the column's last valid row, if it has one.
+    fn last_valid(&self, origin: usize) -> Option<usize> {
+        (origin + self.valid_rows).checked_sub(1).filter(|_| self.valid_rows > 0)
+    }
+
+    /// Whether the column is past its warm-up: more than `lookback` rows of its
+    /// history are processed.
+    pub fn warm(&self, origin: usize) -> bool {
+        origin + self.valid_rows >= self.since + self.lookback
+    }
 }
 
 /// A 2-D, column-oriented, time-indexed table. All columns share one index and
@@ -143,6 +165,14 @@ impl DataFrame {
         for (name, meta) in &self.computed {
             assert!(self.name_to_idx.contains_key(name), "computed {name:?} is not a column");
             assert!(meta.valid_rows <= self.height, "computed {name:?} cursor past the height");
+            // a carried state describes a valid row of THIS frame (never one before it)
+            if meta.state.is_some() {
+                let rows = self.origin..self.origin + meta.valid_rows;
+                assert!(rows.contains(&meta.state_at), "computed {name:?} state outside its rows");
+            }
+            if meta.state_before_last.is_some() {
+                assert!(meta.state_at > self.origin, "computed {name:?} earlier state before row 0");
+            }
         }
     }
 
@@ -430,23 +460,22 @@ impl DataFrame {
         for (name, meta) in &self.computed {
             if len >= meta.lookback {
                 let valid = meta.valid_rows.saturating_sub(start).min(len);
-                // Carry the recursive state only when this slice's END reaches the
-                // parent's `valid_rows`: the captured state is the internal state as
-                // of the parent row `valid_rows - 1`, which is THIS sub-frame's last
-                // valid row exactly when `start + len >= valid_rows` (so `valid` ==
-                // the parent's last-valid offset). A shorter slice (end before
-                // `valid_rows`) would leave the state attached to a row the sub-frame
-                // no longer ends on, so we drop it (the column stays correct via the
-                // full-recompute fallback, just not O(new-rows) continuable).
-                // Both states describe rows relative to the parent's last valid row, so
-                // they carry together.
-                let reaches_end = end >= meta.valid_rows;
-                let carried = if reaches_end { meta.state.clone() } else { None };
-                let carried_before = if reaches_end {
-                    meta.state_before_last.clone()
-                } else {
-                    None
-                };
+                // Carry a state only when the row it describes is one of this slice's
+                // valid rows: the state is the internal state as of the parent row
+                // `state_at` (its last valid row), so the slice must END at or past it
+                // (else it would be attached to a row the sub-frame no longer ends on)
+                // and START at or before it (else it describes a row before the slice —
+                // a stale parent's slice starting after its last valid row). The state
+                // before it likewise needs its own row (`state_at - 1`) inside. Without
+                // a state the column stays correct through the refresh's recompute,
+                // just not O(new-rows) continuable.
+                let (first, last) = (self.origin + start, self.origin + end);
+                let inside = |at: usize| meta.state.is_some() && (first..last).contains(&at)
+                    && meta.last_valid(self.origin) == Some(meta.state_at);
+                let carried = inside(meta.state_at).then(|| meta.state.clone()).flatten();
+                let carried_before = (inside(meta.state_at) && meta.state_at > first)
+                    .then(|| meta.state_before_last.clone())
+                    .flatten();
                 df.computed.insert(
                     name.clone(),
                     ComputedMeta {
@@ -454,6 +483,8 @@ impl DataFrame {
                         valid_rows: valid,
                         state: carried,
                         state_before_last: carried_before,
+                        since: meta.since,
+                        state_at: meta.state_at,
                         scratch: Vec::new(),
                     },
                 );
@@ -632,6 +663,7 @@ impl DataFrame {
 
 mod admit;
 mod computed;
+pub use computed::StaleComputed;
 
 #[cfg(test)]
 mod tests;
