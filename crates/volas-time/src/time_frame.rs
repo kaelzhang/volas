@@ -212,30 +212,58 @@ impl TimeFrame {
         }
     }
 
+    /// The frame's length in its own unit: a sub-day frame is an exact number of
+    /// seconds; a frame of a day or longer is a count of days, weeks, months or
+    /// years (calendar units, whose wall-clock length is not fixed).
+    pub fn span(self) -> Span {
+        use TimeFrame::*;
+        match self {
+            Sec1 => Span::Seconds(1),
+            Min1 => Span::Seconds(60),
+            Min3 => Span::Seconds(180),
+            Min5 => Span::Seconds(300),
+            Min15 => Span::Seconds(900),
+            Min30 => Span::Seconds(1800),
+            Hour1 => Span::Seconds(3600),
+            Hour2 => Span::Seconds(7200),
+            Hour4 => Span::Seconds(14400),
+            Hour6 => Span::Seconds(21600),
+            Hour8 => Span::Seconds(28800),
+            Hour12 => Span::Seconds(43200),
+            Day1 => Span::Days(1),
+            Day3 => Span::Days(3),
+            Week1 => Span::Weeks(1),
+            Month1 => Span::Months(1),
+            Year1 => Span::Years(1),
+        }
+    }
+
     /// The fixed duration in seconds for the fixed-length frames; `None` for the
     /// variable-length calendar frames (`Month1` / `Year1`). Used only by
     /// [`can_coarsen`](Self::can_coarsen).
     fn duration_secs(self) -> Option<i64> {
-        use TimeFrame::*;
-        Some(match self {
-            Sec1 => 1,
-            Min1 => 60,
-            Min3 => 180,
-            Min5 => 300,
-            Min15 => 900,
-            Min30 => 1800,
-            Hour1 => 3600,
-            Hour2 => 7200,
-            Hour4 => 14400,
-            Hour6 => 21600,
-            Hour8 => 28800,
-            Hour12 => 43200,
-            Day1 => 86400,
-            Day3 => 259200,
-            Week1 => 604800,
-            Month1 | Year1 => return None,
-        })
+        match self.span() {
+            Span::Seconds(s) => Some(s),
+            Span::Days(k) => Some(k * 86400),
+            Span::Weeks(k) => Some(k * 604800),
+            Span::Months(_) | Span::Years(_) => None,
+        }
     }
+}
+
+/// A [`TimeFrame`]'s length in its own unit (see [`TimeFrame::span`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Span {
+    /// A sub-day frame: an exact duration of this many seconds.
+    Seconds(i64),
+    /// This many days.
+    Days(i64),
+    /// This many weeks.
+    Weeks(i64),
+    /// This many calendar months.
+    Months(i64),
+    /// This many calendar years.
+    Years(i64),
 }
 
 #[cfg(test)]
@@ -479,5 +507,25 @@ mod tests {
             TimeFrame::Month1.unify(mid),
             TimeFrame::Month1.unify(same_month)
         );
+    }
+
+    #[test]
+    fn span_is_exact_seconds_below_a_day_and_calendar_units_above() {
+        use TimeFrame::*;
+        let seconds = [
+            (Sec1, 1), (Min1, 60), (Min3, 180), (Min5, 300), (Min15, 900), (Min30, 1800),
+            (Hour1, 3600), (Hour2, 7200), (Hour4, 14400), (Hour6, 21600), (Hour8, 28800),
+            (Hour12, 43200),
+        ];
+        for (tf, s) in seconds {
+            assert_eq!(tf.span(), Span::Seconds(s), "{tf:?}");
+            assert!(s < 86400);
+        }
+        assert_eq!(Day1.span(), Span::Days(1));
+        assert_eq!(Day3.span(), Span::Days(3));
+        assert_eq!(Week1.span(), Span::Weeks(1));
+        assert_eq!(Month1.span(), Span::Months(1));
+        assert_eq!(Year1.span(), Span::Years(1));
+        assert_eq!(seconds.len() + 5, ALL.len());
     }
 }

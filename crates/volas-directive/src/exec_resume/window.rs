@@ -9,7 +9,7 @@
 //! averages here (`apo`, `ppo`, `bias`, `dma`, `macdext`, `mavp`, `ma`) compose
 //! [`FiniteMa`] stages, as their dispatch arms compose `ma_typed`.
 
-use crate::exec::{arg_f64, arg_i64, arg_str, arg_usize, percent_oscillator, tf_to_minutes};
+use crate::exec::{arg_f64, arg_usize, hv_annualization, percent_oscillator};
 use crate::lookback::ma_lookback;
 use crate::operands::Operands;
 use crate::types::ArgValue;
@@ -151,10 +151,7 @@ pub(crate) fn step(
         ("bbi", _) => ind::bbi_step(&close()?, p(0), p(1), p(2), p(3), row, prev, next),
         ("hma", _) => ind::hma_step(&close()?, p(0), row, prev, next),
         ("vwma", _) => ind::vwma_step(&close()?, &ops.f64(1, "volume").ok()?, p(0), row, prev, next),
-        ("hv", _) => {
-            let minutes = tf_to_minutes(arg_str(args, 1)).ok()?;
-            ind::hv_step(&close()?, p(0), minutes, arg_i64(args, 2), row, prev, next)
-        }
+        ("hv", _) => ind::hv_step(&close()?, p(0), hv_annualization(args), row, prev, next),
         ("var", _) => ind::var_step(&close()?, p(0), None, row, prev, next),
         ("stddev", _) => ind::var_step(&close()?, p(0), Some(arg_f64(args, 1)), row, prev, next),
         ("sum", _) => ind::sum_step(&close()?, p(0), row, prev, next),

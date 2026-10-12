@@ -31,8 +31,10 @@ pub fn bbw(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
     (4.0 * &std / &ma).to_vec()
 }
 
-/// Historical Volatility.
-pub fn hv(close: &[f64], period: usize, minutes: i64, trading_days: i64, origin: usize) -> Vec<f64> {
+/// Historical Volatility: the sample (ddof = 1) standard deviation of the one-bar log
+/// returns `ln(close_t / close_{t-1})` over `period` bars, times `annualization` — the
+/// square root of the bars per year, which the caller derives from the bar's time frame.
+pub fn hv(close: &[f64], period: usize, annualization: f64, origin: usize) -> Vec<f64> {
     let n = close.len();
     let mut log_return = Array1::from_elem(n, f64::NAN);
     for i in 1..n {
@@ -41,8 +43,6 @@ pub fn hv(close: &[f64], period: usize, minutes: i64, trading_days: i64, origin:
         }
     }
     let std = kernels::rolling_std(log_return.view(), period, 1, origin);
-    let day_minutes = 1440.0;
-    let annualization = ((trading_days as f64) * day_minutes / (minutes as f64)).sqrt();
     (&std * annualization).to_vec()
 }
 
@@ -151,7 +151,7 @@ fn log_return(close: &[f64], i: usize) -> f64 {
 /// [`hv`]'s state after the rows of `close`: the deviation's [`Slide`] of `[Σr, Σr²]`.
 pub fn hv_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
     state_after(Slide::<2>::initial(origin), close.len(), |row, prev, next| {
-        hv_step(close, period, 1, 1, row, prev, next)
+        hv_step(close, period, 1.0, row, prev, next)
     })
 }
 
@@ -159,8 +159,7 @@ pub fn hv_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>>
 pub fn hv_step(
     close: &[f64],
     period: usize,
-    minutes: i64,
-    trading_days: i64,
+    annualization: f64,
     row: usize,
     state: &[f64],
     next: &mut [f64],
@@ -171,7 +170,6 @@ pub fn hv_step(
     let mut slide = Slide::<2>::from_state(state)?;
     let (_, std) = kernels::mean_std_row(&mut slide, period, 1, row, |j| log_return(close, j));
     slide.write_state(next);
-    let annualization = ((trading_days as f64) * 1440.0 / (minutes as f64)).sqrt();
     Some(std * annualization)
 }
 
