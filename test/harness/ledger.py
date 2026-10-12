@@ -121,14 +121,16 @@ class Ledger:
         return np.array(vals, dtype=object)
 
     def frame(self, columns=None, start: int = 0) -> volas.DataFrame:
-        """A fresh frame of the ledger rows ``[start:]`` (the reference frame)."""
+        """A fresh frame of the ledger rows ``[start:]`` (the reference frame): the
+        whole history sliced at ``start``, so its rows keep their absolute positions
+        (where sliding sums re-anchor) exactly as a slice of the frame under test does."""
         columns = tuple(columns or self.columns)
         schema = Schema(self.schema.price, self.schema.volume,
                         tuple((c, self.dtype(c)) for c in columns if c not in self.schema.columns[:5]),
                         self.schema.index, self.schema.tz)
-        rows = self.rows[start:]
-        index = None if self.schema.index == 'range' else self.index[start:]
-        return build.frame(schema, rows, index, columns=columns)
+        index = None if self.schema.index == 'range' else self.index
+        full = build.frame(schema, self.rows, index, columns=columns)
+        return full.iloc[start:] if start else full
 
 
 def reference(ledger: Ledger, directive: str, env: tuple[str, ...], start: int = 0,
