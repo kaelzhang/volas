@@ -14,21 +14,6 @@ use volas_directive::{execute, parse};
 #[allow(unused_imports)]
 use crate::*;
 
-/// R4-P2-01: appended rows must not introduce a column absent from the target.
-/// The name-aligned append NaN-pads a *missing* column (fine), but it silently
-/// dropped an *extra* one — so an exchange adding a field would lose data without
-/// a trace. Reject the extra column instead.
-fn require_no_new_columns(target: &DataFrame, src: &DataFrame) -> PyResult<()> {
-    if let Some(name) = src.names().iter().find(|n| !target.has_column(n)) {
-        return Err(PyValueError::new_err(format!(
-            "append: column {name:?} is not in the target frame — appended rows must not \
-             introduce a new column (a missing column is NaN-padded; an extra one is \
-             rejected so data is never silently dropped)"
-        )));
-    }
-    Ok(())
-}
-
 #[pymethods]
 impl PyDataFrame {
     /// `df[key] = value`. With a column name, add or replace that column —
@@ -176,7 +161,12 @@ impl PyDataFrame {
     /// an error; unlabelled rows (a ``RangeIndex``) take the next labels.
     ///
     /// Missing columns are NaN-padded; cached directive columns go stale until
-    /// ``fulfill()``. A snapshot taken via ``copy()`` / ``iloc`` is unaffected
+    /// ``fulfill()``. The rows may carry only the frame's data columns (a cached
+    /// directive column raises ``ValueError`` — select the data columns first), values
+    /// its dtypes hold exactly (a lossy value raises ``TypeError``), and labels of its
+    /// index kind and awareness; a source frame must be fresh, and only its visible rows
+    /// are read. The rows are checked whole before anything is written, so on an error
+    /// the frame is unchanged. A snapshot taken via ``copy()`` / ``iloc`` is unaffected
     /// (it pays one copy-on-write the next time *it* is appended to).
     ///
     /// Args:
@@ -194,40 +184,23 @@ impl PyDataFrame {
     ///     DataFrame: ``self`` (enabling chaining).
     pub(crate) fn append<'py>(slf: Bound<'py, Self>, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
         if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
+            // A source frame is read like any bulk read: its visible rows only, and never
+            // while a cached column of it is stale (its placeholders are not data).
+            ensure_fresh(&df.inner)?;
             if slf.as_ptr() == other.as_ptr() {
                 // `df.append(df)` needs an owned snapshot before taking `self` mutably.
-                let other_inner = df.inner.clone();
+                let rows = df.logical().into_owned();
                 drop(df);
-                let mut me = slf.borrow_mut();
-                require_no_new_columns(&me.inner, &other_inner)?;
-                if me.tf.is_some() {
-                    me.fold_append(&other_inner)?;
-                } else {
-                    me.inner.append_labelled(&other_inner).map_err(pyerr)?;
-                }
-                me.maybe_compact()?;
+                slf.borrow_mut().append_rows(&rows)?;
                 return Ok(slf);
             }
-            // Normal live path: append a distinct one-row frame without cloning it.
-            let mut me = slf.borrow_mut();
-            require_no_new_columns(&me.inner, &df.inner)?;
-            if me.tf.is_some() {
-                me.fold_append(&df.inner)?;
-            } else {
-                me.inner.append_labelled(&df.inner).map_err(pyerr)?;
-            }
-            me.maybe_compact()?;
+            // Normal live path: append a distinct frame without cloning it.
+            let rows = df.logical();
+            slf.borrow_mut().append_rows(&rows)?;
             return Ok(slf);
         }
         if let Ok(row) = other.extract::<PyRef<PyRow>>() {
-            let mut me = slf.borrow_mut();
-            require_no_new_columns(&me.inner, &row.inner)?;
-            if me.tf.is_some() {
-                me.fold_append(&row.inner)?;
-            } else {
-                me.inner.append_labelled(&row.inner).map_err(pyerr)?;
-            }
-            me.maybe_compact()?;
+            slf.borrow_mut().append_rows(&row.inner)?;
             return Ok(slf);
         }
         // A scalar bar dict — the timestamp under the index-name key. Built straight into a
@@ -235,12 +208,7 @@ impl PyDataFrame {
         if let Ok(dict) = other.downcast::<pyo3::types::PyDict>() {
             let mut me = slf.borrow_mut();
             let bar = me.bar_from_dict(dict)?;
-            if me.tf.is_some() {
-                me.fold_append(&bar)?;
-            } else {
-                me.inner.append_labelled(&bar).map_err(pyerr)?;
-            }
-            me.maybe_compact()?;
+            me.append_rows(&bar)?;
             return Ok(slf);
         }
         Err(PyTypeError::new_err("append expects a DataFrame, a Row, or a bar dict"))
@@ -274,6 +242,19 @@ impl PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// The one path every append form takes once its rows are built: a time-frame frame
+    /// folds them, any other frame appends them keyed by label; then a windowed frame
+    /// compacts. The rows are checked whole before the first write, so on an error the
+    /// frame is unchanged.
+    pub(crate) fn append_rows(&mut self, rows: &DataFrame) -> PyResult<()> {
+        if self.tf.is_some() {
+            self.fold_append(rows)?;
+        } else {
+            self.inner.append(rows).map_err(pyerr)?;
+        }
+        self.maybe_compact()
+    }
+
     /// Resolve `name` (a real column or a directive), materializing + caching a
     /// directive on first use and refreshing a cached directive's stale tail
     /// (O(lookback); a no-op for a plain column or an already-fresh one). Returns

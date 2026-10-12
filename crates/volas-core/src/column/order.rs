@@ -666,6 +666,52 @@ impl Column {
     }
 
 
+    /// Check, writing nothing, that a fold into cell `row` under `op` stays in this
+    /// column's range — the validation half of [`combine_at`](Self::combine_at) (from
+    /// the cell's value) or, with `restart`, of [`init_at`](Self::init_at) on the first
+    /// of `cells` then `combine_at` on the rest. `cells` are the source cells `(column,
+    /// row)` in fold order. A multi-column fold checks every column with this before
+    /// its first write, so a rejected fold changes nothing. Only an integer / datetime
+    /// fold can fail; `Bool` / `Str` are rejected as by `combine_at`.
+    #[inline(never)]
+    pub fn check_fold<'c>(
+        &self,
+        row: usize,
+        op: CombineOp,
+        restart: bool,
+        cells: impl IntoIterator<Item = (&'c Column, usize)>,
+    ) -> Result<()> {
+        let (mut acc, dtype) = match self {
+            Column::F64(_) | Column::F32(_) => return Ok(()),
+            Column::I64(buf, _) => (buf[row], DType::I64),
+            Column::I32(buf, _) => (buf[row] as i64, DType::I32),
+            Column::Datetime(buf) => (buf[row], DType::Datetime),
+            Column::Bool(_, _) | Column::Str(_, _) => {
+                return Err(VolasError::DType(
+                    "check_fold: only numeric / datetime columns can be folded in place".into(),
+                ))
+            }
+        };
+        let in_range = |v: Option<i64>| -> Result<i64> {
+            match dtype {
+                DType::I32 => fold_in_range::<i32>(v, dtype).map(i64::from),
+                _ => fold_in_range::<i64>(v, dtype),
+            }
+        };
+        let mut cells = cells.into_iter();
+        if restart {
+            let Some((src, r)) = cells.next() else { return Ok(()) };
+            acc = in_range(Some(src.get_i64(r)))?;
+        }
+        if matches!(op, CombineOp::Keep) {
+            return Ok(());
+        }
+        for (src, r) in cells {
+            acc = in_range(combine_i64(op, acc, src.get_i64(r)))?;
+        }
+        Ok(())
+    }
+
     // --- dtype-preserving numeric transforms (pandas 3.0) ---------------------
     // Each dispatches the kernel over the column's element type so an int column
     // stays int and computes natively (no f64 round-trip). A non-numeric column

@@ -311,9 +311,37 @@ Rows are keyed by their index label:
   `ValueError`;
 - an integer or string index stays unique: a row labelled like an **earlier** row
   raises `ValueError` (a new label before the last is appended);
-- rows without labels of their own (a `RangeIndex`) take the next labels.
+- rows without labels of their own (a `RangeIndex`) take the next labels — on an
+  integer index the labels after the last one, which must not already be in the index.
 
-On an error the frame is left unchanged.
+What the rows may carry:
+
+- **the frame's data columns only.** A column the frame does not have raises
+  `ValueError`; a column the frame lacks in the rows is padded with a missing value. A
+  column the frame **caches** (an indicator directive it computes itself) raises
+  `ValueError`, in every form — select the data columns first:
+
+  ```text
+  ValueError: cannot append columns ['ema:12']: they are cached directives that this DataFrame computes itself. Select the data columns first, e.g. df.append(other[['open', 'high', 'low', 'close', 'volume']]).
+  ```
+
+- **values the frame's dtypes hold exactly.** Each value is converted to the column's
+  dtype when that changes nothing (an integer `2` into a float column, `3.0` into an
+  integer column); a value that would change (`2.5` into an integer column, text into a
+  number column) raises `TypeError` (`OverflowError` past the dtype's range). The same
+  rule decides a new row and a replacing row.
+- **labels of the frame's index kind.** A `DatetimeIndex` takes timestamps only — of
+  the same awareness: tz-naive rows onto a tz-aware frame (or the reverse) raise
+  `ValueError`, while tz-aware rows in another zone are the same instants and keep the
+  frame's zone; a `NaT` label raises. An integer or string index takes labels of its
+  own kind; rows with a `RangeIndex` onto a `DatetimeIndex` raise.
+- **a source frame that is fresh.** Appending a `DataFrame` reads it like any bulk
+  read: while one of its cached directive columns is stale it raises (call its
+  `fulfill()` first), and a bounded-window source contributes its visible rows only.
+
+The rows are checked whole before anything is written: on an error the frame is left
+exactly as it was — every column, the index and the cached indicators — and the next
+append continues as if the rejected one never happened.
 
 ```python
 times = ['2026-01-01 17:00', '2026-01-01 17:01', '2026-01-01 17:02']

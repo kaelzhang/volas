@@ -16,16 +16,12 @@ from __future__ import annotations
 # --- defects the machines step around (each has a strict-xfail reproduction) -----
 
 OPEN_DEFECTS: frozenset[str] = frozenset({
-    # A failed append leaves earlier columns grown (non-atomic append / fold).
-    'append-atomicity',
     # A composite cached while a bare-named cached column is stale reads the stale
     # placeholder; a plain column named like a command rebinds cached composites.
     'stale-name-binding',
     # `exec` of a bare cached name and `get_column` of a stale computed column
     # return the stale placeholder instead of raising / recomputing.
     'unguarded-stale-read',
-    # Append coerces a foreign index kind / timezone / NaT instead of raising.
-    'append-index-coercion',
     # Windowed frames: recursive columns are not bit-exact with the unbounded
     # history, and a base write restarts carried state on the retained rows only.
     'windowed-drift',
@@ -38,9 +34,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
     # while df[d] names the column from the bound values ('ma:5', 'sar').
     'stringify-column-name',
-    # append reads a source frame without a freshness check (stale placeholders are
-    # appended as data).
-    'stale-append-source',
     # fast > slow is accepted for the two-EMA lines: `macd` panics (a Rust
     # slice-index panic), `apo` / `ppo` / `dma` resume differently from the full
     # compute.
@@ -95,6 +88,9 @@ GET_COLUMN_STALE_RAISES = True
 COMPARE_STALE_RHS_RAISES = True
 # Appending a stale source frame raises (the source is read in bulk).
 APPEND_STALE_SOURCE_RAISES = True
+# Appended rows carrying one of the target's cached directive columns raise, in every
+# append form (REQUIREMENTS R20): select the data columns first.
+APPEND_CACHED_COLUMNS_RAISES = True
 
 # --- append (I12) ---------------------------------------------------------------------
 

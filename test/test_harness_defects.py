@@ -44,11 +44,11 @@ def _same(a, b):
 # --- atomicity (I8) -----------------------------------------------------------------
 
 
-@_xfail('M1 append-atomicity', 'a dtype error on a later column leaves earlier columns grown')
 def test_a_rejected_append_leaves_the_frame_unchanged():
+    # (an int64 volume onto a float64 one is converted losslessly, contract #20; text is not)
     df = volas.DataFrame({'open': [1.0, 2.0], 'close': [1.5, 2.5], 'volume': [10.0, 20.0]})
     with pytest.raises(TypeError):
-        df.append(volas.DataFrame({'open': [3.0], 'close': [3.5], 'volume': np.array([30], 'int64')}))
+        df.append(volas.DataFrame({'open': [3.0], 'close': [3.5], 'volume': ['x']}))
     assert [len(df.get_column(c)) for c in df.columns] == [2, 2, 2]
 
 
@@ -111,7 +111,6 @@ def test_a_comparison_rejects_a_stale_right_hand_frame():
         a == b  # noqa: B015
 
 
-@_xfail('H2 stale-append-source', 'append copies a stale source frame placeholders as data')
 def test_appending_a_stale_frame_raises():
     cols = _walk(30)
     src = _frame(cols, 20, 29)
@@ -123,7 +122,6 @@ def test_appending_a_stale_frame_raises():
         df.append(src)
 
 
-@_xfail('C4 windowed-source-margin', "a windowed source contributes its hidden margin rows")
 def test_a_windowed_source_contributes_only_its_visible_rows():
     cols = _walk(20)
     src = volas.DataFrame({k: v[:10] for k, v in cols.items()}, window=3, max_lookback=4)
@@ -151,13 +149,11 @@ def _dated():
     return volas.DataFrame({'time': _T[:3], 'close': [1.0, 2.0, 3.0]}).set_index('time')
 
 
-@_xfail('M6 append-index-coercion', 'a RangeIndex bar turns a DatetimeIndex into int labels')
 def test_a_range_index_bar_onto_a_datetime_frame_raises():
     with pytest.raises(ValueError):
         _dated().append(volas.DataFrame({'close': [4.0]}))
 
 
-@_xfail('M6 append-index-coercion', 'a naive bar onto an aware frame is taken as UTC')
 def test_a_naive_bar_onto_an_aware_frame_raises():
     df = _dated().tz_localize('Asia/Shanghai')
     with pytest.raises(ValueError):

@@ -95,12 +95,13 @@ class PlainMachine(FrameMachine):
         schema = self.store.schema
         rows, index = self._new_bars(2 if multi else 1, regime, '1m')
         if kind == 'dtype':
-            # One column flips float <-> int. While append atomicity is open only the
-            # first column may (it fails before any column grows); otherwise any.
+            # One numeric column carries text, which no numeric dtype holds (a lossless
+            # int <-> float value is converted, contract #20): any column, the rows are
+            # checked whole before the first one grows.
             numeric = [c for c in schema.columns if schema.dtype(c) in ('float64', 'float32', 'int64', 'int32')]
-            col = numeric[0] if contracts.avoids('append-atomicity') else numeric[regime[1] % len(numeric)]
-            other = 'int64' if schema.dtype(col) in ('float64', 'float32') else 'float64'
-            bar = build.frame(schema, rows, index, dtypes={col: other})
+            col = numeric[regime[1] % len(numeric)]
+            bar = build.frame(schema, rows, index)
+            bar[col] = ['x'] * len(bar)
             self.attempt(lambda: self.df.append(bar), expect_error=TypeError, label=f'append dtype {col}')
             return
         if kind == 'extra_column':
@@ -115,11 +116,11 @@ class PlainMachine(FrameMachine):
             self.attempt(lambda: self.df.iloc.__setitem__((0, 0), 1.0), expect_error=ValueError,
                          label=f'iloc write {col} while stale')
             return
-        if contracts.avoids('append-index-coercion') or not contracts.APPEND_FOREIGN_INDEX_RAISES:
+        if not contracts.APPEND_FOREIGN_INDEX_RAISES:
             return
         if kind == 'str_index':
             plain = build.frame(schema, rows, None)
-            bar = volas.DataFrame({'k': ['a'] * len(plain),
+            bar = volas.DataFrame({'k': [f'k{i}' for i in range(len(plain))],
                                    **{c: plain.get_column(c) for c in plain.columns}}).set_index('k')
             self.attempt(lambda: self.df.append(bar), expect_error=ValueError, label='append str index')
             return
@@ -319,10 +320,14 @@ class PlainMachine(FrameMachine):
         if set(src_df.columns) - set(self.df.columns):
             self.attempt(lambda: self.df.append(src_df), expect_error=ValueError, label='append snapshot (extra)')
             return
-        if any(c in src_cached and c not in self.cached for c in src_df.columns):
+        if contracts.APPEND_CACHED_COLUMNS_RAISES and any(c in self.cached for c in src_df.columns):
+            self.attempt(lambda: self.df.append(src_df), expect_error=ValueError,
+                         label='append snapshot (cached columns)')
+            return
+        if any(c in src_cached for c in src_df.columns):
             return
         if src_stale:
-            if contracts.APPEND_STALE_SOURCE_RAISES and not contracts.avoids('stale-append-source'):
+            if contracts.APPEND_STALE_SOURCE_RAISES:
                 self.attempt(lambda: self.df.append(src_df), expect_error=ValueError,
                              label='append stale snapshot')
             return

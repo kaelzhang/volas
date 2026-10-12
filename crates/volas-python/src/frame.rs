@@ -673,21 +673,14 @@ impl PyDataFrame {
         } else {
             None
         };
-        // Validate every key: the index key, or a plain column. Reject unknown / directive.
-        for k in dict.keys() {
-            let ks: String = k.extract()?;
-            if idx_name.as_deref() == Some(ks.as_str()) {
-                continue;
-            }
-            if !inner.has_column(&ks) {
+        // Validate every key: the index key, or a data column. A cached directive column
+        // is rejected by the same rule as every other append form; an unknown key raises.
+        let keys = dict.keys().iter().map(|k| k.extract::<String>()).collect::<PyResult<Vec<_>>>()?;
+        inner.check_no_cached(keys.iter().map(String::as_str)).map_err(pyerr)?;
+        for ks in &keys {
+            if idx_name.as_deref() != Some(ks.as_str()) && !inner.has_column(ks) {
                 return Err(PyValueError::new_err(format!(
                     "append(dict): unknown key {ks:?} — not a column of the frame nor its index"
-                )));
-            }
-            if inner.is_computed(&ks) {
-                return Err(PyValueError::new_err(format!(
-                    "append(dict): {ks:?} is a cached directive column — recomputed by \
-                     fulfill, not set per bar"
                 )));
             }
         }

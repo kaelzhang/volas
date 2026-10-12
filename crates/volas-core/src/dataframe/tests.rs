@@ -1,4 +1,5 @@
     use super::*;
+    use crate::CombineOp;
     use crate::DType;
 
     fn sample() -> DataFrame {

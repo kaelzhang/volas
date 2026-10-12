@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::column::{Column, CombineOp};
+use crate::column::Column;
 use crate::fxhash::FxHashMap;
 use crate::error::{Result, VolasError};
-use crate::index::{Index, IndexKind, Label};
+use crate::index::{Index, IndexKind};
 use crate::series::Series;
 
 /// Metadata for a materialized (cached) directive column: the directive that
@@ -496,54 +496,6 @@ impl DataFrame {
         Ok(self.same_schema(columns, self.index.take(&idx), 0))
     }
 
-    /// Append the rows of `other` (matched by column name) in place. Columns of
-    /// `self` absent from `other` are NaN-padded (so a frame with materialized
-    /// directive columns can take raw bars; `fulfill` then refreshes them).
-    /// Computed-column metadata is retained, leaving the new rows stale.
-    pub fn append(&mut self, other: &DataFrame) -> Result<()> {
-        let oh = other.height;
-        // Identical schema (same names, same order) — the live-streaming / tf-fold
-        // case: append positionally, skipping the per-column name lookup entirely.
-        // Matching name vectors guarantee `other`'s column `pos` is this frame's
-        // column `pos`.
-        if self.names == other.names {
-            for (dst, src) in self.columns.iter_mut().zip(&other.columns) {
-                dst.append(src)?;
-            }
-            Arc::make_mut(&mut self.index).extend(&other.index)?;
-            self.height += oh;
-            #[cfg(debug_assertions)]
-            self.debug_check();
-            return Ok(());
-        }
-        // Iterate by position to avoid cloning every column name and then
-        // re-hashing it back into this same frame on the live append path.
-        for pos in 0..self.names.len() {
-            let n = &self.names[pos];
-            if let Some(other_pos) = other.column_pos(n) {
-                self.columns[pos].append(&other.columns[other_pos])?;
-            } else {
-                // column `n` is missing from `other` — pad the new rows.
-                if self.computed.contains_key(n) {
-                    // A cached directive (F64 indicator / Bool mask): a cheap stale
-                    // placeholder (NaN / `false`); `fulfill` recomputes and overwrites
-                    // the appended tail, so a dense placeholder keeps validity simple.
-                    self.columns[pos].append_missing(oh)?;
-                } else {
-                    // A plain column keeps its data semantics: pad with dtype-preserving
-                    // NA (int / bool / str grow the validity bitmap; datetime -> NaT;
-                    // float -> NaN), never upcasting the dtype or erroring.
-                    self.columns[pos].append_na(oh);
-                }
-            }
-        }
-        Arc::make_mut(&mut self.index).extend(&other.index)?;
-        self.height += oh;
-        #[cfg(debug_assertions)]
-        self.debug_check();
-        Ok(())
-    }
-
     /// Assign `values` into column position `col` at the given row `positions`
     /// (copy-on-write via [`Arc::make_mut`]). `values` is broadcast when it has
     /// length 1, otherwise its length must equal `positions.len()`. This backs
@@ -590,169 +542,6 @@ impl DataFrame {
         self.invalidate_computed_on_write_at(col);
         #[cfg(debug_assertions)]
         self.debug_check();
-        Ok(())
-    }
-
-    /// Fold `src[src_row]` into the forming aggregate at `row`, in place, per the
-    /// `(dst_col, src_col, op)` plan — the allocation-free live tf-fold. Unlike
-    /// `assign_positions` it neither re-reduces the period nor clones a column
-    /// buffer: each cell is combined through [`Column::combine_at`]. A single
-    /// conservative cache invalidation follows (the forming row changed, so every
-    /// cached directive recomputes on the next read), exactly like a positional
-    /// write. The caller guarantees every `op`'s column dtype is fold-eligible
-    /// (numeric / datetime); a `Bool` / `Str` column makes `combine_at` error.
-    pub fn fold_forming_row(
-        &mut self,
-        row: usize,
-        src: &DataFrame,
-        src_row: usize,
-        ops: &[(usize, usize, CombineOp)],
-    ) -> Result<()> {
-        for &(dst_col, src_col, op) in ops {
-            self.columns[dst_col].combine_at(row, op, &src.columns[src_col], src_row)?;
-        }
-        // Only the forming row changed: mark it stale but KEEP each cached column's
-        // carried states, so `refresh` recomputes just this row from the state before
-        // it instead of recomputing the whole buffer from scratch.
-        self.invalidate_computed_forming_row(row);
-        #[cfg(debug_assertions)]
-        self.debug_check();
-        Ok(())
-    }
-
-    /// Re-cumulate the forming aggregate at `row` from all of `src`'s rows, in place, per
-    /// the fold plan `ops` (as [`fold_forming_row`](Self::fold_forming_row)): the first
-    /// row initializes each cell ([`Column::init_at`]), every later one folds in
-    /// ([`Column::combine_at`]) — exactly the batch reduce of the period, with no
-    /// allocation. Used when a bar already folded in is re-sent with new values (a
-    /// max / min cannot be un-combined). Only that row changed, so each cached column
-    /// keeps what it carries and goes stale from it.
-    pub fn refold_forming_row(
-        &mut self,
-        row: usize,
-        src: &DataFrame,
-        ops: &[(usize, usize, CombineOp)],
-    ) -> Result<()> {
-        for &(dst_col, src_col, op) in ops {
-            let (dst, from) = (&mut self.columns[dst_col], &src.columns[src_col]);
-            dst.init_at(row, op, from, 0)?;
-            for r in 1..src.height {
-                dst.combine_at(row, op, from, r)?;
-            }
-        }
-        self.invalidate_computed_forming_row(row);
-        Ok(())
-    }
-
-
-    /// Replace the last row whole with `src`'s row `src_row`, in place: each column takes
-    /// `src`'s value of the same name, or a missing value when `src` lacks it; a cached
-    /// directive column is left to its refresh. The label is unchanged. Only the last
-    /// row changed, so each cached column keeps what it carries and is stale from that
-    /// row on (see `invalidate_computed_forming_row`).
-    pub fn replace_last_row(&mut self, src: &DataFrame, src_row: usize) -> Result<()> {
-        let Some(last) = self.height.checked_sub(1) else {
-            return Err(VolasError::Shape("no last row to replace".into()));
-        };
-        if src_row >= src.height {
-            return Err(VolasError::Shape(format!(
-                "row position {src_row} is out of range (height {})",
-                src.height
-            )));
-        }
-        let same = self.names == src.names;
-        for pos in 0..self.columns.len() {
-            if !self.computed.is_empty() && self.computed.contains_key(&self.names[pos]) {
-                continue;
-            }
-            let from = if same { Some(pos) } else { src.column_pos(&self.names[pos]) };
-            match from {
-                Some(j) if src.columns[j].dtype() == self.columns[pos].dtype() => {
-                    self.columns[pos].set_last_from(&src.columns[j], src_row)?
-                }
-                Some(j) => {
-                    // a differently typed value takes the column's dtype first
-                    let cell = src.columns[j].slice(src_row, src_row + 1);
-                    let cell = cell.cast(self.columns[pos].dtype())?;
-                    self.columns[pos].set_last_from(&cell, 0)?
-                }
-                None => self.columns[pos].set_last_na(),
-            }
-        }
-        self.invalidate_computed_forming_row(last);
-        Ok(())
-    }
-
-    /// Append `other`'s rows, keyed by their labels: a row labelled like the current
-    /// last row replaces it whole ([`replace_last_row`](Self::replace_last_row)); any
-    /// other row is appended, except that a datetime index only ever increases (a row
-    /// labelled before the last is an error) and an integer / string index stays
-    /// unique (a row labelled like an earlier row is an error). On an error the frame
-    /// is left unchanged. Rows without explicit labels (a `RangeIndex`) take the next
-    /// labels, as [`append`](Self::append). Deciding a datetime row is O(1); an integer
-    /// / string row looks its label up among the frame's.
-    pub fn append_labelled(&mut self, other: &DataFrame) -> Result<()> {
-        if matches!(other.index.kind(), IndexKind::Range(_)) || other.height == 0 {
-            return self.append(other);
-        }
-        let datetime = matches!(self.index.kind(), IndexKind::Datetime(..))
-            || matches!(other.index.kind(), IndexKind::Datetime(..));
-        if other.height == 1 && self.height > 0 {
-            // The live single-bar path: one comparison with the last label.
-            let label = other.index.label_at(0);
-            let last = self.index.label_at(self.height - 1);
-            if label == last {
-                return self.replace_last_row(other, 0);
-            }
-            let fresh = if datetime {
-                !label_precedes(&label, &last)
-            } else {
-                self.index.position_of(&label).is_none()
-            };
-            if fresh {
-                return self.append(other);
-            }
-        }
-        // Decide every row first, so an error leaves the frame unchanged.
-        let mut replaces = Vec::new();
-        for k in 0..other.height {
-            let label = other.index.label_at(k);
-            let prev = if k > 0 {
-                Some(other.index.label_at(k - 1))
-            } else {
-                self.height.checked_sub(1).map(|i| self.index.label_at(i))
-            };
-            let replace = prev.as_ref() == Some(&label);
-            if !replace && datetime && prev.as_ref().is_some_and(|p| label_precedes(&label, p)) {
-                return Err(VolasError::Value(format!(
-                    "cannot append a row labelled {}: a datetime index only increases \
-                     (only the last row can be replaced)",
-                    label_text(&label)
-                )));
-            }
-            if !replace && !datetime {
-                let earlier = self.index.position_of(&label).is_some()
-                    || (0..k).any(|j| other.index.label_at(j) == label);
-                if earlier {
-                    return Err(VolasError::Value(format!(
-                        "cannot append a row labelled {}: an earlier row has that label \
-                         (only the last row can be replaced)",
-                        label_text(&label)
-                    )));
-                }
-            }
-            replaces.push(replace);
-        }
-        if !replaces.contains(&true) {
-            return self.append(other);
-        }
-        for (k, replace) in replaces.into_iter().enumerate() {
-            if replace {
-                self.replace_last_row(other, k)?;
-            } else {
-                self.append(&other.slice_data(k, k + 1))?;
-            }
-        }
         Ok(())
     }
 
@@ -841,25 +630,11 @@ impl DataFrame {
     }
 }
 
-/// Whether datetime label `a` orders before `b` (only a datetime index is ordered by
-/// the append rule; a label of another kind never precedes).
-fn label_precedes(a: &Label, b: &Label) -> bool {
-    matches!((a, b), (Label::I64(x), Label::I64(y)) if x < y)
-}
-
-/// A label as written in a message.
-fn label_text(label: &Label) -> String {
-    match label {
-        Label::I64(v) => v.to_string(),
-        Label::Str(s) => format!("{s:?}"),
-    }
-}
-
+mod admit;
 mod computed;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_nan_fact;
-#[cfg(test)]
-mod tests_replace;
+

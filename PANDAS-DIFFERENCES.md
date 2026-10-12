@@ -523,8 +523,17 @@ rejects it so an exchange adding a field can never quietly lose data.
 Rows appended with a default `RangeIndex` carry no labels of their own, so they take
 the next row labels: appended to a frame with integer labels `0, 1, 2`, one such row
 is labelled `3` (pandas `concat` keeps the row's own `0`, giving `0, 1, 2, 0`). This
-keeps a sliced or windowed frame's labels absolute and gap-free. Rows appended with
-explicit integer labels keep them.
+keeps a sliced or windowed frame's labels absolute and gap-free; a continued label
+that the index already holds raises, as does continuing past the int64 range. Rows
+appended with explicit integer labels keep them.
+
+The appended values take the **target's dtypes** when that changes no value (an
+integer `2` into a float column, `3.0` into an integer one); a value that would change
+raises. pandas `concat` instead upcasts the result column (`int64` + `2.5` →
+`float64`, number + text → `object`). The index kind must match too: a `DatetimeIndex`
+frame takes timestamps of the same tz awareness only, where pandas `concat` would mix
+the labels into an `object` index. A column the target caches (an indicator directive
+it computes) is rejected in the rows of every append form — it is not data.
 
 A row appended with an explicit label equal to the **last** row's label **replaces**
 that row. A `DatetimeIndex` only increases — a row labelled before the last raises —

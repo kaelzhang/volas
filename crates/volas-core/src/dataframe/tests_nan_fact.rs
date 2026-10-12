@@ -40,20 +40,26 @@ fn row(xs: f64, cs: f64) -> DataFrame {
     .unwrap()
 }
 
+/// A row of the data column `x` alone (a cached column is never appended).
+fn data_row(xs: f64) -> DataFrame {
+    DataFrame::new(vec!["x".into()], vec![Column::f64(vec![xs])], None).unwrap()
+}
+
 #[test]
 fn append_of_a_nan_row() {
     let mut df = known_clean();
-    df.append(&row(NAN, 7.0)).unwrap();
+    df.append(&data_row(NAN)).unwrap();
     assert!(x(&df).has_nan());
     // a clean row keeps the fact without a rescan
     let mut df = known_clean();
-    df.append(&row(4.0, 7.0)).unwrap();
+    df.append(&data_row(4.0)).unwrap();
     assert_eq!(x(&df).known_has_nan(), Some(false));
 }
 
 #[test]
 fn append_by_name_pads_a_missing_column_with_nan() {
     let mut df = known_clean();
+    df.invalidate_computed_on_write("c"); // `c` becomes a data column
     let only_c = DataFrame::new(vec!["c".into()], vec![Column::f64(vec![7.0])], None).unwrap();
     df.append(&only_c).unwrap(); // `x` is a plain column: padded with NA
     assert!(x(&df).has_nan());
@@ -150,7 +156,7 @@ fn a_write_to_a_shared_copy_leaves_the_other_untouched() {
     assert!(x(&b).has_nan());
     assert!(!x(&a).has_nan());
     let mut c = a.clone();
-    c.append(&row(NAN, 1.0)).unwrap();
+    c.append(&data_row(NAN)).unwrap();
     assert!(x(&c).has_nan());
     assert_eq!(x(&a).known_has_nan(), Some(false));
 }

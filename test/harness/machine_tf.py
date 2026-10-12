@@ -133,9 +133,9 @@ class TfMachine(FrameMachine):
             bar = build.frame(schema, rows, ts)
             bar['zz_extra'] = [0.0] * len(bar)
         else:
-            if contracts.avoids('append-atomicity'):
-                return  # a fold that fails part-way leaves the forming state changed
-            bar = build.frame(schema, rows, ts, dtypes={'close': 'int64'})
+            # text in a numeric column: no numeric dtype holds it (contract #20)
+            bar = build.frame(schema, rows, ts)
+            bar['close'] = ['x'] * len(bar)
         expect = TypeError if kind == 'dtype' else ValueError
         self.attempt(lambda: self.df.append(bar), expect_error=expect, label=f'fold rejected {kind}')
 
