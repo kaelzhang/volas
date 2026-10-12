@@ -199,14 +199,14 @@ pub fn check_form(cst: &Cst) -> Result<()> {
 fn check_form_cross(name: &str, spec: &CommandSpec, args: &[Option<String>]) -> Result<()> {
     if name == "hv" {
         // hv's time frame / trading days / session all have defaults, so the rule runs
-        // on every form; an absent slot takes its default, as `bind_command` would.
+        // on every form; an absent slot takes its default, as `bind_command` would (a
+        // supplied slot was already bound above, so every slot resolves).
         let slot = |i: usize| match args.get(i).and_then(|o| o.as_deref()) {
             Some(s) => spec.args[i].bound.bind(s).ok(),
             None => spec.args[i].default.value(),
         };
-        if let (Some(tf), Some(days), Some(session)) = (slot(1), slot(2), slot(3)) {
-            check_hv_args(&tf, &days, &session)?;
-        }
+        let slots: Option<Vec<ArgValue>> = (1..=3).map(slot).collect();
+        slots.map_or(Ok(()), |v| check_hv_args(&v[0], &v[1], &v[2]))?;
     }
     if name == "mavp" {
         let at = |i: usize| args.get(i).and_then(|o| o.as_deref()).and_then(|s| s.parse::<usize>().ok());
