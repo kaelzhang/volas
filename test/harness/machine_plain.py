@@ -290,8 +290,9 @@ class PlainMachine(FrameMachine):
         if self.window is not None:
             return
         if contracts.avoids('slice-recursive-rewarm') and any(
-                _names(e.name) & inventory.unbounded_memory() for e in self.cached.values()):
-            return  # a recursive cached column re-warms on the slice instead of continuing
+                _names(e.name) & inventory.unbounded_memory() or inventory.recursive(e.name)
+                for e in self.cached.values()):
+            return  # a recursive cached column is not continued across the slice
         a = data.draw(st.integers(1, len(self.df) - 1))
         if self.stale:
             self.attempt(lambda: self.df.iloc[a:], expect_error=ValueError, label='slice while stale')

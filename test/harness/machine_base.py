@@ -253,7 +253,7 @@ class FrameMachine(RuleBasedStateMachine):
                 # recursive / cumulative lines restart on the retained rows (the
                 # forming refresh's cold path, a write, an undersized history)
                 names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', d.text.lower())}
-                if names & inventory.unbounded_memory():
+                if names & inventory.unbounded_memory() or inventory.recursive(d.text):
                     return False
         return True
 
@@ -384,6 +384,12 @@ class FrameMachine(RuleBasedStateMachine):
         if name in self.cached and name in self.stale and not contracts.GET_COLUMN_REFRESHES:
             return
 
+        # a stale cached column is refreshed by the read, which raises what its compute
+        # raises (contract #26: an int64 input past 2^53 in float64 math)
+        expect = None
+        if name in self.cached and name in self.stale:
+            expect = self.oracle(self.cached[name])[1]
+
         def commit(series):
             got = observe.column_values_series(series)
             if name in self.cached:
@@ -394,7 +400,8 @@ class FrameMachine(RuleBasedStateMachine):
             else:
                 self.check_plain(name, got)
 
-        self.attempt(lambda: self.df.get_column(name), commit=commit, label=f'get_column({name!r})')
+        self.attempt(lambda: self.df.get_column(name), expect_error=expect, commit=commit,
+                     label=f'get_column({name!r})')
 
     @rule(surface=st.sampled_from(sorted(BULK_SURFACES)))
     def bulk_read(self, surface):

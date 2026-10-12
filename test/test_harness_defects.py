@@ -307,7 +307,7 @@ def test_trix_resume_matches_on_zero_prices():
     assert _same(df['trix:1'], volas.DataFrame({'close': vals})['trix:1'])
 
 
-@_xfail('H19 slice-recursive-rewarm', 'a recursive composite re-warms on a slice instead of continuing')
+@_xfail('H19 slice-recursive-rewarm', 'a recursive composite is not continued across a slice (it stays data)')
 def test_a_recursive_composite_continues_across_a_slice():
     cols = _walk(40, 3)
     df = _frame(cols, 0, 30)

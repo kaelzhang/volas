@@ -27,7 +27,8 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # compute.
     'fast-above-slow',
     # A recursive cached column without a carried state (a composite / explicit
-    # series) re-warms on a slice's retained rows instead of continuing its history.
+    # series) is not continued across a slice that drops its history's start: it
+    # stays as data (it cannot be continued exactly, so it is never re-warmed).
     'slice-recursive-rewarm',
     # `ichimoku.senkou_a`'s lookback counts the kijun period only (k - 1 + k): with a
     # tenkan period above it the first value needs more rows than the lookback says,
