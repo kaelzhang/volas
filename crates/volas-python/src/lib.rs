@@ -12,7 +12,7 @@ use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 use volas_core::{
-    datetime, Column, DataFrame, Index, Series, VolasError,
+    datetime, Column, Index, Series, VolasError,
 };
 use volas_directive::parse;
 
@@ -129,23 +129,6 @@ pub(crate) use frame::*;
 pub(crate) use frame_row::*;
 pub(crate) use frame_index::*;
 pub(crate) use frame_window::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
-
-/// Raise if the frame has stale computed columns after an `append`. Column
-/// projection (`df[directive]` / `df[[...]]`) auto-refreshes its columns; every
-/// OTHER read — bulk / positional (`to_numpy`, `.iloc` / `.loc` / `.at` / `.iat`),
-/// the reductions (`sum` / `max` / `describe` / …), conversions and display —
-/// guards with this instead, so it fails loud (call `fulfill()` first) rather than
-/// silently returning stale values. The check itself is O(1).
-pub(crate) fn ensure_fresh(df: &DataFrame) -> PyResult<()> {
-    if df.has_stale_computed() {
-        Err(PyValueError::new_err(
-            "frame has stale computed (directive) columns after append; \
-             call fulfill() before a bulk or positional read",
-        ))
-    } else {
-        Ok(())
-    }
-}
 
 /// Parse an optional printf-style `float_format` spec (shared by `to_csv` /
 /// `to_string`), raising a `ValueError` on an unsupported form.

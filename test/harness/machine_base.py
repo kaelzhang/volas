@@ -357,8 +357,6 @@ class FrameMachine(RuleBasedStateMachine):
         d = data.draw(directives(tuple(self.plain_numeric())))
         if not triggers_ok(d):
             return
-        if contracts.avoids('unguarded-stale-read') and d.bare_names & set(self.cached):
-            return  # a bare name binding a cached column (stale or not) — the open read path
         if self.window is not None:
             return  # exec over a windowed frame sees the retained rows only (contract open)
         entry = Entry(d.text, d, self.env(), self.visible_start())
@@ -374,13 +372,9 @@ class FrameMachine(RuleBasedStateMachine):
     @rule(data=st.data())
     def get_column(self, data):
         """``get_column`` never computes: a plain column reads its data at any time; a
-        stale computed column raises (contract), a fresh one reads its values."""
+        computed column reads its values, a stale one refreshed first (contract)."""
         name = data.draw(st.sampled_from(list(self.df.columns)))
-        if name in self.cached and name in self.stale:
-            if contracts.avoids('unguarded-stale-read') or not contracts.GET_COLUMN_STALE_RAISES:
-                return
-            self.attempt(lambda: self.df.get_column(name), expect_error=ValueError,
-                         label=f'get_column({name!r}) stale')
+        if name in self.cached and name in self.stale and not contracts.GET_COLUMN_REFRESHES:
             return
 
         def commit(series):
@@ -389,6 +383,7 @@ class FrameMachine(RuleBasedStateMachine):
                 entry = self.cached[name]
                 observe.same_indicator(got, np.asarray(self.oracle(entry)[0]), f'get_column({name!r})',
                                        self.tolerance(entry), self.excused(entry))
+                self.stale.discard(name)  # the read refreshed it
             else:
                 self.check_plain(name, got)
 
@@ -402,9 +397,6 @@ class FrameMachine(RuleBasedStateMachine):
                                         for t in self.df.dtypes.values()):
             return  # rolling is numeric-only
         stale = bool(self.stale) and contracts.BULK_READ_STALE_RAISES
-        if stale and self.window is not None and contracts.avoids('windowed-stale-logical-read') and any(
-                volas.directive_lookback(n) > len(self.df) for n in self.stale):
-            return
         self.attempt(lambda: ops[surface](self.df), expect_error=ValueError if stale else None,
                      label=f'{surface}{" (stale)" if stale else ""}')
 

@@ -281,7 +281,8 @@ impl DataFrame {
     }
 
     /// Add a new column or replace an existing one (must match `height`, unless
-    /// the frame currently has no columns).
+    /// the frame currently has no columns). Replacing a column invalidates the
+    /// directive cache (see `invalidate_computed_on_write`); adding one leaves it.
     pub fn set_column(&mut self, name: &str, col: Column) -> Result<()> {
         if self.columns.is_empty() {
             self.height = col.len();
@@ -297,7 +298,13 @@ impl DataFrame {
             )));
         }
         match self.column_pos(name) {
-            Some(i) => self.columns[i] = col,
+            Some(i) => {
+                // A replaced column may feed any cached directive: `name` loses its own
+                // computed status and every other cache goes stale (one rule for every
+                // writer — `df[name] = …`, `astype`, …).
+                self.columns[i] = col;
+                self.invalidate_computed_on_write(name);
+            }
             None => {
                 Arc::make_mut(&mut self.name_to_idx).insert(name.to_string(), self.columns.len());
                 Arc::make_mut(&mut self.names).push(name.to_string());

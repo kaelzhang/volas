@@ -1,10 +1,10 @@
 """Observation without refreshing the frame under test.
 
 Every check here reads either through a documented non-refreshing path
-(``columns`` / ``dtypes`` / ``shape`` / ``index`` / ``is_computed`` /
-``get_column``) or through a ``copy()`` taken for validation and refreshed there —
-never by refreshing the frame itself, so the op schedule under test stays exactly
-the generated one.
+(``columns`` / ``dtypes`` / ``shape`` / ``index`` / ``is_computed``, ``get_column``
+of a data column) or through a ``copy()`` taken for validation and refreshed there
+(``get_column`` of a cached column refreshes it, contract #12) — never by refreshing
+the frame itself, so the op schedule under test stays exactly the generated one.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def structure(df: volas.DataFrame) -> None:
         assert df._physical_height >= n, 'physical height below the visible height'
     for c in cols:
         assert c in df, f'{c!r} listed but not a member'
-        s = df.get_column(c)
+        s = stored(df, c)
         assert len(s) == n, f'column {c!r} has {len(s)} rows, frame {n}'
         assert len(s.isna().to_numpy()) == n, f'validity of {c!r} has the wrong length'
         assert s.dtype == df.dtypes[c], f'{c!r} dtype {s.dtype} != frame dtype {df.dtypes[c]}'
@@ -75,9 +75,15 @@ def representation(s: volas.Series, c: str) -> None:
             f'bool column {c!r}: a missing cell did not export as NaN'
 
 
+def stored(df: volas.DataFrame, c: str) -> volas.Series:
+    """Column ``c`` without refreshing ``df``: a data column as stored, a cached one as a
+    refreshed copy reads it (``get_column`` refreshes the column it reads)."""
+    return df.copy().get_column(c) if df.is_computed(c) else df.get_column(c)
+
+
 def raw_state(df: volas.DataFrame) -> dict:
     """Everything observable without refreshing: schema, index, cache flags, staleness,
-    and every column's stored cells (stale placeholders included) and NA mask."""
+    and every column's cells (a cached column as a refreshed copy reads it) and NA mask."""
     state = {
         'columns': tuple(df.columns),
         'dtypes': dict(df.dtypes),
@@ -89,7 +95,7 @@ def raw_state(df: volas.DataFrame) -> dict:
         'stale': is_stale(df),
     }
     for c in df.columns:
-        s = df.get_column(c)
+        s = stored(df, c)
         state[c] = (_bytes(s.to_numpy(dtype='object') if s.dtype == 'str' else s.to_numpy()),
                     _bytes(s.isna().to_numpy()))
     return state

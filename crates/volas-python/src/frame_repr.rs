@@ -19,7 +19,7 @@ impl PyDataFrame {
     /// (`display.max_rows` / `min_rows`) with a `[N rows x M columns]` footer.
     /// `str` and `repr` are identical.
     pub(crate) fn __repr__(&self) -> PyResult<String> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let truncate = if df.height() > 60 { Some(5) } else { None };
@@ -57,7 +57,7 @@ impl PyDataFrame {
         min_rows: Option<usize>,
         show_dimensions: bool,
     ) -> PyResult<String> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let ff = parse_ff(float_format)?;
@@ -94,7 +94,7 @@ impl PyDataFrame {
     /// DataFrame — a Series falls back to its text repr — so volas matches and
     /// exposes it on DataFrame alone.
     pub(crate) fn _repr_html_(&self) -> PyResult<String> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         Ok(render_frame_html(self.logical().as_ref()))
     }
 }

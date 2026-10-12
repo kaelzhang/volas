@@ -23,7 +23,7 @@ impl PyDataFrame {
     /// last `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
     pub(crate) fn head(&self, n: isize) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let (start, len) = self.logical_range();
         let (a, b) = head_tail_window(n, len, true);
         Ok(PyDataFrame::plain(self.inner.slice(start + a, start + b)))
@@ -33,14 +33,14 @@ impl PyDataFrame {
     /// first `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
     pub(crate) fn tail(&self, n: isize) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let (start, len) = self.logical_range();
         let (a, b) = head_tail_window(n, len, false);
         Ok(PyDataFrame::plain(self.inner.slice(start + a, start + b)))
     }
     /// The `n` rows with the largest values in `column` (pandas `nlargest`).
     pub(crate) fn nlargest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
@@ -48,7 +48,7 @@ impl PyDataFrame {
     }
     /// The `n` rows with the smallest values in `column` (pandas `nsmallest`).
     pub(crate) fn nsmallest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
@@ -58,7 +58,7 @@ impl PyDataFrame {
     /// `drop_duplicates(keep='first')`, over all columns).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn drop_duplicates(&self, keep: &str) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let dup = self.row_duplicated(keep)?;
         let view = self.logical();
         let df = view.as_ref();
@@ -68,7 +68,7 @@ impl PyDataFrame {
     /// True per row for a later duplicate of an earlier row (pandas `duplicated`).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn duplicated(&self, keep: &str) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let dup = self.row_duplicated(keep)?;
         Ok(PySeries {
             inner: Series::new(None, Column::bool(dup), Arc::clone(self.logical().index())),
@@ -78,7 +78,7 @@ impl PyDataFrame {
     /// (pandas pads multi-modal columns into extra rows; volas keeps the single
     /// deterministic first mode per column — documented divergence.)
     pub(crate) fn mode(&self) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let idx = df.index();
@@ -99,7 +99,7 @@ impl PyDataFrame {
     /// MultiIndex, so only a single-column frame is supported — call it on the
     /// column (`df[col].value_counts()`) otherwise.
     pub(crate) fn value_counts(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         if df.width() != 1 {
@@ -119,7 +119,7 @@ impl PyDataFrame {
     /// Sort rows by index label (pandas `sort_index`).
     #[pyo3(signature = (ascending = true))]
     pub(crate) fn sort_index(&self, ascending: bool) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let perm = df.index().argsort(ascending);
@@ -130,7 +130,7 @@ impl PyDataFrame {
     /// (pandas `reset_index`); `drop=True` discards the old index.
     #[pyo3(signature = (drop = false))]
     pub(crate) fn reset_index(&self, drop: bool) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let h = df.height();
@@ -162,7 +162,7 @@ impl PyDataFrame {
     /// returns a new DataFrame. Row labels are parsed against the index kind.
     #[pyo3(signature = (labels, axis = 0, errors = "raise"))]
     pub(crate) fn drop(&self, py: Python<'_>, labels: Vec<Py<PyAny>>, axis: i64, errors: &str) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let ignore_missing = match errors {
@@ -246,7 +246,7 @@ impl PyDataFrame {
         time_frame: &Bound<'_, PyAny>,
         cumulators: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let target = resolve_time_frame(time_frame)?;
         if let Some(tfs) = &self.tf {
             // Same frame is a no-op resample == copy() (keeps the cursor & state).
@@ -287,7 +287,7 @@ impl PyDataFrame {
     /// frame.
     #[pyo3(signature = (columns))]
     pub(crate) fn rename(&self, columns: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let mut mapping = HashMap::new();
@@ -316,7 +316,7 @@ impl PyDataFrame {
     /// new frame. A datetime / int / string column becomes the matching index.
     #[pyo3(signature = (keys))]
     pub(crate) fn set_index(&self, keys: &str) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         Ok(PyDataFrame::plain(
             self.logical().set_index(keys).map_err(pyerr)?,
         ))
@@ -325,7 +325,7 @@ impl PyDataFrame {
     /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
     /// new frame.
     pub(crate) fn astype(&self, dtypes: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let mut df = self.logical().into_owned();
         let mut mapping = HashMap::new();
         for (k, v) in dtypes.iter() {

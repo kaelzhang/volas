@@ -564,7 +564,9 @@ to pandas, volas does **not** support:
   automatic alignment-on-index when combining frames (volas aligns by **position**,
   and raises on a mismatch rather than silently reindexing). One rule decides every
   pairing of two labelled operands — arithmetic, comparisons, `where` / `mask`
-  conditions, `corr` / `cov` and the pairwise window statistics: the labels must be
+  conditions, `df[mask] = v` cell masks (whose columns pair by name), a Series
+  assigned to a column (`df[col] = s`), `corr` / `cov` and the pairwise window
+  statistics: the labels must be
   equal (the same instants; the index name and display zone are ignored), and a
   tz-naive index never pairs with a tz-aware one.
 - **Duplicate-label** lookups (label access assumes unique labels).

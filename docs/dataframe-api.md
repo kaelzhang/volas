@@ -73,8 +73,12 @@ Which gets the 2-period simple moving average on column `"close"`.
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
   `tz_localize` / `tz_convert`. See [Timezones](cumulation.md#timezones).
 - **columns** `Optional[list[str]] = None` Select and order the columns to keep —
-  the same projection as `df[[...]]`. A name not present raises `KeyError`; an empty
-  list or a duplicate name is rejected, and an absent column is never silently filled.
+  the same projection as `df[[...]]` (a stale cached directive column is refreshed
+  first; a bounded-window source gives its visible rows). A name not present raises
+  `KeyError` (a directive is never computed here); an empty list or a duplicate name
+  is rejected, and an absent column is never silently filled. With `index=`, `dtype=`
+  or `window=`, a source `DataFrame` is read like any bulk read: it raises while one
+  of its cached directive columns is stale.
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are bars
   at that frame, each labelled with its **period start**, and the last one is the
@@ -126,7 +130,19 @@ for bar in feed:            # runs forever; memory never grows
 
 Every row-facing surface — `len`, `shape`, `index`, indexing (`[]` / `.iloc` /
 `.loc` / `.iat` / `.at`), `head` / `tail`, reductions, `to_numpy`, `to_csv`,
-`to_pandas`, `repr` — shows **only** the `window` rows; the margin is never visible.
+`to_pandas`, `repr`, `exec`, `tz_localize` / `tz_convert`, comparisons, and a windowed
+frame used as an `append` source or a constructor source — shows **only** the `window`
+rows; the margin is never visible.
+
+Row labels stay unique over every row the frame **retains** — the visible rows and the
+hidden margin. An integer or string label that an earlier row in the margin still
+holds raises, and says so:
+
+```text
+ValueError: cannot append label 20: an earlier row with that label is still retained in the window's hidden margin (max_lookback)
+```
+
+A label whose row has already been dropped from the retained rows is accepted again.
 
 #### `ready` — has the window warmed up?
 
@@ -265,7 +281,8 @@ The difference between `df[directive]` and `df.exec(directive)` is that
 Directly gets the column value by `key`, returning a `Series` — and **never
 computes**: unlike `df[key]`, which parses an unknown key as an indicator
 directive and executes it, `get_column` only fetches an existing column and
-raises `KeyError` otherwise. Use it whenever the column name comes from
+raises `KeyError` otherwise. It is a column read: a cached directive column left
+stale by an `append` is refreshed first, exactly as `df[key]` refreshes it. Use it whenever the column name comes from
 external data (CSV headers, user input, configuration), so a name that happens
 to look like a directive (e.g. `"ma:5"`) can never silently trigger a
 computation.
@@ -409,13 +426,18 @@ Batch-refresh every cached indicator column's stale tail in place
 
 Since `append` is lazy, the cache becomes fresh in one of two ways:
 
-- **Reading an indicator column** — `df['ma:20']` or `df[['ma:20', 'rsi:14']]` —
-  auto-refreshes just those columns' stale tails on access, so a column read is
-  always fresh and cheap. The single- and multi-column forms behave identically.
-- **Every other read** — `to_numpy()`, `.iloc` / `.loc` / `.at`, the reductions
-  (`sum` / `mean` / `max` / `describe` / …), `to_csv`, `repr`, … — does **not**
-  auto-refresh; while the frame is stale it **raises**, telling you to call
-  `fulfill()` first. This is deliberate: a half-updated frame fails loud instead
+- **Reading an indicator column** — `df['ma:20']`, `df[['ma:20', 'rsi:14']]`,
+  `df.get_column('ma:20')`, or `DataFrame(df, columns=[...])` — auto-refreshes just
+  those columns' stale tails on access, so a column read is always fresh and cheap.
+  The single- and multi-column forms behave identically.
+- **Every other read** — `to_numpy()`, `.iloc` / `.loc` / `.at`, row slices and
+  boolean masks (`df[a:b]`, `df[mask]`), the reductions (`sum` / `mean` / `max` /
+  `describe` / …), `isna` / `notna`, `rolling` / `expanding` / `ewm`, `tz_localize` /
+  `tz_convert`, `to_csv`, `repr`, … — does **not** auto-refresh; while the frame is
+  stale it **raises**, telling you to call `fulfill()` first. So does a stale frame
+  used as an **operand**: the right-hand side of a comparison, a `where` / `mask` or
+  `df[mask] = v` condition, an `append` source. `df.exec(d)` reads data columns only,
+  so it is never stale. This is deliberate: a half-updated frame fails loud instead
   of silently returning stale values, and you control when the (bounded) refresh
   cost is paid — which matters on a latency-sensitive live path.
 

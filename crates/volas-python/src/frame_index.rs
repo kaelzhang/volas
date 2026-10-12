@@ -393,7 +393,7 @@ pub struct DataFrameILoc {
 impl DataFrameILoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
-        ensure_fresh(&pf.inner)?;
+        pf.require_fresh()?;
         // Position the read against the logical M view (zero-cost borrow when
         // unbounded), so `iloc[i]` indexes the visible window, never the margin.
         let view = pf.logical();
@@ -430,7 +430,7 @@ impl DataFrameILoc {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        ensure_fresh(&pf.inner)?;
+        pf.require_fresh()?;
         let (rows, col) = split_row_col(key, "iloc")?;
         // Resolve positions against the logical M view, then map them back onto the
         // physical rows by adding the window offset (identity when unbounded).
@@ -522,7 +522,7 @@ pub struct DataFrameLoc {
 impl DataFrameLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
-        ensure_fresh(&pf.inner)?;
+        pf.require_fresh()?;
         // Resolve labels against the logical M view (zero-cost borrow when
         // unbounded), so a margin label is never addressable through `loc`.
         let view = pf.logical();
@@ -589,7 +589,7 @@ impl DataFrameLoc {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        ensure_fresh(&pf.inner)?;
+        pf.require_fresh()?;
         let (rows, col) = split_row_col(key, "loc")?;
         let colname: String = col.extract().map_err(|_| {
             PyTypeError::new_err("loc assignment column must be a single column name")
@@ -625,7 +625,7 @@ pub struct DataFrameIat {
 impl DataFrameIat {
     fn __getitem__(&self, py: Python<'_>, key: (isize, isize)) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
-        ensure_fresh(&pf.inner)?;
+        pf.require_fresh()?;
         let (start, len) = pf.logical_range();
         let i = norm_idx(key.0, len)? + start;
         let j = norm_idx(key.1, pf.inner.width())?;
@@ -640,7 +640,7 @@ impl DataFrameIat {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        ensure_fresh(&pf.inner)?;
+        pf.require_fresh()?;
         let (start, len) = pf.logical_range();
         let i = norm_idx(key.0, len)? + start;
         let j = norm_idx(key.1, pf.inner.width())?;
@@ -660,7 +660,7 @@ pub struct DataFrameAt {
 impl DataFrameAt {
     fn __getitem__(&self, py: Python<'_>, key: (Py<PyAny>, String)) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
-        ensure_fresh(&pf.inner)?;
+        pf.require_fresh()?;
         let (start, _len) = pf.logical_range();
         let lidx = pf.logical_index();
         let label = parse_label(key.0.bind(py), &lidx)?;
@@ -681,7 +681,7 @@ impl DataFrameAt {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        ensure_fresh(&pf.inner)?;
+        pf.require_fresh()?;
         let i = {
             let (start, _len) = pf.logical_range();
             let lidx = pf.logical_index();

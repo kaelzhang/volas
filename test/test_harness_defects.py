@@ -86,17 +86,15 @@ def test_exec_is_fresh_on_a_stale_frame():
     assert _same(df.exec('obv'), _frame(cols, 0, 30).exec('obv'))
 
 
-@_xfail('M3 unguarded-stale-read', 'get_column of a stale computed column returns the placeholder')
-def test_get_column_of_a_stale_computed_column_raises():
+def test_get_column_of_a_stale_computed_column_refreshes_it():
+    # a column read (CONTRACT #12) — the placeholder is never returned
     cols = _walk(30)
     df = _frame(cols, 0, 29)
     df['ema:3']
     df.append(_frame(cols, 29, 30))
-    with pytest.raises(ValueError, match='stale'):
-        df.get_column('ema:3')
+    assert _same(df.get_column('ema:3'), _frame(cols, 0, 30)['ema:3'])
 
 
-@_xfail('C5 stale-compare-rhs', 'a comparison consumes a stale right-hand frame')
 def test_a_comparison_rejects_a_stale_right_hand_frame():
     cols = _walk(30)
     a = _frame(cols, 0, 29)
@@ -128,7 +126,6 @@ def test_a_windowed_source_contributes_only_its_visible_rows():
     assert len(df) == 2 + len(src)
 
 
-@_xfail('H3 windowed-stale-logical-read', 'a stale windowed frame reads through its visible slice')
 def test_a_stale_windowed_frame_rejects_a_bulk_read():
     cols = _walk(40)
     df = volas.DataFrame({k: v[:30] for k, v in cols.items()}, window=1, max_lookback=19)

@@ -16,14 +16,9 @@ from __future__ import annotations
 # --- defects the machines step around (each has a strict-xfail reproduction) -----
 
 OPEN_DEFECTS: frozenset[str] = frozenset({
-    # `exec` of a bare cached name and `get_column` of a stale computed column
-    # return the stale placeholder instead of raising / recomputing.
-    'unguarded-stale-read',
     # Windowed frames: recursive columns are not bit-exact with the unbounded
     # history, and a base write restarts carried state on the retained rows only.
     'windowed-drift',
-    # A comparison consumes a stale right-hand frame without raising.
-    'stale-compare-rhs',
     # Integer folds read the NA placeholder as a value.
     'int-fold-na',
     # tz_localize drops the sub-second part of every timestamp.
@@ -35,9 +30,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # slice-index panic), `apo` / `ppo` / `dma` resume differently from the full
     # compute.
     'fast-above-slow',
-    # A windowed frame checks freshness on its visible slice, where a cached column
-    # longer than the window is no longer computed: a stale read then succeeds.
-    'windowed-stale-logical-read',
     # A recursive cached column without a carried state (a composite / explicit
     # series) re-warms on a slice's retained rows instead of continuing its history.
     'slice-recursive-rewarm',
@@ -84,9 +76,9 @@ EXEC_IS_FRESH = True
 # A bulk / positional read (to_numpy, iloc, equals, to_pandas, ...) of a stale frame
 # raises instead of returning stale values.
 BULK_READ_STALE_RAISES = True
-# `get_column` of a stale computed column raises (it is one of the "every other
-# read" surfaces the README lists as raising while stale).
-GET_COLUMN_STALE_RAISES = True
+# `get_column` of a stale computed column refreshes it, like `df[name]`: it is a
+# column read (CONTRACT #12), never a computation of a missing column.
+GET_COLUMN_REFRESHES = True
 # A comparison whose right-hand frame is stale raises like a stale left-hand side.
 COMPARE_STALE_RHS_RAISES = True
 # Appending a stale source frame raises (the source is read in bulk).

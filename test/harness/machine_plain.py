@@ -359,8 +359,6 @@ class PlainMachine(FrameMachine):
                 other_store.range_kind != self.store.range_kind or \
                 not np.array_equal(np.asarray(other.index), np.asarray(self.df.index)):
             return  # differently-labelled (or differently-kinded) operands are rejected by design
-        if other_stale and not self.stale and contracts.avoids('stale-compare-rhs'):
-            return
         stale = bool(self.stale or other_stale) and contracts.COMPARE_STALE_RHS_RAISES
         before = observe.raw_state(other)
 

@@ -29,7 +29,7 @@ df.astype({col: 'datetime64[s]'})  # numeric epoch -> datetime (unit s|ms|us|ns;
 df.copy() / df.equals(other) / df.to_csv(path=None, ...)   # to_numpy: see its own section (dtype, na_value)
 
 # --- DataFrame: writing ---------------------------------------------------
-df[col] = scalar | array | Series          # add / replace a column (positional)
+df[col] = scalar | array | Series          # add / replace a column (Series: same index)
 df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
 
 # --- Series ---------------------------------------------------------------
@@ -169,8 +169,11 @@ single-level, OHLCV-shaped index that candlestick data uses.
 ## Writing & assignment
 
 Assign a whole column, or write into a positional / label / boolean selection
-(copy-on-write under the hood). Series assignment is **positional** (by row order,
-not index-aligned).
+(copy-on-write under the hood). A Series value must carry the frame's index (the same
+labels; the alignment rule of every operand) and is then paired by position — volas
+never re-aligns by label, so a differently-labelled Series raises. A scalar keeps its
+exact type (an int is an `int64` column, never a float). A boolean-frame mask
+(`df[mask] = v`) pairs with the columns by **name** and must carry the frame's index.
 
 ```py
 df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)

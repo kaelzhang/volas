@@ -103,9 +103,16 @@ impl DataFrame {
     /// decided before the first write, so on an error the frame is unchanged. Deciding
     /// a datetime row is O(1); an integer / string row looks its label up.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
+        self.append_retaining(other, 0)
+    }
+
+    /// [`append`](Self::append) to a frame whose first `hidden` rows are retained but not
+    /// shown (a bounded window's margin): the labels stay unique over every retained row,
+    /// and a clash with a hidden row says so.
+    pub fn append_retaining(&mut self, other: &DataFrame, hidden: usize) -> Result<()> {
         let rows = self.admit(other)?;
         let rows = rows.as_ref();
-        match self.route(rows)? {
+        match self.route(rows, hidden)? {
             Route::Append => self.push_rows(rows),
             Route::Rows(replaces) => {
                 for (k, replace) in replaces.into_iter().enumerate() {
@@ -122,7 +129,7 @@ impl DataFrame {
 
     /// Decide, for each admitted row, whether it replaces the last row or is appended
     /// (see [`append`](Self::append)), or reject the row set. Writes nothing.
-    fn route(&self, rows: &DataFrame) -> Result<Route> {
+    fn route(&self, rows: &DataFrame, hidden: usize) -> Result<Route> {
         if matches!(rows.index.kind(), IndexKind::Range(_)) || rows.height == 0 {
             return Ok(Route::Append); // unlabelled rows: `check_append` vetted their labels
         }
@@ -160,8 +167,15 @@ impl DataFrame {
                 )));
             }
             if !replace && !datetime {
-                let earlier = self.index.position_of(&label).is_some()
-                    || (0..k).any(|j| rows.index.label_at(j) == label);
+                let held = self.index.position_of(&label);
+                if held.is_some_and(|p| p < hidden) {
+                    return Err(VolasError::Value(format!(
+                        "cannot append label {}: an earlier row with that label is still \
+                         retained in the window's hidden margin (max_lookback)",
+                        label_text(&label)
+                    )));
+                }
+                let earlier = held.is_some() || (0..k).any(|j| rows.index.label_at(j) == label);
                 if earlier {
                     return Err(VolasError::Value(format!(
                         "cannot append a row labelled {}: an earlier row has that label \

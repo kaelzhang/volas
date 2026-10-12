@@ -16,7 +16,7 @@ impl PyDataFrame {
     /// Per-column count of non-missing values (pandas `count`) -> a Series indexed
     /// by column name (`int64`), reading each column's validity.
     pub(crate) fn count(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let names: Vec<String> = df.names().to_vec();
@@ -68,7 +68,7 @@ impl PyDataFrame {
     }
     /// Per-column count of distinct present values (pandas `df.nunique()`).
     pub(crate) fn nunique(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let names: Vec<String> = df.names().to_vec();
@@ -90,22 +90,22 @@ impl PyDataFrame {
     /// Per-column truthiness `any` (pandas `df.any()`): a present, non-zero /
     /// True / non-empty cell counts.
     pub(crate) fn any(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         Ok(self.bool_reduce(true))
     }
     /// Per-column truthiness `all` (pandas `df.all()`), NA-skipping.
     pub(crate) fn all(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         Ok(self.bool_reduce(false))
     }
     /// Per-column index label of the maximum (pandas `df.idxmax()`).
     pub(crate) fn idxmax(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         self.idx_extreme(py, true)
     }
     /// Per-column index label of the minimum (pandas `df.idxmin()`).
     pub(crate) fn idxmin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         self.idx_extreme(py, false)
     }
 
@@ -131,7 +131,7 @@ impl PyDataFrame {
     /// Per-column summary statistics over the numeric columns (pandas `describe`):
     /// a frame indexed by `count / mean / std / min / 25% / 50% / 75% / max`.
     pub(crate) fn describe(&self) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let idx = df.index();
@@ -178,7 +178,7 @@ impl PyDataFrame {
     /// is assembled by the core [`Column::from_scalars`] — the supertype of the
     /// parts, each value converted losslessly (no float64 round trip).
     fn reduce_typed(&self, op: impl Fn(&Column) -> volas_core::Result<(DType, Scalar)>) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let mut names = Vec::new();
@@ -206,7 +206,7 @@ impl PyDataFrame {
     /// Per-numeric-column reduce via a fallible Series-level float64 helper ->
     /// f64 Series keyed by column name (non-numeric columns are skipped).
     fn try_reduce_with(&self, op: impl Fn(&PySeries) -> PyResult<f64>) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
+        self.require_fresh()?;
         let view = self.logical();
         let df = view.as_ref();
         let idx = df.index();
