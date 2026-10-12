@@ -1,0 +1,237 @@
+# pandas-compatible API
+
+## The rest of the pandas-compatible API
+
+Everything below behaves like its `pandas` counterpart — if you know it from
+pandas, it works the same in volas, except for the deliberate
+[NA-model divergences](#known-pandas-divergences-the-volasna-model) noted after
+the listing.
+
+```py
+# --- DataFrame: metadata --------------------------------------------------
+df.columns / df.shape / len(df) / df.dtypes      # dtypes -> dict
+df.index                          # row labels, as a NumPy array
+col in df ; for col in df         # membership / iterate column names
+df.tz / df.tz_localize(tz) / df.tz_convert(tz)   # DatetimeIndex tz; see Timezones
+
+# --- DataFrame: selection -------------------------------------------------
+df[col]                           # -> Series
+df[[col, ...]]                    # -> DataFrame
+df[bool_mask]                     # -> DataFrame (filter rows; mask = Series | ndarray)
+df.iloc[...] / df.loc[...] / df.at[label, col] / df.iat[i, j]
+df.head(n=5) / df.tail(n=5)
+
+# --- DataFrame: reshaping & dtypes ----------------------------------------
+df.drop([label, ...], axis=0)     # drop rows by label (axis=1 -> columns)
+df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
+df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)
+df.astype({col: 'datetime64[s]'})  # numeric epoch -> datetime (unit s|ms|us|ns; truncating)
+df.copy() / df.equals(other) / df.to_csv(path=None, ...)   # to_numpy: see its own section (dtype, na_value)
+
+# --- DataFrame: writing ---------------------------------------------------
+df[col] = scalar | array | Series          # add / replace a column (positional)
+df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
+
+# --- Series ---------------------------------------------------------------
+s.name / s.dtype / len(s) / s.tz / s.index
+s.to_list()                       # to_numpy has NA caveats -> see its own section (dtype, na_value)
+s.iloc[...] / s.loc[...]
+s + s, s - 1, -s, ...             # elementwise arithmetic
+s > 0, s == t, s != t, ...        # comparison -> bool Series
+s & t, s | t, ~s, s ^ t           # logical -> bool Series
+s.sum() / s.mean() / s.min() / s.max() / s.std() / s.var() / s.median()   # skip missing
+s.shift(n=1) / s.diff(n=1) / s.fillna(v) / s.ffill() / s.bfill()           # see Missing values: NA keeps the dtype
+s.isna() / s.notna() / s.dropna() / s.equals(t)
+```
+
+### Window operations (`rolling` / `expanding` / `ewm`) — compatibility only
+
+> **This surface exists so pandas research / labeling code moves over verbatim.
+> It is NOT the recommended way to compute indicators, and it should NOT be
+> used in a live trading system**: a window result is a plain Series — it does
+> not join the directive cache and is **not** incrementally refreshed by
+> `append()` / `fulfill()`; every new bar costs a full `O(n)` recompute.
+> Prefer the equivalent directive (`df['ma:20']`, `df['median:30']`,
+> `df['stddev:20']`, …): same kernels, plus caching and `O(lookback)` per-bar
+> refresh.
+
+```py
+s.rolling(window, min_periods=None, center=False)   # int window; min_periods defaults to window
+s.expanding(min_periods=1)
+s.ewm(com=|span=|halflife=|alpha=, min_periods=0, adjust=True, ignore_na=False)
+                                                    # exactly ONE decay spelling
+
+# Rolling / Expanding (pandas semantics: NA skipped, min_periods gates):
+.count() .nunique()                                 # -> int64 Series (native NA)
+.sum() .mean() .median() .min() .max()
+.var(ddof=1) .std(ddof=1) .sem(ddof=1) .skew() .kurt()
+.quantile(q, interpolation='linear') .rank(method='average', ascending=True, pct=False)
+.first() .last()                                    # dtype-preserving
+.corr(other) .cov(other, ddof=1)
+
+# Ewm:
+.mean() .sum() .var(bias=False) .std(bias=False) .corr(other) .cov(other, bias=False)
+```
+
+`center=True` labels each window at its center — it reads **future** bars
+relative to the label. That is exactly what a labeling pass wants, and exactly
+what a live signal must never do; it is supported for the former.
+
+Time-based windows (`rolling('5min')` / a `timedelta`) are deliberately not
+implemented. For multi-timeframe computation, maintain **two tf-aware
+DataFrames** (see [Cumulation](cumulation.md#cumulation-and-datetimeindex)) and `append`
+each bar to both — that is the supported, `O(lookback)`-per-bar design;
+emulating a coarser timeframe through window arithmetic recomputes everything
+on every bar.
+
+Not provided (pandas members that conflict with volas's model): `apply` /
+`agg` / `pipe` (arbitrary-Python-per-window), `win_type`, `step`, `on`,
+`closed`, `method`, `ewm(times=...)`, `ewm.online()` — `append()` + directives
+already cover the streaming use case.
+
+### Known pandas divergences (the `volas.NA` model)
+
+A handful of APIs diverge from pandas **by design**, because volas stores missing
+values natively as [`volas.NA`](#missing-values-volasna) (no `object` dtype, no
+silent float upcast):
+
+- **`shift` / `diff` / `fillna` and friends** keep the column's dtype — a missing
+  value is `volas.NA`, not an int/bool/str column upcast to float/object.
+- **Comparisons** (`==` `!=` `<` `<=` `>` `>=`) return a *non-nullable* bool mask:
+  a missing value compares `False` (and `!=` compares `True`), following IEEE /
+  NumPy — not pandas-nullable's three-valued `NA`. This keeps masks free of `NA`
+  so `df[mask]` and assignment stay total.
+- **Storage keeps the dtype.** Where pandas upcasts an int/bool column with a missing
+  value to `float64` / `object`, volas keeps it `int64` / `boolean` with the hole as
+  `volas.NA` — so `to_list()` returns exact ints and `volas.NA`. The numpy *export*
+  (`to_numpy()`) still follows pandas 3.0 exactly: a missing cell becomes `NaN` / `NaT`
+  by default, an integer `dtype=` over missing values raises, and `na_value=` fills —
+  see the dedicated `df.to_numpy` / `series.to_numpy` sections above.
+
+For the full picture — why volas's type system is built this way, where pandas's
+breaks, and the migration gotchas — see
+[volas vs pandas — the type system](https://github.com/kaelzhang/volas/blob/main/PANDAS-DIFFERENCES.md).
+
+The pandas-shaped indexing and writing details have their own sections —
+[Indexing & selection](#indexing--selection) and
+[Writing & assignment](#writing--assignment).
+
+## Indexing & selection
+
+A pandas-compatible subset for label and positional access. The row index may be
+a range, a `DatetimeIndex`, an integer index, or a **string index**.
+
+```py
+df.iloc[2]          # a Row by position (row.name is its index label)
+df.iloc[10:]        # a DataFrame slice by position
+df.loc[label]       # a Row by index label
+df.loc[lo:hi]       # inclusive label slice (lexicographic for string indexes)
+df.at[label, col]   # a scalar by label + column
+df.iat[i, j]        # a scalar by position
+df.index            # the row labels, as a NumPy array
+```
+
+String (symbol) index — `set_index` on a string column, then look up by symbol:
+
+```py
+df = DataFrame({'sym': ['aa', 'bb', 'cc'], 'px': [1.0, 2.0, 3.0]}).set_index('sym')
+df.loc['bb']           # the row keyed 'bb'
+df.loc['aa':'bb']      # inclusive, lexicographic slice
+df.at['cc', 'px']      # 3.0
+df.drop(['bb'])        # drop by string label
+```
+
+### Differences from pandas (vs pandas)
+
+volas is pandas-shaped on the surface, but its **type system is deliberately
+different** in more than the index: missing values keep their dtype, there is no
+`object` dtype, value-returning methods stay `Series`, and a lossy conversion
+raises instead of degrading silently. **See
+[volas vs pandas — the type system](https://github.com/kaelzhang/volas/blob/main/PANDAS-DIFFERENCES.md) for the full
+comparison — why volas is built this way, where pandas's type system breaks, and
+the migration gotchas.**
+
+The index specifically is a **single level** of one homogeneous label type.
+Relative to pandas, volas does **not** support:
+
+- **`MultiIndex`** (hierarchical / multi-level indexes), on rows *or* columns —
+  columns are a flat list of unique string names.
+- **Arbitrary label dtypes** — an index is exactly one of range, datetime
+  (`datetime64[ns]`), integer, or string. There is no float, categorical,
+  interval, period, timedelta, or mixed-type `object` index.
+- **Index algebra** — reindexing, index set operations (union / intersection),
+  and automatic alignment-on-index when combining frames.
+- **Duplicate-label** lookups (label access assumes unique labels).
+
+If your workflow needs any of these, keep using pandas; volas targets the
+single-level, OHLCV-shaped index that candlestick data uses.
+
+## Writing & assignment
+
+Assign a whole column, or write into a positional / label / boolean selection
+(copy-on-write under the hood). Series assignment is **positional** (by row order,
+not index-aligned).
+
+```py
+df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)
+df.iat[3, 0] = 99.0                     # one cell by position
+df.at[label, 'close'] = 99.0            # one cell by label + column
+df.iloc[10:20, 0] = 0.0                 # a column slice
+df.loc[df['close'] > df['open'], 'signal'] = 1.0   # masked column assignment
+```
+
+Writing a fractional value into an integer column **raises** — the int dtype is
+kept, and a lossy write errors rather than silently widening to float (see
+[Differences from pandas](https://github.com/kaelzhang/volas/blob/main/PANDAS-DIFFERENCES.md); writing `volas.NA` / `None`
+keeps the int dtype and marks the cell missing). Writing into a cached directive
+column drops its cached status, so a later `fulfill()` can never silently
+overwrite your edit.
+
+## Missing values (`volas.NA`)
+
+`volas.NA` is the single missing-value marker, and **every dtype supports it** —
+crucially, a missing value **never changes the column's dtype**:
+
+| dtype | how missing is stored | element access | console display |
+|---|---|---|---|
+| `float64` / `float32` | `NaN`, in-band | `np.float64(nan)` | `<NA>` |
+| `int64` / `int32` / `bool` / `str` | a validity mask (dtype kept) | `volas.NA` | `<NA>` |
+| `datetime64[ns]` | `NaT` | `np.datetime64('NaT')` | `<NA>` |
+
+Whatever the storage, the **console always prints `<NA>`** — one symbol for a
+missing value, regardless of dtype (a float `NaN`, a datetime `NaT`, and an int /
+bool / str hole all render identically; `to_string(na_rep=...)` overrides it).
+Element access and `to_numpy` stay dtype-specific (a float hole reads back as
+`np.nan`), so numpy / pandas interop is lossless.
+
+This tracks pandas' own direction ([PDEP-16]) and means volas has **no `object`
+dtype**: an `int` / `bool` / `str` column with a hole stays `int` / `bool` /
+`str`, where pandas 3.0 upcasts to `float64` / `object`.
+
+```py
+import volas
+s = volas.DataFrame({'a': [1, None, 3]})['a']
+s.dtype                  # 'int64'        (pandas would give float64)
+s[1]                     # <NA>           (s[1] is volas.NA; a float hole stays np.nan)
+s.sum()                  # np.int64(4)    reductions skip NA
+s.fillna(0).to_list()    # [1, 0, 3]
+s.isna().to_numpy()      # [False, True, False]
+print(s)                 # the missing cell prints as <NA>
+
+# shift / diff keep the int dtype (pandas upcasts to float); the gap is NA:
+volas.DataFrame({'a': [10, 20, 30]})['a'].shift(1).to_list()   # [<NA>, 10, 20]
+```
+
+- **Producing NA** — `None` (or `volas.NA`) in a constructor list, the `shift` /
+  `diff` gap, and the default fill of `where` / `mask`.
+- **Consuming NA** — reductions (`sum` / `mean` / `min` / …) and `count` skip it;
+  arithmetic propagates it (`x ∘ NA = NA`); `~` / `&` / `|` / `^` use Kleene
+  three-valued logic (`NA & False = False`, `NA | True = True`); `cumsum` / `abs`
+  / `round` / `clip` / indexing carry it through; `isna` / `notna` / `dropna` /
+  `fillna` / `ffill` / `bfill` work on every dtype.
+- **Comparisons** treat a missing value IEEE / numpy style: `==`, `<`, `<=`,
+  `>`, `>=` involving NA compare `False`, while `!=` compares `True` — so a
+  boolean mask is always pure `bool`, clean for `df[mask]`. Note the `!=`
+  exception: `s != value` therefore *includes* missing rows.
+
+[PDEP-16]: https://github.com/pandas-dev/pandas/pull/58988

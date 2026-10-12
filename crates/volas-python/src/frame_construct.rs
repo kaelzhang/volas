@@ -127,6 +127,7 @@ impl PyDataFrame {
                             open_key: None, // lazily recomputed by fold_append
                             // projection changes the columns -> rebuild the plan lazily.
                             fold_plan: None,
+                refold_plan: None,
                         }),
                     };
                     (inner, tf)
@@ -197,17 +198,17 @@ impl PyDataFrame {
             Some(w) if df.height() > w.capacity => df.slice(df.height() - w.capacity, df.height()),
             _ => df,
         };
-        // A `time_frame` makes this a cumulating frame: the given rows are taken as
-        // already-final bars at that frame (not re-aggregated), and later `append`s fold
-        // finer bars into them. Requires a DatetimeIndex (build one with `set_index` first).
+        // A `time_frame` makes this a cumulating frame: the given rows are bars at that
+        // frame (not re-aggregated), each labelled with its period start; the last one is
+        // the forming bar — the first entry of the open period — so a later finer bar in
+        // its period folds into it. Requires a DatetimeIndex (build one with `set_index`).
         if let Some(tf_obj) = time_frame {
             let frame = resolve_time_frame(tf_obj)?;
             match df.index().kind() {
                 IndexKind::Datetime(v, _) => {
-                    // The rows are taken as final bars and the last row becomes the
-                    // forming-period cursor, so the live-fold invariants must hold
-                    // from the start: a present, non-decreasing timeline — symmetric
-                    // with the append-fold and batch-cumulate guards.
+                    // The last row becomes the open period's first bar, so the live-fold
+                    // invariants must hold from the start: a present, non-decreasing
+                    // timeline — symmetric with the append-fold and batch-cumulate guards.
                     if v.contains(&i64::MIN) {
                         return Err(PyValueError::new_err(
                             "time_frame requires a DatetimeIndex without NaT; drop or \
@@ -229,14 +230,25 @@ impl PyDataFrame {
                 }
             }
             let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
+            // The open period's fine bars start as the last seed row (its data columns
+            // only — a cached directive column is never folded).
+            let h = df.height();
+            let open = if h == 0 {
+                None
+            } else {
+                let data: Vec<String> =
+                    df.names().iter().filter(|n| !df.is_computed(n)).cloned().collect();
+                Some(df.slice_data(h - 1, h).select(&data).map_err(pyerr)?)
+            };
             return Ok(PyDataFrame {
                 inner: df,
                 tf: Some(TfState {
                     time_frame: frame,
                     cumulators: spec,
-                    open: None,
+                    open,
                     open_key: None,
                     fold_plan: None,
+                refold_plan: None,
                 }),
                 window: win,
             });

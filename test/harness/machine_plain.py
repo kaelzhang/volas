@@ -52,6 +52,11 @@ class PlainMachine(FrameMachine):
         last = self.store.index[-1] if self.store.index else None
         return rows, next_timestamps(last, k, step, regime[1], EPOCHS[0])
 
+    def retained(self) -> int | None:
+        """How many rows the frame physically holds: the ledger rows from the slice's
+        start (a slice is a frame of its own rows only)."""
+        return len(self.store.index) - self.offset
+
     def _pend_stale(self):
         if self.coarse().rows:
             self.stale |= set(self.cached)
@@ -80,7 +85,9 @@ class PlainMachine(FrameMachine):
             if k:
                 self._pend_stale()
 
-        self.attempt(lambda: self.df.append(bar), commit=commit, label=f'append {form} k={k}')
+        expect = None if self.store.accepts(labels, self.retained()) else ValueError
+        self.attempt(lambda: self.df.append(bar), expect_error=expect, commit=commit,
+                     label=f'append {form} k={k}')
 
     @rule(kind=st.sampled_from(BAD_APPENDS), regime=regimes(), multi=st.booleans())
     def append_rejected(self, kind, regime, multi):
@@ -330,7 +337,9 @@ class PlainMachine(FrameMachine):
             if rows:
                 self._pend_stale()
 
-        self.attempt(lambda: self.df.append(src_df), commit=commit, label='append snapshot')
+        expect = None if self.store.accepts(labels, self.retained()) else ValueError
+        self.attempt(lambda: self.df.append(src_df), expect_error=expect, commit=commit,
+                     label='append snapshot')
 
     @precondition(lambda self: self.snapshots)
     @rule(data=st.data())

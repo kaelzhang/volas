@@ -138,8 +138,9 @@ BENCH_OPTS := --benchmark-only --benchmark-group-by=func,param:indicator \
 BENCH_STAMP := $(shell date +%Y-%m-%d-%H%M%S)-$(shell git rev-parse --short HEAD 2>/dev/null || echo nogit)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
 BENCH_DIR := .benchmarks/$(BENCH_STAMP)
 # The report's sections (each = one test function in test_benchmark.py); `SECTION=`
-# filters `make benchmark` / `make perf-ab` to one via `-k test_<section>`.
-BENCH_SECTIONS := windowed append api calc coverage
+# filters `make benchmark` / `make perf-ab` to one via `-k test_<section>`. `tf_live`
+# (the volas-only live time-frame rows) is gated by perf_gate but not rendered.
+BENCH_SECTIONS := windowed append api calc coverage tf_live
 ifdef SECTION
 ifeq ($(filter $(SECTION),$(BENCH_SECTIONS)),)
 $(error SECTION must be one of: $(BENCH_SECTIONS))

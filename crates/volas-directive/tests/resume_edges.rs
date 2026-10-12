@@ -206,6 +206,15 @@ fn node_resume_dispatch_covers_stateless_and_recursive_indicators() {
         "efi:13",
         "tsi:25,13",
         "mass_index:25",
+        // the cumulative volume lines, the Keltner middle and bands, SAR, Supertrend
+        "obv",
+        "ad",
+        "wad",
+        "keltner",
+        "keltner.upper",
+        "supertrend",
+        "sar",
+        "sarext",
     ] {
         resume_matches_full(&df, directive, 120);
     }

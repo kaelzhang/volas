@@ -51,22 +51,25 @@ pub(super) fn dispatch(
             arg_usize(args, 0),
         )),
 
-        ("boll", None) => f64col(ind::boll(&close(0)?, arg_usize(args, 0))),
+        ("boll", None) => f64col(ind::boll(&close(0)?, arg_usize(args, 0), ops.origin())),
         ("boll", Some("upper")) => f64col(ind::boll_upper(
             &close(0)?,
             arg_usize(args, 0),
             arg_f64(args, 1),
+            ops.origin(),
         )),
         ("boll", Some("lower")) => f64col(ind::boll_lower(
             &close(0)?,
             arg_usize(args, 0),
             arg_f64(args, 1),
+            ops.origin(),
         )),
-        ("bbw", _) => f64col(ind::bbw(&close(0)?, arg_usize(args, 0))),
+        ("bbw", _) => f64col(ind::bbw(&close(0)?, arg_usize(args, 0), ops.origin())),
 
         ("accbands", None) => f64col(ind::accbands_middle(
             &close(0)?,
             arg_usize(args, 0),
+            ops.origin(),
         )),
         ("accbands", Some("upper")) => {
             let high = ops.f64(0, "high")?;
@@ -75,6 +78,7 @@ pub(super) fn dispatch(
                 &high,
                 &low,
                 arg_usize(args, 0),
+                ops.origin(),
             ))
         }
         ("accbands", Some("lower")) => {
@@ -84,6 +88,7 @@ pub(super) fn dispatch(
                 &high,
                 &low,
                 arg_usize(args, 0),
+                ops.origin(),
             ))
         }
 
@@ -124,6 +129,7 @@ pub(super) fn dispatch(
             arg_usize(args, 1),
             arg_usize(args, 2),
             arg_usize(args, 3),
+            ops.origin(),
         )),
 
         ("tr", _) => {
@@ -174,7 +180,7 @@ pub(super) fn dispatch(
             let period = arg_usize(args, 0);
             let minutes = tf_to_minutes(arg_str(args, 1))?;
             let trading_days = arg_i64(args, 2);
-            f64col(ind::hv(&close, period, minutes, trading_days))
+            f64col(ind::hv(&close, period, minutes, trading_days, ops.origin()))
         }
 
         ("increase", _) => boolcol(ind::increase(
@@ -249,6 +255,7 @@ pub(super) fn dispatch(
                 &close,
                 &volume,
                 arg_usize(args, 0),
+                ops.origin(),
             ))
         }
         ("ultosc", _) => {
@@ -262,6 +269,7 @@ pub(super) fn dispatch(
                 arg_usize(args, 0),
                 arg_usize(args, 1),
                 arg_usize(args, 2),
+                ops.origin(),
             ))
         }
         // Stochastic family: raw %K (NaN warm-up) then matype-MA smoothing stages.
@@ -281,16 +289,16 @@ pub(super) fn dispatch(
                 && slowd_period == 3
                 && slowd_matype == 0
             {
-                if let Some(out) = ind::stoch_d_default_sma(&high, &low, &close) {
+                if let Some(out) = ind::stoch_d_default_sma(&high, &low, &close, ops.origin()) {
                     return f64col(out);
                 }
             }
             let fastk = ind::stoch_fastk(&high, &low, &close, fastk_period);
-            let slowk = ma_typed(&fastk, slowk_period, slowk_matype, false);
+            let slowk = ma_typed(&fastk, slowk_period, slowk_matype, false, ops.origin());
             if line == "k" {
                 f64col(slowk)
             } else {
-                f64col(ma_typed(&slowk, slowd_period, slowd_matype, false))
+                f64col(ma_typed(&slowk, slowd_period, slowd_matype, false, ops.origin()))
             }
         }
         ("stochf", Some(line @ ("k" | "d"))) => {
@@ -301,7 +309,7 @@ pub(super) fn dispatch(
             let fastd_period = arg_usize(args, 1);
             let fastd_matype = arg_usize(args, 2);
             if line == "d" && fastk_period == 5 && fastd_period == 3 && fastd_matype == 0 {
-                if let Some(out) = ind::stochf_d_default_sma(&high, &low, &close) {
+                if let Some(out) = ind::stochf_d_default_sma(&high, &low, &close, ops.origin()) {
                     return f64col(out);
                 }
             }
@@ -309,7 +317,7 @@ pub(super) fn dispatch(
             if line == "k" {
                 f64col(fastk)
             } else {
-                f64col(ma_typed(&fastk, fastd_period, fastd_matype, false))
+                f64col(ma_typed(&fastk, fastd_period, fastd_matype, false, ops.origin()))
             }
         }
         ("stochrsi", Some(line @ ("k" | "d"))) => {
@@ -324,15 +332,20 @@ pub(super) fn dispatch(
                 && fastd_period == 3
                 && fastd_matype == 0
             {
-                if let Some(out) = ind::stochrsi_d_default_sma(&close) {
+                if let Some(out) = ind::stochrsi_d_default_sma(&close, ops.origin()) {
                     return f64col(out);
                 }
+            }
+            if line == "d" && fastd_matype == 0 {
+                // the SMA `.d` resumes from StochRSI's own state, over its complete rows
+                let d = ind::stochrsi_d_sma(&close, rsi_period, fastk_period, fastd_period, ops.origin());
+                return f64col(d);
             }
             let fastk = ind::stochrsi_fastk(&close, rsi_period, fastk_period);
             if line == "k" {
                 f64col(fastk)
             } else {
-                f64col(ma_typed(&fastk, fastd_period, fastd_matype, false))
+                f64col(ma_typed(&fastk, fastd_period, fastd_matype, false, ops.origin()))
             }
         }
 

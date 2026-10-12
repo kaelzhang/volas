@@ -9,65 +9,36 @@ use volas_time::{aggregate_period, AggSpec};
 #[allow(unused_imports)]
 use crate::*;
 
-/// Plan the in-place forming-row fold: for each of `inner`'s columns, the
-/// `(dst_col, src_col, combine_op)` triple pairing it with the matching bar column
-/// and its aggregator. Returns `None` (so the caller takes the batch-aggregate
-/// path) if any column is `Bool` / `Str`, which `Column::combine_at` cannot fold in
-/// place. The common OHLCV (all-numeric) frame is always foldable.
-fn build_fold_ops(
+/// Plan the in-place forming-row fold: for each of `inner`'s columns the bar carries,
+/// the `(dst_col, src_col, combine_op)` triple pairing it with the bar column and its
+/// aggregator. A column the bar does not carry (a cached directive) is not folded.
+/// Returns `None` (so the caller re-cumulates the period) if a carried column is
+/// `Bool` / `Str`, which `Column::combine_at` cannot fold in place. The common OHLCV
+/// (all-numeric) frame is always foldable.
+pub(crate) fn build_fold_ops(
     inner: &DataFrame,
     bar: &DataFrame,
     spec: &AggSpec,
 ) -> Option<Vec<(usize, usize, CombineOp)>> {
     let mut ops = Vec::with_capacity(inner.width());
     for j in 0..inner.width() {
+        let name = &inner.names()[j];
+        let Some(bj) = bar.column_pos(name) else { continue };
         if matches!(inner.columns()[j].dtype(), DType::Bool | DType::Utf8) {
             return None;
         }
-        let name = &inner.names()[j];
-        if let Some(bj) = bar.column_pos(name) {
-            ops.push((j, bj, spec.agg_for(name).as_combine_op()));
-        }
+        ops.push((j, bj, spec.agg_for(name).as_combine_op()));
     }
     Some(ops)
 }
 
-/// At a period rollover the previous forming row becomes final: advance each
-/// default-series recursive column's carried state over that now-closed bar (and
-/// write its final value) so the next period's forming row resumes from the correct
-/// anchor. Columns without a resume kernel, or explicit-`@series` ones, carry no
-/// anchored state and are left to the post-append refresh. Runs once per rollover
-/// (not per fine bar), so the per-column snapshot/parse is off the hot path.
-fn finalize_forming_computed(inner: &mut DataFrame) -> PyResult<()> {
-    let height = inner.height();
-    if height == 0 {
-        return Ok(());
-    }
-    let close_row = height - 1;
-    // Iterate the (short) directive names only — no per-column `state` Vec clone — and
-    // borrow each column's state straight off `inner` just before resuming it.
-    for name in inner.computed_names() {
-        let Ok(node) = parse(&name) else { continue };
-        if !directive_uses_default_series(&node) {
-            continue;
-        }
-        let resumed = inner.computed_resume_state(&name).and_then(|(state, origin)| {
-            volas_directive::exec::execute_resume(inner, &node, state, close_row, origin)
-        });
-        if let Some((tail, new_state)) = resumed {
-            inner.update_computed_tail(&name, close_row, &tail).map_err(pyerr)?;
-            inner.set_computed_state(&name, Some(new_state));
-        }
-    }
-    Ok(())
-}
-
 impl PyDataFrame {
-    /// Fold incoming fine bars into a tf-aware frame: each bar either extends the
-    /// open period's forming bar (update `inner`'s last row in place + mark its
-    /// computed tail stale) or rolls over into a new period (append a fresh
-    /// forming row). Assumes `self.tf` is `Some`. A re-sent forming bar (same
-    /// timestamp) updates the period rather than double-counting it.
+    /// Fold incoming bars into a tf-aware frame. The open period's bars are kept in a
+    /// small frame (`tfs.open`); a bar of that period joins it — REPLACING a bar with
+    /// the same timestamp, so a re-sent bar is never double-counted — and its
+    /// cumulation replaces `inner`'s last (forming) row, marking only that row of each
+    /// cached column stale. A bar of a later period starts a new small frame and
+    /// appends a new forming row. Assumes `self.tf` is `Some`.
     pub(crate) fn fold_append(&mut self, fine: &DataFrame) -> PyResult<()> {
         let last_dt = |df: &DataFrame| -> i64 {
             match df.index().kind() {
@@ -149,12 +120,13 @@ impl PyDataFrame {
                 };
                 let bar = bar.as_ref();
                 let open = tfs.open.as_mut().unwrap();
-                // A re-sent forming bar (same ts) replaces the last open bar.
+                // A re-sent forming bar (same ts) replaces the last open bar, in place.
                 let resent = last_dt(open) == bar_ts;
                 if resent {
-                    *open = open.slice(0, open.height() - 1);
+                    open.replace_last_row(bar, 0).map_err(pyerr)?;
+                } else {
+                    open.append(bar).map_err(pyerr)?;
                 }
-                open.append(bar).map_err(pyerr)?;
                 let last = inner.height() - 1;
                 // Fast path: a new distinct fine bar whose columns are all foldable
                 // (numeric / datetime) updates the forming row IN PLACE — no period
@@ -162,40 +134,36 @@ impl PyDataFrame {
                 // `tfs.fold_plan` and reused while the schema is unchanged, so the hot
                 // path never re-runs the per-bar `column_pos` / `agg_for` HashMap name
                 // lookups (whose SipHash dominated the per-bar cost). A re-sent bar
-                // (can't un-combine max/min) or a non-numeric column falls back to the
-                // batch aggregate; both stale the cached directive tail identically.
-                let plan_ok = !resent
-                    && tfs.fold_plan.as_ref().is_some_and(|fp| fp.matches(inner, bar));
-                if !resent && !plan_ok {
-                    tfs.fold_plan = build_fold_ops(inner, bar, &tfs.cumulators).map(|ops| FoldPlan {
-                        inner_names: inner.names_arc().clone(),
-                        inner_dtypes: inner.columns().iter().map(|c| c.dtype()).collect(),
-                        bar_names: bar.names().to_vec(),
-                        ops,
-                    });
-                }
-                let plan = if resent { None } else { tfs.fold_plan.as_ref() };
-                if let Some(fp) = plan {
-                    inner.fold_forming_row(last, bar, 0, &fp.ops).map_err(pyerr)?;
+                // (can't un-combine max/min) or a non-numeric bar column re-cumulates
+                // the period instead; both stale only the forming row.
+                // A re-sent bar re-cumulates the whole open period instead (a max / min
+                // cannot be un-combined) — also in place, from its own cached plan.
+                let (src, cached) = if resent {
+                    (&*open, &mut tfs.refold_plan)
                 } else {
+                    (bar, &mut tfs.fold_plan)
+                };
+                if !cached.as_ref().is_some_and(|fp| fp.matches(inner, src)) {
+                    *cached = FoldPlan::build(inner, src, &tfs.cumulators);
+                }
+                if let Some(fp) = cached.as_ref() {
+                    if resent {
+                        inner.refold_forming_row(last, src, &fp.ops).map_err(pyerr)?;
+                    } else {
+                        inner.fold_forming_row(last, src, 0, &fp.ops).map_err(pyerr)?;
+                    }
+                } else {
+                    // A bool / str bar column: re-cumulate the open period and REPLACE
+                    // the forming row with it — in place, for every column dtype. Only
+                    // that row changed, so the cached columns keep their states.
                     let agg =
                         aggregate_period(open, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
-                    for (name, col) in agg.names().iter().zip(agg.columns()) {
-                        if let Some(j) = inner.column_pos(name) {
-                            inner.assign_positions(j, &[last], col).map_err(pyerr)?;
-                        }
-                    }
+                    inner.replace_last_row(&agg, 0).map_err(pyerr)?;
                 }
             } else {
-                // Roll over: the previous forming bar (if any) is already final in
-                // `inner`. Advance each cached recursive column's anchor over that
-                // now-closed bar BEFORE opening the next period, so the new forming
-                // row resumes from the correct closed-bar state. With no forming bar
-                // (a frame built from closed bars) the last row is closed and its
-                // state already covers it — advancing again would count it twice.
-                if tfs.open.is_some() {
-                    finalize_forming_computed(inner)?;
-                }
+                // Roll over: the previous forming bar is final in `inner`; the new row is
+                // a stale row like any appended one, resumed from the state as of the
+                // closed bar (never stepping the closed bar again).
                 let bar = fine.slice(i, i + 1);
                 let agg = aggregate_period(&bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
                 tfs.open = Some(bar);

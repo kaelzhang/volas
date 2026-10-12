@@ -154,7 +154,7 @@ impl PyDataFrame {
             (names, cols)
         };
         Ok(PyDataFrame::plain(
-            DataFrame::new(names, columns, Some(Index::range(h))).map_err(pyerr)?,
+            DataFrame::new(names, columns, Some(Index::range(h))).map_err(pyerr)?.with_origin(df.origin()),
         ))
     }
 
@@ -277,6 +277,7 @@ impl PyDataFrame {
                 open: cum.open_clone(),
                 open_key: None,
                 fold_plan: None,
+                refold_plan: None,
             }),
             window: None,
         })

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::column::{Column, CombineOp};
 use crate::fxhash::FxHashMap;
 use crate::error::{Result, VolasError};
-use crate::index::{Index, IndexKind};
+use crate::index::{Index, IndexKind, Label};
 use crate::series::Series;
 
 /// Metadata for a materialized (cached) directive column: the directive that
@@ -30,14 +30,17 @@ pub struct ComputedMeta {
     /// then falls back to the correct full recompute) or the state is unknown
     /// (e.g. after a slice that did not reach the parent's `valid_rows`).
     pub state: Option<Vec<f64>>,
-    /// The original-frame row that THIS (possibly sliced) frame's row 0 maps to.
-    /// `0` for a freshly-computed column; a contiguous slice from `start` bumps it
-    /// by `start`. It lets an absolute-position indicator (the index family —
-    /// maxindex/minindex/minmaxindex) keep emitting ABSOLUTE positions after a
-    /// head-dropping slice: a sub-frame position `p` is original row `p + origin`,
-    /// matching the verbatim-carried (original-absolute) head. Recursive *value*
-    /// indicators ignore it (their state is offset-free).
-    pub origin: usize,
+    /// The carried state as of the row before the last valid one (`valid_rows - 2`):
+    /// the state that row was resumed from. When the last row is replaced in place (a
+    /// row appended with the last row's label, a time-frame forming bar), it becomes
+    /// [`state`](Self::state) again, so the replacement is recomputed in one step from
+    /// it — never re-stepping or recomputing the rows before. A resume of one new row
+    /// moves the old `state` here. `None` when unknown (a replaced row then recomputes
+    /// the column, capturing both states again).
+    pub state_before_last: Option<Vec<f64>>,
+    /// A spare buffer the one-row resume writes the next state into, recycled between
+    /// the two states so a live column steps with no allocation.
+    scratch: Vec<f64>,
 }
 
 /// A 2-D, column-oriented, time-indexed table. All columns share one index and
@@ -59,6 +62,16 @@ pub struct DataFrame {
     /// `clone` / `append`; dropped by shape-changing ops (slice/select/…), where
     /// the columns become plain data.
     computed: FxHashMap<String, ComputedMeta>,
+    /// The absolute position of row 0 in the series this frame continues: `0` for a
+    /// new frame; a contiguous slice (a bounded frame dropping its head included) adds
+    /// its start, so every row keeps the position it has in the full series. A
+    /// derivation over the same rows (columns, names, dtypes, index) keeps it; one
+    /// that selects rows otherwise (`take`, a mask) starts a new series at `0`.
+    /// Sliding-window computations re-anchor their running sums at absolute positions
+    /// (see `volas_compute`), so a value depends only on the rows near it, the same in
+    /// the frame and in the full series; the index family (maxindex / minindex /
+    /// minmaxindex) emits absolute positions.
+    origin: usize,
 }
 
 impl DataFrame {
@@ -106,6 +119,7 @@ impl DataFrame {
             index: Arc::new(index),
             height,
             computed: FxHashMap::default(),
+            origin: 0,
         };
         #[cfg(debug_assertions)]
         df.debug_check();
@@ -130,6 +144,19 @@ impl DataFrame {
             assert!(self.name_to_idx.contains_key(name), "computed {name:?} is not a column");
             assert!(meta.valid_rows <= self.height, "computed {name:?} cursor past the height");
         }
+    }
+
+    /// The absolute position of row 0 in the series this frame continues (see the
+    /// field).
+    pub fn origin(&self) -> usize {
+        self.origin
+    }
+
+    /// This frame, its row 0 at absolute position `origin` — for a derivation that
+    /// keeps the rows of a frame through [`DataFrame::new`].
+    pub fn with_origin(mut self, origin: usize) -> Self {
+        self.origin = origin;
+        self
     }
 
     /// Number of rows.
@@ -186,7 +213,8 @@ impl DataFrame {
     /// derivations (slice / take / mask / astype), with no name-string or hash-map
     /// rebuild. Computed-column status is dropped; the caller re-attaches it where
     /// the derivation preserves it (a contiguous slice).
-    fn same_schema(&self, columns: Vec<Column>, index: Index) -> DataFrame {
+    /// Row 0 of the result is at absolute position `origin`.
+    fn same_schema(&self, columns: Vec<Column>, index: Index, origin: usize) -> DataFrame {
         let height = columns.first().map_or(0, |c| c.len());
         DataFrame {
             names: Arc::clone(&self.names),
@@ -195,13 +223,14 @@ impl DataFrame {
             index: Arc::new(index),
             height,
             computed: FxHashMap::default(),
+            origin,
         }
     }
 
-    /// Gather rows by position into a new frame.
+    /// Gather rows by position into a new frame (a new series: origin 0).
     pub fn take(&self, positions: &[usize]) -> DataFrame {
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(positions)).collect();
-        self.same_schema(columns, self.index.take(positions))
+        self.same_schema(columns, self.index.take(positions), 0)
     }
 
     /// Borrow a column by name.
@@ -264,7 +293,7 @@ impl DataFrame {
         let mut columns = self.columns.clone();
         names.remove(pos);
         columns.remove(pos);
-        DataFrame::new(names, columns, Some(index))
+        Ok(DataFrame::new(names, columns, Some(index))?.with_origin(self.origin))
     }
 
     /// Change the DatetimeIndex's **display / matching** timezone without moving
@@ -368,6 +397,7 @@ impl DataFrame {
             index: Arc::clone(&self.index),
             height: self.height,
             computed: FxHashMap::default(),
+            origin: self.origin,
         })
     }
 
@@ -383,7 +413,7 @@ impl DataFrame {
         let end = end.max(start).min(self.height);
         let len = end - start;
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
-        let mut df = self.same_schema(columns, self.index.slice(start, end));
+        let mut df = self.same_schema(columns, self.index.slice(start, end), self.origin + start);
         // SP-9: carry cached-directive columns *as continuable computed columns*
         // through a contiguous slice. The cached values are already correct (they
         // were computed with full history) and are carried verbatim; we re-tag the
@@ -408,8 +438,12 @@ impl DataFrame {
                 // `valid_rows`) would leave the state attached to a row the sub-frame
                 // no longer ends on, so we drop it (the column stays correct via the
                 // full-recompute fallback, just not O(new-rows) continuable).
-                let carried = if end >= meta.valid_rows {
-                    meta.state.clone()
+                // Both states describe rows relative to the parent's last valid row, so
+                // they carry together.
+                let reaches_end = end >= meta.valid_rows;
+                let carried = if reaches_end { meta.state.clone() } else { None };
+                let carried_before = if reaches_end {
+                    meta.state_before_last.clone()
                 } else {
                     None
                 };
@@ -419,10 +453,8 @@ impl DataFrame {
                         lookback: meta.lookback,
                         valid_rows: valid,
                         state: carried,
-                        // This sub-frame's row 0 is the parent's row `start`, so its
-                        // origin shifts by `start` (an absolute-index resume adds it
-                        // back to stay original-absolute, matching the carried head).
-                        origin: meta.origin + start,
+                        state_before_last: carried_before,
+                        scratch: Vec::new(),
                     },
                 );
             }
@@ -443,7 +475,7 @@ impl DataFrame {
         let start = start.min(self.height);
         let end = end.max(start).min(self.height);
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
-        self.same_schema(columns, self.index.slice(start, end))
+        self.same_schema(columns, self.index.slice(start, end), self.origin + start)
     }
 
     /// Filter rows by a boolean mask.
@@ -461,7 +493,7 @@ impl DataFrame {
             .filter_map(|(i, &b)| if b { Some(i) } else { None })
             .collect();
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(&idx)).collect();
-        Ok(self.same_schema(columns, self.index.take(&idx)))
+        Ok(self.same_schema(columns, self.index.take(&idx), 0))
     }
 
     /// Append the rows of `other` (matched by column name) in place. Columns of
@@ -580,11 +612,147 @@ impl DataFrame {
             self.columns[dst_col].combine_at(row, op, &src.columns[src_col], src_row)?;
         }
         // Only the forming row changed: mark it stale but KEEP each cached column's
-        // anchored resume state, so `refresh` continues the recursion over just this
-        // row (O(lookback)) instead of recomputing the whole buffer from scratch.
+        // carried states, so `refresh` recomputes just this row from the state before
+        // it instead of recomputing the whole buffer from scratch.
         self.invalidate_computed_forming_row(row);
         #[cfg(debug_assertions)]
         self.debug_check();
+        Ok(())
+    }
+
+    /// Re-cumulate the forming aggregate at `row` from all of `src`'s rows, in place, per
+    /// the fold plan `ops` (as [`fold_forming_row`](Self::fold_forming_row)): the first
+    /// row initializes each cell ([`Column::init_at`]), every later one folds in
+    /// ([`Column::combine_at`]) — exactly the batch reduce of the period, with no
+    /// allocation. Used when a bar already folded in is re-sent with new values (a
+    /// max / min cannot be un-combined). Only that row changed, so each cached column
+    /// keeps what it carries and goes stale from it.
+    pub fn refold_forming_row(
+        &mut self,
+        row: usize,
+        src: &DataFrame,
+        ops: &[(usize, usize, CombineOp)],
+    ) -> Result<()> {
+        for &(dst_col, src_col, op) in ops {
+            let (dst, from) = (&mut self.columns[dst_col], &src.columns[src_col]);
+            dst.init_at(row, op, from, 0)?;
+            for r in 1..src.height {
+                dst.combine_at(row, op, from, r)?;
+            }
+        }
+        self.invalidate_computed_forming_row(row);
+        Ok(())
+    }
+
+
+    /// Replace the last row whole with `src`'s row `src_row`, in place: each column takes
+    /// `src`'s value of the same name, or a missing value when `src` lacks it; a cached
+    /// directive column is left to its refresh. The label is unchanged. Only the last
+    /// row changed, so each cached column keeps what it carries and is stale from that
+    /// row on (see `invalidate_computed_forming_row`).
+    pub fn replace_last_row(&mut self, src: &DataFrame, src_row: usize) -> Result<()> {
+        let Some(last) = self.height.checked_sub(1) else {
+            return Err(VolasError::Shape("no last row to replace".into()));
+        };
+        if src_row >= src.height {
+            return Err(VolasError::Shape(format!(
+                "row position {src_row} is out of range (height {})",
+                src.height
+            )));
+        }
+        let same = self.names == src.names;
+        for pos in 0..self.columns.len() {
+            if !self.computed.is_empty() && self.computed.contains_key(&self.names[pos]) {
+                continue;
+            }
+            let from = if same { Some(pos) } else { src.column_pos(&self.names[pos]) };
+            match from {
+                Some(j) if src.columns[j].dtype() == self.columns[pos].dtype() => {
+                    self.columns[pos].set_last_from(&src.columns[j], src_row)?
+                }
+                Some(j) => {
+                    // a differently typed value takes the column's dtype first
+                    let cell = src.columns[j].slice(src_row, src_row + 1);
+                    let cell = cell.cast(self.columns[pos].dtype())?;
+                    self.columns[pos].set_last_from(&cell, 0)?
+                }
+                None => self.columns[pos].set_last_na(),
+            }
+        }
+        self.invalidate_computed_forming_row(last);
+        Ok(())
+    }
+
+    /// Append `other`'s rows, keyed by their labels: a row labelled like the current
+    /// last row replaces it whole ([`replace_last_row`](Self::replace_last_row)); any
+    /// other row is appended, except that a datetime index only ever increases (a row
+    /// labelled before the last is an error) and an integer / string index stays
+    /// unique (a row labelled like an earlier row is an error). On an error the frame
+    /// is left unchanged. Rows without explicit labels (a `RangeIndex`) take the next
+    /// labels, as [`append`](Self::append). Deciding a datetime row is O(1); an integer
+    /// / string row looks its label up among the frame's.
+    pub fn append_labelled(&mut self, other: &DataFrame) -> Result<()> {
+        if matches!(other.index.kind(), IndexKind::Range(_)) || other.height == 0 {
+            return self.append(other);
+        }
+        let datetime = matches!(self.index.kind(), IndexKind::Datetime(..))
+            || matches!(other.index.kind(), IndexKind::Datetime(..));
+        if other.height == 1 && self.height > 0 {
+            // The live single-bar path: one comparison with the last label.
+            let label = other.index.label_at(0);
+            let last = self.index.label_at(self.height - 1);
+            if label == last {
+                return self.replace_last_row(other, 0);
+            }
+            let fresh = if datetime {
+                !label_precedes(&label, &last)
+            } else {
+                self.index.position_of(&label).is_none()
+            };
+            if fresh {
+                return self.append(other);
+            }
+        }
+        // Decide every row first, so an error leaves the frame unchanged.
+        let mut replaces = Vec::new();
+        for k in 0..other.height {
+            let label = other.index.label_at(k);
+            let prev = if k > 0 {
+                Some(other.index.label_at(k - 1))
+            } else {
+                self.height.checked_sub(1).map(|i| self.index.label_at(i))
+            };
+            let replace = prev.as_ref() == Some(&label);
+            if !replace && datetime && prev.as_ref().is_some_and(|p| label_precedes(&label, p)) {
+                return Err(VolasError::Value(format!(
+                    "cannot append a row labelled {}: a datetime index only increases \
+                     (only the last row can be replaced)",
+                    label_text(&label)
+                )));
+            }
+            if !replace && !datetime {
+                let earlier = self.index.position_of(&label).is_some()
+                    || (0..k).any(|j| other.index.label_at(j) == label);
+                if earlier {
+                    return Err(VolasError::Value(format!(
+                        "cannot append a row labelled {}: an earlier row has that label \
+                         (only the last row can be replaced)",
+                        label_text(&label)
+                    )));
+                }
+            }
+            replaces.push(replace);
+        }
+        if !replaces.contains(&true) {
+            return self.append(other);
+        }
+        for (k, replace) in replaces.into_iter().enumerate() {
+            if replace {
+                self.replace_last_row(other, k)?;
+            } else {
+                self.append(&other.slice_data(k, k + 1))?;
+            }
+        }
         Ok(())
     }
 
@@ -596,7 +764,7 @@ impl DataFrame {
             .iter()
             .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
             .collect();
-        DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))
+        Ok(DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))?.with_origin(self.origin))
     }
 
     /// Cast the named columns to new dtypes (pandas `astype`), returning a new
@@ -609,7 +777,7 @@ impl DataFrame {
                 .ok_or_else(|| VolasError::ColumnNotFound(name.clone()))?;
             columns[pos] = self.columns[pos].cast(*dtype)?;
         }
-        Ok(self.same_schema(columns, (*self.index).clone()))
+        Ok(self.same_schema(columns, (*self.index).clone(), self.origin))
     }
 
     /// Value equality (pandas `DataFrame.equals`): same column names + order,
@@ -673,9 +841,25 @@ impl DataFrame {
     }
 }
 
+/// Whether datetime label `a` orders before `b` (only a datetime index is ordered by
+/// the append rule; a label of another kind never precedes).
+fn label_precedes(a: &Label, b: &Label) -> bool {
+    matches!((a, b), (Label::I64(x), Label::I64(y)) if x < y)
+}
+
+/// A label as written in a message.
+fn label_text(label: &Label) -> String {
+    match label {
+        Label::I64(v) => v.to_string(),
+        Label::Str(s) => format!("{s:?}"),
+    }
+}
+
 mod computed;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_nan_fact;
+#[cfg(test)]
+mod tests_replace;

@@ -21,10 +21,10 @@ use super::*;
 
 /// The Wilder-`sum` running accumulator after seeding at `period-1` and folding every
 /// later term — i.e. the value of `s` once `wilder_sum` has consumed all `n` rows. `None`
-/// before the seed exists (`period == 0 || period >= n`). `term(i)` is the per-bar
+/// before the seed exists (`period == 0 || period > n`). `term(i)` is the per-bar
 /// one-period quantity (`dm1.0` / `dm1.1` / `tr1`).
 fn wilder_sum_final(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Option<f64> {
-    if period == 0 || period >= n {
+    if period == 0 || period > n {
         return None;
     }
     let mut s = 0.0;
@@ -140,16 +140,6 @@ fn dm_tr_step(high: &[f64], low: &[f64], close: &[f64], i: usize, a: f64, s: &mu
     s[2] = s[2].mul_add(a, tr1(high, low, close, i));
 }
 
-/// `100·dm_sm/tr_sm` with TA-Lib's ~0-TR guard — the per-row `di` value.
-#[inline]
-fn di_val(dm_sm: f64, tr_sm: f64) -> f64 {
-    if tr_sm.abs() < 1e-14 {
-        0.0
-    } else {
-        100.0 * dm_sm / tr_sm
-    }
-}
-
 /// Final +DI state `[sp, st]` (+DM and TR running sums) — pairs with [`plus_di_resume`].
 pub fn plus_di_final_state(
     high: &[f64],
@@ -220,23 +210,6 @@ pub fn minus_di_resume(
         out.push(di_val(s[1], s[2]));
     }
     Some((out, vec![s[1], s[2]]))
-}
-
-/// The per-row DX value from the +DM/−DM/TR sums — the exact arithmetic of [`dx`].
-#[inline]
-fn dx_val(sp: f64, sm: f64, st: f64) -> f64 {
-    if st.abs() < 1e-14 {
-        0.0
-    } else {
-        let plus_di = 100.0 * sp / st;
-        let minus_di = 100.0 * sm / st;
-        let sum = plus_di + minus_di;
-        if sum.abs() < 1e-14 {
-            0.0
-        } else {
-            100.0 * (minus_di - plus_di).abs() / sum
-        }
-    }
 }
 
 /// Final DX state `[sp, sm, st]` (all three running sums) — pairs with [`dx_resume`].
@@ -445,8 +418,9 @@ pub fn adxr_resume(
 
 
 /// Scalar single-row twin of [`plus_di_resume`]: the +DI value at `row` from
-/// `state = [sp_{row-1}, st_{row-1}]`, no allocation. Advances the fused +DM/TR sums one
-/// bar then applies `di_val`, bit-identical to the Vec loop body.
+/// `state = [sp_{row-1}, st_{row-1}]`, the state as of `row` written into `next`, no
+/// allocation. Advances the fused +DM/TR sums one bar then applies `di_val`,
+/// bit-identical to the Vec loop body.
 pub fn plus_di_resume_one(
     high: &[f64],
     low: &[f64],
@@ -454,19 +428,22 @@ pub fn plus_di_resume_one(
     period: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 2 || row >= high.len() {
+    if row == 0 || state.len() != 2 || next.len() != 2 || row >= high.len() {
         return None;
     }
     let a = 1.0 - 1.0 / period as f64;
     // Mirror the Vec resume's `s = [sp, 0, st]`; −DM slot stays 0 (unused by +DI).
     let mut s = [state[0], 0.0, state[1]];
     dm_tr_step(high, low, close, row, a, &mut s);
+    next.copy_from_slice(&[s[0], s[2]]);
     Some(di_val(s[0], s[2]))
 }
 
 /// Scalar single-row twin of [`minus_di_resume`]: the −DI value at `row` from
-/// `state = [sm_{row-1}, st_{row-1}]`, no allocation. Bit-identical to the Vec loop body.
+/// `state = [sm_{row-1}, st_{row-1}]`, the state as of `row` written into `next`, no
+/// allocation. Bit-identical to the Vec loop body.
 pub fn minus_di_resume_one(
     high: &[f64],
     low: &[f64],
@@ -474,20 +451,23 @@ pub fn minus_di_resume_one(
     period: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 2 || row >= high.len() {
+    if row == 0 || state.len() != 2 || next.len() != 2 || row >= high.len() {
         return None;
     }
     let a = 1.0 - 1.0 / period as f64;
     // Mirror the Vec resume's `s = [0, sm, st]`; +DM slot stays 0 (unused by −DI).
     let mut s = [0.0, state[0], state[1]];
     dm_tr_step(high, low, close, row, a, &mut s);
+    next.copy_from_slice(&[s[1], s[2]]);
     Some(di_val(s[1], s[2]))
 }
 
 /// Scalar single-row twin of [`dx_resume`]: the DX value at `row` from
-/// `state = [sp, sm, st]` (as of row-1), no allocation. Advances all three fused sums one
-/// bar then applies `dx_val`, bit-identical to the Vec loop body.
+/// `state = [sp, sm, st]` (as of row-1), the state as of `row` written into `next`, no
+/// allocation. Advances all three fused sums one bar then applies `dx_val`,
+/// bit-identical to the Vec loop body.
 pub fn dx_resume_one(
     high: &[f64],
     low: &[f64],
@@ -495,19 +475,22 @@ pub fn dx_resume_one(
     period: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 3 || row >= high.len() {
+    if row == 0 || state.len() != 3 || next.len() != 3 || row >= high.len() {
         return None;
     }
     let a = 1.0 - 1.0 / period as f64;
     let mut s = [state[0], state[1], state[2]];
     dm_tr_step(high, low, close, row, a, &mut s);
+    next.copy_from_slice(&s);
     Some(dx_val(s[0], s[1], s[2]))
 }
 
 /// Scalar single-row twin of [`adx_resume`]: the ADX value at `row` from
-/// `state = [sp, sm, st, adx]` (as of row-1), no allocation. Advances the DX sums, forms
-/// `dx[row]`, then folds it into the Wilder ADX average — bit-identical to the Vec body.
+/// `state = [sp, sm, st, adx]` (as of row-1), the state as of `row` written into `next`,
+/// no allocation. Advances the DX sums, forms `dx[row]`, then folds it into the Wilder
+/// ADX average — bit-identical to the Vec body.
 pub fn adx_resume_one(
     high: &[f64],
     low: &[f64],
@@ -515,8 +498,9 @@ pub fn adx_resume_one(
     period: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 4 || row >= high.len() {
+    if row == 0 || state.len() != 4 || next.len() != 4 || row >= high.len() {
         return None;
     }
     let pf = period as f64;
@@ -525,13 +509,15 @@ pub fn adx_resume_one(
     let mut s = [state[0], state[1], state[2]];
     dm_tr_step(high, low, close, row, a_sum, &mut s);
     let dxv = dx_val(s[0], s[1], s[2]);
-    Some(state[3].mul_add(a_avg, dxv * b_avg))
+    let adx = state[3].mul_add(a_avg, dxv * b_avg);
+    next.copy_from_slice(&[s[0], s[1], s[2], adx]);
+    Some(adx)
 }
 
 /// Scalar single-row twin of [`adxr_resume`]: the ADXR value at `row` from
-/// `state = [sp, sm, st, adx[row-period .. row-1]]`, no allocation. Advances the DX sums +
-/// ADX average one bar, then forms `(adx[row] + adx[row-(period-1)])/2`, bit-identical to
-/// the Vec loop body — without the Vec's `win.remove(0)`/`push` (O(1) index instead).
+/// `state = [sp, sm, st, adx[row-period .. row-1]]`, the state as of `row` (the ADX window
+/// slid by one) written into `next`, no allocation. Advances the DX sums + ADX average one
+/// bar, then forms `(adx[row] + adx[row-(period-1)])/2`, bit-identical to the Vec loop body.
 pub fn adxr_resume_one(
     high: &[f64],
     low: &[f64],
@@ -539,8 +525,14 @@ pub fn adxr_resume_one(
     period: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || period == 0 || state.len() < 3 + period || row >= high.len() {
+    if row == 0
+        || period == 0
+        || state.len() != 3 + period
+        || next.len() != state.len()
+        || row >= high.len()
+    {
         return None;
     }
     let pf = period as f64;
@@ -551,42 +543,47 @@ pub fn adxr_resume_one(
     let dxv = dx_val(s[0], s[1], s[2]);
     // newest carried adx = adx[row-1] = state[3 + period - 1]; fold to get adx[row].
     let adx = state[3 + period - 1].mul_add(a_avg, dxv * b_avg);
-    // After the conceptual window slide, win[0] = adx[row-(period-1)]:
-    //  period >= 2 -> old window's win[1] = state[4]; period == 1 -> the just-formed adx.
-    let oldest = if period >= 2 { state[4] } else { adx };
-    Some((adx + oldest) / 2.0)
+    // Slide the window: next = [s, adx[row-(period-1)] .. adx[row]].
+    next[..3].copy_from_slice(&s);
+    next[3..3 + period - 1].copy_from_slice(&state[4..3 + period]);
+    next[3 + period - 1] = adx;
+    Some((adx + next[3]) / 2.0)
 }
 
-
-
 /// Scalar single-row twin of [`plus_dm_resume`]: the running Wilder-sum at `row` from
-/// `state = [s_{row-1}]`, no allocation. Bit-identical to one `wilder_sum` steady step.
+/// `state = [s_{row-1}]` (the new sum is the state as of `row`, written into `next`), no
+/// allocation. Bit-identical to one `wilder_sum` steady step.
 pub fn plus_dm_resume_one(
     high: &[f64],
     low: &[f64],
     period: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.is_empty() || row >= high.len() {
+    if row == 0 || state.len() != 1 || next.len() != 1 || row >= high.len() {
         return None;
     }
     let a = 1.0 - 1.0 / period as f64;
-    Some(state[0].mul_add(a, dm1(high, low, row).0))
+    next[0] = state[0].mul_add(a, dm1(high, low, row).0);
+    Some(next[0])
 }
 
 /// Scalar single-row twin of [`minus_dm_resume`]: running Wilder-sum at `row` from
-/// `state = [s_{row-1}]`, no allocation. Bit-identical to one `wilder_sum` step.
+/// `state = [s_{row-1}]` (the new sum written into `next`), no allocation. Bit-identical
+/// to one `wilder_sum` step.
 pub fn minus_dm_resume_one(
     high: &[f64],
     low: &[f64],
     period: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.is_empty() || row >= high.len() {
+    if row == 0 || state.len() != 1 || next.len() != 1 || row >= high.len() {
         return None;
     }
     let a = 1.0 - 1.0 / period as f64;
-    Some(state[0].mul_add(a, dm1(high, low, row).1))
+    next[0] = state[0].mul_add(a, dm1(high, low, row).1);
+    Some(next[0])
 }

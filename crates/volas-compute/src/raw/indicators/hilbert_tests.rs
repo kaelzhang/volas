@@ -64,18 +64,28 @@ fn assert_bits(a: &[f64], b: &[f64], what: &str) {
     }
 }
 
-/// Tolerant resume-vs-full check for the **windowed-average** outputs
-/// (TRENDLINE / TRENDMODE): the full pass sums each DC-period window via O(n)
-/// price prefix sums while the per-bar resume keeps the exact O(period) rescan,
-/// so the two agree only to a **non-accumulating ~1e-12** (the same window, a
-/// different summation order). The recursive core they share stays bit-exact
-/// (`assert_bits` above); these outputs are independently pinned to TA-Lib.
-fn assert_near(a: &[f64], b: &[f64], what: &str) {
-    assert_eq!(a.len(), b.len(), "{what}: length");
-    for (i, (x, y)) in a.iter().zip(b).enumerate() {
-        let ok = (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-9 + 1e-9 * y.abs();
-        assert!(ok, "{what}: bar {i}: resume {x:?} !~= full {y:?}");
-    }
+/// A resume that starts under an output's warm-up mask (reachable once missing rows
+/// shift the gathered bar index down) emits NaN there, as the full compute does, and
+/// the full values past it.
+#[test]
+fn ht_resume_under_the_mask_is_nan_like_the_full_compute() {
+    let price = series(120);
+    let from = 20; // past CORE_START, under LB_PERIOD and LB_PHASE
+    let head = &price[..from];
+    let st = ht_core_state(head).unwrap();
+    assert_bits(&ht_dcperiod_resume(&price, from, &st).unwrap().0, &ht_dcperiod(&price)[from..], "dcperiod");
+    assert_bits(&ht_phasor_resume(&price, true, from, &st).unwrap().0, &ht_phasor(&price).1[from..], "phasor");
+    let st = ht_dcphase_state(head).unwrap();
+    assert_bits(&ht_dcphase_resume(&price, from, &st).unwrap().0, &ht_dcphase(&price)[from..], "dcphase");
+    assert_bits(&ht_sine_resume(&price, true, from, &st).unwrap().0, &ht_sine(&price).1[from..], "sine");
+    let st = mama_state(head, 0.5, 0.05).unwrap();
+    assert_bits(&mama_resume(&price, 0.5, 0.05, false, from, &st).unwrap().0, &mama(&price, 0.5, 0.05).0[from..], "mama");
+    // the trendline family's raw-price window needs `from >= SMOOTH_PRICE_SIZE`
+    let from = 55; // under LB_PHASE
+    let st = ht_trendline_state(&price[..from]).unwrap();
+    assert_bits(&ht_trendline_resume(&price, from, &st).unwrap().0, &ht_trendline(&price)[from..], "trendline");
+    let st = ht_trendmode_state(&price[..from]).unwrap();
+    assert_bits(&ht_trendmode_resume(&price, from, &st).unwrap().0, &ht_trendmode(&price)[from..], "trendmode");
 }
 
 /// Every HT resume, fed the carried state of a full compute over `price[..from]`,
@@ -111,10 +121,10 @@ fn ht_resume_is_bit_identical_to_full() {
         // TRENDLINE / TRENDMODE (core + iTrend triple [+ DC-phase / counters]).
         let st = ht_trendline_state(head).unwrap();
         let (v, _) = ht_trendline_resume(&price, from, &st).unwrap();
-        assert_near(&v, &ht_trendline(&price)[from..], "trendline");
+        assert_bits(&v, &ht_trendline(&price)[from..], "trendline");
         let st = ht_trendmode_state(head).unwrap();
         let (v, _) = ht_trendmode_resume(&price, from, &st).unwrap();
-        assert_near(&v, &ht_trendmode(&price)[from..], "trendmode");
+        assert_bits(&v, &ht_trendmode(&price)[from..], "trendmode");
 
         // MAMA / FAMA (core + [mama, fama, prev_phase]).
         let st = mama_state(head, 0.5, 0.05).unwrap();
@@ -197,4 +207,37 @@ fn ht_resume_declines_on_short_state() {
     assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
     // MAMA / FAMA need CORE_STATE_LEN + 3 (line 998).
     assert!(mama_resume(&price, 0.5, 0.05, false, 20, &core_only).is_none());
+}
+
+/// A carried state no computation wrote — a ring cursor or DC-phase index out of its
+/// ring, a parity not 0 / 1 — is refused by every resume, never used to index.
+#[test]
+fn a_forged_state_is_refused() {
+    let price = series(120);
+    let head = &price[..80];
+    let forge = |mut st: Vec<f64>, at: usize, v: f64| {
+        st[at] = v;
+        st
+    };
+    let core = ht_core_state(head).unwrap();
+    for (at, v) in [(3, 3.0), (3, 1e9), (3, -1.0), (3, 0.5), (3, f64::NAN), (4, 0.5), (4, 2.0)] {
+        let st = forge(core.clone(), at, v);
+        assert!(ht_dcperiod_resume(&price, 80, &st).is_none(), "cursor {at}={v}");
+        assert!(ht_phasor_resume(&price, true, 80, &st).is_none());
+    }
+    let mama_st = forge(mama_state(head, 0.5, 0.05).unwrap(), 3, 7.0);
+    assert!(mama_resume(&price, 0.5, 0.05, false, 80, &mama_st).is_none());
+    let tl = forge(ht_trendline_state(head).unwrap(), 3, 4.0);
+    assert!(ht_trendline_resume(&price, 80, &tl).is_none());
+    // the DC-phase ring index sits right after the core and the phase
+    let dc = ht_dcphase_state(head).unwrap();
+    for v in [50.0, 1e12, -2.0, 1.5] {
+        let st = forge(dc.clone(), CORE_STATE_LEN + 1, v);
+        assert!(ht_dcphase_resume(&price, 80, &st).is_none(), "dc idx {v}");
+        assert!(ht_sine_resume(&price, false, 80, &st).is_none());
+    }
+    let tm = forge(ht_trendmode_state(head).unwrap(), CORE_STATE_LEN + 1, 99.0);
+    assert!(ht_trendmode_resume(&price, 80, &tm).is_none());
+    // a well-formed state still resumes
+    assert!(ht_dcphase_resume(&price, 80, &dc).is_some());
 }

@@ -12,6 +12,7 @@
 //! Depends on `volas-core` only for the shared error type; it does not touch the
 //! DataFrame data model.
 
+mod accum;
 mod buf;
 mod guard;
 pub mod indicators;

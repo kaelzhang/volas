@@ -5,8 +5,9 @@ use super::*;
 
 // The per-dtype combine kernels behind `Column::combine_at`. `Max` / `Min` / `Sum`
 // match the batch reduce: `f*::max`/`min` drop a `NaN` operand (so a missing fine
-// bar is skipped, exactly like the fold), and the integer sum is overflow-checked in
-// debug (like `Iterator::sum`). `Keep` never reaches here (combine_at returns early).
+// bar is skipped, exactly like the fold), and the integer sum is checked — an overflow
+// is the `numeric::overflow` error, never a wrapped value, as in the batch reduce.
+// `Keep` never reaches here (combine_at returns early).
 fn combine_f64(op: CombineOp, acc: f64, x: f64) -> f64 {
     match op {
         CombineOp::Replace => x,
@@ -27,14 +28,30 @@ fn combine_f32(op: CombineOp, acc: f32, x: f32) -> f32 {
     }
 }
 
-fn combine_i64(op: CombineOp, acc: i64, x: i64) -> i64 {
+fn combine_i64(op: CombineOp, acc: i64, x: i64) -> Option<i64> {
     match op {
-        CombineOp::Replace => x,
-        CombineOp::Max => acc.max(x),
-        CombineOp::Min => acc.min(x),
-        CombineOp::Sum => acc + x,
+        CombineOp::Replace => Some(x),
+        CombineOp::Max => Some(acc.max(x)),
+        CombineOp::Min => Some(acc.min(x)),
+        CombineOp::Sum => acc.checked_add(x),
         CombineOp::Keep => unreachable!(), // LCOV_EXCL_LINE (combine_at returns early on Keep)
     }
+}
+
+/// An integer fold's value in `dtype`'s range, or its overflow error.
+#[inline]
+fn fold_in_range<T: TryFrom<i64>>(v: Option<i64>, dtype: DType) -> Result<T> {
+    match v.and_then(|v| T::try_from(v).ok()) {
+        Some(v) => Ok(v),
+        None => Err(fold_overflow(dtype)),
+    }
+}
+
+/// The overflow error of an integer fold — off the per-bar hot path.
+#[cold]
+#[inline(never)]
+fn fold_overflow(dtype: DType) -> VolasError {
+    crate::numeric::overflow(dtype, "a time-frame fold")
 }
 
 impl Column {
@@ -310,6 +327,60 @@ impl Column {
         }
     }
 
+    /// Overwrite the last cell with `src[src_row]` — value and validity — in place: the
+    /// row appended under the last row's label replaces it. The dtypes must match, as
+    /// for [`append`](Self::append). A float write keeps the column's NaN fact.
+    pub fn set_last_from(&mut self, src: &Column, src_row: usize) -> Result<()> {
+        let n = self.len();
+        let Some(last) = n.checked_sub(1) else {
+            return Err(VolasError::Shape("no last row to replace".into()));
+        };
+        match (self, src) {
+            (Column::F64(a), Column::F64(b)) => a.set(last, b[src_row]),
+            (Column::F32(a), Column::F32(b)) => a.set(last, b[src_row]),
+            (Column::Datetime(a), Column::Datetime(b)) => a.make_mut()[last] = b[src_row],
+            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+                a.make_mut()[last] = b[src_row];
+                av.set(last, n, bv.is_valid(src_row));
+            }
+            (Column::I64(a, av), Column::I64(b, bv)) => {
+                a.make_mut()[last] = b[src_row];
+                av.set(last, n, bv.is_valid(src_row));
+            }
+            (Column::I32(a, av), Column::I32(b, bv)) => {
+                a.make_mut()[last] = b[src_row];
+                av.set(last, n, bv.is_valid(src_row));
+            }
+            (Column::Str(a, av), Column::Str(b, bv)) => {
+                a.set_last(b.get(src_row));
+                av.set(last, n, bv.is_valid(src_row));
+            }
+            (s, o) => {
+                return Err(VolasError::DType(format!(
+                    "cannot replace a {} cell with a {} value",
+                    s.dtype(),
+                    o.dtype()
+                )))
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark the last cell missing in place, dtype-preserving (`NaN` / `NaT`, or an
+    /// invalid validity bit) — a replacing row that lacks this column. No-op when empty.
+    pub fn set_last_na(&mut self) {
+        let n = self.len();
+        let Some(last) = n.checked_sub(1) else { return };
+        match self {
+            Column::F64(a) => a.set(last, f64::NAN),
+            Column::F32(a) => a.set(last, f32::NAN),
+            Column::Datetime(a) => a.make_mut()[last] = i64::MIN,
+            Column::Bool(_, v) | Column::I64(_, v) | Column::I32(_, v) | Column::Str(_, v) => {
+                v.set(last, n, false)
+            }
+        }
+    }
+
     /// Extend a stale computed column with placeholder missing values, avoiding a
     /// temporary one-row [`Column`] allocation on the live append path.
     pub fn append_missing(&mut self, len: usize) -> Result<()> {
@@ -511,26 +582,28 @@ impl Column {
             }
             Column::I64(buf, val) => {
                 let s = src.get_i64(src_row);
+                let v = fold_in_range(combine_i64(op, buf[row], s), DType::I64)?;
                 let b = buf.make_mut();
                 let n = b.len();
-                b[row] = combine_i64(op, b[row], s);
+                b[row] = v;
                 if matches!(op, Replace) {
                     val.set(row, n, src.is_valid(src_row));
                 }
             }
             Column::I32(buf, val) => {
                 let s = src.get_i64(src_row);
+                let v = fold_in_range(combine_i64(op, buf[row] as i64, s), DType::I32)?;
                 let b = buf.make_mut();
                 let n = b.len();
-                b[row] = combine_i64(op, b[row] as i64, s) as i32;
+                b[row] = v;
                 if matches!(op, Replace) {
                     val.set(row, n, src.is_valid(src_row));
                 }
             }
             Column::Datetime(buf) => {
                 let s = src.get_i64(src_row);
-                let b = buf.make_mut();
-                b[row] = combine_i64(op, b[row], s);
+                let v = fold_in_range(combine_i64(op, buf[row], s), DType::Datetime)?;
+                buf.make_mut()[row] = v;
             }
             Column::Bool(_, _) | Column::Str(_, _) => {
                 return Err(VolasError::DType(
@@ -540,6 +613,58 @@ impl Column {
         }
         Ok(())
     }
+
+    /// Set cell `row` to the aggregate of the single value `src[src_row]` under `op`, in
+    /// place — the period's first bar, as the batch reduce
+    /// ([`crate::Agg`]-style `fold`) leaves it after one element: `Max` / `Min` fold it
+    /// into `−∞` / `+∞` (so a NaN first bar is skipped), `Sum` sums the one value, and
+    /// `Keep` / `Replace` (first / last) take it. [`combine_at`](Self::combine_at) then
+    /// folds each later bar, so the pair re-cumulates a period exactly, with no
+    /// allocation. Numeric / datetime only, as `combine_at`.
+    pub fn init_at(&mut self, row: usize, op: CombineOp, src: &Column, src_row: usize) -> Result<()> {
+        use CombineOp::*;
+        let take = matches!(op, Keep | Replace);
+        match self {
+            Column::F64(buf) => {
+                let s = src.get_f64(src_row);
+                let v = match op {
+                    Max => f64::NEG_INFINITY.max(s),
+                    Min => f64::INFINITY.min(s),
+                    Sum => std::iter::once(s).sum::<f64>(),
+                    Keep | Replace => s,
+                };
+                buf.set(row, v);
+            }
+            Column::F32(buf) => {
+                let s = src.get_f64(src_row) as f32;
+                let v = match op {
+                    Max => f32::NEG_INFINITY.max(s),
+                    Min => f32::INFINITY.min(s),
+                    Sum => std::iter::once(s).sum::<f32>(),
+                    Keep | Replace => s,
+                };
+                buf.set(row, v);
+            }
+            Column::I64(buf, val) => {
+                let n = buf.len();
+                buf.make_mut()[row] = src.get_i64(src_row);
+                val.set(row, n, !take || src.is_valid(src_row));
+            }
+            Column::I32(buf, val) => {
+                let n = buf.len();
+                buf.make_mut()[row] = fold_in_range(Some(src.get_i64(src_row)), DType::I32)?;
+                val.set(row, n, !take || src.is_valid(src_row));
+            }
+            Column::Datetime(buf) => buf.make_mut()[row] = src.get_i64(src_row),
+            Column::Bool(_, _) | Column::Str(_, _) => {
+                return Err(VolasError::DType(
+                    "init_at: only numeric / datetime columns can be folded in place".into(),
+                ))
+            }
+        }
+        Ok(())
+    }
+
 
     // --- dtype-preserving numeric transforms (pandas 3.0) ---------------------
     // Each dispatches the kernel over the column's element type so an int column

@@ -7,16 +7,19 @@
 //! bit-exactly past a head-dropping slice (verified by `test/test_group_a_mutation.py`).
 
 use crate::raw::indicators::av;
+use crate::accum::{anchors_at, Anchors, Csum};
+use crate::guard::Slide;
+use crate::guard::state_after;
 use crate::raw::kernels;
 
 /// PSY (心理线): `100 * mean(up, n)`, where `up[i] = 1` when `close[i] > close[i-1]` (the
 /// first bar is not rising). NaN until `n` bars are available.
-/// Source: Eastmoney 心理线.
-pub fn psy(close: &[f64], n: usize) -> Vec<f64> {
+/// Source: Eastmoney 心理线. Row 0 is at absolute position `origin`.
+pub fn psy(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let up: Vec<f64> = (0..close.len())
         .map(|i| f64::from(i > 0 && close[i] > close[i - 1]))
         .collect();
-    (kernels::sma(av(&up), n) * 100.0).to_vec()
+    (kernels::sma(av(&up), n, origin) * 100.0).to_vec()
 }
 
 /// PVT Price Volume Trend (cumulative): `PVT_i = PVT_{i-1} + (C_i - C_{i-1}) / C_{i-1} * V_i`,
@@ -65,8 +68,8 @@ fn volume_index(close: &[f64], volume: &[f64], on_down: bool) -> Vec<f64> {
 
 /// DPO Detrended Price Oscillator: `Price[(n/2 + 1) ago] - SMA_n`.
 /// Source: StockCharts — Detrended Price Oscillator (displaced form).
-pub fn dpo(close: &[f64], n: usize) -> Vec<f64> {
-    let sma = kernels::sma(av(close), n);
+pub fn dpo(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    let sma = kernels::sma(av(close), n, origin);
     let shift = n / 2 + 1;
     (0..close.len())
         .map(|i| if i >= shift { close[i - shift] - sma[i] } else { f64::NAN })
@@ -75,21 +78,19 @@ pub fn dpo(close: &[f64], n: usize) -> Vec<f64> {
 
 /// CMF Chaikin Money Flow: `sum_n(MFV) / sum_n(volume)`, `MFV = ((C-L)-(H-C))/(H-L) * V`.
 /// Source: StockCharts / Fidelity — Chaikin Money Flow.
-pub fn cmf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize) -> Vec<f64> {
-    let mfv: Vec<f64> = (0..close.len())
-        .map(|i| ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i]) * volume[i])
-        .collect();
-    let sum_mfv = super::sum(&mfv, n);
-    let sum_vol = super::sum(volume, n);
+pub fn cmf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    let mfv: Vec<f64> = (0..close.len()).map(|i| mfv(high, low, close, volume, i)).collect();
+    let sum_mfv = super::sum(&mfv, n, origin);
+    let sum_vol = super::sum(volume, n, origin);
     (0..close.len()).map(|i| sum_mfv[i] / sum_vol[i]).collect()
 }
 
 /// CHOP Choppiness Index: `100 * log10( sum_n(TR) / (HHV_n(high) - LLV_n(low)) ) / log10(n)`.
 /// Source: TradingView — Choppiness Index.
-pub fn chop(high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
+pub fn chop(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let tr = super::tr(high, low, close);
     // TR[0] is NaN; `sma` skips the leading-NaN prefix, so `sma * n` is the n-window TR sum.
-    let sum_tr = kernels::sma(av(&tr), n) * n as f64;
+    let sum_tr = kernels::sma(av(&tr), n, origin) * n as f64;
     let hh = super::hhv(high, n);
     let ll = super::llv(low, n);
     let denom = (n as f64).log10();
@@ -101,17 +102,12 @@ pub fn chop(high: &[f64], low: &[f64], close: &[f64], n: usize) -> Vec<f64> {
 /// KST Know Sure Thing (Pring): `1*RCMA1 + 2*RCMA2 + 3*RCMA3 + 4*RCMA4`, where
 /// `RCMA1=SMA10(ROC10)`, `RCMA2=SMA10(ROC15)`, `RCMA3=SMA10(ROC20)`, `RCMA4=SMA15(ROC30)`.
 /// Source: StockCharts — Know Sure Thing.
-pub fn kst(close: &[f64]) -> Vec<f64> {
-    let roc = |p: usize| -> Vec<f64> {
-        (0..close.len())
-            .map(|i| if i >= p { (close[i] / close[i - p] - 1.0) * 100.0 } else { f64::NAN })
-            .collect()
+pub fn kst(close: &[f64], origin: usize) -> Vec<f64> {
+    let leg = |(p, n): (usize, usize)| {
+        let roc: Vec<f64> = (0..close.len()).map(|i| kst_roc(close, p, i)).collect();
+        kernels::sma(av(&roc), n, origin)
     };
-    let (roc10, roc15, roc20, roc30) = (roc(10), roc(15), roc(20), roc(30));
-    let r1 = kernels::sma(av(&roc10), 10);
-    let r2 = kernels::sma(av(&roc15), 10);
-    let r3 = kernels::sma(av(&roc20), 10);
-    let r4 = kernels::sma(av(&roc30), 15);
+    let [r1, r2, r3, r4] = KST_LEGS.map(leg);
     (0..close.len())
         .map(|i| r1[i] + 2.0 * r2[i] + 3.0 * r3[i] + 4.0 * r4[i])
         .collect()
@@ -120,19 +116,9 @@ pub fn kst(close: &[f64]) -> Vec<f64> {
 /// EMV Ease of Movement: `SMA_n(distance / box)`, `distance = mid - prev mid`,
 /// `box = (volume / 1e8) / (high - low)`, `mid = (high + low) / 2`. The 1e8 volume scale is
 /// StockCharts' presentation convention. Source: StockCharts — Ease of Movement.
-pub fn emv(high: &[f64], low: &[f64], volume: &[f64], n: usize) -> Vec<f64> {
-    const SCALE: f64 = 100_000_000.0;
-    let mid: Vec<f64> = (0..high.len()).map(|i| (high[i] + low[i]) / 2.0).collect();
-    let emv1: Vec<f64> = (0..high.len())
-        .map(|i| {
-            if i == 0 {
-                f64::NAN
-            } else {
-                (mid[i] - mid[i - 1]) / ((volume[i] / SCALE) / (high[i] - low[i]))
-            }
-        })
-        .collect();
-    kernels::sma(av(&emv1), n).to_vec()
+pub fn emv(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    let emv1: Vec<f64> = (0..high.len()).map(|i| emv_term(high, low, volume, i)).collect();
+    kernels::sma(av(&emv1), n, origin).to_vec()
 }
 
 /// EFI Elder Force Index: `EMA_n((C - prev C) * volume)`.
@@ -152,15 +138,15 @@ pub fn tsi(close: &[f64], long: usize, short: usize) -> Vec<f64> {
 }
 
 /// Mass Index: `sum_n( EMA9(H-L) / EMA9(EMA9(H-L)) )`.
-/// Source: StockCharts — Mass Index.
-pub fn mass_index(high: &[f64], low: &[f64], n: usize) -> Vec<f64> {
+/// Source: StockCharts — Mass Index. Row 0 is at absolute position `origin`.
+pub fn mass_index(high: &[f64], low: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let rng = mass_index_range(high, low);
     let single = super::ema(&rng, 9);
     let double = super::ema(&single, 9);
     let ratio: Vec<f64> = (0..high.len()).map(|i| single[i] / double[i]).collect();
     // `ratio` warms up with NaN, so use `sma * n` (which skips the leading NaN) rather than
     // the running `sum` (which would propagate it).
-    (kernels::sma(av(&ratio), n) * n as f64).to_vec()
+    (kernels::sma(av(&ratio), n, origin) * n as f64).to_vec()
 }
 
 /// CRSI Connors RSI: `mean( RSI(close, rsi_len), RSI(streak, streak_len),
@@ -412,11 +398,13 @@ pub fn tsi_resume(
     (out, vec![im, om, ia, oa, prev])
 }
 
-/// `[single_ema, double_ema, sum, ratio[len-n..len]…]` after a full [`mass_index`]: the two
-/// EMA9-cascade stages, the exact rolling-sum accumulator, and the `n` ratio values still in
-/// the sum window. `None` before the `n`-sum emits. The accumulator mirrors `kernels::sma`'s
-/// fast-path sliding sum so a resume continues on identical bits.
-pub fn mass_index_final_state(high: &[f64], low: &[f64], n: usize) -> Option<Vec<f64>> {
+/// `[single_ema, double_ema, sum, comp, position, ratio[len-n..len]…]` after a full
+/// [`mass_index`] (row 0 at absolute position `origin`): the two EMA9-cascade stages, the
+/// exact rolling-sum accumulator ([`Csum`]), the absolute position of the next row (for
+/// re-anchoring), and the `n` ratio values still in the sum window. `None` before the
+/// `n`-sum emits. The accumulator is `kernels::sma`'s fast-path sliding sum, so a resume
+/// continues on identical bits.
+pub fn mass_index_final_state(high: &[f64], low: &[f64], n: usize, origin: usize) -> Option<Vec<f64>> {
     let len = high.len();
     let rng = mass_index_range(high, low);
     let single = super::ema(&rng, 9);
@@ -426,24 +414,26 @@ pub fn mass_index_final_state(high: &[f64], low: &[f64], n: usize) -> Option<Vec
     if start + n > len {
         return None; // the n-window sum has not emitted a valid value yet
     }
-    let mut sum = 0.0;
+    let mut sum = Csum::default();
+    let mut anchors = Anchors::from(origin + start, n);
     for i in start..len {
-        sum += ratio[i];
+        sum.add(ratio[i]);
         if i >= start + n {
-            sum -= ratio[i - n];
+            sum.sub(ratio[i - n]);
+        }
+        if anchors.tick() && i + 1 >= n {
+            sum = Csum::of(ratio[(i + 1 - n).max(start)..=i].iter().copied());
         }
     }
-    let mut state = Vec::with_capacity(3 + n);
-    state.push(single[len - 1]);
-    state.push(double[len - 1]);
-    state.push(sum);
+    let mut state = vec![single[len - 1], double[len - 1], 0.0, 0.0, (origin + len) as f64];
+    sum.write_state(&mut state[2..4]);
     state.extend_from_slice(&ratio[len - n..len]);
     Some(state)
 }
 
 /// Resume [`mass_index`] over `[from, n)`: advance the EMA9 cascade, form each ratio, slide
-/// the running sum (add the new ratio, drop the one leaving the window), and emit
-/// `(sum / n) * n` — bit-identical to `kernels::sma(ratio, n) * n`.
+/// the running sum (add the new ratio, drop the one leaving the window, re-anchor at an
+/// absolute position), and emit `mean · n` — bit-identical to `kernels::sma(ratio, n) * n`.
 pub fn mass_index_resume(
     high: &[f64],
     low: &[f64],
@@ -453,108 +443,136 @@ pub fn mass_index_resume(
 ) -> (Vec<f64>, Vec<f64>) {
     let len = high.len();
     let k = 2.0 / (9.0 + 1.0); // EMA9
-    let (mut single, mut double, mut sum) = (state[0], state[1], state[2]);
-    let mut ratios: Vec<f64> = state[3..3 + n].to_vec(); // ratio[from-n .. from]
+    let (mut single, mut double) = (state[0], state[1]);
+    let mut sum = Csum::from_state(&state[2..4]).unwrap_or_default();
+    let mut pos = state[4] as usize;
+    let mut ratios: Vec<f64> = state[5..5 + n].to_vec(); // ratio[from-n .. from]
     let mut out = Vec::with_capacity(len.saturating_sub(from));
     for i in from..len {
         single = ((high[i] - low[i]) - single).mul_add(k, single);
         double = (single - double).mul_add(k, double);
         let ratio_i = single / double;
-        sum += ratio_i;
-        sum -= ratios[i - from]; // ratio[i - n]
+        sum.add(ratio_i);
+        sum.sub(ratios[i - from]); // ratio[i - n]
         ratios.push(ratio_i);
-        out.push((sum / n as f64) * n as f64);
+        if anchors_at(pos, n) {
+            sum = Csum::of(ratios[ratios.len() - n..].iter().copied());
+        }
+        pos += 1;
+        out.push(sum.mean(n as f64) * n as f64);
     }
-    let mut new_state = Vec::with_capacity(3 + n);
-    new_state.push(single);
-    new_state.push(double);
-    new_state.push(sum);
+    let mut new_state = vec![single, double, 0.0, 0.0, pos as f64];
+    sum.write_state(&mut new_state[2..4]);
     new_state.extend_from_slice(&ratios[ratios.len() - n..]);
     (out, new_state)
 }
 
 
-/// Scalar single-row twin of [`pvt_resume`]: compute only PVT at `row` from
-/// `[acc_{row-1}, close_{row-1}]`, zero-alloc, bit-identical to one loop iteration.
+/// Scalar single-row twin of [`pvt_resume`]: PVT at `row` from
+/// `[acc_{row-1}, close_{row-1}]`, the state as of `row` written into `next` (same
+/// length), zero-alloc, bit-identical to one loop iteration.
 pub fn pvt_resume_one(
     close: &[f64],
     volume: &[f64],
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 2 || row >= close.len() {
+    if row == 0 || state.len() < 2 || next.len() != state.len() || row >= close.len() {
         return None;
     }
     let acc = state[0];
     let prev = state[1];
-    Some(acc + (close[row] - prev) / prev * volume[row])
+    let acc = acc + (close[row] - prev) / prev * volume[row];
+    next.copy_from_slice(state);
+    next[0] = acc;
+    next[1] = close[row];
+    Some(acc)
 }
 
 /// Scalar single-row twin of [`volume_index_resume`]; `on_down` selects NVI (true) vs
-/// PVI (false), matching the kernel. Reads close/volume at `row`, carries prev close/vol.
+/// PVI (false), matching the kernel. Reads close/volume at `row`, carries prev close/vol;
+/// the state as of `row` is written into `next` (same length).
 fn volume_index_resume_one(
     close: &[f64],
     volume: &[f64],
     row: usize,
     state: &[f64],
+    next: &mut [f64],
     on_down: bool,
 ) -> Option<f64> {
-    if row == 0 || state.len() < 3 || row >= close.len() {
+    if row == 0 || state.len() < 3 || next.len() != state.len() || row >= close.len() {
         return None;
     }
     let val = state[0];
     let prev_c = state[1];
     let prev_v = state[2];
     let triggered = if on_down { volume[row] < prev_v } else { volume[row] > prev_v };
-    Some(if triggered { val * (1.0 + (close[row] - prev_c) / prev_c) } else { val })
+    let val = if triggered { val * (1.0 + (close[row] - prev_c) / prev_c) } else { val };
+    next.copy_from_slice(state);
+    next[..3].copy_from_slice(&[val, close[row], volume[row]]);
+    Some(val)
 }
 
 /// Scalar single-row twin of [`nvi_resume`].
-pub fn nvi_resume_one(close: &[f64], volume: &[f64], row: usize, state: &[f64]) -> Option<f64> {
-    volume_index_resume_one(close, volume, row, state, true)
+pub fn nvi_resume_one(
+    close: &[f64],
+    volume: &[f64],
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    volume_index_resume_one(close, volume, row, state, next, true)
 }
 
 /// Scalar single-row twin of [`pvi_resume`].
-pub fn pvi_resume_one(close: &[f64], volume: &[f64], row: usize, state: &[f64]) -> Option<f64> {
-    volume_index_resume_one(close, volume, row, state, false)
+pub fn pvi_resume_one(
+    close: &[f64],
+    volume: &[f64],
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    volume_index_resume_one(close, volume, row, state, next, false)
 }
 
-// See `pvi_resume_one` defined alongside `nvi_resume_one` in the nvi entry above
-// (both delegate to the shared `volume_index_resume_one(.., on_down)`):
-//
-// pub fn pvi_resume_one(close: &[f64], volume: &[f64], row: usize, state: &[f64]) -> Option<f64> {
-//     volume_index_resume_one(close, volume, row, state, false)
-// }
-
 /// Scalar single-row twin of [`efi_resume`]: rebuild the raw force term from the carried
-/// prev close, then one fused EMA step. Bit-identical to one loop iteration.
+/// prev close, then one fused EMA step; the state as of `row` is written into `next`
+/// (same length). Bit-identical to one loop iteration.
 pub fn efi_resume_one(
     close: &[f64],
     volume: &[f64],
     n: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 2 || row >= close.len() {
+    if row == 0 || state.len() < 2 || next.len() != state.len() || row >= close.len() {
         return None;
     }
     let k = 2.0 / (n as f64 + 1.0);
     let e = state[0];
     let prev = state[1];
     let x = (close[row] - prev) * volume[row];
-    Some((x - e).mul_add(k, e))
+    let e = (x - e).mul_add(k, e);
+    next.copy_from_slice(state);
+    next[0] = e;
+    next[1] = close[row];
+    Some(e)
 }
 
 /// Scalar single-row twin of [`tsi_resume`]: advance both nested EMA chains one step and
-/// emit `100*outer_m/outer_am`. Bit-identical to one loop iteration.
+/// emit `100*outer_m/outer_am`; the state as of `row` is written into `next` (same
+/// length). Bit-identical to one loop iteration.
 pub fn tsi_resume_one(
     close: &[f64],
     long: usize,
     short: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 5 || row >= close.len() {
+    if row == 0 || state.len() < 5 || next.len() != state.len() || row >= close.len() {
         return None;
     }
     let kl = 2.0 / (long as f64 + 1.0);
@@ -567,30 +585,168 @@ pub fn tsi_resume_one(
     om = (im - om).mul_add(ks, om);
     ia = (ai - ia).mul_add(kl, ia);
     oa = (ia - oa).mul_add(ks, oa);
+    next.copy_from_slice(state);
+    next[..5].copy_from_slice(&[im, om, ia, oa, close[row]]);
     Some(100.0 * om / oa)
 }
 
 /// Scalar single-row twin of [`mass_index_resume`]: advance the EMA9 cascade, form the new
 /// ratio, slide the running sum (add new, drop `ratio[row-n]` = the oldest retained ratio at
-/// `state[3]`), and emit `(sum/n)*n`. Bit-identical to one loop iteration of the Vec kernel.
+/// `state[5]`, re-anchor at an absolute position), and emit `mean·n`; the state as of `row` (the window slid by one) is
+/// written into `next`. Bit-identical to one loop iteration of the Vec kernel.
 pub fn mass_index_resume_one(
     high: &[f64],
     low: &[f64],
     n: usize,
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row >= high.len() || state.len() < 3 + n {
+    if row >= high.len() || n == 0 || state.len() != 5 + n || next.len() != state.len() {
         return None;
     }
     let k = 2.0 / (9.0 + 1.0); // EMA9
     let single = ((high[row] - low[row]) - state[0]).mul_add(k, state[0]);
     let double = (single - state[1]).mul_add(k, state[1]);
     let ratio_i = single / double;
-    let mut sum = state[2];
-    sum += ratio_i;
-    sum -= state[3]; // ratio[row - n], the oldest value in the carried window
-    Some((sum / n as f64) * n as f64)
+    let mut sum = Csum::from_state(&state[2..4])?;
+    let pos = state[4] as usize;
+    sum.add(ratio_i);
+    sum.sub(state[5]); // ratio[row - n], the oldest value in the carried window
+    next[0] = single;
+    next[1] = double;
+    next[4] = (pos + 1) as f64;
+    next[5..5 + n - 1].copy_from_slice(&state[6..5 + n]);
+    next[5 + n - 1] = ratio_i;
+    if anchors_at(pos, n) {
+        sum = Csum::of(next[5..5 + n].iter().copied());
+    }
+    sum.write_state(&mut next[2..4]);
+    Some(sum.mean(n as f64) * n as f64)
+}
+
+
+// ---------------------------------------------------------------------------
+// Resumable forms: the running sums of each full computation, in its exact operation
+// order, so a resume of one row at a time is bit-identical to recomputing the column.
+// ---------------------------------------------------------------------------
+
+/// One bar's money-flow volume, as [`cmf`] sums it.
+#[inline]
+fn mfv(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize) -> f64 {
+    ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i]) * volume[i]
+}
+
+/// [`cmf`]'s state after the rows: its two sums' states.
+pub fn cmf_state(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+    origin: usize,
+) -> Option<Vec<f64>> {
+    state_after(Slide::<1>::initial(origin).repeat(2), close.len(), |row, prev, next| {
+        cmf_step(high, low, close, volume, n, row, prev, next)
+    })
+}
+
+/// One row of [`cmf`] at `row`, from `state` into `next`.
+#[allow(clippy::too_many_arguments)]
+pub fn cmf_step(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    const S: usize = super::SUM_STATE;
+    if row >= close.len() || state.len() != 2 * S || next.len() != 2 * S {
+        return None;
+    }
+    let (n_mfv, n_vol) = next.split_at_mut(S);
+    let flow = super::sum_row(n, row, |j| mfv(high, low, close, volume, j), &state[..S], n_mfv)?;
+    let vol = super::sum_row(n, row, |j| volume[j], &state[S..], n_vol)?;
+    Some(flow / vol)
+}
+
+/// [`dpo`]'s state after the rows of `close`: its SMA's.
+pub fn dpo_state(close: &[f64], n: usize, origin: usize) -> Option<Vec<f64>> {
+    super::ma_state(close, n, 0, origin)
+}
+
+/// One row of [`dpo`] at `row`, from `state` into `next`.
+pub fn dpo_step(close: &[f64], n: usize, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    let sma = super::ma_step(close, n, 0, row, state, next)?;
+    let shift = n / 2 + 1;
+    Some(if row >= shift { close[row - shift] - sma } else { f64::NAN })
+}
+
+/// One bar's ease of movement, as [`emv`] averages it.
+#[inline]
+fn emv_term(high: &[f64], low: &[f64], volume: &[f64], i: usize) -> f64 {
+    const SCALE: f64 = 100_000_000.0;
+    if i == 0 {
+        return f64::NAN;
+    }
+    let mid = |k: usize| (high[k] + low[k]) / 2.0;
+    (mid(i) - mid(i - 1)) / ((volume[i] / SCALE) / (high[i] - low[i]))
+}
+
+/// [`emv`]'s state after the rows: its SMA's.
+pub fn emv_state(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize) -> Option<Vec<f64>> {
+    state_after(Slide::<1>::initial(origin), high.len(), |row, prev, next| {
+        emv_step(high, low, volume, n, row, prev, next)
+    })
+}
+
+/// One row of [`emv`] at `row`, from `state` into `next`.
+pub fn emv_step(
+    high: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    n: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if row >= high.len() {
+        return None;
+    }
+    kernels::sma_step(n, row, |j| emv_term(high, low, volume, j), state, next)
+}
+
+/// KST's four `(rate-of-change period, SMA period)` pairs.
+const KST_LEGS: [(usize, usize); 4] = [(10, 10), (15, 10), (20, 10), (30, 15)];
+
+/// The `p`-bar rate of change of `close` at `i`, as [`kst`] averages it.
+#[inline]
+fn kst_roc(close: &[f64], p: usize, i: usize) -> f64 {
+    if i >= p { (close[i] / close[i - p] - 1.0) * 100.0 } else { f64::NAN }
+}
+
+/// [`kst`]'s state after the rows of `close`: its four SMAs'.
+pub fn kst_state(close: &[f64], origin: usize) -> Option<Vec<f64>> {
+    state_after(Slide::<1>::initial(origin).repeat(4), close.len(), |row, prev, next| {
+        kst_step(close, row, prev, next)
+    })
+}
+
+/// One row of [`kst`] at `row`, from `state` into `next`.
+pub fn kst_step(close: &[f64], row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    const S: usize = kernels::SMA_STATE;
+    if row >= close.len() || state.len() != 4 * S || next.len() != 4 * S {
+        return None;
+    }
+    let mut r = [0.0; 4];
+    for (k, (roc, sma)) in KST_LEGS.into_iter().enumerate() {
+        let (s, n) = (&state[k * S..(k + 1) * S], &mut next[k * S..(k + 1) * S]);
+        r[k] = kernels::sma_step(sma, row, |j| kst_roc(close, roc, j), s, n)?;
+    }
+    Some(r[0] + 2.0 * r[1] + 3.0 * r[2] + 4.0 * r[3])
 }
 
 
@@ -608,7 +764,7 @@ mod tests {
         assert!(nvi_final_state(&[], &[]).is_none()); // volume_index n == 0
         assert!(pvi_final_state(&[], &[]).is_none());
         let (high, low, _) = ohlc(20);
-        assert!(mass_index_final_state(&high, &low, 25).is_none()); // start + n > len
+        assert!(mass_index_final_state(&high, &low, 25, 0).is_none()); // start + n > len
     }
 
     /// Each resume, fed the carried state of a full compute over the head `[0, from)`,
@@ -628,7 +784,7 @@ mod tests {
         let pvi_full = pvi(&close, &vol);
         let efi_full = efi(&close, &vol, 13);
         let tsi_full = tsi(&close, 25, 13);
-        let mi_full = mass_index(&high, &low, 25);
+        let mi_full = mass_index(&high, &low, 25, 0);
 
         // Every `from` is past the slowest warm-up (tsi 37, mass_index 40).
         for &from in &[41usize, 60, 100, 159] {
@@ -649,7 +805,7 @@ mod tests {
             let st = tsi_final_state(c, 25, 13).unwrap();
             assert_bits(&tsi_resume(&close, 25, 13, from, &st).0, &tsi_full[from..], "tsi");
 
-            let st = mass_index_final_state(&high[..from], &low[..from], 25).unwrap();
+            let st = mass_index_final_state(&high[..from], &low[..from], 25, 0).unwrap();
             assert_bits(
                 &mass_index_resume(&high, &low, 25, from, &st).0,
                 &mi_full[from..],

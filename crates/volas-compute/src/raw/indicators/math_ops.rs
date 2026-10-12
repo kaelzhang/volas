@@ -1,33 +1,38 @@
+use crate::accum::{Anchors, Csum};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 
 // ---------------------------------------------------------------------------
 // Math operators — rolling reductions over a fixed window
 // ---------------------------------------------------------------------------
 
-/// Rolling sum over `period` (TA-Lib SUM), O(n) via a sliding total (TA-Lib's exact
-/// order: add current, emit, drop trailing). Lookback `period-1`. Window-local: a
-/// non-finite row affects only the windows holding it (see [`crate::guard`]).
-pub fn sum(data: &[f64], period: usize) -> Vec<f64> {
-    let (out, total) = sum_with::<Unguarded>(data, period);
-    if total.is_finite() {
+/// Rolling sum over `period` (TA-Lib SUM), O(n) via a sliding total (TA-Lib's
+/// order: add current, emit, drop trailing), exact ([`Csum`], re-anchored at absolute
+/// positions — row 0 is at `origin`) so each window's sum is its own however long the
+/// slide. Lookback `period-1`. Window-local: a non-finite row affects only the windows
+/// holding it (see [`crate::guard`]).
+pub fn sum(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    let (out, finite) = sum_with::<Unguarded>(data, period, origin);
+    if finite {
         out
     } else {
-        sum_with::<NonFiniteRows>(data, period).0
+        sum_with::<NonFiniteRows>(data, period, origin).0
     }
 }
 
-/// The sliding sum under a row guard; also returns the final running total.
-fn sum_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, f64) {
+/// The sliding sum under a row guard; also returns whether the total stayed finite.
+fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, bool) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
-        return (out, 0.0);
+        return (out, true);
     }
     let mut guard = G::default();
-    let mut total = 0.0;
+    let mut anchors = Anchors::from(origin + period - 1, period);
+    let mut finite = true;
+    let mut total = Csum::default();
     for &x in &data[..period - 1] {
         if guard.enter(x.is_finite()) {
-            total += x;
+            total.add(x);
         }
     }
     let mut trailing = 0;
@@ -35,27 +40,34 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, f64) {
     for i in (period - 1)..n {
         let x = data[i];
         if guard.enter(x.is_finite()) {
-            total += x;
+            total.add(x);
+        }
+        if anchors.tick() {
+            finite &= total.value().is_finite();
+            let window = data[i + 1 - period..=i].iter().copied();
+            total = Csum::of(window.filter(|x| guard.counts(x.is_finite())));
         }
         out[i] = if guard.clean() {
-            total
+            total.value()
         } else {
             data[i + 1 - period..=i].iter().sum()
         };
         let old = data[trailing];
         if guard.leave(old.is_finite()) {
-            total -= old;
+            total.sub(old);
         }
         trailing += 1;
     }
-    (out, total)
+    (out, finite && total.value().is_finite())
 }
 
 /// Absolute index (as a float) of the highest value in each trailing `period`-bar
 /// window (TA-Lib MAXINDEX). Tie-breaking mirrors TA-Lib's incremental tracker: the
 /// earliest index when the running max is rebuilt after the old one leaves (strict
-/// `>`), the latest when a fresh bar matches the current max (`>=`). Lookback `period-1`.
-pub fn maxindex(data: &[f64], period: usize) -> Vec<f64> {
+/// `>`), the latest when a fresh bar matches the current max (`>=`). Row 0 is at
+/// absolute position `origin` (the frame's), so the positions are the series' own —
+/// the same on a slice or a bounded frame as in the full history. Lookback `period-1`.
+pub fn maxindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -88,7 +100,7 @@ pub fn maxindex(data: &[f64], period: usize) -> Vec<f64> {
             hi_idx = today;
             hi = tmp;
         }
-        out[today] = hi_idx as f64;
+        out[today] = (hi_idx + origin) as f64;
         trailing += 1;
     }
     out
@@ -96,8 +108,8 @@ pub fn maxindex(data: &[f64], period: usize) -> Vec<f64> {
 
 /// Absolute index (as a float) of the lowest value in each trailing `period`-bar
 /// window (TA-Lib MININDEX). Mirror of [`maxindex`] (strict `<` on rebuild, `<=` on
-/// a fresh matching bar). Lookback `period-1`.
-pub fn minindex(data: &[f64], period: usize) -> Vec<f64> {
+/// a fresh matching bar). Row 0 is at absolute position `origin`. Lookback `period-1`.
+pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -129,7 +141,7 @@ pub fn minindex(data: &[f64], period: usize) -> Vec<f64> {
             lo_idx = today;
             lo = tmp;
         }
-        out[today] = lo_idx as f64;
+        out[today] = (lo_idx + origin) as f64;
         trailing += 1;
     }
     out
@@ -145,11 +157,10 @@ pub fn minindex(data: &[f64], period: usize) -> Vec<f64> {
 //     tracker's running extreme as of the last valid row. The tracker's `hi_idx` is NOT a
 //     pure function of the current window (a `>=` match pushes it forward; a rebuild snaps
 //     it to the earliest), so it genuinely must be carried, not re-derived.
-//   * the column's `origin` offset (the original-frame row that this — possibly sliced —
-//     frame's row 0 maps to), so emitted positions stay ABSOLUTE: a sub-frame position `p`
-//     is original row `p + origin`, matching the verbatim-carried head and the
-//     full-history ground truth. The stored `*_idx_abs` is original-absolute too, hence
-//     stable across a slice (a slice carries the state verbatim and only bumps `origin`).
+//   * the frame's `origin` (the absolute position of its row 0 — `DataFrame::origin`),
+//     so emitted positions are ABSOLUTE on every path: a frame position `p` is series
+//     position `p + origin`. The stored `*_idx_abs` is absolute too, hence stable across a
+//     slice (a slice carries the state verbatim; its origin moves with its rows).
 // `from < period - 1` (the tracker never reached a full window before `from`) returns
 // `None` and falls back; a carried slice always keeps `>= lookback` rows so `from >=
 // period - 1` holds and the resume is taken.
@@ -157,9 +168,8 @@ pub fn minindex(data: &[f64], period: usize) -> Vec<f64> {
 /// Final MAXINDEX tracker state `[hi_idx_abs, hi_value]` after a full [`maxindex`]
 /// compute, or `None` if it never warms up (`period == 0 || period > n`). Reproduces the
 /// incremental tracker exactly (earliest on rebuild via `>`, latest on a fresh tie via
-/// `>=`); `hi_idx_abs` is a 0-based position in `data` (the freshly-computed frame, so
-/// `origin == 0`).
-pub fn maxindex_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+/// `>=`); `hi_idx_abs` is the absolute position (`origin` + the position in `data`).
+pub fn maxindex_final_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
     let n = data.len();
     if period == 0 || period > n {
         return None;
@@ -190,7 +200,7 @@ pub fn maxindex_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
         }
         trailing += 1;
     }
-    Some(vec![hi_idx as f64, hi])
+    Some(vec![(hi_idx + origin) as f64, hi])
 }
 
 /// Resume [`maxindex`] from `state = [hi_idx_abs, hi_value]` over rows `[from, n)`,
@@ -239,7 +249,7 @@ pub fn maxindex_resume(
 /// Final MININDEX tracker state `[lo_idx_abs, lo_value]` after a full [`minindex`]
 /// compute, or `None` if it never warms up. Mirror of [`maxindex_final_state`] (strict
 /// `<` on rebuild, `<=` on a fresh tie).
-pub fn minindex_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
+pub fn minindex_final_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
     let n = data.len();
     if period == 0 || period > n {
         return None;
@@ -270,7 +280,7 @@ pub fn minindex_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
         }
         trailing += 1;
     }
-    Some(vec![lo_idx as f64, lo])
+    Some(vec![(lo_idx + origin) as f64, lo])
 }
 
 /// Resume [`minindex`] from `state = [lo_idx_abs, lo_value]` over rows `[from, n)`,
@@ -313,6 +323,53 @@ pub fn minindex_resume(
     Some((out, vec![(lo_idx + origin) as f64, lo]))
 }
 
+
+/// The length of [`sum`]'s resumable state: the [`Slide`](crate::guard::Slide) of the
+/// total.
+pub(crate) const SUM_STATE: usize = crate::guard::Slide::<1>::STATE;
+
+/// One row of [`sum`] over the series `term` at `row` — the careful [`sum_with`] loop's
+/// row (add, read, drop) — from `state` into `next`.
+pub(crate) fn sum_row(
+    period: usize,
+    row: usize,
+    term: impl Fn(usize) -> f64,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    use crate::guard::{Order, Slide, Window};
+    if period == 0 || next.len() != SUM_STATE {
+        return None;
+    }
+    let mut slide = Slide::<1>::from_state(state)?;
+    let value = match slide.row(Order::AddReadDrop, period, row, |j| {
+        let x = term(j);
+        ([x], x.is_finite())
+    }) {
+        Window::Partial => f64::NAN,
+        Window::Sums([total]) => total.value(),
+        Window::Bad => (row + 1 - period..=row).map(&term).sum(),
+    };
+    slide.write_state(next);
+    Some(value)
+}
+
+/// [`sum`]'s state after the rows of `data` (row 0 at absolute position `origin`).
+pub fn sum_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
+    let init = crate::guard::Slide::<1>::initial(origin);
+    crate::guard::state_after(init, data.len(), |row, prev, next| {
+        sum_step(data, period, row, prev, next)
+    })
+}
+
+/// One row of [`sum`] at `row`, from `state` into `next`.
+pub fn sum_step(data: &[f64], period: usize, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    if row >= data.len() {
+        return None;
+    }
+    sum_row(period, row, |j| data[j], state, next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,16 +384,16 @@ mod tests {
     fn index_resume_is_bit_identical_to_full() {
         let data = series(120);
         let period = 30usize;
-        let max_full = maxindex(&data, period);
-        let min_full = minindex(&data, period);
+        let max_full = maxindex(&data, period, 0);
+        let min_full = minindex(&data, period, 0);
         // `from >= period` so the head `data[..from]` is long enough to seed a state
         // (a head of exactly `period - 1` rows never fills a window — see the guard test).
         for &from in &[period, period + 1, 40, 60, 119] {
-            let st = maxindex_final_state(&data[..from], period).unwrap();
+            let st = maxindex_final_state(&data[..from], period, 0).unwrap();
             let (tail, _) = maxindex_resume(&data, period, from, 0, &st).unwrap();
             assert_bits(&tail, &max_full[from..], "maxindex");
 
-            let st = minindex_final_state(&data[..from], period).unwrap();
+            let st = minindex_final_state(&data[..from], period, 0).unwrap();
             let (tail, _) = minindex_resume(&data, period, from, 0, &st).unwrap();
             assert_bits(&tail, &min_full[from..], "minindex");
         }
@@ -351,8 +408,8 @@ mod tests {
         let period = 30usize;
         let cut = 20usize; // drop the head; this sub-frame's row 0 == original row `cut`
         let sub = &data[cut..];
-        let max_full = maxindex(&data, period); // original-absolute ground truth
-        let min_full = minindex(&data, period);
+        let max_full = maxindex(&data, period, 0); // original-absolute ground truth
+        let min_full = minindex(&data, period, 0);
 
         // The carried state is original-absolute (computed over the original head), and
         // `origin == cut` rebases the sub-frame window while keeping emitted positions
@@ -360,12 +417,12 @@ mod tests {
         let from_sub = 40usize; // a sub-frame row well past warm-up
         let head_orig = &data[..cut + from_sub];
 
-        let st = maxindex_final_state(head_orig, period).unwrap();
+        let st = maxindex_final_state(head_orig, period, 0).unwrap();
         let (tail, end) = maxindex_resume(sub, period, from_sub, cut, &st).unwrap();
         assert_bits(&tail, &max_full[cut + from_sub..], "maxindex origin");
         assert_eq!(end[0], *max_full.last().unwrap(), "maxindex end pos");
 
-        let st = minindex_final_state(head_orig, period).unwrap();
+        let st = minindex_final_state(head_orig, period, 0).unwrap();
         let (tail, end) = minindex_resume(sub, period, from_sub, cut, &st).unwrap();
         assert_bits(&tail, &min_full[cut + from_sub..], "minindex origin");
         assert_eq!(end[0], *min_full.last().unwrap(), "minindex end pos");
@@ -378,12 +435,12 @@ mod tests {
     fn index_guards_decline() {
         let data = series(120);
         // period > n -> no full window ever forms.
-        assert!(maxindex_final_state(&data, 200).is_none()); // math_ops.rs:136
-        assert!(minindex_final_state(&data, 200).is_none()); // math_ops.rs:215
+        assert!(maxindex_final_state(&data, 200, 0).is_none()); // math_ops.rs:136
+        assert!(minindex_final_state(&data, 200, 0).is_none()); // math_ops.rs:215
                                                              // from < period - 1 -> tracker not yet warm.
-        let st = maxindex_final_state(&data, 10).unwrap();
+        let st = maxindex_final_state(&data, 10, 0).unwrap();
         assert!(maxindex_resume(&data, 10, 5, 0, &st).is_none()); // math_ops.rs:179
-        let st = minindex_final_state(&data, 10).unwrap();
+        let st = minindex_final_state(&data, 10, 0).unwrap();
         assert!(minindex_resume(&data, 10, 5, 0, &st).is_none()); // math_ops.rs:256
     }
 }

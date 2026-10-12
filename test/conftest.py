@@ -7,6 +7,7 @@ _TARGETED_BENCHMARK_TESTS = {
     'test_coverage',
     'test_coverage_extended',
     'test_coverage_after_append',
+    'test_tf_live',
 }
 
 

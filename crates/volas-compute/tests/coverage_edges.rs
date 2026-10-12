@@ -65,11 +65,11 @@ fn stochastic_public_fast_paths_match_generic_components() {
     assert_nan_prefix(&generic, 19);
     assert!(generic[20].is_finite());
 
-    let slow_d = ind::stoch_d_default_sma(&high, &low, &close).unwrap();
+    let slow_d = ind::stoch_d_default_sma(&high, &low, &close, 0).unwrap();
     assert_nan_prefix(&slow_d, 8);
     assert!(slow_d[8].is_finite());
 
-    let fast_d = ind::stochf_d_default_sma(&high, &low, &close).unwrap();
+    let fast_d = ind::stochf_d_default_sma(&high, &low, &close, 0).unwrap();
     assert_nan_prefix(&fast_d, 6);
     assert!(fast_d[6].is_finite());
 }
@@ -151,8 +151,15 @@ fn stochastic_public_fallbacks_cover_none_and_flat_generic_paths() {
     assert!(short_fk.iter().all(|v| v.is_nan()));
 
     let increasing = (0..80).map(|i| 100.0 + i as f64).collect::<Vec<_>>();
-    let out = ind::stochrsi_d_default_sma(&increasing).unwrap();
+    let out = ind::stochrsi_d_default_sma(&increasing, 0).unwrap();
     assert!(out.contains(&0.0));
+}
+
+/// A single-row resume into a fresh `next` of the state's length: `(value, next)`.
+fn one(st: &[f64], f: impl FnOnce(&mut [f64]) -> Option<f64>) -> (Option<f64>, Vec<f64>) {
+    let mut next = vec![0.0; st.len()];
+    let v = f(&mut next);
+    (v, next)
 }
 
 #[test]
@@ -160,39 +167,46 @@ fn atr_resume_one_guards_and_matches_vec_resume() {
     let h = [10.0, 11.0, 12.0];
     let l = [9.0, 9.5, 10.0];
     let c = [9.5, 10.5, 11.5];
-    // None guards (row 0, empty state, row out of range) mirror `atr_resume`.
-    assert!(ind::atr_resume_one(&h, &l, &c, 14, 0, &[5.0]).is_none());
-    assert!(ind::atr_resume_one(&h, &l, &c, 14, 1, &[]).is_none());
-    assert!(ind::atr_resume_one(&h, &l, &c, 14, 3, &[5.0]).is_none());
-    // The scalar step is bit-identical to the two-`Vec` `atr_resume`'s single step.
-    let (tail, _) = ind::atr_resume(&h, &l, &c, 14, 2, &[5.0]).unwrap();
-    let one = ind::atr_resume_one(&h, &l, &c, 14, 2, &[5.0]).unwrap();
-    assert_eq!(one.to_bits(), tail[0].to_bits());
+    let mut n = [0.0];
+    // None guards (row 0, empty state, a `next` of the wrong length, row out of range).
+    assert!(ind::atr_resume_one(&h, &l, &c, 14, 0, &[5.0], &mut n).is_none());
+    assert!(ind::atr_resume_one(&h, &l, &c, 14, 1, &[], &mut n).is_none());
+    assert!(ind::atr_resume_one(&h, &l, &c, 14, 1, &[5.0], &mut []).is_none());
+    assert!(ind::atr_resume_one(&h, &l, &c, 14, 3, &[5.0], &mut n).is_none());
+    // The scalar step is bit-identical to the two-`Vec` `atr_resume`'s single step —
+    // the value and the advanced state.
+    let (tail, st) = ind::atr_resume(&h, &l, &c, 14, 2, &[5.0]).unwrap();
+    let (v, next) = one(&[5.0], |n| ind::atr_resume_one(&h, &l, &c, 14, 2, &[5.0], n));
+    assert_eq!(v.unwrap().to_bits(), tail[0].to_bits());
+    assert_eq!(next, st);
 }
 
 #[test]
 fn rsi_cmo_resume_one_guards_and_match_vec_resume() {
     let c = [10.0, 11.0, 10.5, 12.0];
-    // None guards (row 0, short state, row out of range).
-    assert!(ind::rsi_resume_one(&c, 14, 0, &[1.0, 1.0]).is_none());
-    assert!(ind::rsi_resume_one(&c, 14, 1, &[1.0]).is_none());
-    assert!(ind::rsi_resume_one(&c, 14, 4, &[1.0, 1.0]).is_none());
-    assert!(ind::cmo_resume_one(&c, 14, 0, &[1.0, 1.0]).is_none());
-    assert!(ind::cmo_resume_one(&c, 14, 1, &[1.0]).is_none());
-    assert!(ind::cmo_resume_one(&c, 14, 4, &[1.0, 1.0]).is_none());
+    let mut n = [0.0; 2];
+    // None guards (row 0, short state, short `next`, row out of range).
+    assert!(ind::rsi_resume_one(&c, 14, 0, &[1.0, 1.0], &mut n).is_none());
+    assert!(ind::rsi_resume_one(&c, 14, 1, &[1.0], &mut n).is_none());
+    assert!(ind::rsi_resume_one(&c, 14, 1, &[1.0, 1.0], &mut [0.0]).is_none());
+    assert!(ind::rsi_resume_one(&c, 14, 4, &[1.0, 1.0], &mut n).is_none());
+    assert!(ind::cmo_resume_one(&c, 14, 0, &[1.0, 1.0], &mut n).is_none());
+    assert!(ind::cmo_resume_one(&c, 14, 1, &[1.0], &mut n).is_none());
+    assert!(ind::cmo_resume_one(&c, 14, 1, &[1.0, 1.0], &mut [0.0]).is_none());
+    assert!(ind::cmo_resume_one(&c, 14, 4, &[1.0, 1.0], &mut n).is_none());
     // The scalar step is bit-identical to the two-`Vec` resume's single step — both the
     // value and the advanced state the next row continues from.
     let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     let c3 = &c[..3];
     let (rt, rs) = ind::rsi_resume(c3, 14, 2, &[0.8, 0.5]).unwrap();
-    let (rv, rstate) = ind::rsi_resume_one(&c, 14, 2, &[0.8, 0.5]).unwrap();
-    assert_eq!((rv.to_bits(), bits(&rstate)), (rt[0].to_bits(), bits(&rs)));
+    let (rv, rstate) = one(&[0.8, 0.5], |n| ind::rsi_resume_one(&c, 14, 2, &[0.8, 0.5], n));
+    assert_eq!((rv.unwrap().to_bits(), bits(&rstate)), (rt[0].to_bits(), bits(&rs)));
     let (ct, cs) = ind::cmo_resume(c3, 14, 2, &[0.8, 0.5]).unwrap();
-    let (cv, cstate) = ind::cmo_resume_one(&c, 14, 2, &[0.8, 0.5]).unwrap();
-    assert_eq!((cv.to_bits(), bits(&cstate)), (ct[0].to_bits(), bits(&cs)));
+    let (cv, cstate) = one(&[0.8, 0.5], |n| ind::cmo_resume_one(&c, 14, 2, &[0.8, 0.5], n));
+    assert_eq!((cv.unwrap().to_bits(), bits(&cstate)), (ct[0].to_bits(), bits(&cs)));
     // Degenerate windows: RSI flat-loss → 100, CMO flat-window → 0.
-    assert_eq!(ind::rsi_resume_one(&[10.0, 11.0], 14, 1, &[1.0, 0.0]).unwrap().0, 100.0);
-    assert_eq!(ind::cmo_resume_one(&[10.0, 10.0], 14, 1, &[0.0, 0.0]).unwrap().0, 0.0);
+    assert_eq!(ind::rsi_resume_one(&[10.0, 11.0], 14, 1, &[1.0, 0.0], &mut n), Some(100.0));
+    assert_eq!(ind::cmo_resume_one(&[10.0, 10.0], 14, 1, &[0.0, 0.0], &mut n), Some(0.0));
 }
 
 #[test]
@@ -204,44 +218,69 @@ fn scalar_resume_one_guards_and_inline_branches() {
     let c: Vec<f64> = (0..60).map(|i| 100.0 + i as f64).collect();
     let v: Vec<f64> = (0..60).map(|i| 10.0 + i as f64).collect();
     let s2 = [1.0, 1.0];
+    let mut buf = [0.0; 32];
+    let n = &mut buf[..];
     // --- guard (`return None`) for every scalar twin ---
-    assert!(ind::obv_resume_one(&c, &v, 0, &s2).is_none());
-    assert!(ind::ad_resume_one(&h, &l, &c, &v, 1, &[]).is_none());
-    assert!(ind::dema_resume_one(&d, 5, 1, &[1.0]).is_none());
-    assert!(ind::tema_resume_one(&d, 5, 1, &[1.0, 1.0]).is_none());
-    assert!(ind::t3_resume_one(&d, 5, 0.7, 1, &[1.0; 5]).is_none());
-    assert!(ind::kama_resume_one(&d, 5, 5, &s2).is_none()); // row <= period
-    assert!(ind::macd_resume_one(&c, 12, 26, 0, &s2).is_none());
-    assert!(ind::macd_signal_resume_one(&c, 12, 26, 9, false, 0, &[1.0; 3]).is_none());
-    assert!(ind::sar_resume_one(&h, &l, 1, &[1.0; 6]).is_none()); // row < 2
-    assert!(ind::sarext_resume_one(&h, &l, 0.0, 1, &[1.0; 7]).is_none());
-    assert!(ind::plus_dm_resume_one(&h, &l, 14, 0, &s2).is_none());
-    assert!(ind::minus_dm_resume_one(&h, &l, 14, 0, &s2).is_none());
-    assert!(ind::plus_di_resume_one(&h, &l, &c, 14, 0, &s2).is_none());
-    assert!(ind::minus_di_resume_one(&h, &l, &c, 14, 0, &s2).is_none());
-    assert!(ind::dx_resume_one(&h, &l, &c, 14, 0, &[1.0; 3]).is_none());
-    assert!(ind::adx_resume_one(&h, &l, &c, 14, 0, &[1.0; 4]).is_none());
-    assert!(ind::adxr_resume_one(&h, &l, &c, 14, 0, &[1.0; 17]).is_none());
-    assert!(ind::pvt_resume_one(&c, &v, 0, &s2).is_none());
-    assert!(ind::nvi_resume_one(&c, &v, 0, &[1.0; 3]).is_none());
-    assert!(ind::pvi_resume_one(&c, &v, 0, &[1.0; 3]).is_none());
-    assert!(ind::efi_resume_one(&c, &v, 13, 0, &s2).is_none());
-    assert!(ind::tsi_resume_one(&c, 25, 13, 0, &[1.0; 5]).is_none());
-    assert!(ind::mass_index_resume_one(&h, &l, 9, 0, &[1.0]).is_none()); // short state
-    assert!(ind::wad_resume_one(&h, &l, &c, 0, &s2).is_none());
-    assert!(ind::keltner_band_resume_one(&c, &h, &l, 20, 10, 2.0, true, 5, &[1.0]).is_none());
-    assert!(ind::supertrend_resume_one(&h, &l, &c, 10, 3.0, false, 5, &[1.0]).is_none());
-    assert!(ind::trix_resume_one(&c, 15, 1, &[1.0, 1.0]).is_none());
+    assert!(ind::obv_resume_one(&c, &v, 0, &s2, &mut n[..2]).is_none());
+    assert!(ind::ad_resume_one(&h, &l, &c, &v, 1, &[], &mut n[..1]).is_none());
+    assert!(ind::dema_resume_one(&d, 5, 1, &[1.0], &mut n[..2]).is_none());
+    assert!(ind::dema_resume_one(&d, 5, 60, &s2, &mut n[..2]).is_none()); // past the end
+    assert!(ind::tema_resume_one(&d, 5, 1, &[1.0, 1.0], &mut n[..3]).is_none());
+    assert!(ind::tema_resume_one(&d, 5, 60, &[1.0; 3], &mut n[..3]).is_none());
+    assert!(ind::t3_resume_one(&d, 5, 0.7, 1, &[1.0; 5], &mut n[..6]).is_none());
+    assert!(ind::t3_resume_one(&d, 5, 0.7, 60, &[1.0; 6], &mut n[..6]).is_none());
+    assert!(ind::kama_resume_one(&d, 5, 5, &s2, &mut n[..2]).is_none()); // row <= period
+    assert!(ind::macd_resume_one(&c, 12, 26, 0, &s2, &mut n[..2]).is_none());
+    assert!(
+        ind::macd_signal_resume_one(&c, 12, 26, 9, false, 0, &[1.0; 3], &mut n[..3]).is_none()
+    );
+    assert!(ind::sar_resume_one(&h, &l, 0.02, 0.2, 1, &[1.0; 6], &mut n[..6]).is_none());
+    assert!(ind::sar_resume_one(&h, &l, 0.02, 0.2, 2, &[1.0; 5], &mut n[..6]).is_none());
+    let accel = (0.02, 0.02, 0.2, 0.02, 0.02, 0.2);
+    let sarext = |row: usize, st: &[f64], n: &mut [f64]| {
+        let (a, b, c, d, e, f) = accel;
+        ind::sarext_resume_one(&h, &l, 0.0, a, b, c, d, e, f, row, st, n)
+    };
+    assert!(sarext(1, &[1.0; 7], &mut n[..7]).is_none()); // row < 2
+    assert!(sarext(2, &[1.0; 6], &mut n[..7]).is_none()); // short state
+    assert!(ind::plus_dm_resume_one(&h, &l, 14, 0, &[1.0], &mut n[..1]).is_none());
+    assert!(ind::minus_dm_resume_one(&h, &l, 14, 0, &[1.0], &mut n[..1]).is_none());
+    assert!(ind::plus_di_resume_one(&h, &l, &c, 14, 0, &s2, &mut n[..2]).is_none());
+    assert!(ind::minus_di_resume_one(&h, &l, &c, 14, 0, &s2, &mut n[..2]).is_none());
+    assert!(ind::dx_resume_one(&h, &l, &c, 14, 0, &[1.0; 3], &mut n[..3]).is_none());
+    assert!(ind::adx_resume_one(&h, &l, &c, 14, 0, &[1.0; 4], &mut n[..4]).is_none());
+    assert!(ind::adxr_resume_one(&h, &l, &c, 14, 0, &[1.0; 17], &mut n[..17]).is_none());
+    assert!(ind::pvt_resume_one(&c, &v, 0, &s2, &mut n[..2]).is_none());
+    assert!(ind::nvi_resume_one(&c, &v, 0, &[1.0; 3], &mut n[..3]).is_none());
+    assert!(ind::pvi_resume_one(&c, &v, 0, &[1.0; 3], &mut n[..3]).is_none());
+    assert!(ind::efi_resume_one(&c, &v, 13, 0, &s2, &mut n[..2]).is_none());
+    assert!(ind::tsi_resume_one(&c, 25, 13, 0, &[1.0; 5], &mut n[..5]).is_none());
+    assert!(ind::mass_index_resume_one(&h, &l, 9, 0, &[1.0], &mut n[..1]).is_none()); // short
+    assert!(ind::wad_resume_one(&h, &l, &c, 0, &s2, &mut n[..2]).is_none());
+    assert!(
+        ind::keltner_band_resume_one(&c, &h, &l, 20, 10, 2.0, true, 5, &[1.0], &mut n[..1])
+            .is_none()
+    );
+    assert!(
+        ind::supertrend_resume_one(&h, &l, &c, 10, 3.0, false, 5, &[1.0], &mut n[..1]).is_none()
+    );
+    assert!(ind::trix_resume_one(&c, 15, 1, &[1.0, 1.0], &mut n[..2]).is_none());
     // --- inline twin branches not hit by trending real data ---
     // obv flat direction: real[row] == carried prev -> obv unchanged.
-    assert_eq!(ind::obv_resume_one(&[10.0, 10.0], &[1.0, 5.0], 1, &[100.0, 10.0]).unwrap(), 100.0);
+    let (obv, _) = one(&[100.0, 10.0], |n| {
+        ind::obv_resume_one(&[10.0, 10.0], &[1.0, 5.0], 1, &[100.0, 10.0], n)
+    });
+    assert_eq!(obv, Some(100.0));
     // adxr period == 1: trailing window length 1 -> oldest adx is the current row's.
-    assert!(ind::adxr_resume_one(&h, &l, &c, 1, 30, &[1.0; 4]).is_some());
+    assert!(ind::adxr_resume_one(&h, &l, &c, 1, 30, &[1.0; 4], &mut n[..4]).is_some());
     // sarext offset-on-reverse nudge, both reversal arms (state[0]=is_long, [4]=sar):
     let hh = [200.0, 200.0, 200.0];
     let ll = [50.0, 50.0, 50.0];
+    let sx = |st: &[f64; 7], n: &mut [f64]| {
+        ind::sarext_resume_one(&hh, &ll, 0.1, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2, 2, st, n)
+    };
     // long -> short reversal (new_low <= sar) with a non-zero offset.
-    assert!(ind::sarext_resume_one(&hh, &ll, 0.1, 2, &[1.0, 0.0, 0.0, 10.0, 100.0, 50.0, 0.0]).is_some());
+    assert!(sx(&[1.0, 0.0, 0.0, 10.0, 100.0, 50.0, 0.0], &mut n[..7]).is_some());
     // short -> long reversal (new_high >= sar) with a non-zero offset.
-    assert!(ind::sarext_resume_one(&hh, &ll, 0.1, 2, &[0.0, 0.0, 0.0, 10.0, 100.0, 200.0, 50.0]).is_some());
+    assert!(sx(&[0.0, 0.0, 0.0, 10.0, 100.0, 200.0, 50.0], &mut n[..7]).is_some());
 }

@@ -20,7 +20,8 @@ impl DataFrame {
                 lookback,
                 valid_rows: self.height,
                 state: None,
-                origin: 0,
+                state_before_last: None,
+                scratch: Vec::new(),
             },
         );
         #[cfg(debug_assertions)]
@@ -28,26 +29,63 @@ impl DataFrame {
     }
 
     /// Attach (or replace) the carried recursive [`ComputedMeta::state`] for a
-    /// cached column, enabling an O(new-rows) append resume. No-op if `name` is
-    /// not a tracked computed column.
+    /// cached column, enabling an O(new-rows) append resume. The state before it is
+    /// unknown afterwards. No-op if `name` is not a tracked computed column.
     pub fn set_computed_state(&mut self, name: &str, state: Option<Vec<f64>>) {
+        self.set_computed_states(name, state, None);
+    }
+
+    /// Attach (or replace) both carried states of a cached column: `state` as of its
+    /// last valid row and `before_last` as of the row before it (see [`ComputedMeta`]).
+    /// No-op if `name` is not a tracked computed column.
+    pub fn set_computed_states(
+        &mut self,
+        name: &str,
+        state: Option<Vec<f64>>,
+        before_last: Option<Vec<f64>>,
+    ) {
         if let Some(meta) = self.computed.get_mut(name) {
             meta.state = state;
+            meta.state_before_last = before_last;
         }
     }
 
-    /// Overwrite element `idx` of a cached column's carried state **in place** (no
-    /// allocation) — the single-row resume fast path, where the new state reuses the
-    /// existing fixed-size buffer. No-op if `name` is not computed, has no state, or
-    /// `idx` is out of range.
-    pub fn update_computed_state_at(&mut self, name: &str, idx: usize, val: f64) {
-        if let Some(slot) = self
-            .computed
-            .get_mut(name)
-            .and_then(|m| m.state.as_mut())
-            .and_then(|s| s.get_mut(idx))
-        {
-            *slot = val;
+    /// Resume a cached column by ONE row — the row after its last valid one: `step` gets
+    /// this frame, the carried state (as of the last valid row), the frame's origin and
+    /// a buffer of the state's length, and returns the new row's value having written the
+    /// state as of that row into the buffer. On `Some`, the states advance (the old state
+    /// becomes [`ComputedMeta::state_before_last`]); on `None` they are untouched. The
+    /// caller writes the value. The buffers are recycled, so a live column steps with no
+    /// allocation. `None` if `name` is untracked or carries no state.
+    pub fn step_computed_state(
+        &mut self,
+        name: &str,
+        step: impl FnOnce(&DataFrame, &[f64], usize, &mut [f64]) -> Option<f64>,
+    ) -> Option<f64> {
+        let origin = self.origin;
+        let meta = self.computed.get_mut(name)?;
+        let prev = meta.state.take()?;
+        let mut next = std::mem::take(&mut meta.scratch);
+        next.clear();
+        next.resize(prev.len(), 0.0);
+        let out = step(self, &prev, origin, &mut next);
+        let meta = self.computed.get_mut(name)?;
+        if out.is_some() {
+            meta.scratch = meta.state_before_last.take().unwrap_or_default();
+            meta.state_before_last = Some(prev);
+            meta.state = Some(next);
+        } else {
+            meta.state = Some(prev);
+            meta.scratch = next;
+        }
+        out
+    }
+
+    /// The states after a resume of ONE new row produced `state` (the state as of that
+    /// row): the old state becomes the state before it. No-op if `name` is untracked.
+    pub fn advance_computed_state(&mut self, name: &str, state: Vec<f64>) {
+        if let Some(meta) = self.computed.get_mut(name) {
+            meta.state_before_last = meta.state.replace(state);
         }
     }
 
@@ -57,14 +95,14 @@ impl DataFrame {
         self.computed.values().any(|m| m.valid_rows < self.height)
     }
 
-    /// Borrow a cached column's carried resume state and its origin offset — the
+    /// Borrow a cached column's carried resume state and the frame's origin — the
     /// `(&[f64], usize)` the resume kernels read — **without cloning** the state
     /// `Vec`. Lets the live refresh / rollover-finalize loops continue the recursion
     /// straight off the stored state instead of snapshotting a per-column copy.
     /// `None` if `name` is untracked or carries no state.
     pub fn computed_resume_state(&self, name: &str) -> Option<(&[f64], usize)> {
         let meta = self.computed.get(name)?;
-        Some((meta.state.as_deref()?, meta.origin))
+        Some((meta.state.as_deref()?, self.origin))
     }
 
     /// Snapshot of the materialized-directive columns (`name`, meta).
@@ -89,11 +127,6 @@ impl DataFrame {
             })
             .map(|(name, meta)| (name.clone(), meta.lookback, meta.valid_rows))
             .collect()
-    }
-
-    /// Names of all materialized-directive columns.
-    pub fn computed_names(&self) -> Vec<String> {
-        self.computed.keys().cloned().collect()
     }
 
     /// Overwrite a computed column's rows `[from, from + tail.len())` in place
@@ -175,18 +208,22 @@ impl DataFrame {
         }
     }
 
-    /// Live tf-fold invalidation: only the **forming row** (the last, still-open
-    /// period bar at `forming_row`) changed, so mark each cached column stale from
-    /// `forming_row` on but **keep** its carried recursive state. The state stays
-    /// anchored at the last CLOSED bar (`forming_row - 1`); `refresh_computed`
-    /// resumes just the forming row from it (O(lookback)) without advancing the
-    /// anchor, and the period rollover advances the anchor over the now-closed bar.
-    /// Unlike [`invalidate_computed_on_write_at`] this neither drops the state nor
-    /// zeroes `valid_rows`, so the live fold never forces a full O(buffer) recompute.
-    pub(super) fn invalidate_computed_forming_row(&mut self, forming_row: usize) {
+    /// The last row changed in place (a time-frame forming bar folded or replaced, or a
+    /// row appended with the last row's label): mark each cached column stale from
+    /// `last_row` on but **keep** what it carries. A column that was valid through that
+    /// row drops back by one: its state as of the row before (`state_before_last`)
+    /// becomes its state, so the refresh recomputes just that row from it (O(1) for a
+    /// recursive kernel). The dropped buffer is kept for the next step. Unlike
+    /// [`invalidate_computed_on_write_at`] this never zeroes `valid_rows`, so the live
+    /// path never forces a full O(buffer) recompute.
+    pub(super) fn invalidate_computed_forming_row(&mut self, last_row: usize) {
         for meta in self.computed.values_mut() {
-            if meta.valid_rows > forming_row {
-                meta.valid_rows = forming_row;
+            if meta.valid_rows > last_row {
+                meta.valid_rows = last_row;
+                let replaced = std::mem::replace(&mut meta.state, meta.state_before_last.take());
+                if let Some(buf) = replaced {
+                    meta.scratch = buf;
+                }
             }
         }
     }
@@ -204,6 +241,7 @@ impl DataFrame {
             // `valid_rows` to 0 breaks that correspondence, so drop it. A later refresh
             // recomputes from scratch (correct) and repopulates the state.
             meta.state = None;
+            meta.state_before_last = None;
         }
     }
 
@@ -213,6 +251,7 @@ impl DataFrame {
         for meta in self.computed.values_mut() {
             meta.valid_rows = 0;
             meta.state = None;
+            meta.state_before_last = None;
         }
     }
 }

@@ -27,9 +27,10 @@ use crate::*;
 pub(crate) struct TfState {
     pub(crate) time_frame: TimeFrame,
     pub(crate) cumulators: AggSpec,
-    /// Raw fine bars of the current open period (`None` until the first
-    /// folded append), kept so a re-sent forming bar updates (deduped) rather
-    /// than double-counts.
+    /// The bars of the current open period — the small frame whose cumulation is the
+    /// forming last row (`None` only while the frame is empty). It starts as the last
+    /// constructed row, or the first bar of a new period; a bar with the same timestamp
+    /// as one in it replaces that bar rather than double-counting.
     pub(crate) open: Option<DataFrame>,
     /// The current open period's `unify_tz` key, **lazily memoized** (`None` until
     /// recomputed). The period key is invariant while a period is forming — only a
@@ -40,6 +41,8 @@ pub(crate) struct TfState {
     pub(crate) open_key: Option<i64>,
     /// Cached live-fold plan (`None` until the first fold), reused across appends.
     pub(crate) fold_plan: Option<FoldPlan>,
+    /// Cached plan re-cumulating the open period into the forming row (a re-sent bar).
+    pub(crate) refold_plan: Option<FoldPlan>,
 }
 
 /// The cached forming-row fold plan: the `(dst_col, src_col, combine_op)` triples,
@@ -57,6 +60,17 @@ pub(crate) struct FoldPlan {
 }
 
 impl FoldPlan {
+    /// The plan folding `src`'s rows into `inner`'s forming row, or `None` when a column
+    /// cannot fold in place (see [`build_fold_ops`]).
+    pub(crate) fn build(inner: &DataFrame, src: &DataFrame, spec: &AggSpec) -> Option<FoldPlan> {
+        crate::frame_tf::build_fold_ops(inner, src, spec).map(|ops| FoldPlan {
+            inner_names: inner.names_arc().clone(),
+            inner_dtypes: inner.columns().iter().map(|c| c.dtype()).collect(),
+            bar_names: src.names().to_vec(),
+            ops,
+        })
+    }
+
     /// Whether this plan still matches `inner` + `bar` (no schema change).
     pub(crate) fn matches(&self, inner: &DataFrame, bar: &DataFrame) -> bool {
         // The inner frame is pointer-stable across the fold's row-only mutations
@@ -140,8 +154,9 @@ pub(crate) struct WindowState {
 ///         ``df[[...]]``); a name not present raises ``KeyError``. An empty list or a
 ///         duplicate name is rejected, and an absent column is never NaN-filled.
 ///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
-///         this bar interval; the given rows are taken as already-final bars and later
-///         ``append``s fold finer bars into them. Requires a DatetimeIndex.
+///         this bar interval. The given rows are bars at that frame, each labelled with its
+///         period start; the last one is the forming bar, so a later ``append`` of a finer
+///         bar in its period folds into it. Requires a DatetimeIndex.
 ///     cumulators (dict[str, str], optional): per-column aggregator overrides for folding
 ///         (e.g. ``{'amount': 'sum'}``); only meaningful together with ``time_frame``.
 ///     dtype (str, optional): cast every column to a single dtype at construction
@@ -300,7 +315,7 @@ impl PyDataFrame {
         let view = self.logical();
         let df = view.as_ref();
         DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-            .map(PyDataFrame::plain)
+            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
             .map_err(pyerr)
     }
 
@@ -313,7 +328,7 @@ impl PyDataFrame {
         let df = view.as_ref();
         let cols = df.columns().iter().map(&op).collect::<PyResult<Vec<_>>>()?;
         DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-            .map(PyDataFrame::plain)
+            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
             .map_err(pyerr)
     }
 
@@ -339,7 +354,7 @@ impl PyDataFrame {
             })
             .collect::<PyResult<Vec<_>>>()?;
         DataFrame::new(df.names().to_vec(), cols, Some((**idx).clone()))
-            .map(PyDataFrame::plain)
+            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
             .map_err(pyerr)
     }
 
@@ -504,7 +519,8 @@ impl PyDataFrame {
             cols,
             Some((**self.inner.index()).clone()),
         )
-        .map_err(pyerr)?;
+        .map_err(pyerr)?
+        .with_origin(self.inner.origin());
         Ok(())
     }
 

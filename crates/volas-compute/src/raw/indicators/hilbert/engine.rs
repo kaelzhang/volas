@@ -355,7 +355,9 @@ impl HtCoreState {
     }
 
     /// Reconstruct from the first `CORE_STATE_LEN` words of `s` (inverse of
-    /// [`serialize`](Self::serialize)); `None` if `s` is too short.
+    /// [`serialize`](Self::serialize)); `None` if `s` is too short or is no state a
+    /// computation wrote — the ring cursor not one of `0..3` or the parity not `0` / `1`
+    /// (the cursor indexes the channels' rings unchecked, so it is validated here).
     pub(super) fn deserialize(s: &[f64]) -> Option<Self> {
         if s.len() < CORE_STATE_LEN {
             return None;
@@ -365,8 +367,12 @@ impl HtCoreState {
             sum: s[1],
             trailing: s[2],
         };
-        let hilbert_idx = s[3] as usize;
-        let even = s[4] != 0.0;
+        let hilbert_idx = ring_index(s[3], 3)?;
+        let even = match s[4] {
+            0.0 => false,
+            1.0 => true,
+            _ => return None,
+        };
         let mut off = 5usize;
         let detrender = HilbertVar::from_state(s, &mut off);
         let q1v = HilbertVar::from_state(s, &mut off);
@@ -499,18 +505,23 @@ impl DcPhase {
     }
 
     /// Reconstruct from `DCPHASE_STATE_LEN` words at `s[off..]`, advancing `off`.
-    /// Inverse of [`DcPhase::push_state`].
-    pub(super) fn from_state(s: &[f64], off: &mut usize) -> Self {
+    /// Inverse of [`DcPhase::push_state`]; `None` if `s` is too short or the ring index
+    /// is not one of `0..SMOOTH_PRICE_SIZE`.
+    pub(super) fn from_state(s: &[f64], off: &mut usize) -> Option<Self> {
         let o = *off;
+        let words = s.get(o..o + DCPHASE_STATE_LEN)?;
         let mut smooth_price = [0.0f64; SMOOTH_PRICE_SIZE];
-        smooth_price.copy_from_slice(&s[o + 2..o + 2 + SMOOTH_PRICE_SIZE]);
+        smooth_price.copy_from_slice(&words[2..]);
+        let idx = ring_index(words[1], SMOOTH_PRICE_SIZE)?;
         *off += DCPHASE_STATE_LEN;
-        DcPhase {
-            smooth_price,
-            idx: s[o + 1] as usize,
-            phase: s[o],
-        }
+        Some(DcPhase { smooth_price, idx, phase: words[0] })
     }
+}
+
+/// A ring cursor read from a carried state word: a whole number in `0..len`, else
+/// `None` (a forged or corrupt state).
+fn ring_index(word: f64, len: usize) -> Option<usize> {
+    (word.fract() == 0.0 && word >= 0.0 && word < len as f64).then_some(word as usize)
 }
 
 /// Words in a serialised [`DcPhase`] (`phase` + `idx` + the 50-slot ring).
@@ -528,28 +539,33 @@ pub(super) fn dcphase_all(core: &[HtBar]) -> Vec<f64> {
     out
 }
 
+/// One trendline bar's dominant-cycle-window raw-price average: TA-Lib's backward
+/// rescan `price[today] + price[today-1] + …` over `DCPeriod` bars, divided by the
+/// period. The single definition the full compute, `*_final_state` and the resume
+/// share — so a resumed bar is bit-identical to the full one (a prefix-sum
+/// difference would reassociate the sum, drift with the history length, and differ
+/// from the rescan in the last bits). `DCPeriod <= SMOOTH_PRICE_SIZE`, so the rescan
+/// is bounded.
+#[inline]
+pub(super) fn trendline_avg(price: &[f64], today: usize, smooth_period: f64) -> f64 {
+    let dc_period_int = (smooth_period + 0.5) as usize;
+    if dc_period_int == 0 {
+        return 0.0;
+    }
+    // Newest to oldest, one add at a time: TA-Lib's order (rows before 0 add nothing).
+    let lo = (today + 1).saturating_sub(dc_period_int);
+    let sum = price[lo..=today].iter().rev().fold(0.0f64, |s, &x| s + x);
+    sum / dc_period_int as f64
+}
+
 /// Trendline per bar: a `DCPeriod`-window average of *raw* price smoothed by the
 /// 4/3/2/1-weighted `iTrend` recurrence. Index `< CORE_START` holds `0.0`.
 pub(super) fn trendline_all(core: &[HtBar], price: &[f64]) -> Vec<f64> {
     let n = core.len();
     let mut out = vec![0.0f64; n];
-    // Prefix sums of price (`prefix[k] = Σ price[0..k]`) turn each bar's
-    // variable-width DC-period window mean into an O(1) difference instead of the
-    // O(period) rescan of [`trendline_avg`] — the whole pass becomes O(n), not
-    // O(n·period) (the dominant cost of HT_TRENDLINE). The reassociated summation
-    // drifts ~1e-12 relative: far inside ht_trendline's 1e-7 TA-Lib parity and the
-    // 1e-9 resume-vs-batch tolerance (the per-bar resume keeps the exact rescan).
-    let mut prefix = vec![0.0f64; n + 1];
-    for i in 0..n {
-        prefix[i + 1] = prefix[i] + price[i];
-    }
     let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
     for today in CORE_START..n {
-        // `smooth_period` is the homodyne period (clamped to [6, 50]) blended 0.33
-        // up from 0, so `dc >= 2` from the very first bar — never zero, no guard.
-        let dc = (core[today].smooth_period + 0.5) as usize;
-        let lo = (today + 1).saturating_sub(dc);
-        let avg = (prefix[today + 1] - prefix[lo]) / dc as f64;
+        let avg = trendline_avg(price, today, core[today].smooth_period);
         out[today] = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
         it3 = it2;
         it2 = it1;

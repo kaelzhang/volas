@@ -145,7 +145,7 @@ impl PyDataFrame {
                 cols.push(col);
             }
             let idx = (*self.inner.index().as_ref()).clone();
-            let df = DataFrame::new(list, cols, Some(idx)).map_err(pyerr)?;
+            let df = DataFrame::new(list, cols, Some(idx)).map_err(pyerr)?.with_origin(self.inner.origin());
             let (start, len) = self.logical_range();
             let df = if self.window.is_some() { df.slice(start, start + len) } else { df };
             return Ok(Py::new(py, PyDataFrame::plain(df))?.into_any());
@@ -159,11 +159,21 @@ impl PyDataFrame {
     /// return the same frame (amortized O(1), like ``list.append`` — the live
     /// single-bar hot path, no full-column copy).
     ///
-    /// On a **time_frame** frame (see the constructor / ``cumulate``) the rows
-    /// are treated as *finer* bars and folded into the current period: a bar in
-    /// the open period updates the forming last row (``df.iloc[-1]``), a bar in a
-    /// new period rolls over into a fresh row. A re-sent forming bar (same
-    /// timestamp) updates rather than double-counts.
+    /// On a **time_frame** frame (see the constructor / ``cumulate``) each row is
+    /// a bar folded into the current period, whose bars are kept in a small frame: a
+    /// bar of the open period joins it — replacing a bar with the same timestamp, so a
+    /// re-sent bar never double-counts — and the cumulated period replaces the forming
+    /// last row (``df.iloc[-1]``); a bar of a later period starts a new row. A bar of
+    /// the frame's own time frame stamped at the period start (an exchange kline
+    /// re-sent while it forms) therefore replaces the last row whole. The last
+    /// constructed row is the open period's first bar, so it must not already hold
+    /// the finer bars appended after it.
+    ///
+    /// On any other frame each row is keyed by its index label: a row labelled like
+    /// the last row replaces it whole; a ``DatetimeIndex`` only increases (a row
+    /// labelled before the last raises ``ValueError``) and an integer / string index
+    /// stays unique (a row labelled like an earlier row raises), the frame unchanged on
+    /// an error; unlabelled rows (a ``RangeIndex``) take the next labels.
     ///
     /// Missing columns are NaN-padded; cached directive columns go stale until
     /// ``fulfill()``. A snapshot taken via ``copy()`` / ``iloc`` is unaffected
@@ -193,7 +203,7 @@ impl PyDataFrame {
                 if me.tf.is_some() {
                     me.fold_append(&other_inner)?;
                 } else {
-                    me.inner.append(&other_inner).map_err(pyerr)?;
+                    me.inner.append_labelled(&other_inner).map_err(pyerr)?;
                 }
                 me.maybe_compact()?;
                 return Ok(slf);
@@ -204,7 +214,7 @@ impl PyDataFrame {
             if me.tf.is_some() {
                 me.fold_append(&df.inner)?;
             } else {
-                me.inner.append(&df.inner).map_err(pyerr)?;
+                me.inner.append_labelled(&df.inner).map_err(pyerr)?;
             }
             me.maybe_compact()?;
             return Ok(slf);
@@ -215,7 +225,7 @@ impl PyDataFrame {
             if me.tf.is_some() {
                 me.fold_append(&row.inner)?;
             } else {
-                me.inner.append(&row.inner).map_err(pyerr)?;
+                me.inner.append_labelled(&row.inner).map_err(pyerr)?;
             }
             me.maybe_compact()?;
             return Ok(slf);
@@ -228,7 +238,7 @@ impl PyDataFrame {
             if me.tf.is_some() {
                 me.fold_append(&bar)?;
             } else {
-                me.inner.append(&bar).map_err(pyerr)?;
+                me.inner.append_labelled(&bar).map_err(pyerr)?;
             }
             me.maybe_compact()?;
             return Ok(slf);
@@ -283,13 +293,13 @@ impl PyDataFrame {
         } else {
             let col = execute(&self.inner, &node).map_err(value_err)?;
             let lookback = volas_directive::lookback::lookback(&node);
-            // Capture the recursive resume state (if any) BEFORE moving the column in,
-            // so a later append can continue in O(new rows) instead of recomputing —
-            // anchored at the last closed bar when the frame has a forming bar.
-            let state = self.capture_resume_state(&self.inner, &node, &col);
+            // Capture the recursive resume states (if any) BEFORE moving the column in —
+            // as of the last row and the row before — so a later append continues in
+            // O(new rows) and a replaced last row recomputes in one step.
+            let (state, before) = Self::capture_resume_states(&self.inner, &node, &col);
             self.inner.set_column(&canonical, col).map_err(pyerr)?;
             self.inner.set_computed(&canonical, lookback);
-            self.inner.set_computed_state(&canonical, state);
+            self.inner.set_computed_states(&canonical, state, before);
         }
         let col = self.inner.column(&canonical).map_err(pyerr)?.clone();
         Ok((canonical, col))

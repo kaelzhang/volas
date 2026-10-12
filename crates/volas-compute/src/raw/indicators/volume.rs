@@ -77,21 +77,14 @@ pub fn adosc_final_state(
     fast: usize,
     slow: usize,
 ) -> Option<Vec<f64>> {
-    let n = close.len();
-    if n == 0 {
+    if close.is_empty() {
         return None;
     }
-    let fastk = 2.0 / (fast as f64 + 1.0);
-    let slowk = 2.0 / (slow as f64 + 1.0);
-    let mut ad_line = money_flow_volume(high[0], low[0], close[0], volume[0]);
-    let mut fast_ema = ad_line;
-    let mut slow_ema = ad_line;
-    for i in 1..n {
-        ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
-        fast_ema = (ad_line - fast_ema).mul_add(fastk, fast_ema);
-        slow_ema = (ad_line - slow_ema).mul_add(slowk, slow_ema);
+    let mut a = Adosc::seed(high, low, close, volume);
+    for i in 1..close.len() {
+        a.step(high, low, close, volume, i, fast, slow);
     }
-    Some(vec![ad_line, fast_ema, slow_ema])
+    Some(a.state())
 }
 
 /// Resume OBV from a carried state over the new rows `[from, n)`, bit-identical to
@@ -149,10 +142,10 @@ pub fn ad_resume(
 /// `[from, n)`, bit-identical to a full [`adosc`] recompute.
 /// `state = [ad_line, fast_ema, slow_ema]` as of row `from - 1`. The two EMAs are
 /// advanced with TA-Lib's exact `(price − prev)·k + prev` (fused) recurrence — the
-/// same instruction sequence as [`adosc`], so the carried-state continuation lands
-/// on identical bits. `from > lookback` on every resume (the cached tail starts at
-/// `valid_rows == lookback + 1` at the earliest), so every emitted row is past the
-/// warm-up mask and finite. Returns the new-row values and the updated state.
+/// same step ([`Adosc`]) as [`adosc`], so the carried-state continuation lands on
+/// identical bits, and the same warm-up mask (a state captured inside the warm-up
+/// resumes to NaN there, as the full compute is). Returns the new-row values and the
+/// updated state.
 // One parameter per series/state the resume reads; a struct would only repackage them.
 #[allow(clippy::too_many_arguments)]
 pub fn adosc_resume(
@@ -165,20 +158,14 @@ pub fn adosc_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
-    let n = close.len();
-    let fastk = 2.0 / (fast as f64 + 1.0);
-    let slowk = 2.0 / (slow as f64 + 1.0);
-    let mut ad_line = state[0];
-    let mut fast_ema = state[1];
-    let mut slow_ema = state[2];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
-    for i in from..n {
-        ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
-        fast_ema = (ad_line - fast_ema).mul_add(fastk, fast_ema);
-        slow_ema = (ad_line - slow_ema).mul_add(slowk, slow_ema);
-        out.push(fast_ema - slow_ema);
-    }
-    (out, vec![ad_line, fast_ema, slow_ema])
+    let mut a = Adosc { ad_line: state[0], fast_ema: state[1], slow_ema: state[2] };
+    let out = (from..close.len())
+        .map(|i| {
+            a.step(high, low, close, volume, i, fast, slow);
+            a.value(i, fast, slow)
+        })
+        .collect();
+    (out, a.state())
 }
 
 /// Money flow volume for one bar: `((close-low) - (high-close)) / (high-low) ·
@@ -225,30 +212,55 @@ pub fn adosc(
     if n == 0 {
         return out;
     }
-    let lookback = fast.max(slow).saturating_sub(1);
-    let fastk = 2.0 / (fast as f64 + 1.0);
-    let slowk = 2.0 / (slow as f64 + 1.0);
     // Fuse the Chaikin A/D line into the oscillator's single pass: accumulate the A/D
     // value on the fly and feed both EMAs, so the intermediate A/D array is never
-    // materialised (TA-Lib computes ADOSC in one pass). The EMAs use TA-Lib's
-    // `(price − prev)·k + prev` form, fused to a single rounding off the recurrence's
-    // critical path; the two independent chains interleave (ILP). EMA is contractive
-    // (k < 1), so the ~1e-16 divergence decays — within the parity tolerance.
-    let mut ad_line = money_flow_volume(high[0], low[0], close[0], volume[0]);
-    let mut fast_ema = ad_line;
-    let mut slow_ema = ad_line;
-    if lookback == 0 {
-        out[0] = fast_ema - slow_ema;
-    }
-    for i in 1..n {
-        ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
-        fast_ema = (ad_line - fast_ema).mul_add(fastk, fast_ema);
-        slow_ema = (ad_line - slow_ema).mul_add(slowk, slow_ema);
-        if i >= lookback {
-            out[i] = fast_ema - slow_ema;
-        }
+    // materialised (TA-Lib computes ADOSC in one pass).
+    let mut a = Adosc::seed(high, low, close, volume);
+    out[0] = a.value(0, fast, slow);
+    for (i, o) in out.iter_mut().enumerate().skip(1) {
+        a.step(high, low, close, volume, i, fast, slow);
+        *o = a.value(i, fast, slow);
     }
     out
+}
+
+/// ADOSC's running state — the A/D line and its fast / slow EMAs — and the one owner of
+/// its seed, step and warm-up mask, shared by [`adosc`], [`adosc_final_state`] and
+/// [`adosc_resume`].
+struct Adosc {
+    ad_line: f64,
+    fast_ema: f64,
+    slow_ema: f64,
+}
+
+impl Adosc {
+    /// The state at bar 0: both EMAs seeded with the first A/D value.
+    fn seed(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Self {
+        let ad_line = money_flow_volume(high[0], low[0], close[0], volume[0]);
+        Adosc { ad_line, fast_ema: ad_line, slow_ema: ad_line }
+    }
+
+    /// Advance over bar `i`. The EMAs use TA-Lib's `(price − prev)·k + prev` form, fused
+    /// to a single rounding; the two independent chains interleave (ILP).
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn step(&mut self, high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize, fast: usize, slow: usize) {
+        let fastk = 2.0 / (fast as f64 + 1.0);
+        let slowk = 2.0 / (slow as f64 + 1.0);
+        self.ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
+        self.fast_ema = (self.ad_line - self.fast_ema).mul_add(fastk, self.fast_ema);
+        self.slow_ema = (self.ad_line - self.slow_ema).mul_add(slowk, self.slow_ema);
+    }
+
+    /// The oscillator at bar `i`: NaN within the warm-up (`i < max(fast, slow) − 1`).
+    #[inline]
+    fn value(&self, i: usize, fast: usize, slow: usize) -> f64 {
+        if i >= fast.max(slow).saturating_sub(1) { self.fast_ema - self.slow_ema } else { f64::NAN }
+    }
+
+    fn state(&self) -> Vec<f64> {
+        vec![self.ad_line, self.fast_ema, self.slow_ema]
+    }
 }
 
 /// Intraday Intensity Index (TradingView `ta.iii`, David Bostian): per-bar
@@ -273,26 +285,30 @@ pub fn iii(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64>
 /// prev_real]` (as of `row - 1`), bit-identical to one [`obv_resume`] loop
 /// iteration, with NO allocation (the live tf-fold forming-row fast path).
 /// `from >= 1` on every resume, so `row == 0` declines; the carried `prev_real`
-/// is the direction reference (never `real[row - 1]`), matching the Vec kernel.
+/// is the direction reference (never `real[row - 1]`), matching the Vec kernel. The
+/// state as of `row` (`[running_obv, real[row]]`) is written into `next`.
 pub fn obv_resume_one(
     real: &[f64],
     volume: &[f64],
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() < 2 || row >= real.len() {
+    if row == 0 || state.len() != 2 || next.len() != 2 || row >= real.len() {
         return None;
     }
     let prev = state[1];
     let dir = ((real[row] > prev) as i8 - (real[row] < prev) as i8) as f64;
-    Some(state[0] + dir * volume[row])
+    let obv = state[0] + dir * volume[row];
+    next.copy_from_slice(&[obv, real[row]]);
+    Some(obv)
 }
 
 /// Single-row AD (Chaikin A/D line) resume: the value at `row` from
 /// `state = [running_ad]` (as of `row - 1`), bit-identical to one [`ad_resume`]
 /// loop iteration, with NO allocation. AD's per-bar money-flow term is
 /// independent of prior bars, so the running total plus this bar's money flow is
-/// the whole step.
+/// the whole step. The state as of `row` (`[running_ad]`) is written into `next`.
 pub fn ad_resume_one(
     high: &[f64],
     low: &[f64],
@@ -300,11 +316,13 @@ pub fn ad_resume_one(
     volume: &[f64],
     row: usize,
     state: &[f64],
+    next: &mut [f64],
 ) -> Option<f64> {
-    if state.is_empty() || row >= close.len() {
+    if state.len() != 1 || next.len() != 1 || row >= close.len() {
         return None;
     }
-    Some(state[0] + money_flow_volume(high[row], low[row], close[row], volume[row]))
+    next[0] = state[0] + money_flow_volume(high[row], low[row], close[row], volume[row]);
+    Some(next[0])
 }
 
 

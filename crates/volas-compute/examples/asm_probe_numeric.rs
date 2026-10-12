@@ -9,7 +9,7 @@ use volas_compute::raw::indicators::{ema, ma};
 #[inline(never)]
 #[no_mangle]
 pub fn probe_ma(close: &[f64], period: usize) -> Vec<f64> {
-    ma(close, period)
+    ma(close, period, 0)
 }
 
 #[inline(never)]

@@ -78,11 +78,15 @@ impl Agg {
                 Ok(Column::f64(vec![val]))
             }
             Column::I64(v, _) | Column::Datetime(v) => {
-                let it = kept.iter().map(|&i| v[i]);
+                let mut it = kept.iter().map(|&i| v[i]);
                 let val = match self {
                     Agg::Max => it.max().unwrap(),
                     Agg::Min => it.min().unwrap(),
-                    Agg::Sum => it.sum(),
+                    // checked, as the in-place fold (`Column::combine_at`): an integer
+                    // sum never wraps
+                    Agg::Sum => it
+                        .try_fold(0i64, i64::checked_add)
+                        .ok_or_else(|| volas_core::numeric::overflow(col.dtype(), "a time-frame fold"))?,
                     _ => unreachable!(), // LCOV_EXCL_LINE
                 };
                 Ok(if matches!(col, Column::Datetime(_)) {
@@ -182,6 +186,14 @@ mod tests {
             Agg::Sum.reduce(&col, &kept).unwrap(),
             Column::f64(vec![9.0])
         );
+    }
+
+    #[test]
+    fn an_integer_sum_never_wraps() {
+        let col = Column::i64(vec![i64::MAX, 1]);
+        let err = Agg::Sum.reduce(&col, &[0, 1]).unwrap_err();
+        assert!(matches!(err, VolasError::Overflow(_)), "{err}");
+        assert_eq!(Agg::Sum.reduce(&col, &[0]).unwrap(), Column::i64(vec![i64::MAX]));
     }
 
     #[test]

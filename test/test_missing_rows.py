@@ -221,26 +221,9 @@ _LIVE = sorted(set(CASES) - set(OPERANDS) - {"mavp:2,8,8@close,periods"}) + [
 ]
 
 
-# Live-path divergences that clean data shows too, independent of missing rows: a
-# sliding-sum resume drifts by a few ULPs, and a tf-folded column fills its last
-# warm-up row. Those are compared within 1e-9 / past the warm-up; the rest bit-exact.
-ULP_DRIFT = {"ht_trendline", "stochrsi.d"}
-FOLD_WARMUP = {
-    "adosc", "ht_dcperiod", "ht_dcphase", "ht_phasor", "ht_phasor.quadrature", "ht_sine",
-    "ht_sine.leadsine", "ht_trendline", "ht_trendmode", "mama", "mama.fama",
-}
-
-
-def _live_matches(live, ref, directive, ctx, fold=False):
-    live, ref = np.asarray(live, dtype=float), np.asarray(ref, dtype=float)
-    if fold and directive in FOLD_WARMUP:
-        warm = volas.directive_lookback(directive)
-        live, ref = live[warm:], ref[warm:]
-    if directive in ULP_DRIFT:
-        np.testing.assert_array_equal(np.isnan(live), np.isnan(ref), err_msg=ctx)
-        np.testing.assert_allclose(live, ref, rtol=1e-9, atol=1e-9, err_msg=ctx)
-    else:
-        _bit_exact(live, ref, ctx)
+def _live_matches(live, ref, ctx):
+    """Every live path is bit-exact with a full recompute: no tolerance, no exception."""
+    _bit_exact(live, ref, ctx)
 
 
 def _plain_frame(data, rows):
@@ -262,7 +245,7 @@ def _append_matches(directive, missing, seed):
         live.append(_plain_frame(data, slice(i, j)))
         live.fulfill()
         ref = _plain_frame(data, slice(0, j))
-        _live_matches(live[directive], ref.exec(directive), directive, f"{directive} @{j}")
+        _live_matches(live[directive], ref.exec(directive), f"{directive} @{j}")
         i, k = j, k + 1
 
 
@@ -343,7 +326,7 @@ def test_tf_fold_matches_a_full_recompute(directive):
         if i in checks:
             ref, ohlcv = _fold_ref(live)
             seen_missing_forming |= bool(np.isnan(ohlcv["close"][-1]))
-            _live_matches(live[directive], ref[directive], directive, f"{directive} i={i}", fold=True)
+            _live_matches(live[directive], ref[directive], f"{directive} i={i}")
     assert seen_missing_forming, "the scenario must fold a missing forming row"
     assert np.isnan(np.asarray(live["close"], float)).sum() >= len(_MISSING_PERIODS)
 
@@ -367,4 +350,4 @@ def test_constructed_tf_frame_rolls_over_a_missing_closed_bar(directive):
         live.append(volas.DataFrame({k: v[i:i + 1] for k, v in cols.items()}, index=ts[i:i + 1]))
         live.fulfill()
         ref, _ = _fold_ref(live)
-        _live_matches(live[directive], ref[directive], directive, f"{directive} i={i}", fold=True)
+        _live_matches(live[directive], ref[directive], f"{directive} i={i}")

@@ -63,7 +63,7 @@ data in dtype-faithful containers until you explicitly ask to leave.
 
 ### C2 — missing values are native (`volas.NA`), and never change a dtype
 
-A missing value is a first-class symbol, [`volas.NA`](README.md#missing-values-volasna),
+A missing value is a first-class symbol, [`volas.NA`](docs/pandas-compatibility.md#missing-values-volasna),
 stored per dtype: a `float` uses in-band `NaN`, an `int` / `bool` / `str` uses a
 validity bitmap (the dtype is preserved), a `datetime` uses `NaT`. Adding a missing
 value to a column **never** upcasts it. The pandas-3.0 "missing → widen the dtype"
@@ -332,7 +332,7 @@ cannot decay into a bag of Python truth-values, and the NA-aware mask check turn
 
 Each subsection below is a behaviour volas deliberately changed, with the pandas
 contrast and the gotcha to keep in mind. These are the same divergences summarised in
-the README's [Known pandas divergences](README.md#known-pandas-divergences-the-volasna-model).
+the pandas-compatible API guide's [Known pandas divergences](docs/pandas-compatibility.md#known-pandas-divergences-the-volasna-model).
 
 ### Missing values keep the dtype
 
@@ -518,6 +518,13 @@ is labelled `3` (pandas `concat` keeps the row's own `0`, giving `0, 1, 2, 0`). 
 keeps a sliced or windowed frame's labels absolute and gap-free. Rows appended with
 explicit integer labels keep them.
 
+A row appended with an explicit label equal to the **last** row's label **replaces**
+that row. A `DatetimeIndex` only increases — a row labelled before the last raises —
+and an integer or string index stays unique — a row labelled like an earlier row
+raises (in both cases the frame is left unchanged). pandas keeps both rows — `concat`
+happily builds a duplicate or out-of-order label — while volas treats a repeated label
+as the same bar sent again, which is what a live feed means by it.
+
 On a `time_frame` frame the appended bars are *folded* into the forming period, so
 the live feed must be well-ordered: a `NaT`-timestamped bar (no period — symmetric
 with `cumulate`, which also rejects `NaT`) and an **out-of-order** bar (a timestamp
@@ -577,7 +584,7 @@ df.exec('change')     # same values as a raw ndarray
 
 Mapping notes: `change` operates on the `close` column with a 1-bar period
 (`pct_change()`'s default `periods=1`); the warm-up row is missing in both. For
-a different period or column, see the directive syntax in `README.md`.
+a different period or column, see the directive syntax in `docs/directives.md`.
 
 ## int `min` / `max` over an all-NA column
 

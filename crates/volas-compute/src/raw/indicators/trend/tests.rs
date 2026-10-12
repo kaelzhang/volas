@@ -145,16 +145,16 @@
         assert!(ema_final_state(&data, 0).is_none());
 
         // kama_final_state: period == 0 / period + 1 > n -> None (trend.rs:500).
-        assert!(kama_final_state(&data, 0).is_none());
-        assert!(kama_final_state(&data[..5], 30).is_none());
+        assert!(kama_final_state(&data, 0, 0).is_none());
+        assert!(kama_final_state(&data[..5], 30, 0).is_none());
         // kama_final_state leading-NaN prefix -> recurse on the finite tail (trend.rs:506).
         let mut nan_head = series(60);
         for x in nan_head.iter_mut().take(3) {
             *x = f64::NAN;
         }
         // A finite-tail KAMA state still computes; it must equal the state of the tail alone.
-        let via_head = kama_final_state(&nan_head, 10).unwrap();
-        let via_tail = kama_final_state(&nan_head[3..], 10).unwrap();
+        let via_head = kama_final_state(&nan_head, 10, 0).unwrap();
+        let via_tail = kama_final_state(&nan_head[3..], 10, 0).unwrap();
         assert_eq!(
             via_head[0].to_bits(),
             via_tail[0].to_bits(),
@@ -163,7 +163,7 @@
         assert_eq!(via_head[1].to_bits(), via_tail[1].to_bits());
 
         // kama_resume underflow: period == 0 / from <= period / from > n -> None (trend.rs:545).
-        let st = kama_final_state(&data, 10).unwrap();
+        let st = kama_final_state(&data, 10, 0).unwrap();
         assert!(kama_resume(&data, 0, 20, &st).is_none());
         assert!(kama_resume(&data, 10, 10, &st).is_none()); // from <= period
         assert!(kama_resume(&data, 10, 1000, &st).is_none()); // from > n

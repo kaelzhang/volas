@@ -200,28 +200,28 @@ pub(crate) fn series_bool(df: &DataFrame, series: &[Ast], i: usize) -> Result<Ve
 /// Infallible: every caller's matype is either a literal or a spec-validated
 /// argument (`ArgBound::IntRange(0, 8)` at the exec boundary), so a value past
 /// 8 cannot reach here.
-fn ma_typed(data: &[f64], period: usize, matype: usize, complete: bool) -> Vec<f64> {
+fn ma_typed(data: &[f64], period: usize, matype: usize, complete: bool, origin: usize) -> Vec<f64> {
     // A recursive average runs on the complete rows of its input — the input may be a
     // derived line that warms up with NaN (see `volas_compute::missing`). A recursive
     // command's own input is complete wherever its result is kept (`complete`), so it
     // is not scanned.
     if crate::spec::is_recursive_matype(matype) {
         let input = if complete { Input::known(data, false) } else { Input::new(data) };
-        return on_complete_rows(&[input], |x| ma_kernel(x[0], period, matype));
+        return on_complete_rows(&[input], |x| ma_kernel(x[0], period, matype, origin));
     }
-    ma_kernel(data, period, matype)
+    ma_kernel(data, period, matype, origin)
 }
 
 /// The moving average of `matype` over `data`.
-fn ma_kernel(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
+fn ma_kernel(data: &[f64], period: usize, matype: usize, origin: usize) -> Vec<f64> {
     match matype {
-        0 => ind::ma(data, period),
+        0 => ind::ma(data, period, origin),
         1 => ind::ema(data, period),
-        2 => ind::wma(data, period),
+        2 => ind::wma(data, period, origin),
         3 => ind::dema(data, period),
         4 => ind::tema(data, period),
-        5 => ind::trima(data, period),
-        6 => ind::kama(data, period),
+        5 => ind::trima(data, period, origin),
+        6 => ind::kama(data, period, origin),
         7 => ind::mama(data, 0.5, 0.05).0,
         8 => ind::t3(data, period, 0.7),
         other => unreachable!("matype {other} is rejected by the spec bound"), // LCOV_EXCL_LINE
@@ -234,6 +234,7 @@ fn ma_kernel(data: &[f64], period: usize, matype: usize) -> Vec<f64> {
 mod cycle;
 mod momentum;
 mod overlap;
+pub(crate) use overlap::percent_oscillator;
 
 /// The dispatch entry point: a bound command (canonical name / sub, typed args,
 /// bound series) routed to its kernel. Validation / defaulting / normalization
@@ -264,11 +265,11 @@ fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
 
 pub use crate::exec_resume::{
     execute_resume, execute_resume_default_series, execute_resume_default_series_one,
-    execute_resume_one, execute_resume_one_node, execute_resume_value, initial_state, ResumeStep,
+    execute_resume_step, initial_state,
 };
 
 /// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.
-fn tf_to_minutes(s: &str) -> Result<i64> {
+pub(crate) fn tf_to_minutes(s: &str) -> Result<i64> {
     let s = s.trim();
     let (num, unit) = s.split_at(s.len().saturating_sub(1));
     let n: i64 = num
@@ -773,11 +774,18 @@ mod tests {
         // (exec:1369). `llv` (lowest-low) has no incremental resume.
         assert!(execute_resume(&df, &p("llv:5"), &[0.0], 3, 0).is_none());
 
-        // execute_resume_value: a recursive directive without a SCALAR twin (`rsi` is
-        // served by the parse-free `execute_resume_one`, not the value dispatch) hits the
-        // scalar dispatch's `_ => None`, so the forming refresh falls back to the Vec path.
-        assert!(execute_resume_value(&df, &p("rsi:14"), &[1.0, 1.0], 5, 0).is_none());
-        // ... and so does a finite-memory one, which skips the missing-row layer.
-        assert!(execute_resume_value(&df, &p("llv:5"), &[1.0], 5, 0).is_none());
+        // execute_resume_step: a recursive directive without a single-row step
+        // (`stochrsi`), a finite-memory one (`llv`), a `macd` sub-line that is no step's,
+        // and a `next` of the wrong length all decline, so the refresh takes the Vec path.
+        let mut next = [0.0; 2];
+        assert!(execute_resume_step(&df, &p("stochrsi.k:14,14,3"), &[1.0], 5, &mut next[..1])
+            .is_none());
+        assert!(execute_resume_step(&df, &p("llv:5"), &[1.0], 5, &mut next[..1]).is_none());
+        assert!(execute_resume_step(&df, &p("rsi:14"), &[1.0, 1.0], 5, &mut next[..1]).is_none());
+        // a composite average declines a state of the wrong length, and a row past the end
+        assert!(execute_resume_step(&df, &p("apo"), &[1.0, 1.0], 5, &mut next[..2]).is_none());
+        let apo = initial_state(&df, &p("apo"), &Column::f64(vec![])).unwrap();
+        let mut n = apo.clone();
+        assert!(execute_resume_step(&df, &p("apo"), &apo, df.height(), &mut n).is_none());
     }
 }

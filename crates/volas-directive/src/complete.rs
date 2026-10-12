@@ -142,10 +142,12 @@ pub(crate) fn state(
 }
 
 /// Whether the resume `ops` just ran read every input's rows `[from - reach, end)`
-/// complete (see [`ResumeRows::in_place`]) — free for a column known complete.
+/// complete (see [`ResumeRows::in_place`]) — free for a column known complete, and with
+/// no allocation for a frame column (the live single-row refresh runs this per row).
 fn read_in_place(ops: &Operands, cmd: &BoundCommand, from: usize, end: usize) -> bool {
     let mut reach = None; // only needed for an input that must be scanned
-    recorded(ops, false).iter().all(|r| {
+    ops.reads().all(|(slot, read)| {
+        let r = Recorded { slot, values: read.view(), has_nan: read.known_has_nan() };
         r.has_nan == Some(false)
             || ResumeRows::in_place(r.input(end), from, *reach.get_or_insert_with(|| cmd.reach()))
     })
@@ -193,7 +195,7 @@ pub(crate) fn resume_one<T>(
     cmd: &BoundCommand,
     row: usize,
     missing: impl FnOnce() -> Option<T>,
-    run: impl Fn(&Operands, usize) -> Option<T>,
+    mut run: impl FnMut(&Operands, usize) -> Option<T>,
 ) -> Option<T> {
     let ops = Operands::new(df, cmd.series);
     let out = run(&ops, row);
@@ -217,7 +219,7 @@ pub(crate) fn resume_one<T>(
 
 #[cfg(test)]
 mod tests {
-    use crate::exec::{execute, execute_resume_one_node, initial_state};
+    use crate::exec::{execute, execute_resume_step, initial_state};
     use crate::parse;
     use volas_core::{Column, DataFrame};
 
@@ -282,13 +284,14 @@ mod tests {
         let head = frame(open[..n - 1].to_vec());
         let st = initial_state(&head, &node, &Column::f64(vec![])).unwrap();
         let full = frame(open.clone());
-        let step = execute_resume_one_node(&full, &node, &st, n - 1).unwrap();
+        let mut next = vec![0.0; st.len()];
+        let value = execute_resume_step(&full, &node, &st, n - 1, &mut next).unwrap();
         let want = execute(&full, &node).unwrap().to_f64_vec()[n - 1];
-        assert_eq!(step.value.to_bits(), want.to_bits());
+        assert_eq!(value.to_bits(), want.to_bits());
         let mut gap = open;
         gap[n - 1] = f64::NAN;
-        let step = execute_resume_one_node(&frame(gap), &node, &st, n - 1).unwrap();
-        assert!(step.value.is_nan());
-        assert_eq!(step.state(), &st[..]);
+        let value = execute_resume_step(&frame(gap), &node, &st, n - 1, &mut next).unwrap();
+        assert!(value.is_nan());
+        assert_eq!(next, st);
     }
 }

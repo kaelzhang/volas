@@ -10,77 +10,65 @@
 //! the available ILP, so a measured `f64x2` SIMD variant came out 1.00x — explicit
 //! SIMD buys nothing here.
 
-use crate::guard::{NonFiniteRows, RowGuard};
+use crate::accum::{Anchors, Csum};
+use crate::guard::{Order, Slide, Window};
 use ndarray::{Array1, ArrayView1};
 use std::collections::VecDeque;
 
-/// Simple moving average (a window is valid only when fully populated).
+/// Simple moving average (a window is valid only when fully populated). Row 0 is at
+/// absolute position `origin` (see [`crate::accum`]).
 ///
-/// O(n) sliding running sum: each step adds the entering value and subtracts
-/// the leaving one. A running count of in-window NaNs gates emission so the
-/// result is identical to a per-window re-sum (any NaN in a window -> NaN).
+/// O(n) sliding running sum: each step adds the entering value and subtracts the
+/// leaving one — an exact sum ([`Csum`], re-anchored at absolute positions), so each
+/// window's mean is that of its own rows however long the slide. A window holding a
+/// NaN is NaN.
 #[inline]
-pub fn sma(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
     let n = data.len();
     if period == 0 || period > n {
         return Array1::from_elem(n, f64::NAN);
     }
-    // Fast path — a clean sliding sum with no per-element NaN bookkeeping (same
-    // accumulation order, so bit-identical for NaN-free data, ~3.6x faster — the
-    // common OHLCV case). A **leading** NaN prefix is skipped (cascaded indicators —
-    // trima, stochastic smoothing — feed an SMA over a series that warms up with
-    // NaN), sliding from the first finite value. A NaN *after* that prefix poisons
-    // the running sum permanently, so one `sum.is_nan()` check after the pass catches
-    // it without a separate scan; then we discard and take the precise slow path.
+    // Fast path — a clean sliding sum with no per-element NaN bookkeeping, the common
+    // OHLCV case. A **leading** NaN prefix is skipped (cascaded indicators — trima,
+    // stochastic smoothing — feed an SMA over a series that warms up with NaN),
+    // sliding from the first finite value. A later non-finite value poisons the sum
+    // until the next anchor; that is checked at every anchor and at the end, and then
+    // the careful path takes over. On the rows it keeps, the fast path does exactly the
+    // careful slide's arithmetic ([`sma_row`]), so the two agree bit for bit.
     //
     // The result is built write-once: the warm-up is filled with NaN, then each mean is
-    // pushed in the same accumulation order — so the valid region is written once
-    // instead of `from_elem(NaN)` + index-overwrite (which writes it twice).
+    // pushed — so the valid region is written once.
     if let Some(src) = data.as_slice() {
         let start = src.iter().position(|x| !x.is_nan()).unwrap_or(n);
         let valid_start = (start + period - 1).min(n);
         let mut out = Vec::with_capacity(n); // reserve the full length so push never reallocs
         out.resize(valid_start, f64::NAN);
-        let mut sum = 0.0;
+        let pf = period as f64;
+        let mut sum = Csum::default();
+        let mut anchors = Anchors::from(origin + start, period);
+        let mut clean = true;
         for i in start..n {
-            sum += src[i];
+            sum.add(src[i]);
             if i >= start + period {
-                sum -= src[i - period];
+                sum.sub(src[i - period]);
+            }
+            if anchors.tick() && i + 1 >= period {
+                clean &= sum.value().is_finite();
+                sum = Csum::of(src[(i + 1 - period).max(start)..=i].iter().copied());
             }
             if i + 1 >= start + period {
-                out.push(sum / period as f64);
+                out.push(sum.mean(pf));
             }
         }
-        if sum.is_finite() {
+        if clean && sum.value().is_finite() {
             return Array1::from_vec(out);
         }
     }
     // Careful path — window-local (see [`crate::guard`]): the running sum holds only
     // finite rows; a window holding a non-finite row takes its own mean directly
     // (NaN for a NaN, ±inf for an infinity), so a bad row never outlives its window.
-    let mut result = Array1::from_elem(n, f64::NAN);
-    let mut guard = NonFiniteRows::default();
-    let mut sum = 0.0;
-    for i in 0..n {
-        let x = data[i];
-        if guard.enter(x.is_finite()) {
-            sum += x;
-        }
-        if i >= period {
-            let leaving = data[i - period];
-            if guard.leave(leaving.is_finite()) {
-                sum -= leaving;
-            }
-        }
-        if i + 1 >= period {
-            result[i] = if guard.clean() {
-                sum / period as f64
-            } else {
-                (i + 1 - period..=i).map(|j| data[j]).sum::<f64>() / period as f64
-            };
-        }
-    }
-    result
+    let mut slide = Slide::<1>::at(origin);
+    (0..n).map(|i| sma_row(&mut slide, period, i, |j| data[j])).collect()
 }
 
 /// SMA-seeded recursive smoother — the shape TA-Lib uses for EMA / Wilder. The
@@ -530,6 +518,70 @@ pub fn rolling_max(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     result
 }
 
+/// One row of [`sma`] over the series `term`, resumed from `slide` (rows `0..i` slid):
+/// the careful slide, which the fast loop follows on clean windows — so a full [`sma`]
+/// and a resume of this one row at a time agree bit for bit.
+#[inline]
+pub(crate) fn sma_row(
+    slide: &mut Slide<1>,
+    period: usize,
+    i: usize,
+    term: impl Fn(usize) -> f64,
+) -> f64 {
+    match slide.row(Order::AddDrop, period, i, |j| {
+        let x = term(j);
+        ([x], x.is_finite())
+    }) {
+        Window::Partial => f64::NAN,
+        Window::Sums([sum]) => sum.mean(period as f64),
+        Window::Bad => (i + 1 - period..=i).map(&term).sum::<f64>() / period as f64,
+    }
+}
+
+/// The length of [`sma`]'s resumable state: the [`Slide`] of the sum.
+pub(crate) const SMA_STATE: usize = Slide::<1>::STATE;
+
+/// One row of [`sma`] over `term` from `state`, writing the state as of `row` into `next`.
+#[inline]
+pub(crate) fn sma_step(
+    period: usize,
+    row: usize,
+    term: impl Fn(usize) -> f64,
+    state: &[f64],
+    next: &mut [f64],
+) -> Option<f64> {
+    if period == 0 || next.len() != SMA_STATE {
+        return None;
+    }
+    let mut slide = Slide::<1>::from_state(state)?;
+    let value = sma_row(&mut slide, period, row, term);
+    slide.write_state(next);
+    Some(value)
+}
+
+/// The window statistics of [`rolling_mean_std`] at row `i` of `data`, resumed from
+/// `slide` (`[Σx, Σx²]` over the window's finite rows): `(mean, std)`.
+#[inline]
+pub(crate) fn mean_std_row(
+    slide: &mut Slide<2>,
+    period: usize,
+    ddof: usize,
+    i: usize,
+    term: impl Fn(usize) -> f64,
+) -> (f64, f64) {
+    let p = period as f64;
+    let denom = (period - ddof) as f64;
+    match slide.row(Order::AddDrop, period, i, |j| {
+        let x = term(j);
+        ([x, x * x], x.is_finite())
+    }) {
+        Window::Partial => (f64::NAN, f64::NAN),
+        Window::Sums([sum, sum_sq]) => dispersion::mean_std_of_sums(&sum, &sum_sq, p, denom),
+        Window::Bad => dispersion::window_mean_std_of(i + 1 - period..=i, &term, p, denom),
+    }
+}
+
+
 mod dispersion;
 pub use dispersion::*;
 
@@ -568,7 +620,7 @@ mod tests {
     #[test]
     fn test_sma() {
         let data = array![1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = sma(data.view(), 3);
+        let result = sma(data.view(), 3, 0);
         assert!(result[0].is_nan());
         assert!(result[1].is_nan());
         assert!((result[2] - 2.0).abs() < 1e-10);
@@ -579,7 +631,7 @@ mod tests {
     #[test]
     fn test_sma_with_nan() {
         let data = array![f64::NAN, f64::NAN, 1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = sma(data.view(), 3);
+        let result = sma(data.view(), 3, 0);
         assert!(result[3].is_nan());
         assert!((result[4] - 2.0).abs() < 1e-10);
         assert!((result[6] - 4.0).abs() < 1e-10);
@@ -607,15 +659,15 @@ mod tests {
     #[test]
     fn empty_input_and_invalid_periods_return_nan() {
         let empty = Array1::<f64>::zeros(0);
-        assert_eq!(sma(empty.view(), 3).len(), 0);
+        assert_eq!(sma(empty.view(), 3, 0).len(), 0);
         assert_eq!(ewma_with_init(empty.view(), 3, 0.0).len(), 0);
 
         let d = array![1.0, 2.0];
         assert!(rolling_min(d.view(), 5).iter().all(|x| x.is_nan())); // period > n
         assert!(rolling_max(d.view(), 5).iter().all(|x| x.is_nan()));
-        assert!(rolling_std(d.view(), 5, 1).iter().all(|x| x.is_nan()));
+        assert!(rolling_std(d.view(), 5, 1, 0).iter().all(|x| x.is_nan()));
         assert!(rolling_min(d.view(), 0).iter().all(|x| x.is_nan())); // period == 0
-        assert!(rolling_std(d.view(), 2, 2).iter().all(|x| x.is_nan())); // ddof >= period
+        assert!(rolling_std(d.view(), 2, 2, 0).iter().all(|x| x.is_nan())); // ddof >= period
     }
 
     // --- O(n) rewrite safety net -------------------------------------------
@@ -713,7 +765,7 @@ mod tests {
         d[7] = f64::NAN;
         d[123] = f64::NAN; // interior NaNs that slide through windows
         for p in [1usize, 2, 5, 20, 50] {
-            approx_eq_nan(&sma(av(&d), p).to_vec(), &naive_sma(&d, p), 1e-9);
+            approx_eq_nan(&sma(av(&d), p, 0).to_vec(), &naive_sma(&d, p), 1e-9);
         }
     }
 
@@ -724,7 +776,7 @@ mod tests {
         for p in [2usize, 5, 20] {
             for ddof in [0usize, 1] {
                 approx_eq_nan(
-                    &rolling_std(av(&d), p, ddof).to_vec(),
+                    &rolling_std(av(&d), p, ddof, 0).to_vec(),
                     &naive_std(&d, p, ddof),
                     1e-7,
                 );
@@ -779,7 +831,7 @@ mod tests {
     fn kernel_edge_and_dual_paths() {
         // sma: a NaN *after* a finite prefix poisons the fast running sum, forcing
         // the precise slow path.
-        let s = sma(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2).to_vec();
+        let s = sma(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2, 0).to_vec();
         assert_eq!(s[1], 1.5);
         assert!(s[2].is_nan() && s[3].is_nan());
         assert_eq!(s[4], 4.5);
@@ -816,12 +868,12 @@ mod tests {
         assert!(rolling_max(av(&[1.0]), 5).iter().all(|x| x.is_nan()));
 
         // rolling_std: NaN-free fast path (its only caller `hv` feeds NaN).
-        let std = rolling_std(av(&[1.0, 2.0, 3.0, 4.0, 5.0]), 3, 1).to_vec();
+        let std = rolling_std(av(&[1.0, 2.0, 3.0, 4.0, 5.0]), 3, 1, 0).to_vec();
         assert!(std[0].is_nan() && std[1].is_nan());
         assert!((std[2] - 1.0).abs() < 1e-12);
 
         // rolling_mean_std: interior-NaN slow path (its callers feed clean closes).
-        let (m, sd) = rolling_mean_std(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2, 0);
+        let (m, sd) = rolling_mean_std(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2, 0, 0);
         assert_eq!(m[1], 1.5);
         assert!(m[2].is_nan() && sd[2].is_nan());
 
@@ -830,11 +882,11 @@ mod tests {
         let arr = ndarray::Array1::from(vec![1.0, 9.0, 2.0, 8.0, 3.0, 7.0, 4.0, 6.0]);
         let strided = arr.slice(ndarray::s![..;2]); // [1, 2, 3, 4], stride 2
         assert!(!strided.is_standard_layout() || strided.as_slice().is_none());
-        let _ = sma(strided, 2);
+        let _ = sma(strided, 2, 0);
         let _ = rolling_min(strided, 2);
         let _ = rolling_max(strided, 2);
-        let _ = rolling_std(strided, 2, 1);
-        let _ = rolling_mean_std(strided, 2, 0);
+        let _ = rolling_std(strided, 2, 1, 0);
+        let _ = rolling_mean_std(strided, 2, 0, 0);
 
         // The naive reference helpers' own degenerate-period guards.
         assert!(naive_sma(&[1.0], 0).iter().all(|x| x.is_nan()));
@@ -846,9 +898,9 @@ mod tests {
     fn rolling_std_recovers_after_an_infinity_leaves() {
         // Finite but for one +inf: the fast path must not trust a NaN-free input.
         let mut d: Vec<f64> = (0..12).map(|i| (i as f64 * 0.7).sin()).collect();
-        let clean = rolling_std(av(&d), 3, 1).to_vec();
+        let clean = rolling_std(av(&d), 3, 1, 0).to_vec();
         d[4] = f64::INFINITY;
-        let got = rolling_std(av(&d), 3, 1).to_vec();
+        let got = rolling_std(av(&d), 3, 1, 0).to_vec();
         assert!(got[4..7].iter().all(|v| v.is_nan()));
         for i in 7..12 {
             assert!((got[i] - clean[i]).abs() < 1e-12, "row {i}: {} vs {}", got[i], clean[i]);

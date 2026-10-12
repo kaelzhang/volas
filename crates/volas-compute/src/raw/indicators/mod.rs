@@ -17,6 +17,13 @@ pub(crate) fn av(s: &[f64]) -> ArrayView1<'_, f64> {
     ArrayView1::from(s)
 }
 
+/// Whether every input has the same length — the shape a multi-input kernel that reads
+/// its inputs unchecked requires; such a kernel gives an empty result otherwise.
+#[inline]
+pub(crate) fn same_len(inputs: &[&[f64]]) -> bool {
+    inputs.windows(2).all(|w| w[0].len() == w[1].len())
+}
+
 mod bands;
 mod candles;
 mod directional;
@@ -115,7 +122,7 @@ mod tests {
 
     #[test]
     fn ma_basic() {
-        let r = ma(&[1.0, 2.0, 3.0, 4.0, 5.0], 3);
+        let r = ma(&[1.0, 2.0, 3.0, 4.0, 5.0], 3, 0);
         assert!(r[0].is_nan() && r[1].is_nan());
         assert!((r[2] - 2.0).abs() < 1e-10);
         assert!((r[4] - 4.0).abs() < 1e-10);
@@ -179,23 +186,23 @@ mod tests {
         // willr flat range; bop no range; cci zero deviation; mfi zero/again-flat flow.
         assert!(willr(&f, &f, &f, 14).contains(&0.0));
         assert!(bop(&f, &f, &f, &f).iter().all(|x| *x == 0.0));
-        assert!(cci(&f, &f, &f, 14).contains(&0.0));
-        assert!(mfi(&f, &f, &f, &vol, 14).contains(&0.0));
+        assert!(cci(&f, &f, &f, 14, 0).contains(&0.0));
+        assert!(mfi(&f, &f, &f, &vol, 14, 0).contains(&0.0));
         // directional: smoothed TR is 0, so +DI / −DI / DX are 0.
         assert!(plus_di(&f, &f, &f, 14).contains(&0.0));
         assert!(minus_di(&f, &f, &f, 14).contains(&0.0));
         assert!(dx(&f, &f, &f, 14).contains(&0.0));
         // statistics: zero variance / zero regression denominator.
-        assert!(stddev(&f, 5, 1.0).contains(&0.0));
-        assert!(correl(&f, &f, 30).contains(&0.0));
-        assert!(beta(&f, &f, 5).contains(&0.0));
+        assert!(stddev(&f, 5, 1.0, 0).contains(&0.0));
+        assert!(correl(&f, &f, 30, 0).contains(&0.0));
+        assert!(beta(&f, &f, 5, 0).contains(&0.0));
         // oscillators: flat stochastic range; CMO's flat-window guard; volume: zero
         // money-flow multiplier.
         assert!(stoch_fastk(&f, &f, &f, 14).contains(&0.0));
         assert!(cmo(&f, 14).contains(&0.0));
         assert!(ad(&f, &f, &f, &vol).contains(&0.0));
         // kama efficiency ratio defaults to 1.0 when there is no net change.
-        assert_eq!(kama(&f, 30).len(), N);
+        assert_eq!(kama(&f, 30, 0).len(), N);
 
         // cmo skips NaN deltas (the shared gains/losses helper's `continue`).
         assert_eq!(cmo(&[100.0, f64::NAN, 102.0, 103.0, 104.0], 2).len(), 5);
@@ -209,15 +216,15 @@ mod tests {
         // roc / beta: a zero prior price yields a 0 result (the divide-by-zero guard).
         let z = [0.0, 0.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0];
         assert_eq!(roc(&z, 2)[2], 0.0);
-        assert!(beta(&z, &f[..z.len()], 5).contains(&0.0));
+        assert!(beta(&z, &f[..z.len()], 5, 0).contains(&0.0));
 
         // accbands: high + low == 0 falls back to the bare high / low edge.
         let pos = vec![5.0; N];
         let neg = vec![-5.0; N];
-        assert!(accbands_upper(&pos, &neg, 20)
+        assert!(accbands_upper(&pos, &neg, 20, 0)
             .iter()
             .any(|x| (*x - 5.0).abs() < 1e-9));
-        assert!(accbands_lower(&pos, &neg, 20)
+        assert!(accbands_lower(&pos, &neg, 20, 0)
             .iter()
             .any(|x| (*x + 5.0).abs() < 1e-9));
 
@@ -259,10 +266,10 @@ mod tests {
         assert!(roc(&[1.0, 2.0], 5).iter().all(|x| x.is_nan()));
         assert!(rocp(&[1.0, 2.0], 5).iter().all(|x| x.is_nan()));
         assert_eq!(rocr(&[0.0, 2.0], 1)[1], 0.0);
-        assert!(imi(&[1.0, 2.0], &[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
+        assert!(imi(&[1.0, 2.0], &[1.0, 2.0], 0, 0).iter().all(|x| x.is_nan()));
         assert!(aroon_up(&[1.0], &[1.0], 0).iter().all(|x| x.is_nan())); // period == 0
         let f = vec![100.0; 5];
-        assert!(ultosc(&f, &f, &f, 0, 14, 28).iter().all(|x| x.is_nan())); // p1 == 0
+        assert!(ultosc(&f, &f, &f, 0, 14, 28, 0).iter().all(|x| x.is_nan())); // p1 == 0
         assert!(adx(&f, &f, &f, 14).iter().all(|x| x.is_nan())); // 2*period-1 >= n
         assert!(t3(&f, 10, 0.7).iter().all(|x| x.is_nan())); // 6*(period-1) >= n
     }

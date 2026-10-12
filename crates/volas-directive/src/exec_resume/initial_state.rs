@@ -24,7 +24,8 @@ pub fn initial_state(df: &DataFrame, node: &Ast, _computed: &Column) -> Option<V
     if crate::spec::is_recursive(name, &args) {
         return crate::complete::state(df, series, |ops| state_of(ops, name, sub, &args));
     }
-    state_of(&Operands::new(df, series), name, sub, &args)
+    let ops = Operands::new(df, series);
+    super::window::state(&ops, name, sub, &args).or_else(|| state_of(&ops, name, sub, &args))
 }
 
 /// The final state of the bound command `name`/`sub` over every row `ops` reads.
@@ -86,7 +87,7 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
         ("mass_index", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
-            ind::mass_index_final_state(&high, &low, arg_usize(args, 0))
+            ind::mass_index_final_state(&high, &low, arg_usize(args, 0), ops.origin())
         }
 
         // Keltner Channels (Group B): the middle line reuses the EMA state; the bands carry
@@ -194,6 +195,7 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
         ("kama", _) => ind::kama_final_state(
             &ops.f64(0, "close").ok()?,
             arg_usize(args, 0),
+            ops.origin(),
         ),
 
         ("macd", None) => ind::macd_final_state(
@@ -300,15 +302,17 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
         ),
 
         // Index family — carry the incremental tracker's final running extreme
-        // `[idx_abs, value]`. Captured at first compute, where `origin == 0`, so the
-        // stored index is original-absolute (stable across a later slice).
+        // `[idx_abs, value]`, its index absolute (the frame's origin added), so stable
+        // across a later slice.
         ("maxindex", _) | ("minmaxindex", Some("max")) => ind::maxindex_final_state(
             &ops.f64(0, "close").ok()?,
             arg_usize(args, 0),
+            ops.origin(),
         ),
         ("minindex", _) | ("minmaxindex", Some("min")) => ind::minindex_final_state(
             &ops.f64(0, "close").ok()?,
             arg_usize(args, 0),
+            ops.origin(),
         ),
 
         // StochRSI — carry the RSI Wilder pair + the recent RSI tail feeding the windows.
@@ -324,6 +328,7 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
                 arg_usize(args, 1),
                 is_d,
                 arg_usize(args, 2),
+                ops.origin(),
             )
         }
 

@@ -21,7 +21,7 @@ mod matrix;
 use std::collections::{BTreeMap, BTreeSet};
 
 use volas_core::{Column, DataFrame};
-use volas_directive::exec::{execute, execute_resume, execute_resume_value, initial_state};
+use volas_directive::exec::{execute, execute_resume, execute_resume_step, initial_state};
 use volas_directive::lookback::lookback;
 use volas_directive::parse;
 use volas_directive::types::Ast;
@@ -30,25 +30,7 @@ const ROWS: usize = 90;
 
 /// `(line head, data class)` pairs whose resume is known to differ from the full
 /// compute (open defects); `*` matches any class.
-const KNOWN_DIVERGENT: &[(&str, &str)] = &[
-    // A state captured inside the warm-up (a head shorter than the lookback) resumes
-    // with values where the full compute is still NaN.
-    ("adosc", "*"),
-    ("ht_dcperiod", "*"),
-    ("ht_dcphase", "*"),
-    ("ht_phasor", "*"),
-    ("ht_phasor.quadrature", "*"),
-    ("ht_sine", "*"),
-    ("ht_sine.leadsine", "*"),
-    ("ht_trendline", "*"),
-    ("ht_trendmode", "*"),
-    ("mama", "*"),
-    ("mama.fama", "*"),
-    // Last-ULP drift between the resume and the full kernel.
-    ("stochrsi.d", "*"),
-    // The resume divides by a zero prior where the full kernel yields 0.
-    ("trix", "zero"),
-];
+const KNOWN_DIVERGENT: &[(&str, &str)] = &[];
 
 fn values(col: &Column) -> Vec<f64> {
     match col.as_bool() {
@@ -133,7 +115,8 @@ fn forming(df: &DataFrame, node: &Ast, from: usize) -> Vec<String> {
                 fails.push(format!("forming x{bump} at {from}: vec {d}"));
             }
         }
-        if let Some(v) = execute_resume_value(&frame, node, &anchor, from, 0) {
+        let mut next = vec![0.0; anchor.len()];
+        if let Some(v) = execute_resume_step(&frame, node, &anchor, from, &mut next) {
             if !same(v, want[from]) {
                 fails.push(format!("forming x{bump} at {from}: scalar {v:?} != {:?}", want[from]));
             }
