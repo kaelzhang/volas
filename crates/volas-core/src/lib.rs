@@ -23,7 +23,7 @@ pub use strbuf::{StrBuffer, StrBufferBuilder};
 pub use column::{BinOp, BoolOp, CmpOp, Column, CombineOp, Scalar};
 pub use numeric::{binary_supertype, fits, Numeric};
 pub use validity::{Bitmap, Validity};
-pub use dataframe::{DataFrame, Reach, Retained, StaleComputed};
+pub use dataframe::{Checkpoint, DataFrame, History, Reach, Retained, StaleComputed};
 pub use dtype::DType;
 pub use error::{Result, VolasError};
 pub use index::{Index, IndexKind, Label, SliceBound};

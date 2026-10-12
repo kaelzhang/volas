@@ -231,11 +231,6 @@ pub fn stochrsi_resume(
     let mut buf = Vec::with_capacity(c + new_rsi.len());
     buf.extend_from_slice(&state[head..]); // rsi[from-c .. from)
     buf.extend_from_slice(&new_rsi); // rsi[from .. n)
-                                     // Every buffered RSI must be finite for the van-Herk %K (the warm guard above ensures
-                                     // `from - c >= rsi_period`, so it is) — bail out defensively otherwise.
-    if buf.iter().any(|x| x.is_nan()) {
-        return None;
-    }
     // Windowed stochastic %K of the RSI buffer (RSI as high=low=close, matching
     // `stochrsi_fastk`). Buffer index `p` is original row `from - c + p`.
     let fk = stoch_fastk(&buf, &buf, &buf, fastk_period);
@@ -686,6 +681,9 @@ pub fn cog_step(close: &[f64], period: usize, row: usize, state: &[f64], next: &
         return None;
     }
     let mut st = <[f64; COG_STATE]>::try_from(state).ok()?;
+    if !crate::guard::holds_window(row, st[5] as usize, period) {
+        return None;
+    }
     let value = cog_row(close, period, row, &mut st);
     next.copy_from_slice(&st);
     Some(value)
@@ -839,7 +837,8 @@ mod tests {
 
     /// StochRSI guards: a too-short close (RSI never accrues `C+1` finite rows) declines
     /// the final state; a bad state length / `from` declines the resume; and an embedded
-    /// NaN in the close keeps an RSI row NaN, tripping the resume's NaN-in-buffer bail-out.
+    /// NaN in the close keeps the resumed RSI rows NaN — the resume carries on exactly as
+    /// the full computation does (each window holding a NaN RSI is NaN).
     #[test]
     fn stochrsi_guards_decline() {
         let (rp, fk, fd) = (14usize, 14usize, 3usize);
@@ -855,13 +854,15 @@ mod tests {
         assert!(stochrsi_resume(&close, rp, fk, false, fd, 120, &bad).is_none());
         assert!(stochrsi_resume(&close, rp, fk, false, fd, 0, &st).is_none()); // from == 0
 
-        // NaN-in-buffer -> resume declines (oscillators.rs:170). Embed a NaN late in the
-        // close so a resumed RSI row stays NaN; the carried context is still finite (the
-        // length/warm guards pass) but the freshly-resumed RSI tail carries the NaN.
+        // A NaN late in the close poisons the raw RSI from row 150 on: the resumed tail
+        // equals the full computation's, NaN windows included.
         let mut nanclose = series(200);
-        nanclose[150] = f64::NAN; // poisons RSI from row 150 onward
+        nanclose[150] = f64::NAN;
         let st = stochrsi_final_state(&nanclose[..140], rp, fk, false, fd, 0).unwrap();
-        assert!(stochrsi_resume(&nanclose, rp, fk, false, fd, 140, &st).is_none());
+        let (tail, _) = stochrsi_resume(&nanclose, rp, fk, false, fd, 140, &st).unwrap();
+        let full = stochrsi_fastk(&nanclose, rp, fk);
+        assert!(tail.iter().zip(&full[140..]).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(tail[10..].iter().all(|v| v.is_nan()));
     }
 
 

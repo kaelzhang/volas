@@ -213,7 +213,9 @@ two-row frame is a length error, never a broadcast). A boolean-frame mask
 (`df[mask] = v`) pairs with the columns by **name** and must carry the frame's index.
 Every cell write (`iloc` / `loc` / `iat` / `at`, `df[mask] = v`) lands in place and,
 like a bulk read, raises while a cached directive column is stale; a mask that selects
-no row changes nothing.
+no row changes nothing. On a bounded (`window=`) frame a whole-column assignment writes
+the visible rows only and keeps the hidden margin's history (see
+[Bounded rolling window](dataframe-api.md#bounded-rolling-window)).
 
 ```py
 df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)

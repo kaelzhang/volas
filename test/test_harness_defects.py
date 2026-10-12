@@ -128,7 +128,7 @@ def test_a_windowed_source_contributes_only_its_visible_rows():
 
 def test_a_stale_windowed_frame_rejects_a_bulk_read():
     cols = _walk(40)
-    df = volas.DataFrame({k: v[:30] for k, v in cols.items()}, window=1, max_lookback=19)
+    df = volas.DataFrame({k: v[:30] for k, v in cols.items()}, window=1, max_lookback=['accbands'])
     df['accbands']
     df.append(_frame(cols, 30, 31))
     with pytest.raises(ValueError, match='stale'):
@@ -281,7 +281,6 @@ def test_an_all_nan_period_folds_to_nan():
     assert np.isnan(df.get_column('low').to_numpy()[0])
 
 
-@_xfail('M5 windowed-drift', 'a windowed recursive column is not bit-exact with the unbounded frame')
 def test_a_windowed_recursive_column_is_bit_exact():
     rng = np.random.default_rng(1)
     c = 100 + np.cumsum(rng.standard_normal(200))

@@ -52,7 +52,7 @@ fn resume_matches_full(df: &DataFrame, directive: &str, from: usize) {
     let computed = execute(&head, &node).unwrap();
     let state = initial_state(&head, &node, &computed)
         .unwrap_or_else(|| panic!("no initial state for {directive}"));
-    let (tail, _) = execute_resume(df, &node, &state, from, 0)
+    let (tail, _) = execute_resume(df, &node, &state, from, df.height(), 0)
         .unwrap_or_else(|| panic!("no resume for {directive}"));
     let full = execute(df, &node).unwrap().to_f64_vec();
     assert_f64_same(&tail.to_f64_vec(), &full[from..]);
@@ -282,8 +282,8 @@ fn resume_decline_paths_cover_question_mark_branches() {
     let p = |directive: &str| parse(directive).unwrap();
     let empty: &[f64] = &[];
 
-    assert!(execute_resume(&df, &p("tr"), empty, 0, 0).is_some());
-    assert!(execute_resume(&df, &p("mom:30"), empty, 0, 0).is_some());
+    assert!(execute_resume(&df, &p("tr"), empty, 0, df.height(), 0).is_some());
+    assert!(execute_resume(&df, &p("mom:30"), empty, 0, df.height(), 0).is_some());
 
     for directive in [
         "kama:30",
@@ -304,7 +304,7 @@ fn resume_decline_paths_cover_question_mark_branches() {
         "supertrend:10,3",
     ] {
         assert!(
-            execute_resume(&df, &p(directive), &[0.0; 8], 0, 0).is_none(),
+            execute_resume(&df, &p(directive), &[0.0; 8], 0, df.height(), 0).is_none(),
             "{directive}"
         );
     }
