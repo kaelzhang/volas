@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
+use volas_core::datetime::Rounding;
 use volas_core::{datetime, Column, DataFrame, Series, Tz, Validity};
 
 use crate::frame::PyDataFrame;
@@ -81,14 +82,17 @@ impl PyDt {
         self.wrap(Column::str_with(out, validity))
     }
 
-    /// A datetime column; a NaT cell stays NaT.
-    fn map_ns(&self, f: impl Fn(&PyTimestamp) -> i64) -> PySeries {
+    /// A datetime column rounded on the `unit_ns` grid (the scalar kernel); a NaT
+    /// cell stays NaT, an element whose result leaves the instant range raises.
+    fn rounded(&self, unit_ns: i64, mode: Rounding) -> PyResult<PySeries> {
         let out = self
             .ns()
             .iter()
-            .map(|&ns| if ns == i64::MIN { i64::MIN } else { f(&Self::ts(ns)) })
-            .collect();
-        self.wrap(Column::datetime(out))
+            .map(|&ns| {
+                if ns == datetime::NAT { Ok(ns) } else { Self::ts(ns).rounded_ns(unit_ns, mode) }
+            })
+            .collect::<PyResult<Vec<i64>>>()?;
+        Ok(self.wrap(Column::datetime(out)))
     }
 }
 
@@ -243,38 +247,22 @@ impl PyDt {
 
     /// Midnight of each element's day (pandas ``.dt.normalize()``); datetime,
     /// NaT stays NaT.
-    fn normalize(&self) -> PySeries {
-        self.map_ns(|t| t.wall_floor(86_400_000_000_000))
+    fn normalize(&self) -> PyResult<PySeries> {
+        self.rounded(86_400_000_000_000, Rounding::Floor)
     }
     /// Floor each element to a frequency boundary (``'D' 'h' '15min' …``,
     /// pandas ``.dt.floor``).
     fn floor(&self, freq: &str) -> PyResult<PySeries> {
-        let unit = crate::scalar::parse_freq_ns(freq)?;
-        Ok(self.map_ns(|t| t.wall_floor(unit)))
+        self.rounded(crate::scalar::parse_freq_ns(freq)?, Rounding::Floor)
     }
     /// Ceil each element to a frequency boundary (see ``floor``).
     fn ceil(&self, freq: &str) -> PyResult<PySeries> {
-        let unit = crate::scalar::parse_freq_ns(freq)?;
-        Ok(self.map_ns(|t| {
-            let f = t.wall_floor(unit);
-            if f == t.ns { f } else { f + unit }
-        }))
+        self.rounded(crate::scalar::parse_freq_ns(freq)?, Rounding::Ceil)
     }
     /// Round each element to the nearest frequency boundary, ties to even
     /// (pandas ``.dt.round``).
     fn round(&self, freq: &str) -> PyResult<PySeries> {
-        let unit = crate::scalar::parse_freq_ns(freq)?;
-        Ok(self.map_ns(|t| {
-            let f = t.wall_floor(unit);
-            let rem = t.ns - f;
-            // round half to even: past the midpoint, or exactly on it with an odd
-            // floor multiple (so rounding up lands on the even one).
-            if rem * 2 > unit || (rem * 2 == unit && (f / unit) % 2 != 0) {
-                f + unit
-            } else {
-                f
-            }
-        }))
+        self.rounded(crate::scalar::parse_freq_ns(freq)?, Rounding::HalfEven)
     }
 
     /// The ISO calendar as a DataFrame with ``year`` / ``week`` / ``day``

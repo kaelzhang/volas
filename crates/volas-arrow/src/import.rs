@@ -10,7 +10,7 @@ use arrow_array::types::{
 };
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{ArrowError, DataType, TimeUnit};
-use volas_core::{Buffer, Column, StrBuffer, Validity};
+use volas_core::{datetime, Buffer, Column, StrBuffer, Validity};
 
 use crate::{borrow_primitive, validity_of};
 
@@ -115,38 +115,18 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
             ))
         }
         // Plain dates land on the ns datetime grid (start-of-day). Date32 = days,
-        // Date64 = milliseconds; out-of-range → NaT.
+        // Date64 = milliseconds; a date outside the instant range raises.
         DataType::Date32 => {
             let a = src.as_primitive::<Date32Type>();
-            Column::Datetime(Buffer::from_vec(
-                (0..len)
-                    .map(|i| {
-                        if a.is_null(i) {
-                            i64::MIN
-                        } else {
-                            (a.value(i) as i64).checked_mul(86_400_000_000_000).unwrap_or(i64::MIN)
-                        }
-                    })
-                    .collect(),
-            ))
+            rescaled(len, |i| (!a.is_null(i)).then(|| a.value(i) as i64), "D")?
         }
         DataType::Date64 => {
             let a = src.as_primitive::<Date64Type>();
-            Column::Datetime(Buffer::from_vec(
-                (0..len)
-                    .map(|i| {
-                        if a.is_null(i) {
-                            i64::MIN
-                        } else {
-                            a.value(i).checked_mul(1_000_000).unwrap_or(i64::MIN)
-                        }
-                    })
-                    .collect(),
-            ))
+            rescaled(len, |i| (!a.is_null(i)).then(|| a.value(i)), "ms")?
         }
-        // Datetimes land on volas's nanosecond grid; `null` → the `i64::MIN` NaT
-        // sentinel. The ns case is borrowed when dense; coarser units rescale (a copy).
-        DataType::Timestamp(unit, _) => datetime_from_timestamp(src, *unit, len),
+        // Datetimes land on volas's nanosecond grid; `null` → the NaT sentinel. The
+        // ns case is borrowed when dense; coarser units rescale (a copy).
+        DataType::Timestamp(unit, _) => datetime_from_timestamp(src, *unit, len)?,
         // Categorical (dictionary-encoded) data — common for parquet string columns
         // (symbols, venues, sides). Decode to its dense value type and re-import (→ Str /
         // I64 / …); a null key stays NA.
@@ -219,47 +199,51 @@ fn copy_strings(
     Ok(Column::Str(sb, validity))
 }
 
-/// Timestamp → `Datetime` (ns). Borrows the buffer for a dense nanosecond array;
-/// otherwise rescales / fills the NaT sentinel into a fresh buffer.
-fn datetime_from_timestamp(src: &ArrayRef, unit: TimeUnit, len: usize) -> Column {
-    let scale = match unit {
-        TimeUnit::Nanosecond => 1,
-        TimeUnit::Microsecond => 1_000,
-        TimeUnit::Millisecond => 1_000_000,
-        TimeUnit::Second => 1_000_000_000,
-    };
+/// A `Datetime` column from `len` raw values in `unit` (`None` = an Arrow null →
+/// NaT). Every present value passes the instant gate: a value outside the
+/// datetime64[ns] range — or one landing on the NaT sentinel — is an import
+/// error, never a silently missing cell.
+fn rescaled(
+    len: usize,
+    value: impl Fn(usize) -> Option<i64>,
+    unit: &str,
+) -> Result<Column, ArrowError> {
+    (0..len)
+        .map(|i| match value(i) {
+            None => Ok(datetime::NAT),
+            Some(v) => datetime::datetime64_to_ns(v, unit, 1),
+        })
+        .collect::<volas_core::Result<Vec<i64>>>()
+        .map(|v| Column::Datetime(Buffer::from_vec(v)))
+        .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))
+}
+
+/// Timestamp → `Datetime` (ns). Borrows the buffer for a dense nanosecond array
+/// (after checking no value collides with the NaT sentinel); otherwise rescales /
+/// fills the sentinel into a fresh buffer through [`rescaled`].
+fn datetime_from_timestamp(
+    src: &ArrayRef,
+    unit: TimeUnit,
+    len: usize,
+) -> Result<Column, ArrowError> {
     macro_rules! filled {
-        ($ty:ty) => {{
+        ($ty:ty, $unit:literal) => {{
             let a = src.as_primitive::<$ty>();
-            Buffer::from_vec(
-                (0..len)
-                    .map(|i| {
-                        // overflow (a coarse-unit instant outside the ns-representable
-                        // range) collapses to the NaT sentinel rather than panicking /
-                        // wrapping.
-                        if a.is_null(i) {
-                            i64::MIN
-                        } else {
-                            a.value(i).checked_mul(scale).unwrap_or(i64::MIN)
-                        }
-                    })
-                    .collect(),
-            )
+            rescaled(len, |i| (!a.is_null(i)).then(|| a.value(i)), $unit)
         }};
     }
-    let buf = match unit {
+    match unit {
         TimeUnit::Nanosecond => {
             let a = src.as_primitive::<TimestampNanosecondType>();
             match a.nulls() {
-                None => return Column::Datetime(borrow_primitive(a.values(), src)),
-                Some(_) => Buffer::from_vec(
-                    (0..len).map(|i| if a.is_null(i) { i64::MIN } else { a.value(i) }).collect(),
-                ),
+                None if !a.values().contains(&datetime::NAT) => {
+                    Ok(Column::Datetime(borrow_primitive(a.values(), src)))
+                }
+                _ => filled!(TimestampNanosecondType, "ns"),
             }
         }
-        TimeUnit::Microsecond => filled!(TimestampMicrosecondType),
-        TimeUnit::Millisecond => filled!(TimestampMillisecondType),
-        TimeUnit::Second => filled!(TimestampSecondType),
-    };
-    Column::Datetime(buf)
+        TimeUnit::Microsecond => filled!(TimestampMicrosecondType, "us"),
+        TimeUnit::Millisecond => filled!(TimestampMillisecondType, "ms"),
+        TimeUnit::Second => filled!(TimestampSecondType, "s"),
+    }
 }

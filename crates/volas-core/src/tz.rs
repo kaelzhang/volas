@@ -78,57 +78,90 @@ impl Tz {
     /// Wall-clock civil parts `(year, month, day, hour, minute, second)` of a UTC
     /// instant `ns` as seen in this timezone.
     pub fn civil_parts(&self, ns: i64) -> (i64, i64, i64, i64, i64, i64) {
+        parts(self.wall(ns))
+    }
+
+    /// The wall clock of the UTC instant `ns` in this timezone. The offset is
+    /// applied in chrono's civil range (far wider than the instant axis), so an
+    /// instant at either end of the axis never wraps on its way to the wall clock.
+    fn wall(&self, ns: i64) -> NaiveDateTime {
+        let utc = DateTime::from_timestamp_nanos(ns);
         match self {
-            Tz::Naive | Tz::Utc | Tz::Offset(_) => {
-                let off = self.fixed_offset_secs().unwrap_or(0) as i64;
-                let local = ns + off * 1_000_000_000;
-                let secs = local.div_euclid(1_000_000_000);
-                let nsub = local.rem_euclid(1_000_000_000) as u32;
-                parts(
-                    DateTime::from_timestamp(secs, nsub)
-                        .unwrap_or_default()
-                        .naive_utc(),
-                )
-            }
-            Tz::Named(tz) => {
-                let secs = ns.div_euclid(1_000_000_000);
-                let nsub = ns.rem_euclid(1_000_000_000) as u32;
-                let dt = DateTime::from_timestamp(secs, nsub)
-                    .unwrap_or_default()
-                    .with_timezone(tz);
-                (
-                    dt.year() as i64,
-                    dt.month() as i64,
-                    dt.day() as i64,
-                    dt.hour() as i64,
-                    dt.minute() as i64,
-                    dt.second() as i64,
-                )
-            }
+            Tz::Naive | Tz::Utc => utc.naive_utc(),
+            Tz::Offset(s) => utc.naive_utc() + chrono::TimeDelta::seconds(*s as i64),
+            Tz::Named(tz) => utc.with_timezone(tz).naive_local(),
         }
     }
 
-    /// UTC epoch-ns of a naive wall-clock time interpreted in this timezone.
-    /// Returns `None` if the civil time is invalid or (for a named zone) falls in
-    /// a DST anomaly: a spring-forward **gap** (the time does not exist) or a
-    /// fall-back **fold** (the time occurs twice — ambiguous; silently picking
-    /// one would shift instants invisibly, F33, so it is rejected like the gap).
-    pub fn wall_to_utc_ns(&self, y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> Option<i64> {
-        let naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
+    /// The UTC instant of the wall clock `wall` in this timezone — the one
+    /// wall-clock → instant conversion, keeping the fractional second. A named
+    /// zone rejects a DST anomaly: a spring-forward **gap** (the wall clock does
+    /// not exist) and a fall-back **fold** (it occurs twice — silently picking one
+    /// would shift instants invisibly, F33), both `Value` errors. An instant outside
+    /// the datetime64[ns] range is an `Overflow` error.
+    pub fn localize(&self, wall: NaiveDateTime) -> Result<i64> {
         match self {
-            Tz::Naive | Tz::Utc | Tz::Offset(_) => {
-                let off = self.fixed_offset_secs().unwrap_or(0) as i64;
-                naive
-                    .and_utc()
-                    .timestamp_nanos_opt()
-                    .map(|ns| ns - off * 1_000_000_000)
-            }
-            Tz::Named(tz) => match tz.from_local_datetime(&naive) {
-                chrono::LocalResult::Single(dt) => dt.timestamp_nanos_opt(),
-                chrono::LocalResult::Ambiguous(_, _) => None,
-                chrono::LocalResult::None => None,
+            Tz::Naive | Tz::Utc => crate::datetime::fixed_wall_instant(&wall, 0),
+            Tz::Offset(s) => crate::datetime::fixed_wall_instant(&wall, *s),
+            Tz::Named(tz) => match tz.from_local_datetime(&wall) {
+                chrono::LocalResult::Single(dt) => crate::datetime::instant_of(&dt),
+                chrono::LocalResult::Ambiguous(_, _) => Err(VolasError::Value(format!(
+                    "wall clock {wall} is ambiguous in {} (a DST fold)",
+                    tz.name()
+                ))),
+                chrono::LocalResult::None => Err(VolasError::Value(format!(
+                    "wall clock {wall} does not exist in {} (a DST gap)",
+                    tz.name()
+                ))),
             },
         }
+    }
+
+    /// The instant whose wall clock in this zone equals the wall clock of `ns` in
+    /// `from` — pandas `tz_localize` of one value (a naive axis reads its stored
+    /// value as the wall clock). Sub-second digits are kept; errors as
+    /// [`Tz::localize`].
+    pub fn localize_from(&self, ns: i64, from: Tz) -> Result<i64> {
+        self.localize(from.wall(ns))
+    }
+
+    /// The instant of `ns`'s wall clock in this zone with the given civil
+    /// fields `[year, month, day, hour, minute, second]` replaced (`None` keeps
+    /// one; the sub-second part is kept) — pandas `Timestamp.replace`. A field
+    /// that does not fit, or an invalid date, is a `Value` error; then as
+    /// [`Tz::localize`].
+    pub fn replace_civil(&self, ns: i64, fields: [Option<i64>; 6]) -> Result<i64> {
+        let wall = self.wall(ns);
+        let keep = [
+            wall.year() as i64,
+            wall.month() as i64,
+            wall.day() as i64,
+            wall.hour() as i64,
+            wall.minute() as i64,
+            wall.second() as i64,
+        ];
+        let mut f = [0u32; 6];
+        for (i, (new, old)) in fields.iter().zip(keep).enumerate() {
+            let v = new.unwrap_or(old);
+            // the year is signed (i32); the other fields are unsigned
+            let fits = if i == 0 { i32::try_from(v).is_ok() } else { u32::try_from(v).is_ok() };
+            if !fits {
+                return Err(VolasError::Value(format!("replace: {v} is out of range")));
+            }
+            f[i] = v as u32;
+        }
+        let new = NaiveDate::from_ymd_opt(f[0] as i32, f[1], f[2])
+            .and_then(|d| d.and_hms_nano_opt(f[3], f[4], f[5], wall.nanosecond()))
+            .ok_or_else(|| VolasError::Value("replace produced an invalid wall-clock".into()))?;
+        self.localize(new)
+    }
+
+    /// UTC epoch-ns of a naive wall-clock time interpreted in this timezone
+    /// ([`Tz::localize`] of whole civil fields). Returns `None` if the civil time is
+    /// invalid, falls in a DST gap / fold, or lies outside the instant range.
+    pub fn wall_to_utc_ns(&self, y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> Option<i64> {
+        let naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
+        self.localize(naive).ok()
     }
 
     /// UTC epoch-ns of a naive wall-clock interpreted in this timezone, resolved
@@ -156,8 +189,8 @@ impl Tz {
                 // historical rule with margin.
                 for _ in 0..16 {
                     match tz.from_local_datetime(&naive) {
-                        chrono::LocalResult::Single(dt) => return dt.timestamp_nanos_opt(),
-                        chrono::LocalResult::Ambiguous(a, _) => return a.timestamp_nanos_opt(),
+                        chrono::LocalResult::Single(dt) => return crate::datetime::instant_of(&dt).ok(),
+                        chrono::LocalResult::Ambiguous(a, _) => return crate::datetime::instant_of(&a).ok(),
                         chrono::LocalResult::None => naive += chrono::Duration::minutes(15),
                     }
                 }
@@ -324,6 +357,46 @@ mod tests {
         let summer = ny.wall_to_utc_ns(2021, 7, 1, 12, 0, 0).unwrap();
         assert_eq!(ny.offset_secs_at(summer), -4 * 3600);   // EDT
         assert_eq!(ny.dst_secs_at(summer), 3600);           // one DST hour
+    }
+
+    #[test]
+    fn localize_keeps_the_fraction_and_names_dst_anomalies() {
+        let ny = Tz::parse("America/New_York").unwrap();
+        let wall = |s: &str| crate::datetime::parse_ns(s).unwrap();
+        // a naive axis value re-read as a NY wall clock keeps its nanoseconds
+        let ns = ny.localize_from(wall("2021-01-04 09:30:00.123456789"), Tz::Naive).unwrap();
+        assert_eq!(ns, wall("2021-01-04 14:30:00.123456789"));
+        let gap = ny.localize_from(wall("2020-03-08 02:30:00"), Tz::Naive).unwrap_err();
+        assert!(gap.to_string().contains("DST gap"));
+        let fold = ny.localize_from(wall("2020-11-01 01:30:00"), Tz::Naive).unwrap_err();
+        assert!(fold.to_string().contains("DST fold"));
+    }
+
+    #[test]
+    fn replace_civil_checks_every_field() {
+        let utc = Tz::Utc;
+        let t = crate::datetime::parse_ns("2024-01-31 10:00:00.5").unwrap();
+        let none = [None; 6];
+        let mut f = none;
+        f[3] = Some(11);
+        assert_eq!(
+            utc.replace_civil(t, f).unwrap(),
+            crate::datetime::parse_ns("2024-01-31 11:00:00.5").unwrap()
+        );
+        let mut f = none;
+        f[0] = Some(2024 + (1 << 32));
+        assert!(matches!(utc.replace_civil(t, f), Err(VolasError::Value(_))));
+        let mut f = none;
+        f[1] = Some(-1);
+        assert!(matches!(utc.replace_civil(t, f), Err(VolasError::Value(_))));
+        let mut f = none;
+        f[1] = Some(2); // Feb 31
+        assert!(matches!(utc.replace_civil(t, f), Err(VolasError::Value(_))));
+        let mut f = none;
+        f[0] = Some(2262);
+        f[1] = Some(4);
+        f[2] = Some(12);
+        assert!(matches!(utc.replace_civil(t, f), Err(VolasError::Overflow(_))));
     }
 
     #[test]

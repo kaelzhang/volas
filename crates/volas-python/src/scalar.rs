@@ -1,14 +1,17 @@
 //! Scalar Python types: `volas.Timestamp`, the `volas.NA` singleton, and its type.
 
 
-use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
 use pyo3::types::PyDict;
+use volas_core::datetime::Rounding;
 use volas_core::{
     datetime, Index,
     IndexKind, Label, Tz,
 };
+
+use crate::coerce::numpy_time_value;
 
 #[allow(unused_imports)]
 use crate::*;
@@ -42,31 +45,18 @@ pub(crate) fn na(py: Python<'_>) -> Py<PyAny> {
         .clone_ref(py)
 }
 
-/// A timedelta operand as nanoseconds: an `np.timedelta64` (normalised to ns) or a
-/// raw integer nanosecond count. Backs `Timestamp` `+` / `-` arithmetic.
+/// A timedelta operand as nanoseconds: an `np.timedelta64` in any unit (scaled
+/// exactly by the core unit owner — its `NaT`, a calendar unit, or a duration past
+/// the i64 range raise) or a raw integer nanosecond count. Backs `Timestamp`
+/// `+` / `-` arithmetic.
 fn delta_ns(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
     if let Ok(n) = delta.extract::<i64>() {
         return Ok(n);
     }
-    delta
-        .call_method1("astype", ("timedelta64[ns]",))?
-        .call_method1("astype", ("int64",))?
-        .call_method0("item")?
-        .extract::<i64>()
-}
-
-/// Validate a checked-arithmetic result as a representable ns value: inside the
-/// i64 range and not `i64::MIN` (the NaT sentinel for both `datetime64[ns]` and
-/// `timedelta64[ns]`, D2). `None` (overflow) or the sentinel raises
-/// `OverflowError` — Timestamp arithmetic must never wrap into a value that
-/// renders as `NaT` yet exposes real civil parts.
-fn checked_ts_ns(ns: Option<i64>) -> PyResult<i64> {
-    match ns {
-        Some(v) if v != i64::MIN => Ok(v),
-        _ => Err(PyOverflowError::new_err(
-            "Timestamp arithmetic overflows the representable datetime64[ns] range",
-        )),
-    }
+    let (unit, count, raw) = numpy_time_value(delta, "m").ok_or_else(|| {
+        PyTypeError::new_err("a Timestamp operand must be an np.timedelta64 or an integer ns count")
+    })??;
+    datetime::timedelta64_to_ns(raw, &unit, count).map_err(pyerr)
 }
 
 /// ``volas.Timestamp(value, tz=None)`` — a typed datetime label carrying its own
@@ -317,45 +307,23 @@ impl PyTimestamp {
         minute: Option<i64>,
         second: Option<i64>,
     ) -> PyResult<Self> {
-        let (y, mo, d, h, mi, se) = datetime::civil_parts_tz(self.ns, self.tz);
-        let (y, mo, d, h, mi, se) = (
-            year.unwrap_or(y), month.unwrap_or(mo), day.unwrap_or(d),
-            hour.unwrap_or(h), minute.unwrap_or(mi), second.unwrap_or(se),
-        );
-        let subsec = self.ns.rem_euclid(1_000_000_000);
-        let ns = self
-            .tz
-            .wall_to_utc_ns(y as i32, mo as u32, d as u32, h as u32, mi as u32, se as u32)
-            .ok_or_else(|| PyValueError::new_err("replace produced an invalid wall-clock"))?
-            + subsec;
+        let fields = [year, month, day, hour, minute, second];
+        let ns = self.tz.replace_civil(self.ns, fields).map_err(pyerr)?;
         Ok(PyTimestamp { ns, tz: self.tz })
     }
 
     /// Floor to a frequency boundary in the timestamp's wall-clock:
     /// `'D' 'h' 'min' 's' 'ms' 'us' 'ns'` with an optional multiple (`'15min'`).
     pub(crate) fn floor(&self, freq: &str) -> PyResult<Self> {
-        let unit = parse_freq_ns(freq)?;
-        Ok(PyTimestamp { ns: self.wall_floor(unit), tz: self.tz })
+        self.rounded(parse_freq_ns(freq)?, Rounding::Floor)
     }
     /// Ceil to a frequency boundary (see `floor`).
     pub(crate) fn ceil(&self, freq: &str) -> PyResult<Self> {
-        let unit = parse_freq_ns(freq)?;
-        let f = self.wall_floor(unit);
-        Ok(PyTimestamp { ns: if f == self.ns { f } else { f + unit }, tz: self.tz })
+        self.rounded(parse_freq_ns(freq)?, Rounding::Ceil)
     }
     /// Round to the nearest frequency boundary, ties to even (pandas `round`).
     pub(crate) fn round(&self, freq: &str) -> PyResult<Self> {
-        let unit = parse_freq_ns(freq)?;
-        let f = self.wall_floor(unit);
-        let rem = self.ns - f;
-        // round half to even: past the midpoint, or exactly on it with an odd
-        // floor multiple (so rounding up lands on the even one).
-        let ns = if rem * 2 > unit || (rem * 2 == unit && (f / unit) % 2 != 0) {
-            f + unit
-        } else {
-            f
-        };
-        Ok(PyTimestamp { ns, tz: self.tz })
+        self.rounded(parse_freq_ns(freq)?, Rounding::HalfEven)
     }
     /// Midnight of the timestamp's wall-clock day (pandas `normalize`).
     pub(crate) fn normalize(&self) -> PyResult<Self> {
@@ -373,17 +341,7 @@ impl PyTimestamp {
             )));
         }
         let tzv = tz_from_py(tz)?;
-        let (y, mo, d, h, mi, se) = datetime::civil_parts_tz(self.ns, self.tz);
-        let subsec = self.ns.rem_euclid(1_000_000_000);
-        let ns = tzv
-            .wall_to_utc_ns(y as i32, mo as u32, d as u32, h as u32, mi as u32, se as u32)
-            .ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "wall-clock does not exist in {} (or is DST-ambiguous)",
-                    tzv.name()
-                ))
-            })?
-            + subsec;
+        let ns = tzv.localize_from(self.ns, self.tz).map_err(pyerr)?;
         Ok(PyTimestamp { ns, tz: tzv })
     }
     /// Restate an AWARE timestamp in another zone (pandas `tz_convert`): the
@@ -533,7 +491,8 @@ impl PyTimestamp {
     /// Overflow raises — arithmetic is a constructor boundary (D2), so a wrapped
     /// result can never resurrect the NaT sentinel or a bogus 1677/2262 instant.
     fn __add__(&self, delta: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
-        Ok(PyTimestamp { ns: checked_ts_ns(self.ns.checked_add(delta_ns(delta)?))?, tz: self.tz })
+        let ns = datetime::shift(self.ns, delta_ns(delta)?).map_err(pyerr)?;
+        Ok(PyTimestamp { ns, tz: self.tz })
     }
 
     /// `ts - other`: another Timestamp gives the `np.timedelta64` difference; an
@@ -542,7 +501,8 @@ impl PyTimestamp {
     /// lands on the NaT sentinel) raises instead of wrapping.
     fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(o) = other.extract::<PyRef<PyTimestamp>>() {
-            let delta = checked_ts_ns(self.ns.checked_sub(o.ns))?;
+            // a difference past the i64 range, or one on the NaT sentinel, raises
+            let delta = datetime::instant(self.ns.checked_sub(o.ns)).map_err(pyerr)?;
             return Ok(py
                 .import("numpy")?
                 .getattr("timedelta64")?
@@ -550,11 +510,9 @@ impl PyTimestamp {
                 .into_any()
                 .unbind());
         }
-        Ok(Py::new(
-            py,
-            PyTimestamp { ns: checked_ts_ns(self.ns.checked_sub(delta_ns(other)?))?, tz: self.tz },
-        )?
-        .into_any())
+        let delta = delta_ns(other)?;
+        let ns = datetime::instant(self.ns.checked_sub(delta)).map_err(pyerr)?;
+        Ok(Py::new(py, PyTimestamp { ns, tz: self.tz })?.into_any())
     }
 
     fn __repr__(&self) -> String {
@@ -670,16 +628,20 @@ pub(crate) fn parse_freq_ns(freq: &str) -> PyResult<i64> {
     if mult <= 0 {
         return Err(PyValueError::new_err(format!("invalid frequency {freq:?}")));
     }
-    Ok(mult * unit_ns)
+    datetime::span_ns(mult, unit_ns).map_err(pyerr)
 }
 
 impl PyTimestamp {
-    /// Floor the instant to a `unit_ns` boundary of the WALL clock (so a daily
-    /// floor lands on the local midnight for an anchored zone).
-    pub(crate) fn wall_floor(&self, unit_ns: i64) -> i64 {
-        let off = self.tz.offset_secs_at(self.ns) as i64 * 1_000_000_000;
-        let wall = self.ns + off;
-        wall.div_euclid(unit_ns) * unit_ns - off
+    /// Round the instant to a `unit_ns` grid of the WALL clock at its offset (so
+    /// a daily floor lands on the local midnight for an anchored zone) — the one
+    /// kernel behind scalar and `.dt` `floor` / `ceil` / `round` / `normalize`;
+    /// a result outside the instant range raises `OverflowError`.
+    pub(crate) fn rounded_ns(&self, unit_ns: i64, mode: Rounding) -> PyResult<i64> {
+        datetime::round_wall(self.ns, self.tz.offset_secs_at(self.ns), unit_ns, mode).map_err(pyerr)
+    }
+
+    fn rounded(&self, unit_ns: i64, mode: Rounding) -> PyResult<Self> {
+        Ok(PyTimestamp { ns: self.rounded_ns(unit_ns, mode)?, tz: self.tz })
     }
 
     /// The ISO calendar triple (iso_year, iso_week, iso_weekday).
