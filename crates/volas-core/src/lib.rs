@@ -26,6 +26,6 @@ pub use validity::{Bitmap, Validity};
 pub use dataframe::DataFrame;
 pub use dtype::DType;
 pub use error::{Result, VolasError};
-pub use index::{Index, IndexKind, Label};
+pub use index::{Index, IndexKind, Label, SliceBound};
 pub use series::Series;
 pub use tz::Tz;

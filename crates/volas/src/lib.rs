@@ -7,7 +7,8 @@
 pub use volas_core as core;
 
 pub use volas_core::{
-    Column, DType, DataFrame, Index, IndexKind, Label, Result, Scalar, Series, Tz, VolasError,
+    Column, DType, DataFrame, Index, IndexKind, Label, Result, Scalar, Series, SliceBound, Tz,
+    VolasError,
 };
 pub use volas_io::{read_csv, ReadCsvOptions};
 pub use volas_time::TimeFrame;

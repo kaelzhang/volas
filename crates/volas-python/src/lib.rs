@@ -29,6 +29,7 @@ use timeframe::PyTimeFrame;
 pub(crate) fn pyerr(e: VolasError) -> PyErr {
     match e {
         VolasError::ColumnNotFound(n) => PyKeyError::new_err(format!("column \"{n}\" not found")),
+        VolasError::Key(m) => PyKeyError::new_err(m),
         VolasError::DType(m) => PyTypeError::new_err(m),
         VolasError::Overflow(m) => PyOverflowError::new_err(m),
         VolasError::Shape(m) | VolasError::Index(m) | VolasError::Value(m) | VolasError::Parse(m) => {
