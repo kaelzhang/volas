@@ -15,6 +15,7 @@
 
 mod engine;
 use engine::*;
+use crate::raw::smoothing::Weighted;
 
 /// `HT_DCPERIOD`: the smoothed dominant-cycle period.
 pub fn ht_dcperiod(price: &[f64]) -> Vec<f64> {
@@ -630,9 +631,9 @@ fn mama_step(
     } else {
         fast_limit
     };
-    *mama = (alpha * price_today) + ((1.0 - alpha) * *mama);
-    let half = 0.5 * alpha;
-    *fama = (half * *mama) + ((1.0 - half) * *fama);
+    // `ta_MAMA.c`'s weighted form `(a·x) + ((1 − a)·prev)` for both averages
+    *mama = Weighted::new(alpha).step(*mama, price_today);
+    *fama = Weighted::new(0.5 * alpha).step(*fama, *mama);
 }
 
 /// Resume `MAMA`/`FAMA` over `[from, n)`, emitting `mama` (`want_fama == false`) or

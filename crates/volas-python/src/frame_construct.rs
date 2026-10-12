@@ -257,7 +257,7 @@ impl PyDataFrame {
     ///     numpy.ndarray
     #[getter]
     pub(crate) fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        index_values(py, &self.meta().labels())
+        index_values(py, &self.meta().labels().index())
     }
 
     // The indexers hold a live reference to this frame (`Py<PyDataFrame>`), not a

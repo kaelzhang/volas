@@ -119,7 +119,7 @@ pub(crate) use coerce::*;
 pub(crate) use series::*;
 pub(crate) use series_support::*;
 pub(crate) use frame::*;
-pub(crate) use frame_tf::TfState;
+pub(crate) use frame_tf::{TfState, TfWrite};
 pub(crate) use frame_derive::{uncarried_cached, RowSel};
 pub(crate) use volas_directive::Replayer;
 pub(crate) use frame_bounded::{LookbackBound, WindowState};

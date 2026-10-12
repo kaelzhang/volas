@@ -743,10 +743,10 @@ fn the_recursive_kernels_run_on_the_complete_rows() {
     assert_eq!(bits(&kern::wilder(strided, 5).to_vec()), bits(&kern::wilder(av(&x), 5).to_vec()));
     // a missing value stepped over leaves the cascade where it was
     let mut e = [1.0, 2.0];
-    kern::ema_cascade_step(&mut e, f64::NAN, 0.5);
+    kern::ema_cascade_step(&mut e, f64::NAN, 3);
     assert_eq!(e, [1.0, 2.0]);
-    kern::ema_cascade_step(&mut e, 3.0, 0.5);
+    kern::ema_cascade_step(&mut e, 3.0, 3);
     let mut r = [1.0, 2.0];
-    raw_kern::ema_cascade_step(&mut r, 3.0, 0.5);
+    raw_kern::ema_cascade_step(&mut r, 3.0, 3);
     assert_eq!(e, r);
 }

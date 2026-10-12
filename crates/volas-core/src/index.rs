@@ -92,6 +92,19 @@ impl LabelOrder {
             IndexKind::Str(v) => LabelOrder::of(v),
         }
     }
+
+    /// The first position of `x` in `labels`, labels of this order: a binary search
+    /// when they are monotonic — O(log n) — a scan otherwise.
+    fn find<T: Ord>(self, labels: &[T], x: &T) -> Option<usize> {
+        let at = if self.increasing {
+            labels.partition_point(|l| l < x)
+        } else if self.decreasing {
+            labels.partition_point(|l| l > x)
+        } else {
+            return labels.iter().position(|l| l == x);
+        };
+        (labels.get(at) == Some(x)).then_some(at)
+    }
 }
 
 /// The label storage backing an [`Index`].
@@ -604,30 +617,27 @@ impl Index {
     }
 
     /// Position of the first label equal to `label` among the positions `rows` (a
-    /// window's retained rows). `None` when none there has it, or the kinds differ.
+    /// window's retained or visible rows). `None` when none there has it, or the kinds
+    /// differ. Searched by the stored [`LabelOrder`]: O(log rows) over ordered labels
+    /// (a time series), a scan over unordered ones — never a copy of the labels.
     pub fn position_in(&self, label: &Label, rows: std::ops::Range<usize>) -> Option<usize> {
         let first = rows.start;
         match (&self.kind, label) {
-            (IndexKind::Int64(vs), Label::I64(v)) => vs.get(rows)?.iter().position(|x| x == v),
-            (IndexKind::Str(vs), Label::Str(s)) => vs.get(rows)?.iter().position(|x| x == s),
-            _ => return self.position_of(label).filter(|p| rows.contains(p)),
+            (IndexKind::Range { start, len }, Label::I64(v)) => {
+                let at = usize::try_from(v.checked_sub(*start)?).ok()?;
+                return (at < *len).then_some(at).filter(|p| rows.contains(p));
+            }
+            (IndexKind::Int64(vs) | IndexKind::Datetime(vs, _), Label::I64(v)) => self.order.find(vs.get(rows)?, v),
+            (IndexKind::Str(vs), Label::Str(s)) => self.order.find(vs.get(rows)?, s),
+            _ => None,
         }
         .map(|p| p + first)
     }
 
-    /// Position of the first label exactly equal to `label`. Returns `None` if
-    /// the label's kind does not match the index's kind.
+    /// Position of the first label exactly equal to `label` ([`position_in`](Self::position_in)
+    /// every row). Returns `None` if the label's kind does not match the index's kind.
     pub fn position_of(&self, label: &Label) -> Option<usize> {
-        match (&self.kind, label) {
-            (IndexKind::Range { start, len }, Label::I64(v)) => {
-                let at = v.checked_sub(*start)?;
-                (at >= 0 && (at as usize) < *len).then_some(at as usize)
-            }
-            (IndexKind::Int64(vs), Label::I64(v)) => vs.iter().position(|x| x == v),
-            (IndexKind::Datetime(vs, _), Label::I64(v)) => vs.iter().position(|x| x == v),
-            (IndexKind::Str(vs), Label::Str(s)) => vs.iter().position(|x| x == s),
-            _ => None,
-        }
+        self.position_in(label, 0..self.len())
     }
 
     /// `[start, end)` positions of the inclusive label slice `[lo, hi]` (pandas

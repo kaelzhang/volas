@@ -924,17 +924,18 @@ def test_coverage_after_append(benchmark, indicator, candidate):
 # --- section 4: core DataFrame API (the data-handling flows, not indicators) -
 #
 # The plumbing a live system runs around every indicator call — frame
-# construction, column access, row slicing, boolean masking, column assignment,
-# copy — timed volas vs pandas / polars. These are the core APIs whose overhead
+# construction, column access, row slicing, boolean masking, column assignment, a
+# single-cell write, copy — timed volas vs pandas / polars. These are the core APIs whose overhead
 # the user wants tracked alongside the kernels.
 
 _API_THRESH = float(_CSV['close'].median())
+_API_CELL = (len(_CSV) // 2, COLUMNS.index('volume'))  # a middle cell: `setcell` writes it
 
 
 def _api_registry():
     """candidate -> {op: thunk}. `construct` rebuilds each call; the rest run over
-    a prebuilt per-candidate frame; `setitem` overwrites a scratch column (so it
-    stays idempotent under repeated timing)."""
+    a prebuilt per-candidate frame; `setitem` overwrites a scratch column and
+    `setcell` one cell (so both stay idempotent under repeated timing)."""
 
     def cols():
         return {c: ARR[c] for c in COLUMNS}
@@ -946,6 +947,7 @@ def _api_registry():
             'slice': lambda: pdf[100:1900],
             'mask': lambda: pdf[pdf['close'] > _API_THRESH],
             'setitem': lambda: pdf.__setitem__('scratch', ARR['close']),
+            'setcell': lambda: pdf.iat.__setitem__(_API_CELL, 1.5),
             'copy': lambda: pdf.copy(),
         })(pd.DataFrame(cols())),
         'volas': (lambda vdf: {
@@ -954,6 +956,7 @@ def _api_registry():
             'slice': lambda: vdf[100:1900],
             'mask': lambda: vdf[vdf['close'] > _API_THRESH],
             'setitem': lambda: vdf.__setitem__('scratch', ARR['close']),
+            'setcell': lambda: vdf.iat.__setitem__(_API_CELL, 1.5),
             'copy': lambda: vdf.copy(),
         })(VolasDataFrame(cols())),
     }
@@ -964,7 +967,8 @@ def _api_registry():
             'getcol': lambda: ldf['close'],
             'slice': lambda: ldf[100:1900],
             'mask': lambda: ldf.filter(pl.col('close') > _API_THRESH),
-            # polars frames are immutable; the idiomatic "add a column" is with_columns.
+            # polars frames are immutable; the idiomatic "add a column" is with_columns
+            # (and there is no in-place cell write: no `setcell`).
             'setitem': lambda: ldf.with_columns(pl.Series('scratch', ARR['close'])),
             'copy': lambda: ldf.clone(),
         }
@@ -972,7 +976,7 @@ def _api_registry():
 
 
 API_REG = _api_registry()
-API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'copy']
+API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'setcell', 'copy']
 API_CANDIDATES = ['pandas', 'polars', 'volas']
 
 

@@ -3,7 +3,7 @@
 use ndarray::Array1;
 
 use crate::raw::indicators::av;
-use crate::raw::indicators::trend::ma::ema_k;
+use crate::raw::smoothing::{self, ema_k};
 use crate::raw::kernels;
 
 /// TA-Lib's price-oscillator rule (`APO`, `PPO`, `MACD`, `MACDEXT`): the slow average is
@@ -54,7 +54,7 @@ pub fn macd_histogram(close: &[f64], fast: usize, slow: usize, signal: usize) ->
 /// The fast/slow EMA pair `(pf, ps)` as of the last row after a full MACD-line compute,
 /// or `None` if the slow EMA never seeds (the line is all-NaN → keep the fallback).
 /// Mirrors `kernels::ema_diff_seeded`: each EMA SMA-seeds at its own period-th finite
-/// value, then advances with the fused `(x-prev)·k+prev` step. Callers pass `fast <= slow`.
+/// value, then advances with the EMA step ([`smoothing::ema`]). Callers pass `fast <= slow`.
 fn macd_emas_final(close: &[f64], fast: usize, slow: usize) -> Option<(f64, f64)> {
     let pf = kernels::sma_seeded_last(close, fast, kernels::ema_step(fast))?;
     let ps = kernels::sma_seeded_last(close, slow, kernels::ema_step(slow))?;
@@ -69,7 +69,7 @@ pub fn macd_final_state(close: &[f64], fast: usize, slow: usize) -> Option<Vec<f
 }
 
 /// Resume the MACD line from `state = [pf, ps]` over rows `[from, n)`, bit-identical to a
-/// full recompute (`fast EMA − slow EMA`, same fused step). Reads only `close[from..]`.
+/// full recompute (`fast EMA − slow EMA`, same step). Reads only `close[from..]`.
 pub fn macd_resume(
     close: &[f64],
     fast: usize,
@@ -83,8 +83,8 @@ pub fn macd_resume(
     let (mut pf, mut ps) = (state[0], state[1]);
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &close[from..n] {
-        pf = (x - pf).mul_add(kf, pf);
-        ps = (x - ps).mul_add(ks, ps);
+        pf = smoothing::ema(pf, x, kf);
+        ps = smoothing::ema(ps, x, ks);
         out.push(pf - ps);
     }
     (out, vec![pf, ps])
@@ -128,10 +128,10 @@ pub fn macd_signal_resume(
     let (mut pf, mut ps, mut sig) = (state[0], state[1], state[2]);
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &close[from..n] {
-        pf = (x - pf).mul_add(kf, pf);
-        ps = (x - ps).mul_add(ks, ps);
+        pf = smoothing::ema(pf, x, kf);
+        ps = smoothing::ema(ps, x, ks);
         let line = pf - ps;
-        sig = (line - sig).mul_add(ksig, sig);
+        sig = smoothing::ema(sig, line, ksig);
         out.push(if histogram { line - sig } else { sig });
     }
     (out, vec![pf, ps, sig])
@@ -156,8 +156,8 @@ pub fn macd_resume_one(
     let (kf, ks) = (ema_k(fast), ema_k(slow));
     let (pf, ps) = (state[0], state[1]);
     let x = close[row];
-    let pf = (x - pf).mul_add(kf, pf);
-    let ps = (x - ps).mul_add(ks, ps);
+    let pf = smoothing::ema(pf, x, kf);
+    let ps = smoothing::ema(ps, x, ks);
     next.copy_from_slice(&[pf, ps]);
     Some(pf - ps)
 }
@@ -184,10 +184,10 @@ pub fn macd_signal_resume_one(
     let (kf, ks, ksig) = (ema_k(fast), ema_k(slow), ema_k(signal));
     let (pf, ps, sig) = (state[0], state[1], state[2]);
     let x = close[row];
-    let pf = (x - pf).mul_add(kf, pf);
-    let ps = (x - ps).mul_add(ks, ps);
+    let pf = smoothing::ema(pf, x, kf);
+    let ps = smoothing::ema(ps, x, ks);
     let line = pf - ps;
-    let sig = (line - sig).mul_add(ksig, sig);
+    let sig = smoothing::ema(sig, line, ksig);
     next.copy_from_slice(&[pf, ps, sig]);
     Some(if histogram { line - sig } else { sig })
 }

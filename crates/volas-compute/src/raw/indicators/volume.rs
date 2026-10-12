@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 use crate::missing;
+use crate::raw::smoothing;
 
 /// On Balance Volume (TA-Lib OBV): a running total that adds the bar's volume when
 /// `real` rises vs the prior bar, subtracts it when `real` falls, and is unchanged
@@ -269,16 +270,17 @@ impl Adosc {
         Adosc { ad_line, fast_ema: ad_line, slow_ema: ad_line }
     }
 
-    /// Advance over bar `i`. The EMAs use TA-Lib's `(price − prev)·k + prev` form, fused
-    /// to a single rounding; the two independent chains interleave (ILP).
+    /// Advance over bar `i`. The EMAs use `ta_ADOSC.c`'s weighted form
+    /// `(k·ad) + ((1 − k)·ema)` ([`smoothing::Weighted`]); the two independent chains
+    /// interleave (ILP).
     #[inline]
     #[allow(clippy::too_many_arguments)]
     fn step(&mut self, high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize, fast: usize, slow: usize) {
-        let fastk = 2.0 / (fast as f64 + 1.0);
-        let slowk = 2.0 / (slow as f64 + 1.0);
+        let fastk = smoothing::Weighted::new(smoothing::ema_k(fast));
+        let slowk = smoothing::Weighted::new(smoothing::ema_k(slow));
         self.ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
-        self.fast_ema = (self.ad_line - self.fast_ema).mul_add(fastk, self.fast_ema);
-        self.slow_ema = (self.ad_line - self.slow_ema).mul_add(slowk, self.slow_ema);
+        self.fast_ema = fastk.step(self.fast_ema, self.ad_line);
+        self.slow_ema = slowk.step(self.slow_ema, self.ad_line);
     }
 
     /// The oscillator at bar `i`: NaN within the warm-up (`i < max(fast, slow) − 1`).

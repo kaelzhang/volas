@@ -197,3 +197,45 @@ fn a_text_bound_on_a_non_increasing_datetime_index_fails_closed() {
     let inc = Index::datetime(vec![1, 2, 4], Tz::Utc);
     assert_eq!(inc.label_slice(Some(&day(2)), Some(&day(3))).unwrap(), (1, 2));
 }
+
+#[test]
+fn a_label_is_found_by_the_stored_order() {
+    // increasing (with repeats): the first of equal labels
+    let inc = int(&[1, 3, 3, 3, 8]);
+    assert_eq!(inc.position_of(&Label::I64(3)), Some(1));
+    assert_eq!(inc.position_of(&Label::I64(4)), None);
+    assert_eq!(inc.position_of(&Label::I64(9)), None);
+    // decreasing
+    let dec = strs(&["d", "c", "c", "a"]);
+    assert_eq!(dec.position_of(&Label::Str("c".into())), Some(1));
+    assert_eq!(dec.position_of(&Label::Str("b".into())), None);
+    // unordered: a scan, still the first
+    let un = int(&[5, 1, 5, 2]);
+    assert_eq!(order(&un), (false, false));
+    assert_eq!(un.position_of(&Label::I64(5)), Some(0));
+    assert_eq!(un.position_of(&Label::I64(2)), Some(3));
+    // a datetime index with NaT is unordered (scanned); without, searched
+    let nat = Index::datetime(vec![10, i64::MIN, 30], Tz::Utc);
+    assert_eq!(nat.position_of(&Label::I64(30)), Some(2));
+    assert_eq!(nat.position_of(&Label::I64(i64::MIN)), Some(1));
+    let dt = Index::datetime(vec![10, 20, 30], Tz::Utc);
+    assert_eq!(dt.position_of(&Label::I64(20)), Some(1));
+    // a label of another kind is never found
+    assert_eq!(dt.position_of(&Label::Str("20".into())), None);
+}
+
+#[test]
+fn a_label_is_found_among_a_range_of_rows() {
+    let ix = int(&[1, 2, 2, 4, 5]);
+    // the first equal label inside the rows, at its position in the whole index
+    assert_eq!(ix.position_in(&Label::I64(2), 2..5), Some(2));
+    assert_eq!(ix.position_in(&Label::I64(1), 1..5), None);
+    assert_eq!(ix.position_in(&Label::I64(5), 1..3), None);
+    // a range index: its own position, inside the rows only
+    let r = Index::range(5);
+    assert_eq!(r.position_in(&Label::I64(3), 2..5), Some(3));
+    assert_eq!(r.position_in(&Label::I64(1), 2..5), None);
+    assert_eq!(r.position_of(&Label::I64(-1)), None);
+    assert_eq!(r.position_of(&Label::I64(5)), None);
+    assert_eq!(Index::range(0).position_of(&Label::I64(0)), None);
+}

@@ -9,6 +9,12 @@ nested directives in parentheses) overriding the default columns. Empty
 argument slots keep earlier defaults, so `macd.signal:,,5` means fast period
 `12`, slow period `26`, and signal period `5`.
 
+Every recurrence evaluates TA-Lib's C source in plain arithmetic, without fused
+multiply-add: the same value on every platform, bit-identical to a TA-Lib build that does
+not fuse, and within rounding of one that does (see
+[Deliberate divergences](migration-talib.md#deliberate-divergences) for which functions
+a fusing build changes).
+
 `matype` follows TA-Lib's integer convention: `0=SMA`, `1=EMA`, `2=WMA`,
 `3=DEMA`, `4=TEMA`, `5=TRIMA`, `6=KAMA`, `7=MAMA`, and `8=T3`. Multi-output
 indicators also accept short aliases where documented by the parser, for example

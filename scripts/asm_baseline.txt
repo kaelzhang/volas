@@ -2,5 +2,5 @@
 # <probe> <kind> <count>: exact = numeric kernel (must stay byte-identical),
 # max = string kernel (must not increase). Refresh only after a reviewed change.
 probe_ma exact 488
-probe_ema exact 94
+probe_ema exact 95
 probe_str_eq_scan max 61

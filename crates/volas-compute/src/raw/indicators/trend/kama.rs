@@ -1,6 +1,7 @@
 //! Kaufman Adaptive Moving Average (KAMA) and its adaptive smoothing constant.
 
 use crate::accum::Csum;
+use crate::raw::smoothing;
 
 /// Kaufman Adaptive Moving Average (TA-Lib KAMA). The smoothing constant adapts each
 /// bar via the efficiency ratio `ER = |price[i]-price[i-period]| / Σ|1-bar changes|`:
@@ -82,16 +83,15 @@ fn kama_bar(data: &[f64], period: usize, today: usize, k: &mut KamaState) -> f64
     }
     let period_roc = data[today] - data[today - period];
     let sc = kama_sc(period_roc, k.sum_roc1.value());
-    // `(price − prev)·sc + prev` fused: one rounding off the recurrence's critical
-    // path. KAMA is contractive (sc ≤ (2/3)² < 1), so the ~1e-16 divergence decays —
-    // within the 1e-9 TA-Lib parity tolerance.
-    k.kama = (data[today] - k.kama).mul_add(sc, k.kama);
+    // TA-Lib's `((price − prev)·sc) + prev`: the EMA step with the adaptive constant.
+    k.kama = smoothing::ema(k.kama, data[today], sc);
     k.kama
 }
 
 /// KAMA's adaptive smoothing constant `SC = (ER·(fast−slow) + slow)²` from the period
 /// ROC and the sliding sum of 1-bar changes, with `ER` clamped to 1 on a tiny/degenerate
-/// denominator (TA-Lib's guard) (`fast = 2/3`, `slow = 2/31`).
+/// denominator (TA-Lib's guard) (`fast = 2/3`, `slow = 2/31`), in `ta_KAMA.c`'s order
+/// `sc = (er·diff) + max; sc *= sc`, unfused.
 #[inline]
 fn kama_sc(period_roc: f64, sum_roc1: f64) -> f64 {
     const CONST_MAX: f64 = 2.0 / (30.0 + 1.0); // slow smoothing constant
@@ -101,7 +101,7 @@ fn kama_sc(period_roc: f64, sum_roc1: f64) -> f64 {
     } else {
         (period_roc / sum_roc1).abs()
     };
-    let sc = er.mul_add(const_diff, CONST_MAX);
+    let sc = er * const_diff + CONST_MAX;
     sc * sc
 }
 

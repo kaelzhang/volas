@@ -135,21 +135,21 @@ fn number_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
         .map_err(|_| PyTypeError::new_err("expected a number"))
 }
 
-/// Assign a Python **scalar** into `col` at `positions`, via the shared
+/// Assign a Python **scalar** into `col` at `positions`, in place, via the shared
 /// `scalar_to_column` + [`Column::scatter`] primitive — the Series setitem path (a
 /// DataFrame's cell writes reach `scatter` through `PyDataFrame::write_cells`).
 ///
-/// A column with **no selected positions** is returned unchanged, so a typed fill
-/// (a string into a str column, say) errors only when it actually targets a cell
-/// of an incompatible column — the mixed-frame atomic rule: nothing is written
-/// unless every targeted column accepts the value.
+/// **No selected positions** leave the column unchanged, so a typed fill (a string
+/// into a str column, say) errors only when it actually targets a cell of an
+/// incompatible column — the mixed-frame atomic rule: nothing is written unless every
+/// targeted column accepts the value.
 pub(crate) fn scatter_scalar(
-    col: &Column,
+    col: &mut Column,
     positions: &[usize],
     value: &Bound<'_, PyAny>,
-) -> PyResult<Column> {
+) -> PyResult<()> {
     if positions.is_empty() {
-        return Ok(col.clone());
+        return Ok(());
     }
     let src = scalar_to_column(value, col.dtype())?;
     col.scatter(positions, &src).map_err(pyerr)
@@ -233,34 +233,62 @@ pub(crate) fn iloc_positions(sel: &Bound<'_, PyAny>, height: usize) -> PyResult<
     ))
 }
 
+/// The labels of a frame's visible rows, looked up where they lie: a windowed frame's
+/// visible rows are a range of its stored index, never copied out to resolve a label.
+pub(crate) struct Labels<'a> {
+    index: &'a Index,
+    rows: std::ops::Range<usize>,
+}
+
+impl<'a> Labels<'a> {
+    /// The labels at positions `rows` of `index`.
+    pub(crate) fn of(index: &'a Index, rows: std::ops::Range<usize>) -> Labels<'a> {
+        Labels { index, rows }
+    }
+
+    /// Every label of `index`.
+    pub(crate) fn whole(index: &'a Index) -> Labels<'a> {
+        Labels::of(index, 0..index.len())
+    }
+
+    /// The visible position of the row `key` labels — the first, when several do — in
+    /// O(log rows) over ordered labels ([`Index::position_in`]); a `KeyError` when none
+    /// does.
+    pub(crate) fn locate(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let label = parse_label(key, self.index)?;
+        self.index
+            .position_in(&label, self.rows.clone())
+            .map(|p| p - self.rows.start)
+            .ok_or_else(|| PyKeyError::new_err("label not found"))
+    }
+
+    /// The visible labels as an index of their own — for a label slice, an alignment,
+    /// an export (a copy when they are not every stored label).
+    pub(crate) fn index(&self) -> std::borrow::Cow<'a, Index> {
+        if self.rows == (0..self.index.len()) {
+            std::borrow::Cow::Borrowed(self.index)
+        } else {
+            std::borrow::Cow::Owned(self.index.slice(self.rows.start, self.rows.end))
+        }
+    }
+}
+
 /// Resolve a `loc` row selector (bool-mask / label-slice / label / label-list) to
 /// row positions.
-pub(crate) fn loc_positions(sel: &Bound<'_, PyAny>, index: &Index, height: usize) -> PyResult<Vec<usize>> {
+pub(crate) fn loc_positions(sel: &Bound<'_, PyAny>, labels: &Labels<'_>, height: usize) -> PyResult<Vec<usize>> {
     if let Some(pos) = as_bool_mask(sel, height)? {
         return Ok(pos);
     }
     if let Ok(slice) = sel.downcast::<PySlice>() {
-        let (lo, hi) = label_bounds(slice, index)?;
+        let index = labels.index();
+        let (lo, hi) = label_bounds(slice, &index)?;
         let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
         return Ok((a..b).collect());
     }
     if let Ok(list) = sel.downcast::<PyList>() {
-        let mut out = Vec::with_capacity(list.len());
-        for item in list.iter() {
-            let label = parse_label(&item, index)?;
-            out.push(
-                index
-                    .position_of(&label)
-                    .ok_or_else(|| PyKeyError::new_err("label not found"))?,
-            );
-        }
-        return Ok(out);
+        return list.iter().map(|item| labels.locate(&item)).collect();
     }
-    let label = parse_label(sel, index)?;
-    let pos = index
-        .position_of(&label)
-        .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-    Ok(vec![pos])
+    Ok(vec![labels.locate(sel)?])
 }
 
 /// One axis of a 2-D `iloc` / `loc` get: a single scalar position (the axis is
@@ -302,18 +330,14 @@ pub(crate) fn iloc_col_axis(sel: &Bound<'_, PyAny>, width: usize) -> PyResult<Ax
 
 /// Resolve a `loc` row axis: a single label reduces the axis (`AxisSel::One`); a
 /// label-slice / label-list / boolean mask keeps it (`AxisSel::Many`).
-pub(crate) fn loc_row_axis(sel: &Bound<'_, PyAny>, index: &Index, height: usize) -> PyResult<AxisSel> {
+pub(crate) fn loc_row_axis(sel: &Bound<'_, PyAny>, labels: &Labels<'_>, height: usize) -> PyResult<AxisSel> {
     if as_bool_mask(sel, height)?.is_some()
         || sel.downcast::<PySlice>().is_ok()
         || sel.downcast::<PyList>().is_ok()
     {
-        return Ok(AxisSel::Many(loc_positions(sel, index, height)?));
+        return Ok(AxisSel::Many(loc_positions(sel, labels, height)?));
     }
-    let label = parse_label(sel, index)?;
-    let pos = index
-        .position_of(&label)
-        .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-    Ok(AxisSel::One(pos))
+    Ok(AxisSel::One(labels.locate(sel)?))
 }
 
 /// Resolve a `loc` column axis (name / name-list / inclusive name-slice) to
@@ -539,10 +563,27 @@ pub(crate) fn label_bounds(
                 Ok(x) => Label::I64(x),
                 Err(_) => parse_label(&obj, index)?,
             },
-            IndexKind::Datetime(_, tz) if text => match tz.period_of_text(&obj.extract::<String>()?) {
-                Some((start, end, _)) => Label::I64(if stop { end - 1 } else { start }),
-                None => parse_label(&obj, index)?,
-            },
+            // a partial date names a period: its first instant starts, its last stops
+            IndexKind::Datetime(_, tz) if text && tz.period_of_text(&obj.extract::<String>()?).is_some() => {
+                let (start, end, _) = tz.period_of_text(&obj.extract::<String>()?).expect("checked above");
+                Label::I64(if stop { end - 1 } else { start })
+            }
+            // text naming no instant (not a datetime, a DST gap / fold wall clock) cannot
+            // bound a datetime slice: a TypeError with the reason, as pandas raises
+            IndexKind::Datetime(_, tz) if text => {
+                Label::I64(crate::convert::parse_ts_in_tz(&obj, *tz).map_err(|e| {
+                    let py = obj.py();
+                    if e.is_instance_of::<pyo3::exceptions::PyValueError>(py) {
+                        PyTypeError::new_err(format!(
+                            "cannot slice a DatetimeIndex with {}: {}",
+                            obj.repr().map_or_else(|_| "?".to_string(), |r| r.to_string()),
+                            e.value(py)
+                        ))
+                    } else {
+                        e
+                    }
+                })?)
+            }
             _ => parse_label(&obj, index)?,
         };
         Ok(Some(if text { SliceBound::text(label) } else { SliceBound::exact(label) }))
@@ -568,7 +609,7 @@ impl DataFrameLoc {
         // 2-D label get: df.loc[rows, col], symmetric with __setitem__.
         if let Ok(tup) = key.downcast::<PyTuple>() {
             if tup.len() == 2 {
-                let rows = loc_row_axis(&tup.get_item(0)?, index, df.height())?;
+                let rows = loc_row_axis(&tup.get_item(0)?, &Labels::whole(index), df.height())?;
                 let cols = loc_col_axis(&tup.get_item(1)?, df)?;
                 return select_2d(py, &pf, &view, rows, cols);
             }
@@ -579,7 +620,7 @@ impl DataFrameLoc {
         }
         // boolean-mask / label-list row selection -> sub-frame.
         if as_bool_mask(key, df.height())?.is_some() || key.downcast::<PyList>().is_ok() {
-            let sel = RowSel::Positions(loc_positions(key, index, df.height())?);
+            let sel = RowSel::Positions(loc_positions(key, &Labels::whole(index), df.height())?);
             return Ok(Py::new(py, pf.derive_rows(&view, &sel)?)?.into_any());
         }
         // F28: partial-string datetime indexing — a year ("2021") or month
@@ -605,10 +646,7 @@ impl DataFrameLoc {
                 }
             }
         }
-        let label = parse_label(key, index)?;
-        let pos = index
-            .position_of(&label)
-            .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+        let pos = Labels::whole(index).locate(key)?;
         Ok(Py::new(py, row_at(df, pos))?.into_any())
     }
 
@@ -682,12 +720,7 @@ impl DataFrameAt {
     fn __getitem__(&self, py: Python<'_>, key: (Py<PyAny>, String)) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
         let view = pf.read()?;
-        let meta = pf.meta();
-        let lidx = meta.labels();
-        let label = parse_label(key.0.bind(py), &lidx)?;
-        let i = lidx
-            .position_of(&label)
-            .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+        let i = pf.meta().labels().locate(key.0.bind(py))?;
         let j = view.column_pos(&key.1).ok_or_else(|| {
             PyKeyError::new_err(format!("column \"{}\" not found", key.1))
         })?;
@@ -704,12 +737,7 @@ impl DataFrameAt {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        let i = {
-            let meta = pf.meta();
-            let lidx = meta.labels();
-            let label = parse_label(key.0.bind(py), &lidx)?;
-            lidx.position_of(&label).ok_or_else(|| PyKeyError::new_err("label not found"))?
-        };
+        let i = pf.meta().labels().locate(key.0.bind(py))?;
         let j = pf
             .inner
             .column_pos(&key.1)

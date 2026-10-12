@@ -15,11 +15,14 @@ use std::sync::Arc;
 /// A packed validity mask: 1 bit per element, **set = present (valid)**, clear =
 /// missing (`volas.NA`). Bits are stored LSB-first in `u64` words; bits beyond
 /// `len` are kept clear so a popcount over every word counts exactly the present
-/// values.
+/// values. The count of missing values is kept as the bits change, so reading it —
+/// and a single-cell write — is O(1), never a popcount of the whole mask.
 #[derive(Clone, Debug)]
 pub struct Bitmap {
     words: Vec<u64>,
     len: usize,
+    /// The number of clear bits among the first `len`.
+    nulls: usize,
 }
 
 /// Words needed to hold `len` bits.
@@ -38,17 +41,18 @@ impl Bitmap {
                 *last = (1u64 << used) - 1;
             }
         }
-        Bitmap { words, len }
+        Bitmap { words, len, nulls: 0 }
     }
 
     /// Build from an iterator of `valid` flags (true = present).
     pub fn from_valid_iter(len: usize, valid: impl IntoIterator<Item = bool>) -> Bitmap {
-        let mut bm = Bitmap { words: vec![0; words_for(len)], len };
+        let mut bm = Bitmap { words: vec![0; words_for(len)], len, nulls: 0 };
         for (i, v) in valid.into_iter().enumerate().take(len) {
             if v {
                 bm.words[i / 64] |= 1u64 << (i % 64);
             }
         }
+        bm.nulls = len - present_bits(&bm.words);
         bm
     }
 
@@ -67,25 +71,32 @@ impl Bitmap {
         (self.words[i / 64] >> (i % 64)) & 1 == 1
     }
 
-    /// Mark element `i` present (`valid = true`) or missing. `i` in bounds.
+    /// Mark element `i` present (`valid = true`) or missing, keeping the missing
+    /// count. `i` in bounds.
     pub fn set(&mut self, i: usize, valid: bool) {
+        if self.get(i) == valid {
+            return;
+        }
         let (w, bit) = (i / 64, 1u64 << (i % 64));
         if valid {
             self.words[w] |= bit;
+            self.nulls -= 1;
         } else {
             self.words[w] &= !bit;
+            self.nulls += 1;
         }
     }
 
-    /// Count of missing values (clear bits among the first `len`).
+    /// Count of missing values (clear bits among the first `len`) — O(1).
     pub fn null_count(&self) -> usize {
-        self.len - present_bits(&self.words)
+        self.nulls
     }
 
     /// Grow by `count` missing (clear) bits — amortized O(count / 64): the words
     /// past `len` are already clear.
     fn grow_missing(&mut self, count: usize) {
         self.len += count;
+        self.nulls += count;
         self.words.resize(words_for(self.len), 0);
     }
 }
@@ -155,16 +166,12 @@ impl Validity {
             }
             Some(arc) => {
                 let bm = Arc::make_mut(arc);
-                // Only an actual 0->1 clear (filling the last hole) can empty the
-                // mask, so we re-collapse to dense ONLY then — preserving the
-                // "Some ⇒ has a missing value" invariant that `has_nulls` /
-                // `null_count` / `PartialEq` / the NA-aware export paths rely on.
-                // A no-op set-present or any set-missing skips the popcount, so the
-                // dense (`None`) hot path is untouched and the `Some` path pays the
-                // `null_count` scan only when a hole is genuinely filled.
-                let clearing_hole = valid && !bm.get(i);
+                // Filling the last hole empties the mask, so it re-collapses to
+                // dense — preserving the "Some ⇒ has a missing value" invariant that
+                // `has_nulls` / `null_count` / `PartialEq` / the NA-aware export paths
+                // rely on. The bitmap keeps its missing count, so this is O(1).
                 bm.set(i, valid);
-                if clearing_hole && bm.null_count() == 0 {
+                if bm.null_count() == 0 {
                     self.0 = None;
                 }
             }
@@ -324,6 +331,22 @@ mod tests {
         bm.set(3, true);
         assert!(bm.get(3));
         assert_eq!(bm.null_count(), 1);
+    }
+
+    #[test]
+    fn bitmap_keeps_its_missing_count_as_bits_change() {
+        let mut bm = Bitmap::from_valid_iter(130, (0..130).map(|i| i % 7 != 0));
+        assert_eq!(bm.null_count(), 19);
+        bm.set(0, false); // already missing: unchanged
+        bm.set(1, true); // already present: unchanged
+        assert_eq!(bm.null_count(), 19);
+        bm.set(0, true);
+        bm.set(129, false);
+        bm.set(128, false);
+        assert_eq!(bm.null_count(), 20);
+        bm.grow_missing(70);
+        assert_eq!((bm.len(), bm.null_count()), (200, 90));
+        assert_eq!(bm.null_count(), bm.len() - present_bits(&bm.words));
     }
 
     #[test]

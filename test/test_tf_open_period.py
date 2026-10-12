@@ -354,3 +354,52 @@ def test_a_relabelled_copy_is_checked_like_a_time_frame_seed():
         DataFrame(base, index=np.array(["2024-01-01T10:00", "NaT"], dtype="datetime64[ns]"))
     with pytest.raises(ValueError, match="requires a DatetimeIndex"):
         DataFrame(base, index=[1, 2])
+
+
+# --- a write that cannot change the forming row leaves the open period as it is -----
+
+
+@pytest.mark.parametrize("via", ["iloc", "loc", "iat", "at", "mask", "rowmask", "cellmask"])
+def test_a_write_to_closed_rows_only_leaves_a_several_bar_period_exact(via):
+    df = _live()  # 09:00 closed; 09:05-09:07 forming
+    write = {
+        "iloc": lambda: df.iloc.__setitem__((0, 1), 99.0),
+        "loc": lambda: df.loc.__setitem__((T0, "volume"), 99.0),
+        "iat": lambda: df.iat.__setitem__((0, 1), 99.0),
+        "at": lambda: df.at.__setitem__((T0, "volume"), 99.0),
+        "mask": lambda: df.loc.__setitem__((np.array([True, False]), "volume"), 99.0),
+        "rowmask": lambda: df.__setitem__(np.array([True, False]), 99.0),
+        "cellmask": lambda: df.__setitem__(df == 1.0, 99.0),  # the closed close only
+    }[via]
+    write()
+    closed_row = {"rowmask": [99.0, 99.0], "cellmask": [99.0, 10.0]}.get(via, [1.0, 99.0])
+    assert rows(df) == [closed_row, [4.0, 6.0]]
+    df.append(frame([7], close=[4.5], volume=[2.5]))  # a re-send still replaces exactly
+    df.append(frame([8], close=[5.0], volume=[1.0]))
+    assert rows(df) == [closed_row, [5.0, 6.5]]
+
+
+def test_a_closed_write_to_a_cached_column_still_turns_it_into_data():
+    # the batch writes no forming cell, but a cached column: the data columns change, so
+    # the next fold makes its forming cell missing, as for any column that becomes data
+    df = DataFrame(frame([0, 5], close=[1.0, 2.0], volume=[1.0, 2.0]), time_frame="5m")
+    df.append(frame([6], close=[4.0], volume=[3.0]))  # the forming period: two fine bars
+    df["ma:2"]
+    df.loc[np.array([True, False]), "ma:2"] = -1.0
+    assert not df.is_computed("ma:2")
+    df.append(frame([7], close=[5.0], volume=[1.0], **{"ma:2": [7.0]}))
+    got = rows(df)
+    assert got[0] == [1.0, 1.0, -1.0] and got[1][:2] == [5.0, 6.0] and np.isnan(got[1][2])
+
+
+def test_a_windowed_closed_write_leaves_the_open_period_like_an_unbounded_one():
+    seed = frame(list(range(0, 50, 5)), close=np.arange(1.0, 11.0), volume=np.ones(10))
+    unb = DataFrame(seed, time_frame="5m")
+    win = DataFrame(seed, time_frame="5m", window=4, max_lookback=2)
+    for df in (unb, win):
+        df.append(frame([46], close=[20.0], volume=[2.0]))
+        df.iat[-2, 1] = 77.0  # the closed row before the forming one
+        df.append(frame([47], close=[21.0], volume=[3.0]))
+        df.append(frame([47], close=[21.5], volume=[2.5]))  # a re-send replaces exactly
+    assert rows(win) == rows(unb)[-4:]
+    assert rows(win)[-2:] == [[9.0, 77.0], [21.5, 5.5]]

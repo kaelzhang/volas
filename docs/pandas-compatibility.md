@@ -222,10 +222,16 @@ keeps its exact type: an int is an `int64` column (never a float), `np.int32(7)`
 of any other shape, a list or a tuple is values, one per row (a one-element array on a
 two-row frame is a length error, never a broadcast). A boolean-frame mask
 (`df[mask] = v`) pairs with the columns by **name** and must carry the frame's index.
-Every cell write (`iloc` / `loc` / `iat` / `at`, `df[mask] = v`) lands in place and,
-like a bulk read, raises while a cached directive column is stale; a mask that selects
-no row changes nothing. On a bounded (`window=`) frame a whole-column assignment writes
-the visible rows only and keeps the hidden margin's history (see
+Every cell write (`iloc` / `loc` / `iat` / `at`, `df[mask] = v`) lands in place, all or
+nothing, and on a numeric, bool or datetime column costs time in the cells it writes,
+not in the frame's length: no column is copied (unless a Series or an export still
+shares it), and a label is found by a binary search over an ordered index — on a plain,
+time-frame or windowed frame alike. Three writes do cost time in the length: a write
+into a `str` column rebuilds the column's contiguous text bytes; a boolean-mask write
+reads its whole mask, one flag per row; and on a windowed frame a label-slice write
+(`df.loc['a':'b', col] = v`) first lays out the visible rows' labels. Like a bulk read, a write raises while a cached directive column is stale; a mask that
+selects no row changes nothing. On a bounded (`window=`) frame a whole-column assignment
+writes the visible rows only and keeps the hidden margin's history (see
 [Bounded rolling window](dataframe-api.md#bounded-rolling-window)).
 
 ```py
