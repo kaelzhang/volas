@@ -16,8 +16,8 @@ CASES = [
     ('ma:5', 4), ('ema:5', 4),
     # MACD variants
     ('macd', 25), ('macd.signal', 33), ('macd.histogram', 33),
-    # BBI (lookback = max of all periods)
-    ('bbi', 24),
+    # BBI (lookback = max of all periods - 1: the longest SMA's first value)
+    ('bbi', 23),
     # TR & ATR
     ('tr', 1), ('atr:14', 14),
     # LLV, HHV, Donchian (lookback = period - 1)
@@ -39,7 +39,7 @@ CASES = [
     # --- Additional cases with varying parameters ---
     ('ma:10', 9), ('ma:20', 19), ('ema:12', 11), ('ema:26', 25),
     ('macd:5,10', 9), ('macd.signal:5,10,3', 11), ('macd.histogram:8,17,5', 20),
-    ('bbi:5,10,15,20', 20),
+    ('bbi:5,10,15,20', 19),
     ('atr:7', 7), ('rsi:7', 7),
     ('boll:10', 9), ('boll.upper:30,2.5', 29),
     ('kdj.k:5,3,50', 15), ('kdj.d:14,5,5,50', 42),
@@ -73,7 +73,7 @@ def test_stringify_stays_lenient_on_a_missing_required_argument():
     assert volas.directive_stringify("ma") == "ma"
 
 
-@pytest.mark.parametrize("directive,lookback", [("obv:", 0), ("tr:", 1), ("ad:", 0), ("bbi:", 24)])
+@pytest.mark.parametrize("directive,lookback", [("obv:", 0), ("tr:", 1), ("ad:", 0), ("bbi:", 23)])
 def test_an_empty_argument_list_means_no_arguments(directive, lookback):
     assert volas.directive_lookback(directive) == lookback
     assert volas.directive_stringify(directive) == directive[:-1]

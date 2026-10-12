@@ -32,8 +32,8 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
     match name {
         "ema" | "smma" => arg(args, 0).saturating_sub(1),
         "ma" => ma_lookback(arg(args, 0), arg(args, 1)),
-        // apo/ppo warm up with the slower MA of the chosen type.
-        "apo" | "ppo" => ma_lookback(arg(args, 1), arg(args, 2)),
+        // apo/ppo need both MAs: the later of the two warm-ups (either may be the longer).
+        "apo" | "ppo" => ma_lookback(arg(args, 0), arg(args, 2)).max(ma_lookback(arg(args, 1), arg(args, 2))),
         // mavp warms up over the maximum period's MA (args: min, max, matype).
         "mavp" => ma_lookback(arg(args, 1), arg(args, 2)),
         "macdext" => {
@@ -69,15 +69,18 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             None => 25,
             _ => 24 + arg(args, 0),
         },
+        // bbi = the mean of four SMAs: first value where the longest SMA's is, max − 1.
         "bbi" => arg(args, 0)
             .max(arg(args, 1))
             .max(arg(args, 2))
-            .max(arg(args, 3)),
+            .max(arg(args, 3))
+            .saturating_sub(1),
         "psy" => arg(args, 0).saturating_sub(1),
         // pvt / nvi / pvi are cumulative (lookback 0); like obv/ad they carry a running-line
         // state so append resumes in O(new rows) and continues past a slice (see exec_resume).
         "pvt" | "nvi" | "pvi" => 0,
-        "dpo" => arg(args, 0).saturating_sub(1),
+        // dpo reads the SMA (n−1) and the close n/2+1 bars back: the later of the two.
+        "dpo" => arg(args, 0).saturating_sub(1).max(arg(args, 0) / 2 + 1),
         "cmf" => arg(args, 0).saturating_sub(1),
         // chop's TR sum needs one prior close, so it warms up one bar past the window.
         "chop" => arg(args, 0),
@@ -88,12 +91,15 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         "mass_index" => 15 + arg(args, 0),
         "efi" => arg(args, 0),
         "tsi" => arg(args, 0) + arg(args, 1) - 1,
-        "crsi" => arg(args, 2) + 1,
+        // crsi averages RSI(close) (rsi_len), RSI(streak) (streak_len; the streak starts
+        // at bar 0) and the percent rank of ROC1 over rank_len prior values (rank_len+1).
+        "crsi" => arg(args, 0).max(arg(args, 1)).max(arg(args, 2) + 1),
         // bias ≡ ppo:1,N,0 — the slow SMA_N gates it (the fast SMA_1 has no warm-up).
         "bias" => arg(args, 0).saturating_sub(1),
-        // dma's DDD line ≡ apo:fast,slow,0 (slow SMA gates it); AMA adds its own SMA_M warm-up.
+        // dma's DDD line = SMA(fast) − SMA(slow) (the later of the two SMAs gates it); AMA adds
+        // its own SMA_M warm-up.
         "dma" => {
-            let line = arg(args, 1).saturating_sub(1);
+            let line = arg(args, 0).max(arg(args, 1)).saturating_sub(1);
             match sub {
                 None => line,
                 _ => line + arg(args, 2).saturating_sub(1),
@@ -109,7 +115,7 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             _ => arg(args, 0).saturating_sub(1),
         },
         // coppock: the longer ROC plus the WMA warm-up.
-        "coppock" => arg(args, 1) + arg(args, 0).saturating_sub(1),
+        "coppock" => arg(args, 1).max(arg(args, 2)) + arg(args, 0).saturating_sub(1),
         // relative_vigor: swma4 (3) + SMAₙ (n−1) = n+2; the signal adds another swma4 (3).
         "relative_vigor" => match sub {
             Some("signal") => arg(args, 0) + 5,
@@ -136,7 +142,8 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             match sub {
                 Some("tenkan") => t.saturating_sub(1),
                 Some("kijun") => k.saturating_sub(1),
-                Some("senkou_a") => k.saturating_sub(1) + k,
+                // senkou_a averages tenkan and kijun: the longer of the two, displaced.
+                Some("senkou_a") => t.max(k).saturating_sub(1) + k,
                 Some("senkou_b") => sb.saturating_sub(1) + k,
                 _ => 0,
             }
@@ -228,7 +235,8 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         // iii is pointwise (no warm-up); kcw warms with its slower component
         // (EMA(ema_period) vs ATR(atr_period)).
         "iii" => 0,
-        "kcw" => arg(args, 0).max(arg(args, 1)).saturating_sub(1),
+        // kcw = 2·mult·ATR/EMA: the EMA warms up at ema_period−1, the ATR at atr_period.
+        "kcw" => arg(args, 0).saturating_sub(1).max(arg(args, 1)),
         // a pivot is confirmed `rightbars` after a point needing `leftbars` of
         // history, so the first possible output is at bar left+right.
         "pivothigh" | "pivotlow" => arg(args, 0) + arg(args, 1),

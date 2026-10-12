@@ -234,3 +234,13 @@ def test_macdext_swaps_its_averages_with_their_types():
                              ('macdext.signal:14,1,7,0,5,2', 'macdext.signal:7,0,14,1,5,2')):
         _same(_exec(d, swapped), _exec(d, ordered), exact=True)
         _same(_appended(d, swapped, 30), _exec(d, ordered), exact=True)
+
+
+# --- Ichimoku: the leading span waits for the longer of its two midpoints ---------------
+
+def test_senkou_a_cached_before_its_first_value_continues_on_append():
+    d = _ohlcv(80)
+    assert volas.directive_lookback('ichimoku.senkou_a:9,1,52') == 9
+    full = _exec(d, 'ichimoku.senkou_a:9,1,52')
+    assert np.isnan(full[:9]).all() and np.isfinite(full[9])
+    _same(_appended(d, 'ichimoku.senkou_a:9,1,52', 4), full, exact=True)

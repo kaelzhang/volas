@@ -70,7 +70,8 @@ bbi:<a>,<b>,<c>,<d>@<on>
 ```
 
 Calculates BBI (Bull and Bear Index), which is the average of `ma:3`, `ma:6`,
-`ma:12`, and `ma:24` by default.
+`ma:12`, and `ma:24` by default. Its first value is the longest average's, at row
+`max(a, b, c, d) − 1` (its lookback).
 
 - **a?** `int=3`
 - **b?** `int=6`
