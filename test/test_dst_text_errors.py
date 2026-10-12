@@ -65,3 +65,19 @@ def test_a_value_of_no_timestamp_type_is_a_type_error_to_build_and_a_missing_lab
     df = _aware('2024-03-10T05:00')
     with pytest.raises(KeyError, match='cannot convert float to a timestamp'):
         df.loc[1.5]
+
+
+@pytest.mark.parametrize('text, reason', [(GAP, 'DST gap'), ('nonsense', 'could not parse')])
+def test_such_text_cannot_bound_a_datetime_slice(text, reason):
+    # pandas 3.0.3: "cannot do slice indexing on DatetimeIndex with these indexers"
+    df = _aware('2024-03-10T05:00')
+    with pytest.raises(TypeError, match=reason):
+        df.loc[text:]
+    with pytest.raises(TypeError, match=reason):
+        df.loc[:text]
+
+
+def test_a_datetime_fill_keeps_the_reason():
+    s = volas.to_datetime(volas.DataFrame({'t': ['2024-01-02', None]})['t'])
+    with pytest.raises(ValueError, match='could not parse datetime "nonsense"'):
+        s.fillna('nonsense')
