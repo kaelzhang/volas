@@ -344,6 +344,7 @@
             Some(9.5)
         });
         assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![9.5]), Some(vec![8.0])));
+        df.set_column("x", Column::f64(vec![0.0; 10])).unwrap();
         df.set_computed("x", 0);
         df.invalidate_computed_on_write("x");
         assert_eq!((meta(&df).state, meta(&df).state_before_last), (None, None));
