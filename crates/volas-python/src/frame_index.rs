@@ -73,6 +73,15 @@ pub(crate) fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<
 /// too, for a float32 target), checked by Python's exact int / float comparison;
 /// otherwise it raises — never a rounded or saturated value (contract #20).
 fn number_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
+    // fast path for the live bar-append cells: a Python float is a float64 as-is
+    if let Ok(f) = v.downcast_exact::<pyo3::types::PyFloat>() {
+        return Ok(Column::f64(vec![f.value()]));
+    }
+    if v.is_exact_instance_of::<pyo3::types::PyInt>() {
+        if let Ok(i) = v.extract::<i64>() {
+            return Ok(Column::i64(vec![i]));
+        }
+    }
     if let Ok(b) = v.extract::<bool>() {
         return Ok(Column::bool(vec![b])); // a Python or NumPy bool
     }
