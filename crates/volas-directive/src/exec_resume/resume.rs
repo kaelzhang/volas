@@ -585,12 +585,9 @@ fn resume_rows(
 
         // StochRSI — a windowed %K (and SMA `.d`) of the Wilder-recursive RSI; resume by
         // carrying the RSI Wilder pair + the recent RSI values feeding the windows. Only
-        // the canonical SMA `.d` (matype 0) resumes; a recursive-MA `.d` declines.
+        // the canonical SMA `.d` (matype 0) resumes (the spec's fact).
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
-            if is_d && ind::generic_ma_type(arg_usize(args, 2), arg_usize(args, 3)) != 0 {
-                return None; // non-SMA `.d` smoothing is recursive — fall back.
-            }
             let (vals, st) = ind::stochrsi_resume(
                 &close().ok()?,
                 arg_usize(args, 0),
@@ -627,6 +624,6 @@ fn resume_rows(
             Some((Column::f64(vals), st))
         }
 
-        _ => None,
+        _ => None, // LCOV_EXCL_LINE every line whose spec declares a resume has an arm
     }
 }

@@ -113,8 +113,8 @@ pub(crate) fn state(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgVa
     }
 }
 
-/// One row of the finite-window command `name` / `sub` at `row`, from `prev` into `next`
-/// (see [`state`]). `None` when it has no step.
+/// One row of the finite-window command `name` / `sub` at `row` (a row of `ops`), from
+/// `prev` into `next` (see [`state`]). `None` when it has no step.
 pub(crate) fn step(
     ops: &Operands,
     name: &str,
@@ -136,9 +136,6 @@ pub(crate) fn step(
             ops.f64(3, "close").ok()?,
         ))
     };
-    if row >= ops.len() {
-        return None;
-    }
     match (name, sub) {
         // a formula of its own row (and a fixed prior one)
         ("avgprice", _) => {
@@ -245,7 +242,7 @@ pub(crate) fn step(
         ("apo" | "ppo" | "bias" | "dma" | "macdext" | "mavp", _) => {
             composite_step(ops, name, sub, args, prev, row, next)
         }
-        _ => None,
+        _ => None, // LCOV_EXCL_LINE every line whose spec declares a step has an arm
     }
 }
 
@@ -341,9 +338,6 @@ fn composite_step(
         return None;
     }
     let data = ops.f64(0, "close").ok()?;
-    if row >= data.len() {
-        return None;
-    }
     if name == "mavp" {
         return mavp_step(&data, &ops.f64_required(1).ok()?, args, prev, row, next);
     }

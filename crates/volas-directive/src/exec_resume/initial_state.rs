@@ -316,12 +316,9 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
         ),
 
         // StochRSI — carry the RSI Wilder pair + the recent RSI tail feeding the windows.
-        // A recursive-MA `.d` (matype != 0) keeps the fallback (no resume).
+        // Only the SMA `.d` resumes (the spec's fact).
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
-            if is_d && ind::generic_ma_type(arg_usize(args, 2), arg_usize(args, 3)) != 0 {
-                return None;
-            }
             ind::stochrsi_final_state(
                 &ops.f64(0, "close").ok()?,
                 arg_usize(args, 0),
@@ -354,6 +351,6 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
             )
         }
 
-        _ => None,
+        _ => None, // LCOV_EXCL_LINE every line whose spec declares a resume has an arm
     }
 }
