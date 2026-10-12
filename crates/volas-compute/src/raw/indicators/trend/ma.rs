@@ -51,16 +51,17 @@ pub fn ema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`ema`] from `state = [ema_{from-1}]` over rows `[from, n)`, bit-identical to a
 /// full recompute. Reads only `data[from..]`.
-pub fn ema_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
+/// Appends rows `[from, n)` to `out` and returns the carried state.
+pub fn ema_resume(data: &[f64], period: usize, from: usize, state: &[f64], out: &mut Vec<f64>) -> Vec<f64> {
     let k = smoothing::ema_k(period);
     let n = data.len();
     let mut e = state[0];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for &x in &data[from..n] {
         e = smoothing::ema(e, x, k);
         out.push(e);
     }
-    (out, vec![e])
+    vec![e]
 }
 
 /// Single new-row EMA resume: the value at `row`, with the carried state as of `row`
@@ -89,21 +90,23 @@ pub fn smma_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`smma`] from `state = [rma_{from-1}]` over rows `[from, n)`. Reads only
 /// `data[from..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn smma_resume(
     data: &[f64],
     period: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let wilder = smoothing::Wilder::new(period);
     let n = data.len();
     let mut w = state[0];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for &x in &data[from..n] {
         w = wilder.step(w, x);
         out.push(w);
     }
-    (out, vec![w])
+    vec![w]
 }
 
 /// Single new-row SMMA resume: the value at `row`, with the state as of `row` (`[w]`,

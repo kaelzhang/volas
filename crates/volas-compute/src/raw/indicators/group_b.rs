@@ -217,22 +217,24 @@ pub fn wad_final_state(high: &[f64], low: &[f64], close: &[f64]) -> Option<Vec<f
 
 /// Resume [`wad`] from `[wad_{from-1}, close_{from-1}]` over `[from, n)`, bit-identical to a
 /// full recompute.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn wad_resume(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let mut acc = state[0];
     let mut prev = state[1];
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    out.reserve(close.len().saturating_sub(from));
     for i in from..close.len() {
         acc += wad_step(high[i], low[i], close[i], prev);
         out.push(acc);
         prev = close[i];
     }
-    (out, vec![acc, prev])
+    vec![acc, prev]
 }
 
 /// One Wilder Swing Index increment. `op` / `cp` are the prior bar's open / close; `t` is the
@@ -286,6 +288,8 @@ pub fn asi_final_state(
 }
 
 /// Resume [`asi`] from `[asi_{from-1}, close_{from-1}, open_{from-1}]` over `[from, n)`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
+#[allow(clippy::too_many_arguments)] // one parameter per input, state and output sink
 pub fn asi_resume(
     open: &[f64],
     high: &[f64],
@@ -294,16 +298,17 @@ pub fn asi_resume(
     t: f64,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let (mut acc, mut pc, mut po) = (state[0], state[1], state[2]);
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    out.reserve(close.len().saturating_sub(from));
     for i in from..close.len() {
         acc += asi_si(open[i], high[i], low[i], close[i], po, pc, t);
         out.push(acc);
         pc = close[i];
         po = open[i];
     }
-    (out, vec![acc, pc, po])
+    vec![acc, pc, po]
 }
 
 /// Which standard pivot-point level to emit.
@@ -442,6 +447,7 @@ pub fn keltner_band_final_state(
 /// to a full recompute. `None` at `from == 0` (the ATR resume declines).
 // One parameter per series/state the resume reads; a struct would only repackage them.
 #[allow(clippy::too_many_arguments)]
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn keltner_band_resume(
     close: &[f64],
     high: &[f64],
@@ -452,12 +458,20 @@ pub fn keltner_band_resume(
     upper: bool,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
-    let (e_vals, e_state) = super::ema_resume(close, ema_period, from, &state[0..1]);
-    let (a_vals, a_state) = super::atr_resume(high, low, close, atr_period, from, &state[1..2])?;
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
+    let at = out.len();
+    let e_state = super::ema_resume(close, ema_period, from, &state[0..1], out);
+    let mut atr = Vec::new();
+    let Some(a_state) = super::atr_resume(high, low, close, atr_period, from, &state[1..2], &mut atr) else {
+        out.truncate(at);
+        return None;
+    };
     let sign = if upper { 1.0 } else { -1.0 };
-    let vals: Vec<f64> = (0..e_vals.len()).map(|i| e_vals[i] + sign * mult * a_vals[i]).collect();
-    Some((vals, vec![e_state[0], a_state[0]]))
+    for (e, a) in out[at..].iter_mut().zip(atr) {
+        *e += sign * mult * a;
+    }
+    Some(vec![e_state[0], a_state[0]])
 }
 
 /// Stochastic Momentum Index (Blau / LazyBear): `HH`/`LL` = k-day high/low; `D = C − (HH+LL)/2`,
@@ -698,6 +712,7 @@ pub fn supertrend_final_state(
 /// resume — bit-identical to a full recompute. `None` at `from == 0` (the ATR resume declines).
 // One parameter per series/state the resume reads; a struct would only repackage them.
 #[allow(clippy::too_many_arguments)]
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn supertrend_resume(
     high: &[f64],
     low: &[f64],
@@ -707,18 +722,19 @@ pub fn supertrend_resume(
     want_direction: bool,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let (mut trend, mut fu, mut fl, mut pc) = (state[0], state[1], state[2], state[3]);
-    let (atr_tail, atr_new) = super::atr_resume(high, low, close, period, from, &state[4..5])?;
+    let at = out.len();
+    let atr_new = super::atr_resume(high, low, close, period, from, &state[4..5], out)?;
     let hl2 = |i: usize| (high[i] + low[i]) / 2.0;
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
-    for (j, i) in (from..close.len()).enumerate() {
-        let step = supertrend_step(hl2(i), atr_tail[j], close[i], mult, trend, fu, fl, pc);
+    for (v, i) in out[at..].iter_mut().zip(from..close.len()) {
+        let step = supertrend_step(hl2(i), *v, close[i], mult, trend, fu, fl, pc);
         (trend, fu, fl) = step;
-        out.push(supertrend_out(trend, fu, fl, want_direction));
+        *v = supertrend_out(trend, fu, fl, want_direction);
         pc = close[i];
     }
-    Some((out, vec![trend, fu, fl, pc, atr_new[0]]))
+    Some(vec![trend, fu, fl, pc, atr_new[0]])
 }
 
 
@@ -811,6 +827,15 @@ mod tests {
 
     /// The cumulative `*_final_state` guards decline on an empty series (no first bar to seed).
     #[test]
+    fn a_declined_keltner_resume_removes_the_ema_rows_it_appended() {
+        let close = [10.0, 11.0, 12.0];
+        let mut out = vec![-0.0, f64::from_bits(0x7ff8_0000_0000_1234)];
+        let before: Vec<u64> = out.iter().map(|v| v.to_bits()).collect();
+        assert!(keltner_band_resume(&close, &close, &close, 2, 2, 2.0, true, 0, &[9.0, 1.0], &mut out).is_none());
+        assert_eq!(out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), before);
+    }
+
+    #[test]
     fn cumulative_final_state_declines_on_empty() {
         assert!(wad_final_state(&[], &[], &[]).is_none());
         assert!(asi_final_state(&[], &[], &[], &[], 3.0).is_none());
@@ -826,13 +851,17 @@ mod tests {
         let asi_full = asi(&open, &high, &low, &close, 3.0);
         for &from in &[1usize, 2, 40, 80, 159] {
             let st = wad_final_state(&high[..from], &low[..from], &close[..from]).unwrap();
-            assert_bits(&wad_resume(&high, &low, &close, from, &st).0, &wad_full[from..], "wad");
+            let mut tail = Vec::new();
+            wad_resume(&high, &low, &close, from, &st, &mut tail);
+            assert_bits(&tail, &wad_full[from..], "wad");
 
             let st =
                 asi_final_state(&open[..from], &high[..from], &low[..from], &close[..from], 3.0)
                     .unwrap();
+            let mut tail = Vec::new();
+            asi_resume(&open, &high, &low, &close, 3.0, from, &st, &mut tail);
             assert_bits(
-                &asi_resume(&open, &high, &low, &close, 3.0, from, &st).0,
+                &tail,
                 &asi_full[from..],
                 "asi",
             );
@@ -855,11 +884,11 @@ mod tests {
         for &from in &[11usize, 20, 80, 159] {
             let st = supertrend_final_state(&high[..from], &low[..from], &close[..from], 10, 3.0)
                 .unwrap();
-            let (line, _) =
-                supertrend_resume(&high, &low, &close, 10, 3.0, false, from, &st).unwrap();
+            let mut line = Vec::new();
+            let _ = supertrend_resume(&high, &low, &close, 10, 3.0, false, from, &st, &mut line).unwrap();
             assert_bits(&line, &line_full[from..], "supertrend");
-            let (dir, _) =
-                supertrend_resume(&high, &low, &close, 10, 3.0, true, from, &st).unwrap();
+            let mut dir = Vec::new();
+            let _ = supertrend_resume(&high, &low, &close, 10, 3.0, true, from, &st, &mut dir).unwrap();
             assert_bits(&dir, &dir_full[from..], "supertrend.direction");
         }
     }

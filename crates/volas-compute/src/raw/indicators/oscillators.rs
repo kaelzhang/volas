@@ -206,9 +206,11 @@ pub fn stochrsi_final_state(
 }
 
 /// Resume StochRSI `.k` / `.d` from its state (see the module note) over rows
-/// `[from, n)`, returning the new-row values and the updated state. `None` when RSI cannot
-/// be resumed (`from == 0`) or the carried context is too short / not warm. Bit-identical
+/// `[from, n)`. `None` when RSI cannot be resumed (`from == 0`) or the carried context
+/// is too short / not warm. Bit-identical
 /// to a fresh `stochrsi_fastk` (+ SMA for `.d`).
+/// Appends rows `[from, n)` to `out` and returns the carried state.
+#[allow(clippy::too_many_arguments)] // one parameter per input, state and output sink
 pub fn stochrsi_resume(
     close: &[f64],
     rsi_period: usize,
@@ -217,46 +219,44 @@ pub fn stochrsi_resume(
     fastd_period: usize,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let n = close.len();
     let c = stochrsi_ctx_depth(fastk_period, is_d, fastd_period);
     let head = stochrsi_head_len(is_d);
     if state.len() != c + head || from == 0 || from > n || from < c || fastk_period == 0 {
         return None;
     }
-    // Continue RSI over the new rows from the carried Wilder pair (as of `from-1`).
-    let (new_rsi, new_wilder) = rsi_resume(close, rsi_period, from, &state[..2])?;
     // RSI buffer covering `[from - c, n)`: the carried context tail ++ the new RSI rows.
-    let mut buf = Vec::with_capacity(c + new_rsi.len());
+    let mut buf = Vec::with_capacity(c + n - from);
     buf.extend_from_slice(&state[head..]); // rsi[from-c .. from)
-    buf.extend_from_slice(&new_rsi); // rsi[from .. n)
+    let new_wilder = rsi_resume(close, rsi_period, from, &state[..2], &mut buf)?;
     // Windowed stochastic %K of the RSI buffer (RSI as high=low=close, matching
     // `stochrsi_fastk`). Buffer index `p` is original row `from - c + p`.
     let fk = stoch_fastk(&buf, &buf, &buf, fastk_period);
     let mut new_state = new_wilder;
     // New rows `[from, n)` are buffer indices `[c, c + (n-from))`.
-    let out: Vec<f64> = if is_d {
+    let at = out.len();
+    out.reserve(n - from);
+    if is_d {
         // `.d` is the SMA of %K; only matype 0 (SMA) is resumed (the caller gates this).
         // Buffer index `p` is row `from - c + p`, so the SMA's row `i` reads `fk[i + c -
         // from]` — present for every row it drops (`>= from - fastd_period`).
         let mut slide = Slide::<1>::from_state(&state[2..head])?;
         let base = from - c;
         let k = |j: usize| fk[j - base];
-        let out = (from..n)
-            .map(|i| stochrsi_d_row(&mut slide, fastd_period, i, k))
-            .collect();
+        out.extend((from..n).map(|i| stochrsi_d_row(&mut slide, fastd_period, i, k)));
         let mut words = [0.0; Slide::<1>::STATE];
         slide.write_state(&mut words);
         new_state.extend_from_slice(&words);
-        out
     } else {
-        fk[c..].to_vec()
-    };
-    debug_assert_eq!(out.len(), n - from);
+        out.extend_from_slice(&fk[c..]);
+    }
+    debug_assert_eq!(out.len() - at, n - from);
     // Refresh the state: Wilder pair as of n-1, [the `.d` slide,] the trailing `c` RSI.
-    let full_rsi_len = c + new_rsi.len(); // == buf.len()
+    let full_rsi_len = buf.len();
     new_state.extend_from_slice(&buf[full_rsi_len - c..]);
-    Some((out, new_state))
+    Some(new_state)
 }
 
 /// Relative Strength Index (TA-Lib RSI): `100·(avgGain/(avgGain+avgLoss))` over the
@@ -382,19 +382,19 @@ fn gain_loss_resume(
     from: usize,
     state: &[f64],
     value: impl Fn(GainLoss) -> f64,
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     if from == 0 {
         return None;
     }
     let mut w = GainLoss::from_state(state)?;
     let avg = smoothing::Wilder::new(period);
-    let out = (from..close.len())
-        .map(|i| {
-            w.step(avg, close[i] - close[i - 1]);
-            value(w)
-        })
-        .collect();
-    Some((out, w.state()))
+    out.reserve(close.len().saturating_sub(from));
+    out.extend((from..close.len()).map(|i| {
+        w.step(avg, close[i] - close[i - 1]);
+        value(w)
+    }));
+    Some(w.state())
 }
 
 /// The single-row twin of [`gain_loss_resume`]: `value` at `row` continued from `state`
@@ -425,13 +425,15 @@ pub fn rsi_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`rsi`] from `state = [avg_gain, avg_loss]` over rows `[from, n)`. `None` at
 /// `from == 0`. Reads only `close[from-1..]`; bit-identical to [`rsi`].
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn rsi_resume(
     close: &[f64],
     period: usize,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
-    gain_loss_resume(close, period, from, state, GainLoss::rsi)
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
+    gain_loss_resume(close, period, from, state, GainLoss::rsi, out)
 }
 
 /// Final CMO state `[avg_gain, avg_loss]` after a full [`cmo`] compute, or `None` if it
@@ -442,13 +444,15 @@ pub fn cmo_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`cmo`] from `state = [avg_gain, avg_loss]` over rows `[from, n)`. `None` at
 /// `from == 0`. Reads only `close[from-1..]`; bit-identical to [`cmo`].
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn cmo_resume(
     close: &[f64],
     period: usize,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
-    gain_loss_resume(close, period, from, state, GainLoss::cmo)
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
+    gain_loss_resume(close, period, from, state, GainLoss::cmo, out)
 }
 
 /// Scalar single-row twin of [`rsi_resume`]: the RSI at `row` continued from
@@ -759,25 +763,29 @@ mod tests {
 
             // `.k` line (is_d = false).
             let st = stochrsi_final_state(head, rp, fk, false, fd, 0).unwrap();
-            let (tail, _) = stochrsi_resume(&close, rp, fk, false, fd, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = stochrsi_resume(&close, rp, fk, false, fd, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &k_full[from..], "stochrsi.k");
 
             // `.d` line (is_d = true): the carried running sum of the `.d` SMA continues
             // the full frame's own, so the two agree bit for bit — also when the resume
             // is chained one row at a time from each returned state.
             let st = stochrsi_final_state(head, rp, fk, true, fd, 0).unwrap();
-            let (tail, _) = stochrsi_resume(&close, rp, fk, true, fd, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = stochrsi_resume(&close, rp, fk, true, fd, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &d_full[from..], "stochrsi.d");
             let mut st = st;
             for row in from..close.len() {
-                let (one, next) = stochrsi_resume(&close[..=row], rp, fk, true, fd, row, &st).unwrap();
+                let mut one = Vec::new();
+                let next = stochrsi_resume(&close[..=row], rp, fk, true, fd, row, &st, &mut one).unwrap();
                 assert_bits(&one, &d_full[row..=row], "stochrsi.d chained");
                 st = next;
             }
             // the default fused `.d` kernel is the same SMA
             let d_default = crate::raw::indicators::stochrsi_d_default_sma(&close, 0).unwrap();
             let st = stochrsi_final_state(head, 14, 5, true, 3, 0).unwrap();
-            let (tail, _) = stochrsi_resume(&close, 14, 5, true, 3, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = stochrsi_resume(&close, 14, 5, true, 3, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &d_default[from..], "stochrsi.d default");
         }
     }
@@ -798,15 +806,16 @@ mod tests {
         let close = series(200);
         let st = stochrsi_final_state(&close[..120], rp, fk, false, fd, 0).unwrap();
         let bad = vec![0.0; 1]; // wrong length (!= c + 2)
-        assert!(stochrsi_resume(&close, rp, fk, false, fd, 120, &bad).is_none());
-        assert!(stochrsi_resume(&close, rp, fk, false, fd, 0, &st).is_none()); // from == 0
+        assert!(stochrsi_resume(&close, rp, fk, false, fd, 120, &bad, &mut Vec::new()).is_none());
+        assert!(stochrsi_resume(&close, rp, fk, false, fd, 0, &st, &mut Vec::new()).is_none()); // from == 0
 
         // A NaN late in the close poisons the raw RSI from row 150 on: the resumed tail
         // equals the full computation's, NaN windows included.
         let mut nanclose = series(200);
         nanclose[150] = f64::NAN;
         let st = stochrsi_final_state(&nanclose[..140], rp, fk, false, fd, 0).unwrap();
-        let (tail, _) = stochrsi_resume(&nanclose, rp, fk, false, fd, 140, &st).unwrap();
+        let mut tail = Vec::new();
+        let _ = stochrsi_resume(&nanclose, rp, fk, false, fd, 140, &st, &mut tail).unwrap();
         let full = stochrsi_fastk(&nanclose, rp, fk);
         assert!(tail.iter().zip(&full[140..]).all(|(a, b)| a.to_bits() == b.to_bits()));
         assert!(tail[10..].iter().all(|v| v.is_nan()));
@@ -824,19 +833,21 @@ mod tests {
         let cmo_full = cmo(&close, p);
         for &from in &[p + 1, 30, 60, 119] {
             let st = rsi_final_state(&close[..from], p).unwrap();
-            let (tail, _) = rsi_resume(&close, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = rsi_resume(&close, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &rsi_full[from..], "rsi");
 
             let st = cmo_final_state(&close[..from], p).unwrap();
-            let (tail, _) = cmo_resume(&close, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = cmo_resume(&close, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &cmo_full[from..], "cmo");
         }
 
         // from == 0 -> both resumes decline (oscillators.rs:384, 440).
         let st = rsi_final_state(&close, p).unwrap();
-        assert!(rsi_resume(&close, p, 0, &st).is_none());
+        assert!(rsi_resume(&close, p, 0, &st, &mut Vec::new()).is_none());
         let st = cmo_final_state(&close, p).unwrap();
-        assert!(cmo_resume(&close, p, 0, &st).is_none());
+        assert!(cmo_resume(&close, p, 0, &st, &mut Vec::new()).is_none());
 
         // period == 0 / n <= period -> final states decline (oscillators.rs:355, 415).
         assert!(rsi_final_state(&[1.0, 2.0], 5).is_none());
@@ -846,13 +857,15 @@ mod tests {
         // resume's flat-loss arm (oscillators.rs:391).
         let up: Vec<f64> = (0..40).map(|i| i as f64).collect();
         let st = rsi_final_state(&up[..20], p).unwrap();
-        let (tail, _) = rsi_resume(&up, p, 20, &st).unwrap();
+        let mut tail = Vec::new();
+        let _ = rsi_resume(&up, p, 20, &st, &mut tail).unwrap();
         assert!(tail.iter().all(|&x| x == 100.0), "rsi flat-loss -> 100");
 
         // Flat close: gain + loss == 0, so CMO's resume returns 0 (oscillators.rs:453).
         let flat = vec![7.0; 40];
         let st = cmo_final_state(&flat[..20], p).unwrap();
-        let (tail, _) = cmo_resume(&flat, p, 20, &st).unwrap();
+        let mut tail = Vec::new();
+        let _ = cmo_resume(&flat, p, 20, &st, &mut tail).unwrap();
         assert!(tail.iter().all(|&x| x == 0.0), "cmo flat-window -> 0");
     }
 }

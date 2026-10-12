@@ -108,15 +108,15 @@ impl Flat for Array1<f64> {
 
 /// A resume's output, fallible or not.
 trait IntoOption {
-    fn into_option(self) -> Option<(Vec<f64>, Vec<f64>)>;
+    fn into_option(self) -> Option<Vec<f64>>;
 }
-impl IntoOption for (Vec<f64>, Vec<f64>) {
-    fn into_option(self) -> Option<(Vec<f64>, Vec<f64>)> {
+impl IntoOption for Vec<f64> {
+    fn into_option(self) -> Option<Vec<f64>> {
         Some(self)
     }
 }
-impl IntoOption for Option<(Vec<f64>, Vec<f64>)> {
-    fn into_option(self) -> Option<(Vec<f64>, Vec<f64>)> {
+impl IntoOption for Option<Vec<f64>> {
+    fn into_option(self) -> Option<Vec<f64>> {
         self
     }
 }
@@ -145,7 +145,7 @@ fn state(name: &str, x: &[&[f64]], got: &dyn Fn(&[&[f64]]) -> String, raw: &dyn 
 }
 
 type StateOf<'a> = &'a dyn Fn(&[&[f64]]) -> Option<Vec<f64>>;
-type Resume<'a> = &'a dyn Fn(&[&[f64]], usize, &[f64]) -> Option<(Vec<f64>, Vec<f64>)>;
+type Resume<'a> = &'a dyn Fn(&[&[f64]], usize, &[f64], &mut Vec<f64>) -> Option<Vec<f64>>;
 
 fn resume(name: &str, x: &[&[f64]], state_of: StateOf, got: Resume, raw: Resume) {
     let rows = kept(x);
@@ -153,13 +153,24 @@ fn resume(name: &str, x: &[&[f64]], state_of: StateOf, got: Resume, raw: Resume)
     let compact = deleted(x, &rows);
     let head: Vec<&[f64]> = compact.iter().map(|c| &c[..at]).collect();
     let st = state_of(&head).unwrap_or_else(|| panic!("{name}: no state"));
-    let (out, next) = raw(&refs(&compact), at, &st).unwrap_or_else(|| panic!("{name}: raw declined"));
+    let prefix = [(-0.0f64).to_bits(), 0x7ff8_0000_0000_1234];
+    let sink = || prefix.iter().map(|&b| f64::from_bits(b)).collect::<Vec<_>>();
+    let mut out = sink();
+    let next = raw(&refs(&compact), at, &st, &mut out).unwrap_or_else(|| panic!("{name}: raw declined"));
+    assert_eq!(out[..2].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), prefix, "{name}");
     let mut full = vec![f64::NAN; N - FROM];
-    for (k, v) in out.into_iter().enumerate() {
+    for (k, &v) in out[2..].iter().enumerate() {
         full[rows[at + k] - FROM] = v;
     }
-    let got = got(x, FROM, &st).map(|(g, s)| (bits(&g), bits(&s)));
-    assert_eq!(got, Some((bits(&full), bits(&next))), "{name}");
+    let mut g = sink();
+    let actual = got(x, FROM, &st, &mut g).map(|s| (bits(&g[2..]), bits(&s)));
+    assert_eq!(g[..2].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), prefix, "{name}");
+    assert_eq!(actual, Some((bits(&full), bits(&next))), "{name}");
+    // An empty continuation appends nothing and retains the last state.
+    let before = out.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let end = raw(&refs(&compact), rows.len(), &next, &mut out).unwrap();
+    assert_eq!(out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), before, "{name}");
+    assert_eq!(bits(&end), bits(&next), "{name}");
 }
 
 type Step<'a> = &'a dyn Fn(&[&[f64]], usize, &[f64]) -> String;
@@ -429,160 +440,140 @@ fn a_state_describes_the_last_complete_row() {
 fn a_resume_continues_over_the_complete_rows() {
     let d = data();
     resume("ad_resume", &[&d.high[..], &d.low[..], &d.close[..], &d.volume[..]], &|x|
-        raw::ad_final_state(x[0], x[1], x[2], x[3]), &|x, from, st| ind::ad_resume(x[0],
-        x[1], x[2], x[3], from, st).into_option(), &|x, from, st| raw::ad_resume(x[0], x[1],
-        x[2], x[3], from, st).into_option());
+        raw::ad_final_state(x[0], x[1], x[2], x[3]), &|x, from, st, out| ind::ad_resume(x[0],
+        x[1], x[2], x[3], from, st, out).into_option(), &|x, from, st, out| raw::ad_resume(x[0], x[1],
+        x[2], x[3], from, st, out).into_option());
     resume("adosc_resume", &[&d.high[..], &d.low[..], &d.close[..], &d.volume[..]], &|x|
-        raw::adosc_final_state(x[0], x[1], x[2], x[3], 3, 6), &|x, from, st|
-        ind::adosc_resume(x[0], x[1], x[2], x[3], 3, 6, from, st).into_option(), &|x, from,
-        st| raw::adosc_resume(x[0], x[1], x[2], x[3], 3, 6, from, st).into_option());
+        raw::adosc_final_state(x[0], x[1], x[2], x[3], 3, 6), &|x, from, st, out|
+        ind::adosc_resume(x[0], x[1], x[2], x[3], 3, 6, from, st, out).into_option(), &|x, from, st, out| raw::adosc_resume(x[0], x[1], x[2], x[3], 3, 6, from, st, out).into_option());
     resume("adx_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::adx_final_state(x[0], x[1], x[2], 5), &|x, from, st| ind::adx_resume(x[0],
-        x[1], x[2], 5, from, st).into_option(), &|x, from, st| raw::adx_resume(x[0], x[1],
-        x[2], 5, from, st).into_option());
+        raw::adx_final_state(x[0], x[1], x[2], 5), &|x, from, st, out| ind::adx_resume(x[0],
+        x[1], x[2], 5, from, st, out).into_option(), &|x, from, st, out| raw::adx_resume(x[0], x[1],
+        x[2], 5, from, st, out).into_option());
     resume("adxr_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::adxr_final_state(x[0], x[1], x[2], 5), &|x, from, st| ind::adxr_resume(x[0],
-        x[1], x[2], 5, from, st).into_option(), &|x, from, st| raw::adxr_resume(x[0], x[1],
-        x[2], 5, from, st).into_option());
+        raw::adxr_final_state(x[0], x[1], x[2], 5), &|x, from, st, out| ind::adxr_resume(x[0],
+        x[1], x[2], 5, from, st, out).into_option(), &|x, from, st, out| raw::adxr_resume(x[0], x[1],
+        x[2], 5, from, st, out).into_option());
     resume("asi_resume", &[&d.open[..], &d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::asi_final_state(x[0], x[1], x[2], x[3], 300.0), &|x, from, st|
-        ind::asi_resume(x[0], x[1], x[2], x[3], 300.0, from, st).into_option(), &|x, from,
-        st| raw::asi_resume(x[0], x[1], x[2], x[3], 300.0, from, st).into_option());
+        raw::asi_final_state(x[0], x[1], x[2], x[3], 300.0), &|x, from, st, out|
+        ind::asi_resume(x[0], x[1], x[2], x[3], 300.0, from, st, out).into_option(), &|x, from, st, out| raw::asi_resume(x[0], x[1], x[2], x[3], 300.0, from, st, out).into_option());
     resume("atr_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::atr_final_state(x[0], x[1], x[2], 5), &|x, from, st| ind::atr_resume(x[0],
-        x[1], x[2], 5, from, st).into_option(), &|x, from, st| raw::atr_resume(x[0], x[1],
-        x[2], 5, from, st).into_option());
-    resume("cmo_resume", &[&d.close[..]], &|x| raw::cmo_final_state(x[0], 5), &|x, from, st|
-        ind::cmo_resume(x[0], 5, from, st).into_option(), &|x, from, st|
-        raw::cmo_resume(x[0], 5, from, st).into_option());
-    resume("dema_resume", &[&d.close[..]], &|x| raw::dema_final_state(x[0], 5), &|x, from,
-        st| ind::dema_resume(x[0], 5, from, st).into_option(), &|x, from, st|
-        raw::dema_resume(x[0], 5, from, st).into_option());
+        raw::atr_final_state(x[0], x[1], x[2], 5), &|x, from, st, out| ind::atr_resume(x[0],
+        x[1], x[2], 5, from, st, out).into_option(), &|x, from, st, out| raw::atr_resume(x[0], x[1],
+        x[2], 5, from, st, out).into_option());
+    resume("cmo_resume", &[&d.close[..]], &|x| raw::cmo_final_state(x[0], 5), &|x, from, st, out|
+        ind::cmo_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::cmo_resume(x[0], 5, from, st, out).into_option());
+    resume("dema_resume", &[&d.close[..]], &|x| raw::dema_final_state(x[0], 5), &|x, from, st, out| ind::dema_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::dema_resume(x[0], 5, from, st, out).into_option());
     resume("dx_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::dx_final_state(x[0], x[1], x[2], 5), &|x, from, st| ind::dx_resume(x[0], x[1],
-        x[2], 5, from, st).into_option(), &|x, from, st| raw::dx_resume(x[0], x[1], x[2], 5,
-        from, st).into_option());
+        raw::dx_final_state(x[0], x[1], x[2], 5), &|x, from, st, out| ind::dx_resume(x[0], x[1],
+        x[2], 5, from, st, out).into_option(), &|x, from, st, out| raw::dx_resume(x[0], x[1], x[2], 5,
+        from, st, out).into_option());
     resume("efi_resume", &[&d.close[..], &d.volume[..]], &|x| raw::efi_final_state(x[0],
-        x[1], 5), &|x, from, st| ind::efi_resume(x[0], x[1], 5, from, st).into_option(),
-        &|x, from, st| raw::efi_resume(x[0], x[1], 5, from, st).into_option());
-    resume("ema_resume", &[&d.close[..]], &|x| raw::ema_final_state(x[0], 5), &|x, from, st|
-        ind::ema_resume(x[0], 5, from, st).into_option(), &|x, from, st|
-        raw::ema_resume(x[0], 5, from, st).into_option());
-    resume("ht_dcperiod_resume", &[&d.close[..]], &|x| raw::ht_core_state(x[0]), &|x, from,
-        st| ind::ht_dcperiod_resume(x[0], from, st).into_option(), &|x, from, st|
-        raw::ht_dcperiod_resume(x[0], from, st).into_option());
-    resume("ht_dcphase_resume", &[&d.close[..]], &|x| raw::ht_dcphase_state(x[0]), &|x,
-        from, st| ind::ht_dcphase_resume(x[0], from, st).into_option(), &|x, from, st|
-        raw::ht_dcphase_resume(x[0], from, st).into_option());
-    resume("ht_phasor_resume", &[&d.close[..]], &|x| raw::ht_core_state(x[0]), &|x, from,
-        st| ind::ht_phasor_resume(x[0], true, from, st).into_option(), &|x, from, st|
-        raw::ht_phasor_resume(x[0], true, from, st).into_option());
-    resume("ht_sine_resume", &[&d.close[..]], &|x| raw::ht_sine_state(x[0]), &|x, from, st|
-        ind::ht_sine_resume(x[0], true, from, st).into_option(), &|x, from, st|
-        raw::ht_sine_resume(x[0], true, from, st).into_option());
-    resume("ht_trendline_resume", &[&d.close[..]], &|x| raw::ht_trendline_state(x[0]), &|x,
-        from, st| ind::ht_trendline_resume(x[0], from, st).into_option(), &|x, from, st|
-        raw::ht_trendline_resume(x[0], from, st).into_option());
-    resume("ht_trendmode_resume", &[&d.close[..]], &|x| raw::ht_trendmode_state(x[0]), &|x,
-        from, st| ind::ht_trendmode_resume(x[0], from, st).into_option(), &|x, from, st|
-        raw::ht_trendmode_resume(x[0], from, st).into_option());
-    resume("kama_resume", &[&d.close[..]], &|x| raw::kama_final_state(x[0], 5, 0), &|x, from,
-        st| ind::kama_resume(x[0], 5, from, st).into_option(), &|x, from, st|
-        raw::kama_resume(x[0], 5, from, st).into_option());
+        x[1], 5), &|x, from, st, out| ind::efi_resume(x[0], x[1], 5, from, st, out).into_option(),
+        &|x, from, st, out| raw::efi_resume(x[0], x[1], 5, from, st, out).into_option());
+    resume("ema_resume", &[&d.close[..]], &|x| raw::ema_final_state(x[0], 5), &|x, from, st, out|
+        ind::ema_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::ema_resume(x[0], 5, from, st, out).into_option());
+    resume("ht_dcperiod_resume", &[&d.close[..]], &|x| raw::ht_core_state(x[0]), &|x, from, st, out| ind::ht_dcperiod_resume(x[0], from, st, out).into_option(), &|x, from, st, out|
+        raw::ht_dcperiod_resume(x[0], from, st, out).into_option());
+    resume("ht_dcphase_resume", &[&d.close[..]], &|x| raw::ht_dcphase_state(x[0]), &|x, from, st, out| ind::ht_dcphase_resume(x[0], from, st, out).into_option(), &|x, from, st, out|
+        raw::ht_dcphase_resume(x[0], from, st, out).into_option());
+    resume("ht_phasor_resume", &[&d.close[..]], &|x| raw::ht_core_state(x[0]), &|x, from, st, out| ind::ht_phasor_resume(x[0], true, from, st, out).into_option(), &|x, from, st, out|
+        raw::ht_phasor_resume(x[0], true, from, st, out).into_option());
+    resume("ht_sine_resume", &[&d.close[..]], &|x| raw::ht_sine_state(x[0]), &|x, from, st, out|
+        ind::ht_sine_resume(x[0], true, from, st, out).into_option(), &|x, from, st, out|
+        raw::ht_sine_resume(x[0], true, from, st, out).into_option());
+    resume("ht_trendline_resume", &[&d.close[..]], &|x| raw::ht_trendline_state(x[0]), &|x, from, st, out| ind::ht_trendline_resume(x[0], from, st, out).into_option(), &|x, from, st, out|
+        raw::ht_trendline_resume(x[0], from, st, out).into_option());
+    resume("ht_trendmode_resume", &[&d.close[..]], &|x| raw::ht_trendmode_state(x[0]), &|x, from, st, out| ind::ht_trendmode_resume(x[0], from, st, out).into_option(), &|x, from, st, out|
+        raw::ht_trendmode_resume(x[0], from, st, out).into_option());
+    resume("kama_resume", &[&d.close[..]], &|x| raw::kama_final_state(x[0], 5, 0), &|x, from, st, out| ind::kama_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::kama_resume(x[0], 5, from, st, out).into_option());
     resume("kdj_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::kdj_final_state(x[0], x[1], x[2], 5, 3, 3, 50.0, true), &|x, from, st|
-        ind::kdj_resume(x[0], x[1], x[2], 5, 3, 3, KdjLine::J, from, st).into_option(), &|x,
-        from, st| raw::kdj_resume(x[0], x[1], x[2], 5, 3, 3, KdjLine::J, from,
-        st).into_option());
+        raw::kdj_final_state(x[0], x[1], x[2], 5, 3, 3, 50.0, true), &|x, from, st, out|
+        ind::kdj_resume(x[0], x[1], x[2], 5, 3, 3, KdjLine::J, from, st, out).into_option(), &|x, from, st, out| raw::kdj_resume(x[0], x[1], x[2], 5, 3, 3, KdjLine::J, from,
+        st, out).into_option());
     resume("keltner_band_resume", &[&d.close[..], &d.high[..], &d.low[..]], &|x|
-        raw::keltner_band_final_state(x[0], x[1], x[2], 5, 5), &|x, from, st|
-        ind::keltner_band_resume(x[0], x[1], x[2], 5, 5, 2.0, true, from, st).into_option(),
-        &|x, from, st| raw::keltner_band_resume(x[0], x[1], x[2], 5, 5, 2.0, true, from,
-        st).into_option());
-    resume("macd_resume", &[&d.close[..]], &|x| raw::macd_final_state(x[0], 3, 6), &|x,
-        from, st| ind::macd_resume(x[0], 3, 6, from, st).into_option(), &|x, from, st|
-        raw::macd_resume(x[0], 3, 6, from, st).into_option());
+        raw::keltner_band_final_state(x[0], x[1], x[2], 5, 5), &|x, from, st, out|
+        ind::keltner_band_resume(x[0], x[1], x[2], 5, 5, 2.0, true, from, st, out).into_option(),
+        &|x, from, st, out| raw::keltner_band_resume(x[0], x[1], x[2], 5, 5, 2.0, true, from,
+        st, out).into_option());
+    resume("macd_resume", &[&d.close[..]], &|x| raw::macd_final_state(x[0], 3, 6), &|x, from, st, out| ind::macd_resume(x[0], 3, 6, from, st, out).into_option(), &|x, from, st, out|
+        raw::macd_resume(x[0], 3, 6, from, st, out).into_option());
     resume("macd_signal_resume", &[&d.close[..]], &|x| raw::macd_signal_final_state(x[0], 3,
-        6, 4), &|x, from, st| ind::macd_signal_resume(x[0], 3, 6, 4, true, from,
-        st).into_option(), &|x, from, st| raw::macd_signal_resume(x[0], 3, 6, 4, true, from,
-        st).into_option());
-    resume("mama_resume", &[&d.close[..]], &|x| raw::mama_state(x[0], 0.5, 0.05), &|x, from,
-        st| ind::mama_resume(x[0], 0.5, 0.05, true, from, st).into_option(), &|x, from, st|
-        raw::mama_resume(x[0], 0.5, 0.05, true, from, st).into_option());
+        6, 4), &|x, from, st, out| ind::macd_signal_resume(x[0], 3, 6, 4, true, from,
+        st, out).into_option(), &|x, from, st, out| raw::macd_signal_resume(x[0], 3, 6, 4, true, from,
+        st, out).into_option());
+    resume("mama_resume", &[&d.close[..]], &|x| raw::mama_state(x[0], 0.5, 0.05), &|x, from, st, out| ind::mama_resume(x[0], 0.5, 0.05, true, from, st, out).into_option(), &|x, from, st, out|
+        raw::mama_resume(x[0], 0.5, 0.05, true, from, st, out).into_option());
     resume("mass_index_resume", &[&d.high[..], &d.low[..]], &|x|
-        raw::mass_index_final_state(x[0], x[1], 5, 0), &|x, from, st|
-        ind::mass_index_resume(x[0], x[1], 5, from, st).into_option(), &|x, from, st|
-        raw::mass_index_resume(x[0], x[1], 5, from, st).into_option());
+        raw::mass_index_final_state(x[0], x[1], 5, 0), &|x, from, st, out|
+        ind::mass_index_resume(x[0], x[1], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::mass_index_resume(x[0], x[1], 5, from, st, out).into_option());
     resume("minus_di_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::minus_di_final_state(x[0], x[1], x[2], 5), &|x, from, st|
-        ind::minus_di_resume(x[0], x[1], x[2], 5, from, st).into_option(), &|x, from, st|
-        raw::minus_di_resume(x[0], x[1], x[2], 5, from, st).into_option());
+        raw::minus_di_final_state(x[0], x[1], x[2], 5), &|x, from, st, out|
+        ind::minus_di_resume(x[0], x[1], x[2], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::minus_di_resume(x[0], x[1], x[2], 5, from, st, out).into_option());
     resume("minus_dm_resume", &[&d.high[..], &d.low[..]], &|x|
-        raw::minus_dm_final_state(x[0], x[1], 5), &|x, from, st| ind::minus_dm_resume(x[0],
-        x[1], 5, from, st).into_option(), &|x, from, st| raw::minus_dm_resume(x[0], x[1], 5,
-        from, st).into_option());
+        raw::minus_dm_final_state(x[0], x[1], 5), &|x, from, st, out| ind::minus_dm_resume(x[0],
+        x[1], 5, from, st, out).into_option(), &|x, from, st, out| raw::minus_dm_resume(x[0], x[1], 5,
+        from, st, out).into_option());
     resume("natr_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::atr_final_state(x[0], x[1], x[2], 5), &|x, from, st| ind::natr_resume(x[0],
-        x[1], x[2], 5, from, st).into_option(), &|x, from, st| raw::natr_resume(x[0], x[1],
-        x[2], 5, from, st).into_option());
+        raw::atr_final_state(x[0], x[1], x[2], 5), &|x, from, st, out| ind::natr_resume(x[0],
+        x[1], x[2], 5, from, st, out).into_option(), &|x, from, st, out| raw::natr_resume(x[0], x[1],
+        x[2], 5, from, st, out).into_option());
     resume("nvi_resume", &[&d.close[..], &d.volume[..]], &|x| raw::nvi_final_state(x[0],
-        x[1]), &|x, from, st| ind::nvi_resume(x[0], x[1], from, st).into_option(), &|x,
-        from, st| raw::nvi_resume(x[0], x[1], from, st).into_option());
+        x[1]), &|x, from, st, out| ind::nvi_resume(x[0], x[1], from, st, out).into_option(), &|x, from, st, out| raw::nvi_resume(x[0], x[1], from, st, out).into_option());
     resume("obv_resume", &[&d.close[..], &d.volume[..]], &|x| raw::obv_final_state(x[0],
-        x[1]), &|x, from, st| ind::obv_resume(x[0], x[1], from, st).into_option(), &|x,
-        from, st| raw::obv_resume(x[0], x[1], from, st).into_option());
+        x[1]), &|x, from, st, out| ind::obv_resume(x[0], x[1], from, st, out).into_option(), &|x, from, st, out| raw::obv_resume(x[0], x[1], from, st, out).into_option());
     resume("plus_di_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::plus_di_final_state(x[0], x[1], x[2], 5), &|x, from, st|
-        ind::plus_di_resume(x[0], x[1], x[2], 5, from, st).into_option(), &|x, from, st|
-        raw::plus_di_resume(x[0], x[1], x[2], 5, from, st).into_option());
+        raw::plus_di_final_state(x[0], x[1], x[2], 5), &|x, from, st, out|
+        ind::plus_di_resume(x[0], x[1], x[2], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::plus_di_resume(x[0], x[1], x[2], 5, from, st, out).into_option());
     resume("plus_dm_resume", &[&d.high[..], &d.low[..]], &|x| raw::plus_dm_final_state(x[0],
-        x[1], 5), &|x, from, st| ind::plus_dm_resume(x[0], x[1], 5, from, st).into_option(),
-        &|x, from, st| raw::plus_dm_resume(x[0], x[1], 5, from, st).into_option());
+        x[1], 5), &|x, from, st, out| ind::plus_dm_resume(x[0], x[1], 5, from, st, out).into_option(),
+        &|x, from, st, out| raw::plus_dm_resume(x[0], x[1], 5, from, st, out).into_option());
     resume("pvi_resume", &[&d.close[..], &d.volume[..]], &|x| raw::pvi_final_state(x[0],
-        x[1]), &|x, from, st| ind::pvi_resume(x[0], x[1], from, st).into_option(), &|x,
-        from, st| raw::pvi_resume(x[0], x[1], from, st).into_option());
+        x[1]), &|x, from, st, out| ind::pvi_resume(x[0], x[1], from, st, out).into_option(), &|x, from, st, out| raw::pvi_resume(x[0], x[1], from, st, out).into_option());
     resume("pvt_resume", &[&d.close[..], &d.volume[..]], &|x| raw::pvt_final_state(x[0],
-        x[1]), &|x, from, st| ind::pvt_resume(x[0], x[1], from, st).into_option(), &|x,
-        from, st| raw::pvt_resume(x[0], x[1], from, st).into_option());
-    resume("rsi_resume", &[&d.close[..]], &|x| raw::rsi_final_state(x[0], 5), &|x, from, st|
-        ind::rsi_resume(x[0], 5, from, st).into_option(), &|x, from, st|
-        raw::rsi_resume(x[0], 5, from, st).into_option());
+        x[1]), &|x, from, st, out| ind::pvt_resume(x[0], x[1], from, st, out).into_option(), &|x, from, st, out| raw::pvt_resume(x[0], x[1], from, st, out).into_option());
+    resume("rsi_resume", &[&d.close[..]], &|x| raw::rsi_final_state(x[0], 5), &|x, from, st, out|
+        ind::rsi_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::rsi_resume(x[0], 5, from, st, out).into_option());
     resume("sar_resume", &[&d.high[..], &d.low[..]], &|x| raw::sar_final_state(x[0], x[1],
-        0.02, 0.2), &|x, from, st| ind::sar_resume(x[0], x[1], 0.02, 0.2, from,
-        st).into_option(), &|x, from, st| raw::sar_resume(x[0], x[1], 0.02, 0.2, from,
-        st).into_option());
+        0.02, 0.2), &|x, from, st, out| ind::sar_resume(x[0], x[1], 0.02, 0.2, from,
+        st, out).into_option(), &|x, from, st, out| raw::sar_resume(x[0], x[1], 0.02, 0.2, from,
+        st, out).into_option());
     resume("sarext_resume", &[&d.high[..], &d.low[..]], &|x| raw::sarext_final_state(x[0],
-        x[1], 0.0, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2), &|x, from, st|
+        x[1], 0.0, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2), &|x, from, st, out|
         ind::sarext_resume(x[0], x[1], 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2, from,
-        st).into_option(), &|x, from, st| raw::sarext_resume(x[0], x[1], 0.0, 0.02, 0.02,
-        0.2, 0.02, 0.02, 0.2, from, st).into_option());
-    resume("smma_resume", &[&d.close[..]], &|x| raw::smma_final_state(x[0], 5), &|x, from,
-        st| ind::smma_resume(x[0], 5, from, st).into_option(), &|x, from, st|
-        raw::smma_resume(x[0], 5, from, st).into_option());
-    resume("stochrsi_resume", &[&d.close[..]], &|x| raw::stochrsi_final_state(x[0], 5, 3, true, 3, 0), &|x, from, st| ind::stochrsi_resume(x[0], 5, 3, true, 3, from,
-        st).into_option(), &|x, from, st| raw::stochrsi_resume(x[0], 5, 3, true, 3, from,
-        st).into_option());
+        st, out).into_option(), &|x, from, st, out| raw::sarext_resume(x[0], x[1], 0.0, 0.02, 0.02,
+        0.2, 0.02, 0.02, 0.2, from, st, out).into_option());
+    resume("smma_resume", &[&d.close[..]], &|x| raw::smma_final_state(x[0], 5), &|x, from, st, out| ind::smma_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::smma_resume(x[0], 5, from, st, out).into_option());
+    resume("stochrsi_resume", &[&d.close[..]], &|x| raw::stochrsi_final_state(x[0], 5, 3, true, 3, 0), &|x, from, st, out| ind::stochrsi_resume(x[0], 5, 3, true, 3, from,
+        st, out).into_option(), &|x, from, st, out| raw::stochrsi_resume(x[0], 5, 3, true, 3, from,
+        st, out).into_option());
     resume("supertrend_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::supertrend_final_state(x[0], x[1], x[2], 5, 2.0), &|x, from, st|
-        ind::supertrend_resume(x[0], x[1], x[2], 5, 2.0, false, from, st).into_option(),
-        &|x, from, st| raw::supertrend_resume(x[0], x[1], x[2], 5, 2.0, false, from,
-        st).into_option());
-    resume("t3_resume", &[&d.close[..]], &|x| raw::t3_final_state(x[0], 5), &|x, from, st|
-        ind::t3_resume(x[0], 5, 0.7, from, st).into_option(), &|x, from, st|
-        raw::t3_resume(x[0], 5, 0.7, from, st).into_option());
-    resume("tema_resume", &[&d.close[..]], &|x| raw::tema_final_state(x[0], 5), &|x, from,
-        st| ind::tema_resume(x[0], 5, from, st).into_option(), &|x, from, st|
-        raw::tema_resume(x[0], 5, from, st).into_option());
-    resume("trix_resume", &[&d.close[..]], &|x| raw::trix_final_state(x[0], 5), &|x, from,
-        st| ind::trix_resume(x[0], 5, from, st).into_option(), &|x, from, st|
-        raw::trix_resume(x[0], 5, from, st).into_option());
-    resume("tsi_resume", &[&d.close[..]], &|x| raw::tsi_final_state(x[0], 6, 3), &|x, from,
-        st| ind::tsi_resume(x[0], 6, 3, from, st).into_option(), &|x, from, st|
-        raw::tsi_resume(x[0], 6, 3, from, st).into_option());
+        raw::supertrend_final_state(x[0], x[1], x[2], 5, 2.0), &|x, from, st, out|
+        ind::supertrend_resume(x[0], x[1], x[2], 5, 2.0, false, from, st, out).into_option(),
+        &|x, from, st, out| raw::supertrend_resume(x[0], x[1], x[2], 5, 2.0, false, from,
+        st, out).into_option());
+    resume("t3_resume", &[&d.close[..]], &|x| raw::t3_final_state(x[0], 5), &|x, from, st, out|
+        ind::t3_resume(x[0], 5, 0.7, from, st, out).into_option(), &|x, from, st, out|
+        raw::t3_resume(x[0], 5, 0.7, from, st, out).into_option());
+    resume("tema_resume", &[&d.close[..]], &|x| raw::tema_final_state(x[0], 5), &|x, from, st, out| ind::tema_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::tema_resume(x[0], 5, from, st, out).into_option());
+    resume("trix_resume", &[&d.close[..]], &|x| raw::trix_final_state(x[0], 5), &|x, from, st, out| ind::trix_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
+        raw::trix_resume(x[0], 5, from, st, out).into_option());
+    resume("tsi_resume", &[&d.close[..]], &|x| raw::tsi_final_state(x[0], 6, 3), &|x, from, st, out| ind::tsi_resume(x[0], 6, 3, from, st, out).into_option(), &|x, from, st, out|
+        raw::tsi_resume(x[0], 6, 3, from, st, out).into_option());
     resume("wad_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        raw::wad_final_state(x[0], x[1], x[2]), &|x, from, st| ind::wad_resume(x[0], x[1],
-        x[2], from, st).into_option(), &|x, from, st| raw::wad_resume(x[0], x[1], x[2],
-        from, st).into_option());
+        raw::wad_final_state(x[0], x[1], x[2]), &|x, from, st, out| ind::wad_resume(x[0], x[1],
+        x[2], from, st, out).into_option(), &|x, from, st, out| raw::wad_resume(x[0], x[1], x[2],
+        from, st, out).into_option());
 }
 
 #[test]

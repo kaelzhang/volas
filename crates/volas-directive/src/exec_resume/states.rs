@@ -66,13 +66,11 @@ fn one_pass(df: &DataFrame, node: &Ast) -> Option<WithStates> {
     }
     let state = super::initial_state(df, node, head)?;
     let since = df.origin();
-    let (middle, before) = super::execute_resume(df, node, &state, head, h - 1, since)?;
-    let (last, after) = super::execute_resume(df, node, &before, h - 1, h, since)?;
     // the head's values in front of the resumed rows, the last row after them
     let head_values = crate::exec::execute(&df.slice_data(0, head), node).ok()?;
     let mut values = Vec::with_capacity(h);
     values.extend(into_f64(head_values));
-    values.extend_from_slice(&into_f64(middle));
-    values.extend(into_f64(last));
+    let before = super::resume::resume_into(df, node, &state, head, h - 1, since, &mut values)?;
+    let after = super::resume::resume_into(df, node, &before, h - 1, h, since, &mut values)?;
     Some((Column::f64(values), Some(after), Some(before)))
 }

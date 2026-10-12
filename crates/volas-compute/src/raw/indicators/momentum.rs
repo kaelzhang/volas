@@ -370,21 +370,23 @@ pub fn trix_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
 /// stage — [`roc`]'s own rule (`roc_value`, its zero-base guard included), with `e2_prev`
 /// the carried 3rd-stage value (= the cascade output at `from−1`). Reads only
 /// `close[from..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn trix_resume(
     close: &[f64],
     period: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let n = close.len();
     let mut e = [state[0], state[1], state[2]];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for &x in &close[from..n] {
         let prev = e[2]; // the cascade output at the previous row (ROC's denominator)
         kernels::ema_cascade_step(&mut e, x, period);
         out.push(roc_value(e[2], prev));
     }
-    (out, e.to_vec())
+    e.to_vec()
 }
 
 /// Aroon Up (TA-Lib AROON, up output): NaN while the `period + 1`-bar window holds a

@@ -476,8 +476,10 @@ fn an_extreme_before_the_frame_is_rebuilt() {
     let lo = ind::minindex_final_state(&low[..5], 3, 0).unwrap();
     assert_eq!((hi[0], lo[0]), (2.0, 2.0));
     // a frame holding rows 3.. (origin 3) resumes at its row 2 (absolute row 5)
-    let (got, _) = ind::maxindex_resume(&data[3..], 3, 2, 3, &hi).unwrap();
+    let mut got = Vec::new();
+    let _ = ind::maxindex_resume(&data[3..], 3, 2, 3, &hi, &mut got).unwrap();
     assert_eq!(got, ind::maxindex(&data, 3, 0)[5..].to_vec());
-    let (got, _) = ind::minindex_resume(&low[3..], 3, 2, 3, &lo).unwrap();
+    let mut got = Vec::new();
+    let _ = ind::minindex_resume(&low[3..], 3, 2, 3, &lo, &mut got).unwrap();
     assert_eq!(got, ind::minindex(&low, 3, 0)[5..].to_vec());
 }

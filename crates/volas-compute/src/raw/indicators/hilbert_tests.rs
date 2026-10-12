@@ -73,20 +73,34 @@ fn ht_resume_under_the_mask_is_nan_like_the_full_compute() {
     let from = 20; // past PERIOD_START, under LB_PERIOD
     let head = &price[..from];
     let st = ht_core_state(head).unwrap();
-    assert_bits(&ht_dcperiod_resume(&price, from, &st).unwrap().0, &ht_dcperiod(&price)[from..], "dcperiod");
-    assert_bits(&ht_phasor_resume(&price, true, from, &st).unwrap().0, &ht_phasor(&price).1[from..], "phasor");
+    let mut tail = Vec::new();
+    ht_dcperiod_resume(&price, from, &st, &mut tail).unwrap();
+    assert_bits(&tail, &ht_dcperiod(&price)[from..], "dcperiod");
+    let mut tail = Vec::new();
+    ht_phasor_resume(&price, true, from, &st, &mut tail).unwrap();
+    assert_bits(&tail, &ht_phasor(&price).1[from..], "phasor");
     let st = mama_state(head, 0.5, 0.05).unwrap();
-    assert_bits(&mama_resume(&price, 0.5, 0.05, false, from, &st).unwrap().0, &mama(&price, 0.5, 0.05).0[from..], "mama");
+    let mut tail = Vec::new();
+    mama_resume(&price, 0.5, 0.05, false, from, &st, &mut tail).unwrap();
+    assert_bits(&tail, &mama(&price, 0.5, 0.05).0[from..], "mama");
     let from = 40; // past PHASE_START, under LB_PHASE
     let st = ht_dcphase_state(&price[..from]).unwrap();
-    assert_bits(&ht_dcphase_resume(&price, from, &st).unwrap().0, &ht_dcphase(&price)[from..], "dcphase");
-    assert_bits(&ht_sine_resume(&price, true, from, &st).unwrap().0, &ht_sine(&price).1[from..], "sine");
+    let mut tail = Vec::new();
+    ht_dcphase_resume(&price, from, &st, &mut tail).unwrap();
+    assert_bits(&tail, &ht_dcphase(&price)[from..], "dcphase");
+    let mut tail = Vec::new();
+    ht_sine_resume(&price, true, from, &st, &mut tail).unwrap();
+    assert_bits(&tail, &ht_sine(&price).1[from..], "sine");
     // the trendline family's raw-price window needs `from >= SMOOTH_PRICE_SIZE`
     let from = 55; // under LB_PHASE
     let st = ht_trendline_state(&price[..from]).unwrap();
-    assert_bits(&ht_trendline_resume(&price, from, &st).unwrap().0, &ht_trendline(&price)[from..], "trendline");
+    let mut tail = Vec::new();
+    ht_trendline_resume(&price, from, &st, &mut tail).unwrap();
+    assert_bits(&tail, &ht_trendline(&price)[from..], "trendline");
     let st = ht_trendmode_state(&price[..from]).unwrap();
-    assert_bits(&ht_trendmode_resume(&price, from, &st).unwrap().0, &ht_trendmode(&price)[from..], "trendmode");
+    let mut tail = Vec::new();
+    ht_trendmode_resume(&price, from, &st, &mut tail).unwrap();
+    assert_bits(&tail, &ht_trendmode(&price)[from..], "trendmode");
 }
 
 /// Every HT resume, fed the carried state of a full compute over `price[..from]`,
@@ -102,36 +116,46 @@ fn ht_resume_is_bit_identical_to_full() {
 
         // DCPERIOD / PHASOR (core-only state).
         let st = ht_core_state(head).unwrap();
-        let (v, _) = ht_dcperiod_resume(&price, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = ht_dcperiod_resume(&price, from, &st, &mut v).unwrap();
         assert_bits(&v, &ht_dcperiod(&price)[from..], "dcperiod");
-        let (v, _) = ht_phasor_resume(&price, false, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = ht_phasor_resume(&price, false, from, &st, &mut v).unwrap();
         assert_bits(&v, &ht_phasor(&price).0[from..], "phasor.inphase");
-        let (v, _) = ht_phasor_resume(&price, true, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = ht_phasor_resume(&price, true, from, &st, &mut v).unwrap();
         assert_bits(&v, &ht_phasor(&price).1[from..], "phasor.quadrature");
 
         // DCPHASE / SINE (core + DC-phase ring).
         let st = ht_dcphase_state(head).unwrap();
-        let (v, _) = ht_dcphase_resume(&price, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = ht_dcphase_resume(&price, from, &st, &mut v).unwrap();
         assert_bits(&v, &ht_dcphase(&price)[from..], "dcphase");
         let st = ht_sine_state(head).unwrap();
-        let (v, _) = ht_sine_resume(&price, false, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = ht_sine_resume(&price, false, from, &st, &mut v).unwrap();
         assert_bits(&v, &ht_sine(&price).0[from..], "sine.sine");
-        let (v, _) = ht_sine_resume(&price, true, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = ht_sine_resume(&price, true, from, &st, &mut v).unwrap();
         assert_bits(&v, &ht_sine(&price).1[from..], "sine.leadsine");
 
         // TRENDLINE / TRENDMODE (core + iTrend triple [+ DC-phase / counters]).
         let st = ht_trendline_state(head).unwrap();
-        let (v, _) = ht_trendline_resume(&price, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = ht_trendline_resume(&price, from, &st, &mut v).unwrap();
         assert_bits(&v, &ht_trendline(&price)[from..], "trendline");
         let st = ht_trendmode_state(head).unwrap();
-        let (v, _) = ht_trendmode_resume(&price, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = ht_trendmode_resume(&price, from, &st, &mut v).unwrap();
         assert_bits(&v, &ht_trendmode(&price)[from..], "trendmode");
 
         // MAMA / FAMA (core + [mama, fama, prev_phase]).
         let st = mama_state(head, 0.5, 0.05).unwrap();
-        let (v, _) = mama_resume(&price, 0.5, 0.05, false, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = mama_resume(&price, 0.5, 0.05, false, from, &st, &mut v).unwrap();
         assert_bits(&v, &mama(&price, 0.5, 0.05).0[from..], "mama");
-        let (v, _) = mama_resume(&price, 0.5, 0.05, true, from, &st).unwrap();
+        let mut v = Vec::new();
+        let _ = mama_resume(&price, 0.5, 0.05, true, from, &st, &mut v).unwrap();
         assert_bits(&v, &mama(&price, 0.5, 0.05).1[from..], "mama.fama");
     }
 }
@@ -148,7 +172,8 @@ fn ht_resume_chains_bit_identical() {
     // bit-exact oracle (which reads both operands unconditionally on the happy path).
     let mut chained = Vec::with_capacity(price.len() - 150);
     for from in 150..price.len() {
-        let (v, st) = ht_dcphase_resume(&price[..from + 1], from, &state).unwrap();
+        let mut v = Vec::new();
+        let st = ht_dcphase_resume(&price[..from + 1], from, &state, &mut v).unwrap();
         assert_eq!(v.len(), 1);
         chained.push(v[0]);
         state = st;
@@ -163,16 +188,16 @@ fn ht_resume_chains_bit_identical() {
 fn ht_resume_declines_below_warmup() {
     let price = series(120);
     let st = ht_core_state(&price).unwrap();
-    assert!(ht_dcperiod_resume(&price, PERIOD_START, &st).is_none());
-    assert!(ht_phasor_resume(&price, false, PERIOD_START, &st).is_none());
+    assert!(ht_dcperiod_resume(&price, PERIOD_START, &st, &mut Vec::new()).is_none());
+    assert!(ht_phasor_resume(&price, false, PERIOD_START, &st, &mut Vec::new()).is_none());
     let st = ht_dcphase_state(&price).unwrap();
-    assert!(ht_dcphase_resume(&price, PHASE_START, &st).is_none());
-    assert!(ht_sine_resume(&price, true, PHASE_START, &st).is_none());
+    assert!(ht_dcphase_resume(&price, PHASE_START, &st, &mut Vec::new()).is_none());
+    assert!(ht_sine_resume(&price, true, PHASE_START, &st, &mut Vec::new()).is_none());
     // Trendline / trendmode need `from >= SMOOTH_PRICE_SIZE` for the raw-price window.
     let st = ht_trendline_state(&price).unwrap();
-    assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE - 1, &st).is_none());
+    assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE - 1, &st, &mut Vec::new()).is_none());
     let st = ht_trendmode_state(&price).unwrap();
-    assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE - 1, &st).is_none());
+    assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE - 1, &st, &mut Vec::new()).is_none());
     // Under-warm-up series carry no state at all.
     let tiny = series(PERIOD_START);
     assert!(ht_core_state(&tiny).is_none());
@@ -195,21 +220,21 @@ fn ht_resume_declines_on_short_state() {
     // Too short for even `HtCore::deserialize` (< CORE_STATE_LEN) -> setup `?`
     // propagates None. `from > PERIOD_START` so the from-guard passes first.
     let stub = vec![0.0; CORE_STATE_LEN - 1];
-    assert!(ht_dcperiod_resume(&price, 20, &stub).is_none());
+    assert!(ht_dcperiod_resume(&price, 20, &stub, &mut Vec::new()).is_none());
 
     // A bare core (exactly CORE_STATE_LEN) deserializes, but the per-output tail is
     // missing, so each family's length check declines.
     let core_only = vec![0.0; CORE_STATE_LEN];
     // DCPHASE / SINE need CORE_STATE_LEN + DCPHASE_STATE_LEN.
-    assert!(ht_dcphase_resume(&price, 40, &core_only).is_none());
-    assert!(ht_sine_resume(&price, false, 40, &core_only).is_none());
+    assert!(ht_dcphase_resume(&price, 40, &core_only, &mut Vec::new()).is_none());
+    assert!(ht_sine_resume(&price, false, 40, &core_only, &mut Vec::new()).is_none());
     // TRENDLINE needs CORE_STATE_LEN + 3; `from >= SMOOTH_PRICE_SIZE` so the
     // warm-up guard passes and the length guard is what fires.
-    assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
+    assert!(ht_trendline_resume(&price, SMOOTH_PRICE_SIZE, &core_only, &mut Vec::new()).is_none());
     // TRENDMODE needs exactly CORE_STATE_LEN + DCPHASE_STATE_LEN + 3 + 4.
-    assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE, &core_only).is_none());
+    assert!(ht_trendmode_resume(&price, SMOOTH_PRICE_SIZE, &core_only, &mut Vec::new()).is_none());
     // MAMA / FAMA need CORE_STATE_LEN + 3.
-    assert!(mama_resume(&price, 0.5, 0.05, false, 20, &core_only).is_none());
+    assert!(mama_resume(&price, 0.5, 0.05, false, 20, &core_only, &mut Vec::new()).is_none());
 }
 
 /// A carried state no computation wrote — a ring cursor or DC-phase index out of its
@@ -225,22 +250,22 @@ fn a_forged_state_is_refused() {
     let core = ht_core_state(head).unwrap();
     for (at, v) in [(3, 3.0), (3, 1e9), (3, -1.0), (3, 0.5), (3, f64::NAN), (4, 0.5), (4, 2.0)] {
         let st = forge(core.clone(), at, v);
-        assert!(ht_dcperiod_resume(&price, 80, &st).is_none(), "cursor {at}={v}");
-        assert!(ht_phasor_resume(&price, true, 80, &st).is_none());
+        assert!(ht_dcperiod_resume(&price, 80, &st, &mut Vec::new()).is_none(), "cursor {at}={v}");
+        assert!(ht_phasor_resume(&price, true, 80, &st, &mut Vec::new()).is_none());
     }
     let mama_st = forge(mama_state(head, 0.5, 0.05).unwrap(), 3, 7.0);
-    assert!(mama_resume(&price, 0.5, 0.05, false, 80, &mama_st).is_none());
+    assert!(mama_resume(&price, 0.5, 0.05, false, 80, &mama_st, &mut Vec::new()).is_none());
     let tl = forge(ht_trendline_state(head).unwrap(), 3, 4.0);
-    assert!(ht_trendline_resume(&price, 80, &tl).is_none());
+    assert!(ht_trendline_resume(&price, 80, &tl, &mut Vec::new()).is_none());
     // the DC-phase ring index sits right after the core and the phase
     let dc = ht_dcphase_state(head).unwrap();
     for v in [50.0, 1e12, -2.0, 1.5] {
         let st = forge(dc.clone(), CORE_STATE_LEN + 1, v);
-        assert!(ht_dcphase_resume(&price, 80, &st).is_none(), "dc idx {v}");
-        assert!(ht_sine_resume(&price, false, 80, &st).is_none());
+        assert!(ht_dcphase_resume(&price, 80, &st, &mut Vec::new()).is_none(), "dc idx {v}");
+        assert!(ht_sine_resume(&price, false, 80, &st, &mut Vec::new()).is_none());
     }
     let tm = forge(ht_trendmode_state(head).unwrap(), CORE_STATE_LEN + 1, 99.0);
-    assert!(ht_trendmode_resume(&price, 80, &tm).is_none());
+    assert!(ht_trendmode_resume(&price, 80, &tm, &mut Vec::new()).is_none());
     // a well-formed state still resumes
-    assert!(ht_dcphase_resume(&price, 80, &dc).is_some());
+    assert!(ht_dcphase_resume(&price, 80, &dc, &mut Vec::new()).is_some());
 }

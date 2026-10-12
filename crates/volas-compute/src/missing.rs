@@ -289,32 +289,40 @@ pub fn state_on_complete_rows<T>(inputs: &[&[f64]], capture: impl FnOnce(&[&[f64
 /// Run `resume` — a resume over the new rows `[from, n)` from `state`, the state as of
 /// the last complete row before `from` — on the complete rows of `inputs`: its history
 /// is every complete row before `from`, a missing new row is NaN, and with no complete
-/// new row the state stays `state`. `resume(inputs, from)` returns the new rows' values
-/// and the state after them. Scans the whole history once (a resume reads a bounded
+/// new row the state stays `state`. `resume(inputs, from, out)` appends rows `[from, n)` to `out`
+/// and returns the state after them. Scans the whole history once (a resume reads a bounded
 /// reach of it, which this layer does not know).
 pub fn resume_on_complete_rows(
     inputs: &[&[f64]],
     from: usize,
     state: &[f64],
-    resume: impl FnOnce(&[&[f64]], usize) -> Option<(Vec<f64>, Vec<f64>)>,
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+    resume: impl FnOnce(&[&[f64]], usize, &mut Vec<f64>) -> Option<Vec<f64>>,
+) -> Option<Vec<f64>> {
     let n = height(inputs);
     let rows = CompleteRows::of(&unknown(inputs));
+    let at = out.len();
     if rows == CompleteRows::All || from >= n {
-        return resume(inputs, from);
+        let next = resume(inputs, from, out);
+        if next.is_none() {
+            out.truncate(at);
+        }
+        return next;
     }
     let gathered = gather(&rows, inputs);
     let views = views(&gathered);
     let start = rows.before(from);
     if start == height(&views) {
-        return Some((vec![f64::NAN; n - from], state.to_vec()));
+        out.resize(at + n - from, f64::NAN);
+        return Some(state.to_vec());
     }
-    let (out, next) = resume(&views, start)?;
-    let mut full = vec![f64::NAN; n - from];
-    for (i, v) in out.into_iter().enumerate() {
-        full[rows.position(start + i) - from] = v;
+    let mut values = Vec::new();
+    let next = resume(&views, start, &mut values)?;
+    out.resize(at + n - from, f64::NAN);
+    for (i, v) in values.into_iter().enumerate() {
+        out[at + rows.position(start + i) - from] = v;
     }
-    Some((full, next))
+    Some(next)
 }
 
 /// Run `step` — a single-row resume at `row` from the state as of the last complete
@@ -387,14 +395,14 @@ impl ResumeRows {
         self.rows.len() > self.from
     }
 
-    /// Place `out`, the resumed values of the gathered new rows, at their positions
-    /// among the `n - from` new rows; every missing new row is NaN.
-    pub fn scatter(&self, n: usize, from: usize, out: Vec<f64>) -> Vec<f64> {
-        let mut full = vec![f64::NAN; n - from];
-        for (&i, v) in self.rows[self.from..].iter().zip(out) {
-            full[i - from] = v;
+    /// Append the gathered `values` at their positions among rows `[from, n)` to
+    /// `out`; every missing new row is NaN.
+    pub fn scatter(&self, n: usize, from: usize, values: Vec<f64>, out: &mut Vec<f64>) {
+        let at = out.len();
+        out.resize(at + n - from, f64::NAN);
+        for (&i, v) in self.rows[self.from..].iter().zip(values) {
+            out[at + i - from] = v;
         }
-        full
     }
 }
 
@@ -556,33 +564,46 @@ mod tests {
     }
 
     /// A running sum carried as `[sum]`: the resume of [`a_kernel_runs_on_the_complete_rows_only`]'s kernel.
-    fn running_resume(x: &[&[f64]], from: usize, state: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+    fn running_resume(x: &[&[f64]], from: usize, state: &[f64], out: &mut Vec<f64>) -> Option<Vec<f64>> {
         let mut s = *state.first()?;
-        let out: Vec<f64> = x[0][from..].iter().map(|v| {
+        out.reserve(x[0].len().saturating_sub(from));
+        out.extend(x[0][from..].iter().map(|v| {
             s += v;
             s
-        })
-        .collect();
-        Some((out, vec![s]))
+        }));
+        Some(vec![s])
     }
 
     #[test]
     fn a_resume_runs_on_the_complete_rows_of_its_history_and_new_rows() {
         let x = [1.0, NAN, 2.0, 3.0, NAN, 4.0];
-        let run = |x: &[&[f64]], from: usize| running_resume(x, from, &[10.0]);
-        let (out, next) = resume_on_complete_rows(&[&x], 3, &[10.0], run).unwrap();
-        assert_eq!(bits(&out), bits(&[13.0, NAN, 17.0]));
+        let run = |x: &[&[f64]], from: usize, out: &mut Vec<f64>| running_resume(x, from, &[10.0], out);
+        let mut out = vec![-0.0];
+        let next = resume_on_complete_rows(&[&x], 3, &[10.0], &mut out, run).unwrap();
+        assert_eq!(bits(&out), bits(&[-0.0, 13.0, NAN, 17.0]));
         assert_eq!(next, vec![17.0]);
         // no complete new row: NaN, the state where it was
-        let (out, next) = resume_on_complete_rows(&[&x[..5]], 4, &[10.0], run).unwrap();
-        assert_eq!(bits(&out), bits(&[NAN]));
+        out.truncate(1);
+        let next = resume_on_complete_rows(&[&x[..5]], 4, &[10.0], &mut out, run).unwrap();
+        assert_eq!(bits(&out), bits(&[-0.0, NAN]));
         assert_eq!(next, vec![10.0]);
         // complete rows, or nothing new: the resume runs as it is
         let clean = [1.0, 2.0];
-        assert_eq!(resume_on_complete_rows(&[&clean], 1, &[0.0], run).unwrap().0, vec![12.0]);
-        assert_eq!(resume_on_complete_rows(&[&x], 6, &[0.0], run).unwrap().0, Vec::<f64>::new());
-        // a resume that declines is declined
-        assert!(resume_on_complete_rows(&[&x], 3, &[], |x, f| running_resume(x, f, &[])).is_none());
+        out.truncate(1);
+        resume_on_complete_rows(&[&clean], 1, &[0.0], &mut out, run).unwrap();
+        assert_eq!(bits(&out), bits(&[-0.0, 12.0]));
+        out.truncate(1);
+        resume_on_complete_rows(&[&x], 6, &[0.0], &mut out, run).unwrap();
+        assert_eq!(bits(&out), bits(&[-0.0]));
+        // a resume that declines is declined, preserving the caller's prefix
+        assert!(resume_on_complete_rows(&[&x], 3, &[], &mut out, |x, f, out| running_resume(x, f, &[], out)).is_none());
+        assert_eq!(bits(&out), bits(&[-0.0]));
+        // even an arm that wrote before declining must leave the sink untouched
+        assert!(resume_on_complete_rows(&[&clean], 1, &[], &mut out, |_, _, out| {
+            out.push(9.0);
+            None
+        }).is_none());
+        assert_eq!(bits(&out), bits(&[-0.0]));
     }
 
     #[test]
@@ -628,7 +649,9 @@ mod tests {
         let gathered = ResumeRows::of(&[&w[..]], 4, 2);
         assert_eq!(gathered, rows(vec![2, 3, 5], 2));
         assert!(gathered.has_new());
-        assert_eq!(bits(&gathered.scatter(6, 4, vec![9.0])), bits(&[NAN, 9.0]));
+        let mut out = vec![-0.0];
+        gathered.scatter(6, 4, vec![9.0], &mut out);
+        assert_eq!(bits(&out), bits(&[-0.0, NAN, 9.0]));
         // a short history gives what it has
         assert_eq!(
             ResumeRows::of(&[&z[..]], 4, 9),

@@ -70,24 +70,26 @@ pub fn macd_final_state(close: &[f64], fast: usize, slow: usize) -> Option<Vec<f
 
 /// Resume the MACD line from `state = [pf, ps]` over rows `[from, n)`, bit-identical to a
 /// full recompute (`fast EMA − slow EMA`, same step). Reads only `close[from..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn macd_resume(
     close: &[f64],
     fast: usize,
     slow: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let (fast, slow) = oscillator_periods(fast, slow);
     let (kf, ks) = (ema_k(fast), ema_k(slow));
     let n = close.len();
     let (mut pf, mut ps) = (state[0], state[1]);
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for &x in &close[from..n] {
         pf = smoothing::ema(pf, x, kf);
         ps = smoothing::ema(ps, x, ks);
         out.push(pf - ps);
     }
-    (out, vec![pf, ps])
+    vec![pf, ps]
 }
 
 /// Final MACD signal/histogram state `[pf, ps, sig]`: the line's fast/slow EMAs plus the
@@ -113,6 +115,8 @@ pub fn macd_signal_final_state(
 /// `histogram` flag selects the per-row output (`line − sig` vs `sig`); both advance the
 /// same fast/slow/signal recursion, bit-identical to the full recompute. Reads only
 /// `close[from..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
+#[allow(clippy::too_many_arguments)] // one parameter per input, state and output sink
 pub fn macd_signal_resume(
     close: &[f64],
     fast: usize,
@@ -121,12 +125,13 @@ pub fn macd_signal_resume(
     histogram: bool,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let (fast, slow) = oscillator_periods(fast, slow);
     let (kf, ks, ksig) = (ema_k(fast), ema_k(slow), ema_k(signal));
     let n = close.len();
     let (mut pf, mut ps, mut sig) = (state[0], state[1], state[2]);
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for &x in &close[from..n] {
         pf = smoothing::ema(pf, x, kf);
         ps = smoothing::ema(ps, x, ks);
@@ -134,7 +139,7 @@ pub fn macd_signal_resume(
         sig = smoothing::ema(sig, line, ksig);
         out.push(if histogram { line - sig } else { sig });
     }
-    (out, vec![pf, ps, sig])
+    vec![pf, ps, sig]
 }
 
 

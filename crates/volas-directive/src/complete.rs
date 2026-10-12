@@ -177,8 +177,8 @@ fn lacks_history(df: &DataFrame, cmd: &BoundCommand, rows: &ResumeRows, since: u
 
 /// Resume a recursive command over the new rows `[from, end)` from `prev_state`, on the
 /// complete rows only: a missing new row is NaN and leaves the state where the last
-/// complete row put it. `run(operands, from)` is its resume arm, over the rows the
-/// operands read: `[start, end)` (a trailing window, see [`Operands::rows`]) — or, when
+/// complete row put it. `run(operands, from, out)` appends to `out` through its resume
+/// arm, over the rows the operands read: `[start, end)` (a trailing window, see [`Operands::rows`]) — or, when
 /// that window holds a missing row, `[0, end)` (the complete rows the resume reads before
 /// its new ones may lie before the window). The column's history starts at the absolute
 /// row `since`.
@@ -193,23 +193,30 @@ pub(crate) fn resume(
     start: usize,
     prev_state: &[f64],
     (from, end, since): (usize, usize, usize),
-    run: impl Fn(&Operands, usize) -> Option<(Column, Vec<f64>)>,
-) -> Option<(Column, Vec<f64>)> {
+    out: &mut Vec<f64>,
+    run: impl Fn(&Operands, usize, &mut Vec<f64>) -> Option<Vec<f64>>,
+) -> Option<Vec<f64>> {
     let ops = Operands::rows(df, cmd.series, start.min(from), end);
     let (start, n) = (ops.start(), ops.len());
     let local = from - start;
-    let out = run(&ops, local);
+    let at = out.len();
+    let next = run(&ops, local, out);
     if ops.failed() || ops.clean() || read_in_place(&ops, cmd, local, n) {
-        return out;
+        if next.is_none() {
+            out.truncate(at);
+        }
+        return next;
     }
+    out.truncate(at);
     if start > 0 {
-        return resume(df, cmd, 0, prev_state, (from, end, since), run);
+        return resume(df, cmd, 0, prev_state, (from, end, since), out, run);
     }
     let recorded = recorded(&ops, false);
     let refs: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..n]).collect();
     let rows = ResumeRows::of(&refs, from, cmd.reach());
     if !rows.has_new() {
-        return Some((Column::f64(vec![f64::NAN; n - from]), prev_state.to_vec()));
+        out.resize(at + end - from, f64::NAN);
+        return Some(prev_state.to_vec());
     }
     if lacks_history(df, cmd, &rows, since) {
         return None;
@@ -217,8 +224,10 @@ pub(crate) fn resume(
     let gathered = over(&ops, df, cmd.series, &recorded, |v| {
         Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
     });
-    let (col, st) = run(&gathered, rows.from)?;
-    Some((Column::f64(rows.scatter(n, from, into_f64(col))), st))
+    let mut values = Vec::new();
+    let st = run(&gathered, rows.from, &mut values)?;
+    rows.scatter(n, from, values, out);
+    Some(st)
 }
 
 /// Resume a recursive command at the single row `row` (the scalar twin of [`resume`]):

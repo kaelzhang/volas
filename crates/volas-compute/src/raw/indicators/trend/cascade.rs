@@ -201,20 +201,22 @@ pub fn dema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`dema`] from `state = [e0, e1]` over rows `[from, n)`, bit-identical to a full
 /// recompute (the same `2·e0 − e1` lattice). Reads only `data[from..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn dema_resume(
     data: &[f64],
     period: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let n = data.len();
     let mut e = [state[0], state[1]];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for &x in &data[from..n] {
         kernels::ema_cascade_step(&mut e, x, period);
         out.push(2.0 * e[0] - e[1]);
     }
-    (out, e.to_vec())
+    e.to_vec()
 }
 
 /// Final TEMA state `[e0, e1, e2]`, or `None` if unseeded. Pairs with [`tema_resume`].
@@ -225,20 +227,22 @@ pub fn tema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`tema`] from `state = [e0, e1, e2]` over rows `[from, n)`, bit-identical to a
 /// full recompute (the `3·e0 − 3·e1 + e2` lattice). Reads only `data[from..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn tema_resume(
     data: &[f64],
     period: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let n = data.len();
     let mut e = [state[0], state[1], state[2]];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for &x in &data[from..n] {
         kernels::ema_cascade_step(&mut e, x, period);
         out.push(3.0 * e[0] - 3.0 * e[1] + e[2]);
     }
-    (out, e.to_vec())
+    e.to_vec()
 }
 
 /// Final T3 state `[e0..e5]`, or `None` if unseeded. Pairs with [`t3_resume`].
@@ -250,18 +254,21 @@ pub fn t3_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 
 /// Resume [`t3`] from `state = [e0..e5]` over rows `[from, n)`, bit-identical to a full
 /// recompute (the same six-deep lattice and combine, [`T3`]). Reads only `data[from..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn t3_resume(
     data: &[f64],
     period: usize,
     vfactor: f64,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let t3 = T3::new(period, vfactor);
     let n = data.len();
     let mut e = [state[0], state[1], state[2], state[3], state[4], state[5]];
-    let out = data[from..n].iter().map(|&x| t3.advance(&mut e, x)).collect();
-    (out, e.to_vec())
+    out.reserve(n.saturating_sub(from));
+    out.extend(data[from..n].iter().map(|&x| t3.advance(&mut e, x)));
+    e.to_vec()
 }
 
 
