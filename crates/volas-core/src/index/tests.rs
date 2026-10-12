@@ -37,7 +37,10 @@ fn is_empty_labels_and_position_of() {
     assert_eq!(Index::range(5).position_of(&i64(3)), Some(3));
     assert_eq!(Index::range(5).position_of(&i64(9)), None);
     assert_eq!(Index::range(5).position_of(&i64(-1)), None);
-    assert_eq!(Index::int64(vec![10, 20, 30]).position_of(&i64(20)), Some(1));
+    assert_eq!(
+        Index::int64(vec![10, 20, 30]).position_of(&i64(20)),
+        Some(1)
+    );
     assert_eq!(Index::int64(vec![10, 20]).position_of(&i64(99)), None);
     assert_eq!(
         Index::datetime(vec![100, 200], Tz::Utc).position_of(&i64(200)),
@@ -116,14 +119,22 @@ fn append_rule_per_kind() {
 #[test]
 fn unlabelled_rows_continue_unique_checked_integer_labels() {
     // continuing onto a label already present (the labels need not be sorted)
-    let err = Index::int64(vec![1, 0]).check_append(&Index::range(1)).unwrap_err();
-    assert!(err.to_string().contains("next label 1 is already in the index"), "{err}");
+    let err = Index::int64(vec![1, 0])
+        .check_append(&Index::range(1))
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("next label 1 is already in the index"),
+        "{err}"
+    );
     // continuing past i64::MAX overflows instead of wrapping
     let mut ix = Index::int64(vec![i64::MAX]);
     let err = ix.extend(&Index::range(1)).unwrap_err();
     assert!(matches!(err, VolasError::Overflow(_)), "{err}");
     assert_eq!(ix, Index::int64(vec![i64::MAX]));
-    let err = Index::int64(vec![i64::MAX - 1]).check_append(&Index::range(2)).unwrap_err();
+    let err = Index::int64(vec![i64::MAX - 1])
+        .check_append(&Index::range(2))
+        .unwrap_err();
     assert!(matches!(err, VolasError::Overflow(_)), "{err}");
     // the last continued label may be i64::MAX itself; no rows continue nothing
     let mut top = Index::int64(vec![i64::MAX - 1]);
@@ -137,7 +148,11 @@ fn unlabelled_rows_continue_unique_checked_integer_labels() {
     // the labels stop increasing
     let mut ix = Index::range(2);
     ix.extend(&Index::int64(vec![9, 5])).unwrap(); // [0, 1, 9, 5]: 9 is the largest
-    assert!(ix.check_append(&Index::range(4)).unwrap_err().to_string().contains("9"));
+    assert!(ix
+        .check_append(&Index::range(4))
+        .unwrap_err()
+        .to_string()
+        .contains("9"));
     ix.extend(&Index::range(3)).unwrap(); // continues 6, 7, 8
     assert_eq!(ix, Index::int64(vec![0, 1, 9, 5, 6, 7, 8]));
     assert!(ix.check_append(&Index::range(1)).is_err()); // 9 again
@@ -145,7 +160,12 @@ fn unlabelled_rows_continue_unique_checked_integer_labels() {
     ix.extend(&Index::range(1)).unwrap(); // 21: past the largest, no scan needed
     assert_eq!(ix.to_i64_labels().last(), Some(&21));
     // derived indexes keep their own largest label
-    assert!(ix.slice(0, 4).check_append(&Index::range(4)).unwrap_err().to_string().contains("9"));
+    assert!(ix
+        .slice(0, 4)
+        .check_append(&Index::range(4))
+        .unwrap_err()
+        .to_string()
+        .contains("9"));
     assert!(ix.take(&[0, 1]).check_append(&Index::range(1)).is_ok());
 }
 
@@ -195,8 +215,12 @@ fn alignment_is_equal_labels_with_matching_awareness() {
     let ny = Tz::parse("America/New_York").unwrap();
     let named = Index::datetime(vec![1, 2], Tz::Utc).with_name(Some("t".into()));
     // same instants: the name and the display zone do not matter
-    assert!(named.require_aligned(&Index::datetime(vec![1, 2], ny)).is_ok());
-    assert!(Index::range(2).require_aligned(&Index::int64(vec![0, 1])).is_ok());
+    assert!(named
+        .require_aligned(&Index::datetime(vec![1, 2], ny))
+        .is_ok());
+    assert!(Index::range(2)
+        .require_aligned(&Index::int64(vec![0, 1]))
+        .is_ok());
     // naive vs aware never aligns, even over the same stored values
     let err = Index::datetime(vec![1, 2], Tz::Naive)
         .require_aligned(&named)
@@ -299,14 +323,23 @@ fn a_sliced_range_keeps_its_start_and_its_labels() {
     // as a frame it continues with fresh (unlabelled) rows
     let mut grown = tail.clone();
     grown.extend(&Index::range(2)).unwrap();
-    assert!(matches!(grown.kind(), IndexKind::Range { start: 7, len: 5 }));
+    assert!(matches!(
+        grown.kind(),
+        IndexKind::Range { start: 7, len: 5 }
+    ));
     // as rows it carries its labels: explicit integer labels, never a continuation
     assert!(!tail.is_unlabelled() && Index::range(2).is_unlabelled());
     let mut ints = Index::range(3);
     ints.extend(&tail).unwrap();
     assert_eq!(ints, Index::int64(vec![0, 1, 2, 7, 8, 9]));
-    let err = Index::datetime(vec![1], Tz::Utc).check_append(&tail).unwrap_err();
+    let err = Index::datetime(vec![1], Tz::Utc)
+        .check_append(&tail)
+        .unwrap_err();
     assert!(err.to_string().contains("integer index"), "{err}");
     // a label slice reads the labels, not the positions
-    assert_eq!(tail.label_slice(Some(&SliceBound::exact(Label::I64(8))), None).unwrap(), (1, 3));
+    assert_eq!(
+        tail.label_slice(Some(&SliceBound::exact(Label::I64(8))), None)
+            .unwrap(),
+        (1, 3)
+    );
 }

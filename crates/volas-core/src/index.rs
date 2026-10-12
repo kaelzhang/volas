@@ -572,7 +572,6 @@ impl Index {
         let first = rows.start;
         match (&self.kind, label) {
             (IndexKind::Int64(vs), Label::I64(v)) => vs.get(rows)?.iter().position(|x| x == v),
-            (IndexKind::Datetime(vs, _), Label::I64(v)) => vs.get(rows)?.iter().position(|x| x == v),
             (IndexKind::Str(vs), Label::Str(s)) => vs.get(rows)?.iter().position(|x| x == s),
             _ => return self.position_of(label).filter(|p| rows.contains(p)),
         }

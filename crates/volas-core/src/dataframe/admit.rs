@@ -13,9 +13,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use crate::column::CombineOp;
 #[cfg(doc)]
 use crate::column::Column;
+use crate::column::CombineOp;
 use crate::error::{Result, VolasError};
 use crate::index::{IndexKind, Label};
 
@@ -40,34 +40,31 @@ enum Route {
 }
 
 impl DataFrame {
-    /// Reject cached directive columns among `names` (the columns of rows to append):
-    /// this frame computes them itself, so appended values would silently become data.
-    /// The message names them and the data columns to select instead.
-    pub fn check_no_cached<'n>(&self, names: impl IntoIterator<Item = &'n str>) -> Result<()> {
-        if self.computed.is_empty() {
-            return Ok(());
-        }
-        let cached: Vec<&str> = names.into_iter().filter(|n| self.computed.contains_key(*n)).collect();
-        if cached.is_empty() {
-            return Ok(());
-        }
+    /// The error for rows to append whose columns `names` include cached directive
+    /// columns: this frame computes them itself, so appended values would silently
+    /// become data. The message names them and the data columns to select instead.
+    fn cached_columns_error<'n>(&self, names: impl IntoIterator<Item = &'n str>) -> VolasError {
+        let cached: Vec<&str> = names
+            .into_iter()
+            .filter(|n| self.computed.contains_key(*n))
+            .collect();
         let data: Vec<&str> = self
             .names
             .iter()
             .map(String::as_str)
             .filter(|n| !self.computed.contains_key(*n))
             .collect();
-        Err(VolasError::Value(format!(
+        VolasError::Value(format!(
             "cannot append columns {}: they are cached directives that this DataFrame computes \
              itself. Select the data columns first, e.g. df.append(other[{}]).",
             py_list(&cached),
             py_list(&data)
-        )))
+        ))
     }
 
     /// Admit `rows` for appending to (or replacing the last row of) this frame — the
     /// one validation of an incoming row set. `rows` must carry no cached directive
-    /// column ([`check_no_cached`](Self::check_no_cached)) and no column this frame
+    /// column ([`cached_columns_error`](Self::cached_columns_error)) and no column this frame
     /// lacks (a column it lacks is padded on append); its index must be one this
     /// frame's index can take ([`crate::Index::check_append`]); and each column is
     /// converted to this frame's dtype without changing a value ([`Column::convert_lossless`],
@@ -81,7 +78,11 @@ impl DataFrame {
         let prefix = self.leads_with(rows);
         let (mut extra, mut convert) = (None, false);
         for (k, (name, col)) in rows.names.iter().zip(&rows.columns).enumerate() {
-            let target = if prefix { Some(k) } else { self.name_to_idx.get(name).copied() };
+            let target = if prefix {
+                Some(k)
+            } else {
+                self.name_to_idx.get(name).copied()
+            };
             let Some(target) = target else {
                 extra.get_or_insert(name);
                 continue;
@@ -93,12 +94,14 @@ impl DataFrame {
         let has_cached = if prefix {
             self.first_computed.is_some_and(|p| p < rows.width())
         } else if self.computed.len() <= rows.width() {
-            self.computed.keys().any(|k| rows.name_to_idx.contains_key(k))
+            self.computed
+                .keys()
+                .any(|k| rows.name_to_idx.contains_key(k))
         } else {
             rows.names.iter().any(|n| self.computed.contains_key(n))
         };
         if has_cached {
-            self.check_no_cached(rows.names.iter().map(String::as_str))?;
+            return Err(self.cached_columns_error(rows.names.iter().map(String::as_str)));
         }
         if let Some(name) = extra {
             return Err(VolasError::Value(format!(
@@ -115,10 +118,16 @@ impl DataFrame {
         for (k, name) in rows.names.iter().enumerate() {
             let dtype = self.columns[self.name_to_idx[name]].dtype();
             if columns[k].dtype() != dtype {
-                columns[k] = columns[k].convert_lossless(dtype).map_err(|e| in_column(name, e))?;
+                columns[k] = columns[k]
+                    .convert_lossless(dtype)
+                    .map_err(|e| in_column(name, e))?;
             }
         }
-        Ok(Cow::Owned(rows.same_schema(columns, (*rows.index).clone(), rows.origin)))
+        Ok(Cow::Owned(rows.same_schema(
+            columns,
+            (*rows.index).clone(),
+            rows.origin,
+        )))
     }
 
     /// Append `other`'s rows in place, keyed by their labels: a row labelled like the
@@ -256,7 +265,11 @@ impl DataFrame {
             }
             replaces.push(replace);
         }
-        Ok(if replaces.contains(&true) { Route::Rows(replaces) } else { Route::Append })
+        Ok(if replaces.contains(&true) {
+            Route::Rows(replaces)
+        } else {
+            Route::Append
+        })
     }
 
     /// Append admitted rows (see [`admit`](Self::admit)) at the end — the commit step:
@@ -397,7 +410,9 @@ impl DataFrame {
         last: &DataFrame,
         ops: &[(usize, usize, CombineOp)],
     ) -> Result<()> {
-        let Some(h) = src.height.checked_sub(1) else { return Ok(()) };
+        let Some(h) = src.height.checked_sub(1) else {
+            return Ok(());
+        };
         for &(dst_col, src_col, op) in ops {
             let dst = &self.columns[dst_col];
             if dst.dtype().is_float() {
@@ -467,7 +482,11 @@ fn py_list(names: &[&str]) -> String {
 /// a single quote and no double quote; backslashes, the quote and control characters
 /// escaped.
 fn py_str(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::with_capacity(s.len() + 2);
     out.push(quote);
     for c in s.chars() {
