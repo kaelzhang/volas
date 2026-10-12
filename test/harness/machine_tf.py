@@ -3,6 +3,7 @@ checked against an independent re-aggregation of the ledger of fine bars."""
 
 from __future__ import annotations
 
+import numpy as np
 from hypothesis import strategies as st
 from hypothesis.stateful import initialize, rule
 
@@ -43,7 +44,7 @@ class TfMachine(FrameMachine):
         self.store = TfLedger(schema, tf)
         self.pin_scale(regime)
         steered, scale = self.steer(regime)
-        rows = self._rows(make_rows(schema, steered, n, None, scale))
+        rows = make_rows(schema, steered, n, None, scale)
         step = TF_NS[tf] * NS
         start = period_start(epoch, tf, schema.tz)
         if mode == 'cumulate':
@@ -56,13 +57,6 @@ class TfMachine(FrameMachine):
             self.store.seed_index, self.store.seed_rows = labels, rows
             self.df = self.wrap(volas.DataFrame(build.frame(schema, rows, labels), time_frame=tf))
         self.log(f'init {mode} {tf} {schema} n={n} {regime}')
-
-    def _rows(self, rows: list[dict]) -> list[dict]:
-        if contracts.avoids('int-fold-na'):
-            for r in rows:
-                if self.store.schema.volume == 'int64' and r['volume'] is None:
-                    r['volume'] = 0
-        return rows
 
     def _last_ts(self) -> int:
         st_ = self.store
@@ -92,7 +86,7 @@ class TfMachine(FrameMachine):
             k = 1
         steered, scale = self.steer(regime)
         prev = [r for _, r in self.store.fine] or self.store.seed_rows
-        rows = self._rows(make_rows(schema, steered, k, last_close(prev), scale))
+        rows = make_rows(schema, steered, k, last_close(prev), scale)
         ts, last = [], self._last_ts()
         for i in range(k):
             last = self._next(last, moves[i], after_seed=i == 0 and not self.store.fine)
@@ -113,7 +107,7 @@ class TfMachine(FrameMachine):
         """A fold the contract rejects: the frame, its forming bar and its caches are
         untouched, and the next valid fold behaves as if it never happened (I8)."""
         schema = self.store.schema
-        rows = self._rows(make_rows(schema, regime, 2, None))
+        rows = make_rows(schema, regime, 2, None)
         last = self._last_ts()
         after_seed = not self.store.fine
         ts = [self._next(last, 'same', after_seed), self._next(last, 'next', after_seed) + 60 * NS]
@@ -135,7 +129,10 @@ class TfMachine(FrameMachine):
         else:
             if contracts.avoids('append-atomicity'):
                 return  # a fold that fails part-way leaves the forming state changed
-            bar = build.frame(schema, rows, ts, dtypes={'close': 'int64'})
+            # a value the close column cannot hold exactly (the lossless conversion raises)
+            bar = build.frame(schema, rows, ts)
+            bar['close'] = (np.full(len(bar), 2**53 + 1, dtype='int64') if schema.dtype('close') in ('float64', 'float32')
+                            else np.full(len(bar), 0.5))
         expect = TypeError if kind == 'dtype' else ValueError
         self.attempt(lambda: self.df.append(bar), expect_error=expect, label=f'fold rejected {kind}')
 

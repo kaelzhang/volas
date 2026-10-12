@@ -2,6 +2,6 @@
 # <fn> max <count>: the function's release-asm instruction count must not
 # increase. Counted from rustc --emit asm. Refresh only after a reviewed change.
 fold_forming_row max 119
-combine_at max 336
+combine_at max 378
 rolling_max max 338
 rolling_min max 338

@@ -161,42 +161,20 @@ def period_start(ts: int, tf: str, tz: str | None) -> int:
     return local - local % step - off
 
 
-def _agg_float(op: str, values: list):
-    nan = [v is None or (isinstance(v, float) and math.isnan(v)) for v in values]
-    vals = [math.nan if n else v for v, n in zip(values, nan)]
-    if op == 'first':
-        return vals[0] if contracts.TF_FLOAT_FIRST_LAST_KEEP_NAN else next((v for v, n in zip(vals, nan) if not n), math.nan)
-    if op == 'last':
-        return vals[-1] if contracts.TF_FLOAT_FIRST_LAST_KEEP_NAN else next((v for v, n in zip(reversed(vals), reversed(nan)) if not n), math.nan)
-    if op in ('max', 'min'):
-        present = [v for v, n in zip(vals, nan) if not n]
-        if not contracts.TF_FLOAT_MAX_MIN_SKIP_NAN and any(nan):
-            return math.nan
-        if not present and contracts.avoids('all-nan-fold-extreme'):
-            return -math.inf if op == 'max' else math.inf  # the known current result
-        return (max if op == 'max' else min)(present) if present else math.nan
-    if contracts.TF_FLOAT_SUM_PROPAGATES_NAN and any(nan):
-        return math.nan
-    total = 0.0
-    for v, n in zip(vals, nan):
-        if not n:
-            total += v  # plain left-to-right addition (Python's sum() compensates)
-    return total
-
-
-def _agg_int(op: str, values: list):
-    present = [v for v in values if v is not None] if contracts.TF_INT_AGG_SKIPS_NA else values
-    if not present or any(v is None for v in present):
+def _aggregate(op: str, values: list):
+    """A period's aggregate: ``None`` (missing) as soon as any value is missing."""
+    if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in values):
         return None
     if op == 'first':
-        return present[0]
+        return values[0]
     if op == 'last':
-        return present[-1]
-    if op == 'max':
-        return max(present)
-    if op == 'min':
-        return min(present)
-    return sum(present)
+        return values[-1]
+    if op in ('max', 'min'):
+        return (max if op == 'max' else min)(values)
+    total = values[0]
+    for v in values[1:]:
+        total += v  # plain left-to-right addition (Python's sum() compensates)
+    return total
 
 
 def aggregate(schema: Schema, fine: list[tuple[int, dict]], tf: str) -> tuple[list[int], list[dict]]:
@@ -216,10 +194,8 @@ def aggregate(schema: Schema, fine: list[tuple[int, dict]], tf: str) -> tuple[li
             op = AGG.get(col, 'last')
             vals = [r[col] for r in g]
             if schema.dtype(col) in ('float64', 'float32'):
-                v = _agg_float(op, vals)
-                out[col] = None if math.isnan(v) else v
-            else:
-                out[col] = _agg_int(op, vals)
+                vals = [None if v is None else float(v) for v in vals]  # float addition
+            out[col] = _aggregate(op, vals)
         rows.append(out)
     return labels, rows
 

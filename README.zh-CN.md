@@ -238,6 +238,8 @@ df['ma:2']
   - `'max'`——最大值
   - `'min'`——最小值
   - `'sum'`——求和
+
+  缺失值从不被跳过：只要桶内任一值缺失，该列的聚合结果（`'first'` / `'last'` / `'max'` / `'min'` / `'sum'` 皆然）即为缺失（全缺失的桶也是缺失，从不得到 `±inf`），实时折叠与批量 `cumulate` 结果一致。`datetime` 列不支持 `'sum'`，`bool` / `str` 列只支持 `'first'` / `'last'`；不支持的组合在构造 frame 时即被拒绝。
 - **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
 - **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：隐藏历史的 margin（`window + max_lookback`），使缓存指标在自动丢弃旧行前后保持正确——递归类指标（EMA/Wilder/ATR/RSI/MACD）**逐位一致（bit-exact）**，有限窗口类（ma/wma/trima/stddev/…）与无界 frame 在浮点容差内一致（~1e-13）。传一个 **int** 直接声明你会用到的最大指标 lookback，或传一个**指标 directive 列表**从它们中最大的 lookback 推导（例如 `['atr:14', 'ma:50']` → margin 49），省去手算复合指标的预热长度。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）会被拒绝。margin 给得过小会**静默破坏**该保证。
 

@@ -78,7 +78,25 @@ otherwise default to `last`:
 df.cumulate('1h', cumulators={'amount': 'sum'})
 ```
 
-The supported aggregators are `first`, `max`, `min`, `last` and `sum`.
+The supported aggregators are `first`, `max`, `min`, `last` and `sum`. Each keeps
+its column's dtype, and each dtype supports:
+
+| dtype | `first` / `last` | `max` / `min` | `sum` |
+|---|---|---|---|
+| `float64` / `float32` / `int64` / `int32` | ✓ | ✓ | ✓ (an integer sum is exact and raises `OverflowError` rather than wrap) |
+| `datetime64[ns]` | ✓ | ✓ | — (`TypeError`) |
+| `bool` / `str` | ✓ | — (`TypeError`) | — (`TypeError`) |
+
+**A missing input is never skipped.** A period's `first` / `last` / `max` / `min` /
+`sum` is missing as soon as **any** of the period's values is missing — a `NaN`
+float, an int / bool / str `volas.NA`, a datetime `NaT` — whatever value a missing
+cell happens to carry, and an all-missing period is missing too (never `±inf`). One
+`NaN` high inside a 15-minute bar thus gives that bar a `NaN` high (which the
+indicators then treat as a missing row) instead of the maximum of the known highs,
+which could understate the true range with no sign that data was missing. The live
+fold (`append` on a `time_frame` frame) and the batch `cumulate` run the same
+aggregation, so they always agree. pandas `resample` skips missing values instead
+(see [pandas compatibility](pandas-compatibility.md)).
 
 The `time_frame` may be a string label or a `TimeFrame` constant — see
 [TimeFrame](#timeframe) for the full list.

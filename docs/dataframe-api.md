@@ -90,6 +90,12 @@ Which gets the 2-period simple moving average on column `"close"`.
   - `'max'` — the maximum
   - `'min'` — the minimum
   - `'sum'` — the sum
+
+  A missing value is never skipped: every aggregate is missing as soon as any value
+  in the bucket is (an all-missing bucket too — never `±inf`); the live fold and the
+  batch `cumulate` agree. A `datetime` column has no `'sum'`, and a `bool` / `str`
+  column only `'first'` / `'last'`; an unsupported pair is rejected when the frame
+  is built (see [Cumulation](cumulation.md)).
 - **window** `Optional[int] = None` Make this a **bounded rolling-window** frame
   showing only the last `window` rows (see [Bounded rolling window](#bounded-rolling-window)).
   Requires `max_lookback`.
@@ -355,6 +361,10 @@ Cumulate (resample) the data frame to a coarser `time_frame`, returning a new
   - `'max'` — the maximum
   - `'min'` — the minimum
   - `'sum'` — the sum
+
+  Every aggregate of a bucket holding a missing value is missing, and an aggregator
+  the column's dtype does not support raises up front (see
+  [Cumulation](cumulation.md)).
 
 ```py
 # from 1-minute klines to 5-minute klines

@@ -3,7 +3,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use volas_core::{CombineOp, DataFrame, DType, IndexKind};
+use volas_core::{CombineOp, DataFrame, IndexKind};
 use volas_time::{aggregate_period, AggSpec};
 
 #[allow(unused_imports)]
@@ -12,9 +12,11 @@ use crate::*;
 /// Plan the in-place forming-row fold: for each of `inner`'s columns the bar carries,
 /// the `(dst_col, src_col, combine_op)` triple pairing it with the bar column and its
 /// aggregator. A column the bar does not carry (a cached directive) is not folded.
-/// Returns `None` (so the caller re-cumulates the period) if a carried column is
-/// `Bool` / `Str`, which `Column::combine_at` cannot fold in place. The common OHLCV
-/// (all-numeric) frame is always foldable.
+/// Returns `None` (so the caller re-cumulates the period, which validates and
+/// converts every column before it writes) if a carried column arrives in another
+/// dtype than the frame's, or has an aggregation the support table rejects — so an
+/// in-place fold never fails half-way. Every dtype folds in place otherwise
+/// (`bool` / `str` columns by their `first` / `last`).
 pub(crate) fn build_fold_ops(
     inner: &DataFrame,
     bar: &DataFrame,
@@ -24,10 +26,11 @@ pub(crate) fn build_fold_ops(
     for j in 0..inner.width() {
         let name = &inner.names()[j];
         let Some(bj) = bar.column_pos(name) else { continue };
-        if matches!(inner.columns()[j].dtype(), DType::Bool | DType::Utf8) {
+        let (dtype, op) = (inner.columns()[j].dtype(), spec.agg_for(name).as_combine_op());
+        if bar.columns()[bj].dtype() != dtype || !op.supports(dtype) {
             return None;
         }
-        ops.push((j, bj, spec.agg_for(name).as_combine_op()));
+        ops.push((j, bj, op));
     }
     Some(ops)
 }
@@ -129,12 +132,12 @@ impl PyDataFrame {
                 }
                 let last = inner.height() - 1;
                 // Fast path: a new distinct fine bar whose columns are all foldable
-                // (numeric / datetime) updates the forming row IN PLACE — no period
+                // (in the frame's own dtypes) updates the forming row IN PLACE — no period
                 // re-reduce, no column clone, no allocation. The fold plan is CACHED in
                 // `tfs.fold_plan` and reused while the schema is unchanged, so the hot
                 // path never re-runs the per-bar `column_pos` / `agg_for` HashMap name
                 // lookups (whose SipHash dominated the per-bar cost). A re-sent bar
-                // (can't un-combine max/min) or a non-numeric bar column re-cumulates
+                // (can't un-combine max/min) or a bar column of another dtype re-cumulates
                 // the period instead; both stale only the forming row.
                 // A re-sent bar re-cumulates the whole open period instead (a max / min
                 // cannot be un-combined) — also in place, from its own cached plan.
@@ -153,7 +156,9 @@ impl PyDataFrame {
                         inner.fold_forming_row(last, src, 0, &fp.ops).map_err(pyerr)?;
                     }
                 } else {
-                    // A bool / str bar column: re-cumulate the open period and REPLACE
+                    // A bar column of another dtype (or an aggregation the support table
+                    // rejects): re-cumulate the open period, which converts or raises
+                    // before writing, and REPLACE
                     // the forming row with it — in place, for every column dtype. Only
                     // that row changed, so the cached columns keep their states.
                     let agg =

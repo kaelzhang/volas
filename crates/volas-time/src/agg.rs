@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use volas_core::{Column, CombineOp, Result, VolasError};
+use volas_core::{Column, CombineOp, DataFrame, Result, VolasError};
 
 /// A column aggregator over a period's rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,16 +32,6 @@ impl Agg {
         })
     }
 
-    fn name(&self) -> &'static str {
-        match self {
-            Agg::First => "first",
-            Agg::Max => "max",
-            Agg::Min => "min",
-            Agg::Last => "last",
-            Agg::Sum => "sum",
-        }
-    }
-
     /// The in-place single-cell combine op equivalent to this aggregator — the
     /// incremental dual of [`Self::reduce`], used by the live tf-fold to update the
     /// forming bar without re-reducing the whole period.
@@ -56,51 +46,21 @@ impl Agg {
     }
 
     /// Reduce the values at `kept` positions of `col` to a 1-element column of
-    /// the appropriate dtype.
+    /// `col`'s dtype: the first value, with every later one folded in by the very
+    /// kernel the live time-frame fold runs ([`Column::combine_at`]), so the batch
+    /// and the incremental aggregate agree exactly — the support table is
+    /// [`CombineOp::supports`], a missing input makes any aggregate missing, an
+    /// integer sum is checked.
     pub fn reduce(&self, col: &Column, kept: &[usize]) -> Result<Column> {
-        match self {
-            Agg::First => Ok(col.take(&[kept[0]])),
-            Agg::Last => Ok(col.take(&[*kept.last().unwrap()])),
-            Agg::Max | Agg::Min | Agg::Sum => self.reduce_numeric(col, kept),
+        let op = self.as_combine_op();
+        if !op.supports(col.dtype()) {
+            return Err(op.unsupported(col.dtype()));
         }
-    }
-
-    fn reduce_numeric(&self, col: &Column, kept: &[usize]) -> Result<Column> {
-        match col {
-            Column::F64(v) => {
-                let it = kept.iter().map(|&i| v[i]);
-                let val = match self {
-                    Agg::Max => it.fold(f64::NEG_INFINITY, f64::max),
-                    Agg::Min => it.fold(f64::INFINITY, f64::min),
-                    Agg::Sum => it.sum(),
-                    _ => unreachable!(), // LCOV_EXCL_LINE
-                };
-                Ok(Column::f64(vec![val]))
-            }
-            Column::I64(v, _) | Column::Datetime(v) => {
-                let mut it = kept.iter().map(|&i| v[i]);
-                let val = match self {
-                    Agg::Max => it.max().unwrap(),
-                    Agg::Min => it.min().unwrap(),
-                    // checked, as the in-place fold (`Column::combine_at`): an integer
-                    // sum never wraps
-                    Agg::Sum => it
-                        .try_fold(0i64, i64::checked_add)
-                        .ok_or_else(|| volas_core::numeric::overflow(col.dtype(), "a time-frame fold"))?,
-                    _ => unreachable!(), // LCOV_EXCL_LINE
-                };
-                Ok(if matches!(col, Column::Datetime(_)) {
-                    Column::datetime(vec![val])
-                } else {
-                    Column::i64(vec![val])
-                })
-            }
-            other => Err(VolasError::DType(format!(
-                "cannot {} a {} column",
-                self.name(),
-                other.dtype()
-            ))),
+        let mut out = col.take(&[kept[0]]);
+        for &i in &kept[1..] {
+            out.combine_at(0, op, col, i)?;
         }
+        Ok(out)
     }
 }
 
@@ -139,6 +99,24 @@ impl AggSpec {
     /// The aggregator for a column (the default if unset).
     pub fn agg_for(&self, name: &str) -> Agg {
         self.by_name.get(name).copied().unwrap_or(self.default)
+    }
+
+    /// Check every column of `df` against the support table
+    /// ([`CombineOp::supports`]) before any period is aggregated — a frame whose
+    /// spec asks for, say, the `max` of a `str` column is rejected up front, by
+    /// `cumulate` and by a `time_frame` frame's construction alike.
+    pub fn check(&self, df: &DataFrame) -> Result<()> {
+        for (name, col) in df.names().iter().zip(df.columns()) {
+            let op = self.agg_for(name).as_combine_op();
+            if !op.supports(col.dtype()) {
+                return Err(VolasError::DType(format!(
+                    "cumulators: cannot {} the {} column {name:?}",
+                    op.name(),
+                    col.dtype()
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -259,18 +237,81 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_input_makes_every_aggregate_missing() {
+        use volas_core::Validity;
+        let all = [0, 1, 2];
+        // float: a NaN anywhere -> NaN (never skipped, never ±inf), first / last too
+        let f = Column::f64(vec![1.0, f64::NAN, 3.0]);
+        for agg in [Agg::First, Agg::Last, Agg::Max, Agg::Min, Agg::Sum] {
+            assert!(agg.reduce(&f, &all).unwrap().get_f64(0).is_nan(), "{agg:?}");
+        }
+        assert_eq!(Agg::First.reduce(&f, &[0, 2]).unwrap(), Column::f64(vec![1.0]));
+        assert_eq!(Agg::Last.reduce(&f, &[0, 2]).unwrap(), Column::f64(vec![3.0]));
+        let s = Column::str_from_options([Some("a".into()), None]);
+        assert!(!Agg::First.reduce(&s, &[0, 1]).unwrap().is_valid(0));
+        let nan = Column::f64(vec![f64::NAN]);
+        assert!(Agg::Max.reduce(&nan, &[0]).unwrap().get_f64(0).is_nan(), "all-missing");
+        // int / f32 / i32: the same rule, payload-independent, dtype kept
+        let ints = Column::i64_with(vec![-5, 999, 2], Validity::from_valid_iter(3, [true, false, true])).unwrap();
+        for agg in [Agg::Max, Agg::Min, Agg::Sum] {
+            let out = agg.reduce(&ints, &all).unwrap();
+            assert_eq!((out.dtype(), out.is_valid(0)), (volas_core::DType::I64, false), "{agg:?}");
+        }
+        assert_eq!(Agg::Max.reduce(&ints, &[0, 2]).unwrap(), Column::i64(vec![2]));
+        assert_eq!(Agg::Sum.reduce(&Column::f32(vec![1.5, 2.0]), &[0, 1]).unwrap(), Column::f32(vec![3.5]));
+        assert_eq!(Agg::Min.reduce(&Column::i32(vec![4, -2]), &[0, 1]).unwrap(), Column::i32(vec![-2]));
+        // the support table: a datetime has no sum
+        let ts = Column::datetime(vec![100, 500]);
+        assert!(Agg::Sum.reduce(&ts, &[0, 1]).is_err());
+    }
+
+    #[test]
+    fn a_spec_is_checked_against_the_frame_up_front() {
+        let df = DataFrame::new(
+            vec!["close".into(), "sym".into()],
+            vec![Column::f64(vec![1.0]), Column::str(vec!["a".into()])],
+            None,
+        )
+        .unwrap();
+        let mut spec = AggSpec::ohlcv();
+        spec.check(&df).unwrap(); // `sym` falls back to `last`
+        spec.set("sym", Agg::Max);
+        assert_eq!(
+            spec.check(&df).unwrap_err(),
+            VolasError::DType("cumulators: cannot max the str column \"sym\"".into())
+        );
+    }
+
+    #[test]
+    fn the_batch_reduce_is_the_fold() {
+        use volas_core::Validity;
+        let cols = [
+            Column::f64(vec![2.0, f64::NAN, 7.0, 1.0]),
+            Column::f64(vec![2.0, 9.0, 7.0, 1.0]),
+            Column::f32(vec![2.0, 9.0, 7.0, 1.0]),
+            Column::i64_with(vec![2, 0, 7, 1], Validity::from_valid_iter(4, [true, false, true, true])).unwrap(),
+            Column::i32(vec![2, 9, 7, 1]),
+            Column::datetime(vec![2, 9, i64::MIN, 1]),
+        ];
+        for col in &cols {
+            for agg in [Agg::First, Agg::Last, Agg::Max, Agg::Min, Agg::Sum] {
+                let (op, batch) = (agg.as_combine_op(), agg.reduce(col, &[0, 1, 2, 3]));
+                let mut fold = col.take(&[0]);
+                let folded = (1..4).try_for_each(|r| fold.combine_at(0, op, col, r));
+                match batch {
+                    Ok(b) => assert!(folded.is_ok() && b.equals(&fold), "{agg:?} {}", col.dtype()),
+                    Err(_) => assert!(folded.is_err(), "{agg:?} {}", col.dtype()),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn default_spec_and_max_min_dtype_errors() {
         assert_eq!(AggSpec::default().agg_for("open"), Agg::First);
         // Max / Min on a non-numeric column hit the dtype-error path (exercises name()).
         let flags = Column::bool(vec![true, false]);
         assert!(Agg::Max.reduce(&flags, &[0, 1]).is_err());
         assert!(Agg::Min.reduce(&flags, &[0, 1]).is_err());
-    }
-
-    #[test]
-    fn agg_name_first_last() {
-        // first / last names (the other variants are exercised via reduce errors).
-        assert_eq!(Agg::First.name(), "first");
-        assert_eq!(Agg::Last.name(), "last");
     }
 }
