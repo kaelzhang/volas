@@ -30,6 +30,7 @@ pub use one_bar::*;
 pub use three_bar::*;
 pub use two_bar::*;
 
+use crate::accum::Csum;
 use crate::missing;
 use crate::raw::kernels;
 use ndarray::ArrayView1;
@@ -151,7 +152,7 @@ pub const CANDLE_PATTERNS: &[&str] = &[
 
 /// The range a candle-setting measures. The full set mirrors TA-Lib's settings table;
 /// a variant is only *constructed* once a pattern needing it lands, so allow the lint.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 #[allow(dead_code)]
 enum RangeType {
     RealBody,
@@ -282,15 +283,69 @@ fn divisor(s: Setting) -> f64 {
     if matches!(s.range, RangeType::Shadows) { 2.0 } else { 1.0 }
 }
 
-/// The setting's range at every bar (TA-Lib `TA_CANDLERANGE`): the real body, the
-/// high − low span, or both shadows, with the range type resolved once.
-fn ranges(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
-    let n = c.len();
-    match s.range {
-        RangeType::RealBody => (0..n).map(|i| (c[i] - o[i]).abs()).collect(),
-        RangeType::HighLow => (0..n).map(|i| h[i] - l[i]).collect(),
-        RangeType::Shadows => (0..n).map(|i| uppershadow(o, h, c, i) + lowershadow(o, l, c, i)).collect(),
+/// The range of type `range` at bar `i` (TA-Lib `TA_CANDLERANGE`): the real body, the
+/// high − low span, or both shadows.
+#[inline(always)]
+fn range_at(range: RangeType, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> f64 {
+    match range {
+        RangeType::RealBody => (c[i] - o[i]).abs(),
+        RangeType::HighLow => h[i] - l[i],
+        RangeType::Shadows => uppershadow(o, h, c, i) + lowershadow(o, l, c, i),
     }
+}
+
+/// The mean of the `range` over the `p`-bar window ending at every bar — exactly
+/// [`kernels::sma`] of the ranges (NaN before the first full window), in one fused pass:
+/// each range is formed as it enters and leaves, and the exact sum ([`Csum`]) is re-summed
+/// only where it could not hold its sum, so no ranges array is materialized. A
+/// non-finite range takes `sma`'s window-local careful path. Row 0 is at absolute
+/// position `origin`. With `p == 0`, the range of the bar itself.
+fn range_mean(range: RangeType, p: usize, o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+    let n = c.len();
+    let r = |i: usize| range_at(range, o, h, l, c, i);
+    if p == 0 {
+        return (0..n).map(r).collect();
+    }
+    if p > n {
+        return vec![f64::NAN; n];
+    }
+    let pf = p as f64;
+    let mut out = Vec::with_capacity(n);
+    out.resize(p - 1, f64::NAN);
+    let mut sum = Csum::default();
+    let mut clean = true;
+    for i in 0..n {
+        sum.add(r(i));
+        if i >= p {
+            sum.sub(r(i - p));
+        }
+        if !sum.is_exact() && i + 1 >= p {
+            clean = sum.value().is_finite();
+            if !clean {
+                break;
+            }
+            sum = Csum::of((i + 1 - p..=i).map(r));
+        }
+        if i + 1 >= p {
+            out.push(sum.mean(pf));
+        }
+    }
+    if clean && sum.value().is_finite() {
+        return out;
+    }
+    let ranges: Vec<f64> = (0..n).map(r).collect();
+    kernels::sma(ArrayView1::from(&ranges), p, origin).to_vec()
+}
+
+/// A setting's average at bar `i` from its range's mean series `mean` ([`range_mean`]):
+/// `factor · mean[i − 1] · inv_div` — the window of the `avg_period` bars before `i` —
+/// or `factor · range(i) · inv_div` for a per-bar setting; NaN before the first window.
+/// `inv_div` is `1 / divisor(s)` (`/ div`, 1 or 2, a power of two, is exactly that
+/// product).
+#[inline(always)]
+fn setting_average(s: Setting, inv_div: f64, mean: &[f64], i: usize) -> f64 {
+    let at = if s.avg_period == 0 { Some(i) } else { i.checked_sub(1) };
+    at.map_or(f64::NAN, |j| s.factor * mean[j] * inv_div)
 }
 
 /// TA-Lib's `TA_CANDLEAVERAGE` of setting `s` at every bar (NaN before the first full
@@ -298,27 +353,51 @@ fn ranges(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// / avg_period / div`, or `factor · range(i) / div` when `avg_period == 0`. Row 0 is at
 /// absolute position `origin` (the frame's). The one definition of a candle average: the
 /// sum slides like TA-Lib's running total (O(1) per bar), but it is the sliding mean every
-/// moving average uses ([`kernels::sma`]: an exact sum re-anchored at absolute positions,
-/// window-local — a non-finite range reaches only the windows holding it) — so a bad
-/// candle never outlives the windows holding it, and a recomputed window (the live
-/// refresh) gives the full computation's bits. On near-tie bars this follows the exact
-/// arithmetic where TA-Lib's plain running total has drifted.
+/// moving average uses ([`kernels::sma`]: an exact sum, window-local — a non-finite range
+/// reaches only the windows holding it) — so a bad candle never outlives the windows
+/// holding it, and a recomputed window (the live refresh) gives the full computation's
+/// bits. On near-tie bars this follows the exact arithmetic where TA-Lib's plain running
+/// total has drifted.
 fn candle_average_series(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
-    let n = c.len();
-    // `/ div` (1 or 2, a power of two) is exactly `* (1 / div)`.
+    let mut mean = range_mean(s.range, s.avg_period, o, h, l, c, origin);
     let inv_div = 1.0 / divisor(s);
-    let r = ranges(s, o, h, l, c);
-    let p = s.avg_period;
-    if p == 0 {
-        return r.into_iter().map(|x| s.factor * x * inv_div).collect();
+    // In place, last bar first: bar `i` reads the mean at `i − 1` (or `i` itself).
+    for i in (0..mean.len()).rev() {
+        mean[i] = setting_average(s, inv_div, &mean, i);
     }
-    // The average at bar `i` is the mean range of the window ending at bar `i − 1`: the
-    // sliding mean every moving average uses (`kernels::sma`), one row behind.
-    let mean = kernels::sma(ArrayView1::from(&r), p, origin);
-    let mut out = Vec::with_capacity(n);
-    out.push(f64::NAN);
-    out.extend(mean.iter().take(n.saturating_sub(1)).map(|m| s.factor * m * inv_div));
-    out
+    mean
+}
+
+/// The averages of `settings` at every bar, as [`candle_average_series`] gives them, from
+/// one mean series per distinct (range, period) — settings that differ only in their
+/// factor share it — read at each bar without materializing a series per setting.
+struct Averages<const K: usize> {
+    settings: [Setting; K],
+    inv_div: [f64; K],
+    means: Vec<Vec<f64>>,
+    which: [usize; K],
+}
+
+impl<const K: usize> Averages<K> {
+    fn new(settings: [Setting; K], o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Self {
+        let mut keys: Vec<(RangeType, usize)> = Vec::with_capacity(K);
+        let mut means = Vec::with_capacity(K);
+        let which = settings.map(|s| {
+            let key = (s.range, s.avg_period);
+            keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+                keys.push(key);
+                means.push(range_mean(s.range, s.avg_period, o, h, l, c, origin));
+                keys.len() - 1
+            })
+        });
+        Averages { settings, inv_div: settings.map(|s| 1.0 / divisor(s)), means, which }
+    }
+
+    /// The averages at bar `i`.
+    #[inline(always)]
+    fn at(&self, i: usize) -> [f64; K] {
+        std::array::from_fn(|k| setting_average(self.settings[k], self.inv_div[k], &self.means[self.which[k]], i))
+    }
 }
 
 /// Build a pattern column: NaN before `lookback`, then `f(i)` (0 / ±100 / ±80 / ±200)
@@ -368,8 +447,8 @@ fn each_bar_avg<const K: usize>(
     origin: usize,
     f: impl Fn(usize, &[f64; K]) -> f64,
 ) -> Vec<f64> {
-    let avg = settings.map(|s| candle_average_series(s, o, h, l, c, origin));
-    each_bar(lookback, o, h, l, c, |i| f(i, &std::array::from_fn(|k| avg[k][i])))
+    let avg = Averages::new(settings, o, h, l, c, origin);
+    each_bar(lookback, o, h, l, c, |i| f(i, &avg.at(i)))
 }
 
 /// [`each_bar_avg`] for a two-bar pattern: `f(i, cur, prev)` with the averages at `i`
@@ -386,10 +465,8 @@ fn each_bar_avg2<const K: usize>(
     origin: usize,
     f: impl Fn(usize, &[f64; K], &[f64; K]) -> f64,
 ) -> Vec<f64> {
-    let avg = settings.map(|s| candle_average_series(s, o, h, l, c, origin));
-    each_bar(lookback, o, h, l, c, |i| {
-        f(i, &std::array::from_fn(|k| avg[k][i]), &std::array::from_fn(|k| avg[k][i - 1]))
-    })
+    let avg = Averages::new(settings, o, h, l, c, origin);
+    each_bar(lookback, o, h, l, c, |i| f(i, &avg.at(i), &avg.at(i - 1)))
 }
 
 /// [`each_bar_avg`] for a pattern that reads averages up to `L − 1` bars back:
@@ -406,10 +483,8 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
     origin: usize,
     f: impl Fn(usize, &[[f64; K]; L]) -> f64,
 ) -> Vec<f64> {
-    let avg = settings.map(|s| candle_average_series(s, o, h, l, c, origin));
-    each_bar(lookback, o, h, l, c, |i| {
-        f(i, &std::array::from_fn(|lag| std::array::from_fn(|k| avg[k][i - lag])))
-    })
+    let avg = Averages::new(settings, o, h, l, c, origin);
+    each_bar(lookback, o, h, l, c, |i| f(i, &std::array::from_fn(|lag| avg.at(i - lag))))
 }
 
 #[cfg(test)]
@@ -447,13 +522,13 @@ mod tests {
     /// bars (to the exact sum's last bit), ÷2 for Shadows, the bar's own range for
     /// `avg_period == 0`; NaN before the first full window, nothing on a short series.
     /// And a recomputed tail (the live refresh: a slice keeps its rows' absolute
-    /// positions) gives the full series' bits once its first anchor has passed.
+    /// positions) gives the full series' bits.
     #[test]
     fn the_average_series_is_the_window_mean_and_a_tail_recompute_matches_it() {
         for n in [3, 10, 11, 14, 60] {
             let [o, h, l, c] = ohlc(n);
             for s in [BODY_LONG, BODY_DOJI, SHADOW_SHORT, SHADOW_LONG, NEAR, BODY_VERY_LONG] {
-                let r = ranges(s, &o, &h, &l, &c);
+                let r: Vec<f64> = (0..n).map(|i| range_at(s.range, &o, &h, &l, &c, i)).collect();
                 let series = candle_average_series(s, &o, &h, &l, &c, 0);
                 for (i, v) in series.iter().enumerate() {
                     if i < s.avg_period {
@@ -481,8 +556,8 @@ mod tests {
     }
 
     /// A missing or infinite candle makes a pattern NaN on exactly the bars whose reach
-    /// holds it, the bars before are untouched, and once it has left (and the sums'
-    /// next anchor has passed) every bar is what clean data gives — an average never
+    /// holds it, the bars before are untouched, and once it has left every bar is what
+    /// clean data gives — an average never
     /// carries it further. Every builder shape.
     #[test]
     fn a_missing_candle_reaches_only_the_bars_that_read_it() {
