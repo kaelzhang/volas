@@ -93,6 +93,7 @@ polars。它是一个窄而快的 DataFrame，专门服务于这一类场景：
 - [时区](#时区)
 - [缺失值（`volas.NA`）](#缺失值volasna)
 - [与 pandas 互操作](#与-pandas-互操作)
+  - [datetime 列是 UTC 瞬时](#datetime-列是-utc-瞬时)
 - [与 Arrow、DLPack 互操作（零拷贝）](#与-arrowdlpack-互操作零拷贝)
 - [错误处理](#错误处理)
 - [内置指标](#内置指标)
@@ -993,8 +994,9 @@ df.cumulate('1h', cumulators={'amount': 'sum'})
 作为标签，即使第一根原始 bar 是在周期中途才到。一根 `15m` bar 如果第一笔 tick 在
 `09:07`，它的标签仍然是 `09:00`，绝不会是 `09:07`；因此 volas 的 bar 会与交易所 K 线以及 pandas `resample`（`label='left'`）完全对齐。
 
-各时间框的网格原点如下：日内时间框锚定在该索引所属（带时区的）交易日**午夜**——
-`15m` bar 起于 `:00`/`:15`/`:30`/`:45`，`4h` bar 起于 `00:00`/`04:00`/…；`1d` 起于午夜；`1w` 起于**周一**；`3d` 使用从 Unix 纪元开始的连续网格；`1M` / `1y` 起于日历月 / 年。如果夏令时切换移除或重复了某个周期边界，标签会解析到该周期最早的真实瞬时。
+各时间框的网格原点如下：日内时间框锚定在该索引所属（带时区的）交易日**午夜**——`15m` bar 起于 `:00`/`:15`/`:30`/`:45`，`4h` bar 起于 `00:00`/`04:00`/…；`1d` 起于午夜；`1w` 起于**周一**；`3d` 使用从 Unix 纪元开始的连续网格；`1M` / `1y` 起于日历月 / 年。
+
+跨越夏令时切换时，**日内**时间框在这张本地网格上按真实瞬时分桶：回拨（fall-back）重复出现的挂钟小时会成为两根 bar，标签是两个不同的瞬时（2026-11-01 的 `America/New_York` 中，`1h` 时间框有一根 `01:00-04:00` bar 和一根 `01:00-05:00` bar，与 pandas `resample('1h')` 完全一致）；被拨快（spring-forward）跳过的网格点，其 bar 从跳空结束的瞬时开始。没有重复任何网格点的回拨留在同一根 bar 内（那天 `00:00` 的 `2h` bar 跨越三个真实小时）。**日及更粗**的时间框保持本地民用日历：25 小时的回拨日是一根 `1d` bar，标签为当地午夜（午夜本身被跳过时，取当天第一个真实瞬时）。实时折叠与 `cumulate` 的分桶完全一致。
 
 传给 `DataFrame(data, time_frame=...)` 的各行遵循同一规则：volas 会把每行的标签当作周期起点（它无法校验这一点），因此以周期**终点**标注的数据必须先向前平移一个周期。
 
@@ -1102,8 +1104,7 @@ df.cumulate(TimeFrame.m5)     # 与 df.cumulate('5m') 相同
 | `TimeFrame.M1` | `'1M'` | frame 所在时区下的民用日历月。 |
 | `TimeFrame.Y1` | `'1y'` | frame 所在时区下的民用日历年。 |
 
-每个桶都按 **frame 所在时区的本地挂钟时间**对齐，但存储仍保持 UTC：日内小时桶（`2h`/`4h`/`6h`/`8h`/`12h`）从本地 `00` 开始，按本地小时步进；`3d` 从该时区下的
-Unix 纪元日开始，计算连续 3 个本地民用日的桶（不在月边界重置）；`1w` 按本地民用时间从周一开始。因此日 / 周 bar 会跟随本地交易日，而具名时区会让小时桶具备 DST 意识。
+每个桶都按 **frame 所在时区的本地挂钟时间**对齐，但存储仍保持 UTC：日内小时桶（`2h`/`4h`/`6h`/`8h`/`12h`）从本地 `00` 开始，按本地小时步进；`3d` 从该时区下的 Unix 纪元日开始，计算连续 3 个本地民用日的桶（不在月边界重置）；`1w` 按本地民用时间从周一开始。因此日 / 周 bar 会跟随本地交易日，而具名时区会让小时桶具备 DST 意识（重复与被跳过的小时见 [bar 标签是周期起点](#bar-标签是周期起点)）。网格始终属于 **frame 自身**的时区：append 到 tf 感知 frame 的 bar 按其瞬时落到这张网格上，与该 bar 自身索引携带的时区无关。
 
 ## `directive` 的语法
 
@@ -1349,6 +1350,31 @@ pdf = df.to_pandas(dtype_backend='numpy_nullable')  # 忠实的 masked Int64 / b
 df.to_csv('out.csv', index=True)   # pandas to_csv 的一个子集；path=None 时返回一个 str
 ```
 
+### datetime 列是 UTC 瞬时
+
+datetime **列**存储的是绝对瞬时（UTC 纪元纳秒），本身不带时区——只有 `DatetimeIndex` 携带时区。任意时区（或 naive）的 pandas 列都按其瞬时读入；凡是能表达时区的导出，一律标为 **UTC**：
+
+| 导出 | datetime 列变成 |
+|---|---|
+| `to_pandas()`（两种后端） | `datetime64[ns, UTC]` |
+| `pa.table(df)` / `pa.array(s)` / `to_arrow()` | `timestamp[ns, tz=UTC]` |
+| `s.to_list()` / `to_dict()` / `items()`、单元格、`to_numpy(dtype='object')` | `Timestamp(..., tz='UTC')`（`NaT` 为 `volas.NA`） |
+| `s.dt.tz` | `'UTC'`（`.dt` 字段读取 UTC 挂钟时间） |
+| `to_numpy()` / `__array__` | 相同 UTC 瞬时的 `datetime64[ns]`（NumPy 没有时区） |
+| `s.dtype` / `df.dtypes`、`repr`、`to_csv` | 不变：dtype 仍为 `datetime64[ns]`（dtype 名中不含时区），repr / CSV 文本显示不带偏移的 UTC 挂钟时间 |
+
+因此瞬时永远没有歧义，但**源列的时区不会被保存**：pandas 的 `datetime64[ns, Asia/Shanghai]` 列会以 `datetime64[ns, UTC]`（相同瞬时）返回。通过转换恢复时区——在 pandas 中，或在 volas 中经由索引：
+
+```py
+pdf = df.to_pandas()
+pdf['t'] = pdf['t'].dt.tz_convert('Asia/Shanghai')      # pandas：重新标注时区
+
+df.set_index('t').tz_localize('UTC').tz_convert('Asia/Shanghai')
+# volas：列的 UTC 瞬时变成锚定 UTC 的索引，再重新标注时区
+```
+
+naive 的 pandas datetime 列同样按 UTC 瞬时读入，因此也会导出为 `datetime64[ns, UTC]`（如有需要，在 pandas 中用 `.dt.tz_localize(None)` 去掉时区）。
+
 `to_pandas` 的 **dtype_backend**（`'numpy'` 对比无损的 `'numpy_nullable'`）决定缺失值如何带入 pandas——逐值说明见
 [`df.to_pandas`](#dfto_pandasdtype_backendnumpy---pandasdataframe)。
 
@@ -1406,9 +1432,7 @@ df['qty'].to_numpy(dtype='int64', na_value=0)    # 或用 na_value 填充空洞
 pa.array(df['qty'])                              # 无损：保留 int64 + 空值位图
 ```
 
-**时区。** Arrow 表没有*索引*，因此帧的索引（及其时区）不会被携带：datetime 列以裸 UTC
-纳秒跨越（绝对时刻精确，只丢「用哪个时区显示」的标签），`from_arrow` 返回全新
-`RangeIndex`。导入后用 `tz_localize` / `tz_convert` 重新打上时区。
+**时区。** Arrow 表没有*索引*，因此帧的索引（及其时区）不会被携带，`from_arrow` 返回全新 `RangeIndex`。datetime 列导出为 `timestamp[ns, tz=UTC]`（见 [datetime 列是 UTC 瞬时](#datetime-列是-utc-瞬时)）；导入的任意时区（或无时区）timestamp 列都变成其精确瞬时，时区本身不保留。导入后用 `set_index` + `tz_localize('UTC')` + `tz_convert` 重新标注时区。
 
 ## 错误处理
 

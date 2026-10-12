@@ -57,7 +57,7 @@ def test_from_pandas_keeps_a_named_index_beside_a_same_named_column():
     back = df.to_pandas()
     assert back.index.name == 'date'
     assert back.index.tolist() == when.tolist()
-    assert back['date'].tolist() == other.tolist()
+    assert back['date'].tolist() == other.tz_localize('UTC').tolist()  # a UTC column
 
 
 def test_datetime64_array_column_ingested():

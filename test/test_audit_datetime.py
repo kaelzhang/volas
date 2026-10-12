@@ -16,6 +16,7 @@ Findings pinned here: F23–F31 (datetime-audit-plan §4).
 
 from __future__ import annotations
 
+import operator
 from datetime import datetime
 
 import pandas as pd
@@ -183,12 +184,40 @@ def test_to_datetime_census(label, xs):
     assert str(out.dtype).startswith("datetime64")
 
 
-# --- Layer 2: scalar-operand I-rep census (F15: `Timestamp == <scalar>`) -----
-# F15 FIXED: pandas / stdlib datetime operands compare correctly.
-_OPERANDS = ["volas-Timestamp", "np-datetime64", "str-datetime", "pd-Timestamp", "py-datetime"]
+# --- Layer 2: scalar-operand I-rep census (F15: `Timestamp <op> <scalar>`) ---
+# Every way to express a datetime scalar, compared with every operator, gives
+# pandas' outcome: instants (Timestamp / datetime / datetime64) compare by
+# instant; a string or an integer is not an instant (`==` False, `!=` True,
+# ordering raises TypeError) — so `a == b` always implies `hash(a) == hash(b)`.
+_CMP_OPS = ["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"]
 
 
-@pytest.mark.parametrize("label", _OPERANDS, ids=_OPERANDS)
+def _outcome(f):
+    try:
+        return bool(f())
+    except TypeError:
+        return TypeError
+
+
+_NAT = ("pd-NaT", "np-NaT")
+
+
+@pytest.mark.parametrize("label", [lbl for lbl, _ in I.datetime_scalars() if lbl not in _NAT])
 def test_timestamp_compare_operand_census(label):
     rhs = dict(I.datetime_scalars())[label]
-    assert bool(volas.Timestamp("2021-06-15 09:30:00") == rhs) is True
+    ours, oracle = volas.Timestamp("2021-06-15 09:30:00"), pd.Timestamp("2021-06-15 09:30:00")
+    for name in _CMP_OPS:
+        f = getattr(operator, name.strip("_"))
+        assert _outcome(lambda: f(ours, rhs)) == _outcome(lambda: f(oracle, rhs)), (label, name)
+        assert _outcome(lambda: f(rhs, ours)) == _outcome(lambda: f(rhs, oracle)), (label, name)
+
+
+@pytest.mark.parametrize("label", _NAT)
+def test_timestamp_compare_nat(label):
+    # NaT is not an instant: never equal (pandas). Ordering diverges: pandas
+    # answers False, volas raises TypeError (a missing instant has no order).
+    nat = dict(I.datetime_scalars())[label]
+    ts = volas.Timestamp("2021-06-15 09:30:00")
+    assert (ts == nat) is False and (ts != nat) is True
+    with pytest.raises(TypeError):
+        ts < nat

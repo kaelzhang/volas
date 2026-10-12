@@ -8,7 +8,6 @@ raises (C4 — no object dtype to mix types), and the whole frame fails atomical
 without a partial write. The DataFrame and Series surfaces must not disagree on
 the same column."""
 
-import numpy as np
 import pytest
 import volas
 from volas import DataFrame
@@ -27,9 +26,9 @@ def test_frame_fillna_datetime_string_and_timestamp():
     df = DataFrame({"t": ["2021-01-01", None, "2021-01-03"]}).astype({"t": "datetime64[ns]"})
     out = df.fillna("2021-01-02")
     assert out["t"].dtype == "datetime64[ns]"
-    assert out["t"].iloc[1] == np.datetime64("2021-01-02")
+    assert out["t"].iloc[1] == volas.Timestamp("2021-01-02", tz="UTC")
     out2 = df.fillna(volas.Timestamp("2021-01-02"))
-    assert out2["t"].iloc[1] == np.datetime64("2021-01-02")
+    assert out2["t"].iloc[1] == volas.Timestamp("2021-01-02", tz="UTC")
 
 
 def test_frame_fillna_na_is_noop():

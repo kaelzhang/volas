@@ -40,7 +40,7 @@ impl PyDt {
     }
 
     fn ts(ns: i64) -> PyTimestamp {
-        PyTimestamp { ns, tz: Tz::Naive } // a value column is tz-less (D3)
+        PyTimestamp { ns, tz: Tz::DATETIME_COLUMN } // a column holds UTC instants
     }
 
     fn wrap(&self, data: Column) -> PySeries {
@@ -53,7 +53,7 @@ impl PyDt {
     /// [`Civil`] view — decomposed ONCE per element, however many fields the value
     /// reads; a NaT cell stays missing (`# C2`).
     fn map_civil<T: Default>(&self, f: impl Fn(&Civil) -> T) -> (Vec<T>, Validity) {
-        self.map_ns(|ns| f(&Tz::Naive.civil(ns))) // a value column is tz-less (D3)
+        self.map_ns(|ns| f(&Tz::DATETIME_COLUMN.civil(ns))) // the UTC wall clock
     }
 
     /// As [`Self::map_civil`] for a value read from the raw instant itself.
@@ -242,7 +242,7 @@ impl PyDt {
                 out.push(String::new());
                 continue;
             }
-            out.push(datetime::strftime(ns, Tz::Naive, fmt).map_err(pyerr)?);
+            out.push(datetime::strftime(ns, Tz::DATETIME_COLUMN, fmt).map_err(pyerr)?);
         }
         Ok(self.wrap(Column::str_with(out, validity)))
     }
@@ -280,7 +280,7 @@ impl PyDt {
             let (y, w, d) = if ns == datetime::NAT {
                 (0, 0, 0)
             } else {
-                Tz::Naive.civil(ns).iso_calendar()
+                Tz::DATETIME_COLUMN.civil(ns).iso_calendar()
             };
             years.push(y);
             weeks.push(w);
@@ -297,11 +297,11 @@ impl PyDt {
         Ok(PyDataFrame::plain(df))
     }
 
-    /// The column-level timezone — always ``None``: a tz lives on the index or
-    /// a scalar ``Timestamp``, never on a value column (D3).
+    /// The column-level timezone — always ``'UTC'``: a datetime column holds UTC
+    /// instants and stores no zone of its own (a display zone lives on the index).
     #[getter]
-    fn tz(&self) -> Option<String> {
-        None
+    fn tz(&self) -> String {
+        Tz::DATETIME_COLUMN.name()
     }
     /// The storage unit — always ``'ns'`` (D1, like pandas ``.dt.unit``).
     #[getter]

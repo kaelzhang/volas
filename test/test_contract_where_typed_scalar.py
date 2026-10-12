@@ -28,7 +28,7 @@ def test_datetime_where_string_scalar():
     s = _s(['2024-01-01', '2024-01-02'], 'datetime64[ns]')
     out = s.where(_mask([True, False]), '2021-01-03')
     assert out.dtype == 'datetime64[ns]'
-    assert out.to_list()[1] == np.datetime64('2021-01-03')
+    assert out.to_list()[1] == volas.Timestamp('2021-01-03', tz='UTC')
 
 
 def test_bool_where_bool_scalar():

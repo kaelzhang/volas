@@ -8,6 +8,7 @@ directions (pandas `na_position='last'`); head / tail slice data and index.
 
 import numpy as np
 import pandas as pd
+import volas
 from volas import DataFrame
 
 
@@ -123,7 +124,8 @@ def test_nunique_unique_all_dtypes():
     dt = _s(['2021-01-02', '2021-01-01', '2021-01-02'], 'datetime64[ns]')
     assert dt.nunique() == 2
     u = dt.unique().to_list()
-    assert u[0] == np.datetime64('2021-01-02') and u[1] == np.datetime64('2021-01-01') and len(u) == 2
+    utc = lambda t: volas.Timestamp(t, tz='UTC')  # noqa: E731 — column cells are UTC
+    assert u[0] == utc('2021-01-02') and u[1] == utc('2021-01-01') and len(u) == 2
 
 
 def test_sort_values_all_dtypes():
@@ -132,7 +134,7 @@ def test_sort_values_all_dtypes():
     assert DataFrame({'a': [True, False, True]})['a'].sort_values().to_list() == [False, True, True]
     dt = _s(['2021-01-03', '2021-01-01', '2021-01-02'], 'datetime64[ns]')
     assert dt.sort_values().to_list() == [
-        np.datetime64('2021-01-01'), np.datetime64('2021-01-02'), np.datetime64('2021-01-03')]
+        volas.Timestamp(t, tz='UTC') for t in ('2021-01-01', '2021-01-02', '2021-01-03')]
 
 
 def test_sort_values_multiple_na_compare_each_other():
