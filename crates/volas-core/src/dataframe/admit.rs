@@ -35,8 +35,18 @@ pub struct Retained {
 enum Route {
     /// Every row is appended (no label repeats the last).
     Append,
+    /// The one row replaces the current last row (the live re-sent bar).
+    ReplaceLast,
     /// Per row: `true` replaces the current last row, `false` appends.
     Rows(Vec<bool>),
+}
+
+/// Rows admitted for a frame ([`DataFrame::admit`]), with whether they carry its
+/// leading columns in order — decided once, so the commit maps their columns
+/// positionally without comparing the names again.
+struct Admitted<'a> {
+    rows: Cow<'a, DataFrame>,
+    leads: bool,
 }
 
 impl DataFrame {
@@ -71,6 +81,11 @@ impl DataFrame {
     /// contract #20 — a lossy value raises). Returns the rows with this frame's dtypes,
     /// borrowed when nothing needed converting (the live single-bar path).
     pub fn admit<'a>(&self, rows: &'a DataFrame) -> Result<Cow<'a, DataFrame>> {
+        self.admit_rows(rows).map(|a| a.rows)
+    }
+
+    /// [`admit`](Self::admit), keeping whether the rows lead with this frame's columns.
+    fn admit_rows<'a>(&self, rows: &'a DataFrame) -> Result<Admitted<'a>> {
         // One pass over the rows' columns: each is looked up once — positionally when the
         // rows carry the frame's leading columns in order (the live bar of a frame whose
         // cached columns follow its data columns) — and its dtype compared. Errors are
@@ -112,7 +127,7 @@ impl DataFrame {
         }
         self.index.check_append(&rows.index)?;
         if !convert {
-            return Ok(Cow::Borrowed(rows));
+            return Ok(Admitted { rows: Cow::Borrowed(rows), leads: prefix });
         }
         let mut columns = rows.columns.clone();
         for (k, name) in rows.names.iter().enumerate() {
@@ -123,11 +138,10 @@ impl DataFrame {
                     .map_err(|e| in_column(name, e))?;
             }
         }
-        Ok(Cow::Owned(rows.same_schema(
-            columns,
-            (*rows.index).clone(),
-            rows.origin,
-        )))
+        Ok(Admitted {
+            rows: Cow::Owned(rows.same_schema(columns, (*rows.index).clone(), rows.origin)),
+            leads: prefix,
+        })
     }
 
     /// Append `other`'s rows in place, keyed by their labels: a row labelled like the
@@ -151,8 +165,8 @@ impl DataFrame {
     /// them from `retained.shown` on: an integer / string label stays unique over the
     /// retained rows only, and a clash with a retained but hidden row says so.
     pub fn append_retaining(&mut self, other: &DataFrame, retained: Retained) -> Result<()> {
-        let rows = self.admit(other)?;
-        self.commit_rows(rows.as_ref(), retained)
+        let admitted = self.admit_rows(other)?;
+        self.commit_rows(&admitted.rows, admitted.leads, retained)
     }
 
     /// [`append`](Self::append) of rows already admitted against a frame with this
@@ -160,19 +174,22 @@ impl DataFrame {
     /// frame admitted): only the label routing and the commit. Columns the rows carry
     /// that this frame lacks are not kept.
     pub fn append_admitted(&mut self, rows: &DataFrame) -> Result<()> {
-        self.commit_rows(rows, Retained { from: 0, shown: 0 })
+        let leads = self.leads_with(rows);
+        self.commit_rows(rows, leads, Retained { from: 0, shown: 0 })
     }
 
-    /// Route admitted rows by label and write them.
-    fn commit_rows(&mut self, rows: &DataFrame, retained: Retained) -> Result<()> {
+    /// Route admitted rows (`leads`: they carry this frame's leading columns) by label
+    /// and write them.
+    fn commit_rows(&mut self, rows: &DataFrame, leads: bool, retained: Retained) -> Result<()> {
         match self.route(rows, retained)? {
-            Route::Append => self.push_rows(rows),
+            Route::Append => self.push_rows(rows, leads),
+            Route::ReplaceLast => self.write_last_row(rows, 0, leads),
             Route::Rows(replaces) => {
                 for (k, replace) in replaces.into_iter().enumerate() {
                     if replace {
-                        self.replace_last_row(rows, k)?;
+                        self.write_last_row(rows, k, leads)?;
                     } else {
-                        self.push_rows(&rows.slice_data(k, k + 1))?;
+                        self.push_rows(&rows.slice_data(k, k + 1), leads)?;
                     }
                 }
                 Ok(())
@@ -185,8 +202,8 @@ impl DataFrame {
     /// into a same-label replacement and merge into a closed row. Admitted like any row
     /// set; on an error the frame is unchanged.
     pub fn append_new(&mut self, other: &DataFrame) -> Result<()> {
-        let rows = self.admit(other)?;
-        let rows = rows.as_ref();
+        let admitted = self.admit_rows(other)?;
+        let rows = admitted.rows.as_ref();
         let mut prev = self.height.checked_sub(1).map(|i| self.index.label_at(i));
         for k in 0..rows.height {
             let label = rows.index.label_at(k);
@@ -202,7 +219,7 @@ impl DataFrame {
             }
             prev = Some(label);
         }
-        self.push_rows(rows)
+        self.push_rows(rows, admitted.leads)
     }
 
     /// Decide, for each admitted row, whether it replaces the last row or is appended
@@ -225,7 +242,7 @@ impl DataFrame {
             let label = rows.index.label_at(0);
             let last = self.index.label_at(self.height - 1);
             if label == last {
-                return Ok(Route::Rows(vec![true]));
+                return Ok(Route::ReplaceLast);
             }
             let fresh = if datetime {
                 !label_precedes(&label, &last)
@@ -283,10 +300,10 @@ impl DataFrame {
     /// the index is extended first (the one step that checks anything), then every
     /// column grows. Columns `rows` lacks are padded; computed metadata is retained,
     /// leaving the new rows stale.
-    fn push_rows(&mut self, rows: &DataFrame) -> Result<()> {
+    fn push_rows(&mut self, rows: &DataFrame, leads: bool) -> Result<()> {
         Arc::make_mut(&mut self.index).extend(&rows.index)?;
         let oh = rows.height;
-        if self.leads_with(rows) {
+        if leads {
             // The rows carry the leading columns in order (the live-streaming case):
             // append them positionally and pad the rest.
             let w = rows.width();
@@ -337,23 +354,18 @@ impl DataFrame {
     /// changes. Only the last row changed, so each cached column keeps what it carries
     /// and is stale from that row on (see `invalidate_computed_forming_row`).
     pub fn replace_last_row(&mut self, src: &DataFrame, src_row: usize) -> Result<()> {
-        let Some(last) = self.height.checked_sub(1) else {
+        if self.height == 0 {
             return Err(VolasError::Shape("no last row to replace".into()));
-        };
+        }
         if src_row >= src.height {
             return Err(VolasError::Shape(format!(
                 "row position {src_row} is out of range (height {})",
                 src.height
             )));
         }
-        // `src`'s column for each of ours: positional when it carries our leading columns
-        let prefix = self.leads_with(src);
-        let source = |pos: usize| match prefix {
-            true => (pos < src.width()).then_some(pos),
-            false => src.column_pos(&self.names[pos]),
-        };
+        let leads = self.leads_with(src);
         for pos in 0..self.columns.len() {
-            if let Some(j) = source(pos) {
+            if let Some(j) = Self::source_of(&self.names[pos], pos, src, leads) {
                 let (to, from) = (self.columns[pos].dtype(), src.columns[j].dtype());
                 if to != from && !self.computed.contains_key(&self.names[pos]) {
                     return Err(VolasError::DType(format!(
@@ -362,11 +374,28 @@ impl DataFrame {
                 }
             }
         }
+        self.write_last_row(src, src_row, leads)
+    }
+
+    /// `src`'s column for this frame's column `pos` (named `name`): positional when
+    /// `src` carries this frame's leading columns (`leads`), else looked up by name.
+    fn source_of(name: &str, pos: usize, src: &DataFrame, leads: bool) -> Option<usize> {
+        match leads {
+            true => (pos < src.width()).then_some(pos),
+            false => src.column_pos(name),
+        }
+    }
+
+    /// The write step of [`replace_last_row`](Self::replace_last_row) for a row of
+    /// `src` whose columns already have this frame's dtypes (admitted rows): each data
+    /// column takes its value, or a missing one; a cached column is left to its refresh.
+    fn write_last_row(&mut self, src: &DataFrame, src_row: usize, leads: bool) -> Result<()> {
+        let last = self.height - 1;
         for pos in 0..self.columns.len() {
             if !self.computed.is_empty() && self.computed.contains_key(&self.names[pos]) {
                 continue;
             }
-            match source(pos) {
+            match Self::source_of(&self.names[pos], pos, src, leads) {
                 Some(j) => self.columns[pos].set_last_from(&src.columns[j], src_row)?,
                 None => self.columns[pos].set_last_na(),
             }
