@@ -156,6 +156,30 @@ impl Label {
     }
 }
 
+/// One bound of a label slice (`.loc[lo:hi]`): the label, and whether it was
+/// written as **text** (a string parsed into the label). The text fact matters on
+/// a datetime index only, where pandas reads a string bound as a partial-date
+/// value rather than an exact label (see [`Index::label_slice`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliceBound {
+    /// The bound's label.
+    pub label: Label,
+    /// Whether the label was parsed from a string.
+    pub from_text: bool,
+}
+
+impl SliceBound {
+    /// A bound given as a label value (an int, a timestamp, …).
+    pub fn exact(label: Label) -> SliceBound {
+        SliceBound { label, from_text: false }
+    }
+
+    /// A bound given as a string, parsed into `label`.
+    pub fn text(label: Label) -> SliceBound {
+        SliceBound { label, from_text: true }
+    }
+}
+
 impl Index {
     /// An index over `kind`'s labels with `name`, its label order computed once.
     fn new(name: Option<String>, kind: IndexKind) -> Index {
@@ -515,9 +539,19 @@ impl Index {
     ///   [`VolasError::Key`] — an ordered comparison would select rows outside the
     ///   requested labels.
     ///
+    /// A datetime index that is not non-decreasing (decreasing, unordered, or
+    /// holding `NaT`) rejects a bound written as text with a [`VolasError::Key`]:
+    /// pandas reads such a bound as a partial-date value and selects every row it
+    /// covers, which may be non-contiguous and which this exact-label search cannot
+    /// reproduce, so it fails closed instead of selecting different rows.
+    ///
     /// A bound of the other label kind (a string against a numeric index, or the
     /// reverse) is a [`VolasError::DType`].
-    pub fn label_slice(&self, lo: Option<&Label>, hi: Option<&Label>) -> Result<(usize, usize)> {
+    pub fn label_slice(
+        &self,
+        lo: Option<&SliceBound>,
+        hi: Option<&SliceBound>,
+    ) -> Result<(usize, usize)> {
         match &self.kind {
             IndexKind::Range(n) => {
                 let (lo, hi) = (i64_bound(lo, "a range")?, i64_bound(hi, "a range")?);
@@ -532,6 +566,14 @@ impl Index {
                 slice_bounds(v, self.order, lo.as_ref(), hi.as_ref(), |x| x.to_string())
             }
             IndexKind::Datetime(v, tz) => {
+                let text = |b: Option<&SliceBound>| b.is_some_and(|b| b.from_text);
+                if !self.order.increasing && (text(lo) || text(hi)) {
+                    return Err(VolasError::Key(
+                        "Value based partial slicing on non-monotonic DatetimeIndexes with \
+                         non-existing keys is not allowed."
+                            .into(),
+                    ));
+                }
                 let (lo, hi) = (i64_bound(lo, "a datetime")?, i64_bound(hi, "a datetime")?);
                 slice_bounds(v, self.order, lo.as_ref(), hi.as_ref(), |&x| {
                     format_ns_offset(x, *tz)
@@ -547,24 +589,24 @@ impl Index {
 
 /// A numeric slice bound: an integer / datetime label, or `None` (open-ended).
 /// A string label against the numeric index of `kind` is a `DType` error.
-fn i64_bound(bound: Option<&Label>, kind: &str) -> Result<Option<i64>> {
-    match bound {
+fn i64_bound(bound: Option<&SliceBound>, kind: &str) -> Result<Option<i64>> {
+    match bound.map(|b| &b.label) {
         None => Ok(None),
         Some(Label::I64(x)) => Ok(Some(*x)),
         Some(Label::Str(s)) => Err(VolasError::DType(format!(
-            "cannot slice {kind} index with the string label '{s}'"
+            "cannot do slice indexing on {kind} index with these indexers [{s}] of type str"
         ))),
     }
 }
 
 /// A string slice bound, or `None` (open-ended). An integer / datetime label
 /// against a string index is a `DType` error.
-fn str_bound(bound: Option<&Label>) -> Result<Option<&String>> {
-    match bound {
+fn str_bound(bound: Option<&SliceBound>) -> Result<Option<&String>> {
+    match bound.map(|b| &b.label) {
         None => Ok(None),
         Some(Label::Str(s)) => Ok(Some(s)),
         Some(Label::I64(x)) => Err(VolasError::DType(format!(
-            "cannot slice a string index with the integer label {x}"
+            "cannot do slice indexing on a string index with these indexers [{x}] of type int"
         ))),
     }
 }
@@ -729,6 +771,7 @@ mod tests {
         // lexicographic slice [bb, cc]
         let lo = Label::Str("bb".into());
         let hi = Label::Str("cc".into());
+        let (lo, hi) = (SliceBound::text(lo), SliceBound::text(hi));
         assert_eq!(ix.label_slice(Some(&lo), Some(&hi)).unwrap(), (1, 3));
         // open-ended upper bound: [cc, end)
         assert_eq!(ix.label_slice(Some(&lo), None).unwrap(), (1, 4));

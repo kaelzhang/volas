@@ -16,7 +16,12 @@ fn order(ix: &Index) -> (bool, bool) {
 }
 
 fn sl(ix: &Index, lo: Option<i64>, hi: Option<i64>) -> Result<(usize, usize)> {
-    ix.label_slice(lo.map(Label::I64).as_ref(), hi.map(Label::I64).as_ref())
+    let b = |x: Option<i64>| x.map(|x| SliceBound::exact(Label::I64(x)));
+    ix.label_slice(b(lo).as_ref(), b(hi).as_ref())
+}
+
+fn text(s: &str) -> SliceBound {
+    SliceBound::text(Label::Str(s.into()))
 }
 
 fn key_err(r: Result<(usize, usize)>, needle: &str) -> bool {
@@ -119,8 +124,7 @@ fn decreasing_index_searches_in_reverse() {
     assert_eq!(sl(&ix, Some(1), Some(2)).unwrap(), (2, 2));
     assert_eq!(sl(&ix, None, Some(2)).unwrap(), (0, 2));
     let s = strs(&["c", "b", "a"]);
-    let (lo, hi) = (Label::Str("bb".into()), Label::Str(String::new()));
-    assert_eq!(s.label_slice(Some(&lo), Some(&hi)).unwrap(), (1, 3));
+    assert_eq!(s.label_slice(Some(&text("bb")), Some(&text(""))).unwrap(), (1, 3));
 }
 
 #[test]
@@ -136,10 +140,9 @@ fn unordered_index_locates_exact_bounds() {
     ));
     assert!(key_err(sl(&ix, Some(-1), None), "left slice bound"));
     let s = strs(&["c", "a", "b"]);
-    let (a, z) = (Label::Str("a".into()), Label::Str("z".into()));
-    assert_eq!(s.label_slice(Some(&a), None).unwrap(), (1, 3));
+    assert_eq!(s.label_slice(Some(&text("a")), None).unwrap(), (1, 3));
     assert!(matches!(
-        s.label_slice(Some(&a), Some(&z)),
+        s.label_slice(Some(&text("a")), Some(&text("z"))),
         Err(VolasError::Key(m)) if m.contains("missing label 'z'")
     ));
     // a repeated bound on an unordered datetime index is ambiguous
@@ -153,12 +156,37 @@ fn unordered_index_locates_exact_bounds() {
 
 #[test]
 fn a_bound_of_the_other_label_kind_is_a_dtype_error() {
-    let s = Label::Str("a".into());
+    let s = text("a");
     for ix in [Index::range(2), int(&[1]), Index::datetime(vec![1], Tz::Utc)] {
-        assert!(matches!(ix.label_slice(Some(&s), None), Err(VolasError::DType(_))));
+        assert!(matches!(
+            ix.label_slice(Some(&s), None),
+            Err(VolasError::DType(m)) if m.contains("indexers [a] of type str")
+        ));
         assert!(matches!(ix.label_slice(None, Some(&s)), Err(VolasError::DType(_))));
     }
-    let i = Label::I64(1);
-    assert!(matches!(strs(&["a"]).label_slice(Some(&i), None), Err(VolasError::DType(_))));
+    let i = SliceBound::exact(Label::I64(1));
+    assert!(matches!(
+        strs(&["a"]).label_slice(Some(&i), None),
+        Err(VolasError::DType(m)) if m.contains("indexers [1] of type int")
+    ));
     assert!(matches!(strs(&["a"]).label_slice(None, Some(&i)), Err(VolasError::DType(_))));
+}
+
+#[test]
+fn a_text_bound_on_a_non_increasing_datetime_index_fails_closed() {
+    let day = |d: i64| SliceBound::text(Label::I64(d));
+    let partial = |r: Result<(usize, usize)>| {
+        matches!(r, Err(VolasError::Key(m)) if m.starts_with("Value based partial slicing"))
+    };
+    for labels in [vec![3, 2, 1], vec![2, 1, 3], vec![NAT, 1, 2]] {
+        let ix = Index::datetime(labels, Tz::Utc);
+        assert!(partial(ix.label_slice(Some(&day(2)), None)));
+        assert!(partial(ix.label_slice(None, Some(&day(2)))));
+        // an exact (non-text) bound keeps the exact-label rule
+        let exact = SliceBound::exact(Label::I64(2));
+        assert!(ix.label_slice(Some(&exact), None).is_ok());
+    }
+    // an increasing datetime index searches text bounds by order, as before
+    let inc = Index::datetime(vec![1, 2, 4], Tz::Utc);
+    assert_eq!(inc.label_slice(Some(&day(2)), Some(&day(3))).unwrap(), (1, 2));
 }

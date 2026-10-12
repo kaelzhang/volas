@@ -1215,7 +1215,7 @@ df.loc[0:1, 'x'] = 99  # 只写这两行：x == [20, 99, 99]
 df.loc[0:5]            # KeyError：5 不是这个无序索引中的标签
 ```
 
-含 `NaT` 的 datetime 索引视为无序，与 pandas 一致。
+含 `NaT` 的 datetime 索引视为无序，与 pandas 一致。在非递增（递减、无序或含 `NaT`）的 datetime 索引上，以**字符串**写出的边界会抛出 `KeyError`：pandas 把它当作部分日期的值来读，可能选出不连续的行，volas 不复现这一行为，宁可报错也不选出不同的行。这种索引请用 `Timestamp` 作边界，或先排序。边界的标签类型与索引不符（整数索引配字符串边界、字符串索引配整数边界）时抛出 `TypeError`。
 
 ### 与 pandas 的差异（vs pandas）
 

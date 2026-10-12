@@ -159,7 +159,13 @@ df.loc[0:1, 'x'] = 99  # writes those two rows only: x == [20, 99, 99]
 df.loc[0:5]            # KeyError: 5 is not a label of this unordered index
 ```
 
-A datetime index holding `NaT` counts as unordered, as in pandas.
+A datetime index holding `NaT` counts as unordered, as in pandas. On a datetime
+index that is not increasing (decreasing, unordered, or holding `NaT`), a bound
+written as a **string** raises `KeyError`: pandas reads it as a partial-date value
+and may select rows that are not contiguous, which volas does not reproduce, so it
+refuses rather than select different rows. Use `Timestamp` bounds there, or sort
+the index first. A bound of the other label kind (a string against an integer
+index, an integer against a string index) raises `TypeError`.
 
 ### Differences from pandas (vs pandas)
 
