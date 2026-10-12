@@ -352,20 +352,20 @@ impl<T: Float> Buffer<T> {
     /// Overwrite the value at each of `positions` with `value(k)` for the `k`-th of
     /// them (copy-on-write; a later repeat of a position wins), in O(`positions`) on a
     /// uniquely-owned buffer, keeping the NaN fact where the writes decide it, as
-    /// [`set`](Self::set) does for one: a NaN written means some NaN; numbers written
-    /// over a NaN-free buffer keep it NaN-free; numbers written over a buffer holding
-    /// a NaN may have removed the last one, so the fact is forgotten.
+    /// [`set`](Self::set) does for one — judged by the values the written positions
+    /// hold afterwards, never by a value a later repeat replaced: a written position
+    /// left NaN means some NaN; numbers left over a NaN-free buffer keep it NaN-free;
+    /// numbers left over a buffer holding a NaN may have removed the last one, so the
+    /// fact is forgotten.
     pub fn scatter(&mut self, positions: &[usize], value: impl Fn(usize) -> T) {
         self.own();
         let before = self.nan_state();
         let w = self.make_mut();
-        let mut wrote_nan = false;
         for (k, &p) in positions.iter().enumerate() {
-            let x = value(k);
-            wrote_nan |= x.is_nan_value();
-            w[p] = x;
+            w[p] = value(k);
         }
-        self.set_nan_state(match (before, wrote_nan) {
+        let left_nan = positions.iter().any(|&p| w[p].is_nan_value());
+        self.set_nan_state(match (before, left_nan) {
             (_, true) => SOME_NAN,
             (NO_NAN, false) => NO_NAN,
             _ => UNKNOWN,
@@ -641,6 +641,23 @@ mod tests {
         assert!(!f.is_borrowed());
         assert_eq!(f.known_has_nan(), None);
         assert!(f.has_nan());
+    }
+
+    #[test]
+    fn scatter_judges_the_fact_by_the_values_a_repeated_position_keeps() {
+        // a NaN written and then overwritten at the same position leaves no NaN
+        let mut b = Buffer::from_vec(vec![1.0, 2.0, 3.0]);
+        assert!(!b.has_nan());
+        b.scatter(&[1, 1], |k| [NAN, 5.0][k]);
+        assert_eq!(b.as_slice(), &[1.0, 5.0, 3.0]);
+        assert_eq!(b.known_has_nan(), Some(false));
+        // the other order keeps the NaN
+        b.scatter(&[2, 2], |k| [6.0, NAN][k]);
+        assert_eq!(b.known_has_nan(), Some(true));
+        // over a buffer holding a NaN, numbers written may have removed the last one
+        b.scatter(&[2, 0, 2], |k| [NAN, 7.0, 8.0][k]);
+        assert_eq!(b.known_has_nan(), None);
+        assert!(!b.has_nan());
     }
 
     #[test]
