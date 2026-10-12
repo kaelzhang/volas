@@ -51,13 +51,16 @@ class TfMachine(FrameMachine):
         step = TF_NS[tf] * NS
         start = period_start(epoch, tf, schema.tz)
         if mode == 'cumulate':
-            # the fed bars may re-send a timestamp (consecutive equal stamps: last wins)
+            # the fed bars may re-send a timestamp (consecutive equal stamps: last wins); a
+            # frame never repeats a label, so the bars a cumulation reads are the last of
+            # each timestamp, and the re-sends reach a time-frame frame through `append`
             ts = [start + 7]
             for i in range(1, n):
                 ts.append(ts[-1] if i < len(resent) and resent[i] else ts[-1] + 60 * NS)
             for t, r in zip(ts, rows):
                 self.store.add(t, r)
-            self.df = self.wrap(build.frame(schema, rows, ts).cumulate(tf))
+            last = [i for i in range(n) if i + 1 == n or ts[i + 1] != ts[i]]
+            self.df = self.wrap(build.frame(schema, [rows[i] for i in last], [ts[i] for i in last]).cumulate(tf))
         else:
             labels = [start + i * step for i in range(n)]
             self.store.seed_index, self.store.seed_rows = labels, rows
@@ -100,7 +103,15 @@ class TfMachine(FrameMachine):
         for i in range(k):
             last = self._next(last, moves[i], after_seed=i == 0 and not self.store.fine)
             ts.append(last)
-        bar = build.bars(schema, rows, ts, form, pad=2, omit=omit)
+        # a frame never repeats a label: bars re-sending a timestamp are appended one run of
+        # distinct timestamps at a time, each run its own frame
+        cuts = [0] + [i for i in range(1, k) if ts[i] == ts[i - 1]] + [k]
+        runs = [build.bars(schema, rows[a:b], ts[a:b], form, pad=2, omit=omit) for a, b in zip(cuts, cuts[1:])]
+
+        def feed():
+            for run in runs:
+                out = self.df.append(run)
+            return out
 
         def commit(_):
             for t, r in zip(ts, rows):
@@ -108,7 +119,7 @@ class TfMachine(FrameMachine):
             if self.cached:
                 self.stale |= set(self.cached)
 
-        self.attempt(lambda: self.df.append(bar), commit=commit, label=f'fold {form} {moves[:k]}')
+        self.attempt(feed, commit=commit, label=f'fold {form} {moves[:k]}')
 
     @rule(kind=st.sampled_from(['out_of_order', 'nat', 'range_index', 'extra_column', 'dtype']),
           regime=regimes())

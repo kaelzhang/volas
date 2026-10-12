@@ -132,8 +132,8 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
     };
     let labels = pyany_to_column(&instants)?;
     let cols = PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None)?.inner;
-    // keyed by the labels as set_index keys them (a re-sent row replaces the one before)
-    let df = PyDataFrame::plain(cols.keyed_by(&labels, Tz::Naive, idx_name).map_err(pyerr)?);
+    // labelled as set_index labels a frame: a repeated label raises
+    let df = PyDataFrame::plain(cols.with_labels(&labels, Tz::Naive, idx_name).map_err(pyerr)?);
 
     // The imported instants are already true UTC; re-attach a tz-aware index's display
     // zone directly (tz_convert would hit the naive-axis guard; localize would shift).

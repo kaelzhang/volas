@@ -133,7 +133,7 @@ impl PyDataFrame {
             Some(ix) => {
                 let col = pyany_to_column(ix)?;
                 let tz = crate::convert::labels_zone(ix)?.unwrap_or(Tz::Naive);
-                df.keyed_by(&col, tz, None).map_err(pyerr)?
+                df.with_labels(&col, tz, None).map_err(pyerr)?
             }
         };
         // `dtype=` casts every column to a single dtype (pandas `DataFrame(data,

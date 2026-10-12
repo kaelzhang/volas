@@ -423,7 +423,7 @@ impl DataFrame {
     }
 
     /// Move data column `name` into the row index (pandas `set_index`) — a new series of
-    /// the other data columns keyed by its labels ([`keyed_by`](Self::keyed_by)). The index
+    /// the other data columns labelled by it ([`with_labels`](Self::with_labels)). The index
     /// records the column's name (pandas keeps it, so `reset_index` restores the column
     /// label).
     pub fn set_index(&self, name: &str) -> Result<DataFrame> {
@@ -432,24 +432,19 @@ impl DataFrame {
         if rest.len() == self.data_names().len() {
             return Err(VolasError::ColumnNotFound(name.to_string())); // a cached column
         }
-        self.select(&rest)?.keyed_by(&labels, crate::tz::Tz::Naive, Some(name.to_string()))
+        self.select(&rest)?.with_labels(&labels, crate::tz::Tz::Naive, Some(name.to_string()))
     }
 
     /// The data columns re-labelled by `labels` (one per row; a datetime column's labels in
-    /// zone `tz`, the index named `name`) — a new series, its rows keyed by their labels as
-    /// appending them one by one would key them ([`Index::keyed`]): a datetime row labelled
-    /// like the row before re-sends it and replaces it; any other repeated label raises.
-    pub fn keyed_by(&self, labels: &Column, tz: crate::tz::Tz, name: Option<String>) -> Result<DataFrame> {
+    /// zone `tz`, the index named `name`; pandas `DataFrame(df, index=...)`) — a new series.
+    /// Every frame's labels are unique ([`Index::from_column_tz`]): a repeated label raises,
+    /// consecutive or not (only the fine bars a cumulation is fed keep re-send semantics).
+    pub fn with_labels(&self, labels: &Column, tz: crate::tz::Tz, name: Option<String>) -> Result<DataFrame> {
         if labels.len() != self.height {
             return Err(VolasError::Shape(format!("index length {} != frame height {}", labels.len(), self.height)));
         }
-        let (index, kept) = Index::keyed(labels, tz)?;
-        let (names, columns) = self.data_parts();
-        let columns = match &kept {
-            Some(rows) => columns.iter().map(|c| c.take(rows)).collect(),
-            None => columns,
-        };
-        DataFrame::new_series(names, columns, index.with_name(name))
+        let index = Index::from_column_tz(labels, tz)?.with_name(name);
+        self.reindexed(index)
     }
 
     /// Move the row index into a leading column `label` (pandas `reset_index`) — or
@@ -519,12 +514,6 @@ impl DataFrame {
             })
             .collect::<Result<Vec<i64>>>()?;
         self.reindexed(Index::datetime(shifted, tz).with_name(self.index.name().map(String::from)))
-    }
-
-    /// The data columns re-labelled by `index` (pandas `DataFrame(df, index=...)`) — a new
-    /// series; `index` must have as many labels as the frame has rows.
-    pub fn with_index(&self, index: Index) -> Result<DataFrame> {
-        self.reindexed(index)
     }
 
     /// The data columns over `index` (same length): a new series.

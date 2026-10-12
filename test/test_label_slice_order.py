@@ -210,14 +210,11 @@ def test_timestamp_bounds_on_datetime_indexes_match_pandas(name):
                 assert vdf["x"].to_list() == pdf["x"].to_list(), (lo, hi)
 
 
-def test_a_datetime_index_never_repeats_a_label():
-    # rows are keyed by their labels as appending them would key them: a row labelled like
-    # the one before re-sends it (the last one wins); any other repeat raises
-    labels = pd.DatetimeIndex([_day(d) for d in (1, 2, 2, 4)])
-    df = volas.DataFrame({"x": [10, 11, 12, 13]}, index=labels)
-    assert df["x"].to_list() == [10, 12, 13]
+@pytest.mark.parametrize("days", [(1, 2, 2, 4), (2, 4, 2, 1)])
+def test_a_datetime_index_never_repeats_a_label(days):
+    # a label names one row: any repeat raises, consecutive or not
     with pytest.raises(ValueError, match="duplicate labels"):
-        volas.DataFrame({"x": [10, 11, 12, 13]}, index=pd.DatetimeIndex([_day(d) for d in (2, 4, 2, 1)]))
+        volas.DataFrame({"x": [10, 11, 12, 13]}, index=pd.DatetimeIndex([_day(d) for d in days]))
 
 
 PARTIAL = "Value based partial slicing on non-monotonic DatetimeIndexes"

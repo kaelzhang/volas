@@ -231,7 +231,7 @@ fn every_other_derivation_is_a_new_series_of_the_data_columns() {
     assert_eq!((indexed.names(), indexed.index().name()), (&data[..], Some("i")));
     assert!(tail.set_index("ema").is_err());
     assert!(tail.set_index("nope").is_err());
-    assert!(tail.with_index(Index::range(2)).is_err());
+    assert!(tail.with_labels(&Column::i64(vec![1, 2]), Tz::Naive, None).is_err());
     for df in [renamed, cast, reset, indexed] {
         assert!(df.computed_columns().is_empty() && df.lead.is_none());
     }
@@ -271,26 +271,23 @@ fn a_frame_has_unique_column_names_and_labels() {
     assert!(Index::from_column(&Column::Datetime(crate::buffer::Buffer::from(vec![nat, 1, nat]))).is_ok());
 }
 
-/// Rows keyed by their labels, as appending them one by one keys them: a datetime row
-/// labelled like the row before re-sends it (the last one wins); any other repeat raises.
+/// A frame's labels never repeat: any repeated label raises, consecutive or not; `NaT`
+/// is no label.
 #[test]
-fn rows_are_keyed_by_their_labels() {
+fn a_frame_is_labelled_by_unique_labels() {
     let df = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![1.0, 2.0, 3.0, 4.0])], None).unwrap();
     let ts = |v: Vec<i64>| Column::Datetime(crate::buffer::Buffer::from(v));
-    let keyed = df.keyed_by(&ts(vec![10, 20, 20, 30]), Tz::Utc, Some("t".into())).unwrap();
-    assert_eq!(keyed.column("close").unwrap().to_f64_vec(), vec![1.0, 3.0, 4.0]);
-    assert_eq!((keyed.index().len(), keyed.index().tz(), keyed.index().name()), (3, Tz::Utc, Some("t")));
-    assert!(matches!(df.keyed_by(&ts(vec![10, 20, 10, 30]), Tz::Naive, None), Err(VolasError::Value(_))));
-    assert!(matches!(df.keyed_by(&ts(vec![10, 20]), Tz::Naive, None), Err(VolasError::Shape(_))));
-    // NaT rows are kept, however many follow each other
+    let labelled = df.with_labels(&ts(vec![10, 20, 25, 30]), Tz::Utc, Some("t".into())).unwrap();
+    assert_eq!((labelled.index().len(), labelled.index().tz(), labelled.index().name()), (4, Tz::Utc, Some("t")));
+    for repeated in [vec![10, 20, 20, 30], vec![10, 20, 10, 30]] {
+        assert!(matches!(df.with_labels(&ts(repeated), Tz::Naive, None), Err(VolasError::Value(_))));
+    }
+    assert!(matches!(df.with_labels(&ts(vec![10, 20]), Tz::Naive, None), Err(VolasError::Shape(_))));
     let nat = crate::datetime::NAT;
-    assert_eq!(df.keyed_by(&ts(vec![nat, nat, 1, 2]), Tz::Naive, None).unwrap().height(), 4);
-    // integer labels never repeat
-    assert!(df.keyed_by(&Column::i64(vec![1, 1, 2, 3]), Tz::Naive, None).is_err());
-    let ints = df.keyed_by(&Column::i64(vec![4, 3, 2, 1]), Tz::Naive, None).unwrap();
-    assert_eq!(ints.height(), 4);
-    // set_index keys its rows alike
+    assert_eq!(df.with_labels(&ts(vec![nat, nat, 1, 2]), Tz::Naive, None).unwrap().height(), 4);
+    assert!(df.with_labels(&Column::i64(vec![1, 1, 2, 3]), Tz::Naive, None).is_err());
+    assert_eq!(df.with_labels(&Column::i64(vec![4, 3, 2, 1]), Tz::Naive, None).unwrap().height(), 4);
     let mut with_t = df.clone();
     with_t.set_column("t", ts(vec![10, 10, 20, 30])).unwrap();
-    assert_eq!(with_t.set_index("t").unwrap().column("close").unwrap().to_f64_vec(), vec![2.0, 3.0, 4.0]);
+    assert!(with_t.set_index("t").is_err());
 }

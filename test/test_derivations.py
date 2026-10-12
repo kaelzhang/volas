@@ -313,12 +313,16 @@ def test_a_middle_selection_of_a_time_frame_frame_is_the_frame_of_its_bars():
 
 # --- labels -----------------------------------------------------------------------------------
 
-def test_a_datetime_index_keys_its_rows_at_construction():
-    t = T0 + np.array([0, 1, 1, 2]) * MIN
-    df = DataFrame({'close': [1.0, 2.0, 3.0, 4.0]}, index=t)
-    assert df['close'].to_list() == [1.0, 3.0, 4.0]  # the re-sent row wins
+@pytest.mark.parametrize('minutes', [[0, 1, 1, 2], [0, 1, 0, 2]])
+def test_a_datetime_index_never_repeats_a_label(minutes):
     with pytest.raises(ValueError, match='duplicate labels'):
-        DataFrame({'close': [1.0, 2.0, 3.0]}, index=T0 + np.array([0, 1, 0]) * MIN)
+        DataFrame({'close': [1.0, 2.0, 3.0, 4.0]}, index=T0 + np.array(minutes) * MIN)
+    with pytest.raises(ValueError, match='duplicate labels'):
+        DataFrame({'close': [1.0, 2.0, 3.0, 4.0], 't': T0 + np.array(minutes) * MIN}).set_index('t')
+    pdf = pytest.importorskip('pandas').DataFrame({'close': [1.0, 2.0, 3.0, 4.0]},
+                                                    index=T0 + np.array(minutes) * MIN)
+    with pytest.raises(ValueError, match='duplicate labels'):
+        DataFrame.from_pandas(pdf)
     nat = np.array(['NaT', 'NaT', '2024-01-01'], dtype='datetime64[ns]')
     assert len(DataFrame({'close': [1.0, 2.0, 3.0]}, index=nat)) == 3  # NaT is no label
 

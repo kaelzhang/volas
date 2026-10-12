@@ -57,19 +57,17 @@ def test_loc_datetime_partial_string():
 
 # F34 (decision 1B, FIXED with a refinement): set_index REJECTS a duplicate-label
 # int64/str column at creation (label access assumes unique labels — the same
-# creation-time guard as the NA-label rule V16). A datetime column keys its rows as
-# appending them would: a row labelled like the one before re-sends it (the last one
-# wins) — the raw fine input of a cumulation keeps its re-send semantics — and any
-# other repeated timestamp is rejected like an int64 one.
+# creation-time guard as the NA-label rule V16), a datetime one too — consecutive or
+# not; only the fine bars a cumulation is fed keep their re-send semantics.
 def test_set_index_rejects_duplicate_labels():
     with pytest.raises((ValueError, KeyError)):
         _indexed([1, 1, 2])              # int64 duplicate label -> rejected
 
 
-def test_set_index_keys_a_re_sent_datetime_and_rejects_other_repeats():
+@pytest.mark.parametrize("stamps", [["2021-01-01", "2021-01-01", "2021-01-02"],
+                                    ["2021-01-01", "2021-01-02", "2021-01-01"]])
+def test_set_index_rejects_a_duplicate_datetime(stamps):
     df = volas.DataFrame({"v": [1.0, 2.0, 3.0]})
-    df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01", "2021-01-01", "2021-01-02"]})["t"])
-    assert df.set_index("t")["v"].to_list() == [2.0, 3.0]   # the re-sent row wins
-    df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01", "2021-01-02", "2021-01-01"]})["t"])
+    df["t"] = volas.to_datetime(volas.DataFrame({"t": stamps})["t"])
     with pytest.raises(ValueError, match="duplicate labels"):
         df.set_index("t")

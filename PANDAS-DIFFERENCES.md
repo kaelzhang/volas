@@ -597,10 +597,9 @@ that row. A `DatetimeIndex` only increases — a row labelled before the last ra
 and an integer or string index stays unique — a row labelled like an earlier row
 raises (in both cases the frame is left unchanged). pandas keeps both rows — `concat`
 happily builds a duplicate or out-of-order label — while volas treats a repeated label
-as the same bar sent again, which is what a live feed means by it. The same rule keys
-rows given with their labels at construction (`index=`, `set_index`,
-`read_csv(index_col=...)`): a datetime row labelled like the row before it replaces it,
-and any other repeated label raises (pandas builds a duplicate-label index).
+as the same bar sent again, which is what a live feed means by it. A frame built with
+repeated labels (`index=`, `set_index`, `read_csv(index_col=...)`, `from_pandas`) raises
+(pandas builds a duplicate-label index).
 
 On a `time_frame` frame the appended bars are *folded* into the forming period, so
 the live feed must be well-ordered: a `NaT`-timestamped bar (no period — symmetric

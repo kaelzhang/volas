@@ -86,11 +86,11 @@ Which gets the 2-period simple moving average on column `"close"`.
   or `window=`, a source `DataFrame` is read like any bulk read: it raises while one
   of its cached directive columns is stale.
 - **index** `Optional[list | np.ndarray] = None` Row labels (int64, string or datetime),
-  one per row. The rows are keyed by their labels as appending them would key them: a
-  datetime row labelled like the row before it is the same bar sent again and replaces
-  it (the last one wins), and any other repeated label raises `ValueError` — a label
-  names one row (`NaT` is no label). `set_index` and `read_csv(index_col=...)` key
-  their rows the same way.
+  one per row. A label names one row: a repeated label raises `ValueError`, consecutive
+  or not (`NaT` is no label); `set_index`, `read_csv(index_col=...)` and
+  `DataFrame.from_pandas` label a frame the same way. Bars sent again (the same
+  timestamp twice) are fed to a frame with `append`, where a row labelled like the last
+  one replaces it, or to a time-frame frame, whose fold keeps the last of them.
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are bars
   at that frame, each labelled with its **period start**, and the last one is the

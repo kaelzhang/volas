@@ -266,7 +266,7 @@ impl Index {
     pub fn from_column_tz(col: &Column, tz: Tz) -> Result<Index> {
         let kind = match col {
             // Every index kind has unique labels (a label names one row); `NaT` is no
-            // label (see [`Index::keyed`] for rows keyed by their labels).
+            // label.
             Column::Datetime(v) => {
                 let present: Vec<i64> = v.iter().copied().filter(|&ns| ns != crate::datetime::NAT).collect();
                 require_unique_labels(&present, "datetime")?;
@@ -291,24 +291,6 @@ impl Index {
             }
         };
         Ok(Index::unnamed(kind))
-    }
-
-    /// The index of rows labelled by `col` keyed by their labels, as appending them one by
-    /// one would key them: a datetime row labelled like the row before it re-sends it and
-    /// replaces it (the last one wins), and the positions of the rows kept are returned
-    /// with the index (`None` when every row is kept). Any other repeated label raises, as
-    /// [`from_column_tz`](Self::from_column_tz) does; `NaT` is no label and never repeats.
-    pub fn keyed(col: &Column, tz: Tz) -> Result<(Index, Option<Vec<usize>>)> {
-        let Column::Datetime(v) = col else {
-            return Ok((Index::from_column_tz(col, tz)?, None));
-        };
-        let resent = |i: usize| v[i] != crate::datetime::NAT && v.get(i + 1) == Some(&v[i]);
-        if !(0..v.len()).any(resent) {
-            return Ok((Index::from_column_tz(col, tz)?, None));
-        }
-        let kept: Vec<usize> = (0..v.len()).filter(|&i| !resent(i)).collect();
-        let labels = Column::Datetime(crate::buffer::Buffer::from(kept.iter().map(|&i| v[i]).collect::<Vec<i64>>()));
-        Ok((Index::from_column_tz(&labels, tz)?, Some(kept)))
     }
 
     /// The timezone of a `Datetime` index ([`Tz::Naive`] for every other kind).

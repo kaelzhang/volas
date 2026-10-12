@@ -55,8 +55,10 @@ def batch(ledger, tf="5m"):
 def test_a_resend_after_cumulate_never_recounts_a_superseded_bar():
     ledger = [(0, 10.0, 12.0, 9.0, 11.0, 10.0), (1, 11.0, 30.0, 10.0, 12.0, 5.0),
               (1, 11.0, 13.0, 10.0, 12.5, 7.0)]
-    fine = frame([b[0] for b in ledger], **{n: [b[k + 1] for b in ledger] for k, n in enumerate(OHLCV)})
+    # a frame never repeats a label: the re-sent 09:01 reaches the cumulation as an append
+    fine = frame([b[0] for b in ledger[:2]], **{n: [b[k + 1] for b in ledger[:2]] for k, n in enumerate(OHLCV)})
     df = fine.cumulate("5m")
+    df.append(bar(*ledger[2]))
     assert rows(df) == [[10.0, 13.0, 9.0, 12.5, 17.0]]
     df.append(bar(2, 12.5, 13.0, 12.0, 12.8, 1.0))
     ledger.append((2, 12.5, 13.0, 12.0, 12.8, 1.0))
@@ -70,7 +72,10 @@ def test_a_resend_after_cumulate_never_recounts_a_superseded_bar():
 def test_every_carrier_of_the_open_period_keeps_one_bar_per_timestamp(derive):
     # the re-sent bar is the last fed one, then the first, then re-sent again
     for minutes, volumes, want in (([0, 1, 1], [1.0, 10.0, 2.0], 3.0), ([0, 0, 1], [1.0, 10.0, 2.0], 12.0)):
-        df = frame(minutes, volume=volumes).cumulate("5m")
+        # the re-sent bar is fed by an append (a frame never repeats a label)
+        cut = next(i for i in range(1, len(minutes)) if minutes[i] == minutes[i - 1])
+        df = frame(minutes[:cut], volume=volumes[:cut]).cumulate("5m")
+        df.append(frame(minutes[cut:], volume=volumes[cut:]))
         df = {"cumulate": df, "copy": df.copy(), "constructor": DataFrame(df)}[derive]
         assert df["volume"].to_list() == [want]
         df.append(frame([1], volume=[2.0]))  # an identical re-send of 09:01

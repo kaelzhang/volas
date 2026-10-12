@@ -165,8 +165,8 @@ impl<'a> Meta<'a> {
 ///         raises ``KeyError``. An empty list or a duplicate name is rejected, and an
 ///         absent column is never NaN-filled.
 ///     index (Sequence, optional): row labels (int64, str or datetime), one per row,
-///         keyed like ``set_index`` keys them: a datetime row labelled like the row
-///         before it replaces it; any other repeated label raises.
+///         unique as ``set_index`` requires them: a repeated label raises (``NaT`` is no
+///         label).
 ///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
 ///         this bar interval. The given rows are bars at that frame, each labelled with its
 ///         period start; the last one is the forming bar, so a later ``append`` of a finer

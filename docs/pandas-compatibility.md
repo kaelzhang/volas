@@ -202,10 +202,9 @@ Relative to pandas, volas does **not** support:
   interval, period, timedelta, or mixed-type `object` index.
 - **Index algebra** — reindexing, index set operations (union / intersection),
   and automatic alignment-on-index when combining frames.
-- **Duplicate labels** — a label names one row. Rows given with labels (`index=`,
-  `set_index`, `read_csv(index_col=...)`) are keyed as appending them would key them:
-  a datetime row labelled like the row before it is the same bar sent again and
-  replaces it (the last one wins); any other repeated label raises `ValueError`.
+- **Duplicate labels** — a label names one row: a frame built with repeated labels
+  (`index=`, `set_index`, `read_csv(index_col=...)`, `from_pandas`) raises `ValueError`.
+  A bar sent again is appended, where a row labelled like the last one replaces it.
 
 If your workflow needs any of these, keep using pandas; volas targets the
 single-level, OHLCV-shaped index that candlestick data uses.
