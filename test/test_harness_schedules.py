@@ -12,7 +12,7 @@ import volas
 
 from .harness import budget, build, observe
 from .harness.data import EPOCHS, NS, Schema, make_rows
-from .harness.ledger import Ledger
+from .harness.ledger import Ledger, reference
 from .harness.schedules import OHLCV, locality_failures, plain_schedule, sweep_directives, tf_schedule
 
 
@@ -162,3 +162,23 @@ def test_a_bool_column_with_na_exports_only_with_a_stated_fill():
     assert out[0] == True and out[2] == False and out[1] is volas.NA  # noqa: E712
     assert np.isnan(df.get_column('flag').to_numpy(dtype='float64')[1])
     observe.structure(df)
+
+
+def test_a_lossy_coarse_volume_beside_a_missing_price_is_an_error():
+    """A long-budget counterexample: on an Asia/Shanghai ledger with an int64 volume past
+    2^53 (exact in int64, no exact float64) and a missing price, the from-scratch
+    reference of a composite over `ad@open` crashed — the missing-row rerun read an
+    empty volume. It is the error the same frame raises without the missing price."""
+    schema = Schema('float64', 'int64', (('x', 'float64'),), 'datetime', 'Asia/Shanghai')
+    index = [1772953200000000000, 1772954100000000000, 1772954400000000000, 1772954700000000000]
+    rows = [dict(open=10.0 + i, high=11.0 + i, low=9.0 + i, close=10.5 + i, volume=100 + i, x=0.5)
+            for i in range(4)]
+    rows[2]['volume'] = 2**53 + 1
+    directive = '-((ad@open)+(ACCBANDS@high))'
+    clean = Ledger(schema)
+    clean.append([dict(r) for r in rows], index)
+    rows[1]['open'] = None
+    ledger = Ledger(schema)
+    ledger.append(rows, index)
+    assert reference(clean, directive, schema.columns) == (None, OverflowError)
+    assert reference(ledger, directive, schema.columns) == (None, OverflowError)

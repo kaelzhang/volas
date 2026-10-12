@@ -7,6 +7,14 @@
 //! the command read: the missing-row rule (`crate::complete`) decides from it, and
 //! reruns the arm over the complete rows of those same columns, without a second
 //! lookup or a second evaluation.
+//!
+//! `Operands` is the one owner of the kernels' shared precondition — every series a
+//! command's arm receives has the same length: the frame's height, or in a rerun the
+//! number of complete rows. Each input is checked against that length as it is handed
+//! out, so a mismatch is an error, never an out-of-bounds read in a kernel. A read that
+//! fails (an absent column, an operand that does not evaluate, an input outside the
+//! `f64` domain) is remembered: the record then lacks that input, so the rule never
+//! reruns the arm without it — the arm's own result, that error, is the answer.
 
 use std::borrow::Cow;
 use std::cell::{Cell, OnceCell};
@@ -63,6 +71,9 @@ pub(crate) struct Operands<'a> {
     df: &'a DataFrame,
     series: &'a [Ast],
     reads: [OnceCell<Read<'a>>; SLOTS],
+    /// The length of every input handed to the arm: the frame's height, or the number
+    /// of complete rows a rerun reads.
+    len: usize,
     /// Rows to read instead of the frame: each slot's complete rows (the rerun).
     over: Option<Vec<Option<Cow<'a, [f64]>>>>,
     /// Stop at a frame column known to hold a NaN (the arm's result would be thrown
@@ -74,6 +85,8 @@ pub(crate) struct Operands<'a> {
     clean: Cell<bool>,
     /// An input read was a frame column known to hold a NaN.
     missing: Cell<bool>,
+    /// A read failed: the record lacks that input.
+    failed: Cell<bool>,
 }
 
 impl<'a> Operands<'a> {
@@ -83,11 +96,13 @@ impl<'a> Operands<'a> {
             df,
             series,
             reads: Default::default(),
+            len: df.height(),
             over: None,
             stop_on_missing: false,
             probing: Cell::new(false),
             clean: Cell::new(true),
             missing: Cell::new(false),
+            failed: Cell::new(false),
         }
     }
 
@@ -100,13 +115,15 @@ impl<'a> Operands<'a> {
         }
     }
 
-    /// Read `views[slot]` for each slot instead (the complete rows of the inputs).
+    /// Read `views[slot]` for each slot instead (the complete rows of the inputs: each
+    /// as long as the first).
     pub(crate) fn over(
         df: &'a DataFrame,
         series: &'a [Ast],
         views: Vec<Option<Cow<'a, [f64]>>>,
     ) -> Self {
         Operands {
+            len: views.iter().flatten().next().map_or(0, |v| v.len()),
             over: Some(views),
             ..Operands::new(df, series)
         }
@@ -118,25 +135,47 @@ impl<'a> Operands<'a> {
         self.df.origin()
     }
 
+    /// `Ok` when an input of `len` rows fits the others (see the module docs).
+    fn fit(&self, slot: usize, len: usize) -> Result<()> {
+        if len == self.len {
+            return Ok(());
+        }
+        Err(VolasError::Shape(format!(
+            "series argument #{slot} has {len} rows where the command's other inputs have {}",
+            self.len
+        )))
+    }
+
     /// The input at `slot`, resolved on its first read (`default` names its column
-    /// when no operand fills the slot).
+    /// when no operand fills the slot); a failed read is remembered.
     fn read(&self, slot: usize, default: &str) -> Result<&Read<'a>> {
         let cell = &self.reads[slot];
         if let Some(read) = cell.get() {
             return Ok(read);
         }
+        let read = self.resolve(slot, default).inspect_err(|_| self.failed.set(true))?;
+        Ok(cell.get_or_init(|| read))
+    }
+
+    fn resolve(&self, slot: usize, default: &str) -> Result<Read<'a>> {
         let read = match operand(self.series, slot) {
             Some(node) => Read::Operand(execute(self.df, node)?),
             None => Read::Frame(self.df.column(default)?),
         };
         require_f64_input(read.column())?;
-        Ok(cell.get_or_init(|| read))
+        self.fit(slot, read.column().len())?;
+        Ok(read)
     }
 
     /// Input `slot` as `f64` (`default` names its column when no operand fills it).
     pub(crate) fn f64(&self, slot: usize, default: &str) -> Result<Cow<'_, [f64]>> {
         if let Some(views) = &self.over {
-            return Ok(Cow::Borrowed(views.get(slot).and_then(|v| v.as_deref()).unwrap_or(&[])));
+            // A rerun reads the inputs the first run recorded, and only those.
+            let view = views.get(slot).and_then(|v| v.as_deref()).ok_or_else(|| {
+                VolasError::Value(format!("series argument #{slot} was not read before the rerun"))
+            })?;
+            self.fit(slot, view.len())?;
+            return Ok(Cow::Borrowed(view));
         }
         let read = self.read(slot, default)?;
         if self.probing.get() {
@@ -167,7 +206,9 @@ impl<'a> Operands<'a> {
     /// A boolean operand at `slot`.
     pub(crate) fn bool(&self, slot: usize) -> Result<Vec<Option<bool>>> {
         self.clean.set(false);
-        series_truths(self.df, self.series, slot)
+        let truths = series_truths(self.df, self.series, slot)?;
+        self.fit(slot, truths.len())?;
+        Ok(truths)
     }
 
     /// Whether every input read is a frame column known to hold no NaN.
@@ -178,6 +219,12 @@ impl<'a> Operands<'a> {
     /// Whether the arm stopped at a frame column known to hold a NaN.
     pub(crate) fn missing(&self) -> bool {
         self.missing.get()
+    }
+
+    /// Whether a read failed, so the record lacks an input the arm reads: the arm's own
+    /// result (that error) is the answer, never a rerun over the complete rows.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.get()
     }
 
     /// Hand every further read over empty: rerunning the arm then completes the
@@ -192,5 +239,54 @@ impl<'a> Operands<'a> {
             .iter()
             .enumerate()
             .filter_map(|(slot, cell)| cell.get().map(|r| (slot, r)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use volas_core::{Column, DataFrame, VolasError};
+
+    use super::Operands;
+
+    fn frame() -> DataFrame {
+        DataFrame::new(vec!["close".into()], vec![Column::f64(vec![1.0, 2.0, 3.0])], None).unwrap()
+    }
+
+    /// Every input a rerun hands out is as long as the others; a shorter one is a shape
+    /// error, never a slice a kernel reads past.
+    #[test]
+    fn a_rerun_input_of_another_length_is_an_error() {
+        let df = frame();
+        let (a, b) = ([1.0, 2.0, 3.0], [1.0, 2.0]);
+        let views = vec![Some(Cow::Borrowed(&a[..])), Some(Cow::Borrowed(&b[..]))];
+        let ops = Operands::over(&df, &[], views);
+        assert_eq!(ops.f64(0, "close").unwrap().len(), 3);
+        let err = ops.f64(1, "close").unwrap_err();
+        assert!(matches!(err, VolasError::Shape(ref m) if m.contains("#1 has 2 rows") && m.ends_with("have 3")));
+    }
+
+    /// A rerun reads only what the first run recorded: an unrecorded slot is an error,
+    /// not an empty series.
+    #[test]
+    fn a_rerun_reads_only_recorded_inputs() {
+        let df = frame();
+        let ops = Operands::over(&df, &[], vec![None]);
+        assert!(matches!(ops.f64(0, "close"), Err(VolasError::Value(m)) if m.contains("not read before")));
+        assert!(Operands::over(&df, &[], vec![]).f64(3, "close").is_err());
+    }
+
+    /// A read that fails is remembered — the record lacks that input — and a later
+    /// successful read does not clear it.
+    #[test]
+    fn a_failed_read_is_remembered() {
+        let df = frame();
+        let ops = Operands::new(&df, &[]);
+        assert!(!ops.failed());
+        assert!(matches!(ops.f64(0, "volume"), Err(VolasError::ColumnNotFound(_))));
+        assert!(ops.failed());
+        assert!(ops.f64(1, "close").is_ok());
+        assert!(ops.failed());
     }
 }
