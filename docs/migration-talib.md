@@ -101,11 +101,11 @@ TA-Lib is the oracle for every TA-Lib-compatible directive; where volas departs 
 it, the departure is deliberate and listed here.
 
 - **Zero tests are exact.** TA-Lib's `TA_IS_ZERO` treats any `|x| < 1e-14` as zero, a
-  threshold in price units. volas tests exact zero in RSI and CMO (`avgGain + avgLoss`),
-  PPO (the slow average) and NATR (the close). Both give the same result on a flat
-  series; on a tiny-priced series
-  (FX-scale returns, prices scaled by `1e-15`) TA-Lib returns 0 where volas returns the
-  value the same series has at any other scale.
+  threshold in price units (MFI's is `total < 1.0`, in volume units). volas tests exact
+  zero in RSI and CMO (`avgGain + avgLoss`), PPO (the slow average), NATR (the close),
+  CORREL / BETA (the variances) and MFI (the money-flow total). Both give the same result
+  on a flat series; on a tiny-priced series (FX-scale returns, prices scaled by `1e-15`)
+  TA-Lib returns 0 where volas returns the value the same series has at any other scale.
 - **ULTOSC weights by position.** `ultosc:<short>,<medium>,<long>` gives 4/2/1 to the
   arguments in the order written; TA-Lib sorts the periods ascending first. The two
   agree whenever the arguments are in order.
