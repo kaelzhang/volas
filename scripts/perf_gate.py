@@ -34,8 +34,9 @@ import sys
 
 
 def _volas_medians(data: dict) -> dict:
-    """``{(section, item): volas median seconds}`` over the coverage + api sections
-    and the volas-only live tf rows (item ``<indicator>/<phase>``)."""
+    """``{(section, item): volas median seconds}`` over the coverage + api sections,
+    the volas-only live tf rows (item ``<indicator>/<phase>``) and the volas-only first
+    materializations (item ``<directive>@n=<rows>``)."""
     out: dict[tuple[str, str], float] = {}
     for b in data['benchmarks']:
         name = b['name']
@@ -43,6 +44,9 @@ def _volas_medians(data: dict) -> dict:
             params = b.get('params') or {}
             item = f"{params.get('indicator')}/{params.get('phase')}"
             out[('tf_live', item)] = b['stats']['median']
+            continue
+        if name.startswith('test_first_cache'):
+            out[('first_cache', (b.get('params') or {}).get('indicator'))] = b['stats']['median']
             continue
         if name.startswith('test_coverage'):
             section = 'coverage'

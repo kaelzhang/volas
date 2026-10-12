@@ -47,6 +47,7 @@ import pytest
 from stock_pandas import StockDataFrame
 from volas import DataFrame as VolasDataFrame
 
+from .bench_first_cache import FIRST_CACHE_IDS, FIRST_CACHE_ROUNDS, build as build_first_cache
 from .bench_tf_live import TF_LIVE_INDICATORS, TF_LIVE_PHASES, build as build_tf_live
 
 try:
@@ -793,6 +794,15 @@ def test_append(benchmark, states, indicator, candidate):
 def test_tf_live(benchmark, indicator, phase):
     run, setup = build_tf_live(ARR, COLUMNS, indicator, phase)
     benchmark.pedantic(run, setup=setup, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
+
+
+# --- the first materialization: one directive cached on a fresh frame -------
+# volas only, with its resume states; not a report section (perf gate rows).
+
+@pytest.mark.parametrize('indicator', FIRST_CACHE_IDS)
+def test_first_cache(benchmark, indicator):
+    run, setup = build_first_cache(indicator)
+    benchmark.pedantic(run, setup=setup, rounds=FIRST_CACHE_ROUNDS, iterations=1, warmup_rounds=1)
 
 
 # --- section 2: batch indicator computation --------------------------------
