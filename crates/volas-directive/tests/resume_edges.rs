@@ -48,7 +48,7 @@ fn assert_f64_same(actual: &[f64], expected: &[f64]) {
 
 fn resume_matches_full(df: &DataFrame, directive: &str, from: usize) {
     let node = parse(directive).unwrap();
-    let head = df.slice(0, from);
+    let head = df.slice_data(0, from);
     let computed = execute(&head, &node).unwrap();
     let state = initial_state(&head, &node, &computed)
         .unwrap_or_else(|| panic!("no initial state for {directive}"));

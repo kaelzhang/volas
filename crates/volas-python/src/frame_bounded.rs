@@ -310,13 +310,13 @@ impl PyDataFrame {
             });
             self.inner.set_computed_checkpoint(&name, checkpoint);
         }
-        self.inner = self.inner.retain_tail(keep);
+        self.inner = self.inner.retain_tail(keep, &Replayer);
     }
 
     /// The frame a cached `node` reads its inputs from: the live frame for a directive on
     /// its default series, else the refresh frame (`base`, made once).
     fn history_frame<'a>(&'a self, node: &Ast, base: &'a mut Option<volas_core::DataFrame>) -> &'a volas_core::DataFrame {
-        if directive_uses_default_series(node) {
+        if volas_directive::uses_default_series(node) {
             return &self.inner;
         }
         if base.is_none() {

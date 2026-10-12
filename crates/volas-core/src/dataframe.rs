@@ -1,12 +1,12 @@
 //! DataFrame: ordered, named columns sharing a single row index.
 
-use std::collections::HashMap;
+
 use std::sync::Arc;
 
 use crate::column::Column;
 use crate::fxhash::FxHashMap;
 use crate::error::{Result, VolasError};
-use crate::index::{Index, IndexKind};
+use crate::index::Index;
 use crate::series::Series;
 
 /// The rows a cached directive column reads around its own, fixed per directive.
@@ -146,6 +146,10 @@ pub struct DataFrame {
     /// What last left cached columns stale ("an append", "a column write"), for the
     /// read gate's message; meaningful only while one is stale.
     stale_by: &'static str,
+    /// The data rows just before row 0 that the cached columns read to recompute their
+    /// first rows (see [`lead_rows`](Self::lead_rows)): a contiguous selection that drops
+    /// the rows its columns' windows reach into keeps them here. `None` with none.
+    lead: Option<derive::Lead>,
 }
 
 /// The cause an append (new rows, a replaced last row, a folded forming bar) leaves.
@@ -201,7 +205,9 @@ impl DataFrame {
         };
         let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
         for (i, n) in names.iter().enumerate() {
-            name_to_idx.insert(n.clone(), i);
+            if name_to_idx.insert(n.clone(), i).is_some() {
+                return Err(VolasError::Value(format!("duplicate column name \"{n}\"")));
+            }
         }
         let df = DataFrame {
             names: Arc::new(names),
@@ -213,6 +219,7 @@ impl DataFrame {
             first_computed: None,
             origin: 0,
             stale_by: STALE_BY_APPEND,
+            lead: None,
         };
         #[cfg(debug_assertions)]
         df.debug_check();
@@ -246,6 +253,9 @@ impl DataFrame {
             if meta.state_before_last.is_some() {
                 assert!(meta.state_at > self.origin, "computed {name:?} earlier state before row 0");
             }
+        }
+        if let Some(lead) = &self.lead {
+            lead.debug_check(self.origin);
         }
     }
 
@@ -311,33 +321,6 @@ impl DataFrame {
         self.computed.contains_key(name)
     }
 
-    /// Build a frame that **shares this frame's schema** (names + lookup, both
-    /// `Arc`-cloned) over freshly derived `columns` / `index` — for the same-shape
-    /// derivations (slice / take / mask / astype), with no name-string or hash-map
-    /// rebuild. Computed-column status is dropped; the caller re-attaches it where
-    /// the derivation preserves it (a contiguous slice).
-    /// Row 0 of the result is at absolute position `origin`.
-    fn same_schema(&self, columns: Vec<Column>, index: Index, origin: usize) -> DataFrame {
-        let height = columns.first().map_or(index.len(), |c| c.len()); // no columns: the index
-        DataFrame {
-            names: Arc::clone(&self.names),
-            name_to_idx: Arc::clone(&self.name_to_idx),
-            columns,
-            index: Arc::new(index),
-            height,
-            computed: FxHashMap::default(),
-            first_computed: None,
-            origin,
-            stale_by: STALE_BY_APPEND,
-        }
-    }
-
-    /// Gather rows by position into a new frame (a new series: origin 0).
-    pub fn take(&self, positions: &[usize]) -> DataFrame {
-        let columns: Vec<Column> = self.columns.iter().map(|c| c.take(positions)).collect();
-        self.same_schema(columns, self.index.take(positions), 0)
-    }
-
     /// Borrow a column by name.
     pub fn column(&self, name: &str) -> Result<&Column> {
         self.column_pos(name)
@@ -392,251 +375,6 @@ impl DataFrame {
         Ok(())
     }
 
-    /// Move a column out of the frame and use it as the row index (pandas
-    /// `set_index`). The column is removed; its values become the index
-    /// (datetime / int64 — see [`Index::from_column`]).
-    pub fn set_index(&self, name: &str) -> Result<DataFrame> {
-        let pos = self
-            .column_pos(name)
-            .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
-        // Record the source column's name on the index (pandas keeps it, so
-        // `reset_index` can restore the original column label).
-        let index = Index::from_column(&self.columns[pos])?.with_name(Some(name.to_string()));
-        let mut names = (*self.names).clone();
-        let mut columns = self.columns.clone();
-        names.remove(pos);
-        columns.remove(pos);
-        Ok(DataFrame::new(names, columns, Some(index))?.with_origin(self.origin))
-    }
-
-    /// Change the DatetimeIndex's **display / matching** timezone without moving
-    /// any instant (pandas `tz_convert`): stored UTC ns are unchanged; only how
-    /// they render and how bare-string `.loc` matches changes. Returns a new frame
-    /// (columns shared). Errors if the index is not a DatetimeIndex.
-    pub fn tz_convert(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
-        match self.index.kind() {
-            IndexKind::Datetime(_, cur) => {
-                // A naive axis is an unanchored wall-clock — there is no source
-                // zone to convert FROM, so converting it would silently relabel
-                // wrong instants. Anchor with tz_localize first (pandas parity).
-                if !cur.is_aware() {
-                    return Err(VolasError::DType(
-                        "cannot tz_convert a tz-naive DatetimeIndex; use tz_localize to anchor it first"
-                            .into(),
-                    ));
-                }
-                let mut df = self.clone();
-                df.index = Arc::new((*self.index).clone().with_tz(tz));
-                Ok(df)
-            }
-            _ => Err(VolasError::DType(
-                "tz_convert requires a DatetimeIndex".into(),
-            )),
-        }
-    }
-
-    /// Tag the DatetimeIndex's zone directly, without the naive-axis guard of
-    /// [`Self::tz_convert`]. For importers (`from_pandas`) whose instants are
-    /// ALREADY true UTC and arrive carrying their zone — not a user-facing API.
-    pub fn set_index_tz(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
-        match self.index.kind() {
-            IndexKind::Datetime(_, _) => {
-                let mut df = self.clone();
-                df.index = Arc::new((*self.index).clone().with_tz(tz));
-                Ok(df)
-            }
-            _ => Err(VolasError::DType(
-                "set_index_tz requires a DatetimeIndex".into(),
-            )),
-        }
-    }
-
-    /// Reinterpret the index's **wall-clock** as `tz` (pandas `tz_localize`): each
-    /// instant is recomputed so the displayed wall-clock is unchanged but now
-    /// correct for `tz`. Use this when data was ingested without a tz and you need
-    /// to attach the right one. Returns a new frame. Errors if the index is not a
-    /// DatetimeIndex or a wall-clock does not exist in `tz` (a DST spring-forward
-    /// gap).
-    pub fn tz_localize(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
-        let (values, cur) = match self.index.kind() {
-            IndexKind::Datetime(v, cur) => (v.clone(), *cur),
-            _ => {
-                return Err(VolasError::DType(
-                    "tz_localize requires a DatetimeIndex".into(),
-                ))
-            }
-        };
-        // Localize anchors an UNanchored wall-clock; an already-aware axis must
-        // use tz_convert (re-localizing would silently reinterpret instants).
-        if cur.is_aware() {
-            return Err(VolasError::DType(format!(
-                "index is already tz-aware ({}); use tz_convert",
-                cur.name()
-            )));
-        }
-        // `Tz` owns the wall clock -> instant conversion (sub-second digits kept; a
-        // DST gap / fold or an instant past the range raises); a NaT label stays NaT.
-        let shifted = values
-            .iter()
-            .map(|&ns| match ns {
-                crate::datetime::NAT => Ok(ns),
-                _ => tz.localize_from(ns, cur),
-            })
-            .collect::<Result<Vec<i64>>>()?;
-        let mut df = self.clone();
-        // tz_localize moves the instants but keeps the index identity (and name).
-        df.index = Arc::new(Index::datetime(shifted, tz).with_name(self.index.name().map(String::from)));
-        Ok(df)
-    }
-
-    /// Select a subset of columns into a new frame sharing this index.
-    pub fn select(&self, names: &[String]) -> Result<DataFrame> {
-        let mut columns = Vec::with_capacity(names.len());
-        for n in names {
-            columns.push(self.column(n)?.clone());
-        }
-        let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
-        for (i, n) in names.iter().enumerate() {
-            name_to_idx.insert(n.clone(), i);
-        }
-        Ok(DataFrame {
-            names: Arc::new(names.to_vec()),
-            columns,
-            name_to_idx: Arc::new(name_to_idx),
-            index: Arc::clone(&self.index),
-            height: self.height,
-            computed: FxHashMap::default(),
-            first_computed: None,
-            origin: self.origin,
-            stale_by: STALE_BY_APPEND,
-        })
-    }
-
-    /// A `[start, end)` row slice.
-    ///
-    /// Deliberately a **value copy** (each column's window is copied), not a
-    /// zero-copy view into the parent buffer: a slice is an independent frame, so
-    /// slicing the recent tail of a long history does not pin the whole history
-    /// alive — the right default for a live system. (A view would be ~1.5x faster
-    /// here but would retain the parent's full buffer; we keep the safer copy.)
-    pub fn slice(&self, start: usize, end: usize) -> DataFrame {
-        self.slice_carrying(start, end, true)
-    }
-
-    /// The last `rows` rows, as a bounded window retains them when it drops its older
-    /// rows: like [`slice`](Self::slice), except that every cached column stays cached
-    /// and keeps its history's [`Checkpoint`] (and the pending one, and why none could be
-    /// formed): the window set them before the drop, so a recursion without a carried
-    /// state is recomputed by replaying its checkpoint — never restarted on these rows.
-    pub fn retain_tail(&self, rows: usize) -> DataFrame {
-        self.slice_carrying(self.height.saturating_sub(rows), self.height, false)
-    }
-
-    /// [`slice`](Self::slice) / [`retain_tail`](Self::retain_tail): `exact` drops a
-    /// recursion the slice cannot continue exactly (no carried state, a later start).
-    fn slice_carrying(&self, start: usize, end: usize, exact: bool) -> DataFrame {
-        let start = start.min(self.height);
-        let end = end.max(start).min(self.height);
-        let len = end - start;
-        let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
-        let mut df = self.same_schema(columns, self.index.slice(start, end), self.origin + start);
-        df.stale_by = self.stale_by;
-        // SP-9: carry cached-directive columns *as continuable computed columns*
-        // through a contiguous slice. The cached values are already correct (they
-        // were computed with full history) and are carried verbatim; we re-tag the
-        // `ComputedMeta` cursor so a later `append` refreshes the tail incrementally
-        // — re-deriving it from the retained raw columns over a `lookback` window,
-        // exactly as a non-sliced frame would (the engine re-warms from raw data,
-        // never from cached output). This is only sound when the slice keeps the
-        // column's continuation reach, and — for a recursion anywhere in it — its
-        // carried state; otherwise a recompute would restart from the slice's own
-        // start and silently diverge, so there we drop the computed status and the
-        // column stays plain data (honest: values correct, but not continuable).
-        // Non-contiguous derivations
-        // (`take` / `filter_mask`) go through `DataFrame::new` and already drop it.
-        for (name, meta) in &self.computed {
-            if len >= meta.reach.continuation {
-                let valid = meta.valid_rows.saturating_sub(start).min(len);
-                // Carry a state only when the row it describes is one of this slice's
-                // valid rows: the state is the internal state as of the parent row
-                // `state_at` (its last valid row), so the slice must END at or past it
-                // (else it would be attached to a row the sub-frame no longer ends on)
-                // and START at or before it (else it describes a row before the slice —
-                // a stale parent's slice starting after its last valid row). The state
-                // before it likewise needs its own row (`state_at - 1`) inside. Without
-                // a state the column stays correct through the refresh's recompute,
-                // just not O(new-rows) continuable.
-                let (first, last) = (self.origin + start, self.origin + end);
-                let inside = |at: usize| meta.state.is_some() && (first..last).contains(&at)
-                    && meta.last_valid(self.origin) == Some(meta.state_at);
-                let carried = inside(meta.state_at).then(|| meta.state.clone()).flatten();
-                let carried_before = (inside(meta.state_at) && meta.state_at > first)
-                    .then(|| meta.state_before_last.clone())
-                    .flatten();
-                if exact && meta.reach.history.recursive() && carried.is_none() && first > meta.since {
-                    // a recursion recomputed over the slice's own rows would restart
-                    // its history after its start: without the state the column stays
-                    // plain data (a slice from its history's start recomputes it all)
-                    continue;
-                }
-                df.computed.insert(
-                    name.clone(),
-                    ComputedMeta {
-                        reach: meta.reach,
-                        valid_rows: valid,
-                        state: carried,
-                        state_before_last: carried_before,
-                        since: meta.since,
-                        state_at: meta.state_at,
-                        scratch: Vec::new(),
-                        // a bounded window's own drop keeps the history's checkpoint; a
-                        // slice is a frame of its own, whose rows do not follow it
-                        checkpoint: if exact { None } else { meta.checkpoint.clone() },
-                        pending: if exact { None } else { meta.pending.clone() },
-                        lost: if exact { None } else { meta.lost.clone() },
-                        first_present: meta.first_present,
-                    },
-                );
-            }
-        }
-        df.note_computed();
-        df
-    }
-
-    /// A `[start, end)` row slice that does **not** carry the cached-directive
-    /// (computed) metadata — for a READ-ONLY derivation that is never appended to
-    /// (a refresh probe, a row-select feeding `DataFrame::new`). [`slice`] clones a
-    /// `ComputedMeta` per cached column to keep the SP-9 incremental resume across
-    /// the slice; a read-only consumer reads only the raw columns and discards the
-    /// frame, so that per-column clone (`O(K)` per slice, `O(K²)` per fulfill over a
-    /// K-indicator windowed frame) is pure waste. The result's computed columns
-    /// become plain data — correct values, but it MUST NOT be appended to (use
-    /// [`slice`] for anything that continues live, e.g. window compaction).
-    pub fn slice_data(&self, start: usize, end: usize) -> DataFrame {
-        let start = start.min(self.height);
-        let end = end.max(start).min(self.height);
-        let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
-        self.same_schema(columns, self.index.slice(start, end), self.origin + start)
-    }
-
-    /// Filter rows by a boolean mask.
-    pub fn filter_mask(&self, mask: &[bool]) -> Result<DataFrame> {
-        if mask.len() != self.height {
-            return Err(VolasError::Shape(format!(
-                "boolean mask length {} != frame height {}",
-                mask.len(),
-                self.height
-            )));
-        }
-        let idx: Vec<usize> = mask
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &b)| if b { Some(i) } else { None })
-            .collect();
-        let columns: Vec<Column> = self.columns.iter().map(|c| c.take(&idx)).collect();
-        Ok(self.same_schema(columns, self.index.take(&idx), 0))
-    }
-
     /// Assign `values` into column position `col` at the given row `positions`
     /// (copy-on-write via [`Arc::make_mut`]). `values` is broadcast when it has
     /// length 1, otherwise its length must equal `positions.len()`. This backs
@@ -684,30 +422,6 @@ impl DataFrame {
         #[cfg(debug_assertions)]
         self.debug_check();
         Ok(())
-    }
-
-    /// Rename columns (pandas `rename(columns=...)`), returning a new frame.
-    /// Names not in `mapping` are kept; columns and index are shared (cheap).
-    pub fn rename(&self, mapping: &HashMap<String, String>) -> Result<DataFrame> {
-        let names: Vec<String> = self
-            .names
-            .iter()
-            .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
-            .collect();
-        Ok(DataFrame::new(names, self.columns.clone(), Some((*self.index).clone()))?.with_origin(self.origin))
-    }
-
-    /// Cast the named columns to new dtypes (pandas `astype`), returning a new
-    /// frame. Untouched columns are shared (cheap).
-    pub fn astype(&self, mapping: &HashMap<String, crate::dtype::DType>) -> Result<DataFrame> {
-        let mut columns = self.columns.clone();
-        for (name, dtype) in mapping {
-            let pos = self
-                .column_pos(name)
-                .ok_or_else(|| VolasError::ColumnNotFound(name.clone()))?;
-            columns[pos] = self.columns[pos].cast(*dtype)?;
-        }
-        Ok(self.same_schema(columns, (*self.index).clone(), self.origin))
     }
 
     /// Value equality (pandas `DataFrame.equals`): same column names + order,
@@ -773,6 +487,8 @@ impl DataFrame {
 
 mod admit;
 pub use admit::Retained;
+mod derive;
+pub use derive::Replay;
 mod computed;
 pub use computed::StaleComputed;
 mod history;
@@ -784,4 +500,6 @@ mod tests;
 mod tests_nan_fact;
 #[cfg(test)]
 mod tests_history;
+#[cfg(test)]
+mod tests_derive;
 

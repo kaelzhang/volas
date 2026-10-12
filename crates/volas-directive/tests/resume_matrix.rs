@@ -69,7 +69,7 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
         }
     }
     for from in froms {
-        let head = df.slice(0, from);
+        let head = df.slice_data(0, from);
         let Ok(head_col) = execute(&head, node) else { continue };
         let Some(mut state) = initial_state(&head, node, &head_col) else { continue };
         let mut at = from;
@@ -77,7 +77,7 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
             if end <= at {
                 continue;
             }
-            let frame = df.slice(0, end);
+            let frame = df.slice_data(0, end);
             let Some(want) = full(&frame, node) else { break };
             // `None` is a legitimate decline: the caller falls back to a full compute.
             let Some((tail, next)) = execute_resume(&frame, node, &state, at, frame.height(), 0) else { break };
@@ -104,11 +104,11 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
 /// state over the closed rows `[0, from)`); each version equals its full recompute.
 fn forming(df: &DataFrame, node: &Ast, from: usize) -> Vec<String> {
     let mut fails = Vec::new();
-    let head = df.slice(0, from);
+    let head = df.slice_data(0, from);
     let Ok(head_col) = execute(&head, node) else { return fails };
     let Some(anchor) = initial_state(&head, node, &head_col) else { return fails };
     for bump in [1.01, 0.97] {
-        let frame = with_last_row_scaled(&df.slice(0, from + 1), bump);
+        let frame = with_last_row_scaled(&df.slice_data(0, from + 1), bump);
         let Some(want) = full(&frame, node) else { continue };
         if let Some((tail, _)) = execute_resume(&frame, node, &anchor, from, frame.height(), 0) {
             if let Some(d) = first_diff(&values(&tail), &want[from..]) {
@@ -154,7 +154,7 @@ fn resume_equals_full_recompute_for_every_line_class_and_point() {
         for text in matrix::variants(line) {
             let Ok(node) = parse(&text) else { panic!("{text} does not parse") };
             for data in &classes {
-                let probe = data.frame.slice(0, ROWS / 2);
+                let probe = data.frame.slice_data(0, ROWS / 2);
                 if let Ok(col) = execute(&probe, &node) {
                     if initial_state(&probe, &node, &col).is_some() {
                         resumable += 1;

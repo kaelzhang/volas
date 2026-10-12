@@ -224,6 +224,53 @@ impl Tz {
         self.localize(naive).ok()
     }
 
+    /// The period a partial date text names in this zone, pandas's partial-string
+    /// periods: a year (`2024`), a month (`2024-01`), a day (`2024-01-02`), an hour
+    /// (`2024-01-02 10`), a minute (`2024-01-02 10:30`) or a second
+    /// (`2024-01-02 10:30:15`), with `T` or a space between the date and the time — as
+    /// `[start, end)` instants (each period start resolved like a calendar period start,
+    /// [`Tz::day_start`]) and how many fields the text gives (1 for a year … 6 for a
+    /// second). `None` for any other text (an exact label, a fraction of a second, an
+    /// offset) and for a period outside the datetime64[ns] range.
+    pub fn period_of_text(&self, text: &str) -> Option<(i64, i64, usize)> {
+        let text = text.trim();
+        let (date, time) = match text.split_once(['T', ' ']) {
+            Some((d, t)) => (d, Some(t)),
+            None => (text, None),
+        };
+        let digits = |t: &str, n: usize| -> Option<u32> {
+            (t.len() == n && t.bytes().all(|b| b.is_ascii_digit())).then(|| t.parse().ok()).flatten()
+        };
+        let mut fields: Vec<u32> = Vec::with_capacity(6);
+        for (i, part) in date.split('-').enumerate() {
+            fields.push(digits(part, if i == 0 { 4 } else { 2 })?);
+        }
+        if let Some(time) = time {
+            if fields.len() != 3 {
+                return None;
+            }
+            for part in time.split(':') {
+                fields.push(digits(part, 2)?);
+            }
+        }
+        let given = fields.len();
+        if given > 6 {
+            return None;
+        }
+        let at = |i: usize, default: u32| fields.get(i).copied().unwrap_or(default);
+        let start = NaiveDate::from_ymd_opt(at(0, 0) as i32, at(1, 1), at(2, 1))?
+            .and_hms_opt(at(3, 0), at(4, 0), at(5, 0))?;
+        let end = match given {
+            1 => start.with_year(start.year() + 1)?,
+            2 => start.checked_add_months(chrono::Months::new(1))?,
+            3 => start + chrono::Duration::days(1),
+            4 => start + chrono::Duration::hours(1),
+            5 => start + chrono::Duration::minutes(1),
+            _ => start + chrono::Duration::seconds(1),
+        };
+        Some((self.localize_earliest(start).ok()?, self.localize_earliest(end).ok()?, given))
+    }
+
     /// The first real instant of the local civil day `year-month-day` in this
     /// zone — its midnight, resolved as [`Tz::localize_earliest`] (a midnight a
     /// DST gap skips starts the day where the gap ends). An invalid date is a

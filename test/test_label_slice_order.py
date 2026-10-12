@@ -176,8 +176,6 @@ DT_INDEXES = {
     "decreasing": [6, 4, 2, 1],
     "unordered": [4, 1, 6, 2],
     "nat": [None, 1, 2, 4],
-    "dup_increasing": [1, 2, 2, 4],
-    "dup_unordered": [2, 4, 2, 1],
 }
 DT_BOUNDS = [None, 1, 2, 3, 4, 6, 9]
 
@@ -212,10 +210,20 @@ def test_timestamp_bounds_on_datetime_indexes_match_pandas(name):
                 assert vdf["x"].to_list() == pdf["x"].to_list(), (lo, hi)
 
 
+def test_a_datetime_index_never_repeats_a_label():
+    # rows are keyed by their labels as appending them would key them: a row labelled like
+    # the one before re-sends it (the last one wins); any other repeat raises
+    labels = pd.DatetimeIndex([_day(d) for d in (1, 2, 2, 4)])
+    df = volas.DataFrame({"x": [10, 11, 12, 13]}, index=labels)
+    assert df["x"].to_list() == [10, 12, 13]
+    with pytest.raises(ValueError, match="duplicate labels"):
+        volas.DataFrame({"x": [10, 11, 12, 13]}, index=pd.DatetimeIndex([_day(d) for d in (2, 4, 2, 1)]))
+
+
 PARTIAL = "Value based partial slicing on non-monotonic DatetimeIndexes"
 
 
-@pytest.mark.parametrize("name", ["decreasing", "unordered", "nat", "dup_unordered"])
+@pytest.mark.parametrize("name", ["decreasing", "unordered", "nat"])
 def test_string_bounds_on_a_non_increasing_datetime_index_fail_closed(name):
     # pandas reads a string bound there as a partial-date value and may select
     # non-contiguous rows; volas raises rather than select different rows

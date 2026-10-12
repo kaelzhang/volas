@@ -187,20 +187,19 @@ def test_e7_pandas_roundtrip(d, n):
 
 
 # --- Layer-2 deep transitions (review CG-8): cached directive lifecycle ------
-def test_cached_directive_detracks_on_rename():
-    """rename rebuilds the frame and DE-TRACKS cached directive columns: they
-    become plain data (still readable), an append NaN-pads them like any plain
-    column (visible missing, not silent wrong values), and fulfill leaves them
-    alone — the coherent de-track semantics, pinned."""
+def test_a_rename_is_a_new_series_without_the_cached_columns():
+    """rename gives a new series of the data columns: a cached directive column is not
+    carried (never plain data that an append NaN-pads); requested again it is computed
+    from the new frame's own columns — `ma:2` reads `close`, which is renamed away."""
     cols = ["open", "high", "low", "close", "volume"]
     df = volas.DataFrame({c: [float(i + 1) for i in range(6)] for c in cols})
     cached = df["ma:2"].to_list()                      # materialise + cache
     renamed = df.rename({"close": "px"})
-    got = renamed["ma:2"].to_list()                    # plain data survives
+    assert renamed.columns == ["open", "high", "low", "px", "volume"]
+    with pytest.raises(volas.DirectiveValueError, match='column "close" not found'):
+        renamed["ma:2"]
+    got = renamed["ma:2@px"].to_list()
     assert all((math.isnan(g) and math.isnan(c)) or g == c for g, c in zip(got, cached))
-    renamed.append(volas.DataFrame({(c if c != "close" else "px"): [9.0] for c in cols}))
-    renamed.fulfill()
-    assert renamed["ma:2"].isna().to_list()[-1] is True   # NaN-padded, visibly
 
 
 def test_cumulators_typo_fails_loud():

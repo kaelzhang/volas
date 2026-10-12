@@ -190,6 +190,78 @@ impl TfState {
         Ok(t)
     }
 
+    /// This state's time frame and aggregators over `frame`, a derivation of its frame
+    /// whose rows are re-selected, re-labelled or re-typed: the time-frame frame of those
+    /// rows ([`reseeded`](Self::reseeded)) when they are still bars — a `DatetimeIndex`
+    /// without `NaT`, in time order — else none (a plain frame).
+    pub(crate) fn relabelled(&self, frame: &DataFrame) -> PyResult<Option<TfState>> {
+        match frame.index().kind() {
+            IndexKind::Datetime(v, _) if !v.contains(&i64::MIN) && v.windows(2).all(|w| w[0] < w[1]) => {
+                self.reseeded(frame).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// This state for its frame's data columns renamed by `mapping`: each renamed column
+    /// keeps its aggregator and its fine bars in the open period.
+    pub(crate) fn renamed(&self, mapping: &std::collections::HashMap<String, String>) -> PyResult<TfState> {
+        let open = match &self.open {
+            Some(o) => Some(OpenPeriod::new(o.bars().rename(mapping).map_err(pyerr)?).map_err(pyerr)?),
+            None => None,
+        };
+        Ok(TfState {
+            time_frame: self.time_frame,
+            cumulators: self.cumulators.renamed(mapping),
+            open,
+            open_key: None,
+            fold_plan: None,
+            refold_next: self.refold_next,
+        })
+    }
+
+    /// This state for `frame`, its frame's rows in another zone (or wall clock anchored
+    /// in one), with `rezone` moving the open period's bars there alike: kept when every
+    /// row of `frame` is still the start of its period on the grid in the new zone and the
+    /// open period's bars fall in the last row's period; else none — the rows are no
+    /// longer bars of the frame's grid (e.g. day bars of one zone seen from another), and
+    /// the result is a plain frame.
+    pub(crate) fn rezoned(
+        &self,
+        frame: &DataFrame,
+        rezone: impl Fn(&DataFrame) -> volas_core::Result<DataFrame>,
+    ) -> PyResult<Option<TfState>> {
+        let IndexKind::Datetime(labels, tz) = frame.index().kind() else {
+            return Ok(None); // LCOV_EXCL_LINE (a time-frame frame's index is a DatetimeIndex)
+        };
+        let on_grid = |ns: i64| self.time_frame.period_start(ns, *tz).is_ok_and(|p| p == ns);
+        if !labels.iter().all(|&ns| on_grid(ns)) {
+            return Ok(None);
+        }
+        let open = match &self.open {
+            None => None,
+            Some(o) => {
+                let bars = rezone(o.bars()).map_err(pyerr)?;
+                let last = labels.last().copied();
+                let IndexKind::Datetime(ts, _) = bars.index().kind() else {
+                    return Ok(None); // LCOV_EXCL_LINE (bars have a DatetimeIndex)
+                };
+                if !ts.iter().all(|&t| self.time_frame.period_start(t, *tz).ok() == last) {
+                    return Ok(None);
+                }
+                Some(OpenPeriod::new(bars).map_err(pyerr)?)
+            }
+        };
+        Ok(Some(TfState {
+            time_frame: self.time_frame,
+            cumulators: self.cumulators.clone(),
+            open,
+            open_key: None,
+            fold_plan: None,
+            refold_next: self.refold_next,
+        }))
+    }
+
     /// The target time frame.
     pub(crate) fn time_frame(&self) -> TimeFrame {
         self.time_frame
@@ -397,7 +469,7 @@ impl PyDataFrame {
             let bar = if bars.height() == 1 {
                 std::borrow::Cow::Borrowed(bars)
             } else {
-                std::borrow::Cow::Owned(bars.slice(i, i + 1))
+                std::borrow::Cow::Owned(bars.slice_data(i, i + 1))
             };
             let bar = bar.as_ref();
             if !same_period {

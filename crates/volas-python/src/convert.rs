@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use volas_core::{
-    datetime, Column, DType, DataFrame, Index,
+    datetime, Column, DType, Index,
     IndexKind, Scalar, Tz, Validity, VolasError,
 };
 
@@ -130,12 +130,10 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
     } else {
         idx.call_method0("to_numpy")?
     };
-    let index = Index::from_column(&pyany_to_column(&instants)?).map_err(pyerr)?.with_name(idx_name);
+    let labels = pyany_to_column(&instants)?;
     let cols = PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None)?.inner;
-    let df = PyDataFrame::plain(
-        DataFrame::new(cols.names().to_vec(), cols.columns().to_vec(), Some(index))
-            .map_err(pyerr)?,
-    );
+    // keyed by the labels as set_index keys them (a re-sent row replaces the one before)
+    let df = PyDataFrame::plain(cols.keyed_by(&labels, Tz::Naive, idx_name).map_err(pyerr)?);
 
     // The imported instants are already true UTC; re-attach a tz-aware index's display
     // zone directly (tz_convert would hit the naive-axis guard; localize would shift).

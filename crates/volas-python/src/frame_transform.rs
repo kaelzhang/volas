@@ -122,7 +122,7 @@ impl PyDataFrame {
                 }
             })
             .collect();
-        Ok(PyDataFrame::plain(take_frame(df, &keep)))
+        self.derive_rows(&view, &RowSel::Positions(keep))
     }
 
     /// Replace missing values with `value` in every column (pandas `fillna`),

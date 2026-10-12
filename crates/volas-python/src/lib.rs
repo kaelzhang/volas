@@ -81,16 +81,6 @@ fn value_err(e: VolasError) -> PyErr {
     }
 }
 
-fn directive_uses_default_series(node: &volas_directive::types::Ast) -> bool {
-    match node {
-        volas_directive::types::Node::Name(_) => true,
-        volas_directive::types::Node::Command(cmd) => cmd.series.iter().all(
-            |series| matches!(series, volas_directive::types::Node::Name(name) if name.is_empty()),
-        ),
-        _ => false,
-    }
-}
-
 mod arrow;
 mod dlpack;
 mod scalar;
@@ -112,6 +102,7 @@ mod frame_access;
 mod frame_bounded;
 mod frame_row;
 mod frame_construct;
+mod frame_derive;
 mod frame_index;
 mod frame_io;
 mod frame_reduce;
@@ -129,6 +120,8 @@ pub(crate) use series::*;
 pub(crate) use series_support::*;
 pub(crate) use frame::*;
 pub(crate) use frame_tf::TfState;
+pub(crate) use frame_derive::{uncarried_cached, RowSel};
+pub(crate) use volas_directive::Replayer;
 pub(crate) use frame_bounded::{LookbackBound, WindowState};
 pub(crate) use frame_row::*;
 pub(crate) use frame_index::*;

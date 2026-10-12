@@ -1,4 +1,6 @@
     use super::*;
+    use super::derive::NoReplay;
+    use crate::index::IndexKind;
     use crate::CombineOp;
     use crate::DType;
 
@@ -36,11 +38,11 @@
     #[test]
     fn slice_and_filter() {
         let df = sample();
-        let s = df.slice(1, 3);
+        let s = df.rows(1, 3, &NoReplay);
         assert_eq!(s.height(), 2);
         assert_eq!(s.column("a").unwrap().as_f64().unwrap(), &[2.0, 3.0]);
 
-        let f = df.filter_mask(&[true, false, true]).unwrap();
+        let f = df.filter_mask(&[true, false, true], &NoReplay).unwrap();
         assert_eq!(f.height(), 2);
         assert_eq!(f.column("b").unwrap().as_i64().unwrap(), &[10, 30]);
     }
@@ -196,7 +198,7 @@
 
     #[test]
     fn filter_mask_rejects_wrong_length() {
-        assert!(sample().filter_mask(&[true, false]).is_err());
+        assert!(sample().filter_mask(&[true, false], &NoReplay).is_err());
     }
 
     #[test]
@@ -254,39 +256,6 @@
         assert!(df
             .update_computed_tail("nope", 0, &Column::f64(vec![1.0]))
             .is_err());
-    }
-
-    #[test]
-    fn slice_carries_computed_only_with_enough_warmup() {
-        // a frame with a cached recursive directive of lookback 11 (ema:12)
-        let mut df = DataFrame::new(
-            vec!["close".into()],
-            vec![Column::f64((0..60).map(|i| i as f64).collect())],
-            None,
-        )
-        .unwrap();
-        df.set_computed("close", Reach { lookback: 11, resume: 0, continuation: 11, history: History::Window });
-        // A carried EMA state as of row 59.
-        df.set_computed_states("close", Some(vec![42.0]), None);
-        // A slice keeping >= lookback rows AND ending at `valid_rows` carries the column
-        // as continuable, threading the recursive state through (the `Some` branch).
-        let keep = df.slice(40, 60); // 20 rows >= 11, end == valid_rows (60)
-        assert_eq!(keep.computed_columns().len(), 1);
-        assert_eq!(keep.computed_columns()[0].1.valid_rows, 20);
-        assert_eq!(keep.computed_columns()[0].1.state, Some(vec![42.0]));
-        // a TAIL slice keeps >= lookback rows but ends BEFORE `valid_rows`, so the carried
-        // state (attached to a row this sub-frame no longer ends on) is dropped — the column
-        // stays computed but state-less, continuable only via the full-recompute fallback.
-        let tail = df.slice(0, 50); // 50 rows >= 11, end (50) < valid_rows (60)
-        assert_eq!(tail.computed_columns().len(), 1);
-        assert_eq!(tail.computed_columns()[0].1.state, None);
-        // a slice keeping < lookback rows drops the computed status entirely (not continuable).
-        let too_short = df.slice(55, 60); // 5 rows < 11
-        assert!(too_short.computed_columns().is_empty());
-        // a column that needs one row past its lookback is kept only with that row
-        df.set_computed("close", Reach { lookback: 11, resume: 0, continuation: 12, history: History::Window });
-        assert!(df.slice(49, 60).computed_columns().is_empty()); // 11 rows < 12
-        assert_eq!(df.slice(48, 60).computed_columns()[0].1.reach.continuation, 12);
     }
 
     fn meta(df: &DataFrame) -> ComputedMeta {
@@ -400,47 +369,6 @@
         assert_eq!((meta(&df).state, meta(&df).state_before_last), (None, None));
     }
 
-    /// Both states describe rows relative to the last valid one, so a slice holding it
-    /// carries both (the earlier one only with its own row inside), and a slice ending
-    /// before it — or starting after it — carries neither.
-    #[test]
-    fn a_slice_carries_both_states_together() {
-        let mut df = ten_rows();
-        df.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0]));
-        let tail = df.slice(5, 10);
-        assert_eq!((meta(&tail).state, meta(&tail).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
-        assert_eq!(tail.computed_resume_state("close"), Some((&[9.0][..], 5)));
-        let last_two = df.slice(8, 10);
-        assert_eq!(meta(&last_two).state_before_last, Some(vec![8.0]));
-        let last_one = ten_rows_lookback(1);
-        let last_one = { let mut d = last_one; d.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0])); d.slice(9, 10) };
-        assert_eq!((meta(&last_one).state, meta(&last_one).state_before_last), (Some(vec![9.0]), None));
-        let head = df.slice(0, 9);
-        assert_eq!((meta(&head).state, meta(&head).state_before_last), (None, None));
-        // a stale frame (valid through row 8) sliced after its last valid row: the state
-        // describes a row before the slice, so it is not carried and nothing is valid
-        let mut stale = stale_last_row();
-        stale.append(&DataFrame::new(vec!["x".into()], vec![Column::f64(vec![10.0])], None).unwrap())
-            .unwrap();
-        let after = stale.slice(9, 11);
-        let m = after.computed_columns().into_iter().find(|(n, _)| n == "close").unwrap().1;
-        assert_eq!((m.valid_rows, m.state, m.state_before_last), (0, None, None));
-        // the history behind a carried column is kept: past warm-up from the first row
-        assert!(df.slice(9, 10).computed_columns().is_empty()); // 1 row < lookback 2
-        assert!(meta(&df.slice(8, 10)).warm(8));
-    }
-
-    fn ten_rows_lookback(lookback: usize) -> DataFrame {
-        let mut df = DataFrame::new(
-            vec!["close".into()],
-            vec![Column::f64((0..10).map(|i| i as f64).collect())],
-            None,
-        )
-        .unwrap();
-        df.set_computed("close", Reach { lookback, resume: 0, continuation: lookback, history: History::Window });
-        df
-    }
-
     /// A computed write never truncates and never skips stale rows: rows past the frame,
     /// or a write starting after the valid rows, raise with nothing written.
     #[test]
@@ -463,30 +391,6 @@
         // a data column has no cursor to move
         df.update_computed_tail("x", 0, &Column::f64(vec![5.0])).unwrap();
         assert_eq!(df.column("x").unwrap().get_f64(0), 5.0);
-    }
-
-    #[test]
-    fn slice_data_drops_computed_carry() {
-        // `slice` carries the cached-directive metadata (continuable resume); `slice_data`
-        // is the read-only twin that drops it — the boundary the refresh probe relies on.
-        // A `slice_data` frame must NOT be appended to (its resume is gone); `slice` is for
-        // anything that continues live (window compaction).
-        let mut df = DataFrame::new(
-            vec!["close".into()],
-            vec![Column::f64((0..60).map(|i| i as f64).collect())],
-            None,
-        )
-        .unwrap();
-        df.set_computed("close", Reach { lookback: 11, resume: 0, continuation: 11, history: History::Window });
-        df.set_computed_states("close", Some(vec![42.0]), None);
-        // slice() carries it (continuable, with the recursive state) ...
-        assert_eq!(df.slice(40, 60).computed_columns().len(), 1);
-        // ... slice_data() drops it (same row data, no resume carry) — and the underlying
-        // raw values are identical, so a read-only probe sees exactly the same columns.
-        let data = df.slice_data(40, 60);
-        assert!(data.computed_columns().is_empty());
-        assert_eq!(data.height(), 20);
-        assert_eq!(data.column("close").unwrap().get_f64(0), 40.0);
     }
 
     #[test]

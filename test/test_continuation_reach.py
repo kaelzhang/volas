@@ -1,7 +1,8 @@
 """Every command's continuation reach (`spec::reads_past_lookback`, the one per-command
 fact behind `lookback::reach`, and a recursion anywhere in a command): a tail slice of
-any length either keeps a cached column it can continue exactly or no longer caches it
-— an append never produces a number the full history does not."""
+any length keeps every cached column and continues it exactly — from its carried state
+and the rows before it the slice keeps (its lead), or, for a recursion that carries no
+state, from its whole history, which the slice keeps."""
 
 import numpy as np
 import pytest
@@ -32,7 +33,7 @@ def frame(a, b):
 
 
 @pytest.mark.parametrize('line', LINES, ids=lambda ln: ln.form + ln.series_suffix)
-def test_a_tail_slice_continues_exactly_or_not_at_all(line):
+def test_a_tail_slice_of_any_length_continues_exactly(line):
     d = line.form + line.series_suffix
     lb = volas.directive_lookback(d)
     if lb > 60:
@@ -42,25 +43,24 @@ def test_a_tail_slice_continues_exactly_or_not_at_all(line):
     want = frame(0, N + 2).exec(d, dtype='object')[-2:]  # a bool line may be missing
     for keep in sorted({max(lb - 1, 1), max(lb, 1), lb + 1, lb + 2, N}):
         tail = base.iloc[N - keep:]
-        cached = tail.is_computed(volas.directive_stringify(d))
+        assert tail.is_computed(volas.directive_stringify(d))
         tail.append(frame(N, N + 2))
-        if cached:
-            got = tail[d].to_numpy(dtype='object')[-2:]
-            assert _same(got, want), (d, keep, got, want)
+        got = tail[d].to_numpy(dtype='object')[-2:]
+        assert _same(got, want), (d, keep, got, want)
 
 
 @pytest.mark.parametrize('d', ['kcw:5', 'stoch_momentum:5', 'close+ema:3@open'])
-def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
-    # no carried state: a slice from the column's first row recomputes it all (kept,
-    # exact); a later start would restart the recursion, so the column is plain data
+@pytest.mark.parametrize('start', [0, 1, 37, N - 1])
+def test_a_recursion_without_a_state_continues_from_the_history_a_slice_keeps(d, start):
+    # no carried state: it is computed over its whole history, which a slice keeps before
+    # its first row — never restarted on the slice's own rows
     base = frame(0, N)
     base[d]
     name = volas.directive_stringify(d)
-    whole = base.iloc[0:]
-    assert whole.is_computed(name)
-    whole.append(frame(N, N + 2))
-    assert _same(whole[d].to_numpy(dtype='object')[-2:], frame(0, N + 2).exec(d, dtype='object')[-2:])
-    assert not base.iloc[1:].is_computed(name)
+    sliced = base.iloc[start:]
+    assert sliced.is_computed(name)
+    sliced.append(frame(N, N + 2))
+    assert _same(sliced[d].to_numpy(dtype='object'), frame(0, N + 2).exec(d, dtype='object')[start:])
 
 
 def test_a_window_refuses_a_recursion_without_a_carried_state():

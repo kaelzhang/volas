@@ -1,6 +1,7 @@
 //! The checkpoint of a cached column's history: where it lives and how it moves.
 
 use super::*;
+use super::derive::NoReplay;
 
 fn frame(rows: usize) -> DataFrame {
     let mut df = DataFrame::new(
@@ -36,8 +37,10 @@ fn a_checkpoint_moves_with_the_window_drop_only() {
     df.set_computed_checkpoint("close", Ok(checkpoint(5))); // not cached: no-op
     assert_eq!(df.computed_checkpoint("close"), None);
     assert_eq!(df.computed_checkpoint("ema"), Some(&checkpoint(5)));
-    assert_eq!(df.retain_tail(4).computed_checkpoint("ema"), Some(&checkpoint(5)));
-    assert_eq!(df.slice(6, 10).computed_checkpoint("ema"), None);
+    assert_eq!(df.retain_tail(4, &NoReplay).computed_checkpoint("ema"), Some(&checkpoint(5)));
+    // any selection holding the row after it keeps it; one starting later does not
+    assert_eq!(df.rows(6, 10, &NoReplay).computed_checkpoint("ema"), Some(&checkpoint(5)));
+    assert_eq!(df.rows(7, 10, &NoReplay).computed_checkpoint("ema"), None);
     assert_eq!(df.clone().computed_checkpoint("ema"), Some(&checkpoint(5)));
     // a write stales the column but keeps its history's checkpoint
     df.invalidate_computed_on_write("close");
@@ -46,8 +49,8 @@ fn a_checkpoint_moves_with_the_window_drop_only() {
     assert_eq!((df.computed_checkpoint("ema"), df.computed_history_lost("ema")), (None, None));
     let why = VolasError::Value("an input past 2^53".into());
     df.set_computed_checkpoint("ema", Err(Some(why.clone())));
-    assert_eq!(df.retain_tail(4).computed_history_lost("ema"), Some(&why));
-    assert_eq!(df.slice(6, 10).computed_history_lost("ema"), None);
+    assert_eq!(df.retain_tail(4, &NoReplay).computed_history_lost("ema"), Some(&why));
+    assert_eq!(df.rows(6, 10, &NoReplay).computed_history_lost("ema"), Some(&why));
     assert_eq!(df.computed_history_lost("close"), None);
 }
 
@@ -56,7 +59,7 @@ fn a_checkpoint_moves_with_the_window_drop_only() {
 /// still starts where it did.
 #[test]
 fn a_replay_continues_the_column() {
-    let mut df = frame(10).retain_tail(6); // rows 4..10, origin 4
+    let mut df = frame(10).retain_tail(6, &NoReplay); // rows 4..10, origin 4
     df.invalidate_computed_on_write("close"); // stale from row 0, no state
     let since = df.computed_columns()[0].1.since;
     df.continue_computed("ema", 2, &Column::f64(vec![7.0, 8.0, 9.0, 10.0]), Some(vec![10.0]), Some(vec![9.0]))

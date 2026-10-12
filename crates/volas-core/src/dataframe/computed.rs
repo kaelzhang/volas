@@ -172,6 +172,12 @@ impl DataFrame {
         Some((meta.state.as_deref()?, self.origin))
     }
 
+    /// The absolute position of the row cached column `name`'s history starts at
+    /// ([`ComputedMeta::since`]), if it is one.
+    pub fn computed_since(&self, name: &str) -> Option<usize> {
+        Some(self.computed.get(name)?.since)
+    }
+
     /// The absolute position of cached column `name`'s first present value — where its
     /// warm-up ended — if one has been computed.
     pub fn computed_first_present(&self, name: &str) -> Option<usize> {

@@ -252,11 +252,13 @@ impl Index {
     /// `NaT` and sorted last.
     pub fn from_column_tz(col: &Column, tz: Tz) -> Result<Index> {
         let kind = match col {
-            // Datetime is exempt from the unique-label rule (F34 refinement):
-            // real market data legitimately carries duplicate timestamps (resent
-            // forming bars, multiple ticks per ts, NaT batches) and cumulate /
-            // sort own the dedup semantics. int64/str labels stay strictly unique.
-            Column::Datetime(v) => IndexKind::Datetime(v.to_vec(), tz),
+            // Every index kind has unique labels (a label names one row); `NaT` is no
+            // label (see [`Index::keyed`] for rows keyed by their labels).
+            Column::Datetime(v) => {
+                let present: Vec<i64> = v.iter().copied().filter(|&ns| ns != crate::datetime::NAT).collect();
+                require_unique_labels(&present, "datetime")?;
+                IndexKind::Datetime(v.to_vec(), tz)
+            }
             Column::I64(v, _) => {
                 require_no_missing_labels(col, "int64")?;
                 require_unique_labels(v, "int64")?;
@@ -276,6 +278,24 @@ impl Index {
             }
         };
         Ok(Index::unnamed(kind))
+    }
+
+    /// The index of rows labelled by `col` keyed by their labels, as appending them one by
+    /// one would key them: a datetime row labelled like the row before it re-sends it and
+    /// replaces it (the last one wins), and the positions of the rows kept are returned
+    /// with the index (`None` when every row is kept). Any other repeated label raises, as
+    /// [`from_column_tz`](Self::from_column_tz) does; `NaT` is no label and never repeats.
+    pub fn keyed(col: &Column, tz: Tz) -> Result<(Index, Option<Vec<usize>>)> {
+        let Column::Datetime(v) = col else {
+            return Ok((Index::from_column_tz(col, tz)?, None));
+        };
+        let resent = |i: usize| v[i] != crate::datetime::NAT && v.get(i + 1) == Some(&v[i]);
+        if !(0..v.len()).any(resent) {
+            return Ok((Index::from_column_tz(col, tz)?, None));
+        }
+        let kept: Vec<usize> = (0..v.len()).filter(|&i| !resent(i)).collect();
+        let labels = Column::Datetime(crate::buffer::Buffer::from(kept.iter().map(|&i| v[i]).collect::<Vec<i64>>()));
+        Ok((Index::from_column_tz(&labels, tz)?, Some(kept)))
     }
 
     /// The timezone of a `Datetime` index ([`Tz::Naive`] for every other kind).
@@ -758,7 +778,10 @@ fn require_no_missing_labels(col: &Column, kind: &str) -> Result<()> {
 /// Label access assumes unique labels (F34, decision 1B): a duplicate-label
 /// index makes `.loc[label]` ill-defined (one row or many?), so it is rejected
 /// at creation — the same creation-time guard as the NA-label rule above.
-fn require_unique_labels<T: std::hash::Hash + Eq>(labels: &[T], kind: &str) -> Result<()> {
+fn require_unique_labels<T: std::hash::Hash + Ord>(labels: &[T], kind: &str) -> Result<()> {
+    if labels.windows(2).all(|w| w[0] < w[1]) {
+        return Ok(()); // increasing labels (the usual time series): unique in one pass
+    }
     let mut seen = std::collections::HashSet::with_capacity(labels.len());
     for l in labels {
         if !seen.insert(l) {

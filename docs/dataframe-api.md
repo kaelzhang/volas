@@ -64,10 +64,12 @@ Which gets the 2-period simple moving average on column `"close"`.
   - a **dict** mapping each column name to an equal-length list or NumPy array
     (`float`, `int`, `bool`, `datetime64`, or `string`); a NumPy **masked array**'s
     masked cells become `volas.NA`;
-  - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`).
-    A tf-aware source re-labelled (`index=`) or re-typed (`dtype=`) gives the tf-aware
-    frame of its new rows, the last one the forming bar (see
-    [Writing to a time-frame frame](cumulation.md#writing-to-a-time-frame-frame)).
+  - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`):
+    `DataFrame(df)` is `df.copy()` — its cached directive columns, a bounded window and
+    a time-frame state included. Re-labelled (`index=`) or re-typed (`dtype=`), it is a
+    new series of the source's visible data columns (see [Derived frames](#derived-frames));
+    a tf-aware source gives the tf-aware frame of its new rows, the last one the forming
+    bar (see [Writing to a time-frame frame](cumulation.md#writing-to-a-time-frame-frame)).
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
   those with the dedicated [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
@@ -76,12 +78,19 @@ Which gets the 2-period simple moving average on column `"close"`.
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
   `tz_localize` / `tz_convert`. See [Timezones](cumulation.md#timezones).
 - **columns** `Optional[list[str]] = None` Select and order the columns to keep —
-  the same projection as `df[[...]]` (a stale cached directive column is refreshed
-  first; a bounded-window source gives its visible rows). A name not present raises
+  the same projection as `df[[...]]` (see [Derived frames](#derived-frames)): the same
+  rows, each listed cached directive column still cached (a stale one is refreshed
+  first); a bounded-window source gives its visible rows. A name not present raises
   `KeyError` (a directive is never computed here); an empty list or a duplicate name
   is rejected, and an absent column is never silently filled. With `index=`, `dtype=`
   or `window=`, a source `DataFrame` is read like any bulk read: it raises while one
   of its cached directive columns is stale.
+- **index** `Optional[list | np.ndarray] = None` Row labels (int64, string or datetime),
+  one per row. The rows are keyed by their labels as appending them would key them: a
+  datetime row labelled like the row before it is the same bar sent again and replaces
+  it (the last one wins), and any other repeated label raises `ValueError` — a label
+  names one row (`NaT` is no label). `set_index` and `read_csv(index_col=...)` key
+  their rows the same way.
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are bars
   at that frame, each labelled with its **period start**, and the last one is the
@@ -543,19 +552,49 @@ df.is_computed('close')                                 # False
 raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low', 'close', 'volume']
 ```
 
-A contiguous slice (`df.iloc[a:b]`, `df.loc[...]`, `head` / `tail`) keeps a cached column
-cached only when it can continue it exactly: the slice keeps the rows the column needs
-(its continuation reach), and a column with a recursion anywhere in its directive (EMA,
-Wilder smoothing, SAR, a cumulative line, …) either carries its resume state into the
-slice or the slice starts at the column's first row. Otherwise the slice keeps the
-column's values as plain data (`is_computed` is `False`), never a re-warmed recursion.
-This is the current behaviour; continuing such a column across a middle slice by
-replaying its history is planned. A slice that carried a recursion's state continues it
-on append, but cannot recompute it once a write discards that state (it does not hold
-the rows the history started on): its next refresh raises. A bounded window's own drop
-of its head is not a slice: its cached columns stay cached, a recursion with the
-checkpoint of its history (see
-[What a bounded window computes](#bounded-rolling-window)).
+How a derived frame keeps the cached columns of its source is stated in
+[Derived frames](#derived-frames).
+
+### Derived frames
+
+A frame derived from another either **continues its series** or **starts a new one**:
+
+- A **contiguous row selection** — the rows `[a, b)` in order, however it is written:
+  `df.iloc[a:b]`, `df[a:b]`, `df.loc[lo:hi]` (a partial date string too), `df.loc['2024-01']`
+  on an increasing index, `head` / `tail`, `iloc[a:b, :]` / `loc[lo:hi, cols]`, a boolean
+  mask or position list that selects consecutive rows, `drop` of the rows around them,
+  `dropna` removing a warm-up — continues the series. Every cached directive column stays
+  cached with its values, and an `append`, a re-sent last row or a `fulfill` continues it
+  bit for bit as the source would have: the selection carries each column's state as of
+  its last row (a selection ending before the source's last row replays a recursion once,
+  from the history the source holds), and keeps the data rows before its first row that
+  its columns read (however short it is). A recursion that carries no state (`kcw`, `crsi`,
+  `stoch_momentum`, a recursive moving-average type, an expression combining a recursion
+  with other values such as `close + kama:3@open`) is computed over its whole history, so
+  the selection keeps all of it: slicing such a frame does not bound its memory — drop the
+  column first (`df.drop(['kcw'], axis=1)`) to trim it. After a write, a column is
+  recomputed over the rows the selection keeps; a recursion carried by its state whose
+  history began before the selection cannot be recomputed there and its refresh raises
+  (recompute it on the frame that holds its history).
+- A **column projection** — `df[[...]]`, `DataFrame(df, columns=[...])`, `drop(axis=1)` —
+  keeps the rows and continues the cached columns it lists (under their canonical names:
+  `df[['close', 'ma:05']]` gives `['close', 'ma:5']`).
+- **Every other derivation is a new series**: a selection of rows that are not consecutive
+  or not in order (a mask with gaps, `iloc[[0, 2, 5]]`, `sort_index(ascending=False)`,
+  `nlargest`), `astype`, `rename`, `set_index` / `reset_index`, a new `index=` or `dtype=`,
+  `tz_localize` / `tz_convert`. It holds the source's data columns only: a cached column
+  is dropped, and requested again it is computed from the new frame's own rows. A 2-D
+  selection of rows that are not consecutive (`df.loc[mask, cols]`) naming a cached column
+  raises `KeyError` — read its values as a Series, `df.loc[mask, 'ma:5']`.
+- `copy()` / `DataFrame(df)` copy everything.
+
+A derivation of a frame whose cached columns are stale raises, like any bulk read (call
+`fulfill()` first); `copy()` proceeds. A derived frame of a bounded window is an unbounded
+frame of its visible rows (its hidden margin serves as the rows before them); a
+time-frame frame's model is kept where the result is still a frame of its bars (see
+[Live cumulation](#live-cumulation--a-tf-aware-dataframe)). A bounded window's own drop of
+its head is not a derivation: its cached columns stay cached, a recursion with the
+checkpoint of its history (see [What a bounded window computes](#bounded-rolling-window)).
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
@@ -868,6 +907,16 @@ its last row is their cumulation. On a tf-aware frame:
 - **df.cumulate(target)** must be a whole multiple of the source frame (e.g.
   `5m→15m`, not `5m→7m`; a week or 3-day bar does not nest into a month/year);
   the same frame is a `copy()`.
+- **A derived frame of the same bars stays tf-aware.** A selection ending at the forming
+  row (`df.iloc[a:]`, `df.tail(n)`, `df.loc[t:]`) keeps the open period, so the next finer
+  bar still folds into it; a projection and `rename` (each column keeps its aggregator)
+  keep it too; `tz_localize` / `tz_convert` keep it while every bar is still a period of
+  the grid in the new zone. Any other selection of bars in time order (one ending before
+  the forming row, a mask), `astype`, `set_index` and a new `index=` / `dtype=` give the
+  tf-aware frame of the resulting bars, the last one forming, as
+  `DataFrame(bars, time_frame=...)` builds it. Rows out of time order, a
+  non-datetime index, or bars that are no longer periods of the grid in the new zone (day
+  bars of `Asia/Shanghai` seen in `UTC`) give a plain frame.
 
 ```py
 df = history.cumulate('5m')   # a tf-aware 5m frame (history is finer, e.g. 1m)

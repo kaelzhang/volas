@@ -15,7 +15,7 @@ from . import build, contracts, inventory, observe
 from .directives import stored_bare_names
 from .data import EPOCHS, NS, make_rows, next_timestamps, regimes, schemas, steps
 from .ledger import Ledger, last_close
-from .machine_base import Entry, FrameMachine
+from .machine_base import FrameMachine
 
 APPEND_FORMS = ('arrow', 'arrow', 'numpy', 'sliced', 'row', 'dict')
 BAD_APPENDS = ('dtype', 'extra_column', 'index_kind', 'naive_onto_aware', 'aware_onto_naive', 'nat',
@@ -72,9 +72,6 @@ class PlainMachine(FrameMachine):
             form = 'arrow'
         if form == 'dict' and schema.index == 'range':
             form = 'numpy'  # an unnamed RangeIndex frame takes no bar dict
-        if contracts.avoids('slice-resend-short') and step == 'resend' and self.offset > 0 and any(
-                volas.directive_lookback(name) >= len(self.df) for name in self.cached):
-            return  # a re-sent last row of a slice holding just a column's lookback
         rows, index = self._new_bars(k, regime, step)
         bar = build.bars(schema, rows, index, form, pad=2, extra=tuple(self.store.user))
         labels = index
@@ -161,7 +158,7 @@ class PlainMachine(FrameMachine):
     @rule(data=st.data(), via=st.sampled_from(['iloc', 'iat', 'at', 'loc']))
     def write_cell(self, data, via):
         """A positional / label write into a data column (invalidates every cache)."""
-        if self.stale or self._positions_carried():
+        if self.stale or self._positions_carried() or self._slice_write_raises():
             return  # a stale write is covered by append_rejected('stale_write')
         coarse = self.coarse()
         col = data.draw(st.sampled_from([c for c in coarse.columns
@@ -205,18 +202,22 @@ class PlainMachine(FrameMachine):
             re.search(rf'\b{re.escape(h)}\b', n) for n in self.cached for h in heads)
 
     def _invalidate_all(self):
-        # A write drops every carried state: each cached column recomputes over the
-        # rows the frame retains (a slice's history restarts at its first row).
-        start = self.visible_start()
-        self.cached = {n: Entry(e.name, e.directive, e.env, start) if self.window is None else e
-                       for n, e in self.cached.items()}
+        # A write leaves every cached column stale; its recompute keeps its history (a
+        # slice keeps the rows before it that the recompute reads).
         self.stale = set(self.cached) if len(self.df) else set()
+
+    def _slice_write_raises(self) -> bool:
+        """Whether a write would leave a recursion whose history starts before the slice
+        to recompute: its refresh raises (the contract's documented case, pinned by
+        test_derivations.py), so the machine does not generate such a write."""
+        return self.window is None and any(
+            inventory.recursion(e.name) and e.start < self.visible_start() for e in self.cached.values())
 
     @precondition(lambda self: len(self.df) > 0)
     @rule(data=st.data())
     def write_computed(self, data):
         """A cell write into a cached float column: it becomes plain data."""
-        if self.stale or not self.cached or self._positions_carried():
+        if self.stale or not self.cached or self._positions_carried() or self._slice_write_raises():
             return
         name = data.draw(st.sampled_from(sorted(self.cached)))
         want, error = self.oracle(self.cached[name])
@@ -244,7 +245,7 @@ class PlainMachine(FrameMachine):
     def set_column(self, data, kind):
         """``df[name] = values``: a new plain column, one named like a bare command or
         a canonical directive, or a replacement of an existing column."""
-        if self.stale or self._positions_carried():
+        if self.stale or self._positions_carried() or self._slice_write_raises():
             return
         from .inventory import executable_lines
         if kind == 'new':
@@ -294,33 +295,18 @@ class PlainMachine(FrameMachine):
         """``df = df.iloc[a:]`` and keep going on the slice (I11)."""
         if self.window is not None:
             return
-        if contracts.avoids('slice-recursive-rewarm') and any(
-                _names(e.name) & inventory.unbounded_memory() or inventory.recursive(e.name)
-                for e in self.cached.values()):
-            return  # a recursive cached column is not continued across the slice
         a = data.draw(st.integers(1, len(self.df) - 1))
         if self.stale:
             self.attempt(lambda: self.df.iloc[a:], expect_error=ValueError, label='slice while stale')
             return
-        # A column the slice is too short to keep computed stays as the plain data it
-        # holds (fresh here: a slice of a stale frame raises).
-        held = {n: (observe.column_values_series(s), s.dtype)
-                for n, s in ((n, self.df.get_column(n)) for n in self.cached)}
-        start = self.visible_start()
+        # Every cached column continues on the slice (fresh here: a slice of a stale frame
+        # raises).
+        assert contracts.SLICE_CACHED_COLUMNS_CONTINUE
 
         def commit(result):
             self.df = result
             self.offset += a
             self.store.range_kind = False
-            new_len = len(self.df)
-            for name in list(self.cached):
-                if contracts.SLICE_CACHED_COLUMNS_CONTINUE and volas.directive_lookback(name) <= new_len:
-                    continue
-                values, dtype = held[name]
-                del self.cached[name]
-                cells = [None] * start + [None if (isinstance(v, float) and np.isnan(v)) else v
-                                          for v in values.tolist()]
-                self.store.add_column(name, cells, 'bool' if dtype == 'bool' else 'float64')
 
         self.attempt(lambda: self.df.iloc[a:], commit=commit, label=f'iloc[{a}:]')
 
@@ -381,11 +367,6 @@ class PlainMachine(FrameMachine):
 
         self.attempt(lambda: self.df == other, expect_error=ValueError if stale else None, commit=commit,
                      label='df == snapshot')
-
-
-def _names(text: str) -> set[str]:
-    """The command names a directive mentions (lower-cased, sub-commands dropped)."""
-    return {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
 
 
 def _nat_index(df: volas.DataFrame, schema) -> volas.DataFrame:

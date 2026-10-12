@@ -19,14 +19,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
     # while df[d] names the column from the bound values ('ma:5', 'sar').
     'stringify-column-name',
-    # A recursive cached column without a carried state (a composite / explicit
-    # series) is not continued across a slice that drops its history's start: it
-    # stays as data (it cannot be continued exactly, so it is never re-warmed).
-    'slice-recursive-rewarm',
-    # A slice holding just a column's lookback keeps it cached, but a re-sent last row
-    # reads the lookback rows before it, which the slice does not hold: the recompute
-    # gives a missing value where the full history has one.
-    'slice-resend-short',
 })
 
 # Directive families whose incremental refresh is known to diverge from the full
@@ -86,9 +78,12 @@ APPEND_FOREIGN_INDEX_RAISES = True
 
 # --- history of derived frames (I11) ---------------------------------------------------
 
-# `iloc[a:]` keeps every already-cached column on its full-history continuation
-# (values and carried state), while a directive first cached on the slice is
-# computed over the retained rows only.
+# `iloc[a:]` keeps every already-cached column on its full-history continuation (values,
+# carried state, and the rows before the slice its recompute reads), however short the
+# slice; a directive first cached on the slice is computed over the retained rows only.
+# A write on the slice recomputes a cached column over its full history too — except a
+# recursion kept by its carried state, which the slice cannot replay from before its
+# first row: its refresh raises (docs/dataframe-api.md "df.is_computed").
 SLICE_CACHED_COLUMNS_CONTINUE = True
 
 # --- tf fold (README "Live cumulation") --------------------------------------------------

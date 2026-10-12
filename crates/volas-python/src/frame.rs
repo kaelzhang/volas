@@ -46,7 +46,7 @@ impl std::ops::Deref for Fresh<'_> {
         if self.start == 0 && self.len == self.frame.height() {
             return self.frame;
         }
-        self.view.get_or_init(|| self.frame.slice(self.start, self.start + self.len))
+        self.view.get_or_init(|| self.frame.rows(self.start, self.start + self.len, &Replayer))
     }
 }
 
@@ -63,8 +63,20 @@ impl Fresh<'_> {
         match self.view.into_inner() {
             Some(view) => view,
             None if whole => self.frame.clone(),
-            None => self.frame.slice(self.start, self.start + self.len),
+            None => self.frame.rows(self.start, self.start + self.len, &Replayer),
         }
+    }
+
+    /// The physical frame the visible rows are part of (a windowed frame's hidden margin
+    /// included) — for a derivation, which maps the visible rows onto it so the margin
+    /// serves as the lead of its cached columns; never for reading values.
+    pub(crate) fn physical(&self) -> &DataFrame {
+        self.frame
+    }
+
+    /// The visible rows: `(start, len)` in the physical frame.
+    pub(crate) fn range(&self) -> (usize, usize) {
+        (self.start, self.len)
     }
 
     /// Column `j` as stored with the offset of visible row 0 in it: one cell read in
@@ -139,16 +151,21 @@ impl Meta<'_> {
 ///
 /// Args:
 ///     data (dict[str, Sequence] | DataFrame): a dict of column name -> equal-length
-///         values, or another volas DataFrame to copy (its index and tf-state are
-///         carried — like ``df.copy()``; re-labelled with ``index=`` or re-typed with
-///         ``dtype=``, a tf-aware source gives the tf-aware frame of its new rows, the
-///         last one the forming bar). A pandas DataFrame is not accepted; use
+///         values, or another volas DataFrame to copy (``DataFrame(df)`` is
+///         ``df.copy()``: its cached columns, window and tf-state are carried;
+///         re-labelled with ``index=`` or re-typed with ``dtype=`` it is a new series of
+///         its visible data columns, and a tf-aware source gives the tf-aware frame of
+///         its new rows, the last one the forming bar). A pandas DataFrame is not accepted; use
 ///         ``DataFrame.from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
 ///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
 ///     columns (list[str], optional): select and order the columns to keep (like
-///         ``df[[...]]``: a stale cached column is refreshed, a windowed source gives its
-///         visible rows); a name not present raises ``KeyError``. An empty list or a
-///         duplicate name is rejected, and an absent column is never NaN-filled.
+///         ``df[[...]]``: the same rows, a listed cached column still cached — refreshed
+///         if stale —, a windowed source gives its visible rows); a name not present
+///         raises ``KeyError``. An empty list or a duplicate name is rejected, and an
+///         absent column is never NaN-filled.
+///     index (Sequence, optional): row labels (int64, str or datetime), one per row,
+///         keyed like ``set_index`` keys them: a datetime row labelled like the row
+///         before it replaces it; any other repeated label raises.
 ///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
 ///         this bar interval. The given rows are bars at that frame, each labelled with its
 ///         period start; the last one is the forming bar, so a later ``append`` of a finer
@@ -239,7 +256,7 @@ impl PyDataFrame {
         match &self.window {
             Some(_) => {
                 let (start, len) = self.logical_range();
-                std::borrow::Cow::Owned(self.inner.slice(start, start + len))
+                std::borrow::Cow::Owned(self.inner.rows(start, start + len, &Replayer))
             }
             None => std::borrow::Cow::Borrowed(&self.inner),
         }
