@@ -14,6 +14,7 @@
 use crate::accum::{shift_row, Csum};
 use crate::guard::{Order, Slide, Window};
 use crate::missing;
+use crate::raw::smoothing;
 use ndarray::{Array1, ArrayView1};
 use std::borrow::Cow;
 
@@ -103,7 +104,7 @@ pub(crate) fn sma_seed(data: impl Iterator<Item = f64>, period: usize) -> Option
 /// first output, at the `period`-th finite value, is the SMA of the first `period`
 /// finite values ([`sma_seed`]); thereafter `prev = step(prev, x)` per row. Leading `NaN`
 /// in `data` (e.g. `tr[0]`) is skipped for seeding; rows before the seed are warm-up
-/// `NaN`. The exact `step` arithmetic is the caller's, to match TA-Lib per kind.
+/// `NaN`. The `step` is one of [`smoothing`]'s TA-Lib steps.
 #[inline]
 fn sma_seeded(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64) -> Array1<f64> {
     let n = data.len();
@@ -127,38 +128,33 @@ pub(crate) fn sma_seeded_last(data: &[f64], period: usize, step: impl Fn(f64, f6
     Some(data[si + 1..].iter().fold(seed, |prev, &x| step(prev, x)))
 }
 
-/// Wilder's smoothing step `prev·(period−1)/period + x/period`, fused (see [`wilder`]).
+/// Wilder's smoothing step over `period` ([`smoothing::Wilder`]) as a closure for
+/// [`sma_seeded`] / [`sma_seeded_last`].
 #[inline]
 pub(crate) fn wilder_step(period: usize) -> impl Fn(f64, f64) -> f64 {
-    let pf = period as f64;
-    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
-    move |prev: f64, x: f64| prev.mul_add(a, x * b)
+    let w = smoothing::Wilder::new(period);
+    move |prev: f64, x: f64| w.step(prev, x)
 }
 
-/// The EMA step `(x − prev)·k + prev`, `k = 2/(period+1)`, fused (see [`ema_seeded`]).
+/// The EMA step over `period` ([`smoothing::ema`]) as a closure for [`sma_seeded`] /
+/// [`sma_seeded_last`].
 #[inline]
 pub(crate) fn ema_step(period: usize) -> impl Fn(f64, f64) -> f64 {
-    let k = 2.0 / (period as f64 + 1.0);
-    move |prev: f64, x: f64| (x - prev).mul_add(k, prev)
+    let k = smoothing::ema_k(period);
+    move |prev: f64, x: f64| smoothing::ema(prev, x, k)
 }
 
 /// Wilder's smoothing (RMA), TA-Lib ATR / RSI / ADX arithmetic:
-/// `out[i] = (out[i-1]*(period-1) + x[i]) / period`, SMA-seeded.
+/// `out[i] = ((out[i-1]·(period−1)) + x[i]) / period` ([`smoothing::Wilder`]),
+/// SMA-seeded. The division stays on the recurrence, as in TA-Lib's source.
 #[inline]
 pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    // `(prev*(period-1) + x) / period` rewritten as `prev*a + x*b` with the two
-    // reciprocals precomputed, then fused (`mul_add`). This takes the per-element
-    // **division** (~14-cycle latency, on the recurrence's critical path) off the
-    // hot loop, leaving a single FMA — a large win for the division-bound Wilder
-    // smoother (ATR / SMMA). Wilder smoothing is contractive (factor `a < 1`), so
-    // the ~1e-16 reassociation error decays rather than accumulates: well within
-    // the 1e-9 TA-Lib parity tolerance.
     sma_seeded(data, period, wilder_step(period))
 }
 
 /// Fused `ema(fast) - ema(slow)` (the MACD line) in a single pass. The two
 /// SMA-seeded EMAs are **independent** recurrences, so interleaving them in one
-/// loop lets the out-of-order core overlap the two FMA dependency chains (ILP) —
+/// loop lets the out-of-order core overlap the two dependency chains (ILP) —
 /// roughly the cost of one EMA, not two — and emits the difference directly (no
 /// intermediate `fast` / `slow` arrays, no separate subtraction pass).
 /// Bit-identical to two [`ema_seeded`] calls minus each other. Requires `fast <= slow`
@@ -172,8 +168,8 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
     if fast == 0 || slow == 0 || n == 0 {
         return out;
     }
-    let kf = 2.0 / (fast as f64 + 1.0);
-    let ks = 2.0 / (slow as f64 + 1.0);
+    let kf = smoothing::ema_k(fast);
+    let ks = smoothing::ema_k(slow);
     // One scan finds both SMA seeds (the period-th finite value for each).
     let (mut sf_sum, mut sf_cnt, mut sf_idx) = (0.0, 0usize, None);
     let (mut ss_sum, mut ss_cnt, mut ss_idx) = (0.0, 0usize, None);
@@ -205,54 +201,50 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
                                        // Warm the fast EMA up to the slow seed (the slow EMA is not valid yet, so the
                                        // difference stays NaN until `ss`).
     for &x in &src[sf + 1..=ss] {
-        pf = (x - pf).mul_add(kf, pf);
+        pf = smoothing::ema(pf, x, kf);
     }
     let mut ps = ss_sum / slow as f64; // slow EMA at its seed `ss`
     dst[ss] = pf - ps;
-    // Interleaved from here: two independent FMA chains the OoO core overlaps.
+    // Interleaved from here: two independent chains the OoO core overlaps.
     for i in (ss + 1)..n {
         let x = src[i];
-        pf = (x - pf).mul_add(kf, pf);
-        ps = (x - ps).mul_add(ks, ps);
+        pf = smoothing::ema(pf, x, kf);
+        ps = smoothing::ema(ps, x, ks);
         dst[i] = pf - ps;
     }
     out
 }
 
-/// Exponential moving average, TA-Lib arithmetic:
-/// `out[i] = out[i-1] + k*(x[i] - out[i-1])` with `k = 2/(period+1)`, SMA-seeded
-/// (TA-Lib's default EMA seeding).
+/// Exponential moving average, TA-Lib arithmetic: `out[i] = ((x[i] − out[i-1])·k) +
+/// out[i-1]` with `k = 2/(period+1)` ([`smoothing::ema`]), SMA-seeded (TA-Lib's default
+/// EMA seeding).
 #[inline]
 pub fn ema_seeded(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    // `(x - prev) * k + prev` via a fused multiply-add: one rounding (slightly more
-    // accurate than TA-Lib's two-op form, within the 1e-9 parity tolerance) and a
-    // shorter dependency chain — on FMA-capable hardware this cuts the latency-bound
-    // EWMA recurrence by ~35%, so ema / macd / macd.signal beat TA-Lib's C loop.
     sma_seeded(data, period, ema_step(period))
 }
 
-/// `S` SMA-seeded EMAs applied in cascade (each stage's input is the previous stage's
-/// output), fused into a single pass — a lattice where every bar advances all stages,
-/// stage `j` consuming stage `j-1`'s *current* output. Returns the final stage.
-///
-/// Staggered warmup: stage `j` SMA-seeds over the first `period` finite values it sees,
-/// which begin at its predecessor's seed, so it seeds at index `j·(period-1)` and the
-/// output is valid from `S·(period-1)`. Bit-identical to chaining [`ema_seeded`] `S`
-/// times (same SMA seed, same FMA step), but one traversal and one allocation instead of
-/// `S` of each. `S` is a const generic so the per-bar `[f64; S]` cascade is scalarised
-/// into registers and unrolled (no per-stage memory traffic). For cascaded-EMA
-/// indicators (TRIX).
-pub fn ema_cascade<const S: usize>(data: &[f64], period: usize) -> Vec<f64> {
+/// The warm-up of `S` SMA-seeded smoothers in cascade — each stage's input is the
+/// previous stage's output; stage `j` SMA-seeds over the first `period` present values it
+/// sees (its predecessor's, from that one's seed), so it seeds `j·(period−1)` rows after
+/// the first present input — stepped with `step` (one of [`smoothing`]'s). Returns
+/// `(lookback, stages)` at the first row where all `S` are seeded, `lookback = start +
+/// S·(period−1)` (`start` = the first present input, after a leading-NaN warm-up of a
+/// derived input), or `None` if they never are. The one warm-up of every cascade — TRIX,
+/// DEMA, TEMA, T3 — and of their captured states.
+pub(crate) fn cascade_warmup<const S: usize>(
+    data: &[f64],
+    period: usize,
+    step: impl Fn(f64, f64) -> f64,
+) -> Option<(usize, [f64; S])> {
     let n = data.len();
-    let mut out = vec![f64::NAN; n];
     if period == 0 || S == 0 {
-        return out;
+        return None;
     }
-    let lookback = S * (period - 1);
+    let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
+    let lookback = start + S * (period - 1);
     if lookback >= n {
-        return out;
+        return None;
     }
-    let k = 2.0 / (period as f64 + 1.0);
     let mut e = [0.0f64; S];
     let mut acc = [0.0f64; S];
     let mut cnt = [0usize; S];
@@ -261,7 +253,7 @@ pub fn ema_cascade<const S: usize>(data: &[f64], period: usize) -> Vec<f64> {
         let mut x = raw;
         for s in 0..S {
             if seeded[s] {
-                e[s] = (x - e[s]).mul_add(k, e[s]);
+                e[s] = step(e[s], x);
                 x = e[s];
             } else if !x.is_nan() {
                 acc[s] += x;
@@ -278,13 +270,56 @@ pub fn ema_cascade<const S: usize>(data: &[f64], period: usize) -> Vec<f64> {
             }
         }
     }
+    Some((lookback, e))
+}
+
+/// Advance an `S`-deep cascade one bar from the carried stage vector `e`, each stage
+/// consuming the previous stage's *current* output, with `step`. The one lattice step of
+/// every cascade's full computation, capture and resumes.
+#[inline(always)]
+pub(crate) fn cascade_step<const S: usize>(e: &mut [f64; S], x: f64, step: impl Fn(f64, f64) -> f64) {
+    let mut x = x;
+    for stage in e.iter_mut() {
+        *stage = step(*stage, x);
+        x = *stage;
+    }
+}
+
+/// The stage vector of a cascade ([`cascade_warmup`] + [`cascade_step`]) after consuming
+/// all of `data`, or `None` if it never fully seeds.
+pub(crate) fn cascade_final<const S: usize>(
+    data: &[f64],
+    period: usize,
+    step: impl Fn(f64, f64) -> f64 + Copy,
+) -> Option<[f64; S]> {
+    let (lookback, mut e) = cascade_warmup::<S>(data, period, step)?;
+    for &x in &data[lookback + 1..] {
+        cascade_step(&mut e, x, step);
+    }
+    Some(e)
+}
+
+/// `S` SMA-seeded EMAs applied in cascade (each stage's input is the previous stage's
+/// output), fused into a single pass — a lattice where every bar advances all stages,
+/// stage `j` consuming stage `j-1`'s *current* output. Returns the final stage.
+///
+/// Staggered warmup ([`cascade_warmup`]): the output is valid from `S·(period-1)` rows
+/// after the first present input. Bit-identical to chaining [`ema_seeded`] `S` times
+/// (same SMA seed, same step), but one traversal and one allocation instead of `S` of
+/// each. `S` is a const generic so the per-bar `[f64; S]` cascade is scalarised into
+/// registers and unrolled (no per-stage memory traffic). For cascaded-EMA indicators
+/// (TRIX).
+pub fn ema_cascade<const S: usize>(data: &[f64], period: usize) -> Vec<f64> {
+    let n = data.len();
+    let mut out = vec![f64::NAN; n];
+    let k = smoothing::ema_k(period);
+    let step = |prev: f64, x: f64| smoothing::ema(prev, x, k);
+    let Some((lookback, mut e)) = cascade_warmup::<S>(data, period, step) else {
+        return out;
+    };
     out[lookback] = e[S - 1];
-    for (i, slot) in out.iter_mut().enumerate().take(n).skip(lookback + 1) {
-        let mut x = data[i];
-        for e in e.iter_mut() {
-            *e = (x - *e).mul_add(k, *e);
-            x = *e;
-        }
+    for (i, slot) in out.iter_mut().enumerate().skip(lookback + 1) {
+        cascade_step(&mut e, data[i], step);
         *slot = e[S - 1];
     }
     out
@@ -292,60 +327,20 @@ pub fn ema_cascade<const S: usize>(data: &[f64], period: usize) -> Vec<f64> {
 
 /// The seeded stage vector `[e0..e_{S-1}]` of [`ema_cascade`] *after consuming all of
 /// `data`* — the cascade state as of the last row, the seed a TRIX resume needs to
-/// continue at row `n`. `None` if the cascade never fully seeds (`lookback >= n`, the
-/// output is all-NaN → keep the full-recompute fallback). Runs the exact warmup +
-/// per-bar lattice of [`ema_cascade`], so the captured stages are bit-identical.
+/// continue at row `n`. `None` if the cascade never fully seeds (the output is all-NaN →
+/// keep the full-recompute fallback). Runs the exact warmup + per-bar lattice of
+/// [`ema_cascade`], so the captured stages are bit-identical.
 pub fn ema_cascade_final<const S: usize>(data: &[f64], period: usize) -> Option<[f64; S]> {
-    let n = data.len();
-    if period == 0 || S == 0 {
-        return None;
-    }
-    let lookback = S * (period - 1);
-    if lookback >= n {
-        return None;
-    }
-    let k = 2.0 / (period as f64 + 1.0);
-    let mut e = [0.0f64; S];
-    let mut acc = [0.0f64; S];
-    let mut cnt = [0usize; S];
-    let mut seeded = [false; S];
-    for &raw in &data[..=lookback] {
-        let mut x = raw;
-        for s in 0..S {
-            if seeded[s] {
-                e[s] = (x - e[s]).mul_add(k, e[s]);
-                x = e[s];
-            } else if !x.is_nan() {
-                acc[s] += x;
-                cnt[s] += 1;
-                if cnt[s] == period {
-                    e[s] = acc[s] / period as f64;
-                    seeded[s] = true;
-                    x = e[s];
-                } else {
-                    x = f64::NAN;
-                }
-            } else {
-                x = f64::NAN;
-            }
-        }
-    }
-    for &raw in &data[lookback + 1..] {
-        ema_cascade_step(&mut e, raw, k);
-    }
-    Some(e)
+    let k = smoothing::ema_k(period);
+    cascade_final(data, period, move |prev: f64, x: f64| smoothing::ema(prev, x, k))
 }
 
 /// Advance an `S`-deep EMA cascade one bar from the carried stage vector `e` (each stage
 /// consumes the previous stage's *current* output). The exact lattice step of
-/// [`ema_cascade`] / [`ema_cascade_final`], shared by the TRIX resume.
+/// [`ema_cascade`] / [`ema_cascade_final`], shared by the TRIX / DEMA / TEMA resumes.
 #[inline]
 pub fn ema_cascade_step<const S: usize>(e: &mut [f64; S], x: f64, k: f64) {
-    let mut x = x;
-    for stage in e.iter_mut() {
-        *stage = (x - *stage).mul_add(k, *stage);
-        x = *stage;
-    }
+    cascade_step(e, x, |prev: f64, x: f64| smoothing::ema(prev, x, k));
 }
 
 /// EWMA seeded with an explicit initial value (used by KDJ).

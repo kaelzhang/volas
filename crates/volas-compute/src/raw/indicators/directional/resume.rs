@@ -32,7 +32,7 @@ fn wilder_sum_final(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Opt
     }
     let pf = period as f64;
     for i in seed + 1..n {
-        s = wilder_sum_step(s, pf, term(i));
+        s = smoothing::wilder_sum(s, pf, term(i));
     }
     Some(s)
 }
@@ -51,7 +51,7 @@ fn wilder_sum_resume(
     let mut s = state;
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        s = wilder_sum_step(s, pf, term(i));
+        s = smoothing::wilder_sum(s, pf, term(i));
         out.push(s);
     }
     (out, s)
@@ -117,9 +117,9 @@ fn dm_tr_sums_final(
 #[inline]
 fn dm_tr_step(high: &[f64], low: &[f64], close: &[f64], i: usize, pf: f64, s: &mut [f64; 3]) {
     let (dp, dm) = dm1(high, low, i);
-    s[0] = wilder_sum_step(s[0], pf, dp);
-    s[1] = wilder_sum_step(s[1], pf, dm);
-    s[2] = wilder_sum_step(s[2], pf, tr_at(high, low, close, i));
+    s[0] = smoothing::wilder_sum(s[0], pf, dp);
+    s[1] = smoothing::wilder_sum(s[1], pf, dm);
+    s[2] = smoothing::wilder_sum(s[2], pf, tr_at(high, low, close, i));
 }
 
 /// Final +DI state `[sp, st]` (+DM and TR running sums) — pairs with [`plus_di_resume`].
@@ -267,7 +267,7 @@ pub fn adx_resume(
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
         dm_tr_step(high, low, close, i, pf, &mut s);
-        adx = adx_next(adx, pf, dx_val(s[0], s[1], s[2]));
+        adx = adx_next(adx, smoothing::Wilder::new(period), dx_val(s[0], s[1], s[2]));
         out.push(adx);
     }
     Some((out, vec![s[0], s[1], s[2], adx]))
@@ -323,7 +323,7 @@ pub fn adxr_resume(
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
         dm_tr_step(high, low, close, i, pf, &mut s);
-        adx = adx_next(adx, pf, dx_val(s[0], s[1], s[2]));
+        adx = adx_next(adx, smoothing::Wilder::new(period), dx_val(s[0], s[1], s[2]));
         // Slide the window forward to include adx[i], then `win[0]` is adx[i-(period-1)].
         win.remove(0);
         win.push(adx);
@@ -427,7 +427,7 @@ pub fn adx_resume_one(
     let pf = period as f64;
     let mut s = [state[0], state[1], state[2]];
     dm_tr_step(high, low, close, row, pf, &mut s);
-    let adx = adx_next(state[3], pf, dx_val(s[0], s[1], s[2]));
+    let adx = adx_next(state[3], smoothing::Wilder::new(period), dx_val(s[0], s[1], s[2]));
     next.copy_from_slice(&[s[0], s[1], s[2], adx]);
     Some(adx)
 }
@@ -457,7 +457,7 @@ pub fn adxr_resume_one(
     let mut s = [state[0], state[1], state[2]];
     dm_tr_step(high, low, close, row, pf, &mut s);
     // newest carried adx = adx[row-1] = state[3 + period - 1]; fold to get adx[row].
-    let adx = adx_next(state[3 + period - 1], pf, dx_val(s[0], s[1], s[2]));
+    let adx = adx_next(state[3 + period - 1], smoothing::Wilder::new(period), dx_val(s[0], s[1], s[2]));
     // Slide the window: next = [s, adx[row-(period-1)] .. adx[row]].
     next[..3].copy_from_slice(&s);
     next[3..3 + period - 1].copy_from_slice(&state[4..3 + period]);
@@ -480,7 +480,7 @@ pub fn plus_dm_resume_one(
         return None;
     }
     let pf = period as f64;
-    next[0] = wilder_sum_step(state[0], pf, dm1(high, low, row).0);
+    next[0] = smoothing::wilder_sum(state[0], pf, dm1(high, low, row).0);
     Some(next[0])
 }
 
@@ -499,6 +499,6 @@ pub fn minus_dm_resume_one(
         return None;
     }
     let pf = period as f64;
-    next[0] = wilder_sum_step(state[0], pf, dm1(high, low, row).1);
+    next[0] = smoothing::wilder_sum(state[0], pf, dm1(high, low, row).1);
     Some(next[0])
 }

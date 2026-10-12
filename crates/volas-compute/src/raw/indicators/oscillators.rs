@@ -1,4 +1,3 @@
-use ndarray::Array1;
 
 use super::av;
 use super::stochastic::{stoch_fastk, stochrsi_fastk};
@@ -6,6 +5,7 @@ use crate::accum::{Accumulator, Csum};
 use crate::guard::Slide;
 use crate::missing;
 use crate::raw::kernels::{self, canonical_zero};
+use crate::raw::smoothing;
 
 // ---------------------------------------------------------------------------
 // Overbought / oversold
@@ -260,121 +260,80 @@ pub fn stochrsi_resume(
     Some((out, new_state))
 }
 
-/// SMA-seeded Wilder average gain and average loss of `data`'s bar-to-bar changes
-/// — the shared core of RSI and CMO. Both outputs are NaN until the first smoothed
-/// value (at index `period`).
-fn wilder_gain_loss(data: &[f64], period: usize) -> (Array1<f64>, Array1<f64>) {
-    let n = data.len();
-    let delta = kernels::diff(av(data));
-    let mut gains = Array1::from_elem(n, f64::NAN);
-    let mut losses = Array1::from_elem(n, f64::NAN);
-    for i in 1..n {
-        let d = delta[i];
-        if d.is_nan() {
-            continue;
-        }
-        gains[i] = d.max(0.0);
-        losses[i] = (-d).max(0.0);
-    }
-    (
-        kernels::wilder(gains.view(), period),
-        kernels::wilder(losses.view(), period),
-    )
+/// Relative Strength Index (TA-Lib RSI): `100·(avgGain/(avgGain+avgLoss))` over the
+/// Wilder-averaged gains and losses ([`GainLoss`]). Single pass, single allocation: the
+/// averages are seeded from the first `period` changes, emitted from index `period`, then
+/// stepped per row.
+pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
+    gain_loss_series(close, period, GainLoss::rsi)
 }
 
-/// Relative Strength Index (TA-Lib RSI): `100·avgGain/(avgGain+avgLoss)`.
-///
-/// Single-pass / single-allocation: seed the Wilder average gain & loss as the SMA
-/// of the first `period` bar-to-bar changes, emit from index `period`, then
-/// Wilder-smooth in place. Bit-identical to `wilder(gains)` / `wilder(losses)` +
-/// combine (same seed sum, same recursion, same flat-window guard) but ~one sixth
-/// the memory traffic — no `diff` / `gains` / `losses` / two smoothed arrays.
-pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
+/// Chande Momentum Oscillator (TA-Lib CMO): `100·((avgGain−avgLoss)/(avgGain+avgLoss))`
+/// over the same Wilder-averaged gains and losses as RSI ([`GainLoss`]); a flat window
+/// (gain + loss = 0) yields 0. Lookback `period`. (Algebraically `2·RSI − 100`; computed
+/// directly in TA-Lib's order rather than derived from RSI.)
+pub fn cmo(close: &[f64], period: usize) -> Vec<f64> {
+    gain_loss_series(close, period, GainLoss::cmo)
+}
+
+/// The full RSI / CMO series: NaN before index `period`, then `value` of the averages.
+fn gain_loss_series(close: &[f64], period: usize, value: impl Fn(GainLoss) -> f64) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || n <= period {
         return out;
     }
-    let mut w = Wilder::rsi_seed(close, period);
-    out[period] = w.rsi();
+    let mut w = GainLoss::seed(close, period);
+    out[period] = value(w);
+    let avg = smoothing::Wilder::new(period);
     for i in (period + 1)..n {
-        w.rsi_step(close[i] - close[i - 1], period);
-        out[i] = w.rsi();
+        w.step(avg, close[i] - close[i - 1]);
+        out[i] = value(w);
     }
     out
 }
 
-/// Chande Momentum Oscillator (TA-Lib CMO): `100·(avgGain−avgLoss)/(avgGain+avgLoss)`
-/// over the same Wilder-smoothed gains/losses as RSI; a flat window (gain+loss = 0)
-/// yields 0. Lookback `period`. (Algebraically `2·RSI − 100`; computed directly so
-/// the flat-window guard matches TA-Lib exactly rather than inheriting RSI's.)
-pub fn cmo(close: &[f64], period: usize) -> Vec<f64> {
-    let (sg, sl) = wilder_gain_loss(close, period);
-    let n = close.len();
-    let mut result = vec![f64::NAN; n];
-    for i in 0..n {
-        if sg[i].is_nan() || sl[i].is_nan() {
-            continue;
-        }
-        result[i] = Wilder { gain: sg[i], loss: sl[i] }.cmo();
-    }
-    result
-}
-
 // --- RSI / CMO state-carry (additive; the full-recompute fallback stays correct) ---
 //
-// Both smooth bar-to-bar gains and losses with a Wilder average, so the carried state is
-// the pair `[avg_gain, avg_loss]` as of row `from-1`. A delta needs the prior close, so a
-// resume reads only `close[from-1..]`; `from == 0` returns `None` (falls back). NOTE the
-// two use DIFFERENT recurrences — `rsi` divides each step (`(avg·(p-1)+x)/p`) while `cmo`
-// goes through `kernels::wilder`'s fused `avg·a + x·b`. Each recurrence, seed and output
-// rule (with its flat-window guard) has one owner, [`Wilder`], which every path uses.
-// `*_final_state` returns `None` before the seed (`n <= period`), keeping the fallback.
+// Both average bar-to-bar gains and losses with TA-Lib's one recurrence (`ta_RSI.c` and
+// `ta_CMO.c` share it), so the carried state is the pair `[avg_gain, avg_loss]` as of row
+// `from-1`. A change needs the prior close, so a resume reads only `close[from-1..]`;
+// `from == 0` returns `None` (falls back). The seed, step and output rules have one
+// owner, [`GainLoss`], which every path uses. `*_final_state` returns `None` before the
+// seed (`n <= period`), keeping the fallback.
 
-/// The Wilder-smoothed average gain and loss behind RSI and CMO — the one owner of their
-/// seeds, steps and output rules.
+/// The Wilder-averaged gain and loss behind RSI and CMO — the one owner of their seed,
+/// step ([`smoothing::gain_loss_seed`], [`smoothing::Wilder::gain_loss`]) and output
+/// rules.
 #[derive(Clone, Copy, Debug)]
-struct Wilder {
+struct GainLoss {
     gain: f64,
     loss: f64,
 }
 
-impl Wilder {
+impl GainLoss {
     fn from_state(state: &[f64]) -> Option<Self> {
         let [gain, loss] = *state else { return None };
-        Some(Wilder { gain, loss })
+        Some(GainLoss { gain, loss })
     }
 
     fn state(self) -> Vec<f64> {
         vec![self.gain, self.loss]
     }
 
-    /// RSI's seed: the SMA of the first `period` gains / losses (deltas `1..=period`).
-    fn rsi_seed(close: &[f64], period: usize) -> Self {
-        let pf = period as f64;
-        let (mut gain, mut loss) = (0.0, 0.0);
-        for i in 1..=period {
-            let d = close[i] - close[i - 1];
-            if d > 0.0 {
-                gain += d;
-            } else {
-                loss -= d;
-            }
-        }
-        Wilder { gain: gain / pf, loss: loss / pf }
+    /// The seed from the first `period` changes (deltas `1..=period`).
+    fn seed(close: &[f64], period: usize) -> Self {
+        let (gain, loss) = smoothing::gain_loss_seed(period, |i| close[i] - close[i - 1]);
+        GainLoss { gain, loss }
     }
 
-    /// RSI's step `(avg·(p-1) + x) / p` over the delta `d`.
+    /// One step over the change `d`.
     #[inline(always)]
-    fn rsi_step(&mut self, d: f64, period: usize) {
-        let pf = period as f64;
-        let p1 = pf - 1.0;
-        let (gain, loss) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
-        self.gain = (self.gain * p1 + gain) / pf;
-        self.loss = (self.loss * p1 + loss) / pf;
+    fn step(&mut self, avg: smoothing::Wilder, d: f64) {
+        (self.gain, self.loss) = avg.gain_loss(self.gain, self.loss, d);
     }
 
-    /// RSI `100·g/(g+l)` (TA-Lib's form), a flat window (`g + l == 0`, exactly) giving 0.
+    /// RSI `100·(g/(g+l))` (TA-Lib's form), a flat window (`g + l == 0`, exactly) giving 0.
     /// TA-Lib tests `TA_IS_ZERO` (an absolute `1e-14`), which zeroes real movements of
     /// tiny-priced series; the exact test agrees with it on every flat window and keeps
     /// the scale-free value everywhere else (a deliberate, documented divergence).
@@ -388,52 +347,81 @@ impl Wilder {
         }
     }
 
-    /// CMO's seed: `kernels::wilder`'s SMA of the first `period` gains / losses.
-    fn cmo_seed(close: &[f64], period: usize) -> Self {
-        let pf = period as f64;
-        let (mut gain, mut loss) = (0.0, 0.0);
-        for i in 1..=period {
-            let d = close[i] - close[i - 1];
-            gain += d.max(0.0);
-            loss += (-d).max(0.0);
-        }
-        Wilder { gain: gain / pf, loss: loss / pf }
-    }
-
-    /// CMO's step: `kernels::wilder`'s fused `avg·a + x·b` over the delta `d`.
-    #[inline(always)]
-    fn cmo_step(&mut self, d: f64, period: usize) {
-        let pf = period as f64;
-        let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
-        self.gain = self.gain.mul_add(a, d.max(0.0) * b);
-        self.loss = self.loss.mul_add(a, (-d).max(0.0) * b);
-    }
-
-    /// CMO `100·(g−l)/(g+l)`, a flat window (`g + l == 0`, exactly) giving 0 — RSI's
-    /// zero test on the same denominator (see [`Wilder::rsi`]).
+    /// CMO `100·((g−l)/(g+l))` (TA-Lib's form), a flat window (`g + l == 0`, exactly)
+    /// giving 0 — RSI's zero test on the same denominator (see [`GainLoss::rsi`]).
     #[inline(always)]
     fn cmo(self) -> f64 {
         let denom = self.gain + self.loss;
         if denom == 0.0 {
             0.0
         } else {
-            100.0 * (self.gain - self.loss) / denom
+            100.0 * ((self.gain - self.loss) / denom)
         }
     }
+}
+
+/// The averages `[avg_gain, avg_loss]` after a full RSI / CMO compute, or `None` if they
+/// never seed (`period == 0 || n <= period`).
+fn gain_loss_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
+    let n = close.len();
+    if period == 0 || n <= period {
+        return None;
+    }
+    let mut w = GainLoss::seed(close, period);
+    let avg = smoothing::Wilder::new(period);
+    for i in (period + 1)..n {
+        w.step(avg, close[i] - close[i - 1]);
+    }
+    Some(w.state())
+}
+
+/// Resume RSI / CMO (`value`) from `state = [avg_gain, avg_loss]` over rows `[from, n)`.
+/// `None` at `from == 0`. Reads only `close[from-1..]`.
+fn gain_loss_resume(
+    close: &[f64],
+    period: usize,
+    from: usize,
+    state: &[f64],
+    value: impl Fn(GainLoss) -> f64,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    if from == 0 {
+        return None;
+    }
+    let mut w = GainLoss::from_state(state)?;
+    let avg = smoothing::Wilder::new(period);
+    let out = (from..close.len())
+        .map(|i| {
+            w.step(avg, close[i] - close[i - 1]);
+            value(w)
+        })
+        .collect();
+    Some((out, w.state()))
+}
+
+/// The single-row twin of [`gain_loss_resume`]: `value` at `row` continued from `state`
+/// (as of `row - 1`), the state as of `row` written into `next` — no allocation. `None`
+/// at `row == 0`, a `state` / `next` that is not two values, or `row` out of range.
+fn gain_loss_resume_one(
+    close: &[f64],
+    period: usize,
+    row: usize,
+    state: &[f64],
+    next: &mut [f64],
+    value: impl Fn(GainLoss) -> f64,
+) -> Option<f64> {
+    if row == 0 || next.len() != 2 || row >= close.len() {
+        return None;
+    }
+    let mut w = GainLoss::from_state(state)?;
+    w.step(smoothing::Wilder::new(period), close[row] - close[row - 1]);
+    next.copy_from_slice(&[w.gain, w.loss]);
+    Some(value(w))
 }
 
 /// Final RSI state `[avg_gain, avg_loss]` after a full [`rsi`] compute, or `None` if it
 /// never seeds (`period == 0 || n <= period`).
 pub fn rsi_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
-    let n = close.len();
-    if period == 0 || n <= period {
-        return None;
-    }
-    let mut w = Wilder::rsi_seed(close, period);
-    for i in (period + 1)..n {
-        w.rsi_step(close[i] - close[i - 1], period);
-    }
-    Some(w.state())
+    gain_loss_final_state(close, period)
 }
 
 /// Resume [`rsi`] from `state = [avg_gain, avg_loss]` over rows `[from, n)`. `None` at
@@ -444,31 +432,13 @@ pub fn rsi_resume(
     from: usize,
     state: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    if from == 0 {
-        return None;
-    }
-    let mut w = Wilder::from_state(state)?;
-    let out = (from..close.len())
-        .map(|i| {
-            w.rsi_step(close[i] - close[i - 1], period);
-            w.rsi()
-        })
-        .collect();
-    Some((out, w.state()))
+    gain_loss_resume(close, period, from, state, GainLoss::rsi)
 }
 
 /// Final CMO state `[avg_gain, avg_loss]` after a full [`cmo`] compute, or `None` if it
 /// never seeds.
 pub fn cmo_final_state(close: &[f64], period: usize) -> Option<Vec<f64>> {
-    let n = close.len();
-    if period == 0 || n <= period {
-        return None;
-    }
-    let mut w = Wilder::cmo_seed(close, period);
-    for i in (period + 1)..n {
-        w.cmo_step(close[i] - close[i - 1], period);
-    }
-    Some(w.state())
+    gain_loss_final_state(close, period)
 }
 
 /// Resume [`cmo`] from `state = [avg_gain, avg_loss]` over rows `[from, n)`. `None` at
@@ -479,17 +449,7 @@ pub fn cmo_resume(
     from: usize,
     state: &[f64],
 ) -> Option<(Vec<f64>, Vec<f64>)> {
-    if from == 0 {
-        return None;
-    }
-    let mut w = Wilder::from_state(state)?;
-    let out = (from..close.len())
-        .map(|i| {
-            w.cmo_step(close[i] - close[i - 1], period);
-            w.cmo()
-        })
-        .collect();
-    Some((out, w.state()))
+    gain_loss_resume(close, period, from, state, GainLoss::cmo)
 }
 
 /// Scalar single-row twin of [`rsi_resume`]: the RSI at `row` continued from
@@ -503,13 +463,7 @@ pub fn rsi_resume_one(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || next.len() != 2 || row >= close.len() {
-        return None;
-    }
-    let mut w = Wilder::from_state(state)?;
-    w.rsi_step(close[row] - close[row - 1], period);
-    next.copy_from_slice(&[w.gain, w.loss]);
-    Some(w.rsi())
+    gain_loss_resume_one(close, period, row, state, next, GainLoss::rsi)
 }
 
 /// Scalar single-row twin of [`cmo_resume`]: the CMO at `row` continued from
@@ -523,13 +477,7 @@ pub fn cmo_resume_one(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || next.len() != 2 || row >= close.len() {
-        return None;
-    }
-    let mut w = Wilder::from_state(state)?;
-    w.cmo_step(close[row] - close[row - 1], period);
-    next.copy_from_slice(&[w.gain, w.loss]);
-    Some(w.cmo())
+    gain_loss_resume_one(close, period, row, state, next, GainLoss::cmo)
 }
 
 /// Donchian middle channel (`(hhv + llv) / 2`).

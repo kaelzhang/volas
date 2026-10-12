@@ -1,62 +1,10 @@
 //! Cascaded EMA trend MAs: DEMA / TEMA / TRIMA / T3, sharing the staggered
-//! `cascade_warmup` and the EMA lattice resume.
+//! [`kernels::cascade_warmup`] and the cascade lattice resume.
 
-use crate::raw::indicators::trend::ma::ema_k;
 use crate::accum::Csum;
 use crate::guard::{ring_push, Slide};
 use crate::raw::kernels;
-
-/// Staggered warm-up for a cascade of `S` SMA-seeded EMAs (`k = 2/(period+1)`): each
-/// stage SMA-seeds over the first `period` finite values of its predecessor, so stage
-/// `j` seeds at `j·(period-1)`. Returns `(lookback, stage values at lookback)` where
-/// `lookback = S·(period-1)` is the first fully-valid bar, or `None` if it never seeds.
-/// Shared by DEMA/TEMA/T3 — their combine and steady-state recurrence differ, but the
-/// warm-up is identical (and bit-identical to chaining `ema_seeded` `S` times).
-fn cascade_warmup<const S: usize>(
-    data: &[f64],
-    period: usize,
-    k: f64,
-) -> Option<(usize, [f64; S])> {
-    let n = data.len();
-    if period == 0 {
-        return None;
-    }
-    // Account for a leading-NaN warm-up prefix (derived inputs — e.g. the stochastic
-    // %K line — warm up with NaN). The cascade seeds over the first finite values, so
-    // the last stage is ready at `start + S*(period-1)`, not from index 0; computing
-    // the lookback from index 0 returns unseeded stages (garbage) too early.
-    let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
-    let lookback = start + S * (period - 1);
-    if lookback >= n {
-        return None;
-    }
-    let mut e = [0.0f64; S];
-    let mut acc = [0.0f64; S];
-    let mut cnt = [0usize; S];
-    let mut seeded = [false; S];
-    for &raw in &data[..=lookback] {
-        let mut x = raw;
-        for s in 0..S {
-            if seeded[s] {
-                e[s] = (x - e[s]).mul_add(k, e[s]);
-                x = e[s];
-            } else if !x.is_nan() {
-                acc[s] += x;
-                cnt[s] += 1;
-                if cnt[s] == period {
-                    e[s] = acc[s] / period as f64;
-                    seeded[s] = true;
-                    x = e[s];
-                } else {
-                    x = f64::NAN;
-                }
-            } else {
-                x = f64::NAN;
-            }
-        }
-    }
-    Some((lookback, e))
-}
+use crate::raw::smoothing::{self, ema_k, Weighted};
 
 /// Double EMA: `2*EMA - EMA(EMA)` (TA-Lib DEMA). Lookback `2*(period-1)`. Single-pass
 /// lattice over the two cascaded EMAs (vs two `ema_seeded` passes + a combine);
@@ -64,15 +12,16 @@ fn cascade_warmup<const S: usize>(
 pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
-    let k = 2.0 / (period as f64 + 1.0);
-    let Some((lookback, e)) = cascade_warmup::<2>(data, period, k) else {
+    let k = ema_k(period);
+    let step = |prev: f64, x: f64| smoothing::ema(prev, x, k);
+    let Some((lookback, e)) = kernels::cascade_warmup::<2>(data, period, step) else {
         return out;
     };
     out[lookback] = 2.0 * e[0] - e[1];
     let (mut e0, mut e1) = (e[0], e[1]);
     for i in (lookback + 1)..n {
-        e0 = (data[i] - e0).mul_add(k, e0);
-        e1 = (e0 - e1).mul_add(k, e1);
+        e0 = step(e0, data[i]);
+        e1 = step(e1, e0);
         out[i] = 2.0 * e0 - e1;
     }
     out
@@ -80,20 +29,21 @@ pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
 
 /// Triple EMA: `3*EMA - 3*EMA(EMA) + EMA(EMA(EMA))` (TA-Lib TEMA). Lookback
 /// `3*(period-1)`. Single-pass lattice over the three cascaded EMAs; bit-identical to
-/// `3·e1 − 3·e2 + e3`.
+/// TA-Lib's `e3 + ((3·e1) − (3·e2))` (the sum commutes).
 pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
-    let k = 2.0 / (period as f64 + 1.0);
-    let Some((lookback, e)) = cascade_warmup::<3>(data, period, k) else {
+    let k = ema_k(period);
+    let step = |prev: f64, x: f64| smoothing::ema(prev, x, k);
+    let Some((lookback, e)) = kernels::cascade_warmup::<3>(data, period, step) else {
         return out;
     };
     out[lookback] = 3.0 * e[0] - 3.0 * e[1] + e[2];
     let (mut e0, mut e1, mut e2) = (e[0], e[1], e[2]);
     for i in (lookback + 1)..n {
-        e0 = (data[i] - e0).mul_add(k, e0);
-        e1 = (e0 - e1).mul_add(k, e1);
-        e2 = (e1 - e2).mul_add(k, e2);
+        e0 = step(e0, data[i]);
+        e1 = step(e1, e0);
+        e2 = step(e2, e1);
         out[i] = 3.0 * e0 - 3.0 * e1 + e2;
     }
     out
@@ -177,40 +127,67 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     ma(&ma(data, a, origin), b, origin)
 }
 
+/// T3's arithmetic (TA-Lib `ta_T3.c`): the weighted EMA form `(k·x) + ((1 − k)·e)` of
+/// its six stages ([`Weighted`] — T3's own form, not `ta_EMA.c`'s) and the
+/// `vfactor`-derived combine coefficients `c1=-v³`, `c2=3(v²−c1)`, `c3=-6v²−3(v−c1)`,
+/// `c4=1+3v−c1+3v²`, computed in TA-Lib's float order. The one owner for the full
+/// computation, its captured state and its resumes.
+#[derive(Clone, Copy)]
+struct T3 {
+    stage: Weighted,
+    c: [f64; 4],
+}
+
+impl T3 {
+    fn new(period: usize, vfactor: f64) -> Self {
+        let v2 = vfactor * vfactor;
+        let c1 = -(v2 * vfactor);
+        let c2 = 3.0 * (v2 - c1);
+        let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
+        let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
+        T3 { stage: t3_stage(period), c: [c1, c2, c3, c4] }
+    }
+
+    /// `c1·e6 + c2·e5 + c3·e4 + c4·e3` over the stages `e = [e1..e6]`.
+    #[inline(always)]
+    fn combine(&self, e: &[f64; 6]) -> f64 {
+        let [c1, c2, c3, c4] = self.c;
+        c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2]
+    }
+
+    /// Advance the six stages by `x` and combine them.
+    #[inline(always)]
+    fn advance(&self, e: &mut [f64; 6], x: f64) -> f64 {
+        let stage = self.stage;
+        kernels::cascade_step(e, x, move |prev: f64, x: f64| stage.step(prev, x));
+        self.combine(e)
+    }
+}
+
+/// The step of each T3 stage over `period`: `k = 2/(period + 1)` in the weighted form.
+fn t3_stage(period: usize) -> Weighted {
+    Weighted::new(ema_k(period))
+}
+
 /// Tillson T3 (TA-Lib T3): `c1·e6 + c2·e5 + c3·e4 + c4·e3` over six cascaded
-/// SMA-seeded EMAs, with `vfactor`-derived coefficients `c1=-v³`, `c2=3(v²−c1)`,
-/// `c3=-6v²−3(v−c1)`, `c4=1+3v−c1+3v²` (computed in TA-Lib's exact float order).
-/// Default period 5, vfactor 0.7; lookback `6·(period-1)`.
+/// SMA-seeded EMAs in TA-Lib's arithmetic ([`T3`]). Default period 5, vfactor 0.7;
+/// lookback `6·(period-1)`.
 pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
-    let v2 = vfactor * vfactor;
-    let c1 = -(v2 * vfactor);
-    let c2 = 3.0 * (v2 - c1);
-    let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
-    let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
-    let k = 2.0 / (period as f64 + 1.0);
-    // Single-pass lattice instead of six sequential `ema_seeded` passes: the six EMAs
-    // cascade (stage j consumes stage j-1's *current* output) so they share one
-    // staggered-warmup traversal ([`cascade_warmup`]); the steady state then advances a
-    // six-deep FMA chain per bar (TA-Lib's lattice) and emits the combine in place.
-    // Bit-identical to the six-call form.
-    let Some((lookback, e)) = cascade_warmup::<6>(data, period, k) else {
+    let t3 = T3::new(period, vfactor);
+    let stage = t3.stage;
+    // Single-pass lattice instead of six sequential passes: the six stages cascade
+    // (stage j consumes stage j-1's *current* output) so they share one
+    // staggered-warmup traversal ([`kernels::cascade_warmup`]); the steady state then
+    // advances the six-deep chain per bar (TA-Lib's lattice) and emits the combine in
+    // place.
+    let Some((lookback, mut e)) = kernels::cascade_warmup::<6>(data, period, |p, x| stage.step(p, x)) else {
         return out;
     };
-    out[lookback] = c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2];
-    // Steady state: all six stages seeded. The cascade is inherently sequential (a
-    // six-deep FMA dependency chain per bar, exactly as in TA-Lib's lattice), so we
-    // unroll it into registers and emit the combine in the same pass.
-    let (mut e0, mut e1, mut e2, mut e3, mut e4, mut e5) = (e[0], e[1], e[2], e[3], e[4], e[5]);
+    out[lookback] = t3.combine(&e);
     for i in (lookback + 1)..n {
-        e0 = (data[i] - e0).mul_add(k, e0);
-        e1 = (e0 - e1).mul_add(k, e1);
-        e2 = (e1 - e2).mul_add(k, e2);
-        e3 = (e2 - e3).mul_add(k, e3);
-        e4 = (e3 - e4).mul_add(k, e4);
-        e5 = (e4 - e5).mul_add(k, e5);
-        out[i] = c1 * e5 + c2 * e4 + c3 * e3 + c4 * e2;
+        out[i] = t3.advance(&mut e, data[i]);
     }
     out
 }
@@ -268,13 +245,13 @@ pub fn tema_resume(
 
 /// Final T3 state `[e0..e5]`, or `None` if unseeded. Pairs with [`t3_resume`].
 pub fn t3_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
-    let e = kernels::ema_cascade_final::<6>(data, period)?;
+    let stage = t3_stage(period);
+    let e = kernels::cascade_final::<6>(data, period, move |p: f64, x: f64| stage.step(p, x))?;
     Some(e.to_vec())
 }
 
 /// Resume [`t3`] from `state = [e0..e5]` over rows `[from, n)`, bit-identical to a full
-/// recompute (the same six-deep lattice + `c1·e5 + c2·e4 + c3·e3 + c4·e2` combine, with
-/// `vfactor`-derived coefficients in TA-Lib's float order). Reads only `data[from..]`.
+/// recompute (the same six-deep lattice and combine, [`T3`]). Reads only `data[from..]`.
 pub fn t3_resume(
     data: &[f64],
     period: usize,
@@ -282,19 +259,10 @@ pub fn t3_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
-    let v2 = vfactor * vfactor;
-    let c1 = -(v2 * vfactor);
-    let c2 = 3.0 * (v2 - c1);
-    let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
-    let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
-    let k = ema_k(period);
+    let t3 = T3::new(period, vfactor);
     let n = data.len();
     let mut e = [state[0], state[1], state[2], state[3], state[4], state[5]];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
-    for &x in &data[from..n] {
-        kernels::ema_cascade_step(&mut e, x, k);
-        out.push(c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2]);
-    }
+    let out = data[from..n].iter().map(|&x| t3.advance(&mut e, x)).collect();
     (out, e.to_vec())
 }
 
@@ -340,10 +308,9 @@ pub fn tema_resume_one(
 }
 
 /// Scalar single-row twin of [`t3_resume`]: the value at `row` from `state = [e0..e5]`,
-/// zero-alloc and bit-identical to one Vec-kernel iteration (same six-deep
-/// `ema_cascade_step` lattice + `c1·e5 + c2·e4 + c3·e3 + c4·e2` combine, with the
-/// `vfactor`-derived coefficients in TA-Lib's exact float order). State is as-of `row-1`;
-/// the cascade as of `row` is written into `next`.
+/// zero-alloc and bit-identical to one Vec-kernel iteration (the same [`T3`] lattice
+/// step and combine). State is as-of `row-1`; the cascade as of `row` is written into
+/// `next`.
 pub fn t3_resume_one(
     data: &[f64],
     period: usize,
@@ -356,14 +323,8 @@ pub fn t3_resume_one(
         return None;
     };
     let x = *data.get(row)?;
-    let v2 = vfactor * vfactor;
-    let c1 = -(v2 * vfactor);
-    let c2 = 3.0 * (v2 - c1);
-    let c3 = -6.0 * v2 - 3.0 * (vfactor - c1);
-    let c4 = 1.0 + 3.0 * vfactor - c1 + 3.0 * v2;
     *e = st;
-    kernels::ema_cascade_step(e, x, ema_k(period));
-    Some(c1 * e[5] + c2 * e[4] + c3 * e[3] + c4 * e[2])
+    Some(T3::new(period, vfactor).advance(e, x))
 }
 
 

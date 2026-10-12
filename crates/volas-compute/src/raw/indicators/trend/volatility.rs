@@ -3,6 +3,7 @@
 use crate::missing;
 use crate::raw::indicators::av;
 use crate::raw::kernels;
+use crate::raw::smoothing;
 
 /// True Range (TA-Lib TRANGE): [`tr_at`] at every row; row 0 has no prior close, so
 /// it has no TR (NaN).
@@ -62,7 +63,7 @@ pub fn natr_value(atr: f64, close: f64) -> f64 {
 // ATR is the SMA-seeded Wilder *average* of True Range, and NATR rescales it by price.
 // The carried state is the running ATR `[atr_{from-1}]`. `tr` at bar `i` reads the prior
 // close, so a resume reads only `high/low/close[from-1..]`; the steady-state step is the
-// exact fused `prev·a + tr·b` of `kernels::wilder`. A resume at `from == 0` (no prior bar)
+// exact Wilder step of `kernels::wilder` ([`smoothing::Wilder`]). A resume at `from == 0` (no prior bar)
 // returns `None` and falls back. `*_final_state` returns `None` before ATR seeds (the
 // column is all-NaN), so the caller keeps the correct fallback.
 
@@ -94,12 +95,11 @@ pub fn atr_resume(
         return None;
     }
     let n = high.len();
-    let pf = period as f64;
-    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
+    let wilder = smoothing::Wilder::new(period);
     let mut atr = state[0];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        atr = atr.mul_add(a, tr_at(high, low, close, i) * b);
+        atr = wilder.step(atr, tr_at(high, low, close, i));
         out.push(atr);
     }
     Some((out, vec![atr]))
@@ -108,7 +108,7 @@ pub fn atr_resume(
 /// Scalar single-row twin of [`atr_resume`]: the Wilder ATR at `row` continued from
 /// `state = [atr_{row-1}]`, with the state as of `row` (`[atr_row]`) written into `next`
 /// — no allocation. Used by the single-bar append / live forming-row refresh.
-/// Bit-identical to `atr_resume` (the same fused step). `None` at `row == 0`, empty
+/// Bit-identical to `atr_resume` (the same step). `None` at `row == 0`, empty
 /// `state`, `next` not one value, or `row` out of range.
 pub fn atr_resume_one(
     high: &[f64],
@@ -123,9 +123,7 @@ pub fn atr_resume_one(
         return None;
     }
     let [slot] = next else { return None };
-    let pf = period as f64;
-    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
-    *slot = state[0].mul_add(a, tr_at(high, low, close, row) * b);
+    *slot = smoothing::Wilder::new(period).step(state[0], tr_at(high, low, close, row));
     Some(*slot)
 }
 

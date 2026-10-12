@@ -43,35 +43,22 @@ pub fn wilder_seed_bar(period: usize) -> Option<usize> {
     (period > 0).then(|| (period - 1).max(1))
 }
 
-/// One Wilder-sum step in TA-Lib's order `s − s/period + term` (`pf` = the period as
-/// `f64`), and at period 1 the term itself — TA-Lib's one-bar branch has no recurrence.
-/// The division stays: `s·(1 − 1/period) + term` rounds differently in the last bits and
-/// keeps an infinite sum infinite where TA-Lib's `inf − inf` is NaN. The one owner of the
-/// step for every directional sum and its resumes.
-#[inline(always)]
-pub(super) fn wilder_sum_step(s: f64, pf: f64, term: f64) -> f64 {
-    if pf == 1.0 { term } else { s - s / pf + term }
-}
+// Every directional sum and its resumes step with Wilder's running sum
+// ([`smoothing::wilder_sum`]); ADX averages DX with Wilder's average
+// ([`smoothing::Wilder`]) — TA-Lib's arithmetic, owned there.
+use crate::raw::smoothing;
 
-/// One step of ADX's Wilder average in TA-Lib's order `((adx·(p − 1)) + dx) / p`
-/// (`pf` = the period as `f64`), unfused like the C source. The one owner of the step
-/// for the full computation and the resumes.
-#[inline(always)]
-pub(super) fn adx_avg_step(adx: f64, pf: f64, dx: f64) -> f64 {
-    ((adx * (pf - 1.0)) + dx) / pf
-}
-
-/// Run `$body` with `$step` bound to [`wilder_sum_step`] for `$period`, the choice made
+/// Run `$body` with `$step` bound to [`smoothing::wilder_sum`] for `$period`, the choice made
 /// once: each arm is its own monomorphic fold, so a full computation's hot loop carries
 /// no per-bar period test.
 macro_rules! with_wilder_step {
     ($period:expr, |$step:ident| $body:expr) => {{
         let pf = $period as f64;
         if pf == 1.0 {
-            let $step = |s: f64, term: f64| wilder_sum_step(s, 1.0, term);
+            let $step = |s: f64, term: f64| smoothing::wilder_sum(s, 1.0, term);
             $body
         } else {
-            let $step = |s: f64, term: f64| wilder_sum_step(s, pf, term);
+            let $step = |s: f64, term: f64| smoothing::wilder_sum(s, pf, term);
             $body
         }
     }};
@@ -144,12 +131,13 @@ pub(super) fn dx_out(prev: f64, sp: f64, sm: f64, st: f64) -> f64 {
     dx_val(sp, sm, st).unwrap_or(prev)
 }
 
-/// ADX's average after a bar with DX `dx`: [`adx_avg_step`], and unchanged on a guarded
-/// bar (TA-Lib `TA_ADX` updates it only when both guards pass).
+/// ADX's average after a bar with DX `dx`: one step of Wilder's average `avg`
+/// (`((adx·(p − 1)) + dx) / p`), and unchanged on a guarded bar (TA-Lib `TA_ADX` updates
+/// it only when both guards pass).
 #[inline]
-pub(super) fn adx_next(adx: f64, pf: f64, dx: Option<f64>) -> f64 {
+pub(super) fn adx_next(adx: f64, avg: smoothing::Wilder, dx: Option<f64>) -> f64 {
     match dx {
-        Some(d) => adx_avg_step(adx, pf, d),
+        Some(d) => avg.step(adx, d),
         None => adx,
     }
 }
@@ -231,7 +219,7 @@ fn adx_fold(
     dm_tr_fold(high, low, close, period, |i, sp, sm, st| {
         let dx = dx_val(sp, sm, st);
         if i > first {
-            avg = adx_next(avg, pf, dx);
+            avg = adx_next(avg, smoothing::Wilder::new(period), dx);
         } else {
             sum += dx.unwrap_or(0.0);
             if i < first {
