@@ -2,6 +2,7 @@
 //! rows needed before an indicator produces a valid value.
 
 use crate::types::{ArgValue, Ast, Command, Node};
+use volas_compute::raw::indicators::generic_ma_lookback;
 
 /// A bound period / count / matype argument. Arguments are resolved + type-checked
 /// by `bind`, so every position is present — there is no default to re-apply here
@@ -10,37 +11,23 @@ fn arg(args: &[ArgValue], i: usize) -> usize {
     args[i].as_usize()
 }
 
-/// Lookback of a TA-Lib MA-type over `period` (mirrors `exec::ma_typed`): DEMA is
-/// `2·(period-1)`, TEMA `3·(period-1)`, KAMA `period`, T3 `6·(period-1)`, MAMA a
-/// fixed `32` (period-independent), and the rest (SMA/EMA/WMA/TRIMA) `period-1`.
-pub(crate) fn ma_lookback(period: usize, matype: usize) -> usize {
-    match matype {
-        3 => 2 * period.saturating_sub(1),
-        4 => 3 * period.saturating_sub(1),
-        6 => period,
-        7 => 32,
-        8 => 6 * period.saturating_sub(1),
-        _ => period.saturating_sub(1),
-    }
-}
-
 /// The command's own lookback (ignoring its series operands). Only ever called
 /// with a bound command name (every caller binds first), so every command has an
 /// arm and an unrecognized name is unreachable.
 pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
     match name {
         "ema" | "smma" => arg(args, 0).saturating_sub(1),
-        "ma" => ma_lookback(arg(args, 0), arg(args, 1)),
-        // apo/ppo warm up with the slower MA of the chosen type.
-        "apo" | "ppo" => ma_lookback(arg(args, 1), arg(args, 2)),
+        "ma" => generic_ma_lookback(arg(args, 0), arg(args, 1)),
+        // apo/ppo need both MAs: the later of the two warm-ups (either may be the longer).
+        "apo" | "ppo" => generic_ma_lookback(arg(args, 0), arg(args, 2)).max(generic_ma_lookback(arg(args, 1), arg(args, 2))),
         // mavp warms up over the maximum period's MA (args: min, max, matype).
-        "mavp" => ma_lookback(arg(args, 1), arg(args, 2)),
+        "mavp" => generic_ma_lookback(arg(args, 1), arg(args, 2)),
         "macdext" => {
-            let line = ma_lookback(arg(args, 0), arg(args, 1))
-                .max(ma_lookback(arg(args, 2), arg(args, 3)));
+            let line = generic_ma_lookback(arg(args, 0), arg(args, 1))
+                .max(generic_ma_lookback(arg(args, 2), arg(args, 3)));
             match sub {
                 None => line,
-                _ => line + ma_lookback(arg(args, 4), arg(args, 5)),
+                _ => line + generic_ma_lookback(arg(args, 4), arg(args, 5)),
             }
         }
         "wma" | "trima" => arg(args, 0).saturating_sub(1),
@@ -68,15 +55,18 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             None => 25,
             _ => 24 + arg(args, 0),
         },
+        // bbi = the mean of four SMAs: first value where the longest SMA's is, max − 1.
         "bbi" => arg(args, 0)
             .max(arg(args, 1))
             .max(arg(args, 2))
-            .max(arg(args, 3)),
+            .max(arg(args, 3))
+            .saturating_sub(1),
         "psy" => arg(args, 0).saturating_sub(1),
         // pvt / nvi / pvi are cumulative (lookback 0); like obv/ad they carry a running-line
         // state so append resumes in O(new rows) and continues past a slice (see exec_resume).
         "pvt" | "nvi" | "pvi" => 0,
-        "dpo" => arg(args, 0).saturating_sub(1),
+        // dpo reads the SMA (n−1) and the close n/2+1 bars back: the later of the two.
+        "dpo" => arg(args, 0).saturating_sub(1).max(arg(args, 0) / 2 + 1),
         "cmf" => arg(args, 0).saturating_sub(1),
         // chop's TR sum needs one prior close, so it warms up one bar past the window.
         "chop" => arg(args, 0),
@@ -87,12 +77,15 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         "mass_index" => 15 + arg(args, 0),
         "efi" => arg(args, 0),
         "tsi" => arg(args, 0) + arg(args, 1) - 1,
-        "crsi" => arg(args, 2) + 1,
+        // crsi averages RSI(close) (rsi_len), RSI(streak) (streak_len; the streak starts
+        // at bar 0) and the percent rank of ROC1 over rank_len prior values (rank_len+1).
+        "crsi" => arg(args, 0).max(arg(args, 1)).max(arg(args, 2) + 1),
         // bias ≡ ppo:1,N,0 — the slow SMA_N gates it (the fast SMA_1 has no warm-up).
         "bias" => arg(args, 0).saturating_sub(1),
-        // dma's DDD line ≡ apo:fast,slow,0 (slow SMA gates it); AMA adds its own SMA_M warm-up.
+        // dma's DDD line = SMA(fast) − SMA(slow) (the later of the two SMAs gates it); AMA adds
+        // its own SMA_M warm-up.
         "dma" => {
-            let line = arg(args, 1).saturating_sub(1);
+            let line = arg(args, 0).max(arg(args, 1)).saturating_sub(1);
             match sub {
                 None => line,
                 _ => line + arg(args, 2).saturating_sub(1),
@@ -108,7 +101,7 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             _ => arg(args, 0).saturating_sub(1),
         },
         // coppock: the longer ROC plus the WMA warm-up.
-        "coppock" => arg(args, 1) + arg(args, 0).saturating_sub(1),
+        "coppock" => arg(args, 1).max(arg(args, 2)) + arg(args, 0).saturating_sub(1),
         // relative_vigor: swma4 (3) + SMAₙ (n−1) = n+2; the signal adds another swma4 (3).
         "relative_vigor" => match sub {
             Some("signal") => arg(args, 0) + 5,
@@ -135,7 +128,8 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             match sub {
                 Some("tenkan") => t.saturating_sub(1),
                 Some("kijun") => k.saturating_sub(1),
-                Some("senkou_a") => k.saturating_sub(1) + k,
+                // senkou_a averages tenkan and kijun: the longer of the two, displaced.
+                Some("senkou_a") => t.max(k).saturating_sub(1) + k,
                 Some("senkou_b") => sb.saturating_sub(1) + k,
                 _ => 0,
             }
@@ -168,7 +162,9 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         "kdj" => arg(args, 0) * 3,
         "rsi" => arg(args, 0),
         "hv" => arg(args, 0),
-        "increase" | "repeat" => arg(args, 0).saturating_sub(1),
+        // increase:k ANDs k steps, each reading a value and its predecessor: k + 1 values.
+        "increase" => arg(args, 0),
+        "repeat" => arg(args, 0).saturating_sub(1),
         // style.<x>: candlestick patterns warm up over their candle-settings avg period
         // (from the compute registry); bullish/bearish need none. (`cdl` resolves here too.)
         "style" => sub
@@ -184,16 +180,16 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         // %K (lookback fastk-1) then matype-MA smoothing stage(s).
         "stoch" => {
             let base =
-                arg(args, 0).saturating_sub(1) + ma_lookback(arg(args, 1), arg(args, 2));
+                arg(args, 0).saturating_sub(1) + generic_ma_lookback(arg(args, 1), arg(args, 2));
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 3), arg(args, 4)),
+                Some("d") => base + generic_ma_lookback(arg(args, 3), arg(args, 4)),
                 _ => base,
             }
         }
         "stochf" => {
             let base = arg(args, 0).saturating_sub(1);
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 1), arg(args, 2)),
+                Some("d") => base + generic_ma_lookback(arg(args, 1), arg(args, 2)),
                 _ => base,
             }
         }
@@ -201,11 +197,12 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             // RSI lookback (period) + the %K window (fastk_period-1), then the d-line MA.
             let base = arg(args, 0) + arg(args, 1).saturating_sub(1);
             match sub {
-                Some("d") => base + ma_lookback(arg(args, 2), arg(args, 3)),
+                Some("d") => base + generic_ma_lookback(arg(args, 2), arg(args, 3)),
                 _ => base,
             }
         }
-        "plus_dm" | "minus_dm" => arg(args, 0).saturating_sub(1),
+        // ±DM seed at bar `period - 1`, but never bar 0 (period 1 seeds at bar 1).
+        "plus_dm" | "minus_dm" => volas_compute::raw::indicators::wilder_seed_bar(arg(args, 0)).unwrap_or(0),
         "plus_di" | "minus_di" | "dx" => arg(args, 0),
         "adx" => 2 * arg(args, 0) - 1,
         "adxr" => 3 * arg(args, 0) - 2,
@@ -226,7 +223,8 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
         // iii is pointwise (no warm-up); kcw warms with its slower component
         // (EMA(ema_period) vs ATR(atr_period)).
         "iii" => 0,
-        "kcw" => arg(args, 0).max(arg(args, 1)).saturating_sub(1),
+        // kcw = 2·mult·ATR/EMA: the EMA warms up at ema_period−1, the ATR at atr_period.
+        "kcw" => arg(args, 0).saturating_sub(1).max(arg(args, 1)),
         // a pivot is confirmed `rightbars` after a point needing `leftbars` of
         // history, so the first possible output is at bar left+right.
         "pivothigh" | "pivotlow" => arg(args, 0) + arg(args, 1),
@@ -420,13 +418,13 @@ mod tests {
     use super::lookback;
     use crate::parser::parse;
 
-    /// Every `own_lookback` arm (and every `ma_lookback` MA-type) must compute without
+    /// Every `own_lookback` arm (and every generic-MA type) must compute without
     /// panicking. `lookback` is only reached on column caching, so `df.exec`-based
     /// parity tests never touch it — this is its coverage.
     #[test]
     fn lookback_covers_every_arm() {
         let directives = [
-            // ma_lookback: every MA type (3 DEMA, 4 TEMA, 6 KAMA, 7 MAMA, 8 T3, _ rest)
+            // generic_ma_lookback: every MA type (3 DEMA, 4 TEMA, 6 KAMA, 7 MAMA, 8 T3, _ rest)
             "ma:5",
             "ma:5,1",
             "ma:5,3",

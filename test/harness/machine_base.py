@@ -74,11 +74,7 @@ BULK_SURFACES = {
 }
 
 
-# The (fast, slow) leading arguments of the two-EMA lines, with their defaults.
-_FAST_SLOW = re.compile(r'\b(macd|apo|ppo|dma)(?:\.\w+)?:(\d*)(?:,(\d*))?')
-_FAST_SLOW_DEFAULTS = {'macd': (12, 26), 'apo': (12, 26), 'ppo': (12, 26), 'dma': (10, 50)}
 _ULTOSC = re.compile(r'\bultosc:(\d*)(?:,(\d*))?(?:,(\d*))?')
-_SENKOU_A = re.compile(r'\bichimoku\.senkou_a:(\d*)(?:,(\d*))?')
 # A parenthesized single primary as a series (`@(rsi:5)`, `@(0)`): its parentheses
 # are dropped from the cached name.
 _PAREN_PRIMARY_SERIES = re.compile(
@@ -90,19 +86,11 @@ def triggers_ok(d: Directive) -> bool:
     text = d.text.lower()
     if contracts.avoids('nested-series-name') and _PAREN_PRIMARY_SERIES.search(text):
         return False
-    if contracts.avoids('fast-above-slow'):
-        for name, fast, slow in _FAST_SLOW.findall(text):
-            default_fast, default_slow = _FAST_SLOW_DEFAULTS[name]
-            if int(fast or default_fast) > int(slow or default_slow):
-                return False
     if contracts.avoids('ultosc-period-order'):
         for a, b, c in _ULTOSC.findall(text):
             periods = [int(a or 7), int(b or 14), int(c or 28)]
             if periods != sorted(periods):
                 return False
-    if contracts.avoids('ichimoku-tenkan-lookback'):
-        if any(int(t or 9) > int(k or 26) for t, k in _SENKOU_A.findall(text)):
-            return False
     families = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text)}
     return not (families & contracts.DIVERGENT_FAMILIES)
 

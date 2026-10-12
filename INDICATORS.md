@@ -70,7 +70,8 @@ bbi:<a>,<b>,<c>,<d>@<on>
 ```
 
 Calculates BBI (Bull and Bear Index), which is the average of `ma:3`, `ma:6`,
-`ma:12`, and `ma:24` by default.
+`ma:12`, and `ma:24` by default. Its first value is the longest average's, at row
+`max(a, b, c, d) − 1` (its lookback).
 
 - **a?** `int=3`
 - **b?** `int=6`
@@ -444,7 +445,9 @@ cmf:<period>@<high>,<low>,<close>,<volume>
 ```
 
 The `period`-bar sum of money-flow volume divided by the sum of volume — positive
-is buying pressure, negative is selling pressure.
+is buying pressure, negative is selling pressure. A bar without range (`high == low`,
+a limit bar) carries no money flow, as in TA-Lib's AD, instead of a `0/0` that would
+blank every window holding it.
 
 - **period?** `int=20`
 - **high? / low? / close? / volume?** `str` the input columns; default to the like-named frame columns.
@@ -717,7 +720,8 @@ wvad:<period>@<open>,<high>,<low>,<close>,<volume>
 
 A volume-weighted gauge of intraday buying vs selling power:
 `Σₙ( (C − O) / (H − L) × V )`. Positive means buyers dominated the open-to-close range,
-negative means sellers.
+negative means sellers. A bar without range (`high == low`) adds 0, the AD / CMF
+convention.
 
 - **period?** `int=24`
 - **open? / high? / low? / close? / volume?** `str` the input columns.
@@ -959,7 +963,8 @@ default, which is useful when comparing percentage change in a time series of
 prices.
 
 - **period?** `int=2` `2` means the start value and the end value of a two-period
-  window are compared.
+  window are compared. A start value of exactly zero gives NaN; any other start value,
+  however small, gives its change.
 - **on?** `str='close'` Which column or directive the calculation is based on.
 
 ```py

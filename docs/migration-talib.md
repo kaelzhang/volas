@@ -95,6 +95,46 @@ sum can decide differently. On prices quantised to a 0.1 tick this shows after a
 thousand bars (a few bars per pattern in twenty thousand); checked against rational
 arithmetic on the same float inputs, volas's decision is the exact one.
 
+## Deliberate divergences
+
+TA-Lib is the oracle for every TA-Lib-compatible directive; where volas departs from
+it, the departure is deliberate and listed here.
+
+- **Zero tests are exact.** TA-Lib's `TA_IS_ZERO` treats any `|x| < 1e-14` as zero, a
+  threshold in price units (MFI's is `total < 1.0`, in volume units). volas tests exact
+  zero in RSI and CMO (`avgGain + avgLoss`), PPO (the slow average), NATR (the close),
+  CORREL / BETA (the variances) and MFI (the money-flow total). Both give the same result
+  on a flat series; on a tiny-priced series (FX-scale returns, prices scaled by `1e-15`)
+  TA-Lib returns 0 where volas returns the value the same series has at any other scale.
+- **ULTOSC weights by position.** `ultosc:<short>,<medium>,<long>` gives 4/2/1 to the
+  arguments in the order written; TA-Lib sorts the periods ascending first. The two
+  agree whenever the arguments are in order.
+- **±DI at period 1** keeps the ×100 of every other period (TA-Lib's period-1 branch
+  drops it).
+- **MACD / MACDEXT lines** are the clean fast-minus-slow difference from each average's
+  own start; TA-Lib seeds them from an offset aligned to the signal line.
+- **Warm-up rows are NaN**, also for TA-Lib's integer outputs (HT_TRENDMODE, the
+  candlestick patterns) where TA-Lib writes 0.
+- **Stochastic %K lines start at their own first value.** TA-Lib delays %K to %D's first
+  row; volas publishes `stoch.k`, `stochf.k` and `stochrsi.k` as soon as they are known —
+  with the default arguments from row 6 instead of 8 (`stoch.k`), 4 instead of 6
+  (`stochf.k`) and 18 instead of 20 (`stochrsi.k`) — earlier by the `%D` average's warm-up.
+  Every value TA-Lib publishes is the same.
+- **NATR at period 1** is `TR / close · 100` like every other period; TA-Lib's period-1
+  branch returns the raw true range.
+- **The Hilbert transform** (`ht_*`, `mama`) follows TA-Lib's C source in plain arithmetic,
+  without fused multiply-add: the same value on every platform, bit-identical to a TA-Lib
+  build that does not fuse (the x86-64 wheels). A build that fuses (clang on arm64) agrees
+  to rounding; on flat or step input, where the dominant-cycle phase is rounding noise,
+  its phase may differ — between TA-Lib builds and platforms as well.
+- **±DM after an infinite move (period ≥ 2).** volas's Wilder sum folds
+  `s·(1 − 1/period) + term`, TA-Lib `s − s/period + term`: once an infinite movement has
+  entered, volas's sum stays infinite and TA-Lib's turns NaN — both lose the line. Tracked
+  to align with TA-Lib's order.
+
+Where TA-Lib's arguments are out of order, volas follows it: a `slow` period shorter
+than `fast` swaps the two averages in `macd`, `apo`, `ppo` and `macdext`.
+
 See also:
 
 - [TA-Lib example script](https://github.com/kaelzhang/volas/blob/main/examples/04_talib_migration.py)

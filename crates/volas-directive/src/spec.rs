@@ -455,7 +455,8 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("tsi", None) => (const { &[p(25), p(13)] }, &["close"]),
         ("crsi", None) => (const { &[p(3), p(2), p(100)] }, &["close"]),
         // Group E formula-equivalent wrappers (China-market names): bias ≡ ppo:1,N,0;
-        // dma's DDD line ≡ apo:fast,slow,0, with AMA = the M-period SMA of that line.
+        // dma's DDD line = SMA(fast) − SMA(slow), positional as 通达信 (≡ apo:fast,slow,0
+        // for fast ≤ slow), with AMA = the M-period SMA of that line.
         ("bias", None) => (const { &[p(6)] }, &["close"]),
         ("dma", None) => (const { &[p(10), p(50)] }, &["close"]),
         ("dma", Some("ama")) => (const { &[p(10), p(50), p(10)] }, &["close"]),
@@ -666,27 +667,24 @@ fn is_recursive_name(name: &str) -> bool {
 /// series starts.
 const ABSOLUTE_POSITION: &[&str] = &["maxindex", "minindex", "minmaxindex"];
 
-/// Whether a TA-Lib MA-type code selects a recursive moving average (EMA, DEMA, TEMA,
-/// KAMA, MAMA, T3 — not SMA, WMA or TRIMA).
-pub fn is_recursive_matype(matype: usize) -> bool {
-    matches!(matype, 1 | 3 | 4 | 6 | 7 | 8)
-}
-
 /// Whether a bound command is recursive: its value at a row depends on every row
 /// before it. A missing row of a recursive command's inputs does not exist for it —
 /// it runs on the complete rows only (see `volas_compute::missing`).
 pub fn is_recursive(name: &str, args: &[ArgValue]) -> bool {
-    let matypes: &[usize] = match name {
-        "ma" => &[1],
-        "apo" | "ppo" | "mavp" | "stochf" => &[2],
-        "macdext" => &[1, 3, 5],
-        "stoch" => &[2, 4],
+    // (period, matype) argument positions of each generic moving average; mavp's
+    // averages span the periods up to its maximum, so its maximum decides.
+    let averages: &[(usize, usize)] = match name {
+        "ma" => &[(0, 1)],
+        "apo" | "ppo" => &[(0, 2), (1, 2)],
+        "mavp" => &[(1, 2)],
+        "stochf" => &[(1, 2)],
+        "macdext" => &[(0, 1), (2, 3), (4, 5)],
+        "stoch" => &[(1, 2), (3, 4)],
         _ => return is_recursive_name(name),
     };
-    matypes
+    averages
         .iter()
-        .filter_map(|&i| args.get(i))
-        .any(|a| is_recursive_matype(a.as_usize()))
+        .any(|&(p, m)| args.get(p).zip(args.get(m)).is_some_and(|(p, m)| volas_compute::raw::indicators::is_recursive_generic_ma(p.as_usize(), m.as_usize())))
 }
 
 /// Whether a recursive command carries its history in a state a resume continues from

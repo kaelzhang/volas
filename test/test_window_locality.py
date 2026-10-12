@@ -169,7 +169,7 @@ RECURSIVE = {
 
 # Indicators that emit their first value from a partial first difference (as 通达信
 # does): they read one row more than `directive_lookback` reports.
-EXTRA_REACH = {"psy": 1, "increase": 1}
+EXTRA_REACH = {"psy": 1}
 # Indicators whose output is an absolute row position.
 ABSOLUTE_POSITION = {"maxindex", "minindex", "minmaxindex"}
 

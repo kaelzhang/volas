@@ -29,38 +29,73 @@ fn dm1(high: &[f64], low: &[f64], i: usize) -> (f64, f64) {
 
 use super::tr_at; // the one true-range term (missing when an input it reads is)
 
+/// The bar a Wilder sum over `period` seeds at: `period - 1`, but never bar 0 — the
+/// one-period term reads the prior bar, so bar 0 has none. Period 1 therefore seeds
+/// at bar 1 with that bar's own term (TA-Lib `PLUS_DM` / `MINUS_DM`: lookback 1, the
+/// raw one-bar movement). `None` for period 0. The one owner of that boundary — the
+/// ±DM kernels, their resumes and their lookback all read it.
+pub fn wilder_seed_bar(period: usize) -> Option<usize> {
+    (period > 0).then(|| (period - 1).max(1))
+}
+
+/// One Wilder-sum step `s·(1 − 1/period) + term` (`a = 1 − 1/period`), and at period 1
+/// (`a == 0`) the term itself — TA-Lib's one-bar branch has no recurrence, so an earlier
+/// infinite term cannot turn every later sum into `inf·0 = NaN`. The one owner of the
+/// step for every directional sum and its resumes.
+#[inline(always)]
+pub(super) fn wilder_sum_step(s: f64, a: f64, term: f64) -> f64 {
+    if a == 0.0 { term } else { s.mul_add(a, term) }
+}
+
+/// Run `$body` with `$step` bound to [`wilder_sum_step`] for `$period`, the choice made
+/// once: each arm is its own monomorphic fold, so a full computation's hot loop carries
+/// no per-bar period test.
+macro_rules! with_wilder_step {
+    ($period:expr, |$step:ident| $body:expr) => {{
+        let a = 1.0 - 1.0 / $period as f64;
+        if a == 0.0 {
+            let $step = |s: f64, term: f64| wilder_sum_step(s, 0.0, term);
+            $body
+        } else {
+            let $step = |s: f64, term: f64| wilder_sum_step(s, a, term);
+            $body
+        }
+    }};
+}
+
 /// Wilder "sum" smoothing of a one-period `term`: seed `= Σ term(i)` over bars
-/// `[1, period-1]`, placed at index `period-1`; then `s = s - s/period + term(i)`.
-/// NaN before index `period-1` — present from `period` rows on, like TA-Lib.
+/// `[1, seed]` placed at bar `seed` ([`wilder_seed_bar`]); then
+/// `s = s - s/period + term(i)`. NaN before the seed, like TA-Lib.
 fn wilder_sum(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Vec<f64> {
     let mut out = vec![f64::NAN; n];
-    if period == 0 || period > n {
+    let Some(seed) = wilder_seed_bar(period).filter(|&s| s < n) else {
         return out;
-    }
+    };
     let mut s = 0.0;
-    for i in 1..period {
+    for i in 1..=seed {
         s += term(i);
     }
-    out[period - 1] = s;
+    out[seed] = s;
     // `s - s/period + term` == `s*(1 - 1/period) + term`: precompute the factor and
     // fuse (mul_add), taking the per-element division off the recurrence's critical
     // path. Wilder smoothing is contractive, so the ~1e-16 reassociation decays —
     // within the 1e-9 parity tolerance. Speeds every directional indicator.
-    let a = 1.0 - 1.0 / period as f64;
-    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
-    for i in period..n {
-        s = s.mul_add(a, term(i));
-        out[i] = s;
-    }
+    with_wilder_step!(period, |step| {
+        #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
+        for i in seed + 1..n {
+            s = step(s, term(i));
+            out[i] = s;
+        }
+    });
     out
 }
 
-/// Wilder-smoothed +DM (TA-Lib PLUS_DM). Lookback `period-1`.
+/// Wilder-smoothed +DM (TA-Lib PLUS_DM). Lookback `period-1`, and 1 at period 1.
 pub fn plus_dm(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     wilder_sum(high.len(), period, |i| dm1(high, low, i).0)
 }
 
-/// Wilder-smoothed -DM (TA-Lib MINUS_DM). Lookback `period-1`.
+/// Wilder-smoothed -DM (TA-Lib MINUS_DM). Lookback `period-1`, and 1 at period 1.
 pub fn minus_dm(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     wilder_sum(high.len(), period, |i| dm1(high, low, i).1)
 }
@@ -144,16 +179,17 @@ fn dm_tr_sums(
     sp[period - 1] = p;
     sm[period - 1] = m;
     st[period - 1] = t;
-    let a = 1.0 - 1.0 / period as f64;
-    for i in period..n {
-        let (dp, dm) = dm1(high, low, i);
-        p = p.mul_add(a, dp);
-        m = m.mul_add(a, dm);
-        t = t.mul_add(a, tr_at(high, low, close, i));
-        sp[i] = p;
-        sm[i] = m;
-        st[i] = t;
-    }
+    with_wilder_step!(period, |step| {
+        for i in period..n {
+            let (dp, dm) = dm1(high, low, i);
+            p = step(p, dp);
+            m = step(m, dm);
+            t = step(t, tr_at(high, low, close, i));
+            sp[i] = p;
+            sm[i] = m;
+            st[i] = t;
+        }
+    });
     (sp, sm, st)
 }
 

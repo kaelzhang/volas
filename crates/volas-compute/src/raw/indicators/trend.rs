@@ -5,6 +5,7 @@
 //! `indicators::<name>` (and `indicators::trend::<name>`).
 
 mod cascade;
+mod generic;
 mod kama;
 mod ma;
 mod macd;
@@ -12,6 +13,7 @@ mod sar;
 mod volatility;
 
 pub use cascade::*;
+pub use generic::*;
 pub use kama::*;
 pub use ma::*;
 pub use macd::*;

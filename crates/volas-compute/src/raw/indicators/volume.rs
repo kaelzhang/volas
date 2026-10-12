@@ -2,6 +2,8 @@
 // Volume
 // ---------------------------------------------------------------------------
 
+use crate::missing;
+
 /// On Balance Volume (TA-Lib OBV): a running total that adds the bar's volume when
 /// `real` rises vs the prior bar, subtracts it when `real` falls, and is unchanged
 /// when flat. Seeded with `volume[0]`; lookback 0 (no warm-up).
@@ -17,15 +19,29 @@ pub fn obv(real: &[f64], volume: &[f64]) -> Vec<f64> {
     let mut prev = real[0];
     out.push(obv);
     for i in 1..n {
-        // Branchless direction sign (+1 up / -1 down / 0 flat): the up/down branch is
-        // unpredictable on real price data, so a misprediction-free form is faster.
-        // Bit-identical: `+1.0·v == +v`, `-1.0·v == -v`, `0·v == 0`.
-        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
-        obv += dir * volume[i];
+        obv = obv_step(obv, prev, real[i], volume[i]);
         out.push(obv);
         prev = real[i];
     }
     out
+}
+
+/// One OBV step (TA-Lib `ta_OBV.c`): add the bar's volume when `real` rose vs `prev`,
+/// subtract it when it fell, and leave the total unchanged when flat. The comparison
+/// selects the addend — `+volume`, `−volume`, or `−0.0` (`x + −0.0 == x` for every `x`,
+/// signed zeros included) — so a flat bar never multiplies its volume (`0·inf` would turn
+/// the line NaN for good), the selection compiles branch-free (the up / down outcome is
+/// unpredictable on real prices) and stays off the running total's dependency chain,
+/// which is one add per bar. The one owner of the step, shared by the full compute and
+/// every resume.
+#[inline(always)]
+fn obv_step(obv: f64, prev: f64, real: f64, volume: f64) -> f64 {
+    use std::hint::select_unpredictable;
+    let moved = select_unpredictable(real > prev, volume, -volume);
+    // not `real != prev`: an unordered (NaN) comparison is no move, as in TA-Lib
+    #[allow(clippy::double_comparisons)]
+    let ordered_move = real > prev || real < prev;
+    obv + select_unpredictable(ordered_move, moved, -0.0)
 }
 
 /// Final OBV state `[running_obv, prev_real]` after a full [`obv`] compute over
@@ -40,8 +56,7 @@ pub fn obv_final_state(real: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
     let mut obv = volume[0];
     let mut prev = real[0];
     for i in 1..n {
-        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
-        obv += dir * volume[i];
+        obv = obv_step(obv, prev, real[i], volume[i]);
         prev = real[i];
     }
     Some(vec![obv, prev])
@@ -107,8 +122,7 @@ pub fn obv_resume(
     let mut prev = state[1];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
-        obv += dir * volume[i];
+        obv = obv_step(obv, prev, real[i], volume[i]);
         out.push(obv);
         prev = real[i];
     }
@@ -168,16 +182,31 @@ pub fn adosc_resume(
     (out, a.state())
 }
 
-/// Money flow volume for one bar: `((close-low) - (high-close)) / (high-low) ·
-/// volume`, with a zero high-low range contributing nothing (TA-Lib's guard).
+/// A bar's range-normalised volume flow `location / (high − low) · volume` — the
+/// per-bar term of AD / ADOSC / CMF / III (`location` = the close location
+/// `(close − low) − (high − close)`, [`money_flow_volume`]) and of WVAD (`location` =
+/// `close − open`). A bar without a positive range carries no flow: TA-Lib AD's guard
+/// (`high − low > 0`, else 0), so a limit bar (`high == low`) adds 0 instead of 0/0 and
+/// does not blank the windows that hold it. Missing when an input is (the per-row term
+/// rule, [`missing::term`]): with a positive range a missing input propagates through
+/// the arithmetic; without one, the "no flow" branch would launder it, so that branch
+/// checks (a missing high or low leaves the range missing). The one owner of that
+/// convention.
 #[inline]
-fn money_flow_volume(high: f64, low: f64, close: f64, volume: f64) -> f64 {
+pub(super) fn range_flow(location: f64, high: f64, low: f64, volume: f64) -> f64 {
     let range = high - low;
     if range > 0.0 {
-        ((close - low) - (high - close)) / range * volume
+        location / range * volume
     } else {
-        0.0
+        missing::term(&[location, range, volume], 0.0)
     }
+}
+
+/// Money flow volume for one bar (TA-Lib AD's term): the close location
+/// `((close − low) − (high − close))` as a [`range_flow`].
+#[inline]
+pub(super) fn money_flow_volume(high: f64, low: f64, close: f64, volume: f64) -> f64 {
+    range_flow((close - low) - (high - close), high, low, volume)
 }
 
 /// Chaikin Accumulation/Distribution line (TA-Lib AD): the running total of each
@@ -264,20 +293,11 @@ impl Adosc {
 }
 
 /// Intraday Intensity Index (TradingView `ta.iii`, David Bostian): per-bar
-/// `((2·close - high - low) / (high - low)) · volume`. A zero-range bar
-/// (`high == low`) has no directional pressure, so it yields `0.0` (matching
-/// the `bop` range guard). No window — a pointwise transform.
+/// `((2·close - high - low) / (high - low)) · volume` — the close-location money flow
+/// of AD ([`money_flow_volume`]), so a bar without range yields `0.0` as there. No
+/// window — a pointwise transform.
 pub fn iii(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
-    (0..close.len())
-        .map(|i| {
-            let range = high[i] - low[i];
-            if range < 1e-14 {
-                0.0
-            } else {
-                (2.0 * close[i] - high[i] - low[i]) / range * volume[i]
-            }
-        })
-        .collect()
+    (0..close.len()).map(|i| money_flow_volume(high[i], low[i], close[i], volume[i])).collect()
 }
 
 
@@ -298,8 +318,7 @@ pub fn obv_resume_one(
         return None;
     }
     let prev = state[1];
-    let dir = ((real[row] > prev) as i8 - (real[row] < prev) as i8) as f64;
-    let obv = state[0] + dir * volume[row];
+    let obv = obv_step(state[0], prev, real[row], volume[row]);
     next.copy_from_slice(&[obv, real[row]]);
     Some(obv)
 }

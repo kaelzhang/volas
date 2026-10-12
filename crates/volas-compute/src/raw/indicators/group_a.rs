@@ -85,7 +85,8 @@ pub fn dpo(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
         .collect()
 }
 
-/// CMF Chaikin Money Flow: `sum_n(MFV) / sum_n(volume)`, `MFV = ((C-L)-(H-C))/(H-L) * V`.
+/// CMF Chaikin Money Flow: `sum_n(MFV) / sum_n(volume)`, `MFV = ((C-L)-(H-C))/(H-L) * V`
+/// — AD's money flow volume, so a bar without range carries no flow (0, not 0/0).
 /// Source: StockCharts / Fidelity — Chaikin Money Flow.
 pub fn cmf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let mfv: Vec<f64> = (0..close.len()).map(|i| mfv(high, low, close, volume, i)).collect();
@@ -625,10 +626,10 @@ pub fn mass_index_resume_one(
 // order, so a resume of one row at a time is bit-identical to recomputing the column.
 // ---------------------------------------------------------------------------
 
-/// One bar's money-flow volume, as [`cmf`] sums it.
+/// One bar's money-flow volume, as [`cmf`] sums it: AD's own term.
 #[inline]
 fn mfv(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize) -> f64 {
-    ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i]) * volume[i]
+    super::volume::money_flow_volume(high[i], low[i], close[i], volume[i])
 }
 
 /// [`cmf`]'s state after the rows: its two sums' states.
