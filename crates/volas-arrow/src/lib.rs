@@ -148,12 +148,12 @@ mod tests {
 
     #[test]
     fn i64_with_nulls_roundtrips() {
-        let col = Column::i64_with(vec![10, 0, 30], na_at(3, &[1]));
+        let col = Column::i64_with(vec![10, 0, 30], na_at(3, &[1])).unwrap();
         let arr = column_to_arrow(&col);
         assert_eq!(arr.null_count(), 1);
         assert_eq!(column_from_arrow(&arr).unwrap(), col);
         // a dense int column exports its buffer and re-imports it with no copy
-        let dense = Column::i64_with(vec![7, 8], Validity::dense());
+        let dense = Column::i64_with(vec![7, 8], Validity::dense()).unwrap();
         let exported = column_to_arrow(&dense);
         let arrow_ptr = exported.as_primitive::<Int64Type>().values().as_ptr();
         assert_eq!(dense.as_i64().unwrap().as_ptr(), arrow_ptr);
@@ -162,13 +162,13 @@ mod tests {
 
     #[test]
     fn bool_roundtrips_through_bitpacking() {
-        let col = Column::bool_with(vec![true, false, true], na_at(3, &[2]));
+        let col = Column::bool_with(vec![true, false, true], na_at(3, &[2])).unwrap();
         assert_eq!(column_from_arrow(&column_to_arrow(&col)).unwrap(), col);
     }
 
     #[test]
     fn str_roundtrip_borrows_the_byte_buffer() {
-        let col = Column::str_with(vec!["alpha".into(), "".into(), "ω".into()], na_at(3, &[1]));
+        let col = Column::str_with(vec!["alpha".into(), "".into(), "ω".into()], na_at(3, &[1])).unwrap();
         let data_ptr = match &col {
             Column::Str(sb, _) => sb.buffers().1.as_ptr(),
             _ => unreachable!(), // LCOV_EXCL_LINE
@@ -201,7 +201,7 @@ mod tests {
         let arr: ArrayRef = Arc::new(StringArray::from(vec!["a", "bc"]));
         assert_eq!(
             column_from_arrow(&arr).unwrap(),
-            Column::str_with(vec!["a".into(), "bc".into()], Validity::dense())
+            Column::str_with(vec!["a".into(), "bc".into()], Validity::dense()).unwrap()
         );
         // large_string offsets need no widening
         let large: ArrayRef = Arc::new(LargeStringArray::from(vec!["a", "bc"]));
@@ -209,13 +209,13 @@ mod tests {
     }
 
     fn col_str_dtype() -> volas_core::DType {
-        Column::str_with(vec![], Validity::dense()).dtype()
+        Column::str_with(vec![], Validity::dense()).unwrap().dtype()
     }
 
     #[test]
     fn boolean_and_timestamp_import_paths() {
         let b: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true), None]));
-        assert_eq!(column_from_arrow(&b).unwrap(), Column::bool_with(vec![true, false], na_at(2, &[1])));
+        assert_eq!(column_from_arrow(&b).unwrap(), Column::bool_with(vec![true, false], na_at(2, &[1])).unwrap());
         let ts: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![Some(5), None]));
         assert_eq!(column_from_arrow(&ts).unwrap(), Column::datetime(vec![5, i64::MIN]));
     }
@@ -251,7 +251,7 @@ mod tests {
         let i16: ArrayRef = Arc::new(Int16Array::from(vec![Some(1), None, Some(-3)]));
         assert_eq!(
             column_from_arrow(&i16).unwrap(),
-            Column::i64_with(vec![1, 0, -3], na_at(3, &[1]))
+            Column::i64_with(vec![1, 0, -3], na_at(3, &[1])).unwrap()
         );
         // every narrow / unsigned width widens to i64
         let i8: ArrayRef = Arc::new(Int8Array::from(vec![-5i8, 5]));
@@ -281,7 +281,7 @@ mod tests {
         let with_null: ArrayRef = Arc::new(UInt64Array::from(vec![None, Some(9u64)]));
         assert_eq!(
             column_from_arrow(&with_null).unwrap(),
-            Column::i64_with(vec![0, 9], na_at(2, &[0]))
+            Column::i64_with(vec![0, 9], na_at(2, &[0])).unwrap()
         );
     }
 
@@ -299,7 +299,7 @@ mod tests {
             Column::str_with(
                 vec!["AAPL".into(), "MSFT".into(), "AAPL".into(), "".into()],
                 na_at(4, &[3]),
-            )
+            ).unwrap()
         );
         // decimal256(_, 2): 150 -> 1.50 (lossy → f64), NA stays NaN
         let dec = Decimal256Array::from(vec![Some(i256::from_i128(150)), None])
@@ -318,7 +318,7 @@ mod tests {
         let sv: ArrayRef = Arc::new(StringViewArray::from(vec![Some("AAPL"), None, Some("MSFT")]));
         assert_eq!(
             column_from_arrow(&sv).unwrap(),
-            Column::str_with(vec!["AAPL".into(), "".into(), "MSFT".into()], na_at(3, &[1])),
+            Column::str_with(vec!["AAPL".into(), "".into(), "MSFT".into()], na_at(3, &[1])).unwrap(),
         );
         // a typeless `Null` column carries no dtype → an all-NA f64 column.
         let nulls: ArrayRef = Arc::new(NullArray::new(3));
@@ -370,9 +370,9 @@ mod tests {
     fn c_data_ffi_roundtrips_every_dtype() {
         let cols = [
             Column::f64(vec![1.0, f64::NAN, 3.0]),
-            Column::i64_with(vec![10, 0, 30], na_at(3, &[1])),
-            Column::bool_with(vec![true, false, true], na_at(3, &[2])),
-            Column::str_with(vec!["a".into(), "".into(), "cd".into()], na_at(3, &[1])),
+            Column::i64_with(vec![10, 0, 30], na_at(3, &[1])).unwrap(),
+            Column::bool_with(vec![true, false, true], na_at(3, &[2])).unwrap(),
+            Column::str_with(vec!["a".into(), "".into(), "cd".into()], na_at(3, &[1])).unwrap(),
             Column::datetime(vec![1_000, i64::MIN, 3_000]),
         ];
         for col in &cols {
@@ -393,8 +393,8 @@ mod tests {
     fn c_stream_roundtrips_a_named_frame() {
         let names = vec!["a".to_string(), "s".to_string()];
         let cols = vec![
-            Column::i64_with(vec![1, 2, 3], na_at(3, &[1])),
-            Column::str_with(vec!["x".into(), "y".into(), "z".into()], Validity::dense()),
+            Column::i64_with(vec![1, 2, 3], na_at(3, &[1])).unwrap(),
+            Column::str_with(vec!["x".into(), "y".into(), "z".into()], Validity::dense()).unwrap(),
         ];
         let mut stream = columns_to_c_stream(&names, &cols).unwrap();
         // SAFETY: `stream` is a fresh, valid C-Stream; the import moves it out.
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn c_data_schema_matches_the_column_dtype() {
-        let col = Column::i64_with(vec![1, 2], Validity::dense());
+        let col = Column::i64_with(vec![1, 2], Validity::dense()).unwrap();
         let schema = column_to_c_schema(&col).unwrap();
         assert_eq!(schema.format(), "l"); // Arrow C-Data format string for int64
     }
@@ -426,7 +426,7 @@ mod tests {
     fn c_data_capsule_pointers_roundtrip() {
         // The raw `*mut c_void` capsule-import path the Python `__arrow_c_array__` glue
         // uses — exercised here so coverage does not hinge on a pyarrow-backed pytest run.
-        let col = Column::i64_with(vec![10, 0, 30], na_at(3, &[1]));
+        let col = Column::i64_with(vec![10, 0, 30], na_at(3, &[1])).unwrap();
         let (mut array, schema) = column_to_c_data(&col).unwrap();
         // SAFETY: `array`/`schema` are a fresh, valid C-Data pair; the import moves `array`
         // out of its slot (leaving it empty/released) and borrows `schema`.
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn i32_with_nulls_roundtrips() {
-        let col = Column::i32_with(vec![1, 0, 3], na_at(3, &[1]));
+        let col = Column::i32_with(vec![1, 0, 3], na_at(3, &[1])).unwrap();
         assert_eq!(column_from_arrow(&column_to_arrow(&col)).unwrap(), col);
     }
 
@@ -488,7 +488,7 @@ mod tests {
         let arr: ArrayRef = Arc::new(StringArray::from(vec![Some("a"), None, Some("cd")]));
         assert_eq!(
             column_from_arrow(&arr).unwrap(),
-            Column::str_with(vec!["a".into(), "".into(), "cd".into()], na_at(3, &[1])),
+            Column::str_with(vec!["a".into(), "".into(), "cd".into()], na_at(3, &[1])).unwrap(),
         );
     }
 
@@ -530,8 +530,8 @@ mod tests {
     fn empty_columns_roundtrip_both_ways() {
         for col in [
             Column::f64(vec![]),
-            Column::i64_with(vec![], Validity::dense()),
-            Column::str_with(vec![], Validity::dense()),
+            Column::i64_with(vec![], Validity::dense()).unwrap(),
+            Column::str_with(vec![], Validity::dense()).unwrap(),
             Column::datetime(vec![]),
         ] {
             assert_eq!(column_from_arrow(&column_to_arrow(&col)).unwrap(), col);

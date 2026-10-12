@@ -3,57 +3,6 @@
 
 use super::*;
 
-// The per-dtype combine kernels behind `Column::combine_at`. `Max` / `Min` / `Sum`
-// match the batch reduce: `f*::max`/`min` drop a `NaN` operand (so a missing fine
-// bar is skipped, exactly like the fold), and the integer sum is checked — an overflow
-// is the `numeric::overflow` error, never a wrapped value, as in the batch reduce.
-// `Keep` never reaches here (combine_at returns early).
-fn combine_f64(op: CombineOp, acc: f64, x: f64) -> f64 {
-    match op {
-        CombineOp::Replace => x,
-        CombineOp::Max => acc.max(x),
-        CombineOp::Min => acc.min(x),
-        CombineOp::Sum => acc + x,
-        CombineOp::Keep => unreachable!(), // LCOV_EXCL_LINE (combine_at returns early on Keep)
-    }
-}
-
-fn combine_f32(op: CombineOp, acc: f32, x: f32) -> f32 {
-    match op {
-        CombineOp::Replace => x,
-        CombineOp::Max => acc.max(x),
-        CombineOp::Min => acc.min(x),
-        CombineOp::Sum => acc + x,
-        CombineOp::Keep => unreachable!(), // LCOV_EXCL_LINE (combine_at returns early on Keep)
-    }
-}
-
-fn combine_i64(op: CombineOp, acc: i64, x: i64) -> Option<i64> {
-    match op {
-        CombineOp::Replace => Some(x),
-        CombineOp::Max => Some(acc.max(x)),
-        CombineOp::Min => Some(acc.min(x)),
-        CombineOp::Sum => acc.checked_add(x),
-        CombineOp::Keep => unreachable!(), // LCOV_EXCL_LINE (combine_at returns early on Keep)
-    }
-}
-
-/// An integer fold's value in `dtype`'s range, or its overflow error.
-#[inline]
-fn fold_in_range<T: TryFrom<i64>>(v: Option<i64>, dtype: DType) -> Result<T> {
-    match v.and_then(|v| T::try_from(v).ok()) {
-        Some(v) => Ok(v),
-        None => Err(fold_overflow(dtype)),
-    }
-}
-
-/// The overflow error of an integer fold — off the per-bar hot path.
-#[cold]
-#[inline(never)]
-fn fold_overflow(dtype: DType) -> VolasError {
-    crate::numeric::overflow(dtype, "a time-frame fold")
-}
-
 impl Column {
     /// A contiguous `[start, end)` slice (a fresh buffer).
     pub fn slice(&self, start: usize, end: usize) -> Column {
@@ -61,10 +10,10 @@ impl Column {
             Column::F64(v) => Column::F64(v.slice(start, end)),
             Column::F32(v) => Column::F32(v.slice(start, end)),
             Column::Bool(v, val) => {
-                Column::bool_with(v[start..end].to_vec(), val.slice(start, end))
+                Column::bool_masked(v[start..end].to_vec(), val.slice(start, end))
             }
-            Column::I64(v, val) => Column::i64_with(v[start..end].to_vec(), val.slice(start, end)),
-            Column::I32(v, val) => Column::i32_with(v[start..end].to_vec(), val.slice(start, end)),
+            Column::I64(v, val) => Column::i64_masked(v[start..end].to_vec(), val.slice(start, end)),
+            Column::I32(v, val) => Column::i32_masked(v[start..end].to_vec(), val.slice(start, end)),
             Column::Str(v, val) => Column::Str(v.slice(start, end), val.slice(start, end)),
             Column::Datetime(v) => Column::datetime(v[start..end].to_vec()),
         }
@@ -76,13 +25,13 @@ impl Column {
             Column::F64(v) => Column::f64(idx.iter().map(|&i| v[i]).collect()),
             Column::F32(v) => Column::f32(idx.iter().map(|&i| v[i]).collect()),
             Column::Bool(v, val) => {
-                Column::bool_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
+                Column::bool_masked(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
             }
             Column::I64(v, val) => {
-                Column::i64_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
+                Column::i64_masked(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
             }
             Column::I32(v, val) => {
-                Column::i32_with(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
+                Column::i32_masked(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
             }
             // Gather straight into one contiguous `StrBuffer` (no intermediate
             // `Vec<String>`, so no per-cell allocation).
@@ -111,15 +60,15 @@ impl Column {
             Column::F32(v) => {
                 Column::f32(idx.iter().map(|p| p.map_or(f32::NAN, |i| v[i])).collect())
             }
-            Column::Bool(v, _) => Column::bool_with(
+            Column::Bool(v, _) => Column::bool_masked(
                 idx.iter().map(|p| p.is_some_and(|i| v[i])).collect(),
                 validity(),
             ),
-            Column::I64(v, _) => Column::i64_with(
+            Column::I64(v, _) => Column::i64_masked(
                 idx.iter().map(|p| p.map_or(0, |i| v[i])).collect(),
                 validity(),
             ),
-            Column::I32(v, _) => Column::i32_with(
+            Column::I32(v, _) => Column::i32_masked(
                 idx.iter().map(|p| p.map_or(0, |i| v[i])).collect(),
                 validity(),
             ),
@@ -283,9 +232,17 @@ impl Column {
         )
     }
 
-    /// Append another column of the same dtype, copy-on-write (grows in place
-    /// when the buffer is uniquely owned).
+    /// Append another column, copy-on-write (grows in place when the buffer is
+    /// uniquely owned). A column of the same dtype appends as-is (the live fast
+    /// path); another dtype converts to this one through the lossless owner
+    /// ([`convert_lossless`](Self::convert_lossless), contract #20) — `2.0` into an
+    /// int column appends `2`, `2.5` raises — so a frame append agrees with a dict /
+    /// row append. A failed conversion leaves `self` unchanged.
     pub fn append(&mut self, other: &Column) -> Result<()> {
+        if self.dtype() != other.dtype() {
+            let converted = other.convert_lossless(self.dtype()).map_err(|e| self.append_error(other, e))?;
+            return self.append(&converted);
+        }
         match (self, other) {
             (Column::F64(a), Column::F64(b)) => {
                 a.append(b);
@@ -319,22 +276,37 @@ impl Column {
                 a.make_mut().extend_from_slice(b);
                 Ok(())
             }
-            (s, o) => Err(VolasError::DType(format!(
-                "cannot append a {} column onto a {} column",
-                o.dtype(),
-                s.dtype()
-            ))),
+            _ => unreachable!("dtypes matched above"), // LCOV_EXCL_LINE
+        }
+    }
+
+    /// The error of appending `other`'s values that this column's dtype cannot hold
+    /// losslessly: the conversion's own kind (`DType` for an inexact value or a kind
+    /// mismatch, `Overflow` past the range), naming both dtypes.
+    #[cold]
+    pub(super) fn append_error(&self, other: &Column, e: VolasError) -> VolasError {
+        let ctx = format!("cannot append a {} column onto a {} column", other.dtype(), self.dtype());
+        match e {
+            VolasError::Overflow(why) => VolasError::Overflow(format!("{ctx}: {why}")),
+            VolasError::DType(why) => VolasError::DType(format!("{ctx}: {why}")),
+            other => other, // LCOV_EXCL_LINE (convert_lossless raises DType / Overflow only)
         }
     }
 
     /// Overwrite the last cell with `src[src_row]` — value and validity — in place: the
-    /// row appended under the last row's label replaces it. The dtypes must match, as
-    /// for [`append`](Self::append). A float write keeps the column's NaN fact.
+    /// row appended under the last row's label replaces it. Another dtype converts
+    /// losslessly first, exactly as for [`append`](Self::append). A float write keeps
+    /// the column's NaN fact.
     pub fn set_last_from(&mut self, src: &Column, src_row: usize) -> Result<()> {
         let n = self.len();
         let Some(last) = n.checked_sub(1) else {
             return Err(VolasError::Shape("no last row to replace".into()));
         };
+        if self.dtype() != src.dtype() {
+            let cell = src.slice(src_row, src_row + 1);
+            let converted = cell.convert_lossless(self.dtype()).map_err(|e| self.append_error(src, e))?;
+            return self.set_last_from(&converted, 0);
+        }
         match (self, src) {
             (Column::F64(a), Column::F64(b)) => a.set(last, b[src_row]),
             (Column::F32(a), Column::F32(b)) => a.set(last, b[src_row]),
@@ -355,13 +327,7 @@ impl Column {
                 a.set_last(b.get(src_row));
                 av.set(last, n, bv.is_valid(src_row));
             }
-            (s, o) => {
-                return Err(VolasError::DType(format!(
-                    "cannot replace a {} cell with a {} value",
-                    s.dtype(),
-                    o.dtype()
-                )))
-            }
+            _ => unreachable!("dtypes matched above"), // LCOV_EXCL_LINE
         }
         Ok(())
     }
@@ -393,9 +359,10 @@ impl Column {
                 v.append_repeated(f32::NAN, len);
                 Ok(())
             }
-            // The refresh path overwrites these placeholder rows on recompute, so a
-            // dense `false` keeps the validity simple (no lingering NA to clear).
-            Column::Bool(v, _) => {
+            // A placeholder is missing, never a present `false`; the refresh writes
+            // each row's value and presence over it.
+            Column::Bool(v, val) => {
+                val.extend_missing(v.len(), len);
                 v.make_mut().extend(std::iter::repeat_n(false, len));
                 Ok(())
             }
@@ -483,9 +450,15 @@ impl Column {
             }
             Validity::from_valid_iter(len, flags)
         };
+        // A numeric target takes its source through the lossless owner (contract
+        // #20): an int past float64's exact range, a non-integral float into an int,
+        // or a finite value past float32's range raises — never a rounded or
+        // saturated write; a missing source cell stays missing (`NaN` / NA).
+        let numeric = |to: DType| values.convert_lossless(to);
         match self {
             Column::F64(v) => {
-                let src = values.to_f64_vec(); // validity-aware: missing -> NaN
+                let src = numeric(DType::F64)?;
+                let src = src.as_f64().expect("converted to f64");
                 let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
@@ -493,31 +466,31 @@ impl Column {
                 Ok(Column::f64(nv))
             }
             Column::F32(v) => {
-                let src = values.to_f32_vec();
+                let src = numeric(DType::F32)?.to_f32_vec(); // already f32: a copy
                 let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
                 Ok(Column::f32(nv))
             }
-            // Int targets keep their dtype: `as_i*_vec` yields a 0 placeholder for a
-            // missing/`NaN` source (the presence is restored by `scatter_validity`)
-            // and errors on a present non-integral value — exactly the Series rule.
+            // Int targets keep their dtype: a missing source holds a 0 placeholder
+            // (its presence is stamped by `scatter_validity`).
             Column::I64(v, val) => {
-                let src = values.as_i64_vec()?;
+                let src = numeric(DType::I64)?;
+                let src = src.as_i64().expect("converted to i64");
                 let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
-                Ok(Column::i64_with(nv, scatter_validity(val)))
+                Ok(Column::i64_masked(nv, scatter_validity(val)))
             }
             Column::I32(v, val) => {
-                let src = values.as_i32_vec()?;
+                let src = numeric(DType::I32)?.as_i32_vec()?; // already i32: a copy
                 let mut nv = v.to_vec();
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
-                Ok(Column::i32_with(nv, scatter_validity(val)))
+                Ok(Column::i32_masked(nv, scatter_validity(val)))
             }
             Column::Bool(v, val) => {
                 let src = values.as_bool_vec()?;
@@ -525,7 +498,7 @@ impl Column {
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)];
                 }
-                Ok(Column::bool_with(nv, scatter_validity(val)))
+                Ok(Column::bool_masked(nv, scatter_validity(val)))
             }
             Column::Str(v, val) => {
                 let src = values.as_str_vec()?;
@@ -533,7 +506,7 @@ impl Column {
                 for (k, &p) in positions.iter().enumerate() {
                     nv[p] = src[pick(k)].clone();
                 }
-                Ok(Column::str_with(nv, scatter_validity(val)))
+                Ok(Column::str_masked(nv, scatter_validity(val)))
             }
             Column::Datetime(v) => {
                 let src = values.as_datetime_vec()?; // `NaT` (i64::MIN) is in-band missing
@@ -546,148 +519,31 @@ impl Column {
         }
     }
 
-    /// Fold `src[src_row]` into cell `row` in place, per `op` — the allocation-free
-    /// core of the live tf-fold's forming-bar update (the incremental dual of
-    /// [`crate::Agg::reduce`] over the period). Writes through `Buffer::make_mut`, so
-    /// it is O(1) on a uniquely-owned buffer (one copy-on-write after a slice). Only
-    /// numeric / datetime columns are supported — `Bool` / `Str` return a `DType`
-    /// error, and the caller (`fold_append`) falls back to the batch reduce for those.
-    ///
-    /// `Max` / `Min` / `Sum` keep the destination's validity (a forming aggregate is
-    /// always present, matching the batch reduce's all-valid result); `Replace`
-    /// (period `last`) copies the source cell's value AND validity.
-    pub fn combine_at(
-        &mut self,
-        row: usize,
-        op: CombineOp,
-        src: &Column,
-        src_row: usize,
-    ) -> Result<()> {
-        use CombineOp::*;
-        if matches!(op, Keep) {
-            return Ok(());
-        }
-        match self {
-            // `make_mut` forgets the column's NaN fact; a resume then checks its few
-            // rows directly (tracking it here would grow this per-bar hot path).
-            Column::F64(buf) => {
-                let s = src.get_f64(src_row);
-                let b = buf.make_mut();
-                b[row] = combine_f64(op, b[row], s);
-            }
-            Column::F32(buf) => {
-                let s = src.get_f64(src_row) as f32;
-                let b = buf.make_mut();
-                b[row] = combine_f32(op, b[row], s);
-            }
-            Column::I64(buf, val) => {
-                let s = src.get_i64(src_row);
-                let v = fold_in_range(combine_i64(op, buf[row], s), DType::I64)?;
-                let b = buf.make_mut();
-                let n = b.len();
-                b[row] = v;
-                if matches!(op, Replace) {
-                    val.set(row, n, src.is_valid(src_row));
-                }
-            }
-            Column::I32(buf, val) => {
-                let s = src.get_i64(src_row);
-                let v = fold_in_range(combine_i64(op, buf[row] as i64, s), DType::I32)?;
-                let b = buf.make_mut();
-                let n = b.len();
-                b[row] = v;
-                if matches!(op, Replace) {
-                    val.set(row, n, src.is_valid(src_row));
-                }
-            }
-            Column::Datetime(buf) => {
-                let s = src.get_i64(src_row);
-                let v = fold_in_range(combine_i64(op, buf[row], s), DType::Datetime)?;
-                buf.make_mut()[row] = v;
-            }
-            Column::Bool(_, _) | Column::Str(_, _) => {
-                return Err(VolasError::DType(
-                    "combine_at: only numeric / datetime columns can be folded in place".into(),
-                ))
-            }
-        }
-        Ok(())
-    }
-
-    /// Set cell `row` to the aggregate of the single value `src[src_row]` under `op`, in
-    /// place — the period's first bar, as the batch reduce
-    /// ([`crate::Agg`]-style `fold`) leaves it after one element: `Max` / `Min` fold it
-    /// into `−∞` / `+∞` (so a NaN first bar is skipped), `Sum` sums the one value, and
-    /// `Keep` / `Replace` (first / last) take it. [`combine_at`](Self::combine_at) then
-    /// folds each later bar, so the pair re-cumulates a period exactly, with no
-    /// allocation. Numeric / datetime only, as `combine_at`.
-    pub fn init_at(&mut self, row: usize, op: CombineOp, src: &Column, src_row: usize) -> Result<()> {
-        use CombineOp::*;
-        let take = matches!(op, Keep | Replace);
-        match self {
-            Column::F64(buf) => {
-                let s = src.get_f64(src_row);
-                let v = match op {
-                    Max => f64::NEG_INFINITY.max(s),
-                    Min => f64::INFINITY.min(s),
-                    Sum => std::iter::once(s).sum::<f64>(),
-                    Keep | Replace => s,
-                };
-                buf.set(row, v);
-            }
-            Column::F32(buf) => {
-                let s = src.get_f64(src_row) as f32;
-                let v = match op {
-                    Max => f32::NEG_INFINITY.max(s),
-                    Min => f32::INFINITY.min(s),
-                    Sum => std::iter::once(s).sum::<f32>(),
-                    Keep | Replace => s,
-                };
-                buf.set(row, v);
-            }
-            Column::I64(buf, val) => {
-                let n = buf.len();
-                buf.make_mut()[row] = src.get_i64(src_row);
-                val.set(row, n, !take || src.is_valid(src_row));
-            }
-            Column::I32(buf, val) => {
-                let n = buf.len();
-                buf.make_mut()[row] = fold_in_range(Some(src.get_i64(src_row)), DType::I32)?;
-                val.set(row, n, !take || src.is_valid(src_row));
-            }
-            Column::Datetime(buf) => buf.make_mut()[row] = src.get_i64(src_row),
-            Column::Bool(_, _) | Column::Str(_, _) => {
-                return Err(VolasError::DType(
-                    "init_at: only numeric / datetime columns can be folded in place".into(),
-                ))
-            }
-        }
-        Ok(())
-    }
-
-
-    // --- dtype-preserving numeric transforms (pandas 3.0) ---------------------
-    // Each dispatches the kernel over the column's element type so an int column
-    // stays int and computes natively (no f64 round-trip). A non-numeric column
-    // is a `DType` error.
-
-    /// Value equality where `NaN == NaN` (pandas `equals` semantics), unlike the
-    /// derived `PartialEq` (which uses IEEE `NaN != NaN`).
+    /// Value equality (pandas `equals`): the same dtype and length, missing in the
+    /// same positions, and equal present values. A missing cell is compared by its
+    /// presence only — never by the payload it happens to hold (two all-NA int
+    /// columns are equal whatever their placeholders) — and `NaN == NaN`, unlike the
+    /// derived structural `PartialEq`.
     pub fn equals(&self, other: &Column) -> bool {
+        let n = self.len();
+        if other.len() != n {
+            return false;
+        }
+        let cells = |same: &dyn Fn(usize) -> bool| {
+            (0..n).all(|i| match (self.is_valid(i), other.is_valid(i)) {
+                (true, true) => same(i),
+                (a, b) => a == b,
+            })
+        };
         match (self, other) {
-            (Column::F64(a), Column::F64(b)) => {
-                a.len() == b.len()
-                    && a.iter()
-                        .zip(b.iter())
-                        .all(|(x, y)| x == y || (x.is_nan() && y.is_nan()))
-            }
-            (Column::F32(a), Column::F32(b)) => {
-                a.len() == b.len()
-                    && a.iter()
-                        .zip(b.iter())
-                        .all(|(x, y)| x == y || (x.is_nan() && y.is_nan()))
-            }
-            _ => self == other,
+            (Column::F64(a), Column::F64(b)) => cells(&|i| a[i] == b[i]),
+            (Column::F32(a), Column::F32(b)) => cells(&|i| a[i] == b[i]),
+            (Column::I64(a, _), Column::I64(b, _)) => cells(&|i| a[i] == b[i]),
+            (Column::I32(a, _), Column::I32(b, _)) => cells(&|i| a[i] == b[i]),
+            (Column::Bool(a, _), Column::Bool(b, _)) => cells(&|i| a[i] == b[i]),
+            (Column::Str(a, _), Column::Str(b, _)) => cells(&|i| a.get(i) == b.get(i)),
+            (Column::Datetime(a), Column::Datetime(b)) => cells(&|i| a[i] == b[i]),
+            _ => false,
         }
     }
 }

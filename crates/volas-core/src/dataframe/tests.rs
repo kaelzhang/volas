@@ -100,8 +100,8 @@
         let na_df = DataFrame::new(
             vec!["i".into(), "b".into(), "t".into()],
             vec![
-                Column::i64_with(vec![1, 0, 3], crate::Validity::from_valid_iter(3, [true, false, true])),
-                Column::bool_with(vec![true, false, false], crate::Validity::from_valid_iter(3, [true, false, true])),
+                Column::i64_masked(vec![1, 0, 3], crate::Validity::from_valid_iter(3, [true, false, true])),
+                Column::bool_masked(vec![true, false, false], crate::Validity::from_valid_iter(3, [true, false, true])),
                 Column::datetime(vec![100, i64::MIN, 300]),
             ],
             None,

@@ -81,6 +81,13 @@ impl Bitmap {
     pub fn null_count(&self) -> usize {
         self.len - present_bits(&self.words)
     }
+
+    /// Grow by `count` missing (clear) bits — amortized O(count / 64): the words
+    /// past `len` are already clear.
+    fn grow_missing(&mut self, count: usize) {
+        self.len += count;
+        self.words.resize(words_for(self.len), 0);
+    }
 }
 
 /// Set bits across `words`, accumulated in `usize` — a bitmap may hold more than
@@ -162,6 +169,30 @@ impl Validity {
                 }
             }
         }
+    }
+
+    /// Grow the mask of a `len`-value column by `count` missing values, in place:
+    /// amortized O(count) on a uniquely-owned bitmap; a dense mask materializes its
+    /// bitmap once (O(len / 64)). No-op for `count == 0`.
+    pub fn extend_missing(&mut self, len: usize, count: usize) {
+        if count == 0 {
+            return;
+        }
+        match &mut self.0 {
+            Some(arc) => Arc::make_mut(arc).grow_missing(count),
+            None => {
+                let mut bm = Bitmap::all_valid(len);
+                bm.grow_missing(count);
+                self.0 = Some(Arc::new(bm));
+            }
+        }
+    }
+
+    /// Whether this validity masks exactly `len` values: a dense validity fits every
+    /// length; a bitmap must cover `len` bits — a shorter one would read past its
+    /// end, a longer one would count missing values the column does not have.
+    pub fn covers(&self, len: usize) -> bool {
+        self.0.as_ref().is_none_or(|bm| bm.len() == len)
     }
 
     /// Whether any value is missing (cheap: dense ⇒ false).

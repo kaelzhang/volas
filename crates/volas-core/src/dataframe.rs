@@ -94,6 +94,11 @@ impl DataFrame {
                     height
                 )));
             }
+            // a column assembled from its public parts may carry a mask of another
+            // length; the frame never admits one
+            if let Err(VolasError::Shape(why)) = c.check_layout() {
+                return Err(VolasError::Shape(format!("column \"{n}\": {why}")));
+            }
         }
         let index = match index {
             Some(ix) => {
@@ -599,8 +604,8 @@ impl DataFrame {
     /// buffer: each cell is combined through [`Column::combine_at`]. A single
     /// conservative cache invalidation follows (the forming row changed, so every
     /// cached directive recomputes on the next read), exactly like a positional
-    /// write. The caller guarantees every `op`'s column dtype is fold-eligible
-    /// (numeric / datetime); a `Bool` / `Str` column makes `combine_at` error.
+    /// write. The caller guarantees each `op` is supported for its column's dtype
+    /// ([`CombineOp::supports`]); an unsupported pair makes `combine_at` error.
     pub fn fold_forming_row(
         &mut self,
         row: usize,
@@ -667,15 +672,8 @@ impl DataFrame {
             }
             let from = if same { Some(pos) } else { src.column_pos(&self.names[pos]) };
             match from {
-                Some(j) if src.columns[j].dtype() == self.columns[pos].dtype() => {
-                    self.columns[pos].set_last_from(&src.columns[j], src_row)?
-                }
-                Some(j) => {
-                    // a differently typed value takes the column's dtype first
-                    let cell = src.columns[j].slice(src_row, src_row + 1);
-                    let cell = cell.cast(self.columns[pos].dtype())?;
-                    self.columns[pos].set_last_from(&cell, 0)?
-                }
+                // a differently typed value converts losslessly (as an append does)
+                Some(j) => self.columns[pos].set_last_from(&src.columns[j], src_row)?,
                 None => self.columns[pos].set_last_na(),
             }
         }

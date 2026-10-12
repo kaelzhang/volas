@@ -9,7 +9,7 @@ fn overflow<T: std::fmt::Debug>(r: Result<T>) -> bool {
 }
 
 fn na_i64(v: &[i64], valid: &[bool]) -> Column {
-    Column::i64_with(v.to_vec(), Validity::from_valid_iter(v.len(), valid.iter().copied()))
+    Column::i64_masked(v.to_vec(), Validity::from_valid_iter(v.len(), valid.iter().copied()))
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn a_missing_cell_payload_never_overflows() {
     assert!(na_i64(&[i64::MAX, 1, 1], &[false, true, true]).cumsum().is_ok());
     assert!(na_i64(&[i64::MAX, 2, 3], &[false, true, true]).cumprod().is_ok());
     assert!(na_i64(&[i64::MIN, -2], &[false, true]).abs().is_ok());
-    assert!(Column::i32_with(vec![i32::MIN, -2], Validity::from_valid_iter(2, [false, true]))
+    assert!(Column::i32_masked(vec![i32::MIN, -2], Validity::from_valid_iter(2, [false, true]))
         .abs()
         .is_ok());
 }

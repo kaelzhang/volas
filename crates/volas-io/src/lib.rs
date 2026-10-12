@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use volas_core::{datetime, Column, DataFrame, Result, Tz, Validity, VolasError};
+use volas_core::{datetime, Column, DataFrame, Result, Tz, VolasError};
 
 /// pandas's default missing-value tokens (`STR_NA_VALUES`). A numeric column
 /// with any of these (trimmed) entries upcasts to `f64` with `NaN`, exactly as
@@ -224,13 +224,8 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
         .all(|t| is_na(t) || t.parse::<i64>().is_ok())
         && trimmed.iter().any(|t| !is_na(t))
     {
-        let validity = Validity::from_valid_iter(trimmed.len(), trimmed.iter().map(|t| !is_na(t)));
-        return Column::i64_with(
-            trimmed
-                .iter()
-                .map(|t| if is_na(t) { 0 } else { t.parse().unwrap() })
-                .collect(),
-            validity,
+        return Column::i64_from_options(
+            trimmed.iter().map(|t| if is_na(t) { None } else { t.parse().ok() }),
         );
     }
     // f64: every cell is either missing (-> NaN) or a number float64 holds without
@@ -255,17 +250,15 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
     // present; an NA token is a missing bool (validity), never read as a literal.
     let is_bool = |t: &str| t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("false");
     if trimmed.iter().all(|t| is_na(t) || is_bool(t)) && trimmed.iter().any(|t| !is_na(t)) {
-        return Column::bool_with(
-            trimmed.iter().map(|t| !is_na(t) && t.eq_ignore_ascii_case("true")).collect(),
-            Validity::from_valid_iter(trimmed.len(), trimmed.iter().map(|t| !is_na(t))),
+        return Column::bool_from_options(
+            trimmed.iter().map(|t| (!is_na(t)).then(|| t.eq_ignore_ascii_case("true"))),
         );
     }
     // str: NA tokens (empty / `NA` / `null` / ...) become NA via the validity
     // bitmap — like pandas, and so a parse_dates column with blank cells parses
     // to NaT instead of failing on the "" placeholder. Present cells keep their
     // original (untrimmed) value.
-    let validity = Validity::from_valid_iter(cells.len(), trimmed.iter().map(|t| !is_na(t)));
-    Column::str_with(cells, validity)
+    Column::str_from_options(cells.iter().zip(&trimmed).map(|(c, t)| (!is_na(t)).then(|| c.clone())))
 }
 
 /// A present cell as the float64 it denotes, or `None` when it is not a number

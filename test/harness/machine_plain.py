@@ -95,12 +95,17 @@ class PlainMachine(FrameMachine):
         schema = self.store.schema
         rows, index = self._new_bars(2 if multi else 1, regime, '1m')
         if kind == 'dtype':
-            # One column flips float <-> int. While append atomicity is open only the
-            # first column may (it fails before any column grows); otherwise any.
+            # One column carries values of another dtype that its own cannot hold
+            # exactly (an int past float64's exact range, a fraction for an int), so
+            # the lossless append conversion raises. While append atomicity is open
+            # only the first column may (it fails before any column grows).
             numeric = [c for c in schema.columns if schema.dtype(c) in ('float64', 'float32', 'int64', 'int32')]
             col = numeric[0] if contracts.avoids('append-atomicity') else numeric[regime[1] % len(numeric)]
-            other = 'int64' if schema.dtype(col) in ('float64', 'float32') else 'float64'
-            bar = build.frame(schema, rows, index, dtypes={col: other})
+            n = len(rows)
+            lossy = (np.full(n, 2**53 + 1, dtype='int64') if schema.dtype(col) in ('float64', 'float32')
+                     else np.full(n, 0.5))
+            bar = build.frame(schema, rows, index)
+            bar[col] = lossy
             self.attempt(lambda: self.df.append(bar), expect_error=TypeError, label=f'append dtype {col}')
             return
         if kind == 'extra_column':

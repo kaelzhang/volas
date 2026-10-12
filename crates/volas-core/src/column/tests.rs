@@ -263,11 +263,11 @@ fn epoch_to_datetime_and_to_string_vec() {
         .epoch_to_datetime_rounded("s")
         .unwrap();
     assert!(!fnan_r.is_valid(0) && fnan_r.is_valid(1));
-    let ina = Column::i64_with(vec![0, 100], Validity::from_valid_iter(2, [false, true]))
+    let ina = Column::i64_masked(vec![0, 100], Validity::from_valid_iter(2, [false, true]))
         .epoch_to_datetime("s")
         .unwrap();
     assert!(!ina.is_valid(0) && ina.is_valid(1)); // NA-bit -> NaT, not epoch 0 -> 1970
-    let ina_r = Column::i64_with(vec![5, 0], Validity::from_valid_iter(2, [true, false]))
+    let ina_r = Column::i64_masked(vec![5, 0], Validity::from_valid_iter(2, [true, false]))
         .epoch_to_datetime_rounded("s")
         .unwrap();
     assert!(ina_r.is_valid(0) && !ina_r.is_valid(1));
@@ -705,9 +705,12 @@ fn f32_i32_columns() {
     let mut ii = Column::i32(vec![1]);
     ii.append(&Column::i32(vec![2])).unwrap();
     assert_eq!(ii, Column::i32(vec![1, 2]));
-    assert!(Column::f32(vec![1.0])
-        .append(&Column::i32(vec![1]))
-        .is_err());
+    // another dtype appends through the lossless conversion; a lossy value raises
+    let mut fa = Column::f32(vec![1.0]);
+    fa.append(&Column::i32(vec![2])).unwrap();
+    assert_eq!(fa, Column::f32(vec![1.0, 2.0]));
+    assert!(fa.append(&Column::i32(vec![16_777_217])).is_err()); // not a float32
+    assert_eq!(fa.len(), 2, "unchanged");
     let mut fm = Column::f32(vec![1.0]);
     fm.append_missing(2).unwrap();
     assert!(matches!(&fm, Column::F32(v) if v.len() == 3 && v[1].is_nan()));
@@ -778,7 +781,7 @@ fn take_optional_every_dtype() {
     let d = Column::datetime(vec![100, 200]).take_optional(&idx);
     assert!(d.is_valid(0) && !d.is_valid(1));
     // a Some(i) pointing at a missing source cell stays missing
-    let holey = Column::i64_with(vec![0, 7], crate::validity::Validity::from_valid_iter(2, [false, true]));
+    let holey = Column::i64_masked(vec![0, 7], crate::validity::Validity::from_valid_iter(2, [false, true]));
     let g = holey.take_optional(&[Some(0), Some(1)]);
     assert!(!g.is_valid(0) && g.is_valid(1));
 }
@@ -815,91 +818,11 @@ fn str_append_is_amortised_not_quadratic() {
 }
 
 #[test]
-fn get_i64_reads_every_dtype() {
+fn get_i64_reads_every_integer_like_dtype() {
     assert_eq!(Column::i64(vec![7]).get_i64(0), 7);
     assert_eq!(Column::i32(vec![7]).get_i64(0), 7);
     assert_eq!(Column::datetime(vec![7]).get_i64(0), 7);
-    assert_eq!(Column::f64(vec![7.9]).get_i64(0), 7);
-    assert_eq!(Column::f32(vec![7.9]).get_i64(0), 7);
     assert_eq!(Column::bool(vec![true]).get_i64(0), 1);
-    assert_eq!(Column::str(vec!["x".into()]).get_i64(0), 0);
-}
-
-#[test]
-fn combine_at_numeric_ops_in_place() {
-    // F64: Max / Min / Sum / Replace / Keep, against src = 5.0
-    let src = Column::f64(vec![5.0]);
-    for (op, want) in [
-        (CombineOp::Max, 5.0),
-        (CombineOp::Min, 3.0),
-        (CombineOp::Sum, 8.0),
-        (CombineOp::Replace, 5.0),
-        (CombineOp::Keep, 3.0),
-    ] {
-        let mut c = Column::f64(vec![3.0]);
-        c.combine_at(0, op, &src, 0).unwrap();
-        assert_eq!(c.get_f64(0), want, "f64 {op:?}");
-    }
-    // a NaN source is dropped by Max (matches the batch reduce's f64::max fold).
-    let mut c = Column::f64(vec![3.0]);
-    c.combine_at(0, CombineOp::Max, &Column::f64(vec![f64::NAN]), 0).unwrap();
-    assert_eq!(c.get_f64(0), 3.0);
-
-    // F32: every op (covers the combine_f32 kernel arms).
-    for (op, want) in [
-        (CombineOp::Max, 5.0),
-        (CombineOp::Min, 3.0),
-        (CombineOp::Sum, 8.0),
-        (CombineOp::Replace, 5.0),
-    ] {
-        let mut c = Column::f32(vec![3.0]);
-        c.combine_at(0, op, &Column::f32(vec![5.0]), 0).unwrap();
-        assert_eq!(c.get_f64(0), want, "f32 {op:?}");
-    }
-
-    // Datetime + I32: every op (covers the combine_i64 kernel arms across dtypes).
-    for (op, want) in [
-        (CombineOp::Max, 5),
-        (CombineOp::Min, 3),
-        (CombineOp::Sum, 8),
-        (CombineOp::Replace, 5),
-    ] {
-        let mut c = Column::datetime(vec![3]);
-        c.combine_at(0, op, &Column::datetime(vec![5]), 0).unwrap();
-        assert_eq!(c.get_i64(0), want, "datetime {op:?}");
-        let mut c = Column::i32(vec![3]);
-        c.combine_at(0, op, &Column::i32(vec![5]), 0).unwrap();
-        assert_eq!(c.get_i64(0), want, "i32 {op:?}");
-    }
-}
-
-#[test]
-fn combine_at_i64_replace_copies_validity() {
-    // Replace from a present source keeps the cell present...
-    let mut c = Column::i64(vec![1, 2]);
-    c.combine_at(1, CombineOp::Replace, &Column::i64(vec![9]), 0).unwrap();
-    assert_eq!(c.get_i64(1), 9);
-    assert!(c.is_valid(1));
-    // ...and from an NA source marks it missing (validity materialized).
-    let na = Column::i64_with(vec![0], Validity::from_valid_iter(1, [false]));
-    let mut c = Column::i64(vec![1, 2]);
-    c.combine_at(1, CombineOp::Replace, &na, 0).unwrap();
-    assert!(!c.is_valid(1));
-    // Sum keeps the destination present (all-valid result, like the batch reduce).
-    let mut c = Column::i64(vec![1, 2]);
-    c.combine_at(1, CombineOp::Sum, &Column::i64(vec![5]), 0).unwrap();
-    assert_eq!(c.get_i64(1), 7);
-    assert!(c.is_valid(1));
-}
-
-#[test]
-fn combine_at_rejects_non_numeric() {
-    assert!(Column::bool(vec![false])
-        .combine_at(0, CombineOp::Replace, &Column::bool(vec![true]), 0)
-        .is_err());
-    assert!(Column::str(vec!["a".into()])
-        .combine_at(0, CombineOp::Replace, &Column::str(vec!["b".into()]), 0)
-        .is_err());
 }
 
 #[test]
@@ -936,59 +859,4 @@ fn binary_ops_reject_unequal_lengths() {
     }
     // equal lengths still pass the check
     assert_eq!(i2.binary(&i2, BinOp::Add).unwrap(), Column::i64(vec![2, 4]));
-}
-
-#[test]
-fn init_at_is_the_aggregate_of_one_value() {
-    use CombineOp::*;
-    // f64: max / min fold the value into -inf / +inf (a NaN first bar is skipped)
-    for (op, x, want) in [
-        (Max, 5.0, 5.0),
-        (Max, f64::NAN, f64::NEG_INFINITY),
-        (Min, f64::NAN, f64::INFINITY),
-        (Sum, 2.5, 2.5),
-        (Keep, 7.0, 7.0),
-        (Replace, f64::NAN, f64::NAN),
-    ] {
-        let mut c = Column::f64(vec![0.0, 0.0]);
-        c.init_at(1, op, &Column::f64(vec![x]), 0).unwrap();
-        let got = c.get_f64(1);
-        assert!(got == want || (got.is_nan() && want.is_nan()), "{op:?} {x}");
-    }
-    for (op, want) in [(Max, 5.0), (Min, 5.0), (Sum, 5.0), (Keep, 5.0)] {
-        let mut c = Column::f32(vec![0.0]);
-        c.init_at(0, op, &Column::f32(vec![5.0]), 0).unwrap();
-        assert_eq!(c.get_f64(0), want, "f32 {op:?}");
-    }
-    // ints: the value; a first / last takes its validity, a max / min / sum is present
-    let na = Column::i64_with(vec![3], Validity::from_valid_iter(1, [false]));
-    for (op, valid) in [(Keep, false), (Replace, false), (Max, true), (Sum, true)] {
-        let mut c = Column::i64(vec![1]);
-        c.init_at(0, op, &na, 0).unwrap();
-        assert_eq!((c.get_i64(0), c.is_valid(0)), (3, valid), "i64 {op:?}");
-        let mut c = Column::i32(vec![1]);
-        c.init_at(0, op, &na, 0).unwrap();
-        assert_eq!((c.get_i64(0), c.is_valid(0)), (3, valid), "i32 {op:?}");
-    }
-    let mut c = Column::datetime(vec![1]);
-    c.init_at(0, Min, &Column::datetime(vec![9]), 0).unwrap();
-    assert_eq!(c.get_i64(0), 9);
-    assert!(Column::bool(vec![false]).init_at(0, Keep, &Column::bool(vec![true]), 0).is_err());
-    assert!(Column::str(vec!["a".into()]).init_at(0, Keep, &Column::str(vec!["b".into()]), 0).is_err());
-}
-
-#[test]
-fn an_integer_fold_never_wraps() {
-    use CombineOp::*;
-    let overflow = |r: Result<()>| matches!(r, Err(VolasError::Overflow(_)));
-    let mut c = Column::i64(vec![i64::MAX]);
-    assert!(overflow(c.combine_at(0, Sum, &Column::i64(vec![1]), 0)));
-    assert_eq!(c.get_i64(0), i64::MAX, "unchanged");
-    let mut c = Column::i32(vec![i32::MAX]);
-    assert!(overflow(c.combine_at(0, Sum, &Column::i32(vec![1]), 0)));
-    assert!(overflow(c.combine_at(0, Replace, &Column::i64(vec![1 << 40]), 0)));
-    assert!(overflow(c.init_at(0, Keep, &Column::i64(vec![1 << 40]), 0)));
-    let mut d = Column::datetime(vec![5]);
-    d.combine_at(0, Max, &Column::datetime(vec![9]), 0).unwrap();
-    assert_eq!(d.get_i64(0), 9);
 }

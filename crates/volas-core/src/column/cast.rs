@@ -149,7 +149,7 @@ impl Column {
                         v.len(),
                         (0..v.len()).map(|i| self.is_valid(i)),
                     );
-                    Ok(Column::i64_with(v.to_vec(), validity))
+                    Ok(Column::i64_masked(v.to_vec(), validity))
                 }
                 // unreachable: int/bool go through cast_int_bool, str through
                 // cast_str_to_numeric, and F64/F32/Datetime are handled above.
@@ -160,11 +160,11 @@ impl Column {
             // missing float cell (NaN) STAYS missing — never numpy's
             // NaN-is-truthy footgun. int sources go through `cast_int_bool`.
             DType::Bool => match self {
-                Column::F64(v) => Ok(Column::bool_with(
+                Column::F64(v) => Ok(Column::bool_masked(
                     v.iter().map(|&x| x != 0.0).collect(),
                     Validity::from_valid_iter(v.len(), v.iter().map(|x| !x.is_nan())),
                 )),
-                Column::F32(v) => Ok(Column::bool_with(
+                Column::F32(v) => Ok(Column::bool_masked(
                     v.iter().map(|&x| x != 0.0).collect(),
                     Validity::from_valid_iter(v.len(), v.iter().map(|x| !x.is_nan())),
                 )),
@@ -198,7 +198,7 @@ impl Column {
                     n,
                     (0..n).map(|i| self.is_valid(i)),
                 );
-                Ok(Column::str_with(self.to_string_vec(), validity))
+                Ok(Column::str_masked(self.to_string_vec(), validity))
             }
             DType::Datetime => self.to_datetime(),
         }
@@ -275,13 +275,13 @@ impl Column {
                     })
                     .collect::<Result<Vec<i64>>>()?;
                 if to == DType::I64 {
-                    Column::i64_with(ints, valid)
+                    Column::i64_masked(ints, valid)
                 } else {
                     let narrow = ints
                         .iter()
                         .map(|&x| i32::try_from(x).map_err(|_| out_of_range(&x)))
                         .collect::<Result<_>>()?;
-                    Column::i32_with(narrow, valid)
+                    Column::i32_masked(narrow, valid)
                 }
             }
         })
@@ -308,24 +308,24 @@ impl Column {
                 .collect()
         };
         match (self, to) {
-            (Column::I64(v, _), DType::I32) => Ok(Column::i32_with(narrow_i32(v)?, validity)),
-            (Column::I64(v, _), DType::Bool) => Ok(Column::bool_with(
+            (Column::I64(v, _), DType::I32) => Ok(Column::i32_masked(narrow_i32(v)?, validity)),
+            (Column::I64(v, _), DType::Bool) => Ok(Column::bool_masked(
                 v.iter().map(|&x| x != 0).collect(),
                 validity,
             )),
-            (Column::I32(v, _), DType::I64) => Ok(Column::i64_with(
+            (Column::I32(v, _), DType::I64) => Ok(Column::i64_masked(
                 v.iter().map(|&x| x as i64).collect(),
                 validity,
             )),
-            (Column::I32(v, _), DType::Bool) => Ok(Column::bool_with(
+            (Column::I32(v, _), DType::Bool) => Ok(Column::bool_masked(
                 v.iter().map(|&x| x != 0).collect(),
                 validity,
             )),
-            (Column::Bool(v, _), DType::I64) => Ok(Column::i64_with(
+            (Column::Bool(v, _), DType::I64) => Ok(Column::i64_masked(
                 v.iter().map(|&b| b as i64).collect(),
                 validity,
             )),
-            (Column::Bool(v, _), DType::I32) => Ok(Column::i32_with(
+            (Column::Bool(v, _), DType::I32) => Ok(Column::i32_masked(
                 v.iter().map(|&b| b as i32).collect(),
                 validity,
             )),
@@ -387,9 +387,9 @@ impl Column {
                             }
                         })
                         .collect::<Result<Vec<i32>>>()?;
-                    Ok(Column::i32_with(narrowed, validity))
+                    Ok(Column::i32_masked(narrowed, validity))
                 } else {
-                    Ok(Column::i64_with(out, validity))
+                    Ok(Column::i64_masked(out, validity))
                 }
             }
         }
