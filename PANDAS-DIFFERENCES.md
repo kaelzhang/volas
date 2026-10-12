@@ -529,16 +529,16 @@ labels into a UTC column. Restore a zone by converting the instants:
 `df.set_index('t').tz_localize('UTC').tz_convert(zone)` (or `.dt.tz_convert(zone)` on
 the pandas side).
 
-A tz-aware **index** gives its labels as what they are: `df.index` is an object array of
-aware `Timestamp`s (pandas `DatetimeIndex.to_numpy()` of an aware index), so a label read
-back — `df.index[-1]`, `DataFrame(..., index=df.index)` — is the same label and aligns
-with the frame. These are volas `Timestamp`s, which pandas and NumPy do not convert
-(`pd.DatetimeIndex(df.index)`, `.astype('datetime64[ns]')`): cross with `to_pandas()`. A
-naive index stays `datetime64[ns]`. Labels given as `index=` keep the one zone their aware
-timestamps carry; aware and naive timestamps, or two zones, in one index raise. A label
-written to a frame follows contract #17: an aware value is an instant, a naive
-`Timestamp` / `datetime` / string a wall clock (a naive / aware mix raises), and a raw
-epoch-ns count — an integer or an `np.datetime64` — is read in the frame's zone.
+A tz-aware **index** exports by the same rule: `df.index` is its UTC instants as
+`datetime64[ns]` (NumPy has no zone slot), while a row's `.name` and a cell are aware
+`Timestamp`s. A label read back from `df.index` is the same label: a label written to a
+frame follows contract #17 — an aware value is an instant, a naive `Timestamp` /
+`datetime` / string a wall clock (a naive / aware mix raises) — and a raw epoch-ns count,
+an integer or an `np.datetime64`, is read in the frame's zone. A frame built with
+`index=df.index` of an aware frame is naive (UTC instants) and does not align with it;
+restore the zone as for a column: `mask.tz_localize('UTC').tz_convert(zone)`. Labels
+given as `index=` keep the one zone their aware timestamps carry; aware and naive
+timestamps, or two zones, in one index raise.
 
 A scalar `Timestamp` compares like pandas': with another instant (a `Timestamp`, a
 `datetime` / `pd.Timestamp`, an `np.datetime64`) by instant, naive and aware never

@@ -823,7 +823,7 @@ directive_lookback('repeat:5@(close > boll.upper)')
 ```py
 # --- DataFrame：元数据 ----------------------------------------------------
 df.columns / df.shape / len(df) / df.dtypes      # dtypes -> dict
-df.index                          # 行标签，作为一个 NumPy 数组（tz-aware 索引为 aware Timestamp）
+df.index                          # 行标签，作为一个 NumPy 数组（tz-aware 索引导出为 UTC 瞬时）
 col in df ; for col in df         # 成员判断 / 迭代列名
 df.tz / df.tz_localize(tz) / df.tz_convert(tz)   # DatetimeIndex 的 tz；见“时区”
 
@@ -1189,7 +1189,7 @@ df.loc[label]       # 按索引标签取一个 Row
 df.loc[lo:hi]       # 闭区间标签切片（字符串索引按字典序）
 df.at[label, col]   # 按标签 + 列取一个标量
 df.iat[i, j]        # 按位置取一个标量
-df.index            # 行标签，作为一个 NumPy 数组（tz-aware 索引为 aware Timestamp）
+df.index            # 行标签，作为一个 NumPy 数组（tz-aware 索引导出为 UTC 瞬时）
 ```
 
 字符串（代码）索引：在字符串列上 `set_index`，再按代码查找：
@@ -1267,7 +1267,7 @@ df = DataFrame({'t': ['2021-01-04 09:30:00'], 'close': [100.0]})
 df['t'] = to_datetime(df['t'])
 df = df.set_index('t').tz_localize('America/New_York')
 df.tz       # 'America/New_York'
-df.index    # [Timestamp('2021-01-04 09:30:00', tz='America/New_York')]  （aware 索引给出 aware Timestamp，与 pandas 的 to_numpy() 一致）
+df.index    # ['2021-01-04T14:30:00.000000000']  （裸 .index 是 UTC，与 pandas .values 一致）
 
 # 正是 tz 让裸本地字符串能匹配到正确那一行：它会按 df.tz 解析。
 df.at['2021-01-04 09:30:00', 'close']   # 100.0
@@ -1284,7 +1284,7 @@ ts.tz                                    # '+08:00'
 e = DataFrame({'t': [1609770600000], 'close': [100.0]})
 e['t'] = to_datetime(e['t'], unit='ms')
 e.set_index('t').tz_localize('UTC').tz_convert('America/New_York').index
-# [Timestamp('2021-01-04 09:30:00', tz='America/New_York')]  （即 14:30Z）
+# ['2021-01-04T14:30:00.000000000']
 
 # 带偏移的字符串本身已经表示绝对瞬时；to_datetime 会解析这个偏移：
 o = DataFrame({'t': ['2021-01-04T09:30:00+08:00'], 'close': [1.0]})
@@ -1306,7 +1306,7 @@ naive.tz_convert('+08:00')                   # TypeError ——先用 tz_localiz
 aware.tz_localize('UTC')                     # TypeError ——已锚定；请用 tz_convert
 ```
 
-`cumulate` 到日线（或更粗）时，会把桶对齐到 frame 的本地交易日；如果使用具名时区，这个对齐具备 DST 意识。tz-aware 索引的 `.index` 是 aware `Timestamp` 组成的 object 数组，读回的标签（如 `df.index[-1]`）可以原样用于 `append` 或 `DataFrame(..., index=df.index)`；naive 索引仍是 `datetime64[ns]`。这些是 volas 的 `Timestamp`，pandas / NumPy 不会直接转换，需要 pandas 时请用 `to_pandas()`。
+`cumulate` 到日线（或更粗）时，会把桶对齐到 frame 的本地交易日；如果使用具名时区，这个对齐具备 DST 意识。裸 `.index` 的 NumPy 导出仍保持 UTC（与 pandas `.values` 一致，NumPy 没有时区槽位）；行的 `.name` 与单元格是 aware `Timestamp`。读回的标签（如 `df.index[-1]`）可以原样用于 `append`：`np.datetime64` / 整数 ns 按帧自身的时区读作 epoch 瞬时。用 `index=df.index` 构造的帧是 naive 的（UTC 瞬时），不会与 aware 帧对齐，需要先恢复时区：`mask.tz_localize('UTC').tz_convert(zone)`。
 
 ## 缺失值（`volas.NA`）
 

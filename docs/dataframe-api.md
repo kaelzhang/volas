@@ -332,7 +332,8 @@ timestamp is read in its own zone: an aware `Timestamp` / `datetime` / offset st
 an instant, a naive one a wall clock — judged against the frame's index like any other
 row (a naive bar onto a tz-aware frame raises), a raw epoch-ns count — an integer or a
 NumPy `datetime64`, the form instants are exported in — read in the frame's zone. A label
-read back from the frame (`df.index[-1]`, an aware `Timestamp` on a tz-aware frame) is
+read back from the frame (`df.index[-1]` — a UTC `datetime64` on a tz-aware frame — or a
+row's `.name`, an aware `Timestamp`) is
 the same label, so it replaces that row. Each value is one cell: an array (even of one
 element) raises. A positional (`RangeIndex`) frame continues its labels, a bounded window's too.
 Cached directive columns are not supplied — they are padded and refreshed automatically.
@@ -483,6 +484,16 @@ df.is_computed('ma:5')                                  # True
 df.is_computed('close')                                 # False
 raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low', 'close', 'volume']
 ```
+
+A contiguous slice (`df.iloc[a:b]`, `df.loc[...]`, `head` / `tail`) keeps a cached column
+cached only when it can continue it exactly: the slice keeps the rows the column needs
+(its continuation reach), and a column with a recursion anywhere in its directive (EMA,
+Wilder smoothing, SAR, a cumulative line, …) either carries its resume state into the
+slice or the slice starts at the column's first row. Otherwise the slice keeps the
+column's values as plain data (`is_computed` is `False`), never a re-warmed recursion.
+This is the current behaviour; continuing such a column across a middle slice by
+replaying its history is planned. A bounded window's own compaction is not a slice: its
+cached columns stay cached and recompute over the rows it retains (`max_lookback`).
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 

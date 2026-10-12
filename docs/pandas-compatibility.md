@@ -10,7 +10,7 @@ the listing.
 ```py
 # --- DataFrame: metadata --------------------------------------------------
 df.columns / df.shape / len(df) / df.dtypes      # dtypes -> dict
-df.index                          # row labels, as a NumPy array (aware Timestamps on a tz-aware index)
+df.index                          # row labels, as a NumPy array (a tz-aware index: its UTC instants)
 col in df ; for col in df         # membership / iterate column names
 df.tz / df.tz_localize(tz) / df.tz_convert(tz)   # DatetimeIndex tz; see Timezones
 
@@ -135,7 +135,7 @@ df.loc[label]       # a Row by index label
 df.loc[lo:hi]       # inclusive label slice (lexicographic for string indexes)
 df.at[label, col]   # a scalar by label + column
 df.iat[i, j]        # a scalar by position
-df.index            # the row labels, as a NumPy array (aware Timestamps on a tz-aware index)
+df.index            # the row labels, as a NumPy array (a tz-aware index: its UTC instants)
 ```
 
 String (symbol) index — `set_index` on a string column, then look up by symbol:
