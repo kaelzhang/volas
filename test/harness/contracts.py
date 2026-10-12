@@ -16,37 +16,24 @@ from __future__ import annotations
 # --- defects the machines step around (each has a strict-xfail reproduction) -----
 
 OPEN_DEFECTS: frozenset[str] = frozenset({
-    # A failed append leaves earlier columns grown (non-atomic append / fold).
-    'append-atomicity',
-    # A composite cached while a bare-named cached column is stale reads the stale
-    # placeholder; a plain column named like a command rebinds cached composites.
-    'stale-name-binding',
-    # `exec` of a bare cached name and `get_column` of a stale computed column
-    # return the stale placeholder instead of raising / recomputing.
-    'unguarded-stale-read',
-    # Append coerces a foreign index kind / timezone / NaT instead of raising.
-    'append-index-coercion',
     # Windowed frames: recursive columns are not bit-exact with the unbounded
     # history, and a base write restarts carried state on the retained rows only.
     'windowed-drift',
-    # A comparison consumes a stale right-hand frame without raising.
-    'stale-compare-rhs',
     # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
     # while df[d] names the column from the bound values ('ma:5', 'sar').
     'stringify-column-name',
-    # append reads a source frame without a freshness check (stale placeholders are
-    # appended as data).
-    'stale-append-source',
     # fast > slow is accepted for the two-EMA lines: `macd` panics (a Rust
     # slice-index panic), `apo` / `ppo` / `dma` resume differently from the full
     # compute.
     'fast-above-slow',
-    # A windowed frame checks freshness on its visible slice, where a cached column
-    # longer than the window is no longer computed: a stale read then succeeds.
-    'windowed-stale-logical-read',
     # A recursive cached column without a carried state (a composite / explicit
-    # series) re-warms on a slice's retained rows instead of continuing its history.
+    # series) is not continued across a slice that drops its history's start: it
+    # stays as data (it cannot be continued exactly, so it is never re-warmed).
     'slice-recursive-rewarm',
+    # `ichimoku.senkou_a`'s lookback counts the kijun period only (k - 1 + k): with a
+    # tenkan period above it the first value needs more rows than the lookback says,
+    # so a column cached inside that gap does not continue on append.
+    'ichimoku-tenkan-lookback',
 })
 
 # Directive families whose incremental refresh is known to diverge from the full
@@ -64,6 +51,12 @@ def avoids(defect: str) -> bool:
 
 # --- naming (README "directive_stringify") -------------------------------------------
 
+# A bare name that is both a data column and a built-in command usable bare raises at
+# bind time (REQUIREMENTS R17); a data column named like a bare command that a cached
+# directive reads cannot be added (R17). A new directive binds data columns only.
+AMBIGUOUS_BARE_NAME_RAISES = True
+COLUMN_UNDER_A_CACHED_COMMAND_RAISES = True
+
 # `directive_stringify(d)` is "the actual column name volas caches it under".
 COLUMN_NAME_IS_STRINGIFY = True
 
@@ -75,13 +68,16 @@ EXEC_IS_FRESH = True
 # A bulk / positional read (to_numpy, iloc, equals, to_pandas, ...) of a stale frame
 # raises instead of returning stale values.
 BULK_READ_STALE_RAISES = True
-# `get_column` of a stale computed column raises (it is one of the "every other
-# read" surfaces the README lists as raising while stale).
-GET_COLUMN_STALE_RAISES = True
+# `get_column` of a stale computed column refreshes it, like `df[name]`: it is a
+# column read (CONTRACT #12), never a computation of a missing column.
+GET_COLUMN_REFRESHES = True
 # A comparison whose right-hand frame is stale raises like a stale left-hand side.
 COMPARE_STALE_RHS_RAISES = True
 # Appending a stale source frame raises (the source is read in bulk).
 APPEND_STALE_SOURCE_RAISES = True
+# Appended rows carrying one of the target's cached directive columns raise, in every
+# append form (REQUIREMENTS R20): select the data columns first.
+APPEND_CACHED_COLUMNS_RAISES = True
 
 # --- append (I12) ---------------------------------------------------------------------
 

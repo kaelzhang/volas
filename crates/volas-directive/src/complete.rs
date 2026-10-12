@@ -299,4 +299,25 @@ mod tests {
         assert!(value.is_nan());
         assert_eq!(next, st);
     }
+
+    /// An input the frame cannot supply is the command's own error — also when another
+    /// input misses a row, where the record of what it reads would otherwise be cut
+    /// short and the rerun over the complete rows read an empty series.
+    #[test]
+    fn an_input_that_cannot_be_read_is_the_error_never_a_rerun() {
+        for known in [false, true] {
+            // the close column's NaN fact unknown (the first run fails at the absent
+            // column) or known (the run stops at close; the probe fails)
+            let close = Column::f64(vec![1.0, f64::NAN, 3.0, 4.0]);
+            if known {
+                assert!(close.has_nan());
+            }
+            let df = DataFrame::new(vec!["close".into()], vec![close], None).unwrap();
+            for d in ["nvi", "pvi", "pvt", "obv", "efi:2", "ad", "adosc"] {
+                let err = execute(&df, &parse(d).unwrap()).unwrap_err();
+                assert!(err.to_string().contains("not found"), "{d}: {err}");
+                assert!(initial_state(&df, &parse(d).unwrap(), &Column::f64(vec![])).is_none(), "{d}");
+            }
+        }
+    }
 }

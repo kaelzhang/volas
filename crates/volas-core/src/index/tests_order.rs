@@ -51,7 +51,9 @@ fn derived_indexes_recompute_their_order() {
     assert_eq!(order(&ix.slice(1, 4)), (true, false));
     assert_eq!(order(&ix.take(&[0, 1])), (false, true));
     assert_eq!(order(&Index::range(5).slice(2, 4)), (true, false));
-    assert_eq!(order(&int(&[1, 2]).append(&int(&[0])).unwrap()), (false, false));
+    let mut grown = int(&[1, 2]);
+    grown.extend(&int(&[0])).unwrap();
+    assert_eq!(order(&grown), (false, false));
     let from = Index::from_column(&Column::i64(vec![3, 1])).unwrap();
     assert_eq!(order(&from), (false, true));
     // the order is a fact of the labels: equal labels give equal indexes
@@ -78,8 +80,8 @@ fn extend_carries_the_order_forward() {
     r.extend(&Index::range(2)).unwrap();
     assert_eq!(order(&r), (true, false));
 
-    // an implicit Range bar continues Int64 labels upward
-    let mut c = int(&[5, 4]);
+    // an implicit Range bar continues Int64 labels upward (from the last, 5: unused)
+    let mut c = int(&[7, 4]);
     c.extend(&Index::range(1)).unwrap();
     assert_eq!(order(&c), (false, false));
     let mut e = int(&[]);
@@ -93,13 +95,18 @@ fn extend_carries_the_order_forward() {
     let mut t = Index::datetime(vec![1], Tz::Utc);
     t.extend(&Index::datetime(vec![2], Tz::Utc)).unwrap();
     assert_eq!(order(&t), (true, false));
-    t.extend(&Index::datetime(vec![NAT], Tz::Utc)).unwrap();
-    assert_eq!(order(&t), (false, false));
+    // a NaT label is never appended (it has no place in the order); built in, it
+    // leaves the index unordered
+    assert!(t.extend(&Index::datetime(vec![NAT], Tz::Utc)).is_err());
+    assert_eq!(order(&t), (true, false));
+    assert_eq!(order(&Index::datetime(vec![1, 2, NAT], Tz::Utc)), (false, false));
 
-    // a numeric-kind mix recomputes over the collapsed Int64 labels
+    // explicit integer labels after implicit positions recompute over the collapsed
+    // Int64 labels (a datetime index is another kind: never mixed in)
     let mut m = Index::range(2);
-    m.extend(&Index::datetime(vec![-1], Tz::Utc)).unwrap();
+    m.extend(&int(&[-1])).unwrap();
     assert_eq!(order(&m), (false, false));
+    assert!(Index::range(2).extend(&Index::datetime(vec![-1], Tz::Utc)).is_err());
 }
 
 #[test]

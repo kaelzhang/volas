@@ -40,7 +40,8 @@ class _Windowed:
 class WindowedMachine(_Windowed, PlainMachine):
 
     def retained(self):
-        return self.df._physical_height
+        # the last window + max_lookback rows, never older rows the buffer still holds
+        return min(self.df._physical_height, self.window + self.max_lookback)
 
     def build_frame(self, schema, rows, index):
         return volas.DataFrame(build.frame(schema, rows, index), window=self.window,

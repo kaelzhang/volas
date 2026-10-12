@@ -29,7 +29,7 @@ import volas
 
 from . import contracts, inventory, observe
 from .data import EXTREME_SCALES
-from .directives import Directive, directives
+from .directives import Directive, directives, stored_bare_names
 from .ledger import Ledger, reference
 
 
@@ -78,6 +78,7 @@ BULK_SURFACES = {
 _FAST_SLOW = re.compile(r'\b(macd|apo|ppo|dma)(?:\.\w+)?:(\d*)(?:,(\d*))?')
 _FAST_SLOW_DEFAULTS = {'macd': (12, 26), 'apo': (12, 26), 'ppo': (12, 26), 'dma': (10, 50)}
 _ULTOSC = re.compile(r'\bultosc:(\d*)(?:,(\d*))?(?:,(\d*))?')
+_SENKOU_A = re.compile(r'\bichimoku\.senkou_a:(\d*)(?:,(\d*))?')
 # A parenthesized single primary as a series (`@(rsi:5)`, `@(0)`): its parentheses
 # are dropped from the cached name.
 _PAREN_PRIMARY_SERIES = re.compile(
@@ -99,6 +100,9 @@ def triggers_ok(d: Directive) -> bool:
             periods = [int(a or 7), int(b or 14), int(c or 28)]
             if periods != sorted(periods):
                 return False
+    if contracts.avoids('ichimoku-tenkan-lookback'):
+        if any(int(t or 9) > int(k or 26) for t, k in _SENKOU_A.findall(text)):
+            return False
     families = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text)}
     return not (families & contracts.DIVERGENT_FAMILIES)
 
@@ -150,10 +154,12 @@ class FrameMachine(RuleBasedStateMachine):
             tolerance = max(tolerance, contracts.ULP_DRIFT_TOLERANCE)
         return tolerance
 
-    def oracle(self, entry: Entry, evaluate: bool = False):
-        """The reference values of ``entry`` on the visible rows, or its error class."""
+    def oracle(self, entry: Entry, evaluate: bool = False, hide: set[str] = frozenset()):
+        """The reference values of ``entry`` on the visible rows, or its error class —
+        over the frame without the data columns ``hide``."""
         text = entry.directive.text if entry.directive else entry.name
-        values, error = reference(self.coarse(), text, entry.env, entry.start, evaluate)
+        env = tuple(c for c in entry.env if c not in hide)
+        values, error = reference(self.coarse(), text, env, entry.start, evaluate)
         if error is not None:
             return None, error
         return values[self.visible_start() - entry.start:], None
@@ -223,11 +229,17 @@ class FrameMachine(RuleBasedStateMachine):
 
     # --- shared ops -----------------------------------------------------------------------
 
+    def command_columns(self) -> set[str]:
+        """The frame's data columns named like a built-in command usable bare."""
+        from .inventory import executable_lines
+        bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
+        return {c for c in self.df.columns if c in bare and c not in self.cached}
+
     def _directive_ok(self, d: Directive) -> bool:
         if not triggers_ok(d):
             return False
-        if contracts.avoids('stale-name-binding') and d.bare_names & self.stale:
-            return False  # a composite reading a stale cached column by bare name
+        if contracts.AMBIGUOUS_BARE_NAME_RAISES and d.bare_names & self.command_columns():
+            return False  # ambiguous (a data column named like a command): raises, tested apart
         if contracts.avoids('window-recompute-ulp') and d.kind == 'bool' and d.operands is None \
                 and any(op in d.text for op in '&|^~'):
             return False  # a logical combination cannot be excused a tie flip
@@ -241,7 +253,7 @@ class FrameMachine(RuleBasedStateMachine):
                 # recursive / cumulative lines restart on the retained rows (the
                 # forming refresh's cold path, a write, an undersized history)
                 names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', d.text.lower())}
-                if names & inventory.unbounded_memory():
+                if names & inventory.unbounded_memory() or inventory.recursive(d.text):
                     return False
         return True
 
@@ -285,9 +297,10 @@ class FrameMachine(RuleBasedStateMachine):
             observe.same_indicator(got, np.asarray(want), f'df[{d.text!r}]', self.tolerance(entry),
                                    self.excused(entry))
             # I9: the column name is a directive of the same meaning (it is what a
-            # refresh re-parses).
+            # refresh re-parses — reading its bare names as the commands, never as a data
+            # column named like one: `change: * 2` caches as `change*2`).
             renamed = replace(entry, name=col, directive=replace(d, text=col))
-            again, error = self.oracle(renamed)
+            again, error = self.oracle(renamed, hide=stored_bare_names(col) & self.command_columns())
             assert error is None, f'the cached name {col!r} of {d.text!r} does not re-parse: {error}'
             observe.same_indicator(np.asarray(again), np.asarray(want), f'{col!r} vs {d.text!r}')
             self.column_of[name] = col
@@ -351,8 +364,6 @@ class FrameMachine(RuleBasedStateMachine):
         d = data.draw(directives(tuple(self.plain_numeric())))
         if not triggers_ok(d):
             return
-        if contracts.avoids('unguarded-stale-read') and d.bare_names & set(self.cached):
-            return  # a bare name binding a cached column (stale or not) — the open read path
         if self.window is not None:
             return  # exec over a windowed frame sees the retained rows only (contract open)
         entry = Entry(d.text, d, self.env(), self.visible_start())
@@ -368,14 +379,16 @@ class FrameMachine(RuleBasedStateMachine):
     @rule(data=st.data())
     def get_column(self, data):
         """``get_column`` never computes: a plain column reads its data at any time; a
-        stale computed column raises (contract), a fresh one reads its values."""
+        computed column reads its values, a stale one refreshed first (contract)."""
         name = data.draw(st.sampled_from(list(self.df.columns)))
-        if name in self.cached and name in self.stale:
-            if contracts.avoids('unguarded-stale-read') or not contracts.GET_COLUMN_STALE_RAISES:
-                return
-            self.attempt(lambda: self.df.get_column(name), expect_error=ValueError,
-                         label=f'get_column({name!r}) stale')
+        if name in self.cached and name in self.stale and not contracts.GET_COLUMN_REFRESHES:
             return
+
+        # a stale cached column is refreshed by the read, which raises what its compute
+        # raises (contract #26: an int64 input past 2^53 in float64 math)
+        expect = None
+        if name in self.cached and name in self.stale:
+            expect = self.oracle(self.cached[name])[1]
 
         def commit(series):
             got = observe.column_values_series(series)
@@ -383,10 +396,12 @@ class FrameMachine(RuleBasedStateMachine):
                 entry = self.cached[name]
                 observe.same_indicator(got, np.asarray(self.oracle(entry)[0]), f'get_column({name!r})',
                                        self.tolerance(entry), self.excused(entry))
+                self.stale.discard(name)  # the read refreshed it
             else:
                 self.check_plain(name, got)
 
-        self.attempt(lambda: self.df.get_column(name), commit=commit, label=f'get_column({name!r})')
+        self.attempt(lambda: self.df.get_column(name), expect_error=expect, commit=commit,
+                     label=f'get_column({name!r})')
 
     @rule(surface=st.sampled_from(sorted(BULK_SURFACES)))
     def bulk_read(self, surface):
@@ -396,9 +411,6 @@ class FrameMachine(RuleBasedStateMachine):
                                         for t in self.df.dtypes.values()):
             return  # rolling is numeric-only
         stale = bool(self.stale) and contracts.BULK_READ_STALE_RAISES
-        if stale and self.window is not None and contracts.avoids('windowed-stale-logical-read') and any(
-                volas.directive_lookback(n) > len(self.df) for n in self.stale):
-            return
         self.attempt(lambda: ops[surface](self.df), expect_error=ValueError if stale else None,
                      label=f'{surface}{" (stale)" if stale else ""}')
 

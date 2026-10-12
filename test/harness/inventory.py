@@ -232,6 +232,31 @@ def executable_lines() -> tuple[Line, ...]:
     return tuple(line for line in lines() if line.executes)
 
 
+# The recursions by kind (spec::is_recursive): the commands whose value depends on
+# every row before, and the TA-Lib MA-type argument slots (a command given one may be
+# a recursion whatever its default arguments compute). While 'slice-recursive-rewarm'
+# or 'windowed-drift' is open the machines step around them; an early jump in the
+# fixture (`unbounded_memory`) does not reveal every one.
+_RECURSIVE = frozenset({
+    'ema', 'smma', 'dema', 'tema', 't3', 'kama', 'macd', 'macdfix', 'kdj', 'rsi', 'crsi',
+    'stochrsi', 'cmo', 'trix', 'pvt', 'nvi', 'pvi', 'obv', 'ad', 'adosc', 'mass_index',
+    'efi', 'tsi', 'keltner', 'kcw', 'stoch_momentum', 'wad', 'asi', 'supertrend', 'atr',
+    'natr', 'plus_dm', 'minus_dm', 'plus_di', 'minus_di', 'dx', 'adx', 'adxr', 'sar',
+    'sarext', 'ht_dcperiod', 'ht_dcphase', 'ht_phasor', 'ht_sine', 'ht_trendline',
+    'ht_trendmode', 'mama'})
+_MATYPE_SLOTS = {'ma': 1, 'apo': 2, 'ppo': 2, 'mavp': 2, 'stochf': 2, 'macdext': 1, 'stoch': 2}
+_ARGS = re.compile(r'\b([a-z_]+)(?:\.[a-z_]+)?:([^@\s()]*)')
+
+
+def recursive(text: str) -> bool:
+    """Whether ``text`` reads a recursion by kind: a recursive command, or an MA-type
+    argument given to a command that takes one."""
+    names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
+    return bool(names & _RECURSIVE) or any(
+        head in _MATYPE_SLOTS and len(args.split(',')) > _MATYPE_SLOTS[head]
+        for head, args in _ARGS.findall(text.lower()))
+
+
 @functools.cache
 def unbounded_memory() -> frozenset[str]:
     """Commands with a line whose output still depends on a row more than its

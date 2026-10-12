@@ -300,6 +300,71 @@ pub fn recomputes_on_a_window(node: &Ast) -> bool {
     }
 }
 
+/// The command a directive's resumable state belongs to — its name and sub-command: a
+/// top-level command, or a bare name binding to one (a composite carries no state).
+fn top_command(node: &Ast) -> Option<(String, Option<String>)> {
+    match node {
+        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[]).ok().map(|c| (c.name, c.sub)),
+        Node::Command(c) => Some((c.name.clone(), c.sub.clone())),
+        _ => None,
+    }
+}
+
+/// The rows a cached directive column reads around its own ([`volas_core::Reach`]),
+/// fixed per directive: computed once when the column is cached, never per refresh.
+pub fn reach(node: &Ast) -> volas_core::Reach {
+    volas_core::Reach {
+        lookback: lookback(node),
+        resume: resume_reach(node),
+        continuation: continuation_reach(node),
+        recursive: recursive_anywhere(node),
+    }
+}
+
+/// Whether a recursion appears anywhere in a directive — a recursive command at the
+/// top, inside an `@` series, an operand, or bound from a bare name — so each value
+/// depends on every row before it, not on a trailing window.
+fn recursive_anywhere(node: &Ast) -> bool {
+    match node {
+        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[])
+            .is_ok_and(|c| crate::spec::is_recursive(&c.name, &c.args)),
+        Node::Scalar(_) => false,
+        Node::Command(c) => {
+            crate::spec::is_recursive(&c.name, &c.args) || c.series.iter().any(recursive_anywhere)
+        }
+        Node::Unary { operand, .. } => recursive_anywhere(operand),
+        Node::Binary { left, right, .. } => recursive_anywhere(left) || recursive_anywhere(right),
+    }
+}
+
+/// The rows before a new row that resuming a directive's carried state reads: none
+/// for a state that is all its command needs (a recursion), its lookback plus one for a
+/// command that reads the row its window drops or SAR's earlier bar
+/// ([`crate::spec::reads_past_lookback`]). A frame holding fewer valid rows cannot
+/// resume it.
+fn resume_reach(node: &Ast) -> usize {
+    match top_command(node) {
+        Some((n, s)) if crate::spec::reads_past_lookback(&n, s.as_deref()) => lookback(node) + 1,
+        _ => 0,
+    }
+}
+
+/// The rows a cached directive column needs to be continued exactly at all — what a
+/// contiguous slice must keep for the column to stay cached: its lookback, from which a
+/// sliding sum or an extremum-position window recomputes exactly over the slice's own
+/// rows when its state cannot resume; any other command reading past its lookback (a
+/// recursion — SAR, KAMA — or PSY's first partial window) continues exactly only with
+/// its [`resume_reach`] rows.
+fn continuation_reach(node: &Ast) -> usize {
+    match top_command(node) {
+        Some((n, s))
+            if !crate::spec::accumulates(&n, s.as_deref()) && !crate::spec::emits_position(&n) =>
+        {
+            resume_reach(node).max(lookback(node))
+        }
+        _ => lookback(node),
+    }
+}
 /// Like [`lookback`], but requires the directive to name an **indicator**. A
 /// top-level bare name that binds to no command — a raw column reference, or a
 /// typo'd directive such as `ma5` for `ma:5` — is rejected (the same

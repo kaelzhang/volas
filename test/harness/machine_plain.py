@@ -12,6 +12,7 @@ from hypothesis.stateful import initialize, precondition, rule
 import volas
 
 from . import build, contracts, inventory, observe
+from .directives import stored_bare_names
 from .data import EPOCHS, NS, make_rows, next_timestamps, regimes, schemas, steps
 from .ledger import Ledger, last_close
 from .machine_base import Entry, FrameMachine
@@ -85,7 +86,7 @@ class PlainMachine(FrameMachine):
             if k:
                 self._pend_stale()
 
-        expect = None if self.store.accepts(labels, self.retained()) else ValueError
+        expect = None if self.store.accepts(labels, self.retained(), len(rows)) else ValueError
         self.attempt(lambda: self.df.append(bar), expect_error=expect, commit=commit,
                      label=f'append {form} k={k}')
 
@@ -97,10 +98,12 @@ class PlainMachine(FrameMachine):
         if kind == 'dtype':
             # One column carries values of another dtype that its own cannot hold
             # exactly (an int past float64's exact range, a fraction for an int), so
-            # the lossless append conversion raises. While append atomicity is open
-            # only the first column may (it fails before any column grows).
+            # the lossless append conversion raises (contract #20): any column, the rows
+            # are checked whole before the first one grows.
+            if not self.store.accepts(index, self.retained(), len(rows)):
+                return  # the labels are refused first (the index is checked before values)
             numeric = [c for c in schema.columns if schema.dtype(c) in ('float64', 'float32', 'int64', 'int32')]
-            col = numeric[0] if contracts.avoids('append-atomicity') else numeric[regime[1] % len(numeric)]
+            col = numeric[regime[1] % len(numeric)]
             # built with the lossy dtype directly, so no assignment can round it first
             lossy, lossy_dtype = ((2**53 + 1, 'int64') if schema.dtype(col) in ('float64', 'float32')
                                   else (0.5, 'float64'))
@@ -120,11 +123,11 @@ class PlainMachine(FrameMachine):
             self.attempt(lambda: self.df.iloc.__setitem__((0, 0), 1.0), expect_error=ValueError,
                          label=f'iloc write {col} while stale')
             return
-        if contracts.avoids('append-index-coercion') or not contracts.APPEND_FOREIGN_INDEX_RAISES:
+        if not contracts.APPEND_FOREIGN_INDEX_RAISES:
             return
         if kind == 'str_index':
             plain = build.frame(schema, rows, None)
-            bar = volas.DataFrame({'k': ['a'] * len(plain),
+            bar = volas.DataFrame({'k': [f'k{i}' for i in range(len(plain))],
                                    **{c: plain.get_column(c) for c in plain.columns}}).set_index('k')
             self.attempt(lambda: self.df.append(bar), expect_error=ValueError, label='append str index')
             return
@@ -251,9 +254,12 @@ class PlainMachine(FrameMachine):
             name = data.draw(st.sampled_from([ln.canonical for ln in executable_lines()][:40]))
         else:
             name = data.draw(st.sampled_from(list(self.df.columns)))
-        if contracts.avoids('stale-name-binding') and any(
-                name in e.directive.bare_names for e in self.cached.values() if e.directive):
-            return  # rebinding a cached composite's bare name
+        bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
+        if name in bare and any(name in stored_bare_names(key) for key in self.cached if key != name):
+            if contracts.COLUMN_UNDER_A_CACHED_COMMAND_RAISES:
+                self.attempt(lambda: self.df.__setitem__(name, np.zeros(len(self.df))),
+                             expect_error=ValueError, label=f'df[{name!r}] = ... under a cached command')
+            return
         if name in self.coarse().schema.columns and self.coarse().dtype(name) not in ('float64',):
             return
         values = np.round(np.linspace(-1, 1, len(self.df)) * data.draw(st.integers(1, 9)), 3)
@@ -284,8 +290,9 @@ class PlainMachine(FrameMachine):
         if self.window is not None:
             return
         if contracts.avoids('slice-recursive-rewarm') and any(
-                _names(e.name) & inventory.unbounded_memory() for e in self.cached.values()):
-            return  # a recursive cached column re-warms on the slice instead of continuing
+                _names(e.name) & inventory.unbounded_memory() or inventory.recursive(e.name)
+                for e in self.cached.values()):
+            return  # a recursive cached column is not continued across the slice
         a = data.draw(st.integers(1, len(self.df) - 1))
         if self.stale:
             self.attempt(lambda: self.df.iloc[a:], expect_error=ValueError, label='slice while stale')
@@ -325,10 +332,14 @@ class PlainMachine(FrameMachine):
         if set(src_df.columns) - set(self.df.columns):
             self.attempt(lambda: self.df.append(src_df), expect_error=ValueError, label='append snapshot (extra)')
             return
-        if any(c in src_cached and c not in self.cached for c in src_df.columns):
+        if contracts.APPEND_CACHED_COLUMNS_RAISES and any(c in self.cached for c in src_df.columns):
+            self.attempt(lambda: self.df.append(src_df), expect_error=ValueError,
+                         label='append snapshot (cached columns)')
+            return
+        if any(c in src_cached for c in src_df.columns):
             return
         if src_stale:
-            if contracts.APPEND_STALE_SOURCE_RAISES and not contracts.avoids('stale-append-source'):
+            if contracts.APPEND_STALE_SOURCE_RAISES:
                 self.attempt(lambda: self.df.append(src_df), expect_error=ValueError,
                              label='append stale snapshot')
             return
@@ -343,7 +354,7 @@ class PlainMachine(FrameMachine):
             if rows:
                 self._pend_stale()
 
-        expect = None if self.store.accepts(labels, self.retained()) else ValueError
+        expect = None if self.store.accepts(labels, self.retained(), len(rows)) else ValueError
         self.attempt(lambda: self.df.append(src_df), expect_error=expect, commit=commit,
                      label='append snapshot')
 
@@ -356,8 +367,6 @@ class PlainMachine(FrameMachine):
                 other_store.range_kind != self.store.range_kind or \
                 not np.array_equal(np.asarray(other.index), np.asarray(self.df.index)):
             return  # differently-labelled (or differently-kinded) operands are rejected by design
-        if other_stale and not self.stale and contracts.avoids('stale-compare-rhs'):
-            return
         stale = bool(self.stale or other_stale) and contracts.COMPARE_STALE_RHS_RAISES
         before = observe.raw_state(other)
 

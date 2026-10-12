@@ -73,8 +73,12 @@ Which gets the 2-period simple moving average on column `"close"`.
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
   `tz_localize` / `tz_convert`. See [Timezones](cumulation.md#timezones).
 - **columns** `Optional[list[str]] = None` Select and order the columns to keep —
-  the same projection as `df[[...]]`. A name not present raises `KeyError`; an empty
-  list or a duplicate name is rejected, and an absent column is never silently filled.
+  the same projection as `df[[...]]` (a stale cached directive column is refreshed
+  first; a bounded-window source gives its visible rows). A name not present raises
+  `KeyError` (a directive is never computed here); an empty list or a duplicate name
+  is rejected, and an absent column is never silently filled. With `index=`, `dtype=`
+  or `window=`, a source `DataFrame` is read like any bulk read: it raises while one
+  of its cached directive columns is stale.
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are bars
   at that frame, each labelled with its **period start**, and the last one is the
@@ -132,7 +136,20 @@ for bar in feed:            # runs forever; memory never grows
 
 Every row-facing surface — `len`, `shape`, `index`, indexing (`[]` / `.iloc` /
 `.loc` / `.iat` / `.at`), `head` / `tail`, reductions, `to_numpy`, `to_csv`,
-`to_pandas`, `repr` — shows **only** the `window` rows; the margin is never visible.
+`to_pandas`, `repr`, `exec`, `tz_localize` / `tz_convert`, comparisons, and a windowed
+frame used as an `append` source or a constructor source — shows **only** the `window`
+rows; the margin is never visible.
+
+Row labels stay unique over the rows the frame **retains** — the last
+`window + max_lookback` rows: the visible ones and the hidden margin, never the older rows
+the buffer may still hold until its next compaction. An integer or string label that an
+earlier row in the margin still holds raises, and says so:
+
+```text
+ValueError: cannot append label 20: an earlier row with that label is still retained in the window's hidden margin (max_lookback)
+```
+
+A label whose row has already been dropped from the retained rows is accepted again.
 
 #### `ready` — has the window warmed up?
 
@@ -244,7 +261,11 @@ df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
 
 Evaluates the given directive and returns its values as a numpy ndarray. It is a
 pure, **stateless** evaluation — the frame is never modified (no column is
-created, and no cache is read or written).
+created, and no cache is read or written). A name in the directive reads a data
+column or runs a built-in command, never a cached directive column, so the result is
+fresh even while the frame is stale (see
+[Names](directives.md#names-a-data-column-or-a-built-in-command)). A bounded-window
+frame returns its visible rows.
 
 ```py
 # Compute the directive without touching the frame
@@ -267,7 +288,8 @@ The difference between `df[directive]` and `df.exec(directive)` is that
 Directly gets the column value by `key`, returning a `Series` — and **never
 computes**: unlike `df[key]`, which parses an unknown key as an indicator
 directive and executes it, `get_column` only fetches an existing column and
-raises `KeyError` otherwise. Use it whenever the column name comes from
+raises `KeyError` otherwise. It is a column read: a cached directive column left
+stale by an `append` is refreshed first, exactly as `df[key]` refreshes it. Use it whenever the column name comes from
 external data (CSV headers, user input, configuration), so a name that happens
 to look like a directive (e.g. `"ma:5"`) can never silently trigger a
 computation.
@@ -305,7 +327,15 @@ df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume':
 ```
 
 It is **strict**: every data column must be provided (a missing one raises — unlike a
-`DataFrame` / `Row`, where a missing column is NA-padded), and an unknown key raises.
+`DataFrame` / `Row`, where a missing column is NA-padded), and an unknown key raises. The
+timestamp is read in its own zone: an aware `Timestamp` / `datetime` / offset string is
+an instant, a naive one a wall clock — judged against the frame's index like any other
+row (a naive bar onto a tz-aware frame raises), a raw epoch-ns count — an integer or a
+NumPy `datetime64`, the form instants are exported in — read in the frame's zone. A label
+read back from the frame (`df.index[-1]` — a UTC `datetime64` on a tz-aware frame — or a
+row's `.name`, an aware `Timestamp`) is
+the same label, so it replaces that row. Each value is one cell: an array (even of one
+element) raises. A positional (`RangeIndex`) frame continues its labels, a bounded window's too.
 Cached directive columns are not supplied — they are padded and refreshed automatically.
 
 Rows are keyed by their index label:
@@ -317,9 +347,37 @@ Rows are keyed by their index label:
   `ValueError`;
 - an integer or string index stays unique: a row labelled like an **earlier** row
   raises `ValueError` (a new label before the last is appended);
-- rows without labels of their own (a `RangeIndex`) take the next labels.
+- rows without labels of their own (a `RangeIndex`) take the next labels — on an
+  integer index the labels after the last one, which must not already be in the index.
 
-On an error the frame is left unchanged.
+What the rows may carry:
+
+- **the frame's data columns only.** A column the frame does not have raises
+  `ValueError`; a column the frame lacks in the rows is padded with a missing value. A
+  column the frame **caches** (an indicator directive it computes itself) raises
+  `ValueError`, in every form — select the data columns first:
+
+  ```text
+  ValueError: cannot append columns ['ema:12']: they are cached directives that this DataFrame computes itself. Select the data columns first, e.g. df.append(other[['open', 'high', 'low', 'close', 'volume']]).
+  ```
+
+- **values the frame's dtypes hold exactly.** Each value is converted to the column's
+  dtype when that changes nothing (an integer `2` into a float column, `3.0` into an
+  integer column); a value that would change (`2.5` into an integer column, text into a
+  number column) raises `TypeError` (`OverflowError` past the dtype's range). The same
+  rule decides a new row and a replacing row.
+- **labels of the frame's index kind.** A `DatetimeIndex` takes timestamps only — of
+  the same awareness: tz-naive rows onto a tz-aware frame (or the reverse) raise
+  `ValueError`, while tz-aware rows in another zone are the same instants and keep the
+  frame's zone; a `NaT` label raises. An integer or string index takes labels of its
+  own kind; rows with a `RangeIndex` onto a `DatetimeIndex` raise.
+- **a source frame that is fresh.** Appending a `DataFrame` reads it like any bulk
+  read: while one of its cached directive columns is stale it raises (call its
+  `fulfill()` first), and a bounded-window source contributes its visible rows only.
+
+The rows are checked whole before anything is written: on an error the frame is left
+exactly as it was — every column, the index and the cached indicators — and the next
+append continues as if the rejected one never happened.
 
 ```python
 times = ['2026-01-01 17:00', '2026-01-01 17:01', '2026-01-01 17:02']
@@ -387,13 +445,18 @@ Batch-refresh every cached indicator column's stale tail in place
 
 Since `append` is lazy, the cache becomes fresh in one of two ways:
 
-- **Reading an indicator column** — `df['ma:20']` or `df[['ma:20', 'rsi:14']]` —
-  auto-refreshes just those columns' stale tails on access, so a column read is
-  always fresh and cheap. The single- and multi-column forms behave identically.
-- **Every other read** — `to_numpy()`, `.iloc` / `.loc` / `.at`, the reductions
-  (`sum` / `mean` / `max` / `describe` / …), `to_csv`, `repr`, … — does **not**
-  auto-refresh; while the frame is stale it **raises**, telling you to call
-  `fulfill()` first. This is deliberate: a half-updated frame fails loud instead
+- **Reading an indicator column** — `df['ma:20']`, `df[['ma:20', 'rsi:14']]`,
+  `df.get_column('ma:20')`, or `DataFrame(df, columns=[...])` — auto-refreshes just
+  those columns' stale tails on access, so a column read is always fresh and cheap.
+  The single- and multi-column forms behave identically.
+- **Every other read** — `to_numpy()`, `.iloc` / `.loc` / `.at`, row slices and
+  boolean masks (`df[a:b]`, `df[mask]`), the reductions (`sum` / `mean` / `max` /
+  `describe` / …), `isna` / `notna`, `rolling` / `expanding` / `ewm`, `tz_localize` /
+  `tz_convert`, `to_csv`, `repr`, … — does **not** auto-refresh; while the frame is
+  stale it **raises**, telling you to call `fulfill()` first. So does a stale frame
+  used as an **operand**: the right-hand side of a comparison, a `where` / `mask` or
+  `df[mask] = v` condition, an `append` source. `df.exec(d)` reads data columns only,
+  so it is never stale. This is deliberate: a half-updated frame fails loud instead
   of silently returning stale values, and you control when the (bounded) refresh
   cost is paid — which matters on a latency-sensitive live path.
 
@@ -421,6 +484,16 @@ df.is_computed('ma:5')                                  # True
 df.is_computed('close')                                 # False
 raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low', 'close', 'volume']
 ```
+
+A contiguous slice (`df.iloc[a:b]`, `df.loc[...]`, `head` / `tail`) keeps a cached column
+cached only when it can continue it exactly: the slice keeps the rows the column needs
+(its continuation reach), and a column with a recursion anywhere in its directive (EMA,
+Wilder smoothing, SAR, a cumulative line, …) either carries its resume state into the
+slice or the slice starts at the column's first row. Otherwise the slice keeps the
+column's values as plain data (`is_computed` is `False`), never a re-warmed recursion.
+This is the current behaviour; continuing such a column across a middle slice by
+replaying its history is planned. A bounded window's own compaction is not a slice: its
+cached columns stay cached and recompute over the rows it retains (`max_lookback`).
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 

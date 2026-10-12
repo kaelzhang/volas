@@ -9,12 +9,24 @@
 //! second (`DataFrame::invalidate_computed_forming_row`) and resumes from it — so a
 //! refresh never re-steps or recomputes the rows before the stale ones.
 
+use std::borrow::Cow;
+
 use pyo3::prelude::*;
 use volas_core::DataFrame;
 use volas_directive::types::Ast;
 
 #[allow(unused_imports)]
 use crate::*;
+
+/// A stale cached column's cursor as the refresh decides on it: its lookback, valid
+/// rows and whether its processed history is past the warm-up.
+#[derive(Clone, Copy)]
+struct Stale {
+    lb: usize,
+    resume: usize,
+    vr: usize,
+    warm: bool,
+}
 
 impl PyDataFrame {
     /// The carried resume states `(state, state_before_last)` of a recursive column
@@ -39,19 +51,33 @@ impl PyDataFrame {
         (after, before)
     }
 
-    /// The frame a cached directive is computed over: the live frame for a
-    /// default-series directive (it reads only the canonical input columns, never a
-    /// cached one), else the frame stripped of cached columns, so a column-name lookup
-    /// can never read a STALE cached column. Built once per refresh and shared.
-    fn base_frame(&self) -> PyResult<DataFrame> {
-        let real_names: Vec<String> = self
-            .inner
-            .names()
-            .iter()
-            .filter(|n| !self.inner.is_computed(n))
-            .cloned()
-            .collect();
-        self.inner.select(&real_names).map_err(pyerr)
+    /// The frame a NEW directive binds and computes over (`df[d]`, `exec`): the data
+    /// columns only, so a name never reads a cached column — whose rows may be a stale
+    /// placeholder — and is never resolved differently from a later refresh. Borrowed
+    /// when the frame caches nothing.
+    pub(crate) fn binding_frame(&self) -> PyResult<Cow<'_, DataFrame>> {
+        self.frame_without(|n| self.inner.is_computed(n))
+    }
+
+    /// The frame a CACHED directive refreshes over: the data columns, less those named
+    /// like a built-in command usable bare. In a cached directive such a bare name is
+    /// always the command: a data column of that name present at bind time made the name
+    /// ambiguous (an error), and one added later is refused while a cached directive
+    /// reads it (`check_new_data_column`) — and the canonical form renders `change:` as
+    /// `change`, so the refresh must not read it as the column.
+    fn refresh_frame(&self) -> PyResult<DataFrame> {
+        Ok(self
+            .frame_without(|n| self.inner.is_computed(n) || volas_directive::is_bare_command(n))?
+            .into_owned())
+    }
+
+    /// This frame without the columns `drop` names (borrowed when it names none).
+    fn frame_without(&self, drop: impl Fn(&str) -> bool) -> PyResult<Cow<'_, DataFrame>> {
+        if !self.inner.names().iter().any(|n| drop(n)) {
+            return Ok(Cow::Borrowed(&self.inner));
+        }
+        let kept: Vec<String> = self.inner.names().iter().filter(|n| !drop(n)).cloned().collect();
+        Ok(Cow::Owned(self.inner.select(&kept).map_err(pyerr)?))
     }
 
     /// Recompute the stale tail of cached directive columns in place — all of
@@ -64,7 +90,8 @@ impl PyDataFrame {
             return Ok(());
         }
         let mut base: Option<DataFrame> = None;
-        for (name, lb, vr) in stale {
+        for volas_core::StaleComputed { name, reach, valid_rows: vr, warm } in stale {
+            let (lb, resume) = (reach.lookback, reach.resume);
             // Parse-free single-row fast path for the stateless finite-memory directives
             // (price transforms, TR, the momentum / ROC family): the newest row is a
             // formula of its own inputs; the (empty) state still advances one row.
@@ -79,10 +106,10 @@ impl PyDataFrame {
             }
             let node = parse(&name).map_err(directive_err)?;
             if !directive_uses_default_series(&node) && base.is_none() {
-                base = Some(self.base_frame()?);
+                base = Some(self.refresh_frame()?);
             }
             let frame = if directive_uses_default_series(&node) { None } else { base.as_ref() };
-            self.refresh_column(&name, &node, frame, lb, vr, height)?;
+            self.refresh_column(&name, &node, frame, Stale { lb, resume, vr, warm }, height)?;
         }
         Ok(())
     }
@@ -94,15 +121,19 @@ impl PyDataFrame {
         name: &str,
         node: &Ast,
         frame: Option<&DataFrame>,
-        lb: usize,
-        vr: usize,
+        Stale { lb, resume, vr, warm }: Stale,
         height: usize,
     ) -> PyResult<()> {
-        // Past warm-up (`vr >= lb`) with a carried state, a recursive column resumes.
-        // The gate keeps the warm-up region on the full recompute: an indicator whose
-        // warm-up mask is length-dependent would otherwise freeze an incrementally
-        // carried early row that a full recompute masks.
-        if vr >= lb && self.inner.computed_resume_state(name).is_some() {
+        // Past warm-up with a carried state, a column resumes. Warm-up is counted on the
+        // column's processed history, not on this frame's row numbers (a tail slice's
+        // replaced last row is still past it). The gate keeps the warm-up region on the
+        // full recompute: an indicator whose warm-up mask is length-dependent would
+        // otherwise freeze an incrementally carried early row that a full recompute
+        // masks. A resume reads `resume_reach` rows before the new one (its lookback,
+        // plus the row its window drops or SAR's earlier bar): a frame holding fewer (a
+        // tail slice) recomputes over its own rows instead.
+        let reach = vr >= resume;
+        if warm && reach && self.inner.computed_resume_state(name).is_some() {
             // One row at a time through the allocation-free step: each row's value and
             // the state as of it; the last two states are kept.
             let mut row = vr;
@@ -168,7 +199,7 @@ impl PyDataFrame {
         // reproducible from its own rows).
         let recomputed = volas_directive::exec::execute_refresh(df, node).map_err(value_err)?;
         let (state, before) = Self::capture_resume_states(df, node, &recomputed);
-        let from = if vr < lb { 0 } else { vr };
+        let from = if warm { vr } else { 0 };
         let tail = recomputed.slice(from, recomputed.len());
         self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;
         self.inner.set_computed_states(name, state, before);

@@ -55,7 +55,7 @@ impl PyDataFrame {
             return Err(PyValueError::new_err("min_periods must be <= window"));
         }
         Ok(PyRollingFrame {
-            frame: self.logical().into_owned(),
+            frame: self.read()?.into_owned(),
             window: window as usize,
             min_periods: min_periods.unwrap_or(window) as usize,
             center,
@@ -68,7 +68,7 @@ impl PyDataFrame {
             return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
         Ok(PyExpandingFrame {
-            frame: self.logical().into_owned(),
+            frame: self.read()?.into_owned(),
             min_periods: min_periods as usize,
         })
     }
@@ -90,7 +90,7 @@ impl PyDataFrame {
             return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
         Ok(PyEwmFrame {
-            frame: self.logical().into_owned(),
+            frame: self.read()?.into_owned(),
             alpha: crate::window::resolve_alpha(com, span, halflife, alpha)?,
             adjust,
             ignore_na,
@@ -104,13 +104,12 @@ impl PyDataFrame {
     /// raises `ValueError`.
     #[pyo3(signature = (how = "any"))]
     pub(crate) fn dropna(&self, how: &str) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        let view = self.read()?;
         if how != "any" && how != "all" {
             return Err(PyValueError::new_err(format!(
                 "dropna: invalid `how` {how:?} (expected 'any' or 'all')"
             )));
         }
-        let view = self.logical();
         let df = view.as_ref();
         let cols = df.columns();
         let total = cols.len();
@@ -137,7 +136,7 @@ impl PyDataFrame {
     /// `fillna(method=)`).
     #[pyo3(signature = (value, limit = None))]
     pub(crate) fn fillna(&self, value: &Bound<'_, PyAny>, limit: Option<i64>) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
+        let view = self.read()?;
         // Per column, fill the missing cells with the typed scalar (str into str,
         // Timestamp / datetime string into datetime, number / bool into a numeric-
         // family column), mirroring the Series surface. A `volas.NA` fill is a
@@ -150,7 +149,6 @@ impl PyDataFrame {
             return Err(PyValueError::new_err("limit must be >= 0"));
         }
         let na_like = is_na_like_py(value);
-        let view = self.logical();
         let cols = view
             .as_ref()
             .columns()
@@ -209,7 +207,6 @@ impl PyDataFrame {
     /// rounding; non-float columns are unchanged.
     #[pyo3(signature = (decimals = 0))]
     pub(crate) fn round(&self, decimals: i32) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
         // Round numeric columns dtype-preservingly (banker's f64, integer-exact
         // i64); leave bool / str / datetime untouched, like pandas df.round.
         self.map_columns(|c| {

@@ -33,14 +33,13 @@ pub struct PyEwmFrame {
 
 /// Apply a Series-level window op over every column of `frame` (a non-numeric
 /// column errors, like pandas with `numeric_only=False`). A frame-level window
-/// is a BULK read — it would aggregate a stale cached-directive column as if
-/// it were data — so it carries the same fulfill guard as to_numpy / iloc
-/// (same-guard symmetry, E8; self-audit SA2-3).
+/// is a BULK read: `frame` is the snapshot the `rolling` / `expanding` / `ewm`
+/// factory took through the read gate (`PyDataFrame::readable`), so it is fresh and
+/// holds the visible rows only.
 fn frame_window(
     frame: &DataFrame,
     op: impl Fn(&PySeries) -> PyResult<PySeries>,
 ) -> PyResult<PyDataFrame> {
-    crate::ensure_fresh(frame)?;
     let wrapper = PyDataFrame::plain(frame.clone());
     wrapper.map_cols(|s| {
         s.inner.data.require_numeric().map_err(pyerr)?;

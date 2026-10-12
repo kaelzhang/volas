@@ -714,6 +714,16 @@ pub fn accumulates(name: &str, sub: Option<&str>) -> bool {
     }
 }
 
+/// Whether continuing a command reads one row more than its lookback: the row its
+/// window drops (a sliding sum — [`accumulates`] — KAMA's volatility sum, PSY's count
+/// of up days, the extremum-position window) or SAR's bar before the previous one. The
+/// one per-command fact behind [`crate::lookback::reach`]; guarded over every command by the
+/// continuation-reach test.
+pub fn reads_past_lookback(name: &str, sub: Option<&str>) -> bool {
+    accumulates(name, sub)
+        || matches!(name, "kama" | "psy" | "maxindex" | "minindex" | "minmaxindex" | "sar" | "sarext")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

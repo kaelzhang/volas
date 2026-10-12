@@ -10,7 +10,7 @@ the listing.
 ```py
 # --- DataFrame: metadata --------------------------------------------------
 df.columns / df.shape / len(df) / df.dtypes      # dtypes -> dict
-df.index                          # row labels, as a NumPy array
+df.index                          # row labels, as a NumPy array (a tz-aware index: its UTC instants)
 col in df ; for col in df         # membership / iterate column names
 df.tz / df.tz_localize(tz) / df.tz_convert(tz)   # DatetimeIndex tz; see Timezones
 
@@ -24,12 +24,13 @@ df.head(n=5) / df.tail(n=5)
 # --- DataFrame: reshaping & dtypes ----------------------------------------
 df.drop([label, ...], axis=0)     # drop rows by label (axis=1 -> columns)
 df.dropna(how='any') / df.sort_index(ascending=True) / df.reset_index(drop=False)
-df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)
+df.rename({old: new}) / df.astype({col: dtype}) / df.set_index(col)  # astype: data columns only
+df[[]]                                  # no columns over the same rows (pandas)
 df.astype({col: 'datetime64[s]'})  # numeric epoch -> datetime (unit s|ms|us|ns; truncating)
 df.copy() / df.equals(other) / df.to_csv(path=None, ...)   # to_numpy: see its own section (dtype, na_value)
 
 # --- DataFrame: writing ---------------------------------------------------
-df[col] = scalar | array | Series          # add / replace a column (positional)
+df[col] = scalar | array | Series          # add / replace a column (Series: same index)
 df.loc[mask, col] = value ; df.iloc[i, j] = value ; df.at[label, col] = value
 
 # --- Series ---------------------------------------------------------------
@@ -134,7 +135,7 @@ df.loc[label]       # a Row by index label
 df.loc[lo:hi]       # inclusive label slice (lexicographic for string indexes)
 df.at[label, col]   # a scalar by label + column
 df.iat[i, j]        # a scalar by position
-df.index            # the row labels, as a NumPy array
+df.index            # the row labels, as a NumPy array (a tz-aware index: its UTC instants)
 ```
 
 String (symbol) index — `set_index` on a string column, then look up by symbol:
@@ -201,12 +202,22 @@ single-level, OHLCV-shaped index that candlestick data uses.
 ## Writing & assignment
 
 Assign a whole column, or write into a positional / label / boolean selection
-(copy-on-write under the hood). Series assignment is **positional** (by row order,
-not index-aligned).
+(copy-on-write under the hood). A Series value must carry the frame's index (the same
+labels; the alignment rule of every operand) and is then paired by position — volas
+never re-aligns by label, so a differently-labelled Series raises. A scalar — a Python
+`int` / `float` / `bool` / `str`, a NumPy scalar or a 0-d array — fills the column and
+keeps its exact type: an int is an `int64` column (never a float), `np.int32(7)` an
+`int32` one, `np.float32(0.5)` a `float32` one, `np.array(True)` a `bool` one. An array
+of any other shape, a list or a tuple is values, one per row (a one-element array on a
+two-row frame is a length error, never a broadcast). A boolean-frame mask
+(`df[mask] = v`) pairs with the columns by **name** and must carry the frame's index.
+Every cell write (`iloc` / `loc` / `iat` / `at`, `df[mask] = v`) lands in place and,
+like a bulk read, raises while a cached directive column is stale; a mask that selects
+no row changes nothing.
 
 ```py
 df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)
-df.iat[3, 0] = 99.0                     # one cell by position
+df.iat[3, 0] = 99.0                     # one cell by position (one value: an array raises)
 df.at[label, 'close'] = 99.0            # one cell by label + column
 df.iloc[10:20, 0] = 0.0                 # a column slice
 df.loc[df['close'] > df['open'], 'signal'] = 1.0   # masked column assignment

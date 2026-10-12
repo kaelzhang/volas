@@ -31,6 +31,27 @@ pub(crate) fn is_na_like_py(v: &Bound<'_, PyAny>) -> bool {
         || v.get_type().name().map(|n| n == "NAType").unwrap_or(false)
 }
 
+/// Whether an assigned value is an array of values rather than one value — the one
+/// classification every assignment surface shares: a list, a tuple, a `Series`, or
+/// anything with one or more dimensions (an `ndarray`, a pandas object) is an array;
+/// a Python / NumPy scalar and a 0-d array are one value. Never decided by whether
+/// the value converts to a number (NumPy converts a one-element array, deprecated).
+pub(crate) fn is_array(v: &Bound<'_, PyAny>) -> bool {
+    use pyo3::types::{PyBool, PyFloat, PyInt};
+    if v.is_exact_instance_of::<PyFloat>()
+        || v.is_exact_instance_of::<PyInt>()
+        || v.is_exact_instance_of::<PyBool>()
+        || v.is_instance_of::<PyString>()
+        || v.is_none()
+    {
+        return false; // the live bar cells: no attribute lookup
+    }
+    if v.is_instance_of::<PyList>() || v.is_instance_of::<PyTuple>() || v.extract::<PyRef<PySeries>>().is_ok() {
+        return true;
+    }
+    v.getattr("ndim").ok().and_then(|n| n.extract::<usize>().ok()).is_some_and(|n| n >= 1)
+}
+
 /// Build a length-1 [`Column`] of EXACTLY the `target` dtype from a Python scalar
 /// — the one scalar-write conversion behind every target-typed write (`iat` /
 /// `iloc` / `at` / `loc` / Series setitem / mask assignment / dict `append`). A
@@ -45,6 +66,12 @@ pub(crate) fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<
     // uniform across every dtype and every assignment surface.
     if is_na_like_py(v) {
         return Ok(Column::na_of(target, 1));
+    }
+    if is_array(v) {
+        return Err(PyTypeError::new_err(format!(
+            "a cell takes one value, not an array ({}) — pass the element itself",
+            v.get_type().name()?
+        )));
     }
     match target {
         DType::F64 | DType::F32 | DType::I64 | DType::I32 => {
@@ -109,9 +136,8 @@ fn number_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
 }
 
 /// Assign a Python **scalar** into `col` at `positions`, via the shared
-/// `scalar_to_column` + [`Column::scatter`] primitive — the single assignment
-/// path behind Series setitem and DataFrame boolean-mask assignment (the
-/// `.loc/.iloc/.at/.iat` indexers reach `scatter` through `assign_positions`).
+/// `scalar_to_column` + [`Column::scatter`] primitive — the Series setitem path (a
+/// DataFrame's cell writes reach `scatter` through `PyDataFrame::write_cells`).
 ///
 /// A column with **no selected positions** is returned unchanged, so a typed fill
 /// (a string into a str column, say) errors only when it actually targets a cell
@@ -141,11 +167,7 @@ pub(crate) fn value_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
 /// Resolve a `df[...] = value` right-hand side for `n` selected rows: a scalar is
 /// broadcast (length-1 column), an array-like must match `n`.
 pub(crate) fn resolve_assignment(v: &Bound<'_, PyAny>, target: DType, n: usize) -> PyResult<Column> {
-    // A Python str has `__len__` but is a scalar here; everything else with
-    // `__len__` (list / ndarray / Series) is array-like.
-    let is_str = v.extract::<String>().is_ok();
-    let arraylike = !is_str && v.hasattr("__len__").unwrap_or(false);
-    if arraylike {
+    if is_array(v) {
         let col = value_to_column(v)?;
         if col.len() != n {
             return Err(PyValueError::new_err(format!(
@@ -393,10 +415,9 @@ pub struct DataFrameILoc {
 impl DataFrameILoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
-        ensure_fresh(&pf.inner)?;
         // Position the read against the logical M view (zero-cost borrow when
         // unbounded), so `iloc[i]` indexes the visible window, never the margin.
-        let view = pf.logical();
+        let view = pf.read()?;
         let df = view.as_ref();
         // 2-D positional get: df.iloc[rows, cols], symmetric with __setitem__.
         if let Ok(tup) = key.downcast::<PyTuple>() {
@@ -430,18 +451,14 @@ impl DataFrameILoc {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        ensure_fresh(&pf.inner)?;
         let (rows, col) = split_row_col(key, "iloc")?;
-        // Resolve positions against the logical M view, then map them back onto the
-        // physical rows by adding the window offset (identity when unbounded).
-        let (start, len) = pf.logical_range();
+        // Positions of the visible rows; the write path maps them onto the frame.
+        let len = pf.meta().range().1;
         let j = norm_idx(col.extract::<isize>()?, pf.inner.width())?;
-        let positions: Vec<usize> = iloc_positions(&rows, len)?.into_iter().map(|p| p + start).collect();
+        let positions = iloc_positions(&rows, len)?;
         let target = pf.inner.columns()[j].dtype();
         let val = resolve_assignment(value, target, positions.len())?;
-        pf.inner
-            .assign_positions(j, &positions, &val)
-            .map_err(pyerr)
+        pf.write_cells(vec![(j, positions, val)])
     }
 }
 
@@ -497,7 +514,7 @@ pub(crate) fn label_bounds(
         }
         let text = obj.is_instance_of::<PyString>();
         let label = match index.kind() {
-            IndexKind::Range(_) | IndexKind::Int64(_) if text => Label::Str(obj.extract()?),
+            IndexKind::Range { .. } | IndexKind::Int64(_) if text => Label::Str(obj.extract()?),
             IndexKind::Str(_) if !text => match obj.extract::<i64>() {
                 Ok(x) => Label::I64(x),
                 Err(_) => parse_label(&obj, index)?,
@@ -519,10 +536,9 @@ pub struct DataFrameLoc {
 impl DataFrameLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
-        ensure_fresh(&pf.inner)?;
         // Resolve labels against the logical M view (zero-cost borrow when
         // unbounded), so a margin label is never addressable through `loc`.
-        let view = pf.logical();
+        let view = pf.read()?;
         let df = view.as_ref();
         let index = df.index();
         // 2-D label get: df.loc[rows, col], symmetric with __setitem__.
@@ -586,29 +602,20 @@ impl DataFrameLoc {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        ensure_fresh(&pf.inner)?;
         let (rows, col) = split_row_col(key, "loc")?;
         let colname: String = col.extract().map_err(|_| {
             PyTypeError::new_err("loc assignment column must be a single column name")
         })?;
-        // Resolve labels against the logical M view, then offset onto physical rows.
-        let (start, len) = pf.logical_range();
-        let positions: Vec<usize> = {
-            let lidx = pf.logical_index();
-            loc_positions(&rows, &lidx, len)?
-        }
-        .into_iter()
-        .map(|p| p + start)
-        .collect();
+        // Resolve labels against the visible rows; the write path maps them onto the frame.
+        let len = pf.meta().range().1;
+        let positions: Vec<usize> = loc_positions(&rows, &pf.meta().labels(), len)?;
         let j = pf
             .inner
             .column_pos(&colname)
             .ok_or_else(|| PyKeyError::new_err(format!("column {colname:?} not found")))?;
         let target = pf.inner.columns()[j].dtype();
         let val = resolve_assignment(value, target, positions.len())?;
-        pf.inner
-            .assign_positions(j, &positions, &val)
-            .map_err(pyerr)
+        pf.write_cells(vec![(j, positions, val)])
     }
 }
 
@@ -622,11 +629,10 @@ pub struct DataFrameIat {
 impl DataFrameIat {
     fn __getitem__(&self, py: Python<'_>, key: (isize, isize)) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
-        ensure_fresh(&pf.inner)?;
-        let (start, len) = pf.logical_range();
-        let i = norm_idx(key.0, len)? + start;
-        let j = norm_idx(key.1, pf.inner.width())?;
-        Ok(np_scalar_to_py(py, &pf.inner.columns()[j], i))
+        let view = pf.read()?;
+        let i = norm_idx(key.0, view.rows())?;
+        let (col, at) = view.cells(norm_idx(key.1, view.width())?);
+        Ok(np_scalar_to_py(py, col, at + i))
     }
 
     /// `df.iat[i, j] = scalar` — set a single cell by position (copy-on-write).
@@ -637,13 +643,11 @@ impl DataFrameIat {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        ensure_fresh(&pf.inner)?;
-        let (start, len) = pf.logical_range();
-        let i = norm_idx(key.0, len)? + start;
+        let i = norm_idx(key.0, pf.meta().range().1)?;
         let j = norm_idx(key.1, pf.inner.width())?;
         let target = pf.inner.columns()[j].dtype();
         let val = scalar_to_column(value, target)?;
-        pf.inner.assign_positions(j, &[i], &val).map_err(pyerr)
+        pf.write_cells(vec![(j, vec![i], val)])
     }
 }
 
@@ -657,16 +661,18 @@ pub struct DataFrameAt {
 impl DataFrameAt {
     fn __getitem__(&self, py: Python<'_>, key: (Py<PyAny>, String)) -> PyResult<Py<PyAny>> {
         let pf = self.parent.borrow(py);
-        ensure_fresh(&pf.inner)?;
-        let (start, _len) = pf.logical_range();
-        let lidx = pf.logical_index();
+        let view = pf.read()?;
+        let meta = pf.meta();
+        let lidx = meta.labels();
         let label = parse_label(key.0.bind(py), &lidx)?;
         let i = lidx
             .position_of(&label)
-            .ok_or_else(|| PyKeyError::new_err("label not found"))?
-            + start;
-        let col = pf.inner.column(&key.1).map_err(pyerr)?;
-        Ok(np_scalar_to_py(py, col, i))
+            .ok_or_else(|| PyKeyError::new_err("label not found"))?;
+        let j = view.column_pos(&key.1).ok_or_else(|| {
+            PyKeyError::new_err(format!("column \"{}\" not found", key.1))
+        })?;
+        let (col, at) = view.cells(j);
+        Ok(np_scalar_to_py(py, col, at + i))
     }
 
     /// `df.at[label, col] = scalar` — set a single cell by label + column name
@@ -678,14 +684,11 @@ impl DataFrameAt {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
-        ensure_fresh(&pf.inner)?;
         let i = {
-            let (start, _len) = pf.logical_range();
-            let lidx = pf.logical_index();
+            let meta = pf.meta();
+            let lidx = meta.labels();
             let label = parse_label(key.0.bind(py), &lidx)?;
-            lidx.position_of(&label)
-                .ok_or_else(|| PyKeyError::new_err("label not found"))?
-                + start
+            lidx.position_of(&label).ok_or_else(|| PyKeyError::new_err("label not found"))?
         };
         let j = pf
             .inner
@@ -693,7 +696,7 @@ impl DataFrameAt {
             .ok_or_else(|| PyKeyError::new_err(format!("column {:?} not found", key.1)))?;
         let target = pf.inner.columns()[j].dtype();
         let val = scalar_to_column(value, target)?;
-        pf.inner.assign_positions(j, &[i], &val).map_err(pyerr)
+        pf.write_cells(vec![(j, vec![i], val)])
     }
 }
 

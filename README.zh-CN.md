@@ -351,7 +351,7 @@ df.exec('ma:20')
 
 按 `key` 直接取列，返回一个 `Series`，并且**绝不触发计算**。`df[key]` 会把未知
 key 当作指标 directive 解析并执行；`get_column` 只读取已经存在的列，不存在就抛
-`KeyError`。当列名来自外部数据（CSV 表头、用户输入、配置）时，请优先使用它，避免像 `"ma:5"` 这样恰好长得像 directive 的列名悄悄触发计算。
+`KeyError`。当列名来自外部数据（CSV 表头、用户输入、配置）时，请优先使用它，避免像 `"ma:5"` 这样恰好长得像 directive 的列名悄悄触发计算。它属于列读取：`append` 之后变为过期（stale）的缓存指标列会先被刷新再返回，与 `df[key]` 一致。
 
 ```py
 df = DataFrame({
@@ -823,7 +823,7 @@ directive_lookback('repeat:5@(close > boll.upper)')
 ```py
 # --- DataFrame：元数据 ----------------------------------------------------
 df.columns / df.shape / len(df) / df.dtypes      # dtypes -> dict
-df.index                          # 行标签，作为一个 NumPy 数组
+df.index                          # 行标签，作为一个 NumPy 数组（tz-aware 索引导出为 UTC 瞬时）
 col in df ; for col in df         # 成员判断 / 迭代列名
 df.tz / df.tz_localize(tz) / df.tz_convert(tz)   # DatetimeIndex 的 tz；见“时区”
 
@@ -1189,7 +1189,7 @@ df.loc[label]       # 按索引标签取一个 Row
 df.loc[lo:hi]       # 闭区间标签切片（字符串索引按字典序）
 df.at[label, col]   # 按标签 + 列取一个标量
 df.iat[i, j]        # 按位置取一个标量
-df.index            # 行标签，作为一个 NumPy 数组
+df.index            # 行标签，作为一个 NumPy 数组（tz-aware 索引导出为 UTC 瞬时）
 ```
 
 字符串（代码）索引：在字符串列上 `set_index`，再按代码查找：
@@ -1306,8 +1306,7 @@ naive.tz_convert('+08:00')                   # TypeError ——先用 tz_localiz
 aware.tz_localize('UTC')                     # TypeError ——已锚定；请用 tz_convert
 ```
 
-`cumulate` 到日线（或更粗）时，会把桶对齐到 frame 的本地交易日；如果使用具名时区，这个对齐具备 DST 意识。裸 `.index` 的 NumPy 导出仍保持 UTC（与 pandas `.values`
-一致）。
+`cumulate` 到日线（或更粗）时，会把桶对齐到 frame 的本地交易日；如果使用具名时区，这个对齐具备 DST 意识。裸 `.index` 的 NumPy 导出仍保持 UTC（与 pandas `.values` 一致，NumPy 没有时区槽位）；行的 `.name` 与单元格是 aware `Timestamp`。读回的标签（如 `df.index[-1]`）可以原样用于 `append`：`np.datetime64` / 整数 ns 按帧自身的时区读作 epoch 瞬时。用 `index=df.index` 构造的帧是 naive 的（UTC 瞬时），不会与 aware 帧对齐，需要先恢复时区：`mask.tz_localize('UTC').tz_convert(zone)`。
 
 ## 缺失值（`volas.NA`）
 

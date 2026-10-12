@@ -287,3 +287,62 @@ fn an_integer_fold_never_wraps() {
     d.combine_at(0, Max, &Column::datetime(vec![9]), 0).unwrap();
     assert_eq!(d.get_i64(0), 9);
 }
+
+#[test]
+fn check_fold_agrees_with_the_fold() {
+    // `check_fold` (the validation half a multi-column fold runs first) succeeds
+    // exactly when the fold itself does: init_at on the first cell when restarting,
+    // combine_at on each one — for every dtype, op, presence and source dtype.
+    use CombineOp::*;
+    let na_i64 = Column::i64_masked(vec![0], Validity::from_valid_iter(1, [false]));
+    let sources = [
+        Column::i64(vec![i64::MAX, 1, i64::from(i32::MAX) + 1, -3]),
+        na_i64.clone(),
+        Column::i32(vec![i32::MAX, 1]),
+        Column::f64(vec![1.5, 2.0, f64::NAN, 9.0e15]),
+        Column::datetime(vec![5, i64::MIN]),
+        Column::bool_from_options([Some(true), None]),
+        Column::str_from_options([Some("x".to_string()), None]),
+    ];
+    let cells = [
+        Column::f64(vec![0.0]),
+        Column::f32(vec![0.0]),
+        Column::i64(vec![1]),
+        Column::i64(vec![i64::MAX - 1]),
+        na_i64,
+        Column::i32(vec![0]),
+        Column::i32(vec![i32::MAX]),
+        Column::datetime(vec![1]),
+        Column::bool(vec![true]),
+        Column::str(vec!["a".into()]),
+    ];
+    let fold = |cell: &Column, op, restart: bool, rows: &[(usize, usize)]| -> bool {
+        let mut c = cell.clone();
+        rows.iter().enumerate().all(|(k, &(j, r))| {
+            if restart && k == 0 {
+                c.init_at(0, op, &sources[j], r).is_ok()
+            } else {
+                c.combine_at(0, op, &sources[j], r).is_ok()
+            }
+        })
+    };
+    for cell in &cells {
+        for op in [Keep, Replace, Max, Min, Sum] {
+            for restart in [false, true] {
+                for (j, src) in sources.iter().enumerate() {
+                    for r in 0..src.len() {
+                        for rows in [vec![(j, r)], vec![(j, r), (j, r)], vec![(j, 0), (j, r)]] {
+                            let checked = cell
+                                .check_fold(0, op, restart, rows.iter().map(|&(j, r)| (&sources[j], r)))
+                                .is_ok();
+                            assert_eq!(checked, fold(cell, op, restart, &rows), "{cell:?} {op:?} {restart} {rows:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // a str cell folds in place only at the last row
+    let two = Column::str(vec!["a".into(), "b".into()]);
+    assert!(two.check_fold(0, Replace, false, [(&sources[6], 0)]).is_err());
+}

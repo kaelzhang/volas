@@ -127,8 +127,6 @@ class TfMachine(FrameMachine):
             bar = build.frame(schema, rows, ts)
             bar['zz_extra'] = [0.0] * len(bar)
         else:
-            if contracts.avoids('append-atomicity'):
-                return  # a fold that fails part-way leaves the forming state changed
             # a value the close column cannot hold exactly (the lossless conversion raises)
             bar = build.frame(schema, rows, ts)
             bar['close'] = (np.full(len(bar), 2**53 + 1, dtype='int64') if schema.dtype('close') in ('float64', 'float32')

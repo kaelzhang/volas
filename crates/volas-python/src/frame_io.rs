@@ -8,7 +8,7 @@ use pyo3::types::{PyCapsule, PyDict, PyList};
 use volas_core::{
     Column, DataFrame,
 };
-use volas_directive::{execute, parse};
+use volas_directive::parse;
 
 use crate::format::{
     cell_to_csv, csv_escape, index_label_csv,
@@ -84,7 +84,10 @@ impl PyDataFrame {
     /// Evaluate an indicator directive and return its values as a NumPy array.
     ///
     /// A pure, stateless evaluation: it parses and computes the directive and leaves
-    /// the frame untouched — no column is created, and no cache is read or written.
+    /// the frame untouched — no column is created, and no cache is read or written. A
+    /// name reads a data column (never a cached directive column, which may be stale) or
+    /// a built-in command; a name that is both is ambiguous and raises. A bounded-window
+    /// frame returns its visible rows.
     /// For a cached, incrementally-refreshed result use ``df[directive]`` (a Series)
     /// or ``df[directive].to_numpy()``.
     ///
@@ -115,23 +118,35 @@ impl PyDataFrame {
         na_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let node = parse(directive).map_err(directive_err)?;
-        let col = execute(&self.inner, &node).map_err(value_err)?;
+        let col = self.evaluate(&*self.binding_frame()?, &node, directive)?;
+        let col = match &self.window {
+            Some(_) => {
+                let (start, len) = self.logical_range();
+                col.slice(start, start + len)
+            }
+            None => col,
+        };
         if dtype.is_none() && na_value.is_none() {
             return column_into_numpy(py, col); // the fresh result, moved without a copy
         }
         column_to_numpy_with(py, &col, dtype, na_value.as_ref())
     }
 
-    /// Gets a column from the frame by name, as a Series.
+    /// Gets a column from the frame by name, as a Series. A column read: a stale cached
+    /// directive column is refreshed first (never computed when absent).
     ///
     /// Args:
     ///     key (str): the column name.
     ///
     /// Returns:
     ///     Series
-    pub(crate) fn get_column(&self, key: &str) -> PyResult<PySeries> {
-        let col = self.inner.column(key).map_err(pyerr)?.clone();
-        Ok(self.present_series(key.to_string(), col))
+    pub(crate) fn get_column(&mut self, key: &str) -> PyResult<PySeries> {
+        let name = self.column_name(key).ok_or_else(|| pyerr(VolasError::ColumnNotFound(key.to_string())))?;
+        if self.inner.is_computed(&name) {
+            self.refresh_computed(Some(&name))?;
+        }
+        let col = self.inner.column(&name).map_err(pyerr)?.clone();
+        Ok(self.present_series(name, col))
     }
 
     /// A copy of the frame — preserving the cached directive columns / cursor and
@@ -149,8 +164,7 @@ impl PyDataFrame {
     /// exports as `datetime64[ns, UTC]`; the index keeps its own zone.
     #[pyo3(signature = (dtype_backend = "numpy"))]
     pub(crate) fn to_pandas<'py>(&self, py: Python<'py>, dtype_backend: &str) -> PyResult<Bound<'py, PyAny>> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         // 'numpy' (default): an int/bool column with NA exports as float64+NaN, the
         // most ecosystem-compatible form. 'numpy_nullable': a faithful, lossless
@@ -170,9 +184,9 @@ impl PyDataFrame {
             data.set_item(name, column_to_pandas(py, &pd, col, nullable)?)?;
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("index", index_to_numpy(py, df.index())?)?;
+        kwargs.set_item("index", index_values(py, df.index())?)?;
         let pdf = pd.call_method("DataFrame", (data,), Some(&kwargs))?;
-        // A tz-aware frame exports a UTC-naive datetime64 index (index_to_numpy); restore the
+        // A tz-aware frame exports a UTC-naive datetime64 index (index_values); restore the
         // display zone so the pandas index is tz-aware — a faithful round-trip with from_pandas.
         if let Some(tz) = self.tz() {
             let aware = pdf
@@ -205,10 +219,9 @@ impl PyDataFrame {
         columns: Option<Vec<String>>,
         float_format: Option<&str>,
     ) -> PyResult<Option<String>> {
-        ensure_fresh(&self.inner)?;
         // Windowed: emit only the logical M rows (a zero-cost borrow when unbounded)
         // — the CSV never carries the hidden margin.
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let ff = parse_ff(float_format)?;
         let names = df.names();
@@ -267,8 +280,7 @@ impl PyDataFrame {
         requested_schema: Option<PyObject>,
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let _ = requested_schema;
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         crate::arrow::frame_c_stream(py, df.names(), df.columns())
     }
@@ -324,10 +336,9 @@ impl PyDataFrame {
         dtype: Option<&str>,
         na_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        ensure_fresh(&self.inner)?;
         // Windowed: export only the logical M rows (a zero-cost borrow when
         // unbounded) — the NN feature matrix is exactly the visible window.
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let cols = df.columns();
         let has_str = cols.iter().any(|c| matches!(c, Column::Str(..)));
@@ -454,8 +465,7 @@ impl PyDataFrame {
     ///         to every column (a string column raises — there is no float meaning).
     #[pyo3(signature = (out, columns = None))]
     pub(crate) fn fill_into(&self, out: &Bound<'_, PyAny>, columns: Option<Vec<String>>) -> PyResult<()> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let positions: Vec<usize> = match &columns {
             Some(cols) => cols
@@ -529,8 +539,6 @@ impl PyDataFrame {
 
     /// Value equality (same columns + index + values, `NaN == NaN`).
     pub(crate) fn equals(&self, other: &PyDataFrame) -> PyResult<bool> {
-        ensure_fresh(&self.inner)?;
-        ensure_fresh(&other.inner)?;
-        Ok(self.logical().as_ref().equals(other.logical().as_ref()))
+        Ok(self.read()?.equals(&*other.read()?))
     }
 }

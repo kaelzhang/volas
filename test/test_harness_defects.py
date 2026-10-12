@@ -44,18 +44,17 @@ def _same(a, b):
 # --- atomicity (I8) -----------------------------------------------------------------
 
 
-@_xfail('M1 append-atomicity', 'a dtype error on a later column leaves earlier columns grown')
 def test_a_rejected_append_leaves_the_frame_unchanged():
+    # (an int64 volume onto a float64 one is converted losslessly, contract #20; text is not)
     df = volas.DataFrame({'open': [1.0, 2.0], 'close': [1.5, 2.5], 'volume': [10.0, 20.0]})
     with pytest.raises(TypeError):
-        df.append(volas.DataFrame({'open': [3.0], 'close': [3.5], 'volume': np.array([30], 'int64')}))
+        df.append(volas.DataFrame({'open': [3.0], 'close': [3.5], 'volume': ['x']}))
     assert [len(df.get_column(c)) for c in df.columns] == [2, 2, 2]
 
 
 # --- name binding (I9) ---------------------------------------------------------------
 
 
-@_xfail('M2 stale-name-binding', 'a composite cached over a stale bare-named cached column keeps its NaN')
 def test_a_composite_never_reads_a_stale_cached_column():
     cols = _walk(30)
     df = _frame(cols, 0, 28)
@@ -79,7 +78,6 @@ def test_stringify_is_the_cached_column_name(directive):
 # --- freshness of read surfaces (I10) ----------------------------------------------------
 
 
-@_xfail('M3 unguarded-stale-read', "exec of a bare cached name returns the stale placeholder")
 def test_exec_is_fresh_on_a_stale_frame():
     cols = _walk(30)
     df = _frame(cols, 0, 29)
@@ -88,17 +86,15 @@ def test_exec_is_fresh_on_a_stale_frame():
     assert _same(df.exec('obv'), _frame(cols, 0, 30).exec('obv'))
 
 
-@_xfail('M3 unguarded-stale-read', 'get_column of a stale computed column returns the placeholder')
-def test_get_column_of_a_stale_computed_column_raises():
+def test_get_column_of_a_stale_computed_column_refreshes_it():
+    # a column read (CONTRACT #12) — the placeholder is never returned
     cols = _walk(30)
     df = _frame(cols, 0, 29)
     df['ema:3']
     df.append(_frame(cols, 29, 30))
-    with pytest.raises(ValueError, match='stale'):
-        df.get_column('ema:3')
+    assert _same(df.get_column('ema:3'), _frame(cols, 0, 30)['ema:3'])
 
 
-@_xfail('C5 stale-compare-rhs', 'a comparison consumes a stale right-hand frame')
 def test_a_comparison_rejects_a_stale_right_hand_frame():
     cols = _walk(30)
     a = _frame(cols, 0, 29)
@@ -111,7 +107,6 @@ def test_a_comparison_rejects_a_stale_right_hand_frame():
         a == b  # noqa: B015
 
 
-@_xfail('H2 stale-append-source', 'append copies a stale source frame placeholders as data')
 def test_appending_a_stale_frame_raises():
     cols = _walk(30)
     src = _frame(cols, 20, 29)
@@ -123,7 +118,6 @@ def test_appending_a_stale_frame_raises():
         df.append(src)
 
 
-@_xfail('C4 windowed-source-margin', "a windowed source contributes its hidden margin rows")
 def test_a_windowed_source_contributes_only_its_visible_rows():
     cols = _walk(20)
     src = volas.DataFrame({k: v[:10] for k, v in cols.items()}, window=3, max_lookback=4)
@@ -132,7 +126,6 @@ def test_a_windowed_source_contributes_only_its_visible_rows():
     assert len(df) == 2 + len(src)
 
 
-@_xfail('H3 windowed-stale-logical-read', 'a stale windowed frame reads through its visible slice')
 def test_a_stale_windowed_frame_rejects_a_bulk_read():
     cols = _walk(40)
     df = volas.DataFrame({k: v[:30] for k, v in cols.items()}, window=1, max_lookback=19)
@@ -151,13 +144,11 @@ def _dated():
     return volas.DataFrame({'time': _T[:3], 'close': [1.0, 2.0, 3.0]}).set_index('time')
 
 
-@_xfail('M6 append-index-coercion', 'a RangeIndex bar turns a DatetimeIndex into int labels')
 def test_a_range_index_bar_onto_a_datetime_frame_raises():
     with pytest.raises(ValueError):
         _dated().append(volas.DataFrame({'close': [4.0]}))
 
 
-@_xfail('M6 append-index-coercion', 'a naive bar onto an aware frame is taken as UTC')
 def test_a_naive_bar_onto_an_aware_frame_raises():
     df = _dated().tz_localize('Asia/Shanghai')
     with pytest.raises(ValueError):
@@ -206,6 +197,15 @@ def test_fast_above_slow_resumes_like_the_full_compute(directive):
         df.append(_frame(cols, i, i + 1))
     df.fulfill()
     assert _same(df[directive], _frame(cols, 0, 60)[directive])
+
+
+@_xfail('ichimoku-tenkan-lookback', 'senkou_a lookback ignores a tenkan period above the kijun')
+def test_senkou_a_cached_before_its_first_value_continues_on_append():
+    cols = _walk(12)
+    df = _frame(cols, 0, 9)
+    df['ichimoku.senkou_a:9,1']
+    df.append(_frame(cols, 9, 10))
+    assert _same(df['ichimoku.senkou_a:9,1'], _frame(cols, 0, 10)['ichimoku.senkou_a:9,1'])
 
 
 def test_a_huge_value_outside_the_window_does_not_skew_linearreg():
@@ -306,7 +306,7 @@ def test_trix_resume_matches_on_zero_prices():
     assert _same(df['trix:1'], volas.DataFrame({'close': vals})['trix:1'])
 
 
-@_xfail('H19 slice-recursive-rewarm', 'a recursive composite re-warms on a slice instead of continuing')
+@_xfail('H19 slice-recursive-rewarm', 'a recursive composite is not continued across a slice (it stays data)')
 def test_a_recursive_composite_continues_across_a_slice():
     cols = _walk(40, 3)
     df = _frame(cols, 0, 30)

@@ -82,6 +82,11 @@ def test_update_then_append(directive):
     _eq(df[directive].to_numpy(), _gt(directive, h))
 
 
+# Recursions that carry no resume state: a slice that drops their head cannot continue
+# them exactly, so it keeps their values as data (never a restarted recursion).
+NO_STATE = {'crsi'}
+
+
 @pytest.mark.parametrize('directive', DIRECTIVES)
 def test_slice_then_append(directive):
     """Combination: cache, slice off the head, append, fulfill — the carried state continues
@@ -89,6 +94,10 @@ def test_slice_then_append(directive):
     df = DataFrame(A)
     df[directive]
     sub = df.iloc[LO:]
+    assert sub.is_computed(directive) == (directive not in NO_STATE)
+    if directive in NO_STATE:
+        _eq(sub[directive].to_numpy(), _gt(directive, A)[LO:])
+        return
     sub.append(DataFrame(BARS))
     sub.fulfill()
     h = {k: np.concatenate([A[k], BARS[k]]) for k in A}

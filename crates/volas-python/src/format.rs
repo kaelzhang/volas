@@ -67,7 +67,7 @@ pub(crate) fn csv_escape(field: String, sep: &str) -> String {
 /// two distinct labels) and the file parses back to the same instants.
 pub(crate) fn index_label_csv(index: &Index, i: usize) -> String {
     match index.kind() {
-        IndexKind::Range(_) => i.to_string(),
+        IndexKind::Range { start, .. } => (start + i as i64).to_string(),
         IndexKind::Int64(v) => v[i].to_string(),
         IndexKind::Datetime(v, tz) => datetime::format_ns_offset(v[i], *tz),
         IndexKind::Str(v) => v[i].clone(),
@@ -198,7 +198,7 @@ fn fmt_date(ns: i64, tz: Tz) -> String {
 /// every displayed instant is midnight, else the full timestamp).
 fn index_cells(index: &Index, rows: &[usize]) -> Vec<String> {
     match index.kind() {
-        IndexKind::Range(_) => rows.iter().map(|&i| i.to_string()).collect(),
+        IndexKind::Range { start, .. } => rows.iter().map(|&i| (start + i as i64).to_string()).collect(),
         IndexKind::Int64(v) => rows.iter().map(|&i| v[i].to_string()).collect(),
         IndexKind::Str(v) => rows.iter().map(|&i| v[i].clone()).collect(),
         IndexKind::Datetime(v, tz) => {

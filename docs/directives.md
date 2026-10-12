@@ -105,6 +105,33 @@ free), then auto-refreshes its stale tail on access after an `append`. Use
 `df.exec(directive)` to compute a directive as a NumPy array **without**
 caching it (see [Usage](dataframe-api.md#usage)).
 
+### Names: a data column or a built-in command
+
+A bare name in a directive (`close`, `obv`, `change` — no colon, no arguments) reads a
+**data column** of the frame or runs the **built-in command** of that name. It never
+reads a cached directive column: a new directive (`df[d]`, `df.exec(d)`) computes from
+the data columns, so `df['close - obv']` runs the `obv` command even when `obv` is also
+cached (and possibly stale after an `append`).
+
+A name that is **both** a data column and a built-in command usable bare is ambiguous
+and raises when the directive is bound:
+
+```text
+DirectiveValueError: ambiguous name 'change' in 'close * change': it is both a column of this DataFrame and the built-in command 'change'. Write 'change:' to use the command, or rename the column — df.rename(columns={'change': 'change_pct'}) — to use the data.
+```
+
+`close * change:` runs the command; renaming the column reads the data. For the same
+reason, once a cached directive reads a command through its bare name, a data column of
+that name cannot be added (it would change what the cached directive refreshes):
+
+```text
+ValueError: cannot add column 'change': the cached directive 'close*change' uses the built-in command 'change' under that name. Rename the new column, or drop the cached directive first — df.drop(['close*change'], axis=1).
+```
+
+A plain column read, `df['change']`, is not a directive and returns the column. The
+command form of a name a data column holds, `df['change:']`, returns the command's
+values without caching them (the column keeps the name).
+
 ## Error handling
 
 Directive problems raise typed exceptions. Both subclass `DirectiveError` and the

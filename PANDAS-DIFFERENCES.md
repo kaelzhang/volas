@@ -529,6 +529,17 @@ labels into a UTC column. Restore a zone by converting the instants:
 `df.set_index('t').tz_localize('UTC').tz_convert(zone)` (or `.dt.tz_convert(zone)` on
 the pandas side).
 
+A tz-aware **index** exports by the same rule: `df.index` is its UTC instants as
+`datetime64[ns]` (NumPy has no zone slot), while a row's `.name` and a cell are aware
+`Timestamp`s. A label read back from `df.index` is the same label: a label written to a
+frame follows contract #17 — an aware value is an instant, a naive `Timestamp` /
+`datetime` / string a wall clock (a naive / aware mix raises) — and a raw epoch-ns count,
+an integer or an `np.datetime64`, is read in the frame's zone. A frame built with
+`index=df.index` of an aware frame is naive (UTC instants) and does not align with it;
+restore the zone as for a column: `mask.tz_localize('UTC').tz_convert(zone)`. Labels
+given as `index=` keep the one zone their aware timestamps carry; aware and naive
+timestamps, or two zones, in one index raise.
+
 A scalar `Timestamp` compares like pandas': with another instant (a `Timestamp`, a
 `datetime` / `pd.Timestamp`, an `np.datetime64`) by instant, naive and aware never
 equal; a string or an integer (an epoch included) is not an instant — `==` is `False`,
@@ -563,8 +574,23 @@ rejects it so an exchange adding a field can never quietly lose data.
 Rows appended with a default `RangeIndex` carry no labels of their own, so they take
 the next row labels: appended to a frame with integer labels `0, 1, 2`, one such row
 is labelled `3` (pandas `concat` keeps the row's own `0`, giving `0, 1, 2, 0`). This
-keeps a sliced or windowed frame's labels absolute and gap-free. Rows appended with
-explicit integer labels keep them.
+keeps a sliced or windowed frame's labels absolute and gap-free; a continued label
+that the index already holds raises, as does continuing past the int64 range. Rows
+appended with explicit integer labels keep them.
+
+The appended values take the **target's dtypes** when that changes no value (an
+integer `2` into a float column, `3.0` into an integer one); a value that would change
+raises. pandas `concat` instead upcasts the result column (`int64` + `2.5` →
+`float64`, number + text → `object`). The index kind must match too: a `DatetimeIndex`
+frame takes timestamps of the same tz awareness only, where pandas `concat` would mix
+the labels into an `object` index. A column the target caches (an indicator directive
+it computes) is rejected in the rows of every append form — it is not data, and
+pandas has no such column: select the data columns first.
+
+A scalar assigned to a whole column keeps its own dtype — a Python `int` is `int64`,
+`np.int32` is `int32`, `np.float32` is `float32` — and a one-element array is one value
+per row, not a scalar: on a frame of another height it is a length error (pandas
+broadcasts a length-1 array).
 
 A row appended with an explicit label equal to the **last** row's label **replaces**
 that row. A `DatetimeIndex` only increases — a row labelled before the last raises —
@@ -595,7 +621,9 @@ to pandas, volas does **not** support:
   automatic alignment-on-index when combining frames (volas aligns by **position**,
   and raises on a mismatch rather than silently reindexing). One rule decides every
   pairing of two labelled operands — arithmetic, comparisons, `where` / `mask`
-  conditions, `corr` / `cov` and the pairwise window statistics: the labels must be
+  conditions, `df[mask] = v` cell masks (whose columns pair by name), a Series
+  assigned to a column (`df[col] = s`), `corr` / `cov` and the pairwise window
+  statistics: the labels must be
   equal (the same instants; the index name and display zone are ignored), and a
   tz-naive index never pairs with a tz-aware one.
 - **Duplicate-label** lookups (label access assumes unique labels).

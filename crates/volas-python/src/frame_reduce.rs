@@ -16,8 +16,7 @@ impl PyDataFrame {
     /// Per-column count of non-missing values (pandas `count`) -> a Series indexed
     /// by column name (`int64`), reading each column's validity.
     pub(crate) fn count(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let names: Vec<String> = df.names().to_vec();
         let counts: Vec<i64> = df.columns().iter().map(|c| c.count() as i64).collect();
@@ -68,8 +67,7 @@ impl PyDataFrame {
     }
     /// Per-column count of distinct present values (pandas `df.nunique()`).
     pub(crate) fn nunique(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let names: Vec<String> = df.names().to_vec();
         let counts: Vec<i64> = df
@@ -90,23 +88,19 @@ impl PyDataFrame {
     /// Per-column truthiness `any` (pandas `df.any()`): a present, non-zero /
     /// True / non-empty cell counts.
     pub(crate) fn any(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
-        Ok(self.bool_reduce(true))
+        Ok(Self::bool_reduce(&self.read()?, true))
     }
     /// Per-column truthiness `all` (pandas `df.all()`), NA-skipping.
     pub(crate) fn all(&self) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
-        Ok(self.bool_reduce(false))
+        Ok(Self::bool_reduce(&self.read()?, false))
     }
     /// Per-column index label of the maximum (pandas `df.idxmax()`).
     pub(crate) fn idxmax(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        ensure_fresh(&self.inner)?;
-        self.idx_extreme(py, true)
+        Self::idx_extreme(py, &self.read()?, true)
     }
     /// Per-column index label of the minimum (pandas `df.idxmin()`).
     pub(crate) fn idxmin(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        ensure_fresh(&self.inner)?;
-        self.idx_extreme(py, false)
+        Self::idx_extreme(py, &self.read()?, false)
     }
 
     // --- column-wise reductions (-> a Series indexed by column name; numeric and
@@ -128,8 +122,7 @@ impl PyDataFrame {
     /// Per-column summary statistics over the numeric columns (pandas `describe`):
     /// a frame indexed by `count / mean / std / min / 25% / 50% / 75% / max`.
     pub(crate) fn describe(&self) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let idx = df.index();
         let mut names = Vec::new();
@@ -175,8 +168,7 @@ impl PyDataFrame {
     /// is assembled by the core [`Column::from_scalars`] — the supertype of the
     /// parts, each value converted losslessly (no float64 round trip).
     fn reduce_typed(&self, op: impl Fn(&Column) -> volas_core::Result<(DType, Scalar)>) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let mut names = Vec::new();
         let mut parts = Vec::new();
@@ -194,8 +186,7 @@ impl PyDataFrame {
     /// Per-numeric-column reduce via a fallible Series-level float64 helper ->
     /// f64 Series keyed by column name (non-numeric columns are skipped).
     fn try_reduce_with(&self, op: impl Fn(&PySeries) -> PyResult<f64>) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let idx = df.index();
         let mut names = Vec::new();
@@ -217,9 +208,7 @@ impl PyDataFrame {
     /// Per-column truthiness any/all over the numeric / bool columns (a str /
     /// datetime column has no truth value, as `Series.any` raises for it), NA
     /// skipped — the same core truth owner as the Series surface (#27).
-    fn bool_reduce(&self, want_any: bool) -> PySeries {
-        let view = self.logical();
-        let df = view.as_ref();
+    fn bool_reduce(df: &Fresh<'_>, want_any: bool) -> PySeries {
         let (mut names, mut vals) = (Vec::new(), Vec::new());
         for (name, c) in df.names().iter().zip(df.columns()) {
             if crate::frame::reduces(c) {
@@ -235,9 +224,7 @@ impl PyDataFrame {
 
     /// Per-column index label of the extreme -> a Series of labels keyed by
     /// column name (the label dtype follows the index kind).
-    fn idx_extreme(&self, py: Python<'_>, want_max: bool) -> PyResult<Py<PyAny>> {
-        let view = self.logical();
-        let df = view.as_ref();
+    fn idx_extreme(py: Python<'_>, df: &Fresh<'_>, want_max: bool) -> PyResult<Py<PyAny>> {
         let names: Vec<String> = df.names().to_vec();
         let mut positions = Vec::with_capacity(names.len());
         for col in df.columns() {

@@ -142,6 +142,65 @@ impl Column {
         Ok(())
     }
 
+    /// Check, writing nothing, that folding `cells` — source `(column, row)` pairs in
+    /// fold order — into cell `row` under `op` succeeds: from the cell's value
+    /// ([`combine_at`](Self::combine_at) each), or with `restart` from the first cell
+    /// ([`init_at`](Self::init_at) then `combine_at` — a period's re-reduction). The
+    /// fold's failures, as the fold itself raises them: an unsupported `op`, a source
+    /// value that does not convert losslessly to this column's dtype, an integer
+    /// overflow, a `Str` cell other than the last row. A multi-column fold checks every
+    /// column with this before its first write, so a rejected fold changes nothing.
+    #[inline(never)]
+    pub fn check_fold<'c>(
+        &self,
+        row: usize,
+        op: CombineOp,
+        restart: bool,
+        cells: impl IntoIterator<Item = (&'c Column, usize)>,
+    ) -> Result<()> {
+        let dtype = self.dtype();
+        if !op.supports(dtype) {
+            return Err(op.unsupported(dtype));
+        }
+        if matches!(self, Column::Str(..)) && row + 1 != self.len() {
+            return Err(str_not_last(row, self.len()));
+        }
+        // the integer aggregate (`None` once missing); only an integer fold can overflow
+        let mut acc = match self {
+            Column::I64(buf, val) => val.is_valid(row).then(|| buf[row]),
+            Column::I32(buf, val) => val.is_valid(row).then(|| i64::from(buf[row])),
+            _ => None,
+        };
+        let integer = matches!(dtype, DType::I64 | DType::I32);
+        let mut first = restart;
+        for (src, r) in cells {
+            let converted;
+            let (src, r) = if src.dtype() == dtype {
+                (src, r)
+            } else {
+                converted = src.slice(r, r + 1).convert_lossless(dtype).map_err(|e| self.append_error(src, e))?;
+                (&converted, 0)
+            };
+            if integer {
+                let x = src.is_valid(r).then(|| src.get_i64(r));
+                acc = match (first, acc, x) {
+                    (true, _, x) => x,
+                    (false, Some(a), Some(b)) => match op {
+                        CombineOp::Keep => Some(a),
+                        CombineOp::Replace => Some(b),
+                        _ if dtype == DType::I32 => {
+                            Some(i64::from(int_combine(op, a as i32, b as i32, dtype)?))
+                        }
+                        _ => Some(int_combine(op, a, b, dtype)?),
+                    },
+                    _ => None, // a missing aggregate stays missing; a missing value makes it
+                };
+            }
+            first = false;
+        }
+        Ok(())
+    }
+
     /// Reduce `src`'s `rows` (a whole period, in order) into cell `row` under `op`
     /// in one pass — the batch reduce and a re-sent bar's re-aggregation. The dtype
     /// is dispatched once for the column; the result is exactly

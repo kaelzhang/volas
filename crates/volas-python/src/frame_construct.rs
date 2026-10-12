@@ -105,14 +105,25 @@ impl PyDataFrame {
         // pandas DataFrame is deliberately NOT accepted here — use `DataFrame.from_pandas`, which keeps
         // volas pandas-free at import. To build a DatetimeIndex from a column, parse it with
         // `to_datetime` then `set_index` (or use `read_csv`).
-        let (df, tf) = if let Ok(other) = data.extract::<PyRef<PyDataFrame>>() {
+        let (df, tf) = if let Ok(mut other) = data.extract::<PyRefMut<PyDataFrame>>() {
+            if index.is_some() || dtype.is_some() || window.is_some() || time_frame.is_some() {
+                // a derivation that re-labels, re-types, re-windows or re-frames the rows reads them
+                other.read()?;
+            }
             match &columns {
                 None => (other.inner.clone(), other.tf.clone()),
                 Some(cols) => {
-                    // Project the frame, and a tf-aware frame's forming-period state, onto
-                    // `cols`. The cumulator spec is per-column with a default, so the dropped
-                    // columns' rules simply go unused — folding stays correct on the kept ones.
-                    let inner = other.inner.select(cols).map_err(pyerr)?;
+                    // A projection reads like `df[[...]]` (stale cached columns refreshed,
+                    // the visible rows only); a tf-aware frame's forming-period state is
+                    // projected onto `cols` too. The cumulator spec is per-column with a
+                    // default, so the dropped columns' rules simply go unused — folding
+                    // stays correct on the kept ones.
+                    // A strict selection of existing columns: a name that is not one raises
+                    // (it is never computed here).
+                    if let Some(c) = cols.iter().find(|c| !other.inner.has_column(c)) {
+                        return Err(PyKeyError::new_err(format!("column \"{c}\" not found")));
+                    }
+                    let inner = other.project(cols)?;
                     let tf = match &other.tf {
                         None => None,
                         Some(t) => Some(TfState {
@@ -121,7 +132,12 @@ impl PyDataFrame {
                             open: t
                                 .open
                                 .as_ref()
-                                .map(|o| o.select(cols))
+                                .map(|o| {
+                                    // the open bars carry data columns only
+                                    let kept: Vec<String> =
+                                        cols.iter().filter(|c| o.has_column(c)).cloned().collect();
+                                    o.select(&kept)
+                                })
                                 .transpose()
                                 .map_err(pyerr)?,
                             open_key: None, // lazily recomputed by fold_append
@@ -171,6 +187,11 @@ impl PyDataFrame {
             Some(ix) => {
                 let col = pyany_to_column(ix)?;
                 let new_index = Index::from_column(&col).map_err(pyerr)?;
+                // aware labels (a frame's own `.index`) keep their zone
+                let new_index = match (crate::convert::labels_zone(ix)?, new_index.kind()) {
+                    (Some(tz), IndexKind::Datetime(v, _)) => Index::datetime(v.clone(), tz),
+                    _ => new_index,
+                };
                 DataFrame::new(df.names().to_vec(), df.columns().to_vec(), Some(new_index))
                     .map_err(pyerr)?
             }
@@ -195,7 +216,7 @@ impl PyDataFrame {
         // retention capacity (window + max_lookback) and bound the initial data to it.
         let win = build_window_state(window, max_lookback)?;
         let df = match &win {
-            Some(w) if df.height() > w.capacity => df.slice(df.height() - w.capacity, df.height()),
+            Some(w) if df.height() > w.capacity => df.retain_tail(w.capacity),
             _ => df,
         };
         // A `time_frame` makes this a cumulating frame: the given rows are bars at that
@@ -278,7 +299,7 @@ impl PyDataFrame {
     pub(crate) fn tz_localize(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
         Ok(PyDataFrame::plain(
-            self.inner.tz_localize(tzv).map_err(pyerr)?,
+            self.read()?.tz_localize(tzv).map_err(pyerr)?,
         ))
     }
 
@@ -289,13 +310,13 @@ impl PyDataFrame {
     /// attached without the naive-guard that protects user-facing `tz_convert`.
     pub(crate) fn _set_index_tz(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
-        Ok(PyDataFrame::plain(self.inner.set_index_tz(tzv).map_err(pyerr)?))
+        Ok(PyDataFrame::plain(self.read()?.set_index_tz(tzv).map_err(pyerr)?))
     }
 
     pub(crate) fn tz_convert(&self, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = Tz::parse(tz).map_err(pyerr)?;
         Ok(PyDataFrame::plain(
-            self.inner.tz_convert(tzv).map_err(pyerr)?,
+            self.read()?.tz_convert(tzv).map_err(pyerr)?,
         ))
     }
 
@@ -348,7 +369,7 @@ impl PyDataFrame {
     ///     numpy.ndarray
     #[getter]
     pub(crate) fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        index_to_numpy(py, self.logical().index())
+        index_values(py, &self.meta().labels())
     }
 
     // The indexers hold a live reference to this frame (`Py<PyDataFrame>`), not a

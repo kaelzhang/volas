@@ -114,6 +114,75 @@ pub(crate) struct WindowState {
     pub(crate) capacity: usize,
 }
 
+/// A frame's values as a reader may see them: fresh (no cached directive column waits
+/// for a refresh) and only the visible rows. Only the read gate
+/// ([`PyDataFrame::read`]) makes one, so every helper that takes a `&Fresh` reads
+/// values the gate admitted.
+pub(crate) struct Fresh<'a> {
+    /// The whole (physical) frame.
+    frame: &'a DataFrame,
+    /// The visible rows `[start, start + len)`; the whole frame when not windowed.
+    start: usize,
+    len: usize,
+    /// The visible rows as their own frame, sliced on first use (windowed only).
+    view: std::cell::OnceCell<DataFrame>,
+}
+
+impl std::ops::Deref for Fresh<'_> {
+    type Target = DataFrame;
+    fn deref(&self) -> &DataFrame {
+        if self.start == 0 && self.len == self.frame.height() {
+            return self.frame;
+        }
+        self.view.get_or_init(|| self.frame.slice(self.start, self.start + self.len))
+    }
+}
+
+impl AsRef<DataFrame> for Fresh<'_> {
+    fn as_ref(&self) -> &DataFrame {
+        self
+    }
+}
+
+impl Fresh<'_> {
+    /// The visible rows as an owned frame.
+    pub(crate) fn into_owned(self) -> DataFrame {
+        let whole = self.start == 0 && self.len == self.frame.height();
+        match self.view.into_inner() {
+            Some(view) => view,
+            None if whole => self.frame.clone(),
+            None => self.frame.slice(self.start, self.start + self.len),
+        }
+    }
+
+    /// Column `j` as stored with the offset of visible row 0 in it: one cell read in
+    /// O(1), without slicing a windowed frame's visible rows.
+    pub(crate) fn cells(&self, j: usize) -> (&Column, usize) {
+        (&self.frame.columns()[j], self.start)
+    }
+
+    /// The number of visible rows.
+    pub(crate) fn rows(&self) -> usize {
+        self.len
+    }
+}
+
+/// The value-free view of a frame ([`PyDataFrame::meta`]): what a caller may read
+/// without the read gate — names, dtypes, the visible row range and labels.
+pub(crate) struct Meta<'a>(&'a PyDataFrame);
+
+impl Meta<'_> {
+    /// The visible rows: `(start, len)` in the physical frame.
+    pub(crate) fn range(&self) -> (usize, usize) {
+        self.0.logical_range()
+    }
+
+    /// The visible rows' labels.
+    pub(crate) fn labels(&self) -> std::borrow::Cow<'_, Index> {
+        self.0.logical_index()
+    }
+}
+
 /// ``volas.DataFrame`` — an ordered, named, time-indexed OHLCV table with
 /// indicator-directive indexing and pandas-compatible positional / label access.
 ///
@@ -160,7 +229,8 @@ pub(crate) struct WindowState {
 ///         ``DataFrame.from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
 ///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
 ///     columns (list[str], optional): select and order the columns to keep (like
-///         ``df[[...]]``); a name not present raises ``KeyError``. An empty list or a
+///         ``df[[...]]``: a stale cached column is refreshed, a windowed source gives its
+///         visible rows); a name not present raises ``KeyError``. An empty list or a
 ///         duplicate name is rejected, and an absent column is never NaN-filled.
 ///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
 ///         this bar interval. The given rows are bars at that frame, each labelled with its
@@ -212,11 +282,43 @@ impl PyDataFrame {
         }
     }
 
+    /// THE read gate — the one freshness rule every reader of this frame's values goes
+    /// through, and the only way to obtain them: while a cached directive column is stale
+    /// (an append or a column write left it to recompute), a read raises instead of
+    /// returning or deriving from its placeholders. The check covers the whole physical
+    /// frame, a windowed frame's hidden margin included (a visible slice would no longer
+    /// know the column is cached). The [`Fresh`] it returns holds the visible rows only.
+    /// A column read (`df[d]`, `df[[...]]`, `get_column`) refreshes the columns it reads
+    /// first; every other read and every frame operand (comparison right-hand side,
+    /// `where` / mask condition, append source, constructor source) reads through this.
+    /// O(cached columns).
+    pub(crate) fn read(&self) -> PyResult<Fresh<'_>> {
+        self.require_fresh()?;
+        let (start, len) = self.logical_range();
+        Ok(Fresh { frame: &self.inner, start, len, view: std::cell::OnceCell::new() })
+    }
+
+    /// The freshness rule shared by the read gate and the write path (`write_cells`).
+    fn require_fresh(&self) -> PyResult<()> {
+        match self.inner.stale_cause() {
+            None => Ok(()),
+            Some(cause) => Err(PyValueError::new_err(format!(
+                "frame has stale computed (directive) columns after {cause}; call fulfill() \
+                 before a bulk or positional read or write"
+            ))),
+        }
+    }
+
+    /// The value-free view of the frame a caller may read without the gate: names,
+    /// dtypes, the visible row range and labels — none of a column's values.
+    pub(crate) fn meta(&self) -> Meta<'_> {
+        Meta(self)
+    }
+
     /// The logical view a windowed frame presents — the last `window` rows, as an
     /// owned sub-frame via `slice` (which carries the directive resume state, SP-9).
-    /// An unbounded frame borrows `inner`. Read / export / display surfaces route
-    /// through this so the hidden margin never leaks.
-    pub(crate) fn logical(&self) -> std::borrow::Cow<'_, DataFrame> {
+    /// An unbounded frame borrows `inner`. Private: values leave through [`read`].
+    fn logical(&self) -> std::borrow::Cow<'_, DataFrame> {
         match &self.window {
             Some(_) => {
                 let (start, len) = self.logical_range();
@@ -227,10 +329,8 @@ impl PyDataFrame {
     }
 
     /// The logical M view's index (the last `window` labels), as a borrow when
-    /// unbounded and an owned slice when windowed. Backs the indexer set paths,
-    /// which resolve a position/label against the visible rows before mapping it
-    /// back to a physical row via [`Self::logical_range`].
-    pub(crate) fn logical_index(&self) -> std::borrow::Cow<'_, Index> {
+    /// unbounded and an owned slice when windowed — labels, no values (see [`Meta`]).
+    fn logical_index(&self) -> std::borrow::Cow<'_, Index> {
         match &self.window {
             Some(_) => {
                 let (start, len) = self.logical_range();
@@ -239,7 +339,6 @@ impl PyDataFrame {
             None => std::borrow::Cow::Borrowed(self.inner.index()),
         }
     }
-
     /// Present a full-length column as a Series sliced to the logical M view (with
     /// the matching sliced index) — identity (a plain `wrap_series`) when unbounded.
     /// Backs windowed `df[name]` so a column read never exposes the hidden margin.
@@ -260,37 +359,41 @@ impl PyDataFrame {
     }
 
     /// After an append, drop the front history once physical retention reaches
-    /// `2*capacity`, keeping the last `capacity` rows. The drop is `DataFrame::slice`,
+    /// `2*capacity`, keeping the last `capacity` rows. The drop is `DataFrame::retain_tail`,
     /// which carries the directive resume state (SP-9) ONLY when the kept window still
     /// holds the last valid row + its `lookback` warm-up. So we first refresh the stale
     /// directive tail (bringing `valid_rows` up to `height`, anchoring the resume state
     /// inside the kept window) — otherwise an append-many-without-read run would drop the
     /// valid region and the recursion would diverge. Refreshing only at the compaction
     /// boundary (every ~`capacity` appends) keeps the per-bar cost amortized O(lookback),
-    /// the same as the lazy read-time refresh. No-op when unbounded.
-    pub(crate) fn maybe_compact(&mut self) -> PyResult<()> {
-        if let Some(w) = &self.window {
-            let cap = w.capacity;
-            if self.inner.height() >= 2 * cap {
-                self.refresh_computed(None)?;
-                let h = self.inner.height();
-                self.inner = self.inner.slice(h - cap, h);
-            }
+    /// the same as the lazy read-time refresh. Each column is refreshed on its own: one
+    /// whose compute raises (contract #26 — an int64 input past 2^53 in float64 math)
+    /// stays stale for its reader to raise, and the window still compacts — the append
+    /// that led here has happened and stands, and a row that cannot be computed leaves
+    /// the window like any other. No-op when unbounded.
+    pub(crate) fn maybe_compact(&mut self) {
+        let Some(cap) = self.window.as_ref().map(|w| w.capacity) else { return };
+        if self.inner.height() < 2 * cap {
+            return;
         }
-        Ok(())
+        for stale in self.inner.stale_computed_columns(None) {
+            // the reader raises it: a refresh error is the column's, never the append's
+            let _ = self.refresh_computed(Some(&stale.name));
+        }
+        let h = self.inner.height();
+        self.inner = self.inner.retain_tail(cap.min(h));
     }
 
     /// Element-wise comparison backing `__eq__` / `__ne__`: against another
     /// DataFrame (identical column names + shared index) or a scalar (broadcast),
     /// producing a bool DataFrame. Compared by position; never auto-aligned.
     pub(crate) fn compare(&self, other: &Bound<'_, PyAny>, op: CmpOp) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
         // Compare the logical M views (zero-cost borrow when unbounded) so the
         // result and the operand both span only the visible window.
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let cols: Vec<Column> = if let Ok(o) = other.extract::<PyRef<PyDataFrame>>() {
-            let oview = o.logical();
+            let oview = o.read()?;
             let odf = oview.as_ref();
             if df.names() != odf.names() {
                 return Err(PyValueError::new_err(
@@ -333,7 +436,7 @@ impl PyDataFrame {
     /// path behind `ffill`/`bfill`/`isna`/`round`/`clip`/… — one logical slice,
     /// margin never leaks.
     pub(crate) fn map_columns(&self, op: impl Fn(&Column) -> PyResult<Column>) -> PyResult<PyDataFrame> {
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let cols = df.columns().iter().map(&op).collect::<PyResult<Vec<_>>>()?;
         DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
@@ -345,10 +448,9 @@ impl PyDataFrame {
     /// `df.cumsum()` etc.). Each column's own dtype rule applies; a column the op
     /// rejects (e.g. a string column under a numeric transform) propagates its error.
     pub(crate) fn map_cols(&self, op: impl Fn(&PySeries) -> PyResult<PySeries>) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
         // Windowed: derive from the logical M view (zero-cost borrow when unbounded),
         // so the hidden margin never leaks into a column-wise transform.
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let idx = df.index();
         let cols = df
@@ -372,8 +474,7 @@ impl PyDataFrame {
     /// column's float64 domain values (`op_name` names it): an int64 past 2^53
     /// raises (contract #26).
     pub(crate) fn reduce_cols(&self, op_name: &str, op: impl Fn(&[f64]) -> f64) -> PyResult<PySeries> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         let mut names = Vec::new();
         let mut vals = Vec::new();
@@ -391,7 +492,6 @@ impl PyDataFrame {
     /// bool / str holes carry directionally too (like the Series version), not
     /// only float NaN. Backs `ffill` / `bfill`.
     pub(crate) fn fill_dir(&self, forward: bool) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
         self.map_columns(|c| Ok(c.fill_dir(forward)))
     }
 
@@ -399,8 +499,7 @@ impl PyDataFrame {
     /// is `[op(col_i, col_j) for i]`, indexed and labelled by the column names.
     /// Backs `corr` / `cov`.
     pub(crate) fn corr_cov(&self, op_name: &str, op: fn(&[f64], &[f64]) -> f64) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
-        let view = self.logical();
+        let view = self.read()?;
         let df = view.as_ref();
         // float64 math: an int64 past 2^53 raises (contract #26)
         let numeric: Vec<(String, Vec<f64>)> = df
@@ -430,13 +529,14 @@ impl PyDataFrame {
         other: Option<&Bound<'_, PyAny>>,
         is_where: bool,
     ) -> PyResult<PyDataFrame> {
-        ensure_fresh(&self.inner)?;
         // Operate on the logical M view (zero-cost borrow when unbounded) so a
         // windowed frame's `cond` is matched against — and the result built from —
         // the visible rows, never the hidden margin.
-        let view = self.logical();
+        let view = self.read()?;
         let base = view.as_ref();
-        if cond.inner.width() != base.width() || cond.inner.height() != base.height() {
+        let cview = cond.read()?;
+        let cond_df = cview.as_ref();
+        if cond_df.width() != base.width() || cond_df.height() != base.height() {
             return Err(PyValueError::new_err(
                 "where/mask: `cond` must have the same shape as the frame",
             ));
@@ -445,11 +545,11 @@ impl PyDataFrame {
         // position — a same-set/different-order cond is reordered to match, and
         // a different name set is an error (silently mis-applying a mask to the
         // wrong column is the worst failure mode for signal filtering).
-        let cond_inner = if cond.inner.names() == base.names() {
-            cond.inner.clone()
+        let cond_inner = if cond_df.names() == base.names() {
+            cond_df.clone()
         } else {
             let mut sorted_a: Vec<&String> = base.names().iter().collect();
-            let mut sorted_b: Vec<&String> = cond.inner.names().iter().collect();
+            let mut sorted_b: Vec<&String> = cond_df.names().iter().collect();
             sorted_a.sort();
             sorted_b.sort();
             if sorted_a != sorted_b {
@@ -457,18 +557,11 @@ impl PyDataFrame {
                     "where/mask: `cond` columns must match the frame's columns by name",
                 ));
             }
-            cond.inner.select(base.names()).map_err(pyerr)?
+            cond_df.select(base.names()).map_err(pyerr)?
         };
-        // and the row labels must agree — a cond built on a different index would
-        // silently filter the wrong rows. (Arc identity first: a cond derived
-        // from this frame shares the index handle, making the common case O(1).)
-        if !std::sync::Arc::ptr_eq(cond_inner.index(), base.index())
-            && *cond_inner.index() != *base.index()
-        {
-            return Err(PyValueError::new_err(
-                "where/mask: `cond` index must equal the frame's index",
-            ));
-        }
+        // and the row labels must agree (the one alignment rule) — a cond built on a
+        // different index would silently filter the wrong rows.
+        require_aligned(base.index(), cond_inner.index())?;
         let cond = &PyDataFrame::plain(cond_inner);
         // the condition must be boolean — a numeric mask is rejected (pandas-shaped)
         if let Some(cc) = cond
@@ -521,25 +614,32 @@ impl PyDataFrame {
         self.with_columns(cols)
     }
 
-    /// Rebuild `inner` from new columns, preserving names and index (drops the
-    /// directive cache, which a write would stale anyway). Backs mask assignment.
-    pub(crate) fn rebuild_with(&mut self, cols: Vec<Column>) -> PyResult<()> {
-        self.inner = DataFrame::new(
-            self.inner.names().to_vec(),
-            cols,
-            Some((**self.inner.index()).clone()),
-        )
-        .map_err(pyerr)?
-        .with_origin(self.inner.origin());
+    /// THE cell write path — every positional, label and mask write (`iloc` / `loc` /
+    /// `iat` / `at` assignment, `df[mask] = v`): each `(column, visible rows, values)`
+    /// write lands in place (copy-on-write), the values already of the column's dtype
+    /// (or one value, broadcast). A stale frame accepts no write — the rule of the read
+    /// gate, decided here once. Writing in place keeps every cached column's identity: a
+    /// written cached column becomes plain data, every other one goes stale
+    /// (`DataFrame::assign_positions`). A write selecting no row changes nothing.
+    pub(crate) fn write_cells(&mut self, writes: Vec<(usize, Vec<usize>, Column)>) -> PyResult<()> {
+        self.require_fresh()?;
+        let start = self.logical_range().0;
+        for (col, rows, values) in writes {
+            if rows.is_empty() {
+                continue;
+            }
+            let phys: Vec<usize> = rows.into_iter().map(|r| r + start).collect();
+            self.inner.assign_positions(col, &phys, &values).map_err(pyerr)?;
+        }
         Ok(())
     }
 
     /// `df[row_mask] = v`: set every column's True rows to the scalar, keeping each
-    /// column's dtype (pandas' whole-row boolean assignment), via the shared
-    /// `scatter_scalar` primitive. Atomic — if any column would take the value
-    /// lossily, the per-column map errors and nothing is written.
+    /// column's dtype (pandas' whole-row boolean assignment). Every column's typed fill
+    /// is resolved first (a lossy fill fails before any write), then written through
+    /// `write_cells`.
     pub(crate) fn assign_row_mask(&mut self, mask: &[bool], value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let (start, len) = self.logical_range();
+        let len = self.logical_range().1;
         if mask.len() != len {
             return Err(PyValueError::new_err(format!(
                 "boolean mask length {} != frame height {}",
@@ -547,115 +647,64 @@ impl PyDataFrame {
                 len
             )));
         }
-        let positions: Vec<usize> = mask
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &m)| m.then_some(i))
-            .collect();
-        if self.window.is_none() {
-            // Unbounded: rebuild from the scattered columns (the established path).
-            let cols = self
-                .inner
+        let rows: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &m)| m.then_some(i)).collect();
+        let writes = if rows.is_empty() {
+            Vec::new()
+        } else {
+            self.inner
                 .columns()
                 .iter()
-                .map(|c| scatter_scalar(c, &positions, value))
-                .collect::<PyResult<Vec<_>>>()?;
-            return self.rebuild_with(cols);
-        }
-        // Windowed: write in place at the physical rows (offset by the window start)
-        // so the hidden margin and the directive cache structure survive. Resolve
-        // every column's typed fill FIRST (atomic — a lossy fill fails before any
-        // write), then scatter.
-        let phys: Vec<usize> = positions.iter().map(|p| p + start).collect();
-        let vals: Vec<Option<Column>> = self
-            .inner
-            .columns()
-            .iter()
-            .map(|c| {
-                if phys.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(scalar_to_column(value, c.dtype())?))
-                }
-            })
-            .collect::<PyResult<_>>()?;
-        for (j, v) in vals.into_iter().enumerate() {
-            if let Some(v) = v {
-                self.inner.assign_positions(j, &phys, &v).map_err(pyerr)?;
-            }
-        }
-        Ok(())
+                .enumerate()
+                .map(|(j, c)| Ok((j, rows.clone(), scalar_to_column(value, c.dtype())?)))
+                .collect::<PyResult<Vec<_>>>()?
+        };
+        self.write_cells(writes)
     }
 
     /// `df[bool_frame] = v`: per-cell assignment where the mask is True, keeping
-    /// each column's dtype. Atomic, like `assign_row_mask`. The condition frame
-    /// must be boolean — the same contract as `DataFrame.where` (a numeric / string
-    /// mask is rejected up front, not coerced through `x != 0.0`).
+    /// each column's dtype, through `write_cells`. The condition frame is an operand
+    /// read through its gate, must be boolean (the contract of `DataFrame.where`: a
+    /// numeric / string mask is rejected up front), pairs with the columns by NAME and
+    /// with the rows by the one alignment rule.
     pub(crate) fn assign_cell_mask(&mut self, cond: &PyDataFrame, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let (start, len) = self.logical_range();
-        if cond.inner.width() != self.inner.width() || cond.inner.height() != len {
+        let len = self.logical_range().1;
+        let cview = cond.read()?;
+        if cview.width() != self.inner.width() || cview.height() != len {
             return Err(PyValueError::new_err(
                 "df[mask] = v: `mask` must have the same shape as the frame",
             ));
         }
-        if let Some(cc) = cond
-            .inner
-            .columns()
-            .iter()
-            .find(|c| !matches!(c, Column::Bool(..)))
-        {
+        let cond_df = if cview.names() == self.inner.names() {
+            cview.into_owned()
+        } else {
+            let mut want: Vec<&String> = self.inner.names().iter().collect();
+            let mut got: Vec<&String> = cview.names().iter().collect();
+            want.sort();
+            got.sort();
+            if want != got {
+                return Err(PyValueError::new_err(
+                    "df[mask] = v: `mask` columns must match the frame's columns by name",
+                ));
+            }
+            cview.select(self.inner.names()).map_err(pyerr)?
+        };
+        self.logical_index().require_aligned(cond_df.index()).map_err(pyerr)?;
+        if let Some(cc) = cond_df.columns().iter().find(|c| !matches!(c, Column::Bool(..))) {
             return Err(PyTypeError::new_err(format!(
                 "df[mask] = v: `mask` must be a boolean frame, got a {} column",
                 cc.dtype()
             )));
         }
-        if self.window.is_none() {
-            let cols = self
-                .inner
-                .columns()
-                .iter()
-                .zip(cond.inner.columns())
-                .map(|(col, cond_col)| {
-                    let positions: Vec<usize> = bool_mask_vec(cond_col)?
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, &m)| m.then_some(i))
-                        .collect();
-                    scatter_scalar(col, &positions, value)
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            return self.rebuild_with(cols);
-        }
-        // Windowed: scatter each column in place at the physical rows the mask
-        // selects (offset by the window start), preserving the hidden margin. Resolve
-        // the per-column fills first so a lossy fill fails before any write (atomic).
-        let plans: Vec<(Vec<usize>, Option<Column>)> = self
-            .inner
-            .columns()
-            .iter()
-            .zip(cond.inner.columns())
-            .map(|(col, cond_col)| {
-                let phys: Vec<usize> = bool_mask_vec(cond_col)?
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, &m)| m.then_some(i + start))
-                    .collect();
-                let v = if phys.is_empty() {
-                    None
-                } else {
-                    Some(scalar_to_column(value, col.dtype())?)
-                };
-                Ok((phys, v))
-            })
-            .collect::<PyResult<_>>()?;
-        for (j, (phys, v)) in plans.into_iter().enumerate() {
-            if let Some(v) = v {
-                self.inner.assign_positions(j, &phys, &v).map_err(pyerr)?;
+        let mut writes = Vec::new();
+        for (j, (col, cond_col)) in self.inner.columns().iter().zip(cond_df.columns()).enumerate() {
+            let rows: Vec<usize> =
+                bool_mask_vec(cond_col)?.iter().enumerate().filter_map(|(i, &m)| m.then_some(i)).collect();
+            if !rows.is_empty() {
+                writes.push((j, rows, scalar_to_column(value, col.dtype())?));
             }
         }
-        Ok(())
+        self.write_cells(writes)
     }
-
     /// Per-cell missing mask -> a bool frame; backs `isna` (want_na=true) /
     /// `notna`. Reads the column validity (every dtype), so an int/bool/str NA
     /// and a datetime NaT are detected, not just a float NaN.
@@ -666,13 +715,16 @@ impl PyDataFrame {
     }
 
     /// Build a one-row bar frame from a scalar `dict` for `append`. The timestamp lives
-    /// under the key equal to the index's name (a labeled index); a `RangeIndex` auto-
-    /// extends. Strict: every plain (non-directive) column must be supplied, the index key
-    /// must be present (labeled index), and an unknown or directive key is an error. The
-    /// frame's known column dtypes drive the coercion (no inference) — the fast bar path.
+    /// under the key equal to the index's name (a labeled index) and is read in its own
+    /// zone — an aware value an instant, a naive one a wall clock, an integer epoch-ns in
+    /// the frame's — so the append's index rule judges its awareness; a `RangeIndex`
+    /// auto-extends. Every other key becomes a bar column (a data column of the frame
+    /// typed by it, any other key as inferred), so the append's admission judges an
+    /// unknown key or a cached directive column exactly as for every other form. The
+    /// dict form is strict besides: every data column must be supplied.
     pub(crate) fn bar_from_dict(&self, dict: &Bound<'_, PyDict>) -> PyResult<DataFrame> {
         let inner = &self.inner;
-        let labeled = !matches!(inner.index().kind(), IndexKind::Range(_));
+        let labeled = !matches!(inner.index().kind(), IndexKind::Range { .. });
         let idx_name: Option<String> = if labeled {
             Some(inner.index().name().map(str::to_string).ok_or_else(|| {
                 PyValueError::new_err(
@@ -683,25 +735,7 @@ impl PyDataFrame {
         } else {
             None
         };
-        // Validate every key: the index key, or a plain column. Reject unknown / directive.
-        for k in dict.keys() {
-            let ks: String = k.extract()?;
-            if idx_name.as_deref() == Some(ks.as_str()) {
-                continue;
-            }
-            if !inner.has_column(&ks) {
-                return Err(PyValueError::new_err(format!(
-                    "append(dict): unknown key {ks:?} — not a column of the frame nor its index"
-                )));
-            }
-            if inner.is_computed(&ks) {
-                return Err(PyValueError::new_err(format!(
-                    "append(dict): {ks:?} is a cached directive column — recomputed by \
-                     fulfill, not set per bar"
-                )));
-            }
-        }
-        // Every plain (non-directive) column must be supplied.
+        // The frame's data columns, in its order, then any other key.
         let mut names = Vec::new();
         let mut cols = Vec::new();
         for name in inner.names() {
@@ -717,6 +751,14 @@ impl PyDataFrame {
             cols.push(crate::coerce::bar_scalar_to_column(&v, dt)?);
             names.push(name.clone());
         }
+        for (k, v) in dict.iter() {
+            let key: String = k.extract()?;
+            if idx_name.as_deref() == Some(key.as_str()) || names.contains(&key) {
+                continue;
+            }
+            cols.push(pyany_to_column(&pyo3::types::PyList::new(dict.py(), [v])?.into_any())?);
+            names.push(key);
+        }
         // The one-row index. A RangeIndex auto-extends (None → a fresh range of len 1).
         let index = match idx_name {
             None => None,
@@ -726,15 +768,25 @@ impl PyDataFrame {
                         "append(dict): missing index key {key:?} (the bar's timestamp)"
                     ))
                 })?;
-                let icol = match inner.index().kind() {
-                    IndexKind::Datetime(..) => crate::coerce::bar_scalar_to_column(&ts, DType::Datetime)?,
-                    IndexKind::Int64(_) => crate::coerce::bar_scalar_to_column(&ts, DType::I64)?,
-                    IndexKind::Str(_) => crate::coerce::bar_scalar_to_column(&ts, DType::Utf8)?,
-                    IndexKind::Range(_) => unreachable!("labeled excludes Range"), // LCOV_EXCL_LINE
-                };
                 Some(match inner.index().kind() {
-                    IndexKind::Datetime(_, tz) => Index::from_column_tz(&icol, *tz).map_err(pyerr)?,
-                    _ => Index::from_column(&icol).map_err(pyerr)?,
+                    IndexKind::Datetime(_, frame_tz) => {
+                        let tz = match crate::convert::timestamp_zone(&ts)? {
+                            crate::convert::Zone::Aware(tz) => tz,
+                            crate::convert::Zone::Naive => volas_core::Tz::Naive,
+                            crate::convert::Zone::Unzoned => *frame_tz,
+                        };
+                        let ns = crate::convert::parse_ts_in_tz(&ts, tz)?;
+                        Index::datetime(vec![ns], tz)
+                    }
+                    IndexKind::Int64(_) => {
+                        Index::from_column(&crate::coerce::bar_scalar_to_column(&ts, DType::I64)?)
+                            .map_err(pyerr)?
+                    }
+                    IndexKind::Str(_) => {
+                        Index::from_column(&crate::coerce::bar_scalar_to_column(&ts, DType::Utf8)?)
+                            .map_err(pyerr)?
+                    }
+                    IndexKind::Range { .. } => unreachable!("labeled excludes Range"), // LCOV_EXCL_LINE
                 })
             }
         };
