@@ -99,6 +99,18 @@ def test_an_explicit_all_default_command_keeps_its_colon():
     assert {'boll:', 'boll'} <= set(df.columns)
 
 
+def test_a_bare_command_is_one_column_whatever_its_case():
+    """`OBV`, `obv` and `Obv` written bare all name the command `obv`: one cached column."""
+    df = _frame()
+    df['OBV']
+    df['Obv']
+    df['obv']
+    assert [c for c in df.columns if c.lower() == 'obv'] == ['obv']
+    assert volas.directive_stringify('close - OBV') == 'close-obv'
+    # a column spelled so is read as data where it is not a command (`rsi` needs a period)
+    assert volas.directive_stringify('Close + RSI') == 'Close+RSI'
+
+
 def _appended(directive, extra=None, rows=N - 1):
     """`directive` cached on the first `rows` rows, then one row appended and read."""
     extra = extra or {}

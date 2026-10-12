@@ -96,14 +96,31 @@ neighbour) — written with zero decimals (`9007199254740993.0`) too — and a
 comparison orders integers exactly — `2**53 + 1 > 2**53`. A whole-number literal
 past int64 that no float64 holds exactly is a `DirectiveSyntaxError`, never a
 rounded value. The
-arithmetic operators, unary `-` and every indicator compute in float64, so an
-int64 operand past `±2**53` (whose float64 image is not its value) raises
-`OverflowError` instead of computing from a rounded input.
+arithmetic operators and every indicator compute in float64, so an int64 operand
+past `±2**53` (whose float64 image is not its value) raises `OverflowError` instead
+of computing from a rounded input. Unary `-` negates an integer exactly (as an int64:
+an integer zero has no sign, so `-(0)` is `0` like the literal `-0`), and a float in
+float64 (`-0.0` keeps its sign).
 
 `df[directive]` **caches** the result as a real column (so repeated reads are
 free), then auto-refreshes its stale tail on access after an `append`. Use
 `df.exec(directive)` to compute a directive as a NumPy array **without**
 caching it (see [Usage](dataframe-api.md#usage)).
+
+### Refresh cost
+
+A refresh after an `append` reads only a trailing window of the frame — the
+directive's lookback twice over — whatever the frame's height: a recursive indicator
+continues its carried state over the new row, a running window sum continues its
+sums, and any other finite window is recomputed over its last window. An int64 or
+float32 input is converted over that window only, and an `@` expression operand
+(`ema:14@(close + open)`, `rsi:14@(ma:5)`) is evaluated over it alone. A few
+directives still cost O(n) per refresh (exact): `crsi`, `stoch_momentum`,
+`ttm_squeeze`, and `apo` / `ppo` / `macdext` / `mavp` / `stoch` / `stochf.d` at a
+recursive MA type recompute their column; a directive whose `@` operand holds a
+recursion or a row position (`rsi:14@(ema:5)`, `ema:3@(maxindex:5)`) evaluates that
+operand over the whole frame. `ma` at a recursive MA type continues as that average
+does.
 
 ### Names: a data column or a built-in command
 
@@ -139,8 +156,9 @@ name: whitespace removed, minimal parentheses, every argument written as its val
 (`ma:05` is `ma:5`, `hv:10,1W` is `hv:10,1w`) and default arguments / series dropped.
 An explicit command whose arguments and series are all defaults keeps its colon
 (`boll:20@close` is `boll:`, `macd:12,26` is `macd:`), so its name never reads as the
-bare name `boll`, which a data column could hold; a command written bare stays bare
-(`df['boll']` caches as `boll`). The cached column keeps the directive it was bound to
+bare name `boll`, which a data column could hold; a command written bare stays bare,
+named by its command whatever its case (`df['BOLL']` and `df['boll']` both cache as
+`boll`). The cached column keeps the directive it was bound to
 when it was cached, and an append continues exactly that directive.
 
 ## Error handling

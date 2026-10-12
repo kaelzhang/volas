@@ -167,8 +167,8 @@ impl ArgValue {
 /// A bound command's payload: its arguments — parsed, defaulted and type-checked once
 /// against the spec of its line — and that spec, so every consumer reads the line's
 /// facts from the command itself. `bare` keeps the spelling of a command written as a
-/// bare name (`obv`) and resolved to the command against a frame: it renders as
-/// written, where an explicit all-default command renders `obv:`.
+/// bare name (`OBV`) and resolved to the command against a frame: it renders bare (as
+/// `obv`), where an explicit all-default command renders `obv:`.
 #[derive(Clone, Debug)]
 pub struct Bound {
     /// The bound arguments, one per spec slot.

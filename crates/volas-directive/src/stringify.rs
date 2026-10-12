@@ -4,10 +4,13 @@
 //! (`ma:05` is `ma:5`, `hv:10,1W` is `hv:10`), default arguments and default series
 //! dropped. A command keeps apart from a bare name: an explicit command whose arguments
 //! and series are all defaults renders `name:` (`boll:20@close` is `boll:`), while a
-//! command written as a bare name renders as written (`boll`) — so a name always
-//! re-parses to what it names, also beside a data column called like a command.
+//! command written as a bare name renders bare, as its command's name (`BOLL` is
+//! `boll`) — so a name always re-parses to what it names, also beside a data column
+//! called like a command.
 
+use crate::bind::is_bare_command;
 use crate::parser::{is_ident_char, is_ident_start};
+use crate::spec::normalize;
 use crate::types::{Command, Node, Payload, UnaryOp};
 
 /// Canonical string form of a directive tree: a bound [`Ast`](crate::types::Ast) (the
@@ -15,6 +18,9 @@ use crate::types::{Command, Node, Payload, UnaryOp};
 /// a required argument may be absent), rendered alike.
 pub fn stringify<A: Payload>(node: &Node<A>) -> String {
     match node {
+        // a bare name that is a command usable bare names that command (a frame-bound
+        // tree holds none: there it is a command node, or an ambiguous name rejected)
+        Node::Name(s) if is_bare_command(s) => normalize(s).into_owned(),
         Node::Name(s) => s.clone(),
         Node::Scalar(v) => v.token(),
         Node::Command(cmd) => stringify_command(cmd),
@@ -54,8 +60,9 @@ pub fn stringify<A: Payload>(node: &Node<A>) -> String {
 }
 
 fn stringify_command<A: Payload>(cmd: &Command<A>) -> String {
-    if let Some(spelling) = cmd.args.bare() {
-        return spelling.to_string();
+    if cmd.args.bare().is_some() {
+        // written bare: the command's own name, whatever its case (`OBV` is `obv`)
+        return cmd.name.clone();
     }
     let spec = cmd.args.spec();
     let mut out = cmd.name.clone();
@@ -142,6 +149,22 @@ mod tests {
     /// The form a frame-blind `directive_stringify` names: bound leniently.
     fn form(input: &str) -> String {
         stringify(&crate::bind::bind_form(&parse_cst(input).unwrap()).unwrap())
+    }
+
+    /// A command written bare names its command, in its canonical case; any other bare
+    /// name (a column) keeps its spelling.
+    #[test]
+    fn a_bare_command_names_its_command() {
+        for d in ["OBV", "obv", "Obv"] {
+            assert_eq!(s(d), "obv");
+            assert_eq!(form(d), "obv");
+        }
+        assert_eq!(s("close - OBV"), "close-obv");
+        assert_eq!(s("Close + RSI"), "Close+RSI"); // `rsi` needs a period: a column
+        let columns = |n: &str| n == "Close";
+        let bound = crate::bind::bind_frame(&parse("Close - OBV").unwrap(), &columns, "").unwrap();
+        assert_eq!(stringify(&bound), "Close-obv");
+        assert!(crate::bind::uses_bare_command(&bound, "OBV") && !crate::bind::uses_bare_command(&bound, "obv"));
     }
 
     #[test]
