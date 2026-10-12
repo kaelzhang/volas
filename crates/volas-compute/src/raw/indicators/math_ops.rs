@@ -1,4 +1,4 @@
-use crate::accum::{Anchors, Csum};
+use crate::accum::Csum;
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 use crate::missing;
 
@@ -7,28 +7,28 @@ use crate::missing;
 // ---------------------------------------------------------------------------
 
 /// Rolling sum over `period` (TA-Lib SUM), O(n) via a sliding total (TA-Lib's
-/// order: add current, emit, drop trailing), exact ([`Csum`], re-anchored at absolute
-/// positions — row 0 is at `origin`) so each window's sum is its own however long the
-/// slide. Lookback `period-1`. Window-local: a non-finite row affects only the windows
+/// order: add current, emit, drop trailing), exact ([`Csum`], re-summed whenever it
+/// could not hold its sum) so each window's sum is its own however long the slide —
+/// which is also why it does not depend on `_origin`, the frame's position every kernel
+/// takes. Lookback `period-1`. Window-local: a non-finite row affects only the windows
 /// holding it (see [`crate::guard`]).
-pub fn sum(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    let (out, finite) = sum_with::<Unguarded>(data, period, origin);
+pub fn sum(data: &[f64], period: usize, _origin: usize) -> Vec<f64> {
+    let (out, finite) = sum_with::<Unguarded>(data, period);
     if finite {
         out
     } else {
-        sum_with::<NonFiniteRows>(data, period, origin).0
+        sum_with::<NonFiniteRows>(data, period).0
     }
 }
 
 /// The sliding sum under a row guard; also returns whether the total stayed finite.
-fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, bool) {
+fn sum_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, bool) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
         return (out, true);
     }
     let mut guard = G::default();
-    let mut anchors = Anchors::from(origin + period - 1, period);
     let mut finite = true;
     let mut total = Csum::default();
     for &x in &data[..period - 1] {
@@ -43,8 +43,7 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64
         if guard.enter(x.is_finite()) {
             total.add(x);
         }
-        let anchor = anchors.tick();
-        if anchor || !total.is_exact() {
+        if !total.is_exact() {
             // the fast pass stops re-summing once a non-finite row has poisoned it (the
             // careful pass recomputes every row); the careful pass always re-sums
             finite &= total.value().is_finite();

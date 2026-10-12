@@ -249,7 +249,7 @@ pub(super) fn dispatch(
         }
         ("sem", _) => {
             let p = arg_usize(args, 0);
-            f64col(volas_compute::window::sem(&close(0)?, p, p, 1))
+            f64col(volas_compute::window::sem(&close(0)?, p, p, 1, ops.origin()))
         }
         // TradingView dispersion / order statistics (window family).
         ("dev", _) => {

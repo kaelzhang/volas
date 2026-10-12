@@ -16,19 +16,19 @@ pub fn boll(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
 /// Bollinger upper band (`ma + times * std`, population std).
 pub fn boll_upper(close: &[f64], period: usize, times: f64, origin: usize) -> Vec<f64> {
     let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    (&ma + times * &std).to_vec()
+    ma.iter().zip(&std).map(|(m, s)| m + times * s).collect()
 }
 
 /// Bollinger lower band (`ma - times * std`, population std).
 pub fn boll_lower(close: &[f64], period: usize, times: f64, origin: usize) -> Vec<f64> {
     let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    (&ma - times * &std).to_vec()
+    ma.iter().zip(&std).map(|(m, s)| m - times * s).collect()
 }
 
 /// Bollinger Band Width (`4 * std / ma`).
 pub fn bbw(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    (4.0 * &std / &ma).to_vec()
+    ma.iter().zip(&std).map(|(m, s)| 4.0 * s / m).collect()
 }
 
 /// Historical Volatility: the sample (ddof = 1) standard deviation of the one-bar log
@@ -110,7 +110,7 @@ pub enum BollLine {
 /// [`boll_upper`] / [`boll_lower`] / [`bbw`]'s state after the rows of `close`:
 /// the [`Slide`] of `[Σx, Σx²]` ([`kernels::rolling_mean_std`]).
 pub fn boll_band_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    state_after(Slide::<3>::initial(origin), close.len(), |row, prev, next| {
+    state_after(Slide::<2>::initial(origin), close.len(), |row, prev, next| {
         boll_band_step(close, period, 2.0, BollLine::Width, row, prev, next)
     })
 }
@@ -129,7 +129,7 @@ pub fn boll_band_step(
     if period == 0 || row >= close.len() || next.len() != kernels::MEAN_STD_STATE {
         return None;
     }
-    let mut slide = Slide::<3>::from_state(state)?;
+    let mut slide = Slide::<2>::from_state(state)?;
     let (ma, std) = kernels::mean_std_row(&mut slide, period, 0, row, |j| close[j]);
     slide.write_state(next);
     Some(match line {
@@ -149,9 +149,9 @@ fn log_return(close: &[f64], i: usize) -> f64 {
 }
 
 /// [`hv`]'s state after the rows of `close`: the deviation's [`Slide`] of `[Σr, Σr²]`
-/// (see [`crate::accum::square_terms`]).
+/// (shifted, see [`kernels::mean_std_row`]).
 pub fn hv_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    state_after(Slide::<3>::initial(origin), close.len(), |row, prev, next| {
+    state_after(Slide::<2>::initial(origin), close.len(), |row, prev, next| {
         hv_step(close, period, 1.0, row, prev, next)
     })
 }
@@ -168,7 +168,7 @@ pub fn hv_step(
     if period <= 1 || row >= close.len() || next.len() != kernels::MEAN_STD_STATE {
         return None;
     }
-    let mut slide = Slide::<3>::from_state(state)?;
+    let mut slide = Slide::<2>::from_state(state)?;
     let (_, std) = kernels::mean_std_row(&mut slide, period, 1, row, |j| log_return(close, j));
     slide.write_state(next);
     Some(std * annualization)

@@ -1,4 +1,4 @@
-use crate::accum::{Anchors, Csum};
+use crate::accum::Csum;
 use crate::guard::{all_finite, own_sums, state_after, window_sums, Order, Slide, Window};
 use crate::missing;
 use crate::raw::kernels;
@@ -259,14 +259,12 @@ pub fn imi(open: &[f64], close: &[f64], period: usize, origin: usize) -> Vec<f64
         down_sum.add(d);
     }
     let mut out = crate::buf::OutBuf::warmup(n, lookback);
-    let mut anchors = Anchors::from(origin + lookback, period);
     let mut clean = true;
     for today in lookback..n {
         let (u, d) = updown(today);
         up_sum.add(u);
         down_sum.add(d);
-        let anchor = anchors.tick();
-        if anchor || !(up_sum.is_exact() && down_sum.is_exact()) {
+        if !(up_sum.is_exact() && down_sum.is_exact()) {
             clean &= up_sum.value().is_finite() && down_sum.value().is_finite();
             if clean {
                 [up_sum, down_sum] = Csum::of_rows((today - lookback..=today).map(|j| {
@@ -308,7 +306,7 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize, origin: usiz
     // The window mean is a sliding sum (add the entering bar, drop the leaving one) — O(1)
     // per bar instead of re-summing the window. The mean-absolute-deviation still scans the
     // window (each `|x - avg|` depends on the just-computed mean, so it cannot slide). The
-    // sliding sum is exact ([`Csum`], re-anchored at absolute positions), so a window's
+    // sliding sum is exact ([`Csum`], re-summed where it could not hold its sum), so a window's
     // mean is its own however long the slide. The value at row `i` from its window mean.
     let p = period as f64;
     let value = |i: usize, avg: f64| cci_value(|j| tp[j], period, i, avg);
@@ -317,12 +315,10 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize, origin: usiz
         sum.add(x);
     }
     let mut out = crate::buf::OutBuf::warmup(n, period - 1);
-    let mut anchors = Anchors::from(origin + period - 1, period);
     let mut clean = true;
     for i in (period - 1)..n {
         sum.add(tp[i]);
-        let anchor = anchors.tick();
-        if anchor || !sum.is_exact() {
+        if !sum.is_exact() {
             clean &= sum.value().is_finite();
             if clean {
                 sum = Csum::of(tp[i + 1 - period..=i].iter().copied());
@@ -622,7 +618,6 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         i += 1;
     }
     // Re-anchor from the ring: the window's flows, oldest (slot `oldest`) first.
-    let mut anchors = Anchors::from(origin + period - 1, period);
     let mut clean = true;
     let mut reanchor = |pos_sum: &mut Csum, neg_sum: &mut Csum, ring_pos: &[f64], ring_neg: &[f64], oldest: usize| {
         clean &= pos_sum.value().is_finite() && neg_sum.value().is_finite();
@@ -632,7 +627,7 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         }
     };
     let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
-    if anchors.tick() || !exact(&pos_sum, &neg_sum) {
+    if !exact(&pos_sum, &neg_sum) {
         reanchor(&mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, 0);
     }
     out.set(period, mfi_value([pos_sum.value(), neg_sum.value()]));
@@ -650,8 +645,7 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         ring_neg[slot] = ng;
         pos_sum.add(p);
         neg_sum.add(ng);
-        let anchor = anchors.tick();
-        if anchor || !exact(&pos_sum, &neg_sum) {
+        if !exact(&pos_sum, &neg_sum) {
             reanchor(&mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, (slot + 1) % period);
         }
         out.set(i, mfi_value([pos_sum.value(), neg_sum.value()]));

@@ -19,10 +19,9 @@
 //! a bad row is non-finite at the end. Clean data therefore costs nothing extra and is
 //! bit-identical to the unguarded loop.
 //!
-//! Every running sum is an exact one ([`Csum`], re-anchored at absolute positions —
-//! see [`crate::accum`]), so a window's sums are its own: the fast pass, the careful
-//! pass and a resume step agree bit for bit, and a bad row stops mattering once it has
-//! left the window and an anchor has passed.
+//! Every running sum is an exact one ([`Csum`] — see [`crate::accum`]), so a window's
+//! sums are its own: the fast pass, the careful pass and a resume step agree bit for
+//! bit, and a bad row stops mattering once it has left the window.
 
 use crate::accum::{anchors_at, Csum};
 
@@ -168,6 +167,12 @@ impl<const K: usize> Slide<K> {
         out[K * Csum::STATE + 1] = self.pos as f64;
     }
 
+    /// The absolute position of the next row to slide.
+    #[inline(always)]
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
     /// Recompute the sums from the window's own rows `rows`, oldest first (the
     /// re-anchoring of [`crate::accum`]); the count of bad rows is unchanged.
     fn reanchor(&mut self, rows: std::ops::RangeInclusive<usize>, term: &impl Fn(usize) -> ([f64; K], bool)) {
@@ -216,9 +221,10 @@ impl<const K: usize> Slide<K> {
 
     /// Advance over row `i` (rows `0..i` already slid): the window of `period` rows
     /// ending at `i`. `term(j)` is row `j`'s terms and whether they belong in the
-    /// running sums (the kernel's own finiteness test). A full window at an anchor
-    /// position, or whose sums went inexact, is re-summed from its own rows before it
-    /// is read.
+    /// running sums (the kernel's own finiteness test, of the row itself). A window at
+    /// an anchor position (full or still filling — a shifted kernel's shift changes
+    /// there, see [`crate::accum::shift_row`]), or a full one whose sums went inexact, is
+    /// re-summed from its own rows before it is read.
     #[inline]
     pub(crate) fn row(
         &mut self,
@@ -228,8 +234,9 @@ impl<const K: usize> Slide<K> {
         term: impl Fn(usize) -> ([f64; K], bool),
     ) -> Window<K> {
         let full = i + 1 >= period;
-        let anchor = full && anchors_at(self.pos, period);
+        let anchor = anchors_at(self.pos, period);
         self.pos += 1;
+        let rows = (i + 1).saturating_sub(period)..=i;
         match order {
             Order::AddDrop | Order::DropAdd => {
                 if order == Order::DropAdd && i >= period {
@@ -239,18 +246,18 @@ impl<const K: usize> Slide<K> {
                 if order == Order::AddDrop && i >= period {
                     self.leave(term(i - period));
                 }
-                if full && (anchor || !self.exact()) {
-                    self.reanchor(i + 1 - period..=i, &term);
+                if anchor || (full && !self.exact()) {
+                    self.reanchor(rows, &term);
                 }
                 if full { self.read() } else { Window::Partial }
             }
             Order::AddReadDrop => {
                 self.enter(term(i));
+                if anchor || (full && !self.exact()) {
+                    self.reanchor(rows, &term);
+                }
                 if !full {
                     return Window::Partial;
-                }
-                if anchor || !self.exact() {
-                    self.reanchor(i + 1 - period..=i, &term);
                 }
                 let w = self.read();
                 self.leave(term(i + 1 - period));

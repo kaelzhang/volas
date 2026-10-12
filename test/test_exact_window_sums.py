@@ -177,7 +177,8 @@ def test_two_outliers_of_different_magnitudes_leave_no_trace():
     bounded = _live(TWO_OUTLIERS[:3], TWO_OUTLIERS[3:], directives, window=4, max_lookback=directives)
     for row in (6, 7):
         window = TWO_OUTLIERS[row - 3:row + 1]
-        alone = DataFrame({"close": np.array(window)})  # the window computed in isolation
+        # the window alone (an uncached frame's slice, keeping its rows' positions)
+        alone = DataFrame({"close": np.array(TWO_OUTLIERS)}).iloc[row - 3:row + 1]
         for d in directives:
             want = np.asarray(alone[d], dtype=float)[3]
             _bits(np.asarray(full[d], dtype=float)[row:row + 1], [want], f"{d} full @{row}")
@@ -269,3 +270,20 @@ def test_an_expanding_sum_holds_every_bit():
     _bits(s.expanding(1).sum(), [math.fsum(x[:i + 1]) for i in range(len(x))], "expanding")
     want = float(sum(Fraction(v) for v in x) / len(x))
     assert abs(np.asarray(s.expanding(1).mean())[-1] - want) <= np.spacing(want)
+
+
+@pytest.mark.parametrize("directive", ["imi:4", "cdl.doji", "cdl.hammer", "sum:4", "wma:4", "cci:4", "mfi:4"])
+def test_outliers_of_different_magnitudes_leave_every_running_sum(directive):
+    """Two outliers of different magnitudes pass through each kind of running sum (a
+    candle's range average, IMI's up / down moves, …): once they have left the window,
+    every value is the one computed without them — the window alone, as a slice keeping
+    its rows' positions."""
+    spikes = np.array(TWO_OUTLIERS + [11.3, 12.7, 13.1, 14.9, 15.5, 16.1, 17.7, 18.3] * 3)
+    n = len(spikes)
+    o = np.full(n, 2.0) + np.arange(n) * 0.01
+    cols = {"open": o, "high": np.maximum(o, spikes) + 0.5, "low": np.minimum(o, spikes) - 0.5,
+            "close": spikes, "volume": np.full(n, 1000.0) + np.arange(n)}
+    full = np.asarray(DataFrame(cols).exec(directive), dtype=float)
+    later = np.asarray(DataFrame(cols).iloc[3:].exec(directive), dtype=float)
+    lead = 3 + volas.directive_lookback(directive) + 2
+    _bits(later[lead - 3:], full[lead:], directive)

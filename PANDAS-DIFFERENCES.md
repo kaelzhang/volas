@@ -646,9 +646,10 @@ The window API is pandas-aligned and differential-tested method by method
   magnitude) each later row is summed exactly the slow way, at several times the
   per-row cost of the compensated add. pandas's Kahan-compensated running sum keeps one
   compensation word and can lose a window to such outliers. `var()` / `std()` /
-  `sem()` are the window's centred variance from its exact sums of values and
-  squares (within an ulp or two of exact, exactly 0 for a constant window), where
-  pandas's running moments lose digits when a window's mean dwarfs its spread.
+  `sem()` are the window's centred variance from exact sums of the values shifted by
+  a value inside the window (within `(24n + 2)·2⁻⁵³` relative of exact, exactly 0 for
+  a constant window — see [centred moments](docs/indicator-inputs.md#centred-moments)),
+  where pandas's running moments lose digits when a window's mean dwarfs its spread.
 
 - **`count()` / `nunique()` return `int64`** with native NA in the warm-up
   region. pandas returns `float64` (NaN-padded) because numpy ints cannot hold

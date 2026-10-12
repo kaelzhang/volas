@@ -10,12 +10,15 @@
 //!   exact sum of the window's terms — what `math.fsum` returns — however the window
 //!   was reached.
 //! - **A value depends on the whole history.** A running sum's words are a function of
-//!   every row it has slid over. So every running sum also **re-anchors**: at each row
-//!   whose absolute position is a multiple of the window length `W`, it is recomputed
-//!   from the window's own rows, oldest first. Re-anchoring costs `O(W)` once per `W`
-//!   rows, amortized `O(1)` per row, and keeps the compensation word small (it holds
-//!   the rounding errors of at most `2W` updates), so the fast form below stays exact
-//!   on any data whose magnitudes are not extreme.
+//!   every row it has slid over — but its *value* is not: an exact sum is the window's
+//!   own, so every value read from it (`value`, `mean`, the centred moments) is a
+//!   function of the window's terms alone, whatever the words. A first-moment slide is
+//!   therefore re-summed only where its compensation could not hold the sum. A
+//!   **re-anchor** — recomputing the sums from the window's own rows at each row whose
+//!   absolute position is a multiple of the window length `W` — is where a shifted
+//!   second moment changes its shift (see "second moments" below), and the careful
+//!   (row-guarded) slide of [`crate::guard`] re-anchors there on every kernel; either way
+//!   a re-anchoring costs `O(W)` once per `W` rows, amortized `O(1)` per row.
 //!
 //! **How a sum stays exact.** A [`Csum`] is two words, `sum + comp`, updated by
 //! error-free transformations: each add splits `sum + x` into its rounded value and
@@ -226,12 +229,7 @@ impl Csum {
     /// only on the sum they represent, not on how it was split.
     #[inline(always)]
     pub(crate) fn mean(&self, n: f64) -> f64 {
-        let hi = self.sum + self.comp;
-        let b = hi - self.sum;
-        let lo = (self.sum - (hi - b)) + (self.comp - b);
-        let q = hi / n;
-        let r = (-q).mul_add(n, hi) + lo;
-        q + r / n
+        mean_of_words(self.words(), n)
     }
 
     /// A sum from its state `[sum, comp]`; `None` unless exactly two words. It is exact
@@ -278,74 +276,79 @@ pub(crate) fn two_prod(a: f64, b: f64) -> (f64, f64) {
     (p, a.mul_add(b, -p))
 }
 
-/// The per-row terms of an exact `[Σx, Σx²]`: `x`, and `x²` split into its rounded
-/// value and its rounding error ([`two_prod`]) — summed apart, so the squares' sum is
-/// exact and [`comoment`] can take a window's deviation from it.
+// --- second moments from shifted data --------------------------------------------
+//
+// A variance, covariance or regression slope is a difference of raw moments —
+// `Σx² − (Σx)²/n` — that cancels catastrophically when the window's level dwarfs its
+// spread (at `12345.67` a variance of `1e-12` is pure rounding noise). The standard cure
+// is to shift the data by a value `K` inside the window: the deviations `d = x − K` are
+// of the window's own spread, so `Σd² − (Σd)²/n` carries no cancellation beyond a
+// factor of the window length. The shift is the value at the window's **anchor row** —
+// the row whose absolute position is the multiple of the window length `W` inside the
+// window ([`shift_row`]): any `W` consecutive positions hold exactly one, a sliding sum
+// re-anchors there already (and so rebuilds its sums with the new shift), and it is a
+// function of the absolute position alone, so every path of a kernel shifts by the same
+// value. `Σx` itself stays an exact sum (means and bands keep their exact values); the
+// linear deviation `Σd = Σx − n·K` is taken from its exact words ([`deviation`]).
+//
+// Accuracy (`u = 2⁻⁵³`, `n` rows, `R` the window's range, `C` its exact centred sum of
+// squares `Σ(x − x̄)²`): each `d` is rounded once (`|δ| ≤ u·R`, as `|x − K| ≤ R`), each
+// `d²` once, their sum is exact (then rounded once), and `Σd` is within `3u|Σd| +
+// 2u²n|K|` of exact — so the computed `C` is within `≈ 12·n·u·R²` of exact, and since a
+// window spanning `R` has `C ≥ R²/2`, within `(24n + 2)·u` **relative** (`R ≥ 2u|K|`
+// for any two distinct values). A flat window has `d = 0` and `Σd = 0` exactly: `C` is
+// exactly `0`. A covariance is bounded the same way against `sqrt(Cxx·Cyy)`.
+
+/// The row (index into the rows of the series, row `i` at absolute position `pos`) whose
+/// value shifts a `period`-row window ending at row `i`: its anchor row, the one whose
+/// absolute position is a multiple of `period`. A window that starts before the series
+/// does (the warm-up of a series whose first position is not a multiple) uses its first
+/// row until the first anchor arrives (a re-anchoring row, which rebuilds the sums).
 #[inline(always)]
-pub(crate) fn square_terms(x: f64) -> [f64; 3] {
-    let (h, l) = two_prod(x, x);
-    [x, h, l]
+pub(crate) fn shift_row(i: usize, pos: usize, period: usize) -> usize {
+    i.saturating_sub(pos % period)
 }
 
-/// `2⁻⁴⁰`: below this fraction of its terms' magnitude a co-moment estimate is too
-/// close to cancellation to trust, and [`comoment`] computes it exactly.
-const COMOMENT_FILTER: f64 = 1.0 / 1_099_511_627_776.0;
-
-/// `n·Σab − Σa·Σb` over a window of `n` rows — `n²` times its co-moment `Σ(a − ā)(b −
-/// b̄)` (with `a = b`, `n²` times its sum of squared deviations) — from the window's
-/// exact sums: `a` and `b` the canonical words of `Σa` and `Σb` ([`Csum::words`]; an
-/// exact constant `c` is `(c, 0)`), and `Σab` as the total of `sab` (the products' sums
-/// split as [`two_prod`] splits each product, or one exact sum).
-///
-/// The raw moments cancel: at a price level of `12345` a variance of `1e-12` is lost
-/// in rounding entirely. So the difference is formed from the sums' canonical words
-/// ([`Csum::words`]): the high words' difference rounded once by FMA, plus the
-/// low-order terms — within an ulp of itself plus `~2⁻¹⁰⁴` of the terms' magnitude —
-/// and returned when it clears that magnitude by `2⁴⁰` (then it is within an ulp or
-/// two of the exact value, and its sign is exact). Closer to cancellation it
-/// is computed exactly, as an [`Exact`] sum of every partial product: a window whose
-/// `a` or `b` is constant gives exactly `0`, never rounding noise. A function of the
-/// exact sums only, so every path that reaches a window reads the same bits.
+/// `Σx − n·K` from an exact sum `Σx`: its canonical words less the exact product `n·K`
+/// ([`two_prod`]) — the deviations' sum without the cancellation of rounding `Σx`
+/// first. Exactly `0` for `n` copies of `K`.
 #[inline(always)]
-pub(crate) fn comoment(n: f64, a: (f64, f64), b: (f64, f64), sab: &[Csum]) -> f64 {
-    let (ah, al) = a;
-    let (bh, bl) = b;
-    let (ph, mut pl) = sab[0].words();
-    for s in &sab[1..] {
-        pl += s.value(); // the products' rounding errors: low-order already
-    }
-    // `n·ph − ah·bh` rounded once (FMA: `n·ph` exact inside it; `ah·bh` split exactly),
-    // then the low-order terms, each a `2⁻⁵²` fraction of the magnitude, rounded apart.
-    let (p2, e2) = two_prod(ah, bh);
-    let head = n.mul_add(ph, -p2);
-    let est = head + ((n * pl - e2) - ah.mul_add(bl, al * bh));
-    if est.abs() > (n * ph).abs().max(p2.abs()) * COMOMENT_FILTER {
-        return est;
-    }
-    comoment_exact(n, a, b, sab)
+pub(crate) fn deviation(sum: &Csum, n: f64, k: f64) -> f64 {
+    let (hi, lo) = sum.words();
+    let (p, e) = two_prod(n, k);
+    (hi - p) + (lo - e)
 }
 
-/// [`comoment`] near cancellation: every partial product of the canonical words,
-/// summed exactly.
-#[cold]
-#[inline(never)]
-fn comoment_exact(n: f64, (ah, al): (f64, f64), (bh, bl): (f64, f64), sab: &[Csum]) -> f64 {
-    let mut exact = Exact::default();
-    for (h, l) in sab.iter().map(Csum::words) {
-        for w in [h, l] {
-            let (p, e) = two_prod(n, w);
-            exact.add(p);
-            exact.add(e);
-        }
-    }
-    for x in [ah, al] {
-        for y in [bh, bl] {
-            let (p, e) = two_prod(-x, y);
-            exact.add(p);
-            exact.add(e);
-        }
-    }
-    exact.to_csum().value()
+/// The quotient of a sum's canonical words `(hi, lo)` by `n` (see [`Csum::mean`]): the
+/// quotient of `hi`, corrected by the exact remainder (FMA) and the low word.
+#[inline(always)]
+fn mean_of_words((hi, lo): (f64, f64), n: f64) -> f64 {
+    // The reciprocal is loop-invariant where `n` is (it hoists out of a kernel's loop):
+    // `q` is within an ulp or two of the quotient, the remainder `r` is exact to the
+    // last bits (FMA), and `q + r·(1/n)` lands on the correctly rounded quotient but in
+    // the rare near-tie — a flat window's `n` equal values give exactly their value.
+    let inv = 1.0 / n;
+    let q = hi * inv;
+    let r = (-q).mul_add(n, hi) + lo;
+    q + r * inv
+}
+
+/// A window's mean and centred sum of squares `Σ(x − x̄)²` from its exact sums `Σx`
+/// and `Σ(x − k)²` — [`Csum::mean`] and [`centred`] from one normalization of `Σx`.
+#[inline(always)]
+pub(crate) fn spread(n: f64, sum: &Csum, k: f64, sum_sq: &Csum) -> (f64, f64) {
+    let words = sum.words();
+    let (p, e) = two_prod(n, k);
+    let d = (words.0 - p) + (words.1 - e);
+    (mean_of_words(words, n), sum_sq.value() - d * d / n)
+}
+
+/// The centred cross moment `Σ(a − ā)(b − b̄)` of a window of `n` rows from its exact
+/// sums `Σa`, `Σb` (shifted by `ka`, `kb`) and the exact sum of the shifted products
+/// `Σ(a − ka)(b − kb)`: `Σdadb − Σda·Σdb/n` (with `a = b`, the centred sum of squares).
+#[inline(always)]
+pub(crate) fn centred(n: f64, (sa, ka): (&Csum, f64), (sb, kb): (&Csum, f64), sum_dd: &Csum) -> f64 {
+    sum_dd.value() - deviation(sa, n, ka) * deviation(sb, n, kb) / n
 }
 
 /// `2⁻⁶⁴`: the step an [`Exact`] expansion scales down by when one of its adds

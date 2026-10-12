@@ -3,10 +3,11 @@
 The one-pass raw-moment forms — `Σx²/n − (Σx/n)²`, `(Σxy − ΣxΣy/n) / sqrt(…)` —
 cancel catastrophically: at a price level of `12345.67` a window's variance of `1e-12`
 is lost in rounding, a flat window's correlation comes out as `-1`, and a variance can
-go negative. volas forms `n·Σab − Σa·Σb` from the window's exact sums (squares and
-products summed exactly, as their rounded values plus their rounding errors), in
-double-double arithmetic and, near cancellation, exactly — so a flat window is exactly
-flat, a correlation stays in `[-1, 1]`, and a zero variance is tested exactly.
+go negative. volas shifts the data by a value inside the window (the value at its
+anchor row) before squaring, so the deviations carry no cancellation: a flat window is
+exactly flat, a variance is within the documented `(24n + 2)·2⁻⁵³` relative bound
+(docs/indicator-inputs.md "Centred moments"), a correlation stays in `[-1, 1]`, and a
+zero variance is tested exactly.
 """
 
 from fractions import Fraction
@@ -15,6 +16,14 @@ import numpy as np
 import pytest
 
 from volas import DataFrame
+
+U = Fraction(1, 2**53)
+
+
+def _var_bound(n):
+    """The documented relative bound of a shifted variance over `n` rows
+    (docs/indicator-inputs.md "Centred moments")."""
+    return (24 * n + 2) * U
 
 LEVELS = (0.1, 100.0, 1234.5, 12345.67, 98765.4321)
 
@@ -79,8 +88,8 @@ def test_a_near_flat_window_keeps_its_variance(level, sigma):
     std = _check_paths(cols, "stddev:20")
     for i in range(19, len(close)):
         exact = _exact_var(close[i - 19:i + 1])
-        assert abs(Fraction(var[i]) - exact) <= exact * Fraction(1, 2**50), (i, var[i], float(exact))
-        assert abs(std[i] - float(exact) ** 0.5) <= 1e-14 * float(exact) ** 0.5, i
+        assert abs(Fraction(var[i]) - exact) <= exact * _var_bound(20), (i, var[i], float(exact))
+        assert abs(Fraction(std[i]) - Fraction(float(exact) ** 0.5)) <= Fraction(float(exact) ** 0.5) * (_var_bound(20) / 2 + 2 * U), i
     up = _check_paths(cols, "boll.upper")
     ma = np.asarray(DataFrame(cols)["ma:20"], dtype=float)
     assert (up[19:] >= ma[19:]).all()
@@ -109,7 +118,8 @@ def test_a_near_flat_slope_is_exact():
         sy = sum(w)
         sxy = sum(a * b for a, b in zip(ages, w))
         exact = -(20 * sxy - sx * sy) / (20 * sxx - sx * sx)  # per bar forward in time
-        assert abs(Fraction(slope[i]) - exact) <= abs(exact) * Fraction(1, 2**48), (i, slope[i], float(exact))
+        span = Fraction(max(close[i - 19:i + 1])) - Fraction(min(close[i - 19:i + 1]))
+        assert abs(Fraction(slope[i]) - exact) <= 24 * U * span / 20, (i, slope[i], float(exact))
 
 
 @pytest.mark.parametrize("level", LEVELS)
@@ -138,8 +148,8 @@ def test_the_pandas_window_variance_is_exact(level, sigma):
             continue
         m = sum(w) / len(w)
         exact = sum((v - m) ** 2 for v in w) / (len(w) - 1)
-        assert abs(Fraction(var[i]) - exact) <= exact * Fraction(1, 2**50), (i, var[i], float(exact))
-        assert abs(std[i] - float(exact) ** 0.5) <= 1e-15 * float(exact) ** 0.5, i
+        assert abs(Fraction(var[i]) - exact) <= exact * _var_bound(len(w)), (i, var[i], float(exact))
+        assert abs(Fraction(std[i]) - Fraction(float(exact) ** 0.5)) <= Fraction(float(exact) ** 0.5) * (_var_bound(len(w)) / 2 + 2 * U), i
     assert (var[66:75] == 0.0).all() and (std[66:75] == 0.0).all()
 
 

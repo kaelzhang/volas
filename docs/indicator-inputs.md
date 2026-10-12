@@ -31,8 +31,8 @@ it:
 - A **candlestick pattern** (`cdl.<pattern>`) reads whole candles: a bar whose open,
   high, low or close is missing or infinite is a missing candle, and every pattern is
   NaN on the bars whose lookback holds it — its own bars and the bars its body / range
-  averages cover — and what clean data gives once it has left (bit for bit once the
-  averages' next anchor has passed, see [Exact window sums](#exact-window-sums)). TA-Lib
+  averages cover — and what clean data gives once it has left (bit for bit: the
+  averages are exact window sums, see [Exact window sums](#exact-window-sums)). TA-Lib
   slides those averages as plain running totals, so one bad candle changes every later
   decision.
 - A **leading run of missing rows** is not data: every indicator treats the series as
@@ -62,8 +62,7 @@ sum is the correctly rounded value of the exact sum of its rows — what Python'
 bounded frame). It carries the rounding error of every step (compensated summation),
 detects the step whose error it could not hold — two outliers of different magnitudes
 in one window, such as `1e35` and `1e20` beside ordinary prices — and then re-sums the
-window exactly; it also recomputes the sum from the window's own rows at every row whose
-absolute position in the series is a multiple of the window length. So a window's value
+window exactly. So a window's value
 is that of its own rows, however long the history and whatever has left it: after
 `close = [1e20, 1, 2, 3, 4, 5]`, `ma:2` is `[nan, 5e19, 1.5, 2.5, 3.5, 4.5]`; after
 `[1.1, 1e35, 1e20, 1.3, 2.7, 3.1, 4.9]`, `sum:4` at the last row is `12.0`; a flat
@@ -82,20 +81,48 @@ the series' own positions, on a slice as on the full frame.
 
 ## Centred moments
 
-`var`, `stddev`, `boll`, `correl`, `beta` and the `linearreg` family take each
-window's spread as `n·Σab − Σa·Σb` (`n²` times its centred co-moment) from the window's
-exact sums — squares and products summed exactly — formed to within an ulp or two (the
-high words' difference rounded once by FMA, then the low-order terms) and, near
-cancellation, exactly. TA-Lib's one-pass raw moments `Σx²/n − (Σx/n)²` cancel
-catastrophically when a window's mean dwarfs its spread: at a price of `12345.67` a
-variance of `1e-12` reads `0`, a variance can go negative, a regression slope of `1e-9`
-per bar is off by `6e-4`, a correlation exceeds `1`, and a flat window's correlation can
-read `-1`. volas gives the exact values: a flat window has exactly zero variance and
-slope, a correlation stays in `[-1, 1]`, and a window with a constant series (zero
-variance, tested exactly) has `correl` and `beta` `0` — TA-Lib's result there, which
-TA-Lib reaches through an absolute `1e-14` threshold on the raw-moment denominator, so
-it also returns `0` for a small but genuine variance (e.g. FX-scale returns); volas does
-not.
+`var`, `stddev`, `boll`, `hv`, `correl`, `beta`, the `linearreg` family, and the window
+API's `var()` / `std()` / `sem()` take each window's spread from **shifted data**. The
+one-pass raw moments `Σx²/n − (Σx/n)²` (TA-Lib's) cancel catastrophically when a
+window's level dwarfs its spread: at a price of `12345.67` a variance of `1e-12` reads
+`0`, a variance can go negative, a regression slope of `1e-9` per bar is off by `6e-4`,
+a correlation exceeds `1`, and a flat window's correlation can read `-1`.
+
+volas subtracts a **shift** `K` that lies inside the window from every value before
+squaring: `d = x − K`, and the centred sum of squares is `C = Σd² − (Σd)²/n`. `K` is the
+value at the window's anchor row — the row whose absolute position is a multiple of the
+window length (any `W` consecutive rows hold exactly one; where a new anchor enters, the
+sums are rebuilt from the window's own rows with its value — `O(W)` once per `W` rows).
+It is a function of
+the absolute position alone, so the full computation, a resume, a live append, a slice
+and a bounded frame all shift by the same value and agree bit for bit. `Σx` stays an
+exact sum (so `boll`'s middle band is `ma`'s exact mean), `Σd²` is the exact sum of the
+rounded squares, and `Σd` is taken from `Σx`'s exact value less the exact product
+`n·K`. The regression slope needs no extra sums: `Σ age·y` is already exact (its terms
+are exact products), so its numerator `n·Σ age·y − Σage·Σy` is formed on the data
+shifted by the window's exact mean. The window API's `var()` / `std()` / `sem()` shift
+by the first present value of each anchor segment.
+
+**Accuracy.** Let `u = 2⁻⁵³`, `n` the window's rows, `R` its range (max − min) and `C*`
+its exact centred sum of squares. Every `|x − K| ≤ R`, so rounding each deviation
+costs at most `u·R`, each square `u·d²`, and the sum of the squares is exact before its
+one rounding; `Σd` is within `3u·|Σd| + 2u²·n·|K|` of exact. Collecting the terms, the
+computed `C` is within `12·n·u·R²` of `C*`; a window spanning `R` has `C* ≥ R²/2`, and two
+distinct doubles differ by at least `2u·|K|`, so
+
+- a variance is within **`(24·n + 2)·2⁻⁵³` relative** of the exact one (a standard
+  deviation within half that, plus its square root's rounding) — `≈ 5.4e-14` for `n =
+  20`, whatever the level;
+- a correlation is within `~(50·n)·2⁻⁵³` absolute of the exact one, and is clamped to
+  `[-1, 1]` (Cauchy–Schwarz can only be overshot by that rounding);
+- a regression slope is within `24·2⁻⁵³·R / n` absolute of the exact one;
+- a **flat window** has every `d = 0` and `Σd = 0` exactly: its variance, deviation and
+  slope are exactly `0`.
+
+A window with a constant series (zero variance, tested exactly) has `correl` and `beta`
+`0` — TA-Lib's result there, which TA-Lib reaches through an absolute `1e-14` threshold
+on the raw-moment denominator, so it also returns `0` for a small but genuine variance
+(e.g. FX-scale returns); volas does not.
 
 `mfi` likewise gives `0` only for a window whose money flow sums to exactly `0`. TA-Lib's
 MFI returns `0` whenever the window's total flow is below `1.0`, an absolute threshold in

@@ -64,12 +64,17 @@ ACCUMULATING = {
 
 
 def _window_matches(directive, data):
-    full = np.asarray(DataFrame(data).exec(directive), dtype=float)
+    """Whether computing over a window of rows that ends at the last row reproduces the
+    full computation, the window a slice keeping its rows' absolute positions (as the
+    engine's window recompute does — second moments shift by the value at a row of
+    absolute position, see docs/indicator-inputs.md)."""
+    frame = DataFrame(data)
+    full = np.asarray(frame.exec(directive), dtype=float)
     lb = volas.directive_lookback(directive)
     win = 2 * (lb + 1)
     for vr in range(win + 1, N):
         start = vr - win
-        part = DataFrame({k: v[start:] for k, v in data.items()})
+        part = frame.iloc[start:]
         tail = np.asarray(part.exec(directive), dtype=float)[vr - start:]
         want = full[vr:]
         same = (tail == want) | (np.isnan(tail) & np.isnan(want))
@@ -98,8 +103,10 @@ def test_a_last_window_recompute_is_exact_unless_the_kernel_accumulates(key):
 @pytest.mark.parametrize("key", ["ma", "sum", "var", "linearreg", "wma", "cci", "mfi", "ultosc"])
 def test_an_accumulating_command_is_its_last_window_because_its_sums_are_exact(key):
     """Even on runs of huge and tiny values, a running sum's value is the exact sum of
-    its window (re-summed whenever it could not hold it), so an accumulating command
-    computed over its last window alone gives the same bits as the full computation."""
+    its window (re-summed whenever it could not hold it), and a second moment's shift is
+    the value at a row of absolute position, so an accumulating command computed over
+    its last window alone (a slice, keeping positions) gives the full computation's
+    bits."""
     for data in (DATA, GAPPY, WIDE):
         assert _window_matches(_directive(key), data), key
 

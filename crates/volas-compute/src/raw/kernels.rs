@@ -11,7 +11,7 @@
 //! the available ILP, so a measured `f64x2` SIMD variant came out 1.00x — explicit
 //! SIMD buys nothing here.
 
-use crate::accum::{square_terms, Anchors, Csum};
+use crate::accum::{shift_row, Csum};
 use crate::guard::{Order, Slide, Window};
 use crate::missing;
 use ndarray::{Array1, ArrayView1};
@@ -21,7 +21,7 @@ use std::borrow::Cow;
 /// absolute position `origin` (see [`crate::accum`]).
 ///
 /// O(n) sliding running sum: each step adds the entering value and subtracts the
-/// leaving one — an exact sum ([`Csum`], re-anchored at absolute positions), so each
+/// leaving one — an exact sum ([`Csum`], re-summed where it could not hold its sum), so each
 /// window's mean is that of its own rows however long the slide. A window holding a
 /// NaN is NaN.
 #[inline]
@@ -48,15 +48,13 @@ pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
         out.resize(valid_start, f64::NAN);
         let pf = period as f64;
         let mut sum = Csum::default();
-        let mut anchors = Anchors::from(origin + start, period);
         let mut clean = true;
         for i in start..n {
             sum.add(src[i]);
             if i >= start + period {
                 sum.sub(src[i - period]);
             }
-            let anchor = anchors.tick();
-            if (anchor || !sum.is_exact()) && i + 1 >= period {
+            if !sum.is_exact() && i + 1 >= period {
                 clean &= sum.value().is_finite();
                 if clean {
                     sum = Csum::of(src[(i + 1 - period).max(start)..=i].iter().copied());
@@ -544,15 +542,15 @@ pub(crate) fn sma_step(
     Some(value)
 }
 
-/// The length of [`mean_std_row`]'s resumable state: the [`Slide`] of `[Σx, Σx²]`.
-pub(crate) const MEAN_STD_STATE: usize = Slide::<3>::STATE;
+/// The length of [`mean_std_row`]'s resumable state: the [`Slide`] of `[Σx, Σ(x − K)²]`.
+pub(crate) const MEAN_STD_STATE: usize = Slide::<2>::STATE;
 
 /// The window statistics of [`rolling_mean_std`] at row `i` of `data`, resumed from
-/// `slide` (`[Σx, Σx²]` over the window's finite rows, see
-/// [`square_terms`]): `(mean, std)`.
+/// `slide` (`[Σx, Σ(x − K)²]` over the window's finite rows, `K` the value at the
+/// window's anchor row — [`shift_row`]): `(mean, std)`.
 #[inline]
 pub(crate) fn mean_std_row(
-    slide: &mut Slide<3>,
+    slide: &mut Slide<2>,
     period: usize,
     ddof: usize,
     i: usize,
@@ -560,16 +558,16 @@ pub(crate) fn mean_std_row(
 ) -> (f64, f64) {
     let p = period as f64;
     let denom = (period - ddof) as f64;
+    let k = term(shift_row(i, slide.pos(), period));
     match slide.row(Order::AddDrop, period, i, |j| {
         let x = term(j);
-        (square_terms(x), x.is_finite())
+        (dispersion::shifted_terms(x, k), x.is_finite())
     }) {
         Window::Partial => (f64::NAN, f64::NAN),
-        Window::Sums(sums) => dispersion::mean_std_of_sums(&sums, p, denom),
-        Window::Bad => dispersion::window_mean_std_of(i + 1 - period..=i, &term, p, denom),
+        Window::Sums(sums) => dispersion::mean_std_of_sums(&sums, k, p, denom),
+        Window::Bad => dispersion::window_mean_std_of(i + 1 - period..=i, &term, k, p, denom),
     }
 }
-
 
 mod dispersion;
 pub use dispersion::*;

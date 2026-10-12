@@ -189,15 +189,15 @@ impl WinSpec {
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn var(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "var")?, |d_, win| w::var(d_, win, self.min_periods, ddof));
+        let out = self.run(&self.data(s, "var")?, |d_, win| w::var(d_, win, self.min_periods, ddof, 0));
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn std(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "std")?, |d_, win| w::std(d_, win, self.min_periods, ddof));
+        let out = self.run(&self.data(s, "std")?, |d_, win| w::std(d_, win, self.min_periods, ddof, 0));
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn sem(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "sem")?, |d_, win| w::sem(d_, win, self.min_periods, ddof));
+        let out = self.run(&self.data(s, "sem")?, |d_, win| w::sem(d_, win, self.min_periods, ddof, 0));
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn skew(&self, s: &Series) -> PyResult<PySeries> {
