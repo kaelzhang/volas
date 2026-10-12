@@ -245,6 +245,32 @@ fn a_continuation_far_into_the_series_reads_a_window_exactly() {
             }
         }
     }
+    // `@` operands evaluated over the window (a pure window or an accumulator) or over
+    // the frame (a recursion, a row position), under recursive and window commands
+    for text in [
+        "rsi:5@(ma:3)", "ema:4@(var:3)", "ma:4@(sum:3@(close-open))", "atr:5@(ma:2@high),low,close",
+        "obv@(wma:3),volume", "kama:4@(close*volume)", "sum:3@(ema:4)", "ema:3@(maxindex:4)",
+        "macd.signal:5,9,3@(boll.upper:6)", "stddev:5@(ma:3,1)",
+    ] {
+        let node = parse(text).unwrap();
+        for data in classes.iter().filter(|d| ["walk", "nan-close", "early-missing-bar"].contains(&d.name)) {
+            let df = &data.frame;
+            let whole = full(df, &node).unwrap();
+            for from in [LONG - 40, LONG - 1] {
+                let head = df.slice(0, from);
+                let state = initial_state(&head, &node, &execute(&head, &node).unwrap()).unwrap();
+                let (tail, _) = execute_resume(df, &node, &state, from, 0).unwrap();
+                if let Some(d) = first_diff(&values(&tail), &whole[from..]) {
+                    fails.push(format!("{text} [{}] from {from}: vec {d}", data.name));
+                }
+                let mut next = vec![0.0; state.len()];
+                let v = execute_resume_step(df, &node, &state, from, &mut next).unwrap();
+                if !same(v, whole[from]) {
+                    fails.push(format!("{text} [{}] from {from}: step {v:?} != {:?}", data.name, whole[from]));
+                }
+            }
+        }
+    }
     assert!(stepped > 500, "only {stepped} steps ran");
     assert!(fails.is_empty(), "{} failure(s):\n{}", fails.len(), fails.join("\n"));
 }

@@ -62,6 +62,24 @@ pub fn recomputes_on_a_window(node: &Ast) -> bool {
     }
 }
 
+/// Whether a directive evaluated over a trailing window of the frame's rows (keeping
+/// their absolute positions) gives, on the window's rows past its lookback, exactly its
+/// values over the whole frame: no recursion and no row-position output anywhere in it
+/// — each command a pure window, or a running accumulator whose sums are exact and
+/// whose anchors are absolute positions. A continuation evaluates such an `@` operand
+/// over the window it reads instead of the frame.
+pub fn evaluates_on_a_window(node: &Ast) -> bool {
+    let own = |node: &Ast| {
+        command_of(node).is_none_or(|(spec, args)| spec.history(&args) != History::Recursive && !spec.emits_position())
+    };
+    match node {
+        Node::Scalar(_) | Node::Name(_) => own(node),
+        Node::Command(c) => own(node) && c.series.iter().all(evaluates_on_a_window),
+        Node::Unary { operand, .. } => evaluates_on_a_window(operand),
+        Node::Binary { left, right, .. } => evaluates_on_a_window(left) && evaluates_on_a_window(right),
+    }
+}
+
 /// The rows a cached directive column reads around its own ([`volas_core::Reach`]),
 /// fixed per directive: computed once when the column is cached, never per refresh.
 pub fn reach(node: &Ast) -> volas_core::Reach {
@@ -304,5 +322,8 @@ mod reach_tests {
         let w = |d: &str| recomputes_on_a_window(&parse(d).unwrap());
         assert!(w("llv:5 + 1") && w("close") && w("-(roc:3)") && w("stochf.k:5,3,1"));
         assert!(!w("ma:5") && !w("ema:5") && !w("maxindex:5") && !w("llv:5@(ema:3)") && !w("obv"));
+        let e = |d: &str| super::evaluates_on_a_window(&parse(d).unwrap());
+        assert!(e("ma:5") && e("sum:3@(close-open)") && e("-(var:4)") && e("close") && e("llv:5"));
+        assert!(!e("ema:3") && !e("ma:5@(rsi:3)") && !e("minindex:4") && !e("obv") && !e("1+ma:3,1"));
     }
 }

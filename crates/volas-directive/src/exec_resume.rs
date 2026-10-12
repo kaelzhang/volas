@@ -15,7 +15,7 @@ use std::borrow::Cow;
 
 use crate::bind::bind_bare;
 use crate::complete::BoundCommand;
-use crate::lookback::{lookback, recomputes_on_a_window};
+use crate::lookback::{evaluates_on_a_window, lookback};
 use crate::spec::{command_spec, History, Resume};
 use crate::types::{Ast, Bound, Command, Node};
 
@@ -75,10 +75,10 @@ fn recursive(cmd: &Command<Bound>) -> bool {
 /// The first frame row a continuation of `node` from `row` reads: twice its lookback
 /// plus one before `row` — the rows its own window and its `@` operands' windows need,
 /// with margin — when its operands can be evaluated over a trailing window
-/// ([`recomputes_on_a_window`]); row 0 otherwise (a recursive operand depends on every
+/// ([`evaluates_on_a_window`]); row 0 otherwise (a recursive operand depends on every
 /// row before).
 fn window_start(node: &Ast, cmd: &Command<Bound>, row: usize) -> usize {
-    if !cmd.series.iter().all(recomputes_on_a_window) {
+    if !cmd.series.iter().all(evaluates_on_a_window) {
         return 0;
     }
     row.saturating_sub(2 * (lookback(node) + 1))
