@@ -707,8 +707,8 @@ pub(crate) fn parse_label(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Lab
             .extract::<String>()
             .map(Label::Str)
             .map_err(|_| PyKeyError::new_err("label must be a string for a string index")),
-        IndexKind::Datetime(_, tz) => parse_ts_in_tz(key, *tz).map(Label::I64),
-        _ => parse_ts(key).map(Label::I64),
+        IndexKind::Datetime(_, tz) => crate::convert::parse_label_in_tz(key, *tz).map(Label::I64),
+        _ => crate::convert::parse_label_in_tz(key, Tz::Naive).map(Label::I64),
     }
 }
 
