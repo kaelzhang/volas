@@ -521,7 +521,10 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 
 /// Money Flow Index (TA-Lib MFI): `100·posMF/(posMF+negMF)` over `period`, where each
 /// bar's money flow `tp·volume` (tp = (h+l+c)/3) is signed by `tp`'s direction vs the
-/// prior bar. A total flow below 1.0 yields 0 (TA-Lib's guard). Row 0 is at absolute
+/// prior bar. A window whose flows sum to exactly 0 yields 0 — TA-Lib's result there,
+/// which TA-Lib reaches through an absolute `total < 1.0` threshold instead (a
+/// deliberate divergence: that threshold makes TA-Lib's MFI depend on the volume's
+/// unit; the exact sums make the zero test exact). Row 0 is at absolute
 /// position `origin` (flow `j`, of bar `j + 1`, at `origin + j`). First value at index
 /// `period` (lookback = period). The sliding sums recompute the leaving bar's flow,
 /// which is bit-identical to TA-Lib's stored value.
@@ -889,11 +892,12 @@ fn mfi_flow(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], j: usize) 
     }
 }
 
-/// MFI from its window's flow sums: `100·pos/(pos+neg)`, 0 for a total below 1.0.
+/// MFI from its window's flow sums: `100·pos/(pos+neg)`, 0 when no money flowed (both
+/// sums are non-negative and exact, so their total is zero exactly when they are).
 #[inline]
 fn mfi_value([pos, neg]: [f64; 2]) -> f64 {
     let total = pos + neg;
-    if total < 1.0 { 0.0 } else { 100.0 * pos / total }
+    if total == 0.0 { 0.0 } else { 100.0 * pos / total }
 }
 
 /// [`mfi`]'s state after the rows: the [`Slide`] of the flow sums `[Σpos, Σneg]`.

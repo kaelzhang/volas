@@ -141,3 +141,20 @@ def test_the_pandas_window_variance_is_exact(level, sigma):
         assert abs(Fraction(var[i]) - exact) <= exact * Fraction(1, 2**50), (i, var[i], float(exact))
         assert abs(std[i] - float(exact) ** 0.5) <= 1e-15 * float(exact) ** 0.5, i
     assert (var[66:75] == 0.0).all() and (std[66:75] == 0.0).all()
+
+
+def test_mfi_does_not_depend_on_the_volume_unit():
+    """MFI is a ratio of money flows: only an exactly zero total flow reads 0, never a
+    total below an absolute threshold, so the volume's unit cannot change it."""
+    rng = np.random.default_rng(4)
+    close = 0.05 + np.abs(np.cumsum(rng.normal(0, 1e-3, 200)))
+    base = {"high": close * 1.001, "low": close * 0.999, "close": close}
+    volume = rng.uniform(1, 10, 200)
+    small = _check_paths({**base, "volume": volume * 1e-3}, "mfi:14")
+    large = _check_paths({**base, "volume": volume * 1e6}, "mfi:14")
+    assert np.isfinite(small[14:]).all() and (small[14:] > 0.0).any()
+    assert np.allclose(small, large, rtol=1e-12, atol=0.0, equal_nan=True)
+    # a window with no flow at all (flat prices) is exactly 0
+    flat = np.full(40, 7.0)
+    zero = _check_paths({"high": flat, "low": flat, "close": flat, "volume": np.full(40, 1e6)}, "mfi:14")
+    assert (zero[14:] == 0.0).all()
