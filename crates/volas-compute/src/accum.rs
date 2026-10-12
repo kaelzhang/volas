@@ -40,10 +40,14 @@
 //!
 //! Every value read is therefore a function of the window's terms alone: the batch
 //! kernel, a resume from carried state, the live one-row step and a bounded frame read
-//! the same bits. The one residue is outside `fsum`'s own domain: a window whose terms
-//! reach the `f64` overflow threshold is summed at a scale of `2⁻⁶⁴` per overflow
-//! (`fsum` raises there), which is exact unless that window's sum also cancels below
-//! `~2⁻⁹⁵⁸`.
+//! the same bits. The one residue is outside `fsum`'s own domain: when an add of the
+//! window's exact re-sum overflows (oldest term first — exactly where `fsum` raises
+//! `OverflowError`), the expansion is scaled by `2⁻⁶⁴` and the sum continues there.
+//! That scaling is exact for every term of magnitude at least `2⁻⁹⁵⁷` (their lowest
+//! bit is at least `2⁻¹⁰¹⁰`, still on the scaled grid), and then so is the rounded
+//! sum; only a nonzero term below `2⁻⁹⁵⁷` beside such an overflow can lose its low
+//! bits (each further `2⁻⁶⁴` step moves that bound up by 64 bits). A window whose adds
+//! never overflow is summed unscaled, whatever its magnitudes.
 //!
 //! The absolute position is the row's place in the series the frame continues (see
 //! `DataFrame::origin`): a bounded frame that dropped its head, or a contiguous slice,
@@ -344,19 +348,15 @@ fn comoment_exact(n: f64, (ah, al): (f64, f64), (bh, bl): (f64, f64), sab: &[Csu
     exact.to_csum().value()
 }
 
-/// `2⁻⁶⁴`: the step an [`Exact`] expansion scales down by when a term or its total
-/// reaches the overflow threshold.
+/// `2⁻⁶⁴`: the step an [`Exact`] expansion scales down by when one of its adds
+/// overflows.
 const RESCALE: f64 = 1.0 / 18_446_744_073_709_551_616.0;
-
-/// `2¹⁰²²`: an expansion whose largest word or incoming term reaches this rescales
-/// first, so no intermediate sum of an add can overflow.
-const HUGE: f64 = 4.494_232_837_155_79e307;
 
 /// An exact sum of any number of `f64` terms: a nonoverlapping expansion (Shewchuk's
 /// partials, the algorithm of Python's `math.fsum`), grown by error-free additions so
 /// it never rounds. Non-finite terms are summed apart, IEEE-style (`fsum`'s rule:
-/// NaN, or ±inf, or NaN for both infinities). Near the overflow threshold the
-/// expansion is scaled by `2⁻⁶⁴` instead of overflowing (see the module docs). The
+/// NaN, or ±inf, or NaN for both infinities). Where an add overflows (where `fsum`
+/// raises) the expansion is scaled by `2⁻⁶⁴` and continues (see the module docs). The
 /// slow, exact form behind [`Csum::of`]; also the running sum of an expanding window,
 /// which never drops a term.
 #[derive(Clone, Debug, Default)]
@@ -389,15 +389,26 @@ impl Exact {
             self.special += x;
             return;
         }
-        let mut x = if self.scale == 0 { x } else { x * pow2_neg(self.scale) };
-        if x.abs() >= HUGE || self.partials.last().is_some_and(|p| p.abs() >= HUGE) {
-            for p in &mut self.partials {
-                *p *= RESCALE;
-            }
-            self.partials.retain(|p| *p != 0.0);
-            x *= RESCALE;
+        let x = if self.scale == 0 { x } else { x * pow2_neg(self.scale) };
+        if let Err(words) = self.grow(x) {
+            // An add overflowed — the point where `fsum` raises. The words still sum
+            // exactly to the new total: scale them down and grow them again.
             self.scale += 64;
+            self.partials.clear();
+            for w in words {
+                let scaled = w * RESCALE;
+                if scaled != 0.0 {
+                    // a few words of magnitude below 2^960 cannot overflow
+                    self.grow(scaled).expect("a total scaled by 2^-64 does not overflow");
+                }
+            }
         }
+    }
+
+    /// Grow the expansion by `x` (Shewchuk's `GROW-EXPANSION`, as `fsum`). If an add
+    /// overflows, the expansion is left empty and `Err` holds finite words whose exact
+    /// sum is the old total plus `x`.
+    fn grow(&mut self, mut x: f64) -> Result<(), Vec<f64>> {
         let mut i = 0;
         for j in 0..self.partials.len() {
             let mut y = self.partials[j];
@@ -405,6 +416,14 @@ impl Exact {
                 std::mem::swap(&mut x, &mut y);
             }
             let hi = x + y;
+            if !hi.is_finite() {
+                let mut words: Vec<f64> = self.partials[..i].to_vec();
+                words.push(x);
+                words.push(y);
+                words.extend_from_slice(&self.partials[j + 1..]);
+                self.partials.clear();
+                return Err(words);
+            }
             let lo = y - (hi - x);
             if lo != 0.0 {
                 self.partials[i] = lo;
@@ -414,6 +433,7 @@ impl Exact {
         }
         self.partials.truncate(i);
         self.partials.push(x);
+        Ok(())
     }
 
     /// `fsum`'s final rounding of the expansion `p` (round-half-even included):

@@ -241,13 +241,18 @@ fn an_overflowing_window_is_summed_at_a_scale() {
     let c = e.to_csum();
     assert!(!c.is_exact());
     assert_eq!(c.value(), big / 2.0);
-    // words already held are scaled with it (a subnormal one drops out: below the
-    // scaled grid, the documented residue)
+    // words already held are scaled with it when an add overflows
     let mut e = Exact::default();
-    for x in [5e-324, 1.0, big, -big] {
+    for x in [1.0, big, big, -big] {
         e.add(x);
     }
-    assert_eq!(e.to_csum().value(), 1.0);
+    assert_eq!(e.to_csum().value(), big);
+    // a subnormal word below the scaled grid drops out: the documented residue
+    let mut e = Exact::default();
+    for x in [5e-324, big, big, -big, -big] {
+        e.add(x);
+    }
+    assert_eq!(e.to_csum().value(), 0.0);
     // a scaled expansion whose sum is past the threshold
     let mut e = Exact::default();
     for x in [big, big, 1.0] {
@@ -266,4 +271,18 @@ fn a_stream_mean_re_sums_an_inexact_window() {
     assert_eq!(got[3], Some(2.0));
     assert_eq!(got[4], Some(3.0));
     assert!(m.finite());
+}
+
+/// A huge term that never overflows an add does not scale the sum: the tiny terms
+/// beside it keep every bit (`fsum`'s own result).
+#[test]
+fn a_huge_term_without_an_overflow_is_summed_unscaled() {
+    let t = [1.0, -2.25, 1.7e308, 3.5, -1.7e308, 1e-300, -2.25];
+    let mut e = Exact::default();
+    for x in t {
+        e.add(x);
+    }
+    assert_eq!(e.to_csum().value(), 1e-300);
+    assert!(e.to_csum().is_exact());
+    assert_eq!(Csum::of(t).value(), 1e-300);
 }
