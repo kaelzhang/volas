@@ -64,6 +64,26 @@ def test_series_cells_and_accessor_are_utc():
     assert obj[0].tz == 'UTC'
 
 
+@pytest.mark.parametrize('values,want', [
+    ([2 ** 62 + 1, None, 3], [2 ** 62 + 1, volas.NA, 3]),   # exact int, never via float
+    ([True, None, False], [True, volas.NA, False]),
+    (['a', None, 'c'], ['a', volas.NA, 'c']),
+])
+def test_series_object_export_is_typed_cells(values, want):
+    # `dtype='object'` is the lossless export: each cell its own typed value, a
+    # missing one volas.NA (or na_value) — the same cells a frame's object export has
+    s = volas.DataFrame({'x': values})['x']
+    for arr in (s.to_numpy(dtype='object'), np.asarray(s, dtype='object')):
+        assert arr.dtype == object
+        got = arr.tolist()
+        assert [type(v) for v in got] == [type(v) for v in want]
+        assert [v is volas.NA if w is volas.NA else v == w for v, w in zip(got, want)] == [True] * 3
+    filled = s.to_numpy(dtype='object', na_value=0).tolist()
+    assert filled == [0 if w is volas.NA else w for w in want]
+    assert s.to_numpy(dtype='object').tolist() == volas.DataFrame({'x': values}).to_numpy(
+        dtype='object')[:, 0].tolist()
+
+
 def test_numpy_export_stays_datetime64_of_the_utc_instants():
     arr = _frame()['t'].to_numpy()
     assert arr.dtype == np.dtype('datetime64[ns]')
