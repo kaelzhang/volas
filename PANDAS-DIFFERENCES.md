@@ -684,3 +684,14 @@ float64 cannot hold exactly (past int64, or past 2⁵³ next to a float token) i
 as text, losslessly — pandas reads `uint64` / `object` or rounds to float64. A
 `nan` token that is not an NA token (`keep_default_na=False`) is text, and an NA
 token in a `True` / `False` column is a missing bool rather than a literal.
+
+## A missing value has no truth value
+
+`&` / `|` / `^` / `~` use Kleene logic over every dtype: a missing operand — a
+float `NaN`, an int / bool `volas.NA`, or a missing scalar (`None` / `NaN` /
+`volas.NA`) — is unknown, so `True & NaN` is `volas.NA` and `False & NaN` is
+`False`. NumPy reads `NaN` as truthy, so pandas gives `True & nan == True`. The same
+rule makes `bool()` of a one-element Series holding a missing value raise
+`TypeError` (like `bool(pd.NA)`), and makes `any` / `all` skip missing cells on both
+the Series and the DataFrame; a DataFrame `any` / `all` covers the numeric and bool
+columns only, as `Series.any` raises for a `str` / `datetime` column.

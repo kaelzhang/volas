@@ -141,25 +141,18 @@ impl PySeries {
     /// funnel to a silent (and dtype-dependent) answer (C4).
     pub(crate) fn any(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let r = match &self.inner.data {
-            // skipna: a NA bool is its `false` placeholder in the buffer, so read the
-            // validity — only a *present* true counts (matching pandas nullable any).
-            Column::Bool(v, val) => v.iter().enumerate().any(|(i, &b)| val.is_valid(i) && b),
-            other => other.to_f64_vec().iter().any(|&x| !x.is_nan() && x != 0.0),
-        };
-        Ok(np_bool(py, r))
+        // skipna: only a *present* true counts (the core truth owner, #27)
+        let c = &self.inner.data;
+        Ok(np_bool(py, (0..c.len()).any(|i| c.truth_at(i) == Some(true))))
     }
 
     /// True if every non-missing element is truthy (empty / all-NA -> True) — pandas
     /// `all` -> `np.bool_`, default `skipna=True`. Bool/numeric only (see `any`).
     pub(crate) fn all(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let r = match &self.inner.data {
-            // skipna: a NA is ignored (vacuously satisfies), only a present false fails.
-            Column::Bool(v, val) => v.iter().enumerate().all(|(i, &b)| !val.is_valid(i) || b),
-            other => other.to_f64_vec().iter().all(|&x| x.is_nan() || x != 0.0),
-        };
-        Ok(np_bool(py, r))
+        // skipna: a NA is ignored (vacuously satisfies), only a present false fails.
+        let c = &self.inner.data;
+        Ok(np_bool(py, (0..c.len()).all(|i| c.truth_at(i) != Some(false))))
     }
 
     /// The `q`-quantile in `[0, 1]` (linear interpolation, NaN-skipping) — pandas

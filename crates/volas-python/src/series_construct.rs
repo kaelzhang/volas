@@ -99,7 +99,10 @@ impl PySeries {
     /// only when it holds exactly one element (pandas-style).
     pub(crate) fn __bool__(&self) -> PyResult<bool> {
         match self.inner.len() {
-            1 => Ok(to_bool_vec(&self.inner.data)[0]),
+            // a missing single value has no truth value (pandas: `bool(pd.NA)`)
+            1 => self.inner.data.truth_at(0).ok_or_else(|| {
+                pyo3::exceptions::PyTypeError::new_err("boolean value of NA is ambiguous")
+            }),
             _ => Err(PyValueError::new_err(
                 "The truth value of a Series is ambiguous — use s.any() or s.all()",
             )),

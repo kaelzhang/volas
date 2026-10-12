@@ -226,24 +226,20 @@ impl PyDataFrame {
         })
     }
 
-    /// Per-column truthiness any/all (NA-skipping) -> bool Series by name.
+    /// Per-column truthiness any/all over the numeric / bool columns (a str /
+    /// datetime column has no truth value, as `Series.any` raises for it), NA
+    /// skipped — the same core truth owner as the Series surface (#27).
     fn bool_reduce(&self, want_any: bool) -> PySeries {
         let view = self.logical();
         let df = view.as_ref();
-        let names: Vec<String> = df.names().to_vec();
-        let vals: Vec<bool> = df
-            .columns()
-            .iter()
-            .map(|c| {
-                let truth = to_bool_vec(c);
-                let present = (0..c.len()).filter(|&i| c.is_valid(i));
-                if want_any {
-                    present.into_iter().any(|i| truth[i])
-                } else {
-                    present.into_iter().all(|i| truth[i])
-                }
-            })
-            .collect();
+        let (mut names, mut vals) = (Vec::new(), Vec::new());
+        for (name, c) in df.names().iter().zip(df.columns()) {
+            if c.require_numeric().is_ok() {
+                let mut truth = (0..c.len()).filter_map(|i| c.truth_at(i));
+                names.push(name.clone());
+                vals.push(if want_any { truth.any(|t| t) } else { truth.all(|t| t) });
+            }
+        }
         PySeries {
             inner: Series::new(None, Column::bool(vals), Arc::new(Index::str(names))),
         }

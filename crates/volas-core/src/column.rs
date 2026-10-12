@@ -470,8 +470,8 @@ impl Column {
     }
 
     /// Value at position `i` coerced to `f64`, **ignoring validity** (a missing
-    /// cell reads its raw placeholder). Used only by the logical-op coercion in
-    /// `bool_at`; NumPy export goes through the validity-aware `to_f64_vec`.
+    /// cell reads its raw placeholder); callers check validity first (e.g.
+    /// [`truth_at`](Self::truth_at)). NumPy export goes through `to_f64_vec`.
     pub fn get_f64(&self, i: usize) -> f64 {
         match self {
             Column::F64(v) => v[i],

@@ -270,63 +270,47 @@ impl Column {
     }
 
     /// Three-valued logical `and` / `or` / `xor` (pandas `&` / `|` / `^`), Kleene
-    /// semantics: a present `false` makes `and` false and a present `true` makes
-    /// `or` true even when the other side is missing; otherwise a missing operand
-    /// yields NA. A non-bool operand is read as `x != 0` (present). Unequal lengths
-    /// are a [`VolasError::Shape`] error.
+    /// semantics over [`truth_at`](Self::truth_at): a present `false` makes `and`
+    /// false and a present `true` makes `or` true even when the other side is
+    /// missing; otherwise a missing operand (a NaN, an int / bool NA) yields NA —
+    /// never a present value (contract #27). Unequal lengths are a
+    /// [`VolasError::Shape`] error.
     pub fn logical(&self, other: &Column, op: BoolOp) -> Result<Column> {
         let n = self.require_same_len(other)?;
         Ok(from_option_bools(
             n,
-            (0..n).map(|i| {
-                let (a, ap) = self.bool_at(i);
-                let (b, bp) = other.bool_at(i);
-                match op {
-                    BoolOp::And => {
-                        if (ap && !a) || (bp && !b) {
-                            Some(false)
-                        } else if ap && bp {
-                            Some(true)
-                        } else {
-                            None
-                        }
-                    }
-                    BoolOp::Or => {
-                        if (ap && a) || (bp && b) {
-                            Some(true)
-                        } else if ap && bp {
-                            Some(false)
-                        } else {
-                            None
-                        }
-                    }
-                    BoolOp::Xor => (ap && bp).then_some(a ^ b),
-                }
+            (0..n).map(|i| match (op, self.truth_at(i), other.truth_at(i)) {
+                (BoolOp::And, Some(false), _) | (BoolOp::And, _, Some(false)) => Some(false),
+                (BoolOp::Or, Some(true), _) | (BoolOp::Or, _, Some(true)) => Some(true),
+                (BoolOp::And, Some(a), Some(b)) => Some(a && b),
+                (BoolOp::Or, Some(a), Some(b)) => Some(a || b),
+                (BoolOp::Xor, Some(a), Some(b)) => Some(a ^ b),
+                _ => None,
             }),
         ))
     }
 
-    /// Logical NOT (pandas `~`), propagating missing (NA in -> NA out). A non-bool
-    /// column is read as `x != 0` first.
+    /// Logical NOT (pandas `~`) over [`truth_at`](Self::truth_at): NA in -> NA out.
     pub fn not(&self) -> Column {
         let n = self.len();
-        from_option_bools(
-            n,
-            (0..n).map(|i| {
-                let (a, ap) = self.bool_at(i);
-                ap.then_some(!a)
-            }),
-        )
+        from_option_bools(n, (0..n).map(|i| self.truth_at(i).map(|a| !a)))
     }
 
-    /// The value (`x != 0` for a non-bool) and presence of element `i`, for the
-    /// logical ops. A non-bool is always present (its missing-as-bool question is
-    /// the comparison policy: a missing value compares/reads `false`-y).
-    fn bool_at(&self, i: usize) -> (bool, bool) {
-        match self {
-            Column::Bool(v, val) => (v[i], val.is_valid(i)),
-            _ => (self.get_f64(i) != 0.0, true),
+    /// The truth value of element `i`, or `None` when it is missing — the one
+    /// validity-aware boolean conversion (contract #27) behind the logical ops,
+    /// `bool()` of a one-element Series, masks and `any` / `all`. A bool reads its
+    /// value, a number `x != 0`, a str `!s.is_empty()`, a datetime `ns != 0`
+    /// (Python truthiness); a missing cell (NaN / NA / NaT) is never read as a
+    /// value, whatever payload it carries.
+    pub fn truth_at(&self, i: usize) -> Option<bool> {
+        if !self.is_valid(i) {
+            return None;
         }
+        Some(match self {
+            Column::Bool(v, _) => v[i],
+            Column::Str(v, _) => !v.get(i).is_empty(),
+            other => other.get_f64(i) != 0.0,
+        })
     }
 
     /// Sum, dtype-preserving (pandas): a float column -> float, int/bool -> i64

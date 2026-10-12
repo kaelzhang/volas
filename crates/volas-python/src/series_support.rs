@@ -192,30 +192,23 @@ pub(crate) fn argext(col: &Column, want_max: bool) -> PyResult<usize> {
         .ok_or_else(|| PyValueError::new_err("Encountered all NA values"))
 }
 
-/// A column coerced to bool (a `Bool` column as-is, else `x != 0.0`).
-pub(crate) fn to_bool_vec(col: &Column) -> Vec<bool> {
-    match col {
-        Column::Bool(v, _) => v.to_vec(),
-        other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
-    }
-}
-
-/// A boolean mask / condition column as a `Vec<bool>`, rejecting any `volas.NA`
-/// (O5). A missing condition is an *unknown* signal — silently reading it as
-/// `False` would drop a row (filtering) or fill it in the `False` direction
-/// (`where` / `mask`) exactly like a deliberate negative, which in a live system
-/// turns a data gap into a trade signal. The user must fill or drop the NA first.
-/// A dense bool mask passes straight through.
+/// A boolean mask / condition column as a `Vec<bool>`, rejecting any missing
+/// cell (O5) through the core truth owner ([`Column::truth_at`], contract #27). A
+/// missing condition is an *unknown* signal — silently reading it as `False`
+/// would drop a row (filtering) or fill it in the `False` direction (`where` /
+/// `mask`) exactly like a deliberate negative, which in a live system turns a
+/// data gap into a trade signal. The user must fill or drop the NA first.
 pub(crate) fn bool_mask_vec(col: &Column) -> PyResult<Vec<bool>> {
-    if let Column::Bool(v, val) = col {
-        if (0..v.len()).any(|i| !val.is_valid(i)) {
-            return Err(PyValueError::new_err(
-                "boolean mask/condition contains volas.NA; an unknown signal is not \
-                 treated as False — fill or drop the NA before masking",
-            ));
-        }
-    }
-    Ok(to_bool_vec(col))
+    (0..col.len())
+        .map(|i| {
+            col.truth_at(i).ok_or_else(|| {
+                PyValueError::new_err(
+                    "boolean mask/condition contains volas.NA; an unknown signal is not \
+                     treated as False — fill or drop the NA before masking",
+                )
+            })
+        })
+        .collect()
 }
 
 /// Recognise a boolean-mask key (`s[mask]` / `df[mask] = v`): a boolean Series, a
@@ -361,6 +354,10 @@ pub(crate) fn series_logical(s: &Series, other: &Bound<'_, PyAny>, op: BoolOp) -
     let rhs: Column = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
         require_aligned(&s.index, &o.inner.index)?;
         o.inner.data.clone()
+    } else if is_na_like_py(other) {
+        // a missing scalar (None / NaN / volas.NA / pd.NA) is an unknown truth
+        // value: Kleene NA, never a present `NaN != 0 == True` (contract #27)
+        Column::na_of(DType::Bool, n)
     } else if let Ok(b) = other.extract::<bool>() {
         Column::bool(vec![b; n])
     } else if let Ok(x) = other.extract::<f64>() {
