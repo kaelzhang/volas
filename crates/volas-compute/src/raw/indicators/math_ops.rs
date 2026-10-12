@@ -75,9 +75,11 @@ fn position(data: &[f64], trailing: usize, today: usize, at: usize) -> f64 {
 }
 
 /// Absolute index (as a float) of the highest value in each trailing `period`-bar
-/// window (TA-Lib MAXINDEX). Tie-breaking mirrors TA-Lib's incremental tracker: the
-/// earliest index when the running max is rebuilt after the old one leaves (strict
-/// `>`), the latest when a fresh bar matches the current max (`>=`). Row 0 is at
+/// window (TA-Lib MAXINDEX). A tie reports the latest of the equal highs — when the
+/// running max is rebuilt after the old one leaves as when a fresh bar matches it — so a
+/// value is a function of its window alone (TA-Lib's tracker reports the earliest on a
+/// rebuild, which makes the position depend on when the last rebuild happened; a
+/// documented divergence). Row 0 is at
 /// absolute position `origin` (the frame's), so the positions are the series' own —
 /// the same on a slice or a bounded frame as in the full history. A window holding a
 /// missing value is NaN. Lookback `period-1`.
@@ -102,7 +104,7 @@ pub fn maxindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
             let mut h = win[0];
             let mut hidx = trailing;
             for (off, &val) in win.iter().enumerate().skip(1) {
-                if val > h {
+                if val >= h {
                     h = val;
                     hidx = trailing + off;
                 }
@@ -122,8 +124,8 @@ pub fn maxindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 }
 
 /// Absolute index (as a float) of the lowest value in each trailing `period`-bar
-/// window (TA-Lib MININDEX). Mirror of [`maxindex`] (strict `<` on rebuild, `<=` on
-/// a fresh matching bar). Row 0 is at absolute position `origin`. A window holding a
+/// window (TA-Lib MININDEX). Mirror of [`maxindex`] (a tie reports the latest of the
+/// equal lows). Row 0 is at absolute position `origin`. A window holding a
 /// missing value is NaN. Lookback `period-1`.
 pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let n = data.len();
@@ -145,7 +147,7 @@ pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
             let mut l = win[0];
             let mut lidx = trailing;
             for (off, &val) in win.iter().enumerate().skip(1) {
-                if val < l {
+                if val <= l {
                     l = val;
                     lidx = trailing + off;
                 }
@@ -170,10 +172,9 @@ pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 // positions, so the value-probe fast-path declines them (a head-dropping slice rebases
 // the window but the cached indices stay original-absolute). Two pieces continue them
 // bit-exactly in O(new rows):
-//   * a carried recursive `state = [extreme_idx_abs, extreme_value]` — the incremental
-//     tracker's running extreme as of the last valid row. The tracker's `hi_idx` is NOT a
-//     pure function of the current window (a `>=` match pushes it forward; a rebuild snaps
-//     it to the earliest), so it genuinely must be carried, not re-derived.
+//   * a carried `state = [extreme_idx_abs, extreme_value]` — the incremental tracker's
+//     running extreme as of the last valid row (the window's latest arg-extreme), which
+//     saves the resume a rescan of the window.
 //   * the frame's `origin` (the absolute position of its row 0 — `DataFrame::origin`),
 //     so emitted positions are ABSOLUTE on every path: a frame position `p` is series
 //     position `p + origin`. The stored `*_idx_abs` is absolute too, hence stable across a
@@ -184,8 +185,7 @@ pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 
 /// Final MAXINDEX tracker state `[hi_idx_abs, hi_value]` after a full [`maxindex`]
 /// compute, or `None` if it never warms up (`period == 0 || period > n`). Reproduces the
-/// incremental tracker exactly (earliest on rebuild via `>`, latest on a fresh tie via
-/// `>=`); `hi_idx_abs` is the absolute position (`origin` + the position in `data`).
+/// incremental tracker exactly (the latest of equal highs); `hi_idx_abs` is the absolute position (`origin` + the position in `data`).
 pub fn maxindex_final_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
     let n = data.len();
     if period == 0 || period > n {
@@ -203,7 +203,7 @@ pub fn maxindex_final_state(data: &[f64], period: usize, origin: usize) -> Optio
             let mut h = win[0];
             let mut hidx = trailing;
             for (off, &val) in win.iter().enumerate().skip(1) {
-                if val > h {
+                if val >= h {
                     h = val;
                     hidx = trailing + off;
                 }
@@ -251,7 +251,7 @@ pub fn maxindex_resume(
             let mut h = win[0];
             let mut hidx = trailing;
             for (off, &val) in win.iter().enumerate().skip(1) {
-                if val > h {
+                if val >= h {
                     h = val;
                     hidx = trailing + off;
                 }
@@ -268,8 +268,8 @@ pub fn maxindex_resume(
 }
 
 /// Final MININDEX tracker state `[lo_idx_abs, lo_value]` after a full [`minindex`]
-/// compute, or `None` if it never warms up. Mirror of [`maxindex_final_state`] (strict
-/// `<` on rebuild, `<=` on a fresh tie).
+/// compute, or `None` if it never warms up. Mirror of [`maxindex_final_state`] (the latest
+/// of equal lows).
 pub fn minindex_final_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
     let n = data.len();
     if period == 0 || period > n {
@@ -287,7 +287,7 @@ pub fn minindex_final_state(data: &[f64], period: usize, origin: usize) -> Optio
             let mut l = win[0];
             let mut lidx = trailing;
             for (off, &val) in win.iter().enumerate().skip(1) {
-                if val < l {
+                if val <= l {
                     l = val;
                     lidx = trailing + off;
                 }
@@ -331,7 +331,7 @@ pub fn minindex_resume(
             let mut l = win[0];
             let mut lidx = trailing;
             for (off, &val) in win.iter().enumerate().skip(1) {
-                if val < l {
+                if val <= l {
                     l = val;
                     lidx = trailing + off;
                 }

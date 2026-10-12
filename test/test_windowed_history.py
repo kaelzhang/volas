@@ -146,6 +146,27 @@ def test_a_write_replays_each_declared_recursion_from_its_checkpoint():
             assert same(w[d], u[d].to_numpy()[-4:]), (d, i)
 
 
+@pytest.mark.parametrize('d', ['psy', 'psy:5', 'minindex:4', 'maxindex:4'])
+def test_a_window_directive_reads_its_lookback_rows_alone(d):
+    # psy's first window starts at the first difference, and a tied extreme reports its
+    # latest position: each value reads its lookback's rows only, so a write that makes
+    # the frame recompute from the rows it keeps gives the unbounded history's values
+    cols = bars(260, seed=13)
+    cols['close'] = np.round(cols['close'])  # ties
+    w = volas.DataFrame(rows(cols, 0, 30), window=3, max_lookback=[d])
+    u = volas.DataFrame(rows(cols, 0, 30))
+    u[d]
+    for i in range(30, 260):
+        w.append(rows(cols, i, i + 1))
+        u.append(rows(cols, i, i + 1))
+        if i % 5 == 0:
+            w.fulfill()
+            u.fulfill()
+            w.iat[0, 0] = float(i)  # open: no input of d, every cache recomputes
+            u.iat[len(u) - 3, 0] = float(i)
+        assert same(w[d], u[d].to_numpy()[-3:]), i
+
+
 def test_declared_directives_are_computed_over_the_whole_seed():
     cols = bars(500, seed=3)
     w = volas.DataFrame(rows(cols, 0, 500), window=5, max_lookback=['ema:20', 'ma:10'])

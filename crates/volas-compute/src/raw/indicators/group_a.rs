@@ -12,21 +12,22 @@ use crate::guard::Slide;
 use crate::guard::state_after;
 use crate::raw::kernels;
 
-/// PSY (心理线): `100 * mean(up, n)`, where `up[i] = 1` when `close[i] > close[i-1]` (the
-/// first bar is not rising). NaN until `n` bars are available.
+/// PSY (心理线): `100 * mean(up, n)`, where `up[i] = 1` when `close[i] > close[i-1]`. The
+/// first bar has no prior close, so no flag: the first full window of `n` flags ends at
+/// bar `n` (NaN before), and each value reads its `n + 1` closes only.
 /// Source: Eastmoney 心理线. Row 0 is at absolute position `origin`.
 pub fn psy(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let up: Vec<f64> = (0..close.len()).map(|i| psy_up(close, i)).collect();
     (kernels::sma(av(&up), n, origin) * 100.0).to_vec()
 }
 
-/// PSY's rising flag at bar `i` (`0` at the first bar). It reads `close[i]` and the
-/// prior close, and is missing when one of them is (the per-row term rule,
-/// [`missing::term`]): a comparison with a missing close would read as "not rising".
+/// PSY's rising flag at bar `i`: it reads `close[i]` and the prior close, and is missing
+/// when one of them is (the per-row term rule, [`missing::term`]): a comparison with a
+/// missing close would read as "not rising". The first bar has no prior close.
 #[inline]
 fn psy_up(close: &[f64], i: usize) -> f64 {
     if i == 0 {
-        return missing::term(&[close[0]], 0.0);
+        return f64::NAN;
     }
     missing::term(&[close[i], close[i - 1]], f64::from(close[i] > close[i - 1]))
 }

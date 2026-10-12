@@ -195,7 +195,7 @@ def psy(o, h, lo, c, v, n=12):
     d = c.diff()
     up = (d > 0).astype(float)
     up[d.isna()] = np.nan  # a bar missing its close or prior close has no flag
-    up.iloc[0] = np.nan if np.isnan(c.iloc[0]) else 0.0  # the first bar is not rising
+    # the first bar has no prior close: no flag (the first full window ends at bar n)
     return up.rolling(n, min_periods=n).sum() / n * 100.0
 
 

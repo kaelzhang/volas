@@ -192,3 +192,36 @@ fn a_replay_that_cannot_run_declines() {
     assert!(replay(&df, &ema, &other, 40).is_none()); // another input slot
     assert!(capture(&df, &atr, 10).is_none());
 }
+
+/// A line without a recursion depends on its lookback's rows alone: computed over just
+/// the rows `[k - L, k]` (the frame's positions kept), its value at row `k` is the full
+/// computation's — on every line and data class, at every row past the warm-up. This is
+/// what lets a bounded window recompute it from the rows it keeps (a lookback that
+/// under-states the rows a value reads fails here).
+#[test]
+fn a_window_line_depends_on_its_lookback_rows_alone() {
+    let classes = matrix::classes(ROWS);
+    let mut fails = Vec::new();
+    for line in &matrix::lines() {
+        for text in matrix::variants(line) {
+            let node = parse(&text).unwrap();
+            if history(&node) != History::Window {
+                continue;
+            }
+            let l = lookback(&node);
+            for data in &classes {
+                let Ok(whole) = execute(&data.frame, &node) else { continue };
+                let whole = whole.to_f64_vec();
+                for k in (l..ROWS).step_by(7).chain([ROWS - 1]) {
+                    let Ok(part) = execute(&data.frame.slice_data(k - l, k + 1), &node) else { continue };
+                    let got = part.to_f64_vec()[l];
+                    if !same(got, whole[k]) {
+                        fails.push(format!("{text} [{}] row {k}: {got:?} != {:?}", data.name, whole[k]));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert!(fails.is_empty(), "{} line(s) read past their lookback:\n{}", fails.len(), fails.join("\n"));
+}

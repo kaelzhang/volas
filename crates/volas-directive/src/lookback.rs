@@ -61,7 +61,8 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
             .max(arg(args, 2))
             .max(arg(args, 3))
             .saturating_sub(1),
-        "psy" => arg(args, 0).saturating_sub(1),
+        // psy averages `n` rising flags, each reading a close and the one before it
+        "psy" => arg(args, 0),
         // pvt / nvi / pvi are cumulative (lookback 0); like obv/ad they carry a running-line
         // state so append resumes in O(new rows) and continues past a slice (see exec_resume).
         "pvt" | "nvi" | "pvi" => 0,
@@ -378,7 +379,7 @@ fn resume_reach(node: &Ast) -> usize {
 /// contiguous slice must keep for the column to stay cached: its lookback, from which a
 /// sliding sum or an extremum-position window recomputes exactly over the slice's own
 /// rows when its state cannot resume; any other command reading past its lookback (a
-/// recursion — SAR, KAMA — or PSY's first partial window) continues exactly only with
+/// recursion — SAR, KAMA) continues exactly only with
 /// its [`resume_reach`] rows.
 fn continuation_reach(node: &Ast) -> usize {
     match top_command(node) {
