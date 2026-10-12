@@ -128,8 +128,10 @@ it, the departure is deliberate and listed here.
   `kama`), the weighted form `(k·x) + ((1 − k)·prev)` of `t3`, `adosc` and `mama`,
   Wilder's average `prev·(p − 1)`, `+ x`, `/ p` (`rsi`, `cmo`, `stochrsi`, `atr`, `natr`,
   the ADX average), the Hilbert transform (`ht_*`) and the stochastic %K
-  `(close − low) / ((high − low) / 100)`. Each value is the same on every platform and
-  bit-identical to a TA-Lib build that does not fuse (the x86-64 wheels). A build that
+  `(close − low) / ((high − low) / 100)`. Each step is the same on every platform and
+  bit-identical to a TA-Lib build that does not fuse (the x86-64 wheels), so is every
+  output computed from the same inputs and seed — not the MACD / MACDEXT lines, whose
+  seeds differ (see above), nor windows summed exactly (see below). A build that
   fuses (clang on arm64 contracts an `x·y + z` expression into one FMA) agrees to
   rounding wherever the C source writes the recurrence as one such expression — the EMA
   and weighted steps, KAMA's constant, the ADX average, the Hilbert transform; RSI, CMO,
