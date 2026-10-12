@@ -235,7 +235,7 @@ on_complete_rows! { resume:
         state) -> (Vec<f64>, Vec<f64>) = total;
     mama_resume(price; fast_limit: f64, slow_limit: f64, want_fama: bool; from, state) ->
         Option<(Vec<f64>, Vec<f64>)>;
-    mass_index_resume(high, low; n: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
+    mass_index_resume(high, low; n: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
     minus_di_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
     minus_dm_resume(high, low; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
     natr_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;

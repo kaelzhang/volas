@@ -188,7 +188,7 @@ fn resume_of(
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let (vals, st) =
-                ind::mass_index_resume(&high, &low, arg_usize(args, 0), from_row, prev_state);
+                ind::mass_index_resume(&high, &low, arg_usize(args, 0), from_row, prev_state)?;
             Some((Column::f64(vals), st))
         }
 

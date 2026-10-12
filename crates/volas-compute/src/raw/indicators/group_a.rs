@@ -456,24 +456,27 @@ fn mass_index_step(range: f64, n: usize, row: usize, state: &[f64], next: &mut [
 }
 
 /// Resume [`mass_index`] over `[from, n)`: one [`mass_index_step`] per row — bit-identical
-/// to `kernels::sma(ratio, n) * n`.
+/// to `kernels::sma(ratio, n) * n`. `None` for a state that is not this kernel's (the
+/// caller then recomputes in full).
 pub fn mass_index_resume(
     high: &[f64],
     low: &[f64],
     n: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+) -> Option<(Vec<f64>, Vec<f64>)> {
     let len = high.len();
+    if n == 0 || from < n || state.len() != MASS_RATIOS + n {
+        return None; // not this kernel's state: the caller recomputes in full
+    }
     let mut prev = state.to_vec();
     let mut next = prev.clone();
     let mut out = Vec::with_capacity(len.saturating_sub(from));
     for i in from..len {
-        let v = mass_index_step(high[i] - low[i], n, i, &prev, &mut next);
-        out.push(v.expect("a mass_index state from mass_index_final_state steps"));
+        out.push(mass_index_step(high[i] - low[i], n, i, &prev, &mut next)?);
         std::mem::swap(&mut prev, &mut next);
     }
-    (out, prev)
+    Some((out, prev))
 }
 
 
@@ -758,6 +761,22 @@ mod tests {
         assert!(mass_index_final_state(&high, &low, 25, 0).is_none()); // start + n > len
     }
 
+    /// A state that is not Mass Index's own declines the resume (the caller recomputes
+    /// in full) instead of panicking: a wrong length, a `from` inside the first window,
+    /// a malformed slide, a zero period.
+    #[test]
+    fn mass_index_resume_declines_a_foreign_state() {
+        let (high, low, _) = ohlc(120);
+        let st = mass_index_final_state(&high[..80], &low[..80], 25, 0).unwrap();
+        assert!(mass_index_resume(&high, &low, 25, 80, &st).is_some());
+        assert!(mass_index_resume(&high, &low, 25, 80, &st[..st.len() - 1]).is_none());
+        assert!(mass_index_resume(&high, &low, 25, 10, &st).is_none());
+        assert!(mass_index_resume(&high, &low, 0, 80, &st).is_none());
+        let mut bad = st.clone();
+        bad[2 + 2] = 0.5; // the slide's count of non-finite rows is not a whole number
+        assert!(mass_index_resume(&high, &low, 25, 80, &bad).is_none());
+    }
+
     /// Each resume, fed the carried state of a full compute over the head `[0, from)`,
     /// reproduces the tail of a full compute over the whole input — bit-for-bit. This is
     /// the property that makes the append + slice-continuation fast path safe.
@@ -798,7 +817,7 @@ mod tests {
 
             let st = mass_index_final_state(&high[..from], &low[..from], 25, 0).unwrap();
             assert_bits(
-                &mass_index_resume(&high, &low, 25, from, &st).0,
+                &mass_index_resume(&high, &low, 25, from, &st).unwrap().0,
                 &mi_full[from..],
                 "mass_index",
             );
