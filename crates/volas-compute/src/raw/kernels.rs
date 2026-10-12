@@ -336,10 +336,12 @@ pub fn ema_cascade_final<const S: usize>(data: &[f64], period: usize) -> Option<
 }
 
 /// Advance an `S`-deep EMA cascade one bar from the carried stage vector `e` (each stage
-/// consumes the previous stage's *current* output). The exact lattice step of
-/// [`ema_cascade`] / [`ema_cascade_final`], shared by the TRIX / DEMA / TEMA resumes.
+/// consumes the previous stage's *current* output), each an EMA over `period`. The exact
+/// lattice step of [`ema_cascade`] / [`ema_cascade_final`], shared by the TRIX / DEMA /
+/// TEMA resumes.
 #[inline]
-pub fn ema_cascade_step<const S: usize>(e: &mut [f64; S], x: f64, k: f64) {
+pub fn ema_cascade_step<const S: usize>(e: &mut [f64; S], x: f64, period: usize) {
+    let k = smoothing::ema_k(period);
     cascade_step(e, x, |prev: f64, x: f64| smoothing::ema(prev, x, k));
 }
 

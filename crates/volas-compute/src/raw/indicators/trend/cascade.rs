@@ -207,12 +207,11 @@ pub fn dema_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
-    let k = ema_k(period);
     let n = data.len();
     let mut e = [state[0], state[1]];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &data[from..n] {
-        kernels::ema_cascade_step(&mut e, x, k);
+        kernels::ema_cascade_step(&mut e, x, period);
         out.push(2.0 * e[0] - e[1]);
     }
     (out, e.to_vec())
@@ -232,12 +231,11 @@ pub fn tema_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
-    let k = ema_k(period);
     let n = data.len();
     let mut e = [state[0], state[1], state[2]];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &data[from..n] {
-        kernels::ema_cascade_step(&mut e, x, k);
+        kernels::ema_cascade_step(&mut e, x, period);
         out.push(3.0 * e[0] - 3.0 * e[1] + e[2]);
     }
     (out, e.to_vec())
@@ -283,7 +281,7 @@ pub fn dema_resume_one(
     };
     let x = *data.get(row)?;
     *e = st;
-    kernels::ema_cascade_step(e, x, ema_k(period));
+    kernels::ema_cascade_step(e, x, period);
     Some(2.0 * e[0] - e[1])
 }
 
@@ -303,7 +301,7 @@ pub fn tema_resume_one(
     };
     let x = *data.get(row)?;
     *e = st;
-    kernels::ema_cascade_step(e, x, ema_k(period));
+    kernels::ema_cascade_step(e, x, period);
     Some(3.0 * e[0] - 3.0 * e[1] + e[2])
 }
 
