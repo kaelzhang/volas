@@ -16,6 +16,8 @@
 pub trait RoundFloat: Copy + std::str::FromStr {
     /// Significand bits, the implicit one included.
     const DIGITS: u32;
+    /// The exponent of the smallest step (the least subnormal).
+    const MIN_STEP_EXP: i32;
     /// The largest `k` for which `10^k` is exact in this type.
     const EXACT_POW10: i32;
     fn to_f64(self) -> f64;
@@ -29,6 +31,7 @@ pub trait RoundFloat: Copy + std::str::FromStr {
 
 impl RoundFloat for f64 {
     const DIGITS: u32 = f64::MANTISSA_DIGITS;
+    const MIN_STEP_EXP: i32 = -1074;
     const EXACT_POW10: i32 = 22;
     fn to_f64(self) -> f64 {
         self
@@ -46,6 +49,7 @@ impl RoundFloat for f64 {
 
 impl RoundFloat for f32 {
     const DIGITS: u32 = f32::MANTISSA_DIGITS;
+    const MIN_STEP_EXP: i32 = -149;
     const EXACT_POW10: i32 = 10;
     fn to_f64(self) -> f64 {
         self as f64
@@ -79,7 +83,7 @@ pub fn round<F: RoundFloat>(x: F, k: i32) -> Option<F> {
 /// [`round`] at `k >= 0` places.
 fn round_places<F: RoundFloat>(x: F, k: i32) -> Option<F> {
     let v = x.to_f64();
-    if k > MAX_PLACES || step_exceeds_place(v, F::DIGITS, k) {
+    if k > MAX_PLACES || step_exceeds_place::<F>(v, k) {
         // the rounded decimal lies within half a place, under half a step: x itself
         return Some(x);
     }
@@ -108,15 +112,15 @@ fn round_places<F: RoundFloat>(x: F, k: i32) -> Option<F> {
     })
 }
 
-/// Whether the step from `v` toward zero (for a `digits`-bit significand) is at least
+/// Whether the step from `v` toward zero (in the float type `F`) is at least
 /// `10^-k`: then the rounded decimal, within half a place of `v`, is nearer
 /// `v` than any other float (or `v` is whole and `k == 0`). Exact: `2^q > 10^-k` ⇔
 /// `5^k > 2^(-q-k)`, compared through `k·log2 5`, which for `1 <= k <= 350` is never
 /// within 1e-4 of an integer (`log2_5_multiples_stay_off_integers`).
-fn step_exceeds_place(v: f64, digits: u32, k: i32) -> bool {
+fn step_exceeds_place<F: RoundFloat>(v: f64, k: i32) -> bool {
     // the step toward zero: at a power of two the floats below are twice as dense
     let power_of_two = v.to_bits() & ((1 << 52) - 1) == 0;
-    let q = (exponent(v) - digits as i32 + 1 - i32::from(power_of_two)).max(min_step_exponent(digits));
+    let q = (exponent(v) - F::DIGITS as i32 + 1 - i32::from(power_of_two)).max(F::MIN_STEP_EXP);
     let m = -q - k;
     m <= 0 || k as f64 * LOG2_5 > m as f64
 }
@@ -134,11 +138,6 @@ fn exponent(v: f64) -> i32 {
     } else {
         biased - 1023
     }
-}
-
-/// The exponent of the smallest step of a `digits`-bit float type (`f64`: −1074).
-fn min_step_exponent(digits: u32) -> i32 {
-    if digits == f64::MANTISSA_DIGITS { -1074 } else { -149 }
 }
 
 /// [`round`] at `-j` places: to the nearest multiple of `10^j`, computed exactly — on
