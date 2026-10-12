@@ -260,21 +260,33 @@ def recursive(text: str) -> bool:
 
 # The MA-type argument slots of each command taking them, and the codes selecting a
 # recursive average (spec::is_recursive_matype); an omitted one is SMA (0).
-_MATYPES = {'ma': (1,), 'apo': (2,), 'ppo': (2,), 'mavp': (2,), 'stochf': (2,),
-            'macdext': (1, 3, 5), 'stoch': (2, 4)}
+# The (period, MA-type) argument positions of each generic moving average with the
+# spec's defaults (spec::is_recursive): an MA type selecting a recursive average makes a
+# recursion, except at period 1 (every type is the identity there).
+_AVERAGES = {'ma': ((0, 1),), 'apo': ((0, 2), (1, 2)), 'ppo': ((0, 2), (1, 2)), 'mavp': ((1, 2),),
+             'stochf': ((1, 2),), 'macdext': ((0, 1), (2, 3), (4, 5)), 'stoch': ((1, 2), (3, 4))}
+_AVERAGE_DEFAULTS = {'apo': ('12', '26', '0'), 'ppo': ('12', '26', '0'), 'stochf': ('5', '3', '0'),
+                     'stoch': ('5', '3', '0', '3', '0'), 'macdext': ('12', '0', '26', '0', '9', '0')}
 _RECURSIVE_MATYPES = {'1', '3', '4', '6', '7', '8'}
 
 
 def recursion(text: str) -> bool:
     """Whether a recursion appears anywhere in ``text`` exactly as the engine decides it
     (spec::is_recursive per command): a recursive command, or an MA-type argument that
-    selects a recursive average."""
+    selects a recursive average of a period above 1."""
     names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
     if names & _RECURSIVE:
         return True
     for head, args in _ARGS.findall(text.lower()):
-        values = args.split(',')
-        if any(i < len(values) and values[i].strip() in _RECURSIVE_MATYPES for i in _MATYPES.get(head, ())):
+        given = [a.strip() for a in args.split(',')]
+        defaults = _AVERAGE_DEFAULTS.get(head, ())
+
+        def arg(i):
+            if i < len(given) and given[i]:
+                return given[i]
+            return defaults[i] if i < len(defaults) else '0'
+
+        if any(arg(m) in _RECURSIVE_MATYPES and arg(p) != '1' for p, m in _AVERAGES.get(head, ())):
             return True
     return False
 

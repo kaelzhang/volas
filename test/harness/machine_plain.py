@@ -72,6 +72,9 @@ class PlainMachine(FrameMachine):
             form = 'arrow'
         if form == 'dict' and schema.index == 'range':
             form = 'numpy'  # an unnamed RangeIndex frame takes no bar dict
+        if contracts.avoids('slice-resend-short') and step == 'resend' and self.offset > 0 and any(
+                volas.directive_lookback(name) >= len(self.df) for name in self.cached):
+            return  # a re-sent last row of a slice holding just a column's lookback
         rows, index = self._new_bars(k, regime, step)
         bar = build.bars(schema, rows, index, form, pad=2, extra=tuple(self.store.user))
         labels = index

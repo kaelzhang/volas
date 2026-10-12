@@ -261,6 +261,8 @@ class FrameMachine(RuleBasedStateMachine):
         if name in self.plain_columns() or d.text in self.plain_columns():
             return  # a plain column of that name shadows the directive (get_column covers it)
         column = self.column_of.get(name, name)
+        if column != name and column in self.plain_columns() and contracts.avoids('stringify-column-name'):
+            return  # it was cached under another name, now a plain column the directive misses
         entry = self.cached.get(column) or Entry(column, d, self.env(), self.visible_start())
         if self.window is not None and column not in self.cached:
             # README: a windowed frame's cached indicators equal the unbounded frame's
