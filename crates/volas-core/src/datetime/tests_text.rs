@@ -76,6 +76,30 @@ fn csv_text_carries_the_offset_of_an_aware_instant() {
 }
 
 #[test]
+fn epoch_text_is_read_exactly() {
+    let ns = |t: &str, u: &str| epoch_text_to_ns(t, u).unwrap();
+    assert_eq!(ns("1704067200.123456789", "s"), 1_704_067_200_123_456_789);
+    assert_eq!(ns(" +1704067200000000500.0 ", "ns"), 1_704_067_200_000_000_500);
+    assert_eq!(ns("1.7040672005e12", "ms"), 1_704_067_200_500_000_000);
+    assert_eq!(ns("-1.5", "s"), -1_500_000_000);
+    assert_eq!(ns(".5", "us"), 500);
+    assert_eq!(ns("5.", "us"), 5_000);
+    assert_eq!(ns("0.000", "s"), 0);
+    // ties to even; a non-zero tail past the kept digits breaks a tie upward
+    assert_eq!(ns("0.0000000005", "s"), 0);
+    assert_eq!(ns("0.0000000015", "s"), 2);
+    assert_eq!(ns("0.0000000005000000000000000000000000000000001", "s"), 1);
+    assert_eq!(ns("1e-400", "s"), 0);
+    for t in ["inf", "nan", "", "-", "1e", "1.2.3", "2024-01-01", "+-1", "1e5.5"] {
+        assert!(matches!(epoch_text_to_ns(t, "s"), Err(VolasError::Value(_))), "{t}");
+    }
+    for t in ["9223372036854775808", "1e400", "-9223372036854775808", "1000000000000000000000000000000000000000"] {
+        assert!(matches!(epoch_text_to_ns(t, "ns"), Err(VolasError::Overflow(_))), "{t}");
+    }
+    assert!(matches!(epoch_text_to_ns("1", "D"), Err(VolasError::Value(_))));
+}
+
+#[test]
 fn one_exact_float_epoch_rule() {
     assert_eq!(epoch_to_ns_f64(1_704_067_200.000_001, "s").unwrap(), 1_704_067_200_000_000_954);
     assert_eq!(epoch_to_ns_f64(1_577_836_800.25, "s").unwrap(), 1_577_836_800_250_000_000);

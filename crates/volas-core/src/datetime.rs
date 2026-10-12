@@ -326,6 +326,58 @@ pub fn epoch_to_ns_f64(value: f64, unit: &str) -> Result<i64> {
         .map_err(|_| epoch_out_of_range(value, unit))
 }
 
+/// Read an epoch written as decimal TEXT (`"1704067200.123456789"`, `"-1.5"`,
+/// `"1.7e9"`) in `unit` — exactly, never through a float: the decimal value × the
+/// unit, rounded to the nearest nanosecond (ties to even, the float-epoch rule's
+/// rounding). Text that is not a finite decimal number (`inf`, `nan`, a date) is a
+/// `Value` error; an instant outside the range an `Overflow` error.
+pub fn epoch_text_to_ns(text: &str, unit: &str) -> Result<i64> {
+    let (scale, _) = unit_ns(epoch_unit(unit)?).expect("an epoch unit is a fixed unit");
+    let t = text.trim();
+    let bad = || VolasError::Value(format!("could not parse epoch {t:?} (a decimal number)"));
+    let (neg, body) = match t.as_bytes().first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let (mantissa, exp) = match body.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i32>().map_err(|_| bad())?),
+        None => (body, 0),
+    };
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if (int.is_empty() && frac.is_empty()) || !digits(int) || !digits(frac) {
+        return Err(bad());
+    }
+    // value = D × 10^pow (D the significant digits), then × the unit's ns
+    let all = format!("{int}{frac}");
+    let mut sig = all.trim_start_matches('0');
+    let mut pow = exp as i64 - frac.len() as i64 + scale.ilog10() as i64;
+    // past 36 significant digits only the rounding needs the rest (as a sticky bit)
+    let sticky = sig.len() > 36 && sig[36..].bytes().any(|b| b != b'0');
+    if sig.len() > 36 {
+        pow += (sig.len() - 36) as i64;
+        sig = &sig[..36];
+    }
+    let d: i128 = if sig.is_empty() { 0 } else { sig.parse().expect("≤ 36 ASCII digits") };
+    let magnitude = if d == 0 {
+        Some(0)
+    } else if pow >= 0 {
+        u32::try_from(pow).ok().and_then(|p| 10i128.checked_pow(p)).and_then(|f| d.checked_mul(f))
+    } else if pow < -37 {
+        Some(0) // below half a nanosecond (d < 10^36)
+    } else {
+        let f = 10i128.pow((-pow) as u32);
+        let (q, r) = (d / f, d % f);
+        let half = f / 2;
+        Some(if r > half || (r == half && (sticky || q % 2 == 1)) { q + 1 } else { q })
+    };
+    magnitude
+        .map(|v| if neg { -v } else { v })
+        .map_or(Err(out_of_range()), instant_wide)
+        .map_err(|_| epoch_out_of_range(t, unit))
+}
+
 /// `p / 2^k` rounded half to even, for `0 ≤ p < 2^83`.
 fn shr_half_even(p: i128, k: i32) -> i128 {
     if k > 84 {

@@ -715,15 +715,15 @@ pandas 子集 CSV 读取器。
 - **sep?** `str = ','` 字段分隔符（单个字符）；`delimiter` 是一个被接受的别名。
 - **header?** `bool = True` `True`（或省略）把第一行当作表头；`False` / `None`
   表示无表头（列被命名为 `'0'`…`'n-1'`）。
-- **parse_dates?** `list[str] | None = None` 要解析成 datetime 列的列名。
+- **parse_dates?** `list[str] | None = None` 要解析成 datetime 列的列名，按其文本逐个解析（全部缺失的列就是全 `NaT`）。
 - **index_col?** `str | int | None = None` 要移入行索引的列名或整数位置；在
   `parse_dates` *之后*应用，所以指定一个已解析的日期列会产生一个 `DatetimeIndex`。
 - **na_values?** `str | list[str] | None = None` 额外的缺失值标记。
 - **keep_default_na?** `bool = True` 同时把默认的 NA 标记也当作缺失。
-- **tz?** `str | None = None` `index_col` datetime 的时区：一个*naive*日期字符串按 `tz` 读入（存为 UTC，索引被标记为 `tz`，`'UTC'` 也不例外，因此索引是 tz-aware 的）。日期列应通过 `index_col` 传入，并且*不要*同时把它列在 `parse_dates` 里。参见[时区](#时区)。接受以下之一：
+- **tz?** `str | None = None` `index_col` datetime 的时区：一个*naive*日期字符串按 `tz` 读入（存为 UTC，索引被标记为 `tz`，`'UTC'` 也不例外，因此索引是 tz-aware 的）。该列也可以同时列在 `parse_dates` 里。参见[时区](#时区)。接受以下之一：
   - 一个固定 UTC 偏移，例如 `'+08:00'` / `'-05:00'`
   - 一个 IANA 时区名称，例如 `'America/New_York'` / `'Asia/Shanghai'` / `'UTC'`
-- **date_unit?** `str | None = None` 把 `index_col` 当作此单位下的 epoch 数值读取（绝对 UTC，带小数的 epoch 保留到最近的纳秒；此时 `tz` 只设置显示时区）。为以下之一：
+- **date_unit?** `str | None = None` 把 `index_col` 当作此单位下的 epoch 数值、按其文本精确读取（绝对 UTC，带小数的 epoch 保留到最近的纳秒；此时 `tz` 只设置显示时区）。为以下之一：
   - `'s'`——秒
   - `'ms'`——毫秒
   - `'us'`——微秒
