@@ -54,10 +54,10 @@ macro_rules! with_wilder_step {
     ($period:expr, |$step:ident| $body:expr) => {{
         let a = 1.0 - 1.0 / $period as f64;
         if a == 0.0 {
-            let $step = |_s: f64, term: f64| wilder_sum_step(_s, 0.0, term);
+            let $step = |s: f64, term: f64| wilder_sum_step(s, 0.0, term);
             $body
         } else {
-            let $step = |s: f64, term: f64| s.mul_add(a, term);
+            let $step = |s: f64, term: f64| wilder_sum_step(s, a, term);
             $body
         }
     }};
