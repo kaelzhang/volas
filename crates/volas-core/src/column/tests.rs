@@ -379,16 +379,15 @@ fn cumulatives_preserve_dtype() {
 }
 
 #[test]
-fn abs_preserves_dtype_and_wraps() {
+fn abs_preserves_dtype_and_never_wraps() {
     assert!(Column::f64(vec![-1.0, f64::NAN, 2.0])
         .abs()
         .unwrap()
         .equals(&Column::f64(vec![1.0, f64::NAN, 2.0])));
-    // abs(i64::MIN) wraps to i64::MIN (pandas / numpy)
-    assert_eq!(
-        Column::i64(vec![-3, 4, i64::MIN]).abs().unwrap(),
-        Column::i64(vec![3, 4, i64::MIN])
-    );
+    // abs(i64::MIN) has no int64 result: an overflow error (contract #25), not
+    // the pandas / NumPy wrap back to i64::MIN
+    assert_eq!(Column::i64(vec![-3, 4]).abs().unwrap(), Column::i64(vec![3, 4]));
+    assert!(matches!(Column::i64(vec![i64::MIN]).abs(), Err(VolasError::Overflow(_))));
 }
 
 #[test]
@@ -524,13 +523,11 @@ fn binary_and_div_dtype() {
     let r = a.binary(&Column::f64(vec![2.0, 3.0]), BinOp::Add).unwrap();
     assert_eq!(r.dtype(), F64);
     assert_eq!(r, Column::f64(vec![7.0, 10.0]));
-    // wrapping overflow matches pandas int64
-    assert_eq!(
-        Column::i64(vec![i64::MAX])
-            .binary(&Column::i64(vec![1]), BinOp::Add)
-            .unwrap(),
-        Column::i64(vec![i64::MIN])
-    );
+    // integer overflow raises (contract #25), never the pandas wrap
+    assert!(matches!(
+        Column::i64(vec![i64::MAX]).binary(&Column::i64(vec![1]), BinOp::Add),
+        Err(VolasError::Overflow(_))
+    ));
     // div is always float
     assert_eq!(a.div(&b).unwrap().dtype(), F64);
     assert_eq!(a.div(&b).unwrap(), Column::f64(vec![2.5, 7.0 / 3.0]));
@@ -541,14 +538,14 @@ fn binary_and_div_dtype() {
 fn reductions_carry_result_dtype() {
     use Scalar::{Bool as SB, F64, I64};
     // sum / prod: float -> F64; int / bool -> I64; non-numeric -> F64 (f64 fallback)
-    assert_eq!(Column::f64(vec![1.0, f64::NAN, 2.0]).sum(), F64(3.0));
-    assert_eq!(Column::i64(vec![1, 2, 3]).sum(), I64(6));
-    assert_eq!(Column::bool(vec![true, false, true]).sum(), I64(2));
-    assert!(matches!(Column::str(vec!["a".into()]).sum(), F64(_)));
-    assert_eq!(Column::f64(vec![2.0, 3.0]).prod(), F64(6.0));
-    assert_eq!(Column::i64(vec![2, 3, 4]).prod(), I64(24));
-    assert_eq!(Column::bool(vec![true, true]).prod(), I64(1));
-    assert!(matches!(Column::str(vec!["a".into()]).prod(), F64(_)));
+    assert_eq!(Column::f64(vec![1.0, f64::NAN, 2.0]).sum().unwrap(), F64(3.0));
+    assert_eq!(Column::i64(vec![1, 2, 3]).sum().unwrap(), I64(6));
+    assert_eq!(Column::bool(vec![true, false, true]).sum().unwrap(), I64(2));
+    assert!(matches!(Column::str(vec!["a".into()]).sum().unwrap(), F64(_)));
+    assert_eq!(Column::f64(vec![2.0, 3.0]).prod().unwrap(), F64(6.0));
+    assert_eq!(Column::i64(vec![2, 3, 4]).prod().unwrap(), I64(24));
+    assert_eq!(Column::bool(vec![true, true]).prod().unwrap(), I64(1));
+    assert!(matches!(Column::str(vec!["a".into()]).prod().unwrap(), F64(_)));
     // min / max keep dtype: int -> I64, bool -> Bool, float -> F64
     assert_eq!(Column::i64(vec![3, 1, 2]).extreme(false), I64(1));
     assert_eq!(Column::i64(vec![3, 1, 2]).extreme(true), I64(3));
@@ -604,10 +601,10 @@ fn f32_i32_columns() {
         Column::f64(vec![1.5, 2.5, 3.5])
     );
     // reductions: f32 -> F32; i32 sum -> I64 (promotes), min -> I32
-    assert_eq!(f.sum(), F32(7.5));
+    assert_eq!(f.sum().unwrap(), F32(7.5));
     assert_eq!(f.extreme(false), F32(1.5));
-    assert_eq!(i.sum(), I64(8));
-    assert_eq!(i.prod(), I64(12));
+    assert_eq!(i.sum().unwrap(), I64(8));
+    assert_eq!(i.prod().unwrap(), I64(12));
     assert_eq!(i.extreme(true), I32(4));
     // round / clip preserve dtype
     assert_eq!(
@@ -668,7 +665,7 @@ fn f32_i32_columns() {
     assert_eq!(i.slice(1, 3), Column::i32(vec![1, 4]));
     assert_eq!(f.take(&[2, 0]), Column::f32(vec![3.5, 1.5]));
     assert_eq!(f.to_string_vec(), vec!["1.5", "2.5", "3.5"]);
-    assert_eq!(f.prod(), F32(13.125));
+    assert_eq!(f.prod().unwrap(), F32(13.125));
     assert!(matches!(Column::i32(vec![]).extreme(false), Scalar::F64(x) if x.is_nan()));
     assert_eq!(
         f.binary(&f, BinOp::Sub).unwrap(),

@@ -6,20 +6,13 @@ use super::*;
 impl Column {
     /// Cumulative sum (pandas `cumsum`, skipna), dtype-preserving (`bool` -> int64
     /// counting trues). Missing values are skipped and stay missing (NA in → NA out).
+    /// An integer overflow is an error (contract #25).
     pub fn cumsum(&self) -> Result<Column> {
         match self {
-            Column::Bool(v, val) => {
-                let iv = widen_i64(v);
-                let out = if val.has_nulls() {
-                    cum_valid(&iv, val, 0, i64::wrapping_add)
-                } else {
-                    stats::cumsum(&iv)
-                };
-                Ok(Column::i64_with(out, val.clone()))
-            }
-            Column::I64(v, val) => Ok(cum(v, val, stats::cumsum, i64::wrapping_add)),
-            Column::I32(v, val) => Ok(cum(v, val, stats::cumsum, i32::wrapping_add)),
-            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v))),
+            Column::Bool(v, val) => cum(&widen_i64(v), val, stats::cumsum, i64::checked_add, "cumsum"),
+            Column::I64(v, val) => cum(v, val, stats::cumsum, i64::checked_add, "cumsum"),
+            Column::I32(v, val) => cum(v, val, stats::cumsum, i32::checked_add, "cumsum"),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v)?)),
         }
     }
 
@@ -29,14 +22,14 @@ impl Column {
         match self {
             Column::Bool(v, val) => {
                 let out = if val.has_nulls() {
-                    cum_valid(v, val, false, |a, b| a || b)
+                    cum_valid(v, val, false, |a, b| Some(a || b)).expect("OR never fails")
                 } else {
                     bool_running(v, true)
                 };
                 Ok(Column::bool_with(out, val.clone()))
             }
-            Column::I64(v, val) => Ok(cum(v, val, stats::cummax, |a, x| if x > a { x } else { a })),
-            Column::I32(v, val) => Ok(cum(v, val, stats::cummax, |a, x| if x > a { x } else { a })),
+            Column::I64(v, val) => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
+            Column::I32(v, val) => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
             // running extreme is order-based, so str (lexical) / datetime (instant)
             // are valid, like min/max — not a numeric-only op.
             Column::Str(..) | Column::Datetime(..) => self.cum_extreme(true),
@@ -50,48 +43,47 @@ impl Column {
         match self {
             Column::Bool(v, val) => {
                 let out = if val.has_nulls() {
-                    cum_valid(v, val, true, |a, b| a && b)
+                    cum_valid(v, val, true, |a, b| Some(a && b)).expect("AND never fails")
                 } else {
                     bool_running(v, false)
                 };
                 Ok(Column::bool_with(out, val.clone()))
             }
-            Column::I64(v, val) => Ok(cum(v, val, stats::cummin, |a, x| if x < a { x } else { a })),
-            Column::I32(v, val) => Ok(cum(v, val, stats::cummin, |a, x| if x < a { x } else { a })),
+            Column::I64(v, val) => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
+            Column::I32(v, val) => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
             Column::Str(..) | Column::Datetime(..) => self.cum_extreme(false),
             _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cummin(v))),
         }
     }
 
     /// Cumulative product (pandas `cumprod`), dtype-preserving (`bool` -> int64).
-    /// Missing values are skipped and stay missing.
+    /// Missing values are skipped and stay missing. An integer overflow is an error.
     pub fn cumprod(&self) -> Result<Column> {
         match self {
-            Column::Bool(v, val) => {
-                let iv = widen_i64(v);
-                let out = if val.has_nulls() {
-                    cum_valid(&iv, val, 1, i64::wrapping_mul)
-                } else {
-                    stats::cumprod(&iv)
-                };
-                Ok(Column::i64_with(out, val.clone()))
-            }
-            Column::I64(v, val) => Ok(cum(v, val, stats::cumprod, i64::wrapping_mul)),
-            Column::I32(v, val) => Ok(cum(v, val, stats::cumprod, i32::wrapping_mul)),
-            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v))),
+            Column::Bool(v, val) => cum(&widen_i64(v), val, stats::cumprod, i64::checked_mul, "cumprod"),
+            Column::I64(v, val) => cum(v, val, stats::cumprod, i64::checked_mul, "cumprod"),
+            Column::I32(v, val) => cum(v, val, stats::cumprod, i32::checked_mul, "cumprod"),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v)?)),
         }
     }
 
     /// Element-wise absolute value (pandas `abs`), dtype-preserving. `abs` of a
-    /// missing (`NaN`) stays missing; `abs(i64::MIN)` wraps to `i64::MIN` (pandas);
-    /// a `bool` column is unchanged (`abs(bool) == bool`).
+    /// missing value stays missing; `abs(i64::MIN)` has no int64 result, so it is an
+    /// overflow error (contract #25; pandas returns `i64::MIN`); a `bool` column is
+    /// unchanged (`abs(bool) == bool`).
     pub fn abs(&self) -> Result<Column> {
-        if matches!(self, Column::Bool(_, _)) {
-            return Ok(self.clone());
+        match self {
+            Column::Bool(_, _) => Ok(self.clone()),
+            Column::I64(v, val) => Ok(Column::i64_with(
+                map_present(v, val, i64::checked_abs, "abs")?,
+                val.clone(),
+            )),
+            Column::I32(v, val) => Ok(Column::i32_with(
+                map_present(v, val, i32::checked_abs, "abs")?,
+                val.clone(),
+            )),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::abs(v)?)),
         }
-        let validity = self.validity().cloned().unwrap_or_default();
-        let out = numeric_dispatch!(self, v => Numeric::into_column(stats::abs(v)))?;
-        Ok(out.with_validity(validity))
     }
 
     /// Round to `decimals` places (pandas `round`), dtype-preserving: banker's
@@ -107,14 +99,18 @@ impl Column {
                     .map(|&x| round_f64(x as f64, decimals) as f32)
                     .collect(),
             )),
+            // a power-of-ten multiple past the dtype's range is an overflow (#25)
             Column::I64(v, val) => Ok(Column::i64_with(
-                v.iter().map(|&x| round_i64(x, decimals)).collect(),
+                map_present(v, val, |x| round_i64(x, decimals), "round")?,
                 val.clone(),
             )),
             Column::I32(v, val) => Ok(Column::i32_with(
-                v.iter()
-                    .map(|&x| round_i64(x as i64, decimals) as i32)
-                    .collect(),
+                map_present(
+                    v,
+                    val,
+                    |x| round_i64(x as i64, decimals).and_then(|r| i32::try_from(r).ok()),
+                    "round",
+                )?,
                 val.clone(),
             )),
             Column::Bool(_, _) => Ok(self.clone()), // round(bool) == bool (pandas no-op)

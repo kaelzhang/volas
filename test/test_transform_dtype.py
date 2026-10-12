@@ -105,11 +105,12 @@ def test_arithmetic_dtype_parity():
     _assert_parity(10.0 / vi, 10.0 / pi)    # reflected division -> float64
 
 
-def test_int_arithmetic_wraps_like_pandas():
+def test_int_arithmetic_overflow_raises_unlike_pandas():
+    # contract #25: pandas wraps int64 silently; volas raises
     big = np.iinfo(np.int64).max
-    out = _vi([big]) + _vi([1])
-    assert out.dtype == "int64"
-    assert int(np.asarray(out.to_numpy())[0]) == np.iinfo(np.int64).min  # wraps
+    with pytest.raises(OverflowError):
+        _vi([big]) + _vi([1])
+    assert (_vi([big - 1]) + _vi([1])).dtype == "int64"
 
 
 # --- bool: per-operation, matching pandas 3.0 -------------------------------

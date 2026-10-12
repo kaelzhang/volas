@@ -4,12 +4,13 @@
 //!
 //! Missing values use the f64 `NaN` sentinel — `i64` has none, so `is_missing`
 //! is always false there — matching pandas 3.0's default (non-nullable) dtypes.
-//! `wrapping_*` matches pandas/numpy int64 overflow (it wraps, e.g.
-//! `abs(i64::MIN) == i64::MIN`) and also keeps volas's overflow-checked test
-//! build from panicking.
+//! Integer arithmetic is checked (`checked_*`): an overflowing result is an
+//! [`overflow`] error in every build profile (contract #25), never a wrap (pandas /
+//! NumPy) and never a debug-only panic.
 
 use crate::column::Column;
 use crate::dtype::DType;
+use crate::error::VolasError;
 
 /// A numeric column element type. Implemented for `f64` and `i64`; adding `i32` /
 /// `f32` / `u64` later is just another `impl` plus a dispatch arm.
@@ -33,14 +34,25 @@ pub trait Numeric: Copy + PartialOrd {
     /// decision in clip / where / mask / assignment.
     fn try_from_f64(x: f64) -> Option<Self>;
 
-    /// Wrapping add (matches pandas/numpy int64 overflow; plain `+` for f64).
-    fn wrapping_add(self, other: Self) -> Self;
-    /// Wrapping subtract.
-    fn wrapping_sub(self, other: Self) -> Self;
-    /// Wrapping multiply.
-    fn wrapping_mul(self, other: Self) -> Self;
-    /// Wrapping absolute value (`abs(i64::MIN) == i64::MIN`, like pandas).
-    fn wrapping_abs(self) -> Self;
+    /// Checked add: `None` when an integer result overflows the type (contract #25:
+    /// integer overflow raises, identically in debug and release). A float never
+    /// overflows here — IEEE gives `±inf` — so the float impls are always `Some`.
+    fn checked_add(self, other: Self) -> Option<Self>;
+    /// Checked subtract (see [`checked_add`](Self::checked_add)).
+    fn checked_sub(self, other: Self) -> Option<Self>;
+    /// Checked multiply (see [`checked_add`](Self::checked_add)).
+    fn checked_mul(self, other: Self) -> Option<Self>;
+    /// Checked absolute value: `abs(i64::MIN)` has no `i64` result, so it is `None`.
+    fn checked_abs(self) -> Option<Self>;
+}
+
+/// The error every checked integer kernel raises when a result leaves its dtype's
+/// range (contract #25) — pandas / NumPy wrap silently instead.
+pub fn overflow(dtype: DType, op: &str) -> VolasError {
+    VolasError::Overflow(format!(
+        "{dtype} overflow in {op}; integer results never wrap — cast to float64 first \
+         if an approximate result is acceptable"
+    ))
 }
 
 impl Numeric for f64 {
@@ -65,20 +77,20 @@ impl Numeric for f64 {
         Some(x)
     }
     #[inline]
-    fn wrapping_add(self, other: Self) -> Self {
-        self + other
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(self + other)
     }
     #[inline]
-    fn wrapping_sub(self, other: Self) -> Self {
-        self - other
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(self - other)
     }
     #[inline]
-    fn wrapping_mul(self, other: Self) -> Self {
-        self * other
+    fn checked_mul(self, other: Self) -> Option<Self> {
+        Some(self * other)
     }
     #[inline]
-    fn wrapping_abs(self) -> Self {
-        self.abs()
+    fn checked_abs(self) -> Option<Self> {
+        Some(self.abs())
     }
 }
 
@@ -104,20 +116,20 @@ impl Numeric for f32 {
         Some(x as f32) // f32 absorbs any float (with rounding), like f64
     }
     #[inline]
-    fn wrapping_add(self, other: Self) -> Self {
-        self + other
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(self + other)
     }
     #[inline]
-    fn wrapping_sub(self, other: Self) -> Self {
-        self - other
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(self - other)
     }
     #[inline]
-    fn wrapping_mul(self, other: Self) -> Self {
-        self * other
+    fn checked_mul(self, other: Self) -> Option<Self> {
+        Some(self * other)
     }
     #[inline]
-    fn wrapping_abs(self) -> Self {
-        self.abs()
+    fn checked_abs(self) -> Option<Self> {
+        Some(self.abs())
     }
 }
 
@@ -147,20 +159,20 @@ impl Numeric for i32 {
         }
     }
     #[inline]
-    fn wrapping_add(self, other: Self) -> Self {
-        i32::wrapping_add(self, other)
+    fn checked_add(self, other: Self) -> Option<Self> {
+        i32::checked_add(self, other)
     }
     #[inline]
-    fn wrapping_sub(self, other: Self) -> Self {
-        i32::wrapping_sub(self, other)
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        i32::checked_sub(self, other)
     }
     #[inline]
-    fn wrapping_mul(self, other: Self) -> Self {
-        i32::wrapping_mul(self, other)
+    fn checked_mul(self, other: Self) -> Option<Self> {
+        i32::checked_mul(self, other)
     }
     #[inline]
-    fn wrapping_abs(self) -> Self {
-        i32::wrapping_abs(self)
+    fn checked_abs(self) -> Option<Self> {
+        i32::checked_abs(self)
     }
 }
 
@@ -192,20 +204,20 @@ impl Numeric for i64 {
         }
     }
     #[inline]
-    fn wrapping_add(self, other: Self) -> Self {
-        i64::wrapping_add(self, other)
+    fn checked_add(self, other: Self) -> Option<Self> {
+        i64::checked_add(self, other)
     }
     #[inline]
-    fn wrapping_sub(self, other: Self) -> Self {
-        i64::wrapping_sub(self, other)
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        i64::checked_sub(self, other)
     }
     #[inline]
-    fn wrapping_mul(self, other: Self) -> Self {
-        i64::wrapping_mul(self, other)
+    fn checked_mul(self, other: Self) -> Option<Self> {
+        i64::checked_mul(self, other)
     }
     #[inline]
-    fn wrapping_abs(self) -> Self {
-        i64::wrapping_abs(self)
+    fn checked_abs(self) -> Option<Self> {
+        i64::checked_abs(self)
     }
 }
 
@@ -259,8 +271,8 @@ mod tests {
         assert!(f64::NAN.is_missing() && !1.0_f64.is_missing());
         assert_eq!(2.5_f64.to_f64(), 2.5);
         assert_eq!(f64::try_from_f64(2.5), Some(2.5)); // f64 always fits
-        assert_eq!(3.0_f64.wrapping_add(4.0), 7.0);
-        assert_eq!((-2.0_f64).wrapping_abs(), 2.0);
+        assert_eq!(Numeric::checked_add(3.0_f64, 4.0), Some(7.0));
+        assert_eq!(Numeric::checked_abs(-2.0_f64), Some(2.0));
     }
 
     #[test]
@@ -275,11 +287,12 @@ mod tests {
         assert_eq!(i64::try_from_f64(f64::NAN), None); // NaN
         assert_eq!(i64::try_from_f64(1e30), None); // out of range
         assert_eq!(i64::try_from_f64(9.223372036854776e18), None); // 2^63, exclusive
-        // wrapping matches pandas int64 overflow
-        assert_eq!(i64::MAX.wrapping_add(1), i64::MIN);
-        assert_eq!(i64::MIN.wrapping_abs(), i64::MIN);
-        assert_eq!(3_i64.wrapping_mul(4), 12);
-        assert_eq!(7_i64.wrapping_sub(10), -3);
+        // checked: an overflowing result is None, never a wrap
+        assert_eq!(Numeric::checked_add(i64::MAX, 1), None);
+        assert_eq!(Numeric::checked_abs(i64::MIN), None);
+        assert_eq!(Numeric::checked_mul(3_i64, 4), Some(12));
+        assert_eq!(Numeric::checked_sub(7_i64, 10), Some(-3));
+        assert!(matches!(overflow(DType::I64, "sum"), VolasError::Overflow(m) if m.starts_with("int64 overflow in sum")));
     }
 
     #[test]
@@ -290,19 +303,19 @@ mod tests {
         assert_eq!(2.5_f32.to_f64(), 2.5);
         assert_eq!(f32::try_from_f64(2.5), Some(2.5_f32));
         assert_eq!(f32::try_from_f64(0.1).map(|x| x.is_finite()), Some(true)); // rounds, still fits
-        assert_eq!(3.0_f32.wrapping_add(4.0), 7.0);
-        assert_eq!((-2.0_f32).wrapping_abs(), 2.0);
+        assert_eq!(Numeric::checked_add(3.0_f32, 4.0), Some(7.0));
+        assert_eq!(Numeric::checked_abs(-2.0_f32), Some(2.0));
         assert!(matches!(f32::into_column(vec![1.0_f32]), Column::F32(_)));
-        // i32: no missing, wrapping, range-checked try_from
+        // i32: no missing, checked, range-checked try_from
         assert_eq!(i32::DTYPE, DType::I32);
         assert!(!5_i32.is_missing());
         assert_eq!(i32::try_from_f64(5.0), Some(5));
         assert_eq!(i32::try_from_f64(2.5), None); // non-integral
         assert_eq!(i32::try_from_f64(3e9), None); // out of i32 range
-        assert_eq!(i32::MAX.wrapping_add(1), i32::MIN); // wraps
-        assert_eq!(i32::MIN.wrapping_abs(), i32::MIN);
-        assert_eq!(7_i32.wrapping_sub(10), -3);
-        assert_eq!(3_i32.wrapping_mul(4), 12);
+        assert_eq!(Numeric::checked_add(i32::MAX, 1), None); // never wraps
+        assert_eq!(Numeric::checked_abs(i32::MIN), None);
+        assert_eq!(Numeric::checked_sub(7_i32, 10), Some(-3));
+        assert_eq!(Numeric::checked_mul(3_i32, 4), Some(12));
         assert!(matches!(i32::into_column(vec![1_i32]), Column::I32(_, _)));
     }
 

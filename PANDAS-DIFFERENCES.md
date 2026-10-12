@@ -612,3 +612,25 @@ The window API is pandas-aligned and differential-tested method by method
   window holding `+inf` sums to `+inf` (`-inf` likewise, and both signs to NaN), and
   the next window without it is exact again. pandas returns NaN for every window
   holding an infinity, an artefact of its compensated summation, not a definition.
+
+## Integer exactness
+
+An integer is an exact value, so volas never changes one silently: where pandas /
+NumPy would wrap, round or saturate, volas computes exactly or raises.
+
+### Integer overflow raises
+
+pandas and NumPy wrap int64 arithmetic modulo 2⁶⁴ (`max + 1 == min`,
+`abs(min) == min`). Every volas integer kernel is checked instead and raises
+`OverflowError`, identically in debug and release builds: `+ - *`, `sum` / `prod`,
+`cumsum` / `cumprod`, `diff`, `abs`, `round` to a negative number of decimals, and
+`//` (`min // -1`). int32 operands overflow at int32 (int32 `sum` / `prod`
+accumulate in int64, like pandas). A missing cell is never computed, so its
+placeholder never raises.
+
+```py
+>>> s = volas.DataFrame({'a': [2**63 - 1]})['a']
+>>> s + 1
+OverflowError: int64 overflow in `+`; integer results never wrap — cast to
+               float64 first if an approximate result is acceptable
+```

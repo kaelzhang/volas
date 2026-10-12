@@ -45,8 +45,9 @@ impl Column {
     /// Binary `+ - *` against `other`, dtype-preserving via [`binary_supertype`]
     /// (`int ∘ int → i64`, else f64). `bool ∘ bool` is logical, matching pandas:
     /// `+` is OR, `*` is AND, `-` is an error (numpy disallows bool subtraction);
-    /// `bool ∘ number` promotes (bool acts as 0/1). Wrapping int ops match pandas
-    /// overflow. Unequal lengths are a [`VolasError::Shape`] error.
+    /// `bool ∘ number` promotes (bool acts as 0/1). Integer ops are checked: an
+    /// overflow is a [`VolasError::Overflow`] (contract #25; pandas wraps). Unequal
+    /// lengths are a [`VolasError::Shape`] error.
     pub fn binary(&self, other: &Column, op: BinOp) -> Result<Column> {
         self.require_same_len(other)?;
         self.require_numeric()?;
@@ -67,25 +68,30 @@ impl Column {
                 )),
             };
         }
+        let dense = Validity::dense();
         match binary_supertype(self.dtype(), other.dtype()) {
-            DType::I64 => Ok(Column::i64_with(
-                binary_kernel(&self.as_i64_vec()?, &other.as_i64_vec()?, op),
-                self.combined_nulls(other),
-            )),
-            DType::I32 => Ok(Column::i32_with(
-                binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op),
-                self.combined_nulls(other),
-            )),
+            DType::I64 => {
+                let nulls = self.combined_nulls(other);
+                let out = binary_kernel(&self.as_i64_vec()?, &other.as_i64_vec()?, op, &nulls)?;
+                Ok(Column::i64_with(out, nulls))
+            }
+            DType::I32 => {
+                let nulls = self.combined_nulls(other);
+                let out = binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op, &nulls)?;
+                Ok(Column::i32_with(out, nulls))
+            }
             DType::F32 => Ok(Column::f32(binary_kernel(
                 &self.to_f32_vec(),
                 &other.to_f32_vec(),
                 op,
-            ))),
+                &dense,
+            )?)),
             _ => Ok(Column::f64(binary_kernel(
                 &self.to_f64_vec(),
                 &other.to_f64_vec(),
                 op,
-            ))),
+                &dense,
+            )?)),
         }
     }
 
@@ -130,13 +136,16 @@ impl Column {
             let present = |i: usize| self.is_valid(i) && other.is_valid(i);
             // exact i64 floor division (the divisor is non-zero where present);
             // NA positions hold a 0 placeholder, masked by the result validity.
+            // `MIN // -1` overflows its dtype (contract #25), at i64 or at i32.
+            let fail = || overflow(st, "`//`");
             let out: Vec<i64> = (0..n)
-                .map(|i| if present(i) { ifloordiv(a[i], b[i]) } else { 0 })
-                .collect();
+                .map(|i| if present(i) { ifloordiv(a[i], b[i]).ok_or_else(fail) } else { Ok(0) })
+                .collect::<Result<_>>()?;
             let val = Validity::from_valid_iter(n, (0..n).map(present));
-            // i32 // i32 stays i32 (the result fits); any i64 operand widens to i64.
+            // i32 // i32 stays i32; any i64 operand widens to i64.
             Ok(if st == DType::I32 {
-                Column::i32_with(out.iter().map(|&x| x as i32).collect(), val)
+                let narrow = out.iter().map(|&x| i32::try_from(x).map_err(|_| fail()));
+                Column::i32_with(narrow.collect::<Result<_>>()?, val)
             } else {
                 Column::i64_with(out, val)
             })
@@ -249,29 +258,31 @@ impl Column {
     }
 
     /// Sum, dtype-preserving (pandas): a float column -> float, int/bool -> i64
-    /// (bool counts trues). Computed natively (i64 in i64, exact past 2^53).
-    pub fn sum(&self) -> Scalar {
-        match self {
-            Column::F64(v) => Scalar::F64(stats::sum(v.as_slice())),
-            Column::F32(v) => Scalar::F32(stats::sum(v.as_slice())),
-            Column::I64(v, val) => Scalar::I64(sum_valid(v, val)),
+    /// (bool counts trues). Computed natively (i64 in i64, exact past 2^53) and
+    /// checked: an int64 overflow is an error (contract #25).
+    pub fn sum(&self) -> Result<Scalar> {
+        Ok(match self {
+            Column::F64(v) => Scalar::F64(stats::sum(v.as_slice())?),
+            Column::F32(v) => Scalar::F32(stats::sum(v.as_slice())?),
+            Column::I64(v, val) => Scalar::I64(sum_valid(v, val)?),
             // int32 / bool sum promotes to int64 (pandas / numpy accumulator)
-            Column::I32(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)),
-            Column::Bool(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)),
-            other => Scalar::F64(stats::sum(&other.to_f64_vec())),
-        }
+            Column::I32(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)?),
+            Column::Bool(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)?),
+            other => Scalar::F64(stats::sum(&other.to_f64_vec())?),
+        })
     }
 
-    /// Product, dtype-preserving (float -> float, int/bool -> i64).
-    pub fn prod(&self) -> Scalar {
-        match self {
-            Column::F64(v) => Scalar::F64(stats::prod(v.as_slice())),
-            Column::F32(v) => Scalar::F32(stats::prod(v.as_slice())),
-            Column::I64(v, val) => Scalar::I64(prod_valid(v, val)),
-            Column::I32(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)),
-            Column::Bool(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)),
-            other => Scalar::F64(stats::prod(&other.to_f64_vec())),
-        }
+    /// Product, dtype-preserving (float -> float, int/bool -> i64), checked like
+    /// [`sum`](Self::sum).
+    pub fn prod(&self) -> Result<Scalar> {
+        Ok(match self {
+            Column::F64(v) => Scalar::F64(stats::prod(v.as_slice())?),
+            Column::F32(v) => Scalar::F32(stats::prod(v.as_slice())?),
+            Column::I64(v, val) => Scalar::I64(prod_valid(v, val)?),
+            Column::I32(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)?),
+            Column::Bool(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)?),
+            other => Scalar::F64(stats::prod(&other.to_f64_vec())?),
+        })
     }
 
     /// Minimum (`want_max = false`) / maximum, dtype-preserving (float -> float,

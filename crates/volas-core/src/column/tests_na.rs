@@ -46,8 +46,8 @@ fn na_is_valid_and_null_count() {
 #[test]
 fn na_reductions_skip_missing() {
     let c = na_i64(&[1, 0, 3], &[true, false, true]); // 1, NA, 3
-    assert_eq!(c.sum(), Scalar::I64(4));
-    assert_eq!(c.prod(), Scalar::I64(3));
+    assert_eq!(c.sum().unwrap(), Scalar::I64(4));
+    assert_eq!(c.prod().unwrap(), Scalar::I64(3));
     assert_eq!(c.extreme(false), Scalar::I64(1));
     assert_eq!(c.extreme(true), Scalar::I64(3));
     // all-NA int -> NaN
@@ -57,13 +57,13 @@ fn na_reductions_skip_missing() {
         vec![5, 0, 7],
         Validity::from_valid_iter(3, [true, false, true]),
     );
-    assert_eq!(i.sum(), Scalar::I64(12));
+    assert_eq!(i.sum().unwrap(), Scalar::I64(12));
     assert_eq!(i.extreme(false), Scalar::I32(5));
     let b = Column::bool_with(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, true]),
     );
-    assert_eq!(b.sum(), Scalar::I64(1)); // present trues: pos0
+    assert_eq!(b.sum().unwrap(), Scalar::I64(1)); // present trues: pos0
     assert_eq!(b.extreme(true), Scalar::Bool(true)); // any present
     assert_eq!(b.extreme(false), Scalar::Bool(false)); // all present (true && false)
     assert!(matches!(

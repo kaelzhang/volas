@@ -30,12 +30,12 @@ impl PySeries {
     /// `np.int64` (computed natively).
     pub(crate) fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(scalar_to_numpy(py, self.inner.data.sum()))
+        Ok(scalar_to_numpy(py, self.inner.data.sum().map_err(pyerr)?))
     }
     /// Product (pandas `prod`), dtype-preserving.
     pub(crate) fn prod(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(scalar_to_numpy(py, self.inner.data.prod()))
+        Ok(scalar_to_numpy(py, self.inner.data.prod().map_err(pyerr)?))
     }
     /// Minimum (pandas `min`). Order-based, so it serves any ordered dtype:
     /// numeric/bool reduce to a numpy scalar (int -> `np.int64`, exact even past
