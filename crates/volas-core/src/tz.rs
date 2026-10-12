@@ -599,6 +599,22 @@ pub fn format_offset(secs: i32, sep: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A partial date text names its period; anything else names no period.
+    #[test]
+    fn a_partial_date_text_names_its_period() {
+        let ns = |s: &str| Tz::Utc.localize(NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap()).unwrap();
+        let period = |t: &str| Tz::Utc.period_of_text(t);
+        assert_eq!(period("2024"), Some((ns("2024-01-01 00:00:00"), ns("2025-01-01 00:00:00"), 1)));
+        assert_eq!(period("2024-12"), Some((ns("2024-12-01 00:00:00"), ns("2025-01-01 00:00:00"), 2)));
+        assert_eq!(period("2024-02-29"), Some((ns("2024-02-29 00:00:00"), ns("2024-03-01 00:00:00"), 3)));
+        assert_eq!(period("2024-02-29T23"), Some((ns("2024-02-29 23:00:00"), ns("2024-03-01 00:00:00"), 4)));
+        assert_eq!(period("2024-02-29 23:59"), Some((ns("2024-02-29 23:59:00"), ns("2024-03-01 00:00:00"), 5)));
+        assert_eq!(period("2024-02-29 23:59:59"), Some((ns("2024-02-29 23:59:59"), ns("2024-03-01 00:00:00"), 6)));
+        for t in ["2024-02 10", "2024-01-02 10:00:00:00", "2024-13", "24-01", "2024-01-02 10:00:00.5", "x"] {
+            assert_eq!(period(t), None, "{t}");
+        }
+    }
+
     #[test]
     fn parse_forms() {
         assert!(Tz::parse("").is_err()); // F47: empty spec is an error, never silent

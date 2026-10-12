@@ -63,14 +63,17 @@ impl Lead {
         self.to - self.from
     }
 
-    /// The last `n` (at most [`len`](Self::len)) rows of column `name`, or `n` missing
-    /// cells of `dtype` when the lead does not hold it (a column added after it: no column
-    /// whose history starts before the frame reads it).
+    /// The last `n` (at most [`len`](Self::len)) rows of column `name` in `dtype` — the
+    /// dtype the column has now. They are missing when the lead does not hold the column
+    /// (one added after it: no column whose history starts before the frame reads it), or
+    /// when its values there do not convert to `dtype` exactly (a column replaced by one
+    /// of another dtype): never a value the history did not have.
     fn tail(&self, name: &str, n: usize, dtype: crate::DType) -> Column {
-        match self.rows.column(name) {
-            Ok(c) => c.slice(self.to - n, self.to),
-            Err(_) => Column::na_of(dtype, n),
-        }
+        self.rows
+            .column(name)
+            .ok()
+            .and_then(|c| c.slice(self.to - n, self.to).convert_lossless(dtype).ok())
+            .unwrap_or_else(|| Column::na_of(dtype, n))
     }
 
     /// This lead over the data columns `names` it holds (a projection).
@@ -230,8 +233,8 @@ impl DataFrame {
         let wanted = computed
             .values()
             .filter(|m| m.since < first)
-            .map(|m| match m.reach.history.recursive() && m.state.is_none() {
-                true => first - m.since,
+            .map(|m| match m.reach.history.recursive() && m.state.is_none() && m.checkpoint.is_none() {
+                true => first - m.since, // computed over all of it
                 false => m.reach.lead().min(first - m.since),
             })
             .max()

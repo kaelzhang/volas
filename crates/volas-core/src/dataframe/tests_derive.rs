@@ -81,6 +81,24 @@ fn a_recursion_without_a_state_keeps_its_whole_history() {
     let mut stale = df.clone();
     stale.invalidate_computed_on_write("close"); // every state dropped
     assert_eq!(stale.rows(8, 10, &NoReplay).lead_rows(), 8);
+    // a recursion replayed from a checkpoint needs only its reach before the rows
+    let mut kept = frame(10);
+    kept.set_computed_checkpoint("ema", Ok(Checkpoint { at: 7, state: Some(vec![7.0]), inputs: vec![] }));
+    kept.invalidate_computed_on_write("close");
+    assert_eq!(kept.rows(8, 10, &NoReplay).lead_rows(), 5);
+}
+
+#[test]
+fn a_lead_holds_a_column_in_the_dtype_it_has_now() {
+    let tail = frame(10).rows(7, 10, &NoReplay);
+    // a whole column replaced by one of another dtype: rows that convert exactly keep
+    // their values, others are missing — never a value the history did not have
+    let mut ints = tail.clone();
+    ints.set_column("close", Column::i64(vec![7, 8, 9])).unwrap();
+    assert_eq!(ints.led(&ints, 5).column("close").unwrap().get_i64(0), 2);
+    let mut text = tail.clone();
+    text.set_column("close", Column::str(vec!["a".into(); 3])).unwrap();
+    assert!(!text.led(&text, 5).column("close").unwrap().is_valid(0));
 }
 
 #[test]
