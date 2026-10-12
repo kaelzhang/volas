@@ -53,7 +53,7 @@ pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
             require_numeric(&c)?; // a str/datetime operand can't go through the f64 funnel (C4)
             match op {
                 UnaryOp::Not => Ok(c.not()),
-                UnaryOp::Neg => Ok(Column::f64(c.to_f64_domain(ARITHMETIC)?.iter().map(|&x| -x).collect())),
+                UnaryOp::Neg => negate(&c),
             }
         }
         Node::Binary { left, op, right } => {
@@ -68,6 +68,18 @@ pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
 
 /// How directive float64 arithmetic names itself in a past-2^53 error.
 const ARITHMETIC: &str = "directive arithmetic";
+
+/// Unary minus. A float negates in float64 (a zero flips its sign); an integer or a
+/// boolean negates exactly, as an int64 — an integer has no signed zero, so `-(0)` is
+/// `0` like the literal `-0`, and `-(-n)` is `n` (negating `i64::MIN` overflows).
+fn negate(c: &Column) -> Result<Column> {
+    match c {
+        Column::F64(_) | Column::F32(_) => {
+            Ok(Column::f64(c.to_f64_domain(ARITHMETIC)?.iter().map(|&x| -x).collect()))
+        }
+        _ => Column::i64(vec![0; c.len()]).binary(c, volas_core::BinOp::Sub),
+    }
+}
 
 fn apply_binary(op: Op, l: &Column, r: &Column) -> Result<Column> {
     let arith = |f: fn(f64, f64) -> f64| -> Result<Column> {

@@ -245,7 +245,9 @@ pub type Ast = Node<Box<[ArgValue]>>;
 /// A numeric literal, held exactly: an integral value inside the int64 range is an
 /// `Int` — so `volume > 9007199254740993` compares against that integer, never its
 /// float64 neighbour (contract #26) — and any other value is a float64. The form is
-/// canonical (`2.0` is `Int(2)`), so a literal re-parses from its token unchanged.
+/// canonical (`2.0` is `Int(2)`), so a literal re-parses from its token unchanged. An
+/// integer zero has no sign (`-0` is `Int(0)`); a float zero written with its decimal
+/// point keeps it (`-0.0` is `Float(-0.0)`, rendered `-0.0`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Number {
     /// An integer literal.
@@ -265,6 +267,11 @@ impl Number {
         let integral = frac.bytes().all(|b| b == b'0');
         if integral {
             if let Ok(i) = whole.parse::<i64>() {
+                // An integer has no signed zero (`-0` is `0`); a float literal written
+                // with a decimal point keeps the sign of its zero (`-0.0`).
+                if i == 0 && text.starts_with('-') && text.contains('.') {
+                    return Ok(Number::Float(-0.0));
+                }
                 return Ok(Number::Int(i));
             }
         }
@@ -292,6 +299,8 @@ impl Number {
     pub(crate) fn token(self) -> String {
         match self {
             Number::Int(i) => i.to_string(),
+            // `-0` would re-parse as the integer zero, which has no sign
+            Number::Float(v) if v == 0.0 && v.is_sign_negative() => "-0.0".to_string(),
             Number::Float(v) => number_token(v),
         }
     }

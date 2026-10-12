@@ -22,8 +22,12 @@ pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
                 UnaryOp::Not => "~",
                 UnaryOp::Neg => "-",
             };
+            // A negated number keeps its parentheses: `-5` is an exact literal (an int64
+            // column), `-(5)` the float64 negation of one, so each form re-parses as
+            // itself.
             let inner = match operand.as_ref() {
                 Node::Binary { .. } => format!("({})", stringify(operand)),
+                Node::Scalar(_) if *op == UnaryOp::Neg => format!("({})", stringify(operand)),
                 _ => stringify(operand),
             };
             format!("{op_s}{inner}")
