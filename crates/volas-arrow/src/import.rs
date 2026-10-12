@@ -105,10 +105,10 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
         }
         // Exact decimals map to the f64 nearest to each value (`volas_core::decimal`) —
         // **lossy** past ~15 significant digits; for exact prices keep the column as a
-        // string upstream. A value past the f64 range is an error, never `inf`.
+        // string upstream.
         DataType::Decimal128(_, scale) => {
             let a = src.as_primitive::<Decimal128Type>();
-            decimals(len, |i| a.is_null(i), |i| decimal::scaled_to_f64(a.value(i), *scale as i32))?
+            decimals(len, |i| a.is_null(i), |i| decimal::scaled_to_f64(a.value(i), *scale as i32))
         }
         // Plain dates land on the ns datetime grid (start-of-day). Date32 = days,
         // Date64 = milliseconds; a date outside the instant range raises.
@@ -136,7 +136,7 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
             decimals(len, |i| a.is_null(i), |i| match a.value(i).to_i128() {
                 Some(m) => decimal::scaled_to_f64(m, *scale as i32),
                 None => decimal::scaled_text_to_f64(&a.value(i).to_string(), *scale as i32),
-            })?
+            })
         }
         // Arrow `string_view` (Utf8View) — a view layout volas cannot borrow into its
         // contiguous StrBuffer; materialise it to LargeUtf8 (one copy — the same one the
@@ -248,23 +248,11 @@ fn datetime_from_timestamp(
 }
 
 /// A decimal column as f64 (`null` → NaN, volas's float missing value), each value read
-/// by `value`; a value past the f64 range is an error naming its row.
-fn decimals(
-    len: usize,
-    is_null: impl Fn(usize) -> bool,
-    value: impl Fn(usize) -> Option<f64>,
-) -> Result<Column, ArrowError> {
+/// by `value`. Every Arrow decimal lies inside the f64 range — at most 76 digits at a
+/// scale of at least −128, so under 10^205 — so a value is always there.
+fn decimals(len: usize, is_null: impl Fn(usize) -> bool, value: impl Fn(usize) -> Option<f64>) -> Column {
     let out = (0..len)
-        .map(|i| {
-            if is_null(i) {
-                return Ok(f64::NAN);
-            }
-            value(i).ok_or_else(|| {
-                ArrowError::InvalidArgumentError(format!(
-                    "Arrow decimal at row {i} lies past the float64 range"
-                ))
-            })
-        })
-        .collect::<Result<Vec<f64>, ArrowError>>()?;
-    Ok(Column::F64(Buffer::from_vec(out)))
+        .map(|i| if is_null(i) { f64::NAN } else { value(i).expect("an Arrow decimal is under 10^205") })
+        .collect();
+    Column::F64(Buffer::from_vec(out))
 }

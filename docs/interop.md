@@ -108,7 +108,7 @@ nanosecond-datetime columns; a string column exports zero-copy too. The repacks 
   a missing `float` (in-band `NaN`) into a real Arrow null;
 - on **import only**: a `string_view` (materialised to contiguous bytes), a coarser-than-ns timestamp
   (rescaled), a `Decimal128` / `Decimal256` (→ the nearest `f64`, **lossy** past ~15 digits —
-  keep prices as strings for exactness; a value past the `f64` range raises), a narrow / unsigned integer (→ `i64`; a `UInt64` past
+  keep prices as strings for exactness), a narrow / unsigned integer (→ `i64`; a `UInt64` past
   `i64::MAX` has no lossless image and raises), a dictionary / categorical column (decoded
   to its values), a typeless `Null` column (→ an all-NA `f64` column), or a
   `Date32` / `Date64` (→ ns datetime). Other Arrow types raise a clear error.
