@@ -229,6 +229,20 @@ def test_retention_is_the_last_window_plus_margin_rows_not_the_buffer():
     assert w.index.tolist() == [40, 10]
 
 
+def test_unlabelled_rows_continue_unique_over_the_retained_rows_only():
+    # 11 continues 10, and is held only by a row past retention (still in the buffer)
+    w = volas.DataFrame(_labelled([11, 20, 30], [1.0, 2.0, 3.0]), window=2, max_lookback=1)
+    w.append(_labelled([10], [4.0]))  # retained: 20 (margin), 30, 10
+    assert w._physical_height == 4
+    w.append(volas.DataFrame({'close': [5.0]}))
+    assert w.index.tolist() == [10, 11]
+    # a continued label a retained row still holds raises, frame unchanged
+    w.append(_labelled([9], [6.0]))  # retained: 10 (margin), 11, 9
+    with pytest.raises(ValueError, match='the next label 10 is already in the index'):
+        w.append(volas.DataFrame({'close': [7.0]}))
+    assert w.index.tolist() == [11, 9]
+
+
 def test_a_label_no_longer_retained_is_accepted():
     w = volas.DataFrame(_labelled([10, 20, 30], [1.0, 2.0, 3.0]), window=2, max_lookback=1)
     for label in (40, 50, 60):

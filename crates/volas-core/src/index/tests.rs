@@ -119,14 +119,9 @@ fn append_rule_per_kind() {
 #[test]
 fn unlabelled_rows_continue_unique_checked_integer_labels() {
     // continuing onto a label already present (the labels need not be sorted)
-    let err = Index::int64(vec![1, 0])
-        .check_append(&Index::range(1))
-        .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("next label 1 is already in the index"),
-        "{err}"
-    );
+    assert_eq!(Index::int64(vec![1, 0]).continuation_clash(1, 0..2), Some(1));
+    // only the given rows count (a window's retained rows)
+    assert_eq!(Index::int64(vec![1, 0]).continuation_clash(1, 1..2), None);
     // continuing past i64::MAX overflows instead of wrapping
     let mut ix = Index::int64(vec![i64::MAX]);
     let err = ix.extend(&Index::range(1)).unwrap_err();
@@ -148,25 +143,20 @@ fn unlabelled_rows_continue_unique_checked_integer_labels() {
     // the labels stop increasing
     let mut ix = Index::range(2);
     ix.extend(&Index::int64(vec![9, 5])).unwrap(); // [0, 1, 9, 5]: 9 is the largest
-    assert!(ix
-        .check_append(&Index::range(4))
-        .unwrap_err()
-        .to_string()
-        .contains("9"));
+    assert_eq!(ix.continuation_clash(4, 0..4), Some(9));
     ix.extend(&Index::range(3)).unwrap(); // continues 6, 7, 8
     assert_eq!(ix, Index::int64(vec![0, 1, 9, 5, 6, 7, 8]));
-    assert!(ix.check_append(&Index::range(1)).is_err()); // 9 again
+    assert_eq!(ix.continuation_clash(1, 0..ix.len()), Some(9)); // 9 again
     ix.extend(&Index::int64(vec![20])).unwrap();
     ix.extend(&Index::range(1)).unwrap(); // 21: past the largest, no scan needed
     assert_eq!(ix.to_i64_labels().last(), Some(&21));
     // derived indexes keep their own largest label
-    assert!(ix
-        .slice(0, 4)
-        .check_append(&Index::range(4))
-        .unwrap_err()
-        .to_string()
-        .contains("9"));
-    assert!(ix.take(&[0, 1]).check_append(&Index::range(1)).is_ok());
+    assert_eq!(ix.slice(0, 4).continuation_clash(4, 0..4), Some(9));
+    assert_eq!(ix.take(&[0, 1]).continuation_clash(1, 0..2), None);
+    // other kinds, no rows, and an overflowing continuation find no clash here
+    assert_eq!(Index::range(3).continuation_clash(1, 0..3), None);
+    assert_eq!(Index::int64(vec![1, 0]).continuation_clash(0, 0..2), None);
+    assert_eq!(Index::int64(vec![5, 3, i64::MAX]).continuation_clash(1, 0..3), None);
 }
 
 #[test]

@@ -135,8 +135,8 @@ frame used as an `append` source or a constructor source — shows **only** the 
 rows; the margin is never visible.
 
 Row labels stay unique over the rows the frame **retains** — the last
-`window + max_lookback` rows: the visible ones and the hidden margin, whatever older rows
-the buffer still holds before its next compaction. An integer or string label that an
+`window + max_lookback` rows: the visible ones and the hidden margin, never the older rows
+the buffer may still hold until its next compaction. An integer or string label that an
 earlier row in the margin still holds raises, and says so:
 
 ```text

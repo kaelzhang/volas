@@ -210,7 +210,14 @@ impl DataFrame {
     fn route(&self, rows: &DataFrame, retained: Retained) -> Result<Route> {
         let held = |label: &Label| self.index.position_in(label, retained.from..self.height);
         if rows.index.is_unlabelled() || rows.height == 0 {
-            return Ok(Route::Append); // unlabelled rows: `check_append` vetted their labels
+            // unlabelled rows continue the last label: unique over the retained rows
+            if let Some(dup) = self.index.continuation_clash(rows.height, retained.from..self.height) {
+                return Err(VolasError::Value(format!(
+                    "cannot append unlabelled rows: the next label {dup} is already in the index \
+                     (label the rows explicitly)"
+                )));
+            }
+            return Ok(Route::Append);
         }
         let datetime = matches!(rows.index.kind(), IndexKind::Datetime(..));
         if rows.height == 1 && self.height > 0 {

@@ -470,7 +470,7 @@ impl Index {
             | (Int64(_), Int64(_))
             | (Str(_), Str(_)) => Ok(()),
             (Datetime(_, a), Datetime(_, b)) if a.is_aware() == b.is_aware() => Ok(()),
-            (Int64(a), Range { len: k, .. }) => continuation(a, self.order.increasing, *k).map(drop),
+            (Int64(a), Range { len: k, .. }) => continuation(a, *k).map(drop),
             (mine, theirs) => Err(VolasError::Value(format!(
                 "cannot append rows with a {} to a frame with a {}{}",
                 other.kind_text(),
@@ -548,7 +548,7 @@ impl Index {
             // a windowed (rolling-compacted) RangeIndex frame's labels absolute and
             // gap-free, matching pandas' last-M view of a RangeIndex.
             (Int64(a), Range { len: bn, .. }) => {
-                let next = continuation(a, order.increasing, *bn)?;
+                let next = continuation(a, *bn)?;
                 let start = a.len();
                 a.extend((0..*bn as i64).map(|k| next + k));
                 let (head, added) = a.split_at(start);
@@ -564,6 +564,22 @@ impl Index {
             _ => unreachable!("rejected by check_append"), // LCOV_EXCL_LINE
         }
         Ok(())
+    }
+
+    /// The first label among the positions `rows` (a window's retained rows) that `k`
+    /// unlabelled rows appended to this integer index would take again — they continue
+    /// from the last label, so with increasing labels none can (O(1)); otherwise the
+    /// rows are scanned. `None` for any other index kind (a `RangeIndex` continues its
+    /// own positions) or when the continuation overflows ([`Index::check_append`]
+    /// reports that).
+    pub fn continuation_clash(&self, k: usize, rows: std::ops::Range<usize>) -> Option<i64> {
+        let IndexKind::Int64(labels) = &self.kind else { return None };
+        if self.order.increasing || k == 0 {
+            return None;
+        }
+        let next = continuation(labels, k).ok()?;
+        let end = next + (k as i64 - 1);
+        labels.get(rows)?.iter().find(|&&l| l >= next && l <= end).copied()
     }
 
     /// Position of the first label equal to `label` among the positions `rows` (a
@@ -755,11 +771,11 @@ fn require_unique_labels<T: std::hash::Hash + Eq>(labels: &[T], kind: &str) -> R
 }
 
 /// The first label `k` unlabelled rows take after the integer labels `labels`
-/// (`last + 1`, or 0 after none): checked arithmetic over the continued labels `next ..=
-/// next + k - 1`, none of which may already be in `labels` (an integer index stays
-/// unique). With `increasing` labels the last is the largest, so none can repeat (O(1));
-/// otherwise they are looked up. No rows (`k == 0`) take no label.
-fn continuation(labels: &[i64], increasing: bool, k: usize) -> Result<i64> {
+/// (`last + 1`, or 0 after none), with checked arithmetic over the continued labels
+/// `next ..= next + k - 1`. Whether one of them is already held is the frame's rule
+/// over the rows it retains ([`Index::continuation_clash`]). No rows (`k == 0`) take
+/// no label.
+fn continuation(labels: &[i64], k: usize) -> Result<i64> {
     let overflow = || {
         VolasError::Overflow(format!(
             "cannot continue the integer index past {} with {k} unlabelled rows",
@@ -772,15 +788,7 @@ fn continuation(labels: &[i64], increasing: bool, k: usize) -> Result<i64> {
         None => 0,
     };
     let Some(span) = k.checked_sub(1) else { return Ok(next) };
-    let end = i64::try_from(span).ok().and_then(|s| next.checked_add(s)).ok_or_else(overflow)?;
-    if !increasing {
-        if let Some(dup) = labels.iter().find(|&&l| l >= next && l <= end) {
-            return Err(VolasError::Value(format!(
-                "cannot append unlabelled rows: the next label {dup} is already in the index \
-                 (label the rows explicitly)"
-            )));
-        }
-    }
+    i64::try_from(span).ok().and_then(|s| next.checked_add(s)).ok_or_else(overflow)?;
     Ok(next)
 }
 
