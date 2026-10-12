@@ -34,6 +34,10 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # An all-NaN period folds high / low to -inf / +inf instead of NaN (already
     # tracked); the tf reference reproduces that result while this is open.
     'all-nan-fold-extreme',
+    # `ichimoku.senkou_a`'s lookback counts the kijun period only (k - 1 + k): with a
+    # tenkan period above it the first value needs more rows than the lookback says,
+    # so a column cached inside that gap does not continue on append.
+    'ichimoku-tenkan-lookback',
 })
 
 # Directive families whose incremental refresh is known to diverge from the full

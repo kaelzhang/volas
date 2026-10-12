@@ -199,6 +199,15 @@ def test_fast_above_slow_resumes_like_the_full_compute(directive):
     assert _same(df[directive], _frame(cols, 0, 60)[directive])
 
 
+@_xfail('ichimoku-tenkan-lookback', 'senkou_a lookback ignores a tenkan period above the kijun')
+def test_senkou_a_cached_before_its_first_value_continues_on_append():
+    cols = _walk(12)
+    df = _frame(cols, 0, 9)
+    df['ichimoku.senkou_a:9,1']
+    df.append(_frame(cols, 9, 10))
+    assert _same(df['ichimoku.senkou_a:9,1'], _frame(cols, 0, 10)['ichimoku.senkou_a:9,1'])
+
+
 def test_a_huge_value_outside_the_window_does_not_skew_linearreg():
     cols = _walk(30)
     cols['close'] = cols['close'].copy()

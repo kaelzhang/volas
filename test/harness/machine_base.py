@@ -78,6 +78,7 @@ BULK_SURFACES = {
 _FAST_SLOW = re.compile(r'\b(macd|apo|ppo|dma)(?:\.\w+)?:(\d*)(?:,(\d*))?')
 _FAST_SLOW_DEFAULTS = {'macd': (12, 26), 'apo': (12, 26), 'ppo': (12, 26), 'dma': (10, 50)}
 _ULTOSC = re.compile(r'\bultosc:(\d*)(?:,(\d*))?(?:,(\d*))?')
+_SENKOU_A = re.compile(r'\bichimoku\.senkou_a:(\d*)(?:,(\d*))?')
 # A parenthesized single primary as a series (`@(rsi:5)`, `@(0)`): its parentheses
 # are dropped from the cached name.
 _PAREN_PRIMARY_SERIES = re.compile(
@@ -99,6 +100,9 @@ def triggers_ok(d: Directive) -> bool:
             periods = [int(a or 7), int(b or 14), int(c or 28)]
             if periods != sorted(periods):
                 return False
+    if contracts.avoids('ichimoku-tenkan-lookback'):
+        if any(int(t or 9) > int(k or 26) for t, k in _SENKOU_A.findall(text)):
+            return False
     families = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text)}
     return not (families & contracts.DIVERGENT_FAMILIES)
 
@@ -154,14 +158,8 @@ class FrameMachine(RuleBasedStateMachine):
         """The reference values of ``entry`` on the visible rows, or its error class —
         over the frame without the data columns ``hide``."""
         text = entry.directive.text if entry.directive else entry.name
-        ledger = self.coarse()
-        if hide:
-            ledger = ledger.copy()
-            for c in hide:
-                ledger.user.pop(c, None)
-                for r in ledger.rows:
-                    r.pop(c, None)
-        values, error = reference(ledger, text, entry.env, entry.start, evaluate)
+        env = tuple(c for c in entry.env if c not in hide)
+        values, error = reference(self.coarse(), text, env, entry.start, evaluate)
         if error is not None:
             return None, error
         return values[self.visible_start() - entry.start:], None
