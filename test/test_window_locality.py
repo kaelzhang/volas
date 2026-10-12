@@ -346,8 +346,15 @@ def _boolean_xfail(keys):
             for k in keys]
 
 
-def _exec_missing(directive, columns, rows=(K,)):
-    data = {k: v.copy() for k, v in BASE.items()}
+def _base_for(key):
+    """The data a key is checked on: `BASE`, except the candle-colour lines, whose `open`
+    must not sit a fixed step above `close` (else the colour never changes and a
+    laundered missing value would go unseen) — they take the candle data."""
+    return {**BASE, **CDL_BASE} if _command(key) == "style" else BASE
+
+
+def _exec_missing(directive, columns, rows=(K,), base=None):
+    data = {k: v.copy() for k, v in (BASE if base is None else base).items()}
     for k in columns:
         data[k][list(rows)] = np.nan
     return np.asarray(DataFrame(data).exec(directive), dtype=float)
@@ -357,13 +364,14 @@ def _exec_missing(directive, columns, rows=(K,)):
 def test_a_window_holding_a_missing_row_is_missing(key):
     """Every output whose definition reads the missing row is NaN — an extremum, a
     position, a count or a per-row term never steps over it."""
-    got = _exec_missing(_directive(key), PRICE_VOLUME)
+    got = _exec_missing(_directive(key), PRICE_VOLUME, base=_base_for(key))
     rows = [K + d for d in _reads(key)]
     assert np.isnan(got[rows]).all(), f"finite at {[r for r in rows if not np.isnan(got[r])]}"
 
 
 _BOOLEAN_READS = {("increase", "close"), ("repeat", "close"), ("style", "open"), ("style", "close"),
-                  ("style.bearish", "open"), ("style.bearish", "close")}
+                  ("style.bearish", "open"), ("style.bearish", "close"), ("style.bullish", "open"),
+                  ("style.bullish", "close")}
 
 
 @pytest.mark.parametrize("key,column", [
@@ -375,9 +383,11 @@ _BOOLEAN_READS = {("increase", "close"), ("repeat", "close"), ("style", "open"),
 def test_a_missing_input_is_never_laundered_into_a_value(key, column):
     """With one input missing at one row, every output is either NaN or exactly what
     clean data gives: a missing value never turns into a different finite one."""
-    directive = _directive(key)
-    clean = _exec(directive)
-    got = _exec_missing(directive, [column])
+    directive, base = _directive(key), _base_for(key)
+    clean = np.asarray(DataFrame(base).exec(directive), dtype=float)
+    # a candle-colour line: one white and one black bar missing, so either colour shows
+    rows = (K, K + 1) if _command(key) == "style" else (K,)
+    got = _exec_missing(directive, [column], rows, base=base)
     laundered = ~np.isnan(got) & ~np.isclose(got, clean, rtol=1e-9, atol=1e-9, equal_nan=True)
     assert not laundered.any(), f"rows {np.flatnonzero(laundered)[:5]}: {got[laundered][:3]}"
 
