@@ -319,3 +319,22 @@ def test_a_windowed_positional_frame_takes_dict_bars_after_compaction():
     seeded = volas.DataFrame({'close': [float(i) for i in range(8)]}, window=3, max_lookback=2)
     seeded.append({'close': 1.0})
     assert seeded.index.tolist() == [6, 7, 8]
+
+
+def test_a_row_an_indicator_cannot_compute_never_fails_a_windowed_append():
+    # an int64 volume past 2^53 cannot enter float64 math exactly (contract #26): the
+    # cached column's reader raises, never the append, and the window keeps compacting
+    def bar(c, v):
+        return volas.DataFrame({'close': [float(c)], 'volume': np.array([v], 'int64')})
+
+    w = volas.DataFrame({'close': [1.0, 2.0, 3.0], 'volume': np.array([5, 6, 7], 'int64')},
+                        window=2, max_lookback=['vr:1'])
+    w['vr:1']
+    for i in range(12):
+        w.append(bar(10 + i, 2**53 + 3 if i == 0 else 10 + i))  # never raises
+        assert len(w) == 2 and w._physical_height <= 2 * 3
+        if i == 1:
+            with pytest.raises(OverflowError):
+                w['vr:1']  # the bad row is still retained
+    want = volas.DataFrame({'close': [20.0, 21.0], 'volume': np.array([19, 20], 'int64')}).exec('vr:1')
+    assert np.array_equal(w['vr:1'].to_numpy()[-1:], want[-1:], equal_nan=True)  # it has left

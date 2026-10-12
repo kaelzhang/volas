@@ -309,7 +309,8 @@ impl PyDataFrame {
             let retained = volas_core::Retained { from, shown };
             self.inner.append_retaining(rows, retained).map_err(pyerr)?;
         }
-        self.maybe_compact()
+        self.maybe_compact();
+        Ok(())
     }
 
     /// Resolve `name` (a real column or a directive), materializing + caching a

@@ -366,17 +366,22 @@ impl PyDataFrame {
     /// inside the kept window) — otherwise an append-many-without-read run would drop the
     /// valid region and the recursion would diverge. Refreshing only at the compaction
     /// boundary (every ~`capacity` appends) keeps the per-bar cost amortized O(lookback),
-    /// the same as the lazy read-time refresh. No-op when unbounded.
-    pub(crate) fn maybe_compact(&mut self) -> PyResult<()> {
-        if let Some(w) = &self.window {
-            let cap = w.capacity;
-            if self.inner.height() >= 2 * cap {
-                self.refresh_computed(None)?;
-                let h = self.inner.height();
-                self.inner = self.inner.retain_tail(cap.min(h));
-            }
+    /// the same as the lazy read-time refresh. Each column is refreshed on its own: one
+    /// whose compute raises (contract #26 — an int64 input past 2^53 in float64 math)
+    /// stays stale for its reader to raise, and the window still compacts — the append
+    /// that led here has happened and stands, and a row that cannot be computed leaves
+    /// the window like any other. No-op when unbounded.
+    pub(crate) fn maybe_compact(&mut self) {
+        let Some(cap) = self.window.as_ref().map(|w| w.capacity) else { return };
+        if self.inner.height() < 2 * cap {
+            return;
         }
-        Ok(())
+        for stale in self.inner.stale_computed_columns(None) {
+            // the reader raises it: a refresh error is the column's, never the append's
+            let _ = self.refresh_computed(Some(&stale.name));
+        }
+        let h = self.inner.height();
+        self.inner = self.inner.retain_tail(cap.min(h));
     }
 
     /// Element-wise comparison backing `__eq__` / `__ne__`: against another
