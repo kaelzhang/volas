@@ -444,7 +444,9 @@ cmf:<period>@<high>,<low>,<close>,<volume>
 ```
 
 The `period`-bar sum of money-flow volume divided by the sum of volume — positive
-is buying pressure, negative is selling pressure.
+is buying pressure, negative is selling pressure. A bar without range (`high == low`,
+a limit bar) carries no money flow, as in TA-Lib's AD, instead of a `0/0` that would
+blank every window holding it.
 
 - **period?** `int=20`
 - **high? / low? / close? / volume?** `str` the input columns; default to the like-named frame columns.
@@ -717,7 +719,8 @@ wvad:<period>@<open>,<high>,<low>,<close>,<volume>
 
 A volume-weighted gauge of intraday buying vs selling power:
 `Σₙ( (C − O) / (H − L) × V )`. Positive means buyers dominated the open-to-close range,
-negative means sellers.
+negative means sellers. A bar without range (`high == low`) adds 0, the AD / CMF
+convention.
 
 - **period?** `int=24`
 - **open? / high? / low? / close? / volume?** `str` the input columns.
@@ -1279,8 +1282,8 @@ iii@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volu
 ```
 
 David Bostian's Intraday Intensity Index, a per-bar volume-pressure measure:
-`((2·close − high − low) / (high − low)) · volume`. A zero-range bar
-(`high == low`) yields `0`. No window parameter.
+`((2·close − high − low) / (high − low)) · volume` — AD's money-flow volume of the bar.
+A bar without range (`high == low`) yields `0`, as in AD. No window parameter.
 
 - **series_high? / series_low? / series_close? / series_volume?** the OHLCV columns.
 

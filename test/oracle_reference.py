@@ -211,12 +211,20 @@ def emv(o, h, lo, c, v, n=14, scale=100_000_000.0):
     return (distance / box).rolling(n, min_periods=n).mean()
 
 
+def _range_flow(location, h, lo, v):
+    """`location / (H - L) * V`, 0 where the bar has no positive range (TA-Lib AD's
+    guard), missing where an input is."""
+    rng = h - lo
+    flow = (location / rng.where(rng > 0) * v).fillna(0.0)
+    return flow.where(location.notna() & rng.notna() & v.notna())
+
+
 def cmf(o, h, lo, c, v, n=20):
-    """Chaikin Money Flow = sum_n(MFV) / sum_n(volume), MFV = ((C-L)-(H-C))/(H-L) * V.
+    """Chaikin Money Flow = sum_n(MFV) / sum_n(volume), MFV = ((C-L)-(H-C))/(H-L) * V,
+    a bar without range carrying no flow (TA-Lib AD's convention, not 0/0).
     Source: StockCharts ChartSchool / Fidelity — Chaikin Money Flow."""
     h, lo, c, vv = _s(h), _s(lo), _s(c), _s(v)
-    mfm = ((c - lo) - (h - c)) / (h - lo)
-    mfv = mfm * vv
+    mfv = _range_flow((c - lo) - (h - c), h, lo, vv)
     return mfv.rolling(n, min_periods=n).sum() / vv.rolling(n, min_periods=n).sum()
 
 
@@ -432,8 +440,9 @@ def dkx_ma(o, h, lo, c, v, m=10):
 
 
 def wvad(o, h, lo, c, v, n=24):
-    """WVAD 威廉变异离散量 = Σn( (C-O)/(H-L) * V ). Source: 通达信 / MBA智库 — WVAD."""
-    w = (_s(c) - _s(o)) / (_s(h) - _s(lo)) * _s(v)
+    """WVAD 威廉变异离散量 = Σn( (C-O)/(H-L) * V ), a bar without range adding 0 (AD's
+    convention). Source: 通达信 / MBA智库 — WVAD."""
+    w = _range_flow(_s(c) - _s(o), _s(h), _s(lo), _s(v))
     return w.rolling(n, min_periods=n).sum()
 
 

@@ -2,6 +2,8 @@
 // Volume
 // ---------------------------------------------------------------------------
 
+use crate::missing;
+
 /// On Balance Volume (TA-Lib OBV): a running total that adds the bar's volume when
 /// `real` rises vs the prior bar, subtracts it when `real` falls, and is unchanged
 /// when flat. Seeded with `volume[0]`; lookback 0 (no warm-up).
@@ -168,16 +170,31 @@ pub fn adosc_resume(
     (out, a.state())
 }
 
-/// Money flow volume for one bar: `((close-low) - (high-close)) / (high-low) ·
-/// volume`, with a zero high-low range contributing nothing (TA-Lib's guard).
+/// A bar's range-normalised volume flow `location / (high − low) · volume` — the
+/// per-bar term of AD / ADOSC / CMF / III (`location` = the close location
+/// `(close − low) − (high − close)`, [`money_flow_volume`]) and of WVAD (`location` =
+/// `close − open`). A bar without a positive range carries no flow: TA-Lib AD's guard
+/// (`high − low > 0`, else 0), so a limit bar (`high == low`) adds 0 instead of 0/0 and
+/// does not blank the windows that hold it. Missing when an input is (the per-row term
+/// rule, [`missing::term`]): with a positive range a missing input propagates through
+/// the arithmetic; without one, the "no flow" branch would launder it, so that branch
+/// checks (a missing high or low leaves the range missing). The one owner of that
+/// convention.
 #[inline]
-fn money_flow_volume(high: f64, low: f64, close: f64, volume: f64) -> f64 {
+pub(super) fn range_flow(location: f64, high: f64, low: f64, volume: f64) -> f64 {
     let range = high - low;
     if range > 0.0 {
-        ((close - low) - (high - close)) / range * volume
+        location / range * volume
     } else {
-        0.0
+        missing::term(&[location, range, volume], 0.0)
     }
+}
+
+/// Money flow volume for one bar (TA-Lib AD's term): the close location
+/// `((close − low) − (high − close))` as a [`range_flow`].
+#[inline]
+pub(super) fn money_flow_volume(high: f64, low: f64, close: f64, volume: f64) -> f64 {
+    range_flow((close - low) - (high - close), high, low, volume)
 }
 
 /// Chaikin Accumulation/Distribution line (TA-Lib AD): the running total of each
@@ -264,20 +281,11 @@ impl Adosc {
 }
 
 /// Intraday Intensity Index (TradingView `ta.iii`, David Bostian): per-bar
-/// `((2·close - high - low) / (high - low)) · volume`. A zero-range bar
-/// (`high == low`) has no directional pressure, so it yields `0.0` (matching
-/// the `bop` range guard). No window — a pointwise transform.
+/// `((2·close - high - low) / (high - low)) · volume` — the close-location money flow
+/// of AD ([`money_flow_volume`]), so a bar without range yields `0.0` as there. No
+/// window — a pointwise transform.
 pub fn iii(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
-    (0..close.len())
-        .map(|i| {
-            let range = high[i] - low[i];
-            if range < 1e-14 {
-                0.0
-            } else {
-                (2.0 * close[i] - high[i] - low[i]) / range * volume[i]
-            }
-        })
-        .collect()
+    (0..close.len()).map(|i| money_flow_volume(high[i], low[i], close[i], volume[i])).collect()
 }
 
 

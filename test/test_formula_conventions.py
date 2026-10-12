@@ -130,3 +130,42 @@ def test_dm_period_one_starts_at_bar_one(name, fn):
     assert np.isnan(_exec(d, f'{name}:1')[0])
     assert volas.directive_lookback(f'{name}:1') == 1
     _same(_appended(d, f'{name}:1', 3), want, exact=True)
+
+
+# --- AD / ADOSC / CMF / III / WVAD: one range-flow rule, zero flow when H == L ----------
+
+def _limit_bar_data():
+    d = _ohlcv(120, seed=5)
+    for i in (40, 41, 90):  # limit bars: no range, close above / below open
+        d['high'][i] = d['low'][i] = d['close'][i]
+    d['open'][41] = d['close'][41] - 1.0
+    return d
+
+
+def _flow(location, h, l, v):
+    rng = h - l
+    return np.where(rng > 0, location / np.where(rng > 0, rng, 1.0) * v, 0.0)
+
+
+def test_a_limit_bar_carries_no_money_flow():
+    d = _limit_bar_data()
+    o, h, l, c, v = (d[k] for k in ('open', 'high', 'low', 'close', 'volume'))
+    mfv = _flow((c - l) - (h - c), h, l, v)
+    cmf = np.array([mfv[i - 19:i + 1].sum() / v[i - 19:i + 1].sum() if i >= 19 else np.nan for i in range(len(c))])
+    _same(_exec(d, 'cmf:20'), cmf)
+    w = _flow(c - o, h, l, v)
+    wvad = np.array([w[i - 23:i + 1].sum() if i >= 23 else np.nan for i in range(len(c))])
+    _same(_exec(d, 'wvad:24'), wvad)
+    _same(_exec(d, 'iii'), mfv)
+    _same(_exec(d, 'ad'), talib.AD(h, l, c, v))
+    _same(_exec(d, 'adosc:3,10'), talib.ADOSC(h, l, c, v, 3, 10))
+    for directive in ('cmf:20', 'wvad:24'):
+        _same(_appended(d, directive, 30), _exec(d, directive), exact=True)
+
+
+def test_a_missing_range_input_is_missing_not_zero_flow():
+    d = _limit_bar_data()
+    d['high'][60] = np.nan
+    got = _exec(d, 'iii')
+    assert np.isnan(got[60]) and np.isfinite(np.delete(got, 60)).all()
+    assert np.isnan(_exec(d, 'cmf:5')[60:65]).all() and np.isfinite(_exec(d, 'cmf:5')[65])
