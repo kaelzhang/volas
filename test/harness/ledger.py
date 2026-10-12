@@ -55,22 +55,47 @@ class Ledger:
     def dtype(self, col: str) -> str:
         return self.user[col] if col in self.user else self.schema.dtype(col)
 
+    def accepts(self, labels: list[int] | None, retained: int | None = None) -> bool:
+        """Whether the frame takes rows labelled ``labels`` (``contracts.
+        APPEND_KEYED_BY_LABEL``): row by row, a label equal to the last replaces it; one
+        before the last raises on a DatetimeIndex, and on an integer index when an
+        earlier row (or an earlier row of the batch) has it. A bounded frame knows only
+        the labels of the ``retained`` rows it still holds."""
+        if labels is None or not contracts.APPEND_KEYED_BY_LABEL:
+            return True
+        prev = self.index[-1] if self.index else None
+        seen = set(self.index if retained is None else self.index[len(self.index) - retained:])
+        for lab in labels:
+            if prev is not None and lab != prev and lab < prev:
+                if self.schema.index == 'datetime' or lab in seen:
+                    return False
+            seen.add(lab)
+            prev = lab
+        return True
+
     def append(self, rows: list[dict], index: list[int] | None) -> None:
         """Record accepted rows; ``index=None`` is a bare RangeIndex bar, whose labels
-        continue the absolute sequence (``last + 1``)."""
+        continue the absolute sequence (``last + 1``). A row labelled like the last
+        replaces it (see :meth:`accepts`)."""
         if index is None:
             start = self.index[-1] + 1 if self.index else 0
             index = list(range(start, start + len(rows)))
-        elif self.schema.index == 'range':
-            self.range_kind = False
-        for r in rows:
+            keyed = False
+        else:
+            keyed = contracts.APPEND_KEYED_BY_LABEL
+        for r, lab in zip(rows, index):
             full = dict(r)
             for c in self.user:
                 full.setdefault(c, None)
             for c in self.schema.columns:
                 full.setdefault(c, None)
+            if keyed and self.index and lab == self.index[-1]:
+                self.rows[-1] = full
+                continue
+            if keyed and self.schema.index == 'range':
+                self.range_kind = False
             self.rows.append(full)
-        self.index.extend(index)
+            self.index.append(lab)
 
     def write(self, pos: int, col: str, value) -> None:
         self.rows[pos][col] = value

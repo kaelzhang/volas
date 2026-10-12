@@ -26,9 +26,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     'unguarded-stale-read',
     # Append coerces a foreign index kind / timezone / NaT instead of raising.
     'append-index-coercion',
-    # The window-recompute refresh differs from the full kernels in the last ULPs
-    # (and so can flip a comparison sitting exactly on the threshold).
-    'window-recompute-ulp',
     # Windowed frames: recursive columns are not bit-exact with the unbounded
     # history, and a base write restarts carried state on the retained rows only.
     'windowed-drift',
@@ -51,19 +48,12 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # A windowed frame checks freshness on its visible slice, where a cached column
     # longer than the window is no longer computed: a stale read then succeeds.
     'windowed-stale-logical-read',
-    # ultosc with periods out of order (e.g. `ultosc:29`) refreshes differently
-    # from its full compute.
-    'ultosc-period-order',
     # A recursive cached column without a carried state (a composite / explicit
     # series) re-warms on a slice's retained rows instead of continuing its history.
     'slice-recursive-rewarm',
     # An all-NaN period folds high / low to -inf / +inf instead of NaN (already
     # tracked); the tf reference reproduces that result while this is open.
     'all-nan-fold-extreme',
-    # A finite but huge input (1e300) that has left a sliding window still skews the
-    # full kernels' running sums (linearreg & co.): extreme magnitudes are only
-    # generated in frames that hold nothing else.
-    'sliding-sum-magnitude',
 })
 
 # Directive families whose incremental refresh is known to diverge from the full
@@ -71,24 +61,9 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
 # crates/volas-directive/tests/resume_matrix.rs); the machines do not cache them
 # while listed.
 DIVERGENT_FAMILIES: frozenset[str] = frozenset({
-    # a state captured inside the warm-up resumes with values where the full
-    # compute is still NaN
-    'adosc', 'ht_dcperiod', 'ht_dcphase', 'ht_phasor', 'ht_sine', 'ht_trendline', 'ht_trendmode',
-    'mama',
-    # the resume divides by a zero prior where the full kernel yields 0
-    'trix',
-    # last-ULP drift between the resume and the full kernel (already tracked)
-    'stochrsi',
     # cancellation in the running co-moment sums: a window recompute and the full
     # kernel differ by more than 1e-9 relative, and |correl| exceeds 1
     'correl', 'beta',
-    # cancellation in the running sum-of-squares variance, amplified by the square
-    # root: boll.lower:1 (a one-sample band, i.e. the value itself) is off by ~1e-5
-    'boll', 'bbw', 'stddev', 'var',
-    # cancellation in vr's running up / down volume sums: a window with no down
-    # volume yields a huge ratio of either sign (the full kernel and a window
-    # recompute disagree by orders of magnitude)
-    'vr',
     # a NaN input keeps suppressing a candlestick pattern far beyond its lookback in
     # the full kernel, so any later window recompute disagrees with it
     'style', 'cdl',
@@ -123,9 +98,12 @@ APPEND_STALE_SOURCE_RAISES = True
 
 # --- append (I12) ---------------------------------------------------------------------
 
-# A plain (non-tf) DatetimeIndex frame accepts a bar earlier than its last row
-# (no documented ordering rule for plain frames; the tf fold raises instead).
-PLAIN_APPEND_OUT_OF_ORDER_ACCEPTED = True
+# Rows are keyed by their labels (docs/dataframe-api.md "df.append"): a row labelled
+# like the last row replaces it; a DatetimeIndex only increases (a row labelled before
+# the last raises); an integer index stays unique (a row labelled like an earlier one
+# raises); a bare RangeIndex bar takes the next labels. A rejected append leaves the
+# frame unchanged. See `Ledger.accepts` / `Ledger.append`.
+APPEND_KEYED_BY_LABEL = True
 # A bar whose index kind differs from the frame's (RangeIndex onto DatetimeIndex),
 # a naive bar onto an aware frame (or the reverse), and a NaT-labelled bar raise.
 APPEND_FOREIGN_INDEX_RAISES = True

@@ -39,6 +39,9 @@ class _Windowed:
 
 class WindowedMachine(_Windowed, PlainMachine):
 
+    def retained(self):
+        return self.df._physical_height
+
     def build_frame(self, schema, rows, index):
         return volas.DataFrame(build.frame(schema, rows, index), window=self.window,
                                max_lookback=self.max_lookback)

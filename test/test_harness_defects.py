@@ -164,7 +164,6 @@ def test_a_naive_bar_onto_an_aware_frame_raises():
         df.append(volas.DataFrame({'time': _T[3:], 'close': [4.0]}).set_index('time'))
 
 
-@_xfail('M6 append-index-coercion', 'a NaT-labelled bar is accepted by a plain frame')
 def test_a_nat_bar_onto_a_plain_frame_raises():
     bar = volas.DataFrame({'close': [4.0]}, index=np.array(['NaT'], 'datetime64[ns]'))
     with pytest.raises(ValueError):
@@ -181,7 +180,6 @@ def test_tz_localize_keeps_subseconds():
 # --- numeric resume / kernels (I1 / I6) ----------------------------------------------------
 
 
-@_xfail('H4 resume-warmup-capture', 'a state captured inside the warm-up resumes where the full is NaN')
 @pytest.mark.parametrize('directive,rows', [('adosc', 1), ('ht_trendline', 62), ('ht_dcperiod', 31),
                                             ('mama', 31)])
 def test_a_column_cached_inside_its_warm_up_continues_exactly(directive, rows):
@@ -200,7 +198,6 @@ def test_macd_with_fast_above_slow_raises_a_directive_error():
         _frame(_walk(80), 0, 80)['macd:30,5']
 
 
-@_xfail('H5 fast-above-slow', 'apo / ppo / dma with fast > slow resume differently from the full compute')
 @pytest.mark.parametrize('directive', ['apo:10,2', 'ppo:10,2', 'dma:10,1'])
 def test_fast_above_slow_resumes_like_the_full_compute(directive):
     cols = _walk(60, 2)
@@ -212,7 +209,6 @@ def test_fast_above_slow_resumes_like_the_full_compute(directive):
     assert _same(df[directive], _frame(cols, 0, 60)[directive])
 
 
-@_xfail('H6 sliding-sum-magnitude', 'a 1e300 input outside the window still skews the full kernel')
 def test_a_huge_value_outside_the_window_does_not_skew_linearreg():
     cols = _walk(30)
     cols['close'] = cols['close'].copy()
@@ -242,7 +238,6 @@ def test_correl_stays_within_unit_range():
     assert np.all(np.abs(finite) <= 1.0)
 
 
-@_xfail('H9 vr-cancellation', 'vr over a window without down volume is a huge ratio of either sign')
 def test_vr_matches_a_window_recompute():
     rows = make_rows(OHLCV, ('walk', 11), 64, None)
     ledger = Ledger(OHLCV)
@@ -252,7 +247,6 @@ def test_vr_matches_a_window_recompute():
     assert _same(full[40:], tail[10:])
 
 
-@_xfail('known stochrsi-ulp', 'stochrsi.d resume drifts from the full kernel in the last ULP')
 def test_stochrsi_d_resume_is_bit_exact():
     drift = []
     for seed in range(12):
@@ -303,7 +297,6 @@ def test_a_windowed_recursive_column_is_bit_exact():
     assert np.array_equal(np.asarray(w['ema:10']), np.asarray(_frame(cols, 0, 200)['ema:10'])[-5:])
 
 
-@_xfail('H10 resume-zero-prior', 'the trix resume divides by a zero prior where the full kernel yields 0')
 def test_trix_resume_matches_on_zero_prices():
     vals = [0.0, 0.0, 1.0, 2.0]
     df = volas.DataFrame({'close': vals[:1]})
@@ -326,7 +319,6 @@ def test_a_recursive_composite_continues_across_a_slice():
                           np.asarray(_frame(cols, 0, 31)['close+kama:3@open'])[-1:])
 
 
-@_xfail('H20 variance-cancellation', 'running sum-of-squares variance drifts; sqrt amplifies it')
 def test_a_one_sample_bollinger_band_is_the_value_itself():
     rng = np.random.default_rng(0)
     c = 100 + np.cumsum(rng.standard_normal(500))
@@ -334,7 +326,6 @@ def test_a_one_sample_bollinger_band_is_the_value_itself():
     assert np.nanmax(np.abs(band - c)) <= 1e-9 * np.max(np.abs(c))
 
 
-@_xfail('H22 ultosc-period-order', 'ultosc with periods out of order refreshes differently from its full compute')
 @pytest.mark.parametrize('directive', ['ultosc:29', 'ultosc:7,30,10', 'ultosc:20,5,3'])
 def test_ultosc_with_unordered_periods_refreshes_like_the_full_compute(directive):
     cols = _walk(80, 0)
