@@ -53,8 +53,9 @@ class PlainMachine(FrameMachine):
         return rows, next_timestamps(last, k, step, regime[1], EPOCHS[0])
 
     def retained(self) -> int | None:
-        """How many rows the frame physically holds (`None`: all of them)."""
-        return None
+        """How many rows the frame physically holds: the ledger rows from the slice's
+        start (a slice is a frame of its own rows only)."""
+        return len(self.store.index) - self.offset
 
     def _pend_stale(self):
         if self.coarse().rows:
