@@ -29,9 +29,9 @@ def test_compound_two_command_directive():
     # stock-pandas test_parse::test_column_with_two_command_real_case — a boolean
     # directive whose *both* operands are indicator commands carrying their own args.
     df = _df()
-    got = np.asarray(df.exec('ma:10 > boll.upper:20'), dtype=float)
-    ma10 = np.asarray(df.exec('ma:10'), dtype=float)
-    upper = np.asarray(df.exec('boll.upper:20'), dtype=float)
+    got = np.asarray(df.exec('ma:10 > boll.upper:20', dtype='float64'), dtype=float)
+    ma10 = np.asarray(df.exec('ma:10', dtype='float64'), dtype=float)
+    upper = np.asarray(df.exec('boll.upper:20', dtype='float64'), dtype=float)
     # a row with a missing operand is a missing truth (NaN here), never a made-up
     # False (stock-pandas / numpy give False); every other row is the plain compare
     unknown = np.isnan(ma10) | np.isnan(upper)
@@ -61,5 +61,5 @@ def test_indicator_recomputes_over_a_sliced_frame():
     for i in range(4, len(c)):
         exp[i] = c[i - 4: i + 1].mean()  # SMA(5) over the sliced close
     np.testing.assert_allclose(
-        np.asarray(sliced.exec('ma:5'), dtype=float), exp, rtol=1e-12, atol=1e-12, equal_nan=True
+        np.asarray(sliced.exec('ma:5', dtype='float64'), dtype=float), exp, rtol=1e-12, atol=1e-12, equal_nan=True
     )

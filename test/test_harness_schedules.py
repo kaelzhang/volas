@@ -150,13 +150,15 @@ def test_a_refold_that_fills_the_last_missing_int_keeps_an_int_export():
     observe.structure(df)
 
 
-def test_a_bool_column_with_na_exports_its_cells():
-    """The NA model at the NumPy boundary: a bool column with a missing cell exports
-    as an object array of True / False / NaN (not a lossy float64)."""
+def test_a_bool_column_with_na_exports_only_with_a_stated_fill():
+    """The NA model at the NumPy boundary: a bool column with a missing cell has no
+    bare NumPy form (a placeholder would read True or False); its object export
+    carries volas.NA, its float export NaN."""
     df = volas.DataFrame({'close': [1.0, 2.0, 3.0], 'flag': [True, None, False]})
     assert df.dtypes['flag'] == 'bool'
-    out = df.get_column('flag').to_numpy()
-    assert out.dtype == object
-    assert out[0] == True and out[2] == False  # noqa: E712 - numpy or Python bool
-    assert isinstance(out[1], float) and np.isnan(out[1])
+    with pytest.raises(ValueError, match='bool column with missing values'):
+        df.get_column('flag').to_numpy()
+    out = df.get_column('flag').to_numpy(dtype='object')
+    assert out[0] == True and out[2] == False and out[1] is volas.NA  # noqa: E712
+    assert np.isnan(df.get_column('flag').to_numpy(dtype='float64')[1])
     observe.structure(df)

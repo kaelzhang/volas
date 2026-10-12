@@ -166,7 +166,7 @@ class FrameMachine(RuleBasedStateMachine):
             return None
         ref = self.coarse().frame(entry.env, entry.start)
         try:
-            lhs, rhs = (np.asarray(ref.exec(x), float) for x in d.operands)
+            lhs, rhs = (ref.exec(x, dtype='float64') for x in d.operands)
         except Exception:
             return None
         return observe.tie_rows(lhs, rhs)[self.visible_start() - entry.start:]
@@ -362,7 +362,7 @@ class FrameMachine(RuleBasedStateMachine):
             observe.same_indicator(np.asarray(values), np.asarray(want), f'exec({d.text!r})',
                                    self.tolerance(entry), self.excused(entry))
 
-        self.attempt(lambda: self.df.exec(d.text), expect_error=error, commit=commit,
+        self.attempt(lambda: observe.exec_values(self.df, d.text), expect_error=error, commit=commit,
                      label=f'exec({d.text!r})')
 
     @rule(data=st.data())

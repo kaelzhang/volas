@@ -275,7 +275,7 @@ def _frame(mutate=None, start=0):
 
 
 def _exec(directive, mutate=None, start=0):
-    return np.asarray(_frame(mutate, start).exec(directive), dtype=float)
+    return np.asarray(_frame(mutate, start).exec(directive, dtype='float64'), dtype=float)
 
 
 def test_registry_fully_classified():
@@ -346,7 +346,7 @@ def test_window_holding_inf_takes_the_formula_value(directive, want):
 
 @pytest.mark.parametrize("directive", ["sum:3", "ma:3", "var:3", "stddev:3", "wma:3", "linearreg:3"])
 def test_window_holding_nan_is_nan_then_recovers(directive):
-    got = np.asarray(_closes([1, 2, np.nan, 4, 5, 6]).exec(directive), float)
+    got = np.asarray(_closes([1, 2, np.nan, 4, 5, 6]).exec(directive, dtype='float64'), float)
     assert np.isnan(got[2:5]).all()
     assert np.isfinite(got[5])
 
@@ -394,10 +394,10 @@ def test_mfi_flat_bars_next_to_an_infinity():
     n = 30
     tp = np.r_[np.full(10, 100.0), np.linspace(100, 110, n - 10)]
     data = dict(high=tp + 1, low=tp - 1, close=tp.copy(), volume=np.full(n, 50.0))
-    clean = np.asarray(DataFrame(data).exec("mfi:5"), float)
+    clean = np.asarray(DataFrame(data).exec("mfi:5", dtype='float64'), float)
     data["close"] = data["close"].copy()
     data["close"][2] = np.inf
-    got = np.asarray(DataFrame(data).exec("mfi:5"), float)
+    got = np.asarray(DataFrame(data).exec("mfi:5", dtype='float64'), float)
     # Only bar 2's flow is non-finite (bar 3's typical price is below +inf, a finite
     # negative flow); the 5-flow windows holding it end at rows 5 and 6 (row 5 is the
     # first output), and the flat bars around it take the zero-flow branch.
@@ -423,5 +423,5 @@ def test_incremental_refresh_after_a_leading_gap_matches_a_full_recompute(key):
         df.append(DataFrame({k: v[i:i + 1] for k, v in data.items()}))
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
-    full = np.asarray(DataFrame(data).exec(directive), dtype=float)
+    full = np.asarray(DataFrame(data).exec(directive, dtype='float64'), dtype=float)
     np.testing.assert_allclose(got, full, rtol=1e-9, atol=1e-9)

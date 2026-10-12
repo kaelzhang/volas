@@ -220,23 +220,23 @@ def test_directive_float64_math_raises_past_2_53(d):
 
 def test_a_comparison_with_a_missing_operand_is_missing():
     df = volas.DataFrame({'close': [1.0, 2.0, 3.0, 2.0, 5.0]})
-    assert _cells(df.exec('close > ma:3')) == [NA, NA, True, False, True]
+    assert _cells(df.exec('close > ma:3', dtype='object')) == [NA, NA, True, False, True]
     # `~` keeps a missing truth missing (it used to turn warm-up NaN into True)
-    assert _cells(df.exec('~(close > ma:3)')) == [NA, NA, False, True, False]
+    assert _cells(df.exec('~(close > ma:3)', dtype='object')) == [NA, NA, False, True, False]
     # Kleene: a present false decides `&`, a present true decides `|`
-    assert _cells(df.exec('(close > ma:3) & (close < 0)')) == [False] * 5
-    assert _cells(df.exec('(close > ma:3) | (close > 0)')) == [True] * 5
-    assert _cells(df.exec('(close > ma:3) ^ (close > 0)')) == [NA, NA, False, True, False]
-    assert _cells(df.exec('ma:3 != 0')) == [NA, NA, True, True, True]
+    assert _cells(df.exec('(close > ma:3) & (close < 0)', dtype='object')) == [False] * 5
+    assert _cells(df.exec('(close > ma:3) | (close > 0)', dtype='object')) == [True] * 5
+    assert _cells(df.exec('(close > ma:3) ^ (close > 0)', dtype='object')) == [NA, NA, False, True, False]
+    assert _cells(df.exec('ma:3 != 0', dtype='object')) == [NA, NA, True, True, True]
     # a cross needs both rows: the first row and warm-up rows are missing unless false
-    assert _cells(df.exec('close // ma:3')) == [NA, NA, NA, False, True]
+    assert _cells(df.exec('close // ma:3', dtype='object')) == [NA, NA, NA, False, True]
 
 
 def test_the_boolean_commands_carry_presence():
     df = volas.DataFrame({'open': [1.0, np.nan, 1.0, 1.0], 'close': [2.0, 2.0, 0.5, 3.0]})
-    assert _cells(df.exec('style.bullish')) == [True, NA, False, True]
-    assert _cells(df.exec('increase:1@close')) == [NA, False, False, True]
-    assert _cells(df.exec('repeat:2@(close > open)')) == [NA, NA, False, False]
+    assert _cells(df.exec('style.bullish', dtype='object')) == [True, NA, False, True]
+    assert _cells(df.exec('increase:1@close', dtype='object')) == [NA, False, False, True]
+    assert _cells(df.exec('repeat:2@(close > open)', dtype='object')) == [NA, NA, False, False]
 
 
 BOOLS = ('close > ma:5', '~(close > ma:5)', 'increase:2@(ma:3)', 'close // ma:3', 'repeat:2@(close > ma:4)')

@@ -522,8 +522,7 @@ pdf = pl.from_dataframe(df)  # polars 经同一协议读取
 `DatetimeIndex` 可往返；反向桥接是 [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe)。
 
 - **dtype_backend?** `str = 'numpy'` 缺失值如何带入 pandas：
-  - `'numpy'`——生态兼容性最好的形式：带缺失值的 int / bool 列变成 `float64` /
-    `object` + `NaN`（与 `pandas.Int64.to_numpy()` 一致）。
+  - `'numpy'`——生态兼容性最好的形式：带缺失值的 int 列变成 `float64` + `NaN`（与 `pandas.Int64.to_numpy()` 一致）；带缺失值的 bool 列变成 masked `boolean`（`pd.NA`），绝不会是会被当作真值的 `NaN`。
   - `'numpy_nullable'`——忠实、无损的 masked 往返：int / bool / str 列保持
     `Int64` / `boolean` / `string`，空洞为 `pandas.NA`。
 
@@ -647,8 +646,7 @@ series.to_numpy(dtype='int64')
 
 注意：
 
-- 默认（不传 `dtype`、不传 `na_value`）是按 dtype 的导出：缺失的 int / bool / datetime
-  单元格折叠为 `NaN` / `NaT`（NumPy 没有 `NA`），稠密列保留原生 dtype。float `NaN` 是带内值，因此 float 列转整型 dtype 时只要存在 `NaN` 同样会抛错（请传 `na_value`）。
+- 默认（不传 `dtype`、不传 `na_value`）是按 dtype 的导出：缺失的 int / datetime 单元格折叠为 `NaN` / `NaT`（NumPy 没有 `NA`），稠密列保留原生 dtype。float `NaN` 是带内值，因此 float 列转整型 dtype 时只要存在 `NaN` 同样会抛错（请传 `na_value`）。带缺失值的 **bool** 列没有默认导出，会**抛错**——`nan` / `None` 占位会被 `np.where` 或布尔索引当作 `True` / `False`；请传 `na_value=`（例如 `False`，得到 bool 数组）、`dtype='float64'`（`NaN`）或 `dtype='object'`（`volas.NA`）。`np.asarray(series)` 与 `df.exec(directive, dtype=..., na_value=...)` 遵循同一规则。
 - 与 pandas 一致，`na_value` 只改变缺失单元格——不给显式 `dtype` 时，带 NA 的 int 列仍导出为 `float64`（默认），`na_value` 只是填充那些 `NaN` 槽。
 - 若需要**无损**保留原生 dtype 与缺失位置（不填充、不折叠 float），用 Arrow 路径（`series.to_arrow()` 携带空值位图）或 `series.to_pandas(dtype_backend='numpy_nullable')`；单独取 NA 掩码用 `series.isna().to_numpy()`。
 

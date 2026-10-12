@@ -82,7 +82,13 @@ anything else involving a missing truth stays missing (`~` of a missing truth is
 missing, never `True`). `increase`, `style` and `repeat` follow the same rule. A
 cached boolean keeps its missing rows through `append` and refresh, exactly as a
 full recompute gives them. To use such a signal as a row mask, state what an
-unknown row means first: `df[df['close > ma:20'].fillna(False)]`.
+unknown row means first: `df[df['close > ma:20'].fillna(False)]`. The same holds at
+the NumPy boundary: a boolean result holding a missing truth has no bare NumPy form
+(a `nan` placeholder would read `True` in `np.where` or indexing), so
+`df.exec('close > ma:20')`, `np.asarray(df['close > ma:20'])` and `.to_numpy()`
+raise until you pass `na_value=` (e.g. `False`), `dtype='float64'` (missing → `NaN`)
+or `dtype='object'` (missing → `volas.NA`) — `df.exec(d, na_value=False)`. Numeric
+results export as before (`np.asarray(df.exec('ma:20'), dtype=np.float64)`).
 
 **Numbers stay exact.** An integer literal is an exact int64
 (`volume > 9007199254740993` compares against that integer, not its float64

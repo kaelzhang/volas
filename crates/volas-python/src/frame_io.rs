@@ -88,20 +88,38 @@ impl PyDataFrame {
     /// For a cached, incrementally-refreshed result use ``df[directive]`` (a Series)
     /// or ``df[directive].to_numpy()``.
     ///
+    /// The result is exported exactly like ``Series.to_numpy``: a boolean result
+    /// holding a missing truth (e.g. the warm-up rows of ``'close > ma:20'``) raises
+    /// unless ``dtype`` / ``na_value`` say what a missing cell is.
+    ///
     /// Args:
     ///     directive (str): the directive, e.g. ``'macd'``, ``'boll.upper:20'``,
     ///         ``'close > open'``.
+    ///     dtype (str, optional): the NumPy dtype to export as (``'float64'`` maps a
+    ///         missing cell to ``NaN``, ``'object'`` to ``volas.NA``).
+    ///     na_value (optional): the value of each missing cell.
     ///
     /// Usage::
     ///
     ///     df.exec('ma:5')   # ndarray of SMA(5); the frame is not modified
+    ///     df.exec('close > ma:20', na_value=False)
     ///
     /// Returns:
     ///     numpy.ndarray
-    pub(crate) fn exec<'py>(&self, py: Python<'py>, directive: &str) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (directive, dtype = None, na_value = None))]
+    pub(crate) fn exec<'py>(
+        &self,
+        py: Python<'py>,
+        directive: &str,
+        dtype: Option<&str>,
+        na_value: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let node = parse(directive).map_err(directive_err)?;
         let col = execute(&self.inner, &node).map_err(value_err)?;
-        Ok(column_into_numpy(py, col))
+        if dtype.is_none() && na_value.is_none() {
+            return column_into_numpy(py, col); // the fresh result, moved without a copy
+        }
+        column_to_numpy_with(py, &col, dtype, na_value.as_ref())
     }
 
     /// Gets a column from the frame by name, as a Series.

@@ -23,7 +23,7 @@ import numpy as np
 
 import volas
 
-from . import build, contracts
+from . import build, contracts, observe
 from .data import OHLC, Schema
 
 
@@ -140,7 +140,8 @@ def reference(ledger: Ledger, directive: str, env: tuple[str, ...], start: int =
     always evaluates the directive (``exec``), never reading a same-named column."""
     ref = ledger.frame(env, start)
     try:
-        return np.asarray(ref.exec(directive) if evaluate else ref[directive]), None
+        return (observe.exec_values(ref, directive) if evaluate
+                else observe.column_values_series(ref[directive])), None
     except Exception as e:  # noqa: BLE001 - the error class is compared, not judged
         return None, type(e)
 

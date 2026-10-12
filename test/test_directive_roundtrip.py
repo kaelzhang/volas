@@ -77,7 +77,7 @@ def test_cached_compound_column_refreshes_after_append(directive):
         df.append(DataFrame({k: v[i : i + 1] for k, v in data.items()}))
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
-    full = np.asarray(DataFrame(data).exec(directive), dtype=float)
+    full = np.asarray(DataFrame(data).exec(directive, dtype='float64'), dtype=float)
     np.testing.assert_allclose(got, full, rtol=1e-9, atol=1e-9)
 
 
@@ -108,7 +108,7 @@ def test_cached_composite_refreshes_exactly(key):
     seed, n = 120, 140
     # Threshold midway between the two middle values of the indicator's own tail, so a
     # drifted (re-warmed) value flips the comparison while float rounding cannot.
-    values = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(_FORMS[key]), float)
+    values = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(_FORMS[key], dtype='float64'), float)
     tail = np.unique(values[seed:][np.isfinite(values[seed:])])
     middle = float((tail[len(tail) // 2 - 1] + tail[len(tail) // 2]) / 2) if len(tail) > 1 else 0.0
     directive = f"({_FORMS[key]}) > {middle!r}"
@@ -118,7 +118,7 @@ def test_cached_composite_refreshes_exactly(key):
         df.append(DataFrame({k: v[i : i + 1] for k, v in base.items()}))
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
-    full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive), dtype=float)
+    full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive, dtype='float64'), dtype=float)
     np.testing.assert_array_equal(got, full)
 
 
@@ -142,7 +142,7 @@ def test_cached_candle_pattern_refreshes_exactly(pattern):
         df.append(DataFrame({k: v[i : i + 1] for k, v in base.items()}))
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
-    full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive), dtype=float)
+    full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive, dtype='float64'), dtype=float)
     np.testing.assert_array_equal(got, full)
 
 
@@ -165,5 +165,5 @@ def test_cached_composite_refreshes_exactly_by_its_structure(directive):
         df.append(DataFrame({k: v[i : i + 1] for k, v in base.items()}))
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
-    full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive), dtype=float)
+    full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive, dtype='float64'), dtype=float)
     np.testing.assert_array_equal(got, full)

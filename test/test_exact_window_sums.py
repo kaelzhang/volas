@@ -86,7 +86,7 @@ def test_a_flat_window_is_flat_after_a_long_history():
         assert (np.asarray(frame["var:20"])[first:] == 0.0).all()
         assert (np.asarray(frame["ma:20"])[first:] == flat).all()
         assert (np.asarray(frame["boll.upper"])[first:] == flat).all()
-        assert not np.asarray(frame["close > ma:20"])[first:].any()
+        assert not frame["close > ma:20"].to_numpy(na_value=True)[first:].any()
 
 
 def _appended(head, tail):
@@ -113,8 +113,8 @@ def test_a_bad_row_stops_mattering_once_an_anchor_has_passed(key, kind):
     bad = {k: v.copy() for k, v in WIDE.items()}
     for col in ("open", "high", "low", "close", "volume"):
         bad[col][150] = bad[col][150] * 1e15 if kind == "spike" else np.nan
-    clean = np.asarray(DataFrame(WIDE).exec(directive), dtype=float)
-    dirty = np.asarray(DataFrame(bad).exec(directive), dtype=float)
+    clean = np.asarray(DataFrame(WIDE).exec(directive, dtype='float64'), dtype=float)
+    dirty = np.asarray(DataFrame(bad).exec(directive, dtype='float64'), dtype=float)
     start = _settled(directive, 150)
     assert start < N, directive
     _bits(dirty[start:], clean[start:], f"{directive} {kind}")
@@ -127,8 +127,8 @@ def test_a_slice_keeps_its_rows_absolute_positions(key):
     directive = _directive(key)
     df = DataFrame(WIDE)
     sub = df.iloc[123:]
-    full = np.asarray(df.exec(directive), dtype=float)
-    part = np.asarray(sub.exec(directive), dtype=float)
+    full = np.asarray(df.exec(directive, dtype='float64'), dtype=float)
+    part = np.asarray(sub.exec(directive, dtype='float64'), dtype=float)
     skip = _settled(directive, 0)
     _bits(part[skip:], full[123 + skip:], directive)
 
@@ -138,8 +138,8 @@ def test_positions_are_the_series_own_on_a_slice_and_a_bounded_frame(directive):
     """The index family emits absolute positions: computed fresh on a slice, carried
     across one, or refreshed on a bounded frame after its head was dropped."""
     df = DataFrame(WIDE)
-    full = np.asarray(df.exec(directive), dtype=float)
-    _bits(np.asarray(df.iloc[300:].exec(directive), dtype=float)[5:], full[305:], f"{directive} fresh")
+    full = np.asarray(df.exec(directive, dtype='float64'), dtype=float)
+    _bits(np.asarray(df.iloc[300:].exec(directive, dtype='float64'), dtype=float)[5:], full[305:], f"{directive} fresh")
     live = DataFrame({k: v[:40] for k, v in WIDE.items()}, window=30, max_lookback=[directive])
     live[directive]
     for i in range(40, 200):

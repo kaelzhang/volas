@@ -453,6 +453,27 @@ array([ 1., nan,  3.])                    # the pandas-style upcast, but only he
 **only** at this boundary, where you asked for it. Storage and `to_list()` keep the
 dtype and `volas.NA`.
 
+A **bool** column holding a missing value is the exception: it has **no** bare NumPy
+export. NumPy has no missing bool, and any placeholder reads as a decided truth — the
+`nan` pandas puts in its object array is truthy, so `np.where(mask, …)` or
+`arr[mask]` would act on an unknown signal as if it were `True` (the same laundering
+the NA-mask rule above rejects). `to_numpy()`, `np.asarray(...)` and `df.exec(...)`
+therefore raise for it until you say what a missing cell means:
+
+```py
+>>> sig = df['close > ma:20']            # the warm-up rows are volas.NA
+>>> np.asarray(sig)
+ValueError: cannot export a bool column with missing values to NumPy: ...
+>>> sig.to_numpy(na_value=False)         # bool array, unknown -> False
+>>> sig.to_numpy(dtype='float64')        # 1.0 / 0.0, unknown -> NaN
+>>> sig.to_numpy(dtype='object')         # True / False / volas.NA (whose bool() raises)
+>>> df.exec('close > ma:20', na_value=False)
+```
+
+A float export (`dtype='float64'`, `np.asarray(x, dtype=np.float64)`, a frame's
+default numeric matrix) carries `NaN` as float data. `to_pandas()` gives such a
+column pandas' masked `boolean` dtype (`pd.NA`) under either backend.
+
 `DataFrame.to_numpy(dtype=...)` is an export boundary — you are *leaving* volas — so
 an explicit `dtype` is honored per cell exactly like pandas (the internal no-lossy
 contract governs *computation*, not what you convert *out*). The matrix:

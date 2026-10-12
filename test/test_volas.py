@@ -166,9 +166,8 @@ PARITY = [
 @pytest.mark.parametrize('directive', PARITY)
 def test_parity_with_stock_pandas(stock, spd, directive):
     expected = np.asarray(spd.exec(directive, create_column=False), dtype=float)
-    raw = stock.exec(directive)
-    actual = np.asarray(raw, dtype=float)
-    if raw.dtype.kind in 'bO':
+    actual = stock.exec(directive, dtype='float64')  # a missing truth -> NaN
+    if stock[directive].dtype == 'bool':
         # A directive boolean is missing where an operand is (the warm-up rows);
         # stock-pandas reads those rows as False — the documented divergence
         # (docs/directives.md#operators). Every row volas knows matches exactly.

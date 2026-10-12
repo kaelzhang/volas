@@ -505,8 +505,8 @@ zone — see [Datetime columns are UTC instants](interop.md#datetime-columns-are
 The reverse bridge is [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe).
 
 - **dtype_backend?** `str = 'numpy'` how a missing value is carried into pandas:
-  - `'numpy'` — the most ecosystem-compatible form: an int / bool column with a missing
-    value becomes `float64` / `object` with `NaN` (like `pandas.Int64.to_numpy()`).
+  - `'numpy'` — the most ecosystem-compatible form: an int column with a missing
+    value becomes `float64` with `NaN` (like `pandas.Int64.to_numpy()`); a bool column with a missing value becomes the masked `boolean` dtype (`pd.NA`), never a truthy `NaN`.
   - `'numpy_nullable'` — a faithful, lossless masked round-trip: an int / bool / str
     column stays `Int64` / `boolean` / `string` with the hole as `pandas.NA`.
 
@@ -651,8 +651,12 @@ series.to_numpy(dtype='int64')
 
 Notes:
 - The default (no `dtype`, no `na_value`) is the dtype-specific export: a missing
-  int / bool / datetime cell collapses to `NaN` / `NaT` (NumPy has no `NA`), while a
-  dense column keeps its native dtype. A float `NaN` is in-band, so a float column
+  int / datetime cell collapses to `NaN` / `NaT` (NumPy has no `NA`), while a dense
+  column keeps its native dtype. A **bool** column with a missing cell has no default
+  export and **raises** — a `nan` / `None` placeholder would be read as `True` /
+  `False` by `np.where` or boolean indexing; pass `na_value=` (e.g. `False`, a bool
+  array), `dtype='float64'` (`NaN`) or `dtype='object'` (`volas.NA`). The same rule
+  covers `np.asarray(series)` and `df.exec(directive, dtype=..., na_value=...)`. A float `NaN` is in-band, so a float column
   cast to an integer dtype likewise raises when any value is `NaN` (pass `na_value`).
 - Like pandas, `na_value` only changes the missing cells — without an explicit `dtype`
   an int column with NA still exports `float64` (the default), and `na_value` simply
