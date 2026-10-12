@@ -202,7 +202,8 @@ fn ma_typed(data: &[f64], period: usize, matype: usize, complete: bool, origin: 
     // derived line that warms up with NaN (see `volas_compute::missing`). A recursive
     // command's own input is complete wherever its result is kept (`complete`), so it
     // is not scanned.
-    if crate::spec::is_recursive_matype(matype) {
+    let matype = crate::spec::ma_type(period, matype);
+    if crate::spec::is_recursive_ma(period, matype) {
         let input = if complete { Input::known(data, false) } else { Input::new(data) };
         return on_complete_rows(&[input], |x| ma_kernel(x[0], period, matype, origin));
     }

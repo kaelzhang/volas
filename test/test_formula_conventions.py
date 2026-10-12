@@ -178,3 +178,25 @@ def test_a_missing_range_input_is_missing_not_zero_flow():
     got = _exec(d, 'iii')
     assert np.isnan(got[60]) and np.isfinite(np.delete(got, 60)).all()
     assert np.isnan(_exec(d, 'cmf:5')[60:65]).all() and np.isfinite(_exec(d, 'cmf:5')[65])
+
+
+# --- the generic MA: period 1 is the identity for every type ----------------------------
+
+@pytest.mark.parametrize('matype', range(9))
+def test_generic_ma_of_period_one_is_the_input(matype):
+    d = _ohlcv(60)
+    _same(_exec(d, f'ma:1,{matype}'), talib.MA(d['close'], 1, matype), exact=True)
+    assert volas.directive_lookback(f'ma:1,{matype}') == 0
+    _same(_appended(d, f'ma:1,{matype}', 5), d['close'], exact=True)
+
+
+def test_dispatchers_smooth_with_the_period_one_identity():
+    d = _ohlcv(120)
+    h, l, c = d['high'], d['low'], d['close']
+    k, dd = talib.STOCH(h, l, c, 5, 1, 7, 3, 0)
+    _same(_exec(d, 'stoch.k:5,1,7,3,0')[~np.isnan(k)], k[~np.isnan(k)])
+    _same(_exec(d, 'stoch.d:5,1,7,3,0')[~np.isnan(dd)], dd[~np.isnan(dd)])
+    # a 1-period KAMA signal is the MACD line itself (TA-Lib: TA_MA(…, 1, KAMA) = input)
+    _same(_exec(d, 'macdext.signal:12,1,26,1,1,6'), _exec(d, 'macdext:12,1,26,1'), exact=True)
+    assert volas.directive_lookback('stoch.k:5,1,7,3,0') == 4
+    _same(_appended(d, 'stochrsi.d:14,5,1,7', 40), _exec(d, 'stochrsi.d:14,5,1,7'), exact=True)

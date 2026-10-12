@@ -1410,7 +1410,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 
 | Volas directive | TA-Lib original | Meaning | Parameters |
 | --- | --- | --- | --- |
-| <a id="indicator-ma"></a>`ma` | `MA` | Generic moving average selected by MA type. | `:<period>,<matype=0>@<series=close>` |
+| <a id="indicator-ma"></a>`ma` | `MA` | Generic moving average selected by MA type. A `period` of 1 is the input itself for every type (TA-Lib `TA_MA`), with no warm-up; the commands that smooth with a generic MA (`apo`, `ppo`, `macdext`, `mavp`, `stoch`, `stochf`, `stochrsi`) inherit it. | `:<period>,<matype=0>@<series=close>` |
 | <a id="indicator-ema"></a>`ema` | `EMA` | Exponential moving average. | `:<period>@<series=close>` |
 | <a id="indicator-wma"></a>`wma` | `WMA` | Weighted moving average. | `:<period>@<series=close>` |
 | <a id="indicator-dema"></a>`dema` | `DEMA` | Double exponential moving average. | `:<period>@<series=close>` |

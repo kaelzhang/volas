@@ -12,9 +12,10 @@ fn arg(args: &[ArgValue], i: usize) -> usize {
 
 /// Lookback of a TA-Lib MA-type over `period` (mirrors `exec::ma_typed`): DEMA is
 /// `2·(period-1)`, TEMA `3·(period-1)`, KAMA `period`, T3 `6·(period-1)`, MAMA a
-/// fixed `32` (period-independent), and the rest (SMA/EMA/WMA/TRIMA) `period-1`.
+/// fixed `32` (period-independent), and the rest (SMA/EMA/WMA/TRIMA) `period-1` — and 0
+/// for any type at period 1 (the identity, [`crate::spec::ma_type`]).
 pub(crate) fn ma_lookback(period: usize, matype: usize) -> usize {
-    match matype {
+    match crate::spec::ma_type(period, matype) {
         3 => 2 * period.saturating_sub(1),
         4 => 3 * period.saturating_sub(1),
         6 => period,

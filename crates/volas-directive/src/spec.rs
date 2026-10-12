@@ -666,27 +666,43 @@ fn is_recursive_name(name: &str) -> bool {
 /// series starts.
 const ABSOLUTE_POSITION: &[&str] = &["maxindex", "minindex", "minmaxindex"];
 
-/// Whether a TA-Lib MA-type code selects a recursive moving average (EMA, DEMA, TEMA,
-/// KAMA, MAMA, T3 — not SMA, WMA or TRIMA).
-pub fn is_recursive_matype(matype: usize) -> bool {
-    matches!(matype, 1 | 3 | 4 | 6 | 7 | 8)
+/// The MA-type code TA-Lib's generic moving average (`TA_MA`) actually runs over
+/// `period`: a period of 1 is the identity for every type — `TA_MA` checks it before
+/// dispatching on the type, so even KAMA and MAMA (which otherwise ignores the period)
+/// return the input, with no warm-up. volas runs that identity as the 1-bar simple
+/// average, whose value is the input. The one owner of the rule: every generic-MA use
+/// — `ma`, its lookback, its recursion class, its resumable stages, and the commands
+/// that smooth with it (`apo`, `ppo`, `macdext`, `mavp`, `stoch`, `stochf`, `stochrsi`)
+/// — reads the type through it.
+pub fn ma_type(period: usize, matype: usize) -> usize {
+    if period == 1 { 0 } else { matype }
+}
+
+/// Whether the generic moving average of `period` and MA-type code `matype` (see
+/// [`ma_type`]) is recursive: EMA, DEMA, TEMA, KAMA, MAMA, T3 — not SMA, WMA, TRIMA,
+/// nor any type at period 1.
+pub fn is_recursive_ma(period: usize, matype: usize) -> bool {
+    matches!(ma_type(period, matype), 1 | 3 | 4 | 6 | 7 | 8)
 }
 
 /// Whether a bound command is recursive: its value at a row depends on every row
 /// before it. A missing row of a recursive command's inputs does not exist for it —
 /// it runs on the complete rows only (see `volas_compute::missing`).
 pub fn is_recursive(name: &str, args: &[ArgValue]) -> bool {
-    let matypes: &[usize] = match name {
-        "ma" => &[1],
-        "apo" | "ppo" | "mavp" | "stochf" => &[2],
-        "macdext" => &[1, 3, 5],
-        "stoch" => &[2, 4],
+    // (period, matype) argument positions of each generic moving average; mavp's
+    // averages span the periods up to its maximum, so its maximum decides.
+    let averages: &[(usize, usize)] = match name {
+        "ma" => &[(0, 1)],
+        "apo" | "ppo" => &[(0, 2), (1, 2)],
+        "mavp" => &[(1, 2)],
+        "stochf" => &[(1, 2)],
+        "macdext" => &[(0, 1), (2, 3), (4, 5)],
+        "stoch" => &[(1, 2), (3, 4)],
         _ => return is_recursive_name(name),
     };
-    matypes
+    averages
         .iter()
-        .filter_map(|&i| args.get(i))
-        .any(|a| is_recursive_matype(a.as_usize()))
+        .any(|&(p, m)| args.get(p).zip(args.get(m)).is_some_and(|(p, m)| is_recursive_ma(p.as_usize(), m.as_usize())))
 }
 
 /// Whether a command's output is an absolute row position.
