@@ -116,7 +116,12 @@ impl PyDataFrame {
         if !self.inner.has_column(&name) || self.inner.is_computed(&name) {
             self.check_new_data_column(&name)?;
         }
-        self.inner.set_column(&name, col).map_err(pyerr)?;
+        // A time-frame frame takes the column through its one write entry: the open
+        // period follows the forming cell it leaves, or the write is refused unchanged.
+        match self.tf.as_mut() {
+            Some(tfs) => tfs.write(&mut self.inner, |inner| inner.set_column(&name, col).map_err(pyerr))?,
+            None => self.inner.set_column(&name, col).map_err(pyerr)?,
+        }
         Ok(())
     }
 
@@ -191,7 +196,9 @@ impl PyDataFrame {
     /// the frame's own time frame stamped at the period start (an exchange kline
     /// re-sent while it forms) therefore replaces the last row whole. The last
     /// constructed row is the open period's first bar, so it must not already hold
-    /// the finer bars appended after it.
+    /// the finer bars appended after it. Every bar is first made a complete bar of the
+    /// frame's data columns (a column it leaves out is a missing value); a column
+    /// written onto the frame later is missing in the open period's earlier bars.
     ///
     /// On any other frame each row is keyed by its index label: a row labelled like
     /// the last row replaces it whole; a ``DatetimeIndex`` only increases (a row
@@ -210,8 +217,9 @@ impl PyDataFrame {
     ///
     /// Args:
     ///     other (DataFrame | Row | dict): the rows to append (fine bars if tf-aware).
-    ///         A scalar dict is one bar — every data column plus the timestamp under the
-    ///         key equal to the index's name (a RangeIndex auto-extends).
+    ///         A scalar dict is one bar — its data columns (one left out is missing, as
+    ///         in every form) plus the timestamp under the key equal to the index's
+    ///         name (a RangeIndex auto-extends).
     ///
     /// Usage::
     ///

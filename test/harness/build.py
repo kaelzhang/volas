@@ -69,8 +69,9 @@ def _tz(df: volas.DataFrame, schema: Schema) -> volas.DataFrame:
     return df._set_index_tz(schema.tz) if schema.tz else df
 
 
-def bar_dict(schema: Schema, row: dict, ts: int | None, extra: tuple[str, ...] = ()) -> dict:
-    """The strict scalar-bar dict form of one row: every data column present (the
+def bar_dict(schema: Schema, row: dict, ts: int | None, extra: tuple[str, ...] = (),
+             omit: tuple[str, ...] = ()) -> dict:
+    """The scalar-bar dict form of one row: every data column but ``omit`` present (the
     ``extra`` plain columns as NA)."""
     out: dict = {}
     if ts is not None:
@@ -78,6 +79,8 @@ def bar_dict(schema: Schema, row: dict, ts: int | None, extra: tuple[str, ...] =
     for c in extra:
         out[c] = None
     for c in schema.columns:
+        if c in omit:
+            continue
         v = row[c]
         if v is not None and schema.dtype(c) == 'datetime64[ns]':
             v = np.datetime64(v, 'ns')
@@ -86,18 +89,20 @@ def bar_dict(schema: Schema, row: dict, ts: int | None, extra: tuple[str, ...] =
 
 
 def bars(schema: Schema, rows: list[dict], index: list[int] | None, form: str, pad: int,
-         extra: tuple[str, ...] = ()):
+         extra: tuple[str, ...] = (), omit: tuple[str, ...] = ()):
     """``rows`` in the requested append form: 'arrow' / 'numpy' frame, 'sliced' (a view
     into a larger frame), 'row' (a ``Row``, one bar), or 'dict' (one bar; ``extra``
-    names plain columns the frame has beyond the schema)."""
+    names plain columns the frame has beyond the schema); the data columns ``omit``
+    left out."""
+    columns = tuple(c for c in schema.columns if c not in omit)
     if form in ('arrow', 'numpy'):
-        return frame(schema, rows, index, storage=form)
+        return frame(schema, rows, index, columns=columns, storage=form)
     if form == 'sliced':
         filler = rows[:1] * pad
         fidx = None if index is None else [index[0] - (pad - i) for i in range(pad)]
         big = frame(schema, filler + rows + filler, None if index is None else fidx + index + [
-            index[-1] + 1 + i for i in range(pad)])
+            index[-1] + 1 + i for i in range(pad)], columns=columns)
         return big.iloc[pad:pad + len(rows)]
     if form == 'row':
-        return frame(schema, rows[:1], None if index is None else index[:1]).iloc[0]
-    return bar_dict(schema, rows[0], None if index is None else index[0], extra)
+        return frame(schema, rows[:1], None if index is None else index[:1], columns=columns).iloc[0]
+    return bar_dict(schema, rows[0], None if index is None else index[0], extra, omit)

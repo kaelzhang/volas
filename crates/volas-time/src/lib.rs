@@ -7,8 +7,10 @@
 
 pub mod agg;
 pub mod cumulate;
+pub mod open_period;
 pub mod time_frame;
 
 pub use agg::{Agg, AggSpec};
 pub use cumulate::{aggregate_period, cumulate, Cumulator};
+pub use open_period::OpenPeriod;
 pub use time_frame::{Span, TimeFrame};
