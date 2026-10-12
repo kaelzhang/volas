@@ -455,7 +455,8 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("tsi", None) => (const { &[p(25), p(13)] }, &["close"]),
         ("crsi", None) => (const { &[p(3), p(2), p(100)] }, &["close"]),
         // Group E formula-equivalent wrappers (China-market names): bias ≡ ppo:1,N,0;
-        // dma's DDD line ≡ apo:fast,slow,0, with AMA = the M-period SMA of that line.
+        // dma's DDD line = SMA(fast) − SMA(slow), positional as 通达信 (≡ apo:fast,slow,0
+        // for fast ≤ slow), with AMA = the M-period SMA of that line.
         ("bias", None) => (const { &[p(6)] }, &["close"]),
         ("dma", None) => (const { &[p(10), p(50)] }, &["close"]),
         ("dma", Some("ama")) => (const { &[p(10), p(50), p(10)] }, &["close"]),

@@ -200,3 +200,37 @@ def test_dispatchers_smooth_with_the_period_one_identity():
     _same(_exec(d, 'macdext.signal:12,1,26,1,1,6'), _exec(d, 'macdext:12,1,26,1'), exact=True)
     assert volas.directive_lookback('stoch.k:5,1,7,3,0') == 4
     _same(_appended(d, 'stochrsi.d:14,5,1,7', 40), _exec(d, 'stochrsi.d:14,5,1,7'), exact=True)
+
+
+# --- price oscillators: TA-Lib's order (the longer period is the slow average) ----------
+
+def test_macd_with_the_slow_period_first_is_talibs_and_does_not_crash():
+    # TA-Lib swaps the periods; its MACD line itself seeds the EMAs off-by-alignment (a
+    # documented quirk), so the line is checked against the clean EMA difference.
+    d = _ohlcv(120)
+    c = d['close']
+    _same(_exec(d, 'macd:14,7'), talib.EMA(c, 7) - talib.EMA(c, 14))
+    for swapped, ordered in (('macd:14,7', 'macd:7,14'), ('macd.signal:14,7,5', 'macd.signal:7,14,5'),
+                             ('macd.histogram:14,7,5', 'macd.histogram:7,14,5')):
+        _same(_exec(d, swapped), _exec(d, ordered), exact=True)
+        _same(_appended(d, swapped, 30), _exec(d, ordered), exact=True)
+
+
+@pytest.mark.parametrize('directive,fn', [
+    ('apo:10,4,1', lambda c: talib.APO(c, 10, 4, 1)),
+    ('ppo:10,4,0', lambda c: talib.PPO(c, 10, 4, 0)),
+])
+def test_oscillators_with_the_slow_period_first_match_talib(directive, fn):
+    d = _ohlcv(120)
+    want = fn(d['close'])
+    m = ~np.isnan(want)
+    _same(_exec(d, directive)[m], want[m])
+    _same(_appended(d, directive, 30), _exec(d, directive), exact=True)
+
+
+def test_macdext_swaps_its_averages_with_their_types():
+    d = _ohlcv(120)
+    for swapped, ordered in (('macdext:14,1,7,0', 'macdext:7,0,14,1'),
+                             ('macdext.signal:14,1,7,0,5,2', 'macdext.signal:7,0,14,1,5,2')):
+        _same(_exec(d, swapped), _exec(d, ordered), exact=True)
+        _same(_appended(d, swapped, 30), _exec(d, ordered), exact=True)

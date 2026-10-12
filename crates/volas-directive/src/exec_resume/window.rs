@@ -251,13 +251,19 @@ fn averages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Averages
             slow: ma(p(1), 0)?,
             smooth: if sub.is_some() { Some(ma(p(2), 0)?) } else { None },
         },
-        ("macdext", sub) => Averages {
-            fast: ma(p(0), p(1))?,
-            slow: ma(p(2), p(3))?,
-            smooth: if sub.is_some() { Some(ma(p(4), p(5))?) } else { None },
-        },
-        // apo / ppo
-        _ => Averages { fast: ma(p(0), p(2))?, slow: ma(p(1), p(2))?, smooth: None },
+        ("macdext", sub) => {
+            let ((fp, fm), (sp, sm)) = ind::oscillator_order((p(0), p(1)), (p(2), p(3)));
+            Averages {
+                fast: ma(fp, fm)?,
+                slow: ma(sp, sm)?,
+                smooth: if sub.is_some() { Some(ma(p(4), p(5))?) } else { None },
+            }
+        }
+        // apo / ppo, in TA-Lib's order
+        _ => {
+            let ((fp, fm), (sp, sm)) = ind::oscillator_order((p(0), p(2)), (p(1), p(2)));
+            Averages { fast: ma(fp, fm)?, slow: ma(sp, sm)?, smooth: None }
+        }
     })
 }
 

@@ -159,10 +159,14 @@ pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
 /// loop lets the out-of-order core overlap the two FMA dependency chains (ILP) —
 /// roughly the cost of one EMA, not two — and emits the difference directly (no
 /// intermediate `fast` / `slow` arrays, no separate subtraction pass).
-/// Bit-identical to two [`ema_seeded`] calls minus each other. Requires
-/// `fast <= slow` (so the fast EMA seeds no later than the slow one).
+/// Bit-identical to two [`ema_seeded`] calls minus each other, for either order of the
+/// periods (`fast > slow` is the negated difference of the swapped pair — exact, as
+/// `a − b == −(b − a)` in IEEE arithmetic).
 #[inline]
 pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array1<f64> {
+    if fast > slow {
+        return -ema_diff_seeded(data, slow, fast);
+    }
     let n = data.len();
     let mut out = Array1::from_elem(n, f64::NAN);
     if fast == 0 || slow == 0 || n == 0 {

@@ -1432,7 +1432,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-midpoint"></a>`midpoint` | `MIDPOINT` | Midpoint over a rolling period. | `:<period>@<series=close>` |
 | <a id="indicator-midprice"></a>`midprice` | `MIDPRICE` | Midpoint price over high and low. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-ht_trendline"></a>`ht_trendline` | `HT_TRENDLINE` | Hilbert Transform instantaneous trendline. | `@<series=close>` |
-| <a id="indicator-macd"></a>`macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. | `:<fast=12>,<slow=26>@<series=close>` |
+| <a id="indicator-macd"></a>`macd` | `MACD` | MACD line; Volas uses standalone EMA fast minus EMA slow. As in TA-Lib, a `slow` shorter than `fast` swaps the two (`macd:26,12` is `macd:12,26`); the same holds for `apo`, `ppo` and `macdext` (with the MA types). | `:<fast=12>,<slow=26>@<series=close>` |
 | <a id="indicator-macd-signal"></a>`macd.signal` | `MACD` | Signal line of the Volas MACD line. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
 | <a id="indicator-macd-histogram"></a>`macd.histogram` | `MACD` | MACD histogram: line minus signal. | `:<fast=12>,<slow=26>,<signal=9>@<series=close>` |
 | <a id="indicator-macdext"></a>`macdext` | `MACDEXT` | MACD line with independent MA types. | `:<fast=12>,<fast_matype=0>,<slow=26>,<slow_matype=0>@<series=close>` |

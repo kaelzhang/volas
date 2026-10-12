@@ -6,6 +6,21 @@ use crate::raw::indicators::av;
 use crate::raw::indicators::trend::ma::ema_k;
 use crate::raw::kernels;
 
+/// TA-Lib's price-oscillator rule (`APO`, `PPO`, `MACD`, `MACDEXT`): the slow average is
+/// the one with the longer period — when `slow < fast` the two averages, each with what
+/// it carries (`T`: its MA type, or nothing), are swapped, so the line is always the
+/// shorter average minus the longer one. The one owner of that rule for the MACD kernels
+/// here and the directive's generic-MA oscillators.
+pub fn oscillator_order<T>(fast: (usize, T), slow: (usize, T)) -> ((usize, T), (usize, T)) {
+    if slow.0 < fast.0 { (slow, fast) } else { (fast, slow) }
+}
+
+/// [`oscillator_order`] of two bare periods.
+fn oscillator_periods(fast: usize, slow: usize) -> (usize, usize) {
+    let ((fast, ()), (slow, ())) = oscillator_order((fast, ()), (slow, ()));
+    (fast, slow)
+}
+
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the
     // line is emitted from its natural start (the slow EMA's first valid row), not
@@ -17,17 +32,20 @@ fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
 
 /// MACD line (DIF).
 pub fn macd(close: &[f64], fast: usize, slow: usize) -> Vec<f64> {
+    let (fast, slow) = oscillator_periods(fast, slow);
     macd_line(close, fast, slow).to_vec()
 }
 
 /// MACD signal line (DEA) — SMA-seeded EMA of the MACD line.
 pub fn macd_signal(close: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
+    let (fast, slow) = oscillator_periods(fast, slow);
     let line = macd_line(close, fast, slow);
     kernels::ema_seeded(line.view(), signal).to_vec()
 }
 
 /// MACD histogram — TA-Lib convention `MACD - signal` (not the stock-pandas `2x`).
 pub fn macd_histogram(close: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
+    let (fast, slow) = oscillator_periods(fast, slow);
     let line = macd_line(close, fast, slow);
     let sig = kernels::ema_seeded(line.view(), signal);
     (&line - &sig).to_vec()
@@ -36,7 +54,7 @@ pub fn macd_histogram(close: &[f64], fast: usize, slow: usize, signal: usize) ->
 /// The fast/slow EMA pair `(pf, ps)` as of the last row after a full MACD-line compute,
 /// or `None` if the slow EMA never seeds (the line is all-NaN → keep the fallback).
 /// Mirrors `kernels::ema_diff_seeded`: each EMA SMA-seeds at its own period-th finite
-/// value, then advances with the fused `(x-prev)·k+prev` step. Requires `fast <= slow`.
+/// value, then advances with the fused `(x-prev)·k+prev` step. Callers pass `fast <= slow`.
 fn macd_emas_final(close: &[f64], fast: usize, slow: usize) -> Option<(f64, f64)> {
     let pf = kernels::sma_seeded_last(close, fast, kernels::ema_step(fast))?;
     let ps = kernels::sma_seeded_last(close, slow, kernels::ema_step(slow))?;
@@ -45,6 +63,7 @@ fn macd_emas_final(close: &[f64], fast: usize, slow: usize) -> Option<(f64, f64)
 
 /// Final MACD-line state `[pf, ps]`, or `None` if unseeded. Pairs with [`macd_resume`].
 pub fn macd_final_state(close: &[f64], fast: usize, slow: usize) -> Option<Vec<f64>> {
+    let (fast, slow) = oscillator_periods(fast, slow);
     let (pf, ps) = macd_emas_final(close, fast, slow)?;
     Some(vec![pf, ps])
 }
@@ -58,6 +77,7 @@ pub fn macd_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
+    let (fast, slow) = oscillator_periods(fast, slow);
     let (kf, ks) = (ema_k(fast), ema_k(slow));
     let n = close.len();
     let (mut pf, mut ps) = (state[0], state[1]);
@@ -80,6 +100,7 @@ pub fn macd_signal_final_state(
     slow: usize,
     signal: usize,
 ) -> Option<Vec<f64>> {
+    let (fast, slow) = oscillator_periods(fast, slow);
     // The line over full history (its NaN warm-up is what the signal SMA-seeds past).
     let line = macd_line(close, fast, slow);
     let line = line.as_slice().expect("macd line is contiguous");
@@ -101,6 +122,7 @@ pub fn macd_signal_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
+    let (fast, slow) = oscillator_periods(fast, slow);
     let (kf, ks, ksig) = (ema_k(fast), ema_k(slow), ema_k(signal));
     let n = close.len();
     let (mut pf, mut ps, mut sig) = (state[0], state[1], state[2]);
@@ -127,6 +149,7 @@ pub fn macd_resume_one(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
+    let (fast, slow) = oscillator_periods(fast, slow);
     if row == 0 || state.len() != 2 || next.len() != 2 || row >= close.len() {
         return None;
     }
@@ -154,6 +177,7 @@ pub fn macd_signal_resume_one(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
+    let (fast, slow) = oscillator_periods(fast, slow);
     if row == 0 || state.len() != 3 || next.len() != 3 || row >= close.len() {
         return None;
     }
