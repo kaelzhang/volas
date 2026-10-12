@@ -28,8 +28,10 @@ it:
 - A **candlestick pattern** (`cdl.<pattern>`) reads whole candles: a bar whose open,
   high, low or close is missing or infinite is a missing candle, and every pattern is
   NaN on the bars whose lookback holds it — its own bars and the bars its body / range
-  averages cover — and exactly what clean data gives once it has left. TA-Lib slides
-  those averages as running totals, so one bad candle changes every later decision.
+  averages cover — and what clean data gives once it has left (bit for bit once the
+  averages' next anchor has passed, see [Exact window sums](#exact-window-sums)). TA-Lib
+  slides those averages as plain running totals, so one bad candle changes every later
+  decision.
 - A **leading run of missing rows** is not data: every indicator treats the series as
   starting after it, so a series with a missing head matches the same series started
   later.

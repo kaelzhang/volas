@@ -1,7 +1,7 @@
 //! Four- and five-bar candlestick patterns.
 
 use super::{
-    candle_average, candle_average_series, color, each_bar, each_bar_avg_n, lowershadow, realbody,
+    candle_average_series, color, each_bar, each_bar_avg_n, lowershadow, realbody,
     realbody_gap_down, realbody_gap_up, uppershadow, BODY_LONG, BODY_SHORT, NEAR,
     SHADOW_VERY_SHORT,
 };
@@ -9,9 +9,9 @@ use super::{
 /// Three-Line Strike (TA-Lib CDL3LINESTRIKE): three same-colour candles in a row, each
 /// opening near the prior body, then a 4th opposite candle that engulfs the move.
 /// `color(3rd)·100`. Lookback 8 (4-bar window + Near).
-pub fn cdl_3linestrike(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_3linestrike(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = NEAR.avg_period + 3;
-    let near = candle_average_series(NEAR, o, h, l, c); // read at i-3 and i-2
+    let near = candle_average_series(NEAR, o, h, l, c, origin); // read at i-3 and i-2
     each_bar(lb, o, h, l, c, |i| {
         let c3_white = c[i - 3] >= o[i - 3];
         let c2_white = c[i - 2] >= o[i - 2];
@@ -56,9 +56,9 @@ pub fn cdl_3linestrike(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 
 /// Breakaway (TA-Lib CDLBREAKAWAY): a long body, a gap, two more in the same direction,
 /// then a 5th opposite candle closing back into the gap. `color(i)·100`. Lookback 14.
-pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_LONG.avg_period + 4;
-    let body_long = candle_average_series(BODY_LONG, o, h, l, c); // read at i-4
+    let body_long = candle_average_series(BODY_LONG, o, h, l, c, origin); // read at i-4
     each_bar(lb, o, h, l, c, |i| {
         let first_white = c[i - 4] >= o[i - 4];
         let same_direction = (c[i - 3] >= o[i - 3]) == first_white
@@ -97,8 +97,9 @@ pub fn cdl_breakaway(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// Ladder Bottom (TA-Lib CDLLADDERBOTTOM): three falling black candles, a 4th black with
 /// an upper shadow, then a white candle closing above the 4th's high — bullish `100`.
 /// Lookback 14.
-pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period + 4;
+    let shadow_very_short = candle_average_series(SHADOW_VERY_SHORT, o, h, l, c, origin);
     each_bar(lb, o, h, l, c, |i| {
         if color(o, c, i - 4) < 0.0
             && color(o, c, i - 3) < 0.0
@@ -108,7 +109,7 @@ pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> 
             && c[i - 4] > c[i - 3]
             && c[i - 3] > c[i - 2]
             && color(o, c, i - 1) < 0.0
-            && uppershadow(o, h, c, i - 1) > candle_average(SHADOW_VERY_SHORT, o, h, l, c, i - 1)
+            && uppershadow(o, h, c, i - 1) > shadow_very_short[i - 1]
             && color(o, c, i) > 0.0
             && o[i] > o[i - 1]
             && c[i] > h[i - 1]
@@ -123,9 +124,9 @@ pub fn cdl_ladderbottom(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> 
 /// Concealing Baby Swallow (TA-Lib CDLCONCEALBABYSWALL): two black marubozu, a 3rd black
 /// gapping down with an upper shadow into the 2nd body, then a 4th black engulfing the
 /// 3rd including its shadows — bullish `100`. Lookback 13.
-pub fn cdl_concealbabyswall(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_concealbabyswall(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period + 3;
-    each_bar_avg_n::<1, 4>([SHADOW_VERY_SHORT], lb, o, h, l, c, |i, hist| {
+    each_bar_avg_n::<1, 4>([SHADOW_VERY_SHORT], lb, o, h, l, c, origin, |i, hist| {
         // SHADOW_VERY_SHORT average at bar `i-lag`.
         let marubozu = |bar: usize, lag: usize| {
             uppershadow(o, h, c, bar) < hist[lag][0] && lowershadow(o, l, c, bar) < hist[lag][0]
@@ -152,9 +153,9 @@ pub fn cdl_concealbabyswall(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f
 /// Mat Hold (TA-Lib CDLMATHOLD): a long white, three small holding candles (penetrating
 /// the 1st body by less than `penetration`, default 0.5), then a white breakout closing
 /// above the reaction highs — bullish continuation `100`. Lookback 14.
-pub fn cdl_mathold(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: f64) -> Vec<f64> {
+pub fn cdl_mathold(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: f64, origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 4;
-    each_bar_avg_n::<2, 5>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, hist| {
+    each_bar_avg_n::<2, 5>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, origin, |i, hist| {
         let floor = c[i - 4] - realbody(o, c, i - 4) * penetration;
         if realbody(o, c, i - 4) > hist[4][0] // BODY_LONG at i-4
             && realbody(o, c, i - 3) < hist[3][1] // BODY_SHORT at i-3
@@ -183,9 +184,9 @@ pub fn cdl_mathold(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: f64)
 /// Rising/Falling Three Methods (TA-Lib CDLRISEFALL3METHODS): a long body, three small
 /// counter-trend bodies holding within its range, then a long body resuming the trend.
 /// `color(1st)·100`. Lookback 14. (The `*color` multiplier handles both directions.)
-pub fn cdl_risefall3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_risefall3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 4;
-    each_bar_avg_n::<2, 5>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, hist| {
+    each_bar_avg_n::<2, 5>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, origin, |i, hist| {
         let dir = color(o, c, i - 4);
         let within = |k: usize| o[k].min(c[k]) < h[i - 4] && o[k].max(c[k]) > l[i - 4];
         if realbody(o, c, i - 4) > hist[4][0] // BODY_LONG at i-4
@@ -215,7 +216,7 @@ pub fn cdl_risefall3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f
 /// Upside/Downside Gap Three Methods (TA-Lib CDLXSIDEGAP3METHODS): two same-colour bodies
 /// with a gap, then an opposite candle filling the gap (opening in the 2nd body, closing
 /// in the 1st). `color(1st)·100`. Lookback 2.
-pub fn cdl_xsidegap3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_xsidegap3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64], _origin: usize) -> Vec<f64> {
     each_bar(2, o, h, l, c, |i| {
         let up = color(o, c, i - 2) > 0.0 && realbody_gap_up(o, c, i - 1, i - 2);
         let down = color(o, c, i - 2) < 0.0 && realbody_gap_down(o, c, i - 1, i - 2);
@@ -237,7 +238,7 @@ pub fn cdl_xsidegap3methods(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f
 /// Hikkake (TA-Lib CDLHIKKAKE): an inside bar then a breakout (`±100`), optionally
 /// confirmed within the next 3 bars by a close beyond the inside bar's extreme (`±200`).
 /// Stateful (carries the pending setup across bars). Lookback 5.
-pub fn cdl_hikkake(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_hikkake(o: &[f64], h: &[f64], l: &[f64], c: &[f64], _origin: usize) -> Vec<f64> {
     // Match TA-Lib's minimal state machine: pending setup index + signed result.
     // Confirmation rereads the inside bar's extreme only on the rare confirmation path.
     let (mut pattern_idx, mut pattern_result) = (0usize, 0_i32);
@@ -285,13 +286,13 @@ pub fn cdl_hikkake(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// Modified Hikkake (TA-Lib CDLHIKKAKEMOD): a stricter hikkake — two nested inside bars
 /// with the middle bar closing near its extreme — then the breakout (`±100`) and optional
 /// 3-bar confirmation (`±200`). Stateful. Lookback 10.
-pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_hikkakemod(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let n = c.len();
     let start = NEAR.avg_period.max(1) + 5;
     if n <= start {
         return vec![f64::NAN; n];
     }
-    let near = candle_average_series(NEAR, o, h, l, c); // read at i-2
+    let near = candle_average_series(NEAR, o, h, l, c, origin); // read at i-2
     let setup = |i: usize| -> Option<f64> {
         let near = near[i - 2];
         if h[i - 2] < h[i - 3]
@@ -347,11 +348,11 @@ mod tests {
         // Setup detected at bar 5: inside bar at 3-4, then a bullish breakout at 5.
         let h_a = [20.0, 20.0, 20.0, 18.0, 16.0, 15.0];
         let l_a = [5.0, 5.0, 5.0, 8.0, 10.0, 7.0];
-        assert_eq!(cdl_hikkake(&o, &h_a, &l_a, &c)[5], 100.0);
+        assert_eq!(cdl_hikkake(&o, &h_a, &l_a, &c, 0)[5], 100.0);
         // Setup at bar 3, then confirmed at bar 5 -> ±200 and the index resets.
         let c_b = [10.0, 10.0, 10.0, 10.0, 10.0, 20.0];
         let h_b = [20.0, 20.0, 18.0, 16.0, 17.0, 21.0];
         let l_b = [5.0, 5.0, 8.0, 6.0, 9.0, 19.0];
-        assert_eq!(cdl_hikkake(&o, &h_b, &l_b, &c_b)[5], 200.0);
+        assert_eq!(cdl_hikkake(&o, &h_b, &l_b, &c_b, 0)[5], 200.0);
     }
 }

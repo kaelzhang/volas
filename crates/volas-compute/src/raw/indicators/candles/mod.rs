@@ -31,11 +31,13 @@ pub use three_bar::*;
 pub use two_bar::*;
 
 use crate::missing;
+use crate::raw::kernels;
+use ndarray::ArrayView1;
 
 /// An OHLC candle recogniser: `(open, high, low, close) -> signal`.
-type PlainFn = fn(&[f64], &[f64], &[f64], &[f64]) -> Vec<f64>;
+type PlainFn = fn(&[f64], &[f64], &[f64], &[f64], usize) -> Vec<f64>;
 /// An OHLC recogniser that also takes TA-Lib's `penetration` ratio.
-type PenetrationFn = fn(&[f64], &[f64], &[f64], &[f64], f64) -> Vec<f64>;
+type PenetrationFn = fn(&[f64], &[f64], &[f64], &[f64], f64, usize) -> Vec<f64>;
 
 /// A candlestick-pattern recogniser. Most take only `(open, high, low, close)`; a few
 /// also take TA-Lib's `penetration` ratio (with a pattern-specific default).
@@ -273,16 +275,6 @@ fn candle_gap_down(h: &[f64], l: &[f64], i: usize, j: usize) -> bool {
     h[i] < l[j]
 }
 
-/// The setting's range at bar `i`.
-#[inline]
-fn range(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> f64 {
-    match s.range {
-        RangeType::RealBody => realbody(o, c, i),
-        RangeType::HighLow => h[i] - l[i],
-        RangeType::Shadows => uppershadow(o, h, c, i) + lowershadow(o, l, c, i),
-    }
-}
-
 /// The divisor of a setting's average: `2` for the Shadows range (two shadows per bar),
 /// else `1` (TA-Lib's `TA_CANDLERANGETYPE == Shadows ? 2.0 : 1.0`).
 #[inline(always)]
@@ -290,27 +282,8 @@ fn divisor(s: Setting) -> f64 {
     if matches!(s.range, RangeType::Shadows) { 2.0 } else { 1.0 }
 }
 
-/// TA-Lib's `TA_CANDLEAVERAGE` of setting `s` at bar `i`: `factor · (Σ range over the
-/// prior `avg_period` bars `[i − avg_period, i − 1]`, oldest first) / avg_period / div`,
-/// or `factor · range(i) / div` when `avg_period == 0`. The one definition of a candle
-/// average: each value is the sum of its own window's ranges — never a running total
-/// carried across bars — so a missing or infinite bar reaches only the averages whose
-/// window holds it, and every path (a full computation, a recomputed last window, this
-/// lazy per-bar form or [`candle_average_series`]) gives the same bits.
-fn candle_average(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> f64 {
-    let base = if s.avg_period != 0 {
-        let mut sum = 0.0;
-        for j in (i - s.avg_period)..i {
-            sum += range(s, o, h, l, c, j);
-        }
-        sum / s.avg_period as f64
-    } else {
-        range(s, o, h, l, c, i)
-    };
-    s.factor * base / divisor(s)
-}
-
-/// The setting's range at every bar — [`range`], with the range type resolved once.
+/// The setting's range at every bar (TA-Lib `TA_CANDLERANGE`): the real body, the
+/// high − low span, or both shadows, with the range type resolved once.
 fn ranges(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let n = c.len();
     match s.range {
@@ -320,47 +293,31 @@ fn ranges(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     }
 }
 
-/// [`candle_average`] at every bar (NaN before the first full window), bit for bit:
-/// each window's ranges summed oldest first, from `0.0`. Eight consecutive bars' sums
-/// advance together, one window offset at a time — every bar's sum still adds its own
-/// window's ranges in their order, but the eight sums are independent, so they stay in
-/// registers and vectorise.
-fn candle_average_series(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+/// TA-Lib's `TA_CANDLEAVERAGE` of setting `s` at every bar (NaN before the first full
+/// window): `factor · (Σ range over the prior `avg_period` bars [i − avg_period, i − 1])
+/// / avg_period / div`, or `factor · range(i) / div` when `avg_period == 0`. Row 0 is at
+/// absolute position `origin` (the frame's). The one definition of a candle average: the
+/// sum slides like TA-Lib's running total (O(1) per bar), but it is the sliding mean every
+/// moving average uses ([`kernels::sma`]: an exact sum re-anchored at absolute positions,
+/// window-local — a non-finite range reaches only the windows holding it) — so a bad
+/// candle never outlives the windows holding it, and a recomputed window (the live
+/// refresh) gives the full computation's bits. On near-tie bars this follows the exact
+/// arithmetic where TA-Lib's plain running total has drifted.
+fn candle_average_series(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let n = c.len();
-    let div = divisor(s);
-    let p = s.avg_period;
+    // `/ div` (1 or 2, a power of two) is exactly `* (1 / div)`.
+    let inv_div = 1.0 / divisor(s);
     let r = ranges(s, o, h, l, c);
+    let p = s.avg_period;
     if p == 0 {
-        return r.into_iter().map(|x| s.factor * x / div).collect();
+        return r.into_iter().map(|x| s.factor * x * inv_div).collect();
     }
-    let mut out = vec![f64::NAN; n];
-    if p >= n {
-        return out;
-    }
-    let pf = p as f64;
-    // `/ div` (1 or 2, a power of two) is exactly `* (1 / div)`: one division per bar.
-    let inv_div = 1.0 / div;
-    let scale = |sum: f64| s.factor * (sum / pf) * inv_div;
-    // Eight bars' sums live in registers while their windows' ranges are added in
-    // order; a tail of fewer than eight bars sums one window at a time.
-    const LANES: usize = 8;
-    let mut i = p;
-    while i + LANES <= n {
-        let mut acc = [0.0f64; LANES];
-        for k in i - p..i {
-            let w: &[f64; LANES] = r[k..k + LANES].try_into().expect("in range");
-            for lane in 0..LANES {
-                acc[lane] += w[lane];
-            }
-        }
-        for lane in 0..LANES {
-            out[i + lane] = scale(acc[lane]);
-        }
-        i += LANES;
-    }
-    for k in i..n {
-        out[k] = scale(r[k - p..k].iter().fold(0.0, |a, &x| a + x));
-    }
+    // The average at bar `i` is the mean range of the window ending at bar `i − 1`: the
+    // sliding mean every moving average uses (`kernels::sma`), one row behind.
+    let mean = kernels::sma(ArrayView1::from(&r), p, origin);
+    let mut out = Vec::with_capacity(n);
+    out.push(f64::NAN);
+    out.extend(mean.iter().take(n.saturating_sub(1)).map(|m| s.factor * m * inv_div));
     out
 }
 
@@ -398,8 +355,9 @@ fn each_bar(
 }
 
 /// [`each_bar`] for a pattern that reads the averages of `settings` at the bar itself:
-/// `f(i, avgs)`, `avgs[k]` = [`candle_average`] of `settings[k]` at `i`.
+/// `f(i, avgs)`, `avgs[k]` = the average of `settings[k]` at `i` ([`candle_average_series`]).
 #[inline]
+#[allow(clippy::too_many_arguments)] // the four prices, their origin, the settings, the reach, the test
 fn each_bar_avg<const K: usize>(
     settings: [Setting; K],
     lookback: usize,
@@ -407,15 +365,17 @@ fn each_bar_avg<const K: usize>(
     h: &[f64],
     l: &[f64],
     c: &[f64],
+    origin: usize,
     f: impl Fn(usize, &[f64; K]) -> f64,
 ) -> Vec<f64> {
-    let avg = settings.map(|s| candle_average_series(s, o, h, l, c));
+    let avg = settings.map(|s| candle_average_series(s, o, h, l, c, origin));
     each_bar(lookback, o, h, l, c, |i| f(i, &std::array::from_fn(|k| avg[k][i])))
 }
 
 /// [`each_bar_avg`] for a two-bar pattern: `f(i, cur, prev)` with the averages at `i`
 /// and at `i − 1`.
 #[inline]
+#[allow(clippy::too_many_arguments)] // the four prices, their origin, the settings, the reach, the test
 fn each_bar_avg2<const K: usize>(
     settings: [Setting; K],
     lookback: usize,
@@ -423,9 +383,10 @@ fn each_bar_avg2<const K: usize>(
     h: &[f64],
     l: &[f64],
     c: &[f64],
+    origin: usize,
     f: impl Fn(usize, &[f64; K], &[f64; K]) -> f64,
 ) -> Vec<f64> {
-    let avg = settings.map(|s| candle_average_series(s, o, h, l, c));
+    let avg = settings.map(|s| candle_average_series(s, o, h, l, c, origin));
     each_bar(lookback, o, h, l, c, |i| {
         f(i, &std::array::from_fn(|k| avg[k][i]), &std::array::from_fn(|k| avg[k][i - 1]))
     })
@@ -434,6 +395,7 @@ fn each_bar_avg2<const K: usize>(
 /// [`each_bar_avg`] for a pattern that reads averages up to `L − 1` bars back:
 /// `f(i, hist)`, `hist[lag][k]` = the average of `settings[k]` at `i − lag`.
 #[inline]
+#[allow(clippy::too_many_arguments)] // the four prices, their origin, the settings, the reach, the test
 fn each_bar_avg_n<const K: usize, const L: usize>(
     settings: [Setting; K],
     lookback: usize,
@@ -441,9 +403,10 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
     h: &[f64],
     l: &[f64],
     c: &[f64],
+    origin: usize,
     f: impl Fn(usize, &[[f64; K]; L]) -> f64,
 ) -> Vec<f64> {
-    let avg = settings.map(|s| candle_average_series(s, o, h, l, c));
+    let avg = settings.map(|s| candle_average_series(s, o, h, l, c, origin));
     each_bar(lookback, o, h, l, c, |i| {
         f(i, &std::array::from_fn(|lag| std::array::from_fn(|k| avg[k][i - lag])))
     })
@@ -480,20 +443,37 @@ mod tests {
         v.iter().map(|x| if x.is_nan() { u64::MAX } else { x.to_bits() }).collect()
     }
 
-    /// Every setting's average series is the per-bar average bit for bit — Shadows
-    /// (÷2), `avg_period == 0` (the bar's own range), a short series — at every phase of
-    /// the four-bar lanes.
+    /// Every setting's average is TA-Lib's: the mean range over the prior `avg_period`
+    /// bars (to the exact sum's last bit), ÷2 for Shadows, the bar's own range for
+    /// `avg_period == 0`; NaN before the first full window, nothing on a short series.
+    /// And a recomputed tail (the live refresh: a slice keeps its rows' absolute
+    /// positions) gives the full series' bits once its first anchor has passed.
     #[test]
-    fn the_average_series_is_the_per_bar_average() {
-        for n in [3, 10, 11, 14, 23] {
+    fn the_average_series_is_the_window_mean_and_a_tail_recompute_matches_it() {
+        for n in [3, 10, 11, 14, 60] {
             let [o, h, l, c] = ohlc(n);
             for s in [BODY_LONG, BODY_DOJI, SHADOW_SHORT, SHADOW_LONG, NEAR, BODY_VERY_LONG] {
-                let series = candle_average_series(s, &o, &h, &l, &c);
+                let r = ranges(s, &o, &h, &l, &c);
+                let series = candle_average_series(s, &o, &h, &l, &c, 0);
                 for (i, v) in series.iter().enumerate() {
                     if i < s.avg_period {
                         assert!(v.is_nan());
+                        continue;
+                    }
+                    let base = if s.avg_period == 0 {
+                        r[i]
                     } else {
-                        assert_eq!(v.to_bits(), candle_average(s, &o, &h, &l, &c, i).to_bits(), "n {n} bar {i}");
+                        r[i - s.avg_period..i].iter().sum::<f64>() / s.avg_period as f64
+                    };
+                    let want = s.factor * base / divisor(s);
+                    assert!((v - want).abs() <= 1e-12 * want.abs(), "n {n} bar {i}: {v} vs {want}");
+                }
+                if n == 60 {
+                    for start in [7, 13, 20] {
+                        let tail = |x: &[f64]| x[start..].to_vec();
+                        let part = candle_average_series(s, &tail(&o), &tail(&h), &tail(&l), &tail(&c), start);
+                        let settled = start + 2 * s.avg_period.max(1) + 1;
+                        assert_eq!(bits(&part[settled - start..]), bits(&series[settled..]), "start {start}");
                     }
                 }
             }
@@ -501,16 +481,17 @@ mod tests {
     }
 
     /// A missing or infinite candle makes a pattern NaN on exactly the bars whose reach
-    /// holds it, and every other bar is what clean data gives — an average never carries
-    /// it further. Every builder shape.
+    /// holds it, the bars before are untouched, and once it has left (and the sums'
+    /// next anchor has passed) every bar is what clean data gives — an average never
+    /// carries it further. Every builder shape.
     #[test]
     fn a_missing_candle_reaches_only_the_bars_that_read_it() {
-        let [o, h, l, c] = ohlc(60);
+        let [o, h, l, c] = ohlc(80);
         let run = |o: &[f64], h: &[f64], l: &[f64], c: &[f64]| {
             [
-                each_bar_avg([BODY_DOJI], 10, o, h, l, c, |i, a| realbody(o, c, i) - a[0]),
-                each_bar_avg2([BODY_LONG, SHADOW_SHORT], 11, o, h, l, c, |_, a, b| a[0] + b[1]),
-                each_bar_avg_n::<2, 3>([NEAR, SHADOW_LONG], 12, o, h, l, c, |_, x| x[2][0] + x[1][1]),
+                each_bar_avg([BODY_DOJI], 10, o, h, l, c, 0, |i, a| realbody(o, c, i) - a[0]),
+                each_bar_avg2([BODY_LONG, SHADOW_SHORT], 11, o, h, l, c, 0, |_, a, b| a[0] + b[1]),
+                each_bar_avg_n::<2, 3>([NEAR, SHADOW_LONG], 12, o, h, l, c, 0, |_, x| x[2][0] + x[1][1]),
                 each_bar(5, o, h, l, c, |i| c[i] - o[i - 5]),
             ]
         };
@@ -521,10 +502,10 @@ mod tests {
                 x[col][30] = bad;
                 let got = run(&x[0], &x[1], &x[2], &x[3]);
                 for ((g, cl), lb) in got.iter().zip(&clean).zip([10, 11, 12, 5]) {
-                    for i in 0..60 {
+                    for i in 0..80 {
                         if (30..=30 + lb).contains(&i) {
                             assert!(g[i].is_nan(), "bar {i} reads the bad candle");
-                        } else {
+                        } else if i < 30 || i > 30 + lb + 20 {
                             assert_eq!(bits(&g[i..=i]), bits(&cl[i..=i]), "bar {i}");
                         }
                     }

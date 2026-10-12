@@ -84,6 +84,13 @@ window's sum exact (see [Exact window sums](indicator-inputs.md#exact-window-sum
 so on such data its values are the exact ones and TA-Lib's are not; on ordinary data the
 two agree to the last few bits.
 
+The candlestick patterns' body / range averages slide the same exact sum. A pattern is a
+threshold test (`body <= 0.1 · average range` for a doji), so on a bar whose two sides
+are within a rounding error of each other TA-Lib's drifted running total and volas's exact
+sum can decide differently. On prices quantised to a 0.1 tick this shows after about ten
+thousand bars (a few bars per pattern in twenty thousand); checked against rational
+arithmetic on the same float inputs, volas's decision is the exact one.
+
 See also:
 
 - [TA-Lib example script](https://github.com/kaelzhang/volas/blob/main/examples/04_talib_migration.py)

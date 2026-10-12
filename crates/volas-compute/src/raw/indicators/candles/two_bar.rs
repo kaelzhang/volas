@@ -35,7 +35,7 @@ fn kicking_gap(o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> bool {
 /// Engulfing (TA-Lib CDLENGULFING): the 2nd real body engulfs the 1st of the opposite
 /// colour. `color(i)·100` for a strict engulf, `color(i)·80` when a boundary just
 /// touches, else 0. Lookback 2.
-pub fn cdl_engulfing(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_engulfing(o: &[f64], h: &[f64], l: &[f64], c: &[f64], _origin: usize) -> Vec<f64> {
     // A pure two-bar geometry check with TA-Lib's white/black branches explicit.
     each_bar(2, o, h, l, c, |i| {
         let white = c[i] >= o[i];
@@ -82,9 +82,9 @@ fn harami_strength(o: &[f64], c: &[f64], i: usize) -> f64 {
 /// Harami (TA-Lib CDLHARAMI): a long body followed by a short body contained within it.
 /// `-color(prev)·{100 strict | 80 touching}` (reversal against the 1st bar's colour) or
 /// 0. Lookback 11.
-pub fn cdl_harami(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_harami(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 1;
-    each_bar_avg2([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, cur, prev| {
+    each_bar_avg2([BODY_LONG, BODY_SHORT], lb, o, h, l, c, origin, |i, cur, prev| {
         if realbody(o, c, i - 1) > prev[0] && realbody(o, c, i) <= cur[1] {
             -color(o, c, i - 1) * harami_strength(o, c, i)
         } else {
@@ -94,9 +94,9 @@ pub fn cdl_harami(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 }
 
 /// Harami Cross (TA-Lib CDLHARAMICROSS): a harami whose 2nd body is a doji. Lookback 11.
-pub fn cdl_haramicross(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_haramicross(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_DOJI.avg_period.max(BODY_LONG.avg_period) + 1;
-    each_bar_avg2([BODY_LONG, BODY_DOJI], lb, o, h, l, c, |i, cur, prev| {
+    each_bar_avg2([BODY_LONG, BODY_DOJI], lb, o, h, l, c, origin, |i, cur, prev| {
         if realbody(o, c, i - 1) > prev[0] && realbody(o, c, i) <= cur[1] {
             -color(o, c, i - 1) * harami_strength(o, c, i)
         } else {
@@ -108,9 +108,9 @@ pub fn cdl_haramicross(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// Piercing (TA-Lib CDLPIERCING): a long black candle then a long white candle that
 /// opens below the prior low and closes back above the prior body's midpoint — bullish
 /// `100`. Lookback 11.
-pub fn cdl_piercing(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_piercing(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_LONG.avg_period + 1;
-    let body_long = candle_average_series(BODY_LONG, o, h, l, c); // read at i-1 and i
+    let body_long = candle_average_series(BODY_LONG, o, h, l, c, origin); // read at i-1 and i
     each_bar(lb, o, h, l, c, |i| {
         let prev_body = realbody(o, c, i - 1);
         if c[i - 1] < o[i - 1]
@@ -137,9 +137,10 @@ pub fn cdl_darkcloudcover(
     l: &[f64],
     c: &[f64],
     penetration: f64,
+    origin: usize,
 ) -> Vec<f64> {
     let lb = BODY_LONG.avg_period + 1;
-    let body_long = candle_average_series(BODY_LONG, o, h, l, c); // read at i-1
+    let body_long = candle_average_series(BODY_LONG, o, h, l, c, origin); // read at i-1
     each_bar(lb, o, h, l, c, |i| {
         let prev_body = realbody(o, c, i - 1);
         if c[i - 1] >= o[i - 1]
@@ -158,9 +159,9 @@ pub fn cdl_darkcloudcover(
 
 /// Doji Star (TA-Lib CDLDOJISTAR): a long body then a doji gapping in the body's
 /// direction. `-color(prev)·100` (potential reversal) or 0. Lookback 11.
-pub fn cdl_dojistar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_dojistar(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_DOJI.avg_period.max(BODY_LONG.avg_period) + 1;
-    each_bar_avg2([BODY_LONG, BODY_DOJI], lb, o, h, l, c, |i, cur, prev| {
+    each_bar_avg2([BODY_LONG, BODY_DOJI], lb, o, h, l, c, origin, |i, cur, prev| {
         let star = (color(o, c, i - 1) > 0.0 && realbody_gap_up(o, c, i, i - 1))
             || (color(o, c, i - 1) < 0.0 && realbody_gap_down(o, c, i, i - 1));
         if realbody(o, c, i - 1) > prev[0] && realbody(o, c, i) <= cur[1] && star {
@@ -173,9 +174,9 @@ pub fn cdl_dojistar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 
 /// Homing Pigeon (TA-Lib CDLHOMINGPIGEON): two black candles, the 2nd short body inside
 /// the 1st long body — bullish `100`. Lookback 11.
-pub fn cdl_homingpigeon(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_homingpigeon(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 1;
-    each_bar_avg2([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, cur, prev| {
+    each_bar_avg2([BODY_LONG, BODY_SHORT], lb, o, h, l, c, origin, |i, cur, prev| {
         if color(o, c, i - 1) < 0.0
             && color(o, c, i) < 0.0
             && realbody(o, c, i - 1) > prev[0]
@@ -192,9 +193,9 @@ pub fn cdl_homingpigeon(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> 
 
 /// Matching Low (TA-Lib CDLMATCHINGLOW): two black candles with equal closes — bullish
 /// `100`. Lookback 6 (Equal average).
-pub fn cdl_matchinglow(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_matchinglow(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = EQUAL.avg_period + 1;
-    each_bar_avg2([EQUAL], lb, o, h, l, c, |i, _cur, prev| {
+    each_bar_avg2([EQUAL], lb, o, h, l, c, origin, |i, _cur, prev| {
         let eq = prev[0];
         if color(o, c, i - 1) < 0.0
             && color(o, c, i) < 0.0
@@ -210,11 +211,11 @@ pub fn cdl_matchinglow(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 
 /// In-Neck (TA-Lib CDLINNECK): a long black candle then a white candle closing just into
 /// the prior body (≈ prior close) — bearish continuation `-100`. Lookback 11.
-pub fn cdl_inneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_inneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = EQUAL.avg_period.max(BODY_LONG.avg_period) + 1;
     // In-Neck reads both BodyLong and Equal at i-1 only.
-    let body_long = candle_average_series(BODY_LONG, o, h, l, c);
-    let equal = candle_average_series(EQUAL, o, h, l, c);
+    let body_long = candle_average_series(BODY_LONG, o, h, l, c, origin);
+    let equal = candle_average_series(EQUAL, o, h, l, c, origin);
     each_bar(lb, o, h, l, c, |i| {
         if c[i - 1] < o[i - 1]
             && realbody(o, c, i - 1) > body_long[i - 1]
@@ -232,9 +233,9 @@ pub fn cdl_inneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 
 /// On-Neck (TA-Lib CDLONNECK): a long black candle then a white candle closing ≈ the
 /// prior low — bearish continuation `-100`. Lookback 11.
-pub fn cdl_onneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_onneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = EQUAL.avg_period.max(BODY_LONG.avg_period) + 1;
-    each_bar_avg2([BODY_LONG, EQUAL], lb, o, h, l, c, |i, _cur, prev| {
+    each_bar_avg2([BODY_LONG, EQUAL], lb, o, h, l, c, origin, |i, _cur, prev| {
         let eq = prev[1];
         if color(o, c, i - 1) < 0.0
             && realbody(o, c, i - 1) > prev[0]
@@ -252,9 +253,9 @@ pub fn cdl_onneck(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 
 /// Thrusting (TA-Lib CDLTHRUSTING): a long black candle then a white candle closing into
 /// the prior body but below its midpoint — bearish continuation `-100`. Lookback 11.
-pub fn cdl_thrusting(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_thrusting(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = EQUAL.avg_period.max(BODY_LONG.avg_period) + 1;
-    each_bar_avg2([BODY_LONG, EQUAL], lb, o, h, l, c, |i, _cur, prev| {
+    each_bar_avg2([BODY_LONG, EQUAL], lb, o, h, l, c, origin, |i, _cur, prev| {
         if color(o, c, i - 1) < 0.0
             && realbody(o, c, i - 1) > prev[0]
             && color(o, c, i) > 0.0
@@ -271,7 +272,7 @@ pub fn cdl_thrusting(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 
 /// Kicking (TA-Lib CDLKICKING): two opposite-colour marubozu separated by a gap in the
 /// 2nd's direction. `color(i)·100`. Lookback 11.
-pub fn cdl_kicking(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_kicking(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period.max(BODY_LONG.avg_period) + 1;
     each_bar_avg2(
         [BODY_LONG, SHADOW_VERY_SHORT],
@@ -279,7 +280,7 @@ pub fn cdl_kicking(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
         o,
         h,
         l,
-        c,
+        c, origin,
         |i, cur, prev| {
             if color(o, c, i - 1) == -color(o, c, i)
                 && is_marubozu(o, h, l, c, i - 1, prev[0], prev[1])
@@ -296,7 +297,7 @@ pub fn cdl_kicking(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 
 /// Kicking-by-Length (TA-Lib CDLKICKINGBYLENGTH): a kicking whose signal takes the colour
 /// of the *longer* marubozu. `color(longer)·100`. Lookback 11.
-pub fn cdl_kickingbylength(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_kickingbylength(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period.max(BODY_LONG.avg_period) + 1;
     each_bar_avg2(
         [BODY_LONG, SHADOW_VERY_SHORT],
@@ -304,7 +305,7 @@ pub fn cdl_kickingbylength(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f6
         o,
         h,
         l,
-        c,
+        c, origin,
         |i, cur, prev| {
             if color(o, c, i - 1) == -color(o, c, i)
                 && is_marubozu(o, h, l, c, i - 1, prev[0], prev[1])
@@ -326,7 +327,7 @@ pub fn cdl_kickingbylength(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f6
 
 /// Separating Lines (TA-Lib CDLSEPARATINGLINES): opposite-colour candles sharing an open,
 /// the 2nd a belt-hold long body — continuation `color(i)·100`. Lookback 11.
-pub fn cdl_separatinglines(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_separatinglines(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT
         .avg_period
         .max(BODY_LONG.avg_period)
@@ -338,7 +339,7 @@ pub fn cdl_separatinglines(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f6
         o,
         h,
         l,
-        c,
+        c, origin,
         |i, cur, prev| {
             let eq = prev[2];
             let vs = cur[1];
@@ -360,9 +361,9 @@ pub fn cdl_separatinglines(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f6
 
 /// Counterattack (TA-Lib CDLCOUNTERATTACK): two long opposite-colour candles with equal
 /// closes. `color(i)·100`. Lookback 11.
-pub fn cdl_counterattack(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
+pub fn cdl_counterattack(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = EQUAL.avg_period.max(BODY_LONG.avg_period) + 1;
-    each_bar_avg2([BODY_LONG, EQUAL], lb, o, h, l, c, |i, cur, prev| {
+    each_bar_avg2([BODY_LONG, EQUAL], lb, o, h, l, c, origin, |i, cur, prev| {
         let eq = prev[1];
         if color(o, c, i - 1) == -color(o, c, i)
             && realbody(o, c, i - 1) > prev[0]
