@@ -4,18 +4,29 @@
 use ndarray::Array1;
 
 use super::av;
-use crate::raw::kernels;
+use super::oscillators::rsv_value;
+use crate::missing;
+use crate::raw::kernels::{self, canonical_zero};
 
+/// KDJ's RSV: [`rsv_value`] over each `period_rsv`-bar window, and — before the first
+/// full window — over the bars available so far (the 通达信 convention for KDJ, a
+/// China-origin indicator: `LLV` / `HHV` of fewer bars than the period reduce what there
+/// is). So %K is seeded from real RSVs, never from a warm-up placeholder.
 fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Array1<f64> {
     let llv = kernels::rolling_min(av(low), period_rsv);
     let hhv = kernels::rolling_max(av(high), period_rsv);
     let n = close.len();
-    let mut rsv = Array1::from_elem(n, 0.0);
+    let mut rsv = Array1::from_elem(n, f64::NAN);
+    let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
     for i in 0..n {
-        let denom = hhv[i] - llv[i];
-        if denom.abs() > 1e-10 {
-            rsv[i] = (close[i] - llv[i]) / denom * 100.0;
-        }
+        rsv[i] = if i + 1 < period_rsv {
+            // a partial window: the bars `[0, i]` (once one is missing, it stays missing)
+            hh = if missing::any_of(&[hh, high[i]]) { f64::NAN } else { hh.max(high[i]) };
+            ll = if missing::any_of(&[ll, low[i]]) { f64::NAN } else { ll.min(low[i]) };
+            rsv_value(close[i], canonical_zero(hh), canonical_zero(ll))
+        } else {
+            rsv_value(close[i], hhv[i], llv[i])
+        };
     }
     rsv
 }

@@ -1,5 +1,6 @@
 use crate::accum::{Anchors, Csum};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
+use crate::missing;
 
 // ---------------------------------------------------------------------------
 // Math operators — rolling reductions over a fixed window
@@ -66,12 +67,21 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64
     (out, finite && total.value().is_finite())
 }
 
+/// A resumed position row: the tracker's absolute position `at`, or NaN while the
+/// window `data[trailing..=today]` holds a missing value (the finite-window rule, as
+/// [`missing::blank_windows`] applies it to the full computation).
+#[inline]
+fn position(data: &[f64], trailing: usize, today: usize, at: usize) -> f64 {
+    if missing::holds_missing(&data[trailing..=today]) { f64::NAN } else { at as f64 }
+}
+
 /// Absolute index (as a float) of the highest value in each trailing `period`-bar
 /// window (TA-Lib MAXINDEX). Tie-breaking mirrors TA-Lib's incremental tracker: the
 /// earliest index when the running max is rebuilt after the old one leaves (strict
 /// `>`), the latest when a fresh bar matches the current max (`>=`). Row 0 is at
 /// absolute position `origin` (the frame's), so the positions are the series' own —
-/// the same on a slice or a bounded frame as in the full history. Lookback `period-1`.
+/// the same on a slice or a bounded frame as in the full history. A window holding a
+/// missing value is NaN. Lookback `period-1`.
 pub fn maxindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
@@ -108,12 +118,14 @@ pub fn maxindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
         out[today] = (hi_idx + origin) as f64;
         trailing += 1;
     }
+    missing::blank_windows(&mut out, data, period);
     out
 }
 
 /// Absolute index (as a float) of the lowest value in each trailing `period`-bar
 /// window (TA-Lib MININDEX). Mirror of [`maxindex`] (strict `<` on rebuild, `<=` on
-/// a fresh matching bar). Row 0 is at absolute position `origin`. Lookback `period-1`.
+/// a fresh matching bar). Row 0 is at absolute position `origin`. A window holding a
+/// missing value is NaN. Lookback `period-1`.
 pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
@@ -149,6 +161,7 @@ pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
         out[today] = (lo_idx + origin) as f64;
         trailing += 1;
     }
+    missing::blank_windows(&mut out, data, period);
     out
 }
 
@@ -246,7 +259,7 @@ pub fn maxindex_resume(
             hi_idx = today;
             hi = tmp;
         }
-        out.push((hi_idx + origin) as f64);
+        out.push(position(data, trailing, today, hi_idx + origin));
     }
     Some((out, vec![(hi_idx + origin) as f64, hi]))
 }
@@ -323,7 +336,7 @@ pub fn minindex_resume(
             lo_idx = today;
             lo = tmp;
         }
-        out.push((lo_idx + origin) as f64);
+        out.push(position(data, trailing, today, lo_idx + origin));
     }
     Some((out, vec![(lo_idx + origin) as f64, lo]))
 }

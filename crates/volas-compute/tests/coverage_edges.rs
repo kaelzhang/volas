@@ -106,16 +106,16 @@ fn short_hilbert_and_sar_bootstrap_edges_are_covered() {
 fn short_candlestick_patterns_cover_output_guards() {
     let (open, high, low, close) = ohlc(1);
     for out in [
-        ind::cdl_engulfing(&open, &high, &low, &close),
-        ind::cdl_piercing(&open, &high, &low, &close),
-        ind::cdl_darkcloudcover(&open, &high, &low, &close, 0.5),
-        ind::cdl_inneck(&open, &high, &low, &close),
-        ind::cdl_hangingman(&open, &high, &low, &close),
-        ind::cdl_2crows(&open, &high, &low, &close),
-        ind::cdl_stalledpattern(&open, &high, &low, &close),
-        ind::cdl_tristar(&open, &high, &low, &close),
-        ind::cdl_tasukigap(&open, &high, &low, &close),
-        ind::cdl_3linestrike(&open, &high, &low, &close),
+        ind::cdl_engulfing(&open, &high, &low, &close, 0),
+        ind::cdl_piercing(&open, &high, &low, &close, 0),
+        ind::cdl_darkcloudcover(&open, &high, &low, &close, 0.5, 0),
+        ind::cdl_inneck(&open, &high, &low, &close, 0),
+        ind::cdl_hangingman(&open, &high, &low, &close, 0),
+        ind::cdl_2crows(&open, &high, &low, &close, 0),
+        ind::cdl_stalledpattern(&open, &high, &low, &close, 0),
+        ind::cdl_tristar(&open, &high, &low, &close, 0),
+        ind::cdl_tasukigap(&open, &high, &low, &close, 0),
+        ind::cdl_3linestrike(&open, &high, &low, &close, 0),
     ] {
         assert_eq!(out.len(), 1);
         assert!(out[0].is_nan());
@@ -128,7 +128,7 @@ fn hikkake_warmup_confirmation_resets_pending_setup() {
     let high = vec![10.0, 8.0, 7.0, 9.0, 9.0, 9.0];
     let low = vec![0.0, 2.0, 1.0, 1.0, 1.0, 1.0];
     let close = vec![5.0, 5.0, 5.0, 9.0, 5.0, 5.0];
-    let out = ind::cdl_hikkake(&open, &high, &low, &close);
+    let out = ind::cdl_hikkake(&open, &high, &low, &close, 0);
     assert!(out[..5].iter().all(|v| v.is_nan()));
     assert_eq!(out[5], 0.0);
 }

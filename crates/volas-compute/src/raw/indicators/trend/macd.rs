@@ -3,7 +3,7 @@
 use ndarray::Array1;
 
 use crate::raw::indicators::av;
-use crate::raw::indicators::trend::ma::{ema_k, ema_seed_idx};
+use crate::raw::indicators::trend::ma::ema_k;
 use crate::raw::kernels;
 
 fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
@@ -38,17 +38,8 @@ pub fn macd_histogram(close: &[f64], fast: usize, slow: usize, signal: usize) ->
 /// Mirrors `kernels::ema_diff_seeded`: each EMA SMA-seeds at its own period-th finite
 /// value, then advances with the fused `(x-prev)·k+prev` step. Requires `fast <= slow`.
 fn macd_emas_final(close: &[f64], fast: usize, slow: usize) -> Option<(f64, f64)> {
-    let (kf, ks) = (ema_k(fast), ema_k(slow));
-    let sf = ema_seed_idx(close, fast)?;
-    let ss = ema_seed_idx(close, slow)?;
-    let mut pf = close[sf + 1 - fast..=sf].iter().sum::<f64>() / fast as f64;
-    for &x in &close[sf + 1..] {
-        pf = (x - pf).mul_add(kf, pf);
-    }
-    let mut ps = close[ss + 1 - slow..=ss].iter().sum::<f64>() / slow as f64;
-    for &x in &close[ss + 1..] {
-        ps = (x - ps).mul_add(ks, ps);
-    }
+    let pf = kernels::sma_seeded_last(close, fast, kernels::ema_step(fast))?;
+    let ps = kernels::sma_seeded_last(close, slow, kernels::ema_step(slow))?;
     Some((pf, ps))
 }
 
@@ -93,12 +84,7 @@ pub fn macd_signal_final_state(
     let line = macd_line(close, fast, slow);
     let line = line.as_slice().expect("macd line is contiguous");
     let (pf, ps) = macd_emas_final(close, fast, slow)?;
-    let ksig = ema_k(signal);
-    let si = ema_seed_idx(line, signal)?;
-    let mut sig = line[si + 1 - signal..=si].iter().sum::<f64>() / signal as f64;
-    for &x in &line[si + 1..] {
-        sig = (x - sig).mul_add(ksig, sig);
-    }
+    let sig = kernels::sma_seeded_last(line, signal, kernels::ema_step(signal))?;
     Some(vec![pf, ps, sig])
 }
 

@@ -27,6 +27,8 @@ it is reviewable, and each is exercised for shape/finiteness by ``test_oracle.py
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import pandas as pd
 
@@ -42,7 +44,7 @@ def _sma(x, n: int) -> pd.Series:
 
 
 def _row_deleted(fn, *cols) -> pd.Series:
-    """The recursive missing-row rule (docs/numerics.md "Missing and non-finite inputs"),
+    """The recursive missing-row rule (docs/indicator-inputs.md "Missing and non-finite inputs"),
     applied at the input boundary: delete every row where any input is NaN, run ``fn`` on
     the complete rows, and put NaN back at the deleted positions."""
     arrs = [_s(x).to_numpy() for x in cols]
@@ -50,6 +52,31 @@ def _row_deleted(fn, *cols) -> pd.Series:
     out = np.full(len(keep), np.nan)
     out[keep] = np.asarray(fn(*(a[keep] for a in arrs)), dtype=float)
     return pd.Series(out)
+
+
+_INPUTS = ('o', 'h', 'lo', 'c', 'v')
+
+
+def _recursive(*reads):
+    """The recursive missing-row rule at a whole reference's input boundary: the
+    reference runs on the rows where every input it reads (``reads``, named like its
+    ``o / h / lo / c / v`` parameters) is present, and NaN is put back at the others —
+    the indicator run on the series with those rows deleted."""
+
+    def wrap(fn):
+        @functools.wraps(fn)
+        def ref(o, h, lo, c, v, *args, **kwargs):
+            cols = dict(zip(_INPUTS, (o, h, lo, c, v)))
+            arrs = {k: None if x is None else _s(x).to_numpy() for k, x in cols.items()}
+            keep = np.logical_and.reduce([~np.isnan(arrs[k]) for k in reads])
+            out = np.full(len(keep), np.nan)
+            sub = [None if arrs[k] is None else arrs[k][keep] for k in _INPUTS]
+            out[keep] = np.asarray(fn(*sub, *args, **kwargs), dtype=float)
+            return pd.Series(out)
+
+        return ref
+
+    return wrap
 
 
 def _ema(x, n: int) -> pd.Series:
@@ -108,11 +135,10 @@ def _rsi(x, n: int) -> pd.Series:
 def _true_range(h, lo, c) -> pd.Series:
     h, lo, c = _s(h), _s(lo), _s(c)
     pc = c.shift(1)
-    tr = pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
-    # The first bar has no prior close, so TR is undefined there (TA-Lib TRANGE /
-    # TradingView `ta.tr` default). pandas `.max(axis=1)` skips the NaN, so blank it.
-    tr[pc.isna()] = np.nan
-    return tr
+    # A bar missing its high, low or prior close has no TR (and the first bar has no
+    # prior close — TA-Lib TRANGE / TradingView `ta.tr`): `skipna=False`, as pandas'
+    # default `.max(axis=1)` would step over the missing value.
+    return pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1, skipna=False)
 
 
 def _atr(h, lo, c, n: int) -> pd.Series:
@@ -165,7 +191,11 @@ def bbi(o, h, lo, c, v):
 def psy(o, h, lo, c, v, n=12):
     """PSY 心理线 = 100 * (rising days in last n) / n; rising = close > prev close.
     Source: Eastmoney 心理线 <https://baike.eastmoney.com/item/心理线>."""
-    up = (_s(c).diff() > 0).astype(float)
+    c = _s(c)
+    d = c.diff()
+    up = (d > 0).astype(float)
+    up[d.isna()] = np.nan  # a bar missing its close or prior close has no flag
+    up.iloc[0] = np.nan if np.isnan(c.iloc[0]) else 0.0  # the first bar is not rising
     return up.rolling(n, min_periods=n).sum() / n * 100.0
 
 
@@ -198,6 +228,7 @@ def dpo(o, h, lo, c, v, n=20):
     return c.shift(shift) - _sma(c, n)
 
 
+@_recursive('c', 'v')
 def pvt(o, h, lo, c, v):
     """Price Volume Trend (cumulative): PVT_i = PVT_{i-1} + (C_i-C_{i-1})/C_{i-1} * V_i,
     PVT_0 = 0. Source: StockCharts / Investopedia — Price Volume Trend."""
@@ -206,6 +237,7 @@ def pvt(o, h, lo, c, v):
     return term.cumsum()
 
 
+@_recursive('c', 'v')
 def nvi(o, h, lo, c, v, base=1000.0):
     """Negative Volume Index: starts at base; on a down-volume day NVI *= (1 + ROC),
     else unchanged. Source: StockCharts — Negative Volume Index."""
@@ -217,6 +249,7 @@ def nvi(o, h, lo, c, v, base=1000.0):
     return pd.Series(out)
 
 
+@_recursive('c', 'v')
 def pvi(o, h, lo, c, v, base=1000.0):
     """Positive Volume Index: starts at base; on an up-volume day PVI *= (1 + ROC),
     else unchanged. Source: StockCharts — Positive Volume Index."""
@@ -228,6 +261,7 @@ def pvi(o, h, lo, c, v, base=1000.0):
     return pd.Series(out)
 
 
+@_recursive('h', 'lo')
 def mass_index(o, h, lo, c, v, n=25, ema_n=9):
     """Mass Index = sum_n( EMA9(H-L) / EMA9(EMA9(H-L)) ).
     Source: StockCharts ChartSchool — Mass Index."""
@@ -237,14 +271,16 @@ def mass_index(o, h, lo, c, v, n=25, ema_n=9):
     return (single / double).rolling(n, min_periods=n).sum()
 
 
+@_recursive('c', 'v')
 def efi(o, h, lo, c, v, n=13):
     """Elder Force Index = EMA_n( (C - prev C) * volume ).
     Source: StockCharts / Investopedia — Force Index."""
-    # Recursive: delete incomplete rows BEFORE differencing, so the change is taken
+    # Recursive: incomplete rows are deleted BEFORE differencing, so the change is taken
     # against the last complete close.
-    return _row_deleted(lambda cc, vv: _ema(_s(cc).diff() * _s(vv), n), c, v)
+    return _ema(_s(c).diff() * _s(v), n)
 
 
+@_recursive('c')
 def tsi(o, h, lo, c, v, long=25, short=13):
     """True Strength Index = 100 * EMA_short(EMA_long(m)) / EMA_short(EMA_long(|m|)),
     m = C - prev C. Source: StockCharts ChartSchool — True Strength Index."""
@@ -279,11 +315,14 @@ def chop(o, h, lo, c, v, n=14):
     return 100.0 * np.log10(num / rng) / np.log10(n)
 
 
+@_recursive('c')
 def crsi(o, h, lo, c, v, rsi_len=3, streak_len=2, rank_len=100):
     """Connors RSI = mean( RSI(close, rsi_len), RSI(streak, streak_len),
     PercentRank(1-period ROC, rank_len) ). streak = signed run length of up/down closes;
     PercentRank = % of the last rank_len values strictly below the current one.
-    Source: Connors Research / TradingView — Connors RSI."""
+    Source: Connors Research / TradingView — Connors RSI. Its RSI legs make it recursive,
+    so a row missing its close is skipped by the whole indicator — the PercentRank leg
+    included (it is not evaluated as a separate finite window)."""
     c = _s(c)
     diff = c.diff()
     streak = np.zeros(len(c))
@@ -464,6 +503,7 @@ def ichimoku(o, h, lo, c, v, tenkan=9, kijun=26, senkou_b=52, line='tenkan'):
     return c  # chikou (causal)
 
 
+@_recursive('h', 'lo', 'c')
 def wad(o, h, lo, c, v):
     """WAD Williams Accumulation/Distribution (cumulative): up close += C-min(prevC,L),
     down close += C-max(prevC,H). Source: Larry Williams / Tulip Indicators — Williams A/D."""
@@ -476,6 +516,7 @@ def wad(o, h, lo, c, v):
     return step.cumsum()
 
 
+@_recursive('o', 'h', 'lo', 'c')
 def asi(o, h, lo, c, v, t=3.0):
     """ASI Accumulative Swing Index (Wilder): SI=50*(N/R)*(K/T), N=(C-Cp)+0.5(C-O)+0.25(Cp-Op),
     K=max(|H-Cp|,|L-Cp|), R selected by the largest of |H-Cp|,|L-Cp|,|H-L|; ASI=ΣSI.
@@ -496,6 +537,7 @@ def asi(o, h, lo, c, v, t=3.0):
     return si.cumsum()
 
 
+@_recursive('h', 'lo', 'c')
 def supertrend(o, h, lo, c, v, period=10, mult=3.0, line='line'):
     """Supertrend (TradingView): hl2 ± mult*ATR bands, recursively tightened against the prior
     bar and flipped into a trailing line; trend = +1 (up, lower band) / -1 (down, upper band).
@@ -527,15 +569,20 @@ def supertrend(o, h, lo, c, v, period=10, mult=3.0, line='line'):
 
 def keltner(o, h, lo, c, v, ema_period=20, atr_period=10, mult=2.0, band=None):
     """Keltner Channels (modern): middle = EMA(close, ema_period); bands = middle ± mult*ATR.
-    Source: StockCharts ChartSchool — Keltner Channels."""
-    mid = _ema(c, ema_period)
+    Source: StockCharts ChartSchool — Keltner Channels. The middle line reads the close
+    only; a band reads high, low and close (and skips a row missing any of them)."""
     if band is None:
-        return mid
-    atr = _atr(h, lo, c, atr_period)
+        return _ema(c, ema_period)
+    return _keltner_band(o, h, lo, c, v, ema_period, atr_period, mult, band)
+
+
+@_recursive('h', 'lo', 'c')
+def _keltner_band(o, h, lo, c, v, ema_period, atr_period, mult, band):
     sign = 1.0 if band == 'upper' else -1.0
-    return mid + sign * mult * atr
+    return _ema(c, ema_period) + sign * mult * _atr(h, lo, c, atr_period)
 
 
+@_recursive('h', 'lo', 'c')
 def stoch_momentum(o, h, lo, c, v, k=10, d=3, signal=3, line='smi'):
     """Stochastic Momentum Index (Blau / LazyBear): HH=max(H,k), LL=min(L,k); D=C-(HH+LL)/2;
     Ds=EMA_d(EMA_d(D)), Dhl=EMA_d(EMA_d(HH-LL)); SMI=Ds/(Dhl/2)*100; signal=EMA_signal(SMI).

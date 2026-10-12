@@ -108,42 +108,16 @@ fn resume_of(
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
-            for i in from_row..high.len() {
-                if i == 0 {
-                    out.push(f64::NAN);
-                } else {
-                    let prev_close = close[i - 1];
-                    out.push(
-                        (high[i] - low[i])
-                            .max((high[i] - prev_close).abs())
-                            .max((low[i] - prev_close).abs()),
-                    );
-                }
-            }
+            let out = (from_row..high.len())
+                .map(|i| if i == 0 { f64::NAN } else { ind::tr_at(&high, &low, &close, i) })
+                .collect();
             Some((Column::f64(out), Vec::new()))
         }
         ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => {
+            let kind = ind::Momentum::of(name)?;
             let data = close().ok()?;
             let period = arg_usize(args, 0);
-            let mut out = Vec::with_capacity(data.len().saturating_sub(from_row));
-            for i in from_row..data.len() {
-                if i < period {
-                    out.push(f64::NAN);
-                    continue;
-                }
-                let prior = data[i - period];
-                let value = match name {
-                    "mom" => data[i] - prior,
-                    _ if prior == 0.0 => 0.0,
-                    "roc" => (data[i] / prior - 1.0) * 100.0,
-                    "rocp" => data[i] / prior - 1.0,
-                    "rocr" => data[i] / prior,
-                    "rocr100" => data[i] / prior * 100.0,
-                    _ => unreachable!(), // LCOV_EXCL_LINE
-                };
-                out.push(value);
-            }
+            let out = (from_row..data.len()).map(|i| kind.at(&data, period, i)).collect();
             Some((Column::f64(out), Vec::new()))
         }
 
@@ -214,7 +188,7 @@ fn resume_of(
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let (vals, st) =
-                ind::mass_index_resume(&high, &low, arg_usize(args, 0), from_row, prev_state);
+                ind::mass_index_resume(&high, &low, arg_usize(args, 0), from_row, prev_state)?;
             Some((Column::f64(vals), st))
         }
 

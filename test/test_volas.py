@@ -150,7 +150,7 @@ def test_series_dtype_bool(stock):
 PARITY = [
     'ma:5', 'ma:20', 'ma:10@open',
     'boll', 'boll.upper', 'boll.lower', 'boll.u', 'boll.l', 'bbw',
-    'rsv:9', 'kdj.k', 'kdj.d', 'kdj.j', 'kdj.k:9,3,50', 'kdj.j:9,3,3,50',
+    'rsv:9',
     'bbi',
     'llv:10', 'hhv:10', 'donchian:20', 'donchian.upper:20', 'donchian.lower:20',
     'hv:20,1d,252',
@@ -158,18 +158,55 @@ PARITY = [
     'increase:3@close', 'increase:3,-1@close',
     'ma:2@(boll.upper)',
     'close > open', 'close >= open', 'close < open', 'close == open',
-    'ma:5 > ma:10', 'kdj.j < 0',
+    'ma:5 > ma:10',
     'ma:5 // ma:10', 'ma:5 \\ ma:10', 'ma:5 >< ma:10',
 ]
+# Rows where volas deliberately differs from stock-pandas: stock-pandas writes an RSV of
+# 0 before the first full window, volas leaves the warm-up missing (NaN) — so `rsv` is
+# compared from its first full window on. (KDJ, which stock-pandas seeds with those 0s,
+# is checked against an independent reference below instead.)
+_PARITY_FROM = {'rsv:9': 8}
 
 
 @pytest.mark.parametrize('directive', PARITY)
 def test_parity_with_stock_pandas(stock, spd, directive):
-    expected = np.asarray(spd.exec(directive, create_column=False), dtype=float)
+    start = _PARITY_FROM.get(directive, 0)
+    expected = np.asarray(spd.exec(directive, create_column=False), dtype=float)[start:]
     actual = np.asarray(stock.exec(directive), dtype=float)
-    assert np.allclose(expected, actual, rtol=1e-6, atol=1e-6, equal_nan=True), (
+    assert np.isnan(actual[:start]).all()
+    assert np.allclose(expected, actual[start:], rtol=1e-6, atol=1e-6, equal_nan=True), (
         f'mismatch for {directive!r}'
     )
+
+
+def _kdj_reference(high, low, close, n=9, m1=3, m2=3, init=50.0):
+    """通达信 KDJ: RSV = 100·(C − LLV(L, n))/(HHV(H, n) − LLV(L, n)), where before the first
+    full window LLV / HHV reduce the bars available so far; K = SMA(RSV, m1, 1),
+    D = SMA(K, m2, 1), both seeded with `init`; J = 3K − 2D."""
+    k_prev = d_prev = init
+    out = []
+    for i in range(len(close)):
+        lo_, hi_ = low[max(0, i - n + 1):i + 1].min(), high[max(0, i - n + 1):i + 1].max()
+        rsv = (close[i] - lo_) / (hi_ - lo_) * 100.0 if abs(hi_ - lo_) > 1e-10 else 0.0
+        k_prev = (m1 - 1) / m1 * k_prev + rsv / m1
+        d_prev = (m2 - 1) / m2 * d_prev + k_prev / m2
+        out.append((k_prev, d_prev, 3.0 * k_prev - 2.0 * d_prev))
+    return np.array(out)
+
+
+@pytest.mark.parametrize('directive,line,args', [
+    ('kdj.k', 0, {}), ('kdj.d', 1, {}), ('kdj.j', 2, {}),
+    ('kdj.k:9,3,50', 0, {}), ('kdj.j:9,3,3,50', 2, {}), ('kdj.d:5,4,2,20', 1, dict(n=5, m1=4, m2=2, init=20.0)),
+])
+def test_kdj_follows_the_tdx_convention_from_the_first_bar(stock, directive, line, args):
+    """KDJ's RSV covers the bars available before its first full window (通达信), so %K is
+    seeded from real RSVs from the very first bar — never from a warm-up placeholder."""
+    h, lo, c = (np.asarray(stock[k], dtype=float) for k in ('high', 'low', 'close'))
+    want = _kdj_reference(h, lo, c, **args)[:, line]
+    np.testing.assert_allclose(np.asarray(stock.exec(directive), dtype=float), want, rtol=1e-12, atol=1e-9)
+    # a boolean of it sees the same values
+    got = np.asarray(stock.exec(f'{directive} < 0'), dtype=bool)
+    np.testing.assert_array_equal(got, want < 0)
 
 
 # ---------------------------------------------------------------------------

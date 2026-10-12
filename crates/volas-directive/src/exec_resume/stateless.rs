@@ -3,16 +3,14 @@
 //! and a fixed prior row, so an append computes exactly the new rows.
 
 use crate::exec::col_f64;
+use volas_compute::raw::indicators as ind;
 use volas_core::{Column, DataFrame};
 
-/// Extract the period from a `name:<period>` directive for the momentum / ROC
-/// family. These commands are required (no default), so the form is always explicit.
-fn period_of(directive: &str, name: &str) -> Option<usize> {
-    directive
-        .strip_prefix(name)?
-        .strip_prefix(':')?
-        .parse()
-        .ok()
+/// The momentum / ROC family member and period of a `name:<period>` directive. These
+/// commands are required (no default), so the form is always explicit.
+fn momentum_of(directive: &str) -> Option<(ind::Momentum, usize)> {
+    let (name, period) = directive.split_once(':')?;
+    Some((ind::Momentum::of(name)?, period.parse().ok()?))
 }
 
 /// Parse-free scalar twin of [`execute_resume_default_series`] for the dominant
@@ -65,33 +63,11 @@ pub fn execute_resume_default_series_one(
             let high = col_f64(df, "high").ok()?;
             let low = col_f64(df, "low").ok()?;
             let close = col_f64(df, "close").ok()?;
-            let prev_close = close[row - 1];
-            Some(
-                (high[row] - low[row])
-                    .max((high[row] - prev_close).abs())
-                    .max((low[row] - prev_close).abs()),
-            )
+            Some(ind::tr_at(&high, &low, &close, row))
         }
         _ => {
-            let (kind, period) = ["mom", "roc", "rocp", "rocr", "rocr100"]
-                .into_iter()
-                .find_map(|kind| {
-                    period_of(directive, kind).map(|period| (kind, period))
-                })?;
-            if row < period {
-                return Some(f64::NAN);
-            }
-            let data = col_f64(df, "close").ok()?;
-            let prior = data[row - period];
-            Some(match kind {
-                "mom" => data[row] - prior,
-                _ if prior == 0.0 => 0.0,
-                "roc" => (data[row] / prior - 1.0) * 100.0,
-                "rocp" => data[row] / prior - 1.0,
-                "rocr" => data[row] / prior,
-                "rocr100" => data[row] / prior * 100.0,
-                _ => unreachable!(), // LCOV_EXCL_LINE
-            })
+            let (kind, period) = momentum_of(directive)?;
+            Some(kind.at(&col_f64(df, "close").ok()?, period, row))
         }
     }
 }
@@ -165,46 +141,15 @@ pub fn execute_resume_default_series(
             let high = col_f64(df, "high").ok()?;
             let low = col_f64(df, "low").ok()?;
             let close = col_f64(df, "close").ok()?;
-            let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
-            for i in from_row..high.len() {
-                if i == 0 {
-                    out.push(f64::NAN);
-                } else {
-                    let prev_close = close[i - 1];
-                    out.push(
-                        (high[i] - low[i])
-                            .max((high[i] - prev_close).abs())
-                            .max((low[i] - prev_close).abs()),
-                    );
-                }
-            }
+            let out = (from_row..high.len())
+                .map(|i| if i == 0 { f64::NAN } else { ind::tr_at(&high, &low, &close, i) })
+                .collect();
             Some((Column::f64(out), Vec::new()))
         }
         _ => {
-            let (kind, period) = ["mom", "roc", "rocp", "rocr", "rocr100"]
-                .into_iter()
-                .find_map(|kind| {
-                    period_of(directive, kind).map(|period| (kind, period))
-                })?;
+            let (kind, period) = momentum_of(directive)?;
             let data = col_f64(df, "close").ok()?;
-            let mut out = Vec::with_capacity(data.len().saturating_sub(from_row));
-            for i in from_row..data.len() {
-                if i < period {
-                    out.push(f64::NAN);
-                    continue;
-                }
-                let prior = data[i - period];
-                let value = match kind {
-                    "mom" => data[i] - prior,
-                    _ if prior == 0.0 => 0.0,
-                    "roc" => (data[i] / prior - 1.0) * 100.0,
-                    "rocp" => data[i] / prior - 1.0,
-                    "rocr" => data[i] / prior,
-                    "rocr100" => data[i] / prior * 100.0,
-                    _ => unreachable!(), // LCOV_EXCL_LINE
-                };
-                out.push(value);
-            }
+            let out = (from_row..data.len()).map(|i| kind.at(&data, period, i)).collect();
             Some((Column::f64(out), Vec::new()))
         }
     }

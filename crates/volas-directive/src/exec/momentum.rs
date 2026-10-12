@@ -210,9 +210,9 @@ pub(super) fn dispatch(
             let low = ops.f64(2, "low")?;
             let close = ops.f64(3, "close")?;
             let v = match pattern {
-                ind::CandlePattern::Plain(f) => f(&open, &high, &low, &close),
+                ind::CandlePattern::Plain(f) => f(&open, &high, &low, &close, ops.origin()),
                 ind::CandlePattern::Penetration { f, .. } => {
-                    f(&open, &high, &low, &close, arg_f64(args, 0))
+                    f(&open, &high, &low, &close, arg_f64(args, 0), ops.origin())
                 }
             };
             f64col(v)

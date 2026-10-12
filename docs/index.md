@@ -13,13 +13,13 @@ methodology, and supported pandas behavior.
 | Look up the `DataFrame` / `Series` / `Row` API and the top-level functions | [DataFrame API](dataframe-api.md) |
 | Cumulate bars, stream a live time frame, handle timezones | [Cumulation, time frames and timezones](cumulation.md) |
 | Write indicator directives and handle directive errors | [Directives](directives.md) |
-| Know how indicators treat missing rows, keep sums exact, take variances | [Numerical conventions](numerics.md) |
 | Index, write and handle missing values the pandas way | [pandas-compatible API](pandas-compatibility.md) |
 | Exchange data with pandas, Arrow and DLPack | [Interop](interop.md) |
 | Check benchmark claims and methodology | [Benchmark FAQ](benchmark-faq.md) |
 | Move TA-Lib calls into volas directives | [TA-Lib migration](migration-talib.md) |
 | Move a pandas OHLCV pipeline into volas | [pandas migration](migration-pandas.md) |
 | Find output names for multi-output indicators | [Directive cheat sheet](directive-cheatsheet.md) |
+| See how indicators treat missing and infinite inputs, keep window sums exact and take variances | [Missing values and exact window sums](indicator-inputs.md) |
 | Decide whether volas is the wrong tool | [When not to use volas](when-not-to-use.md) |
 
 The complete indicator index and pandas-subset contract remain in
@@ -33,12 +33,12 @@ The complete indicator index and pandas-subset contract remain in
 dataframe-api
 cumulation
 directives
-numerics
 pandas-compatibility
 interop
 benchmark-faq
 migration-talib
 migration-pandas
 directive-cheatsheet
+indicator-inputs
 when-not-to-use
 ```

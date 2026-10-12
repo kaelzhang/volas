@@ -24,7 +24,8 @@ _RECURSIVE = sorted(
     set(RECURSIVE.values()) | {SUBCOMMANDS[k] for k in SUBCOMMANDS if k.split(".")[0] in RECURSIVE}
 )
 _FINITE = ["ma:5", "wma:5", "boll.upper", "stddev:5", "llv:5", "rsv:5", "cci:5", "maxindex:5",
-           "linearreg:5", "mfi:5", "willr:5", "kst", "ichimoku.kijun", "pivothigh:5,3"]
+           "linearreg:5", "mfi:5", "willr:5", "kst", "ichimoku.kijun", "pivothigh:5,3",
+           "ttm_squeeze", "ttm_squeeze.on"]
 _STATELESS = ["avgprice", "medprice", "tr", "mom:5", "roc:5", "bop"]
 _OPERANDS = ["rsi:5@open", "ema:5@(close + open)", "ema:5@(rsi:5)", "atr:5@high,low,open",
              "ma:5@(close - open)"]
@@ -187,7 +188,7 @@ def test_plain_integer_frame_replacements_are_exact(directive):
 
 _WINDOW_NOT_BIT_EXACT = {
     "ad", "asi", "kama:5", "kcw", "nvi", "obv", "pvi", "pvt", "stoch_momentum",
-    "stoch_momentum.signal", "ttm_squeeze", "wad",
+    "stoch_momentum.signal", "wad",
 }
 
 

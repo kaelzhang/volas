@@ -59,9 +59,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
 # crates/volas-directive/tests/resume_matrix.rs); the machines do not cache them
 # while listed.
 DIVERGENT_FAMILIES: frozenset[str] = frozenset({
-    # a NaN input keeps suppressing a candlestick pattern far beyond its lookback in
-    # the full kernel, so any later window recompute disagrees with it
-    'style', 'cdl',
 })
 
 

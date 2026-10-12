@@ -7,7 +7,7 @@ use super::*;
 // --- Directional-family state-carry (additive; the full-recompute fallback stays
 // correct) --------------------------------------------------------------------------
 //
-// Every directional indicator is a Wilder recurrence over per-bar terms (`dm1` / `tr1`)
+// Every directional indicator is a Wilder recurrence over per-bar terms (`dm1` / `tr_at`)
 // that each read the *prior* bar. The carried state is the running Wilder accumulator(s)
 // as of row `from-1`: a single sum (±DM), a sum pair (±DI), a sum triple (DX), the DX
 // triple plus the running ADX average (ADX), and additionally the trailing `period`-long
@@ -22,7 +22,7 @@ use super::*;
 /// The Wilder-`sum` running accumulator after seeding at `period-1` and folding every
 /// later term — i.e. the value of `s` once `wilder_sum` has consumed all `n` rows. `None`
 /// before the seed exists (`period == 0 || period > n`). `term(i)` is the per-bar
-/// one-period quantity (`dm1.0` / `dm1.1` / `tr1`).
+/// one-period quantity (`dm1.0` / `dm1.1` / `tr_at`).
 fn wilder_sum_final(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Option<f64> {
     if period == 0 || period > n {
         return None;
@@ -118,14 +118,14 @@ fn dm_tr_sums_final(
         let (dp, dm) = dm1(high, low, i);
         p += dp;
         m += dm;
-        t += tr1(high, low, close, i);
+        t += tr_at(high, low, close, i);
     }
     let a = 1.0 - 1.0 / period as f64;
     for i in period..n {
         let (dp, dm) = dm1(high, low, i);
         p = p.mul_add(a, dp);
         m = m.mul_add(a, dm);
-        t = t.mul_add(a, tr1(high, low, close, i));
+        t = t.mul_add(a, tr_at(high, low, close, i));
     }
     Some((p, m, t))
 }
@@ -137,7 +137,7 @@ fn dm_tr_step(high: &[f64], low: &[f64], close: &[f64], i: usize, a: f64, s: &mu
     let (dp, dm) = dm1(high, low, i);
     s[0] = s[0].mul_add(a, dp);
     s[1] = s[1].mul_add(a, dm);
-    s[2] = s[2].mul_add(a, tr1(high, low, close, i));
+    s[2] = s[2].mul_add(a, tr_at(high, low, close, i));
 }
 
 /// Final +DI state `[sp, st]` (+DM and TR running sums) — pairs with [`plus_di_resume`].
@@ -267,7 +267,7 @@ pub fn adx_final_state(
         let (dp, dm) = dm1(high, low, i);
         s[0] += dp;
         s[1] += dm;
-        s[2] += tr1(high, low, close, i);
+        s[2] += tr_at(high, low, close, i);
     }
     // dx[i] is defined from i == period; collect the first `period` DX values (indices
     // `[period, 2*period)`) to seed the ADX average, advancing the sums as we go.
@@ -345,7 +345,7 @@ pub fn adxr_final_state(
         let (dp, dm) = dm1(high, low, i);
         s[0] += dp;
         s[1] += dm;
-        s[2] += tr1(high, low, close, i);
+        s[2] += tr_at(high, low, close, i);
     }
     let pf = period as f64;
     let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);

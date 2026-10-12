@@ -1,22 +1,30 @@
 //! True-range volatility: TR / ATR / NATR and the ATR state-carry resume.
 
+use crate::missing;
 use crate::raw::indicators::av;
 use crate::raw::kernels;
 
-/// True Range.
+/// True Range (TA-Lib TRANGE): [`tr_at`] at every row; row 0 has no prior close, so
+/// it has no TR (NaN).
 pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     let n = high.len();
     let mut tr = vec![f64::NAN; n];
-    // TA-Lib TRANGE: index 0 has no prior close, so it has no TR (NaN); TR is
-    // defined from index 1 onward.
-    for i in 1..n {
-        let prev_close = close[i - 1];
-        let hl = high[i] - low[i];
-        let hc = (high[i] - prev_close).abs();
-        let lc = (low[i] - prev_close).abs();
-        tr[i] = hl.max(hc).max(lc);
+    for (i, slot) in tr.iter_mut().enumerate().skip(1) {
+        *slot = tr_at(high, low, close, i);
     }
     tr
+}
+
+/// The true range of bar `i >= 1`: `max(high − low, |high − prev close|, |low − prev
+/// close|)`. The one owner of the TR term — TR, ATR / NATR, CHOP, Vortex, ULTOSC and
+/// the live resumes all read it here. It reads `high[i]`, `low[i]` and `close[i - 1]`,
+/// and is missing when one of them is (see [`crate::missing::term`]): `f64::max` would
+/// otherwise step over a missing value into an ordinary range.
+#[inline]
+pub fn tr_at(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
+    let (h, l, prev_close) = (high[i], low[i], close[i - 1]);
+    let range = (h - l).max((h - prev_close).abs()).max((l - prev_close).abs());
+    missing::term(&[h, l, prev_close], range)
 }
 
 /// Average True Range — TA-Lib semantics: SMA-seeded Wilder smoothing of TR (the
@@ -47,42 +55,18 @@ pub fn natr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64>
 // returns `None` and falls back. `*_final_state` returns `None` before ATR seeds (the
 // column is all-NaN), so the caller keeps the correct fallback.
 
-/// One-period true range at bar `i` (needs the prior close) — the per-bar input the ATR
-/// Wilder average smooths. Matches `tr`'s `index >= 1` definition.
-#[inline]
-fn tr1(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
-    let hl = high[i] - low[i];
-    let hc = (high[i] - close[i - 1]).abs();
-    let lc = (low[i] - close[i - 1]).abs();
-    hl.max(hc).max(lc)
-}
-
-/// Final ATR state `[atr]` after a full [`atr`] compute, or `None` if ATR never seeds
-/// (`period == 0 || period >= n`, since `tr[0]` is NaN so the SMA of the first `period`
-/// TRs seeds at index `period`). Reproduces `kernels::wilder(tr)` exactly: SMA-seed the
-/// first `period` TRs (indices `1..=period`), then the fused Wilder step.
+/// Final ATR state `[atr]` after a full [`atr`] compute, or `None` if ATR never seeds:
+/// the Wilder smoothing of the true ranges captured by [`kernels::sma_seeded_last`] —
+/// the full kernel's own seed rule (the first `period` present TRs; `tr[0]` and a true
+/// range of infinite prices are not present) and its own step.
 pub fn atr_final_state(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    let n = high.len();
-    if period == 0 || period >= n {
-        return None;
-    }
-    let pf = period as f64;
-    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
-    // Seed = SMA of tr[1..=period] (tr[0] is undefined / NaN), placed at index `period`.
-    let mut atr = 0.0;
-    for i in 1..=period {
-        atr += tr1(high, low, close, i);
-    }
-    atr /= pf;
-    for i in (period + 1)..n {
-        atr = atr.mul_add(a, tr1(high, low, close, i) * b);
-    }
-    Some(vec![atr])
+    let tr = tr(high, low, close);
+    Some(vec![kernels::sma_seeded_last(&tr, period, kernels::wilder_step(period))?])
 }
 
 /// Resume [`atr`] from `state = [atr_{from-1}]` over rows `[from, n)`. `None` at
@@ -104,7 +88,7 @@ pub fn atr_resume(
     let mut atr = state[0];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        atr = atr.mul_add(a, tr1(high, low, close, i) * b);
+        atr = atr.mul_add(a, tr_at(high, low, close, i) * b);
         out.push(atr);
     }
     Some((out, vec![atr]))
@@ -130,7 +114,7 @@ pub fn atr_resume_one(
     let [slot] = next else { return None };
     let pf = period as f64;
     let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
-    *slot = state[0].mul_add(a, tr1(high, low, close, row) * b);
+    *slot = state[0].mul_add(a, tr_at(high, low, close, row) * b);
     Some(*slot)
 }
 
