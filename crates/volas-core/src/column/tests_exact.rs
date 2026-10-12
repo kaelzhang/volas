@@ -49,7 +49,9 @@ fn from_scalars_takes_the_supertype_losslessly() {
     assert!(Column::from_scalars(&[(DType::I64, Scalar::I64(B)), (DType::F64, Scalar::F64(0.5))]).is_err());
     assert!(Column::from_scalars(&[(DType::I64, Scalar::Bool(true))]).unwrap().equals(&Column::i64(vec![1])));
     assert_eq!(Column::from_scalars(&[]).unwrap().dtype(), DType::F64);
-    assert_eq!(Scalar::Bool(true).dtype(), DType::Bool);
+    let dtypes = [Scalar::F64(0.0), Scalar::F32(0.0), Scalar::I64(0), Scalar::I32(0), Scalar::Bool(true)]
+        .map(|s| s.dtype());
+    assert_eq!(dtypes, [DType::F64, DType::F32, DType::I64, DType::I32, DType::Bool]);
 }
 
 #[test]

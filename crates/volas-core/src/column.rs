@@ -932,6 +932,12 @@ fn clip_bool(v: &[bool], lo: Option<f64>, hi: Option<f64>) -> Vec<bool> {
         .collect()
 }
 
+/// [`binary_kernel`] over float operands: IEEE arithmetic never overflows (it
+/// gives `±inf`), so the checked kernel cannot fail here.
+fn float_kernel<T: Numeric>(a: &[T], b: &[T], op: BinOp) -> Vec<T> {
+    binary_kernel(a, b, op, &Validity::dense()).expect("float arithmetic never overflows")
+}
+
 /// Element-wise `a ∘ b` for `Add` / `Sub` / `Mul` over the positions `valid`
 /// marks present: checked, so an integer overflow at a present position is an
 /// error (contract #25); a missing position holds a `0` placeholder (masked by the

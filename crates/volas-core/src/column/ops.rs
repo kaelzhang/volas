@@ -81,7 +81,6 @@ impl Column {
                 )),
             };
         }
-        let dense = Validity::dense();
         match binary_supertype(self.dtype(), other.dtype()) {
             DType::I64 => {
                 let nulls = self.combined_nulls(other);
@@ -93,18 +92,12 @@ impl Column {
                 let out = binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op, &nulls)?;
                 Ok(Column::i32_with(out, nulls))
             }
-            DType::F32 => Ok(Column::f32(binary_kernel(
-                &self.to_f32_vec(),
-                &other.to_f32_vec(),
-                op,
-                &dense,
-            )?)),
-            _ => Ok(Column::f64(binary_kernel(
+            DType::F32 => Ok(Column::f32(float_kernel(&self.to_f32_vec(), &other.to_f32_vec(), op))),
+            _ => Ok(Column::f64(float_kernel(
                 &self.to_f64_domain("arithmetic")?,
                 &other.to_f64_domain("arithmetic")?,
                 op,
-                &dense,
-            )?)),
+            ))),
         }
     }
 
