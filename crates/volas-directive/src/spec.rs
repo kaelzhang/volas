@@ -220,6 +220,12 @@ const fn time_frame(tf: TimeFrame) -> Arg {
     Arg { default: ArgDefault::TimeFrame(tf), bound: ArgBound::TimeFrame }
 }
 
+/// `hv`'s default trading days per year (the US-equity convention).
+pub(crate) const HV_TRADING_DAYS: i64 = 252;
+
+/// `hv`'s default minutes of trading per day (a 24 h market).
+pub(crate) const HV_SESSION_MINUTES: usize = 1440;
+
 /// Minutes of regular trading per trading day: 1..=1440 (a day has 1440 minutes).
 const fn session_minutes(n: usize) -> Arg {
     Arg { default: ArgDefault::Int(n), bound: ArgBound::IntRange(1, 1440) }
@@ -424,7 +430,14 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // per year (>= 1: 0/negative puts 0/NaN under sqrt), and minutes of trading per
         // day (1440: a 24 h market). The annualization is `exec::hv_annualization`.
         ("hv", None) => (
-            const { &[p2_req(), time_frame(TimeFrame::Day1), i64min(252, 1), session_minutes(1440)] },
+            const {
+                &[
+                    p2_req(),
+                    time_frame(TimeFrame::Day1),
+                    i64min(HV_TRADING_DAYS, 1),
+                    session_minutes(HV_SESSION_MINUTES),
+                ]
+            },
             &["close"],
         ),
         // increase: run length (>= 1), direction (+1 rising / -1 falling).

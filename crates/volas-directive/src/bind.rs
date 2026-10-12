@@ -10,9 +10,13 @@
 //! ready typed [`ArgValue`]s, so `exec` / `lookback` / `stringify` never re-parse,
 //! re-default, or re-validate.
 
-use crate::spec::{canon_sub, command_spec, is_command, normalize};
+use crate::spec::{
+    canon_sub, command_spec, is_command, normalize, CommandSpec, HV_SESSION_MINUTES,
+    HV_TRADING_DAYS,
+};
 use crate::types::{ArgValue, Ast, Command, Cst, Node};
 use volas_core::{Result, VolasError};
+use volas_time::Span;
 
 /// Lower a concrete syntax tree to a bound AST. A bare [`Node::Name`] is left
 /// unbound — without a frame it cannot be told apart from a column reference, so
@@ -179,7 +183,7 @@ pub fn check_form(cst: &Cst) -> Result<()> {
                     })?;
                 }
             }
-            check_form_cross(&name, &c.args)?;
+            check_form_cross(&name, &spec, &c.args)?;
             c.series.iter().try_for_each(check_form)
         }
         Node::Unary { operand, .. } => check_form(operand),
@@ -192,7 +196,18 @@ pub fn check_form(cst: &Cst) -> Result<()> {
 
 /// Cross-argument rules over *supplied* raw tokens (lenient): checked only when both
 /// operands are present, mirroring [`bind_cross_args`] without requiring them.
-fn check_form_cross(name: &str, args: &[Option<String>]) -> Result<()> {
+fn check_form_cross(name: &str, spec: &CommandSpec, args: &[Option<String>]) -> Result<()> {
+    if name == "hv" {
+        // hv's time frame / trading days / session all have defaults, so the rule runs
+        // on every form; an absent slot takes its default, as `bind_command` would.
+        let slot = |i: usize| match args.get(i).and_then(|o| o.as_deref()) {
+            Some(s) => spec.args[i].bound.bind(s).ok(),
+            None => spec.args[i].default.value(),
+        };
+        if let (Some(tf), Some(days), Some(session)) = (slot(1), slot(2), slot(3)) {
+            check_hv_args(&tf, &days, &session)?;
+        }
+    }
     if name == "mavp" {
         let at = |i: usize| args.get(i).and_then(|o| o.as_deref()).and_then(|s| s.parse::<usize>().ok());
         if let (Some(min_p), Some(max_p)) = (at(0), at(1)) {
@@ -209,6 +224,9 @@ fn check_form_cross(name: &str, args: &[Option<String>]) -> Result<()> {
 /// Cross-argument domain rules — a constraint *between* two resolved arguments
 /// that no single-argument bound can express.
 fn bind_cross_args(name: &str, args: &[ArgValue]) -> Result<()> {
+    if name == "hv" {
+        check_hv_args(&args[1], &args[2], &args[3])?;
+    }
     if name == "mavp" {
         // Each per-bar period is clamped into [min_period, max_period]; inverted
         // limits are meaningless (and panic `i64::clamp`). Both are bound `>= 1`.
@@ -220,6 +238,32 @@ fn bind_cross_args(name: &str, args: &[ArgValue]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `hv`'s rules between its time frame and its annualization inputs (the formula is
+/// `exec::hv_annualization`): a sub-day bar must fit in the trading session, and an
+/// argument the frame does not use — `session_minutes` beyond sub-day bars,
+/// `trading_days` beyond day bars — must keep its default rather than be silently
+/// ignored.
+fn check_hv_args(time_frame: &ArgValue, trading_days: &ArgValue, session: &ArgValue) -> Result<()> {
+    let tf = time_frame.as_time_frame();
+    let (days, session) = (trading_days.as_i64(), session.as_usize());
+    let label = tf.label();
+    let why = match tf.span() {
+        Span::Seconds(s) if s > session as i64 * 60 => {
+            format!("a {label} bar is longer than the {session}-minute session")
+        }
+        Span::Seconds(_) => return Ok(()),
+        _ if session != HV_SESSION_MINUTES => format!(
+            "session_minutes applies to sub-day time frames only, got {session} with {label}"
+        ),
+        Span::Days(_) => return Ok(()),
+        _ if days != HV_TRADING_DAYS => format!(
+            "trading_days applies to sub-day and day time frames only, got {days} with {label}"
+        ),
+        _ => return Ok(()),
+    };
+    Err(VolasError::Value(format!("hv: {why}")))
 }
 
 #[cfg(test)]
@@ -245,6 +289,13 @@ mod tests {
         assert!(err_msg("ema:").contains("argument #0 is required"));
         // cross-argument rule (mavp's inverted period limits).
         assert!(err_msg("mavp:30,2@close,close").contains("min_period"));
+        // hv: a bar longer than the session; an argument the frame does not use.
+        assert!(err_msg("hv:10,8h,252,240").contains("a 8h bar is longer than the 240-minute"));
+        assert!(err_msg("hv:10,1d,252,390").contains("session_minutes applies to sub-day"));
+        assert!(err_msg("hv:10,1w,365").contains("trading_days applies to sub-day and day"));
+        for ok in ["hv:10,4h,252,240", "hv:10,1d,365", "hv:10,1w,252,1440", "hv:10,1M"] {
+            assert!(parse(ok).is_ok(), "{ok}");
+        }
     }
 
     #[test]
@@ -301,6 +352,12 @@ mod tests {
         assert!(check("mavp:2,30@close,close").is_ok()); // valid cross-arg (min <= max)
         assert!(check("mavp:30,2@close,close").is_err()); // inverted period limits
         assert!(check("mavp@close,close").is_ok()); // both absent -> cross-arg skipped
+        // hv's rule runs on the form too, absent slots taking their defaults.
+        assert!(check("hv").is_ok());
+        assert!(check("hv:,8h,252,240").is_err()); // the bar outlasts the session
+        assert!(check("hv:,1w,365").is_err()); // trading_days unused by weekly bars
+        assert!(check("hv:,1d,,390").is_err()); // session_minutes unused by day bars
+        assert!(check("hv:,4h,,240").is_ok());
     }
 
     #[test]

@@ -305,16 +305,24 @@ hv  = stdev(r, over the last `period` bars, ddof = 1) × sqrt(bars_per_year)
 - **time_frame?** `str='1d'` The bar time frame. It must be one of the
   [`TimeFrame`](docs/cumulation.md#timeframe) labels. Upper-case aliases such as
   `1W` and `1D` are also accepted. Any other text is a `DirectiveValueError`.
-- **trading_days?** `int=252` Trading days per year. It is used only by sub-day
-  and day bars. 252 is the US equity convention (thinkorswim and the Cboe
+- **trading_days?** `int=252` Trading days per year. It applies to sub-day and
+  day bars only. 252 is the US equity convention (thinkorswim and the Cboe
   realized-volatility formula use it); use 365 for a market that trades every
   day.
 - **session_minutes?** `int=1440` Minutes of regular trading per trading day,
-  from 1 to 1440. It is used only by sub-day bars. The default 1440 fits a 24-hour
-  market. A sub-day bar whose length does not divide the session counts as a
-  fraction of a bar per day. For example, `4h` bars on a 390-minute session give
-  1.625 bars per day.
+  from 1 to 1440. It applies to sub-day bars only. The default 1440 fits a
+  24-hour market. A sub-day bar longer than the session is a
+  `DirectiveValueError`; for example, `hv:10,8h,252,240` raises. A bar whose
+  length does not divide the session counts as a fraction of a bar per day. For
+  example, `4h` bars on a 390-minute session give 1.625 bars per day.
 - **on?** `str='close'` Which column or directive the calculation is based on.
+
+An argument that the time frame does not use is never silently ignored. Passing
+a `session_minutes` other than 1440 with a frame of a day or longer, or a
+`trading_days` other than 252 with a frame of a week or longer, is a
+`DirectiveValueError`. Examples are `hv:10,1d,252,390` and `hv:10,1w,365`. The
+default values stay legal on every frame and drop out of the canonical column
+name, so `hv:10,1d,252,1440` is cached as `hv:10`.
 
 Second bars are exact: a `1s` bar counts 60 bars per minute of session. The
 log returns are demeaned and divided by `n − 1`, as in thinkorswim's

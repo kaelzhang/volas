@@ -677,9 +677,7 @@ mod tests {
         close("hv:10,4h,252,390", 252.0 * 1.625);
         close("hv:10,1s,252,240", 252.0 * 240.0 * 60.0);
         close("hv:10,15m,365", 365.0 * 96.0);
-        // the session applies to sub-day bars only
-        close("hv:10,1d,252,390", 252.0);
-        close("hv:10,1w,252,390", 52.0);
+        close("hv:10,4h,252,240", 252.0); // a bar as long as the session: one per day
     }
 
     #[test]

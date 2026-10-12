@@ -77,13 +77,19 @@ def test_hv_defaults_are_daily_252_and_a_24h_session():
     assert volas.directive_stringify("hv:10,15m,252,390") == "hv:10,15m,,390"
 
 
-def test_hv_session_minutes_ignored_for_daily_and_longer_bars():
-    df = _frame()
-    for tf in ("1d", "3d", "1w", "1M", "1y"):
-        np.testing.assert_array_equal(
-            np.asarray(df[f"hv:10,{tf},252,390"], dtype=float),
-            np.asarray(df[f"hv:10,{tf}"], dtype=float),
-        )
+@pytest.mark.parametrize("directive,canonical", [
+    ("hv:10,4h,252,240", "hv:10,4h,,240"),  # a bar exactly as long as the session
+    ("hv:10,12h,252,720", "hv:10,12h,,720"),
+    ("hv:10,1d,252,1440", "hv:10"),         # default arguments stay legal on any frame
+    ("hv:10,1w,252,1440", "hv:10,1w"),
+    ("hv:10,1M,252", "hv:10,1M"),
+    ("hv:10,1d,365", "hv:10,,365"),         # trading_days applies to day bars
+    ("hv:10,3d,250", "hv:10,3d,250"),
+])
+def test_hv_applicable_arguments_execute(directive, canonical):
+    assert len(_frame()[directive]) == N
+    volas.directive_lookback(directive)
+    assert volas.directive_stringify(directive) == canonical
 
 
 @pytest.mark.parametrize("directive", [
@@ -122,3 +128,25 @@ def test_hv_rejects_an_invalid_configuration(directive):
         volas.directive_lookback(directive)
     with pytest.raises(volas.DirectiveValueError):
         volas.directive_stringify(directive)
+
+
+@pytest.mark.parametrize("directive,message", [
+    # a sub-day bar longer than the trading session
+    ("hv:10,8h,252,240", "longer than the 240-minute session"),
+    ("hv:10,12h,252,390", "longer than the 390-minute session"),
+    ("hv:,8h,252,240", "longer than the 240-minute session"),  # form without the period
+    # an explicit non-default argument the frame does not use
+    ("hv:10,1d,252,390", "session_minutes applies to sub-day time frames only"),
+    ("hv:10,3d,252,240", "session_minutes applies to sub-day time frames only"),
+    ("hv:10,1w,252,390", "session_minutes applies to sub-day time frames only"),
+    ("hv:10,1w,365", "trading_days applies to sub-day and day time frames only"),
+    ("hv:10,1M,250", "trading_days applies to sub-day and day time frames only"),
+    ("hv:10,1y,365,1440", "trading_days applies to sub-day and day time frames only"),
+])
+def test_hv_rejects_an_inapplicable_argument(directive, message):
+    entries = [volas.directive_stringify]
+    if not directive.startswith("hv:,"):  # the bound entries need the period
+        entries += [lambda d: _frame()[d], volas.directive_lookback]
+    for entry in entries:
+        with pytest.raises(volas.DirectiveValueError, match=message):
+            entry(directive)
