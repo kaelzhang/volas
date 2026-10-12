@@ -551,42 +551,45 @@ impl PyDataFrame {
     /// written cached column becomes plain data, every other one goes stale
     /// (`DataFrame::assign_positions`). A write selecting no row changes nothing.
     ///
-    /// On a time-frame frame a write that reaches the forming row, or turns a cached
-    /// column into data, is followed by the open period ([`TfState::follow`]); a cached
-    /// column whose aggregator cannot fold its dtype is refused before any write.
+    /// On a time-frame frame the open period follows what was written
+    /// ([`TfState::follow`]); a write the open period cannot follow exactly — a new
+    /// forming value of a column its several fine bars carry — and a cached column whose
+    /// aggregator cannot fold its dtype are refused before any write.
     pub(crate) fn write_cells(&mut self, writes: Vec<(usize, Vec<usize>, Column)>) -> PyResult<()> {
         self.require_fresh()?;
         let start = self.logical_range().0;
+        let last = self.inner.height().wrapping_sub(1);
+        let mut rewritten: Vec<String> = Vec::new();
         if let Some(tfs) = &self.tf {
-            for (col, rows, _) in &writes {
+            for (col, rows, values) in &writes {
                 let name = &self.inner.names()[*col];
                 if !rows.is_empty() && self.inner.is_computed(name) {
                     tfs.check_data_column(name, self.inner.columns()[*col].dtype())?;
                 }
+                if let Some(k) = rows.iter().position(|&r| r + start == last) {
+                    let k = if values.len() == 1 { 0 } else { k };
+                    if tfs.check_forming_write(&self.inner, name, &values.slice(k, k + 1))? {
+                        rewritten.push(name.clone());
+                    }
+                }
             }
         }
-        let last = self.inner.height().wrapping_sub(1);
-        // Whether a landed write reached the open period: `Some(forming row written)`.
-        let mut follow: Option<bool> = None;
+        let mut landed = false;
         let mut written = Ok(());
         for (col, rows, values) in writes {
             if rows.is_empty() {
                 continue;
             }
-            let cached = self.inner.is_computed(&self.inner.names()[col]);
             let phys: Vec<usize> = rows.into_iter().map(|r| r + start).collect();
             written = self.inner.assign_positions(col, &phys, &values).map_err(pyerr);
             if written.is_err() {
                 break;
             }
-            let forming = phys.contains(&last);
-            if cached || forming {
-                follow = Some(follow == Some(true) || forming);
-            }
+            landed = true;
         }
         // the open period follows what was written, the writes before a failed one too
-        if let (Some(forming), Some(tfs)) = (follow, self.tf.as_mut()) {
-            tfs.follow(&self.inner, forming)?;
+        if let (true, Some(tfs)) = (landed, self.tf.as_mut()) {
+            tfs.follow(&self.inner, &rewritten)?;
         }
         written
     }

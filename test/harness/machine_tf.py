@@ -178,10 +178,12 @@ class TfMachine(FrameMachine):
                   'loc': lambda: self.df.loc.__setitem__((label, col), value)}[via]
 
         def commit(_):
-            self.store.write({pos: {col: stored}}, forming=pos == last)
+            self.store.write({pos: {col: stored}})
             self._wrote()
 
-        self.attempt(target, commit=commit, label=f'{via} write {col}[{pos}]={value!r}')
+        refused = pos == last and self.store.refuses(col, stored)
+        self.attempt(target, expect_error=ValueError if refused else None, commit=commit,
+                     label=f'{via} write {col}[{pos}]={value!r}')
 
     @precondition(lambda self: len(self.df) > 0)
     @rule(data=st.data(), name=st.sampled_from(['u0', 'u1', 'close', 'x']))
@@ -198,18 +200,20 @@ class TfMachine(FrameMachine):
         existing = name in self.df.columns
 
         def commit(_):
-            self.store.write({i: {name: float(v)} for i, v in enumerate(values)}, forming=True,
+            self.store.write({i: {name: float(v)} for i, v in enumerate(values)},
                              columns=None if existing else {name: 'float64'})
             if existing:
                 self._wrote()  # a replaced column may feed any cache
 
-        self.attempt(lambda: self.df.__setitem__(name, values), commit=commit, label=f'df[{name!r}] = ...')
+        refused = existing and self.store.refuses(name, float(values[-1]))
+        self.attempt(lambda: self.df.__setitem__(name, values), expect_error=ValueError if refused else None,
+                     commit=commit, label=f'df[{name!r}] = ...')
 
     @precondition(lambda self: len(self.df) > 0)
     @rule(data=st.data())
     def write_computed(self, data):
         """A cell write into a cached float column: it becomes plain data the fine bars
-        never carried, so the forming row becomes the open period's bar of record."""
+        never carried, so they hold it as missing."""
         if not self._writable() or not self.cached:
             return
         name = data.draw(st.sampled_from(sorted(self.cached)))
@@ -224,7 +228,7 @@ class TfMachine(FrameMachine):
             cells = {i: {name: None if np.isnan(v) else float(v)} for i, v in enumerate(held)}
             cells[pos] = {name: -3.25}
             del self.cached[name]
-            self.store.write(cells, forming=True, columns={name: 'float64'})
+            self.store.write(cells, columns={name: 'float64'})
             self._wrote()
 
         self.attempt(lambda: self.df.iloc.__setitem__((pos, j), -3.25), commit=commit,

@@ -126,7 +126,7 @@ impl PyDataFrame {
                     let inner = other.project(cols)?;
                     // The open period follows the projection: kept data columns keep every
                     // fine bar; a cached column the projection turns into data was never in
-                    // the fine bars, so the forming row becomes the period's bar of record.
+                    // the fine bars, which hold it as missing.
                     let tf = match &other.tf {
                         None => None,
                         Some(t) => {
@@ -135,7 +135,7 @@ impl PyDataFrame {
                                 t.check_data_column(name, col.dtype())?;
                             }
                             t.fold_plan = None; // the columns changed: rebuilt on the next fold
-                            t.follow(&inner, false)?;
+                            t.follow(&inner, &[])?;
                             Some(t)
                         }
                     };

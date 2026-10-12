@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use volas_core::{CombineOp, DType, DataFrame, Index, IndexKind};
+use volas_core::{Column, CombineOp, DType, DataFrame, IndexKind};
 use volas_time::{aggregate_period, AggSpec, OpenPeriod, TimeFrame};
 
 #[allow(unused_imports)]
@@ -19,9 +19,13 @@ use crate::*;
 /// running bar, which `append` keeps updating.
 ///
 /// Invariant (kept by [`PyDataFrame::fold_append`], [`TfState::follow`] and the
-/// constructors): the forming row is the cumulation of `open`, and `open`'s columns are
-/// the frame's data columns — every column but the cached directive ones — in the
-/// frame's order and dtypes, each supported by its aggregator.
+/// constructors): `open`'s columns are the frame's data columns — every column but the
+/// cached directive ones — in the frame's order and dtypes, each supported by its
+/// aggregator, and the forming row is the cumulation of `open` — except in a column that
+/// became data after the period's bars were folded (added, or a cached column
+/// overwritten): the fine bars never carried it, so they hold it as missing, and the
+/// written forming cell stands only until the next fold makes it missing (stale and
+/// visibly so, never a wrong number).
 #[derive(Clone)]
 pub(crate) struct TfState {
     pub(crate) time_frame: TimeFrame,
@@ -42,6 +46,11 @@ pub(crate) struct TfState {
     /// and the open period share the frame's data-column schema, so one plan folds a
     /// bar into the forming row and re-cumulates the open period into it alike.
     pub(crate) fold_plan: Option<FoldPlan>,
+    /// Whether the forming row differs from the cumulation of `open` in a column that
+    /// entered the bars as missing (see the invariant): the next bar of the period then
+    /// re-cumulates the whole period instead of folding into the forming row, so the
+    /// written cell goes missing as the bars say.
+    pub(crate) refold_next: bool,
 }
 
 /// The cached forming-row fold plan: the `(dst_col, src_col, combine_op)` triples,
@@ -106,19 +115,11 @@ fn data_columns(frame: &DataFrame) -> Vec<String> {
     frame.names().iter().filter(|n| !frame.is_computed(n)).cloned().collect()
 }
 
-/// The last row of `frame` as a bar of its data columns, stamped `at` (its own label
-/// when `None`) — a forming bar as the single entry of an open period.
-fn forming_bar(frame: &DataFrame, at: Option<i64>) -> PyResult<OpenPeriod> {
+/// The last row of `frame` as a bar of its data columns, at its own label — a
+/// constructed forming bar, the single entry of an open period.
+fn forming_bar(frame: &DataFrame) -> PyResult<OpenPeriod> {
     let h = frame.height();
     let row = frame.slice_data(h - 1, h).select(&data_columns(frame)).map_err(pyerr)?;
-    let row = match at {
-        None => row,
-        Some(ts) => {
-            let index = Index::datetime(vec![ts], frame.index().tz())
-                .with_name(frame.index().name().map(String::from));
-            DataFrame::new(row.names().to_vec(), row.columns().to_vec(), Some(index)).map_err(pyerr)?
-        }
-    };
     OpenPeriod::new(row).map_err(pyerr)
 }
 
@@ -134,9 +135,9 @@ impl TfState {
         cumulators.check(&data).map_err(pyerr)?; // dtype x aggregator, before the state exists
         let open = match frame.height() {
             0 => None,
-            _ => Some(forming_bar(frame, None)?),
+            _ => Some(forming_bar(frame)?),
         };
-        Ok(TfState { time_frame, cumulators, open, open_key: None, fold_plan: None })
+        Ok(TfState { time_frame, cumulators, open, open_key: None, fold_plan: None, refold_next: false })
     }
 
     /// Check, before a write makes column `name` a data column of dtype `dtype` (a
@@ -154,33 +155,72 @@ impl TfState {
         ))))
     }
 
-    /// Bring the open period in line with `inner` after its rows or data columns
-    /// changed in place, or for a frame derived from the one this state belongs to.
-    /// When the forming row is unchanged (`forming_written` false) and `inner`'s data
-    /// columns are all columns of the open period, the open period is projected onto
-    /// them — every bar kept, exact. Otherwise the forming row was written (or a column
-    /// became data that the fine bars never carried): the written forming row is now
-    /// the period's bar of record, so it becomes the open period's single entry,
-    /// stamped with the period's first bar time — exact while the period held one bar
-    /// (the constructed seed, or a period's first bar); otherwise, as for a
-    /// constructed forming bar, the bars already in it must not be folded again.
-    pub(crate) fn follow(&mut self, inner: &DataFrame, forming_written: bool) -> PyResult<()> {
-        if inner.height() == 0 {
+    /// Check, before a write sets the forming cell of `inner`'s column `name` to `cell`
+    /// (one value of the column's dtype), whether it rewrites the open period: `Ok(true)`
+    /// when it changes the forming value of a data column the open period's bars carry.
+    /// That is exact while the period holds one bar — the bar is rewritten — but a
+    /// forming bar folded from several fine bars has no single bar to rewrite: the write
+    /// is refused, before anything is written. A column the bars do not carry (a new
+    /// data column, a cached column becoming data) and an unchanged value are `Ok(false)`.
+    pub(crate) fn check_forming_write(&self, inner: &DataFrame, name: &str, cell: &Column) -> PyResult<bool> {
+        let (Some(open), Some(last)) = (&self.open, inner.height().checked_sub(1)) else {
+            return Ok(false);
+        };
+        let Ok(held) = inner.column(name) else { return Ok(false) };
+        if inner.is_computed(name) || !open.bars().has_column(name) {
+            return Ok(false);
+        }
+        let cell = match cell.dtype() == held.dtype() {
+            true => std::borrow::Cow::Borrowed(cell),
+            false => std::borrow::Cow::Owned(cell.convert_lossless(held.dtype()).unwrap_or_else(|_| cell.clone())),
+        };
+        if held.slice(last, last + 1).equals(&cell) {
+            return Ok(false);
+        }
+        let bars = open.bars().height();
+        if bars > 1 {
+            return Err(PyValueError::new_err(format!(
+                "cannot overwrite column {name:?} of the forming row: it is the cumulation of the \
+                 {bars} fine bars folded into the open period, so no single value replaces it \
+                 exactly. Write to closed rows only, or append a corrected fine bar (a bar with \
+                 the same timestamp replaces the one it repeats)."
+            )));
+        }
+        Ok(true)
+    }
+
+    /// Bring the open period in line with `inner` after its rows or data columns changed
+    /// in place, or for a frame derived from the one this state belongs to: the open
+    /// period keeps every bar, projected onto `inner`'s data columns. A column the bars
+    /// did not carry (a new data column, a cached column become data) enters them as
+    /// missing, so the next fold makes its forming cell missing; the columns `rewritten`
+    /// (checked by [`check_forming_write`](Self::check_forming_write): the period holds
+    /// one bar) take the forming row's new value.
+    pub(crate) fn follow(&mut self, inner: &DataFrame, rewritten: &[String]) -> PyResult<()> {
+        let Some(last) = inner.height().checked_sub(1) else {
             self.open = None;
             self.open_key = None;
             return Ok(());
+        };
+        let Some(open) = &self.open else {
+            self.open = Some(forming_bar(inner)?); // LCOV_EXCL_LINE (a frame with rows has an open period)
+            return Ok(()); // LCOV_EXCL_LINE
+        };
+        let held = open.bars();
+        let (names, mut columns) = (data_columns(inner), Vec::new());
+        for name in &names {
+            let now = inner.column(name).map_err(pyerr)?;
+            columns.push(match held.column(name) {
+                _ if rewritten.contains(name) => now.slice(last, last + 1),
+                Ok(c) if c.dtype() == now.dtype() => c.clone(),
+                _ => {
+                    self.refold_next = true;
+                    Column::na_of(now.dtype(), held.height())
+                }
+            });
         }
-        let data = data_columns(inner);
-        if let Some(open) = &self.open {
-            let dtype = |frame: &DataFrame, name: &str| frame.column(name).map(|c| c.dtype()).ok();
-            let kept = data.iter().all(|n| dtype(open.bars(), n).is_some() && dtype(open.bars(), n) == dtype(inner, n));
-            if !forming_written && kept {
-                self.open = Some(open.select(&data).map_err(pyerr)?);
-                return Ok(());
-            }
-        }
-        let first = self.open.as_ref().map(OpenPeriod::first_ts);
-        self.open = Some(forming_bar(inner, first)?);
+        let bars = DataFrame::new(names, columns, Some((**held.index()).clone())).map_err(pyerr)?;
+        self.open = Some(OpenPeriod::new(bars).map_err(pyerr)?);
         Ok(())
     }
 }
@@ -319,6 +359,7 @@ impl PyDataFrame {
                 let open = OpenPeriod::new(bar.clone()).map_err(pyerr)?;
                 inner.append_new(&agg).map_err(pyerr)?;
                 tfs.open = Some(open);
+                tfs.refold_next = false;
                 tfs.open_key = Some(key); // the new open period's key (no recompute next bar)
                 continue;
             }
@@ -342,6 +383,15 @@ impl PyDataFrame {
                 inner.check_refold(last, open.bars(), bar, ops).map_err(pyerr)?;
                 open.push(bar).map_err(pyerr)?;
                 inner.refold_forming_row(last, open.bars(), ops).map_err(pyerr)?;
+                tfs.refold_next = false;
+            } else if tfs.refold_next {
+                // the forming row is re-cumulated from the bars, the new one included
+                let mut next = open.clone();
+                next.push(bar).map_err(pyerr)?;
+                inner.check_refold(last, next.bars(), bar, ops).map_err(pyerr)?;
+                inner.refold_forming_row(last, next.bars(), ops).map_err(pyerr)?;
+                *open = next;
+                tfs.refold_next = false;
             } else {
                 inner.fold_forming_row(last, bar, 0, ops).map_err(pyerr)?;
                 open.push(bar).map_err(pyerr)?;

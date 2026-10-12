@@ -799,8 +799,9 @@ its last row is their cumulation. On a tf-aware frame:
   leaves out — in any append form — is a missing value of that bar, so the period's
   aggregate of that column is missing, exactly as a batch `cumulate` of the same bars
   gives; a later bar re-sent with the value replaces it.
-- **A write that reaches the forming row** (`df[col] = ...`, `df.iloc[-1, j] = v`, …)
-  makes the written row the open period's bar of record — see
+- **A write is taken only where the open period follows it exactly**: a new column
+  enters the fine bars as missing (the next fold makes its forming cell missing), and
+  a new forming value over several folded fine bars raises `ValueError` — see
   [Writing to a time-frame frame](cumulation.md#writing-to-a-time-frame-frame).
 - **The last constructed row is the forming bar.** `DataFrame(data,
   time_frame=...)` makes it the first bar of the open period, so a finer bar in

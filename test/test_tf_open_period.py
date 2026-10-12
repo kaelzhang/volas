@@ -7,11 +7,12 @@ cumulation is the forming row.
 * Every incoming bar is normalized once to the frame's data columns: a column the bar
   leaves out is a missing value, the same in every append form and on every path
   (fast fold, refold, rollover), identical to a batch ``cumulate``.
-* A write that reaches the forming row (``df[col] = ...``, ``iloc`` / ``loc`` /
-  ``iat`` / ``at``, a mask write, a cached column overwritten) makes the written row
-  the period's bar of record: the open period's single entry, stamped with the
-  period's first bar time. Re-labelled or re-typed copies (``DataFrame(df, index=...,
-  dtype=...)``) are the time-frame frames of their new rows.
+* A write never yields a wrong number: a column that becomes data (added, or a cached
+  column overwritten) enters the fine bars as missing, so the next fold makes its
+  forming cell missing; a new forming value of a column the bars carry rewrites the
+  period's bar when it holds one, and is refused when it holds several; writes to
+  closed rows leave the open period as it is. Re-labelled or re-typed copies
+  (``DataFrame(df, index=..., dtype=...)``) are the time-frame frames of their new rows.
 """
 
 import numpy as np
@@ -123,13 +124,50 @@ def test_the_dict_form_pads_a_left_out_column_like_every_other_form(tf):
 # --- writes reaching the forming row ---------------------------------------------------
 
 
-def test_an_added_column_reaches_the_open_period():
-    df = _seeded()
-    df["signal"] = 0.0
-    df.append(frame([1], open=[11.0], high=[13.0], low=[10.0], close=[12.0], volume=[5.0], signal=[1.0]))
-    assert rows(df) == [[10.0, 13.0, 9.0, 12.0, 15.0, 1.0]]
-    df.append(frame([1], open=[11.0], high=[13.0], low=[10.0], close=[12.0], volume=[6.0], signal=[2.0]))
-    assert rows(df) == [[10.0, 13.0, 9.0, 12.0, 16.0, 2.0]]
+def _live():
+    """A 5m frame whose open period holds the three fine bars 09:05, 09:06, 09:07."""
+    df = DataFrame(frame([0], close=[1.0], volume=[10.0]), time_frame="5m")
+    for m, c, v in ((5, 2.0, 1.0), (6, 3.0, 2.0), (7, 4.0, 3.0)):
+        df.append(frame([m], close=[c], volume=[v]))
+    return df
+
+
+def test_an_added_column_enters_the_fine_bars_as_missing():
+    # a derived column on a cumulate() result (several fine bars in the open period)
+    df = _live()
+    df["signal"] = [0.5, 0.7]
+    assert rows(df)[1] == [4.0, 6.0, 0.7]  # as written, until the next fold
+    df.append(frame([8], close=[5.0], volume=[4.0], signal=[0.9]))
+    # the earlier fine bars never carried it: the forming value is missing, never 0.9
+    assert rows(df)[1][:2] == [5.0, 10.0] and np.isnan(rows(df)[1][2])
+    df.append(frame([8], close=[5.0], volume=[4.0], signal=[0.9]))  # an identical re-send
+    assert rows(df)[1][:2] == [5.0, 10.0] and np.isnan(rows(df)[1][2])
+    assert rows(df)[0] == [1.0, 10.0, 0.5]
+
+
+def test_an_added_column_keeps_its_value_in_a_row_that_closes_unfolded():
+    df = _live()
+    df["signal"] = [0.5, 0.7]
+    df.append(frame([10], close=[6.0], volume=[1.0], signal=[0.2]))  # rolls over
+    assert rows(df) == [[1.0, 10.0, 0.5], [4.0, 6.0, 0.7], [6.0, 1.0, 0.2]]
+
+
+def test_a_value_written_over_one_bar_rewrites_it_and_a_resend_replaces_it():
+    df = DataFrame(frame([0], close=[1.0], volume=[10.0]), time_frame="5m")
+    df.append(frame([6], close=[2.0], volume=[1.0]))  # the period's one bar: 09:06
+    df["volume"] = [10.0, 50.0]
+    df.append(frame([7], close=[3.0], volume=[5.0]))
+    assert rows(df) == [[1.0, 10.0], [3.0, 55.0]]
+    df.append(frame([7], close=[3.5], volume=[6.0]))  # a re-send: no double count
+    assert rows(df) == [[1.0, 10.0], [3.5, 56.0]]
+
+
+def test_a_rewritten_bar_is_replaced_by_its_resend():
+    df = DataFrame(frame([0], close=[1.0], volume=[10.0]), time_frame="5m")
+    df.append(frame([6], close=[2.0], volume=[1.0]))
+    df.iat[1, 1] = 50.0
+    df.append(frame([6], close=[2.0], volume=[3.0]))  # the exchange re-sends 09:06
+    assert rows(df) == [[1.0, 10.0], [2.0, 3.0]]  # replaced, not 50 + 3
 
 
 def test_a_replaced_column_is_not_undone_by_a_resend():
@@ -162,26 +200,39 @@ def test_a_write_to_a_closed_row_keeps_the_open_period_exact():
     assert rows(df) == [[1.0, 99.0], [3.0, 24.0]]
 
 
-def test_a_forming_write_over_several_fine_bars_becomes_the_period_bar_of_record():
-    df = DataFrame(frame([0], close=[1.0], volume=[10.0]), time_frame="5m")
-    df.append(frame([6], close=[2.0], volume=[1.0]))
-    df.append(frame([7], close=[3.0], volume=[2.0]))
-    df["volume"] = [10.0, 50.0]
-    # the written row is the open period's single entry, at the period's first bar time
-    # (09:06): a re-send of 09:06 replaces it whole, a later bar folds into it
-    df.append(frame([8], close=[4.0], volume=[5.0]))
-    assert rows(df) == [[1.0, 10.0], [4.0, 55.0]]
-    df.append(frame([8], close=[4.5], volume=[6.0]))
-    assert rows(df) == [[1.0, 10.0], [4.5, 56.0]]
+@pytest.mark.parametrize("via", ["setitem", "iat", "loc", "mask"])
+def test_a_value_written_over_several_fine_bars_is_refused_unchanged(via):
+    df = _live()
+    before = rows(df)
+    write = {
+        "setitem": lambda: df.__setitem__("volume", [10.0, 50.0]),
+        "iat": lambda: df.iat.__setitem__((1, 1), 50.0),
+        "loc": lambda: df.loc.__setitem__((T0 + 5 * MINUTE, "volume"), 50.0),
+        "mask": lambda: df.__setitem__(df["close"] > 0, 7.0),
+    }[via]
+    with pytest.raises(ValueError, match="cumulation of the 3 fine bars"):
+        write()
+    assert rows(df) == before
+    df.append(frame([7], close=[4.5], volume=[2.5]))  # a re-send still replaces exactly
+    assert rows(df) == [[1.0, 10.0], [4.5, 5.5]]
 
 
-def test_a_cached_column_overwritten_becomes_data_of_the_open_period():
+def test_writes_that_change_no_forming_value_are_allowed_over_several_bars():
+    df = _live()
+    df["volume"] = [99.0, 6.0]  # the forming volume unchanged; the closed one rewritten
+    df.iat[1, 0] = 4.0  # the same forming close
+    df.append(frame([8], close=[5.0], volume=[4.0]))
+    assert rows(df) == [[1.0, 99.0], [5.0, 10.0]]
+
+
+def test_a_cached_column_overwritten_becomes_data_missing_in_the_fine_bars():
     df = DataFrame(frame([0, 5], close=[1.0, 2.0], volume=[1.0, 2.0]), time_frame="5m")
     df["ma:2"]
     df.iat[0, 2] = -1.0  # a closed cell of the cached column: the column becomes data
     assert not df.is_computed("ma:2")
     df.append(frame([6], close=[3.0], volume=[1.0], **{"ma:2": [7.0]}))
-    assert rows(df) == [[1.0, 1.0, -1.0], [3.0, 3.0, 7.0]]
+    got = rows(df)
+    assert got[0] == [1.0, 1.0, -1.0] and got[1][:2] == [3.0, 3.0] and np.isnan(got[1][2])
 
 
 def test_a_write_the_aggregator_cannot_fold_is_refused_unchanged():
@@ -234,15 +285,15 @@ def test_a_projection_keeps_the_fine_bars_of_its_data_columns():
     p = DataFrame(df, columns=["close", "high"])
     p.append(frame([2], close=[3.0], high=[1.0]))  # a re-send of 09:02 refolds every bar
     assert rows(p) == [[3.0, 5.0]]
-    # a cached column projected becomes data the fine bars never carried: the forming
-    # row (refreshed) is the open period's bar of record, at the period's first bar time
+    # a cached column projected becomes data the fine bars never carried: they hold it
+    # as missing, so the next fold makes its forming cell missing
     two = DataFrame(frame([0, 5], close=[1.0, 3.0]), time_frame="5m")
     two["ma:2"]
     two.append(frame([6], close=[5.0]))
     q = DataFrame(two, columns=["close", "ma:2"])
     assert not q.is_computed("ma:2") and rows(q)[1] == [5.0, 3.0]
     q.append(frame([7], close=[6.0], **{"ma:2": [8.0]}))
-    assert rows(q)[1] == [6.0, 8.0]
+    assert rows(q)[1][0] == 6.0 and np.isnan(rows(q)[1][1])
 
 
 def test_cumulate_does_not_carry_a_cached_column_as_data():

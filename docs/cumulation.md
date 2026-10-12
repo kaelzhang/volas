@@ -229,25 +229,29 @@ it.
 
 ### Writing to a time-frame frame
 
-The forming row is the cumulation of the open period's bars. A write that changes it —
-`df[col] = values`, a cell write such as `df.iloc[-1, j] = v` (or `loc` / `iat` / `at`,
-or a mask write), or a cell write that turns a cached indicator column into data —
-changes the open period with it:
+The forming row is the cumulation of the open period's bars, so a write to a
+time-frame frame — `df[col] = values`, a cell write such as `df.iloc[-1, j] = v` (or
+`loc` / `iat` / `at`, or a mask write) — is taken only where the open period can
+follow it exactly; it never leaves a value that a later bar would count twice or
+silently drop:
 
 - A write that reaches only **closed** rows leaves the open period as it is: a bar
   re-sent afterwards still replaces its earlier version.
-- A write that reaches the **forming** row makes the written row the period's bar of
-  record: it becomes the open period's single bar, stamped with the time of the
-  period's first bar. The next finer bar folds into it, and a bar re-sent with that
-  first bar's time replaces it whole.
-  - While the period holds one bar — right after the frame is built with
-    `time_frame=`, or after the first bar of a new period arrived — this is exact: the
-    written row *is* that bar.
-  - Once several finer bars have been folded in, the written row contains them, and
-    the convention of a constructed forming bar applies: those bars must not be folded
-    again. A bar re-sent after the write (an exchange updating its current 1-minute
-    bar) would count its earlier version a second time. Write once the period has
-    closed, or rebuild the frame with `cumulate` from the finer history.
+- A column that **becomes data** — a new column (`df['signal'] = values`, say on a
+  `cumulate` result), or a cached indicator column overwritten — was never carried by
+  the period's fine bars, so they hold it as missing. The forming cell keeps the
+  written value until the next bar of the period arrives; that fold makes it missing
+  (a missing input is never skipped), so the value is visibly stale, never wrong. A
+  forming row that closes without another bar keeps the written value. Later bars
+  that carry the column fold it as usual.
+- A **new forming value** of a column the bars carry is exact while the period holds
+  one bar — right after the frame is built with `time_frame=`, or when only the first
+  bar of a new period has arrived: that bar is rewritten, the next bar folds into it,
+  and a re-send of it replaces it whole. A forming bar folded from several fine bars
+  has no single bar to rewrite, so the write raises `ValueError` and the frame is
+  unchanged — write to closed rows only, or append a corrected fine bar (a bar with
+  the same timestamp replaces the one it repeats). Writing a forming cell its
+  current value is always allowed.
 - A column added or replaced must be one its aggregator folds: with
   `cumulators={'tag': 'max'}`, `df['tag'] = ['a']` raises `TypeError` and the frame is
   unchanged.
@@ -255,7 +259,7 @@ changes the open period with it:
   rows: the result is the time-frame frame of its new rows, the last one its forming
   bar, exactly as `DataFrame(rows, time_frame=...)` builds it. `DataFrame(df,
   columns=[...])` keeps the open period's bars of the data columns it keeps; a cached
-  column it turns into data makes the forming row the bar of record.
+  column it turns into data enters them as missing.
 
 ## TimeFrame
 

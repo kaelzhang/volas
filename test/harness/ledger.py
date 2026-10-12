@@ -212,11 +212,12 @@ def aggregate(schema: Schema, fine: list[tuple[int, dict]], tf: str,
 class TfLedger:
     """Closed seed bars plus the accepted fine bars of a tf frame.
 
-    A write freezes the coarse rows it reaches: every closed row becomes a seed row
-    (as written), and the open period keeps its fine bars — unless the write reached
-    the forming row or turned a column into data, in which case the written forming
-    row is the open period's single bar, stamped with the period's first bar time
-    (docs/cumulation.md, "Writing to a time-frame frame")."""
+    Writes (docs/cumulation.md, "Writing to a time-frame frame") freeze the closed rows
+    they reach into seed rows, as written, while the open period keeps its fine bars:
+    a column that becomes data enters them as missing, its written forming cell standing
+    (``override``) until the next bar of the period folds it to missing; a new forming
+    value of a column the bars carry rewrites the period's one bar (with several the
+    frame refuses it, see :meth:`refuses`)."""
 
     schema: Schema
     tf: str
@@ -224,37 +225,57 @@ class TfLedger:
     seed_rows: list[dict] = field(default_factory=list)
     fine: list[tuple[int, dict]] = field(default_factory=list)
     user: dict[str, str] = field(default_factory=dict)  # plain columns added by setitem -> dtype
+    override: dict = field(default_factory=dict)  # forming cells written over missing bar values
 
     def copy(self) -> 'TfLedger':
         return TfLedger(self.schema, self.tf, list(self.seed_index), [dict(r) for r in self.seed_rows],
-                        [(t, dict(r)) for t, r in self.fine], dict(self.user))
+                        [(t, dict(r)) for t, r in self.fine], dict(self.user), dict(self.override))
+
+    def _key(self, ts: int) -> int:
+        return period_start(ts, self.tf, self.schema.tz)
 
     def _open_bars(self) -> list[tuple[int, dict]]:
         """The open period's fine bars: the fine bars of the last period, or the last seed
         row at its label (a constructed forming bar)."""
         if self.fine:
-            key = period_start(self.fine[-1][0], self.tf, self.schema.tz)
-            return [(t, r) for t, r in self.fine if period_start(t, self.tf, self.schema.tz) == key]
+            key = self._key(self.fine[-1][0])
+            return [(t, r) for t, r in self.fine if self._key(t) == key]
         return [(self.seed_index[-1], self.seed_rows[-1])]
 
-    def write(self, writes: dict[int, dict], forming: bool, columns: dict[str, str] | None = None) -> None:
-        """Record writes ``{coarse position: {column: value}}``; ``forming``: the write
-        reached the forming row (or turned a column into data); ``columns`` the plain
-        columns it adds."""
+    def carried(self, col: str) -> bool:
+        """Whether the open period's bars carry ``col`` (a data column already there)."""
+        return col in self.schema.columns or col in self.user
+
+    def refuses(self, col: str, value) -> bool:
+        """Whether the frame refuses a forming write of ``value`` into ``col``: a new
+        forming value of a column the bars carry, over several fine bars."""
+        coarse = self.coarse()
+        if not coarse.rows or not self.carried(col):
+            return False
+        return not _same(coarse.rows[-1].get(col), value) and len(self._open_bars()) > 1
+
+    def write(self, writes: dict[int, dict], columns: dict[str, str] | None = None) -> None:
+        """Record accepted writes ``{coarse position: {column: value}}``; ``columns`` the
+        plain columns they turn into data."""
         coarse = self.coarse()
         if not coarse.rows:
             return
         last = len(coarse.rows) - 1
-        open_bars = self._open_bars()
-        self.user.update(columns or {})
+        open_bars = [(t, dict(r)) for t, r in self._open_bars()]
         rows = [dict(r) for r in coarse.rows]
         for pos, cells in writes.items():
             rows[pos].update(cells)
+        for col, value in writes.get(last, {}).items():
+            if columns and col in columns:
+                self.override[col] = value  # the bars hold it as missing
+            elif self.carried(col) and not _same(coarse.rows[last].get(col), value):
+                self.override.pop(col, None)
+                open_bars[0][1][col] = value  # the period's one bar is rewritten
+        for col in columns or {}:
+            self.override.setdefault(col, rows[last].get(col))
+        self.user.update(columns or {})
         self.seed_rows, self.seed_index = rows[:last], list(coarse.index[:last])
-        if forming:
-            self.fine = [(open_bars[0][0], rows[last])]
-        else:
-            self.fine = [(t, dict(r)) for t, r in open_bars]
+        self.fine = open_bars
 
     def accepts(self, ts: int) -> bool:
         """Whether the fold takes a bar at ``ts`` (documented: no out-of-order bar)."""
@@ -262,6 +283,13 @@ class TfLedger:
         return last is None or ts >= last
 
     def add(self, ts: int, row: dict) -> None:
+        if self.override:
+            if self._key(ts) != self._key(self._open_bars()[-1][0]):
+                # the forming row closes as written: it is final
+                coarse = self.coarse()
+                self.seed_rows, self.seed_index = [dict(r) for r in coarse.rows], list(coarse.index)
+                self.fine = []
+            self.override = {}
         full = {c: row.get(c) for c in self.schema.columns + tuple(self.user)}
         if self.fine and self.fine[-1][0] == ts:
             self.fine[-1] = (ts, full)  # a re-sent bar replaces the one it repeats
@@ -274,7 +302,15 @@ class TfLedger:
         out.rows = [dict(r) for r in self.seed_rows] + rows
         out.index = list(self.seed_index) + labels
         out.user = dict(self.user)
+        if self.override and out.rows:
+            out.rows[-1].update(self.override)
         return out
+
+
+def _same(a, b) -> bool:
+    """Cell equality as the frame judges a forming write (missing equals missing)."""
+    missing = lambda v: v is None or (isinstance(v, float) and math.isnan(v))
+    return (missing(a) and missing(b)) or (not missing(a) and not missing(b) and a == b)
 
 
 def last_close(rows: list[dict]) -> float | None:

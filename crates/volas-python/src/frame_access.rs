@@ -117,13 +117,20 @@ impl PyDataFrame {
             self.check_new_data_column(&name)?;
         }
         // On a time-frame frame the column must fold, and its forming cell is written:
-        // the open period follows (the written forming row is its bar of record).
+        // a new value of a column the open period's bars carry rewrites its one bar (a
+        // forming bar of several fine bars refuses it), a new column enters the bars as
+        // missing — both decided before the write.
+        let mut rewritten = Vec::new();
         if let Some(tfs) = &self.tf {
             tfs.check_data_column(&name, col.dtype())?;
+            let h = self.inner.height();
+            if h > 0 && tfs.check_forming_write(&self.inner, &name, &col.slice(h - 1, h))? {
+                rewritten.push(name.clone());
+            }
         }
         self.inner.set_column(&name, col).map_err(pyerr)?;
         if let Some(tfs) = self.tf.as_mut() {
-            tfs.follow(&self.inner, true)?;
+            tfs.follow(&self.inner, &rewritten)?;
         }
         Ok(())
     }
@@ -200,8 +207,8 @@ impl PyDataFrame {
     /// re-sent while it forms) therefore replaces the last row whole. The last
     /// constructed row is the open period's first bar, so it must not already hold
     /// the finer bars appended after it. Every bar is first made a complete bar of the
-    /// frame's data columns (a column it leaves out is a missing value), and a write
-    /// that reaches the forming row makes that row the open period's single bar.
+    /// frame's data columns (a column it leaves out is a missing value); a column
+    /// written onto the frame later is missing in the open period's earlier bars.
     ///
     /// On any other frame each row is keyed by its index label: a row labelled like
     /// the last row replaces it whole; a ``DatetimeIndex`` only increases (a row
