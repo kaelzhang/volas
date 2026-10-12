@@ -7,7 +7,9 @@
 //! read: when every column read is known complete (the column's own remembered fact,
 //! `Column::has_nan`) that result stands with no scan at all; otherwise the record says
 //! which rows are complete, and the arm runs again over just those rows of the same
-//! inputs, its outputs scattered back. The arms and kernels are unchanged.
+//! inputs, its outputs scattered back. The arms and kernels are unchanged. A read that
+//! failed leaves the record without that input, so the arm's own result — the error —
+//! stands and nothing reruns (see [`Operands::failed`]).
 
 use std::borrow::Cow;
 
@@ -100,14 +102,17 @@ fn on_complete_rows<T>(
 ) -> T {
     let ops = Operands::stopping(df, series);
     let first = run(&ops);
-    if !ops.missing() && ops.clean() {
+    if ops.failed() || (!ops.missing() && ops.clean()) {
         return first;
     }
     if ops.missing() {
         // A column read is known to hold a NaN: the in-place result is thrown away
         // unseen — complete the record without computing, then run on the complete rows.
         ops.probe();
-        let _ = run(&ops);
+        let probed = run(&ops);
+        if ops.failed() {
+            return probed;
+        }
     }
     let recorded = recorded(&ops, true);
     let rows = CompleteRows::of(&inputs(&recorded, usize::MAX));
@@ -170,7 +175,7 @@ pub(crate) fn resume(
     let n = df.height();
     let ops = Operands::new(df, cmd.series);
     let out = run(&ops, from);
-    if ops.clean() || read_in_place(&ops, cmd, from, n) {
+    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, from, n) {
         return out;
     }
     let recorded = recorded(&ops, false);
@@ -202,7 +207,7 @@ pub(crate) fn resume_one<T>(
     // The rows up to and including `row` (an out-of-range `row` resumes in place, where
     // the arm declines it).
     let end = (row + 1).min(df.height());
-    if ops.clean() || read_in_place(&ops, cmd, row, end) {
+    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, row, end) {
         return out;
     }
     let recorded = recorded(&ops, false);
