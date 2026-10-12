@@ -679,6 +679,9 @@ pub fn cog_step(close: &[f64], period: usize, row: usize, state: &[f64], next: &
         return None;
     }
     let mut st = <[f64; COG_STATE]>::try_from(state).ok()?;
+    if !crate::guard::holds_window(row, st[5] as usize, period) {
+        return None;
+    }
     let value = cog_row(close, period, row, &mut st);
     next.copy_from_slice(&st);
     Some(value)

@@ -236,13 +236,17 @@ pub fn maxindex_resume(
         return None;
     }
     // The carried extreme index is original-absolute; map it to this frame's coordinates.
-    let mut hi_idx = (state[0] as usize).saturating_sub(origin);
+    // One before the frame's row 0 has left every window here: it is rebuilt at once.
+    let carried = (state[0] as usize).checked_sub(origin);
+    let mut expired = carried.is_none();
+    let mut hi_idx = carried.unwrap_or(0);
     let mut hi = state[1];
     let mut out = Vec::with_capacity(n - from);
     for today in from..n {
         let trailing = today - (period - 1);
         let tmp = data[today];
-        if hi_idx < trailing {
+        if expired || hi_idx < trailing {
+            expired = false;
             let win = &data[trailing..=today];
             let mut h = win[0];
             let mut hidx = trailing;
@@ -313,13 +317,16 @@ pub fn minindex_resume(
     if period == 0 || from < period - 1 || from > n {
         return None;
     }
-    let mut lo_idx = (state[0] as usize).saturating_sub(origin);
+    let carried = (state[0] as usize).checked_sub(origin);
+    let mut expired = carried.is_none();
+    let mut lo_idx = carried.unwrap_or(0);
     let mut lo = state[1];
     let mut out = Vec::with_capacity(n - from);
     for today in from..n {
         let trailing = today - (period - 1);
         let tmp = data[today];
-        if lo_idx < trailing {
+        if expired || lo_idx < trailing {
+            expired = false;
             let win = &data[trailing..=today];
             let mut l = win[0];
             let mut lidx = trailing;

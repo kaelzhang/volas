@@ -431,6 +431,9 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
     let mut sum = Csum::from_state(&state[..2])?;
     let mut wsum = Csum::from_state(&state[2..4])?;
     let (mut bad, seen) = (state[4] as usize, state[5] as usize);
+    if !crate::guard::holds_window(row, seen, period) {
+        return None;
+    }
     let x = term(row);
     if period == 0 || (seen == 0 && x.is_nan()) {
         // the leading-NaN warm-up: skipped (not a row of the average yet)
