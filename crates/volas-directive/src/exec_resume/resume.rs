@@ -4,17 +4,18 @@
 use crate::complete::BoundCommand;
 use crate::exec::{arg_f64, arg_usize};
 use crate::operands::Operands;
+use crate::spec::Resume;
 use crate::types::Ast;
 use volas_compute::raw::indicators as ind;
 use volas_core::{Column, DataFrame};
 
-use super::as_command;
+use super::{as_command, bound, recursive, resume_of, window_start};
 
 /// Resume `node` from `prev_state` over rows `[from_row, height)`, returning the
-/// new-row [`Column`] and the updated state. `None` when `node` has no resume
-/// kernel (caller falls back to a full recompute). The values are bit-identical to
-/// a fresh full recompute, so writing them into the stale tail keeps the cached
-/// column exact.
+/// new-row [`Column`] and the updated state. `None` when `node` has no resume (the
+/// caller recomputes). The values are bit-identical to a fresh full recompute, so
+/// writing them into the stale tail keeps the cached column exact. It reads a trailing
+/// window of the frame (see `window_start`).
 ///
 /// `origin` is the absolute position of the frame's row 0 (`DataFrame::origin`).
 /// Recursive *value* indicators ignore it; the absolute-position index family adds it,
@@ -26,20 +27,39 @@ pub fn execute_resume(
     from_row: usize,
     origin: usize,
 ) -> Option<(Column, Vec<f64>)> {
-    let (name, sub, args, series) = as_command(node)?;
-    let (name, sub) = (name.as_ref(), sub.as_deref());
-    let cmd = BoundCommand { name, sub, args: &args, series };
-    if crate::spec::is_recursive(name, &args) {
+    let cmd = as_command(node)?;
+    let resume = resume_of(&cmd);
+    if resume == Resume::Recompute || from_row > df.height() {
+        return None;
+    }
+    let bc = bound(&cmd);
+    let start = window_start(node, &cmd, from_row);
+    if recursive(&cmd) {
         // Over the complete rows: a missing new row is NaN, the state untouched.
-        return crate::complete::resume(df, &cmd, prev_state, from_row, |ops, from| {
-            resume_of(ops, &cmd, prev_state, from, origin)
+        return crate::complete::resume(df, &bc, start, prev_state, from_row, |ops, from| {
+            resume_rows(ops, &bc, prev_state, from, origin + ops.start())
         });
     }
-    resume_of(&Operands::new(df, series), &cmd, prev_state, from_row, origin)
+    let ops = Operands::window(df, &cmd.series, start);
+    if resume == Resume::Step {
+        return step_rows(&ops, &bc, prev_state, from_row - start);
+    }
+    resume_rows(&ops, &bc, prev_state, from_row - start, origin + start)
+}
+
+/// A finite-window command's rows `[from, len)` of `ops`, one step at a time.
+fn step_rows(ops: &Operands, cmd: &BoundCommand, prev_state: &[f64], from: usize) -> Option<(Column, Vec<f64>)> {
+    let (mut prev, mut next) = (prev_state.to_vec(), prev_state.to_vec());
+    let mut out = Vec::with_capacity(ops.len().saturating_sub(from));
+    for row in from..ops.len() {
+        out.push(super::window::step(ops, cmd.name, cmd.sub, cmd.args, &prev, row, &mut next)?);
+        std::mem::swap(&mut prev, &mut next);
+    }
+    Some((Column::f64(out), prev))
 }
 
 /// [`execute_resume`] of the bound command `cmd` over every row of `ops`.
-fn resume_of(
+fn resume_rows(
     ops: &Operands,
     cmd: &BoundCommand,
     prev_state: &[f64],
@@ -49,78 +69,6 @@ fn resume_of(
     let (name, sub, args) = (cmd.name, cmd.sub, cmd.args);
     let close = || ops.f64(0, "close");
     match (name, sub) {
-        // Stateless finite-memory resume. These kernels depend only on the row
-        // being refreshed plus a fixed prior row, so append can produce exactly the
-        // stale tail without probing a window or recomputing the full column.
-        ("avgprice", _) => {
-            let open = ops.f64(0, "open").ok()?;
-            let high = ops.f64(1, "high").ok()?;
-            let low = ops.f64(2, "low").ok()?;
-            let close = ops.f64(3, "close").ok()?;
-            let mut out = Vec::with_capacity(open.len().saturating_sub(from_row));
-            for i in from_row..open.len() {
-                out.push((open[i] + high[i] + low[i] + close[i]) / 4.0);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        ("medprice", _) => {
-            let high = ops.f64(0, "high").ok()?;
-            let low = ops.f64(1, "low").ok()?;
-            let mut out = Vec::with_capacity(high.len().saturating_sub(from_row));
-            for i in from_row..high.len() {
-                out.push((high[i] + low[i]) / 2.0);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        ("bop", _) => {
-            let open = ops.f64(0, "open").ok()?;
-            let high = ops.f64(1, "high").ok()?;
-            let low = ops.f64(2, "low").ok()?;
-            let close = ops.f64(3, "close").ok()?;
-            let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
-            for i in from_row..close.len() {
-                let range = high[i] - low[i];
-                out.push(if range < 1e-14 { 0.0 } else { (close[i] - open[i]) / range });
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        ("typprice", _) => {
-            let high = ops.f64(0, "high").ok()?;
-            let low = ops.f64(1, "low").ok()?;
-            let close = ops.f64(2, "close").ok()?;
-            let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
-            for i in from_row..close.len() {
-                out.push((high[i] + low[i] + close[i]) / 3.0);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        ("wclprice", _) => {
-            let high = ops.f64(0, "high").ok()?;
-            let low = ops.f64(1, "low").ok()?;
-            let close = ops.f64(2, "close").ok()?;
-            let mut out = Vec::with_capacity(close.len().saturating_sub(from_row));
-            for i in from_row..close.len() {
-                out.push((high[i] + low[i] + 2.0 * close[i]) / 4.0);
-            }
-            Some((Column::f64(out), Vec::new()))
-        }
-        ("tr", _) => {
-            let high = ops.f64(0, "high").ok()?;
-            let low = ops.f64(1, "low").ok()?;
-            let close = ops.f64(2, "close").ok()?;
-            let out = (from_row..high.len())
-                .map(|i| if i == 0 { f64::NAN } else { ind::tr_at(&high, &low, &close, i) })
-                .collect();
-            Some((Column::f64(out), Vec::new()))
-        }
-        ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => {
-            let kind = ind::Momentum::of(name)?;
-            let data = close().ok()?;
-            let period = arg_usize(args, 0);
-            let out = (from_row..data.len()).map(|i| kind.at(&data, period, i)).collect();
-            Some((Column::f64(out), Vec::new()))
-        }
-
         ("obv", _) => {
             let real = ops.f64(0, "close").ok()?;
             let volume = ops.f64(1, "volume").ok()?;
@@ -192,6 +140,18 @@ fn resume_of(
             Some((Column::f64(vals), st))
         }
 
+        // kcw = 2·mult·ATR/EMA over the Keltner band's EMA + ATR pair.
+        ("kcw", _) => {
+            let high = ops.f64(0, "high").ok()?;
+            let low = ops.f64(1, "low").ok()?;
+            let close = ops.f64(2, "close").ok()?;
+            let (ema, ema_state) = ind::ema_resume(&close, arg_usize(args, 0), from_row, &prev_state[0..1]);
+            let (atr, atr_state) =
+                ind::atr_resume(&high, &low, &close, arg_usize(args, 1), from_row, &prev_state[1..2])?;
+            let m = arg_f64(args, 2);
+            let vals = ema.iter().zip(&atr).map(|(&e, &a)| ind::kcw_value(e, a, m)).collect();
+            Some((Column::f64(vals), vec![ema_state[0], atr_state[0]]))
+        }
         // Keltner Channels (Group B): middle resumes the EMA; bands resume the EMA + ATR pair.
         ("keltner", None) => {
             let (vals, st) = ind::ema_resume(

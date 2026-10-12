@@ -19,9 +19,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # Windowed frames: recursive columns are not bit-exact with the unbounded
     # history, and a base write restarts carried state on the retained rows only.
     'windowed-drift',
-    # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
-    # while df[d] names the column from the bound values ('ma:5', 'sar').
-    'stringify-column-name',
     # A recursive cached column without a carried state (a composite / explicit
     # series) is not continued across a slice that drops its history's start: it
     # stays as data (it cannot be continued exactly, so it is never re-warmed).

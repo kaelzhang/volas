@@ -1,7 +1,7 @@
 //! Inventory and data classes for the resume-vs-full matrix.
 //!
 //! The output lines are derived, never hand-listed: commands from `spec::COMMANDS`,
-//! sub-command tokens from every `Some("..")` match in `spec.rs` (validated by
+//! sub-command tokens from every `Some("..")` match in the spec's command table (validated by
 //! `command_spec` after `canon_sub`), candlestick patterns from `CANDLE_PATTERNS`, and
 //! argument values from each slot's `ArgBound` / `ArgDefault`.
 
@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 use volas_core::{Column, DataFrame};
 use volas_directive::spec::{canon_sub, command_spec, Arg, ArgBound, ArgDefault, COMMANDS};
 
-/// The spec source, read for its sub-command tokens.
-const SPEC_RS: &str = include_str!("../../src/spec.rs");
+/// The spec source, read for its sub-command tokens: the aliases and the table.
+const SPEC_RS: &str = concat!(include_str!("../../src/spec/mod.rs"), include_str!("../../src/spec/table.rs"));
 
 /// Every token named inside a `Some(..)` in the spec (sub-commands and aliases).
 fn sub_tokens() -> BTreeSet<String> {
@@ -59,10 +59,11 @@ pub fn lines() -> Vec<Line> {
             if !seen.insert(head.clone()) {
                 continue;
             }
-            let series = match cmd {
-                "correl" | "beta" => "@close,open",
-                "mavp" => "@close,volume",
-                "repeat" => "@close",
+            // a required operand (an empty default) filled in
+            let series = match spec.series {
+                [_, ""] if cmd == "mavp" => "@close,volume",
+                [_, ""] => "@close,open",
+                [""] => "@close",
                 _ => "",
             };
             out.push(Line { head, args: spec.args.to_vec(), series });

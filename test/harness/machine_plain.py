@@ -10,6 +10,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import initialize, precondition, rule
 
 import volas
+import volas_rs
 
 from . import build, contracts, inventory, observe
 from .directives import stored_bare_names
@@ -254,7 +255,7 @@ class PlainMachine(FrameMachine):
             name = data.draw(st.sampled_from([ln.canonical for ln in executable_lines()][:40]))
         else:
             name = data.draw(st.sampled_from(list(self.df.columns)))
-        bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
+        bare = set(volas_rs._directive_bare_commands)
         if name in bare and any(name in stored_bare_names(key) for key in self.cached if key != name):
             if contracts.COLUMN_UNDER_A_CACHED_COMMAND_RAISES:
                 self.attempt(lambda: self.df.__setitem__(name, np.zeros(len(self.df))),

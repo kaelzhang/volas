@@ -187,3 +187,64 @@ fn resume_equals_full_recompute_for_every_line_class_and_point() {
         unexpected.iter().map(|((h, c), w)| format!("  {h} [{c}]: {w}")).collect::<Vec<_>>().join("\n"));
     assert!(fixed.is_empty(), "KNOWN_DIVERGENT entries no longer diverge (remove them): {fixed:?}");
 }
+
+/// Far into a long series a continuation reads only a trailing window of the frame: for
+/// every line, the `Vec` resume and the single-row step from a carried state equal the
+/// full recompute — and a line whose spec declares a resume never declines there, also
+/// with a missing row inside or before the window.
+#[test]
+fn a_continuation_far_into_the_series_reads_a_window_exactly() {
+    use volas_directive::spec::Resume;
+    use volas_directive::types::Node;
+    const LONG: usize = 400;
+    let classes = matrix::classes(LONG);
+    let mut fails = Vec::new();
+    let mut stepped = 0usize;
+    for line in &matrix::lines() {
+        for text in matrix::variants(line) {
+            let node = parse(&text).unwrap();
+            let declared = match &*node {
+                Node::Command(c) => c.args.spec.resume(&c.args),
+                _ => Resume::Recompute,
+            };
+            let picked = ["walk", "nan-close", "early-missing-bar", "constant"];
+            for data in classes.iter().filter(|d| picked.contains(&d.name)) {
+                let df = &data.frame;
+                let Some(whole) = full(df, &node) else { continue };
+                for from in [LONG - 40, LONG - 1] {
+                    let head = df.slice(0, from);
+                    let Ok(head_col) = execute(&head, &node) else { continue };
+                    let Some(state) = initial_state(&head, &node, &head_col) else {
+                        if declared != Resume::Recompute {
+                            fails.push(format!("{text} [{}] from {from}: no state", data.name));
+                        }
+                        continue;
+                    };
+                    match execute_resume(df, &node, &state, from, 0) {
+                        Some((tail, _)) => {
+                            if let Some(d) = first_diff(&values(&tail), &whole[from..]) {
+                                fails.push(format!("{text} [{}] from {from}: vec {d}", data.name));
+                            }
+                        }
+                        None => fails.push(format!("{text} [{}] from {from}: the vec resume declined", data.name)),
+                    }
+                    let mut next = vec![0.0; state.len()];
+                    match execute_resume_step(df, &node, &state, from, &mut next) {
+                        Some(v) => {
+                            stepped += 1;
+                            if !same(v, whole[from]) {
+                                fails.push(format!("{text} [{}] from {from}: step {v:?} != {:?}", data.name, whole[from]));
+                            }
+                        }
+                        None if declared == Resume::Step => {
+                            fails.push(format!("{text} [{}] from {from}: the step declined", data.name));
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+    }
+    assert!(stepped > 500, "only {stepped} steps ran");
+    assert!(fails.is_empty(), "{} failure(s):\n{}", fails.len(), fails.join("\n"));
+}

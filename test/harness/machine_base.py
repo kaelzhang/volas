@@ -26,6 +26,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
 import volas
+import volas_rs
 
 from . import contracts, inventory, observe
 from .data import EXTREME_SCALES
@@ -218,9 +219,10 @@ class FrameMachine(RuleBasedStateMachine):
     # --- shared ops -----------------------------------------------------------------------
 
     def command_columns(self) -> set[str]:
-        """The frame's data columns named like a built-in command usable bare."""
-        from .inventory import executable_lines
-        bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
+        """The frame's data columns named like a built-in command usable bare (the
+        spec's fact, as volas publishes it: `repeat`, whose operand is required, is not
+        one)."""
+        bare = set(volas_rs._directive_bare_commands)
         return {c for c in self.df.columns if c in bare and c not in self.cached}
 
     def _directive_ok(self, d: Directive) -> bool:
@@ -278,7 +280,7 @@ class FrameMachine(RuleBasedStateMachine):
             added = set(self.df.columns) - before
             assert len(added) <= 1, f'df[{d.text!r}] added several columns {added}'
             col = added.pop() if added else column
-            if contracts.COLUMN_NAME_IS_STRINGIFY and not contracts.avoids('stringify-column-name'):
+            if contracts.COLUMN_NAME_IS_STRINGIFY:
                 assert col == name, f'df[{d.text!r}] cached as {col!r}, directive_stringify says {name!r}'
             assert col in self.df.columns and self.df.is_computed(col), f'df[{d.text!r}] did not cache'
             got = observe.column_values_series(series)

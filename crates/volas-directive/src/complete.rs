@@ -16,23 +16,24 @@ use std::borrow::Cow;
 use volas_compute::missing::{CompleteRows, Input, ResumeRows};
 use volas_core::{Column, DataFrame, Result};
 
-use crate::lookback::own_lookback;
 use crate::operands::Operands;
+use crate::spec::CommandSpec;
 use crate::types::{ArgValue, Ast};
 
-/// A bound command: canonical name / sub, typed arguments, `@` series.
+/// A bound command: canonical name / sub, typed arguments, `@` series, its line's spec.
 #[derive(Clone, Copy)]
 pub(crate) struct BoundCommand<'a> {
     pub(crate) name: &'a str,
     pub(crate) sub: Option<&'a str>,
     pub(crate) args: &'a [ArgValue],
     pub(crate) series: &'a [Ast],
+    pub(crate) spec: &'a CommandSpec,
 }
 
 impl BoundCommand<'_> {
     /// How many rows before its first new row a resume of the command reads, at most.
     fn reach(&self) -> usize {
-        own_lookback(self.name, self.sub, self.args) + 1
+        self.spec.lookback_of(self.args) + 1
     }
 }
 
@@ -58,7 +59,7 @@ fn recorded<'o>(ops: &'o Operands, remember: bool) -> Vec<Recorded<'o>> {
     ops.reads()
         .map(|(slot, read)| Recorded {
             slot,
-            values: read.view(),
+            values: Cow::Borrowed(read.view()),
             has_nan: if remember { Some(read.has_nan()) } else { read.known_has_nan() },
         })
         .collect()
@@ -68,8 +69,9 @@ fn inputs<'v>(recorded: &'v [Recorded], end: usize) -> Vec<Input<'v>> {
     recorded.iter().map(|r| r.input(end)).collect()
 }
 
-/// Operands that read, for each recorded slot, `gather(values)`.
+/// Operands that read, for each slot `ops` recorded, `gather(values)`.
 fn over<'v>(
+    ops: &Operands<'v>,
     df: &'v DataFrame,
     series: &'v [Ast],
     recorded: &'v [Recorded<'v>],
@@ -80,7 +82,7 @@ fn over<'v>(
     for r in recorded {
         views[r.slot] = Some(gather(&r.values));
     }
-    Operands::over(df, series, views)
+    Operands::over(df, series, ops.start(), views)
 }
 
 /// A result column's values as `f64`, taken over without a copy when they are.
@@ -119,7 +121,7 @@ fn on_complete_rows<T>(
     if rows == CompleteRows::All {
         return first; // the inputs turned out complete: the in-place run stands
     }
-    let out = run(&over(df, series, &recorded, |v| rows.gather(v)));
+    let out = run(&over(&ops, df, series, &recorded, |v| rows.gather(v)));
     finish(out, &rows, df.height())
 }
 
@@ -152,7 +154,7 @@ pub(crate) fn state(
 fn read_in_place(ops: &Operands, cmd: &BoundCommand, from: usize, end: usize) -> bool {
     let mut reach = None; // only needed for an input that must be scanned
     ops.reads().all(|(slot, read)| {
-        let r = Recorded { slot, values: read.view(), has_nan: read.known_has_nan() };
+        let r = Recorded { slot, values: Cow::Borrowed(read.view()), has_nan: read.known_has_nan() };
         r.has_nan == Some(false)
             || ResumeRows::in_place(r.input(end), from, *reach.get_or_insert_with(|| cmd.reach()))
     })
@@ -160,7 +162,10 @@ fn read_in_place(ops: &Operands, cmd: &BoundCommand, from: usize, end: usize) ->
 
 /// Resume a recursive command over the new rows `[from, height)` from `prev_state`, on
 /// the complete rows only: a missing new row is NaN and leaves the state where the last
-/// complete row put it. `run(operands, from)` is its resume arm.
+/// complete row put it. `run(operands, from)` is its resume arm, over the rows the
+/// operands read: from `start` on (a trailing window, see [`Operands::window`]) — or,
+/// when that window holds a missing row, the whole frame (the complete rows the resume
+/// reads before its new ones may lie before the window).
 ///
 /// The arm runs in place first: when every input it read is known complete, or the
 /// rows it read turn out complete, that is the answer. Otherwise it runs again over the
@@ -168,15 +173,20 @@ fn read_in_place(ops: &Operands, cmd: &BoundCommand, from: usize, end: usize) ->
 pub(crate) fn resume(
     df: &DataFrame,
     cmd: &BoundCommand,
+    start: usize,
     prev_state: &[f64],
     from: usize,
     run: impl Fn(&Operands, usize) -> Option<(Column, Vec<f64>)>,
 ) -> Option<(Column, Vec<f64>)> {
-    let n = df.height();
-    let ops = Operands::new(df, cmd.series);
-    let out = run(&ops, from);
-    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, from, n) {
+    let ops = Operands::window(df, cmd.series, start);
+    let (start, n) = (ops.start(), df.height() - ops.start());
+    let local = from - start;
+    let out = run(&ops, local);
+    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, local, n) {
         return out;
+    }
+    if start > 0 {
+        return resume(df, cmd, 0, prev_state, from, run);
     }
     let recorded = recorded(&ops, false);
     let refs: Vec<&[f64]> = recorded.iter().map(|r| r.values.as_ref()).collect();
@@ -184,7 +194,7 @@ pub(crate) fn resume(
     if !rows.has_new() {
         return Some((Column::f64(vec![f64::NAN; n - from]), prev_state.to_vec()));
     }
-    let gathered = over(df, cmd.series, &recorded, |v| {
+    let gathered = over(&ops, df, cmd.series, &recorded, |v| {
         Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
     });
     let (col, st) = run(&gathered, rows.from)?;
@@ -192,23 +202,29 @@ pub(crate) fn resume(
 }
 
 /// Resume a recursive command at the single row `row` (the scalar twin of [`resume`]):
-/// `missing` when that row is missing, else `run(operands, row)` on the complete rows.
-/// As there, the arm runs in place first and its answer stands when the rows it read
-/// are complete; an `@` operand is evaluated once.
+/// `missing` when that row is missing, else `run(operands, row)` on the complete rows,
+/// over the rows from `start` on (as there, the whole frame when that window holds a
+/// missing row). The arm runs in place first and its answer stands when the rows it
+/// read are complete; an `@` operand is evaluated once.
 pub(crate) fn resume_one<T>(
     df: &DataFrame,
     cmd: &BoundCommand,
+    start: usize,
     row: usize,
     missing: impl FnOnce() -> Option<T>,
     mut run: impl FnMut(&Operands, usize) -> Option<T>,
 ) -> Option<T> {
-    let ops = Operands::new(df, cmd.series);
-    let out = run(&ops, row);
+    let ops = Operands::window(df, cmd.series, start.min(row));
+    let start = ops.start();
+    let out = run(&ops, row - start);
     // The rows up to and including `row` (an out-of-range `row` resumes in place, where
     // the arm declines it).
-    let end = (row + 1).min(df.height());
-    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, row, end) {
+    let end = (row + 1).min(df.height()) - start;
+    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, row - start, end) {
         return out;
+    }
+    if start > 0 {
+        return resume_one(df, cmd, 0, row, missing, run);
     }
     let recorded = recorded(&ops, false);
     let upto: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..end]).collect();
@@ -216,7 +232,7 @@ pub(crate) fn resume_one<T>(
     if !rows.has_new() {
         return missing();
     }
-    let gathered = over(df, cmd.series, &recorded, |v| {
+    let gathered = over(&ops, df, cmd.series, &recorded, |v| {
         Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
     });
     run(&gathered, rows.from)

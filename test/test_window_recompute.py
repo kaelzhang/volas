@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import volas
+import volas_rs
 from volas import DataFrame
 
 from .test_window_locality import ABSOLUTE_POSITION, FINITE, SUBCOMMANDS, _command, _directive
@@ -91,13 +92,10 @@ def _window_matches(directive, data):
 
 
 def test_the_accumulating_commands_are_the_ones_the_engine_resumes():
-    """`spec::accumulates` (which decides that a refresh resumes rather than recomputes
-    a window) names exactly the commands this test finds accumulating."""
-    src = (ROOT / "crates/volas-directive/src/spec.rs").read_text()
-    body = re.search(r"pub fn accumulates\(.*?\{(.*?)\n\}", src, re.S).group(1)
-    named = set(re.findall(r'"([a-z0-9_]+)" =>', body))
-    named |= set(re.findall(r'"([a-z0-9_]+)"', re.search(r"matches!\(\s*name,(.*?)\)", body, re.S).group(1)))
-    assert named == {k.split(".")[0] for k in ACCUMULATING}
+    """The spec's history class (which decides that a refresh resumes rather than
+    recomputes a window) names exactly the lines this test finds accumulating."""
+    named = {k for k in _KEYS if volas_rs._directive_facts(_directive(k))["accumulates"]}
+    assert named == {k for k in _KEYS if k in ACCUMULATING}
 
 
 @pytest.mark.parametrize("key", [k for k in _KEYS if k not in ACCUMULATING])

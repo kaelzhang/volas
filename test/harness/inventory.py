@@ -2,7 +2,7 @@
 
 * Commands: the extension's own registry (``volas_rs._directive_commands``).
 * Sub-command / alias tokens: every token the spec's sub-command matches name
-  (``canon_sub`` and ``command_spec`` in ``spec.rs``) plus the candlestick registry
+  (``canon_sub`` and ``command_spec`` in the ``spec`` module) plus the candlestick registry
   (``CANDLE_PATTERNS``); which ``(command, token)`` pairs exist is decided by the
   directive validator itself (``volas.directive_stringify``).
 * Argument arity and domains: probed through the validator — the "accepts at most
@@ -28,7 +28,7 @@ import volas_rs
 from . import observe
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC_RS = ROOT / 'crates/volas-directive/src/spec.rs'
+SPEC_DIR = ROOT / 'crates/volas-directive/src/spec'
 PARSER_RS = ROOT / 'crates/volas-directive/src/parser.rs'
 COMPUTE_SRC = ROOT / 'crates/volas-compute/src'
 
@@ -68,11 +68,11 @@ def _const_names(path: Path, const: str) -> list[str]:
 
 def commands() -> list[str]:
     registry = getattr(volas_rs, '_directive_commands', None)
-    return list(registry) if registry else _const_names(SPEC_RS, 'COMMANDS')
+    return list(registry) if registry else _const_names(SPEC_DIR / 'mod.rs', 'COMMANDS')
 
 
 def _sub_tokens() -> list[str]:
-    src = SPEC_RS.read_text()
+    src = ''.join(path.read_text() for path in sorted(SPEC_DIR.glob('*.rs')))
     tokens: set[str] = set()
     for group in re.findall(r'Some\(([^()]*)\)', src):
         tokens.update(re.findall(r'"([a-z_0-9]+)"', group))

@@ -11,13 +11,13 @@ Every incremental path (the plain append resume, the tf forming row, the period
 rollover) must agree with a from-scratch full recompute, row for row.
 """
 
-import re
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 import volas
+import volas_rs
 from volas import DataFrame
 
 from test.test_window_locality import RECURSIVE, SUBCOMMANDS
@@ -192,10 +192,13 @@ def test_a_required_operand_left_out_is_still_an_error():
 
 
 def test_every_recursive_command_is_covered():
-    """The Rust classification of recursive commands is exactly the one exercised here."""
-    src = "".join(p.read_text() for p in (ROOT / "crates/volas-directive/src").rglob("*.rs"))
-    body = re.search(r"fn is_recursive_name\(name: &str\) -> bool \{\s*matches!\((.*?)\)", src, re.S).group(1)
-    assert set(re.findall(r'"([a-z0-9_]+)"', body)) == set(RECURSIVE)
+    """The spec's classification of recursive lines is exactly the one exercised here:
+    each command recursive whatever its arguments (not a generic average's type)."""
+    lines = {**RECURSIVE, **{k: d for k, d in SUBCOMMANDS.items()}}
+    recursive = {k.split(".", 1)[0] for k, d in lines.items()
+                 if volas_rs._directive_facts(d)["history"] == "recursive"
+                 and not volas_rs._directive_facts(d)["accumulates"]}
+    assert recursive == set(RECURSIVE)
 
 
 @pytest.mark.parametrize("directive", sorted(CASES))

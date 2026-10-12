@@ -494,11 +494,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether the `+` / `-` at the cursor is a sign inside the argument that began at
-    /// `start`: it opens the argument, or follows the `e` / `E` of a numeric exponent.
+    /// `start`: it opens the argument before a digit or a point (`-1`, `+.5`), or
+    /// follows the `e` / `E` of a numeric exponent. Any other `+` / `-` is an operator
+    /// ending the argument — after an empty argument list too (`obv:+ma:3`).
     fn is_sign_in_number(&self, start: usize) -> bool {
         let i = self.i;
+        let opens_number = || matches!(self.peek2(), Some(c) if c.is_ascii_digit() || c == b'.');
         matches!(self.s[i], b'+' | b'-')
-            && (i == start
+            && ((i == start && opens_number())
                 || (i >= start + 2
                     && matches!(self.s[i - 1], b'e' | b'E')
                     && self.s[i - 2].is_ascii_digit()))

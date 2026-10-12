@@ -66,7 +66,6 @@ def test_a_composite_never_reads_a_stale_cached_column():
     assert _same(df['close - obv'], _frame(cols, 0, 30)['close - obv'])
 
 
-@_xfail('H1 stringify-column-name', 'directive_stringify keeps argument spellings the column name normalizes')
 @pytest.mark.parametrize('directive', ['ma:05', 'sar:0.020', 'stddev:2,1.50', 'boll.upper:20,2.0'])
 def test_stringify_is_the_cached_column_name(directive):
     df = _frame(_walk(30), 0, 30)

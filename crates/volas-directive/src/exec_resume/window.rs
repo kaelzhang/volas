@@ -1,8 +1,9 @@
 //! The resumable finite-window commands: those whose full computation carries a running
-//! accumulator across the series (a sliding sum, sum of squares, weighted sum, …). Each
-//! resumes from the kernel's own state — its running sums in its exact operation order —
-//! one row at a time, bit-identical to recomputing the column; a finite-window command
-//! that accumulates nothing recomputes its last window instead (exact for it).
+//! accumulator across the series (a sliding sum, sum of squares, weighted sum, …), and
+//! the formulas of a row's own inputs (price transforms, TR, the momentum family). Each
+//! resumes from the kernel's own state — its running sums in its exact operation order,
+//! or nothing — one row at a time, bit-identical to recomputing the column; any other
+//! finite-window command recomputes its last window instead (exact for it).
 //!
 //! The states and steps live next to their kernels in `volas_compute::raw`; this module
 //! binds a command's arguments and inputs to them. The commands composed of moving
@@ -31,6 +32,9 @@ pub(crate) fn state(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgVa
         ))
     };
     match (name, sub) {
+        // a formula of its own row (and a fixed prior one) carries nothing
+        ("avgprice" | "medprice" | "typprice" | "wclprice" | "tr" | "bop", _)
+        | ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => Some(Vec::new()),
         ("ma", _) => ind::ma_state(&close()?, p(0), p(1), ops.origin()),
         ("wma", _) => ind::ma_state(&close()?, p(0), 2, ops.origin()),
         ("trima", _) => ind::trima_state(&close()?, p(0), ops.origin()),
@@ -132,7 +136,37 @@ pub(crate) fn step(
             ops.f64(3, "close").ok()?,
         ))
     };
+    if row >= ops.len() {
+        return None;
+    }
     match (name, sub) {
+        // a formula of its own row (and a fixed prior one)
+        ("avgprice", _) => {
+            let (o, h, l, c) = ohlc()?;
+            Some((o[row] + h[row] + l[row] + c[row]) / 4.0)
+        }
+        ("medprice", _) => {
+            let (h, l) = hl()?;
+            Some((h[row] + l[row]) / 2.0)
+        }
+        ("bop", _) => {
+            let (o, h, l, c) = ohlc()?;
+            let range = h[row] - l[row];
+            Some(if range < 1e-14 { 0.0 } else { (c[row] - o[row]) / range })
+        }
+        ("typprice", _) => {
+            let (h, l, c) = hlc()?;
+            Some((h[row] + l[row] + c[row]) / 3.0)
+        }
+        ("wclprice", _) => {
+            let (h, l, c) = hlc()?;
+            Some((h[row] + l[row] + 2.0 * c[row]) / 4.0)
+        }
+        ("tr", _) => {
+            let (h, l, c) = hlc()?;
+            Some(if row == 0 { f64::NAN } else { ind::tr_at(&h, &l, &c, row) })
+        }
+        ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => Some(ind::Momentum::of(name)?.at(&close()?, p(0), row)),
         ("ma", _) => ind::ma_step(&close()?, p(0), p(1), row, prev, next),
         ("wma", _) => ind::ma_step(&close()?, p(0), 2, row, prev, next),
         ("trima", _) => ind::trima_step(&close()?, p(0), row, prev, next),

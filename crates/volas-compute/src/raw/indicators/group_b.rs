@@ -410,15 +410,18 @@ pub fn kcw(
 ) -> Vec<f64> {
     let ema = super::ema(close, ema_period);
     let atr = super::atr(high, low, close, atr_period);
-    (0..close.len())
-        .map(|i| {
-            if ema[i] != 0.0 {
-                2.0 * mult * atr[i] / ema[i]
-            } else {
-                f64::NAN
-            }
-        })
-        .collect()
+    (0..close.len()).map(|i| kcw_value(ema[i], atr[i], mult)).collect()
+}
+
+/// One KCW value from the row's EMA and ATR: `2·mult·ATR/EMA`, NaN where the EMA is 0 —
+/// the one formula the full kernel and the resumed rows share.
+#[inline]
+pub fn kcw_value(ema: f64, atr: f64, mult: f64) -> f64 {
+    if ema != 0.0 {
+        2.0 * mult * atr / ema
+    } else {
+        f64::NAN
+    }
 }
 
 /// Keltner band state `[ema, atr]` after a full compute, or `None` before both seed. The

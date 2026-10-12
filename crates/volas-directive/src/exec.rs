@@ -1,30 +1,16 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
-use std::borrow::Cow;
 
 use crate::bind::bind_command;
 use crate::operands::Operands;
-use crate::types::{ArgValue, Ast, Node, Number, Op, UnaryOp};
+use crate::spec::History;
+use crate::types::{ArgValue, Ast, Bound, Command, Node, Number, Op, UnaryOp};
 use volas_compute::raw::indicators as ind;
 use volas_compute::missing::{on_complete_rows, Input};
 use volas_core::{BoolOp, CmpOp, Column};
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
 use volas_time::Span;
-
-/// Execute for the computed-column REFRESH path: identical to [`execute`]
-/// except a bare `Name` node is dispatched as a COMMAND, never resolved as a
-/// column. The refresh caller knows the node IS the directive being recomputed
-/// (a computed meta only exists for a validated command), and the live frame
-/// already holds the *stale* cached column under that very name — resolving it
-/// would return the stale cache instead of recomputing (a self-referential
-/// no-op).
-pub fn execute_refresh(df: &DataFrame, node: &Ast) -> Result<Column> {
-    match node {
-        Node::Name(name) if !name.is_empty() => exec_bare_command(df, name),
-        _ => execute(df, node),
-    }
-}
 
 /// Execute a directive node against `df`.
 ///
@@ -44,10 +30,12 @@ pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
             if df.has_column(name) {
                 Ok(df.column(name)?.clone())
             } else {
-                exec_bare_command(df, name)
+                // not bound against a frame (`crate::bind::bind_frame`): a bare name that
+                // is no column is the command it names
+                dispatch(df, &bind_command(name, None, &[], &[])?)
             }
         }
-        Node::Command(cmd) => dispatch(df, &cmd.name, cmd.sub.as_deref(), &cmd.args, &cmd.series),
+        Node::Command(cmd) => dispatch(df, cmd),
         Node::Unary { op, operand } => {
             let c = execute(df, operand)?;
             require_numeric(&c)?; // a str/datetime operand can't go through the f64 funnel (C4)
@@ -190,29 +178,6 @@ pub(crate) fn require_f64_input(col: &Column) -> Result<()> {
     col.check_f64_domain("an indicator input")
 }
 
-/// Borrow a frame column as `&[f64]` without copying when it is already `F64`;
-/// otherwise convert (e.g. an `I64` volume column). A command's arm reads its inputs
-/// through [`Operands`](crate::operands::Operands) instead.
-pub(crate) fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
-    let col = df.column(name)?;
-    require_f64_input(col)?;
-    Ok(match col.as_f64() {
-        Some(s) => Cow::Borrowed(s),
-        None => Cow::Owned(col.to_f64_vec()),
-    })
-}
-
-/// A boolean operand's truths, row by row: a bool reads its value, a number
-/// `x != 0`, and a missing cell is a missing truth (contract #27).
-pub(crate) fn series_truths(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<Option<bool>>> {
-    let node = series
-        .get(i)
-        .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
-    let col = execute(df, node)?;
-    require_numeric(&col)?;
-    Ok((0..col.len()).map(|i| col.truth_at(i)).collect())
-}
-
 /// The generic moving average (TA-Lib `TA_MA`, [`ind::generic_ma`]) of `period` and
 /// `matype` over `data`. A recursive average runs on the complete rows of its input — the
 /// input may be a derived line that warms up with NaN (see `volas_compute::missing`). A
@@ -234,37 +199,20 @@ mod momentum;
 mod overlap;
 pub(crate) use overlap::percent_oscillator;
 
-/// The dispatch entry point: a bound command (canonical name / sub, typed args,
-/// bound series) routed to its kernel. Validation / defaulting / normalization
-/// already happened at `bind`, so this is pure dispatch — the `overlap` ->
-/// `momentum` -> `cycle` chain is an internal split of the one command table. A
-/// recursive command runs on the complete rows of its inputs (see `crate::complete`).
-fn dispatch(
-    df: &DataFrame,
-    name: &str,
-    sub: Option<&str>,
-    args: &[ArgValue],
-    series: &[Ast],
-) -> Result<Column> {
-    if crate::spec::is_recursive(name, args) {
-        return crate::complete::compute(df, series, |ops| overlap::dispatch(ops, name, sub, args));
+/// The dispatch entry point: a bound command (canonical name / sub, typed args, bound
+/// series, its line's spec) routed to its kernel. Validation / defaulting /
+/// normalization already happened at `bind`, so this is pure dispatch — the `overlap`
+/// -> `momentum` -> `cycle` chain is an internal split of the one command table. A
+/// recursive line runs on the complete rows of its inputs (see `crate::complete`).
+fn dispatch(df: &DataFrame, cmd: &Command<Bound>) -> Result<Column> {
+    let (name, sub, args) = (cmd.name.as_str(), cmd.sub.as_deref(), &cmd.args.values[..]);
+    if cmd.args.spec.history(args) == History::Recursive {
+        return crate::complete::compute(df, &cmd.series, |ops| overlap::dispatch(ops, name, sub, args));
     }
-    overlap::dispatch(&Operands::new(df, series), name, sub, args)
+    overlap::dispatch(&Operands::new(df, &cmd.series), name, sub, args)
 }
 
-/// Execute a bare `Name` that is not a frame column: bind it as a no-argument
-/// command — the same single `bind` a parsed command gets, so it validates the
-/// name / sub and resolves any defaults — then dispatch. A bare name needing a
-/// sub-command, or a required argument, errors here rather than reaching dispatch.
-fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
-    let cmd = bind_command(name, None, &[], &[])?;
-    dispatch(df, &cmd.name, cmd.sub.as_deref(), &cmd.args, &cmd.series)
-}
-
-pub use crate::exec_resume::{
-    execute_resume, execute_resume_default_series, execute_resume_default_series_one,
-    execute_resume_step, initial_state,
-};
+pub use crate::exec_resume::{execute_resume, execute_resume_step, initial_state};
 
 /// `hv`'s annualization factor √(bars per year), from its bound arguments
 /// `[period, time_frame, trading_days, session_minutes]` — the one owner of the rule,

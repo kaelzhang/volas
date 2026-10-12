@@ -49,7 +49,7 @@ def test_a_tail_slice_continues_exactly_or_not_at_all(line):
             assert _same(got, want), (d, keep, got, want)
 
 
-@pytest.mark.parametrize('d', ['kcw:5', 'stoch_momentum:5', 'close+ema:3@open'])
+@pytest.mark.parametrize('d', ['crsi:3,2,5', 'stoch_momentum:5', 'close+ema:3@open'])
 def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
     # no carried state: a slice from the column's first row recomputes it all (kept,
     # exact); a later start would restart the recursion, so the column is plain data
@@ -66,10 +66,10 @@ def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
 def test_a_window_keeps_a_stateless_recursion_across_its_compaction():
     # a bounded window drops its older rows by design: its cached columns recompute over
     # the rows it retains (the max_lookback margin), so a recursion stays cached
-    w = volas.DataFrame({k: v[:40] for k, v in COLS.items()}, window=5, max_lookback=['kcw:5'])
-    w['kcw:5']
+    w = volas.DataFrame({k: v[:40] for k, v in COLS.items()}, window=5, max_lookback=['stoch_momentum:5'])
+    w['stoch_momentum:5']
     for i in range(40, N):
         w.append(volas.DataFrame({k: v[i:i + 1] for k, v in COLS.items()}))
     assert w._physical_height < N - 40
-    assert w.is_computed('kcw:5')
-    assert not np.isnan(w['kcw:5'].to_numpy()[-1])
+    assert w.is_computed('stoch_momentum:5')
+    assert not np.isnan(w['stoch_momentum:5'].to_numpy()[-1])

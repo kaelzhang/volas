@@ -14,15 +14,17 @@
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
-use super::{ComputedMeta, DataFrame, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
+use super::{ComputedMeta, DataFrame, Directive, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
 
-/// A stale cached column as the refresh reads it: its name, reach, valid-row
-/// cursor, and whether its processed history is past the warm-up
+/// A stale cached column as the refresh reads it: its name, bound directive, reach,
+/// valid-row cursor, and whether its processed history is past the warm-up
 /// ([`ComputedMeta::warm`]).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct StaleComputed {
     /// The column (= its canonical directive).
     pub name: String,
+    /// The bound directive it computes.
+    pub directive: Directive,
     /// The rows the column reads around its own.
     pub reach: Reach,
     /// Rows `[0, valid_rows)` hold valid values.
@@ -37,13 +39,14 @@ impl DataFrame {
         self.first_computed = self.computed.keys().filter_map(|k| self.name_to_idx.get(k).copied()).min();
     }
 
-    /// Record that column `name` is a materialized directive result (valid for
-    /// all current rows), its history starting at this frame's row 0, reading `reach`
-    /// rows around its own.
-    pub fn set_computed(&mut self, name: &str, reach: Reach) {
+    /// Record that column `name` is a materialized result of `directive` (valid for all
+    /// current rows), its history starting at this frame's row 0, reading `reach` rows
+    /// around its own.
+    pub fn set_computed(&mut self, name: &str, directive: Directive, reach: Reach) {
         self.computed.insert(
             name.to_string(),
             ComputedMeta {
+                directive,
                 reach,
                 valid_rows: self.height,
                 state: None,
@@ -169,6 +172,11 @@ impl DataFrame {
         Some((meta.state.as_deref()?, self.origin))
     }
 
+    /// The bound directive the cached column `name` computes, if it is one.
+    pub fn computed_directive(&self, name: &str) -> Option<&Directive> {
+        self.computed.get(name).map(|meta| &meta.directive)
+    }
+
     /// Snapshot of the materialized-directive columns (`name`, meta).
     pub fn computed_columns(&self) -> Vec<(String, ComputedMeta)> {
         self.computed
@@ -191,6 +199,7 @@ impl DataFrame {
             })
             .map(|(name, meta)| StaleComputed {
                 name: name.clone(),
+                directive: std::sync::Arc::clone(&meta.directive),
                 reach: meta.reach,
                 valid_rows: meta.valid_rows,
                 warm: meta.warm(self.origin),

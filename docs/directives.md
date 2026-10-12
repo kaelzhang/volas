@@ -129,8 +129,19 @@ ValueError: cannot add column 'change': the cached directive 'close*change' uses
 ```
 
 A plain column read, `df['change']`, is not a directive and returns the column. The
-command form of a name a data column holds, `df['change:']`, returns the command's
-values without caching them (the column keeps the name).
+command form of a name a data column holds, `df['change:']`, is cached under its own
+name `change:`, apart from the data column `change`.
+
+### Cached column names
+
+A cached directive's column is named by `directive_stringify` of it — its canonical
+name: whitespace removed, minimal parentheses, every argument written as its value
+(`ma:05` is `ma:5`, `hv:10,1W` is `hv:10,1w`) and default arguments / series dropped.
+An explicit command whose arguments and series are all defaults keeps its colon
+(`boll:20@close` is `boll:`, `macd:12,26` is `macd:`), so its name never reads as the
+bare name `boll`, which a data column could hold; a command written bare stays bare
+(`df['boll']` caches as `boll`). The cached column keeps the directive it was bound to
+when it was cached, and an append continues exactly that directive.
 
 ## Error handling
 

@@ -904,8 +904,10 @@ For an in-place, **truncating** cast (the NumPy / pandas `astype` idiom), use
 ### directive_stringify(directive: str) -> str
 
 Get the canonical full name of a `directive` — the actual column name volas caches
-it under. The command name is lowercased and default arguments / series are dropped
-to save space.
+it under. The command name is lowercased, each argument is written as its value, and
+default arguments / series are dropped to save space. An explicit command whose
+arguments are all defaults keeps its colon, apart from the bare name a data column
+could hold (see [Cached column names](directives.md#cached-column-names)).
 
 ```py
 from volas import directive_stringify
@@ -916,9 +918,14 @@ directive_stringify('kdj.j')
 directive_stringify('kdj.j:9,3,2,100@high,close,close')
 # 'kdj.j:,,2,100@,close'
 
-# command names are case-insensitive and canonicalize to lowercase
+# command names are case-insensitive and canonicalize to lowercase; all the
+# arguments are defaults, so the colon keeps the command
 directive_stringify('MACD:12,26')
-# 'macd'
+# 'macd:'
+
+# arguments are written as their values
+directive_stringify('ma:05')
+# 'ma:5'
 ```
 
 ### directive_lookback(directive: str) -> int

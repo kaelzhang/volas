@@ -3,39 +3,38 @@
 
 use crate::exec::{arg_f64, arg_usize};
 use crate::operands::Operands;
+use crate::spec::Resume;
 use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
 use volas_core::{Column, DataFrame};
 
-use super::as_command;
+use super::{as_command, recursive, resume_of};
 
-/// The final recursive state after a full compute of `node` against `df`, matching
-/// the just-computed `computed` column. `None` when `node` has no resume kernel
-/// (the caller then keeps the full-recompute fallback). `computed` is accepted for
-/// kernels that can read their state off the output column directly; the cumulative
-/// family recomputes its (tiny) state from the raw inputs to stay bit-exact with
-/// the canonical kernel.
+/// The final carried state after a full compute of `node` against `df`, matching
+/// the just-computed `computed` column. `None` when `node` has no resume (its spec's
+/// [`Resume::Recompute`], or a composite expression): the caller then recomputes.
+/// `computed` is accepted for kernels that could read their state off the output
+/// column; every kernel recomputes its (small) state from the raw inputs, bit-exact
+/// with the full kernel.
 ///
 /// A recursive command's state is captured over the complete rows of its inputs, so it
 /// describes the last complete row (see `crate::complete`).
 pub fn initial_state(df: &DataFrame, node: &Ast, _computed: &Column) -> Option<Vec<f64>> {
-    let (name, sub, args, series) = as_command(node)?;
-    let (name, sub) = (name.as_ref(), sub.as_deref());
-    if crate::spec::is_recursive(name, &args) {
-        return crate::complete::state(df, series, |ops| state_of(ops, name, sub, &args));
+    let cmd = as_command(node)?;
+    if resume_of(&cmd) == Resume::Recompute {
+        return None;
     }
-    let ops = Operands::new(df, series);
-    super::window::state(&ops, name, sub, &args).or_else(|| state_of(&ops, name, sub, &args))
+    let (name, sub, args) = (cmd.name.as_str(), cmd.sub.as_deref(), &cmd.args.values[..]);
+    if recursive(&cmd) {
+        return crate::complete::state(df, &cmd.series, |ops| state_of(ops, name, sub, args));
+    }
+    let ops = Operands::new(df, &cmd.series);
+    super::window::state(&ops, name, sub, args).or_else(|| state_of(&ops, name, sub, args))
 }
 
 /// The final state of the bound command `name`/`sub` over every row `ops` reads.
 fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Vec<f64>> {
     match (name, sub) {
-        // Stateless finite-memory indicators need no carried values, but marking
-        // them resumable lets append refresh compute only `[valid_rows, height)`.
-        ("avgprice" | "medprice" | "typprice" | "wclprice" | "tr" | "bop", _)
-        | ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => Some(Vec::new()),
-
         ("obv", _) => {
             let real = ops.f64(0, "close").ok()?;
             let volume = ops.f64(1, "volume").ok()?;
@@ -96,7 +95,8 @@ fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) ->
             &ops.f64(0, "close").ok()?,
             arg_usize(args, 0),
         ),
-        ("keltner", Some(_)) => {
+        // kcw = 2·mult·ATR/EMA continues the Keltner band's pair of states.
+        ("keltner", Some(_)) | ("kcw", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;

@@ -11,6 +11,8 @@
 
 use volas_time::TimeFrame;
 
+use crate::spec::CommandSpec;
+
 /// A binary operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -162,39 +164,95 @@ impl ArgValue {
     }
 }
 
-/// A directive's positional arguments, viewed as canonical tokens — the seam that
-/// lets `stringify` canonicalize both a bound [`Ast`] (frame-cache key, complete)
-/// and a raw [`Cst`] (the form-level `directive_stringify`, possibly missing a
-/// required argument). An absent slot is `None`.
-pub trait ArgTokens {
-    /// Number of positional argument slots.
+/// A bound command's payload: its arguments — parsed, defaulted and type-checked once
+/// against the spec of its line — and that spec, so every consumer reads the line's
+/// facts from the command itself. `bare` keeps the spelling of a command written as a
+/// bare name (`obv`) and resolved to the command against a frame: it renders as
+/// written, where an explicit all-default command renders `obv:`.
+#[derive(Clone, Debug)]
+pub struct Bound {
+    /// The bound arguments, one per spec slot.
+    pub values: Box<[ArgValue]>,
+    /// The spec of the command's line.
+    pub spec: CommandSpec,
+    /// The spelling of a command written as a bare name, if it was.
+    pub bare: Option<Box<str>>,
+}
+
+impl std::ops::Deref for Bound {
+    type Target = [ArgValue];
+    fn deref(&self) -> &[ArgValue] {
+        &self.values
+    }
+}
+
+/// Two bound commands are equal when their arguments and spelling are: the spec is a
+/// function of the command's name and sub-command.
+impl PartialEq for Bound {
+    fn eq(&self, other: &Bound) -> bool {
+        self.values == other.values && self.bare == other.bare
+    }
+}
+
+/// The payload of a command in a directive *form* (`directive_stringify`'s input): the
+/// arguments supplied, each bound against its slot, and `None` where a slot is absent —
+/// a required one included, since a form such as `donchian.upper` names a real line
+/// whose period is supplied only at use.
+#[derive(Clone, Debug)]
+pub struct FormArgs {
+    /// The supplied arguments, bound; `None` for an absent slot.
+    pub values: Vec<Option<ArgValue>>,
+    /// The spec of the command's line.
+    pub spec: CommandSpec,
+}
+
+/// What the renderer reads from a command's payload: its spec, its bound arguments (an
+/// absent slot is `None`) and the spelling of a bare-written command. Implemented by the
+/// bound [`Ast`] and by a [`Form`], so one renderer names both.
+pub trait Payload {
+    /// The spec of the command's line.
+    fn spec(&self) -> &CommandSpec;
+    /// Number of argument slots.
     fn arg_len(&self) -> usize;
-    /// The canonical token at slot `i`, or `None` if the slot is absent.
-    fn arg_token(&self, i: usize) -> Option<String>;
+    /// The bound argument at slot `i`, or `None` if absent.
+    fn arg(&self, i: usize) -> Option<&ArgValue>;
+    /// The spelling of a command written as a bare name.
+    fn bare(&self) -> Option<&str>;
 }
 
-impl ArgTokens for Vec<Option<String>> {
+impl Payload for Bound {
+    fn spec(&self) -> &CommandSpec {
+        &self.spec
+    }
     fn arg_len(&self) -> usize {
-        self.len()
+        self.values.len()
     }
-    fn arg_token(&self, i: usize) -> Option<String> {
-        self.get(i).and_then(|o| o.clone())
+    fn arg(&self, i: usize) -> Option<&ArgValue> {
+        self.values.get(i)
+    }
+    fn bare(&self) -> Option<&str> {
+        self.bare.as_deref()
     }
 }
 
-impl ArgTokens for Box<[ArgValue]> {
+impl Payload for FormArgs {
+    fn spec(&self) -> &CommandSpec {
+        &self.spec
+    }
     fn arg_len(&self) -> usize {
-        self.len()
+        self.values.len()
     }
-    fn arg_token(&self, i: usize) -> Option<String> {
-        // Bound arguments are all present; an argument equal to its default renders
-        // as that token, so `stringify` drops it just like an absent raw slot.
-        self.get(i).map(|v| v.to_token())
+    fn arg(&self, i: usize) -> Option<&ArgValue> {
+        self.values.get(i).and_then(Option::as_ref)
+    }
+    fn bare(&self) -> Option<&str> {
+        None
     }
 }
 
-/// A parsed indicator command, e.g. `macd.signal:12,26,9@close`. The argument
-/// payload `A` is raw strings in a [`Cst`] and bound [`ArgValue`]s in an [`Ast`].
+/// A parsed indicator command, e.g. `macd.signal:12,26,9@close`. The payload `A` is the
+/// raw argument strings in a [`Cst`], the bound arguments and line spec ([`Bound`]) in an
+/// [`Ast`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Command<A> {
     /// Command name (canonical in an [`Ast`]: lower-cased, `cdl` folded to `style`).
@@ -238,9 +296,14 @@ pub enum Node<A> {
 /// an omitted slot. Lowered to an [`Ast`] by `bind`.
 pub type Cst = Node<Vec<Option<String>>>;
 
-/// The bound AST: arguments parsed, defaulted, and type-checked once. Executed,
-/// measured (lookback), and rendered (stringify) without per-call re-parsing.
-pub type Ast = Node<Box<[ArgValue]>>;
+/// The bound AST: arguments parsed, defaulted, and type-checked once, each command
+/// carrying its line's spec. Executed, measured (lookback), and rendered (stringify)
+/// without per-call re-parsing.
+pub type Ast = Node<Bound>;
+
+/// A directive form bound leniently (`directive_stringify`): every supplied argument
+/// bound, an absent one left absent.
+pub type Form = Node<FormArgs>;
 
 /// A numeric literal, held exactly: an integral value inside the int64 range is an
 /// `Int` — so `volume > 9007199254740993` compares against that integer, never its

@@ -206,13 +206,22 @@ def test_directive_integers_compare_exactly():
     assert volas.directive_stringify('n>2.0') == 'n>2'
 
 
-@pytest.mark.parametrize('d', ['n - 1', 'n * 2', 'n / 2', '-n', 'ma:1@n', 'sum:1@n', 'minmax.max:1@n'])
+@pytest.mark.parametrize('d', ['n - 1', 'n * 2', 'n / 2', '-(n * 1)', 'ma:1@n', 'sum:1@n', 'minmax.max:1@n'])
 def test_directive_float64_math_raises_past_2_53(d):
     df = volas.DataFrame({'n': np.array([BIG, 1], dtype='int64'), 'close': [1.0, 2.0]})
     with pytest.raises(OverflowError, match='2\\^53'):
         df.exec(d)
     small = volas.DataFrame({'n': np.array([2**53, 1], dtype='int64'), 'close': [1.0, 2.0]})
     small.exec(d)
+
+
+def test_directive_unary_minus_negates_an_integer_exactly():
+    # an integer negates as an int64 (no float64 funnel, no signed zero); i64::MIN overflows
+    df = volas.DataFrame({'n': np.array([BIG, 0, -7], dtype='int64')})
+    got = df.exec('-n')
+    assert got.dtype == np.int64 and got.tolist() == [-BIG, 0, 7]
+    with pytest.raises(OverflowError):
+        volas.DataFrame({'n': np.array([np.iinfo(np.int64).min], dtype='int64')}).exec('-n')
 
 
 # --- directive booleans carry presence ---------------------------------------------------
