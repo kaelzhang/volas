@@ -82,7 +82,11 @@ running sum, which keeps the rounding of every row it ever held: after a spike l
 the window every later value stays off, and a long history drifts. volas keeps each
 window's sum exact (see [Exact window sums](indicator-inputs.md#exact-window-sums)),
 so on such data its values are the exact ones and TA-Lib's are not; on ordinary data the
-two agree to the last few bits.
+two agree to the last few bits. Variances, correlations, betas and regression slopes are
+taken from centred moments of those exact sums rather than TA-Lib's raw moments (see
+[centred moments](indicator-inputs.md#centred-moments)):
+where TA-Lib's cancel — a window whose mean dwarfs its spread — volas's values are the
+exact ones, and a correlation never leaves `[-1, 1]`.
 
 The candlestick patterns' body / range averages slide the same exact sum. A pattern is a
 threshold test (`body <= 0.1 · average range` for a doji), so on a bar whose two sides

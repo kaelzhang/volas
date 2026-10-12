@@ -54,9 +54,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
 # crates/volas-directive/tests/resume_matrix.rs); the machines do not cache them
 # while listed.
 DIVERGENT_FAMILIES: frozenset[str] = frozenset({
-    # cancellation in the running co-moment sums: a window recompute and the full
-    # kernel differ by more than 1e-9 relative, and |correl| exceeds 1
-    'correl', 'beta',
 })
 
 

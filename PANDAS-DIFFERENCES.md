@@ -672,10 +672,24 @@ bar as a missing row. The supported aggregations per dtype are tabled in
 [Cumulation](docs/cumulation.md) (a datetime has no `sum`; `bool` / `str` only
 `first` / `last`), and an unsupported pair is rejected when the frame is built.
 
-## Window aggregations (`rolling` / `expanding`): four deliberate divergences
+## Window aggregations (`rolling` / `expanding`): deliberate divergences
 
 The window API is pandas-aligned and differential-tested method by method
-(`test_audit_t14_window.py`), with four deliberate departures:
+(`test_audit_t14_window.py`), with these deliberate departures:
+
+- **`sum()` / `mean()` are exact.** Each window's sum is the correctly rounded exact
+  sum of its present values (`math.fsum`), however the window was reached: an
+  outlier that has left the window leaves no trace, even two of different magnitudes
+  (`[1.1, 1e35, 1e20, 1.3, 2.7, 3.1, 4.9]`, `rolling(4).sum()` ends at `12.0`). A mean
+  is that exact sum over the count. An expanding window keeps every value, so once
+  its exact sum needs more than two words (an extreme value far from the rest's
+  magnitude) each later row is summed exactly the slow way, at several times the
+  per-row cost of the compensated add. pandas's Kahan-compensated running sum keeps one
+  compensation word and can lose a window to such outliers. `var()` / `std()` /
+  `sem()` are the window's centred variance from its exact sums of values and squares
+  (within an ulp or two of exact, exactly 0 for a constant window, the same bits on a
+  slice or a bounded frame — see [centred moments](docs/indicator-inputs.md#why-two-methods)),
+  where pandas's running moments lose digits when a window's mean dwarfs its spread.
 
 - **`count()` / `nunique()` return `int64`** with native NA in the warm-up
   region. pandas returns `float64` (NaN-padded) because numpy ints cannot hold

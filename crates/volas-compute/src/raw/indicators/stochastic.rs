@@ -1,7 +1,7 @@
 //! Stochastic oscillator batch fast paths.
 
 use super::oscillators::rsi;
-use crate::accum::{Anchors, StreamMean};
+use crate::accum::StreamMean;
 use crate::missing;
 use crate::raw::indicators::FiniteMa;
 use crate::raw::kernels::{self, canonical_zero};
@@ -146,24 +146,23 @@ fn stoch_fastk_small_window(
 /// TA-Lib-style 5-bar extremum tracker and maintains the 3-bar D sum as raw `%K`
 /// values are produced, avoiding the full `fastk` buffer plus a second SMA pass.
 /// Returns `None` on NaN or shape mismatch so callers can preserve the generic path.
-pub fn stochf_d_default_sma(high: &[f64], low: &[f64], close: &[f64], origin: usize) -> Option<Vec<f64>> {
-    stoch_d_sma_fused::<1>(high, low, close, origin)
+pub fn stochf_d_default_sma(high: &[f64], low: &[f64], close: &[f64], _origin: usize) -> Option<Vec<f64>> {
+    stoch_d_sma_fused::<1>(high, low, close)
 }
 
 /// Default STOCH `.d` (`fastk=5, slowk=3 SMA, slowd=3 SMA`) in one pass. The raw
 /// `%K`, slowK sum, and slowD sum advance together; only the requested slowD line is
 /// materialized. Falls back through `None` for NaN-bearing inputs.
-pub fn stoch_d_default_sma(high: &[f64], low: &[f64], close: &[f64], origin: usize) -> Option<Vec<f64>> {
-    stoch_d_sma_fused::<2>(high, low, close, origin)
+pub fn stoch_d_default_sma(high: &[f64], low: &[f64], close: &[f64], _origin: usize) -> Option<Vec<f64>> {
+    stoch_d_sma_fused::<2>(high, low, close)
 }
 
-/// The fused default stochastic smoothing, row 0 at absolute position `origin`: each
+/// The fused default stochastic smoothing: each
 /// 3-bar SMA is `kernels::sma`'s fast path over the line it smooths ([`StreamMean`]).
 fn stoch_d_sma_fused<const STAGES: usize>(
     high: &[f64],
     low: &[f64],
     close: &[f64],
-    origin: usize,
 ) -> Option<Vec<f64>> {
     let n = close.len();
     if high.len() != n || low.len() != n || n < 5 {
@@ -187,7 +186,6 @@ fn stoch_d_sma_fused<const STAGES: usize>(
     // raw %K starts at row 4, slowK (STAGES 2) at row 6
     let mut k_mean = StreamMean::<3>::new();
     let mut d_mean = StreamMean::<3>::new();
-    let (mut k_anchors, mut d_anchors) = (Anchors::from(origin + 4, 3), Anchors::from(origin + 6, 3));
 
     while today < n {
         let low_today = unsafe { *low_ptr.add(today) };
@@ -250,12 +248,12 @@ fn stoch_d_sma_fused<const STAGES: usize>(
         }
         let fastk = fastk(c, highest, lowest);
 
-        if let Some(slowk) = k_mean.push(fastk, k_anchors.tick()) {
+        if let Some(slowk) = k_mean.push(fastk) {
             if STAGES == 1 {
                 unsafe {
                     *out_ptr.add(today) = slowk;
                 }
-            } else if let Some(slowd) = d_mean.push(slowk, d_anchors.tick()) {
+            } else if let Some(slowd) = d_mean.push(slowk) {
                 unsafe {
                     *out_ptr.add(today) = slowd;
                 }
@@ -365,7 +363,7 @@ pub fn stochrsi_fastk(close: &[f64], rsi_period: usize, fastk_period: usize) -> 
 /// Default STOCHRSI `.d` (`rsi=14, fastk=5, fastd=3, SMA`) with the stochastic
 /// and D-smoothing stages fused over the finite RSI tail. RSI itself remains the
 /// single recursive source of truth; this only removes the intermediate fastK Vec.
-pub fn stochrsi_d_default_sma(close: &[f64], origin: usize) -> Option<Vec<f64>> {
+pub fn stochrsi_d_default_sma(close: &[f64], _origin: usize) -> Option<Vec<f64>> {
     let rsi = rsi(close, 14);
     let n = rsi.len();
     let start = rsi.iter().position(|x| !x.is_nan()).unwrap_or(n);
@@ -388,7 +386,6 @@ pub fn stochrsi_d_default_sma(close: &[f64], origin: usize) -> Option<Vec<f64>> 
     let mut lowest = 0.0;
     // %K starts at (complete) row `start + 4`: `kernels::sma`'s fast path over it
     let mut k_mean = StreamMean::<3>::new();
-    let mut k_anchors = Anchors::from(origin + start + 4, 3);
 
     while today < tail.len() {
         let x = unsafe { *src.add(today) };
@@ -435,7 +432,7 @@ pub fn stochrsi_d_default_sma(close: &[f64], origin: usize) -> Option<Vec<f64>> 
         }
 
         let fastk = fastk(x, highest, lowest);
-        if let Some(d) = k_mean.push(fastk, k_anchors.tick()) {
+        if let Some(d) = k_mean.push(fastk) {
             unsafe {
                 *out_ptr.add(start + today) = d;
             }
@@ -584,7 +581,7 @@ mod tests {
     #[test]
     fn stochastic_fused_default_paths_cover_nan_declines() {
         let (high, low, close) = ohlc(12);
-        assert!(stoch_d_sma_fused::<1>(&high[..4], &low[..4], &close[..4], 0).is_none());
+        assert!(stoch_d_sma_fused::<1>(&high[..4], &low[..4], &close[..4]).is_none());
 
         let out = stochf_d_default_sma(&high, &low, &close, 0).unwrap();
         assert!(out[5].is_nan());
@@ -594,32 +591,32 @@ mod tests {
         assert!(out[8].is_finite());
 
         let flat = vec![3.0; 12];
-        let out = stoch_d_sma_fused::<2>(&flat, &flat, &flat, 0).unwrap();
+        let out = stoch_d_sma_fused::<2>(&flat, &flat, &flat).unwrap();
         assert_eq!(out[8], 0.0);
 
         let mut x = low.clone();
         x[4] = f64::NAN;
-        assert!(stoch_d_sma_fused::<2>(&high, &x, &close, 0).is_none());
+        assert!(stoch_d_sma_fused::<2>(&high, &x, &close).is_none());
         let mut x = low.clone();
         x[0] = f64::NAN;
-        assert!(stoch_d_sma_fused::<2>(&high, &x, &close, 0).is_none());
+        assert!(stoch_d_sma_fused::<2>(&high, &x, &close).is_none());
         let mut x = low.clone();
         x[2] = f64::NAN;
-        assert!(stoch_d_sma_fused::<2>(&high, &x, &close, 0).is_none());
+        assert!(stoch_d_sma_fused::<2>(&high, &x, &close).is_none());
 
         let mut x = high.clone();
         x[4] = f64::NAN;
-        assert!(stoch_d_sma_fused::<2>(&x, &low, &close, 0).is_none());
+        assert!(stoch_d_sma_fused::<2>(&x, &low, &close).is_none());
         let mut x = high.clone();
         x[0] = f64::NAN;
-        assert!(stoch_d_sma_fused::<2>(&x, &low, &close, 0).is_none());
+        assert!(stoch_d_sma_fused::<2>(&x, &low, &close).is_none());
         let mut x = high.clone();
         x[2] = f64::NAN;
-        assert!(stoch_d_sma_fused::<2>(&x, &low, &close, 0).is_none());
+        assert!(stoch_d_sma_fused::<2>(&x, &low, &close).is_none());
 
         let mut x = close.clone();
         x[4] = f64::NAN;
-        assert!(stoch_d_sma_fused::<2>(&high, &low, &x, 0).is_none());
+        assert!(stoch_d_sma_fused::<2>(&high, &low, &x).is_none());
     }
 
     #[test]

@@ -33,6 +33,7 @@ import volas  # noqa: F401 - in scope for exec'd doc examples
 _REPO = Path(__file__).resolve().parent.parent
 _DOCS = [
     "README.md", "PANDAS-DIFFERENCES.md", "INDICATORS.md", "DEVELOPMENT.md",
+    "docs/indicators-tradingview.md", "docs/indicators-talib.md",
     "docs/dataframe-api.md", "docs/cumulation.md", "docs/directives.md",
     "docs/pandas-compatibility.md", "docs/interop.md",
 ]
@@ -148,8 +149,7 @@ def test_talib_parity_table_rows_have_a_talib_original():
     appended to the wrong section (it belongs under 'Built-in Commands for
     Statistics'; caught by owner review 2026-06-12)."""
     import pathlib
-    text = pathlib.Path("INDICATORS.md").read_text()
-    table = text[text.index("## TA-Lib-compatible directives"):]
+    table = pathlib.Path("docs/indicators-talib.md").read_text()
     offenders = [
         line.split("|")[1].strip()
         for line in table.splitlines()
