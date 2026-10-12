@@ -838,6 +838,12 @@ mod tests {
         assert!(ema_diff_seeded(av(&[1.0, 2.0]), 2, 5)
             .iter()
             .all(|x| x.is_nan()));
+        // ...and a fast period longer than the slow one: the negated swapped difference,
+        // bit for bit (no panic on the out-of-order seeds).
+        let x = [3.0, 1.5, 4.25, 2.0, 5.5, 4.0, 6.75, 5.0];
+        let (ab, ba) = (ema_diff_seeded(av(&x), 5, 2), ema_diff_seeded(av(&x), 2, 5));
+        assert!(ab.iter().zip(&ba).all(|(p, q)| p.to_bits() == (-q).to_bits()));
+        assert!(ab[4].is_finite());
 
         // ema_cascade: zero period, and lookback exceeding the input length.
         assert!(ema_cascade::<3>(&[1.0, 2.0], 0).iter().all(|x| x.is_nan()));
