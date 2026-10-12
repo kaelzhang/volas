@@ -456,6 +456,9 @@
         // an earlier rewrite keeps the cursor
         df.update_computed_f64_value("close", 1, 7.0).unwrap();
         assert_eq!(meta(&df).valid_rows, 4);
+        // a data column has no cursor to move
+        df.update_computed_tail("x", 0, &Column::f64(vec![5.0])).unwrap();
+        assert_eq!(df.column("x").unwrap().get_f64(0), 5.0);
     }
 
     #[test]

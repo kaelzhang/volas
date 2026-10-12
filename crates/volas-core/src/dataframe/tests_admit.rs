@@ -255,6 +255,7 @@ fn cached_directive_columns_are_never_appended() {
     assert!(df.has_stale_computed());
     // names are written as Python writes them
     assert_eq!(py_list(&["a'b", "c\"d'", "e\\\n\u{1}"]), r#"["a'b", 'c"d\'', 'e\\\n\x01']"#);
+    assert_eq!(py_list(&["\r\t"]), r#"['\r\t']"#);
 }
 
 #[test]
