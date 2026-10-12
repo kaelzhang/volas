@@ -13,13 +13,6 @@ import volas
 from volas import DataFrame, to_datetime
 
 
-def utc(labels):
-    """The UTC instants of index labels: an aware index gives aware Timestamps."""
-    if labels.dtype == object:
-        return np.array([t.value for t in labels], 'int64').astype('datetime64[ns]')
-    return labels.astype('datetime64[ns]')
-
-
 def _ingest(data, col='t', tz=None, unit='ns'):
     """parse ``col`` to UTC instants, set it as the index, optionally localize a display zone.
 
@@ -35,18 +28,18 @@ def test_naive_string_ingested_in_tz():
     df = _ingest({'t': ['2020-01-01 09:30:00'], 'c': [1.0]}, tz='+08:00')
     assert df.tz == '+08:00'
     # the stored instant is 01:30 UTC (09:30 - 8h)
-    assert utc(df.index)[0] == np.datetime64('2020-01-01 01:30:00')
+    assert df.index.astype('datetime64[ns]')[0] == np.datetime64('2020-01-01 01:30:00')
 
 
 def test_offset_aware_strings_are_absolute():
     df = _ingest({'t': ['2020-01-01T09:30:00+08:00'], 'c': [1.0]})
-    assert utc(df.index)[0] == np.datetime64('2020-01-01 01:30:00')
+    assert df.index.astype('datetime64[ns]')[0] == np.datetime64('2020-01-01 01:30:00')
 
 
 def test_epoch_ms_ingestion():
     # exchange API returns epoch-ms; most robust path.
     df = _ingest({'t': np.array([1577836800000], dtype=np.int64), 'c': [1.0]}, unit='ms')
-    assert utc(df.index)[0] == np.datetime64('2020-01-01 00:00:00')
+    assert df.index.astype('datetime64[ns]')[0] == np.datetime64('2020-01-01 00:00:00')
 
 
 def test_named_zone_dst_ingestion():
@@ -54,7 +47,7 @@ def test_named_zone_dst_ingestion():
     df = _ingest(
         {'t': ['2021-01-04 09:30:00', '2021-07-01 09:30:00'], 'c': [1.0, 2.0]},
         tz='America/New_York')
-    inst = utc(df.index)
+    inst = df.index.astype('datetime64[ns]')
     # winter EST = UTC-5 -> 14:30 UTC; summer EDT = UTC-4 -> 13:30 UTC
     assert inst[0] == np.datetime64('2021-01-04 14:30:00')
     assert inst[1] == np.datetime64('2021-07-01 13:30:00')
@@ -67,10 +60,10 @@ def test_tz_localize_then_convert():
     ny = df.tz_localize('America/New_York')
     assert ny.tz == 'America/New_York'
     # the wall-clock 09:30 now means NY -> 14:30 UTC
-    assert utc(ny.index)[0] == np.datetime64('2021-01-04 14:30:00')
+    assert ny.index.astype('datetime64[ns]')[0] == np.datetime64('2021-01-04 14:30:00')
     # convert keeps the instant, only changes display tag
     shanghai = ny.tz_convert('+08:00')
-    assert utc(shanghai.index)[0] == np.datetime64('2021-01-04 14:30:00')
+    assert shanghai.index.astype('datetime64[ns]')[0] == np.datetime64('2021-01-04 14:30:00')
     assert shanghai.tz == '+08:00'
 
 
@@ -86,8 +79,8 @@ def test_cross_market_align_on_utc_axis():
     # UTC-indexed and US (NY) bars at the same instant align on the UTC index
     utc_frame = _ingest({'t': ['2021-01-04 14:30:00'], 'p': [100.0]})
     us = _ingest({'t': ['2021-01-04 09:30:00'], 'p': [200.0]}, tz='America/New_York')
-    assert (utc(utc_frame.index)[0]
-            == utc(us.index)[0])
+    assert (utc_frame.index.astype('datetime64[ns]')[0]
+            == us.index.astype('datetime64[ns]')[0])
 
 
 def test_constructor_rejects_retired_tz_kwarg():
@@ -166,6 +159,6 @@ def test_tz_localize_keeps_subsecond_rows_distinct():
     # cumulation sums both (whole-second rebuilding collapsed them into one label)
     t = np.array(['2026-03-08T06:59:59.250', '2026-03-08T06:59:59.750'], 'datetime64[ns]')
     df = DataFrame({'t': t, 'volume': [1.0, 1.0]}).set_index('t').tz_localize('Asia/Shanghai')
-    inst = utc(df.index)
+    inst = df.index.astype('datetime64[ns]')
     assert inst[1] - inst[0] == np.timedelta64(500, 'ms')
     assert df.cumulate('1s', cumulators={'volume': 'sum'})['volume'].to_list() == [2.0]

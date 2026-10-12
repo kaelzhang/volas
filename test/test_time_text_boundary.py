@@ -177,7 +177,7 @@ def test_read_csv_tz_tags_the_index(tz):
             f.write("time,x\n2024-01-01 12:00:00,1\n")
         df = volas.read_csv(p, index_col="time", tz=tz)
         assert df.tz == tz
-        assert df.index[0].value == pd.Timestamp("2024-01-01 12:00:00", tz=tz).value
+        assert df.index.view("i8")[0] == pd.Timestamp("2024-01-01 12:00:00", tz=tz).value
 
 
 def test_to_csv_writes_the_offset_of_an_aware_index():

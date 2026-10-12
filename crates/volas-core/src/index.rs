@@ -385,7 +385,8 @@ impl Index {
             if a.is_aware() != b.is_aware() {
                 return Err(VolasError::Value(
                     "cannot align a tz-naive index with a tz-aware index; tz_localize the \
-                     naive one first"
+                     naive one first — one built from an aware frame's `.index` (its UTC \
+                     instants) takes `.tz_localize('UTC').tz_convert(zone)`"
                         .into(),
                 ));
             }

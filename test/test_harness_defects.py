@@ -164,7 +164,7 @@ def test_a_nat_bar_onto_a_plain_frame_raises():
 def test_tz_localize_keeps_subseconds():
     t = np.array(['2026-03-08T06:59:59.123456789'], 'datetime64[ns]')
     df = volas.DataFrame({'time': t, 'c': [1.0]}).set_index('time').tz_localize('UTC')
-    assert df.index[0].value == t[0].astype('int64')
+    assert np.asarray(df.index)[0] == t[0]
 
 
 # --- numeric resume / kernels (I1 / I6) ----------------------------------------------------

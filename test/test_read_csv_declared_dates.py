@@ -22,9 +22,6 @@ def _read(text, **kw):
 
 
 def _ns(df):
-    # an aware index gives aware Timestamps; a naive one datetime64
-    if df.index.dtype == object:
-        return [t.value for t in df.index]
     return df.index.view("i8").tolist()
 
 

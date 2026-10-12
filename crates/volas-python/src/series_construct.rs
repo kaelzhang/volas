@@ -42,7 +42,7 @@ impl PySeries {
     ///     numpy.ndarray
     #[getter]
     pub(crate) fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        index_labels(py, &self.inner.index)
+        index_values(py, &self.inner.index)
     }
 
     /// The DatetimeIndex timezone name, or `None` for a tz-naive / non-datetime

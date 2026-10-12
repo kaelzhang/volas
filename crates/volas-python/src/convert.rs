@@ -743,26 +743,10 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
     ))
 }
 
-/// The `.index` labels as a NumPy array: what each label is, so a label read back
-/// is admitted as the same label. A tz-aware DatetimeIndex gives its labels as
-/// aware [`Timestamp`](PyTimestamp)s in an object array (pandas `DatetimeIndex.
-/// to_numpy()` of an aware index); every other index its [`index_values`].
-pub(crate) fn index_labels<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
-    match index.kind() {
-        IndexKind::Datetime(v, tz) if tz.is_aware() => {
-            let labels = (0..v.len()).map(|i| label_to_py(py, index, i)).collect::<Vec<_>>();
-            let list = PyList::new(py, labels)?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "object")?;
-            py.import("numpy")?.call_method("array", (list,), Some(&kwargs))
-        }
-        _ => index_values(py, index),
-    }
-}
-
-/// The index as plain NumPy values: a DatetimeIndex its **UTC** instants as
-/// `datetime64[ns]` (pandas `.values`; an export restores the zone itself), a
-/// string index an object array.
+/// The `.index` row labels as a NumPy array. A DatetimeIndex exports its **UTC**
+/// instants as `datetime64[ns]` (NumPy has no zone slot, the rule for datetime data
+/// at the NumPy boundary; such a label read back is the same instant, see
+/// [`Zone::Unzoned`]); a string index becomes an object array.
 pub(crate) fn index_values<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
     match index.kind() {
         IndexKind::Datetime(v, _) => {
