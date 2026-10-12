@@ -302,3 +302,26 @@ fn a_window_line_depends_on_its_lookback_rows_alone() {
     }
     assert!(fails.is_empty(), "{} line(s) read past their lookback:\n{}", fails.len(), fails.join("\n"));
 }
+
+/// A cross (`//`, `\\`, `><`) compares each operand with its previous row, so it reads one
+/// row more than its operands, and its lookback counts that row.
+#[test]
+fn a_cross_reads_the_row_before_its_operands() {
+    let classes = matrix::classes(ROWS);
+    let mut fails = Vec::new();
+    for text in ["open//close", "close\\\\open", "close><open", "(open)//(cdp@open)", "close//ma:3", "ma:2><roc:3"] {
+        let node = parse(text).unwrap();
+        let l = lookback(&node);
+        for data in &classes {
+            let whole = execute(&data.frame, &node).unwrap().to_f64_vec();
+            for (k, &want) in whole.iter().enumerate().skip(l) {
+                let got = execute(&data.frame.slice_data(k - l, k + 1), &node).unwrap().to_f64_vec()[l];
+                if !same(got, want) {
+                    fails.push(format!("{text} [{}] row {k}: {got:?} != {want:?}", data.name));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(fails.is_empty(), "{} cross(es) read past their lookback:\n{}", fails.len(), fails.join("\n"));
+}

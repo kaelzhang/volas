@@ -246,7 +246,8 @@ pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> 
 }
 
 /// Lookback for a parsed directive: a command's own lookback plus the largest
-/// lookback among its series operands; operators take the max of their operands.
+/// lookback among its series operands; an operator takes the max of its operands plus
+/// the earlier rows it reads itself ([`crate::types::Op::lookback`]).
 pub fn lookback(node: &Ast) -> usize {
     match node {
         Node::Scalar(_) => 0,
@@ -268,7 +269,7 @@ pub fn lookback(node: &Ast) -> usize {
             own + series_max
         }
         Node::Unary { operand, .. } => lookback(operand),
-        Node::Binary { left, right, .. } => lookback(left).max(lookback(right)),
+        Node::Binary { left, op, right } => op.lookback() + lookback(left).max(lookback(right)),
     }
 }
 

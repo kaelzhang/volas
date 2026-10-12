@@ -68,6 +68,16 @@ impl Op {
         }
     }
 
+    /// The rows before the current one this operator reads of its operands: a cross
+    /// compares each operand with its previous row, every other operator reads the
+    /// current row alone.
+    pub fn lookback(&self) -> usize {
+        match self {
+            Op::CrossUp | Op::CrossDown | Op::Cross => 1,
+            _ => 0,
+        }
+    }
+
     /// The canonical source token.
     pub fn token(&self) -> &'static str {
         match self {
