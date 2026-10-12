@@ -107,3 +107,14 @@ def test_rsv_of_a_tiny_range_matches_stochf():
     d = _ohlcv(60, scale=1e-11)
     fastk, _ = talib.STOCHF(d['high'], d['low'], d['close'], 1, 1, 0)
     _same(_exec(d, 'rsv:1'), fastk)
+
+
+# --- NATR: a zero close gives 0 at its own row ------------------------------------------
+
+def test_natr_zero_close_is_zero_at_the_current_row():
+    h, l, c = np.array([1, 2, 1, 3, 4.0]), np.array([1, 2, 0, 3, 2.0]), np.array([1, 2, 0, 3, 3.0])
+    got = _exec({'high': h, 'low': l, 'close': c}, 'natr:1')
+    assert got[2] == 0.0 and np.isfinite(got).sum() == 4
+    assert np.isnan(got[0])
+    d = {'high': h, 'low': l, 'close': c}
+    _same(_appended(d, 'natr:1', 2), got, exact=True)
