@@ -423,12 +423,46 @@ impl Column {
         Ok(())
     }
 
-    /// Scatter `values` into `self` at `positions` — **the single assignment
+    /// `values` as this column stores them: converted to its dtype — the source rule of
+    /// [`scatter`](Self::scatter), every error it raises. A numeric column takes a
+    /// numeric / bool source through the lossless owner (contract #20): an int past
+    /// float64's exact range, a non-integral float into an int, or a finite value past
+    /// float32's range raises — never a rounded or saturated write; a missing source
+    /// cell stays missing (`NaN` / NA). A `Str` or `Datetime` source into a numeric
+    /// column would read as `NaN` / raw epoch nanos — silent corruption — so it is
+    /// refused. A `Bool` / `Str` / `Datetime` column takes only its own dtype.
+    pub fn assignable(&self, values: &Column) -> Result<Column> {
+        let to = self.dtype();
+        if to.is_numeric() && matches!(values.dtype(), DType::Utf8 | DType::Datetime) {
+            return Err(VolasError::DType(format!(
+                "cannot assign {} values into a {} column",
+                values.dtype(),
+                to
+            )));
+        }
+        let kind = |want: &str| {
+            Err(VolasError::DType(match want {
+                "bool" => format!("expected a bool column, got {}", values.dtype()),
+                _ => format!("cannot select a {} column as {want}", values.dtype()),
+            }))
+        };
+        match (self, values) {
+            (Column::Bool(..), Column::Bool(..))
+            | (Column::Str(..), Column::Str(..))
+            | (Column::Datetime(_), Column::Datetime(_)) => Ok(values.clone()),
+            (Column::Bool(..), _) => kind("bool"),
+            (Column::Str(..), _) => kind("str"),
+            (Column::Datetime(_), _) => kind("datetime"),
+            _ => values.convert_lossless(to),
+        }
+    }
+
+    /// Scatter `values` into `self` at `positions`, in place — **the single assignment
     /// primitive** behind every surface (`df.loc / iloc / at / iat = `, Series
     /// setitem, and boolean-mask assignment; a scalar write passes a length-1
     /// `values`, which broadcasts). It **keeps `self`'s dtype** and updates its
     /// validity: each written position takes the source's presence, every other
-    /// position keeps its own. The dtype rules are:
+    /// position keeps its own. The dtype rules are [`assignable`](Self::assignable)'s:
     /// - a float target absorbs any numeric source (a missing source -> in-band `NaN`);
     /// - an int target stays int — a present integral value is stored, a missing /
     ///   `NaN` source marks the cell NA (no float widening, per the NA model), a
@@ -436,99 +470,69 @@ impl Column {
     /// - a `Bool` / `Str` / `Datetime` target requires a matching-kind source (else
     ///   a `DType` error); a missing source marks the cell NA (`NaT` for datetime).
     ///
+    /// All or nothing: the source is converted before the first write, so an error
+    /// leaves the column unchanged. The write costs O(positions) on a uniquely-owned
+    /// buffer (a shared one is copied once, copy-on-write); a float column keeps its
+    /// NaN fact. A `str` column rebuilds its contiguous bytes.
+    ///
     /// `positions` are assumed in bounds (callers validate the mask / index).
-    pub fn scatter(&self, positions: &[usize], values: &Column) -> Result<Column> {
+    pub fn scatter(&mut self, positions: &[usize], values: &Column) -> Result<()> {
+        let src = self.assignable(values)?;
+        self.scatter_assignable(positions, &src);
+        Ok(())
+    }
+
+    /// [`scatter`](Self::scatter) on a copy, returned (tests compare whole columns).
+    #[cfg(test)]
+    pub(crate) fn scattered(&self, positions: &[usize], values: &Column) -> Result<Column> {
+        let mut out = self.clone();
+        out.scatter(positions, values)?;
+        Ok(out)
+    }
+
+    /// [`scatter`](Self::scatter) of a source already of this column's dtype (from
+    /// [`assignable`](Self::assignable)): cannot fail. A later repeat of a position
+    /// wins, as a sequence of single writes would.
+    pub(crate) fn scatter_assignable(&mut self, positions: &[usize], src: &Column) {
         let len = self.len();
-        let m = values.len();
-        let pick = |k: usize| if m == 1 { 0 } else { k };
-        // A numeric target accepts only a numeric / bool source. A `Str` source
-        // would funnel through `to_f64_vec` to `NaN` and a `Datetime` source to raw
-        // epoch nanos — both silent corruption — so reject them up front. (The
-        // `Bool` / `Str` / `Datetime` targets are already strict via their
-        // `as_*_vec` helpers, which error on a mismatched-kind source.)
-        if self.dtype().is_numeric() && matches!(values.dtype(), DType::Utf8 | DType::Datetime) {
-            return Err(VolasError::DType(format!(
-                "cannot assign {} values into a {} column",
-                values.dtype(),
-                self.dtype()
-            )));
-        }
-        // The validity-carrying targets (int / bool / str) share one rule: keep
-        // each row's own presence, then stamp every written position with the
-        // source's. (Float and datetime carry missing in-band, so they skip this.)
-        let scatter_validity = |val: &Validity| -> Validity {
-            let mut flags: Vec<bool> = (0..len).map(|i| val.is_valid(i)).collect();
+        let pick = |k: usize| if src.len() == 1 { 0 } else { k };
+        // The validity-carrying targets (int / bool / str) stamp every written position
+        // with the source's presence; float and datetime carry missing in-band.
+        let presence = |val: &mut Validity, sv: &Validity| {
             for (k, &p) in positions.iter().enumerate() {
-                flags[p] = values.is_valid(pick(k));
+                val.set(p, len, sv.is_valid(pick(k)));
             }
-            Validity::from_valid_iter(len, flags)
         };
-        // A numeric target takes its source through the lossless owner (contract
-        // #20): an int past float64's exact range, a non-integral float into an int,
-        // or a finite value past float32's range raises — never a rounded or
-        // saturated write; a missing source cell stays missing (`NaN` / NA).
-        let numeric = |to: DType| values.convert_lossless(to);
-        match self {
-            Column::F64(v) => {
-                let src = numeric(DType::F64)?;
-                let src = src.as_f64().expect("converted to f64");
-                let mut nv = v.to_vec();
-                for (k, &p) in positions.iter().enumerate() {
-                    nv[p] = src[pick(k)];
-                }
-                Ok(Column::f64(nv))
+        match (self, src) {
+            (Column::F64(v), Column::F64(s)) => v.scatter(positions, |k| s[pick(k)]),
+            (Column::F32(v), Column::F32(s)) => v.scatter(positions, |k| s[pick(k)]),
+            (Column::Datetime(v), Column::Datetime(s)) => {
+                let w = v.make_mut();
+                positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
             }
-            Column::F32(v) => {
-                let src = numeric(DType::F32)?.to_f32_vec(); // already f32: a copy
-                let mut nv = v.to_vec();
-                for (k, &p) in positions.iter().enumerate() {
-                    nv[p] = src[pick(k)];
-                }
-                Ok(Column::f32(nv))
+            (Column::I64(v, val), Column::I64(s, sv)) => {
+                let w = v.make_mut();
+                positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
+                presence(val, sv);
             }
-            // Int targets keep their dtype: a missing source holds a 0 placeholder
-            // (its presence is stamped by `scatter_validity`).
-            Column::I64(v, val) => {
-                let src = numeric(DType::I64)?;
-                let src = src.as_i64().expect("converted to i64");
-                let mut nv = v.to_vec();
-                for (k, &p) in positions.iter().enumerate() {
-                    nv[p] = src[pick(k)];
-                }
-                Ok(Column::i64_masked(nv, scatter_validity(val)))
+            (Column::I32(v, val), Column::I32(s, sv)) => {
+                let w = v.make_mut();
+                positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
+                presence(val, sv);
             }
-            Column::I32(v, val) => {
-                let src = numeric(DType::I32)?.as_i32_vec()?; // already i32: a copy
-                let mut nv = v.to_vec();
-                for (k, &p) in positions.iter().enumerate() {
-                    nv[p] = src[pick(k)];
-                }
-                Ok(Column::i32_masked(nv, scatter_validity(val)))
+            (Column::Bool(v, val), Column::Bool(s, sv)) => {
+                let w = v.make_mut();
+                positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
+                presence(val, sv);
             }
-            Column::Bool(v, val) => {
-                let src = values.as_bool_vec()?;
-                let mut nv = v.to_vec();
-                for (k, &p) in positions.iter().enumerate() {
-                    nv[p] = src[pick(k)];
-                }
-                Ok(Column::bool_masked(nv, scatter_validity(val)))
+            (Column::Str(v, val), Column::Str(s, sv)) => {
+                let mut cells: Vec<&str> = v.iter().collect();
+                positions.iter().enumerate().for_each(|(k, &p)| cells[p] = s.get(pick(k)));
+                let rebuilt: StrBuffer = cells.into_iter().collect();
+                *v = rebuilt;
+                presence(val, sv);
             }
-            Column::Str(v, val) => {
-                let src = values.as_str_vec()?;
-                let mut nv = v.to_vec();
-                for (k, &p) in positions.iter().enumerate() {
-                    nv[p] = src[pick(k)].clone();
-                }
-                Ok(Column::str_masked(nv, scatter_validity(val)))
-            }
-            Column::Datetime(v) => {
-                let src = values.as_datetime_vec()?; // `NaT` (i64::MIN) is in-band missing
-                let mut nv = v.to_vec();
-                for (k, &p) in positions.iter().enumerate() {
-                    nv[p] = src[pick(k)];
-                }
-                Ok(Column::datetime(nv))
-            }
+            _ => unreachable!("an assignable source has the column's dtype"), // LCOV_EXCL_LINE
         }
     }
 

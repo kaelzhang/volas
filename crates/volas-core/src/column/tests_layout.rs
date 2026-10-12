@@ -112,14 +112,14 @@ fn equality_compares_presence_never_a_missing_payload() {
 fn scatter_stores_another_dtype_only_losslessly() {
     let big = (1i64 << 53) + 1;
     let f = Column::f64(vec![0.0, 0.0]);
-    assert!(matches!(f.scatter(&[0], &Column::i64(vec![big])), Err(VolasError::DType(_))));
-    assert_eq!(f.scatter(&[1], &Column::i64(vec![1 << 53])).unwrap(), Column::f64(vec![0.0, 9007199254740992.0]));
+    assert!(matches!(f.scattered(&[0], &Column::i64(vec![big])), Err(VolasError::DType(_))));
+    assert_eq!(f.scattered(&[1], &Column::i64(vec![1 << 53])).unwrap(), Column::f64(vec![0.0, 9007199254740992.0]));
     let g = Column::f32(vec![0.0]);
-    assert!(matches!(g.scatter(&[0], &Column::f64(vec![1e300])), Err(VolasError::Overflow(_))));
-    assert!(matches!(g.scatter(&[0], &Column::i64(vec![(1 << 24) + 1])), Err(VolasError::DType(_))));
+    assert!(matches!(g.scattered(&[0], &Column::f64(vec![1e300])), Err(VolasError::Overflow(_))));
+    assert!(matches!(g.scattered(&[0], &Column::i64(vec![(1 << 24) + 1])), Err(VolasError::DType(_))));
     let i = Column::i32(vec![0, 0]);
-    assert!(matches!(i.scatter(&[0], &Column::i64(vec![1 << 40])), Err(VolasError::Overflow(_))));
-    let out = i.scatter(&[0, 1], &Column::f64(vec![3.0, f64::NAN])).unwrap();
+    assert!(matches!(i.scattered(&[0], &Column::i64(vec![1 << 40])), Err(VolasError::Overflow(_))));
+    let out = i.scattered(&[0, 1], &Column::f64(vec![3.0, f64::NAN])).unwrap();
     assert_eq!((out.get_i64(0), out.is_valid(1)), (3, false));
 }
 

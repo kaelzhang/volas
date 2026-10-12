@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use volas_core::{Column, CombineOp, DType, DataFrame, IndexKind};
+use volas_core::{CellWrites, Column, CombineOp, DType, DataFrame, IndexKind};
 use volas_time::{aggregate_period, AggSpec, Cumulator, OpenPeriod, TimeFrame};
 
 #[allow(unused_imports)]
@@ -117,12 +117,47 @@ fn data_columns(frame: &DataFrame) -> Vec<String> {
     frame.names().iter().filter(|n| !frame.is_computed(n)).cloned().collect()
 }
 
+/// The last (forming) row of `frame` as a bar of its data columns, at its own label
+/// (`None` when the frame has no row).
+fn forming_row(frame: &DataFrame) -> Option<DataFrame> {
+    frame.height().checked_sub(1).map(|last| frame.data_row(last))
+}
+
 /// The last row of `frame` as a bar of its data columns, at its own label — a
 /// constructed forming bar, the single entry of an open period.
 fn forming_bar(frame: &DataFrame) -> PyResult<OpenPeriod> {
-    let h = frame.height();
-    let row = frame.slice_data(h - 1, h).select(&data_columns(frame)).map_err(pyerr)?;
+    let row = forming_row(frame).expect("a frame with rows");
     OpenPeriod::new(row).map_err(pyerr)
+}
+
+/// A change to a tf frame's cells or data columns, checked against it — every error it
+/// can raise already raised — and ready to land: what [`TfState::write`] takes.
+pub(crate) enum TfWrite {
+    /// Cell writes ([`DataFrame::check_writes`]), landing in place.
+    Cells(CellWrites),
+    /// The frame as a column write leaves it: a copy sharing every buffer the write
+    /// does not replace.
+    Frame(DataFrame),
+}
+
+impl TfWrite {
+    /// The forming row of `inner` as this change leaves it: a bar of the data columns
+    /// after it (`None` when the frame has no row). O(columns + cells written) — the
+    /// forming row alone, never a copy of the frame.
+    fn forming(&self, inner: &DataFrame) -> Option<DataFrame> {
+        match self {
+            TfWrite::Cells(w) => inner.height().checked_sub(1).map(|last| w.data_row_after(inner, last)),
+            TfWrite::Frame(f) => forming_row(f),
+        }
+    }
+
+    /// Land the change on `inner`.
+    fn land(self, inner: &mut DataFrame) {
+        match self {
+            TfWrite::Cells(w) => inner.write_cells(w),
+            TfWrite::Frame(f) => *inner = f,
+        }
+    }
 }
 
 impl TfState {
@@ -186,7 +221,8 @@ impl TfState {
     pub(crate) fn projected(&self, inner: &DataFrame) -> PyResult<TfState> {
         let mut t = self.clone();
         t.fold_plan = None; // the columns changed: rebuilt on the next fold
-        t.follow(inner, inner)?; // every kept value is unchanged
+        let row = forming_row(inner);
+        t.follow(row.as_ref(), row.as_ref())?; // every kept value is unchanged
         Ok(t)
     }
 
@@ -195,26 +231,23 @@ impl TfState {
         self.time_frame
     }
 
-    /// THE write entry of a tf frame: `apply` writes `inner` (cells, a column added or
-    /// replaced) — on a copy, so a refused or failed write leaves the frame unchanged —
-    /// and the open period follows what the writes LEAVE in the forming row, however many
-    /// writes reached it (see [`follow`](Self::follow)). Only then is the copy taken.
-    pub(crate) fn write(
-        &mut self,
-        inner: &mut DataFrame,
-        apply: impl FnOnce(&mut DataFrame) -> PyResult<()>,
-    ) -> PyResult<()> {
-        let mut next = inner.clone();
-        apply(&mut next)?;
+    /// THE write entry of a tf frame: `change` (cells written, a column added or
+    /// replaced) is checked already, and the open period follows what it LEAVES in the
+    /// forming row, however many writes reached it (see [`follow`](Self::follow)) — judged
+    /// on the forming row alone, before anything lands. Only then does the change land,
+    /// so a refused write leaves the frame unchanged.
+    pub(crate) fn write(&mut self, inner: &mut DataFrame, change: TfWrite) -> PyResult<()> {
         let mut state = self.clone();
-        state.follow(inner, &next)?;
-        *inner = next;
+        state.follow(forming_row(inner).as_ref(), change.forming(inner).as_ref())?;
+        change.land(inner);
         *self = state;
         Ok(())
     }
 
-    /// Bring the open period in line with `after`, the frame `before` once its rows or
-    /// data columns changed in place (same height). For each data column of `after`:
+    /// Bring the open period in line with `after`, the forming row `before` once the
+    /// frame's rows or data columns changed in place (same height) — each a bar of the
+    /// frame's data columns at the forming row (`None` for a frame without rows), which
+    /// is all the rule reads. For each data column of `after`:
     /// - its aggregator must fold its dtype (else `TypeError`);
     /// - a column the open period's bars do not carry (a new data column, a cached column
     ///   become data) enters them as missing, so the next fold makes its forming cell
@@ -224,22 +257,22 @@ impl TfState {
     ///   bar, and over several fine bars (no single bar to rewrite) is refused with
     ///   `ValueError`. A column whose bars cannot take a new dtype losslessly counts as a
     ///   new forming value.
-    fn follow(&mut self, before: &DataFrame, after: &DataFrame) -> PyResult<()> {
-        let Some(last) = after.height().checked_sub(1) else {
+    fn follow(&mut self, before: Option<&DataFrame>, after: Option<&DataFrame>) -> PyResult<()> {
+        let (Some(before), Some(after)) = (before, after) else {
             self.open = None;
             self.open_key = None;
             return Ok(());
         };
         let Some(open) = &self.open else {
-            self.open = Some(forming_bar(after)?); // LCOV_EXCL_LINE (a frame with rows has an open period)
+            self.open = Some(OpenPeriod::new(after.clone()).map_err(pyerr)?); // LCOV_EXCL_LINE (a frame with rows has an open period)
             return Ok(()); // LCOV_EXCL_LINE
         };
         let held = open.bars();
         let n = held.height();
-        let (names, mut columns) = (data_columns(after), Vec::new());
+        let (names, mut columns) = (after.names().to_vec(), Vec::new());
         for name in &names {
-            let now = after.column(name).map_err(pyerr)?;
-            let dtype = now.dtype();
+            let cell = after.column(name).map_err(pyerr)?;
+            let dtype = cell.dtype();
             let op = self.cumulators.agg_for(name).as_combine_op();
             if !op.supports(dtype) {
                 return Err(pyerr(volas_core::VolasError::DType(format!(
@@ -247,19 +280,18 @@ impl TfState {
                     op.name()
                 ))));
             }
-            let cell = now.slice(last, last + 1);
             let Ok(bars) = held.column(name) else {
                 self.refold_next = true;
                 columns.push(Column::na_of(dtype, n));
                 continue;
             };
             let kept = bars.convert_lossless(dtype).ok().filter(|_| {
-                let was = before.column(name).map(|c| c.slice(last, last + 1));
-                was.ok().and_then(|w| w.convert_lossless(dtype).ok()).is_some_and(|w| w.equals(&cell))
+                let was = before.column(name);
+                was.ok().and_then(|w| w.convert_lossless(dtype).ok()).is_some_and(|w| w.equals(cell))
             });
             columns.push(match kept {
                 Some(bars) => bars,
-                None if n == 1 => cell,
+                None if n == 1 => cell.clone(),
                 None => {
                     return Err(PyValueError::new_err(format!(
                         "cannot overwrite column {name:?} of the forming row: it is the cumulation \

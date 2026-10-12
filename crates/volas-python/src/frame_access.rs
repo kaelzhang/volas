@@ -97,12 +97,14 @@ impl PyDataFrame {
                 )));
             }
             let positions: Vec<usize> = (start..h).collect();
-            Column::na_of(c.dtype(), h).scatter(&positions, &c).map_err(pyerr)
+            let mut padded = Column::na_of(c.dtype(), h);
+            padded.scatter(&positions, &c).map_err(pyerr)?;
+            Ok(padded)
         };
         let col = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
             match &self.window {
                 None => require_aligned(self.inner.index(), &s.inner.index)?,
-                Some(_) => self.meta().labels().require_aligned(&s.inner.index).map_err(pyerr)?,
+                Some(_) => self.meta().labels().index().require_aligned(&s.inner.index).map_err(pyerr)?,
             }
             pad(s.inner.data.clone())?
         } else if let Some(one) = scalar_cell(value)? {
@@ -119,7 +121,11 @@ impl PyDataFrame {
         // A time-frame frame takes the column through its one write entry: the open
         // period follows the forming cell it leaves, or the write is refused unchanged.
         match self.tf.as_mut() {
-            Some(tfs) => tfs.write(&mut self.inner, |inner| inner.set_column(&name, col).map_err(pyerr))?,
+            Some(tfs) => {
+                let mut next = self.inner.clone(); // shares every buffer the write keeps
+                next.set_column(&name, col).map_err(pyerr)?;
+                tfs.write(&mut self.inner, TfWrite::Frame(next))?
+            }
             None => self.inner.set_column(&name, col).map_err(pyerr)?,
         }
         Ok(())

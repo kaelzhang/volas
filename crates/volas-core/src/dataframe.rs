@@ -602,55 +602,6 @@ impl DataFrame {
         Ok(self.same_schema(columns, self.index.take(&idx), 0))
     }
 
-    /// Assign `values` into column position `col` at the given row `positions`
-    /// (copy-on-write via [`Arc::make_mut`]). `values` is broadcast when it has
-    /// length 1, otherwise its length must equal `positions.len()`. This backs
-    /// `df.loc[...] = `, `df.iloc[...] = `, `df.at[...] = ` and `df.iat[...] = `.
-    ///
-    /// Dtype handling is delegated to [`Column::scatter`], the single assignment
-    /// primitive shared with the Series and boolean-mask surfaces: it **keeps the
-    /// target column's dtype** and updates its validity (a write into an existing NA
-    /// cell makes it present; a missing / `NaN` source marks the cell NA without
-    /// widening an int column to float; a present non-integral value into an int
-    /// column is a lossy error).
-    ///
-    /// A manual write into a cached directive column **drops its computed status**
-    /// (it becomes plain data) so a later `fulfill` can never silently clobber the
-    /// override.
-    pub fn assign_positions(
-        &mut self,
-        col: usize,
-        positions: &[usize],
-        values: &Column,
-    ) -> Result<()> {
-        if col >= self.columns.len() {
-            return Err(VolasError::Shape(format!(
-                "column position {col} is out of range (width {})",
-                self.columns.len()
-            )));
-        }
-        let n = positions.len();
-        if values.len() != 1 && values.len() != n {
-            return Err(VolasError::Shape(format!(
-                "cannot assign {} values to {n} selected rows",
-                values.len()
-            )));
-        }
-        for &p in positions {
-            if p >= self.height {
-                return Err(VolasError::Shape(format!(
-                    "row position {p} is out of range (height {})",
-                    self.height
-                )));
-            }
-        }
-        self.columns[col] = self.columns[col].scatter(positions, values)?;
-        self.invalidate_computed_on_write_at(col);
-        #[cfg(debug_assertions)]
-        self.debug_check();
-        Ok(())
-    }
-
     /// Rename columns (pandas `rename(columns=...)`), returning a new frame.
     /// Names not in `mapping` are kept; columns and index are shared (cheap).
     pub fn rename(&self, mapping: &HashMap<String, String>) -> Result<DataFrame> {
@@ -738,6 +689,8 @@ impl DataFrame {
 
 mod admit;
 pub use admit::Retained;
+mod cells;
+pub use cells::{CellWrite, CellWrites};
 mod computed;
 pub use computed::StaleComputed;
 
@@ -745,4 +698,6 @@ pub use computed::StaleComputed;
 mod tests;
 #[cfg(test)]
 mod tests_nan_fact;
+#[cfg(test)]
+mod tests_cells;
 

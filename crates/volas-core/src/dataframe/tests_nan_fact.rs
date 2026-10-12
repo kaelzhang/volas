@@ -98,12 +98,12 @@ fn fold_forming_row_over_the_only_nan() {
 }
 
 #[test]
-fn assign_positions_writing_a_nan_and_clearing_one() {
+fn write_cells_writing_a_nan_and_clearing_one() {
     let mut df = known_clean();
-    df.assign_positions(0, &[1], &Column::f64(vec![NAN]))
+    df.write_one(0, &[1], &Column::f64(vec![NAN]))
         .unwrap();
     assert!(x(&df).has_nan());
-    df.assign_positions(0, &[1], &Column::f64(vec![2.0]))
+    df.write_one(0, &[1], &Column::f64(vec![2.0]))
         .unwrap();
     assert!(!x(&df).has_nan());
 }
@@ -155,7 +155,7 @@ fn slicing_and_selecting_keep_the_fact_right() {
 fn a_write_to_a_shared_copy_leaves_the_other_untouched() {
     let a = known_clean();
     let mut b = a.clone();
-    b.assign_positions(0, &[0], &Column::f64(vec![NAN]))
+    b.write_one(0, &[0], &Column::f64(vec![NAN]))
         .unwrap();
     assert!(x(&b).has_nan());
     assert!(!x(&a).has_nan());

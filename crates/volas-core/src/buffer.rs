@@ -346,14 +346,30 @@ impl<T: Float> Buffer<T> {
     /// NaN-free buffer keeps it NaN-free; a number written over a buffer holding a NaN
     /// may have removed the last one, so the fact is forgotten.
     pub fn set(&mut self, i: usize, value: T) {
+        self.scatter(&[i], |_| value);
+    }
+
+    /// Overwrite the value at each of `positions` with `value(k)` for the `k`-th of
+    /// them (copy-on-write; a later repeat of a position wins), in O(`positions`) on a
+    /// uniquely-owned buffer, keeping the NaN fact where the writes decide it, as
+    /// [`set`](Self::set) does for one: a NaN written means some NaN; numbers written
+    /// over a NaN-free buffer keep it NaN-free; numbers written over a buffer holding
+    /// a NaN may have removed the last one, so the fact is forgotten.
+    pub fn scatter(&mut self, positions: &[usize], value: impl Fn(usize) -> T) {
         self.own();
-        let state = match (self.nan_state(), value.is_nan_value()) {
+        let before = self.nan_state();
+        let w = self.make_mut();
+        let mut wrote_nan = false;
+        for (k, &p) in positions.iter().enumerate() {
+            let x = value(k);
+            wrote_nan |= x.is_nan_value();
+            w[p] = x;
+        }
+        self.set_nan_state(match (before, wrote_nan) {
             (_, true) => SOME_NAN,
             (NO_NAN, false) => NO_NAN,
             _ => UNKNOWN,
-        };
-        self.make_mut()[i] = value;
-        self.set_nan_state(state);
+        });
     }
 }
 
@@ -606,6 +622,25 @@ mod tests {
         u.set(1, 2.0); // unknown stays unknown
         assert_eq!(u.known_has_nan(), None);
         assert!(u.has_nan());
+    }
+
+    #[test]
+    fn scatter_writes_many_cells_in_place_keeping_the_fact() {
+        let mut b = Buffer::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
+        assert!(!b.has_nan());
+        let at = b.as_ptr();
+        b.scatter(&[3, 0, 3], |k| [7.0, 8.0, 9.0][k]); // a later repeat wins
+        assert_eq!((b.as_slice(), b.as_ptr()), (&[8.0, 2.0, 3.0, 9.0][..], at));
+        assert_eq!(b.known_has_nan(), Some(false));
+        b.scatter(&[1, 2], |k| if k == 0 { NAN } else { 0.0 });
+        assert_eq!(b.known_has_nan(), Some(true));
+        b.scatter(&[1], |_| 1.0); // the only NaN may be gone: forget
+        assert_eq!(b.known_has_nan(), None);
+        let mut f = borrowed(vec![1.0, NAN]); // foreign bytes are copied in first
+        f.scatter(&[0], |_| 5.0);
+        assert!(!f.is_borrowed());
+        assert_eq!(f.known_has_nan(), None);
+        assert!(f.has_nan());
     }
 
     #[test]

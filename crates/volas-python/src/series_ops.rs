@@ -142,7 +142,7 @@ impl PySeries {
         // string, None/NaN): convert to a typed single-cell column for this dtype
         // and scatter it — identical rules to the DataFrame indexers and mask
         // assignment (keep dtype, update validity, lossy values error).
-        self.inner.data = scatter_scalar(&self.inner.data, &positions, value)?;
+        scatter_scalar(&mut self.inner.data, &positions, value)?;
         Ok(())
     }
 }

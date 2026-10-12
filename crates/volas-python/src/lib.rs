@@ -127,7 +127,7 @@ pub(crate) use coerce::*;
 pub(crate) use series::*;
 pub(crate) use series_support::*;
 pub(crate) use frame::*;
-pub(crate) use frame_tf::TfState;
+pub(crate) use frame_tf::{TfState, TfWrite};
 pub(crate) use frame_row::*;
 pub(crate) use frame_index::*;
 pub(crate) use frame_window::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};

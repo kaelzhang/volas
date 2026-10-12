@@ -211,9 +211,12 @@ keeps its exact type: an int is an `int64` column (never a float), `np.int32(7)`
 of any other shape, a list or a tuple is values, one per row (a one-element array on a
 two-row frame is a length error, never a broadcast). A boolean-frame mask
 (`df[mask] = v`) pairs with the columns by **name** and must carry the frame's index.
-Every cell write (`iloc` / `loc` / `iat` / `at`, `df[mask] = v`) lands in place and,
-like a bulk read, raises while a cached directive column is stale; a mask that selects
-no row changes nothing.
+Every cell write (`iloc` / `loc` / `iat` / `at`, `df[mask] = v`) lands in place, all or
+nothing, and costs time in the cells it writes, never in the frame's length: no column
+is copied (unless a Series or an export still shares it), and a label is found by a
+binary search over an ordered index — on a plain, time-frame or windowed frame alike.
+Like a bulk read, a write raises while a cached directive column is stale; a mask that
+selects no row changes nothing.
 
 ```py
 df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)
