@@ -26,7 +26,7 @@ impl Column {
                 } else {
                     bool_running(v, true)
                 };
-                Ok(Column::bool_with(out, val.clone()))
+                Ok(Column::bool_masked(out, val.clone()))
             }
             Column::I64(v, val) => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
             Column::I32(v, val) => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
@@ -47,7 +47,7 @@ impl Column {
                 } else {
                     bool_running(v, false)
                 };
-                Ok(Column::bool_with(out, val.clone()))
+                Ok(Column::bool_masked(out, val.clone()))
             }
             Column::I64(v, val) => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
             Column::I32(v, val) => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
@@ -74,11 +74,11 @@ impl Column {
     pub fn abs(&self) -> Result<Column> {
         match self {
             Column::Bool(_, _) => Ok(self.clone()),
-            Column::I64(v, val) => Ok(Column::i64_with(
+            Column::I64(v, val) => Ok(Column::i64_masked(
                 map_present(v, val, i64::checked_abs, "abs")?,
                 val.clone(),
             )),
-            Column::I32(v, val) => Ok(Column::i32_with(
+            Column::I32(v, val) => Ok(Column::i32_masked(
                 map_present(v, val, i32::checked_abs, "abs")?,
                 val.clone(),
             )),
@@ -100,11 +100,11 @@ impl Column {
                     .collect(),
             )),
             // a power-of-ten multiple past the dtype's range is an overflow (#25)
-            Column::I64(v, val) => Ok(Column::i64_with(
+            Column::I64(v, val) => Ok(Column::i64_masked(
                 map_present(v, val, |x| round_i64(x, decimals), "round")?,
                 val.clone(),
             )),
-            Column::I32(v, val) => Ok(Column::i32_with(
+            Column::I32(v, val) => Ok(Column::i32_masked(
                 map_present(
                     v,
                     val,
@@ -129,7 +129,7 @@ impl Column {
             // bool stays bool (pandas): a True lower bound forces all true, a
             // False upper bound forces all false, otherwise unchanged.
             Column::Bool(v, val) => {
-                return Ok(Column::bool_with(clip_bool(v, lower, upper), val.clone()))
+                return Ok(Column::bool_masked(clip_bool(v, lower, upper), val.clone()))
             }
             Column::F64(_) | Column::F32(_) | Column::I64(_, _) | Column::I32(_, _) => {}
             other => {
@@ -174,9 +174,9 @@ impl Column {
         match self {
             Column::F64(v) => Column::f64(shift_fill(v, n, f64::NAN)),
             Column::F32(v) => Column::f32(shift_fill(v, n, f32::NAN)),
-            Column::I64(v, _) => Column::i64_with(shift_fill(v, n, 0), nulls()),
-            Column::I32(v, _) => Column::i32_with(shift_fill(v, n, 0), nulls()),
-            Column::Bool(v, _) => Column::bool_with(shift_fill(v, n, false), nulls()),
+            Column::I64(v, _) => Column::i64_masked(shift_fill(v, n, 0), nulls()),
+            Column::I32(v, _) => Column::i32_masked(shift_fill(v, n, 0), nulls()),
+            Column::Bool(v, _) => Column::bool_masked(shift_fill(v, n, false), nulls()),
             Column::Datetime(v) => Column::datetime(shift_fill(v, n, i64::MIN)),
             Column::Str(v, _) => {
                 let shifted = (0..len)
@@ -303,15 +303,15 @@ impl Column {
             Column::F32(v) => {
                 Column::f32(src.iter().map(|s| s.map_or(f32::NAN, |j| v[j])).collect())
             }
-            Column::I64(v, _) => Column::i64_with(
+            Column::I64(v, _) => Column::i64_masked(
                 src.iter().map(|s| s.map_or(0, |j| v[j])).collect(),
                 validity,
             ),
-            Column::I32(v, _) => Column::i32_with(
+            Column::I32(v, _) => Column::i32_masked(
                 src.iter().map(|s| s.map_or(0, |j| v[j])).collect(),
                 validity,
             ),
-            Column::Bool(v, _) => Column::bool_with(
+            Column::Bool(v, _) => Column::bool_masked(
                 src.iter().map(|s| s.is_some_and(|j| v[j])).collect(),
                 validity,
             ),
@@ -330,14 +330,22 @@ impl Column {
     /// `where` / `mask` core: pick `self` where `cond` is true, else `other`,
     /// producing `target` dtype (the caller resolves keep-vs-promote so the fill's
     /// value/type is accounted for). Picks i64 natively when `target` is `I64`
-    /// (no f64 round-trip, so large ints stay exact). Equal lengths assumed.
+    /// (no f64 round-trip, so large ints stay exact). `self`, `cond` and `other`
+    /// must have one length, else a [`VolasError::Shape`] error before any read.
     pub fn select(&self, cond: &[bool], other: &Column, target: DType) -> Result<Column> {
+        let n = self.require_same_len(other)?;
+        if cond.len() != n {
+            return Err(VolasError::Shape(format!(
+                "condition has {} entries but the operands have {n}",
+                cond.len()
+            )));
+        }
         match target {
-            DType::I64 => Ok(Column::i64_with(
+            DType::I64 => Ok(Column::i64_masked(
                 stats::select(cond, &self.as_i64_vec()?, &other.as_i64_vec()?),
                 self.select_nulls(cond, other),
             )),
-            DType::I32 => Ok(Column::i32_with(
+            DType::I32 => Ok(Column::i32_masked(
                 stats::select(cond, &self.as_i32_vec()?, &other.as_i32_vec()?),
                 self.select_nulls(cond, other),
             )),
@@ -353,7 +361,7 @@ impl Column {
             // also bool); `bool` isn't `Numeric`, so the pick is inlined.
             DType::Bool => {
                 let (a, b) = (self.as_bool_vec()?, other.as_bool_vec()?);
-                Ok(Column::bool_with(
+                Ok(Column::bool_masked(
                     (0..cond.len())
                         .map(|i| if cond[i] { a[i] } else { b[i] })
                         .collect(),
@@ -365,7 +373,7 @@ impl Column {
             // turned every kept string into NaN.
             DType::Utf8 => {
                 let (a, b) = (self.as_str_vec()?, other.as_str_vec()?);
-                Ok(Column::str_with(
+                Ok(Column::str_masked(
                     (0..cond.len())
                         .map(|i| if cond[i] { a[i].clone() } else { b[i].clone() })
                         .collect(),
@@ -397,9 +405,9 @@ impl Column {
         ))
     }
 
-    /// The numeric column with every cell where `keep(i)` is false made missing
-    /// (`NaN` for a float, NA for an int / bool); other dtypes are returned as-is.
-    fn missing_unless(&self, keep: impl Fn(usize) -> bool) -> Column {
+    /// The column with every cell where `keep(i)` is false made missing, in the
+    /// dtype's own representation (`NaN` / `NaT` in-band, else a validity hole).
+    pub(super) fn missing_unless(&self, keep: impl Fn(usize) -> bool) -> Column {
         let n = self.len();
         let and = |val: &Validity| Validity::from_valid_iter(n, (0..n).map(|i| keep(i) && val.is_valid(i)));
         match self {
@@ -408,7 +416,10 @@ impl Column {
             Column::I64(v, val) => Column::I64(v.clone(), and(val)),
             Column::I32(v, val) => Column::I32(v.clone(), and(val)),
             Column::Bool(v, val) => Column::Bool(v.clone(), and(val)),
-            other => other.clone(),
+            Column::Str(v, val) => Column::Str(v.clone(), and(val)),
+            Column::Datetime(v) => {
+                Column::datetime((0..n).map(|i| if keep(i) { v[i] } else { i64::MIN }).collect())
+            }
         }
     }
 

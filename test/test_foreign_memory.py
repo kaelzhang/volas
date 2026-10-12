@@ -42,7 +42,7 @@ def _borrowed_arrow(values):
 def test_a_row_made_missing_through_an_arrow_source_is_skipped(directive):
     source = CLOSE.copy()
     df = DataFrame.from_arrow(pa.table({"close": _borrowed_arrow(source)}))
-    clean = np.asarray(df.exec(directive), float)  # the frame has now looked at its bytes
+    clean = np.asarray(df.exec(directive, dtype='float64'), float)  # the frame has now looked at its bytes
     _bit_exact(clean, DataFrame({"close": CLOSE.copy()}).exec(directive))
     source[100] = np.nan  # written behind the frame's back
     got = df.exec(directive)
@@ -82,7 +82,7 @@ def test_dlpack_and_arrow_exports_are_read_only():
 def test_numpy_import_and_export_copy():
     source = CLOSE.copy()
     df = DataFrame({"close": source})
-    before = np.asarray(df.exec("ema:5"), float)
+    before = np.asarray(df.exec("ema:5", dtype='float64'), float)
     source[10] = np.nan  # the frame copied on construction
     out = df["close"].to_numpy()
     out[20] = np.nan  # and `to_numpy` hands out a copy

@@ -36,6 +36,7 @@ impl Cumulator {
                 "the data frame to be appended is empty".into(),
             ));
         }
+        self.spec.check(fine)?; // before any state is taken
 
         // raw = the still-open period's bars + the incoming bars.
         let raw = match self.open.take() {

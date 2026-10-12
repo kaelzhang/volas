@@ -95,16 +95,19 @@ def test_array_protocol_matches_to_numpy(d):
 def test_to_numpy_na_representation():
     """The NA-bearing export representation, per the NA-model interop ruling:
     float keeps float64+NaN; int demotes to float64+NaN (numpy int has no NA);
-    BOOL exports as an OBJECT array (True/nan/False — F17, float64 would destroy
-    the bool identity); str is object with None; datetime keeps NaT."""
-    import math
+    BOOL has no bare NumPy form (a nan / None placeholder would read True / False),
+    so it exports only with a stated fill — object (volas.NA) or float64 (NaN); str
+    is object with None; datetime keeps NaT."""
     for n in ("N1", "N2"):
         assert A.series("f64", n).to_numpy().dtype == np.float64
         assert A.series("i64", n).to_numpy().dtype == np.float64    # NaN-demoted
-        b = A.series("bool", n).to_numpy()
-        assert b.dtype == object, "F17: bool+NA exports as object"
+        s = A.series("bool", n)
+        with pytest.raises(ValueError, match="bool column with missing values"):
+            s.to_numpy()
+        b = s.to_numpy(dtype="object")
         if n == "N1":
-            assert b[0] is True and math.isnan(b[1]) and b[2] is True
+            assert b[0] is True and b[1] is volas.NA and b[2] is True
+            assert math.isnan(s.to_numpy(dtype="float64")[1])
         assert A.series("str", n).to_numpy().dtype == object
         assert str(A.series("datetime", n).to_numpy().dtype).startswith("datetime64")
 

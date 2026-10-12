@@ -64,13 +64,13 @@ ACCUMULATING = {
 
 
 def _window_matches(directive, data):
-    full = np.asarray(DataFrame(data).exec(directive), dtype=float)
+    full = np.asarray(DataFrame(data).exec(directive, dtype='float64'), dtype=float)
     lb = volas.directive_lookback(directive)
     win = 2 * (lb + 1)
     for vr in range(win + 1, N):
         start = vr - win
         part = DataFrame({k: v[start:] for k, v in data.items()})
-        tail = np.asarray(part.exec(directive), dtype=float)[vr - start:]
+        tail = np.asarray(part.exec(directive, dtype='float64'), dtype=float)[vr - start:]
         want = full[vr:]
         same = (tail == want) | (np.isnan(tail) & np.isnan(want))
         if not same.all():

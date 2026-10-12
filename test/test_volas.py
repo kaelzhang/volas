@@ -172,9 +172,18 @@ _PARITY_FROM = {'rsv:9': 8}
 def test_parity_with_stock_pandas(stock, spd, directive):
     start = _PARITY_FROM.get(directive, 0)
     expected = np.asarray(spd.exec(directive, create_column=False), dtype=float)[start:]
-    actual = np.asarray(stock.exec(directive), dtype=float)
+    actual = stock.exec(directive, dtype='float64')  # a missing truth -> NaN
     assert np.isnan(actual[:start]).all()
-    assert np.allclose(expected, actual[start:], rtol=1e-6, atol=1e-6, equal_nan=True), (
+    actual = actual[start:]
+    if stock[directive].dtype == 'bool':
+        # A directive boolean is missing where an operand is (the warm-up rows);
+        # stock-pandas reads those rows as False — the documented divergence
+        # (docs/directives.md#operators). Every row volas knows matches exactly.
+        unknown = np.isnan(actual)
+        assert not expected[unknown].any(), f'a missing truth where stock-pandas is True: {directive!r}'
+        assert unknown.sum() < len(actual), directive
+        expected, actual = expected[~unknown], actual[~unknown]
+    assert np.allclose(expected, actual, rtol=1e-6, atol=1e-6, equal_nan=True), (
         f'mismatch for {directive!r}'
     )
 

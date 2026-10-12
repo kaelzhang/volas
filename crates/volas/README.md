@@ -76,8 +76,12 @@ Column constructors: `Column::f64`, `Column::i64`, `Column::bool`,
 ### Missing values (NA)
 
 A cell can be missing independently of its value. Float columns use `NaN` as the NA
-marker; integer / bool / string columns carry an explicit validity mask. Check
-missingness per cell with `is_valid`, and count it with `null_count`.
+marker; integer / bool / string columns carry an explicit validity mask. Build them
+from optional cells (`Column::i64_from_options` / `bool_from_options` /
+`str_from_options`), or from values plus a mask with the checked `Column::i64_with`
+/ `i32_with` / `bool_with` / `str_with` (a mask of another length is an error, as is
+any frame column whose mask does not cover it). Check missingness per cell with
+`is_valid`, and count it with `null_count`.
 
 ```rust
 use volas::Column;
@@ -91,12 +95,14 @@ assert!(!prices.is_valid(1));         // cell 1 is NA
 assert!(prices.get_f64(1).is_nan());  // reading an NA f64 yields NaN
 
 // Integer / bool / string columns carry a validity mask instead of a sentinel.
-let volume = Column::i64_with(
-    vec![100, 0, 300],
-    Validity::from_valid_iter(3, [true, false, true]), // cell 1 is NA
-);
+let volume = Column::i64_from_options([Some(100), None, Some(300)]); // cell 1 is NA
 assert_eq!(volume.null_count(), 1);
 assert!(!volume.is_valid(1));
+
+// An explicit mask must cover exactly the values, else a shape error.
+let checked = Column::i64_with(vec![100, 0, 300], Validity::from_valid_iter(3, [true, false, true]));
+assert_eq!(checked.unwrap(), volume);
+assert!(Column::i64_with(vec![1], Validity::from_valid_iter(3, [true, false, true])).is_err());
 ```
 
 Indicator warm-up rows are NA too — e.g. a 2-period SMA has one NA row at the head:

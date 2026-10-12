@@ -100,7 +100,13 @@ silent float upcast):
 - **Comparisons** (`==` `!=` `<` `<=` `>` `>=`) return a *non-nullable* bool mask:
   a missing value compares `False` (and `!=` compares `True`), following IEEE /
   NumPy — not pandas-nullable's three-valued `NA`. This keeps masks free of `NA`
-  so `df[mask]` and assignment stay total.
+  so `df[mask]` and assignment stay total. A **directive** boolean
+  (`df['close > ma:20']`) is different: it is a signal, so a row whose operand is
+  missing (an indicator's warm-up rows) is `volas.NA`, never a made-up `False` —
+  see [Directives](directives.md#operators).
+- **Cumulation never skips a missing value**: a period's `first` / `last` / `max` /
+  `min` / `sum` is missing as soon as one of its values is — pandas `resample`
+  skips missing values instead (see [Cumulation](cumulation.md)).
 - **Storage keeps the dtype.** Where pandas upcasts an int/bool column with a missing
   value to `float64` / `object`, volas keeps it `int64` / `boolean` with the hole as
   `volas.NA` — so `to_list()` returns exact ints and `volas.NA`. The numpy *export*

@@ -50,7 +50,7 @@ fn exact_int_float_ordering() {
 #[test]
 fn convert_lossless_to_floats() {
     use DType::{F32, F64};
-    let ints = Column::i64_with(vec![1, 0], Validity::from_valid_iter(2, [true, false]));
+    let ints = Column::i64_masked(vec![1, 0], Validity::from_valid_iter(2, [true, false]));
     let f = ints.convert_lossless(F64).unwrap();
     assert!(f.equals(&Column::f64(vec![1.0, f64::NAN])));
     assert!(dtype_err(Column::i64(vec![B]).convert_lossless(F64)));

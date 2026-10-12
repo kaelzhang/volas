@@ -471,7 +471,7 @@ def test_candlestick_patterns_match_talib_synthetic(synth_candle_ohlc):
     o, h, l, c = synth_candle_ohlc
     df = volas.DataFrame({'open': o, 'high': h, 'low': l, 'close': c})
     for name, fn, lb in _CANDLE_PATTERNS:
-        got = np.asarray(df.exec(f'style.{name}'), dtype=float)
+        got = np.asarray(df.exec(f'style.{name}', dtype='float64'), dtype=float)
         np.testing.assert_array_equal(got[lb:], np.asarray(fn(o, h, l, c), dtype=float)[lb:])
         assert np.any(got[lb:] != 0), f'{name} never fired on the synthetic series'
 
@@ -525,8 +525,8 @@ def test_accbands_matches_talib(ohlc):
     _parity(df.exec('accbands.m'), mid)
     _parity(df.exec('accbands.l'), low)
     # the .m abbreviation also resolves the Bollinger middle band
-    np.testing.assert_allclose(np.asarray(df.exec('boll.m'), dtype=float),
-                               np.asarray(df.exec('boll'), dtype=float), equal_nan=True)
+    np.testing.assert_allclose(np.asarray(df.exec('boll.m', dtype='float64'), dtype=float),
+                               np.asarray(df.exec('boll', dtype='float64'), dtype=float), equal_nan=True)
 
 
 def test_bollinger_bands_match_talib(ohlc):
@@ -686,6 +686,6 @@ def test_ht_trendline_matches_talib(close_full):
 def test_ht_trendmode_matches_talib(close_full):
     df, c = close_full
     # Integer 0/1 output: exact match over the converged region.
-    got = np.asarray(df.exec('ht_trendmode'), dtype=float)[_HT_CONVERGED:]
+    got = np.asarray(df.exec('ht_trendmode', dtype='float64'), dtype=float)[_HT_CONVERGED:]
     want = np.asarray(talib.HT_TRENDMODE(c), dtype=float)[_HT_CONVERGED:]
     np.testing.assert_array_equal(got, want)

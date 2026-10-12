@@ -2,35 +2,47 @@
 // Tools
 // ---------------------------------------------------------------------------
 
-/// Whether values increase (`direction = 1`) / decrease (`-1`) over a window.
-pub fn increase(data: &[f64], repeat: usize, direction: i32) -> Vec<bool> {
-    let n = data.len();
-    let period = repeat + 1;
-    let mut result = vec![false; n];
-    if period > n {
-        return result;
-    }
-    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
-    for i in (period - 1)..n {
-        let mut is_increasing = true;
-        let mut current = if direction == 1 {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        };
-        #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
-        for j in (i + 1 - period)..=i {
-            let value = data[j];
-            if (value - current) * (direction as f64) > 0.0 {
-                current = value;
+// The boolean tools return truths that carry presence (contract #27): `None` is a
+// missing truth — a comparison with a missing (NaN) operand, or a window reaching
+// before the series start — and windows combine them with Kleene logic.
+
+/// Kleene AND of each row's last `k` truths: `false` as soon as one present `false`
+/// is in the window, `true` when the window is full and every truth in it is `true`,
+/// missing otherwise (rows before the series start are missing). `k == 0` has no
+/// window: every row is missing (the directive boundary rejects it).
+pub fn all_of_last(truths: &[Option<bool>], k: usize) -> Vec<Option<bool>> {
+    (0..truths.len())
+        .map(|i| {
+            let window = &truths[(i + 1).saturating_sub(k)..=i];
+            if k == 0 {
+                None
+            } else if window.contains(&Some(false)) {
+                Some(false)
+            } else if i + 1 >= k && window.iter().all(|t| *t == Some(true)) {
+                Some(true)
             } else {
-                is_increasing = false;
-                break;
+                None
             }
-        }
-        result[i] = is_increasing;
-    }
-    result
+        })
+        .collect()
+}
+
+/// Whether values strictly increase (`direction > 0`) / decrease (`< 0`) over each
+/// row's last `repeat` steps (the last `repeat + 1` values): the Kleene AND of the
+/// steps, a step with a missing value being missing. `direction == 0` never holds.
+pub fn increase(data: &[f64], repeat: usize, direction: i32) -> Vec<Option<bool>> {
+    let want = match direction.signum() {
+        1 => Some(std::cmp::Ordering::Greater),
+        -1 => Some(std::cmp::Ordering::Less),
+        _ => None,
+    };
+    let steps: Vec<Option<bool>> = (0..data.len())
+        .map(|j| {
+            let prev = data.get(j.wrapping_sub(1))?; // the first value has no step
+            data[j].partial_cmp(prev).map(|o| Some(o) == want)
+        })
+        .collect();
+    all_of_last(&steps, repeat)
 }
 
 /// Candlestick style. Parsing the DSL string (`"bullish"` / `"bearish"`) is the
@@ -43,39 +55,20 @@ pub enum Style {
     Bearish,
 }
 
-/// Whether each candle matches `style` (`Bullish` => close > open).
-pub fn style(style: Style, open: &[f64], close: &[f64]) -> Vec<bool> {
-    (0..open.len())
-        .map(|i| match style {
-            Style::Bullish => close[i] > open[i],
-            Style::Bearish => close[i] < open[i],
-        })
-        .collect()
+/// Whether each candle matches `style` (`Bullish` => close > open); missing when
+/// either price is.
+pub fn style(style: Style, open: &[f64], close: &[f64]) -> Vec<Option<bool>> {
+    let want = match style {
+        Style::Bullish => std::cmp::Ordering::Greater,
+        Style::Bearish => std::cmp::Ordering::Less,
+    };
+    (0..open.len()).map(|i| close[i].partial_cmp(&open[i]).map(|o| o == want)).collect()
 }
 
-/// Whether a boolean condition holds for `repeat` consecutive periods.
-pub fn repeat(data: &[bool], repeat: usize) -> Vec<bool> {
-    let n = data.len();
-    if repeat == 1 {
-        return data.to_vec();
-    }
-    let mut result = vec![false; n];
-    // `repeat == 0` would underflow `repeat - 1` below; the directive boundary
-    // rejects it — this is the defensive in-kernel guard (all-false).
-    if repeat == 0 || repeat > n {
-        return result;
-    }
-    for i in (repeat - 1)..n {
-        let mut all_true = true;
-        for &d in &data[(i + 1 - repeat)..=i] {
-            if !d {
-                all_true = false;
-                break;
-            }
-        }
-        result[i] = all_true;
-    }
-    result
+/// Whether a boolean condition holds for `repeat` consecutive periods (the Kleene
+/// AND of [`all_of_last`]).
+pub fn repeat(data: &[Option<bool>], repeat: usize) -> Vec<Option<bool>> {
+    all_of_last(data, repeat)
 }
 
 /// Percentage change over `period` (`data[i] / data[i-(period-1)] - 1`).

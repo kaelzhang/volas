@@ -33,7 +33,7 @@ def test_a_wilder_sum_emits_its_seed_on_exactly_period_rows(directive):
     talib = pytest.importorskip("talib")
     period = int(directive.split(":")[1])
     cols = _cols(period)
-    got = np.asarray(volas.DataFrame(cols).exec(directive), float)
+    got = np.asarray(volas.DataFrame(cols).exec(directive, dtype='float64'), float)
     fn = talib.PLUS_DM if directive.startswith("plus") else talib.MINUS_DM
     np.testing.assert_allclose(got, fn(cols["high"], cols["low"], period), rtol=1e-12, equal_nan=True)
 

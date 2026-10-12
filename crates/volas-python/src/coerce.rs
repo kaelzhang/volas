@@ -6,7 +6,7 @@ use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use volas_core::{
-    datetime, Column, DType, Validity,
+    datetime, Column, DType,
 };
 
 #[allow(unused_imports)]
@@ -88,13 +88,8 @@ fn masked_array_column(v: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
     }
     let col = pyany_to_column(&v.getattr("data")?)?;
     let mask = ma.call_method1("getmaskarray", (v,))?.call_method0("tolist")?;
-    let keep: Vec<bool> = mask.extract::<Vec<bool>>()?.into_iter().map(|m| !m).collect();
-    if keep.iter().all(|&k| k) {
-        return Ok(Some(col));
-    }
-    let dt = col.dtype();
-    let na = Column::na_of(dt, col.len());
-    Ok(Some(col.select(&keep, &na, dt).map_err(pyerr)?))
+    let missing: Vec<bool> = mask.extract()?;
+    Ok(Some(col.with_missing_mask(&missing).map_err(pyerr)?))
 }
 
 /// The interop-private masked construction channel: a 3-tuple
@@ -114,28 +109,20 @@ fn masked_typed_column(t: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Option<C
     };
     let dt = parse_dtype(&dtype)?;
     let vals = t.get_item(0)?;
-    // mask = True means missing (pandas .isna()).
-    let validity = Validity::from_valid_iter(mask.len(), mask.iter().map(|m| !m));
-    Ok(Some(match dt {
-        DType::I64 => Column::i64_with(vals.extract::<Vec<i64>>()?, validity),
-        DType::I32 => Column::i32_with(vals.extract::<Vec<i32>>()?, validity),
-        DType::Bool => Column::bool_with(vals.extract::<Vec<bool>>()?, validity),
-        DType::Utf8 => Column::str_with(vals.extract::<Vec<String>>()?, validity),
-        DType::F64 => {
-            let mut v = vals.extract::<Vec<f64>>()?;
-            for (i, m) in mask.iter().enumerate() {
-                if *m {
-                    v[i] = f64::NAN;
-                }
-            }
-            Column::f64(v)
-        }
+    let dense = match dt {
+        DType::I64 => Column::i64(vals.extract()?),
+        DType::I32 => Column::i32(vals.extract()?),
+        DType::Bool => Column::bool(vals.extract()?),
+        DType::Utf8 => Column::str(vals.extract()?),
+        DType::F64 => Column::f64(vals.extract()?),
         _ => {
             return Err(PyTypeError::new_err(
                 "masked construction supports int64/int32/bool/str/float64",
             ))
         }
-    }))
+    };
+    // mask = True means missing (pandas .isna()); a mask of another length raises
+    Ok(Some(dense.with_missing_mask(&mask).map_err(pyerr)?))
 }
 
 pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
@@ -222,12 +209,12 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     // `volas.NA`. int/bool keep their dtype (pandas upcasts to float/object).
     if let Ok(vv) = v.extract::<Vec<Option<bool>>>() {
         if vv.iter().any(Option::is_some) {
-            return Ok(option_bool_column(vv));
+            return Ok(Column::bool_from_options(vv));
         }
     }
     if let Ok(vv) = v.extract::<Vec<Option<i64>>>() {
         if vv.iter().any(Option::is_some) {
-            return Ok(option_i64_column(vv));
+            return Ok(Column::i64_from_options(vv));
         }
     }
     if let Ok(vv) = v.extract::<Vec<Option<f64>>>() {
@@ -235,8 +222,7 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
         return Ok(Column::f64(vv.iter().map(|x| x.unwrap_or(f64::NAN)).collect()));
     }
     if let Ok(vv) = v.extract::<Vec<Option<String>>>() {
-        let validity = Validity::from_valid_iter(vv.len(), vv.iter().map(Option::is_some));
-        return Ok(Column::str_with(vv.into_iter().map(Option::unwrap_or_default).collect(), validity));
+        return Ok(Column::str_from_options(vv));
     }
     // A list may carry the `volas.NA` symbol itself (not `None`) — normalise it to
     // `None` and retry, so `to_list()` output round-trips back into a frame.
@@ -307,18 +293,6 @@ fn int64_overflow() -> PyErr {
 /// contract #20) — one rule, so a dict append and an `iat` write agree.
 pub(crate) fn bar_scalar_to_column(v: &Bound<'_, PyAny>, dtype: DType) -> PyResult<Column> {
     crate::frame_index::scalar_to_column(v, dtype)
-}
-
-/// Build a `Bool` column from `Option`s, marking `None` cells `volas.NA`.
-pub(crate) fn option_bool_column(vv: Vec<Option<bool>>) -> Column {
-    let validity = Validity::from_valid_iter(vv.len(), vv.iter().map(Option::is_some));
-    Column::bool_with(vv.iter().map(|x| x.unwrap_or(false)).collect(), validity)
-}
-
-/// Build an `I64` column from `Option`s, marking `None` cells `volas.NA`.
-pub(crate) fn option_i64_column(vv: Vec<Option<i64>>) -> Column {
-    let validity = Validity::from_valid_iter(vv.len(), vv.iter().map(Option::is_some));
-    Column::i64_with(vv.iter().map(|x| x.unwrap_or(0)).collect(), validity)
 }
 
 /// The list shapes that must NOT fall through to the lossy-float path: a list of

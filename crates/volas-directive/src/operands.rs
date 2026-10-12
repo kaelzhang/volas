@@ -13,7 +13,7 @@ use std::cell::{Cell, OnceCell};
 
 use volas_core::{Column, DataFrame, Result, VolasError};
 
-use crate::exec::{execute, operand, require_numeric, series_bool};
+use crate::exec::{execute, operand, require_f64_input, series_truths};
 use crate::types::Ast;
 
 /// How many input slots a command can read (every command reads at most five; an arm
@@ -129,7 +129,7 @@ impl<'a> Operands<'a> {
             Some(node) => Read::Operand(execute(self.df, node)?),
             None => Read::Frame(self.df.column(default)?),
         };
-        require_numeric(read.column())?;
+        require_f64_input(read.column())?;
         Ok(cell.get_or_init(|| read))
     }
 
@@ -165,9 +165,9 @@ impl<'a> Operands<'a> {
     }
 
     /// A boolean operand at `slot`.
-    pub(crate) fn bool(&self, slot: usize) -> Result<Vec<bool>> {
+    pub(crate) fn bool(&self, slot: usize) -> Result<Vec<Option<bool>>> {
         self.clean.set(false);
-        series_bool(self.df, self.series, slot)
+        series_truths(self.df, self.series, slot)
     }
 
     /// Whether every input read is a frame column known to hold no NaN.

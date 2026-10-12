@@ -31,8 +31,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     'windowed-drift',
     # A comparison consumes a stale right-hand frame without raising.
     'stale-compare-rhs',
-    # Integer folds read the NA placeholder as a value.
-    'int-fold-na',
     # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
     # while df[d] names the column from the bound values ('ma:5', 'sar').
     'stringify-column-name',
@@ -49,9 +47,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     # A recursive cached column without a carried state (a composite / explicit
     # series) re-warms on a slice's retained rows instead of continuing its history.
     'slice-recursive-rewarm',
-    # An all-NaN period folds high / low to -inf / +inf instead of NaN (already
-    # tracked); the tf reference reproduces that result while this is open.
-    'all-nan-fold-extreme',
 })
 
 # Directive families whose incremental refresh is known to diverge from the full
@@ -112,14 +107,10 @@ SLICE_CACHED_COLUMNS_CONTINUE = True
 
 # --- tf fold (README "Live cumulation") --------------------------------------------------
 
-# Float aggregation of a NaN fine value: first / last keep it as it is, max / min
-# skip it, sum propagates it. (Fold and batch cumulate agree on this today; pandas
-# resample would skip NaN in every aggregator — an open contract question.)
-TF_FLOAT_FIRST_LAST_KEEP_NAN = True
-TF_FLOAT_MAX_MIN_SKIP_NAN = True
-TF_FLOAT_SUM_PROPAGATES_NAN = True
-# Integer aggregation skips NA cells (pandas semantics); an all-NA bucket is NA.
-TF_INT_AGG_SKIPS_NA = True
+# Aggregation of a missing fine value (docs/cumulation.md, "A missing input is never
+# skipped"; a documented pandas divergence): a period's first / last / max / min /
+# sum is missing as soon as any of its values is — for every dtype, identical in the
+# live fold and the batch cumulate, never ±inf. The reference ledger implements it.
 # A frame built with `time_frame=` from closed bars: the behaviour of a fine bar
 # that falls in the LAST seeded period is undocumented, so it is not generated.
 TF_SEED_LAST_PERIOD_GENERATED = False

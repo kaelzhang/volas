@@ -63,7 +63,14 @@ fn replacing_needs_a_last_row_and_a_source_row() {
     let mut col = Column::f64(vec![]);
     assert!(col.set_last_from(&Column::f64(vec![1.0]), 0).is_err());
     col.set_last_na(); // no-op
-    assert!(Column::f64(vec![1.0]).set_last_from(&Column::i64(vec![1]), 0).is_err());
+    // another dtype converts losslessly (as an append does); a lossy value raises
+    let mut f = Column::f64(vec![1.0]);
+    f.set_last_from(&Column::i64(vec![7]), 0).unwrap();
+    assert_eq!(f, Column::f64(vec![7.0]));
+    let mut i = Column::i64(vec![1]);
+    let err = i.set_last_from(&Column::f64(vec![1.5]), 0).unwrap_err();
+    assert!(matches!(err, VolasError::DType(_)), "{err}");
+    assert_eq!(i, Column::i64(vec![1]), "unchanged");
     let mut s = crate::strbuf::StrBuffer::from_vec(vec![]);
     s.set_last("x"); // no-op
     assert_eq!(s.len(), 0);
@@ -168,11 +175,15 @@ fn refolding_the_forming_row_is_the_period_reduce() {
     .unwrap();
     df.refold_forming_row(1, &period, &ops).unwrap();
     assert_eq!(df.column("first").unwrap().get_f64(1), 4.0);
-    assert_eq!(df.column("max").unwrap().get_f64(1), 2.0);
+    // a missing input makes the period's max missing (no skipped value)
+    assert!(df.column("max").unwrap().get_f64(1).is_nan());
     assert_eq!(df.column("sum").unwrap().get_f64(1), 0.875);
     // only the forming row went stale; the state before it is the column's state again
     assert_eq!(df.computed_resume_state("sum"), Some((&[0.5][..], 0)));
-    let bad = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["x".into()])], None).unwrap();
+    // a str column folds its first / last in place at the forming (last) row
+    let bars = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["x".into(), "y".into()])], None).unwrap();
     let mut s = DataFrame::new(vec!["s".into()], vec![Column::str(vec!["a".into()])], None).unwrap();
-    assert!(s.refold_forming_row(0, &bad, &[(0, 0, CombineOp::Keep)]).is_err());
+    s.refold_forming_row(0, &bars, &[(0, 0, CombineOp::Replace)]).unwrap();
+    assert_eq!(s.column("s").unwrap().str_at(0), Some("y"));
+    assert!(s.refold_forming_row(0, &bars, &[(0, 0, CombineOp::Max)]).is_err()); // unsupported
 }

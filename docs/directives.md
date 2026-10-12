@@ -73,6 +73,33 @@ left operator right
   `left` and `right`, returning a `bool` series.
 - arithmetic `+ - * /`, logical `& | ^`, and unary `~` (not) / `-` (negate).
 
+**A directive boolean is missing where it cannot be known.** A comparison whose
+operand is missing — e.g. the warm-up rows of `close > ma:20` — is `volas.NA`, not
+`False`; a cross is missing while either of its two rows is (so its first row is
+too, unless the current row already rules the cross out); and `~ & | ^` follow
+Kleene logic: a present `False` decides `&`, a present `True` decides `|`, and
+anything else involving a missing truth stays missing (`~` of a missing truth is
+missing, never `True`). `increase`, `style` and `repeat` follow the same rule. A
+cached boolean keeps its missing rows through `append` and refresh, exactly as a
+full recompute gives them. To use such a signal as a row mask, state what an
+unknown row means first: `df[df['close > ma:20'].fillna(False)]`. The same holds at
+the NumPy boundary: a boolean result holding a missing truth has no bare NumPy form
+(a `nan` placeholder would read `True` in `np.where` or indexing), so
+`df.exec('close > ma:20')`, `np.asarray(df['close > ma:20'])` and `.to_numpy()`
+raise until you pass `na_value=` (e.g. `False`), `dtype='float64'` (missing → `NaN`)
+or `dtype='object'` (missing → `volas.NA`) — `df.exec(d, na_value=False)`. Numeric
+results export as before (`np.asarray(df.exec('ma:20'), dtype=np.float64)`).
+
+**Numbers stay exact.** An integer literal is an exact int64
+(`volume > 9007199254740993` compares against that integer, not its float64
+neighbour) — written with zero decimals (`9007199254740993.0`) too — and a
+comparison orders integers exactly — `2**53 + 1 > 2**53`. A whole-number literal
+past int64 that no float64 holds exactly is a `DirectiveSyntaxError`, never a
+rounded value. The
+arithmetic operators, unary `-` and every indicator compute in float64, so an
+int64 operand past `±2**53` (whose float64 image is not its value) raises
+`OverflowError` instead of computing from a rounded input.
+
 `df[directive]` **caches** the result as a real column (so repeated reads are
 free), then auto-refreshes its stale tail on access after an `append`. Use
 `df.exec(directive)` to compute a directive as a NumPy array **without**

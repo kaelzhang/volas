@@ -154,16 +154,25 @@ mod tests {
 
     #[test]
     fn style_and_repeat() {
-        assert_eq!(
-            style(Style::Bullish, &[1.0, 2.0], &[2.0, 1.0]),
-            vec![true, false]
-        );
-        assert_eq!(
-            style(Style::Bearish, &[1.0, 2.0], &[2.0, 1.0]),
-            vec![false, true]
-        );
-        let r = repeat(&[true, true, true, false], 2);
-        assert_eq!(r, vec![false, true, true, false]);
+        let (t, f) = (Some(true), Some(false));
+        assert_eq!(style(Style::Bullish, &[1.0, 2.0, f64::NAN], &[2.0, 1.0, 3.0]), vec![t, f, None]);
+        assert_eq!(style(Style::Bearish, &[1.0, 2.0], &[2.0, 1.0]), vec![f, t]);
+        // Kleene AND over the window: the first row's window reaches before the start
+        let r = repeat(&[t, t, t, f], 2);
+        assert_eq!(r, vec![None, t, t, f]);
+        assert_eq!(repeat(&[f, t, None, t], 2), vec![f, f, None, None]);
+        assert_eq!(repeat(&[t, None], 1), vec![t, None]);
+        assert_eq!(repeat(&[t, f], 0), vec![None, None]); // no window
+    }
+
+    #[test]
+    fn increase_is_the_kleene_and_of_its_steps() {
+        let (t, f) = (Some(true), Some(false));
+        let x = [1.0, 2.0, 3.0, 2.0, f64::NAN, 5.0, 6.0];
+        assert_eq!(increase(&x, 1, 1), vec![None, t, t, f, None, None, t]);
+        assert_eq!(increase(&x, 2, 1), vec![None, None, t, f, f, None, None]);
+        assert_eq!(increase(&x, 1, -1), vec![None, f, f, t, None, None, f]);
+        assert_eq!(increase(&[1.0, 2.0], 1, 0), vec![None, f]); // no direction holds
     }
 
     #[test]
@@ -171,9 +180,9 @@ mod tests {
         // rsi skips NaN deltas (the `continue` branch)
         let r = rsi(&[1.0, f64::NAN, 3.0, 4.0, 5.0], 2);
         assert_eq!(r.len(), 5);
-        // increase / repeat return all-false when the window exceeds the length
-        assert_eq!(increase(&[1.0, 2.0], 5, 1), vec![false, false]);
-        assert_eq!(repeat(&[true, true], 5), vec![false, false]);
+        // increase / repeat are missing while the window exceeds the rows so far
+        assert_eq!(increase(&[1.0, 2.0], 5, 1), vec![None, None]);
+        assert_eq!(repeat(&[Some(true), Some(true)], 5), vec![None, None]);
     }
 
     /// Zero-denominator / flat-data branches (no range, no variance, no directional
