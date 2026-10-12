@@ -51,6 +51,7 @@ FINITE = {
     "dkx": "dkx",
     "wvad": "wvad",
     "cdp": "cdp",
+    "ttm_squeeze": "ttm_squeeze",
     "mike": "mike.midr:5",
     "pivot_points": "pivot_points",
     "ichimoku": "ichimoku.chikou",
@@ -138,7 +139,6 @@ RECURSIVE = {
     "crsi": "crsi",
     "keltner": "keltner",
     "stoch_momentum": "stoch_momentum",
-    "ttm_squeeze": "ttm_squeeze",
     "wad": "wad",
     "asi": "asi",
     "supertrend": "supertrend",
@@ -310,6 +310,105 @@ def test_finite_window_recovers_after_bad_value_leaves(key, bad):
     np.testing.assert_allclose(got[:K], clean[:K], rtol=1e-9, atol=1e-9)
 
 
+# --- a missing row is missing for exactly the outputs whose definition reads it ---
+
+# The rows (offsets from the missing row) whose definition reads it, for keys whose
+# reach is not the contiguous trailing window `[0, lookback + extra]`: a lag reads one
+# row `period` back, a prior-bar line reads only the bar before, a displaced line reads
+# its window `displacement` rows back. (`bbi`'s reported lookback is one row long.)
+_LAG = {k: [0, 5] for k in ("mom", "roc", "rocp", "rocr", "rocr100")}
+_PRIOR_BAR = {k: [1] for k in ("cdp", "pivot_points", *(s for s in SUBCOMMANDS if s.startswith(("cdp.", "pivot_points."))))}
+READS = {
+    **_LAG,
+    **_PRIOR_BAR,
+    "bbi": list(range(24)),
+    "coppock": [*range(10), *range(11, 24)],
+    "mavp": list(range(5)),  # periods = 5
+    "ichimoku": [0],  # the chikou line is the close itself
+    "ichimoku.chikou": [0],
+    "ichimoku.senkou_a": list(range(26, 52)),
+    "ichimoku.senkou_b": list(range(26, 78)),
+}
+# Boolean lines carry no missing value yet: a missing row reads as false.
+_BOOLEAN = {"increase", "repeat", "style", "style.bearish", "style.bullish"}
+
+
+def _reads(key):
+    if key in READS:
+        return READS[key]
+    span = volas.directive_lookback(_directive(key)) + 1 + EXTRA_REACH.get(_command(key), 0)
+    return list(range(span))
+
+
+def _boolean_xfail(keys):
+    why = "M12 boolean-validity: a boolean line has no missing value to carry"
+    return [pytest.param(k, marks=pytest.mark.xfail(strict=True, reason=why)) if k in _BOOLEAN else k
+            for k in keys]
+
+
+def _base_for(key):
+    """The data a key is checked on: `BASE`, except the candle-colour lines, whose `open`
+    must not sit a fixed step above `close` (else the colour never changes and a
+    laundered missing value would go unseen) — they take the candle data."""
+    return {**BASE, **CDL_BASE} if _command(key) == "style" else BASE
+
+
+def _exec_missing(directive, columns, rows=(K,), base=None):
+    data = {k: v.copy() for k, v in (BASE if base is None else base).items()}
+    for k in columns:
+        data[k][list(rows)] = np.nan
+    return np.asarray(DataFrame(data).exec(directive), dtype=float)
+
+
+@pytest.mark.parametrize("key", _boolean_xfail(_FINITE_KEYS))
+def test_a_window_holding_a_missing_row_is_missing(key):
+    """Every output whose definition reads the missing row is NaN — an extremum, a
+    position, a count or a per-row term never steps over it."""
+    got = _exec_missing(_directive(key), PRICE_VOLUME, base=_base_for(key))
+    rows = [K + d for d in _reads(key)]
+    assert np.isnan(got[rows]).all(), f"finite at {[r for r in rows if not np.isnan(got[r])]}"
+
+
+_BOOLEAN_READS = {("increase", "close"), ("repeat", "close"), ("style", "open"), ("style", "close"),
+                  ("style.bearish", "open"), ("style.bearish", "close"), ("style.bullish", "open"),
+                  ("style.bullish", "close")}
+
+
+@pytest.mark.parametrize("key,column", [
+    pytest.param(k, c, marks=pytest.mark.xfail(
+        strict=True, reason="M12 boolean-validity: a missing input reads as false")) if (k, c) in _BOOLEAN_READS
+    else (k, c)
+    for k in _FINITE_KEYS for c in PRICE_VOLUME
+])
+def test_a_missing_input_is_never_laundered_into_a_value(key, column):
+    """With one input missing at one row, every output is either NaN or exactly what
+    clean data gives: a missing value never turns into a different finite one."""
+    directive, base = _directive(key), _base_for(key)
+    clean = np.asarray(DataFrame(base).exec(directive), dtype=float)
+    # a candle-colour line: one white and one black bar missing, so either colour shows
+    rows = (K, K + 1) if _command(key) == "style" else (K,)
+    got = _exec_missing(directive, [column], rows, base=base)
+    laundered = ~np.isnan(got) & ~np.isclose(got, clean, rtol=1e-9, atol=1e-9, equal_nan=True)
+    assert not laundered.any(), f"rows {np.flatnonzero(laundered)[:5]}: {got[laundered][:3]}"
+
+
+def test_a_missing_period_is_a_missing_mavp_row():
+    """`mavp` reads its period series at the row only: a missing period is NaN there."""
+    data = {k: v.copy() for k, v in BASE.items()}
+    data["periods"][K] = np.nan
+    got = np.asarray(DataFrame(data).exec(FINITE["mavp"]), float)
+    clean = _exec(FINITE["mavp"])
+    assert np.isnan(got[K])
+    np.testing.assert_array_equal(np.delete(got, K), np.delete(clean, K))
+
+
+@pytest.mark.parametrize("directive", ["roc:1", "rocp:1", "rocr:1", "rocr100:1"])
+def test_a_missing_value_over_a_zero_base_is_missing(directive):
+    # the zero-base rule (0) applies to a present value only
+    got = np.asarray(_closes([0.0, np.nan, 1.0, 2.0]).exec(directive), float)
+    assert np.isnan(got[:3]).all() and np.isfinite(got[3])
+
+
 @pytest.mark.parametrize("key", _ALL_KEYS)
 def test_leading_missing_rows_mean_a_later_start(key):
     """Once a series that starts later has warmed up, a series whose first rows are
@@ -425,3 +524,39 @@ def test_incremental_refresh_after_a_leading_gap_matches_a_full_recompute(key):
     got = np.asarray(df[directive], dtype=float)
     full = np.asarray(DataFrame(data).exec(directive), dtype=float)
     np.testing.assert_allclose(got, full, rtol=1e-9, atol=1e-9)
+
+
+# --- candlestick patterns: a missing candle reaches only the bars that read it ---
+
+_CDL_SRC = (ROOT / "crates/volas-compute/src/raw/indicators/candles/mod.rs").read_text()
+CANDLES = re.findall(r'"([a-z0-9]+)"', re.search(r"pub const CANDLE_PATTERNS[^=]*=\s*&\[(.*?)\];", _CDL_SRC, re.S).group(1))
+_r = np.random.default_rng(7)
+_cc = 100.0 + np.cumsum(_r.standard_normal(N))
+_co = _cc + _r.normal(0.0, 0.8, N)
+CDL_BASE = dict(open=_co, high=np.maximum(_co, _cc) + _r.exponential(0.6, N),
+                low=np.minimum(_co, _cc) - _r.exponential(0.6, N), close=_cc, volume=np.ones(N))
+
+
+def _cdl(directive, column=None, bad=None):
+    data = {k: v.copy() for k, v in CDL_BASE.items()}
+    if column is not None:
+        data[column][K] = bad
+    return np.asarray(DataFrame(data).exec(directive), dtype=float)
+
+
+def test_every_candle_pattern_is_covered():
+    assert len(CANDLES) == 61 and np.count_nonzero(sum(_cdl(f"cdl.{p}") != 0 for p in CANDLES)) > 50
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf], ids=["nan", "inf", "-inf"])
+@pytest.mark.parametrize("column", ("open", "high", "low", "close"))
+@pytest.mark.parametrize("pattern", CANDLES)
+def test_a_candle_pattern_is_missing_exactly_while_it_reads_a_missing_candle(pattern, column, bad):
+    """A candle with a missing or infinite price makes a pattern NaN on the bars whose
+    lookback holds it; every other bar is exactly what clean data gives (a candle
+    average never carries it further)."""
+    directive = f"cdl.{pattern}"
+    clean, got = _cdl(directive), _cdl(directive, column, bad)
+    span = volas.directive_lookback(directive) + 1
+    assert np.isnan(got[K:K + span]).all()
+    np.testing.assert_array_equal(np.delete(got, range(K, K + span)), np.delete(clean, range(K, K + span)))

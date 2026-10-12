@@ -62,9 +62,6 @@ DIVERGENT_FAMILIES: frozenset[str] = frozenset({
     # cancellation in the running co-moment sums: a window recompute and the full
     # kernel differ by more than 1e-9 relative, and |correl| exceeds 1
     'correl', 'beta',
-    # a NaN input keeps suppressing a candlestick pattern far beyond its lookback in
-    # the full kernel, so any later window recompute disagrees with it
-    'style', 'cdl',
 })
 
 

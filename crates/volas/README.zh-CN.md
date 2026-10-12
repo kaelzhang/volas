@@ -175,7 +175,7 @@ directive 引擎是推荐的 API。若想不经 `DataFrame` 直接调用，`comp
 纯函数（`&[f64] -> Vec<f64>`）暴露这些数值内核；多数用户应优先用 directive——它稳定、
 完整，且与 Python 侧完全一致。这些内核遵循与 directive 引擎相同的缺失行规则：递归指标的任一
 输入在某行为 NaN 时，该行输出 NaN，递归从上一个完整行继续，如同该行不存在（见
-[缺失与非有限输入](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md#missing-and-non-finite-inputs)）。
+[缺失与非有限输入](https://github.com/kaelzhang/volas/blob/main/docs/indicator-inputs.md#missing-and-non-finite-inputs)）。
 
 ## 读取 CSV
 
