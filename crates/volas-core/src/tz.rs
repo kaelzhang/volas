@@ -217,9 +217,10 @@ impl Tz {
     /// [`Tz::wall_to_utc_ns`]. Where that method rejects DST anomalies (correct
     /// for user-entered times, F33), a derived bucket start must always resolve:
     /// a fall-back **fold** takes the first of the two occurrences, and a
-    /// spring-forward **gap** (the wall-clock minute does not exist) advances in
-    /// 15-minute steps to the first instant that does — the true first moment of
-    /// the bucket. Returns `None` only for an invalid civil date.
+    /// spring-forward **gap** (the wall clock does not exist) resolves to the
+    /// zone's transition instant ending the gap (from its transition data, to the
+    /// second) — the true first moment of the bucket. Returns `None` for an
+    /// invalid civil date or an instant outside the range.
     pub fn wall_to_utc_ns_earliest(
         &self,
         y: i32,
@@ -232,17 +233,14 @@ impl Tz {
         match self {
             Tz::Naive | Tz::Utc | Tz::Offset(_) => self.wall_to_utc_ns(y, mo, d, h, mi, s),
             Tz::Named(tz) => {
-                let mut naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
-                // Real DST gaps are at most ~2h; 16 quarter-hour probes cover any
-                // historical rule with margin.
-                for _ in 0..16 {
-                    match tz.from_local_datetime(&naive) {
-                        chrono::LocalResult::Single(dt) => return crate::datetime::instant_of(&dt).ok(),
-                        chrono::LocalResult::Ambiguous(a, _) => return crate::datetime::instant_of(&a).ok(),
-                        chrono::LocalResult::None => naive += chrono::Duration::minutes(15),
-                    }
-                }
-                None // LCOV_EXCL_LINE — no real tz rule has a >4h gap
+                let naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
+                let first = match tz.from_local_datetime(&naive) {
+                    chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt,
+                    // inside a gap: the first instant after it, from the zone's
+                    // transition table (`None` past the last known transition)
+                    chrono::LocalResult::None => chrono_tz::GapInfo::new(&naive, tz)?.end?,
+                };
+                crate::datetime::instant_of(&first).ok()
             }
         }
     }
@@ -285,20 +283,16 @@ impl Tz {
         }
     }
 
-    /// The DST component of the offset at the instant, in seconds (0 for fixed
-    /// zones / UTC / naive).
+    /// The DST component of the offset at the instant, in seconds — the zone's
+    /// own transition data (tzdata's `SAVE`), so a southern-hemisphere summer, a
+    /// 30-minute DST (Lord Howe) and a negative winter DST (Europe/Dublin) are all
+    /// exact. 0 for fixed zones / UTC / naive.
     pub fn dst_secs_at(&self, ns: i64) -> i32 {
         match self {
-            Tz::Named(_) => {
-                // the DST component = the offset now minus the zone's standard
-                // (January) offset for that year — robust without chrono-tz
-                // internals, and exact for the IANA zones volas serves.
-                let (y, ..) = self.civil_parts(ns);
-                let jan = self
-                    .wall_to_utc_ns(y as i32, 1, 15, 12, 0, 0)
-                    .map(|jns| self.offset_secs_at(jns))
-                    .unwrap_or(0);
-                self.offset_secs_at(ns) - jan.min(self.offset_secs_at(ns))
+            Tz::Named(tz) => {
+                use chrono_tz::OffsetComponents;
+                let utc = DateTime::from_timestamp_nanos(ns).naive_utc();
+                tz.offset_from_utc_datetime(&utc).dst_offset().num_seconds() as i32
             }
             _ => 0,
         }
@@ -417,6 +411,28 @@ mod tests {
         let summer = ny.wall_to_utc_ns(2021, 7, 1, 12, 0, 0).unwrap();
         assert_eq!(ny.offset_secs_at(summer), -4 * 3600);   // EDT
         assert_eq!(ny.dst_secs_at(summer), 3600);           // one DST hour
+        // from the transition data: a southern summer, a 30-minute DST, Dublin's
+        // negative winter DST
+        let jan = |zone: &str| {
+            let tz = Tz::parse(zone).unwrap();
+            tz.dst_secs_at(tz.wall_to_utc_ns(2024, 1, 15, 12, 0, 0).unwrap())
+        };
+        assert_eq!(jan("Australia/Sydney"), 3600);
+        assert_eq!(jan("Australia/Lord_Howe"), 1800);
+        assert_eq!(jan("Europe/Dublin"), -3600);
+    }
+
+    #[test]
+    fn period_start_in_a_gap_is_the_transition_instant() {
+        let at = |s: &str| crate::datetime::parse_ns(s).unwrap();
+        // Monrovia: -00:44:30 -> UTC at 1972-01-07 00:00 local (a 44:30 gap)
+        let monrovia = Tz::parse("Africa/Monrovia").unwrap();
+        assert_eq!(monrovia.wall_to_utc_ns_earliest(1972, 1, 7, 0, 0, 0), Some(at("1972-01-07 00:44:30")));
+        let ny = Tz::parse("America/New_York").unwrap();
+        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 3, 10, 2, 30, 0), Some(at("2024-03-10 07:00:00")));
+        // a fold takes the first occurrence; an invalid date resolves to nothing
+        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 11, 3, 1, 30, 0), Some(at("2024-11-03 05:30:00")));
+        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 2, 30, 0, 0, 0), None);
     }
 
     #[test]
