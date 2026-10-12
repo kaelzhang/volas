@@ -13,7 +13,9 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use crate::column::{Column, CombineOp};
+use crate::column::CombineOp;
+#[cfg(doc)]
+use crate::column::Column;
 use crate::error::{Result, VolasError};
 use crate::index::{IndexKind, Label};
 
@@ -62,33 +64,51 @@ impl DataFrame {
     /// contract #20 — a lossy value raises). Returns the rows with this frame's dtypes,
     /// borrowed when nothing needed converting (the live single-bar path).
     pub fn admit<'a>(&self, rows: &'a DataFrame) -> Result<Cow<'a, DataFrame>> {
-        self.check_no_cached(rows.names.iter().map(String::as_str))?;
-        let same = self.names == rows.names;
-        if !same {
-            if let Some(name) = rows.names.iter().find(|n| !self.has_column(n)) {
-                return Err(VolasError::Value(format!(
-                    "append: column {name:?} is not in the target frame — appended rows must \
-                     not introduce a new column (a missing column is NaN-padded; an extra one \
-                     is rejected so data is never silently dropped)"
-                )));
-            }
+        // One pass over the rows' columns: each is looked up once — positionally when the
+        // rows carry the frame's leading columns in order (the live bar of a frame whose
+        // cached columns follow its data columns) — and its dtype compared. Errors are
+        // reported in a fixed order afterwards.
+        let prefix = self.leads_with(rows);
+        let (mut extra, mut convert) = (None, false);
+        for (k, (name, col)) in rows.names.iter().zip(&rows.columns).enumerate() {
+            let target = if prefix { Some(k) } else { self.name_to_idx.get(name).copied() };
+            let Some(target) = target else {
+                extra.get_or_insert(name);
+                continue;
+            };
+            convert |= col.dtype() != self.columns[target].dtype();
+        }
+        // Whether the rows carry a cached column, looked up from the smaller side (a live
+        // frame caches a few directives over a few data columns).
+        let has_cached = if prefix {
+            self.computed.keys().any(|k| self.name_to_idx[k] < rows.width())
+        } else if self.computed.len() <= rows.width() {
+            self.computed.keys().any(|k| rows.name_to_idx.contains_key(k))
+        } else {
+            rows.names.iter().any(|n| self.computed.contains_key(n))
+        };
+        if has_cached {
+            self.check_no_cached(rows.names.iter().map(String::as_str))?;
+        }
+        if let Some(name) = extra {
+            return Err(VolasError::Value(format!(
+                "append: column {name:?} is not in the target frame — appended rows must \
+                 not introduce a new column (a missing column is NaN-padded; an extra one \
+                 is rejected so data is never silently dropped)"
+            )));
         }
         self.index.check_append(&rows.index)?;
-        let mut converted: Option<Vec<Column>> = None;
-        for (k, (name, col)) in rows.names.iter().zip(&rows.columns).enumerate() {
-            let target = if same { k } else { self.name_to_idx[name] };
-            let dtype = self.columns[target].dtype();
-            if col.dtype() != dtype {
-                let col = col.convert_lossless(dtype).map_err(|e| in_column(name, e))?;
-                converted.get_or_insert_with(|| rows.columns.clone())[k] = col;
+        if !convert {
+            return Ok(Cow::Borrowed(rows));
+        }
+        let mut columns = rows.columns.clone();
+        for (k, name) in rows.names.iter().enumerate() {
+            let dtype = self.columns[self.name_to_idx[name]].dtype();
+            if columns[k].dtype() != dtype {
+                columns[k] = columns[k].convert_lossless(dtype).map_err(|e| in_column(name, e))?;
             }
         }
-        Ok(match converted {
-            None => Cow::Borrowed(rows),
-            Some(columns) => {
-                Cow::Owned(rows.same_schema(columns, (*rows.index).clone(), rows.origin))
-            }
-        })
+        Ok(Cow::Owned(rows.same_schema(columns, (*rows.index).clone(), rows.origin)))
     }
 
     /// Append `other`'s rows in place, keyed by their labels: a row labelled like the
@@ -196,23 +216,22 @@ impl DataFrame {
     fn push_rows(&mut self, rows: &DataFrame) -> Result<()> {
         Arc::make_mut(&mut self.index).extend(&rows.index)?;
         let oh = rows.height;
-        if self.names == rows.names {
-            // Identical schema (the live-streaming case): append positionally.
+        if self.leads_with(rows) {
+            // The rows carry the leading columns in order (the live-streaming case):
+            // append them positionally and pad the rest.
+            let w = rows.width();
             for (dst, src) in self.columns.iter_mut().zip(&rows.columns) {
                 dst.append(src)?;
+            }
+            for pos in w..self.names.len() {
+                self.pad_rows(pos, oh)?;
             }
         } else {
             for pos in 0..self.names.len() {
                 let n = &self.names[pos];
-                if let Some(j) = rows.column_pos(n) {
-                    self.columns[pos].append(&rows.columns[j])?;
-                } else if self.computed.contains_key(n) {
-                    // A cached directive (F64 indicator / Bool mask): a cheap stale
-                    // placeholder that the refresh recomputes and overwrites.
-                    self.columns[pos].append_missing(oh)?;
-                } else {
-                    // A data column keeps its data semantics: a dtype-preserving NA.
-                    self.columns[pos].append_na(oh);
+                match rows.column_pos(n) {
+                    Some(j) => self.columns[pos].append(&rows.columns[j])?,
+                    None => self.pad_rows(pos, oh)?,
                 }
             }
         }
@@ -220,6 +239,23 @@ impl DataFrame {
         #[cfg(debug_assertions)]
         self.debug_check();
         Ok(())
+    }
+
+    /// Whether `rows` carries this frame's leading columns, in order.
+    fn leads_with(&self, rows: &DataFrame) -> bool {
+        rows.width() <= self.width() && self.names[..rows.width()] == rows.names[..]
+    }
+
+    /// Grow the column at `pos` by `n` rows the appended rows did not carry: a cached
+    /// directive (F64 indicator / Bool mask) by a cheap stale placeholder its refresh
+    /// overwrites, a data column by a dtype-preserving missing value.
+    fn pad_rows(&mut self, pos: usize, n: usize) -> Result<()> {
+        if self.computed.contains_key(&self.names[pos]) {
+            self.columns[pos].append_missing(n)
+        } else {
+            self.columns[pos].append_na(n);
+            Ok(())
+        }
     }
 
     /// Replace the last row whole with `src`'s row `src_row`, in place: each data column
@@ -239,8 +275,12 @@ impl DataFrame {
                 src.height
             )));
         }
-        let same = self.names == src.names;
-        let source = |pos: usize| if same { Some(pos) } else { src.column_pos(&self.names[pos]) };
+        // `src`'s column for each of ours: positional when it carries our leading columns
+        let prefix = self.leads_with(src);
+        let source = |pos: usize| match prefix {
+            true => (pos < src.width()).then_some(pos),
+            false => src.column_pos(&self.names[pos]),
+        };
         for pos in 0..self.columns.len() {
             if let Some(j) = source(pos) {
                 let (to, from) = (self.columns[pos].dtype(), src.columns[j].dtype());
@@ -337,8 +377,10 @@ impl DataFrame {
         ops: &[(usize, usize, CombineOp)],
     ) -> Result<()> {
         for &(dst_col, src_col, op) in ops {
-            let from = &src.columns[src_col];
-            self.columns[dst_col].check_fold(row, op, true, (0..src.height).map(|r| (from, r)))?;
+            let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
+            if !dst.dtype().is_float() {
+                dst.check_fold(row, op, true, (0..src.height).map(|r| (from, r)))?;
+            }
         }
         for &(dst_col, src_col, op) in ops {
             let (dst, from) = (&mut self.columns[dst_col], &src.columns[src_col]);

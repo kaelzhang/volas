@@ -220,7 +220,7 @@ impl PyDataFrame {
 /// period's first bar did not carry is not tracked in it (the fold plan reads the bar
 /// itself), so it is left out rather than rejected.
 fn onto<'a>(open: &DataFrame, bar: &'a DataFrame) -> PyResult<std::borrow::Cow<'a, DataFrame>> {
-    if bar.names().iter().all(|n| open.has_column(n)) {
+    if open.names() == bar.names() || bar.names().iter().all(|n| open.has_column(n)) {
         return Ok(std::borrow::Cow::Borrowed(bar));
     }
     let kept: Vec<String> = bar.names().iter().filter(|n| open.has_column(n)).cloned().collect();

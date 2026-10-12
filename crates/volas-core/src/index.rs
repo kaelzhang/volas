@@ -20,8 +20,14 @@ use crate::tz::Tz;
 pub struct Index {
     /// Optional index name (pandas `Index.name`); `None` when unnamed.
     pub name: Option<String>,
-    /// The label storage / kind.
-    pub kind: IndexKind,
+    /// The label storage / kind (read through [`Index::kind`]; written only here, so
+    /// `int_max` stays its function).
+    kind: IndexKind,
+    /// The largest label of an `Int64` index (`None` for every other kind, or none):
+    /// unlabelled rows continue after the last label, which may repeat a label only
+    /// when the last is not the largest — so the common increasing index decides that
+    /// in O(1).
+    int_max: Option<i64>,
 }
 
 /// The label storage backing an [`Index`].
@@ -87,36 +93,33 @@ impl Label {
 }
 
 impl Index {
+    /// An index of `kind` named `name` (the one constructor: it derives `int_max`).
+    fn of(name: Option<String>, kind: IndexKind) -> Index {
+        let int_max = match &kind {
+            IndexKind::Int64(v) => v.iter().copied().max(),
+            _ => None,
+        };
+        Index { name, kind, int_max }
+    }
+
     /// An unnamed implicit `0..n` range index.
     pub fn range(n: usize) -> Index {
-        Index {
-            name: None,
-            kind: IndexKind::Range(n),
-        }
+        Index::of(None, IndexKind::Range(n))
     }
 
     /// An unnamed explicit integer index.
     pub fn int64(labels: Vec<i64>) -> Index {
-        Index {
-            name: None,
-            kind: IndexKind::Int64(labels),
-        }
+        Index::of(None, IndexKind::Int64(labels))
     }
 
     /// An unnamed datetime index (UTC-ns `labels`, tagged with `tz`).
     pub fn datetime(labels: Vec<i64>, tz: Tz) -> Index {
-        Index {
-            name: None,
-            kind: IndexKind::Datetime(labels, tz),
-        }
+        Index::of(None, IndexKind::Datetime(labels, tz))
     }
 
     /// An unnamed string index.
     pub fn str(labels: Vec<String>) -> Index {
-        Index {
-            name: None,
-            kind: IndexKind::Str(labels),
-        }
+        Index::of(None, IndexKind::Str(labels))
     }
 
     /// The label storage / kind.
@@ -176,7 +179,7 @@ impl Index {
                 )))
             }
         };
-        Ok(Index { name: None, kind })
+        Ok(Index::of(None, kind))
     }
 
     /// The timezone of a `Datetime` index ([`Tz::Naive`] for every other kind).
@@ -240,10 +243,7 @@ impl Index {
             IndexKind::Datetime(v, tz) => IndexKind::Datetime(v[start..end].to_vec(), *tz),
             IndexKind::Str(v) => IndexKind::Str(v[start..end].to_vec()),
         };
-        Index {
-            name: self.name.clone(),
-            kind,
-        }
+        Index::of(self.name.clone(), kind)
     }
 
     /// Gather the given positions (the name and a datetime tz are preserved).
@@ -256,10 +256,7 @@ impl Index {
             }
             IndexKind::Str(v) => IndexKind::Str(idx.iter().map(|&i| v[i].clone()).collect()),
         };
-        Index {
-            name: self.name.clone(),
-            kind,
-        }
+        Index::of(self.name.clone(), kind)
     }
 
     /// Value equality of the **labels** (pandas `.equals` index semantics): a
@@ -371,7 +368,7 @@ impl Index {
             | (Int64(_), Int64(_))
             | (Str(_), Str(_)) => Ok(()),
             (Datetime(_, a), Datetime(_, b)) if a.is_aware() == b.is_aware() => Ok(()),
-            (Int64(a), Range(k)) => continuation(a, *k).map(drop),
+            (Int64(a), Range(k)) => continuation(a, self.int_max, *k).map(drop),
             (mine, theirs) => Err(VolasError::Value(format!(
                 "cannot append rows with a {} to a frame with a {}{}",
                 other.kind_text(),
@@ -407,10 +404,14 @@ impl Index {
     pub fn extend(&mut self, other: &Index) -> Result<()> {
         use IndexKind::*;
         self.check_append(other)?;
+        let int_max = self.int_max;
         match (&mut self.kind, &other.kind) {
             (Range(a), Range(b)) => *a += b,
             (Datetime(a, _), Datetime(b, _)) => a.extend_from_slice(b),
-            (Int64(a), Int64(b)) => a.extend_from_slice(b),
+            (Int64(a), Int64(b)) => {
+                a.extend_from_slice(b);
+                self.int_max = int_max.max(other.int_max);
+            }
             (Str(a), Str(b)) => a.extend(b.iter().cloned()),
             // An implicit positional (Range) index appended to explicit Int64 labels
             // continues the sequence (last + 1, ...), mirroring Range+Range's auto-
@@ -421,13 +422,15 @@ impl Index {
             // a windowed (rolling-compacted) RangeIndex frame's labels absolute and
             // gap-free, matching pandas' last-M view of a RangeIndex.
             (Int64(a), Range(bn)) => {
-                let next = continuation(a, *bn)?;
+                let next = continuation(a, int_max, *bn)?;
                 a.extend((0..*bn as i64).map(|k| next + k));
+                self.int_max = a.last().copied().max(int_max);
             }
             // explicit integer labels after implicit positions: the positions become labels
             (slot @ Range(_), Int64(b)) => {
                 let mut labels = slot.to_i64_labels();
                 labels.extend_from_slice(b);
+                self.int_max = labels.iter().copied().max();
                 *slot = Int64(labels);
             }
             _ => unreachable!("rejected by check_append"), // LCOV_EXCL_LINE
@@ -519,8 +522,9 @@ fn require_unique_labels<T: std::hash::Hash + Eq>(labels: &[T], kind: &str) -> R
 
 /// The first label `k` unlabelled rows take after the integer labels `labels`
 /// (`last + 1`, or 0 after none): checked arithmetic, and none of the `k` continued
-/// labels may already be in `labels` (an integer index stays unique).
-fn continuation(labels: &[i64], k: usize) -> Result<i64> {
+/// labels may already be in `labels` (an integer index stays unique). `max` is the
+/// largest label: below the first continued one, no label can repeat (O(1)).
+fn continuation(labels: &[i64], max: Option<i64>, k: usize) -> Result<i64> {
     let overflow = || {
         VolasError::Overflow(format!(
             "cannot continue the integer index past {} with {k} unlabelled rows",
@@ -532,11 +536,13 @@ fn continuation(labels: &[i64], k: usize) -> Result<i64> {
         None => 0,
     };
     let end = i64::try_from(k).ok().and_then(|k| next.checked_add(k)).ok_or_else(overflow)?;
-    if let Some(dup) = labels.iter().find(|&&l| l >= next && l < end) {
-        return Err(VolasError::Value(format!(
-            "cannot append unlabelled rows: the next label {dup} is already in the index \
-             (label the rows explicitly)"
-        )));
+    if max.is_some_and(|m| m >= next) {
+        if let Some(dup) = labels.iter().find(|&&l| l >= next && l < end) {
+            return Err(VolasError::Value(format!(
+                "cannot append unlabelled rows: the next label {dup} is already in the index \
+                 (label the rows explicitly)"
+            )));
+        }
     }
     Ok(next)
 }
@@ -669,6 +675,20 @@ mod tests {
         assert!(matches!(err, VolasError::Overflow(_)), "{err}");
         // an empty Int64 index continues from 0
         assert!(Index::int64(vec![]).check_append(&Index::range(3)).is_ok());
+        // the largest label follows every extension, so a repeat is still found after
+        // the labels stop increasing
+        let mut ix = Index::range(2);
+        ix.extend(&Index::int64(vec![9, 5])).unwrap(); // [0, 1, 9, 5]: 9 is the largest
+        assert!(ix.check_append(&Index::range(4)).unwrap_err().to_string().contains("9"));
+        ix.extend(&Index::range(3)).unwrap(); // continues 6, 7, 8
+        assert_eq!(ix, Index::int64(vec![0, 1, 9, 5, 6, 7, 8]));
+        assert!(ix.check_append(&Index::range(1)).is_err()); // 9 again
+        ix.extend(&Index::int64(vec![20])).unwrap();
+        ix.extend(&Index::range(1)).unwrap(); // 21: past the largest, no scan needed
+        assert_eq!(ix.to_i64_labels().last(), Some(&21));
+        // derived indexes keep their own largest label
+        assert!(ix.slice(0, 4).check_append(&Index::range(4)).unwrap_err().to_string().contains("9"));
+        assert!(ix.take(&[0, 1]).check_append(&Index::range(1)).is_ok());
     }
 
     #[test]

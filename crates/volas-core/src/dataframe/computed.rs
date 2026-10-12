@@ -185,23 +185,33 @@ impl DataFrame {
             .collect()
     }
 
-    /// Check a computed-column write of rows `[from, from + len)`: inside the frame, and
-    /// for a tracked column starting at or before its valid rows (a write past them would
-    /// leave a gap of stale rows marked valid). Returns the column's position.
-    fn computed_write_at(&self, name: &str, from: usize, len: usize) -> Result<usize> {
+    /// Write rows `[from, from + len)` of the computed column `name` through `write`,
+    /// then mark it valid through the last written row. The rows must lie inside the
+    /// frame and, for a tracked column, start at or before its valid rows (a write past
+    /// them would leave a gap of stale rows marked valid) — anything else is an error and
+    /// nothing is written. A write from row 0 recomputed the column from this frame's own
+    /// rows, so its history starts here. One lookup of each map (the live refresh path).
+    fn write_computed(
+        &mut self,
+        name: &str,
+        from: usize,
+        len: usize,
+        write: impl FnOnce(&mut Column) -> Result<()>,
+    ) -> Result<()> {
         let pos = self
             .name_to_idx
             .get(name)
             .copied()
             .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
-        if from.checked_add(len).is_none_or(|end| end > self.height) {
-            return Err(VolasError::Shape(format!(
+        let end = from.checked_add(len).filter(|&end| end <= self.height).ok_or_else(|| {
+            VolasError::Shape(format!(
                 "cannot write {len} computed rows of \"{name}\" from row {from}: the frame \
                  has {} rows",
                 self.height
-            )));
-        }
-        if let Some(meta) = self.computed.get(name) {
+            ))
+        })?;
+        let meta = self.computed.get_mut(name);
+        if let Some(meta) = &meta {
             if from > meta.valid_rows {
                 return Err(VolasError::Shape(format!(
                     "cannot write computed rows of \"{name}\" from row {from}: rows {} to \
@@ -210,68 +220,57 @@ impl DataFrame {
                 )));
             }
         }
-        Ok(pos)
-    }
-
-    /// The rows `[0, end)` of a tracked column are valid after a contiguous write of
-    /// rows `[from, end)`; a write from row 0 recomputed the column from this frame's
-    /// own rows, so its history starts here.
-    fn extend_valid(&mut self, name: &str, from: usize, end: usize) {
-        let origin = self.origin;
-        if let Some(meta) = self.computed.get_mut(name) {
+        write(&mut self.columns[pos])?;
+        if let Some(meta) = meta {
             meta.valid_rows = meta.valid_rows.max(end);
             if from == 0 {
-                meta.since = origin;
+                meta.since = self.origin;
             }
         }
+        #[cfg(debug_assertions)]
+        self.debug_check();
+        Ok(())
     }
 
     /// Overwrite a computed column's rows `[from, from + tail.len())` in place
     /// (copy-on-write) with the recomputed `tail`, and mark it valid through the last
-    /// written row. The rows must lie inside the frame and start at or before the
-    /// column's valid rows — anything else is an error and nothing is written.
-    /// Directive results are F64 or Bool, so both are handled. O(tail.len()).
+    /// written row, under the rule of `write_computed`. Directive results are F64 or
+    /// Bool, so both are handled. O(tail.len()).
     pub fn update_computed_tail(&mut self, name: &str, from: usize, tail: &Column) -> Result<()> {
-        let pos = self.computed_write_at(name, from, tail.len())?;
-        match (&mut self.columns[pos], tail) {
-            (Column::F64(arc), Column::F64(t)) => {
-                arc.make_mut()[from..from + t.len()].copy_from_slice(t);
+        self.write_computed(name, from, tail.len(), |col| {
+            match (col, tail) {
+                (Column::F64(arc), Column::F64(t)) => {
+                    arc.make_mut()[from..from + t.len()].copy_from_slice(t);
+                }
+                (Column::Bool(arc, _), Column::Bool(t, _)) => {
+                    arc.make_mut()[from..from + t.len()].copy_from_slice(t);
+                }
+                (col, t) => {
+                    return Err(VolasError::DType(format!(
+                        "computed tail dtype {} does not match column \"{name}\" dtype {}",
+                        t.dtype(),
+                        col.dtype()
+                    )))
+                }
             }
-            (Column::Bool(arc, _), Column::Bool(t, _)) => {
-                arc.make_mut()[from..from + t.len()].copy_from_slice(t);
-            }
-            (col, t) => {
-                return Err(VolasError::DType(format!(
-                    "computed tail dtype {} does not match column \"{name}\" dtype {}",
-                    t.dtype(),
-                    col.dtype()
-                )))
-            }
-        }
-        self.extend_valid(name, from, from + tail.len());
-        #[cfg(debug_assertions)]
-        self.debug_check();
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Overwrite one F64 computed value and mark the column valid through that row,
     /// under the same rule as [`update_computed_tail`](Self::update_computed_tail).
     /// This avoids allocating a one-value tail column on the single-bar append path.
     pub fn update_computed_f64_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
-        let pos = self.computed_write_at(name, row, 1)?;
-        match &mut self.columns[pos] {
-            Column::F64(buf) => buf.set(row, value),
-            col => {
-                return Err(VolasError::DType(format!(
-                    "computed scalar dtype F64 does not match column \"{name}\" dtype {}",
-                    col.dtype()
-                )))
+        self.write_computed(name, row, 1, |col| match col {
+            Column::F64(buf) => {
+                buf.set(row, value);
+                Ok(())
             }
-        }
-        self.extend_valid(name, row, row + 1);
-        #[cfg(debug_assertions)]
-        self.debug_check();
-        Ok(())
+            col => Err(VolasError::DType(format!(
+                "computed scalar dtype F64 does not match column \"{name}\" dtype {}",
+                col.dtype()
+            ))),
+        })
     }
 
     /// Drop the computed (cached-directive) status of the column at `col`, if any.

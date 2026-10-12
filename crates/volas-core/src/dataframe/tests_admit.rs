@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::tz::Tz;
-use crate::{DType, Index};
+use crate::{Column, DType, Index};
 
 fn every_dtype(n: usize, at: i64) -> DataFrame {
     let f = |k: usize| (k as i64 + at) as f64;
