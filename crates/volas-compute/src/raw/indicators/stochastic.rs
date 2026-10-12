@@ -33,14 +33,15 @@ fn fastk_value(close: f64, hh: f64, ll: f64) -> f64 {
     missing::term(&[close, hh, ll], fastk(close, hh, ll))
 }
 
-/// The raw %K formula `100·(close − ll)/(hh − ll)`, `0` for a flat range — the one owner
-/// of it for every stochastic path. The extremes' zeros are made `+0` first
+/// The raw %K formula `(close − ll) / ((hh − ll) / 100)` (TA-Lib's order), `0` for a flat
+/// range — the one owner of it for every stochastic path. The extremes' zeros are made `+0` first
 /// ([`canonical_zero`]), so a path that kept the other signed zero gives the same bits.
 #[inline(always)]
 fn fastk(close: f64, hh: f64, ll: f64) -> f64 {
     let (hh, ll) = (canonical_zero(hh), canonical_zero(ll));
-    let diff = hh - ll;
-    if diff != 0.0 { 100.0 * (close - ll) / diff } else { 0.0 }
+    // `ta_STOCHF.c`'s order: the range in percent points first, then the quotient
+    let diff = (hh - ll) / 100.0;
+    if diff != 0.0 { (close - ll) / diff } else { 0.0 }
 }
 
 fn stoch_fastk_small_window(

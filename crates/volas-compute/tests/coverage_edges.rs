@@ -247,7 +247,7 @@ fn scalar_resume_one_guards_and_inline_branches() {
     assert!(ind::minus_dm_resume_one(&h, &l, 14, 0, &[1.0], &mut n[..1]).is_none());
     assert!(ind::plus_di_resume_one(&h, &l, &c, 14, 0, &s2, &mut n[..2]).is_none());
     assert!(ind::minus_di_resume_one(&h, &l, &c, 14, 0, &s2, &mut n[..2]).is_none());
-    assert!(ind::dx_resume_one(&h, &l, &c, 14, 0, &[1.0; 3], &mut n[..3]).is_none());
+    assert!(ind::dx_resume_one(&h, &l, &c, 14, 0, &[1.0; 4], &mut n[..4]).is_none());
     assert!(ind::adx_resume_one(&h, &l, &c, 14, 0, &[1.0; 4], &mut n[..4]).is_none());
     assert!(ind::adxr_resume_one(&h, &l, &c, 14, 0, &[1.0; 17], &mut n[..17]).is_none());
     assert!(ind::pvt_resume_one(&c, &v, 0, &s2, &mut n[..2]).is_none());

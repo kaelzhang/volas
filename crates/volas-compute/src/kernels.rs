@@ -69,8 +69,8 @@ pub fn ema_cascade_final<const S: usize>(data: &[f64], period: usize) -> Option<
 
 /// [`raw::ema_cascade_step`], except that a missing `x` leaves the cascade `e` where it
 /// was.
-pub fn ema_cascade_step<const S: usize>(e: &mut [f64; S], x: f64, k: f64) {
+pub fn ema_cascade_step<const S: usize>(e: &mut [f64; S], x: f64, period: usize) {
     if !is_missing(x) {
-        raw::ema_cascade_step(e, x, k);
+        raw::ema_cascade_step(e, x, period);
     }
 }

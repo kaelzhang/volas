@@ -292,13 +292,7 @@ pub(crate) fn scalar_fill_col(
                     "fill for a datetime column must be a Timestamp or datetime string, not a number",
                 ));
             }
-            // F3: a bad datetime string is a bad *value* (ValueError), not a `.loc`
-            // label lookup — don't leak parse_ts's label-vocabulary KeyError here.
-            let ts = parse_ts(o).map_err(|_| {
-                PyValueError::new_err(
-                    "fill for a datetime column must be a valid datetime string or Timestamp",
-                )
-            })?;
+            let ts = parse_ts(o)?;
             Ok((Column::datetime(vec![ts; n]), DType::Datetime))
         }
         // a bool column keeps bool for a bool fill or a 0/1 numeric fill; any other

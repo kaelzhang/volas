@@ -216,9 +216,10 @@ impl PyDataFrame {
     /// returning a **tf-aware** DataFrame you can keep ``append``-ing finer bars
     /// into (the forming period is the live last row).
     ///
-    /// Requires a DatetimeIndex. Each column is aggregated with a sensible
+    /// Requires a DatetimeIndex. Each data column is aggregated with a sensible
     /// default (open=first, high=max, low=min, close=last, volume=sum); override
-    /// per column via ``cumulators``. If the source already has a ``time_frame``,
+    /// per column via ``cumulators``. A cached directive column is not carried (it
+    /// is computed over the coarse bars when requested there). If the source already has a ``time_frame``,
     /// the target must be a whole multiple of it (e.g. 5m→15m, not 5m→7m, and not
     /// a week/3-day into a month); cumulating to the *same* frame is a ``copy()``.
     ///
@@ -245,34 +246,31 @@ impl PyDataFrame {
         let target = resolve_time_frame(time_frame)?;
         if let Some(tfs) = &self.tf {
             // Same frame is a no-op resample == copy() (keeps the cursor & state).
-            if target == tfs.time_frame {
+            if target == tfs.time_frame() {
                 return Ok(self.copy());
             }
-            if !tfs.time_frame.can_coarsen(target) {
+            if !tfs.time_frame().can_coarsen(target) {
                 return Err(PyValueError::new_err(format!(
                     "cannot cumulate {} -> {}: the target is not a whole multiple of the source frame",
-                    tfs.time_frame.label(),
+                    tfs.time_frame().label(),
                     target.label()
                 )));
             }
         }
-        let base = view.as_ref();
+        // The data columns only: a cached directive column is not data of the coarse
+        // frame — requested there, it is computed over the coarse bars.
+        let data: Vec<String> =
+            view.names().iter().filter(|n| !view.is_computed(n)).cloned().collect();
+        let base = view.select(&data).map_err(pyerr)?;
         let spec = build_agg_spec_for(cumulators, Some(base.names()))?;
         let mut cum = Cumulator::new(target, spec.clone());
-        cum.append(base).map_err(pyerr)?;
+        cum.append(&base).map_err(pyerr)?;
         let frame = cum.frame().map_err(pyerr)?;
         // The result is a fresh frame (no cached directive columns -> cursor 0)
         // that carries the open period's fine bars so further appends fold in.
         Ok(PyDataFrame {
             inner: frame,
-            tf: Some(TfState {
-                time_frame: target,
-                cumulators: spec,
-                open: cum.open_clone(),
-                open_key: None,
-                fold_plan: None,
-                refold_plan: None,
-            }),
+            tf: Some(TfState::from_cumulator(target, spec, &cum)),
             window: None,
         })
     }

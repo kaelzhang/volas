@@ -71,16 +71,17 @@ impl Read<'_> {
     }
 }
 
-/// The values of `col`'s rows `[start, len)` as `f64` — borrowed for a float64 column.
-fn convert(col: &Column, start: usize) -> Result<Cow<'_, [f64]>> {
+/// The values of `col`'s rows `[start, end)` as `f64` — borrowed for a float64 column;
+/// any other is converted over those rows only.
+fn convert(col: &Column, start: usize, end: usize) -> Result<Cow<'_, [f64]>> {
     if let Some(v) = col.as_f64() {
-        return Ok(Cow::Borrowed(&v[start..]));
+        return Ok(Cow::Borrowed(&v[start..end]));
     }
-    if start == 0 {
+    if (start, end) == (0, col.len()) {
         require_f64_input(col)?;
         return Ok(Cow::Owned(col.to_f64_vec()));
     }
-    let rows = col.slice(start, col.len());
+    let rows = col.slice(start, end);
     require_f64_input(&rows)?;
     Ok(Cow::Owned(rows.to_f64_vec()))
 }
@@ -92,6 +93,8 @@ pub(crate) struct Operands<'a> {
     reads: [OnceCell<Read<'a>>; SLOTS],
     /// The first frame row read: `0`, or the start of a trailing window.
     start: usize,
+    /// The row after the last frame row read: the frame's height, or an earlier end.
+    end: usize,
     /// The window's rows as a frame, built for evaluating an `@` operand over them.
     window: OnceCell<DataFrame>,
     /// The length of every input handed to the arm: the rows read, or the number of
@@ -115,21 +118,28 @@ pub(crate) struct Operands<'a> {
 impl<'a> Operands<'a> {
     /// Read the frame's columns and the `@` operands evaluated over it.
     pub(crate) fn new(df: &'a DataFrame, series: &'a [Ast]) -> Self {
-        Operands::window(df, series, 0)
+        Operands::rows(df, series, 0, df.height())
     }
 
-    /// Read only the frame's rows from `start` on (each keeping its absolute position):
+    /// Read only the frame's rows from `start` on (each keeping its absolute position).
+    pub(crate) fn window(df: &'a DataFrame, series: &'a [Ast], start: usize) -> Self {
+        Operands::rows(df, series, start, df.height())
+    }
+
+    /// Read only the frame's rows `[start, end)` (each keeping its absolute position):
     /// the columns' rows there, and the `@` operands evaluated over them. The arm sees
     /// row `start` as its row 0 (see the module docs).
-    pub(crate) fn window(df: &'a DataFrame, series: &'a [Ast], start: usize) -> Self {
-        let start = start.min(df.height());
+    pub(crate) fn rows(df: &'a DataFrame, series: &'a [Ast], start: usize, end: usize) -> Self {
+        let end = end.min(df.height());
+        let start = start.min(end);
         Operands {
             df,
             series,
             reads: Default::default(),
             start,
+            end,
             window: OnceCell::new(),
-            len: df.height() - start,
+            len: end - start,
             over: None,
             stop_on_missing: false,
             probing: Cell::new(false),
@@ -163,6 +173,11 @@ impl<'a> Operands<'a> {
         }
     }
 
+    /// Whether this reads every row of the frame.
+    fn whole(&self) -> bool {
+        (self.start, self.end) == (0, self.df.height())
+    }
+
     /// The length of every input handed to the arm.
     pub(crate) fn len(&self) -> usize {
         self.len
@@ -179,23 +194,22 @@ impl<'a> Operands<'a> {
         self.df.origin() + self.start
     }
 
-    /// `Ok` when an input of `len` rows fits the others (see the module docs).
-    fn fit(&self, slot: usize, len: usize) -> Result<()> {
-        if len == self.len {
+    /// `Ok` when an input of `len` rows fits the others, `want` rows (see the module docs).
+    fn fit(&self, slot: usize, len: usize, want: usize) -> Result<()> {
+        if len == want {
             return Ok(());
         }
         Err(VolasError::Shape(format!(
-            "series argument #{slot} has {len} rows where the command's other inputs have {}",
-            self.len
+            "series argument #{slot} has {len} rows where the command's other inputs have {want}"
         )))
     }
 
     /// The frame an `@` operand is evaluated over: the frame, or its window's rows.
     fn operand_frame(&self) -> &DataFrame {
-        if self.start == 0 {
+        if self.whole() {
             return self.df;
         }
-        self.window.get_or_init(|| self.df.slice_data(self.start, self.df.height()))
+        self.window.get_or_init(|| self.df.slice_data(self.start, self.end))
     }
 
     /// The input at `slot`, resolved on its first read by `resolve`; a failed read is
@@ -205,7 +219,7 @@ impl<'a> Operands<'a> {
         if let Some(read) = cell.get() {
             return Ok(read);
         }
-        let read = resolve().and_then(|r| self.fit(slot, r.values.len()).map(|()| r));
+        let read = resolve().and_then(|r| self.fit(slot, r.values.len(), self.len).map(|()| r));
         let read = read.inspect_err(|_| self.failed.set(true))?;
         Ok(cell.get_or_init(|| read))
     }
@@ -220,10 +234,11 @@ impl<'a> Operands<'a> {
             }
             None => {
                 let col = self.df.column(default)?;
-                let values = convert(col, self.start)?;
-                Ok(match self.start {
-                    0 => Read { values, column: Some(col), known_nan: None },
-                    _ => Read { values, column: None, known_nan: col.known_has_nan().filter(|has| !has) },
+                self.fit(slot, col.len(), self.df.height())?;
+                let values = convert(col, self.start, self.end)?;
+                Ok(match self.whole() {
+                    true => Read { values, column: Some(col), known_nan: None },
+                    false => Read { values, column: None, known_nan: col.known_has_nan().filter(|has| !has) },
                 })
             }
         }
@@ -236,7 +251,7 @@ impl<'a> Operands<'a> {
                 "internal error: series argument #{slot} was not read before the rerun"
             ))
         })?;
-        self.fit(slot, view.len())?;
+        self.fit(slot, view.len(), self.len)?;
         Ok(Cow::Borrowed(view))
     }
 

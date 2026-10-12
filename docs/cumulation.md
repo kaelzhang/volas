@@ -216,6 +216,54 @@ Two properties make this safe for a live feed:
 
 See [Live cumulation](dataframe-api.md#live-cumulation--a-tf-aware-dataframe) for the API summary.
 
+### Every bar is complete
+
+Each bar folded into a time-frame frame is first made a complete bar of the frame's
+data columns (every column except the cached indicator ones), the same way in every
+append form — a `DataFrame`, a `Row` or a scalar dict: a column the bar leaves out is
+a missing value of that bar. The open period, the in-place fold and the re-cumulation
+after a re-sent bar all read that one bar, so leaving `volume` out of a bar gives the
+period a missing `volume` (a missing input is never skipped), exactly as a batch
+`cumulate` of the same bars does, and a re-send of the bar with its `volume` restores
+it.
+
+### Writing to a time-frame frame
+
+The forming row is the cumulation of the open period's bars, so a write to a
+time-frame frame — `df[col] = values`, a cell write such as `df.iloc[-1, j] = v` (or
+`loc` / `iat` / `at`, or a mask write) — is taken only where the open period can
+follow it exactly; it never leaves a value that a later bar would count twice or
+silently drop:
+
+- A write that reaches only **closed** rows leaves the open period as it is: a bar
+  re-sent afterwards still replaces its earlier version.
+- A column that **becomes data** — a new column (`df['signal'] = values`, say on a
+  `cumulate` result), or a cached indicator column overwritten — was never carried by
+  the period's fine bars, so they hold it as missing. The forming cell keeps the
+  written value until the next bar of the period arrives; that fold makes it missing
+  (a missing input is never skipped), so the value is visibly stale, never wrong. A
+  forming row that closes without another bar keeps the written value. Later bars
+  that carry the column fold it as usual.
+- A **new forming value** of a column the bars carry is exact while the period holds
+  one bar — right after the frame is built with `time_frame=`, or when only the first
+  bar of a new period has arrived: that bar is rewritten, the next bar folds into it,
+  and a re-send of it replaces it whole. A forming bar folded from several fine bars
+  has no single bar to rewrite, so the write raises `ValueError` and the frame is
+  unchanged — write to closed rows only, or append a corrected fine bar (a bar with
+  the same timestamp replaces the one it repeats). A write is judged by the value it
+  leaves in the forming cell — `df.iloc[[-1, -1], j] = [a, b]` leaves `b` — and writing
+  a forming cell its current value is always allowed. A column replaced by the same
+  values in another dtype (an integer `volume` by floats) keeps its bars, converted
+  losslessly; bars that cannot take the new dtype exactly count as a new value.
+- A column added or replaced must be one its aggregator folds: with
+  `cumulators={'tag': 'max'}`, `df['tag'] = ['a']` raises `TypeError` and the frame is
+  unchanged.
+- `DataFrame(df, index=...)` and `DataFrame(df, dtype=...)` re-label or re-type the
+  rows: the result is the time-frame frame of its new rows, the last one its forming
+  bar, exactly as `DataFrame(rows, time_frame=...)` builds it. `DataFrame(df,
+  columns=[...])` keeps the open period's bars of the data columns it keeps; a cached
+  column it turns into data enters them as missing.
+
 ## TimeFrame
 
 A `TimeFrame` names a bar interval. It is accepted anywhere volas resamples —
@@ -274,7 +322,8 @@ HK and A-share equity frames coexist and align on the absolute instant. A
 those instants render, how bare-string labels match, and how `cumulate` aligns
 day-and-coarser buckets. A timezone is either a **fixed offset** (`'+08:00'`,
 cheap; A-share / HK equities) or a **named IANA zone** (`'America/New_York'`,
-DST-aware via `chrono-tz`; US / EU). The default is UTC.
+DST-aware via `chrono-tz`; US / EU — past 2099 each zone follows its tzdb rule, as
+Python's `zoneinfo` does). The default is UTC.
 
 Here is the whole picture. Build a `DatetimeIndex` by parsing a column with
 `to_datetime`, promoting it with `set_index`, then tagging the display zone with

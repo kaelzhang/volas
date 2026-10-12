@@ -11,40 +11,49 @@ use volas_core::{Column, DataFrame};
 
 use super::{as_command, bound, recursive, resume_of, window_start};
 
-/// Resume `node` from `prev_state` over rows `[from_row, height)`, returning the
-/// new-row [`Column`] and the updated state. `None` when `node` has no resume (the
-/// caller recomputes). The values are bit-identical to a fresh full recompute, so
-/// writing them into the stale tail keeps the cached column exact. It reads a trailing
-/// window of the frame (see `window_start`).
+/// Resume `node` from `prev_state` over rows `[from_row, end)` (`end` at most the
+/// frame's height), returning those rows as a [`Column`] and the state as of the last
+/// of them. `None` when `node` has no resume kernel, or the resume declines (the caller
+/// falls back to a recompute). The values are bit-identical to a fresh full recompute,
+/// so writing them into the stale rows keeps the cached column exact. Stopping before
+/// the last row reads the inputs' leading rows in place (no copy of the frame), so a
+/// refresh of several rows obtains the state before the last one too.
 ///
-/// `origin` is the absolute position of the frame's row 0 (`DataFrame::origin`).
-/// Recursive *value* indicators ignore it; the absolute-position index family adds it,
-/// so emitted positions are the series' own on every path.
+/// It reads a trailing window of the frame (see `window_start`).
+///
+/// `since` is the absolute position of the row the column's history starts at: when it
+/// lies before the frame's row 0 (the frame dropped its head), a resume missing complete
+/// rows of the history it reads declines rather than restart the recursion. The frame's
+/// own `origin` (`DataFrame::origin`) places its rows: recursive *value* indicators
+/// ignore it; the absolute-position index family adds it, so emitted positions are the
+/// series' own on every path.
 pub fn execute_resume(
     df: &DataFrame,
     node: &Ast,
     prev_state: &[f64],
     from_row: usize,
-    origin: usize,
+    end: usize,
+    since: usize,
 ) -> Option<(Column, Vec<f64>)> {
     let cmd = as_command(node)?;
     let resume = resume_of(&cmd);
-    if resume == Resume::Recompute || from_row > df.height() {
+    let end = end.min(df.height());
+    if resume == Resume::Recompute || from_row > end {
         return None;
     }
     let bc = bound(&cmd);
     let start = window_start(node, &cmd, from_row);
     if recursive(&cmd) {
         // Over the complete rows: a missing new row is NaN, the state untouched.
-        return crate::complete::resume(df, &bc, start, prev_state, from_row, |ops, from| {
-            resume_rows(ops, &bc, prev_state, from, origin + ops.start())
+        return crate::complete::resume(df, &bc, start, prev_state, (from_row, end, since), |ops, from| {
+            resume_rows(ops, &bc, prev_state, from, df.origin() + ops.start())
         });
     }
-    let ops = Operands::window(df, &cmd.series, start);
+    let ops = Operands::rows(df, &cmd.series, start, end);
     if resume == Resume::Step {
         return step_rows(&ops, &bc, prev_state, from_row - start);
     }
-    resume_rows(&ops, &bc, prev_state, from_row - start, origin + start)
+    resume_rows(&ops, &bc, prev_state, from_row - start, df.origin() + start)
 }
 
 /// A finite-window command's rows `[from, len)` of `ops`, one step at a time.

@@ -194,9 +194,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         .lookback(|a| n(a, 0)),
         // increase: run length (>= 1), direction (+1 rising / -1 falling); k steps, each
         // reading a value and its predecessor.
-        ("increase", None) => line(const { &[p(1), one_of(1, &[-1, 1])] }, &["close"]).lookback(|a| n(a, 0)),
+        ("increase", None) => line(const { &[p(1), one_of(1, &[-1, 1])] }, &["close"]).counted().lookback(|a| n(a, 0)),
         // Group A non-TA-Lib indicators (gap report 2026-06-07).
-        ("psy", None) => line(const { &[p(12)] }, &["close"]).reads_past_lookback().lookback(|a| m1(n(a, 0))),
+        // psy averages `n` rising flags, each reading a close and the one before it
+        ("psy", None) => line(const { &[p(12)] }, &["close"]).lookback(|a| n(a, 0)),
         // pvt / nvi / pvi are cumulative (lookback 0), carrying a running line.
         ("pvt" | "nvi" | "pvi", None) => line(&[], &["close", "volume"]).recursive().step(),
         // dpo reads the SMA (n−1) and the close n/2+1 bars back: the later of the two.

@@ -87,7 +87,10 @@ impl PyDataFrame {
     /// the frame untouched — no column is created, and no cache is read or written. A
     /// name reads a data column (never a cached directive column, which may be stale) or
     /// a built-in command; a name that is both is ambiguous and raises. A bounded-window
-    /// frame returns its visible rows.
+    /// frame returns its visible rows, and computes only a directive it can compute
+    /// exactly from the rows it keeps — one that depends on a trailing window of at most
+    /// ``max_lookback`` rows; anything else (a recursion, a longer lookback) raises
+    /// ``ValueError`` — a declared recursion is read as its column, ``df[directive]``.
     /// For a cached, incrementally-refreshed result use ``df[directive]`` (a Series)
     /// or ``df[directive].to_numpy()``.
     ///
@@ -118,6 +121,7 @@ impl PyDataFrame {
         na_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let node = parse(directive).map_err(directive_err)?;
+        self.admit_new(&node, directive)?;
         let (_, col) = self.evaluate(&*self.binding_frame()?, &node, directive)?;
         let col = match &self.window {
             Some(_) => {

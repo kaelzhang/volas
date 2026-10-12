@@ -32,7 +32,7 @@ pub(crate) struct BoundCommand<'a> {
 
 impl BoundCommand<'_> {
     /// How many rows before its first new row a resume of the command reads, at most.
-    fn reach(&self) -> usize {
+    pub(crate) fn reach(&self) -> usize {
         self.spec.lookback_of(self.args) + 1
     }
 }
@@ -160,39 +160,54 @@ fn read_in_place(ops: &Operands, cmd: &BoundCommand, from: usize, end: usize) ->
     })
 }
 
-/// Resume a recursive command over the new rows `[from, height)` from `prev_state`, on
-/// the complete rows only: a missing new row is NaN and leaves the state where the last
+/// Whether a resume over gathered complete rows lacks history it reads: fewer complete
+/// rows before its first new row than it may read, while the column's history (from the
+/// absolute row `since`) starts before the frame's row 0 — the rows it needs were dropped
+/// with the frame's head. It then declines; the caller replays from the column's
+/// checkpoint instead. A frame holding the whole history lacks nothing: fewer rows are
+/// all the series has.
+fn lacks_history(df: &DataFrame, cmd: &BoundCommand, rows: &ResumeRows, since: usize) -> bool {
+    rows.from < cmd.reach() && df.origin() > since
+}
+
+/// Resume a recursive command over the new rows `[from, end)` from `prev_state`, on the
+/// complete rows only: a missing new row is NaN and leaves the state where the last
 /// complete row put it. `run(operands, from)` is its resume arm, over the rows the
-/// operands read: from `start` on (a trailing window, see [`Operands::window`]) — or,
-/// when that window holds a missing row, the whole frame (the complete rows the resume
-/// reads before its new ones may lie before the window).
+/// operands read: `[start, end)` (a trailing window, see [`Operands::rows`]) — or, when
+/// that window holds a missing row, `[0, end)` (the complete rows the resume reads before
+/// its new ones may lie before the window). The column's history starts at the absolute
+/// row `since`.
 ///
 /// The arm runs in place first: when every input it read is known complete, or the
 /// rows it read turn out complete, that is the answer. Otherwise it runs again over the
-/// complete rows of the same inputs.
+/// complete rows of the same inputs — declining when the frame dropped complete rows of
+/// the history it reads ([`lacks_history`]).
 pub(crate) fn resume(
     df: &DataFrame,
     cmd: &BoundCommand,
     start: usize,
     prev_state: &[f64],
-    from: usize,
+    (from, end, since): (usize, usize, usize),
     run: impl Fn(&Operands, usize) -> Option<(Column, Vec<f64>)>,
 ) -> Option<(Column, Vec<f64>)> {
-    let ops = Operands::window(df, cmd.series, start);
-    let (start, n) = (ops.start(), df.height() - ops.start());
+    let ops = Operands::rows(df, cmd.series, start.min(from), end);
+    let (start, n) = (ops.start(), ops.len());
     let local = from - start;
     let out = run(&ops, local);
     if ops.failed() || ops.clean() || read_in_place(&ops, cmd, local, n) {
         return out;
     }
     if start > 0 {
-        return resume(df, cmd, 0, prev_state, from, run);
+        return resume(df, cmd, 0, prev_state, (from, end, since), run);
     }
     let recorded = recorded(&ops, false);
-    let refs: Vec<&[f64]> = recorded.iter().map(|r| r.values.as_ref()).collect();
+    let refs: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..n]).collect();
     let rows = ResumeRows::of(&refs, from, cmd.reach());
     if !rows.has_new() {
         return Some((Column::f64(vec![f64::NAN; n - from]), prev_state.to_vec()));
+    }
+    if lacks_history(df, cmd, &rows, since) {
+        return None;
     }
     let gathered = over(&ops, df, cmd.series, &recorded, |v| {
         Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
@@ -204,13 +219,14 @@ pub(crate) fn resume(
 /// Resume a recursive command at the single row `row` (the scalar twin of [`resume`]):
 /// `missing` when that row is missing, else `run(operands, row)` on the complete rows,
 /// over the rows from `start` on (as there, the whole frame when that window holds a
-/// missing row). The arm runs in place first and its answer stands when the rows it
-/// read are complete; an `@` operand is evaluated once.
+/// missing row; declining like it when the frame dropped history it reads, `since` as
+/// there). The arm runs in place first and its answer stands when the rows it read are
+/// complete; an `@` operand is evaluated once.
 pub(crate) fn resume_one<T>(
     df: &DataFrame,
     cmd: &BoundCommand,
     start: usize,
-    row: usize,
+    (row, since): (usize, usize),
     missing: impl FnOnce() -> Option<T>,
     mut run: impl FnMut(&Operands, usize) -> Option<T>,
 ) -> Option<T> {
@@ -224,13 +240,16 @@ pub(crate) fn resume_one<T>(
         return out;
     }
     if start > 0 {
-        return resume_one(df, cmd, 0, row, missing, run);
+        return resume_one(df, cmd, 0, (row, since), missing, run);
     }
     let recorded = recorded(&ops, false);
     let upto: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..end]).collect();
     let rows = ResumeRows::of(&upto, row, cmd.reach());
     if !rows.has_new() {
         return missing();
+    }
+    if lacks_history(df, cmd, &rows, since) {
+        return None;
     }
     let gathered = over(&ops, df, cmd.series, &recorded, |v| {
         Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
@@ -306,14 +325,47 @@ mod tests {
         let st = initial_state(&head, &node, &Column::f64(vec![])).unwrap();
         let full = frame(open.clone());
         let mut next = vec![0.0; st.len()];
-        let value = execute_resume_step(&full, &node, &st, n - 1, &mut next).unwrap();
+        let value = execute_resume_step(&full, &node, &st, (n - 1, 0), &mut next).unwrap();
         let want = execute(&full, &node).unwrap().to_f64_vec()[n - 1];
         assert_eq!(value.to_bits(), want.to_bits());
         let mut gap = open;
         gap[n - 1] = f64::NAN;
-        let value = execute_resume_step(&frame(gap), &node, &st, n - 1, &mut next).unwrap();
+        let value = execute_resume_step(&frame(gap), &node, &st, (n - 1, 0), &mut next).unwrap();
         assert!(value.is_nan());
         assert_eq!(next, st);
+    }
+
+    /// A resume over gathered complete rows reads `reach` of them before its first new
+    /// row: on a frame that dropped its history's head (the history starts before row 0)
+    /// with fewer of them held — a run of missing rows reaching the frame's start — it
+    /// declines, scalar and `Vec` alike; on a frame holding the whole history it runs.
+    #[test]
+    fn a_resume_lacking_dropped_history_declines() {
+        use crate::exec::execute_resume;
+        let n = 40;
+        let mut open: Vec<f64> = (0..n).map(|i| 40.0 + (i as f64 * 0.3).cos()).collect();
+        for x in &mut open[20..30] {
+            *x = f64::NAN;
+        }
+        let node = parse("rsi:3@open").unwrap();
+        let st = initial_state(&frame(open[..20].to_vec()), &node, &Column::f64(vec![])).unwrap();
+        // the frame keeps rows 18.. (origin 18): two complete rows before row 30
+        let kept = frame(open.clone()).slice_data(18, n);
+        let mut next = vec![0.0; st.len()];
+        assert!(execute_resume(&kept, &node, &st, 12, kept.height(), 0).is_none());
+        assert!(execute_resume_step(&kept, &node, &st, (12, 0), &mut next).is_none());
+        // the history starts at row 18: nothing is missing, the resume runs
+        assert!(execute_resume(&kept, &node, &st, 12, kept.height(), 18).is_some());
+        assert!(execute_resume_step(&kept, &node, &st, (12, 18), &mut next).is_some());
+        // a missing new row needs no history: NaN, the state untouched
+        assert!(execute_resume_step(&kept, &node, &st, (5, 0), &mut next).unwrap().is_nan());
+        // the whole frame holds every complete row: the resume runs, through a row before
+        // the last as well (the inputs read up to it, borrowed)
+        let whole = frame(open);
+        let (tail, _) = execute_resume(&whole, &node, &st, 20, 35, 0).unwrap();
+        let want = execute(&whole, &node).unwrap().to_f64_vec();
+        assert_eq!(tail.len(), 15);
+        assert!(tail.to_f64_vec().iter().zip(&want[20..35]).all(|(a, b)| a.to_bits() == b.to_bits()));
     }
 
     /// An input the frame cannot supply is the command's own error — also when another

@@ -29,6 +29,9 @@ pub struct StaleComputed {
     pub reach: Reach,
     /// Rows `[0, valid_rows)` hold valid values.
     pub valid_rows: usize,
+    /// The absolute position of the row the column's history starts at
+    /// ([`ComputedMeta::since`]): before this frame's row 0 when the frame dropped it.
+    pub since: usize,
     /// More than `lookback` rows of the column's history are processed.
     pub warm: bool,
 }
@@ -54,19 +57,19 @@ impl DataFrame {
                 since: self.origin,
                 state_at: 0,
                 scratch: Vec::new(),
+                checkpoint: None,
+                pending: None,
+                lost: None,
+                first_present: None,
             },
         );
+        let (origin, height) = (self.origin, self.height);
+        if let (Some(pos), Some(meta)) = (self.name_to_idx.get(name), self.computed.get_mut(name)) {
+            meta.note_written(&self.columns[*pos], origin, 0, height);
+        }
         self.note_computed();
         #[cfg(debug_assertions)]
         self.debug_check();
-    }
-
-    /// Attach (or replace) the carried recursive [`ComputedMeta::state`] for a
-    /// cached column — the state as of its last valid row — enabling an O(new-rows)
-    /// append resume. The state before it is unknown afterwards. No-op if `name` is
-    /// not a tracked computed column.
-    pub fn set_computed_state(&mut self, name: &str, state: Option<Vec<f64>>) {
-        self.set_computed_states(name, state, None);
     }
 
     /// Attach (or replace) both carried states of a cached column: `state` as of its
@@ -177,6 +180,12 @@ impl DataFrame {
         self.computed.get(name).map(|meta| &meta.directive)
     }
 
+    /// The absolute position of cached column `name`'s first present value — where its
+    /// warm-up ended — if one has been computed.
+    pub fn computed_first_present(&self, name: &str) -> Option<usize> {
+        self.computed.get(name)?.first_present
+    }
+
     /// Snapshot of the materialized-directive columns (`name`, meta).
     pub fn computed_columns(&self) -> Vec<(String, ComputedMeta)> {
         self.computed
@@ -202,6 +211,7 @@ impl DataFrame {
                 directive: std::sync::Arc::clone(&meta.directive),
                 reach: meta.reach,
                 valid_rows: meta.valid_rows,
+                since: meta.since,
                 warm: meta.warm(self.origin),
             })
             .collect()
@@ -244,6 +254,7 @@ impl DataFrame {
         }
         write(&mut self.columns[pos])?;
         if let Some(meta) = meta {
+            meta.note_written(&self.columns[pos], self.origin, from, end);
             meta.valid_rows = meta.valid_rows.max(end);
             if from == 0 {
                 meta.since = self.origin;
@@ -306,6 +317,9 @@ impl DataFrame {
     pub(super) fn invalidate_computed_forming_row(&mut self, last_row: usize) {
         self.stale_by = STALE_BY_APPEND;
         for meta in self.computed.values_mut() {
+            if meta.pending.as_ref().is_some_and(|p| p.at >= self.origin + last_row) {
+                meta.pending = None; // it covers the replaced row
+            }
             if meta.valid_rows > last_row {
                 meta.valid_rows = last_row;
                 let replaced = std::mem::replace(&mut meta.state, meta.state_before_last.take());
@@ -344,6 +358,7 @@ impl DataFrame {
             // recomputes from scratch (correct) and repopulates the state.
             meta.state = None;
             meta.state_before_last = None;
+            meta.pending = None;
         }
     }
 }

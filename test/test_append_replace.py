@@ -31,8 +31,11 @@ _OPERANDS = ["rsi:5@open", "ema:5@(close + open)", "ema:5@(rsi:5)", "atr:5@high,
              "ma:5@(close - open)"]
 _BOOLEAN = ["close > ma:5", "close > open", "(ema:5 > ma:10) & (close > open)"]
 SHAPES = sorted(set(_RECURSIVE + _FINITE + _STATELESS + _OPERANDS + _BOOLEAN))
-# A recursive `@` operand nested in a windowed frame is recomputed over the retained rows.
-_NESTED_RECURSIVE = {"ema:5@(rsi:5)"}
+# Recursions no carried state covers — a command that recomputes (no carried state), a
+# recursion inside an `@` operand or combined with other values: a windowed frame
+# cannot keep them exact, so declaring one raises.
+_UNKEPT = {"crsi", "stoch_momentum", "stoch_momentum.signal", "ema:5@(rsi:5)",
+           "(ema:5 > ma:10) & (close > open)"}
 
 
 def _bar(i, salt=0.0):
@@ -194,15 +197,20 @@ def test_plain_integer_frame_replacements_are_exact(directive):
     _run_plain(directive, lambda k: (1000 + 10 * k).astype(np.int64))
 
 
-_WINDOW_NOT_BIT_EXACT = {
-    "ad", "asi", "kama:5", "kcw", "nvi", "obv", "pvi", "pvt", "stoch_momentum",
-    "stoch_momentum.signal", "wad",
-}
-
-
-@pytest.mark.parametrize("directive", sorted(set(SHAPES) - _WINDOW_NOT_BIT_EXACT - _NESTED_RECURSIVE))
+@pytest.mark.parametrize("directive", sorted(set(SHAPES) - _UNKEPT))
 def test_windowed_frame_replacements_match_the_unbounded_frame(directive):
     _run_plain(directive, lambda k: T0 + k * MINUTE, window=4)
+
+
+@pytest.mark.parametrize("directive", sorted(_UNKEPT))
+def test_a_windowed_frame_refuses_a_recursion_it_cannot_keep(directive):
+    seed = _frame_of([_bar(i) for i in range(5)], T0 + np.arange(5) * MINUTE)
+    with pytest.raises(ValueError, match=r"cannot keep .* exact on a windowed frame"):
+        DataFrame(seed, window=4, max_lookback=[directive])
+    w = DataFrame(seed, window=4, max_lookback=60)
+    with pytest.raises(ValueError, match=r"cannot keep .* exact on a windowed frame"):
+        w[directive]
+    assert w.columns == list(OHLCV)
 
 
 def _run_tf(directive, window=None):
@@ -250,7 +258,7 @@ def test_tf_frame_resends_are_exact(directive):
     _run_tf(directive)
 
 
-@pytest.mark.parametrize("directive", sorted(set(SHAPES) - _WINDOW_NOT_BIT_EXACT - _NESTED_RECURSIVE))
+@pytest.mark.parametrize("directive", sorted(set(SHAPES) - _UNKEPT))
 def test_windowed_tf_frame_resends_match_the_unbounded_frame(directive):
     _run_tf(directive, window=4)
 
@@ -263,7 +271,7 @@ def test_a_cached_boolean_column_keeps_the_fold_exact(directive):
         n_seed = 40
         seed = [_bar(i) for i in range(n_seed)]
         labels = T0 + np.arange(n_seed) * 15 * MINUTE
-        kw = {} if window is None else {"window": window, "max_lookback": 40}
+        kw = {} if window is None else {"window": window, "max_lookback": [directive, "ma:40"]}
         live = DataFrame(_frame_of(seed, labels), time_frame="15m", **kw)
         twin = DataFrame(_frame_of(seed, labels), time_frame="15m")
         for df in (live, twin):

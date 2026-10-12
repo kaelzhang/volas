@@ -122,15 +122,29 @@ it, the departure is deliberate and listed here.
   Every value TA-Lib publishes is the same.
 - **NATR at period 1** is `TR / close · 100` like every other period; TA-Lib's period-1
   branch returns the raw true range.
-- **The Hilbert transform** (`ht_*`, `mama`) follows TA-Lib's C source in plain arithmetic,
-  without fused multiply-add: the same value on every platform, bit-identical to a TA-Lib
-  build that does not fuse (the x86-64 wheels). A build that fuses (clang on arm64) agrees
-  to rounding; on flat or step input, where the dominant-cycle phase is rounding noise,
-  its phase may differ — between TA-Lib builds and platforms as well.
-- **±DM after an infinite move (period ≥ 2).** volas's Wilder sum folds
-  `s·(1 − 1/period) + term`, TA-Lib `s − s/period + term`: once an infinite movement has
-  entered, volas's sum stays infinite and TA-Lib's turns NaN — both lose the line. Tracked
-  to align with TA-Lib's order.
+- **Recurrences follow TA-Lib's C source in plain arithmetic**, without fused
+  multiply-add: the EMA step `((x − prev)·k) + prev` (`ema`, `dema`, `tema`, `trix`,
+  `macd`, the EMA of `apo` / `ppo` / `macdext` / `ma`, and with its adaptive constant
+  `kama`), the weighted form `(k·x) + ((1 − k)·prev)` of `t3`, `adosc` and `mama`,
+  Wilder's average `prev·(p − 1)`, `+ x`, `/ p` (`rsi`, `cmo`, `stochrsi`, `atr`, `natr`,
+  the ADX average), the Hilbert transform (`ht_*`) and the stochastic %K
+  `(close − low) / ((high − low) / 100)`. Each step is the same on every platform and
+  bit-identical to a TA-Lib build that does not fuse (the x86-64 wheels), so is every
+  output computed from the same inputs and seed — not the MACD / MACDEXT lines, whose
+  seeds differ (see above), nor windows summed exactly (see below). A build that
+  fuses (clang on arm64 contracts an `x·y + z` expression into one FMA) agrees to
+  rounding wherever the C source writes the recurrence as one such expression — the EMA
+  and weighted steps, KAMA's constant, the ADX average, the Hilbert transform; RSI, CMO,
+  ATR, NATR and the stochastic %K are written in separate statements, which no build
+  fuses, so they are bit-identical to every TA-Lib build. (KAMA's sum of 1-bar changes is
+  an exact window sum, see [Sliding sums](#sliding-sums).) On flat or step input, where
+  the dominant-cycle phase is rounding noise, the Hilbert phase may differ — between
+  TA-Lib builds and platforms as well.
+- **The directional family**'s Wilder sums `s − s/p + term` of ±DM and the true range,
+  ±DI and DX have no multiply-add to fuse and are bit-identical to every TA-Lib build,
+  including after an infinite movement, which turns every later sum into NaN, and on
+  TA-Lib's zero guards: where the true-range sum or the DI sum is ~0 (a long flat or
+  halted stretch), ±DI is 0, DX repeats its previous value and ADX keeps its average.
 
 Where TA-Lib's arguments are out of order, volas follows it: a `slow` period shorter
 than `fast` swaps the two averages in `macd`, `apo`, `ppo` and `macdext`.

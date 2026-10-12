@@ -63,13 +63,17 @@ def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
     assert not base.iloc[1:].is_computed(name)
 
 
-def test_a_window_keeps_a_stateless_recursion_across_its_compaction():
-    # a bounded window drops its older rows by design: its cached columns recompute over
-    # the rows it retains (the max_lookback margin), so a recursion stays cached
-    w = volas.DataFrame({k: v[:40] for k, v in COLS.items()}, window=5, max_lookback=['stoch_momentum:5'])
-    w['stoch_momentum:5']
+def test_a_window_refuses_a_recursion_without_a_carried_state():
+    # a bounded window drops its older rows: a recursion it keeps exactly carries a state
+    # it replays from (a checkpoint); one without (crsi recomputes) cannot be declared —
+    # recomputing it over the retained rows would restart its history there
+    seed = {k: v[:40] for k, v in COLS.items()}
+    with pytest.raises(ValueError, match="cannot keep 'crsi:3,2,5' exact on a windowed frame"):
+        volas.DataFrame(seed, window=5, max_lookback=['crsi:3,2,5'])
+    w = volas.DataFrame(seed, window=5, max_lookback=['keltner:5'])
     for i in range(40, N):
         w.append(volas.DataFrame({k: v[i:i + 1] for k, v in COLS.items()}))
     assert w._physical_height < N - 40
-    assert w.is_computed('stoch_momentum:5')
-    assert not np.isnan(w['stoch_momentum:5'].to_numpy()[-1])
+    assert w.is_computed('keltner:5')
+    want = volas.DataFrame({k: v[:N] for k, v in COLS.items()}).exec('keltner:5')[-5:]
+    assert np.array_equal(w['keltner:5'].to_numpy(), want)

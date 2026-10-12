@@ -1,6 +1,5 @@
-//! Moving averages: SMA / EMA / SMMA / WMA / BBI, with the EMA-family
-//! state-carry helpers (`ema_k` / `ema_seed_idx` shared with the cascade and
-//! MACD families).
+//! Moving averages: SMA / EMA / SMMA / WMA / BBI, with the EMA / SMMA state-carry
+//! resumes (their steps are [`smoothing`]'s, shared with the cascade and MACD families).
 
 use crate::accum::{Accumulator, Csum};
 use crate::guard::{all_finite, own_sums, ring_push, state_after, window_sums, Order, Slide, Window};
@@ -8,6 +7,7 @@ use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 use crate::missing;
 use crate::raw::indicators::av;
 use crate::raw::kernels;
+use crate::raw::smoothing;
 
 /// Simple moving average; row 0 is at absolute position `origin` (see
 /// [`crate::accum`]).
@@ -35,22 +35,16 @@ pub fn smma(close: &[f64], period: usize) -> Vec<f64> {
 // of cascaded sub-EMA stage values (dema/tema/t3/trix/macd). `*_final_state` captures
 // that state after a full compute (returning `None` before the indicator has seeded, so
 // the caller keeps the correct fallback); `*_resume` continues the recursion over only
-// the new rows `[from, n)`, reading nothing before `from`, with arithmetic bit-identical
-// to each kernel's steady-state loop. `from` is the cache's `valid_rows`; the carried
-// state is the internal state as of row `from - 1`, which the plumbing guarantees is at
-// or past the seed (a fresh full compute captured it on a non-empty column, and a slice
-// only carries it when its end reaches `valid_rows`). The resume never reads `data[< from]`,
-// so it continues correctly across a head-dropping slice.
-
-/// The k used by every SMA-seeded EMA stage: `2/(period+1)`.
-#[inline]
-pub(super) fn ema_k(period: usize) -> f64 {
-    2.0 / (period as f64 + 1.0)
-}
+// the new rows `[from, n)`, reading nothing before `from`, with the kernel's own step
+// ([`smoothing`]), so a resume is bit-identical to the full computation. `from` is the
+// cache's `valid_rows`; the carried state is the internal state as of row `from - 1`,
+// which the plumbing guarantees is at or past the seed (a fresh full compute captured it
+// on a non-empty column, and a slice only carries it when its end reaches `valid_rows`).
+// The resume never reads `data[< from]`, so it continues correctly across a head-dropping
+// slice.
 
 /// Final single-EMA state `[ema]` after a full [`ema`] compute, or `None` if `data`
-/// never seeded (the column is all-NaN → nothing to carry, keep the fallback). The EMA
-/// is advanced with the same fused `(x-prev)·k+prev` step as `kernels::ema_seeded`.
+/// never seeded (the column is all-NaN → nothing to carry, keep the fallback).
 pub fn ema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
     Some(vec![kernels::sma_seeded_last(data, period, kernels::ema_step(period))?])
 }
@@ -58,22 +52,15 @@ pub fn ema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
 /// Resume [`ema`] from `state = [ema_{from-1}]` over rows `[from, n)`, bit-identical to a
 /// full recompute. Reads only `data[from..]`.
 pub fn ema_resume(data: &[f64], period: usize, from: usize, state: &[f64]) -> (Vec<f64>, Vec<f64>) {
-    let k = ema_k(period);
+    let k = smoothing::ema_k(period);
     let n = data.len();
     let mut e = state[0];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &data[from..n] {
-        e = ema_step(x, e, k);
+        e = smoothing::ema(e, x, k);
         out.push(e);
     }
     (out, vec![e])
-}
-
-/// One EMA recurrence step, shared by [`ema_resume`] and [`ema_resume_one`] so the
-/// full and single-row paths cannot drift: `e' = (x - e)·k + e`.
-#[inline]
-pub(super) fn ema_step(x: f64, e: f64, k: f64) -> f64 {
-    (x - e).mul_add(k, e)
 }
 
 /// Single new-row EMA resume: the value at `row`, with the carried state as of `row`
@@ -90,12 +77,12 @@ pub fn ema_resume_one(
     let e = *state.first()?;
     let x = *data.get(row)?;
     let [slot] = next else { return None };
-    *slot = ema_step(x, e, ema_k(period));
+    *slot = smoothing::ema(e, x, smoothing::ema_k(period));
     Some(*slot)
 }
 
 /// Final Wilder/SMMA state `[rma]` after a full [`smma`] compute, or `None` if `data`
-/// never seeded. Uses `kernels::wilder`'s exact fused `prev·a + x·b` step.
+/// never seeded.
 pub fn smma_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
     Some(vec![kernels::sma_seeded_last(data, period, kernels::wilder_step(period))?])
 }
@@ -108,23 +95,15 @@ pub fn smma_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
-    let pf = period as f64;
-    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
+    let wilder = smoothing::Wilder::new(period);
     let n = data.len();
     let mut w = state[0];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &data[from..n] {
-        w = smma_step(x, w, a, b);
+        w = wilder.step(w, x);
         out.push(w);
     }
     (out, vec![w])
-}
-
-/// One SMMA/Wilder recurrence step, shared by [`smma_resume`] and [`smma_resume_one`]
-/// so they cannot drift: `w' = w·a + x·b`.
-#[inline]
-pub(super) fn smma_step(x: f64, w: f64, a: f64, b: f64) -> f64 {
-    w.mul_add(a, x * b)
 }
 
 /// Single new-row SMMA resume: the value at `row`, with the state as of `row` (`[w]`,
@@ -141,8 +120,7 @@ pub fn smma_resume_one(
     let w = *state.first()?;
     let x = *data.get(row)?;
     let [slot] = next else { return None };
-    let pf = period as f64;
-    *slot = smma_step(x, w, (pf - 1.0) / pf, 1.0 / pf);
+    *slot = smoothing::Wilder::new(period).step(w, x);
     Some(*slot)
 }
 
@@ -431,6 +409,9 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
     let mut sum = Csum::from_state(&state[..2])?;
     let mut wsum = Csum::from_state(&state[2..4])?;
     let (mut bad, seen) = (state[4] as usize, state[5] as usize);
+    if !crate::guard::holds_window(row, seen, period) {
+        return None;
+    }
     let x = term(row);
     if period == 0 || (seen == 0 && x.is_nan()) {
         // the leading-NaN warm-up: skipped (not a row of the average yet)

@@ -49,7 +49,7 @@ fn resume_matches_full(df: &DataFrame, directive: &str, from: usize) {
     let computed = execute(&head, &node).unwrap();
     let state = initial_state(&head, &node, &computed)
         .unwrap_or_else(|| panic!("no initial state for {directive}"));
-    let (tail, _) = execute_resume(df, &node, &state, from, 0)
+    let (tail, _) = execute_resume(df, &node, &state, from, df.height(), 0)
         .unwrap_or_else(|| panic!("no resume for {directive}"));
     let full = execute(df, &node).unwrap().to_f64_vec();
     assert_f64_same(&tail.to_f64_vec(), &full[from..]);
@@ -61,7 +61,7 @@ fn step(df: &DataFrame, directive: &str, row: usize) -> Option<f64> {
     let head = df.slice(0, row);
     let state = initial_state(&head, &node, &execute(&head, &node).unwrap())?;
     let mut next = state.clone();
-    execute_resume_step(df, &node, &state, row, &mut next)
+    execute_resume_step(df, &node, &state, (row, 0), &mut next)
 }
 
 /// A formula of its own row (the price transforms, TR, the momentum family) steps one
@@ -81,8 +81,8 @@ fn a_row_formula_steps_like_its_kernel() {
     }
     // a row past the end declines; TR has no prior bar at row 0
     let node = parse("avgprice").unwrap();
-    assert!(execute_resume_step(&df, &node, &[], 20, &mut []).is_none());
-    assert!(execute_resume_step(&df, &parse("tr").unwrap(), &[], 0, &mut []).unwrap().is_nan());
+    assert!(execute_resume_step(&df, &node, &[], (20, 0), &mut []).is_none());
+    assert!(execute_resume_step(&df, &parse("tr").unwrap(), &[], (0, 0), &mut []).unwrap().is_nan());
     let zero_prior = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![0.0, 1.0, 2.0])], None).unwrap();
     assert_eq!(step(&zero_prior, "roc:2", 2).unwrap(), 0.0);
 }
@@ -94,7 +94,7 @@ fn a_row_formula_resumes_its_tail_like_its_kernel() {
         "avgprice", "medprice", "typprice", "wclprice", "bop", "tr", "mom:3", "roc:3", "rocp:3", "rocr:3", "rocr100:3",
     ] {
         let node = parse(directive).unwrap();
-        let (tail, state) = execute_resume(&df, &node, &[], 0, 0)
+        let (tail, state) = execute_resume(&df, &node, &[], 0, usize::MAX, 0)
             .unwrap_or_else(|| panic!("tail resume failed for {directive}"));
         assert!(state.is_empty());
         assert_f64_same(&tail.to_f64_vec(), &execute(&df, &node).unwrap().to_f64_vec());
@@ -258,11 +258,11 @@ fn recursive_moving_averages_and_kcw_continue_from_a_state() {
             for from in [100, 121, 159] {
                 let head = df.slice(0, from);
                 let state = initial_state(&head, &node, &execute(&head, &node).unwrap()).unwrap();
-                let (tail, _) = execute_resume(&df, &node, &state, from, 0).unwrap();
+                let (tail, _) = execute_resume(&df, &node, &state, from, usize::MAX, 0).unwrap();
                 let tail = tail.to_f64_vec();
                 assert!(tail.iter().zip(&full[from..]).all(|(&a, &b)| exact(a, b)), "{directive} from {from}");
                 let mut next = state.clone();
-                if let Some(v) = execute_resume_step(&df.slice(0, from + 1), &node, &state, from, &mut next) {
+                if let Some(v) = execute_resume_step(&df.slice(0, from + 1), &node, &state, (from, 0), &mut next) {
                     assert!(exact(v, full[from]), "{directive} step at {from}: {v} vs {}", full[from]);
                 } else {
                     assert_eq!(directive, "ma:5,7", "only MAMA has no single-row step");
@@ -282,8 +282,8 @@ fn resume_decline_paths_cover_question_mark_branches() {
     let p = |directive: &str| parse(directive).unwrap();
     let empty: &[f64] = &[];
 
-    assert!(execute_resume(&df, &p("tr"), empty, 0, 0).is_some());
-    assert!(execute_resume(&df, &p("mom:30"), empty, 0, 0).is_some());
+    assert!(execute_resume(&df, &p("tr"), empty, 0, df.height(), 0).is_some());
+    assert!(execute_resume(&df, &p("mom:30"), empty, 0, df.height(), 0).is_some());
 
     for directive in [
         "kama:30",
@@ -304,7 +304,7 @@ fn resume_decline_paths_cover_question_mark_branches() {
         "supertrend:10,3",
     ] {
         assert!(
-            execute_resume(&df, &p(directive), &[0.0; 8], 0, 0).is_none(),
+            execute_resume(&df, &p(directive), &[0.0; 8], 0, df.height(), 0).is_none(),
             "{directive}"
         );
     }

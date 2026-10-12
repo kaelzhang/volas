@@ -4,13 +4,13 @@
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
-    Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type,
+    Date32Type, Date64Type, Decimal128Type, Decimal256Type, Float32Type, Float64Type, Int16Type, Int32Type,
     Int64Type, Int8Type, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{ArrowError, DataType, TimeUnit};
-use volas_core::{datetime, Buffer, Column, StrBuffer, Validity};
+use volas_core::{datetime, decimal, Buffer, Column, StrBuffer, Validity};
 
 use crate::{borrow_primitive, validity_of};
 
@@ -103,16 +103,12 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
                 .collect();
             Column::I64(Buffer::from_vec(widened?), validity_of(a.nulls(), len))
         }
-        // Exact decimals map to f64 — **lossy** past ~15 significant digits; for exact
-        // prices keep the column as a string upstream. `scale` divides the integer mantissa.
+        // Exact decimals map to the f64 nearest to each value (`volas_core::decimal`) —
+        // **lossy** past ~15 significant digits; for exact prices keep the column as a
+        // string upstream.
         DataType::Decimal128(_, scale) => {
             let a = src.as_primitive::<Decimal128Type>();
-            let div = 10f64.powi(*scale as i32);
-            Column::F64(Buffer::from_vec(
-                (0..len)
-                    .map(|i| if a.is_null(i) { f64::NAN } else { a.value(i) as f64 / div })
-                    .collect(),
-            ))
+            decimals(len, |i| a.is_null(i), |i| decimal::scaled_to_f64(a.value(i), *scale as i32))
         }
         // Plain dates land on the ns datetime grid (start-of-day). Date32 = days,
         // Date64 = milliseconds; a date outside the instant range raises.
@@ -134,10 +130,13 @@ pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
             let dense = arrow_cast::cast(src, value_type)?;
             column_from_arrow(&dense)?
         }
-        // 256-bit exact decimal → f64 (lossy past ~15 digits), like `Decimal128` above.
-        DataType::Decimal256(_, _) => {
-            let dense = arrow_cast::cast(src, &DataType::Float64)?;
-            column_from_arrow(&dense)?
+        // 256-bit exact decimal → the nearest f64, like `Decimal128` above.
+        DataType::Decimal256(_, scale) => {
+            let a = src.as_primitive::<Decimal256Type>();
+            decimals(len, |i| a.is_null(i), |i| match a.value(i).to_i128() {
+                Some(m) => decimal::scaled_to_f64(m, *scale as i32),
+                None => decimal::scaled_text_to_f64(&a.value(i).to_string(), *scale as i32),
+            })
         }
         // Arrow `string_view` (Utf8View) — a view layout volas cannot borrow into its
         // contiguous StrBuffer; materialise it to LargeUtf8 (one copy — the same one the
@@ -246,4 +245,14 @@ fn datetime_from_timestamp(
         TimeUnit::Millisecond => filled!(TimestampMillisecondType, "ms"),
         TimeUnit::Second => filled!(TimestampSecondType, "s"),
     }
+}
+
+/// A decimal column as f64 (`null` → NaN, volas's float missing value), each value read
+/// by `value`. Every Arrow decimal lies inside the f64 range — at most 76 digits at a
+/// scale of at least −128, so under 10^205 — so a value is always there.
+fn decimals(len: usize, is_null: impl Fn(usize) -> bool, value: impl Fn(usize) -> Option<f64>) -> Column {
+    let out = (0..len)
+        .map(|i| if is_null(i) { f64::NAN } else { value(i).expect("an Arrow decimal is under 10^205") })
+        .collect();
+    Column::F64(Buffer::from_vec(out))
 }

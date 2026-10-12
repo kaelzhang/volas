@@ -9,6 +9,12 @@ nested directives in parentheses) overriding the default columns. Empty
 argument slots keep earlier defaults, so `macd.signal:,,5` means fast period
 `12`, slow period `26`, and signal period `5`.
 
+Every recurrence evaluates TA-Lib's C source in plain arithmetic, without fused
+multiply-add: the same value on every platform, bit-identical to a TA-Lib build that does
+not fuse, and within rounding of one that does (see
+[Deliberate divergences](migration-talib.md#deliberate-divergences) for which functions
+a fusing build changes).
+
 `matype` follows TA-Lib's integer convention: `0=SMA`, `1=EMA`, `2=WMA`,
 `3=DEMA`, `4=TEMA`, `5=TRIMA`, `6=KAMA`, `7=MAMA`, and `8=T3`. Multi-output
 indicators also accept short aliases where documented by the parser, for example
@@ -142,12 +148,12 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-correl"></a>`correl` | `CORREL` | Pearson correlation coefficient. | `:<period>@<series=close>,<series_other>` |
 | <a id="indicator-beta"></a>`beta` | `BETA` | Beta. | `:<period>@<series=close>,<series_other>` |
 | <a id="indicator-sum"></a>`sum` | `SUM` | Rolling sum. | `:<period>@<series=close>` |
-| <a id="indicator-maxindex"></a>`maxindex` | `MAXINDEX` | Index of the rolling maximum. | `:<period>@<series=close>` |
-| <a id="indicator-minindex"></a>`minindex` | `MININDEX` | Index of the rolling minimum. | `:<period>@<series=close>` |
+| <a id="indicator-maxindex"></a>`maxindex` | `MAXINDEX` | Index of the rolling maximum; a tie reports the latest equal high, so a value depends on its window alone (TA-Lib reports the earliest after its tracker rebuilds, a deliberate divergence). | `:<period>@<series=close>` |
+| <a id="indicator-minindex"></a>`minindex` | `MININDEX` | Index of the rolling minimum; a tie reports the latest equal low (see `maxindex`). | `:<period>@<series=close>` |
 | <a id="indicator-minmax-min"></a>`minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `:<period>@<series=close>` |
 | <a id="indicator-minmax-max"></a>`minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `:<period>@<series=close>` |
-| <a id="indicator-minmaxindex-min"></a>`minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `:<period>@<series=close>` |
-| <a id="indicator-minmaxindex-max"></a>`minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `:<period>@<series=close>` |
+| <a id="indicator-minmaxindex-min"></a>`minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair; a tie reports the latest equal low (see `maxindex`). | `:<period>@<series=close>` |
+| <a id="indicator-minmaxindex-max"></a>`minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair; a tie reports the latest equal high (see `maxindex`). | `:<period>@<series=close>` |
 | <a id="indicator-cdl-2crows"></a>`cdl.2crows` | `CDL2CROWS` | Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-cdl-3blackcrows"></a>`cdl.3blackcrows` | `CDL3BLACKCROWS` | Three Black Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-cdl-3inside"></a>`cdl.3inside` | `CDL3INSIDE` | Three Inside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |

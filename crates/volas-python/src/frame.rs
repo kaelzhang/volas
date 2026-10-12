@@ -9,87 +9,14 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use volas_core::{
-    binary_supertype, CmpOp, Column, CombineOp, DataFrame, DType, Index,
+    binary_supertype, CmpOp, Column, DataFrame, DType, Index,
     IndexKind, Series,
 };
-use volas_time::{AggSpec, TimeFrame};
 
 #[allow(unused_imports)]
 use crate::*;
 
 // --- DataFrame state -------------------------------------------------------
-
-/// Live cumulation state carried by a tf-aware DataFrame (set via the
-/// `time_frame` constructor arg or `cumulate`): the target frame, the per-column
-/// aggregators, and the raw fine bars of the still-open (forming) period —
-/// `df.iloc[-1]` is that period's running bar, which `append` keeps updating.
-#[derive(Clone)]
-pub(crate) struct TfState {
-    pub(crate) time_frame: TimeFrame,
-    pub(crate) cumulators: AggSpec,
-    /// The bars of the current open period — the small frame whose cumulation is the
-    /// forming last row (`None` only while the frame is empty). It starts as the last
-    /// constructed row, or the first bar of a new period; a bar with the same timestamp
-    /// as one in it replaces that bar rather than double-counting.
-    pub(crate) open: Option<DataFrame>,
-    /// The current open period's key — its start on the frame's grid
-    /// (`TimeFrame::period_start`) — **lazily memoized** (`None` until recomputed).
-    /// The key is invariant while a period is forming — only a rollover changes it —
-    /// so caching it lets `fold_append` skip a second `period_start` on every
-    /// same-period bar.
-    /// `Option` (not a bare `i64`) so a construction path that resets `open` without
-    /// touching this can't leave a stale key: `None` just recomputes on next use.
-    pub(crate) open_key: Option<i64>,
-    /// Cached live-fold plan (`None` until the first fold), reused across appends.
-    pub(crate) fold_plan: Option<FoldPlan>,
-    /// Cached plan re-cumulating the open period into the forming row (a re-sent bar).
-    pub(crate) refold_plan: Option<FoldPlan>,
-}
-
-/// The cached forming-row fold plan: the `(dst_col, src_col, combine_op)` triples,
-/// plus the inner schema (name `Arc` + dtypes) and bar column names they were built
-/// for. The hot append path reuses it so it never re-runs the per-bar `column_pos` /
-/// `agg_for` HashMap name lookups (whose SipHash dominated the per-bar cost); it is
-/// rebuilt only when a schema actually changes, which `matches` detects without
-/// hashing — and, on the inner side, in O(1).
-#[derive(Clone)]
-pub(crate) struct FoldPlan {
-    pub(crate) inner_names: Arc<Vec<String>>,
-    pub(crate) inner_dtypes: Vec<DType>,
-    pub(crate) bar_names: Vec<String>,
-    pub(crate) ops: Vec<(usize, usize, CombineOp)>,
-}
-
-impl FoldPlan {
-    /// The plan folding `src`'s rows into `inner`'s forming row, or `None` when a column
-    /// cannot fold in place (see [`build_fold_ops`]).
-    pub(crate) fn build(inner: &DataFrame, src: &DataFrame, spec: &AggSpec) -> Option<FoldPlan> {
-        crate::frame_tf::build_fold_ops(inner, src, spec).map(|ops| FoldPlan {
-            inner_names: inner.names_arc().clone(),
-            inner_dtypes: inner.columns().iter().map(|c| c.dtype()).collect(),
-            bar_names: src.names().to_vec(),
-            ops,
-        })
-    }
-
-    /// Whether this plan still matches `inner` + `bar` (no schema change).
-    pub(crate) fn matches(&self, inner: &DataFrame, bar: &DataFrame) -> bool {
-        // The inner frame is pointer-stable across the fold's row-only mutations
-        // (append / forming-row update), so an O(1) `Arc::ptr_eq` replaces the
-        // inner-name comparison; the bar is a fresh frame each append, so its (short)
-        // names are compared by value. Dtypes are still checked — a cell can be
-        // replaced in place, changing dtype without touching the name `Arc` — but
-        // that is a cheap enum compare, never a hash.
-        Arc::ptr_eq(&self.inner_names, inner.names_arc())
-            && self.bar_names.as_slice() == bar.names()
-            && self.inner_dtypes.len() == inner.width()
-            && self
-                .inner_dtypes
-                .iter()
-                .zip(inner.columns())
-                .all(|(d, c)| *d == c.dtype())
-    }
-}
 
 /// Whether a column takes part in a column-wise reduction (`sum` / `prod` / `min` /
 /// `max` / `mean` / `var` / `std` / `median` / `sem` / `skew` / `kurt` / `corr` /
@@ -97,21 +24,6 @@ impl FoldPlan {
 /// — one predicate, so no reduction drops a column another one keeps.
 pub(crate) fn reduces(col: &Column) -> bool {
     col.require_numeric().is_ok()
-}
-
-/// Bounded rolling-window state when this is a windowed frame (`window=`); `None`
-/// for an unbounded frame. The frame physically retains `[capacity, 2*capacity]`
-/// rows (`capacity = window + max_lookback`); the user-facing surface shows only the
-/// last `window` rows — the margin is hidden history that keeps cached indicators
-/// correct across the periodic front-drop. The drop reuses `DataFrame::slice`, which
-/// carries the directive resume state (SP-9), so no core change is needed.
-#[derive(Clone)]
-pub(crate) struct WindowState {
-    /// The output window M — the logical row count once warmed.
-    pub(crate) window: usize,
-    /// Rows kept for correctness: `window + max_lookback`. Physical retention is
-    /// bounded by `2*capacity` (compact down to `capacity` when reached).
-    pub(crate) capacity: usize,
 }
 
 /// A frame's values as a reader may see them: fresh (no cached directive column waits
@@ -210,13 +122,16 @@ impl Meta<'_> {
 /// grows the frame in place for live streaming.
 ///
 /// Passing ``window=`` makes a **bounded rolling-window** frame: only the last
-/// ``window`` rows are visible, while enough older rows are retained behind the
-/// scenes (``window + max_lookback``) to keep cached indicators consistent across
-/// the periodic, automatic front-drop — so memory stays bounded no matter how many
-/// bars you ``append`` (ideal as a fixed-size NN feature buffer). Every row-facing
-/// surface (indexing, ``to_numpy``, ``to_csv``, reductions, …) sees only the
-/// window; ``ready`` reports whether it has warmed up; ``fill_into`` writes the
-/// window straight into a preallocated array with no per-bar allocation::
+/// ``window`` rows are visible, while a hidden margin of older rows
+/// (``max_lookback``) is retained behind them, and memory stays bounded no matter how
+/// many bars you ``append`` (ideal as a fixed-size NN feature buffer). Every indicator
+/// it computes equals an unbounded frame's bit for bit: the directives declared in
+/// ``max_lookback`` (computed over all the given rows; a recursion keeps a checkpoint of
+/// its history across the periodic front-drop), and any other directive whose values
+/// depend on a trailing window the margin holds — anything else raises. Every
+/// row-facing surface (indexing, ``to_numpy``, ``to_csv``, reductions, …) sees only the
+/// window; ``ready`` reports whether it has warmed up; ``fill_into`` writes the window
+/// straight into a preallocated array with no per-bar allocation::
 ///
 ///     wf = volas.DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
 ///     wf.append(bar); wf.fulfill()        # fold a bar, refresh the cached atr:14
@@ -225,7 +140,9 @@ impl Meta<'_> {
 /// Args:
 ///     data (dict[str, Sequence] | DataFrame): a dict of column name -> equal-length
 ///         values, or another volas DataFrame to copy (its index and tf-state are
-///         carried — like ``df.copy()``). A pandas DataFrame is not accepted; use
+///         carried — like ``df.copy()``; re-labelled with ``index=`` or re-typed with
+///         ``dtype=``, a tf-aware source gives the tf-aware frame of its new rows, the
+///         last one the forming bar). A pandas DataFrame is not accepted; use
 ///         ``DataFrame.from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
 ///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
 ///     columns (list[str], optional): select and order the columns to keep (like
@@ -243,16 +160,16 @@ impl Meta<'_> {
 ///     window (int, optional): make this a bounded rolling-window frame showing only
 ///         the last ``window`` rows (see above). Requires ``max_lookback``.
 ///     max_lookback (int | list[str], optional): REQUIRED with ``window`` (and valid only
-///         with it) — the margin of hidden history (``window + max_lookback``) the frame
-///         keeps so cached indicators survive the automatic front-drop. Recursive
-///         indicators (EMA/Wilder/ATR/RSI/MACD) stay **bit-exact**; finite-window
-///         indicators (ma/wma/trima/stddev/…) match an unbounded frame to floating-point
-///         tolerance (~1e-13). Give an **int** to state the largest indicator lookback you
-///         will use, or a **list of indicator directives** to derive it from the largest of
-///         their lookbacks (e.g. ``['atr:14', 'ma:50']`` -> margin 49) — so you never
-///         hand-compute a compound indicator's warm-up. Too small a margin silently breaks
-///         this guarantee. A list entry must be an indicator directive (e.g. ``'ma:50'``);
-///         a bare/typo'd name (``'ma50'``) is rejected.
+///         with it). A **list of indicator directives** declares them: the hidden margin
+///         is the largest of their lookbacks (e.g. ``['atr:14', 'ma:50']`` -> margin 49),
+///         and each is computed at construction over all the given rows and cached — a
+///         recursion (EMA, Wilder smoothing, a cumulative line, …) can only be computed
+///         this way; one no carried state covers (inside an ``@`` operand, combined with
+///         other values, or a command that recomputes) raises. An **int** is the margin
+///         alone. A directive requested later is computed only when it depends on a
+///         trailing window of at most the margin's rows, else it raises. A list entry must
+///         be an indicator directive (e.g. ``'ma:50'``); a bare/typo'd name (``'ma50'``)
+///         and an empty list are rejected.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
     pub(crate) inner: DataFrame,
@@ -356,32 +273,6 @@ impl PyDataFrame {
             }
             None => self.wrap_series(name, col),
         }
-    }
-
-    /// After an append, drop the front history once physical retention reaches
-    /// `2*capacity`, keeping the last `capacity` rows. The drop is `DataFrame::retain_tail`,
-    /// which carries the directive resume state (SP-9) ONLY when the kept window still
-    /// holds the last valid row + its `lookback` warm-up. So we first refresh the stale
-    /// directive tail (bringing `valid_rows` up to `height`, anchoring the resume state
-    /// inside the kept window) — otherwise an append-many-without-read run would drop the
-    /// valid region and the recursion would diverge. Refreshing only at the compaction
-    /// boundary (every ~`capacity` appends) keeps the per-bar cost amortized O(lookback),
-    /// the same as the lazy read-time refresh. Each column is refreshed on its own: one
-    /// whose compute raises (contract #26 — an int64 input past 2^53 in float64 math)
-    /// stays stale for its reader to raise, and the window still compacts — the append
-    /// that led here has happened and stands, and a row that cannot be computed leaves
-    /// the window like any other. No-op when unbounded.
-    pub(crate) fn maybe_compact(&mut self) {
-        let Some(cap) = self.window.as_ref().map(|w| w.capacity) else { return };
-        if self.inner.height() < 2 * cap {
-            return;
-        }
-        for stale in self.inner.stale_computed_columns(None) {
-            // the reader raises it: a refresh error is the column's, never the append's
-            let _ = self.refresh_computed(Some(&stale.name));
-        }
-        let h = self.inner.height();
-        self.inner = self.inner.retain_tail(cap.min(h));
     }
 
     /// Element-wise comparison backing `__eq__` / `__ne__`: against another
@@ -621,17 +512,27 @@ impl PyDataFrame {
     /// gate, decided here once. Writing in place keeps every cached column's identity: a
     /// written cached column becomes plain data, every other one goes stale
     /// (`DataFrame::assign_positions`). A write selecting no row changes nothing.
+    ///
+    /// On a time-frame frame the writes go through its one write entry
+    /// ([`TfState::write`]): all or nothing, and the open period follows the forming
+    /// cells they leave — or the writes are refused, the frame unchanged.
     pub(crate) fn write_cells(&mut self, writes: Vec<(usize, Vec<usize>, Column)>) -> PyResult<()> {
         self.require_fresh()?;
         let start = self.logical_range().0;
-        for (col, rows, values) in writes {
-            if rows.is_empty() {
-                continue;
+        let apply = |inner: &mut DataFrame| -> PyResult<()> {
+            for (col, rows, values) in writes {
+                if rows.is_empty() {
+                    continue;
+                }
+                let phys: Vec<usize> = rows.into_iter().map(|r| r + start).collect();
+                inner.assign_positions(col, &phys, &values).map_err(pyerr)?;
             }
-            let phys: Vec<usize> = rows.into_iter().map(|r| r + start).collect();
-            self.inner.assign_positions(col, &phys, &values).map_err(pyerr)?;
+            Ok(())
+        };
+        match self.tf.as_mut() {
+            Some(tfs) => tfs.write(&mut self.inner, apply),
+            None => apply(&mut self.inner),
         }
-        Ok(())
     }
 
     /// `df[row_mask] = v`: set every column's True rows to the scalar, keeping each
@@ -720,8 +621,8 @@ impl PyDataFrame {
     /// the frame's — so the append's index rule judges its awareness; a `RangeIndex`
     /// auto-extends. Every other key becomes a bar column (a data column of the frame
     /// typed by it, any other key as inferred), so the append's admission judges an
-    /// unknown key or a cached directive column exactly as for every other form. The
-    /// dict form is strict besides: every data column must be supplied.
+    /// unknown key or a cached directive column exactly as for every other form — and a
+    /// data column the dict leaves out exactly as well: it is missing in the bar.
     pub(crate) fn bar_from_dict(&self, dict: &Bound<'_, PyDict>) -> PyResult<DataFrame> {
         let inner = &self.inner;
         let labeled = !matches!(inner.index().kind(), IndexKind::Range { .. });
@@ -742,11 +643,7 @@ impl PyDataFrame {
             if inner.is_computed(name) {
                 continue;
             }
-            let v = dict.get_item(name)?.ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "append(dict): missing column {name:?} — every data column must be provided"
-                ))
-            })?;
+            let Some(v) = dict.get_item(name)? else { continue };
             let dt = inner.column(name).map_err(pyerr)?.dtype();
             cols.push(crate::coerce::bar_scalar_to_column(&v, dt)?);
             names.push(name.clone());

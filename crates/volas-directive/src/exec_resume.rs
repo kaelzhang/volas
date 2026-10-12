@@ -19,11 +19,13 @@ use crate::lookback::{evaluates_on_a_window, lookback};
 use crate::spec::{command_spec, History, Resume};
 use crate::types::{Ast, Bound, Command, Node};
 
+mod history;
 mod initial_state;
 mod resume;
 mod scalar;
 mod window;
 
+pub use history::{capture, checkpoint, replay};
 pub use initial_state::initial_state;
 pub use resume::execute_resume;
 pub use scalar::execute_resume_step;

@@ -23,13 +23,14 @@ use super::{as_command, bound, recursive, resume_of, window_start};
 /// frame, so it costs that window, not the frame's height. A row missing an input of a
 /// recursive command is NaN and does not advance the state (`next` is `prev_state`).
 /// `None` when the line has no single-row step ([`Resume::Step`]), or the step declines
-/// (`row` out of range, a state of the wrong shape) — the caller then takes the `Vec`
-/// resume.
+/// (`row` out of range, a state of the wrong shape, or a frame that dropped complete rows
+/// of the history the step reads — `since` as in [`super::execute_resume`]) — the caller
+/// then takes the `Vec` resume.
 pub fn execute_resume_step(
     df: &DataFrame,
     node: &Ast,
     prev_state: &[f64],
-    row: usize,
+    (row, since): (usize, usize),
     next: &mut [f64],
 ) -> Option<f64> {
     let cmd = as_command(node)?;
@@ -49,7 +50,7 @@ pub fn execute_resume_step(
         df,
         &bound(&cmd),
         start,
-        row,
+        (row, since),
         || {
             missing.set(true);
             Some(f64::NAN)

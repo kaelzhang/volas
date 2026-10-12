@@ -80,7 +80,7 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
             let frame = df.slice(0, end);
             let Some(want) = full(&frame, node) else { break };
             // `None` is a legitimate decline: the caller falls back to a full compute.
-            let Some((tail, next)) = execute_resume(&frame, node, &state, at, 0) else { break };
+            let Some((tail, next)) = execute_resume(&frame, node, &state, at, frame.height(), 0) else { break };
             if let Some(d) = first_diff(&values(&tail), &want[at..end]) {
                 fails.push(format!("from {from}: chunk [{at},{end}) {d}"));
                 break;
@@ -110,13 +110,13 @@ fn forming(df: &DataFrame, node: &Ast, from: usize) -> Vec<String> {
     for bump in [1.01, 0.97] {
         let frame = with_last_row_scaled(&df.slice(0, from + 1), bump);
         let Some(want) = full(&frame, node) else { continue };
-        if let Some((tail, _)) = execute_resume(&frame, node, &anchor, from, 0) {
+        if let Some((tail, _)) = execute_resume(&frame, node, &anchor, from, frame.height(), 0) {
             if let Some(d) = first_diff(&values(&tail), &want[from..]) {
                 fails.push(format!("forming x{bump} at {from}: vec {d}"));
             }
         }
         let mut next = vec![0.0; anchor.len()];
-        if let Some(v) = execute_resume_step(&frame, node, &anchor, from, &mut next) {
+        if let Some(v) = execute_resume_step(&frame, node, &anchor, (from, 0), &mut next) {
             if !same(v, want[from]) {
                 fails.push(format!("forming x{bump} at {from}: scalar {v:?} != {:?}", want[from]));
             }
@@ -220,7 +220,7 @@ fn a_continuation_far_into_the_series_reads_a_window_exactly() {
                         }
                         continue;
                     };
-                    match execute_resume(df, &node, &state, from, 0) {
+                    match execute_resume(df, &node, &state, from, usize::MAX, 0) {
                         Some((tail, _)) => {
                             if let Some(d) = first_diff(&values(&tail), &whole[from..]) {
                                 fails.push(format!("{text} [{}] from {from}: vec {d}", data.name));
@@ -229,7 +229,7 @@ fn a_continuation_far_into_the_series_reads_a_window_exactly() {
                         None => fails.push(format!("{text} [{}] from {from}: the vec resume declined", data.name)),
                     }
                     let mut next = vec![0.0; state.len()];
-                    match execute_resume_step(df, &node, &state, from, &mut next) {
+                    match execute_resume_step(df, &node, &state, (from, 0), &mut next) {
                         Some(v) => {
                             stepped += 1;
                             if !same(v, whole[from]) {
@@ -259,12 +259,12 @@ fn a_continuation_far_into_the_series_reads_a_window_exactly() {
             for from in [LONG - 40, LONG - 1] {
                 let head = df.slice(0, from);
                 let state = initial_state(&head, &node, &execute(&head, &node).unwrap()).unwrap();
-                let (tail, _) = execute_resume(df, &node, &state, from, 0).unwrap();
+                let (tail, _) = execute_resume(df, &node, &state, from, usize::MAX, 0).unwrap();
                 if let Some(d) = first_diff(&values(&tail), &whole[from..]) {
                     fails.push(format!("{text} [{}] from {from}: vec {d}", data.name));
                 }
                 let mut next = vec![0.0; state.len()];
-                let v = execute_resume_step(df, &node, &state, from, &mut next).unwrap();
+                let v = execute_resume_step(df, &node, &state, (from, 0), &mut next).unwrap();
                 if !same(v, whole[from]) {
                     fails.push(format!("{text} [{}] from {from}: step {v:?} != {:?}", data.name, whole[from]));
                 }

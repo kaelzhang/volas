@@ -250,6 +250,32 @@ pub enum History {
     Recursive,
 }
 
+/// How a class-3 line's history is kept by a frame that does not hold all of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// By the state its resume continues from: a checkpoint of that state replays it.
+    State,
+    /// By its window: its values are a function of a trailing window of its rows.
+    Window,
+    /// Not at all: it carries no state (it recomputes), so only the whole history gives it.
+    Nothing,
+}
+
+/// A line's R13 history class (how its value depends on the rows before it): class 1
+/// depends on a trailing window, class 2 on a running accumulator over a trailing window,
+/// class 3 on every row before — a recursion, a cumulative line or an unbounded count,
+/// with how it is kept. A bounded window computes a class-1 directive on request and the
+/// others only when declared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryClass {
+    /// Class 1.
+    Window,
+    /// Class 2.
+    Accumulator,
+    /// Class 3.
+    Recursion(Keep),
+}
+
 /// What continuing a cached column after new rows runs, beyond a recompute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resume {
@@ -304,6 +330,8 @@ pub struct CommandSpec {
     lookback: LookbackRule,
     emits_position: bool,
     reads_past: bool,
+    /// A count over its window (`increase`): class 3 by R13, kept by its window.
+    counted: bool,
     resume: Resume,
     /// Arguments under which the declared resume is not available (falls back to
     /// [`Resume::Recompute`]).
@@ -328,6 +356,7 @@ impl CommandSpec {
             lookback: LookbackRule::Fixed(0),
             emits_position: false,
             reads_past: false,
+            counted: false,
             resume: Resume::Recompute,
             resume_unless: None,
             runs_as: None,
@@ -379,6 +408,12 @@ impl CommandSpec {
         self
     }
 
+    /// A count over its window: class 3, kept by its window.
+    pub(crate) fn counted(mut self) -> Self {
+        self.counted = true;
+        self
+    }
+
     /// It has a single-row step.
     pub(crate) fn step(mut self) -> Self {
         self.resume = Resume::Step;
@@ -413,6 +448,22 @@ impl CommandSpec {
                 });
                 if recursive { History::Recursive } else { otherwise }
             }
+        }
+    }
+
+    /// The R13 history class under the bound arguments `args` ([`HistoryClass`]): a
+    /// count over its window is class 3 kept by its window; a recursion is class 3, kept
+    /// by its state when it has a resume, else not at all; a running accumulator class 2;
+    /// a pure window class 1.
+    pub fn history_class(&self, args: &[ArgValue]) -> HistoryClass {
+        if self.counted {
+            return HistoryClass::Recursion(Keep::Window);
+        }
+        match self.history(args) {
+            History::Recursive if self.resume(args) == Resume::Recompute => HistoryClass::Recursion(Keep::Nothing),
+            History::Recursive => HistoryClass::Recursion(Keep::State),
+            History::Accumulating => HistoryClass::Accumulator,
+            History::Window => HistoryClass::Window,
         }
     }
 

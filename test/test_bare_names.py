@@ -108,8 +108,8 @@ def test_exec_reads_data_columns_only_and_the_visible_rows():
     assert np.array_equal(df.exec('close - obv'), frame(change=False).exec('close - obv'),
                           equal_nan=True)
     win = volas.DataFrame({'close': CLOSE, 'volume': VOLUME}, window=5, max_lookback=3)
-    assert len(win.exec('ma:3')) == 5
-    assert np.array_equal(win.exec('ma:3'), frame(change=False).exec('ma:3')[-5:])
+    assert len(win.exec('mom:3')) == 5
+    assert np.array_equal(win.exec('mom:3'), frame(change=False).exec('mom:3')[-5:])
 
 
 

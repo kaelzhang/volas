@@ -5,8 +5,8 @@
 
 use std::borrow::Cow;
 
-use crate::spec::{CommandSpec, History};
-use crate::types::{ArgValue, Ast, Node, Op};
+use crate::spec::{CommandSpec, History, HistoryClass, Keep};
+use crate::types::{ArgValue, Ast, Node};
 
 /// The spec and bound arguments of a command node, or of a bare name binding to a
 /// command (`None` for anything else: a column, a scalar, an operation).
@@ -20,14 +20,9 @@ fn command_of(node: &Ast) -> Option<(Cow<'_, CommandSpec>, Cow<'_, [ArgValue]>)>
     }
 }
 
-/// Whether `op` reads the previous row of its operands (a cross).
-fn reads_previous_row(op: Op) -> bool {
-    matches!(op, Op::CrossUp | Op::CrossDown | Op::Cross)
-}
-
 /// Lookback for a bound directive: a command's own lookback plus the largest lookback
-/// among its series operands; an operator takes the max of its operands, and a cross —
-/// which reads the previous row too — one row more.
+/// among its series operands; an operator takes the max of its operands plus the earlier
+/// rows it reads itself ([`crate::types::Op::lookback`]: a cross reads one).
 pub fn lookback(node: &Ast) -> usize {
     match node {
         Node::Scalar(_) => 0,
@@ -38,9 +33,7 @@ pub fn lookback(node: &Ast) -> usize {
             own + c.series.iter().map(lookback).max().unwrap_or(0)
         }
         Node::Unary { operand, .. } => lookback(operand),
-        Node::Binary { left, op, right } => {
-            lookback(left).max(lookback(right)) + usize::from(reads_previous_row(*op))
-        }
+        Node::Binary { left, op, right } => op.lookback() + lookback(left).max(lookback(right)),
     }
 }
 
@@ -87,21 +80,62 @@ pub fn reach(node: &Ast) -> volas_core::Reach {
         lookback: lookback(node),
         resume: resume_reach(node),
         continuation: continuation_reach(node),
-        recursive: recursive_anywhere(node),
+        history: history(node),
     }
 }
 
-/// Whether a recursion appears anywhere in a directive — a recursive command at the
-/// top, inside an `@` series, an operand, or bound from a bare name — so each value
-/// depends on every row before it, not on a trailing window.
-fn recursive_anywhere(node: &Ast) -> bool {
-    let own = || command_of(node).is_some_and(|(spec, args)| spec.history(&args) == History::Recursive);
+/// How a directive's values depend on the rows before them ([`volas_core::History`]),
+/// derived from the history class of each command in it
+/// ([`CommandSpec::history_class`]): its highest class, and for class 3 how a frame keeps
+/// it — by the state of its top command when that is the one recursion in it (its
+/// operands of a lower class or counts), by its window when every class-3 part is a
+/// count, otherwise not at all.
+pub fn history(node: &Ast) -> volas_core::History {
+    use volas_core::History;
+    let (class, recursions) = classes(node);
+    match class {
+        0 | 1 => return History::Window,
+        2 => return History::Accumulator,
+        _ if recursions == 0 => return History::Counted,
+        _ => {}
+    }
+    let carried = matches!(node, Node::Command(_) | Node::Name(_))
+        && command_of(node).is_some_and(|(spec, args)| {
+            spec.history_class(&args) == HistoryClass::Recursion(Keep::State)
+        })
+        && series_of(node).iter().all(|s| classes(s).1 == 0);
+    if carried {
+        return History::Carried { operands: series_of(node).iter().map(lookback).max().unwrap_or(0) };
+    }
+    History::Unkept
+}
+
+/// The `@` operands of a command node (none for anything else).
+fn series_of(node: &Ast) -> &[Ast] {
     match node {
-        Node::Name(_) => own(),
-        Node::Scalar(_) => false,
-        Node::Command(c) => own() || c.series.iter().any(recursive_anywhere),
-        Node::Unary { operand, .. } => recursive_anywhere(operand),
-        Node::Binary { left, right, .. } => recursive_anywhere(left) || recursive_anywhere(right),
+        Node::Command(c) => &c.series,
+        _ => &[],
+    }
+}
+
+/// The highest history class among a directive's commands (0 with none), and how many of
+/// them are recursions (class 3 not kept by its window). A bare name is the command it
+/// binds to; an unbindable one is a column.
+fn classes(node: &Ast) -> (u8, usize) {
+    let own = |node: &Ast| {
+        command_of(node).map_or((0, 0), |(spec, args)| match spec.history_class(&args) {
+            HistoryClass::Window => (1, 0),
+            HistoryClass::Accumulator => (2, 0),
+            HistoryClass::Recursion(Keep::Window) => (3, 0),
+            HistoryClass::Recursion(_) => (3, 1),
+        })
+    };
+    let join = |a: (u8, usize), b: (u8, usize)| (a.0.max(b.0), a.1 + b.1);
+    match node {
+        Node::Scalar(_) | Node::Name(_) => own(node),
+        Node::Command(c) => c.series.iter().map(classes).fold(own(node), join),
+        Node::Unary { operand, .. } => classes(operand),
+        Node::Binary { left, right, .. } => join(classes(left), classes(right)),
     }
 }
 
@@ -120,7 +154,7 @@ fn resume_reach(node: &Ast) -> usize {
 /// contiguous slice must keep for the column to stay cached: its lookback, from which a
 /// sliding sum or an extremum-position window recomputes exactly over the slice's own
 /// rows when its state cannot resume; any other command reading past its lookback (a
-/// recursion — SAR, KAMA — or PSY's first partial window) continues exactly only with
+/// recursion — SAR, KAMA) continues exactly only with
 /// its [`resume_reach`] rows.
 fn continuation_reach(node: &Ast) -> usize {
     match command_of(node) {

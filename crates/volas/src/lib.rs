@@ -32,5 +32,5 @@ pub mod compute {
 /// Time-frame cumulation (OHLCV resampling): aggregate finer bars into a coarser
 /// [`TimeFrame`].
 pub mod time {
-    pub use volas_time::{aggregate_period, cumulate, Agg, AggSpec, Cumulator, TimeFrame};
+    pub use volas_time::{aggregate_period, cumulate, Agg, AggSpec, Cumulator, OpenPeriod, TimeFrame};
 }

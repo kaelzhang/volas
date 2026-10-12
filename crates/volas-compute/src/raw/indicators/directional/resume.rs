@@ -10,8 +10,9 @@ use super::*;
 // Every directional indicator is a Wilder recurrence over per-bar terms (`dm1` / `tr_at`)
 // that each read the *prior* bar. The carried state is the running Wilder accumulator(s)
 // as of row `from-1`: a single sum (±DM), a sum pair (±DI), a sum triple (DX), the DX
-// triple plus the running ADX average (ADX), and additionally the trailing `period`-long
-// ADX window (ADXR, which looks `period-1` rows back). `*_final_state` re-runs the exact
+// triple and the last published DX (DX, which repeats it on a guarded bar), the sum triple
+// plus the running ADX average (ADX), and additionally the trailing `period`-long ADX
+// window (ADXR, which looks `period-1` rows back). `*_final_state` re-runs the exact
 // kernel recurrence to capture that state after a full compute (returning `None` before
 // the indicator seeds, so the caller keeps the correct fallback); `*_resume` continues
 // over rows `[from, n)` reading only `high/low/close[from-1..]`, with arithmetic
@@ -29,16 +30,16 @@ fn wilder_sum_final(n: usize, period: usize, term: impl Fn(usize) -> f64) -> Opt
     for i in 1..=seed {
         s += term(i);
     }
-    let a = 1.0 - 1.0 / period as f64;
+    let pf = period as f64;
     for i in seed + 1..n {
-        s = wilder_sum_step(s, a, term(i));
+        s = smoothing::wilder_sum(s, pf, term(i));
     }
     Some(s)
 }
 
 /// Resume a Wilder-`sum` from carried `s = state` over rows `[from, n)`, producing each
 /// row's running sum and the new `s`. Reads only the bars `[from-1, n)` (each `term(i)`
-/// needs bar `i-1`). Bit-identical to [`wilder_sum`]'s steady-state `s = s·a + term`.
+/// needs bar `i-1`). Bit-identical to [`wilder_sum`]'s steady-state step.
 fn wilder_sum_resume(
     n: usize,
     period: usize,
@@ -46,11 +47,11 @@ fn wilder_sum_resume(
     state: f64,
     term: impl Fn(usize) -> f64,
 ) -> (Vec<f64>, f64) {
-    let a = 1.0 - 1.0 / period as f64;
+    let pf = period as f64;
     let mut s = state;
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        s = wilder_sum_step(s, a, term(i));
+        s = smoothing::wilder_sum(s, pf, term(i));
         out.push(s);
     }
     (out, s)
@@ -98,44 +99,27 @@ pub fn minus_dm_resume(
     Some((out, vec![s]))
 }
 
-/// Final ±DI / DX / ADX shared state: the Wilder-`sum` triple `[sp, sm, st]` as of the
-/// last row (the +DM, −DM and TR running sums). `None` before the seed exists. The
-/// shared seed every directional ratio resumes from.
+/// Final ±DI shared state: the Wilder-`sum` triple `[sp, sm, st]` as of the last row (the
+/// +DM, −DM and TR running sums, [`dm_tr_fold`]). `None` before the seed exists.
 fn dm_tr_sums_final(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     period: usize,
 ) -> Option<(f64, f64, f64)> {
-    let n = high.len();
-    if period == 0 || period >= n {
-        return None;
-    }
-    let (mut p, mut m, mut t) = (0.0, 0.0, 0.0);
-    for i in 1..period {
-        let (dp, dm) = dm1(high, low, i);
-        p += dp;
-        m += dm;
-        t += tr_at(high, low, close, i);
-    }
-    let a = 1.0 - 1.0 / period as f64;
-    for i in period..n {
-        let (dp, dm) = dm1(high, low, i);
-        p = wilder_sum_step(p, a, dp);
-        m = wilder_sum_step(m, a, dm);
-        t = wilder_sum_step(t, a, tr_at(high, low, close, i));
-    }
-    Some((p, m, t))
+    let mut last = None;
+    dm_tr_fold(high, low, close, period, |_, sp, sm, st| last = Some((sp, sm, st)));
+    last
 }
 
-/// Advance the +DM/−DM/TR Wilder sums `s = [sp, sm, st]` one bar at index `i` with factor
-/// `a = 1 - 1/period` (the exact `dm_tr_sums` steady-state step).
+/// Advance the +DM/−DM/TR Wilder sums `s = [sp, sm, st]` one bar at index `i` for the
+/// period `pf` (the exact `dm_tr_sums` steady-state step).
 #[inline]
-fn dm_tr_step(high: &[f64], low: &[f64], close: &[f64], i: usize, a: f64, s: &mut [f64; 3]) {
+fn dm_tr_step(high: &[f64], low: &[f64], close: &[f64], i: usize, pf: f64, s: &mut [f64; 3]) {
     let (dp, dm) = dm1(high, low, i);
-    s[0] = wilder_sum_step(s[0], a, dp);
-    s[1] = wilder_sum_step(s[1], a, dm);
-    s[2] = wilder_sum_step(s[2], a, tr_at(high, low, close, i));
+    s[0] = smoothing::wilder_sum(s[0], pf, dp);
+    s[1] = smoothing::wilder_sum(s[1], pf, dm);
+    s[2] = smoothing::wilder_sum(s[2], pf, tr_at(high, low, close, i));
 }
 
 /// Final +DI state `[sp, st]` (+DM and TR running sums) — pairs with [`plus_di_resume`].
@@ -163,12 +147,12 @@ pub fn plus_di_resume(
         return None;
     }
     let n = high.len();
-    let a = 1.0 - 1.0 / period as f64;
+    let pf = period as f64;
     // s = [sp, sm, st]; +DI ignores the −DM component but shares the fused step.
     let mut s = [state[0], 0.0, state[1]];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        dm_tr_step(high, low, close, i, a, &mut s);
+        dm_tr_step(high, low, close, i, pf, &mut s);
         out.push(di_val(s[0], s[2]));
     }
     Some((out, vec![s[0], s[2]]))
@@ -199,25 +183,31 @@ pub fn minus_di_resume(
         return None;
     }
     let n = high.len();
-    let a = 1.0 - 1.0 / period as f64;
+    let pf = period as f64;
     // s = [sp, sm, st]; −DI ignores the +DM component but shares the fused step.
     let mut s = [0.0, state[0], state[1]];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        dm_tr_step(high, low, close, i, a, &mut s);
+        dm_tr_step(high, low, close, i, pf, &mut s);
         out.push(di_val(s[1], s[2]));
     }
     Some((out, vec![s[1], s[2]]))
 }
 
-/// Final DX state `[sp, sm, st]` (all three running sums) — pairs with [`dx_resume`].
+/// Final DX state `[sp, sm, st, dx]`: the three running sums and the last published DX
+/// (a guarded bar repeats it, [`dx_out`]) — pairs with [`dx_resume`].
 pub fn dx_final_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Option<Vec<f64>> {
-    let (sp, sm, st) = dm_tr_sums_final(high, low, close, period)?;
-    Some(vec![sp, sm, st])
+    let mut last = None;
+    let mut prev = 0.0;
+    dm_tr_fold(high, low, close, period, |_, sp, sm, st| {
+        prev = dx_out(prev, sp, sm, st);
+        last = Some(vec![sp, sm, st, prev]);
+    });
+    last
 }
 
-/// Resume [`dx`] from `state = [sp, sm, st]` over rows `[from, n)`. `None` at `from == 0`.
-/// Reads only `high/low/close[from-1..]`.
+/// Resume [`dx`] from `state = [sp, sm, st, dx]` over rows `[from, n)`. `None` at
+/// `from == 0`. Reads only `high/low/close[from-1..]`.
 pub fn dx_resume(
     high: &[f64],
     low: &[f64],
@@ -230,62 +220,30 @@ pub fn dx_resume(
         return None;
     }
     let n = high.len();
-    let a = 1.0 - 1.0 / period as f64;
+    let pf = period as f64;
     let mut s = [state[0], state[1], state[2]];
+    let mut prev = state[3];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        dm_tr_step(high, low, close, i, a, &mut s);
-        out.push(dx_val(s[0], s[1], s[2]));
+        dm_tr_step(high, low, close, i, pf, &mut s);
+        prev = dx_out(prev, s[0], s[1], s[2]);
+        out.push(prev);
     }
-    Some((out, s.to_vec()))
+    Some((out, vec![s[0], s[1], s[2], prev]))
 }
 
 /// Final ADX state `[sp, sm, st, adx]`: the DX running sums plus the running ADX average
-/// (the SMA-seeded Wilder average of DX) as of the last row. `None` before ADX seeds
-/// (`2·period-1 >= n`), so the caller keeps the fallback. Pairs with [`adx_resume`].
+/// as of the last row ([`adx_fold`]). `None` before ADX seeds (`2·period-1 >= n`), so the
+/// caller keeps the fallback. Pairs with [`adx_resume`].
 pub fn adx_final_state(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     period: usize,
 ) -> Option<Vec<f64>> {
-    let n = high.len();
-    if period == 0 {
-        return None;
-    }
-    let first = 2 * period - 1;
-    if first >= n {
-        return None;
-    }
-    // Re-run dx + its Wilder-average exactly as `adx`, carrying the DX sums alongside so
-    // a resume can keep producing dx[i] without re-seeding.
-    let a_sum = 1.0 - 1.0 / period as f64;
-    let mut s = [0.0, 0.0, 0.0];
-    for i in 1..period {
-        let (dp, dm) = dm1(high, low, i);
-        s[0] += dp;
-        s[1] += dm;
-        s[2] += tr_at(high, low, close, i);
-    }
-    // dx[i] is defined from i == period; collect the first `period` DX values (indices
-    // `[period, 2*period)`) to seed the ADX average, advancing the sums as we go.
-    let pf = period as f64;
-    let mut dx_seed_sum = 0.0;
-    let mut adx = f64::NAN;
-    let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);
-    for i in period..n {
-        dm_tr_step(high, low, close, i, a_sum, &mut s);
-        let dxv = dx_val(s[0], s[1], s[2]);
-        if i < 2 * period {
-            dx_seed_sum += dxv;
-            if i == 2 * period - 1 {
-                adx = dx_seed_sum / pf;
-            }
-        } else {
-            adx = adx.mul_add(a_avg, dxv * b_avg);
-        }
-    }
-    Some(vec![s[0], s[1], s[2], adx])
+    let mut last = None;
+    adx_fold(high, low, close, period, |_, s, adx| last = Some(vec![s[0], s[1], s[2], adx]));
+    last
 }
 
 /// Resume [`adx`] from `state = [sp, sm, st, adx]` over rows `[from, n)`. `None` at
@@ -304,22 +262,20 @@ pub fn adx_resume(
     }
     let n = high.len();
     let pf = period as f64;
-    let a_sum = 1.0 - 1.0 / pf;
-    let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);
+    let average = smoothing::Wilder::new(period);
     let mut s = [state[0], state[1], state[2]];
     let mut adx = state[3];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        dm_tr_step(high, low, close, i, a_sum, &mut s);
-        let dxv = dx_val(s[0], s[1], s[2]);
-        adx = adx.mul_add(a_avg, dxv * b_avg);
+        dm_tr_step(high, low, close, i, pf, &mut s);
+        adx = adx_next(adx, average, dx_val(s[0], s[1], s[2]));
         out.push(adx);
     }
     Some((out, vec![s[0], s[1], s[2], adx]))
 }
 
 /// Final ADXR state `[sp, sm, st, adx_{i-(period-1)}, …, adx_i]`: the DX sums followed by
-/// the trailing `period` ADX values (oldest→newest), so a resume can form
+/// the trailing `period` ADX values (oldest→newest, [`adx_fold`]), so a resume can form
 /// `(adx[i] + adx[i-(period-1)])/2`. `None` before ADXR seeds (`3·period-2 >= n`). Pairs
 /// with [`adxr_resume`].
 pub fn adxr_final_state(
@@ -329,47 +285,17 @@ pub fn adxr_final_state(
     period: usize,
 ) -> Option<Vec<f64>> {
     let n = high.len();
-    if period == 0 {
+    if period == 0 || 3 * period - 2 >= n {
         return None;
     }
-    if 3 * period - 2 >= n {
-        return None;
-    }
-    // Recompute the full ADX series (needed for the trailing window) alongside the live
-    // DX sums; capture the last `period` ADX values.
-    let a_sum = 1.0 - 1.0 / period as f64;
-    let mut s = [0.0, 0.0, 0.0];
-    for i in 1..period {
-        let (dp, dm) = dm1(high, low, i);
-        s[0] += dp;
-        s[1] += dm;
-        s[2] += tr_at(high, low, close, i);
-    }
-    let pf = period as f64;
-    let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);
-    let mut adxv = vec![f64::NAN; n];
-    let mut dx_seed_sum = 0.0;
-    let mut adx = 0.0;
-    #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
-    for i in period..n {
-        dm_tr_step(high, low, close, i, a_sum, &mut s);
-        let dxv = dx_val(s[0], s[1], s[2]);
-        if i < 2 * period {
-            dx_seed_sum += dxv;
-            if i == 2 * period - 1 {
-                adx = dx_seed_sum / pf;
-                adxv[i] = adx;
-            }
-        } else {
-            adx = adx.mul_add(a_avg, dxv * b_avg);
-            adxv[i] = adx;
+    // the last `period` ADX values all exist: n-1 >= 3·period-2 >= (2·period-1) + (period-1)
+    let mut state = vec![0.0; 3 + period];
+    adx_fold(high, low, close, period, |i, s, adx| {
+        state[..3].copy_from_slice(&s);
+        if let Some(slot) = (i + period).checked_sub(n) {
+            state[3 + slot] = adx;
         }
-    }
-    let mut state = vec![s[0], s[1], s[2]];
-    // Trailing `period` ADX values ending at row n-1 (oldest first). They are all valid
-    // because n-1 >= 3*period-2 >= 2*period-1 + (period-1), so the window starts at or
-    // after the ADX seed.
-    state.extend_from_slice(&adxv[n - period..n]);
+    });
     Some(state)
 }
 
@@ -390,8 +316,7 @@ pub fn adxr_resume(
     }
     let n = high.len();
     let pf = period as f64;
-    let a_sum = 1.0 - 1.0 / pf;
-    let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);
+    let average = smoothing::Wilder::new(period);
     let mut s = [state[0], state[1], state[2]];
     // `win` carries the last `period` ADX values, adx[from-period .. from-1] (oldest
     // first), so adx[from-1] (the newest) is `win[period-1]`.
@@ -399,9 +324,8 @@ pub fn adxr_resume(
     let mut adx = win[period - 1]; // the newest carried ADX (= adx[from-1])
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        dm_tr_step(high, low, close, i, a_sum, &mut s);
-        let dxv = dx_val(s[0], s[1], s[2]);
-        adx = adx.mul_add(a_avg, dxv * b_avg);
+        dm_tr_step(high, low, close, i, pf, &mut s);
+        adx = adx_next(adx, average, dx_val(s[0], s[1], s[2]));
         // Slide the window forward to include adx[i], then `win[0]` is adx[i-(period-1)].
         win.remove(0);
         win.push(adx);
@@ -431,10 +355,10 @@ pub fn plus_di_resume_one(
     if row == 0 || state.len() != 2 || next.len() != 2 || row >= high.len() {
         return None;
     }
-    let a = 1.0 - 1.0 / period as f64;
+    let pf = period as f64;
     // Mirror the Vec resume's `s = [sp, 0, st]`; −DM slot stays 0 (unused by +DI).
     let mut s = [state[0], 0.0, state[1]];
-    dm_tr_step(high, low, close, row, a, &mut s);
+    dm_tr_step(high, low, close, row, pf, &mut s);
     next.copy_from_slice(&[s[0], s[2]]);
     Some(di_val(s[0], s[2]))
 }
@@ -454,17 +378,17 @@ pub fn minus_di_resume_one(
     if row == 0 || state.len() != 2 || next.len() != 2 || row >= high.len() {
         return None;
     }
-    let a = 1.0 - 1.0 / period as f64;
+    let pf = period as f64;
     // Mirror the Vec resume's `s = [0, sm, st]`; +DM slot stays 0 (unused by −DI).
     let mut s = [0.0, state[0], state[1]];
-    dm_tr_step(high, low, close, row, a, &mut s);
+    dm_tr_step(high, low, close, row, pf, &mut s);
     next.copy_from_slice(&[s[1], s[2]]);
     Some(di_val(s[1], s[2]))
 }
 
 /// Scalar single-row twin of [`dx_resume`]: the DX value at `row` from
-/// `state = [sp, sm, st]` (as of row-1), the state as of `row` written into `next`, no
-/// allocation. Advances all three fused sums one bar then applies `dx_val`,
+/// `state = [sp, sm, st, dx]` (as of row-1), the state as of `row` written into `next`, no
+/// allocation. Advances all three fused sums one bar then applies [`dx_out`],
 /// bit-identical to the Vec loop body.
 pub fn dx_resume_one(
     high: &[f64],
@@ -475,14 +399,15 @@ pub fn dx_resume_one(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if row == 0 || state.len() != 3 || next.len() != 3 || row >= high.len() {
+    if row == 0 || state.len() != 4 || next.len() != 4 || row >= high.len() {
         return None;
     }
-    let a = 1.0 - 1.0 / period as f64;
+    let pf = period as f64;
     let mut s = [state[0], state[1], state[2]];
-    dm_tr_step(high, low, close, row, a, &mut s);
-    next.copy_from_slice(&s);
-    Some(dx_val(s[0], s[1], s[2]))
+    dm_tr_step(high, low, close, row, pf, &mut s);
+    let dx = dx_out(state[3], s[0], s[1], s[2]);
+    next.copy_from_slice(&[s[0], s[1], s[2], dx]);
+    Some(dx)
 }
 
 /// Scalar single-row twin of [`adx_resume`]: the ADX value at `row` from
@@ -502,12 +427,10 @@ pub fn adx_resume_one(
         return None;
     }
     let pf = period as f64;
-    let a_sum = 1.0 - 1.0 / pf;
-    let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);
+    let average = smoothing::Wilder::new(period);
     let mut s = [state[0], state[1], state[2]];
-    dm_tr_step(high, low, close, row, a_sum, &mut s);
-    let dxv = dx_val(s[0], s[1], s[2]);
-    let adx = state[3].mul_add(a_avg, dxv * b_avg);
+    dm_tr_step(high, low, close, row, pf, &mut s);
+    let adx = adx_next(state[3], average, dx_val(s[0], s[1], s[2]));
     next.copy_from_slice(&[s[0], s[1], s[2], adx]);
     Some(adx)
 }
@@ -534,13 +457,11 @@ pub fn adxr_resume_one(
         return None;
     }
     let pf = period as f64;
-    let a_sum = 1.0 - 1.0 / pf;
-    let (a_avg, b_avg) = ((pf - 1.0) / pf, 1.0 / pf);
+    let average = smoothing::Wilder::new(period);
     let mut s = [state[0], state[1], state[2]];
-    dm_tr_step(high, low, close, row, a_sum, &mut s);
-    let dxv = dx_val(s[0], s[1], s[2]);
+    dm_tr_step(high, low, close, row, pf, &mut s);
     // newest carried adx = adx[row-1] = state[3 + period - 1]; fold to get adx[row].
-    let adx = state[3 + period - 1].mul_add(a_avg, dxv * b_avg);
+    let adx = adx_next(state[3 + period - 1], average, dx_val(s[0], s[1], s[2]));
     // Slide the window: next = [s, adx[row-(period-1)] .. adx[row]].
     next[..3].copy_from_slice(&s);
     next[3..3 + period - 1].copy_from_slice(&state[4..3 + period]);
@@ -562,8 +483,8 @@ pub fn plus_dm_resume_one(
     if row == 0 || state.len() != 1 || next.len() != 1 || row >= high.len() {
         return None;
     }
-    let a = 1.0 - 1.0 / period as f64;
-    next[0] = wilder_sum_step(state[0], a, dm1(high, low, row).0);
+    let pf = period as f64;
+    next[0] = smoothing::wilder_sum(state[0], pf, dm1(high, low, row).0);
     Some(next[0])
 }
 
@@ -581,7 +502,7 @@ pub fn minus_dm_resume_one(
     if row == 0 || state.len() != 1 || next.len() != 1 || row >= high.len() {
         return None;
     }
-    let a = 1.0 - 1.0 / period as f64;
-    next[0] = wilder_sum_step(state[0], a, dm1(high, low, row).1);
+    let pf = period as f64;
+    next[0] = smoothing::wilder_sum(state[0], pf, dm1(high, low, row).1);
     Some(next[0])
 }

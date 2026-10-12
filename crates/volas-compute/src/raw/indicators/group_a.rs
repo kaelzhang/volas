@@ -11,22 +11,24 @@ use crate::missing;
 use crate::guard::Slide;
 use crate::guard::state_after;
 use crate::raw::kernels;
+use crate::raw::smoothing;
 
-/// PSY (心理线): `100 * mean(up, n)`, where `up[i] = 1` when `close[i] > close[i-1]` (the
-/// first bar is not rising). NaN until `n` bars are available.
+/// PSY (心理线): `100 * mean(up, n)`, where `up[i] = 1` when `close[i] > close[i-1]`. The
+/// first bar has no prior close, so no flag: the first full window of `n` flags ends at
+/// bar `n` (NaN before), and each value reads its `n + 1` closes only.
 /// Source: Eastmoney 心理线. Row 0 is at absolute position `origin`.
 pub fn psy(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let up: Vec<f64> = (0..close.len()).map(|i| psy_up(close, i)).collect();
     (kernels::sma(av(&up), n, origin) * 100.0).to_vec()
 }
 
-/// PSY's rising flag at bar `i` (`0` at the first bar). It reads `close[i]` and the
-/// prior close, and is missing when one of them is (the per-row term rule,
-/// [`missing::term`]): a comparison with a missing close would read as "not rising".
+/// PSY's rising flag at bar `i`: it reads `close[i]` and the prior close, and is missing
+/// when one of them is (the per-row term rule, [`missing::term`]): a comparison with a
+/// missing close would read as "not rising". The first bar has no prior close.
 #[inline]
 fn psy_up(close: &[f64], i: usize) -> f64 {
     if i == 0 {
-        return missing::term(&[close[0]], 0.0);
+        return f64::NAN;
     }
     missing::term(&[close[i], close[i - 1]], f64::from(close[i] > close[i - 1]))
 }
@@ -342,8 +344,8 @@ pub fn efi_final_state(close: &[f64], volume: &[f64], n: usize) -> Option<Vec<f6
 }
 
 /// Resume [`efi`] from `[efi_ema_{from-1}, close_{from-1}]` over `[from, n)`. Rebuilds the
-/// raw force term from the carried prev close, then advances the EMA with the same fused
-/// `(x-prev)·k+prev` step as the kernel.
+/// raw force term from the carried prev close, then advances the EMA with the same
+/// step ([`smoothing::ema`]) as the kernel.
 pub fn efi_resume(
     close: &[f64],
     volume: &[f64],
@@ -351,13 +353,13 @@ pub fn efi_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
-    let k = 2.0 / (n as f64 + 1.0);
+    let k = smoothing::ema_k(n);
     let mut e = state[0];
     let mut prev = state[1];
     let mut out = Vec::with_capacity(close.len().saturating_sub(from));
     for i in from..close.len() {
         let x = (close[i] - prev) * volume[i];
-        e = (x - e).mul_add(k, e);
+        e = smoothing::ema(e, x, k);
         out.push(e);
         prev = close[i];
     }
@@ -381,7 +383,7 @@ pub fn tsi_final_state(close: &[f64], long: usize, short: usize) -> Option<Vec<f
 }
 
 /// Resume [`tsi`] over `[from, n)`, advancing both nested EMA chains with the kernel's exact
-/// fused steps.
+/// steps ([`smoothing::ema`]).
 pub fn tsi_resume(
     close: &[f64],
     long: usize,
@@ -389,8 +391,8 @@ pub fn tsi_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
-    let kl = 2.0 / (long as f64 + 1.0);
-    let ks = 2.0 / (short as f64 + 1.0);
+    let kl = smoothing::ema_k(long);
+    let ks = smoothing::ema_k(short);
     let (mut im, mut om, mut ia, mut oa, mut prev) =
         (state[0], state[1], state[2], state[3], state[4]);
     let mut out = Vec::with_capacity(close.len().saturating_sub(from));
@@ -398,10 +400,10 @@ pub fn tsi_resume(
     for i in from..close.len() {
         let mi = close[i] - prev;
         let ai = mi.abs();
-        im = (mi - im).mul_add(kl, im);
-        om = (im - om).mul_add(ks, om);
-        ia = (ai - ia).mul_add(kl, ia);
-        oa = (ia - oa).mul_add(ks, oa);
+        im = smoothing::ema(im, mi, kl);
+        om = smoothing::ema(om, im, ks);
+        ia = smoothing::ema(ia, ai, kl);
+        oa = smoothing::ema(oa, ia, ks);
         out.push(100.0 * om / oa);
         prev = close[i];
     }
@@ -442,9 +444,9 @@ const MASS_RATIOS: usize = 2 + kernels::SMA_STATE;
 /// `n`-sum over the window of carried ratios plus the new one; the state as of the row is
 /// written into `next`. Returns `sum` (`mean·n`). The one step of the Vec and scalar resumes.
 fn mass_index_step(range: f64, n: usize, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
-    let k = 2.0 / (9.0 + 1.0); // EMA9
-    let single = (range - state[0]).mul_add(k, state[0]);
-    let double = (single - state[1]).mul_add(k, state[1]);
+    let k = smoothing::ema_k(9); // EMA9
+    let single = smoothing::ema(state[0], range, k);
+    let double = smoothing::ema(state[1], single, k);
     let ratio = single / double;
     let ring = &state[MASS_RATIOS..MASS_RATIOS + n]; // the ratios of rows `row-n .. row-1`
     let term = |j: usize| if j == row { ratio } else { ring[j + n - row] };
@@ -550,7 +552,7 @@ pub fn pvi_resume_one(
 }
 
 /// Scalar single-row twin of [`efi_resume`]: rebuild the raw force term from the carried
-/// prev close, then one fused EMA step; the state as of `row` is written into `next`
+/// prev close, then one EMA step; the state as of `row` is written into `next`
 /// (same length). Bit-identical to one loop iteration.
 pub fn efi_resume_one(
     close: &[f64],
@@ -563,11 +565,11 @@ pub fn efi_resume_one(
     if row == 0 || state.len() < 2 || next.len() != state.len() || row >= close.len() {
         return None;
     }
-    let k = 2.0 / (n as f64 + 1.0);
+    let k = smoothing::ema_k(n);
     let e = state[0];
     let prev = state[1];
     let x = (close[row] - prev) * volume[row];
-    let e = (x - e).mul_add(k, e);
+    let e = smoothing::ema(e, x, k);
     next.copy_from_slice(state);
     next[0] = e;
     next[1] = close[row];
@@ -588,16 +590,16 @@ pub fn tsi_resume_one(
     if row == 0 || state.len() < 5 || next.len() != state.len() || row >= close.len() {
         return None;
     }
-    let kl = 2.0 / (long as f64 + 1.0);
-    let ks = 2.0 / (short as f64 + 1.0);
+    let kl = smoothing::ema_k(long);
+    let ks = smoothing::ema_k(short);
     let (mut im, mut om, mut ia, mut oa, prev) =
         (state[0], state[1], state[2], state[3], state[4]);
     let mi = close[row] - prev;
     let ai = mi.abs();
-    im = (mi - im).mul_add(kl, im);
-    om = (im - om).mul_add(ks, om);
-    ia = (ai - ia).mul_add(kl, ia);
-    oa = (ia - oa).mul_add(ks, oa);
+    im = smoothing::ema(im, mi, kl);
+    om = smoothing::ema(om, im, ks);
+    ia = smoothing::ema(ia, ai, kl);
+    oa = smoothing::ema(oa, ia, ks);
     next.copy_from_slice(state);
     next[..5].copy_from_slice(&[im, om, ia, oa, close[row]]);
     Some(100.0 * om / oa)

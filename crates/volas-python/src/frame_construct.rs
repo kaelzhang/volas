@@ -14,58 +14,6 @@ use crate::timeframe::{build_agg_spec_for, resolve_time_frame};
 #[allow(unused_imports)]
 use crate::*;
 
-/// The windowed-frame lookback bound — how `max_lookback=` is supplied: either an
-/// explicit row count, or a list of indicator directives whose largest lookback it is
-/// derived from (so the caller never hand-computes a compound indicator's warm-up).
-#[derive(FromPyObject)]
-pub(crate) enum LookbackBound {
-    Count(usize),
-    Directives(Vec<String>),
-}
-
-/// Validate the windowing params and derive the retention capacity. `max_lookback` only
-/// applies with `window`; with `window` it is REQUIRED and supplies the lookback bound
-/// (`capacity = window + lookback`) — directly as an int, or as the largest lookback
-/// among a list of indicator directives. See `designs/...-windowed-dataframe`.
-fn build_window_state(
-    window: Option<usize>,
-    max_lookback: Option<LookbackBound>,
-) -> PyResult<Option<WindowState>> {
-    let Some(w) = window else {
-        if max_lookback.is_some() {
-            return Err(PyValueError::new_err(
-                "max_lookback only applies to a windowed frame — pass window=",
-            ));
-        }
-        return Ok(None);
-    };
-    if w == 0 {
-        return Err(PyValueError::new_err("window must be a positive integer"));
-    }
-    let lookback = match max_lookback {
-        None => {
-            return Err(PyValueError::new_err(
-                "a windowed frame needs its lookback bound — pass max_lookback= \
-                 (an int, or a list of indicator directives to derive it from)",
-            ))
-        }
-        Some(LookbackBound::Count(l)) => l,
-        Some(LookbackBound::Directives(inds)) => {
-            // Each entry must name an INDICATOR: `indicator_lookback` rejects a typo'd
-            // / bare-column directive (e.g. `ma5` for `ma:5`) instead of deriving a
-            // silent 0-row margin that would under-size the window and break the
-            // cached-indicator bit-exactness the feature exists to provide.
-            let mut max = 0usize;
-            for d in &inds {
-                let node = volas_directive::parse(d).map_err(pyerr)?;
-                max = max.max(volas_directive::lookback::indicator_lookback(&node).map_err(pyerr)?);
-            }
-            max
-        }
-    };
-    Ok(Some(WindowState { window: w, capacity: w + lookback }))
-}
-
 #[pymethods]
 impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
@@ -83,6 +31,8 @@ impl PyDataFrame {
         window: Option<usize>,
         max_lookback: Option<LookbackBound>,
     ) -> PyResult<Self> {
+        // The windowing arguments are checked before any data is read.
+        let bounds = crate::frame_bounded::bounds(window, max_lookback)?;
         // `columns`, when given, selects and orders the columns — a strict projection, like
         // `df[[...]]`: a name not present raises KeyError, and an empty list or a duplicate
         // name is rejected. It never silently NaN-fills an absent column.
@@ -124,27 +74,12 @@ impl PyDataFrame {
                         return Err(PyKeyError::new_err(format!("column \"{c}\" not found")));
                     }
                     let inner = other.project(cols)?;
+                    // The open period follows the projection: kept data columns keep every
+                    // fine bar; a cached column the projection turns into data was never in
+                    // the fine bars, which hold it as missing.
                     let tf = match &other.tf {
                         None => None,
-                        Some(t) => Some(TfState {
-                            time_frame: t.time_frame,
-                            cumulators: t.cumulators.clone(),
-                            open: t
-                                .open
-                                .as_ref()
-                                .map(|o| {
-                                    // the open bars carry data columns only
-                                    let kept: Vec<String> =
-                                        cols.iter().filter(|c| o.has_column(c)).cloned().collect();
-                                    o.select(&kept)
-                                })
-                                .transpose()
-                                .map_err(pyerr)?,
-                            open_key: None, // lazily recomputed by fold_append
-                            // projection changes the columns -> rebuild the plan lazily.
-                            fold_plan: None,
-                refold_plan: None,
-                        }),
+                        Some(t) => Some(t.projected(&inner)?),
                     };
                     (inner, tf)
                 }
@@ -212,12 +147,14 @@ impl PyDataFrame {
                     .map_err(pyerr)?
             }
         };
-        // `window=` makes this a bounded rolling-window frame (see designs): derive the
-        // retention capacity (window + max_lookback) and bound the initial data to it.
-        let win = build_window_state(window, max_lookback)?;
-        let df = match &win {
-            Some(w) if df.height() > w.capacity => df.retain_tail(w.capacity),
-            _ => df,
+        // Re-labelled or re-typed rows of a time-frame frame are bars that the open
+        // period's fine bars no longer describe: the frame is the time-frame frame of its
+        // new rows, the last one the forming bar (as the `time_frame` argument builds it).
+        let tf = match tf {
+            Some(t) if index.is_some() || dtype.is_some() => {
+                Some(t.reseeded(&df)?)
+            }
+            tf => tf,
         };
         // A `time_frame` makes this a cumulating frame: the given rows are bars at that
         // frame (not re-aggregated), each labelled with its period start; the last one is
@@ -225,60 +162,14 @@ impl PyDataFrame {
         // its period folds into it. Requires a DatetimeIndex (build one with `set_index`).
         if let Some(tf_obj) = time_frame {
             let frame = resolve_time_frame(tf_obj)?;
-            match df.index().kind() {
-                IndexKind::Datetime(v, _) => {
-                    // The last row becomes the open period's first bar, so the live-fold
-                    // invariants must hold from the start: a present, non-decreasing
-                    // timeline — symmetric with the append-fold and batch-cumulate guards.
-                    if v.contains(&i64::MIN) {
-                        return Err(PyValueError::new_err(
-                            "time_frame requires a DatetimeIndex without NaT; drop or \
-                             fill the missing index timestamps first",
-                        ));
-                    }
-                    if v.windows(2).any(|w| w[1] < w[0]) {
-                        return Err(PyValueError::new_err(
-                            "time_frame requires a monotonic (time-sorted) \
-                             DatetimeIndex; sort the bars by time first",
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(PyValueError::new_err(
-                        "time_frame requires a DatetimeIndex \
-                         (build one with to_datetime(df[col]) then df.set_index(col))",
-                    ));
-                }
-            }
             let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
-            spec.check(&df).map_err(pyerr)?; // dtype x aggregator, before the state exists
-            // The open period's fine bars start as the last seed row (its data columns
-            // only — a cached directive column is never folded).
-            let h = df.height();
-            let open = if h == 0 {
-                None
-            } else {
-                let data: Vec<String> =
-                    df.names().iter().filter(|n| !df.is_computed(n)).cloned().collect();
-                Some(df.slice_data(h - 1, h).select(&data).map_err(pyerr)?)
-            };
-            return Ok(PyDataFrame {
-                inner: df,
-                tf: Some(TfState {
-                    time_frame: frame,
-                    cumulators: spec,
-                    open,
-                    open_key: None,
-                    fold_plan: None,
-                refold_plan: None,
-                }),
-                window: win,
-            });
+            let tf = TfState::seeded(frame, spec, &df)?;
+            return PyDataFrame { inner: df, tf: Some(tf), window: None }.bounded(bounds);
         }
         if cumulators.is_some() {
             return Err(PyValueError::new_err("cumulators requires time_frame"));
         }
-        Ok(PyDataFrame { inner: df, tf, window: win })
+        PyDataFrame { inner: df, tf, window: None }.bounded(bounds)
     }
 
     /// The DatetimeIndex timezone name (`"UTC"` / `"+08:00"` /
@@ -338,23 +229,24 @@ impl PyDataFrame {
         (self.logical_range().1, self.inner.width())
     }
 
-    /// Whether a windowed frame has warmed up — at least `window + max_lookback`
-    /// rows accumulated, so every one of the `window` visible rows has a fully
-    /// valid indicator history. Always ``True`` for an unbounded frame (no
-    /// warm-up contract). See the ``window=`` constructor argument.
+    /// Whether a windowed frame has warmed up: ``True`` only when every declared directive
+    /// (``max_lookback=[...]``) is past its warm-up on every visible row, counting the rows
+    /// it reads complete (non-missing) — its first value is at or before the first visible
+    /// row. O(1) per append; reading fresh values stays the reader's job (``fulfill``).
+    /// Always ``True`` for an unbounded frame (no warm-up contract).
     ///
     /// Returns:
     ///     bool
     #[getter]
     pub(crate) fn ready(&self) -> bool {
         match &self.window {
-            Some(w) => self.inner.height() >= w.capacity,
+            Some(w) => self.warmed(w),
             None => true,
         }
     }
 
-    /// The physical row count actually retained (window M + margin, bounded by
-    /// `2*(window + max_lookback)`). Internal — equals ``len(df)`` for an unbounded
+    /// The physical row count actually retained (at most twice the retention: the window
+    /// M and its margin, at least the margin + 2). Internal — equals ``len(df)`` for an unbounded
     /// frame; exposed so the test suite can assert a windowed frame's memory stays
     /// bounded across unbounded appends.
     #[getter]

@@ -99,7 +99,7 @@ def test_windowed_derivations_see_the_visible_rows_only():
 
 
 def test_a_stale_windowed_frame_raises_on_a_bulk_read():
-    w = volas.DataFrame({'close': CLOSE[:N]}, window=1, max_lookback=19)
+    w = volas.DataFrame({'close': CLOSE[:N]}, window=1, max_lookback=['ma:10', 'ma:20'])
     w['ma:10']
     w.append(volas.DataFrame({'close': CLOSE[N:N + 1]}))
     with pytest.raises(ValueError, match=STALE):

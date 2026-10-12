@@ -33,7 +33,7 @@ pub fn initial_state(df: &DataFrame, node: &Ast, _computed: &Column) -> Option<V
 }
 
 /// The final state of the bound command `name`/`sub` over every row `ops` reads.
-fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Vec<f64>> {
+pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Vec<f64>> {
     match (name, sub) {
         ("obv", _) => {
             let real = ops.f64(0, "close").ok()?;

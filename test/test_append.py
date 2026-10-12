@@ -87,11 +87,14 @@ def test_append_dict_missing_index_key_raises(stock):
         stock.iloc[:10].append(bar)
 
 
-def test_append_dict_missing_column_raises(stock):
+def test_append_dict_missing_column_is_missing_like_every_form(stock):
     bar = _bar_dict(stock, 10)
-    del bar['close']                                         # a data column is missing
-    with pytest.raises(ValueError):
-        stock.iloc[:10].append(bar)
+    del bar['close']                                         # a data column is left out
+    head = stock.iloc[:10]
+    head.append(bar)
+    # padded with a missing value, as a DataFrame / Row bar leaving it out is
+    assert len(head) == 11 and np.isnan(head['close'].to_list()[-1])
+    assert head['open'].to_list()[-1] == bar['open']
 
 
 def test_append_dict_unknown_key_raises(stock):
