@@ -183,8 +183,10 @@ def _aggregate(op: str, values: list):
     return total
 
 
-def aggregate(schema: Schema, fine: list[tuple[int, dict]], tf: str) -> tuple[list[int], list[dict]]:
-    """Coarse ``(labels, rows)`` of the fine bars ``[(ts, row)]`` (already deduplicated)."""
+def aggregate(schema: Schema, fine: list[tuple[int, dict]], tf: str,
+              user: dict[str, str] | None = None) -> tuple[list[int], list[dict]]:
+    """Coarse ``(labels, rows)`` of the fine bars ``[(ts, row)]`` (already deduplicated);
+    ``user`` names plain float columns added to the frame (aggregated by ``last``)."""
     labels: list[int] = []
     groups: list[list[dict]] = []
     for ts, row in fine:
@@ -196,10 +198,10 @@ def aggregate(schema: Schema, fine: list[tuple[int, dict]], tf: str) -> tuple[li
     rows = []
     for g in groups:
         out = {}
-        for col in schema.columns:
+        for col in schema.columns + tuple(user or ()):
             op = AGG.get(col, 'last')
-            vals = [r[col] for r in g]
-            if schema.dtype(col) in ('float64', 'float32'):
+            vals = [r.get(col) for r in g]
+            if col in (user or {}) or schema.dtype(col) in ('float64', 'float32'):
                 vals = [None if v is None else float(v) for v in vals]  # float addition
             out[col] = _aggregate(op, vals)
         rows.append(out)
@@ -208,17 +210,51 @@ def aggregate(schema: Schema, fine: list[tuple[int, dict]], tf: str) -> tuple[li
 
 @dataclass
 class TfLedger:
-    """Closed seed bars plus the accepted fine bars of a tf frame."""
+    """Closed seed bars plus the accepted fine bars of a tf frame.
+
+    A write freezes the coarse rows it reaches: every closed row becomes a seed row
+    (as written), and the open period keeps its fine bars — unless the write reached
+    the forming row or turned a column into data, in which case the written forming
+    row is the open period's single bar, stamped with the period's first bar time
+    (docs/cumulation.md, "Writing to a time-frame frame")."""
 
     schema: Schema
     tf: str
     seed_index: list[int] = field(default_factory=list)
     seed_rows: list[dict] = field(default_factory=list)
     fine: list[tuple[int, dict]] = field(default_factory=list)
+    user: dict[str, str] = field(default_factory=dict)  # plain columns added by setitem -> dtype
 
     def copy(self) -> 'TfLedger':
         return TfLedger(self.schema, self.tf, list(self.seed_index), [dict(r) for r in self.seed_rows],
-                        [(t, dict(r)) for t, r in self.fine])
+                        [(t, dict(r)) for t, r in self.fine], dict(self.user))
+
+    def _open_bars(self) -> list[tuple[int, dict]]:
+        """The open period's fine bars: the fine bars of the last period, or the last seed
+        row at its label (a constructed forming bar)."""
+        if self.fine:
+            key = period_start(self.fine[-1][0], self.tf, self.schema.tz)
+            return [(t, r) for t, r in self.fine if period_start(t, self.tf, self.schema.tz) == key]
+        return [(self.seed_index[-1], self.seed_rows[-1])]
+
+    def write(self, writes: dict[int, dict], forming: bool, columns: dict[str, str] | None = None) -> None:
+        """Record writes ``{coarse position: {column: value}}``; ``forming``: the write
+        reached the forming row (or turned a column into data); ``columns`` the plain
+        columns it adds."""
+        coarse = self.coarse()
+        if not coarse.rows:
+            return
+        last = len(coarse.rows) - 1
+        open_bars = self._open_bars()
+        self.user.update(columns or {})
+        rows = [dict(r) for r in coarse.rows]
+        for pos, cells in writes.items():
+            rows[pos].update(cells)
+        self.seed_rows, self.seed_index = rows[:last], list(coarse.index[:last])
+        if forming:
+            self.fine = [(open_bars[0][0], rows[last])]
+        else:
+            self.fine = [(t, dict(r)) for t, r in open_bars]
 
     def accepts(self, ts: int) -> bool:
         """Whether the fold takes a bar at ``ts`` (documented: no out-of-order bar)."""
@@ -226,17 +262,18 @@ class TfLedger:
         return last is None or ts >= last
 
     def add(self, ts: int, row: dict) -> None:
-        full = {c: row.get(c) for c in self.schema.columns}
+        full = {c: row.get(c) for c in self.schema.columns + tuple(self.user)}
         if self.fine and self.fine[-1][0] == ts:
             self.fine[-1] = (ts, full)  # a re-sent bar replaces the one it repeats
         else:
             self.fine.append((ts, full))
 
     def coarse(self) -> Ledger:
-        labels, rows = aggregate(self.schema, self.fine, self.tf)
+        labels, rows = aggregate(self.schema, self.fine, self.tf, self.user)
         out = Ledger(self.schema)
         out.rows = [dict(r) for r in self.seed_rows] + rows
         out.index = list(self.seed_index) + labels
+        out.user = dict(self.user)
         return out
 
 

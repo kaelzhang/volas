@@ -83,6 +83,33 @@ impl DataFrame {
         self.admit_rows(rows).map(|a| a.rows)
     }
 
+    /// [`admit`](Self::admit) `rows` and give them exactly this frame's data columns —
+    /// every column but the cached directive ones, in this frame's order and dtypes:
+    /// a data column the rows lack becomes a missing cell of its dtype, the value an
+    /// append pads it with. The one coercion of a time-frame frame's incoming bars, so
+    /// its open period, its fold and its refold all read the same complete bar
+    /// whatever the append form left out. Borrowed when the rows already are exactly
+    /// the data columns in order (the live bar), so the per-bar path allocates nothing.
+    pub fn admit_data_rows<'a>(&self, rows: &'a DataFrame) -> Result<Cow<'a, DataFrame>> {
+        let admitted = self.admit_rows(rows)?;
+        if admitted.leads && admitted.rows.width() == self.width() - self.computed.len() {
+            return Ok(admitted.rows); // the leading columns, none cached: all the data columns
+        }
+        let rows = admitted.rows.as_ref();
+        let (mut names, mut columns) = (Vec::new(), Vec::new());
+        for (name, col) in self.names.iter().zip(&self.columns) {
+            if self.computed.contains_key(name) {
+                continue;
+            }
+            columns.push(match rows.column_pos(name) {
+                Some(j) => rows.columns[j].clone(),
+                None => Column::na_of(col.dtype(), rows.height),
+            });
+            names.push(name.clone());
+        }
+        DataFrame::new(names, columns, Some((*rows.index).clone())).map(Cow::Owned)
+    }
+
     /// [`admit`](Self::admit), keeping whether the rows lead with this frame's columns.
     fn admit_rows<'a>(&self, rows: &'a DataFrame) -> Result<Admitted<'a>> {
         // One pass over the rows' columns: each is looked up once — positionally when the

@@ -124,27 +124,20 @@ impl PyDataFrame {
                         return Err(PyKeyError::new_err(format!("column \"{c}\" not found")));
                     }
                     let inner = other.project(cols)?;
+                    // The open period follows the projection: kept data columns keep every
+                    // fine bar; a cached column the projection turns into data was never in
+                    // the fine bars, so the forming row becomes the period's bar of record.
                     let tf = match &other.tf {
                         None => None,
-                        Some(t) => Some(TfState {
-                            time_frame: t.time_frame,
-                            cumulators: t.cumulators.clone(),
-                            open: t
-                                .open
-                                .as_ref()
-                                .map(|o| {
-                                    // the open bars carry data columns only
-                                    let kept: Vec<String> =
-                                        cols.iter().filter(|c| o.has_column(c)).cloned().collect();
-                                    o.select(&kept)
-                                })
-                                .transpose()
-                                .map_err(pyerr)?,
-                            open_key: None, // lazily recomputed by fold_append
-                            // projection changes the columns -> rebuild the plan lazily.
-                            fold_plan: None,
-                refold_plan: None,
-                        }),
+                        Some(t) => {
+                            let mut t = t.clone();
+                            for (name, col) in inner.names().iter().zip(inner.columns()) {
+                                t.check_data_column(name, col.dtype())?;
+                            }
+                            t.fold_plan = None; // the columns changed: rebuilt on the next fold
+                            t.follow(&inner, false)?;
+                            Some(t)
+                        }
                     };
                     (inner, tf)
                 }
@@ -219,6 +212,15 @@ impl PyDataFrame {
             Some(w) if df.height() > w.capacity => df.retain_tail(w.capacity),
             _ => df,
         };
+        // Re-labelled or re-typed rows of a time-frame frame are bars that the open
+        // period's fine bars no longer describe: the frame is the time-frame frame of its
+        // new rows, the last one the forming bar (as the `time_frame` argument builds it).
+        let tf = match tf {
+            Some(t) if index.is_some() || dtype.is_some() => {
+                Some(TfState::seeded(t.time_frame, t.cumulators, &df)?)
+            }
+            tf => tf,
+        };
         // A `time_frame` makes this a cumulating frame: the given rows are bars at that
         // frame (not re-aggregated), each labelled with its period start; the last one is
         // the forming bar — the first entry of the open period — so a later finer bar in
@@ -251,29 +253,8 @@ impl PyDataFrame {
                 }
             }
             let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
-            spec.check(&df).map_err(pyerr)?; // dtype x aggregator, before the state exists
-            // The open period's fine bars start as the last seed row (its data columns
-            // only — a cached directive column is never folded).
-            let h = df.height();
-            let open = if h == 0 {
-                None
-            } else {
-                let data: Vec<String> =
-                    df.names().iter().filter(|n| !df.is_computed(n)).cloned().collect();
-                Some(df.slice_data(h - 1, h).select(&data).map_err(pyerr)?)
-            };
-            return Ok(PyDataFrame {
-                inner: df,
-                tf: Some(TfState {
-                    time_frame: frame,
-                    cumulators: spec,
-                    open,
-                    open_key: None,
-                    fold_plan: None,
-                refold_plan: None,
-                }),
-                window: win,
-            });
+            let tf = TfState::seeded(frame, spec, &df)?;
+            return Ok(PyDataFrame { inner: df, tf: Some(tf), window: win });
         }
         if cumulators.is_some() {
             return Err(PyValueError::new_err("cumulators requires time_frame"));

@@ -216,6 +216,47 @@ Two properties make this safe for a live feed:
 
 See [Live cumulation](dataframe-api.md#live-cumulation--a-tf-aware-dataframe) for the API summary.
 
+### Every bar is complete
+
+Each bar folded into a time-frame frame is first made a complete bar of the frame's
+data columns (every column except the cached indicator ones), the same way in every
+append form — a `DataFrame`, a `Row` or a scalar dict: a column the bar leaves out is
+a missing value of that bar. The open period, the in-place fold and the re-cumulation
+after a re-sent bar all read that one bar, so leaving `volume` out of a bar gives the
+period a missing `volume` (a missing input is never skipped), exactly as a batch
+`cumulate` of the same bars does, and a re-send of the bar with its `volume` restores
+it.
+
+### Writing to a time-frame frame
+
+The forming row is the cumulation of the open period's bars. A write that changes it —
+`df[col] = values`, a cell write such as `df.iloc[-1, j] = v` (or `loc` / `iat` / `at`,
+or a mask write), or a cell write that turns a cached indicator column into data —
+changes the open period with it:
+
+- A write that reaches only **closed** rows leaves the open period as it is: a bar
+  re-sent afterwards still replaces its earlier version.
+- A write that reaches the **forming** row makes the written row the period's bar of
+  record: it becomes the open period's single bar, stamped with the time of the
+  period's first bar. The next finer bar folds into it, and a bar re-sent with that
+  first bar's time replaces it whole.
+  - While the period holds one bar — right after the frame is built with
+    `time_frame=`, or after the first bar of a new period arrived — this is exact: the
+    written row *is* that bar.
+  - Once several finer bars have been folded in, the written row contains them, and
+    the convention of a constructed forming bar applies: those bars must not be folded
+    again. A bar re-sent after the write (an exchange updating its current 1-minute
+    bar) would count its earlier version a second time. Write once the period has
+    closed, or rebuild the frame with `cumulate` from the finer history.
+- A column added or replaced must be one its aggregator folds: with
+  `cumulators={'tag': 'max'}`, `df['tag'] = ['a']` raises `TypeError` and the frame is
+  unchanged.
+- `DataFrame(df, index=...)` and `DataFrame(df, dtype=...)` re-label or re-type the
+  rows: the result is the time-frame frame of its new rows, the last one its forming
+  bar, exactly as `DataFrame(rows, time_frame=...)` builds it. `DataFrame(df,
+  columns=[...])` keeps the open period's bars of the data columns it keeps; a cached
+  column it turns into data makes the forming row the bar of record.
+
 ## TimeFrame
 
 A `TimeFrame` names a bar interval. It is accepted anywhere volas resamples —
