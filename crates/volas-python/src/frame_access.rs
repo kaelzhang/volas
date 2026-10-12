@@ -387,6 +387,11 @@ impl PyDataFrame {
         let node = parse(name).map_err(directive_err)?;
         let canonical = volas_directive::stringify(&node);
         if self.inner.is_computed(&canonical) {
+            // the directive as written is bound against this frame like any new one: a
+            // bare name that is both a data column and a command is ambiguous, whatever
+            // column it would name (R17)
+            let is_data = |n: &str| self.inner.has_column(n) && !self.inner.is_computed(n);
+            volas_directive::bind_frame(&node, &is_data, name).map_err(value_err)?;
             return Ok(Resolved::Column(canonical));
         }
         Ok(Resolved::New(name.to_string(), node))

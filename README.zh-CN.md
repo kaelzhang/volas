@@ -796,7 +796,7 @@ df = df.tz_localize('America/New_York')         # 打上显示时区标记（见
 
 ### directive_stringify(directive: str) -> str
 
-得到 `directive` 的规范全名，也就是 volas 实际缓存时使用的列名。命令名会小写化，每个参数写成它的取值，默认参数 / series 会被省略，以节省空间。参数全部为默认值的显式命令保留冒号，与数据列可能使用的裸名区分开。
+得到 `directive` 的规范全名，也就是 volas 实际缓存时使用的列名。命令名会小写化，每个参数写成它的取值，默认参数 / series 会被省略，以节省空间。同一指令的所有写法只对应一个名字。
 
 ```py
 from volas import directive_stringify
@@ -807,9 +807,9 @@ directive_stringify('kdj.j')
 directive_stringify('kdj.j:9,3,2,100@high,close,close')
 # 'kdj.j:,,2,100@,close'
 
-# 命令名大小写不敏感，并规范化为小写；参数全为默认值，冒号保留命令
+# 命令名大小写不敏感，并规范化为小写；默认参数被省略
 directive_stringify('MACD:12,26')
-# 'macd:'
+# 'macd'
 
 # 参数写成它的取值
 directive_stringify('ma:05')

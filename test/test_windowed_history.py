@@ -268,6 +268,26 @@ def test_a_recursion_carrying_its_own_state_is_kept_by_the_window(d):
     assert same(w[d].to_numpy(dtype='float64'), u[d].to_numpy(dtype='float64')[-4:]), d
 
 
+@pytest.mark.parametrize('d', ['obv', 'ad', 'adosc', 'mfi:14', 'vwma:20', 'ema:20@(volume)'])
+def test_an_int64_volume_window_equals_the_unbounded_history(d):
+    # an int64 input converted over the rows a continuation reads, across compactions:
+    # the declared column equals the unbounded frame's bit for bit
+    rng = np.random.default_rng(1)
+    n = 2600
+    c = 100 + np.cumsum(rng.standard_normal(n))
+    o = c + 0.3 * rng.standard_normal(n)
+    data = {'open': o, 'high': np.maximum(o, c) + .5, 'low': np.minimum(o, c) - .5, 'close': c,
+            'volume': rng.integers(10, 1000, n).astype(np.int64)}
+    frame = lambda lo, hi: volas.DataFrame({k: v[lo:hi] for k, v in data.items()})
+    w = volas.DataFrame({k: v[:2000] for k, v in data.items()}, window=50, max_lookback=[d])
+    u = frame(0, 2000)
+    u[d]
+    for i in range(2000, n):
+        w.append(frame(i, i + 1))
+        u.append(frame(i, i + 1))
+    assert same(w[d].to_numpy(dtype='float64'), u[d].to_numpy(dtype='float64')[-50:])
+
+
 def test_a_copied_cached_column_must_be_kept_by_the_window():
     u = rows(bars(30), 0, 30)
     u['ema:3 - ema:5']

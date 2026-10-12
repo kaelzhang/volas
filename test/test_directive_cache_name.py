@@ -86,17 +86,37 @@ def test_the_cached_column_is_named_by_directive_stringify(directive):
     assert _same(_frame().exec(name, dtype='float64'), _frame().exec(directive, dtype='float64'))
 
 
-def test_an_explicit_all_default_command_keeps_its_colon():
-    assert volas.directive_stringify('boll:20@close') == 'boll:'
-    assert volas.directive_stringify('MACD:12,26') == 'macd:'
-    assert volas.directive_stringify('macd') == 'macd'
+def test_an_all_default_command_and_its_bare_name_are_one_column():
+    assert volas.directive_stringify('boll:20@close') == 'boll'
+    assert volas.directive_stringify('MACD:12,26') == 'macd'
+    assert volas.directive_stringify('macd:') == 'macd'
     assert volas.directive_stringify('ma:05') == 'ma:5'
     assert volas.directive_stringify('hv:10,1W') == 'hv:10,1w'
     assert volas.directive_stringify('donchian.upper') == 'donchian.upper'  # a form, period absent
     df = _frame()
-    df['boll:20']
-    df['boll']
-    assert {'boll:', 'boll'} <= set(df.columns)
+    for d in ('boll:20', 'boll', 'BOLL:', 'boll:20@close'):
+        df[d]
+    assert [c for c in df.columns if c.startswith('boll')] == ['boll']
+
+
+@pytest.mark.parametrize('line', executable_lines(), ids=lambda line: line.head)
+def test_every_default_spelling_of_a_line_is_one_column(line):
+    """A line's default spellings — head and aliases, upper / title case, with and
+    without an empty argument list, and its default form — cache as one column."""
+    heads = [line.head, *line.aliases, line.head.upper(), line.head.title()]
+    spellings = {h + suffix + line.series_suffix for h in heads for suffix in ('', ':')}
+    spellings.add(line.form + line.series_suffix)
+    df = _frame()
+    names = set()
+    for d in sorted(spellings):
+        try:
+            name = volas.directive_stringify(d)
+            df[d]
+        except Exception:
+            continue  # not a spelling that executes (a required argument absent)
+        names.add(name)
+    assert len(names) <= 1, (line.head, names)
+    assert all(df.is_computed(n) for n in names)
 
 
 def test_a_bare_command_is_one_column_whatever_its_case():
@@ -109,6 +129,21 @@ def test_a_bare_command_is_one_column_whatever_its_case():
     assert volas.directive_stringify('close - OBV') == 'close-obv'
     # a column spelled so is read as data where it is not a command (`rsi` needs a period)
     assert volas.directive_stringify('Close + RSI') == 'Close+RSI'
+
+
+def test_a_cached_name_does_not_bypass_the_ambiguity_rule():
+    """A directive spelled so that it names a cached column is still bound against the
+    frame: once a data column `obv` exists, `close - obv` is ambiguous (R17) — it does not
+    silently read the column cached as `close - OBV` before that data column existed."""
+    df = _frame()
+    df['close - OBV']
+    df['obv'] = np.zeros(N)  # `OBV` is spelled otherwise, so the column may be added
+    with pytest.raises(volas.DirectiveValueError, match=(
+            "ambiguous name 'obv' in 'close - obv': it is both a column of this DataFrame and the "
+            "built-in command 'obv'. Write 'obv:' to use the command")):
+        df['close - obv']
+    assert np.asarray(df['close-obv']).shape == (N,)  # the cached column by its own name
+    assert np.asarray(df['close - obv:']).shape == (N,)  # the command, explicitly
 
 
 def _appended(directive, extra=None, rows=N - 1):
@@ -124,19 +159,23 @@ def _appended(directive, extra=None, rows=N - 1):
 
 def test_a_command_written_with_a_colon_beside_a_data_column_of_its_name():
     """With a data column ``change``, ``change: * 2`` is the command: it caches as
-    ``change:*2`` and keeps reading the command after an append."""
+    ``change*2`` and keeps reading the command after an append (the column keeps the
+    directive it was bound to); ``change:`` alone returns the command's values without
+    caching them over the data column of that name."""
     change = {'change': np.linspace(-1, 1, N)}
     df = _appended('change: * 2', change)
-    assert 'change:*2' in df.columns and df.is_computed('change:*2')
+    assert 'change*2' in df.columns and df.is_computed('change*2')
     want = _frame().exec('change:2 * 2', dtype='float64')
-    assert _same(df['change:*2'], want)
+    assert _same(df['change*2'], want)
+    assert _same(df['change: * 2'], want)
     # the bare name beside that data column is ambiguous (R17)
     with pytest.raises(volas.DirectiveValueError, match="ambiguous name 'change'"):
-        _frame(**change)['close * change']
-    # an explicit all-default command beside a data column of its name
-    boll = {'boll': np.zeros(N)}
-    df = _appended('boll:20', boll)
-    assert _same(df['boll:'], _frame().exec('boll:20', dtype='float64'))
+        df['close * change']
+    with pytest.raises(volas.DirectiveValueError, match="ambiguous name 'change'"):
+        df['change * 2']
+    df = _frame(**change)
+    assert _same(df['change:'], _frame().exec('change', dtype='float64'))
+    assert not df.is_computed('change') and _same(df['change'], change['change'])
 
 
 def test_a_data_column_named_like_a_command_that_needs_an_operand():

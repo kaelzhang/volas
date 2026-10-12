@@ -192,12 +192,11 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
 
 /// Get the canonical full name of a `directive` — the actual column name volas caches it
 /// under. The command name is lowercased, arguments are written as their values, and
-/// default arguments / series are dropped; an explicit command whose arguments are all
-/// defaults keeps its colon (``'macd:'``), apart from the bare name ``'macd'``.
+/// default arguments / series are dropped: every spelling of a directive has one name.
 ///
 /// Usage::
 ///
-///     volas.directive_stringify('MACD:12,26')   # -> "macd:"
+///     volas.directive_stringify('MACD:12,26')   # -> "macd"
 #[pyfunction]
 fn directive_stringify(directive: &str) -> PyResult<String> {
     // Bound as a form: every supplied argument bound (so the name is the cache column's),

@@ -2,11 +2,10 @@
 //! and what `directive_stringify` returns: whitespace removed, minimal
 //! parenthesization by operator priority, every argument rendered from its bound value
 //! (`ma:05` is `ma:5`, `hv:10,1W` is `hv:10`), default arguments and default series
-//! dropped. A command keeps apart from a bare name: an explicit command whose arguments
-//! and series are all defaults renders `name:` (`boll:20@close` is `boll:`), while a
-//! command written as a bare name renders bare, as its command's name (`BOLL` is
-//! `boll`) — so a name always re-parses to what it names, also beside a data column
-//! called like a command.
+//! dropped. The name is independent of the spelling: `macd`, `macd:`, `MACD` and
+//! `macd:12,26` all name `macd`. A cached column refreshes from the bound directive it
+//! keeps, never from a re-read of its name, so a name a data column could also hold
+//! needs no mark of its own.
 
 use crate::bind::is_bare_command;
 use crate::parser::{is_ident_char, is_ident_start};
@@ -60,10 +59,6 @@ pub fn stringify<A: Payload>(node: &Node<A>) -> String {
 }
 
 fn stringify_command<A: Payload>(cmd: &Command<A>) -> String {
-    if cmd.args.bare().is_some() {
-        // written bare: the command's own name, whatever its case (`OBV` is `obv`)
-        return cmd.name.clone();
-    }
     let spec = cmd.args.spec();
     let mut out = cmd.name.clone();
     if let Some(s) = &cmd.sub {
@@ -97,10 +92,6 @@ fn stringify_command<A: Payload>(cmd: &Command<A>) -> String {
         .collect();
     let series = join_with('@', series_tokens);
 
-    if cmd.sub.is_none() && args.is_empty() && series.is_empty() {
-        // an explicit command with nothing to show: the colon keeps it a command
-        out.push(':');
-    }
     out.push_str(&args);
     out.push_str(&series);
     out
@@ -174,17 +165,18 @@ mod tests {
         assert_eq!(s("ma:5@close"), "ma:5");
     }
 
-    /// An explicit command whose arguments and series are all defaults keeps its colon,
-    /// so it never renders as the bare name a data column could hold.
+    /// The name is independent of the spelling: an explicit command whose arguments and
+    /// series are all defaults names the same column as its bare name.
     #[test]
-    fn an_all_default_command_keeps_its_colon() {
-        assert_eq!(s("boll:20@close"), "boll:");
-        assert_eq!(s("macd:12,26"), "macd:");
-        assert_eq!(s("change:"), "change:");
-        assert_eq!(s("change: * 2"), "change:*2");
-        assert_eq!(s("ma:5@(obv:)"), "ma:5@(obv:)");
-        assert_eq!(s("macd.signal:12"), "macd.signal"); // a sub-command is never bare
-        assert_eq!(parse("change:*2").unwrap(), parse("change: * 2").unwrap());
+    fn every_spelling_of_a_command_has_one_name() {
+        for d in ["macd", "macd:", "MACD", "Macd:12,26", "macd:012,26@close", "macd.dif"] {
+            assert_eq!(s(d), "macd", "{d}");
+        }
+        assert_eq!(s("boll:20@close"), "boll");
+        assert_eq!(s("change: * 2"), "change*2");
+        assert_eq!(s("ma:5@(obv:)"), "ma:5@obv");
+        assert_eq!(s("macd.signal:12"), "macd.signal");
+        assert_eq!(form("rsi:"), "rsi");
     }
 
     #[test]
@@ -198,7 +190,7 @@ mod tests {
 
     #[test]
     fn sub_canonicalization() {
-        assert_eq!(s("macd.dif"), "macd:"); // the main line, written as a command
+        assert_eq!(s("macd.dif"), "macd");
         assert_eq!(s("macd.s"), "macd.signal");
         assert_eq!(s("boll.u:20"), "boll.upper");
     }
@@ -209,7 +201,7 @@ mod tests {
         assert_eq!(s("ma:05"), "ma:5");
         assert_eq!(s("ma:+2"), "ma:2");
         assert_eq!(s("boll.upper:20,2.0"), "boll.upper");
-        assert_eq!(s("MACD:012,26"), "macd:");
+        assert_eq!(s("MACD:012,26"), "macd");
         assert_eq!(s("hv:10,1W"), "hv:10,1w");
         assert_eq!(s("stddev:2,1.50"), "stddev:2,1.5");
         assert_eq!(s("boll.upper:20,-0.0"), "boll.upper:,-0");
@@ -224,7 +216,6 @@ mod tests {
         }
         assert_eq!(form("donchian.upper"), "donchian.upper");
         assert_eq!(form("correl:5"), "correl:5");
-        assert_eq!(form("rsi:"), "rsi:");
     }
 
     #[test]

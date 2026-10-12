@@ -76,8 +76,7 @@ def test_stringify_stays_lenient_on_a_missing_required_argument():
 @pytest.mark.parametrize("directive,lookback", [("obv:", 0), ("tr:", 1), ("ad:", 0), ("bbi:", 23)])
 def test_an_empty_argument_list_means_no_arguments(directive, lookback):
     assert volas.directive_lookback(directive) == lookback
-    # an explicit command keeps its colon: apart from the bare name a column could hold
-    assert volas.directive_stringify(directive) == directive
+    assert volas.directive_stringify(directive) == directive[:-1]
 
 
 def test_an_empty_argument_list_executes():
