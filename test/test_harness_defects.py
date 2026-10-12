@@ -217,7 +217,6 @@ def test_a_huge_value_outside_the_window_does_not_skew_linearreg():
     assert _same(full[-5:], np.asarray(_frame(cols, 10, 30)['linearreg:2'])[-5:])
 
 
-@_xfail('H7 candle-nan-memory', 'one NaN input suppresses a candlestick pattern far beyond its lookback')
 @pytest.mark.parametrize('pattern', ['style.doji', 'style.hammer', 'style.longline'])
 def test_a_nan_input_leaves_a_candle_pattern_after_its_lookback(pattern):
     ledger = Ledger(OHLCV)

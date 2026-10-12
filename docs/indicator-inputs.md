@@ -25,6 +25,11 @@ it:
   base only for a present value), and a missing `mavp` period. A highest / lowest value
   breaks a tie between `-0.0` and `+0.0` by IEEE total order (`+0.0` is the higher), so
   a later missing value never changes an earlier extremum, not even the sign of a zero.
+- A **candlestick pattern** (`cdl.<pattern>`) reads whole candles: a bar whose open,
+  high, low or close is missing or infinite is a missing candle, and every pattern is
+  NaN on the bars whose lookback holds it — its own bars and the bars its body / range
+  averages cover — and exactly what clean data gives once it has left. TA-Lib slides
+  those averages as running totals, so one bad candle changes every later decision.
 - A **leading run of missing rows** is not data: every indicator treats the series as
   starting after it, so a series with a missing head matches the same series started
   later.

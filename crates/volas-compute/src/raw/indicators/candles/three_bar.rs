@@ -1,9 +1,10 @@
 //! Three-bar candlestick patterns.
 
 use super::{
-    candle_average, candle_gap_down, candle_gap_up, candle_output, color, each_bar, each_bar_avg_n,
-    lowershadow, range, realbody, realbody_gap_down, realbody_gap_up, uppershadow, BODY_DOJI,
-    BODY_LONG, BODY_SHORT, EQUAL, FAR, NEAR, SHADOW_LONG, SHADOW_SHORT, SHADOW_VERY_SHORT,
+    candle_average, candle_average_series, candle_gap_down, candle_gap_up, color, each_bar,
+    each_bar_avg_n, lowershadow, realbody, realbody_gap_down, realbody_gap_up, uppershadow,
+    BODY_DOJI, BODY_LONG, BODY_SHORT, EQUAL, FAR, NEAR, SHADOW_LONG, SHADOW_SHORT,
+    SHADOW_VERY_SHORT,
 };
 
 /// Morning Star (TA-Lib CDLMORNINGSTAR): a long black body, a short star gapping down,
@@ -30,8 +31,7 @@ pub fn cdl_morningstar(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: 
 /// white, short star gapping up, then black closing well into the 1st — `-100`. Lookback 12.
 pub fn cdl_eveningstar(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration: f64) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 2;
-    // Mirror Morning Star's rolling-total path: the three averages are fixed lags
-    // (long at i-2, short at i-1 and i), so avoid per-bar candle-average rescans.
+    // The three averages are fixed lags (long at i-2, short at i-1 and i).
     each_bar_avg_n::<2, 3>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, hist| {
         if realbody(o, c, i - 2) > hist[2][0] // BODY_LONG at i-2
             && color(o, c, i - 2) > 0.0
@@ -72,8 +72,7 @@ pub fn cdl_3inside(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
 /// Three Outside Up/Down (TA-Lib CDL3OUTSIDE): an engulfing confirmed by a 3rd candle
 /// continuing the move. `color(2nd)·100`. Lookback 3.
 pub fn cdl_3outside(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
-    let _ = (h, l);
-    each_bar(c.len(), 3, |i| {
+    each_bar(3, o, h, l, c, |i| {
         let bull = color(o, c, i - 1) > 0.0
             && color(o, c, i - 2) < 0.0
             && c[i - 1] > o[i - 2]
@@ -141,7 +140,7 @@ pub fn cdl_3whitesoldiers(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
 /// Lookback 13.
 pub fn cdl_3blackcrows(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = SHADOW_VERY_SHORT.avg_period + 3;
-    each_bar(c.len(), lb, |i| {
+    each_bar(lb, o, h, l, c, |i| {
         let short_lower =
             |k: usize| lowershadow(o, l, c, k) < candle_average(SHADOW_VERY_SHORT, o, h, l, c, k);
         if color(o, c, i - 3) > 0.0
@@ -283,26 +282,15 @@ pub fn cdl_abandonedbaby(o: &[f64], h: &[f64], l: &[f64], c: &[f64], penetration
 /// inside the 2nd and closing inside the 1st — bearish `-100`. Lookback 12.
 pub fn cdl_2crows(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_LONG.avg_period + 2;
-    let n = c.len();
-    let Some(mut out) = candle_output(n, lb) else {
-        return vec![f64::NAN; n];
-    };
-    // TA-Lib's implementation carries only one BodyLong total at `i-2`; using the
-    // generic average-history helper adds unnecessary per-row history movement here.
-    let mut total = 0.0;
-    let mut trailing = lb - 2 - BODY_LONG.avg_period;
-    for j in trailing..(lb - 2) {
-        total += range(BODY_LONG, o, h, l, c, j);
-    }
-    let body_long_scale = BODY_LONG.factor / BODY_LONG.avg_period as f64;
-    for i in lb..n {
+    let body_long = candle_average_series(BODY_LONG, o, h, l, c); // read at i-2
+    each_bar(lb, o, h, l, c, |i| {
         let first_white = c[i - 2] >= o[i - 2];
         let second_black = c[i - 1] < o[i - 1];
         let third_black = c[i] < o[i];
-        out.set(i, if first_white
+        if first_white
             && second_black
             && third_black
-            && realbody(o, c, i - 2) > total * body_long_scale
+            && realbody(o, c, i - 2) > body_long[i - 2]
             && realbody_gap_up(o, c, i - 1, i - 2)
             && o[i] < o[i - 1]
             && o[i] > c[i - 1]
@@ -312,11 +300,8 @@ pub fn cdl_2crows(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             -100.0
         } else {
             0.0
-        });
-        total += range(BODY_LONG, o, h, l, c, i - 2) - range(BODY_LONG, o, h, l, c, trailing);
-        trailing += 1;
-    }
-    out.finish()
+        }
+    })
 }
 
 /// Upside Gap Two Crows (TA-Lib CDLUPSIDEGAP2CROWS): a long white, a short black gapping
@@ -403,15 +388,10 @@ pub fn cdl_stalledpattern(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
         .max(SHADOW_VERY_SHORT.avg_period)
         .max(NEAR.avg_period)
         + 2;
-    let Some(mut out) = candle_output(c.len(), lb) else {
-        return vec![f64::NAN; c.len()];
-    };
-    // This branch-heavy pattern regressed when routed through the generic
-    // per-bar closure helper; keep the hot loop local and benchmark before
-    // moving it back to shared candle infrastructure.
-    let mut i = lb;
-    while i < c.len() {
-        out.set(i, if color(o, c, i - 2) > 0.0
+    // Branch-heavy and strongly gated: the averages are computed lazily, only on the
+    // bars that pass the cheap colour / close gates.
+    each_bar(lb, o, h, l, c, |i| {
+        if color(o, c, i - 2) > 0.0
             && color(o, c, i - 1) > 0.0
             && color(o, c, i) > 0.0
             && c[i] > c[i - 1]
@@ -427,10 +407,8 @@ pub fn cdl_stalledpattern(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64
             -100.0
         } else {
             0.0
-        });
-        i += 1;
-    }
-    out.finish()
+        }
+    })
 }
 
 /// Identical Three Crows (TA-Lib CDLIDENTICAL3CROWS): three declining black candles with
@@ -487,28 +465,17 @@ pub fn cdl_sticksandwich(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64>
 /// three doji bodies are tested against the threshold computed at `i-2`.)
 pub fn cdl_tristar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_DOJI.avg_period + 2;
-    let n = c.len();
-    let Some(mut out) = candle_output(n, lb) else {
-        return vec![f64::NAN; n];
-    };
-    // TA-Lib uses the BodyDoji average at bar i-2 for all three candles. A single
-    // rolling total avoids the generic three-lag history used by other patterns.
-    let mut total = 0.0;
-    let mut trailing = lb - 2 - BODY_DOJI.avg_period;
-    for j in trailing..(lb - 2) {
-        total += h[j] - l[j];
-    }
-    let body_doji_scale = BODY_DOJI.factor / BODY_DOJI.avg_period as f64;
-    for i in lb..n {
-        let doji = total * body_doji_scale;
+    // TA-Lib uses the BodyDoji average at bar i-2 for all three candles.
+    let body_doji = candle_average_series(BODY_DOJI, o, h, l, c);
+    each_bar(lb, o, h, l, c, |i| {
+        let doji = body_doji[i - 2];
         let prev_lo = o[i - 2].min(c[i - 2]);
         let prev_hi = o[i - 2].max(c[i - 2]);
         let mid_lo = o[i - 1].min(c[i - 1]);
         let mid_hi = o[i - 1].max(c[i - 1]);
         let cur_lo = o[i].min(c[i]);
         let cur_hi = o[i].max(c[i]);
-        out.set(i, if prev_hi - prev_lo <= doji && mid_hi - mid_lo <= doji && cur_hi - cur_lo <= doji
-        {
+        if prev_hi - prev_lo <= doji && mid_hi - mid_lo <= doji && cur_hi - cur_lo <= doji {
             if mid_lo > prev_hi && cur_hi < mid_hi {
                 -100.0
             } else if mid_hi < prev_lo && cur_lo > mid_lo {
@@ -518,19 +485,15 @@ pub fn cdl_tristar(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             }
         } else {
             0.0
-        });
-        total += (h[i - 2] - l[i - 2]) - (h[trailing] - l[trailing]);
-        trailing += 1;
-    }
-    out.finish()
+        }
+    })
 }
 
 /// Unique Three River Bottom (TA-Lib CDLUNIQUE3RIVER): a long black, a black harami with
 /// a new low, then a small white opening above the 2nd low — bullish `100`. Lookback 12.
 pub fn cdl_unique3river(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 2;
-    // The pattern reads only BODY_LONG at i-2 and BODY_SHORT at i. Carry both
-    // rolling totals once instead of rescanning the 10-bar settings on every row.
+    // The pattern reads only BODY_LONG at i-2 and BODY_SHORT at i.
     each_bar_avg_n::<2, 3>([BODY_LONG, BODY_SHORT], lb, o, h, l, c, |i, hist| {
         if realbody(o, c, i - 2) > hist[2][0] // BODY_LONG at i-2
             && color(o, c, i - 2) < 0.0
@@ -583,21 +546,9 @@ pub fn cdl_gapsidesidewhite(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f
 /// Lookback 7.
 pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
     let lb = NEAR.avg_period + 2;
-    let n = c.len();
-    let Some(mut out) = candle_output(n, lb) else {
-        return vec![f64::NAN; n];
-    };
-    // Tasuki Gap only reads NEAR at i-1; a single scalar rolling total beats the
-    // generic history helper and lets the costly body-similarity check run only after
-    // the required gap/colour geometry passes.
-    let mut near_total = 0.0;
-    for j in (lb - 1 - NEAR.avg_period)..(lb - 1) {
-        near_total += range(NEAR, o, h, l, c, j);
-    }
-    let near_scale = NEAR.factor / NEAR.avg_period as f64;
-    let mut trailing = lb - 1 - NEAR.avg_period;
-    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
-    for i in lb..n {
+    // Tasuki Gap only reads NEAR at i-1, and only once the gap / colour geometry passes.
+    let near = candle_average_series(NEAR, o, h, l, c);
+    each_bar(lb, o, h, l, c, |i| {
         let c1 = if c[i - 1] >= o[i - 1] { 1.0 } else { -1.0 };
         let c0 = if c[i] >= o[i] { 1.0 } else { -1.0 };
         let up = c1 > 0.0
@@ -614,20 +565,12 @@ pub fn cdl_tasukigap(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64> {
             && o[i] > c[i - 1]
             && c[i] > o[i - 1]
             && c[i] < c[i - 2].min(o[i - 2]);
-        out.set(i, if up || down {
-            let near = near_total * near_scale;
-            if (realbody(o, c, i - 1) - realbody(o, c, i)).abs() < near {
-                c1 * 100.0
-            } else {
-                0.0
-            }
+        if (up || down) && (realbody(o, c, i - 1) - realbody(o, c, i)).abs() < near[i - 1] {
+            c1 * 100.0
         } else {
             0.0
-        });
-        near_total += range(NEAR, o, h, l, c, i - 1) - range(NEAR, o, h, l, c, trailing);
-        trailing += 1;
-    }
-    out.finish()
+        }
+    })
 }
 
 /// Three Stars in the South (TA-Lib CDL3STARSINSOUTH): a long black with a long lower
@@ -640,7 +583,7 @@ pub fn cdl_3starsinsouth(o: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> Vec<f64>
         .max(BODY_LONG.avg_period)
         .max(BODY_SHORT.avg_period)
         + 2;
-    each_bar(c.len(), lb, |i| {
+    each_bar(lb, o, h, l, c, |i| {
         if color(o, c, i - 2) < 0.0
             && color(o, c, i - 1) < 0.0
             && color(o, c, i) < 0.0

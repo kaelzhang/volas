@@ -75,9 +75,12 @@ pub fn blank_windows(out: &mut [f64], x: &[f64], span: usize) {
 /// own rule widens what makes a row unusable (candle patterns: any non-finite price).
 pub(crate) fn blank_windows_where(out: &mut [f64], x: &[f64], span: usize, bad: impl Fn(f64) -> bool) {
     let n = out.len().min(x.len());
-    let Some(first) = x[..n].iter().position(|&v| bad(v)) else {
+    // Branch-free over fixed chunks first, so the common clean scan vectorises.
+    let clean = x[..n].chunks(8).all(|chunk| !chunk.iter().fold(false, |acc, &v| acc | bad(v)));
+    if clean {
         return;
-    };
+    }
+    let first = x[..n].iter().position(|&v| bad(v)).unwrap_or(n);
     let mut last = first;
     for i in first..n {
         if bad(x[i]) {

@@ -514,3 +514,39 @@ def test_incremental_refresh_after_a_leading_gap_matches_a_full_recompute(key):
     got = np.asarray(df[directive], dtype=float)
     full = np.asarray(DataFrame(data).exec(directive), dtype=float)
     np.testing.assert_allclose(got, full, rtol=1e-9, atol=1e-9)
+
+
+# --- candlestick patterns: a missing candle reaches only the bars that read it ---
+
+_CDL_SRC = (ROOT / "crates/volas-compute/src/raw/indicators/candles/mod.rs").read_text()
+CANDLES = re.findall(r'"([a-z0-9]+)"', re.search(r"pub const CANDLE_PATTERNS[^=]*=\s*&\[(.*?)\];", _CDL_SRC, re.S).group(1))
+_r = np.random.default_rng(7)
+_cc = 100.0 + np.cumsum(_r.standard_normal(N))
+_co = _cc + _r.normal(0.0, 0.8, N)
+CDL_BASE = dict(open=_co, high=np.maximum(_co, _cc) + _r.exponential(0.6, N),
+                low=np.minimum(_co, _cc) - _r.exponential(0.6, N), close=_cc, volume=np.ones(N))
+
+
+def _cdl(directive, column=None, bad=None):
+    data = {k: v.copy() for k, v in CDL_BASE.items()}
+    if column is not None:
+        data[column][K] = bad
+    return np.asarray(DataFrame(data).exec(directive), dtype=float)
+
+
+def test_every_candle_pattern_is_covered():
+    assert len(CANDLES) == 61 and np.count_nonzero(sum(_cdl(f"cdl.{p}") != 0 for p in CANDLES)) > 50
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf], ids=["nan", "inf", "-inf"])
+@pytest.mark.parametrize("column", ("open", "high", "low", "close"))
+@pytest.mark.parametrize("pattern", CANDLES)
+def test_a_candle_pattern_is_missing_exactly_while_it_reads_a_missing_candle(pattern, column, bad):
+    """A candle with a missing or infinite price makes a pattern NaN on the bars whose
+    lookback holds it; every other bar is exactly what clean data gives (a candle
+    average never carries it further)."""
+    directive = f"cdl.{pattern}"
+    clean, got = _cdl(directive), _cdl(directive, column, bad)
+    span = volas.directive_lookback(directive) + 1
+    assert np.isnan(got[K:K + span]).all()
+    np.testing.assert_array_equal(np.delete(got, range(K, K + span)), np.delete(clean, range(K, K + span)))
