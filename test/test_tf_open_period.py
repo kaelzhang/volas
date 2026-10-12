@@ -112,6 +112,14 @@ def test_a_rollover_bar_leaving_out_a_column_does_not_fix_the_period_schema():
     assert rows(high) == [[1.0, 1.0], [5.0, 3.0]]
 
 
+def test_a_bar_leaving_out_a_column_is_completed_around_cached_columns():
+    df = DataFrame(frame([0, 5], close=[1.0, 2.0], volume=[1.0, 2.0]), time_frame="5m")
+    assert df["ma:2"].to_list()[1] == 1.5
+    df.append(frame([6], close=[4.0]))  # no volume; the cached ma:2 is not data
+    assert df["ma:2"].to_list()[1] == 2.5
+    assert rows(df)[1][0] == 4.0 and np.isnan(rows(df)[1][1])
+
+
 @pytest.mark.parametrize("tf", [None, "5m"])
 def test_the_dict_form_pads_a_left_out_column_like_every_other_form(tf):
     base = volas.DataFrame({"t": [T0], "close": [1.0], "volume": [10.0]}).set_index("t")
