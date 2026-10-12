@@ -81,8 +81,8 @@ pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
 /// values, summed in row order. `None` with fewer than `period` present values. The one
 /// seed rule of [`sma_seeded`] and of every state captured from it ([`sma_seeded_last`]),
 /// so a capture always describes the seed the full computation used — a missing value
-/// inside the seed region (a leading `tr[0]`, or a true range of infinite prices) moves
-/// both alike.
+/// inside the seed region moves both alike. ATR owns its fixed TR seed separately:
+/// an arithmetic NaN from infinite prices is included, not skipped.
 pub(crate) fn sma_seed(data: impl Iterator<Item = f64>, period: usize) -> Option<(usize, f64)> {
     if period == 0 {
         return None;
@@ -149,7 +149,19 @@ pub(crate) fn ema_step(period: usize) -> impl Fn(f64, f64) -> f64 {
 /// SMA-seeded. The division stays on the recurrence, as in TA-Lib's source.
 #[inline]
 pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+    if period == 1 {
+        return data.to_owned();
+    }
     sma_seeded(data, period, wilder_step(period))
+}
+
+/// Carried state of [`wilder`], including its period-one identity before seeding
+/// arithmetic can change a negative zero. Public wrappers remove missing rows.
+pub(crate) fn wilder_last(data: &[f64], period: usize) -> Option<f64> {
+    if period == 1 {
+        return data.last().copied();
+    }
+    sma_seeded_last(data, period, wilder_step(period))
 }
 
 /// Fused `ema(fast) - ema(slow)` (the MACD line) in a single pass. The two
