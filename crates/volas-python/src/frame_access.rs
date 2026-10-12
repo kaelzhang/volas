@@ -107,7 +107,7 @@ impl PyDataFrame {
             Some(tfs) => {
                 let mut next = self.inner.clone(); // shares every buffer the write keeps
                 next.set_column(&name, col).map_err(pyerr)?;
-                tfs.write(&mut self.inner, TfWrite::Frame(next))?
+                tfs.write(TfWrite::Frame { inner: &mut self.inner, next })?
             }
             None => self.inner.set_column(&name, col).map_err(pyerr)?,
         }

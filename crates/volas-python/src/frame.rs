@@ -246,11 +246,6 @@ impl PyDataFrame {
         }
     }
 
-    /// The logical M view's index (the last `window` labels), as a borrow when
-    /// unbounded and an owned slice when windowed — labels, no values (see [`Meta`]).
-    fn logical_index(&self) -> std::borrow::Cow<'_, Index> {
-        self.meta().labels().index()
-    }
     /// Present a full-length column as a Series sliced to the logical M view (with
     /// the matching sliced index) — identity (a plain `wrap_series`) when unbounded.
     /// Backs windowed `df[name]` so a column read never exposes the hidden margin.
@@ -521,9 +516,9 @@ impl PyDataFrame {
             .collect();
         let writes = self.inner.check_writes(writes).map_err(pyerr)?;
         match self.tf.as_mut() {
-            Some(tfs) => tfs.write(&mut self.inner, TfWrite::Cells(writes)),
+            Some(tfs) => tfs.write(TfWrite::Cells(writes)),
             None => {
-                self.inner.write_cells(writes);
+                writes.land();
                 Ok(())
             }
         }
@@ -583,7 +578,7 @@ impl PyDataFrame {
             }
             cview.select(self.inner.names()).map_err(pyerr)?
         };
-        self.logical_index().require_aligned(cond_df.index()).map_err(pyerr)?;
+        self.meta().labels().index().require_aligned(cond_df.index()).map_err(pyerr)?;
         if let Some(cc) = cond_df.columns().iter().find(|c| !matches!(c, Column::Bool(..))) {
             return Err(PyTypeError::new_err(format!(
                 "df[mask] = v: `mask` must be a boolean frame, got a {} column",

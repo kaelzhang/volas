@@ -120,7 +120,7 @@ fn data_columns(frame: &DataFrame) -> Vec<String> {
 /// The last (forming) row of `frame` as a bar of its data columns, at its own label
 /// (`None` when the frame has no row).
 fn forming_row(frame: &DataFrame) -> Option<DataFrame> {
-    frame.height().checked_sub(1).map(|last| frame.data_row(last))
+    frame.height().checked_sub(1).map(|last| frame.data_rows(last, last + 1))
 }
 
 /// The last row of `frame` as a bar of its data columns, at its own label — a
@@ -131,43 +131,50 @@ fn forming_bar(frame: &DataFrame) -> PyResult<OpenPeriod> {
 }
 
 /// A change to a tf frame's cells or data columns, checked against it — every error it
-/// can raise already raised — and ready to land: what [`TfState::write`] takes.
-pub(crate) enum TfWrite {
+/// can raise already raised — holding the frame it lands on: what [`TfState::write`]
+/// takes.
+pub(crate) enum TfWrite<'a> {
     /// Cell writes ([`DataFrame::check_writes`]), landing in place.
-    Cells(CellWrites),
-    /// The frame as a column write leaves it: a copy sharing every buffer the write
-    /// does not replace.
-    Frame(DataFrame),
+    Cells(CellWrites<'a>),
+    /// A column write: `next` is the frame `inner` as the write leaves it, a copy
+    /// sharing every buffer the write does not replace.
+    Frame { inner: &'a mut DataFrame, next: DataFrame },
 }
 
-impl TfWrite {
-    /// The forming row of `inner` as this change leaves it: a bar of the data columns
-    /// after it (`None` when the frame has no row). O(columns + cells written) — the
-    /// forming row alone, never a copy of the frame.
-    fn forming(&self, inner: &DataFrame) -> Option<DataFrame> {
+impl TfWrite<'_> {
+    /// The frame, as it is before the change lands.
+    fn frame(&self) -> &DataFrame {
         match self {
-            TfWrite::Cells(w) => inner.height().checked_sub(1).map(|last| w.data_row_after(inner, last)),
-            TfWrite::Frame(f) => forming_row(f),
+            TfWrite::Cells(w) => w.frame(),
+            TfWrite::Frame { inner, .. } => inner,
         }
     }
 
-    /// Whether this change surely leaves the forming row of `inner` and its data
-    /// columns as they are — cell writes that reach neither the forming row nor a cached
-    /// column. Then the open period, which follows only those, stands unjudged.
-    fn leaves_forming_row(&self, inner: &DataFrame) -> bool {
+    /// The forming row as this change leaves it: a bar of the data columns after it
+    /// (`None` when the frame has no row). O(columns + cells written) — the forming row
+    /// alone, never a copy of the frame.
+    fn forming(&self) -> Option<DataFrame> {
         match self {
-            TfWrite::Cells(w) => {
-                inner.height().checked_sub(1).is_some_and(|last| !w.may_change_data_row(inner, last))
-            }
-            TfWrite::Frame(_) => false,
+            TfWrite::Cells(w) => w.frame().height().checked_sub(1).map(|last| w.data_row_after(last)),
+            TfWrite::Frame { next, .. } => forming_row(next),
         }
     }
 
-    /// Land the change on `inner`.
-    fn land(self, inner: &mut DataFrame) {
+    /// Whether this change surely leaves the forming row and the data columns as they
+    /// are — cell writes that reach neither the forming row nor a cached column. Then
+    /// the open period, which follows only those, stands unjudged.
+    fn leaves_forming_row(&self) -> bool {
         match self {
-            TfWrite::Cells(w) => inner.write_cells(w),
-            TfWrite::Frame(f) => *inner = f,
+            TfWrite::Cells(w) => w.frame().height().checked_sub(1).is_some_and(|last| !w.may_change_data_row(last)),
+            TfWrite::Frame { .. } => false,
+        }
+    }
+
+    /// Land the change on its frame.
+    fn land(self) {
+        match self {
+            TfWrite::Cells(w) => w.land(),
+            TfWrite::Frame { inner, next } => *inner = next,
         }
     }
 }
@@ -250,14 +257,14 @@ impl TfState {
     /// so a refused write leaves the frame unchanged. A change that surely leaves the
     /// forming row and the data columns as they are (cells of closed rows only, no cached
     /// column) leaves the open period as it is: it lands at once, at a plain write's cost.
-    pub(crate) fn write(&mut self, inner: &mut DataFrame, change: TfWrite) -> PyResult<()> {
-        if change.leaves_forming_row(inner) {
-            change.land(inner);
+    pub(crate) fn write(&mut self, change: TfWrite<'_>) -> PyResult<()> {
+        if change.leaves_forming_row() {
+            change.land();
             return Ok(());
         }
         let mut state = self.clone();
-        state.follow(forming_row(inner).as_ref(), change.forming(inner).as_ref())?;
-        change.land(inner);
+        state.follow(forming_row(change.frame()).as_ref(), change.forming().as_ref())?;
+        change.land();
         *self = state;
         Ok(())
     }
@@ -393,9 +400,8 @@ impl PyDataFrame {
         if bars.height() > 1 {
             // the forming row's data columns only: what the fold reads and writes
             let h = self.inner.height();
-            let forming = self.inner.slice_data(h.saturating_sub(1), h);
             let mut probe = PyDataFrame {
-                inner: forming.select(&data_columns(&self.inner)).map_err(pyerr)?,
+                inner: self.inner.data_rows(h.saturating_sub(1), h),
                 tf: self.tf.clone(),
                 window: None,
             };
