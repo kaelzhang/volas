@@ -976,3 +976,19 @@ fn init_at_is_the_aggregate_of_one_value() {
     assert!(Column::bool(vec![false]).init_at(0, Keep, &Column::bool(vec![true]), 0).is_err());
     assert!(Column::str(vec!["a".into()]).init_at(0, Keep, &Column::str(vec!["b".into()]), 0).is_err());
 }
+
+#[test]
+fn an_integer_fold_never_wraps() {
+    use CombineOp::*;
+    let overflow = |r: Result<()>| matches!(r, Err(VolasError::Overflow(_)));
+    let mut c = Column::i64(vec![i64::MAX]);
+    assert!(overflow(c.combine_at(0, Sum, &Column::i64(vec![1]), 0)));
+    assert_eq!(c.get_i64(0), i64::MAX, "unchanged");
+    let mut c = Column::i32(vec![i32::MAX]);
+    assert!(overflow(c.combine_at(0, Sum, &Column::i32(vec![1]), 0)));
+    assert!(overflow(c.combine_at(0, Replace, &Column::i64(vec![1 << 40]), 0)));
+    assert!(overflow(c.init_at(0, Keep, &Column::i64(vec![1 << 40]), 0)));
+    let mut d = Column::datetime(vec![5]);
+    d.combine_at(0, Max, &Column::datetime(vec![9]), 0).unwrap();
+    assert_eq!(d.get_i64(0), 9);
+}

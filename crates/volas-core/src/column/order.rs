@@ -5,8 +5,9 @@ use super::*;
 
 // The per-dtype combine kernels behind `Column::combine_at`. `Max` / `Min` / `Sum`
 // match the batch reduce: `f*::max`/`min` drop a `NaN` operand (so a missing fine
-// bar is skipped, exactly like the fold), and the integer sum is overflow-checked in
-// debug (like `Iterator::sum`). `Keep` never reaches here (combine_at returns early).
+// bar is skipped, exactly like the fold), and the integer sum is checked — an overflow
+// is the `numeric::overflow` error, never a wrapped value, as in the batch reduce.
+// `Keep` never reaches here (combine_at returns early).
 fn combine_f64(op: CombineOp, acc: f64, x: f64) -> f64 {
     match op {
         CombineOp::Replace => x,
@@ -27,14 +28,20 @@ fn combine_f32(op: CombineOp, acc: f32, x: f32) -> f32 {
     }
 }
 
-fn combine_i64(op: CombineOp, acc: i64, x: i64) -> i64 {
+fn combine_i64(op: CombineOp, acc: i64, x: i64) -> Option<i64> {
     match op {
-        CombineOp::Replace => x,
-        CombineOp::Max => acc.max(x),
-        CombineOp::Min => acc.min(x),
-        CombineOp::Sum => acc + x,
+        CombineOp::Replace => Some(x),
+        CombineOp::Max => Some(acc.max(x)),
+        CombineOp::Min => Some(acc.min(x)),
+        CombineOp::Sum => acc.checked_add(x),
         CombineOp::Keep => unreachable!(), // LCOV_EXCL_LINE (combine_at returns early on Keep)
     }
+}
+
+/// An integer fold's value in `dtype`'s range, or its overflow error.
+fn fold_in_range<T: TryFrom<i64>>(v: Option<i64>, dtype: DType) -> Result<T> {
+    v.and_then(|v| T::try_from(v).ok())
+        .ok_or_else(|| crate::numeric::overflow(dtype, "a time-frame fold"))
 }
 
 impl Column {
@@ -565,26 +572,28 @@ impl Column {
             }
             Column::I64(buf, val) => {
                 let s = src.get_i64(src_row);
+                let v = fold_in_range(combine_i64(op, buf[row], s), DType::I64)?;
                 let b = buf.make_mut();
                 let n = b.len();
-                b[row] = combine_i64(op, b[row], s);
+                b[row] = v;
                 if matches!(op, Replace) {
                     val.set(row, n, src.is_valid(src_row));
                 }
             }
             Column::I32(buf, val) => {
                 let s = src.get_i64(src_row);
+                let v = fold_in_range(combine_i64(op, buf[row] as i64, s), DType::I32)?;
                 let b = buf.make_mut();
                 let n = b.len();
-                b[row] = combine_i64(op, b[row] as i64, s) as i32;
+                b[row] = v;
                 if matches!(op, Replace) {
                     val.set(row, n, src.is_valid(src_row));
                 }
             }
             Column::Datetime(buf) => {
                 let s = src.get_i64(src_row);
-                let b = buf.make_mut();
-                b[row] = combine_i64(op, b[row], s);
+                let v = fold_in_range(combine_i64(op, buf[row], s), DType::Datetime)?;
+                buf.make_mut()[row] = v;
             }
             Column::Bool(_, _) | Column::Str(_, _) => {
                 return Err(VolasError::DType(
@@ -633,7 +642,7 @@ impl Column {
             }
             Column::I32(buf, val) => {
                 let n = buf.len();
-                buf.make_mut()[row] = src.get_i64(src_row) as i32;
+                buf.make_mut()[row] = fold_in_range(Some(src.get_i64(src_row)), DType::I32)?;
                 val.set(row, n, !take || src.is_valid(src_row));
             }
             Column::Datetime(buf) => buf.make_mut()[row] = src.get_i64(src_row),
