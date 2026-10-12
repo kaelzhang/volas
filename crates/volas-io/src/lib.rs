@@ -160,8 +160,11 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
             validity,
         );
     }
-    // f64: every cell is either missing (-> NaN) or float-parseable.
-    if trimmed.iter().all(|t| is_na(t) || t.parse::<f64>().is_ok()) {
+    // f64: every cell is either missing (-> NaN) or a number float64 holds without
+    // changing an integer: an integer token float64 cannot hold exactly (past 2^53,
+    // or past int64 entirely) keeps the column as text, lossless, instead of
+    // rounding it (contract #20); a `nan` token that is not an NA token is text too.
+    if trimmed.iter().all(|t| is_na(t) || float_token(t).is_some()) {
         return Column::f64(
             trimmed
                 .iter()
@@ -169,22 +172,19 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
                     if is_na(t) {
                         f64::NAN
                     } else {
-                        t.parse().unwrap()
+                        float_token(t).expect("checked above")
                     }
                 })
                 .collect(),
         );
     }
-    // bool: every cell present and a true/false literal (any case).
-    if trimmed
-        .iter()
-        .all(|t| matches!(t.to_ascii_lowercase().as_str(), "true" | "false"))
-    {
-        return Column::bool(
-            trimmed
-                .iter()
-                .map(|t| t.eq_ignore_ascii_case("true"))
-                .collect(),
+    // bool: every cell an NA token or a true/false literal (any case), at least one
+    // present; an NA token is a missing bool (validity), never read as a literal.
+    let is_bool = |t: &str| t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("false");
+    if trimmed.iter().all(|t| is_na(t) || is_bool(t)) && trimmed.iter().any(|t| !is_na(t)) {
+        return Column::bool_with(
+            trimmed.iter().map(|t| !is_na(t) && t.eq_ignore_ascii_case("true")).collect(),
+            Validity::from_valid_iter(trimmed.len(), trimmed.iter().map(|t| !is_na(t))),
         );
     }
     // str: NA tokens (empty / `NA` / `null` / ...) become NA via the validity
@@ -193,6 +193,22 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
     // original (untrimmed) value.
     let validity = Validity::from_valid_iter(cells.len(), trimmed.iter().map(|t| !is_na(t)));
     Column::str_with(cells, validity)
+}
+
+/// A present cell as the float64 it denotes, or `None` when it is not a number
+/// float64 holds faithfully: not float-parseable, a `nan` spelling (only an NA
+/// token is missing), or an integer literal float64 cannot hold exactly
+/// (`9007199254740993`, `9223372036854775809`). An integer literal is exact when
+/// the float's exact decimal expansion equals it.
+fn float_token(t: &str) -> Option<f64> {
+    let x = t.parse::<f64>().ok().filter(|x| !x.is_nan())?;
+    let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(x); // a decimal / exponent / inf literal: float precision applies
+    }
+    let magnitude = digits.trim_start_matches('0');
+    let exact = format!("{:.0}", x.abs());
+    (exact == if magnitude.is_empty() { "0" } else { magnitude }).then_some(x)
 }
 
 #[cfg(test)]
@@ -259,6 +275,31 @@ mod tests {
             infer(&["True", "false", "TRUE"]),
             Column::bool(vec![true, false, true])
         );
+    }
+
+    #[test]
+    fn bool_inference_honors_na_tokens() {
+        let col = infer(&["true", "", "FALSE"]);
+        assert_eq!(col.dtype(), volas_core::DType::Bool);
+        assert!(col.is_valid(0) && !col.is_valid(1) && col.as_bool().unwrap() == [true, false, false]);
+        let na: HashSet<String> = ["True".to_string()].into();
+        let col = infer_column(vec!["True".into(), "False".into()], &na);
+        assert!(!col.is_valid(0) && !col.as_bool().unwrap()[1]);
+    }
+
+    #[test]
+    fn integers_float64_cannot_hold_stay_text() {
+        // past int64, and past 2^53 next to a float: never rounded
+        assert!(matches!(infer(&["9223372036854775809"]), Column::Str(..)));
+        assert!(matches!(infer(&["9007199254740993", "1.5"]), Column::Str(..)));
+        // exact integer literals (any spelling) next to a float are float64
+        assert!(infer(&["9007199254740992", "-007", "+0", "1.5", "18446744073709551616"])
+            .equals(&Column::f64(vec![9007199254740992.0, -7.0, 0.0, 1.5, 18446744073709551616.0])));
+        // a `nan` spelling that is not an NA token is text
+        let na: HashSet<String> = HashSet::new();
+        assert!(matches!(infer_column(vec!["1".into(), "nan".into()], &na), Column::Str(..)));
+        assert_eq!(float_token("-"), None);
+        assert_eq!(float_token("1e3"), Some(1000.0));
     }
 
     #[test]

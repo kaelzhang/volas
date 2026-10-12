@@ -157,12 +157,8 @@ pub fn epoch_to_ns_f64(value: f64, unit: &str) -> Option<i64> {
         "ns" => 1.0,
         _ => return None,
     };
-    let ns = (value * scale).round();
-    if ns.is_finite() && ns >= i64::MIN as f64 && ns <= i64::MAX as f64 {
-        Some(ns as i64)
-    } else {
-        None
-    }
+    // exclusive upper bound: `i64::MAX as f64` is 2^63, which would saturate
+    crate::numeric::Numeric::try_from_f64((value * scale).round())
 }
 
 /// Decompose epoch nanoseconds into civil UTC parts

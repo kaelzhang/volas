@@ -250,6 +250,79 @@ pub fn binary_supertype(a: DType, b: DType) -> DType {
     }
 }
 
+// --- int64 <-> float exactness (the one owner of the range / exactness rule) ---
+//
+// Two distinct questions, both answered only here:
+// - STORAGE (contract #20): may this integer be stored as a float without changing
+//   its value? Yes exactly when it round-trips (`i64_to_f64_exact`), e.g. 2^60 does,
+//   2^53 + 1 does not.
+// - MATH (contract #26): may this integer enter float64 arithmetic? Only inside the
+//   contiguous exact range |x| <= 2^53 (`in_f64_domain`), where every neighbour is
+//   representable too; past it a float64 result is not a function of the exact
+//   input, so the operation raises.
+
+/// The float64 integer range: every integer with `|x| <= 2^53` is exactly
+/// representable, and so are all its neighbours (contract #26).
+pub const F64_EXACT_INT: u64 = 1 << 53;
+
+/// Whether integer `x` may enter float64 math (`|x| <= 2^53`, contract #26).
+#[inline]
+pub fn in_f64_domain(x: i64) -> bool {
+    x.unsigned_abs() <= F64_EXACT_INT
+}
+
+/// The error a float64-domain operation raises for an integer past 2^53.
+pub fn outside_f64_domain(x: i64, op: &str) -> VolasError {
+    VolasError::Overflow(format!(
+        "{op}: the int64 value {x} is outside the float64-exact range |x| <= 2^53, so \
+         a float64 result would not be exact"
+    ))
+}
+
+/// `x` as an `f64` when the conversion is exact (it round-trips), else `None`
+/// (contract #20). `2^63` is the one float whose saturating cast back reads as
+/// `i64::MAX`, so it is excluded explicitly.
+#[inline]
+pub fn i64_to_f64_exact(x: i64) -> Option<f64> {
+    let f = x as f64;
+    (f != 9_223_372_036_854_775_808.0 && f as i64 == x).then_some(f)
+}
+
+/// `x` as an `f32` when the conversion is exact, else `None` (contract #20).
+#[inline]
+pub fn i64_to_f32_exact(x: i64) -> Option<f32> {
+    let f = x as f32;
+    (f != 9_223_372_036_854_775_808.0 && f as i64 == x).then_some(f)
+}
+
+/// A float64 narrowed to float32: precision rounds to the nearest float32 (the
+/// float dtype's own semantics), but a finite value past the float32 range is
+/// `None` — it would become `±inf` (contract #20). `NaN` / `±inf` carry over.
+#[inline]
+pub fn f64_to_f32_in_range(x: f64) -> Option<f32> {
+    let f = x as f32;
+    (f.is_finite() || !x.is_finite()).then_some(f)
+}
+
+/// Exact order of an integer against a float, `None` when the float is `NaN`:
+/// no float64 round trip, so `2^53 + 1 > 2^53` (contract #26; NumPy compares in
+/// float64 and calls them equal).
+pub fn cmp_i64_f64(a: i64, b: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering::{Greater, Less};
+    const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+    if b.is_nan() {
+        None
+    } else if b >= TWO_63 {
+        Some(Less)
+    } else if b < -TWO_63 {
+        Some(Greater)
+    } else {
+        // b in [-2^63, 2^63): its integral part is an exact i64, its fraction exact
+        let t = b.trunc();
+        Some(a.cmp(&(t as i64)).then_with(|| 0.0.partial_cmp(&(b - t)).expect("finite")))
+    }
+}
+
 /// Whether the scalar `x` fits `target` losslessly — the keep-vs-promote test for
 /// clip / where / mask / assignment (e.g. `0.0` fits `int64`, `2.5` does not).
 pub fn fits(target: DType, x: f64) -> bool {

@@ -16,7 +16,10 @@ use crate::strbuf::StrBuffer;
 use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};
-use crate::numeric::{binary_supertype, fits, overflow, Numeric};
+use crate::numeric::{
+    binary_supertype, f64_to_f32_in_range, fits, i64_to_f32_exact, i64_to_f64_exact, overflow,
+    Numeric,
+};
 use crate::stats;
 use crate::validity::Validity;
 
@@ -945,3 +948,5 @@ mod tests;
 mod tests_na;
 #[cfg(test)]
 mod tests_overflow;
+#[cfg(test)]
+mod tests_convert;

@@ -634,3 +634,38 @@ placeholder never raises.
 OverflowError: int64 overflow in `+`; integer results never wrap — cast to
                float64 first if an approximate result is acceptable
 ```
+
+### Conversions are lossless or raise
+
+One conversion rule serves every target-typed write (`iat` / `iloc` / `at` / `loc`,
+Series and mask assignment, dict / `Row` `append`), column ingress (lists, tuples,
+NumPy arrays of any kind), and `astype` between numeric dtypes:
+
+| source → target | converts | raises |
+|---|---|---|
+| int → float64 / float32 | exactly representable (`2**60`) | `TypeError` otherwise (`2**53 + 1` → float64, `2**24 + 1` → float32) |
+| float → int64 / int32 | integral and in range (`5.0`) | `TypeError` for a fraction (`2.5`), `OverflowError` out of range (`1e20`) |
+| int64 → int32 | in range | `OverflowError` |
+| float64 → float32 | rounds to the nearest float32 (float precision) | `OverflowError` for a finite value past float32 (`1e300`, never `inf`) |
+
+pandas / NumPy round, saturate or wrap in each of these cases. Specific ingress
+rules:
+
+- an integer past int64 (a Python int, a NumPy `uint64` value, an `object` array
+  element) raises `OverflowError` — volas has no `uint64`; a `uint64` array whose
+  values all fit int64 (and every narrower unsigned array) widens exactly;
+- integers mixed with floats infer float64 (like pandas) only when every integer
+  is exact in float64, else `TypeError`;
+- tuples and `object` arrays follow the list rules (so `Decimal` raises everywhere);
+- complex values raise `TypeError` (pandas keeps `complex128`; NumPy-to-float
+  drops the imaginary part with only a warning).
+
+`astype('int64')` from a float still truncates toward zero (`2.7 → 2`, as pandas),
+but a value past int64 raises instead of saturating to `±2⁶³`; a float epoch past
+int64 is unconvertible for `astype('datetime64[...]')` likewise.
+
+`read_csv` never rounds an integer token either: a column whose integer tokens
+float64 cannot hold exactly (past int64, or past 2⁵³ next to a float token) is read
+as text, losslessly — pandas reads `uint64` / `object` or rounds to float64. A
+`nan` token that is not an NA token (`keep_default_na=False`) is text, and an NA
+token in a `True` / `False` column is a missing bool rather than a literal.
