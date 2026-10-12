@@ -254,12 +254,15 @@ pub fn dev(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
 }
 
 /// Rolling mode (TradingView `ta.mode`): the most frequent present value; ties
-/// resolve to the SMALLEST value. NA cells are ignored (matching Pine).
+/// resolve to the SMALLEST value; NA cells are ignored. Values are counted by numeric
+/// equality, so `-0.0` and `+0.0` are one value (as pandas counts them), and a zero mode
+/// is `+0.0` whichever signed zeros the window holds.
 pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     per_sorted_window(data, window, min_periods, |sorted, _| {
-        // `sorted` is ascending, so equal values are contiguous: scan runs and
-        // keep the value with the longest run; on a tie the earlier (smaller)
-        // value is already held, giving "ties -> smallest" for free.
+        // `sorted` is ascending (total order: the signed zeros sit side by side), so
+        // numerically equal values are contiguous: scan runs and keep the value with
+        // the longest run; on a tie the earlier (smaller) value is already held,
+        // giving "ties -> smallest" for free.
         let (mut best_val, mut best_len) = (sorted[0], 1usize);
         let (mut cur_val, mut cur_len) = (sorted[0], 1usize);
         for &x in &sorted[1..] {
@@ -274,7 +277,7 @@ pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
                 best_val = cur_val;
             }
         }
-        best_val
+        best_val + 0.0 // a zero mode is +0
     })
 }
 
@@ -367,6 +370,10 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
     }
 }
 
+/// Run `f` over each window's present values kept sorted in IEEE total order — one
+/// canonical multiset per window, so the row a value leaves at removes exactly that
+/// value (a `-0.0` leaving never takes a `+0.0` with it) and a value never depends on
+/// the rows before its window.
 fn per_sorted_window(
     data: &[f64],
     window: usize,
@@ -381,13 +388,14 @@ fn per_sorted_window(
         if window != usize::MAX && i >= window {
             let leaving = data[i - window];
             if !leaving.is_nan() {
-                let pos = sorted.partition_point(|&v| v < leaving);
+                // the very value leaving (total order: a `-0.0` is not a `+0.0`)
+                let pos = sorted.partition_point(|v| v.total_cmp(&leaving).is_lt());
                 sorted.remove(pos);
             }
         }
         let x = data[i];
         if !x.is_nan() {
-            let pos = sorted.partition_point(|&v| v < x);
+            let pos = sorted.partition_point(|v| v.total_cmp(&x).is_lt());
             sorted.insert(pos, x);
         }
         if sorted.len() >= min_periods.max(1) {

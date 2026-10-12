@@ -55,11 +55,11 @@ ACCUMULATING = {
     "accbands", "apo", "bbi", "bbw", "beta", "bias", "boll", "cci", "cmf", "cog", "coppock",
     "correl", "dkx", "dma", "dpo", "emv", "hma", "hv", "imi", "kst", "linearreg",
     "linearreg_angle", "linearreg_intercept", "linearreg_slope", "ma", "macdext", "mavp", "mfi",
-    "ppo", "relative_vigor", "stddev", "stoch", "stochf", "sum", "trima", "tsf", "ultosc", "var",
-    "vr", "vwma", "wma", "wvad",
+    "ppo", "relative_vigor", "stddev", "stoch", "stochf", "sum", "trima", "tsf", "ttm_squeeze",
+    "ultosc", "var", "vr", "vwma", "wma", "wvad",
     "accbands.lower", "accbands.upper", "boll.lower", "boll.u", "boll.upper", "dkx.ma",
     "dma.ama", "dma.ddd", "macdext.histogram", "macdext.signal", "relative_vigor.signal",
-    "stoch.d", "stoch.k", "stochf.d",
+    "stoch.d", "stoch.k", "stochf.d", "ttm_squeeze.on",
 }
 
 

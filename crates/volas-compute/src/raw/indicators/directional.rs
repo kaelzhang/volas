@@ -27,14 +27,7 @@ fn dm1(high: &[f64], low: &[f64], i: usize) -> (f64, f64) {
     (plus, minus)
 }
 
-/// One-period true range at bar `i` (needs the prior close).
-#[inline]
-fn tr1(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
-    let hl = high[i] - low[i];
-    let hc = (high[i] - close[i - 1]).abs();
-    let lc = (low[i] - close[i - 1]).abs();
-    hl.max(hc).max(lc)
-}
+use super::tr_at; // the one true-range term (missing when an input it reads is)
 
 /// Wilder "sum" smoothing of a one-period `term`: seed `= Σ term(i)` over bars
 /// `[1, period-1]`, placed at index `period-1`; then `s = s - s/period + term(i)`.
@@ -115,14 +108,14 @@ pub(super) fn dx_val(sp: f64, sm: f64, st: f64) -> f64 {
 /// +DI (TA-Lib PLUS_DI). Lookback `period`.
 pub fn plus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let sp = wilder_sum(high.len(), period, |i| dm1(high, low, i).0);
-    let st = wilder_sum(high.len(), period, |i| tr1(high, low, close, i));
+    let st = wilder_sum(high.len(), period, |i| tr_at(high, low, close, i));
     di(&sp, &st, period)
 }
 
 /// -DI (TA-Lib MINUS_DI). Lookback `period`.
 pub fn minus_di(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let sm = wilder_sum(high.len(), period, |i| dm1(high, low, i).1);
-    let st = wilder_sum(high.len(), period, |i| tr1(high, low, close, i));
+    let st = wilder_sum(high.len(), period, |i| tr_at(high, low, close, i));
     di(&sm, &st, period)
 }
 
@@ -146,7 +139,7 @@ fn dm_tr_sums(
         let (dp, dm) = dm1(high, low, i);
         p += dp;
         m += dm;
-        t += tr1(high, low, close, i);
+        t += tr_at(high, low, close, i);
     }
     sp[period - 1] = p;
     sm[period - 1] = m;
@@ -156,7 +149,7 @@ fn dm_tr_sums(
         let (dp, dm) = dm1(high, low, i);
         p = p.mul_add(a, dp);
         m = m.mul_add(a, dm);
-        t = t.mul_add(a, tr1(high, low, close, i));
+        t = t.mul_add(a, tr_at(high, low, close, i));
         sp[i] = p;
         sm[i] = m;
         st[i] = t;
@@ -236,7 +229,7 @@ mod tests {
     /// Every directional resume, fed the carried Wilder accumulator(s) of a full compute
     /// over the head, reproduces the tail of a full compute over the whole input —
     /// bit-for-bit. Iterating `from` over an oscillating OHLC series advances the fused
-    /// `dm1`/`tr1` recurrences through their steady state for all seven families.
+    /// `dm1`/`tr_at` recurrences through their steady state for all seven families.
     #[test]
     fn directional_resume_is_bit_identical_to_full() {
         let (high, low, close) = ohlc(120);

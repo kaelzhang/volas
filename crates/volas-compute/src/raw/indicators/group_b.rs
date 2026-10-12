@@ -9,7 +9,7 @@ use crate::raw::kernels;
 
 mod resume;
 pub use resume::*;
-use resume::{dkx_mid, roc_at, swma4_at, vr_volumes, wvad_term};
+use resume::{br_terms, dkx_mid, roc_at, swma4_at, vr_volumes, wvad_term};
 
 /// Rolling `n`-window sum that skips a leading-NaN prefix — so a series with an undefined
 /// first bar (`tr`, prev-close diffs) sums from its first finite value — via `sma * n`.
@@ -54,12 +54,7 @@ pub fn brar_ar(open: &[f64], high: &[f64], low: &[f64], n: usize, origin: usize)
 /// close contributes nothing). Source: 通达信 / MBA智库 — 人气意愿指标 (BRAR).
 pub fn brar_br(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let len = high.len();
-    let up: Vec<f64> = (0..len)
-        .map(|i| if i == 0 { f64::NAN } else { (high[i] - close[i - 1]).max(0.0) })
-        .collect();
-    let dn: Vec<f64> = (0..len)
-        .map(|i| if i == 0 { f64::NAN } else { (close[i - 1] - low[i]).max(0.0) })
-        .collect();
+    let (up, dn): (Vec<f64>, Vec<f64>) = (0..len).map(|i| br_terms(high, low, close, i).into()).unzip();
     let (s_up, s_dn) = (rolling_sum(&up, n, origin), rolling_sum(&dn, n, origin));
     (0..len).map(|i| s_up[i] / s_dn[i] * 100.0).collect()
 }

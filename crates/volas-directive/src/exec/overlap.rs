@@ -56,7 +56,7 @@ pub(super) fn dispatch(
             let real = close(0)?;
             let periods = ops.f64_required(1)?;
             // min_p <= max_p is guaranteed by validate_cross_args (which runs
-            // before dispatch), so the i64::clamp below cannot panic.
+            // before dispatch), so the period clamp cannot panic.
             let min_p = arg_usize(args, 0);
             let max_p = arg_usize(args, 1);
             let matype = arg_usize(args, 2);
@@ -72,7 +72,9 @@ pub(super) fn dispatch(
             // hash + probe dominated this loop. Values are unchanged — only the lookup is faster.
             let mut cache: Vec<Option<(usize, Vec<f64>)>> = vec![None; max_p + 1];
             for i in lb..n {
-                let p = (periods[i] as i64).clamp(min_p as i64, max_p as i64) as usize;
+                let Some(p) = ind::mavp_period(periods[i], min_p, max_p) else {
+                    continue; // a missing period: the row is missing
+                };
                 if cache[p].is_none() {
                     let start = lb - crate::lookback::ma_lookback(p, matype);
                     let sub = ma_typed(&real[start..], p, matype, true, ops.origin() + start);

@@ -1,9 +1,10 @@
 //! Core rolling / moving-window kernels operating on `f64` arrays.
 //!
-//! `NaN` denotes a missing value. Sum / std windows are valid only when fully
-//! populated; min / max reduce over the values present. All kernels are O(n):
-//! sum / std slide a running accumulator, min / max use a monotonic deque —
-//! never the O(n·period) per-window re-scan they were ported from.
+//! `NaN` denotes a missing value, and a window holding one is missing (see
+//! [`crate::missing`]): sum / std / min / max windows are valid only when fully
+//! populated with present values. All kernels are O(n): sum / std slide a running
+//! accumulator, min / max a van Herk block sweep — never the O(n·period) per-window
+//! re-scan they were ported from.
 //!
 //! The kernels are deliberately scalar: the recursive smoothers ([`ema_seeded`],
 //! [`wilder`]) are division-latency bound and the out-of-order core already extracts
@@ -12,8 +13,9 @@
 
 use crate::accum::{Anchors, Csum};
 use crate::guard::{Order, Slide, Window};
+use crate::missing;
 use ndarray::{Array1, ArrayView1};
-use std::collections::VecDeque;
+use std::borrow::Cow;
 
 /// Simple moving average (a window is valid only when fully populated). Row 0 is at
 /// absolute position `origin` (see [`crate::accum`]).
@@ -71,34 +73,41 @@ pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
     (0..n).map(|i| sma_row(&mut slide, period, i, |j| data[j])).collect()
 }
 
+/// The seed of an SMA-seeded smoother over `data` (TA-Lib's EMA / Wilder shape): the row
+/// of its `period`-th present (non-NaN) value and the mean of the first `period` present
+/// values, summed in row order. `None` with fewer than `period` present values. The one
+/// seed rule of [`sma_seeded`] and of every state captured from it ([`sma_seeded_last`]),
+/// so a capture always describes the seed the full computation used — a missing value
+/// inside the seed region (a leading `tr[0]`, or a true range of infinite prices) moves
+/// both alike.
+pub(crate) fn sma_seed(data: impl Iterator<Item = f64>, period: usize) -> Option<(usize, f64)> {
+    if period == 0 {
+        return None;
+    }
+    let (mut sum, mut count) = (0.0, 0usize);
+    for (i, x) in data.enumerate() {
+        if !x.is_nan() {
+            sum += x;
+            count += 1;
+            if count == period {
+                return Some((i, sum / period as f64));
+            }
+        }
+    }
+    None
+}
+
 /// SMA-seeded recursive smoother — the shape TA-Lib uses for EMA / Wilder. The
 /// first output, at the `period`-th finite value, is the SMA of the first `period`
-/// finite values; thereafter `prev = step(prev, x)` per row. Leading `NaN` in
-/// `data` (e.g. `tr[0]`) is skipped for seeding; rows before the seed are warm-up
+/// finite values ([`sma_seed`]); thereafter `prev = step(prev, x)` per row. Leading `NaN`
+/// in `data` (e.g. `tr[0]`) is skipped for seeding; rows before the seed are warm-up
 /// `NaN`. The exact `step` arithmetic is the caller's, to match TA-Lib per kind.
 #[inline]
 fn sma_seeded(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64) -> Array1<f64> {
     let n = data.len();
     let mut out = Array1::from_elem(n, f64::NAN);
-    if period == 0 || n == 0 {
-        return out;
-    }
-    let mut sum = 0.0;
-    let mut count = 0usize;
-    let mut seed_idx = None;
-    for i in 0..n {
-        let x = data[i];
-        if !x.is_nan() {
-            sum += x;
-            count += 1;
-            if count == period {
-                seed_idx = Some(i);
-                break;
-            }
-        }
-    }
-    let Some(si) = seed_idx else { return out };
-    let mut prev = sum / period as f64;
+    let Some((si, seed)) = sma_seed(data.iter().copied(), period) else { return out };
+    let mut prev = seed;
     out[si] = prev;
     for i in (si + 1)..n {
         prev = step(prev, data[i]);
@@ -107,11 +116,34 @@ fn sma_seeded(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f
     out
 }
 
+/// The value of [`sma_seeded`] at the last row of `data` — the carried state of an
+/// SMA-seeded smoother after a full computation — or `None` before it seeds. The same
+/// seed ([`sma_seed`]) and the same `step`, so it is the full computation's last value
+/// bit for bit.
+pub(crate) fn sma_seeded_last(data: &[f64], period: usize, step: impl Fn(f64, f64) -> f64) -> Option<f64> {
+    let (si, seed) = sma_seed(data.iter().copied(), period)?;
+    Some(data[si + 1..].iter().fold(seed, |prev, &x| step(prev, x)))
+}
+
+/// Wilder's smoothing step `prev·(period−1)/period + x/period`, fused (see [`wilder`]).
+#[inline]
+pub(crate) fn wilder_step(period: usize) -> impl Fn(f64, f64) -> f64 {
+    let pf = period as f64;
+    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
+    move |prev: f64, x: f64| prev.mul_add(a, x * b)
+}
+
+/// The EMA step `(x − prev)·k + prev`, `k = 2/(period+1)`, fused (see [`ema_seeded`]).
+#[inline]
+pub(crate) fn ema_step(period: usize) -> impl Fn(f64, f64) -> f64 {
+    let k = 2.0 / (period as f64 + 1.0);
+    move |prev: f64, x: f64| (x - prev).mul_add(k, prev)
+}
+
 /// Wilder's smoothing (RMA), TA-Lib ATR / RSI / ADX arithmetic:
 /// `out[i] = (out[i-1]*(period-1) + x[i]) / period`, SMA-seeded.
 #[inline]
 pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    let pf = period as f64;
     // `(prev*(period-1) + x) / period` rewritten as `prev*a + x*b` with the two
     // reciprocals precomputed, then fused (`mul_add`). This takes the per-element
     // **division** (~14-cycle latency, on the recurrence's critical path) off the
@@ -119,9 +151,7 @@ pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     // smoother (ATR / SMMA). Wilder smoothing is contractive (factor `a < 1`), so
     // the ~1e-16 reassociation error decays rather than accumulates: well within
     // the 1e-9 TA-Lib parity tolerance.
-    let a = (pf - 1.0) / pf;
-    let b = 1.0 / pf;
-    sma_seeded(data, period, move |prev, x| prev.mul_add(a, x * b))
+    sma_seeded(data, period, wilder_step(period))
 }
 
 /// Fused `ema(fast) - ema(slow)` (the MACD line) in a single pass. The two
@@ -190,12 +220,11 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
 /// (TA-Lib's default EMA seeding).
 #[inline]
 pub fn ema_seeded(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    let k = 2.0 / (period as f64 + 1.0);
     // `(x - prev) * k + prev` via a fused multiply-add: one rounding (slightly more
     // accurate than TA-Lib's two-op form, within the 1e-9 parity tolerance) and a
     // shorter dependency chain — on FMA-capable hardware this cuts the latency-bound
     // EWMA recurrence by ~35%, so ema / macd / macd.signal beat TA-Lib's C loop.
-    sma_seeded(data, period, move |prev, x| (x - prev).mul_add(k, prev))
+    sma_seeded(data, period, ema_step(period))
 }
 
 /// `S` SMA-seeded EMAs applied in cascade (each stage's input is the previous stage's
@@ -333,6 +362,16 @@ pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1
     result
 }
 
+/// An extremum's zero is `+0`. Two equal values with different bits are only `+0` and
+/// `−0`, and which of them a path keeps depends on the path (the van Herk sweep, the fused
+/// pair, the trackers of `hhv` and the stochastics, a per-row window — and a missing value
+/// elsewhere in the series may change which one runs). Every path settles the tie here, so
+/// they all give the same bits. `x + 0.0` is `x` for every other value.
+#[inline(always)]
+pub(crate) fn canonical_zero(x: f64) -> f64 {
+    x + 0.0
+}
+
 /// van Herk / Gil-Werman sliding window reduction (min or max) in O(n) for
 /// NaN-free data: per-block prefix and suffix extrema, then each length-`period`
 /// window's extremum is `reduce(suffix[start], prefix[end])`. ~3 compares per
@@ -373,21 +412,16 @@ fn van_herk(
 /// Fused rolling max of `high` and rolling min of `low` over `period` in a single van
 /// Herk traversal: the two extrema share the block-boundary sweep and one combine pass,
 /// and `high` / `low` stream together (one cache pass over the pair instead of two
-/// separate ones). NaN-free fast path — `stoch` / `stochf` / `willr` over OHLCV, and
-/// StochRSI over its finite RSI tail; otherwise defers to the separate [`rolling_max`] /
-/// [`rolling_min`] (which handle interior NaN via a deque). Bit-identical to the two
-/// separate calls — min/max are exact and order-independent.
+/// separate ones) — `stoch` / `stochf` / `willr` over OHLCV, and StochRSI over its
+/// finite RSI tail. A window holding a missing value is NaN (the reduction itself steps
+/// over it, then [`missing::blank_windows`] blanks the windows holding it). Bit-identical
+/// to [`rolling_max`] and [`rolling_min`] — min/max are exact and order-independent.
 pub fn rolling_max_min(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, Vec<f64>) {
     let n = high.len();
     let mut hh = vec![f64::NAN; n];
     let mut ll = vec![f64::NAN; n];
     if period == 0 || period > n {
         return (hh, ll);
-    }
-    if high.iter().any(|x| x.is_nan()) || low.iter().any(|x| x.is_nan()) {
-        let h = rolling_max(ArrayView1::from(high), period);
-        let l = rolling_min(ArrayView1::from(low), period);
-        return (h.into_raw_vec_and_offset().0, l.into_raw_vec_and_offset().0);
     }
     let mut pmax = vec![0.0f64; n];
     let mut smax = vec![0.0f64; n];
@@ -413,109 +447,56 @@ pub fn rolling_max_min(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, V
         s = e;
     }
     for i in (period - 1)..n {
-        hh[i] = smax[i + 1 - period].max(pmax[i]);
-        ll[i] = smin[i + 1 - period].min(pmin[i]);
+        hh[i] = canonical_zero(smax[i + 1 - period].max(pmax[i]));
+        ll[i] = canonical_zero(smin[i + 1 - period].min(pmin[i]));
     }
+    missing::blank_windows(&mut hh, high, period);
+    missing::blank_windows(&mut ll, low, period);
     (hh, ll)
 }
 
-/// Rolling minimum over the values present in each window.
-///
-/// NaN-free data takes the O(n) van Herk fast path; otherwise an ascending
-/// monotonic deque of indices (the front is always the window minimum). NaNs are
-/// never enqueued, so a window is `NaN` only when it holds no present value —
-/// matching the original per-window scan.
-#[inline]
-pub fn rolling_min(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+/// A rolling extremum (`reduce` / its identity `ident`) over `period`: the O(n) van Herk
+/// sweep, its zero made `+0` ([`canonical_zero`]), then every window holding a missing
+/// value blanked (each window's prefix / suffix reads only its own rows, so a missing
+/// value reaches only those windows). A strided view is gathered first. Inlined into
+/// [`rolling_min`] / [`rolling_max`] (the hot-path gate counts their bodies).
+#[inline(always)]
+fn rolling_extremum(
+    data: ArrayView1<f64>,
+    period: usize,
+    reduce: impl Fn(f64, f64) -> f64,
+    ident: f64,
+) -> Array1<f64> {
     let n = data.len();
     let mut result = Array1::from_elem(n, f64::NAN);
     if period == 0 || period > n {
         return result;
     }
-    // Fast path — no NaN: van Herk O(n) sliding extremum (no deque, no indirect
-    // reads). ~2.3x faster than the deque for typical periods and, unlike a
-    // track-and-rescan, never degrades to O(n·period). The common OHLCV case.
-    if let Some(src) = data.as_slice() {
-        if !src.iter().any(|x| x.is_nan()) {
-            let dst = result.as_slice_mut().expect("from_elem is contiguous");
-            van_herk(src, period, dst, |a, b| a.min(b), f64::INFINITY);
-            return result;
-        }
+    let src: Cow<[f64]> = match data.as_slice() {
+        Some(s) => Cow::Borrowed(s),
+        None => Cow::Owned(data.to_vec()),
+    };
+    let dst = result.as_slice_mut().expect("from_elem is contiguous");
+    van_herk(&src, period, dst, reduce, ident);
+    for v in dst.iter_mut() {
+        *v = canonical_zero(*v);
     }
-    let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
-    for i in 0..n {
-        while let Some(&front) = dq.front() {
-            if front + period <= i {
-                dq.pop_front();
-            } else {
-                break;
-            }
-        }
-        let x = data[i];
-        if !x.is_nan() {
-            while let Some(&back) = dq.back() {
-                if data[back] >= x {
-                    dq.pop_back();
-                } else {
-                    break;
-                }
-            }
-            dq.push_back(i);
-        }
-        if i + 1 >= period {
-            if let Some(&front) = dq.front() {
-                result[i] = data[front];
-            }
-        }
-    }
+    missing::blank_windows(dst, &src, period);
     result
 }
 
-/// Rolling maximum over the values present in each window.
+/// Rolling minimum over `period` (NaN while the window holds a missing value).
 ///
-/// O(n) via a descending monotonic deque of indices (mirror of [`rolling_min`]).
-#[inline]
+/// O(n) van Herk sliding extremum — no deque, no indirect reads, and unlike a
+/// track-and-rescan it never degrades to O(n·period).
+pub fn rolling_min(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+    rolling_extremum(data, period, f64::min, f64::INFINITY)
+}
+
+/// Rolling maximum over `period` (NaN while the window holds a missing value) — the
+/// mirror of [`rolling_min`].
 pub fn rolling_max(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    let n = data.len();
-    let mut result = Array1::from_elem(n, f64::NAN);
-    if period == 0 || period > n {
-        return result;
-    }
-    // Fast path — no NaN: van Herk O(n) sliding max (mirror of `rolling_min`).
-    if let Some(src) = data.as_slice() {
-        if !src.iter().any(|x| x.is_nan()) {
-            let dst = result.as_slice_mut().expect("from_elem is contiguous");
-            van_herk(src, period, dst, |a, b| a.max(b), f64::NEG_INFINITY);
-            return result;
-        }
-    }
-    let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
-    for i in 0..n {
-        while let Some(&front) = dq.front() {
-            if front + period <= i {
-                dq.pop_front();
-            } else {
-                break;
-            }
-        }
-        let x = data[i];
-        if !x.is_nan() {
-            while let Some(&back) = dq.back() {
-                if data[back] <= x {
-                    dq.pop_back();
-                } else {
-                    break;
-                }
-            }
-            dq.push_back(i);
-        }
-        if i + 1 >= period {
-            if let Some(&front) = dq.front() {
-                result[i] = data[front];
-            }
-        }
-    }
-    result
+    rolling_extremum(data, period, f64::max, f64::NEG_INFINITY)
 }
 
 /// One row of [`sma`] over the series `term`, resumed from `slide` (rows `0..i` slid):
@@ -672,7 +653,7 @@ mod tests {
 
     // --- O(n) rewrite safety net -------------------------------------------
     // Independent naive (re-scan-every-window) oracles. The fast sliding /
-    // deque kernels MUST match these 1:1 (NaN-aware), including interior NaNs
+    // van Herk kernels MUST match these 1:1 (NaN-aware), including interior NaNs
     // that slide through a window — the case real OHLCV parity data never hits.
 
     fn av(s: &[f64]) -> ArrayView1<'_, f64> {
@@ -723,14 +704,11 @@ mod tests {
             } else {
                 f64::INFINITY
             };
-            let mut any = false;
-            for &x in &d[i + 1 - p..=i] {
-                if !x.is_nan() {
+            let w = &d[i + 1 - p..=i];
+            if w.iter().all(|x| !x.is_nan()) {
+                for &x in w {
                     acc = if max { acc.max(x) } else { acc.min(x) };
-                    any = true;
                 }
-            }
-            if any {
                 out[i] = acc;
             }
         }
@@ -804,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn rolling_min_deque_resurfaces_after_min_leaves_window() {
+    fn rolling_min_resurfaces_after_min_leaves_window() {
         // when the running min leaves the window, the next-smallest must surface
         let z = [5.0, 1.0, 2.0, 3.0, 4.0, 6.0];
         let m = rolling_min(av(&z), 3).to_vec();
@@ -814,14 +792,21 @@ mod tests {
         assert_eq!(&x[2..], &[5.0, 3.0, 4.0, 6.0]);
     }
 
+    /// A window holding a missing value is missing — the extremum never steps over it
+    /// (`llv:3` on `[5, 4, NaN, 6, 7, 8]` is `[nan, nan, nan, nan, nan, 6]`) — and the
+    /// windows after it are exactly the clean ones.
     #[test]
-    fn all_nan_window_is_nan_for_minmax() {
+    fn a_window_holding_a_missing_value_is_missing_for_minmax() {
+        let d = [5.0, 4.0, f64::NAN, 6.0, 7.0, 8.0];
+        let m = rolling_min(av(&d), 3).to_vec();
+        assert!(m[..5].iter().all(|x| x.is_nan()));
+        assert_eq!(m[5], 6.0);
+        let x = rolling_max(av(&d), 3).to_vec();
+        assert!(x[..5].iter().all(|x| x.is_nan()));
+        assert_eq!(x[5], 8.0);
         let d = [f64::NAN, f64::NAN, 1.0, f64::NAN, f64::NAN];
-        let m = rolling_min(av(&d), 2).to_vec();
-        assert!(m[1].is_nan());
-        assert_eq!(m[2], 1.0);
-        assert_eq!(m[3], 1.0);
-        assert!(m[4].is_nan());
+        assert!(rolling_min(av(&d), 2).iter().all(|x| x.is_nan()));
+        assert_eq!(rolling_max(av(&d), 1).to_vec()[2], 1.0);
     }
 
     /// Edge / dual-path branches the production callers never reach: a kernel's
@@ -856,12 +841,14 @@ mod tests {
             .iter()
             .all(|x| x.is_nan()));
 
-        // rolling_max_min: invalid period, then the interior-NaN fallback to the deque.
+        // rolling_max_min: invalid period, then an interior missing value, blanked in
+        // the windows holding it only.
         let (hh, ll) = rolling_max_min(&[1.0, 2.0], &[1.0, 2.0], 0);
         assert!(hh.iter().all(|x| x.is_nan()) && ll.iter().all(|x| x.is_nan()));
         let (hh, ll) = rolling_max_min(&[1.0, f64::NAN, 3.0, 4.0], &[1.0, 2.0, 3.0, 4.0], 2);
+        assert!(hh[1].is_nan() && hh[2].is_nan());
         assert_eq!(hh[3], 4.0);
-        assert_eq!(ll[3], 3.0);
+        assert_eq!(ll[1..], [1.0, 2.0, 3.0]);
 
         // rolling_min / rolling_max: zero period and period > n.
         assert!(rolling_min(av(&[1.0]), 0).iter().all(|x| x.is_nan()));
@@ -883,8 +870,8 @@ mod tests {
         let strided = arr.slice(ndarray::s![..;2]); // [1, 2, 3, 4], stride 2
         assert!(!strided.is_standard_layout() || strided.as_slice().is_none());
         let _ = sma(strided, 2, 0);
-        let _ = rolling_min(strided, 2);
-        let _ = rolling_max(strided, 2);
+        assert_eq!(rolling_min(strided, 2).to_vec()[1..], [1.0, 2.0, 3.0]);
+        assert_eq!(rolling_max(strided, 2).to_vec()[1..], [2.0, 3.0, 4.0]);
         let _ = rolling_std(strided, 2, 1, 0);
         let _ = rolling_mean_std(strided, 2, 0, 0);
 

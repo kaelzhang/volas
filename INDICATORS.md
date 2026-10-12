@@ -33,48 +33,9 @@ no standard at all. `df[d]` and `directive_lookback` reject a directive that omi
 required argument; `directive_stringify` accepts it, because it only names the
 indicator. A trailing colon with nothing after it (`obv:`) means no arguments.
 
-<a id="missing-and-non-finite-inputs"></a>**Missing and non-finite inputs.** A missing row (NaN) or an infinite one affects only
-the outputs whose definition reads it:
-
-- An indicator over a **finite window** (a moving average, a rolling sum / variance /
-  regression, an oscillator built from windowed sums, …) gives, for a window holding
-  a bad row, the value its formula takes on that window — NaN when the window holds a
-  NaN, the mathematical result when it holds an infinity (`±inf` for a sum or mean,
-  NaN for a variance). Once that row has left the window, every output is exactly
-  what clean data gives.
-- A **leading run of missing rows** is not data: every indicator treats the series as
-  starting after it, so a series with a missing head matches the same series started
-  later.
-- A **recursive** indicator (the EMA family and its cascades — DEMA / TEMA / T3 /
-  TRIX / MACD —, Wilder smoothing — RSI / ATR / ADX / CMO —, cumulative lines such as
-  OBV / AD / PVT / NVI / PVI / WAD / ASI, KAMA, SAR, Supertrend, Keltner, TSI, the
-  Hilbert transform and MAMA, and any command whose MA-type argument selects a
-  recursive average) skips a missing row: a row where **any** of its inputs is NaN
-  outputs NaN, and the recursion continues from the last complete row as if that row
-  did not exist. Its output equals the indicator run on the series with those rows
-  deleted, NaN put back at their positions. The live paths follow the same rule — an
-  append, the forming bar of a `time_frame` frame and a period rollover all leave the
-  carried state at the last complete row when a new bar is missing. An infinity is a
-  value, not a missing row. This diverges from TA-Lib, which carries a NaN into every
-  later output of a recursive indicator.
-
-<a id="exact-window-sums"></a>**Exact window sums.** An indicator built on a sliding sum
-(a moving average, a rolling sum, variance, regression, correlation, the sums of CCI /
-MFI / IMI / ULTOSC / VWMA / CMF / …, KAMA's sum of changes) slides it by adding the
-entering row and subtracting the leaving one. volas keeps that sum exact: it carries
-the rounding error of every step (compensated summation), and it recomputes the sum from
-the window's own rows at every row whose absolute position in the series is a multiple
-of the window length. So a window's value is that of its own rows, however long the
-history: after `close = [1e20, 1, 2, 3, 4, 5]`, `ma:2` is `[nan, 5e19, 1.5, 2.5, 3.5,
-4.5]`; a flat window's `stddev` is exactly `0` and its `ma` exactly its value, after any
-history; and once a bad row has left the window and the next anchor has passed, every
-output is bit-identical to clean data's. TA-Lib's plain running sums give `[nan, 5e19,
-1, 2, 3, 4]` for the example above (every window after the spike stays wrong) and drift
-over a long history; volas follows the exact values instead, so on such data the two
-differ. A row's absolute position is kept by a contiguous slice and by a bounded
-(`window=`) frame dropping its head, so they compute exactly what the full series does —
-the position indicators (`maxindex`, `minindex`, `minmaxindex`) included: they report
-the series' own positions, on a slice as on the full frame.
+**Input data.** How an indicator treats a missing (NaN) or infinite input, and how its
+sliding sums stay exact over any history, is one set of rules for every indicator — see
+[Missing values and exact window sums](docs/indicator-inputs.md).
 
 ## Volas-exclusive indicators
 
@@ -153,7 +114,9 @@ df['(boll.upper - boll.lower) / boll']
 rsv:<period>@<high>,<low>,<close>
 ```
 
-Calculates the raw stochastic value, which is often used to calculate KDJ.
+Calculates the raw stochastic value, which is often used to calculate KDJ:
+`100·(close − LLV(low, period)) / (HHV(high, period) − LLV(low, period))`, `0` for a flat
+range. The rows before the first full window are NaN (warm-up).
 
 - **period** `int` (required)
 - **high?** `str='high'` The column name for high prices.
@@ -184,6 +147,11 @@ RSV = rsv(period_rsv)
 The EWMA here is seeded by `init_value`. Trading software from different vendors
 usually uses one of `0.0`, `50.0`, or `100.0` as the initial value; Volas defaults
 to `50.0`.
+
+Before the first full `period_rsv` window, KDJ's RSV covers the bars available so far
+(the 通达信 convention: `LLV` / `HHV` of fewer bars than the period reduce what there is),
+so %K is seeded from real values from the very first bar. This differs from
+stock-pandas, which feeds an RSV of `0` into the first `period_rsv − 1` bars.
 
 ```
 kdj.k:<period_rsv>,<period_k>,<init_value>@<high>,<low>,<close>

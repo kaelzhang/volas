@@ -655,7 +655,7 @@ fn is_recursive_name(name: &str) -> bool {
         "ema" | "smma" | "dema" | "tema" | "t3" | "kama" | "macd" | "macdfix" | "kdj"
             | "rsi" | "crsi" | "stochrsi" | "cmo" | "trix" | "pvt" | "nvi" | "pvi" | "obv"
             | "ad" | "adosc" | "mass_index" | "efi" | "tsi" | "keltner" | "kcw"
-            | "stoch_momentum" | "ttm_squeeze" | "wad" | "asi" | "supertrend" | "atr"
+            | "stoch_momentum" | "wad" | "asi" | "supertrend" | "atr"
             | "natr" | "plus_dm" | "minus_dm" | "plus_di" | "minus_di" | "dx" | "adx"
             | "adxr" | "sar" | "sarext" | "ht_dcperiod" | "ht_dcphase" | "ht_phasor"
             | "ht_sine" | "ht_trendline" | "ht_trendmode" | "mama"
@@ -708,8 +708,8 @@ pub fn accumulates(name: &str, sub: Option<&str>) -> bool {
                 | "cog" | "coppock" | "correl" | "dkx" | "dma" | "dpo" | "emv" | "hma" | "hv"
                 | "imi" | "kst" | "linearreg" | "linearreg_angle" | "linearreg_intercept"
                 | "linearreg_slope" | "ma" | "macdext" | "mavp" | "mfi" | "ppo"
-                | "relative_vigor" | "stddev" | "stoch" | "sum" | "trima" | "tsf" | "ultosc"
-                | "var" | "vr" | "vwma" | "wma" | "wvad"
+                | "relative_vigor" | "stddev" | "stoch" | "sum" | "trima" | "tsf"
+                | "ttm_squeeze" | "ultosc" | "var" | "vr" | "vwma" | "wma" | "wvad"
         ),
     }
 }
@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn no_recursive_command_emits_a_position() {
         let recursive = COMMANDS.iter().filter(|c| is_recursive_name(c));
-        assert_eq!(recursive.clone().count(), 48);
+        assert_eq!(recursive.clone().count(), 47);
         assert!(recursive.into_iter().all(|c| !emits_position(c)));
         for name in ["ma", "apo", "ppo", "mavp", "stochf", "macdext", "stoch"] {
             assert!(!emits_position(name));

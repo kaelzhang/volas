@@ -58,3 +58,26 @@ def test_directive_matches_reference(ohlcv, directive, fn, tol):
         raise
     want = _reference(fn, ohlcv)
     np.testing.assert_allclose(got, want, rtol=tol, atol=tol, equal_nan=True)
+
+
+# Interior missing values: whole bars and single inputs, inside and past every warm-up.
+_MISSING = {'close': [120, 200, 270], 'high': [160, 270], 'low': [230, 270], 'volume': [180, 270],
+            'open': [250, 270]}
+
+
+@pytest.fixture(scope="module")
+def ohlcv_missing(ohlcv):
+    cols = {k: v.copy() for k, v in ohlcv.items()}
+    for k, rows in _MISSING.items():
+        cols[k][rows] = np.nan
+    return cols
+
+
+@pytest.mark.parametrize('directive,fn,tol', oref.CASES, ids=[c[0] for c in oref.CASES])
+def test_directive_matches_reference_on_missing_rows(ohlcv_missing, directive, fn, tol):
+    """With interior missing values the directive still matches its reference, which
+    follows the documented rules on its own: a finite window holding a missing row is
+    missing, a recursive indicator skips a row missing any input it reads."""
+    got = np.asarray(DataFrame(dict(ohlcv_missing))[directive].to_numpy(), dtype=float)
+    want = _reference(fn, ohlcv_missing)
+    np.testing.assert_allclose(got, want, rtol=tol, atol=tol, equal_nan=True)
