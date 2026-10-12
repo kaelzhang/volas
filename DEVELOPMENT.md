@@ -50,8 +50,11 @@ POSIX TZ string, as Python's `zoneinfo` does), which
 python scripts/gen_tz_footers.py
 ```
 
-Until you do, the `footers_*` tests in `volas-core` fail: they check that the file comes
-from the bundled release and that each footer continues the table exactly.
+The file's header records the tzdb release and the `zic` that compiled it (the current
+file: tzdb 2025b, `zic (tzcode) 2022g`, the one macOS ships). Any `zic` that compiles the
+release will do: the `footers_*` tests in `volas-core` check that the file comes from the
+bundled release and that each footer continues the table exactly, so they fail until the
+file is regenerated after an upgrade.
 
 ### Releasing
 
