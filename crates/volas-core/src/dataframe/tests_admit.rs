@@ -253,6 +253,13 @@ fn cached_directive_columns_are_never_appended() {
     // the data columns alone are appended, the cached one goes stale
     df.append(&frame(&["close"], vec![Column::f64(vec![2.0])], Index::range(1))).unwrap();
     assert!(df.has_stale_computed());
+    // looked up from either side: more cached columns than the rows carry, out of order
+    let mut wide = frame(&["a", "b", "c1", "c2"], vec![Column::f64(vec![1.0]); 4], Index::range(1));
+    wide.set_computed("c1", 0);
+    wide.set_computed("c2", 0);
+    wide.append(&frame(&["b"], vec![Column::f64(vec![2.0])], Index::range(1))).unwrap();
+    assert!(wide.append(&frame(&["c2"], vec![Column::f64(vec![2.0])], Index::range(1))).is_err());
+    assert_eq!(wide.height(), 2);
     // names are written as Python writes them
     assert_eq!(py_list(&["a'b", "c\"d'", "e\\\n\u{1}"]), r#"["a'b", 'c"d\'', 'e\\\n\x01']"#);
     assert_eq!(py_list(&["\r\t"]), r#"['\r\t']"#);
