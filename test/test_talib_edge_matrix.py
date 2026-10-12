@@ -10,7 +10,8 @@ The oracle is TA-Lib itself, applied under volas's documented missing-value rule
 * a finite-window command's value depends on its own window only, so its oracle is
   TA-Lib over exactly that window (NaN when the window holds a missing value).
 
-The Hilbert family is compared bit for bit; everything else to 1e-9.
+The Hilbert family and ±DM / ±DI / DX are compared bit for bit; everything else to 1e-9
+(ADX's average holds a multiply-add a contracting TA-Lib build fuses).
 """
 
 from __future__ import annotations
@@ -75,10 +76,15 @@ MATRIX = {
     'rsi:14': ((C,), lambda c: talib.RSI(c, 14), True, False),
     'cmo:14': ((C,), lambda c: talib.CMO(c, 14), True, False),
     'natr:14': ((H, L, C), lambda h, l, c: talib.NATR(h, l, c, 14), True, False),
-    'plus_dm:1': ((H, L), lambda h, l: talib.PLUS_DM(h, l, 1), True, False),
-    'plus_dm:14': ((H, L), lambda h, l: talib.PLUS_DM(h, l, 14), True, False),
-    'minus_dm:1': ((H, L), lambda h, l: talib.MINUS_DM(h, l, 1), True, False),
-    'minus_dm:14': ((H, L), lambda h, l: talib.MINUS_DM(h, l, 14), True, False),
+    'plus_dm:1': ((H, L), lambda h, l: talib.PLUS_DM(h, l, 1), True, True),
+    'plus_dm:14': ((H, L), lambda h, l: talib.PLUS_DM(h, l, 14), True, True),
+    'minus_dm:1': ((H, L), lambda h, l: talib.MINUS_DM(h, l, 1), True, True),
+    'minus_dm:14': ((H, L), lambda h, l: talib.MINUS_DM(h, l, 14), True, True),
+    'plus_di:14': ((H, L, C), lambda h, l, c: talib.PLUS_DI(h, l, c, 14), True, True),
+    'minus_di:14': ((H, L, C), lambda h, l, c: talib.MINUS_DI(h, l, c, 14), True, True),
+    'dx:14': ((H, L, C), lambda h, l, c: talib.DX(h, l, c, 14), True, True),
+    'adx:14': ((H, L, C), lambda h, l, c: talib.ADX(h, l, c, 14), True, False),
+    'adxr:14': ((H, L, C), lambda h, l, c: talib.ADXR(h, l, c, 14), True, False),
     'obv': ((C, V), lambda c, v: talib.OBV(c, v), True, False),
     'ad': ((H, L, C, V), lambda h, l, c, v: talib.AD(h, l, c, v), True, False),
     'adosc:3,10': ((H, L, C, V), lambda h, l, c, v: talib.ADOSC(h, l, c, v, 3, 10), True, False),
@@ -102,11 +108,6 @@ MATRIX = {
 
 # Finite-window commands whose first window row is read only as the prior close.
 PRIOR_CLOSE = {'ultosc:7,14,28'}
-
-# The Wilder-sum smoothing of ±DM (period >= 2) folds `s·(1 − 1/p) + term` where TA-Lib
-# writes `s − s/p + term`: after an infinite movement TA-Lib's sum is NaN for good, volas's
-# inf. Both are poisoned; the evaluation order of the directional family is its own item.
-OPEN = {('plus_dm:14', 'infinite'), ('minus_dm:14', 'infinite')}
 
 
 def _oracle(directive, data):
@@ -134,11 +135,7 @@ def _oracle(directive, data):
     return out
 
 
-CASES = [
-    pytest.param(d, s, id=f'{d}-{s}', marks=[pytest.mark.xfail(strict=True, reason='Wilder-sum order')]
-                 if (d, s) in OPEN else [])
-    for d in MATRIX for s in DATASETS
-]
+CASES = [pytest.param(d, s, id=f'{d}-{s}') for d in MATRIX for s in DATASETS]
 
 
 @pytest.mark.parametrize('directive,dataset', CASES)

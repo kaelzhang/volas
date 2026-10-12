@@ -815,6 +815,24 @@ as text, losslessly — pandas reads `uint64` / `object` or rounds to float64. A
 `nan` token that is not an NA token (`keep_default_na=False`) is text, and an NA
 token in a `True` / `False` column is a missing bool rather than a literal.
 
+## Float `round` is the correctly rounded decimal
+
+pandas rounds a float column through NumPy, which scales by a float `10^k`, rounds to an
+integer and scales back. Each step rounds, so the result is not the decimal value asked
+for: `2.675` (stored as `2.67499999…`) rounds to `2.68`, `1e300` at 10 places becomes
+`inf` (the scaled value overflows) and any value at 400 places becomes `NaN`. volas
+returns Python's `round`: the float nearest to the exact value rounded half-to-even at
+the `k`-th decimal place (for float32, the float32 nearest to that decimal). A value
+whose scaled form would overflow is already whole at that precision and comes back
+unchanged, and a result past the dtype's range raises `OverflowError` like Python's
+(`round(1.7e308, -308)` is `2e308`).
+
+```py
+>>> s = volas.DataFrame({'x': [2.675, 1e300, 1.25]})['x']
+>>> s.round(2).to_list(), s.round(10).to_list()[1], s.round(400).to_list()[2]
+([2.67, 1e+300, 1.25], 1e+300, 1.25)
+```
+
 ## A missing value has no truth value
 
 `&` / `|` / `^` / `~` use Kleene logic over every dtype: a missing operand — a

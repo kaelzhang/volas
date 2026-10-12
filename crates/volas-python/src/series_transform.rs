@@ -335,10 +335,12 @@ impl PySeries {
         Ok(col_to_series(&self.inner, self.inner.data.cumprod().map_err(pyerr)?))
     }
 
-    /// Round each value to `decimals` places (pandas `round`), dtype-preserving:
-    /// banker's (half-to-even) for floats, integer-exact for ints; NaN stays NaN.
-    #[pyo3(signature = (decimals = 0))]
-    pub(crate) fn round(&self, decimals: i32) -> PyResult<PySeries> {
+    /// Round each value to `decimals` places (any int; pandas `round`), dtype-preserving:
+    /// the correctly rounded decimal for floats (Python's `round`), integer-exact for
+    /// ints; NaN stays NaN.
+    #[pyo3(signature = (decimals = DecimalPlaces(0)))]
+    pub(crate) fn round(&self, decimals: DecimalPlaces) -> PyResult<PySeries> {
+        let decimals = decimals.0;
         Ok(col_to_series(&self.inner, self.inner.data.round(decimals).map_err(pyerr)?))
     }
 

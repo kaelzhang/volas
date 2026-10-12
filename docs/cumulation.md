@@ -322,7 +322,8 @@ HK and A-share equity frames coexist and align on the absolute instant. A
 those instants render, how bare-string labels match, and how `cumulate` aligns
 day-and-coarser buckets. A timezone is either a **fixed offset** (`'+08:00'`,
 cheap; A-share / HK equities) or a **named IANA zone** (`'America/New_York'`,
-DST-aware via `chrono-tz`; US / EU). The default is UTC.
+DST-aware via `chrono-tz`; US / EU — past 2099 each zone follows its tzdb rule, as
+Python's `zoneinfo` does). The default is UTC.
 
 Here is the whole picture. Build a `DatetimeIndex` by parsing a column with
 `to_datetime`, promoting it with `set_index`, then tagging the display zone with

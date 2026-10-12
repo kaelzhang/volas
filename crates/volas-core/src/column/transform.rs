@@ -2,6 +2,7 @@
 //! shift/diff, fillna/ffill, and the conditional `select`.
 
 use super::*;
+use crate::decimal;
 
 impl Column {
     /// Cumulative sum (pandas `cumsum`, skipna), dtype-preserving (`bool` -> int64
@@ -86,29 +87,25 @@ impl Column {
         }
     }
 
-    /// Round to `decimals` places (pandas `round`), dtype-preserving: banker's
-    /// (half-to-even) for floats, and for ints an identity at `decimals >= 0` or a
-    /// banker's round to the nearest power-of-ten multiple at negative `decimals`.
+    /// Round to `decimals` places (pandas `round`), dtype-preserving: for floats the
+    /// correctly rounded decimal ([`decimal::round`]: half-to-even on the exact value,
+    /// Python's `round`), and for ints an identity at `decimals >= 0` or a banker's round
+    /// to the nearest power-of-ten multiple at negative `decimals`. A result past the
+    /// dtype's range is an overflow.
     pub fn round(&self, decimals: i32) -> Result<Column> {
         match self {
-            Column::F64(v) => Ok(Column::f64(
-                v.iter().map(|&x| round_f64(x, decimals)).collect(),
-            )),
-            Column::F32(v) => Ok(Column::f32(
-                v.iter()
-                    .map(|&x| round_f64(x as f64, decimals) as f32)
-                    .collect(),
-            )),
+            Column::F64(v) => Ok(Column::f64(round_floats(v, decimals)?)),
+            Column::F32(v) => Ok(Column::f32(round_floats(v, decimals)?)),
             // a power-of-ten multiple past the dtype's range is an overflow (#25)
             Column::I64(v, val) => Ok(Column::i64_masked(
-                map_present(v, val, |x| round_i64(x, decimals), "round")?,
+                map_present(v, val, |x| decimal::round_i64(x, decimals), "round")?,
                 val.clone(),
             )),
             Column::I32(v, val) => Ok(Column::i32_masked(
                 map_present(
                     v,
                     val,
-                    |x| round_i64(x as i64, decimals).and_then(|r| i32::try_from(r).ok()),
+                    |x| decimal::round_i64(x as i64, decimals).and_then(|r| i32::try_from(r).ok()),
                     "round",
                 )?,
                 val.clone(),
@@ -437,4 +434,10 @@ impl Column {
             }),
         )
     }
+}
+
+/// Each float rounded to `decimals` places ([`decimal::round`]); a result past the
+/// dtype's range is an overflow.
+fn round_floats<F: decimal::RoundFloat + Numeric>(v: &[F], decimals: i32) -> Result<Vec<F>> {
+    decimal::round_slice(v, decimals).ok_or_else(|| overflow(F::DTYPE, "round"))
 }
