@@ -90,7 +90,9 @@ pub fn change(data: &[f64], period: usize) -> Vec<f64> {
     let shift = period - 1;
     for i in shift..n {
         let prev = data[i - shift];
-        if prev.abs() > 1e-10 {
+        // An exact zero test, as TA-Lib's ROCP / ROCR: an absolute threshold would
+        // drop the real changes of a tiny-priced series. A zero base stays NaN.
+        if prev != 0.0 {
             result[i] = data[i] / prev - 1.0;
         }
     }

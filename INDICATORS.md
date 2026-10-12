@@ -959,7 +959,8 @@ default, which is useful when comparing percentage change in a time series of
 prices.
 
 - **period?** `int=2` `2` means the start value and the end value of a two-period
-  window are compared.
+  window are compared. A start value of exactly zero gives NaN; any other start value,
+  however small, gives its change.
 - **on?** `str='close'` Which column or directive the calculation is based on.
 
 ```py
@@ -1439,8 +1440,8 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-macdfix-histogram"></a>`macdfix.histogram` | `MACDFIX` | Histogram of the Volas fixed 12/26 MACD line. | `:<signal=9>@<series=close>` |
 | <a id="indicator-apo"></a>`apo` | `APO` | Absolute price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
 | <a id="indicator-ppo"></a>`ppo` | `PPO` | Percentage price oscillator. | `:<fast=12>,<slow=26>,<matype=0>@<series=close>` |
-| <a id="indicator-rsi"></a>`rsi` | `RSI` | Relative Strength Index. | `:<period>@<series=close>` |
-| <a id="indicator-cmo"></a>`cmo` | `CMO` | Chande Momentum Oscillator. | `:<period>@<series=close>` |
+| <a id="indicator-rsi"></a>`rsi` | `RSI` | Relative Strength Index, TA-Lib's `100·avgGain/(avgGain+avgLoss)`. A flat window (`avgGain + avgLoss` exactly 0, a constant or all-falling series) gives 0 as in TA-Lib; TA-Lib's absolute `1e-14` zero test is not used, so a tiny-priced series keeps the value it has at any other scale (a deliberate divergence). | `:<period>@<series=close>` |
+| <a id="indicator-cmo"></a>`cmo` | `CMO` | Chande Momentum Oscillator. A flat window gives 0, with RSI's exact zero test. | `:<period>@<series=close>` |
 | <a id="indicator-cci"></a>`cci` | `CCI` | Commodity Channel Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-imi"></a>`imi` | `IMI` | Intraday Momentum Index. | `:<period>@<series_open=open>,<series_close=close>` |
 | <a id="indicator-mfi"></a>`mfi` | `MFI` | Money Flow Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
