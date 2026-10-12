@@ -114,6 +114,8 @@ _BOUND_PATTERNS = [
     (re.compile(r'must be a finite number > (-?[\d.]+)'), lambda m: ArgDomain('float', float(m[1]) + 1e-3, float(m[1]) + 5)),
     (re.compile(r'must be a number in \[(-?[\d.]+), (-?[\d.]+)\]'), lambda m: ArgDomain('float', float(m[1]), float(m[2]))),
     (re.compile(r'must be a finite number'), lambda m: ArgDomain('float', -5.0, 5.0)),
+    (re.compile(r'must be a time-frame label'), lambda m: ArgDomain(
+        'str', choices=tuple(str(getattr(volas.TimeFrame, a)) for a in ('m1', 'm5', 'H1', 'D1')))),
 ]
 
 
@@ -123,8 +125,7 @@ def _parse_domain(err: str, i: int) -> ArgDomain:
             m = pattern.search(err)
             if m:
                 return build(m)
-    # The validator accepted a free token: a string argument (a time frame for `hv`).
-    return ArgDomain('str', choices=tuple(str(getattr(volas.TimeFrame, a)) for a in ('m1', 'm5', 'H1', 'D1')))
+    raise AssertionError(f'argument #{i}: unrecognised domain in {err!r}')
 
 
 def _arity(head: str) -> int:

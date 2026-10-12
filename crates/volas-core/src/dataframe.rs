@@ -366,19 +366,15 @@ impl DataFrame {
                 cur.name()
             )));
         }
-        let mut shifted = Vec::with_capacity(values.len());
-        for ns in values {
-            let (y, mo, d, h, mi, s) = cur.civil_parts(ns);
-            let new = tz
-                .wall_to_utc_ns(y as i32, mo as u32, d as u32, h as u32, mi as u32, s as u32)
-                .ok_or_else(|| {
-                    VolasError::Value(format!(
-                        "wall-clock {y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02} does not exist in {} (or is DST-ambiguous)",
-                        tz.name()
-                    ))
-                })?;
-            shifted.push(new);
-        }
+        // `Tz` owns the wall clock -> instant conversion (sub-second digits kept; a
+        // DST gap / fold or an instant past the range raises); a NaT label stays NaT.
+        let shifted = values
+            .iter()
+            .map(|&ns| match ns {
+                crate::datetime::NAT => Ok(ns),
+                _ => tz.localize_from(ns, cur),
+            })
+            .collect::<Result<Vec<i64>>>()?;
         let mut df = self.clone();
         // tz_localize moves the instants but keeps the index identity (and name).
         df.index = Arc::new(Index::datetime(shifted, tz).with_name(self.index.name().map(String::from)));

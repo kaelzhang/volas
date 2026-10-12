@@ -692,21 +692,27 @@ fn round_f64(x: f64, decimals: i32) -> f64 {
 /// Round an int to `decimals` places: identity for `decimals >= 0`; for negative
 /// `decimals`, banker's round to the nearest `10^|decimals|` multiple (integer
 /// arithmetic, exact for all i64 — no f64 round-trip). `None` when that multiple
-/// lies past `i64` (`round(i64::MAX, -1)`), an overflow (contract #25).
+/// lies past `i64` (`round(i64::MAX, -1)`, or `round(6e18, -19)` = 1e19), an
+/// overflow (contract #25).
+///
+/// The rounding runs in `i128`, where `10^k` and the rounded multiple are exact
+/// for every `k` up to 38 — past `i64` from `k = 19` on, so the result's fit is
+/// checked rather than assumed. A `10^k` beyond `i128` (`k >= 39`) exceeds twice
+/// any `i64`, so every value rounds to 0 there.
 fn round_i64(x: i64, decimals: i32) -> Option<i64> {
     if decimals >= 0 {
         return Some(x);
     }
-    let factor = match 10i64.checked_pow(decimals.unsigned_abs()) {
-        Some(f) => f,
-        None => return Some(0), // 10^k beyond i64 -> everything rounds to 0
+    let Some(factor) = 10i128.checked_pow(decimals.unsigned_abs()) else {
+        return Some(0);
     };
+    let x = i128::from(x);
     let q = x.div_euclid(factor);
     let r = x.rem_euclid(factor); // 0..factor
     let half = factor / 2; // factor = 10^k is even, so this is exact
     let up = r > half || (r == half && q.rem_euclid(2) != 0); // tie -> even multiple
-    // q = x / 10^k with k >= 1, so q + 1 cannot overflow; the product can.
-    if up { q + 1 } else { q }.checked_mul(factor)
+    // |(q + 1) * factor| <= |x| + factor < 2^63 + 10^38 < 2^127: exact in i128
+    i64::try_from((q + i128::from(up)) * factor).ok()
 }
 
 /// Clamp each element to `[lo, hi]` (either optional); missing passes through.

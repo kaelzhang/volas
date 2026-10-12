@@ -83,12 +83,12 @@ impl Cumulator {
             ));
         }
 
-        let runs = group_runs(&ts, self.tf, tz);
+        let runs = group_runs(&ts, self.tf, tz)?;
         let last = runs.len() - 1;
 
         // Finalize every run except the last.
         for &(a, b) in &runs[..last] {
-            let coarse = aggregate_period(&raw.slice(a, b), &self.spec, self.tf)?;
+            let coarse = aggregate_period(&raw.slice(a, b), &self.spec, self.tf, tz)?;
             self.closed = Some(match self.closed.take() {
                 Some(mut closed) => {
                     closed.append(&coarse)?;
@@ -108,7 +108,7 @@ impl Cumulator {
     /// aggregated as the (live) last row.
     pub fn frame(&self) -> Result<DataFrame> {
         let open_coarse = match &self.open {
-            Some(open) => Some(aggregate_period(open, &self.spec, self.tf)?),
+            Some(open) => Some(aggregate_period(open, &self.spec, self.tf, grid_tz(open))?),
             None => None,
         };
         match (&self.closed, open_coarse) {
@@ -127,7 +127,7 @@ impl Cumulator {
     /// `None` if nothing is open. O(open period) — for live tick reads.
     pub fn last(&self) -> Result<Option<DataFrame>> {
         match &self.open {
-            Some(open) => Ok(Some(aggregate_period(open, &self.spec, self.tf)?)),
+            Some(open) => Ok(Some(aggregate_period(open, &self.spec, self.tf, grid_tz(open))?)),
             None => Ok(None),
         }
     }
@@ -147,14 +147,23 @@ pub fn cumulate(df: &DataFrame, tf: TimeFrame, spec: &AggSpec) -> Result<DataFra
     cumulator.frame()
 }
 
-/// Split a sorted timestamp slice into `[start, end)` runs of equal period key,
-/// bucketing in `tz`'s wall-clock so hour+ periods align to the local trading day.
-fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Vec<(usize, usize)> {
+/// The zone owning the period grid of the cumulator's own bars: their index zone
+/// (every bar it holds went through the datetime-index check of `append`).
+fn grid_tz(bars: &DataFrame) -> Tz {
+    match bars.index().kind() {
+        IndexKind::Datetime(_, tz) => *tz,
+        _ => unreachable!("cumulator bars carry a DatetimeIndex"), // LCOV_EXCL_LINE
+    }
+}
+
+/// Split a sorted timestamp slice into `[start, end)` runs of the same period
+/// (equal [`TimeFrame::period_start`] on `tz`'s local grid).
+fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Result<Vec<(usize, usize)>> {
     let mut runs = Vec::new();
     let mut start = 0;
-    let mut key = tf.unify_tz(ts[0], tz);
+    let mut key = tf.period_start(ts[0], tz)?;
     for (i, &t) in ts.iter().enumerate().skip(1) {
-        let k = tf.unify_tz(t, tz);
+        let k = tf.period_start(t, tz)?;
         if k != key {
             runs.push((start, i));
             start = i;
@@ -162,7 +171,7 @@ fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Vec<(usize, usize)> {
         }
     }
     runs.push((start, ts.len()));
-    runs
+    Ok(runs)
 }
 
 /// Positions to keep when consecutive same-timestamp rows are deduped (keep the
@@ -174,15 +183,19 @@ fn dedup_keep_last(ts: &[i64]) -> Vec<usize> {
         .collect()
 }
 
-/// Aggregate one period's raw bars into a single coarse row (1-row frame). The
-/// index label is the period's grid **start** — `tf.period_start_ns` of the
-/// first raw timestamp (owner decision 2026-06-12: every TimeFrame has a fixed
-/// grid origin and a bar's label is origin + n·delta, e.g. a 15-minute bar
-/// labels :00/:15/:30/:45 — never the first raw timestamp, which can sit
-/// anywhere inside the period).
-pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame) -> Result<DataFrame> {
-    let (ts, tz): (&[i64], _) = match period.index().kind() {
-        IndexKind::Datetime(v, tz) => (v, *tz),
+/// Aggregate one period's raw bars into a single coarse row (1-row frame) on the
+/// period grid of `tz` — the zone that owns the grid (a tf frame's own zone, never
+/// an incoming bar's). The index label is the period's grid **start**,
+/// [`TimeFrame::period_start`] of the first raw timestamp (owner decision
+/// 2026-06-12: every TimeFrame has a fixed grid origin and a bar's label is
+/// origin + n·delta, e.g. a 15-minute bar labels :00/:15/:30/:45 — never the first
+/// raw timestamp, which can sit anywhere inside the period), in `tz`.
+pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame, tz: Tz) -> Result<DataFrame> {
+    let ts: &[i64] = match period.index().kind() {
+        IndexKind::Datetime(v, _) if !v.is_empty() => v,
+        IndexKind::Datetime(..) => {
+            return Err(VolasError::Value("cumulation period has no bars".into()))
+        }
         _ => {
             return Err(VolasError::Value(
                 "cumulation period must have a DatetimeIndex".into(),
@@ -190,7 +203,7 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame) -> Re
         }
     };
     let kept = dedup_keep_last(ts);
-    let start_ns = tf.period_start_ns(ts[kept[0]], tz);
+    let start_ns = tf.period_start(ts[kept[0]], tz)?;
 
     let names = period.names().to_vec();
     let mut columns = Vec::with_capacity(names.len());
@@ -364,7 +377,75 @@ mod tests {
     fn aggregate_period_rejects_non_datetime_index() {
         // append's guard shadows this one in the public path, so call it directly.
         let df = DataFrame::new(vec!["open".into()], vec![Column::f64(vec![1.0])], None).unwrap();
-        assert!(aggregate_period(&df, &AggSpec::ohlcv(), TimeFrame::Min5).is_err());
+        assert!(aggregate_period(&df, &AggSpec::ohlcv(), TimeFrame::Min5, Tz::Utc).is_err());
+        // an empty period has no bar to label: an error, not an index panic
+        let empty = frame(&[], &[], &[], &[], &[], &[]);
+        let err = aggregate_period(&empty, &AggSpec::ohlcv(), TimeFrame::Min5, Tz::Utc).unwrap_err();
+        assert!(err.to_string().contains("no bars"), "{err}");
+    }
+
+    /// The period grid belongs to the zone passed in, not to the bars' own index
+    /// zone: a UTC-indexed bar aggregated on a +08:00 grid starts at the +08:00
+    /// local midnight and carries that zone.
+    #[test]
+    fn aggregate_period_uses_the_grid_zone() {
+        let bar = frame(&["2024-01-02 20:00:00"], &[1.0], &[1.0], &[1.0], &[1.0], &[1.0]);
+        let sh = Tz::parse("+08:00").unwrap();
+        let out = aggregate_period(&bar, &AggSpec::ohlcv(), TimeFrame::Day1, sh).unwrap();
+        match out.index().kind() {
+            IndexKind::Datetime(v, tz) => {
+                // 20:00Z is 04:00 on 01-03 in +08:00, whose day starts at 01-02 16:00Z
+                assert_eq!(v, &vec![datetime::parse_ns("2024-01-02 16:00:00").unwrap()]);
+                assert_eq!(*tz, sh);
+            }
+            other => panic!("{other:?}"), // LCOV_EXCL_LINE
+        }
+    }
+
+    /// Sub-day periods follow real instants on the local grid: the repeated
+    /// 01:00 hour of a New York fall-back is two bars (pandas `resample('1h')`
+    /// gives the same two 01:00 bars), while the day stays one bar.
+    #[test]
+    fn dst_fall_back_repeated_hour_is_two_bars() {
+        let ny = Tz::parse("America/New_York").unwrap();
+        let mut times = Vec::new();
+        let mut t = datetime::parse_ns("2026-11-01 04:00:00").unwrap();
+        while t < datetime::parse_ns("2026-11-01 08:00:00").unwrap() {
+            times.push(t);
+            t += 60_000_000_000;
+        }
+        let n = times.len();
+        let df = DataFrame::new(
+            vec!["volume".into()],
+            vec![Column::f64(vec![1.0; n])],
+            Some(Index::datetime(times, ny)),
+        )
+        .unwrap();
+        let spec = AggSpec::ohlcv();
+        let hourly = cumulate(&df, TimeFrame::Hour1, &spec).unwrap();
+        let labels: Vec<i64> = match hourly.index().kind() {
+            IndexKind::Datetime(v, _) => v.clone(),
+            _ => unreachable!(), // LCOV_EXCL_LINE
+        };
+        let at = |s: &str| datetime::parse_ns(s).unwrap();
+        // 00:00 EDT, 01:00 EDT, 01:00 EST, 02:00 EST
+        assert_eq!(labels, vec![at("2026-11-01 04:00:00"), at("2026-11-01 05:00:00"),
+                                at("2026-11-01 06:00:00"), at("2026-11-01 07:00:00")]);
+        assert_eq!(hourly.columns()[0].as_f64().unwrap(), &[60.0, 60.0, 60.0, 60.0][..]);
+        assert_eq!(cumulate(&df, TimeFrame::Day1, &spec).unwrap().height(), 1);
+    }
+
+    /// A period start outside the instant range raises (never a panic).
+    #[test]
+    fn a_period_start_outside_the_range_is_an_error() {
+        let df = DataFrame::new(
+            vec!["volume".into()],
+            vec![Column::f64(vec![1.0])],
+            Some(Index::datetime(vec![i64::MIN + 1], Tz::Utc)),
+        )
+        .unwrap();
+        let err = cumulate(&df, TimeFrame::Week1, &AggSpec::ohlcv()).unwrap_err();
+        assert!(matches!(err, VolasError::Overflow(_)), "{err}");
     }
 
     /// Owner decision 2026-06-12: a coarse bar is labelled with its grid period

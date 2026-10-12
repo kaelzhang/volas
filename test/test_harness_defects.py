@@ -170,7 +170,6 @@ def test_a_nat_bar_onto_a_plain_frame_raises():
         _dated().append(bar)
 
 
-@_xfail('C6 localize-subsecond', 'tz_localize drops the sub-second part')
 def test_tz_localize_keeps_subseconds():
     t = np.array(['2026-03-08T06:59:59.123456789'], 'datetime64[ns]')
     df = volas.DataFrame({'time': t, 'c': [1.0]}).set_index('time').tz_localize('UTC')

@@ -9,6 +9,8 @@
 //!   / stringify read ready typed values with no re-parsing, re-defaulting, or
 //!   re-validation.
 
+use volas_time::TimeFrame;
+
 /// A binary operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -110,8 +112,8 @@ pub enum ArgValue {
     I64(i64),
     /// A finite float (`ArgBound::Finite` / `FloatMin` / `FloatGt` / `FloatRange`).
     F64(f64),
-    /// A free string (`ArgBound::AnyStr`): e.g. a time-frame token.
-    Str(String),
+    /// A bar time frame (`ArgBound::TimeFrame`), parsed by [`TimeFrame::from_label`].
+    TimeFrame(TimeFrame),
 }
 
 impl ArgValue {
@@ -140,11 +142,11 @@ impl ArgValue {
         }
     }
 
-    /// Extract a string argument.
-    pub fn as_str(&self) -> &str {
+    /// Extract a time-frame argument.
+    pub fn as_time_frame(&self) -> TimeFrame {
         match self {
-            ArgValue::Str(v) => v,
-            _ => unreachable!("argument is not a string: {self:?}"), // LCOV_EXCL_LINE
+            ArgValue::TimeFrame(v) => *v,
+            _ => unreachable!("argument is not a time frame: {self:?}"), // LCOV_EXCL_LINE
         }
     }
 
@@ -155,7 +157,7 @@ impl ArgValue {
             ArgValue::Usize(v) => v.to_string(),
             ArgValue::I64(v) => v.to_string(),
             ArgValue::F64(v) => number_token(*v),
-            ArgValue::Str(v) => v.clone(),
+            ArgValue::TimeFrame(v) => v.label().to_string(),
         }
     }
 }
@@ -360,11 +362,12 @@ mod tests {
         assert_eq!(ArgValue::Usize(14).as_usize(), 14);
         assert_eq!(ArgValue::I64(-1).as_i64(), -1);
         assert_eq!(ArgValue::F64(2.5).as_f64(), 2.5);
-        assert_eq!(ArgValue::Str("1d".into()).as_str(), "1d");
+        assert_eq!(ArgValue::TimeFrame(TimeFrame::Day1).as_time_frame(), TimeFrame::Day1);
         assert_eq!(ArgValue::Usize(20).to_token(), "20");
         assert_eq!(ArgValue::I64(252).to_token(), "252");
         assert_eq!(ArgValue::F64(2.0).to_token(), "2");
         assert_eq!(ArgValue::F64(0.7).to_token(), "0.7");
-        assert_eq!(ArgValue::Str("close".into()).to_token(), "close");
+        // A time frame renders as its canonical label, so `1W` and `1w` share one key.
+        assert_eq!(ArgValue::TimeFrame(TimeFrame::Week1).to_token(), "1w");
     }
 }

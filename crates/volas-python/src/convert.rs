@@ -39,6 +39,13 @@ pub(crate) fn column_to_pandas<'py>(
     col: &Column,
     nullable: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
+    // A datetime column holds UTC instants: pandas gets `datetime64[ns, UTC]` (the
+    // NumPy export has no zone slot), under either backend.
+    if let Column::Datetime(_) = col {
+        return pd
+            .call_method1("array", (column_to_numpy(py, col),))?
+            .call_method1("tz_localize", (Tz::DATETIME_COLUMN.name(),));
+    }
     if !nullable {
         return Ok(column_to_numpy(py, col));
     }
@@ -74,7 +81,7 @@ pub(crate) fn column_to_pandas<'py>(
             kwargs.set_item("dtype", "str")?;
             pd.call_method("array", (list,), Some(&kwargs))
         }
-        // float (NaN in-band) / datetime have no nullable masked form here.
+        // float (NaN in-band) has no nullable masked form here.
         _ => Ok(column_to_numpy(py, col)),
     }
 }
@@ -280,6 +287,21 @@ pub(crate) fn column_to_numpy_with<'py>(
     dtype: Option<&str>,
     na_value: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    // `object` is the lossless export: each cell its own typed value (a UTC
+    // `Timestamp`, an exact int, `volas.NA` — or `na_value` — for a missing cell),
+    // exactly like a frame's `to_numpy(dtype="object")`.
+    if let Some(dt) = dtype {
+        if ExportTarget::of(py, dt)? == ExportTarget::Object {
+            let cells = (0..col.len()).map(|i| match na_value {
+                Some(nv) if !col.is_valid(i) => nv.clone().unbind(),
+                _ => scalar_to_py(py, col, i),
+            });
+            let list = PyList::new(py, cells)?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "object")?;
+            return py.import("numpy")?.call_method("array", (list,), Some(&kwargs));
+        }
+    }
     let Some(nv) = na_value else {
         let arr = column_to_numpy(py, col);
         return match dtype {
@@ -415,9 +437,9 @@ pub(crate) fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> Py<PyAny> 
         Column::I64(..) | Column::I32(..) | Column::Bool(..) | Column::Str(..) => na(py),
         // O1 (-> B): a datetime cell is a volas.Timestamp (matching the index-label
         // scalar type and pandas); a NaT cell is volas.NA (the unified missing
-        // singleton). Columns are UTC-naive ns, so the cell tz is UTC.
+        // singleton). A column holds UTC instants, so the cell is UTC-aware.
         Column::Datetime(v) if v[i] == i64::MIN => na(py),
-        Column::Datetime(v) => Py::new(py, PyTimestamp { ns: v[i], tz: Tz::Naive })
+        Column::Datetime(v) => Py::new(py, PyTimestamp { ns: v[i], tz: Tz::DATETIME_COLUMN })
             .expect("create Timestamp")
             .into_any(),
     }

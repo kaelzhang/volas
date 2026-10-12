@@ -45,7 +45,8 @@ def test_timestamp_conversions():
     assert isinstance(ts.to_numpy(), np.datetime64)
     assert ts.to_numpy() == np.datetime64("2021-03-04T09:30:00")
     assert ts.value == np.datetime64("2021-03-04T09:30:00", "ns").astype("int64")
-    assert ts.to_pydatetime() == _dt.datetime(2021, 3, 4, 9, 30, 0)
+    # a column cell is UTC-aware
+    assert ts.to_pydatetime() == _dt.datetime(2021, 3, 4, 9, 30, 0, tzinfo=_dt.timezone.utc)
 
 
 def test_timestamp_timedelta_arithmetic():

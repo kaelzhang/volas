@@ -157,7 +157,7 @@ def test_series_setitem_datetime_string_scalar():
     # Series, including a NaT cell — parity with df.iat (was a TypeError)
     s = DataFrame({'a': np.array(['2021-01-01', 'NaT'], dtype='datetime64[ns]')})['a']
     s[1] = '2021-01-02'
-    assert s.to_list()[1] == np.datetime64('2021-01-02') and s.isna().to_list() == [False, False]
+    assert s.to_list()[1] == volas.Timestamp('2021-01-02', tz='UTC') and s.isna().to_list() == [False, False]
 
 
 def test_series_setitem_none_marks_na():
@@ -206,7 +206,7 @@ def test_indexer_fills_na_cell(surface, col, val, want):
     assert df.isna()['a'].to_list() == [False, False, False]
     assert df['a'].dtype == before_dt
     got = df['a'].to_list()[1]
-    assert (got == np.datetime64(want)) if before_dt == 'datetime64[ns]' else (got == want)
+    assert (got == volas.Timestamp(want, tz='UTC')) if before_dt == 'datetime64[ns]' else (got == want)
 
 
 def test_dataframe_iloc_int_nan_keeps_int():

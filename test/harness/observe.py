@@ -136,8 +136,7 @@ def column_values(df: volas.DataFrame, c: str) -> np.ndarray:
     s = df.get_column(c)
     if s.dtype in ('float64', 'float32'):
         return s.to_numpy()
-    # `to_list` is exact; an object `to_numpy` of an int column holding a missing
-    # cell goes through the float channel (an int past 2^53 would round there)
+    # the exact typed cells (an int past 2^53 stays exact, a missing cell is NA)
     return np.array([None if (v is volas.NA or v is None) else _scalar(v)
                      for v in s.to_list()], dtype=object)
 

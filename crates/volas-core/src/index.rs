@@ -1,6 +1,7 @@
 //! Index: the row labels shared by a frame and the series drawn from it.
 
 use crate::column::Column;
+use crate::datetime::{format_ns_offset, NAT};
 use crate::error::{Result, VolasError};
 use crate::tz::Tz;
 
@@ -16,12 +17,81 @@ use crate::tz::Tz;
 /// and how bare-string / day-bucket matching maps to wall-clock time (see
 /// [`crate::tz`]). Both the name and a datetime kind's tz ride with the shared
 /// `Arc<Index>`, so a frame and every series drawn from it agree on them for free.
+///
+/// The index also owns the **order** of its labels ([`LabelOrder`]): computed
+/// once when the labels are built and kept current by [`extend`](Self::extend)
+/// in O(appended labels), so a label slice never rescans the labels to learn it.
+/// The labels are reachable only through [`kind`](Self::kind) (read-only), which
+/// keeps the stored order true to them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Index {
     /// Optional index name (pandas `Index.name`); `None` when unnamed.
     pub name: Option<String>,
     /// The label storage / kind.
-    pub kind: IndexKind,
+    kind: IndexKind,
+    /// Whether the labels are non-decreasing / non-increasing.
+    order: LabelOrder,
+}
+
+/// The monotonicity of an index's labels (pandas `is_monotonic_increasing` /
+/// `is_monotonic_decreasing`): numeric labels by value, string labels by code
+/// point. An empty or constant index is both; a datetime index holding `NaT` is
+/// neither (pandas). A label slice searches by this order — see
+/// [`Index::label_slice`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LabelOrder {
+    increasing: bool,
+    decreasing: bool,
+}
+
+impl LabelOrder {
+    /// The order of no labels: both directions hold.
+    const EMPTY: LabelOrder = LabelOrder { increasing: true, decreasing: true };
+    /// Neither direction holds.
+    const NONE: LabelOrder = LabelOrder { increasing: false, decreasing: false };
+
+    /// This order after `added` labels follow a sequence whose last label is
+    /// `last`: one comparison per appended label, and none once neither direction
+    /// holds any more.
+    fn extended<T: Ord>(mut self, last: Option<&T>, added: &[T]) -> LabelOrder {
+        let mut prev = last;
+        for x in added {
+            if self == LabelOrder::NONE {
+                break;
+            }
+            if let Some(p) = prev {
+                self.increasing &= p <= x;
+                self.decreasing &= p >= x;
+            }
+            prev = Some(x);
+        }
+        self
+    }
+
+    /// The order of `labels` (one pass).
+    fn of<T: Ord>(labels: &[T]) -> LabelOrder {
+        LabelOrder::EMPTY.extended(None, labels)
+    }
+
+    /// The order after datetime labels `added` follow `last`: a `NaT` makes the
+    /// labels unordered (pandas).
+    fn extended_datetime(self, last: Option<&i64>, added: &[i64]) -> LabelOrder {
+        if added.contains(&NAT) {
+            LabelOrder::NONE
+        } else {
+            self.extended(last, added)
+        }
+    }
+
+    /// The order of the labels of `kind`.
+    fn of_kind(kind: &IndexKind) -> LabelOrder {
+        match kind {
+            IndexKind::Range(n) => LabelOrder { increasing: true, decreasing: *n <= 1 },
+            IndexKind::Int64(v) => LabelOrder::of(v),
+            IndexKind::Datetime(v, _) => LabelOrder::EMPTY.extended_datetime(None, v),
+            IndexKind::Str(v) => LabelOrder::of(v),
+        }
+    }
 }
 
 /// The label storage backing an [`Index`].
@@ -86,37 +156,60 @@ impl Label {
     }
 }
 
+/// One bound of a label slice (`.loc[lo:hi]`): the label, and whether it was
+/// written as **text** (a string parsed into the label). The text fact matters on
+/// a datetime index only, where pandas reads a string bound as a partial-date
+/// value rather than an exact label (see [`Index::label_slice`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliceBound {
+    /// The bound's label.
+    pub label: Label,
+    /// Whether the label was parsed from a string.
+    pub from_text: bool,
+}
+
+impl SliceBound {
+    /// A bound given as a label value (an int, a timestamp, …).
+    pub fn exact(label: Label) -> SliceBound {
+        SliceBound { label, from_text: false }
+    }
+
+    /// A bound given as a string, parsed into `label`.
+    pub fn text(label: Label) -> SliceBound {
+        SliceBound { label, from_text: true }
+    }
+}
+
 impl Index {
+    /// An index over `kind`'s labels with `name`, its label order computed once.
+    fn new(name: Option<String>, kind: IndexKind) -> Index {
+        let order = LabelOrder::of_kind(&kind);
+        Index { name, kind, order }
+    }
+
+    /// An unnamed index over `kind`'s labels.
+    fn unnamed(kind: IndexKind) -> Index {
+        Index::new(None, kind)
+    }
+
     /// An unnamed implicit `0..n` range index.
     pub fn range(n: usize) -> Index {
-        Index {
-            name: None,
-            kind: IndexKind::Range(n),
-        }
+        Index::unnamed(IndexKind::Range(n))
     }
 
     /// An unnamed explicit integer index.
     pub fn int64(labels: Vec<i64>) -> Index {
-        Index {
-            name: None,
-            kind: IndexKind::Int64(labels),
-        }
+        Index::unnamed(IndexKind::Int64(labels))
     }
 
     /// An unnamed datetime index (UTC-ns `labels`, tagged with `tz`).
     pub fn datetime(labels: Vec<i64>, tz: Tz) -> Index {
-        Index {
-            name: None,
-            kind: IndexKind::Datetime(labels, tz),
-        }
+        Index::unnamed(IndexKind::Datetime(labels, tz))
     }
 
     /// An unnamed string index.
     pub fn str(labels: Vec<String>) -> Index {
-        Index {
-            name: None,
-            kind: IndexKind::Str(labels),
-        }
+        Index::unnamed(IndexKind::Str(labels))
     }
 
     /// The label storage / kind.
@@ -176,7 +269,7 @@ impl Index {
                 )))
             }
         };
-        Ok(Index { name: None, kind })
+        Ok(Index::unnamed(kind))
     }
 
     /// The timezone of a `Datetime` index ([`Tz::Naive`] for every other kind).
@@ -240,10 +333,7 @@ impl Index {
             IndexKind::Datetime(v, tz) => IndexKind::Datetime(v[start..end].to_vec(), *tz),
             IndexKind::Str(v) => IndexKind::Str(v[start..end].to_vec()),
         };
-        Index {
-            name: self.name.clone(),
-            kind,
-        }
+        Index::new(self.name.clone(), kind)
     }
 
     /// Gather the given positions (the name and a datetime tz are preserved).
@@ -256,10 +346,7 @@ impl Index {
             }
             IndexKind::Str(v) => IndexKind::Str(idx.iter().map(|&i| v[i].clone()).collect()),
         };
-        Index {
-            name: self.name.clone(),
-            kind,
-        }
+        Index::new(self.name.clone(), kind)
     }
 
     /// Value equality of the **labels** (pandas `.equals` index semantics): a
@@ -359,10 +446,7 @@ impl Index {
             // remaining: numeric mixes (Range / Int64 / Datetime) -> Int64 labels
             (a, b) => Int64([a.to_i64_labels(), b.to_i64_labels()].concat()),
         };
-        Ok(Index {
-            name: self.name.clone(),
-            kind,
-        })
+        Ok(Index::new(self.name.clone(), kind))
     }
 
     /// Extend in place by the labels of `other` — the amortized-O(1) counterpart
@@ -370,14 +454,28 @@ impl Index {
     /// growing index keeps its own name (so appending an unnamed bar to a named
     /// index does not drop the name). Same-kind indexes grow their buffer; a
     /// numeric-kind mix collapses to `Int64`; mixing a string index with a
-    /// numeric one is an error.
+    /// numeric one is an error. The label order is carried forward over the
+    /// appended labels only.
     pub fn extend(&mut self, other: &Index) -> Result<()> {
         use IndexKind::*;
+        let order = self.order;
         match (&mut self.kind, &other.kind) {
-            (Range(a), Range(b)) => *a += b,
-            (Datetime(a, _), Datetime(b, _)) => a.extend_from_slice(b),
-            (Int64(a), Int64(b)) => a.extend_from_slice(b),
-            (Str(a), Str(b)) => a.extend(b.iter().cloned()),
+            (Range(a), Range(b)) => {
+                *a += b;
+                self.order = LabelOrder { increasing: true, decreasing: *a <= 1 };
+            }
+            (Datetime(a, _), Datetime(b, _)) => {
+                self.order = order.extended_datetime(a.last(), b);
+                a.extend_from_slice(b);
+            }
+            (Int64(a), Int64(b)) => {
+                self.order = order.extended(a.last(), b);
+                a.extend_from_slice(b);
+            }
+            (Str(a), Str(b)) => {
+                self.order = order.extended(a.last(), b);
+                a.extend(b.iter().cloned());
+            }
             (Str(_), _) | (_, Str(_)) => {
                 return Err(VolasError::Shape(
                     "cannot append a string index to a non-string index".into(),
@@ -393,13 +491,17 @@ impl Index {
             // gap-free, matching pandas' last-M view of a RangeIndex.
             (Int64(a), Range(bn)) => {
                 let next = a.last().map(|l| l + 1).unwrap_or(0);
+                let start = a.len();
                 a.extend((0..*bn as i64).map(|k| next + k));
+                let (head, added) = a.split_at(start);
+                self.order = order.extended(head.last(), added);
             }
             // numeric-kind mix (Range / Int64 / Datetime) -> Int64 labels
             (slot, b) => {
                 let mut labels = slot.to_i64_labels();
                 labels.extend(b.to_i64_labels());
                 *slot = Int64(labels);
+                self.order = LabelOrder::of_kind(slot);
             }
         }
         Ok(())
@@ -423,39 +525,136 @@ impl Index {
         }
     }
 
-    /// `[start, end)` positions covering the inclusive label range `[lo, hi]`
-    /// (ascending labels; pandas `.loc` slice semantics). Either bound may be
-    /// `None` for open-ended. Numeric indexes compare numerically; a string
-    /// index compares lexicographically.
-    pub fn label_slice(&self, lo: Option<&Label>, hi: Option<&Label>) -> (usize, usize) {
+    /// `[start, end)` positions of the inclusive label slice `[lo, hi]` (pandas
+    /// `.loc[lo:hi]`); either bound may be `None` for open-ended. Numeric labels
+    /// compare by value, string labels by code point.
+    ///
+    /// The search follows the index's [`LabelOrder`] (pandas `slice_locs`):
+    /// - non-decreasing labels: the rows with `lo <= label <= hi` (a bound need not
+    ///   be a label of the index);
+    /// - otherwise non-increasing labels: the rows with `lo >= label >= hi`;
+    /// - neither (int / str labels need only be unique): each bound is located by
+    ///   the position of its one equal label, and the slice runs between the two.
+    ///   A bound that is not a label, or that labels several rows, is a
+    ///   [`VolasError::Key`] — an ordered comparison would select rows outside the
+    ///   requested labels.
+    ///
+    /// A datetime index that is not non-decreasing (decreasing, unordered, or
+    /// holding `NaT`) rejects a bound written as text with a [`VolasError::Key`]:
+    /// pandas reads such a bound as a partial-date value and selects every row it
+    /// covers, which may be non-contiguous and which this exact-label search cannot
+    /// reproduce, so it fails closed instead of selecting different rows.
+    ///
+    /// A bound of the other label kind (a string against a numeric index, or the
+    /// reverse) is a [`VolasError::DType`].
+    pub fn label_slice(
+        &self,
+        lo: Option<&SliceBound>,
+        hi: Option<&SliceBound>,
+    ) -> Result<(usize, usize)> {
         match &self.kind {
-            IndexKind::Str(labels) => {
-                let start = lo.and_then(Label::as_str).map_or(0, |lo| {
-                    labels
-                        .iter()
-                        .position(|x| x.as_str() >= lo)
-                        .unwrap_or(labels.len())
-                });
-                let end = hi.and_then(Label::as_str).map_or(labels.len(), |hi| {
-                    labels
-                        .iter()
-                        .rposition(|x| x.as_str() <= hi)
-                        .map_or(0, |p| p + 1)
-                });
-                (start, end.max(start))
+            IndexKind::Range(n) => {
+                let (lo, hi) = (i64_bound(lo, "a range")?, i64_bound(hi, "a range")?);
+                // the labels are the positions 0..n
+                let clamp = |x: i64| x.clamp(0, *n as i64) as usize;
+                let start = lo.map_or(0, clamp);
+                let end = hi.map_or(*n, |h| clamp(h.saturating_add(1)));
+                Ok((start, end.max(start)))
             }
-            _ => {
-                let labels = self.to_i64_labels();
-                let start = lo.and_then(Label::as_i64).map_or(0, |lo| {
-                    labels.iter().position(|&x| x >= lo).unwrap_or(labels.len())
-                });
-                let end = hi.and_then(Label::as_i64).map_or(labels.len(), |hi| {
-                    labels.iter().rposition(|&x| x <= hi).map_or(0, |p| p + 1)
-                });
-                (start, end.max(start))
+            IndexKind::Int64(v) => {
+                let (lo, hi) = (i64_bound(lo, "an int64")?, i64_bound(hi, "an int64")?);
+                slice_bounds(v, self.order, lo.as_ref(), hi.as_ref(), |x| x.to_string())
+            }
+            IndexKind::Datetime(v, tz) => {
+                let text = |b: Option<&SliceBound>| b.is_some_and(|b| b.from_text);
+                if !self.order.increasing && (text(lo) || text(hi)) {
+                    return Err(VolasError::Key(
+                        "Value based partial slicing on non-monotonic DatetimeIndexes with \
+                         non-existing keys is not allowed."
+                            .into(),
+                    ));
+                }
+                let (lo, hi) = (i64_bound(lo, "a datetime")?, i64_bound(hi, "a datetime")?);
+                slice_bounds(v, self.order, lo.as_ref(), hi.as_ref(), |&x| {
+                    format_ns_offset(x, *tz)
+                })
+            }
+            IndexKind::Str(v) => {
+                let (lo, hi) = (str_bound(lo)?, str_bound(hi)?);
+                slice_bounds(v, self.order, lo, hi, |x| format!("'{x}'"))
             }
         }
     }
+}
+
+/// A numeric slice bound: an integer / datetime label, or `None` (open-ended).
+/// A string label against the numeric index of `kind` is a `DType` error.
+fn i64_bound(bound: Option<&SliceBound>, kind: &str) -> Result<Option<i64>> {
+    match bound.map(|b| &b.label) {
+        None => Ok(None),
+        Some(Label::I64(x)) => Ok(Some(*x)),
+        Some(Label::Str(s)) => Err(VolasError::DType(format!(
+            "cannot do slice indexing on {kind} index with these indexers [{s}] of type str"
+        ))),
+    }
+}
+
+/// A string slice bound, or `None` (open-ended). An integer / datetime label
+/// against a string index is a `DType` error.
+fn str_bound(bound: Option<&SliceBound>) -> Result<Option<&String>> {
+    match bound.map(|b| &b.label) {
+        None => Ok(None),
+        Some(Label::Str(s)) => Ok(Some(s)),
+        Some(Label::I64(x)) => Err(VolasError::DType(format!(
+            "cannot do slice indexing on a string index with these indexers [{x}] of type int"
+        ))),
+    }
+}
+
+/// The `[start, end)` positions of the inclusive slice `[lo, hi]` over `labels`
+/// whose monotonicity is `order` (the rule of [`Index::label_slice`]). An ordered
+/// index is binary-searched; an unordered one locates each bound exactly.
+/// `render` spells a label in a `Key` error.
+fn slice_bounds<T: Ord>(
+    labels: &[T],
+    order: LabelOrder,
+    lo: Option<&T>,
+    hi: Option<&T>,
+    render: impl Fn(&T) -> String,
+) -> Result<(usize, usize)> {
+    let n = labels.len();
+    let (start, end) = if order.increasing {
+        (
+            lo.map_or(0, |lo| labels.partition_point(|x| x < lo)),
+            hi.map_or(n, |hi| labels.partition_point(|x| x <= hi)),
+        )
+    } else if order.decreasing {
+        (
+            lo.map_or(0, |lo| labels.partition_point(|x| x > lo)),
+            hi.map_or(n, |hi| labels.partition_point(|x| x >= hi)),
+        )
+    } else {
+        let exact = |bound: &T, side: &str| -> Result<usize> {
+            let mut hits = labels.iter().enumerate().filter(|(_, x)| *x == bound);
+            match (hits.next(), hits.next()) {
+                (Some((p, _)), None) => Ok(p),
+                (None, _) => Err(VolasError::Key(format!(
+                    "Cannot get {side} slice bound for non-monotonic index with a missing \
+                     label {}. Either sort the index or specify an existing label.",
+                    render(bound)
+                ))),
+                (Some(_), Some(_)) => Err(VolasError::Key(format!(
+                    "Cannot get {side} slice bound for non-unique label: {}",
+                    render(bound)
+                ))),
+            }
+        };
+        (
+            lo.map_or(Ok(0), |lo| exact(lo, "left"))?,
+            hi.map_or(Ok(n), |hi| exact(hi, "right").map(|p| p + 1))?,
+        )
+    };
+    Ok((start, end.max(start)))
 }
 
 /// Reject building an index from a column that carries `volas.NA`: with no
@@ -486,6 +685,9 @@ fn require_unique_labels<T: std::hash::Hash + Eq>(labels: &[T], kind: &str) -> R
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests_order;
 
 #[cfg(test)]
 mod tests {
@@ -569,9 +771,10 @@ mod tests {
         // lexicographic slice [bb, cc]
         let lo = Label::Str("bb".into());
         let hi = Label::Str("cc".into());
-        assert_eq!(ix.label_slice(Some(&lo), Some(&hi)), (1, 3));
+        let (lo, hi) = (SliceBound::text(lo), SliceBound::text(hi));
+        assert_eq!(ix.label_slice(Some(&lo), Some(&hi)).unwrap(), (1, 3));
         // open-ended upper bound: [cc, end)
-        assert_eq!(ix.label_slice(Some(&lo), None), (1, 4));
+        assert_eq!(ix.label_slice(Some(&lo), None).unwrap(), (1, 4));
     }
 
     #[test]

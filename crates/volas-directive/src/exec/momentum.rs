@@ -177,10 +177,7 @@ pub(super) fn dispatch(
 
         ("hv", _) => {
             let close = ops.f64(0, "close")?;
-            let period = arg_usize(args, 0);
-            let minutes = tf_to_minutes(arg_str(args, 1))?;
-            let trading_days = arg_i64(args, 2);
-            f64col(ind::hv(&close, period, minutes, trading_days, ops.origin()))
+            f64col(ind::hv(&close, arg_usize(args, 0), hv_annualization(args), ops.origin()))
         }
 
         ("increase", _) => boolcol(ind::increase(

@@ -9,7 +9,10 @@ deliberately ignores:
 
   * documentation (``.md``) and data fixtures (``.csv`` / ``.json``),
   * hand-maintained type stubs (``.pyi``, an API mirror that grows with the API),
-  * build / run artifacts (``target/``, ``dist/``, ``.benchmarks/``, …).
+  * everything git ignores (build / run artifacts, virtualenvs, worktrees, …):
+    the gate checks first-party files only — tracked ones plus new files not yet
+    added — exactly the set ``git ls-files --cached --others --exclude-standard``
+    lists.
 
 Run directly with ``python scripts/check_line_count.py``; exits non-zero (and
 lists the offenders, largest first) when any code file exceeds the cap.
@@ -17,8 +20,8 @@ lists the offenders, largest first) when any code file exceeds the cap.
 
 from __future__ import annotations
 
-import os
 import pathlib
+import subprocess
 import sys
 
 # The single knob. 1000 lines is the canonical "this file is doing too much"
@@ -28,25 +31,17 @@ MAX_LINES = 1000
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CODE_EXTS = {".rs", ".py"}
-# Directories that hold build / run artifacts, vendored code, or caches — never
-# first-party source, so never line-count-gated.
-EXCLUDE_DIRS = {
-    "target", "dist", "build", ".benchmarks", "htmlcov", "__pycache__",
-    "node_modules", ".git", ".eggs", ".pytest_cache", ".ruff_cache",
-}
 
 
 def code_files() -> "list[pathlib.Path]":
-    found = []
-    for dirpath, dirnames, filenames in os.walk(ROOT):
-        # prune excluded dirs in place so we never descend into artifacts.
-        dirnames[:] = [
-            d for d in dirnames if d not in EXCLUDE_DIRS and not d.endswith(".egg-info")
-        ]
-        for fn in filenames:
-            if pathlib.Path(fn).suffix in CODE_EXTS:
-                found.append(pathlib.Path(dirpath) / fn)
-    return found
+    listed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=ROOT, check=True, capture_output=True,
+    ).stdout.decode().split("\0")
+    return [
+        ROOT / rel for rel in listed
+        if rel and pathlib.PurePath(rel).suffix in CODE_EXTS and (ROOT / rel).is_file()
+    ]
 
 
 def line_count(path: pathlib.Path) -> int:

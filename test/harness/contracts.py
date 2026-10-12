@@ -31,8 +31,6 @@ OPEN_DEFECTS: frozenset[str] = frozenset({
     'windowed-drift',
     # A comparison consumes a stale right-hand frame without raising.
     'stale-compare-rhs',
-    # tz_localize drops the sub-second part of every timestamp.
-    'localize-subsecond',
     # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
     # while df[d] names the column from the bound values ('ma:5', 'sar').
     'stringify-column-name',
