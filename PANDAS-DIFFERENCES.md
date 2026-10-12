@@ -490,12 +490,17 @@ corrupted. volas keeps datetime a distinct logical type (so it is never summed,
 averaged, or compared through the float funnel), with `NaT` as its missing value and
 a per-frame timezone that governs display and matching while storage stays UTC.
 
-The timezone lives on the **DatetimeIndex only** — there is no column-level tz
-(pandas attaches one to every datetime column). A consequence: `reset_index()` on a
-tz-aware frame moves the labels into a plain datetime column, which has no tz slot,
-so the display zone is dropped (the column shows naive-UTC wall clocks). The absolute
-instants are lossless — `set_index` + `tz_convert` restores the original display —
-but the zone itself does not ride along through a reset/set round-trip.
+The timezone lives on the **DatetimeIndex only** — a datetime **column** holds UTC
+instants and stores no zone (pandas attaches one to every datetime column). Every
+export that can state a zone states UTC: `to_pandas()` gives `datetime64[ns, UTC]`,
+Arrow `timestamp[ns, tz=UTC]`, cells are `Timestamp(..., tz='UTC')` and `.dt.tz` is
+`'UTC'` (NumPy `datetime64[ns]` has no zone slot and carries the same UTC instants).
+So a pandas `datetime64[ns, Asia/Shanghai]` column round-trips as
+`datetime64[ns, UTC]`, and a naive pandas column comes back UTC-aware; the instants
+are exact, the zone is not kept. `reset_index()` on a tz-aware frame likewise moves the
+labels into a UTC column. Restore a zone by converting the instants:
+`df.set_index('t').tz_localize('UTC').tz_convert(zone)` (or `.dt.tz_convert(zone)` on
+the pandas side).
 
 Text and numbers cross the instant boundary by one rule each. A float epoch is the
 float's exact binary value times the unit, rounded to the nearest nanosecond (ties to

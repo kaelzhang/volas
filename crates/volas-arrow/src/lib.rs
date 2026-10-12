@@ -183,6 +183,11 @@ mod tests {
         let col = Column::datetime(vec![1_000, i64::MIN, 3_000]);
         let arr = column_to_arrow(&col);
         assert_eq!(arr.null_count(), 1);
+        // a column's instants are UTC, and the exported type says so
+        assert_eq!(
+            arr.data_type(),
+            &arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("UTC".into()))
+        );
         assert_eq!(column_from_arrow(&arr).unwrap(), col);
     }
 

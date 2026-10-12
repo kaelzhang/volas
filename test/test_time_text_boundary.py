@@ -36,7 +36,7 @@ def test_strftime_matches_pandas(tz, fmt):
 def test_series_dt_strftime_keeps_sub_seconds_and_rejects_bad_formats():
     s = volas.DataFrame({"t": np.array(["2024-01-01T12:00:00.123456789"], dtype="datetime64[ns]")})["t"]
     assert s.dt.strftime("%S.%f").to_list() == ["00.123456"]
-    assert s.dt.strftime("%z|%Z").to_list() == ["|"]  # a value column is naive
+    assert s.dt.strftime("%z|%Z").to_list() == ["+0000|UTC"]  # a column holds UTC instants
     with pytest.raises(ValueError, match="invalid strftime"):
         s.dt.strftime("%Q")
 

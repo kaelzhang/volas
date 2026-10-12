@@ -68,20 +68,17 @@ def test_naive_tz_convert_raises():
         _dt_frame().tz_convert("Asia/Shanghai")
 
 
-# F25, column-level disposition (D3 waiver): a tz lives on the INDEX (or a
-# scalar Timestamp), never on a value column — so to_datetime over offset
-# strings yields the correct ABSOLUTE instants (01:00Z == 09:00+08:00) as a
-# zone-less column. The zone is retained where D3 places it: the scalar
-# (Timestamp('...+08:00').tz == '+08:00', F25-scalar, fixed) and the index
-# (set_index + tz_localize/_set_index_tz). pandas instead grows a per-column
-# tz dtype — a documented divergence.
+# F25, column-level disposition: a display zone lives on the INDEX (or a scalar
+# Timestamp); a datetime column holds UTC instants and exports UTC-aware — so
+# to_datetime over offset strings yields the correct ABSOLUTE instants
+# (01:00Z == 09:00+08:00) as UTC cells. pandas instead keeps a per-column tz
+# dtype — a documented divergence (restore the zone by converting the instants).
 def test_offset_string_column_is_correct_instant():
     s = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01 09:00:00+08:00"]})["t"])
-    # same instant (compared by value: a naive and an aware Timestamp are never
-    # `==`, pandas' naive / aware rule)
-    assert s.to_list()[0].value == volas.Timestamp("2021-01-01 09:00:00+08:00").value
-    assert s.to_list()[0].tz is None
-    assert "01:00" in str(s.to_list()[0])     # rendered as the UTC wall (no column tz)
+    # the same instant, as a UTC-aware cell
+    assert s.to_list()[0] == volas.Timestamp("2021-01-01 09:00:00+08:00")
+    assert s.to_list()[0].tz == "UTC"
+    assert "01:00" in str(s.to_list()[0])     # rendered on the UTC wall clock
 
 
 # --- V-axis: DST gap / fold (the hardest tz edges) --------------------------

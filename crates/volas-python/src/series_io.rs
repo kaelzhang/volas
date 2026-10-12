@@ -47,14 +47,11 @@ impl PySeries {
                  copy=True/None, or use __dlpack__ / to_arrow for a borrowed view",
             ));
         }
-        let arr = column_to_numpy(py, &self.inner.data);
-        match dtype {
-            Some(dt) => {
-                let dt: String = dt.call_method0(py, "__str__")?.extract(py)?;
-                astype_checked(py, arr, &self.inner.data, &dt)
-            }
-            None => Ok(arr),
-        }
+        let dt: Option<String> = match dtype {
+            Some(dt) => Some(dt.call_method0(py, "__str__")?.extract(py)?),
+            None => None,
+        };
+        column_to_numpy_with(py, &self.inner.data, dt.as_deref(), None)
     }
 
     /// Arrow PyCapsule schema protocol: a lone `arrow_schema` capsule (the column's

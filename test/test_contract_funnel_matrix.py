@@ -113,6 +113,6 @@ def test_explicit_boundary_works_typed(op, col):
 def test_order_based_results_are_typed():
     # spot-check that ORDER_BASED really produced typed values, not f64
     assert _str().max() == 'c' and _str().min() == 'a'
-    assert _datetime().max() == np.datetime64('2021-01-03')
+    assert _datetime().max().to_numpy() == np.datetime64('2021-01-03')  # a UTC cell
     assert list(_str().cummax().to_numpy()) == ['b', 'b', 'c']
     assert list(_str().sort_values().to_numpy()) == ['a', 'b', 'c']

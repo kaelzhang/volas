@@ -20,6 +20,36 @@ how a missing value crosses into pandas — see
 [`df.to_pandas`](dataframe-api.md#dfto_pandasdtype_backendnumpy---pandasdataframe) for the per-value
 breakdown.
 
+### Datetime columns are UTC instants
+
+A datetime **column** stores absolute instants (UTC epoch-nanoseconds) and no zone of
+its own — only the `DatetimeIndex` carries a zone. A pandas column in any zone (or
+naive) is read as its instants, and every export that can state a zone states **UTC**:
+
+| export | a datetime column becomes |
+|---|---|
+| `to_pandas()` (both backends) | `datetime64[ns, UTC]` |
+| `pa.table(df)` / `pa.array(s)` / `to_arrow()` | `timestamp[ns, tz=UTC]` |
+| `s.to_list()` / `to_dict()` / `items()`, cells, `to_numpy(dtype='object')` | `Timestamp(..., tz='UTC')` (`volas.NA` for `NaT`) |
+| `s.dt.tz` | `'UTC'` (`.dt` fields read the UTC wall clock) |
+| `to_numpy()` / `__array__` | `datetime64[ns]` of the same UTC instants (NumPy has no zone) |
+
+So the instant is never ambiguous, but the **source column's zone is not stored**: a
+pandas `datetime64[ns, Asia/Shanghai]` column comes back `datetime64[ns, UTC]` (the
+same instants). Restore the zone by converting — in pandas, or in volas through the
+index:
+
+```py
+pdf = df.to_pandas()
+pdf['t'] = pdf['t'].dt.tz_convert('Asia/Shanghai')      # pandas: restate the zone
+
+df.set_index('t').tz_localize('UTC').tz_convert('Asia/Shanghai')
+# volas: the column's UTC instants become a UTC-anchored index, then restated
+```
+
+A naive pandas datetime column is read as UTC instants too, so it also exports as
+`datetime64[ns, UTC]` (drop the zone in pandas with `.dt.tz_localize(None)` if needed).
+
 ## Arrow & DLPack interop (zero-copy)
 
 A volas column owns one contiguous buffer per dtype (Arrow-native string layout
@@ -95,6 +125,9 @@ pa.array(df['qty'])                              # lossless: keeps int64 + the n
 ```
 
 **Timezone.** Arrow tables have no *index*, so the frame's index — and its timezone — is
-not carried: a datetime column crosses as naive UTC nanoseconds (the absolute instant is
-exact; only the display-zone label is dropped), and `from_arrow` returns a fresh
-`RangeIndex`. Re-apply a zone after import with `tz_localize` / `tz_convert`.
+not carried, and `from_arrow` returns a fresh `RangeIndex`. A datetime column exports
+as `timestamp[ns, tz=UTC]` (see
+[Datetime columns are UTC instants](#datetime-columns-are-utc-instants)); an imported
+timestamp column of any zone (or none) becomes its exact instants, the zone itself not
+kept. Restate a zone after import with `set_index` + `tz_localize('UTC')` +
+`tz_convert`.

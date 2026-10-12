@@ -32,7 +32,7 @@ def test_datetime_plus_numeric_frame_exports_object():
     df = df.astype({"t": "datetime64[ns]"})
     arr = df.to_numpy()
     assert arr.dtype == object
-    assert arr[0, 0] == np.datetime64("2021-01-01")   # datetime kept, not f64 epoch
+    assert arr[0, 0] == volas.Timestamp("2021-01-01", tz="UTC")   # a UTC cell, not f64 epoch
     assert arr[0, 1] == 1.0
 
 
@@ -47,7 +47,7 @@ def test_datetime_plus_str_frame_object_unchanged():
     df = df.astype({"t": "datetime64[ns]"})
     arr = df.to_numpy()
     assert arr.dtype == object
-    assert arr[0, 0] == np.datetime64("2021-01-01") and arr[0, 1] == "x"
+    assert arr[0, 0] == volas.Timestamp("2021-01-01", tz="UTC") and arr[0, 1] == "x"
 
 
 # --- explicit dtype (Q3) -----------------------------------------------------

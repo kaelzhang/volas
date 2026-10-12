@@ -489,8 +489,10 @@ for the full zero-copy contract and the DLPack export.
 ### df.to_pandas(dtype_backend='numpy') -> pandas.DataFrame
 
 Export to a `pandas.DataFrame` (pandas is imported lazily, only here — it is not a
-runtime dependency). A `DatetimeIndex` round-trips, and the reverse bridge is
-[`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe).
+runtime dependency). A `DatetimeIndex` round-trips with its zone; a datetime **column**
+exports as UTC-aware `datetime64[ns, UTC]` (columns hold UTC instants and store no
+zone — see [Datetime columns are UTC instants](interop.md#datetime-columns-are-utc-instants)).
+The reverse bridge is [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe).
 
 - **dtype_backend?** `str = 'numpy'` how a missing value is carried into pandas:
   - `'numpy'` — the most ecosystem-compatible form: an int / bool column with a missing

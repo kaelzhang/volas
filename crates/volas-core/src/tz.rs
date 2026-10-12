@@ -42,6 +42,13 @@ pub enum Tz {
 }
 
 impl Tz {
+    /// The zone of every datetime **column**. A column stores absolute instants
+    /// (UTC epoch-ns) and no zone of its own — only a `DatetimeIndex` carries one —
+    /// so wherever a column's values leave volas with a zone slot (pandas, Arrow,
+    /// `Timestamp` cells, `.dt`), that zone is UTC: the instant is never ambiguous,
+    /// and a source zone is restored by converting the instants.
+    pub const DATETIME_COLUMN: Tz = Tz::Utc;
+
     /// Parse a timezone spec: `"UTC"` / `"Z"` -> [`Tz::Utc`]; a fixed offset
     /// (`"+08:00"`, `"+0800"`, `"+8"`, `"-05:00"`) -> [`Tz::Offset`]; otherwise an
     /// IANA name (`"America/New_York"`, `"Asia/Shanghai"`) -> [`Tz::Named`].
