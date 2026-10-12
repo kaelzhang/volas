@@ -100,14 +100,18 @@ fn on_complete_rows<T>(
 ) -> T {
     let ops = Operands::stopping(df, series);
     let first = run(&ops);
-    if !ops.missing() && ops.clean() {
+    // an input that cannot be read is the arm's own error, never a rerun
+    if ops.failed() || (!ops.missing() && ops.clean()) {
         return first;
     }
     if ops.missing() {
         // A column read is known to hold a NaN: the in-place result is thrown away
         // unseen — complete the record without computing, then run on the complete rows.
         ops.probe();
-        let _ = run(&ops);
+        let probed = run(&ops);
+        if ops.failed() {
+            return probed; // likewise for an input the probe could not read
+        }
     }
     let recorded = recorded(&ops, true);
     let rows = CompleteRows::of(&inputs(&recorded, usize::MAX));
@@ -170,7 +174,7 @@ pub(crate) fn resume(
     let n = df.height();
     let ops = Operands::new(df, cmd.series);
     let out = run(&ops, from);
-    if ops.clean() || read_in_place(&ops, cmd, from, n) {
+    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, from, n) {
         return out;
     }
     let recorded = recorded(&ops, false);
@@ -202,7 +206,7 @@ pub(crate) fn resume_one<T>(
     // The rows up to and including `row` (an out-of-range `row` resumes in place, where
     // the arm declines it).
     let end = (row + 1).min(df.height());
-    if ops.clean() || read_in_place(&ops, cmd, row, end) {
+    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, row, end) {
         return out;
     }
     let recorded = recorded(&ops, false);
@@ -293,5 +297,26 @@ mod tests {
         let value = execute_resume_step(&frame(gap), &node, &st, n - 1, &mut next).unwrap();
         assert!(value.is_nan());
         assert_eq!(next, st);
+    }
+
+    /// An input the frame cannot supply is the command's own error — also when another
+    /// input misses a row, where the record of what it reads would otherwise be cut
+    /// short and the rerun over the complete rows read an empty series.
+    #[test]
+    fn an_input_that_cannot_be_read_is_the_error_never_a_rerun() {
+        for known in [false, true] {
+            // the close column's NaN fact unknown (the first run fails at the absent
+            // column) or known (the run stops at close; the probe fails)
+            let close = Column::f64(vec![1.0, f64::NAN, 3.0, 4.0]);
+            if known {
+                assert!(close.has_nan());
+            }
+            let df = DataFrame::new(vec!["close".into()], vec![close], None).unwrap();
+            for d in ["nvi", "pvi", "pvt", "obv", "efi:2", "ad", "adosc"] {
+                let err = execute(&df, &parse(d).unwrap()).unwrap_err();
+                assert!(err.to_string().contains("not found"), "{d}: {err}");
+                assert!(initial_state(&df, &parse(d).unwrap(), &Column::f64(vec![])).is_none(), "{d}");
+            }
+        }
     }
 }

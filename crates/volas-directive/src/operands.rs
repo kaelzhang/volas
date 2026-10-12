@@ -74,6 +74,9 @@ pub(crate) struct Operands<'a> {
     clean: Cell<bool>,
     /// An input read was a frame column known to hold a NaN.
     missing: Cell<bool>,
+    /// An input could not be read (an absent column, an operand that fails): the
+    /// record of what the arm reads is incomplete, so it must not be rerun over it.
+    failed: Cell<bool>,
 }
 
 impl<'a> Operands<'a> {
@@ -88,6 +91,7 @@ impl<'a> Operands<'a> {
             probing: Cell::new(false),
             clean: Cell::new(true),
             missing: Cell::new(false),
+            failed: Cell::new(false),
         }
     }
 
@@ -125,11 +129,15 @@ impl<'a> Operands<'a> {
         if let Some(read) = cell.get() {
             return Ok(read);
         }
-        let read = match operand(self.series, slot) {
-            Some(node) => Read::Operand(execute(self.df, node)?),
-            None => Read::Frame(self.df.column(default)?),
-        };
-        require_f64_input(read.column())?;
+        let resolved = (|| {
+            let read = match operand(self.series, slot) {
+                Some(node) => Read::Operand(execute(self.df, node)?),
+                None => Read::Frame(self.df.column(default)?),
+            };
+            require_f64_input(read.column())?;
+            Ok(read)
+        })();
+        let read = resolved.inspect_err(|_| self.failed.set(true))?;
         Ok(cell.get_or_init(|| read))
     }
 
@@ -178,6 +186,11 @@ impl<'a> Operands<'a> {
     /// Whether the arm stopped at a frame column known to hold a NaN.
     pub(crate) fn missing(&self) -> bool {
         self.missing.get()
+    }
+
+    /// Whether an input could not be read (the arm's own error says why).
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.get()
     }
 
     /// Hand every further read over empty: rerunning the arm then completes the
