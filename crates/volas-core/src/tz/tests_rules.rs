@@ -19,6 +19,8 @@ fn footers_cover_every_zone_of_the_release() {
     assert_eq!(footers::RELEASE, chrono_tz::IANA_TZDB_VERSION);
     assert!(footers::FOOTERS.windows(2).all(|w| w[0].0 < w[1].0), "sorted for the binary search");
     for tz in chrono_tz::TZ_VARIANTS {
+        // the parsed rules are indexed by the zone's discriminant
+        assert_eq!(chrono_tz::TZ_VARIANTS[tz as usize], tz);
         footer_rule(&tz); // panics on a missing or malformed footer
     }
 }

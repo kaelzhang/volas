@@ -116,8 +116,13 @@ impl Tz {
     /// applied in chrono's civil range (far wider than the instant axis), so an
     /// instant at either end of the axis never wraps on its way to the wall clock.
     pub(crate) fn wall(&self, ns: i64) -> NaiveDateTime {
-        let utc = DateTime::from_timestamp_nanos(ns).naive_utc();
-        utc + chrono::TimeDelta::seconds(self.offset_secs_at(ns) as i64)
+        let utc = DateTime::from_timestamp_nanos(ns);
+        match self {
+            Tz::Naive | Tz::Utc => utc.naive_utc(),
+            Tz::Offset(s) => utc.naive_utc() + chrono::TimeDelta::seconds(*s as i64),
+            Tz::Named(tz) if ns < TABLE_END_NS => utc.with_timezone(tz).naive_local(),
+            Tz::Named(tz) => utc.naive_utc() + chrono::TimeDelta::seconds(footer_offset(tz, ns) as i64),
+        }
     }
 
     /// The UTC instant of the wall clock `wall` in this timezone — the one
@@ -200,7 +205,7 @@ impl Tz {
             Tz::Named(tz) => {
                 use chrono_tz::OffsetName;
                 let utc = DateTime::from_timestamp_nanos(ns).naive_utc();
-                if utc >= TABLE_END {
+                if ns >= TABLE_END_NS {
                     return footer_rule(tz).reading_at(utc).kind.abbr.to_string();
                 }
                 // tzdata writes no letters for many zones: their name is the offset
@@ -351,7 +356,12 @@ impl Tz {
         match self {
             Tz::Naive | Tz::Utc => 0,
             Tz::Offset(s) => *s,
-            Tz::Named(tz) => named_offset(tz, DateTime::from_timestamp_nanos(ns).naive_utc()).0,
+            Tz::Named(tz) if ns < TABLE_END_NS => {
+                use chrono::Offset;
+                let utc = DateTime::from_timestamp_nanos(ns).naive_utc();
+                tz.offset_from_utc_datetime(&utc).fix().local_minus_utc()
+            }
+            Tz::Named(tz) => footer_offset(tz, ns),
         }
     }
 
@@ -362,7 +372,15 @@ impl Tz {
     /// / naive.
     pub fn dst_secs_at(&self, ns: i64) -> i32 {
         match self {
-            Tz::Named(tz) => named_offset(tz, DateTime::from_timestamp_nanos(ns).naive_utc()).1,
+            Tz::Named(tz) => {
+                let utc = DateTime::from_timestamp_nanos(ns).naive_utc();
+                if ns < TABLE_END_NS {
+                    use chrono_tz::OffsetComponents;
+                    tz.offset_from_utc_datetime(&utc).dst_offset().num_seconds() as i32
+                } else {
+                    footer_rule(tz).reading_at(utc).dst
+                }
+            }
             _ => 0,
         }
     }
@@ -377,6 +395,9 @@ const TABLE_END: NaiveDateTime = match NaiveDate::from_ymd_opt(2100, 1, 1) {
     None => unreachable!(),
 };
 
+/// [`TABLE_END`] in epoch nanoseconds — the one comparison an instant lookup pays.
+const TABLE_END_NS: i64 = 4_102_444_800 * 1_000_000_000;
+
 /// The last wall clock resolved by the table alone: a wall clock up to a day before
 /// [`TABLE_END`] names instants inside the table under any offset (|offset| < 26 h).
 const TABLE_WALL_END: NaiveDateTime = match NaiveDate::from_ymd_opt(2099, 12, 30) {
@@ -385,26 +406,39 @@ const TABLE_WALL_END: NaiveDateTime = match NaiveDate::from_ymd_opt(2099, 12, 30
 };
 
 /// The named zone's rule past its table — its TZif footer, from the tzdb release the
-/// table was compiled from (`footers_continue_the_table` checks both agree).
+/// table was compiled from (`footers_continue_the_table` checks both agree). Every
+/// footer is parsed once, on the first lookup past the table, into a table indexed by
+/// zone.
 fn footer_rule(tz: &chrono_tz::Tz) -> posix::Rule {
-    let i = footers::FOOTERS
-        .binary_search_by_key(&tz.name(), |&(name, _)| name)
-        .expect("every zone has a footer");
-    posix::Rule::parse(footers::FOOTERS[i].1).expect("every footer parses")
+    static RULES: std::sync::OnceLock<Vec<posix::Rule>> = std::sync::OnceLock::new();
+    let rules = RULES.get_or_init(|| {
+        chrono_tz::TZ_VARIANTS
+            .iter()
+            .map(|zone| {
+                let i = footers::FOOTERS
+                    .binary_search_by_key(&zone.name(), |&(name, _)| name)
+                    .expect("every zone has a footer");
+                posix::Rule::parse(footers::FOOTERS[i].1).expect("every footer parses")
+            })
+            .collect()
+    });
+    rules[*tz as usize]
 }
 
-/// A named zone's offset east of UTC and its DST component at the UTC wall clock `utc`
-/// — its transition table before [`TABLE_END`], its footer rule from there: the one
-/// instant → offset lookup of a named zone.
-fn named_offset(tz: &chrono_tz::Tz, utc: NaiveDateTime) -> (i32, i32) {
+/// A named zone's offset at the instant `ns` past its table ([`footer_rule`]).
+fn footer_offset(tz: &chrono_tz::Tz, ns: i64) -> i32 {
+    footer_rule(tz).reading_at(DateTime::from_timestamp_nanos(ns).naive_utc()).kind.offset
+}
+
+/// A named zone's offset east of UTC at the UTC wall clock `utc` (which may lie past
+/// the instant axis) — its transition table before [`TABLE_END`], its footer rule from
+/// there: the wall clock → instant searches' offset lookup.
+fn named_offset(tz: &chrono_tz::Tz, utc: NaiveDateTime) -> i32 {
     if utc < TABLE_END {
         use chrono::Offset;
-        use chrono_tz::OffsetComponents;
-        let off = tz.offset_from_utc_datetime(&utc);
-        (off.fix().local_minus_utc(), off.dst_offset().num_seconds() as i32)
+        tz.offset_from_utc_datetime(&utc).fix().local_minus_utc()
     } else {
-        let r = footer_rule(tz).reading_at(utc);
-        (r.kind.offset, r.dst)
+        footer_rule(tz).reading_at(utc).kind.offset
     }
 }
 
@@ -415,6 +449,7 @@ fn named_offset(tz: &chrono_tz::Tz, utc: NaiveDateTime) -> (i32, i32) {
 /// at the instant it names (footer transitions are months apart). A wall clock at the
 /// end of chrono's calendar has no day after it and no instant on the axis; it is read at
 /// UTC so the instant conversion reports it out of range.
+#[inline]
 fn named_local(tz: &chrono_tz::Tz, wall: NaiveDateTime) -> chrono::LocalResult<NaiveDateTime> {
     use chrono::LocalResult;
     if wall < TABLE_WALL_END {
@@ -424,10 +459,10 @@ fn named_local(tz: &chrono_tz::Tz, wall: NaiveDateTime) -> chrono::LocalResult<N
     let (Some(before), Some(after)) = (wall.checked_sub_signed(day), wall.checked_add_signed(day)) else {
         return LocalResult::Single(wall);
     };
-    let (early, late) = (named_offset(tz, before).0, named_offset(tz, after).0);
+    let (early, late) = (named_offset(tz, before), named_offset(tz, after));
     let fits = |off: i32| {
         let utc = wall - chrono::TimeDelta::seconds(off as i64);
-        (named_offset(tz, utc).0 == off).then_some(utc)
+        (named_offset(tz, utc) == off).then_some(utc)
     };
     match (fits(early.max(late)), fits(early.min(late))) {
         (Some(a), Some(b)) if a != b => LocalResult::Ambiguous(a, b),
@@ -445,14 +480,14 @@ fn named_gap_end(tz: &chrono_tz::Tz, wall: NaiveDateTime) -> Option<NaiveDateTim
         return chrono_tz::GapInfo::new(&wall, tz).and_then(|gap| gap.end).map(|end| end.naive_utc());
     }
     let day = chrono::TimeDelta::days(1);
-    let after = named_offset(tz, wall.checked_add_signed(day)?).0;
+    let after = named_offset(tz, wall.checked_add_signed(day)?);
     let secs = |off: i32| (wall - chrono::TimeDelta::seconds(off as i64)).and_utc().timestamp();
     // the transition t lies in (wall − after, wall − before]
-    let (mut lo, mut hi) = (secs(after), secs(named_offset(tz, wall - day).0));
+    let (mut lo, mut hi) = (secs(after), secs(named_offset(tz, wall - day)));
     let at = |s: i64| DateTime::from_timestamp(s, 0).map(|d| d.naive_utc());
     while hi - lo > 1 {
         let mid = lo + (hi - lo) / 2;
-        if named_offset(tz, at(mid)?).0 == after {
+        if named_offset(tz, at(mid)?) == after {
             hi = mid;
         } else {
             lo = mid;
