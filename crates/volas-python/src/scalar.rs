@@ -528,11 +528,19 @@ impl PyTimestamp {
         datetime::format_ns_tz(self.ns, self.tz)
     }
 
-    /// Compare with another instant (a Timestamp, a `datetime` / `pd.Timestamp`, an
-    /// `np.datetime64`, a datetime string — aware when it carries an offset — or
-    /// an epoch-ns integer). A naive and an aware instant are never equal and
-    /// cannot be ordered (`TypeError`), as in pandas; a non-instant (`None`, a
-    /// plain `date`, `NaT`, …) is unequal and cannot be ordered.
+    /// Compare with another instant (a Timestamp, a `datetime` / `pd.Timestamp` or
+    /// an `np.datetime64`). A naive and an aware instant are never equal and cannot
+    /// be ordered (`TypeError`), as in pandas. Anything else — a string, an integer
+    /// (an epoch included), `None`, a plain `date`, `NaT`, … — is not an instant:
+    /// `==` is False, `!=` True and ordering raises `TypeError` (pandas' rule; it
+    /// keeps `a == b` implying `hash(a) == hash(b)`). Parse text with `Timestamp(s)`.
+    /// NumPy defers a comparison with a `datetime64` / array to this class
+    /// instead of first turning its operand into an integer (pandas' value).
+    #[classattr]
+    fn __array_priority__() -> f64 {
+        100.0
+    }
+
     fn __richcmp__(
         &self,
         py: Python<'_>,
@@ -561,7 +569,8 @@ impl PyTimestamp {
 
     /// Consistent with `==`: a whole-microsecond instant hashes like the equal
     /// `datetime` (so `datetime in {Timestamp}` works); a sub-microsecond one by
-    /// its nanosecond value — pandas' rule.
+    /// its nanosecond value — pandas' rule (an equal sub-microsecond
+    /// `np.datetime64` hashes by NumPy's own rule, as it does against pandas).
     fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
         if self.ns.rem_euclid(1_000) != 0 {
             return self.ns.into_pyobject(py)?.hash();
@@ -571,22 +580,19 @@ impl PyTimestamp {
 }
 
 /// The `(instant, is_aware)` of a comparison operand that is an instant — a
-/// Timestamp, a `datetime.datetime` (incl. `pd.Timestamp`), an `np.datetime64`, a
-/// datetime string (aware iff it carries an offset) or an epoch-ns integer — or
-/// `None` for anything else (`None`, a plain `date`, `NaT`, …).
+/// Timestamp, a `datetime.datetime` (incl. `pd.Timestamp`) or an `np.datetime64` —
+/// or `None` for anything else (a string, an integer, `None`, a plain `date`,
+/// `NaT`, …), which is not comparable with a Timestamp.
 fn comparable_instant(other: &Bound<'_, PyAny>) -> PyResult<Option<(i64, bool)>> {
     if let Ok(t) = other.extract::<PyRef<PyTimestamp>>() {
         return Ok(Some((t.ns, t.tz.is_aware())));
     }
-    if let Ok(s) = other.extract::<String>() {
-        let aware = datetime::offset_suffix_secs(&s).is_some();
-        return Ok(Some((parse_ts_in_tz(other, Tz::Naive)?, aware)));
-    }
-    if let Ok(i) = other.extract::<i64>() {
-        return Ok(Some((i, false)));
-    }
     if other.is_instance_of::<pyo3::types::PyDateTime>() {
-        let aware = !other.call_method0("utcoffset")?.is_none();
+        // `pd.NaT` is a datetime with no offset or components: not an instant
+        let Ok(offset) = other.call_method0("utcoffset") else {
+            return Ok(None);
+        };
+        let aware = !offset.is_none();
         return Ok(datetime_instant(other, Tz::Naive).ok().map(|ns| (ns, aware)));
     }
     match crate::coerce::numpy_time_value(other, "M") {

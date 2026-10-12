@@ -120,14 +120,17 @@ def test_comparison_with_non_instants_follows_pandas():
             t < other
 
 
-def test_string_operands_carry_their_awareness():
-    # a datetime string stays a comparable operand (volas contract); its offset
-    # suffix makes it aware, so the naive / aware rule applies to it too
+def test_string_operands_are_not_instants():
+    # pandas' rule: a string is never equal to a Timestamp and cannot be ordered
+    # against one; parse it into a Timestamp, whose offset suffix keeps its awareness
     naive, aware = T("2024-01-01 09:00"), T("2024-01-01 09:00", tz="+08:00")
-    assert naive == "2024-01-01 09:00" and aware == "2024-01-01 09:00+08:00"
-    assert (aware == "2024-01-01 09:00") is False
+    assert (naive == "2024-01-01 09:00") is False and (naive != "2024-01-01 09:00") is True
+    with pytest.raises(TypeError):
+        naive < "2024-01-01 10:00"
+    assert naive == T("2024-01-01 09:00") and aware == T("2024-01-01 09:00+08:00")
+    assert (aware == T("2024-01-01 09:00")) is False
     with pytest.raises(TypeError, match="tz-naive and tz-aware"):
-        naive < "2024-01-01 10:00+08:00"
+        naive < T("2024-01-01 10:00+08:00")
 
 
 def test_hash_agrees_with_datetime_equality():

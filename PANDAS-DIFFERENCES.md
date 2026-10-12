@@ -502,6 +502,14 @@ labels into a UTC column. Restore a zone by converting the instants:
 `df.set_index('t').tz_localize('UTC').tz_convert(zone)` (or `.dt.tz_convert(zone)` on
 the pandas side).
 
+A scalar `Timestamp` compares like pandas': with another instant (a `Timestamp`, a
+`datetime` / `pd.Timestamp`, an `np.datetime64`) by instant, naive and aware never
+equal; a string or an integer (an epoch included) is not an instant — `==` is `False`,
+`!=` `True`, ordering raises `TypeError` (parse it with `Timestamp(...)`; `.loc` and
+index selection still parse strings). So `a == b` implies `hash(a) == hash(b)`, with
+pandas' one exception: an equal sub-microsecond `np.datetime64` hashes by NumPy's rule.
+One divergence: ordering against `NaT` raises `TypeError` (pandas answers `False`).
+
 Text and numbers cross the instant boundary by one rule each. A float epoch is the
 float's exact binary value times the unit, rounded to the nearest nanosecond (ties to
 even) — pandas' result for `s` / `ms` / `us`, while pandas truncates a fractional
