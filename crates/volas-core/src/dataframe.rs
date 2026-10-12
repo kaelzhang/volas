@@ -700,8 +700,8 @@ impl DataFrame {
     /// labelled before the last is an error) and an integer / string index stays
     /// unique (a row labelled like an earlier row is an error). On an error the frame
     /// is left unchanged. Rows without explicit labels (a `RangeIndex`) take the next
-    /// labels, as [`append`](Self::append). Deciding a row is O(1) when its label
-    /// follows the last one — a lookup only when an integer / string label precedes it.
+    /// labels, as [`append`](Self::append). Deciding a datetime row is O(1); an integer
+    /// / string row looks its label up among the frame's.
     pub fn append_labelled(&mut self, other: &DataFrame) -> Result<()> {
         if matches!(other.index.kind(), IndexKind::Range(_)) || other.height == 0 {
             return self.append(other);
@@ -715,9 +715,12 @@ impl DataFrame {
             if label == last {
                 return self.replace_last_row(other, 0);
             }
-            if !label_precedes(&label, &last)
-                || (!datetime && self.index.position_of(&label).is_none())
-            {
+            let fresh = if datetime {
+                !label_precedes(&label, &last)
+            } else {
+                self.index.position_of(&label).is_none()
+            };
+            if fresh {
                 return self.append(other);
             }
         }
@@ -731,14 +734,14 @@ impl DataFrame {
                 self.height.checked_sub(1).map(|i| self.index.label_at(i))
             };
             let replace = prev.as_ref() == Some(&label);
-            if !replace && prev.as_ref().is_some_and(|p| label_precedes(&label, p)) {
-                if datetime {
-                    return Err(VolasError::Value(format!(
-                        "cannot append a row labelled {}: a datetime index only increases \
-                         (only the last row can be replaced)",
-                        label_text(&label)
-                    )));
-                }
+            if !replace && datetime && prev.as_ref().is_some_and(|p| label_precedes(&label, p)) {
+                return Err(VolasError::Value(format!(
+                    "cannot append a row labelled {}: a datetime index only increases \
+                     (only the last row can be replaced)",
+                    label_text(&label)
+                )));
+            }
+            if !replace && !datetime {
                 let earlier = self.index.position_of(&label).is_some()
                     || (0..k).any(|j| other.index.label_at(j) == label);
                 if earlier {

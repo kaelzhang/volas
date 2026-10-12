@@ -58,16 +58,18 @@ class Ledger:
     def accepts(self, labels: list[int] | None, retained: int | None = None) -> bool:
         """Whether the frame takes rows labelled ``labels`` (``contracts.
         APPEND_KEYED_BY_LABEL``): row by row, a label equal to the last replaces it; one
-        before the last raises on a DatetimeIndex, and on an integer index when an
-        earlier row (or an earlier row of the batch) has it. A bounded frame knows only
+        before the last raises on a DatetimeIndex; on an integer index a label an
+        earlier row (or an earlier row of the batch) has raises. A bounded frame knows only
         the labels of the ``retained`` rows it still holds."""
         if labels is None or not contracts.APPEND_KEYED_BY_LABEL:
             return True
         prev = self.index[-1] if self.index else None
         seen = set(self.index if retained is None else self.index[len(self.index) - retained:])
         for lab in labels:
-            if prev is not None and lab != prev and lab < prev:
-                if self.schema.index == 'datetime' or lab in seen:
+            if prev is not None and lab != prev:
+                if self.schema.index == 'datetime' and lab < prev:
+                    return False
+                if self.schema.index != 'datetime' and lab in seen:
                     return False
             seen.add(lab)
             prev = lab

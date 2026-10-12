@@ -130,6 +130,14 @@ fn integer_batches_replace_and_raise_atomically() {
     let err = df.append_labelled(&bad).unwrap_err();
     assert!(err.to_string().contains("10"), "{err}");
     assert_eq!(df.height(), before);
+    // after a smaller label, a label above the last can still be an earlier row's:
+    // the index stays unique, singly and in a batch
+    df.append_labelled(&labelled(Index::int64(vec![5]), 4.0)).unwrap(); // [10, 20, 30, 25, 5]
+    for labels in [vec![20], vec![7, 30]] {
+        let err = df.append_labelled(&labelled(Index::int64(labels), 5.0)).unwrap_err();
+        assert!(err.to_string().contains("earlier row"), "{err}");
+        assert_eq!(df.height(), before + 1);
+    }
     // an empty frame takes the rows as they come; a mismatched label kind never compares
     let mut empty = labelled(Index::int64(vec![]), 0.0);
     empty.append_labelled(&labelled(Index::int64(vec![5]), 1.0)).unwrap();
