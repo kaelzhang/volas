@@ -19,8 +19,20 @@ import numpy as np
 import pytest
 
 import volas
+from test import ht_reference as R
 
 talib = pytest.importorskip('talib')
+
+# The Hilbert family's oracle: TA-Lib itself when the installed build evaluates without
+# FMA contraction, else TA-Lib's C source transcribed unfused (`test/ht_reference.py`) —
+# a contracted build rounds differently in the last bits (see test_talib_parity).
+_CONTRACTS = R.talib_contracts(talib)
+
+
+def _ht(talib_fn, ref_fn):
+    if _CONTRACTS:
+        return lambda c: np.asarray(ref_fn([float(x) for x in c]), dtype=float)
+    return talib_fn
 
 N = 220
 
@@ -75,15 +87,15 @@ MATRIX = {
     'ma:1,6': ((C,), lambda c: talib.MA(c, 1, 6), False, True),
     'ma:1,7': ((C,), lambda c: talib.MA(c, 1, 7), False, True),
     'ultosc:7,14,28': ((H, L, C), lambda h, l, c: talib.ULTOSC(h, l, c, 7, 14, 28), False, False),
-    'ht_dcperiod': ((C,), talib.HT_DCPERIOD, True, True),
-    'ht_phasor': ((C,), lambda c: talib.HT_PHASOR(c)[0], True, True),
-    'ht_phasor.quadrature': ((C,), lambda c: talib.HT_PHASOR(c)[1], True, True),
-    'ht_dcphase': ((C,), talib.HT_DCPHASE, True, True),
-    'ht_sine': ((C,), lambda c: talib.HT_SINE(c)[0], True, True),
-    'ht_sine.leadsine': ((C,), lambda c: talib.HT_SINE(c)[1], True, True),
-    'ht_trendline': ((C,), talib.HT_TRENDLINE, True, True),
-    'ht_trendmode': ((C,), lambda c: talib.HT_TRENDMODE(c).astype(float), True, True),
-    'mama': ((C,), lambda c: talib.MAMA(c, 0.5, 0.05)[0], True, True),
+    'ht_dcperiod': ((C,), _ht(talib.HT_DCPERIOD, R.ht_dcperiod), True, True),
+    'ht_phasor': ((C,), _ht(lambda c: talib.HT_PHASOR(c)[0], lambda c: R.ht_phasor(c)[0]), True, True),
+    'ht_phasor.quadrature': ((C,), _ht(lambda c: talib.HT_PHASOR(c)[1], lambda c: R.ht_phasor(c)[1]), True, True),
+    'ht_dcphase': ((C,), _ht(talib.HT_DCPHASE, R.ht_dcphase), True, True),
+    'ht_sine': ((C,), _ht(lambda c: talib.HT_SINE(c)[0], lambda c: R.ht_sine(c)[0]), True, True),
+    'ht_sine.leadsine': ((C,), _ht(lambda c: talib.HT_SINE(c)[1], lambda c: R.ht_sine(c)[1]), True, True),
+    'ht_trendline': ((C,), _ht(talib.HT_TRENDLINE, R.ht_trendline), True, True),
+    'ht_trendmode': ((C,), _ht(lambda c: talib.HT_TRENDMODE(c).astype(float), R.ht_trendmode), True, True),
+    'mama': ((C,), _ht(lambda c: talib.MAMA(c, 0.5, 0.05)[0], lambda c: R.mama(c)[0]), True, True),
 }
 
 

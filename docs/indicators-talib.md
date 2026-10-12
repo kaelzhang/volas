@@ -126,7 +126,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-typprice"></a>`typprice` | `TYPPRICE` | Typical price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-wclprice"></a>`wclprice` | `WCLPRICE` | Weighted close price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-ht_dcperiod"></a>`ht_dcperiod` | `HT_DCPERIOD` | Hilbert Transform dominant cycle period. | `@<series=close>` |
-| <a id="indicator-ht_dcphase"></a>`ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. Like every Hilbert-transform output (`ht_*`, `mama`), bit-identical to TA-Lib from its first published row, flat and step inputs included. | `@<series=close>` |
+| <a id="indicator-ht_dcphase"></a>`ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. Every Hilbert-transform output (`ht_*`, `mama`) evaluates TA-Lib's C recurrences in source order without fused multiply-add, so it is the same on every platform and bit-identical, from its first published row, to a TA-Lib build that does not fuse (x86-64 without FMA); against a fused build (clang on arm64) it agrees to rounding. On flat or step input the phase is rounding noise and may differ between TA-Lib builds and platforms. | `@<series=close>` |
 | <a id="indicator-ht_phasor"></a>`ht_phasor` | `HT_PHASOR` | Hilbert Transform phasor in-phase line. | `@<series=close>` |
 | <a id="indicator-ht_phasor-quadrature"></a>`ht_phasor.quadrature` | `HT_PHASOR` | Hilbert Transform phasor quadrature line. | `@<series=close>` |
 | <a id="indicator-ht_sine"></a>`ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@<series=close>` |

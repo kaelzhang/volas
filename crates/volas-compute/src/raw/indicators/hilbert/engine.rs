@@ -251,14 +251,13 @@ impl HtCoreState {
     /// bit-identical continuation.
     #[inline(always)]
     pub(super) fn step(&mut self, price: &[f64], today: usize) -> HtBar {
-        // TA-Lib's exact evaluation order. The pinned build is compiled with C's default
-        // floating-point contraction, which fuses each `x*y + z` written in one
-        // expression into one rounding: `(0.075*period)+0.54` is `fma(0.075, period,
-        // 0.54)`, `(0.2*X)+(0.8*Y)` is `fma(0.2, X, 0.8*Y)` (the left product fuses).
-        // Every such expression below is written as that `mul_add`, so each bar is
-        // bit-identical to the oracle — on flat input, where the discriminator works on
-        // rounding noise, any other order gives a different period and phase.
-        let adj = self.period.mul_add(0.075, 0.54);
+        // TA-Lib's C source, expression by expression, in plain IEEE arithmetic — no fused
+        // multiply-add: the same value on every platform, bit-identical to a TA-Lib build
+        // that does not contract `x*y + z` (x86-64 without FMA, as the manylinux wheels
+        // are built). A build that contracts (clang on arm64) rounds those expressions
+        // once instead of twice and differs in the last bits; where the discriminator
+        // works on rounding noise (flat or step prices) its phase may then differ.
+        let adj = (0.075 * self.period) + 0.54;
         // All callers keep `today` inside the input slice; this is the innermost
         // loop for every Hilbert-derived indicator.
         let today_value = unsafe { *price.get_unchecked(today) };
@@ -280,8 +279,8 @@ impl HtCoreState {
             if self.hilbert_idx == 3 {
                 self.hilbert_idx = 0;
             }
-            q2 = (q1c + jiv).mul_add(0.2, 0.8 * self.prev_q2);
-            i2 = (self.i1_even_prev3 - jqv).mul_add(0.2, 0.8 * self.prev_i2);
+            q2 = (0.2 * (q1c + jiv)) + (0.8 * self.prev_q2);
+            i2 = (0.2 * (self.i1_even_prev3 - jqv)) + (0.8 * self.prev_i2);
             i1 = self.i1_even_prev3;
             q1 = q1c;
             self.i1_odd_prev3 = self.i1_odd_prev2;
@@ -295,8 +294,8 @@ impl HtCoreState {
                 .ji
                 .transform_odd(self.i1_odd_prev3, self.hilbert_idx, adj);
             let jqv = self.jq.transform_odd(q1c, self.hilbert_idx, adj);
-            q2 = (q1c + jiv).mul_add(0.2, 0.8 * self.prev_q2);
-            i2 = (self.i1_odd_prev3 - jqv).mul_add(0.2, 0.8 * self.prev_i2);
+            q2 = (0.2 * (q1c + jiv)) + (0.8 * self.prev_q2);
+            i2 = (0.2 * (self.i1_odd_prev3 - jqv)) + (0.8 * self.prev_i2);
             i1 = self.i1_odd_prev3;
             q1 = q1c;
             self.i1_even_prev3 = self.i1_even_prev2;
@@ -304,8 +303,8 @@ impl HtCoreState {
         }
 
         // Homodyne discriminator -> dominant cycle period.
-        self.re = i2.mul_add(self.prev_i2, q2 * self.prev_q2).mul_add(0.2, 0.8 * self.re);
-        self.im = i2.mul_add(self.prev_q2, -(q2 * self.prev_i2)).mul_add(0.2, 0.8 * self.im);
+        self.re = (0.2 * ((i2 * self.prev_i2) + (q2 * self.prev_q2))) + (0.8 * self.re);
+        self.im = (0.2 * ((i2 * self.prev_q2) - (q2 * self.prev_i2))) + (0.8 * self.im);
         self.prev_q2 = q2;
         self.prev_i2 = i2;
         let prev_period = self.period;
@@ -328,8 +327,8 @@ impl HtCoreState {
         } else if self.period > 50.0 {
             self.period = 50.0;
         }
-        self.period = self.period.mul_add(0.2, 0.8 * prev_period);
-        self.smooth_period = self.period.mul_add(0.33, 0.67 * self.smooth_period);
+        self.period = (0.2 * self.period) + (0.8 * prev_period);
+        self.smooth_period = (0.33 * self.period) + (0.67 * self.smooth_period);
 
         HtBar {
             smooth_period: self.smooth_period,
@@ -501,15 +500,13 @@ impl DcPhase {
         let mut k = self.idx;
         // The DFT bins have the same sin/cos for every bar of the same period, so read them
         // from a twiddle table built once (lazily) for all periods — the values TA-Lib
-        // computes per bar, without the per-bar transcendentals. Each `part += s*v` is one
-        // fused rounding, as in the contracted oracle build: on flat or step input the
-        // imaginary part is rounding noise that sets the phase, so only TA-Lib's exact
-        // order reproduces it.
+        // computes per bar, without the per-bar transcendentals. Each `part += s*v` rounds
+        // the product and the sum, in TA-Lib's order (see `HtCoreState::step`).
         let twiddle = &DFT_TWIDDLE.get_or_init(build_dft_twiddle)[dc_period_int];
         for &(s, c) in &twiddle[..dc_period_int] {
             let v = self.smooth_price[k];
-            real_part = s.mul_add(v, real_part);
-            imag_part = c.mul_add(v, imag_part);
+            real_part += s * v;
+            imag_part += c * v;
             k = if k == 0 { SMOOTH_PRICE_SIZE - 1 } else { k - 1 };
         }
         let abs_imag = imag_part.abs();
@@ -615,12 +612,11 @@ impl ITrend {
     pub(super) const STATE_LEN: usize = 3;
 
     /// The trendline at bar `today`, advancing the recurrence: TA-Lib's
-    /// `(4·avg + 3·it1 + 2·it2 + it3)/10` in its contracted evaluation order,
-    /// `(fma(2, it2, fma(4, avg, 3·it1)) + it3) / 10`.
+    /// `(4·avg + 3·it1 + 2·it2 + it3)/10`, left to right.
     #[inline]
     pub(super) fn push(&mut self, price: &[f64], today: usize, smooth_period: f64) -> f64 {
         let avg = trendline_avg(price, today, smooth_period);
-        let value = (2.0f64.mul_add(self.it2, 4.0f64.mul_add(avg, 3.0 * self.it1)) + self.it3) / 10.0;
+        let value = (4.0 * avg + 3.0 * self.it1 + 2.0 * self.it2 + self.it3) / 10.0;
         self.it3 = self.it2;
         self.it2 = self.it1;
         self.it1 = avg;

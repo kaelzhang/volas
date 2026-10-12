@@ -9,8 +9,9 @@
 //! (lookback 32 vs 63) and (b) the per-bar value they emit.
 //!
 //! We run the shared core once ([`ht_core`]) and each public function derives its
-//! output from it, porting the recurrences verbatim from `ta_HT_*.c` / `ta_MAMA.c`
-//! so results are bit-identical to TA-Lib 0.6.4. Warm-up entries are `NaN`.
+//! output from it, porting the recurrences verbatim from `ta_HT_*.c` / `ta_MAMA.c` in
+//! plain (unfused) arithmetic, so results are bit-identical to a TA-Lib 0.6.4 build that
+//! does not contract `x*y + z` into FMA, on every platform. Warm-up entries are `NaN`.
 
 mod engine;
 use engine::*;
@@ -111,12 +112,13 @@ pub fn ht_trendline(price: &[f64]) -> Vec<f64> {
     }
     let mut core = HtCoreState::seed(price, PHASE_START);
     let mut itrend = ITrend::default();
-    for (today, slot) in out.iter_mut().enumerate().skip(PHASE_START) {
+    #[allow(clippy::needless_range_loop)] // numeric kernel: `today` indexes `price` too
+    for today in PHASE_START..n {
         let b = core.step(price, today);
         // TA-Lib's iTrend recurrence is per-bar, but only bars >= LB_PHASE are visible.
         let v = itrend.push(price, today, b.smooth_period);
         if today >= LB_PHASE {
-            *slot = v;
+            out[today] = v;
         }
     }
     out
@@ -628,9 +630,9 @@ fn mama_step(
     } else {
         fast_limit
     };
-    *mama = alpha.mul_add(price_today, (1.0 - alpha) * *mama);
+    *mama = (alpha * price_today) + ((1.0 - alpha) * *mama);
     let half = 0.5 * alpha;
-    *fama = half.mul_add(*mama, (1.0 - half) * *fama);
+    *fama = (half * *mama) + ((1.0 - half) * *fama);
 }
 
 /// Resume `MAMA`/`FAMA` over `[from, n)`, emitting `mama` (`want_fama == false`) or

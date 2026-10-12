@@ -115,6 +115,11 @@ it, the departure is deliberate and listed here.
   own start; TA-Lib seeds them from an offset aligned to the signal line.
 - **Warm-up rows are NaN**, also for TA-Lib's integer outputs (HT_TRENDMODE, the
   candlestick patterns) where TA-Lib writes 0.
+- **The Hilbert transform** (`ht_*`, `mama`) follows TA-Lib's C source in plain arithmetic,
+  without fused multiply-add: the same value on every platform, bit-identical to a TA-Lib
+  build that does not fuse (the x86-64 wheels). A build that fuses (clang on arm64) agrees
+  to rounding; on flat or step input, where the dominant-cycle phase is rounding noise,
+  its phase may differ — between TA-Lib builds and platforms as well.
 
 Where TA-Lib's arguments are out of order, volas follows it: a `slow` period shorter
 than `fast` swaps the two averages in `macd`, `apo`, `ppo` and `macdext`.
