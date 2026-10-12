@@ -219,7 +219,7 @@ pub(crate) fn loc_positions(sel: &Bound<'_, PyAny>, index: &Index, height: usize
     }
     if let Ok(slice) = sel.downcast::<PySlice>() {
         let (lo, hi) = label_bounds(slice, index)?;
-        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
+        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
         return Ok((a..b).collect());
     }
     if let Ok(list) = sel.downcast::<PyList>() {
@@ -485,7 +485,7 @@ pub(crate) fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResul
         } else {
             Some(parse_label(&stop_obj, index)?)
         };
-        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
+        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
         Ok(df.slice(a, b))
     } else {
         let info = slice.indices(df.height() as isize)?;
@@ -538,7 +538,7 @@ impl DataFrameLoc {
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, index)?;
-            let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
+            let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
             return Ok(Py::new(py, PyDataFrame::plain(df.slice(a, b)))?.into_any());
         }
         // boolean-mask / label-list row selection -> sub-frame.
@@ -711,7 +711,7 @@ impl SeriesLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, &self.inner.index)?;
-            let (a, b) = self.inner.index.label_slice(lo.as_ref(), hi.as_ref());
+            let (a, b) = self.inner.index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
             let positions: Vec<usize> = (a..b).collect();
             let data = self.inner.data.take(&positions);
             let index = Arc::new(self.inner.index.take(&positions));

@@ -141,6 +141,26 @@ df.at['cc', 'px']      # 3.0
 df.drop(['bb'])        # drop by string label
 ```
 
+A label slice follows the index's label order, as in pandas. Integer and string
+labels only need to be unique, so they may come in any order:
+
+- **increasing labels** select every row with `lo <= label <= hi`; a bound need
+  not be a label of the index;
+- **decreasing labels** select every row with `lo >= label >= hi`;
+- **any other order** locates each bound by its exact label and selects the rows
+  between the two positions. A bound that is not a label of the index raises
+  `KeyError`, because comparing by value would select (or, in
+  `df.loc[lo:hi, col] = v`, overwrite) rows outside the requested labels.
+
+```py
+df = DataFrame({'x': [20, 0, 10]}, index=[2, 0, 1])
+df.loc[0:1]            # the rows labelled 0 and 1
+df.loc[0:1, 'x'] = 99  # writes those two rows only: x == [20, 99, 99]
+df.loc[0:5]            # KeyError: 5 is not a label of this unordered index
+```
+
+A datetime index holding `NaT` counts as unordered, as in pandas.
+
 ### Differences from pandas (vs pandas)
 
 volas is pandas-shaped on the surface, but its **type system is deliberately
