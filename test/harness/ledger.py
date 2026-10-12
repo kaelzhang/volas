@@ -55,16 +55,21 @@ class Ledger:
     def dtype(self, col: str) -> str:
         return self.user[col] if col in self.user else self.schema.dtype(col)
 
-    def accepts(self, labels: list[int] | None, retained: int | None = None) -> bool:
+    def accepts(self, labels: list[int] | None, retained: int | None = None, count: int = 0) -> bool:
         """Whether the frame takes rows labelled ``labels`` (``contracts.
         APPEND_KEYED_BY_LABEL``): row by row, a label equal to the last replaces it; one
         before the last raises on a DatetimeIndex; on an integer index a label an
-        earlier row (or an earlier row of the batch) has raises. A bounded frame knows only
-        the labels of the ``retained`` rows it still holds."""
-        if labels is None or not contracts.APPEND_KEYED_BY_LABEL:
+        earlier row (or an earlier row of the batch) has raises. ``count`` unlabelled
+        rows (``labels=None``) take ``last + 1 ...``, none of which an integer index may
+        already hold. A bounded frame knows only the labels of the ``retained`` rows it
+        still holds."""
+        if not contracts.APPEND_KEYED_BY_LABEL:
             return True
-        prev = self.index[-1] if self.index else None
         seen = set(self.index if retained is None else self.index[len(self.index) - retained:])
+        if labels is None:
+            start = self.index[-1] + 1 if self.index else 0
+            return self.schema.index == 'datetime' or not seen & set(range(start, start + count))
+        prev = self.index[-1] if self.index else None
         for lab in labels:
             if prev is not None and lab != prev:
                 if self.schema.index == 'datetime' and lab < prev:

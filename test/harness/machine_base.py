@@ -29,7 +29,7 @@ import volas
 
 from . import contracts, inventory, observe
 from .data import EXTREME_SCALES
-from .directives import Directive, directives
+from .directives import Directive, directives, stored_bare_names
 from .ledger import Ledger, reference
 
 
@@ -150,10 +150,18 @@ class FrameMachine(RuleBasedStateMachine):
             tolerance = max(tolerance, contracts.ULP_DRIFT_TOLERANCE)
         return tolerance
 
-    def oracle(self, entry: Entry, evaluate: bool = False):
-        """The reference values of ``entry`` on the visible rows, or its error class."""
+    def oracle(self, entry: Entry, evaluate: bool = False, hide: set[str] = frozenset()):
+        """The reference values of ``entry`` on the visible rows, or its error class —
+        over the frame without the data columns ``hide``."""
         text = entry.directive.text if entry.directive else entry.name
-        values, error = reference(self.coarse(), text, entry.env, entry.start, evaluate)
+        ledger = self.coarse()
+        if hide:
+            ledger = ledger.copy()
+            for c in hide:
+                ledger.user.pop(c, None)
+                for r in ledger.rows:
+                    r.pop(c, None)
+        values, error = reference(ledger, text, entry.env, entry.start, evaluate)
         if error is not None:
             return None, error
         return values[self.visible_start() - entry.start:], None
@@ -291,9 +299,10 @@ class FrameMachine(RuleBasedStateMachine):
             observe.same_indicator(got, np.asarray(want), f'df[{d.text!r}]', self.tolerance(entry),
                                    self.excused(entry))
             # I9: the column name is a directive of the same meaning (it is what a
-            # refresh re-parses).
+            # refresh re-parses — reading its bare names as the commands, never as a data
+            # column named like one: `change: * 2` caches as `change*2`).
             renamed = replace(entry, name=col, directive=replace(d, text=col))
-            again, error = self.oracle(renamed)
+            again, error = self.oracle(renamed, hide=stored_bare_names(col) & self.command_columns())
             assert error is None, f'the cached name {col!r} of {d.text!r} does not re-parse: {error}'
             observe.same_indicator(np.asarray(again), np.asarray(want), f'{col!r} vs {d.text!r}')
             self.column_of[name] = col

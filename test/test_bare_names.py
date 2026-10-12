@@ -62,6 +62,7 @@ def test_the_command_or_the_renamed_column_resolve_the_ambiguity():
     assert np.array_equal(renamed['close * change_pct'].to_numpy(), CLOSE * CHANGE)
     # the command form keeps reading the command after an append, never the column
     df['close * change:']
+    assert df.is_computed('close*change')  # cached under its name, refreshed as the command
     df.append(volas.DataFrame({'close': [CLOSE[-1] + 1], 'volume': [1.0], 'change': [5.0]}))
     want = volas.DataFrame({'close': list(CLOSE) + [CLOSE[-1] + 1], 'volume': list(VOLUME) + [1.0]})
     assert np.array_equal(df['close * change:'].to_numpy(), want.exec('close * change'),

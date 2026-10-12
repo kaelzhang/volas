@@ -8,6 +8,7 @@ names it reads (which may bind to a frame column of the same name).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from hypothesis import strategies as st
@@ -58,6 +59,16 @@ def _arg_token(draw, domain: inventory.ArgDomain) -> str:
     return repr(round(value, 3)) if domain.lo <= round(value, 3) <= domain.hi else repr(domain.lo)
 
 
+_BARE = re.compile(r'(?<![\w.])([A-Za-z_][\w.]*)(?![\w.:@])')
+
+
+def stored_bare_names(name: str) -> set[str]:
+    """The bare names (as spelled) of a cached column's name — the directive text a
+    refresh re-reads: every identifier that is not a command with arguments or a series
+    (``ma:5``, ``accbands@open``), including the ``@`` operands."""
+    return set(_BARE.findall(name))
+
+
 @st.composite
 def command(draw, columns: tuple[str, ...], depth: int = 0) -> Directive:
     """One command line with random in-domain arguments, empty default slots, an
@@ -88,7 +99,7 @@ def command(draw, columns: tuple[str, ...], depth: int = 0) -> Directive:
     if series:
         text += '@' + ','.join(series)
     if not tokens and not series and line.head == head.lower():
-        bare = bare | {line.head}  # a bare command name: may bind to a same-named column
+        bare = bare | {head}  # a bare command name, as spelled: may bind to a same-named column
     return Directive(text, line.kind, bare_names=bare, commands=1 + nested)
 
 

@@ -12,6 +12,7 @@ from hypothesis.stateful import initialize, precondition, rule
 import volas
 
 from . import build, contracts, inventory, observe
+from .directives import stored_bare_names
 from .data import EPOCHS, NS, make_rows, next_timestamps, regimes, schemas, steps
 from .ledger import Ledger, last_close
 from .machine_base import Entry, FrameMachine
@@ -85,7 +86,7 @@ class PlainMachine(FrameMachine):
             if k:
                 self._pend_stale()
 
-        expect = None if self.store.accepts(labels, self.retained()) else ValueError
+        expect = None if self.store.accepts(labels, self.retained(), len(rows)) else ValueError
         self.attempt(lambda: self.df.append(bar), expect_error=expect, commit=commit,
                      label=f'append {form} k={k}')
 
@@ -98,6 +99,8 @@ class PlainMachine(FrameMachine):
             # One numeric column carries text, which no numeric dtype holds (a lossless
             # int <-> float value is converted, contract #20): any column, the rows are
             # checked whole before the first one grows.
+            if not self.store.accepts(index, self.retained(), len(rows)):
+                return  # the labels are refused first (the index is checked before values)
             numeric = [c for c in schema.columns if schema.dtype(c) in ('float64', 'float32', 'int64', 'int32')]
             col = numeric[regime[1] % len(numeric)]
             bar = build.frame(schema, rows, index)
@@ -248,8 +251,7 @@ class PlainMachine(FrameMachine):
         else:
             name = data.draw(st.sampled_from(list(self.df.columns)))
         bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
-        if name in bare and any(name in e.directive.bare_names for key, e in self.cached.items()
-                                if e.directive and key != name):
+        if name in bare and any(name in stored_bare_names(key) for key in self.cached if key != name):
             if contracts.COLUMN_UNDER_A_CACHED_COMMAND_RAISES:
                 self.attempt(lambda: self.df.__setitem__(name, np.zeros(len(self.df))),
                              expect_error=ValueError, label=f'df[{name!r}] = ... under a cached command')
@@ -346,7 +348,7 @@ class PlainMachine(FrameMachine):
             if rows:
                 self._pend_stale()
 
-        expect = None if self.store.accepts(labels, self.retained()) else ValueError
+        expect = None if self.store.accepts(labels, self.retained(), len(rows)) else ValueError
         self.attempt(lambda: self.df.append(src_df), expect_error=expect, commit=commit,
                      label='append snapshot')
 
