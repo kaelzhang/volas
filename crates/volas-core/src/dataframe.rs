@@ -244,6 +244,7 @@ impl DataFrame {
         assert_eq!(self.first_computed, first, "first cached column position is stale");
         for (name, meta) in &self.computed {
             assert!(self.name_to_idx.contains_key(name), "computed {name:?} is not a column");
+            assert!(meta.since <= self.origin, "computed {name:?} history starts after row 0");
             assert!(meta.valid_rows <= self.height, "computed {name:?} cursor past the height");
             // a carried state describes a valid row of THIS frame (never one before it)
             if meta.state.is_some() {
