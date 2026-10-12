@@ -205,3 +205,34 @@ def test_the_window_variance_is_within_its_bound_with_missing_runs(seed):
         x[start:start + rng.integers(1, 9)] = np.nan  # missing runs, some covering anchors
     for w in (3, 5, 8):
         _check_present_var(x, w)
+
+
+@pytest.mark.parametrize("method", ["var", "std", "sem"])
+def test_the_window_variance_depends_on_the_window_values_alone(method):
+    """The window API is a snapshot: a slice, a bounded frame and a fresh series of the
+    same rows give the full computation's bits for every window they hold whole."""
+    rng = np.random.default_rng(5)
+    x = 12345.67 + rng.normal(0, 1e-6, 400)
+    x[rng.random(400) < 0.05] = np.nan
+    x[[50, 51, 230]] = [1e9, -1e9, 1e12]
+    w = 7
+    full = np.asarray(getattr(DataFrame({"close": x})["close"].rolling(w, min_periods=2), method)(), dtype=float)
+    for start in (1, 3, 13, 100):
+        part = DataFrame({"close": x}).iloc[start:]["close"]
+        got = np.asarray(getattr(part.rolling(w, min_periods=2), method)(), dtype=float)
+        _bits_eq(got[w - 1:], full[start + w - 1:], f"{method} slice {start}")
+        fresh = np.asarray(getattr(DataFrame({"close": x[start:]})["close"].rolling(w, min_periods=2), method)(), dtype=float)
+        _bits_eq(fresh[w - 1:], full[start + w - 1:], f"{method} fresh {start}")
+    bounded = DataFrame({"close": x[:20]}, window=30, max_lookback=0)
+    for i in range(20, len(x)):
+        bounded.append(DataFrame({"close": x[i:i + 1]}))
+    got = np.asarray(getattr(bounded["close"].rolling(w, min_periods=2), method)(), dtype=float)
+    _bits_eq(got[w - 1:], full[len(x) - len(got) + w - 1:], f"{method} bounded")
+
+
+def _bits_eq(got, want, ctx):
+    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
+    same = (got == want) | (np.isnan(got) & np.isnan(want))
+    if not same.all():
+        bad = int(np.flatnonzero(~same)[0])
+        raise AssertionError(f"{ctx}: row {bad}: {got[bad]!r} vs {want[bad]!r}")

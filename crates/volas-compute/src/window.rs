@@ -10,8 +10,7 @@
 //! dtype-preserving members `first` / `last` / `count` / `nunique` through the
 //! position / count kernels instead).
 
-use crate::accum::{spread, Anchors, Csum, Exact};
-use crate::raw::kernels::shifted_terms;
+use crate::accum::{comoment, square_terms, Csum, Exact};
 use std::collections::HashMap;
 
 /// The trailing window over `i`: `[start, i]`.
@@ -103,31 +102,23 @@ impl Infinities {
 
 /// Slide the present values of each window over `data` and `read` every window holding
 /// at least `min_periods` of them (NaN otherwise) — NaN is missing and skipped, ±inf is
-/// a value. `K` exact sums of `terms(x, shift)` over the window's finite values are kept,
-/// and its infinities are counted apart, so an infinity never outlives its window. The
+/// a value. `K` exact sums of `terms(x)` over the window's finite values are kept, and
+/// its infinities are counted apart, so an infinity never outlives its window. The
 /// running sums are the exact ones of [`crate::accum`], re-summed whenever one went
 /// inexact, so each window's sums are the correctly rounded sums of its own terms
-/// (`math.fsum`), however long the slide. A `shifted` slide (a second moment) also
-/// re-sums at every row whose absolute position (row 0 at `origin`) is a multiple of the
-/// window length (an anchor): its `shift` is the first finite value at or after the
-/// latest anchor (for an expanding window, the first finite value) or, until one has
-/// arrived, the nearest finite value before the anchor inside the window — always a
-/// value of the window (a window with no finite value reads no shift), a function of its
-/// contents and its rows' absolute positions alone, the shift of [`crate::accum`]'s
-/// second moments; the sums are rebuilt whenever it changes. An expanding window never drops a value: its sums are kept exactly by
-/// [`Exact`] expansions once the compensated form can no longer hold them — after an
-/// extreme value (its magnitude far from the rest's), every later row is added to the
-/// expansion and rounded from it, an `O(expansion words)` step with an allocation per
-/// row instead of the compensated add, for the rest of that series.
-/// `read(sums, shift, infinities, count)`.
+/// (`math.fsum`), however long the slide — and depend on the window's values alone,
+/// not on where the series starts. An expanding window never drops a value: its sums
+/// are kept exactly by [`Exact`] expansions once the compensated form can no longer
+/// hold them — after an extreme value (its magnitude far from the rest's), every later
+/// row is added to the expansion and rounded from it, an `O(expansion words)` step with
+/// an allocation per row instead of the compensated add, for the rest of that series.
+/// `read(sums, infinities, count)`.
 fn present_sums<const K: usize>(
     data: &[f64],
     window: usize,
-    origin: usize,
-    shifted: bool,
     min_periods: usize,
-    terms: impl Fn(f64, f64) -> [f64; K],
-    read: impl Fn(&[Csum; K], f64, f64, usize) -> f64,
+    terms: impl Fn(f64) -> [f64; K],
+    read: impl Fn(&[Csum; K], f64, usize) -> f64,
 ) -> Vec<f64> {
     let rolling = window != usize::MAX;
     let min_periods = min_periods.max(1);
@@ -135,8 +126,6 @@ fn present_sums<const K: usize>(
     let mut expansion: Option<[Exact; K]> = None;
     let mut inf = Infinities::default();
     let mut count = 0usize;
-    let (mut k, mut settled) = (0.0, false);
-    let mut anchors = Anchors::from(origin, if rolling { window } else { 1 });
     let mut out = Vec::with_capacity(data.len());
     for i in 0..data.len() {
         if rolling && i >= window {
@@ -144,7 +133,7 @@ fn present_sums<const K: usize>(
             if !x.is_nan() {
                 count -= 1;
                 if x.is_finite() {
-                    for (s, t) in sums.iter_mut().zip(terms(x, k)) {
+                    for (s, t) in sums.iter_mut().zip(terms(x)) {
                         s.sub(t);
                     }
                 } else {
@@ -152,42 +141,28 @@ fn present_sums<const K: usize>(
                 }
             }
         }
-        let anchor = shifted && rolling && anchors.tick();
-        if anchor {
-            // A new segment: until its first present value arrives, the shift is the
-            // nearest present value before the anchor inside the window (if any).
-            settled = false;
-            let earlier = &data[win_start(i, window)..i];
-            if let Some(&v) = earlier.iter().rev().find(|v| v.is_finite()) {
-                k = v;
-            }
-        }
         let x = data[i];
-        let resettle = shifted && !settled && x.is_finite();
-        if resettle {
-            (k, settled) = (x, true);
-        }
         if !x.is_nan() {
             count += 1;
             if !x.is_finite() {
                 inf.count(x, true);
             } else if let Some(e) = &mut expansion {
-                for (e, t) in e.iter_mut().zip(terms(x, k)) {
+                for (e, t) in e.iter_mut().zip(terms(x)) {
                     e.add(t);
                 }
             } else {
-                for (s, t) in sums.iter_mut().zip(terms(x, k)) {
+                for (s, t) in sums.iter_mut().zip(terms(x)) {
                     s.add(t);
                 }
             }
         }
-        let rows = &data[win_start(i, window)..=i];
-        if expansion.is_none() && (anchor || resettle || !sums.iter().all(Csum::is_exact)) {
-            sums = Csum::of_rows(rows.iter().filter(|x| x.is_finite()).map(|&x| terms(x, k)));
+        if expansion.is_none() && !sums.iter().all(Csum::is_exact) {
+            let rows = &data[win_start(i, window)..=i];
+            sums = Csum::of_rows(rows.iter().filter(|x| x.is_finite()).map(|&x| terms(x)));
             if !rolling && !sums.iter().all(Csum::is_exact) {
                 let mut e: [Exact; K] = std::array::from_fn(|_| Exact::default());
                 for &x in rows.iter().filter(|x| x.is_finite()) {
-                    for (e, t) in e.iter_mut().zip(terms(x, k)) {
+                    for (e, t) in e.iter_mut().zip(terms(x)) {
                         e.add(t);
                     }
                 }
@@ -197,7 +172,7 @@ fn present_sums<const K: usize>(
         if let Some(e) = &expansion {
             sums = std::array::from_fn(|j| e[j].to_csum());
         }
-        out.push(if count >= min_periods { read(&sums, k, inf.value(), count) } else { f64::NAN });
+        out.push(if count >= min_periods { read(&sums, inf.value(), count) } else { f64::NAN });
     }
     out
 }
@@ -205,14 +180,14 @@ fn present_sums<const K: usize>(
 /// Rolling / expanding sum of the present values (pandas `sum`): the exact sum of the
 /// finite ones, or the IEEE value of the window's infinities.
 pub fn sum(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    present_sums(data, window, 0, false, min_periods, |x, _| [x], |[s], _, inf, _| if inf != 0.0 { inf } else { s.value() })
+    present_sums(data, window, min_periods, |x| [x], |[s], inf, _| if inf != 0.0 { inf } else { s.value() })
 }
 
 /// Rolling / expanding mean of the present values (pandas `mean`): the exact sum over
 /// the count ([`Csum::mean`] — a flat window has its value as mean), or the IEEE value
 /// of the window's infinities.
 pub fn mean(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    present_sums(data, window, 0, false, min_periods, |x, _| [x], |[s], _, inf, n| if inf != 0.0 { inf } else { s.mean(n as f64) })
+    present_sums(data, window, min_periods, |x| [x], |[s], inf, n| if inf != 0.0 { inf } else { s.mean(n as f64) })
 }
 
 // --- min / max (monotonic deque, O(n)) ---------------------------------------
@@ -289,42 +264,36 @@ fn buf_var(b: &[f64], ddof: usize) -> f64 {
 }
 
 /// The variance with `ddof` degrees of freedom of each window's present values, from
-/// their exact sums `[Σx, Σ(x − K)²]` with the window's shift `K` ([`present_sums`]):
-/// `(Σd² − (Σd)²/n) / (n − ddof)` ([`centred`]) — within `(36n + 2)·2⁻⁵³` of the exact
-/// variance however the window's level dwarfs its spread, exactly zero for a constant
-/// window, NaN when the window holds an infinity or no more than `ddof` values. O(n):
+/// their exact sums `[Σx, Σx²]` ([`square_terms`]): `(n·Σx² − (Σx)²) / (n·(n − ddof))`
+/// by [`comoment`] — within an ulp or two of the exact variance however the window's
+/// level dwarfs its spread, exactly zero for a constant window, NaN when the window
+/// holds an infinity or no more than `ddof` values. A function of the window's values
+/// alone (no shift by an absolute position: this API is a stateless snapshot). O(n):
 /// one exact sliding pass, no per-window rescan.
-fn present_var(
-    data: &[f64],
-    window: usize,
-    origin: usize,
-    min_periods: usize,
-    ddof: usize,
-    read: impl Fn(f64, usize) -> f64,
-) -> Vec<f64> {
-    present_sums(data, window, origin, true, min_periods, shifted_terms, |[sum, sq], k, inf, n| {
+fn present_var(data: &[f64], window: usize, min_periods: usize, ddof: usize, read: impl Fn(f64, usize) -> f64) -> Vec<f64> {
+    present_sums(data, window, min_periods, square_terms, |sums, inf, n| {
         if inf != 0.0 || n <= ddof {
             return f64::NAN;
         }
         let nf = n as f64;
-        read((spread(nf, sum, k, sq).1 / (n - ddof) as f64).max(0.0), n)
+        let s = sums[0].words();
+        read((comoment(nf, s, s, &sums[1..]) / (nf * (n - ddof) as f64)).max(0.0), n)
     })
 }
 
-/// Rolling / expanding sample variance (pandas `var`, default ddof=1); row 0 at absolute
-/// position `origin` (the windows' shift anchors, see [`present_sums`]).
-pub fn var(data: &[f64], window: usize, min_periods: usize, ddof: usize, origin: usize) -> Vec<f64> {
-    present_var(data, window, origin, min_periods, ddof, |v, _| v)
+/// Rolling / expanding sample variance (pandas `var`, default ddof=1).
+pub fn var(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<f64> {
+    present_var(data, window, min_periods, ddof, |v, _| v)
 }
 
 /// Rolling / expanding standard deviation (pandas `std`).
-pub fn std(data: &[f64], window: usize, min_periods: usize, ddof: usize, origin: usize) -> Vec<f64> {
-    present_var(data, window, origin, min_periods, ddof, |v, _| v.sqrt())
+pub fn std(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<f64> {
+    present_var(data, window, min_periods, ddof, |v, _| v.sqrt())
 }
 
 /// Standard error of the mean (pandas `sem`): `std(ddof) / sqrt(count)`.
-pub fn sem(data: &[f64], window: usize, min_periods: usize, ddof: usize, origin: usize) -> Vec<f64> {
-    present_var(data, window, origin, min_periods, ddof, |v, n| (v / n as f64).sqrt())
+pub fn sem(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<f64> {
+    present_var(data, window, min_periods, ddof, |v, n| (v / n as f64).sqrt())
 }
 
 /// Mean absolute deviation about the window mean (TradingView `ta.dev`):

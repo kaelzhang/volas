@@ -67,7 +67,7 @@ ACCUMULATING = {
 # position (docs/indicator-inputs.md "Centred moments"), so a window recompute keeps the
 # rows' positions (a slice) to read the full computation's bits — as the engine's does.
 SHIFTED = {"var", "stddev", "boll", "bbw", "hv", "correl", "beta", "linearreg", "linearreg_angle",
-           "linearreg_intercept", "linearreg_slope", "tsf", "sem"}
+           "linearreg_intercept", "linearreg_slope", "tsf"}
 
 
 def _window_matches(directive, data):

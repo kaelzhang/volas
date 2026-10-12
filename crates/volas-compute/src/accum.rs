@@ -357,6 +357,86 @@ pub(crate) fn centred(n: f64, (sa, ka): (&Csum, f64), (sb, kb): (&Csum, f64), su
     sum_dd.value() - deviation(sa, n, ka) * deviation(sb, n, kb) / n
 }
 
+// --- second moments of a stateless window ----------------------------------------
+//
+// The pandas-style window API is a snapshot: a window's value depends on its values
+// alone, never on where the series starts, so it cannot shift by an anchor row (whose
+// position is absolute). Its variances come from exact `Σx` and an exact `Σx²` (each
+// square split into its rounded value and its rounding error, summed apart), the
+// centred difference `n·Σx² − (Σx)²` formed from their canonical words — a function of
+// the window's exact sums only, so any slice or bounded frame reads the full
+// computation's bits.
+
+/// The per-row terms of an exact `[Σx, Σx²]`: `x`, and `x²` split into its rounded
+/// value and its rounding error ([`two_prod`]) — summed apart, so the squares' sum is
+/// exact and [`comoment`] can take a window's deviation from it.
+#[inline(always)]
+pub(crate) fn square_terms(x: f64) -> [f64; 3] {
+    let (h, l) = two_prod(x, x);
+    [x, h, l]
+}
+
+/// `2⁻⁴⁰`: below this fraction of its terms' magnitude a co-moment estimate is too
+/// close to cancellation to trust, and [`comoment`] computes it exactly.
+const COMOMENT_FILTER: f64 = 1.0 / 1_099_511_627_776.0;
+
+/// `n·Σab − Σa·Σb` over a window of `n` rows — `n²` times its co-moment `Σ(a − ā)(b −
+/// b̄)` (with `a = b`, `n²` times its sum of squared deviations) — from the window's
+/// exact sums: `a` and `b` the canonical words of `Σa` and `Σb` ([`Csum::words`]; an
+/// exact constant `c` is `(c, 0)`), and `Σab` as the total of `sab` (the products' sums
+/// split as [`two_prod`] splits each product, or one exact sum).
+///
+/// The raw moments cancel: at a price level of `12345` a variance of `1e-12` is lost
+/// in rounding entirely. So the difference is formed from the sums' canonical words
+/// ([`Csum::words`]): the high words' difference rounded once by FMA, plus the
+/// low-order terms — within an ulp of itself plus `~2⁻¹⁰⁴` of the terms' magnitude —
+/// and returned when it clears that magnitude by `2⁴⁰` (then it is within an ulp or
+/// two of the exact value, and its sign is exact). Closer to cancellation it
+/// is computed exactly, as an [`Exact`] sum of every partial product: a window whose
+/// `a` or `b` is constant gives exactly `0`, never rounding noise. A function of the
+/// exact sums only, so every path that reaches a window reads the same bits.
+#[inline(always)]
+pub(crate) fn comoment(n: f64, a: (f64, f64), b: (f64, f64), sab: &[Csum]) -> f64 {
+    let (ah, al) = a;
+    let (bh, bl) = b;
+    let (ph, mut pl) = sab[0].words();
+    for s in &sab[1..] {
+        pl += s.value(); // the products' rounding errors: low-order already
+    }
+    // `n·ph − ah·bh` rounded once (FMA: `n·ph` exact inside it; `ah·bh` split exactly),
+    // then the low-order terms, each a `2⁻⁵²` fraction of the magnitude, rounded apart.
+    let (p2, e2) = two_prod(ah, bh);
+    let head = n.mul_add(ph, -p2);
+    let est = head + ((n * pl - e2) - ah.mul_add(bl, al * bh));
+    if est.abs() > (n * ph).abs().max(p2.abs()) * COMOMENT_FILTER {
+        return est;
+    }
+    comoment_exact(n, a, b, sab)
+}
+
+/// [`comoment`] near cancellation: every partial product of the canonical words,
+/// summed exactly.
+#[cold]
+#[inline(never)]
+fn comoment_exact(n: f64, (ah, al): (f64, f64), (bh, bl): (f64, f64), sab: &[Csum]) -> f64 {
+    let mut exact = Exact::default();
+    for (h, l) in sab.iter().map(Csum::words) {
+        for w in [h, l] {
+            let (p, e) = two_prod(n, w);
+            exact.add(p);
+            exact.add(e);
+        }
+    }
+    for x in [ah, al] {
+        for y in [bh, bl] {
+            let (p, e) = two_prod(-x, y);
+            exact.add(p);
+            exact.add(e);
+        }
+    }
+    exact.to_csum().value()
+}
+
 /// `2⁻⁶⁴`: the step an [`Exact`] expansion scales down by when one of its adds
 /// overflows.
 const RESCALE: f64 = 1.0 / 18_446_744_073_709_551_616.0;

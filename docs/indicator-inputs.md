@@ -81,8 +81,9 @@ the series' own positions, on a slice as on the full frame.
 
 ## Centred moments
 
-`var`, `stddev`, `boll`, `hv`, `correl`, `beta`, the `linearreg` family, and the window
-API's `var()` / `std()` / `sem()` take each window's spread from **shifted data**. The
+`var`, `stddev`, `boll`, `hv`, `correl`, `beta` and the `linearreg` family take each
+window's spread from **shifted data**; the window API's `var()` / `std()` / `sem()` from
+**exact sums of squares** (see [Why two methods](#why-two-methods) below). The
 one-pass raw moments `Σx²/n − (Σx/n)²` (TA-Lib's) cancel catastrophically when a
 window's level dwarfs its spread: at a price of `12345.67` a variance of `1e-12` reads
 `0`, a variance can go negative, a regression slope of `1e-9` per bar is off by `6e-4`,
@@ -101,10 +102,7 @@ the exact product `n·K`. The regression slides the exact sums `Σy` and `Σ age
 weighted terms are exact products, so no shift is needed to keep them exact) and reads
 them on the data shifted by the same anchor value `K`: `Σd = Σy − n·K` and `Σ age·d =
 Σ age·y − K·Σage` from their exact words, then `m = (n·Σ age·d − Σage·Σd) / divisor`
-and the intercept `K + (Σd − m·Σage) / n`. The window API's
-`var()` / `std()` / `sem()` skip missing values: there `K` is the first present value
-at or after the anchor or, until one arrives, the nearest present value before it in
-the window.
+and the intercept `K + (Σd − m·Σage) / n`.
 
 **Accuracy.** Let `u = 2⁻⁵³`, `n` the window's rows, `R` its range (max − min), `C*` its
 exact centred sum of squares, and assume no deviation, square or product underflows
@@ -127,6 +125,22 @@ magnitude), so `u·|K| ≤ R`, and a window spanning `R` has `C* ≥ R²/2`; hen
   within `15u·n·Σage·R`, the divisor `n²(n² − 1)/12`);
 - a **flat window** has every `d = 0` and `Σd = 0` exactly: its variance, deviation and
   slope are exactly `0`.
+
+### Why two methods
+
+A directive kernel is resumed from carried
+state and refreshed live, so it must reach a window by the same arithmetic on every path;
+the absolute row position is already part of that state (it is what a bounded frame or
+a slice keeps), and shifting by the anchor-row value costs no more than the raw moments.
+The window API (`rolling` / `expanding` `var()` / `std()` / `sem()`) is a stateless
+snapshot whose contract is that a window's value depends on its values alone — the same
+for a series, a slice of it, a bounded frame or a fresh series of those rows — so it
+cannot shift by a value chosen by absolute position. It keeps exact `Σx` and an exact
+`Σx²` (each square split into its rounded value and its rounding error, summed apart)
+and forms `n·Σx² − (Σx)²` from their canonical words: rounded once by FMA with the
+low-order terms added, or, within `2⁻⁴⁰` of cancellation, summed exactly. That is within
+an ulp or two of the exact variance, exactly `0` for a constant window, and a function of
+the window's values only; O(n), one sliding pass.
 
 A window with a constant series (zero variance, tested exactly) has `correl` and `beta`
 `0` — TA-Lib's result there, which TA-Lib reaches through an absolute `1e-14` threshold
