@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 use volas_core::{
@@ -30,6 +30,7 @@ pub(crate) fn pyerr(e: VolasError) -> PyErr {
     match e {
         VolasError::ColumnNotFound(n) => PyKeyError::new_err(format!("column \"{n}\" not found")),
         VolasError::DType(m) => PyTypeError::new_err(m),
+        VolasError::Overflow(m) => PyOverflowError::new_err(m),
         VolasError::Shape(m) | VolasError::Index(m) | VolasError::Value(m) | VolasError::Parse(m) => {
             PyValueError::new_err(m)
         }

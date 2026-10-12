@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use numpy::PyReadonlyArray1;
-use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PySliceIndices, PyTuple};
 use volas_core::{
@@ -31,9 +31,14 @@ pub(crate) fn is_na_like_py(v: &Bound<'_, PyAny>) -> bool {
         || v.get_type().name().map(|n| n == "NAType").unwrap_or(false)
 }
 
-/// Build a length-1 [`Column`] from a Python scalar, coerced toward the target
-/// column's dtype (so a string can land in a datetime column, etc.). An `I64`
-/// target given a float yields an `F64` value — core then widens the column.
+/// Build a length-1 [`Column`] of EXACTLY the `target` dtype from a Python scalar
+/// — the one scalar-write conversion behind every target-typed write (`iat` /
+/// `iloc` / `at` / `loc` / Series setitem / mask assignment / dict `append`). A
+/// missing scalar becomes the target's NA; a number converts through the core
+/// lossless owner ([`Column::convert_lossless`], contract #20): exact converts,
+/// inexact raises (`2**53 + 1` into float64, `2.5` into int64, `1e300` into
+/// float32), never a silent round or saturation. A string lands in a str / datetime
+/// column; a bool column takes a bool.
 pub(crate) fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
     // `None` / `NaN` / `volas.NA` -> a typed single-cell NA (marks the position
     // missing while keeping the dtype), so `x[i] = None / nan / volas.NA` is
@@ -42,40 +47,9 @@ pub(crate) fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<
         return Ok(Column::na_of(target, 1));
     }
     match target {
-        DType::F64 => {
-            let x = v
-                .extract::<f64>()
-                .map_err(|_| PyTypeError::new_err("expected a number"))?;
-            Ok(Column::f64(vec![x]))
+        DType::F64 | DType::F32 | DType::I64 | DType::I32 => {
+            number_column(v, target)?.convert_lossless(target).map_err(pyerr)
         }
-        DType::I64 => {
-            if let Ok(i) = v.extract::<i64>() {
-                Ok(Column::i64(vec![i]))
-            } else {
-                let x = v
-                    .extract::<f64>()
-                    .map_err(|_| PyTypeError::new_err("expected a number"))?;
-                Ok(Column::f64(vec![x]))
-            }
-        }
-        DType::F32 => {
-            let x = v
-                .extract::<f64>()
-                .map_err(|_| PyTypeError::new_err("expected a number"))?;
-            Ok(Column::f32(vec![x as f32]))
-        }
-        DType::I32 => match v.extract::<i64>() {
-            Ok(i) => match i32::try_from(i) {
-                Ok(v32) => Ok(Column::i32(vec![v32])),
-                Err(_) => Ok(Column::i64(vec![i])), // out of i32 range -> i64 (core widens)
-            },
-            Err(_) => {
-                let x = v
-                    .extract::<f64>()
-                    .map_err(|_| PyTypeError::new_err("expected a number"))?;
-                Ok(Column::f64(vec![x]))
-            }
-        },
         DType::Bool => {
             let b = v
                 .extract::<bool>()
@@ -90,6 +64,48 @@ pub(crate) fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<
         }
         DType::Datetime => Ok(Column::datetime(vec![parse_ts(v)?])),
     }
+}
+
+/// A Python number as its natural 1-cell column, before any conversion: a bool
+/// -> `Bool`, an integer (a Python `int` or a NumPy integer, via `__index__`) ->
+/// `I64`, a float -> `F64`. An integer past int64 has no column of its own: it
+/// may still land in a float `target` when float64 holds it exactly (and float32
+/// too, for a float32 target), checked by Python's exact int / float comparison;
+/// otherwise it raises — never a rounded or saturated value (contract #20).
+fn number_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
+    // fast path for the live bar-append cells: a Python float is a float64 as-is
+    if let Ok(f) = v.downcast_exact::<pyo3::types::PyFloat>() {
+        return Ok(Column::f64(vec![f.value()]));
+    }
+    if v.is_exact_instance_of::<pyo3::types::PyInt>() {
+        if let Ok(i) = v.extract::<i64>() {
+            return Ok(Column::i64(vec![i]));
+        }
+    }
+    if let Ok(b) = v.extract::<bool>() {
+        return Ok(Column::bool(vec![b])); // a Python or NumPy bool
+    }
+    if let Ok(idx) = v.call_method0("__index__") {
+        if let Ok(i) = idx.extract::<i64>() {
+            return Ok(Column::i64(vec![i]));
+        }
+        if !target.is_float() {
+            return Err(PyOverflowError::new_err(format!("{idx} is out of the {target} range")));
+        }
+        let f = idx
+            .extract::<f64>()
+            .map_err(|_| PyOverflowError::new_err(format!("{idx} is out of the {target} range")))?;
+        let narrow_ok = target == DType::F64 || (f as f32) as f64 == f;
+        if !(narrow_ok && idx.eq(f)?) {
+            return Err(PyTypeError::new_err(format!(
+                "{idx} is not exactly representable as {target}"
+            )));
+        }
+        return Ok(Column::f64(vec![f]));
+    }
+    v.extract::<f64>()
+        .map(|x| Column::f64(vec![x]))
+        .map_err(|_| PyTypeError::new_err("expected a number"))
 }
 
 /// Assign a Python **scalar** into `col` at `positions`, via the shared

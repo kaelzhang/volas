@@ -47,7 +47,10 @@ impl Column {
     /// cast). The robust ingestion path for exchange APIs that return numeric
     /// timestamps.
     pub fn epoch_to_datetime(&self, unit: &str) -> Result<Column> {
-        self.epoch_to_datetime_with(unit, |x| datetime::epoch_to_ns(x as i64, unit))
+        // a float epoch past the int64 range is unconvertible, never saturated
+        self.epoch_to_datetime_with(unit, |x| {
+            datetime::epoch_to_ns(i64::try_from_f64(x.trunc())?, unit)
+        })
     }
 
     /// Like [`epoch_to_datetime`](Self::epoch_to_datetime) but **rounds** float
@@ -148,29 +151,13 @@ impl Column {
             ));
         }
         match to {
-            DType::F64 => Ok(Column::f64(self.to_f64_vec())),
+            // a numeric / bool source to a float target: the lossless conversion
+            // (an int past the float's exact range raises instead of rounding, a
+            // finite float past float32's range raises instead of becoming inf).
+            DType::F64 | DType::F32 => self.convert_lossless(to),
             DType::I64 => match self {
-                Column::F64(v) => {
-                    // pandas raises (IntCastingNaNError) rather than silently
-                    // turning NaN -> 0 / inf -> i64::MAX, which corrupts data.
-                    if let Some(x) = v.iter().copied().find(|x| !x.is_finite()) {
-                        return Err(VolasError::Value(format!(
-                            "cannot convert non-finite value ({x}) to int64 (NaN / inf); \
-                             fill or drop it first"
-                        )));
-                    }
-                    Ok(Column::i64(v.iter().map(|&x| x as i64).collect()))
-                }
-                // F32 truncates like F64 (consistent with F32 -> I32), finite-checked.
-                Column::F32(v) => {
-                    if let Some(x) = v.iter().copied().find(|x| !x.is_finite()) {
-                        return Err(VolasError::Value(format!(
-                            "cannot convert non-finite value ({x}) to int64 (NaN / inf); \
-                             fill or drop it first"
-                        )));
-                    }
-                    Ok(Column::i64(v.iter().map(|&x| x as i64).collect()))
-                }
+                // F32 truncates like F64 (consistent with F32 -> I32).
+                Column::F64(_) | Column::F32(_) => truncate_to_i64(&self.to_f64_vec()),
                 // int/bool sources are handled by `cast_int_bool` above.
                 // The exact epoch nanoseconds; a NaT cell stays missing in the
                 // int64 validity (# C2) instead of surfacing the i64::MIN sentinel
@@ -206,9 +193,6 @@ impl Column {
                     other.dtype()
                 ))),
             },
-            DType::F32 => Ok(Column::f32(
-                self.to_f64_vec().iter().map(|&x| x as f32).collect(),
-            )),
             DType::I32 => self
                 .to_f64_vec()
                 .iter()
@@ -236,6 +220,89 @@ impl Column {
             }
             DType::Datetime => self.to_datetime(),
         }
+    }
+
+    /// Convert to `to` WITHOUT changing any present value — the one lossless
+    /// conversion owner (contract #20) behind target-typed writes and ingress. A
+    /// missing cell stays missing (NaN / NA / NaT of the target); a present value
+    /// converts when the target holds it exactly and raises otherwise:
+    /// - int / bool -> float: exact or a `DType` error (`2^53 + 1` is not a float64);
+    /// - float -> int: integral and in range, else a `DType` (`2.5`) or `Overflow`
+    ///   (`1e20`) error;
+    /// - int -> narrower int: in range, else an `Overflow` error;
+    /// - float64 -> float32: rounds to the nearest float32 (the float dtype's own
+    ///   precision) but a finite value past the float32 range is an `Overflow` error
+    ///   (never a silent `inf`);
+    /// - `bool` / `str` / `datetime` targets accept only their own dtype.
+    pub fn convert_lossless(&self, to: DType) -> Result<Column> {
+        if self.dtype() == to {
+            return Ok(self.clone());
+        }
+        if !(self.dtype().is_numeric() || matches!(self, Column::Bool(..)))
+            || !to.is_numeric()
+        {
+            return Err(VolasError::DType(format!(
+                "cannot store {} values in a {to} column",
+                self.dtype()
+            )));
+        }
+        let n = self.len();
+        let valid = Validity::from_valid_iter(n, (0..n).map(|i| self.is_valid(i)));
+        let inexact = |x: &dyn std::fmt::Display| {
+            VolasError::DType(format!("{x} is not exactly representable as {to}"))
+        };
+        let out_of_range =
+            |x: &dyn std::fmt::Display| VolasError::Overflow(format!("{x} is out of the {to} range"));
+        // each present cell as an exact integer or a float (never both)
+        let cell = |i: usize| -> Option<std::result::Result<i64, f64>> {
+            self.is_valid(i).then(|| match self {
+                Column::F64(v) => Err(v[i]),
+                Column::F32(v) => Err(v[i] as f64),
+                other => Ok(other.get_i64(i)),
+            })
+        };
+        Ok(match to {
+            DType::F64 => Column::f64(
+                (0..n)
+                    .map(|i| match cell(i) {
+                        None => Ok(f64::NAN),
+                        Some(Ok(x)) => i64_to_f64_exact(x).ok_or_else(|| inexact(&x)),
+                        Some(Err(x)) => Ok(x),
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+            DType::F32 => Column::f32(
+                (0..n)
+                    .map(|i| match cell(i) {
+                        None => Ok(f32::NAN),
+                        Some(Ok(x)) => i64_to_f32_exact(x).ok_or_else(|| inexact(&x)),
+                        Some(Err(x)) => f64_to_f32_in_range(x).ok_or_else(|| out_of_range(&x)),
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+            _ => {
+                // I64 / I32 (the remaining numeric targets)
+                let ints = (0..n)
+                    .map(|i| match cell(i) {
+                        None => Ok(0), // placeholder under the carried validity
+                        Some(Ok(x)) => Ok(x),
+                        Some(Err(x)) if x.fract() == 0.0 => {
+                            i64::try_from_f64(x).ok_or_else(|| out_of_range(&x))
+                        }
+                        Some(Err(x)) => Err(inexact(&x)),
+                    })
+                    .collect::<Result<Vec<i64>>>()?;
+                if to == DType::I64 {
+                    Column::i64_with(ints, valid)
+                } else {
+                    let narrow = ints
+                        .iter()
+                        .map(|&x| i32::try_from(x).map_err(|_| out_of_range(&x)))
+                        .collect::<Result<_>>()?;
+                    Column::i32_with(narrow, valid)
+                }
+            }
+        })
     }
 
     /// Cast an int/bool column to another int/bool dtype, carrying its validity (a
@@ -345,4 +412,24 @@ impl Column {
             }
         }
     }
+}
+
+/// `astype` float -> int64: truncate toward zero (pandas `astype`), but a
+/// non-finite value or one past the int64 range raises instead of saturating to
+/// `i64::MAX` / `i64::MIN` (pandas raises on NaN / inf only).
+fn truncate_to_i64(v: &[f64]) -> Result<Column> {
+    v.iter()
+        .map(|&x| {
+            if !x.is_finite() {
+                return Err(VolasError::Value(format!(
+                    "cannot convert non-finite value ({x}) to int64 (NaN / inf); \
+                     fill or drop it first"
+                )));
+            }
+            i64::try_from_f64(x.trunc()).ok_or_else(|| {
+                VolasError::Overflow(format!("{x} is out of the int64 range (astype)"))
+            })
+        })
+        .collect::<Result<Vec<i64>>>()
+        .map(Column::i64)
 }

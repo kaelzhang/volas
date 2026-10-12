@@ -24,18 +24,18 @@ impl PySeries {
     /// NaN-skipping mean (pandas `mean`) -> `np.float64`.
     pub(crate) fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, self.mean_f64()))
+        Ok(self.box_float(py, self.mean_f64()?))
     }
     /// Sum (pandas `sum`), dtype-preserving: float -> `np.float64`, int / bool ->
     /// `np.int64` (computed natively).
     pub(crate) fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(scalar_to_numpy(py, self.inner.data.sum()))
+        Ok(scalar_to_numpy(py, self.inner.data.sum().map_err(pyerr)?))
     }
     /// Product (pandas `prod`), dtype-preserving.
     pub(crate) fn prod(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(scalar_to_numpy(py, self.inner.data.prod()))
+        Ok(scalar_to_numpy(py, self.inner.data.prod().map_err(pyerr)?))
     }
     /// Minimum (pandas `min`). Order-based, so it serves any ordered dtype:
     /// numeric/bool reduce to a numpy scalar (int -> `np.int64`, exact even past
@@ -51,32 +51,32 @@ impl PySeries {
     /// Sample variance (`ddof=1`, pandas `var`) -> `np.float64`.
     pub(crate) fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, self.var_f64()))
+        Ok(self.box_float(py, self.var_f64()?))
     }
     /// Sample standard deviation (`ddof=1`, pandas `std`) -> `np.float64`.
     pub(crate) fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, self.var_f64().sqrt()))
+        Ok(self.box_float(py, self.var_f64()?.sqrt()))
     }
     /// Median (pandas `median`) -> `np.float64`.
     pub(crate) fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, self.median_f64()))
+        Ok(self.box_float(py, self.median_f64()?))
     }
     /// Standard error of the mean (`ddof=1`, pandas `sem`) -> `np.float64`.
     pub(crate) fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, stats::sem(&self.inner.data.to_f64_vec())))
+        Ok(self.box_float(py, stats::sem(&self.f64_domain("sem")?)))
     }
     /// Adjusted Fisher-Pearson skewness (pandas `skew`) -> `np.float64`.
     pub(crate) fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, stats::skew(&self.inner.data.to_f64_vec())))
+        Ok(self.box_float(py, stats::skew(&self.f64_domain("skew")?)))
     }
     /// Excess kurtosis, Fisher's definition (pandas `kurt`) -> `np.float64`.
     pub(crate) fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(self.box_float(py, stats::kurt(&self.inner.data.to_f64_vec())))
+        Ok(self.box_float(py, stats::kurt(&self.f64_domain("kurt")?)))
     }
 
     /// Pairwise Pearson correlation with `other` (pandas `corr`), dropping NaN
@@ -85,7 +85,7 @@ impl PySeries {
         require_aligned(&self.inner.index, &other.inner.index)?;
         self.inner.data.require_numeric().map_err(pyerr)?;
         other.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(stats::corr(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec()))
+        Ok(stats::corr(&self.f64_domain("corr")?, &other.f64_domain("corr")?))
     }
 
     /// Pairwise sample covariance with `other`, ddof=1 (pandas `cov`), dropping NaN
@@ -94,7 +94,7 @@ impl PySeries {
         require_aligned(&self.inner.index, &other.inner.index)?;
         self.inner.data.require_numeric().map_err(pyerr)?;
         other.inner.data.require_numeric().map_err(pyerr)?;
-        Ok(stats::cov(&self.inner.data.to_f64_vec(), &other.inner.data.to_f64_vec()))
+        Ok(stats::cov(&self.f64_domain("cov")?, &other.f64_domain("cov")?))
     }
 
     /// Summary statistics (pandas `describe`): a Series indexed by
@@ -104,12 +104,12 @@ impl PySeries {
         // would funnel through to_f64_vec to nonsense, so it raises (C4) until a
         // dtype-aware categorical/datetime describe is designed.
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let v = self.inner.data.to_f64_vec();
-        let count = non_nan(&self.inner.data).len() as f64;
+        let v = self.f64_domain("describe")?;
+        let count = v.iter().filter(|x| !x.is_nan()).count() as f64;
         let vals = vec![
             count,
-            self.mean_f64(),
-            self.var_f64().sqrt(),
+            self.mean_f64()?,
+            self.var_f64()?.sqrt(),
             stats::extreme(&v, false).unwrap_or(f64::NAN),
             self.quantile_f64(0.25)?,
             self.quantile_f64(0.5)?,
@@ -141,25 +141,18 @@ impl PySeries {
     /// funnel to a silent (and dtype-dependent) answer (C4).
     pub(crate) fn any(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let r = match &self.inner.data {
-            // skipna: a NA bool is its `false` placeholder in the buffer, so read the
-            // validity — only a *present* true counts (matching pandas nullable any).
-            Column::Bool(v, val) => v.iter().enumerate().any(|(i, &b)| val.is_valid(i) && b),
-            other => other.to_f64_vec().iter().any(|&x| !x.is_nan() && x != 0.0),
-        };
-        Ok(np_bool(py, r))
+        // skipna: only a *present* true counts (the core truth owner, #27)
+        let c = &self.inner.data;
+        Ok(np_bool(py, (0..c.len()).any(|i| c.truth_at(i) == Some(true))))
     }
 
     /// True if every non-missing element is truthy (empty / all-NA -> True) — pandas
     /// `all` -> `np.bool_`, default `skipna=True`. Bool/numeric only (see `any`).
     pub(crate) fn all(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.data.require_numeric().map_err(pyerr)?;
-        let r = match &self.inner.data {
-            // skipna: a NA is ignored (vacuously satisfies), only a present false fails.
-            Column::Bool(v, val) => v.iter().enumerate().all(|(i, &b)| !val.is_valid(i) || b),
-            other => other.to_f64_vec().iter().all(|&x| x.is_nan() || x != 0.0),
-        };
-        Ok(np_bool(py, r))
+        // skipna: a NA is ignored (vacuously satisfies), only a present false fails.
+        let c = &self.inner.data;
+        Ok(np_bool(py, (0..c.len()).all(|i| c.truth_at(i) != Some(false))))
     }
 
     /// The `q`-quantile in `[0, 1]` (linear interpolation, NaN-skipping) — pandas

@@ -6,20 +6,13 @@ use super::*;
 impl Column {
     /// Cumulative sum (pandas `cumsum`, skipna), dtype-preserving (`bool` -> int64
     /// counting trues). Missing values are skipped and stay missing (NA in → NA out).
+    /// An integer overflow is an error (contract #25).
     pub fn cumsum(&self) -> Result<Column> {
         match self {
-            Column::Bool(v, val) => {
-                let iv = widen_i64(v);
-                let out = if val.has_nulls() {
-                    cum_valid(&iv, val, 0, i64::wrapping_add)
-                } else {
-                    stats::cumsum(&iv)
-                };
-                Ok(Column::i64_with(out, val.clone()))
-            }
-            Column::I64(v, val) => Ok(cum(v, val, stats::cumsum, i64::wrapping_add)),
-            Column::I32(v, val) => Ok(cum(v, val, stats::cumsum, i32::wrapping_add)),
-            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v))),
+            Column::Bool(v, val) => cum(&widen_i64(v), val, stats::cumsum, i64::checked_add, "cumsum"),
+            Column::I64(v, val) => cum(v, val, stats::cumsum, i64::checked_add, "cumsum"),
+            Column::I32(v, val) => cum(v, val, stats::cumsum, i32::checked_add, "cumsum"),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v)?)),
         }
     }
 
@@ -29,14 +22,14 @@ impl Column {
         match self {
             Column::Bool(v, val) => {
                 let out = if val.has_nulls() {
-                    cum_valid(v, val, false, |a, b| a || b)
+                    cum_valid(v, val, false, |a, b| Some(a || b)).expect("OR never fails")
                 } else {
                     bool_running(v, true)
                 };
                 Ok(Column::bool_with(out, val.clone()))
             }
-            Column::I64(v, val) => Ok(cum(v, val, stats::cummax, |a, x| if x > a { x } else { a })),
-            Column::I32(v, val) => Ok(cum(v, val, stats::cummax, |a, x| if x > a { x } else { a })),
+            Column::I64(v, val) => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
+            Column::I32(v, val) => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
             // running extreme is order-based, so str (lexical) / datetime (instant)
             // are valid, like min/max — not a numeric-only op.
             Column::Str(..) | Column::Datetime(..) => self.cum_extreme(true),
@@ -50,48 +43,47 @@ impl Column {
         match self {
             Column::Bool(v, val) => {
                 let out = if val.has_nulls() {
-                    cum_valid(v, val, true, |a, b| a && b)
+                    cum_valid(v, val, true, |a, b| Some(a && b)).expect("AND never fails")
                 } else {
                     bool_running(v, false)
                 };
                 Ok(Column::bool_with(out, val.clone()))
             }
-            Column::I64(v, val) => Ok(cum(v, val, stats::cummin, |a, x| if x < a { x } else { a })),
-            Column::I32(v, val) => Ok(cum(v, val, stats::cummin, |a, x| if x < a { x } else { a })),
+            Column::I64(v, val) => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
+            Column::I32(v, val) => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
             Column::Str(..) | Column::Datetime(..) => self.cum_extreme(false),
             _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cummin(v))),
         }
     }
 
     /// Cumulative product (pandas `cumprod`), dtype-preserving (`bool` -> int64).
-    /// Missing values are skipped and stay missing.
+    /// Missing values are skipped and stay missing. An integer overflow is an error.
     pub fn cumprod(&self) -> Result<Column> {
         match self {
-            Column::Bool(v, val) => {
-                let iv = widen_i64(v);
-                let out = if val.has_nulls() {
-                    cum_valid(&iv, val, 1, i64::wrapping_mul)
-                } else {
-                    stats::cumprod(&iv)
-                };
-                Ok(Column::i64_with(out, val.clone()))
-            }
-            Column::I64(v, val) => Ok(cum(v, val, stats::cumprod, i64::wrapping_mul)),
-            Column::I32(v, val) => Ok(cum(v, val, stats::cumprod, i32::wrapping_mul)),
-            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v))),
+            Column::Bool(v, val) => cum(&widen_i64(v), val, stats::cumprod, i64::checked_mul, "cumprod"),
+            Column::I64(v, val) => cum(v, val, stats::cumprod, i64::checked_mul, "cumprod"),
+            Column::I32(v, val) => cum(v, val, stats::cumprod, i32::checked_mul, "cumprod"),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v)?)),
         }
     }
 
     /// Element-wise absolute value (pandas `abs`), dtype-preserving. `abs` of a
-    /// missing (`NaN`) stays missing; `abs(i64::MIN)` wraps to `i64::MIN` (pandas);
-    /// a `bool` column is unchanged (`abs(bool) == bool`).
+    /// missing value stays missing; `abs(i64::MIN)` has no int64 result, so it is an
+    /// overflow error (contract #25; pandas returns `i64::MIN`); a `bool` column is
+    /// unchanged (`abs(bool) == bool`).
     pub fn abs(&self) -> Result<Column> {
-        if matches!(self, Column::Bool(_, _)) {
-            return Ok(self.clone());
+        match self {
+            Column::Bool(_, _) => Ok(self.clone()),
+            Column::I64(v, val) => Ok(Column::i64_with(
+                map_present(v, val, i64::checked_abs, "abs")?,
+                val.clone(),
+            )),
+            Column::I32(v, val) => Ok(Column::i32_with(
+                map_present(v, val, i32::checked_abs, "abs")?,
+                val.clone(),
+            )),
+            _ => numeric_dispatch!(self, v => Numeric::into_column(stats::abs(v)?)),
         }
-        let validity = self.validity().cloned().unwrap_or_default();
-        let out = numeric_dispatch!(self, v => Numeric::into_column(stats::abs(v)))?;
-        Ok(out.with_validity(validity))
     }
 
     /// Round to `decimals` places (pandas `round`), dtype-preserving: banker's
@@ -107,14 +99,18 @@ impl Column {
                     .map(|&x| round_f64(x as f64, decimals) as f32)
                     .collect(),
             )),
+            // a power-of-ten multiple past the dtype's range is an overflow (#25)
             Column::I64(v, val) => Ok(Column::i64_with(
-                v.iter().map(|&x| round_i64(x, decimals)).collect(),
+                map_present(v, val, |x| round_i64(x, decimals), "round")?,
                 val.clone(),
             )),
             Column::I32(v, val) => Ok(Column::i32_with(
-                v.iter()
-                    .map(|&x| round_i64(x as i64, decimals) as i32)
-                    .collect(),
+                map_present(
+                    v,
+                    val,
+                    |x| round_i64(x as i64, decimals).and_then(|r| i32::try_from(r).ok()),
+                    "round",
+                )?,
                 val.clone(),
             )),
             Column::Bool(_, _) => Ok(self.clone()), // round(bool) == bool (pandas no-op)
@@ -153,7 +149,7 @@ impl Column {
                 .map(|c| c.with_validity(validity))
         } else {
             // int -> f64 promotion: to_f64_vec already maps a missing value to NaN
-            Ok(Column::f64(clip_vec(&self.to_f64_vec(), lower, upper)))
+            Ok(Column::f64(clip_vec(&self.to_f64_domain("clip")?, lower, upper)))
         }
     }
 
@@ -238,11 +234,9 @@ impl Column {
                         .map(|i| if val.is_valid(i) { v[i] } else { iv })
                         .collect(),
                 ),
-                None => Column::f64(
-                    (0..len)
-                        .map(|i| if val.is_valid(i) { v[i] as f64 } else { value })
-                        .collect(),
-                ),
+                // a fractional fill promotes to float64 losslessly: an int past
+                // 2^53 raises rather than rounding (contract #20)
+                None => return self.convert_lossless(DType::F64)?.fillna(value),
             },
             Column::I32(v, val) => match i32::try_from_f64(value) {
                 Some(iv) => Column::i32(
@@ -347,11 +341,14 @@ impl Column {
                 stats::select(cond, &self.as_i32_vec()?, &other.as_i32_vec()?),
                 self.select_nulls(cond, other),
             )),
-            DType::F32 => Ok(Column::f32(stats::select(
-                cond,
-                &self.to_f32_vec(),
-                &other.to_f32_vec(),
-            ))),
+            // float targets: each PICKED cell converts losslessly (contract #20) —
+            // an int past the float's exact range raises, never rounds; a cell
+            // the condition does not pick is never converted.
+            DType::F32 => {
+                let (a, b) = self.picked_as(cond, other, target)?;
+                let (a, b) = (a.to_f32_vec(), b.to_f32_vec());
+                Ok(Column::f32(stats::select(cond, &a, &b)))
+            }
             // bool ∘ bool stays bool (pandas keeps a bool result when the fill is
             // also bool); `bool` isn't `Numeric`, so the pick is inlined.
             DType::Bool => {
@@ -383,11 +380,35 @@ impl Column {
                         .collect(),
                 ))
             }
-            _ => Ok(Column::f64(stats::select(
-                cond,
-                &self.to_f64_vec(),
-                &other.to_f64_vec(),
-            ))),
+            _ => {
+                let (a, b) = self.picked_as(cond, other, DType::F64)?;
+                Ok(Column::f64(stats::select(cond, &a.to_f64_vec(), &b.to_f64_vec())))
+            }
+        }
+    }
+
+    /// `self`'s cells where `cond` holds and `other`'s where it does not, each
+    /// side converted losslessly to the float `target` with its unpicked cells
+    /// masked missing first (so only a value that lands in the result can raise).
+    fn picked_as(&self, cond: &[bool], other: &Column, target: DType) -> Result<(Column, Column)> {
+        Ok((
+            self.missing_unless(|i| cond[i]).convert_lossless(target)?,
+            other.missing_unless(|i| !cond[i]).convert_lossless(target)?,
+        ))
+    }
+
+    /// The numeric column with every cell where `keep(i)` is false made missing
+    /// (`NaN` for a float, NA for an int / bool); other dtypes are returned as-is.
+    fn missing_unless(&self, keep: impl Fn(usize) -> bool) -> Column {
+        let n = self.len();
+        let and = |val: &Validity| Validity::from_valid_iter(n, (0..n).map(|i| keep(i) && val.is_valid(i)));
+        match self {
+            Column::F64(v) => Column::f64((0..n).map(|i| if keep(i) { v[i] } else { f64::NAN }).collect()),
+            Column::F32(v) => Column::f32((0..n).map(|i| if keep(i) { v[i] } else { f32::NAN }).collect()),
+            Column::I64(v, val) => Column::I64(v.clone(), and(val)),
+            Column::I32(v, val) => Column::I32(v.clone(), and(val)),
+            Column::Bool(v, val) => Column::Bool(v.clone(), and(val)),
+            other => other.clone(),
         }
     }
 

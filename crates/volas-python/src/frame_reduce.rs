@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use volas_core::{
-    stats, Column, DataFrame, Index, Series,
+    stats, Column, DType, DataFrame, Index, Scalar, Series,
 };
 
 #[allow(unused_imports)]
@@ -26,34 +26,27 @@ impl PyDataFrame {
         })
     }
 
-    /// Per-column NaN-skipping sum (pandas `df.sum()`; non-numeric skipped).
+    /// Per-column sum (pandas `df.sum()`; non-numeric skipped), in the columns'
+    /// own dtype: an all-int frame sums in int64, exactly (contract #26), and an
+    /// int64 overflow raises (#25).
     pub(crate) fn sum(&self) -> PyResult<PySeries> {
-        self.reduce_cols(|c| {
-            let v = c.to_f64_vec();
-            (0..c.len()).filter(|&i| c.is_valid(i) && !v[i].is_nan()).map(|i| v[i]).sum()
-        })
+        self.reduce_typed(|c| c.sum().map(|s| (s.dtype(), s)))
     }
-    /// Per-column NaN-skipping product (pandas `df.prod()`).
+    /// Per-column product (pandas `df.prod()`), typed like `sum`.
     pub(crate) fn prod(&self) -> PyResult<PySeries> {
-        self.reduce_cols(|c| {
-            let v = c.to_f64_vec();
-            (0..c.len())
-                .filter(|&i| c.is_valid(i) && !v[i].is_nan())
-                .map(|i| v[i])
-                .product()
-        })
+        self.reduce_typed(|c| c.prod().map(|s| (s.dtype(), s)))
     }
     /// Per-column NaN-skipping mean (pandas `df.mean()`).
     pub(crate) fn mean(&self) -> PyResult<PySeries> {
-        self.reduce_with(|s| s.mean_f64())
+        self.try_reduce_with(|s| s.mean_f64())
     }
     /// Per-column sample variance (ddof=1, pandas `df.var()`).
     pub(crate) fn var(&self) -> PyResult<PySeries> {
-        self.reduce_with(|s| s.var_f64())
+        self.try_reduce_with(|s| s.var_f64())
     }
     /// Per-column sample standard deviation (pandas `df.std()`).
     pub(crate) fn std(&self) -> PyResult<PySeries> {
-        self.reduce_with(|s| s.var_f64().sqrt())
+        self.try_reduce_with(|s| Ok(s.var_f64()?.sqrt()))
     }
     /// Per-column NaN-skipping median (pandas `df.median()`).
     pub(crate) fn median(&self) -> PyResult<PySeries> {
@@ -64,25 +57,14 @@ impl PyDataFrame {
     pub(crate) fn quantile(&self, q: f64) -> PyResult<PySeries> {
         self.try_reduce_with(|s| s.quantile_f64(q))
     }
-    /// Per-column NaN-skipping minimum (pandas `df.min()`; numeric columns).
+    /// Per-column minimum (pandas `df.min()`; numeric columns), in the columns'
+    /// own dtype: an all-int frame stays int, exactly (contract #26).
     pub(crate) fn min(&self) -> PyResult<PySeries> {
-        self.reduce_cols(|c| {
-            let v = c.to_f64_vec();
-            (0..c.len())
-                .filter(|&i| c.is_valid(i) && !v[i].is_nan())
-                .map(|i| v[i])
-                .fold(f64::NAN, f64::min)
-        })
+        self.reduce_typed(|c| Ok((c.dtype(), c.extreme(false))))
     }
-    /// Per-column NaN-skipping maximum (pandas `df.max()`).
+    /// Per-column maximum (pandas `df.max()`), typed like `min`.
     pub(crate) fn max(&self) -> PyResult<PySeries> {
-        self.reduce_cols(|c| {
-            let v = c.to_f64_vec();
-            (0..c.len())
-                .filter(|&i| c.is_valid(i) && !v[i].is_nan())
-                .map(|i| v[i])
-                .fold(f64::NAN, f64::max)
-        })
+        self.reduce_typed(|c| Ok((c.dtype(), c.extreme(true))))
     }
     /// Per-column count of distinct present values (pandas `df.nunique()`).
     pub(crate) fn nunique(&self) -> PyResult<PySeries> {
@@ -132,14 +114,17 @@ impl PyDataFrame {
 
     /// Per-column standard error of the mean (pandas `sem`).
     pub(crate) fn sem(&self) -> PyResult<PySeries> {
+        self.guard_f64_domain("sem")?;
         self.reduce_cols(|c| stats::sem(&c.to_f64_vec()))
     }
     /// Per-column unbiased skewness (pandas `skew`).
     pub(crate) fn skew(&self) -> PyResult<PySeries> {
+        self.guard_f64_domain("skew")?;
         self.reduce_cols(|c| stats::skew(&c.to_f64_vec()))
     }
     /// Per-column unbiased excess kurtosis (pandas `kurt`).
     pub(crate) fn kurt(&self) -> PyResult<PySeries> {
+        self.guard_f64_domain("kurt")?;
         self.reduce_cols(|c| stats::kurt(&c.to_f64_vec()))
     }
 
@@ -188,30 +173,38 @@ impl PyDataFrame {
 }
 
 impl PyDataFrame {
-    /// Per-numeric-column reduce via a Series-level helper -> f64 Series keyed
-    /// by column name (non-numeric columns are skipped, like `reduce_cols`).
-    fn reduce_with(&self, op: impl Fn(&PySeries) -> f64) -> PyResult<PySeries> {
+    /// Per-numeric-column (`DType::is_numeric`, like `reduce_cols`) typed reduce:
+    /// `op` gives each column's `(contributed dtype, value)` and the result Series
+    /// is assembled by the core [`Column::from_scalars`] — the supertype of the
+    /// parts, each value converted losslessly (no float64 round trip).
+    fn reduce_typed(&self, op: impl Fn(&Column) -> volas_core::Result<(DType, Scalar)>) -> PyResult<PySeries> {
         ensure_fresh(&self.inner)?;
         let view = self.logical();
         let df = view.as_ref();
-        let idx = df.index();
         let mut names = Vec::new();
-        let mut vals = Vec::new();
+        let mut parts = Vec::new();
         for (name, col) in df.names().iter().zip(df.columns()) {
-            if col.require_numeric().is_ok() {
-                let s = PySeries {
-                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
-                };
+            if col.dtype().is_numeric() {
                 names.push(name.clone());
-                vals.push(op(&s));
+                parts.push(op(col).map_err(pyerr)?);
             }
         }
-        Ok(PySeries {
-            inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
-        })
+        let data = Column::from_scalars(&parts).map_err(pyerr)?;
+        Ok(PySeries { inner: Series::new(None, data, Arc::new(Index::str(names))) })
     }
 
-    /// Like [`Self::reduce_with`] for fallible helpers (quantile).
+    /// Raise when a numeric column holds an int64 past 2^53 (contract #26) — the
+    /// float64-domain check ahead of a `reduce_cols` float64 statistic.
+    fn guard_f64_domain(&self, op: &str) -> PyResult<()> {
+        let view = self.logical();
+        for col in view.as_ref().columns().iter().filter(|c| c.dtype().is_numeric()) {
+            col.to_f64_domain(op).map_err(pyerr)?;
+        }
+        Ok(())
+    }
+
+    /// Per-numeric-column reduce via a fallible Series-level float64 helper ->
+    /// f64 Series keyed by column name (non-numeric columns are skipped).
     fn try_reduce_with(&self, op: impl Fn(&PySeries) -> PyResult<f64>) -> PyResult<PySeries> {
         ensure_fresh(&self.inner)?;
         let view = self.logical();
@@ -233,24 +226,20 @@ impl PyDataFrame {
         })
     }
 
-    /// Per-column truthiness any/all (NA-skipping) -> bool Series by name.
+    /// Per-column truthiness any/all over the numeric / bool columns (a str /
+    /// datetime column has no truth value, as `Series.any` raises for it), NA
+    /// skipped — the same core truth owner as the Series surface (#27).
     fn bool_reduce(&self, want_any: bool) -> PySeries {
         let view = self.logical();
         let df = view.as_ref();
-        let names: Vec<String> = df.names().to_vec();
-        let vals: Vec<bool> = df
-            .columns()
-            .iter()
-            .map(|c| {
-                let truth = to_bool_vec(c);
-                let present = (0..c.len()).filter(|&i| c.is_valid(i));
-                if want_any {
-                    present.into_iter().any(|i| truth[i])
-                } else {
-                    present.into_iter().all(|i| truth[i])
-                }
-            })
-            .collect();
+        let (mut names, mut vals) = (Vec::new(), Vec::new());
+        for (name, c) in df.names().iter().zip(df.columns()) {
+            if c.require_numeric().is_ok() {
+                let mut truth = (0..c.len()).filter_map(|i| c.truth_at(i));
+                names.push(name.clone());
+                vals.push(if want_any { truth.any(|t| t) } else { truth.all(|t| t) });
+            }
+        }
         PySeries {
             inner: Series::new(None, Column::bool(vals), Arc::new(Index::str(names))),
         }

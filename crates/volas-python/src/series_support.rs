@@ -131,7 +131,7 @@ pub(crate) fn series_floordiv(s: &Series, other: &Bound<'_, PyAny>, swap: bool) 
 
 /// Element-wise comparison -> bool Series (positional), dtype-aware via
 /// [`Column::compare`]: `str` / `datetime` / `bool` compare by native value (no f64
-/// funnel), numeric as f64. A missing slot follows IEEE (`!=` true, else false).
+/// funnel), numeric exactly (no float64 round trip). A missing slot follows IEEE (`!=` true, else false).
 /// The right operand is built to the left column's dtype (a str scalar for a str
 /// column, a parsed timestamp for a datetime column, a number for a numeric one).
 pub(crate) fn series_cmp(s: &Series, other: &Bound<'_, PyAny>, op: CmpOp) -> PyResult<PySeries> {
@@ -165,21 +165,22 @@ pub(crate) fn cmp_scalar_col(v: &Bound<'_, PyAny>, dtype: DType, n: usize) -> Py
         DType::Datetime => Ok(Column::datetime(vec![parse_ts(v)?; n])),
         _ if v.extract::<bool>().is_ok() => Ok(Column::bool(vec![v.extract::<bool>()?; n])),
         _ if v.extract::<i64>().is_ok() => Ok(Column::i64(vec![v.extract::<i64>()?; n])),
-        _ => {
-            let x = v
-                .extract::<f64>()
-                .map_err(|_| PyTypeError::new_err("unsupported operand for a comparison"))?;
-            Ok(Column::f64(vec![x; n]))
-        }
+        // a float, or an integer past int64 that float64 holds exactly (else a
+        // TypeError: comparing against a rounded value would be silently wrong)
+        _ if v.extract::<f64>().is_ok() => Ok(broadcast(&scalar_to_column(v, DType::F64)?, n)),
+        _ => Err(PyTypeError::new_err("unsupported operand for a comparison")),
     }
 }
 
-/// The non-NaN `f64` values of a column (for NaN-skipping reductions).
-pub(crate) fn non_nan(col: &Column) -> Vec<f64> {
-    col.to_f64_vec()
-        .into_iter()
-        .filter(|x| !x.is_nan())
-        .collect()
+/// The non-NaN `f64` values of a column for the NaN-skipping float64 reduction
+/// `op` (an int64 past 2^53 raises, contract #26).
+pub(crate) fn non_nan(col: &Column, op: &str) -> PyResult<Vec<f64>> {
+    Ok(col.to_f64_domain(op).map_err(pyerr)?.into_iter().filter(|x| !x.is_nan()).collect())
+}
+
+/// A 1-row column repeated to `n` rows.
+pub(crate) fn broadcast(cell: &Column, n: usize) -> Column {
+    cell.take(&vec![0; n])
 }
 
 /// The position of the first maximum (`want_max`) or minimum present value,
@@ -191,30 +192,23 @@ pub(crate) fn argext(col: &Column, want_max: bool) -> PyResult<usize> {
         .ok_or_else(|| PyValueError::new_err("Encountered all NA values"))
 }
 
-/// A column coerced to bool (a `Bool` column as-is, else `x != 0.0`).
-pub(crate) fn to_bool_vec(col: &Column) -> Vec<bool> {
-    match col {
-        Column::Bool(v, _) => v.to_vec(),
-        other => other.to_f64_vec().iter().map(|&x| x != 0.0).collect(),
-    }
-}
-
-/// A boolean mask / condition column as a `Vec<bool>`, rejecting any `volas.NA`
-/// (O5). A missing condition is an *unknown* signal — silently reading it as
-/// `False` would drop a row (filtering) or fill it in the `False` direction
-/// (`where` / `mask`) exactly like a deliberate negative, which in a live system
-/// turns a data gap into a trade signal. The user must fill or drop the NA first.
-/// A dense bool mask passes straight through.
+/// A boolean mask / condition column as a `Vec<bool>`, rejecting any missing
+/// cell (O5) through the core truth owner ([`Column::truth_at`], contract #27). A
+/// missing condition is an *unknown* signal — silently reading it as `False`
+/// would drop a row (filtering) or fill it in the `False` direction (`where` /
+/// `mask`) exactly like a deliberate negative, which in a live system turns a
+/// data gap into a trade signal. The user must fill or drop the NA first.
 pub(crate) fn bool_mask_vec(col: &Column) -> PyResult<Vec<bool>> {
-    if let Column::Bool(v, val) = col {
-        if (0..v.len()).any(|i| !val.is_valid(i)) {
-            return Err(PyValueError::new_err(
-                "boolean mask/condition contains volas.NA; an unknown signal is not \
-                 treated as False — fill or drop the NA before masking",
-            ));
-        }
-    }
-    Ok(to_bool_vec(col))
+    (0..col.len())
+        .map(|i| {
+            col.truth_at(i).ok_or_else(|| {
+                PyValueError::new_err(
+                    "boolean mask/condition contains volas.NA; an unknown signal is not \
+                     treated as False — fill or drop the NA before masking",
+                )
+            })
+        })
+        .collect()
 }
 
 /// Recognise a boolean-mask key (`s[mask]` / `df[mask] = v`): a boolean Series, a
@@ -329,12 +323,21 @@ pub(crate) fn scalar_fill_col(
         _ if o.extract::<bool>().is_ok() => {
             Ok((Column::bool(vec![o.extract::<bool>()?; n]), DType::Bool))
         }
+        // an integer fill is carried as int64, exactly (contract #26: never via
+        // float64, so 2**53 + 1 stays itself); the select converts it losslessly.
+        // F1: it contributes the narrowest int width that fits, so an i32 column
+        // filled with an integer stays int32 (# C2), not widened to int64.
+        _ if o.extract::<i64>().is_ok() => {
+            let i = o.extract::<i64>()?;
+            let dt = if dtype == DType::I32 && i32::try_from(i).is_ok() { DType::I32 } else { DType::I64 };
+            Ok((Column::i64(vec![i; n]), dt))
+        }
         _ => {
-            let x = o.extract::<f64>().map_err(|_| {
+            o.extract::<f64>().map_err(|_| {
                 PyTypeError::new_err("fill must be a number, a matching-dtype scalar, or a Series")
             })?;
-            // F1: contribute the narrowest int width that fits, so an i32 column
-            // filled with an integer stays int32 (# C2), not widened to int64.
+            // a float (or an integer past int64 that float64 holds exactly)
+            let x = scalar_to_column(o, DType::F64)?.to_f64_vec()[0];
             let dt = match dtype {
                 DType::I32 if fits(DType::I32, x) => DType::I32,
                 _ if fits(DType::I64, x) => DType::I64,
@@ -351,6 +354,10 @@ pub(crate) fn series_logical(s: &Series, other: &Bound<'_, PyAny>, op: BoolOp) -
     let rhs: Column = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
         require_aligned(&s.index, &o.inner.index)?;
         o.inner.data.clone()
+    } else if is_na_like_py(other) {
+        // a missing scalar (None / NaN / volas.NA / pd.NA) is an unknown truth
+        // value: Kleene NA, never a present `NaN != 0 == True` (contract #27)
+        Column::na_of(DType::Bool, n)
     } else if let Ok(b) = other.extract::<bool>() {
         Column::bool(vec![b; n])
     } else if let Ok(x) = other.extract::<f64>() {

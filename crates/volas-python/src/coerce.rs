@@ -116,6 +116,9 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
         if let Some(c) = masked_typed_column(t)? {
             return Ok(c);
         }
+        // any other tuple is a sequence of values: the list rules (incl. the
+        // exactness guards) apply unchanged
+        return pyany_to_column(PyList::new(v.py(), t)?.as_any());
     }
     // A volas Series is an internal column, not a numpy boundary value: clone its
     // Column directly (preserving dtype + volas.NA). Without this it would fall
@@ -141,6 +144,9 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
         let view = ns.call_method1("view", ("int64",))?;
         let a = view.extract::<PyReadonlyArray1<i64>>()?;
         return Ok(Column::datetime(a.as_slice()?.to_vec())); // int64 ns view == epoch-ns
+    }
+    if let Some(col) = exact_array_kind(v)? {
+        return Ok(col);
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<f64>>() {
         return Ok(Column::f64(a.as_slice()?.to_vec()));
@@ -229,42 +235,55 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     ))
 }
 
-/// Coerce one Python scalar to a 1-row [`Column`] of EXACTLY `dtype` — the bar-append
-/// path (`df.append(dict)`), where the frame's column dtype is already known so there is
-/// no inference. A missing scalar (`None` / `NaN` / `volas.NA`) becomes that dtype's NA;
-/// a present value the dtype cannot hold (a non-integer into an int column) errors — C4,
-/// never silently lossy. Distinct from [`scalar_fill_col`], which is fillna's value-based
-/// promotion (returns an f64 column plus a dtype hint).
-pub(crate) fn bar_scalar_to_column(v: &Bound<'_, PyAny>, dtype: DType) -> PyResult<Column> {
-    let na = crate::frame_index::is_na_like_py(v);
-    let na1 = || Validity::from_valid_iter(1, std::iter::once(false));
-    Ok(match dtype {
-        DType::F64 => Column::f64(vec![if na { f64::NAN } else { v.extract::<f64>()? }]),
-        DType::F32 => Column::f32(vec![if na { f32::NAN } else { v.extract::<f32>()? }]),
-        DType::I64 if na => Column::i64_with(vec![0], na1()),
-        DType::I64 => Column::i64_with(vec![bar_int(v)?], Validity::dense()),
-        DType::I32 if na => Column::i32_with(vec![0], na1()),
-        DType::I32 => {
-            let n = i32::try_from(bar_int(v)?)
-                .map_err(|_| PyOverflowError::new_err("value does not fit an int32 column"))?;
-            Column::i32_with(vec![n], Validity::dense())
+/// The NumPy array kinds the typed fast paths cannot take exactly (contract #20):
+/// an unsigned array widens to int64 when every value fits (`uint64` past
+/// `i64::MAX` raises — volas has no uint64), an `object` array is read as the list
+/// of its Python values (so the list guards for Decimal / big ints / mixed
+/// int+float apply), and a complex array raises (no complex dtype). `None` for
+/// every other value.
+fn exact_array_kind(v: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    let Ok(dtype) = v.getattr("dtype") else {
+        return Ok(None);
+    };
+    let (Ok(kind), Ok(size)) = (
+        dtype.getattr("kind").and_then(|k| k.extract::<String>()),
+        dtype.getattr("itemsize").and_then(|k| k.extract::<usize>()),
+    ) else {
+        return Ok(None);
+    };
+    match kind.as_str() {
+        "c" => Err(PyTypeError::new_err(
+            "complex values have no volas dtype; take .real / .imag / abs() explicitly",
+        )),
+        "O" => pyany_to_column(&v.call_method0("tolist")?).map(Some),
+        "u" if size < 8 => pyany_to_column(&v.call_method1("astype", ("int64",))?).map(Some),
+        "u" => {
+            let a = v.extract::<PyReadonlyArray1<u64>>()?;
+            let vals = a
+                .as_slice()?
+                .iter()
+                .map(|&x| i64::try_from(x).map_err(|_| int64_overflow()))
+                .collect::<PyResult<Vec<i64>>>()?;
+            Ok(Some(Column::i64(vals)))
         }
-        DType::Bool if na => Column::bool_with(vec![false], na1()),
-        DType::Bool => Column::bool_with(vec![v.extract::<bool>()?], Validity::dense()),
-        DType::Utf8 if na => Column::str_with(vec![String::new()], na1()),
-        DType::Utf8 => Column::str_with(vec![v.extract::<String>()?], Validity::dense()),
-        DType::Datetime => {
-            Column::datetime(vec![if na { i64::MIN } else { crate::scalar::parse_ts(v)? }])
-        }
-    })
+        _ => Ok(None),
+    }
 }
 
-/// A Python integer for an int column — an int (incl. a numpy integer scalar), never a
-/// float (a fractional value into an int column is a lossy error, C4).
-fn bar_int(v: &Bound<'_, PyAny>) -> PyResult<i64> {
-    v.extract::<i64>()
-        .or_else(|_| v.call_method0("__index__")?.extract::<i64>())
-        .map_err(|_| PyTypeError::new_err("value for an int column must be an integer"))
+/// The error for an integer past int64 (volas has no uint64 / big-int dtype).
+fn int64_overflow() -> PyErr {
+    PyOverflowError::new_err(
+        "integer does not fit int64 (volas has no uint64); pass floats explicitly \
+         if lossy float64 is acceptable",
+    )
+}
+
+/// One Python scalar as a 1-row [`Column`] of EXACTLY `dtype` for the bar-append
+/// path (`df.append(dict)` / `Row` / the index label): the same lossless
+/// target-typed conversion as every other scalar write ([`scalar_to_column`],
+/// contract #20) — one rule, so a dict append and an `iat` write agree.
+pub(crate) fn bar_scalar_to_column(v: &Bound<'_, PyAny>, dtype: DType) -> PyResult<Column> {
+    crate::frame_index::scalar_to_column(v, dtype)
 }
 
 /// Build a `Bool` column from `Option`s, marking `None` cells `volas.NA`.
@@ -286,6 +305,7 @@ pub(crate) fn option_i64_column(vv: Vec<Option<i64>>) -> Column {
 fn list_special_cases(list: &Bound<'_, PyList>) -> PyResult<Option<Column>> {
     let mut all_datetime = !list.is_empty();
     let mut any_present = false;
+    let (mut ints, mut any_float) = (Vec::new(), false);
     for item in list.iter() {
         if item.get_type().name()? == "Decimal" {
             return Err(PyTypeError::new_err(
@@ -293,14 +313,18 @@ fn list_special_cases(list: &Bound<'_, PyList>) -> PyResult<Option<Column>> {
                  (e.g. float(x) for a float64 column) if lossy float is acceptable",
             ));
         }
-        // An int element that does not fit i64 has no exact volas representation
-        // (no uint64) -> error per item, so a valid [int, None, ...] list with
-        // in-range ints is untouched. bool is a PyInt subclass but always fits.
-        if item.is_instance_of::<pyo3::types::PyInt>() && item.extract::<i64>().is_err() {
-            return Err(PyOverflowError::new_err(
-                "integer does not fit int64 (volas has no uint64); pass floats explicitly \
-                 if lossy float64 is acceptable",
+        if item.is_instance_of::<pyo3::types::PyComplex>() {
+            return Err(PyTypeError::new_err(
+                "complex values have no volas dtype; take .real / .imag / abs() explicitly",
             ));
+        }
+        // An integer element (a Python int or a NumPy integer) that does not fit
+        // i64 has no exact volas representation (no uint64) -> error per item, so
+        // a valid [int, None, ...] list with in-range ints is untouched.
+        if let Some(i) = int_item(&item) {
+            ints.push(i.ok_or_else(int64_overflow)?);
+        } else if item.is_instance_of::<pyo3::types::PyFloat>() || type_name_starts(&item, &["float"]) {
+            any_float = true; // a Python float or a NumPy floating scalar
         }
         if item.is_none() {
             // None is a missing slot in either interpretation.
@@ -325,7 +349,28 @@ fn list_special_cases(list: &Bound<'_, PyList>) -> PyResult<Option<Column>> {
         }
         return Ok(Some(Column::datetime(ns)));
     }
+    // Integers mixed with floats infer float64 (like pandas): through the lossless
+    // owner, so an integer float64 cannot hold raises instead of rounding (#20).
+    if any_float {
+        Column::i64(ints).convert_lossless(DType::F64).map_err(pyerr)?;
+    }
     Ok(None)
+}
+
+/// `Some(Some(i))` for an integer item that fits i64, `Some(None)` for one past
+/// it, `None` for a non-integer (bools are not counted as integers here).
+fn int_item(item: &Bound<'_, PyAny>) -> Option<Option<i64>> {
+    let integral = item.is_instance_of::<pyo3::types::PyInt>()
+        || type_name_starts(item, &["int", "uint"]); // a NumPy integer scalar
+    (integral && item.extract::<bool>().is_err()).then(|| item.extract::<i64>().ok())
+}
+
+/// Whether the item's type name starts with one of `prefixes` (NumPy scalar types
+/// such as `int64` / `uint64` / `float32`, which are not Python int / float).
+fn type_name_starts(item: &Bound<'_, PyAny>, prefixes: &[&str]) -> bool {
+    item.get_type()
+        .name()
+        .is_ok_and(|n| n.to_str().is_ok_and(|n| prefixes.iter().any(|p| n.starts_with(p))))
 }
 
 /// Whether a scalar is datetime-like: python datetime/date (and subclasses, e.g.

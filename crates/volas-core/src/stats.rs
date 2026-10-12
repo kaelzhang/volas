@@ -13,18 +13,31 @@
 
 use std::cmp::Ordering;
 
-use crate::numeric::Numeric;
+use crate::error::Result;
+use crate::numeric::{overflow, Numeric};
 
-/// Cumulative sum (pandas `cumsum`, skipna=True), dtype-preserving.
-pub fn cumsum<T: Numeric>(v: &[T]) -> Vec<T> {
-    let mut acc = T::ZERO;
+/// Cumulative sum (pandas `cumsum`, skipna=True), dtype-preserving; an integer
+/// overflow is an error (contract #25).
+pub fn cumsum<T: Numeric>(v: &[T]) -> Result<Vec<T>> {
+    running(v, T::ZERO, T::checked_add, "cumsum")
+}
+
+/// The running fold behind `cumsum` / `cumprod`: a missing element passes through,
+/// a present one advances the checked accumulator.
+fn running<T: Numeric>(
+    v: &[T],
+    seed: T,
+    op: fn(T, T) -> Option<T>,
+    name: &str,
+) -> Result<Vec<T>> {
+    let mut acc = seed;
     v.iter()
         .map(|&x| {
             if x.is_missing() {
-                x
+                Ok(x)
             } else {
-                acc = acc.wrapping_add(x);
-                acc
+                acc = op(acc, x).ok_or_else(|| overflow(T::DTYPE, name))?;
+                Ok(acc)
             }
         })
         .collect()
@@ -60,51 +73,51 @@ fn cum_extreme<T: Numeric>(v: &[T], want_max: bool) -> Vec<T> {
 }
 
 /// Element-wise absolute value (pandas `abs`), dtype-preserving; a missing value
-/// passes through. Generic so the wrapping `abs` resolves to the [`Numeric`] impl
-/// (matching pandas int64 overflow: `abs(i64::MIN) == i64::MIN`).
-pub fn abs<T: Numeric>(v: &[T]) -> Vec<T> {
-    v.iter()
-        .map(|&x| if x.is_missing() { x } else { x.wrapping_abs() })
-        .collect()
-}
-
-/// Cumulative product (pandas `cumprod`, skipna=True), dtype-preserving.
-pub fn cumprod<T: Numeric>(v: &[T]) -> Vec<T> {
-    let mut acc = T::ONE;
+/// passes through. `abs(i64::MIN)` has no `i64` result, so it is an overflow error
+/// (contract #25; pandas / NumPy return `i64::MIN` itself).
+pub fn abs<T: Numeric>(v: &[T]) -> Result<Vec<T>> {
     v.iter()
         .map(|&x| {
             if x.is_missing() {
-                x
+                Ok(x)
             } else {
-                acc = acc.wrapping_mul(x);
-                acc
+                x.checked_abs().ok_or_else(|| overflow(T::DTYPE, "abs"))
             }
         })
         .collect()
 }
 
+/// Cumulative product (pandas `cumprod`, skipna=True), dtype-preserving; an
+/// integer overflow is an error (contract #25).
+pub fn cumprod<T: Numeric>(v: &[T]) -> Result<Vec<T>> {
+    running(v, T::ONE, T::checked_mul, "cumprod")
+}
+
 /// Missing-skipping sum (`0` when empty / all-missing, matching pandas),
-/// dtype-preserving (i64 sums in i64, wrapping like pandas).
-pub fn sum<T: Numeric>(v: &[T]) -> T {
-    let mut acc = T::ZERO;
-    for &x in v {
-        if !x.is_missing() {
-            acc = acc.wrapping_add(x);
-        }
-    }
-    acc
+/// dtype-preserving (i64 sums in i64); an integer overflow is an error.
+pub fn sum<T: Numeric>(v: &[T]) -> Result<T> {
+    fold(v.iter().copied().filter(|x| !x.is_missing()), T::ZERO, T::checked_add, "sum")
 }
 
 /// Missing-skipping product (`1` when empty / all-missing, matching pandas),
-/// dtype-preserving.
-pub fn prod<T: Numeric>(v: &[T]) -> T {
-    let mut acc = T::ONE;
-    for &x in v {
-        if !x.is_missing() {
-            acc = acc.wrapping_mul(x);
-        }
+/// dtype-preserving; an integer overflow is an error.
+pub fn prod<T: Numeric>(v: &[T]) -> Result<T> {
+    fold(v.iter().copied().filter(|x| !x.is_missing()), T::ONE, T::checked_mul, "prod")
+}
+
+/// The checked reduction behind `sum` / `prod`, over already-present values (the
+/// caller filters missing ones, by `NaN` or by validity).
+pub fn fold<T: Numeric>(
+    xs: impl Iterator<Item = T>,
+    seed: T,
+    op: fn(T, T) -> Option<T>,
+    name: &str,
+) -> Result<T> {
+    let mut acc = seed;
+    for x in xs {
+        acc = op(acc, x).ok_or_else(|| overflow(T::DTYPE, name))?;
     }
-    acc
+    Ok(acc)
 }
 
 /// Missing-skipping minimum (`want_max = false`) / maximum, dtype-preserving;
@@ -427,27 +440,34 @@ mod tests {
 
     #[test]
     fn cumulatives_skip_nan() {
-        assert!(eq(&cumsum(&[1.0, nan(), 2.0, 3.0]), &[1.0, nan(), 3.0, 6.0]));
+        assert!(eq(&cumsum(&[1.0, nan(), 2.0, 3.0]).unwrap(), &[1.0, nan(), 3.0, 6.0]));
         assert!(eq(&cummax(&[1.0, nan(), 2.0, 4.0]), &[1.0, nan(), 2.0, 4.0]));
         assert!(eq(&cummin(&[3.0, nan(), 1.0, 2.0]), &[3.0, nan(), 1.0, 1.0]));
-        assert!(eq(&cumprod(&[1.0, nan(), 2.0, 4.0]), &[1.0, nan(), 2.0, 8.0]));
+        assert!(eq(&cumprod(&[1.0, nan(), 2.0, 4.0]).unwrap(), &[1.0, nan(), 2.0, 8.0]));
         // leading NaN: accumulator stays unset until the first finite value
         assert!(eq(&cummax(&[nan(), 5.0, 3.0]), &[nan(), 5.0, 5.0]));
-        assert!(eq(&cumsum(&[]), &[]));
+        assert!(eq(&cumsum(&[]).unwrap(), &[]));
+        // integer overflow is an error, never a wrap (contract #25)
+        assert!(cumsum(&[i64::MAX, 1]).is_err());
+        assert!(cumprod(&[i64::MAX, 2]).is_err());
+        assert!(abs(&[i64::MIN]).is_err());
+        assert_eq!(abs(&[-2_i64, 3]).unwrap(), vec![2, 3]);
+        assert!(eq(&abs(&[-2.0, nan()]).unwrap(), &[2.0, nan()]));
     }
 
     #[test]
     fn reductions_skip_missing_and_preserve_dtype() {
         // float: skip NaN; empty/all-NaN -> identity
-        assert_eq!(prod(&[1.0, nan(), 2.0, 3.0]), 6.0);
-        assert_eq!(prod(&[nan(), nan()]), 1.0);
-        assert_eq!(prod::<f64>(&[]), 1.0);
-        assert_eq!(sum(&[1.0, nan(), 2.0, 3.0]), 6.0);
-        assert_eq!(sum::<f64>(&[]), 0.0);
-        // int: native i64 (wrapping like pandas)
-        assert_eq!(sum(&[1_i64, 2, 3]), 6);
-        assert_eq!(prod(&[2_i64, 3, 4]), 24);
-        assert_eq!(sum(&[i64::MAX, 1]), i64::MIN); // wraps
+        assert_eq!(prod(&[1.0, nan(), 2.0, 3.0]), Ok(6.0));
+        assert_eq!(prod(&[nan(), nan()]), Ok(1.0));
+        assert_eq!(prod::<f64>(&[]), Ok(1.0));
+        assert_eq!(sum(&[1.0, nan(), 2.0, 3.0]), Ok(6.0));
+        assert_eq!(sum::<f64>(&[]), Ok(0.0));
+        // int: native i64, checked (an overflow is an error, never a wrap)
+        assert_eq!(sum(&[1_i64, 2, 3]), Ok(6));
+        assert_eq!(prod(&[2_i64, 3, 4]), Ok(24));
+        assert!(sum(&[i64::MAX, 1]).is_err());
+        assert!(prod(&[i64::MAX, 2]).is_err());
         // extreme: skip NaN, None when empty/all-missing
         assert_eq!(extreme(&[3.0, nan(), 1.0, 2.0], false), Some(1.0));
         assert_eq!(extreme(&[3.0, nan(), 1.0, 2.0], true), Some(3.0));

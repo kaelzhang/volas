@@ -46,8 +46,8 @@ fn na_is_valid_and_null_count() {
 #[test]
 fn na_reductions_skip_missing() {
     let c = na_i64(&[1, 0, 3], &[true, false, true]); // 1, NA, 3
-    assert_eq!(c.sum(), Scalar::I64(4));
-    assert_eq!(c.prod(), Scalar::I64(3));
+    assert_eq!(c.sum().unwrap(), Scalar::I64(4));
+    assert_eq!(c.prod().unwrap(), Scalar::I64(3));
     assert_eq!(c.extreme(false), Scalar::I64(1));
     assert_eq!(c.extreme(true), Scalar::I64(3));
     // all-NA int -> NaN
@@ -57,13 +57,13 @@ fn na_reductions_skip_missing() {
         vec![5, 0, 7],
         Validity::from_valid_iter(3, [true, false, true]),
     );
-    assert_eq!(i.sum(), Scalar::I64(12));
+    assert_eq!(i.sum().unwrap(), Scalar::I64(12));
     assert_eq!(i.extreme(false), Scalar::I32(5));
     let b = Column::bool_with(
         vec![true, false, false],
         Validity::from_valid_iter(3, [true, false, true]),
     );
-    assert_eq!(b.sum(), Scalar::I64(1)); // present trues: pos0
+    assert_eq!(b.sum().unwrap(), Scalar::I64(1)); // present trues: pos0
     assert_eq!(b.extreme(true), Scalar::Bool(true)); // any present
     assert_eq!(b.extreme(false), Scalar::Bool(false)); // all present (true && false)
     assert!(matches!(
@@ -573,4 +573,22 @@ fn na_str_carries_validity() {
         .unwrap();
     assert_eq!(i.dtype(), DType::Utf8);
     assert!(!i.is_valid(1) && i.null_count() == 1);
+}
+
+#[test]
+fn truth_values_carry_validity() {
+    // contract #27: a NaN / NA is never a present truth value, whatever its payload
+    let f = Column::f64(vec![f64::NAN, 0.0, 2.0]);
+    assert_eq!((0..3).map(|i| f.truth_at(i)).collect::<Vec<_>>(), [None, Some(false), Some(true)]);
+    let i = Column::i64_with(vec![7, 0], Validity::from_valid_iter(2, [false, true]));
+    assert_eq!(i.not(), Column::bool_with(vec![false, true], Validity::from_valid_iter(2, [false, true])));
+    let s = Column::str(vec![String::new(), "x".into()]);
+    assert_eq!((s.truth_at(0), s.truth_at(1)), (Some(false), Some(true)));
+    assert_eq!(Column::datetime(vec![i64::MIN, 5]).truth_at(0), None);
+    let t = Column::bool(vec![true, false, true]);
+    let and = t.logical(&f, BoolOp::And).unwrap();
+    assert!(!and.is_valid(0) && !and.as_bool().unwrap()[1] && and.as_bool().unwrap()[2]);
+    let or = Column::bool(vec![false, true, false]).logical(&f, BoolOp::Or).unwrap();
+    assert!(!or.is_valid(0) && or.as_bool().unwrap()[1] && or.as_bool().unwrap()[2]);
+    assert!(!t.logical(&f, BoolOp::Xor).unwrap().is_valid(0));
 }

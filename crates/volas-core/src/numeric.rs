@@ -4,12 +4,13 @@
 //!
 //! Missing values use the f64 `NaN` sentinel — `i64` has none, so `is_missing`
 //! is always false there — matching pandas 3.0's default (non-nullable) dtypes.
-//! `wrapping_*` matches pandas/numpy int64 overflow (it wraps, e.g.
-//! `abs(i64::MIN) == i64::MIN`) and also keeps volas's overflow-checked test
-//! build from panicking.
+//! Integer arithmetic is checked (`checked_*`): an overflowing result is an
+//! [`overflow`] error in every build profile (contract #25), never a wrap (pandas /
+//! NumPy) and never a debug-only panic.
 
 use crate::column::Column;
 use crate::dtype::DType;
+use crate::error::VolasError;
 
 /// A numeric column element type. Implemented for `f64` and `i64`; adding `i32` /
 /// `f32` / `u64` later is just another `impl` plus a dispatch arm.
@@ -33,14 +34,25 @@ pub trait Numeric: Copy + PartialOrd {
     /// decision in clip / where / mask / assignment.
     fn try_from_f64(x: f64) -> Option<Self>;
 
-    /// Wrapping add (matches pandas/numpy int64 overflow; plain `+` for f64).
-    fn wrapping_add(self, other: Self) -> Self;
-    /// Wrapping subtract.
-    fn wrapping_sub(self, other: Self) -> Self;
-    /// Wrapping multiply.
-    fn wrapping_mul(self, other: Self) -> Self;
-    /// Wrapping absolute value (`abs(i64::MIN) == i64::MIN`, like pandas).
-    fn wrapping_abs(self) -> Self;
+    /// Checked add: `None` when an integer result overflows the type (contract #25:
+    /// integer overflow raises, identically in debug and release). A float never
+    /// overflows here — IEEE gives `±inf` — so the float impls are always `Some`.
+    fn checked_add(self, other: Self) -> Option<Self>;
+    /// Checked subtract (see [`checked_add`](Self::checked_add)).
+    fn checked_sub(self, other: Self) -> Option<Self>;
+    /// Checked multiply (see [`checked_add`](Self::checked_add)).
+    fn checked_mul(self, other: Self) -> Option<Self>;
+    /// Checked absolute value: `abs(i64::MIN)` has no `i64` result, so it is `None`.
+    fn checked_abs(self) -> Option<Self>;
+}
+
+/// The error every checked integer kernel raises when a result leaves its dtype's
+/// range (contract #25) — pandas / NumPy wrap silently instead.
+pub fn overflow(dtype: DType, op: &str) -> VolasError {
+    VolasError::Overflow(format!(
+        "{dtype} overflow in {op}; integer results never wrap — cast to float64 first \
+         if an approximate result is acceptable"
+    ))
 }
 
 impl Numeric for f64 {
@@ -65,20 +77,20 @@ impl Numeric for f64 {
         Some(x)
     }
     #[inline]
-    fn wrapping_add(self, other: Self) -> Self {
-        self + other
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(self + other)
     }
     #[inline]
-    fn wrapping_sub(self, other: Self) -> Self {
-        self - other
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(self - other)
     }
     #[inline]
-    fn wrapping_mul(self, other: Self) -> Self {
-        self * other
+    fn checked_mul(self, other: Self) -> Option<Self> {
+        Some(self * other)
     }
     #[inline]
-    fn wrapping_abs(self) -> Self {
-        self.abs()
+    fn checked_abs(self) -> Option<Self> {
+        Some(self.abs())
     }
 }
 
@@ -104,20 +116,20 @@ impl Numeric for f32 {
         Some(x as f32) // f32 absorbs any float (with rounding), like f64
     }
     #[inline]
-    fn wrapping_add(self, other: Self) -> Self {
-        self + other
+    fn checked_add(self, other: Self) -> Option<Self> {
+        Some(self + other)
     }
     #[inline]
-    fn wrapping_sub(self, other: Self) -> Self {
-        self - other
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        Some(self - other)
     }
     #[inline]
-    fn wrapping_mul(self, other: Self) -> Self {
-        self * other
+    fn checked_mul(self, other: Self) -> Option<Self> {
+        Some(self * other)
     }
     #[inline]
-    fn wrapping_abs(self) -> Self {
-        self.abs()
+    fn checked_abs(self) -> Option<Self> {
+        Some(self.abs())
     }
 }
 
@@ -147,20 +159,20 @@ impl Numeric for i32 {
         }
     }
     #[inline]
-    fn wrapping_add(self, other: Self) -> Self {
-        i32::wrapping_add(self, other)
+    fn checked_add(self, other: Self) -> Option<Self> {
+        i32::checked_add(self, other)
     }
     #[inline]
-    fn wrapping_sub(self, other: Self) -> Self {
-        i32::wrapping_sub(self, other)
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        i32::checked_sub(self, other)
     }
     #[inline]
-    fn wrapping_mul(self, other: Self) -> Self {
-        i32::wrapping_mul(self, other)
+    fn checked_mul(self, other: Self) -> Option<Self> {
+        i32::checked_mul(self, other)
     }
     #[inline]
-    fn wrapping_abs(self) -> Self {
-        i32::wrapping_abs(self)
+    fn checked_abs(self) -> Option<Self> {
+        i32::checked_abs(self)
     }
 }
 
@@ -192,20 +204,20 @@ impl Numeric for i64 {
         }
     }
     #[inline]
-    fn wrapping_add(self, other: Self) -> Self {
-        i64::wrapping_add(self, other)
+    fn checked_add(self, other: Self) -> Option<Self> {
+        i64::checked_add(self, other)
     }
     #[inline]
-    fn wrapping_sub(self, other: Self) -> Self {
-        i64::wrapping_sub(self, other)
+    fn checked_sub(self, other: Self) -> Option<Self> {
+        i64::checked_sub(self, other)
     }
     #[inline]
-    fn wrapping_mul(self, other: Self) -> Self {
-        i64::wrapping_mul(self, other)
+    fn checked_mul(self, other: Self) -> Option<Self> {
+        i64::checked_mul(self, other)
     }
     #[inline]
-    fn wrapping_abs(self) -> Self {
-        i64::wrapping_abs(self)
+    fn checked_abs(self) -> Option<Self> {
+        i64::checked_abs(self)
     }
 }
 
@@ -238,6 +250,79 @@ pub fn binary_supertype(a: DType, b: DType) -> DType {
     }
 }
 
+// --- int64 <-> float exactness (the one owner of the range / exactness rule) ---
+//
+// Two distinct questions, both answered only here:
+// - STORAGE (contract #20): may this integer be stored as a float without changing
+//   its value? Yes exactly when it round-trips (`i64_to_f64_exact`), e.g. 2^60 does,
+//   2^53 + 1 does not.
+// - MATH (contract #26): may this integer enter float64 arithmetic? Only inside the
+//   contiguous exact range |x| <= 2^53 (`in_f64_domain`), where every neighbour is
+//   representable too; past it a float64 result is not a function of the exact
+//   input, so the operation raises.
+
+/// The float64 integer range: every integer with `|x| <= 2^53` is exactly
+/// representable, and so are all its neighbours (contract #26).
+pub const F64_EXACT_INT: u64 = 1 << 53;
+
+/// Whether integer `x` may enter float64 math (`|x| <= 2^53`, contract #26).
+#[inline]
+pub fn in_f64_domain(x: i64) -> bool {
+    x.unsigned_abs() <= F64_EXACT_INT
+}
+
+/// The error a float64-domain operation raises for an integer past 2^53.
+pub fn outside_f64_domain(x: i64, op: &str) -> VolasError {
+    VolasError::Overflow(format!(
+        "{op}: the int64 value {x} is outside the float64-exact range |x| <= 2^53, so \
+         a float64 result would not be exact"
+    ))
+}
+
+/// `x` as an `f64` when the conversion is exact (it round-trips), else `None`
+/// (contract #20). `2^63` is the one float whose saturating cast back reads as
+/// `i64::MAX`, so it is excluded explicitly.
+#[inline]
+pub fn i64_to_f64_exact(x: i64) -> Option<f64> {
+    let f = x as f64;
+    (f != 9_223_372_036_854_775_808.0 && f as i64 == x).then_some(f)
+}
+
+/// `x` as an `f32` when the conversion is exact, else `None` (contract #20).
+#[inline]
+pub fn i64_to_f32_exact(x: i64) -> Option<f32> {
+    let f = x as f32;
+    (f != 9_223_372_036_854_775_808.0 && f as i64 == x).then_some(f)
+}
+
+/// A float64 narrowed to float32: precision rounds to the nearest float32 (the
+/// float dtype's own semantics), but a finite value past the float32 range is
+/// `None` — it would become `±inf` (contract #20). `NaN` / `±inf` carry over.
+#[inline]
+pub fn f64_to_f32_in_range(x: f64) -> Option<f32> {
+    let f = x as f32;
+    (f.is_finite() || !x.is_finite()).then_some(f)
+}
+
+/// Exact order of an integer against a float, `None` when the float is `NaN`:
+/// no float64 round trip, so `2^53 + 1 > 2^53` (contract #26; NumPy compares in
+/// float64 and calls them equal).
+pub fn cmp_i64_f64(a: i64, b: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering::{Greater, Less};
+    const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+    if b.is_nan() {
+        None
+    } else if b >= TWO_63 {
+        Some(Less)
+    } else if b < -TWO_63 {
+        Some(Greater)
+    } else {
+        // b in [-2^63, 2^63): its integral part is an exact i64, its fraction exact
+        let t = b.trunc();
+        Some(a.cmp(&(t as i64)).then_with(|| 0.0.partial_cmp(&(b - t)).expect("finite")))
+    }
+}
+
 /// Whether the scalar `x` fits `target` losslessly — the keep-vs-promote test for
 /// clip / where / mask / assignment (e.g. `0.0` fits `int64`, `2.5` does not).
 pub fn fits(target: DType, x: f64) -> bool {
@@ -259,8 +344,8 @@ mod tests {
         assert!(f64::NAN.is_missing() && !1.0_f64.is_missing());
         assert_eq!(2.5_f64.to_f64(), 2.5);
         assert_eq!(f64::try_from_f64(2.5), Some(2.5)); // f64 always fits
-        assert_eq!(3.0_f64.wrapping_add(4.0), 7.0);
-        assert_eq!((-2.0_f64).wrapping_abs(), 2.0);
+        assert_eq!(Numeric::checked_add(3.0_f64, 4.0), Some(7.0));
+        assert_eq!(Numeric::checked_abs(-2.0_f64), Some(2.0));
     }
 
     #[test]
@@ -275,11 +360,12 @@ mod tests {
         assert_eq!(i64::try_from_f64(f64::NAN), None); // NaN
         assert_eq!(i64::try_from_f64(1e30), None); // out of range
         assert_eq!(i64::try_from_f64(9.223372036854776e18), None); // 2^63, exclusive
-        // wrapping matches pandas int64 overflow
-        assert_eq!(i64::MAX.wrapping_add(1), i64::MIN);
-        assert_eq!(i64::MIN.wrapping_abs(), i64::MIN);
-        assert_eq!(3_i64.wrapping_mul(4), 12);
-        assert_eq!(7_i64.wrapping_sub(10), -3);
+        // checked: an overflowing result is None, never a wrap
+        assert_eq!(Numeric::checked_add(i64::MAX, 1), None);
+        assert_eq!(Numeric::checked_abs(i64::MIN), None);
+        assert_eq!(Numeric::checked_mul(3_i64, 4), Some(12));
+        assert_eq!(Numeric::checked_sub(7_i64, 10), Some(-3));
+        assert!(matches!(overflow(DType::I64, "sum"), VolasError::Overflow(m) if m.starts_with("int64 overflow in sum")));
     }
 
     #[test]
@@ -290,19 +376,19 @@ mod tests {
         assert_eq!(2.5_f32.to_f64(), 2.5);
         assert_eq!(f32::try_from_f64(2.5), Some(2.5_f32));
         assert_eq!(f32::try_from_f64(0.1).map(|x| x.is_finite()), Some(true)); // rounds, still fits
-        assert_eq!(3.0_f32.wrapping_add(4.0), 7.0);
-        assert_eq!((-2.0_f32).wrapping_abs(), 2.0);
+        assert_eq!(Numeric::checked_add(3.0_f32, 4.0), Some(7.0));
+        assert_eq!(Numeric::checked_abs(-2.0_f32), Some(2.0));
         assert!(matches!(f32::into_column(vec![1.0_f32]), Column::F32(_)));
-        // i32: no missing, wrapping, range-checked try_from
+        // i32: no missing, checked, range-checked try_from
         assert_eq!(i32::DTYPE, DType::I32);
         assert!(!5_i32.is_missing());
         assert_eq!(i32::try_from_f64(5.0), Some(5));
         assert_eq!(i32::try_from_f64(2.5), None); // non-integral
         assert_eq!(i32::try_from_f64(3e9), None); // out of i32 range
-        assert_eq!(i32::MAX.wrapping_add(1), i32::MIN); // wraps
-        assert_eq!(i32::MIN.wrapping_abs(), i32::MIN);
-        assert_eq!(7_i32.wrapping_sub(10), -3);
-        assert_eq!(3_i32.wrapping_mul(4), 12);
+        assert_eq!(Numeric::checked_add(i32::MAX, 1), None); // never wraps
+        assert_eq!(Numeric::checked_abs(i32::MIN), None);
+        assert_eq!(Numeric::checked_sub(7_i32, 10), Some(-3));
+        assert_eq!(Numeric::checked_mul(3_i32, 4), Some(12));
         assert!(matches!(i32::into_column(vec![1_i32]), Column::I32(_, _)));
     }
 

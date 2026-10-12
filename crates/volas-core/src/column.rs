@@ -16,7 +16,10 @@ use crate::strbuf::StrBuffer;
 use crate::datetime;
 use crate::dtype::DType;
 use crate::error::{Result, VolasError};
-use crate::numeric::{binary_supertype, fits, Numeric};
+use crate::numeric::{
+    binary_supertype, cmp_i64_f64, f64_to_f32_in_range, fits, i64_to_f32_exact, i64_to_f64_exact,
+    in_f64_domain, outside_f64_domain, overflow, Numeric,
+};
 use crate::stats;
 use crate::validity::Validity;
 
@@ -451,9 +454,24 @@ impl Column {
         }
     }
 
+    /// The values as `f64` for an operation computed in float64 (`op` names it in
+    /// the error): mean / var / std / quantiles / moments / corr / cov / the math
+    /// transforms / true division / the window aggregations. A present int64 with
+    /// `|x| > 2^53` raises ([`outside_f64_domain`], contract #26) — its float64
+    /// image is not the value, so the result would not be a function of the input.
+    /// int32 / bool / float inputs always fit; missing cells read as `NaN`.
+    pub fn to_f64_domain(&self, op: &str) -> Result<Vec<f64>> {
+        if let Column::I64(v, val) = self {
+            if let Some(x) = present(v, val).find(|&x| !in_f64_domain(x)) {
+                return Err(outside_f64_domain(x, op));
+            }
+        }
+        Ok(self.to_f64_vec())
+    }
+
     /// Value at position `i` coerced to `f64`, **ignoring validity** (a missing
-    /// cell reads its raw placeholder). Used only by the logical-op coercion in
-    /// `bool_at`; NumPy export goes through the validity-aware `to_f64_vec`.
+    /// cell reads its raw placeholder); callers check validity first (e.g.
+    /// [`truth_at`](Self::truth_at)). NumPy export goes through `to_f64_vec`.
     pub fn get_f64(&self, i: usize) -> f64 {
         match self {
             Column::F64(v) => v[i],
@@ -654,27 +672,49 @@ fn append_validity(av: &mut Validity, alen: usize, bv: &Validity, blen: usize) {
     *av = Validity::from_valid_iter(alen + blen, flags);
 }
 
-/// Sum of the present values in their element type (skip `volas.NA`). Dense ⇒
-/// the plain kernel (no per-element validity check).
-fn sum_valid<T: Numeric>(v: &[T], val: &Validity) -> T {
+/// Sum of the present values in their element type (skip `volas.NA`), checked
+/// (an overflow is an error, contract #25). Dense ⇒ the plain kernel.
+fn sum_valid<T: Numeric>(v: &[T], val: &Validity) -> Result<T> {
     if !val.has_nulls() {
         return stats::sum(v);
     }
-    v.iter()
-        .enumerate()
-        .filter(|(i, _)| val.is_valid(*i))
-        .fold(T::ZERO, |a, (_, &x)| a.wrapping_add(x))
+    stats::fold(present(v, val), T::ZERO, T::checked_add, "sum")
 }
 
-/// Product of the present values (skip `volas.NA`). Dense ⇒ the plain kernel.
-fn prod_valid<T: Numeric>(v: &[T], val: &Validity) -> T {
+/// Product of the present values (skip `volas.NA`), checked. Dense ⇒ the plain
+/// kernel.
+fn prod_valid<T: Numeric>(v: &[T], val: &Validity) -> Result<T> {
     if !val.has_nulls() {
         return stats::prod(v);
     }
+    stats::fold(present(v, val), T::ONE, T::checked_mul, "prod")
+}
+
+/// The present values of `v` under `val`, in order.
+fn present<'a, T: Copy>(v: &'a [T], val: &'a Validity) -> impl Iterator<Item = T> + 'a {
+    v.iter().enumerate().filter(|(i, _)| val.is_valid(*i)).map(|(_, &x)| x)
+}
+
+/// A checked element-wise map over the present values; a missing position keeps
+/// its placeholder (masked by the carried validity), so a payload under a null
+/// never raises. Backs the integer `abs` / `round`.
+fn map_present<T: Numeric>(
+    v: &[T],
+    val: &Validity,
+    f: impl Fn(T) -> Option<T>,
+    op: &str,
+) -> Result<Vec<T>> {
+    let dense = !val.has_nulls();
     v.iter()
         .enumerate()
-        .filter(|(i, _)| val.is_valid(*i))
-        .fold(T::ONE, |a, (_, &x)| a.wrapping_mul(x))
+        .map(|(i, &x)| {
+            if dense || val.is_valid(i) {
+                f(x).ok_or_else(|| overflow(T::DTYPE, op))
+            } else {
+                Ok(x)
+            }
+        })
+        .collect()
 }
 
 /// Min / max of the present values (skip `volas.NA`); `None` when none present.
@@ -696,18 +736,27 @@ fn extreme_valid<T: Numeric>(v: &[T], val: &Validity, want_max: bool) -> Option<
 }
 
 /// Running cumulative `op` over present values; a missing position gets
-/// `placeholder` (masked by the carried validity, so its value is irrelevant).
-fn cum_valid<T: Copy>(v: &[T], val: &Validity, placeholder: T, op: impl Fn(T, T) -> T) -> Vec<T> {
+/// `placeholder` (masked by the carried validity, so its value is irrelevant). A
+/// `None` from `op` is a failed (overflowing) step and fails the whole fold.
+fn cum_valid<T: Copy>(
+    v: &[T],
+    val: &Validity,
+    placeholder: T,
+    op: impl Fn(T, T) -> Option<T>,
+) -> Option<Vec<T>> {
     let mut acc: Option<T> = None;
     v.iter()
         .enumerate()
         .map(|(i, &x)| {
             if val.is_valid(i) {
-                let next = acc.map_or(x, |a| op(a, x));
+                let next = match acc {
+                    None => x,
+                    Some(a) => op(a, x)?,
+                };
                 acc = Some(next);
-                next
+                Some(next)
             } else {
-                placeholder
+                Some(placeholder)
             }
         })
         .collect()
@@ -715,18 +764,20 @@ fn cum_valid<T: Copy>(v: &[T], val: &Validity, placeholder: T, op: impl Fn(T, T)
 
 /// Dtype-preserving cumulative for a numeric column: the dense kernel when fully
 /// present, else a skip-and-propagate fold carrying the input validity through.
+/// `op` is checked: a `None` step is an overflow error named `name` (#25).
 fn cum<T: Numeric>(
     v: &[T],
     val: &Validity,
-    dense: fn(&[T]) -> Vec<T>,
-    op: fn(T, T) -> T,
-) -> Column {
+    dense: fn(&[T]) -> Result<Vec<T>>,
+    op: fn(T, T) -> Option<T>,
+    name: &str,
+) -> Result<Column> {
     let out = if val.has_nulls() {
-        cum_valid(v, val, T::ZERO, op)
+        cum_valid(v, val, T::ZERO, op).ok_or_else(|| overflow(T::DTYPE, name))?
     } else {
-        dense(v)
+        dense(v)?
     };
-    T::into_column(out).with_validity(val.clone())
+    Ok(T::into_column(out).with_validity(val.clone()))
 }
 
 /// Banker's (half-to-even) round of `x` to `decimals` places; `NaN` stays `NaN`.
@@ -740,20 +791,22 @@ fn round_f64(x: f64, decimals: i32) -> f64 {
 
 /// Round an int to `decimals` places: identity for `decimals >= 0`; for negative
 /// `decimals`, banker's round to the nearest `10^|decimals|` multiple (integer
-/// arithmetic, exact for all i64 — no f64 round-trip).
-fn round_i64(x: i64, decimals: i32) -> i64 {
+/// arithmetic, exact for all i64 — no f64 round-trip). `None` when that multiple
+/// lies past `i64` (`round(i64::MAX, -1)`), an overflow (contract #25).
+fn round_i64(x: i64, decimals: i32) -> Option<i64> {
     if decimals >= 0 {
-        return x;
+        return Some(x);
     }
     let factor = match 10i64.checked_pow(decimals.unsigned_abs()) {
         Some(f) => f,
-        None => return 0, // 10^k beyond i64 -> everything rounds to 0
+        None => return Some(0), // 10^k beyond i64 -> everything rounds to 0
     };
     let q = x.div_euclid(factor);
     let r = x.rem_euclid(factor); // 0..factor
     let half = factor / 2; // factor = 10^k is even, so this is exact
     let up = r > half || (r == half && q.rem_euclid(2) != 0); // tie -> even multiple
-    if up { q + 1 } else { q }.wrapping_mul(factor)
+    // q = x / 10^k with k >= 1, so q + 1 cannot overflow; the product can.
+    if up { q + 1 } else { q }.checked_mul(factor)
 }
 
 /// Clamp each element to `[lo, hi]` (either optional); missing passes through.
@@ -797,16 +850,14 @@ fn cmp_typed(n: usize, op: CmpOp, key: impl Fn(usize) -> Option<Ordering>) -> Ve
 }
 
 /// Integer floor division (toward negative infinity, unlike Rust's truncating
-/// `/`), wrapping on overflow like numpy. The divisor is non-zero (callers route
-/// a zero divisor through the float path).
-fn ifloordiv(a: i64, b: i64) -> i64 {
-    let q = a.wrapping_div(b);
-    let r = a.wrapping_rem(b);
-    if r != 0 && (r < 0) != (b < 0) {
-        q - 1
-    } else {
-        q
-    }
+/// `/`); `None` for the one overflowing quotient, `i64::MIN // -1` (contract #25;
+/// NumPy wraps it). The divisor is non-zero (callers route a zero divisor through
+/// the float path).
+fn ifloordiv(a: i64, b: i64) -> Option<i64> {
+    let q = a.checked_div(b)?;
+    let r = a % b; // cannot overflow: the only overflowing pair failed above
+    // a remainder of the opposite sign means `q` was truncated up: q - 1 >= i64::MIN
+    Some(if r != 0 && (r < 0) != (b < 0) { q - 1 } else { q })
 }
 
 /// A hashable key for a float value, or `None` for `NaN` (which groups as NA).
@@ -881,14 +932,33 @@ fn clip_bool(v: &[bool], lo: Option<f64>, hi: Option<f64>) -> Vec<bool> {
         .collect()
 }
 
-/// Element-wise `a ∘ b` for `Add` / `Sub` / `Mul` (wrapping, pandas overflow).
-fn binary_kernel<T: Numeric>(a: &[T], b: &[T], op: BinOp) -> Vec<T> {
+/// [`binary_kernel`] over float operands: IEEE arithmetic never overflows (it
+/// gives `±inf`), so the checked kernel cannot fail here.
+fn float_kernel<T: Numeric>(a: &[T], b: &[T], op: BinOp) -> Vec<T> {
+    binary_kernel(a, b, op, &Validity::dense()).expect("float arithmetic never overflows")
+}
+
+/// Element-wise `a ∘ b` for `Add` / `Sub` / `Mul` over the positions `valid`
+/// marks present: checked, so an integer overflow at a present position is an
+/// error (contract #25); a missing position holds a `0` placeholder (masked by the
+/// result validity) and is never computed, so its payload cannot raise.
+fn binary_kernel<T: Numeric>(a: &[T], b: &[T], op: BinOp, valid: &Validity) -> Result<Vec<T>> {
+    type Op<T> = fn(T, T) -> Option<T>;
+    let (f, name): (Op<T>, &str) = match op {
+        BinOp::Add => (T::checked_add, "`+`"),
+        BinOp::Sub => (T::checked_sub, "`-`"),
+        BinOp::Mul => (T::checked_mul, "`*`"),
+    };
+    let dense = !valid.has_nulls();
     a.iter()
         .zip(b)
-        .map(|(&x, &y)| match op {
-            BinOp::Add => x.wrapping_add(y),
-            BinOp::Sub => x.wrapping_sub(y),
-            BinOp::Mul => x.wrapping_mul(y),
+        .enumerate()
+        .map(|(i, (&x, &y))| {
+            if dense || valid.is_valid(i) {
+                f(x, y).ok_or_else(|| overflow(T::DTYPE, name))
+            } else {
+                Ok(T::ZERO)
+            }
         })
         .collect()
 }
@@ -897,3 +967,9 @@ fn binary_kernel<T: Numeric>(a: &[T], b: &[T], op: BinOp) -> Vec<T> {
 mod tests;
 #[cfg(test)]
 mod tests_na;
+#[cfg(test)]
+mod tests_overflow;
+#[cfg(test)]
+mod tests_convert;
+#[cfg(test)]
+mod tests_exact;

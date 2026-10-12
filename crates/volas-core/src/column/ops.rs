@@ -2,6 +2,19 @@
 
 use super::*;
 
+impl Scalar {
+    /// The dtype the value is carried in.
+    pub fn dtype(&self) -> DType {
+        match self {
+            Scalar::F64(_) => DType::F64,
+            Scalar::F32(_) => DType::F32,
+            Scalar::I64(_) => DType::I64,
+            Scalar::I32(_) => DType::I32,
+            Scalar::Bool(_) => DType::Bool,
+        }
+    }
+}
+
 impl Column {
     /// The single equal-length check every two-column operation calls before any
     /// element access: returns the shared length, or a [`VolasError::Shape`] when
@@ -45,8 +58,9 @@ impl Column {
     /// Binary `+ - *` against `other`, dtype-preserving via [`binary_supertype`]
     /// (`int ∘ int → i64`, else f64). `bool ∘ bool` is logical, matching pandas:
     /// `+` is OR, `*` is AND, `-` is an error (numpy disallows bool subtraction);
-    /// `bool ∘ number` promotes (bool acts as 0/1). Wrapping int ops match pandas
-    /// overflow. Unequal lengths are a [`VolasError::Shape`] error.
+    /// `bool ∘ number` promotes (bool acts as 0/1). Integer ops are checked: an
+    /// overflow is a [`VolasError::Overflow`] (contract #25; pandas wraps). Unequal
+    /// lengths are a [`VolasError::Shape`] error.
     pub fn binary(&self, other: &Column, op: BinOp) -> Result<Column> {
         self.require_same_len(other)?;
         self.require_numeric()?;
@@ -68,22 +82,20 @@ impl Column {
             };
         }
         match binary_supertype(self.dtype(), other.dtype()) {
-            DType::I64 => Ok(Column::i64_with(
-                binary_kernel(&self.as_i64_vec()?, &other.as_i64_vec()?, op),
-                self.combined_nulls(other),
-            )),
-            DType::I32 => Ok(Column::i32_with(
-                binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op),
-                self.combined_nulls(other),
-            )),
-            DType::F32 => Ok(Column::f32(binary_kernel(
-                &self.to_f32_vec(),
-                &other.to_f32_vec(),
-                op,
-            ))),
-            _ => Ok(Column::f64(binary_kernel(
-                &self.to_f64_vec(),
-                &other.to_f64_vec(),
+            DType::I64 => {
+                let nulls = self.combined_nulls(other);
+                let out = binary_kernel(&self.as_i64_vec()?, &other.as_i64_vec()?, op, &nulls)?;
+                Ok(Column::i64_with(out, nulls))
+            }
+            DType::I32 => {
+                let nulls = self.combined_nulls(other);
+                let out = binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op, &nulls)?;
+                Ok(Column::i32_with(out, nulls))
+            }
+            DType::F32 => Ok(Column::f32(float_kernel(&self.to_f32_vec(), &other.to_f32_vec(), op))),
+            _ => Ok(Column::f64(float_kernel(
+                &self.to_f64_domain("arithmetic")?,
+                &other.to_f64_domain("arithmetic")?,
                 op,
             ))),
         }
@@ -100,7 +112,7 @@ impl Column {
                 "division is not supported between two bool columns".into(),
             ));
         }
-        let (a, b) = (self.to_f64_vec(), other.to_f64_vec());
+        let (a, b) = (self.to_f64_domain("`/`")?, other.to_f64_domain("`/`")?);
         Ok(Column::f64(
             a.iter().zip(&b).map(|(&x, &y)| x / y).collect(),
         ))
@@ -130,18 +142,21 @@ impl Column {
             let present = |i: usize| self.is_valid(i) && other.is_valid(i);
             // exact i64 floor division (the divisor is non-zero where present);
             // NA positions hold a 0 placeholder, masked by the result validity.
+            // `MIN // -1` overflows its dtype (contract #25), at i64 or at i32.
+            let fail = || overflow(st, "`//`");
             let out: Vec<i64> = (0..n)
-                .map(|i| if present(i) { ifloordiv(a[i], b[i]) } else { 0 })
-                .collect();
+                .map(|i| if present(i) { ifloordiv(a[i], b[i]).ok_or_else(fail) } else { Ok(0) })
+                .collect::<Result<_>>()?;
             let val = Validity::from_valid_iter(n, (0..n).map(present));
-            // i32 // i32 stays i32 (the result fits); any i64 operand widens to i64.
+            // i32 // i32 stays i32; any i64 operand widens to i64.
             Ok(if st == DType::I32 {
-                Column::i32_with(out.iter().map(|&x| x as i32).collect(), val)
+                let narrow = out.iter().map(|&x| i32::try_from(x).map_err(|_| fail()));
+                Column::i32_with(narrow.collect::<Result<_>>()?, val)
             } else {
                 Column::i64_with(out, val)
             })
         } else {
-            let (a, b) = (self.to_f64_vec(), other.to_f64_vec());
+            let (a, b) = (self.to_f64_domain("`//`")?, other.to_f64_domain("`//`")?);
             Ok(Column::f64(
                 a.iter().zip(&b).map(|(&x, &y)| (x / y).floor()).collect(),
             ))
@@ -151,7 +166,7 @@ impl Column {
     /// Element-wise comparison (pandas `== != < <= > >=`) producing a **non-nullable
     /// bool** mask (decision ②): `str` / `datetime` / `bool` compare by their native
     /// value (NOT through the `to_f64_vec` funnel, which maps `str` to `NaN` and
-    /// loses `datetime` precision), numeric kinds compare as `f64`. A missing slot
+    /// loses `datetime` precision), numeric kinds compare exactly (#26). A missing slot
     /// (either side NA) follows IEEE — `!=` is `true`, every other op `false`,
     /// matching the existing numeric comparison. Comparing two incompatible kinds
     /// (e.g. `str` vs a number) is a [`VolasError::DType`]; unequal lengths are a
@@ -171,12 +186,27 @@ impl Column {
             (Column::Bool(a, av), Column::Bool(b, bv)) => cmp_typed(n, op, |i| {
                 (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i]))
             }),
-            // numeric (and bool-vs-numeric) compare as f64 — NaN follows IEEE here
-            // (`==` false, `!=` true), the established mask policy.
-            (a, b) if numeric_like(a) && numeric_like(b) => {
-                let (x, y) = (a.to_f64_vec(), b.to_f64_vec());
-                (0..n).map(|i| op.matches_f64(x[i], y[i])).collect()
-            }
+            // numeric (and bool-vs-numeric) compare EXACTLY (contract #26): two
+            // integer-like sides as i64, an integer against a float by exact order
+            // (no float64 round trip, so 2^53 + 1 > 2^53); only float vs float is
+            // IEEE. A missing side follows IEEE (`!=` true, else false).
+            (a, b) if numeric_like(a) && numeric_like(b) => match (a.is_float_like(), b.is_float_like()) {
+                (true, true) => {
+                    let (x, y) = (a.to_f64_vec(), b.to_f64_vec());
+                    (0..n).map(|i| op.matches_f64(x[i], y[i])).collect()
+                }
+                (false, false) => cmp_typed(n, op, |i| {
+                    (a.is_valid(i) && b.is_valid(i)).then(|| a.get_i64(i).cmp(&b.get_i64(i)))
+                }),
+                (false, true) => cmp_typed(n, op, |i| {
+                    a.is_valid(i).then(|| cmp_i64_f64(a.get_i64(i), b.get_f64(i))).flatten()
+                }),
+                (true, false) => cmp_typed(n, op, |i| {
+                    b.is_valid(i)
+                        .then(|| cmp_i64_f64(b.get_i64(i), a.get_f64(i)).map(Ordering::reverse))
+                        .flatten()
+                }),
+            },
             _ => {
                 return Err(VolasError::DType(format!(
                     "cannot compare a {} column with a {} column",
@@ -188,90 +218,120 @@ impl Column {
         Ok(Column::bool(out))
     }
 
+    /// A column of per-column reduction results (a DataFrame `sum` / `min` / …),
+    /// each part `(dtype it contributes, value)`. The column's dtype is the
+    /// supertype of the parts (all int64 → int64, int32 → int32, any float →
+    /// float), and every value converts to it losslessly (contract #20 / #26): an
+    /// integer past the float's exact range raises rather than rounding. A `NaN`
+    /// value (an all-missing reduction) becomes the target's missing cell.
+    pub fn from_scalars(parts: &[(DType, Scalar)]) -> Result<Column> {
+        let target = parts.iter().map(|p| p.0).reduce(binary_supertype).unwrap_or(DType::F64);
+        let mut out = Column::na_of(target, 0);
+        for &(_, s) in parts {
+            let cell = match s {
+                Scalar::F64(x) => Column::f64(vec![x]),
+                Scalar::F32(x) => Column::f32(vec![x]),
+                Scalar::I64(x) => Column::i64(vec![x]),
+                Scalar::I32(x) => Column::i32(vec![x]),
+                Scalar::Bool(b) => Column::bool(vec![b]),
+            };
+            out.append(&cell.convert_lossless(target)?)?;
+        }
+        Ok(out)
+    }
+
+    /// Whether the values are floats (`F64` / `F32`) rather than integer-like.
+    fn is_float_like(&self) -> bool {
+        self.dtype().is_float()
+    }
+
+    /// Whether the values are monotonically non-decreasing (`increasing`) or
+    /// non-increasing (pandas `is_monotonic_*`), by each dtype's own order through
+    /// [`compare`](Self::compare) — exact for int64, lexical for str, by instant for
+    /// datetime. Any missing cell makes it false (pandas).
+    pub fn is_monotonic(&self, increasing: bool) -> bool {
+        let n = self.len();
+        if self.null_count() > 0 {
+            return false;
+        }
+        if n < 2 {
+            return true;
+        }
+        let op = if increasing { CmpOp::Ge } else { CmpOp::Le };
+        let ok = self.slice(1, n).compare(&self.slice(0, n - 1), op).expect("a column compares with itself");
+        ok.as_bool().expect("compare yields bool").iter().all(|&b| b)
+    }
+
     /// Three-valued logical `and` / `or` / `xor` (pandas `&` / `|` / `^`), Kleene
-    /// semantics: a present `false` makes `and` false and a present `true` makes
-    /// `or` true even when the other side is missing; otherwise a missing operand
-    /// yields NA. A non-bool operand is read as `x != 0` (present). Unequal lengths
-    /// are a [`VolasError::Shape`] error.
+    /// semantics over [`truth_at`](Self::truth_at): a present `false` makes `and`
+    /// false and a present `true` makes `or` true even when the other side is
+    /// missing; otherwise a missing operand (a NaN, an int / bool NA) yields NA —
+    /// never a present value (contract #27). Unequal lengths are a
+    /// [`VolasError::Shape`] error.
     pub fn logical(&self, other: &Column, op: BoolOp) -> Result<Column> {
         let n = self.require_same_len(other)?;
         Ok(from_option_bools(
             n,
-            (0..n).map(|i| {
-                let (a, ap) = self.bool_at(i);
-                let (b, bp) = other.bool_at(i);
-                match op {
-                    BoolOp::And => {
-                        if (ap && !a) || (bp && !b) {
-                            Some(false)
-                        } else if ap && bp {
-                            Some(true)
-                        } else {
-                            None
-                        }
-                    }
-                    BoolOp::Or => {
-                        if (ap && a) || (bp && b) {
-                            Some(true)
-                        } else if ap && bp {
-                            Some(false)
-                        } else {
-                            None
-                        }
-                    }
-                    BoolOp::Xor => (ap && bp).then_some(a ^ b),
-                }
+            (0..n).map(|i| match (op, self.truth_at(i), other.truth_at(i)) {
+                (BoolOp::And, Some(false), _) | (BoolOp::And, _, Some(false)) => Some(false),
+                (BoolOp::Or, Some(true), _) | (BoolOp::Or, _, Some(true)) => Some(true),
+                (BoolOp::And, Some(a), Some(b)) => Some(a && b),
+                (BoolOp::Or, Some(a), Some(b)) => Some(a || b),
+                (BoolOp::Xor, Some(a), Some(b)) => Some(a ^ b),
+                _ => None,
             }),
         ))
     }
 
-    /// Logical NOT (pandas `~`), propagating missing (NA in -> NA out). A non-bool
-    /// column is read as `x != 0` first.
+    /// Logical NOT (pandas `~`) over [`truth_at`](Self::truth_at): NA in -> NA out.
     pub fn not(&self) -> Column {
         let n = self.len();
-        from_option_bools(
-            n,
-            (0..n).map(|i| {
-                let (a, ap) = self.bool_at(i);
-                ap.then_some(!a)
-            }),
-        )
+        from_option_bools(n, (0..n).map(|i| self.truth_at(i).map(|a| !a)))
     }
 
-    /// The value (`x != 0` for a non-bool) and presence of element `i`, for the
-    /// logical ops. A non-bool is always present (its missing-as-bool question is
-    /// the comparison policy: a missing value compares/reads `false`-y).
-    fn bool_at(&self, i: usize) -> (bool, bool) {
-        match self {
-            Column::Bool(v, val) => (v[i], val.is_valid(i)),
-            _ => (self.get_f64(i) != 0.0, true),
+    /// The truth value of element `i`, or `None` when it is missing — the one
+    /// validity-aware boolean conversion (contract #27) behind the logical ops,
+    /// `bool()` of a one-element Series, masks and `any` / `all`. A bool reads its
+    /// value, a number `x != 0`, a str `!s.is_empty()`, a datetime `ns != 0`
+    /// (Python truthiness); a missing cell (NaN / NA / NaT) is never read as a
+    /// value, whatever payload it carries.
+    pub fn truth_at(&self, i: usize) -> Option<bool> {
+        if !self.is_valid(i) {
+            return None;
         }
+        Some(match self {
+            Column::Bool(v, _) => v[i],
+            Column::Str(v, _) => !v.get(i).is_empty(),
+            other => other.get_f64(i) != 0.0,
+        })
     }
 
     /// Sum, dtype-preserving (pandas): a float column -> float, int/bool -> i64
-    /// (bool counts trues). Computed natively (i64 in i64, exact past 2^53).
-    pub fn sum(&self) -> Scalar {
-        match self {
-            Column::F64(v) => Scalar::F64(stats::sum(v.as_slice())),
-            Column::F32(v) => Scalar::F32(stats::sum(v.as_slice())),
-            Column::I64(v, val) => Scalar::I64(sum_valid(v, val)),
+    /// (bool counts trues). Computed natively (i64 in i64, exact past 2^53) and
+    /// checked: an int64 overflow is an error (contract #25).
+    pub fn sum(&self) -> Result<Scalar> {
+        Ok(match self {
+            Column::F64(v) => Scalar::F64(stats::sum(v.as_slice())?),
+            Column::F32(v) => Scalar::F32(stats::sum(v.as_slice())?),
+            Column::I64(v, val) => Scalar::I64(sum_valid(v, val)?),
             // int32 / bool sum promotes to int64 (pandas / numpy accumulator)
-            Column::I32(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)),
-            Column::Bool(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)),
-            other => Scalar::F64(stats::sum(&other.to_f64_vec())),
-        }
+            Column::I32(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)?),
+            Column::Bool(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)?),
+            other => Scalar::F64(stats::sum(&other.to_f64_vec())?),
+        })
     }
 
-    /// Product, dtype-preserving (float -> float, int/bool -> i64).
-    pub fn prod(&self) -> Scalar {
-        match self {
-            Column::F64(v) => Scalar::F64(stats::prod(v.as_slice())),
-            Column::F32(v) => Scalar::F32(stats::prod(v.as_slice())),
-            Column::I64(v, val) => Scalar::I64(prod_valid(v, val)),
-            Column::I32(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)),
-            Column::Bool(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)),
-            other => Scalar::F64(stats::prod(&other.to_f64_vec())),
-        }
+    /// Product, dtype-preserving (float -> float, int/bool -> i64), checked like
+    /// [`sum`](Self::sum).
+    pub fn prod(&self) -> Result<Scalar> {
+        Ok(match self {
+            Column::F64(v) => Scalar::F64(stats::prod(v.as_slice())?),
+            Column::F32(v) => Scalar::F32(stats::prod(v.as_slice())?),
+            Column::I64(v, val) => Scalar::I64(prod_valid(v, val)?),
+            Column::I32(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)?),
+            Column::Bool(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)?),
+            other => Scalar::F64(stats::prod(&other.to_f64_vec())?),
+        })
     }
 
     /// Minimum (`want_max = false`) / maximum, dtype-preserving (float -> float,

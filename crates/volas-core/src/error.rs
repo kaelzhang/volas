@@ -26,6 +26,12 @@ pub enum VolasError {
     #[error("value error: {0}")]
     Value(String),
 
+    /// A value outside the range its operation is defined on: an integer result
+    /// past its dtype (contract #25), or an integer past the float64-exact range
+    /// fed to float64 math (contract #26).
+    #[error("overflow: {0}")]
+    Overflow(String),
+
     /// A directive string that could not be tokenized / parsed (a *syntax* error,
     /// annotated with line / column), as opposed to a [`Value`](Self::Value) error
     /// for a well-formed directive with an invalid command / argument.

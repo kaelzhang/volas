@@ -612,3 +612,86 @@ The window API is pandas-aligned and differential-tested method by method
   window holding `+inf` sums to `+inf` (`-inf` likewise, and both signs to NaN), and
   the next window without it is exact again. pandas returns NaN for every window
   holding an infinity, an artefact of its compensated summation, not a definition.
+
+## Integer exactness
+
+An integer is an exact value, so volas never changes one silently: where pandas /
+NumPy would wrap, round or saturate, volas computes exactly or raises.
+
+### Integer overflow raises
+
+pandas and NumPy wrap int64 arithmetic modulo 2⁶⁴ (`max + 1 == min`,
+`abs(min) == min`). Every volas integer kernel is checked instead and raises
+`OverflowError`, identically in debug and release builds: `+ - *`, `sum` / `prod`,
+`cumsum` / `cumprod`, `diff`, `abs`, `round` to a negative number of decimals, and
+`//` (`min // -1`). int32 operands overflow at int32 (int32 `sum` / `prod`
+accumulate in int64, like pandas). A missing cell is never computed, so its
+placeholder never raises.
+
+```py
+>>> s = volas.DataFrame({'a': [2**63 - 1]})['a']
+>>> s + 1
+OverflowError: int64 overflow in `+`; integer results never wrap — cast to
+               float64 first if an approximate result is acceptable
+```
+
+### Integer results are exact; float64 math past 2⁵³ raises
+
+NumPy compares and reduces int64 through float64 in many places, so `2**53 + 1`
+and `2**53` compare equal and `nlargest` / `df.max()` can return the wrong row or
+value. volas decides per operation by the kind of result it produces:
+
+| operation | integer input |
+|---|---|
+| `== != < <= > >=` (int vs int, int vs float, Series or scalar), `between`, `is_monotonic_*`, `nlargest` / `nsmallest`, `sort_values`, `rank`, `idxmin` / `idxmax`, `cummin` / `cummax` | **exact** — compared in the integers' own order (an int against a float by exact value, so `2**53 + 1 > 2**53`) |
+| `sum` / `prod` / `min` / `max` (Series and DataFrame), `cumsum` / `cumprod`, `+ - *`, `//` (int // int), `abs`, `round`, `diff`, `fillna` / `where` / `mask` with an integer fill | **exact** — computed in int64 (int32 where pandas keeps it), checked for overflow |
+| a DataFrame `sum` / `min` / … over int **and** float columns | float64 result; each integer converts exactly or raises `TypeError` |
+| `mean`, `var`, `std`, `median`, `quantile`, `sem`, `skew`, `kurt`, `describe`, `corr` / `cov`, the math transforms (`sqrt`, `floor`, `exp`, …), `/`, `//` by zero, `+ - *` with a float operand, `clip` with a fractional bound, `interpolate`, every `rolling` / `expanding` / `ewm` aggregation except `count` / `first` / `last` | **float64 math** — a present int64 with `|x| > 2⁵³` raises `OverflowError` (its float64 image is not the value); within `±2⁵³` every integer and its neighbours are exact, so the result is the float64 result of the true input |
+
+pandas returns a float computed from the rounded input in the last row.
+
+### Conversions are lossless or raise
+
+One conversion rule serves every target-typed write (`iat` / `iloc` / `at` / `loc`,
+Series and mask assignment, dict / `Row` `append`), column ingress (lists, tuples,
+NumPy arrays of any kind), and `astype` between numeric dtypes:
+
+| source → target | converts | raises |
+|---|---|---|
+| int → float64 / float32 | exactly representable (`2**60`) | `TypeError` otherwise (`2**53 + 1` → float64, `2**24 + 1` → float32) |
+| float → int64 / int32 | integral and in range (`5.0`) | `TypeError` for a fraction (`2.5`), `OverflowError` out of range (`1e20`) |
+| int64 → int32 | in range | `OverflowError` |
+| float64 → float32 | rounds to the nearest float32 (float precision) | `OverflowError` for a finite value past float32 (`1e300`, never `inf`) |
+
+pandas / NumPy round, saturate or wrap in each of these cases. Specific ingress
+rules:
+
+- an integer past int64 (a Python int, a NumPy `uint64` value, an `object` array
+  element) raises `OverflowError` — volas has no `uint64`; a `uint64` array whose
+  values all fit int64 (and every narrower unsigned array) widens exactly;
+- integers mixed with floats infer float64 (like pandas) only when every integer
+  is exact in float64, else `TypeError`;
+- tuples and `object` arrays follow the list rules (so `Decimal` raises everywhere);
+- complex values raise `TypeError` (pandas keeps `complex128`; NumPy-to-float
+  drops the imaginary part with only a warning).
+
+`astype('int64')` from a float still truncates toward zero (`2.7 → 2`, as pandas),
+but a value past int64 raises instead of saturating to `±2⁶³`; a float epoch past
+int64 is unconvertible for `astype('datetime64[...]')` likewise.
+
+`read_csv` never rounds an integer token either: a column whose integer tokens
+float64 cannot hold exactly (past int64, or past 2⁵³ next to a float token) is read
+as text, losslessly — pandas reads `uint64` / `object` or rounds to float64. A
+`nan` token that is not an NA token (`keep_default_na=False`) is text, and an NA
+token in a `True` / `False` column is a missing bool rather than a literal.
+
+## A missing value has no truth value
+
+`&` / `|` / `^` / `~` use Kleene logic over every dtype: a missing operand — a
+float `NaN`, an int / bool `volas.NA`, or a missing scalar (`None` / `NaN` /
+`volas.NA`) — is unknown, so `True & NaN` is `volas.NA` and `False & NaN` is
+`False`. NumPy reads `NaN` as truthy, so pandas gives `True & nan == True`. The same
+rule makes `bool()` of a one-element Series holding a missing value raise
+`TypeError` (like `bool(pd.NA)`), and makes `any` / `all` skip missing cells on both
+the Series and the DataFrame; a DataFrame `any` / `all` covers the numeric and bool
+columns only, as `Series.any` raises for a `str` / `datetime` column.
