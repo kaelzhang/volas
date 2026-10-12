@@ -231,7 +231,7 @@
             None,
         )
         .unwrap();
-        h.set_computed("sig", 0);
+        h.set_computed("sig", 0, 0);
         let only_a3 = DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
         h.append(&only_a3).unwrap();
         assert_eq!(h.column("sig").unwrap().as_bool().unwrap(), &[true, false]);
@@ -240,7 +240,7 @@
     #[test]
     fn computed_tail_update_and_dtype_guard() {
         let mut df = sample();
-        df.set_computed("a", 1);
+        df.set_computed("a", 1, 1);
         assert_eq!(df.computed_columns().len(), 1);
         // overwrite the tail of the F64 column "a" with an F64 tail
         df.update_computed_tail("a", 1, &Column::f64(vec![8.0, 9.0]))
@@ -265,7 +265,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", 11);
+        df.set_computed("close", 11, 11);
         // A carried EMA state as of row 59.
         df.set_computed_state("close", Some(vec![42.0]));
         // A slice keeping >= lookback rows AND ending at `valid_rows` carries the column
@@ -283,6 +283,10 @@
         // a slice keeping < lookback rows drops the computed status entirely (not continuable).
         let too_short = df.slice(55, 60); // 5 rows < 11
         assert!(too_short.computed_columns().is_empty());
+        // a column that needs one row past its lookback is kept only with that row
+        df.set_computed("close", 11, 12);
+        assert!(df.slice(49, 60).computed_columns().is_empty()); // 11 rows < 12
+        assert_eq!(df.slice(48, 60).computed_columns()[0].1.reach, 12);
     }
 
     fn meta(df: &DataFrame) -> ComputedMeta {
@@ -296,7 +300,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", 2);
+        df.set_computed("close", 2, 2);
         df
     }
 
@@ -309,7 +313,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", 2);
+        df.set_computed("close", 2, 2);
         df.set_computed_states("close", Some(vec![8.0]), Some(vec![7.0]));
         df.append(&DataFrame::new(vec!["x".into()], vec![Column::f64(vec![9.0])], None).unwrap())
             .unwrap();
@@ -391,7 +395,7 @@
         df.invalidate_computed_forming_row(9);
         assert_eq!(meta(&df).state, None);
         df.set_column("x", Column::f64(vec![0.0; 10])).unwrap();
-        df.set_computed("x", 0);
+        df.set_computed("x", 0, 0);
         df.invalidate_computed_on_write("x");
         assert_eq!((meta(&df).state, meta(&df).state_before_last), (None, None));
     }
@@ -433,7 +437,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", lookback);
+        df.set_computed("close", lookback, lookback);
         df
     }
 
@@ -473,7 +477,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", 11);
+        df.set_computed("close", 11, 11);
         df.set_computed_state("close", Some(vec![42.0]));
         // slice() carries it (continuable, with the recursive state) ...
         assert_eq!(df.slice(40, 60).computed_columns().len(), 1);
@@ -526,7 +530,7 @@
     #[test]
     fn assign_positions_drops_computed_status() {
         let mut df = sample();
-        df.set_computed("a", 1);
+        df.set_computed("a", 1, 1);
         assert_eq!(df.computed_columns().len(), 1);
         // a manual write into the cached column drops its computed status
         df.assign_positions(0, &[0], &Column::f64(vec![7.0]))

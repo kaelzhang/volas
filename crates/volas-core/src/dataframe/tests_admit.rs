@@ -229,7 +229,7 @@ fn a_rejected_batch_writes_no_row() {
     // [last label, new label] where the second row's value is lossy: the replacement of
     // the first row must not have happened either (A-2)
     let mut df = frame(&["s", "x"], vec![Column::str(vec!["a".into(), "b".into()]), Column::f64(vec![1.0, 2.0])], Index::int64(vec![1, 2]));
-    df.set_computed("x", 0);
+    df.set_computed("x", 0, 0);
     let before = snapshot(&df);
     let batch = frame(&["s", "x"], vec![Column::i64(vec![7, 8]), Column::f64(vec![9.0, 10.0])], Index::int64(vec![2, 3]));
     assert!(df.append(&batch).is_err());
@@ -239,7 +239,7 @@ fn a_rejected_batch_writes_no_row() {
 #[test]
 fn cached_directive_columns_are_never_appended() {
     let mut df = frame(&["open", "close", "ema:12"], vec![Column::f64(vec![1.0]); 3], Index::range(1));
-    df.set_computed("ema:12", 12);
+    df.set_computed("ema:12", 12, 12);
     let before = snapshot(&df);
     let rows = frame(&["close", "ema:12"], vec![Column::f64(vec![2.0]); 2], Index::range(1));
     let err = df.append(&rows).unwrap_err();
@@ -255,8 +255,8 @@ fn cached_directive_columns_are_never_appended() {
     assert!(df.has_stale_computed());
     // looked up from either side: more cached columns than the rows carry, out of order
     let mut wide = frame(&["a", "b", "c1", "c2"], vec![Column::f64(vec![1.0]); 4], Index::range(1));
-    wide.set_computed("c1", 0);
-    wide.set_computed("c2", 0);
+    wide.set_computed("c1", 0, 0);
+    wide.set_computed("c2", 0, 0);
     wide.append(&frame(&["b"], vec![Column::f64(vec![2.0])], Index::range(1))).unwrap();
     assert!(wide.append(&frame(&["c2"], vec![Column::f64(vec![2.0])], Index::range(1))).is_err());
     assert_eq!(wide.height(), 2);
@@ -335,7 +335,7 @@ fn refolding_the_forming_row_is_the_period_reduce() {
         None,
     )
     .unwrap();
-    df.set_computed("sum", 0);
+    df.set_computed("sum", 0, 0);
     df.set_computed_states("sum", Some(vec![1.0]), Some(vec![0.5]));
     let period = DataFrame::new(
         vec!["first".into(), "max".into(), "sum".into()],

@@ -20,6 +20,10 @@ pub struct ComputedMeta {
     // use the name directly. Storing it would be a redundant per-bar / per-slice clone.
     /// The directive's lookback (warm-up rows).
     pub lookback: usize,
+    /// The rows the column needs to be continued exactly (`lookback`, or one more when
+    /// continuing it reads the row its window drops): a contiguous slice keeping fewer
+    /// rows does not keep it cached.
+    pub reach: usize,
     /// Rows `[0, valid_rows)` currently hold valid values.
     pub valid_rows: usize,
     /// Carried recursive state for an O(new-rows) append resume: a small,
@@ -461,7 +465,7 @@ impl DataFrame {
         // values correct, but not continuable). Non-contiguous derivations
         // (`take` / `filter_mask`) go through `DataFrame::new` and already drop it.
         for (name, meta) in &self.computed {
-            if len >= meta.lookback {
+            if len >= meta.reach {
                 let valid = meta.valid_rows.saturating_sub(start).min(len);
                 // Carry a state only when the row it describes is one of this slice's
                 // valid rows: the state is the internal state as of the parent row
@@ -483,6 +487,7 @@ impl DataFrame {
                     name.clone(),
                     ComputedMeta {
                         lookback: meta.lookback,
+                        reach: meta.reach,
                         valid_rows: valid,
                         state: carried,
                         state_before_last: carried_before,

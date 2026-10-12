@@ -26,6 +26,7 @@ enum Resolved {
 struct Computed {
     canonical: String,
     lookback: usize,
+    reach: usize,
     col: Column,
     state: Option<Vec<f64>>,
     before: Option<Vec<f64>>,
@@ -322,6 +323,7 @@ impl PyDataFrame {
         Ok(Computed {
             canonical: volas_directive::stringify(node),
             lookback: volas_directive::lookback::lookback(node),
+            reach: volas_directive::lookback::continuation_reach(node),
             col,
             state,
             before,
@@ -335,9 +337,9 @@ impl PyDataFrame {
         if self.inner.has_column(&new.canonical) {
             return Ok(new.col);
         }
-        let Computed { canonical, lookback, col, state, before } = new;
+        let Computed { canonical, lookback, reach, col, state, before } = new;
         self.inner.set_column(&canonical, col).map_err(pyerr)?;
-        self.inner.set_computed(&canonical, lookback);
+        self.inner.set_computed(&canonical, lookback, reach);
         self.inner.set_computed_states(&canonical, state, before);
         Ok(self.inner.column(&canonical).map_err(pyerr)?.clone())
     }

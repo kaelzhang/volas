@@ -33,12 +33,14 @@ pub struct StaleComputed {
 
 impl DataFrame {
     /// Record that column `name` is a materialized directive result (valid for
-    /// all current rows), its history starting at this frame's row 0.
-    pub fn set_computed(&mut self, name: &str, lookback: usize) {
+    /// all current rows), its history starting at this frame's row 0; `reach` is the
+    /// rows it needs to be continued exactly (at least `lookback`).
+    pub fn set_computed(&mut self, name: &str, lookback: usize, reach: usize) {
         self.computed.insert(
             name.to_string(),
             ComputedMeta {
                 lookback,
+                reach: reach.max(lookback),
                 valid_rows: self.height,
                 state: None,
                 state_before_last: None,

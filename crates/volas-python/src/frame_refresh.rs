@@ -127,10 +127,10 @@ impl PyDataFrame {
         // replaced last row is still past it). The gate keeps the warm-up region on the
         // full recompute: an indicator whose warm-up mask is length-dependent would
         // otherwise freeze an incrementally carried early row that a full recompute
-        // masks. A sliding accumulator also needs the row its window drops, `lb + 1`
-        // rows back, in this frame (a tail slice of `lb` rows lacks it): without it the
-        // column recomputes over the frame's rows instead.
-        let reach = vr > lb || !volas_directive::lookback::slides(node);
+        // masks. A resume reads `resume_reach` rows before the new one (its lookback,
+        // plus the row its window drops or SAR's earlier bar): a frame holding fewer (a
+        // tail slice) recomputes over its own rows instead.
+        let reach = vr >= volas_directive::lookback::resume_reach(node);
         if warm && reach && self.inner.computed_resume_state(name).is_some() {
             // One row at a time through the allocation-free step: each row's value and
             // the state as of it; the last two states are kept.

@@ -300,17 +300,39 @@ pub fn recomputes_on_a_window(node: &Ast) -> bool {
     }
 }
 
-/// Whether a directive's resumable state is a sliding accumulator (a running sum the
-/// window's oldest row leaves — [`crate::spec::accumulates`]): resuming it at a row
-/// drops the row `lookback + 1` rows back, so the frame must still hold that row. A
-/// recursive state needs no row before the new one. Only a top-level command (or a bare
-/// name binding to one) carries a resume state.
-pub fn slides(node: &Ast) -> bool {
+/// The command a directive's resumable state belongs to: a top-level command, or a
+/// bare name binding to one (a composite carries no state).
+fn top_command(node: &Ast) -> Option<(String, Option<String>)> {
     match node {
         Node::Name(name) => crate::bind::bind_command(name, None, &[], &[])
-            .is_ok_and(|cmd| crate::spec::accumulates(&cmd.name, cmd.sub.as_deref())),
-        Node::Command(c) => crate::spec::accumulates(&c.name, c.sub.as_deref()),
-        _ => false,
+            .ok()
+            .map(|c| (c.name, c.sub)),
+        Node::Command(c) => Some((c.name.clone(), c.sub.clone())),
+        _ => None,
+    }
+}
+
+/// The rows before a new row that resuming a directive's carried state reads: none
+/// for a state that is all its command needs (a recursion), its lookback plus one for a
+/// command that reads the row its window drops or SAR's earlier bar
+/// ([`crate::spec::reads_past_lookback`]). A frame holding fewer valid rows cannot
+/// resume it.
+pub fn resume_reach(node: &Ast) -> usize {
+    match top_command(node) {
+        Some((n, s)) if crate::spec::reads_past_lookback(&n, s.as_deref()) => lookback(node) + 1,
+        _ => 0,
+    }
+}
+
+/// The rows a cached directive column needs to be continued exactly at all — what a
+/// contiguous slice must keep for the column to stay cached: its lookback, or
+/// [`resume_reach`] when that is more, except
+/// that a sliding sum recomputes its window exactly from `lookback` rows (its running
+/// sums re-anchor at absolute positions) when the state cannot resume.
+pub fn continuation_reach(node: &Ast) -> usize {
+    match top_command(node) {
+        Some((n, s)) if crate::spec::accumulates(&n, s.as_deref()) => lookback(node),
+        _ => resume_reach(node).max(lookback(node)),
     }
 }
 

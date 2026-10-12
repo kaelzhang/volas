@@ -20,7 +20,7 @@ fn known_clean() -> DataFrame {
         None,
     )
     .unwrap();
-    df.set_computed("c", 0);
+    df.set_computed("c", 0, 0);
     assert!(!df.column("x").unwrap().has_nan());
     assert!(!df.column("c").unwrap().has_nan());
     assert_eq!(df.column("x").unwrap().known_has_nan(), Some(false));
