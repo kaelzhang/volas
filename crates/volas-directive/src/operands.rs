@@ -147,14 +147,13 @@ impl<'a> Operands<'a> {
         self.df.origin()
     }
 
-    /// `Ok` when an input of `len` rows fits the others (see the module docs).
-    fn fit(&self, slot: usize, len: usize) -> Result<()> {
-        if len == self.len {
+    /// `Ok` when an input of `len` rows fits the others, `want` rows (see the module docs).
+    fn fit(&self, slot: usize, len: usize, want: usize) -> Result<()> {
+        if len == want {
             return Ok(());
         }
         Err(VolasError::Shape(format!(
-            "series argument #{slot} has {len} rows where the command's other inputs have {}",
-            self.len
+            "series argument #{slot} has {len} rows where the command's other inputs have {want}"
         )))
     }
 
@@ -176,9 +175,7 @@ impl<'a> Operands<'a> {
         };
         require_f64_input(read.column())?;
         // an input spans the frame; the arm reads its first `len` rows
-        if read.column().len() != self.df.height() {
-            self.fit(slot, read.column().len())?;
-        }
+        self.fit(slot, read.column().len(), self.df.height())?;
         Ok(read)
     }
 
@@ -189,7 +186,7 @@ impl<'a> Operands<'a> {
             let view = views.get(slot).and_then(|v| v.as_deref()).ok_or_else(|| {
                 VolasError::Value(format!("series argument #{slot} was not read before the rerun"))
             })?;
-            self.fit(slot, view.len())?;
+            self.fit(slot, view.len(), self.len)?;
             return Ok(Cow::Borrowed(view));
         }
         let read = self.read(slot, default)?;
@@ -231,7 +228,7 @@ impl<'a> Operands<'a> {
         if self.over.is_none() && truths.len() == self.df.height() {
             truths.truncate(self.len);
         }
-        self.fit(slot, truths.len())?;
+        self.fit(slot, truths.len(), self.len)?;
         Ok(truths)
     }
 

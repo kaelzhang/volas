@@ -215,7 +215,7 @@ Every cell write (`iloc` / `loc` / `iat` / `at`, `df[mask] = v`) lands in place 
 like a bulk read, raises while a cached directive column is stale; a mask that selects
 no row changes nothing. On a bounded (`window=`) frame a whole-column assignment writes
 the visible rows only and keeps the hidden margin's history (see
-[Bounded rolling window](dataframe-api.md#what-a-bounded-window-computes)).
+[Bounded rolling window](dataframe-api.md#bounded-rolling-window)).
 
 ```py
 df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)

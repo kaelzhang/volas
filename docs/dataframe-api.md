@@ -106,7 +106,7 @@ Which gets the 2-period simple moving average on column `"close"`.
 - **max_lookback** `Optional[int | list[str]] = None` **Required with `window`** (and
   valid only with it): the hidden margin of rows kept behind the visible ones, and the
   directives the frame computes exactly (see
-  [What a bounded window computes](#what-a-bounded-window-computes)). Pass a **list of
+  [What a bounded window computes](#bounded-rolling-window)). Pass a **list of
   indicator directives** to **declare** them: the margin is the largest of their
   lookbacks (e.g. `['atr:14', 'ma:50']` → margin 49), and each is computed at
   construction over all the given rows and cached — a recursive one (EMA, Wilder
@@ -533,7 +533,7 @@ on append, but cannot recompute it once a write discards that state (it does not
 the rows the history started on): its next refresh raises. A bounded window's own drop
 of its head is not a slice: its cached columns stay cached, a recursion with the
 checkpoint of its history (see
-[What a bounded window computes](#what-a-bounded-window-computes)).
+[What a bounded window computes](#bounded-rolling-window)).
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 

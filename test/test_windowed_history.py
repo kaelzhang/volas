@@ -352,3 +352,25 @@ def test_an_assignment_converts_the_hidden_rows_exactly_or_raises():
     assert w['f'].to_list() == [0.5, 0.5]
     with pytest.raises(ValueError, match=r'length of values \(3\) does not match the window length \(2\)'):
         w['f'] = [1.0, 2.0, 3.0]
+
+
+def test_a_late_request_past_a_zero_margin_raises_and_within_it_folds_exactly():
+    # a 5m frame by cumulate, window 1: increase reads one row before its own, so a
+    # margin of 0 refuses it (it would read a dropped row), and a margin of 1 keeps it
+    # exact through a new period and re-folds of it
+    bar0 = {'open': [1.0], 'high': [2.0], 'low': [0.5], 'close': [1.5], 'volume': [3.0]}
+    base = volas.DataFrame(bar0, index=np.array([T0])).cumulate('5m')
+    w = volas.DataFrame(base, window=1, max_lookback=0)
+    with pytest.raises(ValueError, match=r"'INCREASE@open' .* reads 1 rows before each row, more than the 0"):
+        w['INCREASE@open']
+    w = volas.DataFrame(base, window=1, max_lookback=1)
+    u = volas.DataFrame(base)
+    w['INCREASE@open']
+    u['INCREASE@open']
+    for k, o in enumerate([2.0, 0.5, 3.0]):
+        bar = volas.DataFrame({'open': [o], 'high': [4.0], 'low': [0.1], 'close': [2.0], 'volume': [1.0]},
+                              index=np.array([T0 + (5 + k) * MIN]))
+        w.append(bar)
+        u.append(bar)
+        assert same(w['INCREASE@open'].to_numpy(dtype='float64'),
+                    u['INCREASE@open'].to_numpy(dtype='float64')[-1:]), k
