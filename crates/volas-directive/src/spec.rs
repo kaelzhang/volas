@@ -687,12 +687,51 @@ pub fn is_recursive(name: &str, args: &[ArgValue]) -> bool {
         .any(|&(p, m)| args.get(p).zip(args.get(m)).is_some_and(|(p, m)| volas_compute::raw::indicators::is_recursive_generic_ma(p.as_usize(), m.as_usize())))
 }
 
-/// Whether a recursive command carries its history in a state a resume continues from
-/// (its `initial_state` / `execute_resume` arms): every recursive command but `crsi`,
-/// `kcw` and `stoch_momentum`, and none of the moving-average-type forms (`ma:5,1`, …)
-/// — those recompute. Guarded over every recursive command by the carried-state test.
-pub fn carries_state(name: &str) -> bool {
-    is_recursive_name(name) && !matches!(name, "crsi" | "kcw" | "stoch_momentum")
+/// How a class-3 command's history is kept by a frame that does not hold all of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// By the state its resume continues from (its `initial_state` / `execute_resume`
+    /// arms): a checkpoint of that state replays it.
+    State,
+    /// By its window: its values are a function of a trailing window of its rows.
+    Window,
+    /// Not at all: it carries no state (it recomputes), so only the whole history gives it.
+    Nothing,
+}
+
+/// A command's history class (how its value depends on the rows before it), the one
+/// owner of the classification: class 1 depends on a trailing window, class 2 on a
+/// running accumulator over a trailing window, class 3 on every row before — a
+/// recursion, a cumulative line or an unbounded count, with how it is kept. A bounded
+/// window computes a class-1 directive on request and the others only when declared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryClass {
+    /// Class 1.
+    Window,
+    /// Class 2.
+    Accumulator,
+    /// Class 3.
+    Recursion(Keep),
+}
+
+/// The history class of the bound command `name` / `sub` with `args` (see
+/// [`HistoryClass`]). Class 3: every recursion ([`is_recursive`]) — kept by its state
+/// unless it is `crsi`, `kcw`, `stoch_momentum` or a moving-average-type form, which
+/// recompute — and `increase`, a count over its window. Class 2: the running
+/// accumulators ([`accumulates`]). Guarded over every command by the history-class tests.
+pub fn history_class(name: &str, sub: Option<&str>, args: &[ArgValue]) -> HistoryClass {
+    if name == "increase" {
+        return HistoryClass::Recursion(Keep::Window);
+    }
+    if is_recursive(name, args) {
+        let state = is_recursive_name(name) && !matches!(name, "crsi" | "kcw" | "stoch_momentum");
+        return HistoryClass::Recursion(if state { Keep::State } else { Keep::Nothing });
+    }
+    if accumulates(name, sub) {
+        HistoryClass::Accumulator
+    } else {
+        HistoryClass::Window
+    }
 }
 
 /// Whether a command's output is an absolute row position.

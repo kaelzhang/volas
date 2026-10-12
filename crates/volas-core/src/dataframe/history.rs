@@ -2,42 +2,64 @@
 //! [`Checkpoint`] a frame keeps of a recursion's history once it no longer holds the
 //! rows the history started on (a bounded window that dropped its head).
 //!
-//! A column whose values depend on a trailing window only ([`History::Window`]) is
-//! recomputed exactly by any frame holding that window. A recursion depends on every row
-//! before: a frame that dropped the rows its history started on recomputes it only from a
-//! checkpoint — the state as of a row before the rows it keeps, plus the inputs a resume
-//! reads before its first row — and **replays** forward from it. The checkpoint's
-//! content is produced and consumed by the directive layer (it knows what a command
-//! reads); this module owns where it lives and how it moves with the column.
+//! Every directive has one of three history classes, owned by the command spec: its
+//! values depend on a trailing window (class 1), on a running accumulator over a trailing
+//! window (class 2), or on every row before — a recursion, a cumulative line, an unbounded
+//! count (class 3). A bounded window computes class 1 whenever its margin holds the
+//! window, and classes 2 and 3 only when they are declared. A class-1 or class-2 column,
+//! and a class-3 count whose values are a function of its window, are recomputed exactly
+//! by any frame holding the window. A recursion depends on every row before: a frame
+//! that dropped the rows its history started on recomputes it only from a checkpoint —
+//! the state as of a row before the rows it keeps, plus the inputs a resume reads before
+//! its first row — and **replays** forward from it. The checkpoint's content is produced
+//! and consumed by the directive layer (it knows what a command reads); this module owns
+//! where it lives and how it moves with the column.
 
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
 use super::DataFrame;
 
-/// How a cached column's values depend on the rows before them (see the module docs).
+/// How a cached column's values depend on the rows before them: its history class and,
+/// for class 3, how a frame keeps it (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum History {
-    /// A trailing window of [`Reach::lookback`](super::Reach::lookback) rows only: no
-    /// recursion anywhere, so any frame holding those rows computes a value exactly.
+    /// Class 1: a trailing window of [`Reach::lookback`](super::Reach::lookback) rows,
+    /// no running accumulator.
     Window,
-    /// Every row before, through the carried state of its recursive top command alone,
-    /// whose `@` operands are history-independent and read `operands` rows before a row:
-    /// a frame that dropped its history's head keeps it exactly with a [`Checkpoint`].
+    /// Class 2: a running accumulator over a trailing window (its sums are exact, so a
+    /// value is a function of the window).
+    Accumulator,
+    /// Class 3, a count over a trailing window (`increase`): declared only, and kept by
+    /// recomputing its window.
+    Counted,
+    /// Class 3, a recursion carried by the state of its top command alone, whose `@`
+    /// operands are of classes 1–2 or counts and read `operands` rows before a row: a
+    /// frame that dropped its history's head keeps it exactly with a [`Checkpoint`].
     Carried {
         /// The rows an operand reads before its own (the largest lookback among them).
         operands: usize,
     },
-    /// Every row before, in a form no carried state covers (a recursion inside an
-    /// operand or a composite, or a recursive command without a carried state): a frame
-    /// that does not hold the whole history cannot recompute it.
+    /// Class 3 in a form no carried state covers (a recursion inside an operand or a
+    /// composite, or a recursive command without a carried state): a frame that does not
+    /// hold the whole history cannot recompute it.
     Unkept,
 }
 
 impl History {
-    /// Whether a value depends on every row before it (a recursion anywhere).
+    /// The history class: 1, 2 or 3.
+    pub fn class(self) -> u8 {
+        match self {
+            History::Window => 1,
+            History::Accumulator => 2,
+            History::Counted | History::Carried { .. } | History::Unkept => 3,
+        }
+    }
+
+    /// Whether a value depends on every row before it (a recursion anywhere): only a
+    /// carried state or the whole history reproduces it.
     pub fn recursive(self) -> bool {
-        self != History::Window
+        matches!(self, History::Carried { .. } | History::Unkept)
     }
 }
 
@@ -65,13 +87,44 @@ impl DataFrame {
         self.computed.get(name)?.checkpoint.as_ref()
     }
 
-    /// Keep `checkpoint` as cached column `name`'s history (`None`: it keeps none). A
-    /// checkpoint covers rows before the ones the frame keeps after the coming drop, so it
-    /// is set before it. No-op for an untracked column.
-    pub fn set_computed_checkpoint(&mut self, name: &str, checkpoint: Option<Checkpoint>) {
+    /// Keep `checkpoint` as cached column `name`'s history — or, when none could be
+    /// formed, the error that prevented it, if any (`Err`). A checkpoint covers rows before
+    /// the ones the frame keeps after the coming drop, so it is set before it. No-op for an
+    /// untracked column.
+    pub fn set_computed_checkpoint(&mut self, name: &str, checkpoint: std::result::Result<Checkpoint, Option<VolasError>>) {
         if let Some(meta) = self.computed.get_mut(name) {
-            meta.checkpoint = checkpoint;
+            (meta.checkpoint, meta.lost) = match checkpoint {
+                Ok(cp) => (Some(cp), None),
+                Err(why) => (None, why),
+            };
         }
+    }
+
+    /// Why cached column `name` keeps no checkpoint of its history, if an error prevented
+    /// it.
+    pub fn computed_history_lost(&self, name: &str) -> Option<&VolasError> {
+        self.computed.get(name)?.lost.as_ref()
+    }
+
+    /// Keep `checkpoint` as the one cached column `name`'s history will need at the next
+    /// drop of the head (see [`take_computed_pending`](Self::take_computed_pending)); a
+    /// change to the rows it covers drops it. No-op for an untracked column.
+    pub fn set_computed_pending(&mut self, name: &str, checkpoint: Option<Checkpoint>) {
+        if let Some(meta) = self.computed.get_mut(name) {
+            meta.pending = checkpoint;
+        }
+    }
+
+    /// The pending checkpoint of cached column `name` as of absolute row `at`, taken out,
+    /// if it has one there; one as of another row stays.
+    pub fn take_computed_pending(&mut self, name: &str, at: usize) -> Option<Checkpoint> {
+        let meta = self.computed.get_mut(name)?;
+        meta.pending.take_if(|p| p.at == at)
+    }
+
+    /// Whether cached column `name` keeps a pending checkpoint as of absolute row `at`.
+    pub fn has_computed_pending(&self, name: &str, at: usize) -> bool {
+        self.computed.get(name).and_then(|m| m.pending.as_ref()).is_some_and(|p| p.at == at)
     }
 
     /// A replay continued cached column `name` from its checkpoint: rows `[from,
@@ -104,6 +157,7 @@ impl DataFrame {
         let origin = self.origin;
         let height = self.height;
         let meta = self.computed.get_mut(name).expect("tracked above");
+        meta.note_written(&self.columns[pos], origin, from, height);
         meta.valid_rows = height;
         meta.state_at = origin + height - 1;
         meta.state_before_last = before_last.filter(|_| height > 1 && state.is_some());

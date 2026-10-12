@@ -250,7 +250,7 @@ fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
 }
 
 pub use crate::exec_resume::{
-    capture, execute_resume, execute_resume_default_series, execute_resume_default_series_one,
+    capture, checkpoint, execute_resume, execute_resume_default_series, execute_resume_default_series_one,
     execute_resume_step, initial_state, replay,
 };
 

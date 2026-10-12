@@ -32,8 +32,8 @@ fn a_recursion_is_any_history_but_a_window() {
 fn a_checkpoint_moves_with_the_window_drop_only() {
     let mut df = frame(10);
     assert_eq!(df.computed_checkpoint("ema"), None);
-    df.set_computed_checkpoint("ema", Some(checkpoint(5)));
-    df.set_computed_checkpoint("close", Some(checkpoint(5))); // not cached: no-op
+    df.set_computed_checkpoint("ema", Ok(checkpoint(5)));
+    df.set_computed_checkpoint("close", Ok(checkpoint(5))); // not cached: no-op
     assert_eq!(df.computed_checkpoint("close"), None);
     assert_eq!(df.computed_checkpoint("ema"), Some(&checkpoint(5)));
     assert_eq!(df.retain_tail(4).computed_checkpoint("ema"), Some(&checkpoint(5)));
@@ -42,8 +42,13 @@ fn a_checkpoint_moves_with_the_window_drop_only() {
     // a write stales the column but keeps its history's checkpoint
     df.invalidate_computed_on_write("close");
     assert_eq!(df.computed_checkpoint("ema"), Some(&checkpoint(5)));
-    df.set_computed_checkpoint("ema", None);
-    assert_eq!(df.computed_checkpoint("ema"), None);
+    df.set_computed_checkpoint("ema", Err(None));
+    assert_eq!((df.computed_checkpoint("ema"), df.computed_history_lost("ema")), (None, None));
+    let why = VolasError::Value("an input past 2^53".into());
+    df.set_computed_checkpoint("ema", Err(Some(why.clone())));
+    assert_eq!(df.retain_tail(4).computed_history_lost("ema"), Some(&why));
+    assert_eq!(df.slice(6, 10).computed_history_lost("ema"), None);
+    assert_eq!(df.computed_history_lost("close"), None);
 }
 
 /// A replay continues the column: its rows from the checkpoint's next one take the

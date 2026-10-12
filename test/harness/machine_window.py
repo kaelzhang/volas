@@ -1,6 +1,6 @@
 """Bounded rolling-window machines (plain and tf): the visible rows must equal the
 last ``window`` rows of an unbounded history fed the same events (I11), and the
-``ready`` / margin bookkeeping must follow the documented rule."""
+margin bookkeeping and ``ready`` must follow the documented rule."""
 
 from __future__ import annotations
 
@@ -33,8 +33,9 @@ class _Windowed:
         physical = self.df._physical_height
         assert min(total, self.window + self.max_lookback) <= physical <= total, \
             f'physical {physical} outside [{min(total, self.window + self.max_lookback)}, {total}]'
-        assert self.df.ready == (total >= self.window + self.max_lookback), \
-            f'ready={self.df.ready} with {total} rows, window {self.window} + margin {self.max_lookback}'
+        # README `ready` (R18): every declared directive past its warm-up on every visible
+        # row — these frames declare none (an int margin)
+        assert self.df.ready, f'ready={self.df.ready} with nothing declared'
 
 
 class WindowedMachine(_Windowed, PlainMachine):

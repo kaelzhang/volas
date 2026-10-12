@@ -392,11 +392,18 @@ def test_memory_bounded_under_unbounded_appends():
 
 def test_ready_property():
     data = _ohlcv(100)
-    # window + max_lookback = capacity = 8; not ready until 8 rows accumulate.
-    wf = _windowed(data, 3, window=5, max_lookback=3)
+    # ready once every declared directive is past its warm-up on every visible row: ma:4's
+    # first value is row 3, the first visible row of 8 rows in a window of 5
+    wf = _windowed(data, 3, window=5, max_lookback=['ma:4'])
     assert not wf.ready
-    _feed(wf, data, 3, 8)
+    _feed(wf, data, 3, 7)
+    wf.fulfill()
+    assert not wf.ready  # 7 rows: the first visible row is row 2
+    _feed(wf, data, 7, 8)
+    wf.fulfill()
     assert wf.ready
+    # a frame declaring nothing has no directive to warm up
+    assert _windowed(data, 3, window=5, max_lookback=3).ready
     # unbounded frames are always "ready"
     assert _full(data, 10).ready
 

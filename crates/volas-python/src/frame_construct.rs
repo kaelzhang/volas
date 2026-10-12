@@ -278,17 +278,18 @@ impl PyDataFrame {
         (self.logical_range().1, self.inner.width())
     }
 
-    /// Whether a windowed frame has warmed up — at least `window + max_lookback`
-    /// rows accumulated, so every one of the `window` visible rows has a fully
-    /// valid indicator history. Always ``True`` for an unbounded frame (no
-    /// warm-up contract). See the ``window=`` constructor argument.
+    /// Whether a windowed frame has warmed up: ``True`` only when every declared directive
+    /// (``max_lookback=[...]``) is past its warm-up on every visible row, counting the rows
+    /// it reads complete (non-missing) — its first value is at or before the first visible
+    /// row. O(1) per append; reading fresh values stays the reader's job (``fulfill``).
+    /// Always ``True`` for an unbounded frame (no warm-up contract).
     ///
     /// Returns:
     ///     bool
     #[getter]
     pub(crate) fn ready(&self) -> bool {
         match &self.window {
-            Some(w) => self.inner.height() >= w.window_and_margin(),
+            Some(w) => self.warmed(w),
             None => true,
         }
     }

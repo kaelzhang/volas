@@ -12,7 +12,11 @@ mod matrix;
 use std::collections::BTreeSet;
 
 use volas_core::{Column, DataFrame, History};
-use volas_directive::exec::{capture, execute, initial_state, replay};
+use volas_directive::exec::{capture, checkpoint, execute, initial_state, replay};
+
+thread_local! {
+    static FROM_STATE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 use volas_directive::lookback::{history, lookback, reach};
 use volas_directive::parse;
 use volas_directive::types::Ast;
@@ -46,6 +50,21 @@ fn check(df: &DataFrame, node: &Ast, operands: usize) -> Vec<String> {
             continue;
         };
         assert_eq!(cp.at, cut - 1);
+        // the same history kept from a carried state by a frame holding its last rows only
+        if let Some(state) = cp.state.clone() {
+            let part = df.slice_data(cut / 2, n);
+            if let Some(kept) = checkpoint(&part, node, Some(state), cut - cut / 2, false) {
+                FROM_STATE.with(|c| c.set(c.get() + 1));
+                match replay(&part, node, &kept, part.height()) {
+                    Some((got, _)) => {
+                        if let Some(why) = first_diff(&got.to_f64_vec(), &whole[cut..]) {
+                            fails.push(format!("replay from a carried state at {cut}: {why}"));
+                        }
+                    }
+                    None => fails.push(format!("replay from a carried state at {cut} declined")),
+                }
+            }
+        }
         // the frame a bounded window keeps: from the rows its operands read before the cut
         let frame = df.slice_data(cut - operands, n);
         let end = frame.height();
@@ -95,12 +114,13 @@ fn a_checkpoint_replays_every_carried_line_bit_exactly() {
         }
     }
     assert!(carried > 40, "only {carried} carried lines — the matrix lost its reach");
+    assert!(FROM_STATE.with(|c| c.get()) > 100, "checkpoints from a carried state were not exercised");
     assert!(fails.is_empty(), "{} checkpoint replay failure(s):\n{}", fails.len(), fails.join("\n"));
 }
 
 /// A recursion is kept through a checkpoint exactly when its command carries a state:
 /// `Carried` agrees with the kernels on every line, and a line without a recursion is
-/// `Window`.
+/// not `Unkept`.
 #[test]
 fn the_history_class_agrees_with_the_carried_states() {
     let frame = matrix::classes(ROWS).into_iter().next().unwrap().frame;
@@ -110,24 +130,69 @@ fn the_history_class_agrees_with_the_carried_states() {
             let Ok(col) = execute(&frame, &node) else { continue };
             let state = initial_state(&frame, &node, &col);
             match history(&node) {
-                History::Window => {}
                 History::Carried { .. } => assert!(state.is_some(), "{text}: Carried without a state"),
                 History::Unkept => assert!(state.is_none(), "{text}: a state, but Unkept"),
+                _ => {}
             }
         }
     }
 }
 
+/// The history class of every command, as the spec owns it (REQUIREMENTS R13): a change
+/// to a command's class changes this table, deliberately.
 #[test]
-fn compositions_of_a_recursion_are_unkept() {
+fn every_command_has_its_history_class() {
+    use volas_directive::spec::{history_class, HistoryClass, Keep, COMMANDS};
+    const ACCUMULATORS: &[&str] = &[
+        "accbands", "apo", "bbi", "bbw", "beta", "bias", "boll", "cci", "cmf", "cog", "coppock",
+        "correl", "dkx", "dma", "dpo", "emv", "hma", "hv", "imi", "kst", "linearreg",
+        "linearreg_angle", "linearreg_intercept", "linearreg_slope", "ma", "macdext", "mavp", "mfi",
+        "ppo", "relative_vigor", "stddev", "stoch", "sum", "trima", "tsf", "ttm_squeeze", "ultosc",
+        "var", "vr", "vwma", "wma", "wvad",
+    ];
+    const UNKEPT: &[&str] = &["crsi", "kcw", "stoch_momentum"];
+    let mut seen = 0;
+    for &name in COMMANDS {
+        // the default arguments (no MA-type override); the stochastics' %D line
+        let class = history_class(name, if name == "stochf" { Some("d") } else { None }, &[]);
+        let want = if name == "increase" {
+            HistoryClass::Recursion(Keep::Window)
+        } else if UNKEPT.contains(&name) {
+            HistoryClass::Recursion(Keep::Nothing)
+        } else if volas_directive::spec::is_recursive(name, &[]) {
+            HistoryClass::Recursion(Keep::State)
+        } else if ACCUMULATORS.contains(&name) || name == "stochf" {
+            HistoryClass::Accumulator
+        } else {
+            HistoryClass::Window
+        };
+        assert_eq!(class, want, "{name}");
+        seen += 1;
+    }
+    assert_eq!(seen, COMMANDS.len());
+    assert!(seen > 100);
+    // an MA-type argument selecting a recursive average makes a recursion that recomputes
+    let ema_type = parse("ma:5,1").unwrap();
+    assert_eq!(history(&ema_type), History::Unkept);
+}
+
+#[test]
+fn a_directive_takes_its_highest_class() {
     for (text, want) in [
         ("ema:5", History::Carried { operands: 0 }),
         ("obv", History::Carried { operands: 0 }),
         ("rsi:5@open", History::Carried { operands: 0 }),
         ("rsi:4@(ma:3)", History::Carried { operands: 2 }),
         ("ema:4@(high + low)", History::Carried { operands: 0 }),
-        ("ma:5", History::Window),
-        ("close > ma:3", History::Window),
+        ("ema:4@(increase:2)", History::Carried { operands: 2 }),
+        ("roc:5", History::Window),
+        ("close > open", History::Window),
+        ("maxindex:5", History::Window),
+        ("psy", History::Window),
+        ("ma:5", History::Accumulator),
+        ("close > ma:3", History::Accumulator),
+        ("increase:3", History::Counted),
+        ("increase:2 & (close > ma:3)", History::Counted),
         ("ema:3@(rsi:5)", History::Unkept),
         ("ma:3@(ema:2)", History::Unkept),
         ("ema:3 - ema:5", History::Unkept),
@@ -137,7 +202,9 @@ fn compositions_of_a_recursion_are_unkept() {
         ("stoch_momentum", History::Unkept),
         ("ma:5,1", History::Unkept),
     ] {
-        assert_eq!(history(&parse(text).unwrap()), want, "{text}");
+        let h = history(&parse(text).unwrap());
+        assert_eq!(h, want, "{text}");
+        assert_eq!(h.class(), match want { History::Window => 1, History::Accumulator => 2, _ => 3 }, "{text}");
     }
 }
 
@@ -191,6 +258,16 @@ fn a_replay_that_cannot_run_declines() {
     other.inputs[0].0 = 3;
     assert!(replay(&df, &ema, &other, 40).is_none()); // another input slot
     assert!(capture(&df, &atr, 10).is_none());
+    // from a carried state: a frame without the resume's reach of complete rows before the
+    // row cannot vouch for the history, unless it holds all of it
+    let state = cp.state.clone();
+    assert!(checkpoint(&df.slice_data(9, 40), &ema, state.clone(), 1, false).is_none());
+    assert!(checkpoint(&df.slice_data(0, 40), &ema, None, 1, false).is_none());
+    assert_eq!(checkpoint(&df, &ema, None, 1, true).unwrap().state, None);
+    assert!(checkpoint(&df, &ema, state.clone(), 0, true).is_none());
+    assert!(checkpoint(&df, &ema, state.clone(), 41, true).is_none());
+    assert!(checkpoint(&df, &parse("ma:5").unwrap(), state.clone(), 10, true).is_none());
+    assert!(checkpoint(&df, &atr, state, 10, true).is_none());
 }
 
 /// A line without a recursion depends on its lookback's rows alone: computed over just

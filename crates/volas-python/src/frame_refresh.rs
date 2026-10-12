@@ -142,7 +142,9 @@ impl PyDataFrame {
         // that would read complete rows the frame dropped declines (`since`).
         if warm && vr >= reach.resume && self.inner.computed_resume_state(name).is_some() {
             // One row at a time through the allocation-free step: each row's value and
-            // the state as of it; the last two states are kept.
+            // the state as of it; the last two states are kept. Passing the row the next
+            // drop of a bounded frame's head keeps, it leaves the checkpoint there.
+            let pending = self.pending_row(name, reach.history);
             let mut row = vr;
             while row < height {
                 let value = self.inner.step_computed_state(name, |live, prev, _, next| {
@@ -150,13 +152,16 @@ impl PyDataFrame {
                 });
                 let Some(value) = value else { break };
                 self.inner.update_computed_f64_value(name, row, value).map_err(pyerr)?;
+                if pending == Some(self.inner.origin() + row) {
+                    self.keep_pending(name, node, frame, row + 1, held);
+                }
                 row += 1;
             }
             if row == height {
                 return Ok(());
             }
             // No single-row step (or it declined): the `Vec` resume over the rows left.
-            if self.resume_rows(name, node, frame, (row, height, since))? {
+            if self.resume_rows(name, node, frame, (row, height, since, held), pending)? {
                 return Ok(());
             }
         }
@@ -182,7 +187,8 @@ impl PyDataFrame {
         }
         if reach.history.recursive() && !held {
             // The rows the recursion started on are gone: replay its checkpoint.
-            return self.replay_column(name, node, frame, height);
+            let pending = self.pending_row(name, reach.history);
+            return self.replay_column(name, node, frame, (vr, height), pending);
         }
         // Cold / warm-up / no resume: recompute the column and capture both states.
         // Inside warm-up (`vr < lb`) the whole column is rewritten, re-applying the
@@ -199,45 +205,104 @@ impl PyDataFrame {
         Ok(())
     }
 
+    /// The absolute row whose checkpoint the next drop of a bounded frame's head keeps for
+    /// cached recursion `name` (`history`), when it is not kept yet: the drop keeps the
+    /// frame's last `capacity` rows of twice that, so its head is `capacity` rows on.
+    fn pending_row(&self, name: &str, history: volas_core::History) -> Option<usize> {
+        let (Some(w), volas_core::History::Carried { operands }) = (&self.window, history) else {
+            return None;
+        };
+        let at = self.inner.origin() + w.capacity - 1 + operands;
+        (!self.inner.has_computed_pending(name, at)).then_some(at)
+    }
+
+    /// Keep the checkpoint of cached recursion `name` as of row `end - 1`, which its
+    /// carried state now describes, for the next drop of the head (`whole`: the frame
+    /// holds the history's start).
+    fn keep_pending(&mut self, name: &str, node: &Ast, frame: Option<&DataFrame>, end: usize, whole: bool) {
+        let state = self.inner.computed_resume_state(name).map(|(s, _)| s.to_vec());
+        let df = frame.unwrap_or(&self.inner);
+        let cp = state.and_then(|s| volas_directive::exec::checkpoint(df, node, Some(s), end, whole));
+        self.inner.set_computed_pending(name, cp);
+    }
+
     /// Resume cached column `name` from its carried state over its stale rows `[from,
     /// height)` (the `Vec` resume), leaving both states: several rows resume up to the
-    /// last, then the last from the state before it. `false` (nothing written) when the
-    /// column carries no state of row `from - 1` or a resume declines.
+    /// last, then the last from the state before it — and, when they pass `pending` (the
+    /// row the next drop of a bounded frame's head keeps), up to it first, keeping its
+    /// checkpoint (`whole`: the frame holds the history's start). `false` (nothing
+    /// written) when the column carries no state of row `from - 1` or a resume declines.
     fn resume_rows(
         &mut self,
         name: &str,
         node: &Ast,
         frame: Option<&DataFrame>,
-        (from, height, since): (usize, usize, usize),
+        (from, height, since, whole): (usize, usize, usize, bool),
+        pending: Option<usize>,
     ) -> PyResult<bool> {
+        use volas_directive::exec::{checkpoint, execute_resume};
         let df = frame.unwrap_or(&self.inner);
+        let split = pending.and_then(|p| p.checked_sub(df.origin())).filter(|&t| t >= from && t + 1 < height);
         let resumed = self.inner.computed_resume_state(name).and_then(|(state, _)| {
-            if from + 1 == height {
-                return volas_directive::exec::execute_resume(df, node, state, from, height, since)
-                    .map(|(tail, last)| (tail, last, None));
+            // up to the pending row, when the rows pass it before the last
+            let (mut tail, mut at, mut carried, kept) = match split {
+                Some(t) => {
+                    let (head, at_t) = execute_resume(df, node, state, from, t + 1, since)?;
+                    let kept = checkpoint(df, node, Some(at_t.clone()), t + 1, whole);
+                    (Some(head), t + 1, Some(at_t), kept)
+                }
+                None => (None, from, None, None),
+            };
+            // then up to the last row, and the last
+            if at + 1 < height {
+                let (more, before) = execute_resume(df, node, carried.as_deref().unwrap_or(state), at, height - 1, since)?;
+                match &mut tail {
+                    Some(t) => t.append(&more).ok()?,
+                    None => tail = Some(more),
+                }
+                (at, carried) = (height - 1, Some(before));
             }
-            let (mut tail, before) =
-                volas_directive::exec::execute_resume(df, node, state, from, height - 1, since)?;
-            let (one, last) =
-                volas_directive::exec::execute_resume(df, node, &before, height - 1, height, since)?;
-            tail.append(&one).ok()?;
-            Some((tail, last, Some(before)))
+            let (one, last) = execute_resume(df, node, carried.as_deref().unwrap_or(state), at, height, since)?;
+            let tail = match tail {
+                Some(mut t) => {
+                    t.append(&one).ok()?;
+                    t
+                }
+                None => one,
+            };
+            Some((tail, last, carried, kept))
         });
-        let Some((tail, last, before)) = resumed else { return Ok(false) };
+        let Some((tail, last, before, kept)) = resumed else { return Ok(false) };
         self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;
         match before {
             None => self.inner.advance_computed_state(name, last),
             Some(before) => self.inner.set_computed_states(name, Some(last), Some(before)),
+        }
+        if split.is_some() {
+            self.inner.set_computed_pending(name, kept);
+        } else if pending == Some(self.inner.origin() + height - 1) {
+            self.keep_pending(name, node, frame, height, whole);
         }
         Ok(true)
     }
 
     /// Recompute recursive column `name`, whose history starts before the frame's row 0,
     /// by replaying its checkpoint over the rows after it — up to the row before the last,
-    /// then the last — leaving both states. Without a checkpoint (a slice carries none;
-    /// a bounded window keeps one for each declared recursion) the frame does not hold
-    /// the history the values depend on, and the recompute raises.
-    fn replay_column(&mut self, name: &str, node: &Ast, frame: Option<&DataFrame>, height: usize) -> PyResult<()> {
+    /// then the last — leaving both states (and the checkpoint of `pending`, the row the
+    /// next drop of the head keeps, when the rows pass it). The rows up to the checkpoint
+    /// keep their values, so they must be ones the frame vouches for: still valid (the
+    /// first `vr`), or hidden (before the visible rows, which no write reaches). Without
+    /// such a checkpoint (a slice carries none; a bounded window keeps one for each
+    /// declared recursion) the frame does not hold the history the values depend on, and
+    /// the recompute raises.
+    fn replay_column(
+        &mut self,
+        name: &str,
+        node: &Ast,
+        frame: Option<&DataFrame>,
+        (vr, height): (usize, usize),
+        pending: Option<usize>,
+    ) -> PyResult<()> {
         let lost = || {
             PyValueError::new_err(format!(
                 "cannot recompute '{name}' exactly: each of its values depends on every row \
@@ -248,14 +313,43 @@ impl PyDataFrame {
             ))
         };
         let df = frame.unwrap_or(&self.inner);
-        let checkpoint = self.inner.computed_checkpoint(name).ok_or_else(lost)?;
-        let from = (checkpoint.at + 1).checked_sub(df.origin()).ok_or_else(lost)?;
-        let (mut tail, before) =
-            volas_directive::exec::replay(df, node, checkpoint, height - 1).ok_or_else(lost)?;
-        let (one, last) = volas_directive::exec::replay(df, node, &before, height).ok_or_else(lost)?;
-        tail.append(&one).map_err(pyerr)?;
+        // an input the directive cannot read (an int64 past 2^53) is its own error — in the
+        // rows the frame holds, or in those dropped without a checkpoint
+        let fail = || match self.inner.computed_history_lost(name) {
+            Some(e) => value_err(e.clone()),
+            None => match volas_directive::exec::execute_refresh(df, node) {
+                Err(e) => value_err(e),
+                Ok(_) => lost(),
+            },
+        };
+        let vouched = vr.max(self.logical_range().0);
+        let checkpoint = self
+            .inner
+            .computed_checkpoint(name)
+            .filter(|cp| cp.at < df.origin() + vouched)
+            .ok_or_else(fail)?;
+        let from = (checkpoint.at + 1).checked_sub(df.origin()).ok_or_else(fail)?;
+        // the replay's stops: the pending row's, then the row before the last, then the last
+        let stop = pending.and_then(|p| p.checked_sub(df.origin())).filter(|&t| t >= from && t + 2 < height);
+        let mut ends: Vec<usize> = stop.map(|t| t + 1).into_iter().collect();
+        ends.extend([height - 1, height]);
+        let mut tail = volas_core::Column::f64(Vec::new());
+        let mut points = Vec::with_capacity(ends.len());
+        let mut at = checkpoint.clone();
+        for end in ends {
+            let (part, next) = volas_directive::exec::replay(df, node, &at, end).ok_or_else(fail)?;
+            tail.append(&part).map_err(pyerr)?;
+            points.push(next.clone());
+            at = next;
+        }
+        let kept = pending.and_then(|p| points.iter().find(|cp| cp.at == p).cloned());
+        let (last, before) = (points.pop().expect("the last row"), points.pop().expect("the row before"));
         self.inner
             .continue_computed(name, from, &tail, last.state, before.state)
-            .map_err(pyerr)
+            .map_err(pyerr)?;
+        if kept.is_some() {
+            self.inner.set_computed_pending(name, kept);
+        }
+        Ok(())
     }
 }

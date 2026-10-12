@@ -113,6 +113,11 @@ class FrameMachine(RuleBasedStateMachine):
         self.snapshots: list[tuple] = []
         self.trace: list[str] = []
         self.column_of: dict[str, str] = {}  # directive_stringify -> the cached column name
+        # Data columns of a windowed frame whose hidden cells the model does not know: a
+        # cached column turned data keeps the hidden cells it held, which follow the
+        # refresh path (a recomputed window's retained warm-up holds NaN) rather than the
+        # ledger. No generated directive reads them.
+        self.opaque: set[str] = set()
 
     # --- model helpers -------------------------------------------------------------
 
@@ -238,10 +243,10 @@ class FrameMachine(RuleBasedStateMachine):
 
     def refused_late(self, d: Directive) -> bool:
         """Whether a windowed frame refuses ``d`` requested after construction: a
-        recursion anywhere in it, or a lookback beyond the margin (the frames under test
-        declare no directive)."""
+        directive of history class 2 or 3, or one reading more rows than the margin (the
+        frames under test declare no directive)."""
         return (self.window is not None and contracts.WINDOWED_LATE_RECURSION_RAISES
-                and (inventory.recursion(d.text) or volas.directive_lookback(d.text) > self.max_lookback))
+                and (inventory.history_class(d.text) > 1 or volas.directive_lookback(d.text) > self.max_lookback))
 
     @rule(data=st.data())
     def cache(self, data):
@@ -310,8 +315,8 @@ class FrameMachine(RuleBasedStateMachine):
 
     def plain_numeric(self) -> list[str]:
         coarse = self.coarse()
-        return [c for c in coarse.columns
-                if coarse.dtype(c) in ('float64', 'float32', 'int64', 'int32')] or ['close']
+        return [c for c in coarse.columns if c not in self.opaque
+                and coarse.dtype(c) in ('float64', 'float32', 'int64', 'int32')] or ['close']
 
     @precondition(lambda self: self.cached)
     @rule(data=st.data())

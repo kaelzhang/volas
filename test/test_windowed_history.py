@@ -193,29 +193,50 @@ def test_a_recursion_requested_late_raises_naming_the_two_paths():
 
 def test_a_window_directive_past_the_margin_raises():
     w = volas.DataFrame(rows(bars(40), 0, 40), window=5, max_lookback=['ma:10'])
-    for read in (lambda: w['ma:11'], lambda: w.exec('ma:11')):
-        with pytest.raises(ValueError, match=r"'ma:11' .* reads 10 rows before each row, more than the 9 "
+    for read in (lambda: w['mom:10'], lambda: w.exec('mom:10')):
+        with pytest.raises(ValueError, match=r"'mom:10' .* reads 10 rows before each row, more than the 9 "
                                              r"it keeps \(max_lookback\)"):
             read()
 
 
-def test_a_window_directive_within_the_margin_is_computed_late_exactly():
-    # a running accumulator's sums are exact: it depends on its window only
+def test_a_class_1_directive_within_the_margin_is_computed_late_exactly():
+    # a class-1 directive (a trailing window, no running accumulator) is computed on request
     cols = bars(400, seed=11)
     w = volas.DataFrame(rows(cols, 0, 30), window=4, max_lookback=['ma:12'])
     u = volas.DataFrame(rows(cols, 0, 30))
     for i in range(30, 200):
         w.append(rows(cols, i, i + 1))
         u.append(rows(cols, i, i + 1))
-    for d in ['ma:12', 'boll.upper:7', 'stddev:6', 'wma:9', 'linearreg:5', 'mfi:6', 'maxindex:8',
-              'close > ma:5', 'cci:10']:
+    late = ['maxindex:8', 'minindex:5', 'llv:6', 'hhv:9', 'roc:7', 'mom:3', 'psy:6', 'tr', 'bop',
+            'willr:9', 'close > open']
+    for d in late:
         assert same(w.exec(d, dtype='float64'), u.exec(d, dtype='float64')[-4:]), d
         assert same(w[d].to_numpy(dtype='float64'), u[d].to_numpy(dtype='float64')[-4:]), d
     for i in range(200, 400):
         w.append(rows(cols, i, i + 1))
         u.append(rows(cols, i, i + 1))
-        for d in ['wma:9', 'mfi:6', 'maxindex:8']:
+        for d in late:
             assert same(w[d].to_numpy(dtype='float64'), u[d].to_numpy(dtype='float64')[-4:]), (d, i)
+
+
+@pytest.mark.parametrize('d, why', [
+    ('ma:5', 'it carries a running accumulator \\(a class-2 directive\\)'),
+    ('close > boll.upper:5', 'it carries a running accumulator \\(a class-2 directive\\)'),
+    ('wma:4', 'it carries a running accumulator \\(a class-2 directive\\)'),
+    ('increase:3', 'it counts a run of rows \\(a class-3 directive\\)'),
+])
+def test_class_2_and_3_must_be_declared(d, why):
+    # owner rule R13: only class 1 is computed on request; classes 2 and 3 are declared
+    w = volas.DataFrame(rows(bars(40), 0, 40), window=5, max_lookback=['ma:20'])
+    for read in (lambda: w[d], lambda: w.exec(d)):
+        with pytest.raises(ValueError, match=f"cannot compute '{re.escape(d)}' on this windowed frame: {why}. "
+                                             "Declare it when constructing"):
+            read()
+    declared = volas.DataFrame(rows(bars(40), 0, 40), window=5, max_lookback=['ma:20', d])
+    assert same(declared[d].to_numpy(dtype='float64'), rows(bars(40), 0, 40)[d].to_numpy(dtype='float64')[-5:])
+    # exec of a declared directive points to its column
+    with pytest.raises(ValueError, match=r"It is declared — read its column df\['"):
+        declared.exec(d)
 
 
 @pytest.mark.parametrize('d', ['ema:3@(rsi:5)', 'ma:3@(ema:2)', 'ema:3 - ema:5', 'close > ema:5', 'kcw',
@@ -361,7 +382,7 @@ def test_an_array_assignment_keeps_the_hidden_history():
 def test_a_new_column_has_no_hidden_history():
     w = volas.DataFrame(F([float(i) for i in range(1, 11)]), window=2, max_lookback=['ma:3'])
     w['x'] = [5.0, 7.0]
-    assert np.isnan(w['ma:2@x'].to_list()[0]) and w['ma:2@x'].to_list()[1] == 6.0
+    assert np.isnan(w['mom:1@x'].to_list()[0]) and w['mom:1@x'].to_list()[1] == 2.0
 
 
 def test_an_assignment_converts_the_hidden_rows_exactly_or_raises():
@@ -375,18 +396,17 @@ def test_an_assignment_converts_the_hidden_rows_exactly_or_raises():
         w['f'] = [1.0, 2.0, 3.0]
 
 
-def test_a_late_request_past_a_zero_margin_raises_and_within_it_folds_exactly():
-    # a 5m frame by cumulate, window 1: increase reads one row before its own, so a
-    # margin of 0 refuses it (it would read a dropped row), and a margin of 1 keeps it
-    # exact through a new period and re-folds of it
+def test_a_declared_count_folds_exactly_and_a_late_one_raises():
+    # a 5m frame by cumulate, window 1: increase is class 3 — refused on request (with
+    # any margin), and declared it stays exact through a new period and re-folds of it
     bar0 = {'open': [1.0], 'high': [2.0], 'low': [0.5], 'close': [1.5], 'volume': [3.0]}
     base = volas.DataFrame(bar0, index=np.array([T0])).cumulate('5m')
-    w = volas.DataFrame(base, window=1, max_lookback=0)
-    with pytest.raises(ValueError, match=r"'INCREASE@open' .* reads 1 rows before each row, more than the 0"):
-        w['INCREASE@open']
-    w = volas.DataFrame(base, window=1, max_lookback=1)
+    for margin in (0, 1):
+        w = volas.DataFrame(base, window=1, max_lookback=margin)
+        with pytest.raises(ValueError, match=r"'INCREASE@open' on this windowed frame: it counts a run"):
+            w['INCREASE@open']
+    w = volas.DataFrame(base, window=1, max_lookback=['INCREASE@open'])
     u = volas.DataFrame(base)
-    w['INCREASE@open']
     u['INCREASE@open']
     for k, o in enumerate([2.0, 0.5, 3.0]):
         bar = volas.DataFrame({'open': [o], 'high': [4.0], 'low': [0.1], 'close': [2.0], 'volume': [1.0]},
@@ -395,3 +415,79 @@ def test_a_late_request_past_a_zero_margin_raises_and_within_it_folds_exactly():
         u.append(bar)
         assert same(w['INCREASE@open'].to_numpy(dtype='float64'),
                     u['INCREASE@open'].to_numpy(dtype='float64')[-1:]), k
+
+
+# --- R18: `ready` --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize('d, window', [('ema:5', 3), ('ma:5', 3), ('rsi:5', 2)])
+def test_ready_counts_the_complete_rows_a_declared_directive_reads(d, window):
+    # leading missing closes delay the warm-up: ready turns True exactly when the first
+    # visible row of the declared directive holds a value in the unbounded history
+    cols = bars(40, seed=2)
+    cols['close'][:2] = np.nan
+    w = volas.DataFrame(rows(cols, 0, 1), window=window, max_lookback=[d])
+    u = volas.DataFrame(rows(cols, 0, 1))
+    for i in range(1, 40):
+        w.append(rows(cols, i, i + 1))
+        u.append(rows(cols, i, i + 1))
+        w.fulfill()
+        first_visible = u[d].to_numpy()[len(u) - len(w)]
+        assert w.ready == (not np.isnan(first_visible)), i
+
+
+# --- a windowed frame built from a tail that carries a recursion's state ---------------
+
+
+@pytest.mark.parametrize('read_every', [1, 7, 1000])
+@pytest.mark.parametrize('d', ['ema:5', 'rsi:5', 'obv', 'atr:5'])
+def test_a_tail_carried_into_a_window_keeps_its_recursion(d, read_every):
+    cols = bars(400, seed=5)
+    base = rows(cols, 0, 200)
+    base[d]
+    w = volas.DataFrame(base.iloc[150:], window=5, max_lookback=20)
+    u = rows(cols, 0, 200)
+    u[d]
+    for i in range(200, 300):
+        w.append(rows(cols, i, i + 1))
+        u.append(rows(cols, i, i + 1))
+        if i % read_every == 0 or i == 299:
+            assert same(w[d], u[d].to_numpy()[-5:]), i
+
+
+def test_a_tail_carried_into_a_window_cannot_recompute_after_a_visible_write():
+    # its checkpoint is the tail's last row, which a visible write may follow: the rows up
+    # to it are no longer ones the frame vouches for
+    cols = bars(300, seed=5)
+    base = rows(cols, 0, 200)
+    base['ema:5']
+    w = volas.DataFrame(base.iloc[150:], window=5, max_lookback=20)
+    w.iat[1, 3] = 1.0
+    with pytest.raises(ValueError, match="cannot recompute 'ema:5' exactly"):
+        w['ema:5']
+
+
+# --- a whole-column assignment keeps the margin exactly ----------------------------------
+
+
+def test_a_narrowing_assignment_must_hold_the_hidden_rows_exactly():
+    w = volas.DataFrame(rows(bars(100), 0, 100), window=4, max_lookback=['ema:5', 'ma:5'])
+    v32 = np.array([101.1, 101.2, 101.3, 101.4], dtype=np.float32)
+    with pytest.raises(TypeError, match="cannot assign float32 values to column 'close'"):
+        w['close'] = v32
+    assert w.dtypes['close'] == 'float64'
+    # hidden values a float32 holds exactly are kept
+    exact = volas.DataFrame({'close': [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5]}, window=2, max_lookback=['ma:3'])
+    exact['close'] = np.array([7.5, 8.5], dtype=np.float32)
+    assert exact['close'].to_list() == [7.5, 8.5]
+    assert exact['ma:3'].to_list() == [(3.5 + 4.5 + 7.5) / 3, (4.5 + 7.5 + 8.5) / 3]
+
+
+def test_an_input_out_of_the_float_domain_is_reported_as_it_is():
+    w = volas.DataFrame({'v': np.array([1, 2, 3, 4], dtype='int64')}, window=2, max_lookback=['ema:2@v'])
+    for k in range(20):
+        w.append(volas.DataFrame({'v': np.array([2**60 if k == 3 else k], dtype='int64')}))
+    # the row went with the dropped head: the reason its history could not be kept stays
+    with pytest.raises((ValueError, OverflowError), match='2\\^53') as raised:
+        w['ema:2@v']
+    assert 'cannot recompute' not in str(raised.value)

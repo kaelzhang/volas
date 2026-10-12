@@ -213,9 +213,7 @@ class PlainMachine(FrameMachine):
     @rule(data=st.data())
     def write_computed(self, data):
         """A cell write into a cached float column: it becomes plain data."""
-        if self.stale or not self.cached or self._positions_carried() or self.window is not None:
-            # (a windowed frame keeps the column's hidden cells, which the model does
-            # not hold as data)
+        if self.stale or not self.cached or self._positions_carried():
             return
         name = data.draw(st.sampled_from(sorted(self.cached)))
         want, error = self.oracle(self.cached[name])
@@ -232,6 +230,8 @@ class PlainMachine(FrameMachine):
             values[self.visible_start() + pos] = -3.25
             del self.cached[name]
             self.store.add_column(name, values)
+            if self.window is not None:
+                self.opaque.add(name)  # its hidden cells stay as the cache held them
             self._invalidate_all()
 
         self.attempt(lambda: self.df.iloc.__setitem__((pos, j), -3.25), commit=commit,
@@ -261,14 +261,15 @@ class PlainMachine(FrameMachine):
             return
         if name in self.coarse().schema.columns and self.coarse().dtype(name) not in ('float64',):
             return
-        if self.window is not None and name in self.cached:
-            return  # its hidden cells stay as data, which the model does not hold
+        was_cached = name in self.cached
         values = np.round(np.linspace(-1, 1, len(self.df)) * data.draw(st.integers(1, 9)), 3)
 
         existing = name in self.df.columns
 
         def commit(_):
             stored = [None] * self.visible_start() + [float(v) for v in values]
+            if self.window is not None and was_cached:
+                self.opaque.add(name)  # its hidden cells stay as the cache held them
             if name in self.cached:
                 del self.cached[name]
             if name in self.coarse().schema.columns:

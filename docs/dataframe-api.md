@@ -109,7 +109,8 @@ Which gets the 2-period simple moving average on column `"close"`.
   [What a bounded window computes](#bounded-rolling-window)). Pass a **list of
   indicator directives** to **declare** them: the margin is the largest of their
   lookbacks (e.g. `['atr:14', 'ma:50']` → margin 49), and each is computed at
-  construction over all the given rows and cached — a recursive one (EMA, Wilder
+  construction over all the given rows and cached — a running accumulator or a recursive
+  one (`ma`, EMA, Wilder
   smoothing, a cumulative line, …) can only be computed this way. Or pass an **int**: the
   margin alone, declaring nothing. Each list entry must be an indicator directive
   (`'ma:50'`); a bare/typo'd name (`'ma50'`) and an empty list are rejected.
@@ -155,7 +156,13 @@ A label whose row has already been dropped from the retained rows is accepted ag
 #### What a bounded window computes
 
 A bounded window holds only its recent rows, so it computes an indicator only where it
-can do so exactly:
+can do so exactly. Every directive has one of three **history classes** (owned by the
+command table): **class 1** depends on a trailing window with no running accumulator
+(`roc`, `llv`, `maxindex`, `willr`, `psy`, `close > open`, …); **class 2** on a running
+accumulator over a trailing window (`ma`, `wma`, `boll`, `stddev`, `cci`, `mfi`,
+`linearreg`, …); **class 3** on every row before — a recursion, a cumulative line or an
+unbounded count (EMA, Wilder smoothing, `obv`, `increase`, …). A directive takes the
+highest class among its parts.
 
 - **Declared directives** (`max_lookback=[...]`) are computed at construction over every
   row given — the whole history — and cached. A recursive one keeps a **checkpoint** of
@@ -169,13 +176,13 @@ can do so exactly:
   a moving-average type `ma:5,1`) — cannot be kept and is rejected at construction:
   declare the recursions it combines and combine their columns.
 - **A directive requested later** (`wf[d]`, `wf[[...]]`, `wf.exec(d)`) is computed only
-  when its values depend on a trailing window of at most `max_lookback` rows — no
-  recursion anywhere. A running sum (`ma`, `boll`, `cci`, `mfi`, …) qualifies: its sums
-  are exact, so a value depends on its window alone. Anything else raises, naming the
-  two correct paths:
+  when it is of class 1 and reads at most `max_lookback` rows before each row. Classes 2
+  and 3 must be declared; a later request raises, naming the two correct paths (for a
+  directive already declared, `exec` points to its column instead):
 
 ```text
 ValueError: cannot compute 'ema:10' on this windowed frame: each of its values depends on every row before it, and the frame keeps only its last 50 rows. Declare it when constructing the frame — DataFrame(data, window=30, max_lookback=[..., 'ema:10']) — and read its column df['ema:10'], or compute it on an unbounded frame.
+ValueError: cannot compute 'ma:5' on this windowed frame: it carries a running accumulator (a class-2 directive). Declare it when constructing the frame — DataFrame(data, window=30, max_lookback=[..., 'ma:5']) — and read its column df['ma:5'], or compute it on an unbounded frame.
 ```
 
 A frame copied into a window (`DataFrame(df, window=..., max_lookback=...)`) keeps the
@@ -185,20 +192,28 @@ not a recursion no carried state covers); otherwise the construction raises.
 Assigning a whole column (`wf['x'] = values`, a scalar, an array or a Series of the
 visible rows) writes the visible rows only: the hidden margin keeps the history it
 holds — the column's own values, converted exactly to the new values' dtype (a value it
-cannot hold raises `TypeError`), or missing values for a new column.
+cannot hold exactly, `float32` rounding included, raises `TypeError`), or missing values
+for a new column.
+
+A frame built from a tail of another (`DataFrame(df.iloc[-50:], window=..., ...)`) keeps a
+recursion that tail carries in a state, from that state: it is exact on append. Its
+history before the tail is not there, so after a write to a visible row the frame cannot
+recompute it and the read raises.
 
 #### `ready` — has the window warmed up?
 
-`ready` (a property) is `True` once the frame holds `window + max_lookback` rows — so
-every one of the `window` visible rows has a full indicator history behind it and the
-cached indicators are valid end-to-end. During the initial warm-up it is `False` and
-the visible rows are still filling in; gate your inference / training on it.
+`ready` (a property) is `True` only when every declared directive is past its warm-up
+on every visible row, counting the rows it reads complete (non-missing): the first value
+of each declared column is at or before the first visible row. It is updated in O(1)
+per append; reading fresh values stays the reader's job (`fulfill()` first). A frame
+declaring nothing (an int `max_lookback`) is always `True`. Gate your inference /
+training on it.
 
 ```py
 wf = DataFrame(seed, time_frame='15m', window=30, max_lookback=['atr:14'])
-wf.ready          # False — fewer than 30 + 14 rows accumulated so far
-...               # append until warmed
-wf.ready          # True  — every visible row now has valid indicator history
+wf.ready          # False — atr:14 has no value yet at the first visible row
+...               # append (and fulfill) until warmed
+wf.ready          # True  — every visible row has an atr:14 value
 ```
 
 An **unbounded** frame (no `window=`) has no warm-up contract and is **always `True`**.
@@ -244,16 +259,16 @@ buf = np.empty((30, len(COLS)), dtype=np.float32)
 for bar in feed:
     wf.append(bar)
     wf.fulfill()                      # refresh atr's stale tail before exporting
-    if not wf.ready:
-        continue                      # warming up: buf isn't (30, k) yet, indicators not valid
+    if not wf.ready or len(wf) < 30:
+        continue                      # warming up: indicators not valid / buf not (30, k) yet
     wf.fill_into(buf, columns=COLS)   # zero-alloc write of the 30×5 window into `buf`
     prediction = model(buf)           # feed the model the same memory every bar
 ```
 
 > **Shape note.** The shape match is exact against `len(df)`, which **grows during
-> warm-up** (1, 2, … up to `window`) and only then settles at `window`. Gating on
-> `wf.ready` (as above) sidesteps this: by the time it is `True`, `len(df) == window`,
-> so a fixed `(window, k)` buffer always fits. To export mid-warm-up, size `out` to the
+> warm-up** (1, 2, … up to `window`) and only then settles at `window`. `ready` speaks
+> for the indicators only, so the loop above also waits for `len(wf) == window`, and a
+> fixed `(window, k)` buffer then always fits. To export mid-warm-up, size `out` to the
 > current `len(df)` instead.
 
 `fill_into` is not windowed-only — on a plain frame it exports the whole logical view

@@ -108,9 +108,9 @@ ULP_DRIFT_TOLERANCE = 1e-9
 
 # --- bounded windows (docs "Bounded rolling window") -------------------------------------
 
-# A windowed frame computes a directive requested after construction only when its
-# values depend on a trailing window the margin holds (no recursion anywhere, lookback
-# <= max_lookback); a recursion must be declared in max_lookback, so a later request
+# A windowed frame computes a directive requested after construction only when it is of
+# history class 1 (a trailing window, no running accumulator, no recursion) and the margin
+# holds its lookback; classes 2 and 3 must be declared in max_lookback, so a later request
 # raises ValueError — as does one reading more rows than the margin. A declared or
 # admitted column equals the unbounded history bit for bit, writes included.
 WINDOWED_LATE_RECURSION_RAISES = True

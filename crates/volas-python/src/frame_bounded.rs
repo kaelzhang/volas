@@ -48,6 +48,9 @@ pub(crate) struct WindowState {
     pub(crate) capacity: usize,
     /// The physical row count that triggers a drop: twice the capacity.
     bound: usize,
+    /// The columns the frame keeps by declaration (canonical names): those declared in
+    /// `max_lookback`, and the cached columns a copied source brought.
+    declared: Vec<String>,
 }
 
 impl WindowState {
@@ -62,11 +65,11 @@ impl WindowState {
         };
         let capacity = window.max(2).checked_add(lookback).ok_or_else(too_large)?;
         let bound = capacity.checked_mul(2).ok_or_else(too_large)?;
-        Ok(WindowState { window, lookback, capacity, bound })
+        Ok(WindowState { window, lookback, capacity, bound, declared: Vec::new() })
     }
 
-    /// The window and its margin, `window + max_lookback` rows: what a warmed frame
-    /// holds (`ready`) and the rows its labels stay unique over.
+    /// The window and its margin, `window + max_lookback` rows: the rows its labels stay
+    /// unique over.
     pub(crate) fn window_and_margin(&self) -> usize {
         self.window + self.lookback // fits: at most `capacity`
     }
@@ -137,13 +140,15 @@ impl PyDataFrame {
     /// declared ones are computed over all the given rows — the whole history — and
     /// cached; then the head beyond the retention is dropped, each recursive column
     /// keeping the checkpoint of its history.
-    fn bound(&mut self, Bounds { state, declared }: Bounds) -> PyResult<()> {
-        self.window = Some(state);
+    fn bound(&mut self, Bounds { mut state, declared }: Bounds) -> PyResult<()> {
         let cached: Vec<String> =
             self.inner.names().iter().filter(|n| self.inner.is_computed(n)).cloned().collect();
+        state.declared = cached.clone();
+        self.window = Some(state);
         for name in &cached {
             self.check_kept(&*parse(name).map_err(directive_err)?, name)?;
         }
+        self.checkpoint_carried_states();
         let mut nodes = Vec::with_capacity(declared.len());
         for text in &declared {
             let node = parse(text).map_err(directive_err)?;
@@ -151,9 +156,11 @@ impl PyDataFrame {
             nodes.push(node);
         }
         for (text, node) in declared.iter().zip(&nodes) {
-            if !self.inner.is_computed(&stringify(node)) {
+            let canonical = stringify(node);
+            if !self.inner.is_computed(&canonical) {
                 self.cache_new(text, node)?;
             }
+            self.window.as_mut().expect("bounded above").declared.push(canonical);
         }
         self.maybe_compact();
         Ok(())
@@ -193,33 +200,52 @@ impl PyDataFrame {
 
     /// Whether a directive requested after construction (`df[d]`, `df[[...]]`,
     /// `df.exec(d)`) can be computed exactly on this frame — always on an unbounded one;
-    /// on a bounded one only when it depends on a trailing window its margin holds. A
-    /// recursion must be declared at construction. The error names the two correct paths.
+    /// on a bounded one only a class-1 directive (it depends on a trailing window with no
+    /// running accumulator) whose window the margin holds. Classes 2 and 3 must be
+    /// declared at construction. The error names the two correct paths — or, for a
+    /// directive this frame already caches, its column.
     pub(crate) fn admit_new(&self, node: &Ast, text: &str) -> PyResult<()> {
         let Some(w) = &self.window else { return Ok(()) };
-        if let Some(err) = self.unkept(node, text) {
-            return Err(err);
-        }
         let reach = volas_directive::lookback::reach(node);
-        if reach.history.recursive() {
+        let why = match reach.history {
+            History::Window if reach.lookback <= w.lookback => return Ok(()),
+            History::Window => format!(
+                "it reads {} rows before each row, more than the {} it keeps (max_lookback)",
+                reach.lookback, w.lookback
+            ),
+            History::Unkept => return Err(self.unkept(node, text).expect("an unkept directive")),
+            History::Accumulator => "it carries a running accumulator (a class-2 directive)".to_string(),
+            History::Counted => "it counts a run of rows (a class-3 directive)".to_string(),
+            History::Carried { .. } => format!(
+                "each of its values depends on every row before it, and the frame keeps only its \
+                 last {} rows",
+                w.capacity
+            ),
+        };
+        let canonical = stringify(node);
+        if self.inner.is_computed(&canonical) {
             return Err(PyValueError::new_err(format!(
-                "cannot compute '{text}' on this windowed frame: each of its values depends on \
-                 every row before it, and the frame keeps only its last {} rows. Declare it when \
-                 constructing the frame — DataFrame(data, window={}, max_lookback=[..., '{text}']) \
-                 — and read its column df['{text}'], or compute it on an unbounded frame.",
-                w.capacity, w.window
+                "cannot compute '{text}' from this windowed frame's rows: {why}. It is declared — \
+                 read its column df['{canonical}']."
             )));
         }
-        if reach.lookback > w.lookback {
-            return Err(PyValueError::new_err(format!(
-                "cannot compute '{text}' on this windowed frame: it reads {} rows before each \
-                 row, more than the {} it keeps (max_lookback). Declare it when constructing the \
-                 frame — DataFrame(data, window={}, max_lookback=[..., '{text}']) — and read its \
-                 column df['{text}'], or compute it on an unbounded frame.",
-                reach.lookback, w.lookback, w.window
-            )));
-        }
-        Ok(())
+        Err(PyValueError::new_err(format!(
+            "cannot compute '{text}' on this windowed frame: {why}. Declare it when constructing \
+             the frame — DataFrame(data, window={}, max_lookback=[..., '{text}']) — and read its \
+             column df['{text}'], or compute it on an unbounded frame.",
+            w.window
+        )))
+    }
+
+    /// Whether every declared directive is past its warm-up on every visible row: its
+    /// first present value (where its warm-up ended, counted in the rows it reads
+    /// complete) is at or before the first visible row. O(declared columns).
+    pub(crate) fn warmed(&self, w: &WindowState) -> bool {
+        let first_visible = self.inner.origin() + self.logical_range().0;
+        w.declared
+            .iter()
+            .filter(|n| self.inner.is_computed(n))
+            .all(|n| self.inner.computed_first_present(n).is_some_and(|f| f <= first_visible))
     }
 
     /// After rows were added: once the physical rows reach the drop bound, drop the head
@@ -253,15 +279,16 @@ impl PyDataFrame {
             }
             // the last row before the kept rows whose operands the kept rows recompute
             let end = head + operands - origin; // frame rows the checkpoint covers
-            let Ok(node) = parse(&name) else { continue }; // LCOV_EXCL_LINE (a cached name parses)
-            if base.is_none() && !directive_uses_default_series(&node) {
-                base = self.refresh_frame().ok();
+            let at = origin + end - 1;
+            if let Some(cp) = self.inner.take_computed_pending(&name, at) {
+                self.inner.set_computed_checkpoint(&name, Ok(cp)); // the refresh passed it
+                continue;
             }
-            let frame = match &base {
-                Some(f) if !directive_uses_default_series(&node) => f,
-                _ => &self.inner,
-            };
+            let Ok(node) = parse(&name) else { continue }; // LCOV_EXCL_LINE (a cached name parses)
+            let frame = self.history_frame(&node, &mut base);
             let checkpoint = match self.inner.computed_checkpoint(&name) {
+                // a checkpoint at or past the new head (formed from a carried state) stays
+                Some(cp) if cp.at >= at => Some(cp.clone()),
                 Some(cp) => volas_directive::exec::replay(frame, &node, cp, end).map(|(_, cp)| cp),
                 // its history starts inside the frame: capture it from there
                 None if meta.since >= origin => {
@@ -273,8 +300,49 @@ impl PyDataFrame {
                 }
                 None => None, // the rows its history started on are gone with no checkpoint
             };
+            // none formed: an input the computation cannot read is why, if one is (a reason
+            // found at an earlier drop stays — its row may be gone now)
+            let checkpoint = checkpoint.ok_or_else(|| {
+                self.inner
+                    .computed_history_lost(&name)
+                    .cloned()
+                    .or_else(|| volas_directive::exec::execute_refresh(frame, &node).err())
+            });
             self.inner.set_computed_checkpoint(&name, checkpoint);
         }
         self.inner = self.inner.retain_tail(keep);
+    }
+
+    /// The frame a cached `node` reads its inputs from: the live frame for a directive on
+    /// its default series, else the refresh frame (`base`, made once).
+    fn history_frame<'a>(&'a self, node: &Ast, base: &'a mut Option<volas_core::DataFrame>) -> &'a volas_core::DataFrame {
+        if directive_uses_default_series(node) {
+            return &self.inner;
+        }
+        if base.is_none() {
+            *base = self.refresh_frame().ok();
+        }
+        base.as_ref().unwrap_or(&self.inner)
+    }
+
+    /// A recursion the frame carries in a state whose history started before the frame's
+    /// row 0 (a source frame's tail): its checkpoint is that state, as of its last valid
+    /// row, with the inputs a resume from it reads — when the frame holds them.
+    fn checkpoint_carried_states(&mut self) {
+        let origin = self.inner.origin();
+        let mut base: Option<volas_core::DataFrame> = None;
+        for (name, meta) in self.inner.computed_columns() {
+            if !matches!(meta.reach.history, History::Carried { .. })
+                || meta.since >= origin
+                || self.inner.computed_checkpoint(&name).is_some()
+            {
+                continue;
+            }
+            let Ok(node) = parse(&name) else { continue }; // LCOV_EXCL_LINE (a cached name parses)
+            let state = self.inner.computed_resume_state(&name).map(|(s, _)| s.to_vec());
+            let frame = self.history_frame(&node, &mut base);
+            let cp = state.and_then(|s| volas_directive::exec::checkpoint(frame, &node, Some(s), meta.valid_rows, false));
+            self.inner.set_computed_checkpoint(&name, cp.ok_or(None));
+        }
     }
 }

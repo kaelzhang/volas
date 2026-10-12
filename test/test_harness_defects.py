@@ -128,7 +128,7 @@ def test_a_windowed_source_contributes_only_its_visible_rows():
 
 def test_a_stale_windowed_frame_rejects_a_bulk_read():
     cols = _walk(40)
-    df = volas.DataFrame({k: v[:30] for k, v in cols.items()}, window=1, max_lookback=19)
+    df = volas.DataFrame({k: v[:30] for k, v in cols.items()}, window=1, max_lookback=['accbands'])
     df['accbands']
     df.append(_frame(cols, 30, 31))
     with pytest.raises(ValueError, match='stale'):

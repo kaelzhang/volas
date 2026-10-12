@@ -55,8 +55,15 @@ impl DataFrame {
                 state_at: 0,
                 scratch: Vec::new(),
                 checkpoint: None,
+                pending: None,
+                lost: None,
+                first_present: None,
             },
         );
+        let (origin, height) = (self.origin, self.height);
+        if let (Some(pos), Some(meta)) = (self.name_to_idx.get(name), self.computed.get_mut(name)) {
+            meta.note_written(&self.columns[*pos], origin, 0, height);
+        }
         self.note_computed();
         #[cfg(debug_assertions)]
         self.debug_check();
@@ -165,6 +172,12 @@ impl DataFrame {
         Some((meta.state.as_deref()?, self.origin))
     }
 
+    /// The absolute position of cached column `name`'s first present value — where its
+    /// warm-up ended — if one has been computed.
+    pub fn computed_first_present(&self, name: &str) -> Option<usize> {
+        self.computed.get(name)?.first_present
+    }
+
     /// Snapshot of the materialized-directive columns (`name`, meta).
     pub fn computed_columns(&self) -> Vec<(String, ComputedMeta)> {
         self.computed
@@ -232,6 +245,7 @@ impl DataFrame {
         }
         write(&mut self.columns[pos])?;
         if let Some(meta) = meta {
+            meta.note_written(&self.columns[pos], self.origin, from, end);
             meta.valid_rows = meta.valid_rows.max(end);
             if from == 0 {
                 meta.since = self.origin;
@@ -294,6 +308,9 @@ impl DataFrame {
     pub(super) fn invalidate_computed_forming_row(&mut self, last_row: usize) {
         self.stale_by = STALE_BY_APPEND;
         for meta in self.computed.values_mut() {
+            if meta.pending.as_ref().is_some_and(|p| p.at >= self.origin + last_row) {
+                meta.pending = None; // it covers the replaced row
+            }
             if meta.valid_rows > last_row {
                 meta.valid_rows = last_row;
                 let replaced = std::mem::replace(&mut meta.state, meta.state_before_last.take());
@@ -332,6 +349,7 @@ impl DataFrame {
             // recomputes from scratch (correct) and repopulates the state.
             meta.state = None;
             meta.state_before_last = None;
+            meta.pending = None;
         }
     }
 }

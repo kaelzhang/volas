@@ -293,13 +293,25 @@ impl PyDataFrame {
             )));
         }
         let dtype = values.dtype();
+        let inexact = || {
+            PyTypeError::new_err(format!(
+                "cannot assign {dtype} values to column '{name}' of a windowed frame: its \
+                 hidden rows (the max_lookback margin) hold values {dtype} cannot hold exactly"
+            ))
+        };
         let mut col = match self.inner.column(name) {
-            Ok(old) => old.slice(0, start).convert_lossless(dtype).map_err(|_| {
-                PyTypeError::new_err(format!(
-                    "cannot assign {dtype} values to column '{name}' of a windowed frame: its \
-                     hidden rows (the max_lookback margin) hold values {dtype} cannot hold exactly"
-                ))
-            })?,
+            Ok(old) => {
+                let hidden = old.slice(0, start);
+                let kept = hidden.convert_lossless(dtype).map_err(|_| inexact())?;
+                // a float narrowing rounds by design: every hidden value must survive it
+                if dtype.is_float() && hidden.require_numeric().is_ok() {
+                    let (was, now) = (hidden.to_f64_vec(), kept.to_f64_vec());
+                    if was.iter().zip(&now).any(|(a, b)| a.to_bits() != b.to_bits() && !(a.is_nan() && b.is_nan())) {
+                        return Err(inexact());
+                    }
+                }
+                kept
+            }
             Err(_) => Column::na_of(dtype, start),
         };
         col.append(&values).map_err(pyerr)?;

@@ -279,6 +279,28 @@ def recursion(text: str) -> bool:
     return False
 
 
+# The running accumulators (spec::accumulates: history class 2) — `stochf` only on its
+# `.d` line — and the class-3 count (`increase`).
+_ACCUMULATORS = frozenset({
+    'accbands', 'apo', 'bbi', 'bbw', 'beta', 'bias', 'boll', 'cci', 'cmf', 'cog', 'coppock',
+    'correl', 'dkx', 'dma', 'dpo', 'emv', 'hma', 'hv', 'imi', 'kst', 'linearreg',
+    'linearreg_angle', 'linearreg_intercept', 'linearreg_slope', 'ma', 'macdext', 'mavp', 'mfi',
+    'ppo', 'relative_vigor', 'stddev', 'stoch', 'sum', 'trima', 'tsf', 'ttm_squeeze', 'ultosc',
+    'var', 'vr', 'vwma', 'wma', 'wvad'})
+_STOCHF_D = re.compile(r'\bstochf\.(d|fastd)\b')
+
+
+def history_class(text: str) -> int:
+    """The highest history class among ``text``'s commands (spec::history_class): 3 for a
+    recursion or `increase`, 2 for a running accumulator, else 1."""
+    names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
+    if recursion(text) or 'increase' in names:
+        return 3
+    if names & _ACCUMULATORS or _STOCHF_D.search(text.lower()):
+        return 2
+    return 1
+
+
 @functools.cache
 def unbounded_memory() -> frozenset[str]:
     """Commands with a line whose output still depends on a row more than its

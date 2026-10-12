@@ -1,6 +1,9 @@
 //! Lookback (warm-up) computation for a directive — the minimum number of prior
 //! rows needed before an indicator produces a valid value.
 
+use std::borrow::Cow;
+
+use crate::spec::HistoryClass;
 use crate::types::{ArgValue, Ast, Command, Node};
 use volas_compute::raw::indicators::generic_ma_lookback;
 
@@ -320,46 +323,54 @@ pub fn reach(node: &Ast) -> volas_core::Reach {
     }
 }
 
-/// How a directive's values depend on the rows before them ([`volas_core::History`]):
-/// on a trailing window when no recursion appears anywhere in it; through the carried
-/// state of its top command when that command is a recursion carrying a state
-/// ([`crate::spec::carries_state`]) and its `@` operands hold no recursion; otherwise in
-/// a form no carried state covers.
+/// How a directive's values depend on the rows before them ([`volas_core::History`]),
+/// derived from the history class of each command in it ([`crate::spec::history_class`]):
+/// its highest class, and for class 3 how a frame keeps it — by the state of its top
+/// command when that is the one recursion in it (its operands of a lower class or
+/// counts), by its window when every class-3 part is a count, otherwise not at all.
 pub fn history(node: &Ast) -> volas_core::History {
+    use crate::spec::Keep;
     use volas_core::History;
-    if !recursive_anywhere(node) {
-        return History::Window;
+    let (class, recursions) = classes(node);
+    match class {
+        0 | 1 => return History::Window,
+        2 => return History::Accumulator,
+        _ if recursions == 0 => return History::Counted,
+        _ => {}
     }
-    let carried = |name: &str, args: &[ArgValue], series: &[Ast]| {
-        crate::spec::is_recursive(name, args)
-            && crate::spec::carries_state(name)
-            && !series.iter().any(recursive_anywhere)
+    let carried = |c: &Command<Box<[ArgValue]>>| {
+        matches!(crate::spec::history_class(&c.name, c.sub.as_deref(), &c.args), HistoryClass::Recursion(Keep::State))
+            && c.series.iter().all(|s| classes(s).1 == 0)
     };
-    match node {
-        Node::Command(c) if carried(&c.name, &c.args, &c.series) => {
-            History::Carried { operands: c.series.iter().map(lookback).max().unwrap_or(0) }
-        }
-        Node::Name(name) => match crate::bind::bind_command(name, None, &[], &[]) {
-            Ok(c) if carried(&c.name, &c.args, &[]) => History::Carried { operands: 0 },
-            _ => History::Unkept,
-        },
+    let top = match node {
+        Node::Command(c) => Some(Cow::Borrowed(c)),
+        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[]).ok().map(Cow::Owned),
+        _ => None,
+    };
+    match top {
+        Some(c) if carried(&c) => History::Carried { operands: c.series.iter().map(lookback).max().unwrap_or(0) },
         _ => History::Unkept,
     }
 }
 
-/// Whether a recursion appears anywhere in a directive — a recursive command at the
-/// top, inside an `@` series, an operand, or bound from a bare name — so each value
-/// depends on every row before it, not on a trailing window.
-fn recursive_anywhere(node: &Ast) -> bool {
+/// The highest history class among a directive's commands (0 with none), and how many of
+/// them are recursions (class 3 not kept by its window). A bare name is the command it
+/// binds to; an unbindable one is a column.
+fn classes(node: &Ast) -> (u8, usize) {
+    let of = |name: &str, sub: Option<&str>, args: &[ArgValue]| match crate::spec::history_class(name, sub, args) {
+        HistoryClass::Window => (1, 0),
+        HistoryClass::Accumulator => (2, 0),
+        HistoryClass::Recursion(crate::spec::Keep::Window) => (3, 0),
+        HistoryClass::Recursion(_) => (3, 1),
+    };
+    let join = |a: (u8, usize), b: (u8, usize)| (a.0.max(b.0), a.1 + b.1);
     match node {
+        Node::Scalar(_) => (0, 0),
         Node::Name(name) => crate::bind::bind_command(name, None, &[], &[])
-            .is_ok_and(|c| crate::spec::is_recursive(&c.name, &c.args)),
-        Node::Scalar(_) => false,
-        Node::Command(c) => {
-            crate::spec::is_recursive(&c.name, &c.args) || c.series.iter().any(recursive_anywhere)
-        }
-        Node::Unary { operand, .. } => recursive_anywhere(operand),
-        Node::Binary { left, right, .. } => recursive_anywhere(left) || recursive_anywhere(right),
+            .map_or((0, 0), |c| of(&c.name, c.sub.as_deref(), &c.args)),
+        Node::Command(c) => c.series.iter().map(classes).fold(of(&c.name, c.sub.as_deref(), &c.args), join),
+        Node::Unary { operand, .. } => classes(operand),
+        Node::Binary { left, right, .. } => join(classes(left), classes(right)),
     }
 }
 

@@ -12,7 +12,7 @@ mod scalar;
 mod stateless;
 mod window;
 
-pub use history::{capture, replay};
+pub use history::{capture, checkpoint, replay};
 pub use initial_state::initial_state;
 pub use resume::execute_resume;
 pub use scalar::execute_resume_step;

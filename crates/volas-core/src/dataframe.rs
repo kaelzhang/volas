@@ -71,9 +71,33 @@ pub struct ComputedMeta {
     /// The history of a recursion before the frame's row 0, once the frame dropped the
     /// rows it started on ([`Checkpoint`]): a recompute replays from it.
     checkpoint: Option<Checkpoint>,
+    /// The checkpoint the next drop of the head will keep, captured as the refresh passed
+    /// its row (so the drop need not replay to it); dropped by any change to the rows it
+    /// covers.
+    pending: Option<Checkpoint>,
+    /// Why no checkpoint of the history could be formed when the frame dropped the rows
+    /// it read (an input outside the computation's domain): a recompute reports it.
+    lost: Option<crate::error::VolasError>,
+    /// The absolute position of the column's first present (non-missing) value among the
+    /// rows written so far — where its warm-up ended; `None` until one is written.
+    first_present: Option<usize>,
 }
 
 impl ComputedMeta {
+    /// Note that rows `[from, end)` (frame rows, row 0 at absolute position `origin`) of
+    /// `col` were written: the first present value among them is the column's first when
+    /// none was known before them. Scans only while the first value is unknown or being
+    /// rewritten, so a live column pays nothing per row once warmed.
+    fn note_written(&mut self, col: &Column, origin: usize, from: usize, end: usize) {
+        if self.first_present.is_some_and(|f| f < origin + from) {
+            return;
+        }
+        let found = (from..end).find(|&i| col.is_valid(i)).map(|i| origin + i);
+        if found.is_some() || self.first_present.is_some_and(|f| f < origin + end) {
+            self.first_present = found;
+        }
+    }
+
     /// The absolute position of the column's last valid row, if it has one.
     fn last_valid(&self, origin: usize) -> Option<usize> {
         (origin + self.valid_rows).checked_sub(1).filter(|_| self.valid_rows > 0)
@@ -500,10 +524,10 @@ impl DataFrame {
     }
 
     /// The last `rows` rows, as a bounded window retains them when it drops its older
-    /// rows: like [`slice`](Self::slice), except that a recursion without a carried
-    /// state stays cached — the window's documented contract is that its cached
-    /// columns recompute over the rows it retains (the `max_lookback` margin), so its
-    /// history restarts there by design.
+    /// rows: like [`slice`](Self::slice), except that every cached column stays cached
+    /// and keeps its history's [`Checkpoint`] (and the pending one, and why none could be
+    /// formed): the window set them before the drop, so a recursion without a carried
+    /// state is recomputed by replaying its checkpoint — never restarted on these rows.
     pub fn retain_tail(&self, rows: usize) -> DataFrame {
         self.slice_carrying(self.height.saturating_sub(rows), self.height, false)
     }
@@ -568,6 +592,9 @@ impl DataFrame {
                         // a bounded window's own drop keeps the history's checkpoint; a
                         // slice is a frame of its own, whose rows do not follow it
                         checkpoint: if exact { None } else { meta.checkpoint.clone() },
+                        pending: if exact { None } else { meta.pending.clone() },
+                        lost: if exact { None } else { meta.lost.clone() },
+                        first_present: meta.first_present,
                     },
                 );
             }
