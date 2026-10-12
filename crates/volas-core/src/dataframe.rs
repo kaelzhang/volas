@@ -841,13 +841,10 @@ impl DataFrame {
     }
 }
 
-/// Whether `a` orders before `b` (both integer / datetime, or both string).
+/// Whether datetime label `a` orders before `b` (only a datetime index is ordered by
+/// the append rule; a label of another kind never precedes).
 fn label_precedes(a: &Label, b: &Label) -> bool {
-    match (a, b) {
-        (Label::I64(x), Label::I64(y)) => x < y,
-        (Label::Str(x), Label::Str(y)) => x < y,
-        _ => false,
-    }
+    matches!((a, b), (Label::I64(x), Label::I64(y)) if x < y)
 }
 
 /// A label as written in a message.
