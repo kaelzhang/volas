@@ -196,8 +196,9 @@ impl DataFrame {
             (None, None)
         } else if own && meta.state_at + 1 == last {
             (meta.state.clone(), meta.state_before_last.clone())
-        } else if meta.reach.history.recursive() {
-            // ends before the column's last valid row: replayed once from its history
+        } else if meta.reach.history.recursive() && meta.state.is_some() {
+            // ends before the column's last valid row: replayed once from its history (a
+            // recursion that carries no state has none to replay)
             replay.states(self, name, start + valid).map_or((None, None), |(s, b)| (Some(s), b))
         } else {
             (None, None) // a window recomputes; no state needed

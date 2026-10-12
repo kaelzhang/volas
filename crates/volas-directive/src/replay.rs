@@ -68,10 +68,30 @@ impl Replay for Replayer {
         let origin = frame.origin();
         let since = frame.computed_since(name)?;
         if since >= origin {
+            // the state before the last row from a full computation up to it, then the
+            // last row resumed from it: one pass over the history
             let start = since - origin;
+            // a history from row 0: the frame's own rows (a resume reads `[0, end)` only)
+            let rows = match start {
+                0 => Cow::Borrowed(df),
+                _ => Cow::Owned(df.slice_data(start, end)),
+            };
+            let n = end - start;
             let col = frame.column(name).ok()?.slice(start, end);
-            let (after, before) = resume_states(&df.slice_data(start, end), &node, &col);
-            return Some((after?, before));
+            let before = (n > 1)
+                .then(|| crate::exec::initial_state(&rows.slice_data(0, n - 1), &node, &col.slice(0, n - 1)))
+                .flatten();
+            let resumed = before
+                .as_deref()
+                .and_then(|b| crate::exec::execute_resume(&rows, &node, b, n - 1, n, since))
+                .map(|(_, after)| after);
+            return match resumed {
+                Some(after) => Some((after, before)),
+                None => {
+                    let (after, before) = resume_states(&rows.slice_data(0, n), &node, &col);
+                    Some((after?, before))
+                }
+            };
         }
         let cp = frame.computed_checkpoint(name)?;
         let (_, at) = crate::exec::replay(df, &node, cp, end)?;
