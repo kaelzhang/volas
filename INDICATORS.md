@@ -1485,7 +1485,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-typprice"></a>`typprice` | `TYPPRICE` | Typical price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-wclprice"></a>`wclprice` | `WCLPRICE` | Weighted close price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-ht_dcperiod"></a>`ht_dcperiod` | `HT_DCPERIOD` | Hilbert Transform dominant cycle period. | `@<series=close>` |
-| <a id="indicator-ht_dcphase"></a>`ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. | `@<series=close>` |
+| <a id="indicator-ht_dcphase"></a>`ht_dcphase` | `HT_DCPHASE` | Hilbert Transform dominant cycle phase. Like every Hilbert-transform output (`ht_*`, `mama`), bit-identical to TA-Lib from its first published row, flat and step inputs included. | `@<series=close>` |
 | <a id="indicator-ht_phasor"></a>`ht_phasor` | `HT_PHASOR` | Hilbert Transform phasor in-phase line. | `@<series=close>` |
 | <a id="indicator-ht_phasor-quadrature"></a>`ht_phasor.quadrature` | `HT_PHASOR` | Hilbert Transform phasor quadrature line. | `@<series=close>` |
 | <a id="indicator-ht_sine"></a>`ht_sine` | `HT_SINE` | Hilbert Transform sine wave. | `@<series=close>` |

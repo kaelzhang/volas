@@ -611,23 +611,15 @@ def test_momentum_roc_matches_talib(ohlc):
 
 # --- Hilbert-transform suite ----------------------------------------------------
 #
-# volas implements the canonical TA-Lib 0.6.4 Hilbert-transform algorithms (verified
-# against the official TA-Lib source). The functions that derive purely from the
-# shared Hilbert core — HT_DCPERIOD, HT_PHASOR, MAMA/FAMA — are bit-exact against the
-# installed oracle on any series.
-#
-# The four functions that additionally read the smoothed-price DFT buffer
-# (HT_DCPHASE, HT_SINE) or the raw-price iTrend window (HT_TRENDLINE, HT_TRENDMODE)
-# expose a quirk of the installed `ta_lib` build: its warm-up uses a different buffer
-# initial condition than canonical TA-Lib, producing a transient that decays over
-# ~90 bars before both converge bit-exactly. The 100-row tencent set is too short for
-# that, so these four are verified on the 1999-row series over the converged region.
-# (See tasks/04/designs impl-log for the full investigation.)
+# volas reproduces TA-Lib's Hilbert-transform recurrences in TA-Lib's exact evaluation
+# order (each `x*y + z` fused as the pinned build's floating-point contraction fuses
+# it), with each family's own start: the period family (HT_DCPERIOD, HT_PHASOR, MAMA)
+# primes its smoother over 12 bars, the phase family (HT_DCPHASE, HT_SINE,
+# HT_TRENDLINE, HT_TRENDMODE) over 37. So every output is bit-exact from its first
+# published row, on any series — the 100-row set and the 1999-row set alike. Warm-up
+# rows are NaN where TA-Lib writes 0 (HT_TRENDMODE's integer output).
 
 TENCENT_FULL = str((Path(__file__).parent / 'data' / 'tencent_full.csv').resolve())
-
-# First bar past the installed build's ~90-bar Hilbert warm-up transient.
-_HT_CONVERGED = 300
 
 
 @pytest.fixture(scope='module')
@@ -636,56 +628,36 @@ def close_full():
     return df, df['close'].to_numpy()
 
 
-def _converged(got, want, atol=1e-6):
-    """Assert parity over the converged region (past the warm-up transient)."""
-    got = np.asarray(got, dtype=float)[_HT_CONVERGED:]
-    want = np.asarray(want, dtype=float)[_HT_CONVERGED:]
-    np.testing.assert_allclose(got, want, rtol=1e-7, atol=atol)
+def _bits(got, want, lookback):
+    """Bit-exact parity from the first published row; NaN (volas) over the warm-up."""
+    got = np.asarray(got, dtype=float)
+    want = np.asarray(want, dtype=float)
+    assert np.isnan(got[:lookback]).all()
+    np.testing.assert_array_equal(got[lookback:], want[lookback:])
 
 
-def test_ht_dcperiod_matches_talib(ohlc):
-    df, h, l, c = ohlc
-    _parity(df.exec('ht_dcperiod'), talib.HT_DCPERIOD(c))
-
-
-def test_ht_phasor_matches_talib(ohlc):
-    df, h, l, c = ohlc
+@pytest.mark.parametrize('frame', ['ohlc', 'close_full'])
+def test_ht_period_family_matches_talib_bit_for_bit(frame, request):
+    fixture = request.getfixturevalue(frame)
+    df, c = (fixture[0], fixture[3]) if frame == 'ohlc' else fixture
+    _bits(df.exec('ht_dcperiod'), talib.HT_DCPERIOD(c), 32)
     inphase, quadrature = talib.HT_PHASOR(c)
-    _parity(df.exec('ht_phasor'), inphase)  # primary line = in-phase
-    _parity(df.exec('ht_phasor.quadrature'), quadrature)
-
-
-def test_mama_matches_talib(ohlc):
-    df, h, l, c = ohlc
+    _bits(df.exec('ht_phasor'), inphase, 32)  # primary line = in-phase
+    _bits(df.exec('ht_phasor.quadrature'), quadrature, 32)
     mama, fama = talib.MAMA(c, 0.5, 0.05)
-    _parity(df.exec('mama'), mama)  # primary line = mama
-    _parity(df.exec('mama.fama'), fama)
+    _bits(df.exec('mama'), mama, 32)  # primary line = mama
+    _bits(df.exec('mama.fama'), fama, 32)
     # matype 7 (MAMA) via the generic MA dispatch returns the mama line (period ignored).
-    _parity(df.exec('ma:30,7'), mama)
+    _bits(df.exec('ma:30,7'), mama, 32)
 
 
-def test_ht_dcphase_matches_talib(close_full):
-    df, c = close_full
-    # DCPhase is degrees; at convergence the values coincide so there is no 360°
-    # wrap ambiguity — a plain tolerance suffices.
-    _converged(df.exec('ht_dcphase'), talib.HT_DCPHASE(c), atol=1e-4)
-
-
-def test_ht_sine_matches_talib(close_full):
-    df, c = close_full
+@pytest.mark.parametrize('frame', ['ohlc', 'close_full'])
+def test_ht_phase_family_matches_talib_bit_for_bit(frame, request):
+    fixture = request.getfixturevalue(frame)
+    df, c = (fixture[0], fixture[3]) if frame == 'ohlc' else fixture
+    _bits(df.exec('ht_dcphase'), talib.HT_DCPHASE(c), 63)
     sine, leadsine = talib.HT_SINE(c)
-    _converged(df.exec('ht_sine'), sine)  # primary line = sine
-    _converged(df.exec('ht_sine.leadsine'), leadsine)
-
-
-def test_ht_trendline_matches_talib(close_full):
-    df, c = close_full
-    _converged(df.exec('ht_trendline'), talib.HT_TRENDLINE(c))
-
-
-def test_ht_trendmode_matches_talib(close_full):
-    df, c = close_full
-    # Integer 0/1 output: exact match over the converged region.
-    got = np.asarray(df.exec('ht_trendmode'), dtype=float)[_HT_CONVERGED:]
-    want = np.asarray(talib.HT_TRENDMODE(c), dtype=float)[_HT_CONVERGED:]
-    np.testing.assert_array_equal(got, want)
+    _bits(df.exec('ht_sine'), sine, 63)  # primary line = sine
+    _bits(df.exec('ht_sine.leadsine'), leadsine, 63)
+    _bits(df.exec('ht_trendline'), talib.HT_TRENDLINE(c), 63)
+    _bits(df.exec('ht_trendmode'), talib.HT_TRENDMODE(c), 63)

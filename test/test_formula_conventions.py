@@ -244,3 +244,45 @@ def test_senkou_a_cached_before_its_first_value_continues_on_append():
     full = _exec(d, 'ichimoku.senkou_a:9,1,52')
     assert np.isnan(full[:9]).all() and np.isfinite(full[9])
     _same(_appended(d, 'ichimoku.senkou_a:9,1,52', 4), full, exact=True)
+
+
+# --- the Hilbert family: TA-Lib's exact recurrence from the first published row ---------
+
+HT = [
+    ('ht_dcperiod', talib.HT_DCPERIOD),
+    ('ht_phasor', lambda c: talib.HT_PHASOR(c)[0]),
+    ('ht_phasor.quadrature', lambda c: talib.HT_PHASOR(c)[1]),
+    ('ht_dcphase', talib.HT_DCPHASE),
+    ('ht_sine', lambda c: talib.HT_SINE(c)[0]),
+    ('ht_sine.leadsine', lambda c: talib.HT_SINE(c)[1]),
+    ('ht_trendline', talib.HT_TRENDLINE),
+    ('ht_trendmode', lambda c: talib.HT_TRENDMODE(c).astype(float)),
+    ('mama', lambda c: talib.MAMA(c, 0.5, 0.05)[0]),
+    ('mama.fama', lambda c: talib.MAMA(c, 0.5, 0.05)[1]),
+]
+
+
+def _ht_want(fn, close, directive):
+    want = np.asarray(fn(close), dtype=float)
+    want[:volas.directive_lookback(directive)] = np.nan  # volas: NaN, not TA-Lib's 0, in warm-up
+    return want
+
+
+@pytest.mark.parametrize('directive,fn', HT, ids=[d for d, _ in HT])
+def test_hilbert_matches_talib_bit_for_bit_from_the_first_row(directive, fn):
+    close = volas.read_csv(TENCENT_FULL)['close'].to_numpy()
+    _same(_exec({'close': close}, directive), _ht_want(fn, close, directive), exact=True)
+
+
+@pytest.mark.parametrize('directive,fn', HT, ids=[d for d, _ in HT])
+def test_hilbert_on_degenerate_input_matches_talib(directive, fn):
+    # On flat / step prices the DC-phase DFT works on rounding noise: only TA-Lib's exact
+    # evaluation order reproduces the phase it settles on.
+    for close in (np.full(200, 10.0), np.r_[np.full(100, 10.0), np.full(100, 12.0)], np.full(200, 1234.567)):
+        _same(_exec({'close': close}, directive), _ht_want(fn, close, directive), exact=True)
+
+
+@pytest.mark.parametrize('directive', [d for d, _ in HT])
+def test_hilbert_append_is_bit_identical_to_the_full_recompute(directive):
+    close = volas.read_csv(TENCENT_FULL)['close'].to_numpy()[:260]
+    _same(_appended({'close': close}, directive, 200), _exec({'close': close}, directive), exact=True)

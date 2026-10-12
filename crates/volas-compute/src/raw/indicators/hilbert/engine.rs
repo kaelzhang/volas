@@ -9,14 +9,18 @@ use std::sync::OnceLock;
 /// Hilbert weighting coefficients (`ta_utility.h`'s `DO_HILBERT_TRANSFORM`).
 pub(super) const A: f64 = 0.0962;
 const B: f64 = 0.5769;
-/// `rad2Deg = 45/atan(1) = 180/π`; `deg2Rad = 1/rad2Deg`; `constDeg2RadBy360 = atan(1)·8 = 2π`.
+/// `rad2Deg = 45/atan(1) = 180/π` and `deg2Rad = 1/rad2Deg`, both bit-equal to TA-Lib's.
 pub(super) const RAD2DEG: f64 = 180.0 / PI;
 pub(super) const DEG2RAD: f64 = PI / 180.0;
-pub(super) const TWO_PI: f64 = 2.0 * PI;
 
-/// TA-Lib's fixed WMA warm-up consumes the first 12 bars (3 seed + 9 unrolled)
-/// before the Hilbert recurrence's first iteration (`today`).
-pub(super) const CORE_START: usize = 12;
+/// The first bar of the Hilbert recurrence for `HT_DCPERIOD` / `HT_PHASOR` / `MAMA`:
+/// TA-Lib primes the 4-bar WMA price smoother with 3 bars, then discards 9 pushes.
+pub(super) const PERIOD_START: usize = 12;
+/// The first bar of the Hilbert recurrence for `HT_DCPHASE` / `HT_SINE` /
+/// `HT_TRENDLINE` / `HT_TRENDMODE`: the same 3-bar priming, then 34 discarded pushes.
+/// The recurrence (period, phase, trendline) therefore starts 25 bars later than the
+/// period family's, and its values never converge to the period family's.
+pub(super) const PHASE_START: usize = 37;
 /// Output lookback for `HT_DCPERIOD` / `HT_PHASOR` / `MAMA`.
 pub(super) const LB_PERIOD: usize = 32;
 /// Output lookback for `HT_DCPHASE` / `HT_SINE` / `HT_TRENDLINE` / `HT_TRENDMODE`
@@ -126,7 +130,7 @@ struct PriceWma {
 impl PriceWma {
     /// Push bar `today` (`new_price == price[today]`), returning its 4/3/2/1-weighted
     /// smoothed value. Loads the next trailing word `price[today - 3]`; the seed
-    /// guarantees the first main-loop push (`today == CORE_START`) reads `price[9]`.
+    /// guarantees the first main-loop push (`today == start`) reads `price[start - 3]`.
     #[inline]
     pub(super) fn push(&mut self, price: &[f64], today: usize, new_price: f64) -> f64 {
         self.sub += new_price;
@@ -141,8 +145,9 @@ impl PriceWma {
     }
 }
 
-/// Per-bar state shared by all Hilbert functions. Meaningful only for
-/// `i >= CORE_START`; earlier entries are warm-up and never read.
+/// Per-bar state shared by all Hilbert functions. Meaningful only from the family's
+/// first recurrence bar (`PERIOD_START` / `PHASE_START`); earlier entries are warm-up
+/// and never read.
 #[derive(Clone, Copy, Default)]
 pub(super) struct HtBar {
     /// Smoothed dominant-cycle period (`HT_DCPERIOD` output).
@@ -156,7 +161,7 @@ pub(super) struct HtBar {
 }
 
 /// The full mutable state of the shared Hilbert core *after* processing some bar
-/// `t` (`>= CORE_START - 1`), i.e. everything the `while today < n` loop carries
+/// `t` (`>= start - 1`), i.e. everything the `while today < n` loop carries
 /// between iterations: the WMA price-smoother, the four Hilbert channels + their
 /// circular-buffer index, and the homodyne-discriminator scalars. Serialising it
 /// lets a later append/slice **resume** the recurrence over only the new bars,
@@ -197,10 +202,11 @@ pub(super) struct HtCoreState {
 pub(super) const CORE_STATE_LEN: usize = 3 + 1 + 1 + 40 + 6 + 4;
 
 impl HtCoreState {
-    /// Seed the core from the first `CORE_START` bars (the WMA unrolled warm-up),
-    /// leaving the state positioned to [`step`](Self::step) bar `CORE_START`.
-    /// Requires `price.len() > CORE_START`.
-    pub(super) fn seed(price: &[f64]) -> Self {
+    /// Seed the core from the first `start` bars (the WMA unrolled warm-up: 3 priming
+    /// bars, then `start - 3` discarded pushes), leaving the state positioned to
+    /// [`step`](Self::step) bar `start` — [`PERIOD_START`] or [`PHASE_START`], as the
+    /// TA-Lib function of the family primes it. Requires `price.len() > start`.
+    pub(super) fn seed(price: &[f64], start: usize) -> Self {
         // WMA price-smoother seed (mirrors TA_WMA's unrolled initialisation).
         let mut sub = price[0];
         let mut sum = price[0];
@@ -213,15 +219,15 @@ impl HtCoreState {
             sum,
             trailing: 0.0,
         };
-        // Nine discarded warm-up pushes (bars 3..=11); each loads `price[bar-3]`.
-        for bar in 3..CORE_START {
+        // The discarded warm-up pushes (bars `3..start`); each loads `price[bar-3]`.
+        for bar in 3..start {
             let tv = price[bar];
             let _ = wma.push(price, bar, tv);
         }
         HtCoreState {
             wma,
             hilbert_idx: 0,
-            even: CORE_START.is_multiple_of(2),
+            even: start.is_multiple_of(2),
             detrender: HilbertVar::default(),
             q1v: HilbertVar::default(),
             ji: HilbertVar::default(),
@@ -239,14 +245,19 @@ impl HtCoreState {
         }
     }
 
-    /// Advance the core by one bar `today` (`>= CORE_START`), returning its
+    /// Advance the core by one bar `today` (`>= start`), returning its
     /// [`HtBar`]. This is the verbatim body of [`ht_core`]'s main loop — the single
     /// source of truth shared by the full compute and every resume, guaranteeing
     /// bit-identical continuation.
     #[inline(always)]
     pub(super) fn step(&mut self, price: &[f64], today: usize) -> HtBar {
-        // Keep TA-Lib's explicit `a*x + b*y` smoothing form. On the release target
-        // this beats the algebraic `mul_add` rewrite and preserves the C recurrence order.
+        // TA-Lib's exact evaluation order. The pinned build is compiled with C's default
+        // floating-point contraction, which fuses each `x*y + z` written in one
+        // expression into one rounding: `(0.075*period)+0.54` is `fma(0.075, period,
+        // 0.54)`, `(0.2*X)+(0.8*Y)` is `fma(0.2, X, 0.8*Y)` (the left product fuses).
+        // Every such expression below is written as that `mul_add`, so each bar is
+        // bit-identical to the oracle — on flat input, where the discriminator works on
+        // rounding noise, any other order gives a different period and phase.
         let adj = self.period.mul_add(0.075, 0.54);
         // All callers keep `today` inside the input slice; this is the innermost
         // loop for every Hilbert-derived indicator.
@@ -269,8 +280,8 @@ impl HtCoreState {
             if self.hilbert_idx == 3 {
                 self.hilbert_idx = 0;
             }
-            q2 = 0.2 * (q1c + jiv) + 0.8 * self.prev_q2;
-            i2 = 0.2 * (self.i1_even_prev3 - jqv) + 0.8 * self.prev_i2;
+            q2 = (q1c + jiv).mul_add(0.2, 0.8 * self.prev_q2);
+            i2 = (self.i1_even_prev3 - jqv).mul_add(0.2, 0.8 * self.prev_i2);
             i1 = self.i1_even_prev3;
             q1 = q1c;
             self.i1_odd_prev3 = self.i1_odd_prev2;
@@ -284,8 +295,8 @@ impl HtCoreState {
                 .ji
                 .transform_odd(self.i1_odd_prev3, self.hilbert_idx, adj);
             let jqv = self.jq.transform_odd(q1c, self.hilbert_idx, adj);
-            q2 = 0.2 * (q1c + jiv) + 0.8 * self.prev_q2;
-            i2 = 0.2 * (self.i1_odd_prev3 - jqv) + 0.8 * self.prev_i2;
+            q2 = (q1c + jiv).mul_add(0.2, 0.8 * self.prev_q2);
+            i2 = (self.i1_odd_prev3 - jqv).mul_add(0.2, 0.8 * self.prev_i2);
             i1 = self.i1_odd_prev3;
             q1 = q1c;
             self.i1_even_prev3 = self.i1_even_prev2;
@@ -293,8 +304,8 @@ impl HtCoreState {
         }
 
         // Homodyne discriminator -> dominant cycle period.
-        self.re = 0.2 * (i2 * self.prev_i2 + q2 * self.prev_q2) + 0.8 * self.re;
-        self.im = 0.2 * (i2 * self.prev_q2 - q2 * self.prev_i2) + 0.8 * self.im;
+        self.re = i2.mul_add(self.prev_i2, q2 * self.prev_q2).mul_add(0.2, 0.8 * self.re);
+        self.im = i2.mul_add(self.prev_q2, -(q2 * self.prev_i2)).mul_add(0.2, 0.8 * self.im);
         self.prev_q2 = q2;
         self.prev_i2 = i2;
         let prev_period = self.period;
@@ -317,8 +328,8 @@ impl HtCoreState {
         } else if self.period > 50.0 {
             self.period = 50.0;
         }
-        self.period = 0.2 * self.period + 0.8 * prev_period;
-        self.smooth_period = 0.33 * self.period + 0.67 * self.smooth_period;
+        self.period = self.period.mul_add(0.2, 0.8 * prev_period);
+        self.smooth_period = self.period.mul_add(0.33, 0.67 * self.smooth_period);
 
         HtBar {
             smooth_period: self.smooth_period,
@@ -400,17 +411,17 @@ impl HtCoreState {
     }
 }
 
-/// Run TA-Lib's shared Hilbert core over the whole series. `out[i]` is meaningful
-/// for `i >= CORE_START` only.
-pub(super) fn ht_core(price: &[f64]) -> Vec<HtBar> {
+/// Run TA-Lib's shared Hilbert core over the whole series from the family's first
+/// recurrence bar `start`. `out[i]` is meaningful for `i >= start` only.
+pub(super) fn ht_core(price: &[f64], start: usize) -> Vec<HtBar> {
     let n = price.len();
     let mut bars = vec![HtBar::default(); n];
-    if n <= CORE_START {
+    if n <= start {
         return bars;
     }
-    let mut core = HtCoreState::seed(price);
+    let mut core = HtCoreState::seed(price, start);
     #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
-    for today in CORE_START..n {
+    for today in start..n {
         bars[today] = core.step(price, today);
     }
     bars
@@ -420,18 +431,21 @@ pub(super) fn ht_core(price: &[f64]) -> Vec<HtBar> {
 /// and `HT_TRENDMODE`). `push` consumes one bar and returns its DC phase in
 /// degrees; the phase carries across bars (the `imagPart == 0` branch nudges the
 /// previous value by ±90°).
-/// Twiddle factors `(sin(i·2π/p), cos(i·2π/p))` for every DC period `p ≤ SMOOTH_PRICE_SIZE`,
-/// indexed `[p][i]`. Built once on first use so the DC-phase DFT reads its sin/cos from a table
-/// instead of recomputing them per bar. Row `p = 0` (a degenerate empty window) is never summed.
+/// Twiddle factors `(sin(t), cos(t))` with `t = (i·2π)/p` — TA-Lib's own argument, `2π` as
+/// its `atan(1)·8`, product before quotient — for every DC period `p ≤ SMOOTH_PRICE_SIZE`,
+/// indexed `[p][i]`. Built once on first use so the DC-phase DFT reads the very values
+/// TA-Lib computes per bar instead of recomputing them. Row `p = 0` (a degenerate empty
+/// window) is never summed.
 type DftTwiddle = [[(f64, f64); SMOOTH_PRICE_SIZE]; SMOOTH_PRICE_SIZE + 1];
 static DFT_TWIDDLE: OnceLock<Box<DftTwiddle>> = OnceLock::new();
 
 fn build_dft_twiddle() -> Box<DftTwiddle> {
     let mut t: Box<DftTwiddle> = Box::new([[(0.0, 0.0); SMOOTH_PRICE_SIZE]; SMOOTH_PRICE_SIZE + 1]);
+    let deg2rad_by_360 = 1f64.atan() * 8.0;
     for (p, row) in t.iter_mut().enumerate().skip(1) {
-        let delta = TWO_PI / p as f64;
         for (i, slot) in row.iter_mut().enumerate().take(p) {
-            *slot = (i as f64 * delta).sin_cos();
+            let t = (i as f64 * deg2rad_by_360) / p as f64;
+            *slot = (t.sin(), t.cos());
         }
     }
     t
@@ -458,16 +472,17 @@ impl DcPhase {
         let mut real_part = 0.0f64;
         let mut imag_part = 0.0f64;
         let mut k = self.idx;
-        // The DFT bins t_i = i·(2π/dc_period_int) have the same sin/cos for every bar of the
-        // same period, so read them from a twiddle table built once (lazily) for all periods
-        // rather than recomputing per bar — no per-bar transcendentals, no serial rotation
-        // chain. The table holds the direct sin/cos (well inside the HT convergence tolerance),
-        // and the full compute and the resume share it so they stay bit-identical to each other.
+        // The DFT bins have the same sin/cos for every bar of the same period, so read them
+        // from a twiddle table built once (lazily) for all periods — the values TA-Lib
+        // computes per bar, without the per-bar transcendentals. Each `part += s*v` is one
+        // fused rounding, as in the contracted oracle build: on flat or step input the
+        // imaginary part is rounding noise that sets the phase, so only TA-Lib's exact
+        // order reproduces it.
         let twiddle = &DFT_TWIDDLE.get_or_init(build_dft_twiddle)[dc_period_int];
         for &(s, c) in &twiddle[..dc_period_int] {
             let v = self.smooth_price[k];
-            real_part += s * v;
-            imag_part += c * v;
+            real_part = s.mul_add(v, real_part);
+            imag_part = c.mul_add(v, imag_part);
             k = if k == 0 { SMOOTH_PRICE_SIZE - 1 } else { k - 1 };
         }
         let abs_imag = imag_part.abs();
@@ -527,13 +542,13 @@ fn ring_index(word: f64, len: usize) -> Option<usize> {
 /// Words in a serialised [`DcPhase`] (`phase` + `idx` + the 50-slot ring).
 pub(super) const DCPHASE_STATE_LEN: usize = 2 + SMOOTH_PRICE_SIZE;
 
-/// DC phase per bar (degrees); index `< CORE_START` holds the pre-loop state `0.0`
-/// so `phase[i-1]` is valid at `i == CORE_START`.
+/// DC phase per bar (degrees) over a [`PHASE_START`] core; index `< PHASE_START` holds
+/// the pre-loop state `0.0` so `phase[i-1]` is valid at `i == PHASE_START`.
 pub(super) fn dcphase_all(core: &[HtBar]) -> Vec<f64> {
     let n = core.len();
     let mut out = vec![0.0f64; n];
     let mut dc = DcPhase::new();
-    for i in CORE_START..n {
+    for i in PHASE_START..n {
         out[i] = dc.push(core[i].smoothed, core[i].smooth_period);
     }
     out
@@ -558,18 +573,43 @@ pub(super) fn trendline_avg(price: &[f64], today: usize, smooth_period: f64) -> 
     sum / dc_period_int as f64
 }
 
-/// Trendline per bar: a `DCPeriod`-window average of *raw* price smoothed by the
-/// 4/3/2/1-weighted `iTrend` recurrence. Index `< CORE_START` holds `0.0`.
-pub(super) fn trendline_all(core: &[HtBar], price: &[f64]) -> Vec<f64> {
-    let n = core.len();
-    let mut out = vec![0.0f64; n];
-    let (mut it1, mut it2, mut it3) = (0.0f64, 0.0f64, 0.0f64);
-    for today in CORE_START..n {
-        let avg = trendline_avg(price, today, core[today].smooth_period);
-        out[today] = (4.0 * avg + 3.0 * it1 + 2.0 * it2 + it3) / 10.0;
-        it3 = it2;
-        it2 = it1;
-        it1 = avg;
+/// The trendline's 4/3/2/1-weighted `iTrend` recurrence over the dominant-cycle-window
+/// averages ([`trendline_avg`]): the one owner of the trendline value, shared by
+/// `HT_TRENDLINE`, `HT_TRENDMODE` and their resumes. Carries the last three averages.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ITrend {
+    it1: f64,
+    it2: f64,
+    it3: f64,
+}
+
+impl ITrend {
+    /// Words in a serialised [`ITrend`].
+    pub(super) const STATE_LEN: usize = 3;
+
+    /// The trendline at bar `today`, advancing the recurrence: TA-Lib's
+    /// `(4·avg + 3·it1 + 2·it2 + it3)/10` in its contracted evaluation order,
+    /// `(fma(2, it2, fma(4, avg, 3·it1)) + it3) / 10`.
+    #[inline]
+    pub(super) fn push(&mut self, price: &[f64], today: usize, smooth_period: f64) -> f64 {
+        let avg = trendline_avg(price, today, smooth_period);
+        let value = (2.0f64.mul_add(self.it2, 4.0f64.mul_add(avg, 3.0 * self.it1)) + self.it3) / 10.0;
+        self.it3 = self.it2;
+        self.it2 = self.it1;
+        self.it1 = avg;
+        value
     }
-    out
+
+    /// Append the three carried averages to `v`, for state-carry serialisation.
+    pub(super) fn push_state(&self, v: &mut Vec<f64>) {
+        v.extend_from_slice(&[self.it1, self.it2, self.it3]);
+    }
+
+    /// Reconstruct from [`ITrend::STATE_LEN`] words at `s[*off..]`, advancing `off`;
+    /// `None` if `s` is too short. Inverse of [`ITrend::push_state`].
+    pub(super) fn from_state(s: &[f64], off: &mut usize) -> Option<Self> {
+        let &[it1, it2, it3] = s.get(*off..*off + Self::STATE_LEN)? else { return None };
+        *off += Self::STATE_LEN;
+        Some(ITrend { it1, it2, it3 })
+    }
 }
