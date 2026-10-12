@@ -378,6 +378,17 @@ mod tests {
         assert_eq!(out.column("volume").unwrap().as_f64().unwrap(), &[18.0][..]);
     }
 
+    /// Periods closing over several calls are kept in order: each call's closed rows
+    /// join the earlier ones in one append.
+    #[test]
+    fn closed_periods_accumulate_across_calls() {
+        let df = sample();
+        let mut cum = Cumulator::new(TimeFrame::Min1, AggSpec::ohlcv());
+        cum.append(&df.slice(0, 3)).unwrap();
+        cum.append(&df.slice(3, 6)).unwrap();
+        assert!(cum.frame().unwrap().equals(&cumulate(&df, TimeFrame::Min1, &AggSpec::ohlcv()).unwrap()));
+    }
+
     /// A rejected append leaves the cumulator exactly as it was — its open period
     /// included — whichever step rejects it, so the next append continues the period.
     #[test]

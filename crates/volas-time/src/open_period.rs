@@ -18,7 +18,7 @@ pub struct OpenPeriod {
 impl OpenPeriod {
     /// The open period of one period's fine `bars`, given in non-decreasing time
     /// order: a run of bars with the same timestamp (a re-sent bar) keeps only its
-    /// last bar — the re-send rule of [`crate::cumulate`] (contract: consecutive equal
+    /// last bar — the re-send rule of [`crate::cumulate()`] (consecutive equal
     /// timestamps, last wins). Errors on an empty frame, a non-datetime index or bars
     /// out of order.
     pub fn new(bars: DataFrame) -> Result<OpenPeriod> {
