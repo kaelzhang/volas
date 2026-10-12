@@ -272,9 +272,9 @@ impl PyDataFrame {
         let origin = self.inner.origin();
         let head = origin + (h - keep); // the absolute position of the first kept row
         let mut base: Option<volas_core::DataFrame> = None;
-        for (name, meta) in self.inner.computed_columns() {
-            let History::Carried { operands } = meta.reach.history else { continue };
-            if meta.since >= head {
+        for (name, history, since) in self.inner.computed_histories() {
+            let History::Carried { operands } = history else { continue };
+            if since >= head {
                 continue; // its history starts in the kept rows
             }
             // the last row before the kept rows whose operands the kept rows recompute
@@ -291,8 +291,8 @@ impl PyDataFrame {
                 Some(cp) if cp.at >= at => Some(cp.clone()),
                 Some(cp) => volas_directive::exec::replay(frame, &node, cp, end).map(|(_, cp)| cp),
                 // its history starts inside the frame: capture it from there
-                None if meta.since >= origin => {
-                    let start = meta.since - origin;
+                None if since >= origin => {
+                    let start = since - origin;
                     match start {
                         0 => volas_directive::exec::capture(frame, &node, end),
                         _ => volas_directive::exec::capture(&frame.slice_data(start, h), &node, end - start),

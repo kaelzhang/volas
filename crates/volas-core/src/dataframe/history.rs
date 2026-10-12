@@ -122,6 +122,12 @@ impl DataFrame {
         meta.pending.take_if(|p| p.at == at)
     }
 
+    /// Each cached column's name, history class and the absolute row its history starts
+    /// at — what a bounded frame's drop of its head reads, without copying the states.
+    pub fn computed_histories(&self) -> Vec<(String, History, usize)> {
+        self.computed.iter().map(|(n, m)| (n.clone(), m.reach.history, m.since)).collect()
+    }
+
     /// Whether cached column `name` keeps a pending checkpoint as of absolute row `at`.
     pub fn has_computed_pending(&self, name: &str, at: usize) -> bool {
         self.computed.get(name).and_then(|m| m.pending.as_ref()).is_some_and(|p| p.at == at)
