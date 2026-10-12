@@ -115,11 +115,22 @@ it, the departure is deliberate and listed here.
   own start; TA-Lib seeds them from an offset aligned to the signal line.
 - **Warm-up rows are NaN**, also for TA-Lib's integer outputs (HT_TRENDMODE, the
   candlestick patterns) where TA-Lib writes 0.
+- **Stochastic %K lines start at their own first value.** TA-Lib delays %K to %D's first
+  row; volas publishes `stoch.k`, `stochf.k` and `stochrsi.k` as soon as they are known —
+  with the default arguments from row 6 instead of 8 (`stoch.k`), 4 instead of 6
+  (`stochf.k`) and 18 instead of 20 (`stochrsi.k`) — earlier by the `%D` average's warm-up.
+  Every value TA-Lib publishes is the same.
+- **NATR at period 1** is `TR / close · 100` like every other period; TA-Lib's period-1
+  branch returns the raw true range.
 - **The Hilbert transform** (`ht_*`, `mama`) follows TA-Lib's C source in plain arithmetic,
   without fused multiply-add: the same value on every platform, bit-identical to a TA-Lib
   build that does not fuse (the x86-64 wheels). A build that fuses (clang on arm64) agrees
   to rounding; on flat or step input, where the dominant-cycle phase is rounding noise,
   its phase may differ — between TA-Lib builds and platforms as well.
+- **±DM after an infinite move (period ≥ 2).** volas's Wilder sum folds
+  `s·(1 − 1/period) + term`, TA-Lib `s − s/period + term`: once an infinite movement has
+  entered, volas's sum stays infinite and TA-Lib's turns NaN — both lose the line. Tracked
+  to align with TA-Lib's order.
 
 Where TA-Lib's arguments are out of order, volas follows it: a `slow` period shorter
 than `fast` swaps the two averages in `macd`, `apo`, `ppo` and `macdext`.

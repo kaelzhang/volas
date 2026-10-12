@@ -120,7 +120,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-adosc"></a>`adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `:<fast=3>,<slow=10>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
 | <a id="indicator-tr"></a>`tr` | `TRANGE` | True Range. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-atr"></a>`atr` | `ATR` | Average True Range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| <a id="indicator-natr"></a>`natr` | `NATR` | Normalized Average True Range, `ATR/close·100`; a close of exactly 0 gives 0 at its own row (TA-Lib's guard, with an exact zero test). | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-natr"></a>`natr` | `NATR` | Normalized Average True Range, `ATR/close·100`; a close of exactly 0 gives 0 at its own row (TA-Lib's guard, with an exact zero test). At `period=1` volas normalises as at every other period, where TA-Lib returns the raw true range. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-avgprice"></a>`avgprice` | `AVGPRICE` | Average price. | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-medprice"></a>`medprice` | `MEDPRICE` | Median price. | `@<series_high=high>,<series_low=low>` |
 | <a id="indicator-typprice"></a>`typprice` | `TYPPRICE` | Typical price. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
