@@ -113,6 +113,11 @@ class FrameMachine(RuleBasedStateMachine):
         self.snapshots: list[tuple] = []
         self.trace: list[str] = []
         self.column_of: dict[str, str] = {}  # directive_stringify -> the cached column name
+        # Data columns of a windowed frame whose hidden cells the model does not know: a
+        # cached column turned data keeps the hidden cells it held, which follow the
+        # refresh path (a recomputed window's retained warm-up holds NaN) rather than the
+        # ledger. No generated directive reads them.
+        self.opaque: set[str] = set()
 
     # --- model helpers -------------------------------------------------------------
 
@@ -136,8 +141,6 @@ class FrameMachine(RuleBasedStateMachine):
         if family in contracts.NUMERIC_EXCEPTIONS:
             return contracts.NUMERIC_EXCEPTIONS[family]
         tolerance = 0.0
-        if self.window is not None and contracts.avoids('windowed-drift'):
-            tolerance = contracts.WINDOWED_FINITE_TOLERANCE
         if contracts.avoids('window-recompute-ulp'):
             tolerance = max(tolerance, contracts.ULP_DRIFT_TOLERANCE)
         return tolerance
@@ -233,17 +236,17 @@ class FrameMachine(RuleBasedStateMachine):
             return False  # a logical combination cannot be excused a tie flip
         if self.window is not None:
             try:
-                if volas.directive_lookback(d.text) > self.max_lookback:
-                    return False  # the documented margin must cover the directive
+                volas.directive_lookback(d.text)
             except Exception:
                 return False
-            if contracts.avoids('windowed-drift'):
-                # recursive / cumulative lines restart on the retained rows (the
-                # forming refresh's cold path, a write, an undersized history)
-                names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', d.text.lower())}
-                if names & inventory.unbounded_memory() or inventory.recursive(d.text):
-                    return False
         return True
+
+    def refused_late(self, d: Directive) -> bool:
+        """Whether a windowed frame refuses ``d`` requested after construction: a
+        directive of history class 2 or 3, or one reading more rows than the margin (the
+        frames under test declare no directive)."""
+        return (self.window is not None and contracts.WINDOWED_LATE_RECURSION_RAISES
+                and (inventory.history_class(d.text) > 1 or volas.directive_lookback(d.text) > self.max_lookback))
 
     @rule(data=st.data())
     def cache(self, data):
@@ -258,14 +261,17 @@ class FrameMachine(RuleBasedStateMachine):
         if name in self.plain_columns() or d.text in self.plain_columns():
             return  # a plain column of that name shadows the directive (get_column covers it)
         column = self.column_of.get(name, name)
+        if column != name and column in self.plain_columns() and contracts.avoids('stringify-column-name'):
+            return  # it was cached under another name, now a plain column the directive misses
         entry = self.cached.get(column) or Entry(column, d, self.env(), self.visible_start())
         if self.window is not None and column not in self.cached:
             # README: a windowed frame's cached indicators equal the unbounded frame's
-            # (the unbounded twin's history starts at row 0). A directive first cached
-            # after rows were dropped cannot see them; while 'windowed-drift' is open
-            # that case is not generated.
-            dropped = len(self.coarse().rows) - self.df._physical_height
-            if dropped and contracts.avoids('windowed-drift'):
+            # (the unbounded twin's history starts at row 0): one it admits after rows
+            # were dropped depends on a trailing window the margin holds.
+            if self.refused_late(d):
+                if self.oracle(entry)[1] is None:
+                    self.attempt(lambda: self.df[d.text], expect_error=ValueError,
+                                 label=f'df[{d.text!r}] refused late')
                 return
             entry = replace(entry, start=0)
         if column not in self.cached and contracts.avoids('resume-missing-warmup') \
@@ -311,8 +317,8 @@ class FrameMachine(RuleBasedStateMachine):
 
     def plain_numeric(self) -> list[str]:
         coarse = self.coarse()
-        return [c for c in coarse.columns
-                if coarse.dtype(c) in ('float64', 'float32', 'int64', 'int32')] or ['close']
+        return [c for c in coarse.columns if c not in self.opaque
+                and coarse.dtype(c) in ('float64', 'float32', 'int64', 'int32')] or ['close']
 
     @precondition(lambda self: self.cached)
     @rule(data=st.data())

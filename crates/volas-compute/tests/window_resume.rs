@@ -440,3 +440,44 @@ fn a_malformed_state_or_argument_declines() {
         Some(0.0)
     );
 }
+
+/// A state carried into a frame that does not hold the rows it reads — its full window
+/// and the row leaving it, here a frame starting just before the step — is declined,
+/// never read below the frame's row 0 (a bounded window's resume too close to its head).
+#[test]
+fn a_state_reading_rows_before_the_frame_declines() {
+    let c = &bars(false).close[..];
+    let mut next = [0.0; 64];
+    // states after 40 rows (each window full)
+    let wma = ind::ma_state(&c[..40], 5, 2, 0).unwrap();
+    let linreg = ind::linreg_state(&c[..40], 5, 0).unwrap();
+    let cog = ind::cog_state(&c[..40], 5, 0).unwrap();
+    // the same rows from the frame holding row 40 and the 5 before it: exact
+    let tail = &c[35..];
+    assert!(ind::ma_step(tail, 5, 2, 5, &wma, &mut next[..wma.len()]).is_some());
+    assert!(ind::linreg_step(tail, 5, LinregLine::Value, 5, &linreg, &mut next[..linreg.len()]).is_some());
+    assert!(ind::cog_step(tail, 5, 5, &cog, &mut next[..cog.len()]).is_some());
+    // one row short: the row leaving the window is before the frame
+    let short = &c[36..];
+    assert!(ind::ma_step(short, 5, 2, 4, &wma, &mut next[..wma.len()]).is_none());
+    assert!(ind::linreg_step(short, 5, LinregLine::Value, 4, &linreg, &mut next[..linreg.len()]).is_none());
+    assert!(ind::cog_step(short, 5, 4, &cog, &mut next[..cog.len()]).is_none());
+}
+
+/// An extreme the carried tracker points at before the frame's row 0 has left every
+/// window the frame holds: the resume rebuilds the extreme instead of placing it at row
+/// 0, and the positions equal the full computation's.
+#[test]
+fn an_extreme_before_the_frame_is_rebuilt() {
+    let data = [0.0, 0.0, 100.0, 1.0, 2.0, 0.0, 5.0];
+    let low = [100.0, 100.0, 0.0, 3.0, 2.0, 4.0, 1.0];
+    // the tracker after rows 0..=4 points at row 2 (100 / 0)
+    let hi = ind::maxindex_final_state(&data[..5], 3, 0).unwrap();
+    let lo = ind::minindex_final_state(&low[..5], 3, 0).unwrap();
+    assert_eq!((hi[0], lo[0]), (2.0, 2.0));
+    // a frame holding rows 3.. (origin 3) resumes at its row 2 (absolute row 5)
+    let (got, _) = ind::maxindex_resume(&data[3..], 3, 2, 3, &hi).unwrap();
+    assert_eq!(got, ind::maxindex(&data, 3, 0)[5..].to_vec());
+    let (got, _) = ind::minindex_resume(&low[3..], 3, 2, 3, &lo).unwrap();
+    assert_eq!(got, ind::minindex(&low, 3, 0)[5..].to_vec());
+}

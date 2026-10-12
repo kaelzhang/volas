@@ -72,6 +72,9 @@ class PlainMachine(FrameMachine):
             form = 'arrow'
         if form == 'dict' and schema.index == 'range':
             form = 'numpy'  # an unnamed RangeIndex frame takes no bar dict
+        if contracts.avoids('slice-resend-short') and step == 'resend' and self.offset > 0 and any(
+                volas.directive_lookback(name) >= len(self.df) for name in self.cached):
+            return  # a re-sent last row of a slice holding just a column's lookback
         rows, index = self._new_bars(k, regime, step)
         bar = build.bars(schema, rows, index, form, pad=2, extra=tuple(self.store.user))
         labels = index
@@ -160,8 +163,6 @@ class PlainMachine(FrameMachine):
         """A positional / label write into a data column (invalidates every cache)."""
         if self.stale or self._positions_carried():
             return  # a stale write is covered by append_rejected('stale_write')
-        if self.window is not None and contracts.avoids('windowed-drift'):
-            return  # a write restarts every carried state on the retained rows only
         coarse = self.coarse()
         col = data.draw(st.sampled_from([c for c in coarse.columns
                                          if coarse.dtype(c) in ('float64', 'float32', 'int64', 'int32')]))
@@ -215,8 +216,7 @@ class PlainMachine(FrameMachine):
     @rule(data=st.data())
     def write_computed(self, data):
         """A cell write into a cached float column: it becomes plain data."""
-        if self.stale or not self.cached or self._positions_carried() or (
-                self.window is not None and contracts.avoids('windowed-drift')):
+        if self.stale or not self.cached or self._positions_carried():
             return
         name = data.draw(st.sampled_from(sorted(self.cached)))
         want, error = self.oracle(self.cached[name])
@@ -233,6 +233,8 @@ class PlainMachine(FrameMachine):
             values[self.visible_start() + pos] = -3.25
             del self.cached[name]
             self.store.add_column(name, values)
+            if self.window is not None:
+                self.opaque.add(name)  # its hidden cells stay as the cache held them
             self._invalidate_all()
 
         self.attempt(lambda: self.df.iloc.__setitem__((pos, j), -3.25), commit=commit,
@@ -242,7 +244,7 @@ class PlainMachine(FrameMachine):
     def set_column(self, data, kind):
         """``df[name] = values``: a new plain column, one named like a bare command or
         a canonical directive, or a replacement of an existing column."""
-        if self.stale or self.window is not None or self._positions_carried():
+        if self.stale or self._positions_carried():
             return
         from .inventory import executable_lines
         if kind == 'new':
@@ -262,12 +264,15 @@ class PlainMachine(FrameMachine):
             return
         if name in self.coarse().schema.columns and self.coarse().dtype(name) not in ('float64',):
             return
+        was_cached = name in self.cached
         values = np.round(np.linspace(-1, 1, len(self.df)) * data.draw(st.integers(1, 9)), 3)
 
         existing = name in self.df.columns
 
         def commit(_):
             stored = [None] * self.visible_start() + [float(v) for v in values]
+            if self.window is not None and was_cached:
+                self.opaque.add(name)  # its hidden cells stay as the cache held them
             if name in self.cached:
                 del self.cached[name]
             if name in self.coarse().schema.columns:

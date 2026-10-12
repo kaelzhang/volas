@@ -10,32 +10,39 @@ use volas_core::{Column, DataFrame};
 
 use super::as_command;
 
-/// Resume `node` from `prev_state` over rows `[from_row, height)`, returning the
-/// new-row [`Column`] and the updated state. `None` when `node` has no resume
-/// kernel (caller falls back to a full recompute). The values are bit-identical to
-/// a fresh full recompute, so writing them into the stale tail keeps the cached
-/// column exact.
+/// Resume `node` from `prev_state` over rows `[from_row, end)` (`end` at most the
+/// frame's height), returning those rows as a [`Column`] and the state as of the last
+/// of them. `None` when `node` has no resume kernel, or the resume declines (the caller
+/// falls back to a recompute). The values are bit-identical to a fresh full recompute,
+/// so writing them into the stale rows keeps the cached column exact. Stopping before
+/// the last row reads the inputs' leading rows in place (no copy of the frame), so a
+/// refresh of several rows obtains the state before the last one too.
 ///
-/// `origin` is the absolute position of the frame's row 0 (`DataFrame::origin`).
-/// Recursive *value* indicators ignore it; the absolute-position index family adds it,
-/// so emitted positions are the series' own on every path.
+/// `since` is the absolute position of the row the column's history starts at: when it
+/// lies before the frame's row 0 (the frame dropped its head), a resume missing complete
+/// rows of the history it reads declines rather than restart the recursion. The frame's
+/// own `origin` (`DataFrame::origin`) places its rows: recursive *value* indicators
+/// ignore it; the absolute-position index family adds it, so emitted positions are the
+/// series' own on every path.
 pub fn execute_resume(
     df: &DataFrame,
     node: &Ast,
     prev_state: &[f64],
     from_row: usize,
-    origin: usize,
+    end: usize,
+    since: usize,
 ) -> Option<(Column, Vec<f64>)> {
     let (name, sub, args, series) = as_command(node)?;
     let (name, sub) = (name.as_ref(), sub.as_deref());
     let cmd = BoundCommand { name, sub, args: &args, series };
+    let origin = df.origin();
     if crate::spec::is_recursive(name, &args) {
         // Over the complete rows: a missing new row is NaN, the state untouched.
-        return crate::complete::resume(df, &cmd, prev_state, from_row, |ops, from| {
+        return crate::complete::resume(df, &cmd, prev_state, (from_row, end, since), |ops, from| {
             resume_of(ops, &cmd, prev_state, from, origin)
         });
     }
-    resume_of(&Operands::new(df, series), &cmd, prev_state, from_row, origin)
+    resume_of(&Operands::upto(df, series, end), &cmd, prev_state, from_row, origin)
 }
 
 /// [`execute_resume`] of the bound command `cmd` over every row of `ops`.

@@ -14,58 +14,6 @@ use crate::timeframe::{build_agg_spec_for, resolve_time_frame};
 #[allow(unused_imports)]
 use crate::*;
 
-/// The windowed-frame lookback bound — how `max_lookback=` is supplied: either an
-/// explicit row count, or a list of indicator directives whose largest lookback it is
-/// derived from (so the caller never hand-computes a compound indicator's warm-up).
-#[derive(FromPyObject)]
-pub(crate) enum LookbackBound {
-    Count(usize),
-    Directives(Vec<String>),
-}
-
-/// Validate the windowing params and derive the retention capacity. `max_lookback` only
-/// applies with `window`; with `window` it is REQUIRED and supplies the lookback bound
-/// (`capacity = window + lookback`) — directly as an int, or as the largest lookback
-/// among a list of indicator directives. See `designs/...-windowed-dataframe`.
-fn build_window_state(
-    window: Option<usize>,
-    max_lookback: Option<LookbackBound>,
-) -> PyResult<Option<WindowState>> {
-    let Some(w) = window else {
-        if max_lookback.is_some() {
-            return Err(PyValueError::new_err(
-                "max_lookback only applies to a windowed frame — pass window=",
-            ));
-        }
-        return Ok(None);
-    };
-    if w == 0 {
-        return Err(PyValueError::new_err("window must be a positive integer"));
-    }
-    let lookback = match max_lookback {
-        None => {
-            return Err(PyValueError::new_err(
-                "a windowed frame needs its lookback bound — pass max_lookback= \
-                 (an int, or a list of indicator directives to derive it from)",
-            ))
-        }
-        Some(LookbackBound::Count(l)) => l,
-        Some(LookbackBound::Directives(inds)) => {
-            // Each entry must name an INDICATOR: `indicator_lookback` rejects a typo'd
-            // / bare-column directive (e.g. `ma5` for `ma:5`) instead of deriving a
-            // silent 0-row margin that would under-size the window and break the
-            // cached-indicator bit-exactness the feature exists to provide.
-            let mut max = 0usize;
-            for d in &inds {
-                let node = volas_directive::parse(d).map_err(pyerr)?;
-                max = max.max(volas_directive::lookback::indicator_lookback(&node).map_err(pyerr)?);
-            }
-            max
-        }
-    };
-    Ok(Some(WindowState { window: w, capacity: w + lookback }))
-}
-
 #[pymethods]
 impl PyDataFrame {
     // Constructor — the user-facing argument list & usage live in the class
@@ -83,6 +31,8 @@ impl PyDataFrame {
         window: Option<usize>,
         max_lookback: Option<LookbackBound>,
     ) -> PyResult<Self> {
+        // The windowing arguments are checked before any data is read.
+        let bounds = crate::frame_bounded::bounds(window, max_lookback)?;
         // `columns`, when given, selects and orders the columns — a strict projection, like
         // `df[[...]]`: a name not present raises KeyError, and an empty list or a duplicate
         // name is rejected. It never silently NaN-fills an absent column.
@@ -197,13 +147,6 @@ impl PyDataFrame {
                     .map_err(pyerr)?
             }
         };
-        // `window=` makes this a bounded rolling-window frame (see designs): derive the
-        // retention capacity (window + max_lookback) and bound the initial data to it.
-        let win = build_window_state(window, max_lookback)?;
-        let df = match &win {
-            Some(w) if df.height() > w.capacity => df.retain_tail(w.capacity),
-            _ => df,
-        };
         // Re-labelled or re-typed rows of a time-frame frame are bars that the open
         // period's fine bars no longer describe: the frame is the time-frame frame of its
         // new rows, the last one the forming bar (as the `time_frame` argument builds it).
@@ -221,12 +164,12 @@ impl PyDataFrame {
             let frame = resolve_time_frame(tf_obj)?;
             let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
             let tf = TfState::seeded(frame, spec, &df)?;
-            return Ok(PyDataFrame { inner: df, tf: Some(tf), window: win });
+            return PyDataFrame { inner: df, tf: Some(tf), window: None }.bounded(bounds);
         }
         if cumulators.is_some() {
             return Err(PyValueError::new_err("cumulators requires time_frame"));
         }
-        Ok(PyDataFrame { inner: df, tf, window: win })
+        PyDataFrame { inner: df, tf, window: None }.bounded(bounds)
     }
 
     /// The DatetimeIndex timezone name (`"UTC"` / `"+08:00"` /
@@ -286,23 +229,24 @@ impl PyDataFrame {
         (self.logical_range().1, self.inner.width())
     }
 
-    /// Whether a windowed frame has warmed up — at least `window + max_lookback`
-    /// rows accumulated, so every one of the `window` visible rows has a fully
-    /// valid indicator history. Always ``True`` for an unbounded frame (no
-    /// warm-up contract). See the ``window=`` constructor argument.
+    /// Whether a windowed frame has warmed up: ``True`` only when every declared directive
+    /// (``max_lookback=[...]``) is past its warm-up on every visible row, counting the rows
+    /// it reads complete (non-missing) — its first value is at or before the first visible
+    /// row. O(1) per append; reading fresh values stays the reader's job (``fulfill``).
+    /// Always ``True`` for an unbounded frame (no warm-up contract).
     ///
     /// Returns:
     ///     bool
     #[getter]
     pub(crate) fn ready(&self) -> bool {
         match &self.window {
-            Some(w) => self.inner.height() >= w.capacity,
+            Some(w) => self.warmed(w),
             None => true,
         }
     }
 
-    /// The physical row count actually retained (window M + margin, bounded by
-    /// `2*(window + max_lookback)`). Internal — equals ``len(df)`` for an unbounded
+    /// The physical row count actually retained (at most twice the retention: the window
+    /// M and its margin, at least the margin + 2). Internal — equals ``len(df)`` for an unbounded
     /// frame; exposed so the test suite can assert a windowed frame's memory stays
     /// bounded across unbounded appends.
     #[getter]

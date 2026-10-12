@@ -250,8 +250,8 @@ fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
 }
 
 pub use crate::exec_resume::{
-    execute_resume, execute_resume_default_series, execute_resume_default_series_one,
-    execute_resume_step, initial_state,
+    capture, checkpoint, execute_resume, execute_resume_default_series, execute_resume_default_series_one,
+    execute_resume_step, initial_state, replay,
 };
 
 /// `hv`'s annualization factor √(bars per year), from its bound arguments
@@ -747,57 +747,57 @@ mod tests {
         // execute_resume: SAR / SAREXT at from_row < 2 -> the inner `*_resume` is None, the
         // `?` propagates (exec:1095 / 1114). State contents are unread on the None path.
         let sar_state = vec![1.0, 0.02, 8.0, 6.0, 9.0, 7.0];
-        assert!(execute_resume(&df, &p("sar"), &sar_state, 1, 0).is_none());
+        assert!(execute_resume(&df, &p("sar"), &sar_state, 1, df.height(), 0).is_none());
         let sarext_state = vec![1.0, 0.02, 0.02, 8.0, 6.0, 9.0, 7.0];
-        assert!(execute_resume(&df, &p("sarext"), &sarext_state, 1, 0).is_none());
+        assert!(execute_resume(&df, &p("sarext"), &sarext_state, 1, df.height(), 0).is_none());
 
         // execute_resume: ±DI at from_row == 0 -> inner resume None, `?` propagates
         // (exec:1245 / 1254).
         let di_state = vec![0.0, 0.0];
-        assert!(execute_resume(&df, &p("plus_di:14"), &di_state, 0, 0).is_none());
-        assert!(execute_resume(&df, &p("minus_di:14"), &di_state, 0, 0).is_none());
+        assert!(execute_resume(&df, &p("plus_di:14"), &di_state, 0, df.height(), 0).is_none());
+        assert!(execute_resume(&df, &p("minus_di:14"), &di_state, 0, df.height(), 0).is_none());
 
         // execute_resume: MAMA with a too-short carried state -> mama_resume None (exec:1320).
         // `from_row` is past the HT core warm-up so the length check is what declines.
         let short_mama = vec![0.0; 10];
-        assert!(execute_resume(&df, &p("mama"), &short_mama, 20, 0).is_none());
+        assert!(execute_resume(&df, &p("mama"), &short_mama, 20, df.height(), 0).is_none());
 
         // execute_resume: index family below its `period - 1` warm-up -> resume None
         // (exec:1335 / 1345). period 30, from_row 5 < 29.
         let idx_state = vec![3.0, 100.0];
-        assert!(execute_resume(&df, &p("maxindex:30"), &idx_state, 5, 0).is_none());
-        assert!(execute_resume(&df, &p("minindex:30"), &idx_state, 5, 0).is_none());
+        assert!(execute_resume(&df, &p("maxindex:30"), &idx_state, 5, df.height(), 0).is_none());
+        assert!(execute_resume(&df, &p("minindex:30"), &idx_state, 5, df.height(), 0).is_none());
 
         // execute_resume: KDJ below its RSV window warm-up (from_row + 1 < period_rsv = 9) ->
         // kdj_resume None, the `?` propagates (exec:1402).
         let kdj_state = vec![50.0, 50.0];
-        assert!(execute_resume(&df, &p("kdj.j"), &kdj_state, 2, 0).is_none());
+        assert!(execute_resume(&df, &p("kdj.j"), &kdj_state, 2, df.height(), 0).is_none());
 
         // execute_resume: stochrsi `.d` non-SMA matype -> `return None` (exec:1355).
         let sr_state = vec![0.0; 20];
-        assert!(execute_resume(&df, &p("stochrsi.d:14,14,3,1"), &sr_state, 40, 0).is_none());
+        assert!(execute_resume(&df, &p("stochrsi.d:14,14,3,1"), &sr_state, 40, df.height(), 0).is_none());
 
         // execute_resume: stochrsi `.k` with a malformed (wrong-length) state -> the inner
         // stochrsi_resume is None, the `?` propagates (exec:1365).
         let bad_sr = vec![0.0; 3]; // not `ctx_depth + 2` for these periods
-        assert!(execute_resume(&df, &p("stochrsi.k:14,14,3"), &bad_sr, 40, 0).is_none());
+        assert!(execute_resume(&df, &p("stochrsi.k:14,14,3"), &bad_sr, 40, df.height(), 0).is_none());
 
         // execute_resume: a directive with no resume kernel hits the `_ => None` arm
         // (exec:1369). `llv` (lowest-low) has no incremental resume.
-        assert!(execute_resume(&df, &p("llv:5"), &[0.0], 3, 0).is_none());
+        assert!(execute_resume(&df, &p("llv:5"), &[0.0], 3, df.height(), 0).is_none());
 
         // execute_resume_step: a recursive directive without a single-row step
         // (`stochrsi`), a finite-memory one (`llv`), a `macd` sub-line that is no step's,
         // and a `next` of the wrong length all decline, so the refresh takes the Vec path.
         let mut next = [0.0; 2];
-        assert!(execute_resume_step(&df, &p("stochrsi.k:14,14,3"), &[1.0], 5, &mut next[..1])
+        assert!(execute_resume_step(&df, &p("stochrsi.k:14,14,3"), &[1.0], (5, 0), &mut next[..1])
             .is_none());
-        assert!(execute_resume_step(&df, &p("llv:5"), &[1.0], 5, &mut next[..1]).is_none());
-        assert!(execute_resume_step(&df, &p("rsi:14"), &[1.0, 1.0], 5, &mut next[..1]).is_none());
+        assert!(execute_resume_step(&df, &p("llv:5"), &[1.0], (5, 0), &mut next[..1]).is_none());
+        assert!(execute_resume_step(&df, &p("rsi:14"), &[1.0, 1.0], (5, 0), &mut next[..1]).is_none());
         // a composite average declines a state of the wrong length, and a row past the end
-        assert!(execute_resume_step(&df, &p("apo"), &[1.0, 1.0], 5, &mut next[..2]).is_none());
+        assert!(execute_resume_step(&df, &p("apo"), &[1.0, 1.0], (5, 0), &mut next[..2]).is_none());
         let apo = initial_state(&df, &p("apo"), &Column::f64(vec![])).unwrap();
         let mut n = apo.clone();
-        assert!(execute_resume_step(&df, &p("apo"), &apo, df.height(), &mut n).is_none());
+        assert!(execute_resume_step(&df, &p("apo"), &apo, (df.height(), 0), &mut n).is_none());
     }
 }

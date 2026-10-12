@@ -687,6 +687,53 @@ pub fn is_recursive(name: &str, args: &[ArgValue]) -> bool {
         .any(|&(p, m)| args.get(p).zip(args.get(m)).is_some_and(|(p, m)| volas_compute::raw::indicators::is_recursive_generic_ma(p.as_usize(), m.as_usize())))
 }
 
+/// How a class-3 command's history is kept by a frame that does not hold all of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// By the state its resume continues from (its `initial_state` / `execute_resume`
+    /// arms): a checkpoint of that state replays it.
+    State,
+    /// By its window: its values are a function of a trailing window of its rows.
+    Window,
+    /// Not at all: it carries no state (it recomputes), so only the whole history gives it.
+    Nothing,
+}
+
+/// A command's history class (how its value depends on the rows before it), the one
+/// owner of the classification: class 1 depends on a trailing window, class 2 on a
+/// running accumulator over a trailing window, class 3 on every row before — a
+/// recursion, a cumulative line or an unbounded count, with how it is kept. A bounded
+/// window computes a class-1 directive on request and the others only when declared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryClass {
+    /// Class 1.
+    Window,
+    /// Class 2.
+    Accumulator,
+    /// Class 3.
+    Recursion(Keep),
+}
+
+/// The history class of the bound command `name` / `sub` with `args` (see
+/// [`HistoryClass`]). Class 3: every recursion ([`is_recursive`]) — kept by its state
+/// unless it is `crsi`, `kcw`, `stoch_momentum` or a moving-average-type form, which
+/// recompute — and `increase`, a count over its window. Class 2: the running
+/// accumulators ([`accumulates`]). Guarded over every command by the history-class tests.
+pub fn history_class(name: &str, sub: Option<&str>, args: &[ArgValue]) -> HistoryClass {
+    if name == "increase" {
+        return HistoryClass::Recursion(Keep::Window);
+    }
+    if is_recursive(name, args) {
+        let state = is_recursive_name(name) && !matches!(name, "crsi" | "kcw" | "stoch_momentum");
+        return HistoryClass::Recursion(if state { Keep::State } else { Keep::Nothing });
+    }
+    if accumulates(name, sub) {
+        HistoryClass::Accumulator
+    } else {
+        HistoryClass::Window
+    }
+}
+
 /// Whether a command's output is an absolute row position.
 pub fn emits_position(name: &str) -> bool {
     ABSOLUTE_POSITION.contains(&name)
@@ -713,13 +760,13 @@ pub fn accumulates(name: &str, sub: Option<&str>) -> bool {
 }
 
 /// Whether continuing a command reads one row more than its lookback: the row its
-/// window drops (a sliding sum — [`accumulates`] — KAMA's volatility sum, PSY's count
-/// of up days, the extremum-position window) or SAR's bar before the previous one. The
+/// window drops (a sliding sum — [`accumulates`] — KAMA's volatility sum, the
+/// extremum-position window) or SAR's bar before the previous one. The
 /// one per-command fact behind [`crate::lookback::reach`]; guarded over every command by the
 /// continuation-reach test.
 pub fn reads_past_lookback(name: &str, sub: Option<&str>) -> bool {
     accumulates(name, sub)
-        || matches!(name, "kama" | "psy" | "maxindex" | "minindex" | "minmaxindex" | "sar" | "sarext")
+        || matches!(name, "kama" | "maxindex" | "minindex" | "minmaxindex" | "sar" | "sarext")
 }
 
 #[cfg(test)]

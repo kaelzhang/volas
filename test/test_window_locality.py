@@ -167,9 +167,9 @@ RECURSIVE = {
     "mama": "mama",
 }
 
-# Indicators that emit their first value from a partial first difference (as 通达信
-# does): they read one row more than `directive_lookback` reports.
-EXTRA_REACH = {"psy": 1}
+# Indicators that read more rows than `directive_lookback` reports (none: a value reads
+# its lookback's rows alone — psy's first window starts at the first difference).
+EXTRA_REACH: dict[str, int] = {}
 # Indicators whose output is an absolute row position.
 ABSOLUTE_POSITION = {"maxindex", "minindex", "minmaxindex"}
 

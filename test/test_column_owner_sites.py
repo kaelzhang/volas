@@ -279,7 +279,9 @@ def test_a_cached_directive_of_any_dtype_survives_appends(d):
 def test_a_cached_int_or_bool_directive_through_window_compaction(d):
     cols = _ohlcv(60)
     full = volas.DataFrame(cols)
-    w = volas.DataFrame({k: v[:6] for k, v in cols.items()}, window=4, max_lookback=['ma:3'])
+    # a running accumulator is declared (class 2); a constant is computed on request
+    declared = ['ma:3'] + ([d] if 'ma:' in d else [])
+    w = volas.DataFrame({k: v[:6] for k, v in cols.items()}, window=4, max_lookback=declared)
     w[d]
     for i in range(6, 60):
         w.append(volas.DataFrame({k: v[i:i + 1] for k, v in cols.items()}))

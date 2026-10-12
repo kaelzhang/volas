@@ -214,26 +214,40 @@ def test_variance_stddev_matches_talib(ohlc):
 def test_math_operators_match_talib(ohlc):
     df, h, l, c = ohlc
 
-    def idx_parity(got, want, start):
+    def idx_parity(got, want, start, pick):
         # MAXINDEX/MININDEX/MINMAXINDEX emit integer indices; TA-Lib fills their
         # warm-up with 0, whereas volas uses NaN — its uniform warm-up convention,
         # and 0 is a valid index, so emitting it would be ambiguous. Assert the NaN
-        # warm-up, then compare the valid region (the index values themselves match).
+        # warm-up, then compare the valid region: TA-Lib's index where the window's
+        # extreme is unique; where it is tied, the latest tied position (TA-Lib's
+        # tracker reports the earliest after a rebuild — a documented divergence that
+        # keeps each value a function of its window).
         got = np.asarray(got, dtype=float)
+        want = np.asarray(want, dtype=float).copy()
         assert np.all(np.isnan(got[:start])), 'index outputs warm up with NaN'
-        np.testing.assert_allclose(got[start:], np.asarray(want, dtype=float)[start:],
-                                   rtol=1e-9, atol=1e-9)
+        ties = 0
+        for k in range(start, len(c)):
+            win = c[k - start:k + 1]
+            at = np.flatnonzero(win == pick(win))
+            if len(at) > 1:
+                want[k] = k - start + at[-1]
+                ties += 1
+        np.testing.assert_allclose(got[start:], want[start:], rtol=1e-9, atol=1e-9)
+        return ties
 
+    ties = 0
     for p in (10, 30):  # 30 is the shared TA-Lib default
         _parity(df.exec(f'sum:{p}'), talib.SUM(c, p))
-        idx_parity(df.exec(f'maxindex:{p}'), talib.MAXINDEX(c, p), p - 1)
-        idx_parity(df.exec(f'minindex:{p}'), talib.MININDEX(c, p), p - 1)
+        ties += idx_parity(df.exec(f'maxindex:{p}'), talib.MAXINDEX(c, p), p - 1, np.max)
+        ties += idx_parity(df.exec(f'minindex:{p}'), talib.MININDEX(c, p), p - 1, np.min)
         mn, mx = talib.MINMAX(c, p)  # value outputs: NaN warm-up, matches volas
         _parity(df.exec(f'minmax.min:{p}'), mn)
         _parity(df.exec(f'minmax.max:{p}'), mx)
         mni, mxi = talib.MINMAXINDEX(c, p)
-        idx_parity(df.exec(f'minmaxindex.min:{p}'), mni, p - 1)
-        idx_parity(df.exec(f'minmaxindex.max:{p}'), mxi, p - 1)
+        idx_parity(df.exec(f'minmaxindex.min:{p}'), mni, p - 1, np.min)
+        idx_parity(df.exec(f'minmaxindex.max:{p}'), mxi, p - 1, np.max)
+    # the fixture holds tied extremes, so the tie rule is exercised
+    assert ties
     _parity(df.exec('sum:30'), talib.SUM(c, 30))  # default resolves to 30
 
 

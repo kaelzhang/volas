@@ -265,6 +265,9 @@ class TfLedger:
         rows = [dict(r) for r in coarse.rows]
         for pos, cells in writes.items():
             rows[pos].update(cells)
+        for row in rows:  # a new column is missing on the rows not written (a window's margin)
+            for col in columns or {}:
+                row.setdefault(col, None)
         for col, value in writes.get(last, {}).items():
             if columns and col in columns:
                 self.override[col] = value  # the bars hold it as missing

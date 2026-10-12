@@ -147,9 +147,8 @@ class TfMachine(FrameMachine):
     # --- writes (docs/cumulation.md, "Writing to a time-frame frame") ----------------------
 
     def _writable(self) -> bool:
-        # a stale frame refuses writes (the plain machine covers it); a windowed frame's
-        # writes restart carried state on the retained rows only while that is open
-        return not self.stale and not (self.window is not None and contracts.avoids('windowed-drift'))
+        # a stale frame refuses writes (the plain machine covers it)
+        return not self.stale
 
     def _wrote(self) -> None:
         if self.cached:
@@ -183,7 +182,8 @@ class TfMachine(FrameMachine):
                   'loc': lambda: self.df.loc.__setitem__((label, col), value)}[via]
 
         def commit(_):
-            self.store.write({pos: {col: stored}})
+            # the frame's visible row `pos` is the ledger's row `visible_start + pos`
+            self.store.write({self.visible_start() + pos: {col: stored}})
             self._wrote()
 
         refused = pos == last and self.store.refuses(col, stored)
@@ -193,8 +193,9 @@ class TfMachine(FrameMachine):
     @precondition(lambda self: len(self.df) > 0)
     @rule(data=st.data(), name=st.sampled_from(['u0', 'u1', 'close', 'x']))
     def set_column(self, data, name):
-        """``df[name] = values``: a new plain float column, or a float data column replaced."""
-        if not self._writable() or self.window is not None:
+        """``df[name] = values``: a new plain float column, or a float data column replaced
+        (on a windowed frame, its visible rows: the hidden margin keeps its history)."""
+        if not self._writable():
             return
         coarse = self.coarse()
         if name in coarse.columns and coarse.dtype(name) != 'float64':
@@ -205,7 +206,8 @@ class TfMachine(FrameMachine):
         existing = name in self.df.columns
 
         def commit(_):
-            self.store.write({i: {name: float(v)} for i, v in enumerate(values)},
+            start = self.visible_start()
+            self.store.write({start + i: {name: float(v)} for i, v in enumerate(values)},
                              columns=None if existing else {name: 'float64'})
             if existing:
                 self._wrote()  # a replaced column may feed any cache
@@ -230,10 +232,13 @@ class TfMachine(FrameMachine):
         held = self.df.get_column(name).to_numpy()
 
         def commit(_):
-            cells = {i: {name: None if np.isnan(v) else float(v)} for i, v in enumerate(held)}
-            cells[pos] = {name: -3.25}
+            start = self.visible_start()  # visible row i is the ledger's row start + i
+            cells = {start + i: {name: None if np.isnan(v) else float(v)} for i, v in enumerate(held)}
+            cells[start + pos] = {name: -3.25}
             del self.cached[name]
             self.store.write(cells, columns={name: 'float64'})
+            if self.window is not None:
+                self.opaque.add(name)  # its hidden cells stay as the cache held them
             self._wrote()
 
         self.attempt(lambda: self.df.iloc.__setitem__((pos, j), -3.25), commit=commit,

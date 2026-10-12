@@ -20,7 +20,7 @@ fn frame() -> DataFrame {
         None,
     )
     .unwrap();
-    df.set_computed("c", Reach { lookback: 0, resume: 0, continuation: 0, recursive: false });
+    df.set_computed("c", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     df
 }
 

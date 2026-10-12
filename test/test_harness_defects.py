@@ -128,7 +128,7 @@ def test_a_windowed_source_contributes_only_its_visible_rows():
 
 def test_a_stale_windowed_frame_rejects_a_bulk_read():
     cols = _walk(40)
-    df = volas.DataFrame({k: v[:30] for k, v in cols.items()}, window=1, max_lookback=19)
+    df = volas.DataFrame({k: v[:30] for k, v in cols.items()}, window=1, max_lookback=['accbands'])
     df['accbands']
     df.append(_frame(cols, 30, 31))
     with pytest.raises(ValueError, match='stale'):
@@ -281,7 +281,6 @@ def test_an_all_nan_period_folds_to_nan():
     assert np.isnan(df.get_column('low').to_numpy()[0])
 
 
-@_xfail('M5 windowed-drift', 'a windowed recursive column is not bit-exact with the unbounded frame')
 def test_a_windowed_recursive_column_is_bit_exact():
     rng = np.random.default_rng(1)
     c = 100 + np.cumsum(rng.standard_normal(200))
@@ -332,3 +331,20 @@ def test_ultosc_with_unordered_periods_refreshes_like_the_full_compute(directive
         df.append(_frame(cols, i, i + 1))
         df.fulfill()
     assert _same(df[directive], _frame(cols, 0, 80)[directive])
+
+
+@_xfail('slice-resend-short', 'a re-sent last row of a slice holding just the lookback reads rows it lacks')
+@pytest.mark.parametrize('directive', ['ma:5', 'roc:3', 'pivot_points.r1', 'llv:4'])
+def test_a_re_sent_last_row_of_a_lookback_long_slice_is_exact(directive):
+    cols = _walk(40)
+    keep = volas.directive_lookback(directive)
+    index = list(range(40))
+    df = volas.DataFrame(cols, index=index)
+    df[directive]
+    resent = volas.DataFrame({k: [v[-1] + 0.5] for k, v in cols.items()}, index=[39])
+    whole = volas.DataFrame(cols, index=index)
+    whole[directive]
+    whole.append(resent)
+    tail = df.iloc[40 - keep:]
+    tail.append(resent)
+    assert np.array_equal(tail[directive].to_numpy(), whole[directive].to_numpy()[-keep:], equal_nan=True)

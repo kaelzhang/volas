@@ -152,14 +152,10 @@ def test_reporter_seeded_5m_frame_folds_1m_bars_bit_exact():
 
 _RECURSIVE_SUBS = sorted(k for k in SUBCOMMANDS if k.split(".", 1)[0] in RECURSIVE)
 _ALL_RECURSIVE = sorted(set(RECURSIVE.values()) | {SUBCOMMANDS[k] for k in _RECURSIVE_SUBS})
-# A bounded window does not keep these equal to an unbounded frame on a plain frame
-# either (the cumulative family and a few compound ones restart inside the retained
-# margin), so the windowed comparison covers the rest.
-_WINDOW_NOT_BIT_EXACT = {
-    "ad", "asi", "kama:5", "kcw", "nvi", "obv", "pvi", "pvt", "stoch_momentum",
-    "stoch_momentum.signal", "wad",
-}
-_WINDOWED = sorted(set(_ALL_RECURSIVE) - _WINDOW_NOT_BIT_EXACT)
+# The recursions a bounded window keeps exactly: every one carrying a state (the
+# others — a command that recomputes — cannot be declared on a windowed frame).
+_UNKEPT = {"crsi", "kcw", "stoch_momentum", "stoch_momentum.signal"}
+_WINDOWED = sorted(set(_ALL_RECURSIVE) - _UNKEPT)
 
 
 def _closed_15m(minutes_1m, fine):
@@ -305,3 +301,10 @@ def test_empty_time_frame_frame_with_a_cached_column():
         live.fulfill()
         _check(live, directives, f"bar={i}")
     assert len(live) == 14
+
+
+@pytest.mark.parametrize("directive", sorted(_UNKEPT & set(_ALL_RECURSIVE)))
+def test_a_windowed_tf_frame_refuses_a_recursion_it_cannot_keep(directive):
+    seed_cols, seed_idx = _closed_15m(np.arange(45), _hist(0, 45))
+    with pytest.raises(ValueError, match=r"cannot keep .* exact on a windowed frame"):
+        volas.DataFrame(seed_cols, index=seed_idx, time_frame="15m", window=4, max_lookback=[directive])

@@ -142,12 +142,12 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-correl"></a>`correl` | `CORREL` | Pearson correlation coefficient. | `:<period>@<series=close>,<series_other>` |
 | <a id="indicator-beta"></a>`beta` | `BETA` | Beta. | `:<period>@<series=close>,<series_other>` |
 | <a id="indicator-sum"></a>`sum` | `SUM` | Rolling sum. | `:<period>@<series=close>` |
-| <a id="indicator-maxindex"></a>`maxindex` | `MAXINDEX` | Index of the rolling maximum. | `:<period>@<series=close>` |
-| <a id="indicator-minindex"></a>`minindex` | `MININDEX` | Index of the rolling minimum. | `:<period>@<series=close>` |
+| <a id="indicator-maxindex"></a>`maxindex` | `MAXINDEX` | Index of the rolling maximum; a tie reports the latest equal high, so a value depends on its window alone (TA-Lib reports the earliest after its tracker rebuilds, a deliberate divergence). | `:<period>@<series=close>` |
+| <a id="indicator-minindex"></a>`minindex` | `MININDEX` | Index of the rolling minimum; a tie reports the latest equal low (see `maxindex`). | `:<period>@<series=close>` |
 | <a id="indicator-minmax-min"></a>`minmax.min` | `MINMAX` | Rolling minimum from the MINMAX pair. | `:<period>@<series=close>` |
 | <a id="indicator-minmax-max"></a>`minmax.max` | `MINMAX` | Rolling maximum from the MINMAX pair. | `:<period>@<series=close>` |
-| <a id="indicator-minmaxindex-min"></a>`minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair. | `:<period>@<series=close>` |
-| <a id="indicator-minmaxindex-max"></a>`minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair. | `:<period>@<series=close>` |
+| <a id="indicator-minmaxindex-min"></a>`minmaxindex.min` | `MINMAXINDEX` | Index of the rolling minimum from the pair; a tie reports the latest equal low (see `maxindex`). | `:<period>@<series=close>` |
+| <a id="indicator-minmaxindex-max"></a>`minmaxindex.max` | `MINMAXINDEX` | Index of the rolling maximum from the pair; a tie reports the latest equal high (see `maxindex`). | `:<period>@<series=close>` |
 | <a id="indicator-cdl-2crows"></a>`cdl.2crows` | `CDL2CROWS` | Two Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-cdl-3blackcrows"></a>`cdl.3blackcrows` | `CDL3BLACKCROWS` | Three Black Crows | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-cdl-3inside"></a>`cdl.3inside` | `CDL3INSIDE` | Three Inside Up/Down | `@<series_open=open>,<series_high=high>,<series_low=low>,<series_close=close>` |

@@ -216,7 +216,9 @@ nothing, and costs time in the cells it writes, never in the frame's length: no 
 is copied (unless a Series or an export still shares it), and a label is found by a
 binary search over an ordered index — on a plain, time-frame or windowed frame alike.
 Like a bulk read, a write raises while a cached directive column is stale; a mask that
-selects no row changes nothing.
+selects no row changes nothing. On a bounded (`window=`) frame a whole-column assignment
+writes the visible rows only and keeps the hidden margin's history (see
+[Bounded rolling window](dataframe-api.md#bounded-rolling-window)).
 
 ```py
 df['signal'] = 0.0                      # add / replace a column (scalar | array | Series)

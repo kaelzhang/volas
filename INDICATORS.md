@@ -341,7 +341,8 @@ psy:<period>@<on>
 ```
 
 The percentage of rising days (close above the previous close) over the last
-`period` bars.
+`period` bars. The first bar has no previous close, so the first value is at bar
+`period` (its window of `period` comparisons reads `period + 1` closes).
 
 - **period?** `int=12`
 - **on?** `str='close'` Which column or directive the calculation is based on.

@@ -21,12 +21,13 @@ use super::as_command;
 /// `row` into `next` (which must be `prev_state`'s length). A row missing an input is NaN
 /// and does not advance the state (`next` is `prev_state`). `None` when `node` has no
 /// single-row step, or the step declines (`row` out of range, a state of the wrong
-/// shape) — the caller then takes the `Vec` resume.
+/// shape, or a frame that dropped complete rows of the history the step reads — `since`
+/// as in [`super::execute_resume`]) — the caller then takes the `Vec` resume.
 pub fn execute_resume_step(
     df: &DataFrame,
     node: &Ast,
     prev_state: &[f64],
-    row: usize,
+    (row, since): (usize, usize),
     next: &mut [f64],
 ) -> Option<f64> {
     let (name, sub, args, series) = as_command(node)?;
@@ -49,7 +50,7 @@ pub fn execute_resume_step(
     let out = crate::complete::resume_one(
         df,
         &cmd,
-        row,
+        (row, since),
         || {
             missing.set(true);
             Some(f64::NAN)

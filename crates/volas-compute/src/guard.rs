@@ -293,6 +293,16 @@ impl<const K: usize> Slide<K> {
     }
 }
 
+/// Whether a frame holds the rows a carried window state reads at `row` (the frame's
+/// row): a state that has seen `seen` rows of a `period`-row window reads the window's
+/// rows up to `row`, and — once full — the row leaving it, `row - period`. A state carried
+/// into a frame that does not hold them (a resume too close to the frame's row 0) is
+/// declined, never read below row 0.
+#[inline]
+pub(crate) fn holds_window(row: usize, seen: usize, period: usize) -> bool {
+    row + 1 > seen.min(period)
+}
+
 /// `term`'s values with the default finiteness test: every term finite.
 #[inline]
 pub(crate) fn all_finite<const K: usize>(t: [f64; K]) -> ([f64; K], bool) {

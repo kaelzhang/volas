@@ -560,6 +560,9 @@ pub fn linreg_step(
     let mut sum_d = Csum::from_state(&state[..2])?;
     let mut sum_ad = Csum::from_state(&state[2..4])?;
     let (mut bad, seen, pos) = (state[4] as usize, state[5] as usize, state[6] as usize);
+    if !crate::guard::holds_window(row, seen, period) {
+        return None;
+    }
     let p = period as f64;
     let (sum_x, divisor) = linreg_x_sums(period);
     let k = data[shift_row(row, pos, period)];
