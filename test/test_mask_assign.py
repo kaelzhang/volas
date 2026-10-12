@@ -58,7 +58,7 @@ def test_cell_mask_fills_datetime_holes_from_string():
     df = DataFrame({'a': np.array(['2021-01-01', 'NaT', '2021-01-03'], dtype='datetime64[ns]')})
     df[df.isna()] = '2021-01-02'
     got = df['a'].to_list()
-    assert got[1] == np.datetime64('2021-01-02') and df.isna()['a'].to_list() == [False, False, False]
+    assert got[1] == vs.Timestamp('2021-01-02', tz='UTC') and df.isna()['a'].to_list() == [False, False, False]
 
 
 # --- mixed-frame atomicity ----------------------------------------------------

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PySlice, PySliceIndices, PyTuple};
+use pyo3::types::{PyList, PySlice, PySliceIndices, PyString, PyTuple};
 use volas_core::{
-    Column, DType, DataFrame, Index, Label, Series,
+    Column, DType, DataFrame, Index, IndexKind, Label, Series, SliceBound,
 };
 
 #[allow(unused_imports)]
@@ -219,7 +219,7 @@ pub(crate) fn loc_positions(sel: &Bound<'_, PyAny>, index: &Index, height: usize
     }
     if let Ok(slice) = sel.downcast::<PySlice>() {
         let (lo, hi) = label_bounds(slice, index)?;
-        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
+        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
         return Ok((a..b).collect());
     }
     if let Ok(list) = sel.downcast::<PyList>() {
@@ -467,25 +467,14 @@ pub(crate) fn positional_slice(df: &DataFrame, info: &PySliceIndices) -> DataFra
     }
 }
 
-/// Slice a frame by a Python slice — positional for integer bounds, label-based
-/// (DatetimeIndex) for string bounds.
+/// Slice a frame by a Python slice — label-based when either bound is a string
+/// (`df['a':'b']`), positional otherwise.
 pub(crate) fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResult<DataFrame> {
-    let start_obj = slice.getattr("start")?;
-    let stop_obj = slice.getattr("stop")?;
-    let is_label = start_obj.extract::<String>().is_ok() || stop_obj.extract::<String>().is_ok();
-    if is_label {
+    let is_text = |o: &Bound<'_, PyAny>| o.is_instance_of::<PyString>();
+    if is_text(&slice.getattr("start")?) || is_text(&slice.getattr("stop")?) {
         let index = df.index();
-        let lo = if start_obj.is_none() {
-            None
-        } else {
-            Some(parse_label(&start_obj, index)?)
-        };
-        let hi = if stop_obj.is_none() {
-            None
-        } else {
-            Some(parse_label(&stop_obj, index)?)
-        };
-        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
+        let (lo, hi) = label_bounds(slice, index)?;
+        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
         Ok(df.slice(a, b))
     } else {
         let info = slice.indices(df.height() as isize)?;
@@ -493,23 +482,31 @@ pub(crate) fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResul
     }
 }
 
+/// The two bounds of a label slice (`None` for an open end), each tagged with
+/// whether it was written as a string — the one place a Python slice bound
+/// becomes a [`SliceBound`]. A bound of the other label kind (a string against a
+/// numeric index, an integer against a string index) is kept as written, so
+/// [`Index::label_slice`] rejects it with a `TypeError`.
 pub(crate) fn label_bounds(
     slice: &Bound<'_, PySlice>,
     index: &Index,
-) -> PyResult<(Option<Label>, Option<Label>)> {
-    let start_obj = slice.getattr("start")?;
-    let stop_obj = slice.getattr("stop")?;
-    let lo = if start_obj.is_none() {
-        None
-    } else {
-        Some(parse_label(&start_obj, index)?)
+) -> PyResult<(Option<SliceBound>, Option<SliceBound>)> {
+    let bound = |obj: Bound<'_, PyAny>| -> PyResult<Option<SliceBound>> {
+        if obj.is_none() {
+            return Ok(None);
+        }
+        let text = obj.is_instance_of::<PyString>();
+        let label = match index.kind() {
+            IndexKind::Range(_) | IndexKind::Int64(_) if text => Label::Str(obj.extract()?),
+            IndexKind::Str(_) if !text => match obj.extract::<i64>() {
+                Ok(x) => Label::I64(x),
+                Err(_) => parse_label(&obj, index)?,
+            },
+            _ => parse_label(&obj, index)?,
+        };
+        Ok(Some(if text { SliceBound::text(label) } else { SliceBound::exact(label) }))
     };
-    let hi = if stop_obj.is_none() {
-        None
-    } else {
-        Some(parse_label(&stop_obj, index)?)
-    };
-    Ok((lo, hi))
+    Ok((bound(slice.getattr("start")?)?, bound(slice.getattr("stop")?)?))
 }
 
 /// `df.loc[...]` label indexer.
@@ -538,7 +535,7 @@ impl DataFrameLoc {
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, index)?;
-            let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref());
+            let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
             return Ok(Py::new(py, PyDataFrame::plain(df.slice(a, b)))?.into_any());
         }
         // boolean-mask / label-list row selection -> sub-frame.
@@ -711,7 +708,7 @@ impl SeriesLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, &self.inner.index)?;
-            let (a, b) = self.inner.index.label_slice(lo.as_ref(), hi.as_ref());
+            let (a, b) = self.inner.index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
             let positions: Vec<usize> = (a..b).collect();
             let data = self.inner.data.take(&positions);
             let index = Arc::new(self.inner.index.take(&positions));

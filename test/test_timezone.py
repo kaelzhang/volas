@@ -152,3 +152,13 @@ def test_cumulate_daily_buckets_align_to_ny_day():
          'close': [1.0, 2.0], 'volume': [10.0, 20.0]})
     daily_utc = df_utc.cumulate('1d')
     assert daily_utc.shape[0] == 1
+
+
+def test_tz_localize_keeps_subsecond_rows_distinct():
+    # two ticks inside one second stay two instants after localizing, so a 1s
+    # cumulation sums both (whole-second rebuilding collapsed them into one label)
+    t = np.array(['2026-03-08T06:59:59.250', '2026-03-08T06:59:59.750'], 'datetime64[ns]')
+    df = DataFrame({'t': t, 'volume': [1.0, 1.0]}).set_index('t').tz_localize('Asia/Shanghai')
+    inst = df.index.astype('datetime64[ns]')
+    assert inst[1] - inst[0] == np.timedelta64(500, 'ms')
+    assert df.cumulate('1s', cumulators={'volume': 'sum'})['volume'].to_list() == [2.0]

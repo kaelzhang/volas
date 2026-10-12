@@ -88,6 +88,20 @@ fn abs_diff_round_floordiv_raise_on_overflow() {
     assert!(overflow(Column::i64(vec![i64::MAX]).round(-1)));
     assert!(overflow(Column::i32(vec![i32::MAX]).round(-1)));
     assert_eq!(Column::i32(vec![15]).round(-1).unwrap(), Column::i32(vec![20]));
+    // 10^19 is past i64: |x| > 5e18 rounds to +-1e19 (overflow), the tie to even 0
+    const E18: i64 = 1_000_000_000_000_000_000;
+    assert!(overflow(Column::i64(vec![6 * E18]).round(-19)));
+    assert!(overflow(Column::i64(vec![-6 * E18]).round(-19)));
+    assert!(overflow(Column::i64(vec![5 * E18 + 1]).round(-19)));
+    assert_eq!(
+        Column::i64(vec![5 * E18, -5 * E18, 5 * E18 - 1]).round(-19).unwrap(),
+        Column::i64(vec![0, 0, 0])
+    );
+    // 10^k past i128 (k >= 39): every i64 rounds to 0
+    assert_eq!(
+        Column::i64(vec![i64::MAX, i64::MIN]).round(i32::MIN).unwrap(),
+        Column::i64(vec![0, 0])
+    );
     // the one overflowing integer floor division
     assert!(overflow(Column::i64(vec![i64::MIN]).floordiv(&Column::i64(vec![-1]))));
     assert!(overflow(Column::i32(vec![i32::MIN]).floordiv(&Column::i32(vec![-1]))));

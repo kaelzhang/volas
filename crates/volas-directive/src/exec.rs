@@ -10,6 +10,7 @@ use volas_compute::missing::{on_complete_rows, Input};
 use volas_core::Column;
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
+use volas_time::Span;
 
 /// Execute for the computed-column REFRESH path: identical to [`execute`]
 /// except a bare `Name` node is dispatched as a COMMAND, never resolved as a
@@ -135,10 +136,6 @@ pub(crate) fn arg_f64(args: &[ArgValue], i: usize) -> f64 {
 
 pub(crate) fn arg_i64(args: &[ArgValue], i: usize) -> i64 {
     args[i].as_i64()
-}
-
-pub(crate) fn arg_str(args: &[ArgValue], i: usize) -> &str {
-    args[i].as_str()
 }
 
 // --- series resolution ------------------------------------------------------
@@ -268,33 +265,28 @@ pub use crate::exec_resume::{
     execute_resume_step, initial_state,
 };
 
-/// Map a time-frame string like `"15m"` / `"1h"` / `"1d"` to minutes.
-pub(crate) fn tf_to_minutes(s: &str) -> Result<i64> {
-    let s = s.trim();
-    let (num, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: i64 = num
-        .parse()
-        .map_err(|_| VolasError::Value(format!("invalid time frame '{s}'")))?;
-    let mult = match unit {
-        "m" => 1,
-        "h" => 60,
-        "d" => 1440,
-        "W" => 10080,
-        "M" => 43200,
-        "Y" => 525600,
-        // seconds: minutes = n/60, clamped to >= 1 to avoid division by zero
-        "s" => return Ok((n / 60).max(1)),
-        _ => {
-            return Err(VolasError::Value(format!(
-                "invalid time frame unit in '{s}'"
-            )))
-        }
+/// `hv`'s annualization factor √(bars per year), from its bound arguments
+/// `[period, time_frame, trading_days, session_minutes]` — the one owner of the rule,
+/// shared by the full and the resumed computation. Bars per year follow the time
+/// frame's unit:
+///
+/// * a sub-day bar of `s` seconds: `trading_days × session_minutes × 60 / s` (bars per
+///   trading session times sessions per year, exact for second bars);
+/// * `k` days: `trading_days / k`;
+/// * `k` weeks: `52 / k`; `k` months: `12 / k`; `k` years: `1 / k`.
+///
+/// `session_minutes` applies to sub-day bars only and `trading_days` to sub-day and
+/// day bars only.
+pub(crate) fn hv_annualization(args: &[ArgValue]) -> f64 {
+    let trading_days = args[2].as_i64() as f64;
+    let bars_per_year = match args[1].as_time_frame().span() {
+        Span::Seconds(s) => trading_days * (args[3].as_usize() * 60) as f64 / s as f64,
+        Span::Days(k) => trading_days / k as f64,
+        Span::Weeks(k) => 52.0 / k as f64,
+        Span::Months(k) => 12.0 / k as f64,
+        Span::Years(k) => 1.0 / k as f64,
     };
-    // a zero / negative span (e.g. "0m") would divide the annualization by zero
-    if n < 1 {
-        return Err(VolasError::Value(format!("invalid time frame '{s}'")));
-    }
-    Ok(n * mult)
+    bars_per_year.sqrt()
 }
 
 #[cfg(test)]
@@ -504,6 +496,10 @@ mod tests {
         assert!(is_err("increase:3,0"), "direction must be +1 / -1");
         assert!(is_err("hv:10,1d,0"), "hv trading days must be >= 1");
         assert!(is_err("hv:10,0m"), "a zero time-frame span");
+        assert!(is_err("hv:10,30s"), "not a TimeFrame label");
+        assert!(is_err("hv:10,1\u{e9}"), "a multibyte last character");
+        assert!(is_err("hv:10,15m,252,0"), "a zero-minute session");
+        assert!(is_err("hv:10,15m,252,1441"), "a session longer than a day");
         assert!(is_err("boll.upper:20,nan"), "NaN multiplier poisons the band");
         assert!(is_err("mavp:30,2@close,close"), "inverted mavp period limits");
         assert!(is_err("mavp:0,30@close,close"), "mavp min period below 1");
@@ -648,13 +644,40 @@ mod tests {
             "hv:10,1d,252",
             "hv:10,15m",
             "hv:10,1h",
+            "hv:10,1s,252,390",
+            "hv:10,3d",
             "hv:10,1W",
             "hv:10,1M",
             "hv:10,1Y",
-            "hv:10,30s", // seconds -> minutes clamps to >= 1
         ] {
             assert_eq!(execute(&df, &parse(d).unwrap()).unwrap().len(), 30);
         }
+    }
+
+    /// Bars per year by the time frame's unit: sub-day bars scale by the session,
+    /// day bars by the trading days, and weeks / months / years are fixed counts.
+    #[test]
+    fn hv_annualization_follows_the_time_frame_unit() {
+        let bars_per_year = |d: &str| {
+            let args: Vec<Option<String>> =
+                d["hv:".len()..].split(',').map(|t| Some(t.to_string())).collect();
+            hv_annualization(&bind_command("hv", None, &args, &[]).unwrap().args).powi(2)
+        };
+        let close = |d: &str, want: f64| {
+            let got = bars_per_year(d);
+            assert!((got - want).abs() <= want * 1e-14, "{d}: {got} vs {want}");
+        };
+        close("hv:10", 252.0);
+        close("hv:10,1d,365", 365.0);
+        close("hv:10,3d", 84.0);
+        close("hv:10,1w", 52.0);
+        close("hv:10,1M", 12.0);
+        close("hv:10,1y", 1.0);
+        close("hv:10,15m,252,390", 252.0 * 26.0);
+        close("hv:10,4h,252,390", 252.0 * 1.625);
+        close("hv:10,1s,252,240", 252.0 * 240.0 * 60.0);
+        close("hv:10,15m,365", 365.0 * 96.0);
+        close("hv:10,4h,252,240", 252.0); // a bar as long as the session: one per day
     }
 
     #[test]

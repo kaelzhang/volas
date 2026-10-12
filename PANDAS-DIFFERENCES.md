@@ -490,12 +490,25 @@ corrupted. volas keeps datetime a distinct logical type (so it is never summed,
 averaged, or compared through the float funnel), with `NaT` as its missing value and
 a per-frame timezone that governs display and matching while storage stays UTC.
 
-The timezone lives on the **DatetimeIndex only** — there is no column-level tz
-(pandas attaches one to every datetime column). A consequence: `reset_index()` on a
-tz-aware frame moves the labels into a plain datetime column, which has no tz slot,
-so the display zone is dropped (the column shows naive-UTC wall clocks). The absolute
-instants are lossless — `set_index` + `tz_convert` restores the original display —
-but the zone itself does not ride along through a reset/set round-trip.
+The timezone lives on the **DatetimeIndex only** — a datetime **column** holds UTC
+instants and stores no zone (pandas attaches one to every datetime column). Every
+export that can state a zone states UTC: `to_pandas()` gives `datetime64[ns, UTC]`,
+Arrow `timestamp[ns, tz=UTC]`, cells are `Timestamp(..., tz='UTC')` and `.dt.tz` is
+`'UTC'` (NumPy `datetime64[ns]` has no zone slot and carries the same UTC instants).
+So a pandas `datetime64[ns, Asia/Shanghai]` column round-trips as
+`datetime64[ns, UTC]`, and a naive pandas column comes back UTC-aware; the instants
+are exact, the zone is not kept. `reset_index()` on a tz-aware frame likewise moves the
+labels into a UTC column. Restore a zone by converting the instants:
+`df.set_index('t').tz_localize('UTC').tz_convert(zone)` (or `.dt.tz_convert(zone)` on
+the pandas side).
+
+A scalar `Timestamp` compares like pandas': with another instant (a `Timestamp`, a
+`datetime` / `pd.Timestamp`, an `np.datetime64`) by instant, naive and aware never
+equal; a string or an integer (an epoch included) is not an instant — `==` is `False`,
+`!=` `True`, ordering raises `TypeError` (parse it with `Timestamp(...)`; `.loc` and
+index selection still parse strings). So `a == b` implies `hash(a) == hash(b)`, with
+pandas' one exception: an equal sub-microsecond `np.datetime64` hashes by NumPy's rule.
+One divergence: ordering against `NaT` raises `TypeError` (pandas answers `False`).
 
 Text and numbers cross the instant boundary by one rule each. A float epoch is the
 float's exact binary value times the unit, rounded to the nearest nanosecond (ties to
@@ -604,6 +617,24 @@ df.exec('change')     # same values as a raw ndarray
 Mapping notes: `change` operates on the `close` column with a 1-bar period
 (`pct_change()`'s default `periods=1`); the warm-up row is missing in both. For
 a different period or column, see the directive syntax in `docs/directives.md`.
+
+## `cumulate` across a DST transition: one local grid for every bar
+
+Sub-day time frames bucket by real instants on the frame's **local** grid (anchored
+at local midnight), and day-and-coarser frames by the local civil calendar. pandas
+instead lays absolute-length bins from the first day's local midnight. The two agree
+whenever the offset change is a whole multiple of the step — e.g. New York's one-hour
+DST under `1h` and finer: on a fall-back day the repeated `01:00` hour is two bars in
+both. They differ otherwise: after the transition pandas' bins leave the local grid,
+while volas keeps every bar on it —
+- a multi-hour frame across a one-hour change (on 2026-11-01 in `America/New_York`,
+  pandas `resample('2h')` labels `00:00`, `01:00`, `03:00`, …; volas `00:00`, `02:00`,
+  `04:00`, …, the `00:00` bar spanning three real hours that day);
+- a half-hour DST (`Australia/Lord_Howe`) under `1h` or coarser, and historical LMT
+  offsets that are not whole minutes, under any step.
+
+So a bar's period never depends on where the data happens to start, and live folding
+can place each bar on its own.
 
 ## int `min` / `max` over an all-NA column
 

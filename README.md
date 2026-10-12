@@ -122,6 +122,7 @@ entry below links into its guide.
 - [Timezones](docs/cumulation.md#timezones)
 - [Missing values (`volas.NA`)](docs/pandas-compatibility.md#missing-values-volasna)
 - [pandas interop](docs/interop.md#pandas-interop)
+  - [Datetime columns are UTC instants](docs/interop.md#datetime-columns-are-utc-instants)
 - [Arrow & DLPack interop (zero-copy)](docs/interop.md#arrow--dlpack-interop-zero-copy)
 - [Error handling](docs/directives.md#error-handling)
 - [Built-in Indicators](#built-in-indicators)

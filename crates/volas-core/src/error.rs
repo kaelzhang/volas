@@ -22,6 +22,11 @@ pub enum VolasError {
     #[error("index error: {0}")]
     Index(String),
 
+    /// A row label the operation needs is not in the index (or is not unique
+    /// there), e.g. a label-slice bound on an unordered index.
+    #[error("key error: {0}")]
+    Key(String),
+
     /// A bad argument value.
     #[error("value error: {0}")]
     Value(String),

@@ -121,22 +121,30 @@ impl PyDataFrame {
         let tfs = tf.as_mut().expect("fold_append on a plain frame");
         let frame = tfs.time_frame;
         // Borrow the bars' timestamps (they outlive this fn) — no per-bar Vec clone.
-        let (fine_ts, tz): (&[i64], _) = match bars.index().kind() {
-            IndexKind::Datetime(v, tz) => (v.as_slice(), *tz),
+        let fine_ts: &[i64] = match bars.index().kind() {
+            IndexKind::Datetime(v, _) => v.as_slice(),
             _ => unreachable!("checked by fold_append"), // LCOV_EXCL_LINE
         };
+        // The period grid belongs to the FRAME's zone (its index zone; a frame with no
+        // rows yet takes the first bar's), never to an incoming bar's: bars are instants,
+        // and the frame decides which local day / hour they fall in.
+        let tz = match inner.index().kind() {
+            IndexKind::Datetime(_, tz) => *tz,
+            _ => bars.index().tz(), // LCOV_EXCL_LINE (a tf frame's index is datetime)
+        };
         for (i, &bar_ts) in fine_ts.iter().enumerate() {
-            let key = frame.unify_tz(bar_ts, tz);
-            // The open period's key is invariant while it forms, so memoize it (lazily,
-            // also covering construction paths that set `open` without a key) and skip
-            // the second per-bar `unify_tz` of the forming bar's timestamp.
+            // A period is identified by its start on the frame's grid.
+            let key = frame.period_start(bar_ts, tz).map_err(pyerr)?;
+            // The open period's start is invariant while it forms, so memoize it
+            // (lazily, also covering construction paths that set `open` without one)
+            // and skip the second per-bar `period_start` of the forming bar.
             let same_period = match tfs.open.as_ref() {
                 None => false,
                 Some(open) => {
                     let open_key = match tfs.open_key {
                         Some(k) => k,
                         None => {
-                            let k = frame.unify_tz(last_dt(open), tz);
+                            let k = frame.period_start(last_dt(open), tz).map_err(pyerr)?;
                             tfs.open_key = Some(k);
                             k
                         }
@@ -157,7 +165,8 @@ impl PyDataFrame {
                 // stale row like any appended one, resumed from the state as of the closed
                 // bar (never stepping the closed bar again). The open period switches only
                 // once the row is in.
-                let agg = aggregate_period(bar, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
+                let agg =
+                    aggregate_period(bar, &tfs.cumulators, tfs.time_frame, tz).map_err(pyerr)?;
                 inner.append(&agg).map_err(pyerr)?;
                 tfs.open = Some(bar.clone());
                 tfs.open_key = Some(key); // the new open period's key (no recompute next bar)
@@ -205,7 +214,8 @@ impl PyDataFrame {
                         next.append(&rows).map_err(pyerr)?;
                     }
                     let agg =
-                        aggregate_period(&next, &tfs.cumulators, tfs.time_frame).map_err(pyerr)?;
+                        aggregate_period(&next, &tfs.cumulators, tfs.time_frame, tz)
+                            .map_err(pyerr)?;
                     let agg = inner.admit(&agg).map_err(pyerr)?;
                     inner.replace_last_row(&agg, 0).map_err(pyerr)?;
                     *open = next;

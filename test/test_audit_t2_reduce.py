@@ -103,7 +103,7 @@ def test_describe_shape():
 # idxmax-datetime case is the historical P1-02 incident site; pinned here.
 @pytest.mark.parametrize("d,lo,hi", [
     ("str", "a", "c"),
-    ("datetime", volas.Timestamp("2021-01-01"), volas.Timestamp("2021-01-03")),
+    ("datetime", volas.Timestamp("2021-01-01", tz="UTC"), volas.Timestamp("2021-01-03", tz="UTC")),
 ])
 @pytest.mark.parametrize("n", ("N0", "N1"))
 def test_typed_order_min_max_idx(d, lo, hi, n):

@@ -165,9 +165,9 @@ fn every_accumulating_kernel_resumes_bit_exactly() {
             }
             check(
                 &tag("hv"),
-                &ind::hv(c, 10, 60, 252, origin),
+                &ind::hv(c, 10, (252.0f64 * 24.0).sqrt(), origin),
                 |k| ind::hv_state(&c[..k], 10, origin),
-                |r, s, n| ind::hv_step(c, 10, 60, 252, r, s, n),
+                |r, s, n| ind::hv_step(c, 10, (252.0f64 * 24.0).sqrt(), r, s, n),
             );
             for upper in [true, false] {
                 let full = if upper {
@@ -399,7 +399,7 @@ fn a_malformed_state_or_argument_declines() {
     assert!(ind::hma_step(c, 9, 1, &short, &mut n1).is_none());
     assert!(ind::bbi_step(c, 3, 6, 12, 24, N, &[0.0; 8], &mut big[..8]).is_none());
     assert!(ind::boll_band_step(c, 0, 2.0, BollLine::Upper, 1, &[0.0; 3], &mut big[..3]).is_none());
-    assert!(ind::hv_step(c, 1, 60, 252, 1, &[0.0; 3], &mut big[..3]).is_none());
+    assert!(ind::hv_step(c, 1, 1.0, 1, &[0.0; 3], &mut big[..3]).is_none());
     assert!(ind::accbands_band_step(h, l, 20, true, N, &[0.0; 2], &mut big[..2]).is_none());
     assert!(ind::var_step(c, 0, None, 1, &[0.0; 3], &mut big[..3]).is_none());
     assert!(ind::sum_step(c, 5, N, &[0.0; 2], &mut big[..2]).is_none());

@@ -669,6 +669,29 @@
             .is_err());
     }
 
+    /// Localizing keeps every sub-second digit (each instant goes through
+    /// `Tz::localize_from`, never whole civil seconds), so sub-second rows stay
+    /// distinct; a NaT label stays NaT.
+    #[test]
+    fn tz_localize_keeps_subseconds_and_nat() {
+        use crate::tz::Tz;
+        let a = crate::datetime::parse_ns("2026-03-08 06:59:59.123456789").unwrap();
+        let df = DataFrame::new(
+            vec!["c".into()],
+            vec![Column::f64(vec![1.0, 2.0, 3.0])],
+            Some(Index::datetime(vec![a, a + 1, crate::datetime::NAT], Tz::Naive)),
+        )
+        .unwrap();
+        let sh = df.tz_localize(Tz::parse("+08:00").unwrap()).unwrap();
+        let eight_h = 8 * 3_600_000_000_000;
+        match sh.index().kind() {
+            IndexKind::Datetime(v, _) => {
+                assert_eq!(v, &vec![a - eight_h, a + 1 - eight_h, crate::datetime::NAT])
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn fold_forming_row_combines_in_place() {
         let mut df = DataFrame::new(

@@ -95,8 +95,19 @@ The grid origins per frame: intraday frames anchor at **midnight** of the
 index's (timezone-aware) trading day — a `15m` bar starts at `:00`/`:15`/`:30`/
 `:45`, a `4h` bar at `00:00`/`04:00`/…; `1d` starts at midnight; `1w` on
 **Monday**; `3d` is a continuous grid from the Unix epoch; `1M` / `1y` on the
-calendar month / year. If a daylight-saving transition removes or repeats a
-period's boundary, the label resolves to the period's earliest real instant.
+calendar month / year.
+
+Across a daylight-saving transition, **sub-day** frames bucket by real instants
+on that local grid: a wall-clock hour that a fall-back repeats is two bars with
+distinct instant labels (on 2026-11-01 in `America/New_York` a `1h` frame has a
+`01:00-04:00` bar and a `01:00-05:00` bar, exactly as pandas `resample('1h')`),
+and a grid point that a spring-forward gap skips starts its bar at the instant
+the gap ends. A fall-back that does not repeat a grid point stays inside one bar
+(the `2h` bar of `00:00` spans three real hours that day). **Day-and-coarser**
+frames stay on the local civil calendar: the 25-hour fall-back day is one `1d`
+bar, labelled at its local midnight (or, where midnight itself is skipped, at
+the first real instant of the day). Live folding and `cumulate` bucket
+identically.
 
 The rows given to `DataFrame(data, time_frame=...)` follow the same rule: volas
 reads each row's label as its period start (it cannot check this), so data
@@ -190,9 +201,12 @@ See [Live cumulation](dataframe-api.md#live-cumulation--a-tf-aware-dataframe) fo
 ## TimeFrame
 
 A `TimeFrame` names a bar interval. It is accepted anywhere volas resamples —
-`df.cumulate`, the `time_frame` DataFrame argument, and the `hv` indicator —
-either as a `TimeFrame` constant or as its equivalent **string label**. There is no `TimeFrame(...)`
-constructor — use one of the constants below or a label string.
+`df.cumulate` and the `time_frame` DataFrame argument — either as a `TimeFrame`
+constant or as its equivalent **string label**. There is no `TimeFrame(...)`
+constructor — use one of the constants below or a label string. The `hv`
+indicator takes the label inside its directive; see its
+[reference entry](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md#user-content-indicator-hv)
+for how each frame is annualized.
 
 ```py
 TimeFrame.m5            # the 5-minute frame
@@ -228,7 +242,11 @@ stays UTC: the hour-of-day frames (`2h`/`4h`/`6h`/`8h`/`12h`) start at local `00
 and step in local hours; `3d` counts continuous 3-local-civil-day buckets keyed
 from the Unix epoch day in that zone (not reset at month boundaries); `1w` is
 Monday-start in local civil time. So a daily/weekly bar follows the local trading
-day, and a named zone makes the hour buckets DST-aware.
+day, and a named zone makes the hour buckets DST-aware (see
+[Bar labels are the period start](#bar-labels-are-the-period-start) for the
+repeated and skipped hours). The grid always belongs to the **frame's** zone: a
+bar appended to a tf-aware frame is placed by its instant on that grid, whatever
+zone the bar's own index carries.
 
 ## Timezones
 

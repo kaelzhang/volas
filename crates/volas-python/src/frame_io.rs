@@ -141,7 +141,8 @@ impl PyDataFrame {
     }
 
     /// Convert to a `pandas.DataFrame`. pandas is imported lazily (only here), so
-    /// volas stays pandas-free at import.
+    /// volas stays pandas-free at import. A datetime column holds UTC instants and
+    /// exports as `datetime64[ns, UTC]`; the index keeps its own zone.
     #[pyo3(signature = (dtype_backend = "numpy"))]
     pub(crate) fn to_pandas<'py>(&self, py: Python<'py>, dtype_backend: &str) -> PyResult<Bound<'py, PyAny>> {
         self.require_fresh()?;
