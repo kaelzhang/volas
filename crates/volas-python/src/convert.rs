@@ -3,13 +3,13 @@
 
 
 use numpy::IntoPyArray;
-use pyo3::exceptions::{PyIndexError, PyKeyError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use volas_core::{
     datetime, Column, DType, DataFrame, Index,
-    IndexKind, Scalar, Tz, Validity, VolasError,
+    IndexKind, Scalar, Tz, Validity,
 };
 
 #[allow(unused_imports)]
@@ -696,12 +696,12 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
         return Ok(ts.ns);
     }
     if let Ok(s) = key.extract::<String>() {
-        // An instant outside the datetime64[ns] range raises OverflowError; text that
-        // is not a datetime (or names a DST gap / fold wall clock) is a label miss.
-        return datetime::parse_ns_in_tz(&s, tz).map_err(|e| match e {
-            VolasError::Overflow(_) => pyerr(e),
-            _ => PyKeyError::new_err(format!("invalid datetime label {s:?}")),
-        });
+        // Text names no instant when it is not a datetime or names a wall clock `tz`
+        // skips (a DST gap) or repeats (a fold): a ValueError saying which, with the
+        // zone (pandas' NonExistentTimeError / AmbiguousTimeError are ValueErrors); an
+        // instant outside the datetime64[ns] range is an OverflowError. A row-label
+        // lookup turns the first into a missing label ([`parse_label_in_tz`]).
+        return datetime::parse_ns_in_tz(&s, tz).map_err(pyerr);
     }
     // A stdlib `datetime.datetime` / `datetime.date` — and their subclasses,
     // notably `pd.Timestamp` and `pd.NaT` (F15/F23): read from its components
@@ -738,9 +738,30 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
         }
         return datetime::datetime64_to_ns(raw, &unit, count).map_err(pyerr);
     }
-    Err(PyKeyError::new_err(
-        "label must be a datetime string, integer, or numpy datetime64",
-    ))
+    Err(PyTypeError::new_err(format!(
+        "cannot convert {} to a timestamp: expected a datetime string, a datetime, an \
+         integer (epoch ns) or a numpy datetime64",
+        key.get_type().name()?
+    )))
+}
+
+/// A row label of a datetime index in `tz` (an integer index reads `Tz::Naive`): the
+/// instant [`parse_ts_in_tz`] builds, except that a key which names no instant — text
+/// that is not a datetime or names a DST gap / fold wall clock, or a value of no
+/// timestamp type — is a missing label: a KeyError carrying the reason, as pandas'
+/// `.loc` raises KeyError for it. `None`, NaT and an out-of-range instant keep their
+/// ValueError / OverflowError.
+pub(crate) fn parse_label_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
+    parse_ts_in_tz(key, tz).map_err(|e| {
+        let py = key.py();
+        let text = key.is_instance_of::<pyo3::types::PyString>();
+        if (text && e.is_instance_of::<PyValueError>(py)) || e.is_instance_of::<PyTypeError>(py) {
+            let label = key.repr().map_or_else(|_| "?".to_string(), |r| r.to_string());
+            PyKeyError::new_err(format!("invalid datetime label {label}: {}", e.value(py)))
+        } else {
+            e
+        }
+    })
 }
 
 /// The `.index` row labels as a NumPy array. A DatetimeIndex exports its **UTC**

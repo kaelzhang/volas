@@ -73,6 +73,14 @@ fn delta_ns(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
 ///     tz (str, optional): the zone the value is given in, e.g.
 ///         ``'America/New_York'`` or ``'+08:00'`` (default UTC).
 ///
+/// Raises:
+///     ValueError: text that is not a datetime, or a wall clock ``tz`` skips (a
+///         DST gap) or repeats (a DST fold) — the message names which, and the zone
+///         (as pandas). The same text used as a row label is a missing label
+///         (``KeyError``, carrying that reason).
+///     TypeError: a value of no timestamp type.
+///     OverflowError: an instant outside the ``datetime64[ns]`` range.
+///
 /// Usage::
 ///
 ///     ts = volas.Timestamp('2021-01-04 09:30', tz='America/New_York')
@@ -707,8 +715,8 @@ pub(crate) fn parse_label(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Lab
             .extract::<String>()
             .map(Label::Str)
             .map_err(|_| PyKeyError::new_err("label must be a string for a string index")),
-        IndexKind::Datetime(_, tz) => parse_ts_in_tz(key, *tz).map(Label::I64),
-        _ => parse_ts(key).map(Label::I64),
+        IndexKind::Datetime(_, tz) => crate::convert::parse_label_in_tz(key, *tz).map(Label::I64),
+        _ => crate::convert::parse_label_in_tz(key, Tz::Naive).map(Label::I64),
     }
 }
 

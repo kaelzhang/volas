@@ -10,3 +10,4 @@
 
 pub mod indicators;
 pub mod kernels;
+pub(crate) mod smoothing;

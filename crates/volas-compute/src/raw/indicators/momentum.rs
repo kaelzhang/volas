@@ -376,13 +376,12 @@ pub fn trix_resume(
     from: usize,
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
-    let k = 2.0 / (period as f64 + 1.0);
     let n = close.len();
     let mut e = [state[0], state[1], state[2]];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for &x in &close[from..n] {
         let prev = e[2]; // the cascade output at the previous row (ROC's denominator)
-        kernels::ema_cascade_step(&mut e, x, k);
+        kernels::ema_cascade_step(&mut e, x, period);
         out.push(roc_value(e[2], prev));
     }
     (out, e.to_vec())
@@ -846,10 +845,9 @@ pub fn trix_resume_one(
     if state.len() != 3 || next.len() != 3 || row >= close.len() {
         return None;
     }
-    let k = 2.0 / (period as f64 + 1.0);
     let mut e = [state[0], state[1], state[2]];
     let prev = e[2]; // cascade output at row-1 (ROC's denominator)
-    kernels::ema_cascade_step(&mut e, close[row], k);
+    kernels::ema_cascade_step(&mut e, close[row], period);
     next.copy_from_slice(&e);
     Some(roc_value(e[2], prev))
 }

@@ -519,6 +519,22 @@ pub(crate) fn label_bounds(
                 Ok(x) => Label::I64(x),
                 Err(_) => parse_label(&obj, index)?,
             },
+            // text naming no instant (not a datetime, a DST gap / fold wall clock) cannot
+            // bound a datetime slice: a TypeError with the reason, as pandas raises
+            IndexKind::Datetime(_, tz) if text => {
+                Label::I64(crate::convert::parse_ts_in_tz(&obj, *tz).map_err(|e| {
+                    let py = obj.py();
+                    if e.is_instance_of::<pyo3::exceptions::PyValueError>(py) {
+                        PyTypeError::new_err(format!(
+                            "cannot slice a DatetimeIndex with {}: {}",
+                            obj.repr().map_or_else(|_| "?".to_string(), |r| r.to_string()),
+                            e.value(py)
+                        ))
+                    } else {
+                        e
+                    }
+                })?)
+            }
             _ => parse_label(&obj, index)?,
         };
         Ok(Some(if text { SliceBound::text(label) } else { SliceBound::exact(label) }))
