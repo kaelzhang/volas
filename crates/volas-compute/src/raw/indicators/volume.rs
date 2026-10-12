@@ -19,15 +19,29 @@ pub fn obv(real: &[f64], volume: &[f64]) -> Vec<f64> {
     let mut prev = real[0];
     out.push(obv);
     for i in 1..n {
-        // Branchless direction sign (+1 up / -1 down / 0 flat): the up/down branch is
-        // unpredictable on real price data, so a misprediction-free form is faster.
-        // Bit-identical: `+1.0·v == +v`, `-1.0·v == -v`, `0·v == 0`.
-        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
-        obv += dir * volume[i];
+        obv = obv_step(obv, prev, real[i], volume[i]);
         out.push(obv);
         prev = real[i];
     }
     out
+}
+
+/// One OBV step (TA-Lib `ta_OBV.c`): add the bar's volume when `real` rose vs `prev`,
+/// subtract it when it fell, and leave the total unchanged when flat. The comparison
+/// selects the addend — `+volume`, `−volume`, or `−0.0` (`x + −0.0 == x` for every `x`,
+/// signed zeros included) — so a flat bar never multiplies its volume (`0·inf` would turn
+/// the line NaN for good), the selection compiles branch-free (the up / down outcome is
+/// unpredictable on real prices) and stays off the running total's dependency chain,
+/// which is one add per bar. The one owner of the step, shared by the full compute and
+/// every resume.
+#[inline(always)]
+fn obv_step(obv: f64, prev: f64, real: f64, volume: f64) -> f64 {
+    use std::hint::select_unpredictable;
+    let moved = select_unpredictable(real > prev, volume, -volume);
+    // not `real != prev`: an unordered (NaN) comparison is no move, as in TA-Lib
+    #[allow(clippy::double_comparisons)]
+    let ordered_move = real > prev || real < prev;
+    obv + select_unpredictable(ordered_move, moved, -0.0)
 }
 
 /// Final OBV state `[running_obv, prev_real]` after a full [`obv`] compute over
@@ -42,8 +56,7 @@ pub fn obv_final_state(real: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
     let mut obv = volume[0];
     let mut prev = real[0];
     for i in 1..n {
-        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
-        obv += dir * volume[i];
+        obv = obv_step(obv, prev, real[i], volume[i]);
         prev = real[i];
     }
     Some(vec![obv, prev])
@@ -109,8 +122,7 @@ pub fn obv_resume(
     let mut prev = state[1];
     let mut out = Vec::with_capacity(n.saturating_sub(from));
     for i in from..n {
-        let dir = ((real[i] > prev) as i8 - (real[i] < prev) as i8) as f64;
-        obv += dir * volume[i];
+        obv = obv_step(obv, prev, real[i], volume[i]);
         out.push(obv);
         prev = real[i];
     }
@@ -306,8 +318,7 @@ pub fn obv_resume_one(
         return None;
     }
     let prev = state[1];
-    let dir = ((real[row] > prev) as i8 - (real[row] < prev) as i8) as f64;
-    let obv = state[0] + dir * volume[row];
+    let obv = obv_step(state[0], prev, real[row], volume[row]);
     next.copy_from_slice(&[obv, real[row]]);
     Some(obv)
 }

@@ -1473,7 +1473,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-dx"></a>`dx` | `DX` | Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-adx"></a>`adx` | `ADX` | Average Directional Movement Index. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-adxr"></a>`adxr` | `ADXR` | Average Directional Movement Index Rating. | `:<period>@<series_high=high>,<series_low=low>,<series_close=close>` |
-| <a id="indicator-obv"></a>`obv` | `OBV` | On-Balance Volume. | `@<series_close=close>,<series_volume=volume>` |
+| <a id="indicator-obv"></a>`obv` | `OBV` | On-Balance Volume: adds the bar's volume on an up close, subtracts it on a down close, and leaves the total unchanged on a flat one (even for an infinite volume). | `@<series_close=close>,<series_volume=volume>` |
 | <a id="indicator-ad"></a>`ad` | `AD` | Chaikin Accumulation Distribution line. | `@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
 | <a id="indicator-adosc"></a>`adosc` | `ADOSC` | Chaikin Accumulation Distribution oscillator. | `:<fast=3>,<slow=10>@<series_high=high>,<series_low=low>,<series_close=close>,<series_volume=volume>` |
 | <a id="indicator-tr"></a>`tr` | `TRANGE` | True Range. | `@<series_high=high>,<series_low=low>,<series_close=close>` |
