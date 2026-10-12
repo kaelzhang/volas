@@ -334,7 +334,8 @@ fn composite_step(
 
 /// One row of `mavp` at `row`: every period's average advances (each started where its
 /// first value lands at the output start, as the dispatch arm does), and the row reads
-/// the one its clamped `periods` value selects. `prev[0]` counts the rows seen.
+/// the one its `periods` value selects ([`ind::mavp_period`]; none for a missing one).
+/// `prev[0]` counts the rows seen.
 fn mavp_step(
     real: &[f64],
     periods: &[f64],
@@ -349,7 +350,7 @@ fn mavp_step(
     next[0] = (seen + 1) as f64;
     let mut at = 1;
     let mut value = f64::NAN;
-    let want = (periods[row] as i64).clamp(lo as i64, hi as i64) as usize;
+    let want = ind::mavp_period(periods[row], lo, hi);
     for q in lo..=hi {
         let stage = FiniteMa::new(q, mt)?;
         let len = stage.state_len();
@@ -363,7 +364,7 @@ fn mavp_step(
         // the stage's own row `seen - start` is this frame's `row`
         let off = seen - start;
         let v = stage.step(off, |j| real[row + j - off], s, n)?;
-        if q == want {
+        if Some(q) == want {
             value = v;
         }
     }

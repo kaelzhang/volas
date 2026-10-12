@@ -40,7 +40,7 @@ INPUTS = {
     )},
     **{c: _HL for c in ("sar", "sarext", "plus_dm", "minus_dm", "mass_index")},
     **{c: _HLC for c in (
-        "kdj", "stoch_momentum", "ttm_squeeze", "wad", "supertrend", "atr", "plus_di",
+        "kdj", "stoch_momentum", "wad", "supertrend", "atr", "plus_di",
         "minus_di", "dx", "adx", "adxr", "natr", "kcw",
     )},
     **{c: _CV for c in ("pvt", "nvi", "pvi", "efi", "obv")},

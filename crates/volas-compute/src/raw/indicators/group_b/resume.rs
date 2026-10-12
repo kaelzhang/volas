@@ -4,6 +4,7 @@
 //! computations in the parent module.
 
 use crate::guard::{ring_push, state_after, Slide};
+use crate::missing;
 use crate::raw::indicators::{wma_initial, wma_row, FiniteMa, WMA_STATE};
 use crate::raw::kernels::{self, SMA_STATE};
 
@@ -32,21 +33,36 @@ pub(super) fn wvad_term(open: &[f64], high: &[f64], low: &[f64], close: &[f64], 
     (close[i] - open[i]) / (high[i] - low[i]) * volume[i]
 }
 
-/// VR's per-bar `(up, down, flat)` volumes at `i` (NaN at the first bar).
+/// VR's per-bar `(up, down, flat)` volumes at `i` (NaN at the first bar). They read the
+/// close, the prior close and the volume, and are missing when one of them is (the
+/// per-row term rule, [`missing::terms`]): a comparison with a missing close would read
+/// as a flat day.
 #[inline]
 pub(super) fn vr_volumes(close: &[f64], volume: &[f64], i: usize) -> [f64; 3] {
     if i == 0 {
         return [f64::NAN; 3];
     }
-    let (mut u, mut d, mut p) = (0.0, 0.0, 0.0);
-    if close[i] > close[i - 1] {
-        u = volume[i];
-    } else if close[i] < close[i - 1] {
-        d = volume[i];
+    let (c, prev, v) = (close[i], close[i - 1], volume[i]);
+    let split = if c > prev {
+        [v, 0.0, 0.0]
+    } else if c < prev {
+        [0.0, v, 0.0]
     } else {
-        p = volume[i];
+        [0.0, 0.0, v]
+    };
+    missing::terms(&[c, prev, v], split)
+}
+
+/// BRAR BR's per-bar `[max(0, H − Cᵧ), max(0, Cᵧ − L)]` at `i` (`Cᵧ` the prior close; NaN
+/// at the first bar). Each is missing when an input it reads is (the per-row term rule,
+/// [`missing::term`]): the `max(0, …)` clamp would turn a missing value into `0`.
+#[inline]
+pub(super) fn br_terms(high: &[f64], low: &[f64], close: &[f64], i: usize) -> [f64; 2] {
+    if i == 0 {
+        return [f64::NAN; 2];
     }
-    [u, d, p]
+    let (h, l, cy) = (high[i], low[i], close[i - 1]);
+    [missing::term(&[h, cy], (h - cy).max(0.0)), missing::term(&[cy, l], (cy - l).max(0.0))]
 }
 
 /// One row of the `n`-bar rolling sum (`SMA · n`) of `term`, from `state` into `next`.

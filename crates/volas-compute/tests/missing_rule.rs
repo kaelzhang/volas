@@ -291,12 +291,6 @@ fn a_full_computation_is_the_raw_one_over_the_complete_rows() {
     series("trix", &[&d.close[..]], &|x| ind::trix(x[0], 5).flat(), &|x| raw::trix(x[0], 5).flat());
     series("tsi", &[&d.close[..]], &|x| ind::tsi(x[0], 6, 3).flat(), &|x| raw::tsi(x[0], 6,
         3).flat());
-    series("ttm_squeeze_momentum", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        ind::ttm_squeeze_momentum(x[0], x[1], x[2], 5, 0).flat(), &|x|
-        raw::ttm_squeeze_momentum(x[0], x[1], x[2], 5, 0).flat());
-    series("ttm_squeeze_on", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
-        ind::ttm_squeeze_on(x[0], x[1], x[2], 5, 2.0, 1.5, 0).flat(), &|x|
-        raw::ttm_squeeze_on(x[0], x[1], x[2], 5, 2.0, 1.5, 0).flat());
     series("wad", &[&d.high[..], &d.low[..], &d.close[..]], &|x| ind::wad(x[0], x[1],
         x[2]).flat(), &|x| raw::wad(x[0], x[1], x[2]).flat());
 }

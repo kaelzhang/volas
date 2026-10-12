@@ -2,8 +2,9 @@
 
 use super::oscillators::rsi;
 use crate::accum::{Anchors, StreamMean};
+use crate::missing;
 use crate::raw::indicators::FiniteMa;
-use crate::raw::kernels;
+use crate::raw::kernels::{self, max_total, min_total, total_ge, total_gt, total_le, total_lt};
 
 /// TA-Lib stochastic raw %K: `100·(close − LL) / (HH − LL)` over `period` (HH/LL the
 /// highest high / lowest low). A flat range yields 0, but — unlike [`rsv`] — the
@@ -18,21 +19,20 @@ pub fn stoch_fastk(high: &[f64], low: &[f64], close: &[f64], period: usize) -> V
             return out;
         }
     }
-    // One fused pass for max(high) and min(low) instead of two separate van Herk sweeps.
+    // One fused pass for max(high) and min(low) instead of two separate van Herk sweeps
+    // (NaN while a window holds a missing high / low).
     let (hh, ll) = kernels::rolling_max_min(high, low, period);
-    let n = close.len();
-    let mut out = vec![f64::NAN; n];
-    for i in 0..n {
-        if !hh[i].is_nan() {
-            let diff = hh[i] - ll[i];
-            out[i] = if diff != 0.0 {
-                100.0 * (close[i] - ll[i]) / diff
-            } else {
-                0.0
-            };
-        }
-    }
-    out
+    (0..close.len()).map(|i| fastk_value(close[i], hh[i], ll[i])).collect()
+}
+
+/// Raw %K from a close and its window's extremes `hh` / `ll`: `100·(close − ll)/(hh − ll)`,
+/// `0` for a flat range. Missing when any of the three is (the per-row term rule,
+/// [`missing::term`]): a flat range would otherwise read no close at all.
+#[inline(always)]
+fn fastk_value(close: f64, hh: f64, ll: f64) -> f64 {
+    let diff = hh - ll;
+    let k = if diff != 0.0 { 100.0 * (close - ll) / diff } else { 0.0 };
+    missing::term(&[close, hh, ll], k)
 }
 
 fn stoch_fastk_small_window(
@@ -83,13 +83,13 @@ fn stoch_fastk_small_window(
                 if value.is_nan() {
                     return None;
                 }
-                if value < lowest {
+                if total_lt(value, lowest) {
                     lowest_idx = idx;
                     lowest = value;
                 }
                 idx += 1;
             }
-        } else if low_today <= lowest {
+        } else if total_le(low_today, lowest) {
             lowest_idx = today;
             lowest = low_today;
         }
@@ -110,13 +110,13 @@ fn stoch_fastk_small_window(
                 if value.is_nan() {
                     return None;
                 }
-                if value > highest {
+                if total_gt(value, highest) {
                     highest_idx = idx;
                     highest = value;
                 }
                 idx += 1;
             }
-        } else if high_today >= highest {
+        } else if total_ge(high_today, highest) {
             highest_idx = today;
             highest = high_today;
         }
@@ -203,13 +203,13 @@ fn stoch_d_sma_fused<const STAGES: usize>(
                 if value.is_nan() {
                     return None;
                 }
-                if value < lowest {
+                if total_lt(value, lowest) {
                     lowest_idx = idx;
                     lowest = value;
                 }
                 idx += 1;
             }
-        } else if low_today <= lowest {
+        } else if total_le(low_today, lowest) {
             lowest_idx = today;
             lowest = low_today;
         }
@@ -230,13 +230,13 @@ fn stoch_d_sma_fused<const STAGES: usize>(
                 if value.is_nan() {
                     return None;
                 }
-                if value > highest {
+                if total_gt(value, highest) {
                     highest_idx = idx;
                     highest = value;
                 }
                 idx += 1;
             }
-        } else if high_today >= highest {
+        } else if total_ge(high_today, highest) {
             highest_idx = today;
             highest = high_today;
         }
@@ -305,21 +305,21 @@ fn stoch_fastk_same_series_small_window(data: &[f64], period: usize) -> Option<V
                     return None;
                 }
                 let idx = trailing + 1 + off;
-                if value <= lowest {
+                if total_le(value, lowest) {
                     lowest_idx = idx;
                     lowest = value;
                 }
-                if value >= highest {
+                if total_ge(value, highest) {
                     highest_idx = idx;
                     highest = value;
                 }
             }
         } else {
-            if x <= lowest {
+            if total_le(x, lowest) {
                 lowest_idx = today;
                 lowest = x;
             }
-            if x >= highest {
+            if total_ge(x, highest) {
                 highest_idx = today;
                 highest = x;
             }
@@ -420,22 +420,22 @@ pub fn stochrsi_d_default_sma(close: &[f64], origin: usize) -> Option<Vec<f64>> 
                 if value.is_nan() {
                     return None; // LCOV_EXCL_LINE
                 }
-                if value <= lowest {
+                if total_le(value, lowest) {
                     lowest_idx = idx;
                     lowest = value;
                 }
-                if value >= highest {
+                if total_ge(value, highest) {
                     highest_idx = idx;
                     highest = value;
                 }
                 idx += 1;
             }
         } else {
-            if x <= lowest {
+            if total_le(x, lowest) {
                 lowest_idx = today;
                 lowest = x;
             }
-            if x >= highest {
+            if total_ge(x, highest) {
                 highest_idx = today;
                 highest = x;
             }
@@ -460,23 +460,21 @@ pub fn stochrsi_d_default_sma(close: &[f64], origin: usize) -> Option<Vec<f64>> 
 }
 
 
-/// Raw %K at row `i` alone (see [`stoch_fastk`]): the extremes of the window's present
-/// values — exactly what the rolling kernels reduce — so it equals `stoch_fastk(..)[i]`.
+/// Raw %K at row `i` alone (see [`stoch_fastk`]): the extremes of the window — exactly
+/// what the rolling kernels reduce, NaN while it holds a missing high / low — so it
+/// equals `stoch_fastk(..)[i]`.
 pub fn stoch_fastk_at(high: &[f64], low: &[f64], close: &[f64], period: usize, i: usize) -> f64 {
     if period == 0 || i + 1 < period {
         return f64::NAN;
     }
-    let present = |x: &&f64| !x.is_nan();
     let window = i + 1 - period..=i;
-    let hh = high[window.clone()].iter().filter(present).copied().reduce(f64::max);
-    let ll = low[window].iter().filter(present).copied().reduce(f64::min);
-    match (hh, ll) {
-        (Some(hh), Some(ll)) => {
-            let diff = hh - ll;
-            if diff != 0.0 { 100.0 * (close[i] - ll) / diff } else { 0.0 }
-        }
-        _ => f64::NAN,
+    let (hw, lw) = (&high[window.clone()], &low[window]);
+    if missing::holds_missing(hw) || missing::holds_missing(lw) {
+        return f64::NAN;
     }
+    let hh = hw.iter().copied().fold(f64::NEG_INFINITY, max_total);
+    let ll = lw.iter().copied().fold(f64::INFINITY, min_total);
+    fastk_value(close[i], hh, ll)
 }
 
 /// The smoothing stages of a stochastic line over raw %K: `[slowK]` / `[fastD]`, or

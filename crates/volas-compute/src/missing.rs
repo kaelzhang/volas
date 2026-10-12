@@ -1,21 +1,32 @@
-//! Missing rows of a recursive computation.
+//! Missing values: what a missing (NaN) input does to every kind of computation.
 //!
-//! A row where any input of a recursive computation (EMA cascade, Wilder smoothing,
-//! cumulative sums, the Hilbert transform, SAR, …) is missing (NaN) is not data. It
-//! outputs NaN, and the recursion continues from the last complete row as if the row
-//! did not exist: the computation runs, unchanged, on the complete rows only, and its
-//! outputs are scattered back to their original positions. A leading run of missing
-//! rows is the special case of a series that simply starts later. An infinity is a
-//! value, not a missing row.
+//! An infinity is a value, not a missing one. A missing value affects exactly the
+//! outputs whose definition reads it, by one of three rules owned here:
 //!
-//! [`CompleteRows`] owns this for a full computation and its carried-state capture
-//! (which therefore describes the last complete row); [`ResumeRows`] owns it for a
-//! resume over new rows, which reads only a bounded reach of history. When no row is
-//! missing both hand the inputs through untouched. An [`Input`] whose column already
-//! knows it holds no missing value (the frame remembers that fact per column) is never
-//! scanned, so the common case costs nothing; otherwise it costs one scan.
-//! Finite-window kernels need none of this: window locality (see [`crate::guard`])
-//! already confines a bad row to the windows holding it.
+//! - **A per-row term** (a true range, a signed money flow, an up / down flag, a clamped
+//!   difference, a rate of change, …) that reads a missing input is itself missing:
+//!   [`term`] / [`terms`]. A comparison, `f64::max` / `f64::min` or a zero-base branch
+//!   never steps over a missing input into an ordinary value.
+//! - **A finite window** holding a missing row is missing: an output reduced from a
+//!   window — a sum, an extremum, a position, a count — is NaN while the missing row is
+//!   inside the window, and exactly what clean data gives once it has left. A running
+//!   sum gets this from window locality ([`crate::guard`]) once its terms obey the term
+//!   rule; a reduction that is not a sum (an extremum or its position, a tracker) is
+//!   blanked by [`blank_windows`].
+//! - **A recursive computation** (EMA cascade, Wilder smoothing, cumulative sums, the
+//!   Hilbert transform, SAR, …) skips a row where any of its inputs is missing: the row
+//!   outputs NaN, and the recursion continues from the last complete row as if the row
+//!   did not exist — the computation runs, unchanged, on the complete rows only, and its
+//!   outputs are scattered back to their original positions. A leading run of missing
+//!   rows is the special case of a series that simply starts later.
+//!
+//! For recursions, [`CompleteRows`] owns the rule for a full computation and its
+//! carried-state capture (which therefore describes the last complete row);
+//! [`ResumeRows`] owns it for a resume over new rows, which reads only a bounded reach
+//! of history. When no row is missing both hand the inputs through untouched. An
+//! [`Input`] whose column already knows it holds no missing value (the frame remembers
+//! that fact per column) is never scanned, so the common case costs nothing; otherwise
+//! it costs one scan.
 
 use std::borrow::Cow;
 
@@ -23,6 +34,59 @@ use std::borrow::Cow;
 #[inline]
 pub fn is_missing(x: f64) -> bool {
     x.is_nan()
+}
+
+/// Whether any of `reads` — the inputs one per-row term reads — is missing.
+/// Branch-free, so a term's check compiles to a select.
+#[inline(always)]
+pub fn any_of(reads: &[f64]) -> bool {
+    reads.iter().fold(false, |acc, &x| acc | is_missing(x))
+}
+
+/// The per-row term rule: `value`, the term computed from `reads`, unless one of those
+/// inputs is missing — then the term is missing (NaN) whatever `value` came out as.
+#[inline(always)]
+pub fn term(reads: &[f64], value: f64) -> f64 {
+    if any_of(reads) { f64::NAN } else { value }
+}
+
+/// [`term`] for a term of several values (all missing together).
+#[inline(always)]
+pub fn terms<const K: usize>(reads: &[f64], values: [f64; K]) -> [f64; K] {
+    if any_of(reads) { [f64::NAN; K] } else { values }
+}
+
+/// Whether any value of `window` is missing — the finite-window rule for one window.
+#[inline]
+pub fn holds_missing(window: &[f64]) -> bool {
+    any_missing(window)
+}
+
+/// The finite-window rule over a whole series: set `out[i]` to NaN for every row `i`
+/// whose window — the `span` rows of `x` ending at `i` — holds a missing value. For a
+/// reduction that is not a running sum (an extremum, its position, a tracker's count):
+/// its clean windows are already exact, and this leaves them alone. One scan when `x`
+/// has a missing value, otherwise the scan that finds none.
+pub fn blank_windows(out: &mut [f64], x: &[f64], span: usize) {
+    blank_windows_where(out, x, span, is_missing);
+}
+
+/// [`blank_windows`] for a row test of the caller's (`bad`), for a computation whose
+/// own rule widens what makes a row unusable (candle patterns: any non-finite price).
+pub(crate) fn blank_windows_where(out: &mut [f64], x: &[f64], span: usize, bad: impl Fn(f64) -> bool) {
+    let n = out.len().min(x.len());
+    let Some(first) = x[..n].iter().position(|&v| bad(v)) else {
+        return;
+    };
+    let mut last = first;
+    for i in first..n {
+        if bad(x[i]) {
+            last = i;
+        }
+        if i - last < span {
+            out[i] = f64::NAN;
+        }
+    }
 }
 
 /// Whether row `i` is complete: every input is present there.
@@ -403,6 +467,40 @@ mod tests {
             CompleteRows::of(&ins(&[&long[..]])),
             CompleteRows::Kept(kept)
         );
+    }
+
+    /// A per-row term that reads a missing input is missing, whatever value its formula
+    /// came out as (a `max`, a comparison or a zero-base branch would step over it).
+    #[test]
+    fn a_term_reading_a_missing_input_is_missing() {
+        assert!(any_of(&[1.0, NAN]) && !any_of(&[1.0, f64::INFINITY]) && !any_of(&[]));
+        assert_eq!(term(&[1.0, 2.0], 3.0), 3.0);
+        assert!(term(&[1.0, NAN], NAN.max(1.0)).is_nan());
+        assert_eq!(term(&[f64::INFINITY], 0.0), 0.0); // an infinity is a value
+        assert_eq!(terms(&[1.0], [1.0, 2.0]), [1.0, 2.0]);
+        assert!(terms(&[NAN], [1.0, 2.0]).iter().all(|x| x.is_nan()));
+    }
+
+    /// A window holding a missing row is missing for exactly the rows whose window
+    /// holds it; the rows before and after are left alone.
+    #[test]
+    fn a_window_holding_a_missing_row_is_blanked() {
+        assert!(holds_missing(&[1.0, NAN]) && !holds_missing(&[1.0, 2.0]));
+        let x = [1.0, 2.0, NAN, 4.0, 5.0, 6.0, NAN];
+        let mut out = [9.0; 7];
+        blank_windows(&mut out, &x, 3);
+        assert_eq!(bits(&out), bits(&[9.0, 9.0, NAN, NAN, NAN, 9.0, NAN]));
+        // span 1: the row itself only; nothing missing: untouched
+        let mut out = [9.0; 7];
+        blank_windows(&mut out, &x, 1);
+        assert_eq!(bits(&out), bits(&[9.0, 9.0, NAN, 9.0, 9.0, 9.0, NAN]));
+        let mut out = [9.0; 3];
+        blank_windows(&mut out, &[1.0, 2.0, 3.0], 2);
+        assert_eq!(out, [9.0; 3]);
+        // a caller's own row test: any non-finite value
+        let mut out = [9.0; 4];
+        blank_windows_where(&mut out, &[1.0, f64::INFINITY, 3.0, 4.0], 2, |v| !v.is_finite());
+        assert_eq!(bits(&out), bits(&[9.0, NAN, NAN, 9.0]));
     }
 
     #[test]

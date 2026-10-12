@@ -14,15 +14,25 @@ it:
   a bad row, the value its formula takes on that window — NaN when the window holds a
   NaN, the mathematical result when it holds an infinity (`±inf` for a sum or mean,
   NaN for a variance). Once that row has left the window, every output is exactly
-  what clean data gives.
+  what clean data gives. This holds for every finite-window reduction, not only sums:
+  a highest / lowest value and its position (`hhv`, `llv`, `donchian`, `midpoint`,
+  `maxindex`, `aroon`, `willr`, `rsv`, `stoch`, `mike`, `ichimoku`, …) and a count
+  (`psy`) are NaN while their window holds a NaN — they never step over it. A per-row
+  term that reads a missing input is missing too, whatever its formula would make of
+  it: a true range (`tr`, and so `chop`, `vortex`, `ultosc`), a signed money flow
+  (`mfi`), an up / down split (`vr`, `psy`), a clamped difference (`brar.br`), a rate
+  of change over a zero base (`roc`, `rocp`, `rocr`, `rocr100` give `0` over a zero
+  base only for a present value), and a missing `mavp` period. A highest / lowest value
+  breaks a tie between `-0.0` and `+0.0` by IEEE total order (`+0.0` is the higher), so
+  a later missing value never changes an earlier extremum, not even the sign of a zero.
 - A **leading run of missing rows** is not data: every indicator treats the series as
   starting after it, so a series with a missing head matches the same series started
   later.
 - A **recursive** indicator (the EMA family and its cascades — DEMA / TEMA / T3 /
   TRIX / MACD —, Wilder smoothing — RSI / ATR / ADX / CMO —, cumulative lines such as
-  OBV / AD / PVT / NVI / PVI / WAD / ASI, KAMA, SAR, Supertrend, Keltner, TSI, the
-  Hilbert transform and MAMA, and any command whose MA-type argument selects a
-  recursive average) skips a missing row: a row where **any** of its inputs is NaN
+  OBV / AD / PVT / NVI / PVI / WAD / ASI, KAMA, SAR, Supertrend, Keltner, TSI, KDJ,
+  Connors RSI, the Hilbert transform and MAMA, and any command whose MA-type argument
+  selects a recursive average) skips a missing row: a row where **any** of its inputs is NaN
   outputs NaN, and the recursion continues from the last complete row as if that row
   did not exist. Its output equals the indicator run on the series with those rows
   deleted, NaN put back at their positions. The live paths follow the same rule — an

@@ -7,7 +7,7 @@
 //! bit-exactly past a head-dropping slice (verified by `test/test_group_a_mutation.py`).
 
 use crate::raw::indicators::av;
-use crate::accum::{anchors_at, Anchors, Csum};
+use crate::missing;
 use crate::guard::Slide;
 use crate::guard::state_after;
 use crate::raw::kernels;
@@ -16,10 +16,19 @@ use crate::raw::kernels;
 /// first bar is not rising). NaN until `n` bars are available.
 /// Source: Eastmoney 心理线. Row 0 is at absolute position `origin`.
 pub fn psy(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
-    let up: Vec<f64> = (0..close.len())
-        .map(|i| f64::from(i > 0 && close[i] > close[i - 1]))
-        .collect();
+    let up: Vec<f64> = (0..close.len()).map(|i| psy_up(close, i)).collect();
     (kernels::sma(av(&up), n, origin) * 100.0).to_vec()
+}
+
+/// PSY's rising flag at bar `i` (`0` at the first bar). It reads `close[i]` and the
+/// prior close, and is missing when one of them is (the per-row term rule,
+/// [`missing::term`]): a comparison with a missing close would read as "not rising".
+#[inline]
+fn psy_up(close: &[f64], i: usize) -> f64 {
+    if i == 0 {
+        return missing::term(&[close[0]], 0.0);
+    }
+    missing::term(&[close[i], close[i - 1]], f64::from(close[i] > close[i - 1]))
 }
 
 /// PVT Price Volume Trend (cumulative): `PVT_i = PVT_{i-1} + (C_i - C_{i-1}) / C_{i-1} * V_i`,
@@ -398,12 +407,13 @@ pub fn tsi_resume(
     (out, vec![im, om, ia, oa, prev])
 }
 
-/// `[single_ema, double_ema, sum, comp, position, ratio[len-n..len]…]` after a full
+/// `[single_ema, double_ema, <the n-sum's slide>, ratio[len-n..len]…]` after a full
 /// [`mass_index`] (row 0 at absolute position `origin`): the two EMA9-cascade stages, the
-/// exact rolling-sum accumulator ([`Csum`]), the absolute position of the next row (for
-/// re-anchoring), and the `n` ratio values still in the sum window. `None` before the
-/// `n`-sum emits. The accumulator is `kernels::sma`'s fast-path sliding sum, so a resume
-/// continues on identical bits.
+/// state of the guarded `n`-row sum of the ratios ([`kernels::sma_step`]'s [`Slide`]: the
+/// exact sum, its count of non-finite rows and the next row's absolute position), and the
+/// `n` ratios still in the window. `None` before the `n`-sum emits. The slide is
+/// `kernels::sma`'s own, so a resume continues on identical bits — an infinite ratio
+/// included.
 pub fn mass_index_final_state(high: &[f64], low: &[f64], n: usize, origin: usize) -> Option<Vec<f64>> {
     let len = high.len();
     let rng = mass_index_range(high, low);
@@ -414,26 +424,39 @@ pub fn mass_index_final_state(high: &[f64], low: &[f64], n: usize, origin: usize
     if start + n > len {
         return None; // the n-window sum has not emitted a valid value yet
     }
-    let mut sum = Csum::default();
-    let mut anchors = Anchors::from(origin + start, n);
-    for i in start..len {
-        sum.add(ratio[i]);
-        if i >= start + n {
-            sum.sub(ratio[i - n]);
-        }
-        if anchors.tick() && i + 1 >= n {
-            sum = Csum::of(ratio[(i + 1 - n).max(start)..=i].iter().copied());
-        }
-    }
-    let mut state = vec![single[len - 1], double[len - 1], 0.0, 0.0, (origin + len) as f64];
-    sum.write_state(&mut state[2..4]);
+    let slide = state_after(Slide::<1>::initial(origin), len, |row, prev, next| {
+        kernels::sma_step(n, row, |j| ratio[j], prev, next)
+    })?;
+    let mut state = vec![single[len - 1], double[len - 1]];
+    state.extend(slide);
     state.extend_from_slice(&ratio[len - n..len]);
     Some(state)
 }
 
-/// Resume [`mass_index`] over `[from, n)`: advance the EMA9 cascade, form each ratio, slide
-/// the running sum (add the new ratio, drop the one leaving the window, re-anchor at an
-/// absolute position), and emit `mean · n` — bit-identical to `kernels::sma(ratio, n) * n`.
+/// Where the carried ratios start in a [`mass_index`] state.
+const MASS_RATIOS: usize = 2 + kernels::SMA_STATE;
+
+/// One row of [`mass_index`] from the carried `state` (see [`mass_index_final_state`]):
+/// advance the EMA9 cascade by the row's range, form its ratio, and slide the guarded
+/// `n`-sum over the window of carried ratios plus the new one; the state as of the row is
+/// written into `next`. Returns `sum` (`mean·n`). The one step of the Vec and scalar resumes.
+fn mass_index_step(range: f64, n: usize, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    let k = 2.0 / (9.0 + 1.0); // EMA9
+    let single = (range - state[0]).mul_add(k, state[0]);
+    let double = (single - state[1]).mul_add(k, state[1]);
+    let ratio = single / double;
+    let ring = &state[MASS_RATIOS..MASS_RATIOS + n]; // the ratios of rows `row-n .. row-1`
+    let term = |j: usize| if j == row { ratio } else { ring[j + n - row] };
+    let mean = kernels::sma_step(n, row, term, &state[2..MASS_RATIOS], &mut next[2..MASS_RATIOS])?;
+    next[0] = single;
+    next[1] = double;
+    next[MASS_RATIOS..MASS_RATIOS + n - 1].copy_from_slice(&ring[1..]);
+    next[MASS_RATIOS + n - 1] = ratio;
+    Some(mean * n as f64)
+}
+
+/// Resume [`mass_index`] over `[from, n)`: one [`mass_index_step`] per row — bit-identical
+/// to `kernels::sma(ratio, n) * n`.
 pub fn mass_index_resume(
     high: &[f64],
     low: &[f64],
@@ -442,29 +465,15 @@ pub fn mass_index_resume(
     state: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
     let len = high.len();
-    let k = 2.0 / (9.0 + 1.0); // EMA9
-    let (mut single, mut double) = (state[0], state[1]);
-    let mut sum = Csum::from_state(&state[2..4]).unwrap_or_default();
-    let mut pos = state[4] as usize;
-    let mut ratios: Vec<f64> = state[5..5 + n].to_vec(); // ratio[from-n .. from]
+    let mut prev = state.to_vec();
+    let mut next = prev.clone();
     let mut out = Vec::with_capacity(len.saturating_sub(from));
     for i in from..len {
-        single = ((high[i] - low[i]) - single).mul_add(k, single);
-        double = (single - double).mul_add(k, double);
-        let ratio_i = single / double;
-        sum.add(ratio_i);
-        sum.sub(ratios[i - from]); // ratio[i - n]
-        ratios.push(ratio_i);
-        if anchors_at(pos, n) {
-            sum = Csum::of(ratios[ratios.len() - n..].iter().copied());
-        }
-        pos += 1;
-        out.push(sum.mean(n as f64) * n as f64);
+        let v = mass_index_step(high[i] - low[i], n, i, &prev, &mut next);
+        out.push(v.expect("a mass_index state from mass_index_final_state steps"));
+        std::mem::swap(&mut prev, &mut next);
     }
-    let mut new_state = vec![single, double, 0.0, 0.0, pos as f64];
-    sum.write_state(&mut new_state[2..4]);
-    new_state.extend_from_slice(&ratios[ratios.len() - n..]);
-    (out, new_state)
+    (out, prev)
 }
 
 
@@ -590,10 +599,9 @@ pub fn tsi_resume_one(
     Some(100.0 * om / oa)
 }
 
-/// Scalar single-row twin of [`mass_index_resume`]: advance the EMA9 cascade, form the new
-/// ratio, slide the running sum (add new, drop `ratio[row-n]` = the oldest retained ratio at
-/// `state[5]`, re-anchor at an absolute position), and emit `mean·n`; the state as of `row` (the window slid by one) is
-/// written into `next`. Bit-identical to one loop iteration of the Vec kernel.
+/// Scalar single-row twin of [`mass_index_resume`]: one [`mass_index_step`] from `state`,
+/// the state as of `row` written into `next`. Bit-identical to one loop iteration of the
+/// Vec resume.
 pub fn mass_index_resume_one(
     high: &[f64],
     low: &[f64],
@@ -602,27 +610,10 @@ pub fn mass_index_resume_one(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if row >= high.len() || n == 0 || state.len() != 5 + n || next.len() != state.len() {
+    if row >= high.len() || n == 0 || row < n || state.len() != MASS_RATIOS + n || next.len() != state.len() {
         return None;
     }
-    let k = 2.0 / (9.0 + 1.0); // EMA9
-    let single = ((high[row] - low[row]) - state[0]).mul_add(k, state[0]);
-    let double = (single - state[1]).mul_add(k, state[1]);
-    let ratio_i = single / double;
-    let mut sum = Csum::from_state(&state[2..4])?;
-    let pos = state[4] as usize;
-    sum.add(ratio_i);
-    sum.sub(state[5]); // ratio[row - n], the oldest value in the carried window
-    next[0] = single;
-    next[1] = double;
-    next[4] = (pos + 1) as f64;
-    next[5..5 + n - 1].copy_from_slice(&state[6..5 + n]);
-    next[5 + n - 1] = ratio_i;
-    if anchors_at(pos, n) {
-        sum = Csum::of(next[5..5 + n].iter().copied());
-    }
-    sum.write_state(&mut next[2..4]);
-    Some(sum.mean(n as f64) * n as f64)
+    mass_index_step(high[row] - low[row], n, row, state, next)
 }
 
 

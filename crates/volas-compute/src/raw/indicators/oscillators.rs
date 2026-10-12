@@ -4,7 +4,8 @@ use super::av;
 use super::stochastic::{stoch_fastk, stochrsi_fastk};
 use crate::accum::{anchors_at, Csum};
 use crate::guard::Slide;
-use crate::raw::kernels;
+use crate::missing;
+use crate::raw::kernels::{self, total_ge, total_gt};
 
 // ---------------------------------------------------------------------------
 // Overbought / oversold
@@ -44,7 +45,7 @@ fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
     let mut highest = unsafe { *src };
     for i in 1..10 {
         let value = unsafe { *src.add(i) };
-        if value > highest {
+        if total_gt(value, highest) {
             highest_idx = i;
             highest = value;
         }
@@ -62,13 +63,13 @@ fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
             let mut idx = trailing + 1;
             while idx <= today {
                 let value = unsafe { *src.add(idx) };
-                if value > highest {
+                if total_gt(value, highest) {
                     highest_idx = idx;
                     highest = value;
                 }
                 idx += 1;
             }
-        } else if x >= highest {
+        } else if total_ge(x, highest) {
             highest_idx = today;
             highest = x;
         }
@@ -79,21 +80,25 @@ fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
     out
 }
 
-/// Raw Stochastic Value.
+/// Raw Stochastic Value (未成熟随机值): [`rsv_value`] over each `period`-bar window —
+/// NaN during the warm-up (no full window yet) and while the window holds a missing
+/// value. Lookback `period-1`.
 pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     let llv = kernels::rolling_min(av(low), period);
     let hhv = kernels::rolling_max(av(high), period);
-    let n = close.len();
-    let mut result = vec![f64::NAN; n];
-    for i in 0..n {
-        let denom = hhv[i] - llv[i];
-        if denom.abs() > 1e-10 {
-            result[i] = (close[i] - llv[i]) / denom * 100.0;
-        } else {
-            result[i] = 0.0;
-        }
-    }
-    result
+    (0..close.len()).map(|i| rsv_value(close[i], hhv[i], llv[i])).collect()
+}
+
+/// The raw stochastic value of `close` in a window whose highest high is `hh` and
+/// lowest low `ll`: `100·(close − ll)/(hh − ll)`, `0` for a (near-)flat range. The one
+/// owner of the RSV formula — [`rsv`] and KDJ both evaluate it. Missing when any of the
+/// three is (the per-row term rule, [`missing::term`]): a missing range would otherwise
+/// fall to the flat-range `0`.
+#[inline]
+pub(super) fn rsv_value(close: f64, hh: f64, ll: f64) -> f64 {
+    let denom = hh - ll;
+    let v = if denom.abs() > 1e-10 { (close - ll) / denom * 100.0 } else { 0.0 };
+    missing::term(&[close, hh, ll], v)
 }
 
 // --- StochRSI state-carry (additive; the full-recompute fallback stays correct) ---

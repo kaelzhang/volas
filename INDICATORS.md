@@ -114,7 +114,9 @@ df['(boll.upper - boll.lower) / boll']
 rsv:<period>@<high>,<low>,<close>
 ```
 
-Calculates the raw stochastic value, which is often used to calculate KDJ.
+Calculates the raw stochastic value, which is often used to calculate KDJ:
+`100·(close − LLV(low, period)) / (HHV(high, period) − LLV(low, period))`, `0` for a flat
+range. The rows before the first full window are NaN (warm-up).
 
 - **period** `int` (required)
 - **high?** `str='high'` The column name for high prices.
@@ -145,6 +147,11 @@ RSV = rsv(period_rsv)
 The EWMA here is seeded by `init_value`. Trading software from different vendors
 usually uses one of `0.0`, `50.0`, or `100.0` as the initial value; Volas defaults
 to `50.0`.
+
+Before the first full `period_rsv` window, KDJ's RSV covers the bars available so far
+(the 通达信 convention: `LLV` / `HHV` of fewer bars than the period reduce what there is),
+so %K is seeded from real values from the very first bar. This differs from
+stock-pandas, which feeds an RSV of `0` into the first `period_rsv − 1` bars.
 
 ```
 kdj.k:<period_rsv>,<period_k>,<init_value>@<high>,<low>,<close>

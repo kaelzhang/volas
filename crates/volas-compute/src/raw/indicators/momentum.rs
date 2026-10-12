@@ -1,60 +1,89 @@
 use crate::accum::{Anchors, Csum};
 use crate::guard::{all_finite, own_sums, state_after, window_sums, Order, Slide, Window};
+use crate::missing;
 use crate::raw::kernels;
 
 // ---------------------------------------------------------------------------
 // Momentum — change relative to the price `period` bars earlier
 // ---------------------------------------------------------------------------
 
+/// The momentum / rate-of-change family: each row against the row `period` bars back.
+/// The one owner of the family's per-row rule — the batch kernels, TRIX's 1-period ROC
+/// and the live resumes all evaluate [`Momentum::value`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Momentum {
+    /// `current − prior` (TA-Lib MOM).
+    Mom,
+    /// `100·(current / prior − 1)` (TA-Lib ROC).
+    Roc,
+    /// `current / prior − 1` (TA-Lib ROCP).
+    Rocp,
+    /// `current / prior` (TA-Lib ROCR).
+    Rocr,
+    /// `100·current / prior` (TA-Lib ROCR100).
+    Rocr100,
+}
+
+impl Momentum {
+    /// The family member named `name` (`mom`, `roc`, `rocp`, `rocr`, `rocr100`).
+    pub fn of(name: &str) -> Option<Momentum> {
+        Some(match name {
+            "mom" => Momentum::Mom,
+            "roc" => Momentum::Roc,
+            "rocp" => Momentum::Rocp,
+            "rocr" => Momentum::Rocr,
+            "rocr100" => Momentum::Rocr100,
+            _ => return None,
+        })
+    }
+
+    /// The value of `current` against `prior`. A ratio over a prior of exactly zero is
+    /// `0.0` (TA-Lib's divide-by-zero guard) — for present values only: a missing input
+    /// is missing (the per-row term rule, [`missing::term`]), so the zero-base branch
+    /// never turns a missing value into `0`.
+    #[inline(always)]
+    pub fn value(self, current: f64, prior: f64) -> f64 {
+        let v = match self {
+            Momentum::Mom => current - prior,
+            _ if prior == 0.0 => 0.0,
+            Momentum::Roc => (current / prior - 1.0) * 100.0,
+            Momentum::Rocp => current / prior - 1.0,
+            Momentum::Rocr => current / prior,
+            Momentum::Rocr100 => current / prior * 100.0,
+        };
+        missing::term(&[current, prior], v)
+    }
+
+    /// The value at row `i` of `data` (NaN while `i < period`).
+    #[inline]
+    pub fn at(self, data: &[f64], period: usize, i: usize) -> f64 {
+        if i < period { f64::NAN } else { self.value(data[i], data[i - period]) }
+    }
+
+    /// The whole series: NaN warm-up `[0, period)`, then [`Momentum::value`] per row —
+    /// the valid region written once (no `vec![NaN; n]` re-write; these tiny
+    /// division-bound kernels are dominated by their result-buffer writes).
+    fn series(self, data: &[f64], period: usize) -> Vec<f64> {
+        let n = data.len();
+        if period >= n {
+            return vec![f64::NAN; n];
+        }
+        let mut out = vec![f64::NAN; period];
+        out.extend(data[period..].iter().zip(&data[..n - period]).map(|(&c, &p)| self.value(c, p)));
+        out
+    }
+}
+
 /// Momentum: `data[i] - data[i-period]` (TA-Lib MOM). NaN during warm-up.
 pub fn mom(data: &[f64], period: usize) -> Vec<f64> {
-    let n = data.len();
-    if period >= n {
-        return vec![f64::NAN; n];
-    }
-    // Warm-up NaN, then compute the valid region once (no `vec![NaN; n]` re-write).
-    let mut out = vec![f64::NAN; period];
-    out.extend((period..n).map(|i| data[i] - data[i - period]));
-    out
+    Momentum::Mom.series(data, period)
 }
 
-/// Shared shape for the rate-of-change ratios (ROC/ROCP/ROCR/ROCR100): relate
-/// each row to the price `period` bars earlier via `f(current, prior)`, NaN
-/// during warm-up. A prior price of exactly zero yields `0.0`, matching TA-Lib's
-/// divide-by-zero guard (purely theoretical for a positive price series).
-fn roc_ratio(data: &[f64], period: usize, f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
-    let n = data.len();
-    if period >= n {
-        return vec![f64::NAN; n];
-    }
-    // Fill only the warm-up with NaN, then compute the valid region once via `extend`
-    // rather than `vec![NaN; n]` followed by an index-overwrite of `[period, n)` — the
-    // latter writes that range twice (NaN, then the result). Halves the result-buffer
-    // writes; a meaningful share of these tiny division-bound kernels' cost.
-    let mut out = vec![f64::NAN; period];
-    out.extend(
-        data[period..]
-            .iter()
-            .zip(&data[..(n - period)])
-            .map(
-                |(&current, &prior)| {
-                    if prior == 0.0 {
-                        0.0
-                    } else {
-                        f(current, prior)
-                    }
-                },
-            ),
-    );
-    out
-}
-
-/// One rate of change `100·(current/prior − 1)`; a prior of exactly zero gives `0.0`
-/// (TA-Lib's divide-by-zero guard). The one owner of the ROC rule: [`roc`] and TRIX's
-/// full computation and resumes all evaluate it here.
+/// One rate of change `100·(current/prior − 1)` ([`Momentum::Roc`]), for TRIX's full
+/// computation and resumes.
 #[inline(always)]
 fn roc_value(current: f64, prior: f64) -> f64 {
-    if prior == 0.0 { 0.0 } else { (current / prior - 1.0) * 100.0 }
+    Momentum::Roc.value(current, prior)
 }
 
 /// Rate of change: `100 * (data/data[period ago] - 1)` (TA-Lib ROC).
@@ -92,22 +121,23 @@ pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
 
 /// Rate of change percentage: `data/data[period ago] - 1` (TA-Lib ROCP).
 pub fn rocp(data: &[f64], period: usize) -> Vec<f64> {
-    roc_ratio(data, period, |cur, prior| cur / prior - 1.0)
+    Momentum::Rocp.series(data, period)
 }
 
 /// Rate of change ratio: `data/data[period ago]` (TA-Lib ROCR).
 pub fn rocr(data: &[f64], period: usize) -> Vec<f64> {
-    roc_ratio(data, period, |cur, prior| cur / prior)
+    Momentum::Rocr.series(data, period)
 }
 
 /// Rate of change ratio ×100: `100 * data/data[period ago]` (TA-Lib ROCR100).
 pub fn rocr100(data: &[f64], period: usize) -> Vec<f64> {
-    roc_ratio(data, period, |cur, prior| cur / prior * 100.0)
+    Momentum::Rocr100.series(data, period)
 }
 
 /// Williams %R: `-100 * (HH - close) / (HH - LL)` over `period`, where HH/LL are
-/// the highest high / lowest low (TA-Lib WILLR). A flat range (HH == LL) yields 0.
-/// Lookback `period-1`; the tracker preserves TA-Lib's window and tie semantics.
+/// the highest high / lowest low (TA-Lib WILLR). A flat range (HH == LL) yields 0; a
+/// window holding a missing value is NaN. Lookback `period-1`; the tracker preserves
+/// TA-Lib's window and tie semantics.
 pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
     // The tracker reads its inputs unchecked: inputs of unequal length line up no row.
     if !super::same_len(&[high, low, close]) {
@@ -176,7 +206,13 @@ pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64
         trailing += 1;
         today += 1;
     }
-    out.finish()
+    let mut out = out.finish();
+    // The finite-window rule: the tracker steps over a missing high / low, and a flat
+    // range reads no close — so blank every window holding one, and a missing close.
+    missing::blank_windows(&mut out, high, period);
+    missing::blank_windows(&mut out, low, period);
+    missing::blank_windows(&mut out, close, 1);
+    out
 }
 
 /// Balance of Power: `(close − open)/(high − low)` (TA-Lib BOP). A bar with no
@@ -344,7 +380,8 @@ pub fn trix_resume(
     (out, e.to_vec())
 }
 
-/// Aroon Up (TA-Lib AROON, up output). Lookback `period`.
+/// Aroon Up (TA-Lib AROON, up output): NaN while the `period + 1`-bar window holds a
+/// missing high. Lookback `period`.
 pub fn aroon_up(high: &[f64], _low: &[f64], period: usize) -> Vec<f64> {
     let n = high.len();
     if period == 0 || period >= n {
@@ -377,10 +414,12 @@ pub fn aroon_up(high: &[f64], _low: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         today += 1;
     }
+    missing::blank_windows(&mut out, high, period + 1);
     out
 }
 
-/// Aroon Down (TA-Lib AROON, down output). Lookback `period`.
+/// Aroon Down (TA-Lib AROON, down output): NaN while the `period + 1`-bar window holds
+/// a missing low. Lookback `period`.
 pub fn aroon_down(_high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     let n = low.len();
     if period == 0 || period >= n {
@@ -413,12 +452,14 @@ pub fn aroon_down(_high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         today += 1;
     }
+    missing::blank_windows(&mut out, low, period + 1);
     out
 }
 
 /// Aroon Oscillator (TA-Lib AROONOSC): `factor·(hiIdx − loIdx)` — the algebraic identity
 /// of `aroonUp − aroonDown` that TA-Lib evaluates directly, so it materialises neither
-/// line nor a subtraction pass. Lookback `period`.
+/// line nor a subtraction pass. NaN while the window holds a missing high or low.
+/// Lookback `period`.
 pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
     // The tracker reads its inputs unchecked: inputs of unequal length line up no row.
     if !super::same_len(&[high, low]) {
@@ -509,7 +550,10 @@ pub fn aroonosc(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         today += 1;
     }
-    out.finish()
+    let mut out = out.finish();
+    missing::blank_windows(&mut out, high, period + 1);
+    missing::blank_windows(&mut out, low, period + 1);
+    out
 }
 
 /// Money Flow Index (TA-Lib MFI): `100·posMF/(posMF+negMF)` over `period`, where each
@@ -552,16 +596,9 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
             + unsafe { *low.get_unchecked(i) }
             + unsafe { *close.get_unchecked(i) })
             / 3.0;
-        let flow = tp * unsafe { *volume.get_unchecked(i) };
         // Match TA-Lib's signed-flow branch shape; on real price series adjacent
         // typical-price direction is predictable enough to beat boolean-to-float masks.
-        let (p, ng) = if tp > prev_tp {
-            (flow, 0.0)
-        } else if tp < prev_tp {
-            (0.0, flow)
-        } else {
-            (0.0, 0.0)
-        };
+        let [p, ng] = signed_flow(tp, prev_tp, unsafe { *volume.get_unchecked(i) });
         ring_pos[i - 1] = p;
         ring_neg[i - 1] = ng;
         pos_sum.add(p);
@@ -591,14 +628,7 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
             + unsafe { *low.get_unchecked(i) }
             + unsafe { *close.get_unchecked(i) })
             / 3.0;
-        let flow = tp * unsafe { *volume.get_unchecked(i) };
-        let (p, ng) = if tp > prev_tp {
-            (flow, 0.0)
-        } else if tp < prev_tp {
-            (0.0, flow)
-        } else {
-            (0.0, 0.0)
-        };
+        let [p, ng] = signed_flow(tp, prev_tp, unsafe { *volume.get_unchecked(i) });
         ring_pos[slot] = p; // bar entering
         ring_neg[slot] = ng;
         pos_sum.add(p);
@@ -653,16 +683,15 @@ pub fn ultosc(
     (0..n).map(|row| ultosc_row(|j| terms[j], periods, row, &mut slides)).collect()
 }
 
-/// ULTOSC's `[buying pressure, true range]` of bar `i >= 1`.
+/// ULTOSC's `[buying pressure, true range]` of bar `i >= 1`: `close − min(low, prev
+/// close)` and [`super::tr_at`]. Both are missing when an input the bar reads is (the
+/// per-row term rule, [`missing::term`]): `f64::min` would step over a missing prior
+/// close.
 #[inline]
 fn ultosc_term(high: &[f64], low: &[f64], close: &[f64], i: usize) -> [f64; 2] {
-    let prev_close = close[i - 1];
-    let true_low = low[i].min(prev_close);
-    let bp = close[i] - true_low;
-    let mut tr = high[i] - low[i];
-    tr = tr.max((prev_close - high[i]).abs());
-    tr = tr.max((prev_close - low[i]).abs());
-    [bp, tr]
+    let (c, l, prev_close) = (close[i], low[i], close[i - 1]);
+    let bp = c - l.min(prev_close);
+    missing::terms(&[c, l, prev_close], [bp, super::tr_at(high, low, close, i)])
 }
 
 /// One row of [`ultosc`] (its terms are term `row - 1`; add, read, drop per period),
@@ -869,14 +898,25 @@ pub fn cci_step(
 #[inline]
 fn mfi_flow(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], j: usize) -> [f64; 2] {
     let (now, prev) = (typical(high, low, close, j + 1), typical(high, low, close, j));
-    let f = now * volume[j + 1];
-    if now > prev {
-        [f, 0.0]
-    } else if now < prev {
-        [0.0, f]
+    signed_flow(now, prev, volume[j + 1])
+}
+
+/// A bar's money flow `tp·volume`, signed by the typical price `tp`'s direction against
+/// the prior bar's `prev_tp` (`[flow, 0]` up, `[0, flow]` down, `[0, 0]` flat) — the one
+/// owner of MFI's term, for the fast loop and [`mfi_flow`] alike. It reads both typical
+/// prices and the volume, and is missing when one of them is (the per-row term rule,
+/// [`missing::terms`]): a comparison with a missing value would read as "flat".
+#[inline(always)]
+fn signed_flow(tp: f64, prev_tp: f64, volume: f64) -> [f64; 2] {
+    let flow = tp * volume;
+    let signed = if tp > prev_tp {
+        [flow, 0.0]
+    } else if tp < prev_tp {
+        [0.0, flow]
     } else {
         [0.0, 0.0]
-    }
+    };
+    missing::terms(&[tp, prev_tp, volume], signed)
 }
 
 /// MFI from its window's flow sums: `100·pos/(pos+neg)`, 0 for a total below 1.0.

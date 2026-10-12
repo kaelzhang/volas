@@ -157,7 +157,7 @@ _ALL_RECURSIVE = sorted(set(RECURSIVE.values()) | {SUBCOMMANDS[k] for k in _RECU
 # margin), so the windowed comparison covers the rest.
 _WINDOW_NOT_BIT_EXACT = {
     "ad", "asi", "kama:5", "kcw", "nvi", "obv", "pvi", "pvt", "stoch_momentum",
-    "stoch_momentum.signal", "ttm_squeeze", "wad",
+    "stoch_momentum.signal", "wad",
 }
 _WINDOWED = sorted(set(_ALL_RECURSIVE) - _WINDOW_NOT_BIT_EXACT)
 

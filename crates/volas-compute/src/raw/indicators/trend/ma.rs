@@ -5,6 +5,7 @@
 use crate::accum::{anchors_at, Anchors, Csum};
 use crate::guard::{all_finite, own_sums, ring_push, state_after, window_sums, Order, Slide, Window};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
+use crate::missing;
 use crate::raw::indicators::av;
 use crate::raw::kernels;
 
@@ -47,36 +48,11 @@ pub(super) fn ema_k(period: usize) -> f64 {
     2.0 / (period as f64 + 1.0)
 }
 
-/// Index of the EMA seed (the `period`-th finite value of `data`), or `None` if fewer
-/// than `period` finite values exist. Mirrors `kernels::sma_seeded`'s seeding scan, so a
-/// captured state corresponds to the same seed the full kernel used.
-pub(super) fn ema_seed_idx(data: &[f64], period: usize) -> Option<usize> {
-    if period == 0 {
-        return None;
-    }
-    let mut count = 0usize;
-    for (i, &x) in data.iter().enumerate() {
-        if !x.is_nan() {
-            count += 1;
-            if count == period {
-                return Some(i);
-            }
-        }
-    }
-    None
-}
-
 /// Final single-EMA state `[ema]` after a full [`ema`] compute, or `None` if `data`
 /// never seeded (the column is all-NaN → nothing to carry, keep the fallback). The EMA
 /// is advanced with the same fused `(x-prev)·k+prev` step as `kernels::ema_seeded`.
 pub fn ema_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
-    let k = ema_k(period);
-    let si = ema_seed_idx(data, period)?;
-    let mut e = data[si + 1 - period..=si].iter().sum::<f64>() / period as f64;
-    for &x in &data[si + 1..] {
-        e = (x - e).mul_add(k, e);
-    }
-    Some(vec![e])
+    Some(vec![kernels::sma_seeded_last(data, period, kernels::ema_step(period))?])
 }
 
 /// Resume [`ema`] from `state = [ema_{from-1}]` over rows `[from, n)`, bit-identical to a
@@ -121,14 +97,7 @@ pub fn ema_resume_one(
 /// Final Wilder/SMMA state `[rma]` after a full [`smma`] compute, or `None` if `data`
 /// never seeded. Uses `kernels::wilder`'s exact fused `prev·a + x·b` step.
 pub fn smma_final_state(data: &[f64], period: usize) -> Option<Vec<f64>> {
-    let pf = period as f64;
-    let (a, b) = ((pf - 1.0) / pf, 1.0 / pf);
-    let si = ema_seed_idx(data, period)?;
-    let mut w = data[si + 1 - period..=si].iter().sum::<f64>() / pf;
-    for &x in &data[si + 1..] {
-        w = w.mul_add(a, x * b);
-    }
-    Some(vec![w])
+    Some(vec![kernels::sma_seeded_last(data, period, kernels::wilder_step(period))?])
 }
 
 /// Resume [`smma`] from `state = [rma_{from-1}]` over rows `[from, n)`. Reads only
@@ -502,6 +471,18 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
     next[5] = (seen + 1).min(period) as f64;
     next[6] = (pos + 1) as f64;
     Some(value)
+}
+
+/// The period `mavp` (TA-Lib MAVP) averages a row over: the row's `periods` value
+/// truncated toward zero and clamped to `[min_period, max_period]`. `None` when that value
+/// is missing — the row reads no average and is missing (the per-row term rule, see
+/// [`crate::missing`]); a cast would read it as `0` and clamp it to `min_period`.
+#[inline]
+pub fn mavp_period(value: f64, min_period: usize, max_period: usize) -> Option<usize> {
+    if missing::is_missing(value) {
+        return None;
+    }
+    Some((value as i64).clamp(min_period as i64, max_period as i64) as usize)
 }
 
 /// A finite-window moving average of a TA-Lib MA type — SMA (`0`), WMA (`2`) or TRIMA

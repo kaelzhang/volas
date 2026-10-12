@@ -153,9 +153,6 @@ on_complete_rows! { series:
     tema(data; period: usize) -> Vec<f64>;
     trix(close; period: usize) -> Vec<f64>;
     tsi(close; long: usize, short: usize) -> Vec<f64>;
-    ttm_squeeze_momentum(high, low, close; n: usize, origin: usize) -> Vec<f64>;
-    ttm_squeeze_on(high, low, close; n: usize, bb_mult: f64, kc_mult: f64, origin: usize) ->
-        Vec<f64>;
     wad(high, low, close) -> Vec<f64>;
 }
 
