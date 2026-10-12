@@ -69,7 +69,7 @@ A NaN in the middle of the input is where the two libraries part ways for a
 recursive indicator (EMA, MACD, RSI, ATR, ADX, OBV, SAR, the Hilbert transform, …).
 TA-Lib carries the NaN into every later output. volas skips the row: it outputs NaN
 there and continues the recursion from the last complete row, exactly as if the row
-had been deleted. See [Missing and non-finite inputs](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md#missing-and-non-finite-inputs)
+had been deleted. See [Missing and non-finite inputs](numerics.md#missing-and-non-finite-inputs)
 for the full rule.
 
 ## Sliding sums
@@ -77,9 +77,13 @@ for the full rule.
 TA-Lib's moving averages, rolling sums, variances and regressions slide a plain
 running sum, which keeps the rounding of every row it ever held: after a spike leaves
 the window every later value stays off, and a long history drifts. volas keeps each
-window's sum exact (see [Exact window sums](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md#exact-window-sums)),
+window's sum exact (see [Exact window sums](numerics.md#exact-window-sums)),
 so on such data its values are the exact ones and TA-Lib's are not; on ordinary data the
-two agree to the last few bits.
+two agree to the last few bits. Variances, correlations, betas and regression slopes are
+taken from centred moments of those exact sums rather than TA-Lib's raw moments (see
+[centred moments](numerics.md#centred-moments)):
+where TA-Lib's cancel — a window whose mean dwarfs its spread — volas's values are the
+exact ones, and a correlation never leaves `[-1, 1]`.
 
 See also:
 

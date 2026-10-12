@@ -1,5 +1,5 @@
-use crate::accum::{anchors_at, Anchors, Csum};
-use crate::guard::{all_finite, own_sums, state_after, window_sums, Order, Slide, Window};
+use crate::accum::{anchors_at, comoment, square_terms, two_prod, Accumulator, Anchors, Csum};
+use crate::guard::{all_finite, state_after, Order, Slide, Window};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 
 // ---------------------------------------------------------------------------
@@ -35,18 +35,13 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
     // Single-write (D2): NaN warm-up `[0, period-1)`, each valid row written once.
     let mut slope = crate::buf::OutBuf::warmup(n, period - 1);
     let mut intercept = crate::buf::OutBuf::warmup(n, period - 1);
-    let mut emit = |today: usize, sum_y: f64, sum_xy: f64| {
-        let m = (p * sum_xy - sum_x * sum_y) / divisor;
+    let mut emit = |today: usize, sum_y: &Csum, sum_xy: &Csum| {
+        let (m, b) = linreg_fit_of(p, sum_x, divisor, sum_y, sum_xy);
         slope.set(today, m);
-        intercept.set(today, (sum_y - m * sum_x) / p);
+        intercept.set(today, b);
     };
     // A window's own `(Σy, Σ age·y)` — the direct fit for a window holding a bad row.
-    let window_sums = |today: usize| {
-        data[today + 1 - period..=today]
-            .iter()
-            .enumerate()
-            .fold((0.0, 0.0), |(sy, sxy), (k, &y)| (sy + y, sxy + (period - 1 - k) as f64 * y))
-    };
+    let window_sums = |today: usize| linreg_sums(data[today + 1 - period..=today].iter().copied(), period, |_| true);
     // Seed the first window with TA-Lib's per-bar accumulation order (`i` = age, the
     // newest bar weighted 0, the oldest `period-1`), then slide in O(1): when the
     // window advances one bar every retained point's age rises by one, so `Σ i·y`
@@ -63,25 +58,31 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
     let mut finite = true;
     let mut sum_y = Csum::default();
     let mut sum_xy = Csum::default();
+    // Re-sum at an anchor or when a sum went inexact. The fast pass stops once a
+    // non-finite row has poisoned it (the careful pass recomputes every row); the
+    // careful pass, whose sums hold finite rows only, always re-sums.
     let mut reanchor = |guard: &G, sum_y: &mut Csum, sum_xy: &mut Csum, today: usize| {
         finite &= sum_y.value().is_finite() && sum_xy.value().is_finite();
-        let rows = data[today + 1 - period..=today].iter().copied();
-        (*sum_y, *sum_xy) = linreg_sums(rows, period, |y| guard.counts(y.is_finite()));
+        if finite || !guard.counts(false) {
+            let rows = data[today + 1 - period..=today].iter().copied();
+            (*sum_y, *sum_xy) = linreg_sums(rows, period, |y| guard.counts(y.is_finite()));
+        }
     };
+    let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
     for i in (0..period).rev() {
         let y = data[period - 1 - i];
         if guard.enter(y.is_finite()) {
             linreg_admit_first(&mut sum_y, &mut sum_xy, i, y);
         }
     }
-    if anchors.tick() {
+    if anchors.tick() || !exact(&sum_y, &sum_xy) {
         reanchor(&guard, &mut sum_y, &mut sum_xy, period - 1);
     }
     if guard.clean() {
-        emit(period - 1, sum_y.value(), sum_xy.value());
+        emit(period - 1, &sum_y, &sum_xy);
     } else {
         let (sy, sxy) = window_sums(period - 1);
-        emit(period - 1, sy, sxy);
+        emit(period - 1, &sy, &sxy);
     }
     for today in period..n {
         let leaving = data[today - period];
@@ -89,14 +90,15 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
         let came_in = guard.enter(entering.is_finite());
         let went_out = guard.leave(leaving.is_finite());
         linreg_slide(&mut sum_y, &mut sum_xy, p, came_in.then_some(entering), went_out.then_some(leaving));
-        if anchors.tick() {
+        let anchor = anchors.tick();
+        if anchor || !exact(&sum_y, &sum_xy) {
             reanchor(&guard, &mut sum_y, &mut sum_xy, today);
         }
         if guard.clean() {
-            emit(today, sum_y.value(), sum_xy.value());
+            emit(today, &sum_y, &sum_xy);
         } else {
             let (sy, sxy) = window_sums(today);
-            emit(today, sy, sxy);
+            emit(today, &sy, &sxy);
         }
     }
     let finite = finite && sum_y.value().is_finite() && sum_xy.value().is_finite();
@@ -106,14 +108,32 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
 /// The fit sums `(Σy, Σ age·y)` of one window, its rows oldest first (age `period-1`
 /// down to 0), those `admit` keeps — the seed of a first window, and every
 /// re-anchoring.
-fn linreg_sums(rows: impl Iterator<Item = f64>, period: usize, admit: impl Fn(f64) -> bool) -> (Csum, Csum) {
-    let (mut sum_y, mut sum_xy) = (Csum::default(), Csum::default());
+fn linreg_sums(rows: impl Iterator<Item = f64> + Clone, period: usize, admit: impl Fn(f64) -> bool) -> (Csum, Csum) {
+    let [sum_y, sum_xy] = Csum::settle(linreg_sums_in(rows.clone(), period, &admit), || {
+        linreg_sums_in(rows, period, &admit)
+    });
+    (sum_y, sum_xy)
+}
+
+/// [`linreg_sums`] over an [`Accumulator`].
+fn linreg_sums_in<A: Accumulator>(rows: impl Iterator<Item = f64>, period: usize, admit: &impl Fn(f64) -> bool) -> [A; 2] {
+    let (mut sum_y, mut sum_xy) = (A::default(), A::default());
     for (k, y) in rows.enumerate() {
         if admit(y) {
             linreg_admit_first(&mut sum_y, &mut sum_xy, period - 1 - k, y);
         }
     }
-    (sum_y, sum_xy)
+    [sum_y, sum_xy]
+}
+
+/// The fit `(m, b)` of a window of `p` rows from its exact sums `Σy` and `Σ age·y`
+/// (`sum_x`, `divisor` from [`linreg_x_sums`]): the slope's numerator `p·Σ age·y −
+/// Σage·Σy` by [`comoment`] — accurate however the raw moments cancel, exactly zero
+/// for a flat window.
+#[inline]
+fn linreg_fit_of(p: f64, sum_x: f64, divisor: f64, sum_y: &Csum, sum_xy: &Csum) -> (f64, f64) {
+    let m = comoment(p, &Csum::of([sum_x]), sum_y, std::slice::from_ref(sum_xy)) / divisor;
+    (m, (sum_y.value() - m * sum_x) / p)
 }
 
 /// The fit's closed-form `x` sums over ages `0..period`: `(Σx, Σx·Σx − period·Σx²)`.
@@ -130,7 +150,7 @@ fn linreg_x_sums(period: usize) -> (f64, f64) {
 
 /// Admit a point of age `age` into the first window's `(Σy, Σ age·y)`.
 #[inline(always)]
-fn linreg_admit_first(sum_y: &mut Csum, sum_xy: &mut Csum, age: usize, y: f64) {
+fn linreg_admit_first<A: Accumulator>(sum_y: &mut A, sum_xy: &mut A, age: usize, y: f64) {
     sum_y.add(y);
     sum_xy.add_prod(age as f64, y);
 }
@@ -211,12 +231,15 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> 
     }
     let p = period as f64;
     let mut guard = G::default();
-    let mut total1 = Csum::default(); // Σx over the window
-    let mut total2 = Csum::default(); // Σx² over the window
+    let mut sums = [Csum::default(); 3]; // [Σx, Σx²] over the window (see `square_terms`)
+    let slide = |sums: &mut [Csum; 3], x: f64, sign: f64| {
+        for (s, t) in sums.iter_mut().zip(square_terms(x)) {
+            s.add(sign * t);
+        }
+    };
     for &x in &data[..period - 1] {
         if guard.enter(x.is_finite()) {
-            total1.add(x);
-            total2.add(x * x);
+            slide(&mut sums, x, 1.0);
         }
     }
     let mut trailing = 0;
@@ -227,41 +250,42 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> 
     for i in (period - 1)..n {
         let x = data[i];
         if guard.enter(x.is_finite()) {
-            total1.add(x);
-            total2.add(x * x);
+            slide(&mut sums, x, 1.0);
         }
-        if anchors.tick() {
-            finite &= total1.value().is_finite() && total2.value().is_finite();
-            let window = || data[i + 1 - period..=i].iter().copied().filter(|x| guard.counts(x.is_finite()));
-            total1 = Csum::of(window());
-            total2 = Csum::of(window().map(|x| x * x));
+        let anchor = anchors.tick();
+        if anchor || !sums.iter().all(Csum::is_exact) {
+            // the fast pass stops re-summing once poisoned (see `linreg_fit_with`)
+            finite &= sums.iter().all(|s| s.value().is_finite());
+            if finite || !guard.counts(false) {
+                let window = data[i + 1 - period..=i].iter().filter(|x| guard.counts(x.is_finite()));
+                sums = Csum::of_rows(window.map(|&x| square_terms(x)));
+            }
         }
-        let value = if guard.clean() {
-            var_of_sums(&total1, &total2, p)
-        } else {
-            let (s1, s2) = data[i + 1 - period..=i]
-                .iter()
-                .fold((0.0, 0.0), |(s1, s2), &x| (s1 + x, s2 + x * x));
-            let mean1 = s1 / p;
-            s2 / p - mean1 * mean1
-        };
+        let value = if guard.clean() { var_of_sums(&sums, p) } else { var_of_window(&data[i + 1 - period..=i], p) };
         let old = data[trailing];
         trailing += 1;
         if guard.leave(old.is_finite()) {
-            total1.sub(old);
-            total2.sub(old * old);
+            slide(&mut sums, old, -1.0);
         }
         out.set(i, value);
     }
-    (out.finish(), finite && total1.value().is_finite() && total2.value().is_finite())
+    (out.finish(), finite && sums.iter().all(|s| s.value().is_finite()))
 }
 
-/// The population variance `mean(x²) − mean(x)²` of a window from its exact sums — a
-/// flat window's is exactly zero.
+/// The population variance of a window from its exact sums `[Σx, Σx²]` (see
+/// [`square_terms`]): `(n·Σx² − (Σx)²) / n²` by [`comoment`] — accurate however the raw
+/// moments cancel, exactly zero for a flat window.
 #[inline(always)]
-fn var_of_sums(total1: &Csum, total2: &Csum, p: f64) -> f64 {
-    let mean1 = total1.mean(p);
-    total2.mean(p) - mean1 * mean1
+fn var_of_sums(sums: &[Csum; 3], p: f64) -> f64 {
+    comoment(p, &sums[0], &sums[0], &sums[1..]) / (p * p)
+}
+
+/// The population variance of a window holding a non-finite row, on its own rows (the
+/// IEEE value of that window: NaN).
+fn var_of_window(rows: &[f64], p: f64) -> f64 {
+    let (s1, s2) = rows.iter().fold((0.0, 0.0), |(s1, s2), &x| (s1 + x, s2 + x * x));
+    let mean1 = s1 / p;
+    s2 / p - mean1 * mean1
 }
 
 /// Rolling population variance over `period` (TA-Lib VAR). Lookback period-1.
@@ -292,13 +316,15 @@ pub fn stddev(data: &[f64], period: usize, nbdev: f64, origin: usize) -> Vec<f64
 // Statistic — two-series relationships
 // ---------------------------------------------------------------------------
 
-/// Rolling Pearson correlation of `x` and `y` over `period` (TA-Lib CORREL):
-/// `(Σxy − ΣxΣy/n) / sqrt((Σx²−(Σx)²/n)(Σy²−(Σy)²/n))`. A non-positive denominator
-/// yields 0 (TA-Lib's guard). Row 0 is at absolute position `origin`. Lookback
-/// `period-1`.
+/// Rolling Pearson correlation of `x` and `y` over `period`: `Σ(x−x̄)(y−ȳ) /
+/// sqrt(Σ(x−x̄)²·Σ(y−ȳ)²)` over each window, from its exact sums ([`comoment`] of exact
+/// `Σx`, `Σy`, `Σx²`, `Σy²`, `Σxy`), so `|r| ≤ 1` and a flat window is not rounding
+/// noise. A window where `x` or `y` is constant (zero variance, tested exactly) yields
+/// 0 — TA-Lib CORREL's result there, which TA-Lib reaches through an absolute `1e-14`
+/// threshold on the raw-moment denominator instead (a deliberate divergence: TA-Lib's
+/// raw moments also give `|r| > 1`, and `±1` for some flat windows). Row 0 is at
+/// absolute position `origin`. Lookback `period-1`.
 pub fn correl(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    // The sliding loop reads both series unchecked: series of unequal length line up no
-    // row.
     if !super::same_len(&[x, y]) {
         return Vec::new();
     }
@@ -306,169 +332,172 @@ pub fn correl(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
     if period == 0 || period > n {
         return vec![f64::NAN; n];
     }
-    // Single-write (D2): NaN warm-up `[0, period-1)`, valid region written once via the
-    // output pointer below (no prefill memset); `out.finish()` proves it was filled.
+    let p = period as f64;
+    // Fast path: drop the trailing row, then add the new one (TA-Lib's order) — the
+    // careful slide's arithmetic ([`correl_row`]) on clean data.
     let mut out = crate::buf::OutBuf::warmup(n, period - 1);
-    let pf = period as f64;
-    // Precompute 1/period: the means are then per-element multiplies, not divisions
-    // (TA-Lib divides by period three times per bar). The ~1e-16 difference from a true
-    // divide is well within the 1e-9 parity tolerance (a near-zero denominator is gated
-    // to 0 either way, so the catastrophic-cancellation case is unaffected).
-    let inv_pf = 1.0 / pf;
-    let mut s = [Csum::default(); 5]; // Σx, Σy, Σx², Σy², Σxy
-    let x_ptr = x.as_ptr();
-    let y_ptr = y.as_ptr();
-    let out_ptr = out.ptr();
-    let terms = |xi: f64, yi: f64| [xi, yi, xi * xi, yi * yi, xi * yi];
-    for i in 0..period {
-        // `period <= n` and the hot loop below keeps both indices in range.
-        let (xi, yi) = unsafe { (*x_ptr.add(i), *y_ptr.add(i)) };
-        for (a, t) in s.iter_mut().zip(terms(xi, yi)) {
-            a.add(t);
-        }
-    }
-    let read = |s: &[Csum; 5]| s.map(|a| a.value());
+    let mut s = [Csum::default(); 8];
     let mut anchors = Anchors::from(origin + period - 1, period);
     let mut clean = true;
-    let mut reanchor = |s: &mut [Csum; 5], end: usize| {
-        clean &= read(s).iter().all(|v| v.is_finite());
-        *s = [Csum::default(); 5];
-        for j in end + 1 - period..=end {
-            for (a, t) in s.iter_mut().zip(terms(x[j], y[j])) {
-                a.add(t);
+    for i in 0..n {
+        if i >= period {
+            for (a, t) in s.iter_mut().zip(correl_terms(x[i - period], y[i - period])) {
+                a.sub(t);
             }
         }
-    };
-    let value = |sx: f64, sy: f64, sx2: f64, sy2: f64, sxy: f64| {
-        let denom = (sx2 - sx * sx * inv_pf) * (sy2 - sy * sy * inv_pf);
-        if denom < 1e-14 {
-            0.0
-        } else {
-            (sxy - sx * sy * inv_pf) / denom.sqrt()
-        }
-    };
-    if anchors.tick() {
-        reanchor(&mut s, period - 1);
-    }
-    unsafe {
-        let [sx, sy, sx2, sy2, sxy] = read(&s);
-        *out_ptr.add(period - 1) = value(sx, sy, sx2, sy2, sxy);
-    }
-    let mut trailing = 0;
-    #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
-    for i in period..n {
-        // Drop the trailing values, then add the new ones (TA-Lib's order).
-        let (tx, ty) = unsafe { (*x_ptr.add(trailing), *y_ptr.add(trailing)) };
-        trailing += 1;
-        for (a, t) in s.iter_mut().zip(terms(tx, ty)) {
-            a.sub(t);
-        }
-        let (xi, yi) = unsafe { (*x_ptr.add(i), *y_ptr.add(i)) };
-        for (a, t) in s.iter_mut().zip(terms(xi, yi)) {
+        for (a, t) in s.iter_mut().zip(correl_terms(x[i], y[i])) {
             a.add(t);
         }
-        if anchors.tick() {
-            reanchor(&mut s, i);
+        if i + 1 < period {
+            continue;
         }
-        unsafe {
-            let [sx, sy, sx2, sy2, sxy] = read(&s);
-            *out_ptr.add(i) = value(sx, sy, sx2, sy2, sxy);
+        let anchor = anchors.tick();
+        if anchor || !s.iter().all(Csum::is_exact) {
+            clean &= s.iter().all(|a| a.value().is_finite());
+            if clean {
+                s = Csum::of_rows((i + 1 - period..=i).map(|j| correl_terms(x[j], y[j])));
+            }
         }
+        out.set(i, correl_of_sums(&s, p));
     }
-    if clean && read(&s).iter().all(|v| v.is_finite()) {
+    if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
     // A non-finite row entered: window-local careful path (see `crate::guard`).
-    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
-    window_sums(n, period, Order::DropAdd, origin, |i| {
-        let (xi, yi) = (x[i], y[i]);
-        [xi, yi, xi * xi, yi * yi, xi * yi]
-    }, |i, [sx, sy, sx2, sy2, sxy]| out.set(i, value(sx, sy, sx2, sy2, sxy)));
-    out.finish()
+    let mut slide = Slide::<8>::at(origin);
+    (0..n).map(|i| correl_row(&mut slide, x, y, period, i)).collect()
+}
+
+/// The per-row terms of [`correl`]'s exact sums: `x`, `y`, then `x²`, `y²` and `x·y`
+/// each split into its rounded value and its rounding error.
+#[inline(always)]
+fn correl_terms(x: f64, y: f64) -> [f64; 8] {
+    let (xx, xxe) = two_prod(x, x);
+    let (yy, yye) = two_prod(y, y);
+    let (xy, xye) = two_prod(x, y);
+    [x, y, xx, xxe, yy, yye, xy, xye]
+}
+
+/// Pearson's r of a window of `p` rows from its exact sums ([`correl_terms`]); 0 when
+/// either variance is exactly zero. Clamped to `[-1, 1]` as a last resort: the
+/// co-moments are each within an ulp or two of exact, so Cauchy–Schwarz can only be
+/// overshot by that rounding.
+#[inline]
+fn correl_of_sums(s: &[Csum; 8], p: f64) -> f64 {
+    let dx = comoment(p, &s[0], &s[0], &s[2..4]);
+    let dy = comoment(p, &s[1], &s[1], &s[4..6]);
+    if dx <= 0.0 || dy <= 0.0 {
+        return 0.0;
+    }
+    let dxy = comoment(p, &s[0], &s[1], &s[6..8]);
+    (dxy / (dx.sqrt() * dy.sqrt())).clamp(-1.0, 1.0)
+}
+
+/// One row of [`correl`] at `i`, resumed from `slide` (drop, then add) — the careful
+/// slide, which the fast loop follows on clean windows. A window holding a non-finite
+/// row takes the value of its own sums.
+fn correl_row(slide: &mut Slide<8>, x: &[f64], y: &[f64], period: usize, i: usize) -> f64 {
+    let term = |j: usize| correl_terms(x[j], y[j]);
+    match slide.row(Order::DropAdd, period, i, |j| all_finite(term(j))) {
+        Window::Partial => f64::NAN,
+        Window::Sums(s) => correl_of_sums(&s, period as f64),
+        Window::Bad => correl_of_sums(&Csum::of_rows((i + 1 - period..=i).map(term)), period as f64),
+    }
 }
 
 /// Rolling beta of `x` against `y` over `period` (TA-Lib BETA): the slope
-/// `(n·Σxy − Σx·Σy) / (n·Σx² − (Σx)²)` of the two series' one-bar **returns**
-/// `(p[i]−p[i-1])/p[i-1]` (a zero prior price gives a 0 return; a ~0 denominator
-/// gives 0). Row 0 is at absolute position `origin` (return `j`, of bar `j + 1`, at
-/// `origin + j`). First value at index `period` (lookback = period).
+/// `Σ(rx−r̄x)(ry−r̄y) / Σ(rx−r̄x)²` of the two series' one-bar **returns**
+/// `(p[i]−p[i-1])/p[i-1]` (a zero prior price gives a 0 return), from exact sums
+/// ([`comoment`]). A window whose `x` returns are constant (zero variance, tested
+/// exactly) gives 0 — TA-Lib's result, reached there through an absolute `1e-14`
+/// threshold instead. Row 0 is at absolute position `origin` (return `j`, of bar
+/// `j + 1`, at `origin + j`). First value at index `period` (lookback = period).
 pub fn beta(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let n = x.len();
     if period == 0 || period + 1 > n {
         return vec![f64::NAN; n];
     }
-    // Single-write (D2): NaN warm-up `[0, period)`, valid region written once via
-    // `out.set` (no prefill memset); `out.finish()` proves it was filled.
+    let p = period as f64;
+    // Fast path: add the new return, read, drop the one the next window loses — the
+    // careful slide's arithmetic ([`beta_row`]) on clean data. The returns in the
+    // window are kept, so a leaving one is not divided out again.
     let mut out = crate::buf::OutBuf::warmup(n, period);
-    let ret = |arr: &[f64], i: usize| -> f64 {
-        let prev = arr[i - 1];
-        if prev.abs() < 1e-14 {
-            0.0
-        } else {
-            (arr[i] - prev) / prev
-        }
-    };
-    let pf = period as f64;
-    let mut s = [Csum::default(); 4]; // Σrx, Σry, Σrx², Σrx·ry
-    let terms = |rx: f64, ry: f64| [rx, ry, rx * rx, rx * ry];
-    // Keep the return values that are currently inside the rolling window. TA-Lib
-    // conceptually drops a return after emitting a row; storing it once avoids
-    // recalculating the departing high/low returns, which are division-heavy.
-    let mut rx_ring = vec![0.0; period];
-    let mut ry_ring = vec![0.0; period];
-    for i in 1..period {
-        let (rx, ry) = (ret(x, i), ret(y, i));
-        rx_ring[i] = rx;
-        ry_ring[i] = ry;
-        for (a, t) in s.iter_mut().zip(terms(rx, ry)) {
-            a.add(t);
-        }
-    }
+    let mut ring = vec![[0.0; 6]; period];
+    let mut s = [Csum::default(); 6];
     let mut anchors = Anchors::from(origin + period - 1, period);
     let mut clean = true;
-    for i in period..n {
-        let (rx, ry) = (ret(x, i), ret(y, i));
-        rx_ring[i % period] = rx;
-        ry_ring[i % period] = ry;
-        for (a, t) in s.iter_mut().zip(terms(rx, ry)) {
-            a.add(t);
+    for j in 0..n - 1 {
+        let t = beta_terms(x, y, j);
+        ring[j % period] = t;
+        for (a, v) in s.iter_mut().zip(t) {
+            a.add(v);
         }
-        if anchors.tick() {
+        if j + 1 < period {
+            continue;
+        }
+        let anchor = anchors.tick();
+        if anchor || !s.iter().all(Csum::is_exact) {
             clean &= s.iter().all(|a| a.value().is_finite());
-            s = [Csum::default(); 4];
-            for bar in i + 1 - period..=i {
-                for (a, t) in s.iter_mut().zip(terms(rx_ring[bar % period], ry_ring[bar % period])) {
-                    a.add(t);
-                }
+            if clean {
+                s = Csum::of_rows((j + 1 - period..=j).map(|k| ring[k % period]));
             }
         }
-        let [sx, sy, sxx, sxy] = s.map(|a| a.value());
-        let denom = pf * sxx - sx * sx;
-        out.set(i, if denom.abs() < 1e-14 {
-            0.0
-        } else {
-            (pf * sxy - sx * sy) / denom
-        });
-        let leaving = i + 1 - period;
-        let (tx, ty) = (rx_ring[leaving % period], ry_ring[leaving % period]);
-        for (a, t) in s.iter_mut().zip(terms(tx, ty)) {
-            a.sub(t);
+        out.set(j + 1, beta_of_sums(&s, p));
+        for (a, v) in s.iter_mut().zip(ring[(j + 1 - period) % period]) {
+            a.sub(v);
         }
     }
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
     // A non-finite return entered: window-local careful path (see `crate::guard`).
-    // Returns exist for bars `1..n`; term `j` is bar `j + 1`'s.
     let mut out = crate::buf::OutBuf::warmup(n, period);
-    window_sums(n - 1, period, Order::AddReadDrop, origin, |j| {
-        let (rx, ry) = (ret(x, j + 1), ret(y, j + 1));
-        [rx, ry, rx * rx, rx * ry]
-    }, |j, [sx, sy, sxx, sxy]| {
-        let denom = pf * sxx - sx * sx;
-        out.set(j + 1, if denom.abs() < 1e-14 { 0.0 } else { (pf * sxy - sx * sy) / denom });
-    });
+    let mut slide = Slide::<6>::at(origin);
+    for j in 0..n - 1 {
+        let v = beta_row(&mut slide, x, y, period, j);
+        if j + 1 >= period {
+            out.set(j + 1, v);
+        }
+    }
     out.finish()
+}
+
+/// The one-bar return of `arr` at bar `i` (`>= 1`); 0 after a (near-)zero price.
+#[inline(always)]
+fn beta_return(arr: &[f64], i: usize) -> f64 {
+    let prev = arr[i - 1];
+    if prev.abs() < 1e-14 { 0.0 } else { (arr[i] - prev) / prev }
+}
+
+/// The terms of [`beta`]'s exact sums for return `j` (bar `j + 1`): `rx`, `ry`, then
+/// `rx²` and `rx·ry` each split into its rounded value and its rounding error.
+#[inline(always)]
+fn beta_terms(x: &[f64], y: &[f64], j: usize) -> [f64; 6] {
+    let (rx, ry) = (beta_return(x, j + 1), beta_return(y, j + 1));
+    let (xx, xxe) = two_prod(rx, rx);
+    let (xy, xye) = two_prod(rx, ry);
+    [rx, ry, xx, xxe, xy, xye]
+}
+
+/// Beta of a window of `p` returns from its exact sums ([`beta_terms`]); 0 when the
+/// `x` returns' variance is exactly zero.
+#[inline]
+fn beta_of_sums(s: &[Csum; 6], p: f64) -> f64 {
+    let dx = comoment(p, &s[0], &s[0], &s[2..4]);
+    if dx <= 0.0 {
+        return 0.0;
+    }
+    comoment(p, &s[0], &s[1], &s[4..6]) / dx
+}
+
+/// One row of [`beta`] over return `j`, resumed from `slide` (add, read, drop).
+fn beta_row(slide: &mut Slide<6>, x: &[f64], y: &[f64], period: usize, j: usize) -> f64 {
+    let term = |k: usize| beta_terms(x, y, k);
+    match slide.row(Order::AddReadDrop, period, j, |k| all_finite(term(k))) {
+        Window::Partial => f64::NAN,
+        Window::Sums(s) => beta_of_sums(&s, period as f64),
+        Window::Bad => beta_of_sums(&Csum::of_rows((j + 1 - period..=j).map(term)), period as f64),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -526,9 +555,8 @@ pub fn linreg_step(
     let (mut bad, seen, pos) = (state[4] as usize, state[5] as usize, state[6] as usize);
     let p = period as f64;
     let (sum_x, divisor) = linreg_x_sums(period);
-    let emit = |sum_y: f64, sum_xy: f64| {
-        let m = (p * sum_xy - sum_x * sum_y) / divisor;
-        let b = (sum_y - m * sum_x) / p;
+    let emit = |sum_y: &Csum, sum_xy: &Csum| {
+        let (m, b) = linreg_fit_of(p, sum_x, divisor, sum_y, sum_xy);
         match line {
             LinregLine::Value => b + m * period.saturating_sub(1) as f64,
             LinregLine::Slope => m,
@@ -537,14 +565,9 @@ pub fn linreg_step(
             LinregLine::Forecast => b + m * period as f64,
         }
     };
-    let own = || {
-        data[row + 1 - period..=row]
-            .iter()
-            .enumerate()
-            .fold((0.0, 0.0), |(sy, sxy), (k, &y)| (sy + y, sxy + (period - 1 - k) as f64 * y))
-    };
+    let own = || linreg_sums(data[row + 1 - period..=row].iter().copied(), period, |_| true);
     let y = data[row];
-    let anchor = seen + 1 >= period && anchors_at(pos, period);
+    let scheduled = anchors_at(pos, period);
     let reanchor = |sum_y: &mut Csum, sum_xy: &mut Csum| {
         let rows = data[row + 1 - period..=row].iter().copied();
         (*sum_y, *sum_xy) = linreg_sums(rows, period, f64::is_finite);
@@ -556,16 +579,16 @@ pub fn linreg_step(
         } else {
             bad += 1;
         }
-        if anchor {
+        if seen + 1 >= period && (scheduled || !(sum_y.is_exact() && sum_xy.is_exact())) {
             reanchor(&mut sum_y, &mut sum_xy);
         }
         if seen + 1 < period {
             f64::NAN
         } else if bad == 0 {
-            emit(sum_y.value(), sum_xy.value())
+            emit(&sum_y, &sum_xy)
         } else {
             let (sy, sxy) = own();
-            emit(sy, sxy)
+            emit(&sy, &sxy)
         }
     } else {
         let leaving = data[row - period];
@@ -578,14 +601,14 @@ pub fn linreg_step(
             bad -= 1;
         }
         linreg_slide(&mut sum_y, &mut sum_xy, p, came_in.then_some(y), went_out.then_some(leaving));
-        if anchor {
+        if scheduled || !(sum_y.is_exact() && sum_xy.is_exact()) {
             reanchor(&mut sum_y, &mut sum_xy);
         }
         if bad == 0 {
-            emit(sum_y.value(), sum_xy.value())
+            emit(&sum_y, &sum_xy)
         } else {
             let (sy, sxy) = own();
-            emit(sy, sxy)
+            emit(&sy, &sxy)
         }
     };
     sum_y.write_state(&mut next[..2]);
@@ -596,9 +619,10 @@ pub fn linreg_step(
     Some(value)
 }
 
-/// [`rolling_var`]'s state after the rows of `data`: the [`Slide`] of `[Σx, Σx²]`.
+/// [`rolling_var`]'s state after the rows of `data`: the [`Slide`] of `[Σx, Σx²]` (see
+/// [`square_terms`]).
 pub fn var_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    state_after(Slide::<2>::initial(origin), data.len(), |row, prev, next| {
+    state_after(Slide::<3>::initial(origin), data.len(), |row, prev, next| {
         var_step(data, period, None, row, prev, next)
     })
 }
@@ -613,24 +637,18 @@ pub fn var_step(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if period == 0 || row >= data.len() || next.len() != Slide::<2>::STATE {
+    if period == 0 || row >= data.len() || next.len() != Slide::<3>::STATE {
         return None;
     }
     let p = period as f64;
-    let mut slide = Slide::<2>::from_state(state)?;
+    let mut slide = Slide::<3>::from_state(state)?;
     let variance = match slide.row(Order::AddReadDrop, period, row, |j| {
         let x = data[j];
-        ([x, x * x], x.is_finite())
+        (square_terms(x), x.is_finite())
     }) {
         Window::Partial => f64::NAN,
-        Window::Sums([total1, total2]) => var_of_sums(&total1, &total2, p),
-        Window::Bad => {
-            let (s1, s2) = data[row + 1 - period..=row]
-                .iter()
-                .fold((0.0, 0.0), |(s1, s2), &x| (s1 + x, s2 + x * x));
-            let mean1 = s1 / p;
-            s2 / p - mean1 * mean1
-        }
+        Window::Sums(sums) => var_of_sums(&sums, p),
+        Window::Bad => var_of_window(&data[row + 1 - period..=row], p),
     };
     slide.write_state(next);
     Some(match stddev_nbdev {
@@ -641,9 +659,10 @@ pub fn var_step(
     })
 }
 
-/// [`correl`]'s state after the rows of `x` / `y`: the [`Slide`] of `[Σx, Σy, Σx², Σy², Σxy]`.
+/// [`correl`]'s state after the rows of `x` / `y`: the [`Slide`] of its exact sums
+/// ([`correl_terms`]).
 pub fn correl_state(x: &[f64], y: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    state_after(Slide::<5>::initial(origin), x.len(), |row, prev, next| {
+    state_after(Slide::<8>::initial(origin), x.len(), |row, prev, next| {
         correl_step(x, y, period, row, prev, next)
     })
 }
@@ -658,40 +677,24 @@ pub fn correl_step(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if period == 0 || row >= x.len() || next.len() != Slide::<5>::STATE {
+    if period == 0 || row >= x.len() || next.len() != Slide::<8>::STATE {
         return None;
     }
-    let inv_pf = 1.0 / period as f64;
-    let value = |[sx, sy, sx2, sy2, sxy]: [f64; 5]| {
-        let denom = (sx2 - sx * sx * inv_pf) * (sy2 - sy * sy * inv_pf);
-        if denom < 1e-14 {
-            0.0
-        } else {
-            (sxy - sx * sy * inv_pf) / denom.sqrt()
-        }
-    };
-    let term = |i: usize| {
-        let (xi, yi) = (x[i], y[i]);
-        [xi, yi, xi * xi, yi * yi, xi * yi]
-    };
-    let mut slide = Slide::<5>::from_state(state)?;
-    let out = match slide.row(Order::DropAdd, period, row, |j| all_finite(term(j))) {
-        Window::Partial => f64::NAN,
-        Window::Sums(s) => value(s.map(|c| c.value())),
-        Window::Bad => value(own_sums(row + 1 - period..=row, term)),
-    };
+    let mut slide = Slide::<8>::from_state(state)?;
+    let out = correl_row(&mut slide, x, y, period, row);
     slide.write_state(next);
     Some(out)
 }
 
-/// [`beta`]'s state after the rows of `x` / `y`: the sums of the one-bar returns.
+/// [`beta`]'s state after the rows of `x` / `y`: the [`Slide`] of its exact sums
+/// ([`beta_terms`]).
 pub fn beta_state(x: &[f64], y: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    state_after(Slide::<4>::initial(origin), x.len(), |row, prev, next| {
+    state_after(Slide::<6>::initial(origin), x.len(), |row, prev, next| {
         beta_step(x, y, period, row, prev, next)
     })
 }
 
-/// One row of [`beta`] at `row` (its return is term `row - 1`), from `state` into `next`.
+/// One row of [`beta`] at `row`, from `state` into `next`.
 pub fn beta_step(
     x: &[f64],
     y: &[f64],
@@ -700,33 +703,15 @@ pub fn beta_step(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if period == 0 || row >= x.len() || next.len() != Slide::<4>::STATE {
+    if period == 0 || row >= x.len() || next.len() != Slide::<6>::STATE {
         return None;
     }
     if row == 0 {
         next.copy_from_slice(state);
         return Some(f64::NAN);
     }
-    let ret = |arr: &[f64], i: usize| {
-        let prev = arr[i - 1];
-        if prev.abs() < 1e-14 { 0.0 } else { (arr[i] - prev) / prev }
-    };
-    let pf = period as f64;
-    let term = |j: usize| {
-        let (rx, ry) = (ret(x, j + 1), ret(y, j + 1));
-        [rx, ry, rx * rx, rx * ry]
-    };
-    let value = |[sx, sy, sxx, sxy]: [f64; 4]| {
-        let denom = pf * sxx - sx * sx;
-        if denom.abs() < 1e-14 { 0.0 } else { (pf * sxy - sx * sy) / denom }
-    };
-    let mut slide = Slide::<4>::from_state(state)?;
-    let j = row - 1;
-    let out = match slide.row(Order::AddReadDrop, period, j, |k| all_finite(term(k))) {
-        Window::Partial => f64::NAN,
-        Window::Sums(s) => value(s.map(|c| c.value())),
-        Window::Bad => value(own_sums(j + 1 - period..=j, term)),
-    };
+    let mut slide = Slide::<6>::from_state(state)?;
+    let out = beta_row(&mut slide, x, y, period, row - 1);
     slide.write_state(next);
     Some(out)
 }

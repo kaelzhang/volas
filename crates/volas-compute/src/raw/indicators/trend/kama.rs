@@ -73,11 +73,12 @@ fn change(data: &[f64], j: usize) -> f64 {
 /// anchor position), then step the recurrence. Returns the KAMA at `today`.
 #[inline]
 fn kama_bar(data: &[f64], period: usize, today: usize, k: &mut KamaState) -> f64 {
-    if today == period || anchors_at(k.pos, period) {
-        k.sum_roc1 = Csum::of((today + 1 - period..=today).map(|j| change(data, j)));
-    } else {
+    if today != period && !anchors_at(k.pos, period) {
         k.sum_roc1.sub(change(data, today - period)); // drop the oldest 1-bar change
         k.sum_roc1.add(change(data, today)); // add the newest
+    }
+    if today == period || anchors_at(k.pos, period) || !k.sum_roc1.is_exact() {
+        k.sum_roc1 = Csum::of((today + 1 - period..=today).map(|j| change(data, j)));
     }
     let period_roc = data[today] - data[today - period];
     let sc = kama_sc(period_roc, k.sum_roc1.value());

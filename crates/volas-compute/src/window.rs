@@ -10,6 +10,7 @@
 //! dtype-preserving members `first` / `last` / `count` / `nunique` through the
 //! position / count kernels instead).
 
+use crate::accum::{Anchors, Csum, Exact};
 use std::collections::HashMap;
 
 /// The trailing window over `i`: `[start, i]`.
@@ -72,68 +73,92 @@ pub fn count(
         .collect()
 }
 
-/// Drive a leaving/entering sliding scan; returns the per-row state snapshots.
-fn sliding<T: Copy>(
-    data: &[f64],
-    window: usize,
-    mut update: impl FnMut(f64, bool) -> T,
-) -> Vec<T> {
-    (0..data.len())
-        .map(|i| {
-            if window != usize::MAX && i >= window {
-                update(data[i - window], false);
-            }
-            update(data[i], true)
-        })
-        .collect()
+/// The present values of one window: their exact sum ([`Csum`], finite values only),
+/// the IEEE sum of their infinities (`0` when there are none), and their count.
+#[derive(Clone, Copy)]
+struct Present {
+    sum: Csum,
+    inf: f64,
+    count: usize,
 }
 
-/// Per-row `(sum, present count)` of the present values in each window — NaN is
-/// missing and skipped, ±inf is a value. Window-local: the running sum holds finite
-/// values only and the window's infinities are counted apart, so an infinity never
-/// outlives its window. A window holding infinities sums to `+inf`, `-inf`, or NaN
-/// (both signs) — the IEEE value of that window.
-fn present_sums(data: &[f64], window: usize) -> Vec<(f64, usize)> {
-    let mut s = 0.0f64;
-    let mut nobs = 0usize;
+impl Present {
+    /// The window's sum: the exact sum of its finite values, or the IEEE value of its
+    /// infinities (`+inf`, `-inf`, or NaN for both signs).
+    fn total(&self) -> f64 {
+        if self.inf != 0.0 { self.inf } else { self.sum.value() }
+    }
+
+    /// The window's mean: the exact sum over the count ([`Csum::mean`] — a flat window
+    /// has its value as mean), or the infinities' value.
+    fn mean(&self) -> f64 {
+        if self.inf != 0.0 { self.inf } else { self.sum.mean(self.count as f64) }
+    }
+}
+
+/// Per-row [`Present`] of each window — NaN is missing and skipped, ±inf is a value.
+/// Window-local: the running sum holds finite values only and the window's infinities
+/// are counted apart, so an infinity never outlives its window. The running sum is the
+/// exact one of [`crate::accum`]: it re-sums the window at every multiple of the window
+/// length and whenever it went inexact, so each window's sum is the correctly rounded
+/// sum of its own values (`math.fsum`), however long the slide. An expanding window
+/// never drops a value: its sum is kept exactly by an [`Exact`] expansion once the
+/// compensated form can no longer hold it.
+fn present_sums(data: &[f64], window: usize) -> Vec<Present> {
+    let rolling = window != usize::MAX;
+    let mut sum = Csum::default();
+    let mut expansion: Option<Exact> = None; // an expanding sum past the fast form
+    let mut count = 0usize;
     let (mut pos_inf, mut neg_inf) = (0usize, 0usize);
-    sliding(data, window, |x, entering| {
-        if !x.is_nan() {
-            if x.is_finite() {
-                if entering {
-                    s += x;
-                } else {
-                    s -= x;
-                }
-            } else {
-                let count = if x > 0.0 { &mut pos_inf } else { &mut neg_inf };
-                if entering {
-                    *count += 1;
-                } else {
-                    *count -= 1;
-                }
+    let mut anchors = Anchors::from(0, if rolling { window } else { 1 });
+    let mut out = Vec::with_capacity(data.len());
+    for i in 0..data.len() {
+        let leaving = (rolling && i >= window).then(|| data[i - window]);
+        for (x, sign) in leaving.into_iter().map(|x| (x, -1.0)).chain([(data[i], 1.0)]) {
+            if x.is_nan() {
+                continue;
             }
-            if entering {
-                nobs += 1;
+            let into = if sign > 0.0 { usize::wrapping_add } else { usize::wrapping_sub };
+            count = into(count, 1);
+            if !x.is_finite() {
+                let c = if x > 0.0 { &mut pos_inf } else { &mut neg_inf };
+                *c = into(*c, 1);
+            } else if let Some(e) = &mut expansion {
+                e.add(x);
             } else {
-                nobs -= 1;
+                sum.add(sign * x);
             }
         }
-        let total = match (pos_inf > 0, neg_inf > 0) {
-            (false, false) => s,
+        let anchor = anchors.tick() && rolling;
+        if expansion.is_none() && (anchor || !sum.is_exact()) {
+            let finite = data[win_start(i, window)..=i].iter().copied().filter(|x| x.is_finite());
+            if rolling {
+                sum = Csum::of(finite);
+            } else {
+                let mut e = Exact::default();
+                finite.for_each(|x| e.add(x));
+                expansion = Some(e);
+            }
+        }
+        if let Some(e) = &expansion {
+            sum = e.to_csum();
+        }
+        let inf = match (pos_inf > 0, neg_inf > 0) {
+            (false, false) => 0.0,
             (true, false) => f64::INFINITY,
             (false, true) => f64::NEG_INFINITY,
             (true, true) => f64::NAN,
         };
-        (total, nobs)
-    })
+        out.push(Present { sum, inf, count });
+    }
+    out
 }
 
 /// Rolling / expanding sum of the present values (pandas `sum`).
 pub fn sum(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     present_sums(data, window)
         .into_iter()
-        .map(|(s, c)| if c >= min_periods.max(1) { s } else { f64::NAN })
+        .map(|p| if p.count >= min_periods.max(1) { p.total() } else { f64::NAN })
         .collect()
 }
 
@@ -141,13 +166,7 @@ pub fn sum(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
 pub fn mean(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     present_sums(data, window)
         .into_iter()
-        .map(|(s, c)| {
-            if c >= min_periods.max(1) {
-                s / c as f64
-            } else {
-                f64::NAN
-            }
-        })
+        .map(|p| if p.count >= min_periods.max(1) { p.mean() } else { f64::NAN })
         .collect()
 }
 
@@ -206,23 +225,22 @@ fn is_constant(b: &[f64]) -> bool {
     b.iter().all(|&x| x == b[0])
 }
 
-/// The window mean as the center of every deviation-based statistic. A constant
-/// window's mean is its value EXACTLY — `sum / n` would leave a rounding residue
-/// (`101.37 × 20 / 20 ≠ 101.37`) that the deviations then mistake for dispersion.
+/// The window mean as the center of every deviation-based statistic: the exact sum of
+/// the window ([`Csum::of`]) over its count. A constant window's mean is its value
+/// EXACTLY — a rounded `sum / n` would leave a residue (`101.37 × 20 / 20 ≠ 101.37`)
+/// that the deviations then mistake for dispersion.
 fn window_mean(b: &[f64]) -> f64 {
-    if is_constant(b) {
-        b[0]
-    } else {
-        b.iter().sum::<f64>() / b.len() as f64
-    }
+    Csum::of(b.iter().copied()).mean(b.len() as f64)
 }
 
+/// The two-pass variance of a window with `ddof` degrees of freedom: the exact sum of
+/// the squared deviations from [`window_mean`] over `n − ddof`.
 fn buf_var(b: &[f64], ddof: usize) -> f64 {
     if b.len() <= ddof {
         return f64::NAN;
     }
     let m = window_mean(b);
-    b.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (b.len() - ddof) as f64
+    Csum::of(b.iter().map(|x| (x - m) * (x - m))).value() / (b.len() - ddof) as f64
 }
 
 /// Rolling / expanding sample variance (pandas `var`, default ddof=1).

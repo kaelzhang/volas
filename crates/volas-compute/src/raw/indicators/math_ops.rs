@@ -42,10 +42,15 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64
         if guard.enter(x.is_finite()) {
             total.add(x);
         }
-        if anchors.tick() {
+        let anchor = anchors.tick();
+        if anchor || !total.is_exact() {
+            // the fast pass stops re-summing once a non-finite row has poisoned it (the
+            // careful pass recomputes every row); the careful pass always re-sums
             finite &= total.value().is_finite();
-            let window = data[i + 1 - period..=i].iter().copied();
-            total = Csum::of(window.filter(|x| guard.counts(x.is_finite())));
+            if finite || !guard.counts(false) {
+                let window = data[i + 1 - period..=i].iter().copied();
+                total = Csum::of(window.filter(|x| guard.counts(x.is_finite())));
+            }
         }
         out[i] = if guard.clean() {
             total.value()

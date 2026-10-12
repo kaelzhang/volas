@@ -13,6 +13,7 @@ methodology, and supported pandas behavior.
 | Look up the `DataFrame` / `Series` / `Row` API and the top-level functions | [DataFrame API](dataframe-api.md) |
 | Cumulate bars, stream a live time frame, handle timezones | [Cumulation, time frames and timezones](cumulation.md) |
 | Write indicator directives and handle directive errors | [Directives](directives.md) |
+| Know how indicators treat missing rows, keep sums exact, take variances | [Numerical conventions](numerics.md) |
 | Index, write and handle missing values the pandas way | [pandas-compatible API](pandas-compatibility.md) |
 | Exchange data with pandas, Arrow and DLPack | [Interop](interop.md) |
 | Check benchmark claims and methodology | [Benchmark FAQ](benchmark-faq.md) |
@@ -32,6 +33,7 @@ The complete indicator index and pandas-subset contract remain in
 dataframe-api
 cumulation
 directives
+numerics
 pandas-compatibility
 interop
 benchmark-faq

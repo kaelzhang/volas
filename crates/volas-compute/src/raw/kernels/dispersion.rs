@@ -2,27 +2,29 @@
 //! (Bollinger bands / bandwidth need both).
 
 use super::mean_std_row;
-use crate::accum::{Anchors, Csum};
+use crate::accum::{comoment, square_terms, Anchors, Csum};
 use crate::guard::Slide;
 use ndarray::{Array1, ArrayView1};
 
 /// Rolling standard deviation with `ddof` degrees of freedom; row 0 is at absolute
 /// position `origin` (see [`crate::accum`]).
 ///
-/// O(n) sliding exact sums of `x` and `x²` ([`Csum`]): `var = (mean(x²) − mean(x)²) ·
-/// period / (period − ddof)`, emitted only for fully-populated windows, clamped at zero
-/// before the square root. A flat window's deviation is exactly zero.
+/// O(n) sliding exact sums of `x` and `x²` ([`Csum`], each square split into its
+/// rounded value and its rounding error, so `Σx²` is exact): `var = (n·Σx² − (Σx)²) /
+/// (n·(n − ddof))` with the numerator formed by [`comoment`] — accurate however the raw
+/// moments cancel, exactly zero for a flat window — emitted only for fully-populated
+/// windows.
 #[inline]
 pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize, origin: usize) -> Array1<f64> {
     rolling_mean_std(data, period, ddof, origin).1
 }
 
-/// The mean and standard deviation of a window from its exact sums `Σx` / `Σx²`.
+/// The mean and standard deviation of a window from its exact sums `[Σx, Σx²]` (the
+/// squares' sum split as [`square_terms`] splits each square).
 #[inline(always)]
-pub(crate) fn mean_std_of_sums(sum: &Csum, sum_sq: &Csum, p: f64, denom: f64) -> (f64, f64) {
-    let mean = sum.mean(p);
-    let variance = (sum_sq.mean(p) - mean * mean) * (p / denom);
-    (mean, variance.max(0.0).sqrt())
+pub(crate) fn mean_std_of_sums([sum, sq_hi, sq_lo]: &[Csum; 3], p: f64, denom: f64) -> (f64, f64) {
+    let variance = comoment(p, sum, sum, &[*sq_hi, *sq_lo]) / (p * denom);
+    (sum.mean(p), variance.max(0.0).sqrt())
 }
 
 /// Mean and std of the window `data[start..=end]` evaluated directly on its rows —
@@ -63,42 +65,42 @@ pub fn rolling_mean_std(
     let denom = (period - ddof) as f64;
     // Fast path — one clean sliding pass emitting both outputs, no per-element NaN
     // bookkeeping: the careful slide's arithmetic ([`mean_std_row`]) on clean data. A
-    // non-finite value poisons the sums until the next anchor; that is checked at every
-    // anchor and at the end, and then the careful path takes over.
+    // non-finite value poisons the sums (and marks them inexact); that is checked at
+    // every re-anchoring and at the end, and then the careful path takes over.
     if let Some(src) = data.as_slice() {
-        let mut sum = Csum::default();
-        let mut sum_sq = Csum::default();
+        let mut sums = [Csum::default(); 3];
         let mut anchors = Anchors::from(origin, period);
         let mut clean = true;
         {
             let md = mean.as_slice_mut().expect("from_elem is contiguous");
             let sd = std.as_slice_mut().expect("from_elem is contiguous");
             for i in 0..n {
-                let x = src[i];
-                sum.add(x);
-                sum_sq.add(x * x);
-                if i >= period {
-                    let leaving = src[i - period];
-                    sum.sub(leaving);
-                    sum_sq.sub(leaving * leaving);
+                for (s, t) in sums.iter_mut().zip(square_terms(src[i])) {
+                    s.add(t);
                 }
-                if anchors.tick() && i + 1 >= period {
-                    clean &= sum.value().is_finite() && sum_sq.value().is_finite();
-                    let w = &src[i + 1 - period..=i];
-                    sum = Csum::of(w.iter().copied());
-                    sum_sq = Csum::of(w.iter().map(|x| x * x));
+                if i >= period {
+                    for (s, t) in sums.iter_mut().zip(square_terms(src[i - period])) {
+                        s.sub(t);
+                    }
+                }
+                let anchor = anchors.tick();
+                if (anchor || !sums.iter().all(Csum::is_exact)) && i + 1 >= period {
+                    clean &= sums.iter().all(|s| s.value().is_finite());
+                    if clean {
+                        sums = Csum::of_rows(src[i + 1 - period..=i].iter().map(|&x| square_terms(x)));
+                    }
                 }
                 if i + 1 >= period {
-                    (md[i], sd[i]) = mean_std_of_sums(&sum, &sum_sq, p, denom);
+                    (md[i], sd[i]) = mean_std_of_sums(&sums, p, denom);
                 }
             }
         }
-        if clean && sum.value().is_finite() && sum_sq.value().is_finite() {
+        if clean && sums.iter().all(|s| s.value().is_finite()) {
             return (mean, std);
         }
     }
     // Careful path — window-local (see [`crate::guard`]).
-    let mut slide = Slide::<2>::at(origin);
+    let mut slide = Slide::<3>::at(origin);
     for i in 0..n {
         (mean[i], std[i]) = mean_std_row(&mut slide, period, ddof, i, |j| data[j]);
     }

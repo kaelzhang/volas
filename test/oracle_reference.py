@@ -42,7 +42,7 @@ def _sma(x, n: int) -> pd.Series:
 
 
 def _row_deleted(fn, *cols) -> pd.Series:
-    """The recursive missing-row rule (INDICATORS.md "Missing and non-finite inputs"),
+    """The recursive missing-row rule (docs/numerics.md "Missing and non-finite inputs"),
     applied at the input boundary: delete every row where any input is NaN, run ``fn`` on
     the complete rows, and put NaN back at the deleted positions."""
     arrs = [_s(x).to_numpy() for x in cols]

@@ -110,7 +110,7 @@ pub enum BollLine {
 /// [`boll_upper`] / [`boll_lower`] / [`bbw`]'s state after the rows of `close`:
 /// the [`Slide`] of `[Σx, Σx²]` ([`kernels::rolling_mean_std`]).
 pub fn boll_band_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    state_after(Slide::<2>::initial(origin), close.len(), |row, prev, next| {
+    state_after(Slide::<3>::initial(origin), close.len(), |row, prev, next| {
         boll_band_step(close, period, 2.0, BollLine::Width, row, prev, next)
     })
 }
@@ -126,10 +126,10 @@ pub fn boll_band_step(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if period == 0 || row >= close.len() || next.len() != Slide::<2>::STATE {
+    if period == 0 || row >= close.len() || next.len() != kernels::MEAN_STD_STATE {
         return None;
     }
-    let mut slide = Slide::<2>::from_state(state)?;
+    let mut slide = Slide::<3>::from_state(state)?;
     let (ma, std) = kernels::mean_std_row(&mut slide, period, 0, row, |j| close[j]);
     slide.write_state(next);
     Some(match line {
@@ -150,7 +150,7 @@ fn log_return(close: &[f64], i: usize) -> f64 {
 
 /// [`hv`]'s state after the rows of `close`: the deviation's [`Slide`] of `[Σr, Σr²]`.
 pub fn hv_state(close: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    state_after(Slide::<2>::initial(origin), close.len(), |row, prev, next| {
+    state_after(Slide::<3>::initial(origin), close.len(), |row, prev, next| {
         hv_step(close, period, 1, 1, row, prev, next)
     })
 }
@@ -165,10 +165,10 @@ pub fn hv_step(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
-    if period <= 1 || row >= close.len() || next.len() != Slide::<2>::STATE {
+    if period <= 1 || row >= close.len() || next.len() != kernels::MEAN_STD_STATE {
         return None;
     }
-    let mut slide = Slide::<2>::from_state(state)?;
+    let mut slide = Slide::<3>::from_state(state)?;
     let (_, std) = kernels::mean_std_row(&mut slide, period, 1, row, |j| log_return(close, j));
     slide.write_state(next);
     let annualization = ((trading_days as f64) * 1440.0 / (minutes as f64)).sqrt();

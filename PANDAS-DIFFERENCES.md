@@ -601,10 +601,18 @@ numpy scalars, and numpy int has no missing representation) — pandas's
 numpy-backed behaviour. pandas's *nullable* backend returns `pd.NA` instead;
 volas deliberately keeps the numpy-scalar boundary (C1).
 
-## Window aggregations (`rolling` / `expanding`): four deliberate divergences
+## Window aggregations (`rolling` / `expanding`): deliberate divergences
 
 The window API is pandas-aligned and differential-tested method by method
-(`test_audit_t14_window.py`), with four deliberate departures:
+(`test_audit_t14_window.py`), with these deliberate departures:
+
+- **`sum()` / `mean()` are exact.** Each window's sum is the correctly rounded exact
+  sum of its present values (`math.fsum`), however the window was reached: an
+  outlier that has left the window leaves no trace, even two of different magnitudes
+  (`[1.1, 1e35, 1e20, 1.3, 2.7, 3.1, 4.9]`, `rolling(4).sum()` ends at `12.0`). A mean
+  is that exact sum over the count. pandas's Kahan-compensated running sum keeps one
+  compensation word and can lose a window to such outliers; `var()` / `std()` /
+  `sem()` sum their deviations from the exact mean exactly too.
 
 - **`count()` / `nunique()` return `int64`** with native NA in the warm-up
   region. pandas returns `float64` (NaN-padded) because numpy ints cannot hold

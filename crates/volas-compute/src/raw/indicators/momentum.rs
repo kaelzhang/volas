@@ -224,11 +224,15 @@ pub fn imi(open: &[f64], close: &[f64], period: usize, origin: usize) -> Vec<f64
         let (u, d) = updown(today);
         up_sum.add(u);
         down_sum.add(d);
-        if anchors.tick() {
+        let anchor = anchors.tick();
+        if anchor || !(up_sum.is_exact() && down_sum.is_exact()) {
             clean &= up_sum.value().is_finite() && down_sum.value().is_finite();
-            let window = || (today - lookback..=today).map(updown);
-            up_sum = Csum::of(window().map(|t| t.0));
-            down_sum = Csum::of(window().map(|t| t.1));
+            if clean {
+                [up_sum, down_sum] = Csum::of_rows((today - lookback..=today).map(|j| {
+                    let (u, d) = updown(j);
+                    [u, d]
+                }));
+            }
         }
         out.set(today, imi_value(up_sum.value(), down_sum.value()));
         let (lu, ld) = updown(today - lookback);
@@ -276,9 +280,12 @@ pub fn cci(high: &[f64], low: &[f64], close: &[f64], period: usize, origin: usiz
     let mut clean = true;
     for i in (period - 1)..n {
         sum.add(tp[i]);
-        if anchors.tick() {
+        let anchor = anchors.tick();
+        if anchor || !sum.is_exact() {
             clean &= sum.value().is_finite();
-            sum = Csum::of(tp[i + 1 - period..=i].iter().copied());
+            if clean {
+                sum = Csum::of(tp[i + 1 - period..=i].iter().copied());
+            }
         }
         out.set(i, value(i, sum.mean(p)));
         sum.sub(tp[i + 1 - period]);
@@ -574,11 +581,13 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
     let mut clean = true;
     let mut reanchor = |pos_sum: &mut Csum, neg_sum: &mut Csum, ring_pos: &[f64], ring_neg: &[f64], oldest: usize| {
         clean &= pos_sum.value().is_finite() && neg_sum.value().is_finite();
-        let window = (0..period).map(|k| (oldest + k) % period);
-        *pos_sum = Csum::of(window.clone().map(|k| ring_pos[k]));
-        *neg_sum = Csum::of(window.map(|k| ring_neg[k]));
+        if clean {
+            let window = (0..period).map(|k| (oldest + k) % period);
+            [*pos_sum, *neg_sum] = Csum::of_rows(window.map(|k| [ring_pos[k], ring_neg[k]]));
+        }
     };
-    if anchors.tick() {
+    let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
+    if anchors.tick() || !exact(&pos_sum, &neg_sum) {
         reanchor(&mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, 0);
     }
     out.set(period, mfi_value([pos_sum.value(), neg_sum.value()]));
@@ -603,7 +612,8 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
         ring_neg[slot] = ng;
         pos_sum.add(p);
         neg_sum.add(ng);
-        if anchors.tick() {
+        let anchor = anchors.tick();
+        if anchor || !exact(&pos_sum, &neg_sum) {
             reanchor(&mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, (slot + 1) % period);
         }
         out.set(i, mfi_value([pos_sum.value(), neg_sum.value()]));

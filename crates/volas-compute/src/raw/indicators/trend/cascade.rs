@@ -137,9 +137,12 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
         if i >= a {
             sum1.sub(data[i - a]);
         }
-        if anchors_a.tick() && i + 1 >= a {
+        let anchor_a = anchors_a.tick();
+        if (anchor_a || !sum1.is_exact()) && i + 1 >= a {
             clean &= sum1.value().is_finite();
-            sum1 = Csum::of(data[i + 1 - a..=i].iter().copied());
+            if clean {
+                sum1 = Csum::of(data[i + 1 - a..=i].iter().copied());
+            }
         }
         let anchor_b = anchors_b.tick();
         if i + 1 >= a {
@@ -154,11 +157,13 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
                 slot = 0;
             }
             inner_cnt += 1;
-            if anchor_b && i + 1 >= b {
+            if (anchor_b || !sum2.is_exact()) && i + 1 >= b {
                 clean &= sum2.value().is_finite();
-                // the window's inner means, oldest first (fewer than `b` at the start)
-                let m = inner_cnt.min(b);
-                sum2 = Csum::of((0..m).map(|k| ring[(slot + b - m + k) % b]));
+                if clean {
+                    // the window's inner means, oldest first (fewer than `b` at the start)
+                    let m = inner_cnt.min(b);
+                    sum2 = Csum::of((0..m).map(|k| ring[(slot + b - m + k) % b]));
+                }
             }
             if inner_cnt >= b {
                 out[i] = sum2.mean(bf);

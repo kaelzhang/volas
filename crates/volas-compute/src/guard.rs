@@ -171,15 +171,10 @@ impl<const K: usize> Slide<K> {
     /// Recompute the sums from the window's own rows `rows`, oldest first (the
     /// re-anchoring of [`crate::accum`]); the count of bad rows is unchanged.
     fn reanchor(&mut self, rows: std::ops::RangeInclusive<usize>, term: &impl Fn(usize) -> ([f64; K], bool)) {
-        self.sums = [Csum::default(); K];
-        for j in rows {
+        self.sums = Csum::of_rows(rows.filter_map(|j| {
             let (t, finite) = term(j);
-            if finite {
-                for (s, v) in self.sums.iter_mut().zip(t) {
-                    s.add(v);
-                }
-            }
-        }
+            finite.then_some(t)
+        }));
     }
 
     /// Admit a row: its terms join the sums when `finite`, else it is counted.
@@ -206,6 +201,11 @@ impl<const K: usize> Slide<K> {
         }
     }
 
+    /// Whether every running sum is exact (see [`Csum::is_exact`]).
+    fn exact(&self) -> bool {
+        self.sums.iter().all(Csum::is_exact)
+    }
+
     fn read(&self) -> Window<K> {
         if self.bad == 0 {
             Window::Sums(self.sums)
@@ -217,7 +217,8 @@ impl<const K: usize> Slide<K> {
     /// Advance over row `i` (rows `0..i` already slid): the window of `period` rows
     /// ending at `i`. `term(j)` is row `j`'s terms and whether they belong in the
     /// running sums (the kernel's own finiteness test). A full window at an anchor
-    /// position is re-summed from its own rows before it is read.
+    /// position, or whose sums went inexact, is re-summed from its own rows before it
+    /// is read.
     #[inline]
     pub(crate) fn row(
         &mut self,
@@ -238,7 +239,7 @@ impl<const K: usize> Slide<K> {
                 if order == Order::AddDrop && i >= period {
                     self.leave(term(i - period));
                 }
-                if anchor {
+                if full && (anchor || !self.exact()) {
                     self.reanchor(i + 1 - period..=i, &term);
                 }
                 if full { self.read() } else { Window::Partial }
@@ -248,7 +249,7 @@ impl<const K: usize> Slide<K> {
                 if !full {
                     return Window::Partial;
                 }
-                if anchor {
+                if anchor || !self.exact() {
                     self.reanchor(i + 1 - period..=i, &term);
                 }
                 let w = self.read();

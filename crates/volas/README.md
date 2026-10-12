@@ -181,7 +181,7 @@ The directive engine is the recommended API. For direct, `DataFrame`-free access
 and identical to the Python surface. The kernels follow the directive engine's
 missing-row rule: a row where any input of a recursive indicator is NaN outputs NaN,
 and the recursion continues from the last complete row as if that row did not exist
-(see [Missing and non-finite inputs](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md#missing-and-non-finite-inputs)).
+(see [Missing and non-finite inputs](https://github.com/kaelzhang/volas/blob/main/docs/numerics.md#missing-and-non-finite-inputs)).
 
 ## Reading CSV
 

@@ -10,7 +10,7 @@
 //! the available ILP, so a measured `f64x2` SIMD variant came out 1.00x — explicit
 //! SIMD buys nothing here.
 
-use crate::accum::{Anchors, Csum};
+use crate::accum::{square_terms, Anchors, Csum};
 use crate::guard::{Order, Slide, Window};
 use ndarray::{Array1, ArrayView1};
 use std::collections::VecDeque;
@@ -32,8 +32,9 @@ pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
     // OHLCV case. A **leading** NaN prefix is skipped (cascaded indicators — trima,
     // stochastic smoothing — feed an SMA over a series that warms up with NaN),
     // sliding from the first finite value. A later non-finite value poisons the sum
-    // until the next anchor; that is checked at every anchor and at the end, and then
-    // the careful path takes over. On the rows it keeps, the fast path does exactly the
+    // (and marks it inexact); that is checked at every re-anchoring and at the end, and
+    // then the careful path takes over. A sum that went inexact on finite values is
+    // re-summed at that row (see [`crate::accum`]). On the rows it keeps, the fast path does exactly the
     // careful slide's arithmetic ([`sma_row`]), so the two agree bit for bit.
     //
     // The result is built write-once: the warm-up is filled with NaN, then each mean is
@@ -52,9 +53,12 @@ pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
             if i >= start + period {
                 sum.sub(src[i - period]);
             }
-            if anchors.tick() && i + 1 >= period {
+            let anchor = anchors.tick();
+            if (anchor || !sum.is_exact()) && i + 1 >= period {
                 clean &= sum.value().is_finite();
-                sum = Csum::of(src[(i + 1 - period).max(start)..=i].iter().copied());
+                if clean {
+                    sum = Csum::of(src[(i + 1 - period).max(start)..=i].iter().copied());
+                }
             }
             if i + 1 >= start + period {
                 out.push(sum.mean(pf));
@@ -559,11 +563,15 @@ pub(crate) fn sma_step(
     Some(value)
 }
 
+/// The length of [`mean_std_row`]'s resumable state: the [`Slide`] of `[Σx, Σx²]`.
+pub(crate) const MEAN_STD_STATE: usize = Slide::<3>::STATE;
+
 /// The window statistics of [`rolling_mean_std`] at row `i` of `data`, resumed from
-/// `slide` (`[Σx, Σx²]` over the window's finite rows): `(mean, std)`.
+/// `slide` (`[Σx, Σx²]` over the window's finite rows, see
+/// [`square_terms`]): `(mean, std)`.
 #[inline]
 pub(crate) fn mean_std_row(
-    slide: &mut Slide<2>,
+    slide: &mut Slide<3>,
     period: usize,
     ddof: usize,
     i: usize,
@@ -573,10 +581,10 @@ pub(crate) fn mean_std_row(
     let denom = (period - ddof) as f64;
     match slide.row(Order::AddDrop, period, i, |j| {
         let x = term(j);
-        ([x, x * x], x.is_finite())
+        (square_terms(x), x.is_finite())
     }) {
         Window::Partial => (f64::NAN, f64::NAN),
-        Window::Sums([sum, sum_sq]) => dispersion::mean_std_of_sums(&sum, &sum_sq, p, denom),
+        Window::Sums(sums) => dispersion::mean_std_of_sums(&sums, p, denom),
         Window::Bad => dispersion::window_mean_std_of(i + 1 - period..=i, &term, p, denom),
     }
 }

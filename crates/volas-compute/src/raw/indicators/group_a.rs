@@ -421,7 +421,8 @@ pub fn mass_index_final_state(high: &[f64], low: &[f64], n: usize, origin: usize
         if i >= start + n {
             sum.sub(ratio[i - n]);
         }
-        if anchors.tick() && i + 1 >= n {
+        let anchor = anchors.tick();
+        if (anchor || !sum.is_exact()) && i + 1 >= n {
             sum = Csum::of(ratio[(i + 1 - n).max(start)..=i].iter().copied());
         }
     }
@@ -455,7 +456,7 @@ pub fn mass_index_resume(
         sum.add(ratio_i);
         sum.sub(ratios[i - from]); // ratio[i - n]
         ratios.push(ratio_i);
-        if anchors_at(pos, n) {
+        if anchors_at(pos, n) || !sum.is_exact() {
             sum = Csum::of(ratios[ratios.len() - n..].iter().copied());
         }
         pos += 1;
@@ -618,7 +619,7 @@ pub fn mass_index_resume_one(
     next[4] = (pos + 1) as f64;
     next[5..5 + n - 1].copy_from_slice(&state[6..5 + n]);
     next[5 + n - 1] = ratio_i;
-    if anchors_at(pos, n) {
+    if anchors_at(pos, n) || !sum.is_exact() {
         sum = Csum::of(next[5..5 + n].iter().copied());
     }
     sum.write_state(&mut next[2..4]);

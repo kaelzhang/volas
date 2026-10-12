@@ -2,7 +2,7 @@
 //! state-carry helpers (`ema_k` / `ema_seed_idx` shared with the cascade and
 //! MACD families).
 
-use crate::accum::{anchors_at, Anchors, Csum};
+use crate::accum::{anchors_at, Accumulator, Anchors, Csum};
 use crate::guard::{all_finite, own_sums, ring_push, state_after, window_sums, Order, Slide, Window};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 use crate::raw::indicators::av;
@@ -222,10 +222,16 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64
     let mut guard = G::default();
     let mut anchors = Anchors::from(origin, period);
     let mut finite = true;
+    // Re-sum at an anchor or when a sum went inexact. The fast pass stops once a
+    // non-finite row has poisoned it (the careful pass recomputes every row); the
+    // careful pass, whose sums hold finite rows only, always re-sums.
     let mut reanchor = |guard: &G, sum: &mut Csum, wsum: &mut Csum, end: usize| {
         finite &= sum.value().is_finite() && wsum.value().is_finite();
-        (*sum, *wsum) = wma_sums(data[end + 1 - period..=end].iter().copied(), |x| guard.counts(x.is_finite()));
+        if finite || !guard.counts(false) {
+            (*sum, *wsum) = wma_sums(data[end + 1 - period..=end].iter().copied(), |x| guard.counts(x.is_finite()));
+        }
     };
+    let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
     // Seed the first full window directly.
     let mut sum = Csum::default(); // plain window sum
     let mut wsum = Csum::default(); // weighted sum: newest bar * period ... oldest * 1
@@ -234,7 +240,8 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64
         if guard.enter(data[j].is_finite()) {
             wma_seed(&mut sum, &mut wsum, j, data[j]);
         }
-        if anchors.tick() && j + 1 == period {
+        let anchor = anchors.tick();
+        if (anchor || !exact(&sum, &wsum)) && j + 1 == period {
             reanchor(&guard, &mut sum, &mut wsum, j);
         }
     }
@@ -246,7 +253,8 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64
         let came_in = guard.enter(entering.is_finite());
         let went_out = guard.leave(leaving.is_finite());
         wma_slide(&mut sum, &mut wsum, pf, came_in.then_some(entering), went_out.then_some(leaving));
-        if anchors.tick() {
+        let anchor = anchors.tick();
+        if anchor || !exact(&sum, &wsum) {
             reanchor(&guard, &mut sum, &mut wsum, i);
         }
         out[i] = if guard.clean() { wsum.mean(denom) } else { window(i) };
@@ -256,14 +264,20 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64
 
 /// The WMA sums `(Σx, Σw·x)` of one window, its rows oldest first (weight `1..`),
 /// those `admit` keeps — the seed of a first window, and every re-anchoring.
-fn wma_sums(rows: impl Iterator<Item = f64>, admit: impl Fn(f64) -> bool) -> (Csum, Csum) {
-    let (mut sum, mut wsum) = (Csum::default(), Csum::default());
+fn wma_sums(rows: impl Iterator<Item = f64> + Clone, admit: impl Fn(f64) -> bool) -> (Csum, Csum) {
+    let [sum, wsum] = Csum::settle(wma_sums_in(rows.clone(), &admit), || wma_sums_in(rows, &admit));
+    (sum, wsum)
+}
+
+/// [`wma_sums`] over an [`Accumulator`].
+fn wma_sums_in<A: Accumulator>(rows: impl Iterator<Item = f64>, admit: &impl Fn(f64) -> bool) -> [A; 2] {
+    let (mut sum, mut wsum) = (A::default(), A::default());
     for (j, x) in rows.enumerate() {
         if admit(x) {
             wma_seed(&mut sum, &mut wsum, j, x);
         }
     }
-    (sum, wsum)
+    [sum, wsum]
 }
 
 /// The sum of the WMA weights `1..=period`, `period·(period+1)/2`, formed in `u128` —
@@ -276,7 +290,7 @@ fn wma_weight_sum(period: usize) -> f64 {
 /// Seed the first WMA window with its `j`-th row (weight `j + 1`), the weighted term
 /// exact.
 #[inline(always)]
-fn wma_seed(sum: &mut Csum, wsum: &mut Csum, j: usize, x: f64) {
+fn wma_seed<A: Accumulator>(sum: &mut A, wsum: &mut A, j: usize, x: f64) {
     sum.add(x);
     wsum.add_prod(x, (j + 1) as f64);
 }
@@ -319,11 +333,12 @@ pub fn vwma(close: &[f64], volume: &[f64], period: usize, origin: usize) -> Vec<
             pv.sub(close[i - period] * volume[i - period]);
             vv.sub(volume[i - period]);
         }
-        if anchors.tick() && i + 1 >= period {
+        let anchor = anchors.tick();
+        if (anchor || !(pv.is_exact() && vv.is_exact())) && i + 1 >= period {
             clean &= pv.value().is_finite() && vv.value().is_finite();
-            let w = i + 1 - period..=i;
-            pv = Csum::of(w.clone().map(|j| close[j] * volume[j]));
-            vv = Csum::of(w.map(|j| volume[j]));
+            if clean {
+                [pv, vv] = Csum::of_rows((i + 1 - period..=i).map(|j| [close[j] * volume[j], volume[j]]));
+            }
         }
         if i >= period - 1 {
             out[i] = vwma_value([pv.value(), vv.value()]);
@@ -473,7 +488,7 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
             bad += 1;
         }
         if seen + 1 == period {
-            if anchors_at(pos, period) {
+            if anchors_at(pos, period) || !(sum.is_exact() && wsum.is_exact()) {
                 (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), f64::is_finite);
             }
             if bad == 0 { wsum.mean(denom) } else { window() }
@@ -491,7 +506,7 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
             bad -= 1;
         }
         wma_slide(&mut sum, &mut wsum, pf, came_in.then_some(x), went_out.then_some(leaving));
-        if anchors_at(pos, period) {
+        if anchors_at(pos, period) || !(sum.is_exact() && wsum.is_exact()) {
             (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), f64::is_finite);
         }
         if bad == 0 { wsum.mean(denom) } else { window() }

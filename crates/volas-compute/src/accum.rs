@@ -6,21 +6,44 @@
 //!
 //! - **Rounding is kept for good.** Every add rounds, and the error stays in the sum
 //!   after the row has left: after `1e20` enters and leaves, the window `[1, 2]` reads
-//!   `0`, not `3`. A [`Csum`] is compensated (Neumaier's improved Kahan–Babuška): it
-//!   carries the rounding error of every add, so a window's sum is its exact sum to
-//!   within an ulp, and [`Csum::mean`] divides that exact sum, not its rounded value —
-//!   the mean of a flat window is its value exactly.
-//! - **A value depends on the whole history.** Even compensated, what the sum holds is
-//!   a function of every row it has slid over (the compensation itself rounds once its
-//!   bits run out), so a series that differs only long ago — a NaN that has since left
-//!   the window, a head dropped by a bounded frame — could still differ in the last
-//!   bit. So every running sum **re-anchors**: at each row whose absolute position is
-//!   a multiple of the window length `W`, it is recomputed from the window's own rows
-//!   (a fresh [`Csum`] over them, oldest first). A value then depends only on the rows
-//!   since the anchor before it, less `W` — at most `2W` rows — never on older
-//!   history: once a bad row has left the window and an anchor has passed, the values
-//!   are bit-identical to clean data's. Re-anchoring costs `O(W)` once per `W` rows,
-//!   amortized `O(1)` per row.
+//!   `0`, not `3`. A window's sum here is **exact**: its value is the correctly rounded
+//!   exact sum of the window's terms — what `math.fsum` returns — however the window
+//!   was reached.
+//! - **A value depends on the whole history.** A running sum's words are a function of
+//!   every row it has slid over. So every running sum also **re-anchors**: at each row
+//!   whose absolute position is a multiple of the window length `W`, it is recomputed
+//!   from the window's own rows, oldest first. Re-anchoring costs `O(W)` once per `W`
+//!   rows, amortized `O(1)` per row, and keeps the compensation word small (it holds
+//!   the rounding errors of at most `2W` updates), so the fast form below stays exact
+//!   on any data whose magnitudes are not extreme.
+//!
+//! **How a sum stays exact.** A [`Csum`] is two words, `sum + comp`, updated by
+//! error-free transformations: each add splits `sum + x` into its rounded value and
+//! its exact rounding error (TwoSum), and the error joins `comp`. The only add that can
+//! round is that last one, `comp + e`, and it is **checked** — `(c − comp == e) && (c −
+//! e == comp)` holds exactly when `c = comp + e` is exact (one of the two differences
+//! is computed exactly by Sterbenz / Fast2Sum, so it equals the other operand only if
+//! nothing was lost). So, by induction, while [`Csum::is_exact`] holds, `sum + comp` is
+//! the exact sum of every term added and subtracted, and [`Csum::value`] rounds that
+//! real number once: the correctly rounded window sum. When a check fails — terms whose
+//! magnitudes differ by more than `comp` can hold beside `sum` (`1e35`, `1e20` and
+//! `1.3` in one window), or an overflow — the sum is marked inexact, and the kernel
+//! **re-anchors at that row**, as at a scheduled anchor: [`Csum::of`] re-sums the
+//! window, and when even the fast form cannot hold that sum exactly it falls back to
+//! an [`Exact`] expansion (Shewchuk's partials, `fsum`'s algorithm), which never
+//! rounds. Its value is rounded once, correctly (with `fsum`'s half-even fix-up), and
+//! kept as a canonical pair `(hi, lo)`: `hi` the correctly rounded sum and `lo` the
+//! remainder, so the next row's reading and mean depend only on the exact sum. A sum
+//! that still needs more than two words stays marked inexact, so every row re-sums
+//! its window — `O(W)` per row — until the extreme term has left; ordinary data never
+//! takes that path.
+//!
+//! Every value read is therefore a function of the window's terms alone: the batch
+//! kernel, a resume from carried state, the live one-row step and a bounded frame read
+//! the same bits. The one residue is outside `fsum`'s own domain: a window whose terms
+//! reach the `f64` overflow threshold is summed at a scale of `2⁻⁶⁴` per overflow
+//! (`fsum` raises there), which is exact unless that window's sum also cancels below
+//! `~2⁻⁹⁵⁸`.
 //!
 //! The absolute position is the row's place in the series the frame continues (see
 //! `DataFrame::origin`): a bounded frame that dropped its head, or a contiguous slice,
@@ -28,41 +51,117 @@
 //! state holds its next row's position, so a resume anchors where a full computation
 //! does — every path of a kernel does the same arithmetic on the same rows.
 
-/// A compensated running sum — Neumaier's improved Kahan–Babuška summation. `sum` is
-/// the rounded running total and `comp` the accumulated rounding error of every add
-/// (each one exact, by Fast2Sum on the larger magnitude first); the sum's value is
-/// `sum + comp`. A non-finite term makes the value NaN for good (`comp` takes
-/// `inf − inf`), which the careful slides test for.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// Something terms can be summed into: the fast checked [`Csum`] or the exact
+/// [`Exact`] expansion. A kernel's re-summing helper is written once, generic over it,
+/// and runs the fast form first.
+pub(crate) trait Accumulator: Default {
+    /// Add `x`.
+    fn add(&mut self, x: f64);
+
+    /// Add the exact product `a·b`: its rounded value and its rounding error (by FMA),
+    /// so a product added here and later removed leaves nothing.
+    #[inline(always)]
+    fn add_prod(&mut self, a: f64, b: f64) {
+        let p = a * b;
+        self.add(p);
+        self.add(a.mul_add(b, -p));
+    }
+}
+
+/// A compensated running sum: two words `sum + comp` updated by error-free transforms,
+/// with every rounding of `comp` detected (see the module docs). While
+/// [`is_exact`](Self::is_exact) holds, `sum + comp` is the exact sum of every term; a
+/// non-finite term or an overflow marks it inexact (and its value non-finite).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Csum {
     sum: f64,
     comp: f64,
+    exact: bool,
+}
+
+impl Default for Csum {
+    #[inline(always)]
+    fn default() -> Self {
+        Csum { sum: 0.0, comp: 0.0, exact: true }
+    }
+}
+
+impl Accumulator for Csum {
+    #[inline(always)]
+    fn add(&mut self, x: f64) {
+        Csum::add(self, x);
+    }
 }
 
 impl Csum {
-    /// The length of a compensated sum's state: `[sum, comp]`.
+    /// The length of a compensated sum's state: `[sum, comp]`. A sum that is not exact
+    /// is carried as `[sum, NaN]` — it is never read again, the next full window
+    /// re-sums itself (see [`from_state`](Self::from_state)).
     pub(crate) const STATE: usize = 2;
 
-    /// The compensated sum of `terms`, added in order.
+    /// The exact sum of `terms`, added in order: the fast form when it holds the sum
+    /// exactly (the common case), else the canonical pair of an [`Exact`] expansion
+    /// (exact unless the sum needs more than two words — then marked inexact, its
+    /// value still the correctly rounded sum).
     #[inline]
-    pub(crate) fn of(terms: impl IntoIterator<Item = f64>) -> Self {
-        let mut s = Csum::default();
-        for x in terms {
-            s.add(x);
-        }
+    pub(crate) fn of<I>(terms: I) -> Self
+    where
+        I: IntoIterator<Item = f64>,
+        I::IntoIter: Clone,
+    {
+        let [s] = Csum::of_rows(terms.into_iter().map(|x| [x]));
         s
     }
 
-    /// Add `x`.
+    /// [`of`](Self::of) for `K` sums at once, from rows of `K` terms each — one pass
+    /// over the rows in the common case.
+    #[inline]
+    pub(crate) fn of_rows<const K: usize, I>(rows: I) -> [Self; K]
+    where
+        I: IntoIterator<Item = [f64; K]>,
+        I::IntoIter: Clone,
+    {
+        let rows = rows.into_iter();
+        let mut sums = [Csum::default(); K];
+        for t in rows.clone() {
+            for (s, x) in sums.iter_mut().zip(t) {
+                s.add(x);
+            }
+        }
+        for (k, s) in sums.iter_mut().enumerate() {
+            if !s.exact {
+                let mut e = Exact::default();
+                for t in rows.clone() {
+                    e.add(t[k]);
+                }
+                *s = e.to_csum();
+            }
+        }
+        sums
+    }
+
+    /// The exact sums of a re-summing helper written once over [`Accumulator`]: `fast`
+    /// its result with compensated sums, `slow` the same helper over [`Exact`]
+    /// expansions — run only when a fast sum could not hold its sum exactly.
+    #[inline]
+    pub(crate) fn settle<const K: usize>(fast: [Csum; K], slow: impl FnOnce() -> [Exact; K]) -> [Self; K] {
+        if fast.iter().all(Csum::is_exact) {
+            return fast;
+        }
+        let slow = slow();
+        std::array::from_fn(|k| if fast[k].exact { fast[k] } else { slow[k].to_csum() })
+    }
+
+    /// Add `x`: TwoSum of `sum + x`, its exact error into `comp`, that add checked.
     #[inline(always)]
     pub(crate) fn add(&mut self, x: f64) {
         let t = self.sum + x;
-        self.comp += if self.sum.abs() >= x.abs() {
-            (self.sum - t) + x
-        } else {
-            (x - t) + self.sum
-        };
+        let bv = t - self.sum;
+        let e = (self.sum - (t - bv)) + (x - bv);
+        let c = self.comp + e;
+        self.exact &= (c - self.comp == e) & (c - e == self.comp);
         self.sum = t;
+        self.comp = c;
     }
 
     /// Subtract `x` (add `-x`).
@@ -72,36 +171,51 @@ impl Csum {
     }
 
     /// Add another compensated sum — both its words, so none of its low-order bits is
-    /// lost to rounding its value first.
+    /// lost to rounding its value first. Exact only if `other` is.
     #[inline(always)]
     pub(crate) fn add_sum(&mut self, other: &Csum) {
         self.add(other.sum);
         self.add(other.comp);
+        self.exact &= other.exact;
     }
 
-    /// Subtract another compensated sum — both its words.
+    /// Subtract another compensated sum — both its words. Exact only if `other` is.
     #[inline(always)]
     pub(crate) fn sub_sum(&mut self, other: &Csum) {
         self.sub(other.sum);
         self.sub(other.comp);
+        self.exact &= other.exact;
     }
 
-    /// Add the exact product `a·b` (its rounded value and its rounding error, by FMA),
-    /// so a product added here and later removed as a sum of its factor leaves nothing.
+    /// Add the exact product `a·b` (see [`Accumulator::add_prod`]).
     #[inline(always)]
     pub(crate) fn add_prod(&mut self, a: f64, b: f64) {
-        let p = a * b;
-        self.add(p);
-        self.add(a.mul_add(b, -p));
+        Accumulator::add_prod(self, a, b);
     }
 
-    /// Subtract the exact product `a·b` (see [`add_prod`](Self::add_prod)).
+    /// Subtract the exact product `a·b`.
     #[inline(always)]
     pub(crate) fn sub_prod(&mut self, a: f64, b: f64) {
         self.add_prod(-a, b);
     }
 
-    /// The sum's value: `sum + comp`, rounded once.
+    /// Whether `sum + comp` is the exact sum of every term — else the window must be
+    /// re-summed before it is read.
+    #[inline(always)]
+    pub(crate) fn is_exact(&self) -> bool {
+        self.exact
+    }
+
+    /// The canonical words `(hi, lo)` of the sum: `hi` its value, `lo` the remainder —
+    /// exactly `sum + comp − hi` (TwoSum), so a function of the sum alone, not of how
+    /// the two words split it.
+    #[inline(always)]
+    pub(crate) fn words(&self) -> (f64, f64) {
+        two_sum(self.sum, self.comp)
+    }
+
+    /// The sum's value: `sum + comp`, rounded once — the correctly rounded exact sum
+    /// when [`is_exact`](Self::is_exact) holds or the sum came from [`of`](Self::of).
     #[inline(always)]
     pub(crate) fn value(&self) -> f64 {
         self.sum + self.comp
@@ -122,16 +236,224 @@ impl Csum {
         q + r / n
     }
 
-    /// A sum from its state `[sum, comp]`; `None` unless exactly two words.
+    /// A sum from its state `[sum, comp]`; `None` unless exactly two words. It is exact
+    /// when both words are finite (an inexact sum is written with a NaN low word).
     pub(crate) fn from_state(state: &[f64]) -> Option<Self> {
         let [sum, comp] = *state else { return None };
-        Some(Csum { sum, comp })
+        Some(Csum { sum, comp, exact: sum.is_finite() && comp.is_finite() })
     }
 
-    /// Write the state `[sum, comp]` into `out[..2]`.
+    /// Write the state `[sum, comp]` into `out[..2]` — `[sum, NaN]` for an inexact sum.
     pub(crate) fn write_state(&self, out: &mut [f64]) {
         out[0] = self.sum;
-        out[1] = self.comp;
+        out[1] = if self.exact { self.comp } else { f64::NAN };
+    }
+}
+
+/// `a + b` as its rounded value and its exact rounding error (Knuth's TwoSum).
+#[inline(always)]
+pub(crate) fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let bv = s - a;
+    (s, (a - (s - bv)) + (b - bv))
+}
+
+/// `a·b` as its rounded value and its exact rounding error (by FMA).
+#[inline(always)]
+pub(crate) fn two_prod(a: f64, b: f64) -> (f64, f64) {
+    let p = a * b;
+    (p, a.mul_add(b, -p))
+}
+
+/// The per-row terms of an exact `[Σx, Σx²]`: `x`, and `x²` split into its rounded
+/// value and its rounding error ([`two_prod`]) — summed apart, so the squares' sum is
+/// exact and [`comoment`] can take a window's deviation from it.
+#[inline(always)]
+pub(crate) fn square_terms(x: f64) -> [f64; 3] {
+    let (h, l) = two_prod(x, x);
+    [x, h, l]
+}
+
+/// `2⁻⁴⁰`: below this fraction of its terms' magnitude a co-moment estimate is too
+/// close to cancellation to trust, and [`comoment`] computes it exactly.
+const COMOMENT_FILTER: f64 = 1.0 / 1_099_511_627_776.0;
+
+/// `n·Σab − Σa·Σb` over a window of `n` rows — `n²` times its co-moment `Σ(a − ā)(b −
+/// b̄)` (with `a = b`, `n²` times its sum of squared deviations) — from the window's
+/// exact sums: `sa = Σa`, `sb = Σb`, and `Σab` as the total of `sab` (the products' sums
+/// split as [`two_prod`] splits each product, or one exact sum).
+///
+/// The raw moments cancel: at a price level of `12345` a variance of `1e-12` is lost
+/// in rounding entirely. So the difference is formed from the sums' canonical words
+/// ([`Csum::words`]) in double-double arithmetic — accurate to `~2⁻¹⁰⁰` of the terms'
+/// magnitude — and returned when it clears that magnitude by `2⁴⁰` (then it is within
+/// an ulp or two of the exact value, and its sign is exact). Closer to cancellation it
+/// is computed exactly, as an [`Exact`] sum of every partial product: a window whose
+/// `a` or `b` is constant gives exactly `0`, never rounding noise. A function of the
+/// exact sums only, so every path that reaches a window reads the same bits.
+pub(crate) fn comoment(n: f64, sa: &Csum, sb: &Csum, sab: &[Csum]) -> f64 {
+    let (ah, al) = sa.words();
+    let (bh, bl) = sb.words();
+    let (ph, mut pl) = sab[0].words();
+    for s in &sab[1..] {
+        let (h, l) = s.words();
+        pl += h + l;
+    }
+    let (p1, e1) = two_prod(n, ph);
+    let (p2, e2) = two_prod(ah, bh);
+    let (s, t) = two_sum(p1, -p2);
+    let rest = (e1 - e2) + (n * pl - ah.mul_add(bl, al * bh));
+    let est = s + (t + rest);
+    if est.abs() > (p1.abs() + p2.abs()) * COMOMENT_FILTER {
+        return est;
+    }
+    let mut exact = Exact::default();
+    for (h, l) in sab.iter().map(Csum::words) {
+        for w in [h, l] {
+            let (p, e) = two_prod(n, w);
+            exact.add(p);
+            exact.add(e);
+        }
+    }
+    for x in [ah, al] {
+        for y in [bh, bl] {
+            let (p, e) = two_prod(-x, y);
+            exact.add(p);
+            exact.add(e);
+        }
+    }
+    exact.to_csum().value()
+}
+
+/// `2⁻⁶⁴`: the step an [`Exact`] expansion scales down by when a term or its total
+/// reaches the overflow threshold.
+const RESCALE: f64 = 1.0 / 18_446_744_073_709_551_616.0;
+
+/// `2¹⁰²²`: an expansion whose largest word or incoming term reaches this rescales
+/// first, so no intermediate sum of an add can overflow.
+const HUGE: f64 = 4.494_232_837_155_79e307;
+
+/// An exact sum of any number of `f64` terms: a nonoverlapping expansion (Shewchuk's
+/// partials, the algorithm of Python's `math.fsum`), grown by error-free additions so
+/// it never rounds. Non-finite terms are summed apart, IEEE-style (`fsum`'s rule:
+/// NaN, or ±inf, or NaN for both infinities). Near the overflow threshold the
+/// expansion is scaled by `2⁻⁶⁴` instead of overflowing (see the module docs). The
+/// slow, exact form behind [`Csum::of`]; also the running sum of an expanding window,
+/// which never drops a term.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Exact {
+    /// Nonoverlapping words, increasing in magnitude, each scaled by `2^-scale`.
+    partials: Vec<f64>,
+    /// The sum of the non-finite terms (`0` when there are none).
+    special: f64,
+    /// The scaling exponent, a multiple of 64.
+    scale: i32,
+}
+
+impl Accumulator for Exact {
+    #[inline]
+    fn add(&mut self, x: f64) {
+        Exact::add(self, x);
+    }
+}
+
+/// `2^-scale` for a scale in `0..1023`.
+#[inline]
+fn pow2_neg(scale: i32) -> f64 {
+    f64::from_bits(((1023 - scale) as u64) << 52)
+}
+
+impl Exact {
+    /// Add `x` exactly.
+    pub(crate) fn add(&mut self, x: f64) {
+        if !x.is_finite() {
+            self.special += x;
+            return;
+        }
+        let mut x = if self.scale == 0 { x } else { x * pow2_neg(self.scale) };
+        if x.abs() >= HUGE || self.partials.last().is_some_and(|p| p.abs() >= HUGE) {
+            for p in &mut self.partials {
+                *p *= RESCALE;
+            }
+            self.partials.retain(|p| *p != 0.0);
+            x *= RESCALE;
+            self.scale += 64;
+        }
+        let mut i = 0;
+        for j in 0..self.partials.len() {
+            let mut y = self.partials[j];
+            if x.abs() < y.abs() {
+                std::mem::swap(&mut x, &mut y);
+            }
+            let hi = x + y;
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                self.partials[i] = lo;
+                i += 1;
+            }
+            x = hi;
+        }
+        self.partials.truncate(i);
+        self.partials.push(x);
+    }
+
+    /// `fsum`'s final rounding of the expansion `p` (round-half-even included):
+    /// `(hi, n, lo)` with `sum(p) = hi + lo + sum(p[..n])` exactly and `hi` the
+    /// correctly rounded sum.
+    fn round(p: &[f64]) -> (f64, usize, f64) {
+        let Some((&top, below)) = p.split_last() else { return (0.0, 0, 0.0) };
+        let mut n = below.len();
+        let mut hi = top;
+        let mut lo = 0.0;
+        while n > 0 {
+            let x = hi;
+            n -= 1;
+            let y = p[n];
+            hi = x + y;
+            lo = y - (hi - x);
+            if lo != 0.0 {
+                break;
+            }
+        }
+        // Half-even fix-up: a tie in the last add that the lower words break.
+        if n > 0 && ((lo < 0.0 && p[n - 1] < 0.0) || (lo > 0.0 && p[n - 1] > 0.0)) {
+            let y = lo * 2.0;
+            let x = hi + y;
+            if y == x - hi {
+                hi = x;
+                lo -= y;
+            }
+        }
+        (hi, n, lo)
+    }
+
+    /// The sum as a canonical [`Csum`]: `hi` the correctly rounded sum, `lo` the
+    /// remainder rounded to nearest (nudged one ulp toward zero when that rounding
+    /// would make `hi + lo` round away from `hi`), exact when `hi + lo` is the sum. A
+    /// function of the exact sum alone, so every path that reaches the same window
+    /// reads the same bits.
+    pub(crate) fn to_csum(&self) -> Csum {
+        if self.special != 0.0 {
+            return Csum { sum: self.special, comp: 0.0, exact: false };
+        }
+        let (hi, n, rest) = Exact::round(&self.partials);
+        let mut r = Exact::default();
+        for &w in self.partials[..n].iter().chain([&rest]) {
+            r.add(w);
+        }
+        let (mut lo, ..) = Exact::round(&r.partials);
+        r.add(-lo);
+        let exact = self.scale == 0 && r.partials.iter().all(|&w| w == 0.0);
+        if hi + lo != hi {
+            lo = f64::from_bits(lo.to_bits() - 1); // one ulp toward zero
+        }
+        if self.scale == 0 {
+            Csum { sum: hi, comp: lo, exact }
+        } else {
+            let up = 1.0 / pow2_neg(self.scale);
+            let hi = hi * up;
+            Csum { sum: hi, comp: if hi.is_finite() { lo * up } else { 0.0 }, exact }
+        }
     }
 }
 
@@ -170,8 +492,9 @@ impl Anchors {
 /// `kernels::sma`'s fast path over a series that arrives one value at a time from its
 /// first finite value on — for fused kernels that smooth a line they produce
 /// themselves. A `W`-row window: add the new value, drop the one `W` back, re-anchor
-/// when told to (the caller's [`Anchors`] tick on a full window, `i + 1 >= W`), and
-/// read the mean once `W` values are in. Bit-identical to `sma` over the same series.
+/// when told to (the caller's [`Anchors`] tick on a full window, `i + 1 >= W`) or when
+/// the sum went inexact, and read the mean once `W` values are in. Bit-identical to
+/// `sma` over the same series.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StreamMean<const W: usize> {
     ring: [f64; W],
@@ -197,7 +520,7 @@ impl<const W: usize> StreamMean<W> {
         }
         self.ring[slot] = x;
         self.count += 1;
-        if anchor {
+        if anchor || !self.sum.is_exact() {
             self.clean &= self.sum.value().is_finite();
             let m = self.count.min(W);
             self.sum = Csum::of((0..m).map(|k| self.ring[(self.count - m + k) % W]));
@@ -212,53 +535,4 @@ impl<const W: usize> StreamMean<W> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_compensated_sum_forgets_a_spike() {
-        let mut s = Csum::default();
-        s.add(0.1);
-        s.add(1e300);
-        s.sub(1e300);
-        assert_eq!(s.value(), 0.1);
-        let mut st = [0.0; 2];
-        s.write_state(&mut st);
-        assert_eq!(Csum::from_state(&st), Some(s));
-        assert_eq!(Csum::from_state(&[1.0]), None);
-        s.add(f64::INFINITY);
-        assert!(s.value().is_nan());
-    }
-
-    #[test]
-    fn a_flat_window_has_its_value_as_mean() {
-        for c in [0.1, 100.1, 1234.5678, 1e-7 / 3.0, 7.0 / 3.0] {
-            for n in 1..60 {
-                let s = Csum::of(std::iter::repeat_n(c, n));
-                assert_eq!(s.mean(n as f64), c, "{c} x{n}");
-            }
-        }
-        // the mean does not depend on how the words split the sum
-        let a = Csum { sum: 3.0, comp: 0.5 };
-        let b = Csum { sum: 3.5, comp: 0.0 };
-        assert_eq!(a.mean(7.0), b.mean(7.0));
-        let mut p = Csum::default();
-        p.add_prod(3.0, 0.1);
-        p.sub_sum(&Csum::of([0.1, 0.1, 0.1]));
-        assert_eq!(p.value(), 0.0);
-        p.add_sum(&Csum::of([1.0]));
-        p.sub_prod(2.0, 0.5);
-        assert_eq!(p.value(), 0.0);
-    }
-
-    #[test]
-    fn anchors_fall_on_multiples_of_the_period() {
-        for (from, period) in [(0, 3), (5, 3), (6, 3), (7, 1), (11, 4)] {
-            let mut a = Anchors::from(from, period);
-            for pos in from..from + 20 {
-                assert_eq!(a.tick(), anchors_at(pos, period), "{from} {period} {pos}");
-            }
-        }
-        assert!(!anchors_at(5, 0));
-    }
-}
+mod tests;

@@ -1,6 +1,6 @@
 """The reference oracle itself follows the documented missing-row rule.
 
-INDICATORS.md "Missing and non-finite inputs": a recursive indicator skips a row where
+docs/numerics.md "Missing and non-finite inputs": a recursive indicator skips a row where
 any of its inputs is NaN, so its output equals the indicator run on the series with
 those rows deleted, NaN put back at their positions. ``oracle_reference`` applies that
 rule at its input boundary; these cases pin it on hand-computed series, then check volas
