@@ -236,6 +236,33 @@ def test_macdext_swaps_its_averages_with_their_types():
         _same(_appended(d, swapped, 30), _exec(d, ordered), exact=True)
 
 
+# --- ULTOSC: one window definition, so the future cannot change the past ----------------
+
+def _ultosc_ref(h, l, c, p):
+    bp = np.full(len(c), np.nan)
+    tr = np.full(len(c), np.nan)
+    bp[1:] = c[1:] - np.minimum(l[1:], c[:-1])
+    tr[1:] = np.maximum(h[1:], c[:-1]) - np.minimum(l[1:], c[:-1])
+    out = np.full(len(c), np.nan)
+    for i in range(max(p), len(c)):
+        out[i] = 100 * sum(w * bp[i - q + 1:i + 1].sum() / tr[i - q + 1:i + 1].sum()
+                           for w, q in zip((4, 2, 1), p)) / 7
+    return out
+
+
+@pytest.mark.parametrize('periods', [(7, 14, 28), (4, 3, 2), (28, 14, 7), (7, 28, 14)])
+def test_ultosc_weights_its_periods_by_position_and_is_prefix_invariant(periods):
+    d = _ohlcv(160)
+    directive = 'ultosc:%d,%d,%d' % periods
+    got = _exec(d, directive)
+    _same(got, _ultosc_ref(d['high'], d['low'], d['close'], periods))
+    for bad in (np.nan, np.inf, -np.inf):
+        tail = {k: np.r_[v, v[-3:]] for k, v in d.items()}
+        tail['close'][-2] = bad
+        tail['high'][-1] = bad
+        _same(_exec(tail, directive)[:160], got, exact=True)
+
+
 # --- Ichimoku: the leading span waits for the longer of its two midpoints ---------------
 
 def test_senkou_a_cached_before_its_first_value_continues_on_append():

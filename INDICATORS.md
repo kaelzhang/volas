@@ -1463,7 +1463,7 @@ Every `<name=value>` argument has a default and can be omitted; a `<name>`
 | <a id="indicator-stochrsi-k"></a>`stochrsi.k` | `STOCHRSI` | Fast stochastic RSI percent K. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
 | <a id="indicator-stochrsi-d"></a>`stochrsi.d` | `STOCHRSI` | Fast stochastic RSI percent D. | `:<rsi=14>,<fastk=5>,<fastd=3>,<fastd_matype=0>@<series=close>` |
 | <a id="indicator-trix"></a>`trix` | `TRIX` | One-period ROC of a triple EMA. | `:<period>@<series=close>` |
-| <a id="indicator-ultosc"></a>`ultosc` | `ULTOSC` | Ultimate Oscillator. | `:<short=7>,<medium=14>,<long=28>@<series_high=high>,<series_low=low>,<series_close=close>` |
+| <a id="indicator-ultosc"></a>`ultosc` | `ULTOSC` | Ultimate Oscillator. The 4/2/1 weights follow argument position (short, medium, long); TA-Lib sorts the three periods ascending first, so the two agree for in-order arguments and differ by design otherwise. | `:<short=7>,<medium=14>,<long=28>@<series_high=high>,<series_low=low>,<series_close=close>` |
 | <a id="indicator-aroon-up"></a>`aroon.up` | `AROON` | Aroon up line. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-aroon-down"></a>`aroon.down` | `AROON` | Aroon down line. | `:<period>@<series_high=high>,<series_low=low>` |
 | <a id="indicator-aroonosc"></a>`aroonosc` | `AROONOSC` | Aroon oscillator. | `:<period>@<series_high=high>,<series_low=low>` |

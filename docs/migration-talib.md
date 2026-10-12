@@ -91,6 +91,30 @@ sum can decide differently. On prices quantised to a 0.1 tick this shows after a
 thousand bars (a few bars per pattern in twenty thousand); checked against rational
 arithmetic on the same float inputs, volas's decision is the exact one.
 
+## Deliberate divergences
+
+TA-Lib is the oracle for every TA-Lib-compatible directive; where volas departs from
+it, the departure is deliberate and listed here.
+
+- **Zero tests are exact.** TA-Lib's `TA_IS_ZERO` treats any `|x| < 1e-14` as zero, a
+  threshold in price units. volas tests exact zero in RSI and CMO (`avgGain + avgLoss`),
+  PPO (the slow average) and NATR (the close). Both give the same result on a flat
+  series; on a tiny-priced series
+  (FX-scale returns, prices scaled by `1e-15`) TA-Lib returns 0 where volas returns the
+  value the same series has at any other scale.
+- **ULTOSC weights by position.** `ultosc:<short>,<medium>,<long>` gives 4/2/1 to the
+  arguments in the order written; TA-Lib sorts the periods ascending first. The two
+  agree whenever the arguments are in order.
+- **±DI at period 1** keeps the ×100 of every other period (TA-Lib's period-1 branch
+  drops it).
+- **MACD / MACDEXT lines** are the clean fast-minus-slow difference from each average's
+  own start; TA-Lib seeds them from an offset aligned to the signal line.
+- **Warm-up rows are NaN**, also for TA-Lib's integer outputs (HT_TRENDMODE, the
+  candlestick patterns) where TA-Lib writes 0.
+
+Where TA-Lib's arguments are out of order, volas follows it: a `slow` period shorter
+than `fast` swaps the two averages in `macd`, `apo`, `ppo` and `macdext`.
+
 See also:
 
 - [TA-Lib example script](https://github.com/kaelzhang/volas/blob/main/examples/04_talib_migration.py)
