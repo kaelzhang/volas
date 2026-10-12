@@ -195,14 +195,7 @@ pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64
             highest = high_today;
         }
 
-        // Same Williams %R formula as TA-Lib, but with one range reciprocal instead
-        // of TA-Lib's `(range / -100)` followed by a second division.
-        let range = highest - lowest;
-        if range != 0.0 {
-            out.set(today, (highest - unsafe { *close.get_unchecked(today) }) * (-100.0 / range));
-        } else {
-            out.set(today, 0.0);
-        }
+        out.set(today, willr_value(highest, lowest, unsafe { *close.get_unchecked(today) }));
         trailing += 1;
         today += 1;
     }
@@ -213,6 +206,18 @@ pub fn willr(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64
     missing::blank_windows(&mut out, low, period);
     missing::blank_windows(&mut out, close, 1);
     out
+}
+
+/// Williams %R from a window's extremes and the close: `(HH − close) · (−100 / (HH − LL))`,
+/// `0` for a flat range — TA-Lib's formula with one range reciprocal instead of its
+/// `(range / −100)` and second division. The extremes' zeros are made `+0` first
+/// ([`kernels::canonical_zero`]): which signed zero the tracker kept depends on where it
+/// last rebuilt, and a recomputed window (the live refresh) rebuilds elsewhere.
+#[inline(always)]
+fn willr_value(highest: f64, lowest: f64, close: f64) -> f64 {
+    let (highest, lowest) = (kernels::canonical_zero(highest), kernels::canonical_zero(lowest));
+    let range = highest - lowest;
+    if range != 0.0 { (highest - close) * (-100.0 / range) } else { 0.0 }
 }
 
 /// Balance of Power: `(close − open)/(high − low)` (TA-Lib BOP). A bar with no

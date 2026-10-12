@@ -92,3 +92,25 @@ def test_a_sorted_window_evicts_the_very_value_that_leaves(directive):
 def test_mode_counts_signed_zeros_as_one_value(x, want):
     got = volas.DataFrame({"close": x}).exec(f"mode:{len(x)}")[-1]
     assert _bits([got], [want])  # +0: a zero mode is canonical
+
+
+def _signed_zero_bars(n=60, draws=40):
+    rng = np.random.default_rng(9)
+    return [rng.choice([-0.0, 0.0, 1.0, -1.0, 0.0, -0.0], size=(4, n)) for _ in range(draws)]
+
+
+@pytest.mark.parametrize("trial", range(40))
+def test_willr_settles_signed_zeros_like_every_extremum(trial):
+    """The Williams %R tracker keeps whichever signed zero it met last; its extremes'
+    zeros are made +0 like every other extremum's, so a live refresh (which rebuilds the
+    tracker over a recomputed window) gives the full computation's bits."""
+    n = 60
+    vals = _signed_zero_bars(n)[trial]
+    data = dict(open=vals[0], high=vals[1], low=vals[2], close=vals[3], volume=np.ones(n))
+    full = volas.DataFrame(data).exec("willr:3")
+    df = volas.DataFrame({k: v[:10] for k, v in data.items()}, index=list(range(10)))
+    df["willr:3"]
+    for i in range(10, n):
+        df.append(volas.DataFrame({k: v[i:i + 1] for k, v in data.items()}, index=[i]))
+        df["willr:3"]  # refreshed bar by bar, as a live feed reads it
+    assert _bits(df["willr:3"], full)
