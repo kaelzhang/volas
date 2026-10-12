@@ -55,14 +55,16 @@ fn a_refused_batch_leaves_the_frame_unchanged() {
     let r = df.check_writes(vec![w(0, &[1], Column::f64(vec![9.0])), w(1, &[1], Column::f64(vec![2.5]))]);
     assert!(matches!(r, Err(VolasError::DType(_))));
     assert!(df.equals(&snapshot) && df.is_computed("c"));
-    // each check, in order: the column, the value count, the rows
-    let shape = |writes| match df.check_writes(writes) {
-        Err(VolasError::Shape(m)) => m,
-        other => panic!("{other:?}"),
+    // each check, in order: the column, the value count, the rows, the dtype
+    let shape = |writes, says: &str| {
+        matches!(df.check_writes(writes), Err(VolasError::Shape(m)) if m.contains(says))
     };
-    assert!(shape(vec![w(7, &[0], Column::f64(vec![1.0]))]).contains("column position 7"));
-    assert!(shape(vec![w(0, &[0, 1], Column::f64(vec![1.0, 2.0, 3.0]))]).contains("3 values to 2"));
-    assert!(shape(vec![w(0, &[4], Column::f64(vec![1.0]))]).contains("row position 4"));
+    assert!(shape(vec![w(7, &[0], Column::f64(vec![1.0]))], "column position 7"));
+    assert!(shape(vec![w(0, &[0, 1], Column::f64(vec![1.0, 2.0, 3.0]))], "3 values to 2"));
+    assert!(shape(vec![w(0, &[4], Column::f64(vec![1.0]))], "row position 4"));
+    let mut dt = DataFrame::new(vec!["t".into()], vec![Column::datetime(vec![1, 2])], None).unwrap();
+    let r = dt.write_one(0, &[0], &Column::f64(vec![1.0]));
+    assert!(matches!(r, Err(VolasError::DType(m)) if m.starts_with("cannot select a ") && m.ends_with(" column as datetime")));
 }
 
 #[test]
