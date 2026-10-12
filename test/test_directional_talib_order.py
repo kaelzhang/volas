@@ -49,6 +49,9 @@ def _is_zero(x):
     return -1e-14 < x < 1e-14
 
 
+# The reference follows TA-Lib's C arithmetic, where an infinite movement turns the
+# sums into inf - inf = NaN on purpose; NumPy's scalar warning about it is expected.
+@np.errstate(invalid='ignore')
 def _adx_reference(high, low, close, p, rating=False):
     """TA-Lib 0.6.4 `TA_ADX` (and `TA_ADXR` over it), statement for statement."""
     n = len(high)
