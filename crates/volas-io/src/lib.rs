@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use volas_core::{Column, DataFrame, Result, Validity, VolasError};
+use volas_core::{datetime, Column, DataFrame, Result, Tz, Validity, VolasError};
 
 /// pandas's default missing-value tokens (`STR_NA_VALUES`). A numeric column
 /// with any of these (trimmed) entries upcasts to `f64` with `NaN`, exactly as
@@ -41,6 +41,81 @@ impl Default for ReadCsvOptions {
 /// Read a CSV file into a [`DataFrame`], inferring each column's dtype
 /// (`i64` -> `f64` -> `bool` -> `str`).
 pub fn read_csv(path: impl AsRef<Path>, opts: &ReadCsvOptions) -> Result<DataFrame> {
+    read_csv_table(path, opts)?.into_frame(&[])
+}
+
+/// How a column declared as dates is read from its text tokens.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DateParse {
+    /// Datetime text; a naive token is a wall clock in the zone, an offset-aware
+    /// token is absolute.
+    Text(Tz),
+    /// A decimal epoch number in the unit (`"s"` / `"ms"` / `"us"` / `"ns"`), read
+    /// exactly from the token.
+    Epoch(String),
+}
+
+/// A parsed CSV file before typing: its (deduplicated) header and every column's
+/// raw text tokens. [`CsvTable::into_frame`] types it — declared date columns
+/// from their own tokens, every other column by inference.
+pub struct CsvTable {
+    headers: Vec<String>,
+    cells: Vec<Vec<String>>,
+    na: HashSet<String>,
+}
+
+impl CsvTable {
+    /// The column names, in file order.
+    pub fn names(&self) -> &[String] {
+        &self.headers
+    }
+
+    /// Type the table into a frame: each `(name, parse)` in `dates` is a datetime
+    /// column parsed from its tokens (an NA or blank token is `NaT`) BEFORE any
+    /// inference could reinterpret it (an all-missing date column as float64, an
+    /// epoch token through float64); every other column is inferred. An unknown
+    /// date column name is a `ColumnNotFound` error.
+    pub fn into_frame(self, dates: &[(String, DateParse)]) -> Result<DataFrame> {
+        for (name, _) in dates {
+            if !self.headers.contains(name) {
+                return Err(VolasError::ColumnNotFound(name.clone()));
+            }
+        }
+        let na = self.na;
+        let columns = self
+            .headers
+            .iter()
+            .zip(self.cells)
+            .map(|(name, cells)| match dates.iter().find(|(n, _)| n == name) {
+                Some((_, parse)) => date_column(&cells, parse, &na),
+                None => Ok(infer_column(cells, &na)),
+            })
+            .collect::<Result<Vec<Column>>>()?;
+        DataFrame::new(self.headers, columns, None)
+    }
+}
+
+/// A declared date column from its raw tokens (see [`CsvTable::into_frame`]).
+fn date_column(cells: &[String], parse: &DateParse, na: &HashSet<String>) -> Result<Column> {
+    cells
+        .iter()
+        .map(|cell| {
+            let t = cell.trim();
+            if t.is_empty() || na.contains(t) {
+                return Ok(datetime::NAT);
+            }
+            match parse {
+                DateParse::Text(tz) => datetime::parse_ns_in_tz(t, *tz),
+                DateParse::Epoch(unit) => datetime::epoch_text_to_ns(t, unit),
+            }
+        })
+        .collect::<Result<Vec<i64>>>()
+        .map(Column::datetime)
+}
+
+/// Read a CSV file into a [`CsvTable`] (header + raw tokens), to be typed by
+/// [`CsvTable::into_frame`].
+pub fn read_csv_table(path: impl AsRef<Path>, opts: &ReadCsvOptions) -> Result<CsvTable> {
     let path = path.as_ref();
     let na_set = build_na_set(opts);
     let mut rdr = csv::ReaderBuilder::new()
@@ -113,9 +188,7 @@ pub fn read_csv(path: impl AsRef<Path>, opts: &ReadCsvOptions) -> Result<DataFra
     if !opts.has_header {
         headers = (0..ncol).map(|i| i.to_string()).collect();
     }
-
-    let columns: Vec<Column> = raw.into_iter().map(|c| infer_column(c, &na_set)).collect();
-    DataFrame::new(headers, columns, None)
+    Ok(CsvTable { headers, cells: raw, na: na_set })
 }
 
 /// The effective set of missing-value tokens for these options.
@@ -363,6 +436,36 @@ mod tests {
         assert!(b[1].is_nan());
         let c = df.column("c").unwrap();
         assert_eq!((c.str_at(0).unwrap(), c.str_at(1).unwrap()), ("x", "y"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn declared_date_columns_parse_from_their_tokens() {
+        let path = std::env::temp_dir().join("volas_io_declared_dates.csv");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "t,e,x").unwrap();
+            writeln!(f, "NA,1704067200000000001,1").unwrap();
+            writeln!(f, ",1704067200000000500.0,2").unwrap();
+        }
+        let table = read_csv_table(&path, &ReadCsvOptions::default()).unwrap();
+        assert_eq!(table.names(), &["t", "e", "x"]);
+        let dates = [
+            ("t".to_string(), DateParse::Text(Tz::Naive)),
+            ("e".to_string(), DateParse::Epoch("ns".into())),
+        ];
+        let df = table.into_frame(&dates).unwrap();
+        // an all-missing date column is NaT, epoch tokens are exact
+        assert_eq!(df.column("t").unwrap().as_datetime().unwrap(), &[datetime::NAT; 2]);
+        assert_eq!(
+            df.column("e").unwrap().as_datetime().unwrap(),
+            &[1_704_067_200_000_000_001, 1_704_067_200_000_000_500]
+        );
+        let missing = [("nope".to_string(), DateParse::Text(Tz::Utc))];
+        let err = read_csv_table(&path, &ReadCsvOptions::default()).unwrap().into_frame(&missing);
+        assert!(matches!(err, Err(VolasError::ColumnNotFound(_))));
+        let text = [("x".to_string(), DateParse::Text(Tz::Utc))];
+        assert!(read_csv_table(&path, &ReadCsvOptions::default()).unwrap().into_frame(&text).is_err());
         std::fs::remove_file(&path).ok();
     }
 

@@ -506,15 +506,24 @@ mod tests {
     }
 
     #[test]
-    fn coarse_timestamp_overflow_becomes_nat_not_panic() {
-        use arrow_array::TimestampSecondArray;
-        // 10^10 s · 10^9 (s→ns) overflows i64 — must land on the NaT sentinel, never
-        // panic in the overflow-checked gate build nor wrap to a wrong instant in release.
-        let arr: ArrayRef = Arc::new(TimestampSecondArray::from(vec![1_000_i64, 10_000_000_000_i64]));
-        let v = column_from_arrow(&arr).unwrap();
-        let got = v.as_datetime().unwrap();
-        assert_eq!(got[0], 1_000_000_000_000); // 1000 s -> ns, exact
-        assert_eq!(got[1], i64::MIN); // overflow -> NaT
+    fn out_of_range_dates_and_timestamps_raise_never_nat() {
+        use arrow_array::{Date32Array, Date64Array, TimestampNanosecondArray, TimestampSecondArray};
+        // 10^10 s · 10^9 (s→ns) overflows i64: an import error, never a silent NaT
+        // (a missing cell the source never had) nor a wrapped instant.
+        let ok: ArrayRef = Arc::new(TimestampSecondArray::from(vec![1_000_i64]));
+        assert_eq!(column_from_arrow(&ok).unwrap(), Column::datetime(vec![1_000_000_000_000]));
+        let out: Vec<ArrayRef> = vec![
+            Arc::new(TimestampSecondArray::from(vec![1_000_i64, 10_000_000_000_i64])),
+            Arc::new(Date32Array::from(vec![i32::MAX])),
+            Arc::new(Date64Array::from(vec![i64::MAX])),
+            // a present ns value on the NaT sentinel, dense (borrow path) or nullable
+            Arc::new(TimestampNanosecondArray::from(vec![i64::MIN])),
+            Arc::new(TimestampNanosecondArray::from(vec![None, Some(i64::MIN)])),
+        ];
+        for arr in out {
+            let err = column_from_arrow(&arr).unwrap_err().to_string();
+            assert!(err.contains("outside the datetime64[ns] range"), "{err}");
+        }
     }
 
     #[test]

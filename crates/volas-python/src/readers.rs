@@ -3,7 +3,10 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::{build_datetime_index, norm_idx, pyerr, PyDataFrame};
+use volas_core::Tz;
+use volas_io::DateParse;
+
+use crate::{norm_idx, pyerr, PyDataFrame};
 
 /// Read a CSV file into a ``DataFrame``, inferring per-column dtypes.
 ///
@@ -17,7 +20,7 @@ use crate::{build_datetime_index, norm_idx, pyerr, PyDataFrame};
 ///     header (bool, optional): ``True`` / omitted = the first row is the header;
 ///         ``None`` / ``False`` = no header (columns named ``"0".."n-1"``).
 ///     parse_dates (list[str], optional): column names to parse into datetime
-///         columns.
+///         columns, from their text tokens (an all-missing column is all NaT).
 ///     index_col (str | int, optional): a column name or integer position to
 ///         move into the row index; applied after ``parse_dates``, so naming a
 ///         parsed date column yields a DatetimeIndex.
@@ -25,13 +28,16 @@ use crate::{build_datetime_index, norm_idx, pyerr, PyDataFrame};
 ///     keep_default_na (bool): also treat the default tokens as missing
 ///         (default True).
 ///     tz (str, optional): timezone for the ``index_col`` datetime — a *naive*
-///         date string is interpreted in ``tz`` (stored UTC, the index tagged);
+///         date string is interpreted in ``tz`` (stored UTC, the index tagged
+///         with ``tz``, ``'UTC'`` included);
 ///         accepts a fixed offset (``'+08:00'``) or IANA name
-///         (``'America/New_York'``). For tz ingestion pass the date column via
-///         ``index_col`` and do *not* also list it in ``parse_dates``.
-///     date_unit (str, optional): read ``index_col`` as an epoch integer in this
-///         unit (``'s'`` / ``'ms'`` / ``'us'`` / ``'ns'``, absolute UTC); ``tz``
-///         then only sets the display zone.
+///         (``'America/New_York'``). The column may also be listed in
+///         ``parse_dates``.
+///     date_unit (str, optional): read ``index_col`` as an epoch number in this
+///         unit, exactly from its text (``'s'`` / ``'ms'`` / ``'us'`` / ``'ns'``,
+///         absolute UTC; a
+///         fractional epoch is kept to the nearest nanosecond); ``tz`` then only
+///         sets the display zone.
 ///
 /// Usage::
 ///
@@ -101,43 +107,52 @@ pub fn read_csv(
         na_values: na_list,
         keep_default_na,
     };
-    let mut df = volas_io::read_csv(&path, &opts).map_err(pyerr)?;
+    let table = volas_io::read_csv_table(&path, &opts).map_err(pyerr)?;
 
-    // parse_dates: convert each named column to a datetime column in place.
-    if let Some(cols) = parse_dates {
-        for name in &cols {
-            let parsed = df
-                .column(name)
-                .map_err(pyerr)?
-                .to_datetime()
-                .map_err(pyerr)?;
-            df.set_column(name, parsed).map_err(pyerr)?;
-        }
-    }
-
-    // index_col: move a column (by name or position) into the row index.
-    if let Some(ic) = index_col {
-        let name = if let Ok(s) = ic.extract::<String>() {
+    // index_col: a column name or position (resolved against the header).
+    let index_name = match index_col {
+        None => None,
+        Some(ic) => Some(if let Ok(s) = ic.extract::<String>() {
             s
         } else if let Ok(i) = ic.extract::<isize>() {
-            let pos = norm_idx(i, df.width())?;
-            df.names()[pos].clone()
+            table.names()[norm_idx(i, table.names().len())?].clone()
         } else {
             return Err(PyTypeError::new_err(
                 "index_col must be a column name or an integer position",
             ));
-        };
-        // With tz / date_unit, parse + tag the datetime index; else a plain move.
-        df = if tz.is_some() || date_unit.is_some() {
-            build_datetime_index(df, &name, tz.as_deref(), date_unit.as_deref())?
-        } else {
-            df.set_index(&name).map_err(pyerr)?
-        };
-    } else if tz.is_some() || date_unit.is_some() {
+        }),
+    };
+    let tzv = tz.as_deref().map(Tz::parse).transpose().map_err(pyerr)?;
+    if index_name.is_none() && (tzv.is_some() || date_unit.is_some()) {
         return Err(PyValueError::new_err(
             "tz / date_unit require index_col (the column to use as the datetime index)",
         ));
     }
 
+    // Declared date columns are parsed from their own tokens, before inference:
+    // parse_dates as datetime text, and the index column with tz (naive text read
+    // in tz) or date_unit (an exact epoch number).
+    let mut dates: Vec<(String, DateParse)> = parse_dates
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| (name, DateParse::Text(Tz::Naive)))
+        .collect();
+    if let Some(name) = index_name.as_ref().filter(|_| tzv.is_some() || date_unit.is_some()) {
+        let parse = match &date_unit {
+            Some(unit) => DateParse::Epoch(unit.clone()),
+            None => DateParse::Text(tzv.unwrap_or_default()),
+        };
+        dates.retain(|(n, _)| n != name);
+        dates.push((name.clone(), parse));
+    }
+    let mut df = table.into_frame(&dates).map_err(pyerr)?;
+
+    if let Some(name) = index_name {
+        df = df.set_index(&name).map_err(pyerr)?;
+        // the instants are already UTC; any tz (UTC included) tags the index aware
+        if let Some(tz) = tzv {
+            df = df.set_index_tz(tz).map_err(pyerr)?;
+        }
+    }
     Ok(PyDataFrame::plain(df))
 }

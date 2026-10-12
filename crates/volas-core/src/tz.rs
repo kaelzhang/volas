@@ -57,12 +57,30 @@ impl Tz {
         if s.eq_ignore_ascii_case("utc") || s == "Z" {
             return Ok(Tz::Utc);
         }
-        if let Some(off) = parse_offset_seconds(s) {
-            return Ok(if off == 0 { Tz::Utc } else { Tz::Offset(off) });
+        if s.starts_with(['+', '-']) {
+            let off = parse_offset_seconds(s).ok_or_else(|| {
+                VolasError::Value(format!(
+                    "invalid UTC offset {s:?} (use ±HH, ±HHMM[SS] or ±HH:MM[:SS], hours < 24)"
+                ))
+            })?;
+            return Tz::fixed(off);
         }
         s.parse::<chrono_tz::Tz>()
             .map(Tz::Named)
             .map_err(|_| VolasError::Value(format!("unknown timezone {s:?}")))
+    }
+
+    /// The fixed zone `secs` east of UTC — the one constructor of [`Tz::Offset`]:
+    /// a zero offset is [`Tz::Utc`], and an offset of a day or more is a `Value`
+    /// error (no real zone has one).
+    pub fn fixed(secs: i32) -> Result<Tz> {
+        match secs {
+            0 => Ok(Tz::Utc),
+            s if s.abs() < 86_400 => Ok(Tz::Offset(s)),
+            s => Err(VolasError::Value(format!(
+                "a UTC offset of {s} s is not under a day"
+            ))),
+        }
     }
 
     /// Seconds east of UTC for a fixed zone; `None` for a named (DST) zone, whose
@@ -78,57 +96,121 @@ impl Tz {
     /// Wall-clock civil parts `(year, month, day, hour, minute, second)` of a UTC
     /// instant `ns` as seen in this timezone.
     pub fn civil_parts(&self, ns: i64) -> (i64, i64, i64, i64, i64, i64) {
+        let c = self.civil(ns);
+        (c.year(), c.month(), c.day(), c.hour(), c.minute(), c.second())
+    }
+
+    /// The wall clock of the UTC instant `ns` in this timezone. The offset is
+    /// applied in chrono's civil range (far wider than the instant axis), so an
+    /// instant at either end of the axis never wraps on its way to the wall clock.
+    pub(crate) fn wall(&self, ns: i64) -> NaiveDateTime {
+        let utc = DateTime::from_timestamp_nanos(ns);
         match self {
-            Tz::Naive | Tz::Utc | Tz::Offset(_) => {
-                let off = self.fixed_offset_secs().unwrap_or(0) as i64;
-                let local = ns + off * 1_000_000_000;
-                let secs = local.div_euclid(1_000_000_000);
-                let nsub = local.rem_euclid(1_000_000_000) as u32;
-                parts(
-                    DateTime::from_timestamp(secs, nsub)
-                        .unwrap_or_default()
-                        .naive_utc(),
-                )
-            }
+            Tz::Naive | Tz::Utc => utc.naive_utc(),
+            Tz::Offset(s) => utc.naive_utc() + chrono::TimeDelta::seconds(*s as i64),
+            Tz::Named(tz) => utc.with_timezone(tz).naive_local(),
+        }
+    }
+
+    /// The UTC instant of the wall clock `wall` in this timezone — the one
+    /// wall-clock → instant conversion, keeping the fractional second. A named
+    /// zone rejects a DST anomaly: a spring-forward **gap** (the wall clock does
+    /// not exist) and a fall-back **fold** (it occurs twice — silently picking one
+    /// would shift instants invisibly, F33), both `Value` errors. An instant outside
+    /// the datetime64[ns] range is an `Overflow` error.
+    pub fn localize(&self, wall: NaiveDateTime) -> Result<i64> {
+        match self {
+            Tz::Naive | Tz::Utc => crate::datetime::fixed_wall_instant(&wall, 0),
+            Tz::Offset(s) => crate::datetime::fixed_wall_instant(&wall, *s),
+            Tz::Named(tz) => match tz.from_local_datetime(&wall) {
+                chrono::LocalResult::Single(dt) => crate::datetime::instant_of(&dt),
+                chrono::LocalResult::Ambiguous(_, _) => Err(VolasError::Value(format!(
+                    "wall clock {wall} is ambiguous in {} (a DST fold)",
+                    tz.name()
+                ))),
+                chrono::LocalResult::None => Err(VolasError::Value(format!(
+                    "wall clock {wall} does not exist in {} (a DST gap)",
+                    tz.name()
+                ))),
+            },
+        }
+    }
+
+    /// The instant whose wall clock in this zone equals the wall clock of `ns` in
+    /// `from` — pandas `tz_localize` of one value (a naive axis reads its stored
+    /// value as the wall clock). Sub-second digits are kept; errors as
+    /// [`Tz::localize`].
+    pub fn localize_from(&self, ns: i64, from: Tz) -> Result<i64> {
+        self.localize(from.wall(ns))
+    }
+
+    /// The instant of `ns`'s wall clock in this zone with the given civil
+    /// fields `[year, month, day, hour, minute, second]` replaced (`None` keeps
+    /// one; the sub-second part is kept) — pandas `Timestamp.replace`. A field
+    /// that does not fit, or an invalid date, is a `Value` error; then as
+    /// [`Tz::localize`].
+    pub fn replace_civil(&self, ns: i64, fields: [Option<i64>; 6]) -> Result<i64> {
+        let wall = self.wall(ns);
+        let keep = [
+            wall.year() as i64,
+            wall.month() as i64,
+            wall.day() as i64,
+            wall.hour() as i64,
+            wall.minute() as i64,
+            wall.second() as i64,
+        ];
+        let merged: [i64; 6] = std::array::from_fn(|i| fields[i].unwrap_or(keep[i]));
+        self.localize_fields(merged, wall.nanosecond())
+    }
+
+    /// The instant of the wall clock given field by field — `[year, month, day,
+    /// hour, minute, second]` plus the nanosecond of the second (a Python
+    /// `datetime`'s components) — in this zone. A field that does not fit or an
+    /// invalid date is a `Value` error; then as [`Tz::localize`].
+    pub fn localize_fields(&self, fields: [i64; 6], nanosecond: u32) -> Result<i64> {
+        let bad = |v: i64| VolasError::Value(format!("civil field {v} is out of range"));
+        let year = i32::try_from(fields[0]).map_err(|_| bad(fields[0]))?;
+        let mut f = [0u32; 5];
+        for (slot, &v) in f.iter_mut().zip(&fields[1..]) {
+            *slot = u32::try_from(v).map_err(|_| bad(v))?;
+        }
+        let wall = NaiveDate::from_ymd_opt(year, f[0], f[1])
+            .and_then(|d| d.and_hms_nano_opt(f[2], f[3], f[4], nanosecond))
+            .ok_or_else(|| VolasError::Value(format!("{fields:?} is not a valid wall clock")))?;
+        self.localize(wall)
+    }
+
+    /// The zone's name for the instant `ns`, as `strftime('%Z')` prints it:
+    /// `"UTC"`, `"UTC±HH:MM[:SS]"` for a fixed offset, the tzdata abbreviation of a
+    /// named zone at that instant (`"EST"` / `"EDT"`; a numeric one such as `"-03"`
+    /// when tzdata has no letters), and `""` for a naive axis.
+    pub fn zone_name_at(&self, ns: i64) -> String {
+        match self {
+            Tz::Naive => String::new(),
+            Tz::Utc => "UTC".to_string(),
+            Tz::Offset(s) => format!("UTC{}", format_offset(*s, ":")),
             Tz::Named(tz) => {
-                let secs = ns.div_euclid(1_000_000_000);
-                let nsub = ns.rem_euclid(1_000_000_000) as u32;
-                let dt = DateTime::from_timestamp(secs, nsub)
-                    .unwrap_or_default()
-                    .with_timezone(tz);
-                (
-                    dt.year() as i64,
-                    dt.month() as i64,
-                    dt.day() as i64,
-                    dt.hour() as i64,
-                    dt.minute() as i64,
-                    dt.second() as i64,
-                )
+                use chrono_tz::OffsetName;
+                let utc = DateTime::from_timestamp_nanos(ns);
+                match tz.offset_from_utc_datetime(&utc.naive_utc()).abbreviation() {
+                    Some(name) => name.to_string(),
+                    None => {
+                        let off = self.offset_secs_at(ns);
+                        let text = format_offset(off, "");
+                        // tzdata's numeric names drop a zero minute field (`-03`)
+                        if off % 3600 == 0 { text[..3].to_string() } else { text }
+                    }
+                }
             }
         }
     }
 
-    /// UTC epoch-ns of a naive wall-clock time interpreted in this timezone.
-    /// Returns `None` if the civil time is invalid or (for a named zone) falls in
-    /// a DST anomaly: a spring-forward **gap** (the time does not exist) or a
-    /// fall-back **fold** (the time occurs twice — ambiguous; silently picking
-    /// one would shift instants invisibly, F33, so it is rejected like the gap).
+    /// UTC epoch-ns of a naive wall-clock time interpreted in this timezone
+    /// ([`Tz::localize`] of whole civil fields). Returns `None` if the civil time is
+    /// invalid, falls in a DST gap / fold, or lies outside the instant range.
     pub fn wall_to_utc_ns(&self, y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> Option<i64> {
         let naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
-        match self {
-            Tz::Naive | Tz::Utc | Tz::Offset(_) => {
-                let off = self.fixed_offset_secs().unwrap_or(0) as i64;
-                naive
-                    .and_utc()
-                    .timestamp_nanos_opt()
-                    .map(|ns| ns - off * 1_000_000_000)
-            }
-            Tz::Named(tz) => match tz.from_local_datetime(&naive) {
-                chrono::LocalResult::Single(dt) => dt.timestamp_nanos_opt(),
-                chrono::LocalResult::Ambiguous(_, _) => None,
-                chrono::LocalResult::None => None,
-            },
-        }
+        self.localize(naive).ok()
     }
 
     /// UTC epoch-ns of a naive wall-clock interpreted in this timezone, resolved
@@ -136,9 +218,10 @@ impl Tz {
     /// [`Tz::wall_to_utc_ns`]. Where that method rejects DST anomalies (correct
     /// for user-entered times, F33), a derived bucket start must always resolve:
     /// a fall-back **fold** takes the first of the two occurrences, and a
-    /// spring-forward **gap** (the wall-clock minute does not exist) advances in
-    /// 15-minute steps to the first instant that does — the true first moment of
-    /// the bucket. Returns `None` only for an invalid civil date.
+    /// spring-forward **gap** (the wall clock does not exist) resolves to the
+    /// zone's transition instant ending the gap (from its transition data, to the
+    /// second) — the true first moment of the bucket. Returns `None` for an
+    /// invalid civil date or an instant outside the range.
     pub fn wall_to_utc_ns_earliest(
         &self,
         y: i32,
@@ -151,17 +234,14 @@ impl Tz {
         match self {
             Tz::Naive | Tz::Utc | Tz::Offset(_) => self.wall_to_utc_ns(y, mo, d, h, mi, s),
             Tz::Named(tz) => {
-                let mut naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
-                // Real DST gaps are at most ~2h; 16 quarter-hour probes cover any
-                // historical rule with margin.
-                for _ in 0..16 {
-                    match tz.from_local_datetime(&naive) {
-                        chrono::LocalResult::Single(dt) => return dt.timestamp_nanos_opt(),
-                        chrono::LocalResult::Ambiguous(a, _) => return a.timestamp_nanos_opt(),
-                        chrono::LocalResult::None => naive += chrono::Duration::minutes(15),
-                    }
-                }
-                None // LCOV_EXCL_LINE — no real tz rule has a >4h gap
+                let naive = NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, s)?;
+                let first = match tz.from_local_datetime(&naive) {
+                    chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt,
+                    // inside a gap: the first instant after it, from the zone's
+                    // transition table (`None` past the last known transition)
+                    chrono::LocalResult::None => chrono_tz::GapInfo::new(&naive, tz)?.end?,
+                };
+                crate::datetime::instant_of(&first).ok()
             }
         }
     }
@@ -172,7 +252,7 @@ impl Tz {
         match self {
             Tz::Naive => "naive".to_string(),
             Tz::Utc => "UTC".to_string(),
-            Tz::Offset(s) => format_offset(*s),
+            Tz::Offset(s) => format_offset(*s, ":"),
             Tz::Named(tz) => tz.name().to_string(),
         }
     }
@@ -196,76 +276,71 @@ impl Tz {
             Tz::Offset(s) => *s,
             Tz::Named(tz) => {
                 use chrono::Offset;
-                let secs = ns.div_euclid(1_000_000_000);
-                let nsub = ns.rem_euclid(1_000_000_000) as u32;
-                let utc = DateTime::from_timestamp(secs, nsub).unwrap_or_default();
-                tz.offset_from_utc_datetime(&utc.naive_utc()).fix().local_minus_utc()
+                let utc = DateTime::from_timestamp_nanos(ns).naive_utc();
+                tz.offset_from_utc_datetime(&utc).fix().local_minus_utc()
             }
         }
     }
 
-    /// The DST component of the offset at the instant, in seconds (0 for fixed
-    /// zones / UTC / naive).
+    /// The DST component of the offset at the instant, in seconds — the zone's
+    /// own transition data (tzdata's `SAVE`), so a southern-hemisphere summer, a
+    /// 30-minute DST (Lord Howe) and a negative winter DST (Europe/Dublin) are all
+    /// exact. 0 for fixed zones / UTC / naive.
     pub fn dst_secs_at(&self, ns: i64) -> i32 {
         match self {
-            Tz::Named(_) => {
-                // the DST component = the offset now minus the zone's standard
-                // (January) offset for that year — robust without chrono-tz
-                // internals, and exact for the IANA zones volas serves.
-                let (y, ..) = self.civil_parts(ns);
-                let jan = self
-                    .wall_to_utc_ns(y as i32, 1, 15, 12, 0, 0)
-                    .map(|jns| self.offset_secs_at(jns))
-                    .unwrap_or(0);
-                self.offset_secs_at(ns) - jan.min(self.offset_secs_at(ns))
+            Tz::Named(tz) => {
+                use chrono_tz::OffsetComponents;
+                let utc = DateTime::from_timestamp_nanos(ns).naive_utc();
+                tz.offset_from_utc_datetime(&utc).dst_offset().num_seconds() as i32
             }
             _ => 0,
         }
     }
 }
 
-fn parts(dt: NaiveDateTime) -> (i64, i64, i64, i64, i64, i64) {
-    (
-        dt.year() as i64,
-        dt.month() as i64,
-        dt.day() as i64,
-        dt.hour() as i64,
-        dt.minute() as i64,
-        dt.second() as i64,
-    )
-}
-
-/// Parse a fixed-offset spec (`+HH:MM`, `+HHMM`, `+HH`, `+H`, sign required) to
-/// seconds east of UTC; `None` if it is not an offset.
-fn parse_offset_seconds(s: &str) -> Option<i32> {
-    let sign = match s.as_bytes().first()? {
-        b'+' => 1,
-        b'-' => -1,
+/// The one UTC-offset grammar (zone specs and the suffix of an offset-aware
+/// string): a required sign, then `H`, `HH`, `HHMM`, `HHMMSS`, `HH:MM` or
+/// `HH:MM:SS` in ASCII digits, hours < 24, minutes / seconds < 60. Seconds east of
+/// UTC, or `None` for anything else (no inner signs, no other digits).
+pub(crate) fn parse_offset_seconds(s: &str) -> Option<i32> {
+    let (sign, rest) = match s.as_bytes().first()? {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
         _ => return None,
     };
-    let rest = &s[1..];
-    let (hh, mm) = if let Some((h, m)) = rest.split_once(':') {
-        (h.parse::<i32>().ok()?, m.parse::<i32>().ok()?)
-    } else if rest.len() <= 2 {
-        (rest.parse::<i32>().ok()?, 0)
-    } else if rest.len() == 4 {
-        (
-            rest[..2].parse::<i32>().ok()?,
-            rest[2..].parse::<i32>().ok()?,
-        )
+    let digits = |f: &str, n: usize| -> Option<i32> {
+        (f.len() == n && f.bytes().all(|b| b.is_ascii_digit())).then(|| f.parse().ok())?
+    };
+    let fields: Vec<&str> = if rest.contains(':') {
+        rest.split(':').collect()
+    } else if rest.len() == 1 {
+        vec![rest]
+    } else if rest.is_ascii() && matches!(rest.len(), 2 | 4 | 6) {
+        (0..rest.len()).step_by(2).map(|i| &rest[i..i + 2]).collect()
     } else {
         return None;
     };
-    if hh > 23 || mm > 59 {
-        return None;
+    let mut parts = [0i32; 3];
+    for (i, f) in fields.iter().enumerate() {
+        // the hour may be one digit (`+8`, `+8:30`); every other field is two
+        let v = if i == 0 && f.len() == 1 { digits(f, 1) } else { digits(f, 2) };
+        *parts.get_mut(i)? = v?;
     }
-    Some(sign * (hh * 3600 + mm * 60))
+    let [h, m, sec] = parts;
+    (h < 24 && m < 60 && sec < 60).then_some(sign * (h * 3600 + m * 60 + sec))
 }
 
-fn format_offset(secs: i32) -> String {
+/// Render `secs` east of UTC as `±HH<sep>MM`, plus `<sep>SS` when the offset is not
+/// a whole minute (a historical LMT offset such as Kolkata's `+05:21:10`) — never
+/// truncated, so the text parses back to the same offset.
+pub fn format_offset(secs: i32, sep: &str) -> String {
     let sign = if secs < 0 { '-' } else { '+' };
-    let a = secs.abs();
-    format!("{}{:02}:{:02}", sign, a / 3600, (a % 3600) / 60)
+    let a = secs.unsigned_abs();
+    let mut out = format!("{sign}{:02}{sep}{:02}", a / 3600, a % 3600 / 60);
+    if !a.is_multiple_of(60) {
+        out.push_str(&format!("{sep}{:02}", a % 60));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -324,12 +399,76 @@ mod tests {
         let summer = ny.wall_to_utc_ns(2021, 7, 1, 12, 0, 0).unwrap();
         assert_eq!(ny.offset_secs_at(summer), -4 * 3600);   // EDT
         assert_eq!(ny.dst_secs_at(summer), 3600);           // one DST hour
+        // from the transition data: a southern summer, a 30-minute DST, Dublin's
+        // negative winter DST
+        let jan = |zone: &str| {
+            let tz = Tz::parse(zone).unwrap();
+            tz.dst_secs_at(tz.wall_to_utc_ns(2024, 1, 15, 12, 0, 0).unwrap())
+        };
+        assert_eq!(jan("Australia/Sydney"), 3600);
+        assert_eq!(jan("Australia/Lord_Howe"), 1800);
+        assert_eq!(jan("Europe/Dublin"), -3600);
+    }
+
+    #[test]
+    fn period_start_in_a_gap_is_the_transition_instant() {
+        let at = |s: &str| crate::datetime::parse_ns(s).unwrap();
+        // Monrovia: -00:44:30 -> UTC at 1972-01-07 00:00 local (a 44:30 gap)
+        let monrovia = Tz::parse("Africa/Monrovia").unwrap();
+        assert_eq!(monrovia.wall_to_utc_ns_earliest(1972, 1, 7, 0, 0, 0), Some(at("1972-01-07 00:44:30")));
+        let ny = Tz::parse("America/New_York").unwrap();
+        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 3, 10, 2, 30, 0), Some(at("2024-03-10 07:00:00")));
+        // a fold takes the first occurrence; an invalid date resolves to nothing
+        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 11, 3, 1, 30, 0), Some(at("2024-11-03 05:30:00")));
+        assert_eq!(ny.wall_to_utc_ns_earliest(2024, 2, 30, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn localize_keeps_the_fraction_and_names_dst_anomalies() {
+        let ny = Tz::parse("America/New_York").unwrap();
+        let wall = |s: &str| crate::datetime::parse_ns(s).unwrap();
+        // a naive axis value re-read as a NY wall clock keeps its nanoseconds
+        let ns = ny.localize_from(wall("2021-01-04 09:30:00.123456789"), Tz::Naive).unwrap();
+        assert_eq!(ns, wall("2021-01-04 14:30:00.123456789"));
+        let gap = ny.localize_from(wall("2020-03-08 02:30:00"), Tz::Naive).unwrap_err();
+        assert!(gap.to_string().contains("DST gap"));
+        let fold = ny.localize_from(wall("2020-11-01 01:30:00"), Tz::Naive).unwrap_err();
+        assert!(fold.to_string().contains("DST fold"));
+    }
+
+    #[test]
+    fn replace_civil_checks_every_field() {
+        let utc = Tz::Utc;
+        let t = crate::datetime::parse_ns("2024-01-31 10:00:00.5").unwrap();
+        let none = [None; 6];
+        let mut f = none;
+        f[3] = Some(11);
+        assert_eq!(
+            utc.replace_civil(t, f).unwrap(),
+            crate::datetime::parse_ns("2024-01-31 11:00:00.5").unwrap()
+        );
+        let mut f = none;
+        f[0] = Some(2024 + (1 << 32));
+        assert!(matches!(utc.replace_civil(t, f), Err(VolasError::Value(_))));
+        let mut f = none;
+        f[1] = Some(-1);
+        assert!(matches!(utc.replace_civil(t, f), Err(VolasError::Value(_))));
+        let mut f = none;
+        f[1] = Some(2); // Feb 31
+        assert!(matches!(utc.replace_civil(t, f), Err(VolasError::Value(_))));
+        let mut f = none;
+        f[0] = Some(2262);
+        f[1] = Some(4);
+        f[2] = Some(12);
+        assert!(matches!(utc.replace_civil(t, f), Err(VolasError::Overflow(_))));
     }
 
     #[test]
     fn tz_edge_branches() {
         let ny = Tz::parse("America/New_York").unwrap();
         assert_eq!(ny.fixed_offset_secs(), None); // a named zone has no fixed offset
+        assert_eq!(Tz::Naive.fixed_offset_secs(), Some(0));
+        assert_eq!(Tz::parse("-05:00").unwrap().fixed_offset_secs(), Some(-18_000));
         assert_eq!(Tz::Utc.name(), "UTC");
         // DST fall-back (01:30 on 2020-11-01) is ambiguous -> rejected (F33,
         // symmetric with the gap); the spring-forward gap (02:30 on 2020-03-08)

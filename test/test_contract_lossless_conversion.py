@@ -204,5 +204,7 @@ def test_csv_bool_inference_honors_na(tmp_path):
 
 
 def test_float_epoch_past_int64_raises():
-    with pytest.raises(ValueError, match="epoch"):
+    # an instant outside the datetime64[ns] range is an OverflowError (the one
+    # instant-axis range gate), never a saturated / NaT cell
+    with pytest.raises(OverflowError, match="epoch"):
         _col([1e30]).astype("datetime64[ns]")

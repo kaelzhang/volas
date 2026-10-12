@@ -77,7 +77,10 @@ def test_naive_tz_convert_raises():
 # tz dtype — a documented divergence.
 def test_offset_string_column_is_correct_instant():
     s = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01 09:00:00+08:00"]})["t"])
-    assert s.to_list()[0] == volas.Timestamp("2021-01-01 09:00:00+08:00")  # same instant
+    # same instant (compared by value: a naive and an aware Timestamp are never
+    # `==`, pandas' naive / aware rule)
+    assert s.to_list()[0].value == volas.Timestamp("2021-01-01 09:00:00+08:00").value
+    assert s.to_list()[0].tz is None
     assert "01:00" in str(s.to_list()[0])     # rendered as the UTC wall (no column tz)
 
 

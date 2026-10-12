@@ -6,11 +6,38 @@ use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use volas_core::{
-    Column, DType, Validity,
+    datetime, Column, DType, Validity,
 };
 
 #[allow(unused_imports)]
 use crate::*;
+
+/// The `(unit, count)` of a NumPy datetime64 (`kind == "M"`) / timedelta64
+/// (`kind == "m"`) array or scalar (`np.datetime_data`), or `None` for any other
+/// object — the one place NumPy's time-unit vocabulary is read.
+pub(crate) fn numpy_time_unit(obj: &Bound<'_, PyAny>, kind: &str) -> PyResult<Option<(String, i64)>> {
+    let Ok(dtype) = obj.getattr("dtype") else { return Ok(None) };
+    if dtype.getattr("kind").and_then(|k| k.extract::<String>()).ok().as_deref() != Some(kind) {
+        return Ok(None);
+    }
+    let numpy = obj.py().import("numpy")?;
+    Ok(Some(numpy.call_method1("datetime_data", (dtype,))?.extract()?))
+}
+
+/// A NumPy datetime64 / timedelta64 SCALAR of `kind` as `(unit, count, raw)` —
+/// its raw count in its native unit (`NaT` is `i64::MIN`); `None` for any other
+/// object. The core unit owner then scales `raw` (checked).
+pub(crate) fn numpy_time_value(
+    obj: &Bound<'_, PyAny>,
+    kind: &str,
+) -> Option<PyResult<(String, i64, i64)>> {
+    let read = || -> PyResult<Option<(String, i64, i64)>> {
+        let Some((unit, count)) = numpy_time_unit(obj, kind)? else { return Ok(None) };
+        let raw = obj.call_method1("astype", ("int64",))?.call_method0("item")?.extract::<i64>()?;
+        Ok(Some((unit, count, raw)))
+    };
+    read().transpose()
+}
 
 /// Parse a pandas-style dtype string to a volas [`DType`].
 pub(crate) fn parse_dtype(s: &str) -> PyResult<DType> {
@@ -131,19 +158,15 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
         return Ok(col);
     }
     // A numpy datetime64 array -> a Datetime column (carried as epoch-ns). This is the
-    // pandas-aligned ingestion (`pd.DataFrame` accepts datetime64 arrays) and the no-copy
-    // path `from_pandas` relies on. Normalise any datetime64[unit] to ns, then take its
-    // int64 view (datetime64[ns] is int64 epoch-ns underneath).
-    if v.getattr("dtype")
-        .and_then(|d| d.getattr("kind"))
-        .and_then(|k| k.extract::<String>())
-        .map(|k| k == "M")
-        .unwrap_or(false)
-    {
-        let ns = v.call_method1("astype", ("datetime64[ns]",))?;
-        let view = ns.call_method1("view", ("int64",))?;
+    // pandas-aligned ingestion (`pd.DataFrame` accepts datetime64 arrays) and the path
+    // `from_pandas` relies on. The raw values are read in their NATIVE unit (the int64
+    // view) and scaled by the core unit owner — checked, exact for sub-ns units — never
+    // by NumPy's `astype('datetime64[ns]')`, which wraps out-of-range values silently.
+    if let Some((unit, count)) = numpy_time_unit(v, "M")? {
+        let view = v.call_method1("view", ("int64",))?;
         let a = view.extract::<PyReadonlyArray1<i64>>()?;
-        return Ok(Column::datetime(a.as_slice()?.to_vec())); // int64 ns view == epoch-ns
+        let ns = datetime::datetime64_values_to_ns(a.as_slice()?, &unit, count).map_err(pyerr)?;
+        return Ok(Column::datetime(ns));
     }
     if let Some(col) = exact_array_kind(v)? {
         return Ok(col);

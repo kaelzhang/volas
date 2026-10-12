@@ -9,7 +9,7 @@ use pyo3::sync::GILOnceCell;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use volas_core::{
     datetime, Column, DType, DataFrame, Index,
-    IndexKind, Scalar, Tz, Validity,
+    IndexKind, Scalar, Tz, Validity, VolasError,
 };
 
 #[allow(unused_imports)]
@@ -112,10 +112,9 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
         .call_method1("is_datetime64_any_dtype", (idx.getattr("dtype")?,))?
         .extract::<bool>()?;
     let instants = if datetime_index {
-        // Carry the absolute instants natively as datetime64[ns] (no strftime round-trip).
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "datetime64[ns]")?;
-        idx.call_method("to_numpy", (), Some(&kwargs))?
+        // The absolute (UTC) instants in their native unit (no strftime round-trip);
+        // the column coercion scales them to ns, checked.
+        idx.getattr("values")?
     } else {
         idx.call_method0("to_numpy")?
     };
@@ -152,11 +151,11 @@ fn pandas_series_to_values<'py>(
     s: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let dtype = s.getattr("dtype")?;
-    // datetime (naive or tz-aware) -> native UTC datetime64[ns].
+    // datetime (naive or tz-aware) -> its UTC instants as a NumPy datetime64 array in
+    // the native unit; the column coercion scales them to ns, checked (NumPy's own
+    // `datetime64[ns]` cast would wrap an out-of-range coarse value).
     if types.call_method1("is_datetime64_any_dtype", (&dtype,))?.extract::<bool>()? {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "datetime64[ns]")?;
-        return s.call_method("to_numpy", (), Some(&kwargs));
+        return s.getattr("values");
     }
     // A nullable masked int / boolean / string column -> the typed masked channel, so
     // volas keeps the DECLARED dtype + volas.NA (an Int32 stays int32; an all-NA / empty
@@ -561,59 +560,47 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
         return Ok(ts.ns);
     }
     if let Ok(s) = key.extract::<String>() {
-        return datetime::parse_ns_in_tz(&s, tz)
-            .ok_or_else(|| PyKeyError::new_err(format!("invalid datetime label {s:?}")));
+        // An instant outside the datetime64[ns] range raises OverflowError; text that
+        // is not a datetime (or names a DST gap / fold wall clock) is a label miss.
+        return datetime::parse_ns_in_tz(&s, tz).map_err(|e| match e {
+            VolasError::Overflow(_) => pyerr(e),
+            _ => PyKeyError::new_err(format!("invalid datetime label {s:?}")),
+        });
     }
     // A stdlib `datetime.datetime` / `datetime.date` — and their subclasses,
-    // notably `pd.Timestamp` and `pd.NaT` (F15/F23): round-trip through
-    // `isoformat()`, which the string parser understands for both naive (then
-    // interpreted in `tz`) and offset-aware (absolute) forms. `pd.NaT`
-    // isoformat()s to "NaT", failing the parse -> a clean ValueError
-    // (decision 2), not a label KeyError.
-    if key.is_instance_of::<pyo3::types::PyDate>() || key.is_instance_of::<pyo3::types::PyDateTime>()
-    {
-        let s = key.call_method0("isoformat")?.extract::<String>()?;
-        return datetime::parse_ns_in_tz(&s, tz).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "{s:?} is not a valid timestamp; a missing instant is volas.NA"
-            ))
-        });
+    // notably `pd.Timestamp` and `pd.NaT` (F15/F23): read from its components
+    // (exact to the nanosecond, any second-precision offset) — an aware value at
+    // its own offset, a naive one as a wall clock in `tz`. `pd.NaT` has no
+    // components -> a clean ValueError (decision 2), not a label KeyError.
+    if key.is_instance_of::<pyo3::types::PyDate>() {
+        return crate::scalar::datetime_instant(key, tz);
     }
     if let Ok(i) = key.extract::<i64>() {
         // i64::MIN is the NaT sentinel (D2): a missing instant is volas.NA, not a
         // constructable timestamp. Reject it here — the single chokepoint for
-        // Timestamp(...), TimeFrame.unify(...), and datetime label lookups — so a
-        // raw NaT can never become a bucketable / civil timestamp (which would
-        // render "NaT" yet expose a real 1677 .year, an internal inconsistency).
-        if i == i64::MIN {
+        // Timestamp(...), datetime cell writes and datetime label lookups — so a
+        // raw NaT can never become a civil timestamp (which would render "NaT"
+        // yet expose a real 1677 .year, an internal inconsistency).
+        if i == datetime::NAT {
             return Err(PyValueError::new_err(
                 "NaT (i64::MIN) is not a valid timestamp; a missing instant is volas.NA",
             ));
         }
         return Ok(i);
     }
-    // A numpy datetime64 scalar (any unit): take its epoch-ns. This lets a Timestamp
-    // cell compare against `np.datetime64(...)` and lets `df.loc[np.datetime64(...)]`
-    // resolve — the same instant, just spelled in numpy's vocabulary. Detected by
-    // dtype.kind == "M" so non-datetime numpy scalars still fall through to the error.
-    if key
-        .getattr("dtype")
-        .and_then(|d| d.getattr("kind"))
-        .and_then(|k| k.extract::<String>())
-        .map(|k| k == "M")
-        .unwrap_or(false)
-    {
-        let ns = key
-            .call_method1("astype", ("datetime64[ns]",))?
-            .call_method1("astype", ("int64",))?
-            .call_method0("item")?
-            .extract::<i64>()?;
-        if ns == i64::MIN {
+    // A numpy datetime64 scalar (any unit): its native-unit value scaled by the core
+    // unit owner (checked; NumPy's own ns cast would wrap). This lets a Timestamp cell
+    // compare against `np.datetime64(...)` and lets `df.loc[np.datetime64(...)]`
+    // resolve — the same instant, just spelled in numpy's vocabulary. Non-datetime
+    // numpy scalars fall through to the error.
+    if let Some(value) = crate::coerce::numpy_time_value(key, "M") {
+        let (unit, count, raw) = value?;
+        if raw == datetime::NAT {
             return Err(PyValueError::new_err(
                 "NaT (i64::MIN) is not a valid timestamp; a missing instant is volas.NA",
             ));
         }
-        return Ok(ns);
+        return datetime::datetime64_to_ns(raw, &unit, count).map_err(pyerr);
     }
     Err(PyKeyError::new_err(
         "label must be a datetime string, integer, or numpy datetime64",
@@ -671,39 +658,4 @@ pub(crate) fn norm_idx(i: isize, len: usize) -> PyResult<usize> {
     } else {
         Ok(i as usize)
     }
-}
-
-/// Parse column `dc` to a UTC `Datetime` column, move it into the index, and tag
-/// the index with `tz` (PD-20 ingestion). A **naive** string column is
-/// interpreted in `tz`; with `date_unit` the column is read as an epoch integer
-/// (`"s"`/`"ms"`/`"us"`/`"ns"`, absolute) and `tz` only sets the display zone.
-pub(crate) fn build_datetime_index(
-    mut df: DataFrame,
-    dc: &str,
-    tz: Option<&str>,
-    date_unit: Option<&str>,
-) -> PyResult<DataFrame> {
-    let tzv = match tz {
-        Some(s) => Tz::parse(s).map_err(pyerr)?,
-        None => Tz::Naive,
-    };
-    let parsed = match date_unit {
-        Some(unit) => df
-            .column(dc)
-            .map_err(pyerr)?
-            .epoch_to_datetime(unit)
-            .map_err(pyerr)?,
-        None => df
-            .column(dc)
-            .map_err(pyerr)?
-            .to_datetime_tz(tzv)
-            .map_err(pyerr)?,
-    };
-    df.set_column(dc, parsed).map_err(pyerr)?;
-    let mut df = df.set_index(dc).map_err(pyerr)?;
-    // The instants are already correct UTC; tag the display / matching tz.
-    if !tzv.is_utc() {
-        df = df.tz_convert(tzv).map_err(pyerr)?;
-    }
-    Ok(df)
 }

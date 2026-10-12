@@ -24,13 +24,10 @@ impl Column {
                     // parses to NaT, matching read_csv(parse_dates) and pandas
                     // `to_datetime("")`. A non-empty unparseable string still errors.
                     if !val.is_valid(i) || s.trim().is_empty() {
-                        out.push(i64::MIN);
+                        out.push(datetime::NAT);
                         continue;
                     }
-                    let ns = datetime::parse_ns_in_tz(s, tz).ok_or_else(|| {
-                        VolasError::Value(format!("could not parse datetime {s:?}"))
-                    })?;
-                    out.push(ns);
+                    out.push(datetime::parse_ns_in_tz(s, tz)?);
                 }
                 Ok(Column::datetime(out))
             }
@@ -48,8 +45,9 @@ impl Column {
     /// timestamps.
     pub fn epoch_to_datetime(&self, unit: &str) -> Result<Column> {
         // a float epoch past the int64 range is unconvertible, never saturated
-        self.epoch_to_datetime_with(unit, |x| {
-            datetime::epoch_to_ns(i64::try_from_f64(x.trunc())?, unit)
+        self.epoch_to_datetime_with(unit, |x| match i64::try_from_f64(x.trunc()) {
+            Some(whole) => datetime::epoch_to_ns(whole, unit),
+            None => datetime::epoch_to_ns_f64(x.trunc(), unit),
         })
     }
 
@@ -65,40 +63,24 @@ impl Column {
     fn epoch_to_datetime_with(
         &self,
         unit: &str,
-        f64_to_ns: impl Fn(f64) -> Option<i64>,
+        f64_to_ns: impl Fn(f64) -> Result<i64>,
     ) -> Result<Column> {
         match self {
-            // A missing input maps to `NaT` (i64::MIN), not 1970 / an error: read
-            // the i64 validity bit, and treat a float `NaN` as missing.
+            // A missing input maps to `NaT`, not 1970 / an error: read the i64
+            // validity bit, and treat a float `NaN` as missing. Every present value
+            // passes the instant gate (an unknown unit or an out-of-range instant
+            // raises — never saturates or lands on `NaT`).
             Column::I64(v, val) => v
                 .iter()
                 .enumerate()
                 .map(|(i, &x)| {
-                    if !val.is_valid(i) {
-                        Ok(i64::MIN)
-                    } else {
-                        datetime::epoch_to_ns(x, unit).ok_or_else(|| {
-                            VolasError::Value(format!(
-                            "could not convert epoch with unit {unit:?}: unknown unit or value out of nanosecond range"
-                        ))
-                        })
-                    }
+                    if val.is_valid(i) { datetime::epoch_to_ns(x, unit) } else { Ok(datetime::NAT) }
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::datetime),
             Column::F64(v) => v
                 .iter()
-                .map(|&x| {
-                    if x.is_nan() {
-                        Ok(i64::MIN)
-                    } else {
-                        f64_to_ns(x).ok_or_else(|| {
-                            VolasError::Value(format!(
-                            "could not convert epoch with unit {unit:?}: unknown unit or value out of nanosecond range"
-                        ))
-                        })
-                    }
-                })
+                .map(|&x| if x.is_nan() { Ok(datetime::NAT) } else { f64_to_ns(x) })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::datetime),
             other => Err(VolasError::DType(format!(

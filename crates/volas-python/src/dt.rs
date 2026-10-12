@@ -16,10 +16,11 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
+use volas_core::datetime::{Civil, Rounding};
 use volas_core::{datetime, Column, DataFrame, Series, Tz, Validity};
 
 use crate::frame::PyDataFrame;
-use crate::scalar::PyTimestamp;
+use crate::scalar::{day_name, month_name, PyTimestamp};
 use crate::series::PySeries;
 use crate::pyerr;
 
@@ -48,47 +49,56 @@ impl PyDt {
         }
     }
 
-    /// An int64 component column; a NaT cell stays missing (`# C2`).
-    fn map_i64(&self, f: impl Fn(&PyTimestamp) -> i64) -> PySeries {
+    /// A column of one value per element, computed from the element's wall-clock
+    /// [`Civil`] view — decomposed ONCE per element, however many fields the value
+    /// reads; a NaT cell stays missing (`# C2`).
+    fn map_civil<T: Default>(&self, f: impl Fn(&Civil) -> T) -> (Vec<T>, Validity) {
+        self.map_ns(|ns| f(&Tz::Naive.civil(ns))) // a value column is tz-less (D3)
+    }
+
+    /// As [`Self::map_civil`] for a value read from the raw instant itself.
+    fn map_ns<T: Default>(&self, f: impl Fn(i64) -> T) -> (Vec<T>, Validity) {
         let v = self.ns();
-        let validity = Validity::from_valid_iter(v.len(), v.iter().map(|&ns| ns != i64::MIN));
-        let out = v
-            .iter()
-            .map(|&ns| if ns == i64::MIN { 0 } else { f(&Self::ts(ns)) })
-            .collect();
+        let validity = Validity::from_valid_iter(v.len(), v.iter().map(|&ns| ns != datetime::NAT));
+        let out = v.iter().map(|&ns| if ns == datetime::NAT { T::default() } else { f(ns) }).collect();
+        (out, validity)
+    }
+
+    /// An int64 calendar-component column.
+    fn map_i64(&self, f: impl Fn(&Civil) -> i64) -> PySeries {
+        let (out, validity) = self.map_civil(f);
         self.wrap(Column::i64_with(out, validity))
     }
 
-    /// A bool predicate column; a NaT cell stays missing (`# C2`).
-    fn map_bool(&self, f: impl Fn(&PyTimestamp) -> bool) -> PySeries {
-        let v = self.ns();
-        let validity = Validity::from_valid_iter(v.len(), v.iter().map(|&ns| ns != i64::MIN));
-        let out = v
-            .iter()
-            .map(|&ns| ns != i64::MIN && f(&Self::ts(ns)))
-            .collect();
+    /// A bool calendar-predicate column.
+    fn map_bool(&self, f: impl Fn(&Civil) -> bool) -> PySeries {
+        let (out, validity) = self.map_civil(f);
         self.wrap(Column::bool_with(out, validity))
     }
 
-    /// A str column; a NaT cell stays missing (`# C2`).
-    fn map_str(&self, f: impl Fn(&PyTimestamp) -> String) -> PySeries {
-        let v = self.ns();
-        let validity = Validity::from_valid_iter(v.len(), v.iter().map(|&ns| ns != i64::MIN));
-        let out = v
-            .iter()
-            .map(|&ns| if ns == i64::MIN { String::new() } else { f(&Self::ts(ns)) })
-            .collect();
+    /// A str calendar-name column.
+    fn map_str(&self, f: impl Fn(&Civil) -> &'static str) -> PySeries {
+        let (out, validity) = self.map_civil(|c| f(c).to_string());
         self.wrap(Column::str_with(out, validity))
     }
 
-    /// A datetime column; a NaT cell stays NaT.
-    fn map_ns(&self, f: impl Fn(&PyTimestamp) -> i64) -> PySeries {
+    /// An int64 sub-second component column, read from the instant itself.
+    fn sub_second(&self, f: impl Fn(i64) -> i64) -> PySeries {
+        let (out, validity) = self.map_ns(f);
+        self.wrap(Column::i64_with(out, validity))
+    }
+
+    /// A datetime column rounded on the `unit_ns` grid (the scalar kernel); a NaT
+    /// cell stays NaT, an element whose result leaves the instant range raises.
+    fn rounded(&self, unit_ns: i64, mode: Rounding) -> PyResult<PySeries> {
         let out = self
             .ns()
             .iter()
-            .map(|&ns| if ns == i64::MIN { i64::MIN } else { f(&Self::ts(ns)) })
-            .collect();
-        self.wrap(Column::datetime(out))
+            .map(|&ns| {
+                if ns == datetime::NAT { Ok(ns) } else { Self::ts(ns).rounded_ns(unit_ns, mode) }
+            })
+            .collect::<PyResult<Vec<i64>>>()?;
+        Ok(self.wrap(Column::datetime(out)))
     }
 }
 
@@ -97,129 +107,129 @@ impl PyDt {
     /// Calendar year per element (pandas ``.dt.year``); int64, NaT -> NA.
     #[getter]
     fn year(&self) -> PySeries {
-        self.map_i64(PyTimestamp::year)
+        self.map_i64(Civil::year)
     }
     /// Calendar month, 1..=12 (pandas ``.dt.month``).
     #[getter]
     fn month(&self) -> PySeries {
-        self.map_i64(PyTimestamp::month)
+        self.map_i64(Civil::month)
     }
     /// Day of month, 1..=31 (pandas ``.dt.day``).
     #[getter]
     fn day(&self) -> PySeries {
-        self.map_i64(PyTimestamp::day)
+        self.map_i64(Civil::day)
     }
     /// Hour, 0..=23 (pandas ``.dt.hour``).
     #[getter]
     fn hour(&self) -> PySeries {
-        self.map_i64(PyTimestamp::hour)
+        self.map_i64(Civil::hour)
     }
     /// Minute, 0..=59 (pandas ``.dt.minute``).
     #[getter]
     fn minute(&self) -> PySeries {
-        self.map_i64(PyTimestamp::minute)
+        self.map_i64(Civil::minute)
     }
     /// Second, 0..=59 (pandas ``.dt.second``).
     #[getter]
     fn second(&self) -> PySeries {
-        self.map_i64(PyTimestamp::second)
+        self.map_i64(Civil::second)
     }
     /// Microsecond component, 0..=999_999 (pandas ``.dt.microsecond``).
     #[getter]
     fn microsecond(&self) -> PySeries {
-        self.map_i64(PyTimestamp::microsecond)
+        self.sub_second(|ns| ns.rem_euclid(1_000_000_000) / 1_000)
     }
     /// Nanosecond component, 0..=999 (pandas ``.dt.nanosecond``).
     #[getter]
     fn nanosecond(&self) -> PySeries {
-        self.map_i64(PyTimestamp::nanosecond)
+        self.sub_second(|ns| ns.rem_euclid(1_000))
     }
     /// Day of week, Monday=0 .. Sunday=6 (pandas ``.dt.dayofweek``).
     #[getter]
     fn dayofweek(&self) -> PySeries {
-        self.map_i64(PyTimestamp::weekday)
+        self.map_i64(Civil::weekday)
     }
     /// Alias of ``dayofweek`` (pandas keeps both spellings).
     #[getter]
     fn day_of_week(&self) -> PySeries {
-        self.map_i64(PyTimestamp::weekday)
+        self.map_i64(Civil::weekday)
     }
     /// Alias of ``dayofweek`` (a property here, like pandas ``.dt.weekday``).
     #[getter]
     fn weekday(&self) -> PySeries {
-        self.map_i64(PyTimestamp::weekday)
+        self.map_i64(Civil::weekday)
     }
     /// Ordinal day of the year, 1..=366 (pandas ``.dt.dayofyear``).
     #[getter]
     fn dayofyear(&self) -> PySeries {
-        self.map_i64(PyTimestamp::dayofyear)
+        self.map_i64(Civil::day_of_year)
     }
     /// Alias of ``dayofyear``.
     #[getter]
     fn day_of_year(&self) -> PySeries {
-        self.map_i64(PyTimestamp::dayofyear)
+        self.map_i64(Civil::day_of_year)
     }
     /// Quarter of the year, 1..=4 (pandas ``.dt.quarter``).
     #[getter]
     fn quarter(&self) -> PySeries {
-        self.map_i64(PyTimestamp::quarter)
+        self.map_i64(Civil::quarter)
     }
     /// Days in the element's month, 28..=31 (pandas ``.dt.days_in_month``).
     #[getter]
     fn days_in_month(&self) -> PySeries {
-        self.map_i64(PyTimestamp::days_in_month)
+        self.map_i64(Civil::days_in_month)
     }
     /// Alias of ``days_in_month``.
     #[getter]
     fn daysinmonth(&self) -> PySeries {
-        self.map_i64(PyTimestamp::days_in_month)
+        self.map_i64(Civil::days_in_month)
     }
 
     /// Whether the element is the first day of its month (pandas
     /// ``.dt.is_month_start``); bool, NaT -> NA.
     #[getter]
     fn is_month_start(&self) -> PySeries {
-        self.map_bool(PyTimestamp::is_month_start)
+        self.map_bool(Civil::is_month_start)
     }
     /// Whether the element is the last day of its month.
     #[getter]
     fn is_month_end(&self) -> PySeries {
-        self.map_bool(PyTimestamp::is_month_end)
+        self.map_bool(Civil::is_month_end)
     }
     /// Whether the element is the first day of its quarter.
     #[getter]
     fn is_quarter_start(&self) -> PySeries {
-        self.map_bool(PyTimestamp::is_quarter_start)
+        self.map_bool(Civil::is_quarter_start)
     }
     /// Whether the element is the last day of its quarter.
     #[getter]
     fn is_quarter_end(&self) -> PySeries {
-        self.map_bool(PyTimestamp::is_quarter_end)
+        self.map_bool(Civil::is_quarter_end)
     }
     /// Whether the element is January 1st.
     #[getter]
     fn is_year_start(&self) -> PySeries {
-        self.map_bool(PyTimestamp::is_year_start)
+        self.map_bool(Civil::is_year_start)
     }
     /// Whether the element is December 31st.
     #[getter]
     fn is_year_end(&self) -> PySeries {
-        self.map_bool(PyTimestamp::is_year_end)
+        self.map_bool(Civil::is_year_end)
     }
     /// Whether the element's year is a leap year.
     #[getter]
     fn is_leap_year(&self) -> PySeries {
-        self.map_bool(PyTimestamp::is_leap_year)
+        self.map_bool(Civil::is_leap_year)
     }
 
     /// The English day name per element, e.g. ``"Monday"`` (pandas
     /// ``.dt.day_name()``); str, NaT -> NA.
     fn day_name(&self) -> PySeries {
-        self.map_str(|t| t.day_name().to_string())
+        self.map_str(day_name)
     }
     /// The English month name per element, e.g. ``"June"``.
     fn month_name(&self) -> PySeries {
-        self.map_str(|t| t.month_name().to_string())
+        self.map_str(month_name)
     }
     /// Format each element with a ``strftime`` pattern (pandas
     /// ``.dt.strftime``); str, NaT -> NA.
@@ -232,49 +242,29 @@ impl PyDt {
                 out.push(String::new());
                 continue;
             }
-            out.push(datetime::strftime(ns, Tz::Naive, fmt).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "invalid strftime format {fmt:?}"
-                ))
-            })?);
+            out.push(datetime::strftime(ns, Tz::Naive, fmt).map_err(pyerr)?);
         }
         Ok(self.wrap(Column::str_with(out, validity)))
     }
 
     /// Midnight of each element's day (pandas ``.dt.normalize()``); datetime,
     /// NaT stays NaT.
-    fn normalize(&self) -> PySeries {
-        self.map_ns(|t| t.wall_floor(86_400_000_000_000))
+    fn normalize(&self) -> PyResult<PySeries> {
+        self.rounded(86_400_000_000_000, Rounding::Floor)
     }
     /// Floor each element to a frequency boundary (``'D' 'h' '15min' …``,
     /// pandas ``.dt.floor``).
     fn floor(&self, freq: &str) -> PyResult<PySeries> {
-        let unit = crate::scalar::parse_freq_ns(freq)?;
-        Ok(self.map_ns(|t| t.wall_floor(unit)))
+        self.rounded(crate::scalar::parse_freq_ns(freq)?, Rounding::Floor)
     }
     /// Ceil each element to a frequency boundary (see ``floor``).
     fn ceil(&self, freq: &str) -> PyResult<PySeries> {
-        let unit = crate::scalar::parse_freq_ns(freq)?;
-        Ok(self.map_ns(|t| {
-            let f = t.wall_floor(unit);
-            if f == t.ns { f } else { f + unit }
-        }))
+        self.rounded(crate::scalar::parse_freq_ns(freq)?, Rounding::Ceil)
     }
     /// Round each element to the nearest frequency boundary, ties to even
     /// (pandas ``.dt.round``).
     fn round(&self, freq: &str) -> PyResult<PySeries> {
-        let unit = crate::scalar::parse_freq_ns(freq)?;
-        Ok(self.map_ns(|t| {
-            let f = t.wall_floor(unit);
-            let rem = t.ns - f;
-            // round half to even: past the midpoint, or exactly on it with an odd
-            // floor multiple (so rounding up lands on the even one).
-            if rem * 2 > unit || (rem * 2 == unit && (f / unit) % 2 != 0) {
-                f + unit
-            } else {
-                f
-            }
-        }))
+        self.rounded(crate::scalar::parse_freq_ns(freq)?, Rounding::HalfEven)
     }
 
     /// The ISO calendar as a DataFrame with ``year`` / ``week`` / ``day``
@@ -287,10 +277,10 @@ impl PyDt {
         let mut weeks = Vec::with_capacity(v.len());
         let mut days = Vec::with_capacity(v.len());
         for &ns in v {
-            let (y, w, d) = if ns == i64::MIN {
+            let (y, w, d) = if ns == datetime::NAT {
                 (0, 0, 0)
             } else {
-                Self::ts(ns).iso_calendar()
+                Tz::Naive.civil(ns).iso_calendar()
             };
             years.push(y);
             weeks.push(w);
