@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::bind::bind_node;
-use super::types::{Ast, Command, Cst, Node, Number, Op, UnaryOp};
+use super::types::{Ast, Command, Cst, LiteralError, Node, Number, Op, UnaryOp};
 use volas_core::fxhash::FxHashMap;
 use volas_core::{Result, VolasError};
 
@@ -426,11 +426,14 @@ impl<'a> Parser<'a> {
         // to NaN, but too many digits round to ±inf, which has no literal form: it
         // would render as `inf`, a name, and rebind on re-parse.
         match Number::parse(&text) {
-            Some(v) => self.node(Node::Scalar(v), 1),
-            None if text.parse::<f64>().is_ok() => {
+            Ok(v) => self.node(Node::Scalar(v), 1),
+            Err(LiteralError::OutOfRange) => {
                 Err(self.err("number literal is out of range of a 64-bit float"))
             }
-            None => Err(self.err(format!("invalid number '{text}'"))),
+            Err(LiteralError::Inexact) => Err(self.err(format!(
+                "integer literal '{text}' is past int64 and no 64-bit float holds it exactly"
+            ))),
+            Err(LiteralError::Invalid) => Err(self.err(format!("invalid number '{text}'"))),
         }
     }
 
@@ -687,9 +690,28 @@ mod tests {
                 other => panic!("{d}: {other:?}"), // LCOV_EXCL_LINE
             }
         }
-        // The largest finite literal is still a number.
-        let max = format!("{}", f64::MAX);
+        // The largest finite literal, written exactly, is still a number.
+        let max = format!("{:.0}", f64::MAX);
         assert_eq!(parse_cst(&max).unwrap(), Node::Scalar(Number::Float(f64::MAX)));
+    }
+
+    #[test]
+    fn an_integral_literal_is_read_exactly_or_rejected() {
+        let int = |t: &str| parse_cst(t).unwrap();
+        assert_eq!(int("9007199254740993.0"), Node::Scalar(Number::Int(9_007_199_254_740_993)));
+        assert_eq!(int("-12.000"), Node::Scalar(Number::Int(-12)));
+        assert_eq!(int("100000000000000000000.0"), Node::Scalar(Number::Float(1e20))); // exact
+        assert_eq!(int("007.0"), Node::Scalar(Number::Int(7)));
+        for t in ["18446744073709551617", "18446744073709551617.0", "-36893488147419103233.00"] {
+            match parse_cst(t) {
+                Err(VolasError::Parse(m)) => assert!(m.contains("holds it exactly"), "{m}"),
+                other => panic!("{t}: {other:?}"), // LCOV_EXCL_LINE
+            }
+        }
+        // a non-integral literal is a float64 as written (canonical: a float that
+        // rounds to a whole number is that integer)
+        assert_eq!(int("2.5"), Node::Scalar(Number::Float(2.5)));
+        assert_eq!(int("0.99999999999999999999"), Node::Scalar(Number::Int(1)));
     }
 
     /// A ~40 KB hostile directive must be a syntax error, never a stack overflow in

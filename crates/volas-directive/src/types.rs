@@ -255,16 +255,34 @@ pub enum Number {
 }
 
 impl Number {
-    /// The literal written as `text` (an optional `-`, digits, an optional `.`):
-    /// an integer token is read exactly — never through a float64 — and any other
-    /// is a float64 in canonical form. `None` when `text` is no number or rounds
-    /// to `±inf` (which has no literal form).
-    pub(crate) fn parse(text: &str) -> Option<Number> {
-        if let Ok(i) = text.parse::<i64>() {
-            return Some(Number::Int(i));
+    /// The literal written as `text` (an optional `-`, digits, an optional `.`). An
+    /// integral value (`5`, `5.0`, `9007199254740993.000`) is read exactly, never
+    /// through a float64: inside int64 it is an `Int`; past it, a float64 that holds
+    /// it exactly, else [`LiteralError::Inexact`] — a written integer is never
+    /// rounded silently. Any other value is a float64 in canonical form.
+    pub(crate) fn parse(text: &str) -> Result<Number, LiteralError> {
+        let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+        let integral = frac.bytes().all(|b| b == b'0');
+        if integral {
+            if let Ok(i) = whole.parse::<i64>() {
+                return Ok(Number::Int(i));
+            }
         }
-        let v = text.parse::<f64>().ok().filter(|v| v.is_finite())?;
-        Some(match <i64 as volas_core::numeric::Numeric>::try_from_f64(v) {
+        let v = text.parse::<f64>().map_err(|_| LiteralError::Invalid)?;
+        if !v.is_finite() {
+            return Err(LiteralError::OutOfRange);
+        }
+        if integral {
+            // past int64: only a float64 that is exactly the written integer
+            let (sign, digits) = whole.strip_prefix('-').map_or(("", whole), |d| ("-", d));
+            let digits = digits.trim_start_matches('0');
+            return if format!("{v:.0}") == format!("{sign}{digits}") {
+                Ok(Number::Float(v))
+            } else {
+                Err(LiteralError::Inexact)
+            };
+        }
+        Ok(match <i64 as volas_core::numeric::Numeric>::try_from_f64(v) {
             Some(i) => Number::Int(i),
             None => Number::Float(v),
         })
@@ -279,11 +297,27 @@ impl Number {
     }
 }
 
-/// The canonical source token of a number: its shortest decimal form that reads back
-/// as the same `f64` — a whole number without a decimal point (`2`), whatever its
-/// magnitude (`100000000000000000000`, never a saturated integer cast).
+/// Why a number token is not a literal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiteralError {
+    /// Not a number at all (e.g. `1.2.3`).
+    Invalid,
+    /// Rounds to `±inf`, which has no literal form.
+    OutOfRange,
+    /// An integral value past int64 that no float64 holds exactly.
+    Inexact,
+}
+
+/// The canonical source token of a number that reads back as the same `f64`: a
+/// whole number is its exact integer digits without a decimal point (`2`,
+/// `100000000000000000000`, never a saturated integer cast nor a shortened form the
+/// exact integer reading would reject), any other value its shortest decimal form.
 pub(crate) fn number_token(v: f64) -> String {
-    format!("{v}")
+    if v.fract() == 0.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v}")
+    }
 }
 
 #[cfg(test)]

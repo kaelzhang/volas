@@ -86,7 +86,10 @@ unknown row means first: `df[df['close > ma:20'].fillna(False)]`.
 
 **Numbers stay exact.** An integer literal is an exact int64
 (`volume > 9007199254740993` compares against that integer, not its float64
-neighbour), and a comparison orders integers exactly — `2**53 + 1 > 2**53`. The
+neighbour) — written with zero decimals (`9007199254740993.0`) too — and a
+comparison orders integers exactly — `2**53 + 1 > 2**53`. A whole-number literal
+past int64 that no float64 holds exactly is a `DirectiveSyntaxError`, never a
+rounded value. The
 arithmetic operators, unary `-` and every indicator compute in float64, so an
 int64 operand past `±2**53` (whose float64 image is not its value) raises
 `OverflowError` instead of computing from a rounded input.
