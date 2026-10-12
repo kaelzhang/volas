@@ -81,6 +81,8 @@ class DirectiveValueError(DirectiveError):
 
 @final
 class Timestamp:
+    # Ranks above NumPy so `ndarray <op> Timestamp` defers to Timestamp's comparison.
+    __array_priority__: float
     def __new__(cls, value: Any, tz: Any | None = ...) -> Timestamp: ...
     @property
     def value(self) -> int: ...
