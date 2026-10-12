@@ -85,7 +85,7 @@ fn token(arg: &Arg, period: usize, keep_default: bool) -> String {
         }
         ArgBound::OneOfI64(allowed) => allowed[allowed.len() - 1].to_string(),
         ArgBound::I64Min(min) => (period as i64).max(min).to_string(),
-        ArgBound::AnyStr => "1d".to_string(),
+        ArgBound::TimeFrame => "15m".to_string(),
         _ => match arg.default {
             ArgDefault::Float(f) => format!("{f:?}"),
             _ => "1.0".to_string(),

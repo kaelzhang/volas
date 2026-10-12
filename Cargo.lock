@@ -881,6 +881,7 @@ version = "3.0.4"
 dependencies = [
  "volas-compute",
  "volas-core",
+ "volas-time",
 ]
 
 [[package]]

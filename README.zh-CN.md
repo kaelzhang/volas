@@ -1071,8 +1071,7 @@ API 概览见[实时累积](#实时累积--一个-tf-aware-dataframe)。
 
 ## TimeFrame
 
-`TimeFrame` 表示一个 bar 间隔。凡是 volas 需要重采样的地方都接受它：`df.cumulate`、
-`DataFrame` 的 `time_frame` 参数，以及 `hv` 指标。它既可以写成 `TimeFrame` 常量，也可以写成等价的**字符串标签**。没有 `TimeFrame(...)` 构造函数；请使用下面的常量或标签字符串。
+`TimeFrame` 表示一个 bar 间隔。凡是 volas 需要重采样的地方都接受它：`df.cumulate` 和 `DataFrame` 的 `time_frame` 参数。它既可以写成 `TimeFrame` 常量，也可以写成等价的**字符串标签**。没有 `TimeFrame(...)` 构造函数；请使用下面的常量或标签字符串。[`hv`](INDICATORS.md#user-content-indicator-hv) 指标在 directive 中使用标签（例如 `hv:10,15m,252,390`），并按时间框的单位年化：日内 bar 为 `trading_days × session_minutes / bar 分钟数`，`1d` 为 `trading_days`，`1w` 为 52，`1M` 为 12；`trading_days` 默认 252，`session_minutes` 默认 1440（24 小时市场），美股填 390，A 股填 240。
 
 ```py
 TimeFrame.m5            # 5 分钟 frame

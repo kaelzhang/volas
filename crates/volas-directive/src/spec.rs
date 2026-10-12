@@ -6,6 +6,8 @@
 
 use std::borrow::Cow;
 
+use volas_time::TimeFrame;
+
 use crate::types::ArgValue;
 
 /// A positional-argument default. `Required` means the argument has no default
@@ -20,8 +22,8 @@ pub enum ArgDefault {
     Float(f64),
     /// i64 default (e.g. trading days).
     I64(i64),
-    /// String default (e.g. a time-frame for `hv`).
-    Str(&'static str),
+    /// Time-frame default (`hv`'s bar time frame).
+    TimeFrame(TimeFrame),
 }
 
 impl ArgDefault {
@@ -33,7 +35,7 @@ impl ArgDefault {
             ArgDefault::Int(n) => Some(ArgValue::Usize(*n)),
             ArgDefault::Float(f) => Some(ArgValue::F64(*f)),
             ArgDefault::I64(n) => Some(ArgValue::I64(*n)),
-            ArgDefault::Str(s) => Some(ArgValue::Str((*s).to_string())),
+            ArgDefault::TimeFrame(tf) => Some(ArgValue::TimeFrame(*tf)),
         }
     }
 }
@@ -76,9 +78,9 @@ pub enum ArgBound {
     /// Finite float within `[lo, hi]` (T3 vfactor 0..=1, KDJ seed 0..=100,
     /// MAMA limits 0.01..=0.99 — all TA-Lib / definitional domains).
     FloatRange(f64, f64),
-    /// A free string argument, validated downstream (e.g. `hv`'s time-frame
-    /// token, parsed by `tf_to_minutes`).
-    AnyStr,
+    /// A bar time frame: one of the [`TimeFrame`] labels (`1m`, `15m`, `1h`, `1d`,
+    /// `1w`, `1M`, …), parsed by the time-frame owner [`TimeFrame::from_label`].
+    TimeFrame,
 }
 
 impl ArgBound {
@@ -127,7 +129,9 @@ impl ArgBound {
                 Ok(v) if v.is_finite() && v >= *lo && v <= *hi => Ok(ArgValue::F64(v)),
                 _ => Err(format!("must be a number in [{lo}, {hi}]")),
             },
-            ArgBound::AnyStr => Ok(ArgValue::Str(s.to_string())),
+            ArgBound::TimeFrame => TimeFrame::from_label(s)
+                .map(ArgValue::TimeFrame)
+                .map_err(|_| "must be a time-frame label such as 1m / 15m / 1h / 1d / 1w / 1M".to_string()),
         }
     }
 }
@@ -211,9 +215,14 @@ const fn one_of(x: i64, allowed: &'static [i64]) -> Arg {
     Arg { default: ArgDefault::I64(x), bound: ArgBound::OneOfI64(allowed) }
 }
 
-/// Free string argument (validated downstream).
-const fn tf_str(s: &'static str) -> Arg {
-    Arg { default: ArgDefault::Str(s), bound: ArgBound::AnyStr }
+/// Bar time-frame argument.
+const fn time_frame(tf: TimeFrame) -> Arg {
+    Arg { default: ArgDefault::TimeFrame(tf), bound: ArgBound::TimeFrame }
+}
+
+/// Minutes of regular trading per trading day: 1..=1440 (a day has 1440 minutes).
+const fn session_minutes(n: usize) -> Arg {
+    Arg { default: ArgDefault::Int(n), bound: ArgBound::IntRange(1, 1440) }
 }
 
 /// The metadata for one command (after sub-command canonicalization).
@@ -411,9 +420,13 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("donchian", None) => (const { &[p_req()] }, &["high", "low"]),
         ("donchian", Some("upper")) => (const { &[p_req()] }, &["high"]),
         ("donchian", Some("lower")) => (const { &[p_req()] }, &["low"]),
-        // hv: window (stddev of log returns — needs >= 2), bar time-frame,
-        // annualization trading-days (>= 1: 0/negative puts 0/NaN under sqrt).
-        ("hv", None) => (const { &[p2_req(), tf_str("1d"), i64min(252, 1)] }, &["close"]),
+        // hv: window (stddev of log returns — needs >= 2), bar time frame, trading days
+        // per year (>= 1: 0/negative puts 0/NaN under sqrt), and minutes of trading per
+        // day (1440: a 24 h market). The annualization is `exec::hv_annualization`.
+        ("hv", None) => (
+            const { &[p2_req(), time_frame(TimeFrame::Day1), i64min(252, 1), session_minutes(1440)] },
+            &["close"],
+        ),
         // increase: run length (>= 1), direction (+1 rising / -1 falling).
         ("increase", None) => (const { &[p(1), one_of(1, &[-1, 1])] }, &["close"]),
         // Group A non-TA-Lib indicators (gap report 2026-06-07).
@@ -723,7 +736,8 @@ mod tests {
         assert_eq!(frange(0.7, 0.0, 1.0), arg(D::Float(0.7), B::FloatRange(0.0, 1.0)));
         assert_eq!(i64min(252, 1), arg(D::I64(252), B::I64Min(1)));
         assert_eq!(one_of(1, &[-1, 1]), arg(D::I64(1), B::OneOfI64(&[-1, 1])));
-        assert_eq!(tf_str("1d"), arg(D::Str("1d"), B::AnyStr));
+        assert_eq!(time_frame(TimeFrame::Day1), arg(D::TimeFrame(TimeFrame::Day1), B::TimeFrame));
+        assert_eq!(session_minutes(1440), arg(D::Int(1440), B::IntRange(1, 1440)));
     }
 
     #[test]
@@ -733,8 +747,8 @@ mod tests {
         assert_eq!(ArgDefault::Float(2.5).value(), Some(ArgValue::F64(2.5)));
         assert_eq!(ArgDefault::I64(-1).value(), Some(ArgValue::I64(-1)));
         assert_eq!(
-            ArgDefault::Str("close").value(),
-            Some(ArgValue::Str("close".into()))
+            ArgDefault::TimeFrame(TimeFrame::Min15).value(),
+            Some(ArgValue::TimeFrame(TimeFrame::Min15))
         );
     }
 
@@ -772,7 +786,12 @@ mod tests {
         assert_eq!(ArgBound::FloatRange(0.0, 1.0).bind("0.7"), Ok(ArgValue::F64(0.7)));
         assert!(ArgBound::FloatRange(0.0, 1.0).bind("1.5").is_err());
         assert!(ArgBound::FloatRange(0.0, 100.0).bind("150").is_err());
-        // AnyStr: free-form (validated downstream).
-        assert_eq!(ArgBound::AnyStr.bind("1d"), Ok(ArgValue::Str("1d".into())));
+        // TimeFrame: the TimeFrame labels only (no rounding of seconds, no panic on a
+        // multibyte character).
+        assert_eq!(ArgBound::TimeFrame.bind("1d"), Ok(ArgValue::TimeFrame(TimeFrame::Day1)));
+        assert_eq!(ArgBound::TimeFrame.bind("1W"), Ok(ArgValue::TimeFrame(TimeFrame::Week1)));
+        for bad in ["30s", "10m", "0m", "5x", "xm", "1\u{e9}", ""] {
+            assert!(ArgBound::TimeFrame.bind(bad).is_err(), "{bad:?}");
+        }
     }
 }

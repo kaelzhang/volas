@@ -190,9 +190,12 @@ See [Live cumulation](dataframe-api.md#live-cumulation--a-tf-aware-dataframe) fo
 ## TimeFrame
 
 A `TimeFrame` names a bar interval. It is accepted anywhere volas resamples —
-`df.cumulate`, the `time_frame` DataFrame argument, and the `hv` indicator —
-either as a `TimeFrame` constant or as its equivalent **string label**. There is no `TimeFrame(...)`
-constructor — use one of the constants below or a label string.
+`df.cumulate` and the `time_frame` DataFrame argument — either as a `TimeFrame`
+constant or as its equivalent **string label**. There is no `TimeFrame(...)`
+constructor — use one of the constants below or a label string. The
+[`hv`](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md#user-content-indicator-hv) indicator takes the label
+inside its directive, e.g. `hv:10,15m,252,390`, and annualizes by the frame's
+unit.
 
 ```py
 TimeFrame.m5            # the 5-minute frame

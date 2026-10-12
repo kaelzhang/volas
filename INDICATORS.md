@@ -279,24 +279,82 @@ df['donchian.l:20']
 ### <a id="indicator-hv"></a>`hv`, Historical Volatility
 
 ```
-hv:<period>,<time_frame>,<trading_days>@<on>
+hv:<period>,<time_frame>,<trading_days>,<session_minutes>@<on>
 ```
 
-Gets historical volatility, the statistical measure of the dispersion of returns
-for a security or index over a period of time.
+Gets annualized historical volatility: the sample standard deviation of one-bar
+log returns over `period` bars, scaled to a year.
 
-- **period** `int` (required)
-- **time_frame?** `str='1d'` Time frame such as `1m`, `15m`, `1h`, or `1d`.
-- **trading_days?** `int=254` Trading days in a year; pass an exchange-specific
-  yearly session count when your stock universe uses a different calendar.
+```
+r_t = ln(close_t / close_{t-1})
+hv  = stdev(r, over the last `period` bars, ddof = 1) × sqrt(bars_per_year)
+```
+
+`bars_per_year` depends on the unit of `time_frame`:
+
+| `time_frame` | `bars_per_year` |
+| --- | --- |
+| sub-day bars: `1s`, `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h` | `trading_days × session_minutes / bar_minutes` |
+| `1d` | `trading_days` |
+| `3d` | `trading_days / 3` |
+| `1w` | `52` |
+| `1M` | `12` |
+| `1y` | `1` |
+
+- **period** `int` (required) The number of returns in the window; at least 2.
+- **time_frame?** `str='1d'` The bar time frame. It must be one of the
+  [`TimeFrame`](docs/cumulation.md#timeframe) labels. Upper-case aliases such as
+  `1W` and `1D` are also accepted. Any other text is a `DirectiveValueError`.
+- **trading_days?** `int=252` Trading days per year. It is used only by sub-day
+  and day bars. 252 is the US equity convention (thinkorswim and the Cboe
+  realized-volatility formula use it); use 365 for a market that trades every
+  day.
+- **session_minutes?** `int=1440` Minutes of regular trading per trading day,
+  from 1 to 1440. It is used only by sub-day bars. The default 1440 fits a 24-hour
+  market. A sub-day bar whose length does not divide the session counts as a
+  fraction of a bar per day. For example, `4h` bars on a 390-minute session give
+  1.625 bars per day.
 - **on?** `str='close'` Which column or directive the calculation is based on.
 
-```py
-# 10-period historical volatility for 15-minute data based on 252 US equity sessions
-df['hv:10,15m,252']
+Second bars are exact: a `1s` bar counts 60 bars per minute of session. The
+log returns are demeaned and divided by `n − 1`, as in thinkorswim's
+`HistoricalVolatility`; TradingView's built-in HV uses the population form
+and does not scale intraday bars by their length. A session-only intraday
+series also includes the overnight gap in each session's first return, which
+raises the result.
 
-# Uses default time_frame and trading_days
+| Market | Regular session | `session_minutes` | 15-minute bars per day |
+| --- | --- | --- | --- |
+| US equities (NYSE) | 09:30–16:00 ET, 6.5 h | 390 | 26 |
+| China A-shares (SSE, SZSE) | 09:30–11:30 and 13:00–15:00, 4 h | 240 | 16 |
+| Hong Kong (HKEX) | 09:30–12:00 and 13:00–16:00, 5.5 h | 330 | 22 |
+| CME E-mini S&P 500 futures | 18:00–17:00 ET, with a 1-hour daily break, 23 h | 1380 | 92 |
+| Crypto | 24 h, every day | 1440 (the default) | 96 |
+
+`bars_per_year` is `trading_days` times the bars per day. For example, US
+equities on 15-minute bars give 252 × 26 = 6552, and crypto on 15-minute bars
+with `trading_days = 365` gives 365 × 96 = 35040. Pass your exchange's own
+trading-day count, which is the number of sessions in its yearly calendar.
+
+```py
+# Daily bars, 252 trading days (all defaults)
 df['hv:10']
+
+# US equities, 15-minute bars over the 390-minute regular session
+df['hv:10,15m,252,390']
+
+# China A-shares, 5-minute bars over the 240-minute session
+df['hv:20,5m,252,240']
+
+# CME E-mini futures, hourly bars over the 1380-minute session
+df['hv:20,1h,252,1380']
+
+# Crypto, hourly bars: 365 days, the default 24-hour session
+df['hv:24,1h,365']
+
+# Weekly and monthly bars annualize by 52 and 12
+df['hv:10,1w']
+df['hv:12,1M']
 ```
 
 ### <a id="indicator-psy"></a>`psy`, Psychological Line (心理线)
