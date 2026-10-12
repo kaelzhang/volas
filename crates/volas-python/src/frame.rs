@@ -359,7 +359,7 @@ impl PyDataFrame {
     }
 
     /// After an append, drop the front history once physical retention reaches
-    /// `2*capacity`, keeping the last `capacity` rows. The drop is `DataFrame::slice`,
+    /// `2*capacity`, keeping the last `capacity` rows. The drop is `DataFrame::retain_tail`,
     /// which carries the directive resume state (SP-9) ONLY when the kept window still
     /// holds the last valid row + its `lookback` warm-up. So we first refresh the stale
     /// directive tail (bringing `valid_rows` up to `height`, anchoring the resume state
@@ -373,7 +373,7 @@ impl PyDataFrame {
             if self.inner.height() >= 2 * cap {
                 self.refresh_computed(None)?;
                 let h = self.inner.height();
-                self.inner = self.inner.slice(h - cap, h);
+                self.inner = self.inner.retain_tail(cap.min(h));
             }
         }
         Ok(())

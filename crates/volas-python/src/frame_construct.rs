@@ -216,7 +216,7 @@ impl PyDataFrame {
         // retention capacity (window + max_lookback) and bound the initial data to it.
         let win = build_window_state(window, max_lookback)?;
         let df = match &win {
-            Some(w) if df.height() > w.capacity => df.slice(df.height() - w.capacity, df.height()),
+            Some(w) if df.height() > w.capacity => df.retain_tail(w.capacity),
             _ => df,
         };
         // A `time_frame` makes this a cumulating frame: the given rows are bars at that

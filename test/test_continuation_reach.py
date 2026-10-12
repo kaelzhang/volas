@@ -61,3 +61,15 @@ def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
     whole.append(frame(N, N + 2))
     assert _same(whole[d].to_numpy(dtype='object')[-2:], frame(0, N + 2).exec(d, dtype='object')[-2:])
     assert not base.iloc[1:].is_computed(name)
+
+
+def test_a_window_keeps_a_stateless_recursion_across_its_compaction():
+    # a bounded window drops its older rows by design: its cached columns recompute over
+    # the rows it retains (the max_lookback margin), so a recursion stays cached
+    w = volas.DataFrame({k: v[:40] for k, v in COLS.items()}, window=5, max_lookback=['kcw:5'])
+    w['kcw:5']
+    for i in range(40, N):
+        w.append(volas.DataFrame({k: v[i:i + 1] for k, v in COLS.items()}))
+    assert w._physical_height < N - 40
+    assert w.is_computed('kcw:5')
+    assert not np.isnan(w['kcw:5'].to_numpy()[-1])

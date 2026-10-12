@@ -491,6 +491,21 @@ impl DataFrame {
     /// alive — the right default for a live system. (A view would be ~1.5x faster
     /// here but would retain the parent's full buffer; we keep the safer copy.)
     pub fn slice(&self, start: usize, end: usize) -> DataFrame {
+        self.slice_carrying(start, end, true)
+    }
+
+    /// The last `rows` rows, as a bounded window retains them when it drops its older
+    /// rows: like [`slice`](Self::slice), except that a recursion without a carried
+    /// state stays cached — the window's documented contract is that its cached
+    /// columns recompute over the rows it retains (the `max_lookback` margin), so its
+    /// history restarts there by design.
+    pub fn retain_tail(&self, rows: usize) -> DataFrame {
+        self.slice_carrying(self.height.saturating_sub(rows), self.height, false)
+    }
+
+    /// [`slice`](Self::slice) / [`retain_tail`](Self::retain_tail): `exact` drops a
+    /// recursion the slice cannot continue exactly (no carried state, a later start).
+    fn slice_carrying(&self, start: usize, end: usize, exact: bool) -> DataFrame {
         let start = start.min(self.height);
         let end = end.max(start).min(self.height);
         let len = end - start;
@@ -529,7 +544,7 @@ impl DataFrame {
                 let carried_before = (inside(meta.state_at) && meta.state_at > first)
                     .then(|| meta.state_before_last.clone())
                     .flatten();
-                if meta.reach.recursive && carried.is_none() && first > meta.since {
+                if exact && meta.reach.recursive && carried.is_none() && first > meta.since {
                     // a recursion recomputed over the slice's own rows would restart
                     // its history after its start: without the state the column stays
                     // plain data (a slice from its history's start recomputes it all)
