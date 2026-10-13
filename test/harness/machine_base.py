@@ -42,6 +42,9 @@ class Entry:
     directive: Directive | None
     env: tuple[str, ...]  # the plain columns it was bound against
     start: int  # the ledger row its history starts at
+    # A recursion a write left without its carried state on a frame that no longer holds
+    # the rows its history started on: every refresh of it raises.
+    lost: bool = False
 
 
 class Unexpected(AssertionError):
@@ -149,6 +152,8 @@ class FrameMachine(RuleBasedStateMachine):
     def oracle(self, entry: Entry, evaluate: bool = False, hide: set[str] = frozenset()):
         """The reference values of ``entry`` on the visible rows, or its error class —
         over the frame without the data columns ``hide``."""
+        if entry.lost:
+            return None, ValueError
         text = entry.directive.text if entry.directive else entry.name
         env = tuple(c for c in entry.env if c not in hide)
         values, error = reference(self.coarse(), text, env, entry.start, evaluate)

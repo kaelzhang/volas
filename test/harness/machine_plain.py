@@ -162,7 +162,7 @@ class PlainMachine(FrameMachine):
     @rule(data=st.data(), via=st.sampled_from(['iloc', 'iat', 'at', 'loc']))
     def write_cell(self, data, via):
         """A positional / label write into a data column (invalidates every cache)."""
-        if self.stale or self._positions_carried() or self._recursion_unheld():
+        if self.stale or self._positions_carried():
             return  # a stale write is covered by append_rejected('stale_write')
         coarse = self.coarse()
         col = data.draw(st.sampled_from([c for c in coarse.columns
@@ -205,32 +205,25 @@ class PlainMachine(FrameMachine):
         return self.offset > 0 and any(
             re.search(rf'\b{re.escape(h)}\b', n) for n in self.cached for h in heads)
 
-    def _recursion_unheld(self) -> bool:
-        """Whether a cached recursion sits on a slice past its history's start: a slice
-        continues it only from its carried state, which an invalidating write discards,
-        and the slice does not hold the rows to recompute it from — so every later read
-        raises (pinned by test_windowed_history's
-        test_a_slice_cannot_recompute_a_recursion_after_a_write); such writes are not
-        generated. (A windowed frame replays its declared recursions from their
-        checkpoints.)"""
-        if self.window is not None:
-            return False
-        start = self.visible_start()
-        return any(e.start < start and _recursive(n) for n, e in self.cached.items())
-
     def _invalidate_all(self):
         # A write drops every carried state: each cached column recomputes over the
-        # rows the frame retains (a slice's history restarts at its first row).
+        # rows the frame retains — except a recursion whose history started before them
+        # (a slice past its start), which only its carried state continued: every later
+        # refresh of it raises. A windowed frame replays its declared recursions from
+        # their checkpoints.
         start = self.visible_start()
-        self.cached = {n: Entry(e.name, e.directive, e.env, start) if self.window is None else e
-                       for n, e in self.cached.items()}
+        if self.window is None:
+            self.cached = {n: Entry(e.name, e.directive, e.env, e.start, lost=True)
+                           if e.lost or (e.start < start and _recursive(n))
+                           else Entry(e.name, e.directive, e.env, start)
+                           for n, e in self.cached.items()}
         self.stale = set(self.cached) if len(self.df) else set()
 
     @precondition(lambda self: len(self.df) > 0)
     @rule(data=st.data())
     def write_computed(self, data):
         """A cell write into a cached float column: it becomes plain data."""
-        if self.stale or not self.cached or self._positions_carried() or self._recursion_unheld():
+        if self.stale or not self.cached or self._positions_carried():
             return
         name = data.draw(st.sampled_from(sorted(self.cached)))
         want, error = self.oracle(self.cached[name])
@@ -258,7 +251,7 @@ class PlainMachine(FrameMachine):
     def set_column(self, data, kind):
         """``df[name] = values``: a new plain column, one named like a bare command or
         a canonical directive, or a replacement of an existing column."""
-        if self.stale or self._positions_carried() or self._recursion_unheld():
+        if self.stale or self._positions_carried():
             return
         from .inventory import executable_lines
         if kind == 'new':
