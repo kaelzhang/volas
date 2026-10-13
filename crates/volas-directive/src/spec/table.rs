@@ -50,7 +50,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             .step()
             .runs_as(ma_runs_as)
             .lookback(|a| gml(n(a, 0), n(a, 1))),
-        ("ema" | "smma", None) => line(const { &[p_req()] }, &["close"]).recursive().step().lookback(|a| m1(n(a, 0))),
+        ("ema" | "smma", None) => line(const { &[p_req()] }, &["close"]).recursive().resume_rows(0).step().lookback(|a| m1(n(a, 0))),
         // apo / ppo: fast period, slow period, matype — the later of the two averages.
         ("apo" | "ppo", None) => line(const { &[p(12), p(26), matype()] }, &["close"])
             .averages(&[(0, 2), (1, 2)])
@@ -69,8 +69,8 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
                 .lookback(|a| gml(n(a, 0), n(a, 1)).max(gml(n(a, 2), n(a, 3))) + gml(n(a, 4), n(a, 5)))
         }
         ("wma" | "trima", None) => line(const { &[p_req()] }, &["close"]).accumulating().step().lookback(|a| m1(n(a, 0))),
-        ("dema", None) => line(const { &[p_req()] }, &["close"]).recursive().step().lookback(|a| 2 * m1(n(a, 0))),
-        ("tema", None) => line(const { &[p_req()] }, &["close"]).recursive().step().lookback(|a| 3 * m1(n(a, 0))),
+        ("dema", None) => line(const { &[p_req()] }, &["close"]).recursive().resume_rows(0).step().lookback(|a| 2 * m1(n(a, 0))),
+        ("tema", None) => line(const { &[p_req()] }, &["close"]).recursive().resume_rows(0).step().lookback(|a| 3 * m1(n(a, 0))),
         // TradingView moving averages.
         ("vwma", None) => line(const { &[p_req()] }, &["close", "volume"]).accumulating().step().lookback(|a| m1(n(a, 0))),
         // alma: period, offset (Gaussian peak position, [0,1]), sigma (>0, width).
@@ -84,7 +84,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("swma", None) => line(&[], &["close"]).lookback(|_| 3),
         // t3: period, vfactor (volume factor, TA-Lib domain [0, 1]).
         ("t3", None) => line(const { &[p_req(), frange(0.7, 0.0, 1.0)] }, &["close"])
-            .recursive()
+            .recursive().resume_rows(0)
             .step()
             .lookback(|a| 6 * m1(n(a, 0))),
         ("kama", None) => line(const { &[p_req()] }, &["close"]).recursive().step().reads_past_lookback().lookback(|a| n(a, 0)),
@@ -122,16 +122,16 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         .reads_past_lookback()
         .lookback(|_| 1),
         // macd: fast period, slow period[, signal period].
-        ("macd", None) => line(const { &[p(12), p(26)] }, &["close"]).recursive().step().lookback(|a| m1(n(a, 0).max(n(a, 1)))),
+        ("macd", None) => line(const { &[p(12), p(26)] }, &["close"]).recursive().resume_rows(0).step().lookback(|a| m1(n(a, 0).max(n(a, 1)))),
         ("macd", Some("signal" | "histogram")) => line(const { &[p(12), p(26), p(9)] }, &["close"])
-            .recursive()
+            .recursive().resume_rows(0)
             .step()
             .lookback(|a| n(a, 0).max(n(a, 1)) + n(a, 2) - 2),
         // macdfix: fast/slow fixed at 12/26; the line takes no args, the signal/histogram
         // take only the signal period.
-        ("macdfix", None) => line(&[], &["close"]).recursive().step().lookback(|_| 25),
+        ("macdfix", None) => line(&[], &["close"]).recursive().resume_rows(0).step().lookback(|_| 25),
         ("macdfix", Some("signal" | "histogram")) => {
-            line(const { &[p(9)] }, &["close"]).recursive().step().lookback(|a| 24 + n(a, 0))
+            line(const { &[p(9)] }, &["close"]).recursive().resume_rows(0).step().lookback(|a| 24 + n(a, 0))
         }
         // boll: period[, deviation multiplier (sign-free, TA-Lib nbdev)].
         ("boll", None) => line(const { &[p(20)] }, &["close"]).accumulating().step().lookback(|a| m1(n(a, 0))),
@@ -149,12 +149,14 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("kdj", Some("k")) => {
             line(const { &[p(9), p(3), frange(50.0, 0.0, 100.0)] }, &["high", "low", "close"])
                 .recursive()
+                .resume_inputs(|a| m1(n(a, 0)).max(1))
                 .rows()
                 .lookback(|a| n(a, 0) * 3)
         }
         ("kdj", Some("d" | "j")) => {
             line(const { &[p(9), p(3), p(3), frange(50.0, 0.0, 100.0)] }, &["high", "low", "close"])
                 .recursive()
+                .resume_inputs(|a| m1(n(a, 0)).max(1))
                 .rows()
                 .lookback(|a| n(a, 0) * 3)
         }
@@ -215,7 +217,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("kst", None) => line(&[], &["close"]).accumulating().step().lookback(|_| 44),
         ("emv", None) => line(const { &[p_req()] }, &["high", "low", "volume"]).accumulating().step().lookback(|a| n(a, 0)),
         // mass_index: EMA9 of EMA9 warms up at 2*(9-1)=16, then the n-sum adds n-1.
-        ("mass_index", None) => line(const { &[p(25)] }, &["high", "low"]).recursive().step().lookback(|a| 15 + n(a, 0)),
+        ("mass_index", None) => line(const { &[p(25)] }, &["high", "low"]).recursive().resume_inputs(|a| n(a, 0)).step().lookback(|a| 15 + n(a, 0)),
         ("efi", None) => line(const { &[p(13)] }, &["close", "volume"]).recursive().step().lookback(|a| n(a, 0)),
         ("tsi", None) => line(const { &[p(25), p(13)] }, &["close"]).recursive().step().lookback(|a| n(a, 0) + n(a, 1) - 1),
         // crsi averages RSI(close) (rsi_len), RSI(streak) (streak_len; the streak starts
@@ -363,7 +365,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // constant no-signal column.
         ("cci", None) => line(const { &[p2_req()] }, &["high", "low", "close"]).accumulating().step().lookback(|a| m1(n(a, 0))),
         ("imi", None) => line(const { &[p_req()] }, &["open", "close"]).accumulating().step().lookback(|a| m1(n(a, 0))),
-        ("trix", None) => line(const { &[p_req()] }, &["close"]).recursive().step().lookback(|a| 3 * m1(n(a, 0)) + 1),
+        ("trix", None) => line(const { &[p_req()] }, &["close"]).recursive().resume_rows(0).step().lookback(|a| 3 * m1(n(a, 0)) + 1),
         ("mfi", None) => line(const { &[p_req()] }, &["high", "low", "close", "volume"])
             .accumulating()
             .step()
@@ -393,10 +395,12 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // plus the %K window, then the d-line MA. Only the SMA `.d` resumes.
         ("stochrsi", Some("k")) => line(STOCHRSI, &["close"])
             .recursive()
+            .resume_inputs(|a| m1(n(a, 1)).max(1))
             .rows()
             .lookback(|a| n(a, 0) + m1(n(a, 1))),
         ("stochrsi", Some("d")) => line(STOCHRSI, &["close"])
             .recursive()
+            .resume_inputs(|a| m1(n(a, 1)) + n(a, 2))
             .rows()
             .resume_unless(|a| ind::generic_ma_type(n(a, 2), n(a, 3)) != 0)
             .lookback(|a| n(a, 0) + m1(n(a, 1)) + gml(n(a, 2), n(a, 3))),
@@ -419,12 +423,12 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("maxindex" | "minindex", None) => line(const { &[p_req()] }, &["close"])
             .position()
             .reads_past_lookback()
-            .rows()
+            .step()
             .lookback(|a| m1(n(a, 0))),
         ("minmaxindex", Some("min" | "max")) => line(const { &[p_req()] }, &["close"])
             .position()
             .reads_past_lookback()
-            .rows()
+            .step()
             .lookback(|a| m1(n(a, 0))),
         ("minmax", Some("min" | "max")) => line(const { &[p_req()] }, &["close"]).lookback(|a| m1(n(a, 0))),
         ("natr", None) => line(const { &[p_req()] }, &["high", "low", "close"]).recursive().step().lookback(|a| n(a, 0)),
@@ -482,10 +486,11 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         ("pivothigh", None) => line(const { &[p_req(), p_req()] }, &["high"]).lookback(|a| n(a, 0) + n(a, 1)),
         ("pivotlow", None) => line(const { &[p_req(), p_req()] }, &["low"]).lookback(|a| n(a, 0) + n(a, 1)),
         ("obv", None) => line(&[], &["close", "volume"]).recursive().step(),
-        ("ad", None) => line(&[], &["high", "low", "close", "volume"]).recursive().step(),
+        ("ad", None) => line(&[], &["high", "low", "close", "volume"]).recursive().resume_rows(0).step(),
         // adosc: fast EMA period, slow EMA period.
         ("adosc", None) => line(const { &[p(3), p(10)] }, &["high", "low", "close", "volume"])
             .recursive()
+            .resume_inputs(|a| m1(n(a, 0).max(n(a, 1))))
             .rows()
             .lookback(|a| m1(n(a, 0).max(n(a, 1)))),
         ("avgprice", None) => line(&[], &["open", "high", "low", "close"]).step(),
@@ -495,15 +500,16 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // takes fast/slow limits); fixed warm-up — DCPERIOD / PHASOR / MAMA 32, the
         // phase-dependent DCPHASE / SINE / TRENDLINE / TRENDMODE 63.
         ("ht_dcperiod", None) | ("ht_phasor", None | Some("quadrature")) => {
-            line(&[], &["close"]).recursive().rows().lookback(|_| 32)
+            line(&[], &["close"]).recursive().resume_rows(32).rows().lookback(|_| 32)
         }
         ("ht_dcphase" | "ht_trendline" | "ht_trendmode", None) | ("ht_sine", None | Some("leadsine")) => {
-            line(&[], &["close"]).recursive().rows().lookback(|_| 63)
+            line(&[], &["close"]).recursive().resume_rows(63).rows().lookback(|_| 63)
         }
         // mama: fast limit, slow limit — TA-Lib's domain [0.01, 0.99]; outside it the
         // adaptive alpha degenerates and the output is all-NaN.
         ("mama", None | Some("fama")) => line(const { &[frange(0.5, 0.01, 0.99), frange(0.05, 0.01, 0.99)] }, &["close"])
             .recursive()
+            .resume_rows(32)
             .rows()
             .lookback(|_| 32),
         _ => return None,

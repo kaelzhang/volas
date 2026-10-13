@@ -22,6 +22,8 @@ SMALL, LARGE = 10_000, 1_000_000
 
 
 def _data(n, kind):
+    missing = kind.endswith('-missing')
+    kind = kind.removesuffix('-missing')
     rng = np.random.default_rng(1)
     m = n + 32
     c = 100 + np.cumsum(rng.standard_normal(m))
@@ -32,6 +34,8 @@ def _data(n, kind):
         data['volume'] = rng.integers(10, 1000, m).astype(np.int64)
     elif kind == 'float32':
         data = {k: v.astype(np.float32) for k, v in data.items()}
+    if missing:
+        data['close'][::7] = np.nan
     return data
 
 
@@ -55,6 +59,8 @@ def _append_cost(directive, kind, n, k=24):
 
 
 CASES = [
+    ('ema:20', 'float32-missing'), ('ema:20@(close+open)', 'float64-missing'),
+    ('rsi:14@(volume+close)', 'int64-missing'),
     ('obv', 'int64'), ('mfi:14', 'int64'), ('vwma:20', 'int64'),
     ('ema:20', 'float32'), ('atr:14', 'float32'), ('ma:20', 'float32'),
     ('ema:14@(close+open)', 'float64'), ('rsi:14@(ma:5)', 'float64'), ('ma:5@(close*volume)', 'float64'),

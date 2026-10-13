@@ -15,7 +15,7 @@ fn frame(rows: usize) -> DataFrame {
 }
 
 fn checkpoint(at: usize) -> Checkpoint {
-    Checkpoint { at, state: Some(vec![at as f64]), inputs: vec![(0, vec![1.0, 2.0])] }
+    Checkpoint { at, state: Some(vec![at as f64]), raw: vec![("close".into(), Column::f64(vec![1.0, 2.0]))] }
 }
 
 #[test]

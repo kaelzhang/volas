@@ -400,7 +400,7 @@ def _names(text: str) -> set[str]:
 
 def _recursive(text: str) -> bool:
     """Whether a directive reads a recursion anywhere in it."""
-    return bool(_names(text) & inventory.unbounded_memory()) or inventory.recursive(text)
+    return inventory.recursion(text)
 
 
 def _nat_index(df: volas.DataFrame, schema) -> volas.DataFrame:

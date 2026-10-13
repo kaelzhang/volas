@@ -93,6 +93,7 @@ pub(crate) struct Operands<'a> {
     reads: [OnceCell<Read<'a>>; SLOTS],
     /// The first frame row read: `0`, or the start of a trailing window.
     start: usize,
+    absolute_origin: Option<usize>,
     /// The row after the last frame row read: the frame's height, or an earlier end.
     end: usize,
     /// The window's rows as a frame, built for evaluating an `@` operand over them.
@@ -102,6 +103,7 @@ pub(crate) struct Operands<'a> {
     len: usize,
     /// Rows to read instead of the frame: each slot's complete rows (the rerun).
     over: Option<Vec<Option<Cow<'a, [f64]>>>>,
+    borrowed: Option<[Option<&'a [f64]>; SLOTS]>,
     /// Stop at a frame column known to hold a NaN (the arm's result would be thrown
     /// away; the record is what matters).
     stop_on_missing: bool,
@@ -116,6 +118,9 @@ pub(crate) struct Operands<'a> {
 }
 
 impl<'a> Operands<'a> {
+    /// Place prepared carried rows at their original absolute positions.
+    pub(crate) fn with_origin(mut self, origin: usize) -> Self { self.absolute_origin = Some(origin); self }
+
     /// Read the frame's columns and the `@` operands evaluated over it.
     pub(crate) fn new(df: &'a DataFrame, series: &'a [BoundNode]) -> Self {
         Operands::rows(df, series, 0, df.height())
@@ -137,10 +142,12 @@ impl<'a> Operands<'a> {
             series,
             reads: Default::default(),
             start,
+            absolute_origin: None,
             end,
             window: OnceCell::new(),
             len: end - start,
             over: None,
+            borrowed: None,
             stop_on_missing: false,
             probing: Cell::new(false),
             clean: Cell::new(true),
@@ -173,6 +180,11 @@ impl<'a> Operands<'a> {
         }
     }
 
+    /// Prepared input slots for a scalar plan step, borrowed from reusable scratch.
+    pub(crate) fn borrowed(df: &'a DataFrame, series: &'a [BoundNode], start: usize, views: [Option<&'a [f64]>; SLOTS]) -> Self {
+        Self { len: views.iter().flatten().next().map_or(0, |v| v.len()), borrowed: Some(views), ..Self::window(df, series, start) }
+    }
+
     /// Whether this reads every row of the frame.
     fn whole(&self) -> bool {
         (self.start, self.end) == (0, self.df.height())
@@ -191,7 +203,7 @@ impl<'a> Operands<'a> {
     /// The absolute position of the row the arm sees as row 0 (`DataFrame::origin`,
     /// plus a window's start): where a sliding-window kernel re-anchors its running sums.
     pub(crate) fn origin(&self) -> usize {
-        self.df.origin() + self.start
+        self.absolute_origin.unwrap_or(self.df.origin() + self.start)
     }
 
     /// `Ok` when an input of `len` rows fits the others, `want` rows (see the module docs).
@@ -273,6 +285,9 @@ impl<'a> Operands<'a> {
 
     /// Input `slot` as `f64` (`default` names its column when no operand fills it).
     pub(crate) fn f64(&self, slot: usize, default: &str) -> Result<Cow<'_, [f64]>> {
+        if let Some(views) = &self.borrowed {
+            return views[slot].map(Cow::Borrowed).ok_or_else(|| VolasError::Value("unprepared input slot".into()));
+        }
         if let Some(views) = &self.over {
             return self.recorded(slot, views);
         }

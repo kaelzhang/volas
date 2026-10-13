@@ -64,24 +64,28 @@ pub(crate) fn evaluates_on_a_window_node(node: &BoundNode) -> bool {
 
 /// The rows a cached directive column reads around its own ([`volas_core::Reach`]),
 /// fixed per directive: computed once when the column is cached, never per refresh.
-pub fn reach(node: &Ast) -> volas_core::Reach { reach_node(node.node()) }
-
-fn reach_node(node: &BoundNode) -> volas_core::Reach {
+pub fn reach(node: &Ast) -> volas_core::Reach {
     volas_core::Reach {
-        lookback: lookback_node(node),
-        resume: resume_reach(node),
-        continuation: continuation_reach(node),
-        history: history_node(node),
+        lookback: lookback_node(node.node()),
+        resume: resume_reach(node.node()),
+        continuation: continuation_reach(node.node()),
+        history: history(node),
     }
 }
 
-/// How a directive's values depend on the rows before them ([`volas_core::History`]),
-/// derived from the history class of each command in it
-/// ([`CommandSpec::history_class`]): its highest class, and for class 3 how a frame keeps
-/// it — by the state of its top command when that is the one recursion in it (its
-/// operands of a lower class or counts), by its window when every class-3 part is a
-/// count, otherwise not at all.
-pub fn history(node: &Ast) -> volas_core::History { history_node(node.node()) }
+/// The highest command history class, with recursive keeping derived solely from
+/// the stored continuation plan. Own and Chain retain their state; a Recompute
+/// recursion anywhere leaves the directive Unkept.
+pub fn history(node: &Ast) -> volas_core::History {
+    use crate::types::Continuation;
+    let h = history_node(node.node());
+    if !h.recursive() { return h; }
+    match node.continuation() {
+        Continuation::Own => volas_core::History::Carried { operands: series_of(node.node()).iter().map(lookback_node).max().unwrap_or(0) },
+        Continuation::Chain(p) => volas_core::History::Carried { operands: p.frame_span },
+        Continuation::None => volas_core::History::Unkept,
+    }
+}
 
 fn history_node(node: &BoundNode) -> volas_core::History {
     use volas_core::History;
@@ -92,14 +96,7 @@ fn history_node(node: &BoundNode) -> volas_core::History {
         _ if recursions == 0 => return History::Counted,
         _ => {}
     }
-    let carried = matches!(node, Node::Command(_) | Node::Name(_))
-        && command_of(node).is_some_and(|(spec, args)| {
-            spec.history_class(&args) == HistoryClass::Recursion(Keep::State)
-        })
-        && series_of(node).iter().all(|s| classes(s).1 == 0);
-    if carried {
-        return History::Carried { operands: series_of(node).iter().map(lookback_node).max().unwrap_or(0) };
-    }
+
     History::Unkept
 }
 
@@ -132,13 +129,11 @@ fn classes(node: &BoundNode) -> (u8, usize) {
     }
 }
 
-/// The rows before a new row that resuming a directive's carried state reads: none
-/// for a state that is all its command needs (a recursion), its lookback plus one for a
-/// command that reads the row its window drops or SAR's earlier bar
-/// ([`CommandSpec::reads_past`]). A frame holding fewer valid rows cannot resume it.
+/// The kernel's published resume reach plus the window of its operands. Complete
+/// input tails carry those kernel rows across missing runs and head compaction.
 fn resume_reach(node: &BoundNode) -> usize {
     match command_of(node) {
-        Some((spec, _)) if spec.reads_past() => lookback_node(node) + 1,
+        Some((spec, args)) => spec.resume_reach(&args) + series_of(node).iter().map(lookback_node).max().unwrap_or(0),
         _ => 0,
     }
 }

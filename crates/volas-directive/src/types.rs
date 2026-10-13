@@ -373,6 +373,7 @@ pub struct ChainPlan {
     pub(crate) top: Box<BoundNode>,
     pub(crate) names: Vec<String>,
     pub(crate) span: usize,
+    pub(crate) frame_span: usize,
 }
 
 /// A directive form bound leniently (`directive_stringify`): every supplied argument

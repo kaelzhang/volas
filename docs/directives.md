@@ -118,7 +118,14 @@ float32 input is converted over that window only, and an `@` expression operand
 a row position anywhere in a directive — inside an `@` operand (`rsi:14@(ema:5)`,
 `ema:3@(maxindex:5)`) or combined with other values (`close - ma:5 + obv`,
 `ema:5 > ma:10`) — carries a state of its own and its last few values, so the
-directive continues over that window too, and a slice keeps it cached. A few
+directive continues over that window too, and a slice keeps it cached. Each node also
+carries the complete input rows its resume reads: an EMA needs none, RSI needs its
+previous complete row. Missing rows, even a long missing run, never make a continuation
+read or convert the whole column. Single-row chains step their kernels directly using
+reused input scratch and scalar expression evaluation; `ema:5@(ema:3)`,
+`close-ma:5+obv` and `close>ema:5` allocate nothing on complete inputs. Declared chains
+on bounded frames use the same state for checkpoints and replay after writes or head
+compaction; warm-up checkpoints keep raw input rows. A few
 directives still cost O(n) per refresh (exact): `crsi`, `stoch_momentum`,
 `ttm_squeeze`, and `apo` / `ppo` / `macdext` / `mavp` / `stoch` / `stochf.d` at a
 recursive MA type recompute their column, and so does any directive holding one of

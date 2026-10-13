@@ -172,6 +172,11 @@ pub fn classes(n: usize) -> Vec<Data> {
     let gap = |x: &Vec<f64>| -> Vec<f64> { x.iter().enumerate().map(|(i, &y)| if i == 2 { f64::NAN } else { y }).collect() };
     out.push(Data { name: "early-missing-bar", frame: frame(gap(&o), gap(&h), gap(&l), gap(&c), gap(&v)) });
     out.push(Data { name: "early-missing-close", frame: frame(o.clone(), h.clone(), l.clone(), gap(&c), v.clone()) });
+    for (name, long) in [("periodic-missing", false), ("long-missing-run", true)] {
+        let gap = |x: &Vec<f64>| x.iter().enumerate().map(|(i, &v)|
+            if if long { (n / 3..3 * n / 4).contains(&i) } else { i % 7 == 0 } { f64::NAN } else { v }).collect();
+        out.push(Data { name, frame: frame(gap(&o), gap(&h), gap(&l), gap(&c), gap(&v)) });
+    }
     let (mut ci, mut li) = (c.clone(), l.clone());
     ci[n / 3] = f64::INFINITY;
     li[n / 2] = f64::NEG_INFINITY;

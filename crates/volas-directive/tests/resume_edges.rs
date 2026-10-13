@@ -75,14 +75,17 @@ fn a_row_formula_steps_like_its_kernel() {
     ] {
         let full = execute(&df, &parse(directive).unwrap()).unwrap().to_f64_vec();
         for row in [1, 5, 19] {
-            let value = step(&df, directive, row).unwrap_or_else(|| panic!("no step for {directive}"));
+            let Some(value) = step(&df, directive, row) else {
+                assert!(row < volas_directive::lookback::lookback(&parse(directive).unwrap()));
+                continue;
+            };
             assert_f64_same(&[value], &[full[row]]);
         }
     }
     // a row past the end declines; TR has no prior bar at row 0
     let node = parse("avgprice").unwrap();
     assert!(execute_resume_step(&df, &node, &[], (20, 0), &mut []).is_none());
-    assert!(execute_resume_step(&df, &parse("tr").unwrap(), &[], (0, 0), &mut []).unwrap().is_nan());
+    assert!(step(&df, "tr", 0).is_none());
     let zero_prior = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![0.0, 1.0, 2.0])], None).unwrap();
     assert_eq!(step(&zero_prior, "roc:2", 2).unwrap(), 0.0);
 }
@@ -94,10 +97,12 @@ fn a_row_formula_resumes_its_tail_like_its_kernel() {
         "avgprice", "medprice", "typprice", "wclprice", "bop", "tr", "mom:3", "roc:3", "rocp:3", "rocr:3", "rocr100:3",
     ] {
         let node = parse(directive).unwrap();
-        let (tail, state) = execute_resume(&df, &node, &[], 0, usize::MAX, 0)
+        let from = volas_directive::lookback::lookback(&node);
+        let seed = initial_state(&df, &node, from).unwrap();
+        let (tail, state) = execute_resume(&df, &node, &seed, from, usize::MAX, 0)
             .unwrap_or_else(|| panic!("tail resume failed for {directive}"));
-        assert!(state.is_empty());
-        assert_f64_same(&tail.to_f64_vec(), &execute(&df, &node).unwrap().to_f64_vec());
+        assert_eq!(state, initial_state(&df, &node, usize::MAX).unwrap());
+        assert_f64_same(&tail.to_f64_vec(), &execute(&df, &node).unwrap().to_f64_vec()[from..]);
     }
 }
 
@@ -280,10 +285,11 @@ fn recursive_moving_averages_and_kcw_continue_from_a_state() {
 fn resume_decline_paths_cover_question_mark_branches() {
     let df = ohlcv(80);
     let p = |directive: &str| parse(directive).unwrap();
-    let empty: &[f64] = &[];
+    let tr = initial_state(&df, &p("tr"), 1).unwrap();
+    let mom = initial_state(&df, &p("mom:30"), 30).unwrap();
 
-    assert!(execute_resume(&df, &p("tr"), empty, 0, df.height(), 0).is_some());
-    assert!(execute_resume(&df, &p("mom:30"), empty, 0, df.height(), 0).is_some());
+    assert!(execute_resume(&df, &p("tr"), &tr, 1, df.height(), 0).is_some());
+    assert!(execute_resume(&df, &p("mom:30"), &mom, 30, df.height(), 0).is_some());
 
     for directive in [
         "kama:30",
@@ -307,5 +313,13 @@ fn resume_decline_paths_cover_question_mark_branches() {
             execute_resume(&df, &p(directive), &[0.0; 8], 0, df.height(), 0).is_none(),
             "{directive}"
         );
+    }
+}
+
+#[test]
+fn a_huge_window_keeps_no_state_before_warmup() {
+    let df = ohlcv(20);
+    for text in ["ma:999999999999", "ema:999999999999", "close-ma:999999999999+obv", "llv:999999999999@(ema:3)"] {
+        assert!(initial_state(&df, &parse(text).unwrap(), df.height()).is_none(), "{text}");
     }
 }

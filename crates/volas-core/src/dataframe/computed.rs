@@ -282,13 +282,18 @@ impl DataFrame {
         })
     }
 
-    /// Overwrite one F64 computed value and mark the column valid through that row,
+    /// Overwrite one numeric or boolean computed value and mark the column valid through that row,
     /// under the same rule as [`update_computed_tail`](Self::update_computed_tail).
     /// This avoids allocating a one-value tail column on the single-bar append path.
-    pub fn update_computed_f64_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
+    pub fn update_computed_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
         self.write_computed(name, row, 1, |col| match col {
             Column::F64(buf) => {
                 buf.set(row, value);
+                Ok(())
+            }
+            Column::Bool(buf, valid) => {
+                valid.set(row, buf.len(), !value.is_nan());
+                buf.make_mut()[row] = value != 0.0;
                 Ok(())
             }
             col => Err(VolasError::DType(format!(

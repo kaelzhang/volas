@@ -19,7 +19,7 @@ fn bound_tree_and_continuation_are_read_only_views() {
 fn binding_decides_the_existing_continuation_cases() {
     for (source, kind) in [
         ("close + 1", 0), ("llv:5", 0), ("ma:20", 1), ("rsi:14", 1),
-        ("ema:5@(ema:3)", 2), ("close - ma:5 + obv", 2), ("ema:5@(apo:2,3,1)", 1),
+        ("ema:5@(ema:3)", 2), ("close - ma:5 + obv", 2), ("ema:5@(apo:2,3,1)", 0),
     ] {
         let ast = parse(source).unwrap();
         let actual = match ast.continuation() {

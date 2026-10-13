@@ -137,6 +137,11 @@ pub(crate) fn step(
         ))
     };
     match (name, sub) {
+        ("maxindex" | "minindex" | "minmaxindex", _) => {
+            let max = name == "maxindex" || sub == Some("max");
+            ind::index_resume_one(&close()?, p(0), row, ops.origin(), max, prev, next)
+        }
+
         // a formula of its own row (and a fixed prior one)
         ("avgprice", _) => {
             let (o, h, l, c) = ohlc()?;

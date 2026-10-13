@@ -239,8 +239,7 @@ def test_class_2_and_3_must_be_declared(d, why):
         declared.exec(d)
 
 
-@pytest.mark.parametrize('d', ['ema:3@(rsi:5)', 'ma:3@(ema:2)', 'ema:3 - ema:5', 'close > ema:5',
-                               'crsi', 'apo:5,9,1', 'stoch.k:5,3,1'])
+@pytest.mark.parametrize('d', ['ema:3@(crsi)', 'crsi', 'apo:5,9,1', 'stoch.k:5,3,1'])
 def test_a_recursion_no_state_carries_is_refused(d):
     seed = rows(bars(10), 0, 10)
     with pytest.raises(ValueError, match=f"cannot keep '{re.escape(d)}' exact on a windowed frame"):
@@ -291,8 +290,8 @@ def test_an_int64_volume_window_equals_the_unbounded_history(d):
 def test_a_copied_cached_column_must_be_kept_by_the_window():
     u = rows(bars(30), 0, 30)
     u['ema:3 - ema:5']
-    with pytest.raises(ValueError, match="cannot keep 'ema:3-ema:5' exact"):
-        volas.DataFrame(u, window=3, max_lookback=10)
+    copied = volas.DataFrame(u, window=3, max_lookback=10)
+    assert same(copied['ema:3-ema:5'], u.exec('ema:3-ema:5')[-3:])
     v = rows(bars(30), 0, 30)
     v['ma:20']
     with pytest.raises(ValueError, match=r"cannot keep 'ma:20' on a windowed frame with max_lookback=5: it "

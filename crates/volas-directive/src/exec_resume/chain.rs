@@ -1,19 +1,9 @@
-//! The state chain of a directive whose recursions are not all at its top: a recursion
-//! inside an `@` operand (`ema:5@(ema:3)`), or combined with other values
-//! (`close - ma:5 + obv`).
-//!
-//! Every node of the tree that keeps a state of its own — a recursive command, or one
-//! whose output is a row position — carries that state, and its values on the last `L`
-//! rows (`L` twice the directive's lookback, plus two: every row a consumer of it reads
-//! before a new row). A continuation over new rows runs the nodes children first: each
-//! resumes from its state over the new rows of a trailing window of the frame — its
-//! `@` operands that keep a state read as columns of their own values, the remembered
-//! ones before the new rows — and then the whole tree is evaluated over that window, as
-//! the parts that keep no state are window functions. So one new row costs the window,
-//! whatever the frame's height, and every value is the full computation's.
-//!
-//! The chain is the column's carried state, flat: per node, children first, its state's
-//! length, its state, and its last `L` values (missing before the frame's first row).
+//! The bound continuation plan: commands run in post-order, followed by a scalar
+//! stateless remainder. Recursive and resumable window nodes retain their kernel and
+//! input tails; consumers read their output rings. A scalar step reads the plan directly
+//! into reused scratch, without constructing frames, columns or temporary vectors.
+//! Vector resume evaluates a bounded frame window. Both paths use `state` as their
+//! sole serialization owner and produce the same carried representation.
 
 use volas_core::{Column, DataFrame};
 
@@ -23,14 +13,13 @@ use crate::lookback::lookback_node;
 use crate::spec::{History, Resume};
 use crate::types::{Ast, BoundNode, ChainPlan, Command, Continuation, Node};
 
-/// Whether `node` keeps a state of its own: a recursive command, or one whose output is
-/// a row position.
+/// A recursive command or a command with a published continuation kernel.
 fn keeps_state(node: &BoundNode) -> bool {
     if !matches!(node, Node::Command(_) | Node::Name(_)) {
         return false;
     }
     as_command(node).is_some_and(|c| {
-        c.args.spec.history(&c.args) == History::Recursive || c.args.spec.emits_position()
+        c.args.spec.history(&c.args) == History::Recursive || resume_of(&c) != Resume::Recompute
     })
 }
 
@@ -65,7 +54,17 @@ pub(crate) fn plan(node: &BoundNode) -> Continuation {
             top: Box::new(substitute(node, &nodes)),
             names: (0..nodes.len()).map(hidden).collect(),
             span: 2 * (lookback_node(node) + 1),
+            frame_span: lookback_node(&substitute(node, &nodes)).max(nodes.iter().enumerate().map(|(k, _)| {
+                let own = own_node(&nodes, k);
+                match &own {
+                    Node::Command(c) => c.series.iter().map(lookback_node).max().unwrap_or(0),
+                    _ => 0,
+                }
+            }).max().unwrap_or(0)),
         });
+    }
+    if nodes.iter().any(|n| as_command(n).is_some_and(|c| resume_of(&c) == Resume::Recompute)) {
+        return Continuation::None;
     }
     if as_command(node).is_some_and(|c| resume_of(&c) != Resume::Recompute) {
         Continuation::Own
@@ -120,7 +119,7 @@ fn own_node(nodes: &[&BoundNode], k: usize) -> BoundNode {
             args: c.args.clone(),
             series: c.series.iter().map(|s| substitute(s, &nodes[..k])).collect(),
         }),
-        other => other.clone(), // a bare name: no operands
+        other => Node::Command(as_command(other).expect("a stateful command").into_owned()),
     }
 }
 
@@ -131,9 +130,7 @@ fn tail(values: &[f64], end: usize, l: usize) -> impl Iterator<Item = f64> + '_ 
 
 /// Append one node's state and its last `l` values (of rows before `end`) to `chain`.
 fn keep(chain: &mut Vec<f64>, state: Vec<f64>, values: &[f64], end: usize, l: usize) {
-    chain.push(state.len() as f64);
-    chain.extend(state);
-    chain.extend(tail(values, end, l));
+    super::state::push_chain(chain, &state, tail(values, end, l));
 }
 
 /// The full computation of the chained `node` over `df`, with its chain as of the last
@@ -143,7 +140,7 @@ pub(super) fn with_states(df: &DataFrame, node: &Ast) -> volas_core::Result<supe
     let plan = chain_plan(node);
     let (h, l) = (df.height(), plan.span);
     let mut frame = df.clone();
-    let (mut after, mut before) = (Some(Vec::new()), Some(Vec::new()));
+    let (mut after, mut before) = ((h >= l).then(Vec::new), (h > l).then(Vec::new));
     for (k, own) in plan.nodes.iter().enumerate() {
         let (col, a, b) = super::states::execute_with_states(&frame, own)?;
         let values = into_f64(col);
@@ -189,18 +186,13 @@ pub(super) fn resume(
     let mut next = Vec::with_capacity(chain.len());
     let mut at = 0;
     for (k, own) in plan.nodes.iter().enumerate() {
-        let len = *chain.get(at)? as usize;
-        let state = chain.get(at + 1..at + 1 + len)?;
-        let ring = chain.get(at + 1 + len..at + 1 + len + l)?;
-        at += 1 + len + l;
+        let (state, ring) = super::state::chain_node(chain, &mut at, l)?;
         let (col, state) = super::execute_resume(&win, own, state, held, held + new, since)?;
         // the node's values over the window: those remembered, then the new rows'
         let mut values = Vec::with_capacity(held + new);
         values.extend_from_slice(&ring[l - held..]);
         values.extend(into_f64(col));
-        next.push(state.len() as f64);
-        next.extend(state);
-        next.extend(ring.iter().copied().chain(values[held..].iter().copied()).skip(new));
+        super::state::push_chain(&mut next, &state, ring.iter().copied().chain(values[held..].iter().copied()).skip(new));
         win.set_column(&plan.names[k], Column::f64(values)).ok()?;
     }
     if at != chain.len() {
@@ -208,4 +200,42 @@ pub(super) fn resume(
     }
     let top = crate::exec::execute_node(&win, &plan.top).ok()?;
     Some((top.slice(held, held + new), next))
+}
+
+/// One row, directly from node states and scalar plan operands. The published scalar
+/// API represents a truth as 0/1/NaN; callers retain the cached column's dtype.
+pub(super) fn step(df: &DataFrame, node: &Ast, chain: &[f64], row: usize, next: &mut [f64]) -> Option<f64> {
+    let plan = chain_plan(node);
+    if chain.len() != next.len() || row >= df.height() { return None; }
+    next.copy_from_slice(chain);
+    let mut at = 0;
+    for own in &plan.nodes {
+        let begin = at;
+        let (state, _) = super::state::chain_node(chain, &mut at, plan.span)?;
+        let (done, pending) = next.split_at_mut(begin);
+        let hidden = |name: &str, wanted: usize| ring_value(plan, done, name, wanted, row);
+        let cmd = as_command(own.node())?;
+        if resume_of(&cmd) != Resume::Step { return None; }
+        let (next_state, ring) = super::state::chain_part_mut(pending, state.len(), plan.span)?;
+        let value = super::state::planned_step(df, &super::bound(&cmd), state, row, next_state, |slot, default, wanted| {
+            match crate::exec::operand(&cmd.series, slot) {
+                Some(n) => super::row::evaluate(df, n, wanted, &hidden)?.float(),
+                None => super::row::column(df, default, wanted)?.float(),
+            }
+        })?;
+        ring.copy_within(1.., 0);
+        ring[plan.span - 1] = value;
+    }
+    if at != chain.len() { return None; }
+    super::row::evaluate(df, &plan.top, row, &|name, wanted| ring_value(plan, next, name, wanted, row))?.float()
+}
+
+fn ring_value(plan: &ChainPlan, words: &[f64], name: &str, wanted: usize, row: usize) -> Option<f64> {
+    let k = plan.names.iter().position(|n| n == name)?;
+    let mut at = 0;
+    for i in 0..=k {
+        let (_, ring) = super::state::chain_node(words, &mut at, plan.span)?;
+        if i == k { return ring.get(plan.span.checked_sub(row - wanted + 1)?).copied(); }
+    }
+    None
 }

@@ -171,15 +171,16 @@ highest class among its parts.
 
 - **Declared directives** (`max_lookback=[...]`) are computed at construction over every
   row given — the whole history — and cached. A recursive one keeps a **checkpoint** of
-  its history: its carried state as of a row before the retained rows, plus the inputs a
-  resume reads before its first row. It moves with each drop of the head, and whenever
-  the column has to be recomputed (after a write, a re-sent row the state cannot follow,
-  a run of missing values) the frame replays from it — never restarting the recursion on
-  the rows it holds. A recursion no carried state covers — one inside an `@` operand
-  (`'ema:5@(rsi:5)'`) or combined with other values (`'ema:3 - ema:5'`,
-  `'close > ema:20'`), or a command that recomputes it (`crsi`,
-  `stoch_momentum`) — cannot be kept and is rejected at construction:
-  declare the recursions it combines and combine their columns.
+  its history: the same continuation state used for append refresh, including every
+  stateful node's kernel state, complete input tail and output ring. It moves with each
+  drop of the head. A write replays the directive from that state; missing rows emit
+  NaN and leave a recursion at its last complete row. During warm-up the checkpoint
+  retains the raw input rows until all nodes have a state.
+  Declared chains such as `'ema:5@(rsi:5)'`, `'ema:3 - ema:5'`, `'close > ema:20'`,
+  `'ema:2@(maxindex:2)'` and `'close-ma:5+obv'` stay exact across appends, compaction
+  and visible writes, including on time-frame frames. A recursive command without a
+  continuation (`crsi`, `stoch_momentum`, or a composite average at a recursive MA
+  type) anywhere in a directive is still rejected; compute it on an unbounded frame.
 - **A directive requested later** (`wf[d]`, `wf[[...]]`, `wf.exec(d)`) is computed only
   when it is of class 1 and reads at most `max_lookback` rows before each row. Classes 2
   and 3 must be declared; a later request raises, naming the two correct paths (for a

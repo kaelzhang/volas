@@ -335,14 +335,14 @@
             Some(9.0)
         });
         assert_eq!(got, Some(9.0));
-        df2.update_computed_f64_value("close", 9, 9.0).unwrap();
+        df2.update_computed_value("close", 9, 9.0).unwrap();
         assert_eq!((meta(&df2).state, meta(&df2).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
         // declined: untouched
         assert_eq!(df2.step_computed_state("close", |_, _, _, _| None), None);
         assert_eq!((meta(&df2).state, meta(&df2).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
         // a Vec resume of one row advances the same way
         let mut df3 = stale_last_row();
-        df3.update_computed_f64_value("close", 9, 9.0).unwrap();
+        df3.update_computed_value("close", 9, 9.0).unwrap();
         df3.advance_computed_state("close", vec![9.0]);
         assert_eq!((meta(&df3).state, meta(&df3).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
         df3.advance_computed_state("missing", vec![1.0]); // no-op
@@ -362,7 +362,7 @@
         let mut df = stale_last_row();
         // the row is written without advancing the state: the state now describes row 8
         // while the last valid row is 9
-        df.update_computed_f64_value("close", 9, 9.0).unwrap();
+        df.update_computed_value("close", 9, 9.0).unwrap();
         assert_eq!(df.computed_resume_state("close"), None);
         assert_eq!(df.step_computed_state("close", |_, _, _, _| Some(1.0)), None);
         // a later valid write with the state before it is advanced again
@@ -388,7 +388,7 @@
             next[0] = 9.5;
             Some(9.5)
         });
-        df.update_computed_f64_value("close", 9, 9.5).unwrap();
+        df.update_computed_value("close", 9, 9.5).unwrap();
         assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![9.5]), Some(vec![8.0])));
         // a replacement without a state before it leaves none
         df.set_computed_states("close", Some(vec![9.5]), None);
@@ -448,17 +448,17 @@
         let mut df = stale_last_row();
         let before = df.column("close").unwrap().clone();
         assert!(df.update_computed_tail("close", 9, &Column::f64(vec![1.0, 2.0])).is_err());
-        assert!(df.update_computed_f64_value("close", 10, 1.0).is_err());
+        assert!(df.update_computed_value("close", 10, 1.0).is_err());
         assert!(df.update_computed_tail("close", usize::MAX, &Column::f64(vec![1.0])).is_err());
         df.invalidate_computed_on_write("x"); // valid_rows 0
-        assert!(df.update_computed_f64_value("close", 5, 1.0).is_err());
+        assert!(df.update_computed_value("close", 5, 1.0).is_err());
         assert!(df.column("close").unwrap().equals(&before));
         assert_eq!(meta(&df).valid_rows, 0);
         // a contiguous write moves the cursor to its end only
         df.update_computed_tail("close", 0, &Column::f64(vec![0.0; 4])).unwrap();
         assert_eq!(meta(&df).valid_rows, 4);
         // an earlier rewrite keeps the cursor
-        df.update_computed_f64_value("close", 1, 7.0).unwrap();
+        df.update_computed_value("close", 1, 7.0).unwrap();
         assert_eq!(meta(&df).valid_rows, 4);
         // a data column has no cursor to move
         df.update_computed_tail("x", 0, &Column::f64(vec![5.0])).unwrap();

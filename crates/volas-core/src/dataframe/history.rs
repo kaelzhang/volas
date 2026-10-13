@@ -33,15 +33,12 @@ pub enum History {
     /// Class 3, a count over a trailing window (`increase`): declared only, and kept by
     /// recomputing its window.
     Counted,
-    /// Class 3, a recursion carried by the state of its top command alone, whose `@`
-    /// operands are of classes 1–2 or counts and read `operands` rows before a row: a
-    /// frame that dropped its history's head keeps it exactly with a [`Checkpoint`].
+    /// Class 3, kept by the directive's continuation state (Own or Chain).
     Carried {
-        /// The rows an operand reads before its own (the largest lookback among them).
+        /// Frame rows the continuation reads before a new row, beyond its carried tails.
         operands: usize,
     },
-    /// Class 3 in a form no carried state covers (a recursion inside an operand or a
-    /// composite, or a recursive command without a carried state): a frame that does not
+    /// Class 3 with a recursive command that has no continuation: a frame that does not
     /// hold the whole history cannot recompute it.
     Unkept,
 }
@@ -73,12 +70,11 @@ pub struct Checkpoint {
     pub at: usize,
     /// The column's carried state as of that row (as of its last complete row up to
     /// it); `None` while the history up to it is too short to define one (inside the
-    /// warm-up), when [`inputs`](Self::inputs) hold every complete row of it instead.
+    /// warm-up), when [`raw`](Self::raw) holds every raw row of it instead.
     pub state: Option<Vec<f64>>,
-    /// Each input slot the command reads, with its values on the last complete rows up
-    /// to [`at`](Self::at), oldest first: as many as a resume reads before its first
-    /// row (fewer when the history has fewer) — or, without a state, all of them.
-    pub inputs: Vec<(usize, Vec<f64>)>,
+    /// Raw frame columns from the history's start while the continuation is warming
+    /// up. The directive owns their meaning; core only stores them.
+    pub raw: Vec<(String, Column)>,
 }
 
 impl DataFrame {

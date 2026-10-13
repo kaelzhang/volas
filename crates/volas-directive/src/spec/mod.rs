@@ -330,6 +330,8 @@ pub struct CommandSpec {
     lookback: LookbackRule,
     emits_position: bool,
     reads_past: bool,
+    resume_before: usize,
+    resume_inputs: Option<Lookback>,
     /// A count over its window (`increase`): class 3 by R13, kept by its window.
     counted: bool,
     resume: Resume,
@@ -356,6 +358,8 @@ impl CommandSpec {
             lookback: LookbackRule::Fixed(0),
             emits_position: false,
             reads_past: false,
+            resume_before: 0,
+            resume_inputs: None,
             counted: false,
             resume: Resume::Recompute,
             resume_unless: None,
@@ -384,6 +388,7 @@ impl CommandSpec {
     /// Recursive whatever its arguments.
     pub(crate) fn recursive(mut self) -> Self {
         self.history = HistoryRule::Fixed(History::Recursive);
+        self.resume_before = 1;
         self
     }
 
@@ -493,6 +498,22 @@ impl CommandSpec {
     /// Whether continuing it reads one row more than its lookback.
     pub fn reads_past(&self) -> bool {
         self.reads_past || self.accumulates()
+    }
+
+    /// Complete input rows a resume reads before its first new row.
+    pub fn resume_reach(&self, args: &[ArgValue]) -> usize {
+        if let Some(reads) = self.resume_inputs { return reads(args); }
+        if self.reads_past() { self.lookback_of(args) + 1 } else { self.resume_before }
+    }
+
+    pub(crate) fn resume_rows(mut self, rows: usize) -> Self {
+        self.resume_before = rows;
+        self
+    }
+
+    pub(crate) fn resume_inputs(mut self, reads: Lookback) -> Self {
+        self.resume_inputs = Some(reads);
+        self
     }
 
     /// The resume it has under the bound arguments `args`.

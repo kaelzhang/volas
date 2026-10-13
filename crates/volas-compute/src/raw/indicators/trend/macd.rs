@@ -155,7 +155,7 @@ pub fn macd_resume_one(
     next: &mut [f64],
 ) -> Option<f64> {
     let (fast, slow) = oscillator_periods(fast, slow);
-    if row == 0 || state.len() != 2 || next.len() != 2 || row >= close.len() {
+    if state.len() != 2 || next.len() != 2 || row >= close.len() {
         return None;
     }
     let (kf, ks) = (ema_k(fast), ema_k(slow));
@@ -183,7 +183,7 @@ pub fn macd_signal_resume_one(
     next: &mut [f64],
 ) -> Option<f64> {
     let (fast, slow) = oscillator_periods(fast, slow);
-    if row == 0 || state.len() != 3 || next.len() != 3 || row >= close.len() {
+    if state.len() != 3 || next.len() != 3 || row >= close.len() {
         return None;
     }
     let (kf, ks, ksig) = (ema_k(fast), ema_k(slow), ema_k(signal));

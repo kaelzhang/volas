@@ -333,8 +333,11 @@ def test_ultosc_with_unordered_periods_refreshes_like_the_full_compute(directive
     assert _same(df[directive], _frame(cols, 0, 80)[directive])
 
 
-@_xfail('slice-resend-short', 'a re-sent last row of a slice holding just the lookback reads rows it lacks')
-@pytest.mark.parametrize('directive', ['ma:5', 'roc:3', 'pivot_points.r1', 'llv:4'])
+@pytest.mark.parametrize('directive', [
+    'roc:3',
+    *[pytest.param(d, marks=_xfail('slice-resend-short', 'the slice lacks the rows a resend reads'))
+      for d in ['ma:5', 'pivot_points.r1', 'llv:4']],
+])
 def test_a_re_sent_last_row_of_a_lookback_long_slice_is_exact(directive):
     cols = _walk(40)
     keep = volas.directive_lookback(directive)

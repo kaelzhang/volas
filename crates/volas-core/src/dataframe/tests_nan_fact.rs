@@ -117,13 +117,13 @@ fn update_computed_tail_writing_a_nan() {
 }
 
 #[test]
-fn update_computed_f64_value_writing_and_clearing_a_nan() {
+fn update_computed_value_writing_and_clearing_a_nan() {
     let mut df = known_clean();
-    df.update_computed_f64_value("c", 2, NAN).unwrap();
+    df.update_computed_value("c", 2, NAN).unwrap();
     assert!(df.column("c").unwrap().has_nan());
-    df.update_computed_f64_value("c", 2, 1.0).unwrap();
+    df.update_computed_value("c", 2, 1.0).unwrap();
     assert!(!df.column("c").unwrap().has_nan());
-    df.update_computed_f64_value("c", 0, 2.0).unwrap();
+    df.update_computed_value("c", 0, 2.0).unwrap();
     assert_eq!(df.column("c").unwrap().known_has_nan(), Some(false));
 }
 

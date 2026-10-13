@@ -34,8 +34,7 @@ SHAPES = sorted(set(_RECURSIVE + _FINITE + _STATELESS + _OPERANDS + _BOOLEAN))
 # Recursions no carried state covers — a command that recomputes (no carried state), a
 # recursion inside an `@` operand or combined with other values: a windowed frame
 # cannot keep them exact, so declaring one raises.
-_UNKEPT = {"crsi", "stoch_momentum", "stoch_momentum.signal", "ema:5@(rsi:5)",
-           "(ema:5 > ma:10) & (close > open)"}
+_UNKEPT = {"crsi", "stoch_momentum", "stoch_momentum.signal"}
 
 
 def _bar(i, salt=0.0):

@@ -6,16 +6,15 @@
 //! this step (a plain append, a replaced last row, a time-frame forming row), writing the
 //! advanced state into a buffer it keeps, so the live path allocates nothing.
 
-use std::cell::Cell;
 
 use crate::exec::{arg_f64, arg_usize};
 use crate::operands::Operands;
 use crate::spec::Resume;
 use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
-use volas_core::{Column, DataFrame};
+use volas_core::DataFrame;
 
-use super::{as_command, bound, recursive, resume_of, window_start};
+use super::{as_command, bound, resume_of, window_start};
 
 /// One row of `node` at `row`, continued from `prev_state` (the state as of the last
 /// complete row before `row`): returns the row's value and writes the state as of `row`
@@ -30,18 +29,11 @@ pub fn execute_resume_step(
     df: &DataFrame,
     node: &Ast,
     prev_state: &[f64],
-    (row, since): (usize, usize),
+    (row, _since): (usize, usize),
     next: &mut [f64],
 ) -> Option<f64> {
     if super::chain::chained(node) {
-        // a step yields a float: a chain whose top is not one (a comparison's truth)
-        // declines, and the caller continues it through the `Vec` resume
-        let (value, chain) = super::chain::resume(df, node, prev_state, row, row + 1, since)?;
-        if !matches!(value, Column::F64(_)) || chain.len() != next.len() {
-            return None;
-        }
-        next.copy_from_slice(&chain);
-        return value.as_f64()?.first().copied();
+        return super::chain::step(df, node, prev_state, row, next);
     }
     if !matches!(node.continuation(), crate::types::Continuation::Own) {
         return None;
@@ -50,36 +42,14 @@ pub fn execute_resume_step(
     if resume_of(&cmd) != Resume::Step || next.len() != prev_state.len() || row >= df.height() {
         return None;
     }
-    let (name, sub, args) = (cmd.name.as_str(), cmd.sub.as_deref(), &cmd.args.values[..]);
     let start = window_start(node, &cmd, row);
-    if !recursive(&cmd) {
-        // a finite-window command resumes from its kernel's running sums
-        let ops = Operands::window(df, &cmd.series, start);
-        return super::window::step(&ops, name, sub, args, prev_state, row - start, next);
-    }
-    // Over the complete rows: a missing row is NaN, its state untouched.
-    let missing = Cell::new(false);
-    let out = crate::complete::resume_one(
-        df,
-        &bound(&cmd),
-        start,
-        (row, since),
-        || {
-            missing.set(true);
-            Some(f64::NAN)
-        },
-        |ops, row| step_of(ops, name, sub, args, prev_state, row, next),
-    );
-    if missing.get() {
-        next.copy_from_slice(prev_state);
-    }
-    out
+    super::state::step(df, &bound(&cmd), start, prev_state, row, next)
 }
 
 /// The step of the bound command `name` / `sub` at `row` over `ops` (see
 /// [`execute_resume_step`]).
 #[allow(clippy::too_many_arguments)] // the step's own inputs, passed through
-fn step_of(
+pub(super) fn step_of(
     ops: &Operands,
     name: &str,
     sub: Option<&str>,
@@ -211,10 +181,10 @@ fn step_of(
             let (h, l) = hl()?;
             ind::plus_dm_resume_one(&h, &l, p(0), row, prev, next)
         }
-        // the spec declares a step for nothing else
-        _ => {
+        ("minus_dm", _) => {
             let (h, l) = hl()?;
             ind::minus_dm_resume_one(&h, &l, p(0), row, prev, next)
         }
+        _ => None, // a Rows-only node has no scalar kernel
     }
 }

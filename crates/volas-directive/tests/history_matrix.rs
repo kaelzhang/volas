@@ -1,5 +1,5 @@
-//! Checkpoint-vs-full matrix: every output line a bounded frame keeps through a
-//! checkpoint (`History::Carried`), on every data class, from every cut.
+//! Checkpoint-vs-full matrix: every resumable output line, on every data class,
+//! from every cut, including carried recursions and finite-window nodes.
 //!
 //! A checkpoint captured over the rows before a cut, replayed over a frame that holds
 //! only the rows from the cut on (less the rows its operands read before), must give the
@@ -104,7 +104,11 @@ fn a_checkpoint_replays_every_carried_line_bit_exactly() {
     for line in &matrix::lines() {
         for text in matrix::variants(line) {
             let Ok(node) = parse(&text) else { panic!("{text} does not parse") };
-            let History::Carried { operands } = reach(&node).history else { continue };
+            if matches!(node.continuation(), volas_directive::types::Continuation::None) { continue; }
+            let operands = match reach(&node).history {
+                History::Carried { operands } => operands,
+                _ => lookback(&node),
+            };
             carried += 1;
             for data in &classes {
                 for why in check(&data.frame, &node, operands) {
@@ -209,7 +213,7 @@ fn a_directive_takes_its_highest_class() {
         ("ema:5", History::Carried { operands: 0 }),
         ("obv", History::Carried { operands: 0 }),
         ("rsi:5@open", History::Carried { operands: 0 }),
-        ("rsi:4@(ma:3)", History::Carried { operands: 2 }),
+        ("rsi:4@(ma:3)", History::Carried { operands: 0 }),
         ("ema:4@(high + low)", History::Carried { operands: 0 }),
         ("ema:4@(increase:2)", History::Carried { operands: 2 }),
         ("roc:5", History::Window),
@@ -220,10 +224,10 @@ fn a_directive_takes_its_highest_class() {
         ("close > ma:3", History::Accumulator),
         ("increase:3", History::Counted),
         ("increase:2 & (close > ma:3)", History::Counted),
-        ("ema:3@(rsi:5)", History::Unkept),
-        ("ma:3@(ema:2)", History::Unkept),
-        ("ema:3 - ema:5", History::Unkept),
-        ("close > ema:5", History::Unkept),
+        ("ema:3@(rsi:5)", History::Carried { operands: 0 }),
+        ("ma:3@(ema:2)", History::Carried { operands: 0 }),
+        ("ema:3 - ema:5", History::Carried { operands: 0 }),
+        ("close > ema:5", History::Carried { operands: 0 }),
         ("kcw", History::Carried { operands: 0 }),
         ("crsi", History::Unkept),
         ("stoch_momentum", History::Unkept),
@@ -244,10 +248,10 @@ fn frame(close: Vec<f64>) -> DataFrame {
         .slice_data(0, n)
 }
 
-/// Inside the warm-up a checkpoint has no state: it keeps every complete row of the
+/// Inside the warm-up a checkpoint has no state: it keeps every raw row of the
 /// history, and the replay computes the whole history from them.
 #[test]
-fn a_warm_up_checkpoint_keeps_every_complete_row() {
+fn a_warm_up_checkpoint_keeps_every_raw_row() {
     let close: Vec<f64> = (0..40).map(|i| 50.0 + (i as f64 * 0.7).sin()).collect();
     let mut gappy = close.clone();
     gappy[1] = f64::NAN;
@@ -255,46 +259,49 @@ fn a_warm_up_checkpoint_keeps_every_complete_row() {
     let node = parse("ema:10").unwrap();
     let cp = capture(&df, &node, 4).unwrap();
     assert!(cp.state.is_none());
-    assert_eq!(cp.inputs, vec![(0, vec![df.column("close").unwrap().get_f64(0), close[2], close[3]])]);
+    assert_eq!(cp.raw[0].0, "close");
+    assert!(first_diff(&cp.raw[0].1.to_f64_vec(), &df.column("close").unwrap().to_f64_vec()[..4]).is_none());
     let (got, next) = replay(&df.slice_data(4, 40), &node, &cp, 36).unwrap();
     let want = execute(&df, &node).unwrap().to_f64_vec();
     assert!(first_diff(&got.to_f64_vec(), &want[4..]).is_none());
     assert!(next.state.is_some());
     // a replay with nothing after the checkpoint keeps it
     let (none, same_cp) = replay(&df.slice_data(4, 40), &node, &cp, 0).unwrap();
-    assert_eq!((none.len(), same_cp), (0, cp));
+    assert_eq!(none.len(), 0);
+    assert_eq!(same_cp.at, cp.at);
+    assert_eq!(same_cp.state, cp.state);
 }
 
-/// A replay that cannot run declines: not a recursion, a frame not holding the row
-/// after the checkpoint, an input that is not the one recorded, an unreadable input.
+/// A replay that cannot run declines: no continuation, a frame not holding the row
+/// after the checkpoint, a malformed state, or an unreadable input.
 #[test]
 fn a_replay_that_cannot_run_declines() {
     let df = frame((0..40).map(|i| 50.0 + (i as f64 * 0.7).sin()).collect());
     let ema = parse("ema:5").unwrap();
     let cp = capture(&df, &ema, 10).unwrap();
-    assert!(capture(&df, &parse("ma:5").unwrap(), 10).is_none()); // not a recursion
+    assert!(capture(&df, &parse("crsi").unwrap(), 10).is_none()); // no continuation
     assert!(capture(&df, &ema, 0).is_none());
     assert!(capture(&df, &ema, 41).is_none());
-    assert!(replay(&df, &parse("ma:5").unwrap(), &cp, 40).is_none());
+    assert!(replay(&df, &parse("crsi").unwrap(), &cp, 40).is_none());
     assert!(replay(&df.slice_data(11, 40), &ema, &cp, 29).is_none()); // starts after the row
     assert!(replay(&df, &ema, &cp, 41).is_none()); // past the frame
     assert!(replay(&df, &ema, &cp, 5).is_none()); // ends before the checkpoint
     let atr = parse("atr:5").unwrap();
     assert!(replay(&df, &atr, &cp, 40).is_none()); // reads high / low: no column
     let mut other = cp.clone();
-    other.inputs[0].0 = 3;
-    assert!(replay(&df, &ema, &other, 40).is_none()); // another input slot
+    other.state.as_mut().unwrap().push(0.0);
+    assert!(replay(&df, &ema, &other, 40).is_none()); // malformed serialized state
     assert!(capture(&df, &atr, 10).is_none());
-    // from a carried state: a frame without the resume's reach of complete rows before the
-    // row cannot vouch for the history, unless it holds all of it
+    // A carried state includes its input tail; without a state, only whole history
+    // can supply a warm-up checkpoint's raw rows.
     let state = cp.state.clone();
-    assert!(checkpoint(&df.slice_data(9, 40), &ema, state.clone(), 1, false).is_none());
+    assert!(checkpoint(&df.slice_data(9, 40), &ema, state.clone(), 1, false).is_some());
     assert!(checkpoint(&df.slice_data(0, 40), &ema, None, 1, false).is_none());
     assert_eq!(checkpoint(&df, &ema, None, 1, true).unwrap().state, None);
     assert!(checkpoint(&df, &ema, state.clone(), 0, true).is_none());
     assert!(checkpoint(&df, &ema, state.clone(), 41, true).is_none());
-    assert!(checkpoint(&df, &parse("ma:5").unwrap(), state.clone(), 10, true).is_none());
-    assert!(checkpoint(&df, &atr, state, 10, true).is_none());
+    assert!(checkpoint(&df, &parse("crsi").unwrap(), state.clone(), 10, true).is_none());
+    assert!(replay(&df, &atr, &checkpoint(&df, &atr, state, 10, true).unwrap(), 40).is_none());
 }
 
 /// A line without a recursion depends on its lookback's rows alone: computed over just

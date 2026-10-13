@@ -233,9 +233,9 @@ fn scalar_resume_one_guards_and_inline_branches() {
     assert!(ind::t3_resume_one(&d, 5, 0.7, 1, &[1.0; 5], &mut n[..6]).is_none());
     assert!(ind::t3_resume_one(&d, 5, 0.7, 60, &[1.0; 6], &mut n[..6]).is_none());
     assert!(ind::kama_resume_one(&d, 5, 5, &s2, &mut n[..2]).is_none()); // row <= period
-    assert!(ind::macd_resume_one(&c, 12, 26, 0, &s2, &mut n[..2]).is_none());
+    assert!(ind::macd_resume_one(&c, 12, 26, 0, &s2, &mut n[..2]).is_some());
     assert!(
-        ind::macd_signal_resume_one(&c, 12, 26, 9, false, 0, &[1.0; 3], &mut n[..3]).is_none()
+        ind::macd_signal_resume_one(&c, 12, 26, 9, false, 0, &[1.0; 3], &mut n[..3]).is_some()
     );
     assert!(ind::sar_resume_one(&h, &l, 0.02, 0.2, 1, &[1.0; 6], &mut n[..6]).is_none());
     assert!(ind::sar_resume_one(&h, &l, 0.02, 0.2, 2, &[1.0; 5], &mut n[..6]).is_none());

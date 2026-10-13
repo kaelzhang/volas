@@ -188,11 +188,9 @@ impl PyDataFrame {
     fn unkept(&self, node: &Ast, text: &str) -> Option<PyErr> {
         (volas_directive::lookback::history(node) == History::Unkept).then(|| {
             PyValueError::new_err(format!(
-                "cannot keep '{text}' exact on a windowed frame: it depends on every row \
-                 before through a recursion no carried state covers (one inside an operand or \
-                 combined with other values, or a command that recomputes it), so a frame that \
-                 drops its oldest rows cannot recompute it. Declare the recursive directives it \
-                 combines and combine their columns, or compute it on an unbounded frame."
+                "cannot keep '{text}' exact on a windowed frame: it contains a recursive command \
+                 without a continuation state, so a frame that drops its oldest rows cannot \
+                 recompute it. Compute it on an unbounded frame."
             ))
         })
     }

@@ -6,7 +6,7 @@
 //! after a full compute; `execute_resume` continues over only the new tail rows and
 //! `execute_resume_step` one row at a time, bit-identical to a fresh full recompute.
 //! Which of them a command line has is its spec's fact ([`Resume`]); a line without one
-//! (or a composite expression) returns `None`, and the caller recomputes.
+//! without a continuation returns `None`, and the caller recomputes.
 //!
 //! A continuation reads a trailing window of the frame — its lookback twice over, see
 //! [`window_start`] — so its cost is the window's, not the frame's height.
@@ -26,6 +26,8 @@ mod initial_state;
 mod resume;
 mod scalar;
 mod states;
+mod state;
+mod row;
 mod window;
 
 pub use history::{capture, checkpoint, replay};
@@ -78,14 +80,9 @@ fn recursive(cmd: &Command<Bound>) -> bool {
     cmd.args.spec.history(&cmd.args) == History::Recursive
 }
 
-/// The first frame row a continuation of `node` from `row` reads: twice its lookback
-/// plus one before `row` — the rows its own window and its `@` operands' windows need,
-/// with margin — when its operands can be evaluated over a trailing window
-/// ([`crate::lookback::evaluates_on_a_window`]); row 0 otherwise (a recursive operand depends on every
-/// row before).
-fn window_start(node: &Ast, cmd: &Command<Bound>, row: usize) -> usize {
-    if !cmd.series.iter().all(crate::lookback::evaluates_on_a_window_node) {
-        return 0;
-    }
+/// The first frame row read by a continuation: a bounded operand window. Binding
+/// excludes recursive operands without carried state, so no resume reads from row 0
+/// merely because its inputs contain a missing row.
+fn window_start(node: &Ast, _cmd: &Command<Bound>, row: usize) -> usize {
     row.saturating_sub(2 * (lookback(node) + 1))
 }

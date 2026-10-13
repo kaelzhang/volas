@@ -8,7 +8,7 @@ use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
 use volas_core::DataFrame;
 
-use super::{as_command, recursive, resume_of};
+use super::{as_command, bound, recursive, resume_of};
 
 /// The carried state of `node` as of `df`'s row `end - 1` (`end` at most the frame's
 /// height): what a full computation over the rows `[0, end)` ends with, read in place
@@ -33,10 +33,12 @@ pub fn initial_state(df: &DataFrame, node: &Ast, end: usize) -> Option<Vec<f64>>
     let end = end.min(df.height());
     let (name, sub, args) = (cmd.name.as_str(), cmd.sub.as_deref(), &cmd.args.values[..]);
     if recursive(&cmd) {
-        return crate::complete::state(df, &cmd.series, end, |ops| state_of(ops, name, sub, args));
+        let kernel = crate::complete::state(df, &cmd.series, end, |ops| state_of(ops, name, sub, args))?;
+        return super::state::capture(df, &bound(&cmd), end, kernel, true);
     }
     let ops = Operands::rows(df, &cmd.series, 0, end);
-    super::window::state(&ops, name, sub, args).or_else(|| state_of(&ops, name, sub, args))
+    let kernel = super::window::state(&ops, name, sub, args).or_else(|| state_of(&ops, name, sub, args))?;
+    super::state::capture(df, &bound(&cmd), end, kernel, false)
 }
 
 /// The final state of the bound command `name`/`sub` over every row `ops` reads.

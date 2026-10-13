@@ -100,7 +100,7 @@ impl PyDataFrame {
                     volas_directive::exec::execute_resume_step(live, node, prev, (row, since), next)
                 });
                 let Some(value) = value else { break };
-                self.inner.update_computed_f64_value(name, row, value).map_err(pyerr)?;
+                self.inner.update_computed_value(name, row, value).map_err(pyerr)?;
                 if pending == Some(self.inner.origin() + row) {
                     self.keep_pending(name, node, row + 1, held);
                 }
@@ -278,19 +278,24 @@ impl PyDataFrame {
         let stop = pending.and_then(|p| p.checked_sub(df.origin())).filter(|&t| t >= from && t + 2 < height);
         let mut ends: Vec<usize> = stop.map(|t| t + 1).into_iter().collect();
         ends.extend([height - 1, height]);
-        let mut tail = volas_core::Column::f64(Vec::new());
+        let mut tail: Option<volas_core::Column> = None;
         let mut points = Vec::with_capacity(ends.len());
         let mut at = checkpoint.clone();
         for end in ends {
             let (part, next) = volas_directive::exec::replay(df, node, &at, end).ok_or_else(fail)?;
-            tail.append(&part).map_err(pyerr)?;
+            if !part.is_empty() {
+                match &mut tail {
+                    Some(tail) => tail.append(&part).map_err(pyerr)?,
+                    None => tail = Some(part),
+                }
+            }
             points.push(next.clone());
             at = next;
         }
         let kept = pending.and_then(|p| points.iter().find(|cp| cp.at == p).cloned());
         let (last, before) = (points.pop().expect("the last row"), points.pop().expect("the row before"));
         self.inner
-            .continue_computed(name, from, &tail, last.state, before.state)
+            .continue_computed(name, from, &tail.expect("a replay advances rows"), last.state, before.state)
             .map_err(pyerr)?;
         if kept.is_some() {
             self.inner.set_computed_pending(name, kept);

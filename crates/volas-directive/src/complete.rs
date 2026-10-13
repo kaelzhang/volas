@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 
-use volas_compute::missing::{CompleteRows, Input, ResumeRows};
+use volas_compute::missing::{CompleteRows, Input};
 use volas_core::{Column, DataFrame, Result};
 
 use crate::operands::Operands;
@@ -33,7 +33,7 @@ pub(crate) struct BoundCommand<'a> {
 impl BoundCommand<'_> {
     /// How many rows before its first new row a resume of the command reads, at most.
     pub(crate) fn reach(&self) -> usize {
-        self.spec.lookback_of(self.args) + 1
+        self.spec.resume_reach(self.args)
     }
 }
 
@@ -153,124 +153,6 @@ pub(crate) fn state(
     on_complete_rows(df, series, end, run, |out, _, _| out)
 }
 
-/// Whether the resume `ops` just ran read every input's rows `[from - reach, end)`
-/// complete (see [`ResumeRows::in_place`]) — free for a column known complete, and with
-/// no allocation for a frame column (the live single-row refresh runs this per row).
-fn read_in_place(ops: &Operands, cmd: &BoundCommand, from: usize, end: usize) -> bool {
-    let mut reach = None; // only needed for an input that must be scanned
-    ops.reads().all(|(slot, read)| {
-        let r = Recorded { slot, values: Cow::Borrowed(read.view()), has_nan: read.known_has_nan() };
-        r.has_nan == Some(false)
-            || ResumeRows::in_place(r.input(end), from, *reach.get_or_insert_with(|| cmd.reach()))
-    })
-}
-
-/// Whether a resume over gathered complete rows lacks history it reads: fewer complete
-/// rows before its first new row than it may read, while the column's history (from the
-/// absolute row `since`) starts before the frame's row 0 — the rows it needs were dropped
-/// with the frame's head. It then declines; the caller replays from the column's
-/// checkpoint instead. A frame holding the whole history lacks nothing: fewer rows are
-/// all the series has.
-fn lacks_history(df: &DataFrame, cmd: &BoundCommand, rows: &ResumeRows, since: usize) -> bool {
-    rows.from < cmd.reach() && df.origin() > since
-}
-
-/// Resume a recursive command over the new rows `[from, end)` from `prev_state`, on the
-/// complete rows only: a missing new row is NaN and leaves the state where the last
-/// complete row put it. `run(operands, from, out)` appends to `out` through its resume
-/// arm, over the rows the operands read: `[start, end)` (a trailing window, see [`Operands::rows`]) — or, when
-/// that window holds a missing row, `[0, end)` (the complete rows the resume reads before
-/// its new ones may lie before the window). The column's history starts at the absolute
-/// row `since`.
-///
-/// The arm runs in place first: when every input it read is known complete, or the
-/// rows it read turn out complete, that is the answer. Otherwise it runs again over the
-/// complete rows of the same inputs — declining when the frame dropped complete rows of
-/// the history it reads ([`lacks_history`]).
-pub(crate) fn resume(
-    df: &DataFrame,
-    cmd: &BoundCommand,
-    start: usize,
-    prev_state: &[f64],
-    (from, end, since): (usize, usize, usize),
-    out: &mut Vec<f64>,
-    run: impl Fn(&Operands, usize, &mut Vec<f64>) -> Option<Vec<f64>>,
-) -> Option<Vec<f64>> {
-    let ops = Operands::rows(df, cmd.series, start.min(from), end);
-    let (start, n) = (ops.start(), ops.len());
-    let local = from - start;
-    let at = out.len();
-    let next = run(&ops, local, out);
-    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, local, n) {
-        if next.is_none() {
-            out.truncate(at);
-        }
-        return next;
-    }
-    out.truncate(at);
-    if start > 0 {
-        return resume(df, cmd, 0, prev_state, (from, end, since), out, run);
-    }
-    let recorded = recorded(&ops, false);
-    let refs: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..n]).collect();
-    let rows = ResumeRows::of(&refs, from, cmd.reach());
-    if !rows.has_new() {
-        out.resize(at + end - from, f64::NAN);
-        return Some(prev_state.to_vec());
-    }
-    if lacks_history(df, cmd, &rows, since) {
-        return None;
-    }
-    let gathered = over(&ops, df, cmd.series, &recorded, |v| {
-        Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
-    });
-    let mut values = Vec::new();
-    let st = run(&gathered, rows.from, &mut values)?;
-    rows.scatter(n, from, values, out);
-    Some(st)
-}
-
-/// Resume a recursive command at the single row `row` (the scalar twin of [`resume`]):
-/// `missing` when that row is missing, else `run(operands, row)` on the complete rows,
-/// over the rows from `start` on (as there, the whole frame when that window holds a
-/// missing row; declining like it when the frame dropped history it reads, `since` as
-/// there). The arm runs in place first and its answer stands when the rows it read are
-/// complete; an `@` operand is evaluated once.
-pub(crate) fn resume_one<T>(
-    df: &DataFrame,
-    cmd: &BoundCommand,
-    start: usize,
-    (row, since): (usize, usize),
-    missing: impl FnOnce() -> Option<T>,
-    mut run: impl FnMut(&Operands, usize) -> Option<T>,
-) -> Option<T> {
-    let ops = Operands::window(df, cmd.series, start.min(row));
-    let start = ops.start();
-    let out = run(&ops, row - start);
-    // The rows up to and including `row` (an out-of-range `row` resumes in place, where
-    // the arm declines it).
-    let end = (row + 1).min(df.height()) - start;
-    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, row - start, end) {
-        return out;
-    }
-    if start > 0 {
-        return resume_one(df, cmd, 0, (row, since), missing, run);
-    }
-    let recorded = recorded(&ops, false);
-    let upto: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..end]).collect();
-    let rows = ResumeRows::of(&upto, row, cmd.reach());
-    if !rows.has_new() {
-        return missing();
-    }
-    if lacks_history(df, cmd, &rows, since) {
-        return None;
-    }
-    let gathered = over(&ops, df, cmd.series, &recorded, |v| {
-        Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
-    });
-    run(&gathered, rows.from)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::exec::{execute, execute_resume_step, initial_state};
@@ -349,12 +231,10 @@ mod tests {
         assert_eq!(next, st);
     }
 
-    /// A resume over gathered complete rows reads `reach` of them before its first new
-    /// row: on a frame that dropped its history's head (the history starts before row 0)
-    /// with fewer of them held — a run of missing rows reaching the frame's start — it
-    /// declines, scalar and `Vec` alike; on a frame holding the whole history it runs.
+    /// A resume carries the complete rows its kernel needs, so a dropped head and a
+    /// missing run no longer force either scalar or Vec resume to restart the history.
     #[test]
-    fn a_resume_lacking_dropped_history_declines() {
+    fn a_resume_carries_dropped_complete_history() {
         use crate::exec::execute_resume;
         let n = 40;
         let mut open: Vec<f64> = (0..n).map(|i| 40.0 + (i as f64 * 0.3).cos()).collect();
@@ -366,8 +246,8 @@ mod tests {
         // the frame keeps rows 18.. (origin 18): two complete rows before row 30
         let kept = frame(open.clone()).slice_data(18, n);
         let mut next = vec![0.0; st.len()];
-        assert!(execute_resume(&kept, &node, &st, 12, kept.height(), 0).is_none());
-        assert!(execute_resume_step(&kept, &node, &st, (12, 0), &mut next).is_none());
+        assert!(execute_resume(&kept, &node, &st, 12, kept.height(), 0).is_some());
+        assert!(execute_resume_step(&kept, &node, &st, (12, 0), &mut next).is_some());
         // the history starts at row 18: nothing is missing, the resume runs
         assert!(execute_resume(&kept, &node, &st, 12, kept.height(), 18).is_some());
         assert!(execute_resume_step(&kept, &node, &st, (12, 18), &mut next).is_some());

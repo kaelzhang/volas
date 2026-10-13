@@ -398,6 +398,25 @@ pub fn sum_step(data: &[f64], period: usize, row: usize, state: &[f64], next: &m
     sum_row(period, row, |j| data[j], state, next)
 }
 
+/// One extremum-position tracker step, preserving the full tracker's tie and missing
+/// window rules. The state is the absolute index and value of the retained extreme.
+pub fn index_resume_one(data: &[f64], period: usize, row: usize, origin: usize, max: bool, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    if period == 0 || row + 1 < period || row >= data.len() || state.len() != 2 || next.len() != 2 { return None; }
+    let trailing = row + 1 - period;
+    let mut index = state[0] as usize;
+    let mut value = state[1];
+    let better = |a: f64, b: f64| if max { a >= b } else { a <= b };
+    if index < origin + trailing {
+        value = data[trailing];
+        index = origin + trailing;
+        for (i, &v) in data.iter().enumerate().take(row + 1).skip(trailing + 1) {
+            if better(v, value) { value = v; index = origin + i; }
+        }
+    } else if better(data[row], value) { value = data[row]; index = origin + row; }
+    next.copy_from_slice(&[index as f64, value]);
+    Some(position(data, trailing, row, index))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

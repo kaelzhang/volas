@@ -51,7 +51,7 @@ pub(crate) fn resume_into(
     prev_state: &[f64],
     from_row: usize,
     end: usize,
-    since: usize,
+    _since: usize,
     out: &mut Vec<f64>,
 ) -> Option<Vec<f64>> {
     if super::chain::chained(node) {
@@ -68,17 +68,10 @@ pub(crate) fn resume_into(
     }
     let bc = bound(&cmd);
     let start = window_start(node, &cmd, from_row);
-    if recursive(&cmd) {
-        // Over the complete rows: a missing new row is NaN, the state untouched.
-        return crate::complete::resume(df, &bc, start, prev_state, (from_row, end, since), out, |ops, from, out| {
-            resume_rows(ops, &bc, prev_state, from, df.origin() + ops.start(), out)
-        });
-    }
-    let ops = Operands::rows(df, &cmd.series, start, end);
-    if resume == Resume::Step {
-        return step_rows(&ops, &bc, prev_state, from_row - start, out);
-    }
-    resume_rows(&ops, &bc, prev_state, from_row - start, df.origin() + start, out)
+    super::state::resume(df, &bc, start, prev_state, from_row, end, out, |ops, kernel, from, out| {
+        if !recursive(&cmd) && resume == Resume::Step { step_rows(ops, &bc, kernel, from, out) }
+        else { resume_rows(ops, &bc, kernel, from, ops.origin(), out) }
+    })
 }
 
 /// Appends a finite-window command's rows `[from, len)` of `ops` to `out`, one step at a time.
@@ -745,7 +738,8 @@ mod tests {
     fn a_declined_sink_keeps_its_prefix_after_an_in_place_attempt() {
         let node = crate::parse("rsi:3@open").unwrap();
         let mut open: Vec<f64> = (0..40).map(|i| 40.0 + (i as f64 * 0.3).cos()).collect();
-        let state = super::super::initial_state(&frame(open.clone()), &node, 20).unwrap();
+        let mut state = super::super::initial_state(&frame(open.clone()), &node, 20).unwrap();
+        state.push(0.0); // an invalid serialized state declines without touching the sink
         open[20..30].fill(f64::NAN);
         let df = frame(open).slice_data(18, 40);
         let mut out = vec![-0.0];

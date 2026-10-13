@@ -38,11 +38,12 @@ unsafe impl GlobalAlloc for Counter {
 fn allocations(d: &str, height: usize) -> usize {
     let data: Vec<f64> = (0..height).map(|i| 100.0 + (i as f64 * 0.01).sin()).collect();
     let df = DataFrame::new(
-        vec!["close".into(), "high".into(), "low".into()],
+        vec!["close".into(), "high".into(), "low".into(), "volume".into()],
         vec![
             Column::f64(data.clone()),
             Column::f64(data.iter().map(|v| v + 1.0).collect()),
             Column::f64(data.iter().map(|v| v - 1.0).collect()),
+            Column::i64(vec![100; height]),
         ],
         None,
     ).unwrap();
@@ -74,5 +75,8 @@ fn single_row_allocation_budget() {
         assert_eq!(count, 0, "{d}");
     }
     assert_eq!(short, long);
-    assert!(short < 60_000, "chain must improve on 60 allocations per step");
+    assert_eq!(short, 0);
+    for d in ["close-ma:5+obv", "close>ema:5"] {
+        assert_eq!(allocations(d, 1000), 0, "{d}");
+    }
 }

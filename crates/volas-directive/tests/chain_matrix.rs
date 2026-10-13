@@ -12,6 +12,9 @@ use volas_directive::parse;
 
 const CHAINED: &[&str] = &[
     "ema:5@(ema:3)",
+    "ema:2@(maxindex:2)",
+    "ema:2@(minindex:2)",
+    "rsi:2@(maxindex:2)",
     "ma:5@(ema:3)",
     "rsi:5@(ema:4@(close+open))",
     "ema:5@(kama:4)",
@@ -55,7 +58,6 @@ fn a_chain_continues_bit_for_bit() {
         for &text in CHAINED {
             let node = parse(text).unwrap();
             let full = execute(df, &node).unwrap();
-            let truth = full.as_bool().is_some();
             let whole = values(&full);
             let (col, after, before) = execute_with_states(df, &node).unwrap();
             if !values(&col).iter().zip(&whole).all(|(a, b)| same(*a, *b)) {
@@ -71,16 +73,8 @@ fn a_chain_continues_bit_for_bit() {
             }
             for from in [40, 75, 119] {
                 let Some(mut chain) = initial_state(df, &node, from) else { continue };
-                if truth {
-                    // a step yields a float: a comparison's truth declines it (the
-                    // `Vec` resume below continues it)
-                    let mut next = chain.clone();
-                    if execute_resume_step(df, &node, &chain, (from, 0), &mut next).is_some() {
-                        fails.push(format!("{text} [{}] step at {from}: a truth stepped", data.name));
-                    }
-                }
                 // one row at a time
-                for (row, &want) in whole.iter().enumerate().skip(from).take_while(|_| !truth) {
+                for (row, &want) in whole.iter().enumerate().skip(from) {
                     let mut next = chain.clone();
                     match execute_resume_step(df, &node, &chain, (row, 0), &mut next) {
                         Some(v) if same(v, want) => chain = next,
@@ -90,7 +84,7 @@ fn a_chain_continues_bit_for_bit() {
                         }
                     }
                 }
-                if !truth && !same_chain(Some(&chain), initial_state(df, &node, n).as_ref()) {
+                if !same_chain(Some(&chain), initial_state(df, &node, n).as_ref()) {
                     fails.push(format!("{text} [{}] from {from}: stepped chain != fresh", data.name));
                 }
                 // several rows at once
@@ -128,19 +122,50 @@ fn a_chain_declines_what_does_not_fit_it() {
     assert!(execute_resume(df, &node, &chain, 60, 80, 0).is_some());
 }
 
-/// A recursion over an operand that recomputes (`crsi`) keeps no chain; its own state
-/// resumes over the operand evaluated from row 0, bit for bit the full computation.
+/// A Recompute command anywhere prevents a carried continuation.
 #[test]
-fn a_recursion_over_a_recomputed_operand_resumes_from_row_zero() {
-    let mut resumed = 0;
+fn a_recomputed_operand_has_no_continuation() {
+    let data = matrix::classes(120).remove(0);
+    let node = parse("ema:4@(crsi:3,2,5)").unwrap();
+    assert!(initial_state(&data.frame, &node, 90).is_none());
+    assert_eq!(volas_directive::lookback::history(&node), volas_core::History::Unkept);
+}
+
+#[test]
+fn chains_replay_from_a_window_checkpoint() {
+    use volas_directive::exec::{capture, checkpoint, replay};
     for data in matrix::classes(120) {
-        let df = &data.frame;
-        let node = parse("ema:4@(crsi:3,2,5)").unwrap();
-        let whole = values(&execute(df, &node).unwrap());
-        let Some(state) = initial_state(df, &node, 90) else { continue };
-        let (tail, _) = execute_resume(df, &node, &state, 90, 120, 0).expect("it resumes");
-        assert!(values(&tail).iter().zip(&whole[90..]).all(|(a, b)| same(*a, *b)), "[{}]", data.name);
-        resumed += 1;
+        for &text in CHAINED {
+            let node = parse(text).unwrap();
+            let whole = values(&execute(&data.frame, &node).unwrap());
+            for cut in [2, 40, 75, 100] {
+                let cp = capture(&data.frame, &node, cut).expect(text);
+                let span = match volas_directive::lookback::history(&node) {
+                    volas_core::History::Carried { operands } => operands,
+                    _ => volas_directive::lookback::lookback(&node) + 1,
+                };
+                let start = cut.saturating_sub(span);
+                let frame = data.frame.slice_data(start, 120);
+                let cp = if cp.state.is_some() {
+                    checkpoint(&frame, &node, cp.state, cut - start, false).unwrap()
+                } else { cp };
+                let (got, _) = replay(&frame, &node, &cp, frame.height()).unwrap_or_else(|| panic!("{text} [{}] {cut} replay declined", data.name));
+                assert!(values(&got).iter().zip(&whole[cut..]).all(|(a,b)| same(*a,*b)), "{text} [{}] {cut}", data.name);
+            }
+        }
     }
-    assert!(resumed > 3, "only {resumed} data classes resumed");
+}
+
+#[test]
+fn rows_only_chain_nodes_decline_scalar_execution() {
+    let df = matrix::classes(300).remove(0).frame;
+    for text in ["asi > 0", "kdj.k > 50", "ht_dcperiod > 20"] {
+        let node = parse(text).unwrap();
+        let state = initial_state(&df, &node, 200).unwrap();
+        let mut next = state.clone();
+        assert!(execute_resume_step(&df, &node, &state, (200, 0), &mut next).is_none());
+        let (got, _) = execute_resume(&df, &node, &state, 200, 300, 0).unwrap();
+        let full = values(&execute(&df, &node).unwrap());
+        assert!(values(&got).iter().zip(&full[200..]).all(|(a,b)| same(*a,*b)), "{text}");
+    }
 }

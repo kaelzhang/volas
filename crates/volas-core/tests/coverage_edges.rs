@@ -14,7 +14,7 @@ fn frame_with_computed_f64() -> DataFrame {
 #[test]
 fn computed_scalar_update_refreshes_valid_rows_and_reports_errors() {
     let mut df = frame_with_computed_f64();
-    df.update_computed_f64_value("value", 1, 8.0).unwrap();
+    df.update_computed_value("value", 1, 8.0).unwrap();
     assert_eq!(
         df.column("value").unwrap().as_f64().unwrap(),
         &[1.0, 8.0, 3.0]
@@ -22,13 +22,13 @@ fn computed_scalar_update_refreshes_valid_rows_and_reports_errors() {
     assert_eq!(df.computed_columns()[0].1.valid_rows, 3);
 
     // a row past the frame is an error, never a silently dropped write
-    assert!(df.update_computed_f64_value("value", 99, 9.0).is_err());
+    assert!(df.update_computed_value("value", 99, 9.0).is_err());
     assert_eq!(
         df.column("value").unwrap().as_f64().unwrap(),
         &[1.0, 8.0, 3.0]
     );
 
-    assert!(df.update_computed_f64_value("missing", 0, 1.0).is_err());
+    assert!(df.update_computed_value("missing", 0, 1.0).is_err());
 
     let mut bool_df = DataFrame::new(
         vec!["flag".into()],
@@ -37,7 +37,7 @@ fn computed_scalar_update_refreshes_valid_rows_and_reports_errors() {
     )
     .unwrap();
     bool_df.set_computed("flag", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
-    assert!(bool_df.update_computed_f64_value("flag", 0, 1.0).is_err());
+    assert!(bool_df.update_computed_value("flag", 0, 1.0).is_ok());
 }
 
 #[test]
