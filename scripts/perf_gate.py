@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Performance-regression gate for CI — compares this commit against its parent.
 
-The benchmark runs twice in the SAME CI job, on the SAME runner: once for the current
-commit (HEAD) and once for the base commit (the PR merge-base, or the previous tip on a
-push). This gate compares volas's own median times between the two runs.
+``make perf-ab`` and CI install both builds side by side on the same runner and
+measure AB/BA pairs with the same current harness. ``perf_pairs.py`` supplies
+comparison-equivalent times from the median of paired HEAD/base ratios, with
+between-pair noise stated in the output. Historical single-run benchmark JSON
+remains readable; the same thresholds below apply to both input formats.
 
 Because HEAD and base run on one machine, absolute runner speed AND CPU microarchitecture
 both cancel out — so the thresholds are architecture-independent, and there is no stored
