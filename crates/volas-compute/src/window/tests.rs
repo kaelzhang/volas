@@ -80,3 +80,17 @@ fn sliding_moments_match_direct_windows_bit_for_bit() {
         }
     }
 }
+
+#[test]
+fn recursive_ewm_keeps_constants_exact_and_uses_com_one_gap_weights() {
+    let data = [1.0, f64::NAN, f64::INFINITY, 1.0, f64::NAN, 3.0];
+    let actual = ewm_mean(&data, 0.5, false, false, 0);
+    for (actual, expected) in actual.into_iter().zip([1.0_f64, 1.0, 1.0, 1.0, 1.0, 2.5]) {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+    // Ignoring gaps keeps the usual equally spaced recursive update instead.
+    let actual = ewm_mean(&data, 0.5, false, true, 0);
+    for (actual, expected) in actual.into_iter().zip([1.0_f64, 1.0, 1.0, 1.0, 1.0, 2.0]) {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+}

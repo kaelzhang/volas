@@ -238,13 +238,22 @@ impl Column {
     /// by raw `i64`, `bool` by `false < true`. The result is always `f64` (ties
     /// can average to `x.5`), so rank is order-based, not a numeric-arithmetic op.
     pub fn rank(&self, method: stats::RankMethod, ascending: bool, pct: bool) -> Vec<f64> {
+        self.rank_with_na(method, ascending, pct, None)
+    }
+
+    /// Rank missing cells as one tie group, at the top (`Some(true)`) or bottom
+    /// (`Some(false)`) independent of sort direction, or keep them missing.
+    pub fn rank_with_na(&self, method: stats::RankMethod, ascending: bool, pct: bool, na_top: Option<bool>) -> Vec<f64> {
         stats::rank_by(
             self.len(),
-            |i| self.is_valid(i),
-            |a, b| self.cmp_at(a, b),
-            method,
-            ascending,
-            pct,
+            |i| na_top.is_some() || self.is_valid(i),
+            |a, b| match (self.is_valid(a), self.is_valid(b)) {
+                (true, true) => self.cmp_at(a, b),
+                (false, false) => Ordering::Equal,
+                (false, true) => if na_top == Some(ascending) { Ordering::Less } else { Ordering::Greater },
+                (true, false) => if na_top == Some(ascending) { Ordering::Greater } else { Ordering::Less },
+            },
+            method, ascending, pct,
         )
     }
 

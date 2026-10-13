@@ -50,7 +50,7 @@ pub(crate) fn resolve_alpha(
         if !(h > 0.0 && h.is_finite()) {
             return Err(PyValueError::new_err("ewm halflife must be finite and > 0"));
         }
-        return Ok(1.0 - (-(2.0f64.ln()) / h).exp());
+        return Ok(-(-(2.0f64.ln()) / h).exp_m1());
     }
     let a = alpha.expect("exactly one spelling is set");
     if !(a > 0.0 && a <= 1.0) {

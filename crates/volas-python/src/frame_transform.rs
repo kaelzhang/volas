@@ -19,17 +19,13 @@ impl PyDataFrame {
         self.map_cols(|s| s.isin(values))
     }
     /// Replace cells equal to `to_replace` with `value`, per column,
-    /// dtype-preserving; columns whose dtype cannot hold the scalars are kept
-    /// unchanged (pandas `replace`).
+    /// dtype-preserving; a matched column that cannot hold the replacement raises.
     pub(crate) fn replace(
         &self,
         to_replace: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        self.map_cols(|s| match s.replace(to_replace, value) {
-            Ok(r) => Ok(r),
-            Err(_) => Ok(PySeries { inner: s.inner.clone() }),   // dtype can't match -> untouched
-        })
+        self.map_cols(|s| s.replace(to_replace, value))
     }
     /// Linear interpolation per numeric column (pandas `interpolate`).
     pub(crate) fn interpolate(&self) -> PyResult<PyDataFrame> {
