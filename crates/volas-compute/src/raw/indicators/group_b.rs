@@ -893,3 +893,6 @@ mod tests {
         }
     }
 }
+
+mod smi;
+pub use smi::*;

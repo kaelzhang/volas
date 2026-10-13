@@ -278,7 +278,7 @@ wf.ready          # True ——每个可见行都已有 atr:14 的值
 
 有界窗口只持有最近的行，因此只在能精确计算的地方计算指标。每个 directive 属于三种**历史类别**之一（由命令表统一定义）：**第 1 类**只依赖一个尾部窗口、没有滑动累加器（`roc`、`llv`、`maxindex`、`willr`、`psy`、`close > open` 等）；**第 2 类**依赖尾部窗口上的滑动累加器（`ma`、`wma`、`boll`、`stddev`、`cci`、`mfi`、`linearreg` 等）；**第 3 类**依赖之前的每一行——递归、累积线或无界计数（EMA、Wilder 平滑、`obv`、`increase` 等）。一个 directive 取其各组成部分中最高的类别。
 
-- **声明的 directive**（`max_lookback=[...]`）在构造时基于完整历史计算并缓存。递归类 directive 的**检查点（checkpoint）**与追加续算使用同一份状态，保存每个有状态节点的内核状态、最后完整输入行及输出环。检查点随丢弃头部而前移；写入后从检查点重放整个 directive。缺失行输出 NaN，递归状态停留在上一完整行；预热期间则保存原始输入行。声明的链式表达式（`'ema:5@(rsi:5)'`、`'ema:3 - ema:5'`、`'close > ema:20'`、`'ema:2@(maxindex:2)'`、`'close-ma:5+obv'`）在追加、压缩和可见行写入后仍与完整历史精确一致，带 `time_frame` 的窗口也一样。只有包含无续算状态递归命令的表达式（`crsi`、`stoch_momentum`，或选择递归均线类型的复合均线命令）仍会被拒绝；请在无界 frame 上计算。
+- **声明的 directive**（`max_lookback=[...]`）在构造时基于完整历史计算并缓存。递归类 directive 的**检查点（checkpoint）**与追加续算使用同一份状态，保存每个有状态节点的内核状态、最后完整输入行及输出环。检查点随丢弃头部而前移；写入后从检查点重放整个 directive。缺失行输出 NaN，递归状态停留在上一完整行；预热期间则保存原始输入行。声明的链式表达式（`'ema:5@(rsi:5)'`、`'ema:3 - ema:5'`、`'close > ema:20'`、`'ema:2@(maxindex:2)'`、`'close-ma:5+obv'`）在追加、压缩和可见行写入后仍与完整历史精确一致，带 `time_frame` 的窗口也一样。`crsi`、`stoch_momentum` 以及选择任意均线类型的复合均线命令也保存各阶段的续算状态，可直接声明在窗口 frame 上。
 - **构造之后才请求的 directive**（`wf[d]`、`wf[[...]]`、`wf.exec(d)`）只有在它属于第 1 类、且每行之前读取的行数不超过 `max_lookback` 时才会计算。第 2 类和第 3 类必须声明；构造之后再请求会报错，并给出两条正确的路径（对已经声明的 directive，`exec` 会提示读取它的列）：
 
 ```text

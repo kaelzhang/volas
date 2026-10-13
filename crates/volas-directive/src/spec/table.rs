@@ -54,18 +54,18 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // apo / ppo: fast period, slow period, matype — the later of the two averages.
         ("apo" | "ppo", None) => line(const { &[p(12), p(26), matype()] }, &["close"])
             .averages(&[(0, 2), (1, 2)])
-            .step()
+            .rows()
             .lookback(|a| gml(n(a, 0), n(a, 2)).max(gml(n(a, 1), n(a, 2)))),
         // macdext: fast, fastmatype, slow, slowmatype[, signal, signalmatype]. Matypes
         // default to SMA (0), unlike macd's fixed EMA.
         ("macdext", None) => line(const { &[p(12), matype(), p(26), matype()] }, &["close"])
             .averages(&[(0, 1), (2, 3)])
-            .step()
+            .rows()
             .lookback(|a| gml(n(a, 0), n(a, 1)).max(gml(n(a, 2), n(a, 3)))),
         ("macdext", Some("signal" | "histogram")) => {
             line(const { &[p(12), matype(), p(26), matype(), p(9), matype()] }, &["close"])
                 .averages(&[(0, 1), (2, 3), (4, 5)])
-                .step()
+                .rows()
                 .lookback(|a| gml(n(a, 0), n(a, 1)).max(gml(n(a, 2), n(a, 3))) + gml(n(a, 4), n(a, 5)))
         }
         ("wma" | "trima", None) => line(const { &[p_req()] }, &["close"]).accumulating().step().lookback(|a| m1(n(a, 0))),
@@ -93,7 +93,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // max is cross-checked when binding. It warms up over the maximum period's MA.
         ("mavp", None) => line(const { &[prange_req(), prange_req(), matype()] }, &["close", ""])
             .averages(&[(1, 2)])
-            .step()
+            .rows()
             .lookback(|a| gml(n(a, 1), n(a, 2))),
         // sar: acceleration factor, maximum factor — both non-negative (a negative
         // factor walks the stop away from price, producing garbage).
@@ -223,7 +223,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // crsi averages RSI(close) (rsi_len), RSI(streak) (streak_len; the streak starts
         // at bar 0) and the percent rank of ROC1 over rank_len prior values (rank_len+1).
         ("crsi", None) => line(const { &[p(3), p(2), p(100)] }, &["close"])
-            .recursive()
+            .recursive().step().reads_past_lookback()
             .lookback(|a| n(a, 0).max(n(a, 1)).max(n(a, 2) + 1)),
         // Group E formula-equivalent wrappers (China-market names): bias ≡ ppo:1,N,0 (the
         // slow SMA_N gates it); dma's DDD line = SMA(fast) − SMA(slow), positional as 通达信
@@ -289,10 +289,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // stoch_momentum: k (HH/LL), d (double-EMA smoothing), signal (EMA of SMI): HH/LL
         // (k−1) + the double EMA_d (2·(d−1)); the signal adds EMA_signal.
         ("stoch_momentum", None) => line(const { &[p(10), p(3), p(3)] }, &["high", "low", "close"])
-            .recursive()
+            .recursive().rows().reads_past_lookback()
             .lookback(|a| m1(n(a, 0)) + 2 * m1(n(a, 1))),
         ("stoch_momentum", Some("signal")) => line(const { &[p(10), p(3), p(3)] }, &["high", "low", "close"])
-            .recursive()
+            .recursive().rows().reads_past_lookback()
             .lookback(|a| m1(n(a, 0)) + 2 * m1(n(a, 1)) + m1(n(a, 2))),
         // ttm_squeeze: period, Bollinger σ-multiplier, Keltner range-multiplier. The
         // momentum's linreg over the n-bar delta (itself gated at n−1) warms up at
@@ -378,21 +378,21 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // (fastk-1) then the matype-MA smoothing stage(s); each line reads its own stages.
         ("stoch", Some("k")) => line(STOCH, &["high", "low", "close"])
             .averages(&[(1, 2)])
-            .step()
+            .rows()
             .lookback(|a| m1(n(a, 0)) + gml(n(a, 1), n(a, 2))),
         ("stoch", Some("d")) => line(STOCH, &["high", "low", "close"])
             .averages(&[(1, 2), (3, 4)])
-            .step()
+            .rows()
             .lookback(|a| m1(n(a, 0)) + gml(n(a, 1), n(a, 2)) + gml(n(a, 3), n(a, 4))),
         // stochf: fastk_period, fastd_period, fastd_matype. %K is a pure window (its D
         // smoothing is not its input); %D averages it.
         ("stochf", Some("k")) => line(STOCHF, &["high", "low", "close"]).lookback(|a| m1(n(a, 0))),
         ("stochf", Some("d")) => line(STOCHF, &["high", "low", "close"])
             .averages(&[(1, 2)])
-            .step()
+            .rows()
             .lookback(|a| m1(n(a, 0)) + gml(n(a, 1), n(a, 2))),
         // stochrsi: rsi_period, fastk_period, fastd_period, fastd_matype — the RSI lookback
-        // plus the %K window, then the d-line MA. Only the SMA `.d` resumes.
+        // plus the %K window, then the d-line MA. Every MA type resumes.
         ("stochrsi", Some("k")) => line(STOCHRSI, &["close"])
             .recursive()
             .resume_inputs(|a| m1(n(a, 1)).max(1))
@@ -402,7 +402,6 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             .recursive()
             .resume_inputs(|a| m1(n(a, 1)) + n(a, 2))
             .rows()
-            .resume_unless(|a| ind::generic_ma_type(n(a, 2), n(a, 3)) != 0)
             .lookback(|a| n(a, 0) + m1(n(a, 1)) + gml(n(a, 2), n(a, 3))),
         // ±DM seed at bar `period - 1`, but never bar 0 (period 1 seeds at bar 1).
         ("plus_dm" | "minus_dm", None) => line(const { &[p_req()] }, &["high", "low"])

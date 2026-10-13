@@ -31,10 +31,6 @@ _OPERANDS = ["rsi:5@open", "ema:5@(close + open)", "ema:5@(rsi:5)", "atr:5@high,
              "ma:5@(close - open)"]
 _BOOLEAN = ["close > ma:5", "close > open", "(ema:5 > ma:10) & (close > open)"]
 SHAPES = sorted(set(_RECURSIVE + _FINITE + _STATELESS + _OPERANDS + _BOOLEAN))
-# Recursions no carried state covers — a command that recomputes (no carried state), a
-# recursion inside an `@` operand or combined with other values: a windowed frame
-# cannot keep them exact, so declaring one raises.
-_UNKEPT = {"crsi", "stoch_momentum", "stoch_momentum.signal"}
 
 
 def _bar(i, salt=0.0):
@@ -196,20 +192,9 @@ def test_plain_integer_frame_replacements_are_exact(directive):
     _run_plain(directive, lambda k: (1000 + 10 * k).astype(np.int64))
 
 
-@pytest.mark.parametrize("directive", sorted(set(SHAPES) - _UNKEPT))
+@pytest.mark.parametrize("directive", SHAPES)
 def test_windowed_frame_replacements_match_the_unbounded_frame(directive):
     _run_plain(directive, lambda k: T0 + k * MINUTE, window=4)
-
-
-@pytest.mark.parametrize("directive", sorted(_UNKEPT))
-def test_a_windowed_frame_refuses_a_recursion_it_cannot_keep(directive):
-    seed = _frame_of([_bar(i) for i in range(5)], T0 + np.arange(5) * MINUTE)
-    with pytest.raises(ValueError, match=r"cannot keep .* exact on a windowed frame"):
-        DataFrame(seed, window=4, max_lookback=[directive])
-    w = DataFrame(seed, window=4, max_lookback=60)
-    with pytest.raises(ValueError, match=r"cannot keep .* exact on a windowed frame"):
-        w[directive]
-    assert w.columns == list(OHLCV)
 
 
 def _run_tf(directive, window=None):
@@ -257,7 +242,7 @@ def test_tf_frame_resends_are_exact(directive):
     _run_tf(directive)
 
 
-@pytest.mark.parametrize("directive", sorted(set(SHAPES) - _UNKEPT))
+@pytest.mark.parametrize("directive", SHAPES)
 def test_windowed_tf_frame_resends_match_the_unbounded_frame(directive):
     _run_tf(directive, window=4)
 

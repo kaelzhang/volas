@@ -10,16 +10,16 @@ use volas_core::{Column, DataFrame};
 use super::{as_command, resume_of};
 use crate::complete::into_f64;
 use crate::lookback::lookback_node;
-use crate::spec::{History, Resume};
+use crate::spec::Resume;
 use crate::types::{Ast, BoundNode, ChainPlan, Command, Continuation, Node};
 
-/// A recursive command or a command with a published continuation kernel.
+/// A command with a published continuation kernel.
 fn keeps_state(node: &BoundNode) -> bool {
     if !matches!(node, Node::Command(_) | Node::Name(_)) {
         return false;
     }
     as_command(node).is_some_and(|c| {
-        c.args.spec.history(&c.args) == History::Recursive || resume_of(&c) != Resume::Recompute
+        resume_of(&c) != Resume::Recompute
     })
 }
 
@@ -46,9 +46,7 @@ pub(crate) fn plan(node: &BoundNode) -> Continuation {
     let mut nodes = Vec::new();
     stateful(node, &mut nodes);
     let own_only = nodes.len() == 1 && std::ptr::eq(nodes[0], node);
-    if !nodes.is_empty() && !own_only
-        && nodes.iter().all(|n| as_command(n).is_some_and(|c| resume_of(&c) != Resume::Recompute))
-    {
+    if !nodes.is_empty() && !own_only {
         return Continuation::Chain(ChainPlan {
             nodes: (0..nodes.len()).map(|k| crate::bind::finish(own_node(&nodes, k))).collect(),
             top: Box::new(substitute(node, &nodes)),
@@ -56,15 +54,9 @@ pub(crate) fn plan(node: &BoundNode) -> Continuation {
             span: 2 * (lookback_node(node) + 1),
             frame_span: lookback_node(&substitute(node, &nodes)).max(nodes.iter().enumerate().map(|(k, _)| {
                 let own = own_node(&nodes, k);
-                match &own {
-                    Node::Command(c) => c.series.iter().map(lookback_node).max().unwrap_or(0),
-                    _ => 0,
-                }
+                as_command(&own).expect("own_node constructs a command").series.iter().map(lookback_node).max().unwrap_or(0)
             }).max().unwrap_or(0)),
         });
-    }
-    if nodes.iter().any(|n| as_command(n).is_some_and(|c| resume_of(&c) == Resume::Recompute)) {
-        return Continuation::None;
     }
     if as_command(node).is_some_and(|c| resume_of(&c) != Resume::Recompute) {
         Continuation::Own
@@ -233,9 +225,9 @@ pub(super) fn step(df: &DataFrame, node: &Ast, chain: &[f64], row: usize, next: 
 fn ring_value(plan: &ChainPlan, words: &[f64], name: &str, wanted: usize, row: usize) -> Option<f64> {
     let k = plan.names.iter().position(|n| n == name)?;
     let mut at = 0;
-    for i in 0..=k {
-        let (_, ring) = super::state::chain_node(words, &mut at, plan.span)?;
-        if i == k { return ring.get(plan.span.checked_sub(row - wanted + 1)?).copied(); }
+    for _ in 0..k {
+        super::state::chain_node(words, &mut at, plan.span)?;
     }
-    None
+    let (_, ring) = super::state::chain_node(words, &mut at, plan.span)?;
+    ring.get(plan.span.checked_sub(row - wanted + 1)?).copied()
 }

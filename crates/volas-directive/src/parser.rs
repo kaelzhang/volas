@@ -796,6 +796,21 @@ mod tests {
     }
 
     #[test]
+    fn memo_skips_a_short_input_with_an_oversized_continuation_plan() {
+        fn balanced(n: usize) -> String {
+            if n == 1 { return "1".into(); }
+            format!("({}+{})", balanced(n / 2), balanced(n - n / 2))
+        }
+        let text = balanced(1024).replacen('1', "obv", 1);
+        assert!(text.len() <= MEMO_MAX_INPUT_BYTES);
+        let first = parse(&text).unwrap();
+        let second = parse(&text).unwrap();
+        assert_eq!(first, second);
+        assert!(!Rc::ptr_eq(&first, &second));
+        PARSE_CACHE.with(|c| assert!(c.borrow().get(&text).is_none()));
+    }
+
+    #[test]
     fn memo_bookkeeping_stays_consistent_under_churn() {
         for i in 0..3 * ENTRIES {
             let pad = " ".repeat(i * 7 % INPUT);

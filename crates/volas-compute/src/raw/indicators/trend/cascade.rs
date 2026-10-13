@@ -390,7 +390,7 @@ pub(crate) fn trima_row(
 
 /// [`trima`]'s state after the rows of `data` (row 0 at absolute position `origin`).
 pub fn trima_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
-    super::FiniteMa::new(period, 5)?.state(data.len(), origin, |j| data[j])
+    super::MaStage::new(period, 5)?.state(data.len(), origin, |j| data[j])
 }
 
 /// One row of [`trima`] at `row`, from `state` into `next`.
@@ -398,5 +398,5 @@ pub fn trima_step(data: &[f64], period: usize, row: usize, state: &[f64], next: 
     if row >= data.len() {
         return None;
     }
-    super::FiniteMa::new(period, 5)?.step(row, |j| data[j], state, next)
+    super::MaStage::new(period, 5)?.step(row, |j| data[j], state, next)
 }

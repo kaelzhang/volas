@@ -125,11 +125,12 @@ read or convert the whole column. Single-row chains step their kernels directly 
 reused input scratch and scalar expression evaluation; `ema:5@(ema:3)`,
 `close-ma:5+obv` and `close>ema:5` allocate nothing on complete inputs. Declared chains
 on bounded frames use the same state for checkpoints and replay after writes or head
-compaction; warm-up checkpoints keep raw input rows. A few
-directives still cost O(n) per refresh (exact): `crsi`, `stoch_momentum`,
-`ttm_squeeze`, and `apo` / `ppo` / `macdext` / `mavp` / `stoch` / `stochf.d` at a
-recursive MA type recompute their column, and so does any directive holding one of
-them. `ma` at a recursive MA type continues as that average does.
+compaction; warm-up checkpoints keep raw input rows. CRSI, stochastic momentum,
+and composite averages (`apo`, `ppo`, `macdext`, `mavp`, `stoch`, `stochf.d`,
+`stochrsi`) carry their constituent states at every MA type. Their append cost
+is bounded by their configured windows and the new rows. `ma` at a recursive
+MA type continues as that average does. `ttm_squeeze` still recomputes its column.
+
 
 ### Names: a data column or a built-in command
 

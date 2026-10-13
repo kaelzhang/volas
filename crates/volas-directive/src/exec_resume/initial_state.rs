@@ -3,17 +3,16 @@
 
 use crate::exec::{arg_f64, arg_usize};
 use crate::operands::Operands;
-use crate::spec::Resume;
 use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
 use volas_core::DataFrame;
 
-use super::{as_command, bound, recursive, resume_of};
+use super::{as_command, bound, recursive};
 
 /// The carried state of `node` as of `df`'s row `end - 1` (`end` at most the frame's
 /// height): what a full computation over the rows `[0, end)` ends with, read in place
 /// (no copy of the frame). `None` when `node` has no resume (its spec's
-/// [`Resume::Recompute`], or a composite expression): the caller then recomputes.
+/// [`crate::spec::Resume::Recompute`]): the caller then recomputes.
 ///
 /// A recursive command's state is captured over the complete rows of its inputs, so it
 /// describes the last complete row (see `crate::complete`). A finite-window command's
@@ -27,9 +26,6 @@ pub fn initial_state(df: &DataFrame, node: &Ast, end: usize) -> Option<Vec<f64>>
         return None;
     }
     let cmd = as_command(node.node())?;
-    if resume_of(&cmd) == Resume::Recompute {
-        return None;
-    }
     let end = end.min(df.height());
     let (name, sub, args) = (cmd.name.as_str(), cmd.sub.as_deref(), &cmd.args.values[..]);
     if recursive(&cmd) {
@@ -65,6 +61,11 @@ pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[Ar
             let slow = arg_usize(args, 1);
             ind::adosc_final_state(&high, &low, &close, &volume, fast, slow)
         }
+
+        ("crsi", _) => ind::crsi_final_state(&ops.f64(0, "close").ok()?, arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2)),
+        ("stoch_momentum", sub) => ind::stoch_momentum_final_state(
+            &ops.f64(0, "high").ok()?, &ops.f64(1, "low").ok()?, &ops.f64(2, "close").ok()?,
+            arg_usize(args, 0), arg_usize(args, 1), sub.map(|_| arg_usize(args, 2))),
 
         // Group A cumulative / EMA-recursion family (volas-exclusive).
         ("pvt", _) => {
@@ -325,7 +326,6 @@ pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[Ar
         ),
 
         // StochRSI — carry the RSI Wilder pair + the recent RSI tail feeding the windows.
-        // Only the SMA `.d` resumes (the spec's fact).
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
             ind::stochrsi_final_state(
@@ -334,6 +334,7 @@ pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[Ar
                 arg_usize(args, 1),
                 is_d,
                 arg_usize(args, 2),
+                arg_usize(args, 3),
                 ops.origin(),
             )
         }
@@ -360,6 +361,6 @@ pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[Ar
             )
         }
 
-        _ => None, // LCOV_EXCL_LINE every line whose spec declares a resume has an arm
+        _ => super::window::state(ops, name, sub, args),
     }
 }

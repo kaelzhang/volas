@@ -161,37 +161,8 @@ pub fn mass_index(high: &[f64], low: &[f64], n: usize, origin: usize) -> Vec<f64
     (kernels::sma(av(&ratio), n, origin) * n as f64).to_vec()
 }
 
-/// CRSI Connors RSI: `mean( RSI(close, rsi_len), RSI(streak, streak_len),
-/// PercentRank(1-period ROC%, rank_len) )`, where `streak` is the signed run length of
-/// consecutive up / down closes and PercentRank is the share of the prior `rank_len` ROC
-/// values strictly below the current one. Source: Connors Research / TradingView.
-pub fn crsi(close: &[f64], rsi_len: usize, streak_len: usize, rank_len: usize) -> Vec<f64> {
-    let len = close.len();
-    let mut streak = vec![0.0; len];
-    for i in 1..len {
-        streak[i] = if close[i] > close[i - 1] {
-            if streak[i - 1] > 0.0 { streak[i - 1] + 1.0 } else { 1.0 }
-        } else if close[i] < close[i - 1] {
-            if streak[i - 1] < 0.0 { streak[i - 1] - 1.0 } else { -1.0 }
-        } else {
-            0.0
-        };
-    }
-    let rsi_close = super::rsi(close, rsi_len);
-    let rsi_streak = super::rsi(&streak, streak_len);
-    let roc1: Vec<f64> = (0..len)
-        .map(|i| if i > 0 { (close[i] / close[i - 1] - 1.0) * 100.0 } else { f64::NAN })
-        .collect();
-    let mut prank = vec![f64::NAN; len];
-    for i in (rank_len + 1)..len {
-        let window = &roc1[i - rank_len..i];
-        let below = window.iter().filter(|&&x| x < roc1[i]).count();
-        prank[i] = below as f64 / rank_len as f64 * 100.0;
-    }
-    (0..len)
-        .map(|i| (rsi_close[i] + rsi_streak[i] + prank[i]) / 3.0)
-        .collect()
-}
+mod crsi;
+pub use crsi::*;
 
 // --- state-carry (append O(new rows) + bit-exact slice continuation) ----------
 //

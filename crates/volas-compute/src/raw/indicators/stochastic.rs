@@ -3,7 +3,7 @@
 use super::oscillators::rsi;
 use crate::accum::StreamMean;
 use crate::missing;
-use crate::raw::indicators::FiniteMa;
+use crate::raw::indicators::MaStage;
 use crate::raw::kernels::{self, canonical_zero};
 
 /// TA-Lib stochastic raw %K: `100·(close − LL) / (HH − LL)` over `period` (HH/LL the
@@ -464,18 +464,18 @@ pub fn stoch_fastk_at(high: &[f64], low: &[f64], close: &[f64], period: usize, i
 }
 
 /// The smoothing stages of a stochastic line over raw %K: `[slowK]` / `[fastD]`, or
-/// `[slowK, slowD]` — each a finite-window average `(period, matype)`.
-fn stoch_stages(stages: &[(usize, usize)]) -> Option<(FiniteMa, Option<FiniteMa>)> {
+/// `[slowK, slowD]` — each a generic MA stage `(period, matype)`.
+fn stoch_stages(stages: &[(usize, usize)]) -> Option<(MaStage, Option<MaStage>)> {
     match *stages {
-        [(p, mt)] => Some((FiniteMa::new(p, mt)?, None)),
-        [(p1, mt1), (p2, mt2)] => Some((FiniteMa::new(p1, mt1)?, Some(FiniteMa::new(p2, mt2)?))),
+        [(p, mt)] => Some((MaStage::new(p, mt)?, None)),
+        [(p1, mt1), (p2, mt2)] => Some((MaStage::new(p1, mt1)?, Some(MaStage::new(p2, mt2)?))),
         _ => None,
     }
 }
 
 /// The length of a smoothed stochastic line's state: each stage's, plus for a second
 /// stage the last values of the first it reads.
-fn stoch_state_len((first, second): (FiniteMa, Option<FiniteMa>)) -> usize {
+fn stoch_state_len((first, second): (MaStage, Option<MaStage>)) -> usize {
     first.state_len() + second.map_or(0, |s| s.chained_len())
 }
 
@@ -500,7 +500,7 @@ pub fn stoch_state(
 }
 
 /// One row of a smoothed stochastic line at `row`: raw %K over `fastk_period`, then one
-/// or two finite-window averages `stages` (`(period, matype)`: `[slowK]` for `stoch.k`,
+/// or two generic MA stages `stages` (`(period, matype)`: `[slowK]` for `stoch.k`,
 /// `[slowK, slowD]` for `stoch.d`, `[fastD]` for `stochf.d`), from `state` into `next`.
 #[allow(clippy::too_many_arguments)]
 pub fn stoch_step(

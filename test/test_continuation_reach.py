@@ -50,9 +50,8 @@ def test_a_tail_slice_continues_exactly_or_not_at_all(line):
 
 
 @pytest.mark.parametrize('d', ['crsi:3,2,5', 'stoch_momentum:5', 'close+crsi:3,2,5'])
-def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
-    # no carried state: a slice from the column's first row recomputes it all (kept,
-    # exact); a later start would restart the recursion, so the column is plain data
+def test_recursive_composites_keep_their_states_across_a_slice(d):
+    # Each constituent recursion carries its state across a dropped head.
     base = frame(0, N)
     base[d]
     name = volas.directive_stringify(d)
@@ -60,7 +59,10 @@ def test_a_recursion_without_a_state_continues_only_from_its_history_start(d):
     assert whole.is_computed(name)
     whole.append(frame(N, N + 2))
     assert _same(whole[d].to_numpy(dtype='object')[-2:], frame(0, N + 2).exec(d, dtype='object')[-2:])
-    assert not base.iloc[1:].is_computed(name)
+    tail = base.iloc[1:]
+    assert tail.is_computed(name)
+    tail.append(frame(N, N + 2))
+    assert _same(tail[d].to_numpy(dtype="object")[-2:], frame(0, N + 2).exec(d, dtype="object")[-2:])
 
 
 @pytest.mark.parametrize('d', ['close+ema:3@open', 'ema:5@(ema:3)', 'close-ma:5+obv'])
@@ -75,13 +77,11 @@ def test_a_composite_carries_its_recursions_states_across_a_slice(d):
     assert _same(tail[d].to_numpy(dtype='object')[-2:], frame(0, N + 2).exec(d, dtype='object')[-2:])
 
 
-def test_a_window_refuses_a_recursion_without_a_carried_state():
-    # a bounded window drops its older rows: a recursion it keeps exactly carries a state
-    # it replays from (a checkpoint); one without (crsi recomputes) cannot be declared —
-    # recomputing it over the retained rows would restart its history there
+def test_a_window_keeps_recursive_composites():
     seed = {k: v[:40] for k, v in COLS.items()}
-    with pytest.raises(ValueError, match="cannot keep 'crsi:3,2,5' exact on a windowed frame"):
-        volas.DataFrame(seed, window=5, max_lookback=['crsi:3,2,5'])
+    crsi = volas.DataFrame(seed, window=5, max_lookback=['crsi:3,2,5'])
+    want = volas.DataFrame(seed).exec('crsi:3,2,5')[-5:]
+    np.testing.assert_array_equal(np.asarray(crsi['crsi:3,2,5']).view(np.uint64), want.view(np.uint64))
     w = volas.DataFrame(seed, window=5, max_lookback=['keltner:5'])
     for i in range(40, N):
         w.append(volas.DataFrame({k: v[i:i + 1] for k, v in COLS.items()}))

@@ -319,3 +319,59 @@ fn a_continuation_far_into_the_series_reads_a_window_exactly() {
     assert!(stepped > 500, "only {stepped} steps ran");
     assert!(fails.is_empty(), "{} failure(s):\n{}", fails.len(), fails.join("\n"));
 }
+
+#[test]
+fn every_recursive_composite_declares_and_captures_a_continuation() {
+    use volas_directive::{spec::Resume, types::Node};
+    let data = matrix::classes(400);
+    for line in matrix::lines().iter().filter(|l| ["crsi", "stoch_momentum", "apo", "ppo", "macdext", "mavp", "stoch", "stochf", "stochrsi"].contains(&l.head.split('.').next().unwrap())) {
+        for text in matrix::variants(line) {
+            let node = parse(&text).unwrap();
+            if let Node::Command(c) = node.node() {
+                if c.args.spec().history(&c.args) == volas_directive::spec::History::Recursive {
+                    assert_ne!(c.args.spec().resume(&c.args), Resume::Recompute, "{text}");
+                    assert!(initial_state(&data[0].frame, &node, 399).is_some(), "{text}");
+                }
+            }
+        }
+    }
+}
+
+/// Verify the language-wide invariant, including the Cartesian product of every MA
+/// selector (not just equal-type or rotating mixed examples), at identity and normal
+/// periods. This guards removal of the old unsupported-recursion history class.
+#[test]
+fn every_executable_recursive_line_and_ma_combination_has_a_resume() {
+    use volas_directive::{spec::{ArgBound, History, Resume}, types::Node};
+    fn check(node: &Ast, text: &str) -> bool {
+        let (spec, args) = match node.node() {
+            Node::Command(c) => (c.args.spec().clone(), &c.args[..]),
+            Node::Name(name) => return check(&volas_directive::bind_command(name, None, &[], &[]).unwrap(), text),
+            _ => panic!("inventory entry must name a command: {text}"),
+        };
+        if spec.history(args) != History::Recursive { return false; }
+        assert_ne!(spec.resume(args), Resume::Recompute, "{text}");
+        assert!(volas_directive::lookback::history(node).recursive(), "{text}");
+        true
+    }
+    let mut checked = 0;
+    for line in matrix::lines() {
+        for period in [1, 5] {
+            let base: Vec<String> = line.args.iter().map(|a| matrix::token(a, period, false)).collect();
+            let slots: Vec<usize> = line.args.iter().enumerate()
+                .filter_map(|(i, a)| (a.bound == ArgBound::IntRange(0, 8)).then_some(i)).collect();
+            for mut choice in 0..9usize.pow(slots.len() as u32) {
+                let mut args = base.clone();
+                for &i in &slots { args[i] = (choice % 9).to_string(); choice /= 9; }
+                let suffix = if args.is_empty() { String::new() } else { format!(":{}", args.join(",")) };
+                let text = format!("{}{suffix}{}", line.head, line.series);
+                let node = parse(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+                checked += usize::from(check(&node, &text));
+            }
+        }
+        for text in matrix::variants(&line) {
+            check(&parse(&text).unwrap(), &text);
+        }
+    }
+    assert!(checked > 1500, "only {checked} recursive combinations checked");
+}

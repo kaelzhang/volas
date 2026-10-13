@@ -183,25 +183,9 @@ impl PyDataFrame {
         )))
     }
 
-    /// The error of a directive no bounded frame keeps exactly (a recursion no carried
-    /// state covers), or `None`.
-    fn unkept(&self, node: &Ast, text: &str) -> Option<PyErr> {
-        (volas_directive::lookback::history(node) == History::Unkept).then(|| {
-            PyValueError::new_err(format!(
-                "cannot keep '{text}' exact on a windowed frame: it contains a recursive command \
-                 without a continuation state, so a frame that drops its oldest rows cannot \
-                 recompute it. Compute it on an unbounded frame."
-            ))
-        })
-    }
-
-    /// `node` (spelled `text`) is kept exactly by this bounded frame once declared: it is
-    /// not [`unkept`](Self::unkept), and it reads no more rows than the margin holds.
+    /// `node` (spelled `text`) reads no more rows than the bounded margin holds.
     fn check_kept(&self, node: &Ast, text: &str) -> PyResult<()> {
         let w = self.window.as_ref().expect("a bounded frame");
-        if let Some(err) = self.unkept(node, text) {
-            return Err(err);
-        }
         let lookback = volas_directive::lookback::lookback(node);
         if lookback > w.lookback {
             return Err(PyValueError::new_err(format!(
@@ -228,7 +212,6 @@ impl PyDataFrame {
                 "it reads {} rows before each row, more than the {} it keeps (max_lookback)",
                 reach.lookback, w.lookback
             ),
-            History::Unkept => return Err(self.unkept(node, text).expect("an unkept directive")),
             History::Accumulator => "it carries a running accumulator (a class-2 directive)".to_string(),
             History::Counted => "it counts a run of rows (a class-3 directive)".to_string(),
             History::Carried { .. } => format!(

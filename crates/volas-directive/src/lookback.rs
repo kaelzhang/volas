@@ -74,30 +74,23 @@ pub fn reach(node: &Ast) -> volas_core::Reach {
 }
 
 /// The highest command history class, with recursive keeping derived solely from
-/// the stored continuation plan. Own and Chain retain their state; a Recompute
-/// recursion anywhere leaves the directive Unkept.
+/// the stored continuation plan. Every recursive line publishes a continuation.
 pub fn history(node: &Ast) -> volas_core::History {
     use crate::types::Continuation;
-    let h = history_node(node.node());
-    if !h.recursive() { return h; }
-    match node.continuation() {
-        Continuation::Own => volas_core::History::Carried { operands: series_of(node.node()).iter().map(lookback_node).max().unwrap_or(0) },
-        Continuation::Chain(p) => volas_core::History::Carried { operands: p.frame_span },
-        Continuation::None => volas_core::History::Unkept,
-    }
-}
-
-fn history_node(node: &BoundNode) -> volas_core::History {
     use volas_core::History;
-    let (class, recursions) = classes(node);
+    let (class, recursions) = classes(node.node());
     match class {
         0 | 1 => return History::Window,
         2 => return History::Accumulator,
         _ if recursions == 0 => return History::Counted,
         _ => {}
     }
-
-    History::Unkept
+    let operands = match node.continuation() {
+        Continuation::Own => series_of(node.node()).iter().map(lookback_node).max().unwrap_or(0),
+        Continuation::Chain(p) => p.frame_span,
+        Continuation::None => unreachable!("every recursive line has a continuation"), // LCOV_EXCL_LINE
+    };
+    History::Carried { operands }
 }
 
 /// The `@` operands of a command node (none for anything else).

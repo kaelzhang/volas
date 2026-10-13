@@ -15,11 +15,10 @@ fn columns(node: &BoundNode, names: &mut Vec<String>) {
             if !names.contains(n) { names.push(n.clone()); }
         }
         Node::Command(_) | Node::Name(_) => {
-            if let Some(cmd) = super::as_command(node) {
-                for (i, default) in cmd.args.spec.series.iter().enumerate() {
-                    if let Some(s) = crate::exec::operand(&cmd.series, i) { columns(s, names); }
-                    else if !names.iter().any(|n| n == default) { names.push((*default).into()); }
-                }
+            let cmd = super::as_command(node).expect("a bound command or a command name");
+            for (i, default) in cmd.args.spec.series.iter().enumerate() {
+                if let Some(s) = crate::exec::operand(&cmd.series, i) { columns(s, names); }
+                else if !names.iter().any(|n| n == default) { names.push((*default).into()); }
             }
         }
         Node::Unary { operand, .. } => columns(operand, names),

@@ -178,9 +178,8 @@ highest class among its parts.
   retains the raw input rows until all nodes have a state.
   Declared chains such as `'ema:5@(rsi:5)'`, `'ema:3 - ema:5'`, `'close > ema:20'`,
   `'ema:2@(maxindex:2)'` and `'close-ma:5+obv'` stay exact across appends, compaction
-  and visible writes, including on time-frame frames. A recursive command without a
-  continuation (`crsi`, `stoch_momentum`, or a composite average at a recursive MA
-  type) anywhere in a directive is still rejected; compute it on an unbounded frame.
+  and visible writes, including on time-frame frames. CRSI, stochastic momentum,
+  and composite averages at every MA type also carry their states and can be declared.
 - **A directive requested later** (`wf[d]`, `wf[[...]]`, `wf.exec(d)`) is computed only
   when it is of class 1 and reads at most `max_lookback` rows before each row. Classes 2
   and 3 must be declared; a later request raises, naming the two correct paths (for a
@@ -192,8 +191,8 @@ ValueError: cannot compute 'ma:5' on this windowed frame: it carries a running a
 ```
 
 A frame copied into a window (`DataFrame(df, window=..., max_lookback=...)`) keeps the
-cached columns it carries only when the window keeps them exactly (within the margin, and
-not a recursion no carried state covers); otherwise the construction raises.
+cached columns it carries only when their lookbacks fit the margin; otherwise the
+construction raises.
 
 Assigning a whole column (`wf['x'] = values`, a scalar, an array or a Series of the
 visible rows) writes the visible rows only: the hidden margin keeps the history it

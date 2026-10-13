@@ -157,6 +157,8 @@ on_complete_rows! { series:
 }
 
 on_complete_rows! { state:
+    crsi_final_state(close; rp: usize, sp: usize, rank: usize) -> Option<Vec<f64>>;
+    stoch_momentum_final_state(high, low, close; k: usize, d: usize, signal: Option<usize>) -> Option<Vec<f64>>;
     ad_final_state(high, low, close, volume) -> Option<Vec<f64>>;
     adosc_final_state(high, low, close, volume; fast: usize, slow: usize) -> Option<Vec<f64>>;
     adx_final_state(high, low, close; period: usize) -> Option<Vec<f64>>;
@@ -197,7 +199,7 @@ on_complete_rows! { state:
         accel_max_short: f64) -> Option<Vec<f64>>;
     smma_final_state(data; period: usize) -> Option<Vec<f64>>;
     stochrsi_final_state(close; rsi_period: usize, fastk_period: usize, is_d: bool,
-        fastd_period: usize, origin: usize) -> Option<Vec<f64>>;
+        fastd_period: usize, matype: usize, origin: usize) -> Option<Vec<f64>>;
     supertrend_final_state(high, low, close; period: usize, mult: f64) -> Option<Vec<f64>>;
     t3_final_state(data; period: usize) -> Option<Vec<f64>>;
     tema_final_state(data; period: usize) -> Option<Vec<f64>>;
@@ -207,6 +209,8 @@ on_complete_rows! { state:
 }
 
 on_complete_rows! { resume:
+    crsi_resume(close; rp: usize, sp: usize, rank: usize; from, state) -> Option<Vec<f64>>;
+    stoch_momentum_resume(high, low, close; k: usize, d: usize, signal: Option<usize>; from, state) -> Option<Vec<f64>>;
     ad_resume(high, low, close, volume; ; from, state) -> Vec<f64> = total;
     adosc_resume(high, low, close, volume; fast: usize, slow: usize; from, state) -> Vec<f64> = total;
     adx_resume(high, low, close; period: usize; from, state) -> Option<Vec<f64>>;
@@ -251,7 +255,7 @@ on_complete_rows! { resume:
         from, state) -> Option<Vec<f64>>;
     smma_resume(data; period: usize; from, state) -> Vec<f64> = total;
     stochrsi_resume(close; rsi_period: usize, fastk_period: usize, is_d: bool, fastd_period:
-        usize; from, state) -> Option<Vec<f64>>;
+        usize, matype: usize; from, state) -> Option<Vec<f64>>;
     supertrend_resume(high, low, close; period: usize, mult: f64, want_direction: bool; from,
         state) -> Option<Vec<f64>>;
     t3_resume(data; period: usize, vfactor: f64; from, state) -> Vec<f64> = total;
@@ -262,6 +266,7 @@ on_complete_rows! { resume:
 }
 
 on_complete_rows! { step:
+    crsi_resume_one(close; rp: usize, sp: usize, rank: usize)
     ad_resume_one(high, low, close, volume;)
     adx_resume_one(high, low, close; period: usize)
     adxr_resume_one(high, low, close; period: usize)

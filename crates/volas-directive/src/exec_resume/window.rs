@@ -1,4 +1,4 @@
-//! The resumable finite-window commands: those whose full computation carries a running
+//! Resumable window commands and composites of generic MA stages: those whose full computation carries a running
 //! accumulator across the series (a sliding sum, sum of squares, weighted sum, …), and
 //! the formulas of a row's own inputs (price transforms, TR, the momentum family). Each
 //! resumes from the kernel's own state — its running sums in its exact operation order,
@@ -8,16 +8,15 @@
 //! The states and steps live next to their kernels in `volas_compute::raw`; this module
 //! binds a command's arguments and inputs to them. The commands composed of moving
 //! averages here (`apo`, `ppo`, `bias`, `dma`, `macdext`, `mavp`, `ma`) compose
-//! [`FiniteMa`] stages, as their dispatch arms compose `ma_typed`.
+//! [`MaStage`] stages, as their dispatch arms compose `ma_typed`.
 
 use crate::exec::{arg_f64, arg_usize, hv_annualization, percent_oscillator};
 use crate::operands::Operands;
 use crate::types::ArgValue;
-use volas_compute::raw::indicators::{self as ind, BollLine, FiniteMa, LinregLine};
+use volas_compute::raw::indicators::{self as ind, BollLine, MaStage, LinregLine};
 
-/// The resumable state of the finite-window command `name` / `sub` over the rows `ops`
-/// reads, or `None` when it carries none (a pure per-window command, or a moving-average
-/// type that is recursive).
+/// The resumable state of the window or composite command `name` / `sub` over the rows `ops`
+/// reads, or `None` when it carries none (a pure per-window command).
 pub(crate) fn state(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Vec<f64>> {
     let p = |i| arg_usize(args, i);
     let close = || ops.f64(0, "close").ok();
@@ -101,6 +100,7 @@ pub(crate) fn state(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgVa
             ind::stoch_state(&h, &l, &c, p(0), &stages[..k], ops.origin())
         }
         ("apo" | "ppo" | "bias" | "dma" | "macdext" | "mavp", _) => {
+            if name == "mavp" { ops.f64_required(1).ok()?; }
             let mut prev = composite_initial(name, sub, args, ops.origin())?;
             let mut next = prev.clone();
             for row in 0..close()?.len() {
@@ -264,14 +264,14 @@ fn stoch_stages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> ([(usize, u
 /// The averages a composite command is made of: the line's two `(fast, slow)` and, for
 /// a smoothed line, the smoother — as their dispatch arms build them.
 struct Averages {
-    fast: FiniteMa,
-    slow: FiniteMa,
-    smooth: Option<FiniteMa>,
+    fast: MaStage,
+    slow: MaStage,
+    smooth: Option<MaStage>,
 }
 
 fn averages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Averages> {
     let p = |i| arg_usize(args, i);
-    let ma = FiniteMa::new;
+    let ma = MaStage::new;
     Some(match (name, sub) {
         ("bias", _) => Averages { fast: ma(1, 0)?, slow: ma(p(0), 0)?, smooth: None },
         ("dma", sub) => Averages {
@@ -299,7 +299,7 @@ fn averages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Averages
 fn composite_len(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<usize> {
     if name == "mavp" {
         let (lo, hi, mt) = (arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2));
-        let stages: Option<usize> = (lo..=hi).map(|q| Some(FiniteMa::new(q, mt)?.state_len())).sum();
+        let stages: Option<usize> = (lo..=hi).map(|q| Some(MaStage::new(q, mt)?.state_len())).sum();
         return Some(1 + stages?);
     }
     let a = averages(name, sub, args)?;
@@ -316,7 +316,7 @@ fn composite_initial(name: &str, sub: Option<&str>, args: &[ArgValue], origin: u
         let lb = ind::generic_ma_lookback(hi, mt);
         let mut v = vec![0.0];
         for q in lo..=hi {
-            v.extend(FiniteMa::new(q, mt)?.initial(origin + lb - ind::generic_ma_lookback(q, mt)));
+            v.extend(MaStage::new(q, mt)?.initial(origin + lb - ind::generic_ma_lookback(q, mt)));
         }
         return Some(v);
     }
@@ -387,7 +387,7 @@ fn mavp_step(
     let mut value = f64::NAN;
     let want = ind::mavp_period(periods[row], lo, hi);
     for q in lo..=hi {
-        let stage = FiniteMa::new(q, mt)?;
+        let stage = MaStage::new(q, mt)?;
         let len = stage.state_len();
         let (s, n) = (&prev[at..at + len], &mut next[at..at + len]);
         at += len;

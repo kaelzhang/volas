@@ -185,6 +185,7 @@ pub(super) fn step_of(
             let (h, l) = hl()?;
             ind::minus_dm_resume_one(&h, &l, p(0), row, prev, next)
         }
-        _ => None, // a Rows-only node has no scalar kernel
+        ("crsi", _) => ind::crsi_resume_one(&ops.f64(0, "close").ok()?, arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2), row, prev, next),
+        _ => unreachable!("a recursive Step command has a scalar kernel"), // LCOV_EXCL_LINE
     }
 }

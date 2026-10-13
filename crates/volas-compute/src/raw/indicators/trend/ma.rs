@@ -5,6 +5,7 @@ use crate::accum::{Accumulator, Csum};
 use crate::guard::{all_finite, own_sums, ring_push, state_after, window_sums, Order, Slide, Window};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 use crate::missing;
+use super::MaStage;
 use crate::raw::indicators::av;
 use crate::raw::kernels;
 use crate::raw::smoothing;
@@ -407,7 +408,7 @@ pub(crate) fn wma_initial() -> Vec<f64> {
 /// One row of [`wma`] over the series `term` (the careful [`wma_with`] loop, its
 /// leading-NaN skip included), from `state` into `next`.
 pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
-    // Every caller (`FiniteMa::step`, the HMA / DKX / Coppock steps) checks both lengths.
+    // Every caller (`MaStage::step`, the HMA / DKX / Coppock steps) checks both lengths.
     debug_assert!(state.len() == WMA_STATE && next.len() == WMA_STATE);
     let mut sum = Csum::from_state(&state[..2])?;
     let mut wsum = Csum::from_state(&state[2..4])?;
@@ -479,112 +480,10 @@ pub fn mavp_period(value: f64, min_period: usize, max_period: usize) -> Option<u
     Some((value as i64).clamp(min_period as i64, max_period as i64) as usize)
 }
 
-/// A finite-window moving average of a TA-Lib MA type — SMA (`0`), WMA (`2`) or TRIMA
-/// (`5`) — as a resumable stage over any series, for the commands composed of them
-/// (`ma`, `apo`, `ppo`, `macdext`, `bias`, `dma`, `mavp`, the stochastics). Its step is
-/// the kernel's own row ([`kernels::sma_row`], [`wma_row`], [`trima_row`]).
-#[derive(Clone, Copy, Debug)]
-pub struct FiniteMa {
-    period: usize,
-    matype: usize,
-}
-
-impl FiniteMa {
-    /// The stage of `matype` over `period` — the type `TA_MA` runs there
-    /// ([`super::generic_ma_type`]: any type at period 1 is the identity) — or `None` for
-    /// a type that is not finite-window (a recursive average carries its own state).
-    pub fn new(period: usize, matype: usize) -> Option<Self> {
-        let matype = super::generic_ma_type(period, matype);
-        matches!(matype, 0 | 2 | 5).then_some(FiniteMa { period, matype })
-    }
-
-    /// The length of its state.
-    pub fn state_len(&self) -> usize {
-        match self.matype {
-            0 => kernels::SMA_STATE,
-            2 => WMA_STATE,
-            _ => super::trima_state_len(self.period),
-        }
-    }
-
-    /// How many rows before the current one its step reads (a stage over another
-    /// stage's output keeps that many of them).
-    pub fn reach(&self) -> usize {
-        match self.matype {
-            5 => super::trima_reach(self.period),
-            _ => self.period,
-        }
-    }
-
-    /// One row of the average of `term` at `row`, from `state` into `next`.
-    pub fn step(
-        &self,
-        row: usize,
-        term: impl Fn(usize) -> f64,
-        state: &[f64],
-        next: &mut [f64],
-    ) -> Option<f64> {
-        if next.len() != self.state_len() || state.len() != next.len() {
-            return None;
-        }
-        match self.matype {
-            0 => kernels::sma_step(self.period, row, term, state, next),
-            2 => wma_row(self.period, row, &term, state, next),
-            _ => super::trima_row(self.period, row, &term, state, next),
-        }
-    }
-
-    /// Its state before its first row, at absolute position `origin`.
-    pub fn initial(&self, origin: usize) -> Vec<f64> {
-        match self.matype {
-            0 => Slide::<1>::initial(origin),
-            2 => wma_initial(),
-            _ => super::trima_initial(self.period, origin),
-        }
-    }
-
-    /// Its state as a stage over a series produced one row at a time, before its first
-    /// row (at absolute position `origin`): [`initial`](Self::initial), then the
-    /// series' (not yet seen) previous values.
-    pub fn chained_initial(&self, origin: usize) -> Vec<f64> {
-        let mut v = self.initial(origin);
-        v.resize(self.chained_len(), 0.0);
-        v
-    }
-
-    /// The length of its state as a stage over a series produced one row at a time:
-    /// its own state, then the last [`reach`](Self::reach) values of that series.
-    pub fn chained_len(&self) -> usize {
-        self.state_len() + self.reach()
-    }
-
-    /// One row of the average of a series produced one row at a time — `newest` is its
-    /// value at `row` — from `state` into `next` (both [`chained_len`](Self::chained_len)
-    /// long: the stage's state, then the series' previous values, oldest first).
-    pub fn step_chained(&self, row: usize, newest: f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
-        let (len, reach) = (self.state_len(), self.reach());
-        if state.len() != len + reach || next.len() != state.len() {
-            return None;
-        }
-        let (own, ring) = state.split_at(len);
-        let (n_own, n_ring) = next.split_at_mut(len);
-        // the series at row j: `ring` holds rows `row-reach .. row-1`, oldest first
-        let at = |j: usize| if j == row { newest } else { ring[reach - (row - j)] };
-        let value = self.step(row, at, own, n_own)?;
-        ring_push(ring, newest, n_ring);
-        Some(value)
-    }
-
-    /// The state after the rows `0..n` of `term`, row 0 at absolute position `origin`.
-    pub fn state(&self, n: usize, origin: usize, term: impl Fn(usize) -> f64) -> Option<Vec<f64>> {
-        state_after(self.initial(origin), n, |row, prev, next| self.step(row, &term, prev, next))
-    }
-}
-
 /// [`ma`]'s state after the rows of `close` (row 0 at absolute position `origin`) —
-/// see [`FiniteMa`].
+/// see [`MaStage`].
 pub fn ma_state(close: &[f64], period: usize, matype: usize, origin: usize) -> Option<Vec<f64>> {
-    FiniteMa::new(period, matype)?.state(close.len(), origin, |j| close[j])
+    MaStage::new(period, matype)?.state(close.len(), origin, |j| close[j])
 }
 
 /// One row of [`ma`] (of `matype`) at `row`, from `state` into `next`.
@@ -599,7 +498,7 @@ pub fn ma_step(
     if row >= close.len() {
         return None;
     }
-    FiniteMa::new(period, matype)?.step(row, |j| close[j], state, next)
+    MaStage::new(period, matype)?.step(row, |j| close[j], state, next)
 }
 
 /// [`vwma`]'s state (row 0 at absolute position `origin`): the [`Slide`] of `[Σc·v, Σv]`.

@@ -257,8 +257,6 @@ pub enum Keep {
     State,
     /// By its window: its values are a function of a trailing window of its rows.
     Window,
-    /// Not at all: it carries no state (it recomputes), so only the whole history gives it.
-    Nothing,
 }
 
 /// A line's R13 history class (how its value depends on the rows before it): class 1
@@ -335,9 +333,6 @@ pub struct CommandSpec {
     /// A count over its window (`increase`): class 3 by R13, kept by its window.
     counted: bool,
     resume: Resume,
-    /// Arguments under which the declared resume is not available (falls back to
-    /// [`Resume::Recompute`]).
-    resume_unless: Option<fn(&[ArgValue]) -> bool>,
     /// The recursive command a line runs as under the given arguments, with its
     /// arguments — `ma` at a recursive MA type is exactly that average's command.
     runs_as: Option<RunsAs>,
@@ -362,7 +357,6 @@ impl CommandSpec {
             resume_inputs: None,
             counted: false,
             resume: Resume::Recompute,
-            resume_unless: None,
             runs_as: None,
         }
     }
@@ -431,12 +425,6 @@ impl CommandSpec {
         self
     }
 
-    /// Its resume is not available under the arguments `unless` accepts.
-    pub(crate) fn resume_unless(mut self, unless: fn(&[ArgValue]) -> bool) -> Self {
-        self.resume_unless = Some(unless);
-        self
-    }
-
     /// Under some arguments it runs as another (recursive) command.
     pub(crate) fn runs_as(mut self, f: RunsAs) -> Self {
         self.runs_as = Some(f);
@@ -458,14 +446,13 @@ impl CommandSpec {
 
     /// The R13 history class under the bound arguments `args` ([`HistoryClass`]): a
     /// count over its window is class 3 kept by its window; a recursion is class 3, kept
-    /// by its state when it has a resume, else not at all; a running accumulator class 2;
+    /// by its continuation state; a running accumulator class 2;
     /// a pure window class 1.
     pub fn history_class(&self, args: &[ArgValue]) -> HistoryClass {
         if self.counted {
             return HistoryClass::Recursion(Keep::Window);
         }
         match self.history(args) {
-            History::Recursive if self.resume(args) == Resume::Recompute => HistoryClass::Recursion(Keep::Nothing),
             History::Recursive => HistoryClass::Recursion(Keep::State),
             History::Accumulating => HistoryClass::Accumulator,
             History::Window => HistoryClass::Window,
@@ -520,11 +507,6 @@ impl CommandSpec {
     pub fn resume(&self, args: &[ArgValue]) -> Resume {
         if let Some((name, args)) = self.runs_as_command(args) {
             return command_spec(name, None).map_or(Resume::Recompute, |spec| spec.resume(&args));
-        }
-        let averaged_recursion =
-            matches!(self.history, HistoryRule::Averages(..)) && self.history(args) == History::Recursive;
-        if averaged_recursion || self.resume_unless.is_some_and(|f| f(args)) {
-            return Resume::Recompute;
         }
         self.resume
     }
@@ -707,7 +689,7 @@ mod tests {
             // its own row (the stateless price transforms and the momentum family)
             let _ = spec.lookback_of(&args);
             if spec.resume(&args) == Resume::Rows {
-                assert!(history == History::Recursive || spec.emits_position(), "{name}.{sub:?}");
+                assert!(history == History::Recursive || spec.accumulates() || spec.emits_position(), "{name}.{sub:?}");
             }
         }
         assert!(recursive >= 47, "{recursive}");
@@ -735,10 +717,10 @@ mod tests {
         assert_eq!(ma.resume(&[u(5), u(1)]), Resume::Step); // EMA steps
         assert_eq!(ma.runs_as_command(&[u(5), u(0)]), None);
         let apo = command_spec("apo", None).unwrap();
-        assert_eq!(apo.resume(&[u(2), u(3), u(1)]), Resume::Recompute);
+        assert_eq!(apo.resume(&[u(2), u(3), u(1)]), Resume::Rows);
         let srd = command_spec("stochrsi", Some("d")).unwrap();
         assert_eq!(srd.resume(&[u(14), u(5), u(3), u(0)]), Resume::Rows);
-        assert_eq!(srd.resume(&[u(14), u(5), u(3), u(2)]), Resume::Recompute);
+        assert_eq!(srd.resume(&[u(14), u(5), u(3), u(2)]), Resume::Rows);
     }
 
     /// A bare name is usable when every argument and every input has a default.

@@ -59,6 +59,13 @@ def _append_cost(directive, kind, n, k=24):
 
 
 CASES = [
+    ('crsi:3,2,5', 'float64'),
+    ('stoch_momentum', 'float64'),
+    ('apo:5,10,1', 'float64'),
+    ('stochf.d:5,3,1', 'float64'),
+    ('macdext:12,1,26,1', 'float64'),
+    ('stoch.k:5,3,1', 'float64'),
+    ('stochrsi.d:14,5,3,1', 'float64'),
     ('ema:20', 'float32-missing'), ('ema:20@(close+open)', 'float64-missing'),
     ('rsi:14@(volume+close)', 'int64-missing'),
     ('obv', 'int64'), ('mfi:14', 'int64'), ('vwma:20', 'int64'),

@@ -240,13 +240,13 @@ def test_class_2_and_3_must_be_declared(d, why):
 
 
 @pytest.mark.parametrize('d', ['ema:3@(crsi)', 'crsi', 'apo:5,9,1', 'stoch.k:5,3,1'])
-def test_a_recursion_no_state_carries_is_refused(d):
+def test_recursive_composites_are_declared_and_late_requests_raise(d):
     seed = rows(bars(10), 0, 10)
-    with pytest.raises(ValueError, match=f"cannot keep '{re.escape(d)}' exact on a windowed frame"):
-        volas.DataFrame(seed, window=3, max_lookback=[d])
+    declared = volas.DataFrame(seed, window=3, max_lookback=[d])
+    assert same(declared[d], seed.exec(d, dtype='float64')[-3:])
     w = volas.DataFrame(seed, window=3, max_lookback=60)
     for read in (lambda: w[d], lambda: w.exec(d)):
-        with pytest.raises(ValueError, match="cannot keep"):
+        with pytest.raises(ValueError, match="cannot compute"):
             read()
 
 
@@ -540,3 +540,29 @@ def test_an_input_out_of_the_float_domain_is_reported_as_it_is():
     with pytest.raises((ValueError, OverflowError), match='2\\^53') as raised:
         w['ema:2@v']
     assert 'cannot recompute' not in str(raised.value)
+
+
+@pytest.mark.parametrize('tf', [None, '1m'])
+@pytest.mark.parametrize('d', ['crsi:3,2,5', 'stoch_momentum', 'stoch_momentum.signal',
+                             'apo:5,10,1', 'stochf.d:5,3,1', 'macdext:12,1,26,1',
+                             'stoch.k:5,3,1', 'stochrsi.d:14,5,3,1'])
+def test_recursive_composites_keep_exact_windowed_history(d, tf):
+    cols = bars(320, seed=81, gaps=.03)
+    kw = {} if tf is None else {'time_frame': tf}
+    w = volas.DataFrame(rows(cols, 0, 100), window=5, max_lookback=[d], **kw)
+    u = volas.DataFrame(rows(cols, 0, 100), **kw)
+    u[d]
+    for i in range(100, 320):
+        for df in (w, u):
+            df.append(rows(cols, i, i + 1))
+        if i % 11 == 0:
+            for df in (w, u):
+                df.append(rows(bars(i + 1, seed=i), i, i + 1))
+        if i % 17 == 0:
+            w.fulfill()
+            u.fulfill()
+            w.iat[1, 3] = u.iat[len(u) - 4, 3] = 90.0 + i / 10
+        got = np.asarray(w[d], dtype=np.float64)
+        want = np.asarray(u[d], dtype=np.float64)[-5:]
+        np.testing.assert_array_equal(got.view(np.uint64), want.view(np.uint64), err_msg=f'{d} {i}')
+    assert w._physical_height < 100

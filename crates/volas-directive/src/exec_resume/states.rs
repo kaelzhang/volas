@@ -11,10 +11,9 @@
 
 use volas_core::{Column, DataFrame, Result};
 
-use super::{as_command, recursive, resume_of};
+use super::{as_command, recursive};
 use crate::complete::into_f64;
 use crate::lookback::lookback;
-use crate::spec::Resume;
 use crate::types::Ast;
 
 /// A column's values and its carried states `(state, state_before_last)`.
@@ -59,7 +58,7 @@ fn one_pass(df: &DataFrame, node: &Ast) -> Option<WithStates> {
         return None;
     }
     let cmd = as_command(node.node())?;
-    if !recursive(&cmd) || resume_of(&cmd) == Resume::Recompute {
+    if !recursive(&cmd) {
         return None;
     }
     let h = df.height();

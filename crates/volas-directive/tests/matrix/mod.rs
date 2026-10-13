@@ -61,7 +61,7 @@ pub fn lines() -> Vec<Line> {
             }
             // a required operand (an empty default) filled in
             let series = match spec.series {
-                [_, ""] if cmd == "mavp" => "@close,volume",
+                [_, ""] if cmd == "mavp" => "@close,periods",
                 [_, ""] => "@close,open",
                 [""] => "@close",
                 _ => "",
@@ -74,7 +74,7 @@ pub fn lines() -> Vec<Line> {
 
 /// An in-domain token for one slot: the default when there is one (`""`), else a
 /// value at `period` clamped into the bound.
-fn token(arg: &Arg, period: usize, keep_default: bool) -> String {
+pub fn token(arg: &Arg, period: usize, keep_default: bool) -> String {
     if keep_default && arg.default != ArgDefault::Required {
         return String::new();
     }
@@ -110,6 +110,21 @@ pub fn variants(line: &Line) -> Vec<String> {
             out.push(text);
         }
     }
+    // Every generic-MA slot, including mixed cascades, must carry its recursion.
+    for mt in 0..=8 {
+        let args = match line.head.as_str() {
+            "apo" | "ppo" => format!("5,10,{mt}"),
+            "macdext" => format!("5,{mt},10,{}", (mt + 2) % 9),
+            "macdext.signal" | "macdext.histogram" => format!("5,{mt},10,{},4,{}", (mt + 2) % 9, (mt + 7) % 9),
+            "mavp" => format!("2,10,{mt}"),
+            "stoch.k" | "stoch.d" => format!("5,3,{mt},3,{}", (mt + 3) % 9),
+            "stochf.d" => format!("5,3,{mt}"),
+            "stochrsi.k" | "stochrsi.d" => format!("14,5,3,{mt}"),
+            _ => continue,
+        };
+        out.push(format!("{}:{args}{}", line.head, line.series));
+    }
+    if line.head == "crsi" { out.push("crsi:3,2,5".into()); }
     out
 }
 
@@ -120,9 +135,10 @@ pub struct Data {
 }
 
 fn frame(o: Vec<f64>, h: Vec<f64>, l: Vec<f64>, c: Vec<f64>, v: Vec<f64>) -> DataFrame {
+    let periods = Column::f64((0..c.len()).map(|i| (i % 13) as f64 + 0.25).collect());
     DataFrame::new(
-        ["open", "high", "low", "close", "volume"].iter().map(|s| s.to_string()).collect(),
-        vec![Column::f64(o), Column::f64(h), Column::f64(l), Column::f64(c), Column::f64(v)],
+        ["open", "high", "low", "close", "volume", "periods"].iter().map(|s| s.to_string()).collect(),
+        vec![Column::f64(o), Column::f64(h), Column::f64(l), Column::f64(c), Column::f64(v), periods],
         None,
     )
     .expect("equal-length columns")

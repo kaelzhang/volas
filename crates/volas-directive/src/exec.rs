@@ -699,16 +699,16 @@ mod tests {
     }
 
     /// `initial_state` / `execute_resume` decline (return `None`, so the engine keeps the
-    /// full-recompute fallback) on the off-the-happy-path arms: a non-SMA stochrsi `.d`
-    /// matype, a `*_resume` that returns `None` (from below its warm-up), and a directive
+    /// full-recompute fallback) on malformed states, a `*_resume` that returns `None`
+    /// (from below its warm-up), and a directive
     /// with no resume kernel at all (the `_ => None` catch-all).
     #[test]
     fn state_carry_none_propagation() {
         let df = ohlcv_n(80);
         let p = |d: &str| parse(d).unwrap();
 
-        // initial_state: stochrsi `.d` with a non-SMA matype (arg 3 != 0) -> None (exec:1021).
-        assert!(initial_state(&df, &p("stochrsi.d:14,14,3,1"), usize::MAX).is_none());
+        // Every StochRSI MA type now carries a state.
+        assert!(initial_state(&df, &p("stochrsi.d:14,14,3,1"), usize::MAX).is_some());
 
         // execute_resume: SAR / SAREXT at from_row < 2 -> the inner `*_resume` is None, the
         // `?` propagates (exec:1095 / 1114). State contents are unread on the None path.
@@ -739,7 +739,7 @@ mod tests {
         let kdj_state = vec![50.0, 50.0];
         assert!(execute_resume(&df, &p("kdj.j"), &kdj_state, 2, df.height(), 0).is_none());
 
-        // execute_resume: stochrsi `.d` non-SMA matype -> `return None` (exec:1355).
+        // execute_resume: a recursive-MA StochRSI state of the wrong shape declines.
         let sr_state = vec![0.0; 20];
         assert!(execute_resume(&df, &p("stochrsi.d:14,14,3,1"), &sr_state, 40, df.height(), 0).is_none());
 

@@ -21,7 +21,7 @@ use volas_directive::lookback::{history, lookback, reach};
 use volas_directive::parse;
 use volas_directive::types::Ast;
 
-const ROWS: usize = 90;
+const ROWS: usize = 160;
 
 fn same(a: f64, b: f64) -> bool {
     a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
@@ -111,7 +111,9 @@ fn a_checkpoint_replays_every_carried_line_bit_exactly() {
             };
             carried += 1;
             for data in &classes {
-                for why in check(&data.frame, &node, operands) {
+                let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(&data.frame, &node, operands)))
+                    .unwrap_or_else(|_| panic!("checkpoint replay panicked for {text} [{}]", data.name));
+                for why in checked {
                     fails.push(format!("{text} [{}]: {why}", data.name));
                 }
             }
@@ -123,8 +125,7 @@ fn a_checkpoint_replays_every_carried_line_bit_exactly() {
 }
 
 /// A recursion is kept through a checkpoint exactly when its command carries a state:
-/// `Carried` agrees with the kernels on every line, and a line without a recursion is
-/// not `Unkept`.
+/// `Carried` agrees with the kernels on every recursive line.
 #[test]
 fn the_history_class_agrees_with_the_carried_states() {
     let frame = matrix::classes(ROWS).into_iter().next().unwrap().frame;
@@ -135,10 +136,8 @@ fn the_history_class_agrees_with_the_carried_states() {
                 continue;
             }
             let state = initial_state(&frame, &node, usize::MAX);
-            match history(&node) {
-                History::Carried { .. } => assert!(state.is_some(), "{text}: Carried without a state"),
-                History::Unkept => assert!(state.is_none(), "{text}: a state, but Unkept"),
-                _ => {}
+            if let History::Carried { .. } = history(&node) {
+                assert!(state.is_some(), "{text}: Carried without a state");
             }
         }
     }
@@ -157,7 +156,6 @@ fn every_command_has_its_history_class() {
         "ppo", "relative_vigor", "stddev", "stoch", "sum", "trima", "tsf", "ttm_squeeze", "ultosc",
         "var", "vr", "vwma", "wma", "wvad",
     ];
-    const UNKEPT: &[&str] = &["crsi", "stoch_momentum"];
     let mut seen = 0;
     for &name in COMMANDS {
         // the default arguments (no MA-type override; a required one at 2); the
@@ -187,8 +185,6 @@ fn every_command_has_its_history_class() {
         let class = spec.history_class(&args);
         let want = if name == "increase" {
             HistoryClass::Recursion(Keep::Window)
-        } else if UNKEPT.contains(&name) {
-            HistoryClass::Recursion(Keep::Nothing)
         } else if spec.history(&args) == Line::Recursive {
             HistoryClass::Recursion(Keep::State)
         } else if ACCUMULATORS.contains(&name) || name == "stochf" || name == "stoch" {
@@ -202,9 +198,9 @@ fn every_command_has_its_history_class() {
     assert_eq!(seen, COMMANDS.len());
     assert!(seen > 100);
     // an MA-type argument selecting a recursive average makes a recursion: `ma` runs as
-    // that average and keeps its state; a composite of averages recomputes
+    // that average and keeps its state; a composite carries every stage
     assert_eq!(history(&parse("ma:5,1").unwrap()), History::Carried { operands: 0 });
-    assert_eq!(history(&parse("apo:5,9,1").unwrap()), History::Unkept);
+    assert_eq!(history(&parse("apo:5,9,1").unwrap()), History::Carried { operands: 0 });
 }
 
 #[test]
@@ -229,8 +225,8 @@ fn a_directive_takes_its_highest_class() {
         ("ema:3 - ema:5", History::Carried { operands: 0 }),
         ("close > ema:5", History::Carried { operands: 0 }),
         ("kcw", History::Carried { operands: 0 }),
-        ("crsi", History::Unkept),
-        ("stoch_momentum", History::Unkept),
+        ("crsi", History::Carried { operands: 0 }),
+        ("stoch_momentum", History::Carried { operands: 0 }),
         ("ma:5,1", History::Carried { operands: 0 }),
     ] {
         let h = history(&parse(text).unwrap());
@@ -279,10 +275,10 @@ fn a_replay_that_cannot_run_declines() {
     let df = frame((0..40).map(|i| 50.0 + (i as f64 * 0.7).sin()).collect());
     let ema = parse("ema:5").unwrap();
     let cp = capture(&df, &ema, 10).unwrap();
-    assert!(capture(&df, &parse("crsi").unwrap(), 10).is_none()); // no continuation
+    assert!(capture(&df, &parse("llv:5").unwrap(), 10).is_none()); // no continuation
     assert!(capture(&df, &ema, 0).is_none());
     assert!(capture(&df, &ema, 41).is_none());
-    assert!(replay(&df, &parse("crsi").unwrap(), &cp, 40).is_none());
+    assert!(replay(&df, &parse("llv:5").unwrap(), &cp, 40).is_none());
     assert!(replay(&df.slice_data(11, 40), &ema, &cp, 29).is_none()); // starts after the row
     assert!(replay(&df, &ema, &cp, 41).is_none()); // past the frame
     assert!(replay(&df, &ema, &cp, 5).is_none()); // ends before the checkpoint
@@ -300,7 +296,7 @@ fn a_replay_that_cannot_run_declines() {
     assert_eq!(checkpoint(&df, &ema, None, 1, true).unwrap().state, None);
     assert!(checkpoint(&df, &ema, state.clone(), 0, true).is_none());
     assert!(checkpoint(&df, &ema, state.clone(), 41, true).is_none());
-    assert!(checkpoint(&df, &parse("crsi").unwrap(), state.clone(), 10, true).is_none());
+    assert!(checkpoint(&df, &parse("llv:5").unwrap(), state.clone(), 10, true).is_none());
     assert!(replay(&df, &atr, &checkpoint(&df, &atr, state, 10, true).unwrap(), 40).is_none());
 }
 
@@ -358,4 +354,31 @@ fn a_cross_reads_the_row_before_its_operands() {
         }
     }
     assert!(fails.is_empty(), "{} cross(es) read past their lookback:\n{}", fails.len(), fails.join("\n"));
+}
+
+/// MACDEXT's fast WMA(5), type 2, and slow TEMA(10), type 4, both run on
+/// complete closes. After close[80] is missing, the WMA at row 81 contains
+/// rows 76,77,78,79,81 and has zero non-finite inputs. Sliding it over raw rows
+/// would instead evict close[80] at row 85, subtracting a missing row it never saw.
+#[test]
+fn macdext_wma_tema_checkpoint_replays_the_complete_window() {
+    let mut close: Vec<f64> = (0..160).map(|i| 50.0 + (i as f64 * 0.7).sin()).collect();
+    close[80] = f64::NAN;
+    let df = frame(close);
+    let node = parse("macdext:5,2,10,4").unwrap();
+    let full = execute(&df, &node).unwrap().to_f64_vec();
+    let mut cp = capture(&df, &node, 82).unwrap();
+    assert!(cp.state.is_some());
+    let kept = df.slice_data(40, 160);
+    let mut from = 82;
+    for end in [83, 90, 160] {
+        let (got, next) = replay(&kept, &node, &cp, end - 40).unwrap();
+        assert_eq!(got.to_f64_vec().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            full[from..end].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "rows {from}..{end}");
+        let fresh = capture(&df, &node, end).unwrap();
+        assert_eq!(next.state.as_ref().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            fresh.state.as_ref().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "state at {end}");
+        cp = next;
+        from = end;
+    }
 }

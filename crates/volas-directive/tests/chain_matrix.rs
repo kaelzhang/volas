@@ -122,13 +122,13 @@ fn a_chain_declines_what_does_not_fit_it() {
     assert!(execute_resume(df, &node, &chain, 60, 80, 0).is_some());
 }
 
-/// A Recompute command anywhere prevents a carried continuation.
+/// CRSI now composes through the ordinary continuation plan.
 #[test]
-fn a_recomputed_operand_has_no_continuation() {
+fn a_crsi_operand_carries_its_continuation() {
     let data = matrix::classes(120).remove(0);
     let node = parse("ema:4@(crsi:3,2,5)").unwrap();
-    assert!(initial_state(&data.frame, &node, 90).is_none());
-    assert_eq!(volas_directive::lookback::history(&node), volas_core::History::Unkept);
+    assert!(initial_state(&data.frame, &node, 90).is_some());
+    assert_eq!(volas_directive::lookback::history(&node), volas_core::History::Carried { operands: 0 });
 }
 
 #[test]

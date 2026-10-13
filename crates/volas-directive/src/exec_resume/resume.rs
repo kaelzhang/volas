@@ -63,14 +63,14 @@ pub(crate) fn resume_into(
     let cmd = as_command(node.node())?;
     let resume = resume_of(&cmd);
     let end = end.min(df.height());
-    if resume == Resume::Recompute || from_row > end {
+    if from_row > end {
         return None;
     }
     let bc = bound(&cmd);
     let start = window_start(node, &cmd, from_row);
     super::state::resume(df, &bc, start, prev_state, from_row, end, out, |ops, kernel, from, out| {
         if !recursive(&cmd) && resume == Resume::Step { step_rows(ops, &bc, kernel, from, out) }
-        else { resume_rows(ops, &bc, kernel, from, ops.origin(), out) }
+        else { resume_rows(ops, &bc, kernel, from, out) }
     })
 }
 
@@ -96,12 +96,16 @@ fn resume_rows(
     cmd: &BoundCommand,
     prev_state: &[f64],
     from_row: usize,
-    origin: usize,
     out: &mut Vec<f64>,
 ) -> Option<Vec<f64>> {
     let (name, sub, args) = (cmd.name, cmd.sub, cmd.args);
     let close = || ops.f64(0, "close");
     match (name, sub) {
+        ("crsi", _) => ind::crsi_resume(&close().ok()?, arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2), from_row, prev_state, out),
+        ("stoch_momentum", sub) => ind::stoch_momentum_resume(
+            &ops.f64(0, "high").ok()?, &ops.f64(1, "low").ok()?, &ops.f64(2, "close").ok()?,
+            arg_usize(args, 0), arg_usize(args, 1), sub.map(|_| arg_usize(args, 2)), from_row, prev_state, out),
+
         ("obv", _) => {
             let real = ops.f64(0, "close").ok()?;
             let volume = ops.f64(1, "volume").ok()?;
@@ -207,7 +211,7 @@ fn resume_rows(
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::keltner_band_resume(
+            ind::keltner_band_resume(
                 &close,
                 &high,
                 &low,
@@ -218,8 +222,7 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
 
         // Group B cumulative family (volas-exclusive): resume the running line.
@@ -251,7 +254,7 @@ fn resume_rows(
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::supertrend_resume(
+            ind::supertrend_resume(
                 &high,
                 &low,
                 &close,
@@ -261,8 +264,7 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
 
         // SAR family — resume the state machine from the carried tuple. A resume at
@@ -270,7 +272,7 @@ fn resume_rows(
         ("sar", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
-            let st = ind::sar_resume(
+            ind::sar_resume(
                 &high,
                 &low,
                 arg_f64(args, 0),
@@ -278,14 +280,13 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("sarext", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             // `start_value` (arg 0) only steers the bar-1 bootstrap, never re-run on resume.
-            let st = ind::sarext_resume(
+            ind::sarext_resume(
                 &high,
                 &low,
                 arg_f64(args, 1),
@@ -298,8 +299,7 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
 
         // EMA-recursion family — resume each carried sub-EMA from its last value (skipping
@@ -367,14 +367,13 @@ fn resume_rows(
         }
         // KAMA's sliding-sum resume can decline (short retained head) → None falls back.
         ("kama", _) => {
-            let st = ind::kama_resume(
+            ind::kama_resume(
                 &close().ok()?,
                 arg_usize(args, 0),
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
 
         ("macd", None) => {
@@ -424,30 +423,28 @@ fn resume_rows(
         // resume at `from_row == 0` returns `None` (falls back). DM/DI/DX/ADX/ADXR pull
         // high/low(/close); RSI/CMO/ATR/NATR their named series.
         ("rsi", _) => {
-            let st = ind::rsi_resume(
+            ind::rsi_resume(
                 &close().ok()?,
                 arg_usize(args, 0),
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("cmo", _) => {
-            let st = ind::cmo_resume(
+            ind::cmo_resume(
                 &close().ok()?,
                 arg_usize(args, 0),
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("atr", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::atr_resume(
+            ind::atr_resume(
                 &high,
                 &low,
                 &close,
@@ -455,14 +452,13 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("natr", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::natr_resume(
+            ind::natr_resume(
                 &high,
                 &low,
                 &close,
@@ -470,40 +466,37 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("plus_dm", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
-            let st = ind::plus_dm_resume(
+            ind::plus_dm_resume(
                 &high,
                 &low,
                 arg_usize(args, 0),
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("minus_dm", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
-            let st = ind::minus_dm_resume(
+            ind::minus_dm_resume(
                 &high,
                 &low,
                 arg_usize(args, 0),
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("plus_di", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::plus_di_resume(
+            ind::plus_di_resume(
                 &high,
                 &low,
                 &close,
@@ -511,14 +504,13 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("minus_di", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::minus_di_resume(
+            ind::minus_di_resume(
                 &high,
                 &low,
                 &close,
@@ -526,14 +518,13 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("dx", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::dx_resume(
+            ind::dx_resume(
                 &high,
                 &low,
                 &close,
@@ -541,14 +532,13 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("adx", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::adx_resume(
+            ind::adx_resume(
                 &high,
                 &low,
                 &close,
@@ -556,14 +546,13 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("adxr", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
-            let st = ind::adxr_resume(
+            ind::adxr_resume(
                 &high,
                 &low,
                 &close,
@@ -571,8 +560,7 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
 
         // Hilbert-transform family — reconstruct the shared core + per-output tail and
@@ -580,43 +568,37 @@ fn resume_rows(
         // (or, for the price-windowed trendline/trendmode, before a full dominant-cycle
         // window is visible) returns `None` and falls back to the full recompute.
         ("ht_dcperiod", _) => {
-            let st = ind::ht_dcperiod_resume(&close().ok()?, from_row, prev_state, out)?;
-            Some(st)
+            ind::ht_dcperiod_resume(&close().ok()?, from_row, prev_state, out)
         }
         ("ht_phasor", sub) => {
-            let st = ind::ht_phasor_resume(
+            ind::ht_phasor_resume(
                 &close().ok()?,
                 sub == Some("quadrature"),
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("ht_dcphase", _) => {
-            let st = ind::ht_dcphase_resume(&close().ok()?, from_row, prev_state, out)?;
-            Some(st)
+            ind::ht_dcphase_resume(&close().ok()?, from_row, prev_state, out)
         }
         ("ht_sine", sub) => {
-            let st = ind::ht_sine_resume(
+            ind::ht_sine_resume(
                 &close().ok()?,
                 sub == Some("leadsine"),
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
         ("ht_trendline", _) => {
-            let st = ind::ht_trendline_resume(&close().ok()?, from_row, prev_state, out)?;
-            Some(st)
+            ind::ht_trendline_resume(&close().ok()?, from_row, prev_state, out)
         }
         ("ht_trendmode", _) => {
-            let st = ind::ht_trendmode_resume(&close().ok()?, from_row, prev_state, out)?;
-            Some(st)
+            ind::ht_trendmode_resume(&close().ok()?, from_row, prev_state, out)
         }
         ("mama", sub) => {
-            let st = ind::mama_resume(
+            ind::mama_resume(
                 &close().ok()?,
                 arg_f64(args, 0),
                 arg_f64(args, 1),
@@ -624,53 +606,23 @@ fn resume_rows(
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
 
-        // Index family — windowed arg-extreme emitting ABSOLUTE positions. The carried
-        // state is the incremental tracker's running extreme `[idx_abs, value]`; `origin`
-        // rebases sub-frame positions back to original-absolute. minmaxindex.max / .min
-        // are exactly maxindex / minindex (see `execute`).
-        ("maxindex", _) | ("minmaxindex", Some("max")) => {
-            let st = ind::maxindex_resume(
-                &close().ok()?,
-                arg_usize(args, 0),
-                from_row,
-                origin,
-                prev_state,
-                out,
-            )?;
-            Some(st)
-        }
-        ("minindex", _) | ("minmaxindex", Some("min")) => {
-            let st = ind::minindex_resume(
-                &close().ok()?,
-                arg_usize(args, 0),
-                from_row,
-                origin,
-                prev_state,
-                out,
-            )?;
-            Some(st)
-        }
-
-        // StochRSI — a windowed %K (and SMA `.d`) of the Wilder-recursive RSI; resume by
-        // carrying the RSI Wilder pair + the recent RSI values feeding the windows. Only
-        // the canonical SMA `.d` (matype 0) resumes (the spec's fact).
+        // StochRSI carries its Wilder pair, recent RSI values and generic D stage.
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
-            let st = ind::stochrsi_resume(
+            ind::stochrsi_resume(
                 &close().ok()?,
                 arg_usize(args, 0),
                 arg_usize(args, 1),
                 is_d,
                 arg_usize(args, 2),
+                arg_usize(args, 3),
                 from_row,
                 prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
 
         // KDJ — resume the recursive %K (+ %D for `.d`/`.j`) from the carried state; RSV is
@@ -691,14 +643,13 @@ fn resume_rows(
             } else {
                 arg_usize(args, 2)
             };
-            let st = ind::kdj_resume(
+            ind::kdj_resume(
                 &high, &low, &close, period_rsv, period_k, period_d, kline, from_row, prev_state,
                 out,
-            )?;
-            Some(st)
+            )
         }
 
-        _ => None, // LCOV_EXCL_LINE every line whose spec declares a resume has an arm
+        _ => step_rows(ops, cmd, prev_state, from_row, out),
     }
 }
 

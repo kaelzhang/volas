@@ -415,8 +415,8 @@ fn a_state_describes_the_last_complete_row() {
         ind::smma_final_state(x[0], 5)), &|x| format!("{:?}", raw::smma_final_state(x[0],
         5)));
     state("stochrsi_final_state", &[&d.close[..]], &|x| format!("{:?}",
-        ind::stochrsi_final_state(x[0], 5, 3, true, 3, 0)), &|x| format!("{:?}",
-        raw::stochrsi_final_state(x[0], 5, 3, true, 3, 0)));
+        ind::stochrsi_final_state(x[0], 5, 3, true, 3, 0, 0)), &|x| format!("{:?}",
+        raw::stochrsi_final_state(x[0], 5, 3, true, 3, 0, 0)));
     state("supertrend_final_state", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         format!("{:?}", ind::supertrend_final_state(x[0], x[1], x[2], 5, 2.0)), &|x|
         format!("{:?}", raw::supertrend_final_state(x[0], x[1], x[2], 5, 2.0)));
@@ -553,8 +553,8 @@ fn a_resume_continues_over_the_complete_rows() {
         0.2, 0.02, 0.02, 0.2, from, st, out).into_option());
     resume("smma_resume", &[&d.close[..]], &|x| raw::smma_final_state(x[0], 5), &|x, from, st, out| ind::smma_resume(x[0], 5, from, st, out).into_option(), &|x, from, st, out|
         raw::smma_resume(x[0], 5, from, st, out).into_option());
-    resume("stochrsi_resume", &[&d.close[..]], &|x| raw::stochrsi_final_state(x[0], 5, 3, true, 3, 0), &|x, from, st, out| ind::stochrsi_resume(x[0], 5, 3, true, 3, from,
-        st, out).into_option(), &|x, from, st, out| raw::stochrsi_resume(x[0], 5, 3, true, 3, from,
+    resume("stochrsi_resume", &[&d.close[..]], &|x| raw::stochrsi_final_state(x[0], 5, 3, true, 3, 0, 0), &|x, from, st, out| ind::stochrsi_resume(x[0], 5, 3, true, 3, 0, from,
+        st, out).into_option(), &|x, from, st, out| raw::stochrsi_resume(x[0], 5, 3, true, 3, 0, from,
         st, out).into_option());
     resume("supertrend_resume", &[&d.high[..], &d.low[..], &d.close[..]], &|x|
         raw::supertrend_final_state(x[0], x[1], x[2], 5, 2.0), &|x, from, st, out|

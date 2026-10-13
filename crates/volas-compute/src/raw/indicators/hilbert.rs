@@ -15,6 +15,8 @@
 
 mod engine;
 use engine::*;
+/// Serialized MAMA kernel words, owned by the Hilbert family.
+pub const MAMA_STATE_LEN: usize = CORE_STATE_LEN + 3;
 use crate::raw::smoothing::Weighted;
 
 /// `HT_DCPERIOD`: the smoothed dominant-cycle period.

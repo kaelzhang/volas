@@ -117,12 +117,13 @@ pub(super) fn resume(
     let ops = Operands::rows(df, cmd.series, start, end);
     let local = from - start;
     let at = out.len();
-    let kernel = if local >= prev.count { run(&ops, prev.kernel, local, out) }
-        else { prev.record(&ops, cmd)?; None };
-    if ops.failed() { out.truncate(at); return None; }
+    // The state describes the carried tail, not an arbitrary raw frame window.
+    // Resolve its recorded inputs before choosing the rows to slide: a speculative
+    // run across a missing row can evict a value the kernel never accumulated.
+    prev.record(&ops, cmd)?;
     let mut next = words.to_vec();
     let kernel = if prev.in_place(&ops, local, ops.len(), recursive) {
-        kernel?
+        run(&ops, prev.kernel, local, out)?
     } else {
         out.truncate(at);
         let (gather, rows) = gathered(df, cmd, &ops, &prev, local)?;
@@ -151,12 +152,12 @@ pub(super) fn step(
         if recursive { super::scalar::step_of(ops, cmd.name, cmd.sub, cmd.args, prev.kernel, at, next) }
         else { super::window::step(ops, cmd.name, cmd.sub, cmd.args, prev.kernel, at, next) }
     };
-    let value = if local >= prev.count { run(&ops, local, prev.kernel_mut(next)) }
-        else { prev.record(&ops, cmd)?; None };
-    if ops.failed() { return None; }
+    // Scalar continuation has the same state/input precondition as the row resume.
+    prev.record(&ops, cmd)?;
     if prev.in_place(&ops, local, ops.len(), recursive) {
+        let value = run(&ops, local, prev.kernel_mut(next))?;
         prev.advance(&ops, local, ops.len(), recursive, next)?;
-        return value;
+        return Some(value);
     }
     let (gather, rows) = gathered(df, cmd, &ops, &prev, local)?;
     if rows.is_empty() { next.copy_from_slice(words); return Some(f64::NAN); }

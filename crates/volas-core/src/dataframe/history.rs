@@ -38,9 +38,6 @@ pub enum History {
         /// Frame rows the continuation reads before a new row, beyond its carried tails.
         operands: usize,
     },
-    /// Class 3 with a recursive command that has no continuation: a frame that does not
-    /// hold the whole history cannot recompute it.
-    Unkept,
 }
 
 impl History {
@@ -49,14 +46,14 @@ impl History {
         match self {
             History::Window => 1,
             History::Accumulator => 2,
-            History::Counted | History::Carried { .. } | History::Unkept => 3,
+            History::Counted | History::Carried { .. } => 3,
         }
     }
 
     /// Whether a value depends on every row before it (a recursion anywhere): only a
     /// carried state or the whole history reproduces it.
     pub fn recursive(self) -> bool {
-        matches!(self, History::Carried { .. } | History::Unkept)
+        matches!(self, History::Carried { .. })
     }
 }
 
