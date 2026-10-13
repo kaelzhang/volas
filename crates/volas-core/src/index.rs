@@ -147,7 +147,7 @@ impl IndexKind {
 /// A single row-index label: an integer / datetime (`I64`, ns) or a string
 /// (`Str`). It decouples label *lookup* from the index's storage so the same
 /// `.loc` / `.at` / `.loc[a:b]` / `drop` paths serve every index kind.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Label {
     /// An integer or datetime-ns label.
     I64(i64),
@@ -200,6 +200,12 @@ impl SliceBound {
 }
 
 impl Index {
+    /// In an ordered index, equal labels are adjacent. Uses the stored order,
+    /// without rescanning the labels during row admission.
+    pub(crate) fn labels_are_ordered(&self) -> bool {
+        self.order.increasing || self.order.decreasing
+    }
+
     /// An index over `kind`'s labels with `name`, its label order computed once.
     fn new(name: Option<String>, kind: IndexKind) -> Index {
         let order = LabelOrder::of_kind(&kind);

@@ -154,7 +154,7 @@ impl PyDataFrame {
             .columns()
             .iter()
             .map(|c| -> PyResult<Column> {
-                if c.null_count() == 0 {
+                if !c.has_missing() {
                     return Ok(c.clone());
                 }
                 let n = c.len();

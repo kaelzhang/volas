@@ -21,11 +21,15 @@ pub fn column_to_arrow(col: &Column) -> ArrayRef {
         // The data buffer is still shared zero-copy; only NaN-bearing columns pay the
         // O(n) scan + the small bitmap (dense float stays null-free).
         Column::F64(v) => {
-            let nulls = nulls_from_validity(v.iter().map(|x| !x.is_nan()));
+            let nulls = v.has_nan().then(|| NullBuffer::new(BooleanBuffer::from_iter(
+                v.iter().map(|x| !x.is_nan()),
+            )));
             Arc::new(PrimitiveArray::<Float64Type>::new(scalar(v), nulls))
         }
         Column::F32(v) => {
-            let nulls = nulls_from_validity(v.iter().map(|x| !x.is_nan()));
+            let nulls = v.has_nan().then(|| NullBuffer::new(BooleanBuffer::from_iter(
+                v.iter().map(|x| !x.is_nan()),
+            )));
             Arc::new(PrimitiveArray::<Float32Type>::new(scalar(v), nulls))
         }
         Column::I64(v, val) => {

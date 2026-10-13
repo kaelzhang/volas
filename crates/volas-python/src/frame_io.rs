@@ -350,7 +350,7 @@ impl PyDataFrame {
         // `na_value` fill plumbing: with a value AND any missing cell, build the 2-D NA
         // mask once and substitute `na_value` into the holes of whichever array is built.
         let nv = na_value.as_ref();
-        let mask = (nv.is_some() && cols.iter().any(|c| c.null_count() > 0))
+        let mask = (nv.is_some() && cols.iter().any(Column::has_missing))
             .then(|| frame_na_mask(py, df))
             .transpose()?;
         let mask = mask.as_ref();
@@ -383,7 +383,7 @@ impl PyDataFrame {
                 && target.has_no_na()
                 && cols
                     .iter()
-                    .any(|c| !matches!(c, Column::Datetime(..)) && c.null_count() > 0)
+                    .any(|c| !matches!(c, Column::Datetime(..)) && c.has_missing())
             {
                 return Err(no_na_target_err("a frame", dt));
             }
