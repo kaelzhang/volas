@@ -59,24 +59,23 @@ fn a_position_window_holding_a_missing_row_is_missing_on_every_path() {
 /// changes an earlier extremum's bits.
 #[test]
 fn a_future_missing_value_never_changes_an_earlier_extremum() {
-    use ndarray::ArrayView1;
     use volas_compute::raw::kernels;
     let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     for x in [vec![1.0, -0.0, 0.0], vec![-1.0, 0.0, -0.0], vec![-0.0, 0.0, -0.0], vec![0.0, 0.0, -0.0]] {
         let mut later = x.clone();
         later.push(NAN);
-        for f in [kernels::rolling_min as fn(ArrayView1<f64>, usize) -> ndarray::Array1<f64>, kernels::rolling_max] {
-            let a = f(ArrayView1::from(&x), 3).to_vec();
-            let b = f(ArrayView1::from(&later), 3).to_vec();
+        for f in [kernels::rolling_min as fn(&[f64], usize) -> Vec<f64>, kernels::rolling_max] {
+            let a = f(&x, 3).to_vec();
+            let b = f(&later, 3).to_vec();
             assert_eq!(bits(&a), bits(&b[..3]), "{x:?}");
         }
         let (hh, ll) = kernels::rolling_max_min(&later, &later, 3);
-        assert_eq!(bits(&hh[..3]), bits(&kernels::rolling_max(ArrayView1::from(&x), 3).to_vec()));
-        assert_eq!(bits(&ll[..3]), bits(&kernels::rolling_min(ArrayView1::from(&x), 3).to_vec()));
+        assert_eq!(bits(&hh[..3]), bits(&kernels::rolling_max(&x, 3)));
+        assert_eq!(bits(&ll[..3]), bits(&kernels::rolling_min(&x, 3)));
     }
     // a zero extremum is +0, whichever signed zero the window holds
-    assert_eq!(kernels::rolling_min(ArrayView1::from(&[1.0, -0.0, -0.0]), 3)[2].to_bits(), 0.0f64.to_bits());
-    assert_eq!(kernels::rolling_max(ArrayView1::from(&[-1.0, -0.0, -0.0]), 3)[2].to_bits(), 0.0f64.to_bits());
+    assert_eq!(kernels::rolling_min(&[1.0, -0.0, -0.0], 3)[2].to_bits(), 0.0f64.to_bits());
+    assert_eq!(kernels::rolling_max(&[-1.0, -0.0, -0.0], 3)[2].to_bits(), 0.0f64.to_bits());
     // the hhv:10 tracker and the stochastic trackers agree with the sweep
     let mut z = vec![0.0; 12];
     z[3] = -0.0;

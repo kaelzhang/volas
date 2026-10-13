@@ -8,14 +8,6 @@
 //! function is re-exported here, so callers keep using `indicators::<name>`
 //! regardless of which submodule owns it.
 
-use ndarray::ArrayView1;
-
-/// View a slice as an `ndarray` 1-D view (the kernels' input type). Shared by the
-/// submodules that delegate to `kernels`.
-#[inline]
-pub(crate) fn av(s: &[f64]) -> ArrayView1<'_, f64> {
-    ArrayView1::from(s)
-}
 
 /// Whether every input has the same length — the shape a multi-input kernel that reads
 /// its inputs unchecked requires; such a kernel gives an empty result otherwise.

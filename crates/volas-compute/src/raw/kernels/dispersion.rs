@@ -4,7 +4,6 @@
 use super::mean_std_row;
 use crate::accum::{spread, Anchors, Csum};
 use crate::guard::Slide;
-use ndarray::{Array1, ArrayView1};
 
 /// Rolling standard deviation with `ddof` degrees of freedom; row 0 is at absolute
 /// position `origin` (see [`crate::accum`]).
@@ -15,8 +14,8 @@ use ndarray::{Array1, ArrayView1};
 /// variance however the window's level dwarfs its spread, exactly zero for a flat
 /// window — emitted only for fully-populated windows.
 #[inline]
-pub fn rolling_std(data: ArrayView1<f64>, period: usize, ddof: usize, origin: usize) -> Array1<f64> {
-    rolling_mean_std(data, period, ddof, origin).1
+pub fn rolling_std(data: &[f64], period: usize, ddof: usize, origin: usize) -> Vec<f64> {
+    rolling_dispersion_pass(data, period, ddof, origin, &mut (), |_, std| std)
 }
 
 /// The terms of a window's `[Σx, Σ(x − k)²]` for the row value `x` under the shift `k`.
@@ -56,22 +55,36 @@ pub(crate) fn window_mean_std_of(
 /// both, so this halves the rolling work.
 #[inline]
 pub fn rolling_mean_std(
-    data: ArrayView1<f64>,
+    data: &[f64],
     period: usize,
     ddof: usize,
     origin: usize,
-) -> (Array1<f64>, Array1<f64>) {
+) -> (Vec<f64>, Vec<f64>) {
     rolling_mean_std_pass(data, period, ddof, origin, &mut ())
 }
 
 /// The fused batch pass with terminal-state publication.
 #[inline]
-pub fn rolling_mean_std_pass(data: ArrayView1<f64>, period: usize, ddof: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Array1<f64>, Array1<f64>) {
+pub fn rolling_mean_std_pass(data: &[f64], period: usize, ddof: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, Vec<f64>) {
+    let mut mean = vec![f64::NAN; data.len()];
+    let mut std = vec![f64::NAN; data.len()];
+    rolling_mean_std_each(data, period, ddof, origin, states, |i, m, d| { mean[i] = m; std[i] = d; });
+    (mean, std)
+}
+
+/// Project mean/std directly into one owned output column, including the original
+/// warm-up arithmetic, without materializing either intermediate column.
+#[inline]
+pub fn rolling_dispersion_pass(data: &[f64], period: usize, ddof: usize, origin: usize, states: &mut impl crate::pass::StateSink, project: impl Fn(f64, f64) -> f64) -> Vec<f64> {
+    let mut out = vec![project(f64::NAN, f64::NAN); data.len()];
+    rolling_mean_std_each(data, period, ddof, origin, states, |i, m, d| out[i] = project(m, d));
+    out
+}
+
+fn rolling_mean_std_each(data: &[f64], period: usize, ddof: usize, origin: usize, states: &mut impl crate::pass::StateSink, mut emit: impl FnMut(usize, f64, f64)) {
     let n = data.len();
-    let mut mean = Array1::from_elem(n, f64::NAN);
-    let mut std = Array1::from_elem(n, f64::NAN);
     if period == 0 || period > n || period <= ddof {
-        return (mean, std);
+        return;
     }
     let p = period as f64;
     let denom = (period - ddof) as f64;
@@ -81,14 +94,13 @@ pub fn rolling_mean_std_pass(data: ArrayView1<f64>, period: usize, ddof: usize, 
     // sums are rebuilt at every anchor. A non-finite value poisons the sums (and marks
     // them inexact); that is checked at every re-anchoring and at the end, and then the
     // careful path takes over.
-    if let Some(src) = data.as_slice() {
+    {
+        let src = data;
         let mut sums = [Csum::default(); 2];
         let mut anchors = Anchors::from(origin, period);
         let mut k = src[0];
         let mut clean = true;
         {
-            let md = mean.as_slice_mut().expect("from_elem is contiguous");
-            let sd = std.as_slice_mut().expect("from_elem is contiguous");
             for i in 0..n {
                 let anchor = anchors.tick();
                 if anchor {
@@ -110,20 +122,21 @@ pub fn rolling_mean_std_pass(data: ArrayView1<f64>, period: usize, ddof: usize, 
                     }
                 }
                 if i + 1 >= period {
-                    (md[i], sd[i]) = mean_std_of_sums(&sums, k, p, denom);
+                    let (m, d) = mean_std_of_sums(&sums, k, p, denom);
+                    emit(i, m, d);
                 }
                 states.record(i, n, || Slide::state(sums, 0, origin + i + 1));
             }
         }
         if clean && sums.iter().all(|s| s.value().is_finite()) {
-            return (mean, std);
+            return;
         }
     }
     // Careful path — window-local (see [`crate::guard`]).
     let mut slide = Slide::<2>::at(origin);
     for i in 0..n {
-        (mean[i], std[i]) = mean_std_row(&mut slide, period, ddof, i, |j| data[j]);
+        let (m, d) = mean_std_row(&mut slide, period, ddof, i, |j| data[j]);
+        emit(i, m, d);
         states.record(i, n, || { let mut v = vec![0.0; Slide::<2>::STATE]; slide.write_state(&mut v); v });
     }
-    (mean, std)
 }

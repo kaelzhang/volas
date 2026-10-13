@@ -6,7 +6,6 @@
 //! directive engine refreshes them on `append` in O(new rows) and continues them
 //! bit-exactly past a head-dropping slice (verified by `test/test_group_a_mutation.py`).
 
-use crate::raw::indicators::av;
 use crate::missing;
 use crate::guard::Slide;
 use crate::guard::state_after;
@@ -19,7 +18,9 @@ use crate::raw::smoothing;
 /// Source: Eastmoney 心理线. Row 0 is at absolute position `origin`.
 pub fn psy(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let up: Vec<f64> = (0..close.len()).map(|i| psy_up(close, i)).collect();
-    (kernels::sma(av(&up), n, origin) * 100.0).to_vec()
+    let mut out = kernels::sma(&up, n, origin);
+    for x in &mut out { *x *= 100.0; }
+    out
 }
 
 /// PSY's rising flag at bar `i`: it reads `close[i]` and the prior close, and is missing
@@ -85,7 +86,7 @@ pub fn dpo(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
 
 /// Batch computation with terminal-state publication.
 pub fn dpo_pass<S: crate::pass::StateSink>(close: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
-    let sma = kernels::sma_pass(av(close), n, origin, states);
+    let sma = kernels::sma_pass(close, n, origin, states);
     let shift = n / 2 + 1;
     (0..close.len())
         .map(|i| if i >= shift { close[i - shift] - sma[i] } else { f64::NAN })
@@ -114,7 +115,8 @@ pub fn cmf_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f
 pub fn chop(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let tr = super::tr(high, low, close);
     // TR[0] is NaN; `sma` skips the leading-NaN prefix, so `sma * n` is the n-window TR sum.
-    let sum_tr = kernels::sma(av(&tr), n, origin) * n as f64;
+    let mut sum_tr = kernels::sma(&tr, n, origin);
+    for x in &mut sum_tr { *x *= n as f64; }
     let hh = super::hhv(high, n);
     let ll = super::llv(low, n);
     let denom = (n as f64).log10();
@@ -136,7 +138,7 @@ pub fn kst_pass<S: crate::pass::StateSink>(close: &[f64], origin: usize, states:
     let leg = |(p, n): (usize, usize)| {
         let roc: Vec<f64> = (0..close.len()).map(|i| kst_roc(close, p, i)).collect();
         let mut s = S::default();
-        let values = kernels::sma_pass(av(&roc), n, origin, &mut s);
+        let values = kernels::sma_pass(&roc, n, origin, &mut s);
         stages.push(s);
         values
     };
@@ -157,7 +159,7 @@ pub fn emv(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize) -
 /// Batch computation with terminal-state publication.
 pub fn emv_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let emv1: Vec<f64> = (0..high.len()).map(|i| emv_term(high, low, volume, i)).collect();
-    kernels::sma_pass(av(&emv1), n, origin, states).to_vec()
+    kernels::sma_pass(&emv1, n, origin, states)
 }
 
 /// EFI Elder Force Index: `EMA_n((C - prev C) * volume)`.
@@ -185,7 +187,9 @@ pub fn mass_index(high: &[f64], low: &[f64], n: usize, origin: usize) -> Vec<f64
     let ratio: Vec<f64> = (0..high.len()).map(|i| single[i] / double[i]).collect();
     // `ratio` warms up with NaN, so use `sma * n` (which skips the leading NaN) rather than
     // the running `sum` (which would propagate it).
-    (kernels::sma(av(&ratio), n, origin) * n as f64).to_vec()
+    let mut out = kernels::sma(&ratio, n, origin);
+    for x in &mut out { *x *= n as f64; }
+    out
 }
 
 mod crsi;

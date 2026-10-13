@@ -1,6 +1,4 @@
-use ndarray::Array1;
 
-use super::av;
 use crate::guard::{state_after, Slide};
 use crate::raw::kernels;
 
@@ -10,25 +8,22 @@ use crate::raw::kernels;
 
 /// Bollinger middle band (= MA).
 pub fn boll(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    kernels::sma(av(close), period, origin).to_vec()
+    kernels::sma(close, period, origin)
 }
 
 /// Bollinger upper band (`ma + times * std`, population std).
 pub fn boll_upper(close: &[f64], period: usize, times: f64, origin: usize) -> Vec<f64> {
-    let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    ma.iter().zip(&std).map(|(m, s)| m + times * s).collect()
+    kernels::rolling_dispersion_pass(close, period, 0, origin, &mut (), |m, s| m + times * s)
 }
 
 /// Bollinger lower band (`ma - times * std`, population std).
 pub fn boll_lower(close: &[f64], period: usize, times: f64, origin: usize) -> Vec<f64> {
-    let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    ma.iter().zip(&std).map(|(m, s)| m - times * s).collect()
+    kernels::rolling_dispersion_pass(close, period, 0, origin, &mut (), |m, s| m - times * s)
 }
 
 /// Bollinger Band Width (`4 * std / ma`).
 pub fn bbw(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    let (ma, std) = kernels::rolling_mean_std(av(close), period, 0, origin);
-    ma.iter().zip(&std).map(|(m, s)| 4.0 * s / m).collect()
+    kernels::rolling_dispersion_pass(close, period, 0, origin, &mut (), |m, s| 4.0 * s / m)
 }
 
 /// Historical Volatility: the sample (ddof = 1) standard deviation of the one-bar log
@@ -41,14 +36,13 @@ pub fn hv(close: &[f64], period: usize, annualization: f64, origin: usize) -> Ve
 /// Batch computation with terminal-state publication.
 pub fn hv_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, annualization: f64, origin: usize, states: &mut S) -> Vec<f64> {
     let n = close.len();
-    let mut log_return = Array1::from_elem(n, f64::NAN);
+    let mut log_return = vec![f64::NAN; n];
     for i in 1..n {
         if close[i - 1] > 0.0 && close[i] > 0.0 {
             log_return[i] = (close[i] / close[i - 1]).ln();
         }
     }
-    let std = kernels::rolling_mean_std_pass(log_return.view(), period, 1, origin, states).1;
-    (&std * annualization).to_vec()
+    kernels::rolling_dispersion_pass(&log_return, period, 1, origin, states, |_, s| s * annualization)
 }
 
 /// The raw (pre-SMA) Acceleration Band edge for each bar: `high·(1 + 4·(h-l)/(h+l))`
@@ -81,7 +75,7 @@ fn accband_edge(high: f64, low: f64, upper: bool) -> f64 {
 /// Acceleration Bands middle (TA-Lib ACCBANDS middle) — the SMA of close, identical
 /// to the Bollinger middle band. Lookback `period-1`.
 pub fn accbands_middle(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    kernels::sma(av(close), period, origin).to_vec()
+    kernels::sma(close, period, origin)
 }
 
 /// Acceleration Bands upper (TA-Lib ACCBANDS upper) — SMA of the raw upper edge.
@@ -92,7 +86,7 @@ pub fn accbands_upper(high: &[f64], low: &[f64], period: usize, origin: usize) -
 /// Batch computation with terminal-state publication.
 pub fn accbands_upper_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let raw = accbands_raw(high, low, true);
-    kernels::sma_pass(av(&raw), period, origin, states).to_vec()
+    kernels::sma_pass(&raw, period, origin, states)
 }
 
 /// Acceleration Bands lower (TA-Lib ACCBANDS lower) — SMA of the raw lower edge.
@@ -103,7 +97,7 @@ pub fn accbands_lower(high: &[f64], low: &[f64], period: usize, origin: usize) -
 /// Batch computation with terminal-state publication.
 pub fn accbands_lower_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let raw = accbands_raw(high, low, false);
-    kernels::sma_pass(av(&raw), period, origin, states).to_vec()
+    kernels::sma_pass(&raw, period, origin, states)
 }
 
 // ---------------------------------------------------------------------------

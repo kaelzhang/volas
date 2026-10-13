@@ -155,12 +155,12 @@ pub fn trima_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin
 fn trima_composed<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let (a, b) = trima_windows(period);
     let (mut inner_state, mut outer_state) = (S::default(), S::default());
-    let inner = kernels::sma_pass(data.into(), a, origin, &mut inner_state);
-    let out = kernels::sma_pass(inner.view(), b, origin, &mut outer_state);
+    let inner = kernels::sma_pass(data, a, origin, &mut inner_state);
+    let out = kernels::sma_pass(&inner, b, origin, &mut outer_state);
     states.compose(data.len(), &[&inner_state, &outer_state], |end, state| {
-        state.extend_from_slice(&inner.as_slice().expect("contiguous output")[end.saturating_sub(b)..end]);
+        state.extend_from_slice(&inner[end.saturating_sub(b)..end]);
     });
-    out.into_raw_vec_and_offset().0
+    out
 }
 
 /// T3's arithmetic (TA-Lib `ta_T3.c`): the weighted EMA form `(k·x) + ((1 − k)·e)` of

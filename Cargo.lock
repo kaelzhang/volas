@@ -808,9 +808,6 @@ dependencies = [
 [[package]]
 name = "volas-compute"
 version = "3.0.4"
-dependencies = [
- "ndarray",
-]
 
 [[package]]
 name = "volas-core"
