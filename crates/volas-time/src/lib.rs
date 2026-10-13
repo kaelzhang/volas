@@ -8,9 +8,14 @@
 pub mod agg;
 pub mod cumulate;
 pub mod open_period;
+mod period_aggregate;
 pub mod time_frame;
 
 pub use agg::{Agg, AggSpec};
 pub use cumulate::{aggregate_period, cumulate, Cumulator};
 pub use open_period::OpenPeriod;
+pub use period_aggregate::PeriodAggregate;
 pub use time_frame::{Span, TimeFrame};
+
+#[cfg(test)]
+mod cumulate_regression_tests;
