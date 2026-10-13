@@ -58,11 +58,9 @@ impl OpenPeriod {
     /// On an error nothing changes.
     pub fn push(&mut self, bars: &DataFrame) -> Result<()> {
         self.bars.append_admitted(bars)?;
-        #[cfg(debug_assertions)]
-        assert!(
-            stamps(&self.bars).windows(2).all(|w| w[0] < w[1]),
-            "an open period holds one bar per timestamp, in increasing order"
-        );
+        // append_admitted validates the incoming labels against the last held
+        // label before writing. Re-scanning the history here would make a debug
+        // build's live correction O(period length) despite that invariant.
         Ok(())
     }
 

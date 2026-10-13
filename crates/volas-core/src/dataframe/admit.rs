@@ -459,6 +459,49 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Continue a one-row reduction from its cached prefix, preserving the batch
+    /// fold's missing-value and NaN-bit behavior. `missing` records which source
+    /// columns had a missing input in that prefix (an arithmetic NaN alone does
+    /// not stop a sum). `before` has the same schema as this aggregate: a new
+    /// input checkpoints the current row there; a replacement restarts from it.
+    /// Both snapshots change only after every fold passes. All rows have already
+    /// been admitted, and `ops` matches their schemas, as for `fold_forming_row`.
+    pub fn fold_with_checkpoint(&mut self, before: &mut DataFrame, src: &DataFrame, ops: &[(usize, usize, CombineOp)], missing: &[bool], replace: bool) -> Result<()> {
+        for &(dst_col, src_col, op) in ops {
+            let dst = if replace { &before.columns[dst_col] } else { &self.columns[dst_col] };
+            let from = &src.columns[src_col];
+            if !cannot_fail(dst, from) { dst.check_fold(0, op, false, [(from, 0)])?; }
+        }
+        for &(dst_col, src_col, op) in ops {
+            if replace {
+                self.columns[dst_col].set_last_from(&before.columns[dst_col], 0)?;
+            } else {
+                before.columns[dst_col].set_last_from(&self.columns[dst_col], 0)?;
+            }
+            self.columns[dst_col].combine_reduced_at(0, op, &src.columns[src_col], 0, missing[src_col])?;
+        }
+        self.invalidate_computed_forming_row(0);
+        Ok(())
+    }
+
+    /// Publish an already reduced, admitted row at the forming row, using the
+    /// fold plan's positions. The source has this frame's data dtypes and every
+    /// aggregation check has succeeded, so neither conversion nor reduction is
+    /// repeated. Missing integer / bool / string cells retain the destination's
+    /// unused payload, as `refold_forming_row` does; floats keep the reduced NaN bits.
+    pub fn write_folded_row(&mut self, src: &DataFrame, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
+        for &(dst_col, src_col, _) in ops {
+            let from = &src.columns[src_col];
+            if matches!(from, Column::F64(_) | Column::F32(_)) || from.is_valid(0) {
+                self.columns[dst_col].set_last_from(from, 0)?;
+            } else {
+                self.columns[dst_col].set_last_na();
+            }
+        }
+        self.invalidate_computed_forming_row(self.height - 1);
+        Ok(())
+    }
+
     /// Check, writing nothing, that re-cumulating the forming row `row` from `src`'s rows
     /// with `last`'s row 0 in place of `src`'s last row (a re-sent bar: a column `last`
     /// lacks keeps `src`'s value) succeeds — so the caller can check the fold before

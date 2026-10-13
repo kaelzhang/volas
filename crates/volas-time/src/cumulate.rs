@@ -6,6 +6,7 @@ use volas_core::{DataFrame, Index, IndexKind, Result, Tz, VolasError};
 
 use crate::agg::AggSpec;
 use crate::open_period::{dedup_keep_last, OpenPeriod};
+use crate::PeriodAggregate;
 use crate::time_frame::TimeFrame;
 
 /// A stateful, incremental OHLCV cumulator (the live `cum_append` engine). The
@@ -18,6 +19,9 @@ pub struct Cumulator {
     closed: Option<DataFrame>,
     /// The fine bars of the still-open (last) period.
     open: Option<OpenPeriod>,
+    /// Absent only before any bar or while the open period cannot aggregate (an
+    /// integer overflow is reported by frame/last, or when the period closes).
+    aggregate: Option<PeriodAggregate>,
 }
 
 impl Cumulator {
@@ -28,6 +32,7 @@ impl Cumulator {
             spec,
             closed: None,
             open: None,
+            aggregate: None,
         }
     }
 
@@ -42,6 +47,10 @@ impl Cumulator {
             ));
         }
         self.spec.check(fine)?;
+
+        if self.append_one(fine)? {
+            return Ok(());
+        }
 
         // raw = the still-open period's bars + the incoming bars.
         let raw = match &self.open {
@@ -89,21 +98,15 @@ impl Cumulator {
             ));
         }
 
-        let runs = group_runs(ts, self.tf, tz)?;
-        let last = runs.len() - 1;
+        let runs = PeriodRuns::new(ts, self.tf, tz)?;
+        let last = runs.keys.len() - 1;
 
         // Every run except the last closes: its coarse rows, gathered aside.
-        let mut closing: Option<DataFrame> = None;
-        for &(a, b) in &runs[..last] {
-            let coarse = aggregate_period(&raw.slice_data(a, b), &self.spec, self.tf, tz)?;
-            match &mut closing {
-                Some(rows) => rows.append(&coarse)?,
-                None => closing = Some(coarse),
-            }
-        }
+        let closing = if last == 0 { None } else { Some(runs.aggregate(&raw, &self.spec, last, tz)?) };
         // The last run remains open (re-sent bars collapsed to the last one).
-        let (a, b) = runs[last];
-        let open = OpenPeriod::new(raw.slice_data(a, b))?;
+        let a = runs.starts[last];
+        let open = OpenPeriod::new(raw.slice_data(a, raw.height()))?;
+        let aggregate = PeriodAggregate::new(&open, &self.spec, self.tf, tz).ok();
 
         // Commit: one atomic append of the closed rows, then the open period.
         if let Some(rows) = closing {
@@ -113,16 +116,47 @@ impl Cumulator {
             }
         }
         self.open = Some(open);
+        self.aggregate = aggregate;
         Ok(())
+    }
+
+    /// The live path never clones or scans the raw open period. Invalid / bulk
+    /// feeds take the general transactional path, retaining its error ordering.
+    fn append_one(&mut self, fine: &DataFrame) -> Result<bool> {
+        let (Some(open), Some(aggregate)) = (&mut self.open, &mut self.aggregate) else { return Ok(false) };
+        let IndexKind::Datetime(ts, _) = fine.index().kind() else { return Ok(false) };
+        if ts.len() != 1 || ts[0] < open.last_ts() { return Ok(false); }
+        let bars = open.bars().admit_data_rows(fine)?;
+        let tz = open.bars().index().tz();
+        let key = self.tf.period_start(ts[0], &tz)?;
+        let open_key = match aggregate.current().index().kind() {
+            IndexKind::Datetime(keys, _) => keys[0],
+            _ => unreachable!("an aggregate has a datetime index"), // LCOV_EXCL_LINE
+        };
+        if key != open_key {
+            let index = Index::datetime(ts.to_vec(), tz.clone()).with_name(open.bars().index().name().map(String::from));
+            let columns = bars.columns().iter().map(|c| c.slice(0, 1)).collect();
+            let next = OpenPeriod::new(DataFrame::new(bars.names().to_vec(), columns, Some(index))?)?;
+            let next_aggregate = PeriodAggregate::new(&next, &self.spec, self.tf, &tz).ok();
+            match &mut self.closed {
+                Some(closed) => closed.append(aggregate.current())?,
+                None => self.closed = Some(aggregate.current().clone()),
+            }
+            self.open = Some(next);
+            self.aggregate = next_aggregate;
+        } else {
+            let resent = ts[0] == open.last_ts();
+            open.push(&bars)?;
+            // append has always deferred errors in the still-open aggregate.
+            if aggregate.push(&bars, resent).is_err() { self.aggregate = None; }
+        }
+        Ok(true)
     }
 
     /// The current cumulated frame: closed periods plus the open period
     /// aggregated as the (live) last row.
     pub fn frame(&self) -> Result<DataFrame> {
-        let open_coarse = match &self.open {
-            Some(open) => Some(aggregate_open(open, &self.spec, self.tf)?),
-            None => None,
-        };
+        let open_coarse = self.last()?;
         match (&self.closed, open_coarse) {
             (Some(closed), Some(open)) => {
                 let mut out = closed.clone();
@@ -136,8 +170,9 @@ impl Cumulator {
     }
 
     /// The current open period aggregated into a single (live) coarse bar, or
-    /// `None` if nothing is open. O(open period) — for live tick reads.
+    /// `None` if nothing is open. O(columns) for a valid open aggregate.
     pub fn last(&self) -> Result<Option<DataFrame>> {
+        if let Some(aggregate) = &self.aggregate { return Ok(Some(aggregate.current().clone())); }
         match &self.open {
             Some(open) => Ok(Some(aggregate_open(open, &self.spec, self.tf)?)),
             None => Ok(None),
@@ -149,6 +184,11 @@ impl Cumulator {
     /// bars fold into the same forming period.
     pub fn open_period(&self) -> Option<&OpenPeriod> {
         self.open.as_ref()
+    }
+
+    /// The running state carried with the open period into a live frame.
+    pub fn period_aggregate(&self) -> Option<&PeriodAggregate> {
+        self.aggregate.as_ref()
     }
 }
 
@@ -167,21 +207,50 @@ fn aggregate_open(open: &OpenPeriod, spec: &AggSpec, tf: TimeFrame) -> Result<Da
 
 /// Split a sorted timestamp slice into `[start, end)` runs of the same period
 /// (equal [`TimeFrame::period_start`] on `tz`'s local grid).
-fn group_runs(ts: &[i64], tf: TimeFrame, tz: &Tz) -> Result<Vec<(usize, usize)>> {
-    let mut runs = Vec::new();
-    let mut start = 0;
-    let mut cursor = tf.period_cursor(tz);
-    let mut key = cursor.period_start(ts[0])?;
-    for (i, &t) in ts.iter().enumerate().skip(1) {
-        let k = cursor.period_start(t)?;
-        if k != key {
-            runs.push((start, i));
-            start = i;
-            key = k;
+struct PeriodRuns {
+    keys: Vec<i64>,
+    starts: Vec<usize>,
+    kept: Vec<usize>,
+    offsets: Vec<usize>,
+}
+
+impl PeriodRuns {
+    fn new(ts: &[i64], tf: TimeFrame, tz: &Tz) -> Result<Self> {
+        let mut runs = Self { keys: Vec::new(), starts: Vec::new(), kept: Vec::with_capacity(ts.len()), offsets: Vec::new() };
+        let mut cursor = tf.period_cursor(tz);
+        for (i, &stamp) in ts.iter().enumerate() {
+            let key = cursor.period_start(stamp)?;
+            if runs.keys.last() != Some(&key) {
+                runs.keys.push(key);
+                runs.starts.push(i);
+                runs.offsets.push(runs.kept.len());
+            }
+            if i + 1 == ts.len() || ts[i + 1] != stamp {
+                runs.kept.push(i);
+            }
         }
+        runs.offsets.push(runs.kept.len());
+        Ok(runs)
     }
-    runs.push((start, ts.len()));
-    Ok(runs)
+
+    fn aggregate(&self, raw: &DataFrame, spec: &AggSpec, count: usize, tz: &Tz) -> Result<DataFrame> {
+        let mut columns = Vec::with_capacity(raw.width());
+        let mut error: Option<(usize, VolasError)> = None;
+        for (name, col) in raw.names().iter().zip(raw.columns()) {
+            // Columns fold independently, but errors still belong to the earliest
+            // period, then the earliest column of that period, just as before.
+            let end = error.as_ref().map_or(count, |(row, _)| row + 1);
+            let groups = self.offsets[..=end].windows(2).map(|w| &self.kept[w[0]..w[1]]);
+            match col.reduce_groups(spec.agg_for(name).as_combine_op(), groups) {
+                Ok(col) => columns.push(col),
+                Err(e) if error.as_ref().is_none_or(|(row, _)| e.0 < *row) => error = Some(e),
+                Err(_) => {}
+            }
+        }
+        if let Some((_, error)) = error { return Err(error); }
+        let index = Index::datetime(self.keys[..count].to_vec(), tz.clone()).with_name(raw.index().name().map(String::from));
+        DataFrame::new(raw.names().to_vec(), columns, Some(index))
+    }
 }
 
 /// Aggregate one period's raw bars into a single coarse row (1-row frame) on the

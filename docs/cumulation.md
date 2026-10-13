@@ -209,10 +209,20 @@ Two properties make this safe for a live feed:
   `to_numpy()` does not auto-refresh; call `cum.fulfill()` first, or just read
   the directive.)
 - **Re-sent bars do not double-count.** The forming period keeps its bars, and
-  folding a bar whose timestamp is already among them **replaces** that bar — the
-  same dedup rule shown at the top of this section — matching exchanges that
-  revise their most recent bar. Re-sending a bar of the frame's own time frame
-  (`5m` here, stamped `00:05`) replaces the whole forming row.
+  a bar whose timestamp equals the **latest fine bar's** timestamp replaces that
+  bar, matching exchanges that revise their most recent bar. An earlier timestamp
+  raises and leaves the frame unchanged. Re-sending a bar of the frame's own time
+  frame (`5m` here, stamped `00:05`) replaces the whole forming row while that bar
+  is the only one held in the period.
+
+Batch cumulation computes period boundaries once and builds each output column
+directly, preserving each period's input fold order. Live cumulation keeps the
+running aggregate and the aggregate before the latest fine bar alongside the raw
+bars. Correcting that latest bar therefore costs **O(columns)** regardless of the
+number of fine bars in the open period, including for min/max and when a correction
+removes a missing value. A copy shares buffers until its first write; that first
+write can copy the shared raw bars. A schema or forming-value change rebuilds the
+aggregate checkpoints from the retained bars on the next fold.
 
 See [Live cumulation](dataframe-api.md#live-cumulation--a-tf-aware-dataframe) for the API summary.
 
