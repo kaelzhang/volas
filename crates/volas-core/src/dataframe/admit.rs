@@ -11,6 +11,7 @@
 //! exactly as it was: columns, index, validity and cache cursors.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::column::Column;
@@ -276,6 +277,11 @@ impl DataFrame {
             }
         }
         let mut replaces = Vec::with_capacity(rows.height);
+        // Ordered labels can repeat only next to each other (the replacement
+        // case below). Otherwise remember the incoming labels once, rather than
+        // looking through the whole preceding batch for every row.
+        let mut seen = (!datetime && !rows.index.labels_are_ordered())
+            .then(|| HashSet::with_capacity(rows.height));
         for k in 0..rows.height {
             let label = rows.index.label_at(k);
             let prev = if k > 0 {
@@ -291,6 +297,7 @@ impl DataFrame {
                     label_text(&label)
                 )));
             }
+            let seen_before = seen.as_mut().is_some_and(|seen| !seen.insert(label.clone()));
             if !replace && !datetime {
                 let held = held(&label);
                 if held.is_some_and(|p| p < retained.shown) {
@@ -300,7 +307,7 @@ impl DataFrame {
                         label_text(&label)
                     )));
                 }
-                let earlier = held.is_some() || (0..k).any(|j| rows.index.label_at(j) == label);
+                let earlier = held.is_some() || seen_before;
                 if earlier {
                     return Err(VolasError::Value(format!(
                         "cannot append a row labelled {}: an earlier row has that label \
