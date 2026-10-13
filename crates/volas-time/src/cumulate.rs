@@ -336,8 +336,20 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame, tz: &
             ))
         }
     };
+    if ts.contains(&i64::MIN) {
+        return Err(VolasError::Value("cumulation period cannot contain NaT".into()));
+    }
+    if ts.windows(2).any(|w| w[0] > w[1]) {
+        return Err(VolasError::Value("cumulation period bars must be ordered".into()));
+    }
     let kept = dedup_keep_last(ts);
-    let start_ns = tf.period_start(ts[kept[0]], tz)?;
+    let mut cursor = tf.period_cursor(tz);
+    let start_ns = cursor.period_start(ts[0])?;
+    for &ns in &ts[1..] {
+        if cursor.period_start(ns)? != start_ns {
+            return Err(VolasError::Value("cumulation period contains multiple periods".into()));
+        }
+    }
 
     let names = period.names().to_vec();
     let mut columns = Vec::with_capacity(names.len());

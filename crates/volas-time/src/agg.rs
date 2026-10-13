@@ -56,7 +56,11 @@ impl Agg {
         if !op.supports(col.dtype()) {
             return Err(op.unsupported(col.dtype()));
         }
-        let mut out = col.take(&[kept[0]]);
+        let first = kept.first().ok_or_else(|| VolasError::Value("aggregation requires at least one row".into()))?;
+        if kept.iter().any(|&i| i >= col.len()) {
+            return Err(VolasError::Value("aggregation row is outside the column".into()));
+        }
+        let mut out = col.take(&[*first]);
         out.reduce_into(0, op, col, kept.iter().copied())?;
         Ok(out)
     }

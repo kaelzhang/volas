@@ -219,6 +219,12 @@ and continuation APIs accept `&Ast`. The binder prepares the continuation plan
 once, including any stateful subtrees and their hidden input columns. `stringify`
 accepts `&Ast` or a lenient `&Form` using the same canonical renderer.
 
+Rust `compute::window` helpers return typed `WindowError` results for invalid
+window, decay, quantile, rank, or input-shape parameters; see the
+[compute crate guide](crates/volas-compute/README.md). `time::Agg::reduce` rejects
+empty or out-of-range selections. `time::aggregate_period` requires non-empty,
+ordered datetime bars within one period and rejects NaT or multiple periods.
+
 # Contributing & feedback
 
 Issues, indicator requests, benchmark challenges, and PRs are welcome — see
