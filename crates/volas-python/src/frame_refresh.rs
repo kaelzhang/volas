@@ -193,11 +193,15 @@ impl PyDataFrame {
         // (the rows before are exact — and a head-dropped slice's carried head is not
         // reproducible from its own rows).
         let recomputed = volas_directive::exec::execute_refresh(df, node).map_err(value_err)?;
-        let (state, before) = volas_directive::resume_states(df, node);
+        let carried = volas_directive::resume_states(df, node);
         let from = if warm { vr } else { 0 };
         let tail = recomputed.slice(from, recomputed.len());
         self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;
-        self.inner.set_computed_states(name, state, before);
+        self.inner.set_computed_states(name, carried.state, carried.before);
+        if since == origin {
+            // a history computed from its start: the anchors it passed
+            self.inner.keep_computed_anchors(name, carried.anchors);
+        }
         Ok(())
     }
 
@@ -256,7 +260,12 @@ impl PyDataFrame {
             return self.replay_column(name, node, frame, (row, height), None);
         }
         let recomputed = volas_directive::exec::execute_refresh(led, node).map_err(value_err)?;
-        let (state, before) = volas_directive::resume_states(led, node);
+        let carried = volas_directive::resume_states(led, node);
+        if since == led.origin() {
+            // a history computed from its start: the anchors it passed
+            self.inner.keep_computed_anchors(name, carried.anchors);
+        }
+        let (state, before) = (carried.state, carried.before);
         let from = if warm { row } else { 0 };
         let tail = recomputed.slice(off + from, recomputed.len());
         self.inner.continue_computed(name, from, &tail, state, before).map_err(pyerr)
@@ -386,11 +395,13 @@ impl PyDataFrame {
         };
         let origin = self.inner.origin();
         let vouched = vr.max(self.logical_range().0);
-        let checkpoint = self
-            .inner
-            .computed_checkpoint(name)
-            .filter(|cp| cp.at < origin + vouched)
-            .ok_or_else(fail)?;
+        let checkpoint = match self.inner.computed_checkpoint(name).filter(|cp| cp.at < origin + vouched) {
+            Some(cp) if cp.at + 1 >= origin => cp.clone(),
+            // the nearest point of the history before row 0 a selection keeps (a checkpoint,
+            // or the history's start, with the rows after it in its lead): replayed to the
+            // row before row 0
+            _ => volas_directive::checkpoint_at(&self.inner, name, origin - 1).ok_or_else(fail)?,
+        };
         // the frame's first row the replay writes (the rows before it keep their values)
         let from = (checkpoint.at + 1).checked_sub(origin).ok_or_else(fail)?;
         // the replay's stops, in `df`'s rows: the pending row's, the row before the last, the last

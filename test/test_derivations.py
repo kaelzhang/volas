@@ -470,3 +470,66 @@ def test_a_partial_date_key_selects_its_period_as_a_contiguous_selection():
     assert len(feb) == 29 and feb.is_computed('ema:3')
     hourly = DataFrame({'close': np.arange(48.0)}, index=T0 + np.arange(48) * np.timedelta64(1, 'h'))
     assert len(hourly.loc['2024-01-02 10':'2024-01-02 12']) == 3
+
+
+# --- a long history: the anchors its computation keeps ------------------------------------
+
+LONG = 2600
+_lc = 100 + np.cumsum(np.random.default_rng(5).normal(0, 1, LONG))
+LONG_COLS = {'open': _lc + .2, 'high': _lc + 1, 'low': _lc - 1, 'close': _lc}
+RECURSIONS = ('ema:12', 'ema:5@(ma:3)', 'sar', 'atr:14', 'macd')
+
+
+def long_cached():
+    df = DataFrame(dict(LONG_COLS))
+    for d in RECURSIONS:
+        df[d]
+    return df
+
+
+def written(lo, hi, at):
+    """Each recursion over the long history with `close` at row `at` replaced, rows
+    [lo, hi)."""
+    cols = {k: v.copy() for k, v in LONG_COLS.items()}
+    cols['close'][at] = 99.0
+    return {d: DataFrame(cols).exec(d)[lo:hi] for d in RECURSIONS}
+
+
+@pytest.mark.parametrize('lo,hi', [(LONG - 100, LONG), (1200, 1300), (1023, 1100), (1024, 1100), (LONG - 3, LONG)])
+def test_a_selection_of_a_long_history_recomputes_a_written_row_exactly(lo, hi):
+    # the computation keeps anchors of each recursion's history; a selection keeps the
+    # nearest one before it with the rows after it, and a write to its rows recomputes them
+    # from there — itself, a selection of it, and a window built from it
+    df = long_cached()
+    sub = df.iloc[lo:hi]
+    for frame_, first in ((sub, lo), (sub.iloc[1:], lo + 1)):
+        f = frame_.copy()
+        f.iat[1, DATA.index('close')] = 99.0
+        want = written(first, hi, first + 1)
+        for d in RECURSIONS:
+            assert np.array_equal(f[d].to_numpy(), want[d], equal_nan=True), (lo, hi, d)
+
+
+def test_a_window_from_a_selection_of_a_long_history_recomputes_a_visible_write():
+    df = long_cached()
+    w = DataFrame(df.iloc[LONG - 60:], window=5, max_lookback=40)
+    w.iat[1, DATA.index('close')] = 99.0
+    want = written(LONG - 5, LONG, LONG - 4)
+    for d in RECURSIONS:
+        assert np.array_equal(w[d].to_numpy(), want[d], equal_nan=True), d
+
+
+def test_a_selection_past_the_anchors_of_an_appended_history_replays_and_keeps_them():
+    # rows appended after the computation have no anchors: the first selection past them
+    # replays from the last one, forming those it passes, and a later one keeps them
+    df = DataFrame({k: v[:600] for k, v in LONG_COLS.items()})
+    for d in RECURSIONS:
+        df[d]
+    df.append(DataFrame({k: v[600:] for k, v in LONG_COLS.items()}, index=list(range(600, LONG))))
+    df.fulfill()
+    for lo in (LONG - 50, LONG - 40):
+        f = df.iloc[lo:].copy()
+        f.iat[1, DATA.index('close')] = 99.0
+        want = written(lo, LONG, lo + 1)
+        for d in RECURSIONS:
+            assert np.array_equal(f[d].to_numpy(), want[d], equal_nan=True), (lo, d)

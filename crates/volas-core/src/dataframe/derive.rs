@@ -7,9 +7,11 @@
 //!   ([`DataFrame::origin`]) and every cached directive column stays cached, with its
 //!   values and with what continuing it needs — the carried states moved to the
 //!   selection's last row (replayed once, through [`Replay`], from the history the source
-//!   holds when the selection ends before the source's last valid row), the checkpoint of
-//!   its history when the selection holds the row after it, and the **lead**: the data
-//!   rows before row 0 that recomputing its first rows reads. A column the selection
+//!   holds when the selection ends before the source's last valid row), the nearest
+//!   checkpoint of a recursion's history before its first row (one the source keeps, one
+//!   of its anchors, or the history's start — taken, not replayed, when it is within
+//!   `ANCHOR_SPACING` rows), and the **lead**: the data rows before row 0 that recomputing
+//!   its first rows reads, back to that checkpoint. A column the selection
 //!   cannot recompute from what it keeps (a recursion that carries no state, whose
 //!   history started before the selection) keeps its values and raises when a refresh
 //!   would recompute it: it is never restarted on the selection's own rows.
@@ -30,7 +32,7 @@ use crate::error::{Result, VolasError};
 use crate::fxhash::FxHashMap;
 use crate::index::{Index, IndexKind};
 
-use super::{Checkpoint, ComputedMeta, DataFrame, History, Reach, STALE_BY_APPEND};
+use super::{Checkpoint, ComputedMeta, DataFrame, History, Reach, ANCHOR_SPACING, STALE_BY_APPEND};
 
 /// What a contiguous selection keeps of a recursion carried by its state whose history
 /// starts before the selection ([`Replay::continuation`]).
@@ -134,6 +136,7 @@ impl DataFrame {
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
         let mut df = self.same_schema(columns, self.index.slice(start, end), self.origin + start);
         df.stale_by = self.stale_by;
+        df.computed.reserve(self.computed.len());
         for (name, meta) in &self.computed {
             df.computed.insert(name.clone(), self.continued(name, meta, start, end, replay));
         }
@@ -165,13 +168,20 @@ impl DataFrame {
         // a checkpoint is replayed from over the rows after it: kept when the selection
         // holds them (its rows, whatever its output cursor says)
         let covers = |cp: &Checkpoint| (first..=first + (end - start)).contains(&(cp.at + 1));
-        let kept = meta.checkpoint.clone().filter(covers);
-        // a recursion carried by its state whose history starts before the selection: its
-        // checkpoint at the selection's boundary (every recompute replays from it) and,
-        // when the selection ends before its last valid row, its states there — replayed
-        // once from the history this frame holds
+        let kept = meta.checkpoint.as_ref().filter(|cp| covers(cp)).cloned();
+        // a recursion carried by its state whose history starts before the selection: what
+        // every recompute of its rows replays from — the nearest point of its history
+        // before the selection (a checkpoint of this frame's, one of its anchors, or the
+        // history's start), kept with the rows after it in the lead, when it is within
+        // `ANCHOR_SPACING` rows; else its checkpoint at the selection's boundary, replayed
+        // now (forming the anchors it passes). When the selection ends before its last
+        // valid row, its states there are replayed once from the history this frame holds.
         let carried = matches!(meta.reach.history, History::Carried { .. }) && meta.since < first;
-        let wants_boundary = carried && kept.is_none();
+        let lazy = match carried && kept.is_none() {
+            true => self.nearest_history(meta, first),
+            false => None,
+        };
+        let wants_boundary = carried && kept.is_none() && lazy.is_none();
         let wants_ends = matches!(meta.reach.history, History::Carried { .. }) && valid > 0 && !own;
         let replayed = match wants_boundary || wants_ends {
             true => replay.continuation(self, name, start, start + valid, wants_boundary, wants_ends),
@@ -193,12 +203,32 @@ impl DataFrame {
             since: meta.since,
             state_at: last.saturating_sub(1),
             scratch: Vec::new(),
-            checkpoint: kept.or(replayed.boundary),
-            // the anchors of the rows the selection holds, before its last
-            anchors: meta.anchors.within(first.saturating_sub(1)..last.saturating_sub(1)),
-            pending: meta.pending.clone().filter(covers),
+            checkpoint: kept.or(lazy.flatten()).or(replayed.boundary.map(Arc::new)),
+            // the anchors of its history before its last row, where it agrees with this frame's
+            anchors: meta.anchors.upto(last.saturating_sub(1)),
+            pending: meta.pending.as_ref().filter(|cp| covers(cp)).cloned(),
             lost: meta.lost.clone(),
             first_present: meta.first_present,
+        }
+    }
+
+    /// The nearest point of recursion `meta`'s history before absolute row `first` that a
+    /// replay can start from over rows this frame holds (its own or its lead's), within
+    /// `ANCHOR_SPACING` rows of `first`: `Some(Some(checkpoint))` — this frame's
+    /// checkpoint or the nearest of its anchors, the later — or `Some(None)`, the
+    /// history's start, when it has no checkpoint before `first`. `None` when the
+    /// nearest is farther (or not held).
+    fn nearest_history(&self, meta: &ComputedMeta, first: usize) -> Option<Option<Arc<Checkpoint>>> {
+        let held = self.origin - self.lead_rows(); // the first row this frame holds
+        let near = |from: usize| from >= held && first - from <= ANCHOR_SPACING;
+        let own = meta.checkpoint.clone().filter(|cp| cp.at < first);
+        let nearest = match (own, meta.anchors.nearest(first - 1)) {
+            (Some(a), Some(b)) => Some(if a.at >= b.at { a } else { b }),
+            (a, b) => a.or(b),
+        };
+        match nearest {
+            Some(cp) => near(cp.at + 1).then_some(Some(cp)),
+            None => near(meta.since).then_some(None),
         }
     }
 
@@ -213,6 +243,7 @@ impl DataFrame {
         let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
         let mut df = self.same_schema(columns, self.index.slice(start, end), self.origin + start);
         df.stale_by = self.stale_by;
+        df.computed.reserve(self.computed.len());
         for (name, meta) in &self.computed {
             let valid = meta.valid_rows.saturating_sub(start).min(end - start);
             let mut view = ComputedMeta { valid_rows: valid, ..meta.view() };
@@ -312,7 +343,7 @@ impl DataFrame {
             .collect();
         df.note_computed();
         if !df.computed.is_empty() {
-            df.lead = self.lead.as_ref().map(|l| l.select(&df.data_names()));
+            df.lead = self.lead.as_ref().map(|l| l.select(&df));
             df.retrim_lead();
         }
         #[cfg(debug_assertions)]

@@ -62,10 +62,11 @@ fn a_tail_keeps_every_cached_column_with_its_states_and_lead() {
     assert_eq!((meta(&tail, "ma").valid_rows, meta(&tail, "ema").valid_rows), (3, 3));
     assert_eq!((meta(&tail, "ema").state, meta(&tail, "ema").state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
     assert_eq!(tail.computed_resume_state("ema"), Some((&[9.0][..], 7)));
-    // the lead: the largest reach (ema's lookback 4 and the row its resume reads past
-    // it; ma's 3) of data rows just before row 0
-    assert_eq!(lead(&tail), vec![2.0, 3.0, 4.0, 5.0, 6.0]);
-    assert_eq!(tail.lead_rows(), 5);
+    // the lead: ema, a recursion carried by its state whose history starts within
+    // ANCHOR_SPACING rows before, replays from its start — every row of it; ma's reach (3)
+    // is among them
+    assert_eq!(lead(&tail), vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(tail.lead_rows(), 7);
     assert_eq!(tail.led(&tail, 4).origin(), 3);
     assert!(lead_of(&tail, "ma").iter().all(|v| v.is_nan())); // data rows only
     // a one-row tail keeps no state before its only row
@@ -122,6 +123,8 @@ fn a_lead_shrinks_with_the_columns_that_read_it() {
     let mut df = frame(100);
     df.set_column("kcw", Column::f64(vec![0.0; 100])).unwrap();
     df.set_computed("kcw", Reach { lookback: 1, resume: 0, continuation: 1, history: History::Unkept });
+    // ema replays from its checkpoint at row 89, which the tail holds the row after
+    df.set_computed_checkpoint("ema", Ok(Checkpoint { at: 89, state: Some(vec![89.0]), inputs: vec![] }));
     let tail = df.rows(90, 100, &NoReplay);
     assert_eq!(tail.lead_rows(), 90);
     let names: Vec<String> = ["close", "ma", "ema"].map(String::from).to_vec();
@@ -134,10 +137,14 @@ fn a_lead_shrinks_with_the_columns_that_read_it() {
     assert_eq!(written.lead_rows(), 5);
     // a copied lead shrinks in place while it stays most of its rows; none is left once no
     // cached column reads before row 0
+    // the rows after ema's checkpoint (90..95) and the reach before them (5)
     let short = df.rows(95, 100, &NoReplay).select(&names).unwrap();
-    assert_eq!(short.lead_rows(), 5);
+    assert_eq!(short.lead_rows(), 10);
     let ma = short.select(&["close".to_string(), "ma".to_string()]).unwrap();
     assert_eq!(lead(&ma), vec![92.0, 93.0, 94.0]);
+    // a copied one that stays most of its rows keeps sharing them
+    let window = frame(10).rows(4, 10, &NoReplay).select(&["close".to_string(), "ma".to_string()]).unwrap();
+    assert_eq!(lead(&window), vec![1.0, 2.0, 3.0]);
     let mut bare = ma.clone();
     bare.invalidate_computed_on_write("ma");
     assert_eq!(bare.lead_rows(), 0);
@@ -147,8 +154,9 @@ fn a_lead_shrinks_with_the_columns_that_read_it() {
     added.set_column("x", Column::str(vec!["a".into(); 5])).unwrap();
 }
 
-/// Anchors are a memo of a recursion's history: shared by copies, carried by a selection
-/// for the rows it holds before its last, dropped by a write to the inputs.
+/// Anchors are a memo of a recursion's history: shared by copies, shared by a selection
+/// for the rows before its last (where its history agrees with its source's), dropped by
+/// a write to the inputs.
 #[test]
 fn anchors_follow_the_rows_and_a_write_drops_them() {
     let mut df = frame(10);
@@ -161,8 +169,15 @@ fn anchors_follow_the_rows_and_a_write_drops_them() {
     assert_eq!(anchors.nearest(1), None);
     assert_eq!(df.clone().computed_anchors("ema").unwrap(), anchors);
     let sub = df.rows(4, 9, &NoReplay);
-    assert_eq!(sub.computed_anchors("ema").unwrap().len(), 1);
-    assert_ne!(sub.computed_anchors("ema").unwrap(), anchors);
+    let shared = sub.computed_anchors("ema").unwrap();
+    assert_eq!((shared.len(), shared.nearest(9).map(|cp| cp.at)), (2, Some(5)));
+    assert_ne!(shared, anchors);
+    // one the selection forms before its last row is its source's too; one past it, on
+    // rows that may come to differ, is not kept
+    for at in [6, 8] {
+        shared.keep(Checkpoint { at, state: None, inputs: vec![] });
+    }
+    assert_eq!((anchors.len(), shared.len()), (4, 3));
     df.invalidate_computed_on_write("close");
     assert_eq!(df.computed_anchors("ema").unwrap().len(), 0);
     assert!(df.computed_anchors("close").is_none());
@@ -207,16 +222,16 @@ fn a_stale_source_keeps_its_valid_rows_and_its_state_where_it_is() {
 #[test]
 fn a_selection_of_a_selection_takes_its_lead_from_both() {
     let df = frame(10);
-    let tail = df.rows(6, 10, &NoReplay); // lead rows 1..6
-    let again = tail.rows(1, 4, &NoReplay); // rows 7..10: lead rows 2..7
+    let tail = df.rows(6, 10, &NoReplay); // lead rows 0..6 (ema's whole history)
+    let again = tail.rows(1, 4, &NoReplay); // rows 7..10: lead rows 0..7
     assert_eq!(again.origin(), 7);
-    assert_eq!(lead(&again), vec![2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(lead(&again), vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     // a data column the source's lead does not hold is missing there
     let mut wide = tail.clone();
     wide.set_column("x", Column::f64(vec![1.0; 4])).unwrap();
     let led = wide.rows(1, 4, &NoReplay);
     let x = lead_of(&led, "x");
-    assert!(x[..4].iter().all(|v| v.is_nan()) && x[4] == 1.0);
+    assert!(x[..6].iter().all(|v| v.is_nan()) && x[6] == 1.0);
 }
 
 #[test]
@@ -229,7 +244,7 @@ fn the_led_frame_puts_the_lead_rows_before_row_0() {
     assert_eq!(led.column("close").unwrap().to_f64_vec(), vec![5.0, 6.0, 7.0, 8.0, 9.0]);
     // more than it holds: all of it; a column it does not hold is missing
     let led = tail.led(&tail, 9);
-    assert_eq!(led.height(), 8);
+    assert_eq!(led.height(), 10);
     assert!(led.column("ma").unwrap().to_f64_vec()[0].is_nan());
     // a frame without a lead is itself
     assert!(df.led(&df, 3).equals(&df));
@@ -245,9 +260,39 @@ fn checkpoints_follow_the_rows_they_cover() {
     let kept = df.rows(5, 10, &NoReplay);
     assert_eq!(kept.computed_checkpoint("ema"), Some(&cp));
     assert!(kept.has_computed_pending("ema", 7));
+    // a selection after it keeps it too, the rows after it in its lead
     let later = df.rows(6, 10, &NoReplay);
-    assert_eq!(later.computed_checkpoint("ema"), None);
+    assert_eq!(later.computed_checkpoint("ema"), Some(&cp));
+    assert_eq!(later.lead_rows(), 6);
     assert!(df.rows(9, 10, &NoReplay).take_computed_pending("ema", 7).is_none());
+}
+
+/// A selection keeps the nearest point of a recursion's history before it — an anchor, a
+/// checkpoint or the history's start — with the rows after it in its lead, when it is
+/// within ANCHOR_SPACING rows; a farther one is replayed to the selection's boundary now,
+/// and a source that does not hold it keeps none.
+#[test]
+fn a_selection_keeps_the_nearest_point_of_a_history_within_the_anchor_spacing() {
+    let n = ANCHOR_SPACING + 20;
+    let df = frame(n);
+    let first = ANCHOR_SPACING + 10;
+    // the history's start is farther: the boundary is replayed, and the lead is the reach
+    let far = df.rows(first, n, &Replayed);
+    assert_eq!(far.computed_checkpoint("ema").map(|cp| cp.at), Some(first - 1));
+    assert_eq!(far.lead_rows(), 5);
+    assert_eq!(df.rows(first, n, &NoReplay).computed_checkpoint("ema"), None);
+    // an anchor within it is kept, the rows after it in the lead
+    let at = ANCHOR_SPACING - 1;
+    df.computed_anchors("ema").unwrap().keep(Checkpoint { at, state: Some(vec![at as f64]), inputs: vec![] });
+    let near = df.rows(first, n, &NoReplay);
+    assert_eq!(near.computed_checkpoint("ema").map(|cp| cp.at), Some(at));
+    assert_eq!(near.lead_rows(), first - at - 1 + 5);
+    // a checkpoint later than the anchor is the nearer
+    let mut own = df.clone();
+    own.set_computed_checkpoint("ema", Ok(Checkpoint { at: first - 3, state: None, inputs: vec![] }));
+    let nearer = own.rows(first, n, &NoReplay);
+    assert_eq!(nearer.computed_checkpoint("ema").map(|cp| cp.at), Some(first - 3));
+    assert_eq!(nearer.lead_rows(), 2 + 5);
 }
 
 #[test]
@@ -275,7 +320,7 @@ fn a_projection_keeps_the_series_and_the_listed_cached_columns() {
     assert_eq!((p.origin(), p.is_computed("ema"), p.has_column("ma")), (7, true, false));
     assert_eq!(lead(&p), lead(&tail));
     // without its data columns the lead keeps none; with no cached column there is none
-    assert_eq!(tail.select(&["ema".to_string()]).unwrap().lead_rows(), 5);
+    assert_eq!(tail.select(&["ema".to_string()]).unwrap().lead_rows(), 7);
     assert!(tail.select(&["close".to_string()]).unwrap().lead.is_none());
     assert!(tail.select(&["nope".to_string()]).is_err());
 }
@@ -357,4 +402,36 @@ fn a_frame_is_labelled_by_unique_labels() {
     let mut with_t = df.clone();
     with_t.set_column("t", ts(vec![10, 10, 20, 30])).unwrap();
     assert!(with_t.set_index("t").is_err());
+}
+
+/// A replay that counts the boundaries it is asked for, giving what [`Replayed`] gives.
+struct Counting(std::cell::Cell<usize>);
+
+impl Replay for Counting {
+    fn continuation(&self, frame: &DataFrame, name: &str, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation {
+        self.0.set(self.0.get() + usize::from(boundary));
+        Replayed.continuation(frame, name, start, end, boundary, ends)
+    }
+}
+
+/// With the anchors of a long history, no selection replays its boundary: each keeps the
+/// nearest anchor before it — a tail, one starting just after an anchor, a middle one, one
+/// of a selection.
+#[test]
+fn a_selection_of_an_anchored_history_replays_no_boundary() {
+    let n = 3 * ANCHOR_SPACING;
+    let df = frame(n);
+    let anchors = df.computed_anchors("ema").unwrap();
+    for k in 1..3 {
+        let at = k * ANCHOR_SPACING - 1;
+        anchors.keep(Checkpoint { at, state: Some(vec![at as f64]), inputs: vec![] });
+    }
+    let counting = Counting(std::cell::Cell::new(0));
+    for (start, end) in [(n - 100, n), (2 * ANCHOR_SPACING, n), (ANCHOR_SPACING + 5, n), (ANCHOR_SPACING + 9, n - 9)] {
+        let sub = df.rows(start, end, &counting);
+        assert!(sub.computed_checkpoint("ema").is_some_and(|cp| cp.at < start), "{start}");
+        let again = sub.rows(3, sub.height(), &counting);
+        assert!(again.computed_checkpoint("ema").is_some(), "{start}");
+    }
+    assert_eq!(counting.0.get(), 0);
 }

@@ -35,12 +35,16 @@ fn a_checkpoint_moves_with_the_window_drop_only() {
     assert_eq!(df.computed_checkpoint("ema"), None);
     df.set_computed_checkpoint("ema", Ok(checkpoint(5)));
     df.set_computed_checkpoint("close", Ok(checkpoint(5))); // not cached: no-op
+    df.keep_computed_anchors("close", vec![checkpoint(5)]); // likewise
     assert_eq!(df.computed_checkpoint("close"), None);
     assert_eq!(df.computed_checkpoint("ema"), Some(&checkpoint(5)));
     assert_eq!(df.retain_tail(4, &NoReplay).computed_checkpoint("ema"), Some(&checkpoint(5)));
-    // any selection holding the row after it keeps it; one starting later does not
+    // any selection holding the row after it keeps it; one starting later keeps it too,
+    // with the rows after it in its lead (within ANCHOR_SPACING rows)
     assert_eq!(df.rows(6, 10, &NoReplay).computed_checkpoint("ema"), Some(&checkpoint(5)));
-    assert_eq!(df.rows(7, 10, &NoReplay).computed_checkpoint("ema"), None);
+    let later = df.rows(7, 10, &NoReplay);
+    assert_eq!(later.computed_checkpoint("ema"), Some(&checkpoint(5)));
+    assert_eq!(later.lead_rows(), 4); // row 6, and the reach (3) before it
     assert_eq!(df.clone().computed_checkpoint("ema"), Some(&checkpoint(5)));
     // a write stales the column but keeps its history's checkpoint
     df.invalidate_computed_on_write("close");

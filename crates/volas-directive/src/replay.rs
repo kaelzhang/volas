@@ -35,19 +35,69 @@ pub fn refresh_frame(df: &DataFrame) -> Cow<'_, DataFrame> {
     Cow::Owned(df.select(&kept).expect("existing columns"))
 }
 
-/// The carried resume states of a cached directive `node` computed over `frame`: the
-/// state as of `frame`'s last row and as of the row before it, read in place. `(None,
-/// None)` for a directive with no resume kernel.
-pub fn resume_states(frame: &DataFrame, node: &Ast) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
-    states_upto(frame, node, frame.height())
+/// What a cached directive carries after a computation over its whole history
+/// ([`resume_states`]).
+#[derive(Debug, Default)]
+pub struct ResumeStates {
+    /// Its resume state as of the last row.
+    pub state: Option<Vec<f64>>,
+    /// Its resume state as of the row before the last.
+    pub before: Option<Vec<f64>>,
+    /// The checkpoints of its history at its anchor rows
+    /// ([`Anchors`](volas_core::Anchors)) — for a recursion carried by its state.
+    pub anchors: Vec<volas_core::Checkpoint>,
+}
+
+/// What a cached directive `node` computed over `frame` carries ([`ResumeStates`]): its
+/// resume states as of `frame`'s last row and the row before, read in place (none for a
+/// directive with no resume kernel) — and, for a recursion carried by its state whose
+/// history starts at `frame`'s row 0, the checkpoints of its history at the anchor rows
+/// it passes: the state is carried there on the way to the last rows, so a later
+/// selection of the frame finds its history's nearest point with no replay.
+pub fn resume_states(frame: &DataFrame, node: &Ast) -> ResumeStates {
+    let end = frame.height();
+    let carried = matches!(crate::lookback::reach(node).history, volas_core::History::Carried { .. });
+    let spacing = volas_core::dataframe::ANCHOR_SPACING;
+    // the row counts at which an anchor row ends (never the last row, which a re-sent
+    // row replaces)
+    let first = spacing - frame.origin() % spacing;
+    let marks: Vec<usize> = match carried {
+        true => (first..end).step_by(spacing).collect(),
+        false => Vec::new(),
+    };
+    let since = frame.origin();
+    let mut at: Option<(usize, Vec<f64>)> = None; // the state as of row `.0 - 1`
+    let mut points = Vec::with_capacity(marks.len());
+    for k in marks {
+        let state = at
+            .as_ref()
+            .and_then(|(done, s)| crate::exec::execute_resume(frame, node, s, *done, k, since))
+            .map(|(_, s)| s)
+            .or_else(|| crate::exec::initial_state(frame, node, k));
+        at = state.map(|s| (k, s));
+        points.extend(at.clone());
+    }
+    let (state, before) = states_upto(frame, node, end, at);
+    let anchors = match points.is_empty() {
+        true => Vec::new(),
+        false => crate::exec::checkpoints(frame, node, points),
+    };
+    ResumeStates { state, before, anchors }
 }
 
 /// The states of `node` over `df`'s rows `[0, end)` as of rows `end - 1` and `end - 2`:
-/// the state before the last from a full computation up to it, then the last row
-/// resumed from it — one pass, the rows read in place.
-fn states_upto(df: &DataFrame, node: &Ast, end: usize) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
-    let before = (end > 1).then(|| crate::exec::initial_state(df, node, end - 1)).flatten();
+/// the state before the last resumed from `at` (the state as of an earlier row), or
+/// from a full computation up to it, then the last row resumed from it — one pass, the
+/// rows read in place.
+fn states_upto(df: &DataFrame, node: &Ast, end: usize, at: Option<(usize, Vec<f64>)>) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
     let since = df.origin();
+    let resume = |(done, s): (usize, Vec<f64>)| match done == end - 1 {
+        true => Some(s),
+        false => crate::exec::execute_resume(df, node, &s, done, end - 1, since).map(|(_, s)| s),
+    };
+    let before = (end > 1)
+        .then(|| at.filter(|(done, _)| *done < end).and_then(resume).or_else(|| crate::exec::initial_state(df, node, end - 1)))
+        .flatten();
     let resumed = before
         .as_deref()
         .and_then(|b| crate::exec::execute_resume(df, node, b, end - 1, end, since))
@@ -68,33 +118,50 @@ pub struct Replayer;
 
 impl Replay for Replayer {
     fn continuation(&self, frame: &DataFrame, name: &str, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation {
-        let Ok(node) = crate::parse(name) else { return Continuation::default() };
-        let base;
-        let df: &DataFrame = if uses_default_series(&node) {
-            frame
-        } else {
-            base = refresh_frame(frame);
-            &base
-        };
-        let (Some(since), Some(anchors)) = (frame.computed_since(name), frame.computed_anchors(name)) else {
-            return Continuation::default();
-        };
-        let history = History { df, node: &node, name, frame, since, anchors };
-        let Some(history) = history.over_lead() else { return Continuation::default() };
-        let boundary = (boundary && start > 0).then(|| history.at(frame.origin() + start - 1)).flatten();
-        let ends = ends
-            .then(|| {
-                let last = frame.origin() + end - 1;
-                let before = (end > 1).then(|| history.at(last - 1)).flatten();
-                let at = match &before {
-                    Some(b) => history.step(b, last)?,
-                    None => history.at(last)?,
-                };
-                Some((at.state?, before.and_then(|b| b.state)))
-            })
-            .flatten();
-        Continuation { boundary, ends }
+        replayed(frame, name, |history| Some(continuation(history, frame, start, end, boundary, ends))).unwrap_or_default()
     }
+}
+
+/// The checkpoint of recursive cached column `name`'s history as of absolute row `at` of
+/// `frame` (a row it holds, or one of its lead's), replayed from the nearest point of it
+/// before `at` the frame keeps — an anchor, its checkpoint, or the history's start in its
+/// rows or its lead's. `None` when the frame keeps none of them before `at`, or the
+/// replay cannot run.
+pub fn checkpoint_at(frame: &DataFrame, name: &str, at: usize) -> Option<volas_core::Checkpoint> {
+    replayed(frame, name, |history| history.at(at))
+}
+
+/// `f` over the history of recursive cached column `name` as `frame` holds it, ready to
+/// replay ([`Replayed`]); `None` when the frame holds neither its start nor a checkpoint.
+fn replayed<R>(frame: &DataFrame, name: &str, f: impl FnOnce(&Replayed<'_>) -> Option<R>) -> Option<R> {
+    let node = crate::parse(name).ok()?;
+    let base;
+    let df: &DataFrame = if uses_default_series(&node) {
+        frame
+    } else {
+        base = refresh_frame(frame);
+        &base
+    };
+    let since = frame.computed_since(name)?;
+    let anchors = frame.computed_anchors(name)?;
+    f(&History { df, node: &node, name, frame, since, anchors }.over_lead()?)
+}
+
+/// The continuation of a contiguous selection `[start, end)` of `frame` ([`Replay`]).
+fn continuation(history: &Replayed<'_>, frame: &DataFrame, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation {
+    let boundary = (boundary && start > 0).then(|| history.at(frame.origin() + start - 1)).flatten();
+    let ends = ends
+        .then(|| {
+            let last = frame.origin() + end - 1;
+            let before = (end > 1).then(|| history.at(last - 1)).flatten();
+            let at = match &before {
+                Some(b) => history.step(b, last)?,
+                None => history.at(last)?,
+            };
+            Some((at.state?, before.and_then(|b| b.state)))
+        })
+        .flatten();
+    Continuation { boundary, ends }
 }
 
 /// A recursive cached column's history as a frame holds it, replayed to any row.
@@ -121,17 +188,17 @@ struct Replayed<'a> {
 }
 
 impl<'a> History<'a> {
-    /// This history ready to replay; `None` when the frame holds neither its start nor a
-    /// checkpoint of it.
+    /// This history ready to replay; `None` when the frame holds neither its start (in
+    /// its rows or its lead's) nor a checkpoint of it.
     fn over_lead(self) -> Option<Replayed<'a>> {
-        let kept = match self.since == self.frame.origin() {
-            true => None,
-            false => Some(self.frame.computed_checkpoint(self.name)?.clone()),
-        };
+        let kept = self.frame.computed_checkpoint(self.name).cloned();
         let rows = match self.frame.lead_rows() {
             0 => std::borrow::Cow::Borrowed(self.df),
             lead => std::borrow::Cow::Owned(self.frame.led(self.df, lead)),
         };
+        if kept.is_none() && self.since < rows.origin() {
+            return None;
+        }
         Some(Replayed { history: self, rows, kept })
     }
 }
@@ -144,24 +211,30 @@ impl Replayed<'_> {
         let h = &self.history;
         let spacing = volas_core::dataframe::ANCHOR_SPACING;
         let usable = |cp: &volas_core::Checkpoint| cp.at <= at && cp.at + 1 >= self.rows.origin();
-        let mut from = h.anchors.nearest(at).filter(usable).or_else(|| self.kept.clone().filter(usable));
+        let kept = self.kept.clone().map(std::sync::Arc::new);
+        let mut from = h.anchors.nearest(at).filter(|cp| usable(cp)).or_else(|| kept.filter(|cp| usable(cp)));
         let last_row = h.frame.origin() + h.frame.height() - 1;
         loop {
             let done = from.as_ref().map_or(h.since, |cp| cp.at + 1); // the next row to replay
             let stop = ((done / spacing + 1) * spacing - 1).min(at); // the next anchor row, or `at`
             let next = match &from {
-                // from the history's start, which the frame's rows hold from its row 0
+                // from the history's start, which the frame's rows (or its lead's) hold
                 None => {
-                    let k = stop + 1 - h.df.origin();
-                    crate::exec::checkpoint(h.df, h.node, crate::exec::initial_state(h.df, h.node, k), k, true)?
+                    let k = stop + 1 - h.since;
+                    let df = match h.since.checked_sub(self.rows.origin())? {
+                        _ if h.df.origin() == h.since => std::borrow::Cow::Borrowed(h.df),
+                        skip => std::borrow::Cow::Owned(self.rows.slice_data(skip, skip + k)),
+                    };
+                    crate::exec::checkpoint(&df, h.node, crate::exec::initial_state(&df, h.node, k), k, true)?
                 }
                 Some(cp) => self.step(cp, stop)?,
             };
+            let next = std::sync::Arc::new(next);
             if (next.at + 1) % spacing == 0 && next.at < last_row {
-                h.anchors.keep(next.clone());
+                h.anchors.keep(std::sync::Arc::clone(&next));
             }
             if next.at == at {
-                return Some(next);
+                return Some(std::sync::Arc::unwrap_or_clone(next));
             }
             from = Some(next);
         }

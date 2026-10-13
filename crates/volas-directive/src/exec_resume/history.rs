@@ -121,6 +121,23 @@ pub fn checkpoint(df: &DataFrame, node: &Ast, state: Option<Vec<f64>>, end: usiz
     recursion(node, |cmd| with_inputs(df, cmd, |inputs| keep(df.origin() + end - 1, inputs, end, cmd.reach(), state, whole))?)
 }
 
+/// The checkpoints of the recursive `node` over `df`, whose rows hold the whole history
+/// (it starts at row 0), as of each `(end, state)` of `states`: as of row `end - 1`, from
+/// its carried state there — the inputs read once for all of them. Those that cannot be
+/// formed are left out.
+pub fn checkpoints(df: &DataFrame, node: &Ast, states: Vec<(usize, Vec<f64>)>) -> Vec<Checkpoint> {
+    recursion(node, |cmd| {
+        with_inputs(df, cmd, |inputs| {
+            states
+                .into_iter()
+                .filter(|(end, _)| (1..=df.height()).contains(end))
+                .filter_map(|(end, state)| keep(df.origin() + end - 1, inputs, end, cmd.reach(), Some(state), true))
+                .collect()
+        })
+    })
+    .unwrap_or_default()
+}
+
 /// Replay the recursive `node` from `checkpoint` over `df`'s rows after it up to `end`
 /// (`df` holds the rows from the one after the checkpoint on, or more): those rows'
 /// values and the checkpoint as of row `end - 1`. The values are bit-identical to a full

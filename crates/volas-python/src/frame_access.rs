@@ -29,6 +29,8 @@ struct Computed {
     col: Column,
     state: Option<Vec<f64>>,
     before: Option<Vec<f64>>,
+    /// The checkpoints of its history at the anchor rows it passed.
+    anchors: Vec<volas_core::Checkpoint>,
 }
 
 /// A value assigned to a whole column as the one cell it names, when it is a scalar —
@@ -397,13 +399,14 @@ impl PyDataFrame {
     /// continues in O(new rows) and a replaced last row recomputes in one step.
     fn compute_new(&self, frame: &DataFrame, node: &volas_directive::Ast, text: &str) -> PyResult<Computed> {
         let col = self.evaluate(frame, node, text)?;
-        let (state, before) = volas_directive::resume_states(frame, node);
+        let carried = volas_directive::resume_states(frame, node);
         Ok(Computed {
             canonical: volas_directive::stringify(node),
             reach: volas_directive::lookback::reach(node),
             col,
-            state,
-            before,
+            state: carried.state,
+            before: carried.before,
+            anchors: carried.anchors,
         })
     }
 
@@ -414,10 +417,12 @@ impl PyDataFrame {
         if self.inner.has_column(&new.canonical) {
             return Ok(new.col);
         }
-        let Computed { canonical, reach, col, state, before } = new;
+        let Computed { canonical, reach, col, state, before, anchors } = new;
         self.inner.set_column(&canonical, col).map_err(pyerr)?;
         self.inner.set_computed(&canonical, reach);
         self.inner.set_computed_states(&canonical, state, before);
+        // computed over the binding frame from its row 0: the anchors its history passed
+        self.inner.keep_computed_anchors(&canonical, anchors);
         Ok(self.inner.column(&canonical).map_err(pyerr)?.clone())
     }
 

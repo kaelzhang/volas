@@ -289,7 +289,6 @@ impl PyDataFrame {
             let checkpoint = match self.inner.computed_checkpoint(&name) {
                 // a checkpoint at or past the new head (formed from a carried state) stays
                 Some(cp) if cp.at >= at => Some(cp.clone()),
-                Some(cp) => volas_directive::exec::replay(frame, &node, cp, end).map(|(_, cp)| cp),
                 // its history starts inside the frame: capture it from there
                 None if since >= origin => {
                     let start = since - origin;
@@ -298,7 +297,10 @@ impl PyDataFrame {
                         _ => volas_directive::exec::capture(&frame.slice_data(start, h), &node, end - start),
                     }
                 }
-                None => None, // the rows its history started on are gone with no checkpoint
+                // replayed from its checkpoint, or the nearest point of it before row 0 the
+                // frame keeps (with the rows after it in its lead); none when the rows its
+                // history started on are gone with no checkpoint
+                _ => volas_directive::checkpoint_at(&self.inner, &name, at),
             };
             // none formed: an input the computation cannot read is why, if one is (a reason
             // found at an earlier drop stays — its row may be gone now)
@@ -326,14 +328,16 @@ impl PyDataFrame {
     }
 
     /// A recursion the frame carries in a state whose history started before the frame's
-    /// row 0 (a source frame's tail): its checkpoint is that state, as of its last valid
-    /// row, with the inputs a resume from it reads — when the frame holds them.
+    /// row 0 (a source frame's tail) and of which it keeps no point — no checkpoint, and
+    /// not its start in its lead: its checkpoint is that state, as of its last valid row,
+    /// with the inputs a resume from it reads — when the frame holds them.
     fn checkpoint_carried_states(&mut self) {
         let origin = self.inner.origin();
+        let held = origin - self.inner.lead_rows(); // the first row the frame holds
         let mut base: Option<volas_core::DataFrame> = None;
         for (name, meta) in self.inner.computed_columns() {
             if !matches!(meta.reach.history, History::Carried { .. })
-                || meta.since >= origin
+                || meta.since >= held
                 || self.inner.computed_checkpoint(&name).is_some()
             {
                 continue;

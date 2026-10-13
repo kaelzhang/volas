@@ -568,21 +568,24 @@ A frame derived from another either **continues its series** or **starts a new o
   cached with its values, and an `append`, a re-sent last row or a `fulfill` continues it
   bit for bit as the source would have — and so does a selection of a selection. For a
   recursion carried by its state (EMA, Wilder smoothing, SAR, a cumulative line, …) the
-  selection keeps the checkpoint of its history at its first row and the state at its
-  last, replayed once from the history the source holds; it keeps the data rows before its
-  first row that its columns read, however short it is (a missing row there counts as
-  the recursion skips it). After a write, every column is recomputed from those, exactly
-  as the source would recompute it. A recursion that carries no state (`kcw`, `crsi`,
+  selection keeps the nearest checkpoint of its history before its first row and the
+  state at its last (the source's own for a selection ending at its last row, else
+  replayed once from the history the source holds); it keeps the data rows before its
+  first row that its columns read — back to that checkpoint — however short it is (a
+  missing row there counts as the recursion skips it). After a write, every column is
+  recomputed from those, exactly as the source would recompute it. A recursion that carries no state (`kcw`, `crsi`,
   `stoch_momentum`, a recursive moving-average type, an expression combining a recursion
   with other values such as `close + kama:3@open`) is computed over its whole history, so
   the selection keeps all of it: slicing such a frame does not bound its memory — drop the
   column first (`df.drop(['kcw'], axis=1)`) to trim it; once dropped, the rows only it
   read are released.
 
-  The replay of a recursion's history to a selection's edge starts at the nearest of the
-  checkpoints the frame keeps every 4096 rows (formed the first time a replay passes
-  them): the first selection of a long frame replays its history once, later ones at most
-  4096 rows per recursive column.
+  A recursion's checkpoints — its **anchors** — are kept every 512 rows of its history,
+  formed by the computation that passes them (caching or recomputing the column over its
+  whole history). A selection keeps the nearest one before its first row together with
+  the rows after it, so taking it replays nothing; a selection ending before its source's
+  last row replays its last states once from the nearest anchor, at most 512 rows per
+  recursive column.
 - A **column projection** — `df[[...]]`, `DataFrame(df, columns=[...])`, `drop(axis=1)` —
   keeps the rows and continues the cached columns it lists (under their canonical names:
   `df[['close', 'ma:05']]` gives `['close', 'ma:5']`).

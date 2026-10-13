@@ -15,6 +15,8 @@
 //! and consumed by the directive layer (it knows what a command reads); this module owns
 //! where it lives and how it moves with the column.
 
+use std::sync::Arc;
+
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
@@ -82,50 +84,70 @@ pub struct Checkpoint {
 }
 
 /// The spacing of a recursion's [`Anchors`]: one every this many rows.
-pub const ANCHOR_SPACING: usize = 4096;
+pub const ANCHOR_SPACING: usize = 512;
 
 /// Checkpoints of a recursion's history at regular rows (absolute rows `k ·
-/// ANCHOR_SPACING - 1`), formed the first time a replay passes them and kept with the
-/// column: a later replay of its history to a row starts at the nearest one before it,
-/// so a selection's boundary costs at most the spacing however long the history is. A
-/// memo of the history's inputs: a write to them drops every anchor; anchors are never
-/// formed at a frame's last row, the one a re-sent row replaces. Frames copied from one
-/// another share them until either changes its history.
-#[derive(Clone, Debug, Default)]
-pub struct Anchors(std::sync::Arc<std::sync::Mutex<Vec<Checkpoint>>>);
+/// ANCHOR_SPACING - 1`), formed by the computation or the replay that passes them and kept
+/// with the column: a later replay of its history to a row starts at the nearest one
+/// before it, so a selection's boundary costs at most the spacing however long the
+/// history is. A memo of the history's inputs: a write to them drops every anchor;
+/// anchors are never formed at a frame's last row, the one a re-sent row replaces.
+///
+/// Frames derived from one another share one store while their histories agree: a copy
+/// shares all of it, a selection the rows before its last — it
+/// never reads or forms an anchor past them, where its rows may come to differ.
+#[derive(Clone, Debug)]
+pub struct Anchors {
+    held: Arc<std::sync::Mutex<Vec<Arc<Checkpoint>>>>,
+    /// The rows of the store this frame's history agrees with: those before this one.
+    upto: usize,
+}
+
+impl Default for Anchors {
+    fn default() -> Anchors {
+        Anchors { held: Arc::default(), upto: usize::MAX }
+    }
+}
 
 impl Anchors {
     /// The anchor at the latest row at or before absolute row `at`.
-    pub fn nearest(&self, at: usize) -> Option<Checkpoint> {
-        let held = self.0.lock().expect("anchors lock");
-        held.iter().filter(|cp| cp.at <= at).max_by_key(|cp| cp.at).cloned()
+    pub fn nearest(&self, at: usize) -> Option<Arc<Checkpoint>> {
+        let at = at.min(self.upto.checked_sub(1)?);
+        let held = self.held.lock().expect("anchors lock");
+        let after = held.partition_point(|cp| cp.at <= at); // held in row order
+        after.checked_sub(1).map(|i| held[i].clone())
     }
 
-    /// Keep `checkpoint` as an anchor (one per row).
-    pub fn keep(&self, checkpoint: Checkpoint) {
-        let mut held = self.0.lock().expect("anchors lock");
-        if !held.iter().any(|cp| cp.at == checkpoint.at) {
-            held.push(checkpoint);
+    /// Keep `checkpoint` as an anchor (one per row, in row order) — when its row is one
+    /// this frame shares the store for.
+    pub fn keep(&self, checkpoint: impl Into<Arc<Checkpoint>>) {
+        let checkpoint = checkpoint.into();
+        if checkpoint.at >= self.upto {
+            return;
+        }
+        let mut held = self.held.lock().expect("anchors lock");
+        let at = held.partition_point(|cp| cp.at < checkpoint.at);
+        if held.get(at).is_none_or(|cp| cp.at != checkpoint.at) {
+            held.insert(at, checkpoint);
         }
     }
 
-    /// New anchors holding those of these at rows `rows` — a frame of its own.
-    pub(super) fn within(&self, rows: std::ops::Range<usize>) -> Anchors {
-        let held = self.0.lock().expect("anchors lock");
-        Anchors(std::sync::Arc::new(std::sync::Mutex::new(
-            held.iter().filter(|cp| rows.contains(&cp.at)).cloned().collect(),
-        )))
+    /// These anchors for a frame whose history agrees with this one's on the rows before
+    /// absolute row `upto` only (a selection's).
+    pub(super) fn upto(&self, upto: usize) -> Anchors {
+        Anchors { held: Arc::clone(&self.held), upto: self.upto.min(upto) }
     }
 
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.0.lock().expect("anchors lock").len()
+        let held = self.held.lock().expect("anchors lock");
+        held.partition_point(|cp| cp.at < self.upto)
     }
 }
 
 impl PartialEq for Anchors {
     fn eq(&self, other: &Anchors) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.held, &other.held) && self.upto == other.upto
     }
 }
 
@@ -135,9 +157,18 @@ impl DataFrame {
         Some(self.computed.get(name)?.anchors.clone())
     }
 
+    /// Keep `anchors` as anchors of cached column `name`'s history ([`Anchors`]): the
+    /// checkpoints a computation over its whole history passed. No-op for an untracked
+    /// column.
+    pub fn keep_computed_anchors(&self, name: &str, anchors: Vec<Checkpoint>) {
+        if let Some(meta) = self.computed.get(name) {
+            anchors.into_iter().for_each(|cp| meta.anchors.keep(cp));
+        }
+    }
+
     /// The checkpoint of cached column `name`'s history, if it keeps one.
     pub fn computed_checkpoint(&self, name: &str) -> Option<&Checkpoint> {
-        self.computed.get(name)?.checkpoint.as_ref()
+        self.computed.get(name)?.checkpoint.as_deref()
     }
 
     /// Keep `checkpoint` as cached column `name`'s history — or, when none could be
@@ -147,7 +178,7 @@ impl DataFrame {
     pub fn set_computed_checkpoint(&mut self, name: &str, checkpoint: std::result::Result<Checkpoint, Option<VolasError>>) {
         if let Some(meta) = self.computed.get_mut(name) {
             (meta.checkpoint, meta.lost) = match checkpoint {
-                Ok(cp) => (Some(cp), None),
+                Ok(cp) => (Some(Arc::new(cp)), None),
                 Err(why) => (None, why),
             };
         }

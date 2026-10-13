@@ -250,8 +250,8 @@ fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
 }
 
 pub use crate::exec_resume::{
-    capture, checkpoint, execute_resume, execute_resume_default_series, execute_resume_default_series_one,
-    execute_resume_step, initial_state, replay,
+    capture, checkpoint, checkpoints, execute_resume, execute_resume_default_series,
+    execute_resume_default_series_one, execute_resume_step, initial_state, replay,
 };
 
 /// `hv`'s annualization factor √(bars per year), from its bound arguments

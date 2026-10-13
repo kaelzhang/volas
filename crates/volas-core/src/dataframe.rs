@@ -69,8 +69,9 @@ pub struct ComputedMeta {
     /// the two states so a live column steps with no allocation.
     scratch: Vec<f64>,
     /// The history of a recursion before the frame's row 0, once the frame dropped the
-    /// rows it started on ([`Checkpoint`]): a recompute replays from it.
-    checkpoint: Option<Checkpoint>,
+    /// rows it started on ([`Checkpoint`]): a recompute replays from it. Shared: a
+    /// checkpoint never changes once formed.
+    checkpoint: Option<Arc<Checkpoint>>,
     /// The checkpoint the next drop of the head will keep, captured as the refresh passed
     /// its row (so the drop need not replay to it); dropped by any change to the rows it
     /// covers.
@@ -277,7 +278,7 @@ impl DataFrame {
             }
         }
         if let Some(lead) = &self.lead {
-            lead.debug_check(self.origin);
+            lead.debug_check();
         }
     }
 

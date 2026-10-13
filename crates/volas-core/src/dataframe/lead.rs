@@ -1,8 +1,10 @@
 //! The **lead** of a frame: the data rows just before its row 0 that its cached columns
 //! read to recompute their first rows. A contiguous selection keeps it (see `derive`):
 //! each cached column whose history starts before the selection needs the fewer of its
-//! [`Reach::lead`](super::Reach::lead) and its history's rows there — or, for a recursion that carries no
-//! state and no checkpoint, its whole history there, which it is computed over.
+//! [`Reach::lead`](super::Reach::lead) and its history's rows there — and a recursion the
+//! rows after the point of its history it replays from: its checkpoint, or its whole
+//! history when it keeps none (a recursion carried by its state whose start is near, or one
+//! that carries no state, which it is computed over).
 //!
 //! The lead is history: it is never written. Its values keep the dtype they had; when a
 //! data column is later replaced by one of another dtype, a recompute reads both in their
@@ -16,15 +18,20 @@ use crate::error::{Result, VolasError};
 use crate::fxhash::FxHashMap;
 use crate::index::Index;
 
-use super::{ComputedMeta, DataFrame};
+use super::{ComputedMeta, DataFrame, History};
 
-/// The rows `[from, to)` of `rows`, a frame of data columns whose row `to` would be the
-/// frame's row 0. A lead that is most of its source's rows shares the source's buffers;
-/// a shorter one is a copy of just its rows, so a lead never pins more than twice the
-/// rows it keeps.
+/// The rows `[from, to)` of the data columns of a frame's schema — the schema of the
+/// frame it was taken for (`names` / `name_to_idx`, shared with it), one column per name,
+/// `None` for a cached column's — whose row `to` would be the frame's row 0. A lead that
+/// is most of its source's rows shares the source's buffers; a shorter one is a copy of
+/// just its rows, so a lead never pins more than twice the rows it keeps.
 #[derive(Clone, Debug)]
 pub(super) struct Lead {
-    rows: Arc<DataFrame>,
+    names: Arc<Vec<String>>,
+    name_to_idx: Arc<FxHashMap<String, usize>>,
+    columns: Vec<Option<Column>>,
+    /// The rows each held column has.
+    height: usize,
     from: usize,
     to: usize,
 }
@@ -56,12 +63,26 @@ fn wanted(computed: &FxHashMap<String, ComputedMeta>, first: usize) -> usize {
     computed
         .values()
         .filter(|m| m.since < first)
-        .map(|m| match m.reach.history.recursive() && m.state.is_none() && m.checkpoint.is_none() {
-            true => first - m.since, // computed over all of it
-            false => m.reach.lead().min(first - m.since),
+        .map(|m| match replays_from(m) {
+            // the rows after the point it replays from, and what their recompute reads before
+            Some(from) if from < first => (first - from + m.reach.lead()).min(first - m.since),
+            _ => m.reach.lead().min(first - m.since),
         })
         .max()
         .unwrap_or(0)
+}
+
+/// The absolute row a recompute of recursion `m` replays from, when it is a recursion
+/// that a frame not holding its history keeps by a point of it: the row after its
+/// checkpoint — or its history's start, which a recursion carried by its state with no
+/// checkpoint, or one carrying no state, is computed over.
+fn replays_from(m: &ComputedMeta) -> Option<usize> {
+    match (m.reach.history, &m.checkpoint) {
+        (History::Carried { .. }, Some(cp)) => Some(cp.at + 1),
+        (History::Carried { .. }, None) => Some(m.since),
+        (History::Unkept, _) if m.state.is_none() => Some(m.since),
+        _ => None,
+    }
 }
 
 impl Lead {
@@ -70,43 +91,50 @@ impl Lead {
         self.to - self.from
     }
 
+    /// Column `name` as the lead holds it (all its rows), if it does.
+    fn column(&self, name: &str) -> Option<&Column> {
+        self.columns[*self.name_to_idx.get(name)?].as_ref()
+    }
+
     /// The last `n` (at most [`len`](Self::len)) rows of column `name` as the lead holds
     /// them (in the dtype they had), or `n` missing cells of `dtype` when it does not
     /// hold the column (one added after it: no column whose history starts before the
     /// frame reads it).
     fn tail(&self, name: &str, n: usize, dtype: crate::DType) -> Column {
-        match self.rows.column(name) {
-            Ok(c) => c.slice(self.to - n, self.to),
-            Err(_) => Column::na_of(dtype, n),
+        match self.column(name) {
+            Some(c) => c.slice(self.to - n, self.to),
+            None => Column::na_of(dtype, n),
         }
     }
 
-    /// This lead over the data columns `names` it holds (a projection).
-    pub(super) fn select(&self, names: &[String]) -> Lead {
-        let kept: Vec<String> = names.iter().filter(|n| self.rows.has_column(n)).cloned().collect();
-        Lead { rows: Arc::new(self.rows.select(&kept).expect("held columns")), ..*self }
+    /// This lead over the data columns of `frame` (a projection of the frame it was taken
+    /// for): those it holds, in `frame`'s schema.
+    pub(super) fn select(&self, frame: &DataFrame) -> Lead {
+        let held = |n: &String| self.column(n).filter(|_| !frame.computed.contains_key(n)).cloned();
+        let columns = frame.names.iter().map(held).collect();
+        Lead { names: Arc::clone(&frame.names), name_to_idx: Arc::clone(&frame.name_to_idx), columns, ..*self }
     }
 
-    /// This lead keeping its last `rows` rows only, copied out of a backing frame they
-    /// would no longer be most of; `None` for none.
+    /// This lead keeping its last `rows` rows only, copied out of the buffers they would
+    /// no longer be most of; `None` for none.
     fn trimmed(&self, rows: usize) -> Option<Lead> {
         let rows = rows.min(self.len());
         if rows == 0 {
             return None;
         }
         let from = self.to - rows;
-        if 2 * rows >= self.rows.height {
+        if 2 * rows >= self.height {
             return Some(Lead { from, ..self.clone() });
         }
-        let copy = self.rows.slice_data(from, self.to);
-        Some(Lead { rows: Arc::new(copy), from: 0, to: rows })
+        let columns = self.columns.iter().map(|c| c.as_ref().map(|c| c.slice(from, self.to))).collect();
+        Some(Lead { columns, height: rows, from: 0, to: rows, ..self.clone() })
     }
 
     #[cfg(debug_assertions)]
-    pub(super) fn debug_check(&self, origin: usize) {
-        assert!(self.rows.computed.is_empty() && self.rows.lead.is_none(), "a lead holds data rows only");
-        assert!(self.from <= self.to && self.to <= self.rows.height, "the lead's rows are its frame's");
-        assert_eq!(self.rows.origin + self.to, origin, "the lead ends just before row 0");
+    pub(super) fn debug_check(&self) {
+        assert_eq!(self.columns.len(), self.names.len(), "one lead column per name");
+        assert!(self.columns.iter().flatten().all(|c| c.len() == self.height), "the lead's columns are alike");
+        assert!(self.from <= self.to && self.to <= self.height, "the lead's rows are its columns'");
     }
 }
 
@@ -124,30 +152,32 @@ impl DataFrame {
         if own + older == 0 {
             return None;
         }
-        let names = self.data_names();
+        let data = |i: usize| !computed.contains_key(&self.names[i]);
+        let schema = (Arc::clone(&self.names), Arc::clone(&self.name_to_idx));
         if older == 0 && 2 * own >= self.height {
             // most of this frame's rows: share its buffers rather than copy them
-            let rows = Arc::new(self.select(&names).expect("data columns"));
-            return Some(Lead { rows, from: start - own, to: start });
+            let columns = self.columns.iter().enumerate().map(|(i, c)| data(i).then(|| c.clone())).collect();
+            let (names, name_to_idx) = schema;
+            return Some(Lead { names, name_to_idx, columns, height: self.height, from: start - own, to: start });
         }
-        let columns = names
+        let columns = self
+            .columns
             .iter()
-            .map(|name| {
-                let col = &self.columns[self.name_to_idx[name]];
-                let own_rows = col.slice(start - own, start);
-                match &self.lead {
-                    Some(lead) if older > 0 => {
-                        join(lead.tail(name, older, col.dtype()), &own_rows).expect("checked when the column was written")
+            .enumerate()
+            .map(|(i, col)| {
+                data(i).then(|| {
+                    let own_rows = col.slice(start - own, start);
+                    match &self.lead {
+                        Some(lead) if older > 0 => join(lead.tail(&self.names[i], older, col.dtype()), &own_rows)
+                            .expect("checked when the column was written"),
+                        _ => own_rows,
                     }
-                    _ => own_rows,
-                }
+                })
             })
             .collect();
         let len = own + older;
-        let rows = DataFrame::new(names, columns, Some(Index::range(len)))
-            .expect("equal-length data columns")
-            .with_origin(first - len);
-        Some(Lead { rows: Arc::new(rows), from: 0, to: len })
+        let (names, name_to_idx) = schema;
+        Some(Lead { names, name_to_idx, columns, height: len, from: 0, to: len })
     }
 
     /// The lead trimmed to what the cached columns read now — after the set of cached
@@ -167,7 +197,7 @@ impl DataFrame {
     /// values in a lossless common dtype — else the write is refused before it is made.
     pub(super) fn check_lead_dtype(&self, name: &str, col: &Column) -> Result<()> {
         let Some(lead) = &self.lead else { return Ok(()) };
-        if !lead.rows.has_column(name) || lead.len() == 0 {
+        if lead.column(name).is_none() || lead.len() == 0 {
             return Ok(());
         }
         join(lead.tail(name, lead.len(), col.dtype()), &col.slice(0, 0)).map(|_| ()).map_err(|e| {
@@ -175,7 +205,7 @@ impl DataFrame {
                 "cannot replace column \"{name}\" with {} values: this frame's cached columns read \
                  its rows before the frame's first row, which hold {} values ({e})",
                 col.dtype(),
-                lead.rows.column(name).map(|c| c.dtype().to_string()).unwrap_or_default()
+                lead.column(name).map(|c| c.dtype().to_string()).unwrap_or_default()
             ))
         })
     }
