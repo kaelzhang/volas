@@ -210,7 +210,7 @@ impl Column {
     /// dtype-preserving when `value` fits the dtype, else promoting an int column
     /// to float (a non-integral fill).
     pub fn fillna(&self, value: f64) -> Result<Column> {
-        if self.null_count() == 0 {
+        if !self.has_missing() {
             return Ok(self.clone());
         }
         let len = self.len();
@@ -278,7 +278,7 @@ impl Column {
     /// missing cells from the nearest present value in that direction,
     /// dtype-preserving; leading / trailing cells with no source stay missing.
     pub fn fill_dir(&self, forward: bool) -> Column {
-        if self.null_count() == 0 {
+        if !self.has_missing() {
             return self.clone();
         }
         let len = self.len();
@@ -336,6 +336,17 @@ impl Column {
                 "condition has {} entries but the operands have {n}",
                 cond.len()
             )));
+        }
+        // Homogeneous floats already carry missing values in-band. Pick their
+        // bytes directly: no masked copies or conversions of either input.
+        match (self, other, target) {
+            (Column::F64(a), Column::F64(b), DType::F64) => {
+                return Ok(Column::f64(stats::select(cond, a, b)));
+            }
+            (Column::F32(a), Column::F32(b), DType::F32) => {
+                return Ok(Column::f32(stats::select(cond, a, b)));
+            }
+            _ => {}
         }
         match target {
             DType::I64 => Ok(Column::i64_masked(

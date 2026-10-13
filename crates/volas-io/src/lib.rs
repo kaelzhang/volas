@@ -2,9 +2,11 @@
 //! `csv` crate, with per-column type inference.
 
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::path::Path;
 
-use volas_core::{datetime, Column, DataFrame, Result, Tz, VolasError};
+use volas_core::{datetime, Column, DataFrame, Result, StrBuffer, StrBufferBuilder, Tz, Validity, VolasError};
+use volas_core::numeric::i64_to_f64_exact;
 
 /// pandas's default missing-value tokens (`STR_NA_VALUES`). A numeric column
 /// with any of these (trimmed) entries upcasts to `f64` with `NaN`, exactly as
@@ -60,7 +62,7 @@ pub enum DateParse {
 /// from their own tokens, every other column by inference.
 pub struct CsvTable {
     headers: Vec<String>,
-    cells: Vec<Vec<String>>,
+    cells: Vec<StrBuffer>,
     na: HashSet<String>,
 }
 
@@ -96,7 +98,7 @@ impl CsvTable {
 }
 
 /// A declared date column from its raw tokens (see [`CsvTable::into_frame`]).
-fn date_column(cells: &[String], parse: &DateParse, na: &HashSet<String>) -> Result<Column> {
+fn date_column(cells: &StrBuffer, parse: &DateParse, na: &HashSet<String>) -> Result<Column> {
     cells
         .iter()
         .map(|cell| {
@@ -168,27 +170,25 @@ pub fn read_csv_table(path: impl AsRef<Path>, opts: &ReadCsvOptions) -> Result<C
         }
     }
     let mut ncol = headers.len();
-    let mut raw: Vec<Vec<String>> = if ncol > 0 {
-        vec![Vec::new(); ncol]
-    } else {
-        Vec::new()
-    };
-
-    for rec in rdr.records() {
-        let rec = rec.map_err(|e| VolasError::Value(format!("bad CSV record: {e}")))?;
+    let mut raw: Vec<StrBufferBuilder> = (0..ncol)
+        .map(|_| StrBufferBuilder::with_capacity(0)).collect();
+    let mut rec = csv::StringRecord::new();
+    while rdr.read_record(&mut rec)
+        .map_err(|e| VolasError::Value(format!("bad CSV record: {e}")))?
+    {
         if raw.is_empty() {
             ncol = rec.len();
-            raw = vec![Vec::new(); ncol];
+            raw = (0..ncol).map(|_| StrBufferBuilder::with_capacity(0)).collect();
         }
-        for (j, cell) in raw.iter_mut().enumerate() {
-            cell.push(rec.get(j).unwrap_or("").to_string());
+        for (j, cells) in raw.iter_mut().enumerate() {
+            cells.push(rec.get(j).unwrap_or(""));
         }
     }
 
     if !opts.has_header {
         headers = (0..ncol).map(|i| i.to_string()).collect();
     }
-    Ok(CsvTable { headers, cells: raw, na: na_set })
+    Ok(CsvTable { headers, cells: raw.into_iter().map(StrBufferBuilder::finish).collect(), na: na_set })
 }
 
 /// The effective set of missing-value tokens for these options.
@@ -201,64 +201,128 @@ fn build_na_set(opts: &ReadCsvOptions) -> HashSet<String> {
     set
 }
 
-/// Infer the most specific column type from string cells
-/// (`i64` -> `f64` -> `bool` -> `str`), treating NA tokens as missing.
-fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
-    if cells.is_empty() {
-        return Column::str(cells);
+/// Parsed values for the still-possible column dtype. Only an integer prefix
+/// needs promotion; each token is parsed once for its chosen numeric candidate.
+/// Raw tokens stay in the compact string buffer for dates and late text fallback.
+enum Inferred {
+    Pending,
+    Int(Vec<i64>),
+    Float(Vec<f64>),
+    Bool(Vec<bool>),
+    Text,
+}
+
+impl Inferred {
+    fn missing(&mut self) {
+        match self {
+            Self::Int(v) => v.push(0),
+            Self::Float(v) => v.push(f64::NAN),
+            Self::Bool(v) => v.push(false),
+            Self::Pending | Self::Text => {}
+        }
     }
-    let trimmed: Vec<&str> = cells.iter().map(|c| c.trim()).collect();
-    let is_na = |t: &str| na.contains(t);
-    // i64: every cell present and integral.
-    if trimmed
-        .iter()
-        .all(|t| !is_na(t) && t.parse::<i64>().is_ok())
-    {
-        return Column::i64(trimmed.iter().map(|t| t.parse().unwrap()).collect());
+}
+
+/// Promote parsed integers without reparsing their tokens. An integer the float
+/// cannot hold instead selects text; a negative zero token keeps its float sign.
+fn float_prefix(ints: &[i64], cells: &StrBuffer, valid: &Validity) -> Option<Vec<f64>> {
+    let mut out = Vec::with_capacity(cells.len());
+    for (i, &x) in ints.iter().enumerate() {
+        out.push(if !valid.is_valid(i) {
+            f64::NAN
+        } else if x == 0 && cells.get(i).trim().starts_with('-') {
+            -0.0
+        } else {
+            i64_to_f64_exact(x)?
+        });
     }
-    // i64 + NA: every present cell integral, with >= 1 missing -> a native
-    // int64 column with a validity bitmap (volas's NA model, F35) — the legacy
-    // demote-to-float path would diverge from the constructor's own inference.
-    if trimmed
-        .iter()
-        .all(|t| is_na(t) || t.parse::<i64>().is_ok())
-        && trimmed.iter().any(|t| !is_na(t))
-    {
-        return Column::i64_from_options(
-            trimmed.iter().map(|t| if is_na(t) { None } else { t.parse().ok() }),
-        );
+    Some(out)
+}
+
+/// Infer i64 -> f64 -> bool -> str, preserving the original untrimmed strings
+/// on fallback. The final numeric vector is built as the tokens are inspected;
+/// no validation pass followed by a second parse of every token.
+fn infer_column(cells: StrBuffer, na: &HashSet<String>) -> Column {
+    let n = cells.len();
+    if n == 0 {
+        return Column::Str(cells, Validity::dense());
     }
-    // f64: every cell is either missing (-> NaN) or a number float64 holds without
-    // changing an integer: an integer token float64 cannot hold exactly (past 2^53,
-    // or past int64 entirely) keeps the column as text, lossless, instead of
-    // rounding it (contract #20); a `nan` token that is not an NA token is text too.
-    if trimmed.iter().all(|t| is_na(t) || float_token(t).is_some()) {
-        return Column::f64(
-            trimmed
-                .iter()
-                .map(|t| {
-                    if is_na(t) {
-                        f64::NAN
-                    } else {
-                        float_token(t).expect("checked above")
+    let mut inferred = Inferred::Pending;
+    let mut valid = Validity::dense();
+    let mut exact = String::new();
+    for (i, cell) in cells.iter().enumerate() {
+        let t = cell.trim();
+        if na.contains(t) {
+            valid.set(i, n, false);
+            inferred.missing();
+            continue;
+        }
+        let boolean = || {
+            if t.eq_ignore_ascii_case("true") { Some(true) }
+            else if t.eq_ignore_ascii_case("false") { Some(false) }
+            else { None }
+        };
+        inferred = match inferred {
+            Inferred::Pending => {
+                if let Ok(x) = t.parse::<i64>() {
+                    let mut v = Vec::with_capacity(n);
+                    v.resize(i, 0);
+                    v.push(x);
+                    Inferred::Int(v)
+                } else if let Some(x) = float_token(t, &mut exact) {
+                    let mut v = Vec::with_capacity(n);
+                    v.resize(i, f64::NAN);
+                    v.push(x);
+                    Inferred::Float(v)
+                } else if let Some(b) = boolean() {
+                    let mut v = Vec::with_capacity(n);
+                    v.resize(i, false);
+                    v.push(b);
+                    Inferred::Bool(v)
+                } else {
+                    Inferred::Text
+                }
+            }
+            Inferred::Int(mut v) => {
+                if let Ok(x) = t.parse::<i64>() {
+                    v.push(x);
+                    Inferred::Int(v)
+                } else if let Some(x) = float_token(t, &mut exact) {
+                    match float_prefix(&v, &cells, &valid) {
+                        Some(mut floats) => { floats.push(x); Inferred::Float(floats) }
+                        None => Inferred::Text,
                     }
-                })
-                .collect(),
-        );
+                } else {
+                    Inferred::Text
+                }
+            }
+            Inferred::Float(mut v) => match float_token(t, &mut exact) {
+                Some(x) => { v.push(x); Inferred::Float(v) }
+                None => Inferred::Text,
+            },
+            Inferred::Bool(mut v) => match boolean() {
+                Some(x) => { v.push(x); Inferred::Bool(v) }
+                None => Inferred::Text,
+            },
+            Inferred::Text => Inferred::Text,
+        };
     }
-    // bool: every cell an NA token or a true/false literal (any case), at least one
-    // present; an NA token is a missing bool (validity), never read as a literal.
-    let is_bool = |t: &str| t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("false");
-    if trimmed.iter().all(|t| is_na(t) || is_bool(t)) && trimmed.iter().any(|t| !is_na(t)) {
-        return Column::bool_from_options(
-            trimmed.iter().map(|t| (!is_na(t)).then(|| t.eq_ignore_ascii_case("true"))),
-        );
+    match inferred {
+        Inferred::Int(v) => Column::i64_with(v, valid).expect("CSV validity covers every row"),
+        Inferred::Pending => Column::f64(vec![f64::NAN; n]),
+        Inferred::Float(v) => Column::f64(v),
+        Inferred::Bool(v) => Column::bool_with(v, valid).expect("CSV validity covers every row"),
+        Inferred::Text => {
+            // Keep the original text, but normalize missing payloads to the same
+            // empty spans as the nullable string constructor.
+            let cells = if valid.has_nulls() {
+                cells.iter().enumerate().map(|(i, s)| if valid.is_valid(i) { s } else { "" }).collect()
+            } else {
+                cells
+            };
+            Column::Str(cells, valid)
+        }
     }
-    // str: NA tokens (empty / `NA` / `null` / ...) become NA via the validity
-    // bitmap — like pandas, and so a parse_dates column with blank cells parses
-    // to NaT instead of failing on the "" placeholder. Present cells keep their
-    // original (untrimmed) value.
-    Column::str_from_options(cells.iter().zip(&trimmed).map(|(c, t)| (!is_na(t)).then(|| c.clone())))
 }
 
 /// A present cell as the float64 it denotes, or `None` when it is not a number
@@ -266,14 +330,15 @@ fn infer_column(cells: Vec<String>, na: &HashSet<String>) -> Column {
 /// token is missing), or an integer literal float64 cannot hold exactly
 /// (`9007199254740993`, `9223372036854775809`). An integer literal is exact when
 /// the float's exact decimal expansion equals it.
-fn float_token(t: &str) -> Option<f64> {
+fn float_token(t: &str, exact: &mut String) -> Option<f64> {
     let x = t.parse::<f64>().ok().filter(|x| !x.is_nan())?;
     let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
     if !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Some(x); // a decimal / exponent / inf literal: float precision applies
     }
     let magnitude = digits.trim_start_matches('0');
-    let exact = format!("{:.0}", x.abs());
+    exact.clear();
+    write!(exact, "{:.0}", x.abs()).expect("writing to a String cannot fail");
     (exact == if magnitude.is_empty() { "0" } else { magnitude }).then_some(x)
 }
 
@@ -287,7 +352,41 @@ mod tests {
     }
 
     fn infer(cells: &[&str]) -> Column {
-        infer_column(cells.iter().map(|s| s.to_string()).collect(), &default_na())
+        infer_column(cells.iter().copied().collect(), &default_na())
+    }
+
+    #[test]
+    fn late_type_changes_keep_tokens_missing_and_signed_zero() {
+        let c = infer(&["NA", "-000", " +007 ", "1.25", "-0", "null"]);
+        let v = c.as_f64().unwrap();
+        assert!(v[0].is_nan() && v[5].is_nan());
+        assert_eq!((v[1].to_bits(), v[4].to_bits()), ((-0f64).to_bits(), (-0f64).to_bits()));
+        assert_eq!((v[2], v[3]), (7., 1.25));
+        for tokens in [
+            vec![" 003 ", "-0", "NA", "1.25", " late text "],
+            vec![" 9007199254740993 ", "NA", "1.25"],
+            vec!["1.25", "NA", "9007199254740993"],
+            vec!["NA", "TRUE", "false", " late text "],
+            vec!["NA", "1", "true"],
+        ] {
+            let c = infer(&tokens);
+            let Column::Str(text, val) = c else { panic!("expected text") };
+            for (i, token) in tokens.iter().enumerate() {
+                if *token == "NA" {
+                    assert!(!val.is_valid(i));
+                    assert_eq!(text.get(i), "");
+                } else {
+                    assert!(val.is_valid(i));
+                    assert_eq!(text.get(i), *token);
+                }
+            }
+        }
+        let b = infer(&["NA", "false", "NA", "TRUE"]);
+        assert_eq!(b.as_bool().unwrap(), &[false, false, false, true]);
+        assert!(!b.is_valid(0) && !b.is_valid(2));
+        assert_eq!(infer(&["-0", "+000"]).as_i64().unwrap(), &[0, 0]);
+        let c = infer(&["NA", "-9223372036854775808", "1.25"]);
+        assert_eq!(c.as_f64().unwrap()[1], i64::MIN as f64);
     }
 
     #[test]
@@ -349,7 +448,7 @@ mod tests {
         assert_eq!(col.dtype(), volas_core::DType::Bool);
         assert!(col.is_valid(0) && !col.is_valid(1) && col.as_bool().unwrap() == [true, false, false]);
         let na: HashSet<String> = ["True".to_string()].into();
-        let col = infer_column(vec!["True".into(), "False".into()], &na);
+        let col = infer_column(["True", "False"].into_iter().collect(), &na);
         assert!(!col.is_valid(0) && !col.as_bool().unwrap()[1]);
     }
 
@@ -363,9 +462,9 @@ mod tests {
             .equals(&Column::f64(vec![9007199254740992.0, -7.0, 0.0, 1.5, 18446744073709551616.0])));
         // a `nan` spelling that is not an NA token is text
         let na: HashSet<String> = HashSet::new();
-        assert!(matches!(infer_column(vec!["1".into(), "nan".into()], &na), Column::Str(..)));
-        assert_eq!(float_token("-"), None);
-        assert_eq!(float_token("1e3"), Some(1000.0));
+        assert!(matches!(infer_column(["1", "nan"].into_iter().collect(), &na), Column::Str(..)));
+        assert_eq!(float_token("-", &mut String::new()), None);
+        assert_eq!(float_token("1e3", &mut String::new()), Some(1000.0));
     }
 
     #[test]
@@ -379,7 +478,7 @@ mod tests {
     #[test]
     fn empty_column_is_str() {
         assert_eq!(
-            infer_column(Vec::new(), &default_na()),
+            infer_column(StrBuffer::from_vec(Vec::new()), &default_na()),
             Column::str(Vec::new())
         );
     }
@@ -391,7 +490,7 @@ mod tests {
             ..Default::default()
         });
         // "NA" is no longer missing -> the column is object/string, not float.
-        match infer_column(vec!["1".into(), "NA".into()], &na) {
+        match infer_column(["1", "NA"].into_iter().collect(), &na) {
             Column::Str(v, _) => assert_eq!(v.to_vec(), vec!["1".to_string(), "NA".to_string()]),
             other => panic!("expected Str, got {other:?}"), // LCOV_EXCL_LINE
         }
@@ -403,7 +502,7 @@ mod tests {
             na_values: vec!["MISSING".into()],
             ..Default::default()
         });
-        match infer_column(vec!["1".into(), "MISSING".into()], &na) {
+        match infer_column(["1", "MISSING"].into_iter().collect(), &na) {
             Column::I64(v, val) => {
                 assert_eq!(v[0], 1);
                 assert!(!val.is_valid(1));          // F35: custom NA token -> int64 + NA
