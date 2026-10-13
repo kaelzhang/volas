@@ -4,21 +4,16 @@
 use std::collections::HashMap;
 
 use super::derive::NoReplay;
-use super::Continuation;
 use super::*;
 use crate::tz::Tz;
 
-/// A replay that has the history: the states it gives name the row they describe.
+/// A replay that has the history: the state of a checkpoint it gives names its row.
 struct Replayed;
 
 impl Replay for Replayed {
-    fn continuation(&self, frame: &DataFrame, _: &str, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation {
-        let at = (frame.origin() + end - 1) as f64;
-        let row = frame.origin() + start;
-        Continuation {
-            boundary: (boundary && row > 0).then(|| Checkpoint { at: row - 1, state: Some(vec![(row - 1) as f64]), inputs: vec![] }),
-            ends: ends.then(|| (vec![at], Some(vec![at - 1.0]))),
-        }
+    fn boundary(&self, frame: &DataFrame, _: &str, start: usize) -> Option<Checkpoint> {
+        let row = (frame.origin() + start).checked_sub(1)?;
+        Some(Checkpoint { at: row, state: Some(vec![row as f64]), inputs: vec![] })
     }
 }
 
@@ -192,18 +187,16 @@ fn a_selection_from_the_history_start_needs_no_lead() {
 }
 
 #[test]
-fn a_middle_selection_replays_its_recursions_once() {
+fn a_middle_selection_carries_no_states_and_replays_nothing() {
+    // its states as of its last row are computed when the column continues, from what it
+    // keeps: its valid rows, the nearest point of the history before it and the lead
     let df = frame(10);
-    let mid = df.rows(3, 6, &Replayed);
-    assert_eq!((meta(&mid, "ema").state, meta(&mid, "ema").state_before_last), (Some(vec![5.0]), Some(vec![4.0])));
-    assert_eq!(mid.computed_resume_state("ema"), Some((&[5.0][..], 3)));
-    // a window column needs no state: it recomputes over its rows and the lead
-    assert_eq!(meta(&mid, "ma").state, None);
-    // without the history, the recursion stays cached with no state (its refresh raises)
-    let lost = df.rows(3, 6, &NoReplay);
-    assert_eq!((meta(&lost, "ema").state, meta(&lost, "ema").valid_rows), (None, 3));
-    // a one-row middle selection keeps no state before its only row
-    assert_eq!(meta(&df.rows(4, 5, &Replayed), "ema").state_before_last, None);
+    let counting = Counting(std::cell::Cell::new(0));
+    let mid = df.rows(3, 6, &counting);
+    assert_eq!((meta(&mid, "ema").state, meta(&mid, "ema").state_before_last), (None, None));
+    assert_eq!((mid.computed_resume_state("ema"), meta(&mid, "ema").valid_rows), (None, 3));
+    assert_eq!((meta(&mid, "ma").state, counting.0.get()), (None, 0));
+    assert_eq!(mid.lead_rows(), 3); // ema's whole history before it
 }
 
 #[test]
@@ -408,9 +401,9 @@ fn a_frame_is_labelled_by_unique_labels() {
 struct Counting(std::cell::Cell<usize>);
 
 impl Replay for Counting {
-    fn continuation(&self, frame: &DataFrame, name: &str, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation {
-        self.0.set(self.0.get() + usize::from(boundary));
-        Replayed.continuation(frame, name, start, end, boundary, ends)
+    fn boundary(&self, frame: &DataFrame, name: &str, start: usize) -> Option<Checkpoint> {
+        self.0.set(self.0.get() + 1);
+        Replayed.boundary(frame, name, start)
     }
 }
 

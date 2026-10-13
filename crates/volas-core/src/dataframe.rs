@@ -470,7 +470,7 @@ pub use admit::Retained;
 mod cells;
 pub use cells::{CellWrite, CellWrites};
 mod derive;
-pub use derive::{Continuation, Replay};
+pub use derive::Replay;
 mod lead;
 mod computed;
 pub use computed::StaleComputed;

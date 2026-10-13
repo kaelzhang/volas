@@ -108,6 +108,18 @@ impl PyDataFrame {
     ) -> PyResult<()> {
         let lb = reach.lookback;
         let origin = self.inner.origin();
+        // A selection ending before its source's last row carries a recursion's states
+        // lazily: those as of its last valid row are replayed here, the first time the
+        // column continues, from the nearest point of its history it keeps.
+        if warm && vr > 0
+            && vr >= reach.resume
+            && matches!(reach.history, volas_core::History::Carried { .. })
+            && self.inner.computed_resume_state(name).is_none()
+        {
+            if let Some((state, before)) = volas_directive::states_at(&self.inner, name, vr) {
+                self.inner.set_computed_states(name, Some(state), before);
+            }
+        }
         // The rows before row `vr` that a resume or a recompute of it reads, when the frame
         // does not hold them: its lead keeps them (a contiguous selection keeps the data
         // rows its cached columns read before its row 0) — for a recursion that carries no

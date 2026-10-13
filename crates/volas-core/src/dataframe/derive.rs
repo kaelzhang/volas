@@ -5,13 +5,13 @@
 //! - A **contiguous row selection** (the rows `[start, end)` in order, however it is
 //!   written) continues the source's series: its row 0 keeps its absolute position
 //!   ([`DataFrame::origin`]) and every cached directive column stays cached, with its
-//!   values and with what continuing it needs — the carried states moved to the
-//!   selection's last row (replayed once, through [`Replay`], from the history the source
-//!   holds when the selection ends before the source's last valid row), the nearest
-//!   checkpoint of a recursion's history before its first row (one the source keeps, one
-//!   of its anchors, or the history's start — taken, not replayed, when it is within
-//!   `ANCHOR_SPACING` rows), and the **lead**: the data rows before row 0 that recomputing
-//!   its first rows reads, back to that checkpoint. A column the selection
+//!   values and with what continuing it needs — the carried states of the source's last
+//!   valid row when the selection ends there (else none: a continuation computes them
+//!   from what the selection keeps), the nearest checkpoint of a recursion's history
+//!   before its first row (one the source keeps, one of its anchors, or the history's
+//!   start — taken, not replayed, when it is within `ANCHOR_SPACING` rows; replayed
+//!   through [`Replay`] otherwise), and the **lead**: the data rows before row 0 that
+//!   recomputing its first rows reads, back to that checkpoint. A column the selection
 //!   cannot recompute from what it keeps (a recursion that carries no state, whose
 //!   history started before the selection) keeps its values and raises when a refresh
 //!   would recompute it: it is never restarted on the selection's own rows.
@@ -34,40 +34,28 @@ use crate::index::{Index, IndexKind};
 
 use super::{Checkpoint, ComputedMeta, DataFrame, History, Reach, ANCHOR_SPACING, STALE_BY_APPEND};
 
-/// What a contiguous selection keeps of a recursion carried by its state whose history
-/// starts before the selection ([`Replay::continuation`]).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Continuation {
-    /// The checkpoint of its history as of the row before the selection's first: every
-    /// recompute of the selection's rows replays from it.
-    pub boundary: Option<Checkpoint>,
-    /// Its carried states as of the selection's last row and the row before it.
-    pub ends: Option<(Vec<f64>, Option<Vec<f64>>)>,
-}
-
 /// The directive layer's half of a contiguous selection: the history of a recursive
-/// cached column carried by its state at the selection's edges, which the source frame
-/// does not carry. The core knows where a column's history is; only the directive layer
-/// can replay it.
+/// cached column carried by its state at a row the source frame keeps no point of it
+/// near. The core knows where a column's history is; only the directive layer can replay
+/// it.
 pub trait Replay {
-    /// For the recursive cached column `name` of `frame` (carried by its state), over
-    /// the selection of `frame`'s rows `[start, end)`: the checkpoint of its history as
-    /// of row `start - 1` (when `boundary`), and its states as of rows `end - 1` and
-    /// `end - 2` (when `ends`) — replayed from the history `frame` holds of the column,
-    /// its rows from the history start or its checkpoint, reading the rows in place.
-    /// What cannot be replayed is `None`.
-    fn continuation(&self, frame: &DataFrame, name: &str, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation;
+    /// For the recursive cached column `name` of `frame` (carried by its state): the
+    /// checkpoint of its history as of the row before `frame`'s row `start` — replayed
+    /// from the history `frame` holds of the column (the nearest anchor, its checkpoint
+    /// or the history's start), reading the rows in place. `None` when it cannot be
+    /// replayed.
+    fn boundary(&self, frame: &DataFrame, name: &str, start: usize) -> Option<Checkpoint>;
 }
 
 /// A replay that never has the history (core tests: a selection that needs it keeps the
-/// column without a state).
+/// column without a checkpoint).
 #[cfg(test)]
 pub(super) struct NoReplay;
 
 #[cfg(test)]
 impl Replay for NoReplay {
-    fn continuation(&self, _: &DataFrame, _: &str, _: usize, _: usize, _: bool, _: bool) -> Continuation {
-        Continuation::default()
+    fn boundary(&self, _: &DataFrame, _: &str, _: usize) -> Option<Checkpoint> {
+        None
     }
 }
 
@@ -155,8 +143,8 @@ impl DataFrame {
     }
 
     /// Cached column `name` (`meta`) as the selection `[start, end)` of this frame keeps
-    /// it: its valid rows, its states as of its last valid row there (this frame's, or
-    /// replayed), and the checkpoints that cover rows before ones it holds.
+    /// it: its valid rows, its states as of its last valid row there (this frame's, when
+    /// it is the same row), and the nearest point of its history before the rows it holds.
     fn continued(&self, name: &str, meta: &ComputedMeta, start: usize, end: usize, replay: &dyn Replay) -> ComputedMeta {
         let first = self.origin + start;
         let valid = meta.valid_rows.saturating_sub(start).min(end - start);
@@ -174,23 +162,21 @@ impl DataFrame {
         // before the selection (a checkpoint of this frame's, one of its anchors, or the
         // history's start), kept with the rows after it in the lead, when it is within
         // `ANCHOR_SPACING` rows; else its checkpoint at the selection's boundary, replayed
-        // now (forming the anchors it passes). When the selection ends before its last
-        // valid row, its states there are replayed once from the history this frame holds.
+        // now (forming the anchors it passes)
         let carried = matches!(meta.reach.history, History::Carried { .. }) && meta.since < first;
         let lazy = match carried && kept.is_none() {
             true => self.nearest_history(meta, first),
             false => None,
         };
-        let wants_boundary = carried && kept.is_none() && lazy.is_none();
-        let wants_ends = matches!(meta.reach.history, History::Carried { .. }) && valid > 0 && !own;
-        let replayed = match wants_boundary || wants_ends {
-            true => replay.continuation(self, name, start, start + valid, wants_boundary, wants_ends),
-            false => Continuation::default(),
+        let boundary = match carried && kept.is_none() && lazy.is_none() {
+            true => replay.boundary(self, name, start).map(Arc::new),
+            false => None,
         };
-        let (state, before) = match (own, replayed.ends) {
-            (true, _) => (meta.state.clone(), meta.state_before_last.clone()),
-            (false, Some((s, b))) => (Some(s), b),
-            (false, None) => (None, None),
+        // the states as of its last valid row: this frame's when it is the same row; else
+        // none — a continuation of the column computes them from what the selection keeps
+        let (state, before) = match own {
+            true => (meta.state.clone(), meta.state_before_last.clone()),
+            false => (None, None),
         };
         // the state before describes the row before the last, which must be held (the
         // boundary checkpoint stands for the row before the first)
@@ -203,7 +189,7 @@ impl DataFrame {
             since: meta.since,
             state_at: last.saturating_sub(1),
             scratch: Vec::new(),
-            checkpoint: kept.or(lazy.flatten()).or(replayed.boundary.map(Arc::new)),
+            checkpoint: kept.or(lazy.flatten()).or(boundary),
             // the anchors of its history before its last row, where it agrees with this frame's
             anchors: meta.anchors.upto(last.saturating_sub(1)),
             pending: meta.pending.as_ref().filter(|cp| covers(cp)).cloned(),

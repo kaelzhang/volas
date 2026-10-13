@@ -26,15 +26,19 @@ fn a_replay_gives_the_states_a_full_computation_ends_with() {
     let node = parse("ema:5").unwrap();
     df.set_column("ema:5", execute(&df, &node).unwrap()).unwrap();
     df.set_computed("ema:5", volas_directive::lookback::reach(&node));
-    let got = Replayer.continuation(&df, "ema:5", 7, 20, true, true);
-    let head = df.slice_data(0, 20);
-    let carried = volas_directive::resume_states(&head, &node);
-    assert_eq!(got.ends, Some((carried.state.unwrap(), carried.before)));
-    let boundary = got.boundary.unwrap();
+    let ends = volas_directive::states_at(&df, "ema:5", 20);
+    let carried = volas_directive::resume_states(&df.slice_data(0, 20), &node);
+    assert_eq!(ends, Some((carried.state.unwrap(), carried.before)));
+    // a selection's first row: replayed over its lead, with no state before it
+    let sub = df.rows(10, 30, &Replayer);
+    let first = volas_directive::resume_states(&df.slice_data(0, 11), &node).state;
+    assert_eq!(volas_directive::states_at(&sub, "ema:5", 1), Some((first.unwrap(), None)));
+    let boundary = Replayer.boundary(&df, "ema:5", 7).unwrap();
     assert_eq!((boundary.at, boundary.state), (6, volas_directive::resume_states(&df.slice_data(0, 7), &node).state));
+    assert_eq!(Replayer.boundary(&df, "ema:5", 0), None); // no row before the first
     // a name that is not a cached column, or one that does not parse, has no history
-    assert_eq!(Replayer.continuation(&df, "close", 7, 20, true, true), Default::default());
-    assert_eq!(Replayer.continuation(&df, "ema:", 7, 20, true, true), Default::default());
+    assert_eq!(Replayer.boundary(&df, "close", 7), None);
+    assert_eq!(volas_directive::states_at(&df, "ema:", 20), None);
 }
 
 /// A computation over a long history keeps the checkpoints of a recursion carried by its

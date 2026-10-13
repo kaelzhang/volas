@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use volas_core::{Continuation, DataFrame, Replay};
+use volas_core::{DataFrame, Replay};
 
 use crate::types::{Ast, Node};
 
@@ -109,7 +109,7 @@ fn states_upto(df: &DataFrame, node: &Ast, end: usize, at: Option<(usize, Vec<f6
 }
 
 /// The directive layer's replay of a recursive cached column's history at a contiguous
-/// selection's edges ([`Replay`]). A checkpoint as of a row is replayed from the nearest
+/// selection's boundary ([`Replay`]). A checkpoint as of a row is replayed from the nearest
 /// of the column's [`Anchors`](volas_core::Anchors) before it — or from the history's
 /// start the frame holds, or the checkpoint it keeps of a history that started before its
 /// row 0 — forming the anchors it passes, so any edge costs at most the anchor spacing
@@ -117,9 +117,31 @@ fn states_upto(df: &DataFrame, node: &Ast, end: usize, at: Option<(usize, Vec<f6
 pub struct Replayer;
 
 impl Replay for Replayer {
-    fn continuation(&self, frame: &DataFrame, name: &str, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation {
-        replayed(frame, name, |history| Some(continuation(history, frame, start, end, boundary, ends))).unwrap_or_default()
+    fn boundary(&self, frame: &DataFrame, name: &str, start: usize) -> Option<volas_core::Checkpoint> {
+        checkpoint_at(frame, name, (frame.origin() + start).checked_sub(1)?)
     }
+}
+
+/// The carried states of recursive cached column `name` as of `frame`'s rows `end - 1` and
+/// `end - 2` (the latter when there is one), replayed from the nearest point of its
+/// history before them the frame keeps ([`checkpoint_at`]) — what a selection ending
+/// before its source's last row continues the column from. `None` when they cannot be
+/// replayed, or that point is more than `ANCHOR_SPACING` rows before them (the rows a
+/// write left without anchors: the column is recomputed in one pass instead).
+pub fn states_at(frame: &DataFrame, name: &str, end: usize) -> Option<(Vec<f64>, Option<Vec<f64>>)> {
+    let last = (frame.origin() + end).checked_sub(1)?;
+    replayed(frame, name, |history| {
+        let from = history.nearest(last).map_or(history.history.since, |cp| cp.at + 1);
+        if last - from.min(last) > volas_core::dataframe::ANCHOR_SPACING {
+            return None;
+        }
+        let before = (end > 1).then(|| history.at(last - 1)).flatten();
+        let at = match &before {
+            Some(b) => history.step(b, last)?,
+            None => history.at(last)?,
+        };
+        Some((at.state?, before.and_then(|b| b.state)))
+    })
 }
 
 /// The checkpoint of recursive cached column `name`'s history as of absolute row `at` of
@@ -145,23 +167,6 @@ fn replayed<R>(frame: &DataFrame, name: &str, f: impl FnOnce(&Replayed<'_>) -> O
     let since = frame.computed_since(name)?;
     let anchors = frame.computed_anchors(name)?;
     f(&History { df, node: &node, name, frame, since, anchors }.over_lead()?)
-}
-
-/// The continuation of a contiguous selection `[start, end)` of `frame` ([`Replay`]).
-fn continuation(history: &Replayed<'_>, frame: &DataFrame, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation {
-    let boundary = (boundary && start > 0).then(|| history.at(frame.origin() + start - 1)).flatten();
-    let ends = ends
-        .then(|| {
-            let last = frame.origin() + end - 1;
-            let before = (end > 1).then(|| history.at(last - 1)).flatten();
-            let at = match &before {
-                Some(b) => history.step(b, last)?,
-                None => history.at(last)?,
-            };
-            Some((at.state?, before.and_then(|b| b.state)))
-        })
-        .flatten();
-    Continuation { boundary, ends }
 }
 
 /// A recursive cached column's history as a frame holds it, replayed to any row.
@@ -210,9 +215,7 @@ impl Replayed<'_> {
     fn at(&self, at: usize) -> Option<volas_core::Checkpoint> {
         let h = &self.history;
         let spacing = volas_core::dataframe::ANCHOR_SPACING;
-        let usable = |cp: &volas_core::Checkpoint| cp.at <= at && cp.at + 1 >= self.rows.origin();
-        let kept = self.kept.clone().map(std::sync::Arc::new);
-        let mut from = h.anchors.nearest(at).filter(|cp| usable(cp)).or_else(|| kept.filter(|cp| usable(cp)));
+        let mut from = self.nearest(at);
         let last_row = h.frame.origin() + h.frame.height() - 1;
         loop {
             let done = from.as_ref().map_or(h.since, |cp| cp.at + 1); // the next row to replay
@@ -238,6 +241,15 @@ impl Replayed<'_> {
             }
             from = Some(next);
         }
+    }
+
+    /// The nearest checkpoint at or before absolute row `at` a replay can start from over
+    /// the rows it holds — an anchor, or the frame's checkpoint; `None` for the history's
+    /// start.
+    fn nearest(&self, at: usize) -> Option<std::sync::Arc<volas_core::Checkpoint>> {
+        let usable = |cp: &volas_core::Checkpoint| cp.at <= at && cp.at + 1 >= self.rows.origin();
+        let kept = self.kept.clone().map(std::sync::Arc::new);
+        self.history.anchors.nearest(at).filter(|cp| usable(cp)).or_else(|| kept.filter(|cp| usable(cp)))
     }
 
     /// The checkpoint as of absolute row `at`, replayed from `from` (a checkpoint before it).
