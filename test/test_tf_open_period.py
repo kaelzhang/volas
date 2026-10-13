@@ -298,15 +298,15 @@ def test_a_projection_keeps_the_fine_bars_of_its_data_columns():
     p = DataFrame(df, columns=["close", "high"])
     p.append(frame([2], close=[3.0], high=[1.0]))  # a re-send of 09:02 refolds every bar
     assert rows(p) == [[3.0, 5.0]]
-    # a cached column projected stays cached: the next fold refreshes it
+    # a cached column projected is data from then on (R40): its values as shown, never
+    # continued — a bar without it leaves the period it folds into missing there
     two = DataFrame(frame([0, 5], close=[1.0, 3.0]), time_frame="5m")
     two["ma:2"]
     two.append(frame([6], close=[5.0]))
     q = DataFrame(two, columns=["close", "ma:2"])
-    assert q.is_computed("ma:2") and rows(q)[1] == [5.0, 3.0]
+    assert not q.is_computed("ma:2") and rows(q)[1] == [5.0, 3.0]
     q.append(frame([7], close=[6.0]))
-    q.fulfill()
-    assert rows(q)[1] == [6.0, 3.5]
+    assert rows(q)[1][0] == 6.0 and np.isnan(rows(q)[1][1])
 
 
 def test_cumulate_does_not_carry_a_cached_column_as_data():

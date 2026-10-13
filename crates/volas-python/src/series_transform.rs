@@ -291,7 +291,6 @@ impl PySeries {
         let index = Arc::new(self.inner.index.take(&keep));
         PySeries {
             inner: Series::new(self.inner.name.clone(), data, index),
-            cached: false,
         }
     }
 
@@ -313,7 +312,6 @@ impl PySeries {
         };
         Ok(PySeries {
             inner: Series::new(self.inner.name.clone(), col, Arc::clone(&self.inner.index)),
-            cached: false,
         })
     }
 

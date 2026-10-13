@@ -107,9 +107,9 @@ impl Lead {
         }
     }
 
-    /// This lead over the data columns of `frame` (a projection of the frame it was taken
-    /// for): those it holds, in `frame`'s schema.
-    pub(super) fn select(&self, frame: &DataFrame) -> Lead {
+    /// This lead over the data columns of `frame` (the frame it was taken for, less some
+    /// columns): those it holds, in `frame`'s schema.
+    pub(super) fn over(&self, frame: &DataFrame) -> Lead {
         let held = |n: &String| self.column(n).filter(|_| !frame.computed.contains_key(n)).cloned();
         let columns = frame.names.iter().map(held).collect();
         Lead { names: Arc::clone(&frame.names), name_to_idx: Arc::clone(&frame.name_to_idx), columns, ..*self }

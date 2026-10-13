@@ -442,7 +442,6 @@ pub(crate) fn select_2d(
             let col = sub.columns()[0].clone();
             let series = PySeries {
                 inner: Series::new(Some(name), col, Arc::clone(sub.index())),
-                cached: false,
             };
             Ok(Py::new(py, series)?.into_any())
         }
@@ -785,7 +784,6 @@ impl SeriesLoc {
                 py,
                 PySeries {
                     inner: Series::new(self.inner.name.clone(), data, index),
-                    cached: false,
                 },
             )?
             .into_any());

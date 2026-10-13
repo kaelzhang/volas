@@ -94,7 +94,7 @@ impl PySeries {
         // boolean mask -> the True rows, as a new Series (pandas `s[bool_mask]`)
         if let Some(mask) = bool_mask_key(key)? {
             let sub = self.inner.filter_mask(&mask).map_err(pyerr)?;
-            return Ok(Py::new(py, PySeries { inner: sub, cached: false })?.into_any());
+            return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
         }
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.len())?;

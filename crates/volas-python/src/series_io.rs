@@ -81,7 +81,7 @@ impl PySeries {
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, name: Option<String>) -> PyResult<PySeries> {
         let col = crate::arrow::column_from_arrow_obj(data)?;
         let n = col.len();
-        Ok(PySeries { inner: Series::new(name, col, Arc::new(Index::range(n))), cached: false })
+        Ok(PySeries { inner: Series::new(name, col, Arc::new(Index::range(n))) })
     }
 
     /// Export as a `pyarrow.Array` (zero-copy where dtypes match; requires pyarrow).

@@ -127,7 +127,6 @@ impl PySeries {
                 df.columns()[0].clone(),
                 Arc::clone(df.index()),
             ),
-            cached: false,
         })
     }
 
@@ -149,7 +148,6 @@ impl PySeries {
                 df.columns()[0].clone(),
                 Arc::clone(df.index()),
             ),
-            cached: false,
         })
     }
 

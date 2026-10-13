@@ -180,13 +180,18 @@ PROJECTIONS = {
 
 
 @pytest.mark.parametrize('form', PROJECTIONS)
-def test_a_projection_continues_its_listed_cached_columns(form):
+def test_a_projection_keeps_its_listed_cached_columns_as_data(form):
+    # the listed columns only, their values as the source shows them; a listed cached
+    # column is data from then on — never continued, even with its inputs alongside
     df = cached(['ema:12', 'ma:5']).iloc[N - 4:]
     p = PROJECTIONS[form](df, DATA + ['ema:12'])
-    assert p.columns == DATA + ['ema:12'] and p.is_computed('ema:12')
-    new = bars(N, N + 1)
-    p.append(DataFrame(new, index=[N]))
-    assert same(p['ema:12'].to_numpy(dtype='object'), full('ema:12', history(N, new))[N - 4:])
+    assert p.columns == DATA + ['ema:12'] and not p.is_computed('ema:12')
+    assert same(p['ema:12'].to_numpy(dtype='object'), df['ema:12'].to_numpy(dtype='object'))
+    p.append(DataFrame(bars(N, N + 1), index=[N]))  # a bar without it: missing there
+    assert np.isnan(p['ema:12'].to_numpy()[-1]) and not p.is_computed('ema:12')
+    q = PROJECTIONS[form](df, ['close', 'ema:12'])
+    q.append(DataFrame({'close': [1.0], 'ema:12': [5.0]}, index=[N]))  # a bar with it: its value
+    assert q['ema:12'].to_numpy()[-1] == 5.0
 
 
 def test_a_projection_names_a_directive_by_its_canonical_column():
@@ -239,19 +244,27 @@ VALUE_TRANSFORMS = {
 
 
 @pytest.mark.parametrize('form', VALUE_TRANSFORMS)
-def test_a_value_transform_is_a_new_series_without_the_cached_columns(form):
-    # its cells are not a cached directive's values: never carried out as plain data
+def test_a_value_transform_keeps_the_cached_columns_as_data(form):
+    # every column transformed, a cached one as the plain data of its transformed values
     df = cached(['ma:5', 'ema:12'])
     new = VALUE_TRANSFORMS[form](df)
-    assert new.columns == DATA, form
+    assert new.columns == df.columns, form
     assert not any(new.is_computed(c) for c in new.columns)
 
 
-def test_a_cached_column_read_as_a_series_never_becomes_a_frame_column():
+def test_a_value_transform_of_a_cached_column_transforms_its_values():
     df = cached(['ma:5'])
-    assert df['ma:5'].to_frame().columns == []
-    assert df['ma:5'].reset_index().columns == ['index']
-    assert df['close'].to_frame().columns == ['close']  # data stays data
+    filled = df.fillna(0.0)
+    want = np.nan_to_num(df['ma:5'].to_numpy(), nan=0.0)
+    assert np.array_equal(filled['ma:5'].to_numpy(), want) and not filled.is_computed('ma:5')
+
+
+def test_a_cached_column_read_as_a_series_becomes_a_data_column():
+    df = cached(['ma:5'])
+    for frame_ in (df['ma:5'].to_frame(), df['ma:5'].copy().to_frame()):
+        assert frame_.columns == ['ma:5'] and not frame_.is_computed('ma:5')
+        assert same(frame_['ma:5'].to_numpy(dtype='object'), df['ma:5'].to_numpy(dtype='object'))
+    assert df['ma:5'].reset_index().columns == ['index', 'ma:5']
 
 
 def test_a_new_series_of_a_stale_frame_raises():
@@ -381,10 +394,11 @@ def test_a_rename_keeps_each_aggregator_and_ignores_an_absent_source():
     assert r['vol'].to_list() == [5.0]
 
 
-def test_a_constructor_re_typed_projection_is_a_new_series_of_its_data_columns():
+def test_a_constructor_re_typed_projection_casts_its_listed_columns_as_data():
     df = cached(['ema:3'])
     got = DataFrame(df, columns=['close', 'ema:3'], dtype='float32')
-    assert got.columns == ['close'] and str(got['close'].dtype) == 'float32'
+    assert got.columns == ['close', 'ema:3'] and not got.is_computed('ema:3')
+    assert [str(got[c].dtype) for c in got.columns] == ['float32', 'float32']
 
 
 def test_an_empty_range_is_the_same_selection_in_every_form():
@@ -407,7 +421,8 @@ def test_a_windowed_source_made_unbounded_gives_its_visible_rows():
 
 def test_the_constructor_projects_a_cached_column_by_any_spelling():
     df = cached(['ema:3'])
-    assert DataFrame(df, columns=['close', 'ema:03']).columns == ['close', 'ema:3']
+    p = DataFrame(df, columns=['close', 'ema:03'])
+    assert p.columns == ['close', 'ema:3'] and not p.is_computed('ema:3')
 
 
 def test_a_period_key_selects_the_same_rows_in_one_and_two_dimensions():
@@ -417,13 +432,15 @@ def test_a_period_key_selects_the_same_rows_in_one_and_two_dimensions():
     assert df.loc['2024-02', :].is_computed('ema:3')
 
 
-def test_dropping_the_column_that_needs_the_whole_history_releases_it():
-    # kcw carries no state: a slice keeps its whole history; once it is dropped, only
-    # what ema needs stays — and a later slice keeps no more
+def test_dropping_a_column_keeps_the_others_continuing():
+    # a drop removes the columns it names, everything else unchanged — not a projection:
+    # kcw carries no state, so a slice keeps its whole history; once it is dropped, ema
+    # stays cached and continues bit for bit, and only what ema needs stays
     df = cached(['ema:3', 'kcw:5'])
     tail = df.iloc[N - 10:]
-    assert tail.drop(['kcw:5'], axis=1).iloc[5:].shape == (5, len(DATA) + 1)
     kept = tail.drop(['kcw:5'], axis=1)
+    assert kept.columns == DATA + ['ema:3'] and kept.is_computed('ema:3')
+    assert kept.iloc[5:].shape == (5, len(DATA) + 1) and kept.iloc[5:].is_computed('ema:3')
     kept.append(DataFrame(bars(N, N + 1), index=[N]))
     assert same(kept['ema:3'].to_numpy(dtype='object'), full('ema:3', history(N, bars(N, N + 1)))[N - 10:])
 

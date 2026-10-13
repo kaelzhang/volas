@@ -476,7 +476,7 @@ impl PyDataFrame {
             });
         }
         drop(new_cols);
-        // the same series over the listed columns (cached ones continuing), its visible rows
+        // the listed columns over the same rows, each as data (R40), its visible rows
         let df = self.inner.select(&names).map_err(pyerr)?;
         let (start, len) = self.logical_range();
         Ok(if self.window.is_some() { df.rows(start, start + len, &Replayer) } else { df })

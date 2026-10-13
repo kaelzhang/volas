@@ -182,7 +182,6 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
     };
     Ok(PySeries {
         inner: Series::new(name, converted, index),
-        cached: false,
     })
 }
 

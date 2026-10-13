@@ -172,7 +172,11 @@ period, as in pandas: a year (`'2024'`), a month (`'2024-01'`), a day, an hour
 and a stop bound its last, so `df.loc['2024-01':'2024-02']` holds both whole months. A
 single year or month key (`df.loc['2024-01']`) selects its period's rows the same way.
 Either is a contiguous selection, so cached directive columns continue on it (see
-[Derived frames](dataframe-api.md#derived-frames)).
+[Derived frames](dataframe-api.md#derived-frames)). A **column** selection
+(`df[['close', 'ma:5']]`, `df.loc[:, cols]`) and a value transform (`fillna`, `abs`,
+`where`, …) give plain data columns, as pandas does: a cached directive column becomes
+its values and is never continued afterwards. `drop(axis=1)` only removes the columns it
+names: the remaining cached columns keep continuing.
 
 A datetime index holding `NaT` counts as unordered, as in pandas. On a datetime
 index that is not increasing (decreasing, unordered, or holding `NaT`), a bound

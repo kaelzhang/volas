@@ -133,7 +133,6 @@ impl WinSpec {
     fn f64_series(&self, s: &Series, out: Vec<f64>) -> PySeries {
         PySeries {
             inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)),
-            cached: false,
         }
     }
 
@@ -143,7 +142,6 @@ impl WinSpec {
         let cells = out.iter().map(|&x| (!x.is_nan()).then_some(x as i64));
         PySeries {
             inner: Series::new(s.name.clone(), Column::i64_from_options(cells), Arc::clone(&s.index)),
-            cached: false,
         }
     }
 
@@ -237,7 +235,6 @@ impl WinSpec {
                 s.data.take_optional(&pos),
                 Arc::clone(&s.index),
             ),
-            cached: false,
         }
     }
     pub(crate) fn corr(&self, s: &Series, other: &PySeries) -> PyResult<PySeries> {
@@ -475,7 +472,6 @@ impl PyEwm {
                 Column::f64(out),
                 Arc::clone(&self.series.index),
             ),
-            cached: false,
         }
     }
 }

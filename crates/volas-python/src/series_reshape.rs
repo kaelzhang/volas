@@ -29,7 +29,6 @@ impl PySeries {
                 self.inner.data.take(&idx),
                 Arc::new(Index::range(idx.len())),
             ),
-            cached: false,
         }
     }
 
@@ -136,7 +135,7 @@ impl PySeries {
         } else {
             Column::i64(order.iter().map(|k| counts[k]).collect())
         };
-        Ok(PySeries { inner: Series::new(None, data, Arc::new(index)), cached: false })
+        Ok(PySeries { inner: Series::new(None, data, Arc::new(index)) })
     }
 
     /// The most frequent value(s), ascending, on a fresh RangeIndex (pandas `mode`).
@@ -158,7 +157,7 @@ impl PySeries {
         positions.sort_unstable();
         let data = self.inner.data.take(&positions);
         let h = positions.len();
-        PySeries { inner: Series::new(self.inner.name.clone(), data, Arc::new(Index::range(h))), cached: false }
+        PySeries { inner: Series::new(self.inner.name.clone(), data, Arc::new(Index::range(h))) }
     }
 
     /// The `n` largest values, descending (pandas `nlargest`).
@@ -189,7 +188,7 @@ impl PySeries {
         let positions: Vec<usize> = (0..self.inner.len()).filter(|&i| !dup[i]).collect();
         let data = self.inner.data.take(&positions);
         let index = Arc::new(self.inner.index.take(&positions));
-        Ok(PySeries { inner: Series::new(self.inner.name.clone(), data, index), cached: false })
+        Ok(PySeries { inner: Series::new(self.inner.name.clone(), data, index) })
     }
 
     /// True for each duplicate occurrence other than the `keep` one (`'first'` |
@@ -233,19 +232,17 @@ impl PySeries {
                     self.inner.data.clone(),
                     Arc::new(Index::range(h)),
                 ),
-                cached: false,
             };
             return Ok(Py::new(py, s)?.into_any());
         }
         let label = self.inner.index.name().unwrap_or("index").to_string();
         let vname = self.inner.name.clone().unwrap_or_else(|| "0".to_string());
-        // a cached directive column's values are not carried into a frame as data
-        let (mut names, mut cols) = (vec![label], vec![self.inner.index.to_column()]);
-        if !self.cached {
-            names.push(vname);
-            cols.push(self.inner.data.clone());
-        }
-        let df = volas_core::DataFrame::new(names, cols, Some(Index::range(h))).map_err(pyerr)?;
+        let df = volas_core::DataFrame::new(
+            vec![label, vname],
+            vec![self.inner.index.to_column(), self.inner.data.clone()],
+            Some(Index::range(h)),
+        )
+        .map_err(pyerr)?;
         Ok(Py::new(py, PyDataFrame::plain(df))?.into_any())
     }
 
@@ -255,7 +252,7 @@ impl PySeries {
         let perm = self.inner.index.argsort(ascending);
         let data = self.inner.data.take(&perm);
         let index = Arc::new(self.inner.index.take(&perm));
-        PySeries { inner: Series::new(self.inner.name.clone(), data, index), cached: false }
+        PySeries { inner: Series::new(self.inner.name.clone(), data, index) }
     }
 
     /// A copy with a new name (pandas scalar `rename`).
@@ -263,13 +260,12 @@ impl PySeries {
     pub(crate) fn rename(&self, name: Option<String>) -> PySeries {
         PySeries {
             inner: Series::new(name, self.inner.data.clone(), Arc::clone(&self.inner.index)),
-            cached: false,
         }
     }
 
     /// An independent copy (pandas `copy`; columns are copy-on-write).
     pub(crate) fn copy(&self) -> PySeries {
-        PySeries { inner: self.inner.clone(), cached: self.cached }
+        PySeries { inner: self.inner.clone() }
     }
 
     /// This series as a 1-column DataFrame (pandas `to_frame`).
@@ -278,13 +274,12 @@ impl PySeries {
         let col_name = name
             .or_else(|| self.inner.name.clone())
             .unwrap_or_else(|| "0".to_string());
-        // a cached directive column's values are not carried into a frame as data: the
-        // frame holds its rows' labels only
-        let (names, cols) = match self.cached {
-            true => (Vec::new(), Vec::new()),
-            false => (vec![col_name], vec![self.inner.data.clone()]),
-        };
-        let df = volas_core::DataFrame::new(names, cols, Some((*self.inner.index).clone())).map_err(pyerr)?;
+        let df = volas_core::DataFrame::new(
+            vec![col_name],
+            vec![self.inner.data.clone()],
+            Some((*self.inner.index).clone()),
+        )
+        .map_err(pyerr)?;
         Ok(PyDataFrame::plain(df))
     }
 }

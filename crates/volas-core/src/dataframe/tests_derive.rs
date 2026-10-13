@@ -122,23 +122,28 @@ fn a_lead_shrinks_with_the_columns_that_read_it() {
     df.set_computed_checkpoint("ema", Ok(Checkpoint { at: 89, state: Some(vec![89.0]), inputs: vec![] }));
     let tail = df.rows(90, 100, &NoReplay);
     assert_eq!(tail.lead_rows(), 90);
-    let names: Vec<String> = ["close", "ma", "ema"].map(String::from).to_vec();
-    let kept = tail.select(&names).unwrap();
-    assert_eq!(kept.lead_rows(), 5);
-    assert_eq!(lead(&kept), vec![85.0, 86.0, 87.0, 88.0, 89.0]);
-    // so does dropping a column's cached status
+    // a column removal keeps the others cached, its lead trimmed to what they read
+    let dropped = tail.drop_columns(&["kcw".to_string(), "nope".to_string()]).unwrap();
+    assert_eq!((dropped.lead_rows(), dropped.is_computed("ema"), dropped.has_column("kcw")), (5, true, false));
+    assert_eq!(lead(&dropped), vec![85.0, 86.0, 87.0, 88.0, 89.0]);
+    assert_eq!(dropped.computed_checkpoint("ema").map(|cp| cp.at), Some(89));
+    // a column that stops being cached stops reading before row 0
     let mut written = tail.clone();
     written.invalidate_computed_on_write("kcw");
     assert_eq!(written.lead_rows(), 5);
+    assert_eq!(lead(&written), vec![85.0, 86.0, 87.0, 88.0, 89.0]);
     // a copied lead shrinks in place while it stays most of its rows; none is left once no
     // cached column reads before row 0
     // the rows after ema's checkpoint (90..95) and the reach before them (5)
-    let short = df.rows(95, 100, &NoReplay).select(&names).unwrap();
+    let mut short = df.rows(95, 100, &NoReplay);
+    short.invalidate_computed_on_write("kcw");
     assert_eq!(short.lead_rows(), 10);
-    let ma = short.select(&["close".to_string(), "ma".to_string()]).unwrap();
+    let mut ma = short.clone();
+    ma.invalidate_computed_on_write("ema");
     assert_eq!(lead(&ma), vec![92.0, 93.0, 94.0]);
     // a copied one that stays most of its rows keeps sharing them
-    let window = frame(10).rows(4, 10, &NoReplay).select(&["close".to_string(), "ma".to_string()]).unwrap();
+    let mut window = frame(10).rows(4, 10, &NoReplay);
+    window.invalidate_computed_on_write("ema");
     assert_eq!(lead(&window), vec![1.0, 2.0, 3.0]);
     let mut bare = ma.clone();
     bare.invalidate_computed_on_write("ma");
@@ -307,14 +312,14 @@ fn rows_by_position_continue_only_when_contiguous_in_order() {
 }
 
 #[test]
-fn a_projection_keeps_the_series_and_the_listed_cached_columns() {
+fn a_projection_keeps_the_rows_and_the_listed_columns_as_data() {
+    // a listed cached column keeps its values as plain data, never continued (R40); an
+    // unlisted one is dropped; the frame keeps no history before its rows
     let tail = frame(10).rows(7, 10, &NoReplay);
     let p = tail.select(&["ema".to_string(), "close".to_string()]).unwrap();
-    assert_eq!((p.origin(), p.is_computed("ema"), p.has_column("ma")), (7, true, false));
-    assert_eq!(lead(&p), lead(&tail));
-    // without its data columns the lead keeps none; with no cached column there is none
-    assert_eq!(tail.select(&["ema".to_string()]).unwrap().lead_rows(), 7);
-    assert!(tail.select(&["close".to_string()]).unwrap().lead.is_none());
+    assert_eq!((p.origin(), p.is_computed("ema"), p.has_column("ma")), (7, false, false));
+    assert!(p.column("ema").unwrap().equals(tail.column("ema").unwrap()));
+    assert!(p.computed_columns().is_empty() && p.lead.is_none());
     assert!(tail.select(&["nope".to_string()]).is_err());
 }
 

@@ -28,7 +28,7 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         self.map_cols(|s| match s.replace(to_replace, value) {
             Ok(r) => Ok(r),
-            Err(_) => Ok(PySeries { inner: s.inner.clone(), cached: false }),   // dtype can't match -> untouched
+            Err(_) => Ok(PySeries { inner: s.inner.clone() }),   // dtype can't match -> untouched
         })
     }
     /// Linear interpolation per numeric column (pandas `interpolate`).

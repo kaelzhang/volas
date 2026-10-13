@@ -79,8 +79,8 @@ Which gets the 2-period simple moving average on column `"close"`.
   `tz_localize` / `tz_convert`. See [Timezones](cumulation.md#timezones).
 - **columns** `Optional[list[str]] = None` Select and order the columns to keep —
   the same projection as `df[[...]]` (see [Derived frames](#derived-frames)): the same
-  rows, each listed cached directive column still cached (a stale one is refreshed
-  first); a bounded-window source gives its visible rows. A name not present raises
+  rows, each listed cached directive column as a data column of its values (a stale one
+  is refreshed first), never continued; a bounded-window source gives its visible rows. A name not present raises
   `KeyError` (a directive is never computed here; a cached one is found by any
   spelling of its directive); a duplicate name is rejected, an empty list keeps no
   column, and an absent column is never silently filled. With `index=`, `dtype=`
@@ -587,9 +587,17 @@ A frame derived from another either **continues its series** or **starts a new o
   the rows after it, so taking it replays nothing; the first `append` or `fulfill` of a
   selection ending before its source's last row replays its last states from the
   nearest anchor, at most 512 rows per recursive column.
-- A **column projection** — `df[[...]]`, `DataFrame(df, columns=[...])`, `drop(axis=1)` —
-  keeps the rows and continues the cached columns it lists (under their canonical names:
-  `df[['close', 'ma:05']]` gives `['close', 'ma:5']`).
+- A **column projection** — `df[[...]]`, `DataFrame(df, columns=[...])`, `df.loc[:, [...]]`
+  — keeps the rows and only the columns it lists, each a **data column**: a
+  listed cached directive column keeps its values exactly as the source shows them (under
+  its canonical name: `df[['close', 'ma:05']]` gives `['close', 'ma:5']`) and is never
+  continued afterwards — even when the projection also holds the directive's inputs. An
+  `append` treats it like any data column: a bar without it leaves it missing, a bar with
+  it gives that value. An unlisted cached column is dropped, and the projection keeps no
+  history before its rows.
+- A **column removal** — `drop(axis=1)` — removes the columns it names and keeps everything
+  else as it is: the remaining cached columns stay cached and continue, and the rows only
+  the removed ones read before the first row are released.
 - **Every other derivation is a new series**: a selection of rows that are not consecutive
   or not in order (a mask with gaps, `iloc[[0, 2, 5]]`, `sort_index(ascending=False)`,
   `nlargest`), `astype`, `rename`, `set_index` / `reset_index`, a new `index=` or `dtype=`,
@@ -597,11 +605,12 @@ A frame derived from another either **continues its series** or **starts a new o
   the cells (`fillna`, `ffill` / `bfill`, `isna` / `notna`, `round`, `abs`, `clip`,
   `cumsum` / `cummax` / `cummin` / `cumprod`, `diff`, `shift`, `rank`, `isin`, `replace`,
   `interpolate`, `where` / `mask`, `df == x` / `df != x`, the `rolling` / `expanding` /
-  `ewm` aggregations). It holds the source's data columns only: a cached column is
-  dropped — its transformed cells are not its directive's values, so they never become a
-  plain column under its name — and requested again it is computed from the new frame's
-  own rows. Likewise a cached column read as a Series (`df['ma:5']`) does not become a
-  column of a frame: `to_frame()` holds its labels only and `reset_index()` its index. A 2-D
+  `ewm` aggregations). A value transform reads every column as a projection gives it: a
+  cached column's transformed values are a plain data column under its name, never
+  continued. A cached column read as a Series (`df['ma:5']`) is its values: `to_frame()` /
+  `reset_index()` make it a data column. The other derivations above hold the source's
+  data columns only: a cached column is dropped, and requested again it is computed from
+  the new frame's own rows. A 2-D
   selection of rows that are not consecutive (`df.loc[mask, cols]`) naming a cached column
   raises `KeyError` — read its values as a Series, `df.loc[mask, 'ma:5']`.
 - `copy()` / `DataFrame(df)` copy everything.

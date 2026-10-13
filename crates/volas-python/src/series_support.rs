@@ -23,7 +23,6 @@ pub(crate) fn slice_series(s: &Series, slice: &Bound<'_, PySlice>) -> PyResult<P
     let index = Arc::new(s.index.take(&positions));
     Ok(PySeries {
         inner: Series::new(s.name.clone(), data, index),
-        cached: false,
     })
 }
 
@@ -75,7 +74,6 @@ pub(crate) fn require_aligned(a: &Arc<Index>, b: &Arc<Index>) -> PyResult<()> {
 pub(crate) fn f64_series(s: &Series, out: Vec<f64>) -> PySeries {
     PySeries {
         inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)),
-        cached: false,
     }
 }
 
@@ -84,7 +82,6 @@ pub(crate) fn f64_series(s: &Series, out: Vec<f64>) -> PySeries {
 pub(crate) fn col_to_series(s: &Series, data: Column) -> PySeries {
     PySeries {
         inner: Series::new(s.name.clone(), data, Arc::clone(&s.index)),
-        cached: false,
     }
 }
 
@@ -100,7 +97,6 @@ pub(crate) fn describe_labels() -> Vec<String> {
 pub(crate) fn bool_series(s: &Series, out: Vec<bool>) -> PySeries {
     PySeries {
         inner: Series::new(s.name.clone(), Column::bool(out), Arc::clone(&s.index)),
-        cached: false,
     }
 }
 

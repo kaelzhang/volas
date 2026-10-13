@@ -15,7 +15,9 @@
 //!   cannot recompute from what it keeps (a recursion that carries no state, whose
 //!   history started before the selection) keeps its values and raises when a refresh
 //!   would recompute it: it is never restarted on the selection's own rows.
-//! - A **column projection** keeps the rows: the listed columns, cached ones continuing.
+//! - A **column projection** keeps the rows and the listed columns, each as data: a
+//!   listed cached column's values, never continued (R40). A **column removal** keeps
+//!   every other column as it is, cached ones continuing.
 //! - Every **other derivation** — rows not contiguous in order, a cast, a rename, a new
 //!   index, a time-zone change — starts a **new series**: its row 0 at position 0 and its
 //!   data columns only. A cached column is dropped; requested again, it is computed from
@@ -298,9 +300,10 @@ impl DataFrame {
 
     // --- column projections ----------------------------------------------------------------
 
-    /// The columns `names`, in that order, over the same rows: the same series (its
-    /// origin), a listed cached column staying cached as it is, and the lead of the listed
-    /// data columns.
+    /// The columns `names`, in that order, over the same rows, each a data column: a
+    /// listed cached column keeps its values as this frame shows them and is plain data
+    /// from then on — never continued, even with its inputs alongside (R40); an unlisted
+    /// one is dropped. The frame keeps no history before its rows (no lead).
     pub fn select(&self, names: &[String]) -> Result<DataFrame> {
         let mut columns = Vec::with_capacity(names.len());
         let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
@@ -311,7 +314,7 @@ impl DataFrame {
             }
         }
         // the rows are the same: the index is shared, not copied
-        let mut df = DataFrame {
+        let df = DataFrame {
             names: Arc::new(names.to_vec()),
             columns,
             name_to_idx: Arc::new(name_to_idx),
@@ -323,13 +326,23 @@ impl DataFrame {
             stale_by: self.stale_by,
             lead: None,
         };
-        df.computed = names
-            .iter()
-            .filter_map(|n| self.computed.get(n).map(|m| (n.clone(), m.clone())))
-            .collect();
+        #[cfg(debug_assertions)]
+        df.debug_check();
+        Ok(df)
+    }
+
+    /// This frame without the columns `names` (a name that is not a column is ignored):
+    /// every other column as it is, over the same rows — a cached one still cached and
+    /// continuing, with its states, checkpoint and anchors — and the lead trimmed to what
+    /// the cached columns left read (a column removal, not a projection: see
+    /// [`select`](Self::select)).
+    pub fn drop_columns(&self, names: &[String]) -> Result<DataFrame> {
+        let keep: Vec<String> = self.names.iter().filter(|n| !names.contains(n)).cloned().collect();
+        let mut df = self.select(&keep)?;
+        df.computed = keep.iter().filter_map(|n| self.computed.get(n).map(|m| (n.clone(), m.clone()))).collect();
         df.note_computed();
         if !df.computed.is_empty() {
-            df.lead = self.lead.as_ref().map(|l| l.select(&df));
+            df.lead = self.lead.as_ref().map(|l| l.over(&df));
             df.retrim_lead();
         }
         #[cfg(debug_assertions)]

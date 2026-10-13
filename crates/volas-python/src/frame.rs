@@ -168,8 +168,9 @@ impl<'a> Meta<'a> {
 ///         ``DataFrame.from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
 ///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
 ///     columns (list[str], optional): select and order the columns to keep (like
-///         ``df[[...]]``: the same rows, a listed cached column still cached — refreshed
-///         if stale —, a windowed source gives its visible rows); a name not present
+///         ``df[[...]]``: the same rows, a listed cached column as a data column of its
+///         values — refreshed if stale, never continued —, a windowed source gives its
+///         visible rows); a name not present
 ///         raises ``KeyError`` (a cached one is found by any spelling). A duplicate name
 ///         is rejected, an empty list keeps no column, and an absent column is never
 ///         NaN-filled.
@@ -262,10 +263,8 @@ impl PyDataFrame {
     /// Present a full-length column as a Series sliced to the logical M view (with
     /// the matching sliced index) — identity (a plain `wrap_series`) when unbounded.
     /// Backs windowed `df[name]` so a column read never exposes the hidden margin.
-    /// A cached directive column is marked as one ([`PySeries::cached`]).
     pub(crate) fn present_series(&self, name: String, col: Column) -> PySeries {
-        let cached = self.inner.is_computed(&name);
-        let mut series = match &self.window {
+        match &self.window {
             Some(_) => {
                 let (start, len) = self.logical_range();
                 PySeries {
@@ -274,13 +273,10 @@ impl PyDataFrame {
                         col.slice(start, start + len),
                         Arc::new(self.inner.index().slice(start, start + len)),
                     ),
-                    cached: false,
                 }
             }
             None => self.wrap_series(name, col),
-        };
-        series.cached = cached;
-        series
+        }
     }
 
     /// Element-wise comparison backing `__eq__` / `__ne__`: against another
@@ -316,14 +312,13 @@ impl PyDataFrame {
     }
 
     /// The cells every value transform reads (`compare`, `fillna`, `where` / `mask`, the
-    /// column-wise transforms): the visible rows' data columns. A value transform is a
-    /// new series, as `astype` is (R15): a cached directive column is not carried — its
-    /// transformed cells are not its directive's values, and are never handed out as a
-    /// plain data column under its name. Read through the gate; the hidden margin of a
-    /// windowed frame never reaches it.
+    /// column-wise transforms): every column of the visible rows as data — a cached
+    /// directive column's values as plain data, never continued (R40), as a projection
+    /// gives them. Read through the gate; the hidden margin of a windowed frame never
+    /// reaches it.
     pub(crate) fn data_view(&self) -> PyResult<DataFrame> {
         let view = self.read()?;
-        view.select(&view.data_names()).map_err(pyerr)
+        view.select(view.names()).map_err(pyerr)
     }
 
     /// Column-wise transform chokepoint: map every data column of the visible rows
@@ -348,7 +343,6 @@ impl PyDataFrame {
             .map(|(name, col)| {
                 let s = PySeries {
                     inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
-                    cached: false,
                 };
                 Ok(op(&s)?.inner.data)
             })
@@ -371,7 +365,6 @@ impl PyDataFrame {
         }
         Ok(PySeries {
             inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
-            cached: false,
         })
     }
 
@@ -688,7 +681,6 @@ impl PyDataFrame {
     pub(crate) fn wrap_series(&self, name: String, col: Column) -> PySeries {
         PySeries {
             inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
-            cached: false,
         }
     }
 }
