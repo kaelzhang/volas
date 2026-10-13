@@ -132,6 +132,19 @@ fn a_lead_shrinks_with_the_columns_that_read_it() {
     let mut written = tail.clone();
     written.invalidate_computed_on_write("kcw");
     assert_eq!(written.lead_rows(), 5);
+    // a copied lead shrinks in place while it stays most of its rows; none is left once no
+    // cached column reads before row 0
+    let short = df.rows(95, 100, &NoReplay).select(&names).unwrap();
+    assert_eq!(short.lead_rows(), 5);
+    let ma = short.select(&["close".to_string(), "ma".to_string()]).unwrap();
+    assert_eq!(lead(&ma), vec![92.0, 93.0, 94.0]);
+    let mut bare = ma.clone();
+    bare.invalidate_computed_on_write("ma");
+    assert_eq!(bare.lead_rows(), 0);
+    // a data column the lead does not hold takes any dtype
+    let mut added = ma.clone();
+    added.set_column("x", Column::f64(vec![0.0; 5])).unwrap();
+    added.set_column("x", Column::str(vec!["a".into(); 5])).unwrap();
 }
 
 /// Anchors are a memo of a recursion's history: shared by copies, carried by a selection

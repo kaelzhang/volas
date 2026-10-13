@@ -81,7 +81,7 @@ CONTIGUOUS = {
     'head_tail': lambda df, a, b: df.head(b).tail(b - a),
 }
 RANGES = {'tail': (N - 7, N), 'short_tail': (N - 2, N), 'one_row': (N - 1, N), 'middle': (17, 41),
-          'short_middle': (30, 32), 'head': (0, 25), 'whole': (0, N)}
+          'short_middle': (30, 32), 'head': (0, 25), 'first_row': (0, 1), 'whole': (0, N)}
 
 
 @pytest.mark.parametrize('rng_name', RANGES)
@@ -141,6 +141,22 @@ def test_a_write_on_a_selection_recomputes_its_columns_over_their_history():
     tail = cached(['ema:12']).iloc[N - 3:]
     tail.iat[0, DATA.index('close')] = 99.0
     assert same(tail['ema:12'].to_numpy(dtype='object'), full('ema:12', rows)[N - 3:])
+
+
+def test_selections_of_a_long_history_replay_from_its_anchors():
+    # past the anchor spacing, a selection's edge replays from the nearest anchor; every
+    # later selection reads the same anchors
+    n = 10_000
+    c = 100 + np.cumsum(np.random.default_rng(3).normal(0, 1, n + 1))
+    df = DataFrame({'close': c[:n]})
+    for d in ('ema:12', 'ema:5@(ma:3)'):
+        df[d]
+    for a, b in [(n - 5, n), (4100, 4200), (9000, 9001), (n - 3, n)]:
+        sub = df.iloc[a:b]
+        sub.append(DataFrame({'close': c[n:n + 1]}, index=[b]))
+        for d in ('ema:12', 'ema:5@(ma:3)'):
+            want = DataFrame({'close': np.append(c[:b], c[n])}).exec(d)[a:]
+            assert np.array_equal(sub[d].to_numpy(), want, equal_nan=True), (a, b, d)
 
 
 def test_a_selection_of_a_stale_frame_raises_and_a_copy_proceeds():
