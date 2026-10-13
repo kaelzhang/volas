@@ -43,16 +43,29 @@ impl<'a> Node<'a> {
         &mut next[5..5 + self.kernel.len()]
     }
     fn advance(&self, ops: &Operands, from: usize, end: usize, recursive: bool, next: &mut [f64]) -> Option<()> {
-        for row in from..end {
-            if recursive && ops.reads().any(|(_, r)| r.view()[row].is_nan()) { continue; }
+        // Only the final `reach` accepted rows survive in the published tail.
+        // Walk backwards to those rows instead of shifting every input through the
+        // tail after the batch kernel has already computed the whole batch. A
+        // zero-reach recursion therefore reads no rows here.
+        let rows = (from..end).rev()
+            .filter(|&row| !recursive || ops.reads().all(|(_, r)| !r.view()[row].is_nan()))
+            .take(self.reach);
+        let mut kept = 0;
+        for row in rows {
             for (slot, r) in ops.reads() {
-                if self.reach == 0 { continue; }
                 let at = self.offset(slot)?;
-                next.copy_within(at + 1..at + self.reach, at);
-                next[at + self.reach - 1] = r.view()[row];
+                next[at + self.reach - 1 - kept] = r.view()[row];
             }
-            next[3] = (next[3] + 1.0).min(self.reach as f64);
+            kept += 1;
         }
+        // Short batches keep the un-evicted suffix of the previous tail, including
+        // any warm-up padding. Read it from the previous state, not the new suffix.
+        for (slot, _) in ops.reads() {
+            let at = self.offset(slot)?;
+            next[at..at + self.reach - kept]
+                .copy_from_slice(&self.words[at + kept..at + self.reach]);
+        }
+        next[3] = (self.count + kept).min(self.reach) as f64;
         Some(())
     }
     fn record(&self, ops: &Operands, cmd: &BoundCommand) -> Option<()> {

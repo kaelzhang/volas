@@ -7,9 +7,9 @@
 #   scripts/perf_ab.sh <base-ref> <indicator>         # one indicator, compact report
 #   scripts/perf_ab.sh <base-ref> '' <section>        # one report section, perf_gate verdict
 #
-# The base ref is built in a TEMPORARY GIT WORKTREE (the working tree is never
-# touched — no stashing), benchmarked, then HEAD (the current tree, including
-# uncommitted changes) is rebuilt and benchmarked. Nothing is archived.
+# The base ref is exported with a read-only Git archive (no repository or worktree
+# metadata changes), benchmarked, then HEAD (the current tree, including
+# uncommitted changes) is rebuilt and benchmarked. Benchmark results are not retained.
 set -euo pipefail
 
 BASE_REF="${1:?usage: perf_ab.sh <base-ref> [indicator] [section]}"
@@ -22,15 +22,16 @@ PY_PREFIX="$("$PYTHON" -c 'import sys; print(sys.prefix)')"
 export VIRTUAL_ENV="$PY_PREFIX" CONDA_PREFIX="$PY_PREFIX"
 ROOT="$(git rev-parse --show-toplevel)"
 TMP="$(mktemp -d)"
-trap 'git -C "$ROOT" worktree remove --force "$TMP/base" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP"' EXIT
 
 BENCH_OPTS=(--benchmark-only --benchmark-group-by=func,param:indicator --benchmark-sort=name -q)
 FILTER=()
 [ -n "$INDICATOR" ] && FILTER+=(--volas-benchmark-indicator="$INDICATOR")
 [ -n "$SECTION" ] && FILTER+=(-k "test_$SECTION")
 
-echo ">> building + benchmarking BASE ($BASE_REF) in a temp worktree..."
-git -C "$ROOT" worktree add --detach "$TMP/base" "$BASE_REF" >/dev/null
+echo ">> building + benchmarking BASE ($BASE_REF) in a temporary archive..."
+mkdir "$TMP/base"
+git -C "$ROOT" archive "$BASE_REF" | tar -x -C "$TMP/base"
 # The base build gets its OWN target dir: sharing $ROOT/target between two
 # checkouts of the same workspace let cargo hand the HEAD build a stale rlib
 # from the base tree (observed: HEAD's volas-directive linked against the

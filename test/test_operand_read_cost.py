@@ -119,3 +119,21 @@ def test_twenty_cached_directives_refresh_at_a_cost_independent_of_height():
         full = df.exec(d, dtype='float64')[-3:]
         got = np.asarray(df[d], dtype=float)[-3:]
         assert ((got == full) | (np.isnan(got) & np.isnan(full))).all(), d
+
+
+@pytest.mark.parametrize('directive', ['ema:20', 'ma:20,1', 'ma:20,3', 'ma:20,6', 'ma:20,8',
+                                       'kcw', 'atr:14', 'rsi:14', 'macd', 'obv'])
+def test_first_materialization_costs_one_computation(directive):
+    """Carrying a bounded tail must not step the million input rows a second time."""
+    data = {k: v[:LARGE] for k, v in _data(LARGE, 'float64').items()}
+    cache = compute = float('inf')
+    for _ in range(5):
+        df = volas.DataFrame(data)
+        start = time.perf_counter()
+        got = np.asarray(df[directive])
+        cache = min(cache, time.perf_counter() - start)
+        start = time.perf_counter()
+        want = df.exec(directive, dtype='float64')
+        compute = min(compute, time.perf_counter() - start)
+    np.testing.assert_array_equal(got.view(np.uint64), want.view(np.uint64))
+    assert cache < 1.8 * compute + 0.001, (directive, cache, compute)
