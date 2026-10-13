@@ -191,6 +191,21 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
     }
 }
 
+/// A pass publishes both states only when both complete input tails exist.
+/// Declining leaves short history to the continuation owner's warm-up capture.
+fn tails(values: &[f64], reach: usize) -> Option<(&[f64], &[f64])> {
+    let n = values.len();
+    let before = n.checked_sub(1)?;
+    Some((&values[n.checked_sub(reach)?..], &values[before.checked_sub(reach)?..before]))
+}
+
+fn append_tails(pass: &mut KernelPass, values: &[f64], reach: usize) -> Option<()> {
+    let (after, before) = tails(values, reach)?;
+    pass.after.extend_from_slice(after);
+    pass.before.extend_from_slice(before);
+    Some(())
+}
+
 fn stage(stage: ind::MaStage, data: &[f64], origin: usize) -> Option<KernelPass> {
     let mut states = volas_compute::pass::States::default();
     let values = stage.pass(data, origin, &mut states)?;
@@ -209,9 +224,7 @@ fn averages(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     }
     if let Some(smooth) = a.smooth {
         let mut signal = stage(smooth, &fast.values, ops.origin())?;
-        let n = data.len();
-        signal.after.extend_from_slice(&fast.values[n - smooth.reach()..]);
-        signal.before.extend_from_slice(&fast.values[n - 1 - smooth.reach()..n - 1]);
+        append_tails(&mut signal, &fast.values, smooth.reach())?;
         fast.after.extend(signal.after);
         fast.before.extend(signal.before);
         if cmd.sub == Some("histogram") {
@@ -228,7 +241,7 @@ fn mavp(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     let (lo, hi, mt) = (p(0), p(1), p(2));
     let lb = ind::generic_ma_lookback(hi, mt);
     let n = data.len();
-    let mut result = KernelPass { values: vec![f64::NAN; n], after: vec![n as f64], before: vec![(n - 1) as f64] };
+    let mut result = KernelPass { values: vec![f64::NAN; n], after: vec![n as f64], before: vec![n.checked_sub(1)? as f64] };
     // Classify the output rows once. Each stage writes only its selected rows,
     // rather than re-reading and clamping every period for every stage.
     let mut selected = vec![Vec::new(); hi - lo + 1];
@@ -237,7 +250,7 @@ fn mavp(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     }
     for q in lo..=hi {
         let start = lb - ind::generic_ma_lookback(q, mt);
-        let pass = stage(ind::MaStage::new(q, mt)?, &data[start..], ops.origin() + start)?;
+        let pass = stage(ind::MaStage::new(q, mt)?, data.get(start..)?, ops.origin() + start)?;
         result.after.extend(pass.after);
         result.before.extend(pass.before);
         for &i in &selected[q - lo] { result.values[i] = pass.values[i - start]; }
@@ -254,12 +267,10 @@ fn stochastic(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     let mut result = stage(ind::MaStage::new(stages[0].0, stages[0].1)?, &raw, ops.origin())?;
     if count == 2 {
         let smooth = ind::MaStage::new(stages[1].0, stages[1].1)?;
-        let pass = stage(smooth, &result.values, ops.origin())?;
+        let mut pass = stage(smooth, &result.values, ops.origin())?;
+        append_tails(&mut pass, &result.values, smooth.reach())?;
         result.after.extend(pass.after);
         result.before.extend(pass.before);
-        let n = raw.len();
-        result.after.extend_from_slice(&result.values[n - smooth.reach()..]);
-        result.before.extend_from_slice(&result.values[n - 1 - smooth.reach()..n - 1]);
         result.values = pass.values;
     }
     Some(result)
@@ -269,19 +280,22 @@ fn stochrsi(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     let x = ops.f64(0, "close").ok()?;
     let p = |i| arg_usize(cmd.args, i);
     let mut rsi = KernelPass::run(|s| ind::rsi_pass(&x, p(0), s))?;
-    let n = x.len();
     let c = p(1) - 1;
-    rsi.after.extend_from_slice(&rsi.values[n - c..]);
-    rsi.before.extend_from_slice(&rsi.values[n - 1 - c..n - 1]);
+    // The RSI kernel can seed before the stochastic input ring is complete.
+    let (after, before) = tails(&rsi.values, c)?;
+    rsi.after.extend_from_slice(after);
+    rsi.before.extend_from_slice(before);
     let raw = ind::stochrsi_from_rsi(&rsi.values, p(1));
     if cmd.sub == Some("d") {
         let ma = ind::MaStage::new(p(2), p(3))?;
-        let pass = stage(ma, &raw, ops.origin())?;
+        let mut pass = stage(ma, &raw, ops.origin())?;
+        append_tails(&mut pass, &raw, ma.reach())?;
         rsi.after.extend(pass.after);
         rsi.before.extend(pass.before);
-        rsi.after.extend_from_slice(&raw[n - ma.reach()..]);
-        rsi.before.extend_from_slice(&raw[n - 1 - ma.reach()..n - 1]);
         rsi.values = pass.values;
     } else { rsi.values = raw; }
     Some(rsi)
 }
+
+#[cfg(test)]
+mod tests;
