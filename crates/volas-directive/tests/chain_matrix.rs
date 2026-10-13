@@ -112,3 +112,35 @@ fn a_chain_continues_bit_for_bit() {
     assert!(chains > 100, "only {chains} chains formed");
     assert!(fails.is_empty(), "{} failure(s):\n{}", fails.len(), fails[..fails.len().min(40)].join("\n"));
 }
+
+/// A chain continues only forwards and only from a chain of its own layout: a range that
+/// ends before it starts, or a chain longer than the directive's, declines.
+#[test]
+fn a_chain_declines_what_does_not_fit_it() {
+    let data = matrix::classes(80).into_iter().next().unwrap();
+    let df = &data.frame;
+    let node = parse("ema:5@(ema:3)").unwrap();
+    let chain = initial_state(df, &node, 60).unwrap();
+    assert!(execute_resume(df, &node, &chain, 61, 60, 0).is_none());
+    let mut longer = chain.clone();
+    longer.push(0.0);
+    assert!(execute_resume(df, &node, &longer, 60, 80, 0).is_none());
+    assert!(execute_resume(df, &node, &chain, 60, 80, 0).is_some());
+}
+
+/// A recursion over an operand that recomputes (`crsi`) keeps no chain; its own state
+/// resumes over the operand evaluated from row 0, bit for bit the full computation.
+#[test]
+fn a_recursion_over_a_recomputed_operand_resumes_from_row_zero() {
+    let mut resumed = 0;
+    for data in matrix::classes(120) {
+        let df = &data.frame;
+        let node = parse("ema:4@(crsi:3,2,5)").unwrap();
+        let whole = values(&execute(df, &node).unwrap());
+        let Some(state) = initial_state(df, &node, 90) else { continue };
+        let (tail, _) = execute_resume(df, &node, &state, 90, 120, 0).expect("it resumes");
+        assert!(values(&tail).iter().zip(&whole[90..]).all(|(a, b)| same(*a, *b)), "[{}]", data.name);
+        resumed += 1;
+    }
+    assert!(resumed > 3, "only {resumed} data classes resumed");
+}

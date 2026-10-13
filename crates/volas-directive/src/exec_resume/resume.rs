@@ -184,13 +184,12 @@ fn resume_rows(
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
+            // the ATR first, into its own rows: a decline leaves `out` untouched
+            let mut atr = Vec::new();
+            let atr_state =
+                ind::atr_resume(&high, &low, &close, arg_usize(args, 1), from_row, &prev_state[1..2], &mut atr)?;
             let at = out.len();
             let ema_state = ind::ema_resume(&close, arg_usize(args, 0), from_row, &prev_state[0..1], out);
-            let mut atr = Vec::new();
-            let Some(atr_state) = ind::atr_resume(&high, &low, &close, arg_usize(args, 1), from_row, &prev_state[1..2], &mut atr) else {
-                out.truncate(at);
-                return None;
-            };
             let m = arg_f64(args, 2);
             for (e, a) in out[at..].iter_mut().zip(atr) {
                 *e = ind::kcw_value(*e, a, m);

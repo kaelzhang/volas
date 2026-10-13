@@ -226,8 +226,6 @@ pub trait Payload {
     fn arg_len(&self) -> usize;
     /// The bound argument at slot `i`, or `None` if absent.
     fn arg(&self, i: usize) -> Option<&ArgValue>;
-    /// The spelling of a command written as a bare name.
-    fn bare(&self) -> Option<&str>;
 }
 
 impl Payload for Bound {
@@ -240,9 +238,6 @@ impl Payload for Bound {
     fn arg(&self, i: usize) -> Option<&ArgValue> {
         self.values.get(i)
     }
-    fn bare(&self) -> Option<&str> {
-        self.bare.as_deref()
-    }
 }
 
 impl Payload for FormArgs {
@@ -254,9 +249,6 @@ impl Payload for FormArgs {
     }
     fn arg(&self, i: usize) -> Option<&ArgValue> {
         self.values.get(i).and_then(Option::as_ref)
-    }
-    fn bare(&self) -> Option<&str> {
-        None
     }
 }
 
