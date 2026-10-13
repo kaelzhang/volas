@@ -18,6 +18,8 @@ use volas_core::{Column, Series};
 
 use crate::series::PySeries;
 
+fn window_err(err: w::WindowError) -> PyErr { PyValueError::new_err(err.to_string()) }
+
 /// Resolve pandas's four exclusive EW decay spellings to the smoothing factor.
 pub(crate) fn resolve_alpha(
     com: Option<f64>,
@@ -53,19 +55,8 @@ pub(crate) fn resolve_alpha(
         return Ok(-(-(2.0f64.ln()) / h).exp_m1());
     }
     let a = alpha.expect("exactly one spelling is set");
-    if !(a > 0.0 && a <= 1.0) {
-        return Err(PyValueError::new_err("ewm alpha must satisfy 0 < alpha <= 1"));
-    }
+    w::validate_alpha(a).map_err(window_err)?;
     Ok(a)
-}
-
-fn validate_interpolation(interpolation: &str) -> PyResult<()> {
-    match interpolation {
-        "linear" | "lower" | "higher" | "nearest" | "midpoint" => Ok(()),
-        other => Err(PyValueError::new_err(format!(
-            "interpolation must be one of linear/lower/higher/nearest/midpoint, got {other:?}"
-        ))),
-    }
 }
 
 /// R-1: a negative ddof must be a clean ValueError, never pyo3's
@@ -75,15 +66,6 @@ pub(crate) fn validate_ddof(ddof: i64) -> PyResult<usize> {
         return Err(PyValueError::new_err("ddof must be >= 0"));
     }
     Ok(ddof as usize)
-}
-
-fn validate_rank_method(method: &str) -> PyResult<()> {
-    match method {
-        "average" | "min" | "max" => Ok(()),
-        other => Err(PyValueError::new_err(format!(
-            "rank method must be 'average', 'min' or 'max', got {other:?}"
-        ))),
-    }
 }
 
 /// The shared engine: a window specification over one series. `window ==
@@ -102,31 +84,29 @@ impl WinSpec {
     /// "missing", so the trailing kernels produce exactly the clipped
     /// centered semantics — then re-slicing the labels. The kernel receives the
     /// trailing window length to use (see [`geometry`](Self::geometry)).
-    fn run(&self, data: &[f64], k: impl FnOnce(&[f64], usize) -> Vec<f64>) -> Vec<f64> {
+    fn run(&self, data: &[f64], k: impl FnOnce(&[f64], usize) -> Result<Vec<f64>, w::WindowError>) -> PyResult<Vec<f64>> {
         let n = data.len();
+        w::validate_window(self.window, self.min_periods).map_err(window_err)?;
         let (window, fwd) = self.geometry(n);
         if fwd == 0 {
-            return k(data, window);
+            return k(data, window).map_err(window_err);
         }
         let mut padded = data.to_vec();
         padded.extend(std::iter::repeat_n(f64::NAN, fwd));
-        let out = k(&padded, window);
-        out[fwd..fwd + n].to_vec()
+        let out = k(&padded, window).map_err(window_err)?;
+        Ok(out[fwd..fwd + n].to_vec())
     }
 
-    /// The trailing `(window, fwd)` that realizes this spec over `n` rows: the
-    /// window as given and no forward reach when trailing; when centered, the
-    /// backward reach `window / 2` and forward reach `window - window / 2 - 1`,
-    /// each **bounded by `n`** — the window is clipped at both edges, so reaching
-    /// past the data is the same as reaching exactly to it. The padding (and every
-    /// kernel buffer) is therefore bounded by the data, never by the window.
+    /// Keep the declared window and bound its forward padding by `n`. Reaching
+    /// past all data is equivalent to reaching its end. Kernel scratch buffers
+    /// also reserve at most the data length, so a huge window does not allocate
+    /// a huge buffer or change the parameter domain seen by the kernel.
     fn geometry(&self, n: usize) -> (usize, usize) {
         if !self.center {
             return (self.window, 0);
         }
         let fwd = self.window - self.window / 2 - 1;
-        let (back, fwd) = ((self.window / 2).min(n), fwd.min(n));
-        (back + fwd + 1, fwd)
+        (self.window, fwd.min(n))
     }
 
     /// A float64 aggregation result carrying the source's name + index.
@@ -151,100 +131,96 @@ impl WinSpec {
         s.data.to_f64_domain(op).map_err(crate::pyerr)
     }
 
-    pub(crate) fn count(&self, s: &Series) -> PySeries {
+    pub(crate) fn count(&self, s: &Series) -> PyResult<PySeries> {
         // count gates on window COVERAGE (see the kernel), so it handles
         // `center` itself instead of going through the NaN-padding `run`.
-        let out = w::count(&s.data.to_f64_vec(), self.window, self.min_periods, self.center);
-        self.i64_series(s, out)
+        let out = w::count(&s.data.to_f64_vec(), self.window, self.min_periods, self.center).map_err(window_err)?;
+        Ok(self.i64_series(s, out))
     }
     pub(crate) fn nunique(&self, s: &Series) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "nunique")?, |d, win| w::nunique(d, win, self.min_periods));
+        let out = self.run(&self.data(s, "nunique")?, |d, win| w::nunique(d, win, self.min_periods))?;
         Ok(self.i64_series(s, out))
     }
     pub(crate) fn sum(&self, s: &Series) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "sum")?, |d, win| w::sum(d, win, self.min_periods));
+        let out = self.run(&self.data(s, "sum")?, |d, win| w::sum(d, win, self.min_periods))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn mean(&self, s: &Series) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "mean")?, |d, win| w::mean(d, win, self.min_periods));
+        let out = self.run(&self.data(s, "mean")?, |d, win| w::mean(d, win, self.min_periods))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn median(&self, s: &Series) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "median")?, |d, win| w::median(d, win, self.min_periods));
+        let out = self.run(&self.data(s, "median")?, |d, win| w::median(d, win, self.min_periods))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn min(&self, s: &Series) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "min")?, |d, win| w::min(d, win, self.min_periods));
+        let out = self.run(&self.data(s, "min")?, |d, win| w::min(d, win, self.min_periods))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn max(&self, s: &Series) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "max")?, |d, win| w::max(d, win, self.min_periods));
+        let out = self.run(&self.data(s, "max")?, |d, win| w::max(d, win, self.min_periods))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn var(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "var")?, |d_, win| w::var(d_, win, self.min_periods, ddof));
+        let out = self.run(&self.data(s, "var")?, |d_, win| w::var(d_, win, self.min_periods, ddof))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn std(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "std")?, |d_, win| w::std(d_, win, self.min_periods, ddof));
+        let out = self.run(&self.data(s, "std")?, |d_, win| w::std(d_, win, self.min_periods, ddof))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn sem(&self, s: &Series, ddof: usize) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "sem")?, |d_, win| w::sem(d_, win, self.min_periods, ddof));
+        let out = self.run(&self.data(s, "sem")?, |d_, win| w::sem(d_, win, self.min_periods, ddof))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn skew(&self, s: &Series) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "skew")?, |d, win| w::skew(d, win, self.min_periods));
+        let out = self.run(&self.data(s, "skew")?, |d, win| w::skew(d, win, self.min_periods))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn kurt(&self, s: &Series) -> PyResult<PySeries> {
-        let out = self.run(&self.data(s, "kurt")?, |d, win| w::kurt(d, win, self.min_periods));
+        let out = self.run(&self.data(s, "kurt")?, |d, win| w::kurt(d, win, self.min_periods))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn quantile(&self, s: &Series, q: f64, interpolation: &str) -> PyResult<PySeries> {
-        validate_interpolation(interpolation)?;
-        if !(0.0..=1.0).contains(&q) {
-            return Err(PyValueError::new_err("quantile q must be in [0, 1]"));
-        }
         let out = self.run(&self.data(s, "quantile")?, |d, win| {
             w::quantile(d, win, self.min_periods, q, interpolation)
-        });
+        })?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn rank(&self, s: &Series, method: &str, ascending: bool, pct: bool) -> PyResult<PySeries> {
-        validate_rank_method(method)?;
         // a centered window ending in the padding ranks its last DATA row
         let n = s.len();
         let out = self.run(&self.data(s, "rank")?, |d, win| {
             w::rank_padded(d, win, self.min_periods, method, ascending, pct, n)
-        });
+        })?;
         Ok(self.f64_series(s, out))
     }
     /// `first` / `last` preserve the source dtype: gather the edge positions.
-    pub(crate) fn edge(&self, s: &Series, last: bool) -> PySeries {
+    pub(crate) fn edge(&self, s: &Series, last: bool) -> PyResult<PySeries> {
         let n = s.len();
         let mut valid: Vec<bool> = (0..n).map(|i| s.data.is_valid(i)).collect();
         // the same pad-and-relabel trick as `run` (padding is never valid, so it
         // is never selected as an edge position).
+        w::validate_window(self.window, self.min_periods).map_err(window_err)?;
         let (window, fwd) = self.geometry(n);
         valid.extend(std::iter::repeat_n(false, fwd));
-        let pos = w::edge_positions(&valid, window, self.min_periods, last)[fwd..fwd + n].to_vec();
-        PySeries {
+        let pos = w::edge_positions(&valid, window, self.min_periods, last).map_err(window_err)?[fwd..fwd + n].to_vec();
+        Ok(PySeries {
             inner: Series::new(
                 s.name.clone(),
                 s.data.take_optional(&pos),
                 Arc::clone(&s.index),
             ),
-        }
+        })
     }
     pub(crate) fn corr(&self, s: &Series, other: &PySeries) -> PyResult<PySeries> {
         let (x, y) = pair(s, other)?;
-        let out = self.run2(&x, &y, |a, b, win| w::corr(a, b, win, self.min_periods));
+        let out = self.run2(&x, &y, |a, b, win| w::corr(a, b, win, self.min_periods))?;
         Ok(self.f64_series(s, out))
     }
     pub(crate) fn cov(&self, s: &Series, other: &PySeries, ddof: usize) -> PyResult<PySeries> {
         let (x, y) = pair(s, other)?;
-        let out = self.run2(&x, &y, |a, b, win| w::cov(a, b, win, self.min_periods, ddof));
+        let out = self.run2(&x, &y, |a, b, win| w::cov(a, b, win, self.min_periods, ddof))?;
         Ok(self.f64_series(s, out))
     }
 
@@ -253,17 +229,18 @@ impl WinSpec {
         &self,
         x: &[f64],
         y: &[f64],
-        k: impl FnOnce(&[f64], &[f64], usize) -> Vec<f64>,
-    ) -> Vec<f64> {
+        k: impl FnOnce(&[f64], &[f64], usize) -> Result<Vec<f64>, w::WindowError>,
+    ) -> PyResult<Vec<f64>> {
         let n = x.len();
+        w::validate_window(self.window, self.min_periods).map_err(window_err)?;
         let (window, fwd) = self.geometry(n);
         if fwd == 0 {
-            return k(x, y, window);
+            return k(x, y, window).map_err(window_err);
         }
         let (mut xp, mut yp) = (x.to_vec(), y.to_vec());
         xp.extend(std::iter::repeat_n(f64::NAN, fwd));
         yp.extend(std::iter::repeat_n(f64::NAN, fwd));
-        k(&xp, &yp, window)[fwd..fwd + n].to_vec()
+        Ok(k(&xp, &yp, window).map_err(window_err)?[fwd..fwd + n].to_vec())
     }
 }
 
@@ -298,7 +275,7 @@ pub struct PyEwm {
 #[pymethods]
 impl PyRolling {
     /// Present-value count per window (pandas `count`); int64, gaps are NA.
-    fn count(&self) -> PySeries {
+    fn count(&self) -> PyResult<PySeries> {
         self.spec.count(&self.series)
     }
     /// Distinct present values per window (pandas `nunique`); int64.
@@ -359,11 +336,11 @@ impl PyRolling {
         self.spec.rank(&self.series, method, ascending, pct)
     }
     /// First present value per window (pandas `first`), dtype-preserving.
-    fn first(&self) -> PySeries {
+    fn first(&self) -> PyResult<PySeries> {
         self.spec.edge(&self.series, false)
     }
     /// Last present value per window (pandas `last`), dtype-preserving.
-    fn last(&self) -> PySeries {
+    fn last(&self) -> PyResult<PySeries> {
         self.spec.edge(&self.series, true)
     }
     /// Rolling Pearson correlation against another series (pandas `corr`).
@@ -380,7 +357,7 @@ impl PyRolling {
 #[pymethods]
 impl PyExpanding {
     /// Expanding present-value count; int64.
-    fn count(&self) -> PySeries {
+    fn count(&self) -> PyResult<PySeries> {
         self.spec.count(&self.series)
     }
     /// Expanding distinct present values; int64.
@@ -441,11 +418,11 @@ impl PyExpanding {
         self.spec.rank(&self.series, method, ascending, pct)
     }
     /// First present value so far, dtype-preserving.
-    fn first(&self) -> PySeries {
+    fn first(&self) -> PyResult<PySeries> {
         self.spec.edge(&self.series, false)
     }
     /// Last present value so far, dtype-preserving.
-    fn last(&self) -> PySeries {
+    fn last(&self) -> PyResult<PySeries> {
         self.spec.edge(&self.series, true)
     }
     /// Expanding Pearson correlation against another series.
@@ -496,7 +473,7 @@ impl PyEwm {
             self.adjust,
             self.ignore_na,
             self.min_periods,
-        )))
+        ).map_err(window_err)?))
     }
     /// Exponentially-weighted (un-normalized) sum; like pandas, only defined
     /// for `adjust=True`.
@@ -511,7 +488,7 @@ impl PyEwm {
             self.alpha,
             self.ignore_na,
             self.min_periods,
-        )))
+        ).map_err(window_err)?))
     }
     /// Exponentially-weighted variance (pandas `var(bias=False)`).
     #[pyo3(signature = (bias = false))]
@@ -523,7 +500,7 @@ impl PyEwm {
             self.ignore_na,
             bias,
             self.min_periods.max(1),
-        )))
+        ).map_err(window_err)?))
     }
     /// Exponentially-weighted standard deviation.
     #[pyo3(signature = (bias = false))]
@@ -535,7 +512,7 @@ impl PyEwm {
             self.ignore_na,
             bias,
             self.min_periods.max(1),
-        );
+        ).map_err(window_err)?;
         Ok(self.wrap(v.into_iter().map(f64::sqrt).collect()))
     }
     /// Exponentially-weighted covariance against another series.
@@ -550,7 +527,7 @@ impl PyEwm {
             self.ignore_na,
             bias,
             self.min_periods.max(1),
-        )))
+        ).map_err(window_err)?))
     }
     /// Exponentially-weighted correlation against another series.
     fn corr(&self, other: &PySeries) -> PyResult<PySeries> {
@@ -562,6 +539,6 @@ impl PyEwm {
             self.adjust,
             self.ignore_na,
             self.min_periods.max(1),
-        )))
+        ).map_err(window_err)?))
     }
 }

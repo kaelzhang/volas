@@ -21,3 +21,15 @@ with optional terminal-state publication through `StateSink`. Regression kernels
 likewise emit only the selected line. Exact sums retain their original arithmetic
 and rounding; their common expansions stay inline and larger expansions spill to
 heap storage without a precision limit.
+
+The published `window` helpers return `Result<_, window::WindowError>`. They
+validate a positive rolling window (`usize::MAX` for expanding),
+`min_periods <= window`, finite `0 < alpha <= 1`, `q` in `[0, 1]`, the quantile
+interpolation and rank method, equal pairwise input lengths, and rank padding.
+Validation applies even to empty inputs. Valid inputs retain the same arithmetic:
+
+```rust
+use volas_compute::window;
+assert_eq!(window::ewm_mean(&[1.0, 3.0], 0.5, false, false, 0).unwrap(), vec![1.0, 2.0]);
+assert_eq!(window::quantile(&[1.0, 3.0], 2, 1, f64::INFINITY, "linear"), Err(window::WindowError::Quantile));
+```
