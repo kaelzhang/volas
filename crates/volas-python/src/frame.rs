@@ -192,8 +192,7 @@ impl<'a> Meta<'a> {
 ///         is the largest of their lookbacks (e.g. ``['atr:14', 'ma:50']`` -> margin 49),
 ///         and each is computed at construction over all the given rows and cached — a
 ///         recursion (EMA, Wilder smoothing, a cumulative line, …) can only be computed
-///         this way; one no carried state covers (inside an ``@`` operand, combined with
-///         other values, or a command that recomputes) raises. An **int** is the margin
+///         this way, including nested and combined recursions. An **int** is the margin
 ///         alone. A directive requested later is computed only when it depends on a
 ///         trailing window of at most the margin's rows, else it raises. A list entry must
 ///         be an indicator directive (e.g. ``'ma:50'``); a bare/typo'd name (``'ma50'``)
@@ -657,9 +656,9 @@ impl PyDataFrame {
                         let tz = match crate::convert::timestamp_zone(&ts)? {
                             crate::convert::Zone::Aware(tz) => tz,
                             crate::convert::Zone::Naive => volas_core::Tz::Naive,
-                            crate::convert::Zone::Unzoned => *frame_tz,
+                            crate::convert::Zone::Unzoned => frame_tz.clone(),
                         };
-                        let ns = crate::convert::parse_ts_in_tz(&ts, tz)?;
+                        let ns = crate::convert::parse_ts_in_tz(&ts, &tz)?;
                         Index::datetime(vec![ns], tz)
                     }
                     IndexKind::Int64(_) => {

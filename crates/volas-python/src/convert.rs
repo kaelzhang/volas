@@ -139,12 +139,8 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
     // zone directly (tz_convert would hit the naive-axis guard; localize would shift).
     if datetime_index {
         if let Some(tz) = idx.getattr("tz").ok().filter(|t| !t.is_none()) {
-            // pandas renders a fixed offset as 'UTC+08:00'; volas's tz name for that is '+08:00'.
-            let mut tzname = tz.str()?.to_string();
-            if tzname.starts_with("UTC+") || tzname.starts_with("UTC-") {
-                tzname = tzname[3..].to_string();
-            }
-            return df._set_index_tz(&tzname);
+            let zone = crate::scalar::tz_from_py(&tz)?;
+            return Ok(PyDataFrame::plain(df.inner.set_index_tz(zone).map_err(pyerr)?));
         }
     }
     Ok(df)
@@ -585,7 +581,7 @@ pub(crate) fn extreme_value(py: Python<'_>, col: &Column, want_max: bool) -> Py<
 /// label. Display layers render the readable string form separately.
 pub(crate) fn label_to_py(py: Python<'_>, index: &Index, i: usize) -> Py<PyAny> {
     match index.kind() {
-        IndexKind::Datetime(v, tz) => Py::new(py, PyTimestamp { ns: v[i], tz: *tz })
+        IndexKind::Datetime(v, tz) => Py::new(py, PyTimestamp { ns: v[i], tz: tz.clone() })
             .unwrap()
             .into_any(),
         IndexKind::Int64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
@@ -608,7 +604,7 @@ pub(crate) enum Zone {
 /// The zone `key` (a timestamp as `parse_ts_in_tz` accepts it) is written in.
 pub(crate) fn timestamp_zone(key: &Bound<'_, PyAny>) -> PyResult<Zone> {
     if let Ok(ts) = key.extract::<PyRef<PyTimestamp>>() {
-        return Ok(if ts.tz.is_aware() { Zone::Aware(ts.tz) } else { Zone::Naive });
+        return Ok(if ts.tz.is_aware() { Zone::Aware(ts.tz.clone()) } else { Zone::Naive });
     }
     if let Ok(s) = key.extract::<String>() {
         return match datetime::offset_suffix_secs(&s) {
@@ -619,7 +615,7 @@ pub(crate) fn timestamp_zone(key: &Bound<'_, PyAny>) -> PyResult<Zone> {
     if key.is_instance_of::<pyo3::types::PyDateTime>() {
         let off = key.call_method0("utcoffset")?;
         if !off.is_none() {
-            return Ok(Zone::Aware(Tz::fixed(crate::scalar::offset_secs(&off)?).map_err(pyerr)?));
+            return Ok(Zone::Aware(crate::scalar::zone_of(key)?));
         }
         return Ok(Zone::Naive);
     }
@@ -656,9 +652,9 @@ pub(crate) fn labels_zone(labels: &Bound<'_, PyAny>) -> PyResult<Option<Tz>> {
             Zone::Aware(tz) => Some(tz),
             _ => None,
         };
-        match seen {
+        match &seen {
             None => seen = Some(zone),
-            Some(first) if first == zone => {}
+            Some(first) if *first == zone => {}
             Some(first) => {
                 return Err(PyValueError::new_err(match (first, zone) {
                     (Some(a), Some(b)) => format!(
@@ -681,7 +677,7 @@ pub(crate) fn labels_zone(labels: &Bound<'_, PyAny>) -> PyResult<Option<Tz>> {
 /// `tz`. A [`PyTimestamp`] carries its own tz and resolves to an absolute instant
 /// (so it matches across zones); an offset-aware string is already absolute; an
 /// integer is epoch-ns.
-pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
+pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: &Tz) -> PyResult<i64> {
     // None is not a constructable instant: volas has no NaT scalar — a missing
     // instant is volas.NA (decision 2 / D2). A clean ValueError, never a label
     // KeyError (F16).
@@ -749,7 +745,7 @@ pub(crate) fn parse_ts_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
 /// timestamp type — is a missing label: a KeyError carrying the reason, as pandas'
 /// `.loc` raises KeyError for it. `None`, NaT and an out-of-range instant keep their
 /// ValueError / OverflowError.
-pub(crate) fn parse_label_in_tz(key: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
+pub(crate) fn parse_label_in_tz(key: &Bound<'_, PyAny>, tz: &Tz) -> PyResult<i64> {
     parse_ts_in_tz(key, tz).map_err(|e| {
         let py = key.py();
         let text = key.is_instance_of::<pyo3::types::PyString>();

@@ -23,7 +23,7 @@ from pathlib import Path
 import volas
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC_RS = ROOT / "crates/volas-directive/src/spec.rs"
+SPEC_RS = ROOT / "crates/volas-directive/src/spec/mod.rs"
 CANDLES_RS = ROOT / "crates/volas-compute/src/raw/indicators/candles/mod.rs"
 README = ROOT / "README.md"
 README_ZH = ROOT / "README.zh-CN.md"
@@ -32,7 +32,7 @@ INDICATORS = ROOT / "INDICATORS.md"
 # Canonical sub-command tokens used by the multi-output indicators (after
 # canon_sub). The script probes each command with each token and keeps the forms
 # the validator accepts, so listing a few extra here is harmless — but a BRAND-NEW
-# sub token added to spec.rs must be added here too (the rare case; main commands
+# sub token added to the spec table must be added here too (the rare case; main commands
 # and patterns are read straight from their consts).
 SUB_TOKENS = [
     "signal", "histogram", "up", "down", "k", "d", "j", "upper", "lower",

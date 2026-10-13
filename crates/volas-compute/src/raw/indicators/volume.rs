@@ -105,36 +105,39 @@ pub fn adosc_final_state(
 
 /// Resume OBV from a carried state over the new rows `[from, n)`, bit-identical to
 /// a full [`obv`] recompute. `state = [running_obv, prev_real]` is the internal
-/// state as of row `from - 1` (the last valid row). Returns the values for rows
-/// `[from, n)` and the new `[running_obv, prev_real]` state as of row `n - 1`.
+/// state as of row `from - 1` (the last valid row). Appends rows `[from, n)` to
+/// `out` and returns the new `[running_obv, prev_real]` state as of row `n - 1`.
 ///
 /// `from >= 1` always (a fresh compute, `from == 0`, uses [`obv`] directly), and
 /// the recurrence reads only `real[from..]`/`volume[from..]` plus the carried
 /// `prev_real`, so it never reaches before `from` — sound after a head-dropping
 /// slice that retained none of the pre-`from` rows.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn obv_resume(
     real: &[f64],
     volume: &[f64],
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let n = real.len();
     let mut obv = state[0];
     let mut prev = state[1];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for i in from..n {
         obv = obv_step(obv, prev, real[i], volume[i]);
         out.push(obv);
         prev = real[i];
     }
-    (out, vec![obv, prev])
+    vec![obv, prev]
 }
 
 /// Resume AD (Chaikin A/D line) from a carried state over the new rows `[from, n)`,
 /// bit-identical to a full [`ad`] recompute. `state = [running_ad]` as of row
 /// `from - 1`. AD's per-bar money-flow term is independent of prior bars, so only
-/// the running total is carried. Returns the new-row values and the updated
-/// `[running_ad]`.
+/// the running total is carried. Appends rows `[from, n)` to `out` and returns
+/// the updated `[running_ad]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn ad_resume(
     high: &[f64],
     low: &[f64],
@@ -142,15 +145,16 @@ pub fn ad_resume(
     volume: &[f64],
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let n = close.len();
     let mut ad = state[0];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for i in from..n {
         ad += money_flow_volume(high[i], low[i], close[i], volume[i]);
         out.push(ad);
     }
-    (out, vec![ad])
+    vec![ad]
 }
 
 /// Resume ADOSC (Chaikin A/D Oscillator) from a carried state over the new rows
@@ -159,10 +163,10 @@ pub fn ad_resume(
 /// advanced with TA-Lib's exact `(price − prev)·k + prev` (fused) recurrence — the
 /// same step ([`Adosc`]) as [`adosc`], so the carried-state continuation lands on
 /// identical bits, and the same warm-up mask (a state captured inside the warm-up
-/// resumes to NaN there, as the full compute is). Returns the new-row values and the
-/// updated state.
+/// resumes to NaN there, as the full compute is).
 // One parameter per series/state the resume reads; a struct would only repackage them.
 #[allow(clippy::too_many_arguments)]
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn adosc_resume(
     high: &[f64],
     low: &[f64],
@@ -172,15 +176,15 @@ pub fn adosc_resume(
     slow: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let mut a = Adosc { ad_line: state[0], fast_ema: state[1], slow_ema: state[2] };
-    let out = (from..close.len())
-        .map(|i| {
-            a.step(high, low, close, volume, i, fast, slow);
-            a.value(i, fast, slow)
-        })
-        .collect();
-    (out, a.state())
+    out.reserve(close.len().saturating_sub(from));
+    out.extend((from..close.len()).map(|i| {
+        a.step(high, low, close, volume, i, fast, slow);
+        a.value(i, fast, slow)
+    }));
+    a.state()
 }
 
 /// A bar's range-normalised volume flow `location / (high − low) · volume` — the
@@ -381,11 +385,13 @@ mod tests {
             let head = &close[..from];
 
             let st = obv_final_state(head, &vol[..from]).unwrap();
-            let (tail, _) = obv_resume(&close, &vol, from, &st);
+            let mut tail = Vec::new();
+            let _ = obv_resume(&close, &vol, from, &st, &mut tail);
             assert_bits(&tail, &obv_full[from..], "obv");
 
             let st = ad_final_state(&high[..from], &low[..from], head, &vol[..from]).unwrap();
-            let (tail, _) = ad_resume(&high, &low, &close, &vol, from, &st);
+            let mut tail = Vec::new();
+            let _ = ad_resume(&high, &low, &close, &vol, from, &st, &mut tail);
             assert_bits(&tail, &ad_full[from..], "ad");
         }
 
@@ -402,7 +408,8 @@ mod tests {
                 slow,
             )
             .unwrap();
-            let (tail, _) = adosc_resume(&high, &low, &close, &vol, fast, slow, from, &st);
+            let mut tail = Vec::new();
+            let _ = adosc_resume(&high, &low, &close, &vol, fast, slow, from, &st, &mut tail);
             assert_bits(&tail, &adosc_full[from..], "adosc");
         }
     }

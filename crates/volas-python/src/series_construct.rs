@@ -111,8 +111,8 @@ impl PySeries {
 
     /// Anchor a NAIVE DatetimeIndex's wall-clock in `tz` (pandas `tz_localize`)
     /// — the Series-level mirror of `df.tz_localize` (F27).
-    pub(crate) fn tz_localize(&self, tz: &str) -> PyResult<PySeries> {
-        let tzv = Tz::parse(tz).map_err(pyerr)?;
+    pub(crate) fn tz_localize(&self, py: Python<'_>, tz: &str) -> PyResult<PySeries> {
+        let tzv = crate::timezone::parse(py, tz)?;
         let df = volas_core::DataFrame::new(
             vec![self.inner.name.clone().unwrap_or_else(|| "x".to_string())],
             vec![self.inner.data.clone()],
@@ -132,8 +132,8 @@ impl PySeries {
 
     /// Restate an AWARE DatetimeIndex in another zone (pandas `tz_convert`) —
     /// the Series-level mirror of `df.tz_convert` (F27).
-    pub(crate) fn tz_convert(&self, tz: &str) -> PyResult<PySeries> {
-        let tzv = Tz::parse(tz).map_err(pyerr)?;
+    pub(crate) fn tz_convert(&self, py: Python<'_>, tz: &str) -> PyResult<PySeries> {
+        let tzv = crate::timezone::parse(py, tz)?;
         let df = volas_core::DataFrame::new(
             vec![self.inner.name.clone().unwrap_or_else(|| "x".to_string())],
             vec![self.inner.data.clone()],

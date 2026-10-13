@@ -36,6 +36,8 @@ pub(crate) trait RowGuard: Default {
     /// Whether a row belongs in the running sums, without admitting it — for
     /// re-anchoring the sums from the window's own rows.
     fn counts(&self, finite: bool) -> bool;
+    /// Number of non-finite rows retained by the guard.
+    fn bad(&self) -> usize;
 }
 
 /// Trust every row — the fast pass. Compiles to the plain sliding loop.
@@ -43,6 +45,8 @@ pub(crate) trait RowGuard: Default {
 pub(crate) struct Unguarded;
 
 impl RowGuard for Unguarded {
+    #[inline(always)]
+    fn bad(&self) -> usize { 0 }
     #[inline(always)]
     fn enter(&mut self, _finite: bool) -> bool {
         true
@@ -66,6 +70,8 @@ impl RowGuard for Unguarded {
 pub(crate) struct NonFiniteRows(usize);
 
 impl RowGuard for NonFiniteRows {
+    #[inline]
+    fn bad(&self) -> usize { self.0 }
     #[inline]
     fn enter(&mut self, finite: bool) -> bool {
         if !finite {
@@ -165,6 +171,18 @@ impl<const K: usize> Slide<K> {
         }
         out[K * Csum::STATE] = self.bad as f64;
         out[K * Csum::STATE + 1] = self.pos as f64;
+    }
+
+    /// Append a publication to the kernel sink's existing buffer.
+    pub(crate) fn append_state(&self, out: &mut Vec<f64>) {
+        let at = out.len();
+        out.resize(at + Self::STATE, 0.0);
+        self.write_state(&mut out[at..]);
+    }
+
+    /// Append the batch loop's running components in this owner's wire layout.
+    pub(crate) fn append_components(out: &mut Vec<f64>, sums: [Csum; K], bad: usize, pos: usize) {
+        Self { sums, bad, pos }.append_state(out);
     }
 
     /// The absolute position of the next row to slide.
@@ -314,13 +332,10 @@ pub(crate) fn all_finite<const K: usize>(t: [f64; K]) -> ([f64; K], bool) {
 /// running ones for a clean window, the window's own sums when it holds a row with a
 /// non-finite term. A non-finite term therefore reaches exactly the windows holding it.
 /// `emit` is called for every `i` in `period-1..n`, in order, after `order`'s update.
-pub(crate) fn window_sums<const K: usize>(
-    n: usize,
-    period: usize,
-    order: Order,
-    origin: usize,
-    term: impl Fn(usize) -> [f64; K],
-    mut emit: impl FnMut(usize, [f64; K]),
+pub(crate) fn window_sums_pass<const K: usize>(
+    n: usize, period: usize, order: Order, origin: usize,
+    term: impl Fn(usize) -> [f64; K], mut emit: impl FnMut(usize, [f64; K]),
+    states: &mut impl crate::pass::StateSink,
 ) {
     if period == 0 || period > n {
         return;
@@ -332,6 +347,7 @@ pub(crate) fn window_sums<const K: usize>(
             Window::Sums(s) => emit(i, s.map(|c| c.value())),
             Window::Bad => emit(i, own_sums(i + 1 - period..=i, &term)),
         }
+        states.record(i, n, |out| slide.append_state(out));
     }
 }
 
@@ -400,7 +416,7 @@ mod tests {
 
     fn sums(xs: &[f64], period: usize) -> Vec<(usize, f64)> {
         let mut out = Vec::new();
-        window_sums(xs.len(), period, Order::AddDrop, 0, |i| [xs[i]], |i, [s]| out.push((i, s)));
+        window_sums_pass(xs.len(), period, Order::AddDrop, 0, |i| [xs[i]], |i, [s]| out.push((i, s)), &mut ());
         out
     }
 
@@ -436,7 +452,7 @@ mod tests {
         for origin in [0, 1, 4] {
             let run = |xs: &[f64]| {
                 let mut out = Vec::new();
-                window_sums(xs.len(), 4, Order::AddReadDrop, origin, |i| [xs[i]], |i, [s]| out.push((i, s)));
+                window_sums_pass(xs.len(), 4, Order::AddReadDrop, origin, |i| [xs[i]], |i, [s]| out.push((i, s)), &mut ());
                 out
             };
             let (ra, rb) = (run(&a), run(&b));

@@ -49,6 +49,8 @@ from stock_pandas import StockDataFrame
 from volas import DataFrame as VolasDataFrame
 
 from . import bench_long
+from .bench_first_cache import FIRST_CACHE_IDS, FIRST_CACHE_ROUNDS, build as build_first_cache
+from .bench_pandas import PANDAS_CALC
 from .bench_tf_live import TF_LIVE_INDICATORS, TF_LIVE_PHASES, build as build_tf_live
 
 try:
@@ -154,67 +156,6 @@ APPEND_ROUNDS = 500
 #       performs one warm-up append, so the one-time Vec capacity-doubling
 #       memcpy of a fresh frame is no longer charged to every measured round).
 METHODOLOGY = "append-steady-state-v2"
-
-
-# --- pandas (idiomatic, per indicator) -------------------------------------
-
-def _pd_ma(csv):
-    return csv['close'].rolling(20).mean()
-
-
-def _pd_ema(csv):
-    return csv['close'].ewm(span=12, adjust=True, min_periods=12).mean()
-
-
-def _pd_macd(csv):
-    c = csv['close']
-    return (c.ewm(span=12, adjust=True, min_periods=12).mean()
-            - c.ewm(span=26, adjust=True, min_periods=26).mean())
-
-
-def _pd_macd_signal(csv):
-    return _pd_macd(csv).ewm(span=9, adjust=True, min_periods=9).mean()
-
-
-def _pd_boll_upper(csv):
-    c = csv['close']
-    return c.rolling(20).mean() + 2.0 * c.rolling(20).std(ddof=0)
-
-
-def _pd_willr(csv):
-    h, lo, c = csv['high'], csv['low'], csv['close']
-    hh, ll = h.rolling(14).max(), lo.rolling(14).min()
-    return -100.0 * (hh - c) / (hh - ll)
-
-
-def _pd_rsi(csv):
-    c = csv['close']
-    delta = c.diff()
-    ag = delta.clip(lower=0.0).ewm(alpha=1.0 / 14, adjust=True, min_periods=14).mean()
-    al = (-delta).clip(lower=0.0).ewm(alpha=1.0 / 14, adjust=True, min_periods=14).mean()
-    return 100.0 - 100.0 / (1.0 + ag / al)
-
-
-def _pd_atr(csv):
-    h, lo, c = csv['high'], csv['low'], csv['close']
-    pc = c.shift(1)
-    tr = pd.concat([h - lo, (h - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
-    return tr.rolling(14).mean()
-
-
-def _pd_llv(csv):
-    return csv['low'].rolling(10).min()
-
-
-def _pd_hhv(csv):
-    return csv['high'].rolling(10).max()
-
-
-PANDAS_CALC = {
-    'ma:20': _pd_ma, 'ema:12': _pd_ema, 'macd': _pd_macd,
-    'macd.signal': _pd_macd_signal, 'boll.upper': _pd_boll_upper, 'willr:14': _pd_willr,
-    'rsi:14': _pd_rsi, 'atr:14': _pd_atr, 'llv:10': _pd_llv, 'hhv:10': _pd_hhv,
-}
 
 
 # --- pandas-ta (the `.ta` DataFrame accessor) ------------------------------
@@ -795,6 +736,15 @@ def test_append(benchmark, states, indicator, candidate):
 def test_tf_live(benchmark, indicator, phase):
     run, setup = build_tf_live(ARR, COLUMNS, indicator, phase)
     benchmark.pedantic(run, setup=setup, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
+
+
+# --- the first materialization: one directive cached on a fresh frame -------
+# volas only, with its resume states; not a report section (perf gate rows).
+
+@pytest.mark.parametrize('indicator', FIRST_CACHE_IDS)
+def test_first_cache(benchmark, indicator):
+    run, setup = build_first_cache(indicator)
+    benchmark.pedantic(run, setup=setup, rounds=FIRST_CACHE_ROUNDS, iterations=1, warmup_rounds=1)
 
 
 # --- section 2: batch indicator computation --------------------------------

@@ -1,6 +1,6 @@
 //! [`Buffer<T>`]: a typed, contiguous value buffer that is either **owned**
-//! (`Arc<Vec<T>>`, the volas-computed case) or **borrows foreign memory**
-//! zero-copy (e.g. an Arrow / NumPy buffer kept alive by a guard).
+//! (`Arc<Vec<T>>`, the volas-computed case) or **holds a guarded range**
+//! zero-copy (e.g. an Arrow / NumPy buffer, or immutable copied slice slab).
 //!
 //! Reads go through a slice uniformly ([`Deref`] to `[T]`), so every kernel —
 //! which already takes `&[T]` — is unaffected by where the bytes live. Mutation is
@@ -32,8 +32,7 @@ use std::sync::Arc;
 enum Data<T> {
     /// volas-owned, `Arc`-shared (cheap clone, copy-on-write mutation).
     Owned(Arc<Vec<T>>),
-    /// A zero-copy view of foreign memory (Arrow / NumPy). `guard` keeps the
-    /// foreign allocation alive for exactly as long as this buffer does.
+    /// A guarded zero-copy range of foreign or immutable Rust-owned memory.
     Borrowed {
         ptr: NonNull<T>,
         len: usize,
@@ -45,8 +44,11 @@ enum Data<T> {
 const UNKNOWN: u8 = 0;
 const NO_NAN: u8 = 1;
 const SOME_NAN: u8 = 2;
+// Unknown facts over checked immutable Rust-owned ranges may be remembered.
+const IMMUTABLE_UNKNOWN: u8 = 3;
 
-/// Where a buffer keeps its NaN fact: an atomic tri-state for a float element (a query
+/// Where a buffer keeps its NaN fact: an atomic fact for a float element (with an unknown
+/// immutable-range marker; a query
 /// records it through `&self` on a `Sync` buffer; every thread derives the same value
 /// from the same immutable bytes, so `Relaxed` suffices), nothing at all for an
 /// element that cannot be NaN.
@@ -155,7 +157,8 @@ impl<T: Element> Buffer<T> {
     pub fn as_slice(&self) -> &[T] {
         match &self.data {
             Data::Owned(a) => a.as_slice(),
-            // SAFETY: the invariant of `from_foreign` (guard keeps `len` valid `T` alive).
+            // SAFETY: `from_foreign` or checked `from_shared_range` gives a guard
+            // that keeps these `len` initialized, immutable values alive.
             Data::Borrowed { ptr, len, .. } => unsafe {
                 std::slice::from_raw_parts(ptr.as_ptr(), *len)
             },
@@ -168,7 +171,7 @@ impl<T: Element> Buffer<T> {
         self.as_slice().as_ptr()
     }
 
-    /// Whether the bytes are a zero-copy view of foreign memory.
+    /// Whether the bytes are a guarded zero-copy view.
     #[inline]
     pub fn is_borrowed(&self) -> bool {
         matches!(self.data, Data::Borrowed { .. })
@@ -186,6 +189,25 @@ impl<T: Element> Buffer<T> {
 }
 
 impl<T: Element + Send + Sync + 'static> Buffer<T> {
+    /// A checked zero-copy range of an immutable Rust-owned allocation. The guard
+    /// owns the Vec; any external `Arc::make_mut` copies while this view exists.
+    /// These immutable ranges remember their own NaN fact and materialize only their
+    /// selected range on a write. Empty ranges are valid; invalid ranges are rejected.
+    pub fn from_shared_range(owner: Arc<Vec<T>>, range: std::ops::Range<usize>) -> Option<Self> {
+        let values = owner.get(range)?;
+        // A slice reference always has a non-null aligned pointer, including when empty.
+        let ptr = NonNull::new(values.as_ptr() as *mut T).expect("slice pointer");
+        let len = values.len();
+        Some(Buffer::with(Data::Borrowed { ptr, len, guard: owner }, IMMUTABLE_UNKNOWN))
+    }
+
+    /// Preserve the fact from a NaN-free source when copying one selected range.
+    pub(crate) fn from_shared_nan_free_range(owner: Arc<Vec<T>>, range: std::ops::Range<usize>) -> Option<Self> {
+        let buffer = Self::from_shared_range(owner, range)?;
+        buffer.set_nan_state(NO_NAN);
+        Some(buffer)
+    }
+
     /// An owner handle that keeps this buffer's allocation alive — the keep-alive a
     /// zero-copy foreign export (Arrow / DLPack) hands the consumer alongside the raw
     /// [`as_ptr`](Self::as_ptr) pointer, so the bytes outlive this `Buffer`. Cloning is
@@ -277,12 +299,13 @@ impl<T: Float> Buffer<T> {
     /// except for a zero-copy view of foreign memory, which its owner may write behind
     /// volas's back: that is scanned on every query, never remembered.
     pub fn has_nan(&self) -> bool {
-        match self.nan_state() {
+        let state = self.nan_state();
+        match state {
             NO_NAN => false,
             SOME_NAN => true,
             _ => {
                 let found = scan_nan(self.as_slice());
-                if !self.is_borrowed() {
+                if state == IMMUTABLE_UNKNOWN || !self.is_borrowed() {
                     self.set_nan_state(if found { SOME_NAN } else { NO_NAN });
                 }
                 found
@@ -426,6 +449,56 @@ impl<T: Element> From<Vec<T>> for Buffer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_ranges_keep_only_their_values_independent_of_owner_writes() {
+        let mut owner = Arc::new(vec![9.0, 1.0, 2.0, 8.0]);
+        let mut range = Buffer::from_shared_range(Arc::clone(&owner), 1..3).unwrap();
+        let old = Arc::downgrade(&owner);
+        Arc::make_mut(&mut owner)[1] = 7.0;
+        assert_eq!(range.as_slice(), &[1.0, 2.0]);
+        assert!(!range.has_nan());
+        assert_eq!(range.known_has_nan(), Some(false));
+        range.set(0, 3.0);
+        assert!(!range.is_borrowed());
+        assert_eq!(range.as_slice(), &[3.0, 2.0]);
+        assert_eq!(owner.as_slice(), &[9.0, 7.0, 2.0, 8.0]);
+        assert!(old.upgrade().is_none());
+    }
+
+    #[test]
+    fn shared_ranges_validate_bounds_and_keep_exports_alive() {
+        let owner = Arc::new(vec![1.0, f64::NAN]);
+        assert!(Buffer::from_shared_range(Arc::clone(&owner), 2..2).unwrap().is_empty());
+        assert!(Buffer::from_shared_range(Arc::clone(&owner), 2..3).is_none());
+        let reversed = std::ops::Range { start: 1, end: 0 };
+        assert!(Buffer::from_shared_range(Arc::clone(&owner), reversed).is_none());
+        let range = Buffer::from_shared_range(Arc::clone(&owner), 1..2).unwrap();
+        assert!(range.has_nan());
+        assert_eq!(range.known_has_nan(), Some(true));
+        let weak = Arc::downgrade(&owner);
+        let export = range.keepalive();
+        drop(owner);
+        drop(range);
+        assert!(weak.upgrade().unwrap()[1].is_nan());
+        drop(export);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn shared_range_nan_facts_describe_only_the_selected_range() {
+        let owner = Arc::new(vec![f64::NAN, 1.0, 2.0]);
+        let missing = Buffer::from_shared_range(Arc::clone(&owner), 0..1).unwrap();
+        let clean = Buffer::from_shared_range(Arc::clone(&owner), 1..3).unwrap();
+        assert_eq!(missing.known_has_nan(), None);
+        assert_eq!(clean.known_has_nan(), None);
+        assert!(missing.has_nan());
+        assert!(!clean.has_nan());
+        assert_eq!(missing.clone().known_has_nan(), Some(true));
+        assert_eq!(clean.clone().known_has_nan(), Some(false));
+        let known = Buffer::from_shared_nan_free_range(owner, 1..2).unwrap();
+        assert_eq!(known.known_has_nan(), Some(false));
+    }
 
     /// A `Borrowed` buffer that points into `v`'s data, with `v` (as an `Arc`) as
     /// the guard keeping it alive — the shape an Arrow import produces.

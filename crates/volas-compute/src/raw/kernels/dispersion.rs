@@ -61,6 +61,12 @@ pub fn rolling_mean_std(
     ddof: usize,
     origin: usize,
 ) -> (Array1<f64>, Array1<f64>) {
+    rolling_mean_std_pass(data, period, ddof, origin, &mut ())
+}
+
+/// The fused batch pass with terminal-state publication.
+#[inline]
+pub fn rolling_mean_std_pass(data: ArrayView1<f64>, period: usize, ddof: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Array1<f64>, Array1<f64>) {
     let n = data.len();
     let mut mean = Array1::from_elem(n, f64::NAN);
     let mut std = Array1::from_elem(n, f64::NAN);
@@ -106,16 +112,19 @@ pub fn rolling_mean_std(
                 if i + 1 >= period {
                     (md[i], sd[i]) = mean_std_of_sums(&sums, k, p, denom);
                 }
+                states.record(i, n, |out| Slide::append_components(out, sums, 0, origin + i + 1));
             }
         }
         if clean && sums.iter().all(|s| s.value().is_finite()) {
             return (mean, std);
         }
     }
+    states.restart();
     // Careful path — window-local (see [`crate::guard`]).
     let mut slide = Slide::<2>::at(origin);
     for i in 0..n {
         (mean[i], std[i]) = mean_std_row(&mut slide, period, ddof, i, |j| data[j]);
+        states.record(i, n, |out| slide.append_state(out));
     }
     (mean, std)
 }

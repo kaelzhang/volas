@@ -3,8 +3,9 @@
 Ported / adapted from stock-pandas's ``test_parser.py::test_stringify`` and
 ``test_basic.py::test_directive_stringify``. The canonical form is volas-native:
 whitespace removed, minimal parens by operator priority, default args/series
-dropped. (Unlike stock-pandas it does not coerce numeric args to a typed display,
-so `100` stays `100` rather than `100.0`.)
+dropped, each argument written as its value. (Unlike stock-pandas it does not coerce
+numeric args to a typed display, so `100` stays `100` rather than `100.0`.) The name does
+not depend on the spelling: `boll`, `boll:`, `BOLL` and `boll:20@close` are all `boll`.
 """
 
 import pytest
@@ -16,8 +17,12 @@ from volas import directive_stringify as stringify
     # default args / series dropped (test_basic)
     ('boll', 'boll'),
     ('boll:20@close', 'boll'),
+    ('boll:', 'boll'),
+    ('BOLL', 'boll'),
     ('boll:30@close', 'boll:30'),
     ('macd:12,26', 'macd'),
+    ('ma:05', 'ma:5'),
+    ('obv: + ma:3', 'obv+ma:3'),
     ('ma:5@close', 'ma:5'),
     # operator priority + minimal parens
     ('close + open * high', 'close+open*high'),

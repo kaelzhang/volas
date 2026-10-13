@@ -310,7 +310,7 @@ fn a_rejected_batch_writes_no_row() {
         ],
         Index::int64(vec![1, 2]),
     );
-    df.set_computed("x", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
+    df.set_computed("x", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     let before = snapshot(&df);
     let batch = frame(
         &["s", "x"],
@@ -328,7 +328,7 @@ fn cached_directive_columns_are_never_appended() {
         vec![Column::f64(vec![1.0]); 3],
         Index::range(1),
     );
-    df.set_computed("ema:12", Reach { lookback: 12, resume: 0, continuation: 12, history: History::Window });
+    df.set_computed("ema:12", std::sync::Arc::new(()), Reach { lookback: 12, resume: 0, continuation: 12, history: History::Window });
     let before = snapshot(&df);
     let rows = frame(
         &["close", "ema:12"],
@@ -357,8 +357,8 @@ fn cached_directive_columns_are_never_appended() {
         vec![Column::f64(vec![1.0]); 4],
         Index::range(1),
     );
-    wide.set_computed("c1", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
-    wide.set_computed("c2", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
+    wide.set_computed("c1", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
+    wide.set_computed("c2", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     wide.append(&frame(
         &["b"],
         vec![Column::f64(vec![2.0])],
@@ -455,7 +455,7 @@ fn refolding_the_forming_row_is_the_period_reduce() {
         None,
     )
     .unwrap();
-    df.set_computed("sum", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
+    df.set_computed("sum", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     df.set_computed_states("sum", Some(vec![1.0]), Some(vec![0.5]));
     let period = DataFrame::new(
         vec!["first".into(), "max".into(), "sum".into()],
@@ -467,6 +467,9 @@ fn refolding_the_forming_row_is_the_period_reduce() {
         None,
     )
     .unwrap();
+    let before = snapshot(&df);
+    df.check_refold(1, &period, &period.slice_data(2, 3), &ops).unwrap();
+    assert_eq!(snapshot(&df), before); // float / NaN validation leaves cells and cache states alone
     df.refold_forming_row(1, &period, &ops).unwrap();
     assert_eq!(df.column("first").unwrap().get_f64(1), 4.0);
     // a missing input makes the period's max missing (no skipped value)

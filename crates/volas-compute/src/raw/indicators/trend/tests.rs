@@ -13,7 +13,8 @@
         let full = sar(&high, &low, accel, max);
         for &from in &[2usize, 3, 10, 40, 80, 120, 159] {
             let st = sar_final_state(&high[..from], &low[..from], accel, max).unwrap();
-            let (tail, _) = sar_resume(&high, &low, accel, max, from, &st).unwrap();
+            let mut tail = Vec::new();
+    let _ = sar_resume(&high, &low, accel, max, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &full[from..], "sar");
         }
         // The oscillating series must actually reverse in both directions for the resume to
@@ -55,8 +56,8 @@
                     ams,
                 )
                 .unwrap();
-                let (tail, _) =
-                    sarext_resume(&high, &low, offset, ail, al, aml, ais, as_, ams, from, &st)
+                let mut tail = Vec::new();
+    let _ = sarext_resume(&high, &low, offset, ail, al, aml, ais, as_, ams, from, &st, &mut tail)
                         .unwrap();
                 assert_bits(&tail, &full[from..], "sarext");
             }
@@ -129,9 +130,9 @@
         // from < 2 -> resume declines (714 / 973). State is unread on the None path.
         let st = vec![1.0, 0.02, 10.0, 8.0, 10.0, 8.0];
         let (h, l, _c) = ohlc(20);
-        assert!(sar_resume(&h, &l, 0.02, 0.2, 1, &st).is_none());
+        assert!(sar_resume(&h, &l, 0.02, 0.2, 1, &st, &mut Vec::new()).is_none());
         let st7 = vec![1.0, 0.02, 0.02, 10.0, 8.0, 10.0, 8.0];
-        assert!(sarext_resume(&h, &l, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2, 1, &st7).is_none());
+        assert!(sarext_resume(&h, &l, 0.0, 0.02, 0.02, 0.2, 0.02, 0.02, 0.2, 1, &st7, &mut Vec::new()).is_none());
     }
 
     /// The remaining `*_final_state` / `*_resume` None guards in the MA-family helpers:
@@ -164,9 +165,9 @@
 
         // kama_resume underflow: period == 0 / from <= period / from > n -> None (trend.rs:545).
         let st = kama_final_state(&data, 10, 0).unwrap();
-        assert!(kama_resume(&data, 0, 20, &st).is_none());
-        assert!(kama_resume(&data, 10, 10, &st).is_none()); // from <= period
-        assert!(kama_resume(&data, 10, 1000, &st).is_none()); // from > n
+        assert!(kama_resume(&data, 0, 20, &st, &mut Vec::new()).is_none());
+        assert!(kama_resume(&data, 10, 10, &st, &mut Vec::new()).is_none()); // from <= period
+        assert!(kama_resume(&data, 10, 1000, &st, &mut Vec::new()).is_none()); // from > n
 
         // atr_final_state: period == 0 / period >= n -> None (trend.rs:1226).
         let (h, l, c) = ohlc(60);
@@ -174,5 +175,5 @@
         assert!(atr_final_state(&h, &l, &c, 100).is_none());
         // atr_resume: from == 0 -> None (trend.rs:1253).
         let st = atr_final_state(&h, &l, &c, 14).unwrap();
-        assert!(atr_resume(&h, &l, &c, 14, 0, &st).is_none());
+        assert!(atr_resume(&h, &l, &c, 14, 0, &st, &mut Vec::new()).is_none());
     }

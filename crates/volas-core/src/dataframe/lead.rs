@@ -3,8 +3,7 @@
 //! each cached column whose history starts before the selection needs the fewer of its
 //! [`Reach::lead`](super::Reach::lead) and its history's rows there — and a recursion the
 //! rows after the point of its history it replays from: its checkpoint, or its whole
-//! history when it keeps none (a recursion carried by its state whose start is near, or one
-//! that carries no state, which it is computed over).
+//! history when it keeps no checkpoint (a recursion whose history starts nearby).
 //!
 //! The lead is history: it is never written. Its values keep the dtype they had; when a
 //! data column is later replaced by one of another dtype, a recompute reads both in their
@@ -21,13 +20,14 @@ use crate::index::Index;
 use super::{ComputedMeta, DataFrame, History};
 
 /// The rows `[from, to)` of the data columns of a frame's schema — the schema of the
-/// frame it was taken for (`names` / `name_to_idx`, shared with it), one column per name,
+/// frame it was taken for (`name_to_idx`, shared with it), one column per name,
 /// `None` for a cached column's — whose row `to` would be the frame's row 0. A lead that
 /// is most of its source's rows shares the source's buffers; a shorter one is a copy of
-/// just its rows, so a lead never pins more than twice the rows it keeps.
+/// just its rows. Packed float columns may share the copied lead rows and selected
+/// visible rows in one bounded slab; it never pins the source history. Removing
+/// columns may retain the other copied ranges until the lead is copied again.
 #[derive(Clone, Debug)]
 pub(super) struct Lead {
-    names: Arc<Vec<String>>,
     name_to_idx: Arc<FxHashMap<String, usize>>,
     columns: Vec<Option<Column>>,
     /// The rows each held column has.
@@ -59,13 +59,16 @@ fn join(head: Column, tail: &Column) -> Result<Column> {
 
 /// How many rows before absolute row `first` the cached columns `computed` read (see the
 /// module docs).
-fn wanted(computed: &FxHashMap<String, ComputedMeta>, first: usize) -> usize {
+fn wanted(computed: &FxHashMap<Arc<str>, ComputedMeta>, first: usize) -> usize {
     computed
         .values()
         .filter(|m| m.since < first)
-        .map(|m| match replays_from(m) {
-            // the rows after the point it replays from, and what their recompute reads before
-            Some(from) if from < first => (first - from + m.reach.lead()).min(first - m.since),
+        .map(|m| match (m.reach.history, replays_from(m)) {
+            // Checkpoint state already owns every kernel tail and chain ring. Only
+            // stateless operands read raw rows before its next row (`operands`).
+            (History::Carried { operands }, Some(from)) => {
+                first.saturating_sub(from.saturating_sub(operands)).min(first - m.since)
+            }
             _ => m.reach.lead().min(first - m.since),
         })
         .max()
@@ -74,13 +77,11 @@ fn wanted(computed: &FxHashMap<String, ComputedMeta>, first: usize) -> usize {
 
 /// The absolute row a recompute of recursion `m` replays from, when it is a recursion
 /// that a frame not holding its history keeps by a point of it: the row after its
-/// checkpoint — or its history's start, which a recursion carried by its state with no
-/// checkpoint, or one carrying no state, is computed over.
+/// checkpoint — or its history's start when no checkpoint has formed yet.
 fn replays_from(m: &ComputedMeta) -> Option<usize> {
     match (m.reach.history, &m.checkpoint) {
-        (History::Carried { .. }, Some(cp)) => Some(cp.at + 1),
+        (History::Carried { .. }, Some(cp)) => Some(cp.position() + 1),
         (History::Carried { .. }, None) => Some(m.since),
-        (History::Unkept, _) if m.state.is_none() => Some(m.since),
         _ => None,
     }
 }
@@ -110,9 +111,9 @@ impl Lead {
     /// This lead over the data columns of `frame` (the frame it was taken for, less some
     /// columns): those it holds, in `frame`'s schema.
     pub(super) fn over(&self, frame: &DataFrame) -> Lead {
-        let held = |n: &String| self.column(n).filter(|_| !frame.computed.contains_key(n)).cloned();
+        let held = |n: &String| self.column(n).filter(|_| !frame.computed.contains_key(n.as_str())).cloned();
         let columns = frame.names.iter().map(held).collect();
-        Lead { names: Arc::clone(&frame.names), name_to_idx: Arc::clone(&frame.name_to_idx), columns, ..*self }
+        Lead { name_to_idx: Arc::clone(&frame.name_to_idx), columns, ..*self }
     }
 
     /// This lead keeping its last `rows` rows only, copied out of the buffers they would
@@ -132,18 +133,94 @@ impl Lead {
 
     #[cfg(debug_assertions)]
     pub(super) fn debug_check(&self) {
-        assert_eq!(self.columns.len(), self.names.len(), "one lead column per name");
+        assert_eq!(self.columns.len(), self.name_to_idx.len(), "one lead column per name");
         assert!(self.columns.iter().flatten().all(|c| c.len() == self.height), "the lead's columns are alike");
         assert!(self.from <= self.to && self.to <= self.height, "the lead's rows are its columns'");
     }
 }
 
 impl DataFrame {
+    /// A short float selection may copy its visible rows and raw lead into one
+    /// immutable allocation. Older lead or mostly-shared history follows `lead_before`.
+    pub(super) fn copied_slab_lead_rows(&self, start: usize, computed: &FxHashMap<Arc<str>, ComputedMeta>) -> usize {
+        let rows = wanted(computed, self.origin + start);
+        if rows > 0 && rows <= start && rows < self.height - rows && computed.len() < self.width() {
+            rows
+        } else {
+            0
+        }
+    }
+
+    /// Raw inputs precede the cached suffix: copy each input's adjacent lead and
+    /// visible rows together. Every column still has its own COW range and NaN fact.
+    pub(super) fn copy_float_prefix_rows(&self, start: usize, end: usize, raw: usize, lead_rows: usize) -> (Vec<Column>, Lead) {
+        let rows = end - start;
+        let mut values = Vec::with_capacity(rows * self.width() + lead_rows * raw);
+        for (i, col) in self.columns.iter().enumerate() {
+            let from = if i < raw { start - lead_rows } else { start };
+            values.extend_from_slice(&col.as_f64().expect("checked floats")[from..end]);
+        }
+        let owner = Arc::new(values);
+        let mut columns = Vec::with_capacity(self.width());
+        let mut history = Vec::with_capacity(self.width());
+        for (i, col) in self.columns.iter().enumerate() {
+            let clean = col.known_has_nan() == Some(false);
+            let buffer = |range| {
+                let values = if clean {
+                    crate::buffer::Buffer::from_shared_nan_free_range(Arc::clone(&owner), range)
+                } else {
+                    crate::buffer::Buffer::from_shared_range(Arc::clone(&owner), range)
+                }.expect("copied prefix slab range");
+                Column::F64(values)
+            };
+            let from = if i < raw { i * (rows + lead_rows) } else { i * rows + raw * lead_rows };
+            let visible = if i < raw { from + lead_rows } else { from };
+            columns.push(buffer(visible..visible + rows));
+            history.push((i < raw).then(|| buffer(from..from + lead_rows)));
+        }
+        let lead = Lead { name_to_idx: Arc::clone(&self.name_to_idx), columns: history, height: lead_rows, from: 0, to: lead_rows };
+        (columns, lead)
+    }
+
+    /// Finish the bounded copied slab, preserving the visible prefix and adding only
+    /// raw operand rows. The caller checked that all columns are float64.
+    pub(super) fn finish_copied_slab_lead(
+        &self, start: usize, computed: &FxHashMap<Arc<str>, ComputedMeta>, rows: usize, mut values: Vec<f64>,
+    ) -> (Arc<Vec<f64>>, Option<Lead>) {
+        if rows == 0 {
+            return (Arc::new(values), None);
+        }
+        let data_count = self.width() - computed.len();
+        let raw_prefix = self.first_computed == Some(data_count);
+        let data = |i: usize| if raw_prefix { i < data_count } else {
+            !computed.contains_key(self.names[i].as_str())
+        };
+        let mut offset = values.len();
+        for (i, col) in self.columns.iter().enumerate() {
+            if data(i) {
+                values.extend_from_slice(&col.as_f64().expect("checked floats")[start - rows..start]);
+            }
+        }
+        let owner = Arc::new(values);
+        let columns = self.columns.iter().enumerate().map(|(i, col)| data(i).then(|| {
+            let range = offset..offset + rows;
+            offset += rows;
+            let buffer = if col.known_has_nan() == Some(false) {
+                crate::buffer::Buffer::from_shared_nan_free_range(Arc::clone(&owner), range)
+            } else {
+                crate::buffer::Buffer::from_shared_range(Arc::clone(&owner), range)
+            }.expect("copied lead slab range");
+            Column::F64(buffer)
+        })).collect();
+        let lead = Lead { name_to_idx: Arc::clone(&self.name_to_idx), columns, height: rows, from: 0, to: rows };
+        (owner, Some(lead))
+    }
+
     /// The lead of the selection starting at row `start` whose cached columns are
     /// `computed`: the rows they read before it (see the module docs), taken from this
     /// frame's rows before `start`, then its own lead. `None` when no column reads
     /// before it.
-    pub(super) fn lead_before(&self, start: usize, computed: &FxHashMap<String, ComputedMeta>) -> Option<Lead> {
+    pub(super) fn lead_before(&self, start: usize, computed: &FxHashMap<Arc<str>, ComputedMeta>) -> Option<Lead> {
         let first = self.origin + start;
         let wanted = wanted(computed, first);
         let own = wanted.min(start);
@@ -152,13 +229,43 @@ impl DataFrame {
         if own + older == 0 {
             return None;
         }
-        let data = |i: usize| !computed.contains_key(&self.names[i]);
-        let schema = (Arc::clone(&self.names), Arc::clone(&self.name_to_idx));
+        let data_count = self.width().saturating_sub(computed.len());
+        // When every raw column precedes the cached suffix, its count and the
+        // memoized first cached position agree. No per-column key lookup is needed.
+        let raw_prefix = self.first_computed == Some(data_count);
+        let data = |i: usize| if raw_prefix { i < data_count } else {
+            self.first_computed.is_none_or(|first| i < first)
+                || !computed.contains_key(self.names[i].as_str())
+        };
+        let name_to_idx = Arc::clone(&self.name_to_idx);
         if older == 0 && 2 * own >= self.height {
             // most of this frame's rows: share its buffers rather than copy them
             let columns = self.columns.iter().enumerate().map(|(i, c)| data(i).then(|| c.clone())).collect();
-            let (names, name_to_idx) = schema;
-            return Some(Lead { names, name_to_idx, columns, height: self.height, from: start - own, to: start });
+            return Some(Lead { name_to_idx, columns, height: self.height, from: start - own, to: start });
+        }
+        if older == 0 && data_count > 1
+            && self.columns.iter().all(|col| matches!(col, Column::F64(_)))
+        {
+            // One bounded copy for the raw float lead, not a separate Vec and Arc
+            // per column. The visible columns remain independent value copies.
+            let mut values = Vec::with_capacity(own * data_count);
+            for (i, col) in self.columns.iter().enumerate() {
+                if data(i) {
+                    values.extend_from_slice(&col.as_f64().expect("checked floats")[start - own..start]);
+                }
+            }
+            let owner = Arc::new(values);
+            let mut offset = 0;
+            let columns = self.columns.iter().enumerate().map(|(i, _)| {
+                data(i).then(|| {
+                    let from = offset;
+                    offset += own;
+                    let buffer = crate::buffer::Buffer::from_shared_range(Arc::clone(&owner), from..offset)
+                        .expect("copied slab range");
+                    Column::F64(buffer)
+                })
+            }).collect();
+            return Some(Lead { name_to_idx, columns, height: own, from: 0, to: own });
         }
         let columns = self
             .columns
@@ -176,8 +283,7 @@ impl DataFrame {
             })
             .collect();
         let len = own + older;
-        let (names, name_to_idx) = schema;
-        Some(Lead { names, name_to_idx, columns, height: len, from: 0, to: len })
+        Some(Lead { name_to_idx, columns, height: len, from: 0, to: len })
     }
 
     /// The lead trimmed to what the cached columns read now — after the set of cached
@@ -192,6 +298,43 @@ impl DataFrame {
         }
     }
 
+    /// Validate incoming cells against the dtype they will share with the historical
+    /// lead. Every numeric widening is exact by dtype except int64 into float64;
+    /// only that pair scans present cells, with no conversion or allocation.
+    pub(super) fn check_lead_values(&self, name: &str, col: &Column, from: usize, end: usize) -> Result<()> {
+        let Column::I64(values, valid) = col else { return Ok(()) };
+        let Some(held) = self.lead.as_ref().filter(|lead| lead.len() > 0).and_then(|lead| lead.column(name)) else {
+            return Ok(());
+        };
+        if !held.dtype().is_float() {
+            return Ok(());
+        }
+        for row in from..end {
+            if valid.is_valid(row) && crate::numeric::i64_to_f64_exact(values[row]).is_none() {
+                return Err(lead_inexact(name, values[row]));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check a fold through the column owner, then validate its already computed
+    /// integer aggregate against the historical lead. No second pass or allocation.
+    pub(super) fn check_fold_with_lead<'a>(
+        &self, col: usize, dst: &Column, (row, op, restart): (usize, crate::CombineOp, bool),
+        cells: impl IntoIterator<Item = (&'a Column, usize)>,
+    ) -> Result<()> {
+        let value = dst.checked_fold_value(row, op, restart, cells)?;
+        if let (Column::I64(..), Some(value), Some(lead)) = (dst, value, &self.lead) {
+            if lead.len() > 0 && crate::numeric::i64_to_f64_exact(value).is_none() {
+                let name = &self.names[col];
+                if lead.column(name).is_some_and(|held| held.dtype().is_float()) {
+                    return Err(lead_inexact(name, value));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Whether column `name` may take `col` in place of its values: the lead's rows of
     /// it (the history before row 0, which no write changes) must read with `col`'s
     /// values in a lossless common dtype — else the write is refused before it is made.
@@ -200,6 +343,7 @@ impl DataFrame {
         if lead.column(name).is_none() || lead.len() == 0 {
             return Ok(());
         }
+        self.check_lead_values(name, col, 0, col.len())?;
         join(lead.tail(name, lead.len(), col.dtype()), &col.slice(0, 0)).map(|_| ()).map_err(|e| {
             VolasError::DType(format!(
                 "cannot replace column \"{name}\" with {} values: this frame's cached columns read \
@@ -236,4 +380,11 @@ impl DataFrame {
             .expect("equal-length columns")
             .with_origin(frame.origin - take)
     }
+}
+
+fn lead_inexact(name: &str, value: i64) -> VolasError {
+    VolasError::DType(format!(
+        "cannot write column \"{name}\": {value} is not exactly representable as float64, \
+         the common dtype of its new values and its rows before the frame's first row"
+    ))
 }

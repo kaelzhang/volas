@@ -11,18 +11,23 @@
 //! - warm-up is counted on the column's processed history (`since` to the last valid
 //!   row, absolute positions), never on a slice's local row numbers.
 
+use std::sync::Arc;
+
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
-use super::{Anchors, ComputedMeta, DataFrame, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
+use super::{Anchors, ComputedMeta, DataFrame, Directive, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
 
-/// A stale cached column as the refresh reads it: its name, reach, valid-row
-/// cursor, where its history starts, and whether its processed history is past the
-/// warm-up ([`ComputedMeta::warm`]).
-#[derive(Clone, Debug, PartialEq)]
-pub struct StaleComputed {
-    /// The column (= its canonical directive).
-    pub name: String,
+/// A stale cached column as the refresh reads it: its name, bound directive, reach,
+/// valid-row cursor, and whether its processed history is past the warm-up
+/// ([`ComputedMeta::warm`]).
+/// `Name` defaults to `String`; shared snapshots use `Arc<str>` without copying names.
+#[derive(Clone, Debug)]
+pub struct StaleComputed<Name = String> {
+    /// The column (= its canonical directive), owned or shared by the snapshot.
+    pub name: Name,
+    /// The bound directive it computes.
+    pub directive: Directive,
     /// The rows the column reads around its own.
     pub reach: Reach,
     /// Rows `[0, valid_rows)` hold valid values.
@@ -34,27 +39,39 @@ pub struct StaleComputed {
     pub warm: bool,
 }
 
+fn stale_snapshot<Name>(name: Name, meta: &ComputedMeta, origin: usize) -> StaleComputed<Name> {
+    StaleComputed {
+        name,
+        directive: Arc::clone(&meta.directive),
+        reach: meta.reach,
+        valid_rows: meta.valid_rows,
+        since: meta.since,
+        warm: meta.warm(origin),
+    }
+}
+
 impl DataFrame {
     /// Re-derive `first_computed` after the set of cached columns changed.
     pub(super) fn note_computed(&mut self) {
-        self.first_computed = self.computed.keys().filter_map(|k| self.name_to_idx.get(k).copied()).min();
+        self.first_computed = self.computed.keys().filter_map(|k| self.name_to_idx.get(k.as_ref()).copied()).min();
         self.retrim_lead();
     }
 
-    /// Record that column `name` is a materialized directive result (valid for
-    /// all current rows), its history starting at this frame's row 0, reading `reach`
-    /// rows around its own.
-    pub fn set_computed(&mut self, name: &str, reach: Reach) {
+    /// Record that column `name` is a materialized result of `directive` (valid for all
+    /// current rows), its history starting at this frame's row 0, reading `reach` rows
+    /// around its own.
+    pub fn set_computed(&mut self, name: &str, directive: Directive, reach: Reach) {
         self.computed.insert(
-            name.to_string(),
+            Arc::from(name),
             ComputedMeta {
+                directive,
                 reach,
                 valid_rows: self.height,
                 state: None,
                 state_before_last: None,
                 since: self.origin,
                 state_at: 0,
-                scratch: Vec::new(),
+                scratch: None,
                 checkpoint: None,
                 pending: None,
                 anchors: Anchors::default(),
@@ -86,8 +103,8 @@ impl DataFrame {
             match meta.last_valid(origin) {
                 Some(at) => {
                     meta.state_at = at;
-                    meta.state_before_last = before_last.filter(|_| at > origin && state.is_some());
-                    meta.state = state;
+                    meta.state_before_last = before_last.filter(|_| at > origin && state.is_some()).map(Arc::from);
+                    meta.state = state.map(Arc::from);
                 }
                 None => {
                     meta.state = None;
@@ -115,19 +132,25 @@ impl DataFrame {
             return None;
         }
         let prev = meta.state.take()?;
-        let mut next = std::mem::take(&mut meta.scratch);
-        next.clear();
-        next.resize(prev.len(), 0.0);
-        let out = step(self, &prev, origin, &mut next);
+        let mut next = match meta.scratch.take() {
+            Some(next) if next.len() == prev.len() => next,
+            // The sized slice and its Arc header occupy one allocation. A successful
+            // step publishes every word, so recycled buffers need no clearing.
+            _ => std::iter::repeat_n(0.0, prev.len()).collect::<Arc<[f64]>>(),
+        };
+        let out = match Arc::get_mut(&mut next) {
+            Some(writable) => step(self, &prev, origin, writable),
+            None => step(self, &prev, origin, Arc::make_mut(&mut next)),
+        };
         let meta = self.computed.get_mut(name)?;
         if out.is_some() {
-            meta.scratch = meta.state_before_last.take().unwrap_or_default();
+            meta.scratch = meta.state_before_last.take();
             meta.state_before_last = Some(prev);
             meta.state = Some(next);
             meta.state_at += 1;
         } else {
             meta.state = Some(prev);
-            meta.scratch = next;
+            meta.scratch = Some(next);
         }
         out
     }
@@ -140,7 +163,7 @@ impl DataFrame {
         if let Some(meta) = self.computed.get_mut(name) {
             let at = meta.last_valid(origin);
             // the old state is the one before only if it described the row before
-            let before = meta.state.replace(state);
+            let before = meta.state.replace(Arc::from(state));
             meta.state_before_last = before.filter(|_| at == Some(meta.state_at + 1));
             match at {
                 Some(at) => meta.state_at = at,
@@ -180,6 +203,11 @@ impl DataFrame {
         Some(self.computed.get(name)?.since)
     }
 
+    /// The bound directive the cached column computes.
+    pub fn computed_directive(&self, name: &str) -> Option<&Directive> {
+        self.computed.get(name).map(|meta| &meta.directive)
+    }
+
     /// The absolute position of cached column `name`'s first present value — where its
     /// warm-up ended — if one has been computed.
     pub fn computed_first_present(&self, name: &str) -> Option<usize> {
@@ -190,7 +218,7 @@ impl DataFrame {
     pub fn computed_columns(&self) -> Vec<(String, ComputedMeta)> {
         self.computed
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.as_ref().to_owned(), v.clone()))
             .collect()
     }
 
@@ -201,19 +229,27 @@ impl DataFrame {
     /// via [`computed_resume_state`](Self::computed_resume_state) just before resuming
     /// it, so no per-column `Vec<f64>` is deep-copied per fulfill.
     pub fn stale_computed_columns(&self, only: Option<&str>) -> Vec<StaleComputed> {
-        self.computed
-            .iter()
-            .filter(|(name, meta)| {
-                meta.valid_rows < self.height && only.is_none_or(|target| target == name.as_str())
-            })
-            .map(|(name, meta)| StaleComputed {
-                name: name.clone(),
-                reach: meta.reach,
-                valid_rows: meta.valid_rows,
-                since: meta.since,
-                warm: meta.warm(self.origin),
-            })
+        self.stale_metadata(only)
+            .map(|(name, meta)| stale_snapshot(name.as_ref().to_owned(), meta, self.origin))
             .collect()
+    }
+
+    /// An owned stale-column snapshot with shared names. A single column needs no
+    /// allocation: the first item is inline and only further items use a Vec. Like
+    /// `stale_computed_columns`, it holds no frame borrow or carried state, so the
+    /// frame may be refreshed while consuming it.
+    pub fn shared_stale_computed_columns(&self, only: Option<&str>) -> impl Iterator<Item = StaleComputed<Arc<str>>> + use<> {
+        let mut items = self.stale_metadata(only)
+            .map(|(name, meta)| stale_snapshot(Arc::clone(name), meta, self.origin));
+        let first = items.next();
+        let rest: Vec<_> = items.collect();
+        first.into_iter().chain(rest)
+    }
+
+    fn stale_metadata<'a>(&'a self, only: Option<&'a str>) -> impl Iterator<Item = (&'a Arc<str>, &'a ComputedMeta)> {
+        self.computed.iter().filter(move |(name, meta)| {
+            meta.valid_rows < self.height && only.is_none_or(|target| target == name.as_ref())
+        })
     }
 
     /// Write rows `[from, from + len)` of the computed column `name` through `write`,
@@ -281,13 +317,18 @@ impl DataFrame {
         })
     }
 
-    /// Overwrite one F64 computed value and mark the column valid through that row,
+    /// Overwrite one numeric or boolean computed value and mark the column valid through that row,
     /// under the same rule as [`update_computed_tail`](Self::update_computed_tail).
     /// This avoids allocating a one-value tail column on the single-bar append path.
-    pub fn update_computed_f64_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
+    pub fn update_computed_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
         self.write_computed(name, row, 1, |col| match col {
             Column::F64(buf) => {
                 buf.set(row, value);
+                Ok(())
+            }
+            Column::Bool(buf, valid) => {
+                valid.set(row, buf.len(), !value.is_nan());
+                buf.make_mut()[row] = value != 0.0;
                 Ok(())
             }
             col => Err(VolasError::DType(format!(
@@ -300,7 +341,7 @@ impl DataFrame {
     /// Drop the computed (cached-directive) status of the column at `col`, if any.
     fn drop_computed_at(&mut self, col: usize) {
         if let Some(name) = self.names.get(col) {
-            self.computed.remove(name);
+            self.computed.remove(name.as_str());
             self.note_computed();
         }
     }
@@ -323,7 +364,7 @@ impl DataFrame {
                 meta.valid_rows = last_row;
                 let replaced = std::mem::replace(&mut meta.state, meta.state_before_last.take());
                 if let Some(buf) = replaced {
-                    meta.scratch = buf;
+                    meta.scratch = Some(buf);
                     meta.state_at = meta.state_at.saturating_sub(1);
                 }
             }

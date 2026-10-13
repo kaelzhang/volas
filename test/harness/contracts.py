@@ -15,11 +15,7 @@ from __future__ import annotations
 
 # --- defects the machines step around (each has a strict-xfail reproduction) -----
 
-OPEN_DEFECTS: frozenset[str] = frozenset({
-    # directive_stringify keeps the argument tokens as written ('ma:05', 'sar:0.020')
-    # while df[d] names the column from the bound values ('ma:5', 'sar').
-    'stringify-column-name',
-})
+OPEN_DEFECTS: frozenset[str] = frozenset()
 
 # Directive families whose incremental refresh is known to diverge from the full
 # compute (each pinned by a strict-xfail reproduction and by KNOWN_DIVERGENT in
@@ -36,10 +32,10 @@ def avoids(defect: str) -> bool:
 
 # --- naming (README "directive_stringify") -------------------------------------------
 
-# A bare name that is both a data column and a built-in command usable bare raises at
-# bind time (REQUIREMENTS R17); a data column named like a bare command that a cached
-# directive reads cannot be added (R17). A new directive binds data columns only.
-AMBIGUOUS_BARE_NAME_RAISES = True
+# A bare name that is both a data column and a built-in command reads the data at
+# bind time: an existing data column owns the name. A new data column cannot shadow
+# a command read by an existing cached directive. A new directive binds data only.
+AMBIGUOUS_BARE_NAME_RAISES = False
 COLUMN_UNDER_A_CACHED_COMMAND_RAISES = True
 
 # `directive_stringify(d)` is "the actual column name volas caches it under".
@@ -81,9 +77,7 @@ APPEND_FOREIGN_INDEX_RAISES = True
 # `iloc[a:]` keeps every already-cached column on its full-history continuation (values,
 # carried state, and the rows before the slice its recompute reads), however short the
 # slice; a directive first cached on the slice is computed over the retained rows only.
-# A write on the slice recomputes a cached column over its full history too — except a
-# recursion kept by its carried state, which the slice cannot replay from before its
-# first row: its refresh raises (docs/dataframe-api.md "df.is_computed").
+# A write on the slice replays the cached column from its retained history checkpoint.
 SLICE_CACHED_COLUMNS_CONTINUE = True
 
 # --- tf fold (README "Live cumulation") --------------------------------------------------

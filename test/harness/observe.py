@@ -82,17 +82,27 @@ def representation(s: volas.Series, c: str) -> None:
         assert (np.isnan(out) == missing).all(), f'bool column {c!r}: NaN not exactly at the NA cells'
 
 
+def refresh_raises(e: Exception) -> bool:
+    """Whether ``e`` is an error a refresh raises by contract: the float64-exactness
+    error (contract #26), or a recursion whose history the frame no longer holds after a
+    write discarded its carried state (README: a slice continues a recursive column only
+    from its carried state)."""
+    return isinstance(e, OverflowError) or (isinstance(e, ValueError) and str(e).startswith('cannot recompute'))
+
+
 def stored(df: volas.DataFrame, c: str) -> volas.Series | None:
     """Column ``c`` without refreshing ``df``: a data column as stored, a cached one as a
     refreshed copy reads it (``get_column`` refreshes the column it reads) — ``None``
-    when that refresh raises the float64-exactness error (contract #26), which the
-    value checks model against the reference."""
+    when that refresh raises by contract (:func:`refresh_raises`), which the value checks
+    model against the reference."""
     if not df.is_computed(c):
         return df.get_column(c)
     try:
         return df.copy().get_column(c)
-    except OverflowError:
-        return None
+    except Exception as e:  # noqa: BLE001 - classified
+        if refresh_raises(e):
+            return None
+        raise
 
 
 def raw_state(df: volas.DataFrame) -> dict:
@@ -125,7 +135,9 @@ def fresh_view(df: volas.DataFrame) -> dict:
     view = df.copy()
     try:
         view.fulfill()
-    except OverflowError as e:
+    except Exception as e:  # noqa: BLE001 - classified
+        if not refresh_raises(e):
+            raise
         return {'refresh raises': str(e)}
     return {c: _bytes(_column(view, c)) for c in view.columns}
 

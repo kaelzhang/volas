@@ -120,6 +120,7 @@ pub fn kdj_final_state(
 /// identical value to the full series). `None` when there is not a full RSV window before
 /// `from` (`from + 1 < period_rsv`), `from` is out of range, or the state is too short.
 #[allow(clippy::too_many_arguments)]
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn kdj_resume(
     high: &[f64],
     low: &[f64],
@@ -130,7 +131,8 @@ pub fn kdj_resume(
     line: KdjLine,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let n = close.len();
     if period_rsv == 0 || from == 0 || from > n || from + 1 < period_rsv || state.is_empty() {
         return None;
@@ -143,12 +145,12 @@ pub fn kdj_resume(
     let mut k_prev = state[0];
     match line {
         KdjLine::K => {
-            let mut out = Vec::with_capacity(n - from);
+            out.reserve(n - from);
             for &r in rsv.iter().skip(skip) {
                 k_prev = bk * k_prev + ak * r;
                 out.push(k_prev);
             }
-            Some((out, vec![k_prev]))
+            Some(vec![k_prev])
         }
         KdjLine::D | KdjLine::J => {
             if state.len() < 2 {
@@ -157,7 +159,7 @@ pub fn kdj_resume(
             let (ad, bd) = (1.0 / period_d as f64, 1.0 - 1.0 / period_d as f64);
             let mut d_prev = state[1];
             let is_j = matches!(line, KdjLine::J);
-            let mut out = Vec::with_capacity(n - from);
+            out.reserve(n - from);
             for &r in rsv.iter().skip(skip) {
                 k_prev = bk * k_prev + ak * r;
                 d_prev = bd * d_prev + ad * k_prev;
@@ -167,7 +169,7 @@ pub fn kdj_resume(
                     d_prev
                 });
             }
-            Some((out, vec![k_prev, d_prev]))
+            Some(vec![k_prev, d_prev])
         }
     }
 }
@@ -205,8 +207,8 @@ mod tests {
             )
             .unwrap();
             assert_eq!(st_k.len(), 1, "kdj.k carries [%K]");
-            let (tail, ret) =
-                kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, from, &st_k).unwrap();
+            let mut tail = Vec::new();
+            let ret = kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, from, &st_k, &mut tail).unwrap();
             assert_bits(&tail, &k_full[from..], "kdj.k");
             assert_eq!(ret.len(), 1);
 
@@ -223,12 +225,12 @@ mod tests {
             )
             .unwrap();
             assert_eq!(st_d.len(), 2, "kdj.d/.j carry [%K, %D]");
-            let (tail, ret) =
-                kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::D, from, &st_d).unwrap();
+            let mut tail = Vec::new();
+            let ret = kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::D, from, &st_d, &mut tail).unwrap();
             assert_bits(&tail, &d_full[from..], "kdj.d");
             assert_eq!(ret.len(), 2);
-            let (tail, _) =
-                kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::J, from, &st_d).unwrap();
+            let mut tail = Vec::new();
+            let _ = kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::J, from, &st_d, &mut tail).unwrap();
             assert_bits(&tail, &j_full[from..], "kdj.j");
         }
     }
@@ -246,12 +248,12 @@ mod tests {
 
         let st =
             kdj_final_state(&high[..40], &low[..40], &close[..40], p, pk, pd, init, true).unwrap();
-        assert!(kdj_resume(&high, &low, &close, 0, pk, pd, KdjLine::K, 40, &st).is_none()); // period_rsv == 0
-        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, 0, &st).is_none()); // from == 0
-        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, n + 1, &st).is_none()); // from > n
-        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, p - 2, &st).is_none()); // from + 1 < p
-        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, 40, &[]).is_none()); // empty state
-        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::D, 40, &[1.0]).is_none());
+        assert!(kdj_resume(&high, &low, &close, 0, pk, pd, KdjLine::K, 40, &st, &mut Vec::new()).is_none()); // period_rsv == 0
+        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, 0, &st, &mut Vec::new()).is_none()); // from == 0
+        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, n + 1, &st, &mut Vec::new()).is_none()); // from > n
+        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, p - 2, &st, &mut Vec::new()).is_none()); // from + 1 < p
+        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, 40, &[], &mut Vec::new()).is_none()); // empty state
+        assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::D, 40, &[1.0], &mut Vec::new()).is_none());
         // `.d` needs [%K, %D]
     }
 }

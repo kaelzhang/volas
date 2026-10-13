@@ -4,8 +4,8 @@ events (docs/dataframe-api.md "Derived frames"):
 - a contiguous row selection, however it is written, continues each cached column: its
   values, an append and a re-sent last row equal the full history's, bit for bit — a
   middle selection replays its recursions once, a short one keeps the rows before it its
-  columns read, a recursion that carries no state keeps its whole history;
-- a projection keeps the rows and continues the listed cached columns;
+  columns read, and each recursion retains a continuation checkpoint;
+- a projection keeps the listed columns as plain data values;
 - every other derivation is a new series: cached columns dropped, recomputed from the new
   frame's own rows on request;
 - a derivation of a stale frame raises (the read gate), a copy proceeds.
@@ -26,8 +26,8 @@ COLS = {'open': _c + rng.normal(0, .3, N + 4), 'high': _c + 1 + rng.random(N + 4
 DATA = list(COLS)
 
 # one directive per history class and shape: a window, a running accumulator, a count, a
-# recursion carried by its state (plain, reading past its lookback, over an operand), one
-# that carries none (a command, a composite), an absolute position, a boolean composite
+# recursion carried by its state (plain, reading past its lookback, over an operand),
+# a command and composite state chain, an absolute position, a boolean composite
 DIRECTIVES = ['ma:5', 'boll.upper:10', 'increase:3', 'ema:12', 'sar', 'ema:5@(ma:3)', 'macd.signal',
               'kcw:5', 'close+kama:3@open', 'maxindex:5', 'close > ema:6']
 
@@ -126,9 +126,8 @@ def test_a_selection_of_a_selection_continues_as_the_first_one(rng_name):
 
 
 def test_a_write_on_a_selection_recomputes_its_columns_over_their_history():
-    # a window column, and a recursion that carries no state (whose whole history the
-    # selection keeps), recompute over the rows the selection keeps before it — and so
-    # does a recursion carried by its state once those rows hold its whole history
+    # Window columns and recursive state chains replay the history retained by the
+    # selection, including the lead rows before its visible boundary.
     rows = history(N)
     rows['close'] = rows['close'].copy()
     rows['close'][N - 3] = 99.0
@@ -434,8 +433,8 @@ def test_a_period_key_selects_the_same_rows_in_one_and_two_dimensions():
 
 def test_dropping_a_column_keeps_the_others_continuing():
     # a drop removes the columns it names, everything else unchanged — not a projection:
-    # kcw carries no state, so a slice keeps its whole history; once it is dropped, ema
-    # stays cached and continues bit for bit, and only what ema needs stays
+    # Each recursion carries state; dropping kcw leaves ema continuing bit for bit
+    # and retains only the history ema needs.
     df = cached(['ema:3', 'kcw:5'])
     tail = df.iloc[N - 10:]
     kept = tail.drop(['kcw:5'], axis=1)
@@ -550,3 +549,15 @@ def test_a_selection_past_the_anchors_of_an_appended_history_replays_and_keeps_t
         want = written(lo, LONG, lo + 1)
         for d in RECURSIONS:
             assert np.array_equal(f[d].to_numpy(), want[d], equal_nan=True), (lo, d)
+
+
+@pytest.mark.parametrize('spelling', ['atr:14', 'ATR:14', 'atr:014'])
+def test_projected_directive_data_shadows_every_expression_operand(spelling):
+    df = cached(['atr:14'])
+    projected = df[['close', 'atr:14']]
+    values = projected.get_column('atr:14').to_numpy()
+    np.testing.assert_array_equal(projected[spelling], values)
+    np.testing.assert_array_equal(projected.exec(spelling + ' + 0'), values)
+    np.testing.assert_array_equal(projected[spelling + ' + 0'], values)
+    oracle = DataFrame({'x': values}).exec('ema:2@x')
+    np.testing.assert_array_equal(projected['ema:2@(' + spelling + ')'], oracle)

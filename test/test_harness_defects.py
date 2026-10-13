@@ -1,9 +1,8 @@
-"""Minimal reproductions of the open defects the differential harness steps around.
+"""Minimal regressions for defects discovered by the differential harness.
 
-Each test asserts the contract (see ``harness/contracts.py``) and is a strict xfail
-naming its defect: when a fix lands the test XPASSes, which fails the suite until the
-xfail and the matching ``OPEN_DEFECTS`` / ``DIVERGENT_FAMILIES`` entry are removed —
-so the machines start hunting that defect class again.
+Each test asserts the contract (see ``harness/contracts.py``). Resolved defects are
+ordinary passing tests, and the property machines exercise their operation classes
+again once the matching ``OPEN_DEFECTS`` entry is removed.
 """
 
 import numpy as np
@@ -15,10 +14,6 @@ from .harness import build
 from .harness.data import EPOCHS, NS, Schema, make_rows
 from .harness.ledger import Ledger
 from .harness.schedules import OHLCV
-
-
-def _xfail(defect, why):
-    return pytest.mark.xfail(strict=True, reason=f'{defect}: {why}')
 
 
 def _walk(n, seed=1):
@@ -66,7 +61,6 @@ def test_a_composite_never_reads_a_stale_cached_column():
     assert _same(df['close - obv'], _frame(cols, 0, 30)['close - obv'])
 
 
-@_xfail('H1 stringify-column-name', 'directive_stringify keeps argument spellings the column name normalizes')
 @pytest.mark.parametrize('directive', ['ma:05', 'sar:0.020', 'stddev:2,1.50', 'boll.upper:20,2.0'])
 def test_stringify_is_the_cached_column_name(directive):
     df = _frame(_walk(30), 0, 30)
@@ -304,11 +298,12 @@ def test_trix_resume_matches_on_zero_prices():
 
 
 def test_a_recursive_composite_continues_across_a_slice():
-    # it carries no state: the slice keeps its whole history and computes it over that
+    # Each recursion carries its state and the slice continues the same history.
     cols = _walk(40, 3)
     df = _frame(cols, 0, 30)
     df['(close)+(kama:3@open)']
     df = df.iloc[1:]
+    assert df.is_computed('close+kama:3@open')
     df.append(_frame(cols, 30, 31))
     df.fulfill()
     assert np.array_equal(np.asarray(df['close+kama:3@open'])[-1:],

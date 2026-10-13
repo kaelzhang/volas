@@ -1,9 +1,6 @@
 use volas_core::{Column, DataFrame};
 use volas_directive::{
-    exec::{
-        execute, execute_resume, execute_resume_default_series, execute_resume_default_series_one,
-        initial_state,
-    },
+    exec::{execute, execute_resume, execute_resume_step, initial_state},
     parse,
 };
 
@@ -50,7 +47,7 @@ fn resume_matches_full(df: &DataFrame, directive: &str, from: usize) {
     let node = parse(directive).unwrap();
     let head = df.slice_data(0, from);
     execute(&head, &node).unwrap();
-    let state = initial_state(&head, &node, head.height())
+    let state = initial_state(&head, &node, usize::MAX)
         .unwrap_or_else(|| panic!("no initial state for {directive}"));
     let (tail, _) = execute_resume(df, &node, &state, from, df.height(), 0)
         .unwrap_or_else(|| panic!("no resume for {directive}"));
@@ -58,91 +55,61 @@ fn resume_matches_full(df: &DataFrame, directive: &str, from: usize) {
     assert_f64_same(&tail.to_f64_vec(), &full[from..]);
 }
 
+/// One step of `directive` at `row` from its state over the rows before.
+fn step(df: &DataFrame, directive: &str, row: usize) -> Option<f64> {
+    let node = parse(directive).unwrap();
+    let head = df.slice_data(0, row);
+    let state = initial_state(&head, &node, usize::MAX)?;
+    let mut next = state.clone();
+    execute_resume_step(df, &node, &state, (row, 0), &mut next)
+}
+
+/// A formula of its own row (the price transforms, TR, the momentum family) steps one
+/// row with an empty state, exactly as the full kernel computes it.
 #[test]
-fn default_series_scalar_resume_covers_every_directive_arm() {
+fn a_row_formula_steps_like_its_kernel() {
     let df = ohlcv(20);
-    assert!(execute_resume_default_series_one(&df, "ma:2@close", 19).is_none());
-    assert!(execute_resume_default_series_one(&df, "avgprice", 20).is_none());
-
-    assert_eq!(
-        execute_resume_default_series_one(&df, "avgprice", 2).unwrap(),
-        (df.column("open").unwrap().as_f64().unwrap()[2]
-            + df.column("high").unwrap().as_f64().unwrap()[2]
-            + df.column("low").unwrap().as_f64().unwrap()[2]
-            + df.column("close").unwrap().as_f64().unwrap()[2])
-            / 4.0
-    );
-    assert!(execute_resume_default_series_one(&df, "tr", 0)
-        .unwrap()
-        .is_nan());
     for directive in [
-        "medprice",
-        "typprice",
-        "wclprice",
-        "bop",
-        "tr",
-        "mom:3",
-        "roc:3",
-        "rocp:3",
-        "rocr:3",
-        "rocr100:3",
+        "avgprice", "medprice", "typprice", "wclprice", "bop", "tr", "mom:3", "roc:3", "rocp:3", "rocr:3",
+        "rocr100:3", "mom:30",
     ] {
-        let value = execute_resume_default_series_one(&df, directive, 5)
-            .unwrap_or_else(|| panic!("scalar resume failed for {directive}"));
-        assert!(value.is_finite(), "{directive}");
+        let full = execute(&df, &parse(directive).unwrap()).unwrap().to_f64_vec();
+        for row in [1, 5, 19] {
+            let Some(value) = step(&df, directive, row) else {
+                assert!(row < volas_directive::lookback::lookback(&parse(directive).unwrap()));
+                continue;
+            };
+            assert_f64_same(&[value], &[full[row]]);
+        }
     }
-
-    assert!(execute_resume_default_series_one(&df, "mom:30", 5)
-        .unwrap()
-        .is_nan());
-    let zero_prior = DataFrame::new(
-        vec!["close".into()],
-        vec![Column::f64(vec![0.0, 1.0, 2.0])],
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        execute_resume_default_series_one(&zero_prior, "roc:2", 2).unwrap(),
-        0.0
-    );
+    // a row past the end declines; TR has no prior bar at row 0
+    let node = parse("avgprice").unwrap();
+    assert!(execute_resume_step(&df, &node, &[], (20, 0), &mut []).is_none());
+    assert!(step(&df, "tr", 0).is_none());
+    let zero_prior = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![0.0, 1.0, 2.0])], None).unwrap();
+    assert_eq!(step(&zero_prior, "roc:2", 2).unwrap(), 0.0);
 }
 
 #[test]
-fn default_series_tail_resume_covers_transform_and_ratio_arms() {
+fn a_row_formula_resumes_its_tail_like_its_kernel() {
     let df = ohlcv(12);
-    assert!(execute_resume_default_series(&df, "ma:2@close", 6).is_none());
-
     for directive in [
-        "avgprice",
-        "medprice",
-        "typprice",
-        "wclprice",
-        "bop",
-        "tr",
-        "mom:3",
-        "roc:3",
-        "rocp:3",
-        "rocr:3",
-        "rocr100:3",
+        "avgprice", "medprice", "typprice", "wclprice", "bop", "tr", "mom:3", "roc:3", "rocp:3", "rocr:3", "rocr100:3",
     ] {
-        let (tail, _) = execute_resume_default_series(&df, directive, 0)
+        let node = parse(directive).unwrap();
+        let from = volas_directive::lookback::lookback(&node);
+        let seed = initial_state(&df, &node, from).unwrap();
+        let (tail, state) = execute_resume(&df, &node, &seed, from, usize::MAX, 0)
             .unwrap_or_else(|| panic!("tail resume failed for {directive}"));
-        let full = execute(&df, &parse(directive).unwrap())
-            .unwrap()
-            .to_f64_vec();
-        assert_f64_same(&tail.to_f64_vec(), &full);
+        assert_eq!(state, initial_state(&df, &node, usize::MAX).unwrap());
+        assert_f64_same(&tail.to_f64_vec(), &execute(&df, &node).unwrap().to_f64_vec()[from..]);
     }
 }
 
 #[test]
-fn default_series_resume_reads_an_integer_column_as_f64() {
-    let df = DataFrame::new(
-        vec!["close".into()],
-        vec![Column::i64(vec![10, 11, 13, 12])],
-        None,
-    )
-    .unwrap();
-    assert_eq!(execute_resume_default_series_one(&df, "mom:2", 3).unwrap(), 1.0);
+fn a_step_reads_an_integer_column_as_f64() {
+    let df = DataFrame::new(vec!["close".into()], vec![Column::i64(vec![10, 11, 13, 12])], None).unwrap();
+    assert_eq!(step(&df, "mom:2", 3).unwrap(), 1.0);
 }
 
 #[test]
@@ -276,14 +243,53 @@ fn execute_dispatch_covers_specialized_default_fallbacks() {
     assert_eq!(out.len(), df.height());
 }
 
+/// `ma` at a recursive MA type runs as that average's own command, so it continues
+/// from that command's state — by the `Vec` resume and by the single-row step — exactly
+/// as a full recompute; and `kcw` continues the Keltner band's EMA + ATR pair. Both
+/// over a series with a missing row too.
+#[test]
+fn recursive_moving_averages_and_kcw_continue_from_a_state() {
+    let mut df = ohlcv(160);
+    for gap in [false, true] {
+        if gap {
+            let mut close = df.column("close").unwrap().to_f64_vec();
+            close[120] = f64::NAN;
+            df.set_column("close", Column::f64(close)).unwrap();
+        }
+        for directive in ["ma:5,1", "ma:5,3", "ma:5,4", "ma:5,6", "ma:5,7", "ma:5,8", "kcw", "kcw:7,4,1.5"] {
+            let node = parse(directive).unwrap();
+            let full = execute(&df, &node).unwrap().to_f64_vec();
+            let exact = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+            for from in [100, 121, 159] {
+                let head = df.slice_data(0, from);
+                let state = initial_state(&head, &node, usize::MAX).unwrap();
+                let (tail, _) = execute_resume(&df, &node, &state, from, usize::MAX, 0).unwrap();
+                let tail = tail.to_f64_vec();
+                assert!(tail.iter().zip(&full[from..]).all(|(&a, &b)| exact(a, b)), "{directive} from {from}");
+                let mut next = state.clone();
+                if let Some(v) = execute_resume_step(&df.slice_data(0, from + 1), &node, &state, (from, 0), &mut next) {
+                    assert!(exact(v, full[from]), "{directive} step at {from}: {v} vs {}", full[from]);
+                } else {
+                    assert_eq!(directive, "ma:5,7", "only MAMA has no single-row step");
+                }
+            }
+        }
+    }
+    // a period of 1 is the identity for every type: no recursion, the SMA's own state
+    let node = parse("ma:1,1").unwrap();
+    let head = df.slice_data(0, 50);
+    assert!(initial_state(&head, &node, usize::MAX).is_some());
+}
+
 #[test]
 fn resume_decline_paths_cover_question_mark_branches() {
     let df = ohlcv(80);
     let p = |directive: &str| parse(directive).unwrap();
-    let empty: &[f64] = &[];
+    let tr = initial_state(&df, &p("tr"), 1).unwrap();
+    let mom = initial_state(&df, &p("mom:30"), 30).unwrap();
 
-    assert!(execute_resume(&df, &p("tr"), empty, 0, df.height(), 0).is_some());
-    assert!(execute_resume(&df, &p("mom:30"), empty, 0, df.height(), 0).is_some());
+    assert!(execute_resume(&df, &p("tr"), &tr, 1, df.height(), 0).is_some());
+    assert!(execute_resume(&df, &p("mom:30"), &mom, 30, df.height(), 0).is_some());
 
     for directive in [
         "kama:30",
@@ -308,4 +314,16 @@ fn resume_decline_paths_cover_question_mark_branches() {
             "{directive}"
         );
     }
+}
+
+#[test]
+fn a_huge_window_does_not_allocate_its_declared_size_before_warmup() {
+    let df = ohlcv(20);
+    for text in ["ma:999999999999", "close-ma:999999999999+obv"] {
+        assert!(initial_state(&df, &parse(text).unwrap(), df.height()).is_none(), "{text}");
+    }
+    let seed = initial_state(&df, &parse("ema:999999999999").unwrap(), df.height()).unwrap();
+    assert!(seed.len() < 100);
+    let chain = initial_state(&df, &parse("llv:999999999999@(ema:3)").unwrap(), df.height()).unwrap();
+    assert!(chain.len() < 100);
 }

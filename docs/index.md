@@ -10,7 +10,7 @@ methodology, and supported pandas behavior.
 
 | Goal | Read |
 | --- | --- |
-| Look up the `DataFrame` / `Series` / `Row` API and the top-level functions | [DataFrame API](dataframe-api.md) |
+| Look up the `DataFrame` / `Series` / `Row` API and the top-level functions | [DataFrame API](dataframe-api.md), [Series API](series-api.md) |
 | Cumulate bars, stream a live time frame, handle timezones | [Cumulation, time frames and timezones](cumulation.md) |
 | Write indicator directives and handle directive errors | [Directives](directives.md) |
 | Index, write and handle missing values the pandas way | [pandas-compatible API](pandas-compatibility.md) |
@@ -33,6 +33,7 @@ The complete indicator index and pandas-subset contract remain in
 :maxdepth: 2
 
 dataframe-api
+series-api
 cumulation
 directives
 pandas-compatibility

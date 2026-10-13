@@ -108,7 +108,7 @@ impl PyTimestamp {
             None => zone_of(value)?,
         };
         Ok(PyTimestamp {
-            ns: parse_ts_in_tz(value, tzv)?,
+            ns: parse_ts_in_tz(value, &tzv)?,
             tz: tzv,
         })
     }
@@ -123,7 +123,7 @@ impl PyTimestamp {
     /// (unanchored) — UTC-anchored and naive are distinct states (F13).
     #[getter]
     fn tz(&self) -> Option<String> {
-        match self.tz {
+        match &self.tz {
             Tz::Naive => None,
             other => Some(other.name()),
         }
@@ -303,7 +303,7 @@ impl PyTimestamp {
     ) -> PyResult<Self> {
         let fields = [year, month, day, hour, minute, second];
         let ns = self.tz.replace_civil(self.ns, fields).map_err(pyerr)?;
-        Ok(PyTimestamp { ns, tz: self.tz })
+        Ok(PyTimestamp { ns, tz: self.tz.clone() })
     }
 
     /// Floor to a frequency boundary in the timestamp's wall-clock:
@@ -335,7 +335,7 @@ impl PyTimestamp {
             )));
         }
         let tzv = tz_from_py(tz)?;
-        let ns = tzv.localize_from(self.ns, self.tz).map_err(pyerr)?;
+        let ns = tzv.localize_from(self.ns, &self.tz).map_err(pyerr)?;
         Ok(PyTimestamp { ns, tz: tzv })
     }
     /// Restate an AWARE timestamp in another zone (pandas `tz_convert`): the
@@ -380,19 +380,7 @@ impl PyTimestamp {
     /// offsets, `zoneinfo.ZoneInfo` for IANA names), or `None` if naive.
     #[getter]
     fn tzinfo<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        match self.tz {
-            Tz::Naive => Ok(None),
-            Tz::Utc => Ok(Some(py.import("datetime")?.getattr("timezone")?.getattr("utc")?)),
-            Tz::Offset(secs) => {
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("seconds", secs)?;
-                let delta = py.import("datetime")?.getattr("timedelta")?.call((), Some(&kwargs))?;
-                Ok(Some(py.import("datetime")?.getattr("timezone")?.call1((delta,))?))
-            }
-            Tz::Named(_) => Ok(Some(
-                py.import("zoneinfo")?.getattr("ZoneInfo")?.call1((self.tz.name(),))?,
-            )),
-        }
+        crate::timezone::to_python(py, &self.tz)
     }
 
     /// POSIX epoch seconds as a float (stdlib / pandas `timestamp()`).
@@ -435,7 +423,7 @@ impl PyTimestamp {
     /// any other unit raises (no silent precision change).
     fn as_unit(&self, unit: &str) -> PyResult<Self> {
         if unit == "ns" {
-            Ok(PyTimestamp { ns: self.ns, tz: self.tz })
+            Ok(PyTimestamp { ns: self.ns, tz: self.tz.clone() })
         } else {
             Err(PyValueError::new_err(
                 "volas Timestamps are ns-resolution; only as_unit('ns') is supported",
@@ -467,7 +455,7 @@ impl PyTimestamp {
     /// Format the wall-clock time with a `strftime` format string (pandas
     /// `Timestamp.strftime`). Raises `ValueError` on an invalid format.
     fn strftime(&self, fmt: &str) -> PyResult<String> {
-        datetime::strftime(self.ns, self.tz, fmt).map_err(pyerr)
+        datetime::strftime(self.ns, &self.tz, fmt).map_err(pyerr)
     }
 
     /// As a Python `datetime.datetime` at microsecond precision (`datetime`'s
@@ -496,7 +484,7 @@ impl PyTimestamp {
     /// result can never resurrect the NaT sentinel or a bogus 1677/2262 instant.
     fn __add__(&self, delta: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
         let ns = datetime::shift(self.ns, delta_ns(delta)?).map_err(pyerr)?;
-        Ok(PyTimestamp { ns, tz: self.tz })
+        Ok(PyTimestamp { ns, tz: self.tz.clone() })
     }
 
     /// `ts - other`: another Timestamp gives the `np.timedelta64` difference; an
@@ -516,11 +504,11 @@ impl PyTimestamp {
         }
         let delta = delta_ns(other)?;
         let ns = datetime::instant(self.ns.checked_sub(delta)).map_err(pyerr)?;
-        Ok(Py::new(py, PyTimestamp { ns, tz: self.tz })?.into_any())
+        Ok(Py::new(py, PyTimestamp { ns, tz: self.tz.clone() })?.into_any())
     }
 
     fn __repr__(&self) -> String {
-        match self.tz {
+        match &self.tz {
             Tz::Naive => format!("Timestamp('{}')", datetime::format_ns(self.ns)),
             other => format!(
                 "Timestamp('{}', tz='{}')",
@@ -533,7 +521,7 @@ impl PyTimestamp {
     /// The readable wall-clock string (pandas `str(Timestamp)` form) — the
     /// object form stays in `repr`.
     fn __str__(&self) -> String {
-        datetime::format_ns_tz(self.ns, self.tz)
+        datetime::format_ns_tz(self.ns, &self.tz)
     }
 
     /// Compare with another instant (a Timestamp, a `datetime` / `pd.Timestamp` or
@@ -605,7 +593,7 @@ fn comparable_instant(other: &Bound<'_, PyAny>) -> PyResult<Option<(i64, bool)>>
             return Ok(None);
         };
         let aware = !offset.is_none();
-        return Ok(datetime_instant(other, Tz::Naive).ok().map(|ns| (ns, aware)));
+        return Ok(datetime_instant(other, &Tz::Naive).ok().map(|ns| (ns, aware)));
     }
     match crate::coerce::numpy_time_value(other, "M") {
         Some(value) => {
@@ -619,12 +607,12 @@ fn comparable_instant(other: &Bound<'_, PyAny>) -> PyResult<Option<(i64, bool)>>
     }
 }
 
-/// The zone a constructor value carries: a Timestamp's tz, an aware `datetime`'s
-/// tzinfo (its fixed offset when the tzinfo has no name volas resolves), an
-/// offset-aware string's offset; [`Tz::Naive`] otherwise.
-fn zone_of(value: &Bound<'_, PyAny>) -> PyResult<Tz> {
+/// The zone a constructor value carries: a Timestamp's tz, the canonical key
+/// rules of an aware datetime's keyed tzinfo (its fixed offset when unkeyed),
+/// an offset-aware string's offset; [`Tz::Naive`] otherwise.
+pub(crate) fn zone_of(value: &Bound<'_, PyAny>) -> PyResult<Tz> {
     if let Ok(t) = value.extract::<PyRef<PyTimestamp>>() {
-        return Ok(t.tz);
+        return Ok(t.tz.clone());
     }
     if value.is_instance_of::<pyo3::types::PyDateTime>() {
         // `pd.NaT` (a datetime without components) has no zone; the instant
@@ -634,6 +622,11 @@ fn zone_of(value: &Bound<'_, PyAny>) -> PyResult<Tz> {
             return Ok(Tz::Naive);
         }
         let tzinfo = value.getattr("tzinfo")?;
+        if ["key", "zone"].iter().any(|name| {
+            tzinfo.getattr(*name).and_then(|key| key.extract::<String>()).is_ok()
+        }) {
+            return tz_from_py(&tzinfo);
+        }
         return tz_from_py(&tzinfo).or_else(|_| Tz::fixed(offset_secs(&offset)?).map_err(pyerr));
     }
     Ok(match value.extract::<String>().ok().and_then(|s| datetime::offset_suffix_secs(&s)) {
@@ -661,7 +654,7 @@ pub(crate) fn offset_secs(delta: &Bound<'_, PyAny>) -> PyResult<i32> {
 /// from its components — exact to the nanosecond (`pd.Timestamp.nanosecond`),
 /// never through text. An aware value is read at its own UTC offset; a naive one
 /// is a wall clock in `tz`. `pd.NaT` (no components) is a `ValueError`.
-pub(crate) fn datetime_instant(value: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64> {
+pub(crate) fn datetime_instant(value: &Bound<'_, PyAny>, tz: &Tz) -> PyResult<i64> {
     let missing = || PyValueError::new_err("NaT is not a valid timestamp; a missing instant is volas.NA");
     let field = |name: &str| -> PyResult<i64> { value.getattr(name)?.extract().map_err(|_| missing()) };
     let is_dt = value.is_instance_of::<pyo3::types::PyDateTime>();
@@ -669,17 +662,17 @@ pub(crate) fn datetime_instant(value: &Bound<'_, PyAny>, tz: Tz) -> PyResult<i64
     let fields = [field("year")?, field("month")?, field("day")?, time("hour")?, time("minute")?, time("second")?];
     let nanos = time("microsecond")? * 1_000
         + if value.hasattr("nanosecond")? { field("nanosecond")? } else { 0 };
-    let zone = match is_dt.then(|| value.call_method0("utcoffset")).transpose()? {
-        Some(off) if !off.is_none() => Tz::fixed(offset_secs(&off)?).map_err(pyerr)?,
-        _ => tz,
+    let offset_zone = match is_dt.then(|| value.call_method0("utcoffset")).transpose()? {
+        Some(off) if !off.is_none() => Some(Tz::fixed(offset_secs(&off)?).map_err(pyerr)?),
+        _ => None,
     };
-    zone.localize_fields(fields, nanos as u32).map_err(pyerr)
+    offset_zone.as_ref().unwrap_or(tz).localize_fields(fields, nanos as u32).map_err(pyerr)
 }
 
 /// Parse a Python timestamp (datetime string or epoch-ns integer) to UTC ns,
 /// interpreting a naive string's wall-clock as-is (zero offset).
 pub(crate) fn parse_ts(key: &Bound<'_, PyAny>) -> PyResult<i64> {
-    parse_ts_in_tz(key, Tz::Naive)
+    parse_ts_in_tz(key, &Tz::Naive)
 }
 
 /// Resolve a Python `tz=` argument: a string spec (IANA / `"+08:00"` / `"UTC"`),
@@ -687,12 +680,12 @@ pub(crate) fn parse_ts(key: &Bound<'_, PyAny>) -> PyResult<i64> {
 /// offset) — F29. An empty string is an error (F47, via `Tz::parse`).
 pub(crate) fn tz_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Tz> {
     if let Ok(s) = obj.extract::<String>() {
-        return Tz::parse(&s).map_err(pyerr);
+        return crate::timezone::parse(obj.py(), &s);
     }
     // zoneinfo.ZoneInfo carries its IANA name in `.key` (pytz in `.zone`).
     for attr in ["key", "zone"] {
         if let Ok(key) = obj.getattr(attr).and_then(|k| k.extract::<String>()) {
-            return Tz::parse(&key).map_err(pyerr);
+            return crate::timezone::from_object(obj, &key);
         }
     }
     // any datetime.tzinfo: take its UTC offset (fixed-offset zones), exactly.
@@ -715,8 +708,8 @@ pub(crate) fn parse_label(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Lab
             .extract::<String>()
             .map(Label::Str)
             .map_err(|_| PyKeyError::new_err("label must be a string for a string index")),
-        IndexKind::Datetime(_, tz) => crate::convert::parse_label_in_tz(key, *tz).map(Label::I64),
-        _ => crate::convert::parse_label_in_tz(key, Tz::Naive).map(Label::I64),
+        IndexKind::Datetime(_, tz) => crate::convert::parse_label_in_tz(key, tz).map(Label::I64),
+        _ => crate::convert::parse_label_in_tz(key, &Tz::Naive).map(Label::I64),
     }
 }
 
@@ -800,7 +793,7 @@ impl PyTimestamp {
             },
             "M" => Ok(operator.call_method1(name, (self.to_numpy(py)?, other))?.unbind()),
             "O" => {
-                let me = Py::new(py, PyTimestamp { ns: self.ns, tz: self.tz })?;
+                let me = Py::new(py, PyTimestamp { ns: self.ns, tz: self.tz.clone() })?;
                 let flat = other.call_method0("ravel")?;
                 let cells = flat
                     .try_iter()?
@@ -825,7 +818,7 @@ impl PyTimestamp {
     }
 
     fn rounded(&self, unit_ns: i64, mode: Rounding) -> PyResult<Self> {
-        Ok(PyTimestamp { ns: self.rounded_ns(unit_ns, mode)?, tz: self.tz })
+        Ok(PyTimestamp { ns: self.rounded_ns(unit_ns, mode)?, tz: self.tz.clone() })
     }
 
     /// The wall-clock calendar view of this instant in its zone — decomposed once

@@ -14,6 +14,11 @@ use crate::raw::smoothing;
 /// every kernel takes. Every path — this, [`kama_final_state`], [`kama_resume`],
 /// [`kama_resume_one`] — advances by the one [`kama_bar`].
 pub fn kama(data: &[f64], period: usize, _origin: usize) -> Vec<f64> {
+    kama_pass(data, period, _origin, &mut ())
+}
+
+/// Batch KAMA with terminal recurrence states.
+pub fn kama_pass(data: &[f64], period: usize, _origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period + 1 > n {
@@ -23,6 +28,7 @@ pub fn kama(data: &[f64], period: usize, _origin: usize) -> Vec<f64> {
     let mut k = KamaState::seed(data, period);
     for (today, o) in out.iter_mut().enumerate().skip(period) {
         *o = kama_bar(data, period, today, &mut k);
+        states.record(today, n, |out| { let at = out.len(); out.resize(at + KAMA_STATE, 0.0); k.write_state(&mut out[at..]); });
     }
     out
 }
@@ -132,19 +138,22 @@ pub fn kama_final_state(data: &[f64], period: usize, _origin: usize) -> Option<V
 /// `data[from-period-1 ..= from-1]` plus `data[from..]`. Returns `None` (→ caller's
 /// full-recompute fallback) when `from <= period` (the trailing window would underflow)
 /// or the state is malformed.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn kama_resume(
     data: &[f64],
     period: usize,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let n = data.len();
     if period == 0 || from <= period || from > n {
         return None;
     }
     let mut k = KamaState::from_state(state)?;
-    let out = (from..n).map(|today| kama_bar(data, period, today, &mut k)).collect();
-    Some((out, k.to_vec()))
+    out.reserve(n.saturating_sub(from));
+    out.extend((from..n).map(|today| kama_bar(data, period, today, &mut k)));
+    Some(k.to_vec())
 }
 
 /// Single new-row [`kama`] resume: the KAMA value at `row` from `state` (as of

@@ -6,9 +6,7 @@ use std::collections::HashSet;
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use volas_core::{
-    CmpOp, DataFrame, Tz,
-};
+use volas_core::{CmpOp, DataFrame, Tz};
 
 use crate::timeframe::{build_agg_spec_for, resolve_time_frame};
 #[allow(unused_imports)]
@@ -71,7 +69,10 @@ impl PyDataFrame {
                 // re-labelled / re-typed: a new series of the visible rows' data columns
                 None if index.is_some() || dtype.is_some() => {
                     let view = other.read()?;
-                    (view.select(&view.data_names()).map_err(pyerr)?, other.tf.clone())
+                    (
+                        view.select(&view.data_names()).map_err(pyerr)?,
+                        other.tf.clone(),
+                    )
                 }
                 // a windowed source made an unbounded frame gives its visible rows (its hidden
                 // margin serving as their history); re-windowed, all the rows it holds
@@ -90,7 +91,11 @@ impl PyDataFrame {
                     // its directive: a name that is not one raises (it is never computed here).
                     let names = cols
                         .iter()
-                        .map(|c| other.column_name(c).ok_or_else(|| PyKeyError::new_err(format!("column \"{c}\" not found"))))
+                        .map(|c| {
+                            other.column_name(c).ok_or_else(|| {
+                                PyKeyError::new_err(format!("column \"{c}\" not found"))
+                            })
+                        })
                         .collect::<PyResult<Vec<_>>>()?;
                     let inner = other.project(&names)?;
                     // The open period follows the projection: kept data columns keep every
@@ -173,12 +178,22 @@ impl PyDataFrame {
             let frame = resolve_time_frame(tf_obj)?;
             let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
             let tf = TfState::seeded(frame, spec, &df)?;
-            return PyDataFrame { inner: df, tf: Some(tf), window: None }.bounded(bounds);
+            return PyDataFrame {
+                inner: df,
+                tf: Some(tf),
+                window: None,
+            }
+            .bounded(bounds);
         }
         if cumulators.is_some() {
             return Err(PyValueError::new_err("cumulators requires time_frame"));
         }
-        PyDataFrame { inner: df, tf, window: None }.bounded(bounds)
+        PyDataFrame {
+            inner: df,
+            tf,
+            window: None,
+        }
+        .bounded(bounds)
     }
 
     /// The DatetimeIndex timezone name (`"UTC"` / `"+08:00"` /
@@ -196,10 +211,10 @@ impl PyDataFrame {
     /// Reinterpret the index wall-clock as `tz` (pandas `tz_localize`): the
     /// displayed wall-clock is unchanged, each instant is recomputed. Use when
     /// data was ingested without a tz. Returns a new frame.
-    pub(crate) fn tz_localize(&self, tz: &str) -> PyResult<PyDataFrame> {
-        let tzv = Tz::parse(tz).map_err(pyerr)?;
-        let inner = self.read()?.tz_localize(tzv).map_err(pyerr)?;
-        self.derive_rezoned(inner, |bars| bars.tz_localize(tzv))
+    pub(crate) fn tz_localize(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = crate::timezone::parse(py, tz)?;
+        let inner = self.read()?.tz_localize(tzv.clone()).map_err(pyerr)?;
+        self.derive_rezoned(inner, |bars| bars.tz_localize(tzv.clone()))
     }
 
     /// Change the index display / matching tz without moving any instant (pandas
@@ -207,15 +222,17 @@ impl PyDataFrame {
     /// Tag the index's zone directly (interop-internal): `from_pandas` imports a
     /// tz-aware pandas index whose instants are ALREADY true UTC, so the zone is
     /// attached without the naive-guard that protects user-facing `tz_convert`.
-    pub(crate) fn _set_index_tz(&self, tz: &str) -> PyResult<PyDataFrame> {
-        let tzv = Tz::parse(tz).map_err(pyerr)?;
-        Ok(PyDataFrame::plain(self.read()?.set_index_tz(tzv).map_err(pyerr)?))
+    pub(crate) fn _set_index_tz(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = crate::timezone::parse(py, tz)?;
+        Ok(PyDataFrame::plain(
+            self.read()?.set_index_tz(tzv).map_err(pyerr)?,
+        ))
     }
 
-    pub(crate) fn tz_convert(&self, tz: &str) -> PyResult<PyDataFrame> {
-        let tzv = Tz::parse(tz).map_err(pyerr)?;
-        let inner = self.read()?.tz_convert(tzv).map_err(pyerr)?;
-        self.derive_rezoned(inner, |bars| bars.tz_convert(tzv))
+    pub(crate) fn tz_convert(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = crate::timezone::parse(py, tz)?;
+        let inner = self.read()?.tz_convert(tzv.clone()).map_err(pyerr)?;
+        self.derive_rezoned(inner, |bars| bars.tz_convert(tzv.clone()))
     }
 
     /// The column names, in order.

@@ -1,8 +1,8 @@
 //! Group B indicators (gap report 2026-06-07, §9): convention-sensitive market
 //! indicators. Each kernel pins ONE authoritative convention, cited inline and matched
-//! bit-for-shape by the source-pinned oracle (`test/oracle_reference.py`). Finite-memory
-//! members refresh on `append` through the engine's windowed fast-path (no state-carry);
-//! recursive members carry a `*_final_state` / `*_resume` pair like Group A.
+//! bit-for-shape by the source-pinned oracle (`test/oracle_reference.py`). Sliding
+//! accumulators publish their continuation states from the batch pass; recursive
+//! members carry a `*_final_state` / `*_resume` pair like Group A.
 
 use crate::raw::indicators::av;
 use crate::raw::kernels;
@@ -63,12 +63,19 @@ pub fn brar_br(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize
 /// are the summed volumes of up- / down- / flat-close days (vs the prior close).
 /// Source: MBA智库 — 成交量比率 (VR).
 pub fn vr(close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    vr_pass(close, volume, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn vr_pass<S: crate::pass::StateSink>(close: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let len = close.len();
     let (mut uv, mut dv, mut pv) = (vec![f64::NAN; len], vec![f64::NAN; len], vec![f64::NAN; len]);
     for i in 1..len {
         [uv[i], dv[i], pv[i]] = vr_volumes(close, volume, i);
     }
-    let (suv, sdv, spv) = (rolling_sum(&uv, n, origin), rolling_sum(&dv, n, origin), rolling_sum(&pv, n, origin));
+    let (mut a, mut b, mut c) = (states.child(), states.child(), states.child());
+    let (suv, sdv, spv) = (kernels::sma_pass(av(&uv), n, origin, &mut a) * n as f64, kernels::sma_pass(av(&dv), n, origin, &mut b) * n as f64, kernels::sma_pass(av(&pv), n, origin, &mut c) * n as f64);
+    states.compose(len, &[&a, &b, &c], |_, _| {});
     (0..len)
         .map(|i| (suv[i] + 0.5 * spv[i]) / (sdv[i] + 0.5 * spv[i]) * 100.0)
         .collect()
@@ -77,10 +84,15 @@ pub fn vr(close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
 /// Coppock Curve = `WMA_w(ROC_long + ROC_short)`, `ROC_p = (C / C₋ₚ − 1) × 100`.
 /// Source: StockCharts ChartSchool / Wikipedia — Coppock Curve.
 pub fn coppock(close: &[f64], w: usize, roc_long: usize, roc_short: usize, origin: usize) -> Vec<f64> {
+    coppock_pass(close, w, roc_long, roc_short, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn coppock_pass<S: crate::pass::StateSink>(close: &[f64], w: usize, roc_long: usize, roc_short: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let len = close.len();
     let sum: Vec<f64> =
         (0..len).map(|i| roc_at(close, roc_long, i) + roc_at(close, roc_short, i)).collect();
-    super::wma(&sum, w, origin)
+    super::wma_pass(&sum, w, origin, states)
 }
 
 /// 4-bar symmetric weighted MA, weights `[1, 2, 2, 1] / 6` (newest first); NaN until 3 prior
@@ -99,11 +111,23 @@ pub fn relative_vigor(
     n: usize,
     origin: usize,
 ) -> Vec<f64> {
+    relative_vigor_pass(open, high, low, close, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn relative_vigor_pass<S: crate::pass::StateSink>(open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    n: usize,
+    origin: usize, states: &mut S) -> Vec<f64> {
     let len = close.len();
     let co: Vec<f64> = (0..len).map(|i| close[i] - open[i]).collect();
     let hl: Vec<f64> = (0..len).map(|i| high[i] - low[i]).collect();
-    let num = kernels::sma(av(&swma4(&co)), n, origin);
-    let den = kernels::sma(av(&swma4(&hl)), n, origin);
+    let (mut a, mut b) = (states.child(), states.child());
+    let num = kernels::sma_pass(av(&swma4(&co)), n, origin, &mut a);
+    let den = kernels::sma_pass(av(&swma4(&hl)), n, origin, &mut b);
+    states.compose(len, &[&a, &b], |_, _| {});
     (0..len).map(|i| num[i] / den[i]).collect()
 }
 
@@ -116,19 +140,46 @@ pub fn relative_vigor_signal(
     n: usize,
     origin: usize,
 ) -> Vec<f64> {
-    swma4(&relative_vigor(open, high, low, close, n, origin))
+    relative_vigor_signal_pass(open, high, low, close, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn relative_vigor_signal_pass<S: crate::pass::StateSink>(open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    n: usize,
+    origin: usize, states: &mut S) -> Vec<f64> {
+    let mut stage = states.child();
+    let rvi = relative_vigor_pass(open, high, low, close, n, origin, &mut stage);
+    states.compose(close.len(), &[&stage], |end, out| out.extend_from_slice(&rvi[end.saturating_sub(3)..end]));
+    swma4(&rvi)
 }
 
 /// DKX 多空线 = `WMA(MID, 20)`, `MID = (3·C + L + O + H) / 6`. The fixed 20-period linear
 /// weights 20…1 are exactly TA-Lib WMA's. Source: 百度百科 / 东方财富 — 多空线 (DKX).
 pub fn dkx(open: &[f64], high: &[f64], low: &[f64], close: &[f64], origin: usize) -> Vec<f64> {
+    dkx_pass(open, high, low, close, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn dkx_pass<S: crate::pass::StateSink>(open: &[f64], high: &[f64], low: &[f64], close: &[f64], origin: usize, states: &mut S) -> Vec<f64> {
     let mid: Vec<f64> = (0..close.len()).map(|i| dkx_mid(open, high, low, close, i)).collect();
-    super::wma(&mid, 20, origin)
+    super::wma_pass(&mid, 20, origin, states)
 }
 
 /// MADKX = `SMA_m(DKX)`, the DKX signal line. Source: 百度百科 / 东方财富 — 多空线 (DKX).
 pub fn dkx_ma(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, origin: usize) -> Vec<f64> {
-    super::ma(&dkx(open, high, low, close, origin), m, origin)
+    dkx_ma_pass(open, high, low, close, m, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn dkx_ma_pass<S: crate::pass::StateSink>(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    let (mut a, mut b) = (states.child(), states.child());
+    let line = dkx_pass(open, high, low, close, origin, &mut a);
+    let values = kernels::sma_pass(av(&line), m, origin, &mut b).to_vec();
+    states.compose(close.len(), &[&a, &b], |end, out| out.extend_from_slice(&line[end.saturating_sub(m)..end]));
+    values
 }
 
 /// WVAD 威廉变异离散量 = `Σₙ( (C − O) / (H − L) · V )`, a bar without range adding 0 (AD's
@@ -142,8 +193,20 @@ pub fn wvad(
     n: usize,
     origin: usize,
 ) -> Vec<f64> {
+    wvad_pass(open, high, low, close, volume, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+#[allow(clippy::too_many_arguments)]
+pub fn wvad_pass<S: crate::pass::StateSink>(open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+    origin: usize, states: &mut S) -> Vec<f64> {
     let w: Vec<f64> = (0..close.len()).map(|i| wvad_term(open, high, low, close, volume, i)).collect();
-    rolling_sum(&w, n, origin)
+    (kernels::sma_pass(av(&w), n, origin, states) * n as f64).to_vec()
 }
 
 /// Which CDP support/resistance line to emit.
@@ -217,22 +280,24 @@ pub fn wad_final_state(high: &[f64], low: &[f64], close: &[f64]) -> Option<Vec<f
 
 /// Resume [`wad`] from `[wad_{from-1}, close_{from-1}]` over `[from, n)`, bit-identical to a
 /// full recompute.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn wad_resume(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let mut acc = state[0];
     let mut prev = state[1];
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    out.reserve(close.len().saturating_sub(from));
     for i in from..close.len() {
         acc += wad_step(high[i], low[i], close[i], prev);
         out.push(acc);
         prev = close[i];
     }
-    (out, vec![acc, prev])
+    vec![acc, prev]
 }
 
 /// One Wilder Swing Index increment. `op` / `cp` are the prior bar's open / close; `t` is the
@@ -286,6 +351,8 @@ pub fn asi_final_state(
 }
 
 /// Resume [`asi`] from `[asi_{from-1}, close_{from-1}, open_{from-1}]` over `[from, n)`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
+#[allow(clippy::too_many_arguments)] // one parameter per input, state and output sink
 pub fn asi_resume(
     open: &[f64],
     high: &[f64],
@@ -294,16 +361,17 @@ pub fn asi_resume(
     t: f64,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let (mut acc, mut pc, mut po) = (state[0], state[1], state[2]);
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    out.reserve(close.len().saturating_sub(from));
     for i in from..close.len() {
         acc += asi_si(open[i], high[i], low[i], close[i], po, pc, t);
         out.push(acc);
         pc = close[i];
         po = open[i];
     }
-    (out, vec![acc, pc, po])
+    vec![acc, pc, po]
 }
 
 /// Which standard pivot-point level to emit.
@@ -410,15 +478,18 @@ pub fn kcw(
 ) -> Vec<f64> {
     let ema = super::ema(close, ema_period);
     let atr = super::atr(high, low, close, atr_period);
-    (0..close.len())
-        .map(|i| {
-            if ema[i] != 0.0 {
-                2.0 * mult * atr[i] / ema[i]
-            } else {
-                f64::NAN
-            }
-        })
-        .collect()
+    (0..close.len()).map(|i| kcw_value(ema[i], atr[i], mult)).collect()
+}
+
+/// One KCW value from the row's EMA and ATR: `2·mult·ATR/EMA`, NaN where the EMA is 0 —
+/// the one formula the full kernel and the resumed rows share.
+#[inline]
+pub fn kcw_value(ema: f64, atr: f64, mult: f64) -> f64 {
+    if ema != 0.0 {
+        2.0 * mult * atr / ema
+    } else {
+        f64::NAN
+    }
 }
 
 /// Keltner band state `[ema, atr]` after a full compute, or `None` before both seed. The
@@ -439,6 +510,7 @@ pub fn keltner_band_final_state(
 /// to a full recompute. `None` at `from == 0` (the ATR resume declines).
 // One parameter per series/state the resume reads; a struct would only repackage them.
 #[allow(clippy::too_many_arguments)]
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn keltner_band_resume(
     close: &[f64],
     high: &[f64],
@@ -449,26 +521,27 @@ pub fn keltner_band_resume(
     upper: bool,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
-    let (e_vals, e_state) = super::ema_resume(close, ema_period, from, &state[0..1]);
-    let (a_vals, a_state) = super::atr_resume(high, low, close, atr_period, from, &state[1..2])?;
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
+    let at = out.len();
+    let e_state = super::ema_resume(close, ema_period, from, &state[0..1], out);
+    let mut atr = Vec::new();
+    let Some(a_state) = super::atr_resume(high, low, close, atr_period, from, &state[1..2], &mut atr) else {
+        out.truncate(at);
+        return None;
+    };
     let sign = if upper { 1.0 } else { -1.0 };
-    let vals: Vec<f64> = (0..e_vals.len()).map(|i| e_vals[i] + sign * mult * a_vals[i]).collect();
-    Some((vals, vec![e_state[0], a_state[0]]))
+    for (e, a) in out[at..].iter_mut().zip(atr) {
+        *e += sign * mult * a;
+    }
+    Some(vec![e_state[0], a_state[0]])
 }
 
 /// Stochastic Momentum Index (Blau / LazyBear): `HH`/`LL` = k-day high/low; `D = C − (HH+LL)/2`,
 /// `Ds = EMA_d(EMA_d(D))`, `Dhl = EMA_d(EMA_d(HH−LL))`; `SMI = Ds / (Dhl/2) × 100`. The short
 /// double-EMA smoothing keeps it effectively finite-memory. Source: William Blau / LazyBear — SMI.
 pub fn stoch_momentum(high: &[f64], low: &[f64], close: &[f64], k: usize, d: usize) -> Vec<f64> {
-    let len = high.len();
-    let hh = super::hhv(high, k);
-    let ll = super::llv(low, k);
-    let rdiff: Vec<f64> = (0..len).map(|i| close[i] - (hh[i] + ll[i]) / 2.0).collect();
-    let diff: Vec<f64> = (0..len).map(|i| hh[i] - ll[i]).collect();
-    let ds = super::ema(&super::ema(&rdiff, d), d);
-    let dhl = super::ema(&super::ema(&diff, d), d);
-    (0..len).map(|i| ds[i] / (dhl[i] * 0.5) * 100.0).collect()
+    stoch_momentum_pass(high, low, close, k, d, None, &mut ())
 }
 
 /// SMI signal line = `EMA_signal(SMI)`. Source: William Blau / LazyBear — SMI.
@@ -480,7 +553,7 @@ pub fn stoch_momentum_signal(
     d: usize,
     signal: usize,
 ) -> Vec<f64> {
-    super::ema(&stoch_momentum(high, low, close, k, d), signal)
+    stoch_momentum_pass(high, low, close, k, d, Some(signal), &mut ())
 }
 
 /// Shift a series forward by `k` bars: `out[i] = x[i-k]` (NaN for the first `k`). Used to
@@ -695,6 +768,7 @@ pub fn supertrend_final_state(
 /// resume — bit-identical to a full recompute. `None` at `from == 0` (the ATR resume declines).
 // One parameter per series/state the resume reads; a struct would only repackage them.
 #[allow(clippy::too_many_arguments)]
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn supertrend_resume(
     high: &[f64],
     low: &[f64],
@@ -704,18 +778,19 @@ pub fn supertrend_resume(
     want_direction: bool,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let (mut trend, mut fu, mut fl, mut pc) = (state[0], state[1], state[2], state[3]);
-    let (atr_tail, atr_new) = super::atr_resume(high, low, close, period, from, &state[4..5])?;
+    let at = out.len();
+    let atr_new = super::atr_resume(high, low, close, period, from, &state[4..5], out)?;
     let hl2 = |i: usize| (high[i] + low[i]) / 2.0;
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
-    for (j, i) in (from..close.len()).enumerate() {
-        let step = supertrend_step(hl2(i), atr_tail[j], close[i], mult, trend, fu, fl, pc);
+    for (v, i) in out[at..].iter_mut().zip(from..close.len()) {
+        let step = supertrend_step(hl2(i), *v, close[i], mult, trend, fu, fl, pc);
         (trend, fu, fl) = step;
-        out.push(supertrend_out(trend, fu, fl, want_direction));
+        *v = supertrend_out(trend, fu, fl, want_direction);
         pc = close[i];
     }
-    Some((out, vec![trend, fu, fl, pc, atr_new[0]]))
+    Some(vec![trend, fu, fl, pc, atr_new[0]])
 }
 
 
@@ -808,6 +883,15 @@ mod tests {
 
     /// The cumulative `*_final_state` guards decline on an empty series (no first bar to seed).
     #[test]
+    fn a_declined_keltner_resume_removes_the_ema_rows_it_appended() {
+        let close = [10.0, 11.0, 12.0];
+        let mut out = vec![-0.0, f64::from_bits(0x7ff8_0000_0000_1234)];
+        let before: Vec<u64> = out.iter().map(|v| v.to_bits()).collect();
+        assert!(keltner_band_resume(&close, &close, &close, 2, 2, 2.0, true, 0, &[9.0, 1.0], &mut out).is_none());
+        assert_eq!(out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), before);
+    }
+
+    #[test]
     fn cumulative_final_state_declines_on_empty() {
         assert!(wad_final_state(&[], &[], &[]).is_none());
         assert!(asi_final_state(&[], &[], &[], &[], 3.0).is_none());
@@ -823,13 +907,17 @@ mod tests {
         let asi_full = asi(&open, &high, &low, &close, 3.0);
         for &from in &[1usize, 2, 40, 80, 159] {
             let st = wad_final_state(&high[..from], &low[..from], &close[..from]).unwrap();
-            assert_bits(&wad_resume(&high, &low, &close, from, &st).0, &wad_full[from..], "wad");
+            let mut tail = Vec::new();
+            wad_resume(&high, &low, &close, from, &st, &mut tail);
+            assert_bits(&tail, &wad_full[from..], "wad");
 
             let st =
                 asi_final_state(&open[..from], &high[..from], &low[..from], &close[..from], 3.0)
                     .unwrap();
+            let mut tail = Vec::new();
+            asi_resume(&open, &high, &low, &close, 3.0, from, &st, &mut tail);
             assert_bits(
-                &asi_resume(&open, &high, &low, &close, 3.0, from, &st).0,
+                &tail,
                 &asi_full[from..],
                 "asi",
             );
@@ -852,12 +940,15 @@ mod tests {
         for &from in &[11usize, 20, 80, 159] {
             let st = supertrend_final_state(&high[..from], &low[..from], &close[..from], 10, 3.0)
                 .unwrap();
-            let (line, _) =
-                supertrend_resume(&high, &low, &close, 10, 3.0, false, from, &st).unwrap();
+            let mut line = Vec::new();
+            let _ = supertrend_resume(&high, &low, &close, 10, 3.0, false, from, &st, &mut line).unwrap();
             assert_bits(&line, &line_full[from..], "supertrend");
-            let (dir, _) =
-                supertrend_resume(&high, &low, &close, 10, 3.0, true, from, &st).unwrap();
+            let mut dir = Vec::new();
+            let _ = supertrend_resume(&high, &low, &close, 10, 3.0, true, from, &st, &mut dir).unwrap();
             assert_bits(&dir, &dir_full[from..], "supertrend.direction");
         }
     }
 }
+
+mod smi;
+pub use smi::*;

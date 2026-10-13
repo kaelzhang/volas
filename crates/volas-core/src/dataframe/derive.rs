@@ -11,10 +11,8 @@
 //!   before its first row (one the source keeps, one of its anchors, or the history's
 //!   start — taken, not replayed, when it is within `ANCHOR_SPACING` rows; replayed
 //!   through [`Replay`] otherwise), and the **lead**: the data rows before row 0 that
-//!   recomputing its first rows reads, back to that checkpoint. A column the selection
-//!   cannot recompute from what it keeps (a recursion that carries no state, whose
-//!   history started before the selection) keeps its values and raises when a refresh
-//!   would recompute it: it is never restarted on the selection's own rows.
+//!   recomputing its first rows reads, back to that checkpoint. Every recursion carries
+//!   continuation state; the directive layer owns that state's representation.
 //! - A **column projection** keeps the rows and the listed columns, each as data: a
 //!   listed cached column's values, never continued (R40). A **column removal** keeps
 //!   every other column as it is, cached ones continuing.
@@ -34,7 +32,7 @@ use crate::error::{Result, VolasError};
 use crate::fxhash::FxHashMap;
 use crate::index::{Index, IndexKind};
 
-use super::{Checkpoint, ComputedMeta, DataFrame, History, Reach, ANCHOR_SPACING, STALE_BY_APPEND};
+use super::{Checkpoint, CheckpointRef, ComputedMeta, DataFrame, History, Reach, ANCHOR_SPACING, STALE_BY_APPEND};
 
 /// The directive layer's half of a contiguous selection: the history of a recursive
 /// cached column carried by its state at a row the source frame keeps no point of it
@@ -47,6 +45,10 @@ pub trait Replay {
     /// or the history's start), reading the rows in place. `None` when it cannot be
     /// replayed.
     fn boundary(&self, frame: &DataFrame, name: &str, start: usize) -> Option<Checkpoint>;
+
+    /// The continuation states as of rows `end - 1` and `end - 2`, lazily recovered
+    /// from this cached column's history. The directive layer owns their format.
+    fn continuation(&self, frame: &DataFrame, name: &str, end: usize) -> Option<(Vec<f64>, Option<Vec<f64>>)>;
 }
 
 /// A replay that never has the history (core tests: a selection that needs it keeps the
@@ -56,6 +58,10 @@ pub(super) struct NoReplay;
 
 #[cfg(test)]
 impl Replay for NoReplay {
+    fn continuation(&self, _: &DataFrame, _: &str, _: usize) -> Option<(Vec<f64>, Option<Vec<f64>>)> {
+        None
+    }
+
     fn boundary(&self, _: &DataFrame, _: &str, _: usize) -> Option<Checkpoint> {
         None
     }
@@ -94,7 +100,7 @@ impl DataFrame {
 
     /// The data columns (every column but the cached directive ones), by name, in order.
     pub fn data_names(&self) -> Vec<String> {
-        self.names.iter().filter(|n| !self.computed.contains_key(*n)).cloned().collect()
+        self.names.iter().filter(|n| !self.computed.contains_key(n.as_str())).cloned().collect()
     }
 
     /// A new series of these rows: the data columns of `self` as they are (taken with
@@ -113,8 +119,8 @@ impl DataFrame {
     // --- contiguous row selections ----------------------------------------------------
 
     /// The rows `[start, end)` as a continuation of this frame's series (see the module
-    /// docs): every cached column stays cached; `replay` replays a recursion's states
-    /// when the selection ends before its last valid row.
+    /// docs): every cached column stays cached; a recursion's end states are recovered
+    /// lazily through `Replay::continuation` when the column first continues.
     ///
     /// The rows are a **value copy**, not a view into this frame's buffers: a selection is
     /// an independent frame, so selecting the recent tail of a long history does not pin
@@ -123,15 +129,50 @@ impl DataFrame {
     pub fn rows(&self, start: usize, end: usize, replay: &dyn Replay) -> DataFrame {
         let start = start.min(self.height);
         let end = end.max(start).min(self.height);
-        let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
+        let mut computed = FxHashMap::with_capacity_and_hasher(self.computed.len(), Default::default());
+        for (name, meta) in &self.computed {
+            computed.insert(name.clone(), self.continued(name, meta, start, end, replay));
+        }
+        let mut copied_lead = None;
+        let columns: Vec<Column> = if end < self.height && end > start && end - start <= ANCHOR_SPACING
+            && self.width() > 1 && self.columns.iter().all(|c| matches!(c, Column::F64(_)))
+        {
+            // Short interior slices keep no source allocation alive. Pool their
+            // copied values; a write materializes only the affected column's range.
+            let rows = end - start;
+            let lead_rows = self.copied_slab_lead_rows(start, &computed);
+            let raw = self.width() - computed.len();
+            if lead_rows > 0 && self.first_computed == Some(raw) {
+                let (columns, lead) = self.copy_float_prefix_rows(start, end, raw, lead_rows);
+                copied_lead = Some(lead);
+                columns
+            } else {
+                let mut values = Vec::with_capacity(rows * self.width() + lead_rows * (self.width() - computed.len()));
+                for col in &self.columns {
+                    values.extend_from_slice(&col.as_f64().expect("checked floats")[start..end]);
+                }
+                let (owner, lead) = self.finish_copied_slab_lead(start, &computed, lead_rows, values);
+                copied_lead = lead;
+                self.columns.iter().enumerate().map(|(i, col)| {
+                    let range = i * rows..(i + 1) * rows;
+                    let buffer = if col.known_has_nan() == Some(false) {
+                        crate::buffer::Buffer::from_shared_nan_free_range(Arc::clone(&owner), range)
+                    } else {
+                        crate::buffer::Buffer::from_shared_range(Arc::clone(&owner), range)
+                    }.expect("copied slab range");
+                    Column::F64(buffer)
+                }).collect()
+            }
+        } else {
+            self.columns.iter().map(|c| c.slice(start, end)).collect()
+        };
         let mut df = self.same_schema(columns, self.index.slice(start, end), self.origin + start);
         df.stale_by = self.stale_by;
-        df.computed.reserve(self.computed.len());
-        for (name, meta) in &self.computed {
-            df.computed.insert(name.clone(), self.continued(name, meta, start, end, replay));
-        }
-        df.lead = self.lead_before(start, &df.computed);
-        df.note_computed();
+        df.computed = computed;
+        df.lead = copied_lead.or_else(|| self.lead_before(start, &df.computed));
+        // Same schema and same cached names: preserve the memo directly. The lead
+        // was already built to exactly the wanted reach, so no second trim is needed.
+        df.first_computed = self.first_computed;
         #[cfg(debug_assertions)]
         df.debug_check();
         df
@@ -157,8 +198,8 @@ impl DataFrame {
             && valid > 0;
         // a checkpoint is replayed from over the rows after it: kept when the selection
         // holds them (its rows, whatever its output cursor says)
-        let covers = |cp: &Checkpoint| (first..=first + (end - start)).contains(&(cp.at + 1));
-        let kept = meta.checkpoint.as_ref().filter(|cp| covers(cp)).cloned();
+        let covers = |at: usize| (first..=first + (end - start)).contains(&(at + 1));
+        let kept = meta.checkpoint.as_ref().filter(|cp| covers(cp.position())).cloned();
         // a recursion carried by its state whose history starts before the selection: what
         // every recompute of its rows replays from — the nearest point of its history
         // before the selection (a checkpoint of this frame's, one of its anchors, or the
@@ -171,7 +212,7 @@ impl DataFrame {
             false => None,
         };
         let boundary = match carried && kept.is_none() && lazy.is_none() {
-            true => replay.boundary(self, name, start).map(Arc::new),
+            true => replay.boundary(self, name, start).map(CheckpointRef::from),
             false => None,
         };
         // the states as of its last valid row: this frame's when it is the same row; else
@@ -184,17 +225,18 @@ impl DataFrame {
         // boundary checkpoint stands for the row before the first)
         let before = before.filter(|_| state.is_some() && last - 1 > first);
         ComputedMeta {
+            directive: Arc::clone(&meta.directive),
             reach: meta.reach,
             valid_rows: valid,
             state,
             state_before_last: before,
             since: meta.since,
             state_at: last.saturating_sub(1),
-            scratch: Vec::new(),
+            scratch: None,
             checkpoint: kept.or(lazy.flatten()).or(boundary),
             // the anchors of its history before its last row, where it agrees with this frame's
             anchors: meta.anchors.upto(last.saturating_sub(1)),
-            pending: meta.pending.as_ref().filter(|cp| covers(cp)).cloned(),
+            pending: meta.pending.as_ref().filter(|cp| covers(cp.at)).cloned(),
             lost: meta.lost.clone(),
             first_present: meta.first_present,
         }
@@ -206,16 +248,16 @@ impl DataFrame {
     /// checkpoint or the nearest of its anchors, the later — or `Some(None)`, the
     /// history's start, when it has no checkpoint before `first`. `None` when the
     /// nearest is farther (or not held).
-    fn nearest_history(&self, meta: &ComputedMeta, first: usize) -> Option<Option<Arc<Checkpoint>>> {
+    fn nearest_history(&self, meta: &ComputedMeta, first: usize) -> Option<Option<CheckpointRef>> {
         let held = self.origin - self.lead_rows(); // the first row this frame holds
         let near = |from: usize| from >= held && first - from <= ANCHOR_SPACING;
-        let own = meta.checkpoint.clone().filter(|cp| cp.at < first);
+        let own = meta.checkpoint.clone().filter(|cp| cp.position() < first);
         let nearest = match (own, meta.anchors.nearest(first - 1)) {
-            (Some(a), Some(b)) => Some(if a.at >= b.at { a } else { b }),
+            (Some(a), Some(b)) => Some(if a.position() >= b.position() { a } else { b }),
             (a, b) => a.or(b),
         };
         match nearest {
-            Some(cp) => near(cp.at + 1).then_some(Some(cp)),
+            Some(cp) => near(cp.position() + 1).then_some(Some(cp)),
             None => near(meta.since).then_some(None),
         }
     }
@@ -238,7 +280,7 @@ impl DataFrame {
             view.state_at = (self.origin + start + valid).saturating_sub(1);
             df.computed.insert(name.clone(), view);
         }
-        df.note_computed();
+        df.first_computed = self.first_computed;
         df
     }
 
@@ -339,7 +381,7 @@ impl DataFrame {
     pub fn drop_columns(&self, names: &[String]) -> Result<DataFrame> {
         let keep: Vec<String> = self.names.iter().filter(|n| !names.contains(n)).cloned().collect();
         let mut df = self.select(&keep)?;
-        df.computed = keep.iter().filter_map(|n| self.computed.get(n).map(|m| (n.clone(), m.clone()))).collect();
+        df.computed = keep.iter().filter_map(|n| self.computed.get_key_value(n.as_str()).map(|(key, m)| (Arc::clone(key), m.clone()))).collect();
         df.note_computed();
         if !df.computed.is_empty() {
             df.lead = self.lead.as_ref().map(|l| l.over(&df));
@@ -457,7 +499,7 @@ impl DataFrame {
     /// a wall clock does not exist in `tz` (a DST gap).
     pub fn tz_localize(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
         let (values, cur) = match self.index.kind() {
-            IndexKind::Datetime(v, cur) => (v, *cur),
+            IndexKind::Datetime(v, cur) => (v, cur),
             _ => return Err(VolasError::DType("tz_localize requires a DatetimeIndex".into())),
         };
         // Localize anchors an UNanchored wall clock; an already-aware axis must use
@@ -470,13 +512,7 @@ impl DataFrame {
         }
         // `Tz` owns the wall clock -> instant conversion (sub-second digits kept; a DST
         // gap / fold or an instant past the range raises); a NaT label stays NaT.
-        let shifted = values
-            .iter()
-            .map(|&ns| match ns {
-                crate::datetime::NAT => Ok(ns),
-                _ => tz.localize_from(ns, cur),
-            })
-            .collect::<Result<Vec<i64>>>()?;
+        let shifted = tz.localize_values(values, cur)?;
         self.reindexed(Index::datetime(shifted, tz).with_name(self.index.name().map(String::from)))
     }
 

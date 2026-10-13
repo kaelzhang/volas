@@ -71,6 +71,58 @@ impl CombineOp {
 }
 
 impl Column {
+    /// Reduce ordered, nonempty groups into one typed output buffer. Each group is
+    /// a slice of source row positions (duplicates can already have been removed).
+    /// The caller owns grouping; the fold and its exact arithmetic stay here. An
+    /// error carries its group number so column-wise callers can preserve the
+    /// period-then-column error priority without materializing period frames.
+    pub fn reduce_groups<'a>(
+        &self,
+        op: CombineOp,
+        groups: impl ExactSizeIterator<Item = &'a [usize]>,
+    ) -> std::result::Result<Column, (usize, VolasError)> {
+        if !op.supports(self.dtype()) {
+            return Err((0, op.unsupported(self.dtype())));
+        }
+        if op.is_endpoint() {
+            let n = groups.len();
+            let (positions, valid) = match self {
+                Column::F64(s) => endpoint_groups(op, groups, |r| !s[r].is_nan()),
+                Column::F32(s) => endpoint_groups(op, groups, |r| !s[r].is_nan()),
+                Column::Datetime(s) => endpoint_groups(op, groups, |r| s[r] != i64::MIN),
+                Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v) => endpoint_groups(op, groups, |r| v.is_valid(r)),
+            };
+            let mut out = self.take(&positions);
+            match &mut out {
+                Column::F64(v) => {
+                    for i in 0..n { if !valid.is_valid(i) { v.set(i, f64::NAN); } }
+                }
+                Column::F32(v) => {
+                    for i in 0..n { if !valid.is_valid(i) { v.set(i, f32::NAN); } }
+                }
+                Column::Datetime(v) => {
+                    for i in 0..n { if !valid.is_valid(i) { v.make_mut()[i] = i64::MIN; } }
+                }
+                Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v) => *v = valid,
+            }
+            return Ok(out);
+        }
+        Ok(match self {
+            Column::F64(s) => Column::f64(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied())).collect()),
+            Column::F32(s) => Column::f32(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied())).collect()),
+            Column::I64(s, sv) => {
+                let (values, valid) = int_groups(op, s, sv, groups, DType::I64)?;
+                Column::i64_masked(values, valid)
+            }
+            Column::I32(s, sv) => {
+                let (values, valid) = int_groups(op, s, sv, groups, DType::I32)?;
+                Column::i32_masked(values, valid)
+            }
+            Column::Datetime(s) => Column::datetime(groups.map(|r| instant_reduce(op, s, r[0], r[1..].iter().copied())).collect()),
+            _ => unreachable!("the support table admits no other pair"), // LCOV_EXCL_LINE
+        })
+    }
+
     /// Set cell `row` to the aggregate of the single value `src[src_row]` under
     /// `op`: that value with its presence (a one-value period's aggregate is the
     /// value). [`combine_at`](Self::combine_at) then folds each later value in. A
@@ -142,6 +194,31 @@ impl Column {
         Ok(())
     }
 
+    /// Continue a batch reduction from its prefix aggregate. `had_missing`
+    /// distinguishes a float reduction stopped by an input NaN from an arithmetic
+    /// NaN (e.g. inf + -inf), which must still visit later inputs. Endpoints use
+    /// the same canonical missing value as `reduce_into`. This preserves even NaN
+    /// payloads and signed zeros when a cached prefix replaces a full re-reduction.
+    pub fn combine_reduced_at(&mut self, row: usize, op: CombineOp, src: &Column, r: usize, had_missing: bool) -> Result<()> {
+        if op.is_endpoint() && (!self.is_valid(row) || !src.is_valid(r)) {
+            return self.set_missing_at(row);
+        }
+        if !op.is_endpoint() {
+            match (&mut *self, src) {
+                (Column::F64(a), Column::F64(b)) => {
+                    if !had_missing { a.set(row, if b[r].is_nan() { b[r] } else { float_combine(op, a[row], b[r]) }); }
+                    return Ok(());
+                }
+                (Column::F32(a), Column::F32(b)) => {
+                    if !had_missing { a.set(row, if b[r].is_nan() { b[r] } else { float_combine(op, a[row], b[r]) }); }
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        self.combine_at(row, op, src, r)
+    }
+
     /// Check, writing nothing, that folding `cells` — source `(column, row)` pairs in
     /// fold order — into cell `row` under `op` succeeds: from the cell's value
     /// ([`combine_at`](Self::combine_at) each), or with `restart` from the first cell
@@ -158,6 +235,16 @@ impl Column {
         restart: bool,
         cells: impl IntoIterator<Item = (&'c Column, usize)>,
     ) -> Result<()> {
+        self.checked_fold_value(row, op, restart, cells).map(|_| ())
+    }
+
+    /// The integer aggregate already calculated while checking a fold. Frame
+    /// admission reuses it to validate historical dtype compatibility before writing.
+    #[inline(never)]
+    pub(crate) fn checked_fold_value<'c>(
+        &self, row: usize, op: CombineOp, restart: bool,
+        cells: impl IntoIterator<Item = (&'c Column, usize)>,
+    ) -> Result<Option<i64>> {
         let dtype = self.dtype();
         if !op.supports(dtype) {
             return Err(op.unsupported(dtype));
@@ -198,7 +285,7 @@ impl Column {
             }
             first = false;
         }
-        Ok(())
+        Ok(acc)
     }
 
     /// Reduce `src`'s `rows` (a whole period, in order) into cell `row` under `op`
@@ -253,14 +340,7 @@ impl Column {
                 write_int(buf, val, row, v)
             }
             (Column::Datetime(buf), Column::Datetime(s)) => {
-                let mut acc = s[first];
-                for x in std::iter::once(first).chain(rows).map(|r| s[r]) {
-                    if x == i64::MIN {
-                        return self.set_missing_at(row);
-                    }
-                    acc = if op == CombineOp::Max { acc.max(x) } else { acc.min(x) };
-                }
-                buf.make_mut()[row] = acc;
+                buf.make_mut()[row] = instant_reduce(op, s, first, rows);
             }
             _ => unreachable!("the support table admits no other pair"), // LCOV_EXCL_LINE
         }
@@ -329,6 +409,45 @@ impl Column {
             self.combine_at(row, op, &cell, 0)
         }
     }
+}
+
+fn endpoint_groups<'a>(op: CombineOp, groups: impl ExactSizeIterator<Item = &'a [usize]>, present: impl Fn(usize) -> bool) -> (Vec<usize>, Validity) {
+    let n = groups.len();
+    let mut valid = Validity::default();
+    let positions = groups.enumerate().map(|(i, rows)| {
+        let first = rows[0];
+        let (present, last) = endpoint_scan(first, rows[1..].iter().copied(), &present);
+        valid.set(i, n, present);
+        if present && op == CombineOp::Replace { last } else { first }
+    }).collect();
+    (positions, valid)
+}
+
+fn int_groups<'a, T: crate::buffer::Element + Copy + Into<i64> + TryFrom<i64>>(
+    op: CombineOp,
+    s: &[T],
+    sv: &Validity,
+    groups: impl ExactSizeIterator<Item = &'a [usize]>,
+    dtype: DType,
+) -> std::result::Result<(Vec<T>, Validity), (usize, VolasError)> {
+    let n = groups.len();
+    let mut valid = Validity::default();
+    let mut values = Vec::with_capacity(n);
+    for (i, rows) in groups.enumerate() {
+        let value = int_reduce(op, s, sv, rows[0], rows[1..].iter().copied(), dtype).map_err(|e| (i, e))?;
+        valid.set(i, n, value.is_some());
+        values.push(value.unwrap_or(s[rows[0]]));
+    }
+    Ok((values, valid))
+}
+
+fn instant_reduce(op: CombineOp, s: &[i64], first: usize, rest: impl Iterator<Item = usize>) -> i64 {
+    let mut acc = s[first];
+    for x in std::iter::once(first).chain(rest).map(|r| s[r]) {
+        if x == i64::MIN { return i64::MIN; }
+        acc = if op == CombineOp::Max { acc.max(x) } else { acc.min(x) };
+    }
+    acc
 }
 
 /// The error of a `Str` fold into a cell other than the last row (a string column

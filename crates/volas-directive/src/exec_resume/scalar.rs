@@ -1,88 +1,56 @@
 //! The single-row resume step: one new row of a recursive indicator — its value and the
 //! carried state as of that row — with no allocation. Mirrors [`super::execute_resume`]
-//! arm-for-arm: each arm calls the scalar twin of that arm's kernel, bit-identical to one
-//! iteration of its loop. A cached recursive column refreshes its newest row through
+//! arm-for-arm for every line whose spec declares a step ([`Resume::Step`]): each arm
+//! calls the scalar twin of that arm's kernel, bit-identical to one iteration of its
+//! loop. A cached recursive column refreshes its newest row through
 //! this step (a plain append, a replaced last row, a time-frame forming row), writing the
 //! advanced state into a buffer it keeps, so the live path allocates nothing.
 
-use std::cell::Cell;
 
-use crate::complete::BoundCommand;
 use crate::exec::{arg_f64, arg_usize};
 use crate::operands::Operands;
+use crate::spec::Resume;
 use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
 use volas_core::DataFrame;
 
-use super::as_command;
+use super::{bound, resume_of};
 
-/// One row of the recursive `node` at `row`, continued from `prev_state` (the state as of
-/// the last complete row before `row`): returns the row's value and writes the state as of
-/// `row` into `next` (which must be `prev_state`'s length). A row missing an input is NaN
-/// and does not advance the state (`next` is `prev_state`). `None` when `node` has no
-/// single-row step, or the step declines (`row` out of range, a state of the wrong
-/// shape, or a frame that dropped complete rows of the history the step reads — `since`
-/// as in [`super::execute_resume`]) — the caller then takes the `Vec` resume.
+/// One row of `node` at `row`, continued from `prev_state` (the state as of the last
+/// complete row before `row`): returns the row's value and writes the state as of `row`
+/// into `next` (which must be `prev_state`'s length). It reads a trailing window of the
+/// frame, so it costs that window, not the frame's height. A row missing an input of a
+/// recursive command is NaN and does not advance the state (`next` is `prev_state`).
+/// `None` when the line has no single-row step ([`Resume::Step`]), or the step declines
+/// (`row` out of range, a state of the wrong shape, or a frame that dropped complete rows
+/// of the history the step reads — `since` as in [`super::execute_resume`]) — the caller
+/// then takes the `Vec` resume.
 pub fn execute_resume_step(
     df: &DataFrame,
     node: &Ast,
     prev_state: &[f64],
-    (row, since): (usize, usize),
+    (row, _since): (usize, usize),
     next: &mut [f64],
 ) -> Option<f64> {
-    let (name, sub, args, series) = as_command(node)?;
-    let (name, sub) = (name.as_ref(), sub.as_deref());
-    if next.len() != prev_state.len() {
+    if super::chain::chained(node) {
+        return super::chain::step(df, node, prev_state, row, next);
+    }
+    if !matches!(node.continuation(), crate::types::Continuation::Own(_)) {
         return None;
     }
-    if !crate::spec::is_recursive(name, &args) {
-        // a finite-window command resumes from its kernel's running sums
-        let ops = Operands::new(df, series);
-        return super::window::step(&ops, name, sub, &args, prev_state, row, next);
-    }
-    if !has_step(name, sub) {
+    let crate::types::Continuation::Own(cmd) = node.continuation() else { return None; };
+    if resume_of(cmd) != Resume::Step || next.len() != prev_state.len() || row >= df.height() {
         return None;
     }
-    // Over the complete rows (every command with a step is recursive): a missing row is
-    // NaN, its state untouched.
-    let cmd = BoundCommand { name, sub, args: &args, series };
-    let missing = Cell::new(false);
-    let out = crate::complete::resume_one(
-        df,
-        &cmd,
-        (row, since),
-        || {
-            missing.set(true);
-            Some(f64::NAN)
-        },
-        |ops, row| step_of(ops, name, sub, &args, prev_state, row, next),
-    );
-    if missing.get() {
-        next.copy_from_slice(prev_state);
-    }
-    out
-}
-
-/// Whether the command `name` / `sub` has a single-row step. Without one (the index
-/// family, `stochrsi`, `adosc`, `asi`, `kdj`, the Hilbert family and `mama`), a refresh
-/// takes the `Vec` resume.
-fn has_step(name: &str, sub: Option<&str>) -> bool {
-    match name {
-        "macd" | "macdfix" => matches!(sub, None | Some("signal" | "histogram")),
-        _ => matches!(
-            name,
-            "ema" | "smma" | "atr" | "natr" | "rsi" | "cmo" | "obv" | "ad" | "dema" | "tema"
-                | "t3" | "kama" | "sar" | "sarext" | "plus_di" | "minus_di" | "dx" | "adx"
-                | "adxr" | "pvt" | "nvi" | "pvi" | "efi" | "tsi" | "mass_index" | "wad"
-                | "keltner" | "supertrend" | "trix" | "plus_dm" | "minus_dm"
-        ),
-    }
+    super::state::planned_step(df, &bound(cmd), prev_state, row, next, |slot, default, wanted| {
+        super::row::operand(df, cmd, slot, default, wanted, &|_, _| None)
+    })
 }
 
 /// The step of the bound command `name` / `sub` at `row` over `ops` (see
 /// [`execute_resume_step`]).
 #[allow(clippy::too_many_arguments)] // the step's own inputs, passed through
-fn step_of(
+pub(super) fn step_of(
     ops: &Operands,
     name: &str,
     sub: Option<&str>,
@@ -187,6 +155,14 @@ fn step_of(
             let (h, l, c) = hlc()?;
             ind::wad_resume_one(&h, &l, &c, row, prev, next)
         }
+        // kcw = 2·mult·ATR/EMA over the Keltner band's EMA + ATR pair
+        ("kcw", _) => {
+            let (h, l, c) = hlc()?;
+            let (n_ema, n_atr) = next.split_at_mut(1);
+            let ema = ind::ema_resume_one(&c, p(0), row, &prev[..1], n_ema)?;
+            let atr = ind::atr_resume_one(&h, &l, &c, p(1), row, &prev[1..2], n_atr)?;
+            Some(ind::kcw_value(ema, atr, arg_f64(args, 2)))
+        }
         // the middle line is the EMA of close
         ("keltner", None) => ind::ema_resume_one(&close()?, p(0), row, prev, next),
         ("keltner", Some(band)) => {
@@ -206,10 +182,11 @@ fn step_of(
             let (h, l) = hl()?;
             ind::plus_dm_resume_one(&h, &l, p(0), row, prev, next)
         }
-        // `has_step` admits nothing else
-        _ => {
+        ("minus_dm", _) => {
             let (h, l) = hl()?;
             ind::minus_dm_resume_one(&h, &l, p(0), row, prev, next)
         }
+        ("crsi", _) => ind::crsi_resume_one(&ops.f64(0, "close").ok()?, arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2), row, prev, next),
+        _ => unreachable!("a recursive Step command has a scalar kernel"), // LCOV_EXCL_LINE
     }
 }

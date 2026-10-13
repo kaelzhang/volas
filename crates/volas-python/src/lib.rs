@@ -11,14 +11,13 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
-use volas_core::{
-    datetime, Column, Index, Series, VolasError,
-};
+use volas_core::{datetime, Column, Index, Series, VolasError};
 use volas_directive::parse;
 
 mod format;
 mod readers;
 mod timeframe;
+mod timezone;
 
 use format::parse_float_format;
 use readers::read_csv;
@@ -32,9 +31,10 @@ pub(crate) fn pyerr(e: VolasError) -> PyErr {
         VolasError::Key(m) => PyKeyError::new_err(m),
         VolasError::DType(m) => PyTypeError::new_err(m),
         VolasError::Overflow(m) => PyOverflowError::new_err(m),
-        VolasError::Shape(m) | VolasError::Index(m) | VolasError::Value(m) | VolasError::Parse(m) => {
-            PyValueError::new_err(m)
-        }
+        VolasError::Shape(m)
+        | VolasError::Index(m)
+        | VolasError::Value(m)
+        | VolasError::Parse(m) => PyValueError::new_err(m),
     }
 }
 
@@ -81,26 +81,22 @@ fn value_err(e: VolasError) -> PyErr {
     }
 }
 
+/// The bound directive a cached column computes (only this binding caches columns, each
+/// under its frame-bound [`volas_directive::Ast`]).
+fn bound_directive(directive: &volas_core::Directive) -> &volas_directive::Ast {
+    directive
+        .downcast_ref::<volas_directive::Ast>()
+        .expect("a cached column's directive is a bound volas_directive::Ast")
+}
+
 mod arrow;
-mod dlpack;
-mod scalar;
-mod convert;
 mod coerce;
-mod series;
-mod series_construct;
-mod series_io;
-mod series_ops;
-mod series_reduce;
-mod series_repr;
-mod series_reshape;
-mod series_transform;
+mod convert;
+mod dlpack;
 mod dt;
-mod window;
-mod series_support;
 mod frame;
 mod frame_access;
 mod frame_bounded;
-mod frame_row;
 mod frame_construct;
 mod frame_derive;
 mod frame_index;
@@ -109,23 +105,35 @@ mod frame_reduce;
 mod frame_refresh;
 mod frame_repr;
 mod frame_reshape;
+mod frame_row;
 mod frame_tf;
 mod frame_transform;
 mod frame_window;
+mod scalar;
+mod series;
+mod series_construct;
+mod series_io;
+mod series_ops;
+mod series_reduce;
+mod series_repr;
+mod series_reshape;
+mod series_support;
+mod series_transform;
+mod window;
 
-pub(crate) use scalar::*;
-pub(crate) use convert::*;
 pub(crate) use coerce::*;
+pub(crate) use convert::*;
+pub(crate) use frame::*;
+pub(crate) use frame_bounded::{LookbackBound, WindowState};
+pub(crate) use frame_derive::{uncarried_cached, RowSel};
+pub(crate) use frame_index::*;
+pub(crate) use frame_row::*;
+pub(crate) use frame_tf::{TfState, TfWrite};
+pub(crate) use frame_window::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
+pub(crate) use scalar::*;
 pub(crate) use series::*;
 pub(crate) use series_support::*;
-pub(crate) use frame::*;
-pub(crate) use frame_tf::{TfState, TfWrite};
-pub(crate) use frame_derive::{uncarried_cached, RowSel};
 pub(crate) use volas_directive::Replayer;
-pub(crate) use frame_bounded::{LookbackBound, WindowState};
-pub(crate) use frame_row::*;
-pub(crate) use frame_index::*;
-pub(crate) use frame_window::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
 
 /// Parse an optional printf-style `float_format` spec (shared by `to_csv` /
 /// `to_string`), raising a `ValueError` on an unsupported form.
@@ -186,19 +194,21 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
 }
 
 /// Get the canonical full name of a `directive` — the actual column name volas caches it
-/// under. The command name is lowercased and default arguments / series are dropped.
+/// under. The command name is lowercased, arguments are written as their values, and
+/// default arguments / series are dropped: every spelling of a directive has one name.
 ///
 /// Usage::
 ///
 ///     volas.directive_stringify('MACD:12,26')   # -> "macd"
 #[pyfunction]
 fn directive_stringify(directive: &str) -> PyResult<String> {
-    // Form-level: parse to a raw `Cst` (no binding) so a valid but argument-incomplete
-    // form like `donchian.upper` still canonicalizes to its name; `check_form`
-    // rejects an unknown command / sub-command or a bare sub-requiring name.
+    // Bound as a form: every supplied argument bound (so the name is the cache column's),
+    // an absent required one left absent, so a valid but argument-incomplete form like
+    // `donchian.upper` still canonicalizes to its name; an unknown command / sub-command
+    // or a bare sub-requiring name is rejected.
     let node = volas_directive::parse_cst(directive).map_err(directive_err)?;
-    volas_directive::check_form(&node).map_err(value_err)?;
-    Ok(volas_directive::stringify(&node))
+    let form = volas_directive::bind_form(&node).map_err(value_err)?;
+    Ok(volas_directive::stringify(&form))
 }
 
 /// Get the lookback period of a `directive` — the minimum number of prior rows it needs
@@ -216,6 +226,53 @@ fn directive_lookback(directive: &str) -> PyResult<usize> {
     // Frame-blind: reject an unknown command / sub-command or a bare sub-requiring name.
     volas_directive::check_bare(&node).map_err(value_err)?;
     Ok(volas_directive::lookback::lookback(&node))
+}
+
+/// The structural facts of a command line, as its spec states them (an audit anchor):
+/// `history` (`'window'` / `'accumulating'` / `'recursive'` under the directive's
+/// arguments), `accumulates` (a running accumulator by kind), `resume` (`'recompute'` /
+/// `'rows'` / `'step'`), `position` (a row-position output) and `bare` (usable as a bare
+/// name). `directive` is one command, written explicitly or bare.
+#[pyfunction]
+fn _directive_facts<'py>(
+    py: Python<'py>,
+    directive: &str,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use volas_directive::spec::{History, Resume};
+    use volas_directive::types::Node;
+    let node = parse(directive).map_err(directive_err)?;
+    let node = match node.node() {
+        Node::Name(name) => std::rc::Rc::new(
+            volas_directive::bind_command(name, None, &[], &[]).map_err(value_err)?,
+        ),
+        _ => node,
+    };
+    let cmd = match node.node() {
+        Node::Command(c) => c,
+        _ => {
+            return Err(DirectiveValueError::new_err(format!(
+                "'{directive}' is not a command"
+            )))
+        }
+    };
+    let spec = cmd.args.spec();
+    let facts = pyo3::types::PyDict::new(py);
+    let history = match spec.history(&cmd.args) {
+        History::Window => "window",
+        History::Accumulating => "accumulating",
+        History::Recursive => "recursive",
+    };
+    let resume = match spec.resume(&cmd.args) {
+        Resume::Recompute => "recompute",
+        Resume::Rows => "rows",
+        Resume::Step => "step",
+    };
+    facts.set_item("history", history)?;
+    facts.set_item("accumulates", spec.accumulates())?;
+    facts.set_item("resume", resume)?;
+    facts.set_item("position", spec.emits_position())?;
+    facts.set_item("bare", volas_directive::is_bare_command(&cmd.name))?;
+    Ok(facts)
 }
 
 /// The compiled module backing the `volas` package.
@@ -250,8 +307,10 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
+    m.add_function(wrap_pyfunction!(timezone::tz_database, m)?)?;
     m.add_function(wrap_pyfunction!(directive_stringify, m)?)?;
     m.add_function(wrap_pyfunction!(directive_lookback, m)?)?;
+    m.add_function(wrap_pyfunction!(_directive_facts, m)?)?;
     m.add_class::<NaType>()?;
     // Machine-readable vocabularies for the systematic audit's external anchors
     // (SPEC §6.3): the dtype set is generated FROM the Rust enum (a new dtype
@@ -264,7 +323,19 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
             .map(|d| d.name().to_string())
             .collect::<Vec<_>>(),
     )?;
-    m.add("_directive_commands", volas_directive::spec::COMMANDS.to_vec())?;
+    m.add(
+        "_directive_commands",
+        volas_directive::spec::COMMANDS.to_vec(),
+    )?;
+    // The commands usable as a bare name (the spec's fact the R17 ambiguity rule reads).
+    m.add(
+        "_directive_bare_commands",
+        volas_directive::spec::COMMANDS
+            .iter()
+            .copied()
+            .filter(|c| volas_directive::is_bare_command(c))
+            .collect::<Vec<_>>(),
+    )?;
     m.add("NA", na(m.py()))?;
     Ok(())
 }

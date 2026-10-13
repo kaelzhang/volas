@@ -3,15 +3,14 @@ writes, name collisions, slices, and appends / comparisons across snapshots."""
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 from hypothesis import strategies as st
 from hypothesis.stateful import initialize, precondition, rule
 
 import volas
+import volas_rs
 
-from . import build, contracts, inventory, observe
+from . import build, contracts, observe
 from .directives import stored_bare_names
 from .data import EPOCHS, NS, make_rows, next_timestamps, regimes, schemas, steps
 from .ledger import Ledger, last_close
@@ -158,7 +157,7 @@ class PlainMachine(FrameMachine):
     @rule(data=st.data(), via=st.sampled_from(['iloc', 'iat', 'at', 'loc']))
     def write_cell(self, data, via):
         """A positional / label write into a data column (invalidates every cache)."""
-        if self.stale or self._positions_carried() or self._slice_write_raises():
+        if self.stale:
             return  # a stale write is covered by append_rejected('stale_write')
         coarse = self.coarse()
         col = data.draw(st.sampled_from([c for c in coarse.columns
@@ -191,33 +190,16 @@ class PlainMachine(FrameMachine):
 
         self.attempt(target, commit=commit, label=f'{via} write {col}[{pos}]={value!r}')
 
-    def _positions_carried(self) -> bool:
-        """Whether a cached position-valued directive (the index family) sits on a
-        slice: an invalidating write would recompute it with the slice's origin
-        (absolute positions) while a fresh cache on the same slice is relative — an
-        undecided history contract, so such writes are not generated."""
-        from .inventory import position_valued
-        heads = position_valued()
-        return self.offset > 0 and any(
-            re.search(rf'\b{re.escape(h)}\b', n) for n in self.cached for h in heads)
-
     def _invalidate_all(self):
         # A write leaves every cached column stale; its recompute keeps its history (a
         # slice keeps the rows before it that the recompute reads).
         self.stale = set(self.cached) if len(self.df) else set()
 
-    def _slice_write_raises(self) -> bool:
-        """Whether a write would leave a recursion whose history starts before the slice
-        to recompute: its refresh raises (the contract's documented case, pinned by
-        test_derivations.py), so the machine does not generate such a write."""
-        return self.window is None and any(
-            inventory.recursion(e.name) and e.start < self.visible_start() for e in self.cached.values())
-
     @precondition(lambda self: len(self.df) > 0)
     @rule(data=st.data())
     def write_computed(self, data):
         """A cell write into a cached float column: it becomes plain data."""
-        if self.stale or not self.cached or self._positions_carried() or self._slice_write_raises():
+        if self.stale or not self.cached:
             return
         name = data.draw(st.sampled_from(sorted(self.cached)))
         want, error = self.oracle(self.cached[name])
@@ -245,7 +227,7 @@ class PlainMachine(FrameMachine):
     def set_column(self, data, kind):
         """``df[name] = values``: a new plain column, one named like a bare command or
         a canonical directive, or a replacement of an existing column."""
-        if self.stale or self._positions_carried() or self._slice_write_raises():
+        if self.stale:
             return
         from .inventory import executable_lines
         if kind == 'new':
@@ -257,7 +239,7 @@ class PlainMachine(FrameMachine):
             name = data.draw(st.sampled_from([ln.canonical for ln in executable_lines()][:40]))
         else:
             name = data.draw(st.sampled_from(list(self.df.columns)))
-        bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
+        bare = set(volas_rs._directive_bare_commands)
         if name in bare and any(name in stored_bare_names(key) for key in self.cached if key != name):
             if contracts.COLUMN_UNDER_A_CACHED_COMMAND_RAISES:
                 self.attempt(lambda: self.df.__setitem__(name, np.zeros(len(self.df))),
@@ -367,6 +349,12 @@ class PlainMachine(FrameMachine):
 
         self.attempt(lambda: self.df == other, expect_error=ValueError if stale else None, commit=commit,
                      label='df == snapshot')
+
+
+def _recursive(text: str) -> bool:
+    """Whether a directive reads a recursion anywhere in it."""
+    from . import inventory
+    return inventory.recursion(text)
 
 
 def _nat_index(df: volas.DataFrame, schema) -> volas.DataFrame:

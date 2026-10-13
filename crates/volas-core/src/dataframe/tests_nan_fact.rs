@@ -20,7 +20,7 @@ fn known_clean() -> DataFrame {
         None,
     )
     .unwrap();
-    df.set_computed("c", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
+    df.set_computed("c", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     assert!(!df.column("x").unwrap().has_nan());
     assert!(!df.column("c").unwrap().has_nan());
     assert_eq!(df.column("x").unwrap().known_has_nan(), Some(false));
@@ -117,13 +117,13 @@ fn update_computed_tail_writing_a_nan() {
 }
 
 #[test]
-fn update_computed_f64_value_writing_and_clearing_a_nan() {
+fn update_computed_value_writing_and_clearing_a_nan() {
     let mut df = known_clean();
-    df.update_computed_f64_value("c", 2, NAN).unwrap();
+    df.update_computed_value("c", 2, NAN).unwrap();
     assert!(df.column("c").unwrap().has_nan());
-    df.update_computed_f64_value("c", 2, 1.0).unwrap();
+    df.update_computed_value("c", 2, 1.0).unwrap();
     assert!(!df.column("c").unwrap().has_nan());
-    df.update_computed_f64_value("c", 0, 2.0).unwrap();
+    df.update_computed_value("c", 0, 2.0).unwrap();
     assert_eq!(df.column("c").unwrap().known_has_nan(), Some(false));
 }
 

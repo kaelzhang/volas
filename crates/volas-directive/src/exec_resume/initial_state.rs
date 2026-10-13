@@ -7,32 +7,39 @@ use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
 use volas_core::DataFrame;
 
-use super::as_command;
+use super::{bound, recursive};
 
-/// The resume state of `node` after a full compute over `df`'s rows `[0, end)` — read in
-/// place, never copied — as of row `end - 1`. `None` when `node` has no resume kernel
-/// (the caller then keeps the full-recompute fallback).
+/// The carried state of `node` as of `df`'s row `end - 1` (`end` at most the frame's
+/// height): what a full computation over the rows `[0, end)` ends with, read in place
+/// (no copy of the frame). `None` when `node` has no resume (its spec's
+/// [`crate::spec::Resume::Recompute`]): the caller then recomputes.
 ///
 /// A recursive command's state is captured over the complete rows of its inputs, so it
-/// describes the last complete row (see `crate::complete`).
+/// describes the last complete row (see `crate::complete`). A finite-window command's
+/// running sums are stepped from row 0, so the state is the one a continuation of the
+/// whole history carries, representation and all.
 pub fn initial_state(df: &DataFrame, node: &Ast, end: usize) -> Option<Vec<f64>> {
-    let (name, sub, args, series) = as_command(node)?;
-    let (name, sub) = (name.as_ref(), sub.as_deref());
-    if crate::spec::is_recursive(name, &args) {
-        return crate::complete::state(df, series, end, |ops| state_of(ops, name, sub, &args));
+    if super::chain::chained(node) {
+        return super::chain::capture(df, node, end);
     }
-    let ops = Operands::upto(df, series, end);
-    super::window::state(&ops, name, sub, &args).or_else(|| state_of(&ops, name, sub, &args))
+    if !matches!(node.continuation(), crate::types::Continuation::Own(_)) {
+        return None;
+    }
+    let crate::types::Continuation::Own(cmd) = node.continuation() else { return None; };
+    let end = end.min(df.height());
+    let (name, sub, args) = (cmd.name.as_str(), cmd.sub.as_deref(), &cmd.args.values[..]);
+    if recursive(cmd) {
+        let kernel = crate::complete::state(df, &cmd.series, end, |ops| state_of(ops, name, sub, args)).unwrap_or_default();
+        return super::state::capture(df, &bound(cmd), end, kernel, true);
+    }
+    let ops = Operands::rows(df, &cmd.series, 0, end);
+    let kernel = super::window::state(&ops, name, sub, args).or_else(|| state_of(&ops, name, sub, args))?;
+    super::state::capture(df, &bound(cmd), end, kernel, false)
 }
 
 /// The final state of the bound command `name`/`sub` over every row `ops` reads.
 pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Vec<f64>> {
     match (name, sub) {
-        // Stateless finite-memory indicators need no carried values, but marking
-        // them resumable lets append refresh compute only `[valid_rows, height)`.
-        ("avgprice" | "medprice" | "typprice" | "wclprice" | "tr" | "bop", _)
-        | ("mom" | "roc" | "rocp" | "rocr" | "rocr100", _) => Some(Vec::new()),
-
         ("obv", _) => {
             let real = ops.f64(0, "close").ok()?;
             let volume = ops.f64(1, "volume").ok()?;
@@ -54,6 +61,11 @@ pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[Ar
             let slow = arg_usize(args, 1);
             ind::adosc_final_state(&high, &low, &close, &volume, fast, slow)
         }
+
+        ("crsi", _) => ind::crsi_final_state(&ops.f64(0, "close").ok()?, arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2)),
+        ("stoch_momentum", sub) => ind::stoch_momentum_final_state(
+            &ops.f64(0, "high").ok()?, &ops.f64(1, "low").ok()?, &ops.f64(2, "close").ok()?,
+            arg_usize(args, 0), arg_usize(args, 1), sub.map(|_| arg_usize(args, 2))),
 
         // Group A cumulative / EMA-recursion family (volas-exclusive).
         ("pvt", _) => {
@@ -93,7 +105,8 @@ pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[Ar
             &ops.f64(0, "close").ok()?,
             arg_usize(args, 0),
         ),
-        ("keltner", Some(_)) => {
+        // kcw = 2·mult·ATR/EMA continues the Keltner band's pair of states.
+        ("keltner", Some(_)) | ("kcw", _) => {
             let high = ops.f64(0, "high").ok()?;
             let low = ops.f64(1, "low").ok()?;
             let close = ops.f64(2, "close").ok()?;
@@ -313,18 +326,15 @@ pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[Ar
         ),
 
         // StochRSI — carry the RSI Wilder pair + the recent RSI tail feeding the windows.
-        // A recursive-MA `.d` (matype != 0) keeps the fallback (no resume).
         ("stochrsi", Some(line @ ("k" | "d"))) => {
             let is_d = line == "d";
-            if is_d && ind::generic_ma_type(arg_usize(args, 2), arg_usize(args, 3)) != 0 {
-                return None;
-            }
             ind::stochrsi_final_state(
                 &ops.f64(0, "close").ok()?,
                 arg_usize(args, 0),
                 arg_usize(args, 1),
                 is_d,
                 arg_usize(args, 2),
+                arg_usize(args, 3),
                 ops.origin(),
             )
         }
@@ -351,6 +361,6 @@ pub(super) fn state_of(ops: &Operands, name: &str, sub: Option<&str>, args: &[Ar
             )
         }
 
-        _ => None,
+        _ => super::window::state(ops, name, sub, args),
     }
 }

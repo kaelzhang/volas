@@ -57,6 +57,7 @@ pub fn sar_final_state(
 /// `from - 1`) over rows `[from, n)`, bit-identical to a full recompute. `None` at `from < 2`
 /// (the bootstrap needs bars 0 and 1, never re-run here). Reads only `high/low[from..]`; the
 /// prior bar's extremes come from the carried state.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn sar_resume(
     high: &[f64],
     low: &[f64],
@@ -64,18 +65,19 @@ pub fn sar_resume(
     maximum: f64,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     if from < 2 {
         return None;
     }
     let n = high.len();
     let af_init = acceleration.min(maximum);
     let mut st = [state[0], state[1], state[2], state[3], state[4], state[5]];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for today in from..n {
         out.push(sar_step(&mut st, high[today], low[today], af_init, maximum));
     }
-    Some((out, st.to_vec()))
+    Some(st.to_vec())
 }
 
 /// SAR's bootstrap direction from the one-period −DM at bar 1: a positive −DM ⇒ short.
@@ -232,6 +234,7 @@ pub fn sarext_final_state(
 /// `from < 2`. `start_value` is omitted (it only steers the bar-1 bootstrap, never re-run here).
 /// Reads only `high/low[from..]`; the prior bar's extremes come from the carried state.
 #[allow(clippy::too_many_arguments)]
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn sarext_resume(
     high: &[f64],
     low: &[f64],
@@ -244,7 +247,8 @@ pub fn sarext_resume(
     accel_max_short: f64,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     if from < 2 {
         return None;
     }
@@ -254,11 +258,11 @@ pub fn sarext_resume(
         accel_short, accel_max_short,
     );
     let mut st = [state[0], state[1], state[2], state[3], state[4], state[5], state[6]];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for today in from..n {
         out.push(sarext_step(&mut st, high[today], low[today], &p));
     }
-    Some((out, st.to_vec()))
+    Some(st.to_vec())
 }
 
 /// SAREXT's resume parameters, with each acceleration capped by its maximum.

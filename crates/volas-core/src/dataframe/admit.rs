@@ -87,7 +87,7 @@ impl DataFrame {
         let rows = admitted.rows.as_ref();
         let (mut names, mut columns) = (Vec::new(), Vec::new());
         for (name, col) in self.names.iter().zip(&self.columns) {
-            if self.computed.contains_key(name) {
+            if self.computed.contains_key(name.as_str()) {
                 continue;
             }
             columns.push(match rows.column_pos(name) {
@@ -134,9 +134,9 @@ impl DataFrame {
         } else if self.computed.len() <= rows.width() {
             self.computed
                 .keys()
-                .any(|k| rows.name_to_idx.contains_key(k))
+                .any(|k| rows.name_to_idx.contains_key(k.as_ref()))
         } else {
-            rows.names.iter().any(|n| self.computed.contains_key(n))
+            rows.names.iter().any(|n| self.computed.contains_key(n.as_str()))
         };
         if has_cached {
             return Err(self.cached_columns_error(rows.names.iter().map(String::as_str)));
@@ -150,6 +150,11 @@ impl DataFrame {
         }
         self.index.check_append(&rows.index)?;
         if !convert {
+            if self.lead.is_some() {
+                for (name, col) in rows.names.iter().zip(&rows.columns) {
+                    self.check_lead_values(name, col, 0, col.len())?;
+                }
+            }
             return Ok(Admitted { rows: Cow::Borrowed(rows), leads: prefix });
         }
         let mut columns = rows.columns.clone();
@@ -160,6 +165,7 @@ impl DataFrame {
                     .convert_lossless(dtype)
                     .map_err(|e| in_column(name, e))?;
             }
+            self.check_lead_values(name, &columns[k], 0, columns[k].len())?;
         }
         Ok(Admitted {
             rows: Cow::Owned(rows.same_schema(columns, (*rows.index).clone(), rows.origin)),
@@ -392,7 +398,10 @@ impl DataFrame {
         for pos in 0..self.columns.len() {
             if let Some(j) = Self::source_of(&self.names[pos], pos, src, leads) {
                 let to = self.columns[pos].dtype();
-                if src.columns[j].dtype() != to && !self.computed.contains_key(&self.names[pos]) {
+                if !self.computed.contains_key(self.names[pos].as_str()) {
+                    self.check_lead_values(&self.names[pos], &src.columns[j], src_row, src_row + 1)?;
+                }
+                if src.columns[j].dtype() != to && !self.computed.contains_key(self.names[pos].as_str()) {
                     // a differently typed value converts losslessly (as an append does)
                     src.columns[j].slice(src_row, src_row + 1).convert_lossless(to)?;
                 }
@@ -416,7 +425,7 @@ impl DataFrame {
     fn write_last_row(&mut self, src: &DataFrame, src_row: usize, leads: bool) -> Result<()> {
         let last = self.height - 1;
         for pos in 0..self.columns.len() {
-            if !self.computed.is_empty() && self.computed.contains_key(&self.names[pos]) {
+            if !self.computed.is_empty() && self.computed.contains_key(self.names[pos].as_str()) {
                 continue;
             }
             match Self::source_of(&self.names[pos], pos, src, leads) {
@@ -447,7 +456,7 @@ impl DataFrame {
         for &(dst_col, src_col, op) in ops {
             let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
             if !cannot_fail(dst, from) {
-                dst.check_fold(row, op, false, [(from, src_row)])?;
+                self.check_fold_with_lead(dst_col, dst, (row, op, false), [(from, src_row)])?;
             }
         }
         for &(dst_col, src_col, op) in ops {
@@ -456,6 +465,52 @@ impl DataFrame {
         self.invalidate_computed_forming_row(row);
         #[cfg(debug_assertions)]
         self.debug_check();
+        Ok(())
+    }
+
+    /// Continue a one-row reduction from its cached prefix, preserving the batch
+    /// fold's missing-value and NaN-bit behavior. `missing` records which source
+    /// columns had a missing input in that prefix (an arithmetic NaN alone does
+    /// not stop a sum). `before` has the same schema as this aggregate: a new
+    /// input checkpoints the current row there; a replacement restarts from it.
+    /// Both snapshots change only after every fold passes. All rows have already
+    /// been admitted, and `ops` matches their schemas, as for `fold_forming_row`.
+    pub fn fold_with_checkpoint(&mut self, before: &mut DataFrame, src: &DataFrame, ops: &[(usize, usize, CombineOp)], missing: &[bool], replace: bool) -> Result<()> {
+        for &(dst_col, src_col, op) in ops {
+            let dst = if replace { &before.columns[dst_col] } else { &self.columns[dst_col] };
+            let from = &src.columns[src_col];
+            if !cannot_fail(dst, from) { self.check_fold_with_lead(dst_col, dst, (0, op, false), [(from, 0)])?; }
+        }
+        for &(dst_col, src_col, op) in ops {
+            if replace {
+                self.columns[dst_col].set_last_from(&before.columns[dst_col], 0)?;
+            } else {
+                before.columns[dst_col].set_last_from(&self.columns[dst_col], 0)?;
+            }
+            self.columns[dst_col].combine_reduced_at(0, op, &src.columns[src_col], 0, missing[src_col])?;
+        }
+        self.invalidate_computed_forming_row(0);
+        Ok(())
+    }
+
+    /// Publish an already reduced, admitted row at the forming row, using the
+    /// fold plan's positions. The source has this frame's data dtypes and every
+    /// aggregation check has succeeded, so neither conversion nor reduction is
+    /// repeated. Missing integer / bool / string cells retain the destination's
+    /// unused payload, as `refold_forming_row` does; floats keep the reduced NaN bits.
+    pub fn write_folded_row(&mut self, src: &DataFrame, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
+        for &(dst_col, src_col, _) in ops {
+            self.check_lead_values(&self.names[dst_col], &src.columns[src_col], 0, 1)?;
+        }
+        for &(dst_col, src_col, _) in ops {
+            let from = &src.columns[src_col];
+            if matches!(from, Column::F64(_) | Column::F32(_)) || from.is_valid(0) {
+                self.columns[dst_col].set_last_from(from, 0)?;
+            } else {
+                self.columns[dst_col].set_last_na();
+            }
+        }
+        self.invalidate_computed_forming_row(self.height - 1);
         Ok(())
     }
 
@@ -483,7 +538,7 @@ impl DataFrame {
                 Some(j) => (&last.columns[j], 0),
                 None => (from, h),
             };
-            dst.check_fold(row, op, true, (0..h).map(|r| (from, r)).chain([tail]))?;
+            self.check_fold_with_lead(dst_col, dst, (row, op, true), (0..h).map(|r| (from, r)).chain([tail]))?;
         }
         Ok(())
     }
@@ -504,7 +559,7 @@ impl DataFrame {
         for &(dst_col, src_col, op) in ops {
             let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
             if !cannot_fail(dst, from) {
-                dst.check_fold(row, op, true, (0..src.height).map(|r| (from, r)))?;
+                self.check_fold_with_lead(dst_col, dst, (row, op, true), (0..src.height).map(|r| (from, r)))?;
             }
         }
         for &(dst_col, src_col, op) in ops {
@@ -580,7 +635,7 @@ fn label_text(label: &Label) -> String {
 /// float bar): a float column of the source's own dtype takes every aggregation.
 #[inline]
 fn cannot_fail(dst: &Column, src: &Column) -> bool {
-    dst.dtype().is_float() && src.dtype() == dst.dtype()
+    dst.dtype().is_float() && std::mem::discriminant(dst) == std::mem::discriminant(src)
 }
 
 #[cfg(test)]

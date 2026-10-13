@@ -172,11 +172,11 @@ else
 endif
 
 # Standardized local A/B performance comparison (THE pipeline for "did my
-# change move performance?"): builds BASE in a temp worktree, benchmarks it,
+# change move performance?"): builds BASE from a read-only Git archive, benchmarks it,
 # rebuilds HEAD (the current tree, incl. uncommitted changes), benchmarks it,
 # and prints the verdict — perf_gate for the full suite, a compact normalized
 # report for a single indicator. Same harness, same machine, back-to-back
-# (exactly the CI gate's method). Nothing is archived.
+# (exactly the CI gate's method). Benchmark results are not retained.
 #
 #   make perf-ab BASE=HEAD~1                       # full suite
 #   make perf-ab BASE=HEAD~1 INDICATOR=bop         # one indicator

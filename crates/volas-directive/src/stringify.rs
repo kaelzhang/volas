@@ -1,20 +1,26 @@
-//! Render a directive AST back to its canonical string: whitespace removed,
-//! minimal parenthesization by operator priority, default arguments and default
-//! series dropped (so `boll`, `boll:20`, `boll:20@close` all stringify to
-//! `boll`). The canonical form is volas-native — numeric arguments are not
-//! coerced to a typed display (e.g. `100` stays `100`, not `100.0`).
+//! The one renderer of a directive's canonical name — the name volas caches it under,
+//! and what `directive_stringify` returns: whitespace removed, minimal
+//! parenthesization by operator priority, every argument rendered from its bound value
+//! (`ma:05` is `ma:5`, `hv:10,1W` is `hv:10`), default arguments and default series
+//! dropped. The name is independent of the spelling: `macd`, `macd:`, `MACD` and
+//! `macd:12,26` all name `macd`. A cached column refreshes from the bound directive it
+//! keeps, never from a re-read of its name, so a name a data column could also hold
+//! needs no mark of its own.
 
+use crate::bind::is_bare_command;
 use crate::parser::{is_ident_char, is_ident_start};
-use crate::spec::{canon_sub, command_spec, normalize};
-use crate::types::{ArgTokens, Command, Node, UnaryOp};
+use crate::spec::normalize;
+use crate::types::{Command, Node, Payload, UnaryOp};
 
-/// Canonical string form of a directive tree. Generic over the argument payload so
-/// it canonicalizes both a bound [`Ast`](crate::types::Ast) (the frame-cache key)
-/// and a raw [`Cst`](crate::types::Cst) (the form-level `directive_stringify`,
-/// where a required argument may be absent — the form name is still canonical).
-pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
+/// Canonical string form of a directive tree: a bound [`Ast`](crate::types::Ast) (the
+/// cache key) or a directive [`Form`](crate::types::Form) (`directive_stringify`, where
+/// a required argument may be absent), rendered alike.
+pub(crate) fn stringify_node<A: Payload>(node: &Node<A>) -> String {
     match node {
-        Node::Name(s) => s.clone(),
+        // a bare name that is a command usable bare names that command (a frame-bound
+        // tree holds none: there it is a command node, or a resolved Data reference)
+        Node::Name(s) if is_bare_command(s) => normalize(s).into_owned(),
+        Node::Data(s) | Node::Name(s) => s.clone(),
         Node::Scalar(v) => v.token(),
         Node::Command(cmd) => stringify_command(cmd),
         Node::Unary { op, operand } => {
@@ -22,9 +28,12 @@ pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
                 UnaryOp::Not => "~",
                 UnaryOp::Neg => "-",
             };
+            // A negated number keeps its parentheses: `-5` is an exact literal, `-(5)`
+            // the negation of one, so each form re-parses as itself.
             let inner = match operand.as_ref() {
-                Node::Binary { .. } => format!("({})", stringify(operand)),
-                _ => stringify(operand),
+                Node::Binary { .. } => format!("({})", stringify_node(operand)),
+                Node::Scalar(_) if *op == UnaryOp::Neg => format!("({})", stringify_node(operand)),
+                _ => stringify_node(operand),
             };
             format!("{op_s}{inner}")
         }
@@ -33,77 +42,67 @@ pub fn stringify<A: ArgTokens>(node: &Node<A>) -> String {
             // The left child only needs parens if it binds *looser* than us.
             let l = match left.as_ref() {
                 Node::Binary { op: lop, .. } if lop.priority() < p => {
-                    format!("({})", stringify(left))
+                    format!("({})", stringify_node(left))
                 }
-                _ => stringify(left),
+                _ => stringify_node(left),
             };
             // The right child needs parens at equal priority too (left-assoc).
             let r = match right.as_ref() {
                 Node::Binary { op: rop, .. } if rop.priority() <= p => {
-                    format!("({})", stringify(right))
+                    format!("({})", stringify_node(right))
                 }
-                _ => stringify(right),
+                _ => stringify_node(right),
             };
             format!("{l}{}{r}", op.token())
         }
     }
 }
 
-fn stringify_command<A: ArgTokens>(cmd: &Command<A>) -> String {
-    // Canonicalize the name / sub here (case-folding, `cdl` -> `style`, alias subs);
-    // this is idempotent for an already-bound `Ast` and the real work for a raw `Cst`.
-    let name = normalize(&cmd.name);
-    let sub = canon_sub(&name, cmd.sub.as_deref());
-    let mut out = name.clone().into_owned();
-    if let Some(s) = &sub {
+fn stringify_command<A: Payload>(cmd: &Command<A>) -> String {
+    let spec = cmd.args.spec();
+    let mut out = cmd.name.clone();
+    if let Some(s) = &cmd.sub {
         out.push('.');
         out.push_str(s);
     }
-    let spec = command_spec(&name, sub.as_deref());
 
-    // Arguments: keep a slot only if it is present and differs from its default. An
-    // absent slot — or one equal to its default — renders empty, and trailing empties
-    // fall away (`boll:20@close` -> `boll`; the absent period of `donchian.upper`
-    // simply drops).
+    // Arguments: keep a slot only if it is present and differs from its default (as a
+    // token, so a `-0` multiplier is not its default `0`). An absent slot — or one equal
+    // to its default — renders empty, and trailing empties fall away.
     let arg_tokens: Vec<String> = (0..cmd.args.arg_len())
         .map(|i| {
-            let default = spec
-                .as_ref()
-                .and_then(|s| s.args.get(i))
-                .and_then(|spec_arg| spec_arg.default.value())
-                .map(|d| d.to_token());
-            match cmd.args.arg_token(i) {
+            let default = spec.args.get(i).and_then(|a| a.default.value()).map(|d| d.to_token());
+            match cmd.args.arg(i).map(|v| v.to_token()) {
                 Some(v) if Some(&v) != default.as_ref() => v,
                 _ => String::new(),
             }
         })
         .collect();
-    out.push_str(&join_with(':', arg_tokens));
+    let args = join_with(':', arg_tokens);
 
     // Series: keep one only if it differs from the default column.
     let series_tokens: Vec<String> = cmd
         .series
         .iter()
         .enumerate()
-        .map(|(i, node)| {
-            let default = spec.as_ref().and_then(|s| s.series.get(i)).copied();
-            match node {
-                Node::Name(s) if s.is_empty() || Some(s.as_str()) == default => String::new(),
-                other => stringify_series(other),
-            }
+        .map(|(i, node)| match node {
+            Node::Data(s) | Node::Name(s) if s.is_empty() || spec.series.get(i) == Some(&s.as_str()) => String::new(),
+            other => stringify_series(other),
         })
         .collect();
-    out.push_str(&join_with('@', series_tokens));
+    let series = join_with('@', series_tokens);
 
+    out.push_str(&args);
+    out.push_str(&series);
     out
 }
 
 /// A series operand. The parser reads a bare identifier in a series slot and nothing
 /// else bare, so any other operand — a command with a sub / arguments / series, a
-/// scalar, an expression — is grouped; one that renders as a bare identifier (a
-/// command whose arguments are all defaults) is not, so the form is a fixed point.
-fn stringify_series<A: ArgTokens>(node: &Node<A>) -> String {
-    let text = stringify(node);
+/// scalar, an expression — is grouped; one that renders as a bare identifier (a column,
+/// or a command written bare) is not, so the form is a fixed point.
+fn stringify_series<A: Payload>(node: &Node<A>) -> String {
+    let text = stringify_node(node);
     if is_identifier(&text) {
         text
     } else {
@@ -129,22 +128,76 @@ fn join_with(prefix: char, mut tokens: Vec<String>) -> String {
     }
 }
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::types::Ast {}
+    impl Sealed for crate::types::Form {}
+}
+
+/// The two published directive representations accepted by the canonical renderer.
+pub trait Render: sealed::Sealed {
+    /// Render with the shared payload-generic node renderer.
+    fn render(&self) -> String;
+}
+impl Render for crate::types::Ast {
+    fn render(&self) -> String { stringify_node(self.node()) }
+}
+impl Render for crate::types::Form {
+    fn render(&self) -> String { stringify_node(self) }
+}
+
+/// Canonical spelling of a validated directive or a lenient directive form.
+pub fn stringify(tree: &(impl Render + ?Sized)) -> String { tree.render() }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse;
+    use crate::{parse, parse_cst};
 
     fn s(input: &str) -> String {
-        stringify(&parse(input).unwrap())
+        stringify(&*parse(input).unwrap())
+    }
+
+    /// The form a frame-blind `directive_stringify` names: bound leniently.
+    fn form(input: &str) -> String {
+        stringify(&crate::bind::bind_form(&parse_cst(input).unwrap()).unwrap())
+    }
+
+    /// A command written bare names its command, in its canonical case; any other bare
+    /// name (a column) keeps its spelling.
+    #[test]
+    fn a_bare_command_names_its_command() {
+        for d in ["OBV", "obv", "Obv"] {
+            assert_eq!(s(d), "obv");
+            assert_eq!(form(d), "obv");
+        }
+        assert_eq!(s("close - OBV"), "close-obv");
+        assert_eq!(s("Close + RSI"), "Close+RSI"); // `rsi` needs a period: a column
+        let columns = |n: &str| n == "Close";
+        let bound = crate::bind::bind_frame(&parse("Close - OBV").unwrap(), &columns, "").unwrap();
+        assert_eq!(stringify(&bound), "Close-obv");
+        assert!(crate::bind::uses_bare_command(&bound, "OBV") && crate::bind::uses_bare_command(&bound, "obv"));
     }
 
     #[test]
     fn drops_default_args_and_series() {
         assert_eq!(s("boll"), "boll");
-        assert_eq!(s("boll:20@close"), "boll");
         assert_eq!(s("boll:30@close"), "boll:30");
-        assert_eq!(s("macd:12,26"), "macd");
         assert_eq!(s("ma:5@close"), "ma:5");
+    }
+
+    /// The name is independent of the spelling: an explicit command whose arguments and
+    /// series are all defaults names the same column as its bare name.
+    #[test]
+    fn every_spelling_of_a_command_has_one_name() {
+        for d in ["macd", "macd:", "MACD", "Macd:12,26", "macd:012,26@close", "macd.dif"] {
+            assert_eq!(s(d), "macd", "{d}");
+        }
+        assert_eq!(s("boll:20@close"), "boll");
+        assert_eq!(s("change: * 2"), "change*2");
+        assert_eq!(s("ma:5@(obv:)"), "ma:5@obv");
+        assert_eq!(s("macd.signal:12"), "macd.signal");
+        assert_eq!(form("rsi:"), "rsi");
     }
 
     #[test]
@@ -153,6 +206,7 @@ mod tests {
         assert_eq!(s("3 * (high - low)"), "3*(high-low)");
         assert_eq!(s("(kdj.j > 100) | (kdj.j <= 100)"), "kdj.j>100|kdj.j<=100");
         assert_eq!(s("~ ( kdj.j < 0 )"), "~(kdj.j<0)");
+        assert_eq!(s("-(5) + -5 - -(close)"), "-(5)+-5--close");
     }
 
     #[test]
@@ -160,6 +214,29 @@ mod tests {
         assert_eq!(s("macd.dif"), "macd");
         assert_eq!(s("macd.s"), "macd.signal");
         assert_eq!(s("boll.u:20"), "boll.upper");
+    }
+
+    /// Arguments render from their bound values, whatever their spelling.
+    #[test]
+    fn arguments_render_from_their_values() {
+        assert_eq!(s("ma:05"), "ma:5");
+        assert_eq!(s("ma:+2"), "ma:2");
+        assert_eq!(s("boll.upper:20,2.0"), "boll.upper");
+        assert_eq!(s("MACD:012,26"), "macd");
+        assert_eq!(s("hv:10,1W"), "hv:10,1w");
+        assert_eq!(s("stddev:2,1.50"), "stddev:2,1.5");
+        assert_eq!(s("boll.upper:20,-0.0"), "boll.upper:,-0");
+    }
+
+    /// A form names exactly what its directive caches under; an absent required
+    /// argument or operand simply drops.
+    #[test]
+    fn a_form_renders_like_its_directive() {
+        for d in ["ma:05", "kdj.j:9,3,2,100@high,close,close", "MACD:12,26", "boll:20@close", "obv", "close > 2"] {
+            assert_eq!(form(d), s(d), "{d}");
+        }
+        assert_eq!(form("donchian.upper"), "donchian.upper");
+        assert_eq!(form("correl:5"), "correl:5");
     }
 
     #[test]
@@ -217,18 +294,5 @@ mod tests {
         assert_eq!(s("boll.upper:20,100000000000000000000"), "boll.upper:,100000000000000000000");
         assert_eq!(s("close > 2"), "close>2");
         assert_eq!(s("close > 0.000001"), "close>0.000001");
-    }
-
-    #[test]
-    fn scalar_series_operand() {
-        // a bare scalar in a series slot exercises stringify_series's Scalar arm
-        use crate::types::{ArgValue, Ast, Command, Node};
-        let node: Ast = Node::Command(Command {
-            name: "correl".into(),
-            sub: None,
-            args: vec![ArgValue::Usize(5)].into_boxed_slice(),
-            series: vec![Node::Name("close".into()), Node::Scalar(crate::types::Number::Int(3))],
-        });
-        assert!(stringify(&node).contains('3'));
     }
 }

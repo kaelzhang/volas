@@ -1,6 +1,6 @@
 """A bare name in a directive is either a data column or a built-in command, never a
-cached column and never both: a name that could be read either way raises at bind
-time, a data column that would change what a cached directive reads cannot be added,
+cached column: a data column owns every spelling at bind time; a data column that
+would change what an existing cached directive reads cannot be added,
 and `exec` / a new directive read the data columns only — so a stale cached column's
 placeholder is never computed with."""
 
@@ -15,11 +15,6 @@ CLOSE = 100 + np.cumsum(rng.standard_normal(N))
 VOLUME = rng.uniform(1, 100, N)
 CHANGE = rng.standard_normal(N)
 
-AMBIGUOUS = (
-    "ambiguous name 'change' in 'close * change': it is both a column of this DataFrame "
-    "and the built-in command 'change'. Write 'change:' to use the command, or rename the "
-    "column — df.rename(columns={'change': 'change_pct'}) — to use the data."
-)
 CANNOT_ADD = (
     "cannot add column 'change': the cached directive 'close*change' uses the built-in "
     "command 'change' under that name. Rename the new column, or drop the cached directive "
@@ -40,33 +35,26 @@ def state(df):
     return list(df.columns), {c: cells(c) for c in df.columns}
 
 
-def test_a_name_that_is_a_column_and_a_command_raises_at_bind_time():
+def test_a_name_that_is_a_column_and_a_command_reads_the_data():
     df = frame()
-    before = state(df)
-    for read in (lambda: df['close * change'], lambda: df.exec('close * change')):
-        with pytest.raises(volas.DirectiveValueError) as err:
-            read()
-        assert str(err.value) == AMBIGUOUS
-        assert state(df) == before
-    with pytest.raises(volas.DirectiveValueError, match="ambiguous name 'change' in 'ma:3@change'"):
-        df['ma:3@change']
+    for spelling in ('change', 'CHANGE', 'change:'):
+        np.testing.assert_array_equal(df.exec('close * ' + spelling), CLOSE * CHANGE)
+        np.testing.assert_array_equal(df['close * ' + spelling], CLOSE * CHANGE)
+    np.testing.assert_array_equal(df['ma:3@change'],
+                                  volas.DataFrame({'x': CHANGE}).exec('ma:3@x'))
 
 
-def test_the_command_or_the_renamed_column_resolve_the_ambiguity():
+def test_every_command_spelling_and_the_renamed_column_read_the_data():
     df = frame()
-    command = frame(change=False).exec('close * change')
-    assert np.array_equal(df['close * change:'].to_numpy(), command, equal_nan=True)
-    assert np.array_equal(df.exec('close * change:'), command, equal_nan=True)
-    assert np.array_equal(df['change:'].to_numpy(), frame(change=False).exec('change'), equal_nan=True)
+    for d in ('close * change', 'close * change:'):
+        np.testing.assert_array_equal(df[d], CLOSE * CHANGE)
+        np.testing.assert_array_equal(df.exec(d), CLOSE * CHANGE)
+    np.testing.assert_array_equal(df['change:'], CHANGE)
     renamed = df.rename(columns={'change': 'change_pct'})
-    assert np.array_equal(renamed['close * change_pct'].to_numpy(), CLOSE * CHANGE)
-    # the command form keeps reading the command after an append, never the column
-    df['close * change:']
-    assert df.is_computed('close*change')  # cached under its name, refreshed as the command
+    np.testing.assert_array_equal(renamed['close * change_pct'], CLOSE * CHANGE)
     df.append(volas.DataFrame({'close': [CLOSE[-1] + 1], 'volume': [1.0], 'change': [5.0]}))
-    want = volas.DataFrame({'close': list(CLOSE) + [CLOSE[-1] + 1], 'volume': list(VOLUME) + [1.0]})
-    assert np.array_equal(df['close * change:'].to_numpy(), want.exec('close * change'),
-                          equal_nan=True)
+    want = np.append(CLOSE * CHANGE, (CLOSE[-1] + 1) * 5.0)
+    np.testing.assert_array_equal(df['close * change:'], want)
 
 
 def test_a_column_named_like_a_command_a_cached_directive_uses_cannot_be_added():

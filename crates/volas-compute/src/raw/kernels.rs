@@ -11,70 +11,16 @@
 //! the available ILP, so a measured `f64x2` SIMD variant came out 1.00x — explicit
 //! SIMD buys nothing here.
 
-use crate::accum::{shift_row, Csum};
+use crate::accum::shift_row;
 use crate::guard::{Order, Slide, Window};
 use crate::missing;
 use crate::raw::smoothing;
 use ndarray::{Array1, ArrayView1};
 use std::borrow::Cow;
 
-/// Simple moving average (a window is valid only when fully populated). Row 0 is at
-/// absolute position `origin` (see [`crate::accum`]).
-///
-/// O(n) sliding running sum: each step adds the entering value and subtracts the
-/// leaving one — an exact sum ([`Csum`], re-summed where it could not hold its sum), so each
-/// window's mean is that of its own rows however long the slide. A window holding a
-/// NaN is NaN.
-#[inline]
-pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
-    let n = data.len();
-    if period == 0 || period > n {
-        return Array1::from_elem(n, f64::NAN);
-    }
-    // Fast path — a clean sliding sum with no per-element NaN bookkeeping, the common
-    // OHLCV case. A **leading** NaN prefix is skipped (cascaded indicators — trima,
-    // stochastic smoothing — feed an SMA over a series that warms up with NaN),
-    // sliding from the first finite value. A later non-finite value poisons the sum
-    // (and marks it inexact); that is checked at every re-anchoring and at the end, and
-    // then the careful path takes over. A sum that went inexact on finite values is
-    // re-summed at that row (see [`crate::accum`]). On the rows it keeps, the fast path does exactly the
-    // careful slide's arithmetic ([`sma_row`]), so the two agree bit for bit.
-    //
-    // The result is built write-once: the warm-up is filled with NaN, then each mean is
-    // pushed — so the valid region is written once.
-    if let Some(src) = data.as_slice() {
-        let start = src.iter().position(|x| !x.is_nan()).unwrap_or(n);
-        let valid_start = (start + period - 1).min(n);
-        let mut out = Vec::with_capacity(n); // reserve the full length so push never reallocs
-        out.resize(valid_start, f64::NAN);
-        let pf = period as f64;
-        let mut sum = Csum::default();
-        let mut clean = true;
-        for i in start..n {
-            sum.add(src[i]);
-            if i >= start + period {
-                sum.sub(src[i - period]);
-            }
-            if !sum.is_exact() && i + 1 >= period {
-                clean &= sum.value().is_finite();
-                if clean {
-                    sum = Csum::of(src[(i + 1 - period).max(start)..=i].iter().copied());
-                }
-            }
-            if i + 1 >= start + period {
-                out.push(sum.mean(pf));
-            }
-        }
-        if clean && sum.value().is_finite() {
-            return Array1::from_vec(out);
-        }
-    }
-    // Careful path — window-local (see [`crate::guard`]): the running sum holds only
-    // finite rows; a window holding a non-finite row takes its own mean directly
-    // (NaN for a NaN, ±inf for an infinity), so a bad row never outlives its window.
-    let mut slide = Slide::<1>::at(origin);
-    (0..n).map(|i| sma_row(&mut slide, period, i, |j| data[j])).collect()
-}
+mod sma;
+pub use sma::{sma, sma_pass};
+pub(crate) use sma::{sma_row, sma_step, SMA_STATE};
 
 /// The seed of an SMA-seeded smoother over `data` (TA-Lib's EMA / Wilder shape): the row
 /// of its `period`-th present (non-NaN) value and the mean of the first `period` present
@@ -107,16 +53,53 @@ pub(crate) fn sma_seed(data: impl Iterator<Item = f64>, period: usize) -> Option
 /// `NaN`. The `step` is one of [`smoothing`]'s TA-Lib steps.
 #[inline]
 fn sma_seeded(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64) -> Array1<f64> {
+    sma_seeded_pass(data, period, step, &mut ())
+}
+
+/// Seeded smoother publishing its terminal states from the value loop.
+pub fn sma_seeded_pass<S: crate::pass::StateSink>(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64, states: &mut S) -> Array1<f64> {
     let n = data.len();
-    let mut out = Array1::from_elem(n, f64::NAN);
-    let Some((si, seed)) = sma_seed(data.iter().copied(), period) else { return out };
+    // Value-only code keeps its original allocation and indexed stores. Capturing
+    // passes write the warm prefix once and append each computed value once.
+    let mut out = Array1::from_elem(if S::CAPTURE { 0 } else { n }, f64::NAN);
+    let Some((si, seed)) = sma_seed(data.iter().copied(), period) else {
+        return if S::CAPTURE { Array1::from_elem(n, f64::NAN) } else { out };
+    };
     let mut prev = seed;
-    out[si] = prev;
-    for i in (si + 1)..n {
-        prev = step(prev, data[i]);
-        out[i] = prev;
+    macro_rules! smooth_value {
+        ($input:expr) => {{ prev = step(prev, $input); prev }};
     }
-    out
+    macro_rules! smooth_rows {
+        ($from:expr, $end:expr, $out:ident, indexed) => {{
+            for i in $from..$end { let value = smooth_value!(data[i]); $out[i] = value; }
+        }};
+
+    }
+    if S::CAPTURE {
+        let mut values = Vec::with_capacity(n);
+        values.resize(si, f64::NAN);
+        values.push(seed);
+        states.record(si, n, |out| out.extend_from_slice(&[prev]));
+        let contiguous = data.as_slice();
+        let mut from = si + 1;
+        while from < n {
+            let end = states.next_end(from + 1, n);
+            if let Some(src) = contiguous {
+                values.extend(src[from..end].iter().copied().map(|input| smooth_value!(input)));
+            } else {
+                let span = data.slice(ndarray::s![from..end]);
+                values.extend(span.iter().copied().map(|input| smooth_value!(input)));
+            }
+            states.record(end - 1, n, |out| out.extend_from_slice(&[prev]));
+            from = end;
+        }
+        Array1::from_vec(values)
+    } else {
+        out[si] = prev;
+        smooth_rows!(si + 1, n, out, indexed);
+        out
+    }
+
 }
 
 /// The value of [`sma_seeded`] at the last row of `data` — the carried state of an
@@ -510,47 +493,6 @@ pub fn rolling_min(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
 /// mirror of [`rolling_min`].
 pub fn rolling_max(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
     rolling_extremum(data, period, f64::max, f64::NEG_INFINITY)
-}
-
-/// One row of [`sma`] over the series `term`, resumed from `slide` (rows `0..i` slid):
-/// the careful slide, which the fast loop follows on clean windows — so a full [`sma`]
-/// and a resume of this one row at a time agree bit for bit.
-#[inline]
-pub(crate) fn sma_row(
-    slide: &mut Slide<1>,
-    period: usize,
-    i: usize,
-    term: impl Fn(usize) -> f64,
-) -> f64 {
-    match slide.row(Order::AddDrop, period, i, |j| {
-        let x = term(j);
-        ([x], x.is_finite())
-    }) {
-        Window::Partial => f64::NAN,
-        Window::Sums([sum]) => sum.mean(period as f64),
-        Window::Bad => (i + 1 - period..=i).map(&term).sum::<f64>() / period as f64,
-    }
-}
-
-/// The length of [`sma`]'s resumable state: the [`Slide`] of the sum.
-pub(crate) const SMA_STATE: usize = Slide::<1>::STATE;
-
-/// One row of [`sma`] over `term` from `state`, writing the state as of `row` into `next`.
-#[inline]
-pub(crate) fn sma_step(
-    period: usize,
-    row: usize,
-    term: impl Fn(usize) -> f64,
-    state: &[f64],
-    next: &mut [f64],
-) -> Option<f64> {
-    if period == 0 || next.len() != SMA_STATE {
-        return None;
-    }
-    let mut slide = Slide::<1>::from_state(state)?;
-    let value = sma_row(&mut slide, period, row, term);
-    slide.write_state(next);
-    Some(value)
 }
 
 /// The length of [`mean_std_row`]'s resumable state: the [`Slide`] of `[Σx, Σ(x − K)²]`.

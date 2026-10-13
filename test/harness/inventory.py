@@ -2,7 +2,7 @@
 
 * Commands: the extension's own registry (``volas_rs._directive_commands``).
 * Sub-command / alias tokens: every token the spec's sub-command matches name
-  (``canon_sub`` and ``command_spec`` in ``spec.rs``) plus the candlestick registry
+  (``canon_sub`` and ``command_spec`` in the ``spec`` module) plus the candlestick registry
   (``CANDLE_PATTERNS``); which ``(command, token)`` pairs exist is decided by the
   directive validator itself (``volas.directive_stringify``).
 * Argument arity and domains: probed through the validator — the "accepts at most
@@ -28,7 +28,7 @@ import volas_rs
 from . import observe
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC_RS = ROOT / 'crates/volas-directive/src/spec.rs'
+SPEC_DIR = ROOT / 'crates/volas-directive/src/spec'
 PARSER_RS = ROOT / 'crates/volas-directive/src/parser.rs'
 COMPUTE_SRC = ROOT / 'crates/volas-compute/src'
 
@@ -68,11 +68,11 @@ def _const_names(path: Path, const: str) -> list[str]:
 
 def commands() -> list[str]:
     registry = getattr(volas_rs, '_directive_commands', None)
-    return list(registry) if registry else _const_names(SPEC_RS, 'COMMANDS')
+    return list(registry) if registry else _const_names(SPEC_DIR / 'mod.rs', 'COMMANDS')
 
 
 def _sub_tokens() -> list[str]:
-    src = SPEC_RS.read_text()
+    src = ''.join(path.read_text() for path in sorted(SPEC_DIR.glob('*.rs')))
     tokens: set[str] = set()
     for group in re.findall(r'Some\(([^()]*)\)', src):
         tokens.update(re.findall(r'"([a-z_0-9]+)"', group))
@@ -234,10 +234,10 @@ def executable_lines() -> tuple[Line, ...]:
 
 # The recursions by kind (spec::is_recursive): the commands whose value depends on
 # every row before, and the TA-Lib MA-type argument slots (a command given one may be
-# a recursion whatever its default arguments compute). While 'slice-recursive-rewarm'
-# is open the machines step around them, and a windowed frame refuses them when
-# requested after construction; an early jump in the fixture (`unbounded_memory`)
-# does not reveal every one.
+# a recursion whatever its default arguments compute). A slice keeps such a column
+# only by its carried states, and a windowed frame refuses them when requested after
+# construction; an early jump in the fixture (`unbounded_memory`) does not reveal
+# every one.
 _RECURSIVE = frozenset({
     'ema', 'smma', 'dema', 'tema', 't3', 'kama', 'macd', 'macdfix', 'kdj', 'rsi', 'crsi',
     'stochrsi', 'cmo', 'trix', 'pvt', 'nvi', 'pvi', 'obv', 'ad', 'adosc', 'mass_index',
@@ -245,8 +245,14 @@ _RECURSIVE = frozenset({
     'natr', 'plus_dm', 'minus_dm', 'plus_di', 'minus_di', 'dx', 'adx', 'adxr', 'sar',
     'sarext', 'ht_dcperiod', 'ht_dcphase', 'ht_phasor', 'ht_sine', 'ht_trendline',
     'ht_trendmode', 'mama'})
-_MATYPE_SLOTS = {'ma': 1, 'apo': 2, 'ppo': 2, 'mavp': 2, 'stochf': 2, 'macdext': 1, 'stoch': 2}
-_ARGS = re.compile(r'\b([a-z_]+)(?:\.[a-z_]+)?:([^@\s()]*)')
+# Keyed by line where the MA type is one line's alone (`stochf.d`; `stochf.k` reads none).
+_MATYPE_SLOTS = {'ma': 1, 'apo': 2, 'ppo': 2, 'mavp': 2, 'stochf.d': 2, 'macdext': 1, 'stoch': 2}
+_ARGS = re.compile(r'\b([a-z_]+)(\.[a-z_]+)?:([^@\s()]*)')
+
+
+def _line(table, head, sub):
+    """``table``'s entry for the line ``head`` + ``sub`` (its own, else its command's)."""
+    return table.get(head + sub, table.get(head))
 
 
 def recursive(text: str) -> bool:
@@ -254,8 +260,8 @@ def recursive(text: str) -> bool:
     argument given to a command that takes one."""
     names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
     return bool(names & _RECURSIVE) or any(
-        head in _MATYPE_SLOTS and len(args.split(',')) > _MATYPE_SLOTS[head]
-        for head, args in _ARGS.findall(text.lower()))
+        _line(_MATYPE_SLOTS, head, sub) is not None and len(args.split(',')) > _line(_MATYPE_SLOTS, head, sub)
+        for head, sub, args in _ARGS.findall(text.lower()))
 
 
 # The MA-type argument slots of each command taking them, and the codes selecting a
@@ -264,8 +270,8 @@ def recursive(text: str) -> bool:
 # spec's defaults (spec::is_recursive): an MA type selecting a recursive average makes a
 # recursion, except at period 1 (every type is the identity there).
 _AVERAGES = {'ma': ((0, 1),), 'apo': ((0, 2), (1, 2)), 'ppo': ((0, 2), (1, 2)), 'mavp': ((1, 2),),
-             'stochf': ((1, 2),), 'macdext': ((0, 1), (2, 3), (4, 5)), 'stoch': ((1, 2), (3, 4))}
-_AVERAGE_DEFAULTS = {'apo': ('12', '26', '0'), 'ppo': ('12', '26', '0'), 'stochf': ('5', '3', '0'),
+             'stochf.d': ((1, 2),), 'macdext': ((0, 1), (2, 3), (4, 5)), 'stoch': ((1, 2), (3, 4))}
+_AVERAGE_DEFAULTS = {'apo': ('12', '26', '0'), 'ppo': ('12', '26', '0'), 'stochf.d': ('5', '3', '0'),
                      'stoch': ('5', '3', '0', '3', '0'), 'macdext': ('12', '0', '26', '0', '9', '0')}
 _RECURSIVE_MATYPES = {'1', '3', '4', '6', '7', '8'}
 
@@ -277,16 +283,16 @@ def recursion(text: str) -> bool:
     names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
     if names & _RECURSIVE:
         return True
-    for head, args in _ARGS.findall(text.lower()):
+    for head, sub, args in _ARGS.findall(text.lower()):
         given = [a.strip() for a in args.split(',')]
-        defaults = _AVERAGE_DEFAULTS.get(head, ())
+        defaults = _line(_AVERAGE_DEFAULTS, head, sub) or ()
 
         def arg(i):
             if i < len(given) and given[i]:
                 return given[i]
             return defaults[i] if i < len(defaults) else '0'
 
-        if any(arg(m) in _RECURSIVE_MATYPES and arg(p) != '1' for p, m in _AVERAGES.get(head, ())):
+        if any(arg(m) in _RECURSIVE_MATYPES and arg(p) != '1' for p, m in _line(_AVERAGES, head, sub) or ()):
             return True
     return False
 

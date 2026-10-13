@@ -239,23 +239,59 @@ def test_class_2_and_3_must_be_declared(d, why):
         declared.exec(d)
 
 
-@pytest.mark.parametrize('d', ['ema:3@(rsi:5)', 'ma:3@(ema:2)', 'ema:3 - ema:5', 'close > ema:5', 'kcw',
-                               'crsi', 'ma:5,1'])
-def test_a_recursion_no_state_carries_is_refused(d):
+@pytest.mark.parametrize('d', ['ema:3@(crsi)', 'crsi', 'apo:5,9,1', 'stoch.k:5,3,1'])
+def test_recursive_composites_are_declared_and_late_requests_raise(d):
     seed = rows(bars(10), 0, 10)
-    with pytest.raises(ValueError, match=f"cannot keep '{re.escape(d)}' exact on a windowed frame"):
-        volas.DataFrame(seed, window=3, max_lookback=[d])
+    declared = volas.DataFrame(seed, window=3, max_lookback=[d])
+    assert same(declared[d], seed.exec(d, dtype='float64')[-3:])
     w = volas.DataFrame(seed, window=3, max_lookback=60)
     for read in (lambda: w[d], lambda: w.exec(d)):
-        with pytest.raises(ValueError, match="cannot keep"):
+        with pytest.raises(ValueError, match="cannot compute"):
             read()
+
+
+@pytest.mark.parametrize('d', ['kcw', 'kcw:7,4,1.5', 'ma:5,1', 'ma:4,3', 'ma:4,4', 'ma:4,6', 'ma:4,7', 'ma:4,8'])
+def test_a_recursion_carrying_its_own_state_is_kept_by_the_window(d):
+    # kcw continues the Keltner band's EMA + ATR pair; `ma` at a recursive MA type runs
+    # as that average: both carry a state, so a window keeps them exact once declared
+    cols = bars(300, seed=5)
+    w = volas.DataFrame(rows(cols, 0, 60), window=4, max_lookback=[d])
+    u = volas.DataFrame(rows(cols, 0, 60))
+    u[d]
+    for i in range(60, 300):
+        w.append(rows(cols, i, i + 1))
+        u.append(rows(cols, i, i + 1))
+        if i % 37 == 0:
+            assert same(w[d].to_numpy(dtype='float64'), u[d].to_numpy(dtype='float64')[-4:]), (d, i)
+    assert w._physical_height < 300
+    assert same(w[d].to_numpy(dtype='float64'), u[d].to_numpy(dtype='float64')[-4:]), d
+
+
+@pytest.mark.parametrize('d', ['obv', 'ad', 'adosc', 'mfi:14', 'vwma:20', 'ema:20@(volume)'])
+def test_an_int64_volume_window_equals_the_unbounded_history(d):
+    # an int64 input converted over the rows a continuation reads, across compactions:
+    # the declared column equals the unbounded frame's bit for bit
+    rng = np.random.default_rng(1)
+    n = 2600
+    c = 100 + np.cumsum(rng.standard_normal(n))
+    o = c + 0.3 * rng.standard_normal(n)
+    data = {'open': o, 'high': np.maximum(o, c) + .5, 'low': np.minimum(o, c) - .5, 'close': c,
+            'volume': rng.integers(10, 1000, n).astype(np.int64)}
+    frame = lambda lo, hi: volas.DataFrame({k: v[lo:hi] for k, v in data.items()})
+    w = volas.DataFrame({k: v[:2000] for k, v in data.items()}, window=50, max_lookback=[d])
+    u = frame(0, 2000)
+    u[d]
+    for i in range(2000, n):
+        w.append(frame(i, i + 1))
+        u.append(frame(i, i + 1))
+    assert same(w[d].to_numpy(dtype='float64'), u[d].to_numpy(dtype='float64')[-50:])
 
 
 def test_a_copied_cached_column_must_be_kept_by_the_window():
     u = rows(bars(30), 0, 30)
     u['ema:3 - ema:5']
-    with pytest.raises(ValueError, match="cannot keep 'ema:3-ema:5' exact"):
-        volas.DataFrame(u, window=3, max_lookback=10)
+    copied = volas.DataFrame(u, window=3, max_lookback=10)
+    assert same(copied['ema:3-ema:5'], u.exec('ema:3-ema:5')[-3:])
     v = rows(bars(30), 0, 30)
     v['ma:20']
     with pytest.raises(ValueError, match=r"cannot keep 'ma:20' on a windowed frame with max_lookback=5: it "
@@ -281,6 +317,19 @@ def test_a_slice_recomputes_a_recursion_after_a_write_from_its_boundary():
     whole = rows(cols, 0, 40)
     whole.iat[30, 3] = 1.0
     assert same(s['ema:5'], whole['ema:5'].to_numpy()[-10:])
+
+
+@pytest.mark.parametrize('declared', ['macd:', 'MACD:12,26'])
+def test_a_declaration_named_like_a_data_column_raises(declared):
+    # the declared column would be cached under 'macd', a data column: the declaration
+    # cannot be kept, so construction refuses it rather than drop it
+    data = {'close': [1., 2.], 'macd': [99., 99.]}
+    with pytest.raises(ValueError) as raised:
+        volas.DataFrame(data, window=2, max_lookback=[declared])
+    assert str(raised.value) == (
+        f"cannot declare '{declared}': its column name 'macd' is a data column of this DataFrame. "
+        "Rename the data column — df.rename(columns={'macd': 'macd_data'}) — or declare another "
+        "directive.")
 
 
 def test_an_empty_declaration_raises():
@@ -494,3 +543,29 @@ def test_an_input_out_of_the_float_domain_is_reported_as_it_is():
     with pytest.raises((ValueError, OverflowError), match='2\\^53') as raised:
         w['ema:2@v']
     assert 'cannot recompute' not in str(raised.value)
+
+
+@pytest.mark.parametrize('tf', [None, '1m'])
+@pytest.mark.parametrize('d', ['crsi:3,2,5', 'stoch_momentum', 'stoch_momentum.signal',
+                             'apo:5,10,1', 'stochf.d:5,3,1', 'macdext:12,1,26,1',
+                             'stoch.k:5,3,1', 'stochrsi.d:14,5,3,1'])
+def test_recursive_composites_keep_exact_windowed_history(d, tf):
+    cols = bars(320, seed=81, gaps=.03)
+    kw = {} if tf is None else {'time_frame': tf}
+    w = volas.DataFrame(rows(cols, 0, 100), window=5, max_lookback=[d], **kw)
+    u = volas.DataFrame(rows(cols, 0, 100), **kw)
+    u[d]
+    for i in range(100, 320):
+        for df in (w, u):
+            df.append(rows(cols, i, i + 1))
+        if i % 11 == 0:
+            for df in (w, u):
+                df.append(rows(bars(i + 1, seed=i), i, i + 1))
+        if i % 17 == 0:
+            w.fulfill()
+            u.fulfill()
+            w.iat[1, 3] = u.iat[len(u) - 4, 3] = 90.0 + i / 10
+        got = np.asarray(w[d], dtype=np.float64)
+        want = np.asarray(u[d], dtype=np.float64)[-5:]
+        np.testing.assert_array_equal(got.view(np.uint64), want.view(np.uint64), err_msg=f'{d} {i}')
+    assert w._physical_height < 100

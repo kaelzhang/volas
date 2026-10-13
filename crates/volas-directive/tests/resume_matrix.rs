@@ -73,7 +73,7 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
         if execute(&head, node).is_err() {
             continue;
         }
-        let Some(mut state) = initial_state(&head, node, head.height()) else { continue };
+        let Some(mut state) = initial_state(&head, node, usize::MAX) else { continue };
         let mut at = from;
         for end in [from + 1, (from + 4).min(n), n] {
             if end <= at {
@@ -91,7 +91,7 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
             at = end;
         }
         if at == n {
-            if let Some(fresh) = initial_state(df, node, df.height()) {
+            if let Some(fresh) = initial_state(df, node, usize::MAX) {
                 if first_diff(&state, &fresh).is_some() {
                     fails.push(format!("from {from}: carried state {state:?} != fresh {fresh:?}"));
                 }
@@ -110,7 +110,7 @@ fn forming(df: &DataFrame, node: &Ast, from: usize) -> Vec<String> {
     if execute(&head, node).is_err() {
         return fails;
     }
-    let Some(anchor) = initial_state(&head, node, head.height()) else { return fails };
+    let Some(anchor) = initial_state(&head, node, usize::MAX) else { return fails };
     for bump in [1.01, 0.97] {
         let frame = with_last_row_scaled(&df.slice_data(0, from + 1), bump);
         let Some(want) = full(&frame, node) else { continue };
@@ -159,7 +159,7 @@ fn resume_equals_full_recompute_for_every_line_class_and_point() {
             let Ok(node) = parse(&text) else { panic!("{text} does not parse") };
             for data in &classes {
                 let probe = data.frame.slice_data(0, ROWS / 2);
-                if execute(&probe, &node).is_ok() && initial_state(&probe, &node, probe.height()).is_some() {
+                if execute(&probe, &node).is_ok() && initial_state(&probe, &node, usize::MAX).is_some() {
                     resumable += 1;
                 }
                 let fails = check(&data.frame, &node);
@@ -188,4 +188,214 @@ fn resume_equals_full_recompute_for_every_line_class_and_point() {
     assert!(unexpected.is_empty(), "{} resume divergence(s) not in KNOWN_DIVERGENT:\n{}", unexpected.len(),
         unexpected.iter().map(|((h, c), w)| format!("  {h} [{c}]: {w}")).collect::<Vec<_>>().join("\n"));
     assert!(fixed.is_empty(), "KNOWN_DIVERGENT entries no longer diverge (remove them): {fixed:?}");
+}
+
+/// The computation together with its carried states (one pass for a recursion that
+/// resumes) gives the full computation's values bit for bit, and the states a capture
+/// after it gives — on every line, data class and a range of heights.
+#[test]
+fn a_computation_with_its_states_is_the_full_computation() {
+    use volas_directive::exec::execute_with_states;
+    let mut fails = Vec::new();
+    let mut one_pass = 0usize;
+    for rows in [7, 40, 160] {
+        for data in &matrix::classes(rows) {
+            let df = &data.frame;
+            let extra = ["ma:5,1", "ma:5,3", "ma:5,4", "ma:5,6", "ma:5,7", "ma:5,8", "kcw:7,4,1.5", "rsi:5@(ma:3)",
+                "ema:4@(close+open)", "obv@(wma:3),volume", "ema:3@(ema:4)", "stochrsi.d:5,3,3,0"];
+            let lines = matrix::lines();
+            let texts = lines.iter().flat_map(matrix::variants).chain(extra.iter().map(|t| t.to_string()));
+            for text in texts {
+                {
+                    let node = parse(&text).unwrap();
+                    let Some(whole) = full(df, &node) else { continue };
+                    let (col, state, before) = execute_with_states(df, &node).unwrap();
+                    if let Some(d) = first_diff(&values(&col), &whole) {
+                        fails.push(format!("{text} [{} {rows}]: values {d}", data.name));
+                    }
+                    let want = (initial_state(df, &node, rows), initial_state(df, &node, rows - 1));
+                    let same_state = |a: &Option<Vec<f64>>, b: &Option<Vec<f64>>| match (a, b) {
+                        (Some(a), Some(b)) => first_diff(a, b).is_none(),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if !same_state(&state, &want.0) || (state.is_some() && !same_state(&before, &want.1)) {
+                        fails.push(format!("{text} [{} {rows}]: states {state:?} / {before:?} != {want:?}", data.name));
+                    }
+                    one_pass += usize::from(state.is_some());
+                }
+            }
+        }
+    }
+    assert!(one_pass > 1000, "only {one_pass} computations carried states");
+    assert!(fails.is_empty(), "{} failure(s):\n{}", fails.len(), fails[..fails.len().min(30)].join("\n"));
+}
+
+/// Far into a long series a continuation reads only a trailing window of the frame: for
+/// every line, the `Vec` resume and the single-row step from a carried state equal the
+/// full recompute — and a line whose spec declares a resume never declines there, also
+/// with a missing row inside or before the window.
+#[test]
+fn a_continuation_far_into_the_series_reads_a_window_exactly() {
+    use volas_directive::spec::Resume;
+    use volas_directive::types::Node;
+    const LONG: usize = 400;
+    let classes = matrix::classes(LONG);
+    let mut fails = Vec::new();
+    let mut stepped = 0usize;
+    for line in &matrix::lines() {
+        for text in matrix::variants(line) {
+            let node = parse(&text).unwrap();
+            let declared = match node.node() {
+                Node::Command(c) => c.args.spec().resume(&c.args),
+                _ => Resume::Recompute,
+            };
+            let picked = ["walk", "nan-close", "early-missing-bar", "constant"];
+            for data in classes.iter().filter(|d| picked.contains(&d.name)) {
+                let df = &data.frame;
+                let Some(whole) = full(df, &node) else { continue };
+                for from in [LONG - 40, LONG - 1] {
+                    let head = df.slice_data(0, from);
+                    if execute(&head, &node).is_err() {
+                        continue;
+                    }
+                    let Some(state) = initial_state(&head, &node, usize::MAX) else {
+                        if declared != Resume::Recompute {
+                            fails.push(format!("{text} [{}] from {from}: no state", data.name));
+                        }
+                        continue;
+                    };
+                    match execute_resume(df, &node, &state, from, usize::MAX, 0) {
+                        Some((tail, _)) => {
+                            if let Some(d) = first_diff(&values(&tail), &whole[from..]) {
+                                fails.push(format!("{text} [{}] from {from}: vec {d}", data.name));
+                            }
+                        }
+                        None => fails.push(format!("{text} [{}] from {from}: the vec resume declined", data.name)),
+                    }
+                    let mut next = vec![0.0; state.len()];
+                    match execute_resume_step(df, &node, &state, (from, 0), &mut next) {
+                        Some(v) => {
+                            stepped += 1;
+                            if !same(v, whole[from]) {
+                                fails.push(format!("{text} [{}] from {from}: step {v:?} != {:?}", data.name, whole[from]));
+                            }
+                        }
+                        None if declared == Resume::Step => {
+                            fails.push(format!("{text} [{}] from {from}: the step declined", data.name));
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+    }
+    // `@` operands evaluated over the window (a pure window or an accumulator) or over
+    // the frame (a recursion, a row position), under recursive and window commands
+    for text in [
+        "rsi:5@(ma:3)", "ema:4@(var:3)", "ma:4@(sum:3@(close-open))", "atr:5@(ma:2@high),low,close",
+        "obv@(wma:3),volume", "kama:4@(close*volume)", "sum:3@(ema:4)", "ema:3@(maxindex:4)",
+        "macd.signal:5,9,3@(boll.upper:6)", "stddev:5@(ma:3,1)",
+    ] {
+        let node = parse(text).unwrap();
+        for data in classes.iter().filter(|d| ["walk", "nan-close", "early-missing-bar"].contains(&d.name)) {
+            let df = &data.frame;
+            let whole = full(df, &node).unwrap();
+            for from in [LONG - 40, LONG - 1] {
+                let head = df.slice_data(0, from);
+                let state = initial_state(&head, &node, usize::MAX).unwrap();
+                let (tail, _) = execute_resume(df, &node, &state, from, usize::MAX, 0).unwrap();
+                if let Some(d) = first_diff(&values(&tail), &whole[from..]) {
+                    fails.push(format!("{text} [{}] from {from}: vec {d}", data.name));
+                }
+                let mut next = vec![0.0; state.len()];
+                let v = execute_resume_step(df, &node, &state, (from, 0), &mut next).unwrap();
+                if !same(v, whole[from]) {
+                    fails.push(format!("{text} [{}] from {from}: step {v:?} != {:?}", data.name, whole[from]));
+                }
+            }
+        }
+    }
+    assert!(stepped > 500, "only {stepped} steps ran");
+    assert!(fails.is_empty(), "{} failure(s):\n{}", fails.len(), fails.join("\n"));
+}
+
+#[test]
+fn every_recursive_composite_declares_and_captures_a_continuation() {
+    use volas_directive::{spec::Resume, types::Node};
+    let data = matrix::classes(400);
+    for line in matrix::lines().iter().filter(|l| ["crsi", "stoch_momentum", "apo", "ppo", "macdext", "mavp", "stoch", "stochf", "stochrsi"].contains(&l.head.split('.').next().unwrap())) {
+        for text in matrix::variants(line) {
+            let node = parse(&text).unwrap();
+            if let Node::Command(c) = node.node() {
+                if c.args.spec().history(&c.args) == volas_directive::spec::History::Recursive {
+                    assert_ne!(c.args.spec().resume(&c.args), Resume::Recompute, "{text}");
+                    assert!(initial_state(&data[0].frame, &node, 399).is_some(), "{text}");
+                }
+            }
+        }
+    }
+}
+
+/// Verify the language-wide invariant, including the Cartesian product of every MA
+/// selector (not just equal-type or rotating mixed examples), at identity and normal
+/// periods. This guards removal of the old unsupported-recursion history class.
+#[test]
+fn every_executable_recursive_line_and_ma_combination_has_a_resume() {
+    use volas_directive::{spec::{ArgBound, History, Resume}, types::Node};
+    fn check(node: &Ast, text: &str) -> bool {
+        let (spec, args) = match node.node() {
+            Node::Command(c) => (c.args.spec().clone(), &c.args[..]),
+            Node::Name(name) => return check(&volas_directive::bind_command(name, None, &[], &[]).unwrap(), text),
+            _ => panic!("inventory entry must name a command: {text}"),
+        };
+        if spec.history(args) != History::Recursive { return false; }
+        assert_ne!(spec.resume(args), Resume::Recompute, "{text}");
+        assert!(volas_directive::lookback::history(node).recursive(), "{text}");
+        true
+    }
+    let mut checked = 0;
+    for line in matrix::lines() {
+        for period in [1, 5] {
+            let base: Vec<String> = line.args.iter().map(|a| matrix::token(a, period, false)).collect();
+            let slots: Vec<usize> = line.args.iter().enumerate()
+                .filter_map(|(i, a)| (a.bound == ArgBound::IntRange(0, 8)).then_some(i)).collect();
+            for mut choice in 0..9usize.pow(slots.len() as u32) {
+                let mut args = base.clone();
+                for &i in &slots { args[i] = (choice % 9).to_string(); choice /= 9; }
+                let suffix = if args.is_empty() { String::new() } else { format!(":{}", args.join(",")) };
+                let text = format!("{}{suffix}{}", line.head, line.series);
+                let node = parse(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+                checked += usize::from(check(&node, &text));
+            }
+        }
+        for text in matrix::variants(&line) {
+            check(&parse(&text).unwrap(), &text);
+        }
+    }
+    assert!(checked > 1500, "only {checked} recursive combinations checked");
+}
+
+/// A long undefined prefix still has sliding state, even if the final two rows are
+/// inside the first window. Publishing a batch state must preserve that warm-up.
+#[test]
+fn batch_terminal_states_include_unseeded_and_poisoned_windows() {
+    use volas_directive::exec::execute_with_states;
+    use volas_core::{Column, DataFrame};
+    for present in [0, 1, 2, 5, 20, 60] {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let x: Vec<f64> = (0..80).map(|i| if i < 80 - present { bad } else { 100.0 + i as f64 / 7.0 }).collect();
+            let df = DataFrame::new(vec!["close".into()], vec![Column::f64(x)], None).unwrap();
+            for text in ["ma:5", "wma:5", "trima:5", "trima:6", "hma:9", "bbi", "boll.upper:5", "stddev:5", "sum:5", "linearreg:5", "bias:5", "dma.ama:3,5,4", "macdext.signal:3,2,5,5,4,2"] {
+                let node = parse(text).unwrap();
+                let (col, after, before) = execute_with_states(&df, &node).unwrap();
+                assert!(first_diff(&values(&col), &full(&df, &node).unwrap()).is_none(), "{text} {present} {bad}: values");
+                for (got, end) in [(after, 80), (before, 79)] {
+                    let want = initial_state(&df, &node, end).unwrap();
+                    let got = got.unwrap();
+                    assert!(first_diff(&got, &want).is_none(), "{text} {present} {bad} at {end}: {got:?} != {want:?}");
+                }
+            }
+        }
+    }
 }

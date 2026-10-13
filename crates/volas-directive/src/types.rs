@@ -11,6 +11,8 @@
 
 use volas_time::TimeFrame;
 
+use crate::spec::CommandSpec;
+
 /// A binary operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -172,39 +174,96 @@ impl ArgValue {
     }
 }
 
-/// A directive's positional arguments, viewed as canonical tokens — the seam that
-/// lets `stringify` canonicalize both a bound [`Ast`] (frame-cache key, complete)
-/// and a raw [`Cst`] (the form-level `directive_stringify`, possibly missing a
-/// required argument). An absent slot is `None`.
-pub trait ArgTokens {
-    /// Number of positional argument slots.
+/// A bound command's payload: its arguments — parsed, defaulted and type-checked once
+/// against the spec of its line — and that spec, so every consumer reads the line's
+/// facts from the command itself. `bare` keeps the spelling of a command written as a
+/// bare name (`OBV`) and resolved to the command against a frame: it renders bare (as
+/// `obv`), where an explicit all-default command renders `obv:`.
+#[derive(Clone, Debug)]
+pub struct Bound {
+    /// The bound arguments, one per spec slot.
+    pub(crate) values: Box<[ArgValue]>,
+    /// The spec of the command's line.
+    pub(crate) spec: CommandSpec,
+    /// The spelling of a command written as a bare name, if it was.
+    pub(crate) bare: Option<Box<str>>,
+}
+
+impl Bound {
+    /// The validated arguments, one per spec slot.
+    pub fn values(&self) -> &[ArgValue] { &self.values }
+    /// The command line's specification.
+    pub fn spec(&self) -> &CommandSpec { &self.spec }
+    /// The original bare spelling, when bound against a frame.
+    pub fn bare(&self) -> Option<&str> { self.bare.as_deref() }
+}
+
+impl std::ops::Deref for Bound {
+    type Target = [ArgValue];
+    fn deref(&self) -> &[ArgValue] {
+        &self.values
+    }
+}
+
+/// Two bound commands are equal when their arguments and spelling are: the spec is a
+/// function of the command's name and sub-command.
+impl PartialEq for Bound {
+    fn eq(&self, other: &Bound) -> bool {
+        self.values == other.values && self.bare == other.bare
+    }
+}
+
+/// The payload of a command in a directive *form* (`directive_stringify`'s input): the
+/// arguments supplied, each bound against its slot, and `None` where a slot is absent —
+/// a required one included, since a form such as `donchian.upper` names a real line
+/// whose period is supplied only at use.
+#[derive(Clone, Debug)]
+pub struct FormArgs {
+    /// The supplied arguments, bound; `None` for an absent slot.
+    pub values: Vec<Option<ArgValue>>,
+    /// The spec of the command's line.
+    pub spec: CommandSpec,
+}
+
+/// What the renderer reads from a command's payload: its spec, its bound arguments (an
+/// absent slot is `None`) and the spelling of a bare-written command. Implemented by the
+/// bound [`Ast`] and by a [`Form`], so one renderer names both.
+pub trait Payload {
+    /// The spec of the command's line.
+    fn spec(&self) -> &CommandSpec;
+    /// Number of argument slots.
     fn arg_len(&self) -> usize;
-    /// The canonical token at slot `i`, or `None` if the slot is absent.
-    fn arg_token(&self, i: usize) -> Option<String>;
+    /// The bound argument at slot `i`, or `None` if absent.
+    fn arg(&self, i: usize) -> Option<&ArgValue>;
 }
 
-impl ArgTokens for Vec<Option<String>> {
+impl Payload for Bound {
+    fn spec(&self) -> &CommandSpec {
+        &self.spec
+    }
     fn arg_len(&self) -> usize {
-        self.len()
+        self.values.len()
     }
-    fn arg_token(&self, i: usize) -> Option<String> {
-        self.get(i).and_then(|o| o.clone())
+    fn arg(&self, i: usize) -> Option<&ArgValue> {
+        self.values.get(i)
     }
 }
 
-impl ArgTokens for Box<[ArgValue]> {
+impl Payload for FormArgs {
+    fn spec(&self) -> &CommandSpec {
+        &self.spec
+    }
     fn arg_len(&self) -> usize {
-        self.len()
+        self.values.len()
     }
-    fn arg_token(&self, i: usize) -> Option<String> {
-        // Bound arguments are all present; an argument equal to its default renders
-        // as that token, so `stringify` drops it just like an absent raw slot.
-        self.get(i).map(|v| v.to_token())
+    fn arg(&self, i: usize) -> Option<&ArgValue> {
+        self.values.get(i).and_then(Option::as_ref)
     }
 }
 
-/// A parsed indicator command, e.g. `macd.signal:12,26,9@close`. The argument
-/// payload `A` is raw strings in a [`Cst`] and bound [`ArgValue`]s in an [`Ast`].
+/// A parsed indicator command, e.g. `macd.signal:12,26,9@close`. The payload `A` is the
+/// raw argument strings in a [`Cst`], the bound arguments and line spec ([`Bound`]) in an
+/// [`Ast`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Command<A> {
     /// Command name (canonical in an [`Ast`]: lower-cased, `cdl` folded to `style`).
@@ -220,6 +279,8 @@ pub struct Command<A> {
 /// A node in the directive AST, generic over its command argument payload `A`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node<A> {
+    /// A frame-bound data column; never interpreted as a command.
+    Data(String),
     /// A bare identifier: a column name, or a no-argument command.
     Name(String),
     /// A numeric literal.
@@ -248,14 +309,85 @@ pub enum Node<A> {
 /// an omitted slot. Lowered to an [`Ast`] by `bind`.
 pub type Cst = Node<Vec<Option<String>>>;
 
-/// The bound AST: arguments parsed, defaulted, and type-checked once. Executed,
-/// measured (lookback), and rendered (stringify) without per-call re-parsing.
-pub type Ast = Node<Box<[ArgValue]>>;
+/// The bound AST: arguments parsed, defaulted, and type-checked once, each command
+/// carrying its line's spec. Executed, measured (lookback), and rendered (stringify)
+/// without per-call re-parsing.
+///
+/// The bound root cannot be mutated through the parse result:
+/// ```compile_fail
+/// let mut a = volas_directive::parse("ema:2").unwrap();
+/// let node: &mut volas_directive::types::Node<_> = std::rc::Rc::make_mut(&mut a);
+/// ```
+/// A raw node cannot be used as an executable AST:
+/// ```compile_fail
+/// use volas_directive::{Ast, types::{Bound, Node}};
+/// let node: Node<Bound> = Node::Name("close".into());
+/// let ast: Ast = node.into();
+/// ```
+/// Bound arguments cannot be changed, even on a cloned payload:
+/// ```compile_fail
+/// let a = volas_directive::parse("ema:2").unwrap();
+/// if let volas_directive::types::Node::Command(c) = a.node() {
+///     let mut args = c.args.clone();
+///     args.values = Box::new([]);
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct Ast {
+    root: BoundNode,
+    continuation: Continuation,
+}
+
+impl Ast {
+    // Only the binder publishes executable trees; this constructor is crate-private.
+    pub(crate) fn bound(root: BoundNode) -> Self {
+        let continuation = crate::exec_resume::plan(&root);
+        Self { root, continuation }
+    }
+
+    /// Read the validated root. A detached clone is not an executable directive.
+    pub fn node(&self) -> &Node<Bound> { &self.root }
+    /// The continuation selected once when this directive was bound.
+    pub fn continuation(&self) -> &Continuation { &self.continuation }
+}
+
+impl PartialEq for Ast {
+    fn eq(&self, other: &Self) -> bool { self.root == other.root }
+}
+
+pub(crate) type BoundNode = Node<Bound>;
+
+/// How a bound directive continues over newly appended rows.
+#[derive(Clone, Debug)]
+pub enum Continuation {
+    /// No carried state; compute the directive again.
+    None,
+    /// The top command carries its own kernel state.
+    Own(Box<Command<Bound>>),
+    /// Stateful subtrees continue in post-order before evaluating the top.
+    Chain(ChainPlan),
+}
+
+/// A binder-owned continuation plan. Its prepared nodes and column names are immutable.
+#[derive(Clone, Debug)]
+pub struct ChainPlan {
+    pub(crate) nodes: Vec<Ast>,
+    pub(crate) top: Box<BoundNode>,
+    pub(crate) names: Vec<String>,
+    pub(crate) span: usize,
+    pub(crate) frame_span: usize,
+}
+
+/// A directive form bound leniently (`directive_stringify`): every supplied argument
+/// bound, an absent one left absent.
+pub type Form = Node<FormArgs>;
 
 /// A numeric literal, held exactly: an integral value inside the int64 range is an
 /// `Int` — so `volume > 9007199254740993` compares against that integer, never its
 /// float64 neighbour (contract #26) — and any other value is a float64. The form is
-/// canonical (`2.0` is `Int(2)`), so a literal re-parses from its token unchanged.
+/// canonical (`2.0` is `Int(2)`), so a literal re-parses from its token unchanged. An
+/// integer zero has no sign (`-0` is `Int(0)`); a float zero written with its decimal
+/// point keeps it (`-0.0` is `Float(-0.0)`, rendered `-0.0`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Number {
     /// An integer literal.
@@ -275,6 +407,11 @@ impl Number {
         let integral = frac.bytes().all(|b| b == b'0');
         if integral {
             if let Ok(i) = whole.parse::<i64>() {
+                // An integer has no signed zero (`-0` is `0`); a float literal written
+                // with a decimal point keeps the sign of its zero (`-0.0`).
+                if i == 0 && text.starts_with('-') && text.contains('.') {
+                    return Ok(Number::Float(-0.0));
+                }
                 return Ok(Number::Int(i));
             }
         }
@@ -302,6 +439,8 @@ impl Number {
     pub(crate) fn token(self) -> String {
         match self {
             Number::Int(i) => i.to_string(),
+            // `-0` would re-parse as the integer zero, which has no sign
+            Number::Float(v) if v == 0.0 && v.is_sign_negative() => "-0.0".to_string(),
             Number::Float(v) => number_token(v),
         }
     }

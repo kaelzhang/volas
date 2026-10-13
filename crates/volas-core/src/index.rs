@@ -302,7 +302,7 @@ impl Index {
     /// The timezone of a `Datetime` index ([`Tz::Naive`] for every other kind).
     pub fn tz(&self) -> Tz {
         match &self.kind {
-            IndexKind::Datetime(_, tz) => *tz,
+            IndexKind::Datetime(_, tz) => tz.clone(),
             _ => Tz::Naive,
         }
     }
@@ -358,7 +358,7 @@ impl Index {
                 IndexKind::Range { start: first + start as i64, len: end - start }
             }
             IndexKind::Int64(v) => IndexKind::Int64(v[start..end].to_vec()),
-            IndexKind::Datetime(v, tz) => IndexKind::Datetime(v[start..end].to_vec(), *tz),
+            IndexKind::Datetime(v, tz) => IndexKind::Datetime(v[start..end].to_vec(), tz.clone()),
             IndexKind::Str(v) => IndexKind::Str(v[start..end].to_vec()),
         };
         Index::new(self.name.clone(), kind)
@@ -372,7 +372,7 @@ impl Index {
             }
             IndexKind::Int64(v) => IndexKind::Int64(idx.iter().map(|&i| v[i]).collect()),
             IndexKind::Datetime(v, tz) => {
-                IndexKind::Datetime(idx.iter().map(|&i| v[i]).collect(), *tz)
+                IndexKind::Datetime(idx.iter().map(|&i| v[i]).collect(), tz.clone())
             }
             IndexKind::Str(v) => IndexKind::Str(idx.iter().map(|&i| v[i].clone()).collect()),
         };
@@ -679,7 +679,7 @@ impl Index {
                 }
                 let (lo, hi) = (i64_bound(lo, "a datetime")?, i64_bound(hi, "a datetime")?);
                 slice_bounds(v, self.order, lo.as_ref(), hi.as_ref(), |&x| {
-                    format_ns_offset(x, *tz)
+                    format_ns_offset(x, tz)
                 })
             }
             IndexKind::Str(v) => {

@@ -27,15 +27,20 @@ pub struct Reach {
     pub history: History,
 }
 
+/// The directive a cached column computes, bound by the directive engine and opaque to
+/// the core: kept in the column's metadata — carried through clones and contiguous
+/// slices with it — so a refresh continues exactly what was cached instead of re-reading
+/// the column's name.
+pub type Directive = Arc<dyn std::any::Any + Send + Sync>;
+
 /// Metadata for a materialized (cached) directive column: the directive that
 /// produced it, its lookback, and how many leading rows currently hold valid
 /// values. After an `append`, the new rows are stale (NaN) and `valid_rows` lags
 /// `height` until `fulfill` recomputes the tail.
 #[derive(Clone, Debug)]
 pub struct ComputedMeta {
-    // NB: the directive string is NOT stored here — a computed column's canonical
-    // directive is *identical* to its column name (the `computed` map key), so callers
-    // use the name directly. Storing it would be a redundant per-bar / per-slice clone.
+    /// The bound directive the column computes (its canonical name is the column's).
+    pub directive: Directive,
     /// The rows the column reads around its own: lookback, resume and continuation.
     pub reach: Reach,
     /// Rows `[0, valid_rows)` currently hold valid values.
@@ -47,7 +52,7 @@ pub struct ComputedMeta {
     /// full recompute. `None` when the directive has no resume implementation (it
     /// then falls back to the correct full recompute) or the state is unknown
     /// (e.g. after a slice that did not reach the parent's `valid_rows`).
-    pub state: Option<Vec<f64>>,
+    pub state: Option<Arc<[f64]>>,
     /// The carried state as of the row before the last valid one (`valid_rows - 2`):
     /// the state that row was resumed from. When the last row is replaced in place (a
     /// row appended with the last row's label, a time-frame forming bar), it becomes
@@ -55,7 +60,7 @@ pub struct ComputedMeta {
     /// it — never re-stepping or recomputing the rows before. A resume of one new row
     /// moves the old `state` here. `None` when unknown (a replaced row then recomputes
     /// the column, capturing both states again).
-    pub state_before_last: Option<Vec<f64>>,
+    pub state_before_last: Option<Arc<[f64]>>,
     /// The absolute position (see [`DataFrame::origin`]) of the first row the column's
     /// history starts at — the row its warm-up counts from. Its rows `[since, origin +
     /// valid_rows)` have been processed, so warm-up is judged on that count, never on
@@ -67,11 +72,11 @@ pub struct ComputedMeta {
     state_at: usize,
     /// A spare buffer the one-row resume writes the next state into, recycled between
     /// the two states so a live column steps with no allocation.
-    scratch: Vec<f64>,
+    scratch: Option<Arc<[f64]>>,
     /// The history of a recursion before the frame's row 0, once the frame dropped the
     /// rows it started on ([`Checkpoint`]): a recompute replays from it. Shared: a
     /// checkpoint never changes once formed.
-    checkpoint: Option<Arc<Checkpoint>>,
+    checkpoint: Option<CheckpointRef>,
     /// The checkpoint the next drop of the head will keep, captured as the refresh passed
     /// its row (so the drop need not replay to it); dropped by any change to the rows it
     /// covers.
@@ -91,13 +96,14 @@ impl ComputedMeta {
     /// its history starts and its first present value — nothing that continues it.
     fn view(&self) -> ComputedMeta {
         ComputedMeta {
+            directive: Arc::clone(&self.directive),
             reach: self.reach,
             valid_rows: self.valid_rows,
             state: None,
             state_before_last: None,
             since: self.since,
             state_at: self.state_at,
-            scratch: Vec::new(),
+            scratch: None,
             checkpoint: None,
             pending: None,
             anchors: Anchors::default(),
@@ -150,7 +156,7 @@ pub struct DataFrame {
     /// incrementally recompute their tail after an append. Carried through
     /// `clone` / `append`; dropped by shape-changing ops (slice/select/…), where
     /// the columns become plain data.
-    computed: FxHashMap<String, ComputedMeta>,
+    computed: FxHashMap<Arc<str>, ComputedMeta>,
     /// The position of the first cached directive column (`None` without one) — derived
     /// from `computed` (`note_computed` keeps it), so whether the leading columns hold a
     /// cached one is O(1) on the per-bar append path.
@@ -187,6 +193,14 @@ fn admit_layout(name: &str, col: &Column) -> Result<()> {
         Err(VolasError::Shape(why)) => Err(VolasError::Shape(format!("column \"{name}\": {why}"))),
         other => other,
     }
+}
+
+/// Recover the first repeated name only after the successful-path count check failed.
+#[cold]
+fn duplicate_name(names: &[String]) -> VolasError {
+    let mut seen = std::collections::HashSet::with_capacity(names.len());
+    let name = names.iter().find(|name| !seen.insert(name.as_str())).expect("name count found a duplicate");
+    VolasError::Value(format!("duplicate column name \"{name}\""))
 }
 
 impl DataFrame {
@@ -227,9 +241,10 @@ impl DataFrame {
         };
         let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
         for (i, n) in names.iter().enumerate() {
-            if name_to_idx.insert(n.clone(), i).is_some() {
-                return Err(VolasError::Value(format!("duplicate column name \"{n}\"")));
-            }
+            name_to_idx.insert(n.clone(), i);
+        }
+        if name_to_idx.len() != names.len() {
+            return Err(duplicate_name(&names));
         }
         let df = DataFrame {
             names: Arc::new(names),
@@ -262,10 +277,10 @@ impl DataFrame {
             col.debug_check(name);
         }
         assert_eq!(self.index.len(), self.height, "index length differs from the height");
-        let first = self.computed.keys().filter_map(|k| self.name_to_idx.get(k).copied()).min();
+        let first = self.computed.keys().filter_map(|k| self.name_to_idx.get(k.as_ref()).copied()).min();
         assert_eq!(self.first_computed, first, "first cached column position is stale");
         for (name, meta) in &self.computed {
-            assert!(self.name_to_idx.contains_key(name), "computed {name:?} is not a column");
+            assert!(self.name_to_idx.contains_key(name.as_ref()), "computed {name:?} is not a column");
             assert!(meta.since <= self.origin, "computed {name:?} history starts after row 0");
             assert!(meta.valid_rows <= self.height, "computed {name:?} cursor past the height");
             // a carried state describes a valid row of THIS frame (never one before it)
@@ -474,8 +489,10 @@ pub use derive::Replay;
 mod lead;
 mod computed;
 pub use computed::StaleComputed;
+mod state_words;
+pub use state_words::StateWords;
 mod history;
-pub use history::{Anchors, Checkpoint, History, ANCHOR_SPACING};
+pub use history::{Anchors, Checkpoint, CheckpointRef, History, ANCHOR_SPACING};
 
 #[cfg(test)]
 mod tests;

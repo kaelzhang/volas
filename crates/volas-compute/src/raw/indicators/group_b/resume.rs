@@ -5,7 +5,7 @@
 
 use crate::guard::{ring_push, state_after, Slide};
 use crate::missing;
-use crate::raw::indicators::{wma_initial, wma_row, FiniteMa, WMA_STATE};
+use crate::raw::indicators::{wma_initial, wma_row, MaStage, WMA_STATE};
 use crate::raw::kernels::{self, SMA_STATE};
 
 /// The `p`-bar rate of change of `close` at `i` (NaN before `p` bars exist).
@@ -178,7 +178,7 @@ pub fn dkx_state(
 ) -> Option<Vec<f64>> {
     let mut init = wma_initial();
     if let Some(m) = ma {
-        init.extend(FiniteMa::new(m, 0)?.chained_initial(origin));
+        init.extend(MaStage::new(m, 0)?.chained_initial(origin));
     }
     state_after(init, close.len(), |row, prev, next| {
         dkx_step(open, high, low, close, ma, row, prev, next)
@@ -205,7 +205,7 @@ pub fn dkx_step(
     let (n_wma, n_rest) = next.split_at_mut(WMA_STATE);
     let dkx = wma_row(20, row, &mid, &state[..WMA_STATE], n_wma)?;
     let Some(m) = ma else { return Some(dkx) };
-    let value = FiniteMa::new(m, 0)?.step_chained(row, dkx, &state[WMA_STATE..], n_rest)?;
+    let value = MaStage::new(m, 0)?.step_chained(row, dkx, &state[WMA_STATE..], n_rest)?;
     Some(value)
 }
 
