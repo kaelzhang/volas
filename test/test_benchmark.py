@@ -15,7 +15,8 @@ Five report sections (the order they render in, ``CATEGORY_ORDER``):
      is measured through ``pedantic`` with the **same** round count, so the
      ``rounds`` column is comparable (see ``APPEND_ROUNDS``).
   3. ``api`` — the core DataFrame plumbing a live system runs around every indicator
-     call (construct / column access / row slice / boolean mask / assign / copy),
+     call (construct / column access / row slice / boolean mask / assign / copy, and
+     the trailing and middle selections of a long history carrying cached indicators),
      timed against pandas / polars. Not indicator math; the surrounding APIs.
   4. ``calc`` — compute the indicator over the whole series (batch), all libraries.
   5. ``coverage`` — every indicator **both volas and TA-Lib implement** (the set the
@@ -47,6 +48,7 @@ import pytest
 from stock_pandas import StockDataFrame
 from volas import DataFrame as VolasDataFrame
 
+from . import bench_long
 from .bench_tf_live import TF_LIVE_INDICATORS, TF_LIVE_PHASES, build as build_tf_live
 
 try:
@@ -932,6 +934,7 @@ _API_THRESH = float(_CSV['close'].median())
 _API_CELL = (len(_CSV) // 2, COLUMNS.index('volume'))  # a middle cell: `setcell` writes it
 
 
+
 def _api_registry():
     """candidate -> {op: thunk}. `construct` rebuilds each call; the rest run over
     a prebuilt per-candidate frame; `setitem` overwrites a scratch column and
@@ -976,7 +979,9 @@ def _api_registry():
 
 
 API_REG = _api_registry()
-API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'setcell', 'copy']
+for _cand, _ops in bench_long.ops().items():  # `tails` / `middle` over a long history
+    API_REG[_cand].update(_ops)
+API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'setcell', 'copy', 'tails', 'middle']
 API_CANDIDATES = ['pandas', 'polars', 'volas']
 
 
