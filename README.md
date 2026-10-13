@@ -202,6 +202,10 @@ df['close'].to_numpy()           # 1-D ndarray
 df.to_numpy()                    # 2-D ndarray (rows x columns)
 ```
 
+[Cumulation](docs/cumulation.md) accepts empty datetime frames and applies the
+requested aggregation rules even at the same time frame. Window declarations
+also accept raw columns (`max_lookback=['close']`, lookback zero).
+
 ## Built-in Indicators
 
 The complete directive reference lives in [INDICATORS.md](INDICATORS.md). It

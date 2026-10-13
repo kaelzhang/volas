@@ -110,13 +110,14 @@ Which gets the 2-period simple moving average on column `"close"`.
   valid only with it): the hidden margin of rows kept behind the visible ones, and the
   directives the frame computes exactly (see
   [What a bounded window computes](#bounded-rolling-window)). Pass a **list of
-  indicator directives** to **declare** them: the margin is the largest of their
+  directives** to **declare** them: the margin is the largest of their
   lookbacks (e.g. `['atr:14', 'ma:50']` → margin 49), and each is computed at
   construction over all the given rows and cached — a running accumulator or a recursive
   one (`ma`, EMA, Wilder
   smoothing, a cumulative line, …) can only be computed this way. Or pass an **int**: the
-  margin alone, declaring nothing. Each list entry must be an indicator directive
-  (`'ma:50'`); a bare/typo'd name (`'ma50'`) and an empty list are rejected, and so is a
+  margin alone, declaring nothing. A raw-column directive (`'close'`) is also valid:
+  its lookback is zero and it stays a data column. Unknown columns (`'ma50'`) and an
+  empty list are rejected, and so is a
   directive whose column name is a data column of the frame (`'macd:'` beside a data
   column `macd`): rename that column to declare it.
 
@@ -875,7 +876,8 @@ its last row is their cumulation. On a tf-aware frame:
   marks them stale, and the next read recomputes just the tail.
 - **df.cumulate(target)** must be a whole multiple of the source frame (e.g.
   `5m→15m`, not `5m→7m`; a week or 3-day bar does not nest into a month/year);
-  the same frame is a `copy()`.
+  at the same time frame it re-aggregates the current data rows with the requested
+  cumulators (see [Cumulation](cumulation.md)).
 
 ```py
 df = history.cumulate('5m')   # a tf-aware 5m frame (history is finer, e.g. 1m)
