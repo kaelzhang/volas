@@ -116,7 +116,9 @@ Which gets the 2-period simple moving average on column `"close"`.
   one (`ma`, EMA, Wilder
   smoothing, a cumulative line, …) can only be computed this way. Or pass an **int**: the
   margin alone, declaring nothing. Each list entry must be an indicator directive
-  (`'ma:50'`); a bare/typo'd name (`'ma50'`) and an empty list are rejected.
+  (`'ma:50'`); a bare/typo'd name (`'ma50'`) and an empty list are rejected, and so is a
+  directive whose column name is a data column of the frame (`'macd:'` beside a data
+  column `macd`): rename that column to declare it.
 
 ### Bounded rolling window
 

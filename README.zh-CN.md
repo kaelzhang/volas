@@ -242,7 +242,7 @@ df['ma:2']
 
   缺失值从不被跳过：只要桶内任一值缺失，该列的聚合结果（`'first'` / `'last'` / `'max'` / `'min'` / `'sum'` 皆然）即为缺失（全缺失的桶也是缺失，从不得到 `±inf`），实时折叠与批量 `cumulate` 结果一致。`datetime` 列不支持 `'sum'`，`bool` / `str` 列只支持 `'first'` / `'last'`；不支持的组合在构造 frame 时即被拒绝。
 - **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
-- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：可见行之前保留的隐藏 margin 行数，以及该 frame 能精确计算的 directive（参见[有界窗口能计算什么](#有界窗口能计算什么)）。传一个**指标 directive 列表**即为**声明**它们：margin 取它们 lookback 的最大值（例如 `['atr:14', 'ma:50']` → margin 49），每个声明的 directive 在构造时基于全部给定行计算并缓存——滑动累加类或递归类指标（`ma`、EMA、Wilder 平滑、累积线等）只能以这种方式计算。传一个 **int** 则只给出 margin，不声明任何 directive。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）和空列表会被拒绝。
+- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：可见行之前保留的隐藏 margin 行数，以及该 frame 能精确计算的 directive（参见[有界窗口能计算什么](#有界窗口能计算什么)）。传一个**指标 directive 列表**即为**声明**它们：margin 取它们 lookback 的最大值（例如 `['atr:14', 'ma:50']` → margin 49），每个声明的 directive 在构造时基于全部给定行计算并缓存——滑动累加类或递归类指标（`ma`、EMA、Wilder 平滑、累积线等）只能以这种方式计算。传一个 **int** 则只给出 margin，不声明任何 directive。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）和空列表会被拒绝；列名与 frame 中某个数据列相同的 directive（数据列 `macd` 旁的 `'macd:'`）同样会被拒绝：请先重命名该数据列再声明。
 
 ### 有界滚动窗口
 

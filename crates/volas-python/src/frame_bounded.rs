@@ -154,6 +154,7 @@ impl PyDataFrame {
         for text in &declared {
             let node = parse(text).map_err(directive_err)?;
             self.check_kept(&node, text)?;
+            self.check_declarable(&node, text)?;
             nodes.push(node);
         }
         for (text, node) in declared.iter().zip(&nodes) {
@@ -165,6 +166,21 @@ impl PyDataFrame {
         }
         self.maybe_compact();
         Ok(())
+    }
+
+    /// A declaration is kept as a cached column under its canonical name: a data column
+    /// of that name leaves no place for it, so the declaration is refused (never accepted
+    /// and then left uncomputed).
+    fn check_declarable(&self, node: &Ast, text: &str) -> PyResult<()> {
+        let canonical = stringify(node);
+        if !self.inner.has_column(&canonical) || self.inner.is_computed(&canonical) {
+            return Ok(());
+        }
+        Err(PyValueError::new_err(format!(
+            "cannot declare '{text}': its column name '{canonical}' is a data column of this \
+             DataFrame. Rename the data column — df.rename(columns={{'{canonical}': \
+             '{canonical}_data'}}) — or declare another directive."
+        )))
     }
 
     /// The error of a directive no bounded frame keeps exactly (a recursion no carried
