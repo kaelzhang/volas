@@ -81,8 +81,9 @@ Which gets the 2-period simple moving average on column `"close"`.
   the same projection as `df[[...]]` (see [Derived frames](#derived-frames)): the same
   rows, each listed cached directive column still cached (a stale one is refreshed
   first); a bounded-window source gives its visible rows. A name not present raises
-  `KeyError` (a directive is never computed here); an empty list or a duplicate name
-  is rejected, and an absent column is never silently filled. With `index=`, `dtype=`
+  `KeyError` (a directive is never computed here; a cached one is found by any
+  spelling of its directive); a duplicate name is rejected, an empty list keeps no
+  column, and an absent column is never silently filled. With `index=`, `dtype=`
   or `window=`, a source `DataFrame` is read like any bulk read: it raises while one
   of its cached directive columns is stale.
 - **index** `Optional[list | np.ndarray] = None` Row labels (int64, string or datetime),
@@ -565,17 +566,23 @@ A frame derived from another either **continues its series** or **starts a new o
   mask or position list that selects consecutive rows, `drop` of the rows around them,
   `dropna` removing a warm-up — continues the series. Every cached directive column stays
   cached with its values, and an `append`, a re-sent last row or a `fulfill` continues it
-  bit for bit as the source would have: the selection carries each column's state as of
-  its last row (a selection ending before the source's last row replays a recursion once,
-  from the history the source holds), and keeps the data rows before its first row that
-  its columns read (however short it is). A recursion that carries no state (`kcw`, `crsi`,
+  bit for bit as the source would have — and so does a selection of a selection. For a
+  recursion carried by its state (EMA, Wilder smoothing, SAR, a cumulative line, …) the
+  selection keeps the checkpoint of its history at its first row and the state at its
+  last, replayed once from the history the source holds; it keeps the data rows before its
+  first row that its columns read, however short it is (a missing row there counts as
+  the recursion skips it). After a write, every column is recomputed from those, exactly
+  as the source would recompute it. A recursion that carries no state (`kcw`, `crsi`,
   `stoch_momentum`, a recursive moving-average type, an expression combining a recursion
   with other values such as `close + kama:3@open`) is computed over its whole history, so
   the selection keeps all of it: slicing such a frame does not bound its memory — drop the
-  column first (`df.drop(['kcw'], axis=1)`) to trim it. After a write, a column is
-  recomputed over the rows the selection keeps; a recursion carried by its state whose
-  history began before the selection cannot be recomputed there and its refresh raises
-  (recompute it on the frame that holds its history).
+  column first (`df.drop(['kcw'], axis=1)`) to trim it; once dropped, the rows only it
+  read are released.
+
+  The replay of a recursion's history to a selection's edge starts at the nearest of the
+  checkpoints the frame keeps every 4096 rows (formed the first time a replay passes
+  them): the first selection of a long frame replays its history once, later ones at most
+  4096 rows per recursive column.
 - A **column projection** — `df[[...]]`, `DataFrame(df, columns=[...])`, `drop(axis=1)` —
   keeps the rows and continues the cached columns it lists (under their canonical names:
   `df[['close', 'ma:05']]` gives `['close', 'ma:5']`).

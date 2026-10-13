@@ -397,7 +397,7 @@ impl PyDataFrame {
     /// continues in O(new rows) and a replaced last row recomputes in one step.
     fn compute_new(&self, frame: &DataFrame, node: &volas_directive::Ast, text: &str) -> PyResult<Computed> {
         let col = self.evaluate(frame, node, text)?;
-        let (state, before) = volas_directive::resume_states(frame, node, &col);
+        let (state, before) = volas_directive::resume_states(frame, node);
         Ok(Computed {
             canonical: volas_directive::stringify(node),
             reach: volas_directive::lookback::reach(node),

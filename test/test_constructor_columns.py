@@ -37,9 +37,10 @@ def test_columns_none_is_unchanged():
 
 # --- validation (shared by both data kinds) --------------------------------
 
-def test_empty_columns_raises():
-    with pytest.raises(ValueError):
-        DataFrame(D, columns=[])
+def test_empty_columns_keep_no_column():
+    # the same as df[[]]: every projection form handles an empty list alike
+    assert DataFrame(D, columns=[]).columns == []
+    assert DataFrame(DataFrame(D), columns=[]).columns == DataFrame(D)[[]].columns == []
 
 
 def test_duplicate_column_raises():

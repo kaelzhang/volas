@@ -103,7 +103,7 @@ pub fn capture(df: &DataFrame, node: &Ast, end: usize) -> Option<Checkpoint> {
         return None;
     }
     recursion(node, |cmd| {
-        let state = super::initial_state(&df.slice_data(0, end), node, &Column::f64(Vec::new()));
+        let state = super::initial_state(df, node, end);
         with_inputs(df, cmd, |inputs| keep(df.origin() + end - 1, inputs, end, cmd.reach(), state, true))?
     })
 }
@@ -159,7 +159,7 @@ pub fn replay(df: &DataFrame, node: &Ast, checkpoint: &Checkpoint, end: usize) -
             }
             None => {
                 let values = crate::exec::execute(&frame, &over).ok()?;
-                let state = super::initial_state(&frame, &over, &values);
+                let state = super::initial_state(&frame, &over, frame.height());
                 (values.slice(from, n), state)
             }
         };

@@ -127,8 +127,10 @@ fn the_history_class_agrees_with_the_carried_states() {
     for line in &matrix::lines() {
         for text in matrix::variants(line) {
             let node = parse(&text).unwrap();
-            let Ok(col) = execute(&frame, &node) else { continue };
-            let state = initial_state(&frame, &node, &col);
+            if execute(&frame, &node).is_err() {
+                continue;
+            }
+            let state = initial_state(&frame, &node, frame.height());
             match history(&node) {
                 History::Carried { .. } => assert!(state.is_some(), "{text}: Carried without a state"),
                 History::Unkept => assert!(state.is_none(), "{text}: a state, but Unkept"),

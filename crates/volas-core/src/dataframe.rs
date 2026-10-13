@@ -75,6 +75,8 @@ pub struct ComputedMeta {
     /// its row (so the drop need not replay to it); dropped by any change to the rows it
     /// covers.
     pending: Option<Checkpoint>,
+    /// Checkpoints of the history at regular rows ([`Anchors`]), formed by replays.
+    anchors: Anchors,
     /// Why no checkpoint of the history could be formed when the frame dropped the rows
     /// it read (an input outside the computation's domain): a recompute reports it.
     lost: Option<crate::error::VolasError>,
@@ -84,6 +86,25 @@ pub struct ComputedMeta {
 }
 
 impl ComputedMeta {
+    /// This column as a reader's view keeps it (`DataFrame::view_rows`): its reach, where
+    /// its history starts and its first present value — nothing that continues it.
+    fn view(&self) -> ComputedMeta {
+        ComputedMeta {
+            reach: self.reach,
+            valid_rows: self.valid_rows,
+            state: None,
+            state_before_last: None,
+            since: self.since,
+            state_at: self.state_at,
+            scratch: Vec::new(),
+            checkpoint: None,
+            pending: None,
+            anchors: Anchors::default(),
+            lost: None,
+            first_present: self.first_present,
+        }
+    }
+
     /// Note that rows `[from, end)` (frame rows, row 0 at absolute position `origin`) of
     /// `col` were written: the first present value among them is the column's first when
     /// none was known before them. Scans only while the first value is unknown or being
@@ -149,7 +170,7 @@ pub struct DataFrame {
     /// The data rows just before row 0 that the cached columns read to recompute their
     /// first rows (see [`lead_rows`](Self::lead_rows)): a contiguous selection that drops
     /// the rows its columns' windows reach into keeps them here. `None` with none.
-    lead: Option<derive::Lead>,
+    lead: Option<lead::Lead>,
 }
 
 /// The cause an append (new rows, a replaced last row, a folded forming bar) leaves.
@@ -359,6 +380,9 @@ impl DataFrame {
         }
         match self.column_pos(name) {
             Some(i) => {
+                // The rows before row 0 keep their values: a dtype that cannot hold them
+                // exactly is refused here, before anything is written.
+                self.check_lead_dtype(name, &col)?;
                 // A replaced column may feed any cached directive: `name` loses its own
                 // computed status and every other cache goes stale (one rule for every
                 // writer — `df[name] = …`, `astype`, …).
@@ -442,11 +466,12 @@ pub use admit::Retained;
 mod cells;
 pub use cells::{CellWrite, CellWrites};
 mod derive;
-pub use derive::Replay;
+pub use derive::{Continuation, Replay};
+mod lead;
 mod computed;
 pub use computed::StaleComputed;
 mod history;
-pub use history::{Checkpoint, History};
+pub use history::{Anchors, Checkpoint, History, ANCHOR_SPACING};
 
 #[cfg(test)]
 mod tests;

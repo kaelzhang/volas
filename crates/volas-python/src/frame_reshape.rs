@@ -265,10 +265,12 @@ impl PyDataFrame {
     pub(crate) fn rename(&self, columns: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
         let view = self.read()?;
         let df = view.as_ref();
-        let mut mapping = HashMap::new();
+        let mut requested = HashMap::new();
         for (k, v) in columns.iter() {
-            mapping.insert(k.extract::<String>()?, v.extract::<String>()?);
+            requested.insert(k.extract::<String>()?, v.extract::<String>()?);
         }
+        // the one mapping the columns, the open period and the aggregators follow
+        let mapping = df.renaming(&requested);
         // F39: a rename must not collide two columns onto one name (duplicate
         // column names violate the unique-name contract) — fail-loud (C4). A rename is a
         // new series of the data columns (R15): the cached ones are not carried.

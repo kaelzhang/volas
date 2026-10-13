@@ -26,12 +26,13 @@ fn a_replay_gives_the_states_a_full_computation_ends_with() {
     let node = parse("ema:5").unwrap();
     df.set_column("ema:5", execute(&df, &node).unwrap()).unwrap();
     df.set_computed("ema:5", volas_directive::lookback::reach(&node));
-    let (at, before) = Replayer.states(&df, "ema:5", 20).unwrap();
+    let got = Replayer.continuation(&df, "ema:5", 7, 20, true, true);
     let head = df.slice_data(0, 20);
-    let col = execute(&head, &node).unwrap();
-    let want = volas_directive::resume_states(&head, &node, &col);
-    assert_eq!((Some(at), before), want);
-    // a name that is not a cached column, or one that does not parse, has no states
-    assert!(Replayer.states(&df, "close", 20).is_none());
-    assert!(Replayer.states(&df, "ema:", 20).is_none());
+    let (at, before) = volas_directive::resume_states(&head, &node);
+    assert_eq!(got.ends, Some((at.unwrap(), before)));
+    let boundary = got.boundary.unwrap();
+    assert_eq!((boundary.at, boundary.state), (6, volas_directive::resume_states(&df.slice_data(0, 7), &node).0));
+    // a name that is not a cached column, or one that does not parse, has no history
+    assert_eq!(Replayer.continuation(&df, "close", 7, 20, true, true), Default::default());
+    assert_eq!(Replayer.continuation(&df, "ema:", 7, 20, true, true), Default::default());
 }

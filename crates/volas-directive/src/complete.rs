@@ -92,15 +92,18 @@ fn into_f64(column: Column) -> Vec<f64> {
 }
 
 /// Run a full computation (or a state capture) of a recursive command over the
-/// complete rows of its inputs: `run` is its arm, `finish` places the result of a run
-/// over the complete rows back on the frame's rows.
+/// complete rows of its inputs among the frame's rows `[0, end)` (read in place, never
+/// copied): `run` is its arm, `finish` places the result of a run over the complete rows
+/// back on those rows.
 fn on_complete_rows<T>(
     df: &DataFrame,
     series: &[Ast],
+    end: usize,
     run: impl Fn(&Operands) -> T,
     finish: impl FnOnce(T, &CompleteRows, usize) -> T,
 ) -> T {
-    let ops = Operands::stopping(df, series);
+    let end = end.min(df.height());
+    let ops = Operands::stopping(df, series).upto_rows(end);
     let first = run(&ops);
     if ops.failed() || (!ops.missing() && ops.clean()) {
         return first;
@@ -115,15 +118,15 @@ fn on_complete_rows<T>(
         }
     }
     let recorded = recorded(&ops, true);
-    let rows = CompleteRows::of(&inputs(&recorded, usize::MAX));
+    let rows = CompleteRows::of(&inputs(&recorded, end));
     if rows == CompleteRows::All {
         // The inputs turned out complete: the in-place run stands — unless it stopped at
         // a column whose remembered fact claimed a NaN the values no longer hold. Then
         // it runs in place again, never stopping: a stale fact is never the answer.
-        return if ops.missing() { run(&Operands::new(df, series)) } else { first };
+        return if ops.missing() { run(&Operands::upto(df, series, end)) } else { first };
     }
-    let out = run(&over(df, series, &recorded, |v| rows.gather(v)));
-    finish(out, &rows, df.height())
+    let out = run(&over(df, series, &recorded, |v| rows.gather(&v[..end])));
+    finish(out, &rows, end)
 }
 
 /// Compute a recursive command over the complete rows of its inputs: `run` is its
@@ -133,20 +136,21 @@ pub(crate) fn compute(
     series: &[Ast],
     run: impl Fn(&Operands) -> Result<Column>,
 ) -> Result<Column> {
-    on_complete_rows(df, series, run, |out, rows, n| {
+    on_complete_rows(df, series, df.height(), run, |out, rows, n| {
         Ok(Column::f64(rows.scatter(n, into_f64(out?))))
     })
 }
 
 /// The carried state of a recursive command after a full computation over the
-/// complete rows of its inputs — the state as of the last complete row. `run` is its
-/// state-capture arm.
+/// complete rows of its inputs among the frame's rows `[0, end)` — the state as of the
+/// last complete row before `end`. `run` is its state-capture arm.
 pub(crate) fn state(
     df: &DataFrame,
     series: &[Ast],
+    end: usize,
     run: impl Fn(&Operands) -> Option<Vec<f64>>,
 ) -> Option<Vec<f64>> {
-    on_complete_rows(df, series, run, |out, _, _| out)
+    on_complete_rows(df, series, end, run, |out, _, _| out)
 }
 
 /// Whether the resume `ops` just ran read every input's rows `[from - reach, end)`
@@ -309,7 +313,7 @@ mod tests {
         let open: Vec<f64> = (0..n).map(|i| 40.0 + (i as f64 * 0.3).cos()).collect();
         let node = parse("rsi:3@open").unwrap();
         let head = frame(open[..n - 1].to_vec());
-        let st = initial_state(&head, &node, &Column::f64(vec![])).unwrap();
+        let st = initial_state(&head, &node, head.height()).unwrap();
         let full = frame(open.clone());
         let mut next = vec![0.0; st.len()];
         let value = execute_resume_step(&full, &node, &st, (n - 1, 0), &mut next).unwrap();
@@ -335,7 +339,7 @@ mod tests {
             *x = f64::NAN;
         }
         let node = parse("rsi:3@open").unwrap();
-        let st = initial_state(&frame(open[..20].to_vec()), &node, &Column::f64(vec![])).unwrap();
+        let st = initial_state(&frame(open.to_vec()), &node, 20).unwrap();
         // the frame keeps rows 18.. (origin 18): two complete rows before row 30
         let kept = frame(open.clone()).slice_data(18, n);
         let mut next = vec![0.0; st.len()];
@@ -371,7 +375,7 @@ mod tests {
             for d in ["nvi", "pvi", "pvt", "obv", "efi:2", "ad", "adosc"] {
                 let err = execute(&df, &parse(d).unwrap()).unwrap_err();
                 assert!(err.to_string().contains("not found"), "{d}: {err}");
-                assert!(initial_state(&df, &parse(d).unwrap(), &Column::f64(vec![])).is_none(), "{d}");
+                assert!(initial_state(&df, &parse(d).unwrap(), df.height()).is_none(), "{d}");
             }
         }
     }

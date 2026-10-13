@@ -270,15 +270,17 @@ def test_a_copied_cached_column_must_be_kept_by_the_window():
     assert same(w['ema:4'], v['ema:4'].to_numpy()[-3:])
 
 
-def test_a_slice_cannot_recompute_a_recursion_after_a_write():
-    # a slice continues a recursion from its carried state; a write discards it, and the
-    # slice does not hold the rows the history started on
-    df = rows(bars(40), 0, 40)
+def test_a_slice_recomputes_a_recursion_after_a_write_from_its_boundary():
+    # a write discards the carried state; the slice keeps the checkpoint of the history
+    # before its first row and replays from it
+    cols = bars(40)
+    df = rows(cols, 0, 40)
     df['ema:5']
     s = df.iloc[-10:]
     s.iat[0, 3] = 1.0
-    with pytest.raises(ValueError, match="cannot recompute 'ema:5' exactly"):
-        s.fulfill()
+    whole = rows(cols, 0, 40)
+    whole.iat[30, 3] = 1.0
+    assert same(s['ema:5'], whole['ema:5'].to_numpy()[-10:])
 
 
 def test_an_empty_declaration_raises():
@@ -455,16 +457,17 @@ def test_a_tail_carried_into_a_window_keeps_its_recursion(d, read_every):
             assert same(w[d], u[d].to_numpy()[-5:]), i
 
 
-def test_a_tail_carried_into_a_window_cannot_recompute_after_a_visible_write():
-    # its checkpoint is the tail's last row, which a visible write may follow: the rows up
-    # to it are no longer ones the frame vouches for
+def test_a_tail_carried_into_a_window_recomputes_after_a_visible_write():
+    # the tail keeps the checkpoint of the history before its first row: a write to a
+    # visible row replays from it
     cols = bars(300, seed=5)
     base = rows(cols, 0, 200)
     base['ema:5']
     w = volas.DataFrame(base.iloc[150:], window=5, max_lookback=20)
     w.iat[1, 3] = 1.0
-    with pytest.raises(ValueError, match="cannot recompute 'ema:5' exactly"):
-        w['ema:5']
+    whole = rows(cols, 0, 200)
+    whole.iat[196, 3] = 1.0
+    assert same(w['ema:5'], whole['ema:5'].to_numpy()[-5:])
 
 
 # --- a whole-column assignment keeps the margin exactly ----------------------------------

@@ -39,6 +39,14 @@ impl RowSel {
         RowSel::Positions(mask.iter().enumerate().filter_map(|(i, &b)| b.then_some(i)).collect())
     }
 
+    /// The positions these rows are, in order.
+    pub(crate) fn positions(&self) -> Vec<usize> {
+        match self {
+            RowSel::Range(a, b) => (*a..(*b).max(*a)).collect(),
+            RowSel::Positions(p) => p.clone(),
+        }
+    }
+
     /// The contiguous range these rows are, if they are one (in order, at least one row).
     fn range(&self) -> Option<(usize, usize)> {
         match self {

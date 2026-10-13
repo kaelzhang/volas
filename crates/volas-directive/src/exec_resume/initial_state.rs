@@ -5,26 +5,23 @@ use crate::exec::{arg_f64, arg_usize};
 use crate::operands::Operands;
 use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
-use volas_core::{Column, DataFrame};
+use volas_core::DataFrame;
 
 use super::as_command;
 
-/// The final recursive state after a full compute of `node` against `df`, matching
-/// the just-computed `computed` column. `None` when `node` has no resume kernel
-/// (the caller then keeps the full-recompute fallback). `computed` is accepted for
-/// kernels that can read their state off the output column directly; the cumulative
-/// family recomputes its (tiny) state from the raw inputs to stay bit-exact with
-/// the canonical kernel.
+/// The resume state of `node` after a full compute over `df`'s rows `[0, end)` — read in
+/// place, never copied — as of row `end - 1`. `None` when `node` has no resume kernel
+/// (the caller then keeps the full-recompute fallback).
 ///
 /// A recursive command's state is captured over the complete rows of its inputs, so it
 /// describes the last complete row (see `crate::complete`).
-pub fn initial_state(df: &DataFrame, node: &Ast, _computed: &Column) -> Option<Vec<f64>> {
+pub fn initial_state(df: &DataFrame, node: &Ast, end: usize) -> Option<Vec<f64>> {
     let (name, sub, args, series) = as_command(node)?;
     let (name, sub) = (name.as_ref(), sub.as_deref());
     if crate::spec::is_recursive(name, &args) {
-        return crate::complete::state(df, series, |ops| state_of(ops, name, sub, &args));
+        return crate::complete::state(df, series, end, |ops| state_of(ops, name, sub, &args));
     }
-    let ops = Operands::new(df, series);
+    let ops = Operands::upto(df, series, end);
     super::window::state(&ops, name, sub, &args).or_else(|| state_of(&ops, name, sub, &args))
 }
 

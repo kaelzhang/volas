@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use super::derive::NoReplay;
+use super::Continuation;
 use super::*;
 use crate::tz::Tz;
 
@@ -11,9 +12,13 @@ use crate::tz::Tz;
 struct Replayed;
 
 impl Replay for Replayed {
-    fn states(&self, frame: &DataFrame, _: &str, end: usize) -> Option<(Vec<f64>, Option<Vec<f64>>)> {
+    fn continuation(&self, frame: &DataFrame, _: &str, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation {
         let at = (frame.origin() + end - 1) as f64;
-        Some((vec![at], Some(vec![at - 1.0])))
+        let row = frame.origin() + start;
+        Continuation {
+            boundary: (boundary && row > 0).then(|| Checkpoint { at: row - 1, state: Some(vec![(row - 1) as f64]), inputs: vec![] }),
+            ends: ends.then(|| (vec![at], Some(vec![at - 1.0]))),
+        }
     }
 }
 
@@ -89,16 +94,65 @@ fn a_recursion_without_a_state_keeps_its_whole_history() {
 }
 
 #[test]
-fn a_lead_holds_a_column_in_the_dtype_it_has_now() {
-    let tail = frame(10).rows(7, 10, &NoReplay);
-    // a whole column replaced by one of another dtype: rows that convert exactly keep
-    // their values, others are missing — never a value the history did not have
-    let mut ints = tail.clone();
-    ints.set_column("close", Column::i64(vec![7, 8, 9])).unwrap();
-    assert_eq!(ints.led(&ints, 5).column("close").unwrap().get_i64(0), 2);
+fn a_lead_keeps_its_history_whatever_dtype_a_column_takes() {
+    let mut df = frame(10);
+    df.set_column("close", Column::f64((0..10).map(|i| i as f64 + 0.123456789).collect())).unwrap();
+    df.set_computed("ma", Reach { lookback: 2, resume: 3, continuation: 2, history: History::Window });
+    let tail = df.rows(7, 10, &NoReplay);
+    // a whole column of another dtype: the history and the new values read in their
+    // lossless common dtype — never rounded, never missing
+    for col in [Column::i64(vec![7, 8, 9]), Column::f32(vec![7.5, 8.5, 9.5])] {
+        let mut written = tail.clone();
+        written.set_column("close", col).unwrap();
+        let led = written.led(&written.select(&["close".to_string()]).unwrap(), 3);
+        let close = led.column("close").unwrap();
+        assert_eq!((close.dtype(), close.to_f64_vec()[0]), (crate::DType::F64, 4.123456789));
+    }
+    // a dtype the history cannot be read in is refused before anything is written
     let mut text = tail.clone();
-    text.set_column("close", Column::str(vec!["a".into(); 3])).unwrap();
-    assert!(!text.led(&text, 5).column("close").unwrap().is_valid(0));
+    let before = text.column("close").unwrap().clone();
+    assert!(matches!(text.set_column("close", Column::str(vec!["a".into(); 3])), Err(VolasError::DType(_))));
+    assert!(text.column("close").unwrap().equals(&before));
+}
+
+/// The lead holds only what the cached columns read now: dropping the one that needed
+/// the whole history releases the rest, copied out of the buffers it no longer is most of.
+#[test]
+fn a_lead_shrinks_with_the_columns_that_read_it() {
+    let mut df = frame(100);
+    df.set_column("kcw", Column::f64(vec![0.0; 100])).unwrap();
+    df.set_computed("kcw", Reach { lookback: 1, resume: 0, continuation: 1, history: History::Unkept });
+    let tail = df.rows(90, 100, &NoReplay);
+    assert_eq!(tail.lead_rows(), 90);
+    let names: Vec<String> = ["close", "ma", "ema"].map(String::from).to_vec();
+    let kept = tail.select(&names).unwrap();
+    assert_eq!(kept.lead_rows(), 5);
+    assert_eq!(lead(&kept), vec![85.0, 86.0, 87.0, 88.0, 89.0]);
+    // so does dropping a column's cached status
+    let mut written = tail.clone();
+    written.invalidate_computed_on_write("kcw");
+    assert_eq!(written.lead_rows(), 5);
+}
+
+/// Anchors are a memo of a recursion's history: shared by copies, carried by a selection
+/// for the rows it holds before its last, dropped by a write to the inputs.
+#[test]
+fn anchors_follow_the_rows_and_a_write_drops_them() {
+    let mut df = frame(10);
+    let anchors = df.computed_anchors("ema").unwrap();
+    for at in [2, 5, 8, 5] {
+        anchors.keep(Checkpoint { at, state: Some(vec![at as f64]), inputs: vec![] });
+    }
+    assert_eq!(anchors.len(), 3);
+    assert_eq!(anchors.nearest(6).map(|cp| cp.at), Some(5));
+    assert_eq!(anchors.nearest(1), None);
+    assert_eq!(df.clone().computed_anchors("ema").unwrap(), anchors);
+    let sub = df.rows(4, 9, &NoReplay);
+    assert_eq!(sub.computed_anchors("ema").unwrap().len(), 1);
+    assert_ne!(sub.computed_anchors("ema").unwrap(), anchors);
+    df.invalidate_computed_on_write("close");
+    assert_eq!(df.computed_anchors("ema").unwrap().len(), 0);
+    assert!(df.computed_anchors("close").is_none());
 }
 
 #[test]

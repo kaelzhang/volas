@@ -14,7 +14,7 @@
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
-use super::{ComputedMeta, DataFrame, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
+use super::{Anchors, ComputedMeta, DataFrame, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
 
 /// A stale cached column as the refresh reads it: its name, reach, valid-row
 /// cursor, where its history starts, and whether its processed history is past the
@@ -38,6 +38,7 @@ impl DataFrame {
     /// Re-derive `first_computed` after the set of cached columns changed.
     pub(super) fn note_computed(&mut self) {
         self.first_computed = self.computed.keys().filter_map(|k| self.name_to_idx.get(k).copied()).min();
+        self.retrim_lead();
     }
 
     /// Record that column `name` is a materialized directive result (valid for
@@ -56,6 +57,7 @@ impl DataFrame {
                 scratch: Vec::new(),
                 checkpoint: None,
                 pending: None,
+                anchors: Anchors::default(),
                 lost: None,
                 first_present: None,
             },
@@ -356,6 +358,7 @@ impl DataFrame {
             meta.state = None;
             meta.state_before_last = None;
             meta.pending = None;
+            meta.anchors = Anchors::default(); // the history's inputs changed
         }
     }
 }

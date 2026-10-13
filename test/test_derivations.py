@@ -136,12 +136,11 @@ def test_a_write_on_a_selection_recomputes_its_columns_over_their_history():
     tail.iat[0, DATA.index('close')] = 99.0
     for d in ['ma:5', 'kcw:5', 'ema:12']:
         assert same(tail[d].to_numpy(dtype='object'), full(d, rows)[N - 3:]), d
-    # without them, a recursion carried by its state cannot replay from before the
-    # selection: its refresh raises, never a restarted recursion
+    # alone, a recursion carried by its state replays from the checkpoint of its history
+    # the selection keeps at its boundary
     tail = cached(['ema:12']).iloc[N - 3:]
     tail.iat[0, DATA.index('close')] = 99.0
-    with pytest.raises(ValueError, match="cannot recompute 'ema:12' exactly"):
-        tail['ema:12']
+    assert same(tail['ema:12'].to_numpy(dtype='object'), full('ema:12', rows)[N - 3:])
 
 
 def test_a_selection_of_a_stale_frame_raises_and_a_copy_proceeds():
@@ -275,6 +274,19 @@ def test_a_selection_of_a_windowed_frame_continues_its_declared_columns():
             assert same(sub[d].to_numpy(dtype='object'), want), (a, b, d)
 
 
+@pytest.mark.parametrize('batches', [[7], [1] * 7, [3, 4]])
+def test_a_compaction_before_a_refresh_keeps_a_recursion_s_checkpoint(batches):
+    # the rows a checkpoint covers decide whether it is kept, never the output cursor
+    d = 'ema:3@(ma:3)'
+    f = DataFrame({'close': np.arange(20.0)}, window=3, max_lookback=[d])
+    at = 20
+    for k in batches:
+        f.append(DataFrame({'close': np.arange(float(at), float(at + k))}))
+        at += k
+    whole = DataFrame({'close': np.arange(float(at))})
+    assert f[d].to_list() == whole.exec(d).tolist()[-3:]
+
+
 def test_a_windowed_frame_copied_by_the_constructor_keeps_its_window():
     seed = {k: v[:N] for k, v in COLS.items()}
     wf = DataFrame(seed, window=5, max_lookback=['ema:12'])
@@ -339,6 +351,65 @@ def test_a_middle_selection_of_a_time_frame_frame_is_the_frame_of_its_bars():
     mid = df.iloc[:2]  # the closed bars 09:30 and 09:35; the last one becomes forming
     mid.append(fine([9], [50.0]))  # a finer bar of 09:35 folds into it
     assert len(mid) == 2 and mid['close'].to_list()[-1] == 50.0
+
+
+def test_a_rename_keeps_each_aggregator_and_ignores_an_absent_source():
+    # a source that is not a column is no rename: volume keeps its sum
+    t = np.datetime64('2024-01-01', 'ns') + np.arange(3) * np.timedelta64(1, 'm')
+    f = DataFrame({'volume': [1.0, 1.0]}, index=t[:2]).cumulate('5m')
+    s = f.rename({'Volume': 'volume'})
+    s.append(DataFrame({'volume': [3.0]}, index=t[2:]))
+    assert s['volume'].to_list() == [5.0]
+    r = f.rename({'volume': 'vol'})
+    r.append(DataFrame({'vol': [3.0]}, index=t[2:]))
+    assert r['vol'].to_list() == [5.0]
+
+
+def test_a_constructor_re_typed_projection_is_a_new_series_of_its_data_columns():
+    df = cached(['ema:3'])
+    got = DataFrame(df, columns=['close', 'ema:3'], dtype='float32')
+    assert got.columns == ['close'] and str(got['close'].dtype) == 'float32'
+
+
+def test_an_empty_range_is_the_same_selection_in_every_form():
+    df = cached(['ema:3'])
+    for sub in (df.iloc[:0], df.iloc[:0, :], df.loc[N:], df.loc[N:, :]):
+        assert sub.shape == (0, len(DATA) + 1) and sub.is_computed('ema:3')
+
+
+def test_cumulators_without_a_time_frame_raise_on_a_copy_too():
+    with pytest.raises(ValueError, match='cumulators requires time_frame'):
+        DataFrame(cached(['ema:3']), cumulators={'close': 'sum'})
+
+
+def test_a_windowed_source_made_unbounded_gives_its_visible_rows():
+    seed = {k: v[:N] for k, v in COLS.items()}
+    wf = DataFrame(seed, window=3, max_lookback=['ma:3'], index=T0 + np.arange(N) * MIN)
+    tf = DataFrame(wf, time_frame='1m')
+    assert len(tf) == 3 and tf['close'].to_list() == wf['close'].to_list()
+
+
+def test_the_constructor_projects_a_cached_column_by_any_spelling():
+    df = cached(['ema:3'])
+    assert DataFrame(df, columns=['close', 'ema:03']).columns == ['close', 'ema:3']
+
+
+def test_a_period_key_selects_the_same_rows_in_one_and_two_dimensions():
+    df = DataFrame({'close': np.arange(40.0)}, index=DAYS)
+    df['ema:3']
+    assert df.loc['2024-02', :].shape == df.loc['2024-02'].shape == (29, 2)
+    assert df.loc['2024-02', :].is_computed('ema:3')
+
+
+def test_dropping_the_column_that_needs_the_whole_history_releases_it():
+    # kcw carries no state: a slice keeps its whole history; once it is dropped, only
+    # what ema needs stays — and a later slice keeps no more
+    df = cached(['ema:3', 'kcw:5'])
+    tail = df.iloc[N - 10:]
+    assert tail.drop(['kcw:5'], axis=1).iloc[5:].shape == (5, len(DATA) + 1)
+    kept = tail.drop(['kcw:5'], axis=1)
+    kept.append(DataFrame(bars(N, N + 1), index=[N]))
+    assert same(kept['ema:3'].to_numpy(dtype='object'), full('ema:3', history(N, bars(N, N + 1)))[N - 10:])
 
 
 # --- labels -----------------------------------------------------------------------------------

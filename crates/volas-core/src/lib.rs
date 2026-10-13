@@ -25,7 +25,7 @@ pub use column::{BinOp, BoolOp, CmpOp, Column, CombineOp, Scalar};
 pub use numeric::{binary_supertype, fits, Numeric};
 pub use validity::{Bitmap, Validity};
 pub use dataframe::{
-    CellWrite, CellWrites, Checkpoint, DataFrame, History, Reach, Replay, Retained, StaleComputed,
+    Anchors, CellWrite, CellWrites, Checkpoint, Continuation, DataFrame, History, Reach, Replay, Retained, StaleComputed,
 };
 pub use dtype::DType;
 pub use error::{Result, VolasError};

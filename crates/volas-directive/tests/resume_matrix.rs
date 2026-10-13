@@ -70,8 +70,10 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
     }
     for from in froms {
         let head = df.slice_data(0, from);
-        let Ok(head_col) = execute(&head, node) else { continue };
-        let Some(mut state) = initial_state(&head, node, &head_col) else { continue };
+        if execute(&head, node).is_err() {
+            continue;
+        }
+        let Some(mut state) = initial_state(&head, node, head.height()) else { continue };
         let mut at = from;
         for end in [from + 1, (from + 4).min(n), n] {
             if end <= at {
@@ -89,7 +91,7 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
             at = end;
         }
         if at == n {
-            if let Some(fresh) = initial_state(df, node, &Column::f64(whole.clone())) {
+            if let Some(fresh) = initial_state(df, node, df.height()) {
                 if first_diff(&state, &fresh).is_some() {
                     fails.push(format!("from {from}: carried state {state:?} != fresh {fresh:?}"));
                 }
@@ -105,8 +107,10 @@ fn check(df: &DataFrame, node: &Ast) -> Vec<String> {
 fn forming(df: &DataFrame, node: &Ast, from: usize) -> Vec<String> {
     let mut fails = Vec::new();
     let head = df.slice_data(0, from);
-    let Ok(head_col) = execute(&head, node) else { return fails };
-    let Some(anchor) = initial_state(&head, node, &head_col) else { return fails };
+    if execute(&head, node).is_err() {
+        return fails;
+    }
+    let Some(anchor) = initial_state(&head, node, head.height()) else { return fails };
     for bump in [1.01, 0.97] {
         let frame = with_last_row_scaled(&df.slice_data(0, from + 1), bump);
         let Some(want) = full(&frame, node) else { continue };
@@ -155,10 +159,8 @@ fn resume_equals_full_recompute_for_every_line_class_and_point() {
             let Ok(node) = parse(&text) else { panic!("{text} does not parse") };
             for data in &classes {
                 let probe = data.frame.slice_data(0, ROWS / 2);
-                if let Ok(col) = execute(&probe, &node) {
-                    if initial_state(&probe, &node, &col).is_some() {
-                        resumable += 1;
-                    }
+                if execute(&probe, &node).is_ok() && initial_state(&probe, &node, probe.height()).is_some() {
+                    resumable += 1;
                 }
                 let fails = check(&data.frame, &node);
                 if let Some(first) = fails.first() {

@@ -193,7 +193,7 @@ impl PyDataFrame {
         // (the rows before are exact — and a head-dropped slice's carried head is not
         // reproducible from its own rows).
         let recomputed = volas_directive::exec::execute_refresh(df, node).map_err(value_err)?;
-        let (state, before) = volas_directive::resume_states(df, node, &recomputed);
+        let (state, before) = volas_directive::resume_states(df, node);
         let from = if warm { vr } else { 0 };
         let tail = recomputed.slice(from, recomputed.len());
         self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;
@@ -256,7 +256,7 @@ impl PyDataFrame {
             return self.replay_column(name, node, frame, (row, height), None);
         }
         let recomputed = volas_directive::exec::execute_refresh(led, node).map_err(value_err)?;
-        let (state, before) = volas_directive::resume_states(led, node, &recomputed);
+        let (state, before) = volas_directive::resume_states(led, node);
         let from = if warm { row } else { 0 };
         let tail = recomputed.slice(off + from, recomputed.len());
         self.inner.continue_computed(name, from, &tail, state, before).map_err(pyerr)
@@ -369,7 +369,12 @@ impl PyDataFrame {
                  max_lookback). Recompute it on the frame that holds its whole history."
             ))
         };
-        let df = frame.unwrap_or(&self.inner);
+        // over the frame's lead too, when it keeps one: an operand of the recursion reads
+        // the rows before row 0 (a checkpoint at a selection's boundary replays from row 0)
+        let base = frame.unwrap_or(&self.inner);
+        let led = (self.inner.lead_rows() > 0).then(|| self.inner.led(base, self.inner.lead_rows()));
+        let df = led.as_ref().unwrap_or(base);
+        let off = df.height() - height;
         // an input the directive cannot read (an int64 past 2^53) is its own error — in the
         // rows the frame holds, or in those dropped without a checkpoint
         let fail = || match self.inner.computed_history_lost(name) {
@@ -379,17 +384,19 @@ impl PyDataFrame {
                 Ok(_) => lost(),
             },
         };
+        let origin = self.inner.origin();
         let vouched = vr.max(self.logical_range().0);
         let checkpoint = self
             .inner
             .computed_checkpoint(name)
-            .filter(|cp| cp.at < df.origin() + vouched)
+            .filter(|cp| cp.at < origin + vouched)
             .ok_or_else(fail)?;
-        let from = (checkpoint.at + 1).checked_sub(df.origin()).ok_or_else(fail)?;
-        // the replay's stops: the pending row's, then the row before the last, then the last
-        let stop = pending.and_then(|p| p.checked_sub(df.origin())).filter(|&t| t >= from && t + 2 < height);
+        // the frame's first row the replay writes (the rows before it keep their values)
+        let from = (checkpoint.at + 1).checked_sub(origin).ok_or_else(fail)?;
+        // the replay's stops, in `df`'s rows: the pending row's, the row before the last, the last
+        let stop = pending.and_then(|p| p.checked_sub(df.origin())).filter(|&t| t >= from + off && t + 2 < df.height());
         let mut ends: Vec<usize> = stop.map(|t| t + 1).into_iter().collect();
-        ends.extend([height - 1, height]);
+        ends.extend([df.height() - 1, df.height()]);
         let mut tail = volas_core::Column::f64(Vec::new());
         let mut points = Vec::with_capacity(ends.len());
         let mut at = checkpoint.clone();

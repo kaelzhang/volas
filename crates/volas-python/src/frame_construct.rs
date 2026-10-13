@@ -34,12 +34,9 @@ impl PyDataFrame {
         // The windowing arguments are checked before any data is read.
         let bounds = crate::frame_bounded::bounds(window, max_lookback)?;
         // `columns`, when given, selects and orders the columns — a strict projection, like
-        // `df[[...]]`: a name not present raises KeyError, and an empty list or a duplicate
-        // name is rejected. It never silently NaN-fills an absent column.
+        // `df[[...]]`: a name not present raises KeyError, a duplicate name is rejected, and
+        // an empty list keeps no column. It never silently NaN-fills an absent column.
         if let Some(cols) = &columns {
-            if cols.is_empty() {
-                return Err(PyValueError::new_err("columns must not be empty"));
-            }
             let mut seen = HashSet::with_capacity(cols.len());
             for c in cols {
                 if !seen.insert(c.as_str()) {
@@ -56,7 +53,13 @@ impl PyDataFrame {
         // volas pandas-free at import. To build a DatetimeIndex from a column, parse it with
         // `to_datetime` then `set_index` (or use `read_csv`).
         let (df, tf) = if let Ok(mut other) = data.extract::<PyRefMut<PyDataFrame>>() {
-            if columns.is_none() && index.is_none() && dtype.is_none() && window.is_none() && time_frame.is_none() {
+            if columns.is_none()
+                && index.is_none()
+                && dtype.is_none()
+                && window.is_none()
+                && time_frame.is_none()
+                && cumulators.is_none()
+            {
                 // `DataFrame(other)` is `other.copy()`: the window and time-frame state too
                 return Ok(other.copy());
             }
@@ -70,6 +73,12 @@ impl PyDataFrame {
                     let view = other.read()?;
                     (view.select(&view.data_names()).map_err(pyerr)?, other.tf.clone())
                 }
+                // a windowed source made an unbounded frame gives its visible rows (its hidden
+                // margin serving as their history); re-windowed, all the rows it holds
+                None if other.window.is_some() && window.is_none() => {
+                    let view = other.read()?;
+                    (view.contiguous(0, view.rows()), other.tf.clone())
+                }
                 None => (other.inner.clone(), other.tf.clone()),
                 Some(cols) => {
                     // A projection reads like `df[[...]]` (stale cached columns refreshed,
@@ -77,12 +86,13 @@ impl PyDataFrame {
                     // projected onto `cols` too. The cumulator spec is per-column with a
                     // default, so the dropped columns' rules simply go unused — folding
                     // stays correct on the kept ones.
-                    // A strict selection of existing columns: a name that is not one raises
-                    // (it is never computed here).
-                    if let Some(c) = cols.iter().find(|c| !other.inner.has_column(c)) {
-                        return Err(PyKeyError::new_err(format!("column \"{c}\" not found")));
-                    }
-                    let inner = other.project(cols)?;
+                    // A strict selection of existing columns, a cached one by any spelling of
+                    // its directive: a name that is not one raises (it is never computed here).
+                    let names = cols
+                        .iter()
+                        .map(|c| other.column_name(c).ok_or_else(|| PyKeyError::new_err(format!("column \"{c}\" not found"))))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    let inner = other.project(&names)?;
                     // The open period follows the projection: kept data columns keep every
                     // fine bar; a cached column the projection turns into data was never in
                     // the fine bars, which hold it as missing.
@@ -142,7 +152,8 @@ impl PyDataFrame {
             None => df,
             Some(dt_str) => {
                 let dt = parse_dtype(dt_str)?;
-                let mapping = df.names().iter().map(|n| (n.clone(), dt)).collect();
+                // a new series: its data columns cast (a cached one is not carried)
+                let mapping = df.data_names().into_iter().map(|n| (n, dt)).collect();
                 df.astype(&mapping).map_err(pyerr)?
             }
         };

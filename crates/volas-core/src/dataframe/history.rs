@@ -81,7 +81,60 @@ pub struct Checkpoint {
     pub inputs: Vec<(usize, Vec<f64>)>,
 }
 
+/// The spacing of a recursion's [`Anchors`]: one every this many rows.
+pub const ANCHOR_SPACING: usize = 4096;
+
+/// Checkpoints of a recursion's history at regular rows (absolute rows `k ·
+/// ANCHOR_SPACING - 1`), formed the first time a replay passes them and kept with the
+/// column: a later replay of its history to a row starts at the nearest one before it,
+/// so a selection's boundary costs at most the spacing however long the history is. A
+/// memo of the history's inputs: a write to them drops every anchor; anchors are never
+/// formed at a frame's last row, the one a re-sent row replaces. Frames copied from one
+/// another share them until either changes its history.
+#[derive(Clone, Debug, Default)]
+pub struct Anchors(std::sync::Arc<std::sync::Mutex<Vec<Checkpoint>>>);
+
+impl Anchors {
+    /// The anchor at the latest row at or before absolute row `at`.
+    pub fn nearest(&self, at: usize) -> Option<Checkpoint> {
+        let held = self.0.lock().expect("anchors lock");
+        held.iter().filter(|cp| cp.at <= at).max_by_key(|cp| cp.at).cloned()
+    }
+
+    /// Keep `checkpoint` as an anchor (one per row).
+    pub fn keep(&self, checkpoint: Checkpoint) {
+        let mut held = self.0.lock().expect("anchors lock");
+        if !held.iter().any(|cp| cp.at == checkpoint.at) {
+            held.push(checkpoint);
+        }
+    }
+
+    /// New anchors holding those of these at rows `rows` — a frame of its own.
+    pub(super) fn within(&self, rows: std::ops::Range<usize>) -> Anchors {
+        let held = self.0.lock().expect("anchors lock");
+        Anchors(std::sync::Arc::new(std::sync::Mutex::new(
+            held.iter().filter(|cp| rows.contains(&cp.at)).cloned().collect(),
+        )))
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.0.lock().expect("anchors lock").len()
+    }
+}
+
+impl PartialEq for Anchors {
+    fn eq(&self, other: &Anchors) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 impl DataFrame {
+    /// The anchors of cached column `name`'s history ([`Anchors`]), if it is cached.
+    pub fn computed_anchors(&self, name: &str) -> Option<Anchors> {
+        Some(self.computed.get(name)?.anchors.clone())
+    }
+
     /// The checkpoint of cached column `name`'s history, if it keeps one.
     pub fn computed_checkpoint(&self, name: &str) -> Option<&Checkpoint> {
         self.computed.get(name)?.checkpoint.as_ref()

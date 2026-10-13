@@ -30,64 +30,31 @@ use crate::error::{Result, VolasError};
 use crate::fxhash::FxHashMap;
 use crate::index::{Index, IndexKind};
 
-use super::{Checkpoint, ComputedMeta, DataFrame, Reach, STALE_BY_APPEND};
+use super::{Checkpoint, ComputedMeta, DataFrame, History, Reach, STALE_BY_APPEND};
 
-/// The directive layer's half of a contiguous selection that ends before a recursive
-/// cached column's last valid row: the column's carried states as of the selection's
-/// last row, which the source frame does not carry. The core knows where a column's
-/// history is; only the directive layer can replay it.
+/// What a contiguous selection keeps of a recursion carried by its state whose history
+/// starts before the selection ([`Replay::continuation`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Continuation {
+    /// The checkpoint of its history as of the row before the selection's first: every
+    /// recompute of the selection's rows replays from it.
+    pub boundary: Option<Checkpoint>,
+    /// Its carried states as of the selection's last row and the row before it.
+    pub ends: Option<(Vec<f64>, Option<Vec<f64>>)>,
+}
+
+/// The directive layer's half of a contiguous selection: the history of a recursive
+/// cached column carried by its state at the selection's edges, which the source frame
+/// does not carry. The core knows where a column's history is; only the directive layer
+/// can replay it.
 pub trait Replay {
-    /// The carried states of the recursive cached column `name` of `frame` as of
-    /// `frame`'s row `end - 1` and as of the row before it (`None` for that one when
-    /// there is no state of it), replayed from the history `frame` holds of the column:
-    /// its rows from the column's history start, or its checkpoint. `None` when `frame`
-    /// holds neither, or the column carries no state.
-    fn states(&self, frame: &DataFrame, name: &str, end: usize) -> Option<(Vec<f64>, Option<Vec<f64>>)>;
-}
-
-/// The data rows just before a frame's row 0 that its cached columns read (see the
-/// module docs): the rows `[from, to)` of `rows`, a frame of data columns whose row `to`
-/// would be the frame's row 0. A lead that is most of its source's rows shares the
-/// source's buffers; a shorter one is a copy of just its rows, so a selection never pins
-/// more than twice the rows its lead keeps.
-#[derive(Clone, Debug)]
-pub(super) struct Lead {
-    rows: Arc<DataFrame>,
-    from: usize,
-    to: usize,
-}
-
-impl Lead {
-    /// How many rows the lead keeps.
-    fn len(&self) -> usize {
-        self.to - self.from
-    }
-
-    /// The last `n` (at most [`len`](Self::len)) rows of column `name` in `dtype` — the
-    /// dtype the column has now. They are missing when the lead does not hold the column
-    /// (one added after it: no column whose history starts before the frame reads it), or
-    /// when its values there do not convert to `dtype` exactly (a column replaced by one
-    /// of another dtype): never a value the history did not have.
-    fn tail(&self, name: &str, n: usize, dtype: crate::DType) -> Column {
-        self.rows
-            .column(name)
-            .ok()
-            .and_then(|c| c.slice(self.to - n, self.to).convert_lossless(dtype).ok())
-            .unwrap_or_else(|| Column::na_of(dtype, n))
-    }
-
-    /// This lead over the data columns `names` it holds (a projection).
-    fn select(&self, names: &[String]) -> Lead {
-        let kept: Vec<String> = names.iter().filter(|n| self.rows.has_column(n)).cloned().collect();
-        Lead { rows: Arc::new(self.rows.select(&kept).expect("held columns")), ..*self }
-    }
-
-    #[cfg(debug_assertions)]
-    pub(super) fn debug_check(&self, origin: usize) {
-        assert!(self.rows.computed.is_empty() && self.rows.lead.is_none(), "a lead holds data rows only");
-        assert!(self.from <= self.to && self.to <= self.rows.height, "the lead's rows are its frame's");
-        assert_eq!(self.rows.origin + self.to, origin, "the lead ends just before row 0");
-    }
+    /// For the recursive cached column `name` of `frame` (carried by its state), over
+    /// the selection of `frame`'s rows `[start, end)`: the checkpoint of its history as
+    /// of row `start - 1` (when `boundary`), and its states as of rows `end - 1` and
+    /// `end - 2` (when `ends`) — replayed from the history `frame` holds of the column,
+    /// its rows from the history start or its checkpoint, reading the rows in place.
+    /// What cannot be replayed is `None`.
+    fn continuation(&self, frame: &DataFrame, name: &str, start: usize, end: usize, boundary: bool, ends: bool) -> Continuation;
 }
 
 /// A replay that never has the history (core tests: a selection that needs it keeps the
@@ -97,8 +64,8 @@ pub(super) struct NoReplay;
 
 #[cfg(test)]
 impl Replay for NoReplay {
-    fn states(&self, _: &DataFrame, _: &str, _: usize) -> Option<(Vec<f64>, Option<Vec<f64>>)> {
-        None
+    fn continuation(&self, _: &DataFrame, _: &str, _: usize, _: usize, _: bool, _: bool) -> Continuation {
+        Continuation::default()
     }
 }
 
@@ -191,22 +158,33 @@ impl DataFrame {
         let first = self.origin + start;
         let valid = meta.valid_rows.saturating_sub(start).min(end - start);
         let last = first + valid; // one past the selection's last valid row
-        let own = meta.state.is_some() && meta.last_valid(self.origin) == Some(meta.state_at);
-        let (state, before) = if valid == 0 {
-            (None, None)
-        } else if own && meta.state_at + 1 == last {
-            (meta.state.clone(), meta.state_before_last.clone())
-        } else if meta.reach.history.recursive() && meta.state.is_some() {
-            // ends before the column's last valid row: replayed once from its history (a
-            // recursion that carries no state has none to replay)
-            replay.states(self, name, start + valid).map_or((None, None), |(s, b)| (Some(s), b))
-        } else {
-            (None, None) // a window recomputes; no state needed
+        let own = meta.state.is_some()
+            && meta.last_valid(self.origin) == Some(meta.state_at)
+            && meta.state_at + 1 == last
+            && valid > 0;
+        // a checkpoint is replayed from over the rows after it: kept when the selection
+        // holds them (its rows, whatever its output cursor says)
+        let covers = |cp: &Checkpoint| (first..=first + (end - start)).contains(&(cp.at + 1));
+        let kept = meta.checkpoint.clone().filter(covers);
+        // a recursion carried by its state whose history starts before the selection: its
+        // checkpoint at the selection's boundary (every recompute replays from it) and,
+        // when the selection ends before its last valid row, its states there — replayed
+        // once from the history this frame holds
+        let carried = matches!(meta.reach.history, History::Carried { .. }) && meta.since < first;
+        let wants_boundary = carried && kept.is_none();
+        let wants_ends = matches!(meta.reach.history, History::Carried { .. }) && valid > 0 && !own;
+        let replayed = match wants_boundary || wants_ends {
+            true => replay.continuation(self, name, start, start + valid, wants_boundary, wants_ends),
+            false => Continuation::default(),
         };
-        // the state before describes the row before the last, which must be held
+        let (state, before) = match (own, replayed.ends) {
+            (true, _) => (meta.state.clone(), meta.state_before_last.clone()),
+            (false, Some((s, b))) => (Some(s), b),
+            (false, None) => (None, None),
+        };
+        // the state before describes the row before the last, which must be held (the
+        // boundary checkpoint stands for the row before the first)
         let before = before.filter(|_| state.is_some() && last - 1 > first);
-        // a checkpoint is replayed from over the rows after it: kept when they are held
-        let covers = |cp: &Checkpoint, rows: usize| (first..=first + rows).contains(&(cp.at + 1));
         ComputedMeta {
             reach: meta.reach,
             valid_rows: valid,
@@ -215,91 +193,34 @@ impl DataFrame {
             since: meta.since,
             state_at: last.saturating_sub(1),
             scratch: Vec::new(),
-            checkpoint: meta.checkpoint.clone().filter(|cp| covers(cp, valid)),
-            pending: meta.pending.clone().filter(|cp| covers(cp, end - start)),
+            checkpoint: kept.or(replayed.boundary),
+            // the anchors of the rows the selection holds, before its last
+            anchors: meta.anchors.within(first.saturating_sub(1)..last.saturating_sub(1)),
+            pending: meta.pending.clone().filter(covers),
             lost: meta.lost.clone(),
             first_present: meta.first_present,
         }
     }
 
-    /// The lead of the selection starting at row `start` whose cached columns are
-    /// `computed`: the data rows before it that they read to recompute its first rows —
-    /// for each column whose history starts before it, the fewer of its
-    /// [`lead`](Reach::lead) and its history's rows there, or, for a recursion that
-    /// carries no state, its whole history there (it is computed over all of it) — taken
-    /// from this frame's rows before `start`, then its own lead. `None` when no column
-    /// reads before it.
-    fn lead_before(&self, start: usize, computed: &FxHashMap<String, ComputedMeta>) -> Option<Lead> {
-        let first = self.origin + start;
-        let wanted = computed
-            .values()
-            .filter(|m| m.since < first)
-            .map(|m| match m.reach.history.recursive() && m.state.is_none() && m.checkpoint.is_none() {
-                true => first - m.since, // computed over all of it
-                false => m.reach.lead().min(first - m.since),
-            })
-            .max()
-            .unwrap_or(0);
-        let own = wanted.min(start);
-        let held = self.lead.as_ref().map_or(0, Lead::len);
-        let older = (wanted - own).min(held);
-        if own + older == 0 {
-            return None;
+    /// The rows `[start, end)` to READ (a reader's view of a frame's visible rows): their
+    /// values, each cached column marked as one over its valid rows, and nothing that
+    /// continues it — no state, checkpoint or lead. It is never appended to and never
+    /// derived from: a derivation maps its rows onto this frame instead
+    /// ([`rows`](Self::rows)).
+    pub fn view_rows(&self, start: usize, end: usize) -> DataFrame {
+        let start = start.min(self.height);
+        let end = end.max(start).min(self.height);
+        let columns: Vec<Column> = self.columns.iter().map(|c| c.slice(start, end)).collect();
+        let mut df = self.same_schema(columns, self.index.slice(start, end), self.origin + start);
+        df.stale_by = self.stale_by;
+        for (name, meta) in &self.computed {
+            let valid = meta.valid_rows.saturating_sub(start).min(end - start);
+            let mut view = ComputedMeta { valid_rows: valid, ..meta.view() };
+            view.state_at = (self.origin + start + valid).saturating_sub(1);
+            df.computed.insert(name.clone(), view);
         }
-        let names = self.data_names();
-        if older == 0 && 2 * own >= self.height {
-            // most of this frame's rows: share its buffers rather than copy them
-            let rows = Arc::new(self.select(&names).expect("data columns"));
-            return Some(Lead { rows, from: start - own, to: start });
-        }
-        let columns = names
-            .iter()
-            .map(|name| {
-                let col = &self.columns[self.name_to_idx[name]];
-                let mut out = match &self.lead {
-                    Some(lead) if older > 0 => lead.tail(name, older, col.dtype()),
-                    _ => col.slice(0, 0),
-                };
-                out.append(&col.slice(start - own, start)).expect("same dtype");
-                out
-            })
-            .collect();
-        let len = own + older;
-        let rows = DataFrame::new(names, columns, Some(Index::range(len)))
-            .expect("equal-length data columns")
-            .with_origin(first - len);
-        Some(Lead { rows: Arc::new(rows), from: 0, to: len })
-    }
-
-    /// How many data rows before row 0 this frame keeps in its lead (see the module docs).
-    pub fn lead_rows(&self) -> usize {
-        self.lead.as_ref().map_or(0, Lead::len)
-    }
-
-    /// `frame` — this frame's rows over some of its data columns (the frame a cached
-    /// column recomputes over) — preceded by the last `rows` rows of this frame's lead
-    /// (all of it when it holds fewer): the frame a recompute that reads before row 0 runs
-    /// over, its row 0 at the absolute position of the first lead row it takes. A column
-    /// the lead does not hold is missing on its rows. Its labels are positions (no
-    /// computation reads labels).
-    pub fn led(&self, frame: &DataFrame, rows: usize) -> DataFrame {
-        let Some(lead) = self.lead.as_ref().filter(|_| rows > 0) else {
-            return frame.clone();
-        };
-        let take = rows.min(lead.len());
-        let columns = frame
-            .names
-            .iter()
-            .zip(&frame.columns)
-            .map(|(name, col)| {
-                let mut out = lead.tail(name, take, col.dtype());
-                out.append(col).expect("same dtype");
-                out
-            })
-            .collect();
-        DataFrame::new(frame.names.to_vec(), columns, Some(Index::range(take + frame.height)))
-            .expect("equal-length columns")
-            .with_origin(frame.origin - take)
+        df.note_computed();
+        df
     }
 
     /// A `[start, end)` row slice that does **not** carry the cached-directive metadata —
@@ -392,6 +313,7 @@ impl DataFrame {
         df.note_computed();
         if !df.computed.is_empty() {
             df.lead = self.lead.as_ref().map(|l| l.select(&df.data_names()));
+            df.retrim_lead();
         }
         #[cfg(debug_assertions)]
         df.debug_check();
@@ -400,9 +322,21 @@ impl DataFrame {
 
     // --- new series ------------------------------------------------------------------------
 
-    /// Rename columns (pandas `rename(columns=...)`) — a new series of the data columns
-    /// (a name in `mapping` that is not one is ignored, as pandas does).
+    /// The rename `mapping` takes effect as: its entries whose source is a data column of
+    /// this frame (pandas ignores a name that is not a column; a cached column is not
+    /// carried by a rename). The one resolution every part of a renamed frame follows.
+    pub fn renaming(&self, mapping: &HashMap<String, String>) -> HashMap<String, String> {
+        mapping
+            .iter()
+            .filter(|(from, _)| self.has_column(from) && !self.is_computed(from))
+            .map(|(from, to)| (from.clone(), to.clone()))
+            .collect()
+    }
+
+    /// Rename columns (pandas `rename(columns=...)`) — a new series of the data columns,
+    /// renamed as [`renaming`](Self::renaming) resolves `mapping`.
     pub fn rename(&self, mapping: &HashMap<String, String>) -> Result<DataFrame> {
+        let mapping = self.renaming(mapping);
         let (names, columns) = self.data_parts();
         let names = names.into_iter().map(|n| mapping.get(&n).cloned().unwrap_or(n)).collect();
         DataFrame::new_series(names, columns, (*self.index).clone())

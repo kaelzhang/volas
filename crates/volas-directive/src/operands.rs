@@ -110,7 +110,12 @@ impl<'a> Operands<'a> {
     /// at most the frame's height) — borrowed, so a resume of rows before the last reads
     /// no copy of the frame.
     pub(crate) fn upto(df: &'a DataFrame, series: &'a [Ast], end: usize) -> Self {
-        Operands { len: end.min(df.height()), ..Operands::new(df, series) }
+        Operands::new(df, series).upto_rows(end)
+    }
+
+    /// These operands reading the rows `[0, end)` only (at most the frame's height).
+    pub(crate) fn upto_rows(self, end: usize) -> Self {
+        Operands { len: end.min(self.df.height()), ..self }
     }
 
     /// The length of every input handed to the arm.

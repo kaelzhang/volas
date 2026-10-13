@@ -54,7 +54,7 @@ impl std::ops::Deref for Fresh<'_> {
         if self.start == 0 && self.len == self.frame.height() {
             return self.frame;
         }
-        self.view.get_or_init(|| self.frame.rows(self.start, self.start + self.len, &Replayer))
+        self.view.get_or_init(|| self.frame.view_rows(self.start, self.start + self.len))
     }
 }
 
@@ -71,7 +71,7 @@ impl Fresh<'_> {
         match self.view.into_inner() {
             Some(view) => view,
             None if whole => self.frame.clone(),
-            None => self.frame.rows(self.start, self.start + self.len, &Replayer),
+            None => self.frame.view_rows(self.start, self.start + self.len),
         }
     }
 
@@ -170,8 +170,9 @@ impl<'a> Meta<'a> {
 ///     columns (list[str], optional): select and order the columns to keep (like
 ///         ``df[[...]]``: the same rows, a listed cached column still cached — refreshed
 ///         if stale —, a windowed source gives its visible rows); a name not present
-///         raises ``KeyError``. An empty list or a duplicate name is rejected, and an
-///         absent column is never NaN-filled.
+///         raises ``KeyError`` (a cached one is found by any spelling). A duplicate name
+///         is rejected, an empty list keeps no column, and an absent column is never
+///         NaN-filled.
 ///     index (Sequence, optional): row labels (int64, str or datetime), one per row,
 ///         unique as ``set_index`` requires them: a repeated label raises (``NaT`` is no
 ///         label).
