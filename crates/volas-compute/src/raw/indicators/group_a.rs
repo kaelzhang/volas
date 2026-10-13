@@ -80,7 +80,12 @@ fn volume_index(close: &[f64], volume: &[f64], on_down: bool) -> Vec<f64> {
 /// DPO Detrended Price Oscillator: `Price[(n/2 + 1) ago] - SMA_n`.
 /// Source: StockCharts — Detrended Price Oscillator (displaced form).
 pub fn dpo(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
-    let sma = kernels::sma(av(close), n, origin);
+    dpo_pass(close, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn dpo_pass<S: crate::pass::StateSink>(close: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    let sma = kernels::sma_pass(av(close), n, origin, states);
     let shift = n / 2 + 1;
     (0..close.len())
         .map(|i| if i >= shift { close[i - shift] - sma[i] } else { f64::NAN })
@@ -91,9 +96,16 @@ pub fn dpo(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
 /// — AD's money flow volume, so a bar without range carries no flow (0, not 0/0).
 /// Source: StockCharts / Fidelity — Chaikin Money Flow.
 pub fn cmf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    cmf_pass(high, low, close, volume, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn cmf_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let mfv: Vec<f64> = (0..close.len()).map(|i| mfv(high, low, close, volume, i)).collect();
-    let sum_mfv = super::sum(&mfv, n, origin);
-    let sum_vol = super::sum(volume, n, origin);
+    let (mut a, mut b) = (S::default(), S::default());
+    let sum_mfv = super::sum_pass(&mfv, n, origin, &mut a);
+    let sum_vol = super::sum_pass(volume, n, origin, &mut b);
+    states.compose(close.len(), &[&a, &b], |_, _| {});
     (0..close.len()).map(|i| sum_mfv[i] / sum_vol[i]).collect()
 }
 
@@ -115,11 +127,21 @@ pub fn chop(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize) -
 /// `RCMA1=SMA10(ROC10)`, `RCMA2=SMA10(ROC15)`, `RCMA3=SMA10(ROC20)`, `RCMA4=SMA15(ROC30)`.
 /// Source: StockCharts — Know Sure Thing.
 pub fn kst(close: &[f64], origin: usize) -> Vec<f64> {
+    kst_pass(close, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn kst_pass<S: crate::pass::StateSink>(close: &[f64], origin: usize, states: &mut S) -> Vec<f64> {
+    let mut stages = Vec::new();
     let leg = |(p, n): (usize, usize)| {
         let roc: Vec<f64> = (0..close.len()).map(|i| kst_roc(close, p, i)).collect();
-        kernels::sma(av(&roc), n, origin)
+        let mut s = S::default();
+        let values = kernels::sma_pass(av(&roc), n, origin, &mut s);
+        stages.push(s);
+        values
     };
     let [r1, r2, r3, r4] = KST_LEGS.map(leg);
+    states.compose(close.len(), &stages.iter().collect::<Vec<_>>(), |_, _| {});
     (0..close.len())
         .map(|i| r1[i] + 2.0 * r2[i] + 3.0 * r3[i] + 4.0 * r4[i])
         .collect()
@@ -129,8 +151,13 @@ pub fn kst(close: &[f64], origin: usize) -> Vec<f64> {
 /// `box = (volume / 1e8) / (high - low)`, `mid = (high + low) / 2`. The 1e8 volume scale is
 /// StockCharts' presentation convention. Source: StockCharts — Ease of Movement.
 pub fn emv(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    emv_pass(high, low, volume, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn emv_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let emv1: Vec<f64> = (0..high.len()).map(|i| emv_term(high, low, volume, i)).collect();
-    kernels::sma(av(&emv1), n, origin).to_vec()
+    kernels::sma_pass(av(&emv1), n, origin, states).to_vec()
 }
 
 /// EFI Elder Force Index: `EMA_n((C - prev C) * volume)`.

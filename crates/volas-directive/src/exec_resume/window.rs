@@ -253,7 +253,7 @@ pub(crate) fn step(
 
 /// A stochastic line's smoothing stages `(period, matype)` (see `ind::stoch_step`) and
 /// how many of them there are.
-fn stoch_stages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> ([(usize, usize); 2], usize) {
+pub(super) fn stoch_stages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> ([(usize, usize); 2], usize) {
     let p = |i| arg_usize(args, i);
     match (name, sub) {
         ("stoch", Some("d")) => ([(p(1), p(2)), (p(3), p(4))], 2),
@@ -263,13 +263,13 @@ fn stoch_stages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> ([(usize, u
 
 /// The averages a composite command is made of: the line's two `(fast, slow)` and, for
 /// a smoothed line, the smoother — as their dispatch arms build them.
-struct Averages {
-    fast: MaStage,
-    slow: MaStage,
-    smooth: Option<MaStage>,
+pub(super) struct Averages {
+    pub fast: MaStage,
+    pub slow: MaStage,
+    pub smooth: Option<MaStage>,
 }
 
-fn averages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Averages> {
+pub(super) fn averages(name: &str, sub: Option<&str>, args: &[ArgValue]) -> Option<Averages> {
     let p = |i| arg_usize(args, i);
     let ma = MaStage::new;
     Some(match (name, sub) {

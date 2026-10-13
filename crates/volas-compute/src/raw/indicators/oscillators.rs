@@ -413,6 +413,11 @@ pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
 /// first clean window after it — a bad bar reaches only the windows holding it, and a
 /// value never depends on the rows after it.
 pub fn cog(close: &[f64], period: usize, _origin: usize) -> Vec<f64> {
+    cog_pass(close, period, _origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn cog_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, _origin: usize, states: &mut S) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -421,6 +426,7 @@ pub fn cog(close: &[f64], period: usize, _origin: usize) -> Vec<f64> {
     let mut state = [0.0; COG_STATE];
     for (i, o) in out.iter_mut().enumerate() {
         *o = cog_row(close, period, i, &mut state);
+        states.record(i, n, || state.to_vec());
     }
     out
 }

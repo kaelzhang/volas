@@ -90,6 +90,11 @@ pub(super) fn capture(df: &DataFrame, cmd: &BoundCommand, end: usize, kernel: Ve
         for (slot, default) in cmd.spec.series.iter().enumerate() { ops.f64(slot, default).ok()?; }
     }
     if ops.failed() { return None; }
+    capture_read(&ops, cmd, end, kernel, recursive)
+}
+
+/// Frame the states published by a kernel using its already-resolved input reads.
+pub(super) fn capture_read(ops: &Operands, cmd: &BoundCommand, end: usize, kernel: Vec<f64>, recursive: bool) -> Option<Vec<f64>> {
     // Finite-window nodes read raw frame windows; only recursions gather complete rows.
     let reach = if recursive { cmd.reach() } else { cmd.reach().max(cmd.spec.lookback_of(cmd.args)) };
     let mask = ops.reads().fold(0usize, |m, (s, _)| m | (1 << s));

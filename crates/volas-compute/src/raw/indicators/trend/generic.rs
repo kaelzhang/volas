@@ -131,6 +131,10 @@ mod tests {
     fn resumable_stages_apply_the_period_one_identity() {
         use crate::raw::indicators::{ma_state, ma_step, MaStage};
         assert!(MaStage::new(1, 6).is_some() && MaStage::new(2, 6).is_some());
+        // Recursive stages belong to the resume path, not the finite batch publisher.
+        let mut states = crate::pass::States::default();
+        assert!(MaStage::new(2, 6).unwrap().finite_pass(&[3.0, 1.5, 4.25], 0, &mut states).is_none());
+        assert!(states.after.is_none() && states.before.is_none());
         let x = [3.0, 1.5, 4.25];
         let state = ma_state(&x[..2], 1, 7, 0).expect("period 1 resumes for every type");
         let mut next = state.clone();

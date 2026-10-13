@@ -13,16 +13,21 @@ use crate::missing;
 /// takes. Lookback `period-1`. Window-local: a non-finite row affects only the windows
 /// holding it (see [`crate::guard`]).
 pub fn sum(data: &[f64], period: usize, _origin: usize) -> Vec<f64> {
-    let (out, finite) = sum_with::<Unguarded>(data, period);
+    sum_pass(data, period, _origin, &mut ())
+}
+
+/// SUM batch pass with terminal-state publication.
+pub fn sum_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let (out, finite) = sum_with::<Unguarded>(data, period, origin, states);
     if finite {
         out
     } else {
-        sum_with::<NonFiniteRows>(data, period).0
+        sum_with::<NonFiniteRows>(data, period, origin, states).0
     }
 }
 
 /// The sliding sum under a row guard; also returns whether the total stayed finite.
-fn sum_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, bool) {
+fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, bool) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -61,6 +66,7 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, bool) {
         if guard.leave(old.is_finite()) {
             total.sub(old);
         }
+        states.record(i, n, || crate::guard::Slide::state([total], guard.bad(), origin + i + 1));
         trailing += 1;
     }
     (out, finite && total.value().is_finite())

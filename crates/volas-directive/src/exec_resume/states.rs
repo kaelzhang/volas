@@ -1,6 +1,10 @@
 //! A full computation together with the states a cached column carries — the state as
 //! of the last row and the one before — in one pass over the rows.
 //!
+//! Sliding accumulators publish both terminal states from their batch kernel's own
+//! pass. The continuation owner frames those words and the bounded input tails;
+//! it never reconstructs the accumulator by stepping through the history again.
+//!
 //! A recursion's state depends on every row before, so capturing it after a full
 //! computation runs the recursion a second time. Instead the recursion runs once, through
 //! the command's own paths: the full computation over a short head (its warm-up and some
@@ -51,7 +55,7 @@ pub fn capture(df: &DataFrame, node: &Ast) -> (Option<Vec<f64>>, Option<Vec<f64>
     }
 }
 
-/// The one-pass computation of a recursion that resumes: `None` when `node` is none, the
+/// The one-pass computation of a carried line: `None` when it has no batch/resume path, the
 /// frame is too short for a head past the warm-up, or a path declines.
 fn one_pass(df: &DataFrame, node: &Ast) -> Option<WithStates> {
     if !matches!(node.continuation(), crate::types::Continuation::Own) {
@@ -59,7 +63,14 @@ fn one_pass(df: &DataFrame, node: &Ast) -> Option<WithStates> {
     }
     let cmd = as_command(node.node())?;
     if !recursive(&cmd) {
-        return None;
+        let h = df.height();
+        if h < 2 * (lookback(node) + 1) + 2 { return None; }
+        let cmd = super::bound(&cmd);
+        let ops = crate::operands::Operands::new(df, cmd.series);
+        let pass = super::batch::compute(&ops, &cmd)?;
+        let after = super::state::capture_read(&ops, &cmd, h, pass.after, false)?;
+        let before = super::state::capture_read(&ops, &cmd, h - 1, pass.before, false)?;
+        return Some((Column::f64(pass.values), Some(after), Some(before)));
     }
     let h = df.height();
     let head = 2 * (lookback(node) + 1);

@@ -1,8 +1,8 @@
 //! Group B indicators (gap report 2026-06-07, §9): convention-sensitive market
 //! indicators. Each kernel pins ONE authoritative convention, cited inline and matched
-//! bit-for-shape by the source-pinned oracle (`test/oracle_reference.py`). Finite-memory
-//! members refresh on `append` through the engine's windowed fast-path (no state-carry);
-//! recursive members carry a `*_final_state` / `*_resume` pair like Group A.
+//! bit-for-shape by the source-pinned oracle (`test/oracle_reference.py`). Sliding
+//! accumulators publish their continuation states from the batch pass; recursive
+//! members carry a `*_final_state` / `*_resume` pair like Group A.
 
 use crate::raw::indicators::av;
 use crate::raw::kernels;
@@ -63,12 +63,19 @@ pub fn brar_br(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize
 /// are the summed volumes of up- / down- / flat-close days (vs the prior close).
 /// Source: MBA智库 — 成交量比率 (VR).
 pub fn vr(close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    vr_pass(close, volume, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn vr_pass<S: crate::pass::StateSink>(close: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let len = close.len();
     let (mut uv, mut dv, mut pv) = (vec![f64::NAN; len], vec![f64::NAN; len], vec![f64::NAN; len]);
     for i in 1..len {
         [uv[i], dv[i], pv[i]] = vr_volumes(close, volume, i);
     }
-    let (suv, sdv, spv) = (rolling_sum(&uv, n, origin), rolling_sum(&dv, n, origin), rolling_sum(&pv, n, origin));
+    let (mut a, mut b, mut c) = (S::default(), S::default(), S::default());
+    let (suv, sdv, spv) = (kernels::sma_pass(av(&uv), n, origin, &mut a) * n as f64, kernels::sma_pass(av(&dv), n, origin, &mut b) * n as f64, kernels::sma_pass(av(&pv), n, origin, &mut c) * n as f64);
+    states.compose(len, &[&a, &b, &c], |_, _| {});
     (0..len)
         .map(|i| (suv[i] + 0.5 * spv[i]) / (sdv[i] + 0.5 * spv[i]) * 100.0)
         .collect()
@@ -77,10 +84,15 @@ pub fn vr(close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
 /// Coppock Curve = `WMA_w(ROC_long + ROC_short)`, `ROC_p = (C / C₋ₚ − 1) × 100`.
 /// Source: StockCharts ChartSchool / Wikipedia — Coppock Curve.
 pub fn coppock(close: &[f64], w: usize, roc_long: usize, roc_short: usize, origin: usize) -> Vec<f64> {
+    coppock_pass(close, w, roc_long, roc_short, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn coppock_pass<S: crate::pass::StateSink>(close: &[f64], w: usize, roc_long: usize, roc_short: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let len = close.len();
     let sum: Vec<f64> =
         (0..len).map(|i| roc_at(close, roc_long, i) + roc_at(close, roc_short, i)).collect();
-    super::wma(&sum, w, origin)
+    super::wma_pass(&sum, w, origin, states)
 }
 
 /// 4-bar symmetric weighted MA, weights `[1, 2, 2, 1] / 6` (newest first); NaN until 3 prior
@@ -99,11 +111,23 @@ pub fn relative_vigor(
     n: usize,
     origin: usize,
 ) -> Vec<f64> {
+    relative_vigor_pass(open, high, low, close, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn relative_vigor_pass<S: crate::pass::StateSink>(open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    n: usize,
+    origin: usize, states: &mut S) -> Vec<f64> {
     let len = close.len();
     let co: Vec<f64> = (0..len).map(|i| close[i] - open[i]).collect();
     let hl: Vec<f64> = (0..len).map(|i| high[i] - low[i]).collect();
-    let num = kernels::sma(av(&swma4(&co)), n, origin);
-    let den = kernels::sma(av(&swma4(&hl)), n, origin);
+    let (mut a, mut b) = (S::default(), S::default());
+    let num = kernels::sma_pass(av(&swma4(&co)), n, origin, &mut a);
+    let den = kernels::sma_pass(av(&swma4(&hl)), n, origin, &mut b);
+    states.compose(len, &[&a, &b], |_, _| {});
     (0..len).map(|i| num[i] / den[i]).collect()
 }
 
@@ -116,19 +140,46 @@ pub fn relative_vigor_signal(
     n: usize,
     origin: usize,
 ) -> Vec<f64> {
-    swma4(&relative_vigor(open, high, low, close, n, origin))
+    relative_vigor_signal_pass(open, high, low, close, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn relative_vigor_signal_pass<S: crate::pass::StateSink>(open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    n: usize,
+    origin: usize, states: &mut S) -> Vec<f64> {
+    let mut stage = S::default();
+    let rvi = relative_vigor_pass(open, high, low, close, n, origin, &mut stage);
+    states.compose(close.len(), &[&stage], |end, out| out.extend_from_slice(&rvi[end.saturating_sub(3)..end]));
+    swma4(&rvi)
 }
 
 /// DKX 多空线 = `WMA(MID, 20)`, `MID = (3·C + L + O + H) / 6`. The fixed 20-period linear
 /// weights 20…1 are exactly TA-Lib WMA's. Source: 百度百科 / 东方财富 — 多空线 (DKX).
 pub fn dkx(open: &[f64], high: &[f64], low: &[f64], close: &[f64], origin: usize) -> Vec<f64> {
+    dkx_pass(open, high, low, close, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn dkx_pass<S: crate::pass::StateSink>(open: &[f64], high: &[f64], low: &[f64], close: &[f64], origin: usize, states: &mut S) -> Vec<f64> {
     let mid: Vec<f64> = (0..close.len()).map(|i| dkx_mid(open, high, low, close, i)).collect();
-    super::wma(&mid, 20, origin)
+    super::wma_pass(&mid, 20, origin, states)
 }
 
 /// MADKX = `SMA_m(DKX)`, the DKX signal line. Source: 百度百科 / 东方财富 — 多空线 (DKX).
 pub fn dkx_ma(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, origin: usize) -> Vec<f64> {
-    super::ma(&dkx(open, high, low, close, origin), m, origin)
+    dkx_ma_pass(open, high, low, close, m, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn dkx_ma_pass<S: crate::pass::StateSink>(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    let (mut a, mut b) = (S::default(), S::default());
+    let line = dkx_pass(open, high, low, close, origin, &mut a);
+    let values = kernels::sma_pass(av(&line), m, origin, &mut b).to_vec();
+    states.compose(close.len(), &[&a, &b], |end, out| out.extend_from_slice(&line[end.saturating_sub(m)..end]));
+    values
 }
 
 /// WVAD 威廉变异离散量 = `Σₙ( (C − O) / (H − L) · V )`, a bar without range adding 0 (AD's
@@ -142,8 +193,20 @@ pub fn wvad(
     n: usize,
     origin: usize,
 ) -> Vec<f64> {
+    wvad_pass(open, high, low, close, volume, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+#[allow(clippy::too_many_arguments)]
+pub fn wvad_pass<S: crate::pass::StateSink>(open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+    origin: usize, states: &mut S) -> Vec<f64> {
     let w: Vec<f64> = (0..close.len()).map(|i| wvad_term(open, high, low, close, volume, i)).collect();
-    rolling_sum(&w, n, origin)
+    (kernels::sma_pass(av(&w), n, origin, states) * n as f64).to_vec()
 }
 
 /// Which CDP support/resistance line to emit.

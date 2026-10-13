@@ -26,6 +26,7 @@ mod initial_state;
 mod resume;
 mod scalar;
 mod states;
+mod batch;
 mod state;
 mod row;
 mod window;

@@ -11,7 +11,8 @@ import numpy as np
 
 from volas import DataFrame as VolasDataFrame
 
-FIRST_CACHE_INDICATORS = ['kcw', 'ma:20,1', 'ma:20,3', 'ma:20,6', 'ma:20,8', 'ema:20', 'atr:14', 'ma:20']
+FIRST_CACHE_INDICATORS = ['kcw', 'ma:20,1', 'ma:20,3', 'ma:20,6', 'ma:20,8', 'ema:20', 'atr:14', 'ma:20',
+                          'boll.upper:20', 'vwma:20', 'mfi:14', 'stddev:20', 'linearreg:14']
 FIRST_CACHE_LENGTHS = (100_000, 1_000_000)
 FIRST_CACHE_ROUNDS = 20
 # the rows' ids: ``<directive>@n=<rows>``

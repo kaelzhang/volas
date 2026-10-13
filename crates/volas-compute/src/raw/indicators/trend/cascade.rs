@@ -54,6 +54,11 @@ pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
 /// `((n+1)/2, (n+1)/2)` for odd `n` and `(n/2, n/2+1)` for even `n` (either order).
 /// Row 0 is at absolute position `origin`. Lookback `period-1`.
 pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    trima_pass(data, period, origin, &mut ())
+}
+
+/// Fused TRIMA batch pass with terminal-state publication.
+pub fn trima_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -62,7 +67,8 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     // Skip a leading-NaN warm-up prefix (see `wma`).
     let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
     if start > 0 {
-        let sub = trima(&data[start..], period, origin + start);
+        if S::CAPTURE { return trima_composed(data, period, origin, states); }
+        let sub = trima_pass(&data[start..], period, origin + start, states);
         out[start..].copy_from_slice(&sub);
         return out;
     }
@@ -116,6 +122,12 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
                 out[i] = sum2.mean(bf);
             }
         }
+        states.record(i, n, || {
+            let mut v = Slide::state([sum1], 0, origin + i + 1);
+            v.extend(Slide::state([sum2], b.min(i + 1).saturating_sub(inner_cnt), origin + i + 1));
+            v.extend((0..b).map(|k| ring[(slot + k) % b]));
+            v
+        });
     }
     if clean && sum1.value().is_finite() && sum2.value().is_finite() {
         return out;
@@ -123,8 +135,18 @@ pub fn trima(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     // A non-finite row entered: fall back to the reference composition this fused pass
     // is bit-identical to. Both SMAs are window-local (see `crate::guard`), so a bad
     // row reaches only the windows holding it.
-    let ma = crate::raw::indicators::trend::ma::ma;
-    ma(&ma(data, a, origin), b, origin)
+    trima_composed(data, period, origin, states)
+}
+
+fn trima_composed<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    let (a, b) = trima_windows(period);
+    let (mut inner_state, mut outer_state) = (S::default(), S::default());
+    let inner = kernels::sma_pass(data.into(), a, origin, &mut inner_state);
+    let out = kernels::sma_pass(inner.view(), b, origin, &mut outer_state);
+    states.compose(data.len(), &[&inner_state, &outer_state], |end, state| {
+        state.extend_from_slice(&inner.as_slice().expect("contiguous output")[end.saturating_sub(b)..end]);
+    });
+    out.into_raw_vec_and_offset().0
 }
 
 /// T3's arithmetic (TA-Lib `ta_T3.c`): the weighted EMA form `(k·x) + ((1 − k)·e)` of

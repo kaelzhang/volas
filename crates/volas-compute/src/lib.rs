@@ -20,5 +20,6 @@ mod guard;
 pub mod indicators;
 pub mod kernels;
 pub mod missing;
+pub mod pass;
 pub mod raw;
 pub mod window;

@@ -122,7 +122,8 @@ def test_twenty_cached_directives_refresh_at_a_cost_independent_of_height():
 
 
 @pytest.mark.parametrize('directive', ['ema:20', 'ma:20,1', 'ma:20,3', 'ma:20,6', 'ma:20,8',
-                                       'kcw', 'atr:14', 'rsi:14', 'macd', 'obv'])
+                                       'kcw', 'atr:14', 'rsi:14', 'macd', 'obv', 'ma:20', 'boll.upper:20',
+                                       'vwma:20', 'mfi:14', 'stddev:20', 'linearreg:14'])
 def test_first_materialization_costs_one_computation(directive):
     """Carrying a bounded tail must not step the million input rows a second time."""
     data = {k: v[:LARGE] for k, v in _data(LARGE, 'float64').items()}

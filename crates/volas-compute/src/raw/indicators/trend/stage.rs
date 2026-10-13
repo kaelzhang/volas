@@ -28,6 +28,17 @@ impl MaStage {
     /// An EMA stage with the raw kernel's leading-NaN skip and propagation thereafter.
     pub fn ema(period: usize) -> Self { Self { period, kind: MaKind::Recursive(RecursiveKind::Ema), complete: false } }
 
+    /// A finite stage's batch kernel publishes the exact states used by `step`.
+    /// Recursive stages use their existing one-pass resume path instead.
+    pub fn finite_pass<S: crate::pass::StateSink>(&self, data: &[f64], origin: usize, states: &mut S) -> Option<Vec<f64>> {
+        Some(match self.kind {
+            MaKind::Finite(FiniteKind::Sma) => kernels::sma_pass(data.into(), self.period, origin, states).into_raw_vec_and_offset().0,
+            MaKind::Finite(FiniteKind::Wma) => super::wma_pass(data, self.period, origin, states),
+            MaKind::Finite(FiniteKind::Trima) => super::trima_pass(data, self.period, origin, states),
+            MaKind::Recursive(_) => return None,
+        })
+    }
+
     /// The length of its state.
     pub fn state_len(&self) -> usize {
         match self.kind {

@@ -375,3 +375,27 @@ fn every_executable_recursive_line_and_ma_combination_has_a_resume() {
     }
     assert!(checked > 1500, "only {checked} recursive combinations checked");
 }
+
+/// A long undefined prefix still has sliding state, even if the final two rows are
+/// inside the first window. Publishing a batch state must preserve that warm-up.
+#[test]
+fn batch_terminal_states_include_unseeded_and_poisoned_windows() {
+    use volas_directive::exec::execute_with_states;
+    use volas_core::{Column, DataFrame};
+    for present in [0, 1, 2, 5, 20, 60] {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let x: Vec<f64> = (0..80).map(|i| if i < 80 - present { bad } else { 100.0 + i as f64 / 7.0 }).collect();
+            let df = DataFrame::new(vec!["close".into()], vec![Column::f64(x)], None).unwrap();
+            for text in ["ma:5", "wma:5", "trima:5", "trima:6", "hma:9", "bbi", "boll.upper:5", "stddev:5", "sum:5", "linearreg:5", "bias:5", "dma.ama:3,5,4", "macdext.signal:3,2,5,5,4,2"] {
+                let node = parse(text).unwrap();
+                let (col, after, before) = execute_with_states(&df, &node).unwrap();
+                assert!(first_diff(&values(&col), &full(&df, &node).unwrap()).is_none(), "{text} {present} {bad}: values");
+                for (got, end) in [(after, 80), (before, 79)] {
+                    let want = initial_state(&df, &node, end).unwrap();
+                    let got = got.unwrap();
+                    assert!(first_diff(&got, &want).is_none(), "{text} {present} {bad} at {end}: {got:?} != {want:?}");
+                }
+            }
+        }
+    }
+}

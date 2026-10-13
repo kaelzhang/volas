@@ -2,7 +2,7 @@
 //! resumes (their steps are [`smoothing`]'s, shared with the cascade and MACD families).
 
 use crate::accum::{Accumulator, Csum};
-use crate::guard::{all_finite, own_sums, ring_push, state_after, window_sums, Order, Slide, Window};
+use crate::guard::{all_finite, own_sums, ring_push, state_after, Order, Slide, Window};
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 use crate::missing;
 use super::MaStage;
@@ -135,31 +135,49 @@ pub fn smma_resume_one(
 /// however long the slide — which is also why it does not depend on `_origin`, the
 /// frame's position every kernel takes. Lookback `period-1`.
 pub fn wma(data: &[f64], period: usize, _origin: usize) -> Vec<f64> {
+    wma_pass(data, period, _origin, &mut ())
+}
+
+/// WMA batch pass with terminal-state publication.
+pub fn wma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, _origin: usize, states: &mut S) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
+        if S::CAPTURE {
+            let mut prev = wma_initial();
+            let mut next = prev.clone();
+            for i in 0..n {
+                wma_row(period, i, &|j| data[j], &prev, &mut next);
+                states.record(i, n, || next.clone());
+                std::mem::swap(&mut prev, &mut next);
+            }
+        }
         return out;
     }
     // Skip a leading-NaN warm-up prefix (derived inputs — e.g. the stochastic %K line —
     // warm up with NaN): compute from the first finite value onward, mirroring sma/ema.
     let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
     if start > 0 {
-        let sub = wma(&data[start..], period, 0);
+        if n >= 2 && start >= n - 1 {
+            states.record(n - 2, n, wma_initial);
+            states.record(n - 1, n, wma_initial);
+        }
+        let sub = wma_pass(&data[start..], period, 0, states);
         out[start..].copy_from_slice(&sub);
         return out;
     }
-    let (out, finite) = wma_with::<Unguarded>(data, period);
+    let (out, finite) = wma_with::<Unguarded>(data, period, states);
     if finite {
         out
     } else {
-        wma_with::<NonFiniteRows>(data, period).0
+        wma_with::<NonFiniteRows>(data, period, states).0
     }
 }
 
 /// The sliding WMA under a row guard (`period <= data.len()`); also returns whether
 /// the running sums stayed finite. A window holding a non-finite row is weighted
 /// directly on its own rows.
-fn wma_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, bool) {
+fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, bool) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     let denom = wma_weight_sum(period);
@@ -195,6 +213,7 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, bool) {
             reanchor(&guard, &mut sum, &mut wsum, j);
         }
     }
+    states.record(period - 1, n, || Slide::state([sum, wsum], guard.bad(), period));
     out[period - 1] = if guard.clean() { wsum.mean(denom) } else { window(period - 1) };
     // Slide: dropping the oldest (weight 1) raises every retained weight by one.
     for i in period..n {
@@ -207,6 +226,7 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize) -> (Vec<f64>, bool) {
             reanchor(&guard, &mut sum, &mut wsum, i);
         }
         out[i] = if guard.clean() { wsum.mean(denom) } else { window(i) };
+        states.record(i, n, || Slide::state([sum, wsum], guard.bad(), period));
     }
     (out, finite && sum.value().is_finite() && wsum.value().is_finite())
 }
@@ -269,6 +289,11 @@ fn wma_slide(sum: &mut Csum, wsum: &mut Csum, pf: f64, entering: Option<f64>, le
 /// to zero yields `NaN` (no weight). Row 0 is at absolute position `origin`. Lookback
 /// `period-1`. O(n) sliding, exact sums ([`Csum`]).
 pub fn vwma(close: &[f64], volume: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    vwma_pass(close, volume, period, origin, &mut ())
+}
+
+/// VWMA batch pass with terminal-state publication.
+pub fn vwma_pass(close: &[f64], volume: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -293,14 +318,15 @@ pub fn vwma(close: &[f64], volume: &[f64], period: usize, origin: usize) -> Vec<
         if i >= period - 1 {
             out[i] = vwma_value([pv.value(), vv.value()]);
         }
+        states.record(i, n, || Slide::state([pv, vv], 0, origin + i + 1));
     }
     if clean && pv.value().is_finite() && vv.value().is_finite() {
         return out;
     }
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
-    window_sums(n, period, Order::AddDrop, origin, |i| [close[i] * volume[i], volume[i]], |i, s| {
+    crate::guard::window_sums_pass(n, period, Order::AddDrop, origin, |i| [close[i] * volume[i], volume[i]], |i, s| {
         out[i] = vwma_value(s);
-    });
+    }, states);
     out
 }
 
@@ -346,6 +372,11 @@ pub fn alma(close: &[f64], period: usize, offset: f64, sigma: f64) -> Vec<f64> {
 /// WMA(close, n), round(√n))`, with `n/2` floored. Lower lag than a plain WMA.
 /// Row 0 is at absolute position `origin`. Lookback `n + round(√n) − 2`.
 pub fn hma(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    hma_pass(close, period, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn hma_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let n = close.len();
     if period == 0 || period > n {
         return vec![f64::NAN; n];
@@ -357,10 +388,13 @@ pub fn hma(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
     }
     let half = period / 2;
     let sq = (period as f64).sqrt().round() as usize;
-    let wma_half = wma(close, half, origin);
-    let wma_full = wma(close, period, origin);
+    let (mut a, mut b, mut c) = (S::default(), S::default(), S::default());
+    let wma_half = wma_pass(close, half, origin, &mut a);
+    let wma_full = wma_pass(close, period, origin, &mut b);
     let raw: Vec<f64> = (0..n).map(|i| 2.0 * wma_half[i] - wma_full[i]).collect();
-    wma(&raw, sq, origin)
+    let values = wma_pass(&raw, sq, origin, &mut c);
+    states.compose(n, &[&a, &b, &c], |end, out| out.extend_from_slice(&raw[end.saturating_sub(sq)..end]));
+    values
 }
 
 /// Symmetrically-Weighted Moving Average (TradingView `ta.swma`): fixed 4-bar
@@ -380,11 +414,18 @@ pub fn swma(close: &[f64]) -> Vec<f64> {
 /// Bull and Bear Index (`mean of ma:a, ma:b, ma:c, ma:d`); row 0 at absolute position
 /// `origin`.
 pub fn bbi(close: &[f64], a: usize, b: usize, c: usize, d: usize, origin: usize) -> Vec<f64> {
+    bbi_pass(close, a, b, c, d, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn bbi_pass<S: crate::pass::StateSink>(close: &[f64], a: usize, b: usize, c: usize, d: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let data = av(close);
-    let ma_a = kernels::sma(data, a, origin);
-    let ma_b = kernels::sma(data, b, origin);
-    let ma_c = kernels::sma(data, c, origin);
-    let ma_d = kernels::sma(data, d, origin);
+    let (mut sa, mut sb, mut sc, mut sd) = (S::default(), S::default(), S::default(), S::default());
+    let ma_a = kernels::sma_pass(data, a, origin, &mut sa);
+    let ma_b = kernels::sma_pass(data, b, origin, &mut sb);
+    let ma_c = kernels::sma_pass(data, c, origin, &mut sc);
+    let ma_d = kernels::sma_pass(data, d, origin, &mut sd);
+    states.compose(close.len(), &[&sa, &sb, &sc, &sd], |_, _| {});
     ((&ma_a + &ma_b + &ma_c + &ma_d) / 4.0).to_vec()
 }
 
