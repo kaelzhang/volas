@@ -96,7 +96,7 @@ def test_fulfill_no_computed_columns_is_noop():
     assert 'ma:20' not in df.columns
 
 
-def test_fulfill_is_incremental_not_full_recompute():
+def test_fulfill_is_incremental_not_full_recompute(cost_guard):
     # fulfill (O(lookback)) must be dramatically cheaper than a full O(n) recompute.
     n = 100_000
     base = {c: np.arange(n, dtype=float) for c in ['open', 'high', 'low', 'close', 'volume']}
@@ -105,15 +105,15 @@ def test_fulfill_is_incremental_not_full_recompute():
     one = volas.DataFrame({c: [1.0] for c in ['open', 'high', 'low', 'close', 'volume']})
     df = df.append(one)
 
-    t0 = time.perf_counter()
-    df.fulfill()
-    fulfill_us = (time.perf_counter() - t0) * 1e6
+    def elapsed(call):
+        start = time.perf_counter()
+        call()
+        return (time.perf_counter() - start) * 1e6
 
-    t0 = time.perf_counter()
-    df.exec('ma:30')  # a full O(n) recompute of a fresh directive
-    full_us = (time.perf_counter() - t0) * 1e6
+    fulfill_us, full_us = cost_guard.pair(lambda: elapsed(df.fulfill),
+                                         lambda: elapsed(lambda: df.exec('ma:30')))
 
-    assert fulfill_us * 10 < full_us, (fulfill_us, full_us)
+    cost_guard(fulfill_us * 10, full_us)
 
 
 # The probe path executes on the LIVE frame (incl. the stale cached column) for

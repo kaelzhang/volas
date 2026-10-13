@@ -12,6 +12,8 @@ import time
 import numpy as np
 import pytest
 
+from scripts.perf_costs import timing_rounds
+
 import volas
 
 COLS = ['open', 'high', 'low', 'close', 'volume']
@@ -45,7 +47,7 @@ def _per_write_us(kind, how, row, n):
     for k in range(50):                          # warm: the first write may own the buffer
         write(float(k))
     best = float('inf')
-    for _ in range(3):                           # best of 3 damps scheduler noise
+    for _ in range(timing_rounds(3)):                           # best of 3 damps scheduler noise
         t = time.perf_counter()
         for k in range(500):
             write(float(k) + 0.5)
@@ -60,7 +62,7 @@ def _hole_fill_us(n):
     df.iat[0, 0] = None
     i = n // 2
     best = float('inf')
-    for _ in range(3):
+    for _ in range(timing_rounds(3)):
         t = time.perf_counter()
         for k in range(300):
             df.iat[i, 0] = None
@@ -70,26 +72,25 @@ def _hole_fill_us(n):
     return best
 
 
-def test_int_hole_fill_does_not_scale_with_rows():
-    small = _hole_fill_us(2_000)
-    large = _hole_fill_us(10_000_000)
-    assert large < small * 5, (small, large)     # O(1) missing count, no popcount
+def test_int_hole_fill_does_not_scale_with_rows(cost_guard):
+    small, large = cost_guard.pair(lambda: _hole_fill_us(2_000), lambda: _hole_fill_us(10_000_000))
+    cost_guard(large, small * 5)     # O(1) missing count, no popcount
 
 
 @pytest.mark.parametrize('row', ['middle', 'last'])
 @pytest.mark.parametrize('how', ['iat', 'at', 'iloc', 'loc'])
 @pytest.mark.parametrize('kind', ['plain', 'tf', 'windowed'])
-def test_cell_write_does_not_scale_with_rows(kind, how, row):
-    small = _per_write_us(kind, how, row, 2_000)
-    large = _per_write_us(kind, how, row, 200_000)
-    assert large < small * 5, (small, large)     # O(cells written), not ~100x
+def test_cell_write_does_not_scale_with_rows(kind, how, row, cost_guard):
+    small, large = cost_guard.pair(lambda: _per_write_us(kind, how, row, 2_000),
+                                  lambda: _per_write_us(kind, how, row, 200_000))
+    cost_guard(large, small * 5)     # O(cells written), not ~100x
 
 
 @pytest.mark.parametrize('how', ['iat', 'at', 'iloc', 'loc'])
 @pytest.mark.parametrize('kind', ['tf', 'windowed'])
-def test_a_closed_row_tf_write_costs_about_a_plain_one(kind, how):
+def test_a_closed_row_tf_write_costs_about_a_plain_one(kind, how, cost_guard):
     # a write that reaches neither the forming row nor a cached column cannot move the
     # open period: it costs what the same write costs on a plain frame
-    plain = _per_write_us('plain', how, 'middle', 200_000)
-    tf = _per_write_us(kind, how, 'middle', 200_000)
-    assert tf < plain * 2, (plain, tf)
+    plain, tf = cost_guard.pair(lambda: _per_write_us('plain', how, 'middle', 200_000),
+                               lambda: _per_write_us(kind, how, 'middle', 200_000))
+    cost_guard(tf, plain * 2)

@@ -46,12 +46,54 @@ flag, and the methodology key. A single indicator:
 make benchmark INDICATOR=rsi
 ```
 
-The same back-to-back A/B harness gates performance changes:
+The paired A/B harness gates performance changes:
 
 ```bash
 make perf-ab BASE=HEAD~1                 # full suite, pass/fail verdict
 make perf-ab BASE=HEAD~1 INDICATOR=bop   # one indicator
 ```
+
+The full gate builds isolated release wheels and runs six balanced AB/BA process
+pairs with the current harness. It includes every volas row: coverage, extended
+coverage, after-append coverage, API, calc, append, windowed streams, live time
+frames, first materialization, and the million-row true-range benchmarks.
+Rows are identified by section and full parametrized name, including length and
+phase. The median paired HEAD/base ratio is gated at geometric mean ≤ 1.10 and
+individual item ≤ 1.60. Rows below the 5 µs base floor are summed within their
+section and gated as a section bucket, so small costs still contribute.
+
+Release cost checks also run in the balanced pairs. Their within-run comparison
+order alternates; the median of six normalized HEAD cost ratios must satisfy
+each original strict bound. BASE cost samples are retained for diagnosis.
+Correctness/coverage runs execute these same operations and retain all value
+assertions, but do not enforce wall-clock bounds on instrumented code.
+Allocation-count assertions remain in the correctness suite.
+
+The preserved bounds are:
+
+| Tests | Bound |
+| --- | --- |
+| `test_operand_read_cost`: live refresh, twenty directives | large < 8 × small + 20 µs / 100 µs |
+| composite capture | 100k rows < 12 × 20k rows |
+| first materialization (all directives) | cache < 1.8 × exec + 1 ms |
+| `test_cell_write_cost`: hole fill, cell write | large < 5 × small |
+| closed-row time-frame write | time-frame < 2 × plain |
+| `test_cumulation_cost`: batch, resend | many < 8 × few; large < 5 × small |
+| `test_core_io_cost`: integer admission | 30k rows < 30 × 3k rows |
+| `test_fillna_cost`: dense fill | 1M rows < 10 × 10k rows |
+| `test_append`: amortized append | large < 5 × small |
+| `test_fulfill`: incremental refresh | 10 × fulfill < full recompute |
+
+`test_benchmark_true_range` has timings rather than ratio assertions; both its
+batch and single-row measurements participate in the full gate. Scoped
+`INDICATOR` / `SECTION` runs provide focused measurements; the cost-bound suite
+runs with the full gate. Automatic benchmarks have a 0.05 s budget per process;
+pedantic append and repeated cost-check samples are spread across pairs
+(rounding up, so the total sample budget is preserved). First caching keeps 20
+rounds per process: the million-row workloads need that sample count to stabilize
+medians under load. The harness reports measurement
+and total wall time, paired ratio MAD, and the number of gated cost checks.
+Use `PERF_AB_JSON_DIR=/path` to retain raw measurements and cost samples.
 
 ## Add a benchmark case
 

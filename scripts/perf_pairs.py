@@ -20,6 +20,13 @@ import subprocess
 import sys
 import time
 
+try:
+    from scripts.perf_costs import COST_TESTS, cost_verdict
+    from scripts.perf_items import benchmark_key
+except ModuleNotFoundError:
+    from perf_costs import COST_TESTS, cost_verdict
+    from perf_items import benchmark_key
+
 
 WORKER = '''
 import pathlib, sys
@@ -53,7 +60,7 @@ def summarize(base: list[dict], head: list[dict]) -> tuple[dict, dict]:
     validate_rounds(len(base))
     if len(head) != len(base):
         raise ValueError('BASE and HEAD must have equal paired rounds')
-    runs = [{b['name']: b for b in run['benchmarks']} for run in base + head]
+    runs = [{benchmark_key(b): b for b in run['benchmarks']} for run in base + head]
     names = runs[0].keys()
     if not names or any(run.keys() != names for run in runs):
         raise ValueError('every paired round must contain the same benchmark items')
@@ -76,7 +83,7 @@ def summarize(base: list[dict], head: list[dict]) -> tuple[dict, dict]:
             if stat == 'median':
                 noise.append({'name': name, 'median_ratio': ratio,
                               'relative_mad': median(abs(r - ratio) for r in ratios) / ratio,
-                              'ratios': ratios})
+                              'ratios': ratios, 'base_seconds': bs, 'head_seconds': hs})
         for output, stats in zip(outputs, (bstats, hstats)):
             # Retain only report-consumed statistics; pooled stddev/ops would
             # describe a different estimator and mislead downstream tools.
@@ -91,22 +98,41 @@ def run_pairs(python: str, root: Path, sites: dict[str, str], directory: Path,
               rounds: int, options: list[str]) -> None:
     validate_rounds(rounds)
     samples: dict[str, list[dict]] = {'base': [], 'head': []}
+    costs: dict[str, list[dict]] = {'base': [], 'head': []}
+    scoped = '-k' in options or any(option.startswith('--volas-benchmark-indicator')
+                                    for option in options)
+    full_gate = not scoped or '--volas-cost-checks' in options
+    options = [option for option in options if option != '--volas-cost-checks']
     started = time.monotonic()
     environment = dict(os.environ, VOLAS_BENCHMARK_PAIRS=str(rounds))
     for pair in range(rounds):
         order = ('base', 'head') if pair % 2 == 0 else ('head', 'base')
         for side in order:
+            environment['VOLAS_COST_REVERSE'] = str(pair % 2)
             path = directory / f'{side}-{pair + 1}.json'
             print(f'>> pair {pair + 1}/{rounds}: {side.upper()}', flush=True)
             with (directory / f'{side}-{pair + 1}.log').open('w') as log:
                 result = subprocess.run([python, '-c', WORKER, sites[side],
-                                         'test/test_benchmark.py', *options,
+                                         'test/test_benchmark.py', 'test/test_benchmark_true_range.py', *options,
                                          f'--benchmark-json={path}'], cwd=root, env=environment,
                                         stdout=log, stderr=subprocess.STDOUT)
             if result.returncode:
                 sys.stderr.write(log.name + ':\n' + Path(log.name).read_text())
                 raise BenchmarkFailure(side, result.returncode)
             samples[side].append(json.loads(path.read_text()))
+            if full_gate:
+                cost_path = directory / f'{side}-cost-{pair + 1}.json'
+                with (directory / f'{side}-cost-{pair + 1}.log').open('w') as log:
+                    result = subprocess.run([python, '-c', WORKER, sites[side], *COST_TESTS,
+                                             '--benchmark-disable', '-q',
+                                             f'--volas-cost-json={cost_path}'], cwd=root, env=environment,
+                                            stdout=log, stderr=subprocess.STDOUT)
+                if result.returncode:
+                    sys.stderr.write(Path(log.name).read_text())
+                    raise BenchmarkFailure(side, result.returncode)
+                costs[side].append(json.loads(cost_path.read_text()))
+    if full_gate and not cost_verdict(costs['head']):
+        raise BenchmarkFailure('head', 1)
     base, head = summarize(samples['base'], samples['head'])
     for side, data in (('base', base), ('head', head)):
         (directory / f'{side}.json').write_text(json.dumps(data))

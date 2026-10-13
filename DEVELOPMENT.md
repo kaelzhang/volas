@@ -97,9 +97,9 @@ make benchmark INDICATOR=bop    # ONE indicator: compact normalized report to
                                 # stdout (volas vs talib, batch + after-append +
                                 # append overhead); a working probe, NOT archived
 make perf-ab BASE=HEAD~1 [INDICATOR=bop]
-                                # the standard A/B: build+bench BASE in a temp
-                                # worktree, then HEAD (incl. uncommitted changes),
-                                # back-to-back on this machine; full suite ->
+                                # the standard A/B: isolated release BASE + HEAD
+                                # (incl. uncommitted changes), six balanced AB/BA
+                                # pairs on this machine; full suite ->
                                 # perf_gate verdict, single indicator -> compact
                                 # HEAD/base report. The CI gate's exact method.
 # THE RULE: performance questions are answered through these three commands —
@@ -113,6 +113,11 @@ make perf-ab BASE=HEAD~1 [INDICATOR=bop]
 # the top-10 slowest-vs-talib indicators (batch + after-append) and the
 # after-append-overhead degrader list.
 ```
+
+The full gate includes every volas benchmark section, aggregates sub-5µs costs
+by section, and enforces the original cost-ratio bounds on release builds.
+Correctness runs keep the same operations and value assertions without timing
+bounds on instrumented code. See [gate details](benchmarks/README.md).
 
 The locally generated `./benchmark-report.html` (and the always-current
 published copy at <https://volas.ost.ai>, deployed by the

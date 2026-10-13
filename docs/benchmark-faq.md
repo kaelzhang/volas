@@ -30,6 +30,29 @@ headline names the exact metric — currently **139 / 157 covered indicators by
 the default ratio**. If you reproduce different numbers, the fixture, versions,
 or machine almost certainly differ; please include them when you report.
 
+## What does the regression gate cover?
+
+`make perf-ab BASE=<ref>` builds isolated release wheels and measures six balanced
+AB/BA process pairs. It gates every volas section, including first caching,
+append, windowed streams, calc, all coverage variants, API, live time frames and
+true-range workloads. Each row retains its section and full parametrized identity.
+The geometric-mean ratio limit is 1.10; the individual-item limit is 1.60.
+Items below the 5 µs floor are summed by section **within each pair**, then gated
+using the median paired ratio with the same limits.
+
+The full gate also runs the original complexity and cost-ratio checks on release
+builds. Comparison order alternates across the six pairs, and each original
+strict bound applies to the median normalized cost ratio. `make test` still
+executes their operations and checks their values, preserving coverage without
+applying wall-clock bounds to instrumented code. Deterministic allocation checks
+stay in the correctness suite. The preserved bounds and reproduction commands
+are listed in the [benchmark guide](https://github.com/kaelzhang/volas/blob/main/benchmarks/README.md).
+
+The output reports measurement time, total build-plus-measurement time and
+between-pair noise. `PERF_AB_JSON_DIR=<directory>` retains raw rounds, cost
+samples and logs, including failed runs. `SECTION` / `INDICATOR` limit focused
+probes; use the full gate for a complete verdict.
+
 ## Why not just report one big "X× faster" number?
 
 A single multiplier hides the distribution: volas wins big on some indicators,

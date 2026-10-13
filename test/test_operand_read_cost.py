@@ -16,6 +16,8 @@ import time
 import numpy as np
 import pytest
 
+from scripts.perf_costs import timing_rounds
+
 import volas
 
 SMALL, LARGE = 10_000, 1_000_000
@@ -84,30 +86,32 @@ CASES = [
 
 
 @pytest.mark.parametrize('directive, kind', CASES, ids=[f'{d}-{k}' for d, k in CASES])
-def test_a_live_refresh_costs_the_same_at_a_million_rows(directive, kind):
-    small, _ = _append_cost(directive, kind, SMALL)
-    large, df = _append_cost(directive, kind, LARGE)
+def test_a_live_refresh_costs_the_same_at_a_million_rows(directive, kind, cost_guard):
+    (small, _), (large, df) = cost_guard.pair(
+        lambda: _append_cost(directive, kind, SMALL),
+        lambda: _append_cost(directive, kind, LARGE))
     # a whole-column conversion / evaluation per row would be ~100x here
-    assert large < 8 * small + 20e-6, (directive, kind, small, large)
+    cost_guard(large, 8 * small + 20e-6)
     full = df.exec(directive, dtype='float64')[-3:]
     got = np.asarray(df[directive], dtype=float)[-3:]
     assert ((got == full) | (np.isnan(got) & np.isnan(full))).all()
 
 
-def test_a_composite_captures_its_state_from_one_conversion():
+def test_a_composite_captures_its_state_from_one_conversion(cost_guard):
     """A composite's state is stepped over every row once; its float32 input is
     converted once, not once per row (which made the capture quadratic)."""
     def first(n):
         data = _data(n, 'float32')
         best = float('inf')
-        for _ in range(3):
+        for _ in range(timing_rounds(3)):
             df = volas.DataFrame({c: v[:n] for c, v in data.items()})
             t0 = time.perf_counter()
             df['apo:12,26,0']
             best = min(best, time.perf_counter() - t0)
         return best
     # linear: ~5x; quadratic: ~25x
-    assert first(100_000) < 12 * first(20_000)
+    large, small = cost_guard.pair(lambda: first(100_000), lambda: first(20_000))
+    cost_guard(large, 12 * small)
 
 
 MULTI = ['ema:20', 'ma:20', 'macd', 'kdj.k', 'sar', 'close-open', 'close>ma:20', 'obv', 'mfi:14', 'vwma:20',
@@ -115,10 +119,11 @@ MULTI = ['ema:20', 'ma:20', 'macd', 'kdj.k', 'sar', 'close-open', 'close>ma:20',
          'kcw', 'ad', 'adosc']
 
 
-def test_twenty_cached_directives_refresh_at_a_cost_independent_of_height():
-    small, _ = _append_cost(MULTI, 'int64', SMALL)
-    large, df = _append_cost(MULTI, 'int64', LARGE)
-    assert large < 8 * small + 100e-6, (small, large)
+def test_twenty_cached_directives_refresh_at_a_cost_independent_of_height(cost_guard):
+    (small, _), (large, df) = cost_guard.pair(
+        lambda: _append_cost(MULTI, 'int64', SMALL),
+        lambda: _append_cost(MULTI, 'int64', LARGE))
+    cost_guard(large, 8 * small + 100e-6)
     for d in MULTI:
         full = df.exec(d, dtype='float64')[-3:]
         got = np.asarray(df[d], dtype=float)[-3:]
@@ -136,20 +141,27 @@ RECURSIVE_COMPOSITES = [f.format(m=m) for m in [1, 3, 4, 6, 7, 8] for f in [
 @pytest.mark.parametrize('directive', RECURSIVE_COMPOSITES + ['ema:20', 'ma:20,1', 'ma:20,3', 'ma:20,6', 'ma:20,8',
                                        'kcw', 'atr:14', 'rsi:14', 'macd', 'obv', 'ma:20', 'boll.upper:20',
                                        'vwma:20', 'mfi:14', 'stddev:20', 'linearreg:14'])
-def test_first_materialization_costs_one_computation(directive):
+def test_first_materialization_costs_one_computation(directive, cost_guard):
     """Carrying a bounded tail must not step the million input rows a second time."""
     data = {k: v[:LARGE] for k, v in _data(LARGE, 'float64').items()}
     cache = compute = float('inf')
-    for _ in range(5):
+    for _ in range(timing_rounds(5)):
         df = volas.DataFrame(data)
-        start = time.perf_counter()
-        got = np.asarray(df[directive])
-        cache = min(cache, time.perf_counter() - start)
-        start = time.perf_counter()
-        want = df.exec(directive, dtype='float64')
-        compute = min(compute, time.perf_counter() - start)
+        def cached():
+            start = time.perf_counter()
+            got = np.asarray(df[directive])
+            return time.perf_counter() - start, got
+
+        def raw():
+            start = time.perf_counter()
+            want = df.exec(directive, dtype='float64')
+            return time.perf_counter() - start, want
+
+        (elapsed_cache, got), (elapsed_compute, want) = cost_guard.pair(cached, raw)
+        cache = min(cache, elapsed_cache)
+        compute = min(compute, elapsed_compute)
     np.testing.assert_array_equal(got.view(np.uint64), want.view(np.uint64))
-    assert cache < 1.8 * compute + 0.001, (directive, cache, compute)
+    cost_guard(cache, 1.8 * compute + 0.001)
 
 
 @pytest.mark.parametrize('directive', ['ema:20', 'crsi:3,2,5', 'rsi:14', 'apo:5,10,1', 'ema:5@(ema:3)'])

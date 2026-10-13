@@ -151,7 +151,7 @@ def test_append_is_in_place_and_returns_self(stock):
     assert len(out) == 15
 
 
-def test_append_per_bar_is_amortized_constant_time():
+def test_append_per_bar_is_amortized_constant_time(cost_guard):
     # a single-bar append must not scale with frame size — the whole point of the
     # in-place change (the immutable O(n)-copy append made a live loop O(n^2)).
     cols = ['open', 'high', 'low', 'close', 'volume']
@@ -166,6 +166,5 @@ def test_append_per_bar_is_amortized_constant_time():
             df.append(one)
         return (time.perf_counter() - t) / 1000 * 1e6
 
-    small = per_bar_us(2_000)
-    large = per_bar_us(200_000)
-    assert large < small * 5, (small, large)        # O(1)-ish, not ~100x
+    small, large = cost_guard.pair(lambda: per_bar_us(2_000), lambda: per_bar_us(200_000))
+    cost_guard(large, small * 5)        # O(1)-ish, not ~100x
