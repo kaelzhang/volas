@@ -77,14 +77,21 @@ impl PyDataFrame {
         let view = self.read()?;
         let df = view.as_ref();
         let idx = df.index();
+        let all_missing = df.columns().iter().all(|c| c.null_count() == c.len());
+        if all_missing {
+            return Ok(PyDataFrame::plain(DataFrame::new(df.names().to_vec(), df.columns().iter().map(|c| c.take(&[])).collect(), None).map_err(pyerr)?));
+        }
         let mut cols = Vec::with_capacity(df.width());
         for (name, col) in df.names().iter().zip(df.columns()) {
             let s = PySeries {
                 inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
             };
             let m = s.mode();
-            let take: Vec<usize> = if m.inner.is_empty() { vec![] } else { vec![0] };
-            cols.push(m.inner.data.take(&take));
+            cols.push(if m.inner.is_empty() {
+                Column::na_of(col.dtype(), 1)
+            } else {
+                m.inner.data.take(&[0])
+            });
         }
         Ok(PyDataFrame::plain(
             DataFrame::new(df.names().to_vec(), cols, None).map_err(pyerr)?,

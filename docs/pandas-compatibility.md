@@ -74,6 +74,20 @@ s.ewm(com=|span=|halflife=|alpha=, min_periods=0, adjust=True, ignore_na=False)
 .mean() .sum() .var(bias=False) .std(bias=False) .corr(other) .cov(other, bias=False)
 ```
 
+With `min_periods=0`, empty rolling / expanding windows return 0 for `sum`
+and `nunique`; statistics without an empty identity remain missing. EWM treats
+NaN and both infinity signs as missing, following pandas 3.0.3. Rolling / expanding
+methods treat infinities as values; see the
+[per-method infinity policy](https://github.com/kaelzhang/volas/blob/main/PANDAS-DIFFERENCES.md#window-aggregations-rolling--expanding-deliberate-divergences).
+
+Scalar `replace` preserves dtypes: a matched column that cannot hold the new value
+raises and leaves the source frame unchanged. Numeric membership and replacement
+match equal integer / float values across storage dtypes without rounding large
+integers. `rank(na_option='top'|'bottom')` treats missing cells as one tie group,
+including percentile ranks. `DataFrame.mode()` keeps one mode per column; a
+missing-only column is padded with NA when another column has a mode, and a frame
+with only missing values returns zero rows.
+
 `center=True` labels each window at its center — it reads **future** bars
 relative to the label. That is exactly what a labeling pass wants, and exactly
 what a live signal must never do; it is supported for the former.

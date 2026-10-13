@@ -132,7 +132,6 @@ fn present_sums_at<const K: usize>(
     mut read: impl FnMut(usize, &[Csum; K], f64, usize) -> f64,
 ) -> Vec<f64> {
     let rolling = window != usize::MAX;
-    let min_periods = min_periods.max(1);
     let mut sums = [Csum::default(); K];
     let mut expansion: Option<[Exact; K]> = None;
     let mut inf = Infinities::default();
@@ -590,7 +589,7 @@ pub fn nunique(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
             nobs += 1;
             *counts.entry(value_key(x)).or_insert(0) += 1;
         }
-        if nobs >= min_periods.max(1) {
+        if nobs >= min_periods {
             out[i] = counts.len() as f64;
         }
     }
@@ -611,7 +610,7 @@ pub fn edge_positions(
     for i in 0..n {
         let start = win_start(i, window);
         let nobs = valid[start..=i].iter().filter(|&&v| v).count();
-        if nobs >= min_periods.max(1) {
+        if nobs >= min_periods {
             out[i] = if last {
                 (start..=i).rev().find(|&k| valid[k])
             } else {
@@ -716,14 +715,17 @@ pub fn ewm_mean(
     let mut nobs = 0usize;
     data.iter()
         .map(|&x| {
-            let is_obs = !x.is_nan();
+            let is_obs = x.is_finite();
             nobs += is_obs as usize;
             if !avg.is_nan() {
                 if is_obs || !ignore_na {
                     old_wt *= old_wt_factor;
                     if is_obs {
                         if avg != x {
-                            avg = (old_wt * avg + new_wt * x) / (old_wt + new_wt);
+                            // pandas 3 uses the complement of the decayed weight
+                            // for its com=1 recursive mean, including across gaps.
+                            let wt = if !adjust && alpha == 0.5 { 1.0 - old_wt } else { new_wt };
+                            avg = (old_wt * avg + wt * x) / (old_wt + wt);
                         }
                         if adjust {
                             old_wt += new_wt;
@@ -752,7 +754,7 @@ pub fn ewm_sum(data: &[f64], alpha: f64, ignore_na: bool, min_periods: usize) ->
     let mut nobs = 0usize;
     data.iter()
         .map(|&x| {
-            let is_obs = !x.is_nan();
+            let is_obs = x.is_finite();
             nobs += is_obs as usize;
             if !s.is_nan() {
                 if is_obs || !ignore_na {
@@ -794,7 +796,7 @@ pub fn ewm_cov(
     x.iter()
         .zip(y)
         .map(|(&xi, &yi)| {
-            let is_obs = !xi.is_nan() && !yi.is_nan();
+            let is_obs = xi.is_finite() && yi.is_finite();
             nobs += is_obs as usize;
             if !mean_x.is_nan() {
                 if is_obs || !ignore_na {
@@ -859,7 +861,7 @@ pub fn ewm_var(
 }
 
 /// pandas `ewm(...).corr(other)`: `cov / sqrt(var_x · var_y)` with the biased
-/// (bias=true) building blocks, exactly as pandas computes it.
+/// (bias=true) building blocks. Divide before multiplying to retain range.
 pub fn ewm_corr(
     x: &[f64],
     y: &[f64],
@@ -874,7 +876,7 @@ pub fn ewm_corr(
     let n = x.len();
     let (mut xp, mut yp) = (vec![f64::NAN; n], vec![f64::NAN; n]);
     for i in 0..n {
-        if !x[i].is_nan() && !y[i].is_nan() {
+        if x[i].is_finite() && y[i].is_finite() {
             xp[i] = x[i];
             yp[i] = y[i];
         }
@@ -884,9 +886,10 @@ pub fn ewm_corr(
     cv.iter()
         .zip(vx.iter().zip(&vy))
         .map(|(&c, (&a, &b))| {
-            let d = (a * b).sqrt();
-            if d > 0.0 {
-                c / d
+            if a > 0.0 && b > 0.0 {
+                // Divide by standard deviations separately: the variance product
+                // need never be representable. Equal variances preserve c/a exactly.
+                if a == b { c / a } else { (c / a.sqrt()) / b.sqrt() }
             } else {
                 f64::NAN
             }

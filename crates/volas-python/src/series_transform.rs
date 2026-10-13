@@ -58,15 +58,24 @@ impl PySeries {
     }
 
     /// Replace every cell equal to `to_replace` with `value`, dtype-preserving
-    /// (pandas scalar `replace`). Types that cannot match the column are an error.
+    /// (pandas scalar `replace`). Unmatched dtypes stay unchanged; a matched
+    /// replacement that cannot be stored raises.
     pub(crate) fn replace(
         &self,
         to_replace: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PySeries> {
         let n = self.inner.len();
-        let old = cmp_scalar_col(to_replace, self.inner.data.dtype(), 1)?;
-        let newc = scalar_to_column(value, self.inner.data.dtype())?;
+        let dtype = self.inner.data.dtype();
+        let old = if is_na_like_py(to_replace) {
+            Column::na_of(dtype, 1)
+        } else {
+            let is_text = to_replace.extract::<String>().is_ok();
+            if dtype != volas_core::DType::Datetime && (dtype == volas_core::DType::Utf8) != is_text {
+                return Ok(col_to_series(&self.inner, self.inner.data.clone()));
+            }
+            cmp_scalar_col(to_replace, dtype, 1)?
+        };
         let old_key = cell_key(&old, 0);
         let positions: Vec<usize> = (0..n)
             .filter(|&i| cell_key(&self.inner.data, i) == old_key)
@@ -74,6 +83,7 @@ impl PySeries {
         if positions.is_empty() {
             return Ok(col_to_series(&self.inner, self.inner.data.clone()));
         }
+        let newc = scalar_to_column(value, self.inner.data.dtype())?;
         let mut data = self.inner.data.clone();
         data.scatter(&positions, &newc).map_err(pyerr)?;
         Ok(col_to_series(&self.inner, data))
@@ -365,24 +375,10 @@ impl PySeries {
             "dense" => stats::RankMethod::Dense,
             other => return Err(PyValueError::new_err(format!("rank: unknown method '{other}'"))),
         };
-        let mut ranks = self.inner.data.rank(m, ascending, pct);
-        if na_option != "keep" {
-            // 'top'/'bottom': NA cells receive the extreme ranks instead of NaN;
-            // present ranks shift to make room (pandas semantics).
-            let n = self.inner.len();
-            let na_count = (0..n).filter(|&i| !self.inner.data.is_valid(i)).count();
-            if na_count > 0 && !pct {
-                let mut na_rank = if na_option == "top" { 1.0 } else { (n - na_count + 1) as f64 };
-                for (i, r) in ranks.iter_mut().enumerate() {
-                    if !self.inner.data.is_valid(i) {
-                        *r = na_rank;
-                        na_rank += 1.0;
-                    } else if na_option == "top" {
-                        *r += na_count as f64;
-                    }
-                }
-            }
-        }
+        let ranks = self.inner.data.rank_with_na(
+            m, ascending, pct,
+            match na_option { "top" => Some(true), "bottom" => Some(false), _ => None },
+        );
         Ok(f64_series(&self.inner, ranks))
     }
 
