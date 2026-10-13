@@ -431,7 +431,7 @@ chop:<period>@<high>,<low>,<close>
 How choppy versus trending the market is over `period` bars:
 `100 * log10(sum(TR) / (HHV − LLV)) / log10(period)`. Higher is choppier.
 
-- **period** `int` (required)
+- **period** `int >= 2` (required; `log10(1)` is zero)
 - **high? / low? / close?** `str` the input columns; default to the like-named frame columns.
 
 ```py
@@ -836,7 +836,7 @@ linear regression over `period` of `close − ((HH+LL)/2 + SMA(close))/2`. `ttm_
 `1.0` while the market is "squeezed" (the Bollinger Bands sit inside the Keltner Channels —
 low volatility, a breakout is brewing), else `0.0`.
 
-- **period?** `int=20`
+- **period?** `int >= 2`, default `20` (one-bar regression / squeeze is degenerate)
 - **bb_mult?** `float=2.0` The Bollinger σ multiplier (squeeze flag only).
 - **kc_mult?** `float=1.5` The Keltner range multiplier (squeeze flag only).
 - **high? / low? / close?** `str` the input columns.
