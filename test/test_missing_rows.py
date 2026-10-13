@@ -12,6 +12,8 @@ rollover) must agree with a from-scratch full recompute, row for row.
 """
 
 from pathlib import Path
+from functools import cache
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -62,6 +64,19 @@ MATYPE = {
     "stoch.d:5,3,0,3,4": _HLC,
     "stochf.d:5,3,1": _HLC,
 }
+for _mt in [1, 3, 4, 6, 7, 8]:
+    for _form, _inputs in {
+        'ma:5,{m}': _C, 'apo:5,10,{m}': _C, 'ppo:5,10,{m}': _C,
+        'macdext:5,{m},10,{m}': _C,
+        'macdext.signal:5,{m},10,{m},3,{m}': _C,
+        'macdext.histogram:5,{m},10,{m},3,{m}': _C,
+        'mavp:2,8,{m}@close,periods': ('close', 'periods'),
+        'stoch.k:5,3,{m},3,{m}': _HLC, 'stoch.d:5,3,{m},3,{m}': _HLC,
+        'stochf.d:5,3,{m}': _HLC, 'stochrsi.d:14,5,3,{m}': _C,
+        'stochrsi.k:14,5,3,{m}': _C,
+    }.items():
+        MATYPE[_form.format(m=_mt)] = _inputs
+
 # Explicit operands: the inputs are what the operands read.
 OPERANDS = {
     "ema:5@open": ("open",),
@@ -191,14 +206,59 @@ def test_a_required_operand_left_out_is_still_an_error():
         DataFrame(BASE).exec("mavp:2,8,8@close,")
 
 
+@cache
+def _production_lines():
+    # Enumerate the registry, including commands requiring explicit series (mavp).
+    # Probe all sub-line tokens from the spec, never from this test's dictionaries.
+    from test.harness.inventory import _args, _sub_tokens, default_form
+    lines = {}
+    for command in volas_rs._directive_commands:
+        for head in [command] + [command + '.' + token for token in _sub_tokens()]:
+            args = _args(head)
+            form = default_form(head, args)
+            for suffix in ['', '@close,periods']:
+                try:
+                    volas_rs._directive_facts(form + suffix)
+                    canonical = volas.directive_stringify(form + suffix).split(':', 1)[0].split('@', 1)[0]
+                except ValueError:
+                    continue
+                lines[canonical] = SimpleNamespace(head=canonical, form=form, series_suffix=suffix, args=args)
+                break
+    return tuple(lines.values())
+
+
 def test_every_recursive_command_is_covered():
     """The spec's classification of recursive lines is exactly the one exercised here:
     each command recursive whatever its arguments (not a generic average's type)."""
-    lines = {**RECURSIVE, **{k: d for k, d in SUBCOMMANDS.items()}}
-    recursive = {k.split(".", 1)[0] for k, d in lines.items()
-                 if volas_rs._directive_facts(d)["history"] == "recursive"
-                 and not volas_rs._directive_facts(d)["accumulates"]}
+    lines = _production_lines()
+    recursive = {line.head.split('.', 1)[0] for line in lines
+                 if volas_rs._directive_facts(line.form + line.series_suffix)["history"] == "recursive"
+                 and not volas_rs._directive_facts(line.form + line.series_suffix)["accumulates"]}
     assert recursive == set(RECURSIVE)
+    tested = {_sub_key(d).split('@', 1)[0] for d in CASES}
+    expected = {line.head for line in lines
+                if volas_rs._directive_facts(line.form + line.series_suffix)["history"] == "recursive"}
+    assert expected <= tested, expected - tested
+    # Discover MA selectors from the validator's domains, independently of MATYPE.
+    for line in lines:
+        slots = [i for i, arg in enumerate(line.args)
+                 if arg.kind == 'int' and arg.lo == 0 and arg.hi == 8]
+        if not slots:
+            continue
+        for kind in [1, 3, 4, 6, 7, 8]:
+            args = [str(kind) if i in slots else '5' for i in range(len(line.args))]
+            form = line.head + ':' + ','.join(args) + line.series_suffix
+            if volas_rs._directive_facts(form)['history'] != 'recursive':
+                continue
+            covered = False
+            for directive in MATYPE:
+                head, _, args = directive.split('@', 1)[0].partition(':')
+                values = args.split(',')
+                if head == line.head and all(i < len(values) and values[i] == str(kind) for i in slots):
+                    covered = True
+            assert covered, form
+
+
 
 
 @pytest.mark.parametrize("directive", sorted(CASES))
@@ -218,8 +278,8 @@ def test_inputs_are_what_the_command_reads(directive):
 
 # --- every incremental path agrees with a full recompute --------------------------
 
-# `mavp` reads a `periods` column the OHLCV fold does not carry; it has no resume.
-_LIVE = sorted(set(CASES) - set(OPERANDS) - {"mavp:2,8,8@close,periods"}) + [
+# Plain frames retain every operand, including mavp periods.
+_LIVE = sorted(set(CASES) - set(OPERANDS)) + [
     "ema:5@open", "obv@open,volume",
 ]
 
@@ -315,7 +375,7 @@ _MISSING_PERIODS = (70, 71, 85)
 _MISSING_FINE = (15 * 90 + 14, 15 * 95 + 3)
 
 
-@pytest.mark.parametrize("directive", _LIVE)
+@pytest.mark.parametrize("directive", [d.replace("@close,periods", "@close,volume") for d in _LIVE])
 def test_tf_fold_matches_a_full_recompute(directive):
     n_bars = 110
     cols, ts = _fine(n_bars, _MISSING_PERIODS, _MISSING_FINE)
@@ -334,7 +394,7 @@ def test_tf_fold_matches_a_full_recompute(directive):
     assert np.isnan(np.asarray(live["close"], float)).sum() >= len(_MISSING_PERIODS)
 
 
-@pytest.mark.parametrize("directive", _LIVE)
+@pytest.mark.parametrize("directive", [d.replace("@close,periods", "@close,volume") for d in _LIVE])
 def test_constructed_tf_frame_rolls_over_a_missing_closed_bar(directive):
     """Built from closed bars whose last one is missing, then rolled over."""
     n_closed, n_fine = 90, 40
@@ -411,3 +471,11 @@ def test_a_refresh_over_an_unreadable_new_row_is_the_same_error(directive, bad, 
         live[directive]
 
     assert _error(refresh) == want
+
+
+def test_recursive_guard_rejects_each_omitted_command(monkeypatch):
+    for command in list(RECURSIVE):
+        with monkeypatch.context() as patch:
+            patch.delitem(RECURSIVE, command)
+            with pytest.raises(AssertionError):
+                test_every_recursive_command_is_covered()

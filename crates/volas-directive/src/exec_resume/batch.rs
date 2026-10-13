@@ -2,11 +2,57 @@
 use crate::{complete::BoundCommand, exec::{arg_f64, arg_usize}, operands::Operands};
 use volas_compute::{pass::KernelPass, raw::{indicators as ind, kernels}};
 
+/// Run recursive batch kernels once, over exactly the recorded complete inputs.
+pub(super) fn recursive_pass(df: &volas_core::DataFrame, cmd: &BoundCommand) -> Option<super::states::WithStates> {
+    use std::borrow::Cow;
+    use volas_compute::missing::{CompleteRows, Input};
+    let ops = Operands::new(df, cmd.series);
+    ops.probe();
+    super::initial_state::state_of(&ops, cmd.name, cmd.sub, cmd.args);
+    if ops.failed() { return None; }
+    let reads: Vec<_> = ops.reads().collect();
+    let inputs: Vec<_> = reads.iter().map(|(_, r)| Input::known(r.view(), r.has_nan())).collect();
+    let rows = CompleteRows::of(&inputs);
+    let mut views: Vec<Option<Cow<'_, [f64]>>> = vec![None; 8];
+    for (slot, r) in &reads { views[*slot] = Some(rows.gather(r.view())); }
+    let complete = Operands::over(df, cmd.series, 0, views);
+    if complete.len() < 2 { return None; }
+    let pass = compute(&complete, cmd)?;
+    let n = df.height();
+    let before = if reads.iter().any(|(_, r)| r.view()[n - 1].is_nan()) { pass.after.clone() } else { pass.before };
+    let after = super::state::capture_read(&ops, cmd, n, pass.after, true)?;
+    let before = super::state::capture_read(&ops, cmd, n - 1, before, true)?;
+    Some((volas_core::Column::f64(rows.scatter(n, pass.values)), Some(after), Some(before)))
+}
+
 pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     let p = |i| arg_usize(cmd.args, i);
     let close = || ops.f64(0, "close").ok();
     let origin = ops.origin();
     match (cmd.name, cmd.sub) {
+        ("ema" | "dema" | "tema" | "kama" | "t3" | "mama" | "rsi", _) => {
+            let x = close()?;
+            KernelPass::run(|s| match cmd.name {
+                "ema" => ind::ema_pass(&x, p(0), s),
+                "dema" => ind::dema_pass(&x, p(0), s),
+                "tema" => ind::tema_pass(&x, p(0), s),
+                "kama" => ind::kama_pass(&x, p(0), origin, s),
+                "t3" => ind::t3_pass(&x, p(0), arg_f64(cmd.args, 1), s),
+                "mama" => ind::mama_pass(&x, arg_f64(cmd.args, 0), arg_f64(cmd.args, 1), cmd.sub.is_some(), s),
+                _ => ind::rsi_pass(&x, p(0), s),
+            })
+        }
+        ("crsi", _) => {
+            let x = close()?;
+            KernelPass::run(|s| ind::crsi_pass(&x, p(0), p(1), p(2), s))
+        }
+        ("stochrsi", _) => stochrsi(ops, cmd),
+        ("stoch_momentum", _) => {
+            let h = ops.f64(0, "high").ok()?;
+            let l = ops.f64(1, "low").ok()?;
+            let c = ops.f64(2, "close").ok()?;
+            KernelPass::run(|s| ind::stoch_momentum_pass(&h, &l, &c, p(0), p(1), cmd.sub.map(|_| p(2)), s))
+        }
         ("ma", _) if ind::generic_ma_type(p(0), p(1)) == 0 => {
             let x = close()?;
             KernelPass::run(|s| kernels::sma_pass((&*x).into(), p(0), origin, s).into_raw_vec_and_offset().0)
@@ -148,7 +194,7 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
 
 fn stage(stage: ind::MaStage, data: &[f64], origin: usize) -> Option<KernelPass> {
     let mut states = volas_compute::pass::States::default();
-    let values = stage.finite_pass(data, origin, &mut states)?;
+    let values = stage.pass(data, origin, &mut states)?;
     Some(KernelPass { values, after: states.after?, before: states.before? })
 }
 
@@ -184,14 +230,18 @@ fn mavp(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     let lb = ind::generic_ma_lookback(hi, mt);
     let n = data.len();
     let mut result = KernelPass { values: vec![f64::NAN; n], after: vec![n as f64], before: vec![(n - 1) as f64] };
+    // Classify the output rows once. Each stage writes only its selected rows,
+    // rather than re-reading and clamping every period for every stage.
+    let mut selected = vec![Vec::new(); hi - lo + 1];
+    for (i, &period) in periods.iter().enumerate().skip(lb) {
+        if let Some(q) = ind::mavp_period(period, lo, hi) { selected[q - lo].push(i); }
+    }
     for q in lo..=hi {
         let start = lb - ind::generic_ma_lookback(q, mt);
         let pass = stage(ind::MaStage::new(q, mt)?, &data[start..], ops.origin() + start)?;
         result.after.extend(pass.after);
         result.before.extend(pass.before);
-        for i in lb..n {
-            if ind::mavp_period(periods[i], lo, hi) == Some(q) { result.values[i] = pass.values[i - start]; }
-        }
+        for &i in &selected[q - lo] { result.values[i] = pass.values[i - start]; }
     }
     Some(result)
 }
@@ -214,4 +264,25 @@ fn stochastic(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
         result.values = pass.values;
     }
     Some(result)
+}
+
+fn stochrsi(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
+    let x = ops.f64(0, "close").ok()?;
+    let p = |i| arg_usize(cmd.args, i);
+    let mut rsi = KernelPass::run(|s| ind::rsi_pass(&x, p(0), s))?;
+    let n = x.len();
+    let c = p(1) - 1;
+    rsi.after.extend_from_slice(&rsi.values[n - c..]);
+    rsi.before.extend_from_slice(&rsi.values[n - 1 - c..n - 1]);
+    let raw = ind::stochrsi_from_rsi(&rsi.values, p(1));
+    if cmd.sub == Some("d") {
+        let ma = ind::MaStage::new(p(2), p(3))?;
+        let pass = stage(ma, &raw, ops.origin())?;
+        rsi.after.extend(pass.after);
+        rsi.before.extend(pass.before);
+        rsi.after.extend_from_slice(&raw[n - ma.reach()..]);
+        rsi.before.extend_from_slice(&raw[n - 1 - ma.reach()..n - 1]);
+        rsi.values = pass.values;
+    } else { rsi.values = raw; }
+    Some(rsi)
 }

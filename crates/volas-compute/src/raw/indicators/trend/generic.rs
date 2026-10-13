@@ -49,7 +49,7 @@ impl MaKind {
         }
     }
 
-    fn compute(self, data: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    pub(super) fn compute(self, data: &[f64], period: usize, origin: usize) -> Vec<f64> {
         match self {
             Self::Finite(FiniteKind::Sma) => super::ma(data, period, origin),
             Self::Finite(FiniteKind::Wma) => super::wma(data, period, origin),
@@ -131,10 +131,11 @@ mod tests {
     fn resumable_stages_apply_the_period_one_identity() {
         use crate::raw::indicators::{ma_state, ma_step, MaStage};
         assert!(MaStage::new(1, 6).is_some() && MaStage::new(2, 6).is_some());
-        // Recursive stages belong to the resume path, not the finite batch publisher.
+        // Recursive and finite stages publish the same continuation representation.
         let mut states = crate::pass::States::default();
-        assert!(MaStage::new(2, 6).unwrap().finite_pass(&[3.0, 1.5, 4.25], 0, &mut states).is_none());
-        assert!(states.after.is_none() && states.before.is_none());
+        assert!(MaStage::new(2, 6).unwrap().pass(&[3.0, 1.5, 4.25], 0, &mut states).is_some());
+        assert!(states.after.is_some() && states.before.is_some());
+        assert!(MaStage::new(0, 1).unwrap().state(1, 0, |_| 1.0).is_none());
         let x = [3.0, 1.5, 4.25];
         let state = ma_state(&x[..2], 1, 7, 0).expect("period 1 resumes for every type");
         let mut next = state.clone();

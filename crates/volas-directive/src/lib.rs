@@ -6,6 +6,7 @@ mod complete;
 mod operands;
 pub mod exec;
 mod exec_resume;
+mod element;
 pub mod lookback;
 pub mod parser;
 pub mod spec;

@@ -335,6 +335,11 @@ fn stoch_fastk_same_series_small_window(data: &[f64], period: usize) -> Option<V
 /// (index `rsi_period + fastk_period - 1`). The `fastd` line is then `ma_typed` of this.
 pub fn stochrsi_fastk(close: &[f64], rsi_period: usize, fastk_period: usize) -> Vec<f64> {
     let rsi = rsi(close, rsi_period);
+    stochrsi_from_rsi(&rsi, fastk_period)
+}
+
+/// StochRSI's raw K from the already computed RSI line, shared with state capture.
+pub fn stochrsi_from_rsi(rsi: &[f64], fastk_period: usize) -> Vec<f64> {
     let n = rsi.len();
     let mut fk = vec![f64::NAN; n];
     // RSI warms up with a leading-NaN prefix, so a rolling min/max over the whole line

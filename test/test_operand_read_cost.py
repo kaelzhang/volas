@@ -34,6 +34,8 @@ def _data(n, kind):
         data['volume'] = rng.integers(10, 1000, m).astype(np.int64)
     elif kind == 'float32':
         data = {k: v.astype(np.float32) for k, v in data.items()}
+    if kind in ('unseeded', 'leading'):
+        data['close'][:n + (32 if kind == 'unseeded' else 5)] = np.nan
     if missing:
         data['close'][::7] = np.nan
     return data
@@ -59,6 +61,8 @@ def _append_cost(directive, kind, n, k=24):
 
 
 CASES = [
+    *[(d, k) for d in ['ema:20', 'crsi:3,2,5', 'rsi:14', 'apo:5,10,1', 'ema:5@(ema:3)']
+      for k in ['unseeded', 'leading']],
     ('crsi:3,2,5', 'float64'),
     ('stoch_momentum', 'float64'),
     ('apo:5,10,1', 'float64'),
@@ -121,7 +125,15 @@ def test_twenty_cached_directives_refresh_at_a_cost_independent_of_height():
         assert ((got == full) | (np.isnan(got) & np.isnan(full))).all(), d
 
 
-@pytest.mark.parametrize('directive', ['ema:20', 'ma:20,1', 'ma:20,3', 'ma:20,6', 'ma:20,8',
+RECURSIVE_COMPOSITES = [f.format(m=m) for m in [1, 3, 4, 6, 7, 8] for f in [
+    'apo:5,10,{m}', 'ppo:5,10,{m}', 'macdext:5,{m},10,{m}',
+    'macdext.signal:5,{m},10,{m},3,{m}', 'macdext.histogram:5,{m},10,{m},3,{m}',
+    'mavp:2,8,{m}@close,open', 'stoch.k:5,3,{m}', 'stoch.d:5,3,{m},3,{m}',
+    'stochf.d:5,3,{m}', 'stochrsi.d:14,5,3,{m}',
+]] + ['crsi:3,2,5', 'stoch_momentum', 'stoch_momentum.signal']
+
+
+@pytest.mark.parametrize('directive', RECURSIVE_COMPOSITES + ['ema:20', 'ma:20,1', 'ma:20,3', 'ma:20,6', 'ma:20,8',
                                        'kcw', 'atr:14', 'rsi:14', 'macd', 'obv', 'ma:20', 'boll.upper:20',
                                        'vwma:20', 'mfi:14', 'stddev:20', 'linearreg:14'])
 def test_first_materialization_costs_one_computation(directive):
@@ -138,3 +150,22 @@ def test_first_materialization_costs_one_computation(directive):
         compute = min(compute, time.perf_counter() - start)
     np.testing.assert_array_equal(got.view(np.uint64), want.view(np.uint64))
     assert cache < 1.8 * compute + 0.001, (directive, cache, compute)
+
+
+@pytest.mark.parametrize('directive', ['ema:20', 'crsi:3,2,5', 'rsi:14', 'apo:5,10,1', 'ema:5@(ema:3)'])
+def test_unseeded_window_and_unbounded_history_cross_the_seed_identically(directive):
+    n = 10_000
+    future = 100 + np.sin(np.arange(90, dtype=float))
+    future[:5] = np.nan
+    future[::7] = np.nan
+    values = np.r_[np.full(n, np.nan), future]
+    full = volas.DataFrame({'close': values}).exec(directive, dtype='float64')
+    plain = volas.DataFrame({'close': values[:n]})
+    window = volas.DataFrame({'close': values[:n]}, window=5, max_lookback=[directive])
+    plain[directive]
+    for i, value in enumerate(future, n):
+        for frame in [plain, window]:
+            frame.append({'close': value})
+            got = frame[directive].to_numpy(dtype='float64')[-5:]
+            want = full[i + 1 - len(got):i + 1]
+            assert ((got.view('uint64') == want.view('uint64')) | (np.isnan(got) & np.isnan(want))).all()

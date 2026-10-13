@@ -19,9 +19,12 @@ pub fn ma(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
 
 /// Exponential moving average (TA-Lib: SMA-seeded, `k = 2/(period+1)`).
 pub fn ema(close: &[f64], period: usize) -> Vec<f64> {
-    kernels::ema_seeded(av(close), period)
-        .into_raw_vec_and_offset()
-        .0
+    ema_pass(close, period, &mut ())
+}
+
+/// EMA batch values and the terminal recurrence states from the same pass.
+pub fn ema_pass(close: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    kernels::sma_seeded_pass(av(close), period, kernels::ema_step(period), states).into_raw_vec_and_offset().0
 }
 
 /// Smoothed moving average (Wilder's RMA: SMA-seeded, `alpha = 1/period`).

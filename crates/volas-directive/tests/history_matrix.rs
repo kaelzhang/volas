@@ -244,19 +244,17 @@ fn frame(close: Vec<f64>) -> DataFrame {
         .slice_data(0, n)
 }
 
-/// Inside the warm-up a checkpoint has no state: it keeps every raw row of the
-/// history, and the replay computes the whole history from them.
+/// Warm-up checkpoints carry bounded complete seed rows in the continuation state.
 #[test]
-fn a_warm_up_checkpoint_keeps_every_raw_row() {
+fn a_warm_up_checkpoint_keeps_bounded_seed_state() {
     let close: Vec<f64> = (0..40).map(|i| 50.0 + (i as f64 * 0.7).sin()).collect();
     let mut gappy = close.clone();
     gappy[1] = f64::NAN;
     let df = frame(gappy);
     let node = parse("ema:10").unwrap();
     let cp = capture(&df, &node, 4).unwrap();
-    assert!(cp.state.is_none());
-    assert_eq!(cp.raw[0].0, "close");
-    assert!(first_diff(&cp.raw[0].1.to_f64_vec(), &df.column("close").unwrap().to_f64_vec()[..4]).is_none());
+    assert!(cp.state.is_some());
+    assert!(cp.raw.is_empty());
     let (got, next) = replay(&df.slice_data(4, 40), &node, &cp, 36).unwrap();
     let want = execute(&df, &node).unwrap().to_f64_vec();
     assert!(first_diff(&got.to_f64_vec(), &want[4..]).is_none());
@@ -265,7 +263,8 @@ fn a_warm_up_checkpoint_keeps_every_raw_row() {
     let (none, same_cp) = replay(&df.slice_data(4, 40), &node, &cp, 0).unwrap();
     assert_eq!(none.len(), 0);
     assert_eq!(same_cp.at, cp.at);
-    assert_eq!(same_cp.state, cp.state);
+    assert_eq!(same_cp.state.unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        cp.state.unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>());
 }
 
 /// A replay that cannot run declines: no continuation, a frame not holding the row

@@ -541,14 +541,7 @@ pub fn keltner_band_resume(
 /// `Ds = EMA_d(EMA_d(D))`, `Dhl = EMA_d(EMA_d(HH−LL))`; `SMI = Ds / (Dhl/2) × 100`. The short
 /// double-EMA smoothing keeps it effectively finite-memory. Source: William Blau / LazyBear — SMI.
 pub fn stoch_momentum(high: &[f64], low: &[f64], close: &[f64], k: usize, d: usize) -> Vec<f64> {
-    let len = high.len();
-    let hh = super::hhv(high, k);
-    let ll = super::llv(low, k);
-    let rdiff: Vec<f64> = (0..len).map(|i| close[i] - (hh[i] + ll[i]) / 2.0).collect();
-    let diff: Vec<f64> = (0..len).map(|i| hh[i] - ll[i]).collect();
-    let ds = super::ema(&super::ema(&rdiff, d), d);
-    let dhl = super::ema(&super::ema(&diff, d), d);
-    (0..len).map(|i| ds[i] / (dhl[i] * 0.5) * 100.0).collect()
+    stoch_momentum_pass(high, low, close, k, d, None, &mut ())
 }
 
 /// SMI signal line = `EMA_signal(SMI)`. Source: William Blau / LazyBear — SMI.
@@ -560,7 +553,7 @@ pub fn stoch_momentum_signal(
     d: usize,
     signal: usize,
 ) -> Vec<f64> {
-    super::ema(&stoch_momentum(high, low, close, k, d), signal)
+    stoch_momentum_pass(high, low, close, k, d, Some(signal), &mut ())
 }
 
 /// Shift a series forward by `k` bars: `out[i] = x[i-k]` (NaN for the first `k`). Used to

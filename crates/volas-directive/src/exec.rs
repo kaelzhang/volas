@@ -4,10 +4,10 @@
 use crate::bind::bind_command_node;
 use crate::operands::Operands;
 use crate::spec::History;
-use crate::types::{ArgValue, Ast, Bound, BoundNode, Command, Node, Number, Op, UnaryOp};
+use crate::types::{ArgValue, Ast, Bound, BoundNode, Command, Node, Number};
 use volas_compute::raw::indicators as ind;
 use volas_compute::missing::{on_complete_rows, Input};
-use volas_core::{BoolOp, CmpOp, Column};
+use volas_core::Column;
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
 use volas_time::Span;
@@ -43,94 +43,16 @@ pub(crate) fn execute_node(df: &DataFrame, node: &BoundNode) -> Result<Column> {
         Node::Unary { op, operand } => {
             let c = execute_node(df, operand)?;
             require_numeric(&c)?; // a str/datetime operand can't go through the f64 funnel (C4)
-            match op {
-                UnaryOp::Not => Ok(c.not()),
-                UnaryOp::Neg => negate(&c),
-            }
+            crate::element::unary_column(*op, &c)
         }
         Node::Binary { left, op, right } => {
             let l = execute_node(df, left)?;
             let r = execute_node(df, right)?;
             require_numeric(&l)?; // both operands must be numeric (or bool) — C4, no
             require_numeric(&r)?; // silent str -> NaN arithmetic / comparison
-            apply_binary(*op, &l, &r)
+            crate::element::binary_column(*op, &l, &r)
         }
     }
-}
-
-/// How directive float64 arithmetic names itself in a past-2^53 error.
-const ARITHMETIC: &str = "directive arithmetic";
-
-/// Unary minus. A float negates in float64 (a zero flips its sign); an integer or a
-/// boolean negates exactly, as an int64 — an integer has no signed zero, so `-(0)` is
-/// `0` like the literal `-0`, and `-(-n)` is `n` (negating `i64::MIN` overflows).
-fn negate(c: &Column) -> Result<Column> {
-    match c {
-        Column::F64(_) | Column::F32(_) => {
-            Ok(Column::f64(c.to_f64_domain(ARITHMETIC)?.iter().map(|&x| -x).collect()))
-        }
-        _ => Column::i64(vec![0; c.len()]).binary(c, volas_core::BinOp::Sub),
-    }
-}
-
-fn apply_binary(op: Op, l: &Column, r: &Column) -> Result<Column> {
-    let arith = |f: fn(f64, f64) -> f64| -> Result<Column> {
-        let (lf, rf) = (l.to_f64_domain(ARITHMETIC)?, r.to_f64_domain(ARITHMETIC)?);
-        Ok(Column::f64(lf.iter().zip(&rf).map(|(&a, &b)| f(a, b)).collect()))
-    };
-    match op {
-        Op::Add => arith(|a, b| a + b),
-        Op::Sub => arith(|a, b| a - b),
-        Op::Mul => arith(|a, b| a * b),
-        Op::Div => arith(|a, b| a / b),
-        Op::And => l.logical(r, BoolOp::And),
-        Op::Or => l.logical(r, BoolOp::Or),
-        Op::Xor => l.logical(r, BoolOp::Xor),
-        _ => compare(op, l, r),
-    }
-}
-
-/// A comparison or cross of `l` against `r`, row by row, by exact order
-/// ([`Column::order_rows`]); a row with a missing side is a missing truth. A cross
-/// is the Kleene AND of the previous row's order and this row's (the row before the
-/// first is missing): `//` is `prev <= && now >`, `\\` is `prev >= && now <`, and
-/// `><` either of them.
-fn compare(op: Op, l: &Column, r: &Column) -> Result<Column> {
-    let order = l.order_rows(r)?;
-    let at = |i: usize, cmp: CmpOp| order[i].map(|o| cmp.matches(o));
-    let crossed = |i: usize, before: CmpOp, now: CmpOp| {
-        kleene_and(i.checked_sub(1).and_then(|p| at(p, before)), at(i, now))
-    };
-    let rows = 0..order.len();
-    let simple = |cmp: CmpOp| Column::bool_from_options(rows.clone().map(|i| at(i, cmp)));
-    Ok(match op {
-        Op::Lt => simple(CmpOp::Lt),
-        Op::Le => simple(CmpOp::Le),
-        Op::Eq => simple(CmpOp::Eq),
-        Op::Ne => simple(CmpOp::Ne),
-        Op::Ge => simple(CmpOp::Ge),
-        Op::Gt => simple(CmpOp::Gt),
-        Op::CrossUp => Column::bool_from_options(rows.map(|i| crossed(i, CmpOp::Le, CmpOp::Gt))),
-        Op::CrossDown => Column::bool_from_options(rows.map(|i| crossed(i, CmpOp::Ge, CmpOp::Lt))),
-        Op::Cross => Column::bool_from_options(rows.map(|i| {
-            kleene_or(crossed(i, CmpOp::Le, CmpOp::Gt), crossed(i, CmpOp::Ge, CmpOp::Lt))
-        })),
-        _ => unreachable!("arithmetic / logical ops are applied above"), // LCOV_EXCL_LINE
-    })
-}
-
-/// Kleene AND: a present `false` decides; otherwise a missing side is missing.
-fn kleene_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
-    match (a, b) {
-        (Some(false), _) | (_, Some(false)) => Some(false),
-        (Some(true), Some(true)) => Some(true),
-        _ => None,
-    }
-}
-
-/// Kleene OR: a present `true` decides; otherwise a missing side is missing.
-fn kleene_or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
-    kleene_and(a.map(|x| !x), b.map(|x| !x)).map(|x| !x)
 }
 
 // --- argument accessors -----------------------------------------------------
@@ -214,6 +136,11 @@ fn dispatch(df: &DataFrame, cmd: &Command<Bound>) -> Result<Column> {
         return crate::complete::compute(df, &cmd.series, |ops| overlap::dispatch(ops, name, sub, args));
     }
     overlap::dispatch(&Operands::new(df, &cmd.series), name, sub, args)
+}
+
+/// Execute one bound command against inputs already resolved by the continuation owner.
+pub(crate) fn execute_inputs(ops: &Operands, cmd: &crate::complete::BoundCommand) -> Result<Column> {
+    overlap::dispatch(ops, cmd.name, cmd.sub, cmd.args)
 }
 
 pub use crate::exec_resume::{

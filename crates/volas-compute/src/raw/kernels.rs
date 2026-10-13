@@ -122,14 +122,21 @@ pub(crate) fn sma_seed(data: impl Iterator<Item = f64>, period: usize) -> Option
 /// `NaN`. The `step` is one of [`smoothing`]'s TA-Lib steps.
 #[inline]
 fn sma_seeded(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64) -> Array1<f64> {
+    sma_seeded_pass(data, period, step, &mut ())
+}
+
+/// Seeded smoother publishing its terminal states from the value loop.
+pub fn sma_seeded_pass(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64, states: &mut impl crate::pass::StateSink) -> Array1<f64> {
     let n = data.len();
     let mut out = Array1::from_elem(n, f64::NAN);
     let Some((si, seed)) = sma_seed(data.iter().copied(), period) else { return out };
     let mut prev = seed;
     out[si] = prev;
+    states.record(si, n, || vec![prev]);
     for i in (si + 1)..n {
         prev = step(prev, data[i]);
         out[i] = prev;
+        states.record(i, n, || vec![prev]);
     }
     out
 }

@@ -14,7 +14,7 @@ use crate::types::{ArgValue, Ast};
 use volas_compute::raw::indicators as ind;
 use volas_core::DataFrame;
 
-use super::{as_command, bound, resume_of, window_start};
+use super::{bound, resume_of};
 
 /// One row of `node` at `row`, continued from `prev_state` (the state as of the last
 /// complete row before `row`): returns the row's value and writes the state as of `row`
@@ -35,15 +35,16 @@ pub fn execute_resume_step(
     if super::chain::chained(node) {
         return super::chain::step(df, node, prev_state, row, next);
     }
-    if !matches!(node.continuation(), crate::types::Continuation::Own) {
+    if !matches!(node.continuation(), crate::types::Continuation::Own(_)) {
         return None;
     }
-    let cmd = as_command(node.node())?;
-    if resume_of(&cmd) != Resume::Step || next.len() != prev_state.len() || row >= df.height() {
+    let crate::types::Continuation::Own(cmd) = node.continuation() else { return None; };
+    if resume_of(cmd) != Resume::Step || next.len() != prev_state.len() || row >= df.height() {
         return None;
     }
-    let start = window_start(node, &cmd, row);
-    super::state::step(df, &bound(&cmd), start, prev_state, row, next)
+    super::state::planned_step(df, &bound(cmd), prev_state, row, next, |slot, default, wanted| {
+        super::row::operand(df, cmd, slot, default, wanted, &|_, _| None)
+    })
 }
 
 /// The step of the bound command `name` / `sub` at `row` over `ops` (see

@@ -58,8 +58,8 @@ pub(crate) fn plan(node: &BoundNode) -> Continuation {
             }).max().unwrap_or(0)),
         });
     }
-    if as_command(node).is_some_and(|c| resume_of(&c) != Resume::Recompute) {
-        Continuation::Own
+    if let Some(c) = as_command(node).filter(|c| resume_of(c) != Resume::Recompute) {
+        Continuation::Own(Box::new(c.into_owned()))
     } else {
         Continuation::None
     }
@@ -130,9 +130,11 @@ fn keep(chain: &mut Vec<f64>, state: Vec<f64>, values: &[f64], end: usize, l: us
 /// as of that row (still in its warm-up), independently of the other.
 pub(super) fn with_states(df: &DataFrame, node: &Ast) -> volas_core::Result<super::states::WithStates> {
     let plan = chain_plan(node);
-    let (h, l) = (df.height(), plan.span);
+    let h = df.height();
+    let l = h.min(plan.span);
+    let prior_l = h.saturating_sub(1).min(plan.span);
     let mut frame = df.clone();
-    let (mut after, mut before) = ((h >= l).then(Vec::new), (h > l).then(Vec::new));
+    let (mut after, mut before) = (Some(vec![l as f64]), Some(vec![prior_l as f64]));
     for (k, own) in plan.nodes.iter().enumerate() {
         let (col, a, b) = super::states::execute_with_states(&frame, own)?;
         let values = into_f64(col);
@@ -141,7 +143,7 @@ pub(super) fn with_states(df: &DataFrame, node: &Ast) -> volas_core::Result<supe
             chain
         });
         before = before.zip(b).map(|(mut chain, b)| {
-            keep(&mut chain, b, &values, h.saturating_sub(1), l);
+            keep(&mut chain, b, &values, h.saturating_sub(1), prior_l);
             chain
         });
         frame.set_column(&plan.names[k], Column::f64(values))?;
@@ -167,7 +169,8 @@ pub(super) fn resume(
     since: usize,
 ) -> Option<(Column, Vec<f64>)> {
     let plan = chain_plan(node);
-    let l = plan.span;
+    let l = *chain.first()? as usize;
+    if l > plan.span { return None; }
     let end = end.min(df.height());
     if from > end {
         return None;
@@ -175,8 +178,9 @@ pub(super) fn resume(
     let start = from.saturating_sub(l);
     let mut win = df.slice_data(start, end);
     let (new, held) = (end - from, from - start);
-    let mut next = Vec::with_capacity(chain.len());
-    let mut at = 0;
+    let next_l = (l + new).min(plan.span);
+    let mut next = vec![next_l as f64];
+    let mut at = 1;
     for (k, own) in plan.nodes.iter().enumerate() {
         let (state, ring) = super::state::chain_node(chain, &mut at, l)?;
         let (col, state) = super::execute_resume(&win, own, state, held, held + new, since)?;
@@ -184,7 +188,7 @@ pub(super) fn resume(
         let mut values = Vec::with_capacity(held + new);
         values.extend_from_slice(&ring[l - held..]);
         values.extend(into_f64(col));
-        super::state::push_chain(&mut next, &state, ring.iter().copied().chain(values[held..].iter().copied()).skip(new));
+        super::state::push_chain(&mut next, &state, ring.iter().copied().chain(values[held..].iter().copied()).skip(l + new - next_l));
         win.set_column(&plan.names[k], Column::f64(values)).ok()?;
     }
     if at != chain.len() {
@@ -199,21 +203,20 @@ pub(super) fn resume(
 pub(super) fn step(df: &DataFrame, node: &Ast, chain: &[f64], row: usize, next: &mut [f64]) -> Option<f64> {
     let plan = chain_plan(node);
     if chain.len() != next.len() || row >= df.height() { return None; }
+    let l = *chain.first()? as usize;
+    if l != plan.span { return None; }
     next.copy_from_slice(chain);
-    let mut at = 0;
+    let mut at = 1;
     for own in &plan.nodes {
         let begin = at;
         let (state, _) = super::state::chain_node(chain, &mut at, plan.span)?;
         let (done, pending) = next.split_at_mut(begin);
         let hidden = |name: &str, wanted: usize| ring_value(plan, done, name, wanted, row);
-        let cmd = as_command(own.node())?;
-        if resume_of(&cmd) != Resume::Step { return None; }
+        let crate::types::Continuation::Own(cmd) = own.continuation() else { return None; };
+        if resume_of(cmd) != Resume::Step { return None; }
         let (next_state, ring) = super::state::chain_part_mut(pending, state.len(), plan.span)?;
-        let value = super::state::planned_step(df, &super::bound(&cmd), state, row, next_state, |slot, default, wanted| {
-            match crate::exec::operand(&cmd.series, slot) {
-                Some(n) => super::row::evaluate(df, n, wanted, &hidden)?.float(),
-                None => super::row::column(df, default, wanted)?.float(),
-            }
+        let value = super::state::planned_step(df, &super::bound(cmd), state, row, next_state, |slot, default, wanted| {
+            super::row::operand(df, cmd, slot, default, wanted, &hidden)
         })?;
         ring.copy_within(1.., 0);
         ring[plan.span - 1] = value;
@@ -224,10 +227,11 @@ pub(super) fn step(df: &DataFrame, node: &Ast, chain: &[f64], row: usize, next: 
 
 fn ring_value(plan: &ChainPlan, words: &[f64], name: &str, wanted: usize, row: usize) -> Option<f64> {
     let k = plan.names.iter().position(|n| n == name)?;
-    let mut at = 0;
+    let l = *words.first()? as usize;
+    let mut at = 1;
     for _ in 0..k {
-        super::state::chain_node(words, &mut at, plan.span)?;
+        super::state::chain_node(words, &mut at, l)?;
     }
-    let (_, ring) = super::state::chain_node(words, &mut at, plan.span)?;
-    ring.get(plan.span.checked_sub(row - wanted + 1)?).copied()
+    let (_, ring) = super::state::chain_node(words, &mut at, l)?;
+    ring.get(l.checked_sub(row - wanted + 1)?).copied()
 }

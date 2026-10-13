@@ -49,12 +49,12 @@ fn scalar_chains_preserve_integer_comparisons_and_typed_operands() {
 }
 
 #[test]
-fn a_warmup_checkpoint_keeps_columns_but_not_literal_operands() {
+fn a_warmup_checkpoint_keeps_bounded_state_without_raw_columns() {
     let df = frame();
     let node = parse("ema:5 + 2").unwrap();
     let cp = capture(&df, &node, 2).unwrap();
-    assert!(cp.state.is_none());
-    assert_eq!(cp.raw.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["close"]);
+    assert!(cp.state.is_some());
+    assert!(cp.raw.is_empty());
     let (got, next) = replay(&df.slice_data(2, 60), &node, &cp, 58).unwrap();
     let full = execute(&df, &node).unwrap();
     assert_eq!(got.to_f64_vec().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -76,4 +76,49 @@ fn a_continuation_declines_foreign_kernel_shapes_and_reversed_ranges() {
     let state = initial_state(&df, &parse("ma:5 + 1").unwrap(), 30).unwrap();
     assert!(execute_resume_step(&df, &parse("wma:5 + 1").unwrap(), &state,
         (30, 0), &mut state.clone()).is_none());
+}
+
+#[test]
+fn a_chain_declines_an_impossible_retained_span() {
+    let df = frame();
+    let node = parse("ma:5 + 1").unwrap();
+    let mut state = initial_state(&df, &node, 30).unwrap();
+    state[0] = f64::INFINITY;
+    assert!(execute_resume(&df, &node, &state, 30, 60, 0).is_none());
+}
+
+#[test]
+fn an_empty_history_has_no_terminal_states() {
+    let df = frame().slice_data(0, 0);
+    let (values, after, before) = volas_directive::exec::execute_with_states(&df, &parse("ema:3").unwrap()).unwrap();
+    assert_eq!(values.len(), 0);
+    assert!(after.is_none() && before.is_none());
+}
+
+#[test]
+fn a_window_remainder_declines_scalar_and_resumes_as_a_vector() {
+    let df = frame();
+    let node = parse("midpoint:2@(ema:3)").unwrap();
+    let state = initial_state(&df, &node, 30).unwrap();
+    assert!(execute_resume_step(&df, &node, &state, (30, 0), &mut state.clone()).is_none());
+    let (got, _) = execute_resume(&df, &node, &state, 30, 60, 0).unwrap();
+    let full = execute(&df, &node).unwrap();
+    for i in 0..got.len() { assert_eq!(got.get_f64(i).to_bits(), full.get_f64(30 + i).to_bits()); }
+}
+
+#[test]
+fn finite_warmup_checkpoints_retain_expression_inputs_for_replay() {
+    let df = frame();
+    for text in ["-ma:5 + 2", "ma:5@(close + small)"] {
+        let node = parse(text).unwrap();
+        let cp = capture(&df, &node, 2).unwrap();
+        assert!(cp.state.is_none());
+        assert!(!cp.raw.is_empty());
+        let (got, _) = replay(&df.slice_data(2, 60), &node, &cp, 58).unwrap();
+        let full = execute(&df, &node).unwrap();
+        for i in 0..got.len() {
+            let (a, b) = (got.get_f64(i), full.get_f64(i + 2));
+            assert!(a.to_bits() == b.to_bits() || a.is_nan() && b.is_nan(), "{text} at {i}");
+        }
+    }
 }

@@ -102,7 +102,7 @@ pub(crate) struct Operands<'a> {
     /// complete rows a rerun reads.
     len: usize,
     /// Rows to read instead of the frame: each slot's complete rows (the rerun).
-    over: Option<Vec<Option<Cow<'a, [f64]>>>>,
+    over: bool,
     borrowed: Option<[Option<&'a [f64]>; SLOTS]>,
     /// Stop at a frame column known to hold a NaN (the arm's result would be thrown
     /// away; the record is what matters).
@@ -146,7 +146,7 @@ impl<'a> Operands<'a> {
             end,
             window: OnceCell::new(),
             len: end - start,
-            over: None,
+            over: false,
             borrowed: None,
             stop_on_missing: false,
             probing: Cell::new(false),
@@ -173,11 +173,14 @@ impl<'a> Operands<'a> {
         start: usize,
         views: Vec<Option<Cow<'a, [f64]>>>,
     ) -> Self {
-        Operands {
-            len: views.iter().flatten().next().map_or(0, |v| v.len()),
-            over: Some(views),
-            ..Operands::window(df, series, start)
+        let mut ops = Operands { len: views.iter().flatten().next().map_or(0, |v| v.len()),
+            over: true, ..Operands::window(df, series, start) };
+        for (slot, values) in views.into_iter().enumerate() {
+            if let Some(values) = values {
+                ops.reads[slot] = OnceCell::from(Read { values, column: None, known_nan: None });
+            }
         }
+        ops
     }
 
     /// Prepared input slots for a scalar plan step, borrowed from reusable scratch.
@@ -229,7 +232,11 @@ impl<'a> Operands<'a> {
     fn read(&self, slot: usize, resolve: impl FnOnce() -> Result<Read<'a>>) -> Result<&Read<'a>> {
         let cell = &self.reads[slot];
         if let Some(read) = cell.get() {
+            self.fit(slot, read.values.len(), self.len)?;
             return Ok(read);
+        }
+        if self.over {
+            return Err(VolasError::Value(format!("internal error: series argument #{slot} was not read before the rerun")));
         }
         let read = resolve().and_then(|r| self.fit(slot, r.values.len(), self.len).map(|()| r));
         let read = read.inspect_err(|_| self.failed.set(true))?;
@@ -256,17 +263,6 @@ impl<'a> Operands<'a> {
         }
     }
 
-    /// A rerun's view of `slot`: what the first run recorded, and only that.
-    fn recorded<'v>(&self, slot: usize, views: &'v [Option<Cow<'a, [f64]>>]) -> Result<Cow<'v, [f64]>> {
-        let view = views.get(slot).and_then(|v| v.as_deref()).ok_or_else(|| {
-            VolasError::Value(format!(
-                "internal error: series argument #{slot} was not read before the rerun"
-            ))
-        })?;
-        self.fit(slot, view.len(), self.len)?;
-        Ok(Cow::Borrowed(view))
-    }
-
     /// Hand `read` to the arm: empty while probing; note what is known of its NaNs.
     fn hand_out<'r>(&self, read: &'r Read<'a>) -> Result<Cow<'r, [f64]>> {
         if self.probing.get() {
@@ -288,9 +284,6 @@ impl<'a> Operands<'a> {
         if let Some(views) = &self.borrowed {
             return views[slot].map(Cow::Borrowed).ok_or_else(|| VolasError::Value("unprepared input slot".into()));
         }
-        if let Some(views) = &self.over {
-            return self.recorded(slot, views);
-        }
         let read = self.read(slot, || self.resolve(slot, default))?;
         self.hand_out(read)
     }
@@ -305,9 +298,7 @@ impl<'a> Operands<'a> {
     /// `x != 0`, and a missing cell is a missing truth (contract #27). Recorded like any
     /// other input.
     pub(crate) fn bool(&self, slot: usize) -> Result<Vec<Option<bool>>> {
-        let values = match &self.over {
-            Some(views) => self.recorded(slot, views)?,
-            None => {
+        let values = {
                 let read = self.read(slot, || {
                     let node = operand(self.series, slot)
                         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
@@ -320,7 +311,6 @@ impl<'a> Operands<'a> {
                     Ok(Read { values: Cow::Owned(truths.collect()), column: None, known_nan: None })
                 })?;
                 self.hand_out(read)?
-            }
         };
         Ok(values.iter().map(|v| (!v.is_nan()).then_some(*v != 0.0)).collect())
     }

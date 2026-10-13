@@ -10,6 +10,11 @@ use crate::raw::smoothing::{self, ema_k, Weighted};
 /// lattice over the two cascaded EMAs (vs two `ema_seeded` passes + a combine);
 /// bit-identical to `2·e1 − e2`.
 pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
+    dema_pass(data, period, &mut ())
+}
+
+/// Batch kernel publishing its terminal recurrence states.
+pub fn dema_pass(data: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     let k = ema_k(period);
@@ -19,10 +24,12 @@ pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
     };
     out[lookback] = 2.0 * e[0] - e[1];
     let (mut e0, mut e1) = (e[0], e[1]);
+    states.record(lookback, n, || e.to_vec());
     for i in (lookback + 1)..n {
         e0 = step(e0, data[i]);
         e1 = step(e1, e0);
         out[i] = 2.0 * e0 - e1;
+        states.record(i, n, || vec![e0, e1]);
     }
     out
 }
@@ -31,6 +38,11 @@ pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
 /// `3*(period-1)`. Single-pass lattice over the three cascaded EMAs; bit-identical to
 /// TA-Lib's `e3 + ((3·e1) − (3·e2))` (the sum commutes).
 pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
+    tema_pass(data, period, &mut ())
+}
+
+/// Batch kernel publishing its terminal recurrence states.
+pub fn tema_pass(data: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     let k = ema_k(period);
@@ -40,11 +52,13 @@ pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
     };
     out[lookback] = 3.0 * e[0] - 3.0 * e[1] + e[2];
     let (mut e0, mut e1, mut e2) = (e[0], e[1], e[2]);
+    states.record(lookback, n, || e.to_vec());
     for i in (lookback + 1)..n {
         e0 = step(e0, data[i]);
         e1 = step(e1, e0);
         e2 = step(e2, e1);
         out[i] = 3.0 * e0 - 3.0 * e1 + e2;
+        states.record(i, n, || vec![e0, e1, e2]);
     }
     out
 }
@@ -195,6 +209,11 @@ fn t3_stage(period: usize) -> Weighted {
 /// SMA-seeded EMAs in TA-Lib's arithmetic ([`T3`]). Default period 5, vfactor 0.7;
 /// lookback `6·(period-1)`.
 pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
+    t3_pass(data, period, vfactor, &mut ())
+}
+
+/// Batch kernel publishing its terminal recurrence states.
+pub fn t3_pass(data: &[f64], period: usize, vfactor: f64, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     let t3 = T3::new(period, vfactor);
@@ -208,8 +227,10 @@ pub fn t3(data: &[f64], period: usize, vfactor: f64) -> Vec<f64> {
         return out;
     };
     out[lookback] = t3.combine(&e);
+    states.record(lookback, n, || e.to_vec());
     for i in (lookback + 1)..n {
         out[i] = t3.advance(&mut e, data[i]);
+        states.record(i, n, || e.to_vec());
     }
     out
 }

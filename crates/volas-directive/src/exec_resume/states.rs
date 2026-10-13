@@ -5,8 +5,8 @@
 //! pass. The continuation owner frames those words and the bounded input tails;
 //! it never reconstructs the accumulator by stepping through the history again.
 //!
-//! A recursion's state depends on every row before, so capturing it after a full
-//! computation runs the recursion a second time. Instead the recursion runs once, through
+//! Recursive compositions publish their terminal states from their batch kernels too.
+//! Recurrences with direct vector resumes run once through
 //! the command's own paths: the full computation over a short head (its warm-up and some
 //! rows past it), the state as of the head's last row, then the resume from it over the
 //! rest — which yields those rows' values and the state before the last row — and the
@@ -15,7 +15,6 @@
 
 use volas_core::{Column, DataFrame, Result};
 
-use super::{as_command, recursive};
 use crate::complete::into_f64;
 use crate::lookback::lookback;
 use crate::types::Ast;
@@ -58,24 +57,23 @@ pub fn capture(df: &DataFrame, node: &Ast) -> (Option<Vec<f64>>, Option<Vec<f64>
 /// The one-pass computation of a carried line: `None` when it has no batch/resume path, the
 /// frame is too short for a head past the warm-up, or a path declines.
 fn one_pass(df: &DataFrame, node: &Ast) -> Option<WithStates> {
-    if !matches!(node.continuation(), crate::types::Continuation::Own) {
+    if !matches!(node.continuation(), crate::types::Continuation::Own(_)) {
         return None;
     }
-    let cmd = as_command(node.node())?;
-    if !recursive(&cmd) {
-        let h = df.height();
-        if h < 2 * (lookback(node) + 1) + 2 { return None; }
-        let cmd = super::bound(&cmd);
-        let ops = crate::operands::Operands::new(df, cmd.series);
-        let pass = super::batch::compute(&ops, &cmd)?;
-        let after = super::state::capture_read(&ops, &cmd, h, pass.after, false)?;
-        let before = super::state::capture_read(&ops, &cmd, h - 1, pass.before, false)?;
-        return Some((Column::f64(pass.values), Some(after), Some(before)));
-    }
+    let crate::types::Continuation::Own(cmd) = node.continuation() else { return None; };
     let h = df.height();
     let head = 2 * (lookback(node) + 1);
-    if h < head + 2 {
-        return None;
+    if h < head + 2 { return None; }
+    let bc = super::bound(cmd);
+    if bc.spec.history(bc.args) == crate::spec::History::Recursive {
+        if let Some(pass) = super::batch::recursive_pass(df, &bc) { return Some(pass); }
+    } else {
+        let ops = crate::operands::Operands::new(df, bc.series);
+        if let Some(pass) = super::batch::compute(&ops, &bc) {
+            let after = super::state::capture_read(&ops, &bc, h, pass.after, false)?;
+            let before = super::state::capture_read(&ops, &bc, h - 1, pass.before, false)?;
+            return Some((Column::f64(pass.values), Some(after), Some(before)));
+        }
     }
     let state = super::initial_state(df, node, head)?;
     let since = df.origin();

@@ -36,14 +36,20 @@ unsafe impl GlobalAlloc for Counter {
 }
 
 fn allocations(d: &str, height: usize) -> usize {
-    let data: Vec<f64> = (0..height).map(|i| 100.0 + (i as f64 * 0.01).sin()).collect();
+    let mut data: Vec<f64> = (0..height).map(|i| 100.0 + (i as f64 * 0.01).sin()).collect();
+    let (d, mode) = d.split_once('|').unwrap_or((d, ""));
+    if mode == "missing" { data[height - 1] = f64::NAN; }
+    if mode == "tail" { data[height - 3] = f64::NAN; }
+    let close = if mode == "f32" { Column::f32(data.iter().map(|v| *v as f32).collect()) }
+        else { Column::f64(data.clone()) };
     let df = DataFrame::new(
-        vec!["close".into(), "high".into(), "low".into(), "volume".into()],
+        vec!["close".into(), "high".into(), "low".into(), "volume".into(), "open".into()],
         vec![
-            Column::f64(data.clone()),
+            close,
             Column::f64(data.iter().map(|v| v + 1.0).collect()),
             Column::f64(data.iter().map(|v| v - 1.0).collect()),
             Column::i64(vec![100; height]),
+            Column::f64(data),
         ],
         None,
     ).unwrap();
@@ -63,7 +69,8 @@ fn allocations(d: &str, height: usize) -> usize {
 // One test owns the process-wide counter; test harness threads do no measured work.
 #[test]
 fn single_row_allocation_budget() {
-    let own: Vec<_> = ["ema:20", "ma:20", "rsi:14", "atr:14"].into_iter()
+    let own: Vec<_> = ["ema:20", "ma:20", "rsi:14", "atr:14", "ma:20,1", "ma:20,3",
+        "ema:20@(close+open)", "ema:20|f32", "ema:20|missing", "crsi:3,2,5|tail"].into_iter()
         .map(|d| (d, allocations(d, 1000))).collect();
     let short = allocations("ema:5@(ema:3)", 1000);
     let long = allocations("ema:5@(ema:3)", 100_000);

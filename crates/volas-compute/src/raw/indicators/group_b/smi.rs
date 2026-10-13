@@ -49,3 +49,26 @@ pub fn stoch_momentum_resume(high: &[f64], low: &[f64], close: &[f64], k: usize,
     }
     Some(prev)
 }
+
+/// Batch SMI composition; each smoothing kernel publishes its own terminal state.
+#[allow(clippy::too_many_arguments)]
+pub fn stoch_momentum_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], k: usize, d: usize, signal: Option<usize>, states: &mut S) -> Vec<f64> {
+    let n = close.len();
+    let hh = crate::raw::indicators::hhv(high, k);
+    let ll = crate::raw::indicators::llv(low, k);
+    let rdiff: Vec<_> = (0..n).map(|i| close[i] - (hh[i] + ll[i]) / 2.0).collect();
+    let diff: Vec<_> = (0..n).map(|i| hh[i] - ll[i]).collect();
+    let ema = MaStage::ema(d);
+    let (mut a, mut b, mut c, mut e) = (S::default(), S::default(), S::default(), S::default());
+    let a_values = ema.pass(&rdiff, 0, &mut a).expect("EMA stage");
+    let numerator = ema.pass(&a_values, 0, &mut b).expect("EMA stage");
+    let c_values = ema.pass(&diff, 0, &mut c).expect("EMA stage");
+    let denominator = ema.pass(&c_values, 0, &mut e).expect("EMA stage");
+    let mut values: Vec<_> = numerator.iter().zip(denominator).map(|(a, b)| a / (b * 0.5) * 100.0).collect();
+    if let Some(p) = signal {
+        let mut s = S::default();
+        values = MaStage::ema(p).pass(&values, 0, &mut s).expect("EMA stage");
+        states.compose(n, &[&a, &b, &c, &e, &s], |_, _| {});
+    } else { states.compose(n, &[&a, &b, &c, &e], |_, _| {}); }
+    values
+}

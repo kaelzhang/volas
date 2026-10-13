@@ -86,7 +86,7 @@ pub fn history(node: &Ast) -> volas_core::History {
         _ => {}
     }
     let operands = match node.continuation() {
-        Continuation::Own => series_of(node.node()).iter().map(lookback_node).max().unwrap_or(0),
+        Continuation::Own(_) => series_of(node.node()).iter().map(lookback_node).max().unwrap_or(0),
         Continuation::Chain(p) => p.frame_span,
         Continuation::None => unreachable!("every recursive line has a continuation"), // LCOV_EXCL_LINE
     };

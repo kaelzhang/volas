@@ -28,14 +28,15 @@ impl MaStage {
     /// An EMA stage with the raw kernel's leading-NaN skip and propagation thereafter.
     pub fn ema(period: usize) -> Self { Self { period, kind: MaKind::Recursive(RecursiveKind::Ema), complete: false } }
 
-    /// A finite stage's batch kernel publishes the exact states used by `step`.
-    /// Recursive stages use their existing one-pass resume path instead.
-    pub fn finite_pass<S: crate::pass::StateSink>(&self, data: &[f64], origin: usize, states: &mut S) -> Option<Vec<f64>> {
+    /// The batch kernel publishes the exact states used by `step`, including
+    /// partially seeded recursive stages.
+    pub fn pass<S: crate::pass::StateSink>(&self, data: &[f64], origin: usize, states: &mut S) -> Option<Vec<f64>> {
+        if !S::CAPTURE && !self.complete { return Some(self.kind.compute(data, self.period, origin)); }
         Some(match self.kind {
             MaKind::Finite(FiniteKind::Sma) => kernels::sma_pass(data.into(), self.period, origin, states).into_raw_vec_and_offset().0,
             MaKind::Finite(FiniteKind::Wma) => super::wma_pass(data, self.period, origin, states),
             MaKind::Finite(FiniteKind::Trima) => super::trima_pass(data, self.period, origin, states),
-            MaKind::Recursive(_) => return None,
+            MaKind::Recursive(kind) => return kind.pass(data, self.period, self.complete, states),
         })
     }
 
@@ -145,7 +146,7 @@ impl RecursiveKind {
     // inputs are skipped, matching ma_typed's complete-row evaluation.
     fn step(self, p: usize, complete: bool, x: f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
         next.copy_from_slice(state);
-        if x.is_nan() && (complete || state[0] == 0.0) { return Some(f64::NAN); }
+        if x.is_nan() && (complete || state[0] < self.seed_len(p) as f64) { return Some(f64::NAN); }
         let seed = self.seed_len(p);
         let seen = state[0] as usize;
         let k = self.kernel_len();
@@ -174,13 +175,65 @@ impl RecursiveKind {
             Self::Dema => super::dema_resume_one(tail, p, seed, prev, kernel),
             Self::Tema => super::tema_resume_one(tail, p, seed, prev, kernel),
             Self::Kama => super::kama_resume_one(tail, p, seed, prev, kernel),
-            Self::Mama => {
-                let mut out = Vec::with_capacity(1);
-                let st = crate::raw::indicators::mama_resume(tail, 0.5, 0.05, false, seed, prev, &mut out)?;
-                kernel.copy_from_slice(&st);
-                out.first().copied()
-            }
+            Self::Mama => crate::raw::indicators::mama_resume_one(tail, 0.5, 0.05, false, seed, prev, kernel),
             Self::T3 => super::t3_resume_one(tail, p, 0.7, seed, prev, kernel),
         }
+    }
+}
+
+impl RecursiveKind {
+    fn pass(self, data: &[f64], p: usize, complete: bool, states: &mut impl crate::pass::StateSink) -> Option<Vec<f64>> {
+        use crate::pass::States;
+        use crate::missing::{CompleteRows, Input};
+        let rows = if complete { CompleteRows::of(&[Input::new(data)]) } else {
+            let start = data.iter().position(|v| !v.is_nan()).unwrap_or(data.len());
+            if data[start..data.len().min(start + self.seed_len(p))].iter().all(|v| !v.is_nan()) {
+                CompleteRows::After(start)
+            } else {
+                let mut seen = 0;
+                CompleteRows::Kept((start..data.len()).filter(|&i| {
+                    if seen < self.seed_len(p) && data[i].is_nan() { false }
+                    else { seen += 1; true }
+                }).collect())
+            }
+        };
+        let input = rows.gather(data);
+        let input = &*input;
+        let mut raw = States::default();
+        let result = match self {
+            Self::Ema => kernels::sma_seeded_pass(input.into(), p, kernels::ema_step(p), &mut raw).into_raw_vec_and_offset().0,
+            Self::Dema => super::dema_pass(input, p, &mut raw),
+            Self::Tema => super::tema_pass(input, p, &mut raw),
+            Self::Kama => super::kama_pass(input, p, 0, &mut raw),
+            Self::Mama => crate::raw::indicators::mama_pass(input, 0.5, 0.05, false, &mut raw),
+            Self::T3 => super::t3_pass(input, p, 0.7, &mut raw),
+        };
+        let seed = self.seed_len(p);
+        for end in data.len().saturating_sub(1).max(1)..=data.len() {
+            let count = match &rows {
+                CompleteRows::All => end,
+                CompleteRows::After(start) => end.saturating_sub(*start),
+                CompleteRows::Kept(rows) => rows.partition_point(|&i| i < end),
+            };
+            let kernel = if count == input.len() { raw.after.as_ref() } else { raw.before.as_ref() };
+            let state = if count >= seed {
+                let kernel = kernel?;
+                let mut state = vec![seed as f64];
+                state.extend_from_slice(kernel);
+                state.extend(std::iter::repeat_n(0.0, (seed + 1).saturating_sub(count)));
+                state.extend_from_slice(&input[count.saturating_sub(seed + 1)..count]);
+                state
+            } else {
+                let mut state = vec![0.0; self.state_len(p)];
+                let mut next = state.clone();
+                for &x in &input[..count] {
+                    self.step(p, complete, x, &state, &mut next)?;
+                    std::mem::swap(&mut state, &mut next);
+                }
+                state
+            };
+            states.record(end - 1, data.len(), || state);
+        }
+        Some(rows.scatter(data.len(), result))
     }
 }

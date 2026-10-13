@@ -317,9 +317,13 @@ fn resume_decline_paths_cover_question_mark_branches() {
 }
 
 #[test]
-fn a_huge_window_keeps_no_state_before_warmup() {
+fn a_huge_window_does_not_allocate_its_declared_size_before_warmup() {
     let df = ohlcv(20);
-    for text in ["ma:999999999999", "ema:999999999999", "close-ma:999999999999+obv", "llv:999999999999@(ema:3)"] {
+    for text in ["ma:999999999999", "close-ma:999999999999+obv"] {
         assert!(initial_state(&df, &parse(text).unwrap(), df.height()).is_none(), "{text}");
     }
+    let seed = initial_state(&df, &parse("ema:999999999999").unwrap(), df.height()).unwrap();
+    assert!(seed.len() < 100);
+    let chain = initial_state(&df, &parse("llv:999999999999@(ema:3)").unwrap(), df.height()).unwrap();
+    assert!(chain.len() < 100);
 }

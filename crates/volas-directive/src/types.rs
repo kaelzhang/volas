@@ -361,7 +361,7 @@ pub enum Continuation {
     /// No carried state; compute the directive again.
     None,
     /// The top command carries its own kernel state.
-    Own,
+    Own(Box<Command<Bound>>),
     /// Stateful subtrees continue in post-order before evaluating the top.
     Chain(ChainPlan),
 }

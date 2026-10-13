@@ -9,7 +9,7 @@ use crate::types::Ast;
 use volas_compute::raw::indicators as ind;
 use volas_core::{Column, DataFrame};
 
-use super::{as_command, bound, recursive, resume_of, window_start};
+use super::{bound, recursive, resume_of, window_start};
 
 /// Resume `node` from `prev_state` over rows `[from_row, end)` (`end` at most the
 /// frame's height), returning those rows as a [`Column`] and the state as of the last
@@ -57,19 +57,19 @@ pub(crate) fn resume_into(
     if super::chain::chained(node) {
         return None;
     }
-    if !matches!(node.continuation(), crate::types::Continuation::Own) {
+    if !matches!(node.continuation(), crate::types::Continuation::Own(_)) {
         return None;
     }
-    let cmd = as_command(node.node())?;
-    let resume = resume_of(&cmd);
+    let crate::types::Continuation::Own(cmd) = node.continuation() else { return None; };
+    let resume = resume_of(cmd);
     let end = end.min(df.height());
     if from_row > end {
         return None;
     }
-    let bc = bound(&cmd);
-    let start = window_start(node, &cmd, from_row);
+    let bc = bound(cmd);
+    let start = window_start(node, cmd, from_row);
     super::state::resume(df, &bc, start, prev_state, from_row, end, out, |ops, kernel, from, out| {
-        if !recursive(&cmd) && resume == Resume::Step { step_rows(ops, &bc, kernel, from, out) }
+        if !recursive(cmd) && resume == Resume::Step { step_rows(ops, &bc, kernel, from, out) }
         else { resume_rows(ops, &bc, kernel, from, out) }
     })
 }

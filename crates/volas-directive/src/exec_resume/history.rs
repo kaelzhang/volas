@@ -1,6 +1,6 @@
 //! Checkpoints store exactly the continuation state. Replay is ordinary resume.
-//! During warm-up the raw input columns retain the history, including missing rows,
-//! integer precision and absolute row positions, for both Own and Chain plans.
+//! Recursive warm-up uses the same bounded continuation model as seeded history.
+//! Lines without a representable continuation retain raw inputs until they can resume.
 
 use volas_core::{Checkpoint, Column, DataFrame};
 use crate::types::{Ast, BoundNode, Node};

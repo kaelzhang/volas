@@ -12,13 +12,20 @@ fn streak_next(prior: f64, current: f64, streak: f64) -> f64 {
 /// consecutive up / down closes and PercentRank is the share of the prior `rank_len` ROC
 /// values strictly below the current one. Source: Connors Research / TradingView.
 pub fn crsi(close: &[f64], rsi_len: usize, streak_len: usize, rank_len: usize) -> Vec<f64> {
+    crsi_pass(close, rsi_len, streak_len, rank_len, &mut ())
+}
+
+/// CRSI batch composition publishes its two Wilder pairs and terminal streak.
+pub fn crsi_pass<S: crate::pass::StateSink>(close: &[f64], rsi_len: usize, streak_len: usize, rank_len: usize, states: &mut S) -> Vec<f64> {
     let len = close.len();
     let mut streak = vec![0.0; len];
     for i in 1..len {
         streak[i] = streak_next(close[i - 1], close[i], streak[i - 1]);
     }
-    let rsi_close = crate::raw::indicators::rsi(close, rsi_len);
-    let rsi_streak = crate::raw::indicators::rsi(&streak, streak_len);
+    let (mut a, mut b) = (S::default(), S::default());
+    let rsi_close = crate::raw::indicators::rsi_pass(close, rsi_len, &mut a);
+    let rsi_streak = crate::raw::indicators::rsi_pass(&streak, streak_len, &mut b);
+    if len > rank_len + 2 { states.compose(len, &[&a, &b], |end, s| s.push(streak[end - 1])); }
     let roc1: Vec<f64> = (0..len)
         .map(|i| if i > 0 { (close[i] / close[i - 1] - 1.0) * 100.0 } else { f64::NAN })
         .collect();

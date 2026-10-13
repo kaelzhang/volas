@@ -184,6 +184,11 @@ pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f
 /// updates both MAMA accumulators exactly like TA-Lib; it only skips the sibling
 /// output vector that the caller will discard.
 pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: bool) -> Vec<f64> {
+    mama_pass(price, fast_limit, slow_limit, want_fama, &mut ())
+}
+
+/// MAMA batch values and the same terminal state used by row continuation.
+pub fn mama_pass(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: bool, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
     let n = price.len();
     let mut out = vec![f64::NAN; n];
     if n <= PERIOD_START {
@@ -204,6 +209,7 @@ pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: boo
             &mut fama,
             &mut prev_phase,
         );
+        states.record(i, n, || { let mut v = core.serialize(); v.extend([mama, fama, prev_phase]); v });
         if i >= LB_PERIOD {
             out[i] = if want_fama { fama } else { mama };
         }
@@ -692,6 +698,19 @@ pub fn mama_resume(
     v.push(fama);
     v.push(prev_phase);
     Some(v)
+}
+
+/// One MAMA/FAMA row written into caller-owned state, with no allocation.
+#[allow(clippy::too_many_arguments)]
+pub fn mama_resume_one(price: &[f64], fast: f64, slow: f64, fama_line: bool, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    if state.len() != MAMA_STATE_LEN || next.len() != MAMA_STATE_LEN || row >= price.len() { return None; }
+    let mut core = ht_core_resume_setup(state, row, PERIOD_START)?;
+    let (mut mama, mut fama, mut phase) = (state[CORE_STATE_LEN], state[CORE_STATE_LEN + 1], state[CORE_STATE_LEN + 2]);
+    let bar = core.step(price, row);
+    mama_step(&bar, price[row], fast, slow, &mut mama, &mut fama, &mut phase);
+    core.write_state(&mut next[..CORE_STATE_LEN]);
+    next[CORE_STATE_LEN..].copy_from_slice(&[mama, fama, phase]);
+    Some(masked(row, LB_PERIOD, if fama_line { fama } else { mama }))
 }
 
 

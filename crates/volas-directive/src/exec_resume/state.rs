@@ -1,10 +1,11 @@
 //! The continuation's wire format. Core stores these words without interpreting them.
 //!
-//! A node is `[kernel_len, reach, slots_mask, complete_count, scratch_stride, kernel..., tails..., scratch...]`.
+//! A node is `[kernel_len, reach, slots_mask, complete_count, scratch_stride, seed_origin, kernel..., tails..., scratch...]`.
 //! Each used input slot has `reach` words, oldest first, padded on the left until
 //! warm-up supplies them. Recursive tails contain complete rows; finite-window tails
 //! retain raw window rows, including NaNs. Scratch is zeroed before publishing state.
-//! Chains concatenate `[node_len, node..., output_ring...]`.
+//! A zero-length recursive kernel carries the complete seed rows until it can seed.
+//! Chains start with their retained ring span, then concatenate `[node_len, node..., output_ring...]`.
 //! Only this module reads or writes either layout.
 
 use std::borrow::Cow;
@@ -18,6 +19,7 @@ pub(super) struct Node<'a> {
     mask: usize,
     count: usize,
     stride: usize,
+    origin: usize,
 }
 
 impl<'a> Node<'a> {
@@ -27,20 +29,20 @@ impl<'a> Node<'a> {
         let mask = *words.get(2)? as usize;
         let count = *words.get(3)? as usize;
         let stride = *words.get(4)? as usize;
-        if mask >= 256 || count > reach || words.len() != 5 + len + (reach + stride) * mask.count_ones() as usize {
+        if mask >= 256 || count > reach || words.len() != 6 + len + (reach + stride) * mask.count_ones() as usize {
             return None;
         }
-        Some(Self { words, kernel: words.get(5..5 + len)?, reach, mask, count, stride })
+        Some(Self { words, kernel: words.get(6..6 + len)?, reach, mask, count, stride, origin: *words.get(5)? as usize })
     }
     fn offset(&self, slot: usize) -> Option<usize> {
-        (self.mask & (1 << slot) != 0).then(|| 5 + self.kernel.len() + self.reach * (self.mask & ((1 << slot) - 1)).count_ones() as usize)
+        (self.mask & (1 << slot) != 0).then(|| 6 + self.kernel.len() + self.reach * (self.mask & ((1 << slot) - 1)).count_ones() as usize)
     }
     fn tail(&self, slot: usize) -> Option<&[f64]> {
         let end = self.offset(slot)? + self.reach;
         Some(&self.words[end - self.count..end])
     }
     pub fn kernel_mut<'b>(&self, next: &'b mut [f64]) -> &'b mut [f64] {
-        &mut next[5..5 + self.kernel.len()]
+        &mut next[6..6 + self.kernel.len()]
     }
     fn advance(&self, ops: &Operands, from: usize, end: usize, recursive: bool, next: &mut [f64]) -> Option<()> {
         // Only the final `reach` accepted rows survive in the published tail.
@@ -94,14 +96,21 @@ pub(super) fn capture(df: &DataFrame, cmd: &BoundCommand, end: usize, kernel: Ve
 }
 
 /// Frame the states published by a kernel using its already-resolved input reads.
-pub(super) fn capture_read(ops: &Operands, cmd: &BoundCommand, end: usize, kernel: Vec<f64>, recursive: bool) -> Option<Vec<f64>> {
+pub(super) fn capture_read(ops: &Operands, cmd: &BoundCommand, end: usize, mut kernel: Vec<f64>, recursive: bool) -> Option<Vec<f64>> {
     // Finite-window nodes read raw frame windows; only recursions gather complete rows.
-    let reach = if recursive { cmd.reach() } else { cmd.reach().max(cmd.spec.lookback_of(cmd.args)) };
+    if recursive && !kernel.is_empty() && (0..end).rev()
+        .filter(|&i| ops.reads().all(|(_, r)| !r.view()[i].is_nan())).take(cmd.reach()).count() < cmd.reach() {
+        kernel.clear();
+    }
+    let warm = recursive && kernel.is_empty();
+    let reach = if warm { ((0..end).filter(|&i| ops.reads().all(|(_, r)| !r.view()[i].is_nan())).count() + 1).min(2 * (cmd.spec.lookback_of(cmd.args) + 1)) }
+        else if recursive { cmd.reach() } else { cmd.reach().max(cmd.spec.lookback_of(cmd.args)) };
     let mask = ops.reads().fold(0usize, |m, (s, _)| m | (1 << s));
     let rows: Vec<usize> = (0..end).rev().filter(|&i| !recursive || ops.reads().all(|(_, r)| !r.view()[i].is_nan())).take(reach).collect();
-    if rows.len() < reach { return None; }
+    if !recursive && rows.len() < reach { return None; }
+    if warm && rows.len() == reach { return None; }
     let stride = reach + 1;
-    let mut words = vec![kernel.len() as f64, reach as f64, mask as f64, rows.len() as f64, stride as f64];
+    let mut words = vec![kernel.len() as f64, reach as f64, mask as f64, rows.len() as f64, stride as f64, ops.origin() as f64];
     words.extend(kernel);
     for (_, r) in ops.reads() {
         words.extend(std::iter::repeat_n(f64::NAN, reach - rows.len()));
@@ -122,7 +131,7 @@ fn gathered<'a>(df: &'a DataFrame, cmd: &'a BoundCommand, ops: &Operands, prev: 
         values.extend(rows.iter().map(|&i| r.view()[i]));
         views[slot] = Some(Cow::Owned(values));
     }
-    Some((Operands::over(df, cmd.series, ops.start(), views).with_origin(df.origin() + ops.start() + from - prev.count), rows))
+    Some((Operands::over(df, cmd.series, ops.start(), views).with_origin(if prev.kernel.is_empty() { prev.origin } else { df.origin() + ops.start() + from - prev.count }), rows))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -140,6 +149,18 @@ pub(super) fn resume(
     // run across a missing row can evict a value the kernel never accumulated.
     prev.record(&ops, cmd)?;
     let mut next = words.to_vec();
+    if recursive && prev.kernel.is_empty() {
+        let (gather, rows) = gathered(df, cmd, &ops, &prev, local)?;
+        if rows.is_empty() {
+            out.resize(at + end - from, f64::NAN);
+            return Some(next);
+        }
+        let values = crate::complete::into_f64(crate::exec::execute_inputs(&gather, cmd).ok()?);
+        let kernel = super::initial_state::state_of(&gather, cmd.name, cmd.sub, cmd.args).unwrap_or_default();
+        out.resize(at + end - from, f64::NAN);
+        for (row, value) in rows.into_iter().zip(values.iter().skip(prev.count)) { out[at + row - local] = *value; }
+        return capture_read(&gather, cmd, gather.len(), kernel, true);
+    }
     let kernel = if prev.in_place(&ops, local, ops.len(), recursive) {
         run(&ops, prev.kernel, local, out)?
     } else {
@@ -155,33 +176,6 @@ pub(super) fn resume(
     prev.kernel_mut(&mut next).copy_from_slice(&kernel);
     prev.advance(&ops, local, ops.len(), recursive, &mut next)?;
     Some(next)
-}
-
-pub(super) fn step(
-    df: &DataFrame, cmd: &BoundCommand, start: usize, words: &[f64], row: usize, next: &mut [f64],
-) -> Option<f64> {
-    let prev = Node::read(words)?;
-    if next.len() != words.len() { return None; }
-    next.copy_from_slice(words);
-    let ops = Operands::rows(df, cmd.series, start, row + 1);
-    let local = row - start;
-    let recursive = cmd.spec.history(cmd.args) == crate::spec::History::Recursive;
-    let run = |ops: &Operands, at, next: &mut [f64]| {
-        if recursive { super::scalar::step_of(ops, cmd.name, cmd.sub, cmd.args, prev.kernel, at, next) }
-        else { super::window::step(ops, cmd.name, cmd.sub, cmd.args, prev.kernel, at, next) }
-    };
-    // Scalar continuation has the same state/input precondition as the row resume.
-    prev.record(&ops, cmd)?;
-    if prev.in_place(&ops, local, ops.len(), recursive) {
-        let value = run(&ops, local, prev.kernel_mut(next))?;
-        prev.advance(&ops, local, ops.len(), recursive, next)?;
-        return Some(value);
-    }
-    let (gather, rows) = gathered(df, cmd, &ops, &prev, local)?;
-    if rows.is_empty() { next.copy_from_slice(words); return Some(f64::NAN); }
-    let value = run(&gather, prev.count, prev.kernel_mut(next))?;
-    prev.advance(&ops, local, ops.len(), recursive, next)?;
-    Some(value)
 }
 
 pub(super) fn push_chain(chain: &mut Vec<f64>, state: &[f64], ring: impl Iterator<Item=f64>) {
@@ -210,7 +204,7 @@ pub(super) fn planned_step(
     let recursive = cmd.spec.history(cmd.args) == crate::spec::History::Recursive;
     let count = prev.count;
     let origin = (df.origin() + row).checked_sub(count)?;
-    let scratch_at = 5 + prev.kernel.len() + prev.reach * prev.mask.count_ones() as usize;
+    let scratch_at = 6 + prev.kernel.len() + prev.reach * prev.mask.count_ones() as usize;
     let (stored, scratch) = next.split_at_mut(scratch_at);
     let mut missing = false;
     let mut k = 0;
@@ -224,6 +218,7 @@ pub(super) fn planned_step(
         k += 1;
     }
     if recursive && missing { scratch.fill(0.0); return Some(f64::NAN); }
+    if recursive && prev.kernel.is_empty() { scratch.fill(0.0); return None; }
     let mut views = [None; 8];
     let mut k = 0;
     for (slot, view) in views.iter_mut().enumerate() {
@@ -233,7 +228,7 @@ pub(super) fn planned_step(
         }
     }
     let ops = Operands::borrowed(df, cmd.series, 0, views).with_origin(origin);
-    let kernel = &mut stored[5..5 + prev.kernel.len()];
+    let kernel = &mut stored[6..6 + prev.kernel.len()];
     let value = if recursive {
         super::scalar::step_of(&ops, cmd.name, cmd.sub, cmd.args, prev.kernel, count, kernel)
     } else {

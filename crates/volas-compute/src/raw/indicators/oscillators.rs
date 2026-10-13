@@ -161,7 +161,12 @@ pub fn stochrsi_resume(close: &[f64], rsi_period: usize, fastk_period: usize, is
 /// averages are seeded from the first `period` changes, emitted from index `period`, then
 /// stepped per row.
 pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
-    gain_loss_series(close, period, GainLoss::rsi)
+    rsi_pass(close, period, &mut ())
+}
+
+/// RSI batch values with the terminal Wilder pairs.
+pub fn rsi_pass(close: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    gain_loss_series(close, period, GainLoss::rsi, states)
 }
 
 /// Chande Momentum Oscillator (TA-Lib CMO): `100·((avgGain−avgLoss)/(avgGain+avgLoss))`
@@ -169,11 +174,11 @@ pub fn rsi(close: &[f64], period: usize) -> Vec<f64> {
 /// (gain + loss = 0) yields 0. Lookback `period`. (Algebraically `2·RSI − 100`; computed
 /// directly in TA-Lib's order rather than derived from RSI.)
 pub fn cmo(close: &[f64], period: usize) -> Vec<f64> {
-    gain_loss_series(close, period, GainLoss::cmo)
+    gain_loss_series(close, period, GainLoss::cmo, &mut ())
 }
 
 /// The full RSI / CMO series: NaN before index `period`, then `value` of the averages.
-fn gain_loss_series(close: &[f64], period: usize, value: impl Fn(GainLoss) -> f64) -> Vec<f64> {
+fn gain_loss_series(close: &[f64], period: usize, value: impl Fn(GainLoss) -> f64, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || n <= period {
@@ -181,10 +186,12 @@ fn gain_loss_series(close: &[f64], period: usize, value: impl Fn(GainLoss) -> f6
     }
     let mut w = GainLoss::seed(close, period);
     out[period] = value(w);
+    states.record(period, n, || w.state());
     let avg = smoothing::Wilder::new(period);
     for i in (period + 1)..n {
         w.step(avg, close[i] - close[i - 1]);
         out[i] = value(w);
+        states.record(i, n, || w.state());
     }
     out
 }

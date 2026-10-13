@@ -7,7 +7,7 @@ fn bound_tree_and_continuation_are_read_only_views() {
     assert_eq!(c.args.values()[0].as_usize(), 2);
     assert!(c.args.bare().is_none());
     assert_eq!(c.args.spec().lookback_of(c.args.values()), 1);
-    assert!(matches!(ast.continuation(), Continuation::Own));
+    assert!(matches!(ast.continuation(), Continuation::Own(_)));
     let mut detached = ast.node().clone();
     let Node::Command(c) = &mut detached else { unreachable!() };
     c.series.clear();
@@ -23,12 +23,12 @@ fn binding_decides_the_existing_continuation_cases() {
     ] {
         let ast = parse(source).unwrap();
         let actual = match ast.continuation() {
-            Continuation::None => 0, Continuation::Own => 1, Continuation::Chain(_) => 2,
+            Continuation::None => 0, Continuation::Own(_) => 1, Continuation::Chain(_) => 2,
         };
         assert_eq!(actual, kind, "{source}");
     }
     let ast = bind_frame(&parse("obv").unwrap(), &|_| false, "obv").unwrap();
-    assert!(matches!(ast.continuation(), Continuation::Own));
+    assert!(matches!(ast.continuation(), Continuation::Own(_)));
     let Node::Command(c) = ast.node() else { unreachable!() };
     assert_eq!(c.args.bare(), Some("obv"));
 }
