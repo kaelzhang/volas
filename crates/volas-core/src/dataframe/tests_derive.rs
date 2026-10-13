@@ -427,4 +427,7 @@ fn a_selection_of_an_anchored_history_replays_no_boundary() {
         assert!(again.computed_checkpoint("ema").is_some(), "{start}");
     }
     assert_eq!(counting.0.get(), 0);
+    // without them, one far from the history's start replays its boundary
+    let far = frame(n).rows(n - 100, n, &counting);
+    assert_eq!((counting.0.get(), far.computed_checkpoint("ema").map(|cp| cp.at)), (1, Some(n - 101)));
 }

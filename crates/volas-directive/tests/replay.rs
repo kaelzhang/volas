@@ -36,6 +36,12 @@ fn a_replay_gives_the_states_a_full_computation_ends_with() {
     let boundary = Replayer.boundary(&df, "ema:5", 7).unwrap();
     assert_eq!((boundary.at, boundary.state), (6, volas_directive::resume_states(&df.slice_data(0, 7), &node).state));
     assert_eq!(Replayer.boundary(&df, "ema:5", 0), None); // no row before the first
+    // states farther than the anchor spacing from the nearest point the frame keeps (a
+    // history with no anchors) are not replayed
+    let mut long = closes(2 * volas_core::dataframe::ANCHOR_SPACING);
+    long.set_column("ema:5", execute(&long, &node).unwrap()).unwrap();
+    long.set_computed("ema:5", volas_directive::lookback::reach(&node));
+    assert_eq!(volas_directive::states_at(&long, "ema:5", long.height()), None);
     // a name that is not a cached column, or one that does not parse, has no history
     assert_eq!(Replayer.boundary(&df, "close", 7), None);
     assert_eq!(volas_directive::states_at(&df, "ema:", 20), None);
