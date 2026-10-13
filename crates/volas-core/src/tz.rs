@@ -69,6 +69,7 @@ impl Tz {
 
     /// Load caller-supplied TZif v1–v4 bytes. Source and version describe the
     /// adapter's selected data; rules and byte identity belong to this owner.
+    /// Each call compiles independent rules; clone the result to share them.
     pub fn from_tzif(key: &str, bytes: Vec<u8>, source: String, version: Option<String>) -> Result<Tz> {
         if !database::valid_key(key) {
             return Err(VolasError::Value(format!("invalid timezone key {key:?}")));

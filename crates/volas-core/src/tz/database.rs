@@ -16,8 +16,8 @@ pub(super) fn valid_key(key: &str) -> bool {
 
 pub(super) fn load(key: &str) -> Result<Tz> {
     if !valid_key(key) { return Err(VolasError::Value(format!("invalid timezone key {key:?}"))); }
-    // Unlike the bounded byte cache, named lookups retain the first successful
-    // load for the entire process. Explicit from_tzif calls never enter here.
+    // Named lookups retain the first successful load for the entire process.
+    // Explicit from_tzif calls compile independent rules and never enter here.
     static NAMED: OnceLock<Registry> = OnceLock::new();
     load_once(NAMED.get_or_init(Registry::default), key, || read(key)).map(Tz::Named)
 }
@@ -93,15 +93,12 @@ mod tests {
     }
 
     #[test]
-    fn parsed_names_keep_their_rules_after_byte_cache_eviction() {
+    fn parsed_names_retain_first_rules_and_ignore_explicit_byte_loads() {
         let bytes = super::super::tests_tzif::fixture(0, &[], &[(1, false, 0)], b"TEST\0", "");
         let supplied = Tz::from_tzif("Etc/UTC", bytes.clone(), "test".into(), None).unwrap();
         assert_eq!(supplied.offset_secs_at(0), 1);
         let Tz::Named(first) = Tz::parse("Etc/UTC").unwrap() else { panic!() };
         assert_eq!(Tz::Named(first.clone()).offset_secs_at(0), 0);
-        for n in 0..65 {
-            Tz::from_tzif(&format!("Test/NativeCache{n}"), bytes.clone(), "test".into(), None).unwrap();
-        }
         let Tz::Named(second) = Tz::parse("Etc/UTC").unwrap() else { panic!() };
         assert!(Arc::ptr_eq(&first, &second));
 

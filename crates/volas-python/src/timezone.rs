@@ -2,53 +2,15 @@
 //!
 //! Python chooses the bytes; `volas_core::tz` owns their parsing and all rules.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+use std::sync::{Mutex, OnceLock};
 
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
 use pyo3::types::{PyBytes, PyDict};
 use volas_core::Tz;
 
 use crate::pyerr;
-
-#[derive(Default)]
-struct ZoneEntry {
-    ready: OnceLock<Tz>,
-    initialize: Mutex<()>,
-}
-
-thread_local! {
-    static LOADING_KEYS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-}
-
-struct LoadingKey {
-    nested: bool,
-}
-
-impl LoadingKey {
-    fn enter(key: &str) -> PyResult<Self> {
-        LOADING_KEYS.with(|keys| {
-            let mut keys = keys.borrow_mut();
-            if keys.iter().any(|loading| loading == key) {
-                return Err(PyRuntimeError::new_err(format!(
-                    "recursive timezone initialization for key {key:?}",
-                )));
-            }
-            let nested = !keys.is_empty();
-            keys.push(key.to_string());
-            Ok(Self { nested })
-        })
-    }
-}
-
-impl Drop for LoadingKey {
-    fn drop(&mut self) {
-        LOADING_KEYS.with(|keys| { keys.borrow_mut().pop(); });
-    }
-}
 
 fn adapter(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
     py.import("volas._timezone")
@@ -64,51 +26,21 @@ pub(crate) fn parse(py: Python<'_>, key: &str) -> PyResult<Tz> {
 }
 
 fn named(py: Python<'_>, key: &str) -> PyResult<Tz> {
-    // The registry guard never crosses a Python callback. Each key has its own
-    // GIL-aware initialization lock. Nested callbacks never wait on another
-    // active initializer, which prevents dependency cycles across threads.
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<ZoneEntry>>>> = OnceLock::new();
-    let entry = {
-        let mut cache = CACHE.get_or_init(Mutex::default)
-            .lock_py_attached(py).unwrap_or_else(|error| error.into_inner());
-        cache.get(key).cloned().unwrap_or_else(|| {
-            let entry = Arc::new(ZoneEntry::default());
-            cache.insert(key.to_string(), entry.clone());
-            entry
-        })
-    };
-    if let Some(zone) = entry.ready.get() {
+    static CACHE: OnceLock<Mutex<HashMap<String, Tz>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Mutex::default);
+    if let Some(zone) = cache.lock_py_attached(py)
+        .unwrap_or_else(|error| error.into_inner()).get(key) {
         return Ok(zone.clone());
     }
-    // Check recursion before waiting on the key's lock; dropping this guard on
-    // any Python error permits a later initialization attempt to succeed.
-    let loading = LoadingKey::enter(key)?;
-    let _initialize = if loading.nested {
-        match entry.initialize.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(TryLockError::WouldBlock) => {
-                if let Some(zone) = entry.ready.get() {
-                    return Ok(zone.clone());
-                }
-                return Err(PyRuntimeError::new_err(format!(
-                    "nested timezone initialization for key {key:?} would block; retry after the active initialization completes",
-                )));
-            }
-        }
-    } else {
-        entry.initialize.lock_py_attached(py)
-            .unwrap_or_else(|error| error.into_inner())
-    };
-    if let Some(zone) = entry.ready.get() {
-        return Ok(zone.clone());
-    }
+    // Python I/O may release the GIL. Resolve and compile without the registry
+    // lock; racing cold reads are harmless, and every caller uses the winner.
     let helper = adapter(py)?;
     let (data, source, version): (Bound<'_, PyBytes>, String, Option<String>) =
         helper.call_method1("_resolve", (key,))?.extract()?;
     let zone = Tz::from_tzif(key, data.as_bytes().to_vec(), source, version).map_err(pyerr)?;
     helper.call_method1("_pin", (key,))?;
-    Ok(entry.ready.get_or_init(|| zone).clone())
+    let mut cache = cache.lock_py_attached(py).unwrap_or_else(|error| error.into_inner());
+    Ok(cache.entry(key.to_string()).or_insert(zone).clone())
 }
 
 // Preserve the existing mixed datetime.timezone.utc / ZoneInfo("UTC") input
@@ -156,3 +88,6 @@ pub(crate) fn tz_database<'py>(py: Python<'py>, key: &str) -> PyResult<Bound<'py
     result.set_item("version", rules.version())?;
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests;

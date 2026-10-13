@@ -311,7 +311,6 @@ def test_first_use_rules_are_not_evicted_by_other_keys(tmp_path):
 def _case_concurrent_first_use(directory):
     from concurrent.futures import ThreadPoolExecutor
     import threading
-    import time
 
     import volas._timezone as adapter
 
@@ -326,18 +325,19 @@ def _case_concurrent_first_use(directory):
         nonlocal count
         with count_lock:
             count += 1
-        time.sleep(0.02)  # Release the GIL while the owner is initializing.
-        return original(name)
+        data = original(name)
+        # Every caller observes a cold key before any caller can publish it.
+        barrier.wait(timeout=10)
+        return data
 
     adapter._resolve = counted
 
     def load(_):
-        barrier.wait(timeout=10)
         return volas.Timestamp(ns, tz=key)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(load, range(8)))
-    assert count == 1, f"resolved {count} times instead of once"
+    assert count == 8, f"expected eight racing cold reads, got {count}"
     canonical = zoneinfo.ZoneInfo(key)
     for value in results:
         assert value.tzinfo is canonical
@@ -355,7 +355,7 @@ def _case_concurrent_first_use(directory):
     assert _frame(ns, key).iloc[0].name.tzinfo is canonical
 
 
-def test_concurrent_first_use_resolves_once_and_warm_uses_are_memory_only(tmp_path):
+def test_concurrent_first_use_publishes_shared_rules_and_warm_uses_are_memory_only(tmp_path):
     write_zone(tmp_path, "Local/Concurrent", local_tzif("Etc/GMT-3"), "2026b")
     run_isolated_case("_case_concurrent_first_use", str(tmp_path), tzpath=[tmp_path])
 

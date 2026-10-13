@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use crate::datetime::Civil;
 use crate::error::{Result, VolasError};
@@ -54,19 +54,7 @@ struct LocalSpan { start: i64, kind: Local }
 
 impl ZoneRules {
     pub(super) fn load(key: &str, bytes: Vec<u8>, source: String, version: Option<String>) -> Result<Arc<Self>> {
-        // A bounded cache of exact byte identities, not names or content hashes.
-        // Holding a frame never relies on this cache's retention policy.
-        static CACHE: OnceLock<Mutex<Vec<Arc<ZoneRules>>>> = OnceLock::new();
-        let mut cache = CACHE.get_or_init(Mutex::default).lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(pos) = cache.iter().position(|r| r.key == key && r.bytes == bytes && r.source == source && r.version == version) {
-            let found = cache.remove(pos);
-            cache.push(found.clone());
-            return Ok(found);
-        }
-        let rules = Arc::new(Self::compile(key.to_string(), bytes, source, version)?);
-        if cache.len() == 64 { cache.remove(0); }
-        cache.push(rules.clone());
-        Ok(rules)
+        Ok(Arc::new(Self::compile(key.to_string(), bytes, source, version)?))
     }
 
     fn compile(key: String, bytes: Vec<u8>, source: String, version: Option<String>) -> Result<Self> {

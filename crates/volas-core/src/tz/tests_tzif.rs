@@ -103,22 +103,18 @@ fn cpython_initial_final_and_dst_derivation() {
 }
 
 #[test]
-fn byte_identity_caching_and_snapshot_retention() {
+fn explicit_byte_loads_are_independent_and_clones_share_rules() {
     let bytes = fixture(0, &[], &[(0, false, 0)], b"UTC\0", "");
     let a = zone(bytes.clone()).unwrap();
     let b = zone(bytes.clone()).unwrap();
-    // Explicit byte loads remain equal even if another test evicts their
-    // bounded cache entry. Cloning a value must always share its rules.
     assert_eq!(a, b);
+    let (Tz::Named(ar), Tz::Named(br)) = (&a, &b) else { panic!() };
+    assert!(!Arc::ptr_eq(ar, br));
     let cloned = a.clone();
     let (Tz::Named(ar), Tz::Named(br)) = (&a, &cloned) else { panic!() };
     assert!(Arc::ptr_eq(ar, br));
     let c = zone(fixture(0, &[], &[(3600, false, 0)], b"NEW\0", "")).unwrap();
     assert_ne!(a, c);
-    assert_eq!(a.offset_secs_at(0), 0);
-    for n in 0..65 {
-        Tz::from_tzif(&format!("Test/Cache{n}"), bytes.clone(), "memory".into(), Some("test".into())).unwrap();
-    }
     assert_eq!(a.offset_secs_at(0), 0);
     assert!(Tz::from_tzif("../invalid", bytes, "memory".into(), None).is_err());
 }

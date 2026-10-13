@@ -325,8 +325,8 @@ cheap; A-share / HK equities) or a **named IANA zone** (`'America/New_York'`).
 volas reads named-zone TZif bytes from the running interpreter's `zoneinfo.TZPATH`
 directories in order, then the `tzdata` package, and evaluates them in Rust across
 the full `datetime64[ns]` range, including future POSIX footer rules. `tzdata` is a
-runtime dependency. The first successful use of each named key loads and compiles
-its rules once per process. All later timestamps, frames, and open cumulation
+runtime dependency. The first successful initialization establishes one immutable
+rules object per named key and process. All later timestamps, frames, and open cumulation
 periods using that key share the same immutable rules without reading files or
 recompiling. Named Python exports use the interpreter's standard `ZoneInfo(key)`;
 volas retains that object so its identity remains stable for pandas interop.
