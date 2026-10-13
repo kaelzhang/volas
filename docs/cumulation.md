@@ -450,3 +450,8 @@ key is `UTC`. String `"UTC"` and numeric UTC offsets remain fixed specifications
 `cumulate` to a daily (or coarser) bar aligns buckets to the frame's local
 trading day — DST-aware for a named zone — while the raw `.index` numpy export
 stays UTC (matching pandas `.values`).
+
+Rust callers of `volas_time::aggregate_period` must supply a non-empty,
+nondecreasing DatetimeIndex without NaT, with every bar in the same grid period.
+Duplicate timestamps keep the last bar. Invalid inputs return `VolasError::Value`;
+`Agg::reduce` also rejects empty or out-of-range row selections.

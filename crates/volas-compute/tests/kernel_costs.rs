@@ -64,7 +64,7 @@ fn low_variance_has_no_per_window_heap_allocation() {
                 .map(|i| 12345.67 + (i as f64 * 0.1).sin() * 1e-6)
                 .collect(),
         ] {
-            let (_, count, _) = counted(|| window::var(&data, 20, 20, 1));
+            let (_, count, _) = counted(|| window::var(&data, 20, 20, 1).unwrap());
             assert_eq!(count, 1, "only the result may allocate, n={n}");
         }
     }
@@ -134,8 +134,8 @@ fn measure_kernel_costs() {
             .map(|i| 12345.67 + (i as f64 * 0.1).sin() * 1e-6)
             .collect();
         let mut cases: Vec<CostCase<'_>> = vec![
-            ("var_flat", Box::new(|| window::var(&flat, 20, 20, 1))),
-            ("var_low", Box::new(|| window::var(&low, 20, 20, 1))),
+            ("var_flat", Box::new(|| window::var(&flat, 20, 20, 1).unwrap())),
+            ("var_low", Box::new(|| window::var(&low, 20, 20, 1).unwrap())),
             (
                 "adx_capture",
                 Box::new(|| ind::adx_final_state(&h, &l, &c, 14).unwrap()),
@@ -158,7 +158,7 @@ fn measure_kernel_costs() {
                     _ => "skew2000",
                 };
                 let data = &c;
-                cases.push((name, Box::new(move || window::skew(data, p, p))));
+                cases.push((name, Box::new(move || window::skew(data, p, p).unwrap())));
             }
         }
         for (name, f) in cases {
@@ -238,18 +238,24 @@ fn snapshot_kernel_bits() {
         let l: Vec<_> = c.iter().map(|x| x - 1.0).collect();
         for p in [1, 2, 3, 4, 20, 200, usize::MAX] {
             for min in [0, 1, 3, 20] {
+                if min > p {
+                    assert_eq!(window::skew(&c, p, min), Err(window::WindowError::MinPeriods));
+                    assert_eq!(window::kurt(&c, p, min), Err(window::WindowError::MinPeriods));
+                    assert_eq!(window::var(&c, p, min, 1), Err(window::WindowError::MinPeriods));
+                    continue;
+                }
                 for (name, kernel) in [
-                    ("skew", window::skew as fn(&[f64], usize, usize) -> Vec<f64>),
+                    ("skew", window::skew as fn(&[f64], usize, usize) -> Result<Vec<f64>, window::WindowError>),
                     ("kurt", window::kurt),
                 ] {
                     println!(
                         "BITS,{fixture},{p},{min},{name},{:016x}",
-                        checksum(&kernel(&c, p, min))
+                        checksum(&kernel(&c, p, min).unwrap())
                     );
                 }
                 println!(
                     "BITS,{fixture},{p},{min},var,{:016x}",
-                    checksum(&window::var(&c, p, min, 1))
+                    checksum(&window::var(&c, p, min, 1).unwrap())
                 );
             }
         }

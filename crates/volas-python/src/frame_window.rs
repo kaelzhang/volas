@@ -82,7 +82,7 @@ impl PyExpandingFrame {
 impl PyRollingFrame {
     /// Per-column rolling count (int64) -> DataFrame.
     fn count(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.count(s)))
+        self.agg(|w, s| w.count(s))
     }
     /// Per-column rolling distinct-count (int64).
     fn nunique(&self) -> PyResult<PyDataFrame> {
@@ -146,11 +146,11 @@ impl PyRollingFrame {
     }
     /// Per-column first present value per window, dtype-preserving.
     fn first(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.edge(s, false)))
+        self.agg(|w, s| w.edge(s, false))
     }
     /// Per-column last present value per window, dtype-preserving.
     fn last(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.edge(s, true)))
+        self.agg(|w, s| w.edge(s, true))
     }
 }
 
@@ -158,7 +158,7 @@ impl PyRollingFrame {
 impl PyExpandingFrame {
     /// Per-column expanding count (int64) -> DataFrame.
     fn count(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.count(s)))
+        self.agg(|w, s| w.count(s))
     }
     /// Per-column expanding distinct-count (int64).
     fn nunique(&self) -> PyResult<PyDataFrame> {
@@ -222,11 +222,11 @@ impl PyExpandingFrame {
     }
     /// Per-column first present value so far, dtype-preserving.
     fn first(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.edge(s, false)))
+        self.agg(|w, s| w.edge(s, false))
     }
     /// Per-column last present value so far, dtype-preserving.
     fn last(&self) -> PyResult<PyDataFrame> {
-        self.agg(|w, s| Ok(w.edge(s, true)))
+        self.agg(|w, s| w.edge(s, true))
     }
 }
 
