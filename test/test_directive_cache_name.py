@@ -1,11 +1,9 @@
 """A cached directive's column name is ``directive_stringify`` of it — one renderer —
-and it keeps a command apart from a bare name.
+and retains the bound command independently of its spelling.
 
 ``directive_stringify(d)`` is documented as "the actual column name volas caches it
 under": every argument is written as its bound value (``ma:05`` caches as ``ma:5``), and
-an explicit command whose arguments are all defaults keeps its colon (``boll:20`` caches
-as ``boll:``), so its name never re-reads as a bare name — which a data column of that
-name would take. A cached column refreshes from the directive it was bound to, never
+default arguments are dropped (``boll:20`` caches as ``boll``). A cached column refreshes from the directive it was bound to, never
 from a re-read of its name.
 """
 
@@ -134,10 +132,10 @@ def test_a_bare_command_is_one_column_whatever_its_case():
 def test_a_cached_name_does_not_bypass_the_ambiguity_rule():
     """A directive spelled so that it names a cached column is still bound against the
     frame: once a data column `obv` exists, `close - obv` is ambiguous (R17) — it does not
-    silently read the column cached as `close - OBV` before that data column existed."""
+    silently read the column cached as `close - OBV:` before that data column existed."""
     df = _frame()
-    df['close - OBV']
-    df['obv'] = np.zeros(N)  # `OBV` is spelled otherwise, so the column may be added
+    df['close - OBV:']
+    df['obv'] = np.zeros(N)  # an explicit command does not use a bare name
     with pytest.raises(volas.DirectiveValueError, match=(
             "ambiguous name 'obv' in 'close - obv': it is both a column of this DataFrame and the "
             "built-in command 'obv'. Write 'obv:' to use the command")):
@@ -207,3 +205,27 @@ def test_a_folded_forming_bar_refreshes_a_displaced_ichimoku_span():
     df.append(bar)
     assert len(df) == n
     assert _same(df[d], df.exec(d, dtype='float64'))
+
+
+@pytest.mark.parametrize('spelling', ['accbands', 'ACCBANDS', 'AcCbAnDs'])
+@pytest.mark.parametrize('template', ['({0})+({0}@open)', '-{0}', 'ma:3@{0}'])
+def test_a_bare_command_collision_uses_its_canonical_identity(spelling, template):
+    df = _frame()
+    directive = template.format(spelling)
+    df[directive]
+    canonical = volas.directive_stringify(directive)
+    before = df.to_numpy().copy()
+    columns = list(df.columns)
+    with pytest.raises(ValueError) as err:
+        df['accbands'] = np.zeros(N)
+    assert str(err.value) == (
+        f"cannot add column 'accbands': the cached directive '{canonical}' uses the built-in "
+        "command 'accbands' under that name. Rename the new column, or drop the cached directive "
+        f"first — df.drop(['{canonical}'], axis=1)."
+    )
+    assert list(df.columns) == columns
+    assert np.array_equal(df.to_numpy(), before, equal_nan=True)
+    assert df.is_computed(canonical)
+    dropped = df.drop([directive], axis=1)
+    dropped['accbands'] = np.zeros(N)
+    assert np.array_equal(dropped['accbands'].to_numpy(), np.zeros(N))
