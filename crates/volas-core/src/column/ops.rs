@@ -65,6 +65,11 @@ impl Column {
         self.require_same_len(other)?;
         self.require_numeric()?;
         other.require_numeric()?;
+        match (self, other) {
+            (Column::F64(a), Column::F64(b)) => return Ok(Column::f64(float_slice_kernel(a, b, op))),
+            (Column::F32(a), Column::F32(b)) => return Ok(Column::f32(float_slice_kernel(a, b, op))),
+            _ => {}
+        }
         if let (Column::Bool(a, av), Column::Bool(b, bv)) = (self, other) {
             let nulls = av.and(bv);
             return match op {
@@ -92,7 +97,6 @@ impl Column {
                 let out = binary_kernel(&self.as_i32_vec()?, &other.as_i32_vec()?, op, &nulls)?;
                 Ok(Column::i32_masked(out, nulls))
             }
-            DType::F32 => Ok(Column::f32(float_kernel(&self.to_f32_vec(), &other.to_f32_vec(), op))),
             _ => Ok(Column::f64(float_kernel(
                 &self.to_f64_domain("arithmetic")?,
                 &other.to_f64_domain("arithmetic")?,
@@ -107,6 +111,16 @@ impl Column {
         self.require_same_len(other)?;
         self.require_numeric()?;
         other.require_numeric()?;
+        match (self, other) {
+            (Column::F64(a), Column::F64(b)) => {
+                return Ok(Column::f64(float_output(a, b, |x, y| x / y)));
+            }
+            (Column::F32(a), Column::F32(b)) => {
+                // True division has always widened BOTH operands before dividing.
+                return Ok(Column::f64(float_output(a, b, |x, y| x as f64 / y as f64)));
+            }
+            _ => {}
+        }
         if matches!((self, other), (Column::Bool(_, _), Column::Bool(_, _))) {
             return Err(VolasError::DType(
                 "division is not supported between two bool columns".into(),
