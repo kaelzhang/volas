@@ -44,7 +44,7 @@ impl StateSink for States {
             if end < len { self.before = state; } else { self.after = state; }
         }
     }
-    #[inline]
+    #[inline(always)]
     fn record(&mut self, row: usize, len: usize, state: impl FnOnce() -> Vec<f64>) {
         if row + 2 == len { self.before = Some(state()); }
         else if row + 1 == len { self.after = Some(state()); }
@@ -93,4 +93,37 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod publication_cost {
+    use super::*;
+    #[derive(Default)]
+    struct Calls(usize);
+    impl StateSink for Calls {
+        const CAPTURE: bool = true;
+        fn record(&mut self, _: usize, _: usize, _: impl FnOnce() -> Vec<f64>) { self.0 += 1; }
+        fn compose(&mut self, _: usize, _: &[&Self], _: impl Fn(usize, &mut Vec<f64>)) { self.0 += 1; }
+    }
+    #[test]
+    fn a_seeded_smoother_publishes_only_its_terminal_rows() {
+        for n in [100, 10_000] {
+            let data = vec![100.0; n];
+            let mut calls = Calls::default();
+            crate::raw::indicators::ema_pass(&data, 20, &mut calls);
+            assert_eq!(calls.0, 2, "n={n}");
+        }
+    }
+    #[test]
+    fn a_composite_uses_one_publication_envelope() {
+        for n in [100, 10_000] {
+            let data = vec![100.0; n];
+            let mut calls = Calls::default();
+            let values = crate::raw::indicators::bbi_pass(&data, 2, 3, 5, 20, 0, &mut calls);
+            assert_eq!(values.len(), n);
+            assert_eq!(values[n - 1], 100.0);
+            assert_eq!(calls.0, 1, "n={n}");
+        }
+    }
+
 }

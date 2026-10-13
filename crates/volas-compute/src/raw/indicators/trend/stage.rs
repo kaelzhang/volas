@@ -33,7 +33,7 @@ impl MaStage {
     pub fn pass<S: crate::pass::StateSink>(&self, data: &[f64], origin: usize, states: &mut S) -> Option<Vec<f64>> {
         if !S::CAPTURE && !self.complete { return Some(self.kind.compute(data, self.period, origin)); }
         Some(match self.kind {
-            MaKind::Finite(FiniteKind::Sma) => kernels::sma_pass(data.into(), self.period, origin, states).into_raw_vec_and_offset().0,
+            MaKind::Finite(FiniteKind::Sma) => kernels::sma_pass(data, self.period, origin, states),
             MaKind::Finite(FiniteKind::Wma) => super::wma_pass(data, self.period, origin, states),
             MaKind::Finite(FiniteKind::Trima) => super::trima_pass(data, self.period, origin, states),
             MaKind::Recursive(kind) => return kind.pass(data, self.period, self.complete, states),
@@ -201,7 +201,7 @@ impl RecursiveKind {
         let input = &*input;
         let mut raw = States::default();
         let result = match self {
-            Self::Ema => kernels::sma_seeded_pass(input.into(), p, kernels::ema_step(p), &mut raw).into_raw_vec_and_offset().0,
+            Self::Ema => kernels::sma_seeded_pass(input, p, kernels::ema_step(p), &mut raw),
             Self::Dema => super::dema_pass(input, p, &mut raw),
             Self::Tema => super::tema_pass(input, p, &mut raw),
             Self::Kama => super::kama_pass(input, p, 0, &mut raw),

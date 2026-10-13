@@ -15,8 +15,6 @@ use crate::accum::{shift_row, Csum};
 use crate::guard::{Order, Slide, Window};
 use crate::missing;
 use crate::raw::smoothing;
-use ndarray::{Array1, ArrayView1};
-use std::borrow::Cow;
 
 /// Simple moving average (a window is valid only when fully populated). Row 0 is at
 /// absolute position `origin` (see [`crate::accum`]).
@@ -26,16 +24,16 @@ use std::borrow::Cow;
 /// window's mean is that of its own rows however long the slide. A window holding a
 /// NaN is NaN.
 #[inline]
-pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
+pub fn sma(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
     sma_pass(data, period, origin, &mut ())
 }
 
 /// SMA batch pass with optional terminal-state publication.
 #[inline]
-pub fn sma_pass<S: crate::pass::StateSink>(data: ArrayView1<f64>, period: usize, origin: usize, states: &mut S) -> Array1<f64> {
+pub fn sma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let n = data.len();
     if period == 0 || period > n {
-        return Array1::from_elem(n, f64::NAN);
+        return vec![f64::NAN; n];
     }
     // Fast path — a clean sliding sum with no per-element NaN bookkeeping, the common
     // OHLCV case. A **leading** NaN prefix is skipped (cascaded indicators — trima,
@@ -48,7 +46,8 @@ pub fn sma_pass<S: crate::pass::StateSink>(data: ArrayView1<f64>, period: usize,
     //
     // The result is built write-once: the warm-up is filled with NaN, then each mean is
     // pushed — so the valid region is written once.
-    if let Some(src) = data.as_slice() {
+    {
+        let src = data;
         let start = src.iter().position(|x| !x.is_nan()).unwrap_or(n);
         let valid_start = (start + period - 1).min(n);
         let mut out = Vec::with_capacity(n); // reserve the full length so push never reallocs
@@ -73,7 +72,7 @@ pub fn sma_pass<S: crate::pass::StateSink>(data: ArrayView1<f64>, period: usize,
             states.record(i, n, || Slide::state([sum], period.min(i + 1).saturating_sub(i + 1 - start), origin + i + 1));
         }
         if clean && sum.value().is_finite() && (!S::CAPTURE || start < n.saturating_sub(1)) {
-            return Array1::from_vec(out);
+            return out;
         }
     }
     // Careful path — window-local (see [`crate::guard`]): the running sum holds only
@@ -121,22 +120,27 @@ pub(crate) fn sma_seed(data: impl Iterator<Item = f64>, period: usize) -> Option
 /// in `data` (e.g. `tr[0]`) is skipped for seeding; rows before the seed are warm-up
 /// `NaN`. The `step` is one of [`smoothing`]'s TA-Lib steps.
 #[inline]
-fn sma_seeded(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64) -> Array1<f64> {
+fn sma_seeded(data: &[f64], period: usize, step: impl Fn(f64, f64) -> f64) -> Vec<f64> {
     sma_seeded_pass(data, period, step, &mut ())
 }
 
 /// Seeded smoother publishing its terminal states from the value loop.
-pub fn sma_seeded_pass(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64, states: &mut impl crate::pass::StateSink) -> Array1<f64> {
+pub fn sma_seeded_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, step: impl Fn(f64, f64) -> f64, states: &mut S) -> Vec<f64> {
     let n = data.len();
-    let mut out = Array1::from_elem(n, f64::NAN);
+    let mut out = vec![f64::NAN; n];
     let Some((si, seed)) = sma_seed(data.iter().copied(), period) else { return out };
     let mut prev = seed;
     out[si] = prev;
-    states.record(si, n, || vec![prev]);
     for i in (si + 1)..n {
         prev = step(prev, data[i]);
         out[i] = prev;
-        states.record(i, n, || vec![prev]);
+    }
+    if S::CAPTURE {
+        // A seeded smoother's published value is its entire recurrence state.
+        // Read the last two stored values rather than dispatching a publisher per row.
+        for (i, &value) in out.iter().enumerate().skip(n.saturating_sub(2).max(si)) {
+            states.record(i, n, || vec![value]);
+        }
     }
     out
 }
@@ -170,7 +174,7 @@ pub(crate) fn ema_step(period: usize) -> impl Fn(f64, f64) -> f64 {
 /// `out[i] = ((out[i-1]·(period−1)) + x[i]) / period` ([`smoothing::Wilder`]),
 /// SMA-seeded. The division stays on the recurrence, as in TA-Lib's source.
 #[inline]
-pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+pub fn wilder(data: &[f64], period: usize) -> Vec<f64> {
     if period == 1 {
         return data.to_owned();
     }
@@ -195,10 +199,10 @@ pub(crate) fn wilder_last(data: &[f64], period: usize) -> Option<f64> {
 /// (the fast EMA seeds no later than the slow one): its callers order the periods by
 /// TA-Lib's rule first (`indicators::oscillator_order`).
 #[inline]
-pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array1<f64> {
+pub fn ema_diff_seeded(data: &[f64], fast: usize, slow: usize) -> Vec<f64> {
     debug_assert!(fast <= slow, "ema_diff_seeded needs fast <= slow, got {fast} > {slow}");
     let n = data.len();
-    let mut out = Array1::from_elem(n, f64::NAN);
+    let mut out = vec![f64::NAN; n];
     if fast == 0 || slow == 0 || n == 0 {
         return out;
     }
@@ -207,8 +211,7 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
     // One scan finds both SMA seeds (the period-th finite value for each).
     let (mut sf_sum, mut sf_cnt, mut sf_idx) = (0.0, 0usize, None);
     let (mut ss_sum, mut ss_cnt, mut ss_idx) = (0.0, 0usize, None);
-    for i in 0..n {
-        let x = data[i];
+    for (i, &x) in data.iter().enumerate() {
         if !x.is_nan() {
             if sf_idx.is_none() {
                 sf_sum += x;
@@ -229,8 +232,8 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
     let (Some(sf), Some(ss)) = (sf_idx, ss_idx) else {
         return out;
     };
-    let src = data.as_slice().expect("MACD inputs are contiguous");
-    let dst = out.as_slice_mut().expect("from_elem is contiguous");
+    let src = data;
+    let dst = &mut out;
     let mut pf = sf_sum / fast as f64; // fast EMA at its seed `sf`
                                        // Warm the fast EMA up to the slow seed (the slow EMA is not valid yet, so the
                                        // difference stays NaN until `ss`).
@@ -253,7 +256,7 @@ pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array
 /// out[i-1]` with `k = 2/(period+1)` ([`smoothing::ema`]), SMA-seeded (TA-Lib's default
 /// EMA seeding).
 #[inline]
-pub fn ema_seeded(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+pub fn ema_seeded(data: &[f64], period: usize) -> Vec<f64> {
     sma_seeded(data, period, ema_step(period))
 }
 
@@ -381,9 +384,9 @@ pub fn ema_cascade_step<const S: usize>(e: &mut [f64; S], x: f64, period: usize)
 
 /// EWMA seeded with an explicit initial value (used by KDJ).
 #[inline]
-pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1<f64> {
+pub fn ewma_with_init(data: &[f64], period: usize, init: f64) -> Vec<f64> {
     let n = data.len();
-    let mut result = Array1::from_elem(n, f64::NAN);
+    let mut result = vec![f64::NAN; n];
     if n == 0 {
         return result;
     }
@@ -497,26 +500,23 @@ pub fn rolling_max_min(high: &[f64], low: &[f64], period: usize) -> (Vec<f64>, V
 /// [`rolling_min`] / [`rolling_max`] (the hot-path gate counts their bodies).
 #[inline(always)]
 fn rolling_extremum(
-    data: ArrayView1<f64>,
+    data: &[f64],
     period: usize,
     reduce: impl Fn(f64, f64) -> f64,
     ident: f64,
-) -> Array1<f64> {
+) -> Vec<f64> {
     let n = data.len();
-    let mut result = Array1::from_elem(n, f64::NAN);
+    let mut result = vec![f64::NAN; n];
     if period == 0 || period > n {
         return result;
     }
-    let src: Cow<[f64]> = match data.as_slice() {
-        Some(s) => Cow::Borrowed(s),
-        None => Cow::Owned(data.to_vec()),
-    };
-    let dst = result.as_slice_mut().expect("from_elem is contiguous");
-    van_herk(&src, period, dst, reduce, ident);
+    let src = data;
+    let dst = &mut result;
+    van_herk(src, period, dst, reduce, ident);
     for v in dst.iter_mut() {
         *v = canonical_zero(*v);
     }
-    missing::blank_windows(dst, &src, period);
+    missing::blank_windows(dst, src, period);
     result
 }
 
@@ -524,13 +524,13 @@ fn rolling_extremum(
 ///
 /// O(n) van Herk sliding extremum — no deque, no indirect reads, and unlike a
 /// track-and-rescan it never degrades to O(n·period).
-pub fn rolling_min(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+pub fn rolling_min(data: &[f64], period: usize) -> Vec<f64> {
     rolling_extremum(data, period, f64::min, f64::INFINITY)
 }
 
 /// Rolling maximum over `period` (NaN while the window holds a missing value) — the
 /// mirror of [`rolling_min`].
-pub fn rolling_max(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
+pub fn rolling_max(data: &[f64], period: usize) -> Vec<f64> {
     rolling_extremum(data, period, f64::max, f64::NEG_INFINITY)
 }
 
@@ -607,9 +607,9 @@ pub use dispersion::*;
 
 /// First difference (`data[i] - data[i-1]`).
 #[inline]
-pub fn diff(data: ArrayView1<f64>) -> Array1<f64> {
+pub fn diff(data: &[f64]) -> Vec<f64> {
     let n = data.len();
-    let mut result = Array1::from_elem(n, f64::NAN);
+    let mut result = vec![f64::NAN; n];
     for i in 1..n {
         if !data[i].is_nan() && !data[i - 1].is_nan() {
             result[i] = data[i] - data[i - 1];
@@ -621,7 +621,6 @@ pub fn diff(data: ArrayView1<f64>) -> Array1<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
 
     /// `ema_cascade_final` declines (returns `None`) for the two degenerate shapes that
     /// produce an all-NaN cascade: a zero period or zero-depth cascade (kernels.rs:277),
@@ -639,8 +638,8 @@ mod tests {
 
     #[test]
     fn test_sma() {
-        let data = array![1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = sma(data.view(), 3, 0);
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let result = sma(&data, 3, 0);
         assert!(result[0].is_nan());
         assert!(result[1].is_nan());
         assert!((result[2] - 2.0).abs() < 1e-10);
@@ -650,8 +649,8 @@ mod tests {
 
     #[test]
     fn test_sma_with_nan() {
-        let data = array![f64::NAN, f64::NAN, 1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = sma(data.view(), 3, 0);
+        let data = vec![f64::NAN, f64::NAN, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let result = sma(&data, 3, 0);
         assert!(result[3].is_nan());
         assert!((result[4] - 2.0).abs() < 1e-10);
         assert!((result[6] - 4.0).abs() < 1e-10);
@@ -659,9 +658,9 @@ mod tests {
 
     #[test]
     fn test_rolling_min_max() {
-        let data = array![3.0, 1.0, 4.0, 1.0, 5.0];
-        let mn = rolling_min(data.view(), 3);
-        let mx = rolling_max(data.view(), 3);
+        let data = vec![3.0, 1.0, 4.0, 1.0, 5.0];
+        let mn = rolling_min(&data, 3);
+        let mx = rolling_max(&data, 3);
         assert!((mn[2] - 1.0).abs() < 1e-10);
         assert!((mx[2] - 4.0).abs() < 1e-10);
         assert!((mx[4] - 5.0).abs() < 1e-10);
@@ -669,8 +668,8 @@ mod tests {
 
     #[test]
     fn test_diff() {
-        let data = array![1.0, 3.0, 6.0];
-        let d = diff(data.view());
+        let data = vec![1.0, 3.0, 6.0];
+        let d = diff(&data);
         assert!(d[0].is_nan());
         assert!((d[1] - 2.0).abs() < 1e-10);
         assert!((d[2] - 3.0).abs() < 1e-10);
@@ -678,16 +677,16 @@ mod tests {
 
     #[test]
     fn empty_input_and_invalid_periods_return_nan() {
-        let empty = Array1::<f64>::zeros(0);
-        assert_eq!(sma(empty.view(), 3, 0).len(), 0);
-        assert_eq!(ewma_with_init(empty.view(), 3, 0.0).len(), 0);
+        let empty = Vec::<f64>::new();
+        assert_eq!(sma(&empty, 3, 0).len(), 0);
+        assert_eq!(ewma_with_init(&empty, 3, 0.0).len(), 0);
 
-        let d = array![1.0, 2.0];
-        assert!(rolling_min(d.view(), 5).iter().all(|x| x.is_nan())); // period > n
-        assert!(rolling_max(d.view(), 5).iter().all(|x| x.is_nan()));
-        assert!(rolling_std(d.view(), 5, 1, 0).iter().all(|x| x.is_nan()));
-        assert!(rolling_min(d.view(), 0).iter().all(|x| x.is_nan())); // period == 0
-        assert!(rolling_std(d.view(), 2, 2, 0).iter().all(|x| x.is_nan())); // ddof >= period
+        let d = vec![1.0, 2.0];
+        assert!(rolling_min(&d, 5).iter().all(|x| x.is_nan())); // period > n
+        assert!(rolling_max(&d, 5).iter().all(|x| x.is_nan()));
+        assert!(rolling_std(&d, 5, 1, 0).iter().all(|x| x.is_nan()));
+        assert!(rolling_min(&d, 0).iter().all(|x| x.is_nan())); // period == 0
+        assert!(rolling_std(&d, 2, 2, 0).iter().all(|x| x.is_nan())); // ddof >= period
     }
 
     // --- O(n) rewrite safety net -------------------------------------------
@@ -695,9 +694,6 @@ mod tests {
     // van Herk kernels MUST match these 1:1 (NaN-aware), including interior NaNs
     // that slide through a window — the case real OHLCV parity data never hits.
 
-    fn av(s: &[f64]) -> ArrayView1<'_, f64> {
-        ArrayView1::from(s)
-    }
 
     fn naive_sma(d: &[f64], p: usize) -> Vec<f64> {
         let n = d.len();
@@ -782,7 +778,7 @@ mod tests {
         d[7] = f64::NAN;
         d[123] = f64::NAN; // interior NaNs that slide through windows
         for p in [1usize, 2, 5, 20, 50] {
-            approx_eq_nan(&sma(av(&d), p, 0).to_vec(), &naive_sma(&d, p), 1e-9);
+            approx_eq_nan(&sma(&d, p, 0).to_vec(), &naive_sma(&d, p), 1e-9);
         }
     }
 
@@ -793,7 +789,7 @@ mod tests {
         for p in [2usize, 5, 20] {
             for ddof in [0usize, 1] {
                 approx_eq_nan(
-                    &rolling_std(av(&d), p, ddof, 0).to_vec(),
+                    &rolling_std(&d, p, ddof, 0).to_vec(),
                     &naive_std(&d, p, ddof),
                     1e-7,
                 );
@@ -808,12 +804,12 @@ mod tests {
         d[11] = f64::NAN; // a fully-NaN sub-run
         for p in [1usize, 3, 10, 30] {
             approx_eq_nan(
-                &rolling_min(av(&d), p).to_vec(),
+                &rolling_min(&d, p).to_vec(),
                 &naive_minmax(&d, p, false),
                 0.0,
             );
             approx_eq_nan(
-                &rolling_max(av(&d), p).to_vec(),
+                &rolling_max(&d, p).to_vec(),
                 &naive_minmax(&d, p, true),
                 0.0,
             );
@@ -824,10 +820,10 @@ mod tests {
     fn rolling_min_resurfaces_after_min_leaves_window() {
         // when the running min leaves the window, the next-smallest must surface
         let z = [5.0, 1.0, 2.0, 3.0, 4.0, 6.0];
-        let m = rolling_min(av(&z), 3).to_vec();
+        let m = rolling_min(&z, 3).to_vec();
         assert!(m[0].is_nan() && m[1].is_nan());
         assert_eq!(&m[2..], &[1.0, 1.0, 2.0, 3.0]);
-        let x = rolling_max(av(&z), 3).to_vec();
+        let x = rolling_max(&z, 3).to_vec();
         assert_eq!(&x[2..], &[5.0, 3.0, 4.0, 6.0]);
     }
 
@@ -837,15 +833,15 @@ mod tests {
     #[test]
     fn a_window_holding_a_missing_value_is_missing_for_minmax() {
         let d = [5.0, 4.0, f64::NAN, 6.0, 7.0, 8.0];
-        let m = rolling_min(av(&d), 3).to_vec();
+        let m = rolling_min(&d, 3).to_vec();
         assert!(m[..5].iter().all(|x| x.is_nan()));
         assert_eq!(m[5], 6.0);
-        let x = rolling_max(av(&d), 3).to_vec();
+        let x = rolling_max(&d, 3).to_vec();
         assert!(x[..5].iter().all(|x| x.is_nan()));
         assert_eq!(x[5], 8.0);
         let d = [f64::NAN, f64::NAN, 1.0, f64::NAN, f64::NAN];
-        assert!(rolling_min(av(&d), 2).iter().all(|x| x.is_nan()));
-        assert_eq!(rolling_max(av(&d), 1).to_vec()[2], 1.0);
+        assert!(rolling_min(&d, 2).iter().all(|x| x.is_nan()));
+        assert_eq!(rolling_max(&d, 1).to_vec()[2], 1.0);
     }
 
     /// Edge / dual-path branches the production callers never reach: a kernel's
@@ -855,22 +851,22 @@ mod tests {
     fn kernel_edge_and_dual_paths() {
         // sma: a NaN *after* a finite prefix poisons the fast running sum, forcing
         // the precise slow path.
-        let s = sma(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2, 0).to_vec();
+        let s = sma(&[1.0, 2.0, f64::NAN, 4.0, 5.0], 2, 0).to_vec();
         assert_eq!(s[1], 1.5);
         assert!(s[2].is_nan() && s[3].is_nan());
         assert_eq!(s[4], 4.5);
 
         // sma_seeded (via wilder / ema_seeded): empty, zero period, and fewer than
         // `period` finite values (no seed found).
-        assert_eq!(wilder(av(&[]), 3).len(), 0);
-        assert_eq!(ema_seeded(av(&[1.0, 2.0]), 0).len(), 2);
-        assert!(wilder(av(&[f64::NAN, 1.0]), 3).iter().all(|x| x.is_nan()));
+        assert_eq!(wilder(&[], 3).len(), 0);
+        assert_eq!(ema_seeded(&[1.0, 2.0], 0).len(), 2);
+        assert!(wilder(&[f64::NAN, 1.0], 3).iter().all(|x| x.is_nan()));
 
         // ema_diff_seeded: zero period, and data too short for the slow seed.
-        assert!(ema_diff_seeded(av(&[1.0, 2.0]), 0, 2)
+        assert!(ema_diff_seeded(&[1.0, 2.0], 0, 2)
             .iter()
             .all(|x| x.is_nan()));
-        assert!(ema_diff_seeded(av(&[1.0, 2.0]), 2, 5)
+        assert!(ema_diff_seeded(&[1.0, 2.0], 2, 5)
             .iter()
             .all(|x| x.is_nan()));
 
@@ -890,29 +886,24 @@ mod tests {
         assert_eq!(ll[1..], [1.0, 2.0, 3.0]);
 
         // rolling_min / rolling_max: zero period and period > n.
-        assert!(rolling_min(av(&[1.0]), 0).iter().all(|x| x.is_nan()));
-        assert!(rolling_max(av(&[1.0]), 5).iter().all(|x| x.is_nan()));
+        assert!(rolling_min(&[1.0], 0).iter().all(|x| x.is_nan()));
+        assert!(rolling_max(&[1.0], 5).iter().all(|x| x.is_nan()));
 
         // rolling_std: NaN-free fast path (its only caller `hv` feeds NaN).
-        let std = rolling_std(av(&[1.0, 2.0, 3.0, 4.0, 5.0]), 3, 1, 0).to_vec();
+        let std = rolling_std(&[1.0, 2.0, 3.0, 4.0, 5.0], 3, 1, 0).to_vec();
         assert!(std[0].is_nan() && std[1].is_nan());
         assert!((std[2] - 1.0).abs() < 1e-12);
 
         // rolling_mean_std: interior-NaN slow path (its callers feed clean closes).
-        let (m, sd) = rolling_mean_std(av(&[1.0, 2.0, f64::NAN, 4.0, 5.0]), 2, 0, 0);
+        let (m, sd) = rolling_mean_std(&[1.0, 2.0, f64::NAN, 4.0, 5.0], 2, 0, 0);
         assert_eq!(m[1], 1.5);
         assert!(m[2].is_nan() && sd[2].is_nan());
 
-        // Non-contiguous (strided) input: `as_slice()` is None, so the fast path's
-        // if-let does not match and the NaN-aware slow path runs instead.
-        let arr = ndarray::Array1::from(vec![1.0, 9.0, 2.0, 8.0, 3.0, 7.0, 4.0, 6.0]);
-        let strided = arr.slice(ndarray::s![..;2]); // [1, 2, 3, 4], stride 2
-        assert!(!strided.is_standard_layout() || strided.as_slice().is_none());
-        let _ = sma(strided, 2, 0);
-        assert_eq!(rolling_min(strided, 2).to_vec()[1..], [1.0, 2.0, 3.0]);
-        assert_eq!(rolling_max(strided, 2).to_vec()[1..], [2.0, 3.0, 4.0]);
-        let _ = rolling_std(strided, 2, 1, 0);
-        let _ = rolling_mean_std(strided, 2, 0, 0);
+        // Interop callers gather non-contiguous arrays before entering compute.
+        let arr = [1.0, 9.0, 2.0, 8.0, 3.0, 7.0, 4.0, 6.0];
+        let gathered: Vec<_> = arr.iter().step_by(2).copied().collect();
+        assert_eq!(rolling_min(&gathered, 2)[1..], [1.0, 2.0, 3.0]);
+        assert_eq!(rolling_max(&gathered, 2)[1..], [2.0, 3.0, 4.0]);
 
         // The naive reference helpers' own degenerate-period guards.
         assert!(naive_sma(&[1.0], 0).iter().all(|x| x.is_nan()));
@@ -924,9 +915,9 @@ mod tests {
     fn rolling_std_recovers_after_an_infinity_leaves() {
         // Finite but for one +inf: the fast path must not trust a NaN-free input.
         let mut d: Vec<f64> = (0..12).map(|i| (i as f64 * 0.7).sin()).collect();
-        let clean = rolling_std(av(&d), 3, 1, 0).to_vec();
+        let clean = rolling_std(&d, 3, 1, 0).to_vec();
         d[4] = f64::INFINITY;
-        let got = rolling_std(av(&d), 3, 1, 0).to_vec();
+        let got = rolling_std(&d, 3, 1, 0).to_vec();
         assert!(got[4..7].iter().all(|v| v.is_nan()));
         for i in 7..12 {
             assert!((got[i] - clean[i]).abs() < 1e-12, "row {i}: {} vs {}", got[i], clean[i]);
@@ -941,6 +932,6 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "fast <= slow")]
     fn ema_diff_seeded_rejects_a_fast_period_longer_than_the_slow() {
-        let _ = ema_diff_seeded(av(&[3.0, 1.5, 4.25, 2.0, 5.5]), 5, 2);
+        let _ = ema_diff_seeded(&[3.0, 1.5, 4.25, 2.0, 5.5], 5, 2);
     }
 }

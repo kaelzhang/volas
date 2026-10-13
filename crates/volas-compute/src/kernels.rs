@@ -12,48 +12,28 @@
 
 pub use crate::raw::kernels::*;
 
-use ndarray::{Array1, ArrayView1};
 
 use crate::missing::{is_missing, on_complete_rows, state_on_complete_rows, Input};
 use crate::raw::kernels as raw;
 
-/// Run the array kernel `kernel` on the complete rows of `data`.
-fn on_complete_view(
-    data: ArrayView1<f64>,
-    kernel: impl FnOnce(ArrayView1<f64>) -> Array1<f64>,
-) -> Array1<f64> {
-    let owned;
-    let values = match data.as_slice() {
-        Some(values) => values,
-        None => {
-            owned = data.to_vec(); // a strided view: one contiguous copy
-            &owned
-        }
-    };
-    let out = on_complete_rows(&[Input::new(values)], |rows| {
-        kernel(ArrayView1::from(rows[0])).into_raw_vec_and_offset().0
-    });
-    Array1::from(out)
-}
-
 /// [`raw::wilder`] over the complete rows of `data`.
-pub fn wilder(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    on_complete_view(data, |x| raw::wilder(x, period))
+pub fn wilder(data: &[f64], period: usize) -> Vec<f64> {
+    on_complete_rows(&[Input::new(data)], |rows| raw::wilder(rows[0], period))
 }
 
 /// [`raw::ema_seeded`] over the complete rows of `data`.
-pub fn ema_seeded(data: ArrayView1<f64>, period: usize) -> Array1<f64> {
-    on_complete_view(data, |x| raw::ema_seeded(x, period))
+pub fn ema_seeded(data: &[f64], period: usize) -> Vec<f64> {
+    on_complete_rows(&[Input::new(data)], |rows| raw::ema_seeded(rows[0], period))
 }
 
 /// [`raw::ema_diff_seeded`] over the complete rows of `data`.
-pub fn ema_diff_seeded(data: ArrayView1<f64>, fast: usize, slow: usize) -> Array1<f64> {
-    on_complete_view(data, |x| raw::ema_diff_seeded(x, fast, slow))
+pub fn ema_diff_seeded(data: &[f64], fast: usize, slow: usize) -> Vec<f64> {
+    on_complete_rows(&[Input::new(data)], |rows| raw::ema_diff_seeded(rows[0], fast, slow))
 }
 
 /// [`raw::ewma_with_init`] over the complete rows of `data`.
-pub fn ewma_with_init(data: ArrayView1<f64>, period: usize, init: f64) -> Array1<f64> {
-    on_complete_view(data, |x| raw::ewma_with_init(x, period, init))
+pub fn ewma_with_init(data: &[f64], period: usize, init: f64) -> Vec<f64> {
+    on_complete_rows(&[Input::new(data)], |rows| raw::ewma_with_init(rows[0], period, init))
 }
 
 /// [`raw::ema_cascade`] over the complete rows of `data`.

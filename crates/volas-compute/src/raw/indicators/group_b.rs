@@ -4,7 +4,6 @@
 //! accumulators publish their continuation states from the batch pass; recursive
 //! members carry a `*_final_state` / `*_resume` pair like Group A.
 
-use crate::raw::indicators::av;
 use crate::raw::kernels;
 
 mod resume;
@@ -14,7 +13,9 @@ use resume::{br_terms, dkx_mid, roc_at, swma4_at, vr_volumes, wvad_term};
 /// Rolling `n`-window sum that skips a leading-NaN prefix — so a series with an undefined
 /// first bar (`tr`, prev-close diffs) sums from its first finite value — via `sma * n`.
 fn rolling_sum(x: &[f64], n: usize, origin: usize) -> Vec<f64> {
-    (kernels::sma(av(x), n, origin) * n as f64).to_vec()
+    let mut out = kernels::sma(x, n, origin);
+    for x in &mut out { *x *= n as f64; }
+    out
 }
 
 /// Vortex Indicator (+VI / −VI): `+VM = |high − prev low|`, `−VM = |low − prev high|`;
@@ -74,7 +75,8 @@ pub fn vr_pass<S: crate::pass::StateSink>(close: &[f64], volume: &[f64], n: usiz
         [uv[i], dv[i], pv[i]] = vr_volumes(close, volume, i);
     }
     let (mut a, mut b, mut c) = (S::default(), S::default(), S::default());
-    let (suv, sdv, spv) = (kernels::sma_pass(av(&uv), n, origin, &mut a) * n as f64, kernels::sma_pass(av(&dv), n, origin, &mut b) * n as f64, kernels::sma_pass(av(&pv), n, origin, &mut c) * n as f64);
+    let (mut suv, mut sdv, mut spv) = (kernels::sma_pass(&uv, n, origin, &mut a), kernels::sma_pass(&dv, n, origin, &mut b), kernels::sma_pass(&pv, n, origin, &mut c));
+    for values in [&mut suv, &mut sdv, &mut spv] { for x in values { *x *= n as f64; } }
     states.compose(len, &[&a, &b, &c], |_, _| {});
     (0..len)
         .map(|i| (suv[i] + 0.5 * spv[i]) / (sdv[i] + 0.5 * spv[i]) * 100.0)
@@ -125,8 +127,8 @@ pub fn relative_vigor_pass<S: crate::pass::StateSink>(open: &[f64],
     let co: Vec<f64> = (0..len).map(|i| close[i] - open[i]).collect();
     let hl: Vec<f64> = (0..len).map(|i| high[i] - low[i]).collect();
     let (mut a, mut b) = (S::default(), S::default());
-    let num = kernels::sma_pass(av(&swma4(&co)), n, origin, &mut a);
-    let den = kernels::sma_pass(av(&swma4(&hl)), n, origin, &mut b);
+    let num = kernels::sma_pass(&swma4(&co), n, origin, &mut a);
+    let den = kernels::sma_pass(&swma4(&hl), n, origin, &mut b);
     states.compose(len, &[&a, &b], |_, _| {});
     (0..len).map(|i| num[i] / den[i]).collect()
 }
@@ -177,7 +179,7 @@ pub fn dkx_ma(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, 
 pub fn dkx_ma_pass<S: crate::pass::StateSink>(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let (mut a, mut b) = (S::default(), S::default());
     let line = dkx_pass(open, high, low, close, origin, &mut a);
-    let values = kernels::sma_pass(av(&line), m, origin, &mut b).to_vec();
+    let values = kernels::sma_pass(&line, m, origin, &mut b);
     states.compose(close.len(), &[&a, &b], |end, out| out.extend_from_slice(&line[end.saturating_sub(m)..end]));
     values
 }
@@ -206,7 +208,9 @@ pub fn wvad_pass<S: crate::pass::StateSink>(open: &[f64],
     n: usize,
     origin: usize, states: &mut S) -> Vec<f64> {
     let w: Vec<f64> = (0..close.len()).map(|i| wvad_term(open, high, low, close, volume, i)).collect();
-    (kernels::sma_pass(av(&w), n, origin, states) * n as f64).to_vec()
+    let mut out = kernels::sma_pass(&w, n, origin, states);
+    for x in &mut out { *x *= n as f64; }
+    out
 }
 
 /// Which CDP support/resistance line to emit.
@@ -642,7 +646,7 @@ pub fn ttm_squeeze_on(
     let sma = super::ma(close, n, origin);
     let sd = super::stddev(close, n, 1.0, origin);
     let tr = super::tr(high, low, close);
-    let atr = kernels::sma(av(&tr), n, origin).to_vec(); // SMA of TR (skips the leading-NaN tr[0])
+    let atr = kernels::sma(&tr, n, origin); // SMA of TR (skips the leading-NaN tr[0])
     (0..len)
         .map(|i| {
             let bb_u = sma[i] + bb_mult * sd[i];

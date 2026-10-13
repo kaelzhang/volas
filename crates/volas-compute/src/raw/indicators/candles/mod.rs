@@ -33,7 +33,6 @@ pub use two_bar::*;
 use crate::accum::Csum;
 use crate::missing;
 use crate::raw::kernels;
-use ndarray::ArrayView1;
 
 /// An OHLC candle recogniser: `(open, high, low, close) -> signal`.
 type PlainFn = fn(&[f64], &[f64], &[f64], &[f64], usize) -> Vec<f64>;
@@ -323,7 +322,7 @@ fn range_mean(range: RangeType, p: usize, o: &[f64], h: &[f64], l: &[f64], c: &[
         return out;
     }
     let ranges: Vec<f64> = (0..n).map(r).collect();
-    kernels::sma(ArrayView1::from(&ranges), p, origin).to_vec()
+    kernels::sma(&ranges, p, origin)
 }
 
 /// A setting's average at bar `i` from its range's mean series `mean` ([`range_mean`]):

@@ -1,8 +1,6 @@
 //! MACD line / signal / histogram and their state-carry resume.
 
-use ndarray::Array1;
 
-use crate::raw::indicators::av;
 use crate::raw::smoothing::{self, ema_k};
 use crate::raw::kernels;
 
@@ -21,34 +19,53 @@ fn oscillator_periods(fast: usize, slow: usize) -> (usize, usize) {
     (fast, slow)
 }
 
-fn macd_line(close: &[f64], fast: usize, slow: usize) -> Array1<f64> {
+fn macd_line(close: &[f64], fast: usize, slow: usize) -> Vec<f64> {
     // TA-Lib MACD line = fast EMA - slow EMA (SMA-seeded EMAs). Best practice: the
     // line is emitted from its natural start (the slow EMA's first valid row), not
     // delayed to the signal line's start as TA-Lib's aligned 3-output form does.
     // `ema_diff_seeded` fuses both EMAs into one interleaved pass (ILP over the two
     // independent recurrences) and emits the difference directly.
-    kernels::ema_diff_seeded(av(close), fast, slow)
+    kernels::ema_diff_seeded(close, fast, slow)
 }
 
 /// MACD line (DIF).
 pub fn macd(close: &[f64], fast: usize, slow: usize) -> Vec<f64> {
     let (fast, slow) = oscillator_periods(fast, slow);
-    macd_line(close, fast, slow).to_vec()
+    macd_line(close, fast, slow)
 }
 
 /// MACD signal line (DEA) — SMA-seeded EMA of the MACD line.
 pub fn macd_signal(close: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
     let (fast, slow) = oscillator_periods(fast, slow);
-    let line = macd_line(close, fast, slow);
-    kernels::ema_seeded(line.view(), signal).to_vec()
+    macd_signal_line(macd_line(close, fast, slow), signal)
 }
 
 /// MACD histogram — TA-Lib convention `MACD - signal` (not the stock-pandas `2x`).
 pub fn macd_histogram(close: &[f64], fast: usize, slow: usize, signal: usize) -> Vec<f64> {
     let (fast, slow) = oscillator_periods(fast, slow);
-    let line = macd_line(close, fast, slow);
-    let sig = kernels::ema_seeded(line.view(), signal);
-    (&line - &sig).to_vec()
+    let mut line = macd_line(close, fast, slow);
+    let sig = kernels::ema_seeded(&line, signal);
+    for (x, s) in line.iter_mut().zip(sig) { *x -= s; }
+    line
+}
+
+/// Consume the owned line into its selected signal output. The seed and each EMA
+/// step have the same source order as `ema_seeded`; the original line value is
+/// read before overwriting it, so the signal needs no second column.
+fn macd_signal_line(mut line: Vec<f64>, period: usize) -> Vec<f64> {
+    let seed = kernels::sma_seed(line.iter().copied(), period);
+    let start = seed.map_or(line.len(), |(i, _)| i);
+    line[..start].fill(f64::NAN);
+    if let Some((i, mut prev)) = seed {
+        let k = ema_k(period);
+        line[i] = prev;
+        for value in &mut line[i + 1..] {
+            let x = *value;
+            prev = smoothing::ema(prev, x, k);
+            *value = prev;
+        }
+    }
+    line
 }
 
 /// The fast/slow EMA pair `(pf, ps)` as of the last row after a full MACD-line compute,
@@ -105,7 +122,7 @@ pub fn macd_signal_final_state(
     let (fast, slow) = oscillator_periods(fast, slow);
     // The line over full history (its NaN warm-up is what the signal SMA-seeds past).
     let line = macd_line(close, fast, slow);
-    let line = line.as_slice().expect("macd line is contiguous");
+    let line = &line;
     let (pf, ps) = macd_emas_final(close, fast, slow)?;
     let sig = kernels::sma_seeded_last(line, signal, kernels::ema_step(signal))?;
     Some(vec![pf, ps, sig])

@@ -55,7 +55,7 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
         }
         ("ma", _) if ind::generic_ma_type(p(0), p(1)) == 0 => {
             let x = close()?;
-            KernelPass::run(|s| kernels::sma_pass((&*x).into(), p(0), origin, s).into_raw_vec_and_offset().0)
+            KernelPass::run(|s| kernels::sma_pass(&x, p(0), origin, s))
         }
         ("ma", _) | ("wma" | "trima" | "sum", _) => {
             let x = close()?;
@@ -74,17 +74,16 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
         }
         ("boll" | "accbands", None) => {
             let x = close()?;
-            KernelPass::run(|s| kernels::sma_pass((&*x).into(), p(0), origin, s).into_raw_vec_and_offset().0)
+            KernelPass::run(|s| kernels::sma_pass(&x, p(0), origin, s))
         }
         ("boll", Some(_)) | ("bbw", _) => {
             let x = close()?;
             KernelPass::run(|s| {
-                let (m, d) = kernels::rolling_mean_std_pass((&*x).into(), p(0), 0, origin, s);
-                m.iter().zip(&d).map(|(m, d)| match cmd.sub {
+                kernels::rolling_dispersion_pass(&x, p(0), 0, origin, s, |m, d| match cmd.sub {
                     Some("upper") => m + arg_f64(cmd.args, 1) * d,
                     Some(_) => m - arg_f64(cmd.args, 1) * d,
                     None => 4.0 * d / m,
-                }).collect()
+                })
             })
         }
         ("vwma", _) => {

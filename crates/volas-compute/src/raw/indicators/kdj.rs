@@ -1,9 +1,7 @@
 //! The KDJ stochastic oscillator (`k` / `d` / `j` lines) and its append-resume
 //! state — split out of `oscillators` to keep each indicator file focused.
 
-use ndarray::Array1;
 
-use super::av;
 use super::oscillators::rsv_value;
 use crate::missing;
 use crate::raw::kernels::{self, canonical_zero};
@@ -12,11 +10,11 @@ use crate::raw::kernels::{self, canonical_zero};
 /// full window — over the bars available so far (the 通达信 convention for KDJ, a
 /// China-origin indicator: `LLV` / `HHV` of fewer bars than the period reduce what there
 /// is). So %K is seeded from real RSVs, never from a warm-up placeholder.
-fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Array1<f64> {
-    let llv = kernels::rolling_min(av(low), period_rsv);
-    let hhv = kernels::rolling_max(av(high), period_rsv);
+fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Vec<f64> {
+    let llv = kernels::rolling_min(low, period_rsv);
+    let hhv = kernels::rolling_max(high, period_rsv);
     let n = close.len();
-    let mut rsv = Array1::from_elem(n, f64::NAN);
+    let mut rsv = vec![f64::NAN; n];
     let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
     for i in 0..n {
         rsv[i] = if i + 1 < period_rsv {
@@ -41,7 +39,7 @@ pub fn kdj_k(
     init: f64,
 ) -> Vec<f64> {
     let rsv = kdj_rsv(high, low, close, period_rsv);
-    kernels::ewma_with_init(rsv.view(), period_k, init).to_vec()
+    kernels::ewma_with_init(&rsv, period_k, init)
 }
 
 /// KDJ %D line.
@@ -55,8 +53,8 @@ pub fn kdj_d(
     init: f64,
 ) -> Vec<f64> {
     let rsv = kdj_rsv(high, low, close, period_rsv);
-    let k = kernels::ewma_with_init(rsv.view(), period_k, init);
-    kernels::ewma_with_init(k.view(), period_d, init).to_vec()
+    let k = kernels::ewma_with_init(&rsv, period_k, init);
+    kernels::ewma_with_init(&k, period_d, init)
 }
 
 /// KDJ %J line (`3K - 2D`).
@@ -70,9 +68,11 @@ pub fn kdj_j(
     init: f64,
 ) -> Vec<f64> {
     let rsv = kdj_rsv(high, low, close, period_rsv);
-    let k = kernels::ewma_with_init(rsv.view(), period_k, init);
-    let d = kernels::ewma_with_init(k.view(), period_d, init);
-    (3.0 * &k - 2.0 * &d).to_vec()
+    let k = kernels::ewma_with_init(&rsv, period_k, init);
+    let d = kernels::ewma_with_init(&k, period_d, init);
+    let mut out = k;
+    for (k, d) in out.iter_mut().zip(d) { *k = 3.0 * *k - 2.0 * d; }
+    out
 }
 
 /// The KDJ line a resume emits: %K, %D, or %J (`3K - 2D`).
@@ -104,11 +104,11 @@ pub fn kdj_final_state(
         return None;
     }
     let rsv = kdj_rsv(high, low, close, period_rsv);
-    let k = kernels::ewma_with_init(rsv.view(), period_k, init);
+    let k = kernels::ewma_with_init(&rsv, period_k, init);
     if !want_d {
         return Some(vec![k[n - 1]]);
     }
-    let d = kernels::ewma_with_init(k.view(), period_d, init);
+    let d = kernels::ewma_with_init(&k, period_d, init);
     Some(vec![k[n - 1], d[n - 1]])
 }
 

@@ -11,8 +11,10 @@
 //! functions through; [`raw`] holds the recursive functions without it (TA-Lib's
 //! semantics: a NaN propagates).
 //!
-//! Depends on `volas-core` only for the shared error type; it does not touch the
-//! DataFrame data model.
+//! This crate has no dependencies. Inputs are borrowed slices; outputs are owned
+//! `Vec`s. Array interoperability belongs to the caller.
+
+#![doc = include_str!("../README.md")]
 
 mod accum;
 mod buf;

@@ -111,7 +111,7 @@ impl Infinities {
 /// are kept exactly by [`Exact`] expansions once the compensated form can no longer
 /// hold them — after an extreme value (its magnitude far from the rest's), every later
 /// row is added to the expansion and rounded from it, an `O(expansion words)` step with
-/// an allocation per row instead of the compensated add, for the rest of that series.
+/// inline storage for common expansions instead of the compensated add, for the rest of that series.
 /// `read(sums, infinities, count)`.
 fn present_sums<const K: usize>(
     data: &[f64],
@@ -119,6 +119,17 @@ fn present_sums<const K: usize>(
     min_periods: usize,
     terms: impl Fn(f64) -> [f64; K],
     read: impl Fn(&[Csum; K], f64, usize) -> f64,
+) -> Vec<f64> {
+    present_sums_at(data, window, min_periods, terms, |_, sums, inf, count| read(sums, inf, count))
+}
+
+/// The same exact slide, with the window's endpoint available to its reader.
+fn present_sums_at<const K: usize>(
+    data: &[f64],
+    window: usize,
+    min_periods: usize,
+    terms: impl Fn(f64) -> [f64; K],
+    mut read: impl FnMut(usize, &[Csum; K], f64, usize) -> f64,
 ) -> Vec<f64> {
     let rolling = window != usize::MAX;
     let min_periods = min_periods.max(1);
@@ -172,7 +183,7 @@ fn present_sums<const K: usize>(
         if let Some(e) = &expansion {
             sums = std::array::from_fn(|j| e[j].to_csum());
         }
-        out.push(if count >= min_periods { read(&sums, inf.value(), count) } else { f64::NAN });
+        out.push(if count >= min_periods { read(i, &sums, inf.value(), count) } else { f64::NAN });
     }
     out
 }
@@ -334,10 +345,24 @@ pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
     })
 }
 
+/// Borrow finite windows and read their exact mean from the shared sliding sum.
+/// Central moments still reduce in the original row order. Missing/non-finite
+/// inputs retain the present-value gather and direct exact mean.
+fn per_moment(data: &[f64], window: usize, min_periods: usize, mut f: impl FnMut(&[f64], f64) -> f64) -> Vec<f64> {
+    if window == 0 { return vec![f64::NAN; data.len()]; }
+    if data.iter().all(|x| x.is_finite()) {
+        present_sums_at(data, window, min_periods, |x| [x], |i, sums, _, count| {
+            f(&data[win_start(i, window)..=i], sums[0].mean(count as f64))
+        })
+    } else {
+        per_window(data, window, min_periods, |b| f(b, window_mean(b)))
+    }
+}
+
 /// Bias-corrected sample skewness (pandas `skew`; needs >= 3 present values). A
 /// constant window is exactly `0` (pandas 3's degenerate-window rule).
 pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    per_window(data, window, min_periods, |b| {
+    per_moment(data, window, min_periods, |b, m| {
         let n = b.len() as f64;
         if b.len() < 3 {
             return f64::NAN;
@@ -345,7 +370,6 @@ pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
         if is_constant(b) {
             return 0.0;
         }
-        let m = window_mean(b);
         let m2 = b.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n;
         let m3 = b.iter().map(|x| (x - m).powi(3)).sum::<f64>() / n;
         if m2 <= 0.0 {
@@ -358,7 +382,7 @@ pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
 /// Bias-corrected excess kurtosis (pandas `kurt`; needs >= 4 present values). A
 /// constant window is exactly `-3` (pandas 3's degenerate-window rule).
 pub fn kurt(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    per_window(data, window, min_periods, |b| {
+    per_moment(data, window, min_periods, |b, m| {
         let n = b.len() as f64;
         if b.len() < 4 {
             return f64::NAN;
@@ -366,7 +390,6 @@ pub fn kurt(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
         if is_constant(b) {
             return -3.0;
         }
-        let m = window_mean(b);
         let m2 = b.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n;
         let m4 = b.iter().map(|x| (x - m).powi(4)).sum::<f64>() / n;
         if m2 <= 0.0 {
@@ -870,3 +893,6 @@ pub fn ewm_corr(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

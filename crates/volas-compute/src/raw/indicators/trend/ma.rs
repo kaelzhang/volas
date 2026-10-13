@@ -6,7 +6,6 @@ use crate::guard::{all_finite, own_sums, ring_push, state_after, Order, Slide, W
 use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 use crate::missing;
 use super::MaStage;
-use crate::raw::indicators::av;
 use crate::raw::kernels;
 use crate::raw::smoothing;
 
@@ -14,7 +13,7 @@ use crate::raw::smoothing;
 /// [`crate::accum`]).
 pub fn ma(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
     // Move the kernel's owned buffer out (no copy) rather than `to_vec`.
-    kernels::sma(av(close), period, origin).into_raw_vec_and_offset().0
+    kernels::sma(close, period, origin)
 }
 
 /// Exponential moving average (TA-Lib: SMA-seeded, `k = 2/(period+1)`).
@@ -24,12 +23,12 @@ pub fn ema(close: &[f64], period: usize) -> Vec<f64> {
 
 /// EMA batch values and the terminal recurrence states from the same pass.
 pub fn ema_pass(close: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
-    kernels::sma_seeded_pass(av(close), period, kernels::ema_step(period), states).into_raw_vec_and_offset().0
+    kernels::sma_seeded_pass(close, period, kernels::ema_step(period), states)
 }
 
 /// Smoothed moving average (Wilder's RMA: SMA-seeded, `alpha = 1/period`).
 pub fn smma(close: &[f64], period: usize) -> Vec<f64> {
-    kernels::wilder(av(close), period).into_raw_vec_and_offset().0
+    kernels::wilder(close, period)
 }
 
 // --- EMA-family state-carry (additive; the full-recompute fallback stays correct) ---
@@ -144,7 +143,6 @@ pub fn wma(data: &[f64], period: usize, _origin: usize) -> Vec<f64> {
 /// WMA batch pass with terminal-state publication.
 pub fn wma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, _origin: usize, states: &mut S) -> Vec<f64> {
     let n = data.len();
-    let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
         if S::CAPTURE {
             let mut prev = wma_initial();
@@ -155,12 +153,13 @@ pub fn wma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, _origin:
                 std::mem::swap(&mut prev, &mut next);
             }
         }
-        return out;
+        return vec![f64::NAN; n];
     }
     // Skip a leading-NaN warm-up prefix (derived inputs — e.g. the stochastic %K line —
     // warm up with NaN): compute from the first finite value onward, mirroring sma/ema.
     let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
     if start > 0 {
+        let mut out = vec![f64::NAN; n];
         if n >= 2 && start >= n - 1 {
             states.record(n - 2, n, wma_initial);
             states.record(n - 1, n, wma_initial);
@@ -422,14 +421,16 @@ pub fn bbi(close: &[f64], a: usize, b: usize, c: usize, d: usize, origin: usize)
 
 /// Batch computation with terminal-state publication.
 pub fn bbi_pass<S: crate::pass::StateSink>(close: &[f64], a: usize, b: usize, c: usize, d: usize, origin: usize, states: &mut S) -> Vec<f64> {
-    let data = av(close);
+    let data = close;
     let (mut sa, mut sb, mut sc, mut sd) = (S::default(), S::default(), S::default(), S::default());
     let ma_a = kernels::sma_pass(data, a, origin, &mut sa);
     let ma_b = kernels::sma_pass(data, b, origin, &mut sb);
     let ma_c = kernels::sma_pass(data, c, origin, &mut sc);
     let ma_d = kernels::sma_pass(data, d, origin, &mut sd);
     states.compose(close.len(), &[&sa, &sb, &sc, &sd], |_, _| {});
-    ((&ma_a + &ma_b + &ma_c + &ma_d) / 4.0).to_vec()
+    let mut out = ma_a;
+    for (((a, b), c), d) in out.iter_mut().zip(ma_b).zip(ma_c).zip(ma_d) { *a = ((*a + b) + c + d) / 4.0; }
+    out
 }
 
 // ---------------------------------------------------------------------------

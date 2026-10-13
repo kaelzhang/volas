@@ -15,7 +15,6 @@
 //!
 //! All bit-exact. Generated from the declarations in `src/indicators.rs`.
 
-use ndarray::{Array1, ArrayView1};
 use volas_compute::indicators::{self as ind, KdjLine};
 use volas_compute::kernels as kern;
 use volas_compute::raw::{indicators as raw, kernels as raw_kern};
@@ -98,11 +97,6 @@ impl Flat for (Vec<f64>, Vec<f64>) {
 impl Flat for Option<Vec<f64>> {
     fn flat(self) -> Vec<Vec<f64>> {
         self.into_iter().collect()
-    }
-}
-impl Flat for Array1<f64> {
-    fn flat(self) -> Vec<Vec<f64>> {
-        vec![self.to_vec()]
     }
 }
 
@@ -704,23 +698,20 @@ fn one(st: &[f64], f: impl FnOnce(&mut [f64]) -> Option<f64>) -> (Option<f64>, V
     (v, next)
 }
 
-fn av<'a>(x: &[&'a [f64]]) -> ArrayView1<'a, f64> {
-    ArrayView1::from(x[0])
-}
 
 #[test]
 fn the_recursive_kernels_run_on_the_complete_rows() {
     let d = data();
     let x = [&d.close[..]];
-    series("wilder", &x, &|x| kern::wilder(av(x), 5).flat(), &|x| raw_kern::wilder(av(x), 5).flat());
-    series("ema_seeded", &x, &|x| kern::ema_seeded(av(x), 5).flat(), &|x| {
-        raw_kern::ema_seeded(av(x), 5).flat()
+    series("wilder", &x, &|x| kern::wilder(x[0], 5).flat(), &|x| raw_kern::wilder(x[0], 5).flat());
+    series("ema_seeded", &x, &|x| kern::ema_seeded(x[0], 5).flat(), &|x| {
+        raw_kern::ema_seeded(x[0], 5).flat()
     });
-    series("ema_diff_seeded", &x, &|x| kern::ema_diff_seeded(av(x), 3, 6).flat(), &|x| {
-        raw_kern::ema_diff_seeded(av(x), 3, 6).flat()
+    series("ema_diff_seeded", &x, &|x| kern::ema_diff_seeded(x[0], 3, 6).flat(), &|x| {
+        raw_kern::ema_diff_seeded(x[0], 3, 6).flat()
     });
-    series("ewma_with_init", &x, &|x| kern::ewma_with_init(av(x), 3, 50.0).flat(), &|x| {
-        raw_kern::ewma_with_init(av(x), 3, 50.0).flat()
+    series("ewma_with_init", &x, &|x| kern::ewma_with_init(x[0], 3, 50.0).flat(), &|x| {
+        raw_kern::ewma_with_init(x[0], 3, 50.0).flat()
     });
     series("ema_cascade", &x, &|x| kern::ema_cascade::<3>(x[0], 4).flat(), &|x| {
         raw_kern::ema_cascade::<3>(x[0], 4).flat()
@@ -728,10 +719,10 @@ fn the_recursive_kernels_run_on_the_complete_rows() {
     state("ema_cascade_final", &x, &|x| format!("{:?}", kern::ema_cascade_final::<3>(x[0], 4)), &|x| {
         format!("{:?}", raw_kern::ema_cascade_final::<3>(x[0], 4))
     });
-    // a strided view is read through one contiguous copy
+    // an interop caller supplies a gathered slice
     let both: Vec<f64> = d.close.iter().flat_map(|&v| [v, 0.0]).collect();
-    let strided = ArrayView1::from(&both[..]).slice_move(ndarray::s![..;2]);
-    assert_eq!(bits(&kern::wilder(strided, 5).to_vec()), bits(&kern::wilder(av(&x), 5).to_vec()));
+    let gathered: Vec<_> = both.iter().step_by(2).copied().collect();
+    assert_eq!(bits(&kern::wilder(&gathered, 5).to_vec()), bits(&kern::wilder(x[0], 5).to_vec()));
     // a missing value stepped over leaves the cascade where it was
     let mut e = [1.0, 2.0];
     kern::ema_cascade_step(&mut e, f64::NAN, 3);
