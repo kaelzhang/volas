@@ -282,7 +282,8 @@ class PlainMachine(FrameMachine):
                 self.opaque.add(name)  # its hidden cells stay as the cache held them
             if name in self.cached:
                 del self.cached[name]
-            if name in self.coarse().schema.columns:
+            # User-added data columns also own their hidden history on replacement.
+            if name in self.coarse().columns:
                 for i, v in enumerate(stored[self.visible_start():]):
                     self.store.write(self.visible_start() + i, name, v)
             else:
