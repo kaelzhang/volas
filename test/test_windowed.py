@@ -1,7 +1,7 @@
 """Windowed (bounded rolling-window) DataFrame tests.
 
 A windowed frame (``DataFrame(data, window=M, max_lookback=L)``, where ``L`` is an
-int or a list of indicator directives to derive it from) keeps only the last ``M``
+int or a list of directives to derive it from) keeps only the last ``M``
 rows visible while physically retaining ``M + L`` rows of margin so cached indicators
 stay bit-exact across the
 periodic front-drop. Every row-facing surface presents the logical ``M`` view; the
@@ -89,9 +89,9 @@ def test_max_lookback_int_and_list_equivalent():
     assert by_int._physical_height == by_list._physical_height
 
 
-@pytest.mark.parametrize("bad", ["ma5", "atr14", "close", "kdj"])
-def test_max_lookback_rejects_non_indicator_directive(bad):
-    # A typo'd directive (missing colon: `ma5` for `ma:5`), a raw column name, or a
+@pytest.mark.parametrize("bad", ["ma5", "atr14", "kdj"])
+def test_max_lookback_rejects_unknown_or_incomplete_directive(bad):
+    # A typo'd directive (missing colon: `ma5` for `ma:5`) or a
     # bare sub-requiring command must RAISE at construction — never derive a silent
     # 0-row margin that under-sizes the window and breaks cached-indicator
     # bit-exactness. (Same rejection `df.exec`/`df[...]` give the directive.)

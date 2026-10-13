@@ -219,7 +219,7 @@ def test_tf_illegal_coarsen_raises():
     assert df3.cumulate('15m').shape[0] >= 1  # 15 = 5 * 3 is legal
 
 
-def test_tf_same_frame_cumulate_is_copy():
+def test_tf_same_frame_cumulate_keeps_aggregated_values():
     df5 = get_1m().cumulate('5m')
     assert df5.cumulate('5m').equals(df5)
 
