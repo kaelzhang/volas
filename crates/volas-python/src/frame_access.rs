@@ -133,7 +133,7 @@ impl PyDataFrame {
             }
         }
         if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
-            let sub = self.read()?.filter_mask(arr.as_slice()?).map_err(pyerr)?;
+            let sub = self.read()?.filter_mask(&crate::coerce::numpy_values(&arr)).map_err(pyerr)?;
             return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
         }
         // boolean mask as a plain Python list (df[[True, False, ...]]). An empty
