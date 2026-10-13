@@ -206,6 +206,13 @@ df.to_numpy()                    # 2-D ndarray (rows x columns)
 requested aggregation rules even at the same time frame. Window declarations
 also accept raw columns (`max_lookback=['close']`, lookback zero).
 
+Arrow imports take an owned snapshot by default. For immutable producers,
+`DataFrame.from_arrow(table, copy=False)` and `Series.from_arrow(array, copy=False)`
+retain the zero-copy import option: the producer and every alias must never write
+borrowed memory again while imported objects or views survive. Zero-copy exports
+are unchanged. **Breaking change:** producer writes after a default import no longer
+change volas data. See the [interop contract](docs/interop.md#arrow--dlpack-interop-zero-copy).
+
 ## Built-in Indicators
 
 The complete directive reference lives in [INDICATORS.md](INDICATORS.md). It

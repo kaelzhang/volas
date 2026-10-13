@@ -71,7 +71,7 @@ Which gets the 2-period simple moving average on column `"close"`.
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
   those with the dedicated [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
-  [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe) instead. To attach a
+  [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copytrue---dataframe) instead. To attach a
   [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html),
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
   `tz_localize` / `tz_convert`. See [Timezones](cumulation.md#timezones).
@@ -293,18 +293,17 @@ shares the index's name is kept as a column. See [pandas interop](interop.md#pan
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
 ```
 
-### DataFrame.from_arrow(data) -> DataFrame
+### DataFrame.from_arrow(data, copy=True) -> DataFrame
 
-A **volas-specific static method** that builds a `DataFrame` from any object exposing
-the Arrow **C-Stream** protocol (`__arrow_c_stream__`) — a `pyarrow.Table` /
-`RecordBatch` / `RecordBatchReader`, a polars `DataFrame`, etc. The data buffers are
-borrowed where the dtypes match (otherwise a column is copied), a multi-chunk source
-is concatenated, and the result carries a fresh `RangeIndex`. The producer's buffers
-are validated before they are read: a malformed array (buffer sizes, offsets out of
+Builds a `DataFrame` from the Arrow **C-Stream** protocol (`__arrow_c_stream__`):
+`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`, polars `DataFrame`, etc. Imports
+form owned snapshots by default, including multi-chunk sources, with a fresh
+`RangeIndex`. Producer buffers are validated before reading: a malformed array (buffer sizes, offsets out of
 range or not monotonic, a present string that is not valid UTF-8) raises `ValueError`.
 A null string slot's bytes are unspecified in Arrow and are never read.
 
 - **data** the Arrow source — any object implementing `__arrow_c_stream__`.
+- **copy** keyword-only `bool = True`. `False` borrows matching numeric and dense ns-datetime buffers. The producer and every alias must never write borrowed memory again while any imported object or view survives. Other layouts still copy.
 
 ```py
 df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame
@@ -312,7 +311,7 @@ df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
 ```
 
 > Arrow is **not** accepted by the `DataFrame(data=...)` constructor (which takes a
-> `dict` or another `DataFrame`); build from an Arrow object through `from_arrow`.
+> `dict` or another `DataFrame`); use `from_arrow` for whole Arrow tables. Arrow arrays inside a `dict` are supported and copied.
 
 ### df.exec(directive: str) -> np.ndarray
 
@@ -746,16 +745,15 @@ three digits, up to nanoseconds. Missing values stay `NA`. Format errors are
 reported when formatting the first present value; an empty or all-NaT Series
 returns its empty or missing result.
 
-### Series.from_arrow(data, name=None) -> Series
+### Series.from_arrow(data, name=None, copy=True) -> Series
 
-A **volas-specific static method** that builds a `Series` from any object exposing the
-Arrow **C-Data** array protocol (`__arrow_c_array__`) — a `pyarrow.Array`, a polars
-`Series`, etc. The data buffer is borrowed where the dtype matches (otherwise copied);
-the result carries a fresh `RangeIndex`. A malformed array raises `ValueError`, exactly
-as in [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe).
+Builds a `Series` from the Arrow **C-Data** protocol (`__arrow_c_array__`):
+`pyarrow.Array`, polars `Series`, etc. Imports form owned snapshots with a fresh
+`RangeIndex`; malformed arrays raise `ValueError`, as in [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copytrue---dataframe).
 
 - **data** the Arrow source — any object implementing `__arrow_c_array__`.
 - **name?** `str | None = None` the name for the resulting `Series`.
+- **copy** keyword-only `bool = True`. `False` opts into borrowing under the same producer-immutability precondition as `DataFrame.from_arrow`; conversion layouts still copy.
 
 ```py
 s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series

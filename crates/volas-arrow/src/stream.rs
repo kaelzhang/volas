@@ -13,7 +13,7 @@ use arrow_select::concat::concat_batches;
 use volas_core::Column;
 
 use crate::ffi::{check_schema, validate_imported};
-use crate::{column_from_arrow, column_to_arrow};
+use crate::{column_from_arrow_with_copy, column_to_arrow};
 
 /// Named columns as a one-batch Arrow C-Stream (the DataFrame export). Every column's
 /// data buffer is shared with Arrow (no copy); the stream yields a single `RecordBatch`.
@@ -71,12 +71,36 @@ pub unsafe fn columns_from_c_stream(
     frame_from_c_stream(stream).map(|(names, cols, _)| (names, cols))
 }
 
+/// Consume a columns-only stream with an explicit ownership policy.
+///
+/// # Safety
+/// Same preconditions as `frame_from_c_stream_with_copy`.
+pub unsafe fn columns_from_c_stream_with_copy(
+    stream: *mut c_void,
+    copy: bool,
+) -> Result<(Vec<String>, Vec<Column>), ArrowError> {
+    frame_from_c_stream_with_copy(stream, copy).map(|(names, cols, _)| (names, cols))
+}
+
 /// Consume a frame stream, preserving its row count independently of its columns.
 ///
 /// # Safety
 /// `stream` must be a live, not-yet-consumed Arrow C-Stream capsule payload.
 pub unsafe fn frame_from_c_stream(
     stream: *mut c_void,
+) -> Result<(Vec<String>, Vec<Column>, usize), ArrowError> {
+    frame_from_c_stream_with_copy(stream, true)
+}
+
+/// Consume a stream with an explicit ownership policy. Conversion layouts and
+/// multi-batch `copy=false` imports may still copy.
+///
+/// # Safety
+/// `stream` must be live and valid. For `copy=false`, the producer and every alias
+/// must never write borrowed memory again while imported columns or views survive.
+pub unsafe fn frame_from_c_stream_with_copy(
+    stream: *mut c_void,
+    copy: bool,
 ) -> Result<(Vec<String>, Vec<Column>, usize), ArrowError> {
     let mut stream =
         std::ptr::replace(stream as *mut FFI_ArrowArrayStream, FFI_ArrowArrayStream::empty());
@@ -121,12 +145,16 @@ pub unsafe fn frame_from_c_stream(
         batches.push(RecordBatch::from(StructArray::from(data)));
     }
     let names: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
-    let batch = concat_batches(&schema, &batches)?;
-    let cols = batch
-        .columns()
-        .iter()
-        .map(column_from_arrow)
-        .collect::<Result<Vec<Column>, ArrowError>>()?;
+    let cols = if copy && !batches.is_empty() {
+        (0..names.len()).map(|i| {
+            let chunks = batches.iter().map(|b| b.column(i).clone()).collect::<Vec<_>>();
+            crate::chunks::owned_chunks(&chunks)
+        }).collect::<Result<Vec<_>, _>>()?
+    } else {
+        let batch = concat_batches(&schema, &batches)?;
+        batch.columns().iter().map(|a| column_from_arrow_with_copy(a, copy))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     Ok((names, cols, height))
 }
 
