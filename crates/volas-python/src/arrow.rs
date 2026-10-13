@@ -8,7 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyCapsuleMethods, PyTuple};
 use volas_arrow::{
-    column_from_c_capsules, column_to_c_data, column_to_c_schema, frame_from_c_stream,
+    column_from_c_capsules_with_copy, column_to_c_data, column_to_c_schema, frame_from_c_stream_with_copy,
     frame_to_c_stream,
 };
 use volas_core::Column;
@@ -51,7 +51,7 @@ pub(crate) fn column_c_array<'py>(
 
 /// Build a `Column` from any object exposing the `__arrow_c_array__` protocol
 /// (a pyarrow `Array`, a polars `Series`, …) — the import half of `from_arrow`.
-pub(crate) fn column_from_arrow_obj(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
+pub(crate) fn column_from_arrow_obj(obj: &Bound<'_, PyAny>, copy: bool) -> PyResult<Column> {
     let pair = obj.call_method0("__arrow_c_array__")?;
     let (schema_cap, array_cap) = pair.extract::<(Bound<'_, PyCapsule>, Bound<'_, PyCapsule>)>()?;
     check_name(&schema_cap, SCHEMA_NAME)?;
@@ -60,7 +60,7 @@ pub(crate) fn column_from_arrow_obj(obj: &Bound<'_, PyAny>) -> PyResult<Column> 
     let schema_ptr = schema_cap.pointer() as *const c_void;
     // SAFETY: the capsules are a valid, not-yet-consumed C-Data pair (their names were
     // checked); `schema_cap` / `array_cap` stay alive across the call below.
-    let col = unsafe { column_from_c_capsules(array_ptr, schema_ptr) }.map_err(arrow_err)?;
+    let col = unsafe { column_from_c_capsules_with_copy(array_ptr, schema_ptr, copy) }.map_err(arrow_err)?;
     drop((schema_cap, array_cap));
     Ok(col)
 }
@@ -79,7 +79,7 @@ pub(crate) fn frame_c_stream<'py>(
 /// `(names, columns, height)` from any object exposing `__arrow_c_stream__` (a pyarrow
 /// `Table` / `RecordBatchReader`, a polars `DataFrame`, …) — the import half of the
 /// frame `from_arrow`.
-pub(crate) fn frame_from_arrow_obj(obj: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, Vec<Column>, usize)> {
+pub(crate) fn frame_from_arrow_obj(obj: &Bound<'_, PyAny>, copy: bool) -> PyResult<(Vec<String>, Vec<Column>, usize)> {
     let cap = obj
         .call_method0("__arrow_c_stream__")?
         .extract::<Bound<'_, PyCapsule>>()?;
@@ -87,7 +87,7 @@ pub(crate) fn frame_from_arrow_obj(obj: &Bound<'_, PyAny>) -> PyResult<(Vec<Stri
     let ptr = cap.pointer();
     // SAFETY: a valid, not-yet-consumed `arrow_array_stream` capsule (name checked);
     // `cap` stays alive across the call.
-    let out = unsafe { frame_from_c_stream(ptr) }.map_err(arrow_err)?;
+    let out = unsafe { frame_from_c_stream_with_copy(ptr, copy) }.map_err(arrow_err)?;
     drop(cap);
     Ok(out)
 }

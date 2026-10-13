@@ -16,8 +16,9 @@
 //! writes ([`Buffer::append`], [`Buffer::set`]) keep it current in O(1) instead.
 //!
 //! The fact is only ever remembered for bytes volas owns. A zero-copy view of foreign
-//! memory (an Arrow import) belongs to a producer that may still write it, so it is
-//! scanned on every query and never remembered; its first write copies it into an
+//! memory is an explicit opt-in: the producer and every alias must never write it
+//! again for the guard lifetime. Borrowed bytes are conservatively scanned on every
+//! query and never remembered; its first write copies it into an
 //! owned buffer, which may then remember. What volas lends out zero-copy (DLPack,
 //! Arrow) is read-only to the consumer, so owned bytes cannot change behind it.
 
@@ -274,8 +275,8 @@ fn scan_nan<T: Float>(x: &[T]) -> bool {
 
 impl<T: Float> Buffer<T> {
     /// Whether any value is NaN. Scans once, then remembers until the values change —
-    /// except for a zero-copy view of foreign memory, which its owner may write behind
-    /// volas's back: that is scanned on every query, never remembered.
+    /// except for immutable borrowed memory, whose fact is conservatively scanned
+    /// on every query rather than remembered.
     pub fn has_nan(&self) -> bool {
         match self.nan_state() {
             NO_NAN => false,
@@ -506,19 +507,16 @@ mod tests {
         assert!(Buffer::from_vec(vec![f32::NAN]).has_nan());
     }
 
-    /// Foreign bytes can change behind the buffer, so their fact is never remembered —
+    /// Borrowed bytes conservatively never memoize the NaN fact —
     /// and once copied in by a write, the owned copy may remember again.
     #[test]
     fn a_borrowed_buffer_never_remembers() {
-        let arc = Arc::new(vec![1.0, 2.0]);
+        let arc = Arc::new(vec![NAN, 2.0]);
         let ptr = NonNull::new(arc.as_ptr() as *mut f64).unwrap();
         // SAFETY: `arc` owns the 2 f64 and is the guard.
         let b = unsafe { Buffer::from_foreign(ptr, 2, arc.clone()) };
-        assert!(!b.has_nan());
+        assert!(b.has_nan());
         assert_eq!(b.known_has_nan(), None);
-        // the producer writes its bytes: the next query sees it
-        // SAFETY: test-only stand-in for a producer writing the shared allocation.
-        unsafe { *ptr.as_ptr() = NAN };
         assert!(b.has_nan());
         assert_eq!(b.clone().known_has_nan(), None);
         assert_eq!(b.slice(1, 2).known_has_nan(), None);

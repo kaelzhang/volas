@@ -303,11 +303,13 @@ impl PyDataFrame {
     }
 
     /// Build a DataFrame from any object exposing the Arrow stream protocol
-    /// (`__arrow_c_stream__`) — a pyarrow `Table`, a polars `DataFrame`, … — zero-copy
-    /// where dtypes match. The result carries a fresh `RangeIndex`.
+    /// (`__arrow_c_stream__`) — a pyarrow `Table`, a polars `DataFrame`, … — an owned snapshot by default.
+    /// `copy=False` borrows matching buffers; the producer and every alias must never write
+    /// borrowed memory again while imported objects or views survive. The result carries a fresh `RangeIndex`.
     #[staticmethod]
-    pub(crate) fn from_arrow(data: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let (names, cols, height) = crate::arrow::frame_from_arrow_obj(data)?;
+    #[pyo3(signature = (data, *, copy = true))]
+    pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, copy: bool) -> PyResult<PyDataFrame> {
+        let (names, cols, height) = crate::arrow::frame_from_arrow_obj(data, copy)?;
         Ok(PyDataFrame::plain(DataFrame::new(names, cols, Some(Index::range(height))).map_err(pyerr)?))
     }
 

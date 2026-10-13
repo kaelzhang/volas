@@ -134,7 +134,7 @@ def test_series_arrow_schema_capsule():
 
 def test_series_zero_copy_through_import_export():
     src = pa.array([7, 8, 9, 10], type=pa.int64())
-    reexport = pa.array(volas.Series.from_arrow(src))
+    reexport = pa.array(volas.Series.from_arrow(src, copy=False))
     assert src.buffers()[1].address == reexport.buffers()[1].address
 
 
@@ -186,8 +186,9 @@ def test_dlpack_device_is_cpu():
 
 def test_dlpack_is_zero_copy():
     src = pa.array([5, 6, 7, 8], type=pa.int64())
-    arr = np.from_dlpack(volas.Series.from_arrow(src))
-    assert arr.ctypes.data == src.buffers()[1].address
+    series = volas.Series.from_arrow(src)
+    arr = np.from_dlpack(series)
+    assert arr.ctypes.data == pa.array(series).buffers()[1].address
 
 
 def test_dlpack_unconsumed_capsule_frees_cleanly():

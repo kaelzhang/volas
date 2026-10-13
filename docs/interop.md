@@ -83,7 +83,7 @@ pa.array(df['close'])              # Series  -> pyarrow.Array  (shares the buffe
 pa.table(df)                       # DataFrame -> pyarrow.Table (one RecordBatch)
 df['close'].to_arrow()             # convenience for pa.array(...)
 
-Series.from_arrow(pa_array, name='close')   # Arrow array  -> Series (borrowed where dtypes match)
+Series.from_arrow(pa_array, name='close')   # Arrow array  -> Series (owned snapshot)
 DataFrame.from_arrow(pa_table)              # Arrow table  -> DataFrame (row count kept even with no columns)
 
 # DLPack — NumPy / PyTorch / JAX borrow a dense numeric (or bool) column.
@@ -91,9 +91,9 @@ np.from_dlpack(df['close'])        # zero-copy ndarray view
 ```
 
 The high-level entry points — [`df.to_arrow`](dataframe-api.md#dfto_arrow---pyarrowtable) /
-[`DataFrame.from_arrow`](dataframe-api.md#dataframefrom_arrowdata---dataframe),
+[`DataFrame.from_arrow`](dataframe-api.md#dataframefrom_arrowdata-copytrue---dataframe),
 [`series.to_arrow`](dataframe-api.md#seriesto_arrow---pyarrowarray) /
-[`Series.from_arrow`](dataframe-api.md#seriesfrom_arrowdata-namenone---series) — are documented under
+[`Series.from_arrow`](dataframe-api.md#seriesfrom_arrowdata-namenone-copytrue---series) — are documented under
 Usage. They sit on these **standard protocol methods**, which Arrow / array consumers
 call automatically (so you rarely call them yourself):
 
@@ -111,9 +111,25 @@ call automatically (so you rarely call them yourself):
   an int/bool column with a missing value (DLPack has no null mask) or a str/datetime
   column raises.
 
-**Zero-copy contract.** The *data* buffer is shared (no copy) in both directions for
-volas's native numeric (`int32` / `int64` / `float32` / `float64`) and
-nanosecond-datetime columns; a string column exports zero-copy too. The repacks are:
+**Import snapshot contract (breaking change).** Arrow imports now copy by default.
+Changes the producer makes after import cannot change volas columns, cached directives,
+resume states or checkpoints. NumPy and pandas imports also form owned snapshots.
+Do not write the input concurrently with import; copying does not provide an atomic
+snapshot across columns.
+
+Use `Series.from_arrow(array, copy=False)` or
+`DataFrame.from_arrow(table, copy=False)` to opt into zero-copy import for matching
+native numeric (`int32` / `int64` / `float32` / `float64`) and dense ns-datetime
+buffers. **The producer and every alias must never write borrowed memory again while
+any imported object or view survives.** This is an immutability precondition, including
+finite-value changes; volas cannot detect external writes or invalidate their caches.
+`copy=False` permits borrowing rather than requiring it: incompatible layouts and
+multi-chunk columns may still copy. Constructors receiving Arrow arrays copy; to opt
+in, import a Series with `copy=False` and pass that Series to the frame constructor.
+
+**Zero-copy export contract.** Native numeric and ns-datetime columns export shared,
+read-only data buffers; strings also export zero-copy. Export behavior is unchanged.
+The remaining repacks are:
 
 - on **import**, every string column (`string` / `large_string`, sliced or not) — it is
   copied into volas-owned buffers and validated there (in-range monotonic offsets, valid
