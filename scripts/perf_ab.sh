@@ -1,78 +1,67 @@
 #!/usr/bin/env bash
-# Standardized local A/B performance comparison — THE pipeline for "did my
-# change move performance?" questions. Never ad-hoc timing scripts: this runs
-# the same harness, same machine, back-to-back, exactly like the CI perf gate.
+# Standardized local paired A/B performance comparison. Both wheels live in
+# isolated sites; identical fresh processes measure AB, BA, AB, BA, ... pairs.
 #
-#   scripts/perf_ab.sh <base-ref>                     # full suite, perf_gate verdict
-#   scripts/perf_ab.sh <base-ref> <indicator>         # one indicator, compact report
-#   scripts/perf_ab.sh <base-ref> '' <section>        # one report section, perf_gate verdict
+#   scripts/perf_ab.sh <base-ref> [indicator] [section]
 #   BASE_SITE=/path/to/prebuilt/site-packages scripts/perf_ab.sh <base-ref>
-#
-# The base ref is built in a temporary git archive (the working tree is never
-# touched), benchmarked, then HEAD (the current tree, including uncommitted
-# changes) is rebuilt and benchmarked. BASE_SITE can reuse an isolated build.
 set -euo pipefail
 
 BASE_REF="${1:?usage: perf_ab.sh <base-ref> [indicator] [section]}"
 INDICATOR="${2:-}"
 SECTION="${3:-}"
 PYTHON="${VOLAS_PYTHON:-python}"
-# maturin needs VIRTUAL_ENV / CONDA_PREFIX to find the interpreter — set them from
-# the resolved python so this runs from a bare shell (mirrors the Makefile).
-PY_PREFIX="$("$PYTHON" -c 'import sys; print(sys.prefix)')"
-export VIRTUAL_ENV="$PY_PREFIX" CONDA_PREFIX="$PY_PREFIX"
 ROOT="$(git rev-parse --show-toplevel)"
+ROUNDS="${PERF_AB_ROUNDS:-6}"
+"$PYTHON" -c 'import sys; sys.path.insert(0, sys.argv[1]); from scripts.perf_pairs import validate_rounds; validate_rounds(int(sys.argv[2]))' "$ROOT" "$ROUNDS"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# Optional numba-based comparison libraries must not cache into a shared env.
+export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-$TMP/numba}"
 
-BENCH_OPTS=(--benchmark-only --benchmark-group-by=func,param:indicator --benchmark-sort=name -q)
+# Spread the auto-calibrated budget over six pairs instead of repeating the
+# default one-second/item budget twelve times. perf_pairs.py spreads the
+# pedantic budget across pairs through the current harness's environment.
+BENCH_OPTS=(--benchmark-only --benchmark-group-by=func,param:indicator --benchmark-sort=name -q
+            --benchmark-max-time=0.05 --benchmark-min-rounds=5)
 FILTER=()
 [ -n "$INDICATOR" ] && FILTER+=(--volas-benchmark-indicator="$INDICATOR")
-[ -n "$SECTION" ] && FILTER+=(-k "test_$SECTION")
+KSELECT="${PERF_AB_KSELECT:-}"
+if [ -z "$INDICATOR" ] && [ -z "$SECTION" ] && [ -z "$KSELECT" ]; then
+  # The full verdict consumes only these rows; avoid timing unrelated peers.
+  KSELECT='((test_coverage or test_api) and volas) or test_tf_live'
+fi
+[ -n "$SECTION" ] && KSELECT="test_$SECTION${KSELECT:+ and ($KSELECT)}"
+[ -n "$KSELECT" ] && FILTER+=(-k "$KSELECT")
+
+build_site() {
+  local tree="$1" side="$2" target="$3"
+  echo ">> building $side into an isolated site..."
+  ( cd "$tree" && CARGO_TARGET_DIR="$target" "$PYTHON" -m maturin build --release -q \
+      --interpreter "$PYTHON" --out "$TMP/$side-wheels" ) || return 1
+  "$PYTHON" -m pip install --no-index --no-deps --no-compile --target "$TMP/$side-site" \
+      "$TMP/$side-wheels/"*.whl >/dev/null
+}
 
 if [ -n "${BASE_SITE:-}" ]; then
-  # An independently built wheel may be supplied in restricted environments
-  # where Git metadata cannot be changed. Keep the identical current harness
-  # and gate; only the package import location differs between measurements.
-  BASE_SITE="$(cd "$BASE_SITE" && pwd)"
-  BASE_IMPORT="$BASE_SITE"
-  echo ">> benchmarking prebuilt BASE ($BASE_REF) from $BASE_SITE..."
-  "$PYTHON" -c '
-import pathlib, sys
-sys.path.insert(0, sys.argv[1])
-import volas, volas_rs
-expected = pathlib.Path(sys.argv[1]).resolve()
-for module in (volas, getattr(volas_rs, "volas_rs", volas_rs)):
-    actual = pathlib.Path(module.__file__).resolve()
-    assert expected in actual.parents, (expected, actual)
-' "$BASE_SITE"
+  BASE_IMPORT="$(cd "$BASE_SITE" && pwd)"
+  echo ">> using prebuilt BASE ($BASE_REF) from $BASE_IMPORT"
 else
-  echo ">> building + benchmarking BASE ($BASE_REF) in a temp archive..."
   mkdir "$TMP/base"
-  git -C "$ROOT" archive "$BASE_REF" | tar -x -C "$TMP/base"
-  BASE_IMPORT="$TMP/base"
-# The base build gets its OWN target dir: sharing $ROOT/target between two
-# checkouts of the same workspace let cargo hand the HEAD build a stale rlib
-# from the base tree (observed: HEAD's volas-directive linked against the
-# base's volas-compute, missing a newly added module). A cold build is the
-# price of a sound comparison.
-  ( cd "$TMP/base" && CARGO_TARGET_DIR="$TMP/base/target" "$PYTHON" -m maturin develop --release -q )
+  git -C "$ROOT" archive "$BASE_REF" | tar -x -C "$TMP/base" || exit 2
+  # Independent target dirs prevent stale cross-checkout rlibs.
+  build_site "$TMP/base" base "$TMP/base/target" || exit 2
+  BASE_IMPORT="$TMP/base-site"
 fi
-# Preload the isolated base package before pytest adds the current harness's
-# checkout to sys.path; its pure-Python API may also have changed since BASE.
-( cd "$ROOT" && "$PYTHON" -c '
-import sys
-sys.path.insert(0, sys.argv.pop(1))
-import volas, pytest
-raise SystemExit(pytest.main(sys.argv[1:]))
-' "$BASE_IMPORT" test/test_benchmark.py "${BENCH_OPTS[@]}" ${FILTER[@]+"${FILTER[@]}"} \
-    --benchmark-json="$TMP/base.json" >/dev/null )
+build_site "$ROOT" head "${CARGO_TARGET_DIR:-$ROOT/target}"
 
-echo ">> building + benchmarking HEAD (current tree)..."
-( cd "$ROOT" && "$PYTHON" -m maturin develop --release -q )
-( cd "$ROOT" && "$PYTHON" -m pytest test/test_benchmark.py "${BENCH_OPTS[@]}" ${FILTER[@]+"${FILTER[@]}"} \
-    --benchmark-json="$TMP/head.json" >/dev/null )
-
+"$PYTHON" "$ROOT/scripts/perf_pairs.py" --base-site "$BASE_IMPORT" \
+    --head-site "$TMP/head-site" --root "$ROOT" --output "$TMP" --rounds "$ROUNDS" \
+    "${BENCH_OPTS[@]}" ${FILTER[@]+"${FILTER[@]}"}
+echo ">> total A/B wall time (builds + measurement): ${SECONDS}s"
+if [ -n "${PERF_AB_JSON_DIR:-}" ]; then
+  mkdir -p "$PERF_AB_JSON_DIR"
+  cp "$TMP/"*.json "$TMP/"*.log "$PERF_AB_JSON_DIR/"
+fi
 echo
 if [ -n "$INDICATOR" ]; then
   "$PYTHON" "$ROOT/scripts/bench_indicator_report.py" "$TMP/head.json" "$INDICATOR" --base "$TMP/base.json"

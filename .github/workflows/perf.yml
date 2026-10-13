@@ -1,18 +1,9 @@
 name: perf-gate
 
-# Performance-regression gate. The benchmark runs TWICE in this one job, on the SAME
-# runner: once for this commit (HEAD) and once for its parent (the PR merge-base, or the
-# previous tip on a push). scripts/perf_gate.py then compares volas's own median times
-# between the two runs.
-#
-# Comparing HEAD against its parent on one machine is what makes the gate reliable: the
-# runner's absolute speed AND its CPU microarchitecture both cancel, so the thresholds are
-# architecture-independent and there is no stored baseline to drift across machines (a
-# committed volas/TA-Lib-ratio baseline is meaningless here — that ratio is not portable
-# from a dev machine to the x86 runner).
-#
-# Fail-safe: if the parent can't be resolved, or its build/benchmark fails, the gate is
-# skipped rather than failed — a regression gate must never block CI on its own plumbing.
+# Performance-regression gate using the same isolated AB/BA paired measurement
+# as make perf-ab. Relative load drift is shared by both sides; the unchanged
+# gate consumes the median paired HEAD/base ratios and reports per-item noise.
+# Missing or failed BASE plumbing skips comparison; HEAD failures fail the job.
 
 on:
   push:
@@ -63,8 +54,6 @@ jobs:
 
       - name: Resolve the base commit
         run: |
-          HEAD_SHA="$(git rev-parse HEAD)"
-          echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="$(git merge-base "${{ github.event.pull_request.base.sha }}" HEAD || true)"
           else
@@ -79,33 +68,28 @@ jobs:
           fi
           echo "BASE_SHA=$BASE" >> "$GITHUB_ENV"
 
-      - name: Benchmark HEAD
-        run: |
-          maturin develop --release
-          pytest test/test_benchmark.py -k "(test_coverage or test_api) and volas" \
-            --benchmark-only --benchmark-sort=name \
-            --benchmark-columns=median --benchmark-json="$RUNNER_TEMP/head.json" -q
-
-      - name: Benchmark the base commit
+      - name: Benchmark paired BASE and HEAD
         if: ${{ env.BASE_SHA != '' }}
-        continue-on-error: true       # fail-safe: a base build/benchmark failure skips the gate
+        env:
+          VOLAS_PYTHON: ${{ github.workspace }}/.venv/bin/python
+          PERF_AB_KSELECT: "(test_coverage or test_api) and volas"
+          PERF_AB_JSON_DIR: ${{ runner.temp }}/perf-pairs
         run: |
-          git checkout --quiet --force "$BASE_SHA"
-          maturin develop --release
-          pytest test/test_benchmark.py -k "(test_coverage or test_api) and volas" \
-            --benchmark-only --benchmark-sort=name \
-            --benchmark-columns=median --benchmark-json="$RUNNER_TEMP/base.json" -q
-
-      - name: Restore HEAD
-        if: ${{ always() }}           # ensure the gate runs against HEAD's perf_gate.py
-        run: git checkout --quiet --force "$HEAD_SHA"
+          STATUS=0
+          bash scripts/perf_ab.sh "$BASE_SHA" || STATUS=$?
+          if [ "$STATUS" = 2 ]; then
+            echo "BASE build/benchmark failed — comparison skipped."
+          elif [ "$STATUS" != 0 ] && [ ! -f "$RUNNER_TEMP/perf-pairs/head.json" ]; then
+            exit "$STATUS"            # HEAD / comparison failure must fail the job
+          fi
+          # A measured regression is enforced by the Performance gate step below.
 
       - name: Performance gate
         run: |
-          if [ -f "$RUNNER_TEMP/base.json" ]; then
-            python scripts/perf_gate.py "$RUNNER_TEMP/head.json" --base "$RUNNER_TEMP/base.json"
+          if [ -f "$RUNNER_TEMP/perf-pairs/base.json" ] && [ -f "$RUNNER_TEMP/perf-pairs/head.json" ]; then
+            python scripts/perf_gate.py "$RUNNER_TEMP/perf-pairs/head.json" --base "$RUNNER_TEMP/perf-pairs/base.json"
           else
-            echo "No base benchmark (first commit, or the base build/benchmark failed) — gate skipped."
+            echo "No complete paired comparison (first commit, or build/benchmark failed) — gate skipped."
           fi
 
       - name: Upload benchmark JSON
@@ -113,5 +97,5 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: benchmark-json
-          path: ${{ runner.temp }}/*.json
+          path: ${{ runner.temp }}/perf-pairs
           retention-days: 14

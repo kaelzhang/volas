@@ -171,16 +171,23 @@ else
 	@echo "\033[1m>> Benchmark archived to $(BENCH_DIR)/ <<\033[0m"
 endif
 
-# Standardized local A/B performance comparison (THE pipeline for "did my
-# change move performance?"): builds BASE from a read-only Git archive, benchmarks it,
-# rebuilds HEAD (the current tree, incl. uncommitted changes), benchmarks it,
-# and prints the verdict — perf_gate for the full suite, a compact normalized
-# report for a single indicator. Same harness, same machine, back-to-back
-# (exactly the CI gate's method). Benchmark results are not retained.
+# Standardized local A/B performance comparison: build BASE from a git archive
+# and HEAD (current tree, including uncommitted changes) into separate sites.
+# Identical fresh pytest processes alternate AB/BA for six paired rounds.
+# Reports use the median of per-round HEAD/base ratios, with relative MAD noise;
+# base times are round medians, head times are base times multiplied by paired
+# ratios. The 5us floor, geomean <= 1.10 and per-item <= 1.60 are unchanged.
+# Auto-calibrated items get 0.05s/process; the 500-round pedantic budget is
+# spread across pairs (84 per process for six pairs, same for BASE and HEAD).
+# The full gate measures coverage / api / tf_live volas rows only.
+# Nothing is archived unless PERF_AB_JSON_DIR is explicitly supplied.
 #
 #   make perf-ab BASE=HEAD~1                       # full suite
 #   make perf-ab BASE=HEAD~1 INDICATOR=bop         # one indicator
 #   make perf-ab BASE=HEAD~1 SECTION=windowed      # one report section
+#   BASE_SITE=/isolated/site make perf-ab BASE=HEAD  # reuse a prebuilt BASE
+#   PERF_AB_ROUNDS=10 make perf-ab BASE=HEAD       # even, >= 6 pairs
+# PERF_AB_KSELECT adds a pytest -k selector (CI restricts measurement to volas).
 BASE ?= HEAD~1
 perf-ab:
 	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)" "$(SECTION)"

@@ -7,10 +7,8 @@
 # jitter cancels: bench_noise.sh measures its layout-noise floor at ~±2. That makes
 # the win count the right metric for detecting a REAL cross-commit regression.
 #
-# This builds BASE in a temp worktree and HEAD (the current tree) back-to-back on
-# the same machine (so thermal cancels), benchmarks the coverage section of each,
-# and prints both win counts plus the indicators whose ratio moved most — the
-# candidates that actually regressed.
+# Uses perf_ab.sh's isolated builds and AB/BA paired rounds, preserving the
+# coverage report's minimum-time metric and the win-count output below.
 #
 #   scripts/bench_wincount_ab.sh <base-ref>
 #
@@ -22,22 +20,15 @@ BASE_REF="${1:?usage: bench_wincount_ab.sh <base-ref>}"
 PYTHON="${VOLAS_PYTHON:-python}"
 ROOT="$(git rev-parse --show-toplevel)"
 TMP="$(mktemp -d)"
-trap 'git -C "$ROOT" worktree remove --force "$TMP/base" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP"' EXIT
 KSEL='test_coverage and not test_coverage_extended and not test_coverage_after_append'
 
-run_bench() { # $1 = json out
-  ( cd "$ROOT" && "$PYTHON" -m pytest test/test_benchmark.py -k "$KSEL" --benchmark-only -q \
-      --benchmark-json="$1" >/dev/null 2>&1 )
-}
-
-echo ">> building + benchmarking BASE ($BASE_REF) in a temp worktree..."
-git -C "$ROOT" worktree add --detach "$TMP/base" "$BASE_REF" >/dev/null
-( cd "$TMP/base" && CARGO_TARGET_DIR="$TMP/base/target" "$PYTHON" -m maturin develop --release -q )
-run_bench "$TMP/base.json"
-
-echo ">> building + benchmarking HEAD (current tree)..."
-( cd "$ROOT" && "$PYTHON" -m maturin develop --release -q )
-run_bench "$TMP/head.json"
+# A regression verdict is diagnostic here: print the win-count comparison too.
+# Build/measurement failures have no complete JSON pair and must still fail.
+if ! PERF_AB_KSELECT="$KSEL" PERF_AB_JSON_DIR="$TMP" VOLAS_PYTHON="$PYTHON" \
+    bash "$ROOT/scripts/perf_ab.sh" "$BASE_REF"; then
+  [ -f "$TMP/base.json" ] && [ -f "$TMP/head.json" ] || exit 1
+fi
 
 echo
 "$PYTHON" - "$TMP/base.json" "$TMP/head.json" "$BASE_REF" <<'PY'
