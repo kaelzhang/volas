@@ -12,7 +12,8 @@ both cancel out — so the thresholds are architecture-independent, and there is
 baseline to drift across machines or to regenerate by hand.
 
 A regression (volas got slower from base to HEAD) is flagged when, over the items whose
-base median is at least ``--min-us`` microseconds (faster items are pure timing noise):
+base median is at least ``--min-us`` microseconds, plus summed section buckets
+for faster items:
 
 * the geometric mean of the per-item HEAD/base ratios exceeds ``--geomean-max`` — a broad
   slowdown across the suite, or
@@ -31,45 +32,19 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import re
+from statistics import median
 import sys
+
+try:
+    from scripts.perf_items import volas_key
+except ModuleNotFoundError:  # direct script entrypoint
+    from perf_items import volas_key
 
 
 def _volas_medians(data: dict) -> dict:
-    """``{(section, item): volas median seconds}`` over the coverage + api sections,
-    the volas-only live tf rows (item ``<indicator>/<phase>``) and the volas-only first
-    materializations (item ``<directive>@n=<rows>``)."""
-    out: dict[tuple[str, str], float] = {}
-    for b in data['benchmarks']:
-        name = b['name']
-        if name.startswith('test_tf_live'):
-            params = b.get('params') or {}
-            item = f"{params.get('indicator')}/{params.get('phase')}"
-            out[('tf_live', item)] = b['stats']['median']
-            continue
-        if name.startswith('test_first_cache'):
-            out[('first_cache', (b.get('params') or {}).get('indicator'))] = b['stats']['median']
-            continue
-        if name.startswith('test_coverage'):
-            section = 'coverage'
-        elif name.startswith('test_api'):
-            section = 'api'
-        else:
-            continue
-        params = b.get('params') or {}
-        cand = params.get('candidate')
-        item = params.get('indicator') or params.get('op')
-        if cand is None or item is None:  # fall back to parsing "[indicator-candidate]"
-            m = re.search(r'\[(.+)\]', name)
-            if m:
-                inside = m.group(1)
-                for c in ('talib', 'volas', 'pandas', 'polars'):
-                    if inside.endswith('-' + c):
-                        item, cand = inside[: -(len(c) + 1)], c
-                        break
-        if cand == 'volas' and item:
-            out[(section, item)] = b['stats']['median']
-    return out
+    """All volas measurements, keyed by section and full parametrized name."""
+    return {key: row['stats']['median'] for row in data['benchmarks']
+            if (key := volas_key(row)) is not None}
 
 
 def _load(path: str) -> dict | None:
@@ -85,8 +60,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument('head', help='pytest-benchmark JSON for the current commit')
     ap.add_argument('--base', required=True, help='pytest-benchmark JSON for the base commit')
     ap.add_argument('--min-us', type=float, default=5.0,
-                    help='only gate items whose base median is at least this many '
-                         'microseconds; faster items are timing noise (default 5)')
+                    help='gate individual items above this many microseconds; faster items '
+                         'are summed by section (default 5)')
     ap.add_argument('--geomean-max', type=float, default=1.10,
                     help='max tolerated geometric-mean HEAD/base ratio (default 1.10 = +10%%)')
     ap.add_argument('--item-max', type=float, default=1.60,
@@ -105,13 +80,35 @@ def main(argv: list[str]) -> int:
 
     ratios: dict[tuple[str, str], float] = {}
     sub_floor = 0
+    buckets: dict[str, list[float]] = {}
+    bucket_keys: dict[str, list[tuple[str, str]]] = {}
+    with open(a.head) as stream:
+        paired = json.load(stream).get('paired', {})
+    observations = {tuple(item['name']): item for item in paired.get('items', [])
+                    if 'base_seconds' in item and 'head_seconds' in item}
     for key, bmed in base.items():
         if key not in head:
             continue
         if bmed * 1e6 < a.min_us:
             sub_floor += 1
+            totals = buckets.setdefault(key[0], [0.0, 0.0])
+            bucket_keys.setdefault(key[0], []).append(key)
+            totals[0] += bmed
+            totals[1] += head[key]
             continue
         ratios[key] = head[key] / bmed
+
+    for section, (bmed, hmed) in buckets.items():
+        keys = bucket_keys[section]
+        if observations and all(key in observations for key in keys):
+            count = len(observations[keys[0]]['base_seconds'])
+            bs = [sum(observations[key]['base_seconds'][r] for key in keys) for r in range(count)]
+            hs = [sum(observations[key]['head_seconds'][r] for key in keys) for r in range(count)]
+            bmed = median(bs)
+            hmed = bmed * median(h / b for b, h in zip(bs, hs))
+        key = section, '<sub-floor total>'
+        base[key], head[key] = bmed, hmed
+        ratios[key] = hmed / bmed
 
     if not ratios:
         print('perf gate: no comparable items above the time floor; skipping.')
@@ -123,7 +120,7 @@ def main(argv: list[str]) -> int:
     faster = sum(1 for r in ratios.values() if r < 1.0)
 
     print(f'perf gate: {len(ratios)} items gated (>= {a.min_us:g}us), {sub_floor} sub-floor '
-          f'skipped; geomean HEAD/base = {geomean:.3f} (max {a.geomean_max:.2f}); '
+          f'aggregated in {len(buckets)} section(s); geomean HEAD/base = {geomean:.3f} (max {a.geomean_max:.2f}); '
           f'{faster} item(s) faster.')
     for (s, i), r in sorted(ratios.items(), key=lambda kv: -kv[1])[:5]:
         print(f'    biggest mover: [{s}] {i}: x{r:.2f}')

@@ -1,4 +1,9 @@
+import json
+import os
+from pathlib import Path
 import warnings
+
+import pytest
 
 
 _PANDAS_ORACLE_VERSION = None
@@ -43,6 +48,7 @@ def pytest_report_header(config):
 
 
 def pytest_addoption(parser):
+    parser.addoption("--volas-cost-json", default=None, help="Collect release cost bounds for paired gating.")
     parser.addoption(
         '--volas-benchmark-indicator',
         action='store',
@@ -62,6 +68,10 @@ def _indicator_matches(requested, params):
 
 
 def pytest_collection_modifyitems(config, items):
+    if config.getoption('--volas-cost-json'):
+        kept = [item for item in items if 'cost_guard' in item.fixturenames]
+        config.hook.pytest_deselected(items=[item for item in items if item not in kept])
+        items[:] = kept
     requested = config.getoption('--volas-benchmark-indicator')
     if not requested:
         return
@@ -80,3 +90,30 @@ def pytest_collection_modifyitems(config, items):
     if deselected:
         config.hook.pytest_deselected(items=deselected)
     items[:] = kept
+
+
+@pytest.fixture
+def cost_guard(request):
+    """Correctness runs execute all operations; release pairs enforce timing bounds."""
+    def record(actual, limit):
+        path = request.config.getoption('--volas-cost-json')
+        if path:
+            checks = getattr(request.config, '_volas_cost_checks', {})
+            if request.node.nodeid in checks:
+                raise ValueError('duplicate release cost check')
+            checks[request.node.nodeid] = actual / limit
+            request.config._volas_cost_checks = checks
+    def pair(first, second):
+        if os.environ.get('VOLAS_COST_REVERSE') == '1':
+            b, a = second(), first()
+        else:
+            a, b = first(), second()
+        return a, b
+    record.pair = pair
+    return record
+
+
+def pytest_sessionfinish(session, exitstatus):
+    path = session.config.getoption('--volas-cost-json')
+    if path and exitstatus == 0:
+        Path(path).write_text(json.dumps(getattr(session.config, '_volas_cost_checks', {})))

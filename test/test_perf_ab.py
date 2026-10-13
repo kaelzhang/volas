@@ -54,15 +54,15 @@ def test_gate_thresholds_apply_to_paired_ratios(tmp_path, capsys):
     assert 'slowed by > 60%' in capsys.readouterr().out
 
 
-def test_gate_keeps_five_microsecond_floor(tmp_path, capsys):
+def test_gate_aggregates_below_five_microsecond_floor(tmp_path, capsys):
     import json
     from scripts import perf_gate
 
     b, h = perf_pairs.summarize([sample(4e-6)] * 6, [sample(40e-6)] * 6)
     for name, data in (('base', b), ('head', h)):
         (tmp_path / f'{name}.json').write_text(json.dumps(data))
-    assert perf_gate.main([str(tmp_path / 'head.json'), '--base', str(tmp_path / 'base.json')]) == 0
-    assert 'no comparable items above the time floor' in capsys.readouterr().out
+    assert perf_gate.main([str(tmp_path / 'head.json'), '--base', str(tmp_path / 'base.json')]) == 1
+    assert 'aggregated in 1 section(s)' in capsys.readouterr().out
 
 
 def test_runner_uses_balanced_order_identical_layout_and_paired_files(tmp_path, monkeypatch):
@@ -73,17 +73,21 @@ def test_runner_uses_balanced_order_identical_layout_and_paired_files(tmp_path, 
     calls = []
 
     def run(command, **kwargs):
-        calls.append((command, kwargs))
+        calls.append((command, dict(kwargs, env=dict(kwargs['env']))))
         path = command[-1].split('=', 1)[1]
-        data = sample(10 if command[3] == 'base-site' else 20)
+        data = ({'cost': .5} if '--volas-cost-json=' in command[-1]
+                else sample(10 if command[3] == 'base-site' else 20))
         from pathlib import Path
         Path(path).write_text(json.dumps(data))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(perf_pairs.subprocess, 'run', run)
     perf_pairs.run_pairs(sys.executable, tmp_path, {'base': 'base-site', 'head': 'head-site'},
-                         tmp_path, 6, ['--benchmark-only'])
-    assert [command[3] for command, _ in calls] == ['base-site', 'head-site', 'head-site', 'base-site'] * 3
+                         tmp_path, 6, ['--benchmark-only', '--volas-cost-checks', '-k', 'volas'])
+    assert [command[3] for command, _ in calls if '--benchmark-only' in command] == ['base-site', 'head-site', 'head-site', 'base-site'] * 3
+    assert [kwargs['env']['VOLAS_COST_REVERSE'] for command, kwargs in calls
+            if '--benchmark-only' in command] == ['0', '0', '1', '1'] * 3
+    assert all('--volas-cost-checks' not in command for command, _ in calls)
     assert all(command[:3] == [sys.executable, '-c', perf_pairs.WORKER] for command, _ in calls)
     assert all(kwargs['cwd'] == tmp_path for _, kwargs in calls)
     assert all(kwargs['env']['VOLAS_BENCHMARK_PAIRS'] == '6' for _, kwargs in calls)
@@ -184,7 +188,8 @@ def test_script_entrypoint_writes_comparison(tmp_path, monkeypatch):
                                     '--root', str(tmp_path), '--output', str(tmp_path)])
 
     def run(command, **kwargs):
-        Path(command[-1].split('=', 1)[1]).write_text(json.dumps(sample(10)))
+        Path(command[-1].split('=', 1)[1]).write_text(json.dumps(
+            {'cost': .5} if '--volas-cost-json=' in command[-1] else sample(10)))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(subprocess, 'run', run)
