@@ -546,7 +546,7 @@ pub(crate) fn label_bounds(
             // text naming no instant (not a datetime, a DST gap / fold wall clock) cannot
             // bound a datetime slice: a TypeError with the reason, as pandas raises
             IndexKind::Datetime(_, tz) if text => {
-                Label::I64(crate::convert::parse_ts_in_tz(&obj, *tz).map_err(|e| {
+                Label::I64(crate::convert::parse_ts_in_tz(&obj, tz).map_err(|e| {
                     let py = obj.py();
                     if e.is_instance_of::<pyo3::exceptions::PyValueError>(py) {
                         PyTypeError::new_err(format!(
@@ -605,7 +605,7 @@ impl DataFrameLoc {
         // ("2021-02") string selects the whole period's rows (pandas parity).
         if let volas_core::IndexKind::Datetime(_, tz) = index.kind() {
             if let Ok(sk) = key.extract::<String>() {
-                if let Some((lo, hi)) = partial_period_bounds(&sk, *tz) {
+                if let Some((lo, hi)) = partial_period_bounds(&sk, tz) {
                     let positions: Vec<usize> = (0..df.height())
                         .filter(|&i| {
                             index
@@ -763,7 +763,7 @@ impl SeriesLoc {
 /// The `[start, end)` UTC-ns bounds of a partial datetime label: `"2021"` (the
 /// year) or `"2021-02"` (the month) — pandas partial-string indexing (F28). A
 /// full date / datetime string is NOT partial (it resolves as an exact label).
-fn partial_period_bounds(s: &str, tz: volas_core::Tz) -> Option<(i64, i64)> {
+fn partial_period_bounds(s: &str, tz: &volas_core::Tz) -> Option<(i64, i64)> {
     let b = s.trim().as_bytes();
     let all_digits = |x: &[u8]| x.iter().all(u8::is_ascii_digit);
     if b.len() == 4 && all_digits(b) {

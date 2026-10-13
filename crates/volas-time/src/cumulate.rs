@@ -53,8 +53,8 @@ impl Cumulator {
             None => Cow::Borrowed(fine),
         };
 
-        let (ts, tz): (&[i64], Tz) = match raw.index().kind() {
-            IndexKind::Datetime(v, tz) => (v, *tz),
+        let (ts, tz): (&[i64], &Tz) = match raw.index().kind() {
+            IndexKind::Datetime(v, tz) => (v, tz),
             _ => {
                 return Err(VolasError::Value(
                     "cumulation target must have a DatetimeIndex".into(),
@@ -162,17 +162,18 @@ pub fn cumulate(df: &DataFrame, tf: TimeFrame, spec: &AggSpec) -> Result<DataFra
 /// The open period aggregated on the grid of its own bars' zone (every bar the
 /// cumulator holds went through the datetime-index check of `append`).
 fn aggregate_open(open: &OpenPeriod, spec: &AggSpec, tf: TimeFrame) -> Result<DataFrame> {
-    aggregate_period(open.bars(), spec, tf, open.bars().index().tz())
+    aggregate_period(open.bars(), spec, tf, &open.bars().index().tz())
 }
 
 /// Split a sorted timestamp slice into `[start, end)` runs of the same period
 /// (equal [`TimeFrame::period_start`] on `tz`'s local grid).
-fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Result<Vec<(usize, usize)>> {
+fn group_runs(ts: &[i64], tf: TimeFrame, tz: &Tz) -> Result<Vec<(usize, usize)>> {
     let mut runs = Vec::new();
     let mut start = 0;
-    let mut key = tf.period_start(ts[0], tz)?;
+    let mut cursor = tf.period_cursor(tz);
+    let mut key = cursor.period_start(ts[0])?;
     for (i, &t) in ts.iter().enumerate().skip(1) {
-        let k = tf.period_start(t, tz)?;
+        let k = cursor.period_start(t)?;
         if k != key {
             runs.push((start, i));
             start = i;
@@ -190,7 +191,7 @@ fn group_runs(ts: &[i64], tf: TimeFrame, tz: Tz) -> Result<Vec<(usize, usize)>> 
 /// 2026-06-12: every TimeFrame has a fixed grid origin and a bar's label is
 /// origin + n·delta, e.g. a 15-minute bar labels :00/:15/:30/:45 — never the first
 /// raw timestamp, which can sit anywhere inside the period), in `tz`.
-pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame, tz: Tz) -> Result<DataFrame> {
+pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame, tz: &Tz) -> Result<DataFrame> {
     let ts: &[i64] = match period.index().kind() {
         IndexKind::Datetime(v, _) if !v.is_empty() => v,
         IndexKind::Datetime(..) => {
@@ -211,7 +212,7 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame, tz: T
         columns.push(spec.agg_for(name).reduce(col, &kept)?);
     }
     // The aggregated index keeps the source index's name (pandas resample parity).
-    let index = Index::datetime(vec![start_ns], tz).with_name(period.index().name().map(String::from));
+    let index = Index::datetime(vec![start_ns], tz.clone()).with_name(period.index().name().map(String::from));
     DataFrame::new(names, columns, Some(index))
 }
 
@@ -443,10 +444,10 @@ mod tests {
     fn aggregate_period_rejects_non_datetime_index() {
         // append's guard shadows this one in the public path, so call it directly.
         let df = DataFrame::new(vec!["open".into()], vec![Column::f64(vec![1.0])], None).unwrap();
-        assert!(aggregate_period(&df, &AggSpec::ohlcv(), TimeFrame::Min5, Tz::Utc).is_err());
+        assert!(aggregate_period(&df, &AggSpec::ohlcv(), TimeFrame::Min5, &Tz::Utc).is_err());
         // an empty period has no bar to label: an error, not an index panic
         let empty = frame(&[], &[], &[], &[], &[], &[]);
-        let err = aggregate_period(&empty, &AggSpec::ohlcv(), TimeFrame::Min5, Tz::Utc).unwrap_err();
+        let err = aggregate_period(&empty, &AggSpec::ohlcv(), TimeFrame::Min5, &Tz::Utc).unwrap_err();
         assert!(err.to_string().contains("no bars"), "{err}");
     }
 
@@ -457,7 +458,7 @@ mod tests {
     fn aggregate_period_uses_the_grid_zone() {
         let bar = frame(&["2024-01-02 20:00:00"], &[1.0], &[1.0], &[1.0], &[1.0], &[1.0]);
         let sh = Tz::parse("+08:00").unwrap();
-        let out = aggregate_period(&bar, &AggSpec::ohlcv(), TimeFrame::Day1, sh).unwrap();
+        let out = aggregate_period(&bar, &AggSpec::ohlcv(), TimeFrame::Day1, &sh).unwrap();
         match out.index().kind() {
             IndexKind::Datetime(v, tz) => {
                 // 20:00Z is 04:00 on 01-03 in +08:00, whose day starts at 01-02 16:00Z

@@ -459,7 +459,7 @@ impl DataFrame {
     /// gap).
     pub fn tz_localize(&self, tz: crate::tz::Tz) -> Result<DataFrame> {
         let (values, cur) = match self.index.kind() {
-            IndexKind::Datetime(v, cur) => (v.clone(), *cur),
+            IndexKind::Datetime(v, cur) => (v, cur),
             _ => {
                 return Err(VolasError::DType(
                     "tz_localize requires a DatetimeIndex".into(),
@@ -476,13 +476,7 @@ impl DataFrame {
         }
         // `Tz` owns the wall clock -> instant conversion (sub-second digits kept; a
         // DST gap / fold or an instant past the range raises); a NaT label stays NaT.
-        let shifted = values
-            .iter()
-            .map(|&ns| match ns {
-                crate::datetime::NAT => Ok(ns),
-                _ => tz.localize_from(ns, cur),
-            })
-            .collect::<Result<Vec<i64>>>()?;
+        let shifted = tz.localize_values(values, cur)?;
         let mut df = self.clone();
         // tz_localize moves the instants but keeps the index identity (and name).
         df.index = Arc::new(Index::datetime(shifted, tz).with_name(self.index.name().map(String::from)));

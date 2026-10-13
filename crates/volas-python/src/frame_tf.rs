@@ -425,12 +425,12 @@ impl PyDataFrame {
         // rows yet takes the first bar's), never to an incoming bar's: bars are instants,
         // and the frame decides which local day / hour they fall in.
         let tz = match inner.index().kind() {
-            IndexKind::Datetime(_, tz) => *tz,
+            IndexKind::Datetime(_, tz) => tz.clone(),
             _ => bars.index().tz(), // LCOV_EXCL_LINE (a tf frame's index is datetime)
         };
         for (i, &bar_ts) in fine_ts.iter().enumerate() {
             // A period is identified by its start on the frame's grid.
-            let key = frame.period_start(bar_ts, tz).map_err(pyerr)?;
+            let key = frame.period_start(bar_ts, &tz).map_err(pyerr)?;
             // The open period's start is invariant while it forms, so memoize it
             // (lazily, also covering construction paths that set `open` without one)
             // and skip the second per-bar `period_start` of the forming bar.
@@ -440,7 +440,7 @@ impl PyDataFrame {
                     let open_key = match tfs.open_key {
                         Some(k) => k,
                         None => {
-                            let k = frame.period_start(open.last_ts(), tz).map_err(pyerr)?;
+                            let k = frame.period_start(open.last_ts(), &tz).map_err(pyerr)?;
                             tfs.open_key = Some(k);
                             k
                         }
@@ -462,7 +462,7 @@ impl PyDataFrame {
                 // bar (never stepping the closed bar again). The open period switches only
                 // once the row is in.
                 let agg =
-                    aggregate_period(bar, &tfs.cumulators, tfs.time_frame, tz).map_err(pyerr)?;
+                    aggregate_period(bar, &tfs.cumulators, tfs.time_frame, &tz).map_err(pyerr)?;
                 let open = OpenPeriod::new(bar.clone()).map_err(pyerr)?;
                 inner.append_new(&agg).map_err(pyerr)?;
                 tfs.open = Some(open);

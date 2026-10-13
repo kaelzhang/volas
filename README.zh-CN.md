@@ -1070,7 +1070,9 @@ float（见[与 pandas 的差异](PANDAS-DIFFERENCES.md)；写入 `volas.NA` / `
 
 ## 时区
 
-底层存储始终是 **UTC 纪元纳秒**——这是美股、港股和 A 股等股票市场共存时，用来按绝对瞬时对齐的统一轴。`DatetimeIndex` 还会携带一个**frame 级时区**，决定这些瞬时如何显示、裸字符串标签如何匹配，以及 `cumulate` 如何对齐日线及更粗周期。时区可以是**固定偏移**（如 `'+08:00'`，成本低，适合 A 股 / 港股），也可以是**具名 IANA 时区**（如 `'America/New_York'`，通过 `chrono-tz` 支持 DST，适合美股 / 欧洲）。默认是 UTC。
+`volas.tz_database()` 返回指定 key 首次使用时的数据来源和 IANA 版本；未使用的 key 会在查询时初始化。同一进程内，每个具名时区在首次初始化时确定规则，后续对象共享同一份规则。多主机部署应在 lockfile 中固定 `tzdata`，在首次使用前设置 `PYTHONTZPATH=""`，更新数据后重启进程；详见[时区数据与部署](docs/cumulation.md#reproducible-timezone-deployment)。
+
+底层存储始终是 **UTC 纪元纳秒**——这是美股、港股和 A 股等股票市场共存时，用来按绝对瞬时对齐的统一轴。`DatetimeIndex` 还会携带一个**frame 级时区**，决定这些瞬时如何显示、裸字符串标签如何匹配，以及 `cumulate` 如何对齐日线及更粗周期。时区可以是**固定偏移**（如 `'+08:00'`，成本低，适合 A 股 / 港股），也可以是**具名 IANA 时区**（如 `'America/New_York'`，由 volas 读取当前 Python 的 TZif 数据并支持 DST，适合美股 / 欧洲）。默认是 UTC。
 
 完整流程如下：先用 `to_datetime` 解析一列，构建 `DatetimeIndex`；再用 `set_index`
 提升为索引；最后用 `tz_localize`（把 naive 挂钟*重新解释为*某个时区，瞬时会移动）或
