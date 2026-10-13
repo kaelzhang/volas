@@ -58,6 +58,13 @@ fn column_builders_match_the_period_fold_for_every_dtype_and_aggregator() {
                 want.append(&aggregate_period(&df.slice_data(a, b), &spec, TimeFrame::Min5, &Tz::Utc).unwrap()).unwrap();
             }
             same_bits(&cumulate(&df, TimeFrame::Min5, &spec).unwrap(), &want);
+            let mut live = Cumulator::new(TimeFrame::Min5, spec.clone());
+            live.append(&df).unwrap();
+            let snapshot = live.frame().unwrap();
+            let (owned, open, aggregate) = live.into_parts().unwrap();
+            same_bits(&owned, &snapshot);
+            assert!(open.is_some());
+            assert!(aggregate.is_some());
         }
     }
 }
@@ -129,6 +136,11 @@ fn overflow_priority_is_period_then_column_and_open_errors_stay_deferred() {
     live.append(&df.slice_data(0, 1)).unwrap();
     live.append(&df.slice_data(1, 2)).unwrap(); // only the open aggregate overflows
     assert!(matches!(live.last(), Err(VolasError::Overflow(_))));
+    let mut failing = Cumulator::new(TimeFrame::Min5, spec.clone());
+    failing.append(&df.slice_data(0, 2)).unwrap();
+    assert!(matches!(failing.into_parts(), Err(VolasError::Overflow(_))));
+    let batch = Cumulator::from_frame(&df.slice_data(0, 2), TimeFrame::Min5, spec.clone()).unwrap();
+    assert!(matches!(batch.into_parts(), Err(VolasError::Overflow(_))));
     let held = live.open_period().unwrap().bars().clone();
     assert!(live.append(&df.slice_data(2, 3)).is_err()); // cannot close it
     assert!(live.open_period().unwrap().bars().equals(&held));
