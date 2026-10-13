@@ -223,6 +223,18 @@ let _ = five_min;
 `TimeFrame` is an enum (`Min1`, `Min5`, `Hour1`, `Day1`, …) and also parses a label via
 `TimeFrame::from_label("5m")`.
 
+For incremental Rust input, `volas::time::Cumulator::append` retains the open
+period's fine bars. `frame(&self)` returns an independent snapshot while the
+cumulator remains usable. When finished, `into_frame(self)` consumes the
+cumulator and transfers its output buffers. `into_parts(self)` additionally
+returns the open period and its running aggregate for live continuation.
+
+`Cumulator::from_frame(&fine, tf, spec)` constructs and ingests an initial batch
+with output capacity for consuming materialization and the first live append.
+It validates like `new` followed by `append`, including deferred open-period errors.
+Ordinary `new` / `append` builders retain their existing snapshot capacity budget.
+
+
 ## Error handling
 
 Fallible functions return `Result<_, VolasError>` (a single error enum) — no panics on

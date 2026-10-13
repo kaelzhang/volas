@@ -36,11 +36,24 @@ impl Cumulator {
         }
     }
 
+    /// Construct and ingest an initial batch, reserving its closed output for
+    /// consuming materialization and the first live append. Validation and deferred
+    /// open-period errors are the same as `new` followed by `append`.
+    pub fn from_frame(fine: &DataFrame, tf: TimeFrame, spec: AggSpec) -> Result<Self> {
+        let mut cumulator = Self::new(tf, spec);
+        cumulator.append_inner(fine, true)?;
+        Ok(cumulator)
+    }
+
     /// Feed fine bars (must have a `DatetimeIndex`). Periods that close are
     /// finalized; the trailing period stays open for the next call. All or nothing:
     /// the closed rows and the next open period are built aside, and the cumulator
     /// takes them only once every step has succeeded, so on an error it is unchanged.
     pub fn append(&mut self, fine: &DataFrame) -> Result<()> {
+        self.append_inner(fine, false)
+    }
+
+    fn append_inner(&mut self, fine: &DataFrame, materializing: bool) -> Result<()> {
         if fine.height() == 0 {
             return Err(VolasError::Value(
                 "the data frame to be appended is empty".into(),
@@ -102,7 +115,7 @@ impl Cumulator {
         let last = runs.keys.len() - 1;
 
         // Every run except the last closes: its coarse rows, gathered aside.
-        let closing = if last == 0 { None } else { Some(runs.aggregate(&raw, &self.spec, last, tz)?) };
+        let closing = if last == 0 { None } else { Some(runs.aggregate(&raw, &self.spec, last, tz, materializing)?) };
         // The last run remains open (re-sent bars collapsed to the last one).
         let a = runs.starts[last];
         let open = OpenPeriod::new(raw.slice_data(a, raw.height()))?;
@@ -169,6 +182,27 @@ impl Cumulator {
         }
     }
 
+    /// Consume the output buffers, retaining the raw open bars and running aggregate
+    /// for a caller that will continue the live series. Moves closed buffers without
+    /// snapshot COW; `from_frame` reserves room for the forming row and live append.
+    /// Errors from the open period retain `last`'s timing.
+    pub fn into_parts(self) -> Result<(DataFrame, Option<OpenPeriod>, Option<PeriodAggregate>)> {
+        let open_coarse = self.last()?;
+        let Self { closed, open, aggregate, .. } = self;
+        let frame = match (closed, open_coarse) {
+            (Some(mut closed), Some(coarse)) => { closed.append(&coarse)?; closed }
+            (Some(closed), None) => closed,
+            (None, Some(coarse)) => coarse,
+            (None, None) => DataFrame::new(Vec::new(), Vec::new(), None)?,
+        };
+        Ok((frame, open, aggregate))
+    }
+
+    /// Consume a one-shot cumulator without snapshotting its closed history.
+    pub fn into_frame(self) -> Result<DataFrame> {
+        self.into_parts().map(|(frame, _, _)| frame)
+    }
+
     /// The current open period aggregated into a single (live) coarse bar, or
     /// `None` if nothing is open. O(columns) for a valid open aggregate.
     pub fn last(&self) -> Result<Option<DataFrame>> {
@@ -194,9 +228,7 @@ impl Cumulator {
 
 /// One-shot resample of `df` (must have a `DatetimeIndex`) into `tf` periods.
 pub fn cumulate(df: &DataFrame, tf: TimeFrame, spec: &AggSpec) -> Result<DataFrame> {
-    let mut cumulator = Cumulator::new(tf, spec.clone());
-    cumulator.append(df)?;
-    cumulator.frame()
+    Cumulator::from_frame(df, tf, spec.clone())?.into_frame()
 }
 
 /// The open period aggregated on the grid of its own bars' zone (every bar the
@@ -233,7 +265,7 @@ impl PeriodRuns {
         Ok(runs)
     }
 
-    fn aggregate(&self, raw: &DataFrame, spec: &AggSpec, count: usize, tz: &Tz) -> Result<DataFrame> {
+    fn aggregate(&self, raw: &DataFrame, spec: &AggSpec, count: usize, tz: &Tz, materializing: bool) -> Result<DataFrame> {
         let mut columns = Vec::with_capacity(raw.width());
         let mut error: Option<(usize, VolasError)> = None;
         for (name, col) in raw.names().iter().zip(raw.columns()) {
@@ -241,14 +273,25 @@ impl PeriodRuns {
             // period, then the earliest column of that period, just as before.
             let end = error.as_ref().map_or(count, |(row, _)| row + 1);
             let groups = self.offsets[..=end].windows(2).map(|w| &self.kept[w[0]..w[1]]);
-            match col.reduce_groups(spec.agg_for(name).as_combine_op(), groups) {
+            // Only the initial materializing batch retains the snapshot output's
+            // growth capacity. Ordinary incremental builders keep their old budget.
+            // The maximum open string cell bounds the forming endpoint's bytes.
+            let spare = if materializing { count } else { 0 };
+            let bytes = match col {
+                volas_core::Column::Str(v, _) if materializing => (self.starts[count]..raw.height()).map(|i| v.get(i).len()).max().unwrap_or(0),
+                _ => 0,
+            };
+            match col.reduce_groups_with_spare(spec.agg_for(name).as_combine_op(), groups, spare, bytes) {
                 Ok(col) => columns.push(col),
                 Err(e) if error.as_ref().is_none_or(|(row, _)| e.0 < *row) => error = Some(e),
                 Err(_) => {}
             }
         }
         if let Some((_, error)) = error { return Err(error); }
-        let index = Index::datetime(self.keys[..count].to_vec(), tz.clone()).with_name(raw.index().name().map(String::from));
+        let capacity = if materializing { (count * 2).max(4) } else { count };
+        let mut keys = Vec::with_capacity(capacity);
+        keys.extend_from_slice(&self.keys[..count]);
+        let index = Index::datetime(keys, tz.clone()).with_name(raw.index().name().map(String::from));
         DataFrame::new(raw.names().to_vec(), columns, Some(index))
     }
 }
@@ -289,6 +332,35 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame, tz: &
 mod tests {
     use super::*;
     use volas_core::{datetime, Column};
+
+    #[test]
+    fn consumption_keeps_closed_buffers_and_snapshot_isolation() {
+        let fine = DataFrame::new(vec!["volume".into()], vec![Column::f64(vec![1., 2., 3.])],
+            Some(Index::datetime(vec![0, 60_000_000_000, 120_000_000_000], Tz::Utc))).unwrap();
+        let cum = Cumulator::from_frame(&fine, TimeFrame::Min1, AggSpec::ohlcv()).unwrap();
+        let closed = cum.closed.as_ref().unwrap();
+        let values = closed.columns()[0].as_f64().unwrap().as_ptr();
+        let labels = match closed.index().kind() { IndexKind::Datetime(v, _) => v.as_ptr(), _ => unreachable!() };
+        let snapshot = cum.frame().unwrap();
+        let (out, open, aggregate) = cum.into_parts().unwrap();
+        assert_eq!(values, out.columns()[0].as_f64().unwrap().as_ptr());
+        match out.index().kind() { IndexKind::Datetime(v, _) => assert_eq!(labels, v.as_ptr()), _ => unreachable!() }
+        assert!(out.equals(&snapshot));
+        assert_eq!(open.unwrap().bars().height(), 1);
+        assert!(aggregate.is_some());
+        let mut changed = out;
+        let next = DataFrame::new(vec!["volume".into()], vec![Column::f64(vec![4.])],
+            Some(Index::datetime(vec![180_000_000_000], Tz::Utc))).unwrap();
+        changed.append(&next).unwrap();
+        assert!(snapshot.equals(&fine));
+        assert_eq!(changed.height(), 4);
+
+        let empty = Cumulator::new(TimeFrame::Min1, AggSpec::ohlcv()).into_parts().unwrap();
+        assert_eq!(empty.0.height(), 0);
+        assert!(empty.1.is_none() && empty.2.is_none());
+        let closed_only = Cumulator { closed: Some(fine.clone()), ..Cumulator::new(TimeFrame::Min1, AggSpec::ohlcv()) };
+        assert!(closed_only.into_frame().unwrap().equals(&fine));
+    }
 
     fn frame(
         times: &[&str],

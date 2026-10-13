@@ -224,9 +224,13 @@ impl Default for StrBufferBuilder {
 
 impl StrBufferBuilder {
     pub fn with_capacity(n: usize) -> Self {
+        Self::with_capacities(n, 0)
+    }
+    /// Reserve row offsets and UTF-8 bytes for a known-size output.
+    pub fn with_capacities(n: usize, bytes: usize) -> Self {
         let mut offsets = Vec::with_capacity(n + 1);
         offsets.push(0);
-        StrBufferBuilder { offsets, data: Vec::new() }
+        StrBufferBuilder { offsets, data: Vec::with_capacity(bytes) }
     }
     #[inline]
     pub fn push(&mut self, s: &str) {

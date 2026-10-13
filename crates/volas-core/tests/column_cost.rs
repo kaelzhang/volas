@@ -2,7 +2,23 @@
 #[path = "support/allocation.rs"]
 mod allocation;
 use allocation::measure;
-use volas_core::{CmpOp, Column, DType};
+use volas_core::{BinOp, CmpOp, Column, DType};
+
+#[test]
+fn homogeneous_float_arithmetic_allocates_only_its_output() {
+    for dtype in [DType::F64, DType::F32] {
+        let a = Column::f64(vec![1.; 30_000]).cast(dtype).unwrap();
+        let b = Column::f64(vec![2.; 30_000]).cast(dtype).unwrap();
+        for op in [Some(BinOp::Add), Some(BinOp::Sub), Some(BinOp::Mul), None] {
+            let (out, calls, bytes) = measure(|| match op {
+                Some(op) => a.binary(&b, op).unwrap(),
+                None => a.div(&b).unwrap(),
+            });
+            assert_eq!(out.len(), a.len());
+            assert!(calls <= 2, "{dtype} {op:?}: {calls} allocations, {bytes} bytes");
+        }
+    }
+}
 
 #[test]
 fn same_float_select_allocates_only_its_output() {
@@ -55,5 +71,19 @@ fn dense_fills_learn_the_buffer_fact_and_share_storage() {
             assert!(out.equals(&c));
             assert_eq!(calls, 0);
         }
+    }
+}
+
+#[test]
+fn ordinary_string_gather_keeps_first_append_capacity() {
+    let n = 30_000;
+    let source = Column::str(vec!["bar".into(); n]);
+    let idx: Vec<_> = (0..n).collect();
+    let groups: Vec<Vec<_>> = (0..n).map(|i| vec![i]).collect();
+    let bar = source.slice(0, 1);
+    for mut out in [source.take(&idx), source.reduce_groups(volas_core::CombineOp::Replace, groups.iter().map(Vec::as_slice)).unwrap()] {
+        let (_, calls, bytes) = measure(|| out.append(&bar).unwrap());
+        assert_eq!(out.len(), n + 1);
+        assert_eq!(calls, 0, "{calls} allocations / {bytes} bytes");
     }
 }

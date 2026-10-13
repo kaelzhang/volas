@@ -739,6 +739,12 @@ t.dt.dayofweek             # Monday=0 .. Sunday=6
 t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
 ```
 
+`dt.strftime(fmt)` applies the same format language as `Timestamp.strftime(fmt)`.
+`%f` writes six fractional digits; `%.f` writes the nonzero fraction in groups of
+three digits, up to nanoseconds. Missing values stay `NA`. Format errors are
+reported when formatting the first present value; an empty or all-NaT Series
+returns its empty or missing result.
+
 ### Series.from_arrow(data, name=None) -> Series
 
 A **volas-specific static method** that builds a `Series` from any object exposing the
@@ -956,6 +962,10 @@ int column) becomes `NaT`, like `pd.to_datetime`.
   parsed field is honored: an offset (`%z` / `%:z`) makes the value an absolute instant,
   exactly like an offset-aware string without `format`; time fields the format omits
   are zero. `%Z` (a zone *name*) raises `ValueError` — use a numeric offset.
+
+Empty, blank and missing string cells become `NaT` before format validation.
+An empty or all-missing string input therefore does not raise for an invalid
+format. Otherwise errors follow input order and name the first failing text.
 
 Naive strings parse as UTC and offset-aware strings (`…+08:00`) are absolute. To
 *display* the resulting index in a zone, make it the index and tag the zone with

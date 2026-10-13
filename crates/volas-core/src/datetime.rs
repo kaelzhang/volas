@@ -450,7 +450,7 @@ pub fn format_ns_offset(ns: i64, tz: &Tz) -> String {
 /// name — both empty for a naive `tz`, like pandas. An invalid or unformattable
 /// format is a `Value` error, never a panic.
 pub fn strftime(ns: i64, tz: &Tz, fmt: &str) -> Result<String> {
-    format::strftime(ns, tz, fmt)
+    Strftime::new(fmt).format(ns, tz)
 }
 
 /// Parse `s` with an explicit `strptime`-style `fmt` to **UTC** epoch ns, honoring
@@ -462,7 +462,7 @@ pub fn strftime(ns: i64, tz: &Tz, fmt: &str) -> Result<String> {
 /// silently skipped — an abbreviation does not identify a zone. A `Value` error when `s` does not
 /// match `fmt`.
 pub fn parse_ns_format(s: &str, fmt: &str) -> Result<i64> {
-    parse::parse_ns_format(s, fmt)
+    Strptime::new(fmt).parse(s)
 }
 
 #[cfg(test)]
@@ -577,6 +577,8 @@ mod tests {
 
 pub mod civil;
 mod format;
+pub use format::Strftime;
+pub use parse::Strptime;
 mod parse;
 pub use civil::Civil;
 

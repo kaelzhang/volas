@@ -3,6 +3,7 @@
 //! governs localization, calendar fields, rendering and time-frame boundaries.
 
 use std::sync::Arc;
+use std::fmt::Write;
 use crate::datetime::{self, Civil};
 use crate::error::{Result, VolasError};
 
@@ -173,11 +174,19 @@ impl Tz {
     }
 
     pub fn zone_name_at(&self, ns: i64) -> String {
+        let mut out = String::new();
+        self.write_zone_name(ns, &mut out);
+        out
+    }
+
+    /// Write the zone name into an existing text buffer, borrowing named-zone
+    /// abbreviations and writing fixed offsets without an intermediate String.
+    pub(crate) fn write_zone_name(&self, ns: i64, out: &mut String) {
         match self {
-            Tz::Naive => String::new(),
-            Tz::Utc => "UTC".to_string(),
-            Tz::Offset(s) => format!("UTC{}", format_offset(*s, ":")),
-            Tz::Named(rules) => rules.reading(ns.div_euclid(1_000_000_000)).abbr.clone(),
+            Tz::Naive => {},
+            Tz::Utc => out.push_str("UTC"),
+            Tz::Offset(s) => { out.push_str("UTC"); write_offset(*s, ":", out); },
+            Tz::Named(rules) => out.push_str(&rules.reading(ns.div_euclid(1_000_000_000)).abbr),
         }
     }
 
@@ -272,11 +281,16 @@ pub(crate) fn parse_offset_seconds(s: &str) -> Option<i32> {
 /// a whole minute (a historical LMT offset such as Kolkata's `+05:21:10`) — never
 /// truncated, so the text parses back to the same offset.
 pub fn format_offset(secs: i32, sep: &str) -> String {
+    let mut out = String::new();
+    write_offset(secs, sep, &mut out);
+    out
+}
+
+fn write_offset(secs: i32, sep: &str, out: &mut String) {
     let sign = if secs < 0 { '-' } else { '+' };
     let a = secs.unsigned_abs();
-    let mut out = format!("{sign}{:02}{sep}{:02}", a / 3600, a % 3600 / 60);
+    write!(out, "{sign}{:02}{sep}{:02}", a / 3600, a % 3600 / 60).unwrap();
     if !a.is_multiple_of(60) {
-        out.push_str(&format!("{sep}{:02}", a % 60));
+        write!(out, "{sep}{:02}", a % 60).unwrap();
     }
-    out
 }

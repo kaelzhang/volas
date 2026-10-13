@@ -9,6 +9,7 @@ COST_TESTS = [
     'test/test_operand_read_cost.py', 'test/test_cell_write_cost.py',
     'test/test_cumulation_cost.py', 'test/test_core_io_cost.py',
     'test/test_fillna_cost.py', 'test/test_append.py', 'test/test_fulfill.py',
+    'test/test_core_batch_cost.py',
 ]
 
 

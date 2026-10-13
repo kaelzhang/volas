@@ -405,32 +405,47 @@ fn read_field(text: &mut &str, p: &mut Fields, spec: Spec) -> Option<()> {
     }
 }
 
-pub(super) fn parse_ns_format(s: &str, fmt: &str) -> Result<i64> {
-    let mismatch = || VolasError::Value(format!("\"{s}\" does not match format \"{fmt}\""));
-    let tokens = format::tokens(fmt).ok_or_else(mismatch)?;
-    if tokens
-        .iter()
-        .any(|t| matches!(t, Token::Field(Spec { code: 'Z', .. })))
-    {
-        return Err(VolasError::Value(format!(
-            "format \"{fmt}\": %Z (a time-zone name) is not supported — use a numeric \
-             offset (%z / %:z), or parse without format= and localize"
-        )));
+/// An explicit format compiled once for a scalar or a batch of text values.
+pub struct Strptime<'a> {
+    fmt: &'a str,
+    tokens: Option<Vec<Token<'a>>>,
+    zone_name: bool,
+}
+
+impl<'a> Strptime<'a> {
+    /// Compile without changing validation timing for an empty or all-missing batch.
+    pub fn new(fmt: &'a str) -> Self {
+        let tokens = format::tokens(fmt);
+        let zone_name = tokens.as_ref().is_some_and(|tokens| tokens.iter().any(|t| matches!(t, Token::Field(Spec { code: 'Z', .. }))));
+        Self { fmt, tokens, zone_name }
     }
-    let mut rest = s;
-    let mut p = Fields::default();
-    for token in tokens {
-        match token {
-            Token::Literal(text) => rest = rest.strip_prefix(text).ok_or_else(mismatch)?,
-            Token::Space(_) => rest = rest.trim_start(),
-            Token::Field(spec) => read_field(&mut rest, &mut p, spec).ok_or_else(mismatch)?,
+
+    /// Parse one value, retaining its text in mismatch and range errors.
+    pub fn parse(&self, s: &str) -> Result<i64> {
+        let fmt = self.fmt;
+        let mismatch = || VolasError::Value(format!("\"{s}\" does not match format \"{fmt}\""));
+        let tokens = self.tokens.as_ref().ok_or_else(mismatch)?;
+        if self.zone_name {
+            return Err(VolasError::Value(format!(
+                "format \"{fmt}\": %Z (a time-zone name) is not supported — use a numeric \
+                 offset (%z / %:z), or parse without format= and localize"
+            )));
         }
+        let mut rest = s;
+        let mut p = Fields::default();
+        for token in tokens {
+            match token {
+                Token::Literal(text) => rest = rest.strip_prefix(text).ok_or_else(mismatch)?,
+                Token::Space(_) => rest = rest.trim_start(),
+                Token::Field(spec) => read_field(&mut rest, &mut p, *spec).ok_or_else(mismatch)?,
+            }
+        }
+        if !rest.is_empty() {
+            return Err(mismatch());
+        }
+        let local = p.wall().ok_or_else(mismatch)?;
+        local
+            .instant(p.offset.unwrap_or(0) as i32)
+            .map_err(|_| VolasError::Overflow(format!("\"{s}\" is outside the datetime64[ns] range")))
     }
-    if !rest.is_empty() {
-        return Err(mismatch());
-    }
-    let local = p.wall().ok_or_else(mismatch)?;
-    local
-        .instant(p.offset.unwrap_or(0) as i32)
-        .map_err(|_| VolasError::Overflow(format!("\"{s}\" is outside the datetime64[ns] range")))
 }

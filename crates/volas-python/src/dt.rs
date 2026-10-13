@@ -227,8 +227,9 @@ impl PyDt {
     /// Format each element with a ``strftime`` pattern (pandas
     /// ``.dt.strftime``); str, NaT -> NA.
     fn strftime(&self, fmt: &str) -> PyResult<PySeries> {
+        let formatter = datetime::Strftime::new(fmt);
         let out = self
-            .map_ns(|ns| datetime::strftime(ns, &Tz::DATETIME_COLUMN, fmt))
+            .map_ns(|ns| formatter.format(ns, &Tz::DATETIME_COLUMN))
             .into_iter()
             .map(Option::transpose)
             .collect::<volas_core::Result<Vec<_>>>()
