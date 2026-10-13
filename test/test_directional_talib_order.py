@@ -22,6 +22,8 @@ import pytest
 import volas
 from test import ht_reference as R
 
+from test.exact import assert_exact
+
 talib = pytest.importorskip('talib')
 
 _CONTRACTS = R.talib_contracts(talib)
@@ -158,11 +160,7 @@ def test_zero_guards_are_talibs(name, kind):
 
 
 def _assert_bits(got, want, what):
-    got, want = np.asarray(got, float), np.asarray(want, float)
-    np.testing.assert_array_equal(np.isnan(got), np.isnan(want), err_msg=f'{what}: NaN mask')
-    m = ~np.isnan(want)
-    assert np.array_equal(got[m].view(np.uint64), want[m].view(np.uint64)), \
-        f'{what}: first differing row {np.flatnonzero(got[m] != want[m])[:1]}'
+    assert_exact(got, want, what)
 
 
 @pytest.mark.parametrize('period', [2, 5, 14, 30])

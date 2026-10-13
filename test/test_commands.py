@@ -11,6 +11,8 @@ from .common import (
     to_fixed
 )
 
+from test.exact import assert_exact, same_exact
+
 
 @pytest.fixture
 def stock():
@@ -23,17 +25,17 @@ def test_command_names_are_case_insensitive(stock):
     for directive in ('MACD:12,26', 'ATR:14', 'RSI:14', 'TR', 'BOLL.upper'):
         got = np.asarray(stock[directive], dtype=float)
         want = np.asarray(stock[directive.lower()], dtype=float)
-        np.testing.assert_array_equal(got, want)  # NaN positions included
+        assert_exact(got, want)  # NaN positions included
 
 
 def test_style_namespace_and_cdl_alias(stock):
     """style.bullish/.bearish and the `cdl` alias match; `cdl` is case-insensitive too."""
     bull = np.asarray(stock['style.bullish'], dtype=float)
     for d in ('style.bullish', 'cdl.bullish', 'CDL.bullish'):
-        np.testing.assert_array_equal(np.asarray(stock[d], dtype=float), bull)
+        assert_exact(np.asarray(stock[d], dtype=float), bull)
     bear = np.asarray(stock['style.bearish'], dtype=float)
     for d in ('style.bearish', 'cdl.bearish'):
-        np.testing.assert_array_equal(np.asarray(stock[d], dtype=float), bear)
+        assert_exact(np.asarray(stock[d], dtype=float), bear)
 
 
 def test_append(stock):
@@ -84,12 +86,12 @@ def test_operators(stock):
     assert stock['(kdj.j - kdj.j) == 0'].to_numpy().all()
     assert stock['(kdj.j + - kdj.j) == 0'].to_numpy().all()
 
-    assert np.array_equal(
+    assert same_exact(
         stock['kdj.j'].to_numpy() * 2,
         stock['kdj.j * 2'].to_numpy()
     )
 
-    assert np.array_equal(
+    assert same_exact(
         stock['kdj.j'].to_numpy() / 2,
         stock['kdj.j / 2'].to_numpy()
     )

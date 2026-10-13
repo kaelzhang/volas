@@ -1,9 +1,11 @@
 """Column-write events in the ledger preserve data outside the visible window."""
-import numpy as np
+
 import pytest
 
 from .harness.data import Schema, EPOCHS
 from .harness.machine_window import WindowedMachine
+
+from test.exact import assert_exact
 
 
 class _Draws:
@@ -23,12 +25,10 @@ def test_replacing_a_user_column_preserves_the_ledgers_hidden_history(directive,
     machine.set_column(_Draws('u1', 1), 'new')
     machine.set_column(_Draws('u0', 1), 'new')
     machine.append(1, 'arrow', ('walk', 0), '1m')
-    np.testing.assert_array_equal(machine.df[directive].to_numpy(),
+    assert_exact(machine.df[directive].to_numpy(),
                                   machine.store.frame()[directive].to_numpy()[-1:])
     machine.set_column(_Draws('u0', 1), kind)
     assert machine.store.rows[0]['u0'] == -1.0
     want = machine.store.frame()[directive].to_numpy()[-1:]
-    np.testing.assert_array_equal(machine.df[directive].to_numpy(), want)
+    assert_exact(machine.df[directive].to_numpy(), want)
     machine.teardown()
-
-

@@ -64,16 +64,17 @@ pub fn cdl_engulfing(o: &[f64], h: &[f64], l: &[f64], c: &[f64], _origin: usize)
     })
 }
 
-/// Harami strength of the 2nd body inside the 1st: `100` when strictly contained, `80`
-/// when a boundary just touches (`<=` / `>=`), else `0`.
+/// Harami reversal signal: signed `100` when strictly contained, signed `80`
+/// when a boundary touches, and positive zero when there is no containment.
+/// Apply direction only to a signal, as TA-Lib does with integer output codes.
 #[inline]
-fn harami_strength(o: &[f64], c: &[f64], i: usize) -> f64 {
+fn harami_signal(o: &[f64], c: &[f64], i: usize) -> f64 {
     let (hi, lo) = (o[i].max(c[i]), o[i].min(c[i]));
     let (prev_hi, prev_lo) = (o[i - 1].max(c[i - 1]), o[i - 1].min(c[i - 1]));
     if hi < prev_hi && lo > prev_lo {
-        100.0
+        -color(o, c, i - 1) * 100.0
     } else if hi <= prev_hi && lo >= prev_lo {
-        80.0
+        -color(o, c, i - 1) * 80.0
     } else {
         0.0
     }
@@ -86,7 +87,7 @@ pub fn cdl_harami(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> 
     let lb = BODY_SHORT.avg_period.max(BODY_LONG.avg_period) + 1;
     each_bar_avg2([BODY_LONG, BODY_SHORT], lb, o, h, l, c, origin, |i, cur, prev| {
         if realbody(o, c, i - 1) > prev[0] && realbody(o, c, i) <= cur[1] {
-            -color(o, c, i - 1) * harami_strength(o, c, i)
+            harami_signal(o, c, i)
         } else {
             0.0
         }
@@ -98,7 +99,7 @@ pub fn cdl_haramicross(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize
     let lb = BODY_DOJI.avg_period.max(BODY_LONG.avg_period) + 1;
     each_bar_avg2([BODY_LONG, BODY_DOJI], lb, o, h, l, c, origin, |i, cur, prev| {
         if realbody(o, c, i - 1) > prev[0] && realbody(o, c, i) <= cur[1] {
-            -color(o, c, i - 1) * harami_strength(o, c, i)
+            harami_signal(o, c, i)
         } else {
             0.0
         }

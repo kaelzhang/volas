@@ -8,6 +8,8 @@ import pytest
 
 import volas
 
+from test.exact import same_exact
+
 T = volas.to_datetime
 
 
@@ -25,7 +27,7 @@ def state(df):
 
 
 def same(a, b):
-    return np.array_equal(np.asarray(a, float), np.asarray(b, float), equal_nan=True)
+    return same_exact(a, b)
 
 
 # --- plain frames ---------------------------------------------------------------
@@ -337,4 +339,4 @@ def test_a_row_an_indicator_cannot_compute_never_fails_a_windowed_append():
             with pytest.raises(OverflowError):
                 w['vr:1']  # the bad row is still retained
     want = volas.DataFrame({'close': [20.0, 21.0], 'volume': np.array([19, 20], 'int64')}).exec('vr:1')
-    assert np.array_equal(w['vr:1'].to_numpy()[-1:], want[-1:], equal_nan=True)  # it has left
+    assert same_exact(w['vr:1'].to_numpy()[-1:], want[-1:])  # it has left

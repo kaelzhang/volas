@@ -13,6 +13,8 @@ import pytest
 import volas
 from test import ht_reference
 
+from test.exact import assert_exact
+
 talib = pytest.importorskip('talib')
 
 TENCENT = str((Path(__file__).parent / 'data' / 'tencent.csv').resolve())
@@ -129,9 +131,9 @@ def test_macdfix_matches_macd_with_fixed_periods(ohlc):
     # the clean EMA(12)-EMA(26) difference (diverging from talib.MACDFIX's internally
     # inconsistent EMA by the same documented quirk).
     df, h, l, c = ohlc
-    np.testing.assert_array_equal(df.exec('macdfix'), df.exec('macd:12,26'))
-    np.testing.assert_array_equal(df.exec('macdfix.signal:9'), df.exec('macd.signal:12,26,9'))
-    np.testing.assert_array_equal(df.exec('macdfix.histogram'), df.exec('macd.histogram:12,26,9'))
+    assert_exact(df.exec('macdfix'), df.exec('macd:12,26'))
+    assert_exact(df.exec('macdfix.signal:9'), df.exec('macd.signal:12,26,9'))
+    assert_exact(df.exec('macdfix.histogram'), df.exec('macd.histogram:12,26,9'))
     _parity(df.exec('macdfix'), talib.EMA(c, 12) - talib.EMA(c, 26), mask_want=True)
 
 
@@ -408,21 +410,22 @@ assert len(_CANDLE_PATTERNS) == 61, 'all 61 TA-Lib candlestick patterns covered'
 def _candle_pat(got, want, lb):
     # f64 -100/0/100, warm-up NaN (TA-Lib fills its int output's warm-up with 0).
     # Values are exact, so compare the valid region.
-    got = np.asarray(got, dtype=float)
+    got = np.asarray(got)
+    want = np.asarray(want)
     assert np.all(np.isnan(got[:lb])), 'pattern warm-up is NaN'
-    np.testing.assert_array_equal(got[lb:], np.asarray(want, dtype=float)[lb:])
+    assert_exact(got[lb:], want[lb:])
 
 
 def test_candlestick_patterns_match_talib(ohlc):
     df, h, l, c = ohlc
     o = df['open'].to_numpy()
     for name, fn, lb in _CANDLE_PATTERNS:
-        want = fn(o, h, l, c)
+        want = np.asarray(fn(o, h, l, c), dtype=float)
         _candle_pat(df.exec(f'style.{name}'), want, lb)
         _candle_pat(df.exec(f'cdl.{name}'), want, lb)  # the cdl alias matches
     # the penetration ratio is an optional arg (default 0.5)
     _candle_pat(df.exec('cdl.darkcloudcover:0.6'),
-                talib.CDLDARKCLOUDCOVER(o, h, l, c, penetration=0.6), 11)
+                np.asarray(talib.CDLDARKCLOUDCOVER(o, h, l, c, penetration=0.6), dtype=float), 11)
 
 
 def _synthetic_candle_ohlc():
@@ -487,7 +490,7 @@ def test_candlestick_patterns_match_talib_synthetic(synth_candle_ohlc):
     df = volas.DataFrame({'open': o, 'high': h, 'low': l, 'close': c})
     for name, fn, lb in _CANDLE_PATTERNS:
         got = np.asarray(df.exec(f'style.{name}', dtype='float64'), dtype=float)
-        np.testing.assert_array_equal(got[lb:], np.asarray(fn(o, h, l, c), dtype=float)[lb:])
+        assert_exact(got[lb:], np.asarray(fn(o, h, l, c), dtype=float)[lb:])
         assert np.any(got[lb:] != 0), f'{name} never fired on the synthetic series'
 
 
@@ -655,13 +658,13 @@ def close_full():
 def _ht(got, want, lookback):
     """NaN over the warm-up, then TA-Lib from the first published row: bit for bit
     against an unfused build, to `_HT_FUSED_ATOL` against a contracted one."""
-    got = np.asarray(got, dtype=float)
-    want = np.asarray(want, dtype=float)
+    got = np.asarray(got)
+    want = np.asarray(want)
     assert np.isnan(got[:lookback]).all()
     if _TALIB_CONTRACTS:
         np.testing.assert_allclose(got[lookback:], want[lookback:], rtol=0, atol=_HT_FUSED_ATOL)
     else:
-        np.testing.assert_array_equal(got[lookback:], want[lookback:])
+        assert_exact(got[lookback:], want[lookback:])
 
 
 @pytest.mark.parametrize('frame', ['ohlc', 'close_full'])
@@ -688,7 +691,7 @@ def test_ht_phase_family_matches_talib(frame, request):
     _ht(df.exec('ht_sine'), sine, 63)  # primary line = sine
     _ht(df.exec('ht_sine.leadsine'), leadsine, 63)
     _ht(df.exec('ht_trendline'), talib.HT_TRENDLINE(c), 63)
-    _ht(df.exec('ht_trendmode', dtype='float64'), talib.HT_TRENDMODE(c), 63)
+    _ht(df.exec('ht_trendmode', dtype='float64'), np.asarray(talib.HT_TRENDMODE(c), dtype='float64'), 63)
 
 
 @pytest.mark.skipif(_TALIB_CONTRACTS, reason='flat input: phase is rounding noise of the build')
@@ -697,4 +700,4 @@ def test_ht_phase_family_matches_talib(frame, request):
 def test_ht_phase_on_degenerate_input_matches_an_unfused_talib(close):
     df = volas.DataFrame({'close': close})
     _ht(df.exec('ht_dcphase'), talib.HT_DCPHASE(close), 63)
-    _ht(df.exec('ht_trendmode', dtype='float64'), talib.HT_TRENDMODE(close), 63)
+    _ht(df.exec('ht_trendmode', dtype='float64'), np.asarray(talib.HT_TRENDMODE(close), dtype='float64'), 63)

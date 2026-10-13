@@ -13,13 +13,13 @@ import pytest
 
 import volas
 
+from test.exact import same_exact
+
 FRAME = volas.DataFrame({'close': [1.0, -2.0, 0.0], 'n': np.array([3, 0, -4], dtype=np.int64)})
 
 
 def _same_bits(a, b):
-    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    nan = np.isnan(a) & np.isnan(b)
-    return bool(((a.view(np.int64) == b.view(np.int64)) | nan).all())
+    return same_exact(a, b)
 
 
 def _values(directive):

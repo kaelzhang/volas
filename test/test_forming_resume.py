@@ -11,6 +11,8 @@ import pytest
 
 import volas
 
+from test.exact import assert_exact
+
 
 def _load(n):
     csv = pd.read_csv("test/data/sample_1m_20k.csv")
@@ -20,17 +22,7 @@ def _load(n):
 
 
 def _bit_exact(live, ref, ctx):
-    """Equal where both finite, NaN in the same cells — same kernel ⇒ no tolerance."""
-    assert live.shape == ref.shape, f"{ctx}: shape {live.shape} != {ref.shape}"
-    both_nan = np.isnan(live) & np.isnan(ref)
-    a = np.where(both_nan, 0.0, live)
-    b = np.where(both_nan, 0.0, ref)
-    if not np.array_equal(a, b):
-        bad = np.argmax(np.abs(a - b))
-        raise AssertionError(
-            f"{ctx}: diverged at row {bad}: live={live[bad]!r} ref={ref[bad]!r} "
-            f"max|Δ|={np.nanmax(np.abs(a - b))!r}"
-        )
+    assert_exact(live, ref, ctx)
 
 
 @pytest.mark.parametrize("directive", ["atr:14", "ema:20", "rsi:14", "natr:14", "cmo:14"])

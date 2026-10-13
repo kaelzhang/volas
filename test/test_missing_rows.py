@@ -24,6 +24,8 @@ from volas import DataFrame
 
 from test.test_window_locality import RECURSIVE, SUBCOMMANDS
 
+from test.exact import assert_exact
+
 ROOT = Path(__file__).resolve().parent.parent
 OHLCV = ("open", "high", "low", "close", "volume")
 
@@ -137,14 +139,7 @@ def _mutated(pattern):
 
 
 def _bit_exact(got, want, ctx):
-    """Equal where both are numbers, NaN in the same cells — no tolerance."""
-    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
-    assert got.shape == want.shape, f"{ctx}: shape {got.shape} != {want.shape}"
-    nan = np.isnan(got) & np.isnan(want)
-    a, b = np.where(nan, 0.0, got), np.where(nan, 0.0, want)
-    if not np.array_equal(a, b):
-        bad = int(np.flatnonzero(a != b)[0])
-        raise AssertionError(f"{ctx}: row {bad}: got {got[bad]!r}, want {want[bad]!r}")
+    assert_exact(got, want, ctx)
 
 
 def _deleted(directive, data, inputs):

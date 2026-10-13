@@ -10,6 +10,8 @@ import pytest
 
 import volas
 
+from test.exact import assert_exact
+
 OHLCV = ("open", "high", "low", "close", "volume")
 
 
@@ -23,9 +25,7 @@ def _cols(n):
 
 
 def _bit_exact(got, want, ctx):
-    got, want = np.asarray(got, float), np.asarray(want, float)
-    same = (got == want) | (np.isnan(got) & np.isnan(want))
-    assert same.all(), f"{ctx}: rows {np.flatnonzero(~same)[:5]}: {got[~same][:3]} vs {want[~same][:3]}"
+    assert_exact(got, want, ctx)
 
 
 @pytest.mark.parametrize("directive", ["plus_dm:14", "minus_dm:14", "plus_dm:3", "minus_dm:5"])

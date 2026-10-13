@@ -1,7 +1,10 @@
 """Short publication histories fall back to the continuation warm-up owner."""
+
 import numpy as np
 import pytest
 import volas
+
+from test.exact import assert_exact
 
 
 @pytest.mark.parametrize('directive', ['stochrsi.fastk:2,', 'stochrsi.d:2,5,8',
@@ -22,7 +25,7 @@ def test_short_frames_publish_only_complete_continuation_states(directive, tf):
         df[directive]
         bar = volas.DataFrame({k: v[n:n + 1] for k, v in columns.items()}, index=index[n:n + 1])
         df.append(bar)
-        np.testing.assert_array_equal(df[directive].to_numpy(), frame(n + 1)[directive].to_numpy())
+        assert_exact(df[directive].to_numpy(), frame(n + 1)[directive].to_numpy())
 
 @pytest.mark.parametrize('complete', range(3, 7))
 def test_short_complete_history_uses_warmup_state_inside_a_large_frame(complete):
@@ -33,4 +36,4 @@ def test_short_complete_history_uses_warmup_state_inside_a_large_frame(complete)
     df['stochrsi.fastk:2,']
     df.append(volas.DataFrame({'close': [9.0]}))
     expected = volas.DataFrame({'close': np.r_[close, 9.0]})['stochrsi.fastk:2,']
-    np.testing.assert_array_equal(df['stochrsi.fastk:2,'].to_numpy(), expected.to_numpy())
+    assert_exact(df['stochrsi.fastk:2,'].to_numpy(), expected.to_numpy())

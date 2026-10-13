@@ -14,6 +14,8 @@ import numpy as np
 
 import volas
 
+from test.exact import assert_exact
+
 TENCENT = str((Path(__file__).parent / 'data' / 'tencent.csv').resolve())
 
 
@@ -86,8 +88,7 @@ def test_fulfill_single_bar_resume_ema_smma_explicit_series():
     for d in directives:
         exp = np.asarray(ref[d].to_numpy(), float)
         got = np.asarray(df[d].to_numpy(), float)
-        m = ~np.isnan(exp)
-        np.testing.assert_array_equal(got[m], exp[m])  # strict bit-exactness
+        assert_exact(got, exp)  # strict bit-exactness
 
 
 def test_fulfill_no_computed_columns_is_noop():
