@@ -26,7 +26,7 @@ use super::{as_command, bound, recursive};
 /// The recursive command `node` binds to, as a [`BoundCommand`] passed to `f`; `None`
 /// for anything else.
 fn recursion<R>(node: &Ast, f: impl FnOnce(&BoundCommand) -> Option<R>) -> Option<R> {
-    let cmd = as_command(node)?;
+    let cmd = as_command(node.node())?;
     if !recursive(&cmd) {
         return None;
     }
@@ -89,7 +89,7 @@ fn over_inputs(cmd: &BoundCommand, inputs: Vec<(usize, Vec<f64>)>) -> Option<(Da
         args: Bound { values: cmd.args.into(), spec: cmd.spec.clone(), bare: None },
         series: names.into_iter().map(Node::Name).collect(),
     });
-    Some((frame, node))
+    Some((frame, crate::bind::finish(node)))
 }
 
 /// The checkpoint of the recursive `node`'s history over `df`'s rows `[0, end)` — a

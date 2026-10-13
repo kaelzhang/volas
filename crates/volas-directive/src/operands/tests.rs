@@ -52,7 +52,7 @@ fn a_failed_read_is_remembered() {
 fn a_boolean_read_is_recorded() {
     let df = frame();
     let node = parse("repeat:1@(close > 1)").unwrap();
-    let crate::types::Node::Command(cmd) = &*node else { unreachable!() };
+    let crate::types::Node::Command(cmd) = node.node() else { unreachable!() };
     let ops = Operands::new(&df, &cmd.series);
     assert_eq!(ops.bool(0).unwrap(), vec![Some(false), Some(true), Some(true)]);
     assert_eq!(ops.bool(0).unwrap().len(), 3); // the second read takes the record
@@ -73,7 +73,7 @@ fn a_window_reads_only_its_rows() {
         .unwrap()
         .with_origin(10);
     let node = parse("sum:2@(close + n)").unwrap();
-    let crate::types::Node::Command(cmd) = &*node else { unreachable!() };
+    let crate::types::Node::Command(cmd) = node.node() else { unreachable!() };
     let ops = Operands::window(&df, &cmd.series, 2);
     assert_eq!((ops.start(), ops.origin()), (2, 12));
     assert_eq!(&*ops.f64(1, "n").unwrap(), &[3.0, 4.0]);

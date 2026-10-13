@@ -1,10 +1,10 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
 
-use crate::bind::bind_command;
+use crate::bind::bind_command_node;
 use crate::operands::Operands;
 use crate::spec::History;
-use crate::types::{ArgValue, Ast, Bound, Command, Node, Number, Op, UnaryOp};
+use crate::types::{ArgValue, Ast, Bound, BoundNode, Command, Node, Number, Op, UnaryOp};
 use volas_compute::raw::indicators as ind;
 use volas_compute::missing::{on_complete_rows, Input};
 use volas_core::{BoolOp, CmpOp, Column};
@@ -20,6 +20,10 @@ use volas_time::Span;
 /// (contract #26). Booleans carry presence (contract #27): a comparison with a
 /// missing operand is missing, and `~ & | ^` use Kleene logic.
 pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
+    execute_node(df, node.node())
+}
+
+pub(crate) fn execute_node(df: &DataFrame, node: &BoundNode) -> Result<Column> {
     match node {
         Node::Scalar(Number::Int(v)) => Ok(Column::i64(vec![*v; df.height()])),
         Node::Scalar(Number::Float(v)) => Ok(Column::f64(vec![*v; df.height()])),
@@ -32,12 +36,12 @@ pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
             } else {
                 // not bound against a frame (`crate::bind::bind_frame`): a bare name that
                 // is no column is the command it names
-                dispatch(df, &bind_command(name, None, &[], &[])?)
+                dispatch(df, &bind_command_node(name, None, &[], &[])?)
             }
         }
         Node::Command(cmd) => dispatch(df, cmd),
         Node::Unary { op, operand } => {
-            let c = execute(df, operand)?;
+            let c = execute_node(df, operand)?;
             require_numeric(&c)?; // a str/datetime operand can't go through the f64 funnel (C4)
             match op {
                 UnaryOp::Not => Ok(c.not()),
@@ -45,8 +49,8 @@ pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
             }
         }
         Node::Binary { left, op, right } => {
-            let l = execute(df, left)?;
-            let r = execute(df, right)?;
+            let l = execute_node(df, left)?;
+            let r = execute_node(df, right)?;
             require_numeric(&l)?; // both operands must be numeric (or bool) — C4, no
             require_numeric(&r)?; // silent str -> NaN arithmetic / comparison
             apply_binary(*op, &l, &r)
@@ -150,7 +154,7 @@ pub(crate) fn arg_i64(args: &[ArgValue], i: usize) -> i64 {
 
 /// The `@` operand filling series slot `i`, if any: an absent slot or an empty name
 /// leaves it to the command's default series.
-pub(crate) fn operand(series: &[Ast], i: usize) -> Option<&Ast> {
+pub(crate) fn operand(series: &[BoundNode], i: usize) -> Option<&BoundNode> {
     series
         .get(i)
         .filter(|n| !matches!(n, Node::Name(s) if s.is_empty()))
@@ -613,7 +617,7 @@ mod tests {
         let bars_per_year = |d: &str| {
             let args: Vec<Option<String>> =
                 d["hv:".len()..].split(',').map(|t| Some(t.to_string())).collect();
-            hv_annualization(&bind_command("hv", None, &args, &[]).unwrap().args).powi(2)
+            hv_annualization(&bind_command_node("hv", None, &args, &[]).unwrap().args).powi(2)
         };
         let close = |d: &str, want: f64| {
             let got = bars_per_year(d);
@@ -691,7 +695,7 @@ mod tests {
 
     #[test]
     fn empty_name_is_an_error() {
-        assert!(execute(&stock(), &Node::Name(String::new())).is_err());
+        assert!(execute_node(&stock(), &Node::Name(String::new())).is_err());
     }
 
     /// `initial_state` / `execute_resume` decline (return `None`, so the engine keeps the

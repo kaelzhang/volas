@@ -39,16 +39,19 @@ pub const MEMO_MAX_INPUT_BYTES: usize = 4096;
 /// [`memo_cost`]. Realistic directives fill [`MEMO_MAX_ENTRIES`] first.
 pub const MEMO_MAX_BYTES: usize = 1 << 20;
 
-/// Estimated resident bytes of one memo entry: the key, the tree's strings (no
-/// longer than the input) and one tree node per parsed node.
-fn memo_cost(input: &str, nodes: usize) -> usize {
-    2 * input.len() + nodes * std::mem::size_of::<Ast>()
+/// Estimated resident bytes of one memo entry, including the prepared continuation.
+/// A chain partitions a copy of the tree among its own nodes and substituted top,
+/// with a hidden name at each stateful edge. Budget conservatively for two copies.
+fn memo_cost(input: &str, nodes: usize, ast: &Ast) -> usize {
+    let tree = 2 * input.len() + nodes * std::mem::size_of::<crate::types::BoundNode>();
+    let plan = match ast.continuation() {
+        crate::types::Continuation::Chain(plan) => {
+            2 * tree + plan.nodes.len() * (std::mem::size_of::<Ast>() + 64)
+        }
+        _ => 0,
+    };
+    tree + std::mem::size_of::<Ast>() + plan
 }
-
-// Any single memoizable entry fits the byte budget on its own, so eviction always
-// makes room.
-const _: () =
-    assert!(2 * MEMO_MAX_INPUT_BYTES + MAX_NODES * std::mem::size_of::<Ast>() <= MEMO_MAX_BYTES);
 
 /// One thread's parse memo, bounded by [`MEMO_MAX_ENTRIES`] and [`MEMO_MAX_BYTES`].
 /// When full it evicts uniformly random entries, one at a time, until the new entry
@@ -122,7 +125,8 @@ thread_local! {
 /// Parse a directive string into a bound, validated [`Ast`] (memoized per thread).
 /// Binding happens here, once: an invalid argument / unknown command errors at parse
 /// time, and the returned tree is ready to execute with no further validation. Only
-/// successful parses of inputs up to [`MEMO_MAX_INPUT_BYTES`] are memoized.
+/// successful parses of inputs up to [`MEMO_MAX_INPUT_BYTES`] whose prepared tree fits
+/// [`MEMO_MAX_BYTES`] are memoized.
 pub fn parse(input: &str) -> Result<Rc<Ast>> {
     let memoize = input.len() <= MEMO_MAX_INPUT_BYTES;
     if memoize {
@@ -131,10 +135,12 @@ pub fn parse(input: &str) -> Result<Rc<Ast>> {
         }
     }
     let (cst, nodes) = parse_tree(input)?;
-    let ast = Rc::new(bind_node(&cst)?);
+    let ast = Rc::new(crate::bind::finish(bind_node(&cst)?));
     if memoize {
-        let cost = memo_cost(input, nodes);
-        PARSE_CACHE.with(|c| c.borrow_mut().insert(input, &ast, cost));
+        let cost = memo_cost(input, nodes, &ast);
+        if cost <= MEMO_MAX_BYTES {
+            PARSE_CACHE.with(|c| c.borrow_mut().insert(input, &ast, cost));
+        }
     }
     Ok(ast)
 }

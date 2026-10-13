@@ -23,7 +23,10 @@ pub fn initial_state(df: &DataFrame, node: &Ast, end: usize) -> Option<Vec<f64>>
     if super::chain::chained(node) {
         return super::chain::capture(df, node, end);
     }
-    let cmd = as_command(node)?;
+    if !matches!(node.continuation(), crate::types::Continuation::Own) {
+        return None;
+    }
+    let cmd = as_command(node.node())?;
     if resume_of(&cmd) == Resume::Recompute {
         return None;
     }

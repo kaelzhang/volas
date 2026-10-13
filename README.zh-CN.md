@@ -1296,6 +1296,8 @@ except DirectiveSyntaxError as e:
 
 完整 directive 参考见 [INDICATORS.md](INDICATORS.md)，其中覆盖 Volas 独有指标、内置统计命令，以及与 TA-Lib 兼容的 directive。
 
+Rust 调用方通过 `parse` 或 `bind_frame` 获得经过校验、不可变更内部表示的 `volas_directive::Ast`。通过 `node()` 与 `continuation()` 查看它；命令参数提供只读的 `values()`、`spec()` 与 `bare()` 访问器。执行、lookback 与续算 API 都接受 `&Ast`。binder 在绑定时一次性准备续算计划，包括其中的有状态子树及其隐藏输入列。`stringify` 接受 `&Ast` 或宽松的 `&Form`，使用同一个规范渲染器。
+
 # 参与与反馈
 
 欢迎提 issue、指标请求、benchmark 挑战和 PR——参见

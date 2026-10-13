@@ -33,8 +33,8 @@ use std::cell::{Cell, OnceCell};
 
 use volas_core::{Column, DataFrame, Result, VolasError};
 
-use crate::exec::{execute, operand, require_f64_input, require_numeric};
-use crate::types::Ast;
+use crate::exec::{execute_node, operand, require_f64_input, require_numeric};
+use crate::types::BoundNode;
 
 /// How many input slots a command can read (every command reads at most five; an arm
 /// reading past this is a bug, caught by every command's test).
@@ -89,7 +89,7 @@ fn convert(col: &Column, start: usize, end: usize) -> Result<Cow<'_, [f64]>> {
 /// The operands a command's arm reads (see the module docs).
 pub(crate) struct Operands<'a> {
     df: &'a DataFrame,
-    series: &'a [Ast],
+    series: &'a [BoundNode],
     reads: [OnceCell<Read<'a>>; SLOTS],
     /// The first frame row read: `0`, or the start of a trailing window.
     start: usize,
@@ -117,19 +117,19 @@ pub(crate) struct Operands<'a> {
 
 impl<'a> Operands<'a> {
     /// Read the frame's columns and the `@` operands evaluated over it.
-    pub(crate) fn new(df: &'a DataFrame, series: &'a [Ast]) -> Self {
+    pub(crate) fn new(df: &'a DataFrame, series: &'a [BoundNode]) -> Self {
         Operands::rows(df, series, 0, df.height())
     }
 
     /// Read only the frame's rows from `start` on (each keeping its absolute position).
-    pub(crate) fn window(df: &'a DataFrame, series: &'a [Ast], start: usize) -> Self {
+    pub(crate) fn window(df: &'a DataFrame, series: &'a [BoundNode], start: usize) -> Self {
         Operands::rows(df, series, start, df.height())
     }
 
     /// Read only the frame's rows `[start, end)` (each keeping its absolute position):
     /// the columns' rows there, and the `@` operands evaluated over them. The arm sees
     /// row `start` as its row 0 (see the module docs).
-    pub(crate) fn rows(df: &'a DataFrame, series: &'a [Ast], start: usize, end: usize) -> Self {
+    pub(crate) fn rows(df: &'a DataFrame, series: &'a [BoundNode], start: usize, end: usize) -> Self {
         let end = end.min(df.height());
         let start = start.min(end);
         Operands {
@@ -151,7 +151,7 @@ impl<'a> Operands<'a> {
 
     /// As [`rows`](Self::rows) over the rows `[0, end)`, stopping the arm at the first
     /// frame column known to hold a NaN (see [`missing`](Self::missing)).
-    pub(crate) fn stopping(df: &'a DataFrame, series: &'a [Ast], end: usize) -> Self {
+    pub(crate) fn stopping(df: &'a DataFrame, series: &'a [BoundNode], end: usize) -> Self {
         Operands {
             stop_on_missing: true,
             ..Operands::rows(df, series, 0, end)
@@ -162,7 +162,7 @@ impl<'a> Operands<'a> {
     /// as long as the first) of the frame's rows from `start` on.
     pub(crate) fn over(
         df: &'a DataFrame,
-        series: &'a [Ast],
+        series: &'a [BoundNode],
         start: usize,
         views: Vec<Option<Cow<'a, [f64]>>>,
     ) -> Self {
@@ -228,7 +228,7 @@ impl<'a> Operands<'a> {
     fn resolve(&self, slot: usize, default: &str) -> Result<Read<'a>> {
         match operand(self.series, slot) {
             Some(node) => {
-                let col = execute(self.operand_frame(), node)?;
+                let col = execute_node(self.operand_frame(), node)?;
                 require_f64_input(&col)?;
                 Ok(Read { values: Cow::Owned(col.to_f64_vec()), column: None, known_nan: None })
             }
@@ -296,7 +296,7 @@ impl<'a> Operands<'a> {
                 let read = self.read(slot, || {
                     let node = operand(self.series, slot)
                         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
-                    let col = execute(self.operand_frame(), node)?;
+                    let col = execute_node(self.operand_frame(), node)?;
                     require_numeric(&col)?;
                     let truths = (0..col.len()).map(|i| match col.truth_at(i) {
                         Some(t) => f64::from(u8::from(t)),

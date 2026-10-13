@@ -182,11 +182,20 @@ impl ArgValue {
 #[derive(Clone, Debug)]
 pub struct Bound {
     /// The bound arguments, one per spec slot.
-    pub values: Box<[ArgValue]>,
+    pub(crate) values: Box<[ArgValue]>,
     /// The spec of the command's line.
-    pub spec: CommandSpec,
+    pub(crate) spec: CommandSpec,
     /// The spelling of a command written as a bare name, if it was.
-    pub bare: Option<Box<str>>,
+    pub(crate) bare: Option<Box<str>>,
+}
+
+impl Bound {
+    /// The validated arguments, one per spec slot.
+    pub fn values(&self) -> &[ArgValue] { &self.values }
+    /// The command line's specification.
+    pub fn spec(&self) -> &CommandSpec { &self.spec }
+    /// The original bare spelling, when bound against a frame.
+    pub fn bare(&self) -> Option<&str> { self.bare.as_deref() }
 }
 
 impl std::ops::Deref for Bound {
@@ -301,7 +310,70 @@ pub type Cst = Node<Vec<Option<String>>>;
 /// The bound AST: arguments parsed, defaulted, and type-checked once, each command
 /// carrying its line's spec. Executed, measured (lookback), and rendered (stringify)
 /// without per-call re-parsing.
-pub type Ast = Node<Bound>;
+///
+/// The bound root cannot be mutated through the parse result:
+/// ```compile_fail
+/// let mut a = volas_directive::parse("ema:2").unwrap();
+/// let node: &mut volas_directive::types::Node<_> = std::rc::Rc::make_mut(&mut a);
+/// ```
+/// A raw node cannot be used as an executable AST:
+/// ```compile_fail
+/// use volas_directive::{Ast, types::{Bound, Node}};
+/// let node: Node<Bound> = Node::Name("close".into());
+/// let ast: Ast = node.into();
+/// ```
+/// Bound arguments cannot be changed, even on a cloned payload:
+/// ```compile_fail
+/// let a = volas_directive::parse("ema:2").unwrap();
+/// if let volas_directive::types::Node::Command(c) = a.node() {
+///     let mut args = c.args.clone();
+///     args.values = Box::new([]);
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct Ast {
+    root: BoundNode,
+    continuation: Continuation,
+}
+
+impl Ast {
+    // Only the binder publishes executable trees; this constructor is crate-private.
+    pub(crate) fn bound(root: BoundNode) -> Self {
+        let continuation = crate::exec_resume::plan(&root);
+        Self { root, continuation }
+    }
+
+    /// Read the validated root. A detached clone is not an executable directive.
+    pub fn node(&self) -> &Node<Bound> { &self.root }
+    /// The continuation selected once when this directive was bound.
+    pub fn continuation(&self) -> &Continuation { &self.continuation }
+}
+
+impl PartialEq for Ast {
+    fn eq(&self, other: &Self) -> bool { self.root == other.root }
+}
+
+pub(crate) type BoundNode = Node<Bound>;
+
+/// How a bound directive continues over newly appended rows.
+#[derive(Clone, Debug)]
+pub enum Continuation {
+    /// No carried state; compute the directive again.
+    None,
+    /// The top command carries its own kernel state.
+    Own,
+    /// Stateful subtrees continue in post-order before evaluating the top.
+    Chain(ChainPlan),
+}
+
+/// A binder-owned continuation plan. Its prepared nodes and column names are immutable.
+#[derive(Clone, Debug)]
+pub struct ChainPlan {
+    pub(crate) nodes: Vec<Ast>,
+    pub(crate) top: Box<BoundNode>,
+    pub(crate) names: Vec<String>,
+    pub(crate) span: usize,
+}
 
 /// A directive form bound leniently (`directive_stringify`): every supplied argument
 /// bound, an absent one left absent.

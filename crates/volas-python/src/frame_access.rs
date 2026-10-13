@@ -389,7 +389,7 @@ impl PyDataFrame {
             return Ok(Resolved::Column(name.to_string()));
         }
         let node = parse(name).map_err(directive_err)?;
-        let canonical = volas_directive::stringify(&node);
+        let canonical = volas_directive::stringify(&*node);
         if self.inner.is_computed(&canonical) {
             // the directive as written is bound against this frame like any new one: a
             // bare name that is both a data column and a command is ambiguous, whatever
@@ -447,7 +447,7 @@ impl PyDataFrame {
             let frame = self.binding_frame()?;
             for r in &resolved {
                 if let Resolved::New(text, node) = r {
-                    let canonical = volas_directive::stringify(node);
+                    let canonical = volas_directive::stringify(node.as_ref());
                     if !computed.iter().any(|c| c.canonical == canonical) {
                         computed.push(self.compute_new(&frame, node, text)?);
                     }
@@ -467,7 +467,7 @@ impl PyDataFrame {
                     self.inner.column(name).map_err(pyerr)?.clone()
                 }
                 Resolved::New(_, node) => {
-                    let canonical = volas_directive::stringify(node);
+                    let canonical = volas_directive::stringify(node.as_ref());
                     new_cols.iter().find(|(n, _)| *n == canonical).expect("computed above").1.clone()
                 }
             });

@@ -55,7 +55,10 @@ pub fn capture(df: &DataFrame, node: &Ast) -> (Option<Vec<f64>>, Option<Vec<f64>
 /// The one-pass computation of a recursion that resumes: `None` when `node` is none, the
 /// frame is too short for a head past the warm-up, or a path declines.
 fn one_pass(df: &DataFrame, node: &Ast) -> Option<WithStates> {
-    let cmd = as_command(node)?;
+    if !matches!(node.continuation(), crate::types::Continuation::Own) {
+        return None;
+    }
+    let cmd = as_command(node.node())?;
     if !recursive(&cmd) || resume_of(&cmd) == Resume::Recompute {
         return None;
     }

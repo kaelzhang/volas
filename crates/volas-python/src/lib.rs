@@ -235,12 +235,15 @@ fn _directive_facts<'py>(py: Python<'py>, directive: &str) -> PyResult<Bound<'py
     use volas_directive::spec::{History, Resume};
     use volas_directive::types::Node;
     let node = parse(directive).map_err(directive_err)?;
-    let cmd = match &*node {
-        Node::Command(c) => c.clone(),
-        Node::Name(name) => volas_directive::bind_command(name, None, &[], &[]).map_err(value_err)?,
+    let node = match node.node() {
+        Node::Name(name) => std::rc::Rc::new(volas_directive::bind_command(name, None, &[], &[]).map_err(value_err)?),
+        _ => node,
+    };
+    let cmd = match node.node() {
+        Node::Command(c) => c,
         _ => return Err(DirectiveValueError::new_err(format!("'{directive}' is not a command"))),
     };
-    let spec = &cmd.args.spec;
+    let spec = cmd.args.spec();
     let facts = pyo3::types::PyDict::new(py);
     let history = match spec.history(&cmd.args) {
         History::Window => "window",

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use volas_directive::spec::{canon_sub, ArgBound};
 use volas_directive::types::{ArgValue, Node};
-use volas_directive::{bind_command, parse, stringify};
+use volas_directive::{bind_frame, parse, stringify};
 
 /// A deterministic pseudo-random sequence (xorshift; no RNG dependency).
 struct Rng(u64);
@@ -40,9 +40,9 @@ fn spell(value: &ArgValue, rng: &mut Rng) -> String {
 /// that is a command bound as that command.
 fn identity(text: &str) -> Option<(String, Option<String>, Vec<String>)> {
     let node = parse(text).ok()?;
-    let cmd = match &*node {
-        Node::Command(c) => c.clone(),
-        Node::Name(name) => bind_command(name, None, &[], &[]).ok()?,
+    let node = bind_frame(&node, &|_| false, text).ok()?;
+    let cmd = match node.node() {
+        Node::Command(c) => c,
         _ => return None,
     };
     if !cmd.series.iter().all(|s| matches!(s, Node::Name(n) if n.is_empty() || n == "close" || n == "open" || n == "volume")) {
@@ -54,13 +54,14 @@ fn identity(text: &str) -> Option<(String, Option<String>, Vec<String>)> {
         .iter()
         .enumerate()
         .map(|(i, s)| match s {
-            Node::Name(n) if n.is_empty() => cmd.args.spec.series[i].to_string(),
-            other => stringify(other),
+            Node::Name(n) if n.is_empty() => cmd.args.spec().series[i].to_string(),
+            Node::Name(n) => n.clone(),
+            _ => unreachable!("only column operands passed the filter"),
         })
         .collect();
-    let mut args: Vec<String> = cmd.args.values.iter().map(ArgValue::to_token).collect();
+    let mut args: Vec<String> = cmd.args.values().iter().map(ArgValue::to_token).collect();
     args.extend(series);
-    Some((cmd.name, cmd.sub, args))
+    Some((cmd.name.clone(), cmd.sub.clone(), args))
 }
 
 /// A bound command's identity: its name, sub-line and argument and operand tokens.
@@ -113,7 +114,7 @@ fn every_spelling_of_a_bound_command_has_one_name() {
         for text in texts {
             let Some(id) = identity(&text) else { continue };
             assert_eq!(id.1, canonical_sub, "{text}");
-            let name = stringify(&parse(&text).unwrap());
+            let name = stringify(&*parse(&text).unwrap());
             spellings += 1;
             names.entry(id).or_default().insert(name, text);
         }

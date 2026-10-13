@@ -6,14 +6,14 @@
 use std::borrow::Cow;
 
 use crate::spec::{CommandSpec, History, HistoryClass, Keep};
-use crate::types::{ArgValue, Ast, Node};
+use crate::types::{ArgValue, Ast, BoundNode, Node};
 
 /// The spec and bound arguments of a command node, or of a bare name binding to a
 /// command (`None` for anything else: a column, a scalar, an operation).
-fn command_of(node: &Ast) -> Option<(Cow<'_, CommandSpec>, Cow<'_, [ArgValue]>)> {
+fn command_of(node: &BoundNode) -> Option<(Cow<'_, CommandSpec>, Cow<'_, [ArgValue]>)> {
     match node {
         Node::Command(c) => Some((Cow::Borrowed(&c.args.spec), Cow::Borrowed(&c.args.values[..]))),
-        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[])
+        Node::Name(name) => crate::bind::bind_command_node(name, None, &[], &[])
             .ok()
             .map(|c| (Cow::Owned(c.args.spec), Cow::Owned(c.args.values.into_vec()))),
         _ => None,
@@ -23,17 +23,19 @@ fn command_of(node: &Ast) -> Option<(Cow<'_, CommandSpec>, Cow<'_, [ArgValue]>)>
 /// Lookback for a bound directive: a command's own lookback plus the largest lookback
 /// among its series operands; an operator takes the max of its operands plus the earlier
 /// rows it reads itself ([`crate::types::Op::lookback`]: a cross reads one).
-pub fn lookback(node: &Ast) -> usize {
+pub fn lookback(node: &Ast) -> usize { lookback_node(node.node()) }
+
+pub(crate) fn lookback_node(node: &BoundNode) -> usize {
     match node {
         Node::Scalar(_) => 0,
         // A bare name is a column (no warm-up) or a no-argument command.
         Node::Name(_) => command_of(node).map_or(0, |(spec, args)| spec.lookback_of(&args)),
         Node::Command(c) => {
             let own = c.args.spec.lookback_of(&c.args);
-            own + c.series.iter().map(lookback).max().unwrap_or(0)
+            own + c.series.iter().map(lookback_node).max().unwrap_or(0)
         }
-        Node::Unary { operand, .. } => lookback(operand),
-        Node::Binary { left, op, right } => op.lookback() + lookback(left).max(lookback(right)),
+        Node::Unary { operand, .. } => lookback_node(operand),
+        Node::Binary { left, op, right } => op.lookback() + lookback_node(left).max(lookback_node(right)),
     }
 }
 
@@ -46,26 +48,30 @@ pub fn lookback(node: &Ast) -> usize {
 /// directive with no carried state over a trailing window (its lookback plus a margin)
 /// instead of the whole column. A bare name is taken as the command it names; an
 /// unbindable one is a column.
-pub fn evaluates_on_a_window(node: &Ast) -> bool {
-    let own = |node: &Ast| {
+pub fn evaluates_on_a_window(node: &Ast) -> bool { evaluates_on_a_window_node(node.node()) }
+
+pub(crate) fn evaluates_on_a_window_node(node: &BoundNode) -> bool {
+    let own = |node: &BoundNode| {
         command_of(node).is_none_or(|(spec, args)| spec.history(&args) != History::Recursive && !spec.emits_position())
     };
     match node {
         Node::Scalar(_) | Node::Name(_) => own(node),
-        Node::Command(c) => own(node) && c.series.iter().all(evaluates_on_a_window),
-        Node::Unary { operand, .. } => evaluates_on_a_window(operand),
-        Node::Binary { left, right, .. } => evaluates_on_a_window(left) && evaluates_on_a_window(right),
+        Node::Command(c) => own(node) && c.series.iter().all(evaluates_on_a_window_node),
+        Node::Unary { operand, .. } => evaluates_on_a_window_node(operand),
+        Node::Binary { left, right, .. } => evaluates_on_a_window_node(left) && evaluates_on_a_window_node(right),
     }
 }
 
 /// The rows a cached directive column reads around its own ([`volas_core::Reach`]),
 /// fixed per directive: computed once when the column is cached, never per refresh.
-pub fn reach(node: &Ast) -> volas_core::Reach {
+pub fn reach(node: &Ast) -> volas_core::Reach { reach_node(node.node()) }
+
+fn reach_node(node: &BoundNode) -> volas_core::Reach {
     volas_core::Reach {
-        lookback: lookback(node),
+        lookback: lookback_node(node),
         resume: resume_reach(node),
         continuation: continuation_reach(node),
-        history: history(node),
+        history: history_node(node),
     }
 }
 
@@ -75,7 +81,9 @@ pub fn reach(node: &Ast) -> volas_core::Reach {
 /// it — by the state of its top command when that is the one recursion in it (its
 /// operands of a lower class or counts), by its window when every class-3 part is a
 /// count, otherwise not at all.
-pub fn history(node: &Ast) -> volas_core::History {
+pub fn history(node: &Ast) -> volas_core::History { history_node(node.node()) }
+
+fn history_node(node: &BoundNode) -> volas_core::History {
     use volas_core::History;
     let (class, recursions) = classes(node);
     match class {
@@ -90,13 +98,13 @@ pub fn history(node: &Ast) -> volas_core::History {
         })
         && series_of(node).iter().all(|s| classes(s).1 == 0);
     if carried {
-        return History::Carried { operands: series_of(node).iter().map(lookback).max().unwrap_or(0) };
+        return History::Carried { operands: series_of(node).iter().map(lookback_node).max().unwrap_or(0) };
     }
     History::Unkept
 }
 
 /// The `@` operands of a command node (none for anything else).
-fn series_of(node: &Ast) -> &[Ast] {
+fn series_of(node: &BoundNode) -> &[BoundNode] {
     match node {
         Node::Command(c) => &c.series,
         _ => &[],
@@ -106,8 +114,8 @@ fn series_of(node: &Ast) -> &[Ast] {
 /// The highest history class among a directive's commands (0 with none), and how many of
 /// them are recursions (class 3 not kept by its window). A bare name is the command it
 /// binds to; an unbindable one is a column.
-fn classes(node: &Ast) -> (u8, usize) {
-    let own = |node: &Ast| {
+fn classes(node: &BoundNode) -> (u8, usize) {
+    let own = |node: &BoundNode| {
         command_of(node).map_or((0, 0), |(spec, args)| match spec.history_class(&args) {
             HistoryClass::Window => (1, 0),
             HistoryClass::Accumulator => (2, 0),
@@ -128,9 +136,9 @@ fn classes(node: &Ast) -> (u8, usize) {
 /// for a state that is all its command needs (a recursion), its lookback plus one for a
 /// command that reads the row its window drops or SAR's earlier bar
 /// ([`CommandSpec::reads_past`]). A frame holding fewer valid rows cannot resume it.
-fn resume_reach(node: &Ast) -> usize {
+fn resume_reach(node: &BoundNode) -> usize {
     match command_of(node) {
-        Some((spec, _)) if spec.reads_past() => lookback(node) + 1,
+        Some((spec, _)) if spec.reads_past() => lookback_node(node) + 1,
         _ => 0,
     }
 }
@@ -141,10 +149,10 @@ fn resume_reach(node: &Ast) -> usize {
 /// rows when its state cannot resume; any other command reading past its lookback (a
 /// recursion — SAR, KAMA) continues exactly only with
 /// its [`resume_reach`] rows.
-fn continuation_reach(node: &Ast) -> usize {
+fn continuation_reach(node: &BoundNode) -> usize {
     match command_of(node) {
-        Some((spec, _)) if !spec.accumulates() && !spec.emits_position() => resume_reach(node).max(lookback(node)),
-        _ => lookback(node),
+        Some((spec, _)) if !spec.accumulates() && !spec.emits_position() => resume_reach(node).max(lookback_node(node)),
+        _ => lookback_node(node),
     }
 }
 
@@ -159,16 +167,18 @@ fn continuation_reach(node: &Ast) -> usize {
 /// Dataframe-agnostic: it validates the directive's form only — it never consults
 /// a column — so it stays a pure function of the directive, exactly like
 /// [`lookback`].
-pub fn indicator_lookback(node: &Ast) -> volas_core::Result<usize> {
+pub fn indicator_lookback(node: &Ast) -> volas_core::Result<usize> { indicator_lookback_node(node.node()) }
+
+fn indicator_lookback_node(node: &BoundNode) -> volas_core::Result<usize> {
     // Reject a bare sub-requiring name anywhere (e.g. `kdj`, or nested `ma:5@kdj`).
-    crate::bind::check_bare(node)?;
+    crate::bind::check_bare_node(node)?;
     // A standalone bare name must bind to a real command; an unbindable one is a
     // typo / column reference, not an indicator. (Nested bare names are data-source
     // column references, validated at execution, and intentionally not rejected.)
     if let Node::Name(name) = node {
-        crate::bind::bind_command(name, None, &[], &[])?;
+        crate::bind::bind_command_node(name, None, &[], &[])?;
     }
-    Ok(lookback(node))
+    Ok(lookback_node(node))
 }
 
 #[cfg(test)]

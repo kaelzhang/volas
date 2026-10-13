@@ -246,8 +246,8 @@ fn a_continuation_far_into_the_series_reads_a_window_exactly() {
     for line in &matrix::lines() {
         for text in matrix::variants(line) {
             let node = parse(&text).unwrap();
-            let declared = match &*node {
-                Node::Command(c) => c.args.spec.resume(&c.args),
+            let declared = match node.node() {
+                Node::Command(c) => c.args.spec().resume(&c.args),
                 _ => Resume::Recompute,
             };
             let picked = ["walk", "nan-close", "early-missing-bar", "constant"];

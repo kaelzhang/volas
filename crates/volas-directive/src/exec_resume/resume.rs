@@ -57,7 +57,10 @@ pub(crate) fn resume_into(
     if super::chain::chained(node) {
         return None;
     }
-    let cmd = as_command(node)?;
+    if !matches!(node.continuation(), crate::types::Continuation::Own) {
+        return None;
+    }
+    let cmd = as_command(node.node())?;
     let resume = resume_of(&cmd);
     let end = end.min(df.height());
     if resume == Resume::Recompute || from_row > end {

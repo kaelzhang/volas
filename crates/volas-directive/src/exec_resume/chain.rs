@@ -19,13 +19,13 @@ use volas_core::{Column, DataFrame};
 
 use super::{as_command, resume_of};
 use crate::complete::into_f64;
-use crate::lookback::lookback;
+use crate::lookback::lookback_node;
 use crate::spec::{History, Resume};
-use crate::types::{Ast, Command, Node};
+use crate::types::{Ast, BoundNode, ChainPlan, Command, Continuation, Node};
 
 /// Whether `node` keeps a state of its own: a recursive command, or one whose output is
 /// a row position.
-fn keeps_state(node: &Ast) -> bool {
+fn keeps_state(node: &BoundNode) -> bool {
     if !matches!(node, Node::Command(_) | Node::Name(_)) {
         return false;
     }
@@ -35,7 +35,7 @@ fn keeps_state(node: &Ast) -> bool {
 }
 
 /// The nodes of `node` that keep a state, children first.
-fn stateful<'a>(node: &'a Ast, out: &mut Vec<&'a Ast>) {
+fn stateful<'a>(node: &'a BoundNode, out: &mut Vec<&'a BoundNode>) {
     match node {
         Node::Command(c) => c.series.iter().for_each(|s| stateful(s, out)),
         Node::Unary { operand, .. } => stateful(operand, out),
@@ -53,13 +53,35 @@ fn stateful<'a>(node: &'a Ast, out: &mut Vec<&'a Ast>) {
 /// Whether `node` continues through a state chain: some node below its top keeps a
 /// state (a command whose operands keep none continues by its own resume), and every node
 /// that keeps one resumes.
-pub(super) fn chained(node: &Ast) -> bool {
+pub(crate) fn plan(node: &BoundNode) -> Continuation {
     let mut nodes = Vec::new();
     stateful(node, &mut nodes);
     let own_only = nodes.len() == 1 && std::ptr::eq(nodes[0], node);
-    !nodes.is_empty()
-        && !own_only
+    if !nodes.is_empty() && !own_only
         && nodes.iter().all(|n| as_command(n).is_some_and(|c| resume_of(&c) != Resume::Recompute))
+    {
+        return Continuation::Chain(ChainPlan {
+            nodes: (0..nodes.len()).map(|k| crate::bind::finish(own_node(&nodes, k))).collect(),
+            top: Box::new(substitute(node, &nodes)),
+            names: (0..nodes.len()).map(hidden).collect(),
+            span: 2 * (lookback_node(node) + 1),
+        });
+    }
+    if as_command(node).is_some_and(|c| resume_of(&c) != Resume::Recompute) {
+        Continuation::Own
+    } else {
+        Continuation::None
+    }
+}
+
+/// The decision is stored at binding time; this hot-path check never walks the tree.
+pub(super) fn chained(node: &Ast) -> bool {
+    matches!(node.continuation(), Continuation::Chain(_))
+}
+
+fn chain_plan(node: &Ast) -> &ChainPlan {
+    let Continuation::Chain(plan) = node.continuation() else { unreachable!("a chained directive") };
+    plan
 }
 
 /// The name of the column holding the values of the `k`-th stateful node.
@@ -68,7 +90,7 @@ fn hidden(k: usize) -> String {
 }
 
 /// `node` with each of its subtrees among `done` (by identity) read from its column.
-fn substitute(node: &Ast, done: &[&Ast]) -> Ast {
+fn substitute(node: &BoundNode, done: &[&BoundNode]) -> BoundNode {
     if let Some(k) = done.iter().position(|d| std::ptr::eq(*d, node)) {
         return Node::Name(hidden(k));
     }
@@ -90,7 +112,7 @@ fn substitute(node: &Ast, done: &[&Ast]) -> Ast {
 }
 
 /// The `k`-th stateful node with its children read from their columns.
-fn own_node(nodes: &[&Ast], k: usize) -> Ast {
+fn own_node(nodes: &[&BoundNode], k: usize) -> BoundNode {
     match nodes[k] {
         Node::Command(c) => Node::Command(Command {
             name: c.name.clone(),
@@ -100,11 +122,6 @@ fn own_node(nodes: &[&Ast], k: usize) -> Ast {
         }),
         other => other.clone(), // a bare name: no operands
     }
-}
-
-/// The rows a consumer reads of a node before a new row.
-fn span(node: &Ast) -> usize {
-    2 * (lookback(node) + 1)
 }
 
 /// `values` (of rows `[0, len)`) on the `l` rows before `end`, missing before row 0.
@@ -123,13 +140,12 @@ fn keep(chain: &mut Vec<f64>, state: Vec<f64>, values: &[f64], end: usize, l: us
 /// row and the one before (see the module docs): each `None` while a node has no state
 /// as of that row (still in its warm-up), independently of the other.
 pub(super) fn with_states(df: &DataFrame, node: &Ast) -> volas_core::Result<super::states::WithStates> {
-    let mut nodes = Vec::new();
-    stateful(node, &mut nodes);
-    let (h, l) = (df.height(), span(node));
+    let plan = chain_plan(node);
+    let (h, l) = (df.height(), plan.span);
     let mut frame = df.clone();
     let (mut after, mut before) = (Some(Vec::new()), Some(Vec::new()));
-    for k in 0..nodes.len() {
-        let (col, a, b) = super::states::execute_with_states(&frame, &own_node(&nodes, k))?;
+    for (k, own) in plan.nodes.iter().enumerate() {
+        let (col, a, b) = super::states::execute_with_states(&frame, own)?;
         let values = into_f64(col);
         after = after.zip(a).map(|(mut chain, a)| {
             keep(&mut chain, a, &values, h, l);
@@ -139,9 +155,9 @@ pub(super) fn with_states(df: &DataFrame, node: &Ast) -> volas_core::Result<supe
             keep(&mut chain, b, &values, h.saturating_sub(1), l);
             chain
         });
-        frame.set_column(&hidden(k), Column::f64(values))?;
+        frame.set_column(&plan.names[k], Column::f64(values))?;
     }
-    let top = crate::exec::execute(&frame, &substitute(node, &nodes))?;
+    let top = crate::exec::execute_node(&frame, &plan.top)?;
     Ok((top, after, before))
 }
 
@@ -161,9 +177,8 @@ pub(super) fn resume(
     end: usize,
     since: usize,
 ) -> Option<(Column, Vec<f64>)> {
-    let mut nodes = Vec::new();
-    stateful(node, &mut nodes);
-    let l = span(node);
+    let plan = chain_plan(node);
+    let l = plan.span;
     let end = end.min(df.height());
     if from > end {
         return None;
@@ -173,22 +188,24 @@ pub(super) fn resume(
     let (new, held) = (end - from, from - start);
     let mut next = Vec::with_capacity(chain.len());
     let mut at = 0;
-    for k in 0..nodes.len() {
+    for (k, own) in plan.nodes.iter().enumerate() {
         let len = *chain.get(at)? as usize;
         let state = chain.get(at + 1..at + 1 + len)?;
         let ring = chain.get(at + 1 + len..at + 1 + len + l)?;
         at += 1 + len + l;
-        let (col, state) = super::execute_resume(&win, &own_node(&nodes, k), state, held, held + new, since)?;
+        let (col, state) = super::execute_resume(&win, own, state, held, held + new, since)?;
         // the node's values over the window: those remembered, then the new rows'
-        let mut values: Vec<f64> = ring[l - held..].to_vec();
+        let mut values = Vec::with_capacity(held + new);
+        values.extend_from_slice(&ring[l - held..]);
         values.extend(into_f64(col));
-        let whole: Vec<f64> = ring.iter().copied().chain(values[held..].iter().copied()).collect();
-        keep(&mut next, state, &whole, whole.len(), l);
-        win.set_column(&hidden(k), Column::f64(values)).ok()?;
+        next.push(state.len() as f64);
+        next.extend(state);
+        next.extend(ring.iter().copied().chain(values[held..].iter().copied()).skip(new));
+        win.set_column(&plan.names[k], Column::f64(values)).ok()?;
     }
     if at != chain.len() {
         return None;
     }
-    let top = crate::exec::execute(&win, &substitute(node, &nodes)).ok()?;
+    let top = crate::exec::execute_node(&win, &plan.top).ok()?;
     Some((top.slice(held, held + new), next))
 }

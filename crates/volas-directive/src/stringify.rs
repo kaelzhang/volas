@@ -15,7 +15,7 @@ use crate::types::{Command, Node, Payload, UnaryOp};
 /// Canonical string form of a directive tree: a bound [`Ast`](crate::types::Ast) (the
 /// cache key) or a directive [`Form`](crate::types::Form) (`directive_stringify`, where
 /// a required argument may be absent), rendered alike.
-pub fn stringify<A: Payload>(node: &Node<A>) -> String {
+pub(crate) fn stringify_node<A: Payload>(node: &Node<A>) -> String {
     match node {
         // a bare name that is a command usable bare names that command (a frame-bound
         // tree holds none: there it is a command node, or an ambiguous name rejected)
@@ -31,9 +31,9 @@ pub fn stringify<A: Payload>(node: &Node<A>) -> String {
             // A negated number keeps its parentheses: `-5` is an exact literal, `-(5)`
             // the negation of one, so each form re-parses as itself.
             let inner = match operand.as_ref() {
-                Node::Binary { .. } => format!("({})", stringify(operand)),
-                Node::Scalar(_) if *op == UnaryOp::Neg => format!("({})", stringify(operand)),
-                _ => stringify(operand),
+                Node::Binary { .. } => format!("({})", stringify_node(operand)),
+                Node::Scalar(_) if *op == UnaryOp::Neg => format!("({})", stringify_node(operand)),
+                _ => stringify_node(operand),
             };
             format!("{op_s}{inner}")
         }
@@ -42,16 +42,16 @@ pub fn stringify<A: Payload>(node: &Node<A>) -> String {
             // The left child only needs parens if it binds *looser* than us.
             let l = match left.as_ref() {
                 Node::Binary { op: lop, .. } if lop.priority() < p => {
-                    format!("({})", stringify(left))
+                    format!("({})", stringify_node(left))
                 }
-                _ => stringify(left),
+                _ => stringify_node(left),
             };
             // The right child needs parens at equal priority too (left-assoc).
             let r = match right.as_ref() {
                 Node::Binary { op: rop, .. } if rop.priority() <= p => {
-                    format!("({})", stringify(right))
+                    format!("({})", stringify_node(right))
                 }
-                _ => stringify(right),
+                _ => stringify_node(right),
             };
             format!("{l}{}{r}", op.token())
         }
@@ -102,7 +102,7 @@ fn stringify_command<A: Payload>(cmd: &Command<A>) -> String {
 /// scalar, an expression — is grouped; one that renders as a bare identifier (a column,
 /// or a command written bare) is not, so the form is a fixed point.
 fn stringify_series<A: Payload>(node: &Node<A>) -> String {
-    let text = stringify(node);
+    let text = stringify_node(node);
     if is_identifier(&text) {
         text
     } else {
@@ -128,13 +128,34 @@ fn join_with(prefix: char, mut tokens: Vec<String>) -> String {
     }
 }
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::types::Ast {}
+    impl Sealed for crate::types::Form {}
+}
+
+/// The two published directive representations accepted by the canonical renderer.
+pub trait Render: sealed::Sealed {
+    /// Render with the shared payload-generic node renderer.
+    fn render(&self) -> String;
+}
+impl Render for crate::types::Ast {
+    fn render(&self) -> String { stringify_node(self.node()) }
+}
+impl Render for crate::types::Form {
+    fn render(&self) -> String { stringify_node(self) }
+}
+
+/// Canonical spelling of a validated directive or a lenient directive form.
+pub fn stringify(tree: &(impl Render + ?Sized)) -> String { tree.render() }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{parse, parse_cst};
 
     fn s(input: &str) -> String {
-        stringify(&parse(input).unwrap())
+        stringify(&*parse(input).unwrap())
     }
 
     /// The form a frame-blind `directive_stringify` names: bound leniently.

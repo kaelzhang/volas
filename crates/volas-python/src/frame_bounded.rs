@@ -158,7 +158,7 @@ impl PyDataFrame {
             nodes.push(node);
         }
         for (text, node) in declared.iter().zip(&nodes) {
-            let canonical = stringify(node);
+            let canonical = stringify(node.as_ref());
             if !self.inner.is_computed(&canonical) {
                 self.cache_new(text, node)?;
             }

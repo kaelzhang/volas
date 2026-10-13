@@ -58,18 +58,18 @@ fn binds_through_operators_and_series() {
 fn binds_bare_name_command_on_the_fly() {
     // A bare name resolves its defaults (no-arg `obv`, default-only `boll` -> 20);
     // a name needing a sub or a required argument errors; an unknown name too.
-    assert!(bind_command("obv", None, &[], &[]).is_ok());
+    assert!(bind_command_node("obv", None, &[], &[]).is_ok());
     let boll = bind_bare("boll").unwrap();
     assert_eq!(boll.args[0], ArgValue::Usize(20));
     assert_eq!(boll.name, "boll");
     assert_eq!(boll.args.bare.as_deref(), Some("boll"));
     // `cdl` folds to the canonical `style` namespace; sub canonicalizes.
-    let doji = bind_command("CDL", Some("doji"), &[], &[]).unwrap();
+    let doji = bind_command_node("CDL", Some("doji"), &[], &[]).unwrap();
     assert_eq!(doji.name, "style");
-    assert!(bind_command("ema", None, &[], &[]).is_err()); // required period
-    assert!(bind_command("atr", None, &[], &[]).is_err()); // required period
-    assert!(bind_command("kdj", None, &[], &[]).is_err()); // needs a sub
-    assert!(bind_command("nope", None, &[], &[]).is_err()); // unknown
+    assert!(bind_command_node("ema", None, &[], &[]).is_err()); // required period
+    assert!(bind_command_node("atr", None, &[], &[]).is_err()); // required period
+    assert!(bind_command_node("kdj", None, &[], &[]).is_err()); // needs a sub
+    assert!(bind_command_node("nope", None, &[], &[]).is_err()); // unknown
 }
 
 /// Against a frame, a bare name reads what it names: a data column, a command (kept as
@@ -81,7 +81,7 @@ fn binds_bare_names_against_a_frame() {
     let bind = |d: &str| bind_frame(&parse(d).unwrap(), &columns, d);
     let node = bind("close * obv").unwrap();
     assert!(uses_bare_command(&node, "obv") && !uses_bare_command(&node, "close"));
-    assert!(matches!(&node, Node::Binary { right, .. } if matches!(&**right, Node::Command(_))));
+    assert!(matches!(node.node(), Node::Binary { right, .. } if matches!(&**right, Node::Command(_))));
     let err = format!("{:?}", bind("close * change").unwrap_err());
     assert!(err.contains("ambiguous name 'change' in 'close * change'"), "{err}");
     // `repeat` is no bare command (its operand is required): the data column is read

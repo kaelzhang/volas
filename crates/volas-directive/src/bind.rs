@@ -19,19 +19,19 @@ use crate::spec::{
     canon_sub, command_spec, is_command, normalize, CommandSpec, HV_SESSION_MINUTES,
     HV_TRADING_DAYS,
 };
-use crate::types::{ArgValue, Ast, Bound, Command, Cst, Form, FormArgs, Node};
+use crate::types::{ArgValue, Ast, Bound, BoundNode, Command, Cst, Form, FormArgs, Node};
 use volas_core::{Result, VolasError};
 use volas_time::Span;
 
 /// Lower a concrete syntax tree to a bound AST. A bare [`Node::Name`] is left
 /// unbound — without a frame it cannot be told apart from a column reference; see
 /// [`bind_frame`].
-pub fn bind_node(cst: &Cst) -> Result<Ast> {
+pub(crate) fn bind_node(cst: &Cst) -> Result<BoundNode> {
     Ok(match cst {
         Node::Name(s) => Node::Name(s.clone()),
         Node::Scalar(v) => Node::Scalar(*v),
         Node::Command(c) => {
-            Node::Command(bind_command(&c.name, c.sub.as_deref(), &c.args, &c.series)?)
+            Node::Command(bind_command_node(&c.name, c.sub.as_deref(), &c.args, &c.series)?)
         }
         Node::Unary { op, operand } => Node::Unary {
             op: *op,
@@ -94,7 +94,7 @@ fn filled<A>(series: &[Node<A>], i: usize) -> bool {
 /// window, an out-of-domain seed, a NaN multiplier, inverted `mavp` limits, a missing
 /// required argument or operand, more operands than the line reads, an unknown
 /// command / sub) instead of becoming a valid-shaped column with no signal (V17).
-pub fn bind_command(
+pub(crate) fn bind_command_node(
     name: &str,
     sub: Option<&str>,
     args: &[Option<String>],
@@ -134,9 +134,19 @@ pub fn bind_command(
     })
 }
 
+/// Bind a command's raw tokens and operands into an opaque executable directive.
+pub fn bind_command(
+    name: &str,
+    sub: Option<&str>,
+    args: &[Option<String>],
+    series: &[Cst],
+) -> Result<Ast> {
+    bind_command_node(name, sub, args, series).map(|cmd| finish(Node::Command(cmd)))
+}
+
 /// The command a bare `name` runs as: every argument at its default, the spelling kept.
 pub(crate) fn bind_bare(name: &str) -> Result<Command<Bound>> {
-    let mut cmd = bind_command(name, None, &[], &[])?;
+    let mut cmd = bind_command_node(name, None, &[], &[])?;
     cmd.args.bare = Some(name.into());
     Ok(cmd)
 }
@@ -168,6 +178,13 @@ fn ambiguous(name: &str, directive: &str) -> VolasError {
 /// rejected, naming both ways out. The result reads no bare name as a command, so it
 /// executes the same on every later frame.
 pub fn bind_frame(node: &Ast, is_column: &impl Fn(&str) -> bool, directive: &str) -> Result<Ast> {
+    bind_frame_node(node.node(), is_column, directive).map(finish)
+}
+
+/// Seal a validated tree together with its continuation decision.
+pub(crate) fn finish(node: BoundNode) -> Ast { Ast::bound(node) }
+
+fn bind_frame_node(node: &BoundNode, is_column: &impl Fn(&str) -> bool, directive: &str) -> Result<BoundNode> {
     Ok(match node {
         Node::Name(name) if name.is_empty() => node.clone(),
         Node::Name(name) if is_column(name) => {
@@ -185,17 +202,17 @@ pub fn bind_frame(node: &Ast, is_column: &impl Fn(&str) -> bool, directive: &str
             series: c
                 .series
                 .iter()
-                .map(|s| bind_frame(s, is_column, directive))
+                .map(|s| bind_frame_node(s, is_column, directive))
                 .collect::<Result<_>>()?,
         }),
         Node::Unary { op, operand } => Node::Unary {
             op: *op,
-            operand: Box::new(bind_frame(operand, is_column, directive)?),
+            operand: Box::new(bind_frame_node(operand, is_column, directive)?),
         },
         Node::Binary { left, op, right } => Node::Binary {
-            left: Box::new(bind_frame(left, is_column, directive)?),
+            left: Box::new(bind_frame_node(left, is_column, directive)?),
             op: *op,
-            right: Box::new(bind_frame(right, is_column, directive)?),
+            right: Box::new(bind_frame_node(right, is_column, directive)?),
         },
     })
 }
@@ -204,13 +221,17 @@ pub fn bind_frame(node: &Ast, is_column: &impl Fn(&str) -> bool, directive: &str
 /// through a bare name — so a data column added under that name would have changed
 /// what it reads.
 pub fn uses_bare_command(node: &Ast, name: &str) -> bool {
+    uses_bare_node(node.node(), name)
+}
+
+fn uses_bare_node(node: &BoundNode, name: &str) -> bool {
     match node {
         Node::Name(_) | Node::Scalar(_) => false,
         Node::Command(c) => {
-            c.args.bare.as_deref() == Some(name) || c.series.iter().any(|s| uses_bare_command(s, name))
+            c.args.bare.as_deref() == Some(name) || c.series.iter().any(|s| uses_bare_node(s, name))
         }
-        Node::Unary { operand, .. } => uses_bare_command(operand, name),
-        Node::Binary { left, right, .. } => uses_bare_command(left, name) || uses_bare_command(right, name),
+        Node::Unary { operand, .. } => uses_bare_node(operand, name),
+        Node::Binary { left, right, .. } => uses_bare_node(left, name) || uses_bare_node(right, name),
     }
 }
 
@@ -221,22 +242,24 @@ pub fn uses_bare_command(node: &Ast, name: &str) -> bool {
 /// unverifiable column reference and passes.
 fn check_bare_command(name: &str) -> Result<()> {
     if is_command(&normalize(name)) {
-        bind_command(name, None, &[], &[])?;
+        bind_command_node(name, None, &[], &[])?;
     }
     Ok(())
 }
 
 /// Walk a bound [`Ast`] applying only the bare-name rule — every `Command` was
 /// already validated when `bind` produced the tree. Used by `directive_lookback`.
-pub fn check_bare<A>(node: &Node<A>) -> Result<()> {
+pub fn check_bare(node: &Ast) -> Result<()> { check_bare_node(node.node()) }
+
+pub(crate) fn check_bare_node(node: &BoundNode) -> Result<()> {
     match node {
         Node::Name(name) => check_bare_command(name),
         Node::Scalar(_) => Ok(()),
-        Node::Command(c) => c.series.iter().try_for_each(check_bare),
-        Node::Unary { operand, .. } => check_bare(operand),
+        Node::Command(c) => c.series.iter().try_for_each(check_bare_node),
+        Node::Unary { operand, .. } => check_bare_node(operand),
         Node::Binary { left, right, .. } => {
-            check_bare(left)?;
-            check_bare(right)
+            check_bare_node(left)?;
+            check_bare_node(right)
         }
     }
 }

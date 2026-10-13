@@ -18,7 +18,7 @@ use volas_core::{Column, DataFrame, Result};
 
 use crate::operands::Operands;
 use crate::spec::CommandSpec;
-use crate::types::{ArgValue, Ast};
+use crate::types::{ArgValue, BoundNode};
 
 /// A bound command: canonical name / sub, typed arguments, `@` series, its line's spec.
 #[derive(Clone, Copy)]
@@ -26,7 +26,7 @@ pub(crate) struct BoundCommand<'a> {
     pub(crate) name: &'a str,
     pub(crate) sub: Option<&'a str>,
     pub(crate) args: &'a [ArgValue],
-    pub(crate) series: &'a [Ast],
+    pub(crate) series: &'a [BoundNode],
     pub(crate) spec: &'a CommandSpec,
 }
 
@@ -73,7 +73,7 @@ fn inputs<'v>(recorded: &'v [Recorded], end: usize) -> Vec<Input<'v>> {
 fn over<'v>(
     ops: &Operands<'v>,
     df: &'v DataFrame,
-    series: &'v [Ast],
+    series: &'v [BoundNode],
     recorded: &'v [Recorded<'v>],
     gather: impl Fn(&'v [f64]) -> Cow<'v, [f64]>,
 ) -> Operands<'v> {
@@ -98,7 +98,7 @@ pub(crate) fn into_f64(column: Column) -> Vec<f64> {
 /// result of a run over the complete rows back on those rows.
 fn on_complete_rows<T>(
     df: &DataFrame,
-    series: &[Ast],
+    series: &[BoundNode],
     end: usize,
     run: impl Fn(&Operands) -> T,
     finish: impl FnOnce(T, &CompleteRows, usize) -> T,
@@ -133,7 +133,7 @@ fn on_complete_rows<T>(
 /// dispatch arm.
 pub(crate) fn compute(
     df: &DataFrame,
-    series: &[Ast],
+    series: &[BoundNode],
     run: impl Fn(&Operands) -> Result<Column>,
 ) -> Result<Column> {
     on_complete_rows(df, series, df.height(), run, |out, rows, n| {
@@ -146,7 +146,7 @@ pub(crate) fn compute(
 /// among them. `run` is its state-capture arm.
 pub(crate) fn state(
     df: &DataFrame,
-    series: &[Ast],
+    series: &[BoundNode],
     end: usize,
     run: impl Fn(&Operands) -> Option<Vec<f64>>,
 ) -> Option<Vec<f64>> {

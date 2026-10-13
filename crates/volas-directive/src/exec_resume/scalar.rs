@@ -41,9 +41,12 @@ pub fn execute_resume_step(
             return None;
         }
         next.copy_from_slice(&chain);
-        return value.to_f64_vec().first().copied();
+        return value.as_f64()?.first().copied();
     }
-    let cmd = as_command(node)?;
+    if !matches!(node.continuation(), crate::types::Continuation::Own) {
+        return None;
+    }
+    let cmd = as_command(node.node())?;
     if resume_of(&cmd) != Resume::Step || next.len() != prev_state.len() || row >= df.height() {
         return None;
     }
