@@ -15,12 +15,11 @@ import volas
 from test import oracle_reference as native
 from test.test_directional_talib_order import _adx_reference, _CONTRACTS
 
+from test.exact import assert_exact
+
 
 def _bits(got, want):
-    got, want = np.asarray(got, float), np.asarray(want, float)
-    np.testing.assert_array_equal(np.isnan(got), np.isnan(want))
-    present = ~np.isnan(want)
-    np.testing.assert_array_equal(got[present].view(np.uint64), want[present].view(np.uint64))
+    assert_exact(got, want)
 
 
 _VALUES = [0.0, -0.0, 3.0, -2.0, np.inf, -np.inf, np.nan]

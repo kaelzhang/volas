@@ -15,6 +15,8 @@ import pytest
 
 from volas import DataFrame
 
+from test.exact import assert_exact
+
 N = 20_000
 
 
@@ -69,4 +71,27 @@ def test_a_live_candle_refresh_is_the_full_computation_bit_for_bit(pattern):
     for i in range(seed, len(c)):
         df.append(DataFrame({k: v[i:i + 1] for k, v in data.items()}))
     full = np.asarray(DataFrame(data).exec(directive), float)
-    np.testing.assert_array_equal(np.asarray(df[directive], float), full)
+    assert_exact(np.asarray(df[directive], float), full)
+
+
+@pytest.mark.parametrize('pattern', ['harami', 'haramicross'])
+@pytest.mark.parametrize('bearish', [False, True])
+@pytest.mark.parametrize('placement,strength', [('outside', 0.0), ('inside', 100.0), ('touch', 80.0)])
+def test_harami_signal_has_positive_zero_when_not_contained(pattern, bearish, placement, strength):
+    o, c = np.full(12, 10.0), np.full(12, 11.0)
+    o[10], c[10] = (14.0, 10.0) if bearish else (10.0, 14.0)
+    endpoints = {'outside': (15.0, 15.1), 'inside': (12.0, 12.1), 'touch': (14.0, 13.9)}
+    o[11], c[11] = endpoints[placement]
+    if bearish:
+        o[11], c[11] = 24.0 - o[11], 24.0 - c[11]
+    data = dict(open=o, high=np.maximum(o, c) + 1.0, low=np.minimum(o, c) - 1.0, close=c)
+    directive = 'cdl.' + pattern
+    # TA-Lib emits integer signal codes: no signal has positive zero in float64.
+    want = np.array([strength if bearish or strength == 0 else -strength])
+    full = DataFrame(data)
+    assert_exact(full.exec(directive)[-1:], want)
+    for kwargs in ({}, {'window': 3, 'max_lookback': [directive]}):
+        live = DataFrame({k: v[:11] for k, v in data.items()}, **kwargs)
+        live[directive]
+        live.append(DataFrame({k: v[11:] for k, v in data.items()}))
+        assert_exact(live[directive].to_numpy()[-1:], want)

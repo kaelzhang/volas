@@ -13,6 +13,8 @@ import pytest
 
 from volas import DataFrame, directive_lookback, directive_stringify
 
+from test.exact import assert_exact
+
 COMPOUND = [
     "rsi:14 > 50",
     "natr:14 + cmo:14",
@@ -59,7 +61,7 @@ def test_a_sign_inside_a_number_stays_in_the_argument(directive):
 
 def test_an_operator_after_an_argument_is_an_operator():
     df = DataFrame({"close": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]})
-    np.testing.assert_array_equal(df.exec("ma:2-1"), df.exec("ma:2 - 1"))
+    assert_exact(df.exec("ma:2-1"), df.exec("ma:2 - 1"))
 
 
 def _frame(n):
@@ -119,7 +121,7 @@ def test_cached_composite_refreshes_exactly(key):
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
     full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive, dtype='float64'), dtype=float)
-    np.testing.assert_array_equal(got, full)
+    assert_exact(got, full)
 
 
 def _candle_patterns():
@@ -143,7 +145,7 @@ def test_cached_candle_pattern_refreshes_exactly(pattern):
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
     full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive, dtype='float64'), dtype=float)
-    np.testing.assert_array_equal(got, full)
+    assert_exact(got, full)
 
 
 
@@ -166,4 +168,4 @@ def test_cached_composite_refreshes_exactly_by_its_structure(directive):
         df.fulfill()
     got = np.asarray(df[directive], dtype=float)
     full = np.asarray(DataFrame({k: v[:n] for k, v in base.items()}).exec(directive, dtype='float64'), dtype=float)
-    np.testing.assert_array_equal(got, full)
+    assert_exact(got, full)

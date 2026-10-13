@@ -19,6 +19,8 @@ import pytest
 
 from volas import DataFrame
 
+from test.exact import assert_exact
+
 
 def _stale():
     """A frame with two cached directives and one un-fulfilled appended bar."""
@@ -74,7 +76,7 @@ def test_single_and_multi_projection_agree():
     b = _stale()
     one = b["ma:3"].to_numpy()
     two = b[["ma:3"]].to_numpy()[:, 0]
-    np.testing.assert_array_equal(one, two)
+    assert_exact(one, two)
     assert not np.isnan(one[-1])  # the appended bar's value is computed, not NaN
 
 

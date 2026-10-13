@@ -22,6 +22,8 @@ from volas import DataFrame
 
 from test.test_benchmark import COVERAGE_IDS
 
+from test.exact import assert_exact
+
 _CSV = Path(__file__).parent / 'data' / 'tencent_full.csv'
 _COLS = ['open', 'high', 'low', 'close', 'volume']
 _RAW = np.genfromtxt(_CSV, delimiter=',', names=True)
@@ -81,10 +83,7 @@ def _gt(directive, data):
 
 
 def _eq(got, exp):
-    np.testing.assert_allclose(
-        np.asarray(got, dtype=float), np.asarray(exp, dtype=float),
-        rtol=1e-9, atol=1e-9, equal_nan=True,
-    )
+    assert_exact(got, exp)
 
 
 def _cache(df, directive):

@@ -20,6 +20,8 @@ import pytest
 
 import volas
 
+from test.exact import same_exact
+
 pa = pytest.importorskip('pyarrow')
 
 
@@ -38,7 +40,7 @@ def _series(xs, dtype=np.float64):
 
 
 def _bits_equal(a, b):
-    return np.float64(a).view(np.uint64) == np.float64(b).view(np.uint64) or (np.isnan(a) and np.isnan(b))
+    return same_exact(a, b)
 
 
 KS = [0, 1, 2, 3, 5, 8, 10, 15, 16, 17, 22, 23, 30, 100, 300, 307, 308, 309, 320, 323, 324, 330, 400, 2**31 - 1,

@@ -17,6 +17,8 @@ import volas
 
 from . import contracts
 
+from test.exact import assert_exact, exact_mask
+
 STALE = 'stale computed'
 
 
@@ -221,33 +223,29 @@ def expected_values(values: np.ndarray, dtype: str) -> np.ndarray:
 
 
 def same_data(got: np.ndarray, want: np.ndarray, what: str) -> None:
-    if got.shape != want.shape:
-        raise Mismatch(f'{what}: shape {got.shape} != {want.shape}')
-    if got.dtype == object or want.dtype == object:
-        bad = [i for i, (a, b) in enumerate(zip(got.tolist(), want.tolist())) if a != b]
-    else:
-        bad = np.flatnonzero(~((got == want) | (np.isnan(got) & np.isnan(want)))).tolist()
-    if bad:
-        i = bad[0]
-        raise Mismatch(f'{what}: {len(bad)} cell(s) differ, first at row {i}: got {got[i]!r} want {want[i]!r}')
+    try:
+        assert_exact(got, want, what)
+    except AssertionError as error:
+        raise Mismatch(str(error)) from error
 
 
 def same_indicator(got: np.ndarray, want: np.ndarray, what: str, tolerance: float = 0.0,
                    excused: np.ndarray | None = None) -> None:
-    """Bit-exact (NaN == NaN) unless ``tolerance`` > 0, then relative to the column's
-    finite scale; rows in ``excused`` (a documented tie) are not judged."""
-    if got.shape != want.shape:
-        raise Mismatch(f'{what}: shape {got.shape} != {want.shape}')
-    if got.dtype == np.bool_ or want.dtype == np.bool_:
-        ok = got == want
-    else:
-        g, w = got.astype(float), want.astype(float)
-        ok = (g == w) | (np.isnan(g) & np.isnan(w))
-        if tolerance > 0:
-            finite = np.isfinite(w) & np.isfinite(g)
-            scale = np.max(np.abs(w[finite]), initial=1.0)
-            with np.errstate(invalid='ignore', over='ignore'):
-                ok |= finite & (np.abs(np.where(finite, g - w, 0.0)) <= tolerance * scale)
+    """Native bits with matching missing masks; optional finite-value tolerance.
+
+    A tolerance never excuses a zero-sign difference or casts integer inputs.
+    Rows in ``excused`` are documented comparison ties.
+    """
+    try:
+        ok = exact_mask(got, want)
+    except AssertionError as error:
+        raise Mismatch(f'{what}: {error}') from error
+    if tolerance > 0 and got.dtype.kind == want.dtype.kind == 'f':
+        finite = np.isfinite(want) & np.isfinite(got)
+        scale = np.max(np.abs(want[finite]), initial=1.0)
+        zero_sign = (got == 0) & (want == 0) & (np.signbit(got) != np.signbit(want))
+        with np.errstate(invalid='ignore', over='ignore'):
+            ok |= finite & ~zero_sign & (np.abs(np.where(finite, got - want, 0.0)) <= tolerance * scale)
     if excused is not None:
         ok |= excused
     if not ok.all():

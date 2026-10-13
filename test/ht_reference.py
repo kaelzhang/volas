@@ -283,8 +283,10 @@ def talib_contracts(talib) -> bool:
     """Whether the installed TA-Lib was built with floating-point contraction (its
     `x*y + z` fused into FMA, as clang does on arm64): its HT_DCPERIOD then differs from
     this unfused transcription in the last bits of a fixed, non-degenerate series."""
+    from test.exact import same_exact
+
     import numpy as np
 
     x = [100.0 + 0.05 * t + 6.0 * math.sin(t * 0.3) + 2.0 * math.cos(t * 0.11) for t in range(200)]
     got = np.asarray(talib.HT_DCPERIOD(np.asarray(x)), dtype=float)
-    return not np.array_equal(got, np.asarray(ht_dcperiod(x)), equal_nan=True)
+    return not same_exact(got, np.asarray(ht_dcperiod(x)))

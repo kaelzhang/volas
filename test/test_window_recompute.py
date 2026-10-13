@@ -23,6 +23,8 @@ from volas import DataFrame
 
 from .test_window_locality import ABSOLUTE_POSITION, FINITE, SUBCOMMANDS, _command, _directive
 
+from test.exact import assert_exact, exact_mask
+
 ROOT = Path(__file__).resolve().parent.parent
 N = 400
 _rng = np.random.default_rng(11)
@@ -85,7 +87,7 @@ def _window_matches(directive, data):
         part = frame.iloc[start:] if shifted else DataFrame({k: v[start:] for k, v in data.items()})
         tail = np.asarray(part.exec(directive, dtype='float64'), dtype=float)[vr - start:]
         want = full[vr:]
-        same = (tail == want) | (np.isnan(tail) & np.isnan(want))
+        same = exact_mask(tail, want)
         if not same.all():
             return False
     return True
@@ -119,11 +121,7 @@ def test_an_accumulating_command_is_its_last_window_because_its_sums_are_exact(k
 # --- the accumulating commands resume bit-exactly on every live path ----------------
 
 def _bit_exact(got, want, ctx):
-    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
-    same = (got == want) | (np.isnan(got) & np.isnan(want))
-    if not same.all():
-        bad = int(np.flatnonzero(~same)[0])
-        raise AssertionError(f"{ctx}: row {bad}: {got[bad]!r} vs {want[bad]!r}")
+    assert_exact(got, want, ctx)
 
 
 def _rows(data, lo, hi, labels):

@@ -18,6 +18,8 @@ import pytest
 
 from volas import DataFrame, Series
 
+from test.exact import assert_exact
+
 pa = pytest.importorskip("pyarrow")
 
 N = 160
@@ -26,9 +28,7 @@ CLOSE = 100.0 + np.cumsum(_rng.standard_normal(N))
 
 
 def _bit_exact(got, want):
-    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
-    nan = np.isnan(got) & np.isnan(want)
-    np.testing.assert_array_equal(np.where(nan, 0.0, got), np.where(nan, 0.0, want))
+    assert_exact(got, want)
 
 
 def _borrowed_arrow(values):

@@ -16,6 +16,8 @@ import pytest
 
 from volas import DataFrame
 
+from test.exact import assert_exact
+
 WINDOW = 30
 LOOKBACK = 14          # atr:14 -> capacity 44, 2*capacity 88
 N = 500                # >> 2*capacity: forces ~5 compactions
@@ -92,11 +94,7 @@ def _tail(uf):
 # --------------------------------------------------------------------------- #
 
 def _eq_values(av, bv):
-    assert av.shape == bv.shape, f"shape {av.shape} != {bv.shape}"
-    if np.issubdtype(av.dtype, np.floating) and np.issubdtype(bv.dtype, np.floating):
-        assert np.allclose(av, bv, equal_nan=True), f"values differ:\n{av}\n{bv}"
-    else:
-        assert np.array_equal(av, bv), f"values differ:\n{av}\n{bv}"
+    assert_exact(av, bv)
 
 
 def _eq_series(a, b):
@@ -165,7 +163,7 @@ def test_iloc_scalar_row(pair):
     wf, oracle = pair
     for i in (0, 5, WINDOW - 1, -1, -WINDOW):
         assert wf.iloc[i]['close'] == oracle.iloc[i]['close']
-        assert np.array_equal(wf.iloc[i].to_numpy(), oracle.iloc[i].to_numpy())
+        assert_exact(wf.iloc[i].to_numpy(), oracle.iloc[i].to_numpy())
 
 
 def test_iloc_slice(pair):
@@ -298,7 +296,7 @@ def test_to_csv_index_labels(pair):
 
 def test_to_numpy(pair):
     wf, oracle = pair
-    assert np.allclose(wf.to_numpy(), oracle.to_numpy(), equal_nan=True)
+    assert_exact(wf.to_numpy(), oracle.to_numpy())
 
 
 def test_to_pandas_index(pair):
@@ -306,7 +304,7 @@ def test_to_pandas_index(pair):
     wf, oracle = pair
     a, b = wf.to_pandas(), oracle.to_pandas()
     assert np.array_equal(a.index.to_numpy(), b.index.to_numpy())
-    assert np.allclose(a.to_numpy(), b.to_numpy(), equal_nan=True)
+    assert_exact(a.to_numpy(), b.to_numpy())
 
 
 # --------------------------------------------------------------------------- #

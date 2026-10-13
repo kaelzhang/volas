@@ -21,6 +21,8 @@ from volas import DataFrame
 
 from .test_window_recompute import ACCUMULATING, _directive
 
+from test.exact import assert_exact
+
 # OHLCV in runs of huge and tiny values (see `test_window_recompute.WIDE`), long enough
 # for the longest accumulating lookback to settle twice.
 N = 1200
@@ -38,11 +40,7 @@ WIDE = {
 
 
 def _bits(got, want, ctx):
-    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
-    same = (got == want) | (np.isnan(got) & np.isnan(want))
-    if not same.all():
-        bad = int(np.flatnonzero(~same)[0])
-        raise AssertionError(f"{ctx}: row {bad}: {got[bad]!r} vs {want[bad]!r}")
+    assert_exact(got, want, ctx)
 
 
 def test_a_spike_leaves_no_trace():

@@ -10,6 +10,8 @@ import volas
 
 from .harness.inventory import executable_lines
 
+from test.exact import assert_exact, same_exact
+
 rng = np.random.default_rng(7)
 N = 100
 _c = 100 + np.cumsum(rng.normal(0, 1, N + 3))
@@ -21,10 +23,7 @@ LINES = executable_lines()
 
 
 def _same(got, want):
-    """Equal cells, a missing cell (volas.NA / NaN) equal to a missing one."""
-    def cell(v):
-        return None if v is volas.NA or (isinstance(v, float) and v != v) else v
-    return [cell(v) for v in got] == [cell(v) for v in want]
+    return same_exact(got, want)
 
 
 def frame(a, b):
@@ -81,14 +80,14 @@ def test_a_window_keeps_recursive_composites():
     seed = {k: v[:40] for k, v in COLS.items()}
     crsi = volas.DataFrame(seed, window=5, max_lookback=['crsi:3,2,5'])
     want = volas.DataFrame(seed).exec('crsi:3,2,5')[-5:]
-    np.testing.assert_array_equal(np.asarray(crsi['crsi:3,2,5']).view(np.uint64), want.view(np.uint64))
+    assert_exact(np.asarray(crsi['crsi:3,2,5']).view(np.uint64), want.view(np.uint64))
     w = volas.DataFrame(seed, window=5, max_lookback=['keltner:5'])
     for i in range(40, N):
         w.append(volas.DataFrame({k: v[i:i + 1] for k, v in COLS.items()}))
     assert w._physical_height < N - 40
     assert w.is_computed('keltner:5')
     want = volas.DataFrame({k: v[:N] for k, v in COLS.items()}).exec('keltner:5')[-5:]
-    assert np.array_equal(w['keltner:5'].to_numpy(), want)
+    assert same_exact(w['keltner:5'].to_numpy(), want)
 
 
 @pytest.mark.parametrize('d', ['ema:3', 'ema:5@(ema:3)', 'close>ema:5', 'close-ma:5+obv'])
@@ -120,4 +119,4 @@ def test_an_input_write_on_a_slice_loses_its_recursions(d, read):
     want = {k: v[5:N].copy() for k, v in COLS.items()}
     want['close'][3] = 1.0
     got = s.get_column('ma:3').to_numpy()
-    assert np.array_equal(got, volas.DataFrame(want).exec('ma:3'), equal_nan=True)
+    assert same_exact(got, volas.DataFrame(want).exec('ma:3'))

@@ -13,6 +13,8 @@ import pytest
 
 from volas import DataFrame
 
+from test.exact import assert_exact
+
 
 @pytest.fixture(scope='module')
 def df():
@@ -22,8 +24,7 @@ def df():
 
 
 def _bits_equal(a, b):
-    # assert_array_equal compares element-wise with NaN == NaN — exact, no tolerance.
-    np.testing.assert_array_equal(np.asarray(a, dtype=float), np.asarray(b, dtype=float))
+    assert_exact(a, b)
 
 
 @pytest.mark.parametrize('n', [6, 12, 24])

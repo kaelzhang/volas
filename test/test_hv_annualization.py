@@ -19,6 +19,8 @@ import pytest
 import volas
 from volas import DataFrame
 
+from test.exact import assert_exact, same_exact
+
 N = 240
 PERIOD = 10
 _rng = np.random.default_rng(7)
@@ -65,14 +67,14 @@ CASES = [
 def test_hv_matches_numpy_per_unit_and_market(directive, bars_per_year, what):
     got = np.asarray(_frame()[directive], dtype=float)
     want = _reference(CLOSE, PERIOD, bars_per_year)
-    assert np.array_equal(np.isnan(got), np.isnan(want)), what
+    assert same_exact(np.isnan(got), np.isnan(want)), what
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=0, err_msg=what)
 
 
 def test_hv_defaults_are_daily_252_and_a_24h_session():
     df = _frame()
     full = np.asarray(df["hv:10,1d,252,1440"], dtype=float)
-    np.testing.assert_array_equal(np.asarray(df["hv:10"], dtype=float), full)
+    assert_exact(np.asarray(df["hv:10"], dtype=float), full)
     assert volas.directive_stringify("hv:10,1d,252,1440") == "hv:10"
     assert volas.directive_stringify("hv:10,15m,252,390") == "hv:10,15m,,390"
 
@@ -105,8 +107,8 @@ def test_hv_resume_equals_full_recompute(directive):
         if i % 11 == 0 or i == N - 1:
             got = np.asarray(live[directive], dtype=float)
             want = np.asarray(_frame(CLOSE[:i + 1])[directive], dtype=float)
-            same = (got == want) | (np.isnan(got) & np.isnan(want))
-            assert same.all(), f"{directive} @{i}"
+            same = same_exact(got, want)
+            assert same, f"{directive} @{i}"
 
 
 @pytest.mark.parametrize("directive", [

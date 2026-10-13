@@ -19,6 +19,8 @@ import pytest
 import volas
 from test.harness.inventory import executable_lines, sample_value
 
+from test.exact import same_exact
+
 N = 60
 
 
@@ -39,8 +41,7 @@ def _frame(rows=N, **extra):
 
 
 def _same(a, b):
-    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    return bool(((a == b) | (np.isnan(a) & np.isnan(b))).all())
+    return same_exact(a, b)
 
 
 def _spellings(line):

@@ -13,6 +13,8 @@ import pytest
 
 from volas import DataFrame
 
+from test.exact import same_exact
+
 
 def _ts(n, start=0):
     base = np.datetime64('2020-01-01T00:00:00')
@@ -125,7 +127,7 @@ def test_len_shape_index_are_logical():
     assert wf.shape == (5, 5)
     assert len(wf.index) == 5
     # the visible labels are the last five timestamps
-    assert np.array_equal(wf.index, _ts(5, start=55))
+    assert same_exact(wf.index, _ts(5, start=55))
 
 
 def test_column_access_is_logical():
@@ -133,11 +135,11 @@ def test_column_access_is_logical():
     wf = _windowed(data, 10, window=5, max_lookback=3)
     _feed(wf, data, 10, 60)
     full = _full(data, 60)
-    assert np.array_equal(wf['close'].to_numpy(), full['close'].to_numpy()[-5:])
+    assert same_exact(wf['close'].to_numpy(), full['close'].to_numpy()[-5:])
     # list projection is also logical-M
     proj = wf[['close', 'high']]
     assert len(proj) == 5
-    assert np.array_equal(proj['high'].to_numpy(), full['high'].to_numpy()[-5:])
+    assert same_exact(proj['high'].to_numpy(), full['high'].to_numpy()[-5:])
 
 
 def test_to_numpy_only_window():
@@ -193,8 +195,8 @@ def test_head_tail_within_window():
     wf = _windowed(data, 10, window=5, max_lookback=3)
     _feed(wf, data, 10, 60)
     full = _full(data, 60)
-    assert np.array_equal(wf.head(2)['close'].to_numpy(), full['close'].to_numpy()[-5:-3])
-    assert np.array_equal(wf.tail(2)['close'].to_numpy(), full['close'].to_numpy()[-2:])
+    assert same_exact(wf.head(2)['close'].to_numpy(), full['close'].to_numpy()[-5:-3])
+    assert same_exact(wf.tail(2)['close'].to_numpy(), full['close'].to_numpy()[-2:])
 
 
 def test_iloc_iat_loc_at_are_logical():
@@ -244,7 +246,7 @@ def test_fill_into_matches_to_numpy():
         out = np.empty((5, len(cols)), dtype=dt)
         wf.fill_into(out, columns=cols)
         ref = wf[cols].to_numpy(dtype=dt.__name__)
-        assert np.array_equal(out, ref)
+        assert same_exact(out, ref)
 
 
 def test_fill_into_default_columns():
@@ -305,7 +307,7 @@ def test_fill_into_unbounded_frame():
     df = _full(data, 8)
     out = np.empty((8, 1), dtype=np.float64)
     df.fill_into(out, columns=['close'])
-    assert np.array_equal(out[:, 0], data['close'])
+    assert same_exact(out[:, 0], data['close'])
 
 
 # --------------------------------------------------------------------------- #
@@ -324,9 +326,9 @@ def test_indicator_bit_exact_across_compactions(directive):
     uf = _incremental(data, 30, 300, directive)
     got = wf[directive].to_numpy()
     want = uf[directive].to_numpy()[-30:]
-    assert np.array_equal(np.isnan(got), np.isnan(want))
+    assert same_exact(np.isnan(got), np.isnan(want))
     m = ~np.isnan(got)
-    assert np.array_equal(got[m], want[m]), f"{directive}: {got[m][-1]!r} vs {want[m][-1]!r}"
+    assert same_exact(got[m], want[m]), f"{directive}: {got[m][-1]!r} vs {want[m][-1]!r}"
 
 
 def test_margin_keeps_indicator_history():
@@ -368,8 +370,8 @@ def test_tf_fold_fast_path_matches_batch_aggregate():
     fast = build(False)   # all numeric -> in-place fast fold
     slow = build(True)    # a str column -> batch-aggregate fallback
     cols = ['open', 'high', 'low', 'close', 'volume']
-    assert np.array_equal(fast[cols].to_numpy(), slow[cols].to_numpy())
-    assert np.array_equal(np.asarray(fast.index), np.asarray(slow.index))
+    assert same_exact(fast[cols].to_numpy(), slow[cols].to_numpy())
+    assert same_exact(np.asarray(fast.index), np.asarray(slow.index))
 
 
 # --------------------------------------------------------------------------- #
@@ -436,10 +438,10 @@ def test_new_column_assignment_is_logical():
     wf = _windowed(data, 10, window=5, max_lookback=3)
     _feed(wf, data, 10, 60)
     wf['signal'] = np.arange(5, dtype=float)
-    assert np.array_equal(wf['signal'].to_numpy(), np.arange(5, dtype=float))
+    assert same_exact(wf['signal'].to_numpy(), np.arange(5, dtype=float))
     # a scalar broadcasts across the visible window
     wf['flag'] = 1.0
-    assert np.array_equal(wf['flag'].to_numpy(), np.ones(5))
+    assert same_exact(wf['flag'].to_numpy(), np.ones(5))
 
 
 def test_boolean_mask_assignment_is_logical():
@@ -516,4 +518,4 @@ def test_unbounded_frame_unchanged():
     assert df._physical_height == 50
     assert df.shape == (50, 5)
     # window is None -> the full frame is the logical view
-    assert np.array_equal(df['close'].to_numpy(), data['close'])
+    assert same_exact(df['close'].to_numpy(), data['close'])

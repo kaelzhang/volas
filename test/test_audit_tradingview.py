@@ -23,6 +23,8 @@ import pytest
 
 import volas
 
+from test.exact import assert_exact, same_exact
+
 
 def _import_pandas_ta():
     """Import pandas-ta, skipping the test on ANY import-time failure — not just a
@@ -203,7 +205,7 @@ def test_cog_dense_and_nan_paths_agree():
     s = volas.DataFrame({"c": x})["cog:10@c"]
     ref = _ref_cog(x, 10)
     got = np.asarray(s.to_numpy(), float)
-    assert np.array_equal(np.isnan(got), np.isnan(ref))
+    assert same_exact(np.isnan(got), np.isnan(ref))
     m = ~np.isnan(ref)
     np.testing.assert_allclose(got[m], ref[m], rtol=1e-9, atol=1e-9)
     # nested directive (ma:5 warm-up NaN) also takes the fallback
@@ -236,7 +238,7 @@ def test_cog_zero_window_sum_in_recurrence_is_na():
     sig = np.concatenate([sig, -sig[::-1]])              # exact +x / -x cancellation pairs
     got = np.asarray(volas.DataFrame({"c": sig})["cog:2@c"].to_numpy(), float)
     ref = _ref_cog(sig, 2)
-    assert np.array_equal(np.isnan(got), np.isnan(ref))  # no garbage-finite where ref is NaN
+    assert same_exact(np.isnan(got), np.isnan(ref))  # no garbage-finite where ref is NaN
     m = ~np.isnan(ref)
     np.testing.assert_allclose(got[m], ref[m], rtol=1e-9, atol=1e-9)
 
@@ -320,18 +322,18 @@ def test_pivothigh_matches_pine(left, right):
     got = np.asarray(DF[f"pivothigh:{left},{right}"].to_numpy(), float)
     # pivots are exact (no float reduction) AND sparse — match BOTH the value
     # and the NaN pattern (where a pivot is / isn't confirmed).
-    assert np.array_equal(np.isnan(got), np.isnan(ref)), "pivot NaN pattern"
+    assert same_exact(np.isnan(got), np.isnan(ref)), "pivot NaN pattern"
     m = ~np.isnan(ref)
-    np.testing.assert_array_equal(got[m], ref[m])
+    assert_exact(got[m], ref[m])
 
 
 @pytest.mark.parametrize("left,right", [(5, 5), (3, 2), (2, 8), (1, 1)])
 def test_pivotlow_matches_pine(left, right):
     ref = _ref_pivot(L, left, right, high=False)
     got = np.asarray(DF[f"pivotlow:{left},{right}"].to_numpy(), float)
-    assert np.array_equal(np.isnan(got), np.isnan(ref)), "pivot NaN pattern"
+    assert same_exact(np.isnan(got), np.isnan(ref)), "pivot NaN pattern"
     m = ~np.isnan(ref)
-    np.testing.assert_array_equal(got[m], ref[m])
+    assert_exact(got[m], ref[m])
 
 
 def test_pivot_nan_candidate_is_not_a_pivot():
@@ -398,7 +400,7 @@ def test_lookback(directive, lb):
 ])
 def test_directive_entries_and_append_refresh(directive):
     # E2: df[d] == exec(d)
-    np.testing.assert_array_equal(DF.exec(directive), DF[directive].to_numpy())
+    assert_exact(DF.exec(directive), DF[directive].to_numpy())
     # E3: append+fulfill (probe path) == batch recompute (rtol 1e-9: sliding-sum
     # indicators drift ~1e-13, within the windowed-probe tolerance, like WMA)
     head = volas.DataFrame({k: v[:-1] for k, v in ARR.items()})

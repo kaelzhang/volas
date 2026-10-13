@@ -28,6 +28,8 @@ import pytest
 
 import volas
 
+from test.exact import assert_exact, same_exact
+
 rng = np.random.default_rng(7)
 X = rng.normal(0, 1, 300)
 X[[5, 50, 51, 120]] = np.nan
@@ -195,8 +197,7 @@ def test_directive_window_single_source(directive, roll):
     arr = {c: 100 + rng.normal(0, 1, 200).cumsum()
            for c in ("open", "high", "low", "close", "volume")}
     df = volas.DataFrame(arr)
-    assert np.array_equal(df[directive].to_numpy(), roll(df["close"]).to_numpy(),
-                          equal_nan=True)
+    assert same_exact(df[directive].to_numpy(), roll(df["close"]).to_numpy())
     assert volas.directive_lookback(directive) == 19
 
 
@@ -253,12 +254,12 @@ def test_new_directive_append_refresh_and_entries(directive):
            for c in ("open", "high", "low", "close", "volume")}
     full = volas.DataFrame(arr)
     want = full[directive].to_numpy()
-    np.testing.assert_array_equal(full.exec(directive), want)          # E2
+    assert_exact(full.exec(directive), want)          # E2
     head = volas.DataFrame({c: v[:-1] for c, v in arr.items()})
     _ = head[directive]
     head.append(volas.DataFrame({c: v[-1:] for c, v in arr.items()}))
     head.fulfill()
-    assert np.array_equal(head[directive].to_numpy(), want, equal_nan=True)  # E3
+    assert same_exact(head[directive].to_numpy(), want)  # E3
 
 
 def test_time_window_rolling_backlogged():
@@ -408,7 +409,7 @@ def _v(values):
 
 
 def _exact(a, b):
-    np.testing.assert_array_equal(np.asarray(a.to_numpy(), float), b.to_numpy(float))
+    assert_exact(a.to_numpy(), b.to_numpy())
 
 
 @pytest.mark.parametrize("entry", ["rolling", "expanding"])

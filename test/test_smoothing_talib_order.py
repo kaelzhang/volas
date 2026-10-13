@@ -23,6 +23,8 @@ import pytest
 import volas
 from test import smoothing_reference as R
 
+from test.exact import assert_exact, same_exact
+
 N = 160
 
 
@@ -93,12 +95,7 @@ def _frame(data, i=0, j=N):
 
 
 def _assert_bits(got, want, what):
-    got, want = np.asarray(got, float), np.asarray(want, float)
-    np.testing.assert_array_equal(np.isnan(got), np.isnan(want), err_msg=f'{what}: NaN mask')
-    m = ~np.isnan(want)
-    diff = np.flatnonzero(got[m].view(np.uint64) != want[m].view(np.uint64))
-    assert diff.size == 0, f'{what}: first differing row {np.flatnonzero(m)[diff[0]]}: ' \
-        f'{got[m][diff[0]]!r} != {want[m][diff[0]]!r}'
+    assert_exact(got, want, what)
 
 
 @pytest.mark.parametrize('kind', KINDS)
@@ -157,7 +154,7 @@ def _talib_contracts_ema():
     """Whether the installed TA-Lib's EMA step is FMA-contracted: on a zero-crossing
     series its EMA then differs from the unfused C transcription in the last bits."""
     x = _swing(300)
-    return not np.array_equal(talib.EMA(x, 9), R.ema(x, 9), equal_nan=True)
+    return not same_exact(talib.EMA(x, 9), R.ema(x, 9))
 
 
 _CONTRACTS = _talib_contracts_ema()

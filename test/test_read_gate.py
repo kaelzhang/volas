@@ -9,6 +9,8 @@ import pytest
 
 import volas
 
+from test.exact import same_exact
+
 rng = np.random.default_rng(11)
 N = 30
 CLOSE = 100 + np.cumsum(rng.standard_normal(N + 1))
@@ -37,7 +39,7 @@ T0 = np.datetime64('2026-01-01T00:00', 'ns')
 def test_get_column_refreshes_a_stale_cached_column():
     df = stale()
     got = df.get_column('ema:3')
-    assert np.array_equal(got.to_numpy(), full('ema:3'), equal_nan=True)
+    assert same_exact(got.to_numpy(), full('ema:3'))
     with pytest.raises(KeyError):
         df.get_column('ma:5')  # never computes
 
@@ -45,7 +47,7 @@ def test_get_column_refreshes_a_stale_cached_column():
 def test_dlpack_of_a_column_read_is_fresh():
     df = stale()
     s = df.get_column('ema:3')
-    assert np.array_equal(np.from_dlpack(s), full('ema:3'), equal_nan=True)
+    assert same_exact(np.from_dlpack(s), full('ema:3'))
 
 
 @pytest.mark.parametrize('read', [
@@ -82,9 +84,8 @@ def test_a_stale_operand_raises():
 def test_the_constructor_projection_reads_like_a_column_projection():
     df = stale()
     sub = volas.DataFrame(df, columns=['close', 'ema:3'])
-    assert np.array_equal(sub['ema:3'].to_numpy(), full('ema:3'), equal_nan=True)
-    assert np.array_equal(sub['ema:3'].to_numpy(), df[['close', 'ema:3']]['ema:3'].to_numpy(),
-                          equal_nan=True)
+    assert same_exact(sub['ema:3'].to_numpy(), full('ema:3'))
+    assert same_exact(sub['ema:3'].to_numpy(), df[['close', 'ema:3']]['ema:3'].to_numpy())
 
 
 def test_windowed_derivations_see_the_visible_rows_only():
@@ -170,9 +171,8 @@ def test_a_mask_write_is_in_place_and_keeps_the_cache():
     df.fulfill()
     df[df['close'] > 100] = 0.0  # selects nothing: changes nothing
     assert df.is_computed('ema:2')
-    assert np.array_equal(df['ema:2'].to_numpy(),
-                          volas.DataFrame({'close': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}).exec('ema:2'),
-                          equal_nan=True)
+    assert same_exact(df['ema:2'].to_numpy(),
+                          volas.DataFrame({'close': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]}).exec('ema:2'))
     df[df['close'] > 5] = 0.0  # every column of the row, the cached one too: now data
     assert not df.is_computed('ema:2')
     assert df.get_column('ema:2').to_numpy()[-1] == 0.0
@@ -197,7 +197,7 @@ def test_astype_is_a_new_series_without_cached_columns(target):
     assert a.columns == ['close', 'ts']
     a.fulfill()
     a.to_numpy()
-    assert np.array_equal(a['ema:2'].to_numpy(), df['ema:2'].to_numpy(), equal_nan=True)
+    assert same_exact(a['ema:2'].to_numpy(), df['ema:2'].to_numpy())
 
 
 # --- labels on a windowed frame (REQUIREMENTS R26) -----------------------------------------

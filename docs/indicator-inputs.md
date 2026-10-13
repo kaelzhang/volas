@@ -34,7 +34,8 @@ it:
   averages cover — and what clean data gives once it has left (bit for bit: the
   averages are exact window sums, see [Exact window sums](#exact-window-sums)). TA-Lib
   slides those averages as plain running totals, so one bad candle changes every later
-  decision.
+  decision. A present no-pattern signal is `+0.0`, matching TA-Lib's integer
+  zero code; the candle's direction applies only to a nonzero signal.
 - A **leading run of missing rows** is not data: every indicator treats the series as
   starting after it, so a series with a missing head matches the same series started
   later.
